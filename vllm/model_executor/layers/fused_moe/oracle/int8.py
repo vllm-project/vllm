@@ -118,10 +118,10 @@ def select_int8_moe_backend(
     config: FusedMoEConfig,
     weight_key: QuantKey | None = kInt8StaticChannelSym,
     activation_key: QuantKey | None = kInt8DynamicTokenSym,
-) -> tuple[Int8MoeBackend, type[mk.FusedMoEExperts] | None]:
+) -> tuple[Int8MoeBackend, type[mk.FusedMoEExperts]]:
     """Select the primary Int8 MoE backend.
     Note: Shape-specific fallbacks may still occur at runtime.
-    Returns `(NONE, None)` for requantization sources, which have no kernel.
+    Returns `NONE` and a placeholder experts class for requantization sources.
     """
     # TODO: migrate to oracle base method.
     source = Int8MoEKernelOracle.maybe_skip_for_requantization_source()

@@ -88,7 +88,7 @@ def select_w4a8_int8_moe_backend(
     config: FusedMoEConfig,
     weight_key: QuantKey | None,
     activation_key: QuantKey | None,
-) -> tuple[W4A8Int8MoeBackend, type[mk.FusedMoEExperts] | None]:
+) -> tuple[W4A8Int8MoeBackend, type[mk.FusedMoEExperts]]:
     """Select the primary W4A8 Int8 MoE backend.
 
     Args:
@@ -97,8 +97,8 @@ def select_w4a8_int8_moe_backend(
         activation_key: Activation quantization key (currently unused for W4A8)
 
     Returns:
-        Tuple of (backend, kernel_class); `(NONE, None)` for requantization
-        sources, which have no kernel.
+        Tuple of (backend, kernel_class); `NONE` and a placeholder experts class
+        for requantization sources, which have no kernel.
 
     """
     # TODO: migrate to oracle base method.

@@ -675,7 +675,7 @@ def select_mxfp4_moe_backend(
             Use kFp8StaticTensorSym for W4A8 scheme.
 
     Note: Shape-specific fallbacks may still occur at runtime.
-    Returns `(NONE, None)` for requantization sources, which have no kernel.
+    Returns `NONE` and a placeholder experts class for requantization sources.
 
     """
     # TODO: migrate to oracle base method.
@@ -772,7 +772,7 @@ def select_deepseek_v4_mxfp4_moe_backend(
 ) -> tuple[Mxfp4MoeBackend, type[mk.FusedMoEExperts] | None]:
     """Select the MXFP4 MoE backend with MXFP8 activation as top priority.
     Falls back through BF16 and other backends.
-    Returns `(NONE, None)` for requantization sources, which have no kernel.
+    Returns `NONE` and a placeholder experts class for requantization sources.
     """
     # TODO: migrate to oracle base method.
     source = Mxfp4MoEKernelOracle.maybe_skip_for_requantization_source()

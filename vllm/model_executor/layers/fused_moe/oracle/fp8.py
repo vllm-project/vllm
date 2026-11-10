@@ -425,7 +425,7 @@ def select_fp8_moe_backend(
 ) -> tuple[Fp8MoeBackend, type[mk.FusedMoEExperts] | None]:
     """Select the primary FP8 MoE backend
     Note: Shape-specific fallbacks may still occur at runtime.
-    Returns `(NONE, None)` for requantization sources, which have no kernel.
+    Returns `NONE` and a placeholder experts class for requantization sources.
     """
     # TODO: migrate to oracle base method.
     source = Fp8MoEKernelOracle.maybe_skip_for_requantization_source()

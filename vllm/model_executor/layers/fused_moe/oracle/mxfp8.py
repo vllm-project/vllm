@@ -101,12 +101,12 @@ def _select_kernel_cls(
 
 def select_mxfp8_moe_backend(
     config: FusedMoEConfig,
-) -> tuple[Fp8MoeBackend, type[mk.FusedMoEExperts] | None]:
+) -> tuple[Fp8MoeBackend, type[mk.FusedMoEExperts]]:
     """Select the MXFP8 MoE backend and the best expert class.
 
     Returns:
-        A tuple of (fp8_backend, experts_cls); `(NONE, None)` for
-        requantization sources, which have no kernel.
+        A tuple of (fp8_backend, experts_cls); `NONE` and a placeholder experts
+        class for requantization sources, which have no kernel.
 
     """
     # TODO: migrate to oracle base method.

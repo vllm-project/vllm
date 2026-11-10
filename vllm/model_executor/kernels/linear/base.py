@@ -22,7 +22,7 @@ class LinearKernelOracle:
 
     @staticmethod
     def maybe_skip_for_requantization_source() -> bool:
-        """Whether kernel selection must be skipped (no kernel is returned).
+        """Whether to return a placeholder instead of selecting a compute kernel.
 
         A checkpoint method created as an online requantization source only
         dequantizes its weights, so it needs no linear kernel.

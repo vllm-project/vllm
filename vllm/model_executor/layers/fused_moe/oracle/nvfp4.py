@@ -218,10 +218,10 @@ def select_nvfp4_moe_backend(
     config: FusedMoEConfig,
     weight_key: QuantKey | None,
     activation_key: QuantKey | None,
-) -> tuple[NvFp4MoeBackend, type[mk.FusedMoEExperts] | None]:
+) -> tuple[NvFp4MoeBackend, type[mk.FusedMoEExperts]]:
     """Select the primary NvFP4 MoE backend
     Note: Shape-specific fallbacks may still occur at runtime.
-    Returns `(NONE, None)` for requantization sources, which have no kernel.
+    Returns `NONE` and a placeholder experts class for requantization sources.
     """
     # TODO: migrate to oracle base method.
     source = NvFp4MoEKernelOracle.maybe_skip_for_requantization_source()

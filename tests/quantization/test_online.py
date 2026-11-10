@@ -3068,7 +3068,7 @@ _ORACLE_MODULE = "vllm.model_executor.layers.fused_moe.oracle"
 
 
 @pytest.mark.parametrize(
-    "module,select_fn,oracle_cls,backend_enum,num_extra_args",
+    "module,select_fn,oracle_cls,backend_enum,num_extra_args,source_format",
     [
         pytest.param(
             "fp8",
@@ -3076,6 +3076,7 @@ _ORACLE_MODULE = "vllm.model_executor.layers.fused_moe.oracle"
             "Fp8MoEKernelOracle",
             "Fp8MoeBackend",
             2,
+            None,
             id="fp8",
         ),
         pytest.param(
@@ -3084,6 +3085,7 @@ _ORACLE_MODULE = "vllm.model_executor.layers.fused_moe.oracle"
             "Mxfp8MoEKernelOracle",
             "Fp8MoeBackend",
             0,
+            None,
             id="mxfp8",
         ),
         pytest.param(
@@ -3092,6 +3094,7 @@ _ORACLE_MODULE = "vllm.model_executor.layers.fused_moe.oracle"
             "Mxfp4MoEKernelOracle",
             "Mxfp4MoeBackend",
             0,
+            None,
             id="mxfp4",
         ),
         pytest.param(
@@ -3100,6 +3103,7 @@ _ORACLE_MODULE = "vllm.model_executor.layers.fused_moe.oracle"
             "Mxfp4MoEKernelOracle",
             "Mxfp4MoeBackend",
             0,
+            None,
             id="mxfp4-deepseek-v4",
         ),
         pytest.param(
@@ -3108,6 +3112,7 @@ _ORACLE_MODULE = "vllm.model_executor.layers.fused_moe.oracle"
             "NvFp4MoEKernelOracle",
             "NvFp4MoeBackend",
             2,
+            None,
             id="nvfp4",
         ),
         pytest.param(
@@ -3116,6 +3121,7 @@ _ORACLE_MODULE = "vllm.model_executor.layers.fused_moe.oracle"
             "Int8MoEKernelOracle",
             "Int8MoeBackend",
             2,
+            None,
             id="int8",
         ),
         pytest.param(
@@ -3124,6 +3130,7 @@ _ORACLE_MODULE = "vllm.model_executor.layers.fused_moe.oracle"
             "WNA16MoEKernelOracle",
             "WNA16MoEBackend",
             4,
+            None,
             id="wna16",
         ),
         pytest.param(
@@ -3132,6 +3139,7 @@ _ORACLE_MODULE = "vllm.model_executor.layers.fused_moe.oracle"
             "W4A8Int8MoEKernelOracle",
             "W4A8Int8MoeBackend",
             2,
+            None,
             id="w4a8-int8",
         ),
         pytest.param(
@@ -3140,8 +3148,21 @@ _ORACLE_MODULE = "vllm.model_executor.layers.fused_moe.oracle"
             "UnquantizedMoEKernelOracle",
             "UnquantizedMoeBackend",
             0,
+            None,
             id="unquantized",
         ),
+        *[
+            pytest.param(
+                "nvfp4",
+                "select_nvfp4_moe_backend",
+                "NvFp4MoEKernelOracle",
+                "NvFp4MoeBackend",
+                2,
+                source_format,
+                id=f"nvfp4-construct-{source_format}",
+            )
+            for source_format in ("modelopt", "compressed_tensors", "quark")
+        ],
     ],
 )
 def test_moe_oracles_skip_dispatch_for_requantization_source(
@@ -3150,10 +3171,16 @@ def test_moe_oracles_skip_dispatch_for_requantization_source(
     oracle_cls: str,
     backend_enum: str,
     num_extra_args: int,
+    source_format: str | None,
+    monkeypatch,
+    default_vllm_config,
 ) -> None:
-    """Requantization sources get `(XxBackend.NONE, None)` without dispatching."""
+    """Selectors and source construction skip the checkpoint compute backend."""
     import importlib
 
+    from vllm.model_executor.layers.fused_moe.oracle.base import (
+        RequantizationSourceExperts,
+    )
     from vllm.model_executor.layers.quantization.online.requantization import (
         requantization_source_scope,
     )
@@ -3167,23 +3194,125 @@ def test_moe_oracles_skip_dispatch_for_requantization_source(
     # Outside of a requantization source, selection is not skipped.
     assert oracle.maybe_skip_for_requantization_source() is None
 
-    # `object()` raises on any attribute access: dispatch must not read the config
-    # (e.g. `moe_backend`) nor any of the other arguments.
-    with requantization_source_scope():
-        assert select(object(), *[object()] * num_extra_args) == (none_backend, None)
+    def fail(*args, **kwargs):
+        raise AssertionError("Checkpoint backend dispatch must be skipped.")
+
+    monkeypatch.setattr(oracle, "try_backend", fail)
+    monkeypatch.setattr(oracle, "return_or_raise", fail)
+
+    if source_format is None:
+        # Dispatch must not read the config or any other argument.
+        with requantization_source_scope():
+            assert select(object(), *[object()] * num_extra_args) == (
+                none_backend,
+                RequantizationSourceExperts,
+            )
+        return
+
+    from vllm.model_executor.layers.quantization.base_config import (
+        QuantizationConfig,
+        resolve_quant_method,
+    )
+    from vllm.model_executor.layers.quantization.online.requantization import (
+        is_requantization_source,
+    )
+
+    default_vllm_config.model_config = ModelConfig()
+    monkeypatch.setattr(
+        "vllm.model_executor.parameter.get_tensor_model_parallel_rank", lambda: 0
+    )
+    monkeypatch.setattr(
+        "vllm.model_executor.parameter.get_tensor_model_parallel_world_size", lambda: 1
+    )
+    config: QuantizationConfig
+    expected_source_cls: type[
+        ModelOptNvFp4FusedMoE
+        | CompressedTensorsW4A4Nvfp4MoEMethod
+        | QuarkNvfp4MoEMethod
+    ]
+    if source_format == "modelopt":
+        config = ModelOptNvFp4Config(is_checkpoint_nvfp4_serialized=True)
+        expected_source_cls = ModelOptNvFp4FusedMoE
+    elif source_format == "compressed_tensors":
+        config = ModelOptMxFp8Config(
+            is_checkpoint_mxfp8_serialized=True,
+            kv_cache_quant_algo=None,
+            exclude_modules=[],
+            moe_quant_algo="NVFP4",
+        )
+        expected_source_cls = CompressedTensorsW4A4Nvfp4MoEMethod
+    else:
+        weight = [
+            {
+                "dtype": "fp4",
+                "qscheme": "per_group",
+                "group_size": 16,
+                "is_dynamic": False,
+            },
+            {"dtype": "fp8_e4m3", "qscheme": "per_tensor", "is_dynamic": False},
+        ]
+        config = QuarkConfig(
+            {
+                "exclude": [],
+                "global_quant_config": {
+                    "weight": weight,
+                    "input_tensors": [{**weight[0], "is_dynamic": True}, weight[1]],
+                },
+                "layer_quant_config": {},
+                "layer_type_quant_config": {},
+            }
+        )
+        expected_source_cls = QuarkNvfp4MoEMethod
+    config.online_quantization_config = OnlineQuantizationConfig(
+        quant_config_args(moe="mxfp4")
+    )
+
+    def select_target(**kwargs):
+        # Only the checkpoint method is constructed in the source scope.
+        assert not is_requantization_source()
+        return Mxfp4MoeBackend.EMULATION, RequantizationSourceExperts
+
+    target_dispatch = Mock(side_effect=select_target)
+    monkeypatch.setattr(
+        "vllm.model_executor.layers.quantization.online.mxfp4.select_mxfp4_moe_backend",
+        target_dispatch,
+    )
+    layer = _TestRoutedExperts()
+    layer.expert_map_manager = SimpleNamespace(num_fused_shared_experts=0)
+    target = resolve_quant_method(config, layer, "model.layers.0.mlp.experts")
+    assert isinstance(target, Mxfp4OnlineMoEMethod)
+    source = target.requantization_source
+    assert isinstance(source, expected_source_cls)
+    assert source.nvfp4_backend is none_backend
+    assert source.experts_cls is RequantizationSourceExperts
+    assert not is_requantization_source()
+    with torch.device("cpu"):
+        target.create_weights(
+            layer,
+            num_experts=8,
+            hidden_size=256,
+            intermediate_size_per_partition=256,
+            params_dtype=torch.bfloat16,
+            global_num_experts=8,
+            weight_loader=Mock(),
+        )
+    assert target.requantization_source_parameters
+    assert all(not parameter.is_meta for parameter in layer.parameters())
+    target_dispatch.assert_called_once()
+    assert not is_requantization_source()
 
 
 @pytest.mark.parametrize(
-    "init_kernel,kwargs",
+    "init_kernel,kwargs,source_format",
     [
         pytest.param(
-            "init_mxfp8_linear_kernel", {"weight_shape": (32, 32)}, id="mxfp8"
+            "init_mxfp8_linear_kernel", {"weight_shape": (32, 32)}, None, id="mxfp8"
         ),
-        pytest.param("init_mxfp4_linear_kernel", {}, id="mxfp4"),
+        pytest.param("init_mxfp4_linear_kernel", {}, None, id="mxfp4"),
         pytest.param(
-            "init_mxfp6_linear_kernel", {"weight_quant_key": object()}, id="mxfp6"
+            "init_mxfp6_linear_kernel", {"weight_quant_key": object()}, None, id="mxfp6"
         ),
-        pytest.param("init_nvfp4_linear_kernel", {}, id="nvfp4"),
+        pytest.param("init_nvfp4_linear_kernel", {}, None, id="nvfp4"),
         pytest.param(
             "init_fp8_linear_kernel",
             {
@@ -3193,6 +3322,7 @@ def test_moe_oracles_skip_dispatch_for_requantization_source(
                 "out_dtype": object(),
                 "weight_shape": (32, 32),
             },
+            None,
             id="fp8",
         ),
         pytest.param(
@@ -3204,6 +3334,7 @@ def test_moe_oracles_skip_dispatch_for_requantization_source(
                 "input_dtype": object(),
                 "out_dtype": object(),
             },
+            None,
             id="wfp8-a16",
         ),
         pytest.param(
@@ -3214,14 +3345,28 @@ def test_moe_oracles_skip_dispatch_for_requantization_source(
                 "input_symmetric": True,
                 "module_name": "module",
             },
+            None,
             id="int8",
         ),
+        *[
+            pytest.param(
+                "init_mxfp8_linear_kernel",
+                {},
+                source_format,
+                id=f"mxfp8-construct-{source_format}",
+            )
+            for source_format in ("modelopt", "quark")
+        ],
     ],
 )
 def test_linear_dispatch_skipped_for_requantization_source(
-    monkeypatch, init_kernel: str, kwargs: dict[str, Any]
+    monkeypatch,
+    init_kernel: str,
+    kwargs: dict[str, Any],
+    source_format: str | None,
+    default_vllm_config,
 ) -> None:
-    """Requantization sources get no linear kernel and do not dispatch."""
+    """Requantization sources get a placeholder linear kernel, without dispatch."""
     from vllm.model_executor.kernels import linear as linear_kernels
     from vllm.model_executor.kernels.linear import LinearKernelOracle
     from vllm.model_executor.layers.quantization.online.requantization import (
@@ -3239,6 +3384,100 @@ def test_linear_dispatch_skipped_for_requantization_source(
         monkeypatch.setattr(linear_kernels, dispatch, fail)
     assert not LinearKernelOracle.maybe_skip_for_requantization_source()
 
-    with requantization_source_scope():
-        assert LinearKernelOracle.maybe_skip_for_requantization_source()
-        assert getattr(linear_kernels, init_kernel)(**kwargs) is None
+    if source_format is None:
+        with requantization_source_scope():
+            assert LinearKernelOracle.maybe_skip_for_requantization_source()
+            kernel = getattr(linear_kernels, init_kernel)(**kwargs)
+    else:
+        from vllm.model_executor.kernels.linear.requantization_source import (
+            FakeFp8LinearKernel,
+            FakeMxFp8LinearKernel,
+        )
+        from vllm.model_executor.layers.quantization.base_config import (
+            QuantizationConfig,
+            resolve_quant_method,
+        )
+        from vllm.model_executor.layers.quantization.online.requantization import (
+            is_requantization_source,
+        )
+
+        default_vllm_config.model_config = ModelConfig()
+        monkeypatch.setattr(
+            "vllm.model_executor.parameter.get_tensor_model_parallel_rank", lambda: 0
+        )
+        monkeypatch.setattr(
+            "vllm.model_executor.parameter.get_tensor_model_parallel_world_size",
+            lambda: 1,
+        )
+        config: QuantizationConfig
+        if source_format == "modelopt":
+            config = _fully_quantized_modelopt_mxfp8_config()
+        else:
+            config = QuarkConfig(
+                {
+                    "exclude": [],
+                    "global_quant_config": {
+                        "weight": {
+                            "dtype": "fp8_e4m3",
+                            "qscheme": "per_group",
+                            "group_size": 32,
+                            "is_dynamic": False,
+                            "scale_format": "e8m0",
+                        },
+                        "input_tensors": {
+                            "dtype": "fp8_e4m3",
+                            "qscheme": "per_group",
+                            "group_size": 32,
+                            "is_dynamic": True,
+                            "scale_format": "e8m0",
+                        },
+                    },
+                    "layer_quant_config": {},
+                    "layer_type_quant_config": {},
+                }
+            )
+        config.online_quantization_config = OnlineQuantizationConfig(
+            quant_config_args(linear="fp8_per_channel")
+        )
+
+        def select_target(**kwargs):
+            assert not is_requantization_source()
+            return FakeFp8LinearKernel()
+
+        target_dispatch = Mock(side_effect=select_target)
+        monkeypatch.setattr(
+            "vllm.model_executor.layers.quantization.online.fp8.init_fp8_linear_kernel",
+            target_dispatch,
+        )
+        layer = _TestLinear()
+        target = resolve_quant_method(config, layer, "model.layers.0.self_attn.o_proj")
+        assert isinstance(target, Fp8PtpcOnlineLinearMethod)
+        source = target.requantization_source
+        assert not is_requantization_source()
+        with torch.device("cpu"):
+            target.create_weights(
+                layer,
+                input_size_per_partition=128,
+                output_partition_sizes=[64],
+                input_size=128,
+                output_size=64,
+                params_dtype=torch.bfloat16,
+                weight_loader=Mock(),
+            )
+        assert target.requantization_source_parameters
+        assert layer.weight.shape == (64, 128)
+        assert not layer.weight.is_meta
+        if source_format == "modelopt":
+            assert isinstance(source, ModelOptLinearMethod)
+            kernel = source.kernel
+        else:
+            assert isinstance(source, QuarkLinearMethod)
+            kernel = layer.scheme.ocp_mx_linear
+        assert isinstance(kernel, FakeMxFp8LinearKernel)
+        target_dispatch.assert_called_once()
+        assert not is_requantization_source()
+
+    assert type(kernel).__module__.endswith("requantization_source")
+    # The placeholder must fail loudly if it is ever used for compute.
+    with pytest.raises(RuntimeError, match="no linear kernel"):
+        kernel.process_weights_after_loading(torch.nn.Module())

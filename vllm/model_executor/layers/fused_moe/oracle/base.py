@@ -34,6 +34,14 @@ BackendT = TypeVar("BackendT", bound=Enum)
 Rejection = tuple[type[mk.FusedMoEExperts], str | None]
 
 
+class RequantizationSourceExperts(mk.FusedMoEExperts):
+    """Experts class selected for online requantization sources.
+
+    Such a source only dequantizes its weights, so no kernel is ever built from
+    it: it is returned as a class and never instantiated.
+    """
+
+
 class MoEKernelOracle(ABC, Generic[BackendT]):
     """Abstract base for MoE kernel-selection oracles.
 
@@ -45,9 +53,9 @@ class MoEKernelOracle(ABC, Generic[BackendT]):
     # Display name for the shared log helpers below; subclasses must set it.
     name: ClassVar[str]
 
-    # Backend returned (with no experts class) when selection is skipped for an
-    # online requantization source, which only dequantizes weights. Oracles that
-    # support requantization sources set it, e.g. to their enum's `NONE`.
+    # Backend returned (with `RequantizationSourceExperts`) when selection is
+    # skipped for an online requantization source, which only dequantizes weights.
+    # Oracles supporting requantization sources set it to their enum's `NONE`.
     # NB: `NONE` may carry other meanings in some enums (e.g. no backend on an
     # out-of-tree platform for fp8, kernel-less online mxfp4): see each enum.
     placeholder_backend: BackendT
@@ -71,7 +79,7 @@ class MoEKernelOracle(ABC, Generic[BackendT]):
     @classmethod
     def maybe_skip_for_requantization_source(
         cls,
-    ) -> tuple[BackendT, None] | None:
+    ) -> tuple[BackendT, type[mk.FusedMoEExperts]] | None:
         """Skip backend selection for online requantization sources."""
         from vllm.model_executor.layers.quantization.online.requantization import (
             is_requantization_source,
@@ -79,7 +87,7 @@ class MoEKernelOracle(ABC, Generic[BackendT]):
 
         if not is_requantization_source():
             return None
-        return cls.placeholder_backend, None
+        return cls.placeholder_backend, RequantizationSourceExperts
 
     def get_priority_backends(self, moe_config: FusedMoEConfig) -> list[BackendT]:
         """Return platform-appropriate backends in priority order for

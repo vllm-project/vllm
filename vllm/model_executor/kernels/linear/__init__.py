@@ -174,6 +174,14 @@ from vllm.model_executor.kernels.linear.nvfp4.marlin import (
 from vllm.model_executor.kernels.linear.nvfp4.pytorch import (
     TorchNvFp4LinearKernel,
 )
+from vllm.model_executor.kernels.linear.requantization_source import (
+    FakeFp8LinearKernel,
+    FakeInt8LinearKernel,
+    FakeMxFp4LinearKernel,
+    FakeMxFp6LinearKernel,
+    FakeMxFp8LinearKernel,
+    FakeNvFp4LinearKernel,
+)
 from vllm.model_executor.kernels.linear.scaled_mm import (
     Fp8BlockScaledMMLinearKernel,
     FP8ScaledMMLinearKernel,
@@ -753,10 +761,10 @@ def init_fp8_linear_kernel(
     weight_shape: tuple[int, int],
     force_kernel: type[FP8ScaledMMLinearKernel] | None = None,
     module_name: str | None = None,
-) -> FP8ScaledMMLinearKernel | Fp8BlockScaledMMLinearKernel | None:
+) -> FP8ScaledMMLinearKernel | Fp8BlockScaledMMLinearKernel:
     # TODO: migrate to oracle base method.
     if LinearKernelOracle.maybe_skip_for_requantization_source():
-        return None
+        return FakeFp8LinearKernel()
 
     scaled_mm_linear_kernel_config = FP8ScaledMMLinearLayerConfig(
         weight_quant_key=weight_quant_key,
@@ -860,10 +868,10 @@ def init_int8_linear_kernel(
     input_symmetric: bool,
     module_name: str,
     is_fused_module: bool = False,
-) -> Int8ScaledMMLinearKernel | None:
+) -> Int8ScaledMMLinearKernel:
     # TODO: migrate to oracle base method.
     if LinearKernelOracle.maybe_skip_for_requantization_source():
-        return None
+        return FakeInt8LinearKernel()
 
     config = Int8ScaledMMLinearLayerConfig(
         is_channelwise=is_channelwise,
@@ -974,14 +982,14 @@ def choose_mp_linear_kernel(
 
 def init_mxfp8_linear_kernel(
     *, weight_shape: tuple[int, int], bmm_batch_size: int | None = None
-) -> Mxfp8LinearKernel | None:
+) -> Mxfp8LinearKernel:
     """Select and instantiate the best MXFP8 linear kernel for the
     current platform and `(N, K)` weight shape.
 
-    Returns `None` for requantization sources, which have no kernel."""
+    Returns a placeholder for requantization sources, which have no kernel."""
     # TODO: migrate to oracle base method.
     if LinearKernelOracle.maybe_skip_for_requantization_source():
-        return None
+        return FakeMxFp8LinearKernel()
 
     config = Mxfp8LinearLayerConfig(
         weight_shape=weight_shape,
@@ -1073,14 +1081,14 @@ def _resolve_linear_activation_key(
 
 def init_mxfp4_linear_kernel(
     activation_quant_key: QuantKey | None = None,
-) -> MxFp4LinearKernel | None:
+) -> MxFp4LinearKernel:
     """Select and instantiate the best MXFP4 linear kernel for the
     current platform.
 
-    Returns `None` for requantization sources, which have no kernel."""
+    Returns a placeholder for requantization sources, which have no kernel."""
     # TODO: migrate to oracle base method.
     if LinearKernelOracle.maybe_skip_for_requantization_source():
-        return None
+        return FakeMxFp4LinearKernel()
 
     activation_quant_key = _resolve_linear_activation_key(activation_quant_key)
     config = MxFp4LinearLayerConfig(
@@ -1134,14 +1142,14 @@ def init_mxfp4_linear_kernel(
 def init_mxfp6_linear_kernel(
     weight_quant_key: QuantKey,
     activation_quant_key: QuantKey | None = None,
-) -> MxFp6LinearKernel | None:
+) -> MxFp6LinearKernel:
     """Select and instantiate the best MXFP6 linear kernel for the
     current platform.
 
-    Returns `None` for requantization sources, which have no kernel."""
+    Returns a placeholder for requantization sources, which have no kernel."""
     # TODO: migrate to oracle base method.
     if LinearKernelOracle.maybe_skip_for_requantization_source():
-        return None
+        return FakeMxFp6LinearKernel()
 
     config = MxFp6LinearLayerConfig(
         weight_quant_key=weight_quant_key,
@@ -1198,10 +1206,10 @@ def init_wfp8_a16_linear_kernel(
     out_dtype: torch.dtype,
     force_kernel: type[FP8ScaledMMLinearKernel] | None = None,
     module_name: str | None = None,
-) -> FP8ScaledMMLinearKernel | None:
+) -> FP8ScaledMMLinearKernel:
     # TODO: migrate to oracle base method.
     if LinearKernelOracle.maybe_skip_for_requantization_source():
-        return None
+        return FakeFp8LinearKernel()
 
     config = FP8ScaledMMLinearLayerConfig(
         weight_quant_key=weight_quant_key,
@@ -1232,14 +1240,14 @@ def init_wfp8_a16_linear_kernel(
     )
 
 
-def init_nvfp4_linear_kernel(use_a16: bool = False) -> NvFp4LinearKernel | None:
+def init_nvfp4_linear_kernel(use_a16: bool = False) -> NvFp4LinearKernel:
     """Select and instantiate the best NVFP4 linear kernel for the
     current platform.
 
-    Returns `None` for requantization sources, which have no kernel."""
+    Returns a placeholder for requantization sources, which have no kernel."""
     # TODO: migrate to oracle base method.
     if LinearKernelOracle.maybe_skip_for_requantization_source():
-        return None
+        return FakeNvFp4LinearKernel()
 
     config = NvFp4LinearLayerConfig()
     a16_kernels = (
