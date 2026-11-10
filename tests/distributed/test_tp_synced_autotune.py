@@ -1,8 +1,9 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 """Two TP ranks whose local autotune timings disagree must pick the same Triton config
-under VLLM_TRITON_SYNC_AUTOTUNE_TP, and different configs without it, also when only
-one rank has the key in its on-disk autotune cache.
+under VLLM_TRITON_SYNC_AUTOTUNE_TP, and different configs without it, also when the key
+was already resolved on some ranks: in the on-disk autotune cache, or in memory by an
+autotune outside a forward pass.
 
 Run `pytest tests/distributed/test_tp_synced_autotune.py`.
 """
@@ -74,6 +75,9 @@ def _picked_block(rank: int, mode: str) -> list[tuple[int, int, int]]:
         launch()  # outside a forward pass: tuned locally, written to rank 1's disk
         copy_kernel.cache.clear()  # as after a restart: only the disk entry is left
         benched.clear()
+    if mode == "warm_mem_both" or (mode == "warm_mem_rank1" and rank == 1):
+        launch()  # outside a forward pass: tuned locally, kept in Triton's memory
+        benched.clear()
     dist.barrier(group=group)
 
     with override_forward_context(SimpleNamespace()):  # type: ignore[arg-type]
@@ -120,9 +124,28 @@ def warm_rank1_worker(monkeypatch, tp_size, pp_size, rank, distributed_init_port
     _worker(monkeypatch, tp_size, pp_size, rank, distributed_init_port, "warm_rank1")
 
 
+@ray.remote(num_gpus=1, max_calls=1)
+def warm_mem_rank1_worker(monkeypatch, tp_size, pp_size, rank, distributed_init_port):
+    _worker(
+        monkeypatch, tp_size, pp_size, rank, distributed_init_port, "warm_mem_rank1"
+    )
+
+
+@ray.remote(num_gpus=1, max_calls=1)
+def warm_mem_both_worker(monkeypatch, tp_size, pp_size, rank, distributed_init_port):
+    _worker(monkeypatch, tp_size, pp_size, rank, distributed_init_port, "warm_mem_both")
+
+
 @multi_gpu_test(num_gpus=2)
 @pytest.mark.parametrize(
-    "test_target", [synced_worker, unsynced_worker, warm_rank1_worker]
+    "test_target",
+    [
+        synced_worker,
+        unsynced_worker,
+        warm_rank1_worker,
+        warm_mem_rank1_worker,
+        warm_mem_both_worker,
+    ],
 )
 def test_tp_synced_autotune(monkeypatch: pytest.MonkeyPatch, test_target):
     multi_process_parallel(monkeypatch, 2, 1, test_target)
