@@ -17,6 +17,9 @@ from vllm.model_executor.layers.vocab_parallel_embedding import (
 
 logger = init_logger(__name__)
 
+# Set on a model once its tying has been reconciled with its checkpoint.
+_TIE_CHECKED = "_word_embeddings_tie_checked"
+
 
 @dataclass
 class _UntiedLMHead:
@@ -78,7 +81,15 @@ def maybe_retie_word_embeddings(model: nn.Module, model_config: ModelConfig) -> 
 
     Checkpoints produced by quantization or fine-tuning tooling often keep a redundant
     copy of the tied `lm_head`. Sharing the storage again reclaims the memory it would
-    otherwise cost."""
+    otherwise cost.
+
+    Runs once per model: a direct reload reruns post-load processing on the
+    cold-started model and must keep its tying. Re-tying there would make
+    `lm_head` the input embeddings, and every later update's `lm_head` would be
+    dropped."""
+    if getattr(model, _TIE_CHECKED, False):
+        return
+    setattr(model, _TIE_CHECKED, True)
     if not model_config.word_embeddings_untied_by_checkpoint:
         return
     if (untied := _get_untied_lm_head(model)) is None:

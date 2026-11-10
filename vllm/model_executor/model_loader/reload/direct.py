@@ -257,4 +257,4 @@ def finish_direct_reload(
         if isinstance(getattr(module, "quant_method", None), QuantizeMethodBase):
             module.__dict__.pop("_already_called_process_weights_after_loading", None)
 
-    process_weights_after_loading(model, model_config, device, reload=True)
+    process_weights_after_loading(model, model_config, device)
