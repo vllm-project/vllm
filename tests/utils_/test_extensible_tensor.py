@@ -49,7 +49,7 @@ def test_extensible_tensor_grows_without_moving() -> None:
 @create_new_process_for_each_test("spawn")
 def test_views_survive_shared_pycapsule_new_restype_change() -> None:
     """Other libraries (e.g. FlashInfer's MNNVL helpers) reset the shared
-    ``ctypes.pythonapi.PyCapsule_New.restype``; views must not depend on it."""
+    `ctypes.pythonapi.PyCapsule_New.restype`; views must not depend on it."""
     import ctypes
 
     _skip_unless_vmm()
