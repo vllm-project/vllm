@@ -82,6 +82,19 @@ def _temporary_replayssm_autotune_state(
         for tensor in (ring_start, prev_num_accepted):
             if tensor.numel():
                 reset_trackers.setdefault(tensor.data_ptr(), tensor)
+        if len(module.kv_cache) == 6:
+            state_indices = torch.arange(
+                1,
+                max_num_reqs + 1,
+                dtype=torch.int32,
+                device=module.kv_cache[1].device,
+            )
+            initial = torch.zeros(
+                (1, *module.kv_cache[1].shape[1:]),
+                dtype=torch.float32,
+                device=module.kv_cache[1].device,
+            ).expand(max_num_reqs, -1, -1, -1)
+            module.initialize_replayssm_state(initial, state_indices)
 
     try:
         yield

@@ -7,9 +7,9 @@ from dataclasses import replace
 
 import torch
 from torch import nn
-
 from vllm.compilation.breakable_cudagraph import eager_break_during_capture
 from vllm.config import CacheConfig, ModelConfig, VllmConfig, get_current_vllm_config
+from vllm.config.compilation import CompilationMode, CUDAGraphMode
 from vllm.config.mamba import MambaBackendEnum
 from vllm.distributed import (
     divide,
@@ -523,7 +523,49 @@ class MambaMixer2(MambaBase, PluggableLayer):
         )
 
         vllm_config = get_current_vllm_config()
+        from vllm.model_executor.layers.mamba.ops.marlin_input_conv import (
+            select_mamba_marlin_ownership,
+        )
+
+        select_mamba_marlin_ownership(self, vllm_config)
         compilation_config = vllm_config.compilation_config
+        splitting_ops = compilation_config.splitting_ops
+        # Existing capture choices remain authoritative. Explicit lists must
+        # include the new boundary; other routes keep the original mixer op.
+        fusion_capture_allowed = (
+            compilation_config.mode == CompilationMode.NONE
+            or splitting_ops is None
+            or "vllm::mamba_mixer2_with_input_projection" in splitting_ops
+        )
+        # Adaptive/token-keyed FULL graphs can replay shorter logical queries
+        # without rerunning this opaque Python dispatch. The legacy18arg kernel
+        # has no device query-length pointer: preserve original conv/SSU there.
+        speculative = vllm_config.speculative_config
+        uniform_capture_contract = (
+            not (speculative is not None and speculative.enable_adaptive_verification)
+            and compilation_config.cudagraph_mode.mixed_mode() != CUDAGraphMode.FULL
+        )
+        kernel_type = type(getattr(self.in_proj.quant_method, "kernel", None))
+        marlin_owner_selected = (
+            kernel_type.__module__ == "vllm.model_executor.kernels.linear.nvfp4.marlin"
+            and kernel_type.__name__ == "MarlinNvFp4LinearKernel"
+        )
+        self._marlin_input_conv_allowed = False
+        if (
+            current_platform.is_cuda()
+            and fusion_capture_allowed
+            and uniform_capture_contract
+            and marlin_owner_selected
+            and hasattr(torch.ops._C, "mamba_marlin_input_conv")
+        ):
+            props = torch.cuda.get_device_properties(torch.cuda.current_device())
+            self._marlin_input_conv_allowed = (
+                props.major == 12
+                and props.minor == 1
+                and props.multi_processor_count == 48
+                and vllm_config.lora_config is None
+                and self.tp_size == 1
+            )
         if prefix in compilation_config.static_forward_context:
             raise ValueError(f"Duplicate layer name: {prefix}")
         compilation_config.static_forward_context[prefix] = self
@@ -541,6 +583,9 @@ class MambaMixer2(MambaBase, PluggableLayer):
         )
         self.mamba_config = vllm_config.mamba_config
         self.use_flashinfer_replayssm = vllm_config.use_flashinfer_replayssm
+        self.replayssm_state_dtype = (
+            cache_config.replayssm_state_dtype if cache_config is not None else "auto"
+        )
         self.state_alignment = mamba_state_alignment(vllm_config)
         if self.use_replayssm and self.num_heads % self.tp_size != 0:
             raise ValueError(
@@ -548,6 +593,9 @@ class MambaMixer2(MambaBase, PluggableLayer):
             )
         # ReplaySSM appends x/dt/B rings to (conv_state, ssm_state).
         _n_state = 5 if self.use_replayssm else 2
+        _n_state += len(
+            MambaStateDtypeCalculator.replayssm_read_dtypes(self.replayssm_state_dtype)
+        )
         self.kv_cache = tuple(torch.tensor([]) for _ in range(_n_state))
         self._replayssm_ring_start = torch.empty(0, dtype=torch.int32)
         self._replayssm_prev_num_accepted = torch.empty(0, dtype=torch.int32)
@@ -573,35 +621,57 @@ class MambaMixer2(MambaBase, PluggableLayer):
 
         # Check if running on Blackwell (SM100+) for kernel tuning
         self.is_blackwell = current_platform.is_device_capability_family(100)
+        self._gb10_replayssm_profile_allowed = (
+            self.use_flashinfer_replayssm and self._marlin_input_conv_allowed
+        )
+        self._marlin_output_profile_allowed = (
+            self._gb10_replayssm_profile_allowed
+            and hasattr(torch.ops._C, "mamba_marlin_output")
+        )
 
     def forward(
         self,
         hidden_states: torch.Tensor,
         mup_vector: torch.Tensor | None = None,
     ):
-        # 1. Gated MLP's linear projection
-        projected_states, _ = self.in_proj(hidden_states)
-        if mup_vector is not None:
-            projected_states = projected_states * mup_vector
+        fused_input = False
+        if self._marlin_input_conv_allowed:
+            from vllm.model_executor.layers.mamba.ops.marlin_input_conv import (
+                can_use_marlin_input_conv,
+            )
 
-        # 2. Prepare inputs for conv + SSM
+            fused_input = can_use_marlin_input_conv(self, hidden_states, mup_vector)
+
+        # Caller-provided addresses remain stable across eager-break capture.
+        if fused_input:
+            projected_states = torch.empty(
+                (hidden_states.shape[0], 18560),
+                dtype=hidden_states.dtype,
+                device=hidden_states.device,
+            )
+        else:
+            projected_states, _ = self.in_proj(hidden_states)
+            if mup_vector is not None:
+                projected_states = projected_states * mup_vector
+
         ssm_output = torch.empty(
-            [
-                hidden_states.shape[0],
-                (self.num_heads // self.tp_size) * self.head_dim,
-            ],
+            [hidden_states.shape[0], (self.num_heads // self.tp_size) * self.head_dim],
             dtype=hidden_states.dtype,
             device=hidden_states.device,
         )
-
-        # 3. conv + SSM
-        # (split `projected_states` into hidden_states_B_C, dt in the custom op to
-        # ensure it is not treated as an intermediate tensor by torch compile)
-        torch.ops.vllm.mamba_mixer2(
-            projected_states,
-            ssm_output,
-            _encode_layer_name(self.prefix),
-        )
+        if fused_input:
+            torch.ops.vllm.mamba_mixer2_with_input_projection(
+                hidden_states,
+                projected_states,
+                ssm_output,
+                _encode_layer_name(self.prefix),
+            )
+        else:
+            torch.ops.vllm.mamba_mixer2(
+                projected_states,
+                ssm_output,
+                _encode_layer_name(self.prefix),
+            )
 
         # 4. gated MLP
         # GatedRMSNorm internally applying SiLU to the gate
@@ -611,7 +681,17 @@ class MambaMixer2(MambaBase, PluggableLayer):
         hidden_states = self.norm(ssm_output, gate)
 
         # 5. Final linear projection
-        output, _ = self.out_proj(hidden_states)
+        from vllm.model_executor.layers.mamba.ops.marlin_input_conv import (
+            can_use_marlin_output,
+        )
+
+        if can_use_marlin_output(self, hidden_states, check_rows=False):
+            # Keep M dynamic in Dynamo; choose the measured M8 launch at runtime.
+            output = torch.ops.vllm.mamba_mixer2_output_projection(
+                hidden_states, _encode_layer_name(self.prefix)
+            )
+        else:
+            output, _ = self.out_proj(hidden_states)
 
         return output
 
@@ -638,7 +718,11 @@ class MambaMixer2(MambaBase, PluggableLayer):
 
         # Triton's autotuner includes tensor dtypes in its cache key,
         # so state_dtype must match what real inference uses.
-        ssm_state_dtype = self.get_state_dtype()[1]
+        ssm_state_dtype = (
+            torch.float32
+            if self.replayssm_state_dtype != "auto"
+            else self.get_state_dtype()[1]
+        )
 
         # SSD kernel autotune keys depend on dtype and head dimensions,
         # not on sequence length or batch size, so a single shape suffices.
@@ -728,6 +812,8 @@ class MambaMixer2(MambaBase, PluggableLayer):
         self,
         projected_states: torch.Tensor,
         output: torch.Tensor,
+        *,
+        _conv_precomputed: bool = False,
     ):
         hidden_states_B_C, dt = torch.split(
             projected_states[..., self.tped_intermediate_size :],
@@ -744,6 +830,7 @@ class MambaMixer2(MambaBase, PluggableLayer):
 
         assert self.cache_config is not None
         use_spec_decode = self.num_spec > 0
+        shared_quantized = self.replayssm_state_dtype != "auto"
         ring_start = prev_num_accepted = None
 
         attn_metadata: AttentionMetadata | None = None
@@ -850,11 +937,23 @@ class MambaMixer2(MambaBase, PluggableLayer):
             initial_states = None
             if has_initial_states_p is not None and prep_initial_states:
                 assert state_indices_tensor_p is not None
-                initial_states = torch.where(
-                    has_initial_states_p[:, None, None, None],
-                    ssm_state[state_indices_tensor_p],
-                    0,
-                )
+                if shared_quantized:
+                    from vllm.model_executor.layers.mamba.ops import (
+                        replayssm_quantization,
+                    )
+
+                    initial_states = replayssm_quantization.dequantize_replayssm_state(
+                        ssm_state,
+                        self.kv_cache[5],
+                        state_indices_tensor_p,
+                        has_initial_states_p,
+                    )
+                else:
+                    initial_states = torch.where(
+                        has_initial_states_p[:, None, None, None],
+                        ssm_state[state_indices_tensor_p],
+                        0,
+                    )
 
             # NOTE: final output is an in-place update of out tensor
             assert preallocated_ssm_out_p is not None
@@ -883,9 +982,15 @@ class MambaMixer2(MambaBase, PluggableLayer):
                 dt_softplus=True,
                 dt_limit=(0.0, float("inf")),
                 out=preallocated_ssm_out_p.view(num_prefill_tokens, -1, self.head_dim),
-                state_dtype=ssm_state.dtype,
-                final_states_out=None if has_checkpoints else ssm_state,
-                final_state_indices=None if has_checkpoints else state_indices_tensor_p,
+                state_dtype=torch.float32 if shared_quantized else ssm_state.dtype,
+                final_states_out=None
+                if has_checkpoints or shared_quantized
+                else ssm_state,
+                final_state_indices=(
+                    None
+                    if has_checkpoints or shared_quantized
+                    else state_indices_tensor_p
+                ),
             )
 
             if has_checkpoints:
@@ -899,12 +1004,24 @@ class MambaMixer2(MambaBase, PluggableLayer):
                     checkpoint_meta,
                     raw_qkv=x.transpose(0, 1),
                     conv_state=conv_state,
-                    recurrent_checkpoint=varlen_states,
-                    recurrent_state=ssm_state,
+                    recurrent_checkpoint=None if shared_quantized else varlen_states,
+                    recurrent_state=None if shared_quantized else ssm_state,
                     cu_seqlens=query_start_loc_p,
                     recurrent_rows=checkpoint_chunk_idx,
                 )
-                ssm_state[state_indices_tensor_p] = final_states
+                if not shared_quantized:
+                    ssm_state[state_indices_tensor_p] = final_states
+            if shared_quantized:
+                self.initialize_replayssm_state(
+                    final_states if has_checkpoints else varlen_states,
+                    state_indices_tensor_p.contiguous(),
+                )
+                if checkpoint_meta is not None:
+                    self.initialize_replayssm_state(
+                        varlen_states,
+                        checkpoint_meta.state_indices.contiguous(),
+                        source_indices=checkpoint_chunk_idx,
+                    )
             if (
                 ring_start is not None
                 and not self.use_flashinfer_replayssm
@@ -917,24 +1034,37 @@ class MambaMixer2(MambaBase, PluggableLayer):
         if has_decode:
             assert state_indices_tensor_d is not None
 
-            # 2. Convolution sequence transformation
-            hidden_states_B_C_d = causal_conv1d_update(
-                hidden_states_B_C_d,
-                conv_state,
-                self.conv_weights,
-                self.conv1d.bias,
-                self.activation,
-                conv_state_indices=state_indices_tensor_d,
-                num_accepted_tokens=num_accepted_tokens,
-                query_start_loc=query_start_loc_d,
-                # ReplaySSM keeps one physical state block while a speculative
-                # decode call still processes the full target + draft window.
-                max_query_len=(
-                    1 + self.num_spec
-                    if self.use_replayssm and use_spec_decode
-                    else state_indices_tensor_d.size(-1)
-                ),
-            )
+            if _conv_precomputed:
+                # Batched admission requires the full configured uniform window.
+                # B1 also admits runtime-short queries, as before.
+                assert (
+                    not has_prefill
+                    and 1 <= num_decodes <= 4
+                    and (
+                        1 <= num_decode_tokens <= 1 + self.num_spec
+                        if num_decodes == 1
+                        else num_decode_tokens == num_decodes * (1 + self.num_spec)
+                    )
+                )
+            else:
+                # 2. Convolution sequence transformation
+                hidden_states_B_C_d = causal_conv1d_update(
+                    hidden_states_B_C_d,
+                    conv_state,
+                    self.conv_weights,
+                    self.conv1d.bias,
+                    self.activation,
+                    conv_state_indices=state_indices_tensor_d,
+                    num_accepted_tokens=num_accepted_tokens,
+                    query_start_loc=query_start_loc_d,
+                    # ReplaySSM keeps one physical state block while a speculative
+                    # decode call still processes the full target + draft window.
+                    max_query_len=(
+                        1 + self.num_spec
+                        if self.use_replayssm and use_spec_decode
+                        else state_indices_tensor_d.size(-1)
+                    ),
+                )
 
             hidden_states_d, B_d, C_d = self.split_hidden_states_B_C_fn(
                 hidden_states_B_C_d
@@ -1024,6 +1154,15 @@ class MambaMixer2(MambaBase, PluggableLayer):
                         cu_seqlens=fi_cu_seqlens,
                         max_seqlen=fi_max_seqlen,
                         enable_pdl=False,
+                        state_scale=self.kv_cache[5] if shared_quantized else None,
+                        stochastic_rounding_rng=(
+                            self.mamba_config.stochastic_rounding_rng
+                        ),
+                        use_gb10_profile=(
+                            self._gb10_replayssm_profile_allowed
+                            and _conv_precomputed
+                            and self.mamba_config.ssu_algorithm is None
+                        ),
                     )
                 else:
                     assert ring_start is not None
@@ -1107,8 +1246,20 @@ class MambaMixer2(MambaBase, PluggableLayer):
             self.cache_config.mamba_ssm_cache_dtype,
         )
         if self.use_replayssm:
-            return MambaStateDtypeCalculator.append_replayssm_ring(
-                base_dtype, self.model_config.dtype
+            if self.replayssm_state_dtype != "auto":
+                base_dtype = (
+                    base_dtype[0],
+                    MambaStateDtypeCalculator.replayssm_checkpoint_dtype(
+                        self.replayssm_state_dtype
+                    ),
+                )
+            return (
+                *MambaStateDtypeCalculator.append_replayssm_ring(
+                    base_dtype, self.model_config.dtype
+                ),
+                *MambaStateDtypeCalculator.replayssm_read_dtypes(
+                    self.replayssm_state_dtype
+                ),
             )
         return base_dtype
 
@@ -1126,19 +1277,66 @@ class MambaMixer2(MambaBase, PluggableLayer):
         )
         if self.use_replayssm:
             assert self.replayssm_buffer_len is not None
-            return MambaStateShapeCalculator.append_replayssm_ring(
-                base_shapes=base_shape,
-                n_groups=self.n_groups,
-                tp_world_size=tp_world_size,
-                logical_window=self.replayssm_buffer_len,
-                backend=self.mamba_config.backend,
-                num_speculative_tokens=self.num_spec,
+            return (
+                *MambaStateShapeCalculator.append_replayssm_ring(
+                    base_shapes=base_shape,
+                    n_groups=self.n_groups,
+                    tp_world_size=tp_world_size,
+                    logical_window=self.replayssm_buffer_len,
+                    backend=self.mamba_config.backend,
+                    num_speculative_tokens=self.num_spec,
+                ),
+                *MambaStateShapeCalculator.replayssm_read_shapes(
+                    base_shape[1], self.replayssm_state_dtype
+                ),
             )
         return base_shape
+
+    def initialize_replayssm_state(
+        self,
+        states: torch.Tensor,
+        state_indices: torch.Tensor,
+        source_indices: torch.Tensor | None = None,
+    ) -> None:
+        """Encode prefill checkpoints together with their decode scales."""
+        from vllm.model_executor.layers.mamba.ops.replayssm_quantization import (
+            quantize_replayssm_state,
+        )
+
+        quantize_replayssm_state(
+            states,
+            self.kv_cache[1],
+            self.kv_cache[5],
+            state_indices,
+            source_indices,
+        )
 
     @property
     def mamba_type(self) -> MambaAttentionBackendEnum:
         return MambaAttentionBackendEnum.MAMBA2
+
+
+@eager_break_during_capture
+def mamba_mixer2_with_input_projection(
+    hidden_states: torch.Tensor,
+    projected: torch.Tensor,
+    output: torch.Tensor,
+    layer_name: LayerNameType,
+) -> None:
+    from vllm.model_executor.layers.mamba.ops.marlin_input_conv import project_and_run
+
+    layer_name = _resolve_layer_name(layer_name)
+    context = get_forward_context()
+    layer = context.no_compile_layers[layer_name]
+    metadata = (context.attn_metadata or {}).get(layer_name)
+    project_and_run(layer, hidden_states, projected, output, metadata)
+
+
+direct_register_custom_op(
+    op_name="mamba_mixer2_with_input_projection",
+    op_func=mamba_mixer2_with_input_projection,
+    mutates_args=["projected", "output"],
+)
 
 
 @eager_break_during_capture
@@ -1157,4 +1355,33 @@ direct_register_custom_op(
     op_name="mamba_mixer2",
     op_func=mamba_mixer2,
     mutates_args=["output"],
+)
+
+
+def mamba_mixer2_output_projection(
+    hidden_states: torch.Tensor, layer_name: LayerNameType
+) -> torch.Tensor:
+    from vllm.model_executor.layers.mamba.ops.marlin_input_conv import (
+        can_use_marlin_output,
+        run_marlin_output,
+    )
+
+    layer = get_forward_context().no_compile_layers[_resolve_layer_name(layer_name)]
+    if can_use_marlin_output(layer, hidden_states):
+        return run_marlin_output(layer, hidden_states)
+    output, _ = layer.out_proj(hidden_states)
+    return output
+
+
+def mamba_mixer2_output_projection_fake(
+    hidden_states: torch.Tensor, layer_name: LayerNameType
+) -> torch.Tensor:
+    return hidden_states.new_empty((hidden_states.shape[0], 4096))
+
+
+direct_register_custom_op(
+    op_name="mamba_mixer2_output_projection",
+    op_func=mamba_mixer2_output_projection,
+    mutates_args=[],
+    fake_impl=mamba_mixer2_output_projection_fake,
 )

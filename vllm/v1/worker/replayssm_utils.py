@@ -401,6 +401,18 @@ class ReplaySSMModelContext:
             for mixer in mixers
         ), "FlashInfer ReplaySSM requires equal materialization geometry"
 
+        if (
+            first_spec.mamba_cache_mode == "align"
+            and first.mamba_config.stochastic_rounding_rng == "shared_seed"
+        ):
+            from inspect import signature
+
+            if "sr_rng" not in signature(_load_replayssm_materialize()).parameters:
+                raise ImportError(
+                    "Shared-seed ReplaySSM prefix caching requires FlashInfer "
+                    "replayssm_materialize with sr_rng support"
+                )
+
         device = first.kv_cache[1].device
         block_tables = [table for _, _, table in grouped]
         src_slots = torch.full(
@@ -456,8 +468,16 @@ class ReplaySSMModelContext:
                     [m.kv_cache[3] for m in mixers]
                 ),
                 A_ptrs=_cuda_i64_ptrs([m.A for m in mixers]),
-                state_scale_ptrs=zero_table,
-                state_scale_slot_strides=zero_table,
+                state_scale_ptrs=(
+                    _cuda_i64_ptrs([m.kv_cache[5] for m in mixers])
+                    if len(first.kv_cache) == 6
+                    else zero_table
+                ),
+                state_scale_slot_strides=(
+                    _cuda_i64_slot_strides([m.kv_cache[5] for m in mixers])
+                    if len(first.kv_cache) == 6
+                    else zero_table
+                ),
             ),
             src_slots=src_slots,
             dst_slots=dst_slots,
@@ -482,10 +502,18 @@ class ReplaySSMModelContext:
         rand_seed = None
         philox_rounds = 0
         if mamba_config.enable_stochastic_rounding:
+            seed_count = (
+                len(self.mixers)
+                if mamba_config.stochastic_rounding_rng == "shared_seed"
+                else 1
+            )
             rand_seed = torch.randint(
-                0, 2**32, (1,), device=self.src_slots.device, dtype=torch.int64
+                0, 2**32, (seed_count,), device=self.src_slots.device, dtype=torch.int64
             )
             philox_rounds = mamba_config.stochastic_rounding_philox_rounds or 10
+        kwargs = {}
+        if mamba_config.stochastic_rounding_rng != "philox":
+            kwargs["sr_rng"] = mamba_config.stochastic_rounding_rng
         _load_replayssm_materialize()(
             *self.materialize_tables,
             self.src_slots,
@@ -505,6 +533,7 @@ class ReplaySSMModelContext:
             pad_slot_id=NULL_BLOCK_ID,
             rand_seed=rand_seed,
             philox_rounds=philox_rounds,
+            **kwargs,
         )
 
     def reset_new_slots(

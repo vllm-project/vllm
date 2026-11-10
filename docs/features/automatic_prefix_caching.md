@@ -65,6 +65,46 @@ FlashInfer ReplaySSM has these limits:
 
 Prefix reuse still requires a shared prefix with a saved Mamba checkpoint. The matching rules for hybrid Mamba models above also apply.
 
+### Shared 8-bit ReplaySSM checkpoints
+
+`--replayssm-state-dtype fp8` or `int8` stores one shared checkpoint for recurrence and readout.
+The default `auto` preserves floating-point checkpoint storage.
+FlashInfer stores FP8 E4M3FN or INT8 payloads with FP32 scales for each state row.
+The convolution cache and replay inputs remain in BF16.
+
+```bash
+vllm serve nvidia/NVIDIA-Nemotron-3.5-Lightning-30B-A3B-NVFP4 \
+    --dtype bfloat16 \
+    --mamba-cache-dtype bfloat16 \
+    --mamba-ssm-cache-dtype auto \
+    --mamba-backend flashinfer \
+    --use-replayssm \
+    --replayssm-state-dtype int8 \
+    --enable-mamba-cache-stochastic-rounding \
+    --mamba-cache-philox-rounds 5 \
+    --enable-prefix-caching
+```
+
+Replace `int8` with `fp8` for FP8 checkpoints.
+The existing stochastic-rounding options control decode checkpoint writes.
+Prefill conversion uses nearest rounding. Quantization can change model output.
+The path requires Mamba2 head dimension 64, state size 128, BF16 activations, and FlashInfer 0.7.2 or newer.
+FP8 requires FlashInfer 0.7.4 or newer, which bounds FP8 checkpoint scales for tiny state rows.
+Explicit SSU algorithm selection is unsupported for quantized checkpoints.
+
+With a FlashInfer build that supports shared-seed stochastic rounding, add
+`--mamba-cache-sr-rng shared_seed` to replace per-element Philox with one uniform
+random seed per invocation. This opt-in applies to FP16, FP8 and INT8 ReplaySSM
+checkpoint writes. It requires `--enable-mamba-cache-stochastic-rounding` and
+the FlashInfer ReplaySSM backend. Prefix materialization uses the same caller-selected
+rounding policy; shared-seed materialization requires a FlashInfer build that
+exposes `replayssm_materialize(..., sr_rng=...)`. Its per-layer seeds are generated
+as one array in a single random-number draw. `philox` remains the default.
+Kernel tuning selects launch configurations without changing this policy or its
+round count. Shared-seed rounding correlates decisions across
+state elements. Model-quality equivalence
+has not been validated; kernel correctness and timing do not establish it.
+
 ## Example workloads
 
 We describe two example workloads, where APC can provide huge performance benefit:

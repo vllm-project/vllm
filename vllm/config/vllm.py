@@ -1546,6 +1546,7 @@ class VllmConfig:
         if (
             self.mamba_config.enable_stochastic_rounding
             and self.cache_config.mamba_ssm_cache_dtype != "float16"
+            and self.cache_config.replayssm_state_dtype == "auto"
         ):
             raise ValueError(
                 "Stochastic rounding for Mamba cache requires "
@@ -3597,6 +3598,55 @@ class VllmConfig:
             raise ValueError(
                 "--mamba-block-size can only be set with --enable-prefix-caching"
             )
+        return self
+
+    @model_validator(mode="after")
+    def validate_replayssm_read_state(self) -> "VllmConfig":
+        if (
+            self.mamba_config.stochastic_rounding_rng == "shared_seed"
+            and not self.use_flashinfer_replayssm
+        ):
+            raise ValueError(
+                "--mamba-cache-sr-rng shared_seed requires --use-replayssm "
+                "and --mamba-backend flashinfer"
+            )
+        if self.cache_config.replayssm_state_dtype == "auto":
+            return self
+        if not self.use_flashinfer_replayssm:
+            raise ValueError(
+                "--replayssm-state-dtype requires --use-replayssm and "
+                "--mamba-backend flashinfer"
+            )
+        if self.cache_config.mamba_ssm_cache_dtype != "auto":
+            raise ValueError(
+                "Quantized ReplaySSM requires --mamba-ssm-cache-dtype auto"
+            )
+        if self.mamba_config.ssu_algorithm not in (None, "auto"):
+            raise ValueError("Quantized ReplaySSM requires the automatic SSU algorithm")
+        if self.model_config is not None:
+            if self.model_config.dtype != torch.bfloat16:
+                raise ValueError("Quantized ReplaySSM requires BF16 activations")
+            config = self.model_config.hf_text_config
+            if (
+                getattr(config, "mamba_head_dim", None) != 64
+                or getattr(config, "ssm_state_size", None) != 128
+            ):
+                raise ValueError(
+                    "Quantized ReplaySSM requires Mamba2 head dimension 64 "
+                    "and state size 128"
+                )
+        if self.cache_config.replayssm_state_dtype == "fp8":
+            from vllm.utils.flashinfer import (
+                _REPLAYSSM_FP8_MIN_FLASHINFER,
+                has_flashinfer_replayssm_fp8_checkpoints,
+            )
+
+            if not has_flashinfer_replayssm_fp8_checkpoints():
+                raise ValueError(
+                    "FP8 ReplaySSM checkpoints require FlashInfer "
+                    f">= {_REPLAYSSM_FP8_MIN_FLASHINFER}, which bounds FP8 "
+                    "checkpoint scales; use --replayssm-state-dtype int8"
+                )
         return self
 
     @model_validator(mode="after")

@@ -8,6 +8,7 @@ the Triton, FlashInfer, or CPU backend based on the configured
 the backend defaults to 'cpu'.
 """
 
+import os
 from abc import ABC, abstractmethod
 from collections.abc import Callable
 from functools import cache
@@ -355,6 +356,7 @@ _mamba_ssu_backend: MambaSSUBackend | None = None
 
 
 _flashinfer_replayssm_kernel: Callable[..., torch.Tensor] | None = None
+_flashinfer_replayssm_main_controls_supported = False
 
 
 @cache
@@ -367,6 +369,34 @@ def flashinfer_replayssm_autotune_supported() -> bool:
     except ImportError:
         return False
     return True
+
+
+def _gb10_replayssm_profile_tactic(
+    batch: int, tokens: int, sr_rng: str
+) -> dict[str, object]:
+    """FP16 choices measured over complete accepted-token Markov courses.
+
+    Rounding policy is supplied by the caller. The common T6 cutoff avoids
+    four mode-specific exceptions worth at most 0.64 us per complete layer.
+    Unmeasured/nonpositive shapes retain FlashInfer's ordinary selection.
+    """
+    if not (1 <= batch <= 4 and 1 <= tokens <= 8 and batch * tokens <= 16):
+        return {}
+    if sr_rng not in ("philox", "shared_seed"):
+        return {}
+    if batch == 3 and tokens == 5 and sr_rng == "philox":
+        return {"algorithm": "monolith", "d_split": 2}
+    if batch == 1 or (batch == 2 and (sr_rng == "philox" or tokens >= 5)):
+        if tokens >= 7:
+            return {"algorithm": "monolith", "d_split": 1}
+        return {
+            "algorithm": "two-kernel",
+            "d_split": 2,
+            "main_pipeline_stages": 2,
+            "main_ctas_per_sm": 5,
+            "precompute_heads_per_cta": 1,
+        }
+    return {}
 
 
 def selective_state_update_replayssm_flashinfer(
@@ -393,6 +423,9 @@ def selective_state_update_replayssm_flashinfer(
     cu_seqlens: torch.Tensor | None = None,
     max_seqlen: int | None = None,
     enable_pdl: bool = False,
+    state_scale: torch.Tensor | None = None,
+    use_gb10_profile: bool = False,
+    stochastic_rounding_rng: str = "philox",
 ) -> torch.Tensor:
     """Run FlashInfer checkpointing SSU with model-owned tracker metadata."""
     if _flashinfer_replayssm_kernel is None:
@@ -416,6 +449,82 @@ def selective_state_update_replayssm_flashinfer(
     cb_scaled = cumAdt_vec = cb_old = None
     if scratch is not None:
         cb_scaled, cumAdt_vec, cb_old = scratch
+
+    # The mixer enables this only for the actual fused Marlin/conv producer on
+    # the measured 48-SM GB10. Explicit settings and other layouts stay AUTO.
+    launch_kwargs = {}
+    batch, tokens = x.shape[:2]
+    ring_length = 16 + tokens
+    projected_stride = 18560
+    if (
+        use_gb10_profile
+        and cu_seqlens is None
+        and max_seqlen is None
+        and not enable_pdl
+        and enable_stochastic_rounding
+        and stochastic_rounding_philox_rounds == 5
+        and stochastic_rounding_rng in ("philox", "shared_seed")
+        and scratch is not None
+        and state.dtype == torch.float16
+        and tuple(state.shape[1:]) == (128, 64, 128)
+        and tuple(x.shape[2:]) == (128, 64)
+        and dt.shape == out.shape == x.shape
+        and tuple(B.shape) == tuple(C.shape) == (batch, tokens, 8, 128)
+        and A.dtype == torch.float32
+        and tuple(A.shape) == (128, 64, 128)
+        and A.stride()[1:] == (0, 0)
+        and D is not None
+        and dt_bias is not None
+        and tuple(D.shape) == tuple(dt_bias.shape) == (128, 64)
+        and dt.stride(-1) == D.stride(-1) == dt_bias.stride(-1) == 0
+        and all(t.dtype == torch.bfloat16 for t in (x, dt, B, C, out, D, dt_bias))
+        and dt_softplus
+        and state_scale is None
+        and tuple(x_cache.shape[1:]) == (128, ring_length, 64)
+        and tuple(B_cache.shape[1:]) == (8, ring_length, 128)
+        and tuple(dt_cache.shape[1:]) == (128, ring_length)
+        and x_cache.dtype == B_cache.dtype == torch.bfloat16
+        and dt_cache.dtype == torch.float32
+        and state.stride()[1:] == (8192, 128, 1)
+        and x_cache.stride()[1:] == (ring_length * 64, 64, 1)
+        and B_cache.stride()[1:] == (ring_length * 128, 128, 1)
+        and dt_cache.stride()[1:] == (ring_length, 1)
+        and x.stride()[2:] == out.stride()[2:] == (64, 1)
+        and B.stride()[2:] == C.stride()[2:] == (128, 1)
+        and dt.stride(2) == 1
+        and all(
+            (tokens == 1 or tensor.stride(1) == projected_stride)
+            and (batch == 1 or tensor.stride(0) == tokens * projected_stride)
+            for tensor in (x, dt, B, C)
+        )
+        and out.is_contiguous()
+        and indices is not None
+        and indices.dtype == torch.int32
+        and tuple(indices.shape) == (batch,)
+        and indices.is_contiguous()
+        and ring_start.dtype == prev_num_accepted_tokens.dtype == torch.int32
+        and not any(
+            name in os.environ
+            for name in (
+                "FLASHINFER_SSU_HEADS_PER_CTA",
+                "FLASHINFER_SSU_PRECOMPUTE_NUM_WARPS",
+                "FLASHINFER_SSU_MAIN_CTA_PER_SM",
+                "FLASHINFER_SSU_MAIN_PIPELINE_STAGES",
+            )
+        )
+    ):
+        launch_kwargs = _gb10_replayssm_profile_tactic(
+            batch, tokens, stochastic_rounding_rng
+        )
+        if (
+            launch_kwargs.get("algorithm") == "two-kernel"
+            and not _flashinfer_replayssm_main_controls_supported
+        ):
+            # Older compatible FlashInfer still serves the ordinary AUTO path.
+            launch_kwargs = {}
+
+    if stochastic_rounding_rng != "philox":
+        launch_kwargs["sr_rng"] = stochastic_rounding_rng
 
     rand_seed = (
         torch.randint(0, 2**32, (1,), device=state.device, dtype=torch.int64)
@@ -448,6 +557,8 @@ def selective_state_update_replayssm_flashinfer(
         cb_scaled=cb_scaled,
         cumAdt_vec=cumAdt_vec,
         cb_old=cb_old,
+        state_scale=state_scale,
+        **launch_kwargs,
     )
 
 
@@ -467,6 +578,7 @@ def initialize_mamba_ssu_backend(
         return
 
     global _flashinfer_replayssm_kernel, _mamba_ssu_backend
+    global _flashinfer_replayssm_main_controls_supported
     backend = mamba_config.backend
 
     if backend == MambaBackendEnum.TRITON:
@@ -496,6 +608,7 @@ def initialize_mamba_ssu_backend(
         logger.info("Using %s Mamba SSU backend.", _mamba_ssu_backend.name)
 
     _flashinfer_replayssm_kernel = None
+    _flashinfer_replayssm_main_controls_supported = False
     if use_replayssm and backend == MambaBackendEnum.FLASHINFER:
         try:
             from flashinfer.mamba.checkpointing_ssu import checkpointing_ssu
@@ -503,6 +616,23 @@ def initialize_mamba_ssu_backend(
             raise ImportError(
                 "FlashInfer ReplaySSM requires a compatible flashinfer-python package"
             ) from e
+        from inspect import signature
+
+        try:
+            parameters = signature(checkpointing_ssu).parameters
+        except (TypeError, ValueError):
+            parameters = {}
+        _flashinfer_replayssm_main_controls_supported = all(
+            name in parameters for name in ("main_pipeline_stages", "main_ctas_per_sm")
+        )
+        if (
+            mamba_config.stochastic_rounding_rng == "shared_seed"
+            and "sr_rng" not in parameters
+        ):
+            raise ImportError(
+                "Shared-seed ReplaySSM requires FlashInfer checkpointing_ssu "
+                "with sr_rng support"
+            )
         _flashinfer_replayssm_kernel = checkpointing_ssu
     if use_replayssm:
         logger.info("Using %s ReplaySSM backend.", backend.value)

@@ -4,7 +4,6 @@
 from typing import TYPE_CHECKING
 
 import torch
-
 import vllm.envs as envs
 from vllm.logger import init_logger
 from vllm.platforms import current_platform
@@ -1162,6 +1161,75 @@ def awq_marlin_moe_repack(
             b_q_weight[e], size_k, size_n, num_bits
         )
     return output
+
+
+def mamba_marlin_input_conv(
+    input: torch.Tensor,
+    projected: torch.Tensor,
+    weight: torch.Tensor,
+    scales: torch.Tensor,
+    global_scale: torch.Tensor,
+    taps: torch.Tensor,
+    bias: torch.Tensor,
+    history: torch.Tensor,
+    cache_indices: torch.Tensor,
+    accepted_tokens: torch.Tensor | None,
+    pad_slot_id: int,
+    null_block_id: int,
+) -> None:
+    torch.ops._C.mamba_marlin_input_conv(
+        input,
+        projected,
+        weight,
+        scales,
+        global_scale,
+        taps,
+        bias,
+        history,
+        cache_indices,
+        accepted_tokens,
+        pad_slot_id,
+        null_block_id,
+    )
+
+
+if hasattr(torch.ops._C, "mamba_marlin_input_conv"):
+
+    @register_fake("_C::mamba_marlin_input_conv")
+    def _mamba_marlin_input_conv_fake(
+        input,
+        projected,
+        weight,
+        scales,
+        global_scale,
+        taps,
+        bias,
+        history,
+        cache_indices,
+        accepted_tokens,
+        pad_slot_id,
+        null_block_id,
+    ) -> None:
+        return None
+
+
+def mamba_marlin_output(
+    input: torch.Tensor,
+    weight: torch.Tensor,
+    scales: torch.Tensor,
+    global_scale: torch.Tensor,
+    workspace: torch.Tensor,
+) -> torch.Tensor:
+    return torch.ops._C.mamba_marlin_output(
+        input, weight, scales, global_scale, workspace
+    )
+
+
+if hasattr(torch.ops._C, "mamba_marlin_output"):
+
+    @register_fake("_C::mamba_marlin_output")
+    def _mamba_marlin_output_fake(input, weight, scales, global_scale, workspace):
+        return input.new_empty((input.shape[0], 4096))
 
 
 def marlin_gemm(

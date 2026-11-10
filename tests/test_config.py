@@ -4346,6 +4346,162 @@ def test_hybrid_layer_counts_sparse_attention_as_attention(
         )
 
 
+@pytest.mark.parametrize("state_dtype", ["fp8", "int8"])
+def test_quantized_replayssm_requires_replay_backend(state_dtype):
+    with pytest.raises(ValueError, match="requires --use-replayssm"):
+        VllmConfig(
+            cache_config=CacheConfig(replayssm_state_dtype=state_dtype),
+            device_config=DeviceConfig(device="cpu"),
+        )
+
+
+@pytest.mark.parametrize(
+    ("backend", "enabled"),
+    [
+        (MambaBackendEnum.TRITON, False),
+        (MambaBackendEnum.TRITON, True),
+        (MambaBackendEnum.FLASHINFER, False),
+    ],
+)
+def test_shared_seed_mamba_requires_stochastic_rounding(backend, enabled):
+    from vllm.config.mamba import MambaConfig
+
+    with pytest.raises(ValueError, match="requires stochastic rounding"):
+        MambaConfig(
+            backend=backend,
+            enable_stochastic_rounding=enabled,
+            stochastic_rounding_rng="shared_seed",
+        )
+
+
+def test_shared_seed_mamba_requires_replayssm():
+    from vllm.config.mamba import MambaConfig
+
+    if not current_platform.is_cuda():
+        pytest.skip("stochastic rounding requires CUDA")
+    with pytest.raises(ValueError, match="requires --use-replayssm"):
+        VllmConfig(
+            cache_config=CacheConfig(mamba_ssm_cache_dtype="float16"),
+            mamba_config=MambaConfig(
+                backend=MambaBackendEnum.FLASHINFER,
+                enable_stochastic_rounding=True,
+                stochastic_rounding_rng="shared_seed",
+            ),
+            device_config=DeviceConfig(device="cpu"),
+        )
+
+
+def test_shared_seed_mamba_rejects_bfloat16_checkpoint():
+    from vllm.config.mamba import MambaConfig
+
+    if not current_platform.is_cuda():
+        pytest.skip("stochastic rounding requires CUDA")
+    with pytest.raises(ValueError, match="SSM cache to be float16"):
+        VllmConfig(
+            cache_config=CacheConfig(
+                use_replayssm=True, mamba_ssm_cache_dtype="bfloat16"
+            ),
+            mamba_config=MambaConfig(
+                backend=MambaBackendEnum.FLASHINFER,
+                enable_stochastic_rounding=True,
+                stochastic_rounding_rng="shared_seed",
+            ),
+            device_config=DeviceConfig(device="cpu"),
+        )
+
+
+@pytest.mark.parametrize(
+    ("prefix_caching", "cache_mode"), [(True, "none"), (False, "align")]
+)
+def test_shared_seed_mamba_allows_prefix_materialization(prefix_caching, cache_mode):
+    from vllm.config.mamba import MambaConfig
+
+    if not current_platform.is_cuda():
+        pytest.skip("stochastic rounding requires CUDA")
+    config = VllmConfig(
+        cache_config=CacheConfig(
+            use_replayssm=True,
+            mamba_ssm_cache_dtype="float16",
+            enable_prefix_caching=prefix_caching,
+            mamba_cache_mode=cache_mode,
+        ),
+        mamba_config=MambaConfig(
+            backend=MambaBackendEnum.FLASHINFER,
+            enable_stochastic_rounding=True,
+            stochastic_rounding_rng="shared_seed",
+        ),
+        device_config=DeviceConfig(device="cpu"),
+    )
+    assert config.mamba_config.stochastic_rounding_rng == "shared_seed"
+
+
+@pytest.mark.parametrize("state_dtype", ["fp8", "int8"])
+def test_quantized_replayssm_rejects_conflicting_checkpoint_dtype(state_dtype):
+    from vllm.config.mamba import MambaConfig
+
+    with pytest.raises(ValueError, match="mamba-ssm-cache-dtype"):
+        VllmConfig(
+            cache_config=CacheConfig(
+                use_replayssm=True,
+                replayssm_state_dtype=state_dtype,
+                mamba_ssm_cache_dtype="float32",
+            ),
+            mamba_config=MambaConfig(backend=MambaBackendEnum.FLASHINFER),
+            device_config=DeviceConfig(device="cpu"),
+        )
+
+
+@pytest.mark.parametrize(
+    ("flashinfer_version", "accepted"), [("0.7.4rc1", False), ("0.7.4", True)]
+)
+def test_quantized_replayssm_fp8_requires_bounded_flashinfer_scales(
+    monkeypatch, flashinfer_version, accepted
+):
+    """FlashInfer 0.7.4 is the first release that bounds FP8 checkpoint scales."""
+    import importlib.metadata
+
+    from vllm.config.mamba import MambaConfig
+    from vllm.utils.flashinfer import has_flashinfer_replayssm_fp8_checkpoints
+
+    installed_version = importlib.metadata.version
+
+    def version(distribution):
+        if distribution == "flashinfer-python":
+            return flashinfer_version
+        return installed_version(distribution)
+
+    def make_config():
+        return VllmConfig(
+            cache_config=CacheConfig(use_replayssm=True, replayssm_state_dtype="fp8"),
+            mamba_config=MambaConfig(backend=MambaBackendEnum.FLASHINFER),
+            device_config=DeviceConfig(device="cpu"),
+        )
+
+    monkeypatch.setattr(importlib.metadata, "version", version)
+    has_flashinfer_replayssm_fp8_checkpoints.cache_clear()
+    try:
+        if accepted:
+            assert make_config().cache_config.replayssm_state_dtype == "fp8"
+        else:
+            with pytest.raises(ValueError, match="bounds FP8 checkpoint scales"):
+                make_config()
+    finally:
+        has_flashinfer_replayssm_fp8_checkpoints.cache_clear()
+
+
+@pytest.mark.parametrize("state_dtype", ["fp8", "int8"])
+def test_quantized_replayssm_preserves_explicit_checkpoint_selection(state_dtype):
+    from transformers import PreTrainedConfig
+
+    from vllm.model_executor.models.config import NemotronHForCausalLMConfig
+
+    cache = CacheConfig(use_replayssm=True, replayssm_state_dtype=state_dtype)
+    NemotronHForCausalLMConfig.update_mamba_ssm_cache_dtype(
+        cache_config=cache, hf_config=PreTrainedConfig(mamba_ssm_cache_dtype="float32")
+    )
+    assert cache.mamba_ssm_cache_dtype == "auto"
+
+
 def test_layer_range_with_prefill_context_parallel(monkeypatch):
     """Workers are laid out as PP x PCP x TP: every PCP and TP rank of a
     stage gets that stage's layers, so layer counts match under an uneven

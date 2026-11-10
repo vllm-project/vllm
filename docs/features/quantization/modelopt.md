@@ -168,3 +168,62 @@ export VLLM_TEST_MODELOPT_FP8_PC_PT_MODEL_PATH=<path_to_fp8_pc_pt_checkpoint>
 export VLLM_TEST_MODELOPT_FP8_PB_WO_MODEL_PATH=<path_to_fp8_pb_wo_checkpoint>
 pytest -q tests/quantization/test_modelopt.py
 ```
+
+## GB10 Mamba2 input projection and convolution
+
+A CUDA13 build can fuse input projection and convolution for an already
+selected Marlin NVFP4 W4A16 Mamba2 layer on GB10 SM121 hardware with 48 SMs.
+The specialization requires BF16, tensor parallel size 1, and the supported
+4096-hidden/128-head geometry using FlashInfer ReplaySSM. It supports batch
+sizes `B=1–4` and configured token lengths `T=1–8` when `B*T <= 16`.
+
+Batch size is a runtime value; the configured token length `T` is compiled
+for each graph. With `B=1`, runtime metadata may select fewer valid tokens
+than the configured length. With `B=2–4`, every request must have the same
+length, equal to the configured `T`. The fast path requires structural
+metadata and padded-layout checks to pass. Inactive cache slots remain
+protected. Unsupported or unproven geometry, metadata, wrappers and backends
+retain the original projection and convolution path.
+
+On SM121, supported ModelOpt NVFP4 weight-only Mamba2 input/output projections
+select Marlin locally before normal post-load weight packing, including shapes
+that have not been tuned and may be slower. Attention,
+other linears, MoE and the shared backend configuration are unchanged; only one
+weight pack is created. Unsupported codecs/dtypes, LoRA, batch-invariant mode
+and explicitly disabled Marlin kernels retain their configured owners.
+The fused operators require those existing Marlin packs and never convert
+another backend's packed weights at runtime. Unmatched token/batch shapes use
+ordinary Marlin for the same Mamba-owned weights. The fusion preserves ReplaySSM
+state and stochastic-rounding seed handling.
+
+Only the matching Mamba output callsite selects the tuned existing Marlin
+kernel for BF16 `M=8, K=8192, N=4096` with NVFP4 group16 weights. The generic
+Marlin operator and its dispatcher keep their stock behavior.
+
+For compatible FP16 ReplaySSM calls, this GB10 path applies measured launch
+profiles to 29 combinations of uniform batch/token shape and caller-selected
+rounding policy among `B=1–4`, `T=1–8`, `B*T <= 16`. The policy must be Philox
+with five configured rounds or shared seed with five configured rounds.
+The selector never changes the caller's rounding mode or round count. It
+requires the actual fused Marlin-convolution producer, equal configured/runtime
+verification lengths, BF16 inputs, a 16-token checkpoint window
+(`16+T` physical ring entries; 24 at `T=8`), 128 value heads of width 64,
+128 state channels and eight shared Q/K groups, with PDL disabled and the
+supported state/ring layouts and scratch buffers. FP8, INT8, round-to-nearest
+and unmatched shapes retain normal FlashInfer selection/autotuning.
+
+For `B=1`, both policies use the two-kernel profile through `T=6`, then
+monolith with `d_split=1` at `T=7–8`. `B=2` uses the same rule for Philox5;
+shared seed retains normal selection at `T=1–4`, uses the two-kernel profile
+at `T=5–6`, and monolith with `d_split=1` at `T=7–8`. `B=3, T=5` with Philox5
+uses monolith with `d_split=2`; all other `B=3–4` points retain normal selection.
+
+Profiles use existing monolithic or two-kernel algorithms and launch controls.
+The installed FlashInfer API is inspected once at backend initialization;
+profiles requiring new MAIN controls retain normal selection when those
+controls are unavailable. Shared seed requires a compatible FlashInfer API.
+An explicit SSU algorithm setting retains precedence, including `auto`.
+Setting any of `FLASHINFER_SSU_HEADS_PER_CTA`,
+`FLASHINFER_SSU_PRECOMPUTE_NUM_WARPS`, `FLASHINFER_SSU_MAIN_CTA_PER_SM` or
+`FLASHINFER_SSU_MAIN_PIPELINE_STAGES` also preserves the configured FlashInfer
+path.

@@ -12,13 +12,17 @@ import torch
 from vllm.config import CacheConfig
 from vllm.config.mamba import MambaBackendEnum, MambaConfig, MambaSSUAlgorithm
 from vllm.model_executor.layers.mamba.abstract import MambaBase
-from vllm.model_executor.layers.mamba.mamba_utils import MambaStateShapeCalculator
+from vllm.model_executor.layers.mamba.mamba_utils import (
+    MambaStateDtypeCalculator,
+    MambaStateShapeCalculator,
+)
 from vllm.model_executor.layers.mamba.ops.ssu_dispatch import (
     FlashInferSSUBackend,
     TritonSSUBackend,
     get_mamba_ssu_backend,
     initialize_mamba_ssu_backend,
     selective_state_update,
+    selective_state_update_replayssm_flashinfer,
 )
 from vllm.utils.torch_utils import set_random_seed
 from vllm.v1.attention.backends.mamba2_attn import Mamba2AttentionMetadata
@@ -31,6 +35,7 @@ from vllm.v1.kv_cache_interface import (
     KVCacheLayout,
     MambaSpec,
 )
+from vllm.v1.worker.mamba_utils import _validate_replayssm_read_state_spec
 from vllm.v1.worker.replayssm_utils import (
     ReplaySSMModelContext,
     _compact_replayssm_requests_kernel,
@@ -52,9 +57,11 @@ def restore_backend_state():
 
     old_backend = mod._mamba_ssu_backend
     old_replayssm_kernel = mod._flashinfer_replayssm_kernel
+    old_main_controls = mod._flashinfer_replayssm_main_controls_supported
     yield
     mod._mamba_ssu_backend = old_backend
     mod._flashinfer_replayssm_kernel = old_replayssm_kernel
+    mod._flashinfer_replayssm_main_controls_supported = old_main_controls
 
 
 def _kv_cache_config_with_ssu(
@@ -77,27 +84,55 @@ def _cuda_ints(values):
     return torch.tensor(values, dtype=torch.int32, device="cuda")
 
 
-def _replayssm_mixer(kv_cache, ring_start, committed, A):
+def _replayssm_mixer(kv_cache, ring_start, committed, A, sr_rng=None):
     return SimpleNamespace(
         kv_cache=kv_cache,
         _replayssm_ring_start=ring_start,
         _replayssm_prev_num_accepted=committed,
         replayssm_buffer_len=16,
         A=A,
-        mamba_config=MambaConfig(backend=MambaBackendEnum.FLASHINFER),
+        mamba_config=MambaConfig(
+            backend=MambaBackendEnum.FLASHINFER,
+            enable_stochastic_rounding=sr_rng is not None,
+            stochastic_rounding_philox_rounds=5 if sr_rng is not None else 0,
+            stochastic_rounding_rng=sr_rng or "philox",
+        ),
     )
 
 
 @pytest.mark.parametrize("checkpointed", [False, True], ids=["replay", "checkpoint"])
 @pytest.mark.parametrize(
-    ("post_step", "layout", "ssm_dtype"),
+    ("post_step", "layout", "ssm_dtype", "sr_rng"),
     [
-        pytest.param(False, KVCacheLayout.LBNHC, torch.float16, id="v1-fp16-lbnhc"),
-        pytest.param(True, KVCacheLayout.BLHNC, torch.float32, id="v2-fp32-blhnc"),
+        pytest.param(
+            False, KVCacheLayout.LBNHC, torch.float16, None, id="v1-fp16-lbnhc"
+        ),
+        pytest.param(
+            True, KVCacheLayout.BLHNC, torch.float32, None, id="v2-fp32-blhnc"
+        ),
+        pytest.param(False, KVCacheLayout.LBNHC, torch.int8, None, id="v1-int8-lbnhc"),
+        pytest.param(
+            True, KVCacheLayout.BLHNC, torch.float8_e4m3fn, None, id="v2-fp8-blhnc"
+        ),
+        *[
+            pytest.param(
+                post_step, layout, dtype, policy, id=f"{version}-{name}-{policy}"
+            )
+            for post_step, layout, version in (
+                (False, KVCacheLayout.LBNHC, "v1"),
+                (True, KVCacheLayout.BLHNC, "v2"),
+            )
+            for dtype, name in (
+                (torch.float16, "fp16"),
+                (torch.int8, "int8"),
+                (torch.float8_e4m3fn, "fp8"),
+            )
+            for policy in ("philox", "shared_seed")
+        ],
     ],
 )
 def test_replayssm_materializes_only_accepted_boundary_with_compacted_rows(
-    post_step, layout, ssm_dtype, checkpointed
+    post_step, layout, ssm_dtype, sr_rng, checkpointed, monkeypatch
 ):
     """Publish a boundary without modifying its live or cached-prefix sources."""
     try:
@@ -116,6 +151,7 @@ def test_replayssm_materializes_only_accepted_boundary_with_compacted_rows(
 
     set_random_seed(42)
     slots, heads, dim, dstate, ring_len = 19, 8, 64, 128, 20
+    quantized = ssm_dtype in (torch.int8, torch.float8_e4m3fn)
     spec = MambaSpec(
         block_size=16,
         shapes=(
@@ -136,6 +172,12 @@ def test_replayssm_materializes_only_accepted_boundary_with_compacted_rows(
         state_alignment=16,
         block_stride_alignment=16,
     )
+    if quantized:
+        spec = replace(
+            spec,
+            shapes=(*spec.shapes, (heads, dim)),
+            dtypes=(*spec.dtypes, torch.float32),
+        )
     spec = replace(spec, page_size_padded=spec.page_size_bytes + 128)
     vllm_config = SimpleNamespace(
         cache_config=CacheConfig(),
@@ -162,13 +204,31 @@ def test_replayssm_materializes_only_accepted_boundary_with_compacted_rows(
         )
         MambaBase.bind_kv_cache(layer, page)
         caches[name] = layer.kv_cache
-    rings = {name: states[2:] for name, states in caches.items()}
+    rings = {name: states[2:5] for name, states in caches.items()}
     for name, states in caches.items():
-        states[1].normal_(std=0.1)
         x, dt, B = rings[name]
-        x.normal_()
-        dt.fill_(0.01)
-        B.normal_()
+        if quantized:
+            qmax = 127 if ssm_dtype == torch.int8 else 448
+            factors = torch.exp2(
+                (
+                    torch.arange(slots, device="cuda")[:, None, None]
+                    + torch.arange(heads * dim, device="cuda").reshape(1, heads, dim)
+                )
+                % 3
+                - 2
+            )
+            states[1].fill_(8)
+            states[1][..., -1] = qmax
+            states[5].copy_(factors)
+            x.copy_((qmax * factors / 4)[:, :, None, :])
+            dt.fill_(1)
+            B.zero_()
+            B[..., -1] = 1
+        else:
+            states[1].normal_(std=0.1)
+            x.normal_()
+            dt.fill_(0.01)
+            B.normal_()
         assert (
             not x.is_contiguous() and not dt.is_contiguous() and not B.is_contiguous()
         )
@@ -180,11 +240,18 @@ def test_replayssm_materializes_only_accepted_boundary_with_compacted_rows(
     for names, prefix, live in zip(layer_names, [1, 7, 13], [3, 9, 15], strict=True):
         for name in names:
             caches[name][1][live].copy_(caches[name][1][prefix])
+            if quantized:
+                caches[name][5][live].copy_(caches[name][5][prefix])
     original = {name: states[1].clone() for name, states in caches.items()}
+    original_scales = (
+        {name: states[5].clone() for name, states in caches.items()}
+        if quantized
+        else {}
+    )
     ring_before = {
         name: [tensor.clone() for tensor in tensors] for name, tensors in rings.items()
     }
-    A = -torch.ones(heads, device="cuda")
+    A = torch.full((heads,), 0.0 if quantized else -1.0, device="cuda")
     null = NULL_BLOCK_ID
     block_tables = [
         [[null, 3], [null, 5], [4, 4], [null, null], [null, null]],
@@ -207,10 +274,24 @@ def test_replayssm_materializes_only_accepted_boundary_with_compacted_rows(
             starts[slot], committed[slot] = start, count
         starts, committed = _cuda_ints(starts), _cuda_ints(committed)
         mixers = [
-            _replayssm_mixer(caches[name], starts, committed, A) for name in names
+            _replayssm_mixer(caches[name], starts, committed, A, sr_rng)
+            for name in names
         ]
         grouped.append((mixers, spec, _cuda_ints(table)))
     context = ReplaySSMModelContext.create(grouped, max_num_reqs=6)
+    from vllm.v1.worker import replayssm_utils
+
+    materializer_calls = []
+
+    def record_materializer(*args, sr_rng="philox", **kwargs):
+        materializer_calls.append(
+            (sr_rng, kwargs["philox_rounds"], kwargs["rand_seed"])
+        )
+        return replayssm_materialize(*args, sr_rng=sr_rng, **kwargs)
+
+    monkeypatch.setattr(
+        replayssm_utils, "_load_replayssm_materialize", lambda: record_materializer
+    )
     # Row 0 crosses token 16, but only later groups have a destination.
     # Row 1 rejects all drafts and stops at 15.
     # Row 2 uses in-place replay; row 3 has null slots in every group.
@@ -251,6 +332,17 @@ def test_replayssm_materializes_only_accepted_boundary_with_compacted_rows(
         num_reqs=5,
     )
     context.postprocess(**metadata)
+    assert materializer_calls
+    actual_rng, actual_rounds, actual_seed = materializer_calls[0]
+    assert actual_rng == (sr_rng or "philox")
+    assert actual_rounds == (5 if sr_rng is not None else 0)
+    if sr_rng is None:
+        assert actual_seed is None
+    else:
+        expected_seed_count = len(context.mixers) if sr_rng == "shared_seed" else 1
+        assert actual_seed.shape == (expected_seed_count,)
+        assert actual_seed.dtype == torch.int64 and actual_seed.is_cuda
+        assert torch.all((actual_seed >= 0) & (actual_seed < 2**32))
     # After a checkpoint, the source state is canonical at the old ring end.
     # Only the two accepted tokens through the boundary remain to replay.
     plans = {0: (1, 2) if checkpointed else (7, 4), 2: (6, 4)}
@@ -278,6 +370,8 @@ def test_replayssm_materializes_only_accepted_boundary_with_compacted_rows(
                 destinations.setdefault(caches[name][1].data_ptr(), set()).add(dst)
                 x, dt, B = rings[name]
                 expected = original[name][src].float().clone()
+                if quantized:
+                    expected *= original_scales[name][src, ..., None]
                 for offset in range(flush):
                     pos = (start + offset) % ring_len
                     delta = dt[src, :, pos]
@@ -287,9 +381,19 @@ def test_replayssm_materializes_only_accepted_boundary_with_compacted_rows(
                         * x[src, :, pos].float()[:, :, None]
                         * B[src, 0, pos].float()[None, None, :]
                     )
-                torch.testing.assert_close(
-                    caches[name][1][dst].float(), expected, atol=2e-3, rtol=2e-3
-                )
+                if quantized:
+                    if sr_rng is None:
+                        _assert_rows(
+                            expected, caches[name][1][dst], caches[name][5][dst]
+                        )
+                    else:
+                        _assert_sr_rows(
+                            expected, caches[name][1][dst], caches[name][5][dst]
+                        )
+                else:
+                    torch.testing.assert_close(
+                        caches[name][1][dst].float(), expected, atol=2e-3, rtol=2e-3
+                    )
             assert starts[dst].item() == 0
             assert committed[dst].item() == 0
             if src != dst:
@@ -298,20 +402,31 @@ def test_replayssm_materializes_only_accepted_boundary_with_compacted_rows(
     # Check all other slots, including immutable prefixes and each live tail.
     for name, states in caches.items():
         for slot in set(range(slots)) - destinations[states[1].data_ptr()]:
-            torch.testing.assert_close(
-                states[1][slot], original[name][slot], atol=0, rtol=0
-            )
+            assert torch.equal(_bytes(states[1][slot]), _bytes(original[name][slot]))
+            if quantized:
+                torch.testing.assert_close(
+                    states[5][slot], original_scales[name][slot], atol=0, rtol=0
+                )
         for tensor, before in zip(rings[name], ring_before[name], strict=True):
             torch.testing.assert_close(tensor, before, atol=0, rtol=0)
 
     # Old plans beyond the new batch must not replay a second time.
     before_shrink = {name: states[1].clone() for name, states in caches.items()}
+    scales_before_shrink = (
+        {name: states[5].clone() for name, states in caches.items()}
+        if quantized
+        else {}
+    )
     mapping[:2].fill_(-1)
     metadata["num_reqs"] = 2
     context.postprocess(**metadata)
     assert context.active_request_indices.tolist() == [-1] * 6
     for name, states in caches.items():
-        torch.testing.assert_close(states[1], before_shrink[name], atol=0, rtol=0)
+        assert torch.equal(_bytes(states[1]), _bytes(before_shrink[name]))
+        if quantized:
+            torch.testing.assert_close(
+                states[5], scales_before_shrink[name], atol=0, rtol=0
+            )
 
 
 @pytest.mark.skipif(not torch.cuda.is_available(), reason="requires CUDA")
@@ -669,6 +784,7 @@ def test_replayssm_mixer_selects_mtp_layout(
     mixer.use_replayssm = True
     mixer.use_flashinfer_replayssm = True
     mixer.replayssm_buffer_len = 16
+    mixer.replayssm_state_dtype = "auto"
     mixer.mamba_config = MambaConfig(backend=MambaBackendEnum.FLASHINFER)
     mixer.cache_config = SimpleNamespace(mamba_block_size=16, mamba_cache_mode="none")
     mixer.conv_weights = torch.empty(0)
@@ -755,3 +871,414 @@ def test_replayssm_ring_shape_extends_groups_for_head_shards():
     )
 
     assert shapes == (*base_shapes, (2, 16, 64), (2, 16), (1, 16, 128))
+
+
+def _require_cuda():
+    if not torch.cuda.is_available():
+        pytest.skip("requires CUDA")
+    from vllm.platforms import current_platform
+
+    if not current_platform.is_cuda():
+        pytest.skip("requires the NVIDIA CUDA platform")
+
+
+def _bytes(value):
+    return value.contiguous().view(torch.uint8).cpu()
+
+
+def _encode_rows(value, dtype):
+    value = value.float().cpu()
+    qmax = 127 if dtype == torch.int8 else 448
+    amax = value.abs().amax(-1)
+    multiplier = torch.where(amax == 0, 1.0, qmax / amax)
+    scaled = value * multiplier[..., None]
+    if dtype == torch.int8:
+        scaled = scaled.round()
+    return scaled.to(dtype), multiplier.reciprocal()
+
+
+def _assert_rows(value, payload, scale):
+    expected_payload, expected_scale = _encode_rows(value, payload.dtype)
+    assert torch.equal(_bytes(payload), _bytes(expected_payload))
+    torch.testing.assert_close(scale.cpu(), expected_scale, rtol=0, atol=0)
+
+
+def _assert_sr_rows(value, payload, scale):
+    """Require exact scales and the two legal stochastic neighbors, not RN bytes."""
+    value = value.float().cpu()
+    _, expected_scale = _encode_rows(value, payload.dtype)
+    torch.testing.assert_close(scale.cpu(), expected_scale, rtol=0, atol=0)
+    qmax = 127 if payload.dtype == torch.int8 else 448
+    amax = value.abs().amax(-1)
+    multiplier = torch.where(amax == 0, 1.0, qmax / amax)
+    scaled = value * multiplier[..., None]
+    if payload.dtype == torch.int8:
+        lower = scaled.floor().clamp(-qmax, qmax)
+        upper = scaled.ceil().clamp(-qmax, qmax)
+    else:
+        # Enumerate all finite E4M3FN values so neighbors remain exact at
+        # exponent/subnormal boundaries and at the finite saturation limits.
+        encodings = torch.arange(256, dtype=torch.int16).to(torch.uint8)
+        values = encodings.view(payload.dtype).float()
+        finite = values[torch.isfinite(values)].sort().values
+        lower_indices = torch.searchsorted(finite, scaled, right=True) - 1
+        upper_indices = torch.searchsorted(finite, scaled, right=False)
+        lower = finite[lower_indices.clamp(0, finite.numel() - 1)]
+        upper = finite[upper_indices.clamp(0, finite.numel() - 1)]
+    actual = payload.float().cpu()
+    assert torch.all((actual == lower) | (actual == upper))
+
+
+def _source(dtype):
+    qmax = 127 if dtype == torch.int8 else 448
+    value = torch.ones(3, 16, 64, 128)
+    value[..., -1] = qmax
+    factors = torch.exp2(torch.arange(16 * 64).reshape(16, 64) % 3 - 2)
+    return value * factors[None, ..., None], factors
+
+
+def test_shared_int8_prefill_tiny_rows_keep_valid_scales():
+    """INT8 prefill retains normal decode scales for tiny nonzero rows."""
+    _require_cuda()
+    from vllm.model_executor.layers.mamba.ops.replayssm_quantization import (
+        quantize_replayssm_state,
+    )
+
+    floor = 2.0**-126
+    rows = torch.tensor([0.0, floor, 2 * floor, 64 * floor, 127.0], device="cuda")
+    source = rows[None, None, :, None].expand(1, 1, 5, 128).contiguous()
+    source[..., 1::2] = 0
+    state = torch.zeros(2, 1, 5, 128, dtype=torch.int8, device="cuda")
+    scales = torch.ones(2, 1, 5, device="cuda")
+    quantize_replayssm_state(
+        source, state, scales, torch.tensor([1], device="cuda", dtype=torch.int32)
+    )
+    expected = torch.tensor([0, 1, 2, 64, 127], device="cuda", dtype=torch.int8)
+    expected = expected[None, :, None].expand(1, 5, 128).clone()
+    expected[..., 1::2] = 0
+    torch.testing.assert_close(state[1], expected, rtol=0, atol=0)
+    torch.testing.assert_close(
+        scales[1, 0],
+        torch.tensor([1.0, floor, floor, floor, 1.0], device="cuda"),
+        rtol=0,
+        atol=0,
+    )
+
+
+@pytest.mark.parametrize("dtype", [torch.float16, torch.float8_e4m3fn, torch.int8])
+def test_shared_seed_dispatch_matches_flashinfer_api(dtype):
+    """The vLLM dispatcher forwards shared-seed SR rather than invoking Philox."""
+    _require_cuda()
+    from flashinfer.mamba.checkpointing_ssu import checkpointing_ssu
+
+    from vllm.model_executor.layers.mamba.ops.replayssm_quantization import (
+        quantize_replayssm_state,
+    )
+
+    initialize_mamba_ssu_backend(
+        MambaConfig(
+            backend=MambaBackendEnum.FLASHINFER,
+            enable_stochastic_rounding=True,
+            stochastic_rounding_rng="shared_seed",
+        ),
+        _kv_cache_config_with_ssu(),
+        use_replayssm=True,
+    )
+    torch.manual_seed(714)
+    device = torch.device("cuda")
+    inputs = dict(
+        state=torch.zeros(2, 128, 64, 128, device=device, dtype=dtype),
+        x_cache=torch.randn(2, 128, 24, 64, device=device, dtype=torch.bfloat16) * 0.1,
+        B_cache=torch.randn(2, 8, 24, 128, device=device, dtype=torch.bfloat16) * 0.1,
+        dt_cache=torch.full((2, 128, 24), 0.01, device=device),
+        ring_start=torch.zeros(2, device=device, dtype=torch.int32),
+        prev_num_accepted_tokens=torch.tensor(
+            [0, 15], device=device, dtype=torch.int32
+        ),
+        x=torch.randn(1, 8, 128, 64, device=device, dtype=torch.bfloat16) * 0.1,
+        dt=torch.full((1, 8, 128, 1), 0.01, device=device, dtype=torch.bfloat16).expand(
+            -1, -1, -1, 64
+        ),
+        A=torch.full((128, 1, 1), -1.0, device=device).expand(128, 64, 128),
+        B=torch.randn(1, 8, 8, 128, device=device, dtype=torch.bfloat16) * 0.1,
+        C=torch.randn(1, 8, 8, 128, device=device, dtype=torch.bfloat16) * 0.1,
+        out=torch.empty(1, 8, 128, 64, device=device, dtype=torch.bfloat16),
+        state_batch_indices=torch.tensor([1], device=device, dtype=torch.int32),
+    )
+    source = torch.randn(1, 128, 64, 128, device=device) * 0.1
+    if dtype == torch.float16:
+        inputs["state"][1].copy_(source[0])
+    else:
+        inputs["state_scale"] = torch.ones(2, 128, 64, device=device)
+        quantize_replayssm_state(
+            source,
+            inputs["state"],
+            inputs["state_scale"],
+            inputs["state_batch_indices"],
+        )
+    # Preserve the tied-head strides of read-only A and dt in both API calls.
+    actual = {k: v if k in ("A", "dt") else v.clone() for k, v in inputs.items()}
+    rng = torch.cuda.get_rng_state()
+    seed = torch.randint(0, 2**32, (1,), device=device, dtype=torch.int64)
+    checkpointing_ssu(
+        **inputs,
+        rand_seed=seed,
+        philox_rounds=5,
+        sr_rng="shared_seed",
+        enable_pdl=False,
+    )
+    torch.cuda.set_rng_state(rng)
+    selective_state_update_replayssm_flashinfer(
+        **actual,
+        enable_stochastic_rounding=True,
+        stochastic_rounding_philox_rounds=5,
+        stochastic_rounding_rng="shared_seed",
+    )
+    for key in ("state", "x_cache", "B_cache", "dt_cache", "out", "state_scale"):
+        if key in inputs:
+            assert torch.equal(_bytes(inputs[key]), _bytes(actual[key])), key
+
+
+def test_shared_fp8_prefill_tiny_rows_keep_valid_scales():
+    """Tiny prefill rows must not overflow the encoder or produce zero scales."""
+    _require_cuda()
+    from vllm.model_executor.layers.mamba.ops.replayssm_quantization import (
+        quantize_replayssm_state,
+    )
+
+    floor = 2.0**-117
+    rows = torch.tensor(
+        [0.0, 2.0**-140, 2.0**-118, 448.0 * floor, 448.0, 2.0**-122], device="cuda"
+    )
+    source = rows[None, None, :, None].expand(1, 1, 6, 128).contiguous()
+    # An unbounded encode scale, 448 / 2^-122, overflows FP32 at these zeros.
+    source[0, 0, -1, 1::2] = 0
+    state = torch.zeros(2, 1, 6, 128, dtype=torch.float8_e4m3fn, device="cuda")
+    scales = torch.ones(2, 1, 6, device="cuda")
+    quantize_replayssm_state(
+        source, state, scales, torch.tensor([1], device="cuda", dtype=torch.int32)
+    )
+
+    expected = torch.tensor([0.0, 0.0, 0.5, 448.0, 448.0, 2.0**-5], device="cuda")
+    expected = expected[None, :, None].expand(1, 6, 128).clone()
+    expected[0, -1, 1::2] = 0
+    torch.testing.assert_close(state[1].float(), expected, rtol=0, atol=0)
+    torch.testing.assert_close(
+        scales[1, 0],
+        torch.tensor([1.0, floor, floor, floor, 1.0, floor], device="cuda"),
+        rtol=0,
+        atol=0,
+    )
+
+
+@pytest.mark.parametrize("dtype", [torch.int8, torch.float8_e4m3fn])
+def test_shared_prefill_selected_slots_and_reuse(dtype):
+    """Pack, gather, and replace prefill states without touching padding."""
+    _require_cuda()
+    from vllm.model_executor.layers.mamba.ops.replayssm_quantization import (
+        dequantize_replayssm_state,
+        quantize_replayssm_state,
+    )
+
+    source, factors = _source(dtype)
+    source[..., :8] = (
+        torch.tensor([-2.5, -1.5, -1.0625, -0.3, 0.3, 1.0625, 1.5, 2.5])
+        * factors[None, ..., None]
+    )
+    source[0, 0, 0].zero_()
+    source[2] *= 2
+    source = source.cuda()
+    # A larger outer stride reproduces padded cache pages.
+    payload_pages = torch.full((6, 16, 64, 128), 7, dtype=dtype, device="cuda")
+    scale_pages = torch.full((6, 16, 64), 7.0, device="cuda")
+    payload, scale = payload_pages[::2], scale_pages[::2]
+    ids = torch.tensor([2, 0, 1], dtype=torch.int32, device="cuda")
+    quantize_replayssm_state(
+        source,
+        payload,
+        scale,
+        ids,
+        source_indices=torch.tensor([2, -1, 0], device="cuda"),
+    )
+    _assert_rows(source[2], payload[2], scale[2])
+    _assert_rows(source[0], payload[1], scale[1])
+    assert torch.all(payload[0].float() == 7)
+    assert torch.all(scale[0] == 7)
+    decoded = dequantize_replayssm_state(
+        payload,
+        scale,
+        torch.tensor([2, 1, 1, -1], dtype=torch.int32, device="cuda"),
+        torch.tensor([True, True, False, True], device="cuda"),
+    )
+    assert decoded.dtype == torch.float32
+    expected = torch.zeros_like(decoded)
+    expected_payload, expected_scale = _encode_rows(source[[2, 0]], dtype)
+    expected[:2] = (expected_payload.float() * expected_scale[..., None]).cuda()
+    torch.testing.assert_close(decoded, expected, rtol=0, atol=0)
+    preserved_payload, preserved_scale = _bytes(payload[1]), scale[1].clone()
+
+    source.mul_(4)
+    ids.copy_(torch.tensor([2, -1, -1], dtype=torch.int32, device="cuda"))
+    quantize_replayssm_state(source, payload, scale, ids)
+    _assert_rows(source[0], payload[2], scale[2])
+    assert torch.equal(_bytes(payload[1]), preserved_payload)
+    assert torch.equal(scale[1], preserved_scale)
+    assert torch.all(payload_pages[1::2].float() == 7)
+    assert torch.all(scale_pages[1::2] == 7)
+
+
+@pytest.mark.parametrize(
+    ("dtype", "philox_rounds"),
+    [(torch.int8, 0), (torch.float8_e4m3fn, 0), (torch.int8, 5)],
+)
+def test_shared_graph_mixed_flush_checkpoint_bytes(dtype, philox_rounds):
+    """Dispatch two graph flushes with changing scales and unchanged other slots."""
+    _require_cuda()
+    from vllm.model_executor.layers.mamba.ops.replayssm_quantization import (
+        quantize_replayssm_state,
+    )
+
+    initialize_mamba_ssu_backend(
+        MambaConfig(backend=MambaBackendEnum.FLASHINFER),
+        _kv_cache_config_with_ssu(),
+        use_replayssm=True,
+    )
+    source, factors = _source(dtype)
+    # Each flush adds qmax to the row maximum. Payloads 12 -> 6 -> 4 are exact.
+    source[..., :-1] *= 12
+    source[0].zero_()
+    qmax = 127 if dtype == torch.int8 else 448
+    payload = torch.zeros_like(source, dtype=dtype, device="cuda")
+    scale = torch.ones(3, 16, 64, device="cuda")
+    quantize_replayssm_state(
+        source.cuda(), payload, scale, torch.tensor([-1, 1, 2], device="cuda")
+    )
+    initial_payload, initial_scale = payload.clone(), scale.clone()
+    x = (
+        (qmax * factors / 16)
+        .cuda()
+        .to(torch.bfloat16)[None, None]
+        .expand(3, 1, -1, -1)
+        .contiguous()
+    )
+    b = torch.zeros(3, 1, 1, 128, device="cuda", dtype=torch.bfloat16)
+    b[..., -1] = 1
+    x_cache = x[:, 0, :, None].expand(-1, -1, 17, -1).contiguous()
+    b_cache = b[:, 0, :, None].expand(-1, -1, 17, -1).contiguous()
+    dt_cache = torch.ones(3, 16, 17, device="cuda")
+    out = torch.empty_like(x)
+    args = dict(
+        state=payload,
+        state_scale=scale,
+        x_cache=x_cache,
+        B_cache=b_cache,
+        dt_cache=dt_cache,
+        ring_start=torch.zeros(3, device="cuda", dtype=torch.int32),
+        prev_num_accepted_tokens=torch.tensor(
+            [0, 0, 16], device="cuda", dtype=torch.int32
+        ),
+        x=x,
+        dt=torch.ones(3, 1, 16, 1, device="cuda", dtype=torch.bfloat16).expand(
+            -1, -1, -1, 64
+        ),
+        A=torch.zeros(16, 1, 1, device="cuda").expand(-1, 64, 128),
+        B=b,
+        C=b,
+        out=out,
+        state_batch_indices=torch.tensor([2, 1, NULL_BLOCK_ID], device="cuda"),
+        enable_stochastic_rounding=bool(philox_rounds),
+        stochastic_rounding_philox_rounds=philox_rounds,
+    )
+    selective_state_update_replayssm_flashinfer(**args)
+    graph = torch.cuda.CUDAGraph()
+    with torch.cuda.graph(graph):
+        selective_state_update_replayssm_flashinfer(**args)
+    payload.copy_(initial_payload)
+    scale.copy_(initial_scale)
+    for iteration in range(1, 3):
+        graph.replay()
+        expected = source.clone()
+        expected[2, ..., -1] += iteration * qmax * factors
+        _assert_rows(expected, payload, scale)
+        torch.testing.assert_close(
+            scale[2].cpu(), (iteration + 1) * factors, rtol=0, atol=0
+        )
+        expected_out = torch.stack(
+            (
+                (1 + iteration + 1 / 16) * qmax * factors,
+                (1 + 1 / 16) * qmax * factors,
+            )
+        ).to(torch.bfloat16)
+        assert torch.equal(out[:2, 0].cpu(), expected_out)
+
+
+@pytest.mark.parametrize("state_dtype", ["fp8", "int8"])
+def test_replayssm_quantized_cache_spec_requires_matching_scale(state_dtype):
+    """A quantized cache specification requires an FP32 scale with matching rows."""
+    state_shape = (16, 64, 128)
+    spec = MambaSpec(
+        block_size=16,
+        shapes=(
+            (3, 64),
+            state_shape,
+            (16, 17, 64),
+            (16, 17),
+            (1, 17, 128),
+            *MambaStateShapeCalculator.replayssm_read_shapes(state_shape, state_dtype),
+        ),
+        dtypes=(
+            torch.bfloat16,
+            MambaStateDtypeCalculator.replayssm_checkpoint_dtype(state_dtype),
+            torch.bfloat16,
+            torch.float32,
+            torch.bfloat16,
+            *MambaStateDtypeCalculator.replayssm_read_dtypes(state_dtype),
+        ),
+    )
+    _validate_replayssm_read_state_spec(spec)
+    with pytest.raises(ValueError, match="requires an FP32 scale page"):
+        _validate_replayssm_read_state_spec(
+            replace(spec, shapes=spec.shapes[:5], dtypes=spec.dtypes[:5])
+        )
+    with pytest.raises(ValueError, match="Invalid quantized ReplaySSM"):
+        _validate_replayssm_read_state_spec(
+            replace(spec, shapes=(*spec.shapes[:5], (16, 65)))
+        )
+    with pytest.raises(ValueError, match="Invalid quantized ReplaySSM"):
+        _validate_replayssm_read_state_spec(
+            replace(spec, dtypes=(*spec.dtypes[:5], torch.float16))
+        )
+
+
+def test_shared_seed_prefix_requires_materializer_api(monkeypatch):
+    """Fail at context setup for an old FI API; default Philox stays compatible."""
+    from vllm.v1.worker import replayssm_utils
+
+    states = (
+        torch.empty(2, 1, device="cuda"),
+        torch.empty(2, 1, 64, 128, dtype=torch.float16, device="cuda"),
+        torch.empty(2, 1, 24, 64, dtype=torch.bfloat16, device="cuda"),
+        torch.empty(2, 1, 24, dtype=torch.float32, device="cuda"),
+        torch.empty(2, 1, 24, 128, dtype=torch.bfloat16, device="cuda"),
+    )
+    mixer = _replayssm_mixer(
+        states,
+        _cuda_ints([0, 0]),
+        _cuda_ints([0, 0]),
+        torch.empty(1, device="cuda"),
+        "shared_seed",
+    )
+    spec = MambaSpec(
+        block_size=16,
+        shapes=tuple(t.shape[1:] for t in states),
+        dtypes=tuple(t.dtype for t in states),
+        mamba_cache_mode="align",
+    )
+    grouped = [([mixer], spec, _cuda_ints([[0, 1]]))]
+    monkeypatch.setattr(
+        replayssm_utils, "_load_replayssm_materialize", lambda: lambda: None
+    )
+    with pytest.raises(ImportError, match="replayssm_materialize with sr_rng support"):
+        ReplaySSMModelContext.create(grouped, max_num_reqs=1)
+    mixer.mamba_config.stochastic_rounding_rng = "philox"
+    assert ReplaySSMModelContext.create(grouped, max_num_reqs=1).materialize_prefixes
