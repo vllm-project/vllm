@@ -619,59 +619,207 @@ def _detect_developer_role_support(chat_template: str) -> bool:
     return '"developer"' in chat_template or "'developer'" in chat_template
 
 
-def _convert_developer_to_system(
+_DeveloperRoleMode = Literal["native", "system", "leading_system"]
+"""
+How developer messages reach a chat template, as in the Rust frontend's
+`DeveloperRole`. Unless the template names `developer` (`native`), developer
+messages in the leading run of system messages are merged with it into one
+`system` message. A later developer message becomes a `system` message in
+place if the template renders one mid-conversation (`system`), else it joins
+the adjacent user turn, the following one if any (`leading_system`).
+"""
+
+_DEVELOPER_ROLE_MODES_MAXSIZE = 32
+_DEVELOPER_ROLE_MODES = dict[
+    tuple[str, str, tuple[tuple[str, str], ...]], _DeveloperRoleMode
+]()
+"""
+Used in `_resolve_developer_role_mode` to probe each chat template once. The
+probe renders with the tokenizer's special tokens and the request's template
+variables (e.g. `enable_thinking`), so both are in the key.
+"""
+
+# A system message after an assistant turn, as clients add context
+# mid-conversation. Some templates accept one only after a user turn.
+_LATER_SYSTEM_PROBE: Final = (
+    ("system", "PROBE_SYSTEM"),
+    ("user", "PROBE_USER"),
+    ("assistant", "PROBE_ASSISTANT"),
+    ("system", "PROBE_LATER_SYSTEM"),
+    ("user", "PROBE_USER_2"),
+)
+
+_PROBE_TOOL: Final = {
+    "type": "function",
+    "function": {
+        "name": "get_weather",
+        "description": "Get the weather for a city.",
+        "parameters": {
+            "type": "object",
+            "properties": {"city": {"type": "string"}},
+            "required": ["city"],
+        },
+    },
+}
+
+
+def _renders_later_system(
+    tokenizer: HfTokenizer, chat_template: str, template_kwargs: dict[str, Any]
+) -> bool:
+    conversation = [
+        {"role": role, "content": text} for role, text in _LATER_SYSTEM_PROBE
+    ]
+    # A `tool_use` template may render nothing without tools.
+    for tools in (None, [_PROBE_TOOL]):
+        try:
+            prompt = tokenizer.apply_chat_template(
+                conversation=conversation,  # type: ignore[arg-type]
+                tools=tools,  # type: ignore[arg-type]
+                chat_template=chat_template,
+                tokenize=False,
+                add_generation_prompt=True,
+                **template_kwargs,
+            )
+        except Exception:
+            continue
+        if isinstance(prompt, str) and all(
+            text in prompt for _, text in _LATER_SYSTEM_PROBE
+        ):
+            return True
+    return False
+
+
+def _resolve_developer_role_mode(
+    tokenizer: HfTokenizer,
+    chat_template: str,
+    template_kwargs: dict[str, Any] | None = None,
+) -> _DeveloperRoleMode:
+    # A render probe cannot tell whether the template knows `developer`,
+    # since templates with a generic role branch render any role.
+    if _detect_developer_role_support(chat_template):
+        return "native"
+
+    template_kwargs = template_kwargs or {}
+    cache_key = (
+        chat_template,
+        tokenizer.name_or_path,
+        tuple(sorted((k, repr(v)) for k, v in template_kwargs.items())),
+    )
+    if (mode := _DEVELOPER_ROLE_MODES.get(cache_key)) is None:
+        mode = (
+            "system"
+            if _renders_later_system(tokenizer, chat_template, template_kwargs)
+            else "leading_system"
+        )
+        # Requests may carry their own chat template, so bound the cache.
+        if len(_DEVELOPER_ROLE_MODES) >= _DEVELOPER_ROLE_MODES_MAXSIZE:
+            _DEVELOPER_ROLE_MODES.clear()
+        _DEVELOPER_ROLE_MODES[cache_key] = mode
+    return mode
+
+
+_MessageContent = str | list[dict[str, str]] | None
+
+
+def _is_text_part(part: object) -> bool:
+    return isinstance(part, dict) and part.get("type") == "text"
+
+
+def _is_empty_content(content: _MessageContent) -> bool:
+    if isinstance(content, list):
+        return all(_is_text_part(part) and not part.get("text") for part in content)
+    return not content
+
+
+def _append_content(
+    content: _MessageContent, other: _MessageContent
+) -> _MessageContent:
+    """Append `other` to `content`, keeping parts in order. Text on both sides
+    of the boundary is joined with a blank line."""
+    if _is_empty_content(other):
+        return content
+    if _is_empty_content(content):
+        return other
+    if isinstance(content, str) and isinstance(other, str):
+        return f"{content}\n\n{other}"
+
+    parts = [{"type": "text", "text": content}] if isinstance(content, str) else content
+    others = [{"type": "text", "text": other}] if isinstance(other, str) else other
+    assert parts and others
+    if _is_text_part(parts[-1]) and _is_text_part(others[0]):
+        joined = {**parts[-1], "text": f"{parts[-1]['text']}\n\n{others[0]['text']}"}
+        return [*parts[:-1], joined, *others[1:]]
+    return [*parts, *others]
+
+
+def _join_previous_user(
+    lowered: list[ConversationMessage], content: _MessageContent
+) -> None:
+    # Developer content that no user turn follows joins the previous user
+    # turn, or becomes one if the previous turn is not one.
+    if lowered and lowered[-1]["role"] == "user":
+        previous = lowered[-1]
+        lowered[-1] = {
+            **previous,
+            "content": _append_content(previous.get("content"), content),
+        }
+    else:
+        lowered.append({"role": "user", "content": content})
+
+
+def _lower_developer_messages(
     conversation: list[ConversationMessage],
+    mode: _DeveloperRoleMode,
 ) -> list[ConversationMessage]:
-    converted: list[ConversationMessage] = []
-    for msg in conversation:
-        if msg["role"] == "developer":
-            new_msg = dict(msg)
-            new_msg["role"] = "system"
-            new_msg.pop("tools", None)
-            converted.append(new_msg)  # type: ignore[arg-type]
-        else:
-            converted.append(msg)
-    return converted
+    """Lower developer messages for a chat template, keeping them in place.
 
-
-def _consolidate_system_messages(
-    conversation: list[ConversationMessage],
-) -> list[ConversationMessage]:
-    """Merge all system messages into one at position 0.
-
-    Some chat templates (e.g. Qwen 3.6) require the system message to be the
-    very first message.  After developer-to-system conversion, system messages
-    may appear at non-first positions; this merges them into a single message.
+    Developer messages are merged at most with an adjacent turn, so media
+    placeholders stay in order and the prompt prefix stays stable as later
+    turns are appended. The caller's own system messages are left to the
+    template.
     """
-    system_contents: list[str] = []
-    non_system: list[ConversationMessage] = []
-    needs_consolidation = False
-    for i, msg in enumerate(conversation):
-        if msg["role"] == "system":
-            if i > 0 or system_contents:
-                needs_consolidation = True
-            content = msg.get("content", "")
-            if isinstance(content, list):
-                parts = []
-                for part in content:
-                    if isinstance(part, dict) and "text" in part:
-                        parts.append(part["text"])
-                    elif isinstance(part, str):
-                        parts.append(part)
-                content = "\n".join(parts)
-            if content:
-                system_contents.append(content)
-        else:
-            non_system.append(msg)
-
-    if not needs_consolidation:
+    if mode == "native":
         return conversation
 
-    merged: ConversationMessage = {
-        "role": "system",
-        "content": "\n\n".join(system_contents),
-    }
-    return [merged, *non_system]
+    leading_run = next(
+        (
+            i
+            for i, msg in enumerate(conversation)
+            if msg["role"] not in ("system", "developer")
+        ),
+        len(conversation),
+    )
+    lowered: list[ConversationMessage] = []
+    if any(msg["role"] == "developer" for msg in conversation[:leading_run]):
+        merged: _MessageContent = ""
+        for msg in conversation[:leading_run]:
+            merged = _append_content(merged, msg.get("content"))
+        lowered.append({"role": "system", "content": merged})
+    else:
+        lowered.extend(conversation[:leading_run])
+
+    # Developer content waiting for the next user turn.
+    pending: _MessageContent = None
+    for msg in conversation[leading_run:]:
+        if msg["role"] == "developer":
+            if mode == "system":
+                system_msg = {k: v for k, v in msg.items() if k != "tools"}
+                system_msg["role"] = "system"
+                lowered.append(cast("ConversationMessage", system_msg))
+            else:
+                pending = _append_content(pending or "", msg.get("content"))
+        elif msg["role"] == "user" and pending is not None:
+            content = _append_content(pending, msg.get("content"))
+            lowered.append({**msg, "content": content})
+            pending = None
+        else:
+            if pending is not None:
+                _join_previous_user(lowered, pending)
+                pending = None
+            lowered.append(msg)
+    if pending is not None:
+        _join_previous_user(lowered, pending)
+    return lowered
 
 
 _CONTENT_FORMATS_MAXSIZE = 32
@@ -905,20 +1053,26 @@ def safe_apply_chat_template(
             "allowed, so you must provide a chat template if the tokenizer "
             "does not define one."
         )
-    if any(
-        msg["role"] == "developer" for msg in conversation
-    ) and not _detect_developer_role_support(chat_template):
-        conversation = _convert_developer_to_system(conversation)
-        conversation = _consolidate_system_messages(conversation)
-        logger.info_once(
-            "Chat template does not support the 'developer' message role. "
-            "Converting developer messages to 'system' role.",
-        )
     resolved_kwargs = resolve_chat_template_kwargs(
         tokenizer=tokenizer,
         chat_template=chat_template,
         chat_template_kwargs=kwargs,
     )
+    if any(msg["role"] == "developer" for msg in conversation):
+        hf_params = _get_hf_base_chat_template_params()
+        template_kwargs = {
+            k: v for k, v in resolved_kwargs.items() if k not in hf_params
+        }
+        mode = _resolve_developer_role_mode(tokenizer, chat_template, template_kwargs)
+        if mode != "native":
+            conversation = _lower_developer_messages(conversation, mode)
+            logger.info_once(
+                "Chat template does not support the 'developer' message role. "
+                "Developer messages after the leading system message become %s.",
+                "system messages in place"
+                if mode == "system"
+                else "part of the adjacent user turn",
+            )
 
     # transformers v5 changed the default of `return_dict` to True, which
     # makes `apply_chat_template(tokenize=True)` return a `BatchEncoding`
