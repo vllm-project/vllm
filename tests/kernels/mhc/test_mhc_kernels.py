@@ -46,7 +46,7 @@ from vllm.models.deepseek_v41.nvidia.ops.mega_mhc import (
     is_mega_mhc_supported,
     mhc_shifted_post_pre_deep_gemm,
 )
-from vllm.models.deepseek_v41.nvidia.ops.mhc import hc_expand
+from vllm.models.deepseek_v41.nvidia.ops.mhc import hc_expand, mhc_boundary_weight
 from vllm.platforms import current_platform
 from vllm.utils.torch_utils import set_random_seed
 
@@ -87,7 +87,9 @@ def test_deepseek_v41_all_reduce_fusion_requires_kernel_support(
     assert mhc.supports_mhc_all_reduce(config) is expected
 
 
-@pytest.mark.skipif(not current_platform.is_cuda(), reason="CUDA required")
+@pytest.mark.skipif(
+    not current_platform.is_cuda_alike(), reason="CUDA or ROCm required"
+)
 @pytest.mark.parametrize(
     "num_tokens,hc_mult,hidden_size",
     [
@@ -139,7 +141,9 @@ def test_hc_collapse_preserves_weighted_residual_sum(
         )
 
 
-@pytest.mark.skipif(not current_platform.is_cuda(), reason="CUDA required")
+@pytest.mark.skipif(
+    not current_platform.is_cuda_alike(), reason="CUDA or ROCm required"
+)
 def test_hc_collapse_custom_op_supports_compile():
     x = torch.randn(2, 4, 5120, dtype=torch.bfloat16, device=DEVICE)
     pre = torch.rand(2, 4, device=DEVICE)
@@ -190,7 +194,9 @@ def test_v41_dspark_head_collapses_with_last_ffn_mix(num_tokens, monkeypatch):
     )
 
 
-@pytest.mark.skipif(not current_platform.is_cuda(), reason="CUDA required")
+@pytest.mark.skipif(
+    not current_platform.is_cuda_alike(), reason="CUDA or ROCm required"
+)
 @pytest.mark.parametrize("num_tokens", [1, 7, 32])
 @pytest.mark.parametrize("tp_size", [4, 8])
 def test_hc_collapse_before_gather_is_bitwise_equal(num_tokens, tp_size):
@@ -566,6 +572,7 @@ def test_deepseek_v41_decoder_mixes_match_torch(
     decoder.hc_post_alpha = 2.0
     decoder.use_sequence_parallel = False
     decoder.fuse_mhc_all_reduce = False
+    decoder.hc_attn_boundary_weight = decoder.hc_ffn_boundary_weight = None
     decoder.mhc_stream = None
     if mhc_mode != "disabled":
         from vllm.utils.deep_gemm import is_deep_gemm_supported
@@ -667,6 +674,7 @@ def test_deepseek_v41_decoder_mixes_match_torch(
         capture_aux=False,
         stream=None,
         reduce_results=False,
+        boundary_weight=None,
         **kw,
     ):
         residual = mhc_post_torch(x, residual, post_mix, res_mix)
@@ -695,7 +703,7 @@ def test_deepseek_v41_capture_previous_aux(entry, monkeypatch, default_vllm_conf
 
     The draft model's input is the mean over hc streams of the previous
     layer's post. That post now runs inside this layer's fused pre, so the
-    captured value must equal a standalone ``mhc_post_tilelang`` on the same
+    captured value must equal a standalone `mhc_post_tilelang` on the same
     inputs -- and Engram must not be folded into it, since the injection
     happens after the aux consumers read the stream.
     """
@@ -709,6 +717,7 @@ def test_deepseek_v41_capture_previous_aux(entry, monkeypatch, default_vllm_conf
     decoder.hc_post_alpha = 2.0
     decoder.use_sequence_parallel = False
     decoder.fuse_mhc_all_reduce = False
+    decoder.hc_attn_boundary_weight = decoder.hc_ffn_boundary_weight = None
     decoder.mhc_stream = None
     decoder.engram = None
     from vllm.model_executor.layers.layernorm import RMSNorm
@@ -767,18 +776,9 @@ def test_mhc_pre_delayed_custom_op_supports_compile(carried):
 
 
 @pytest.mark.skipif(not HAS_TILELANG_MHC, reason="TileLang MHC support required")
-@pytest.mark.skipif(
-    not current_platform.is_device_capability_family(100),
-    reason="DeepGEMM Mega mHC requires SM100-family CUDA",
-)
-@pytest.mark.parametrize("num_tokens", [0, 1, 17, 128, 1024])
-@pytest.mark.parametrize("hidden_size", [5120, 7168])
-def test_deep_gemm_mega_mhc_correctness(num_tokens, hidden_size):
-    set_random_seed(0)
+def _shifted_post_pre_case(num_tokens: int, hidden_size: int):
+    """Inputs of `mhc_shifted_post_pre_deep_gemm` and the TileLang reference."""
     hc_mult = 4
-    if not is_mega_mhc_supported(hidden_size, 4):
-        pytest.skip("DeepGEMM Mega mHC is not available")
-
     x = torch.randn(num_tokens, hidden_size, dtype=torch.bfloat16, device=DEVICE)
     residual = torch.randn(
         num_tokens, hc_mult, hidden_size, dtype=torch.bfloat16, device=DEVICE
@@ -832,7 +832,6 @@ def test_deep_gemm_mega_mhc_correctness(num_tokens, hidden_size):
         norm_weight,
         7e-6,
     )
-    actual = mhc_shifted_post_pre_deep_gemm(*args)
     expected = (
         expected_residual,
         expected_post_mix,
@@ -840,6 +839,23 @@ def test_deep_gemm_mega_mhc_correctness(num_tokens, hidden_size):
         expected_y_bf16,
         expected_previous_mix,
     )
+    return args, expected
+
+
+@pytest.mark.skipif(
+    not current_platform.is_device_capability_family(100),
+    reason="DeepGEMM Mega mHC requires SM100-family CUDA",
+)
+@pytest.mark.parametrize("num_tokens", [0, 1, 17, 128, 1024])
+@pytest.mark.parametrize("hidden_size", [5120, 7168])
+def test_deep_gemm_mega_mhc_correctness(num_tokens, hidden_size):
+    set_random_seed(0)
+    if not is_mega_mhc_supported(hidden_size, 4):
+        pytest.skip("DeepGEMM Mega mHC is not available")
+
+    args, expected = _shifted_post_pre_case(num_tokens, hidden_size)
+    x = args[0]
+    actual = mhc_shifted_post_pre_deep_gemm(*args)
     for i, (result, ref) in enumerate(zip(actual, expected, strict=True)):
         # Match the existing mHC BF16 tolerance: post rounding differences
         # can be amplified by cancellation in the carried collapse.
@@ -862,6 +878,27 @@ def test_deep_gemm_mega_mhc_correctness(num_tokens, hidden_size):
                 for result, ref in zip(captured, eager, strict=True):
                     torch.testing.assert_close(result, ref, atol=0, rtol=0)
         torch.cuda.current_stream().wait_stream(stream)
+
+
+@pytest.mark.skipif(not HAS_TILELANG_MHC, reason="TileLang MHC support required")
+@pytest.mark.parametrize("num_tokens", [1, 17, 98, 128, 196, 197, 252, 336])
+def test_mhc_boundary_correctness(num_tokens):
+    if mhc_boundary_weight(5120, 4, torch.device(DEVICE)) is None:
+        pytest.skip("The CuTe DSL mHC boundary needs SM100 and CuTe DSL")
+    set_random_seed(0)
+    from vllm.models.deepseek_v41.nvidia.ops.mhc_boundary import (
+        mhc_shifted_post_pre_boundary,
+        prepare_boundary_weight,
+    )
+
+    args, expected = _shifted_post_pre_case(num_tokens, 5120)
+    boundary_args = list(args)
+    boundary_args[5] = prepare_boundary_weight(args[5])
+    actual = mhc_shifted_post_pre_boundary(*boundary_args)
+    assert actual is not None
+    for i, (result, ref) in enumerate(zip(actual, expected, strict=True)):
+        atol, rtol = (1.6e-2, 1e-2) if i in (0, 3) else (1e-6, 1e-3)
+        torch.testing.assert_close(result, ref, atol=atol, rtol=rtol)
 
 
 def sinkhorn_normalize_ref(x: torch.Tensor, repeat: int, eps: float) -> torch.Tensor:
@@ -1345,7 +1382,7 @@ def test_mhc_fused_rocm_fallback_applies_norm(monkeypatch):
 def test_mhc_pre_delayed_rocm_aiter(num_tokens, carried):
     """AITER must reproduce the delayed reference on both seam variants.
 
-    ``num_tokens`` spans the split-k choices AITER makes for the projection,
+    `num_tokens` spans the split-k choices AITER makes for the projection,
     since the pre-mix is recovered from that unreduced output.
     """
     set_random_seed(0)
@@ -1392,15 +1429,15 @@ def test_mhc_pre_delayed_rocm_aiter(num_tokens, carried):
 @pytest.mark.parametrize("seam", ["post", "no_post", "identity_pre"])
 def test_mhc_pre_delayed_rocm_aiter_fused_rms_norm(num_tokens, seam):
     """One fused kernel must match the whole reference seam: the post block
-    (the previous seam's post/comb gates fold ``sublayer_out`` into the
+    (the previous seam's post/comb gates fold `sublayer_out` into the
     streams), the delayed pre block (projection + Sinkhorn producing the next
     seam's post/comb/pre gates, plus the collapse with the carried pre-mix),
     and the RMSNorm folded onto the collapse.
 
-    ``num_tokens`` spans the kernel's split-K config buckets. ``seam`` covers
+    `num_tokens` spans the kernel's split-K config buckets. `seam` covers
     the three call shapes the model makes: a regular seam (post folded in), an
     Engram seam (post already applied), and the draft entry seam
-    (``pre_mix=None`` = identity pre-mix).
+    (`pre_mix=None` = identity pre-mix).
     """
     set_random_seed(0)
     hc_mult, hidden_size = 4, 5120
@@ -1597,8 +1634,8 @@ def test_deepseek_v41_rocm_decoder_overlap_matches_serial(
     entry, num_splits, over_limit, monkeypatch, default_vllm_config
 ):
     """The decoder layer splits its seams only inside a FULL graph capture of at
-    most ``MHC_OVERLAP_MAX_TOKENS`` tokens, and the replayed layer matches the
-    serial one. ``num_splits`` counts the seams that carry a post block: layer
+    most `MHC_OVERLAP_MAX_TOKENS` tokens, and the replayed layer matches the
+    serial one. `num_splits` counts the seams that carry a post block: layer
     0, a pipeline entry and Engram fold none into the attention seam, and the
     FFN seam always has one."""
     from vllm.config import CUDAGraphMode
@@ -1709,13 +1746,13 @@ def test_mhc_pre_delayed_rocm_aiter_declines_unsupported(monkeypatch):
     """The broadcast seam must not take the AITER path; a fused norm must not
     take the unfused AITER op.
 
-    The broadcast projects a narrower ``x``, which no AITER pre kernel takes;
-    ``mhc_pre_gemm_sqrsum`` folds no RMSNorm, so a fused norm routes to the
+    The broadcast projects a narrower `x`, which no AITER pre kernel takes;
+    `mhc_pre_gemm_sqrsum` folds no RMSNorm, so a fused norm routes to the
     fused seam kernel where it exists (gfx950) and away from AITER otherwise.
     What is asserted here is the routing decision, which is what this gate
     owns; the numerics of the paths are covered by
-    ``test_deepseek_v41_mhc_pre_delayed`` and
-    ``test_mhc_pre_delayed_rocm_aiter_fused_rms_norm``.
+    `test_deepseek_v41_mhc_pre_delayed` and
+    `test_mhc_pre_delayed_rocm_aiter_fused_rms_norm`.
     """
     set_random_seed(0)
     hc_mult, hidden_size = 4, 5120
@@ -1975,7 +2012,7 @@ def _patch_first_rank_pp_group(monkeypatch):
 @pytest.mark.parametrize("carried", [False, True])
 def test_deepseek_v4_layer_reuse_residual_keeps_caller_input(carried):
     """reuse_residual changes no output and never writes the caller's x, even
-    when a first layer starts from ``residual = x``."""
+    when a first layer starts from `residual = x`."""
     torch.set_default_device(DEVICE)
     set_random_seed(0)
     hc_mult, hidden_size, num_tokens = 4, 4096, 64

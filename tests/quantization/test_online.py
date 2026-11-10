@@ -308,6 +308,10 @@ def test_online_mxfp4_activation_key_is_honoured_or_rejected(
         assert computed_key == activation_quant_key
 
 
+@pytest.mark.skipif(
+    current_platform.is_xpu(),
+    reason="MXFP4 linear kernels on XPU only support dynamic activation.",
+)
 def test_online_hadamard_target_wraps_resolved_method(default_vllm_config) -> None:
     """`hadamard_size` on a `targets` spec wraps the method built with the
     resolved activation key in `InputHadamardLinearMethod`."""
@@ -2600,9 +2604,11 @@ def test_log_online_quantization(
     log_online_quantization(default_vllm_config)
 
     assert logged_messages == [
-        "Quantizing 3 layers of types: block_sparse_moe.experts: 1 (from targets: "
-        f"*experts*, {expected_target_summary}); mlp.down_proj: 2 (from linear: "
-        "fp8_per_tensor)"
+        (
+            "Quantizing 3 layers of types: block_sparse_moe.experts: 1 (from "
+            f"targets: *experts*, {expected_target_summary}); mlp.down_proj: 2 "
+            "(from linear: fp8_per_tensor)"
+        )
     ]
 
 
