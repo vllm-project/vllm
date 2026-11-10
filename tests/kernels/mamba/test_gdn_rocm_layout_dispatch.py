@@ -65,6 +65,7 @@ def _make_layer(gqa_interleaved_layout: bool):
     layer.prefix = PREFIX
     layer.gqa_interleaved_layout = gqa_interleaved_layout
     layer.qkvz_layout = "interleaved" if gqa_interleaved_layout else "flat"
+    layer.use_aiter_fused_gdn_decode = False
 
     layer.calls = []
     layer._forward_core_decode_aiter = lambda **kw: layer.calls.append("aiter")
