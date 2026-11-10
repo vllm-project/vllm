@@ -253,9 +253,7 @@ def _run_scenario(method: str, pp_size: int) -> None:
         supported = on_gfx950()
     else:
         supported = current_platform.is_cuda()
-    if not (
-        supported and current_platform.is_fully_connected(list(range(pp_size)))
-    ):
+    if not (supported and current_platform.is_fully_connected(list(range(pp_size)))):
         pytest.skip(
             "copy engines need NVLink-connected CUDA GPUs or xGMI-connected gfx950"
         )

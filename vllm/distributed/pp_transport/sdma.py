@@ -262,8 +262,7 @@ class _Sent:
         # A ring entry's signals are waited for before they are reused.
         if not self.done:
             self.done = (
-                self.transport.seq - self.seq >= _RING
-                or _hsa().load(self.full) == 0
+                self.transport.seq - self.seq >= _RING or _hsa().load(self.full) == 0
             )
         return self.done
 
