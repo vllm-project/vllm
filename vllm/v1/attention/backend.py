@@ -677,17 +677,17 @@ class AttentionMetadataBuilder(ABC, Generic[M]):
                     max_decode_query_len(self.vllm_config),
                 )
 
-        # Non-attention specs default to dcp_sharded=False, hence the type check.
-        is_dcp_replicated_cache = (
-            isinstance(self.kv_cache_spec, AttentionSpec)
-            and not self.kv_cache_spec.dcp_sharded
-        )
         if (
             self.vllm_config.parallel_config.decode_context_parallel_size > 1
             and not supports_dcp_with_varlen
-            and not is_dcp_replicated_cache
         ):
-            self.reorder_batch_threshold = 1
+            # Non-attention specs default to dcp_sharded=False, hence the type check.
+            is_dcp_replicated_cache = (
+                isinstance(self.kv_cache_spec, AttentionSpec)
+                and not self.kv_cache_spec.dcp_sharded
+            )
+            if not is_dcp_replicated_cache:
+                self.reorder_batch_threshold = 1
 
     @abstractmethod
     def build(

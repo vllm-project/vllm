@@ -2079,7 +2079,9 @@ def test_draft_decode_context_parallel_size(configured, expected):
     """The draft defaults to the target's DCP; an explicit value must be 1 or
     the target's."""
     target_parallel_config = ParallelConfig(
-        tensor_parallel_size=4, decode_context_parallel_size=4
+        tensor_parallel_size=4,
+        decode_context_parallel_size=4,
+        distributed_executor_backend="mp",
     )
     if expected is ValueError:
         with pytest.raises(ValueError, match="draft_dcp"):
