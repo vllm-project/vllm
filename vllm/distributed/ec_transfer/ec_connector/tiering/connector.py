@@ -5,7 +5,7 @@
 
 from __future__ import annotations
 
-from collections.abc import Collection
+from collections.abc import Callable, Collection
 from typing import TYPE_CHECKING
 
 from vllm.distributed.ec_transfer.ec_connector.cpu.connector import (
@@ -20,41 +20,29 @@ if TYPE_CHECKING:
 class ECTieringConnector(ECCPUConnector):
     """CPU-primary connector with optional asynchronous secondary tiers."""
 
+    _gpu_cache_lookup: Callable[[Request], Collection[str]]
+
     def on_new_request(self, request: Request) -> None:
         assert self.connector_scheduler is not None
         self.connector_scheduler.on_new_request(request)
 
-    def on_new_request_with_cache(
-        self, request: Request, local_cache_hashes: Collection[str]
+    def bind_gpu_cache_lookup(
+        self, lookup: Callable[[Request], Collection[str]]
     ) -> None:
-        from vllm.distributed.ec_transfer.ec_connector.tiering.scheduler import (
-            ECTieringScheduler,
-        )
+        self._gpu_cache_lookup = lookup
 
-        if isinstance(self.connector_scheduler, ECTieringScheduler):
-            self.connector_scheduler.on_new_request(request, local_cache_hashes)
-        else:
-            self.on_new_request(request)
-
-    def ensure_cache_available_with_cache(
-        self,
-        request: Request,
-        num_computed_tokens: int,
-        local_cache_hashes: Collection[str],
+    def ensure_cache_available(
+        self, request: Request, num_computed_tokens: int
     ) -> bool:
-        from vllm.distributed.ec_transfer.ec_connector.tiering.scheduler import (
-            ECTieringScheduler,
+        assert self.connector_scheduler is not None
+        return self.connector_scheduler.ensure_cache_available(
+            request, num_computed_tokens, self._gpu_cache_lookup(request)
         )
-
-        if isinstance(self.connector_scheduler, ECTieringScheduler):
-            return self.connector_scheduler.ensure_cache_available(
-                request, num_computed_tokens, local_cache_hashes
-            )
-        return self.ensure_cache_available(request, num_computed_tokens)
 
     def _make_scheduler(self, vllm_config: VllmConfig):
         from vllm.distributed.ec_transfer.ec_connector.tiering.scheduler import (
             ECTieringScheduler,
         )
 
+        self._gpu_cache_lookup = lambda request: ()
         return ECTieringScheduler(vllm_config)

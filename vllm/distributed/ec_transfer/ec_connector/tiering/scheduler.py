@@ -79,9 +79,7 @@ class ECTieringScheduler(ECCPUScheduler):
             super().shutdown()
             raise
 
-    def on_new_request(
-        self, request: Request, local_cache_hashes: Collection[str] = ()
-    ) -> None:
+    def on_new_request(self, request: Request) -> None:
         if self._tiering_manager is None or not self._is_consumer:
             return
         for feature in request.mm_features:

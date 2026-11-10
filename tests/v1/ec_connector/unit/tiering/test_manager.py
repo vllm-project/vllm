@@ -379,7 +379,7 @@ def test_mixed_images_prefetch_both_and_gpu_hits_bypass_file_waits(
 ):
     scheduler = indexed_scheduler
     request = image_request("A", "B")
-    scheduler.on_new_request(request, local_cache_hashes={"A"})
+    scheduler.on_new_request(request)
     # A concurrent request may have populated B on GPU while its prefetch runs.
     assert scheduler.ensure_cache_available(request, 0, {"A", "B"})
     assert scheduler._primary.get("A") is not None
@@ -437,7 +437,7 @@ def test_cpu_ready_gpu_miss_loads_without_filesystem_read(indexed_scheduler):
     request = image_request("A")
     scheduler._primary.alloc("A", 2, (2, 32))
     scheduler._primary.mark_ready("A")
-    scheduler.on_new_request(request, local_cache_hashes=set())
+    scheduler.on_new_request(request)
     assert scheduler.ensure_cache_available(request, 0, set())
     assert not scheduler._tiering_manager._pending_reads
     scheduler.update_state_after_alloc(request, 0)
@@ -463,8 +463,8 @@ def test_arrival_holds_ready_cpu_copy_even_with_gpu_hit(indexed_scheduler, copie
     primary.mark_ready("A")
     primary.alloc("busy", primary._region.num_blocks - 2)
     request = image_request(*(["A"] * copies))
-    scheduler.on_new_request(request, local_cache_hashes={"A"})
-    scheduler.on_new_request(request, local_cache_hashes={"A"})
+    scheduler.on_new_request(request)
+    scheduler.on_new_request(request)
     assert primary.alloc("B", 2) is None
     assert not scheduler._tiering_manager._pending_reads
     assert scheduler.ensure_cache_available(request, 0, {"A"})
@@ -562,8 +562,8 @@ def test_async_arrival_prefetch_survives_one_of_two_request_cancellations(
     )
     first = image_request("late", request_id="first")
     second = image_request("late", request_id="second")
-    scheduler.on_new_request(first, {"late"})
-    scheduler.on_new_request(second, {"late"})
+    scheduler.on_new_request(first)
+    scheduler.on_new_request(second)
     manager.request_finished(first.request_id)
     deadline = monotonic() + 5
     while not ((entry := scheduler._primary.get("late")) is not None and entry.ready):
@@ -575,3 +575,47 @@ def test_async_arrival_prefetch_survives_one_of_two_request_cancellations(
     scheduler.update_state_after_alloc(second, 0)
     assert "late" in scheduler._pending_loads
     manager.request_finished(second.request_id)
+
+
+@pytest.mark.parametrize("cpu_ready", [False, True])
+def test_connector_original_interface_uses_fresh_gpu_lookup(
+    indexed_scheduler, cpu_ready
+):
+    from vllm.distributed.ec_transfer.ec_connector.base import ECConnectorRole
+    from vllm.distributed.ec_transfer.ec_connector.tiering.connector import (
+        ECTieringConnector,
+    )
+    from vllm.v1.core.encoder_cache_manager import EncoderCacheManager
+
+    connector = ECTieringConnector(
+        indexed_scheduler._vllm_config, ECConnectorRole.SCHEDULER
+    )
+    cache = EncoderCacheManager(cache_size=2)
+    resident = image_request("A", request_id="resident")
+    cache.allocate(resident, 0)
+    cache.free(resident)
+    connector.bind_gpu_cache_lookup(cache.get_cached_mm_hashes)
+    request = image_request("A")
+    scheduler = connector.connector_scheduler
+    try:
+        if cpu_ready:
+            scheduler._primary.alloc("A", 2, (2, 32))
+            scheduler._primary.mark_ready("A")
+        else:
+            scheduler._primary.alloc("busy", scheduler._primary._region.num_blocks)
+        assert connector.ensure_cache_available(request, 0)
+        assert not scheduler._tiering_manager._pending_reads
+        assert "A" not in scheduler._pending_loads
+        # The callback is evaluated again, rather than retaining an arrival snapshot.
+        other = image_request("B")
+        assert cache.can_allocate(other, 0, 2, 0)
+        cache.allocate(other, 0)
+        assert cache.get_cached_mm_hashes(request) == frozenset()
+        if cpu_ready:
+            assert connector.ensure_cache_available(request, 0)
+        else:
+            scheduler._primary.discard("busy")
+            assert not connector.ensure_cache_available(request, 0)
+            assert scheduler._tiering_manager._pending_reads
+    finally:
+        connector.shutdown()

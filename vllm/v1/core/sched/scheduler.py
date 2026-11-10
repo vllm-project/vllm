@@ -294,6 +294,15 @@ class Scheduler(SchedulerInterface):
         self.encoder_cache_manager = manager_cls_obj.create_manager(
             cache_size=encoder_cache_size, vllm_config=vllm_config
         )
+        if self.ec_connector is not None:
+            from vllm.distributed.ec_transfer.ec_connector.tiering.connector import (
+                ECTieringConnector,
+            )
+
+            if isinstance(self.ec_connector, ECTieringConnector):
+                self.ec_connector.bind_gpu_cache_lookup(
+                    self.encoder_cache_manager.get_cached_mm_hashes
+                )
         speculative_config = vllm_config.speculative_config
         self.use_eagle = False
         self.use_eagle_block_drop = False
@@ -846,10 +855,9 @@ class Scheduler(SchedulerInterface):
             if (
                 self.ec_connector is not None
                 and request.mm_features
-                and not self.ec_connector.ensure_cache_available_with_cache(
+                and not self.ec_connector.ensure_cache_available(
                     request,
                     request.num_computed_tokens - request.num_output_placeholders,
-                    self.encoder_cache_manager.get_cached_mm_hashes(request),
                 )
             ):
                 req_index += 1
@@ -2767,10 +2775,9 @@ class Scheduler(SchedulerInterface):
         return (
             self.ec_connector is not None
             and bool(request.mm_features)
-            and not self.ec_connector.ensure_cache_available_with_cache(
+            and not self.ec_connector.ensure_cache_available(
                 request,
                 num_computed_tokens,
-                self.encoder_cache_manager.get_cached_mm_hashes(request),
             )
         )
 
@@ -3122,9 +3129,7 @@ class Scheduler(SchedulerInterface):
                 request.record_event(EngineCoreEventType.QUEUED)
 
             if self.ec_connector is not None:
-                self.ec_connector.on_new_request_with_cache(
-                    request, self.encoder_cache_manager.get_cached_mm_hashes(request)
-                )
+                self.ec_connector.on_new_request(request)
 
     def finish_requests(
         self, request_ids: str | Iterable[str] | None, finished_status: RequestStatus
