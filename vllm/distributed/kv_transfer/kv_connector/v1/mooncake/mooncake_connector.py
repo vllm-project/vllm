@@ -812,6 +812,15 @@ def _use_layerwise(config: KVTransferConfig | None) -> bool:
     return mode == "layerwise"
 
 
+def _get_layerwise_transfer_interval(config: KVTransferConfig) -> int:
+    interval = config.get_from_extra_config("layerwise_transfer_interval", 1)
+    if type(interval) is not int or interval < 1:
+        raise ValueError(
+            "Mooncake layerwise_transfer_interval must be a positive integer"
+        )
+    return interval
+
+
 def _validate_layerwise_config(
     vllm_config: VllmConfig, role: KVConnectorRole, kv_cache_config: "KVCacheConfig"
 ) -> None:
@@ -830,6 +839,7 @@ def _validate_layerwise_config(
             "Layerwise P requires per-layer Python hooks and cannot use FULL "
             "CUDA graphs. Use PIECEWISE or eager mode on kv_producer."
         )
+    _get_layerwise_transfer_interval(transfer)
     assert transfer.engine_id is not None
     parallel = vllm_config.parallel_config
     if role == KVConnectorRole.WORKER and parallel.prefill_context_parallel_size > 1:
@@ -913,8 +923,14 @@ def _build_state_block_slice(
     destination: Sequence[int],
     token_end: int,
     null_block: int,
+    num_speculative_blocks: int = 0,
 ) -> _BlockSlice:
-    """Pair resident state slots after removing align-mode placeholders."""
+    """Pair resident states, excluding speculative scratch and placeholders."""
+    if num_speculative_blocks:
+        if min(len(source), len(destination)) <= num_speculative_blocks:
+            raise ValueError("Producer/consumer is missing a recurrent state slot")
+        source = source[:-num_speculative_blocks]
+        destination = destination[:-num_speculative_blocks]
     src = tuple(block for block in source if block != null_block)
     dst = tuple(block for block in destination if block != null_block)
     if len(src) < len(dst):
@@ -3978,6 +3994,10 @@ class MooncakeConnectorWorker:
         )
 
     def _init_layerwise_state(self) -> None:
+        self._layerwise_transfer_interval = _get_layerwise_transfer_interval(
+            self.vllm_config.kv_transfer_config
+        )
+        self._saved_layer_indices: set[int] = set()
         self.requests_to_send: dict[str, RequestState] = {}
         # Transfer IDs of requests prefilling in the current scheduler step.
         self.prefilling_transfer_ids: tuple[str, ...] = ()
@@ -4040,6 +4060,7 @@ class MooncakeConnectorWorker:
         assert isinstance(metadata, MooncakeConnectorMetadata)
         # wait_for_save must drain device readers before replacing block tables.
         assert not self._pending_sends
+        self._saved_layer_indices.clear()
         self.cached_block_slices.clear()
         self.process_decode_ready_requests()
         ids = tuple(request.transfer_id for request in metadata.requests)
@@ -4183,14 +4204,16 @@ class MooncakeConnectorWorker:
     def _init_layerwise_layout(self) -> None:
         if self.opaque_packed_storages:
             raise ValueError("Layerwise requires individually addressable layers")
-        writers: dict[tuple[int, int, int], str] = {}
-        for name, base, stride, length in zip(
+        writers: dict[tuple[int, int, int, int], str] = {}
+        for name, group, base, stride, length in zip(
             self.registered_layer_names,
+            self.registered_group_indices,
             self.kv_caches_base_addr,
             self.block_len_per_layer,
             self.kv_block_len_per_layer,
         ):
-            if writers.setdefault((base, stride, length), name) != name:
+            # HMA groups may alias storage but own distinct live block IDs.
+            if writers.setdefault((group, base, stride, length), name) != name:
                 raise ValueError("Layerwise cannot distinguish aliased cache writers")
         self._layer_index_by_name = dict(
             zip(self.registered_layer_names, self.registered_layer_indices)
@@ -4428,6 +4451,11 @@ class MooncakeConnectorWorker:
                     remote_group_block_ids,
                     token_end=state.num_prompt_tokens,
                     null_block=NULL_BLOCK_ID,
+                    num_speculative_blocks=(
+                        spec.num_speculative_blocks
+                        if isinstance(spec, MambaSpec)
+                        else 0
+                    ),
                 )
             elif is_window:
                 block_mapping = _build_window_block_slice(
@@ -4594,11 +4622,17 @@ class MooncakeConnectorWorker:
             return
         # The attention save hook must follow all KV writes for this transformer
         # layer across groups, including an independent indexer.
-        # All KV writes use one stream; this event fences earlier layers too.
-        self._ready_event = self._record_event()
         for transfer_id in self.prefilling_transfer_ids:
             state = self.requests_to_send[transfer_id]
             state.available_tokens[layer_index] = state.scheduled_end_tokens
+        if self._layerwise_transfer_interval > 1:
+            if layer_index in self._saved_layer_indices:
+                return
+            self._saved_layer_indices.add(layer_index)
+            if len(self._saved_layer_indices) % self._layerwise_transfer_interval:
+                return
+        # All KV writes use one stream; this event fences the entire batch.
+        self._ready_event = self._record_event()
         self._process_pending_transfers()
 
     def wait_for_save(self) -> None:
@@ -4619,6 +4653,7 @@ class MooncakeConnectorWorker:
         self._process_pending_transfers(wait=True)
         self.cached_block_slices.clear()
         self.prefilling_transfer_ids = ()
+        self._saved_layer_indices.clear()
 
 
 def _normalize_paired_block_order(

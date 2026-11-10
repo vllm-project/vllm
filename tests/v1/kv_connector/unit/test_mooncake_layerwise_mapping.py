@@ -67,15 +67,36 @@ class BlockMappingTests(unittest.TestCase):
             )
 
     def test_state_boundary_and_missing_slot(self):
-        result = mapping._build_state_block_slice(
-            [0, 12, 0, 13], [0, 23], token_end=543, null_block=0
-        )
-        self.assertEqual(result.source, (13,))
-        self.assertEqual(result.destination, (23,))
-        self.assertEqual(result.end_tokens, 543)
+        for num_spec in (0, 1, 3):
+            with self.subTest(num_spec=num_spec):
+                # Scratch slots must be excluded before compacting nulls.
+                src_scratch = [30, 0, 32][:num_spec]
+                dst_scratch = [40, 0, 42][:num_spec]
+                result = mapping._build_state_block_slice(
+                    [0, 12, 0, 13] + src_scratch,
+                    [0, 23] + dst_scratch,
+                    token_end=543,
+                    null_block=0,
+                    num_speculative_blocks=num_spec,
+                )
+                self.assertEqual(result.source, (13,))
+                self.assertEqual(result.destination, (23,))
+                self.assertEqual(result.end_tokens, 543)
+                with self.assertRaisesRegex(ValueError, "missing"):
+                    mapping._build_state_block_slice(
+                        [13] + src_scratch,
+                        [22, 23] + dst_scratch,
+                        token_end=543,
+                        null_block=0,
+                        num_speculative_blocks=num_spec,
+                    )
         with self.assertRaisesRegex(ValueError, "missing"):
             mapping._build_state_block_slice(
-                [13], [22, 23], token_end=543, null_block=0
+                [30, 31, 32],
+                [23, 40, 41, 42],
+                token_end=543,
+                null_block=0,
+                num_speculative_blocks=3,
             )
 
     def test_ring_does_not_expand_with_prompt_length(self):

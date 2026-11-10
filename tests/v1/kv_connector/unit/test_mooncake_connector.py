@@ -1245,9 +1245,11 @@ def _xfer_meta(
 
 
 @contextlib.contextmanager
-def mooncake_register_worker(kv_cache_config, *, kv_role: str = "kv_consumer"):
+def mooncake_register_worker(
+    kv_cache_config, *, kv_role: str = "kv_consumer", transfer_mode: str = "request"
+):
     """Build a worker whose engine registration and sender thread are patched."""
-    vllm_config = _make_worker_vllm_config(kv_role)
+    vllm_config = _make_worker_vllm_config(kv_role, {"transfer_mode": transfer_mode})
     connector_mod = (
         "vllm.distributed.kv_transfer.kv_connector.v1.mooncake.mooncake_connector"
     )
@@ -2410,33 +2412,40 @@ def test_packed_and_unpacked_region_lengths_fail_homogeneous_tp_handshake():
     ("num_groups", "expected_group_index"),
     [(1, 0), (2, _SHARED_REGION_GROUP_ID)],
 )
-def test_register_kv_caches_collapses_shared_mla_storage(
-    num_groups, expected_group_index
+@pytest.mark.parametrize("transfer_mode", ["request", "layerwise"])
+def test_register_kv_caches_shared_mla_storage(
+    num_groups, expected_group_index, transfer_mode
 ):
-    """Shared backing collapses to one packed region; two groups mark it -1."""
+    """Only request mode collapses writers sharing a packed region."""
     num_blocks = 4
     packed_row = 256
     with mooncake_register_worker(
-        _make_packed_mla_kv_cache_config(num_blocks, num_groups=num_groups)
+        _make_packed_mla_kv_cache_config(num_blocks, num_groups=num_groups),
+        transfer_mode=transfer_mode,
     ) as (worker, reg):
         backing = torch.zeros((num_blocks, packed_row), dtype=torch.uint8)
-        worker.register_kv_caches(
-            {
-                "model.layers.0.mla_attn": backing,
-                "model.layers.1.indexer": backing,
-            }
+        caches = dict.fromkeys(
+            ["model.layers.0.mla_attn", "model.layers.1.indexer"], backing
         )
+        if transfer_mode == "layerwise" and num_groups == 1:
+            with pytest.raises(ValueError, match="aliased cache writers"):
+                worker.register_kv_caches(caches)
+            return
+        worker.register_kv_caches(caches)
 
     reg.assert_called_once()
     registered_ptrs, registered_lens = reg.call_args[0]
     assert registered_ptrs == [backing.data_ptr()]
     assert registered_lens == [backing.untyped_storage().nbytes()]
-    assert worker.kv_caches_base_addr == [backing.data_ptr()]
-    assert worker.block_len_per_layer == [packed_row]
-    assert worker.kv_block_len_per_layer == [packed_row]
-    assert worker.registered_layer_names == ["model.layers.0.mla_attn"]
-    assert worker.registered_group_indices == [expected_group_index]
-    if expected_group_index == _SHARED_REGION_GROUP_ID:
+    regions = 2 if transfer_mode == "layerwise" else 1
+    assert worker.kv_caches_base_addr == [backing.data_ptr()] * regions
+    assert worker.block_len_per_layer == [packed_row] * regions
+    assert worker.kv_block_len_per_layer == [packed_row] * regions
+    assert worker.registered_layer_names == list(caches)[:regions]
+    assert worker.registered_group_indices == (
+        [0, 1] if transfer_mode == "layerwise" else [expected_group_index]
+    )
+    if transfer_mode == "request" and expected_group_index == _SHARED_REGION_GROUP_ID:
         assert worker.region_shared_groups == [(0, 1)]
 
 
