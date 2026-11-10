@@ -1753,30 +1753,6 @@ _SPECULATIVE_DECODING_EXAMPLE_MODELS = {
         tokenizer="Qwen/Qwen3-8B",
         use_original_num_layers=True,
     ),
-    # [PEagle]
-    "PEagleDraftModel": _HfExamplesInfo(
-        "Qwen/Qwen3-8B",
-        trust_remote_code=True,
-        speculative_model="nm-testing/qwen3-8b-peagle-speculators",
-        tokenizer="Qwen/Qwen3-8B",
-        use_original_num_layers=True,
-    ),
-    "PeagleLlamaForCausalLM": _HfExamplesInfo(
-        "Qwen/Qwen3-8B",
-        trust_remote_code=True,
-        speculative_model="nm-testing/qwen3-8b-peagle-speculators",
-        tokenizer="Qwen/Qwen3-8B",
-        use_original_num_layers=True,
-    ),
-    "PeagleQwen3ForCausalLM": _HfExamplesInfo(
-        "Qwen/Qwen3-8B",
-        trust_remote_code=True,
-        speculative_model=(
-            "inference-optimization/Qwen3-8B-speculators.peagle-qwen3arch-ckpt4"
-        ),
-        tokenizer="Qwen/Qwen3-8B",
-        use_original_num_layers=True,
-    ),
     # [MTP]
     "BailingMoeV25MTPModel": _HfExamplesInfo(
         "inclusionAI/Ring-2.5-1T",
@@ -1959,6 +1935,9 @@ _TRANSFORMERS_BACKEND_MODELS = {
         "vllm-project/Ilama-3.2-1B", trust_remote_code=True
     ),
     "TransformersMultiModalForCausalLM": _HfExamplesInfo("BAAI/Emu3-Chat-hf"),
+    "TransformersMultiModalForTranscription": _HfExamplesInfo(
+        "microsoft/VibeVoice-ASR-HF"
+    ),
     "TransformersMoEForCausalLM": _HfExamplesInfo("allenai/OLMoE-1B-7B-0924"),
     "TransformersForMTP": _HfExamplesInfo(
         "zai-org/GLM-4.5",

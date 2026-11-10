@@ -149,10 +149,8 @@ class DeepseekV32MultiTokenPredictorLayer(nn.Module):
         # the draft-logits hidden (compute_logits applies the LM head only) and
         # the recycled previous_hidden_states. Recycling the pre-final-norm
         # hidden mismatches the draft model's hnorm and lowers MTP acceptance;
-        # post-norm recycle matches deepseek_mtp.py (PR #45895). The tuple form
-        # is understood by both the V2 speculator (isinstance-tuple check) and
-        # the legacy proposer (model_returns_tuple is True for the
-        # DeepSeekMTPModel architecture).
+        # post-norm recycle matches deepseek_mtp.py (PR #45895). The speculator
+        # recognizes the tuple form with an isinstance check.
         if is_sequence_parallel:
             hidden_states, _ = self.shared_head.norm(hidden_states, residual)
             hidden_states = sp_all_gather(hidden_states)[: positions.shape[0]]
@@ -201,7 +199,7 @@ class DeepseekV32MultiTokenPredictor(nn.Module):
                 self_attn.skip_topk = skip
 
     def compact_topk_indices(self, slot_ids: torch.Tensor):
-        """Gather the top-k index rows at ``slot_ids`` to the front of the buffer."""
+        """Gather the top-k index rows at `slot_ids` to the front of the buffer."""
         num_slots = slot_ids.numel()
         for layer in self.layers.values():
             self_attn = getattr(layer.mtp_block, "self_attn", None)
@@ -257,9 +255,9 @@ class DeepseekV32MultiTokenPredictor(nn.Module):
     ) -> torch.Tensor:
         """Greedy draft token ids via per-rank argmax over the vocab shard.
 
-        Saves the full-vocab all-gather ``compute_logits`` does; same tokens.
+        Saves the full-vocab all-gather `compute_logits` does; same tokens.
         Name is fixed by the protocol the proposer probes for
-        (``use_local_argmax_reduction``).
+        (`use_local_argmax_reduction`).
         """
         current_step_idx = spec_step_idx % self.num_mtp_layers
         mtp_layer = self.layers[str(self.mtp_start_layer_idx + current_step_idx)]
@@ -325,7 +323,7 @@ class DeepseekV32MTP(nn.Module, DeepseekV2MixtureOfExperts, SupportsPP):
         hidden_states: torch.Tensor,
         spec_step_idx: int = 0,
     ) -> torch.Tensor:
-        """See ``DeepseekV32MultiTokenPredictor.get_top_tokens``."""
+        """See `DeepseekV32MultiTokenPredictor.get_top_tokens`."""
         return self.model.get_top_tokens(hidden_states, spec_step_idx)
 
     def _rewrite_spec_layer_name(self, spec_layer: int, name: str) -> str:

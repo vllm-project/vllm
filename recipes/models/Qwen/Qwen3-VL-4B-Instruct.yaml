@@ -1,0 +1,109 @@
+meta:
+  title: "Qwen3-VL-4B-Instruct"
+  slug: "qwen3-vl-4b-instruct"
+  provider: "Qwen"
+  description: "Qwen3-VL dense 4B vision-language model supporting image, video, and text workloads."
+  date_added: 2026-11-06
+  date_updated: 2026-11-06
+  tasks:
+    - multimodal
+    - text
+  performance_headline: "Intel Xeon 6 CPU BF16 serving"
+  related_recipes:
+    - "Qwen/Qwen3-VL-30B-A3B-Instruct"
+  hardware:
+    xeon6: verified
+
+model:
+  model_id: "Qwen/Qwen3-VL-4B-Instruct"
+  min_vllm_version: "0.11.0"
+  architecture: dense
+  parameter_count: "4B"
+  active_parameters: "4B"
+  context_length: 262144
+  base_args: []
+  base_env: {}
+
+dependencies:
+  - note: "Recommended for offline multimodal inference (image/video pre-processing helpers)"
+    command: "uv pip install qwen-vl-utils==0.0.14"
+    optional: true
+
+features:
+  text_only:
+    description: "Skip loading the vision encoder for text-only workloads to free KV-cache memory."
+    args:
+      - "--language-model-only"
+  encoder_parallel:
+    description: "Run the vision encoder in data-parallel mode."
+    args:
+      - "--mm-encoder-tp-mode"
+      - "data"
+
+opt_in_features:
+  - text_only
+
+variants:
+  default:
+    precision: bf16
+    vram_minimum_gb: 12
+    description: "BF16 inference on Intel Xeon 6"
+    supported_hardware:
+      - xeon6
+
+compatible_strategies:
+  - single_node_tp
+
+hardware_overrides: {}
+
+strategy_overrides: {}
+
+guide: |
+  ## Overview
+
+  Qwen3-VL-4B-Instruct is a dense multimodal Qwen3-VL model for image, video,
+  and text workloads. This recipe targets single-node Intel Xeon 6 BF16 serving.
+
+  ## Prerequisites
+
+  - Hardware: Intel Xeon 6 CPUs
+  - A vLLM CPU build with Qwen3-VL support (including the model-support changes
+    from the `new_qwen3-vl-model` branch when not yet available in a release)
+
+  For x86 CPU installation, follow the
+  [CPU installation guide](https://docs.vllm.ai/en/latest/getting_started/installation/cpu/).
+
+  ## Intel Xeon 6
+
+  ```bash
+  vllm serve Qwen/Qwen3-VL-4B-Instruct \
+    --tensor-parallel-size 1 \
+    --mm-encoder-tp-mode data
+  ```
+
+  ## Docker
+
+  Use a CPU image containing the required Qwen3-VL implementation.
+
+  ```bash
+  docker run \
+    --privileged --ipc=host -p 8000:8000 \
+    -v ~/.cache/huggingface:/root/.cache/huggingface \
+    vllm/vllm-openai-cpu:latest-x86_64 Qwen/Qwen3-VL-4B-Instruct \
+    --tensor-parallel-size 1 \
+    --mm-encoder-tp-mode data
+  ```
+
+  The Docker command assumes that the specified CPU image includes the
+  required model support. If not, build the image from the support branch.
+  Start with TP=1; tune TP and NUMA placement only after testing on Xeon 6.
+
+  ## Runtime Tuning
+
+  Scheduler, concurrency, memory, and CPU affinity settings depend on the
+  Xeon 6 topology and workload and are intentionally not hard-coded.
+
+  ## References
+
+  - [Model card](https://huggingface.co/Qwen/Qwen3-VL-4B-Instruct)
+  - [vLLM CPU installation](https://docs.vllm.ai/en/latest/getting_started/installation/cpu/)

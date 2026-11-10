@@ -227,6 +227,68 @@ def test_video_canvas_matches_processed_frame_budget(
     assert _num_video_embeds(processed) == canvas.width * canvas.height // (32 * 32)
 
 
+@pytest.mark.parametrize(
+    ("model_id", "width", "height", "mm_processor_kwargs"),
+    [
+        ("Qwen/Qwen3-Omni-30B-A3B-Instruct", 540, 960, None),
+        ("Qwen/Qwen3-Omni-30B-A3B-Instruct", 720, 1280, None),
+        ("Qwen/Qwen3-Omni-30B-A3B-Instruct", 1280, 960, {"do_resize": False}),
+        (
+            "Qwen/Qwen3-Omni-30B-A3B-Instruct",
+            960,
+            540,
+            {
+                "images_kwargs": {
+                    "size": {
+                        "shortest_edge": 128 * 32 * 32,
+                        "longest_edge": 256 * 32 * 32,
+                    }
+                }
+            },
+        ),
+        ("Cloudflare/clef-omni", 640, 360, None),
+        (
+            "Cloudflare/clef-omni",
+            4000,
+            3000,
+            {
+                "videos_kwargs": {
+                    "size": {
+                        "shortest_edge": 128 * 32 * 32,
+                        "longest_edge": 256 * 32 * 32,
+                    }
+                }
+            },
+        ),
+    ],
+)
+def test_dummy_video_follows_size_hint(
+    model_id: str,
+    width: int,
+    height: int,
+    mm_processor_kwargs: dict[str, Any] | None,
+) -> None:
+    ctx = build_model_context(
+        model_id,
+        model_config_kwargs={"max_model_len": 16384},
+        mm_processor_kwargs=mm_processor_kwargs,
+        limit_mm_per_prompt={
+            "audio": 0,
+            "image": 0,
+            "video": {"count": 1, "num_frames": 2, "width": width, "height": height},
+        },
+    )
+    processor = MULTIMODAL_REGISTRY.create_processor(ctx.model_config)
+    video = np.zeros((2, height, width, 3), dtype=np.uint8)
+    processed = processor(
+        "<|vision_start|><|video_pad|><|vision_end|>",
+        mm_items=processor.info.parse_mm_data({"video": [video]}),
+        hf_processor_mm_kwargs={"videos_kwargs": {"do_sample_frames": False}},
+    )
+    dummy = processor.get_dummy_mm_inputs({"video": 1})
+    assert _num_video_embeds(dummy) == _num_video_embeds(processed)
+
+
 def test_image_budget_is_unchanged() -> None:
     ctx = build_model_context(
         "Qwen/Qwen3-Omni-30B-A3B-Instruct",
