@@ -55,7 +55,7 @@ from vllm.entrypoints.serve.utils.request_logger import RequestLogger
 from vllm.entrypoints.serve.utils.tool_calls_utils import (
     resolve_finish_reason,
 )
-from vllm.exceptions import GenerationError
+from vllm.exceptions import GenerationError, VLLMValidationError
 from vllm.inputs import EngineInput, MultiModalPlaceholders
 from vllm.logger import init_logger
 from vllm.logprobs import Logprob
@@ -296,6 +296,17 @@ class OpenAIServingChat(GenerateBaseServing):
         for the API specification. This API mimics the OpenAI
         Chat Completion API.
         """
+        # An empty `messages` list would otherwise pass validation and only
+        # raise an IndexError in get_chat_request_role() after a full
+        # generation. Reject it before any work is scheduled. This is checked
+        # here rather than on the request model because internal callers
+        # (renderers, adapters) construct ChatCompletionRequest directly.
+        if not request.messages:
+            return self.create_error_response(
+                VLLMValidationError(
+                    "messages must be a non-empty list.", parameter="messages"
+                )
+            )
         return await self._with_kv_transfer_rejection_cleanup(
             self._create_chat_completion(request, raw_request), request, raw_request
         )
