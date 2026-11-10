@@ -369,7 +369,7 @@ class AutoGPTQLinearMethod(LinearMethodBase):
             # Only Humming honors VLLM_BATCH_INVARIANT; the other candidates
             # tile on the token count, so any other selection (or none) keeps
             # the dequantize fallback.
-            kernel_type = None
+            kernel_type: type[MPLinearKernel] | None = None
             try:
                 if (
                     choose_mp_linear_kernel(mp_linear_kernel_config)
