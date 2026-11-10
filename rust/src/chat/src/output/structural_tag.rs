@@ -11,7 +11,7 @@ use vllm_engine_core_client::protocol::structured_outputs::{
 use vllm_parser::output_grammar::{BuiltOutputGrammar, GrammarCoverage};
 use vllm_text::TextRequest;
 use xgrammar_structural_tag::StructuralTag;
-use xgrammar_structural_tag::format::{Format, GrammarFormat, GrammarSyntax, TagFormat};
+use xgrammar_structural_tag::format::{Format, GrammarSyntax, TagFormat};
 
 use crate::{Error, Result};
 
@@ -41,7 +41,7 @@ pub(crate) fn answer_format(params: &StructuredOutputsParams) -> Option<Format> 
             } else {
                 GrammarSyntax::Ebnf
             };
-            Format::Grammar(GrammarFormat::new(grammar.clone()).with_syntax(syntax))
+            Format::grammar(grammar.clone(), syntax)
         }
         StructuredOutputConstraint::StructuralTag(tag) => structural_tag_format(tag)?,
     })
@@ -163,32 +163,27 @@ mod tests {
             ),
             (
                 StructuredOutputsParams::grammar("root ::= \"a\""),
-                Format::Grammar(GrammarFormat::new("root ::= \"a\"")),
+                Format::grammar("root ::= \"a\"", GrammarSyntax::Ebnf),
             ),
             (
                 StructuredOutputsParams::grammar("# Answer\nroot ::= \"a\" # or \"b\""),
-                Format::Grammar(GrammarFormat::new("# Answer\nroot ::= \"a\" # or \"b\"")),
+                Format::grammar("# Answer\nroot ::= \"a\" # or \"b\"", GrammarSyntax::Ebnf),
             ),
             (
                 StructuredOutputsParams::grammar("start: \"a\""),
-                Format::Grammar(
-                    GrammarFormat::new("start: \"a\"").with_syntax(GrammarSyntax::Lark),
-                ),
+                Format::grammar("start: \"a\"", GrammarSyntax::Lark),
             ),
             // Lark, whose comments mention EBNF.
             (
                 StructuredOutputsParams::grammar("// Like `root ::= \"a\"` in EBNF.\nstart: \"a\""),
-                Format::Grammar(
-                    GrammarFormat::new("// Like `root ::= \"a\"` in EBNF.\nstart: \"a\"")
-                        .with_syntax(GrammarSyntax::Lark),
+                Format::grammar(
+                    "// Like `root ::= \"a\"` in EBNF.\nstart: \"a\"",
+                    GrammarSyntax::Lark,
                 ),
             ),
             (
                 StructuredOutputsParams::grammar("start: \"a\" # not `root ::= \"a\"`"),
-                Format::Grammar(
-                    GrammarFormat::new("start: \"a\" # not `root ::= \"a\"`")
-                        .with_syntax(GrammarSyntax::Lark),
-                ),
+                Format::grammar("start: \"a\" # not `root ::= \"a\"`", GrammarSyntax::Lark),
             ),
             (
                 StructuredOutputsParams::structural_tag(

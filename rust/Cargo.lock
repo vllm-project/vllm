@@ -6470,7 +6470,7 @@ checksum = "9edde0db4769d2dc68579893f2306b26c6ecfbe0ef499b013d731b7b9247e0b9"
 [[package]]
 name = "xgrammar-structural-tag"
 version = "0.5.0+xgrammar.0.2.9.8f9a127"
-source = "git+https://github.com/Inferact/xgrammar-structural-tag?rev=f884814a9f3f859f3444b0c6e301639bf52e2fc0#f884814a9f3f859f3444b0c6e301639bf52e2fc0"
+source = "git+https://github.com/Inferact/xgrammar-structural-tag?rev=f39ff18cdaad9a0c88df5d7fcca68e7ca957da66#f39ff18cdaad9a0c88df5d7fcca68e7ca957da66"
 dependencies = [
  "auto_impl",
  "serde",

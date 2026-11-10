@@ -557,8 +557,8 @@ mod tests {
     use expect_test::expect;
     use serde_json::json;
     use xgrammar_structural_tag::format::{
-        AnyTokensFormat, DispatchFormat, ExcludeTokenFormat, GrammarFormat, JsonSchemaFormat,
-        JsonSchemaStyle, TokenBoundary, TokenDispatchFormat, TokenFormat, TokenTriggeredTagsFormat,
+        AnyTokensFormat, DispatchFormat, ExcludeTokenFormat, JsonSchemaFormat, JsonSchemaStyle,
+        TokenBoundary, TokenDispatchFormat, TokenFormat, TokenTriggeredTagsFormat,
     };
 
     use super::*;
@@ -576,8 +576,8 @@ mod tests {
                 exclude_tokens: vec![TokenValue::Id(2)],
                 max_tokens: Some(16),
             }),
-            Format::Grammar(GrammarFormat::new("root ::= a\na ::= \"x\"")),
-            Format::Grammar(GrammarFormat::new("start: \"x\"+").with_syntax(GrammarSyntax::Lark)),
+            Format::grammar("root ::= a\na ::= \"x\"", GrammarSyntax::Ebnf),
+            Format::grammar("start: \"x\"+", GrammarSyntax::Lark),
             Format::repeat(Format::regex("[0-9]"), 1, -1),
             Format::JsonSchema(
                 JsonSchemaFormat::new(json!({ "type": "string" }))
