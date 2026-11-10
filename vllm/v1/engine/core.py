@@ -92,6 +92,7 @@ from vllm.v1.engine import (
     UtilityOutput,
     UtilityResult,
 )
+from vllm.v1.engine.snapshot_resources import EngineSnapshotResources
 from vllm.v1.engine.tensor_ipc import TensorIpcReceiver
 from vllm.v1.engine.utils import (
     EngineHandshakeMetadata,
@@ -127,6 +128,8 @@ _R = TypeVar("_R")  # Return type for collective_rpc
 
 class EngineCore:
     """Inner loop of vLLM's Engine."""
+
+    _snapshot_resources: EngineSnapshotResources | None = None
 
     def __init__(
         self,
@@ -1021,9 +1024,7 @@ class EngineCore:
                 self._reset_caches(reset_connector=reset_connector)
                 self._set_kv_cache_reclaimable(True)
             if preparing:
-                self.release_kv_cache_memory()
-                self.collective_rpc("checkpoint_prepare")
-                self.collective_rpc("synchronize_device")
+                self._prepare_checkpoint_resources()
                 self._checkpoint_state = CheckpointState.PREPARED
         except Exception as e:
             if not preparing:
@@ -1082,6 +1083,7 @@ class EngineCore:
                 f"Cannot resume scheduling while the checkpoint state is "
                 f"{self._checkpoint_state}"
             )
+        self._require_snapshot_resources_idle()
         self._set_kv_cache_reclaimable(False)
         self.scheduler.set_pause_state(PauseState.UNPAUSED)
         if self._checkpoint_state == CheckpointState.RESTORING:
@@ -1126,6 +1128,7 @@ class EngineCore:
             raise RuntimeError(
                 f"Cannot sleep while the checkpoint state is {self._checkpoint_state}"
             )
+        self._require_snapshot_resources_idle()
         # Pause scheduler before sleeping.
         clear_prefix_cache = level >= 1
         pause_future = self.pause_scheduler(
@@ -1173,11 +1176,8 @@ class EngineCore:
             # Remove "scheduling" from tags if there are other tags to process.
             tags = [t for t in tags if t != "scheduling"]
 
-        if tags is None or tags:
-            self.model_executor.wake_up(tags)
-            if tags is None or "kv_cache" in tags:
-                # Peers must load the re-registered KV cache.
-                self._set_kv_connector_handshake_metadata()
+        self._require_snapshot_resources_idle()
+        self._wake_up_memory(tags)
 
         # Partial wakes intentionally keep the remaining allocations asleep.
         # Resume scheduling only once all executor memory is resident again.
@@ -1186,7 +1186,44 @@ class EngineCore:
             self.resume_scheduler()
         return fully_awake
 
+    def _wake_up_memory(self, tags: list[str] | None) -> None:
+        if tags is None or tags:
+            self.model_executor.wake_up(tags)
+            if tags is None or "kv_cache" in tags:
+                # Peers must load the re-registered KV cache.
+                self._set_kv_connector_handshake_metadata()
+
+    def _require_snapshot_resources_idle(self) -> None:
+        if self._snapshot_resources is not None:
+            self._snapshot_resources.require_idle()
+
+    def _prepare_checkpoint_resources(self) -> None:
+        self._require_snapshot_resources_idle()
+        self._snapshot_resources = EngineSnapshotResources(self)
+        self._snapshot_resources.prepare_checkpoint()
+
+    def _prepare_session_resources(self) -> None:
+        self._require_snapshot_resources_idle()
+        self._snapshot_resources = EngineSnapshotResources(self)
+        self._snapshot_resources.prepare_session()
+
+    def prepare_snapshot_resources(self) -> None:
+        self._prepare_session_resources()
+
+    def restore_snapshot_resources(self) -> None:
+        if self._checkpoint_state != CheckpointState.RUNNING:
+            raise RuntimeError("Use checkpoint_restore for checkpoint resources")
+        resources = self._snapshot_resources
+        if resources is None:
+            raise RuntimeError("Snapshot resources have not been prepared")
+        resources.restore()
+
     def release_kv_cache_memory(self, reset_connector: bool = True) -> None:
+        """Discard KV cache physical memory for an external caller."""
+        self._require_snapshot_resources_idle()
+        self._release_kv_cache_memory(reset_connector=reset_connector)
+
+    def _release_kv_cache_memory(self, reset_connector: bool = True) -> None:
         """Discard KV cache physical memory. Requires a completed pause
         and all executor memory to be resident. Kept requests are recomputed
         after wake-up. `reset_connector` is as for `sleep`.
@@ -2501,6 +2538,9 @@ class EngineCoreProc(EngineCore):
             return "Preparing for a checkpoint requires --enable-sleep-mode"
         if self.model_executor.is_sleeping:
             return "Preparing for a checkpoint requires an awake engine"
+        resources = self._snapshot_resources
+        if resources is not None and not resources.is_idle:
+            return f"Snapshot resources are unavailable in phase {resources.phase}"
         self._checkpoint_state = CheckpointState.PREPARING
         try:
             self.pause_generation(mode=mode, clear_cache=False)
@@ -2521,8 +2561,10 @@ class EngineCoreProc(EngineCore):
         logger.info("Restoring from a process checkpoint")
         self._checkpoint_state = CheckpointState.RESTORING
         try:
-            self.collective_rpc("checkpoint_restore")
-            self.wake_up(["kv_cache"])
+            assert self._snapshot_resources is not None
+            self._snapshot_resources.restore()
+            if not self.model_executor.is_sleeping:
+                self.resume_scheduler()
         except Exception as e:
             self._fail_checkpoint(e)
             raise

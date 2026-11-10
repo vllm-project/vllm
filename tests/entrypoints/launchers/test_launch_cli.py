@@ -36,6 +36,7 @@ from vllm.snapshot.controller import (
     create_snapshot,
     restore_snapshot,
 )
+from vllm.snapshot.engine import SnapshotCanaryError
 from vllm.snapshot.manifest import (
     SnapshotCompatibilityError,
     SnapshotManifest,
@@ -47,7 +48,6 @@ from vllm.snapshot.manifest import (
     write_manifest_atomic,
 )
 from vllm.snapshot.runtime import ProcessInventory, _decode_endpoint, _TcpSocketRecord
-from vllm.snapshot.server import SnapshotCanaryError
 from vllm.snapshot.types import Oracle, oracles_match
 from vllm.utils.argparse_utils import FlexibleArgumentParser
 
@@ -465,6 +465,11 @@ def test_snapshot_create_cli_accepts_only_pinned_compact_mode(
         ("spec_method", "ngram", "does not support speculative decoding"),
         ("spec_model", "draft-model", "does not support speculative decoding"),
         ("spec_tokens", 3, "does not support speculative decoding"),
+        (
+            "distributed_executor_backend",
+            "vllm.v1.executor.cuda_checkpoint_executor.CUDACheckpointExecutor",
+            "local executor",
+        ),
     ],
 )
 def test_snapshot_create_rejects_invalid_config(
@@ -645,8 +650,8 @@ def snapshot_child(tmp_path: Path, monkeypatch: pytest.MonkeyPatch):
         get_num_unfinished_requests=Mock(return_value=0),
         pause_generation=AsyncMock(),
         resume_generation=AsyncMock(),
-        sleep=AsyncMock(),
-        wake_up=AsyncMock(),
+        prepare_snapshot_resources=AsyncMock(),
+        restore_snapshot_resources=AsyncMock(),
         collective_rpc=AsyncMock(),
         shutdown=Mock(),
     )
@@ -690,15 +695,24 @@ def snapshot_child(tmp_path: Path, monkeypatch: pytest.MonkeyPatch):
 
 
 @pytest.mark.asyncio
-async def test_snapshot_child_rejects_mismatch_before_publication(snapshot_child):
+async def test_snapshot_child_rejects_mismatch_before_publication(
+    snapshot_child, monkeypatch: pytest.MonkeyPatch
+):
     child = snapshot_child
     child.canary.side_effect = [_oracle(), _oracle((42,), " Lyon")]
+    monkeypatch.setattr(
+        snapshot_server,
+        "write_ready_atomic",
+        lambda *_args: pytest.fail("mismatched snapshot was published"),
+    )
     with pytest.raises(SnapshotCanaryError, match="rehearsal changed"):
         await snapshot_server.run_vllm_snapshot_child(child.control, child.args)
     assert not child.control.ready_file.exists()
     child.bind.assert_not_called()
     child.engine.shutdown.assert_called_once_with(timeout=0)
     child.closed.assert_called_once()
+    error = json.loads(child.control.ready_file.with_name("error.json").read_text())
+    assert error["phase"] == "rehearsal: canary"
 
 
 @pytest.mark.asyncio
@@ -711,18 +725,19 @@ async def test_snapshot_child_waits_for_workers_and_canary_before_binding(
     canary_entered, canary_done = asyncio.Event(), asyncio.Event()
     preparations = recoveries = canaries = 0
 
-    async def rpc(method, **_kwargs):
-        nonlocal preparations, recoveries
-        if method == "checkpoint_prepare":
-            preparations += 1
-            if preparations == 2:
-                prepare_entered.set()
-                await prepare_done.wait()
-        elif method == "checkpoint_restore":
-            recoveries += 1
-            if recoveries == 2:
-                recover_entered.set()
-                await recover_done.wait()
+    async def prepare_resources():
+        nonlocal preparations
+        preparations += 1
+        if preparations == 2:
+            prepare_entered.set()
+            await prepare_done.wait()
+
+    async def restore_resources():
+        nonlocal recoveries
+        recoveries += 1
+        if recoveries == 2:
+            recover_entered.set()
+            await recover_done.wait()
 
     async def canary(_engine):
         nonlocal canaries
@@ -732,7 +747,8 @@ async def test_snapshot_child_waits_for_workers_and_canary_before_binding(
             await canary_done.wait()
         return _oracle()
 
-    child.engine.collective_rpc.side_effect = rpc
+    child.engine.prepare_snapshot_resources.side_effect = prepare_resources
+    child.engine.restore_snapshot_resources.side_effect = restore_resources
     child.canary.side_effect = canary
     task = asyncio.create_task(
         snapshot_server.run_vllm_snapshot_child(child.control, child.args)
@@ -750,7 +766,7 @@ async def test_snapshot_child_waits_for_workers_and_canary_before_binding(
         recover_done.set()
         await asyncio.wait_for(canary_entered.wait(), 1)
         # Memory is awake and may have resumed scheduling. It is still private.
-        assert child.engine.wake_up.await_count == 4
+        assert child.canary.await_count == 3
         child.bind.assert_not_called()
         child.serving.assert_not_awaited()
         canary_done.set()
@@ -766,34 +782,33 @@ async def test_snapshot_child_waits_for_workers_and_canary_before_binding(
 
 
 @pytest.mark.asyncio
-@pytest.mark.parametrize("failure", ["communicator", "reload", "canary"])
+@pytest.mark.parametrize("failure", ["restore", "synchronize", "canary"])
 async def test_snapshot_recovery_failure_never_binds_and_keeps_diagnostic(
     snapshot_child, failure: str
 ):
     child = snapshot_child
-    restore_count = 0
+    restores = syncs = 0
 
-    async def rpc(method, **_kwargs):
-        nonlocal restore_count
-        if method == "checkpoint_restore":
-            restore_count += 1
-        if (
-            restore_count == 2
-            and method
-            == {
-                "communicator": "checkpoint_restore",
-                "reload": "reload_weights",
-                "canary": "unused",
-            }[failure]
-        ):
+    async def restore_resources():
+        nonlocal restores
+        restores += 1
+        if failure == "restore" and restores == 2:
             raise RuntimeError("injected recovery failure")
 
+    async def rpc(method, **_kwargs):
+        nonlocal syncs
+        if method == "synchronize_device":
+            syncs += 1
+            if failure == "synchronize" and syncs == 2:
+                raise RuntimeError("injected recovery failure")
+
+    child.engine.restore_snapshot_resources.side_effect = restore_resources
     child.engine.collective_rpc.side_effect = rpc
     if failure == "canary":
         child.canary.side_effect = [_oracle(), _oracle(), _oracle((42,), " Lyon")]
     # Cleanup failure must not hide the failure that made recovery unsafe.
     child.engine.shutdown.side_effect = RuntimeError("cleanup failed")
-    with pytest.raises(RuntimeError, match="recovery failure|recovery changed"):
+    with pytest.raises(RuntimeError, match="recovery failure|changed canary"):
         await snapshot_server.run_vllm_snapshot_child(child.control, child.args)
     error = json.loads(child.control.ready_file.with_name("error.json").read_text())
     assert error["phase"].startswith("recovery:")
@@ -819,7 +834,7 @@ async def test_snapshot_recovery_deadline_or_cancellation_is_terminal(
         await asyncio.Event().wait()
 
     child.canary.side_effect = held_canary
-    recovery = asyncio.create_task(session.recover())
+    recovery = asyncio.create_task(session.restore())
     await asyncio.wait_for(entered.wait(), 1)
     if cancel:
         recovery.cancel()
@@ -829,22 +844,26 @@ async def test_snapshot_recovery_deadline_or_cancellation_is_terminal(
     assert session.phase == "recovery: canary"
     rpc_count = child.engine.collective_rpc.await_count
     with pytest.raises(RuntimeError, match="state failed"):
-        await session.recover()
+        await session.restore()
     with pytest.raises(RuntimeError, match="state failed"):
         await session.prepare()
     assert child.engine.collective_rpc.await_count == rpc_count
 
 
 @pytest.mark.asyncio
-async def test_snapshot_partial_sleep_failure_cannot_be_recovered(snapshot_child):
+async def test_snapshot_partial_preparation_failure_cannot_be_recovered(
+    snapshot_child,
+):
     child = snapshot_child
-    child.engine.sleep.side_effect = RuntimeError("failure after releasing memory")
+    child.engine.prepare_snapshot_resources.side_effect = RuntimeError(
+        "failure after releasing memory"
+    )
     session = snapshot_engine.SnapshotSession(child.engine, timeout_s=1)
     with pytest.raises(RuntimeError, match="after releasing"):
         await session.prepare()
     with pytest.raises(RuntimeError, match="state failed"):
-        await session.recover()
-    child.engine.wake_up.assert_not_awaited()
+        await session.restore()
+    child.engine.restore_snapshot_resources.assert_not_awaited()
 
 
 @pytest.mark.asyncio
@@ -852,28 +871,15 @@ async def test_snapshot_session_completed_operations_are_not_repeated(snapshot_c
     child = snapshot_child
     session = snapshot_engine.SnapshotSession(child.engine, timeout_s=1)
     assert await session.prepare() == await session.prepare() == _oracle()
-    assert child.engine.sleep.await_count == 2
-    await session.recover()
-    await session.recover()
+    assert child.engine.prepare_snapshot_resources.await_count == 2
+    await session.restore()
+    await session.restore()
     assert child.canary.await_count == 3
+    child.engine.pause_generation.assert_awaited_with(mode="wait")
+    assert child.engine.restore_snapshot_resources.await_count == 2
+    assert child.engine.resume_generation.await_count == 2
     with pytest.raises(RuntimeError, match="state ready"):
         await session.prepare()
-
-
-@pytest.mark.asyncio
-async def test_snapshot_memory_policy_does_not_own_private_generation(snapshot_child):
-    child = snapshot_child
-    policy = snapshot_engine.SnapshotMemoryPolicy(AsyncMock(), AsyncMock())
-    session = snapshot_engine.SnapshotSession(
-        child.engine, timeout_s=1, memory_policy=policy
-    )
-    await session.prepare()
-    await session.recover()
-    child.engine.pause_generation.assert_awaited_with(mode="wait")
-    assert child.engine.resume_generation.await_count == 2
-    assert policy.release.await_count == policy.restore.await_count == 2
-    child.engine.sleep.assert_not_awaited()
-    child.engine.wake_up.assert_not_awaited()
 
 
 @pytest.mark.asyncio
@@ -881,10 +887,10 @@ async def test_snapshot_session_rejects_existing_requests(snapshot_child):
     child = snapshot_child
     child.engine.get_num_unfinished_requests.return_value = 1
     session = snapshot_engine.SnapshotSession(child.engine, timeout_s=1)
-    with pytest.raises(RuntimeError, match="idle startup engine"):
+    with pytest.raises(RuntimeError, match="idle engine"):
         await session.prepare()
     child.canary.assert_not_awaited()
-    child.engine.sleep.assert_not_awaited()
+    child.engine.prepare_snapshot_resources.assert_not_awaited()
 
 
 @pytest.mark.asyncio

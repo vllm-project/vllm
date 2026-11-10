@@ -351,6 +351,12 @@ class EngineCoreClient(ABC):
     async def checkpoint_state_async(self) -> tuple[CheckpointState, str | None]:
         raise NotImplementedError
 
+    async def prepare_snapshot_resources_async(self) -> None:
+        raise NotImplementedError
+
+    async def restore_snapshot_resources_async(self) -> None:
+        raise NotImplementedError
+
     async def abort_requests_async(self, request_ids: list[str]) -> None:
         raise NotImplementedError
 
@@ -1451,6 +1457,12 @@ class AsyncMPClient(MPClient):
     async def checkpoint_state_async(self) -> tuple[CheckpointState, str | None]:
         state, error = await self.call_utility_async("checkpoint_state")
         return CheckpointState(state), error
+
+    async def prepare_snapshot_resources_async(self) -> None:
+        await self.call_utility_async("prepare_snapshot_resources")
+
+    async def restore_snapshot_resources_async(self) -> None:
+        await self.call_utility_async("restore_snapshot_resources")
 
     async def execute_dummy_batch_async(self) -> None:
         await self.call_utility_async("execute_dummy_batch")

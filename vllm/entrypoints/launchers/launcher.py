@@ -388,7 +388,7 @@ def setup_server(args, *, reuse_port: bool):
 
 
 def bind_server_socket(args, *, reuse_port: bool):
-    """Bind after argument validation; startup capture defers this until recovery."""
+    """Bind after argument validation."""
     if args.uds:
         sock = create_server_unix_socket(args.uds)
     else:

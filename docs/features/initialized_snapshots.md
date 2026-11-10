@@ -13,11 +13,15 @@ configuration on the same machine. It is not a portable model artifact.
 
 ## Requirements
 
-Snapshots currently require:
+The `vllm snapshot create/restore` CLI currently requires:
 
 - Linux on x86-64 with one NVIDIA GPU.
 - TP1 with one unauthenticated plaintext HTTP server. Other parallel sizes,
   TLS, middleware, Unix sockets, and speculative decoding are unsupported.
+- A local executor (`mp`, `uni`, or the default). Ray, external launchers and
+  custom executors are unsupported.
+- The CLI rejects `--checkpoint-prepare-on-startup`; the snapshot session owns
+  resource preparation.
 - Because snapshot mode requires an unauthenticated plaintext HTTP server, use
   a trusted host or network boundary, or external controls. See the vLLM
   [Security guide](../usage/security.md).
@@ -140,6 +144,35 @@ solely because its PID appears in the manifest, since PIDs can be reused.
 
 The artifact is reusable after its previous restored tree stops. Only one
 snapshot or external CRIU operation may use a shared `/dev/shm` mount at a time.
+
+## Shared engine resource operations
+
+Snapshot sessions and the `/checkpoint/*` lifecycle drive the same engine-side
+executor. `SnapshotEngineOps` runs a `SnapshotResourcePlan`: a memory
+release/restore pair, communicator prepare/restore hooks, and a device
+synchronization step. Both current plans release memory before preparing
+communicators and restore communicators before memory. A failed operation
+retains its phase and is terminal for the engine.
+
+`SnapshotSession` is the session lifecycle used by the CLI. It records a
+reference canary, pauses the engine with `wait`, releases level-2 memory,
+restores it once to rehearse recovery, then releases it again for capture. A
+final restore runs the communicator and memory recovery, then validates the
+canary before the caller binds HTTP. The engine must be a private startup
+engine; a failed session is not retried in the same process.
+
+The checkpoint endpoints are the second consumer, not a session backend. They
+keep their existing states, pause modes, repeated-call behavior, supported
+configurations and `/health` semantics. Their plan keeps model weights resident,
+releases and restores only KV memory, and still runs the existing communicator
+hooks. Resource recovery does not reopen request admission; each caller owns
+that decision.
+
+Snapshot session preparation requires that no worker reports an incomplete
+weight update, so an interrupted weight-transfer session cannot be captured as a
+valid engine. The checkpoint endpoints keep their existing behavior. Pausing
+keeps inference readiness false through preparation, and recovery only makes the
+engine ready after memory restoration and the session canary complete.
 
 ## Tradeoffs and limitations
 

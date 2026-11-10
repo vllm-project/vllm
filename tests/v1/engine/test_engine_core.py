@@ -900,6 +900,17 @@ def _executor_calls(core: EngineCoreProc) -> list[str]:
     ]
 
 
+def _idle_snapshot_engine_core_proc() -> EngineCoreProc:
+    core = _pausable_engine_core_proc()
+    core.vllm_config = MagicMock()
+    core.vllm_config.model_config.enable_sleep_mode = True
+    core.model_executor.is_sleeping = False
+    core.model_executor.collective_rpc.return_value = [False]
+    core.scheduler.pause_state = PauseState.PAUSED_NEW
+    core.scheduler.get_kv_connector.return_value = None
+    return core
+
+
 def test_checkpoint_prepare_then_restore_run_in_order():
     """Preparing drains, then discards the KV cache and releases external
     state. Restoring brings external state back before the KV cache wakes and
@@ -928,6 +939,86 @@ def test_checkpoint_prepare_then_restore_run_in_order():
     assert core.checkpoint_state() == (CheckpointState.RUNNING, None)
     assert _executor_calls(core) == ["checkpoint_restore", "wake_up"]
     core.scheduler.set_pause_state.assert_called_with(PauseState.UNPAUSED)
+    assert not core.reject_new_requests
+
+
+def test_release_kv_cache_memory_rejects_prepared_snapshot_resources():
+    core = _idle_snapshot_engine_core_proc()
+    core.prepare_snapshot_resources()
+
+    with pytest.raises(RuntimeError, match="Snapshot resources are unavailable"):
+        core.release_kv_cache_memory()
+    core.model_executor.discard.assert_not_called()
+
+
+def test_inference_readiness_requires_completed_weights_and_unpaused_engine():
+    core = _pausable_engine_core_proc()
+    core.scheduler.pause_state = PauseState.UNPAUSED
+    core.model_executor.is_sleeping = False
+    core.model_executor.collective_rpc.return_value = [False]
+    assert core.is_inference_ready()
+
+    core.model_executor.collective_rpc.return_value = [True]
+    assert not core.is_inference_ready()
+
+    core.scheduler.pause_state = PauseState.PAUSED_ALL
+    core.model_executor.collective_rpc.return_value = [False]
+    assert not core.is_inference_ready()
+
+
+def test_snapshot_resources_reject_incomplete_weight_updates():
+    """A session must not capture or release an engine whose weights are
+    incomplete, matching the public readiness contract."""
+    core = _idle_snapshot_engine_core_proc()
+    core.model_executor.collective_rpc.return_value = [True]
+
+    with pytest.raises(RuntimeError, match="completed weight updates"):
+        core.prepare_snapshot_resources()
+    core.model_executor.sleep.assert_not_called()
+
+
+def test_snapshot_resources_release_memory_before_communicators():
+    """A private CLI engine releases level-2 memory first and restores
+    communicators before waking and reloading weights."""
+    from unittest.mock import call
+
+    core = _idle_snapshot_engine_core_proc()
+    core.prepare_snapshot_resources()
+
+    assert core.model_executor.sleep.call_args_list == [call(2)]
+    assert [
+        entry.args[0] for entry in core.model_executor.collective_rpc.call_args_list
+    ] == [
+        "has_incomplete_weight_update",
+        "checkpoint_prepare",
+        "synchronize_device",
+    ]
+
+    core.restore_snapshot_resources()
+    core.scheduler.set_pause_state.assert_not_called()
+
+    assert core.model_executor.wake_up.call_args_list == [
+        call(["weights"]),
+        call(["kv_cache"]),
+    ]
+    assert [
+        entry.args[0] for entry in core.model_executor.collective_rpc.call_args_list
+    ] == [
+        "has_incomplete_weight_update",
+        "checkpoint_prepare",
+        "synchronize_device",
+        "checkpoint_restore",
+        "reload_weights",
+    ]
+
+
+def test_refused_session_prepare_keeps_the_resources_restorable():
+    core = _idle_snapshot_engine_core_proc()
+    core.prepare_snapshot_resources()
+    with pytest.raises(RuntimeError, match="Snapshot resources are unavailable"):
+        core.prepare_snapshot_resources()
+    core.restore_snapshot_resources()
+    core.resume_scheduler()
     assert not core.reject_new_requests
 
 

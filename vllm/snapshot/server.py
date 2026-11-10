@@ -5,7 +5,6 @@ import argparse
 import asyncio
 import json
 import math
-import os
 import stat
 import sys
 from dataclasses import dataclass
@@ -15,26 +14,9 @@ from typing import Any
 from pydantic import ValidationError
 
 from vllm.logger import init_logger
-from vllm.snapshot.engine import (
-    _CANARY_PROMPT as _CANARY_PROMPT,
-)
-from vllm.snapshot.engine import (
-    SnapshotCanaryError as SnapshotCanaryError,
-)
 from vllm.snapshot.engine import SnapshotSession
-from vllm.snapshot.engine import (
-    _release_reloadable_state as _release_reloadable_state,
-)
-from vllm.snapshot.engine import (
-    _restore_reloadable_state as _restore_reloadable_state,
-)
-from vllm.snapshot.engine import (
-    oracle_from_request_output as oracle_from_request_output,
-)
-from vllm.snapshot.engine import (
-    run_engine_canary as run_engine_canary,
-)
 from vllm.snapshot.manifest import ReleaseMarker, _validation_path, _write_json_atomic
+from vllm.snapshot.process import detach_snapshot_streams
 from vllm.snapshot.types import Oracle
 
 logger = init_logger(__name__)
@@ -92,12 +74,12 @@ def parse_control_args(argv: list[str]) -> tuple[ControlArgs, list[str]]:
     parser.add_argument("--release-file", type=Path, required=True)
     parser.add_argument("--release-timeout-s", type=float, default=900.0)
     control_args, remaining = parser.parse_known_args(argv)
-    if remaining and remaining[0] == "--":
-        remaining = remaining[1:]
     if not math.isfinite(control_args.release_timeout_s) or (
         control_args.release_timeout_s <= 0
     ):
         raise ValueError("release timeout must be positive and finite")
+    if remaining and remaining[0] == "--":
+        remaining = remaining[1:]
     return (
         ControlArgs(
             ready_file=control_args.ready_file,
@@ -106,18 +88,6 @@ def parse_control_args(argv: list[str]) -> tuple[ControlArgs, list[str]]:
         ),
         remaining,
     )
-
-
-def detach_snapshot_streams() -> None:
-    """Remove launch-log descriptors from the reusable process image."""
-    sys.stdout.flush()
-    sys.stderr.flush()
-    sink = os.open(os.devnull, os.O_WRONLY)
-    try:
-        os.dup2(sink, sys.stdout.fileno())
-        os.dup2(sink, sys.stderr.fileno())
-    finally:
-        os.close(sink)
 
 
 async def wait_for_release_marker(
@@ -155,6 +125,8 @@ def parse_vllm_args(argv: list[str]) -> Any:
         raise ValueError("snapshot server requires the HTTP frontend")
     if args.api_server_count not in (None, 1):
         raise ValueError("snapshot server supports one API server")
+    if args.checkpoint_prepare_on_startup:
+        raise ValueError("snapshot create cannot use --checkpoint-prepare-on-startup")
     args.api_server_count = None
     validate_parsed_serve_args(args)
     return args
@@ -190,7 +162,7 @@ async def run_vllm_snapshot_child(control: ControlArgs, args: Any) -> None:
             args.port = listener.port
             phase = "recover"
             error_file.unlink(missing_ok=True)
-            await session.recover()
+            await session.restore()
             phase = "serve"
             listen_address, sock = bind_server_socket(args, reuse_port=False)
             try:
@@ -204,8 +176,6 @@ async def run_vllm_snapshot_child(control: ControlArgs, args: Any) -> None:
             finally:
                 sock.close()
         except BaseException as error:
-            # Restored stdout/stderr point at /dev/null. Preserve the primary
-            # failure before shutdown, including failures in the release barrier.
             try:
                 _write_json_atomic(
                     error_file,
@@ -218,8 +188,7 @@ async def run_vllm_snapshot_child(control: ControlArgs, args: Any) -> None:
             except Exception:
                 logger.exception("Could not record snapshot child failure")
             try:
-                # A cancelled RPC may still be running. Terminate owned workers
-                # without trying to drain or wake partially released memory.
+                # A cancelled RPC can still own partially released device state.
                 engine.shutdown(timeout=0)
             except Exception:
                 logger.exception("Could not shut down failed snapshot engine")
