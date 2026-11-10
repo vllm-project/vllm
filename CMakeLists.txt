@@ -368,8 +368,8 @@ if(VLLM_GPU_LANG STREQUAL "HIP")
   set(VLLM_EXT_SRC
     "csrc/rocm/quickreduce/torch_bindings.cpp"
     "csrc/rocm/quickreduce/custom_quickreduce.cu")
-  # Octave KV cache (store, decode, rotation, prefill): only built for the
-  # validated architectures, gfx1100 (RDNA3) and gfx942 (MI300).
+  # Octave KV cache (store, decode, rotation, prefill): only built for
+  # gfx1100 (RDNA3), gfx1151 (RDNA3.5) and gfx942 (MI300).
   set(VLLM_OCTAVE_KV OFF)
   if(VLLM_GPU_ARCHES MATCHES "gfx942|gfx1100|gfx1151")
     set(VLLM_OCTAVE_KV ON)

@@ -26,8 +26,10 @@
   #include <hip/hip_bf16.h>
   #include <hip/hip_fp16.h>
 
+  #include "octave_arch.cuh"
   #include "octave_format.cuh"
-  #if defined(__HIP_DEVICE_COMPILE__) && (!defined(__gfx1100__) || !defined(__gfx1151__))
+
+  #if defined(__HIP_DEVICE_COMPILE__) && !defined(OCTAVE_WMMA_TARGET)
     #define OCTAVE_WMMA_STUB
   #endif
 
@@ -605,13 +607,12 @@ int octave_decode_wmma(torch::Tensor query, torch::Tensor cache,
                        const int* qpos, const int* wtags, int wmask,
                        const int* stags, int smask, int64_t query_group) {
   using namespace octave_wmma;
-  // 0: gfx1100 (this file), 1: gfx942 (octave_decode_mfma_cdna.cu, dense
-  // only).
+  // 0: gfx1100 or gfx1151 (this file), 1: gfx942 (octave_decode_mfma_cdna.cu,
+  // dense only).
   static const int arch = [] {
     const std::string name =
         at::cuda::getCurrentDeviceProperties()->gcnArchName;
-    if (name.rfind("gfx1100", 0) == 0) return 0;
-    if (name.rfind("gfx1151", 0) == 0) return 0;
+    if (octave::is_wmma_arch(name)) return 0;
     if (name.rfind("gfx942", 0) == 0) return 1;
     return -1;
   }();

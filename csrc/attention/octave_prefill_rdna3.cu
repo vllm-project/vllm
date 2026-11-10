@@ -34,8 +34,9 @@
   #include <hip/hip_runtime.h>
   #include <hip/hip_fp16.h>
 
+  #include "octave_arch.cuh"
   #include "octave_format.cuh"
-  #if defined(__HIP_DEVICE_COMPILE__) && (!defined(__gfx1100__) || !defined(__gfx1151__))
+  #if defined(__HIP_DEVICE_COMPILE__) && !defined(OCTAVE_WMMA_TARGET)
     #define OCTAVE_PREFILL_STUB
   #endif
 
@@ -476,8 +477,8 @@ __global__ __launch_bounds__(NTHREADS) void prefix_attn(
         for (int c = 0; c < OFRAGS; ++c) O[c] *= alpha;
       }
       u8v pf;
-        // B operand in natural token order: lane half 0 holds the even tokens,
-        // half 1 the odd ones; interleave them per pair.
+        // B operand in natural token order: lane half 0 holds the even
+        // tokens, half 1 the odd ones; interleave them per pair.
     #pragma unroll
       for (int k = 0; k < 4; ++k) {
         const uint32_t o = xhalf(pd[k]);
@@ -739,16 +740,15 @@ void octave_prefill(torch::Tensor out, torch::Tensor q, torch::Tensor k,
   TORCH_CHECK(cache.stride(2) % align == 0 && cache.stride(1) % align == 0 &&
                   cache.stride(0) % align == 0,
               "octave_prefill: misaligned slots");
-  // 0: gfx1100 (WMMA), 1: gfx942 (MFMA, octave_prefill_cdna.cu).
+  // 0: gfx1100 or gfx1151 (WMMA), 1: gfx942 (MFMA, octave_prefill_cdna.cu).
   static const int arch = [] {
     const std::string name =
         at::cuda::getCurrentDeviceProperties()->gcnArchName;
-    if (name.rfind("gfx1100", 0) == 0) return 0;
-    if (name.rfind("gfx1151", 0) == 0) return 0;
+    if (octave::is_wmma_arch(name)) return 0;
     if (name.rfind("gfx942", 0) == 0) return 1;
     return -1;
   }();
-  TORCH_CHECK(arch >= 0, "octave_prefill: gfx1100 or gfx942 only");
+  TORCH_CHECK(arch >= 0, "octave_prefill: gfx1100, gfx1151 or gfx942 only");
   const int num_seqs = seq_lens.size(0);
   if (num_seqs == 0 || q.size(0) == 0) return;
   const at::cuda::OptionalCUDAGuard guard(device_of(q));

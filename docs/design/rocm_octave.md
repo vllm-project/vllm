@@ -127,22 +127,29 @@ naming what is missing. The kernels in this tree are HIP; a FlyDSL kernel
 (for example a CDNA prefill) must keep the same signature and semantics, pass
 the same tests, and report a clear error when `flydsl` is not installed.
 
-Octave is enabled only on RDNA3 and CDNA3, validated on gfx1100 and gfx942
-(MI300). The backend rejects any other family at selection
-(`supports_compute_capability`, via `get_rdna_version()` and
-`get_cdna_version()`), and the kernel tests skip elsewhere. CMake builds the
-Octave sources and registers the ops only when the target list includes
-gfx1100 or gfx942; other targets in the same build compile the
-architecture-specific kernels as empty stubs, and the kernel dispatch reports
+Octave is enabled only on RDNA3 (including RDNA3.5) and CDNA3: gfx1100,
+gfx1151 and gfx942 (MI300), validated on gfx1100 and gfx942. The backend
+rejects any other family at selection (`supports_compute_capability`, via
+`get_rdna_version()` and `get_cdna_version()`), and the kernel tests skip
+elsewhere. CMake builds the Octave sources and registers the ops only when the
+target list includes gfx1100, gfx1151 or gfx942; other targets in the same
+build compile the architecture-specific kernels as empty stubs
+(`OCTAVE_WMMA_TARGET` in `octave_arch.cuh`), and the kernel dispatch reports
 any other RDNA3 chip as not validated.
 
-| Piece | gfx1100 (RDNA3) | gfx942 (MI300) |
+| Piece | gfx1100 (RDNA3), gfx1151 (RDNA3.5) | gfx942 (MI300) |
 | --- | --- | --- |
 | int8 dot4 (`octave_arch.cuh`) | `v_dot4_i32_iu8` | `v_dot4_i32_i8` |
 | Codebook lookup (`octave_format.cuh`) | `v_perm_b32` | `v_perm_b32` |
 | Cache store, reduce, rotate | portable | portable (decode reduce: gfx942 kernel) |
 | Decode | WMMA | MFMA (`v_mfma_i32_16x16x32_i8`) |
 | Prefill | WMMA | MFMA |
+
+gfx1151 runs the gfx1100 WMMA kernels unchanged: it has the register file of
+gfx1100 (1536 VGPRs per SIMD) and compiles them alike. The other RDNA3.5 chips
+(gfx1150, gfx1152, gfx1153) are not enabled: with 1024 VGPRs per SIMD a
+prefill block (24 waves) fills a whole WGP and the block-K formats spill one
+VGPR.
 
 The portable dot4 decode stays as the reference tier the tests compare the
 native tiers against.

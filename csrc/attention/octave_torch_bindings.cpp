@@ -1,5 +1,5 @@
 // Op registration for the Octave KV cache kernels (legacy _C extension, full
-// torch API). Built only for gfx1100 and gfx942; see CMakeLists.txt.
+// torch API). Built only for gfx1100, gfx1151 and gfx942; see CMakeLists.txt.
 #include <optional>
 
 #include <torch/all.h>
