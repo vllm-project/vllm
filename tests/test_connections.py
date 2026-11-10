@@ -295,6 +295,20 @@ async def test_get_bytes_allows_body_within_limit(
 
 
 @pytest.mark.asyncio
+async def test_requests_do_not_retain_clients_when_reuse_is_disabled(
+    local_media_server: str,
+) -> None:
+    connection = HTTPConnection(reuse_client=False)
+    url = f"{local_media_server}/small"
+
+    assert connection.get_bytes(url) == _SMALL_BODY
+    assert await connection.async_get_bytes(url) == _SMALL_BODY
+
+    assert connection._sync_client is None
+    assert connection._async_client is None
+
+
+@pytest.mark.asyncio
 @pytest.mark.parametrize("use_async", [False, True], ids=["sync", "async"])
 @pytest.mark.parametrize("always_incomplete", [False, True], ids=["recover", "exhaust"])
 async def test_get_bytes_retries_incomplete_response(
