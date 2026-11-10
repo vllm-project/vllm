@@ -161,6 +161,21 @@ class CudaRTLibrary:
     def cudaSetDevice(self, device: int) -> None:
         self.CUDART_CHECK(self.funcs["cudaSetDevice"](device))
 
+    def cudaStreamCreateWithFlags(self, flags: int) -> int:
+        """Create a stream on the current device; returns its raw handle.
+
+        Only used under NVIDIA Confidential Computing, so unlike
+        `exported_functions` it is resolved on use: ROCm and non-CC processes
+        never look it up.
+        """
+        create = self.lib.cudaStreamCreateWithFlags
+        create.restype = cudaError_t
+        create.argtypes = [ctypes.POINTER(ctypes.c_void_p), ctypes.c_uint]
+        stream = ctypes.c_void_p()
+        self.CUDART_CHECK(create(ctypes.byref(stream), flags))
+        assert stream.value is not None
+        return stream.value
+
     def cudaDeviceSynchronize(self) -> None:
         self.CUDART_CHECK(self.funcs["cudaDeviceSynchronize"]())
 
