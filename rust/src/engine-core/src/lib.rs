@@ -10,5 +10,6 @@ pub mod connectors;
 pub mod hash;
 pub mod kv_cache;
 pub mod sched;
+pub mod structured_output;
 #[cfg(test)]
 mod trace_replay;

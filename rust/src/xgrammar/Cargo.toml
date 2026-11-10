@@ -1,0 +1,13 @@
+[package]
+name = "vllm-xgrammar"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+description = "Safe Rust bindings to the vendored xgrammar C++ engine (same version as the Python wheel)."
+links = "xgrammar"
+
+[dependencies]
+thiserror = { workspace = true }
+
+[build-dependencies]
+cc = { workspace = true }

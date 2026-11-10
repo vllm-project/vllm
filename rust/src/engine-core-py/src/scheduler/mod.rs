@@ -13,7 +13,9 @@
 //!
 //! Where the wrapper selected one, a native collaborator replaces the Python
 //! hooks: the NIXL or Mooncake store connector's scheduler half
-//! ([`ConnectorImpl`]).
+//! ([`ConnectorImpl`]), and the xgrammar structured output manager for the
+//! requests whose grammar it initialized
+//! (`set_native_structured_output`).
 
 mod config;
 mod hooks;
@@ -31,7 +33,7 @@ use pyo3::exceptions::{
 };
 use pyo3::intern;
 use pyo3::prelude::*;
-use pyo3::types::{PyDict, PyList, PyModule, PyString};
+use pyo3::types::{PyByteArray, PyDict, PyList, PyModule, PyString};
 use rustc_hash::FxHashSet;
 use thiserror_ext::AsReport;
 use vllm_engine_core::connectors::mooncake_store_scheduler::SavePinPolicy;
@@ -40,9 +42,11 @@ use vllm_engine_core::sched::scheduler::{
     AuxOutputConnector, EcConnector, ErrorRequestIds, IdSetOrder, KvConnector, PauseState,
     Scheduler, SchedulerError, StructuredOutput,
 };
+use vllm_engine_core::structured_output::RequestView;
 
 use self::hooks::{
-    PyAuxOutputConnector, PyEcConnector, PyKvConnector, PyStructuredOutput, SchedulerContext,
+    NativeStructuredOutput, PyAuxOutputConnector, PyEcConnector, PyKvConnector, PyStructuredOutput,
+    SchedulerContext, StructuredOutputHooks,
 };
 use self::output::{
     ExtraStats, counts_of, draft_token_ids_from_py, engine_core_outputs_to_py,
@@ -55,6 +59,7 @@ use crate::kv_cache::config::convert_config;
 use crate::kv_cache::views::{SchedulerKv, SchedulerKvManagerView};
 use crate::mooncake::scheduler::NativeMooncakeStoreConnector;
 use crate::nixl::RustNixlConnectorScheduler;
+use crate::structured_output::{RustStructuredOutputManager, bytes_of};
 
 pub fn register(m: &Bound<'_, PyModule>) -> PyResult<()> {
     m.add_class::<RustSchedulerCore>()?;
@@ -123,6 +128,9 @@ pub struct RustSchedulerCore {
     kv_cache_manager: Py<SchedulerKvManagerView>,
     kv_event_publisher: Py<PyAny>,
     structured_output_manager: Py<PyAny>,
+    /// The native xgrammar manager, shared with the scheduler's
+    /// [`StructuredOutputHooks`].
+    native_structured_output: NativeStructuredOutput,
     enable_kv_cache_events: bool,
     /// The Python KV connector, shared with the hooks when they call it.
     connector: Option<Arc<Mutex<Py<PyAny>>>>,
@@ -147,6 +155,12 @@ impl RustSchedulerCore {
         result.map_err(|payload| self.panic_error(payload))
     }
 
+    /// Run native code that may call Python (a Python reasoning parser): a
+    /// panic becomes the call's exception.
+    fn run_native<R>(&self, f: impl FnOnce() -> R) -> PyResult<R> {
+        catch_unwind(AssertUnwindSafe(f)).map_err(|payload| self.panic_error(payload))
+    }
+
     /// The exception of a panic: the Python exception a hook raised, else
     /// an `AssertionError` with the panic message.
     fn panic_error(&self, payload: Box<dyn std::any::Any + Send>) -> PyErr {
@@ -169,6 +183,12 @@ impl RustSchedulerCore {
         let removed = self.inner.take_removed_requests();
         if removed.is_empty() {
             return Ok(());
+        }
+        if let Some(native) = self.native_structured_output.get() {
+            let mut native = native.lock().unwrap();
+            for request in &removed {
+                native.remove_request(&request.request_id);
+            }
         }
         let mut table = self.shared.table.lock().unwrap();
         let mut removed_ids = FxHashSet::default();
@@ -449,9 +469,10 @@ impl RustSchedulerCore {
             }
         };
         let connector = connector.map(|c| Arc::new(Mutex::new(c.unbind())));
-        let structured_output: Box<dyn StructuredOutput> = Box::new(PyStructuredOutput::new(
-            structured_output_manager.clone_ref(py),
-            shared.clone(),
+        let native_structured_output = NativeStructuredOutput::default();
+        let structured_output: Box<dyn StructuredOutput> = Box::new(StructuredOutputHooks::new(
+            native_structured_output.clone(),
+            PyStructuredOutput::new(structured_output_manager.clone_ref(py), shared.clone()),
         ));
         let enable_kv_cache_events = rust_config.enable_kv_cache_events;
         // Construction asserts the config like Python does.
@@ -475,6 +496,7 @@ impl RustSchedulerCore {
             kv_cache_manager,
             kv_event_publisher,
             structured_output_manager,
+            native_structured_output,
             enable_kv_cache_events,
             connector,
             connector_impl,
@@ -562,6 +584,14 @@ impl RustSchedulerCore {
             ConnectorImpl::Nixl(nixl) => Some(nixl.clone_ref(py)),
             _ => None,
         }
+    }
+
+    /// Route the structured output requests whose grammar `manager`
+    /// initializes to it rather than to the Python manager. Set once.
+    fn set_native_structured_output(&self, manager: &RustStructuredOutputManager) -> PyResult<()> {
+        self.native_structured_output
+            .set(manager.shared())
+            .map_err(|_| PyValueError::new_err("the native structured output manager is set"))
     }
 
     /// The `KVCacheManager` facade connectors are bound to.
@@ -721,6 +751,8 @@ impl RustSchedulerCore {
         // The corresponding rows of the bitmask will be in this order.
         let ids = PyList::empty(py);
         let requests = PyDict::new(py);
+        let native = self.native_structured_output.get().cloned();
+        let mut native_requests = Vec::new();
         let num_scheduled_tokens = scheduler_output.getattr(intern!(py, "num_scheduled_tokens"))?;
         for req_id in num_scheduled_tokens.try_iter()? {
             let req_id = req_id?;
@@ -732,12 +764,59 @@ impl RustSchedulerCore {
                 continue;
             }
             ids.append(&req_id)?;
+            if native.as_ref().is_some_and(|n| n.lock().unwrap().has_request(id)) {
+                native_requests.push(request);
+                continue;
+            }
             let obj = self.shared.py_request(py, id).into_bound(py);
             sync_request(&obj, request)?;
             requests.set_item(&req_id, obj)?;
         }
         if ids.is_empty() {
             return Ok(py.None().into_bound(py));
+        }
+        if let Some(native) = native.filter(|_| !native_requests.is_empty()) {
+            if !requests.is_empty() {
+                return Err(PyAssertionError::new_err(
+                    "structured output requests of the native and the Python manager \
+                     are scheduled together",
+                ));
+            }
+            let spec_tokens = scheduler_output
+                .getattr(intern!(py, "scheduled_spec_decode_tokens"))?
+                .cast_into::<PyDict>()?;
+            let mut drafts = rustc_hash::FxHashMap::default();
+            if !spec_tokens.is_empty() {
+                for request in &native_requests {
+                    if let Some(tokens) = spec_tokens.get_item(&request.request_id)? {
+                        drafts.insert(request.request_id.as_str(), tokens.extract::<Vec<i32>>()?);
+                    }
+                }
+            }
+            let views: Vec<RequestView<'_>> =
+                native_requests.iter().map(|&r| RequestView::from(r)).collect();
+            let mut manager = native.lock().unwrap();
+            let bitmask = self.run_native(|| {
+                manager
+                    .grammar_bitmask(&views, |id| drafts.get(id).map(Vec::as_slice))
+                    .map(|b| {
+                        (
+                            b.num_rows,
+                            b.row_words,
+                            PyByteArray::new(py, bytes_of(b.data)),
+                        )
+                    })
+            })?;
+            let Some((num_rows, row_words, bytes)) = bitmask else {
+                return Ok(py.None().into_bound(py));
+            };
+            let types = types(py)?;
+            let array = types
+                .np_frombuffer
+                .bind(py)
+                .call1((bytes, types.np_int32.bind(py)))?
+                .call_method1(intern!(py, "reshape"), (num_rows, row_words))?;
+            return types.grammar_output.bind(py).call1((ids, array));
         }
         let bitmask = self.structured_output_manager.bind(py).call_method1(
             intern!(py, "grammar_bitmask"),

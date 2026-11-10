@@ -32,7 +32,7 @@ pytestmark = pytest.mark.cpu_test
 def test_matches_python_scheduler(seed: int, sample: str, use_async: bool):
     """Every SchedulerOutput, EngineCoreOutputs, KV event, stat and grammar
     bitmask matches, with the native NIXL and Mooncake store scheduler halves
-    (`run_one` asserts they are used)."""
+    and the native xgrammar manager (`run_one` asserts they are used)."""
     cfg = getattr(FuzzConfig, f"sample_{sample}" if sample != "base" else "sample")(
         seed
     )
@@ -53,12 +53,13 @@ def test_matches_python_scheduler(seed: int, sample: str, use_async: bool):
 
 
 def test_native_hooks_can_be_disabled(monkeypatch):
-    """`VLLM_RUST_CORE_NATIVE_HOOKS=0` keeps the Python connector hooks, with
-    the same behavior."""
+    """`VLLM_RUST_CORE_NATIVE_HOOKS=0` keeps the Python connector hooks and
+    structured output manager, with the same behavior."""
     monkeypatch.setenv("VLLM_RUST_CORE_NATIVE_HOOKS", "0")
     cfg = FuzzConfig.sample_nixl(2)
     scheduler = build_scheduler(cfg, RustScheduler)
     assert scheduler._core.connector_impl == "python"
+    assert scheduler._native_structured_output is None
     ok, msg = run_one(
         cfg,
         lambda cfg: build_scheduler(cfg, Scheduler),

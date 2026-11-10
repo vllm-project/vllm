@@ -794,8 +794,9 @@ environment_variables: dict[str, Callable[[], Any]] = {
     "VLLM_USE_RUST_CORE": lambda: bool(int(os.getenv("VLLM_USE_RUST_CORE", "0"))),
     # With the Rust scheduler, whether it uses native ports of its
     # collaborators where they support the configuration (the NIXL and
-    # Mooncake store connectors' scheduler halves) instead of calling the
-    # Python ones. Defaults to 1; 0 keeps the Python collaborators.
+    # Mooncake store connectors' scheduler halves, the xgrammar structured
+    # output manager) instead of calling the Python ones. Defaults to 1;
+    # 0 keeps the Python collaborators.
     "VLLM_RUST_CORE_NATIVE_HOOKS": lambda: bool(
         int(os.getenv("VLLM_RUST_CORE_NATIVE_HOOKS", "1"))
     ),
