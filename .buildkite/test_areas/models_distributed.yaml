@@ -51,6 +51,7 @@ steps:
   source_file_dependencies:
   - vllm/model_executor/model_loader/sharded_state_loader.py
   - vllm/model_executor/models/
+  - vllm/v1/worker/gpu/model_states/default.py
   - tests/basic_correctness/
   - tests/model_executor/model_loader/test_sharded_state_loader.py
   - tests/models/
