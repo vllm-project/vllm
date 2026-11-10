@@ -508,7 +508,7 @@ def test_replay_on_off_preserves_rejection_sampling_and_rng(monkeypatch):
         ([0, 4, 8], vocab_size, rows_per_request),
         ([0, 4], vocab_size, rows_per_request),
     ]
-    assert off_masks is None and on_masks is not None
+    assert off_masks is None and isinstance(on_masks, SamplingMaskTensors)
     assert on_masks.rows_per_request == rows_per_request
     assert on_masks.token_ids.shape == (num_reqs * rows_per_request, vocab_size)
     assert on_masks.packed_mask.shape[0] == num_reqs * rows_per_request
