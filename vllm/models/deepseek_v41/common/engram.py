@@ -518,6 +518,7 @@ def _engram_lookup_kernel(
     ids,
     sorted_dst,
     out,
+    out_scales,
     vocab_start,
     vocab_end,
     num_rows,
@@ -535,9 +536,10 @@ def _engram_lookup_kernel(
     OUT_STRIDE: tl.constexpr,
     PEER_ROWS: tl.constexpr = 0,
     WORD: tl.constexpr = tl.uint8,
+    MXFP8: tl.constexpr = False,
 ):
-    """Gather FP8 rows as packed values/scales (copied WORD at a time) or
-    dequantized BF16.
+    """Gather FP8 rows as packed values/scales, as MXFP8 values with F8_128x4
+    `out_scales` (FP8 values copied WORD at a time), or dequantized BF16.
 
     Only this rank's heads are read; padded heads write zeros for all-gather.
     `weight`/`scales` may address pinned host memory through UVA. If SORTED,
@@ -577,15 +579,17 @@ def _engram_lookup_kernel(
             row_weight, row_scales = weight, scales
         row_weight += local * DIM
         row_scales += local * (DIM // QUANT_BLOCK)
-        if PACKED:
-            # Copy values then scales WORD at a time: one memory request a word.
+        if PACKED or MXFP8:
+            # Copy values WORD at a time: one memory request a word.
             word_bytes: tl.constexpr = WORD.primitive_bitwidth // 8
             value_words = tl.arange(0, DIM // word_bytes)
-            scale_words = tl.arange(0, DIM // QUANT_BLOCK // word_bytes)
-            width: tl.constexpr = DIM + DIM // QUANT_BLOCK
+            # MXFP8 rows hold values only; packed rows append their scales.
+            width: tl.constexpr = DIM if MXFP8 else DIM + DIM // QUANT_BLOCK
             dst = dst.to(tl.int64)
-            dst = dst // LOCAL_HEADS * OUT_STRIDE + dst % LOCAL_HEADS * width
-            out_row = (out + dst).to(tl.pointer_type(WORD))
+            token, head = dst // LOCAL_HEADS, dst % LOCAL_HEADS
+            out_row = (out + token * OUT_STRIDE + head * width).to(
+                tl.pointer_type(WORD)
+            )
             values = tl.load(
                 row_weight.to(tl.pointer_type(WORD))[:, None] + value_words[None, :],
                 mask=owned[:, None],
@@ -594,15 +598,37 @@ def _engram_lookup_kernel(
             tl.store(
                 out_row[:, None] + value_words[None, :], values, mask=valid[:, None]
             )
-            scale = tl.load(
-                row_scales.to(tl.pointer_type(WORD))[:, None] + scale_words[None, :],
-                mask=owned[:, None],
-                other=0,
-            )
-            out_row += DIM // word_bytes
-            tl.store(
-                out_row[:, None] + scale_words[None, :], scale, mask=valid[:, None]
-            )
+            if MXFP8:
+                # F8_128x4 keeps four consecutive groups in one 32-bit word.
+                quads = tl.arange(0, DIM // QUANT_BLOCK // 4)
+                scale = tl.load(
+                    row_scales.to(tl.pointer_type(tl.uint32))[:, None] + quads[None, :],
+                    mask=owned[:, None],
+                    other=0,
+                )
+                group = head[:, None] * (DIM // QUANT_BLOCK) + quads[None, :] * 4
+                offset = mxfp8_scale_offset(
+                    token[:, None], group, TOTAL_HEADS * DIM // QUANT_BLOCK
+                )
+                tl.store(
+                    (out_scales + offset).to(tl.pointer_type(tl.uint32)),
+                    scale,
+                    mask=valid[:, None],
+                )
+            else:
+                scale_words = tl.arange(0, DIM // QUANT_BLOCK // word_bytes)
+                scale = tl.load(
+                    row_scales.to(tl.pointer_type(WORD))[:, None]
+                    + scale_words[None, :],
+                    mask=owned[:, None],
+                    other=0,
+                )
+                out_row += DIM // word_bytes
+                tl.store(
+                    out_row[:, None] + scale_words[None, :],
+                    scale,
+                    mask=valid[:, None],
+                )
         else:
             values = tl.load(
                 row_weight[:, None] + cols[None, :], mask=owned[:, None], other=0.0
@@ -1233,9 +1259,14 @@ class ParallelEngramEmbedding(nn.Module):
         return self._views
 
     def lookup(
-        self, indices: torch.Tensor, out: torch.Tensor, background: bool = False
+        self,
+        indices: torch.Tensor,
+        out: torch.Tensor,
+        background: bool = False,
+        out_scales: torch.Tensor | None = None,
     ) -> None:
-        """Look up local heads into BF16, or packed FP8 bytes followed by scales.
+        """Look up local heads into BF16, packed FP8 bytes followed by scales,
+        or (given `out_scales`) MXFP8 values and F8_128x4 scales.
 
         `background` limits the grid to leave SMs for concurrent work.
         """
@@ -1266,12 +1297,13 @@ class ParallelEngramEmbedding(nn.Module):
         # Host reads are latency bound: once the rows fill the grid with
         # 128-row tiles, each program keeps 8x the reads in flight.
         block_r = 128 if rows >= 128 * max_grid else 16
-        packed = out.dtype == torch.uint8
-        # 128-row tiles copy packed rows 8 bytes per load where their values,
-        # scales and output rows are 8-byte aligned (16-row tiles: a byte).
+        mxfp8 = out_scales is not None
+        packed = out.dtype == torch.uint8 and not mxfp8
+        # Copy FP8 rows 8 bytes per load where values, scales and output rows
+        # are 8-byte aligned: always for MXFP8, on 128-row tiles for packed rows
+        # (whose 16-row tiles are faster with byte reads).
         wide = (
-            packed
-            and block_r == 128
+            (mxfp8 or (packed and block_r == 128))
             and self.dim // self.block_size % 8 == 0
             and (out.stride(0) | out.data_ptr()) % 8 == 0
         )
@@ -1282,6 +1314,7 @@ class ParallelEngramEmbedding(nn.Module):
             indices,
             dst,
             out,
+            out if out_scales is None else out_scales,
             self.vocab_start_idx,
             self.vocab_end_idx,
             rows,
@@ -1299,6 +1332,7 @@ class ParallelEngramEmbedding(nn.Module):
             OUT_STRIDE=out.stride(0),
             PEER_ROWS=self.peer_rows,
             WORD=tl.uint64 if wide else tl.uint8,
+            MXFP8=mxfp8,
             num_warps=8 if block_r == 128 else 4,
         )
 
@@ -1660,6 +1694,7 @@ class Engram(nn.Module):
     _prefetch_stream: torch.cuda.Stream | None = None
     _prefetch_done: torch.cuda.Event | None = None
     _batch: EngramBatch | None = None
+    staged_scales: torch.Tensor | None = None
 
     def __init__(
         self,
@@ -1739,14 +1774,35 @@ class Engram(nn.Module):
         )
 
     def _init_staging(self, max_tokens: int, head_dim: int) -> None:
+        table = self.embed_tokens
+        # Unsharded tables stage their FP8 rows as MXFP8 (values, F8_128x4
+        # scales) for the WKV GEMM, instead of dequantizing to BF16 and
+        # quantizing back.
+        fp8 = (
+            table.dp_size == 1
+            and table.tp_size == 1
+            and head_dim % 128 == 0
+            and table.block_size == 32
+            and can_fuse_query_quant([self.wkv])
+            and get_current_vllm_config().lora_config is None
+        )
         # Persistent storage keeps lookup addresses stable across graph replays.
         self.staged_rows = torch.empty(
-            max_tokens * self.embed_tokens.dp_size,
-            self.embed_tokens.part_n_hash_cols,
+            max_tokens * table.dp_size,
+            table.part_n_hash_cols,
             head_dim,
-            dtype=torch.bfloat16,
+            dtype=torch.uint8 if fp8 else torch.bfloat16,
         )
-        if not self.embed_tokens.cpu_offload:
+        # Zeroed: the WKV GEMM reads the scales of a whole 128-row tile.
+        self.staged_scales = (
+            torch.zeros(
+                mxfp8_scale_bytes(max_tokens, table.n_hash_cols * head_dim),
+                dtype=torch.uint8,
+            )
+            if fp8
+            else None
+        )
+        if not table.cpu_offload:
             self._prefetch_stream = None
             return
         if self._prefetch_stream is None:
@@ -1759,9 +1815,16 @@ class Engram(nn.Module):
         rows = self.staged_rows[: hash_ids.shape[0]]
         assert rows.shape[0] == hash_ids.shape[0], "engram staging buffer too small"
         if self._prefetch_stream is None:
-            self.embed_tokens.lookup(hash_ids, rows)
+            self._lookup(hash_ids, rows)
         else:
             self._start_prefetch(hash_ids, rows)
+
+    def _lookup(
+        self, hash_ids: torch.Tensor, rows: torch.Tensor, background: bool = False
+    ) -> None:
+        self.embed_tokens.lookup(
+            hash_ids, rows, background=background, out_scales=self.staged_scales
+        )
 
     @eager_break_during_capture
     def _start_prefetch(self, hash_ids: torch.Tensor, rows: torch.Tensor) -> None:
@@ -1775,7 +1838,7 @@ class Engram(nn.Module):
         # Big lookups stall persistent main-stream kernels anyway: run them inline.
         _, inline_min_tokens = _engram_lookup_thresholds(hash_ids.device)
         if inline_min_tokens is not None and num_tokens >= inline_min_tokens:
-            self.embed_tokens.lookup(hash_ids, rows)
+            self._lookup(hash_ids, rows)
         else:
             stream = self._prefetch_stream
             assert stream is not None
@@ -1783,7 +1846,7 @@ class Engram(nn.Module):
             # Keep temporary hash storage alive until lookup finishes reading it.
             hash_ids.record_stream(stream)
             with torch.cuda.stream(stream):
-                self.embed_tokens.lookup(hash_ids, rows, background=True)
+                self._lookup(hash_ids, rows, background=True)
         assert self._prefetch_done is not None
         self._prefetch_done.record(stream)
 
@@ -1800,6 +1863,18 @@ class Engram(nn.Module):
             staged = self.staged_rows[: slot * self.embed_tokens.dp_size]
             return _gather_engram_rows(staged, num_tokens)
         return self.staged_rows[:num_tokens]
+
+    def fp8_wkv_input(self, rows: torch.Tensor) -> QuantizedActivation:
+        """The MXFP8 WKV input of staged FP8 rows."""
+        assert self.staged_scales is not None
+        values = rows.flatten(1).view(torch.float8_e4m3fn)
+        return QuantizedActivation(
+            values,
+            self.staged_scales[: mxfp8_scale_bytes(*values.shape)],
+            torch.bfloat16,
+            values.shape,
+            kMxfp8Dynamic,
+        )
 
     def embed(self, hash_ids: torch.Tensor) -> torch.Tensor:
         """Gather heads, returning only local tokens when SP is enabled."""
@@ -1834,6 +1909,8 @@ class Engram(nn.Module):
         the gate so those positions pass through untouched."""
         if self._batch is not None:
             kv = self.wkv(self._batch.wkv_input(self, hash_ids.shape[0]))
+        elif self.staged_scales is not None:
+            kv = self.wkv(self.fp8_wkv_input(self._ready_rows(hash_ids.shape[0])))
         else:
             kv = self.wkv(self.embed(hash_ids).flatten(-2))
         num_kv_tokens = hash_ids.shape[0]
