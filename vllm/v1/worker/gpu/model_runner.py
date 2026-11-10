@@ -432,6 +432,8 @@ class GPUModelRunner(LoRAModelRunnerMixin):
                     self.jit_warmup_registry.activate(),
                 ):
                     self.speculator.load_model(self.model)
+                    if self.lora_config:
+                        self.speculator.set_lora_manager(self.lora_manager)
                     eplb_models_added = self.eplb.maybe_register_speculator(
                         self.speculator, self.speculative_config, load_dummy_weights
                     )
