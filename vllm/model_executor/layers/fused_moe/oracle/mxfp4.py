@@ -167,6 +167,8 @@ class Mxfp4MoeBackend(Enum):
     # W4A16: aiter Triton moe_gemm_a16w4 kernel (gfx942/gfx950/gfx1250)
     AITER_TRITON_MXFP4_BF16 = "AITER_TRITON_MXFP4_BF16"
     AITER_MXFP4_FP8 = "AITER_MXFP4_FP8"  # W4A8: triton kernel
+    # MXFP4 weights + dynamic per-group MXFP8 activations (gfx950 a8w4)
+    AITER_MXFP4_MXFP8 = "AITER_MXFP4_MXFP8"
     AITER_MXFP4_MXFP4 = "AITER_MXFP4_MXFP4"  # W4A4: CK kernel (gfx950)
     # W4A4: aiter Triton/Gluon moe_gemm_a4w4 kernel (gfx1250)
     AITER_TRITON_MXFP4_MXFP4 = "AITER_TRITON_MXFP4_MXFP4"
@@ -320,6 +322,13 @@ def backend_to_kernel_cls(
 
         return [AiterW4A8ExpertsMonolithic]
 
+    elif backend == Mxfp4MoeBackend.AITER_MXFP4_MXFP8:
+        from vllm.model_executor.layers.fused_moe.experts.aiter_mxfp4_mxfp8_moe import (
+            AiterMxfp4Mxfp8ExpertsMonolithic,
+        )
+
+        return [AiterMxfp4Mxfp8ExpertsMonolithic]
+
     elif backend == Mxfp4MoeBackend.AITER_MXFP4_MXFP4:
         from vllm.model_executor.layers.fused_moe.experts.rocm_aiter_moe import (
             AiterMxfp4Experts,
@@ -393,11 +402,13 @@ def map_mxfp4_backend(runner_backend: MoEBackend) -> list[Mxfp4MoeBackend]:
             Mxfp4MoeBackend.AITER_MXFP4_BF16,
             Mxfp4MoeBackend.AITER_TRITON_MXFP4_BF16,
             Mxfp4MoeBackend.AITER_MXFP4_FP8,
+            Mxfp4MoeBackend.AITER_MXFP4_MXFP8,
             Mxfp4MoeBackend.AITER_MXFP4_MXFP4,
             Mxfp4MoeBackend.AITER_TRITON_MXFP4_MXFP4,
         ],
         "aiter_triton_mxfp4_bf16": [Mxfp4MoeBackend.AITER_TRITON_MXFP4_BF16],
         "aiter_mxfp4_fp8": [Mxfp4MoeBackend.AITER_MXFP4_FP8],
+        "aiter_mxfp4_mxfp8": [Mxfp4MoeBackend.AITER_MXFP4_MXFP8],
         "aiter_triton_mxfp4_mxfp4": [Mxfp4MoeBackend.AITER_TRITON_MXFP4_MXFP4],
         "aiter_mxfp4_mxfp4": [Mxfp4MoeBackend.AITER_MXFP4_MXFP4],
         "xpu": [Mxfp4MoeBackend.XPU],
@@ -421,6 +432,7 @@ def _get_priority_backends_for_gpt_oss() -> list[Mxfp4MoeBackend]:
         Mxfp4MoeBackend.AITER_MXFP4_BF16,
         Mxfp4MoeBackend.AITER_TRITON_MXFP4_BF16,
         Mxfp4MoeBackend.AITER_MXFP4_FP8,
+        Mxfp4MoeBackend.AITER_MXFP4_MXFP8,
         Mxfp4MoeBackend.AITER_MXFP4_MXFP4,
         Mxfp4MoeBackend.TRITON,
         Mxfp4MoeBackend.FLASHINFER_CUTLASS_MXFP4_BF16,
@@ -492,6 +504,8 @@ def _backend_activation_key(backend: Mxfp4MoeBackend) -> QuantKey | None:
         return kMxfp8Dynamic
     if backend == Mxfp4MoeBackend.AITER_MXFP4_FP8:
         return kFp8StaticTensorSym
+    if backend == Mxfp4MoeBackend.AITER_MXFP4_MXFP8:
+        return kMxfp8Dynamic
     if backend in (
         Mxfp4MoeBackend.AITER_MXFP4_MXFP4,
         Mxfp4MoeBackend.AITER_TRITON_MXFP4_MXFP4,
@@ -894,6 +908,11 @@ def mxfp4_round_up_hidden_size_and_intermediate_size(
     ):
         intermediate_size = round_up(intermediate_size, 128)
         hidden_size = round_up(hidden_size, 128)
+    elif backend == Mxfp4MoeBackend.AITER_MXFP4_MXFP8:
+        # GEMM1's MXFP8 writeback needs the SwiGLU width to be a multiple of
+        # the MX block, and both GEMMs reduce over a multiple of that block.
+        intermediate_size = round_up(intermediate_size, OCP_MX_BLOCK_SIZE)
+        hidden_size = round_up(hidden_size, OCP_MX_BLOCK_SIZE)
     elif current_platform.is_rocm():
         from vllm.platforms.rocm import get_cdna_version
 
@@ -1293,6 +1312,36 @@ def convert_gpt_oss_weight_to_mxfp4_moe_kernel_format(
         )
 
         return (w13_data, w2_data, w13_scale, w2_scale, w13_bias, w2_bias)
+
+    elif mxfp4_backend == Mxfp4MoeBackend.AITER_MXFP4_MXFP8:
+        from vllm.model_executor.layers.fused_moe.experts.aiter_mxfp4_mxfp8_moe import (
+            quark_mxfp4_to_a8w4_layout,
+        )
+
+        # Already-interleaved SWIGLUOAI stays even/odd. The uninterleaved
+        # checkpoint is [all gates | all ups], which the fused SwiGLU would
+        # read as the wrong pairs.
+        interleave = (
+            getattr(layer, "activation", None) == MoEActivation.SWIGLUOAI_UNINTERLEAVE
+        )
+        w13_weight, w13_weight_scale = quark_mxfp4_to_a8w4_layout(
+            w13_weight, w13_weight_scale, interleave_gate_up=interleave
+        )
+        w2_weight, w2_weight_scale = quark_mxfp4_to_a8w4_layout(
+            w2_weight, w2_weight_scale, interleave_gate_up=False
+        )
+        if w13_bias is not None:
+            w13_bias = w13_bias.data.to(torch.float32)
+        if w2_bias is not None:
+            w2_bias = w2_bias.data.to(torch.float32)
+        return (
+            w13_weight,
+            w2_weight,
+            w13_weight_scale,
+            w2_weight_scale,
+            w13_bias,
+            w2_bias,
+        )
 
     elif mxfp4_backend == Mxfp4MoeBackend.AITER_MXFP4_MXFP4:
         if w13_bias is not None:
@@ -2176,6 +2225,19 @@ def make_mxfp4_moe_quant_config(
             gemm1_beta=gemm1_beta,
             gemm1_clamp_limit=swiglu_limit,
             is_scale_swizzled=True,
+        )
+    elif mxfp4_backend == Mxfp4MoeBackend.AITER_MXFP4_MXFP8:
+        # Checkpoint MXFP4 bytes, dynamic per-group MXFP8 activations.
+        return ocp_mx_moe_quant_config(
+            quant_dtype="mxfp8_e4m3",
+            weight_dtype="mxfp4",
+            w1_bias=w1_bias,
+            w2_bias=w2_bias,
+            w1_scale=w1_scale,
+            w2_scale=w2_scale,
+            gemm1_alpha=gemm1_alpha,
+            gemm1_beta=gemm1_beta,
+            gemm1_clamp_limit=swiglu_limit,
         )
     elif mxfp4_backend == Mxfp4MoeBackend.AITER_MXFP4_FP8:
         # W4A8: MXFP4 weights + static FP8 activations

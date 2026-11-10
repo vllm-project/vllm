@@ -1639,11 +1639,14 @@ class QuarkOCP_MX_MoEMethod(QuarkMoEMethod):
                 moe, activation_key=kMxfp4Dynamic
             )
         elif self.ocp_mx_scheme == "w_mxfp4_a_mxfp8":
-            # MXFP4 weights + dynamic per-group MXFP8 activations. No fused
-            # backend consumes per-group E8M0 activations on this path yet, so
-            # emulation dequantizes the weights and fake-quantizes the
-            # activations back to bf16.
-            self.mxfp4_backend = Mxfp4MoeBackend.EMULATION
+            # MXFP4 weights + dynamic per-group MXFP8 activations. gfx950 uses
+            # AITER moe_gemm_a8w4 when AITER is enabled; otherwise emulation.
+            # GEMM1 writes the second activation straight into MXFP8, so there
+            # is no bf16 SwiGLU output to rotate. A rotated checkpoint has to
+            # stay on emulation; do not add this backend to that allowlist.
+            self.mxfp4_backend, self.experts_cls = select_mxfp4_moe_backend(
+                moe, activation_key=kMxfp8Dynamic
+            )
 
         # Validation for unsupported schemes
         if any(
