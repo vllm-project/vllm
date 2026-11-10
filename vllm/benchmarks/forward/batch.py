@@ -77,11 +77,13 @@ def build_batch(
     rng: np.random.Generator,
     dcp_size: int = 1,
     lookahead: int = 0,
+    sampling_params: SamplingParams | None = None,
 ) -> BenchBatch:
     """Allocate disjoint blocks and build `NewRequestData` for every request.
 
     Groups share one block pool, so block IDs are unique across groups. Block
     0 is the null block. Lookahead reserves space for the drafter's KV writes.
+    Every request uses `sampling_params` (default: `SamplingParams()`).
 
     With prefix P = K - Q (KV length K, query length Q):
 
@@ -100,6 +102,8 @@ def build_batch(
         (group.kv_cache_spec.prefix_replay_tokens for group in kv_cache_groups),
         default=0,
     )
+    if sampling_params is None:
+        sampling_params = SamplingParams()
     expected: dict[str, tuple[int, int, bool]] = {}
     cursor = 1
     new_reqs = []
@@ -128,7 +132,7 @@ def build_batch(
                 prompt_token_ids=prompt.tolist(),
                 prefill_token_ids=prompt.tolist(),
                 mm_features=[],
-                sampling_params=SamplingParams(max_tokens=16, temperature=0.0),
+                sampling_params=sampling_params,
                 pooling_params=None,
                 block_ids=tuple(block_ids),
                 num_computed_tokens=computed,

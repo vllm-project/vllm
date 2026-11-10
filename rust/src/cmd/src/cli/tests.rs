@@ -12,6 +12,7 @@ use vllm_server::{
     OutputLogConfig, OutputLogging, ParserSelection, ReasoningEffort, RendererSelection,
 };
 use vllm_text::backend::hf::ModelSource;
+use vllm_tracing::LogLevel;
 
 use super::{BenchCommand, Cli, Command, LogStatsInterval, SharedRuntimeArgs, parse_int_flag};
 
@@ -264,7 +265,7 @@ fn serve_args_forward_python_flags_with_separator() {
                         enable_force_include_usage: false,
                         enable_request_id_headers: false,
                         log_error_stack: None,
-                        enable_scale_out: false,
+                        enable_scale_out: None,
                         enable_tokenizer_info_endpoint: false,
                         sse_keep_alive_interval: 0,
                         fingerprint_mode: Full,
@@ -305,6 +306,8 @@ fn serve_args_forward_python_flags_with_separator() {
                         },
                         root_path: None,
                         profiler_config: None,
+                        log_level: None,
+                        logging_config: None,
                     },
                     managed_engine: ManagedEngineArgs {
                         python: "../vllm/.venv/bin/python",
@@ -556,6 +559,229 @@ fn skip_tokenizer_init_reaches_backends_and_managed_engine() {
         panic!("expected frontend args");
     };
     assert!(args.into_config().skip_tokenizer_init);
+}
+
+#[test]
+fn serve_args_forward_log_level_to_managed_engine() {
+    let cli = Cli::try_parse_from([
+        "vllm-rs",
+        "serve",
+        "Qwen/Qwen3-0.6B",
+        "--log-level",
+        "debug",
+    ])
+    .unwrap();
+    assert_eq!(cli.log_level(), LogLevel::Debug);
+
+    let Command::Serve(args) = cli.command else {
+        panic!("expected serve args");
+    };
+
+    // Python's level choices are upper case only.
+    let config = args.to_managed_engine_config(5555, &topology(&args), None);
+    expect![[r#"
+        [
+            "--logging-config",
+            "{\"log_level\":\"DEBUG\"}",
+            "--reasoning-parser",
+            "qwen3",
+        ]
+    "#]]
+    .assert_debug_eq(&config.python_args);
+}
+
+/// Level names are case-insensitive, with Python logging's `WARN` and `FATAL`
+/// aliases, as `VLLM_LOGGING_LEVEL` already was.
+#[test]
+fn serve_accepts_log_level_names_in_any_case() {
+    let cases: &[(&[&str], LogLevel)] = &[
+        (&["--log-level", "Warning"], LogLevel::Warning),
+        (&["--log-level", "warn"], LogLevel::Warning),
+        (&["--log-level", "fatal"], LogLevel::Critical),
+        (&["--logging-config.log_level", "debug"], LogLevel::Debug),
+        (
+            &["--logging-config", r#"{"log_level":"notset"}"#],
+            LogLevel::Notset,
+        ),
+    ];
+    for &(case, expected) in cases {
+        let cli = Cli::try_parse_from(
+            ["vllm-rs", "serve", "Qwen/Qwen3-0.6B"].into_iter().chain(case.iter().copied()),
+        )
+        .unwrap();
+        assert_eq!(cli.log_level(), expected, "{case:?}");
+    }
+
+    for case in [
+        &["--log-level", "verbose"][..],
+        &["--logging-config.log_level", "verbose"],
+    ] {
+        let error = Cli::try_parse_from(
+            ["vllm-rs", "serve", "Qwen/Qwen3-0.6B"].into_iter().chain(case.iter().copied()),
+        )
+        .unwrap_err();
+        assert_eq!(
+            error.kind(),
+            clap::error::ErrorKind::ValueValidation,
+            "{case:?}"
+        );
+    }
+}
+
+/// Python's `--logging-config` and its dotted forms set the level, and
+/// `--log-level` overrides it in either order.
+#[test]
+fn serve_resolves_log_level_like_python() {
+    let cases: &[(&[&str], LogLevel)] = &[
+        (&["--logging-config.log_level", "ERROR"], LogLevel::Error),
+        (
+            &["--logging-config", r#"{"log_level":"ERROR"}"#],
+            LogLevel::Error,
+        ),
+        (
+            &[
+                "--logging-config.log_level",
+                "DEBUG",
+                "--log-level",
+                "ERROR",
+            ],
+            LogLevel::Error,
+        ),
+        (
+            &["--log-level", "ERROR", "--logging-config.log_level=DEBUG"],
+            LogLevel::Error,
+        ),
+        // The text formatter is what Rust implements, and the Python-only
+        // fields do not affect the level.
+        (
+            &[
+                "--logging-config.log_level",
+                "WARNING",
+                "--logging-config.formatter",
+                "text",
+                "--logging-config.configure_logging=true",
+            ],
+            LogLevel::Warning,
+        ),
+    ];
+    for &(case, expected) in cases {
+        let cli = Cli::try_parse_from(
+            ["vllm-rs", "serve", "Qwen/Qwen3-0.6B"].into_iter().chain(case.iter().copied()),
+        )
+        .unwrap();
+        assert_eq!(cli.log_level(), expected, "{case:?}");
+
+        let Command::Serve(args) = cli.command else {
+            panic!("expected serve args");
+        };
+        assert!(args.managed_engine.python_args.is_empty(), "{case:?}");
+    }
+}
+
+/// The managed engine gets the logging config with the level this frontend
+/// resolved. The fields only Python logging reads are forwarded as given, an
+/// explicit `null` included, and validated by the engine.
+#[test]
+fn serve_forwards_logging_config_to_managed_engine() {
+    let cli = Cli::try_parse_from([
+        "vllm-rs",
+        "serve",
+        "Qwen/Qwen3-0.6B",
+        "--logging-config.log_level",
+        "debug",
+        "--logging-config.configure_logging",
+        "false",
+        "--logging-config.pylogging_config_file",
+        "null",
+        "--log-level",
+        "ERROR",
+    ])
+    .unwrap();
+
+    let Command::Serve(args) = cli.command else {
+        panic!("expected serve args");
+    };
+    let config = args.to_managed_engine_config(5555, &topology(&args), None);
+    expect![[r#"
+        [
+            "--logging-config",
+            "{\"log_level\":\"ERROR\",\"configure_logging\":false,\"pylogging_config_file\":null}",
+            "--reasoning-parser",
+            "qwen3",
+        ]
+    "#]]
+    .assert_debug_eq(&config.python_args);
+}
+
+/// The JSON formatter is not implemented and fails startup, also in its
+/// dotted form, instead of reaching only the managed engine.
+#[test]
+fn serve_rejects_unimplemented_logging_config() {
+    let error = Cli::try_parse_from([
+        "vllm-rs",
+        "serve",
+        "Qwen/Qwen3-0.6B",
+        "--logging-config",
+        r#"{"formatter":"json"}"#,
+    ])
+    .unwrap_err();
+    assert_eq!(error.kind(), clap::error::ErrorKind::ValueValidation);
+
+    let error = Cli::try_parse_from([
+        "vllm-rs",
+        "serve",
+        "Qwen/Qwen3-0.6B",
+        "--logging-config.formatter",
+        "json",
+    ])
+    .unwrap_err();
+    expect![[r#"
+        error: invalid value '{"formatter":"json"}' for '--logging-config <JSON>': invalid JSON object: formatter: unknown variant `json`, expected `text` at line 1 column 19
+
+        For more information, try '--help'.
+    "#]].assert_eq(&error.to_string());
+}
+
+/// The Python supervisor sends the resolved level and formatter as
+/// `logging_config`.
+#[test]
+fn frontend_args_json_resolves_logging_config() {
+    let parse = |args_json: &str| {
+        Cli::try_parse_from([
+            "vllm-rs",
+            "frontend",
+            "--listen-fd",
+            "3",
+            "--input-listener-fd",
+            "999999",
+            "--output-listener-fd",
+            "999998",
+            "--args-json",
+            args_json,
+        ])
+    };
+
+    let cli = parse(
+        r#"{"model_tag":"Qwen/Qwen3-0.6B","logging_config":{"log_level":"DEBUG","formatter":"text"}}"#,
+    )
+    .unwrap();
+    assert_eq!(cli.log_level(), LogLevel::Debug);
+
+    // Python-only fields are accepted, not rejected.
+    parse(
+        r#"{"model_tag":"Qwen/Qwen3-0.6B","logging_config":{"log_level":"DEBUG","formatter":"text","configure_logging":false,"pylogging_config_file":"/tmp/logging.json"}}"#,
+    )
+    .unwrap();
+
+    let error = parse(
+        r#"{"model_tag":"Qwen/Qwen3-0.6B","logging_config":{"log_level":"DEBUG","formatter":"json"}}"#,
+    )
+    .unwrap_err();
+    expect![[r#"
+        error: invalid value '{"model_tag":"Qwen/Qwen3-0.6B","logging_config":{"log_level":"DEBUG","formatter":"json"}}' for '--args-json <JSON>': invalid JSON arguments: logging_config.formatter: unknown variant `json`, expected `text` at line 1 column 87
+
+        For more information, try '--help'.
+    "#]].assert_eq(&error.to_string());
 }
 
 #[test]
@@ -934,6 +1160,45 @@ fn log_error_stack_defaults_to_server_dev_mode() {
     };
     let model_only = r#"{"model_tag":"Qwen/Qwen3-0.6B"}"#;
     let disabled = r#"{"model_tag":"Qwen/Qwen3-0.6B","log_error_stack":false}"#;
+    assert!(!json(model_only, &[]));
+    assert!(json(model_only, &[("VLLM_SERVER_DEV_MODE", "1")]));
+    assert!(!json(disabled, &[("VLLM_SERVER_DEV_MODE", "1")]));
+}
+
+/// `--enable-scale-out` falls back to `VLLM_SERVER_DEV_MODE`, like
+/// `--log-error-stack`.
+#[test]
+fn enable_scale_out_defaults_to_server_dev_mode() {
+    let serve = |extra_args: &[&str]| {
+        let cli =
+            Cli::try_parse_from(["vllm-rs", "serve", "Qwen/Qwen3-0.6B"].iter().chain(extra_args))
+                .unwrap();
+        let Command::Serve(args) = cli.command else {
+            panic!("expected serve args");
+        };
+        args.to_frontend_config("tcp://127.0.0.1:62100".to_string(), &topology(&args))
+            .api_server_options
+            .enable_scale_out
+    };
+    assert!(!serve(&[]));
+    assert!(serve(&["--enable-scale-out"]));
+    assert!(serve(&["--server-dev-mode", "1"]));
+    assert!(!serve(&[
+        "--server-dev-mode",
+        "1",
+        "--enable-scale-out",
+        "false"
+    ]));
+
+    let json = |args_json: &str, vars: &[(&str, &str)]| {
+        let vars: HashMap<_, _> = vars.iter().copied().collect();
+        let mut args: SharedRuntimeArgs = serde_json::from_str(args_json).unwrap();
+        args.apply_env_fallbacks(|name| vars.get(name).map(|value| value.to_string()))
+            .unwrap();
+        args.api_server_options().enable_scale_out
+    };
+    let model_only = r#"{"model_tag":"Qwen/Qwen3-0.6B"}"#;
+    let disabled = r#"{"model_tag":"Qwen/Qwen3-0.6B","enable_scale_out":false}"#;
     assert!(!json(model_only, &[]));
     assert!(json(model_only, &[("VLLM_SERVER_DEV_MODE", "1")]));
     assert!(!json(disabled, &[("VLLM_SERVER_DEV_MODE", "1")]));
@@ -1973,7 +2238,7 @@ fn frontend_args_accept_json() {
                         enable_force_include_usage: false,
                         enable_request_id_headers: false,
                         log_error_stack: None,
-                        enable_scale_out: false,
+                        enable_scale_out: None,
                         enable_tokenizer_info_endpoint: false,
                         sse_keep_alive_interval: 0,
                         fingerprint_mode: Full,
@@ -2014,6 +2279,8 @@ fn frontend_args_accept_json() {
                         },
                         root_path: None,
                         profiler_config: None,
+                        log_level: None,
+                        logging_config: None,
                     },
                 },
             ),
@@ -2929,7 +3196,7 @@ fn serve_args_accept_handshake_aliases() {
                         enable_force_include_usage: false,
                         enable_request_id_headers: false,
                         log_error_stack: None,
-                        enable_scale_out: false,
+                        enable_scale_out: None,
                         enable_tokenizer_info_endpoint: false,
                         sse_keep_alive_interval: 0,
                         fingerprint_mode: Full,
@@ -2970,6 +3237,8 @@ fn serve_args_accept_handshake_aliases() {
                         },
                         root_path: None,
                         profiler_config: None,
+                        log_level: None,
+                        logging_config: None,
                     },
                     managed_engine: ManagedEngineArgs {
                         python: "python3",

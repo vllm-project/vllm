@@ -359,6 +359,47 @@ pub mod kv_connector {
     #[serde(transparent)]
     pub struct UmbpStats(pub BTreeMap<UmbpOperation, UmbpOperationCounts>);
 
+    /// SimpleCPUOffload connector telemetry.
+    ///
+    /// Unlike the NIXL, Mooncake and UMBP payloads (one field per counter or
+    /// sample list), Python sends the offloading connectors' self-describing
+    /// envelope (also `OffloadingConnectorStats`): `{"types": {name: kind},
+    /// "data": {name: {label_values: value}}}`, keyed by Prometheus metric name
+    /// and then by the label values as a tuple (`()` when unlabeled). The kind
+    /// of each metric is fixed by its name, so only `data` is read, and the
+    /// fixed-size array keys check each metric's label count when decoding.
+    ///
+    /// Original Python definition: `SimpleCPUOffloadStats` in
+    /// `vllm/v1/simple_kv_offload/metrics.py`.
+    #[derive(Debug, Clone, Default, PartialEq, Serialize, Deserialize)]
+    pub struct SimpleCpuOffloadStats {
+        pub data: SimpleCpuOffloadData,
+    }
+
+    /// SimpleCPUOffload samples of one interval, keyed by metric name and then
+    /// by the metric's label values (a Python tuple, empty when unlabeled).
+    #[derive(Debug, Clone, Default, PartialEq, Serialize, Deserialize)]
+    pub struct SimpleCpuOffloadData {
+        /// Store admission counter increments by `outcome`.
+        #[serde(default, rename = "vllm:simple_kv_offload_save_outcomes_total")]
+        pub save_outcomes: BTreeMap<[String; 1], u64>,
+        /// Counter increment of blocks loaded back to GPU.
+        #[serde(default, rename = "vllm:simple_kv_offload_load_blocks_total")]
+        pub load_blocks: BTreeMap<[String; 0], u64>,
+        /// Pinned offload-pool blocks. Python sets it on every interval, which
+        /// also tells this payload apart from other connectors' `types`/`data`
+        /// payloads.
+        #[serde(rename = "vllm:simple_kv_offload_used_blocks")]
+        pub used_blocks: BTreeMap<[String; 0], u64>,
+        /// Offload blocks in pending stores.
+        #[serde(default, rename = "vllm:simple_kv_offload_pending_store_blocks")]
+        pub pending_store_blocks: BTreeMap<[String; 0], u64>,
+        /// Deployment facts as labels (`backend`, `page_cache`, `lazy_offload`,
+        /// `capacity_blocks`); the value is always 1.
+        #[serde(default, rename = "vllm:simple_kv_offload_info")]
+        pub info: BTreeMap<[String; 4], u64>,
+    }
+
     /// Telemetry emitted by a `MultiConnector` with a flat child payload map.
     #[serde_with::skip_serializing_none]
     #[derive(Debug, Clone, Default, PartialEq, Serialize, Deserialize)]
@@ -375,6 +416,8 @@ pub mod kv_connector {
         pub mooncake: Option<MooncakeStats>,
         #[serde(rename = "UMBPStoreConnector")]
         pub umbp: Option<UmbpStats>,
+        #[serde(rename = "SimpleCPUOffloadConnector")]
+        pub simple_cpu_offload: Option<SimpleCpuOffloadStats>,
         /// Child connector payloads without a Rust telemetry implementation.
         #[serde(flatten)]
         pub other: BTreeMap<String, OpaqueValue>,
@@ -396,6 +439,7 @@ pub mod kv_connector {
         MooncakeTransfer(MooncakeTransferStats),
         Mooncake(MooncakeStats),
         Umbp(UmbpStats),
+        SimpleCpuOffload(SimpleCpuOffloadStats),
         Multi(Box<MultiConnectorStats>),
         Other(BTreeMap<String, OpaqueValue>),
     }

@@ -226,6 +226,9 @@ impl InklingChatRenderer {
                         ChatContentPart::VideoUrl { .. } => {
                             return Err(Error::UnsupportedMultimodalContent("video_url"));
                         }
+                        ChatContentPart::ToolReference { .. } => {
+                            return Err(Error::UnsupportedContentPart("tool_reference"));
+                        }
                     }
                 }
             }

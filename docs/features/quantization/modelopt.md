@@ -20,8 +20,14 @@ following `quantization.quant_algo` values:
 - `W4A16_NVFP4`: weight-only ModelOpt NVFP4 checkpoints with 16-bit
   activations (use `quantization="modelopt_fp4"`).
 - `MXFP8`: ModelOpt MXFP8 checkpoints (use `quantization="modelopt_mxfp8"`).
+- `INT8_PB_WO`: block-scaled INT8 weight-only linear layers with 16-bit
+  activations (use `quantization="modelopt_int8"`): a symmetric int8 `weight`
+  and a `weight_scale` per `group_size` input elements (for example 16 or 32).
+  `group_size` is required. vLLM serves these layers with its mixed-precision
+  (WNA16) kernels, such as Marlin and Humming. MoE experts are not supported.
 - `MIXED_PRECISION`: per-layer formats specified by `quantized_layers`
-  (use `quantization="modelopt_mixed"`).
+  (use `quantization="modelopt_mixed"`). Each layer may use any format above;
+  `INT8_PB_WO` layers take their own `group_size`.
 
 For per-tensor `FP8`, vLLM converts E4M3FN weights and scales to E4M3FNUZ
 when required by the GPU, for example on AMD MI300.

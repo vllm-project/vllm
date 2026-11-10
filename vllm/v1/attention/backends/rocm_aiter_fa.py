@@ -1091,7 +1091,6 @@ class AiterFlashAttentionImpl(AttentionImpl):
         output: torch.Tensor,
         cu_seqlens_q: torch.Tensor,
         max_seqlen_q: int,
-        min_seqlen_q: int,
         max_seqlen_k: int,
         block_table: torch.Tensor,
         slot_mapping: torch.Tensor,
@@ -1120,7 +1119,7 @@ class AiterFlashAttentionImpl(AttentionImpl):
             cu_seqlens_k=cu_seqlens_q,
             max_seqlen_q=max_seqlen_q,
             max_seqlen_k=max_seqlen_q,
-            min_seqlen_q=min_seqlen_q,
+            min_seqlen_q=0,
             dropout_p=0.0,
             softmax_scale=self.scale,
             causal=True,
@@ -1168,7 +1167,7 @@ class AiterFlashAttentionImpl(AttentionImpl):
                 cu_seqlens_k=cu_seqlens_kv[chunk_idx],
                 max_seqlen_q=max_seqlen_q,
                 max_seqlen_k=max_seqlens[chunk_idx],
-                min_seqlen_q=min_seqlen_q,
+                min_seqlen_q=0,
                 dropout_p=0.0,
                 softmax_scale=self.scale,
                 causal=False,
@@ -1355,7 +1354,6 @@ class AiterFlashAttentionImpl(AttentionImpl):
                 output=extend_outputs,
                 cu_seqlens_q=attn_metadata.extend_metadata.query_start_loc,
                 max_seqlen_q=attn_metadata.extend_metadata.max_query_len,
-                min_seqlen_q=0,
                 max_seqlen_k=attn_metadata.extend_metadata.max_seq_len,
                 block_table=attn_metadata.block_table[
                     num_decodes : num_decodes + num_extends

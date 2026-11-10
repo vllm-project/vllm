@@ -731,7 +731,7 @@ class SupportsLoRA(Protocol):
     is_non_gated_moe: ClassVar[bool] = False
     # The `embedding_module` and `embedding_padding_modules`
     # are empty by default.
-    embedding_modules: ClassVar[dict[str, str]] = {}
+    embedding_modules: dict[str, str] = {}
     packed_modules_mapping: dict[str, list[str]] = {}
     # Module prefixes to skip during LoRA loading (e.g., ["mtp."] for MTP layers)
     lora_skip_prefixes: ClassVar[list[str]] = []
@@ -1443,7 +1443,7 @@ class SupportsTranscription(Protocol):
         return None
 
     @classmethod
-    def post_process_output(cls, text: str) -> str:
+    def post_process_output(cls, text: str, model_config: "ModelConfig") -> str:
         """Post-process the raw model output text.
 
         Some ASR models output structured formats (e.g., language tags,
@@ -1451,6 +1451,7 @@ class SupportsTranscription(Protocol):
 
         Args:
             text: Raw decoded text from the model.
+            model_config: The config of the model.
 
         Returns:
             Cleaned transcription text.
@@ -1459,11 +1460,15 @@ class SupportsTranscription(Protocol):
         return text
 
     @classmethod
-    def parse_diarized_transcript(cls, text: str) -> list[DiarizedTranscriptionSegment]:
+    def parse_diarized_transcript(
+        cls, text: str, model_config: "ModelConfig"
+    ) -> list[DiarizedTranscriptionSegment]:
         """Parse the model-specific diarized transcript format.
 
-        Only models that set `supports_diarized_transcription` must override
-        this method.
+        Receives the raw decoded output of one audio chunk, without
+        `post_process_output` applied, and returns timestamps relative to that
+        chunk. Only models that set `supports_diarized_transcription` must
+        override this method.
         """
         raise NotImplementedError
 
@@ -1662,7 +1667,11 @@ class EagleModelMixin:
             layer_idx >= self._aux_first_local_layer
             and layer_idx in self.aux_hidden_state_layers
         ):
-            value = hidden_states + residual if residual is not None else hidden_states
+            if residual is None:
+                # The first layer updates its residual (the embeddings) in place
+                value = hidden_states.clone()
+            else:
+                value = hidden_states + residual
             aux_hidden_states.append(value)
         return aux_hidden_states
 
@@ -1716,6 +1725,9 @@ def _get_decoder_holder(model: object) -> object:
         parent_ref = model.get_language_model()
     elif hasattr(model, "language_model"):
         parent_ref = model.language_model
+    # The Transformers modeling backend's `.model` is the HF model, not the decoder
+    if isinstance(parent_ref, EagleModelMixin):
+        return parent_ref
     # A multimodal model that builds its decoder inside `_mark_language_model`
     # has get_language_model() return the decoder itself, with no `.model`.
     return getattr(parent_ref, "model", parent_ref)

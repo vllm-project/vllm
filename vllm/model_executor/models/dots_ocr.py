@@ -1,6 +1,7 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 from collections.abc import Iterable, Mapping
+from itertools import accumulate
 from typing import Annotated, Literal, TypeAlias
 
 import torch
@@ -57,6 +58,7 @@ from vllm.multimodal.inputs import MultiModalKwargsItem
 from vllm.sequence import IntermediateTensors
 from vllm.transformers_utils.configs.dotsocr import DotsOCRConfig, DotsVisionConfig
 from vllm.utils.tensor_schema import TensorSchema, TensorShape
+from vllm.utils.torch_utils import async_tensor_h2d
 from vllm.v1.attention.backends.registry import AttentionBackendEnum
 
 from .vision import is_vit_use_data_parallel, run_dp_sharded_mrope_vision_model
@@ -510,7 +512,7 @@ class DotsVisionTransformer(nn.Module):
     def get_pos_ids_by_grid(self, grid_thw: list[list[int]]) -> list[torch.Tensor]:
         pos_ids = []
         for t, h, w in grid_thw:
-            hpos_ids = torch.arange(h).unsqueeze(1).expand(-1, w)
+            hpos_ids = torch.arange(h, device=self.device).unsqueeze(1).expand(-1, w)
             hpos_ids = hpos_ids.reshape(
                 h // self.spatial_merge_size,
                 self.spatial_merge_size,
@@ -520,7 +522,7 @@ class DotsVisionTransformer(nn.Module):
             hpos_ids = hpos_ids.permute(0, 2, 1, 3)
             hpos_ids = hpos_ids.flatten()
 
-            wpos_ids = torch.arange(w).unsqueeze(0).expand(h, -1)
+            wpos_ids = torch.arange(w, device=self.device).unsqueeze(0).expand(h, -1)
             wpos_ids = wpos_ids.reshape(
                 h // self.spatial_merge_size,
                 self.spatial_merge_size,
@@ -556,22 +558,20 @@ class DotsVisionTransformer(nn.Module):
     ) -> torch.Tensor:
         rotary_pos_emb = self.rot_pos_emb(grid_thw)
 
-        # Convert grid_thw to tensor (always expecting list format now)
-        grid_thw_tensor = torch.tensor(
-            grid_thw, device=hidden_states.device, dtype=torch.long
-        )
         hidden_states = hidden_states.to(self.dtype)
-        hidden_states = self.patch_embed(hidden_states, grid_thw_tensor)
+        hidden_states = self.patch_embed(hidden_states)
 
-        cu_seqlens = torch.repeat_interleave(
-            grid_thw_tensor[:, 1] * grid_thw_tensor[:, 2], grid_thw_tensor[:, 0]
-        ).cumsum(
-            dim=0,
-            dtype=grid_thw_tensor.dtype if torch.jit.is_tracing() else torch.int32,
+        cu_seqlens = torch.tensor(
+            list(
+                accumulate((h * w for t, h, w in grid_thw for _ in range(t)), initial=0)
+            ),
+            dtype=torch.long if torch.jit.is_tracing() else torch.int32,
+            device="cpu",
         )
-        cu_seqlens = torch.cat([cu_seqlens.new_zeros(1), cu_seqlens])
 
+        # Attention wrappers read max_seqlen with .item() on every layer.
         max_seqlen = self.compute_attn_mask_seqlen(cu_seqlens)
+        cu_seqlens = async_tensor_h2d(cu_seqlens, device=self.device)
         for blk in self.blocks:
             hidden_states = blk(
                 hidden_states,

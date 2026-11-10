@@ -948,13 +948,18 @@ class AsyncLLM(EngineClient):
                             mm_cache_stats=renderer.stat_mm_cache(),
                         )
             except Exception as e:
-                if get_elastic_ep_rank_retired() and isinstance(e, EngineDeadError):
+                if not isinstance(e, EngineDeadError):
+                    logger.exception("AsyncLLM output_handler failed.")
+                elif get_elastic_ep_rank_retired():
                     logger.info(
                         "[Elastic EP] Retired rank stopped receiving EngineCore outputs"
                     )
-                    output_processor.propagate_error(e)
-                    return
-                logger.exception("AsyncLLM output_handler failed.")
+                elif engine_core.resources.stop_requested:
+                    logger.info(
+                        "Engine core gone during shutdown; output handler exiting"
+                    )
+                else:
+                    logger.exception("AsyncLLM output_handler failed.")
                 output_processor.propagate_error(e)
 
         self.output_handler = asyncio.create_task(output_handler())

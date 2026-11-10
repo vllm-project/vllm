@@ -292,6 +292,10 @@ class GroupedTopKRouter(BaseRouter):
         self.skip_padding = skip_padding
 
     @property
+    def masks_padding(self) -> bool:
+        return self.skip_padding
+
+    @property
     def routing_method_type(self) -> RoutingMethodType:
         return get_routing_method_type(
             scoring_func=self.scoring_func,

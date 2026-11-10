@@ -6,6 +6,7 @@
 
 - `--enable-scale-out` registers it, with `/render`, `/derender` and `/inference/v1/abort_requests`.
 - `--tokens-only` always registers it, skips loading the tokenizer and forces `detokenize=False`. Stop strings (`sampling_params.stop`) are then rejected with a 400; use `stop_token_ids`.
+- `VLLM_SERVER_DEV_MODE=1` turns `--enable-scale-out` on unless `--disable-scale-out` is passed.
 - With neither flag, it returns 403 `Scale-out endpoints are disabled. Restart vllm serve with --enable-scale-out to enable them.`
 
 ```bash

@@ -455,9 +455,10 @@ def dummy_hf_overrides(
     model_arch: str = "",
     exist_overrides: dict[str, Any] | None = None,
     use_original_num_layers: bool = False,
+    num_hidden_layers: int | None = None,
 ) -> PreTrainedConfig:
     """Dummy HF overrides function used to create dummy model
-    with only minimum nums of layer.
+    with only minimum nums of layer, or `num_hidden_layers` if given.
     """
     # Copy because this helper is called more than once
     # while loading config, and we `.pop()`
@@ -487,6 +488,8 @@ def dummy_hf_overrides(
         # Use the original number of layers from the config
         num_layers = getattr(text_config, "num_layers", 1)
         num_hidden_layers = getattr(text_config, "num_hidden_layers", 1)
+    elif num_hidden_layers is not None:
+        num_layers = num_hidden_layers
     else:
         # Use minimal layers for testing
         num_layers = 1
