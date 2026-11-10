@@ -43,6 +43,8 @@ class MoEKernelOracle(ABC, Generic[BackendT]):
     Concrete oracles can declare backend priorities and mappings to use the
     default selection flow, or override methods for their selection policy.
     Kernel construction and weight conversion remain per-oracle operations.
+    A `None` declaration leaves the corresponding default method unimplemented;
+    empty declarations are valid.
 
     Deployment inputs are supplied at construction and stored as
     `self.moe_config`, `self.weight_key`, and `self.activation_key`. Priority
@@ -51,9 +53,9 @@ class MoEKernelOracle(ABC, Generic[BackendT]):
 
     # Display name for the shared log helpers below; subclasses must set it.
     name: ClassVar[str]
-    priority_backends: tuple[BackendT, ...] = ()
-    backend_mapping: dict[MoEBackend, BackendT] = {}
-    experts_mapping: dict[BackendT, tuple[str, ...]] = {}
+    priority_backends: tuple[BackendT, ...] | None = None
+    backend_mapping: dict[MoEBackend, BackendT] | None = None
+    experts_mapping: dict[BackendT, tuple[str, ...]] | None = None
 
     def __init__(
         self,
@@ -77,6 +79,11 @@ class MoEKernelOracle(ABC, Generic[BackendT]):
         The default returns a copy of `priority_backends`. Override this method
         to compute priorities from the instance's deployment inputs.
         """
+        if self.priority_backends is None:
+            raise NotImplementedError(
+                f"{type(self).__name__} must define priority_backends "
+                "or override get_priority_backends()."
+            )
         return list(self.priority_backends)
 
     def backend_to_kernel_cls(
@@ -87,11 +94,21 @@ class MoEKernelOracle(ABC, Generic[BackendT]):
 
         Overrides with a module-level mapping must forward to it at call time.
         """
+        if self.experts_mapping is None:
+            raise NotImplementedError(
+                f"{type(self).__name__} must define experts_mapping "
+                "or override backend_to_kernel_cls()."
+            )
         return resolve_moe_experts(backend, self.experts_mapping, self.name)
 
     def map_backend(self, runner_backend: MoEBackend) -> BackendT:
         """Map a user-facing `MoEBackend` (from the runner config) to
         this oracle's enum."""
+        if self.backend_mapping is None:
+            raise NotImplementedError(
+                f"{type(self).__name__} must define backend_mapping "
+                "or override map_backend()."
+            )
         backend = self.backend_mapping.get(runner_backend)
         if backend is not None:
             return backend
