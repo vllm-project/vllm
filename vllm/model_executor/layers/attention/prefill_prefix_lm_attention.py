@@ -1,18 +1,14 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
-from dataclasses import replace
-
 import torch
 
-from vllm.config import CacheConfig, VllmConfig
+from vllm.config import CacheConfig
 from vllm.model_executor.layers.attention import Attention
 from vllm.model_executor.layers.attention.encoder_only_attention import (
     create_encoder_only_attention_backend,
 )
 from vllm.v1.attention.backend import AttentionType
 from vllm.v1.attention.selector import get_attn_backend
-from vllm.v1.core.single_type_kv_cache_manager import FullAttentionManager
-from vllm.v1.kv_cache_interface import KVCacheLayerConfig
 
 
 class PrefillPrefixLMAttention(Attention):
@@ -70,20 +66,3 @@ class PrefillPrefixLMAttention(Attention):
             attn_type=AttentionType.DECODER,
             **kwargs,
         )
-
-    def get_kv_cache_config(self, vllm_config: VllmConfig) -> KVCacheLayerConfig | None:
-        """Tag the KV cache config as non-causal.
-
-        The layout is identical to a regular decoder full-attention layer, so
-        we reuse the base config and only flip `non_causal=True`. The engine
-        core reads this flag (across the worker/engine process boundary, via
-        the pickled config) to disable scheduling features that assume causal
-        attention -- chunked prefill and prefix caching -- which would
-        otherwise corrupt the bidirectional prefill of a Prefix LM.
-        """
-        config = super().get_kv_cache_config(vllm_config)
-        if config is not None and config.manager_cls is FullAttentionManager:
-            return replace(
-                config, manager_config=FullAttentionManager.config(non_causal=True)
-            )
-        return config
