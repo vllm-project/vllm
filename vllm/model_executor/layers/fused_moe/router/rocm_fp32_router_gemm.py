@@ -164,7 +164,7 @@ def rocm_fp32_router_gemm(
     hidden_states: torch.Tensor,
     router_weight: torch.Tensor,
 ) -> torch.Tensor:
-    """Compute ``hidden_states @ router_weight.T`` with FP32 accumulation."""
+    """Compute `hidden_states @ router_weight.T` with FP32 accumulation."""
     _validate_inputs(hidden_states, router_weight)
     if get_cdna_version() >= 5:
         if hidden_states.shape[0] == 0:

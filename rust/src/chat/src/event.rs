@@ -6,7 +6,8 @@ use std::sync::Arc;
 
 use serde::{Deserialize, Serialize};
 use vllm_engine_core_client::protocol::output::RequestSpecDecodeMetrics;
-use vllm_llm::{RequestTimestamps, TokenUsage};
+use vllm_engine_core_client::protocol::tensor::WireNdArray;
+use vllm_llm::{RequestTimestamps, TokenUsage, WeightVersionSpan};
 use vllm_text::{DecodedLogprobs, DecodedPromptLogprobs};
 
 use crate::FinishReason;
@@ -242,11 +243,14 @@ pub enum ChatEvent {
         spec_decode_metrics: Option<RequestSpecDecodeMetrics>,
         finish_reason: FinishReason,
         /// Connector-specific KV transfer parameters for disaggregated serving.
-        /// Boxed, like `ec_transfer_params`, to keep the per-token variants of
-        /// this enum small.
         kv_transfer_params: Option<Box<serde_json::Value>>,
         /// Connector-specific encoder cache transfer parameters for
         /// disaggregated serving.
         ec_transfer_params: Option<Box<serde_json::Value>>,
+        /// Weight-version spans over all generated token positions.
+        weight_versions: Option<Vec<WeightVersionSpan>>,
+        /// Routed-expert rows for the whole request, when the engine returned
+        /// any.
+        routed_experts: Option<Box<WireNdArray>>,
     },
 }

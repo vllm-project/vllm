@@ -10,11 +10,12 @@ will transfer.
 from __future__ import annotations
 
 import hashlib
+import itertools
 import json
 from collections.abc import Sequence
 from dataclasses import dataclass, field, replace
 from dataclasses import fields as dataclass_fields
-from enum import Enum
+from enum import StrEnum
 from typing import Any, NamedTuple, overload
 
 import torch
@@ -25,11 +26,16 @@ from vllm.distributed.kv_transfer.kv_connector.v1.base import (
     KVConnectorWorkerMetadata,
 )
 from vllm.v1.kv_cache_interface import (
+    AttentionSpec,
     KVCacheConfig,
     KVCacheGroupSpec,
     KVCacheSpec,
+    KVCacheTensor,
     UniformTypeKVCacheSpecs,
+    compute_layer_kv_cache_shape_bytes,
+    compute_layout_strides,
 )
+from vllm.v1.kv_cache_layout import KVCacheLayout
 
 
 def _layer_specs(group: KVCacheGroupSpec) -> dict[str, KVCacheSpec]:
@@ -40,11 +46,90 @@ def _layer_specs(group: KVCacheGroupSpec) -> dict[str, KVCacheSpec]:
     return dict.fromkeys(group.layer_names, spec)
 
 
+def _page_segments(
+    spec: KVCacheSpec,
+    tensor: KVCacheTensor,
+    num_blocks: int,
+    layout: KVCacheLayout,
+) -> tuple[tuple[int, int], ...]:
+    """Byte `(offset, length)` runs of a layer's page from its block start.
+
+    Empty when the page is one contiguous run. LHBNC and BHLNC store each
+    head's tokens as a separate run.
+    """
+    if not spec.has_layer_views:
+        return ()
+    _, heads, states, content = compute_layer_kv_cache_shape_bytes(spec, num_blocks)
+    _, _, head_stride, state_stride, _ = compute_layout_strides(
+        spec,
+        num_blocks,
+        len(tensor.layers),
+        layout,
+        fixed_strides=(tensor.layer_stride, tensor.block_stride, None, None, None),
+    )
+    dims = sorted(
+        (stride, size)
+        for stride, size in ((head_stride, heads), (state_stride, states))
+        if size > 1
+    )
+    run = content
+    while dims and dims[0][0] == run:
+        run *= dims.pop(0)[1]
+    if not dims:
+        return ()
+    return tuple(
+        (sum(i * stride for i, (stride, _) in zip(index, dims)), run)
+        for index in itertools.product(*(range(size) for _, size in dims))
+    )
+
+
+def tp_replicated_group_ids(
+    config: KVCacheConfig, topology: RankTopology
+) -> frozenset[int]:
+    """Groups whose blocks are byte-identical on every TP rank.
+
+    Every layer must declare a single TP shard (`max_tp_shards=1`, e.g. MLA
+    latents and sparse indexers); context parallelism shards them, so it opts
+    out.
+    """
+    if topology.tp_size == 1 or topology.pcp_size > 1 or topology.dcp_size > 1:
+        return frozenset()
+    return frozenset(
+        group_id
+        for group_id, group in enumerate(config.kv_cache_groups)
+        if group.enable_kv_transfer
+        and group.layer_names
+        and all(
+            isinstance(spec, AttentionSpec) and spec.max_tp_shards == 1
+            for spec in _layer_specs(group).values()
+        )
+    )
+
+
 def _spec_fingerprint(spec: KVCacheSpec) -> dict[str, str]:
     """Every field that shapes a layer's stored bytes, in a stable form."""
     return {
         "kind": type(spec).__name__,
         **{item.name: str(getattr(spec, item.name)) for item in dataclass_fields(spec)},
+    }
+
+
+def _model_fingerprint(model_config: Any) -> dict[str, Any]:
+    """Effective model settings that change the KV a checkpoint produces.
+
+    `hf_config` already has `hf_overrides` applied, so overridden RoPE or
+    attention settings separate engines that share the same model path.
+    """
+    hf_config = getattr(model_config, "hf_config", None)
+    to_dict = getattr(hf_config, "to_dict", None)
+    config = dict(to_dict()) if callable(to_dict) else {}
+    # Neither changes the KV, and either would split engines sharing a pool.
+    config.pop("_name_or_path", None)
+    config.pop("transformers_version", None)
+    return {
+        "dtype": str(getattr(model_config, "dtype", None)),
+        "quantization": getattr(model_config, "quantization", None),
+        "hf_config": config,
     }
 
 
@@ -126,6 +211,25 @@ class RankTopology:
         )
 
 
+def _engine_may_load_foreign_kv(vllm_config: Any) -> bool:
+    """Whether any connector of this engine may load KV that vLLM's own cache
+    writer did not produce, e.g. a MultiConnector sibling of UMBP.
+
+    MultiConnector hands each child a config copy holding only that child's
+    kv_transfer_config, so read the engine's current config, which workers set
+    while they create their connector.
+    """
+    from vllm.config import get_current_vllm_config_or_none
+    from vllm.distributed.kv_transfer.kv_connector.utils import (
+        kv_connector_may_load_foreign_kv,
+    )
+
+    engine_config = get_current_vllm_config_or_none()
+    if engine_config is None or engine_config.kv_transfer_config is None:
+        engine_config = vllm_config
+    return kv_connector_may_load_foreign_kv(engine_config)
+
+
 @dataclass(frozen=True)
 class UMBPNamespace:
     """Compatibility namespace for objects stored outside the engine."""
@@ -134,7 +238,7 @@ class UMBPNamespace:
 
     @classmethod
     def configured(cls, vllm_config: Any) -> UMBPNamespace | None:
-        """Return the explicit ``key_namespace``, or None when it is derived."""
+        """Return the explicit `key_namespace`, or None when it is derived."""
         extra = vllm_config.kv_transfer_config.kv_connector_extra_config
         configured = extra.get("key_namespace", "auto")
         if configured == "auto":
@@ -175,6 +279,7 @@ class UMBPNamespace:
         fields = {
             "model": getattr(model_config, "model", ""),
             "revision": getattr(model_config, "revision", None),
+            "model_config": _model_fingerprint(model_config),
             "block_size": vllm_config.cache_config.block_size,
             "cache_layout": getattr(kv_cache_config, "kv_cache_layout", None),
             "groups": [
@@ -197,7 +302,14 @@ class UMBPNamespace:
         if speculative is not None:
             # Added only when set, so namespaces without a drafter are unchanged.
             fields["speculative"] = speculative
-        payload = json.dumps(fields, sort_keys=True, separators=(",", ":")).encode()
+        if _engine_may_load_foreign_kv(vllm_config):
+            # Bytes another connector loaded can be stored here too. Keep them
+            # out of the namespace that UMBP-only engines restore as canonical
+            # KV. Added only when set, so UMBP-only namespaces are unchanged.
+            fields["foreign_kv"] = True
+        payload = json.dumps(
+            fields, sort_keys=True, separators=(",", ":"), default=str
+        ).encode()
         return cls(hashlib.sha256(payload).hexdigest()[:32])
 
 
@@ -206,17 +318,26 @@ class UMBPHandshakeMetadata(KVConnectorHandshakeMetadata):
     """Namespace a worker derived, reported to the scheduler at startup."""
 
     namespace: str
+    replicated_groups: tuple[int, ...] = ()
 
 
 @dataclass(frozen=True)
 class BlockIdentityCodec:
-    """Build stable rank-local keys from vLLM block hashes."""
+    """Build stable rank-local keys from vLLM block hashes.
+
+    Groups in `replicated_groups` get one TP-agnostic key (`tp*`) that
+    every TP rank loads and only TP rank 0 stores.
+    """
 
     namespace: UMBPNamespace
     tp_rank: int = 0
     pp_rank: int = 0
     pcp_rank: int = 0
     dcp_rank: int = 0
+    replicated_groups: frozenset[int] = frozenset()
+
+    def stores_group(self, group_id: int) -> bool:
+        return self.tp_rank == 0 or group_id not in self.replicated_groups
 
     def key(self, block_hash: bytes, group_id: int = 0) -> str:
         return self.key_for_namespace(
@@ -236,9 +357,10 @@ class BlockIdentityCodec:
         if group_id < 0:
             raise ValueError("group_id must be non-negative")
         tp_rank, pcp_rank, dcp_rank, pp_rank = namespace
+        tp = "*" if group_id in self.replicated_groups else tp_rank
         return (
             f"umbp:vllm:v1:{self.namespace.value}:"
-            f"tp{tp_rank}:pcp{pcp_rank}:dcp{dcp_rank}:"
+            f"tp{tp}:pcp{pcp_rank}:dcp{dcp_rank}:"
             f"pp{pp_rank}:g{group_id}:"
             f"{block_hash.hex()}"
         )
@@ -253,7 +375,14 @@ class BlockIdentityCodec:
             self.key_for_namespace(block_hash, group_id, namespace)
             for namespace in topology.all_namespaces()
             for group_id in group_ids
+            if group_id not in self.replicated_groups or namespace[0] == 0
         )
+
+    def keys_per_object(self, topology: RankTopology, group_id: int) -> int:
+        """Number of rank keys that together hold one logical block."""
+        if group_id in self.replicated_groups:
+            return topology.rank_count // topology.tp_size
+        return topology.rank_count
 
 
 @dataclass(frozen=True)
@@ -266,13 +395,20 @@ class KVRegion:
     block_bytes: int
     object_offset: int
     block_size: int = 1
+    segments: tuple[tuple[int, int], ...] = ()
 
     def __post_init__(self) -> None:
         if self.block_stride <= 0 or self.block_bytes <= 0:
             raise ValueError("KV region sizes must be positive")
         if self.block_size <= 0:
             raise ValueError("KV region block_size must be positive")
-        if self.block_bytes > self.block_stride:
+        if self.segments:
+            if sum(length for _, length in self.segments) != self.block_bytes:
+                raise ValueError(
+                    f"KV region segments of {self.layer_name!r} do not cover "
+                    f"its {self.block_bytes} bytes"
+                )
+        elif self.block_bytes > self.block_stride:
             raise ValueError(
                 f"KV region bytes ({self.block_bytes}) exceed its stride "
                 f"({self.block_stride}) for {self.layer_name!r}"
@@ -319,6 +455,7 @@ class KVLayoutPlanner:
             if group.enable_kv_transfer
             for layer, spec in _layer_specs(group).items()
         }
+        layout = config.kv_cache_layout
         regions: list[KVRegion] = []
         offset = 0
         for tensor in config.kv_cache_tensors:
@@ -327,6 +464,21 @@ class KVLayoutPlanner:
                     continue
                 group_id, spec = layer_specs[layer_name]
                 block_bytes = spec.page_size_bytes
+                segments = (
+                    ()
+                    if layout is None
+                    else _page_segments(
+                        spec, tensor, config.num_blocks, KVCacheLayout[layout]
+                    )
+                )
+                if not segments and (
+                    block_bytes > tensor.block_stride
+                    or (len(tensor.layers) > 1 and tensor.layer_stride < block_bytes)
+                ):
+                    raise ValueError(
+                        f"UMBP cannot copy {layer_name!r}: its KV block is split "
+                        "into strided runs and KVCacheConfig.kv_cache_layout is unset"
+                    )
                 regions.append(
                     KVRegion(
                         layer_name=layer_name,
@@ -335,6 +487,7 @@ class KVLayoutPlanner:
                         block_bytes=block_bytes,
                         object_offset=offset,
                         block_size=spec.block_size,
+                        segments=segments,
                     )
                 )
                 offset += block_bytes
@@ -371,6 +524,11 @@ class KVLayoutPlanner:
             for region in self.regions:
                 if region.layer_name != layer_name:
                     continue
+                if region.segments and block_stride != region.block_stride:
+                    raise ValueError(
+                        f"KV block stride mismatch for {layer_name!r}: "
+                        f"config={region.block_stride}, tensor={block_stride}"
+                    )
                 if (
                     block_stride > region.block_stride
                     or region.block_stride % block_stride != 0
@@ -458,6 +616,25 @@ class KVLayoutPlanner:
             physical_stride = self._physical_strides.get(
                 region.layer_name, region.block_stride
             )
+            if region.segments:
+                start = object_offset if group_id is not None else region.object_offset
+                for segment_offset, length in region.segments:
+                    ranges.append(
+                        KVRange(
+                            layer_name=region.layer_name,
+                            group_id=region.group_id,
+                            block_id=block_id,
+                            base_address=base_address
+                            + block_id * region.block_stride
+                            + segment_offset,
+                            stride=region.block_stride,
+                            length=length,
+                            object_offset=start,
+                        )
+                    )
+                    start += length
+                object_offset += region.block_bytes
+                continue
             if region.block_bytes <= physical_stride:
                 ranges.append(
                     KVRange(
@@ -675,7 +852,11 @@ class RequestTracker:
         return complete_tokens
 
 
-class TransferJobStatus(str, Enum):
+# Error prefix of a transfer a runtime refused without touching the pool.
+TRANSFER_NOT_ATTEMPTED = "transfer not attempted"
+
+
+class TransferJobStatus(StrEnum):
     PENDING = "pending"
     RUNNING = "running"
     COMPLETED = "completed"
