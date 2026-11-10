@@ -458,7 +458,14 @@ class VllmConfig:
     additional_config: dict | SupportsCompileFactors = Field(default_factory=dict)
     """Additional config for specified platform. Different platforms may
     support different configs. Make sure the configs are valid for the platform
-    you are using. Contents must be hashable."""
+    you are using. Contents must be hashable.
+
+    Known keys:
+    - ``audio_bucket_seconds`` (``list[float]``): enable encoder length
+      bucketing for padded audio encoders by bucketing items into these
+      second-length rungs (e.g. ``[2, 4, 8, 16, 30]``). Off by default, and
+      only applied to adapted models (currently ``qwen2_audio``).
+    """
     instance_id: str = ""
     """The ID of the vLLM instance."""
     optimization_level: OptimizationLevel = OptimizationLevel.O2

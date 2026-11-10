@@ -511,6 +511,7 @@ steps:
   - vllm/
   - "!vllm/distributed/kv_transfer/"
   - tests/models/test_utils.py
+  - tests/models/test_mm_encoder_bucketing.py
   - tests/models/test_vision.py
   - tests/models/test_adapters.py
   - tests/models/test_qwen3_5_mtp_config.py
@@ -536,6 +537,7 @@ steps:
     - >-
       pytest -v -s
       models/test_utils.py
+      models/test_mm_encoder_bucketing.py
       models/test_vision.py
       models/test_adapters.py
       models/test_qwen3_5_mtp_config.py
