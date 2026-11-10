@@ -658,6 +658,7 @@ def test_hybrid_write_notifies_grouped_slots_or_releases_a_complete_local_hit(
             req_id="req",
             transfer_id="tx",
             block_notify_list=[[10], [1, 2, 3]],
+            num_prompt_tokens=9,
             host="127.0.0.2",
             port=7000,
             num_skip_blocks=0,

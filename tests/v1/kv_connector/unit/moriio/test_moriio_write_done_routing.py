@@ -121,6 +121,7 @@ def _write_task(
         remote_block_ids_hint=None,
         layer_name="layer0",
         event=None,
+        num_prompt_tokens=8,
         remote_notify_port=20000,
         remote_ip=remote_ip,
         multi_pod_hosts=multi_pod_hosts or [],
@@ -276,7 +277,7 @@ def test_finalize_single_pod_port_uses_global_rank():
 
 
 def test_execute_write_task_writes_every_fanout_target():
-    info = RemoteAllocInfo(block_ids=[2], decode_dp_rank=0)
+    info = RemoteAllocInfo(block_ids=[[2, 4]], decode_dp_rank=0, num_prompt_tokens=8)
     alloc = {"tA": info}
     worker = _fake_worker(alloc)
     session_engine_ids: list[str] = []
@@ -290,6 +291,7 @@ def test_execute_write_task_writes_every_fanout_target():
         return [engine_id], f"metadata-{engine_id}"
 
     worker._get_built_session = _get_built_session
+    worker._has_mamba = False
     worker._is_mamba_layer = lambda layer_name: False
     writer = make_moriio_writer(worker)
     write_sessions: list[list[str]] = []

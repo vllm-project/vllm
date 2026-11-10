@@ -136,13 +136,33 @@ WRITE mode is used by default. READ mode can be configured by setting `--kv-tran
 !!! note
     `notify_port` and `handshake_port` are *base* ports: each (PP rank, DP rank, TP rank) worker within an instance uses `base + offset` where the offset is based on the ranks. Make sure the ranges starting at both ports are free on the host.
 
+### WRITE transfer validation and trust boundaries
+
+Both peers must run a version that exchanges WRITE prompt token counts. The
+producer checks its computed prompt length against the consumer's expected
+transferred length, and checks every cache group's block count before writing.
+Hybrid prefill reports its truncated N-1-token prompt; the consumer may reserve
+one additional attention block for its locally recomputed last token.
+Missing coverage metadata or mismatched coverage fails the transfer. The
+consumer follows `kv_load_failure_policy` (`fail` by default, or `recompute`).
+Upgrade both peers together; WRITE transfers from an older consumer without
+coverage metadata are rejected.
+
+`kv_transfer_params` is internal routing metadata, not an authorization boundary.
+Only a trusted router should supply it: strip client-supplied values before
+forwarding requests, and restrict direct access to prefill and decode APIs and
+their control-plane ports. READ block IDs address the producer's registered
+memory, and transfer IDs act as bearer capabilities for completion and release.
+Coverage validation does not authenticate these fields or establish per-request
+READ ownership. See the [security guide](../usage/security.md).
+
 ### Hybrid attention and recurrent state
 
 WRITE mode supports hybrid attention plus Mamba/KDA models, including DSpark. Use matching cache layouts on both instances, `--mamba-cache-mode align`, and `read_mode: false` in each instance's `kv_connector_extra_config`. Both peers must support hybrid WRITE. Sliding-window WRITE and hybrid speculative methods other than DSpark remain unsupported.
 
 For DSpark, configure the same draft model on both instances through `--speculative-config`. Target and draft attention groups retain their own block IDs and token spans; only the running recurrent state is transferred, not speculative scratch slots. The producer transfers the state after the first N-1 prompt tokens, and the consumer recomputes the last prompt token. Convolution and SSM transfers must both finish before the layer is complete.
 
-Hybrid READ transfers every attention group, so drafters that share the target's attention groups (such as MTP) also work. Plain-attention WRITE retains its existing notification format.
+Hybrid READ transfers every attention group, so drafters that share the target's attention groups (such as MTP) also work. Plain-attention WRITE retains its flat block-ID list.
 
 ### Kimi-K3 specialized decode
 

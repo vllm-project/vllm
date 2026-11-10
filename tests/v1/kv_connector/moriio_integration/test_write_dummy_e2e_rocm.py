@@ -56,6 +56,7 @@ import sys
 import tempfile
 import threading
 import time
+import uuid
 from collections.abc import Callable, Iterator
 from concurrent.futures import ThreadPoolExecutor
 from dataclasses import dataclass, field
@@ -982,3 +983,90 @@ def _check_corrupted_prefill_state_is_detected(arch_name: str, read_mode: bool) 
         f"reference (distances {distances}); the comparison cannot detect "
         "transfer corruption"
     )
+
+
+def test_write_mismatched_prompt_fails_at_openai_endpoint():
+    """Neither a whole-page nor a partial-page shortfall may generate tokens."""
+    arch = ARCHS["qwen3_dense"]
+    overrides = _arch_overrides(arch)
+    selector, devices = _visible_devices()
+    prefill_port, decode_port, ping_port = (_open_port() for _ in range(3))
+    configs = [
+        _moriio_config("kv_producer", prefill_port, ping_port),
+        _moriio_config("kv_consumer", decode_port, ping_port),
+    ]
+    with _proxy(ping_port), contextlib.ExitStack() as stack:
+        servers: list[RemoteOpenAIServer] = []
+        stack.callback(RemoteOpenAIServer.shutdown_many, servers)
+        with ThreadPoolExecutor(2) as pool:
+            futures = [
+                pool.submit(
+                    _server,
+                    arch,
+                    overrides,
+                    "TRITON_ATTN",
+                    "NONE",
+                    [devices[index]],
+                    selector,
+                    port=port,
+                    kv_transfer_config=config,
+                )
+                for index, (port, config) in enumerate(
+                    zip((prefill_port, decode_port), configs)
+                )
+            ]
+            for future in futures:
+                servers.append(future.result())
+        prefill, decode = servers
+
+        def peer_params(config):
+            extra = config["kv_connector_extra_config"]
+            return {
+                "remote_engine_id": f"127.0.0.1:{extra['handshake_port']}",
+                "remote_host": "127.0.0.1",
+                "remote_handshake_port": int(extra["handshake_port"]),
+                "remote_notify_port": int(extra["notify_port"]),
+                "remote_block_ids": [],
+                "remote_tp_size": 1,
+                "remote_dp_size": 1,
+            }
+
+        block_size = _block_size(decode)
+        # The first pair fits in one page; the second differs by whole pages.
+        for prefill_len, decode_len in [(3, 4), (4, 4 * block_size)]:
+            transfer_id = f"tx-{uuid.uuid4()}"
+            body = {"model": arch.model, "max_tokens": 1, "temperature": 0}
+            response = requests.post(
+                f"{prefill.url_root}/v1/completions",
+                json={
+                    **body,
+                    "prompt": list(range(1000, 1000 + prefill_len)),
+                    "kv_transfer_params": {
+                        **peer_params(configs[1]),
+                        "transfer_id": transfer_id,
+                        "do_remote_decode": True,
+                        # Client metadata must not override scheduler coverage.
+                        "num_prompt_tokens": decode_len,
+                    },
+                },
+                timeout=120,
+            )
+            response.raise_for_status()
+            response = requests.post(
+                f"{decode.url_root}/v1/completions",
+                json={
+                    **body,
+                    "prompt": list(range(1000, 1000 + decode_len)),
+                    "kv_transfer_params": {
+                        **peer_params(configs[0]),
+                        "transfer_id": transfer_id,
+                        "do_remote_prefill": True,
+                    },
+                },
+                timeout=120,
+            )
+            assert response.status_code == 500, response.text
+            assert "error" in response.json()
+            _wait_for_prefill_blocks_freed(prefill)
+        # A rejected transfer must leave both servers usable.
+        assert _first_step(decode.url_root, arch.model, [1100, 1101])

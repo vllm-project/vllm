@@ -84,6 +84,47 @@ def _get_write_geometry_key(kv_cache: torch.Tensor) -> WriteGeometryKey:
     return (tuple(kv_cache.shape), tuple(kv_cache.stride()), kv_cache.dtype)
 
 
+class WriteCoverageError(MoRIIOError):
+    """WRITE coverage is invalid before any RDMA operation is submitted."""
+
+
+def _validate_write_block_counts(
+    local_blocks: list[int], remote_blocks: list[int], has_mamba: bool
+) -> None:
+    extra_blocks = len(remote_blocks) - len(local_blocks)
+    if extra_blocks != 0 and not (has_mamba and extra_blocks == 1):
+        raise WriteCoverageError(
+            "WRITE source and destination block counts do not match: "
+            f"{len(local_blocks)} != {len(remote_blocks)}"
+        )
+
+
+def validate_write_allocation(
+    task: WriteTask, allocation: RemoteAllocInfo, has_mamba: bool
+) -> None:
+    """Reject incomplete WRITE coverage before any layer submits a transfer."""
+    local_tokens = task.num_prompt_tokens
+    remote_tokens = allocation.num_prompt_tokens
+    if (
+        type(local_tokens) is not int
+        or type(remote_tokens) is not int
+        or local_tokens <= 0
+        or local_tokens != remote_tokens
+    ):
+        raise WriteCoverageError(
+            "WRITE prompt token counts are missing or do not match: "
+            f"prefill={local_tokens}, decode={remote_tokens}. "
+            "Both peers must support WRITE token coverage validation."
+        )
+    remote_blocks = allocation.block_ids
+    if remote_blocks is None or len(task.local_block_ids) != len(remote_blocks):
+        raise WriteCoverageError(
+            "WRITE source and destination cache groups do not match"
+        )
+    for local, remote in zip(task.local_block_ids, remote_blocks, strict=True):
+        _validate_write_block_counts(local, remote, has_mamba)
+
+
 class MoRIIOWriter:
     """Handles write operations for KV cache transfers.
 
@@ -216,15 +257,16 @@ class MoRIIOWriter:
                 # )
                 continue
 
-            # Execute the task
-            try:
-                self._execute_write_task(task)
-            except Exception:
-                logger.exception(
-                    "Write task failed for request %s, marking done",
-                    task.request_id,
-                )
-                self._mark_request_done(task.transfer_id)
+            self._try_execute_write_task(task)
+
+    def _try_execute_write_task(self, task: WriteTask) -> None:
+        try:
+            self._execute_write_task(task)
+        except Exception as exc:
+            logger.exception("Write task failed for request %s", task.request_id)
+            self._mark_request_done(task.transfer_id)
+            if isinstance(exc, WriteCoverageError):
+                self._notify_write_failed(task, str(exc))
 
     def _process_deferred_tasks(self) -> None:
         """Process tasks that were previously deferred."""
@@ -239,34 +281,28 @@ class MoRIIOWriter:
             if self._is_transfer_terminal(task.transfer_id):
                 continue
             if self._is_remote_ready(task):
-                try:
-                    self._execute_write_task(task)
-                except Exception:
-                    logger.exception(
-                        "Deferred write task failed for request %s, marking done",
-                        task.request_id,
-                    )
-                    self._mark_request_done(task.transfer_id)
+                self._try_execute_write_task(task)
             elif (
                 now - task.enqueue_time > defer_timeout
                 and self.worker.moriio_wrapper.fail_unallocated_write(task.transfer_id)
             ):
-                self._notify_write_failed(task, now - task.enqueue_time)
+                self._notify_write_failed(
+                    task, f"timed out after {now - task.enqueue_time:.1f}s"
+                )
             else:
                 still_deferred.append(task)
 
         self._deferred_tasks = still_deferred
 
-    def _notify_write_failed(self, task: WriteTask, age: float) -> None:
+    def _notify_write_failed(self, task: WriteTask, reason: str) -> None:
         self._clear_transfer_state(task.transfer_id)
         logger.error(
-            "Deferred write task for request %s timed out after %.1fs waiting "
-            "for remote blocks",
+            "WRITE transfer failed for request %s: %s",
             task.request_id,
-            age,
+            reason,
         )
-        # No remote allocation arrived, so the decode DP rank that owns the
-        # request is unknown. Tell every rank; the others drop it.
+        # Allocation may not have arrived yet. Notify every decode DP rank;
+        # only the rank owning this transfer will use the failure.
         for decode_dp_rank in range(max(task.remote_dp_size, 1)):
             for remote_ip, remote_port in self._resolve_notify_endpoints(
                 task, decode_dp_rank
@@ -280,7 +316,7 @@ class MoRIIOWriter:
                     )
                 except Exception:
                     logger.exception(
-                        "Failed to notify decode DP rank %d that transfer %s timed out",
+                        "Failed to notify decode DP rank %d that transfer %s failed",
                         decode_dp_rank,
                         task.transfer_id,
                     )
@@ -374,6 +410,8 @@ class MoRIIOWriter:
             )
             return
 
+        validate_write_allocation(task, request_info, self.worker._has_mamba)
+
         # Wait for CUDA event
         # The attention computation of the current layer cannot
         # overlap with the kv transfer task,
@@ -451,9 +489,11 @@ class MoRIIOWriter:
             skip = request_info.num_skip_blocks
             local_blocks = task.local_block_ids[group][skip:]
             remote_blocks = request_info.block_ids[group][skip:]
-            if self.worker._has_mamba:
-                # D can reserve a tail block for the token recomputed locally.
-                remote_blocks = remote_blocks[: len(local_blocks)]
+            _validate_write_block_counts(
+                local_blocks, remote_blocks, self.worker._has_mamba
+            )
+            # Hybrid D can reserve a tail block for its locally recomputed token.
+            remote_blocks = remote_blocks[: len(local_blocks)]
             if (
                 target is None
                 or task.tp_mapping is None
@@ -1125,6 +1165,7 @@ class MoRIIOWrapper:
                 ),
                 num_skip_blocks=int(data.get("num_skip_blocks", 0)),
                 decode_dp_rank=decode_dp_rank,
+                num_prompt_tokens=data.get("num_prompt_tokens"),
             )
 
     def _handle_write_done_message(self, data: dict):
