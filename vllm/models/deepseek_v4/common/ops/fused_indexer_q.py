@@ -569,7 +569,7 @@ class FusedIndexerQRopeMxFp4TritonKernel(
             MXFP4_BLOCK=MXFP4_BLOCK_SIZE,
             index_weights_stride=index_weights.stride(0),
             index_weights_out_stride=index_weights_out.stride(0),
-PRESHUFFLE_FP4=current_platform.is_rocm(),
+            PRESHUFFLE_FP4=current_platform.is_rocm(),
             enable_fp_fusion=True,
             num_warps=1,
         )

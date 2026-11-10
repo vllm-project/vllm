@@ -12,6 +12,9 @@ from vllm.distributed import (
     get_tensor_model_parallel_world_size,
     tensor_model_parallel_all_reduce,
 )
+from vllm.distributed.kv_transfer.kv_connector.utils import (
+    kv_connector_may_load_foreign_kv,
+)
 from vllm.forward_context import get_forward_context
 from vllm.logger import init_logger
 from vllm.model_executor.layers.fusion.quant_activation import QuantizedActivation
@@ -72,28 +75,29 @@ logger = init_logger(__name__)
 
 def _trust_dsv4_extra_cache_nan_free(
     kv_cache_dtype: str,
-    has_kv_transfer: bool,
+    has_foreign_kv_writer: bool,
     has_extra_cache: bool,
 ) -> bool:
     return (
         _ON_GFX950
         and kv_cache_dtype == "fp8_ds_mla"
-        and not has_kv_transfer
+        and not has_foreign_kv_writer
         and has_extra_cache
     )
 
 
-def _aiter_sparse_mla_enabled(has_kv_transfer: bool) -> bool:
+def _aiter_sparse_mla_enabled(has_foreign_kv_writer: bool) -> bool:
     from vllm._aiter_ops import rocm_aiter_ops
 
     if not rocm_aiter_ops.is_triton_sparse_mla_enabled():
         return False
     # The aiter kernel does not scrub NaNs, so like the trust check above it
     # needs a cache only the canonical writer has touched.
-    if has_kv_transfer:
+    if has_foreign_kv_writer:
         logger.warning_once(
             "VLLM_ROCM_USE_AITER_TRITON_SPARSE_MLA is ignored with a KV "
-            "connector; DeepSeek V4 keeps the Triton sparse attention."
+            "connector that may load non-canonical KV; DeepSeek V4 keeps the "
+            "Triton sparse attention."
         )
         return False
     return True
@@ -370,7 +374,7 @@ class DeepseekV41ROCMAiterSparseSWAMetadataBuilder(DeepseekV41SparseSWAMetadataB
             device=self.device,
         )
         self._use_aiter_sparse_mla = _aiter_sparse_mla_enabled(
-            self.vllm_config.kv_transfer_config is not None
+            kv_connector_may_load_foreign_kv(self.vllm_config)
         )
 
     def build(
@@ -569,7 +573,9 @@ class DeepseekV41ROCMAiterMLAAttention(DeepseekV4Attention):
         # so retain the ordinary MXFP8 linear kernel for post-load processing
         # instead of asking for the CUDA-only BMM kernel.
         self.wo_a.is_bmm = False
-        self._has_kv_transfer = vllm_config.kv_transfer_config is not None
+        # Connectors that restore only whole canonical blocks (e.g. UMBP) keep
+        # the NaN-free and aiter sparse MLA fast paths on ROCm.
+        self._has_foreign_kv_writer = kv_connector_may_load_foreign_kv(vllm_config)
         # Block scale for the preshuffled weight; None = not preshuffled.
         self._wqa_wkv_scale: torch.Tensor | None = None
         self._wo_b_scale: torch.Tensor | None = None
@@ -596,7 +602,9 @@ class DeepseekV41ROCMAiterMLAAttention(DeepseekV4Attention):
                     "this rank; PP splits inside a v4.1 index-sharing group "
                     "are not supported."
                 )
-        self._use_aiter_sparse_mla = _aiter_sparse_mla_enabled(self._has_kv_transfer)
+        self._use_aiter_sparse_mla = _aiter_sparse_mla_enabled(
+            self._has_foreign_kv_writer
+        )
         if self.compressor is None and self.indexer is None:
             # Dense layers have nothing to overlap; keep the base serial path.
             self.aux_stream_list = None
@@ -1196,7 +1204,7 @@ class DeepseekV41ROCMAiterMLAAttention(DeepseekV4Attention):
             inv_rope_cos_sin_cache=self.rotary_emb.cos_sin_cache,
             extra_cache_nan_free=_trust_dsv4_extra_cache_nan_free(
                 self.kv_cache_dtype,
-                self._has_kv_transfer,
+                self._has_foreign_kv_writer,
                 not swa_only and kv_cache is not None,
             ),
         )
