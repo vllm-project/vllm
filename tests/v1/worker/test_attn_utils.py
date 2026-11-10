@@ -462,11 +462,11 @@ def test_fast_prefill_skips_lora_batches():
 
 class _FakeSharedHostRegion:
     def __init__(self) -> None:
-        self.cleanup_calls = 0
+        self.abort_calls = 0
         self.base_tensor = torch.empty(1, dtype=torch.int8)
 
-    def cleanup(self) -> None:
-        self.cleanup_calls += 1
+    def abort_startup_cleanup(self) -> None:
+        self.abort_calls += 1
 
 
 @pytest.mark.skipif(not _has_hisparse_ops(), reason="HiSparse CUDA ops not compiled")
@@ -583,7 +583,7 @@ def test_init_hisparse_rolls_back_host_pool(monkeypatch, failure_phase, shared):
             {},
             SimpleNamespace(),
         )
-    assert region.cleanup_calls == int(shared)
+    assert region.abort_calls == int(shared)
     cudart.cudaHostUnregister.assert_called_once_with(registered.data_ptr())
     assert attn_utils_module.get_hisparse_host_pool(vllm_config, None) is not pools[0]
     hisparse_runtime_module.drop_hisparse_host_pool(vllm_config)
