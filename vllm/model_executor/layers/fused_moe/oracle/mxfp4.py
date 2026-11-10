@@ -143,6 +143,13 @@ def _swizzle_cutlass_mxfp4_scales(scale: torch.Tensor) -> torch.Tensor:
 
 
 class Mxfp4MoeBackend(Enum):
+    # No oracle-selected kernel backend. Used for:
+    # - Quark OCP-MX MoE schemes without an oracle backend, which fall back to
+    #   EMULATION (`QuarkOCP_MX_MoEMethod`);
+    # - online MXFP4 with no kernel, which only quantizes and pads the weights
+    #   (`Mxfp4OnlineMoEMethod`, `Mxfp4MoEMethod` skip kernel setup);
+    # - requantization sources (checkpoint methods that only dequantize weights
+    #   for an online method), see `MoEKernelOracle.placeholder_backend`.
     NONE = "None"
     # b12x backends
     B12X_MXFP4_MXFP8 = "B12X_MXFP4_MXFP8"

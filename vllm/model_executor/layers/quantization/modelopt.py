@@ -923,9 +923,10 @@ class ModelOptNvFp4FusedMoE(FusedMoEMethodBase):
             weight_key=kNvfp4Static,
             activation_key=activation_key,
         )
-        if (
-            self.per_token_activation
-            and self.nvfp4_backend != NvFp4MoeBackend.FLASHINFER_TRTLLM
+        # NONE: requantization source, which has no compute backend.
+        if self.per_token_activation and self.nvfp4_backend not in (
+            NvFp4MoeBackend.FLASHINFER_TRTLLM,
+            NvFp4MoeBackend.NONE,
         ):
             raise ValueError(
                 "Per-token NVFP4 activation for pre-quantized weights "

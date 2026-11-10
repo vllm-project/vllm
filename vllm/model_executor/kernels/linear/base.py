@@ -10,6 +10,8 @@ import torch
 from vllm.model_executor.layers.quantization.utils.quant_utils import QuantKey
 
 
+# TODO: extend similarly to oracle/base.py on MOE side, to remove code duplication in
+# the different linear oracles (#65978)
 class LinearKernelOracle:
     """Shared behaviour of linear kernel selection (dispatch).
 

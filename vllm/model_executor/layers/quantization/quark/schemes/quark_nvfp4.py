@@ -51,7 +51,10 @@ class QuarkNVFP4(QuarkScheme):
         self.kernel = init_nvfp4_linear_kernel()
         self.group_size = 16
 
-        if not isinstance(self.kernel, EmulationNvFp4LinearKernel):
+        # No kernel for requantization sources.
+        if self.kernel is not None and not isinstance(
+            self.kernel, EmulationNvFp4LinearKernel
+        ):
             logger.warning_once(
                 "Only EmulationNvFp4LinearKernel NVFP4 dense implementation is "
                 "tested with QuarkNVFP4, got kernel=%s. Correctness is not validated.",
@@ -155,6 +158,7 @@ class QuarkNVFP4(QuarkScheme):
         )
 
         # Convert layer to NVFP4 linear kernel format
+        assert self.kernel is not None  # None for requantization sources
         self.kernel.process_weights_after_loading(layer)
 
     def apply_weights(
@@ -163,4 +167,5 @@ class QuarkNVFP4(QuarkScheme):
         x: torch.Tensor,
         bias: torch.Tensor | None = None,
     ) -> torch.Tensor:
+        assert self.kernel is not None  # None for requantization sources
         return self.kernel.apply_weights(layer=layer, x=x, bias=bias)

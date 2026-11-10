@@ -918,6 +918,10 @@ def choose_mp_linear_kernel(
         type[MPLinearKernel]: Chosen kernel.
 
     """
+    # NOTE: not skipped for requantization sources (unlike the `init_*` selectors):
+    # this returns a kernel class that callers use (`__name__`) and instantiate, so
+    # a placeholder would be required, while no scheme using it implements
+    # `dequantize_weight` and can be a requantization source yet.
     if compute_capability is None:
         if current_platform is None:
             raise ValueError("Cannot determine compute capability")

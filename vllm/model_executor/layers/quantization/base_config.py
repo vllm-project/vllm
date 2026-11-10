@@ -345,13 +345,12 @@ def resolve_quant_method(
             )
             target_spec = target[3] if target is not None else None
 
-    # The checkpoint method of requantized experts is only a dequantization source.
+    # With an online target, the checkpoint method is never used for compute: it
+    # is either a dequantization source or discarded in favour of the online
+    # method (all paths below return the online method or raise). It therefore
+    # needs no kernel backend, which the oracles skip in this scope.
     with (
-        (
-            requantization_source_scope()
-            if online_target is not None and isinstance(layer, RoutedExperts)
-            else nullcontext()
-        ),
+        requantization_source_scope() if online_target is not None else nullcontext(),
         layer_target_spec_scope(target_spec if online_target is None else None),
     ):
         # A `targets` spec without a weight key overrides the activation of the

@@ -54,6 +54,10 @@ logger = init_logger(__name__)
 
 
 class Fp8MoeBackend(Enum):
+    # No kernel backend. Used for:
+    # - out-of-tree platforms (OOT/TPU), where no backend is registered;
+    # - requantization sources (checkpoint methods that only dequantize weights
+    #   for an online method), see `MoEKernelOracle.placeholder_backend`.
     NONE = "NONE"
     FLASHINFER_TRTLLM = "FLASHINFER_TRTLLM"
     FLASHINFER_CUTLASS = "FLASHINFER_CUTLASS"

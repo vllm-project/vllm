@@ -70,9 +70,8 @@ class CompressedTensorsW4A4Mxfp4MoEMethod(CompressedTensorsMoEMethod):
             or moe.moe_backend == "deep_gemm"
             or is_flashinfer_moe_ep_backend(moe.moe_backend)
         ):
-            self.mxfp4_backend, experts_cls = select_mxfp4_moe_backend(moe)
-            assert experts_cls is not None
-            self.experts_cls = experts_cls
+            # `experts_cls` is None for requantization sources (NONE backend).
+            self.mxfp4_backend, self.experts_cls = select_mxfp4_moe_backend(moe)
             self.use_cutlass_mxfp4 = False
         elif self.use_cutlass_mxfp4:
             logger.info_once("Using CutlassExpertsMxfp4 for MXFP4 MoE")

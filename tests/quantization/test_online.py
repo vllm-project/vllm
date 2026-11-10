@@ -3134,6 +3134,14 @@ _ORACLE_MODULE = "vllm.model_executor.layers.fused_moe.oracle"
             2,
             id="w4a8-int8",
         ),
+        pytest.param(
+            "unquantized",
+            "select_unquantized_moe_backend",
+            "UnquantizedMoEKernelOracle",
+            "UnquantizedMoeBackend",
+            0,
+            id="unquantized",
+        ),
     ],
 )
 def test_moe_oracles_skip_dispatch_for_requantization_source(

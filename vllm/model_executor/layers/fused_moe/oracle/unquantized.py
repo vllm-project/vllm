@@ -235,7 +235,13 @@ def select_unquantized_moe_backend(
 ) -> tuple[UnquantizedMoeBackend, type[mk.FusedMoEExperts] | None]:
     """Select the primary Unquantized MoE backend.
     Note: Shape-specific fallbacks may still occur at runtime.
+    Returns `(NONE, None)` when an online method replaces the unquantized one.
     """
+    # TODO: migrate to oracle base method.
+    source = UnquantizedMoEKernelOracle.maybe_skip_for_requantization_source()
+    if source is not None:
+        return source
+
     if current_platform.is_tpu():
         return UnquantizedMoeBackend.TPU, None
 

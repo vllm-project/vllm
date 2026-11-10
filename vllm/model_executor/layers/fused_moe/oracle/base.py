@@ -48,6 +48,8 @@ class MoEKernelOracle(ABC, Generic[BackendT]):
     # Backend returned (with no experts class) when selection is skipped for an
     # online requantization source, which only dequantizes weights. Oracles that
     # support requantization sources set it, e.g. to their enum's `NONE`.
+    # NB: `NONE` may carry other meanings in some enums (e.g. no backend on an
+    # out-of-tree platform for fp8, kernel-less online mxfp4): see each enum.
     placeholder_backend: BackendT
 
     def __init__(
