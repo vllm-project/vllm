@@ -139,6 +139,7 @@ class BlockPool:
         metrics_collector: KVCacheMetricsCollector | None = None,
         num_hash_lookahead_tokens: int = 0,
         medium: str = MEDIUM_GPU,
+        contiguous_allocation: bool | None = None,
     ):
         assert isinstance(num_gpu_blocks, int) and num_gpu_blocks > 0
         self.num_gpu_blocks = num_gpu_blocks
@@ -147,7 +148,14 @@ class BlockPool:
         self.hash_block_size = hash_block_size
         self.num_hash_lookahead_tokens = num_hash_lookahead_tokens
         self._weak_self = weakref.ref(self)
-        self.use_contiguous_allocation = envs.VLLM_KV_CONTIG_ALLOC
+        # Pools whose blocks form NIXL transfer descriptors want contiguous
+        # runs; offload pools pay the scan cost on every batched allocation
+        # without any transfer-side benefit, so they opt out.
+        self.use_contiguous_allocation = (
+            envs.VLLM_KV_CONTIG_ALLOC
+            if contiguous_allocation is None
+            else contiguous_allocation
+        )
         # All kv-cache blocks.
         self.blocks: list[KVCacheBlock] = [
             KVCacheBlock(idx, pool=self._weak_self) for idx in range(num_gpu_blocks)
@@ -778,21 +786,20 @@ class BlockPool:
             self.get_num_free_blocks(),
             _CONTIGUOUS_ALLOC_WINDOW_FACTOR * num_blocks,
         )
-        window_blocks: list[KVCacheBlock] = []
+        runs: list[list[KVCacheBlock]] = []
+        capacity = 0
         if window_size:
             for index, block in enumerate(
                 self.free_block_queue.iter_blocks_after(None), start=1
             ):
                 if block.block_id not in self._reuse_watchers:
-                    window_blocks.append(block)
-                if index == window_size:
+                    if not runs or abs(block.block_id - runs[-1][-1].block_id) != 1:
+                        runs.append([])
+                    runs[-1].append(block)
+                    if len(runs[-1]) >= 2:
+                        capacity += 1 if len(runs[-1]) > 2 else 2
+                if index == window_size or capacity >= num_blocks:
                     break
-
-        runs: list[list[KVCacheBlock]] = []
-        for block in window_blocks:
-            if not runs or abs(block.block_id - runs[-1][-1].block_id) != 1:
-                runs.append([])
-            runs[-1].append(block)
 
         for run in runs:
             if run[0].block_id > run[-1].block_id:

@@ -2345,7 +2345,8 @@ environment_variables: dict[str, Callable[[], Any]] = {
     "VLLM_KV_OFFLOAD_MAX_BATCH_DESCRIPTORS": lambda: int(
         os.getenv("VLLM_KV_OFFLOAD_MAX_BATCH_DESCRIPTORS", "0")
     ),
-    # Prefer contiguous physical block-ID runs for large KV-cache allocations.
+    # Prefer contiguous physical block-ID runs for large KV-cache allocations
+    # in the GPU block pool; offload CPU pools always keep LRU order.
     "VLLM_KV_CONTIG_ALLOC": lambda: bool(int(os.getenv("VLLM_KV_CONTIG_ALLOC", "0"))),
     # On WSL2 with a compatible kernel (>= 4.19.121), pinned memory is
     # supported but disabled by default due to a small performance regression.

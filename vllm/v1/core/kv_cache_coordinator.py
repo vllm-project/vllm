@@ -97,6 +97,7 @@ class KVCacheCoordinator(ABC):
         hash_block_size: int,
         metrics_collector: KVCacheMetricsCollector | None = None,
         num_hash_lookahead_tokens: int = 0,
+        contiguous_allocation: bool | None = None,
     ):
         self.kv_cache_config = kv_cache_config
         # The scheduling granularity (LCM of all group block sizes), must be a multiple
@@ -114,6 +115,7 @@ class KVCacheCoordinator(ABC):
             enable_kv_cache_events=enable_kv_cache_events,
             metrics_collector=metrics_collector,
             num_hash_lookahead_tokens=num_hash_lookahead_tokens,
+            contiguous_allocation=contiguous_allocation,
         )
 
         self.single_type_managers = tuple(
@@ -465,6 +467,7 @@ class KVCacheCoordinatorNoPrefixCache(KVCacheCoordinator):
         hash_block_size: int,
         metrics_collector: KVCacheMetricsCollector | None = None,
         num_hash_lookahead_tokens: int = 0,
+        contiguous_allocation: bool | None = None,
     ):
         super().__init__(
             kv_cache_config,
@@ -477,6 +480,7 @@ class KVCacheCoordinatorNoPrefixCache(KVCacheCoordinator):
             hash_block_size=hash_block_size,
             metrics_collector=metrics_collector,
             num_hash_lookahead_tokens=num_hash_lookahead_tokens,
+            contiguous_allocation=contiguous_allocation,
         )
         self.num_single_type_manager = len(self.single_type_managers)
 
@@ -510,6 +514,7 @@ class UnitaryKVCacheCoordinator(KVCacheCoordinator):
         hash_block_size: int,
         metrics_collector: KVCacheMetricsCollector | None = None,
         num_hash_lookahead_tokens: int = 0,
+        contiguous_allocation: bool | None = None,
     ):
         super().__init__(
             kv_cache_config,
@@ -522,6 +527,7 @@ class UnitaryKVCacheCoordinator(KVCacheCoordinator):
             hash_block_size=hash_block_size,
             metrics_collector=metrics_collector,
             num_hash_lookahead_tokens=num_hash_lookahead_tokens,
+            contiguous_allocation=contiguous_allocation,
         )
         self.group_block_size = self.kv_cache_config.kv_cache_groups[0].block_size
         self.manager_config = self.kv_cache_config.kv_cache_groups[0].manager_config
@@ -575,6 +581,7 @@ class HybridKVCacheCoordinator(KVCacheCoordinator):
         metrics_collector: KVCacheMetricsCollector | None = None,
         num_hash_lookahead_tokens: int = 0,
         allow_partial_hash_hits: bool = True,
+        contiguous_allocation: bool | None = None,
     ):
         super().__init__(
             kv_cache_config,
@@ -587,6 +594,7 @@ class HybridKVCacheCoordinator(KVCacheCoordinator):
             hash_block_size=hash_block_size,
             metrics_collector=metrics_collector,
             num_hash_lookahead_tokens=num_hash_lookahead_tokens,
+            contiguous_allocation=contiguous_allocation,
         )
         # hash_block_size: the block size used to compute block hashes.
         # The actual block size usually equals hash_block_size, but in cases where
@@ -841,6 +849,7 @@ def get_kv_cache_coordinator(
     metrics_collector: KVCacheMetricsCollector | None = None,
     num_hash_lookahead_tokens: int = 0,
     allow_partial_hash_hits: bool = True,
+    contiguous_allocation: bool | None = None,
 ) -> KVCacheCoordinator:
     if not enable_caching:
         return KVCacheCoordinatorNoPrefixCache(
@@ -853,6 +862,7 @@ def get_kv_cache_coordinator(
             hash_block_size=hash_block_size,
             metrics_collector=metrics_collector,
             num_hash_lookahead_tokens=num_hash_lookahead_tokens,
+            contiguous_allocation=contiguous_allocation,
         )
     if len(kv_cache_config.kv_cache_groups) == 1:
         return UnitaryKVCacheCoordinator(
@@ -866,6 +876,7 @@ def get_kv_cache_coordinator(
             hash_block_size=hash_block_size,
             metrics_collector=metrics_collector,
             num_hash_lookahead_tokens=num_hash_lookahead_tokens,
+            contiguous_allocation=contiguous_allocation,
         )
     return HybridKVCacheCoordinator(
         kv_cache_config,
@@ -879,4 +890,5 @@ def get_kv_cache_coordinator(
         metrics_collector=metrics_collector,
         num_hash_lookahead_tokens=num_hash_lookahead_tokens,
         allow_partial_hash_hits=allow_partial_hash_hits,
+        contiguous_allocation=contiguous_allocation,
     )

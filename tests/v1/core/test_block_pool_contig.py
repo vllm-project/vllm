@@ -140,3 +140,59 @@ def test_contiguous_alloc_enabled_from_environment(monkeypatch: pytest.MonkeyPat
     pool = make_pool_with_free_order([12, 4, 5, 6, 7, 8, 9, 10, 11, 3, 2, 1])
 
     assert pool.use_contiguous_allocation
+
+
+def test_contiguous_alloc_constructor_overrides_environment(
+    monkeypatch: pytest.MonkeyPatch,
+):
+    monkeypatch.setenv("VLLM_KV_CONTIG_ALLOC", "1")
+    free_order = [12, 4, 5, 6, 7, 8, 9, 10, 11, 3, 2, 1]
+
+    pool = BlockPool(
+        num_gpu_blocks=len(free_order) + 1,
+        enable_caching=False,
+        hash_block_size=16,
+        contiguous_allocation=False,
+    )
+    blocks = pool.get_new_blocks(pool.get_num_free_blocks())
+    blocks_by_id = {block.block_id: block for block in blocks}
+    pool.free_blocks([blocks_by_id[block_id] for block_id in free_order])
+
+    assert not pool.use_contiguous_allocation
+
+    allocated = pool.get_new_blocks(8)
+
+    assert [block.block_id for block in allocated] == free_order[:8]
+
+
+def test_contiguous_alloc_constructor_enables_without_environment(
+    monkeypatch: pytest.MonkeyPatch,
+):
+    monkeypatch.delenv("VLLM_KV_CONTIG_ALLOC", raising=False)
+    free_order = [12, 4, 5, 6, 7, 8, 9, 10, 11, 3, 2, 1]
+
+    pool = BlockPool(
+        num_gpu_blocks=len(free_order) + 1,
+        enable_caching=False,
+        hash_block_size=16,
+        contiguous_allocation=True,
+    )
+    blocks = pool.get_new_blocks(pool.get_num_free_blocks())
+    blocks_by_id = {block.block_id: block for block in blocks}
+    pool.free_blocks([blocks_by_id[block_id] for block_id in free_order])
+
+    allocated = pool.get_new_blocks(8)
+
+    assert [block.block_id for block in allocated] == [4, 5, 6, 7, 8, 9, 10, 11]
+
+
+def test_contiguous_alloc_stops_scanning_once_capacity_reached():
+    # A sufficient run early in the LRU order ends the window scan before the
+    # longer run later in the queue is ever visited.
+    free_order = [5, 6, 7, 8, 1, 10, 11, 12, 13, 14, 9, 2, 3, 4]
+    pool = make_pool_with_free_order(free_order)
+    pool.use_contiguous_allocation = True
+
+    blocks = pool.get_new_blocks(4)
+
+    assert [block.block_id for block in blocks] == [5, 6, 7, 8]
