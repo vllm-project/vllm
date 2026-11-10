@@ -2002,6 +2002,43 @@ def test_pooling_cache_miss_is_a_request_error_and_batch_continues():
     assert torch.equal(succeeded.outputs.data, torch.tensor([1.0, 2.0]))
 
 
+@pytest.mark.parametrize("with_queue", [False, True])
+@pytest.mark.skip_global_cleanup
+def test_pooling_request_aborted_by_engine_finishes_as_pooling_output(with_queue):
+    """The engine aborts a queued pooling request (by a pause, sleep or
+    shutdown) with an output carrying no pooler output; the request still
+    finishes as a pooling output, for `AsyncLLM` (queue) and `LLMEngine`."""
+    output_processor = OutputProcessor(tokenizer=None, log_stats=False)
+    request = EngineCoreRequest(
+        request_id="request-int",
+        external_req_id="request",
+        prompt_token_ids=[1, 2],
+        mm_features=None,
+        arrival_time=0,
+        lora_request=None,
+        cache_salt=None,
+        data_parallel_rank=None,
+        sampling_params=None,
+        pooling_params=PoolingParams(task="embed"),
+    )
+    queue = (
+        RequestOutputCollector(RequestOutputKind.FINAL_ONLY, request.request_id)
+        if with_queue
+        else None
+    )
+    output_processor.add_request(request, prompt=None, queue=queue)
+
+    processed = output_processor.process_outputs(
+        [EngineCoreOutput(request.request_id, [], finish_reason=FinishReason.ABORT)]
+    )
+
+    output = queue.get_nowait() if queue else processed.request_outputs[0]
+    assert isinstance(output, PoolingRequestOutput)
+    assert output.finished
+    assert output.outputs.data.numel() == 0
+    assert not output_processor.has_unfinished_requests()
+
+
 @pytest.mark.skip_global_cleanup
 def test_async_pooling_cache_miss_does_not_fail_output_processor():
     output_processor = OutputProcessor(tokenizer=None, log_stats=False)

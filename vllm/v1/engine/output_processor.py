@@ -808,15 +808,22 @@ class OutputProcessor:
             request_error = None
             if (
                 req_state.detokenizer is None
-                and engine_core_output.mm_cache_miss_hashes
-                and finish_reason == FinishReason.ERROR
+                and pooling_output is None
+                and finish_reason is not None
             ):
-                request_error = RequestError(
-                    code="multimodal_cache_miss",
-                    message="Multi-modal processor cache miss.",
-                    retryable=True,
-                )
+                # A pooling request the engine ended without a pooler output
+                # (aborted, or failed before it ran) finishes as a pooling
+                # output, as frontend aborts do.
                 pooling_output = EMPTY_CPU_TENSOR
+                if (
+                    engine_core_output.mm_cache_miss_hashes
+                    and finish_reason == FinishReason.ERROR
+                ):
+                    request_error = RequestError(
+                        code="multimodal_cache_miss",
+                        message="Multi-modal processor cache miss.",
+                        retryable=True,
+                    )
 
             if pooling_output is None:
                 assert req_state.detokenizer is not None

@@ -7,7 +7,7 @@ from unittest.mock import MagicMock, call
 import pytest
 
 from tests.utils import create_new_process_for_each_test
-from vllm import LLM
+from vllm import LLM, PoolingParams
 from vllm.engine.arg_utils import EngineArgs
 from vllm.exceptions import ProfilerAlreadyActiveError
 from vllm.sampling_params import SamplingParams, StructuredOutputsParams
@@ -377,4 +377,33 @@ def test_inproc_sleep_delivers_abort_outputs(monkeypatch: pytest.MonkeyPatch):
             if output.finished:
                 finished[output.request_id] = output.outputs[0].finish_reason
     assert finished == {"r0": "abort", "r1": "abort"}
+    assert not engine.has_unfinished_requests()
+
+
+@create_new_process_for_each_test()
+def test_inproc_sleep_finishes_queued_pooling_request(
+    monkeypatch: pytest.MonkeyPatch,
+):
+    """In-process, a sleep that aborts a queued embedding request finishes it
+    as a pooling output on the next step."""
+    monkeypatch.setenv("VLLM_ENABLE_V1_MULTIPROCESSING", "0")
+    engine = LLMEngine.from_engine_args(
+        EngineArgs(
+            model="Qwen/Qwen3-Embedding-0.6B",
+            runner="pooling",
+            max_model_len=128,
+            enforce_eager=True,
+            enable_sleep_mode=True,
+            gpu_memory_utilization=0.5,
+        )
+    )
+    engine.add_request("e0", "Hello, my name is", PoolingParams(task="embed"))
+
+    engine.sleep(level=1)
+    engine.wake_up()
+
+    outputs = engine.step()
+    assert [(output.request_id, output.finished) for output in outputs] == [
+        ("e0", True)
+    ]
     assert not engine.has_unfinished_requests()
