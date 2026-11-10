@@ -71,6 +71,7 @@ from vllm.v1.core.sched.output import (
     SchedulerOutput,
 )
 from vllm.v1.core.single_type_kv_cache_manager import (
+    ChunkedLocalAttentionManager,
     FullAttentionManager,
     SlidingWindowManager,
 )
@@ -306,6 +307,196 @@ def test_swa_offload_window_covers_unaligned_hit(
     if needs_left:
         assert {left_key, swa[end - 1]} <= set(job.keys)
     manager.complete_load(job.keys, state.req_context)
+
+
+def _make_chunked_local_scheduler(
+    manager: OffloadingManager, blocks_per_chunk: int
+) -> tuple[OffloadingConnectorScheduler, list[KVCacheGroupSpec]]:
+    """Full attention plus Llama 4 style chunked local attention (chunk 64)."""
+    config = create_vllm_config(
+        kv_connector="OffloadingConnector",
+        kv_role="kv_both",
+        kv_connector_extra_config={"blocks_per_chunk": blocks_per_chunk},
+    )
+    attention = dict(block_size=16, num_kv_heads=1, head_size=1, dtype=torch.float32)
+    groups = [
+        KVCacheGroupSpec(["full"], FullAttentionSpec(**attention)),
+        KVCacheGroupSpec(
+            ["local"], ChunkedLocalAttentionSpec(**attention, attention_chunk_size=64)
+        ),
+    ]
+    kv_config = KVCacheConfig(
+        num_blocks=64, kv_cache_tensors=[], kv_cache_groups=groups
+    )
+    spec = MockOffloadingSpec(build_offloading_config(config, kv_config))
+    spec.manager = manager
+    return OffloadingConnectorScheduler(spec, config, kv_config), groups
+
+
+def _new_chunked_local_request(
+    sched: OffloadingConnectorScheduler, req_id: str, num_tokens: int
+) -> tuple[Request, RequestOffloadState]:
+    """A prompt of num_tokens + 1 tokens: num_tokens of them can hit."""
+    init_none_hash(sha256)
+    request = Request(
+        request_id=req_id,
+        prompt_token_ids=list(range(num_tokens + 1)),
+        sampling_params=SamplingParams(max_tokens=1),
+        pooling_params=None,
+        block_hasher=get_request_block_hasher(16, sha256),
+    )
+    sched.on_new_request(request)
+    state = sched._req_status[req_id]
+    state.update_offload_keys()
+    return request, state
+
+
+def _load_chunked_local_hit(
+    sched: OffloadingConnectorScheduler,
+    groups: list[KVCacheGroupSpec],
+    request: Request,
+    external: int,
+) -> tuple[OffloadKey, ...]:
+    """Allocate the hit with the real block managers and return the load's keys."""
+    pool = BlockPool(64, enable_caching=True, hash_block_size=16)
+    managers = []
+    for i, group in enumerate(groups):
+        cls = FullAttentionManager if i == 0 else ChunkedLocalAttentionManager
+        m = cls(
+            kv_cache_spec=group.kv_cache_spec,
+            block_pool=pool,
+            enable_caching=True,
+            kv_cache_group_id=i,
+            scheduler_block_size=16,
+        )
+        m.add_local_computed_blocks(request.request_id, [], 0, external)
+        m.allocate_external_computed_blocks(request.request_id, 0, external)
+        managers.append(m)
+    blocks = KVCacheBlocks(tuple(m.req_to_blocks[request.request_id] for m in managers))
+    sched.update_state_after_alloc(request, blocks, external)
+    sched._release_step()
+    [job] = [j for j in sched._jobs.values() if j.req_id == request.request_id]
+    return job.keys
+
+
+@pytest.mark.cpu_test
+@pytest.mark.parametrize("blocks_per_chunk", [1, 2])
+@pytest.mark.parametrize("num_tokens", [64, 96, 128, 160, 192])
+def test_chunked_local_lookup_reads_only_the_attention_chunk(
+    blocks_per_chunk, num_tokens
+):
+    """The load reads only the attention chunk holding the next token (the
+    allocator nulls the blocks before it), and the lookup needs only those
+    keys."""
+    tokens_per_chunk = 16 * blocks_per_chunk
+    manager = CPUOffloadingManager(num_chunks=100)
+    sched, groups = _make_chunked_local_scheduler(manager, blocks_per_chunk)
+    request, state = _new_chunked_local_request(sched, "req", num_tokens)
+    full, local = (group.offload_keys for group in state.group_states)
+    local_start = num_tokens // 64 * 64
+    attention_chunk = local[local_start // tokens_per_chunk :]
+    store = manager.prepare_store(full + attention_chunk, state.req_context)
+    assert store is not None
+    manager.complete_store(store.keys_to_store, state.req_context)
+
+    assert sched.get_num_new_matched_tokens(request, 0) == (num_tokens, True)
+    load_keys = sched.lookup_request(state.req_context)
+    assert load_keys == full + attention_chunk
+    assert _load_chunked_local_hit(sched, groups, request, num_tokens) == tuple(
+        load_keys
+    )
+
+
+@pytest.mark.cpu_test
+@pytest.mark.parametrize(
+    "local_state",
+    ["missing_before", "pending_before", "pending_current", "missing_current"],
+)
+def test_chunked_local_lookup_ignores_chunks_before_the_attention_chunk(
+    local_state,
+):
+    """Only the attention chunk's keys decide a chunked local group's hit."""
+    manager = CPUOffloadingManager(num_chunks=100)
+    sched, _ = _make_chunked_local_scheduler(manager, blocks_per_chunk=1)
+    request, state = _new_chunked_local_request(sched, "req", 96)
+    full, local = (group.offload_keys for group in state.group_states)
+    # The attention chunk for a 96-token hit is local[4:6].
+    ready, pending = full + local[4:], local[:4]
+    if local_state == "missing_before":
+        pending = []
+    elif local_state == "pending_current":
+        ready, pending = full + local[5:], local[4:5]
+    elif local_state == "missing_current":
+        ready, pending = full + local[5:], []
+    store = manager.prepare_store(ready, state.req_context)
+    assert store is not None
+    manager.complete_store(store.keys_to_store, state.req_context)
+    if pending:
+        assert manager.prepare_store(pending, state.req_context) is not None
+
+    expected = {
+        "pending_current": (None, False),
+        # The hit can still end where the attention chunk starts.
+        "missing_current": (64, True),
+    }.get(local_state, (96, True))
+    assert sched.get_num_new_matched_tokens(request, 0) == expected
+
+
+@pytest.mark.cpu_test
+@pytest.mark.parametrize("blocks_per_chunk", [1, 3])
+def test_chunked_local_load_window_ends_at_the_attention_chunk_start(
+    blocks_per_chunk,
+):
+    sched, _ = _make_chunked_local_scheduler(
+        CPUOffloadingManager(num_chunks=1), blocks_per_chunk
+    )
+    window = sched.config.kv_group_configs[1].load_window_size_in_chunks
+    if blocks_per_chunk == 1:
+        # 64-token attention chunks over 16-token offload chunks
+        assert [window(n) for n in (64, 65, 80, 96, 127, 128)] == [0, 1, 1, 2, 4, 0]
+    else:
+        # 48-token offload chunks: 64 and 128 fall inside a chunk
+        assert [window(n) for n in (64, 96, 128, 129, 144)] == [0, 1, 0, 1, 1]
+
+
+@pytest.mark.cpu_test
+def test_chunked_local_hit_survives_eviction_of_unread_chunks():
+    """A load refreshes only the chunks it reads, so the CPU tier evicts the
+    older chunked-local chunks first. The next lookup must not require them."""
+    manager = CPUOffloadingManager(num_chunks=12)
+    sched, groups = _make_chunked_local_scheduler(manager, blocks_per_chunk=1)
+
+    request, state = _new_chunked_local_request(sched, "first", 96)
+    full, local = (group.offload_keys for group in state.group_states)
+    store = manager.prepare_store(full + local, state.req_context)
+    assert store is not None and not store.evicted_keys
+    manager.complete_store(store.keys_to_store, state.req_context)
+    manager.on_request_finished(state.req_context)
+
+    request, state = _new_chunked_local_request(sched, "second", 96)
+    assert sched.get_num_new_matched_tokens(request, 0) == (96, True)
+    keys = _load_chunked_local_hit(sched, groups, request, 96)
+    assert set(keys) == set(full + local[4:])
+    [job_id] = state.transfer_jobs
+    sched.update_connector_output(
+        KVConnectorOutput(
+            kv_connector_worker_meta=OffloadingWorkerMetadata(
+                completed_jobs={job_id: 1}
+            )
+        )
+    )
+    manager.on_request_finished(state.req_context)
+
+    other = ReqContext(req_id="other")
+    store = manager.prepare_store(
+        [make_offload_key(f"x{i}".encode(), 0) for i in range(4)], other
+    )
+    assert store is not None and set(store.evicted_keys) == set(local[:4])
+    manager.complete_store(store.keys_to_store, other)
+
+    request, state = _new_chunked_local_request(sched, "third", 96)
+    assert sched.get_num_new_matched_tokens(request, 0) == (96, True)
+    assert _load_chunked_local_hit(sched, groups, request, 96) == tuple(keys)
 
 
 def _make_partial_tail_scheduler(

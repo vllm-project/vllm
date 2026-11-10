@@ -38,6 +38,7 @@ from vllm.v1.core.kv_cache_utils import eagle_proof_margin
 from vllm.v1.core.sched.output import SchedulerOutput
 from vllm.v1.core.single_type_kv_cache_manager import SingleTypeKVCacheManager
 from vllm.v1.kv_cache_interface import (
+    ChunkedLocalAttentionSpec,
     KVCacheConfig,
     KVCacheSpec,
     MambaSpec,
@@ -118,6 +119,16 @@ class GroupOffloadConfig(NamedTuple):
 
     def load_window_size_in_chunks(self, num_tokens: int) -> int | None:
         window = self.sliding_window_size_in_chunks
+        if isinstance(self.kv_cache_spec, ChunkedLocalAttentionSpec):
+            # The next token attends only within its attention chunk, and the
+            # allocator nulls the blocks before that chunk.
+            chunk_size = self.kv_cache_spec.attention_chunk_size
+            local_start = num_tokens // chunk_size * chunk_size
+            if local_start == num_tokens:
+                return 0
+            return cdiv(num_tokens, self.tokens_per_chunk) - (
+                local_start // self.tokens_per_chunk
+            )
         if isinstance(self.kv_cache_spec, SlidingWindowSpec):
             assert window is not None
             # Lookup rounds the right edge up, but allocation retains the
@@ -909,6 +920,32 @@ class OffloadingConnectorScheduler(SchedulerView):
                 )
         return None if defer_lookup or pending_in_window else consecutive_hits
 
+    def _local_chunk_lookup(
+        self,
+        keys: Sequence[OffloadKey],
+        first_idx: int,
+        req_context: ReqContext,
+    ) -> int | None:
+        """Return the end index (in `keys`) of the consecutive hits from
+        `first_idx`, the first offload chunk of the attention chunk being read.
+        Returns None if the backend deferred a lookup or a hit isn't ready."""
+        defer_lookup = False
+        end_idx = first_idx
+        for key in keys[first_idx:]:
+            match self.manager.lookup(key, req_context):
+                case LookupResult.HIT:
+                    end_idx += 1
+                case LookupResult.HIT_PENDING:
+                    defer_lookup = True
+                    end_idx += 1
+                case LookupResult.RETRY:
+                    # Don't break: keep scanning to let manager kick off
+                    # async lookups.
+                    defer_lookup = True
+                case LookupResult.MISS:
+                    break
+        return None if defer_lookup else end_idx
+
     def _lookup_complete_chunks(
         self,
         req_status: RequestOffloadState,
@@ -1056,12 +1093,24 @@ class OffloadingConnectorScheduler(SchedulerView):
                         candidate_end
                     )
                     assert initial_window is not None
-                    num_hit_chunks = self._sliding_window_lookup(
-                        offload_keys,
-                        required_window,
-                        req_status.req_context,
-                        initial_window + int(is_eagle_unverified),
+                    is_chunked_local = isinstance(
+                        group_config.kv_cache_spec, ChunkedLocalAttentionSpec
                     )
+                    if is_chunked_local and not is_eagle_unverified:
+                        # As in the GPU prefix cache: hits run forward from the
+                        # start of the attention chunk.
+                        num_hit_chunks = self._local_chunk_lookup(
+                            offload_keys,
+                            max(0, len(offload_keys) - initial_window),
+                            req_status.req_context,
+                        )
+                    else:
+                        num_hit_chunks = self._sliding_window_lookup(
+                            offload_keys,
+                            required_window,
+                            req_status.req_context,
+                            initial_window + int(is_eagle_unverified),
+                        )
                 if num_hit_chunks == 0:
                     return 0, full_attention_hit_boundary
 
