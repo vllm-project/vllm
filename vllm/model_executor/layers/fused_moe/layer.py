@@ -139,6 +139,7 @@ def FusedMoEFactory(
     routed_input_transform: torch.nn.Module | None = None,
     routed_output_transform: torch.nn.Module | None = None,
     apply_routed_scale_to_output: bool = False,
+    divide_shared_output_in_fp16: bool = False,
     zero_expert_type: str | None = None,
     hash_indices_table: torch.Tensor | None = None,
     bias_vl: torch.Tensor | None = None,
@@ -219,6 +220,10 @@ def FusedMoEFactory(
         routed_output_transform: Output transformation module
         apply_routed_scale_to_output: Whether to apply routed_scaling_factor to
                                       output instead of topk_weights
+        divide_shared_output_in_fp16: With apply_routed_scale_to_output, divide
+            the shared expert output by routed_scaling_factor for FP16 instead
+            of scaling the routed output. Only set this if the model's decoder
+            layer compensates with matching divisions (see DeepseekV2).
         zero_expert_type: Type of zero expert handling
         hash_indices_table: Hash table for expert indices
         bias_vl: Vision routing bias for image tokens (Deepseek V4)
@@ -549,6 +554,7 @@ def FusedMoEFactory(
         routed_scaling_factor=routed_scaling_factor
         if apply_routed_scale_to_output
         else 1.0,
+        divide_shared_output_in_fp16=divide_shared_output_in_fp16,
         **runner_args if runner_args is not None else {},
     )
 

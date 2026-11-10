@@ -204,7 +204,14 @@ class EPLBController:
     ) -> None:
         if self.state is None or not self.parallel_config.enable_eplb:
             return
-        self.state.prepare_forward(model_config, num_unpadded_tokens, ubatch_slices)
+        # Warmup and capture forwards (suppress()) are not in step with any
+        # peer rank, so a routing policy's per-forward collective must not run.
+        self.state.prepare_forward(
+            model_config,
+            num_unpadded_tokens,
+            ubatch_slices,
+            routing_hooks=not self.suppressed,
+        )
 
     def setup_from_mapping(
         self,

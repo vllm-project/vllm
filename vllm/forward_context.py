@@ -43,10 +43,6 @@ class BatchDescriptor:
     """
     True if all the requests in the batch have the same number of tokens.
     """
-    has_lora: bool = False
-    """
-    Whether this batch has active LoRA adapters.
-    """
     num_active_loras: int = 0
     """
     Number of distinct active LoRA adapters in this batch.

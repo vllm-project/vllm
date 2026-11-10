@@ -1,13 +1,20 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 from collections.abc import Callable
+from typing import Any
 from unittest.mock import patch
 
 import pytest
 import torch
+from transformers import DeepseekV3Config
 
 from vllm._aiter_ops import rocm_aiter_ops
+from vllm.config import (
+    VllmConfig,
+    set_current_vllm_config,
+)
 from vllm.distributed.eplb.eplb_state import EplbLayerState
+from vllm.model_executor.custom_op import PluggableLayer, op_registry_oot
 from vllm.model_executor.layers.fused_moe.config import RoutingMethodType
 from vllm.model_executor.layers.fused_moe.router.base_router import (
     _eplb_map_and_record_triton,
@@ -25,8 +32,14 @@ from vllm.model_executor.layers.fused_moe.router.grouped_topk_router import (
 from vllm.model_executor.layers.fused_moe.router.router_factory import (
     create_fused_moe_router,
 )
+from vllm.model_executor.layers.fused_moe.router.routing_simulator_router import (
+    RoutingSimulatorRouter,
+)
+from vllm.model_executor.model_loader.weight_utils import default_weight_loader
+from vllm.model_executor.models.deepseek_v2 import DeepseekV2MoE
 from vllm.model_executor.models.llama4 import Llama4MoE
 from vllm.platforms import current_platform
+from vllm.utils.torch_utils import set_default_torch_dtype
 
 DEVICE = current_platform.device_type
 
@@ -76,6 +89,140 @@ def test_degenerate_grouped_config_uses_standard_topk() -> None:
         baseline_weights,
         baseline_ids,
     )
+
+
+def test_select_experts_rejects_noncontiguous_custom_routing() -> None:
+    """A custom routing function returning column slices of one packed tensor
+    would otherwise reach every MoE backend with the wrong row stride."""
+
+    def packed_routing(hidden_states, gating_output, topk, renormalize):
+        return gating_output[:, :topk], gating_output[:, topk:].to(torch.int32)
+
+    router = create_fused_moe_router(
+        top_k=1,
+        global_num_experts=4,
+        custom_routing_function=packed_routing,
+    )
+    routing = torch.tensor([[0.5, 3.0], [0.25, 1.0]], device=DEVICE)
+
+    with pytest.raises(ValueError, match="non-contiguous"):
+        router.select_experts(torch.empty((2, 8), device=DEVICE), routing)
+
+
+@pytest.fixture
+def oot_registry_scope():
+    original = op_registry_oot.copy()
+    try:
+        yield
+    finally:
+        op_registry_oot.clear()
+        op_registry_oot.update(original)
+
+
+@pytest.mark.parametrize("scheme", ["plain", "grouped_sigmoid_bias"])
+def test_pluggable_router_output_parity(oot_registry_scope, scheme):
+    kwargs: dict[str, Any] = dict(top_k=2, global_num_experts=8)
+    if scheme == "grouped_sigmoid_bias":
+        kwargs.update(
+            use_grouped_topk=True,
+            num_expert_group=2,
+            topk_group=1,
+            scoring_func="sigmoid",
+            e_score_correction_bias=torch.nn.Parameter(
+                torch.arange(8, dtype=torch.float32, device=DEVICE) / 10
+            ),
+        )
+    baseline = create_fused_moe_router(**kwargs)
+
+    oot_router_cls = type("OOTRouter", (type(baseline),), {})
+
+    PluggableLayer.register_oot(oot_router_cls, name=type(baseline).__name__)
+    router = create_fused_moe_router(**kwargs)
+    assert type(router) is oot_router_cls
+    assert router.kernel_routing_method_type == baseline.kernel_routing_method_type
+    hidden = torch.zeros((2, 128), device=DEVICE)
+    logits = torch.tensor(
+        [
+            [0.1, 1.2, -0.3, 0.7, 2.1, 0.4, -0.2, 0.9],
+            [1.0, -0.2, 0.3, 1.7, -1.1, 2.4, 0.2, 0.5],
+        ],
+        dtype=torch.float32,
+        device=DEVICE,
+    )
+    expected_weights, expected_ids = baseline.select_experts(hidden, logits)
+    weights, ids = router.select_experts(hidden, logits)
+    torch.testing.assert_close(ids, expected_ids, rtol=0, atol=0)
+    torch.testing.assert_close(weights, expected_weights, rtol=0, atol=0)
+
+
+def test_pluggable_router_preserves_model_bias_loading(dist_init):
+    """The model's gate retains the checkpoint path when its router is a module."""
+    hf_config = DeepseekV3Config(
+        hidden_size=128,
+        moe_intermediate_size=128,
+        n_routed_experts=4,
+        n_shared_experts=1,
+        num_experts_per_tok=2,
+        n_group=2,
+        topk_group=1,
+        topk_method="noaux_tc",
+        scoring_func="sigmoid",
+    )
+    config = VllmConfig()
+    with (
+        set_current_vllm_config(config),
+        set_default_torch_dtype(torch.bfloat16),
+        torch.device(DEVICE),
+    ):
+        moe = DeepseekV2MoE(
+            hf_config, config.parallel_config, prefix="model.layers.1.mlp"
+        )
+    router = moe.experts.router
+    bias = moe.gate.e_score_correction_bias
+    assert isinstance(router, torch.nn.Module)
+    assert router.e_score_correction_bias is bias
+    params = dict(moe.named_parameters())
+    assert params["gate.e_score_correction_bias"] is bias
+    assert [name for name, value in params.items() if value is bias] == [
+        "gate.e_score_correction_bias"
+    ]
+    checkpoint_bias = torch.tensor(
+        [0.4, -0.2, 0.1, 0.7], dtype=torch.float32, device=DEVICE
+    )
+    default_weight_loader(params["gate.e_score_correction_bias"], checkpoint_bias)
+    torch.testing.assert_close(
+        router.e_score_correction_bias, checkpoint_bias, rtol=0, atol=0
+    )
+    torch.testing.assert_close(
+        moe.state_dict()["gate.e_score_correction_bias"],
+        checkpoint_bias,
+        rtol=0,
+        atol=0,
+    )
+
+
+def test_pluggable_simulator_preserves_selected_routing_method(
+    oot_registry_scope, monkeypatch
+):
+    class OOTSimulator(RoutingSimulatorRouter):
+        pass
+
+    RoutingSimulatorRouter.register_oot(OOTSimulator)
+    monkeypatch.setenv("VLLM_MOE_ROUTING_SIMULATION_STRATEGY", "uniform_random")
+    state = EplbLayerState()
+    router = create_fused_moe_router(
+        top_k=4,
+        global_num_experts=128,
+        use_grouped_topk=True,
+        num_expert_group=8,
+        topk_group=4,
+        scoring_func="sigmoid",
+        e_score_correction_bias=torch.zeros(128, device=DEVICE),
+        eplb_state=state,
+    )
+    assert type(router) is OOTSimulator
+    assert router.kernel_routing_method_type == RoutingMethodType.DeepSeekV3
+    assert router.eplb_state is state
 
 
 def test_multiple_expert_groups_use_grouped_topk() -> None:
@@ -904,9 +1051,9 @@ def test_eplb_replica_shares_steer_routing_from_a_narrow_table():
 @pytest.mark.parametrize("top_k,R", [(2, 2), (4, 2), (8, 4), (8, 8)])
 def test_eplb_map_hot_expert_replica_balance(top_k, R):
     """Hot logical expert with R replicas must be balanced across replicas
-    even when ``top_k`` is a multiple of ``R``. In that regime every top-k
-    offset for the hot expert lands on a multiple of ``top_k`` in the flat
-    ``topk_ids`` view, so per-replica assignment must not collapse onto a
+    even when `top_k` is a multiple of `R`. In that regime every top-k
+    offset for the hot expert lands on a multiple of `top_k` in the flat
+    `topk_ids` view, so per-replica assignment must not collapse onto a
     single replica.
     """
     num_tokens = 8192

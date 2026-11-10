@@ -2,7 +2,7 @@
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 """Buffers of the context-parallel decode indexer (TP4, gfx950).
 
-Rank ``me`` holds index head ``me``; ``kernel_cp_push`` scores a quarter of every
+Rank `me` holds index head `me`; `kernel_cp_push` scores a quarter of every
 request's blocks for all four heads and stores head h's scores into rank h's
 receive buffer. Buffers and flags are uncached memory mapped by the peers; the
 call counts stay on the device, so the handshake replays in CUDA graphs.
@@ -20,7 +20,7 @@ WORLD = _kernel.WORLD
 
 
 class _DevicePointer:
-    """A raw device allocation as a tensor (``__cuda_array_interface__``)."""
+    """A raw device allocation as a tensor (`__cuda_array_interface__`)."""
 
     def __init__(self, ptr: int, nbytes: int):
         self.__cuda_array_interface__ = {
@@ -67,7 +67,7 @@ class IndexCP:
         width: int,
         grid: int = 0,
     ) -> torch.Tensor:
-        """Score this rank's blocks of every head from its index-q rows ``iq``.
+        """Score this rank's blocks of every head from its index-q rows `iq`.
 
         Returns this rank's head over every block, [1, rows, width]: a view of
         the receive buffer, valid until the next call.
@@ -103,21 +103,15 @@ _CP: IndexCP | None = None
 
 
 def init(device: torch.device, max_width: int) -> None:
-    """Create this rank's ``IndexCP``; a collective, called once outside capture."""
+    """Create this rank's `IndexCP`; a collective, called once outside capture."""
     global _CP
     if _CP is not None:
         return
-    from vllm.config import get_current_vllm_config
     from vllm.distributed import get_tp_group
     from vllm.platforms.rocm import on_gfx950
 
     tp = get_tp_group()
-    # One set of buffers and flags: microbatches would share them.
-    if (
-        tp.world_size != WORLD
-        or not on_gfx950()
-        or get_current_vllm_config().parallel_config.use_ubatching
-    ):
+    if tp.world_size != WORLD or not on_gfx950():
         return
     _CP = IndexCP(tp.rank_in_group, tp.cpu_group, device, _kernel.MAX_ROWS, max_width)
 

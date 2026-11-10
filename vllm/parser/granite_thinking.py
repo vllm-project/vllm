@@ -3,13 +3,13 @@
 """Granite 4.2 thinking parser.
 
 Granite 4.2 uses the same tool call and reasoning format as Nemotron V3
-(``<think>``/``</think>`` + ``<tool_call>`` XML).  This config reuses
-:class:`NemotronV3Parser` with two Granite-specific behaviors:
+(`<think>`/`</think>` + `<tool_call>` XML).  This config reuses
+`NemotronV3Parser` with two Granite-specific behaviors:
 
 1. Strip leading newlines from content — the Granite chat template writes
-   ``\\n</think>\\n``, so the first content character is always ``\\n``.
+   `\\n</think>\\n`, so the first content character is always `\\n`.
 2. Inherit the Nemotron V3 reasoning-to-content swap for
-   ``enable_thinking=False`` / ``force_nonempty_content=True``.
+   `enable_thinking=False` / `force_nonempty_content=True`.
 """
 
 from __future__ import annotations
@@ -43,15 +43,15 @@ def granite_thinking_config(thinking: bool = True) -> ParserEngineConfig:
 
 class GraniteThinkingParser(NemotronV3Parser):
     """Granite 4.2 parser: same format as Nemotron V3, with
-    leading-newline stripping on content after ``</think>``.
+    leading-newline stripping on content after `</think>`.
 
-    The ``reasoning_ended`` property is overridden to delay the
+    The `reasoning_ended` property is overridden to delay the
     reasoning-to-content transition reported to
-    :class:`~vllm.parser.abstract_parser.DelegatingParser` until the
+    `DelegatingParser` until the
     template's leading newline has been consumed.  Without this delay,
-    ``DelegatingParser.parse_delta`` passes newline tokens through a
+    `DelegatingParser.parse_delta` passes newline tokens through a
     raw pass-through path that bypasses the engine's
-    ``_events_to_delta`` (and therefore our stripping logic).
+    `_events_to_delta` (and therefore our stripping logic).
     """
 
     def __init__(

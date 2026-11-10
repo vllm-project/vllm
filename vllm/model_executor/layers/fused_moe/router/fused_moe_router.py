@@ -7,6 +7,7 @@ from typing import TYPE_CHECKING
 import torch
 
 from vllm.distributed.eplb.eplb_state import EplbLayerState
+from vllm.model_executor.custom_op import PluggableLayer
 from vllm.model_executor.layers.fused_moe.config import RoutingMethodType
 
 if TYPE_CHECKING:
@@ -15,12 +16,13 @@ if TYPE_CHECKING:
     )
 
 
-class FusedMoERouter(ABC):
+class FusedMoERouter(PluggableLayer, ABC):
     """FusedMoERouter is an abstract class that provides a 'select_experts'
     method that is used for routing hidden states based on router logits.
     """
 
     def __init__(self, eplb_state: EplbLayerState | None = None):
+        super().__init__()
         self._routing_replay_out: torch.Tensor | None = None
         self.eplb_state = eplb_state
         # Deepseek V4.1 vision checkpoints carry a second per-expert routing
@@ -52,6 +54,11 @@ class FusedMoERouter(ABC):
     @property
     def supports_monolithic_kernels(self) -> bool:
         return True
+
+    @property
+    def masks_padding(self) -> bool:
+        """Whether `select_experts` already gives padding rows expert id -1."""
+        return False
 
     def prepare_monolithic_logits(self, router_logits: torch.Tensor) -> torch.Tensor:
         return router_logits
@@ -99,6 +106,12 @@ class FusedMoERouter(ABC):
             topk_indices_dtype=topk_indices_dtype,
             input_ids=input_ids,
         )
+        # MoE kernels read routing tensors as dense buffers and ignore strides
+        if not (topk_weights.is_contiguous() and topk_ids.is_contiguous()):
+            raise ValueError(
+                f"{type(self).__name__} returned non-contiguous topk_weights "
+                "or topk_ids"
+            )
 
         # Write routing data for non-monolithic path (Triton, etc.)
         # (set by bind_routing_capture_to_model during capturer init)
