@@ -290,13 +290,14 @@ def test_draft_attention_fused_qk_norm_rope(
     """One fused launch gives the q of DFlash's q-norm and RoPE and stores its
     k/v in a bf16 or fp8 cache as the layer's reshape_and_cache_flash would;
     the attention layer gets q alone."""
+    from transformers import MiniMaxM3VLTextConfig
+
     from vllm.forward_context import set_forward_context
     from vllm.model_executor.models.qwen3_dflash import DFlashQwen3Attention
     from vllm.models.minimax_m3.common.dspark import MiniMaxM3DSparkAttention
-    from vllm.transformers_utils.configs.minimax_m3 import MiniMaxM3TextConfig
 
     torch.manual_seed(0)
-    config = MiniMaxM3TextConfig(
+    config = MiniMaxM3VLTextConfig(
         hidden_size=512,
         num_attention_heads=8,
         num_key_value_heads=2,
@@ -378,16 +379,17 @@ def test_draft_fp16_attention_output_feeds_mxfp8_o_proj(dist_init, default_vllm_
     """A backend that writes an FP8 query's output as FP16 hands it to the
     MXFP8 o_proj without a conversion pass; o_proj quantizes it and still
     returns bf16, bit-identical to the bf16 path for values both dtypes hold."""
+    from transformers import MiniMaxM3VLTextConfig
+
     from vllm.forward_context import set_forward_context
     from vllm.model_executor.layers.quantization.modelopt import ModelOptMxFp8Config
     from vllm.model_executor.layers.quantization.utils.mxfp8_utils import (
         _mxfp8_e4m3_quantize_torch,
     )
     from vllm.models.minimax_m3.common.dspark import MiniMaxM3DSparkAttention
-    from vllm.transformers_utils.configs.minimax_m3 import MiniMaxM3TextConfig
 
     torch.manual_seed(0)
-    config = MiniMaxM3TextConfig(
+    config = MiniMaxM3VLTextConfig(
         hidden_size=512,
         num_attention_heads=8,
         num_key_value_heads=2,
