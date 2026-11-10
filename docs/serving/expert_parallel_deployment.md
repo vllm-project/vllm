@@ -401,14 +401,17 @@ logical experts on the surviving ranks. The original checkpoint must remain
 accessible to survivors so they can reload expert weights.
 The orchestrator selects the recovery mode when it sends the recovery request.
 
-By default, faults abort unfinished requests. To keep them queued for resumption
-after successful retry or scale-down recovery, set
-`--fault-tolerance-config '{"resume_requests_after_recovery": true}'`.
-Streams on surviving engines stall during recovery and continue afterward;
-requests on a dead engine cannot be resumed this way.
+The `FaultToleranceConfig.request_failure_policy` setting controls how faults
+affect unfinished requests. The default, `"fail"`, aborts them immediately.
+To keep them queued for resumption after successful retry or scale-down recovery,
+set `--fault-tolerance-config '{"request_failure_policy": "recompute"}'`.
+The engine recomputes their KV cache from the prompt and already generated
+tokens, then continues generation. Streams on surviving engines stall during
+recovery and continue afterward; requests on a dead engine cannot be resumed
+this way.
 To discard queued requests for a particular retry, include `"abort": true` in
 the retry request's `params`. This parameter must be a JSON boolean and defaults
-to `false`; resumption still requires the configuration option above.
+to `false`; resumption still requires `request_failure_policy="recompute"`.
 
 ### Coordinating recovery
 

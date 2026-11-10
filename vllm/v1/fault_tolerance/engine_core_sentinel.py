@@ -152,7 +152,7 @@ class EngineCoreSentinel:
         # Evict the KV blocks that the failed step may have partially written.
         self._clear_contaminated_blocks()
 
-        if ft_config.resume_requests_after_recovery:
+        if ft_config.request_failure_policy == "recompute":
             timestamp = time.monotonic()
             while scheduler.running:
                 request = scheduler.running.pop()

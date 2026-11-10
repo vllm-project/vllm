@@ -393,8 +393,11 @@ def test_injected_fault_retry_recovers_all_ranks(monkeypatch, tmp_path):
     dp_size = 2
     faulted_rank = 1
     max_tokens = 100
-    resume_args = ["--fault-tolerance-config.resume_requests_after_recovery", "true"]
-    with _ft_manager(resume_args, dp_size=dp_size) as servers:
+    recompute_args = [
+        "--fault-tolerance-config",
+        '{"request_failure_policy": "recompute"}',
+    ]
+    with _ft_manager(recompute_args, dp_size=dp_size) as servers:
         assert len(servers) == dp_size
         servers_by_rank = _servers_by_rank(servers, dp_size)
 

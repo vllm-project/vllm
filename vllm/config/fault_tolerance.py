@@ -1,7 +1,7 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 
-from typing import TYPE_CHECKING
+from typing import TYPE_CHECKING, Literal
 
 from vllm.config.utils import config
 
@@ -21,12 +21,13 @@ class FaultToleranceConfig:
     If vLLM does not recover during this time, the original error is raised.
     """
 
-    resume_requests_after_recovery: bool = False
-    """If True, in-flight requests are preempted back to the waiting queue on
-    fault (instead of being aborted) so they are automatically re-scheduled
-    after recovery. Clients will not receive abort notifications.
-    Setting this to False, or passing ``params={"abort": true}`` to the
-    ``retry`` instruction, discards the in-flight requests instead.
+    request_failure_policy: Literal["recompute", "fail"] = "fail"
+    """Policy for handling unfinished requests when the engine encounters a fault.
+    'recompute': preempt requests back to the waiting queue to recompute their
+    KV cache and continue generation after recovery, without abort notifications.
+    'fail': abort unfinished requests immediately (default).
+    Passing ``params={"abort": true}`` to the ``retry`` instruction discards
+    queued requests even when the policy is 'recompute'.
     """
 
 
