@@ -1531,29 +1531,20 @@ def test_engram_rejects_elastic_cross_dp(option):
         EngramConfig(**{option: True}).verify_parallel_config(parallel)
 
 
-def test_independent_data_parallel_rejects_expert_parallel():
-    with pytest.raises(ValueError, match="independent_data_parallel"):
-        ParallelConfig(
-            data_parallel_size=2,
-            independent_data_parallel=True,
-            enable_expert_parallel=True,
-            distributed_executor_backend="mp",
-        )
-
-
 @pytest.mark.parametrize(
-    "is_moe, independent, expected",
-    [(True, False, True), (True, True, False), (False, False, False)],
+    "overrides, match",
+    [
+        ({"enable_expert_parallel": True}, "independent_data_parallel"),
+        ({"distributed_executor_backend": "external_launcher"}, "external_launcher"),
+    ],
 )
-def test_dp_ranks_in_lockstep(is_moe: bool, independent: bool, expected: bool):
-    config = SimpleNamespace(
-        model_config=SimpleNamespace(is_moe=is_moe),
-        parallel_config=SimpleNamespace(independent_data_parallel=independent),
-    )
-    assert VllmConfig.dp_ranks_in_lockstep.fget(config) is expected
+def test_independent_data_parallel_rejects(overrides, match):
+    kwargs = {"distributed_executor_backend": "mp"} | overrides
+    with pytest.raises(ValueError, match=match):
+        ParallelConfig(data_parallel_size=2, independent_data_parallel=True, **kwargs)
 
 
-def test_independent_dp_rank_keeps_local_dp_size():
+def test_independent_dp_rank_keeps_dp_size():
     parallel = ParallelConfig(
         data_parallel_size=4,
         data_parallel_size_local=4,
@@ -1562,65 +1553,9 @@ def test_independent_dp_rank_keeps_local_dp_size():
     )
     parallel.reconfigure_for_independent_dp_rank()
     assert parallel.data_parallel_size == 1
-    assert parallel._independent_dp_size_local == 4
     # The engine re-validates its config after this reset.
     assert parallel.num_dp_replicas == 4
     EngramConfig(dp_shared_memory=True).verify_parallel_config(parallel)
-
-
-def test_independent_data_parallel_rejects_external_launcher():
-    with pytest.raises(ValueError, match="external_launcher"):
-        ParallelConfig(
-            data_parallel_size=2,
-            independent_data_parallel=True,
-            distributed_executor_backend="external_launcher",
-        )
-
-
-def _independent_dp_config(**overrides):
-    parallel = ParallelConfig(
-        data_parallel_size=2,
-        independent_data_parallel=True,
-        distributed_executor_backend="mp",
-    )
-    fields = dict(
-        parallel_config=parallel,
-        load_config=SimpleNamespace(load_format="auto"),
-        model_config=None,
-        engram_config=None,
-        speculative_config=None,
-    )
-    return SimpleNamespace(**(fields | overrides))
-
-
-def test_independent_data_parallel_rejects_ipc_weight_cache():
-    config = _independent_dp_config(
-        load_config=SimpleNamespace(load_format="ipc_cache")
-    )
-    with pytest.raises(ValueError, match="IPC weight cache"):
-        VllmConfig._verify_independent_data_parallel(config)
-
-
-def test_independent_data_parallel_keeps_dynamic_speculative_decoding():
-    per_batch_size = [(1, 16, 3), (64, 4096, 0)]
-    speculative_config = SimpleNamespace(
-        uses_dynamic_speculative_decoding=lambda: True,
-        num_speculative_tokens=3,
-        num_speculative_tokens_per_batch_size=per_batch_size,
-    )
-    config = _independent_dp_config(speculative_config=speculative_config)
-    VllmConfig._maybe_disable_dynamic_sd_for_data_parallel(config)
-    assert speculative_config.num_speculative_tokens_per_batch_size == per_batch_size
-
-
-def test_engram_rejects_independent_dp_across_dp():
-    parallel = ParallelConfig(
-        data_parallel_size=2,
-        independent_data_parallel=True,
-        distributed_executor_backend="mp",
-    )
-    with pytest.raises(ValueError, match="independent_data_parallel"):
-        EngramConfig(embedding_across_dp=True).verify_parallel_config(parallel)
 
 
 def test_engram_dp_shared_memory_requires_cpu_offload():

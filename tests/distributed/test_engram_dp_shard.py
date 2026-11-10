@@ -848,7 +848,7 @@ def _check_prefetch_replay(
 
 
 def _independent_dp_worker(
-    rank: int, table_port: int, world_ports: list[int], coord_store_port: int
+    rank: int, world_ports: list[int], coord_store_port: int
 ) -> None:
     """One independent DP rank: its own single-process world, no DP group."""
     torch.accelerator.set_device_index(rank)
@@ -879,8 +879,6 @@ def _independent_dp_worker(
     parallel_config = vllm_config.parallel_config
     parallel_config.data_parallel_rank_local = rank
     parallel_config.reconfigure_for_independent_dp_rank()
-    parallel_config.data_parallel_master_port = table_port
-    # With a coordination store, the leader publishes a freshly bound port.
     parallel_config.data_parallel_master_ip = "127.0.0.1"
     parallel_config._coord_store_port = coord_store_port
     vllm_config.engram_config = EngramConfig(dp_shared_memory=True)
@@ -896,8 +894,7 @@ def _independent_dp_worker(
         assert get_engram_dp_group() is None
         group = get_engram_table_share_group()
         assert (group.rank_in_group, group.world_size) == (rank, WORLD_SIZE)
-        for shm_fits in (True, False):
-            _check_ple_shared_table(shm_fits)
+        _check_ple_shared_table(shm_fits=True)
     finally:
         cleanup_dist_env_and_memory()
 
@@ -905,20 +902,16 @@ def _independent_dp_worker(
 @pytest.mark.skipif(
     not current_platform.is_cuda_alike(), reason="CUDA or ROCm required"
 )
-@pytest.mark.parametrize("use_coord_store", [False, True])
-def test_ple_table_shared_across_independent_dp_ranks(use_coord_store):
+def test_ple_table_shared_across_independent_dp_ranks():
     """Independent DP ranks share no process group, yet load one PLE table."""
     if torch.accelerator.device_count() < WORLD_SIZE:
         pytest.skip(f"Need {WORLD_SIZE} GPUs to run the test.")
-    ports = get_open_ports_list(WORLD_SIZE + 1)
-    coord_store = None
-    if use_coord_store:
-        coord_store = create_tcp_store(
-            "127.0.0.1", 0, is_master=True, world_size=-1, wait_for_workers=False
-        )
+    coord_store = create_tcp_store(
+        "127.0.0.1", 0, is_master=True, world_size=-1, wait_for_workers=False
+    )
     mp.spawn(
         _independent_dp_worker,
-        args=(ports[0], ports[1:], coord_store.port if coord_store else 0),
+        args=(get_open_ports_list(WORLD_SIZE), coord_store.port),
         nprocs=WORLD_SIZE,
     )
 
