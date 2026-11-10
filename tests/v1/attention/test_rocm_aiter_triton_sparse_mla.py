@@ -633,10 +633,11 @@ def test_sparse_mla_store_epilogue_topk_indices_are_compact(
 
 @pytest.mark.parametrize("use_graph", [False, True])
 @torch.inference_mode()
-def test_sparse_mla_store_epilogue_glm_live_indices_are_nonnegative(
+def test_sparse_mla_store_epilogue_req_index_mapper_live_indices_are_nonnegative(
     use_graph: bool,
 ) -> None:
-    """GLM's mapper bounds invalid local slots and does not touch the unused tail."""
+    """The request-to-global index mapper bounds invalid local slots and does
+    not touch the unused tail."""
     from vllm.v1.attention.backends.mla.rocm_aiter_mla_sparse import (
         triton_convert_req_index_to_global_index,
     )
