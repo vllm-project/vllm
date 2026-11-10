@@ -49,8 +49,12 @@ PUSH_REG_NOTIF_PREFIX = b"PUSH_REG:"
 #  11: Add per-region transfer geometry and memory types to NixlAgentMetadata
 #  12: Add per-region member names for PP push
 #  13: Add packed-member layouts and order-independent packed-push backend hashes
+#  14: Add Qwen3.8-Flash-Next PLE page length - #59997
+#  15: Add remote_registration_generation to kv_transfer_params
+#  16: Pair regions by the layers both sides hold: every peer advertises
+#      region_members and the cache group of each layer
 #
-NIXL_CONNECTOR_VERSION: int = 13
+NIXL_CONNECTOR_VERSION: int = 16
 
 
 @dataclass
@@ -73,8 +77,12 @@ class NixlAgentMetadata:
     region_mem_types: list[str] | None = None
     dcp_size: int = 1
     pcp_size: int = 1
+    # Page length of the PLE short-conv state (None when the model has none).
+    ple_block_len: int | None = None
     # Layer names sharing each advertised region, in region order.
     region_members: list[list[str]] = field(default_factory=list)
+    # Cache group of each layer in region_members.
+    layer_group_ids: dict[str, int] = field(default_factory=dict)
     # Packed member -> (byte offset in its region's block, bytes per page).
     packed_member_layouts: dict[str, tuple[int, int]] = field(default_factory=dict)
 
@@ -101,7 +109,7 @@ def _get_speculative_compatibility_factors(
 ) -> dict[str, Any] | None:
     """Return NIXL compatibility factors for hidden-state-based speculators."""
     speculative_config = vllm_config.speculative_config
-    if speculative_config is None or not speculative_config.use_eagle():
+    if speculative_config is None or not speculative_config.uses_target_hidden_states:
         return None
 
     draft_model_config = speculative_config.draft_model_config
@@ -131,7 +139,6 @@ def _get_speculative_compatibility_factors(
         "model": draft_model_config.model,
         "revision": draft_model_config.revision,
         "code_revision": draft_model_config.code_revision,
-        "parallel_drafting": speculative_config.parallel_drafting,
         "kv_cache_dtype": str(kv_cache_dtype),
         "auxiliary_layer_ids": (
             tuple(auxiliary_layer_ids) if auxiliary_layer_ids is not None else None
@@ -233,6 +240,8 @@ class RemoteMeta:
     request_id: str
     blocks_expiry_time: float | None = None
     num_tokens: int | None = None
+    # Bumped each time the remote publishes a changed KV cache registration.
+    registration_generation: int = 0
 
 
 @dataclass
@@ -258,6 +267,9 @@ class ReqMeta:
     # Worker-only, per-region physical pages to zero after a successful pull.
     # None selects group-based completion; empty lists mean no zeroing.
     region_blocks_to_zero: BlockIds | None = None
+    # Worker-only, per-group range of the remote-sized sub-blocks of each local
+    # group a pull covers. None derives it from the block counts.
+    covered_sub_blocks: list[range] | None = None
 
 
 class NixlConnectorMetadata(KVConnectorMetadata):
@@ -333,5 +345,8 @@ class NixlConnectorMetadata(KVConnectorMetadata):
             port=kv_transfer_params["remote_port"],
             blocks_expiry_time=kv_transfer_params.get("remote_blocks_expiry_time"),
             num_tokens=kv_transfer_params.get("remote_num_tokens"),
+            registration_generation=kv_transfer_params.get(
+                "remote_registration_generation", 0
+            ),
         )
         self.reqs_to_recv[request_id] = req

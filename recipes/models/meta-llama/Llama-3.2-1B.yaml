@@ -1,0 +1,125 @@
+meta:
+  title: "Llama-3.2-1B"
+  slug: "llama-3.2-1b"
+  provider: "Meta"
+  description: "Meta Llama 3.2 1.23B dense pretrained language model with 128K context, validated for BF16 serving on Intel Xeon 6."
+  date_added: 2026-08-18
+  date_updated: 2026-09-12
+  tasks:
+    - text
+  performance_headline: "Validated on Intel Xeon 6 (GNR) with BF16 serving"
+  related_recipes:
+    - "meta-llama/Llama-3.2-3B-Instruct"
+    - "meta-llama/Llama-3.1-8B-Instruct"
+  hardware:
+    xeon6: verified
+
+model:
+  model_id: "meta-llama/Llama-3.2-1B"
+  min_vllm_version: "0.6.2"
+  architecture: dense
+  parameter_count: "1.23B"
+  active_parameters: "1.23B"
+  context_length: 131072
+  base_args: []
+  base_env: {}
+
+features: {}
+
+opt_in_features: []
+
+variants:
+  default:
+    precision: bf16
+    vram_minimum_gb: 3
+    description: "Full precision BF16"
+    supported_hardware:
+      - xeon6
+
+compatible_strategies:
+  - single_node_tp
+  - multi_node_tp
+
+hardware_overrides: {}
+
+strategy_overrides:
+  single_node_tp:
+    tp:
+      xeon6: 1
+
+guide: |
+  ## Overview
+
+  Llama 3.2 1B is Meta's compact pretrained dense language model with 128K
+  context. This recipe includes an Intel Xeon 6 CPU configuration validated
+  with BF16 serving.
+
+  ## Prerequisites
+
+  - Hardware: 1x Xeon 6 NUMA node
+  - vLLM >= 0.6.2
+
+  ### pip (Intel Xeon 6 CPUs)
+
+  For Intel and AMD x86 CPUs, follow the
+  [CPU pre-built wheels](https://docs.vllm.ai/en/latest/getting_started/installation/cpu/#pre-built-wheels)
+  installation instructions.
+
+  ### Docker (Intel Xeon 6 CPUs)
+
+  ```bash
+  docker pull vllm/vllm-openai-cpu:latest-x86_64
+  ```
+
+  ## Runtime and Platform Tuning
+
+  The following validation settings are not model requirements and are intentionally
+  not portable CPU recipe defaults:
+
+  - `--max-num-batched-tokens` and `--max-num-seqs`: scheduler batch/concurrency
+    tuning for workload shape, latency targets, and platform capacity.
+  - `--gpu-memory-utilization`: platform memory-budget tuning.
+  - `--no-enable-prefix-caching`: workload/benchmark cache-policy tuning.
+  - `VLLM_ENGINE_ITERATION_TIMEOUT_S`: runtime operational timeout tuning.
+
+  Hardware-specific overrides may still use these settings when they are part of a
+  validated platform configuration.
+
+  ## Intel Xeon 6
+
+  Choose the tensor parallel size based on the system topology and deployment
+  requirements. Add `--tensor-parallel-size <N>` when needed; the recipe does
+  not prescribe a Xeon 6 TP value or hard-code NUMA node IDs.
+
+  ```bash
+  vllm serve meta-llama/Llama-3.2-1B
+  ```
+
+  Docker:
+
+  ```bash
+  docker run \
+    --privileged --ipc=host -p 8000:8000 \
+    -v ~/.cache/huggingface:/root/.cache/huggingface \
+    vllm/vllm-openai-cpu:latest-x86_64 meta-llama/Llama-3.2-1B \
+    --tensor-parallel-size 1
+  ```
+
+  ## Client Usage
+
+  ```python
+  from openai import OpenAI
+
+  client = OpenAI(base_url="http://localhost:8000/v1", api_key="unused")
+  response = client.completions.create(
+      model="meta-llama/Llama-3.2-1B",
+      prompt="Explain tensor parallelism briefly.",
+      max_tokens=128,
+  )
+  print(response.choices[0].text)
+  ```
+
+  ## References
+
+  - [Model card](https://huggingface.co/meta-llama/Llama-3.2-1B)
+  - [vLLM CPU installation](https://docs.vllm.ai/en/latest/getting_started/installation/cpu/)

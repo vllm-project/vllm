@@ -19,8 +19,10 @@ from vllm.config import SpeculativeConfig
 from vllm.config.compilation import CUDAGraphMode
 from vllm.v1.attention.backend import CommonAttentionMetadata
 from vllm.v1.attention.backends.gdn_attn import (
+    GDNAttentionBackend,
     GDNAttentionMetadata,
     GDNAttentionMetadataBuilder,
+    plan_flashinfer_checkpoints,
 )
 from vllm.v1.attention.backends.utils import mamba_get_block_table_tensor
 from vllm.v1.kv_cache_interface import MambaSpec
@@ -149,6 +151,7 @@ GDN_BUILD_TEST_CASES = {
 def _create_gdn_builder(
     num_speculative_tokens: int = 0,
     full_cuda_graph: bool = False,
+    adaptive_verification: bool = False,
 ) -> GDNAttentionMetadataBuilder:
     """Create a GDNAttentionMetadataBuilder with minimal config."""
     vllm_config = create_vllm_config(
@@ -162,6 +165,7 @@ def _create_gdn_builder(
         vllm_config.speculative_config = SpeculativeConfig(
             method="ngram",
             num_speculative_tokens=num_speculative_tokens,
+            enable_adaptive_verification=adaptive_verification,
         )
     mamba_spec = MambaSpec(
         block_size=BLOCK_SIZE,
@@ -301,6 +305,64 @@ def test_full_cudagraph_spec_metadata_uses_request_count():
     assert meta.num_accepted_tokens.shape == (batch.batch_size,)
 
 
+@pytest.mark.parametrize("num_speculative_tokens", [3, 15])
+def test_adaptive_verification_uses_device_query_boundaries(
+    num_speculative_tokens: int,
+):
+    """GDN keeps the CPU batch plan while executing the GPU's ragged plan."""
+    builder = _create_gdn_builder(
+        num_speculative_tokens=num_speculative_tokens,
+        adaptive_verification=True,
+    )
+    batch = BatchSpec(seq_lens=[80, 96, 112], query_lens=[3, 3, 3])
+    common = create_common_attn_metadata(batch, BLOCK_SIZE, DEVICE)
+    device_query_start_loc = torch.tensor([0, 1, 5, 9], dtype=torch.int32)
+    common = common.replace(query_start_loc=device_query_start_loc)
+
+    meta = builder.build(
+        common_prefix_len=0,
+        common_attn_metadata=common,
+        num_accepted_tokens=torch.ones(3, dtype=torch.int32),
+        num_decode_draft_tokens_cpu=torch.tensor([2, 2, 2], dtype=torch.int32),
+    )
+
+    assert GDNAttentionBackend.supports_device_cpu_query_lens_mismatch()
+    assert (
+        builder.get_varlen_cudagraph_max_query_len(
+            builder.vllm_config, builder.kv_cache_spec
+        )
+        == num_speculative_tokens + 1
+    )
+    torch.testing.assert_close(meta.spec_query_start_loc, device_query_start_loc)
+    assert meta.num_spec_decode_tokens == 9
+    assert meta.num_spec_decodes == 3
+    assert meta.uniform_spec_sequence_length is None
+
+
+def test_adaptive_cudagraph_capture_uses_spec_decode_path():
+    """A varlen graph captured as one-token rows must replay multi-token rows."""
+    builder = _create_gdn_builder(
+        num_speculative_tokens=3,
+        full_cuda_graph=True,
+        adaptive_verification=True,
+    )
+    # Varlen graph capture maximizes the request count, so a four-token graph
+    # is captured as four one-token dummy rows. At replay it may instead hold
+    # one four-token speculative row. Capture must therefore freeze the
+    # speculative path, whose padded rows can also process one-token decodes.
+    batch = BatchSpec(seq_lens=[1, 1, 1, 1], query_lens=[1, 1, 1, 1])
+    common = create_common_attn_metadata(batch, BLOCK_SIZE, DEVICE)
+
+    meta = builder.build_for_cudagraph_capture(common)
+
+    assert meta.num_spec_decodes == 4
+    assert meta.num_decodes == 0
+    assert meta.spec_query_start_loc is not None
+    assert meta.spec_sequence_masks_cpu is not None
+    assert meta.spec_sequence_masks_cpu.device.type == "cpu"
+    torch.testing.assert_close(meta.spec_query_start_loc, common.query_start_loc)
+
+
 def _build_non_spec(
     batch: BatchSpec,
     is_prefilling: list[bool] | None,
@@ -385,7 +447,7 @@ def test_cudagraph_capture_batch_stays_decode_only():
 
 
 def _create_checkpoint_builder_and_batch(
-    num_spec: int, prefix_match_unit: int = 16
+    num_spec: int, prefix_match_unit: int | None = 16
 ) -> tuple[GDNAttentionMetadataBuilder, CommonAttentionMetadata, dict]:
     vllm_config = create_vllm_config(
         model_name="Qwen/Qwen3.5-0.8B",
@@ -413,6 +475,8 @@ def _create_checkpoint_builder_and_batch(
         vllm_config=vllm_config,
         device=DEVICE,
     )
+    vllm_config.cache_config.hash_block_size = prefix_match_unit or 64
+    vllm_config.cache_config.cache_hit_alignment_tokens = prefix_match_unit or 64
     batch = BatchSpec(
         seq_lens=[65, 100, 100], query_lens=[3 if num_spec else 1, 100, 99]
     )
@@ -431,7 +495,9 @@ def _create_checkpoint_builder_and_batch(
 
 
 @pytest.mark.parametrize("num_spec", [0, 3])
-@pytest.mark.parametrize("prefix_match_unit, expected_offset", [(16, 96), (8, 96)])
+@pytest.mark.parametrize(
+    "prefix_match_unit, expected_offset", [(None, 64), (16, 96), (8, 96)]
+)
 def test_checkpoint_metadata_preserves_non_spec_order(
     num_spec, prefix_match_unit, expected_offset
 ):
@@ -484,3 +550,20 @@ def test_update_block_table_regathers_checkpoint(num_spec):
     assert not torch.equal(
         actual.checkpoint.state_indices, source.checkpoint.state_indices
     )
+
+
+def test_plan_flashinfer_checkpoints_selects_the_state_at_each_offset():
+    """Each checkpoint row maps to the state FlashInfer emits at its offset.
+
+    The leading decode row is not in the prefill kernel and never checkpoints;
+    the 50-token prefill is shorter than the stride and emits no states.
+    """
+    every_n_tokens, cu_starts, rows = plan_flashinfer_checkpoints(
+        offsets=[0, 128, 0, 192], query_lens=[200, 50, 300]
+    )
+
+    assert every_n_tokens == 64
+    assert cu_starts == [0, 3, 3, 7]
+    # Row 1: state after 128 tokens of the first prefill. Row 3: after 192
+    # tokens of the third prefill, whose states start at index 3.
+    assert rows == [0, 1, 0, 5]

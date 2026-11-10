@@ -17,8 +17,8 @@ from vllm.distributed.parallel_state import get_pp_group
 from vllm.logger import init_logger
 from vllm.model_executor.model_loader import get_model
 from vllm.model_executor.model_loader.utils import get_draft_load_config
-from vllm.v1.worker.gpu.spec_decode.autoregressive.speculator import (
-    AutoRegressiveSpeculator,
+from vllm.v1.worker.gpu.spec_decode.target_dependent_ar.speculator import (
+    TargetDependentARSpeculator,
 )
 
 logger = init_logger(__name__)
@@ -45,7 +45,7 @@ def _copy_target_kv_scales(attn: nn.Module, target_attn: nn.Module) -> None:
         getattr(attn, scale_name).copy_(getattr(target_attn, scale_name))
 
 
-class Gemma4Speculator(AutoRegressiveSpeculator):
+class Gemma4Speculator(TargetDependentARSpeculator):
     @property
     def advance_draft_positions(self) -> bool:
         # Gemma4 MTP is Q-only and reads K/V from the target's existing cache.
