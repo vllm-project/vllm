@@ -19,6 +19,7 @@ from vllm.model_executor.models.config import MODELS_CONFIG_MAP
         ("DeepseekV41ForCausalLM", "bfloat16"),
         ("GlmMoeDsaForCausalLM", "float32"),
         ("Glm5NextForCausalLM", "float32"),
+        ("KimiK31ForConditionalGeneration", "bfloat16"),
     ],
 )
 @pytest.mark.parametrize("sm100", [True, False])
@@ -35,8 +36,8 @@ def test_indexer_logits_dtype_follows_model_default_unless_set(
         # A non-auto KV dtype keeps the hooks off their platform-specific paths.
         cache_config=SimpleNamespace(cache_dtype="fp8"),
         model_config=SimpleNamespace(
-            hf_config=SimpleNamespace(index_topk=2048),
-            hf_text_config=SimpleNamespace(index_topk=2048),
+            hf_config=SimpleNamespace(index_topk=2048, dsa_config={}),
+            hf_text_config=SimpleNamespace(index_topk=2048, dsa_config={}),
         ),
         parallel_config=SimpleNamespace(set_dcp_defaults=lambda **_: None),
         speculative_config=None,
