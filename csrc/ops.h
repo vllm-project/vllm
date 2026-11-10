@@ -537,6 +537,14 @@ void top_k_per_row_decode(const torch::stable::Tensor& logits, int64_t next_n,
                           torch::stable::Tensor& indices, int64_t numRows,
                           int64_t stride0, int64_t stride1, int64_t topK);
 
+#ifdef USE_ROCM
+void top_k_per_row_decode_remap(const torch::stable::Tensor& logits,
+                                const torch::stable::Tensor& seqLens,
+                                torch::stable::Tensor& indices,
+                                const torch::stable::Tensor& positions,
+                                int64_t block);
+#endif
+
 void persistent_topk(const torch::stable::Tensor& logits,
                      const torch::stable::Tensor& lengths,
                      torch::stable::Tensor& output,

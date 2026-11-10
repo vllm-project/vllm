@@ -339,14 +339,28 @@ __device__ bool processHistogramStep(
   return !finalBinFits;
 }
 
+struct ColumnIndex {
+  __device__ int operator()(int column) const { return column; }
+};
+
+struct SlotPosition {
+  const int* rowPositions;
+  int block;
+  __device__ int operator()(int slot) const {
+    return slot < 0 ? -1 : rowPositions[slot / block] + slot % block;
+  }
+};
+
 // Follows half - 11 - 11 - 10 bit iterations
 // Keep the adaptive kernel's device instantiation separate from legacy calls.
 template <int kNumThreadsPerBlock, int kNumBins, bool useRadixSort,
           bool multipleBlocksPerRow = false, bool mergeBlocks = false,
-          bool deviceLengthAware = false, bool useTopK512Optimization = false>
+          bool deviceLengthAware = false, bool useTopK512Optimization = false,
+          typename IndexMap = ColumnIndex>
 static __device__ void topKPerRowJob(const int* indices, const float* logits,
                                      int rowStart, int rowEnd, int* outIndices,
-                                     float* outLogits, int stride1, int topK) {
+                                     float* outLogits, int stride1, int topK,
+                                     IndexMap indexMap = IndexMap{}) {
   static_assert(!deviceLengthAware || multipleBlocksPerRow != mergeBlocks);
   static_assert(!useTopK512Optimization || kNumThreadsPerBlock == 1024);
   // The number of slots for the final pass.
@@ -409,7 +423,7 @@ static __device__ void topKPerRowJob(const int* indices, const float* logits,
         outIndices[rowIt] = rowIt + rowStart;
         outLogits[rowIt] = logits[rowIt + rowStart];
       } else {
-        outIndices[rowIt] = rowIt;
+        outIndices[rowIt] = indexMap(rowIt);
       }
     }
     for (int rowIt = rowLen + threadIdx.x; rowIt < topK;
@@ -562,9 +576,9 @@ static __device__ void topKPerRowJob(const int* indices, const float* logits,
       if (stride1 == 1) {
         // stride1 == 1 will use vectorized_process, which indexes already skip
         // the rowStart.
-        outIndices[i] = smemOutput[i];
+        outIndices[i] = indexMap(smemOutput[i]);
       } else {
-        outIndices[i] = smemOutput[i] - rowStart;
+        outIndices[i] = indexMap(smemOutput[i] - rowStart);
       }
     }
   }
@@ -711,12 +725,23 @@ __device__ int gfx950TopK512ActiveBlocks(int rowLength, int numRows,
   return min(min(activeBlocks, maxBlocks), max(1, rowLength / 512));
 }
 
-template <int kNumThreadsPerBlock, bool mergeBlocks = false>
+struct CandidatePositions {
+  const int* positions;
+  int64_t stride;
+  int block;
+};
+
+static __device__ ColumnIndex rowIndexMap(int) { return {}; }
+static __device__ SlotPosition rowIndexMap(int row, CandidatePositions pool) {
+  return {pool.positions + row * pool.stride, pool.block};
+}
+
+template <int kNumThreadsPerBlock, bool mergeBlocks = false, typename... Pool>
 static __global__
 __launch_bounds__(kNumThreadsPerBlock) void topKPerRowDecode512DeviceLengthAware(
     const float* logits, const int* seqLens, int* outIndices,
     int* outIndicesAux, float* outLogitsAux, int stride0, int next_n,
-    int seqLensIs2D, int maxBlocks) {
+    int seqLensIs2D, int maxBlocks, Pool... pool) {
   #if defined(__gfx950__)
   constexpr int topK = 512;
   constexpr int kNumBins = 2048;
@@ -727,20 +752,22 @@ __launch_bounds__(kNumThreadsPerBlock) void topKPerRowDecode512DeviceLengthAware
           : max(0, seqLens[rowIdx / next_n] - next_n + rowIdx % next_n + 1);
   const int activeBlocks =
       gfx950TopK512ActiveBlocks(rowEnd, gridDim.x, maxBlocks);
+  const auto indexMap = rowIndexMap(rowIdx, pool...);
   outIndices += static_cast<int64_t>(rowIdx) * topK;
   if constexpr (mergeBlocks) {
     if (activeBlocks == 1) return;
     const int64_t offset = static_cast<int64_t>(rowIdx) * maxBlocks * topK;
     topKPerRowJob<kNumThreadsPerBlock, kNumBins, true, false, true, false,
                   true>(outIndicesAux + offset, outLogitsAux + offset, 0,
-                        activeBlocks * topK, outIndices, nullptr, 1, topK);
+                        activeBlocks * topK, outIndices, nullptr, 1, topK,
+                        indexMap);
   } else {
     if (blockIdx.y >= activeBlocks) return;
     logits += static_cast<int64_t>(rowIdx) * stride0;
     if (activeBlocks == 1) {
       topKPerRowJob<kNumThreadsPerBlock, kNumBins, true, false, false, false,
                     true>(nullptr, logits, 0, rowEnd, outIndices, nullptr, 1,
-                          topK);
+                          topK, indexMap);
       return;
     }
     const int blockSize = rowEnd / activeBlocks;
@@ -751,7 +778,8 @@ __launch_bounds__(kNumThreadsPerBlock) void topKPerRowDecode512DeviceLengthAware
         (static_cast<int64_t>(rowIdx) * maxBlocks + blockIdx.y) * topK;
     topKPerRowJob<kNumThreadsPerBlock, kNumBins, true, true, false, false,
                   true>(nullptr, logits, rowStart, blockRowEnd,
-                        outIndicesAux + offset, outLogitsAux + offset, 1, topK);
+                        outIndicesAux + offset, outLogitsAux + offset, 1, topK,
+                        indexMap);
   }
   #endif
 }
@@ -802,6 +830,71 @@ void apply_repetition_penalties_(
       });
 }
 
+#ifdef USE_ROCM
+static bool useGfx950TopK512(int64_t topK, int64_t stride1, int64_t numRows,
+                             int64_t numColumns) {
+  return topK == 512 && stride1 == 1 && numRows > 0 && numRows <= 384 &&
+         numColumns <= 1024 * 1024 &&
+         std::strncmp(get_device_prop()->gcnArchName, "gfx950", 6) == 0;
+}
+
+template <typename... Pool>
+static void launchGfx950TopK512(const torch::stable::Tensor& logits,
+                                const torch::stable::Tensor& seqLens,
+                                torch::stable::Tensor& indices, int64_t numRows,
+                                int64_t stride0, int64_t next_n,
+                                int seqLensIs2D, cudaStream_t stream,
+                                Pool... pool) {
+  constexpr int topK = 512;
+  const auto numColumns = logits.size(1);
+  int multipleBlocksPerRowConfig = 1;
+  if (numRows <= 32 && numColumns > 16 * 1024) {
+    multipleBlocksPerRowConfig = 16;
+  } else if (numRows <= 128 && numColumns > 64 * 1024) {
+    multipleBlocksPerRowConfig = 10;
+  } else if (numRows <= 160 && numColumns > 256 * 1024) {
+    multipleBlocksPerRowConfig = 3;
+  } else if (numRows <= 256 && numColumns > 256 * 1024) {
+    multipleBlocksPerRowConfig = 2;
+  }
+
+  constexpr int kNumThreadsPerSplitBlock = 1024;
+  if (multipleBlocksPerRowConfig == 1) {
+    vllm::topKPerRowDecode512DeviceLengthAware<kNumThreadsPerSplitBlock>
+        <<<numRows, kNumThreadsPerSplitBlock, 2 * topK * sizeof(int32_t),
+           stream>>>(logits.const_data_ptr<float>(),
+                     seqLens.const_data_ptr<int>(),
+                     indices.mutable_data_ptr<int>(), nullptr, nullptr,
+                     static_cast<int>(stride0), static_cast<int>(next_n),
+                     seqLensIs2D, multipleBlocksPerRowConfig, pool...);
+    return;
+  }
+  const auto outIndicesAux = torch::stable::empty(
+      {numRows, multipleBlocksPerRowConfig, topK},
+      torch::headeronly::ScalarType::Int, std::nullopt, logits.device());
+  const auto outLogitsAux = torch::stable::empty(
+      {numRows, multipleBlocksPerRowConfig, topK},
+      torch::headeronly::ScalarType::Float, std::nullopt, logits.device());
+  vllm::topKPerRowDecode512DeviceLengthAware<kNumThreadsPerSplitBlock>
+      <<<dim3(numRows, multipleBlocksPerRowConfig), kNumThreadsPerSplitBlock,
+         2 * topK * sizeof(int32_t), stream>>>(
+          logits.const_data_ptr<float>(), seqLens.const_data_ptr<int>(),
+          indices.mutable_data_ptr<int>(),
+          outIndicesAux.mutable_data_ptr<int>(),
+          outLogitsAux.mutable_data_ptr<float>(), static_cast<int>(stride0),
+          static_cast<int>(next_n), seqLensIs2D, multipleBlocksPerRowConfig,
+          pool...);
+  constexpr int kNumThreadsPerBlockMerge = 1024;
+  vllm::topKPerRowDecode512DeviceLengthAware<kNumThreadsPerBlockMerge, true>
+      <<<numRows, kNumThreadsPerBlockMerge, topK * sizeof(int32_t), stream>>>(
+          nullptr, seqLens.const_data_ptr<int>(),
+          indices.mutable_data_ptr<int>(),
+          outIndicesAux.mutable_data_ptr<int>(),
+          outLogitsAux.mutable_data_ptr<float>(), 0, static_cast<int>(next_n),
+          seqLensIs2D, multipleBlocksPerRowConfig, pool...);
+}
+#endif
+
 void top_k_per_row_decode(const torch::stable::Tensor& logits, int64_t next_n,
                           const torch::stable::Tensor& seqLens,
                           torch::stable::Tensor& indices, int64_t numRows,
@@ -820,55 +913,9 @@ void top_k_per_row_decode(const torch::stable::Tensor& logits, int64_t next_n,
   int seqLensIs2D = seqLens.dim() == 2 ? 1 : 0;
 
 #ifdef USE_ROCM
-  const bool useGfx950DeviceLengthAwareTopK512 =
-      topK == 512 && stride1 == 1 && numRows > 0 && numRows <= 384 &&
-      numColumns <= 1024 * 1024 &&
-      std::strncmp(get_device_prop()->gcnArchName, "gfx950", 6) == 0;
-  if (useGfx950DeviceLengthAwareTopK512) {
-    int multipleBlocksPerRowConfig = 1;
-    if (numRows <= 32 && numColumns > 16 * 1024) {
-      multipleBlocksPerRowConfig = 16;
-    } else if (numRows <= 128 && numColumns > 64 * 1024) {
-      multipleBlocksPerRowConfig = 10;
-    } else if (numRows <= 160 && numColumns > 256 * 1024) {
-      multipleBlocksPerRowConfig = 3;
-    } else if (numRows <= 256 && numColumns > 256 * 1024) {
-      multipleBlocksPerRowConfig = 2;
-    }
-
-    constexpr int kNumThreadsPerSplitBlock = 1024;
-    if (multipleBlocksPerRowConfig == 1) {
-      vllm::topKPerRowDecode512DeviceLengthAware<kNumThreadsPerSplitBlock>
-          <<<numRows, kNumThreadsPerSplitBlock, 2 * topK * sizeof(int32_t),
-             stream>>>(logits.const_data_ptr<float>(),
-                       seqLens.const_data_ptr<int>(),
-                       indices.mutable_data_ptr<int>(), nullptr, nullptr,
-                       static_cast<int>(stride0), static_cast<int>(next_n),
-                       seqLensIs2D, multipleBlocksPerRowConfig);
-      return;
-    }
-    const auto outIndicesAux = torch::stable::empty(
-        {numRows, multipleBlocksPerRowConfig, topK},
-        torch::headeronly::ScalarType::Int, std::nullopt, logits.device());
-    const auto outLogitsAux = torch::stable::empty(
-        {numRows, multipleBlocksPerRowConfig, topK},
-        torch::headeronly::ScalarType::Float, std::nullopt, logits.device());
-    vllm::topKPerRowDecode512DeviceLengthAware<kNumThreadsPerSplitBlock>
-        <<<dim3(numRows, multipleBlocksPerRowConfig), kNumThreadsPerSplitBlock,
-           2 * topK * sizeof(int32_t), stream>>>(
-            logits.const_data_ptr<float>(), seqLens.const_data_ptr<int>(),
-            indices.mutable_data_ptr<int>(),
-            outIndicesAux.mutable_data_ptr<int>(),
-            outLogitsAux.mutable_data_ptr<float>(), static_cast<int>(stride0),
-            static_cast<int>(next_n), seqLensIs2D, multipleBlocksPerRowConfig);
-    constexpr int kNumThreadsPerBlockMerge = 1024;
-    vllm::topKPerRowDecode512DeviceLengthAware<kNumThreadsPerBlockMerge, true>
-        <<<numRows, kNumThreadsPerBlockMerge, topK * sizeof(int32_t), stream>>>(
-            nullptr, seqLens.const_data_ptr<int>(),
-            indices.mutable_data_ptr<int>(),
-            outIndicesAux.mutable_data_ptr<int>(),
-            outLogitsAux.mutable_data_ptr<float>(), 0, static_cast<int>(next_n),
-            seqLensIs2D, multipleBlocksPerRowConfig);
+  if (useGfx950TopK512(topK, stride1, numRows, numColumns)) {
+    launchGfx950TopK512(logits, seqLens, indices, numRows, stride0, next_n,
+                        seqLensIs2D, stream);
     return;
   }
 #endif
@@ -984,6 +1031,45 @@ void top_k_per_row_decode(const torch::stable::Tensor& logits, int64_t next_n,
             outIndicesAux.const_data_ptr<int>());
   }
 }
+
+#ifdef USE_ROCM
+void top_k_per_row_decode_remap(const torch::stable::Tensor& logits,
+                                const torch::stable::Tensor& seqLens,
+                                torch::stable::Tensor& indices,
+                                const torch::stable::Tensor& positions,
+                                int64_t block) {
+  const auto numRows = logits.size(0);
+  if (numRows == 0) return;
+  const torch::stable::accelerator::DeviceGuard device_guard(
+      logits.get_device_index());
+  const cudaStream_t stream = get_current_cuda_stream();
+  const auto numColumns = logits.size(1);
+  STD_TORCH_CHECK(
+      useGfx950TopK512(indices.size(1), logits.stride(1), numRows, numColumns),
+      "top_k_per_row_decode_remap needs gfx950, 512 indices per row, "
+      "unit-stride logits, at most 384 rows and 1M columns");
+  STD_TORCH_CHECK(logits.scalar_type() == torch::headeronly::ScalarType::Float,
+                  "logits must be float32");
+  STD_TORCH_CHECK(seqLens.scalar_type() == torch::headeronly::ScalarType::Int,
+                  "seq_lens must be int32");
+  STD_TORCH_CHECK(indices.scalar_type() == torch::headeronly::ScalarType::Int &&
+                      indices.dim() == 2 && indices.size(0) >= numRows &&
+                      indices.stride(0) == 512 && indices.stride(1) == 1,
+                  "indices must be int32 rows of 512 contiguous entries");
+  STD_TORCH_CHECK(
+      positions.scalar_type() == torch::headeronly::ScalarType::Int &&
+          positions.dim() == 2 && positions.size(0) >= numRows &&
+          positions.stride(1) == 1,
+      "positions must be int32 [rows, blocks] with unit column stride");
+  STD_TORCH_CHECK(block >= 1 && positions.size(1) * block >= numColumns,
+                  "positions must hold a block start for every logits column");
+  launchGfx950TopK512(
+      logits, seqLens, indices, numRows, logits.stride(0), 1,
+      seqLens.dim() == 2 ? 1 : 0, stream,
+      vllm::CandidatePositions{positions.const_data_ptr<int>(),
+                               positions.stride(0), static_cast<int>(block)});
+}
+#endif
 
 void top_k_per_row_prefill(const torch::stable::Tensor& logits,
                            const torch::stable::Tensor& rowStarts,

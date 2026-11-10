@@ -3044,3 +3044,30 @@ def test_decode_chunk_budget_disabled_fitting_and_invalid():
         _decode_chunk_ranges(32, 1024, -1, 2)
     with pytest.raises(ValueError, match="16 logits rows"):
         _decode_chunk_ranges(32, 1024, 1024, 2)
+
+
+@pytest.mark.parametrize("width", [16_384, 65_536])
+@requires_gfx950
+@torch.inference_mode()
+def test_sparse_indexer_candidate_topk_remap_gfx950(width: int) -> None:
+    """The fused store equals vLLM's top-k followed by the consumers' remap."""
+    from vllm.v1.attention.ops.rocm_paged_mxfp4_indexer import _remap_compact_topk
+
+    rows, block, top_k = 8, 8, 512
+    num_blocks = width // block
+    generator = torch.Generator().manual_seed(width)
+    ends = torch.tensor(
+        [0, 1, 300, 511, 512, 513, width // 2, width], dtype=torch.int32
+    ).cuda()
+    logits = torch.rand(rows, width, generator=generator).argsort(1).float().cuda()
+    starts = torch.rand(rows, 4 * num_blocks, generator=generator).argsort(1)
+    positions = torch.full(
+        (rows, num_blocks + 64), -5, dtype=torch.int32, device="cuda"
+    )[:, :num_blocks]
+    positions.copy_(starts[:, :num_blocks] * block)
+    expected = torch.full((rows, top_k), -777, dtype=torch.int32, device="cuda")
+    _run_topk_backend("top_k_per_row_decode", logits, ends, expected, top_k, width)
+    _remap_compact_topk(expected, positions, block)
+    out = torch.full_like(expected, -777)
+    torch.ops._C.top_k_per_row_decode_remap(logits, ends, out, positions, block)
+    assert torch.equal(out.sort(1).values, expected.sort(1).values)

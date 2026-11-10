@@ -644,6 +644,12 @@ STABLE_TORCH_LIBRARY_FRAGMENT(_C, ops) {
       "Tensor seq_lens, Tensor! indices, "
       "int numRows, int stride0, int stride1, int topK) -> ()");
 
+#ifdef USE_ROCM
+  ops.def(
+      "top_k_per_row_decode_remap(Tensor logits, Tensor seq_lens, "
+      "Tensor! indices, Tensor positions, int block) -> ()");
+#endif
+
   ops.def(
       "persistent_topk(Tensor logits, Tensor lengths, Tensor! output, "
       "Tensor workspace, int k, int max_seq_len) -> ()");
@@ -935,6 +941,10 @@ STABLE_TORCH_LIBRARY_IMPL(_C, CUDA, ops) {
            TORCH_BOX(&apply_repetition_penalties_));
   ops.impl("top_k_per_row_prefill", TORCH_BOX(&top_k_per_row_prefill));
   ops.impl("top_k_per_row_decode", TORCH_BOX(&top_k_per_row_decode));
+#ifdef USE_ROCM
+  ops.impl("top_k_per_row_decode_remap",
+           TORCH_BOX(&top_k_per_row_decode_remap));
+#endif
   ops.impl("persistent_topk", TORCH_BOX(&persistent_topk));
 #ifdef VLLM_ENABLE_COOPERATIVE_TOPK
   ops.impl("cooperative_topk", TORCH_BOX(&cooperative_topk));
