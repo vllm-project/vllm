@@ -190,9 +190,10 @@ echo 'import os; os.system("touch /tmp/changed.file")' >> vllm/__init__.py
 if [[ "${is_rocm}" == "1" && -n "${PYTHON_ONLY_COMPILE_PYTHON:-}" ]]; then
     # TheRock publishes the image's ROCm torch builds for every supported Python.
     # This torch pulls its own triton, not the image's repacked one.
-    rocm_arch="$(rocm-bootstrap-detect --unique)"
-    read -r torch_version torchvision_version < <(python3 -c \
-        'import torch, torchvision; print(torch.__version__, torchvision.__version__)')
+    torch_info="$(python3 -c 'import torch, torchvision
+print(torch.cuda.get_device_properties(0).gcnArchName.split(":")[0],
+      torch.__version__, torchvision.__version__)')"
+    read -r rocm_arch torch_version torchvision_version <<<"${torch_info}"
     uv venv --python "${PYTHON_ONLY_COMPILE_PYTHON}" /tmp/python-only-venv
     source /tmp/python-only-venv/bin/activate
     if [[ -n "${rocm_wheel}" ]]; then
