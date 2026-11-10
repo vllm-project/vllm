@@ -260,7 +260,8 @@ def test_iteration_details_count_recomputation_as_prefill():
         max_model_len=128,
     )
     scheduler.observability_config.enable_logging_iteration_details = True
-    (request,) = create_requests(num_requests=1, num_tokens=8)
+    # Keep this test's prefill-to-decode setup self-contained.
+    (request,) = create_requests(num_requests=1, num_tokens=8, max_tokens=100)
     scheduler.add_request(request)
     output = scheduler.schedule()
     scheduler.update_from_output(
@@ -273,8 +274,9 @@ def test_iteration_details_count_recomputation_as_prefill():
             pooler_output=[],
         ),
     )
-    (request,) = scheduler.running
+    assert request.status == RequestStatus.RUNNING
     assert request.num_output_tokens == 1
+    assert scheduler.running == [request]
 
     scheduler.running.remove(request)
     scheduler._preempt_request(request, 0.0)
