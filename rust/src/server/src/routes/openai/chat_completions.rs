@@ -15,7 +15,7 @@ use axum::extract::State;
 use axum::http::HeaderMap;
 use axum::response::sse::Event;
 use axum::response::{IntoResponse, Response};
-use futures::{Stream, StreamExt as _, pin_mut};
+use futures::{Stream, StreamExt as _, future, pin_mut};
 use serde_json::Value;
 use thiserror_ext::AsReport as _;
 use tracing::{debug, error, info, trace};
@@ -37,6 +37,7 @@ use crate::routes::openai::chat_completions::types::{
     ChatCompletionStreamChoice, ChatCompletionStreamPrompt, ChatCompletionStreamResponse,
     ChatMessageDelta,
 };
+use crate::routes::openai::utils::choices::{ChoiceChunk, merge_choice_chunk_streams};
 use crate::routes::openai::utils::logprobs::{
     decoded_logprobs_to_openai_chat, prompt_logprobs_to_maps,
 };
@@ -46,8 +47,8 @@ use crate::routes::openai::utils::types::{
     ToolCallDelta, Usage,
 };
 use crate::routes::openai::utils::usage::ContinuousUsage;
-use crate::routes::openai::utils::validate_max_output_tokens;
 use crate::routes::openai::utils::validated_json::ValidatedJson;
+use crate::routes::openai::utils::{validate_max_output_tokens, validate_n_limit};
 use crate::routes::output_log::{LoggedOutput, chat_output_text};
 use crate::state::AppState;
 use crate::utils::{ResolvedRequestContext, resolve_request_context, sse_response, unix_timestamp};
@@ -76,10 +77,14 @@ pub async fn chat_completions(
         Ok(prepared) => prepared,
         Err(error) => return error.into_response(),
     };
+    if let Err(error) = validate_n_limit(prepared.n.get(), state.api_server_options.max_n_sequences)
+    {
+        return error.into_response();
+    }
     if let Err(error) = validate_max_output_tokens(
         "max_completion_tokens",
         prepared.chat_request.sampling_params.max_tokens,
-        state.chat.engine_core_client().max_model_len(),
+        state.llm().info().max_model_len,
     ) {
         return error.into_response();
     }
@@ -95,47 +100,97 @@ pub async fn chat_completions(
     // is configured to count them.
     let count_reasoning_tokens = state.chat.reasoning_parser_name().is_some();
 
-    let mut chat_stream =
-        match state.chat.chat(prepared.chat_request).instrument(request_span.clone()).await {
-            Ok(stream) => stream,
-            Err(error) => {
-                return chat_submit_error("failed to submit chat request", error).into_response();
-            }
-        };
+    let n = prepared.n;
+    let chat_streams = match state
+        .chat
+        .chat_n(prepared.chat_request, n)
+        .instrument(request_span.clone())
+        .await
+    {
+        Ok(streams) => streams,
+        Err(error) => {
+            return chat_submit_error("failed to submit chat request", error).into_response();
+        }
+    };
 
     if stream {
-        let prompt_text = chat_stream.take_prompt_text();
-        let chunk_stream = chat_completion_chunk_stream(
-            chat_stream,
-            prompt_text,
-            prepared.request_id,
-            prepared.response_model,
-            created,
-            api_server_options,
-            count_reasoning_tokens,
-            prepared.options,
-        );
-        let sse_stream = chat_completion_sse_stream(chunk_stream).instrument(request_span);
+        let chunk_streams = chat_streams
+            .into_iter()
+            .map(|mut chat_stream| {
+                let prompt_text = chat_stream.take_prompt_text();
+                chat_completion_chunk_stream(
+                    chat_stream,
+                    prompt_text,
+                    prepared.request_id.clone(),
+                    prepared.response_model.clone(),
+                    created,
+                    state.system_fingerprint.clone(),
+                    api_server_options,
+                    count_reasoning_tokens,
+                    prepared.options.clone(),
+                )
+            })
+            .collect();
+        let sse_stream = chat_completion_sse_stream(merge_choice_chunk_streams(chunk_streams))
+            .instrument(request_span);
 
         sse_response(sse_stream, api_server_options.sse_keep_alive_interval)
     } else {
-        let response = match collect_chat_completion(
-            chat_stream,
-            prepared.request_id,
-            prepared.response_model,
-            created,
-            api_server_options,
-            count_reasoning_tokens,
-            prepared.options,
-        )
+        let responses = future::try_join_all(chat_streams.into_iter().map(|chat_stream| {
+            collect_chat_completion(
+                chat_stream,
+                prepared.request_id.clone(),
+                prepared.response_model.clone(),
+                created,
+                state.system_fingerprint.clone(),
+                api_server_options,
+                count_reasoning_tokens,
+                prepared.options.clone(),
+            )
+        }))
         .instrument(request_span.clone())
-        .await
-        {
-            Ok(response) => response,
-            Err(error) => return error.into_response(),
-        };
+        .await;
+        match responses {
+            Ok(responses) => Json(merge_choice_responses(responses)).into_response(),
+            Err(error) => error.into_response(),
+        }
+    }
+}
 
-        Json(response).into_response()
+/// Merge the responses of a request's choices, in index order, like Python's
+/// non-streaming response for `n > 1`: the prompt-level fields come from the
+/// first choice, usage adds up per [`Usage::add_choice`], and per-request
+/// metrics, which describe a single sample, are reported only for `n = 1`.
+fn merge_choice_responses(responses: Vec<ChatCompletionResponse>) -> ChatCompletionResponse {
+    let mut responses = responses.into_iter();
+    let mut merged = responses.next().expect("a request has at least one choice");
+    for (index, response) in (1..).zip(responses) {
+        merged.metrics = None;
+        if let (Some(usage), Some(other)) = (&mut merged.usage, &response.usage) {
+            usage.add_choice(other);
+        }
+        merged.choices.extend(response.choices.into_iter().map(|mut choice| {
+            choice.index = index;
+            choice
+        }));
+    }
+    merged
+}
+
+impl ChoiceChunk for ChatCompletionStreamResponse {
+    fn set_choice_index(&mut self, index: u32) {
+        for choice in &mut self.choices {
+            choice.index = index;
+        }
+    }
+
+    fn final_usage_mut(&mut self) -> Option<&mut Usage> {
+        // OpenAI's final usage chunk is the one chunk without choices.
+        self.choices.is_empty().then_some(self.usage.as_mut()).flatten()
+    }
+
+    fn clear_metrics(&mut self) {
+        self.metrics = None;
     }
 }
 
@@ -144,6 +199,7 @@ async fn collect_chat_completion(
     request_id: String,
     response_model: String,
     created: u64,
+    system_fingerprint: Option<String>,
     ApiServerOptions {
         enable_log_requests,
         log_outputs,
@@ -305,7 +361,7 @@ async fn collect_chat_completion(
         service_tier: None,
         usage: Some(usage),
         metrics,
-        system_fingerprint: None,
+        system_fingerprint,
         prompt_logprobs,
         prompt_token_ids: return_token_ids.then(|| prompt_token_ids.to_vec()),
         prompt_text,
@@ -322,6 +378,7 @@ async fn chat_completion_chunk_stream(
     request_id: String,
     response_model: String,
     created: u64,
+    system_fingerprint: Option<String>,
     ApiServerOptions {
         enable_log_requests,
         log_outputs,
@@ -557,7 +614,12 @@ async fn chat_completion_chunk_stream(
                     kv_transfer_params.map(|value| *value),
                     weight_versions.filter(|_| return_weight_versions),
                 ) {
-                    Ok(chunk) => {
+                    Ok(mut chunk) => {
+                        // Like Python, the last chunk carries the fingerprint:
+                        // this one, or the usage chunk that follows.
+                        if !include_usage {
+                            chunk.system_fingerprint = system_fingerprint.clone();
+                        }
                         let finish_reason = chunk.choices[0].finish_reason.as_deref();
                         if let Some(delta_log) = delta_log.as_mut() {
                             delta_log.finish(finish_reason);
@@ -601,6 +663,7 @@ async fn chat_completion_chunk_stream(
                             count_reasoning_tokens.then_some(final_usage.reasoning_tokens),
                         ),
                         metrics,
+                        system_fingerprint,
                     ))
                     .await;
                 }
@@ -623,10 +686,12 @@ fn usage_chunk(
     envelope: &Arc<StreamResponseEnvelope>,
     usage: Usage,
     metrics: Option<PerRequestMetrics>,
+    system_fingerprint: Option<String>,
 ) -> ChatCompletionStreamResponse {
     let mut chunk = ChatCompletionStreamResponse::new(envelope);
     chunk.usage = Some(usage);
     chunk.metrics = metrics.map(Into::into);
+    chunk.system_fingerprint = system_fingerprint;
     chunk
 }
 
@@ -1268,6 +1333,7 @@ mod tests {
             "chatcmpl-1".to_string(),
             "model".to_string(),
             1,
+            None,
             ApiServerOptions {
                 enable_prompt_tokens_details: true,
                 enable_per_request_metrics: true,
@@ -1365,6 +1431,7 @@ mod tests {
             "chatcmpl-1".to_string(),
             "model".to_string(),
             1,
+            None,
             ApiServerOptions::default(),
             false,
             ResponseOptions {
@@ -1418,6 +1485,7 @@ mod tests {
             "chatcmpl-1".to_string(),
             "model".to_string(),
             1,
+            None,
             ApiServerOptions::default(),
             false,
             ResponseOptions {
@@ -1484,6 +1552,7 @@ mod tests {
             "chatcmpl-1".to_string(),
             "model".to_string(),
             1,
+            None,
             ApiServerOptions::default(),
             false,
             ResponseOptions::default(),
@@ -1569,6 +1638,7 @@ mod tests {
             "chatcmpl-1".to_string(),
             "model".to_string(),
             1,
+            None,
             ApiServerOptions::default(),
             false,
             ResponseOptions {
@@ -1706,6 +1776,7 @@ mod tests {
             "chatcmpl-1".to_string(),
             "model".to_string(),
             1,
+            None,
             ApiServerOptions::default(),
             false,
             ResponseOptions {
@@ -1789,6 +1860,7 @@ mod tests {
             "chatcmpl-1".to_string(),
             "model".to_string(),
             1,
+            None,
             ApiServerOptions::default(),
             false,
             ResponseOptions {
@@ -1855,6 +1927,7 @@ mod tests {
             "chatcmpl-1".to_string(),
             "model".to_string(),
             1,
+            None,
             ApiServerOptions::default(),
             false,
             ResponseOptions {
@@ -1939,6 +2012,7 @@ mod tests {
             "chatcmpl-1".to_string(),
             "model".to_string(),
             1,
+            None,
             ApiServerOptions::default(),
             true,
             ResponseOptions {
@@ -2015,6 +2089,7 @@ mod tests {
             "chatcmpl-1".to_string(),
             "model".to_string(),
             1,
+            None,
             ApiServerOptions::default(),
             true,
             ResponseOptions {
@@ -2080,6 +2155,7 @@ mod tests {
                 "chatcmpl-1".to_string(),
                 "model".to_string(),
                 1,
+                None,
                 ApiServerOptions::default(),
                 count_reasoning_tokens,
                 ResponseOptions {

@@ -139,6 +139,7 @@ class EngineCoreOutput(
     spec_decode_metrics: object | None = None
     prompt_token_id_logprobs: object | None = None
     error: RequestError | None = None
+    watermarking: bool | None = None
 
 
 class ExtendedEngineCoreOutput(EngineCoreOutput):
@@ -296,6 +297,7 @@ outputs = EngineCoreOutputs(
             new_token_ids=[7, 8],
             finish_reason=FinishReason.ERROR,
             error=RequestError("engine_paused", "Generation is paused.", True),
+            watermarking=True,
             routed_experts=[
                 np.arange(4, dtype=np.uint8).reshape(2, 1, 2).dtype.str,
                 [2, 1, 2],
@@ -546,6 +548,9 @@ class EngineCoreReadyResponse:
     effective_attention_block_size: int | None = None
     vllm_config: dict | None = None
     prefix_hash_config: PrefixHashConfig | None = None
+    cache_config_info: dict[str, str] | None = None
+    config_hash: str | None = None
+    enable_expert_parallel: bool = False
 
 
 ready_response = EngineCoreReadyResponse(
@@ -592,6 +597,9 @@ ready_response = EngineCoreReadyResponse(
         "parallel_config": {"_api_process_count": 1, "_api_process_rank": -1},
         "speculative_config": None,
     },
+    cache_config_info={"block_size": "16", "mamba_block_size": "None"},
+    config_hash="0123456789",
+    enable_expert_parallel=True,
 )
 
 nixl_stats = {

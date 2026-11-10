@@ -112,6 +112,7 @@ fn hf_renderer(template: &str) -> HfChatRenderer {
     HfChatRenderer::new(
         Some(template.into()),
         HashMap::new(),
+        None,
         ChatTemplateContentFormatOption::OpenAi,
     )
     .unwrap()

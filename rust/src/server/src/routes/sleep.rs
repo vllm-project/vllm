@@ -49,16 +49,12 @@ const fn default_sleep_level() -> SleepLevel {
     SleepLevel::OffloadWeights
 }
 
-fn invalid_query(error: QueryRejection) -> ApiError {
-    ApiError::invalid_request(error.body_text(), None)
-}
-
 /// Put the engine to sleep.
 pub async fn sleep(
     State(state): State<Arc<AppState>>,
     params: Result<Query<SleepParams>, QueryRejection>,
 ) -> Result<Json<SleepResponse>, ApiError> {
-    let Query(SleepParams { level, mode }) = params.map_err(invalid_query)?;
+    let Query(SleepParams { level, mode }) = params?;
     let _recorder = METRICS.api_server.record_sleep_mode_operation("sleep");
 
     state

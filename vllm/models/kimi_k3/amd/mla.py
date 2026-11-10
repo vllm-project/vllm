@@ -185,6 +185,9 @@ class KimiK3MultiHeadLatentAttentionWrapper(MultiHeadLatentAttentionWrapper):
         )
 
     def process_weights_after_loading(self) -> None:
+        self.refresh_derived_weights()
+
+    def refresh_derived_weights(self) -> None:
         if self._fold_qb_uk:
             self._build_w_fold()
 

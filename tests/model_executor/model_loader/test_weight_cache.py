@@ -479,6 +479,49 @@ def test_ipc_cache_nvfp4_cutlass(vllm_runner, tmp_path, monkeypatch):
     run_cold_start_and_warm_restart(vllm_runner, NVFP4_CASE, tmp_path)
 
 
+@pytest.mark.skipif(
+    not current_platform.is_cuda_alike(), reason="Requires CUDA or ROCm"
+)
+def test_ipc_fallback_restores_memory_budget(vllm_runner, enable_pickle):
+    """A reachable but incompatible daemon must not reduce the disk-load budget."""
+    model = "Qwen/Qwen3-0.6B"
+    budgets = []
+    outputs = []
+    with WeightCacheDaemon(
+        model,
+        tp_size=1,
+        extra_args=["--dtype", "bfloat16", "--disable-flashinfer-autotune"],
+    ) as daemon:
+        daemon.wait_until_ready()
+        for load_format in ("auto", "ipc_cache"):
+            extra = (
+                {"socket_dir": daemon.socket_dir, "fallback": True}
+                if load_format == "ipc_cache"
+                else {}
+            )
+            with vllm_runner(
+                model,
+                dtype="float16",
+                load_format=load_format,
+                model_loader_extra_config=extra,
+                enforce_eager=True,
+                gpu_memory_utilization=0.1,
+                max_model_len=1024,
+                max_num_batched_tokens=1024,
+                max_num_seqs=1,
+                kernel_config={"enable_flashinfer_autotune": False},
+            ) as llm:
+                budgets.append(
+                    llm.collective_rpc(lambda worker: worker.requested_memory)[0]
+                )
+                outputs.append(
+                    llm.generate_greedy(["The capital of France is"], max_tokens=8)
+                )
+
+    assert budgets[1] == budgets[0], "Disk fallback retained the external weight charge"
+    assert outputs[1] == outputs[0]
+
+
 @create_new_process_for_each_test()
 @pytest.mark.distributed(num_gpus=2)
 def test_ipc_cache_cold_start_and_warm_restart_tp2_ep(vllm_runner, tmp_path):
@@ -1115,6 +1158,26 @@ def test_daemon_releases_cublas_workspaces():
         "daemon retained BLAS workspaces"
     )
     torch.testing.assert_close(result, torch.full_like(result, 128), rtol=0, atol=0)
+
+
+@pytest.mark.parametrize("is_draft,fallback_bytes", [(False, 8), (True, 4)])
+def test_external_weight_fallback_preserves_other_role(is_draft, fallback_bytes):
+    """Only the failed role's charge is reported, at most once."""
+    from vllm.model_executor.model_loader.weight_cache.utils import (
+        ExternalWeightCharges,
+        record_external_weight_charge,
+        record_external_weight_fallback,
+    )
+
+    accounting = ExternalWeightCharges()
+    with accounting.track():
+        record_external_weight_charge("target.sock", False, 8)
+        record_external_weight_charge("draft.sock", True, 4)
+        source = "draft.sock" if is_draft else "target.sock"
+        record_external_weight_fallback(source, is_draft)
+        record_external_weight_fallback(source, is_draft)
+        record_external_weight_fallback("uncharged.sock", False)
+    assert accounting.fallback_bytes == fallback_bytes
 
 
 @pytest.mark.skipif(not current_platform.is_cuda(), reason="Requires CUDA")

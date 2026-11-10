@@ -22,4 +22,16 @@ pub enum Error {
     },
     #[error("routed experts for request `{request_id}` changed dtype or shape")]
     RoutedExpertsShapeMismatch { request_id: String },
+    /// The request uses a field this implementation does not carry out.
+    #[error("`{field}` is not supported")]
+    Unsupported { field: &'static str },
+    /// The request cannot be taken now; retrying later may succeed.
+    #[error("unavailable: {message}")]
+    Unavailable { message: String },
+    /// A remote implementation rejected the request as invalid.
+    #[error("{message}")]
+    RemoteInvalidRequest { message: String },
+    /// A remote implementation failed the request.
+    #[error("remote error: {message}")]
+    Remote { message: String },
 }

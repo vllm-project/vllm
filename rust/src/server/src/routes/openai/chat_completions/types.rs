@@ -70,7 +70,6 @@ pub struct ChatCompletionRequest {
     pub max_completion_tokens: Option<u32>,
 
     /// How many chat completion choices to generate for each input message
-    #[validate(range(min = 1, max = 10))]
     pub n: Option<u32>,
 
     /// Number between -2.0 and 2.0. Positive values penalize new tokens based
@@ -446,6 +445,8 @@ pub(super) struct ChatCompletionStreamResponse {
     pub choices: Vec<ChatCompletionStreamChoice>,
     pub usage: Option<Usage>,
     pub metrics: Option<StreamPerRequestMetrics>,
+    /// Set only on the last chunk.
+    pub system_fingerprint: Option<String>,
     /// Set only on the first chunk.
     #[serde(flatten)]
     pub prompt: Option<ChatCompletionStreamPrompt>,
@@ -461,6 +462,7 @@ impl ChatCompletionStreamResponse {
             choices: Vec::new(),
             usage: None,
             metrics: None,
+            system_fingerprint: None,
             prompt: None,
             kv_transfer_params: None,
         }
