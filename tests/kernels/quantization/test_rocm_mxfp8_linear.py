@@ -479,7 +479,8 @@ def test_rocm_mxfp8_fused_act_quant_bitwise_eq_unfused(monkeypatch, n, k, num_to
     )
 
 
-@pytest.mark.parametrize("num_rows", [1, 64, 65])
+# 256 and 257 straddle _MXFP8_QUANT_ROWS_MAX_M, so both kernels see the zeros.
+@pytest.mark.parametrize("num_rows", [1, 64, 65, 256, 257])
 @torch.inference_mode()
 def test_rocm_mxfp8_quantizer_matches_torch_on_degenerate_blocks(num_rows):
     """The fused ROCm quantizer must agree with the torch one, zeros included.
@@ -500,6 +501,29 @@ def test_rocm_mxfp8_quantizer_matches_torch_on_degenerate_blocks(num_rows):
     q_torch, s_torch = _mxfp8_e4m3_quantize_torch(x)
 
     assert not torch.isnan(q_triton.float()).any()
+    torch.testing.assert_close(s_triton, s_torch, rtol=0, atol=0)
+    torch.testing.assert_close(
+        q_triton.view(torch.uint8), q_torch.view(torch.uint8), rtol=0, atol=0
+    )
+
+
+# Both sides of _MXFP8_QUANT_ROWS_MAX_M and _MXFP8_QUANT_ROWS_MIN_K; 96, 576,
+# 1280, 2880 and 5120 leave a partial last BLOCK_K.
+@pytest.mark.parametrize("num_rows", [1, 5, 31, 256, 257, 600])
+@pytest.mark.parametrize("k", [32, 96, 576, 1280, 2880, 4096, 5120])
+@torch.inference_mode()
+def test_rocm_mxfp8_quantizer_matches_torch(num_rows, k):
+    """Bit-exact against the torch quantizer, scales included, at every width."""
+    torch.manual_seed(num_rows * 10007 + k)
+    # Neighbouring blocks get different scales, so a block written with its
+    # neighbour's scale fails.
+    x = torch.randn(num_rows, k // 32, 32, device="cuda")
+    x *= torch.exp2(torch.randint(-20, 20, (num_rows, k // 32, 1), device="cuda"))
+    x = x.view(num_rows, k).to(torch.bfloat16)
+
+    q_triton, s_triton = _mxfp8_e4m3_quantize_triton(x)
+    q_torch, s_torch = _mxfp8_e4m3_quantize_torch(x)
+
     torch.testing.assert_close(s_triton, s_torch, rtol=0, atol=0)
     torch.testing.assert_close(
         q_triton.view(torch.uint8), q_torch.view(torch.uint8), rtol=0, atol=0

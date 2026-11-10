@@ -172,8 +172,57 @@ def _mxfp8_quant_triton_kernel():
     return _kernel
 
 
+def _mxfp8_quant_rows_triton_kernel():
+    """Lazily-built row-wise variant of `_mxfp8_quant_triton_kernel`.
+
+    Each program handles one row and `BLOCK_K` contiguous elements
+    (`BLOCK_K // 32` MX blocks), so a small `M` does not launch mostly masked
+    `[BLOCK_M, 32]` tiles. The per-element arithmetic is the same, so the
+    output is bit-identical.
+    """
+    from vllm.triton_utils import tl, triton
+
+    @triton.jit
+    def _rows_kernel(
+        x_ptr,
+        xq_ptr,
+        s_ptr,
+        K,
+        sxm,
+        sqm,
+        ssm,
+        BLOCK_K: tl.constexpr,
+        FP8_MAX: tl.constexpr,
+        TINY: tl.constexpr,
+    ):
+        NUM_BLOCKS: tl.constexpr = BLOCK_K // 32
+        row = tl.program_id(0).to(tl.int64)
+        pid_k = tl.program_id(1)
+        offs_b = pid_k * NUM_BLOCKS + tl.arange(0, NUM_BLOCKS)  # MX block index
+        offs_k = offs_b[:, None] * 32 + tl.arange(0, 32)[None, :]  # [NUM_BLOCKS, 32]
+        # K is a multiple of 32, so the mask never splits an MX block.
+        x = tl.load(x_ptr + row * sxm + offs_k, mask=offs_k < K, other=0.0).to(
+            tl.float32
+        )
+        amax = tl.maximum(tl.max(tl.abs(x), axis=1), TINY)  # [NUM_BLOCKS]
+        sb = tl.ceil(tl.log2(amax / FP8_MAX)) + 127.0
+        sb = tl.minimum(tl.maximum(sb, 0.0), 254.0)
+        # See _mxfp8_quant_triton_kernel for why this is a reciprocal multiply.
+        rescale = tl.exp2(127.0 - sb)
+        xq = (x * rescale[:, None]).to(xq_ptr.dtype.element_ty)
+        tl.store(xq_ptr + row * sqm + offs_k, xq, mask=offs_k < K)
+        tl.store(s_ptr + row * ssm + offs_b, sb.to(tl.uint8), mask=offs_b < K // 32)
+
+    return _rows_kernel
+
+
 _MXFP8_QUANT_KERNEL = None
-_MXFP8_M1_BLOCK_M = {2048: 4, 3072: 4, 6144: 2}
+_MXFP8_QUANT_ROWS_KERNEL = None
+# Measured on MI355X: the row kernel is faster at any K up to this many rows,
+# and at any M once K >= _MXFP8_QUANT_ROWS_MIN_K.
+_MXFP8_QUANT_ROWS_MAX_M = 256
+_MXFP8_QUANT_ROWS_MIN_K = 4096
+_MXFP8_QUANT_ROWS_BLOCK_K = 2048
 
 
 def _mxfp8_e4m3_quantize_triton(
@@ -182,9 +231,7 @@ def _mxfp8_e4m3_quantize_triton(
     """Fused 2D MXFP8 quant (non-swizzled, row-major [M, K//32] scales)."""
     from vllm.triton_utils import triton
 
-    global _MXFP8_QUANT_KERNEL
-    if _MXFP8_QUANT_KERNEL is None:
-        _MXFP8_QUANT_KERNEL = _mxfp8_quant_triton_kernel()
+    global _MXFP8_QUANT_KERNEL, _MXFP8_QUANT_ROWS_KERNEL
 
     M, K = x.shape
     x = x.contiguous()
@@ -192,7 +239,29 @@ def _mxfp8_e4m3_quantize_triton(
     scales = torch.empty(
         (M, K // MXFP8_BLOCK_SIZE), dtype=MXFP8_SCALE_DTYPE, device=x.device
     )
-    BLOCK_M = _MXFP8_M1_BLOCK_M.get(K, 64) if M == 1 else 64
+    if M <= _MXFP8_QUANT_ROWS_MAX_M or K >= _MXFP8_QUANT_ROWS_MIN_K:
+        if _MXFP8_QUANT_ROWS_KERNEL is None:
+            _MXFP8_QUANT_ROWS_KERNEL = _mxfp8_quant_rows_triton_kernel()
+        # All three are contiguous along K, so only row strides are passed.
+        block_k = min(_MXFP8_QUANT_ROWS_BLOCK_K, triton.next_power_of_2(K))
+        _MXFP8_QUANT_ROWS_KERNEL[(M, triton.cdiv(K, block_k))](
+            x,
+            xq,
+            scales,
+            K,
+            x.stride(0),
+            xq.stride(0),
+            scales.stride(0),
+            BLOCK_K=block_k,
+            FP8_MAX=float(torch.finfo(MXFP8_VALUE_DTYPE).max),
+            TINY=float(torch.finfo(torch.float32).tiny),
+            num_warps=1,
+        )
+        return xq, scales
+
+    if _MXFP8_QUANT_KERNEL is None:
+        _MXFP8_QUANT_KERNEL = _mxfp8_quant_triton_kernel()
+    BLOCK_M = 64
     grid = (triton.cdiv(M, BLOCK_M), K // MXFP8_BLOCK_SIZE)
     _MXFP8_QUANT_KERNEL[grid](
         x,
