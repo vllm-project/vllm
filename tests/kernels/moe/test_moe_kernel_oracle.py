@@ -27,6 +27,7 @@ from vllm.model_executor.layers.fused_moe.experts.fused_batched_moe import (
 )
 from vllm.model_executor.layers.fused_moe.experts.marlin_moe import MarlinExperts
 from vllm.model_executor.layers.fused_moe.experts.triton_moe import TritonExperts
+from vllm.model_executor.layers.fused_moe.oracle import fp8 as fp8_oracle
 from vllm.model_executor.layers.fused_moe.oracle.base import make_moe_kernel
 from vllm.model_executor.layers.fused_moe.oracle.fp8 import (
     Fp8MoeBackend,
@@ -456,6 +457,34 @@ def test_fp8_aiter_env_selection(
             select()
         return
     assert select()[0] is expected
+
+
+@pytest.mark.parametrize("family", [100, 120])
+def test_fp8_priority_triton_before_cutlass_on_sm120(family, monkeypatch):
+    """On SM12x, Triton (and batched Triton) rank ahead of the vLLM CUTLASS
+    backends; other platforms keep CUTLASS first."""
+    monkeypatch.setattr(
+        "vllm.model_executor.layers.fused_moe.oracle.fp8.prioritize_humming",
+        lambda backends: backends,
+    )
+    monkeypatch.setattr(current_platform, "is_cuda", lambda: True)
+    monkeypatch.setattr(current_platform, "is_xpu", lambda: False)
+    monkeypatch.setattr(current_platform, "is_cpu", lambda: False)
+    monkeypatch.setattr(
+        current_platform, "is_device_capability", lambda *_, **__: False
+    )
+    monkeypatch.setattr(
+        current_platform,
+        "is_device_capability_family",
+        lambda capability, device_id=0: capability == family,
+    )
+    backends = fp8_oracle._get_priority_backends(make_dummy_moe_config(), None, None)
+    pairs = [
+        (Fp8MoeBackend.TRITON, Fp8MoeBackend.VLLM_CUTLASS),
+        (Fp8MoeBackend.BATCHED_TRITON, Fp8MoeBackend.BATCHED_VLLM_CUTLASS),
+    ]
+    for triton, cutlass in pairs:
+        assert (backends.index(triton) < backends.index(cutlass)) == (family == 120)
 
 
 _FORMAT = mk.FusedMoEActivationFormat

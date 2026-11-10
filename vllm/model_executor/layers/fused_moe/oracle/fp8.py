@@ -137,6 +137,19 @@ def _get_priority_backends(
         else:
             _move_to_front(_AVAILABLE_BACKENDS, Fp8MoeBackend.TRITON)
 
+    # On SM12x, the vLLM CUTLASS grouped GEMM is within ~2% of tuned Triton
+    # and slower for some shapes (e.g. Mixtral), so prefer Triton. CUTLASS
+    # stays available through --moe-backend cutlass.
+    if current_platform.is_cuda() and current_platform.is_device_capability_family(120):
+        for cutlass_backend, triton_backend in (
+            (Fp8MoeBackend.VLLM_CUTLASS, Fp8MoeBackend.TRITON),
+            (Fp8MoeBackend.BATCHED_VLLM_CUTLASS, Fp8MoeBackend.BATCHED_TRITON),
+        ):
+            _AVAILABLE_BACKENDS.remove(triton_backend)
+            _AVAILABLE_BACKENDS.insert(
+                _AVAILABLE_BACKENDS.index(cutlass_backend), triton_backend
+            )
+
     if current_platform.is_xpu():
         # XPU platform supports TritonExperts and XPUExpertsFp8,
         # move XPU backend to the front.
