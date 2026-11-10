@@ -528,6 +528,10 @@ def _gfx942_monokernel() -> bool:
 
 
 class DeepseekV41ROCMAiterMLASparseBackend(DeepseekV4SparseMLABackend):
+    @classmethod
+    def supports_pcp(cls) -> bool:
+        return True
+
     @staticmethod
     def get_name() -> str:
         return "ROCM_FLASHMLA_SPARSE_DSV41"
@@ -542,6 +546,10 @@ class DeepseekV41ROCMAiterMLASparseBackend(DeepseekV4SparseMLABackend):
 
 
 class DeepseekV41ROCMAiterSparseSWABackend(DeepseekSparseSWABackend):
+    @classmethod
+    def supports_pcp(cls) -> bool:
+        return True
+
     @staticmethod
     def get_builder_cls() -> type["DeepseekV41ROCMAiterSparseSWAMetadataBuilder"]:
         return DeepseekV41ROCMAiterSparseSWAMetadataBuilder
@@ -693,8 +701,12 @@ class DeepseekV41ROCMAiterMLAAttention(DeepseekV4Attention):
         hidden_states: torch.Tensor,
         llama_4_scaling: torch.Tensor | None = None,
     ) -> torch.Tensor:
-        if self.indexer is None or not current_platform.enable_multi_stream_overlap(
-            self.aux_stream_list, get_forward_context().attn_metadata
+        if (
+            self.use_pcp
+            or self.indexer is None
+            or not current_platform.enable_multi_stream_overlap(
+                self.aux_stream_list, get_forward_context().attn_metadata
+            )
         ):
             # Sequential fallback: no forks outside the capture region, where
             # HIP event sync is unreliable.
@@ -1020,6 +1032,18 @@ class DeepseekV41ROCMAiterMLAAttention(DeepseekV4Attention):
             attn_metadata.get(self.swa_cache_layer.prefix),
         )
         assert swa_metadata is not None
+
+        if self.use_pcp:
+            num_tokens = (
+                swa_metadata.num_decode_tokens + swa_metadata.num_prefill_tokens
+            )
+            if isinstance(output, QuantizedActivation):
+                output.data[num_tokens:].zero_()
+                output.scale[num_tokens:].zero_()
+            else:
+                output[num_tokens:].zero_()
+            if num_tokens == 0:
+                return
 
         swa_only = self.compress_ratio == 0
         self_kv_cache = None if swa_only else self._compressed_kv_cache()
