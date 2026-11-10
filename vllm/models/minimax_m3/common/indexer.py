@@ -4,14 +4,14 @@
 
 The indexer scores KV blocks with the index heads and selects the top-k blocks
 (plus fixed init/local blocks) that the main block-sparse attention
-(``sparse_attention.py``) then attends to. It owns its own side cache
-(``MiniMaxM3IndexerCache``, one index-key vector per token), metadata, and
+(`sparse_attention.py`) then attends to. It owns its own side cache
+(`MiniMaxM3IndexerCache`, one index-key vector per token), metadata, and
 metadata builder, mirroring how DeepSeek V4 keeps the indexer separate from the
 main attention.
 
-``MiniMaxM3Indexer`` is the ``nn.Module`` the attention layer holds (like
-``DeepseekV4Indexer``); it picks a kernel impl in ``__init__`` (via
-``select_indexer_impl_cls``) and delegates ``forward`` to it.
+`MiniMaxM3Indexer` is the `nn.Module` the attention layer holds (like
+`DeepseekV4Indexer`); it picks a kernel impl in `__init__` (via
+`select_indexer_impl_cls`) and delegates `forward` to it.
 """
 
 from dataclasses import dataclass
@@ -103,7 +103,7 @@ class MiniMaxM3IndexerCache(nn.Module, AttentionLayerBase):
     """Side KV cache for the indexer's per-token index keys (key-only).
 
     Registers itself in the static forward context so the KV-cache manager
-    allocates it (like ``DeepseekV32IndexerCache``).
+    allocates it (like `DeepseekV32IndexerCache`).
     """
 
     def __init__(
@@ -182,7 +182,7 @@ class MiniMaxM3IndexerPrefillMetadata:
 
 @dataclass
 class MiniMaxM3IndexerDecodeMetadata:
-    """Per-decode state (cudagraph-safe). ``decode_query_len`` is the uniform
+    """Per-decode state (cudagraph-safe). `decode_query_len` is the uniform
     per-request query length (1, or 1 + num_speculative_tokens)."""
 
     seq_lens: torch.Tensor  # [num_decodes] int32
@@ -216,7 +216,7 @@ class MiniMaxM3IndexerMetadataBuilder(
     AttentionMetadataBuilder[MiniMaxM3IndexerMetadata]
 ):
     """Abstract base: shared setup only. The Triton and MSA builders are
-    parallel subclasses that each own their full ``build`` (no shared code)."""
+    parallel subclasses that each own their full `build` (no shared code)."""
 
     # Full cudagraphs for uniform decode batches (incl. spec-decode verify).
     _cudagraph_support: ClassVar[AttentionCGSupport] = AttentionCGSupport.UNIFORM_BATCH
@@ -341,9 +341,9 @@ class MiniMaxM3IndexerImpl(nn.Module):
     """Abstract base for the indexer kernel impls.
 
     Each impl owns its side cache and reports its backend via
-    ``indexer_backend_cls`` (so each gets its own builder). The Triton and MSA
-    subclasses each own a full ``forward`` returning ``(decode_topk,
-    prefill_topk)`` -- no shared forward code.
+    `indexer_backend_cls` (so each gets its own builder). The Triton and MSA
+    subclasses each own a full `forward` returning `(decode_topk,
+    prefill_topk)` -- no shared forward code.
     """
 
     # Set by each impl so the side cache reports the matching backend + builder.
@@ -402,15 +402,15 @@ class MiniMaxM3IndexerImpl(nn.Module):
         )
 
     def reserve_workspace(self) -> None:
-        """Reserve the workspace-manager scratch ``forward`` needs; called from
-        the memory-profiling run, which skips ``forward``."""
+        """Reserve the workspace-manager scratch `forward` needs; called from
+        the memory-profiling run, which skips `forward`."""
         return
 
     def forward(
         self,
         index_query: torch.Tensor,
     ) -> tuple[torch.Tensor | None, torch.Tensor | None]:
-        """Return ``(decode_topk, prefill_topk)``; implemented per kernel impl."""
+        """Return `(decode_topk, prefill_topk)`; implemented per kernel impl."""
         raise NotImplementedError
 
 
@@ -513,8 +513,8 @@ def select_indexer_impl_cls(
 ) -> type[MiniMaxM3IndexerImpl]:
     """Pick the indexer impl off the platform, top-k count, and cache dtype.
 
-    On Blackwell (SM100) with ``topk_blocks == 16`` (the only width fmha_sm100's
-    ``sparse_topk_select`` kernel supports), the fmha_sm100 score + top-k path is
+    On Blackwell (SM100) with `topk_blocks == 16` (the only width fmha_sm100's
+    `sparse_topk_select` kernel supports), the fmha_sm100 score + top-k path is
     used for both bf16 and fp8 index caches. An nvfp4 index cache uses the MSA
     Q8KV4/Q8KV8 paged indexers (SM100/SM103/SM107 only). Everything else falls back to
     the Triton indexer, with fp8 restricted to CUDA platforms that advertise fp8
@@ -623,10 +623,10 @@ def select_indexer_impl_cls(
 
 
 class MiniMaxM3Indexer(nn.Module):
-    """Indexer module held by the attention layer (like ``DeepseekV4Indexer``).
+    """Indexer module held by the attention layer (like `DeepseekV4Indexer`).
 
-    Picks the kernel impl in ``__init__`` (``select_indexer_impl_cls``) and
-    delegates ``forward``; exposes the impl's side cache via ``index_cache``.
+    Picks the kernel impl in `__init__` (`select_indexer_impl_cls`) and
+    delegates `forward`; exposes the impl's side cache via `index_cache`.
     """
 
     def __init__(

@@ -660,7 +660,7 @@ class TestTieringOffloadingManager:
     def _promote_with_deferred_release(
         self, monkeypatch, chunks, successful_indices=(), preset=False
     ) -> list[threading.Event]:
-        """Promote ``chunks`` from tier1 into a failure with a deferred release.
+        """Promote `chunks` from tier1 into a failure with a deferred release.
 
         Returns the events the tier reported; setting one releases its job.
         """

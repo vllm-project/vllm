@@ -1,7 +1,7 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
-"""The FP32-state RecoverSSM commit (``KdaCommitF32``, the ``fp32_deferred`` backend
-``KDARecoverSSMCommitContext`` gets under the specialized decode for FP32 checkpoints
+"""The FP32-state RecoverSSM commit (`KdaCommitF32`, the `fp32_deferred` backend
+`KDARecoverSSMCommitContext` gets under the specialized decode for FP32 checkpoints
 on SM10x) against the stock
 Triton commit it replaces: every layer's final state and, with prefix caching
 (align), the block-boundary state, over random accepted lengths."""
@@ -111,7 +111,7 @@ def test_commit_matches_stock(heads, requests, q, align, monkeypatch):
 
 @torch.inference_mode()
 def test_unbounded_gate_falls_back_to_triton():
-    """The softplus gate (``gate_lower_bound=None``) keeps the stock Triton commit."""
+    """The softplus gate (`gate_lower_bound=None`) keeps the stock Triton commit."""
     layers = _layers(12, 2, 5, 3, seed=0)
     for layer in layers:
         layer.gate_lower_bound = None

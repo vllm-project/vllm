@@ -26,7 +26,11 @@ from vllm.v1.attention.backend import (
     MultipleOf,
     max_decode_query_len,
 )
-from vllm.v1.attention.ops.triton_decode_attention import decode_attention_fwd
+from vllm.v1.attention.ops.triton_decode_attention import (
+    _decode_grouped_att_m_fwd,
+    _decode_softmax_reducev_fwd,
+    decode_attention_fwd,
+)
 from vllm.v1.kv_cache_interface import (
     get_kv_cache_spec_sliding_window,
     is_quantized_kv_cache,
@@ -64,9 +68,9 @@ def _reserve_attn_logits_workspace(
 
     Reserving at the worst case (max KV length -> max num_kv_splits,
     max_decode_rows) before warmup/cudagraph capture means the per-call
-    ``get_simultaneous`` in ``forward_mqa`` never has to grow the buffer at
+    `get_simultaneous` in `forward_mqa` never has to grow the buffer at
     runtime (which would raise once the workspace is locked). Like
-    ``forward_mqa``, the KV length is clamped to the layer's sliding window.
+    `forward_mqa`, the KV length is clamped to the layer's sliding window.
     """
     if not is_workspace_manager_initialized():
         return
@@ -271,6 +275,54 @@ class TritonMLAImpl(MLACommonImpl[MLACommonMetadata]):
             # Windowed DSpark drafts only run non-causal decode blocks.
             raise NotImplementedError("Sliding-window Triton MLA prefill")
         return super().forward_mha(*args, **kwargs)
+
+    def register_decode_warmup(
+        self, kv_cache: torch.Tensor, kv_cache_dtype: str
+    ) -> None:
+        """Register the split-KV decode kernels for a bound KV cache.
+
+        Mirrors forward_mqa's launch: MLAAttention views a uint8 fp8 cache as
+        fp8, num_kv_splits is any value `_compute_num_kv_splits` can select
+        up to max_model_len (clamped to the sliding window), and the query
+        keeps the model dtype.
+        """
+        if is_quantized_kv_cache(kv_cache_dtype) and kv_cache_dtype not in (
+            "fp8_ds_mla",
+            "nvfp4_ds_mla",
+        ):
+            kv_cache = kv_cache.view(current_platform.fp8_dtype())
+        if envs.VLLM_BATCH_INVARIANT:
+            num_kv_splits: tuple[int, ...] = (1,)
+        else:
+            max_kv_len = self._vllm_config.model_config.max_model_len
+            if self.decode_sliding_window is not None:
+                max_kv_len = min(max_kv_len, self.decode_sliding_window)
+            max_splits = _compute_num_kv_splits(max_kv_len, self._sm_count)
+            num_kv_splits = tuple(
+                sorted({1 << i for i in range(max_splits.bit_length())} | {max_splits})
+            )
+        num_heads = self.num_heads * self.dcp_world_size
+        dtype = self._vllm_config.model_config.dtype
+        sliding_window = self.decode_sliding_window or 0
+        _decode_grouped_att_m_fwd.register_warmup(
+            q_dtype=dtype,
+            kv_dtype=kv_cache.dtype,
+            num_heads=num_heads,
+            head_size=kv_cache.shape[-1],
+            kv_lora_rank=self.kv_lora_rank,
+            page_size=kv_cache.shape[1],
+            kv_block_stride=kv_cache.stride(0),
+            kv_token_stride=kv_cache.stride(1),
+            num_kv_splits=num_kv_splits,
+            sliding_window=sliding_window,
+        )
+        _decode_softmax_reducev_fwd.register_warmup(
+            dtype=dtype,
+            num_heads=num_heads,
+            kv_lora_rank=self.kv_lora_rank,
+            num_kv_splits=num_kv_splits,
+            sliding_window=sliding_window,
+        )
 
     def forward_mqa(
         self,
