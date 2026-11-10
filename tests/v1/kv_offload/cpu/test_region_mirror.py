@@ -5,7 +5,7 @@
 import threading
 import time
 import uuid
-from unittest.mock import MagicMock
+from unittest.mock import MagicMock, create_autospec
 
 import numpy as np
 import pytest
@@ -21,6 +21,7 @@ from vllm.v1.kv_offload.base import (
     GPULoadStoreSpec,
     TransferResult,
 )
+from vllm.v1.kv_offload.cpu.gpu_worker import CPUOffloadingWorker
 from vllm.v1.kv_offload.cpu.region_mirror import (
     MirrorStuckError,
     MirrorTopology,
@@ -38,7 +39,6 @@ from vllm.v1.kv_offload.pointer_utils import resolve_device_pointers
 SLOT = 4096
 NUM_CHUNKS = 8
 HEAD_LAYOUT = SlotLayout(num_chunks=NUM_CHUNKS, row_stride=2 * SLOT, size=SLOT)
-_CPU_SPEC = MagicMock(spec=BlockIDsLoadStoreSpec)
 
 
 def _wait_for(predicate, timeout: float = 10.0) -> None:
@@ -217,10 +217,13 @@ def test_remapping_agents_do_not_cache_vram_registrations(
 
 
 class _FakeClient:
-    """Stands in for RegionMirrorClient: copies run when the test lets them."""
+    """Stands in for RegionMirrorClient, the NIXL boundary: copies run when the
+    test lets them, and each one is recorded with its descriptors."""
 
     def __init__(self):
         self.calls: list[tuple[str, list[int]]] = []
+        # (op, GPU addresses, head addresses, sizes) of each copy.
+        self.copies: list[tuple[str, list[int], list[int], list[int]]] = []
         self.gate = threading.Event()
         self.gate.set()
         # Set once a copy has started and waits on the gate.
@@ -230,20 +233,21 @@ class _FakeClient:
         self.stopped = False
         self.shut_down = False
 
-    def _copy(self, op: str, gpu: np.ndarray) -> None:
+    def _copy(self, op: str, gpu: np.ndarray, local: np.ndarray, sizes) -> None:
         self.entered.set()
         self.gate.wait()
         self.calls.append((op, gpu.tolist()))
+        self.copies.append((op, gpu.tolist(), local.tolist(), sizes.tolist()))
         if self.stuck == op:
             raise MirrorStuckError(f"{op} stuck")
         if self.fail == op:
             raise RuntimeError(f"{op} failed")
 
     def write(self, gpu, local, sizes) -> None:
-        self._copy("write", gpu)
+        self._copy("write", gpu, local, sizes)
 
     def read(self, gpu, local, sizes) -> None:
-        self._copy("read", gpu)
+        self._copy("read", gpu, local, sizes)
 
     def stop(self, reason: str = "") -> None:
         self.stopped = True
@@ -271,20 +275,67 @@ def events(monkeypatch) -> list[MagicMock]:
     return recorded
 
 
+# One KV tensor of 64-byte pages and one GPU block per CPU chunk, so each
+# block is one 64-byte copy to its chunk's row of this worker's slot.
+_PAGE = 64
+_SLOT_BASE = 1_000_000 + SLOT
+
+
+class _Transfers:
+    """Real transfer specs for a worker's GPU blocks, and the addresses that
+    the planners from `slot_planners` should resolve them to."""
+
+    def __init__(self):
+        self.kv_caches = _kv_caches([_PAGE])
+
+    def gpu(self, *blocks: int):
+        spec = GPULoadStoreSpec(
+            np.array(blocks), group_sizes=[len(blocks)], block_indices=[0]
+        )
+        return resolve_device_pointers(spec, self.kv_caches)
+
+    @staticmethod
+    def cpu(*chunks: int) -> BlockIDsLoadStoreSpec:
+        return BlockIDsLoadStoreSpec(np.array(chunks))
+
+    def addresses(self, *blocks: int) -> list[int]:
+        return [self.kv_caches.tensors[0].tensor[b].data_ptr() for b in blocks]
+
+    @staticmethod
+    def rows(*chunks: int) -> list[int]:
+        return [_SLOT_BASE + c * HEAD_LAYOUT.row_stride for c in chunks]
+
+
 def _mirror_worker(
     client: _FakeClient, max_transfer_bytes: int = 1 << 20
-) -> tuple[RegionMirrorWorker, MagicMock, MagicMock]:
-    store, load = MagicMock(), MagicMock()
-    ops = (np.array([10, 11]), np.array([20, 21]), np.array([64, 64]))
-    store.copy_ops.return_value = ops
-    load.copy_ops.return_value = (ops[1], ops[0], ops[2])
+) -> tuple[RegionMirrorWorker, _Transfers]:
+    transfers = _Transfers()
+    store, load = slot_planners(transfers.kv_caches, 1, HEAD_LAYOUT, _SLOT_BASE)
     worker = RegionMirrorWorker(
         store,
         load,
         client,  # type: ignore[arg-type]
         max_transfer_bytes=max_transfer_bytes,
     )
-    return worker, store, load
+    return worker, transfers
+
+
+def _store(worker: RegionMirrorWorker, t: _Transfers, job_id: int, *blocks: int):
+    """Store GPU blocks to the CPU chunks of the same index."""
+    return worker.submit_store(job_id, t.gpu(*blocks), t.cpu(*blocks))
+
+
+def _load(
+    worker: RegionMirrorWorker,
+    t: _Transfers,
+    job_id: int,
+    *blocks: int,
+    expedited: bool = False,
+):
+    """Load GPU blocks from the CPU chunks of the same index."""
+    return worker.submit_load(
+        job_id, t.cpu(*blocks), t.gpu(*blocks), expedited=expedited
+    )
 
 
 def _finished(worker: RegionMirrorWorker) -> list[TransferResult]:
@@ -301,9 +352,9 @@ def _finished(worker: RegionMirrorWorker) -> list[TransferResult]:
 def test_store_is_reported_after_its_write_behind_the_compute_stream(events):
     client = _FakeClient()
     client.gate.clear()
-    worker, _, _ = _mirror_worker(client)
+    worker, t = _mirror_worker(client)
     try:
-        assert worker.submit_store(1, MagicMock(), _CPU_SPEC)
+        assert worker.submit_store(1, t.gpu(4, 5), t.cpu(2, 3))
         events[0].record.assert_called_once()
         assert client.entered.wait(10)
         assert worker.get_finished() == []
@@ -311,21 +362,26 @@ def test_store_is_reported_after_its_write_behind_the_compute_stream(events):
         client.gate.set()
         [result] = _finished(worker)
         assert result.job_id == 1 and result.success
-        assert result.transfer_size == 128
+        assert result.transfer_size == 2 * _PAGE
         events[0].synchronize.assert_called_once()
-        assert client.calls == [("write", [10, 11])]
+        assert client.copies == [
+            ("write", t.addresses(4, 5), t.rows(2, 3), [_PAGE, _PAGE])
+        ]
     finally:
         worker.shutdown()
 
 
 def test_load_is_reported_after_its_read(events):
     client = _FakeClient()
-    worker, _, _ = _mirror_worker(client)
+    worker, t = _mirror_worker(client)
     try:
-        assert worker.submit_load(2, _CPU_SPEC, MagicMock())
+        assert worker.submit_load(2, t.cpu(6, 1), t.gpu(3, 7))
         [result] = _finished(worker)
         assert result.job_id == 2 and result.success
-        assert client.calls == [("read", [10, 11])]
+        assert result.transfer_size == 2 * _PAGE
+        assert client.copies == [
+            ("read", t.addresses(3, 7), t.rows(6, 1), [_PAGE, _PAGE])
+        ]
     finally:
         worker.shutdown()
 
@@ -333,11 +389,11 @@ def test_load_is_reported_after_its_read(events):
 def test_wait_covers_stores_too(events):
     """The copy reads the GPU blocks, so they cannot be reused before it ends."""
     client = _FakeClient()
-    worker, _, _ = _mirror_worker(client)
+    worker, t = _mirror_worker(client)
     try:
-        assert worker.submit_store(3, MagicMock(), _CPU_SPEC)
+        assert _store(worker, t, 3, 0, 1)
         worker.wait({3})
-        assert client.calls == [("write", [10, 11])]
+        assert client.calls == [("write", t.addresses(0, 1))]
         assert worker.get_finished()[0].job_id == 3
     finally:
         worker.shutdown()
@@ -348,9 +404,9 @@ def test_unregister_waits_for_copies_in_flight(events):
     while the GPU memory is still registered."""
     client = _FakeClient()
     client.gate.clear()
-    worker, _, _ = _mirror_worker(client)
+    worker, t = _mirror_worker(client)
     try:
-        assert worker.submit_store(4, MagicMock(), _CPU_SPEC)
+        assert _store(worker, t, 4, 0, 1)
         assert client.entered.wait(10)
         unregistered = threading.Event()
 
@@ -366,7 +422,7 @@ def test_unregister_waits_for_copies_in_flight(events):
         client.gate.set()
         assert unregistered.wait(10)
         thread.join(10)
-        assert client.calls == [("write", [10, 11]), ("unregister", [])]
+        assert client.calls == [("write", t.addresses(0, 1)), ("unregister", [])]
         worker.restore_kv_caches()
         assert client.calls[-1] == ("restore", [])
         assert [r.job_id for r in worker.get_finished()] == [4]
@@ -378,12 +434,12 @@ def test_unregister_waits_for_copies_in_flight(events):
 def test_failed_copy_reports_a_failed_transfer(events, op):
     client = _FakeClient()
     client.fail = op
-    worker, _, _ = _mirror_worker(client)
+    worker, t = _mirror_worker(client)
     try:
         if op == "write":
-            assert worker.submit_store(4, MagicMock(), _CPU_SPEC)
+            assert _store(worker, t, 4, 0, 1)
         else:
-            assert worker.submit_load(4, _CPU_SPEC, MagicMock())
+            assert _load(worker, t, 4, 0, 1)
         assert _finished(worker) == [TransferResult(job_id=4, success=False)]
     finally:
         worker.shutdown()
@@ -393,9 +449,9 @@ def test_a_stuck_transfer_is_never_reported_and_stops_the_engine(events):
     """A transfer that may still land must not let the chunk be reused."""
     client = _FakeClient()
     client.stuck = "write"
-    worker, _, _ = _mirror_worker(client)
+    worker, t = _mirror_worker(client)
     try:
-        assert worker.submit_store(5, MagicMock(), _CPU_SPEC)
+        assert _store(worker, t, 5, 0, 1)
         _wait_for(lambda: client.stopped)
         with pytest.raises(RuntimeError, match="may still land"):
             worker.get_finished()
@@ -408,20 +464,20 @@ def test_a_stuck_transfer_is_never_reported_and_stops_the_engine(events):
 def test_loads_overtake_waiting_stores(events):
     client = _FakeClient()
     client.gate.clear()
-    worker, _, load = _mirror_worker(client)
-    load.copy_ops.return_value = (
-        np.array([20]),
-        np.array([99]),
-        np.array([64]),
-    )
+    worker, t = _mirror_worker(client)
     try:
-        for job_id in (6, 7, 8):
-            assert worker.submit_store(job_id, MagicMock(), _CPU_SPEC)
-        _wait_for(lambda: len(worker._stores) == 2)
-        assert worker.submit_load(9, _CPU_SPEC, MagicMock())
+        for job_id, block in ((6, 0), (7, 1), (8, 2)):
+            assert _store(worker, t, job_id, block)
+        assert client.entered.wait(10)
+        assert _load(worker, t, 9, 5)
         client.gate.set()
         _wait_for(lambda: len(client.calls) == 4)
-        assert [op for op, _ in client.calls] == ["write", "read", "write", "write"]
+        assert client.calls == [
+            ("write", t.addresses(0)),
+            ("read", t.addresses(5)),
+            ("write", t.addresses(1)),
+            ("write", t.addresses(2)),
+        ]
     finally:
         worker.shutdown()
 
@@ -429,18 +485,19 @@ def test_loads_overtake_waiting_stores(events):
 def test_expedited_loads_overtake_waiting_loads(events):
     client = _FakeClient()
     client.gate.clear()
-    worker, _, load = _mirror_worker(client)
-    load.copy_ops.side_effect = [
-        (np.array([40]), np.array([job_id]), np.array([64])) for job_id in (14, 15, 16)
-    ]
+    worker, t = _mirror_worker(client)
     try:
-        assert worker.submit_load(14, _CPU_SPEC, MagicMock())
+        assert _load(worker, t, 14, 1)
         assert client.entered.wait(10)
-        assert worker.submit_load(15, _CPU_SPEC, MagicMock())
-        assert worker.submit_load(16, _CPU_SPEC, MagicMock(), expedited=True)
+        assert _load(worker, t, 15, 2)
+        assert _load(worker, t, 16, 3, expedited=True)
         client.gate.set()
         worker.wait({14, 15, 16})
-        assert client.calls == [("read", [14]), ("read", [16]), ("read", [15])]
+        assert client.calls == [
+            ("read", t.addresses(1)),
+            ("read", t.addresses(3)),
+            ("read", t.addresses(2)),
+        ]
     finally:
         worker.shutdown()
 
@@ -448,32 +505,22 @@ def test_expedited_loads_overtake_waiting_loads(events):
 def test_large_copies_are_split_and_loads_go_between_their_transfers(events):
     client = _FakeClient()
     client.gate.clear()
-    worker, store, load = _mirror_worker(client, max_transfer_bytes=128)
-    store.copy_ops.return_value = (
-        np.arange(10, 15),
-        np.arange(20, 25),
-        np.full(5, 64),
-    )
-    load.copy_ops.return_value = (
-        np.array([30]),
-        np.array([40]),
-        np.array([64]),
-    )
+    worker, t = _mirror_worker(client, max_transfer_bytes=2 * _PAGE)
     try:
-        assert worker.submit_store(12, MagicMock(), _CPU_SPEC)
-        _wait_for(lambda: not worker._stores)
-        assert worker.submit_load(13, _CPU_SPEC, MagicMock())
+        assert _store(worker, t, 12, 0, 1, 2, 3, 4)
+        assert client.entered.wait(10)
+        assert _load(worker, t, 13, 7)
         client.gate.set()
         worker.wait({12, 13})
         results = worker.get_finished()
-        assert client.calls == [
-            ("write", [10, 11]),
-            ("read", [40]),
-            ("write", [12, 13]),
-            ("write", [14]),
+        assert client.copies == [
+            ("write", t.addresses(0, 1), t.rows(0, 1), [_PAGE, _PAGE]),
+            ("read", t.addresses(7), t.rows(7), [_PAGE]),
+            ("write", t.addresses(2, 3), t.rows(2, 3), [_PAGE, _PAGE]),
+            ("write", t.addresses(4), t.rows(4), [_PAGE]),
         ]
         stored = next(r for r in results if r.job_id == 12)
-        assert stored.success and stored.transfer_size == 320
+        assert stored.success and stored.transfer_size == 5 * _PAGE
     finally:
         worker.shutdown()
 
@@ -499,8 +546,8 @@ def test_mismatched_head_layouts_are_rejected(monkeypatch):
 def test_shutdown_is_prompt_with_copies_waiting(events):
     client = _FakeClient()
     client.gate.clear()
-    worker, _, _ = _mirror_worker(client)
-    assert worker.submit_store(10, MagicMock(), _CPU_SPEC)
+    worker, t = _mirror_worker(client)
+    assert _store(worker, t, 10, 0, 1)
     started = time.monotonic()
     worker.shutdown()
     assert time.monotonic() - started < 5
@@ -508,11 +555,14 @@ def test_shutdown_is_prompt_with_copies_waiting(events):
 
 
 def test_head_worker_leaves_transfers_to_its_inner_worker():
-    inner = MagicMock()
+    inner = create_autospec(CPUOffloadingWorker, instance=True)
     inner.submit_store.return_value = True
-    head = MagicMock()
+    head = create_autospec(RegionMirrorHead, instance=True)
     worker = RegionMirrorHeadWorker(inner, head)
-    assert worker.submit_store(11, MagicMock(), _CPU_SPEC)
+    t = _Transfers()
+    device_ptrs, cpu_spec = t.gpu(0, 1), t.cpu(0, 1)
+    assert worker.submit_store(11, device_ptrs, cpu_spec)
+    inner.submit_store.assert_called_once_with(11, device_ptrs, cpu_spec)
     worker.wait({11})
     inner.wait.assert_called_once_with({11})
     worker.shutdown()
