@@ -113,8 +113,8 @@ def test_missing_logits_rows_skip_only_affected_capture():
     chunks = capture_scheduled_hidden_states(
         plans,
         ["a", "b"],
-        {"a": 2, "b": 2},
-        {"a": 0, "b": 0},
+        np.array([0, 2, 4]),
+        np.array([0, 0]),
         torch.zeros(4, 2),
         logits=torch.ones(3, 4),
         cu_num_logits=np.array([0, 1, 3]),
@@ -124,24 +124,18 @@ def test_missing_logits_rows_skip_only_affected_capture():
     assert list(chunks) == ["b"]
 
 
-def test_missing_logprobs_settle_as_skip_instead_of_engine_error():
-    buffer = HiddenStateCaptureBuffer(
-        HiddenStateCapturePlan.from_window("r", 1, 0, 1, "test", logprob_topk=1)
-    )
-    result, reason = buffer.update(_chunk([0], [[0.0, 0.0]]), 1, stopped=True)
-    assert result is None and reason == "logprob_rows_unavailable"
-
-
 def test_recomputed_history_needs_no_logits_after_delivery():
     plan = HiddenStateCapturePlan.from_window("r", 1, 0, 16, "test", logprob_topk=2)
     assert (
         capture_scheduled_hidden_states(
             {"r": plan},
             ["r"],
-            {"r": 8},
-            {"r": 0},
+            np.array([0, 8]),
+            np.array([0]),
             torch.zeros(8, 2),
             settled_ends={"r": 8},
+            logits=torch.empty(0),
+            cu_num_logits=np.zeros(2, dtype=np.int32),
         )
         == {}
     )
@@ -153,10 +147,12 @@ def test_rejected_rows_remain_eligible_after_recomputation():
     chunk = capture_scheduled_hidden_states(
         {"r": plan},
         ["r"],
-        {"r": 10},
-        {"r": 0},
+        np.array([0, 10]),
+        np.array([0]),
         hidden,
         settled_ends={"r": 8},
+        logits=torch.empty(0),
+        cu_num_logits=np.zeros(2, dtype=np.int32),
     )["r"]
     np.testing.assert_array_equal(chunk.positions, [8, 9])
     torch.testing.assert_close(chunk.hidden_states, hidden[8:10])
@@ -196,10 +192,11 @@ def test_mixed_batch_snapshots_only_intersecting_rows_and_owns_storage():
     chunks = capture_scheduled_hidden_states(
         {"a": plan},
         ["b", "a"],
-        {"a": 6, "b": 4},
-        {"a": 0, "b": 0},
+        np.array([0, 4, 10]),
+        np.array([0, 0]),
         hidden,
-        query_start_loc=np.array([0, 4, 10]),
+        logits=torch.empty(0),
+        cu_num_logits=np.zeros(3, dtype=np.int32),
     )
     expected = hidden[7:9].clone()
     hidden.fill_(-1)
@@ -207,7 +204,15 @@ def test_mixed_batch_snapshots_only_intersecting_rows_and_owns_storage():
     np.testing.assert_array_equal(chunks["a"].positions, [3, 4])
     torch.testing.assert_close(chunks["a"].hidden_states, expected)
     assert (
-        capture_scheduled_hidden_states({"a": plan}, ["a"], {"a": 1}, {"a": 9}, hidden)
+        capture_scheduled_hidden_states(
+            {"a": plan},
+            ["a"],
+            np.array([0, 1]),
+            np.array([9]),
+            hidden,
+            logits=torch.empty(0),
+            cu_num_logits=np.zeros(2, dtype=np.int32),
+        )
         == {}
     )
 
@@ -227,10 +232,12 @@ def test_chunked_prefill_prompt_rows_settle_with_the_sampling_chunk():
         chunks = capture_scheduled_hidden_states(
             plans,
             ["r"],
-            {"r": 4},
-            {"r": computed},
+            np.array([0, 4]),
+            np.array([computed]),
             hidden[computed : computed + 4],
             settled_ends=settled_ends,
+            logits=torch.empty(0),
+            cu_num_logits=np.zeros(2, dtype=np.int32),
         )
         released = carry.release(chunks, {}, emitted, {"vocab_size": 8})
         if not emitted:
@@ -311,30 +318,6 @@ def test_mixed_capture_requires_prompt_rows_but_allows_early_output_stop():
     np.testing.assert_array_equal(result.hidden_positions, [2, 3, 4])
 
 
-def test_prompt_carry_reports_inconsistent_tensor_fields():
-    carry = HiddenCaptureCarry()
-    first = _chunk([2], [[2]])
-    first.tensors["extra"] = torch.ones(1, 1)
-    assert carry.release({"r": first}, {}, []) == {}
-    assert carry.release({"r": _chunk([3], [[3]])}, {}, ["r"]) == {
-        "r": (None, "tensor_fields_mismatch")
-    }
-    assert carry.empty()
-
-
-def test_settlement_reports_inconsistent_tensor_fields():
-    buffer = HiddenStateCaptureBuffer(
-        HiddenStateCapturePlan.from_window("r", 1, 0, 2, "test")
-    )
-    first = _chunk([0], [[0]])
-    first.tensors["extra"] = torch.ones(1, 1)
-    assert buffer.update(first, 1, stopped=False) == (None, None)
-    assert buffer.update(_chunk([1], [[1]]), 2, stopped=True) == (
-        None,
-        "tensor_fields_mismatch",
-    )
-
-
 def test_logits_contract_excludes_custom_transforms(default_vllm_config):
     from vllm.distributed.aux_output_connector.hidden_states import _logits_contract
     from vllm.model_executor.layers.logits_processor import LogitsProcessor
@@ -404,13 +387,72 @@ def test_capture_contract_does_not_publish_checkpoint_paths(name, expected):
     assert _public_capture_model_name(name) == expected
 
 
-def test_capture_settlement_still_sorts_and_deduplicates_replayed_rows():
-    buffer = HiddenStateCaptureBuffer(
-        HiddenStateCapturePlan.from_window("r", 1, 0, 3, "replay", min_rows=3)
+@pytest.mark.parametrize("routing", [False, True])
+def test_hidden_settlement_preserves_optional_routing_output(routing):
+    from vllm.config import AuxOutputConfig
+    from vllm.distributed.aux_output_connector.connector import (
+        AuxOutputSchedulerConnector,
+        RoutedExpertsRequestOutput,
     )
-    result, reason = buffer.update(
-        _chunk([2, 0, 1, 1], [[2], [0], [1], [99]]), 3, stopped=True
+    from vllm.v1.core.kv_cache_manager import KVCacheManager
+    from vllm.v1.core.sched.output import CachedRequestData, SchedulerOutput
+    from vllm.v1.kv_cache_interface import (
+        FullAttentionSpec,
+        KVCacheConfig,
+        KVCacheGroupSpec,
     )
-    assert reason is None
-    np.testing.assert_array_equal(result.hidden_positions, [0, 1, 2])
-    torch.testing.assert_close(result.hidden_states, torch.tensor([[0], [1], [2]]))
+
+    manager = KVCacheManager(
+        KVCacheConfig(
+            8,
+            [],
+            [
+                KVCacheGroupSpec(
+                    ["layer"],
+                    FullAttentionSpec(
+                        block_size=16, num_kv_heads=1, head_size=1, dtype=torch.float16
+                    ),
+                )
+            ],
+        ),
+        max_model_len=64,
+        scheduler_block_size=16,
+        hash_block_size=16,
+    )
+    connector = AuxOutputSchedulerConnector(
+        manager,
+        None,
+        AuxOutputConfig(
+            enable_hidden_states=True, enable_return_routed_experts=routing
+        ),
+    )
+    request = _request({"start": 0, "end": 1, "collection_id": "composed"})
+    step = SchedulerOutput(
+        scheduled_new_reqs=[],
+        scheduled_cached_reqs=CachedRequestData.make_empty(),
+        num_scheduled_tokens={"r": 3},
+        total_num_scheduled_tokens=3,
+        scheduled_spec_decode_tokens={},
+        scheduled_encoder_inputs={},
+        finished_req_ids=set(),
+        free_encoder_mm_hashes=[],
+    )
+    metadata = connector.build_connector_meta(step, {"r": request})
+    assert list(metadata.hidden_plans) == ["r"]
+    assert ("r" in metadata.requests) == routing
+    request.append_output_token_ids([4])
+    rows = np.array([[[1]], [[2]], [[3]]], dtype=np.uint8)
+    output = AuxRequestOutput(
+        routed_experts=RoutedExpertsRequestOutput(0, rows) if routing else None,
+        hidden_chunk=_chunk([2], [[7.0, 8.0]]),
+    )
+    routed, aux = connector.take_outputs(request, {"r": output}, stopped=False)
+    if routing:
+        np.testing.assert_array_equal(routed, rows)
+    else:
+        assert routed is None
+    assert aux is not None and aux.hidden_capture_skip_reason is None
+    torch.testing.assert_close(
+        aux.hidden_state_capture.hidden_states, torch.tensor([[7.0, 8.0]])
+    )
+    assert not connector.build_connector_meta(step, {"r": request}).hidden_plans

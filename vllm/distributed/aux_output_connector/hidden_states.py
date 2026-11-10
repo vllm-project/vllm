@@ -12,10 +12,9 @@ settle with accepted tokens. Rows outside the range are never copied.
 
 from __future__ import annotations
 
-from collections.abc import Callable, Iterable, Mapping
+from collections.abc import Callable, Iterable, Mapping, Sequence
 from dataclasses import dataclass, field, replace
 from pathlib import PurePosixPath, PureWindowsPath
-from threading import Lock
 from time import perf_counter
 from typing import TYPE_CHECKING, Any, Literal
 
@@ -35,13 +34,10 @@ if TYPE_CHECKING:
     from vllm.v1.worker.gpu.input_batch import InputBatch
     from vllm.v1.worker.gpu.model_states.interface import ModelState
 
+CAPTURE_KEY = "hidden_state_capture"
 HIDDEN_STATES = "hidden_states"
 LOGPROBS = "logprobs"
 LOGPROB_TOKEN_IDS = "logprob_token_ids"
-
-
-class InconsistentTensorFieldsError(ValueError):
-    """Capture chunks disagree on their tensor fields."""
 
 
 @dataclass(frozen=True)
@@ -81,6 +77,7 @@ class HiddenStateCapturePlan:
             or self.window_start_abs >= self.window_end_abs
             or self.min_rows < 1
             or self.min_rows > self.window_end_abs - self.window_start_abs
+            or self.logprob_topk < 0
         ):
             raise ValueError("Invalid hidden-state capture plan")
         if self.hidden_layout not in ("final", "aux_final", "dflash_aux"):
@@ -89,8 +86,6 @@ class HiddenStateCapturePlan:
             raise ValueError("Hidden-state layout does not match auxiliary layers")
         if len(set(self.aux_layer_ids)) != len(self.aux_layer_ids):
             raise ValueError("Duplicate auxiliary hidden-state layers")
-        if self.logprob_topk < 0:
-            raise ValueError("logprob_topk must be a nonnegative integer")
         if self.logprob_topk and self.window_start_abs < self.output_start:
             raise ValueError(
                 "logprob_topk only supports output rows; use "
@@ -186,9 +181,7 @@ class HiddenStateCaptureChunk:
     def concat(cls, chunks: list[HiddenStateCaptureChunk]) -> HiddenStateCaptureChunk:
         if len(chunks) == 1:
             return chunks[0]
-        names = set(chunks[0].tensors)
-        if any(set(chunk.tensors) != names for chunk in chunks[1:]):
-            raise InconsistentTensorFieldsError("tensor_fields_mismatch")
+        names = chunks[0].tensors
         return cls(
             positions=np.concatenate([chunk.positions for chunk in chunks]),
             tensors={
@@ -226,88 +219,61 @@ def drop_incompatible_aux_plans(
 def capture_scheduled_hidden_states(
     plans: dict[str, HiddenStateCapturePlan],
     req_ids: list[str],
-    num_scheduled_tokens: dict[str, int],
-    num_computed_tokens: dict[str, int],
+    query_start_loc: np.ndarray,
+    num_computed_tokens: np.ndarray,
     hidden_states: torch.Tensor,
-    aux_hidden_states: list[torch.Tensor] | None = None,
-    query_start_loc: np.ndarray | None = None,
+    aux_hidden_states: Sequence[torch.Tensor] = (),
     *,
-    logits: torch.Tensor | None = None,
-    cu_num_logits: np.ndarray | None = None,
+    logits: torch.Tensor,
+    cu_num_logits: np.ndarray,
     settled_ends: dict[str, int] | None = None,
     errors: dict[str, str] | None = None,
 ) -> dict[str, HiddenStateCaptureChunk]:
-    """Snapshot only window rows before reusable model buffers are overwritten.
+    """Own window rows before graph buffers are reused, excluding settled history."""
+    from vllm.v1.worker.gpu.sample.logprob import compute_token_logprobs
 
-    Rows below ``settled_ends`` were already delivered and are skipped when a
-    preempted request recomputes its history.
-    """
     chunks: dict[str, HiddenStateCaptureChunk] = {}
-    row_offset = 0
     for index, req_id in enumerate(req_ids):
-        num_rows = num_scheduled_tokens[req_id]
-        if query_start_loc is not None:
-            row_offset = int(query_start_loc[index])
-            if int(query_start_loc[index + 1]) - row_offset != num_rows:
-                raise ValueError("Scheduled hidden-state row boundaries do not match")
         plan = plans.get(req_id)
-        if plan is not None:
-            start = num_computed_tokens[req_id]
-            first = max(
-                start, plan.window_start_abs, (settled_ends or {}).get(req_id, 0)
-            )
-            end = min(start + num_rows, plan.window_end_abs)
-            if first < end:
-                first_row = row_offset + first - start
-                end_row = row_offset + end - start
-                if plan.aux_layer_ids:
-                    if aux_hidden_states is None or len(aux_hidden_states) != len(
-                        plan.aux_layer_ids
-                    ):
-                        raise ValueError(
-                            "Requested auxiliary hidden layers are unavailable"
-                        )
-                    parts = [state[first_row:end_row] for state in aux_hidden_states]
-                    if plan.includes_final_layer:
-                        parts.append(hidden_states[first_row:end_row])
-                    states = torch.cat(parts, dim=-1)
-                else:
-                    states = hidden_states[first_row:end_row]
-                # Graph outputs are reused by the next forward; own selected rows.
-                tensors = {HIDDEN_STATES: states.detach().clone()}
-                if plan.logprob_topk:
-                    if logits is None or cu_num_logits is None:
-                        if errors is not None:
-                            errors[req_id] = "logits_unavailable"
-                        row_offset += num_rows
-                        continue
-                    logit_start, logit_end = map(int, cu_num_logits[index : index + 2])
-                    # MRV2 places each request's logits on its query suffix.
-                    query_logit_start = (
-                        row_offset + num_rows - (logit_end - logit_start)
-                    )
-                    if first_row < query_logit_start or logit_end > logits.shape[0]:
-                        if errors is not None:
-                            errors[req_id] = "logits_rows_unavailable"
-                        row_offset += num_rows
-                        continue
-                    selected_start = logit_start + first_row - query_logit_start
-                    scores = logits[
-                        selected_start : selected_start + end_row - first_row
-                    ].float()
-                    from vllm.v1.worker.gpu.sample.logprob import compute_token_logprobs
-
-                    _, token_ids = scores.topk(plan.logprob_topk, dim=-1)
-                    tensors[LOGPROBS] = compute_token_logprobs(scores, token_ids)
-                    tensors[LOGPROB_TOKEN_IDS] = token_ids
-                chunks[req_id] = HiddenStateCaptureChunk(
-                    positions=np.arange(first, end, dtype=np.int64),
-                    tensors=tensors,
-                    copied_bytes=sum(
-                        t.numel() * t.element_size() for t in tensors.values()
-                    ),
-                )
-        row_offset += num_rows
+        if plan is None:
+            continue
+        row_offset, row_end = map(int, query_start_loc[index : index + 2])
+        num_rows = row_end - row_offset
+        start = int(num_computed_tokens[index])
+        first = max(start, plan.window_start_abs, (settled_ends or {}).get(req_id, 0))
+        end = min(start + num_rows, plan.window_end_abs)
+        if first >= end:
+            continue
+        first_row = row_offset + first - start
+        end_row = row_offset + end - start
+        if plan.aux_layer_ids:
+            parts = [state[first_row:end_row] for state in aux_hidden_states]
+            if plan.includes_final_layer:
+                parts.append(hidden_states[first_row:end_row])
+            states = torch.cat(parts, dim=-1)
+        else:
+            states = hidden_states[first_row:end_row]
+        tensors = {HIDDEN_STATES: states.detach().clone()}
+        if plan.logprob_topk:
+            logit_start, logit_end = map(int, cu_num_logits[index : index + 2])
+            # MRV2 places each request's logits on its query suffix.
+            query_logit_start = row_end - (logit_end - logit_start)
+            if first_row < query_logit_start:
+                if errors is not None:
+                    errors[req_id] = "logits_rows_unavailable"
+                continue
+            selected_start = logit_start + first_row - query_logit_start
+            scores = logits[
+                selected_start : selected_start + end_row - first_row
+            ].float()
+            _, token_ids = scores.topk(plan.logprob_topk, dim=-1)
+            tensors[LOGPROBS] = compute_token_logprobs(scores, token_ids)
+            tensors[LOGPROB_TOKEN_IDS] = token_ids
+        chunks[req_id] = HiddenStateCaptureChunk(
+            positions=np.arange(first, end, dtype=np.int64),
+            tensors=tensors,
+            copied_bytes=sum(t.numel() * t.element_size() for t in tensors.values()),
+        )
     return chunks
 
 
@@ -370,24 +336,13 @@ class HiddenStateCaptureBuffer:
                 self.error = "prompt_rows_unavailable"
             return None
         positions = np.concatenate([chunk.positions for chunk in self.chunks])
-        unique_indices = None
-        if np.any(positions[1:] <= positions[:-1]):
-            positions, unique_indices = np.unique(positions, return_index=True)
         if plan.window_start_abs < prompt_end and not np.array_equal(
             positions[positions < prompt_end],
             np.arange(plan.window_start_abs, prompt_end),
         ):
             self.error = "prompt_rows_unavailable"
             return None
-        names = set(self.chunks[0].tensors)
-        if HIDDEN_STATES not in names or any(
-            set(chunk.tensors) != names for chunk in self.chunks[1:]
-        ):
-            self.error = "tensor_fields_mismatch"
-            return None
-        if self.plan.logprob_topk and not {LOGPROBS, LOGPROB_TOKEN_IDS} <= names:
-            self.error = "logprob_rows_unavailable"
-            return None
+        names = self.chunks[0].tensors
         if len(positions) < self.plan.min_rows:
             return None
         tensors = (
@@ -398,9 +353,6 @@ class HiddenStateCaptureBuffer:
                 for name in names
             }
         )
-        if unique_indices is not None:
-            index = torch.from_numpy(unique_indices)
-            tensors = {name: tensor[index] for name, tensor in tensors.items()}
         return HiddenStateCaptureResult(
             hidden_positions=positions,
             tensors={name: tensors[name] for name in sorted(names)},
@@ -446,9 +398,6 @@ class HiddenStateCaptureBuffer:
             else "insufficient_rows"
         )
         return None, reason
-
-
-CAPTURE_KEY = "hidden_state_capture"
 
 
 def capture_plan(
@@ -508,13 +457,19 @@ def validate_capture_request(
         raise VLLMValidationError(
             "Hidden capture requires n=1, no stop strings or streaming input"
         )
-    if plan.aux_layer_ids and (
-        config.speculative_config is None
-        or not config.speculative_config.uses_aux_hidden_states
-    ):
-        raise VLLMValidationError(
-            "Auxiliary hidden capture requires an auxiliary-layer speculator"
-        )
+    if plan.aux_layer_ids:
+        speculative = config.speculative_config
+        if speculative is None or not speculative.uses_aux_hidden_states:
+            raise VLLMValidationError(
+                "Auxiliary hidden capture requires an auxiliary-layer speculator"
+            )
+        configured_layers = speculative.aux_hidden_state_layer_ids
+        if configured_layers and plan.aux_layer_ids != tuple(
+            sorted(set(configured_layers))
+        ):
+            raise VLLMValidationError(
+                "Requested auxiliary layers do not match the configured target layers"
+            )
     if plan.logprob_topk > config.model_config.get_vocab_size():
         raise VLLMValidationError("logprob_topk exceeds the model vocabulary")
     maximum = config.model_config.max_logprobs
@@ -529,7 +484,7 @@ def validate_capture_request(
             "Prompt hidden capture is incorrect with --kv-sharing-fast-prefill; "
             "disable it for scoring"
         )
-    if rows > config.model_config.max_model_len:
+    if plan.window_end_abs > config.model_config.max_model_len:
         raise VLLMValidationError("Hidden capture window exceeds max_model_len")
     hidden_width = config.model_config.get_hidden_size() * (
         len(plan.aux_layer_ids) + plan.includes_final_layer
@@ -554,7 +509,6 @@ class HiddenCaptureCarry:
     def __init__(self) -> None:
         self._chunks: dict[str, list[HiddenStateCaptureChunk]] = {}
         self._errors: dict[str, str] = {}
-        self._lock = Lock()
 
     def empty(self) -> bool:
         return not self._chunks and not self._errors
@@ -566,38 +520,31 @@ class HiddenCaptureCarry:
         emitted: Iterable[str],
         logits_contract: dict[str, Any] | None = None,
     ) -> dict[str, tuple[HiddenStateCaptureChunk | None, str | None]]:
-        with self._lock:
-            for request_id, chunk in chunks.items():
-                self._chunks.setdefault(request_id, []).append(chunk)
-            for request_id, error in errors.items():
-                self._errors.setdefault(request_id, error)
-            released: dict[str, tuple[HiddenStateCaptureChunk | None, str | None]] = {}
-            for request_id in emitted:
-                parts = self._chunks.pop(request_id, None)
-                release_error = self._errors.pop(request_id, None)
-                if parts is None and release_error is None:
-                    continue
-                released_chunk = None
-                if parts is not None:
-                    try:
-                        released_chunk = HiddenStateCaptureChunk.concat(parts)
-                    except InconsistentTensorFieldsError:
-                        release_error = release_error or "tensor_fields_mismatch"
-                    else:
-                        released_chunk.logits_contract = logits_contract
-                released[request_id] = (released_chunk, release_error)
-            return released
+        for request_id, chunk in chunks.items():
+            self._chunks.setdefault(request_id, []).append(chunk)
+        for request_id, error in errors.items():
+            self._errors.setdefault(request_id, error)
+        released: dict[str, tuple[HiddenStateCaptureChunk | None, str | None]] = {}
+        for request_id in emitted:
+            parts = self._chunks.pop(request_id, None)
+            release_error = self._errors.pop(request_id, None)
+            if parts is None and release_error is None:
+                continue
+            released_chunk = None
+            if parts is not None:
+                released_chunk = HiddenStateCaptureChunk.concat(parts)
+                released_chunk.logits_contract = logits_contract
+            released[request_id] = (released_chunk, release_error)
+        return released
 
     def discard(self, request_ids: Iterable[str]) -> None:
-        with self._lock:
-            for request_id in request_ids:
-                self._chunks.pop(request_id, None)
-                self._errors.pop(request_id, None)
+        for request_id in request_ids:
+            self._chunks.pop(request_id, None)
+            self._errors.pop(request_id, None)
 
     def clear(self) -> None:
-        with self._lock:
-            self._chunks.clear()
-            self._errors.clear()
+        self._chunks.clear()
+        self._errors.clear()
 
 
 @dataclass
@@ -679,7 +626,7 @@ def _logits_contract(
 
     if type(model) is not Qwen3ForCausalLM:
         return None
-    processor = getattr(model, "logits_processor", None)
+    processor = model.logits_processor
     if not _supports_logits_reconstruction(
         type(model),
         type(processor),
@@ -689,7 +636,6 @@ def _logits_contract(
         model_state_cls=resolve_model_state_cls(config, model),
     ):
         return None
-    assert processor is not None
     hf_config = config.model_config.hf_text_config
     tied = bool(getattr(hf_config, "tie_word_embeddings", False))
     return {
@@ -707,10 +653,6 @@ def _logits_contract(
 
 class HiddenStateWorker:
     def __init__(self, model: torch.nn.Module, config: VllmConfig) -> None:
-        from vllm.v1.worker.gpu.spec_decode.eagle.eagle3_utils import (
-            get_eagle3_aux_layers_from_config,
-        )
-
         self.plans: dict[str, HiddenStateCapturePlan] = {}
         self.settled_ends: dict[str, int] = {}
         self.pending: PendingHiddenOutput | None = None
@@ -722,7 +664,7 @@ class HiddenStateWorker:
             and config.speculative_config.uses_aux_hidden_states
         ):
             layers = (
-                get_eagle3_aux_layers_from_config(config.speculative_config)
+                config.speculative_config.aux_hidden_state_layer_ids
                 or model.get_eagle3_default_aux_hidden_state_layers()
             )
         self.layer_ids: tuple[int, ...] = tuple(sorted(set(layers)))
@@ -741,7 +683,7 @@ class HiddenStateWorker:
         batch: InputBatch,
         hidden_states: torch.Tensor,
         aux_hidden_states: list[torch.Tensor] | None,
-        logits: torch.Tensor | None,
+        logits: torch.Tensor,
     ) -> None:
         if not self.plans and self.carry.empty():
             self.pending = None
@@ -749,22 +691,13 @@ class HiddenStateWorker:
         errors = drop_incompatible_aux_plans(
             self.plans, batch.req_ids, self.layer_ids, aux_hidden_states
         )
-        counts = {
-            rid: int(batch.query_start_loc_np[i + 1] - batch.query_start_loc_np[i])
-            for i, rid in enumerate(batch.req_ids)
-        }
-        computed = {
-            rid: int(batch.num_computed_tokens_np[i])
-            for i, rid in enumerate(batch.req_ids)
-        }
         chunks = capture_scheduled_hidden_states(
             self.plans,
             batch.req_ids,
-            counts,
-            computed,
-            hidden_states,
-            aux_hidden_states,
             batch.query_start_loc_np,
+            batch.num_computed_tokens_np,
+            hidden_states,
+            aux_hidden_states or (),
             logits=logits,
             cu_num_logits=batch.cu_num_logits_np,
             settled_ends=self.settled_ends,

@@ -84,7 +84,8 @@ disable auxiliary outputs needed by the speculative decoder itself.
 `logprob_topk` optionally includes window-aligned top-k raw logprobs and token IDs.
 These are computed before sampling penalties, temperature or grammar masks.
 The requested top-k must not exceed `max_logprobs` (unless it is -1) or the model
-vocabulary. Window length must not exceed `max_model_len`. Admission bounds
+vocabulary. The absolute window end must not exceed `max_model_len` (including the
+prompt offset for response coordinates). Admission bounds
 retained payload bytes multiplied by `max_num_seqs` using
 `aux_output_config.max_hidden_capture_bytes` (256 MiB by default). This budget
 includes hidden values and top-k values/IDs; model logits and allocator caches

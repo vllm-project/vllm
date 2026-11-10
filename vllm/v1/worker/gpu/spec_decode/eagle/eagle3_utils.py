@@ -6,6 +6,7 @@ import torch
 import torch.nn as nn
 
 from vllm.config import SpeculativeConfig
+from vllm.config.speculative import get_aux_hidden_state_layer_ids
 from vllm.logger import init_logger
 from vllm.model_executor.models.interfaces import SupportsEagle3, supports_eagle3
 
@@ -103,38 +104,4 @@ def reserve_aux_intermediate_tensor_slots(model: nn.Module) -> None:
 def get_eagle3_aux_layers_from_config(
     spec_config: SpeculativeConfig,
 ) -> tuple[int, ...] | None:
-    if not (spec_config and spec_config.draft_model_config):
-        return None
-    hf_config = spec_config.draft_model_config.hf_config
-    layer_ids = getattr(hf_config, "eagle_aux_hidden_state_layer_ids", None)
-    if not layer_ids:
-        dflash_config = getattr(hf_config, "dflash_config", None)
-        if dflash_config and isinstance(dflash_config, dict):
-            # Add 1 to convert DFlash's aux layer id semantics
-            layer_ids = [i + 1 for i in (dflash_config.get("target_layer_ids") or [])]
-    if not layer_ids:
-        dspark_layer_ids = getattr(hf_config, "dspark_target_layer_ids", None)
-        if dspark_layer_ids:
-            if getattr(hf_config, "model_type", None) == "deepseek_v41":
-                # v4.1 reads the attention *inputs* of its target layers, and
-                # the target model captures the entry stream of layer L when
-                # idx+1 == L, so the ids are used as-is. (v4's ids are in
-                # capture-after semantics and keep the +1.)
-                layer_ids = list(dspark_layer_ids)
-            else:
-                layer_ids = [i + 1 for i in dspark_layer_ids]
-    if not layer_ids:
-        # Dense DSpark (e.g. Qwen3) also uses different aux layer semantics.
-        target_layer_ids = getattr(hf_config, "target_layer_ids", None)
-        if target_layer_ids:
-            layer_ids = [i + 1 for i in target_layer_ids]
-    if not layer_ids:
-        for config_name in ("dflash_config", "eagle_config"):
-            drafter_config = getattr(hf_config, config_name, None)
-            if drafter_config and isinstance(drafter_config, dict):
-                layer_ids = drafter_config.get("layer_ids")
-                if layer_ids:
-                    break
-    if layer_ids and isinstance(layer_ids, (list, tuple)):
-        return tuple(layer_ids)
-    return None
+    return get_aux_hidden_state_layer_ids(spec_config)

@@ -14,9 +14,9 @@ import torch
 from vllm.distributed.aux_output_connector import store as store_module
 from vllm.distributed.aux_output_connector.connector import (
     AuxOutputConnectorMetadata,
-    AuxOutputSchedulerConnector,
-    AuxRequestOutput,
     PackedBlockHashes,
+    RoutedExpertsRequestOutput,
+    RoutedExpertsSchedulerConnector,
 )
 from vllm.distributed.aux_output_connector.routed_experts import (
     RoutedExpertsBuffer,
@@ -85,7 +85,7 @@ def _kv_cache_manager(
 
 
 def _make_connector():
-    return AuxOutputSchedulerConnector(_kv_cache_manager({}))
+    return RoutedExpertsSchedulerConnector(_kv_cache_manager({}))
 
 
 @dataclass
@@ -1525,9 +1525,11 @@ def test_scheduler_connector_builds_worker_metadata_and_forwards_output():
     assert list(metadata.block_hashes[request.request_id]) == [b"a" * 32]
 
     routing = np.arange(4 * 3 * 2, dtype=np.uint8).reshape(4, 3, 2)
-    output = {"request": AuxRequestOutput(0, routing)}
+    output = {"request": RoutedExpertsRequestOutput(0, routing)}
     request.num_computed_tokens = 4
-    np.testing.assert_array_equal(connector.take_output(request, output), routing)
+    np.testing.assert_array_equal(
+        connector.take_output(request, output.get(request.request_id)), routing
+    )
 
 
 @pytest.mark.parametrize("finish", [False, True], ids=["hash-only-update", "finish"])
@@ -1804,15 +1806,18 @@ def test_scheduler_consumes_ordered_stale_aux_outputs():
     )
     first_rows = np.arange(4 * 3 * 2, dtype=np.uint8).reshape(4, 3, 2)
     second_rows = np.arange(4 * 3 * 2, dtype=np.uint8).reshape(4, 3, 2) + 40
-    first = {"request": AuxRequestOutput(0, first_rows)}
-    second = {"request": AuxRequestOutput(4, second_rows)}
+    first = {"request": RoutedExpertsRequestOutput(0, first_rows)}
+    second = {"request": RoutedExpertsRequestOutput(4, second_rows)}
     connector.request_finished(request)
 
     request.num_tokens = 5
-    np.testing.assert_array_equal(connector.take_output(request, first), first_rows)
+    np.testing.assert_array_equal(
+        connector.take_output(request, first.get(request.request_id)), first_rows
+    )
     request.num_tokens = 6
     np.testing.assert_array_equal(
-        connector.take_output(request, second), second_rows[:1]
+        connector.take_output(request, second.get(request.request_id)),
+        second_rows[:1],
     )
 
 
@@ -1829,7 +1834,7 @@ def test_scheduler_rejects_stale_output_without_aux_outputs():
     ):
         connector.take_output(
             request,
-            {},
+            None,
         )
 
 
@@ -1841,14 +1846,14 @@ def test_scheduler_rejects_missing_accepted_aux_output_rows():
         {request.request_id: request},
     )
     output = {
-        "request": AuxRequestOutput(
+        "request": RoutedExpertsRequestOutput(
             0,
             np.empty((0, *_SHAPE), dtype=_DTYPE),
         )
     }
 
     with pytest.raises(AssertionError, match="invalid token range"):
-        connector.take_output(request, output)
+        connector.take_output(request, output.get(request.request_id))
 
 
 def test_scheduler_rejects_aux_output_past_finished_request():
@@ -1860,7 +1865,7 @@ def test_scheduler_rejects_aux_output_past_finished_request():
         {request.request_id: request},
     )
     output = {
-        "request": AuxRequestOutput(
+        "request": RoutedExpertsRequestOutput(
             1,
             np.empty((0, *_SHAPE), dtype=_DTYPE),
         )
@@ -1869,7 +1874,7 @@ def test_scheduler_rejects_aux_output_past_finished_request():
     with pytest.raises(
         AssertionError, match="finished auxiliary output output has no accepted"
     ):
-        connector.take_output(request, output)
+        connector.take_output(request, output.get(request.request_id))
 
 
 @pytest.mark.parametrize("chunk_size", [2, 4])
@@ -1903,7 +1908,7 @@ def test_prompt_end_offset_through_worker_and_scheduler(chunk_size, max_tokens):
         request.num_tokens = 5
         request.num_output_tokens = 1
         request.finished = max_tokens == 1
-        result = connector.take_output(request, output)
+        result = connector.take_output(request, output.get(request.request_id))
         np.testing.assert_array_equal(result, rows[:0])
 
         if max_tokens == 2:
@@ -1923,7 +1928,8 @@ def test_prompt_end_offset_through_worker_and_scheduler(chunk_size, max_tokens):
             request.num_tokens = 6
             request.finished = True
             np.testing.assert_array_equal(
-                connector.take_output(request, output), rows[4:]
+                connector.take_output(request, output.get(request.request_id)),
+                rows[4:],
             )
     finally:
         worker.close()
@@ -2002,7 +2008,7 @@ def test_scheduler_connector_reset_derives_emit_start_from_request():
 _HASHES = [bytes([index]) * 32 for index in range(4)]
 
 
-def _kv_cache_metadata(connector: AuxOutputSchedulerConnector):
+def _kv_cache_metadata(connector: RoutedExpertsSchedulerConnector):
     metadata = connector.build_connector_meta(_step_output([], [], []), {})
     retained, released = metadata.retained_block_hashes, metadata.released_block_hashes
     return list(retained or ()), list(released or ())
@@ -2010,14 +2016,16 @@ def _kv_cache_metadata(connector: AuxOutputSchedulerConnector):
 
 def _finished_request_with_cached_blocks(num_blocks: int = 1):
     cached = {_HASHES[1]: [Mock()], _HASHES[3]: [Mock()]}
-    connector = AuxOutputSchedulerConnector(_kv_cache_manager(cached, 2, num_blocks))
+    connector = RoutedExpertsSchedulerConnector(
+        _kv_cache_manager(cached, 2, num_blocks)
+    )
     request = _SchedulerRequest("request", list(_HASHES), 17, num_computed_tokens=16)
     connector.request_finished(request)
     assert _kv_cache_metadata(connector) == (_HASHES, [])
     return cached, connector, request
 
 
-def _finish_empty_request(connector: AuxOutputSchedulerConnector):
+def _finish_empty_request(connector: RoutedExpertsSchedulerConnector):
     connector.request_finished(_SchedulerRequest("empty", [], 1))
     return _kv_cache_metadata(connector)
 

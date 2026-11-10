@@ -11,6 +11,7 @@ import torch
 
 import vllm.envs as envs
 from vllm.config import (
+    AuxOutputConfig,
     CacheConfig,
     ECTransferConfig,
     KVTransferConfig,
@@ -25,6 +26,8 @@ from vllm.config.watermarking import WatermarkConfig
 from vllm.distributed.aux_output_connector.connector import (
     AuxOutputSchedulerConnector,
     AuxRequestOutput,
+    RoutedExpertsRequestOutput,
+    RoutedExpertsSchedulerConnector,
 )
 from vllm.distributed.ec_transfer.ec_connector.metrics import ECConnectorStats
 from vllm.distributed.kv_transfer.kv_connector.v1.hisparse.connector import (
@@ -260,7 +263,9 @@ def test_routed_experts_prompt_start_at_prompt_end(max_tokens):
     (request,) = create_requests(num_requests=1, max_tokens=max_tokens)
     request.sampling_params.routed_experts_prompt_start = request.num_prompt_tokens
     scheduler.aux_output_connector = AuxOutputSchedulerConnector(
-        scheduler.kv_cache_manager
+        scheduler.kv_cache_manager,
+        None,
+        AuxOutputConfig(enable_return_routed_experts=True),
     )
     scheduler.add_request(request)
     scheduler_output = scheduler.schedule()
@@ -279,8 +284,9 @@ def test_routed_experts_prompt_start_at_prompt_end(max_tokens):
             pooler_output=[],
             aux_output_connector_output={
                 request.request_id: AuxRequestOutput(
-                    request.num_prompt_tokens,
-                    np.empty((0, 1, 1), dtype=np.uint8),
+                    routed_experts=RoutedExpertsRequestOutput(
+                        request.num_prompt_tokens, np.empty((0, 1, 1), dtype=np.uint8)
+                    )
                 )
             },
         ),
@@ -294,7 +300,9 @@ def test_routed_experts_prompt_start_at_prompt_end(max_tokens):
 def test_routed_experts_hashes_follow_scheduled_tokens():
     scheduler = create_scheduler(enable_prefix_caching=True, max_num_batched_tokens=64)
     scheduler.aux_output_connector = AuxOutputSchedulerConnector(
-        scheduler.kv_cache_manager
+        scheduler.kv_cache_manager,
+        None,
+        AuxOutputConfig(enable_return_routed_experts=True),
     )
     (request,) = create_requests(
         num_requests=1, num_tokens=160, max_tokens=20, ignore_eos=True
@@ -323,8 +331,9 @@ def test_routed_experts_hashes_follow_scheduled_tokens():
                 pooler_output=[],
                 aux_output_connector_output={
                     request.request_id: AuxRequestOutput(
-                        0,
-                        np.zeros((num_computed + num_scheduled, 1, 1), np.uint8),
+                        routed_experts=RoutedExpertsRequestOutput(
+                            0, np.zeros((num_computed + num_scheduled, 1, 1), np.uint8)
+                        )
                     )
                 },
             ),
@@ -386,12 +395,18 @@ def test_prefix_hit_is_capped_at_retained_auxiliary_outputs(
         scheduler.add_request(first)
         scheduler.schedule()
         scheduler.finish_requests(first.request_id, RequestStatus.FINISHED_ABORTED)
-    connector = AuxOutputSchedulerConnector(scheduler.kv_cache_manager, Mock())
-    connector.max_cache_hit = Mock(return_value=max_cache_hit)
+    connector = AuxOutputSchedulerConnector(
+        scheduler.kv_cache_manager,
+        Mock(),
+        AuxOutputConfig(enable_return_routed_experts=True),
+    )
     scheduler.aux_output_connector = connector
     scheduler.add_request(second)
 
-    output = scheduler.schedule()
+    with patch.object(
+        RoutedExpertsSchedulerConnector, "max_cache_hit", return_value=max_cache_hit
+    ):
+        output = scheduler.schedule()
 
     assert output.num_scheduled_tokens[second.request_id] == 80 - expected_hit
 
@@ -399,7 +414,9 @@ def test_prefix_hit_is_capped_at_retained_auxiliary_outputs(
 def test_evicted_blocks_release_their_auxiliary_outputs_past_capacity():
     scheduler = create_scheduler(enable_prefix_caching=True, num_blocks=5)
     scheduler.aux_output_connector = AuxOutputSchedulerConnector(
-        scheduler.kv_cache_manager
+        scheduler.kv_cache_manager,
+        None,
+        AuxOutputConfig(enable_return_routed_experts=True),
     )
     first, second, third = create_requests(num_requests=3, num_tokens=64)
     for request in (first, second):
@@ -2899,7 +2916,11 @@ def test_prefix_cache_stats_counted_once_for_retried_then_scheduled_request():
 def test_scheduler_reset_prefix_cache():
     scheduler = create_scheduler(enable_prefix_caching=True)
     scheduler.aux_output_connector = Mock(
-        wraps=AuxOutputSchedulerConnector(scheduler.kv_cache_manager)
+        wraps=AuxOutputSchedulerConnector(
+            scheduler.kv_cache_manager,
+            None,
+            AuxOutputConfig(enable_return_routed_experts=True),
+        )
     )
     requests = create_requests(num_requests=10)
     for request in requests:
@@ -8620,8 +8641,9 @@ def test_hybrid_divergent_hit_fallback_is_capped_at_retained_auxiliary_outputs(
     manager = scheduler.kv_cache_manager
     _, mamba_ids = _seed_hybrid_prefix(manager, 4, block_size)
     manager.block_pool.evict_blocks({mamba_ids[1], mamba_ids[2], mamba_ids[3]})
-    connector = AuxOutputSchedulerConnector(manager, scheduler.connector)
-    connector.max_cache_hit = Mock(return_value=max_cache_hit)
+    connector = AuxOutputSchedulerConnector(
+        manager, scheduler.connector, AuxOutputConfig(enable_return_routed_experts=True)
+    )
     scheduler.aux_output_connector = connector
     [replay] = create_requests(
         num_requests=1,
@@ -8633,7 +8655,10 @@ def test_hybrid_divergent_hit_fallback_is_capped_at_retained_auxiliary_outputs(
     )
     scheduler.add_request(replay)
 
-    [new_req] = scheduler.schedule().scheduled_new_reqs
+    with patch.object(
+        RoutedExpertsSchedulerConnector, "max_cache_hit", return_value=max_cache_hit
+    ):
+        [new_req] = scheduler.schedule().scheduled_new_reqs
 
     assert new_req.num_computed_tokens == expected_num_computed
 

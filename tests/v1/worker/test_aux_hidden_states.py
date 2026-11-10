@@ -15,6 +15,7 @@ from vllm.distributed.aux_output_connector.hidden_states import (
     HiddenStateCapturePlan,
     capture_scheduled_hidden_states,
 )
+from vllm.exceptions import VLLMValidationError
 from vllm.sampling_params import SamplingParams
 
 if TYPE_CHECKING:
@@ -78,8 +79,8 @@ def test_window_logprobs_do_not_depend_on_other_selected_rows():
         return capture_scheduled_hidden_states(
             {"r": plan},
             ["r"],
-            {"r": 8},
-            {"r": 0},
+            np.array([0, 8]),
+            np.array([0]),
             hidden,
             logits=logits,
             cu_num_logits=np.array([0, 8]),
@@ -99,8 +100,8 @@ def test_recomputed_history_is_excluded_before_logprob_capture():
     chunk = capture_scheduled_hidden_states(
         {"r": plan},
         ["r"],
-        {"r": 9},
-        {"r": 0},
+        np.array([0, 9]),
+        np.array([0]),
         hidden,
         logits=logits,
         cu_num_logits=np.array([0, 1]),
@@ -510,6 +511,23 @@ def test_speculative_aux_windows_match_full_capture(vllm_runner, monkeypatch):
                 use_tqdm=False,
             )
 
+        with pytest.raises(VLLMValidationError, match="configured target layers"):
+            runner.llm.generate(
+                prompts[0],
+                SamplingParams(
+                    max_tokens=1,
+                    extra_args={
+                        "hidden_state_capture": {
+                            "start": 0,
+                            "end": 1,
+                            "collection_id": "wrong-layers",
+                            "aux_layer_ids": [1],
+                            "hidden_layout": "aux_final",
+                        }
+                    },
+                ),
+                use_tqdm=False,
+            )
         full = generate(0, 32)
         window = generate(8, 16)
         for before, after in zip(full, window):

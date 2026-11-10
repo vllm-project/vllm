@@ -26,6 +26,13 @@ def invalid_request(case):
         params.extra_args["hidden_state_capture"].update(
             aux_layer_ids=[1], hidden_layout="aux_final"
         )
+    if case in ("absolute_window", "response_window"):
+        assert params.extra_args is not None
+        params.extra_args["hidden_state_capture"].update(
+            start=64 if case == "absolute_window" else 63,
+            end=65 if case == "absolute_window" else 64,
+            coordinate="absolute" if case == "absolute_window" else "response",
+        )
     return EngineCoreRequest(
         request_id="capture",
         prompt_token_ids=[100, 200],
@@ -51,7 +58,14 @@ def test_direct_capture_admission_with_real_engine(vllm_runner, monkeypatch):
         kv_sharing_fast_prefill=True,
         aux_output_config={"enable_hidden_states": True},
     ) as runner:
-        for case in ("n", "stop", "resumable", "aux"):
+        for case in (
+            "n",
+            "stop",
+            "resumable",
+            "aux",
+            "absolute_window",
+            "response_window",
+        ):
             with pytest.raises(VLLMValidationError):
                 runner.llm.llm_engine.add_request(
                     "capture", invalid_request(case), SamplingParams()
@@ -93,7 +107,14 @@ def test_async_capture_admission_with_real_engine(monkeypatch):
             )
         )
         try:
-            for case in ("n", "stop", "resumable", "aux"):
+            for case in (
+                "n",
+                "stop",
+                "resumable",
+                "aux",
+                "absolute_window",
+                "response_window",
+            ):
                 with pytest.raises(VLLMValidationError):
                     await engine.add_request(
                         "capture", invalid_request(case), SamplingParams()
