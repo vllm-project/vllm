@@ -20,16 +20,14 @@ import torch
 from tests.v1.attention.utils import dense_kv_cache_views
 from vllm.distributed import mooncake_store
 from vllm.distributed.kv_events import KVEventAggregator
-from vllm.distributed.kv_transfer.kv_connector.v1.mooncake import (
+from vllm.distributed.kv_transfer.kv_connector.v1.mooncake_store import (
     rdma_utils,
-)
-from vllm.distributed.kv_transfer.kv_connector.v1.mooncake.store import (
     worker,
 )
-from vllm.distributed.kv_transfer.kv_connector.v1.mooncake.store import (
+from vllm.distributed.kv_transfer.kv_connector.v1.mooncake_store import (
     worker as mooncake_store_worker,
 )
-from vllm.distributed.kv_transfer.kv_connector.v1.mooncake.store.data import (  # noqa: E501
+from vllm.distributed.kv_transfer.kv_connector.v1.mooncake_store.data import (  # noqa: E501
     BlobBlockHashes,
     BoundaryPut,
     ChunkedTokenDatabase,
@@ -39,7 +37,7 @@ from vllm.distributed.kv_transfer.kv_connector.v1.mooncake.store.data import (  
     RequestTracker,
     TailKeyBoundary,
 )
-from vllm.distributed.kv_transfer.kv_connector.v1.mooncake.store.layout import (  # noqa: E501
+from vllm.distributed.kv_transfer.kv_connector.v1.mooncake_store.layout import (  # noqa: E501
     HeadMajorStoreLayout,
     KeyMetadata,
     MambaStoreLayout,
@@ -47,10 +45,10 @@ from vllm.distributed.kv_transfer.kv_connector.v1.mooncake.store.layout import (
     RankLocalStoreLayout,
     TokenMajorStoreLayout,
 )
-from vllm.distributed.kv_transfer.kv_connector.v1.mooncake.store.metrics import (
+from vllm.distributed.kv_transfer.kv_connector.v1.mooncake_store.metrics import (
     MooncakeStoreConnectorStats,
 )
-from vllm.distributed.kv_transfer.kv_connector.v1.mooncake.store.scheduler import (  # noqa: E501
+from vllm.distributed.kv_transfer.kv_connector.v1.mooncake_store.scheduler import (  # noqa: E501
     _partial_tail_non_mamba_puts,
 )
 from vllm.model_executor.layers.mamba.mamba_utils import get_conv_state_layout
@@ -4367,7 +4365,7 @@ def _register_with_mocked_threads(
     kv_caches: dict[str, torch.Tensor],
 ) -> None:
     """Call register_kv_caches with the I/O transfer threads mocked out."""
-    prefix = "vllm.distributed.kv_transfer.kv_connector.v1.mooncake.store.worker."
+    prefix = "vllm.distributed.kv_transfer.kv_connector.v1.mooncake_store.worker."
     with (
         patch(prefix + "KVCacheStoreSendingThread", side_effect=_auto_set_ready_event),
         patch(prefix + "KVCacheStoreRecvingThread", side_effect=_auto_set_ready_event),
@@ -4485,10 +4483,10 @@ def _make_bare_worker(
 def test_mooncake_lookup_reuses_resolved_hash_checkpoint(
     use_eagle, prefix_match_unit, dcp_world_size, mamba_block_size
 ):
-    from vllm.distributed.kv_transfer.kv_connector.v1.mooncake.store import (
+    from vllm.distributed.kv_transfer.kv_connector.v1.mooncake_store import (
         coordinator as mooncake_coordinator,
     )
-    from vllm.distributed.kv_transfer.kv_connector.v1.mooncake.store.scheduler import (
+    from vllm.distributed.kv_transfer.kv_connector.v1.mooncake_store.scheduler import (
         MooncakeStoreScheduler,
     )
 
@@ -4527,7 +4525,7 @@ def test_mooncake_lookup_reuses_resolved_hash_checkpoint(
         ),
     )
     with patch(
-        "vllm.distributed.kv_transfer.kv_connector.v1.mooncake.store."
+        "vllm.distributed.kv_transfer.kv_connector.v1.mooncake_store."
         "scheduler.LookupKeyClient"
     ):
         scheduler = MooncakeStoreScheduler(
@@ -4563,7 +4561,7 @@ def test_scheduler_follows_core_hit_alignment(alignment, expected):
     """The store takes partial hits from core's resolved alignment, not from its
     own groups: these Mamba specs alone would allow them, but core may still
     keep hits on the block (e.g. for a sliding-window group it never sees)."""
-    from vllm.distributed.kv_transfer.kv_connector.v1.mooncake.store.scheduler import (
+    from vllm.distributed.kv_transfer.kv_connector.v1.mooncake_store.scheduler import (
         MooncakeStoreScheduler,
     )
 
@@ -4597,7 +4595,7 @@ def test_scheduler_follows_core_hit_alignment(alignment, expected):
         parallel_config=SimpleNamespace(decode_context_parallel_size=1, world_size=1),
     )
     with patch(
-        "vllm.distributed.kv_transfer.kv_connector.v1.mooncake.store."
+        "vllm.distributed.kv_transfer.kv_connector.v1.mooncake_store."
         "scheduler.LookupKeyClient"
     ):
         scheduler = MooncakeStoreScheduler(
