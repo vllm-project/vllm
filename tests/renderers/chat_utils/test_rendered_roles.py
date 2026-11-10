@@ -54,7 +54,7 @@ user:{{ message['content'] }}
 
 
 def _filtering_render(messages):
-    """Render only system/user/assistant/tool, matching ``_FILTERING_TEMPLATE``."""
+    """Render only system/user/assistant/tool, matching `_FILTERING_TEMPLATE`."""
     handled = {"system", "user", "assistant", "tool"}
     parts = []
     for message in messages:
@@ -85,16 +85,16 @@ def test_role_filter_extracts_qwen_style_roles():
 
 
 def test_chatml_inequality_guard_is_not_an_allow_list():
-    """ChatML's ``!= assistant`` guard must not skip the drop check.
+    """ChatML's `!= assistant` guard must not skip the drop check.
 
     The template still prints every role. The guard is a possible filter
-    with no literal allow-list, not a reason to trust ``assistant`` only.
+    with no literal allow-list, not a reason to trust `assistant` only.
     """
     assert roles_rendered_by_chat_template(_CHATML_TEMPLATE) == frozenset()
 
 
 def test_negated_role_comparisons_are_filters_without_an_allow_list():
-    """``not in``, ``!=``, and ``not (role == ...)`` do not name kept roles."""
+    """`not in`, `!=`, and `not (role == ...)` do not name kept roles."""
     not_in = "{% if message.role not in ['user', 'assistant'] %}skip{% endif %}"
     unequal = (
         "{% if message.role != 'user' and message.role != 'assistant' %}skip{% endif %}"
@@ -113,7 +113,7 @@ def test_dynamic_role_allow_list_is_treated_as_a_filter():
 
 
 def test_dynamic_role_equality_is_treated_as_a_filter():
-    """``message.role == some_var`` is a filter even though the name is hidden."""
+    """`message.role == some_var` is a filter even though the name is hidden."""
     template = "{% if message.role == allowed_role %}{{ message.content }}{% endif %}"
     assert roles_rendered_by_chat_template(template) == frozenset()
 
@@ -134,7 +134,7 @@ def test_selectattr_on_a_non_role_attribute_is_not_a_role_filter():
 
 
 def test_rejectattr_role_filter_does_not_allow_the_rejected_role():
-    """``rejectattr`` drops the named role, so that name is not an allow-list."""
+    """`rejectattr` drops the named role, so that name is not an allow-list."""
     template = (
         "{% for message in messages | rejectattr('role', 'equalto', 'tool') %}"
         "{{ message.content }}{% endfor %}"
@@ -302,7 +302,7 @@ def test_role_header_without_content_is_rejected():
 
 
 def test_else_branch_custom_role_is_probed_and_kept():
-    """A custom role printed from ``else`` is probed, and kept when rendered."""
+    """A custom role printed from `else` is probed, and kept when rendered."""
     calls = 0
 
     def render_text(messages):
@@ -618,7 +618,7 @@ def test_rejectattr_keeps_a_role_it_does_not_name():
 
 
 def _render_loop_template(template: str, messages) -> str:
-    """Render with ``{% continue %}`` enabled, matching HF's Jinja env."""
+    """Render with `{% continue %}` enabled, matching HF's Jinja env."""
     env = jinja2.sandbox.ImmutableSandboxedEnvironment(
         trim_blocks=True,
         lstrip_blocks=True,
@@ -665,7 +665,7 @@ def _render_loop_template(template: str, messages) -> str:
     ],
 )
 def test_exclusion_template_rejects_a_dropped_custom_role(template):
-    """A ``continue`` on a negated role check must not accept ``usr``."""
+    """A `continue` on a negated role check must not accept `usr`."""
     dropped = [{"role": "usr", "content": "secret launch code"}]
     rendered = _render_loop_template(template, dropped)
     assert "secret launch code" not in rendered
@@ -692,7 +692,7 @@ def test_exclusion_template_rejects_a_dropped_custom_role(template):
 
 
 def test_negated_equality_rejects_the_named_role_when_content_is_dropped():
-    """``not (role == 'wizard')`` must not treat wizard as rendered."""
+    """`not (role == 'wizard')` must not treat wizard as rendered."""
     template = """
     {% for message in messages %}
     {% if not (message.role == 'wizard') %}
@@ -716,7 +716,7 @@ def test_negated_equality_rejects_the_named_role_when_content_is_dropped():
 
 
 def test_selectattr_ne_rejects_a_role_also_named_by_equality():
-    """``selectattr('role', 'ne', ...)`` drops that role even if ``==`` names it."""
+    """`selectattr('role', 'ne', ...)` drops that role even if `==` names it."""
     template = """
     {% for message in messages %}
     {% if message.role == 'wizard' %}{% endif %}
@@ -741,7 +741,7 @@ def test_selectattr_ne_rejects_a_role_also_named_by_equality():
 
 
 def test_rejectattr_ne_rejects_every_other_role():
-    """``rejectattr('role', '!=', 'user')`` keeps user and drops ``usr``."""
+    """`rejectattr('role', '!=', 'user')` keeps user and drops `usr`."""
     template = """
     {% for message in messages | rejectattr('role', '!=', 'user') %}
     {{ message.content }}
@@ -1135,7 +1135,7 @@ def test_ignored_developer_role_warns_and_is_not_a_400():
 
 
 def test_standard_roles_follow_the_openai_message_schema():
-    """Legacy ``function`` is a schema role, so it is not treated as a typo."""
+    """Legacy `function` is a schema role, so it is not treated as a typo."""
     assert (
         frozenset({"system", "user", "assistant", "tool", "developer", "function"})
         == _STANDARD_CHAT_ROLES
@@ -1196,7 +1196,7 @@ def test_formatting_only_assistant_check_does_not_warn():
 
 
 def test_loop_controls_and_generation_still_parse():
-    """HF's Jinja env accepts ``{% break %}`` and ``{% generation %}``."""
+    """HF's Jinja env accepts `{% break %}` and `{% generation %}`."""
     template = """
     {% for message in messages %}
     {% if message['role'] == 'user' %}
@@ -1483,7 +1483,7 @@ def test_sliced_content_is_not_rejected_when_the_probe_marker_is_clipped():
 
 @pytest.mark.parametrize("count", [64, 256, 1024])
 def test_distinct_truncated_messages_stay_within_render_budget(count):
-    """``content[:5]`` clips every marker when each prefix is unique.
+    """`content[:5]` clips every marker when each prefix is unique.
 
     The omission split cannot prove which turn contributed, so it stops
     after the shared render budget and keeps the request.
