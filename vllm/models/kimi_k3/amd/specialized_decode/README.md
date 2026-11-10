@@ -25,6 +25,10 @@ peer memory.
   top-16, MXFP4 experts, shared experts, latent all-reduce + RMSNorm, up_proj,
   final all-reduce).
 
+Kimi-K3.1 DSA layers run their indexer and sparse MLA normally, then pass the
+gated attention output to K2 for o_proj and the latent MoE. Eligible KDA layers
+retain K1/K2. Prefill and unsupported decode batches use the standard layer path.
+
 The kernels read vLLM's loaded weights, KDA states and MLA KV cache in place.
 Nothing is copied or re-quantized. The kernels tile up to 64 rows (`MAX_TOKENS`),
 but at 32 and 64 rows they lose to vLLM's decode, so a served step is capped at 16
@@ -33,7 +37,7 @@ but at 32 and 64 rows they lose to vLLM's decode, so a served step is capped at 
 ## Enabling
 
 ```bash
-VLLM_USE_V2_MODEL_RUNNER=1 VLLM_ROCM_USE_AITER=1 VLLM_ROCM_USE_AITER_FP4BMM=1 \
+VLLM_ROCM_USE_AITER=1 VLLM_ROCM_USE_AITER_FP4BMM=1 \
   vllm serve <Kimi-K3> -tp 8 --max-num-seqs 1 \
   [--decode-context-parallel-size 8 --dcp-comm-backend a2a] --kv-cache-dtype fp8 \
   [--speculative-config '{"method": "dspark", "num_speculative_tokens": 7, ...}'] \
@@ -45,7 +49,7 @@ There are no other options. `decode_backend=auto` (the default) runs vLLM's deco
 ## Supported deployments
 
 TP8 on MI355X with all 256 CUs, ordinary decode at decode context parallel 1 or 8, or
-speculative decoding at decode context parallel 1 or 8, Model Runner V2, AITER
+speculative decoding at decode context parallel 1 or 8, AITER
 (`VLLM_ROCM_USE_AITER=1`: K2's MoE is AITER's SiTU MXFP4 MoE), BF16 conv / FP32
 recurrent KDA states. For speculative decoding, `--max-num-seqs` is 1, 2, 4 or 8,
 with max_num_seqs x (num_speculative_tokens + 1) <= 16 (a full step is one
@@ -73,8 +77,7 @@ If you request the specialized decode for anything else, startup fails with one
   routed-expert capture, sleep mode, CPU weight offload, weight updates,
   an unserved max_num_seqs / speculative tokens / DCP,
   adaptive verification, dynamic speculative decoding, ReplaySSM / RecoverSSM,
-  the V1 model runner, `STOCK_TORCH_COMPILE`, another model's shapes, another
-  GPU.
+  `STOCK_TORCH_COMPILE`, another model's shapes, another GPU.
 - **Loaded weights, when the model state builds the executor:** each kernel
   layer's weight shapes and dtypes and the MoE backend (`AITER_MXFP4_BF16`, K3
   SiTU). Each MLA layer's attention backend, shapes, gate, DCP setup, fp8 E4M3

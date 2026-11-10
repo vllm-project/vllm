@@ -3,7 +3,7 @@
 
 import torch
 
-from vllm import _custom_ops as ops
+from vllm import _cpu_ops as ops
 
 
 def gumbel_sample(

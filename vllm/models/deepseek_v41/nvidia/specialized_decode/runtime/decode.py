@@ -2,27 +2,27 @@
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 """The specialized decode executor.
 
-``SpecializedDecode`` runs the decoder layers of ``DeepseekV4Model`` for the
+`SpecializedDecode` runs the decoder layers of `DeepseekV4Model` for the
 steps captured into FULL CUDA graphs of pure decode batches of up to
-``FUSED_MHC_MAX_ROWS`` rows. Its model state builds it once the weights are
-loaded. ``plan`` decides per forward whether it runs; the model's forward then
-passes the returned ``DecodeStep`` to the backbone, which runs its embedding
-and Engram hashing as usual and hands the layers to ``DecodeStep.run``. Every
+`FUSED_MHC_MAX_ROWS` rows. Its model state builds it once the weights are
+loaded. `plan` decides per forward whether it runs; the model's forward then
+passes the returned `DecodeStep` to the backbone, which runs its embedding
+and Engram hashing as usual and hands the layers to `DecodeStep.run`. Every
 other forward (prefill, mixed, eager, PIECEWISE) runs the stock layers, which
 the executor leaves unchanged.
 
 Per layer the executor runs the stock modules through its own steps:
 
-- ``Boundaries`` (``boundary``): the mHC between sublayers, on the fused
+- `Boundaries` (`boundary`): the mHC between sublayers, on the fused
   all-reduce + mHC kernel;
-- ``AttentionStep`` (``attention.step``);
-- ``MoEStep`` (``moe.step``), which leaves the MoE finalize to the next
+- `AttentionStep` (`attention.step`);
+- `MoEStep` (`moe.step`), which leaves the MoE finalize to the next
   boundary;
-- ``EngramPrefetch`` (``engram.prefetch``) for the Engram layers.
+- `EngramPrefetch` (`engram.prefetch`) for the Engram layers.
 
 The steps issue TP collectives, so every decision reads host state that all TP
 ranks share: the step's rows and the attention metadata's host fields. Side
-streams the steps fork are joined before ``run`` returns, so a capture ends
+streams the steps fork are joined before `run` returns, so a capture ends
 joined.
 """
 
@@ -89,7 +89,7 @@ class DecodeStep(NamedTuple):
         streams: torch.Tensor | None = None,
     ) -> DecodeOutput:
         """The backbone's output after its embedding (and, from the
-        executor's ``embedding``, the embedding's hc ``streams``)."""
+        executor's `embedding`, the embedding's hc `streams`)."""
         return self.executor.run(
             self,
             hidden_states,
@@ -102,7 +102,7 @@ class DecodeStep(NamedTuple):
 
 
 def step_gates(rows: int, executor: "SpecializedDecode") -> DecodeStep:
-    """The step of ``rows`` rows (0 < rows <= ``FUSED_MHC_MAX_ROWS``)."""
+    """The step of `rows` rows (0 < rows <= `FUSED_MHC_MAX_ROWS`)."""
     return DecodeStep(
         rows=rows,
         low_batch=rows <= LOW_BATCH_MAX_ROWS,
@@ -116,7 +116,7 @@ def captures_pure_decode(swa_prefixes: list[str]) -> bool:
     a pure decode step: not a PIECEWISE capture (Model Runner V2 captures FULL
     graphs with the forward context's mode NONE, and PIECEWISE ones, which
     report capturing too, with PIECEWISE), and decode metadata without
-    prefills for every SWA KV-cache group (``swa_prefixes``) of the layers."""
+    prefills for every SWA KV-cache group (`swa_prefixes`) of the layers."""
     context = get_forward_context()
     attn_metadata = context.attn_metadata
     if context.cudagraph_runtime_mode == CUDAGraphMode.PIECEWISE or not isinstance(
@@ -267,7 +267,7 @@ class SpecializedDecode:
     ) -> DecodeStep | None:
         """The step this forward runs, or None to run the stock layers: only
         FULL CUDA graph captures of pure decode steps of up to
-        ``FUSED_MHC_MAX_ROWS`` rows run the executor."""
+        `FUSED_MHC_MAX_ROWS` rows run the executor."""
         rows = positions.shape[0]
         if (
             intermediate_tensors is not None
@@ -295,8 +295,8 @@ class SpecializedDecode:
         streams: torch.Tensor | None = None,
     ) -> DecodeOutput:
         """The decoder layers and the final collapse of the step, on the
-        embedding ``x`` (with its hc ``streams`` when the step's embedding
-        wrote them); returns what ``DeepseekV4Model.forward`` returns."""
+        embedding `x` (with its hc `streams` when the step's embedding
+        wrote them); returns what `DeepseekV4Model.forward` returns."""
         backbone = self.backbone
         aux_layers = backbone.aux_hidden_state_layers
         aux: dict[int, torch.Tensor] = {}
@@ -362,7 +362,7 @@ class SpecializedDecode:
     def _head(
         self, streams: torch.Tensor, pre: torch.Tensor, aux: dict[int, torch.Tensor]
     ) -> DecodeOutput:
-        """``DeepseekV4Model.forward`` after the layers: the MTP buffer, the
+        """`DeepseekV4Model.forward` after the layers: the MTP buffer, the
         collapse of the hc streams with the last pre-mix and the final norm."""
         backbone = self.backbone
         if backbone._mtp_hidden_buffer is not None:

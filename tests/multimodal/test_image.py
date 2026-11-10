@@ -113,7 +113,7 @@ def test_transparency_offline_matches_online(make_image):
     """A PIL image passed offline and the same image sent online as a PNG
     end up with the same pixels, matching Pillow's own RGBA conversion.
 
-    After ``convert("RGB")``, Pillow keeps the transparent color in ``info``
+    After `convert("RGB")`, Pillow keeps the transparent color in `info`
     and saves it as a tRNS chunk, so every pixel of that color is
     transparent in both pipelines, including opaque GIF pixels that share it.
     """

@@ -3,11 +3,11 @@
 """The Kimi-K3 specialized decode executor (layer mode): one routing decision per
 step, then the layer kernels inside the stock layer loop.
 
-Built by the model state once the weights are loaded (``KimiK3ModelState``): checks
-the loaded weights, builds the per-rank launch state (``runner``) and the layer
+Built by the model state once the weights are loaded (`KimiK3ModelState`): checks
+the loaded weights, builds the per-rank launch state (`runner`) and the layer
 kernels of every width, and compiles every build, before memory profiling and graph
-capture. ``prepare_kv`` binds it to every KV cache vLLM allocates. Each step
-``plan`` returns a ``Step`` or None; ``Step.layer(i)`` is the kernel replacing
+capture. `prepare_kv` binds it to every KV cache vLLM allocates. Each step
+`plan` returns a `Step` or None; `Step.layer(i)` is the kernel replacing
 decoder layer i (None for vLLM's layers). Weight reloads are not supported."""
 
 from collections.abc import Callable, Mapping
@@ -50,7 +50,7 @@ Kernel = WholeLayer | FfnLayer | MlaOpsLayer
 
 
 class Step(NamedTuple):
-    """A planned step: ``width`` rows of whole uniform decode requests."""
+    """A planned step: `width` rows of whole uniform decode requests."""
 
     width: int
     attn_metadata: Mapping[str, Any]  # by layer name
@@ -66,8 +66,8 @@ def step_reason(
     attn_metadata, kda_prefix: str, width: int, q: int, mla_prefix: str = ""
 ) -> str | None:
     """None if a step's KDA and MLA metadata (identical on every TP rank) are a
-    pure, uniform regular-decode or spec-verify step filling ``width`` rows, else
-    why not. ``q`` is the deployment's configured rows per request."""
+    pure, uniform regular-decode or spec-verify step filling `width` rows, else
+    why not. `q` is the deployment's configured rows per request."""
     if not isinstance(attn_metadata, dict):
         return "no metadata"
     m: Any = attn_metadata.get(kda_prefix)
@@ -117,7 +117,7 @@ def step_reason(
 
 
 def agree(reasons: list[str], group, what: str) -> None:
-    """Raises on every TP rank if any rank has ``reasons``: a rank that refused
+    """Raises on every TP rank if any rank has `reasons`: a rank that refused
     alone would leave the others spinning in-kernel."""
     if not tp_agree(not reasons, group):
         why = "; ".join(reasons) if reasons else "another TP rank refused"
@@ -241,7 +241,7 @@ class SpecializedDecode:
         - PIECEWISE steps (captured without attention metadata);
         - widths without kernels (more than max_num_seqs requests);
         - steps that are not pure, uniform regular-decode or spec-verify steps
-          (``step_reason``).
+          (`step_reason`).
 
         Eager steps run the kernels too. Every predicate is the same on all TP
         ranks: the kernels' mailboxes need every rank on one path. Under FULL
