@@ -931,18 +931,37 @@ async def benchmark(
             if max_concurrency
             else contextlib.nullcontext()
         )
-        warmup_tasks = []
 
-        async def warmup_limited_request_func():
+        async def warmup_limited_request_func(salted: bool) -> RequestFuncOutput:
+            # Warmups resend the first request. A unique cache_salt keeps them
+            # from filling the prefix cache for each other and for the run.
+            warmup_input = test_input
+            if salted:
+                warmup_input = replace(
+                    test_input,
+                    extra_body={
+                        **(test_input.extra_body or {}),
+                        "cache_salt": f"warmup-{uuid.uuid4().hex}",
+                    },
+                )
             async with warmup_semaphore:
                 return await request_func(
-                    request_func_input=test_input, session=session, pbar=warmup_pbar
+                    request_func_input=warmup_input, session=session, pbar=warmup_pbar
                 )
 
-        for _ in range(num_warmups):
-            request_task = asyncio.create_task(warmup_limited_request_func())
-            warmup_tasks.append(request_task)
-        _ = await asyncio.gather(*warmup_tasks)
+        warmup_outputs = await asyncio.gather(
+            *(warmup_limited_request_func(salted=True) for _ in range(num_warmups))
+        )
+        if not any(output.success for output in warmup_outputs):
+            print(
+                "WARNING: warmup requests with cache_salt failed "
+                f"({warmup_outputs[0].error.strip()[:200]}), retrying without it."
+            )
+            if warmup_pbar is not None:
+                warmup_pbar.reset()
+            await asyncio.gather(
+                *(warmup_limited_request_func(salted=False) for _ in range(num_warmups))
+            )
 
         if warmup_pbar is not None:
             warmup_pbar.close()

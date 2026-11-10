@@ -125,6 +125,44 @@ def test_bench_serve(server):
 
 
 @pytest.mark.benchmark
+def test_bench_serve_warmups_do_not_prime_prefix_cache(server):
+    """Warmups resend the first prompt; they must not leave it in the prefix cache."""
+    command = [
+        "vllm",
+        "bench",
+        "serve",
+        "--host",
+        server.host,
+        "--port",
+        str(server.port),
+        "--dataset-name",
+        "random",
+        "--random-input-len",
+        "64",
+        "--random-output-len",
+        "4",
+        "--num-prompts",
+        "3",
+        "--max-concurrency",
+        "1",
+        "--num-warmups",
+        "2",
+    ]
+    result = subprocess.run(command, capture_output=True, text=True)
+    print(result.stdout)
+    print(result.stderr)
+
+    assert result.returncode == 0, f"Benchmark failed: {result.stderr}"
+    metrics = requests.get(server.url_for("metrics")).text
+    hits = sum(
+        float(line.rsplit(" ", 1)[1])
+        for line in metrics.splitlines()
+        if line.startswith("vllm:prefix_cache_hits_total")
+    )
+    assert hits == 0
+
+
+@pytest.mark.benchmark
 def test_bench_serve_insecure(ssl_server):
     """Test --insecure flag with an HTTPS server using a self-signed certificate."""
     base_url = f"https://{ssl_server.host}:{ssl_server.port}"
