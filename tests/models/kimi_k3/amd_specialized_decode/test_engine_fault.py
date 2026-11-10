@@ -2,7 +2,7 @@
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 """Fail-stop end to end: a TP rank that stalls inside a served Kimi-K3
 specialized decode step fails a request, and the engine stops instead of
-hanging: every TP rank must stop at the same step (``guards.FailStop``), or the
+hanging: every TP rank must stop at the same step (`guards.FailStop`), or the
 ranks that went on would wait in the next collective for ever."""
 
 import json
@@ -118,7 +118,6 @@ def test_a_stalled_rank_stops_the_engine(tmp_path):
         "PYTHONPATH": os.pathsep.join(
             filter(None, [str(site), os.getenv("PYTHONPATH")])
         ),
-        "VLLM_USE_V2_MODEL_RUNNER": "1",
         "VLLM_ROCM_USE_AITER": "1",
         "VLLM_ROCM_AITER_MLA_ASM_PADDING": "asm",
         # M1 runs W_UK / W_UV as AITER's MXFP4 bmms, off by default
