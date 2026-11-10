@@ -84,6 +84,13 @@ class CausalMixin(VllmModelForTextGeneration, Base):
 
         return super().load_weights(auto_load_lm_head_bias(weights)) | lm_head_bias
 
+    def compute_logits_local(self, hidden_states: "torch.Tensor") -> "torch.Tensor":
+        """Logits for this TP rank's vocab shard, for batch-sharded sampling."""
+        bias = self.lm_head.bias
+        return self.logits_processor(
+            self.lm_head, hidden_states, bias, skip_gather=True
+        )
+
     def compute_logits(self, hidden_states: "torch.Tensor") -> "torch.Tensor | None":
         logits = self.logits_processor(self.lm_head, hidden_states, self.lm_head.bias)
         return logits

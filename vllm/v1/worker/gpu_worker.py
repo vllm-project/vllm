@@ -1571,6 +1571,7 @@ class Worker(WorkerBase):
             self.model_runner.decode_query_len,
             uniform_decode=True,
             randomize_inputs=self.randomize_dummy_inputs,
+            num_active_loras=0,
         )
 
     def add_lora(self, lora_request: LoRARequest) -> bool:
@@ -1779,7 +1780,7 @@ class Worker(WorkerBase):
 
         # Weight transfer bypasses GPUModelRunner.reload_weights().
         if not self._weight_update_is_draft:
-            self.model_runner.reset_lora_state()
+            self.model_runner.on_target_weights_replaced()
 
     def shutdown(self) -> None:
         gc.unfreeze()

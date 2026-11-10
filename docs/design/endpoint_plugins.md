@@ -82,7 +82,13 @@ An endpoint plugin can implement [`SupportsStart`][vllm.plugins.endpoint_plugins
 
 The server awaits `start(state)` during lifespan startup, after `init_state` and before accepting HTTP requests. Hooks run in load order. If a hook raises or is cancelled, startup fails and the server calls `stop(state)` on preceding eligible plugins in reverse order. The failing plugin must release its own partially acquired resources before raising. A plugin with only `stop` becomes eligible when startup reaches its position in load order.
 
+SIGINT, SIGTERM and `request_shutdown()` cancel pending plugin startup after engine shutdown. Watchdog exit cancels pending startup without waiting for engine shutdown. Cancellation targets plugin startup, not listener binding; the server waits for binding to finish before HTTP teardown. A startup hook must propagate cancellation after releasing partially acquired resources. Cancellation remains cooperative.
+
+Optional `start` and `stop` hooks must be async functions. The plugin loader rejects synchronous hooks with an error naming the plugin and hook before attaching routes or initializing state.
+
 On shutdown, the server awaits each eligible `stop(state)` once in reverse order before deleting app state. An exception or cancellation from a stop hook does not skip other plugins or native serving cleanup. Cancellation of the lifespan task is re-raised after cleanup. Stop hooks must settle their owned background work; cleanup is cooperative and has no hard deadline.
+
+A stop hook that never returns prevents earlier plugins and native serving handlers from cleaning up. Repeated shutdown requests do not force termination. A process manager's forced termination remains the backstop; per-hook stop deadlines and second-signal forced exit are separate policy changes.
 
 The server stops the engine before HTTP shutdown and plugin cleanup. **A stop hook cannot rely on a running engine.** Use the optional drain capability below to settle accepted plugin work before engine shutdown. The API server's `/health` behavior is unchanged.
 

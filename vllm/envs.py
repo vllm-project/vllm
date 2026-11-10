@@ -1531,7 +1531,7 @@ environment_variables: dict[str, Callable[[], Any]] = {
     "VLLM_RUST_FRONTEND_PATH": lambda: _resolve_rust_cli_path(),
     # If set, vllm will run in development mode, which will enable
     # some additional endpoints for developing and debugging,
-    # e.g. `/reset_prefix_cache`
+    # e.g. `/reset_prefix_cache`, and default `--enable-scale-out` to on
     "VLLM_SERVER_DEV_MODE": lambda: bool(int(os.getenv("VLLM_SERVER_DEV_MODE", "0"))),
     # Controls the maximum number of requests to handle in a
     # single asyncio task when processing per-token outputs in the

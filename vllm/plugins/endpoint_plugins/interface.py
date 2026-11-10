@@ -29,6 +29,7 @@ either exclude `"render"` from `required_tasks` or check for `None` in
 """
 
 import asyncio
+import inspect
 import time
 from argparse import Namespace
 from copy import copy
@@ -222,14 +223,42 @@ async def init_endpoint_plugins_state(
         await plugin.init_state(engine_client, state, args)
 
 
+def validate_endpoint_plugin_hooks(plugin: EndpointPlugin) -> None:
+    for name in ("start", "stop"):
+        hook = getattr(plugin, name, None)
+        if hook is not None and not inspect.iscoroutinefunction(hook):
+            raise TypeError(
+                f"Endpoint plugin {plugin.name} hook {name} must be an async function"
+            )
+
+
+def cancel_endpoint_plugin_startup(state: State) -> None:
+    """Cancel acquisition once, without interrupting rollback or listener binding."""
+    state.endpoint_plugin_startup_cancelled = True
+    task = getattr(state, "endpoint_plugin_startup_task", None)
+    if task is not None and not task.cancelling():
+        task.cancel()
+
+
 async def start_endpoint_plugins(state: State) -> None:
     """Start plugins in load order, recording those eligible for cleanup."""
     started: list[EndpointPlugin] = []
     state.started_endpoint_plugins = started
-    for plugin in getattr(state, "endpoint_plugins", []):
-        if isinstance(plugin, SupportsStart):
-            await plugin.start(state)
-        started.append(plugin)
+
+    async def start() -> None:
+        for plugin in getattr(state, "endpoint_plugins", []):
+            if getattr(state, "endpoint_plugin_startup_cancelled", False):
+                raise asyncio.CancelledError
+            if isinstance(plugin, SupportsStart):
+                await plugin.start(state)
+            started.append(plugin)
+
+    task = asyncio.create_task(start())
+    state.endpoint_plugin_startup_task = task
+    try:
+        await task
+    finally:
+        state.endpoint_plugin_startup_task = None
 
 
 def endpoint_plugins_ready(state: State) -> bool:

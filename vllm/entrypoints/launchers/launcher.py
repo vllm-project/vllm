@@ -25,13 +25,17 @@ from vllm.entrypoints.common.startup import (
 )
 from vllm.entrypoints.launchers.utils.ssl import SSLCertRefresher
 from vllm.logger import init_logger
-from vllm.plugins.endpoint_plugins.interface import drain_endpoint_plugins
+from vllm.plugins.endpoint_plugins.interface import (
+    cancel_endpoint_plugin_startup,
+    drain_endpoint_plugins,
+)
 from vllm.tracing import instrument
 from vllm.utils.network_utils import find_process_using_port, is_valid_ipv6_address
 from vllm.utils.system_utils import set_ulimit
 from vllm.version import __version__ as VLLM_VERSION
 
 from .utils.constants import (
+    DISABLED_ROUTE_TAG,
     H11_MAX_HEADER_COUNT_DEFAULT,
     H11_MAX_INCOMPLETE_EVENT_SIZE_DEFAULT,
 )
@@ -77,6 +81,8 @@ class NoSignalServer(uvicorn.Server):
             self.should_exit = True
         else:
             self._exit_after_startup = True
+            if (state := getattr(self.config.app, "state", None)) is not None:
+                cancel_endpoint_plugin_startup(state)
 
     @contextlib.contextmanager
     def capture_signals(self) -> Generator[None, None, None]:
@@ -214,7 +220,13 @@ async def serve_http(
         if methods is None or path is None:
             continue
 
-        logger.info("Route: %s, Methods: %s", path, ", ".join(methods))
+        disabled = DISABLED_ROUTE_TAG in getattr(route, "tags", ())
+        logger.info(
+            "Route: %s, Methods: %s%s",
+            path,
+            ", ".join(methods),
+            " (disabled)" if disabled else "",
+        )
 
     # other endpoints
     for route in app.routes:
@@ -246,6 +258,7 @@ async def serve_http(
     config.load()
     server = NoSignalServer(config, peer_loads=peer_loads)
     app.state.server = server
+    app_state = app.state
 
     loop = asyncio.get_running_loop()
 
@@ -308,6 +321,7 @@ async def serve_http(
             )
             logger.info_once("[shutdown] API server: engine client stopped")
 
+        cancel_endpoint_plugin_startup(app_state)
         # Finish binding before requesting exit: older Uvicorn otherwise skips
         # shutdown, and cancelling create_server can orphan its listener.
         await server.startup_complete.wait()
