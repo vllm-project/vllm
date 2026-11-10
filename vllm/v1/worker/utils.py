@@ -744,23 +744,10 @@ def profile_mm_embed_input_ids(
     modality: str,
     model_config: ModelConfig,
 ) -> None:
-    """Run the multimodal embedding merge once so profiling reserves it.
+    """Run `embed_input_ids` on a full batch so profiling includes its peak.
 
-    Dummy runs pass the model a slice of the pre-allocated `inputs_embeds`
-    buffer, so `embed_input_ids` never executes during memory profiling even
-    though every step carrying multimodal data calls it. Its temporaries scale
-    with `max_num_batched_tokens` (and, for models with deepstack embeddings,
-    with several times the hidden size), so run it on a full batch of
-    multimodal tokens to include that peak in the profiled memory.
-
-    Args:
-        model: The multimodal model being profiled.
-        mm_embeddings: Encoder outputs from the dummy encoder run.
-        num_tokens: Batch size to profile, i.e. `max_num_batched_tokens`.
-        device: Device to place the dummy input IDs on.
-        modality: Modality of the dummy items, as tagged by the encoder gather.
-        model_config: Config used to detect appended mrope-position channels.
-
+    Dummy runs skip the merge, but its temporaries (e.g. deepstack embeddings)
+    scale with `max_num_batched_tokens`.
     """
     mm_config = model_config.multimodal_config
     if (
@@ -769,10 +756,7 @@ def profile_mm_embed_input_ids(
         and mm_config is not None
         and mm_config.is_multimodal_pruning_enabled()
     ):
-        # Pruning models append mrope-position channels to their embeddings
-        # and the serving path strips them before the merge. Their width is
-        # model-specific, so let the model do it: an empty prompt has no media
-        # to reposition, leaving only the strip.
+        # Strip the appended mrope-position channels like the serving path does.
         mm_embeddings, _, _ = model.recompute_mrope_positions(
             input_ids=[],
             multimodal_embeddings=mm_embeddings,
@@ -785,9 +769,7 @@ def profile_mm_embed_input_ids(
     for mm_embedding in mm_embeddings:
         if num_mm_tokens >= num_tokens:
             break
-        # Slicing drops tensor attributes, and the gather path tags every
-        # embedding it hands to `embed_input_ids`. Interleaved Omni merge
-        # raises on an untagged embedding, so profiling has to tag it too.
+        # Slicing drops the modality tag that interleaved merge requires.
         mm_embeds.append(
             set_mm_embedding_modality(
                 mm_embedding[: num_tokens - num_mm_tokens], modality
@@ -795,16 +777,14 @@ def profile_mm_embed_input_ids(
         )
         num_mm_tokens += mm_embeds[-1].size(0)
 
-    # `is_multimodal` is kept on CPU by the serving path to avoid a D2H sync.
     is_mm_embed = torch.zeros(num_tokens, dtype=torch.bool, device="cpu")
     is_mm_embed[:num_mm_tokens] = True
 
-    inputs_embeds = model.embed_input_ids(
+    model.embed_input_ids(
         torch.zeros(num_tokens, dtype=torch.int32, device=device),
         multimodal_embeddings=mm_embeds,
         is_multimodal=is_mm_embed,
     )
-    del inputs_embeds
 
 
 def request_memory(
