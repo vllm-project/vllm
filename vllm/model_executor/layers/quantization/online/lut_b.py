@@ -4,7 +4,6 @@
 
 import torch
 
-from vllm.logger import init_logger
 from vllm.model_executor.layers.fused_moe import RoutedExperts
 from vllm.model_executor.layers.fused_moe.config import (
     FUSED_MOE_UNQUANTIZED_CONFIG,
@@ -12,30 +11,19 @@ from vllm.model_executor.layers.fused_moe.config import (
     FusedMoEQuantConfig,
 )
 from vllm.model_executor.layers.fused_moe.experts.lut_b_moe import (
-    LutBEmulationTritonExperts,
     LutBSm107Experts,
     make_lut_b_moe_kernel,
-)
-from vllm.model_executor.layers.fused_moe.modular_kernel import (
-    FusedMoEActivationFormat,
+    select_lut_b_moe_experts,
 )
 from vllm.model_executor.layers.quantization.online.moe_base import (
     OnlineMoEMethodBase,
 )
 from vllm.model_executor.layers.quantization.utils.lut_b_utils import (
-    LUT_B_SM107_TILE_K,
-    LUT_B_SM107_TILE_N,
     dequantize_lut_b,
     lut_b_to_sm107_tiles,
     quantize_lut_b,
 )
-from vllm.model_executor.layers.quantization.utils.quant_utils import (
-    kLutBStatic,
-    kMxfp8Dynamic,
-)
 from vllm.model_executor.utils import replace_parameter
-
-logger = init_logger(__name__)
 
 
 class LutBOnlineMoEMethod(OnlineMoEMethodBase):
@@ -51,32 +39,7 @@ class LutBOnlineMoEMethod(OnlineMoEMethodBase):
         if moe.has_bias:
             raise ValueError("LUT-B online MoE quantization does not support bias.")
 
-        if moe.moe_backend not in ("auto", "emulation"):
-            raise ValueError(
-                f"moe_backend={moe.moe_backend!r} is not supported for LUT-B "
-                "MoE; expected 'auto' or 'emulation'."
-            )
-        native_shape = (
-            moe.hidden_dim % LUT_B_SM107_TILE_K == 0
-            and moe.intermediate_size_per_partition % LUT_B_SM107_TILE_N == 0
-        )
-        supported, reason = LutBSm107Experts.is_supported_config(
-            LutBSm107Experts,
-            moe,
-            kLutBStatic,
-            kMxfp8Dynamic,
-            FusedMoEActivationFormat.Standard,
-        )
-        self.experts_cls: type[LutBSm107Experts | LutBEmulationTritonExperts]
-        if moe.moe_backend == "emulation":
-            self.experts_cls = LutBEmulationTritonExperts
-        elif supported and native_shape:
-            self.experts_cls = LutBSm107Experts
-        else:
-            self.experts_cls = LutBEmulationTritonExperts
-            if reason is None:
-                reason = "hidden and intermediate sizes must be multiples of 128"
-            logger.info_once("LUT-B MoE falls back to emulation: %s", reason)
+        self.experts_cls = select_lut_b_moe_experts(moe)
 
     def get_fused_moe_quant_config(self, layer: torch.nn.Module) -> FusedMoEQuantConfig:
         # Both experts quantize activations themselves, and the native weights

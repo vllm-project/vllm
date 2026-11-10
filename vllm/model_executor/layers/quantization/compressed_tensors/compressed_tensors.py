@@ -331,9 +331,8 @@ class CompressedTensorsConfig(QuantizationConfig):
             targets = quant_config.get("targets")
             for target in targets:
                 target_scheme_map[target] = {}
-                weight_quant = QuantizationArgs.model_validate(
-                    quant_config.get("weights")
-                )
+                weight_config = quant_config.get("weights")
+                weight_quant = QuantizationArgs.model_validate(weight_config)
                 target_scheme_map[target]["weights"] = weight_quant
 
                 target_scheme_map[target]["input_activations"] = None
