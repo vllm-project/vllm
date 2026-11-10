@@ -2,7 +2,7 @@
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 """Publish immutable Engram tables to independent CUDA processes.
 
-Run with ``python -m vllm.distributed.engram_share.vmm.owner``.
+Run with `python -m vllm.distributed.engram_share.vmm.owner`.
 The control socket only exchanges metadata and leases; lookup rows never pass
 through it. Every participant needs access to the same NVIDIA IMEX channel.
 """
