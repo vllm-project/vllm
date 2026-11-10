@@ -115,22 +115,26 @@ class NixlPushConnectorScheduler(NixlBaseConnectorScheduler):
         self._chunk_trackers: dict[ReqId, _ChunkPushTracker] = {}
 
         if self._chunked_push:
+            parallel_config = vllm_config.parallel_config
             transfer_groups = kv_cache_config.transfer_groups
             if vllm_config.kv_transfer_config.kv_role != "kv_producer":
                 self._chunked_push = False
-            elif self.use_host_buffer:
-                raise ValueError("NIXL chunked push requires a device KV buffer")
-            elif vllm_config.parallel_config.pipeline_parallel_size != 1:
-                raise ValueError("NIXL chunked push currently requires PP=1")
-            elif vllm_config.parallel_config.prefill_context_parallel_size != 1:
-                raise ValueError("NIXL chunked push currently requires PCP=1")
-            elif len(transfer_groups) != 1 or not is_full_attention_spec(
-                transfer_groups[0].kv_cache_spec
+            elif (
+                self.use_host_buffer
+                or parallel_config.pipeline_parallel_size != 1
+                or parallel_config.prefill_context_parallel_size != 1
+                or parallel_config.decode_context_parallel_size != 1
+                or len(transfer_groups) != 1
+                or not is_full_attention_spec(transfer_groups[0].kv_cache_spec)
             ):
-                raise ValueError(
-                    "NIXL chunked push currently requires one full-attention "
-                    "transfer group"
+                # Chunked push is used only in the configurations it is tested
+                # in; the others push requests whole.
+                logger.warning(
+                    "NIXL chunked push needs a device KV buffer, PP=1, PCP=1, "
+                    "DCP=1 and one full-attention KV cache group. Falling back "
+                    "to whole-request push."
                 )
+                self._chunked_push = False
 
     def get_num_new_matched_tokens(
         self, request: Request, num_computed_tokens: int

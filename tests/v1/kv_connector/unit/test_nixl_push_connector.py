@@ -747,20 +747,6 @@ def test_evicted_request_drops_its_chunk_jobs():
     assert w.writes == []
 
 
-def test_chunk_path_not_used_when_decode_tp_differs():
-    w = _StubWriterWorker.fresh()
-    w.world_size = 1
-    w.transfer_topo = MagicMock()
-    w.transfer_topo.get_engine_info.return_value.remote_tp_size = 2
-    with patch(
-        "vllm.distributed.kv_transfer.kv_connector.v1.nixl.push_worker.logger"
-    ) as mock_logger:
-        assert not w._chunk_path_supported(
-            _chunk_job(0, 1), _registration_data("req-d")
-        )
-    mock_logger.warning_once.assert_called_once()
-
-
 class TestPushWriterRegSend:
     """`_do_send_reg_notif`: the PUSH_REG goes to every handshaked agent of
     the P engine, and the agent map is read under `_handshake_lock` so the

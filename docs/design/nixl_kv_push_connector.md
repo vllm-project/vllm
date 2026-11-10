@@ -33,9 +33,10 @@ instead of waiting for the request to finish. Enable it on the producer with:
 }
 ```
 
-The option is off by default. It currently requires a device KV buffer, PP1,
-PCP1, DCP1, and one transferable full-attention cache group. P and D must use
-the same TP and block size for chunks; otherwise the request is pushed whole.
+The option is off by default. Chunked push is used only in the configurations
+it is tested in: a device KV buffer, PP1, PCP1, DCP1, one transferable
+full-attention cache group, and P and D with the same TP. In other
+configurations a warning is logged and requests are pushed whole.
 
 Chunked push changes only when blocks are written. Block lifetimes are those of
 whole-request push: a running request owns its blocks, preemption and abort
