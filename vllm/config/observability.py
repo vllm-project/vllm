@@ -52,7 +52,9 @@ class ObservabilityConfig:
     response under `metrics.speculative_decoding`. `none` disables; `summary` adds mean
     acceptance length, draft acceptance rate, and the step-by-draft-length
     histogram; `detailed` additionally records the ordered per-step
-    accepted/proposed arrays (one entry per verify step). Only reported for
+    accepted/proposed arrays (one entry per verify step) and, when adaptive
+    verification is on, `per_step_verified` (draft tokens admitted to the
+    verifier, beside `per_step_drafted`). Only reported for
     single-sequence requests (`n == 1`), mirroring the timing metrics. No effect
     unless speculative decoding is enabled. Independent of `--disable-log-stats`.
     This is the per-request response-body counterpart of the aggregate

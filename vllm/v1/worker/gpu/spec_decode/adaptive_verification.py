@@ -267,6 +267,9 @@ class AdaptiveVerificationManager:
         # Batch-sharded sampling sizes its all-to-all from host counts, so it
         # needs the admitted split on the host.
         self._copy_admitted_drafts_to_host = copy_admitted_drafts_to_host
+        # req_id -> admitted draft count for the step currently in execute.
+        # sample_tokens takes this onto ModelRunnerOutput. None until reallocate.
+        self._verified_by_req: dict[str, int] | None = None
         if copy_admitted_drafts_to_host:
             self._admitted_drafts_cpu = torch.empty(
                 max_num_reqs, dtype=torch.int32, pin_memory=True
@@ -288,6 +291,29 @@ class AdaptiveVerificationManager:
         self._stale_idx = 0
         for slot in self._stale_confidences:
             slot.np.fill(1.0)
+
+        # Admitted length per request is decided on device and never written
+        # into the scheduler's spec-decode counters, which keep counting the
+        # proposed block. Accumulate here and log a histogram periodically.
+        self._admitted_hist = torch.zeros(
+            self.num_speculative_steps + 1, dtype=torch.int32, device=device
+        )
+        self._budget_log_steps = 0
+        self._budget_log_proposed = 0
+        self._budget_log_admitted = 0
+        self._budget_log_interval = 10
+        # Detailed per-decision counters for Step 1 calibration evidence.
+        self._decision_log_interval = 1  # log every budget decision
+        self._decision_step = 0
+        self._sum_est_accepted = 0.0
+        self._sum_cost_ms = 0.0
+        self._sum_score = 0.0
+        self._budget_hist = torch.zeros(
+            self.num_speculative_steps
+            * self.req_states.max_num_reqs
+            + 1,
+            dtype=torch.int32,
+        )
 
     def warmup_budget_kernel(self) -> None:
         """JIT the draft-budget kernel so the first binding step doesn't compile."""
@@ -368,7 +394,14 @@ class AdaptiveVerificationManager:
             self.req_states.max_num_batched_tokens,
             self._cudagraph_limit,
         )
-        logger.debug("DSpark cost tables: %s", self.cost_tables)
+        logger.info(
+            "Adaptive verification cost tables ready: draft_curve_len=%d "
+            "verify_curve_len=%d cudagraph_limit=%d cost_tables=%s",
+            len(draft_curve),
+            len(verify_curve),
+            self._cudagraph_limit,
+            self.cost_tables,
+        )
 
     def record_confidences(
         self, confidence_probs: torch.Tensor, input_batch: "InputBatch"
@@ -458,7 +491,60 @@ class AdaptiveVerificationManager:
             req_id: int(num_tokens)
             for req_id, num_tokens in zip(req_ids, num_non_draft_tokens, strict=True)
         }
-        draft_budget = int(np.argmax(num_tokens_to_estimated_accepted_tokens / costs))
+        with np.errstate(divide="ignore", invalid="ignore"):
+            budget_scores = num_tokens_to_estimated_accepted_tokens / costs
+        budget_scores = np.nan_to_num(budget_scores, nan=0.0, posinf=0.0, neginf=0.0)
+        draft_budget = int(np.argmax(budget_scores))
+        est_accepted = float(num_tokens_to_estimated_accepted_tokens[draft_budget])
+        cost_ms = float(costs[draft_budget])
+        score = est_accepted / cost_ms if cost_ms > 0 else float("nan")
+        proposed = int(scheduled_drafts.sum())
+        # Survival of the slots that would win under this budget (prefix of
+        # sorted scores). Empty when draft_budget==0.
+        admitted_survivals = scores[:draft_budget]
+        mean_surv = (
+            float(admitted_survivals.mean()) if draft_budget > 0 else 0.0
+        )
+        min_surv = (
+            float(admitted_survivals.min()) if draft_budget > 0 else 0.0
+        )
+        self._decision_step += 1
+        self._sum_est_accepted += est_accepted
+        self._sum_cost_ms += cost_ms
+        self._sum_score += score
+        if draft_budget < self._budget_hist.numel():
+            self._budget_hist[draft_budget] += 1
+        if self._decision_step % self._decision_log_interval == 0:
+            logger.info(
+                "Adaptive verification decision step=%d num_reqs=%d "
+                "proposed=%d draft_budget=%d max_draft_budget=%d "
+                "est_accepted=%.3f cost_ms=%.3f score=%.4f "
+                "non_draft_tokens=%d num_sampling_reqs=%d "
+                "admitted_survival(mean=%.4f min=%.4f) "
+                "per_req_scheduled_drafts=%s p=%s survival=%s score_by_budget=%s",
+                self._decision_step,
+                num_reqs,
+                proposed,
+                draft_budget,
+                max_draft_budget,
+                est_accepted,
+                cost_ms,
+                score,
+                num_non_draft_tokens_total,
+                int(num_sampling_requests),
+                mean_surv,
+                min_surv,
+                scheduled_drafts.tolist(),
+                [
+                    [round(float(v), 4) for v in stale_confidences[i, : int(n)]]
+                    for i, n in enumerate(scheduled_drafts)
+                ],
+                [
+                    [round(float(v), 4) for v in survival_probability[i, : int(n)]]
+                    for i, n in enumerate(scheduled_drafts)
+                ],
+                [round(float(v), 4) for v in budget_scores],
+            )
         self._batch_budget = (
             num_drafts_per_req,
             num_non_draft_tokens_per_req,
@@ -514,6 +600,9 @@ class AdaptiveVerificationManager:
         """
         batch_budget, self._batch_budget = self._batch_budget, None
         assert batch_budget is not None
+        # Replaced below if this step actually admits drafts. Clearing first
+        # keeps a capture or a zero-proposal step from reusing the last batch.
+        self._verified_by_req = {}
         num_drafts_per_req, num_non_draft_tokens_per_req, draft_budget = batch_budget
         num_reqs = idx_mapping.shape[0]
         scheduled_drafts = np.fromiter(
@@ -560,6 +649,14 @@ class AdaptiveVerificationManager:
             out=self.query_start_loc[1 : num_reqs + 1],
         )
         self.query_start_loc[num_reqs + 1 :].fill_(num_tokens)
+        self._record_admitted_budget(
+            capacities,
+            num_reqs,
+            int(scheduled_drafts.sum()),
+            draft_budget,
+            scheduled_drafts,
+            req_ids,
+        )
 
         admitted_drafts = None
         if self._copy_admitted_drafts_to_host and (
@@ -580,6 +677,117 @@ class AdaptiveVerificationManager:
             draft_budget,
             admitted_drafts,
         )
+
+    def take_verified_draft_tokens(self) -> dict[str, int] | None:
+        """Return this step's admitted draft counts and drop them.
+
+        ``sample_tokens`` calls this once, after ``reallocate_drafts``, so the
+        scheduler can put the admitted width on the request next to the
+        proposed draft count. Empty when this step admitted nothing.
+        """
+        verified = self._verified_by_req
+        self._verified_by_req = None
+        if not verified:
+            return None
+        return verified
+
+    def _record_admitted_budget(
+        self,
+        capacities: torch.Tensor,
+        num_reqs: int,
+        proposed: int,
+        admitted: int,
+        scheduled_drafts: np.ndarray,
+        req_ids: list[str],
+    ) -> None:
+        """Count how many draft tokens each request was actually allowed to verify.
+
+        ``capacities[:num_reqs]`` is the per-request admitted length after the
+        budget kernel. ``proposed`` is the block the drafter offered.
+        ``scheduled_drafts`` is that offered block per request, so a 0 there
+        is a request with no draft this step rather than a trimmed one.
+        """
+        if (
+            self.cost_tables is None
+            or num_reqs <= 0
+            or proposed <= 0
+            or torch.cuda.is_current_stream_capturing()
+        ):
+            return
+        # Per-request admitted length for this step. This is the draft-token
+        # count that verification actually receives, after the budget kernel.
+        sent = [int(x) for x in capacities[:num_reqs].detach().cpu().tolist()]
+        scheduled = [int(x) for x in scheduled_drafts[:num_reqs].tolist()]
+        self._verified_by_req = {
+            req_ids[i]: sent[i] for i in range(num_reqs) if scheduled[i] > 0
+        }
+        logger.info(
+            "Adaptive verification tokens_sent_to_verifier step=%d total=%d "
+            "per_req=%s scheduled=%s",
+            self._decision_step,
+            int(admitted),
+            sent,
+            scheduled,
+        )
+        lengths = capacities[:num_reqs].to(torch.long)
+        self._admitted_hist.scatter_add_(
+            0,
+            lengths.clamp_(0, self.num_speculative_steps),
+            torch.ones(num_reqs, dtype=torch.int32, device=capacities.device),
+        )
+        self._budget_log_steps += 1
+        self._budget_log_proposed += proposed
+        self._budget_log_admitted += admitted
+        if self._budget_log_steps < self._budget_log_interval:
+            return
+        self._flush_admitted_budget_log()
+
+    def _flush_admitted_budget_log(self) -> None:
+        if self._budget_log_steps <= 0 and self._decision_step <= 0:
+            return
+        histogram = self._admitted_hist.tolist()
+        fraction = (
+            self._budget_log_admitted / self._budget_log_proposed
+            if self._budget_log_proposed
+            else float("nan")
+        )
+        n = max(self._decision_step, 1)
+        # Compact global-budget histogram: only non-zero bins.
+        budget_hist = {
+            int(i): int(c)
+            for i, c in enumerate(self._budget_hist.tolist())
+            if c > 0
+        }
+        logger.info(
+            "Adaptive verification admitted drafts over %d steps: "
+            "proposed=%d admitted=%d (%.3f of proposed), "
+            "per-request length histogram (index = tokens verified)=%s, "
+            "decision_steps=%d mean_est_accepted=%.3f mean_cost_ms=%.3f "
+            "mean_score=%.4f global_draft_budget_hist=%s",
+            self._budget_log_steps,
+            self._budget_log_proposed,
+            self._budget_log_admitted,
+            fraction,
+            histogram,
+            self._decision_step,
+            self._sum_est_accepted / n,
+            self._sum_cost_ms / n,
+            self._sum_score / n,
+            budget_hist,
+        )
+        self._admitted_hist.zero_()
+        self._budget_log_steps = 0
+        self._budget_log_proposed = 0
+        self._budget_log_admitted = 0
+
+    def __del__(self) -> None:
+        # A short run can end before the next interval. Flush whatever is left.
+        try:
+            if torch.cuda.is_current_stream_capturing():
+                return
+            self._flush_admitted_budget_log()
+        except Exception:
+            return
 
 
 def maybe_create_adaptive_verification_manager(

@@ -310,6 +310,10 @@ class ModelRunnerOutput:
     # ``None`` when ``return_sampling_mask`` is off.
     sampling_masks: SamplingMaskLists | None = None
 
+    # req_id -> draft tokens admitted to the verifier this step.
+    # None when adaptive verification did not run for the batch.
+    num_verified_draft_tokens: dict[str, int] | None = None
+
     @staticmethod
     def with_kv_conn_output_only(
         kv_connector_output: KVConnectorOutput | None,

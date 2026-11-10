@@ -3,7 +3,10 @@
 
 import torch
 
+from vllm.logger import init_logger
 from vllm.triton_utils import tl, triton
+
+logger = init_logger(__name__)
 from vllm.v1.worker.gpu.spec_decode.rejection_sampler_utils import (
     _compute_max_and_sumexp,
 )
@@ -447,6 +450,27 @@ class OnlineAcceptanceEstimator:
         self._refit()
 
     def _refit(self) -> None:
+        # The kernel stores the new coefficients and then zeros counts. Read
+        # the observation counts, slope, and intercepts first, or the log
+        # would show an empty round.
+        capturing = torch.cuda.is_current_stream_capturing()
+        counts: list[int] | None = None
+        slope_before = 0.0
+        intercepts_before: list[float] = []
+        # c_k is the summed p(1-p) curvature. The intercept variance the kernel
+        # uses is 1 / (c_k + L2). Read it before the kernel zeros info.
+        curvature: list[float] = []
+        if not capturing:
+            counts = [
+                int(round(float(x))) for x in self.counts.detach().cpu().tolist()
+            ]
+            slope_before = float(self.slope.detach().cpu().item())
+            intercepts_before = [
+                float(x) for x in self.intercepts.detach().cpu().tolist()
+            ]
+            curvature = [
+                round(float(row[2]), 6) for row in self.info.detach().cpu().tolist()
+            ]
         _refit_kernel[(1,)](
             self.slope,
             self.intercepts,
@@ -459,6 +483,21 @@ class OnlineAcceptanceEstimator:
             L2=self.L2,
             DAMPING=self.DAMPING_OBSERVATIONS,
             BLOCK=triton.next_power_of_2(self.num_speculative_steps),
+        )
+        if capturing or not counts or sum(counts) <= 0:
+            return
+        slope = float(self.slope.detach().cpu().item())
+        intercepts = [float(x) for x in self.intercepts.detach().cpu().tolist()]
+        logger.info(
+            "Adaptive verification refit refit=%d n=%s c=%s slope_before=%.6g "
+            "intercepts_before=%s slope=%.6g intercepts=%s",
+            self._refits + 1,
+            counts,
+            curvature,
+            slope_before,
+            [round(x, 6) for x in intercepts_before],
+            slope,
+            [round(x, 6) for x in intercepts],
         )
 
     def predict(

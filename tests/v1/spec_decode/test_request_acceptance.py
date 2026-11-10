@@ -40,6 +40,22 @@ def test_observe_buckets_by_accepted_draft_count():
     assert s.per_step_drafted == []
 
 
+def test_observe_detailed_records_verified_beside_drafted():
+    s = RequestSpecDecodeMetrics.new(num_spec_tokens=8)
+    s.observe(num_draft_tokens=8, num_accepted=2, num_verified=7, detailed=True)
+    s.observe(num_draft_tokens=8, num_accepted=8, num_verified=8, detailed=True)
+    assert s.per_step_drafted == [8, 8]
+    assert s.per_step_verified == [7, 8]
+    d = s.to_dict()
+    assert d["per_step_drafted"] == [8, 8]
+    assert d["per_step_verified"] == [7, 8]
+
+    summary = RequestSpecDecodeMetrics.new(num_spec_tokens=8)
+    summary.observe(num_draft_tokens=8, num_accepted=2, num_verified=7, detailed=False)
+    assert summary.per_step_verified == []
+    assert "per_step_verified" not in summary.to_dict()
+
+
 def test_observe_detailed_records_ordered_per_step_arrays():
     # Distinct step count (3), max draft length (k=4), and per-step drafted
     # counts (4, 2, 4) so no accidental "everything is 3" pattern is implied.

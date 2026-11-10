@@ -2300,6 +2300,10 @@ class GPUModelRunner(LoRAModelRunnerMixin):
             prompt_token_id_logprobs_dict=prompt_token_id_logprobs_dict,
             cudagraph_stats=cudagraph_stats,
         )
+        if self.adaptive_verification is not None:
+            model_runner_output.num_verified_draft_tokens = (
+                self.adaptive_verification.take_verified_draft_tokens()
+            )
         pending_aux_output = None
         if self.aux_output_connector is not None:
             pending_aux_output = self.aux_output_connector.prepare_output(input_batch)

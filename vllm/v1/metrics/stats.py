@@ -370,6 +370,10 @@ class RequestSpecDecodeMetrics:
             (``detailed`` only; empty otherwise).
         per_step_drafted: Ordered proposed-draft count per verify step
             (``detailed`` only; empty otherwise).
+        per_step_verified: Ordered draft count actually admitted to the
+            verifier per step (``detailed`` only; empty unless adaptive
+            verification reported it). This is the budget split, not the
+            proposed block and not the accepted prefix.
     """
 
     num_spec_tokens: int
@@ -377,6 +381,7 @@ class RequestSpecDecodeMetrics:
     num_draft_tokens: int = 0
     per_step_accepted: list[int] = field(default_factory=list)
     per_step_drafted: list[int] = field(default_factory=list)
+    per_step_verified: list[int] = field(default_factory=list)
 
     @classmethod
     def new(cls, num_spec_tokens: int) -> "RequestSpecDecodeMetrics":
@@ -386,13 +391,22 @@ class RequestSpecDecodeMetrics:
         )
 
     def observe(
-        self, num_draft_tokens: int, num_accepted: int, detailed: bool = False
+        self,
+        num_draft_tokens: int,
+        num_accepted: int,
+        detailed: bool = False,
+        num_verified: int | None = None,
     ) -> None:
         self.histogram[num_accepted] += 1
         self.num_draft_tokens += num_draft_tokens
         if detailed:
             self.per_step_accepted.append(num_accepted)
             self.per_step_drafted.append(num_draft_tokens)
+            # Absent when adaptive verification did not report an admitted
+            # width for this step. Leave the list empty rather than copying
+            # the proposed count into it.
+            if num_verified is not None:
+                self.per_step_verified.append(num_verified)
 
     def to_dict(self) -> dict[str, Any]:
         """Payload matching ``SpeculativeDecodingMetrics`` for the response.
@@ -419,6 +433,8 @@ class RequestSpecDecodeMetrics:
         if self.per_step_accepted:
             result["per_step_accepted"] = self.per_step_accepted
             result["per_step_drafted"] = self.per_step_drafted
+        if self.per_step_verified:
+            result["per_step_verified"] = self.per_step_verified
         return result
 
 

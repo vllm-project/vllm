@@ -2431,9 +2431,14 @@ class Scheduler(SchedulerInterface):
                         adj_draft_tokens -= (
                             scheduler_output.num_invalid_spec_tokens.get(req_id, 0)
                         )
+                    verified_by_req = model_runner_output.num_verified_draft_tokens
+                    num_verified = (
+                        verified_by_req.get(req_id) if verified_by_req else None
+                    )
                     request.spec_decode_metrics.observe(
                         num_draft_tokens=adj_draft_tokens,
                         num_accepted=num_accepted,
+                        num_verified=num_verified,
                         detailed=self.spec_decode_metrics_level == "detailed",
                     )
 
