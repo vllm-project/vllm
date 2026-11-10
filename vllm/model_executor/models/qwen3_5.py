@@ -569,7 +569,7 @@ class Qwen3_5ForConditionalGeneration(Qwen3VLForConditionalGeneration, IsHybrid)
                 batch.
                 **NOTE**: If mrope is enabled (default setting for Qwen3VL
                 opensource models), the shape will be `(3, seq_len)`,
-                otherwise it will be `(seq_len,).
+                otherwise it will be `(seq_len,)`.
             intermediate_tensors: Intermediate tensors from previous pipeline
                 stages.
             inputs_embeds: Pre-computed input embeddings.

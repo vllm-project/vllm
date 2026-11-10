@@ -83,8 +83,8 @@ _T = TypeVar("_T", bound=TokenizerLike, default=TokenizerLike)
 class _SwappableExecutor(Executor):
     """Executor whose inner pool can be replaced without changing identity.
 
-    ``make_async`` captures the executor object at wrap time. Replacing
-    ``self._executor`` with a new ``ThreadPoolExecutor`` would leave those
+    `make_async` captures the executor object at wrap time. Replacing
+    `self._executor` with a new `ThreadPoolExecutor` would leave those
     wrappers (tokenize, decode, pooling, derender) bound to a shutdown pool.
     """
 
@@ -493,8 +493,8 @@ class BaseRenderer(ABC, Generic[_T]):
         # For Qwen3 models, the language model has extra tokens that do
         # not exist in the tokenizer, and vice versa for multimodal
         # placeholder tokens in some multimodal models.
-        # See https://github.com/QwenLM/Qwen3/issues/29#issuecomment-1933720399 # noqa: E501
-        # and https://github.com/vllm-project/vllm/pull/22471#discussion_r2312251421 # noqa: E501
+        # See https://github.com/QwenLM/Qwen3/issues/29#issuecomment-1933720399
+        # and https://github.com/vllm-project/vllm/pull/22471#discussion_r2312251421
 
         # Here we take the max of the two to determine if a token id is
         # truly out-of-vocabulary.
@@ -630,7 +630,7 @@ class BaseRenderer(ABC, Generic[_T]):
         """Whether this renderer's tokenizer can emit char-level offsets.
 
         Defaults to False; only renderers backed by an HF fast tokenizer
-        (see ``HfRenderer``) can produce ``offset_mapping``.
+        (see `HfRenderer`) can produce `offset_mapping`.
         """
         return False
 
@@ -655,9 +655,9 @@ class BaseRenderer(ABC, Generic[_T]):
     ) -> "TokensPrompt":
         """Build a TokensPrompt from already-extracted token ids.
 
-        ``offset_mapping`` is the per-token ``(start, end)`` sequence from
+        `offset_mapping` is the per-token `(start, end)` sequence from
         a BatchEncoding; pass it only when offsets were requested, and it
-        is attached as ``prompt_token_offsets``.
+        is attached as `prompt_token_offsets`.
         """
         if offset_mapping is not None:
             return TokensPrompt(
