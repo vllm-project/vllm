@@ -405,14 +405,14 @@ class HarmonyParser(DelegatingParser):
 
     @staticmethod
     def _normalize_recipient(recipient: str | None) -> str | None:
-        """Remove constrained formats misparsed into recipients by older Harmony."""
+        """Remove special-token text misparsed into recipients by Harmony."""
         if recipient is None:
             return None
 
-        constrain_index = recipient.find("<|constrain|>")
-        if constrain_index == -1:
+        special_index = recipient.find("<|")
+        if special_index == -1:
             return recipient
-        return recipient[:constrain_index].rstrip() or None
+        return recipient[:special_index].rstrip() or None
 
 
 _JSON_CONSTRAINS = [" json", " <|constrain|>json"]
