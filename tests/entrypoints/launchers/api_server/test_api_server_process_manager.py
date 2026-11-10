@@ -1,6 +1,7 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 
+import json
 import multiprocessing
 import os
 import socket
@@ -12,6 +13,7 @@ from unittest.mock import patch
 import pytest
 import zmq
 
+import vllm.envs as envs
 from vllm.utils.network_utils import make_zmq_listener, make_zmq_socket
 from vllm.v1.engine.admission_control import SharedAdmissionStats
 from vllm.v1.utils import (
@@ -547,6 +549,8 @@ def test_rust_frontend_inherits_grpc_listener(monkeypatch):
     output_listener = make_zmq_listener("tcp://127.0.0.1:0", zmq.PULL)
     input_fd = input_listener.socket.fileno()
     output_fd = output_listener.socket.fileno()
+    http_fd = sock.fileno()
+    grpc_fd = grpc_sock.fileno()
     try:
         monkeypatch.setattr(subprocess_mod, "Popen", fake_popen)
         RustFrontendProcessManager(
@@ -561,18 +565,151 @@ def test_rust_frontend_inherits_grpc_listener(monkeypatch):
             grpc_sock=grpc_sock,
         )
         [(cmd, kwargs)] = popen_calls
-        grpc_fd = grpc_sock.fileno()
         flag_index = cmd.index("--grpc-listen-fd")
         assert cmd[flag_index + 1] == str(grpc_fd)
-        assert list(kwargs["pass_fds"]) == [
-            sock.fileno(),
-            input_fd,
-            output_fd,
-            grpc_fd,
-        ]
+        assert list(kwargs["pass_fds"]) == [http_fd, input_fd, output_fd, grpc_fd]
     finally:
         sock.close()
         grpc_sock.close()
+
+
+@pytest.mark.parametrize(
+    ("cli_args", "level", "formatter", "warns"),
+    [
+        ([], envs.VLLM_LOGGING_LEVEL, "text", False),
+        (["--log-level", "DEBUG"], "DEBUG", "text", False),
+        (["--logging-config.log_level", "WARNING"], "WARNING", "text", False),
+        (
+            ["--log-level", "DEBUG", "--logging-config.formatter", "json"],
+            "DEBUG",
+            "json",
+            False,
+        ),
+        (
+            ["--log-config-file", "/tmp/logging.json"],
+            envs.VLLM_LOGGING_LEVEL,
+            "text",
+            True,
+        ),
+        (
+            ["--logging-config.configure_logging=false"],
+            envs.VLLM_LOGGING_LEVEL,
+            "text",
+            True,
+        ),
+    ],
+)
+def test_rust_frontend_receives_resolved_logging_config(
+    monkeypatch, cli_args, level, formatter, warns
+):
+    """Logging arguments are not among the non-default args. The resolved
+    level and formatter reach --args-json as logging_config; the fields that
+    configure Python logging only are warned about."""
+    import subprocess as subprocess_mod
+
+    from vllm.entrypoints.common.cli_args import make_arg_parser
+    from vllm.logger import configure_logging_from_args
+    from vllm.utils.argparse_utils import FlexibleArgumentParser
+    from vllm.v1.utils import RustFrontendProcessManager
+
+    args = make_arg_parser(FlexibleArgumentParser()).parse_args(
+        ["--model", "org/model", *cli_args]
+    )
+    with patch("vllm.logger.configure_logging_if_needed"):
+        configure_logging_from_args(args)
+
+    class _FakeProc:
+        pid = 4321
+        returncode = 0
+
+        def poll(self):
+            return 0
+
+        def wait(self, timeout=None):
+            return 0
+
+    popen_calls = []
+
+    def fake_popen(cmd, **kwargs):
+        popen_calls.append((cmd, kwargs))
+        return _FakeProc()
+
+    sock = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
+    input_listener = make_zmq_listener("tcp://127.0.0.1:0", zmq.ROUTER)
+    output_listener = make_zmq_listener("tcp://127.0.0.1:0", zmq.PULL)
+    try:
+        monkeypatch.setattr(subprocess_mod, "Popen", fake_popen)
+        warning = patch("vllm.v1.utils.logger.warning").start()
+        RustFrontendProcessManager(
+            binary_path="/nonexistent/vllm-rs",
+            sock=sock,
+            args=args,
+            input_listener=input_listener,
+            output_listener=output_listener,
+            engine_start_index=0,
+            engine_count=1,
+            data_parallel_size=1,
+        )
+    finally:
+        patch.stopall()
+        sock.close()
+
+    [(cmd, _)] = popen_calls
+    args_json = json.loads(cmd[cmd.index("--args-json") + 1])
+    assert args_json["logging_config"] == {"log_level": level, "formatter": formatter}
+    assert warning.called == warns
+
+
+def test_rust_frontend_parent_releases_listening_sockets(monkeypatch):
+    """The parent's copies must not keep the ports listening once Rust has them."""
+    import subprocess as subprocess_mod
+
+    from vllm.entrypoints.common.cli_args import make_arg_parser
+    from vllm.utils.argparse_utils import FlexibleArgumentParser
+    from vllm.v1.utils import RustFrontendProcessManager
+
+    args = make_arg_parser(FlexibleArgumentParser()).parse_args(
+        ["--model", "org/model", "--grpc-port", "50051"]
+    )
+
+    class _FakeProc:
+        pid = 4321
+        returncode = 0
+
+        def poll(self):
+            return 0
+
+        def wait(self, timeout=None):
+            return 0
+
+    listeners = []
+    for _ in range(2):
+        s = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
+        s.bind(("127.0.0.1", 0))
+        s.listen()
+        listeners.append(s)
+    addresses = [s.getsockname() for s in listeners]
+    input_listener = make_zmq_listener("tcp://127.0.0.1:0", zmq.ROUTER)
+    output_listener = make_zmq_listener("tcp://127.0.0.1:0", zmq.PULL)
+    try:
+        monkeypatch.setattr(subprocess_mod, "Popen", lambda *a, **kw: _FakeProc())
+        RustFrontendProcessManager(
+            binary_path="/nonexistent/vllm-rs",
+            sock=listeners[0],
+            args=args,
+            input_listener=input_listener,
+            output_listener=output_listener,
+            engine_start_index=0,
+            engine_count=1,
+            data_parallel_size=1,
+            grpc_sock=listeners[1],
+        )
+        for address in addresses:
+            with pytest.raises(ConnectionRefusedError):
+                socket.create_connection(address, timeout=1).close()
+    finally:
+        for s in listeners:
+            s.close()
 
 
 def test_rust_frontend_spawn_failure_cleans_up_listeners(tmp_path):
