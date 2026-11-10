@@ -78,7 +78,7 @@ class MiniMaxVLPatchEmbed(nn.Module):
 class MiniMaxVLAttention(nn.Module):
     """Multi-head attention with MiniMax's partial 3D RoPE.
 
-    Partial means only the first ``rot_dim`` (< head_dim) dimensions of
+    Partial means only the first `rot_dim` (< head_dim) dimensions of
     Q and K are rotated; the remaining dims are passed through unchanged.
     """
 
@@ -294,7 +294,7 @@ class MiniMaxVLEncoder(nn.Module):
 class MiniMaxVLVisionTransformer(nn.Module):
     """CLIP-based ViT with 3D RoPE (t/h/w decomposed).
 
-    Faithfully mirrors the reference ``MiniMaxVLVisionTransformer``.
+    Faithfully mirrors the reference `MiniMaxVLVisionTransformer`.
     FLASHINFER backend is not supported; standard flash-attn is used.
     """
 

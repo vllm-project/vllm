@@ -306,6 +306,10 @@ class DeepseekV4DecoderLayer(nn.Module):
             # reduces it on the others.
             self.attn.wo_b.reduce_results = False
 
+    def process_weights_after_loading(self) -> None:
+        if self.mono is not None:
+            self.mono.build_runner(self.attn_norm.weight.device)
+
     @staticmethod
     def _hc_collapse(x: torch.Tensor, pre_mix: torch.Tensor) -> torch.Tensor:
         """Hyper-connection collapse used by DSpark on ROCm."""
@@ -501,7 +505,7 @@ class DeepseekV4DecoderLayer(nn.Module):
         res_mix: torch.Tensor,
         residual: torch.Tensor,
     ) -> None:
-        """Write the KV ``forward`` would for the replay layers' inputs, skipping
+        """Write the KV `forward` would for the replay layers' inputs, skipping
         the rest of the layer; the replay batch then reruns its rows."""
         # The replay batch rules out Engram and sequence parallel here.
         assert self.engram is None and not self.use_sequence_parallel
@@ -613,6 +617,17 @@ class DeepseekV4Model(nn.Module, EagleModelMixin):
             ),
             prefix=f"{prefix}.layers",
         )
+        engram = next(
+            (
+                layer.engram
+                for layer in islice(self.layers, self.start_layer, self.end_layer)
+                if getattr(layer, "engram", None) is not None
+            ),
+            None,
+        )
+        if engram is not None:
+            # Shared host tables and GPU peer reads look up only local tokens.
+            self.engram_dp_shared_memory = engram.embed_tokens.dp_size == 1
 
         # Config flag is the switch. On ROCm, attention forces
         # swa_cache_layer.bounded_replay off unless the CDNA version
@@ -958,8 +973,8 @@ class DeepseekV4Model(nn.Module, EagleModelMixin):
     ) -> tuple[torch.Tensor, ...]:
         """Layers past the last KV source, on the rows they are given.
 
-        The final ``mhc_post`` runs here, on this batch. The return is
-        ``(hidden_states, pre_mix, *aux)``.
+        The final `mhc_post` runs here, on this batch. The return is
+        `(hidden_states, pre_mix, *aux)`.
         """
         # Post of the layer before the cut. These rows are already trimmed,
         # and sequence parallel is unsupported while replay is on.
@@ -1002,7 +1017,7 @@ class DeepseekV4Model(nn.Module, EagleModelMixin):
         return (hidden_states, pre_mix, *cut_aux, *aux)
 
     def _decoder_replay_supported(self, vllm_config: VllmConfig, cut: int) -> bool:
-        """Whether this rank may replay from layer ``cut`` on; warns when not."""
+        """Whether this rank may replay from layer `cut` on; warns when not."""
         parallel_config = vllm_config.parallel_config
         spec_config = vllm_config.speculative_config
         draft_config = spec_config.draft_model_config if spec_config else None
@@ -1226,8 +1241,8 @@ def _linear_scale_param_name(vllm_config: VllmConfig, expert_dtype: str) -> str:
     """Parameter name the linear quant method registers for weight scales.
 
     Native MXFP8 checkpoints ([32, 32] blocks with MXFP4 experts) route linear
-    layers through ModelOptLinearMethod, which registers ``weight_scale``;
-    block-FP8 linear layers register ``weight_scale_inv``.
+    layers through ModelOptLinearMethod, which registers `weight_scale`;
+    block-FP8 linear layers register `weight_scale_inv`.
     """
     use_mxfp8 = (
         getattr(vllm_config.quant_config, "weight_block_size", None) == [32, 32]

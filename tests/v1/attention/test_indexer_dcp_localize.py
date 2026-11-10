@@ -120,11 +120,11 @@ def _dcp_lse_merge(
 
 
 class _FakeDCPGroup(GroupCoordinator):
-    """Single-process stand-in: ``all_gather`` returns the pre-built dim-0
-    concatenation of every rank's packed ``(score, global_id)`` candidates,
+    """Single-process stand-in: `all_gather` returns the pre-built dim-0
+    concatenation of every rank's packed `(score, global_id)` candidates,
     mirroring the one packed all-gather the merge issues.
 
-    ``GroupCoordinator.__init__`` is never run, so no process group exists."""
+    `GroupCoordinator.__init__` is never run, so no process group exists."""
 
     def __init__(self, gathered_packed: torch.Tensor) -> None:
         self.gathered_packed = gathered_packed
@@ -207,10 +207,10 @@ def _merge_local_topks_global_with_fake_dcp(
     interleave: int,
     row_starts: list[torch.Tensor | None] | None = None,
 ) -> list[torch.Tensor]:
-    """Run ``_merge_dcp_topk_global`` for every rank against a faked
+    """Run `_merge_dcp_topk_global` for every rank against a faked
     all-gather and return each rank's global-index result (all ranks should
     agree). The fake pre-builds the packed candidate concatenation the merge's
-    single ``all_gather`` would return."""
+    single `all_gather` would return."""
     # The merge is now CuteDSL-only (no PyTorch fallback), so it runs the real
     # Triton pack + CuteDSL selector kernels even behind the faked all-gather.
     if not current_platform.is_cuda() or not has_cutedsl():
@@ -601,7 +601,7 @@ def test_cutedsl_gathered_select_compact_keys_match_reference(
 ):
     """Scores at the logits dtype (upcast BF16 SM100 MQA logits tie at the
     top-k boundary) keyed only by their high score bits and the id bits below
-    ``num_positions`` must select the same set as the full 64-bit key."""
+    `num_positions` must select the same set as the full 64-bit key."""
     from vllm.model_executor.kernels.attention.dsa.dcp_indexer_cutedsl import (
         dcp_topk_id_bits,
         dcp_topk_score_bits,

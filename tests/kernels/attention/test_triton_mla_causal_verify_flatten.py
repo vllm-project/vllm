@@ -1,16 +1,16 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
-"""Tests for the multi-token decode flatten in ``TritonMLAImpl.forward_mqa``.
+"""Tests for the multi-token decode flatten in `TritonMLAImpl.forward_mqa`.
 
-``decode_attention_fwd`` has no causal flag: it launches one program per row of
-``q`` and reads that row's KV extent from ``B_Seqlen``. So a ``query_len``-token
+`decode_attention_fwd` has no causal flag: it launches one program per row of
+`q` and reads that row's KV extent from `B_Seqlen`. So a `query_len`-token
 decode block is flattened to one row per query token, and intra-block causality
-has to be expressed through the per-row sequence lengths -- row ``t`` gets
-``seq_len - (query_len - 1) + t``, i.e. the committed prefix plus block tokens
-``0..t``. A non-causal draft block instead gives every row the same full extent.
+has to be expressed through the per-row sequence lengths -- row `t` gets
+`seq_len - (query_len - 1) + t`, i.e. the committed prefix plus block tokens
+`0..t`. A non-causal draft block instead gives every row the same full extent.
 
-The kernel is replaced by a spy, so these tests assert on the ``block_table``
-and ``seq_lens`` the backend actually submits and need no GPU or Triton runtime.
+The kernel is replaced by a spy, so these tests assert on the `block_table`
+and `seq_lens` the backend actually submits and need no GPU or Triton runtime.
 """
 
 from types import SimpleNamespace
@@ -48,7 +48,7 @@ def _seq_lens(query_len: int) -> list[int]:
 
 
 def _make_impl(dcp_world_size: int = 1) -> TritonMLAImpl:
-    """Only the attributes ``forward_mqa`` reads; __init__ wants a full config."""
+    """Only the attributes `forward_mqa` reads; __init__ wants a full config."""
     impl = object.__new__(TritonMLAImpl)
     impl.kv_lora_rank = KV_LORA_RANK
     impl.scale = HEAD_SIZE**-0.5
@@ -84,7 +84,7 @@ def _run_forward_mqa(
 ):
     """Drive forward_mqa with the decode kernel spied out.
 
-    Returns the ``(block_table, seq_lens)`` handed to ``decode_attention_fwd``.
+    Returns the `(block_table, seq_lens)` handed to `decode_attention_fwd`.
     """
     captured: dict = {}
 

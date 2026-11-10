@@ -50,7 +50,7 @@ def minimax_m3_nvfp4_sparse_prefill(
     k_scale: torch.Tensor | None = None,
     v_scale: torch.Tensor | None = None,
 ) -> None:
-    """Token t attends to the causal tokens of its ``topk`` blocks."""
+    """Token t attends to the causal tokens of its `topk` blocks."""
     n_tok, n_heads, head_dim = q.shape
     if n_tok == 0:
         return

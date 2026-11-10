@@ -33,11 +33,11 @@ WeightTransferUpdatePayload = dict[str, Any] | list[dict[str, Any]]
 
 
 def _stack_key(name: str) -> tuple[str, int] | None:
-    """``(prefix, index)`` of the OUTERMOST integer segment, or None if there is
+    """`(prefix, index)` of the OUTERMOST integer segment, or None if there is
     none.
 
     Outermost is what keeps a MoE layer whole:
-    ``model.layers.3.mlp.experts.7.w1`` keys on the layer, not the expert.
+    `model.layers.3.mlp.experts.7.w1` keys on the layer, not the expert.
     """
     parts = name.split(".")
     for i, part in enumerate(parts):
@@ -56,9 +56,9 @@ def layerwise_groups(names: list[str]) -> list[list[str]]:
     shares.
 
     Keying on the index rather than a literal prefix needs no per-architecture
-    naming table: ``model.layers.0.``, ``model.language_model.layers.0.``,
-    ``transformer.h.0.``, ``backbone.layers.0.`` and a vision tower's
-    ``visual.blocks.0.`` all partition alike. Matching one fixed prefix does not,
+    naming table: `model.layers.0.`, `model.language_model.layers.0.`,
+    `transformer.h.0.`, `backbone.layers.0.` and a vision tower's
+    `visual.blocks.0.` all partition alike. Matching one fixed prefix does not,
     and its failure is silent — every name lands in a single group holding the
     whole model, which defeats the per-layer bound below.
 
@@ -383,7 +383,7 @@ class TrainerInitInfo:
     Every concrete subclass sets a class-level `backend` string (the same key it
     registers under in `WeightTransferTrainerFactory`). The factory reads it to
     dispatch, so callers pass only the init info/ It is a `ClassVar`
-    (a fixed per-backend constant), so it is not an ``__init__`` field.
+    (a fixed per-backend constant), so it is not an `__init__` field.
     """
 
     backend: ClassVar[str]
