@@ -24,6 +24,7 @@ from vllm.logger import _print_warning_once
 from vllm.model_executor.layers.fused_moe import FusedMoEFactory
 from vllm.model_executor.layers.fused_moe.experts import rocm_aiter_moe
 from vllm.model_executor.layers.fused_moe.oracle import nvfp4 as nvfp4_oracle
+from vllm.model_executor.layers.fused_moe.oracle.fp8 import Fp8MoeBackend
 from vllm.model_executor.layers.fused_moe.oracle.mxfp4 import Mxfp4MoeBackend
 from vllm.model_executor.layers.fused_moe.oracle.nvfp4 import NvFp4MoeBackend
 from vllm.model_executor.layers.quantization.compressed_tensors.compressed_tensors_moe.compressed_tensors_moe_w4a4_nvfp4 import (  # noqa: E501
@@ -940,8 +941,11 @@ def test_fse_online_quantization_routed_shared(
     num_slots = routed_experts.moe_config.num_logical_experts + num_fused_shared_experts
     assert routed_experts.w13_weight.shape[0] == num_slots
     assert routed_experts.w2_weight.shape[0] == num_slots
-    if routed_method_cls is Mxfp8OnlineMoEMethod:
-        # MXFP8 scales are stored flattened as [num_slots * rows, K // 32].
+    if (
+        getattr(routed_experts.quant_method, "fp8_backend", None)
+        == Fp8MoeBackend.AITER_MXFP8
+    ):
+        # AITER MXFP8 scales are shuffled flat as [num_slots * rows, K // 32].
         assert routed_experts.w13_weight_scale.shape[0] == (
             num_slots * routed_experts.w13_weight.shape[1]
         )
