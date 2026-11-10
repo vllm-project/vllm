@@ -25,6 +25,7 @@ from vllm.model_executor.layers.fused_moe.router.zero_expert_router import (
     ZeroExpertRouter,
 )
 from vllm.model_executor.layers.fused_moe.runner.moe_runner import MoERunner
+from vllm.model_executor.layers.linear import ReplicatedLinear
 from vllm.model_executor.layers.quantization.online.fp8 import Fp8PtpcOnlineLinearMethod
 from vllm.model_executor.layers.quantization.online.mxfp4 import Mxfp4OnlineLinearMethod
 
@@ -98,7 +99,15 @@ class ROCmLatentMoERunner(MoERunner):
         self, hidden_shard: torch.Tensor, router_logits: torch.Tensor
     ) -> tuple[torch.Tensor, torch.Tensor, torch.Tensor]:
         """Latent projection and top-k for this rank's token shard only."""
-        latent, _ = self.apply_routed_input_transform(hidden_shard)
+        transform = self.routed_input_transform
+        if getattr(transform, "_token_group", None) is not None:
+            # KimiRoutedInputLinear would split the shard again over its group
+            # and gather other ranks' rows.
+            latent, _ = ReplicatedLinear.forward(
+                cast(ReplicatedLinear, transform), hidden_shard
+            )
+        else:
+            latent, _ = self.apply_routed_input_transform(hidden_shard)
         topk_weights, topk_ids = self.router.select_experts(
             hidden_states=latent,
             router_logits=router_logits,

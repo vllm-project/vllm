@@ -37,6 +37,7 @@ from vllm.models.kimi_k3.amd.linear import (
     KimiDecoderLayer,
     KimiMLP,
     KimiMoE,
+    KimiRoutedInputLinear,
     KimiRoutedOutputTransform,
 )
 from vllm.platforms import current_platform
@@ -233,9 +234,10 @@ def _build_mlp(
     """A small dense KimiMLP or latent KimiMoE with the same weights on every
     rank's view of the full layer.
 
-    `kind` is "dense", "moe" (token-shardable tail) or "moe_no_shared"
-    (without shared experts the tail is not token-shardable, so the layer
-    takes the all-gather fallback).
+    `kind` is "dense", "moe" (token-shardable tail), "moe_token_group" (as
+    "moe", with Kimi-K3.1's routed input projection splitting every batch over
+    the TP group) or "moe_no_shared" (without shared experts the tail is not
+    token-shardable, so the layer takes the all-gather fallback).
     """
     init_workspace_manager(device)
     vllm_config = VllmConfig()
@@ -264,9 +266,15 @@ def _build_mlp(
                 use_grouped_topk=True,
                 num_expert_group=1,
                 topk_group=1,
+                dsa_config={"dsa_layers": []} if kind == "moe_token_group" else None,
             )
             mlp = KimiMoE(config, prefix="model.layers.1.mlp", layer_idx=1)
-            assert mlp.experts.token_shardable is (kind == "moe")
+            if kind == "moe_token_group":
+                projection = mlp.routed_expert_down_proj
+                assert isinstance(projection, KimiRoutedInputLinear)
+                projection._token_group = get_tp_group()
+                projection.min_sharded_tokens = 1
+            assert mlp.experts.token_shardable is (kind != "moe_no_shared")
 
     # Same seed on every rank: replicated weights match across ranks, and each
     # rank's TP shard is just a slice of some consistent full weight.
@@ -315,11 +323,13 @@ def _check_mlp_rows(
     )
 
 
-def _check_shard_routed_moe(device: torch.device, tp_world: int, rank: int) -> None:
+def _check_shard_routed_moe(
+    device: torch.device, tp_world: int, rank: int, kind: str = "moe"
+) -> None:
     """A latent KimiMoE routed on the token shard, with the gathered top-k
     replacing routing."""
     _check_mlp_rows(
-        device, tp_world, rank, "moe", KimiDecoderLayer._run_moe_sp_shard_routed
+        device, tp_world, rank, kind, KimiDecoderLayer._run_moe_sp_shard_routed
     )
 
 
@@ -335,6 +345,9 @@ _CHECKS: dict[str, Callable[[torch.device, int, int], None]] = {
     "routing_gather": _check_routing_gather,
     "padded_gather_scatter": _check_padded_gather_scatter,
     "shard_routed_moe": _check_shard_routed_moe,
+    "shard_routed_moe_token_group": partial(
+        _check_shard_routed_moe, kind="moe_token_group"
+    ),
     "mlp_sp_dense": partial(_check_mlp_sp, kind="dense"),
     "mlp_sp_moe_no_shared": partial(_check_mlp_sp, kind="moe_no_shared"),
 }
@@ -406,6 +419,13 @@ def test_shard_routed_moe_tp8_matches_unsharded_rows(
     use_aiter: bool, monkeypatch: pytest.MonkeyPatch
 ) -> None:
     _run_shard_routed_moe(8, use_aiter, monkeypatch)
+
+
+@multi_gpu_test(num_gpus=4)
+def test_shard_routed_moe_tp4_token_group_projection() -> None:
+    """The routed input projection runs on the local shard only, even when it
+    would split batches over a token group."""
+    _run_ranks("shard_routed_moe_token_group", 4)
 
 
 @multi_gpu_test(num_gpus=4)
