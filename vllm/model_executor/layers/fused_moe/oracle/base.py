@@ -4,6 +4,7 @@
 """Abstract base class for MoE kernel oracles."""
 
 from abc import ABC
+from collections.abc import Mapping
 from enum import Enum
 from typing import TYPE_CHECKING, Any, ClassVar, Generic, TypeVar, cast
 
@@ -54,8 +55,8 @@ class MoEKernelOracle(ABC, Generic[BackendT]):
     # Display name for the shared log helpers below; subclasses must set it.
     name: ClassVar[str]
     priority_backends: tuple[BackendT, ...] | None = None
-    backend_mapping: dict[MoEBackend, BackendT] | None = None
-    experts_mapping: dict[BackendT, tuple[str, ...]] | None = None
+    backend_mapping: Mapping[MoEBackend, BackendT] | None = None
+    experts_mapping: Mapping[BackendT, tuple[str, ...]] | None = None
 
     def __init__(
         self,
@@ -283,7 +284,7 @@ class MoEKernelOracle(ABC, Generic[BackendT]):
 
 def resolve_moe_experts(
     backend: BackendT,
-    experts_mapping: dict[BackendT, tuple[str, ...]],
+    experts_mapping: Mapping[BackendT, tuple[str, ...]],
     name: str,
 ) -> list[type[mk.FusedMoEExperts]]:
     paths = experts_mapping.get(backend)

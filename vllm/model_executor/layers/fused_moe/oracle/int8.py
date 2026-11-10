@@ -1,7 +1,9 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 
+from collections.abc import Mapping
 from enum import Enum
+from types import MappingProxyType
 from typing import Any
 
 import torch
@@ -70,24 +72,28 @@ class Int8MoEKernelOracle(MoEKernelOracle[Int8MoeBackend]):
         Int8MoeBackend.HUMMING,
         Int8MoeBackend.CPU,
     )
-    backend_mapping: dict[MoEBackend, Int8MoeBackend] = {
-        "triton": Int8MoeBackend.TRITON,
-        "humming": Int8MoeBackend.HUMMING,
-    }
-    experts_mapping: dict[Int8MoeBackend, tuple[str, ...]] = {
-        Int8MoeBackend.TRITON: (f"{MOE_EXPERTS_MODULE}.triton_moe.TritonExperts",),
-        Int8MoeBackend.HUMMING: (
-            f"{MOE_EXPERTS_MODULE}.fused_humming_moe.BatchedHummingGroupedExperts",
-            f"{MOE_EXPERTS_MODULE}.fused_humming_moe.HummingGroupedExperts",
-            f"{MOE_EXPERTS_MODULE}.fused_humming_moe.HummingIndexedExperts",
-        ),
-        Int8MoeBackend.CPU: (
-            f"{MOE_EXPERTS_MODULE}.cpu_moe.ZenCPUExpertsInt8",
-            f"{MOE_EXPERTS_MODULE}.cpu_moe.PowerCPUExpertsInt8",
-            f"{MOE_EXPERTS_MODULE}.cpu_moe.ArmCPUExpertsInt8",
-            f"{MOE_EXPERTS_MODULE}.cpu_moe.CPUExpertsInt8",
-        ),
-    }
+    backend_mapping: Mapping[MoEBackend, Int8MoeBackend] = MappingProxyType(
+        {
+            "triton": Int8MoeBackend.TRITON,
+            "humming": Int8MoeBackend.HUMMING,
+        }
+    )
+    experts_mapping: Mapping[Int8MoeBackend, tuple[str, ...]] = MappingProxyType(
+        {
+            Int8MoeBackend.TRITON: (f"{MOE_EXPERTS_MODULE}.triton_moe.TritonExperts",),
+            Int8MoeBackend.HUMMING: (
+                f"{MOE_EXPERTS_MODULE}.fused_humming_moe.BatchedHummingGroupedExperts",
+                f"{MOE_EXPERTS_MODULE}.fused_humming_moe.HummingGroupedExperts",
+                f"{MOE_EXPERTS_MODULE}.fused_humming_moe.HummingIndexedExperts",
+            ),
+            Int8MoeBackend.CPU: (
+                f"{MOE_EXPERTS_MODULE}.cpu_moe.ZenCPUExpertsInt8",
+                f"{MOE_EXPERTS_MODULE}.cpu_moe.PowerCPUExpertsInt8",
+                f"{MOE_EXPERTS_MODULE}.cpu_moe.ArmCPUExpertsInt8",
+                f"{MOE_EXPERTS_MODULE}.cpu_moe.CPUExpertsInt8",
+            ),
+        }
+    )
 
     def backend_to_kernel_cls(
         self, backend: Int8MoeBackend
