@@ -84,6 +84,67 @@ def make_residual_boundary(rows, *, post_input_scale=False):
     return boundary, pre_norm
 
 
+@pytest.mark.skipif(not current_platform.is_cuda(), reason="NVIDIA CuTe DSL kernel")
+@pytest.mark.parametrize("rows", [7, 147, 154, 336, 3584])
+@pytest.mark.parametrize("stream_dtype", [torch.bfloat16, torch.float32])
+@pytest.mark.parametrize("pre_input_scale", [False, True])
+def test_dspark_boundary_preserves_rounding_and_reloads(
+    rows, stream_dtype, pre_input_scale
+):
+    from vllm.models.muse_spark.nvidia.specialized_decode.cutedsl.common import (
+        draft_boundary,
+    )
+
+    torch.manual_seed(170)
+    post = make_norm(MuseSparkRMSNorm, has_weight=False, eps=1e-8)
+    pre = make_norm(
+        MuseSparkRMSNormWithInputScale if pre_input_scale else MuseSparkRMSNorm,
+        is_post_norm=False,
+    )
+    conn = MuseSparkNormPreservingResidualConnection(HIDDEN).cuda()
+    with torch.no_grad():
+        conn.gate.uniform_(-3, 3)
+    conn.materialize_coefficients()
+    fused = draft_boundary.DraftBoundary(
+        draft_boundary.draft_boundary_constants(post, conn, pre),
+        conn.alpha,
+        conn.beta,
+        None,
+        pre.weight,
+    )
+    branch = torch.randn(rows, HIDDEN, device="cuda", dtype=torch.bfloat16)
+    stream = torch.randn(rows, HIDDEN, device="cuda", dtype=stream_dtype)
+
+    def reference():
+        updated = conn(stream=stream.float(), branch=post(branch))
+        return updated, pre(updated.bfloat16())
+
+    for store_stream in (True, False):
+        fused.prepare(
+            stream_dtype == torch.bfloat16, store_stream, rows > fused.late_rows
+        )
+        graph = torch.cuda.CUDAGraph()
+        with torch.cuda.graph(graph):
+            updated, out = fused.run(branch, stream, store_stream)
+        for seed in (171, 172):
+            torch.manual_seed(seed)
+            branch.normal_()
+            stream.normal_()
+            pointers = (conn.alpha.data_ptr(), conn.beta.data_ptr())
+            with torch.no_grad():
+                conn.gate.uniform_(-3, 3)
+                pre.weight.normal_(0, 0.1)
+            conn.materialize_coefficients()
+            assert pointers == (conn.alpha.data_ptr(), conn.beta.data_ptr())
+            expected_stream, expected = reference()
+            graph.replay()
+            torch.testing.assert_close(out, expected, rtol=0, atol=0)
+            if store_stream:
+                torch.testing.assert_close(updated, expected_stream, rtol=0, atol=0)
+            else:
+                assert updated is None
+
+
 def reference(norm, x):
     """The same norm in fp64, weight and all."""
     x64 = x.double()
