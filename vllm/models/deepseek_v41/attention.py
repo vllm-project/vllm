@@ -759,12 +759,13 @@ class DeepseekV4Attention(nn.Module, AttentionLayerBase, ABC):
         # The eager attention region writes into a caller-owned buffer
         # (breakable_cudagraph needs in-place outputs); its shape and how it is
         # projected afterwards follow the interface contract above.
-        attn_out = self._alloc_attn_out(hidden_states.shape[0], hidden_states)
+        full_num_tokens = positions.shape[0]
+        attn_out = self._alloc_attn_out(full_num_tokens, hidden_states)
 
         # Keep the attention input preparation in the captured graph. Only the
         # sparse indexer and MLA attention run in the eager break below.
         qr_kv, kv_score, indexer_weights = self._run_parallel_input_projections(
-            hidden_states
+            hidden_states, full_num_tokens
         )
         qr, qr_scale, kv = self._split_qkv_and_norm(qr_kv)
 
@@ -784,7 +785,9 @@ class DeepseekV4Attention(nn.Module, AttentionLayerBase, ABC):
         """Write only the KV `forward` writes (SWA KV, compressed KV, index K),
         skipping wq_b, the indexer's top-k and attention."""
         attn_metadata = get_forward_context().attn_metadata
-        qr_kv, kv_score, _ = self._run_parallel_input_projections(hidden_states)
+        qr_kv, kv_score, _ = self._run_parallel_input_projections(
+            hidden_states, positions.shape[0]
+        )
         _, _, kv = self._split_qkv_and_norm(qr_kv)
         cache_positions = positions
         if isinstance(attn_metadata, dict):
@@ -1001,8 +1004,15 @@ class DeepseekV4Attention(nn.Module, AttentionLayerBase, ABC):
             indexer_result = prepare_indexer()
         index_q, index_q_scale, index_weights_out = indexer_result
 
+        # The indexer op reads only this argument's row count and device (to
+        # clear its top-k buffer). Under the token-sharded decoder the local
+        # stream is shorter than the top-k layout, so pass the full-row KV
+        # latent, which `_run_parallel_input_projections` gathered.
+        indexer_hidden_states = (
+            kv if kv.shape[0] != hidden_states.shape[0] else hidden_states
+        )
         self._sparse_indexer_and_attn(
-            hidden_states,
+            indexer_hidden_states,
             index_q,
             index_q_scale,
             index_weights_out,
@@ -1012,11 +1022,19 @@ class DeepseekV4Attention(nn.Module, AttentionLayerBase, ABC):
             attn_out,
         )
 
-    def _fused_wqa_wkv_gemm(self, hidden_states: torch.Tensor) -> torch.Tensor:
+    def _fused_wqa_wkv_gemm(
+        self, hidden_states: torch.Tensor, full_num_tokens: int | None = None
+    ) -> torch.Tensor:
         # Override point: the ROCm layer preshuffles this weight in place, so
         # it cannot go through fused_wqa_wkv directly.
         num_tokens = hidden_states.shape[0]
+        if full_num_tokens is None:
+            full_num_tokens = num_tokens
         # MergedColumnParallelLinear returns (output, bias); bias is None.
+        if num_tokens < full_num_tokens:
+            # The decoder already holds only this rank's token shard.
+            qr_kv, _ = self.fused_wqa_wkv(hidden_states)
+            return sp_all_gather(qr_kv.contiguous())[:full_num_tokens]
         if self.shard_fused_wqa_wkv and num_tokens >= _SHARD_FUSED_WQA_WKV_MIN_TOKENS:
             qr_kv, _ = self.fused_wqa_wkv(sp_shard(hidden_states))
             return sp_all_gather(qr_kv)[:num_tokens]
@@ -1033,12 +1051,14 @@ class DeepseekV4Attention(nn.Module, AttentionLayerBase, ABC):
         return self.wq_b(qr)
 
     def _run_parallel_input_projections(
-        self, hidden_states: torch.Tensor
+        self, hidden_states: torch.Tensor, full_num_tokens: int | None = None
     ) -> tuple[
         torch.Tensor,
         torch.Tensor | None,
         torch.Tensor | None,
     ]:
+        if full_num_tokens is None:
+            full_num_tokens = hidden_states.shape[0]
         aux_streams = self.aux_stream_list
         if aux_streams is not None:
             aux_streams = aux_streams[:2]
@@ -1070,7 +1090,7 @@ class DeepseekV4Attention(nn.Module, AttentionLayerBase, ABC):
             aux_fns[1] = indexer_weights_proj
 
         qr_kv, (kv_score, indexer_weights) = execute_in_parallel(
-            lambda: self._fused_wqa_wkv_gemm(hidden_states),
+            lambda: self._fused_wqa_wkv_gemm(hidden_states, full_num_tokens),
             aux_fns,
             self.ln_events[0],
             self.ln_events[1:3],
@@ -1078,6 +1098,16 @@ class DeepseekV4Attention(nn.Module, AttentionLayerBase, ABC):
             enable=hidden_states.shape[0]
             <= envs.VLLM_MULTI_STREAM_GEMM_TOKEN_THRESHOLD,
         )
+
+        if hidden_states.shape[0] < full_num_tokens:
+            # The A projections ran on this rank's token shard; the TP B
+            # projections and cache writes need the full rows.
+            if kv_score is not None:
+                kv_score = sp_all_gather(kv_score.contiguous())[:full_num_tokens]
+            if indexer_weights is not None:
+                indexer_weights = sp_all_gather(indexer_weights.contiguous())[
+                    :full_num_tokens
+                ]
 
         return qr_kv, kv_score, indexer_weights
 

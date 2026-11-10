@@ -391,3 +391,80 @@ def test_short_context_fill_follows_shardq_rows():
     rows, num_tokens = _short_context_topk_rows(positions, metadata)
     assert num_tokens == 4
     torch.testing.assert_close(rows, torch.tensor([10, 11, 15, 16]))
+
+
+def test_token_shard_gate(monkeypatch):
+    """The decoder-stream token shard needs every condition that can disable
+    ShardQ statically, since the FFN reduction is decided at construction."""
+    from vllm.models.deepseek_v41.nvidia import model as dsv41_model
+
+    monkeypatch.setattr(dsv41_model, "_shard_fused_wqa_wkv", lambda config: True)
+    config = SimpleNamespace(
+        parallel_config=SimpleNamespace(
+            pipeline_parallel_size=1, enable_expert_parallel=False
+        ),
+        attention_config=SimpleNamespace(sparse_mla_shard_q=True),
+        cache_config=SimpleNamespace(
+            enable_prefix_caching=False, swa_bounded_replay=True
+        ),
+        compilation_config=SimpleNamespace(
+            max_prefill_cudagraph_capture_tokens=16
+        ),
+        model_config=SimpleNamespace(
+            hf_config=SimpleNamespace(
+                kv_source_layer_ids=[20],
+                num_hidden_layers=40,
+                engram_layer_ids=[1, 14],
+            )
+        ),
+        lora_config=None,
+        speculative_config=None,
+        additional_config={},
+    )
+    layer = SimpleNamespace(attn=SimpleNamespace(use_shardq=True))
+    assert dsv41_model._shardq_token_shard_static(config)
+    assert dsv41_model._shardq_token_shard_supported(config, True, False, [layer])
+
+    assert not dsv41_model._shardq_token_shard_supported(config, False, False, [layer])
+    assert not dsv41_model._shardq_token_shard_supported(config, True, True, [layer])
+    assert not dsv41_model._shardq_token_shard_supported(
+        config,
+        True,
+        False,
+        [SimpleNamespace(attn=SimpleNamespace(use_shardq=False))],
+    )
+
+    config.attention_config.sparse_mla_shard_q = False
+    assert not dsv41_model._shardq_token_shard_static(config)
+    config.attention_config.sparse_mla_shard_q = True
+    config.cache_config.swa_bounded_replay = False
+    assert not dsv41_model._shardq_token_shard_static(config)
+    config.cache_config.swa_bounded_replay = True
+    config.lora_config = SimpleNamespace()
+    assert not dsv41_model._shardq_token_shard_static(config)
+    config.lora_config = None
+    config.compilation_config.max_prefill_cudagraph_capture_tokens = 4096
+    assert not dsv41_model._shardq_token_shard_static(config)
+    config.compilation_config.max_prefill_cudagraph_capture_tokens = None
+    assert not dsv41_model._shardq_token_shard_static(config)
+    config.compilation_config.max_prefill_cudagraph_capture_tokens = 16
+    config.model_config.hf_config.engram_layer_ids = [20]
+    assert not dsv41_model._shardq_token_shard_static(config)
+    config.model_config.hf_config.engram_layer_ids = [1, 14]
+    config.model_config.hf_config.kv_source_layer_ids = [39]
+    assert not dsv41_model._shardq_token_shard_static(config)
+    config.model_config.hf_config.kv_source_layer_ids = [20]
+    config.cache_config.enable_prefix_caching = True
+    assert not dsv41_model._shardq_token_shard_static(config)
+    config.cache_config.enable_prefix_caching = False
+    config.additional_config = {"decode_backend": "latency_specialized"}
+    assert not dsv41_model._shardq_token_shard_static(config)
+    config.additional_config = {}
+    config.speculative_config = SimpleNamespace(uses_aux_hidden_states=True)
+    assert not dsv41_model._shardq_token_shard_static(config)
+    config.speculative_config = None
+    config.parallel_config.enable_expert_parallel = True
+    assert not dsv41_model._shardq_token_shard_static(config)
+    config.parallel_config.enable_expert_parallel = False
+    config.parallel_config.pipeline_parallel_size = 2
+    assert not dsv41_model._shardq_token_shard_static(config)

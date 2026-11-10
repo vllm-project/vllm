@@ -69,6 +69,7 @@ from vllm.model_executor.models.utils import (
     maybe_prefix,
 )
 from vllm.models.common.ops.sequence_parallel import (
+    is_sequence_parallel_active,
     sp_all_gather,
     sp_padding_mask,
     sp_reduce_scatter,
@@ -94,6 +95,7 @@ from vllm.models.deepseek_v41.nvidia.flashinfer_sparse import (
     DeepseekV4FlashInferSM120Attention,
 )
 from vllm.models.deepseek_v41.nvidia.flashmla import DeepseekV4FlashMLAAttention
+from vllm.models.deepseek_v41.shardq import SHARDQ_MIN_TOKENS
 from vllm.platforms import current_platform
 from vllm.sequence import IntermediateTensors
 from vllm.utils.math_utils import cdiv
@@ -351,6 +353,62 @@ def _shard_fused_wqa_wkv(vllm_config: VllmConfig) -> bool:
     )
 
 
+def _shardq_token_shard_static(vllm_config: VllmConfig) -> bool:
+    """Whether the model can token-shard and reduce-scatter the pre-replay stream.
+
+    The decision is static: the pre-replay layer FFNs are built without their
+    final all-reduce and their full-row path performs it instead. Every
+    config-level condition that can disable ShardQ is therefore part of this
+    gate, so a head-sharded build keeps the stock FFN reduction; the model's
+    per-layer cache decision remains a runtime fallback.
+    """
+    speculative_config = vllm_config.speculative_config
+    additional_config = vllm_config.additional_config
+    decode_backend = (
+        additional_config.get("decode_backend", "auto")
+        if isinstance(additional_config, dict)
+        else "auto"
+    )
+    parallel_config = vllm_config.parallel_config
+    config = vllm_config.model_config.hf_config
+    cut = max(config.kv_source_layer_ids)
+    prefill_capture = (
+        vllm_config.compilation_config.max_prefill_cudagraph_capture_tokens
+    )
+    return (
+        parallel_config.pipeline_parallel_size == 1
+        and not parallel_config.enable_expert_parallel
+        and vllm_config.attention_config.sparse_mla_shard_q
+        and vllm_config.cache_config.swa_bounded_replay
+        and vllm_config.lora_config is None
+        and cut < config.num_hidden_layers - 1
+        and not any(i >= cut for i in getattr(config, "engram_layer_ids", ()))
+        and not vllm_config.cache_config.enable_prefix_caching
+        and prefill_capture is not None
+        and prefill_capture < SHARDQ_MIN_TOKENS
+        and _shard_fused_wqa_wkv(vllm_config)
+        and decode_backend == "auto"
+        and (
+            speculative_config is None
+            or not speculative_config.uses_aux_hidden_states
+        )
+    )
+
+
+def _shardq_token_shard_supported(
+    vllm_config: VllmConfig,
+    shardq_enabled: bool,
+    use_sequence_parallel: bool,
+    layers: Iterable[nn.Module],
+) -> bool:
+    """Whether the pre-replay decoder stream can stay token-sharded around ShardQ."""
+    if not shardq_enabled or use_sequence_parallel:
+        return False
+    if not _shardq_token_shard_static(vllm_config):
+        return False
+    return all(getattr(layer.attn, "use_shardq", False) for layer in layers)
+
+
 def maybe_init_gemm_rs(vllm_config: VllmConfig, use_sequence_parallel: bool) -> bool:
     """Set up the fused `wo_b` GEMM + reduce-scatter when opted in.
 
@@ -432,11 +490,22 @@ class DeepseekV4DecoderLayer(nn.Module):
                 # forward keeps the separate reduce-scatter below.
                 self.attn.bind_gemm_rs()
         self.attn.shard_fused_wqa_wkv = _shard_fused_wqa_wkv(vllm_config)
+        # The pre-replay layers can keep the decoder stream token-sharded and
+        # finish the FFN with a reduce-scatter; the layers past the replay cut
+        # see full rows only.
+        self.token_shard_capable = (
+            extract_layer_index(prefix) < max(config.kv_source_layer_ids)
+            and not fuse_mhc_all_reduce
+            and _shardq_token_shard_static(vllm_config)
+        )
+        self.token_shard_owns_reduce = False
         self.ffn = DeepseekV4MoE(
             vllm_config,
             prefix=f"{prefix}.ffn",
             use_sequence_parallel=self.use_sequence_parallel,
-            reduce_results=not fuse_mhc_all_reduce,
+            reduce_results=(
+                not fuse_mhc_all_reduce and not self.token_shard_capable
+            ),
         )
 
         self.attn_norm = RMSNorm(self.hidden_size, self.rms_norm_eps)
@@ -577,6 +646,12 @@ class DeepseekV4DecoderLayer(nn.Module):
         torch.Tensor | None,
     ]:
         previous_aux: torch.Tensor | None = None
+        full_num_tokens = positions.shape[0]
+        use_token_shard = (
+            not self.use_sequence_parallel
+            and isinstance(x, torch.Tensor)
+            and x.shape[0] < full_num_tokens
+        )
         mhc_stream = self.mhc_stream
         if mhc_stream is not None and (
             in_piecewise_cudagraph()
@@ -698,9 +773,15 @@ class DeepseekV4DecoderLayer(nn.Module):
             x = sp_all_gather(x)[: positions.shape[0]]
 
         x = self.attn(positions, x, None)
+        if not use_token_shard and self.token_shard_owns_reduce:
+            # The feature turns off wo_b's own all-reduce so the sharded path
+            # can reduce-scatter; full steps must sum the attention partial.
+            x = tensor_model_parallel_all_reduce(x)
         # With GEMM-RS bound, the attention output is already this rank's
         # sequence-parallel shard (see DeepseekV4Attention._wo_b_proj).
-        if self.use_sequence_parallel and self.attn.gemm_rs is None:
+        if use_token_shard or (
+            self.use_sequence_parallel and self.attn.gemm_rs is None
+        ):
             x = sp_reduce_scatter(x)
 
         if mhc_stream is not None:
@@ -724,11 +805,20 @@ class DeepseekV4DecoderLayer(nn.Module):
             stream=mhc_stream,
             reduce_results=self.fuse_mhc_all_reduce,
         )
-        if self.fuse_mhc_all_reduce and self.ffn.defers_finalize(x.shape[0]):
+        if use_token_shard:
+            x = sp_all_gather(x.contiguous())[:full_num_tokens]
+            x = self.ffn(x, input_ids, mega_gate_metadata)
+            assert isinstance(x, torch.Tensor)
+            x = sp_reduce_scatter(x)
+        elif self.fuse_mhc_all_reduce and self.ffn.defers_finalize(x.shape[0]):
             # The next layer's first boundary finalizes it with the all-reduce.
             x = self.ffn.forward_unfinalized(x, input_ids)
         else:
             x = self.ffn(x, input_ids, mega_gate_metadata)
+            if self.token_shard_capable and isinstance(x, torch.Tensor):
+                # The FFN was built without its own all-reduce for the
+                # feature; full steps must sum the routed partial here.
+                x = tensor_model_parallel_all_reduce(x)
         if mhc_stream is not None:
             torch.cuda.current_stream().wait_stream(mhc_stream)
         return x, residual, post_mix, res_mix, ffn_pre, previous_aux
@@ -980,6 +1070,22 @@ class DeepseekV4Model(nn.Module, EagleModelMixin):
             logger.info_once(
                 "ShardQ disabled for DeepSeek-V4.1: SWA bounded replay is off."
             )
+        self.shardq_token_shard = _shardq_token_shard_supported(
+            vllm_config,
+            shardq_enabled and not self.fuse_mhc_all_reduce,
+            self.use_sequence_parallel,
+            islice(self.layers, self.start_layer, self.decoder_replay_start),
+        )
+        if self.shardq_token_shard:
+            logger.info_once(
+                "ShardQ token-sharded decoder stream enabled below the replay cut."
+            )
+            for layer in islice(
+                self.layers, self.start_layer, self.decoder_replay_start
+            ):
+                # The decoder reduce-scatters the attention partial itself.
+                layer.attn.wo_b.reduce_results = False
+                layer.token_shard_owns_reduce = True
 
         # The n-gram hash needs a slot-keyed rolling store of compressed ids
         # (chunked prefill / decode lookback); key it off the first local
@@ -1154,6 +1260,18 @@ class DeepseekV4Model(nn.Module, EagleModelMixin):
                 )
             hidden_states = sp_shard(hidden_states)
             input_ids = sp_shard(input_ids)
+        use_token_shard = (
+            self.shardq_token_shard
+            and not self.use_sequence_parallel
+            and decode_step is None
+            and self._step_uses_shardq()
+            and is_sequence_parallel_active(True, full_num_tokens, SHARDQ_MIN_TOKENS)
+        )
+        if use_token_shard:
+            # Keep the decoder stream on this rank's token shard through the
+            # pre-replay layers; the attention gathers compact projections and
+            # the FFN gathers full rows.
+            hidden_states = sp_shard(hidden_states)
 
         local_input_ids = input_ids
         if (
@@ -1194,6 +1312,18 @@ class DeepseekV4Model(nn.Module, EagleModelMixin):
             engram_hashes,
             engram_mask,
         )
+        if use_token_shard and hidden_states.shape[0] < full_num_tokens:
+            # The replay path writes KV and runs the late layers on full rows.
+            hidden_states, residual, post_mix, res_mix, pre_mix = (
+                self._gather_token_stream(
+                    hidden_states,
+                    residual,
+                    post_mix,
+                    res_mix,
+                    pre_mix,
+                    full_num_tokens,
+                )
+            )
         late_aux: list[torch.Tensor] = []
         if self.decoder_replay_layers is not None:
             hidden_states, pre_mix, *late_aux = self.decoder_replay_layers(
@@ -1268,6 +1398,44 @@ class DeepseekV4Model(nn.Module, EagleModelMixin):
             else None,
         )
 
+    def _step_uses_shardq(self) -> bool:
+        """Whether this step's metadata built a ShardQ plan."""
+        if not is_forward_context_available():
+            return False
+        attn_metadata = get_forward_context().attn_metadata
+        if isinstance(attn_metadata, list):
+            attn_metadata = attn_metadata[dbo_current_ubatch_id()]
+        if not isinstance(attn_metadata, dict):
+            return False
+        attn = getattr(self.layers[self.start_layer], "attn", None)
+        if attn is None:
+            return False
+        metadata = attn_metadata.get(attn.swa_cache_layer.prefix)
+        return getattr(metadata, "shardq", None) is not None
+
+    @staticmethod
+    def _gather_token_stream(
+        hidden_states: torch.Tensor,
+        residual: torch.Tensor,
+        post_mix: torch.Tensor,
+        res_mix: torch.Tensor,
+        pre_mix: torch.Tensor,
+        full_num_tokens: int,
+    ) -> tuple[torch.Tensor, torch.Tensor, torch.Tensor, torch.Tensor, torch.Tensor]:
+        """Gather a token-sharded decoder stream back to full rows."""
+        assert isinstance(hidden_states, torch.Tensor)
+
+        def gather(tensor: torch.Tensor) -> torch.Tensor:
+            return sp_all_gather(tensor.contiguous())[:full_num_tokens]
+
+        return (
+            gather(hidden_states),
+            gather(residual),
+            gather(post_mix),
+            gather(res_mix),
+            gather(pre_mix),
+        )
+
     def _run_layers(
         self,
         layer_ids: range,
@@ -1287,10 +1455,29 @@ class DeepseekV4Model(nn.Module, EagleModelMixin):
         # Every layer's post runs inside the next layer's fused pre, so aux
         # hidden states are read back from there instead of recomputed.
         full_num_tokens = positions.shape[0]
+        token_shard = (
+            self.shardq_token_shard
+            and isinstance(hidden_states, torch.Tensor)
+            and hidden_states.shape[0] < full_num_tokens
+        )
         mega_gate_metadata = self._mega_gate_metadata(input_ids)
         for idx in layer_ids:
+            layer = self.layers[idx]
+            gather_engram = token_shard and getattr(layer, "engram", None) is not None
+            if gather_engram:
+                # Engram injection reads the full hc stream and its hashes.
+                hidden_states, residual, post_mix, res_mix, pre_mix = (
+                    self._gather_token_stream(
+                        hidden_states,
+                        residual,
+                        post_mix,
+                        res_mix,
+                        pre_mix,
+                        full_num_tokens,
+                    )
+                )
             hidden_states, residual, post_mix, res_mix, pre_mix, previous_aux = (
-                self.layers[idx](
+                layer(
                     hidden_states,
                     positions,
                     input_ids,
@@ -1304,9 +1491,16 @@ class DeepseekV4Model(nn.Module, EagleModelMixin):
                     mega_gate_metadata=mega_gate_metadata,
                 )
             )
+            if gather_engram:
+                assert isinstance(hidden_states, torch.Tensor)
+                hidden_states = sp_shard(hidden_states)
+                residual = sp_shard(residual)
+                post_mix = sp_shard(post_mix)
+                res_mix = sp_shard(res_mix)
+                pre_mix = sp_shard(pre_mix)
             if previous_aux is not None:
                 # idx is the one-based id of the layer whose post this is.
-                if self.use_sequence_parallel:
+                if previous_aux.shape[0] < full_num_tokens:
                     previous_aux = sp_all_gather(previous_aux)[:full_num_tokens]
                 aux_hidden_by_layer[idx] = previous_aux
         assert residual is not None and post_mix is not None

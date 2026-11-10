@@ -666,15 +666,17 @@ class DeepseekV41ROCMAiterMLAAttention(DeepseekV4Attention):
             out = tensor_model_parallel_all_reduce(out)
         return out
 
-    def _fused_wqa_wkv_gemm(self, hidden_states: torch.Tensor) -> torch.Tensor:
+    def _fused_wqa_wkv_gemm(
+        self, hidden_states: torch.Tensor, full_num_tokens: int | None = None
+    ) -> torch.Tensor:
         if self._wqa_wkv_scale is not None and hidden_states.dim() == 2:
             return self._bpre_attn_gemm(
                 self.fused_wqa_wkv.weight, self._wqa_wkv_scale, hidden_states, False
             )
-        return super()._fused_wqa_wkv_gemm(hidden_states)
+        return super()._fused_wqa_wkv_gemm(hidden_states, full_num_tokens)
 
     def _run_parallel_input_projections(
-        self, hidden_states: torch.Tensor
+        self, hidden_states: torch.Tensor, full_num_tokens: int | None = None
     ) -> tuple[torch.Tensor, torch.Tensor | None, torch.Tensor | None]:
         if self.indexer is not None and self.compressor is None:
             # Serial: qr must sit on the default stream before the q-side
@@ -682,10 +684,12 @@ class DeepseekV41ROCMAiterMLAAttention(DeepseekV4Attention):
             aux_streams = self.aux_stream_list
             self.aux_stream_list = None
             try:
-                return super()._run_parallel_input_projections(hidden_states)
+                return super()._run_parallel_input_projections(
+                    hidden_states, full_num_tokens
+                )
             finally:
                 self.aux_stream_list = aux_streams
-        return super()._run_parallel_input_projections(hidden_states)
+        return super()._run_parallel_input_projections(hidden_states, full_num_tokens)
 
     def forward(
         self,
