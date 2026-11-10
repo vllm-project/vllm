@@ -46,7 +46,7 @@ the decode after load and binds it to every KV cache vLLM allocates.
 ## Refusals
 
 Unsupported deployments are refused with every reason at once: the config
-before load (platform, MRv2, PP, DP, EP, EPLB, DCP, PCP, LoRA, KV connectors,
+before load (platform, PP, DP, EP, EPLB, DCP, PCP, LoRA, KV connectors,
 routed-expert capture, speculative decoding, sleep mode, CPU weight offload,
 weight updates, prompt embeds, graph modes and capture sizes, geometry, TP
 size, sequence-parallel MoE, cache dtypes), the model after load (MoE backend,

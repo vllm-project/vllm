@@ -1,7 +1,9 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
-"""The GLM-5.3-Flash specialized-decode switch, shared by every vendor. Reads only
-the config, so it imports no vendor code."""
+"""The switch for GLM-5.3-Flash's ROCm specialized decode (the backbone's per-layer
+kernels). Reads only the config, so it imports no vendor code. The NVIDIA executor
+(`nvidia/specialized_decode/runtime`) parses the same `decode_backend` key on its
+own: a new value has to go to both."""
 
 from __future__ import annotations
 
