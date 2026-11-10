@@ -127,7 +127,8 @@ def test_bench_serve(server):
 
 @pytest.mark.benchmark
 def test_bench_serve_warmups_do_not_prime_prefix_cache(server):
-    """Warmups resend the first prompt; they must not leave it in the prefix cache."""
+    """The ready check and warmups resend the first prompt; they must not leave it
+    in the prefix cache."""
     command = [
         "vllm",
         "bench",
@@ -148,6 +149,8 @@ def test_bench_serve_warmups_do_not_prime_prefix_cache(server):
         "1",
         "--num-warmups",
         "2",
+        "--ready-check-timeout-sec",
+        "60",
     ]
     result = subprocess.run(command, capture_output=True, text=True)
     print(result.stdout)

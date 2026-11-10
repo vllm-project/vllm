@@ -73,6 +73,18 @@ def _merge_overrides(base: dict | None, override: dict | None) -> dict | None:
     return {**(base or {}), **(override or {})}
 
 
+def _with_unique_cache_salt(request_func_input: RequestFuncInput) -> RequestFuncInput:
+    """Copy with a fresh `cache_salt`, so the request cannot hit, or be hit by,
+    other requests in the prefix cache."""
+    return replace(
+        request_func_input,
+        extra_body={
+            **(request_func_input.extra_body or {}),
+            "cache_salt": f"warmup-{uuid.uuid4().hex}",
+        },
+    )
+
+
 TERM_PLOTLIB_AVAILABLE = (importlib.util.find_spec("termplotlib") is not None) and (
     shutil.which("gnuplot") is not None
 )
@@ -906,8 +918,33 @@ async def benchmark(
     )
 
     if ready_check_timeout_sec > 0:
+
+        async def ready_check_request_func(
+            request_func_input: RequestFuncInput,
+            session: aiohttp.ClientSession,
+            pbar: tqdm | None = None,
+        ) -> RequestFuncOutput:
+            # Salted like the warmups so the check does not prime the prefix cache
+            # for request 0; unsalted if the server rejects cache_salt.
+            output = await request_func(
+                request_func_input=_with_unique_cache_salt(request_func_input),
+                session=session,
+                pbar=pbar,
+            )
+            if output.success:
+                return output
+            output = await request_func(
+                request_func_input=request_func_input, session=session, pbar=pbar
+            )
+            if output.success:
+                print(
+                    "WARNING: the ready check succeeded only without cache_salt; "
+                    "the first measured request may hit the prefix cache."
+                )
+            return output
+
         test_output = await wait_for_endpoint(
-            request_func,
+            ready_check_request_func,
             test_input,
             session,
             timeout_seconds=ready_check_timeout_sec,
@@ -935,15 +972,7 @@ async def benchmark(
         async def warmup_limited_request_func(salted: bool) -> RequestFuncOutput:
             # A unique cache_salt per warmup prevents prefix cache hits among
             # warmups and the run.
-            warmup_input = test_input
-            if salted:
-                warmup_input = replace(
-                    test_input,
-                    extra_body={
-                        **(test_input.extra_body or {}),
-                        "cache_salt": f"warmup-{uuid.uuid4().hex}",
-                    },
-                )
+            warmup_input = _with_unique_cache_salt(test_input) if salted else test_input
             async with warmup_semaphore:
                 return await request_func(
                     request_func_input=warmup_input, session=session, pbar=warmup_pbar
@@ -2012,7 +2041,9 @@ def add_cli_args(parser: FlexibleArgumentParser):
         type=int,
         default=0,
         help="Maximum time to wait for the endpoint to become ready "
-        "in seconds. Ready check will be skipped by default.",
+        "in seconds. Ready check will be skipped by default. The check sends "
+        "the first request with a unique cache_salt (unsalted if the server "
+        "rejects it), so it does not prime the prefix cache for the run.",
     )
 
     parser.add_argument(
