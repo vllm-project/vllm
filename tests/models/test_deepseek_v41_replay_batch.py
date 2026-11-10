@@ -10,7 +10,7 @@ import numpy as np
 import pytest
 import torch
 
-from vllm.config import CUDAGraphMode
+from vllm.config import CompilationConfig, CUDAGraphMode
 from vllm.config.engram import EngramConfig
 from vllm.config.kv_transfer import KVTransferConfig
 from vllm.forward_context import (
@@ -236,11 +236,12 @@ def test_replay_batch_keeps_device_decode_boundaries(state):
     ],
 )
 def test_remote_graph_requires_breakable_piecewise(eager, mode, breakable, allowed):
+    config = CompilationConfig(cudagraph_mode=mode, use_breakable_cudagraph=breakable)
     if allowed:
-        _validate_remote_graph_mode(eager, mode, breakable)
+        _validate_remote_graph_mode(eager, config)
     else:
         with pytest.raises(ValueError, match="breakable PIECEWISE"):
-            _validate_remote_graph_mode(eager, mode, breakable)
+            _validate_remote_graph_mode(eager, config)
 
 
 @pytest.mark.parametrize(
@@ -253,11 +254,24 @@ def test_remote_graph_requires_breakable_piecewise(eager, mode, breakable, allow
     ],
 )
 def test_remote_full_decode_graph_is_opt_in(mode, breakable, allowed):
+    config = CompilationConfig(cudagraph_mode=mode, use_breakable_cudagraph=breakable)
     if allowed:
-        _validate_remote_graph_mode(False, mode, breakable, full_decode=True)
+        _validate_remote_graph_mode(False, config, full_decode=True)
     else:
         with pytest.raises(ValueError):
-            _validate_remote_graph_mode(False, mode, breakable, full_decode=True)
+            _validate_remote_graph_mode(False, config, full_decode=True)
+
+
+def test_remote_graph_uses_resolved_config_not_environment(monkeypatch):
+    monkeypatch.setenv("VLLM_USE_BREAKABLE_CUDAGRAPH", "0")
+    config = CompilationConfig(
+        cudagraph_mode=CUDAGraphMode.PIECEWISE, use_breakable_cudagraph=True
+    )
+    _validate_remote_graph_mode(False, config)
+    monkeypatch.setenv("VLLM_USE_BREAKABLE_CUDAGRAPH", "1")
+    config.use_breakable_cudagraph = False
+    with pytest.raises(ValueError, match="breakable PIECEWISE"):
+        _validate_remote_graph_mode(False, config)
 
 
 @pytest.mark.parametrize(

@@ -52,7 +52,7 @@ from vllm.compilation.breakable_cudagraph import (
     is_breakable_cudagraph_enabled,
 )
 from vllm.config import VllmConfig, get_current_vllm_config
-from vllm.config.compilation import CUDAGraphMode
+from vllm.config.compilation import CompilationConfig, CUDAGraphMode
 from vllm.distributed import (
     get_dp_group,
     get_engram_dp_group,
@@ -90,10 +90,11 @@ logger = init_logger(__name__)
 
 def _validate_remote_graph_mode(
     enforce_eager: bool,
-    mode: CUDAGraphMode,
-    breakable: bool,
+    compilation_config: CompilationConfig,
     full_decode: bool = False,
 ) -> None:
+    mode = compilation_config.cudagraph_mode
+    breakable = is_breakable_cudagraph_enabled(compilation_config)
     allowed_full = full_decode and (
         mode == CUDAGraphMode.FULL_DECODE_ONLY
         or (mode == CUDAGraphMode.FULL_AND_PIECEWISE and breakable)
@@ -1795,8 +1796,7 @@ class Engram(nn.Module):
             load_config = vllm_config.load_config
             _validate_remote_graph_mode(
                 vllm_config.model_config.enforce_eager,
-                vllm_config.compilation_config.cudagraph_mode,
-                is_breakable_cudagraph_enabled(),
+                vllm_config.compilation_config,
                 engram_config.rdma_full_decode_graph,
             )
             if (

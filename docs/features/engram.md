@@ -175,6 +175,24 @@ Remote lookups use the existing per-layer prefetch stream by default. Set
 for comparison or troubleshooting.
 The ordinary local-table path remains the default.
 
+For a bounded local-versus-remote lookup microbenchmark, use the same model,
+owner and transport setup described above:
+
+```bash
+python benchmarks/benchmark_engram_rdma.py \
+  --model "$MODEL" --ready "$OWNER_READY_FILE" \
+  --library "$ENGRAM_NIXL_SHIM" --reader-port-base "$TEST_READER_PORT_BASE" \
+  --tokens 1 4 16 64 256 1024 --heads 2 --output results.json
+```
+
+The benchmark compares the native local lookup and remote provider using the
+same randomly selected rows from a bounded checkpoint prefix. It checks exact
+BF16 output and alternates the two paths. It reports CUDA-event and synchronized
+host-wall durations; event intervals can include host launch gaps. This is a
+single-reader component test, not a serving benchmark or a prefetch-overlap
+measurement. The bounded table and repeated IDs may affect cache behavior;
+token counts do not by themselves imply production prefill or decode shapes.
+
 Use a nonzero `--shutdown-timeout` to allow worker cleanup. A forced shutdown
 can leave an owner lease outstanding; the owner must retain the backing until
 the affected consumers are confirmed stopped. Automatic recovery is not part of
