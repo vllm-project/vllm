@@ -1,27 +1,27 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
-"""DeepSeek-V4.1 mono decode layer on ROCm CDNA4 and CDNA3 (``--monokernel``).
+"""DeepSeek-V4.1 mono decode layer on ROCm CDNA4 and CDNA3 (`--monokernel`).
 
 A decode step's backbone layer -- the attention seam, the attention, its TP
 all-reduce, the FFN seam, the MoE and its all-reduce -- runs as two persistent
-FlyDSL launches (``mono``, this directory) on the layer's loaded
+FlyDSL launches (`mono`, this directory) on the layer's loaded
 weights, the TP reductions inside the kernels. Every backbone layer of the
-checkpoint runs whole (compress ratio 0, 1 or 2 over ``fp8_ds_mla`` records):
+checkpoint runs whole (compress ratio 0, 1 or 2 over `fp8_ds_mla` records):
 the first layer and the Engram layers hand K1 a settled residual, and an index
 source runs vLLM's compressor and indexer between the two launches. A layer
 outside that (an MXFP8 KV cache, another indexer) keeps vLLM's attention seam
 and attention and runs the rest as one launch, the FFN launch, from wo_b's
 unreduced output. A step takes the kernels when it is decode only, at most
-``MAX_ROWS`` rows (eager or a FULL CUDA graph: the model is not torch.compiled);
+`MAX_ROWS` rows (eager or a FULL CUDA graph: the model is not torch.compiled);
 a whole layer also needs its SWA rows as the kernels read them (causal windows;
 for the DSpark draft's layers, the block's non-causal rows). Anything else runs
 the layer as before; the paths share every tensor at the layer boundary, so they
 interleave freely.
 
 On CDNA3 (gfx942) the kernels compute the same layer on their own copies of
-the weights (``mono/weights942.py``), at TP 4 and on steps of up to
-``MAX_ROWS_GFX942`` rows. An index source's keys are written by
-``mono/keylist.py`` between vLLM's indexer and K2 there, and the DSpark draft
+the weights (`mono/weights942.py`), at TP 4 and on steps of up to
+`MAX_ROWS_GFX942` rows. An index source's keys are written by
+`mono/keylist.py` between vLLM's indexer and K2 there, and the DSpark draft
 layers also take the FFN launch, built for the draft's routing.
 
 Every TP rank must take the same path at every layer (the kernels wait on each
@@ -81,7 +81,7 @@ def _mono_runner(device: torch.device, draft: "MonoDecodeLayer | None" = None):
     """The process's mono runner (one a TP rank, shared by every layer of the
     target; the DSpark draft's layers share one of their own, as its routing and
     SWA rows differ). Its peer-memory handshake is collective over the TP group:
-    every rank builds it at the same layer of the same step."""
+    every rank builds it at load, at the same layer (`build_runner`)."""
     global _runner, _draft_runner
     if draft is not None:
         if _draft_runner is None:
@@ -149,7 +149,7 @@ def _max_rows() -> int:
 def _capture_plain_experts(experts) -> None:
     """gfx942: vLLM converts the routed experts to its Triton kernels' format
     when the weights are loaded and frees the plain scales. Wrap that step so
-    the gfx942 copies (``weights942.moe_copies``) are made from the
+    the gfx942 copies (`weights942.moe_copies`) are made from the
     plain tensors first."""
     qm = experts.quant_method
     original = qm.process_weights_after_loading
@@ -174,9 +174,9 @@ def _capture_plain_experts(experts) -> None:
 
 
 def _keep_copies(layer, copies: tuple[torch.Tensor, ...]) -> None:
-    """Store a layer's gfx942 copies as ``layer.mono942``. A reload of the
-    weights (``reload_weights``, or a weight update in RL) runs
-    ``process_weights_after_loading`` again, and the kernels and captured
+    """Store a layer's gfx942 copies as `layer.mono942`. A reload of the
+    weights (`reload_weights`, or a weight update in RL) runs
+    `process_weights_after_loading` again, and the kernels and captured
     CUDA graphs read the first copies by their addresses. So the copies of a
     reload are written into the first copies in place."""
     kept = getattr(layer, "mono942", None)
@@ -193,7 +193,7 @@ ATTN_LINEARS_942 = ("fused_wqa_wkv", "wq_b", "wo_a", "wo_b")
 
 
 def _copy_linear_at_load(linear) -> None:
-    """gfx942: make the dense MXFP8 linear's ``weights942.linear_copy`` right
+    """gfx942: make the dense MXFP8 linear's `weights942.linear_copy` right
     after vLLM has processed its weights at load. By default
     (VLLM_MXFP8_EMULATION_DEQUANT_AT_LOAD) vLLM dequantizes them to bf16
     there, and the copy re-encodes them as the gfx942 kernels read them.
@@ -217,7 +217,7 @@ def _copy_942_at_load(layer: "DeepseekV4DecoderLayer", ffn_only: bool) -> None:
     them when vLLM processes the weights at load, so that they count as model
     memory when vLLM sizes the KV cache. Copies made at the first decode step
     would count only when that step is also the CUDA graph memory profile, so
-    with that profile off or with ``enforce_eager`` they would not count. A
+    with that profile off or with `enforce_eager` they would not count. A
     layer that takes only the FFN launch needs no attention copies."""
     ffn = layer.ffn
     _capture_plain_experts(ffn.experts.routed_experts)
@@ -274,7 +274,7 @@ def _select(
     qr: torch.Tensor,
 ) -> None:
     """An index source's compressor and top-k selection, from K1's normed input
-    and bf16 qr: ``_forward_csa2_full`` / ``_forward_csa2_reindex`` and the
+    and bf16 qr: `_forward_csa2_full` / `_forward_csa2_reindex` and the
     indexer op, serial."""
     attn = layer.attn
     comp, indexer = attn.compressor, attn.indexer
@@ -297,9 +297,9 @@ def _select(
 
 
 class MonoDecodeLayer:
-    """One decoder layer's mono path (``create``: None when the layer is not
-    eligible): the whole layer (``__call__``) or, with ``ffn_only``, the FFN
-    launch after vLLM's attention (``ffn``). Its weights are taken from the
+    """One decoder layer's mono path (`create`: None when the layer is not
+    eligible): the whole layer (`__call__`) or, with `ffn_only`, the FFN
+    launch after vLLM's attention (`ffn`). Its weights are taken from the
     layer at the first call, after loading."""
 
     def __init__(
@@ -486,6 +486,11 @@ class MonoDecodeLayer:
         logger.info_once("DSv4.1 mono decode: the whole standard backbone layers")
         return MonoDecodeLayer()
 
+    def build_runner(self, device: torch.device) -> None:
+        """Build the layer's runner after loading rather than at its first
+        decode step, which must not allocate, exchange handles or sync."""
+        _mono_runner(device, self if self.draft else None)
+
     def weights(self, layer: "DeepseekV4DecoderLayer"):
         if self._weights is not None:
             return self._weights
@@ -524,7 +529,7 @@ class MonoDecodeLayer:
     def _weights_942(self, layer: "DeepseekV4DecoderLayer"):
         """gfx942: the layer's tensors as the gfx942 kernels read them. The
         dense MXFP8 linears and the routed experts as the copies made at load
-        (``_copy_942_at_load``)."""
+        (`_copy_942_at_load`)."""
         from vllm.models.deepseek_v41.amd.mono.runner import MonoLayerWeights
 
         f = layer.ffn
@@ -661,7 +666,7 @@ class MonoDecodeLayer:
     ) -> tuple[torch.Tensor, ...] | None:
         """The layer's outputs (x, residual, post_mix, res_mix, pre_mix) by the
         mono kernels, or None when this step takes the original path (always for
-        an ``ffn_only`` layer)."""
+        an `ffn_only` layer)."""
         if self.ffn_only:
             return None
         first = residual is None
@@ -749,9 +754,9 @@ class MonoDecodeLayer:
         res_mix: torch.Tensor,
         pre_mix: torch.Tensor,
     ) -> tuple[torch.Tensor, ...] | None:
-        """The layer's outputs by the FFN launch from ``part``, wo_b's unreduced
+        """The layer's outputs by the FFN launch from `part`, wo_b's unreduced
         output, and the attention seam's outputs; None when this step takes the
-        original path (the caller then reduces ``part`` itself)."""
+        original path (the caller then reduces `part` itself)."""
         why, _, _ = self._decode_step(layer, part.shape[0])
         tensors = (part, residual, post_mix, res_mix, pre_mix)
         if why is None and not all(t.is_contiguous() for t in tensors):

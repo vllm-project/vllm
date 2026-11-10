@@ -2009,13 +2009,13 @@ class QuarkOCP_MX_MoEMethod(QuarkMoEMethod):
 class QuarkW8A8Mxfp8MoEMethod(QuarkMoEMethod):
     """Quark OCP MX MXFP8 (W8A8) experts.
 
-    FP8 E4M3 weights with E8M0 uint8 scales per 1x32 block (Quark ``fp8_e4m3``
-    ``per_group`` ``group_size=32`` ``scale_format=e8m0``), and activations
+    FP8 E4M3 weights with E8M0 uint8 scales per 1x32 block (Quark `fp8_e4m3`
+    `per_group` `group_size=32` `scale_format=e8m0`), and activations
     dynamically quantized to MXFP8. The stored layout is the one the online,
     ModelOpt and compressed-tensors MXFP8 MoE methods produce or load
-    (``[E, rows, cols]`` E4M3, ``[E, rows, cols / 32]`` uint8), and the weights go
+    (`[E, rows, cols]` E4M3, `[E, rows, cols / 32]` uint8), and the weights go
     through the same backend selection, kernel-format conversion and kernel
-    (``AITER_MXFP8`` on gfx950).
+    (`AITER_MXFP8` on gfx950).
     """
 
     supported_activation_quant_keys = [kMxfp8Dynamic]
@@ -2322,7 +2322,7 @@ class QuarkNvfp4MoEMethod(QuarkMoEMethod):
     def dequantize_weight(
         self, layer: torch.nn.Module
     ) -> Iterator[tuple[slice, torch.Tensor, torch.Tensor]]:
-        """Yield ``(experts, w13, w2)`` dequantized Quark NVFP4 experts."""
+        """Yield `(experts, w13, w2)` dequantized Quark NVFP4 experts."""
         return dequantize_nvfp4_moe_weights(
             layer.w13_weight,
             layer.w13_weight_scale,

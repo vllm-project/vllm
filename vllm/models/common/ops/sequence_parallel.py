@@ -26,10 +26,10 @@ def _custom_collective(name: str, x: torch.Tensor) -> torch.Tensor | None:
 def is_sequence_parallel_active(
     is_enabled: bool, num_tokens: int, min_tokens: int = 0
 ) -> bool:
-    """Whether a batch of ``num_tokens`` shards the stream along the sequence.
+    """Whether a batch of `num_tokens` shards the stream along the sequence.
 
     Below one token per rank the shards are mostly padding, so the batch
-    stays replicated. A model may raise this lower bound with ``min_tokens``.
+    stays replicated. A model may raise this lower bound with `min_tokens`.
     """
     return is_enabled and num_tokens >= max(
         get_tensor_model_parallel_world_size(), min_tokens
@@ -58,7 +58,7 @@ def _has_fused_all_gather_matmul() -> bool:
 
 
 def can_sp_all_gather_matmul(x: torch.Tensor, weight: torch.Tensor) -> bool:
-    """Whether ``sp_all_gather_matmul`` applies to this shard and weight."""
+    """Whether `sp_all_gather_matmul` applies to this shard and weight."""
     return (
         x.shape[0] >= _FUSED_AG_MATMUL_MIN_TOKENS_PER_RANK
         and x.dtype == weight.dtype == torch.bfloat16
@@ -69,7 +69,7 @@ def can_sp_all_gather_matmul(x: torch.Tensor, weight: torch.Tensor) -> bool:
 
 
 def sp_all_gather_matmul(x: torch.Tensor, weight: torch.Tensor) -> torch.Tensor:
-    """``sp_all_gather(x) @ weight.T``, overlapping the gather with the GEMM."""
+    """`sp_all_gather(x) @ weight.T`, overlapping the gather with the GEMM."""
     _, outputs = torch.ops.symm_mem.fused_all_gather_matmul(
         x.contiguous(),
         [weight.t()],

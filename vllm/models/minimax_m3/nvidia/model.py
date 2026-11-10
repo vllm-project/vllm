@@ -201,7 +201,7 @@ def _is_moe_layer(config: PreTrainedConfig, layer_id: int) -> bool:
 def _use_mega_moe(vllm_config: VllmConfig) -> bool:
     """Whether MoE layers run the DeepGEMM NVFP4 MegaMoE kernel.
 
-    Opt in with ``--kernel-config '{"moe_backend": "deep_gemm_mega_moe"}'``. Only
+    Opt in with `--kernel-config '{"moe_backend": "deep_gemm_mega_moe"}'`. Only
     checkpoints with NVFP4 routed experts (MiniMax-M3.1) are supported.
     """
     if vllm_config.kernel_config.moe_backend != "deep_gemm_mega_moe":
@@ -278,7 +278,7 @@ def _row_parallel_reduce_scatter(
     linear: RowParallelLinear,
     gemm_rs: "GemmRsAr | None",
 ) -> torch.Tensor:
-    """``linear`` followed by a reduce-scatter to this rank's token shard."""
+    """`linear` followed by a reduce-scatter to this rank's token shard."""
     num_tokens = x.orig_shape[0] if isinstance(x, QuantizedActivation) else x.shape[0]
     if gemm_rs is not None and num_tokens >= _GEMM_RS_MIN_TOKENS:
         return gemm_rs.apply(x, linear)
@@ -294,7 +294,7 @@ MEGA_MOE_FC2_INPUT_SCALE = 1.0 / 16.0
 def _mega_moe_expert_params_mapping(
     num_experts: int,
 ) -> list[tuple[str, str, int, str]]:
-    """Map ``experts.{e}.w{1,2,3}.*`` to the MegaMoE ``w13_*``/``w2_*`` params."""
+    """Map `experts.{e}.w{1,2,3}.*` to the MegaMoE `w13_*`/`w2_*` params."""
     return [
         (
             "experts.w2_" if shard_id == "w2" else "experts.w13_",
@@ -311,7 +311,7 @@ def _mega_moe_expert_weight(
     name: str, weight: torch.Tensor
 ) -> tuple[str, torch.Tensor] | None:
     """Convert a compressed-tensors NVFP4 routed-expert tensor to the ModelOpt
-    convention ``DeepGemmMegaMoEExperts`` loads, or None to drop it.
+    convention `DeepGemmMegaMoEExperts` loads, or None to drop it.
 
     The global scales become dequantization scales. The FC1 input is quantized
     per token, so its input scale is dropped, and the FC2 input scale is the
@@ -331,7 +331,7 @@ def _mega_moe_expert_weight(
 
 
 def _consumes_mxfp8_128x4(linear: nn.Module) -> bool:
-    """Whether ``linear`` takes a pre-quantized MXFP8 activation whose UE8M0
+    """Whether `linear` takes a pre-quantized MXFP8 activation whose UE8M0
     scales are in FlashInfer's 128x4 swizzled layout (what the MXFP8 norm
     kernels write)."""
     if get_input_quant_key(linear) != kMxfp8Dynamic:
@@ -351,13 +351,13 @@ def _consumes_mxfp8_128x4(linear: nn.Module) -> bool:
 class MiniMAXGemmaRMSNorm(nn.Module):
     """Gemma-style RMS normalization.
 
-    2-D inputs run the Triton kernel in ``ops/norm_mxfp8.py``; with
-    ``mxfp8=True`` the normed activation is emitted as MXFP8 (a
-    ``QuantizedActivation``) for a consumer linear instead of BF16. Other
+    2-D inputs run the Triton kernel in `ops/norm_mxfp8.py`; with
+    `mxfp8=True` the normed activation is emitted as MXFP8 (a
+    `QuantizedActivation`) for a consumer linear instead of BF16. Other
     shapes (the dspark drafter's per-head norms) keep the FlashInfer kernels.
 
-    When ``residual`` is given, the fused add + norm runs in place and the
-    updated ``(x, residual)`` pair is returned.
+    When `residual` is given, the fused add + norm runs in place and the
+    updated `(x, residual)` pair is returned.
     """
 
     def __init__(
@@ -644,7 +644,7 @@ class MiniMaxM3MoE(nn.Module):
         return self.experts.moe_config.skip_final_all_reduce
 
     def defer_finalize(self, max_num_tokens: int) -> bool:
-        """Leave the routed top-k reduction of calls up to ``max_num_tokens``
+        """Leave the routed top-k reduction of calls up to `max_num_tokens`
         to the consumer; return whether the experts accepted.
 
         Only the TRTLLM-Gen NVFP4 experts can stop after GEMM2.
@@ -667,7 +667,7 @@ class MiniMaxM3MoE(nn.Module):
         )
 
     def forward_unfinalized(self, hidden_states: torch.Tensor) -> MoEOutput:
-        """``forward`` with the routed top-k reduction and all-reduce left open."""
+        """`forward` with the routed top-k reduction and all-reduce left open."""
         router_logits, _ = self.gate(hidden_states)
         # The runner's custom op returns tensors only, so run its body directly.
         shared_output, routed = _unpack(
@@ -850,15 +850,15 @@ class MiniMaxM3SparseAttention(nn.Module, AttentionLayerBase):
 
     This is a merged attention layer: it owns the projections (qkv + index
     q/k), per-head QK norms and RoPE, *and* the attention-backend wiring that a
-    generic ``Attention`` layer would normally provide — it binds the
-    ``MiniMaxM3SparseBackend`` + main impl, registers the main paged K/V cache,
-    and owns the lightning indexer (``MiniMaxM3Indexer``), which holds the
+    generic `Attention` layer would normally provide — it binds the
+    `MiniMaxM3SparseBackend` + main impl, registers the main paged K/V cache,
+    and owns the lightning indexer (`MiniMaxM3Indexer`), which holds the
     index-key side cache.
 
     The index branch (index_{q,k}_proj + index_{q,k}_norm) feeds the sparse
     top-k block selection. M3 always disables the index value/output
-    projections (``sparse_disable_index_value`` set for every sparse layer), so
-    ``index_{v,o}_proj`` are never created.
+    projections (`sparse_disable_index_value` set for every sparse layer), so
+    `index_{v,o}_proj` are never created.
     """
 
     def __init__(
@@ -1494,7 +1494,7 @@ class MiniMaxM3Model(nn.Module, EagleModelMixin):
         the normed rows to the MXFP8 its qkv_proj reads.
 
         Each MoE whose successor can take the output gets the hint here, and
-        ``defers_finalize`` decides per call. The final norm feeds the LM head
+        `defers_finalize` decides per call. The final norm feeds the LM head
         in BF16, so the last layer keeps its own finalize. Builds a collective
         kernel: every TP rank decides alike.
         """
@@ -1571,8 +1571,6 @@ class MiniMaxM3Model(nn.Module, EagleModelMixin):
             if residual is not None:
                 residual = sp_shard(residual)
 
-        remote_aux = self.collect_remote_aux_hidden_states(intermediate_tensors)
-
         # Aux hidden state k is the residual stream entering layer k. Under TP
         # it is only complete after layer k's input norm (or the final norm)
         # finishes the previous FFN's deferred all-reduce, so it is read there.
@@ -1632,7 +1630,6 @@ class MiniMaxM3Model(nn.Module, EagleModelMixin):
         elif self.use_sequence_parallel:
             hidden_states = sp_all_gather(hidden_states)[:num_tokens]
 
-        aux_hidden_states = remote_aux + aux_hidden_states
         if len(aux_hidden_states) > 0:
             return hidden_states, aux_hidden_states
         return hidden_states
@@ -1837,8 +1834,8 @@ class MiniMaxM3SparseForConditionalGeneration(
     """Top-level (VL) entry point for MiniMax M3.
 
     The vision tower is not modeled yet; this wrapper routes the text
-    backbone by constructing ``MiniMaxM3SparseForCausalLM`` from the nested
-    ``text_config`` and delegating generation to it.
+    backbone by constructing `MiniMaxM3SparseForCausalLM` from the nested
+    `text_config` and delegating generation to it.
     """
 
     # The vision tower runs replicated per rank under ``--mm-encoder-tp-mode

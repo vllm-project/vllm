@@ -575,7 +575,7 @@ class TestStreamingScheduler(unittest.TestCase):
             scheduler_output_cycle2.num_scheduled_tokens[session.request_id] == 1
         )  # Only the output token [10]
 
-        # Step 8: Calculate num_tokens like gpu_model_runner.py:1284 does
+        # Step 8: Calculate the cached request's token count.
         # This is where the bug would manifest!
         num_tokens_cycle2 = len(cached_state_cycle1["prompt_token_ids"]) + len(
             cached_state_cycle1["output_token_ids"]
