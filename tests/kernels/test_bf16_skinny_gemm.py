@@ -112,6 +112,16 @@ GLM_WARP_SPLITK_CASES = sorted(
     for num_tokens in _warp_splitk_probe_tokens(spec)
 )
 
+
+# Every planned ll_bf16 M: its dot-product kernel compiles M in, and its split-K
+# kernel changes regime with the M tile, so test them all (launches are cheap).
+GLM_LL_BF16_CASES = sorted(
+    (capability, spec.n, spec.k, num_tokens)
+    for capability, table in GLM_GPU_TABLES
+    for spec in table.values()
+    for num_tokens in spec.ll_bf16_tokens
+)
+
 QWEN4_EXP_SM90_CASES = [
     (n, k, num_tokens, config)
     for (n, k), plans in qwen4_exp_gemm.QWEN4_EXP_SM90_GEMM_PLANS.items()
@@ -556,20 +566,26 @@ def test_glm52_sm107_warp_splitk_rows() -> None:
         range(9, 17)
     )
 
+    covered = {}
     for spec in glm52_gemm.GLM52_PROJECTIONS_SM107.values():
-        if not spec.warp_splitk_configs:
-            continue
         plan = spec.build_plan()
-        warp_tokens = {
-            num_tokens
-            for num_tokens, (backend, _) in plan.items()
-            if backend == "fi_warp_splitk"
+        tokens_by_backend = {
+            "cute": {num_tokens for num_tokens, _ in spec.cute_configs},
+            "dsv3_fused_a": set(spec.dsv3_tokens),
+            "fi_warp_splitk": {
+                num_tokens for num_tokens, _ in spec.warp_splitk_configs
+            },
+            "ll_bf16": set(spec.ll_bf16_tokens),
         }
-        assert warp_tokens == {num_tokens for num_tokens, _ in spec.warp_splitk_configs}
-        assert max(warp_tokens) == 32
-        # Warp split-K rows are applied last; they must not hide measured rows.
-        assert not warp_tokens & {num_tokens for num_tokens, _ in spec.cute_configs}
-        assert not warp_tokens & spec.dsv3_tokens
+        # Each M has one backend: a later backend must not hide another's row.
+        assert sum(map(len, tokens_by_backend.values())) == len(plan)
+        for backend, tokens in tokens_by_backend.items():
+            assert {m for m, (b, _) in plan.items() if b == backend} == tokens
+        covered[(spec.n, spec.k)] = set(plan)
+    # q_b at TP8 is the SM103 entry; the shared expert down uses cuBLAS from M=25.
+    assert covered.pop((2048, 2048)) == set(range(1, 17))
+    assert covered.pop((6144, 512)) == set(range(1, 25))
+    assert all(tokens == set(range(1, 33)) for tokens in covered.values())
 
 
 def test_glm52_warp_splitk_warmup_units(monkeypatch: pytest.MonkeyPatch) -> None:
@@ -594,6 +610,55 @@ def test_glm52_warp_splitk_warmup_units(monkeypatch: pytest.MonkeyPatch) -> None
     assert {unit.key for unit in warmup.get_cutedsl_warmup_compile_units()} == {
         ("fi-warp-splitk", spec.n, spec.k, config)
         for _, config in spec.warp_splitk_configs
+    }
+
+
+def test_glm52_ll_bf16_warmup_units(monkeypatch: pytest.MonkeyPatch) -> None:
+    from vllm.model_executor.warmup import cutedsl_warmup
+
+    registered: list[object] = []
+    warmup = glm52_gemm._LLBf16Warmup()
+    monkeypatch.setattr(glm52_gemm.ll_bf16, "is_available", lambda: True)
+    monkeypatch.setattr(glm52_gemm, "_ll_bf16_warmup", warmup)
+    monkeypatch.setattr(glm52_gemm, "_warp_splitk_module", lambda: None)
+    monkeypatch.setattr(
+        cutedsl_warmup, "register_cutedsl_warmup_provider", registered.append
+    )
+    monkeypatch.setattr(
+        glm52_gemm.shape_dynamic_skinny_gemm, "is_available", lambda: False
+    )
+    gate_up = glm52_gemm.GLM52_PROJECTIONS_SM107[(1024, 6144)]
+    wk = glm52_gemm.GLM52_PROJECTIONS_SM107[(160, 6144)]
+
+    for spec in (gate_up, wk, gate_up):
+        glm52_gemm._request_warmup(torch.bfloat16, spec)
+
+    assert registered == [warmup]
+    planned = {
+        (spec.n, spec.k, num_tokens)
+        for spec in (gate_up, wk)
+        for num_tokens in spec.ll_bf16_tokens
+    }
+    units = warmup.get_cutedsl_warmup_compile_units()
+    assert len(units) == len(planned)
+    assert {unit.key for unit in units} == {("ll-bf16", *point) for point in planned}
+
+    # Each unit runs its (N, K, M) through ll_bf16_gemm, the runtime entry point,
+    # so warmup compiles whatever kernel the planned call will dispatch.
+    calls: list[tuple[int, int, int, torch.dtype, torch.dtype]] = []
+
+    def fake_ll_bf16_gemm(x, weight, output_dtype=torch.float32):
+        calls.append((weight.shape[0], x.shape[1], x.shape[0], x.dtype, output_dtype))
+
+    monkeypatch.setattr(glm52_gemm.ll_bf16, "ll_bf16_gemm", fake_ll_bf16_gemm)
+    monkeypatch.setattr(glm52_gemm.current_platform, "device_type", "cpu")
+    monkeypatch.setattr(torch.accelerator, "current_device_index", lambda: 0)
+    for unit in units:
+        unit.compile()
+    assert len(calls) == len(planned)
+    assert set(calls) == {
+        (n, k, num_tokens, torch.bfloat16, torch.bfloat16)
+        for n, k, num_tokens in planned
     }
 
 
@@ -1231,16 +1296,23 @@ def _require_capability_and_warp_splitk(capability: tuple[int, int]) -> None:
         pytest.skip("FlashInfer warp split-K BF16 GEMM is not available")
 
 
-@pytest.mark.parametrize("cuda_graph", [False, True])
-@pytest.mark.parametrize("capability,n,k,num_tokens", GLM_WARP_SPLITK_CASES)
-def test_glm_warp_splitk_selected_shapes(
-    capability: tuple[int, int], n: int, k: int, num_tokens: int, cuda_graph: bool
+def _check_glm52_planned_call(
+    capability: tuple[int, int],
+    n: int,
+    k: int,
+    num_tokens: int,
+    backend: str,
+    cuda_graph: bool,
 ) -> None:
-    _require_capability_and_warp_splitk(capability)
     torch.manual_seed(42)
     x = torch.randn(num_tokens, k, dtype=torch.bfloat16, device="cuda")
     weight = torch.randn(n, k, dtype=torch.bfloat16, device="cuda")
-    plan = _glm52_device_plan(weight, num_tokens, "fi_warp_splitk")
+    if torch.cuda.get_device_capability() == capability:
+        plan = _glm52_device_plan(weight, num_tokens, backend)
+    else:
+        # Same architecture family: run that table's row directly.
+        plan = dict(GLM_GPU_TABLES)[capability][(n, k)].build_plan()
+        assert plan[num_tokens][0] == backend
 
     output = glm52_gemm.run_glm52_plan(plan, x, weight)
     if cuda_graph:
@@ -1248,12 +1320,43 @@ def test_glm_warp_splitk_selected_shapes(
         graph = torch.cuda.CUDAGraph()
         with torch.cuda.graph(graph):
             output = glm52_gemm.run_glm52_plan(plan, x, weight)
+        # New input values, so the check needs the replayed kernel to read them.
+        x.normal_()
         graph.replay()
     torch.accelerator.synchronize()
 
     assert output is not None
+    assert output.dtype == x.dtype
     reference = x.float() @ weight.float().t()
     torch.testing.assert_close(output.float(), reference, rtol=2e-2, atol=2e-1)
+
+
+@pytest.mark.parametrize("cuda_graph", [False, True])
+@pytest.mark.parametrize("capability,n,k,num_tokens", GLM_WARP_SPLITK_CASES)
+def test_glm_warp_splitk_selected_shapes(
+    capability: tuple[int, int], n: int, k: int, num_tokens: int, cuda_graph: bool
+) -> None:
+    _require_capability_and_warp_splitk(capability)
+    _check_glm52_planned_call(
+        capability, n, k, num_tokens, "fi_warp_splitk", cuda_graph
+    )
+
+
+@pytest.mark.parametrize("cuda_graph", [False, True])
+@pytest.mark.parametrize("capability,n,k,num_tokens", GLM_LL_BF16_CASES)
+def test_glm_ll_bf16_selected_shapes(
+    capability: tuple[int, int], n: int, k: int, num_tokens: int, cuda_graph: bool
+) -> None:
+    # ll_bf16 picks its kernels by architecture family, so any SM10x GPU (such as
+    # CI's B200) runs the SM107 rows' kernels.
+    if (
+        not torch.cuda.is_available()
+        or torch.cuda.get_device_capability()[0] != capability[0]
+    ):
+        pytest.skip(f"ll_bf16 rows of the SM{capability[0]}x tables need that family")
+    if not glm52_gemm.ll_bf16.is_available():
+        pytest.skip("ll_bf16 GEMM (CuTe DSL) is not available")
+    _check_glm52_planned_call(capability, n, k, num_tokens, "ll_bf16", cuda_graph)
 
 
 @pytest.mark.parametrize("capability,n,k,num_tokens", CUTE_CASES)
