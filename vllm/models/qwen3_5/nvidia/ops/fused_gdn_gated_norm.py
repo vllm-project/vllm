@@ -83,6 +83,7 @@ def fused_gdn_gated_rms_norm(
     norm_before_gate: bool,
     activation: str,
     scale: torch.Tensor | None = None,
+    rows_per_block: int | None = None,
 ) -> None:
     """Gated RMS norm ``out = rms_norm(x) * act(z)`` for Qwen3.5 GDN.
 
@@ -101,6 +102,8 @@ def fused_gdn_gated_rms_norm(
         activation: "swish"/"silu" or "sigmoid".
         scale: optional static per-tensor FP8 scale; when given, out is
             float8_e4m3fn and must not alias x.
+        rows_per_block: tokens per program; defaults to ``calc_rows_per_block``
+            of the token count.
 
     """
     assert x.shape == z.shape == out.shape and x.dim() == 2
@@ -115,7 +118,8 @@ def fused_gdn_gated_rms_norm(
     if num_tokens == 0:
         return
     block_n = triton.next_power_of_2(head_v_dim)
-    rows_per_block = calc_rows_per_block(num_tokens, x.device)
+    if rows_per_block is None:
+        rows_per_block = calc_rows_per_block(num_tokens, x.device)
     grid = (triton.cdiv(num_tokens, rows_per_block), num_v_heads)
     _fused_gdn_gated_rms_norm_kernel[grid](
         x,
