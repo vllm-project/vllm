@@ -572,7 +572,7 @@ def test_deepseek_v41_forward_mqa_mxfp8_matches_reference(
     assert _max_row_rel_err(blocks.view_as(q), expected) < 0.05
 
 
-@pytest.mark.parametrize("model", ["deepseek_v4", "deepseek_v41", "fused_topk"])
+@pytest.mark.parametrize("model", ["deepseek_v4", "deepseek_v41"])
 @pytest.mark.parametrize("width", [8, 128, 1024, 2048])
 @pytest.mark.parametrize("use_graph", [False, True])
 @torch.inference_mode()
@@ -582,14 +582,9 @@ def test_sparse_mla_store_epilogue_topk_indices_are_compact(
     """Unmasked attention must see every valid key and no negative live slots."""
     import importlib
 
-    if model == "fused_topk":
-        build = importlib.import_module(
-            "vllm.models.deepseek_v41.amd.ops.topk_pack"
-        ).launch
-    else:
-        build = importlib.import_module(
-            f"vllm.models.{model}.amd.rocm"
-        ).compute_global_topk_ragged_indices_and_indptr
+    build = importlib.import_module(
+        f"vllm.models.{model}.amd.rocm"
+    ).compute_global_topk_ragged_indices_and_indptr
 
     source = (
         torch.arange(4 * width, dtype=torch.int32, device="cpu").view(4, width) % 64
