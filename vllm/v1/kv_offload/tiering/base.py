@@ -243,7 +243,7 @@ class SecondaryTierManager(ABC):
         calling thread.
 
         Preconditions (guaranteed by the framework):
-          - ``job_metadata.chunk_ids`` are valid primary-tier slots, pinned
+          - `job_metadata.chunk_ids` are valid primary-tier slots, pinned
             (ref-counted) for the duration of the transfer.
 
         The implementation is responsible for:
@@ -252,7 +252,7 @@ class SecondaryTierManager(ABC):
           3. Allocating space in this tier
           4. Submitting the async transfer (read from primary via chunk_ids)
 
-        Report completion via ``get_finished_jobs()``.
+        Report completion via `get_finished_jobs()`.
 
         Args:
             job_metadata: Job metadata including job_id, keys, and chunk_ids
@@ -271,13 +271,13 @@ class SecondaryTierManager(ABC):
         on the calling thread.
 
         Preconditions (guaranteed by the framework):
-          - ``job_metadata.chunk_ids`` are allocated primary-tier slots
+          - `job_metadata.chunk_ids` are allocated primary-tier slots
             ready to receive data.
 
         The implementation must copy data from this tier into the
-        primary-tier slots identified by ``chunk_ids``.
+        primary-tier slots identified by `chunk_ids`.
 
-        Report completion via ``get_finished_jobs()``.
+        Report completion via `get_finished_jobs()`.
 
         Args:
             job_metadata: Job metadata including job_id, keys, and chunk_ids
@@ -385,7 +385,7 @@ class SecondaryTierManager(ABC):
         store. Queued (not-yet-started) transfers may be cancelled, but their
         failure result must still appear in `get_finished_jobs()`.
 
-        Likewise, every ``JobResult.deferred_release`` event must be set
+        Likewise, every `JobResult.deferred_release` event must be set
         before this returns, so the tier must bound how long it can defer a
         release.
         """
