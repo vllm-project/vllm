@@ -17,6 +17,7 @@ use tracing::{debug, info, trace, warn};
 use vllm_metrics::METRICS;
 use zeromq::RouterSendHalf;
 
+use crate::client::mm_sender_cache::MmSenderCache;
 use crate::client::readiness::{Readiness, RecheckGuard};
 use crate::client::state::{
     OutputReceiver, OutputSender, RequestRegistry, UtilityReceiver, UtilityRegistry,
@@ -73,6 +74,9 @@ pub(crate) struct ClientInner {
     /// Whether the engines can accept and process new requests, maintained
     /// around the control calls this client sends.
     readiness: Arc<Readiness>,
+    /// Shadows of engines' LRU multimodal receiver caches. Each lock is held
+    /// from the shadow update through the send so updates follow engine order.
+    mm_sender_caches: BTreeMap<EngineId, tokio::sync::Mutex<MmSenderCache>>,
 }
 
 impl ClientInner {
@@ -99,6 +103,21 @@ impl ClientInner {
         // Every engine reports the same `max_loras`, validated before the
         // client is built.
         let max_loras = engines[0].ready_response.max_loras;
+        let mm_sender_caches = engines
+            .iter()
+            .filter_map(|engine| {
+                let capacity = engine.ready_response.mm_receiver_cache_bytes?;
+                info!(
+                    engine_id = ?engine.engine_id,
+                    capacity,
+                    "mirroring engine multimodal receiver cache"
+                );
+                Some((
+                    engine.engine_id.clone(),
+                    tokio::sync::Mutex::new(MmSenderCache::new(capacity)),
+                ))
+            })
+            .collect();
         Self {
             input_send,
             handle,
@@ -115,6 +134,25 @@ impl ClientInner {
             health_error: ArcSwapOption::empty(),
             health_tx: watch::Sender::new(true),
             readiness: Arc::new(Readiness::new()),
+            mm_sender_caches,
+        }
+    }
+
+    /// Drop shadow entries the engine reported missing so they are resent.
+    async fn invalidate_mm_sender_cache(&self, engine_index: u32, mm_hashes: &[String]) {
+        let Some(cache) = u16::try_from(engine_index)
+            .ok()
+            .and_then(|index| self.mm_sender_caches.get(&EngineId::from_engine_index(index)))
+        else {
+            return;
+        };
+        cache.lock().await.invalidate(mm_hashes);
+    }
+
+    /// Clear every shadow, matching an engine-side `reset_mm_cache`.
+    pub async fn clear_mm_sender_caches(&self) {
+        for cache in self.mm_sender_caches.values() {
+            cache.lock().await.clear();
         }
     }
 
@@ -400,6 +438,17 @@ impl ClientInner {
         engine_id: &EngineId,
         mut payload: EngineCoreRequest,
     ) -> Result<()> {
+        let _send_order = match (
+            self.mm_sender_caches.get(engine_id),
+            &mut payload.mm_features,
+        ) {
+            (Some(cache), Some(features)) if !features.is_empty() => {
+                let mut cache = cache.lock().await;
+                cache.strip_cached(features);
+                Some(cache)
+            }
+            _ => None,
+        };
         let aux_frames = payload.extract_aux_frames(self.msgpack_zero_copy_threshold);
         let payload = Bytes::from(encode_msgpack(&payload)?);
         self.send_encoded_to_engine(engine_id, EngineCoreRequestType::Add, payload, aux_frames)
@@ -569,6 +618,11 @@ pub(crate) async fn run_output_dispatcher_loop(
             match outputs {
                 EngineCoreOutputs::RequestBatch(batch) => {
                     let has_outputs = !batch.outputs.is_empty();
+                    for output in &batch.outputs {
+                        if let Some(mm_hashes) = output.mm_cache_miss_hashes.as_deref() {
+                            inner.invalidate_mm_sender_cache(batch.engine_index, mm_hashes).await;
+                        }
+                    }
                     let mut iteration_tokens: u64 =
                         batch.outputs.iter().map(output_iteration_tokens).sum();
                     let (engine_index, timestamp, weight_version) =

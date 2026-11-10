@@ -145,6 +145,10 @@ pub struct EngineCoreReadyResponse {
     /// Whether expert parallelism is enabled.
     #[serde(default)]
     pub enable_expert_parallel: bool,
+    /// Byte capacity of the engine's LRU multimodal receiver cache, or `None`
+    /// when the engine has none.
+    #[serde(default)]
+    pub mm_receiver_cache_bytes: Option<u64>,
 }
 
 /// Frontend-owned ZMQ addresses that are sent to the engine during startup

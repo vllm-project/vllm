@@ -2592,6 +2592,82 @@ async fn client_sends_large_multimodal_tensor_as_aux_frame() {
     client.shutdown().await.unwrap();
 }
 
+/// With an engine-side LRU receiver cache, a repeated item is sent without
+/// data, and an item the engine reports missing is sent with data again.
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn client_omits_cached_multimodal_data_until_engine_reports_miss() {
+    init_tracing();
+    let ipc = IpcNamespace::new().unwrap();
+    let handshake_address = ipc.handshake_endpoint();
+    let ready_response = EngineCoreReadyResponse {
+        mm_receiver_cache_bytes: Some(1 << 20),
+        ..crate::mock_engine::default_ready_response()
+    };
+
+    let (shutdown_tx, engine_task) = crate::test_utils::spawn_mock_engine_task_with_ready(
+        handshake_address.clone(),
+        EngineId::from_engine_index(0),
+        ready_response,
+        move |dealer, push| {
+            Box::pin(async move {
+                for (request_id, expect_data, report_miss) in [
+                    ("req-1", true, false),
+                    ("req-2", false, true),
+                    ("req-3", true, false),
+                ] {
+                    let add = recv_engine_message(dealer).await;
+                    let request: EngineCoreRequest = rmp_serde::from_slice(&add[1]).unwrap();
+                    assert_eq!(request.request_id, request_id);
+                    let feature = &request.mm_features.as_ref().unwrap()[0];
+                    assert_eq!(feature.data.is_some(), expect_data, "{request_id}");
+
+                    let mut output =
+                        request_output(request_id, vec![], Some(EngineCoreFinishReason::Length));
+                    if report_miss {
+                        output.mm_cache_miss_hashes = Some(vec!["processor-hash".to_string()]);
+                    }
+                    send_outputs(
+                        push,
+                        RequestBatchOutputs {
+                            outputs: vec![output],
+                            finished_requests: Some(BTreeSet::from([request_id.to_string()])),
+                            ..Default::default()
+                        }
+                        .into(),
+                    )
+                    .await;
+                }
+            })
+        },
+    );
+
+    let client = connect_client_with_ipc(
+        handshake_test_config(
+            handshake_address,
+            1,
+            "test-model",
+            Duration::from_secs(2),
+            0,
+            None,
+        ),
+        &ipc,
+    )
+    .await;
+
+    for request_id in ["req-1", "req-2", "req-3"] {
+        let request = EngineCoreRequest {
+            request_id: request_id.to_string(),
+            ..sample_multimodal_request()
+        };
+        let outputs = client.call(request).await.unwrap().into_outputs().collect::<Vec<_>>().await;
+        assert!(outputs.iter().all(Result::is_ok), "{request_id}");
+    }
+
+    let _ = shutdown_tx.send(());
+    engine_task.await.unwrap();
+    client.shutdown().await.unwrap();
+}
+
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn multi_engine_client_shares_transport_and_routes_by_inflight_count() {
     init_tracing();
@@ -4228,6 +4304,7 @@ fn python_msgpack_fixtures_match_rust_encoding_and_record_nixl_metrics() {
     assert_eq!(ready_response.effective_attention_block_size, Some(64));
     assert_eq!(ready_response.config_hash.as_deref(), Some("0123456789"));
     assert!(ready_response.enable_expert_parallel);
+    assert_eq!(ready_response.mm_receiver_cache_bytes, Some(4 << 30));
     assert_eq!(
         ready_response.cache_config_info,
         Some(BTreeMap::from([

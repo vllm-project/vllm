@@ -159,6 +159,9 @@ class EngineCoreReadyResponse:
     # hashing failed) and whether expert parallelism is enabled.
     config_hash: str | None = None
     enable_expert_parallel: bool = False
+    # Byte capacity of the engine's LRU multi-modal receiver cache, or None when
+    # the engine has none. Lets non-Python frontends mirror it as a sender cache.
+    mm_receiver_cache_bytes: int | None = None
 
 
 class EngineCoreRequest(
