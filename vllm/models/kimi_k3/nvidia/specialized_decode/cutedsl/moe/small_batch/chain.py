@@ -2,9 +2,9 @@
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 """Small-batch MoE chains: front -> routed experts -> (shared expert) -> polling tail.
 
-TP8 B1: ``MoeFrontTP8`` -> ``ClusterExpertsTP8`` -> ``MoeSharedTP8`` -> ``MoeTail``
-(front_poll, trigger 3). TP16 B1/B2: ``MoeFrontTP16`` (shared expert inside, on
-designated SMs) -> ``ClusterExpertsTP16`` -> ``MoeTail``. The o-projection consumer
+TP8 B1: `MoeFrontTP8` -> `ClusterExpertsTP8` -> `MoeSharedTP8` -> `MoeTail`
+(front_poll, trigger 3). TP16 B1/B2: `MoeFrontTP16` (shared expert inside, on
+designated SMs) -> `ClusterExpertsTP16` -> `MoeTail`. The o-projection consumer
 publishes the post-attention row into the x_moe mailbox (parity = layer index % 2) and
 bumps an epoch hint; the co-resident front has staged its weights by then. MoE tail
 polls the G/W/S slots (three parities, 0xffff-armed, re-armed after use) and publishes

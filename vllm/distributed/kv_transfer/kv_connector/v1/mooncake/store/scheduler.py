@@ -52,24 +52,24 @@ def _partial_tail_non_mamba_puts(
 ) -> list[BoundaryPut]:
     """Locate the non-Mamba blocks a partial-tail save publishes.
 
-    A later request resumes at the prompt's Mamba checkpoint (``boundary``) only
+    A later request resumes at the prompt's Mamba checkpoint (`boundary`) only
     if both pieces of KV are stored:
 
-    - Mamba groups: the state at ``boundary``, handed off by the core as a
+    - Mamba groups: the state at `boundary`, handed off by the core as a
       boundary put of its own, so Mamba groups are not listed here.
     - Other groups: the KV from the last LCM-aligned normal save up to
-      ``boundary`` plus the group's EAGLE proof margin (``proof_end``). Each
-      block is keyed by the hash at its end, clipped to ``proof_end``.
+      `boundary` plus the group's EAGLE proof margin (`proof_end`). Each
+      block is keyed by the hash at its end, clipped to `proof_end`.
 
     Groups whose proof is not computed yet are omitted. For example, with LCM
     16, blocks of 4 tokens, and a checkpoint at 44, the full-attention blocks
     are 8-10, keyed at 36, 40 and 44.
 
     A Mamba state handed off at any other position, i.e. a shared-prefix
-    junction (``--enable-mamba-shared-prefix-checkpoint``), adds no puts here.
+    junction (`--enable-mamba-shared-prefix-checkpoint`), adds no puts here.
 
-    ``block_sizes`` are the per-group block sizes, indexed like
-    ``req_meta.block_ids``.
+    `block_sizes` are the per-group block sizes, indexed like
+    `req_meta.block_ids`.
     """
     mamba_tails = [
         put.num_tokens
@@ -234,7 +234,7 @@ class MooncakeStoreScheduler:
     ) -> tuple[int | None, bool]:
         """Check for external KV cache hit.
 
-        Returns ``(None, False)`` when an async lookup is still in flight,
+        Returns `(None, False)` when an async lookup is still in flight,
         signaling the scheduler to retry this request on a later step.
         """
         if not self.enable_lookup:
@@ -706,8 +706,8 @@ class MooncakeStoreScheduler:
         Flushed in the step they arrive: the CoW copy is enqueued before the
         connector event records, so this step's event fences the exact block.
         Entries ride the request's save meta when present, else an
-        offload-only ReqMeta (``token_len_chunk=0`` skips the normal save,
-        ``can_save=True`` takes the normal enqueue and store-job pinning path).
+        offload-only ReqMeta (`token_len_chunk=0` skips the normal save,
+        `can_save=True` takes the normal enqueue and store-job pinning path).
         """
         save_metas = {m.req_id: m for m in meta.requests if m.can_save}
         for req_id, entries in offloads.items():
@@ -786,14 +786,14 @@ class MooncakeStoreScheduler:
         return bool(self._pinned_saves)
 
     def reset_store(self) -> bool:
-        """Trigger a global ``remove_all(force=True)`` on the Mooncake master.
+        """Trigger a global `remove_all(force=True)` on the Mooncake master.
 
         Routes through the existing LookupKey ZMQ admin channel to worker
-        rank 0, which owns the ``MooncakeDistributedStore`` handle.
+        rank 0, which owns the `MooncakeDistributedStore` handle.
 
         Ordering assumption: caller (typically
-        ``Scheduler.reset_connector_cache``, invoked via
-        ``reset_prefix_cache(reset_connector=True)``) MUST ensure no
+        `Scheduler.reset_connector_cache`, invoked via
+        `reset_prefix_cache(reset_connector=True)`) MUST ensure no
         in-flight Mooncake lookups or transfers. For RL workflows this is
         satisfied at the step boundary after weight updates and rollout
         drain. Violating this can allow stale KV to be served on the next

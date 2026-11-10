@@ -381,8 +381,7 @@ class LLM(
 
         PoolingOfflineMixin.__init__(self)
 
-        # Cache for __repr__ to avoid repeated collective_rpc calls
-        self._cached_repr: str | None = None
+        self._cached_model_inspection: str | None = None
 
     @classmethod
     def from_engine_args(cls, engine_args: EngineArgs) -> "LLM":
@@ -843,7 +842,9 @@ class LLM(
             reset_running_requests, reset_connector
         )
 
-    def sleep(self, level: int = 1, mode: PauseMode = "abort"):
+    def sleep(
+        self, level: int = 1, mode: PauseMode = "abort", reset_connector: bool = True
+    ):
         """Put the engine to sleep. The engine should not process any requests.
         The caller should guarantee that no requests are being processed
         during the sleep period, before `wake_up` is called.
@@ -865,17 +866,25 @@ class LLM(
                            CPU memory pressure.
             mode: How to handle any existing requests, can be "abort", "wait",
                 or "keep".
+            reset_connector: Also reset the KV connector's cache, such as
+                blocks offloaded to CPU. Set `False` only if the weights do
+                not change before `wake_up`. Ignored at level 0.
 
         """
-        self.llm_engine.sleep(level=level, mode=mode)
+        self.llm_engine.sleep(level=level, mode=mode, reset_connector=reset_connector)
 
-    def release_kv_cache_memory(self) -> None:
+    def release_kv_cache_memory(self, reset_connector: bool = True) -> None:
         """Release the GPU physical memory backing the KV cache.
 
-        Requires a completed ``sleep(level=0)`` and resident executor memory.
-        Restore with ``wake_up(tags=["kv_cache"])``; kept requests are recomputed.
+        Requires a completed `sleep(level=0)` and resident executor memory.
+        Restore with `wake_up(tags=["kv_cache"])`; kept requests are recomputed.
+
+        Args:
+            reset_connector: Also reset the KV connector's cache; see
+                [sleep][vllm.LLM.sleep].
+
         """
-        self.llm_engine.release_kv_cache_memory()
+        self.llm_engine.release_kv_cache_memory(reset_connector)
 
     def wake_up(self, tags: list[str] | None = None) -> bool:
         """Wake up the engine from sleep mode. See the [sleep][vllm.LLM.sleep]
@@ -908,15 +917,13 @@ class LLM(
         """
         return self.llm_engine.get_metrics()
 
-    def __repr__(self) -> str:
-        """Return a transformers-style hierarchical view of the model."""
-        # Cache the result to avoid repeated collective_rpc calls
-        if self._cached_repr is None:
+    def get_model_inspection(self) -> str:
+        """Return a cached transformers-style hierarchical view of the model."""
+        if self._cached_model_inspection is None:
             results = self.llm_engine.collective_rpc("get_model_inspection")
-            # In distributed settings, we get results from all workers
-            # Just return the first one (they should all be the same)
-            if results:
-                self._cached_repr = results[0]
-            else:
-                self._cached_repr = f"LLM(model={self.model_config.model!r})"
-        return self._cached_repr
+            self._cached_model_inspection = results[0] if results else repr(self)
+        return self._cached_model_inspection
+
+    def __repr__(self) -> str:
+        """Return a local model summary without querying workers."""
+        return f"LLM(model={self.model_config.model!r})"

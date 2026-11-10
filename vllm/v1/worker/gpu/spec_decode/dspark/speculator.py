@@ -2,18 +2,18 @@
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 """DSpark speculator: semi-autoregressive parallel drafting.
 
-DSpark drafts a block of ``num_speculative_tokens`` tokens in one parallel pass
+DSpark drafts a block of `num_speculative_tokens` tokens in one parallel pass
 (reusing the DFlash machinery: context-KV precompute + a query-block forward),
 then injects intra-block dependency with a lightweight sequential Markov head.
 
 Differences from DFlash:
-  * Anchor-as-first-prediction: each request emits exactly ``N =
-    num_speculative_tokens`` query tokens (anchor + N-1 noise), NOT ``1 + N``.
+  * Anchor-as-first-prediction: each request emits exactly `N =
+    num_speculative_tokens` query tokens (anchor + N-1 noise), NOT `1 + N`.
     Every query position is a prediction (the anchor predicts the first draft
-    token), so we sample at all N positions and ``sample_pos = query_pos + 1``
+    token), so we sample at all N positions and `sample_pos = query_pos + 1`
     (standard next-token), whereas DFlash's masks sit AT the predicted position.
-    This is the ``sample_from_anchor`` path in the shared prepare-inputs kernel.
-    Speculators-format checkpoints instead use the DFlash ``1 + N`` fill-in
+    This is the `sample_from_anchor` path in the shared prepare-inputs kernel.
+    Speculators-format checkpoints instead use the DFlash `1 + N` fill-in
     layout (anchor is the bonus token).
   * Sequential Markov sampling: instead of DFlash's single parallel sample, we
     sample left-to-right, adding a prefix-dependent Markov bias derived from the
@@ -24,7 +24,7 @@ backbone forward AND the sequential Markov sampling.
 
 Under batch-sharded sampling, draft steps also shard the sequential sampling
 across TP ranks: each rank runs the Markov loop only for the requests it owns
-(the same owners as verification), see ``_sample_sequential_sharded``.
+(the same owners as verification), see `_sample_sequential_sharded`.
 """
 
 from typing import Any
@@ -418,7 +418,7 @@ class DSparkSpeculator(DFlashSpeculator):
 
         Candidate selection is done once for all draft positions. At each
         sequential step, the selected logits are corrected in place and every
-        other entry is set to ``-inf``. The normal dense sampling and rejection
+        other entry is set to `-inf`. The normal dense sampling and rejection
         paths then consume that truncated distribution unchanged.
         """
         assert self._draft_topk is not None
