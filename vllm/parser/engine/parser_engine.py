@@ -1337,10 +1337,11 @@ class ParserEngine(Parser):
                 stack.append("]")
             elif c in "}]" and stack:
                 stack.pop()
-        suffix = ""
         if escape:
-            # A trailing escape would swallow the quote that closes the string.
-            suffix += "\\"
+            # A lone trailing backslash cannot be completed without inventing
+            # the character it escapes.
+            return ""
+        suffix = ""
         if in_string:
             suffix += '"'
         else:

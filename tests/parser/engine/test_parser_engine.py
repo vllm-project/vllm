@@ -1833,7 +1833,6 @@ class TestJsonPrefixTerminator:
         "prefix, expected",
         [
             ('{"a": "x', '"}'),
-            ('{"a": "x\\', '\\"}'),
             ('{"a": [', "]}"),
             ('{"a": {"b": "x', '"}}'),
             # A dangling separator is completed with null so the prefix parses;
@@ -1845,6 +1844,7 @@ class TestJsonPrefixTerminator:
             # An object after a comma cannot be completed without inventing a key.
             ('{"a": 1, ', ""),
             # A partial escape cannot be completed without inventing characters.
+            ('{"t": "ab\\', ""),
             ('{"t": "ab\\u12', ""),
             ('{"flag": tr', ""),
             ("", ""),
