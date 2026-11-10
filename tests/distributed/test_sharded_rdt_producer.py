@@ -324,9 +324,9 @@ class TestFreeBarrier:
     def test_freed_groups_are_reported_back_to_the_engine(self, server_factory):
         """The engine holds the CUDA-IPC export refs and may only drop them once
         the server says the group is gone — and it hears that ONLY through
-        ``wait_freed`` / ``end_sync``, never a publish return (a freed notice
+        `wait_freed` / `end_sync`, never a publish return (a freed notice
         riding an unharvested async publish while the engine blocks in
-        ``wait_freed`` would wedge the loop)."""
+        `wait_freed` would wedge the loop)."""
         server = server_factory()
         server.begin_sync(1)
         _publish(server, GI_A, GROUP_A)
@@ -932,7 +932,7 @@ class TestFakeServerAgreesWithTheRealOne:
 
 class TestExportRing:
     """The packed export path. Its one hard invariant is that the trainer packs
-    a group exactly the way ``publish_group`` rebuilds it — a layout
+    a group exactly the way `publish_group` rebuilds it — a layout
     disagreement would serve the wrong bytes with nothing downstream to catch
     it."""
 
@@ -1109,8 +1109,8 @@ def sharing_server(server_factory):
     """A producer whose serve slots are plain CPU tensors.
 
     The pack is the only part of the serve path that touches a buffer, so
-    replacing the one allocation seam (``_new_serve_buffer``, which would
-    ``torch.empty(..., device="cuda")`` and register the result with NIXL) puts
+    replacing the one allocation seam (`_new_serve_buffer`, which would
+    `torch.empty(..., device="cuda")` and register the result with NIXL) puts
     the whole shared-pack path within reach of a CPU test.
     """
 
@@ -1141,7 +1141,7 @@ def _blob_bytes(server, name):
 class TestSharedServeSlots:
     """One registered slot serving several inference deployments.
 
-    Consumers whose ids differ by a multiple of ``workers_per_replica`` are the
+    Consumers whose ids differ by a multiple of `workers_per_replica` are the
     same worker of different deployments: same parallel config, same baked plan,
     same chunk sequence, byte-identical pack layout. They rendezvous per chunk,
     the last arrival packs, and every one of them returns that blob, so R
@@ -1199,7 +1199,7 @@ class TestSharedServeSlots:
 
     def test_the_slot_follows_the_consumers_issue_order(self, sharing_server):
         """The invariant slot safety rests on. The consumer drains pull i before
-        issuing i+K, so choosing the slot as ``seq % K`` means a slot is only
+        issuing i+K, so choosing the slot as `seq % K` means a slot is only
         repacked once the read of its previous contents is over. Deriving it from
         a per-call counter on the producer instead (execution order) can hand a
         slot to a pull whose predecessor is still being read, because Ray may
@@ -1229,7 +1229,7 @@ class TestSharedServeSlots:
         assert slots == {0: 0, 1: 1, 2: 0}, slots
 
     def test_a_seqless_call_is_refused(self, sharing_server):
-        """The slot comes from ``seq``, so a caller that sends none cannot be
+        """The slot comes from `seq`, so a caller that sends none cannot be
         served safely."""
         server = sharing_server(workers_per_replica=2)
         server.begin_sync(1, [0])
@@ -1289,7 +1289,7 @@ class TestSharedServeSlots:
 
 
 class TestSharedReservation:
-    """``reserve_serve_buffer`` under sharing: one ring per GROUP, and the
+    """`reserve_serve_buffer` under sharing: one ring per GROUP, and the
     init-time check that the group's members pull the same chunks."""
 
     def test_matching_plans_reserve_one_ring_between_them(self, sharing_server):

@@ -202,7 +202,8 @@ class B12xPagedAttentionBackend(AttentionBackend):
 
     @classmethod
     def get_supported_head_sizes(cls) -> list[int]:
-        return [64, 128, 192, 256]
+        # head_dim 64 is excluded until flashinfer-ai/flashinfer#6977 is fixed.
+        return [128, 192, 256]
 
     @classmethod
     def supports_sink(cls) -> bool:
