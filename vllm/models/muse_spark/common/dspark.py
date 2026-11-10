@@ -37,7 +37,7 @@ from vllm.model_executor.models.utils import (
 )
 from vllm.model_executor.utils import refill_derived
 from vllm.models.muse_spark.common.layers import (
-    MuseSpark1xRMSNorm,
+    MuseSparkRMSNorm,
     materialize_residual_path_constants,
 )
 from vllm.models.muse_spark.nvidia.specialized_decode.runtime import decode_backend
@@ -46,12 +46,12 @@ from vllm.transformers_utils.configs.muse_spark import MuseSparkDSparkConfig
 
 if TYPE_CHECKING or not current_platform.is_rocm():
     from vllm.models.muse_spark.nvidia.model import (
-        MuseSpark1xDecoderLayer,
+        MuseSparkDecoderLayer,
         gather_columns,
     )
 else:
     from vllm.models.muse_spark.amd.model import (  # type: ignore[assignment]
-        MuseSpark1xDecoderLayer,
+        MuseSparkDecoderLayer,
     )
 
 if TYPE_CHECKING:
@@ -68,7 +68,7 @@ logger = init_logger(__name__)
 
 def _use_column_parallel_fc(enabled: bool, hidden_size: int, tp_size: int) -> bool:
     """Whether to try the column-parallel draft fc, which the specialized
-    decode (``enabled``) selects."""
+    decode (`enabled`) selects."""
     if not enabled:
         return False
     if tp_size == 1 or hidden_size % tp_size != 0:
@@ -98,7 +98,7 @@ def _keep_column_parallel_fc(fc: ColumnParallelLinear) -> bool:
 
 def _uses_specialized_decode(vllm_config: VllmConfig) -> bool:
     """Whether the deployment selects the Muse Spark specialized decode
-    (``additional_config={"decode_backend": "latency_specialized"}``) for the
+    (`additional_config={"decode_backend": "latency_specialized"}`) for the
     draft. Not supported on ROCm, where the draft keeps the stock path."""
     if decode_backend(vllm_config) != "latency_specialized":
         return False
@@ -114,7 +114,7 @@ def _uses_specialized_decode(vllm_config: VllmConfig) -> bool:
 def _draft_logits_values(speculator: "DSparkSpeculator") -> torch.Tensor | None:
     """The speculator's draft logits cache, [max_num_reqs, steps, vocab], or
     None. Replicated: the speculator shards it only for a draft without the
-    ``sample_sequential`` hook."""
+    `sample_sequential` hook."""
     cache = speculator.draft_logits
     if cache is None:
         return None
@@ -122,7 +122,7 @@ def _draft_logits_values(speculator: "DSparkSpeculator") -> torch.Tensor | None:
     return cache.values
 
 
-class MuseSparkDSparkDecoderLayer(MuseSpark1xDecoderLayer):
+class MuseSparkDSparkDecoderLayer(MuseSparkDecoderLayer):
     """Dense Muse layer with the draft's materialized, gated FP32 residual."""
 
     def __init__(self, vllm_config: VllmConfig, prefix: str = "") -> None:
@@ -234,7 +234,7 @@ class MuseSparkDSparkModel(DFlashQwen3Model):
                 prefix=maybe_prefix(prefix, "fc"),
                 return_bias=False,
             )
-        self.hidden_norm = MuseSpark1xRMSNorm(
+        self.hidden_norm = MuseSparkRMSNorm(
             config.hidden_size,
             eps=config.rms_norm_eps,
             has_weight=config.norm_affine,
@@ -247,7 +247,7 @@ class MuseSparkDSparkModel(DFlashQwen3Model):
             )
             for layer_idx in range(config.num_hidden_layers)
         )
-        self.norm = MuseSpark1xRMSNorm(
+        self.norm = MuseSparkRMSNorm(
             config.hidden_size,
             eps=config.rms_norm_eps,
             has_weight=config.norm_affine,
@@ -329,8 +329,6 @@ class MuseSparkDSparkModel(DFlashQwen3Model):
             )
         ):
             return
-        if not hasattr(self, "_num_attn_layers"):
-            self._build_fused_kv_buffers()
         num_ctx = context_states.shape[0]
         num_layers = self._num_attn_layers
         all_kv_flat = self._project_muse_context_kv(context_states)
@@ -470,11 +468,11 @@ class MuseSparkDSparkForCausalLM(Qwen3DSparkForCausalLM):
         return logits
 
     def output_logit_transform_params(self) -> tuple[float, float | None]:
-        """``(multiplier, soft_cap)`` of ``apply_output_logit_transform``.
+        """`(multiplier, soft_cap)` of `apply_output_logit_transform`.
 
         The fused DSpark Markov loop computes the transform from these values
-        (``logits * multiplier``, then ``soft_cap * tanh(x / soft_cap)`` unless
-        ``soft_cap`` is None) instead of calling it, so a subclass that changes
+        (`logits * multiplier`, then `soft_cap * tanh(x / soft_cap)` unless
+        `soft_cap` is None) instead of calling it, so a subclass that changes
         the transform must override this too.
         """
         return self.output_multiplier, self.output_soft_cap_temp
@@ -485,7 +483,7 @@ class MuseSparkDSparkForCausalLM(Qwen3DSparkForCausalLM):
         num_reqs: int,
         head_hidden: torch.Tensor,
     ) -> bool:
-        """The ``sample_sequential`` hook under the specialized decode, which
+        """The `sample_sequential` hook under the specialized decode, which
         DSparkSpeculator._sample_sequential asks first: the fused Markov
         sampling loop samples the drafts, and this returns True."""
         if self._markov_sampler is None:
@@ -548,23 +546,14 @@ class MuseSparkDSparkForCausalLM(Qwen3DSparkForCausalLM):
 
     def load_weights(self, weights: Iterable[tuple[str, torch.Tensor]]) -> set[str]:
         model_weights = {}
-        includes_lm_head = False
-        includes_d2t = False
         for name, loaded_weight in weights:
             if name == "t2d":
                 continue
             if name == "d2t":
                 name = "draft_id_to_target_id"
-                includes_d2t = True
             elif "lm_head" not in name:
                 name = "model." + name
-            if "lm_head" in name:
-                includes_lm_head = True
             model_weights[name] = loaded_weight
-        if not includes_lm_head:
-            raise ValueError("Muse Spark DSpark requires its own lm_head")
-        if not includes_d2t:
-            raise ValueError("Muse Spark DSpark requires a d2t vocabulary mapping")
         mapper = WeightsMapper(
             orig_to_new_substr={
                 "model.embed_tokens": None,
