@@ -978,6 +978,7 @@ class DeepseekV32IndexerMetadataBuilder(AttentionMetadataBuilder):
     # so this is None; its own split uses self.decode_threshold.
     reorder_batch_threshold: int | None = None
     requires_block_table_width = True
+    fused_decode_metadata = False
 
     @classmethod
     def get_cudagraph_support(
@@ -1196,6 +1197,14 @@ class DeepseekV32IndexerMetadataBuilder(AttentionMetadataBuilder):
         out = self.decode_seq_lens_buffer[:num_decodes]
         out.copy_(local_seq_lens)
         return out
+
+    def _build_decode_rows(
+        self,
+        common_attn_metadata: CommonAttentionMetadata,
+        num_decodes: int,
+        num_decode_tokens: int,
+    ) -> tuple[torch.Tensor, torch.Tensor, torch.Tensor]:
+        raise NotImplementedError
 
     def _prepare_decode_tensors(
         self,
@@ -1681,7 +1690,7 @@ class DeepseekV32IndexerMetadataBuilder(AttentionMetadataBuilder):
         decode_metadata = None
         if num_decodes > 0:
             assert num_decode_tokens <= self.expanded_block_table_buffer.shape[0]
-            if not self.supports_varlen:
+            if not (self.supports_varlen or self.fused_decode_metadata):
                 torch.diff(
                     common_attn_metadata.query_start_loc[: num_decodes + 1],
                     out=self.decode_lens_buffer[:num_decodes],
@@ -1785,6 +1794,12 @@ class DeepseekV32IndexerMetadataBuilder(AttentionMetadataBuilder):
                     global_seq_lens_for_decode = self.global_decode_seq_lens_buffer[
                         :num_decode_tokens
                     ]
+            elif self.fused_decode_metadata:
+                assert dcp_local_seq_lens is None
+                seq_lens, block_table, decode_lens = self._build_decode_rows(
+                    common_attn_metadata, num_decodes, num_decode_tokens
+                )
+                requires_padding = False
             else:
                 seq_lens, block_table, decode_lens, batch_size, requires_padding = (
                     self._prepare_decode_tensors(
@@ -1817,7 +1832,7 @@ class DeepseekV32IndexerMetadataBuilder(AttentionMetadataBuilder):
 
             # For DeepseekV4 (compress_ratio > 1), the indexer KV cache stores
             # compressed tokens. Convert uncompressed seq_lens to compressed.
-            if self.compress_ratio > 1:
+            if self.compress_ratio > 1 and not self.fused_decode_metadata:
                 if seq_lens_is_buffer_view:
                     seq_lens //= self.compress_ratio
                 else:
