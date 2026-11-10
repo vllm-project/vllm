@@ -1,8 +1,9 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
-"""The copy-engine PP transport carries every step's tensors intact through a
-PP chain, with varying sizes and stages that take turns lagging behind, and
-every rank makes the same transport choice when one rank cannot set it up.
+"""The copy-engine PP transport (CUDA copy engines, or SDMA engines on ROCm
+gfx950) carries every step's tensors intact through a PP chain, with varying
+sizes and stages that take turns lagging behind, and every rank makes the same
+transport choice when one rank cannot set it up.
 
 Every scenario runs on one shared set of Ray workers (one per GPU): a worker
 keeps its vLLM import and CUDA context across scenarios and only
@@ -26,11 +27,11 @@ from vllm.distributed.parallel_state import (
     destroy_model_parallel,
     get_pp_group,
 )
-from vllm.distributed.pp_transport import create_pp_transport
-from vllm.distributed.pp_transport.copy_engine import (
-    CopyEngineTransport,
-    CopyEngineUnavailable,
+from vllm.distributed.pp_transport import (
+    copy_engine_transport_class,
+    create_pp_transport,
 )
+from vllm.distributed.pp_transport.copy_engine import CopyEngineUnavailable
 from vllm.platforms import current_platform
 from vllm.sequence import IntermediateTensors
 
@@ -94,7 +95,7 @@ class PPTransportWorker:
                     k: torch.zeros(MAX_ROWS, WIDTH, dtype=torch.bfloat16, device="cuda")
                     for k in KEYS
                 }
-            transport = CopyEngineTransport(_config(), pp_group, persistent)
+            transport = copy_engine_transport_class()(_config(), pp_group, persistent)
 
             lag = torch.randn(4096, 4096, device="cuda")
             for step in range(STEPS):
@@ -161,6 +162,7 @@ class PPTransportWorker:
             os.environ["VLLM_PP_TRANSPORT"] = "copy_engine"
             with pytest.raises(CopyEngineUnavailable, match="injected open failure"):
                 create_pp_transport(_config(), persistent)
+            # Under "auto", NCCL: on ROCm always, elsewhere by the failure.
             os.environ["VLLM_PP_TRANSPORT"] = "auto"
             assert create_pp_transport(_config(), persistent) is None
 
@@ -244,12 +246,19 @@ def _multi_gpu(*, num_gpus: int):
 
 
 def _run_scenario(method: str, pp_size: int) -> None:
-    # NVML, not CUDA: the test process must not initialize CUDA.
+    # NVML / amdsmi, not CUDA: the test process must not initialize CUDA.
+    if current_platform.is_rocm():
+        from vllm.platforms.rocm import on_gfx950
+
+        supported = on_gfx950()
+    else:
+        supported = current_platform.is_cuda()
     if not (
-        current_platform.is_cuda()
-        and current_platform.is_fully_connected(list(range(pp_size)))
+        supported and current_platform.is_fully_connected(list(range(pp_size)))
     ):
-        pytest.skip("copy engines need NVLink-connected CUDA GPUs")
+        pytest.skip(
+            "copy engines need NVLink-connected CUDA GPUs or xGMI-connected gfx950"
+        )
     port = get_open_port()
     refs = [getattr(w, method).remote(pp_size, port) for w in _POOL.get()]
     try:

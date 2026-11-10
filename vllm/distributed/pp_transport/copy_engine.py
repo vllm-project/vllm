@@ -18,12 +18,15 @@ the CPU group.
 The waits omit CU_STREAM_WAIT_VALUE_FLUSH, which x86 hosts do not support. As
 in NCCL's zero-SM copy-engine path, this relies on NVLink delivering the peer
 copy before the flag write that follows it, so all PP GPUs must be NVLink peers.
+
+On ROCm, `sdma.SdmaTransport` keeps this protocol and replaces the platform
+hooks at the end of `CopyEngineTransport` (the peer copy, the flag operations).
 """
 
 import contextlib
 from collections import deque
 from types import SimpleNamespace
-from typing import TYPE_CHECKING, Any, NamedTuple
+from typing import TYPE_CHECKING, Any, NamedTuple, Protocol
 
 import torch
 
@@ -117,6 +120,12 @@ def _write_flag(stream: torch.cuda.Stream, addr: int, value: int) -> None:
     )
 
 
+class _CopyDone(Protocol):
+    """A step's peer copy, as `_peer_copy` returns it."""
+
+    def query(self) -> bool: ...
+
+
 class CopyEngineUnavailable(RuntimeError):
     """Copy engines are not usable. Raised on every rank alike."""
 
@@ -143,8 +152,8 @@ class CopyEngineTransport(PPTransport):
 
         # The same on every rank, so these raise before any collective.
         parallel_config = vllm_config.parallel_config
-        if not current_platform.is_cuda():
-            raise CopyEngineUnavailable("PP copy engines need CUDA")
+        if (reason := self._platform_unavailable()) is not None:
+            raise CopyEngineUnavailable(reason)
         if (
             parallel_config.tensor_parallel_size != 1
             or parallel_config.prefill_context_parallel_size != 1
@@ -174,7 +183,7 @@ class CopyEngineTransport(PPTransport):
                 # Best effort: every rank must still raise the same error.
                 with contextlib.suppress(Exception):
                     for p in opened:
-                        _close_peer(p)
+                        self._close_peer(p)
                     for p in owned:
                         ops.free_shared_buffer(p)
                 raise CopyEngineUnavailable(
@@ -183,29 +192,23 @@ class CopyEngineTransport(PPTransport):
             return [o for o, _ in gathered]
 
         def allocate_recv() -> tuple[Any, ...]:
-            import cuda.bindings.driver as cu
-
             layout = _layout(persistent) if persistent is not None else {}
             device = torch.accelerator.current_device_index()
-            attr = cu.CUdevice_attribute
-            memops = attr.CU_DEVICE_ATTRIBUTE_CAN_USE_64_BIT_STREAM_MEM_OPS
-            dev = _check(cu.cuDeviceGet(device))
-            if not _check(cu.cuDeviceGetAttribute(memops, dev)):
-                raise RuntimeError(f"GPU {device} lacks 64-bit stream memory ops")
+            info = self._device_info(device)
             # Zeroed before the handle is shared.
             ptr, handle = ops.allocate_shared_buffer_and_handle(
                 _DATA_OFFSET + _nbytes(layout)
             )
             owned.append(ptr)
             phys = current_platform.visible_device_id_to_physical_device_id(device)
-            return ptr, handle, layout, phys
+            return ptr, handle, layout, phys, info
 
         ranks = step(allocate_recv)
-        ptr, _, layout, _ = ranks[rank]
+        ptr, _, layout, _, _ = ranks[rank]
 
         def connect() -> tuple[int | None, int | None, int | None]:
             if not current_platform.is_fully_connected([r[3] for r in ranks]):
-                raise RuntimeError("PP GPUs are not all NVLink-connected")
+                raise RuntimeError(f"PP GPUs are not all {self._LINK} peers")
             prev_ptr = next_ptr = send_ptr = None
             if not pp_group.is_first_rank:
                 prev_ptr = ops.open_mem_handle(ranks[rank - 1][1])
@@ -218,6 +221,7 @@ class CopyEngineTransport(PPTransport):
                     _nbytes(ranks[rank + 1][2])
                 )
                 owned.append(send_ptr)
+                self._setup_sender(ranks[rank + 1][4])
             return prev_ptr, next_ptr, send_ptr
 
         prev_ptr, next_ptr, send_ptr = step(connect)[rank]
@@ -241,9 +245,9 @@ class CopyEngineTransport(PPTransport):
             self.stream = torch.cuda.Stream()
             self.seq = 0
             # The send buffer's last peer copy.
-            self.peer_done: torch.cuda.Event | None = None
+            self.peer_done: _CopyDone | None = None
             # Metadata sends with their step's peer_done.
-            self.pending: deque[tuple[Any, torch.cuda.Event]] = deque()
+            self.pending: deque[tuple[Any, _CopyDone]] = deque()
 
     def recv(self, pp_group: "GroupCoordinator") -> IntermediateTensors:
         """This step's tensors, as views of the persistent tensors. The wait
@@ -258,16 +262,14 @@ class CopyEngineTransport(PPTransport):
 
         def copy_in() -> None:
             stream = torch.cuda.current_stream()
-            _wait_flag(stream, self.full, meta["seq"])
+            self._wait_flag(stream, self.full, meta["seq"])
             for key, view in src.items():
                 out[key].copy_(view)
-            _write_flag(stream, self.peer_empty, meta["seq"])
+            self._write_flag(stream, self.peer_empty, meta["seq"])
 
         return AsyncIntermediateTensors(out, comm_postprocess=[copy_in])
 
     def send(self, tensors: dict, pp_group: "GroupCoordinator") -> None:
-        from cuda.bindings import runtime as cudart
-
         rows = {k: t.shape[0] for k, t in tensors.items()}
         for key, t in tensors.items():
             r = self.send_layout.get(key)
@@ -282,7 +284,7 @@ class CopyEngineTransport(PPTransport):
         # Main stream: pack once the previous peer copy is done.
         main = torch.cuda.current_stream()
         if self.peer_done is not None:
-            main.wait_event(self.peer_done)
+            self._wait_done(main, self.peer_done)
         for key, dst in _views(self.send_buf, self.send_layout, rows).items():
             dst.copy_(tensors[key])
         packed = torch.cuda.Event()
@@ -290,7 +292,51 @@ class CopyEngineTransport(PPTransport):
 
         # Side stream: peer copy once the receive region is empty, then publish.
         self.stream.wait_event(packed)
-        _wait_flag(self.stream, self.empty, self.seq - 1)
+        self._wait_flag(self.stream, self.empty, self.seq - 1)
+        self.peer_done = self._peer_copy(rows)
+
+        # gloo sends complete only in wait(), which blocks until the peer
+        # receives. Step k+1's copy waited for empty >= k, so k was received.
+        self.pending.append((meta_work, self.peer_done))
+        while len(self.pending) > 1 and self.pending[1][1].query():
+            self.pending.popleft()[0].wait()
+
+    # Platform hooks; `sdma.SdmaTransport` (ROCm) overrides them.
+
+    _LINK = "NVLink"
+    _wait_flag = staticmethod(_wait_flag)
+    _write_flag = staticmethod(_write_flag)
+    _close_peer = staticmethod(_close_peer)
+
+    @classmethod
+    def _platform_unavailable(cls) -> str | None:
+        """Why this platform cannot run the transport, or None."""
+        from vllm.platforms import current_platform
+
+        return None if current_platform.is_cuda() else "PP copy engines need CUDA"
+
+    def _device_info(self, device: int) -> Any:
+        """Raises if `device` cannot run the transport. The result reaches the
+        previous stage's `_setup_sender`."""
+        import cuda.bindings.driver as cu
+
+        attr = cu.CUdevice_attribute
+        memops = attr.CU_DEVICE_ATTRIBUTE_CAN_USE_64_BIT_STREAM_MEM_OPS
+        dev = _check(cu.cuDeviceGet(device))
+        if not _check(cu.cuDeviceGetAttribute(memops, dev)):
+            raise RuntimeError(f"GPU {device} lacks 64-bit stream memory ops")
+        return None
+
+    def _setup_sender(self, next_info: Any) -> None:
+        """Sender state beyond the buffers, given the next stage's
+        `_device_info`."""
+
+    def _peer_copy(self, rows: dict[str, int]) -> _CopyDone:
+        """Queue, behind `self.stream`'s work, the copy of the send buffer's
+        first `rows` rows into the next stage's receive region, then publish
+        `full = self.seq` to it."""
+        from cuda.bindings import runtime as cudart
+
         for key, n in rows.items():
             r = self.send_layout[key]
             if n:
@@ -303,12 +349,13 @@ class CopyEngineTransport(PPTransport):
                         self.stream.cuda_stream,
                     )
                 )
-        self.peer_done = torch.cuda.Event()
-        self.peer_done.record(self.stream)
+        done = torch.cuda.Event()
+        done.record(self.stream)
         _write_flag(self.stream, self.peer_full, self.seq)
+        return done
 
-        # gloo sends complete only in wait(), which blocks until the peer
-        # receives. Step k+1's copy waited for empty >= k, so k was received.
-        self.pending.append((meta_work, self.peer_done))
-        while len(self.pending) > 1 and self.pending[1][1].query():
-            self.pending.popleft()[0].wait()
+    def _wait_done(self, stream: torch.cuda.Stream, done: _CopyDone) -> None:
+        """Make `stream` wait until the peer copy `done` has read the send
+        buffer."""
+        assert isinstance(done, torch.cuda.Event)
+        stream.wait_event(done)

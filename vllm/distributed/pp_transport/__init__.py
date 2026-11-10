@@ -12,6 +12,7 @@ from vllm.logger import init_logger
 if TYPE_CHECKING:
     from vllm.config import VllmConfig
     from vllm.distributed.parallel_state import GroupCoordinator
+    from vllm.distributed.pp_transport.copy_engine import CopyEngineTransport
     from vllm.sequence import IntermediateTensors
 
 logger = init_logger(__name__)
@@ -30,12 +31,26 @@ class PPTransport(ABC):
         """Receive this step's inputs from the previous stage."""
 
 
+def copy_engine_transport_class() -> "type[CopyEngineTransport]":
+    """This platform's copy-engine transport: SDMA engines on ROCm, CUDA copy
+    engines otherwise."""
+    from vllm.platforms import current_platform
+
+    if current_platform.is_rocm():
+        from vllm.distributed.pp_transport.sdma import SdmaTransport
+
+        return SdmaTransport
+    from vllm.distributed.pp_transport.copy_engine import CopyEngineTransport
+
+    return CopyEngineTransport
+
+
 def create_pp_transport(
     vllm_config: "VllmConfig", persistent: "IntermediateTensors | None"
 ) -> PPTransport | None:
     """Collective over the PP group. Returns None (send over NCCL) without PP,
-    or under "auto" when copy engines are not usable on some rank; every rank
-    makes the same choice.
+    under "auto" on ROCm, or under "auto" when copy engines are not usable on
+    some rank; every rank makes the same choice.
 
     Args:
         vllm_config: The engine config.
@@ -50,13 +65,17 @@ def create_pp_transport(
         return None
     mode = envs.VLLM_PP_TRANSPORT
     assert mode in ("auto", "copy_engine")
-    from vllm.distributed.pp_transport.copy_engine import (
-        CopyEngineTransport,
-        CopyEngineUnavailable,
-    )
+    from vllm.distributed.pp_transport.copy_engine import CopyEngineUnavailable
+    from vllm.platforms import current_platform
 
+    if mode == "auto" and current_platform.is_rocm():
+        logger.info_once(
+            "PP transport: NCCL (SDMA copy engines on ROCm are opt-in: "
+            "VLLM_PP_TRANSPORT=copy_engine)"
+        )
+        return None
     try:
-        transport = CopyEngineTransport(
+        transport = copy_engine_transport_class()(
             vllm_config, pp_group, None if persistent is None else persistent.tensors
         )
     except CopyEngineUnavailable as e:
