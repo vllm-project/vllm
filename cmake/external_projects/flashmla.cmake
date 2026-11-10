@@ -66,6 +66,10 @@ if(${CMAKE_CUDA_COMPILER_VERSION} VERSION_GREATER_EQUAL 12.9)
 elseif(${CMAKE_CUDA_COMPILER_VERSION} VERSION_GREATER_EQUAL 12.8)
     list(APPEND SUPPORT_ARCHS "10.0a")
 endif()
+if(${CMAKE_CUDA_COMPILER_VERSION} VERSION_GREATER_EQUAL 13.0)
+    # Thor: FlashMLA dispatches only the SM100 sparse kernels validated on it.
+    list(APPEND SUPPORT_ARCHS "11.0a")
+endif()
 
 
 cuda_archs_loose_intersection(FLASH_MLA_ARCHS "${SUPPORT_ARCHS}" "${CUDA_ARCHS}")
