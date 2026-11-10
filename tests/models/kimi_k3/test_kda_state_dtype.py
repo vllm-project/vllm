@@ -1,11 +1,11 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
-"""``--mamba-ssm-cache-dtype`` must reach the KDA recurrent state of the models
+"""`--mamba-ssm-cache-dtype` must reach the KDA recurrent state of the models
 built on the shared KDA layers (it used to be dropped, leaving the state
 float32 unconditionally).
 
-Mirrors ``tests/models/glm5next/test_kda_state_dtype.py`` for the KDA
-implementations under ``vllm/model_executor``.
+Mirrors `tests/models/glm5next/test_kda_state_dtype.py` for the KDA
+implementations under `vllm/model_executor`.
 """
 
 from types import SimpleNamespace
@@ -53,7 +53,7 @@ def test_kda_layer_state_dtype_follows_ssm_cache_dtype(layer_cls, ssm_dtype, exp
 @pytest.mark.parametrize("model_cls", [AliceAIForCausalLM, BailingMoeV3ForCausalLM])
 def test_kda_model_state_dtype_follows_ssm_cache_dtype(model_cls, ssm_dtype, expected):
     # The model-level dtype feeds the mamba page size used to pick
-    # ``mamba_block_size``; it must agree with the layer's own dtype or the
+    # `mamba_block_size`; it must agree with the layer's own dtype or the
     # allocated page overflows the planned one.
     model_config, cache_config = _configs(ssm_dtype)
     vllm_config = SimpleNamespace(model_config=model_config, cache_config=cache_config)
