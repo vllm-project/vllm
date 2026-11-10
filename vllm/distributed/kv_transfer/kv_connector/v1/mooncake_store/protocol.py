@@ -33,7 +33,7 @@ Mirrors the named-tag convention used by the NIXL connector (see
 `vllm/distributed/kv_transfer/kv_connector/v1/nixl/metadata.py`).
 """
 
-from vllm.distributed.kv_transfer.kv_connector.v1.mooncake.store.data import (
+from vllm.distributed.kv_transfer.kv_connector.v1.mooncake_store.data import (
     MooncakeLookupResult,
     TailKeyBoundary,
 )
