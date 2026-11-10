@@ -73,6 +73,8 @@ Similar to the backend kernels, each experts kernel only supports certain quanti
 
 Each experts kernel supports one or more activation functions, e.g. silu or gelu, which are applied to the intermediate results.
 
+`BatchedTritonExperts` applies optional expert projection biases after dequantization and before casting each GEMM result to the activation dtype. The first projection's bias is applied before the activation function. Adding bias to an already rounded BF16 result can lose cancellation residuals.
+
 As with the backends, some experts support applying topk weights on the input activations. The entries in the column in this table only apply to the non-modular experts.
 
 Most experts flavors include an equivalent modular interface which will be a subclass of `FusedMoEExpertsModular`.

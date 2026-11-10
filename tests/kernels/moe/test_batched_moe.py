@@ -22,9 +22,14 @@ from vllm.model_executor.layers.fused_moe.activation import (
     MoEActivation,
     apply_moe_activation,
 )
+from vllm.model_executor.layers.fused_moe.config import biased_moe_quant_config
 from vllm.model_executor.layers.fused_moe.experts.fused_batched_moe import (
     BatchedTritonExperts,
     invoke_moe_batched_triton_kernel,
+)
+from vllm.model_executor.layers.fused_moe.modular_kernel import FusedMoEKernel
+from vllm.model_executor.layers.fused_moe.prepare_finalize.batched import (
+    BatchedPrepareAndFinalize,
 )
 from vllm.platforms import current_platform
 from vllm.triton_utils import tl
@@ -255,9 +260,12 @@ def test_batched_mm(
 
 
 @pytest.mark.parametrize("scale_shape", ["[E]", "[E,1,1]"])
-def test_batched_mm_per_tensor_weight_per_token_act(scale_shape: str):
-    """Per-tensor weight scales must broadcast along N when activations are
-    quantized per token, instead of indexing into other experts' scales."""
+@pytest.mark.parametrize("bias_case", ["none", "varying", "cancellation"])
+def test_batched_mm_per_tensor_weight_per_token_act(scale_shape: str, bias_case: str):
+    """Expert scales and biases broadcast along N with per-token quantization.
+
+    Bias must be added after dequantization and before output rounding.
+    """
     if torch.float8_e4m3fn not in DTYPES or (
         current_platform.is_cuda_alike()
         and not current_platform.has_device_capability(89)
@@ -283,6 +291,21 @@ def test_batched_mm_per_tensor_weight_per_token_act(scale_shape: str):
     assert B_scale is not None and B_scale.numel() == E
     B_scale = B_scale.view(-1) if scale_shape == "[E]" else B_scale.view(-1, 1, 1)
 
+    bias = None
+    if bias_case == "varying":
+        bias = torch.arange(E * N, device=DEVICE, dtype=torch.float32).view(N, E).T
+        bias = bias / 128
+    elif bias_case == "cancellation":
+        A_q = torch.ones_like(A_q, dtype=torch.bfloat16).to(A_q.dtype)
+        B_q = torch.ones_like(B_q, dtype=torch.bfloat16)
+        B_q[:, :, 0] = 1.25
+        B_q = B_q.to(A_q.dtype)
+        assert A_scale is not None
+        A_scale.fill_(0.25)
+        B_scale.fill_(0.5)
+        bias = torch.full((E, N), -K / 8, device=DEVICE, dtype=torch.float32)
+        num_expert_tokens[1] = 0
+
     test_output = torch.zeros((E, M, N), dtype=torch.bfloat16, device=DEVICE)
     invoke_moe_batched_triton_kernel(
         A_q,
@@ -298,18 +321,26 @@ def test_batched_mm_per_tensor_weight_per_token_act(scale_shape: str):
         False,
         config={"BLOCK_SIZE_M": 16, "BLOCK_SIZE_N": 16, "BLOCK_SIZE_K": 32},
         per_act_token_quant=True,
+        B_bias=bias,
     )
 
     ref_output = native_batched_masked_quant_matmul(
         A_q,
         B_q,
-        torch.zeros_like(test_output),
+        torch.zeros_like(test_output, dtype=torch.float32),
         num_expert_tokens,
         A_scale,
         B_scale.view(-1, 1, 1),
         None,
         True,
     )
+    if bias is not None:
+        valid = torch.arange(M, device=DEVICE)[None, :] < num_expert_tokens[:, None]
+        ref_output = torch.where(valid[:, :, None], ref_output + bias[:, None, :], 0)
+    ref_output = ref_output.to(test_output.dtype)
+    if bias_case == "cancellation":
+        torch.testing.assert_close(test_output, ref_output, atol=0, rtol=0)
+        return
     torch.testing.assert_close(test_output, ref_output, atol=6e-2, rtol=6e-2)
 
 
@@ -787,6 +818,91 @@ def test_batched_experts_end_to_end(m, n, k, e, topk):
         triton_output = batched_moe(a, w1, w2, topk_weight, topk_ids)
 
     torch.testing.assert_close(triton_output, baseline_output, atol=3e-2, rtol=2e-2)
+
+
+@pytest.mark.parametrize(
+    ("bias_part", "cancellation"),
+    [
+        ("none", False),
+        ("up", False),
+        ("down", False),
+        pytest.param("up", True, id="up-cancellation"),
+        pytest.param("down", True, id="down-cancellation"),
+    ],
+)
+@pytest.mark.parametrize("activation", [MoEActivation.SILU, MoEActivation.SWIGLUOAI])
+def test_batched_experts_preserve_bias(bias_part, cancellation, activation):
+    """Both expert biases must be applied before rounding the GEMM output."""
+    from vllm.v1.worker.workspace import init_workspace_manager
+
+    device = current_platform.device_type
+    init_workspace_manager(torch.device(f"{device}:0"))
+    m, e, n, k = 3, 2, 128, 128
+    x = torch.zeros((m, k), device=device, dtype=torch.bfloat16)
+    w1 = torch.zeros((e, 2 * n, k), device=device, dtype=x.dtype)
+    w2 = torch.zeros((e, k, n), device=device, dtype=x.dtype)
+    b1 = (
+        torch.ones((e, 2 * n), device=device, dtype=x.dtype)
+        if bias_part == "up"
+        else None
+    )
+    b2 = (
+        torch.arange(e * k, device=device, dtype=torch.float32).view(k, e).T
+        if bias_part == "down"
+        else None
+    )
+    expected_value = 0.0
+    if bias_part == "up" or cancellation:
+        value = torch.tensor(0.25 if cancellation and bias_part == "up" else 1.0)
+        if activation == MoEActivation.SILU:
+            activated = torch.nn.functional.silu(value) * value
+        else:
+            activated = value * torch.sigmoid(1.702 * value) * (value + 1)
+        activated_value = activated.to(x.dtype).item()
+    if bias_part == "up":
+        w2.copy_(torch.eye(k, device=device, dtype=x.dtype).expand_as(w2))
+        expected_value = activated_value
+        if cancellation:
+            x.fill_(1)
+            w1.fill_(1)
+            w1[:, :, 0] = 1.25
+            assert b1 is not None
+            b1.fill_(-128)
+    elif cancellation:
+        b1 = torch.ones((e, 2 * n), device=device, dtype=x.dtype)
+        w2.fill_(1)
+        w2[:, :, 0] = 1.25
+        assert b2 is not None
+        b2.fill_(-128 * activated_value)
+        expected_value = activated_value / 4
+    expected = torch.full_like(x, expected_value)
+    if b2 is not None and not cancellation:
+        expected.copy_(b2[[0, 1, 0]])
+    config = make_dummy_moe_config(
+        num_experts=e,
+        experts_per_token=1,
+        hidden_dim=k,
+        intermediate_size=n,
+        activation=activation,
+    )
+    config.has_bias = bias_part != "none"
+    kernel = FusedMoEKernel(
+        BatchedPrepareAndFinalize(64, num_dispatchers=1, num_local_experts=e, rank=0),
+        BatchedTritonExperts(config, biased_moe_quant_config(b1, b2), 64, 1),
+    )
+    with set_current_vllm_config(vllm_config):
+        actual = kernel.apply(
+            x,
+            w1,
+            w2,
+            torch.ones((m, 1), device=device, dtype=torch.float32),
+            torch.tensor([[0], [1], [0]], device=device, dtype=torch.int32),
+            activation=activation,
+            apply_router_weight_on_input=False,
+            global_num_experts=e,
+            expert_map=None,
+        )
+    torch.testing.assert_close(actual, expected, atol=0, rtol=0)
 
 
 def test_batched_triton_backend_mapping():
