@@ -53,6 +53,7 @@ from vllm.transformers_utils.model_arch_config_convertor import (
     MODEL_ARCH_CONFIG_CONVERTORS,
     ModelArchConfigConvertorBase,
 )
+from vllm.transformers_utils.processor import processor_has_attr
 from vllm.transformers_utils.repo_utils import resolve_revision
 from vllm.transformers_utils.runai_utils import ObjectStorageModel, is_runai_obj_uri
 from vllm.transformers_utils.utils import maybe_model_redirect
@@ -189,8 +190,8 @@ class ModelConfig:
     - "deepseek_v32" will always use the tokenizer from `deepseek_v32`.
     - "deepseek_v4" will always use the tokenizer from `deepseek_v4`.
     - "deepseek_v41" will use the DeepSeek V4.1 prompt encoder.
-    - "kimi_k3" will always use the "hf" tokenizer but render chat prompts
-      with Kimi K3's Python XTML encoding instead of a Jinja template.
+    - "kimi_k3" requires a tokenizer with native Kimi K3 XTML chat encoding.
+      It rejects the generic Hugging Face Jinja fallback.
     - "glm5_next" uses the "hf" tokenizer and renderer on the Python frontend;
       the Rust frontend renders GLM-5.3 and GLM-5.3-Flash prompts natively,
       and selects this under "auto" for the `glm5_next` model type
@@ -1179,6 +1180,14 @@ class ModelConfig:
                 cls += "EmbeddingModel"
             elif task == "classify":
                 cls += "ForSequenceClassification"
+        elif cls == "TransformersMultiModal" and processor_has_attr(
+            self.model,
+            self.hf_config.model_type,
+            "apply_transcription_request",
+            revision=self.revision,
+            trust_remote_code=self.trust_remote_code,
+        ):
+            cls += "ForTranscription"
         else:
             cls += "ForCausalLM"
         return cls
@@ -1432,6 +1441,7 @@ class ModelConfig:
                 "modelopt",
                 "modelopt_fp4",
                 "modelopt_mxfp8",
+                "modelopt_int8",
                 "mxfp8",
                 "modelopt_mixed",
                 # Ensure heavy backends are probed last to avoid unnecessary
