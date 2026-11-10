@@ -2331,6 +2331,7 @@ class EngineCoreProc(EngineCore):
                     if len(reuse_buffers) < max_reuse_bufs:
                         reuse_buffers.append(reclaimed)
 
+                outputs.pack_for_transport()
                 buffer = reuse_buffers.pop() if reuse_buffers else bytearray()
                 buffers = encoder.encode_into(outputs, buffer)
                 tracker = self._send_msg_tracking_payload(
