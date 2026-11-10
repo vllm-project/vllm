@@ -1127,7 +1127,9 @@ def test_mxfp4_linear_with_fp8_inputs_requests_fp8_activations():
     assert scheme.kernel.config.activation_quant_key == kFp8Dynamic128Sym
 
 
-def test_mxfp4_moe_with_mxfp4_inputs_keeps_w4a4_method(monkeypatch):
+def test_mxfp4_moe_with_mxfp4_inputs_keeps_w4a4_method(
+    monkeypatch, default_vllm_config
+):
     """Only FP8 inputs take the shared path; W4A4 keeps its own kernels."""
     from vllm.model_executor.layers.quantization.compressed_tensors.compressed_tensors_moe.compressed_tensors_moe_w4a4_mxfp4 import (  # noqa: E501
         CompressedTensorsW4A4Mxfp4MoEMethod,
