@@ -404,7 +404,12 @@ def test_scale_save_armed_on_first_rank_only(tmp_path, monkeypatch, first_rank):
     """Only the global first rank writes the scale file, so the result does
     not depend on which rank of a data-parallel encoder writes last."""
     import vllm.model_executor.layers.attention.mm_encoder_attention as mod
-    from vllm.config import ModelConfig, VllmConfig, set_current_vllm_config
+    from vllm.config import (
+        CompilationConfig,
+        ModelConfig,
+        VllmConfig,
+        set_current_vllm_config,
+    )
     from vllm.config.multimodal import MultiModalConfig
     from vllm.v1.attention.backends.registry import AttentionBackendEnum
 
@@ -419,7 +424,10 @@ def test_scale_save_armed_on_first_rank_only(tmp_path, monkeypatch, first_rank):
         mod, "get_vit_attn_backend", lambda **_: AttentionBackendEnum.FLASHINFER
     )
     save_file = tmp_path / "scales.json"
-    vllm_config = VllmConfig()
+    # A mock config: a real VllmConfig() probes for a GPU platform and fails
+    # on hosts without one.
+    vllm_config = MagicMock(spec=VllmConfig)
+    vllm_config.compilation_config = CompilationConfig(custom_ops=["none"])
     vllm_config.model_config = MagicMock(
         spec=ModelConfig,
         multimodal_config=MultiModalConfig(
