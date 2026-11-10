@@ -8,7 +8,7 @@ send trimming, and group-count invariant checking in _build_transfer_params.
 
 import asyncio
 import ctypes
-from unittest.mock import patch
+from unittest.mock import AsyncMock, patch
 
 import pytest
 import torch
@@ -676,6 +676,65 @@ def test_hisparse_import_copies_uncached_pages(hisparse_producer, decoder_tp, sh
         assert torch.equal(host, expected_host)
         assert torch.equal(gpu, expected_gpu)
         assert sum(lengths) == (5 if host_owner else 3) * page * sends_bytes
+
+
+@pytest.mark.cpu_test
+@pytest.mark.asyncio
+@pytest.mark.parametrize(
+    "hisparse_producer", [(True, 2, 0), (True, 2, 1)], indirect=True
+)
+@pytest.mark.parametrize("shared", [False, True])
+@pytest.mark.parametrize("producer_blocks", [[], [4, 3, 2, 1]])
+async def test_hisparse_full_prefix_hit_completes_without_writes(
+    hisparse_producer, shared, producer_blocks
+):
+    """Empty suffixes acknowledge every peer and release P without touching D."""
+    producer, caches, page = hisparse_producer
+    config = _make_packed_mla_kv_cache_config(8, num_groups=2)
+    config.kv_cache_groups[0].host_resident = True
+    config.hisparse_host_num_blocks = 8
+    config.hisparse_shared_host_pool = shared
+    announcement = MooncakeConnectorMetadata()
+    announcement.add_new_req("p", [], {"transfer_id": "tx-1"}, False)
+    await producer.record_send_reqs(announcement)
+    completed = MooncakeConnectorMetadata()
+    completed.add_new_req("p", [producer_blocks], {"transfer_id": "tx-1"}, False)
+    await producer.record_send_reqs(completed)
+    ranks = producer.transfer_topo.handshake_target_ranks(4)
+    sock = AsyncMock()
+    with patch.object(producer.engine, "batch_transfer_sync_write") as write:
+        for index, rank in enumerate(ranks):
+            host = torch.full((8, page), 0xCC, dtype=torch.uint8)
+            gpu = torch.full((8, page), 0xDD, dtype=torch.uint8)
+            pull = _make_pull_meta("d", [[], []])
+            pull.pull_tasks_count = 1
+            with mooncake_register_worker(config, tp_size=4, tp_rank=rank) as (
+                decoder,
+                reg,
+            ):
+                decoder.register_kv_caches(dict(zip(caches, (host, gpu))))
+                assert (host.data_ptr() in reg.call_args.args[0]) == (
+                    rank == 0 or not shared
+                )
+                meta = decoder._build_pull_metadata({"d": pull}, include_layout=True)
+                await producer.send_kv_to_decode(b"decoder", sock, meta)
+                response = producer._xfer_resp_decoder.decode(
+                    sock.send_multipart.call_args.args[0][1]
+                )
+                assert response.status == MooncakeXferResponseStatus.FINISH
+                assert response.ok_reqs == ["d"] and not response.err_reqs
+                pending = {"d": pull}
+                decoder.process_pulling_result(response, pending)
+                assert pending == {} and pull.pull_tasks_count == 0
+                assert await decoder.fetch_finished_recving_reqs() == set()
+                assert decoder.get_block_ids_with_load_errors() == set()
+                reg.assert_called_once()
+            assert torch.all(host == 0xCC) and torch.all(gpu == 0xDD)
+            expected = {"p"} if index == len(ranks) - 1 else set()
+            assert await producer.fetch_finished_sending_reqs() == expected
+        write.assert_not_called()
+    assert "tx-1" not in producer.reqs_need_send
+    assert await producer.fetch_finished_sending_reqs() == set()
 
 
 @pytest.mark.cpu_test
