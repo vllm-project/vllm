@@ -126,10 +126,10 @@ __all__ = [
 def _use_k3_situ_aiter_a8w4(
     moe: FusedMoEConfig, ocp_mx_scheme: OCP_MX_Scheme | str
 ) -> bool:
-    """Whether Quark K3 should override A4 activations with native A8."""
+    """Whether Quark K3 should use AITER's SiTUv2 activation path."""
     return (
         ocp_mx_scheme == "w_mxfp4_a_mxfp4"
-        and rocm_aiter_ops.is_fused_moe_situv2_a8w4_enabled()
+        and rocm_aiter_ops.is_fused_moe_situv2_enabled()
     )
 
 
@@ -1618,8 +1618,8 @@ class QuarkOCP_MX_MoEMethod(QuarkMoEMethod):
         # Select backend based on OCP MX scheme
         if self.is_k3_situ_aiter_a8w4:
             # The checkpoint declares dynamic MXFP4 activations. This explicit
-            # opt-in keeps its packed MXFP4 weights/scales but quantizes SiTU
-            # activations to MXFP8 in AITER's native SiTUv2 A8W4 kernels.
+            # opt-in keeps its packed weights/scales and passes BF16 inputs to
+            # AITER, which applies the selected SiTUv2 activation quantization.
             self.mxfp4_backend = Mxfp4MoeBackend.AITER_MXFP4_BF16
             self.experts_cls = backend_to_kernel_cls(self.mxfp4_backend)[0]
         elif self.ocp_mx_scheme == "w_mxfp4":
