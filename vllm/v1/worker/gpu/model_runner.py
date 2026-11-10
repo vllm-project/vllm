@@ -147,7 +147,7 @@ from vllm.v1.worker.gpu.lora_utils import (
     get_num_active_loras_for_dispatch,
 )
 from vllm.v1.worker.gpu.mm.encoder_cache import EncoderCache
-from vllm.v1.worker.gpu.mm.lora import set_active_mm_loras
+from vllm.v1.worker.gpu.mm.lora import plan_mm_lora_batches, set_active_mm_loras
 from vllm.v1.worker.gpu.model_states import init_model_state
 from vllm.v1.worker.gpu.pool.pooling_runner import PoolingRunner
 from vllm.v1.worker.gpu.pp_utils import PPHandler
@@ -1455,6 +1455,35 @@ class GPUModelRunner(LoRAModelRunnerMixin):
             num_reqs, num_toks, max_query_len, decode_graph_eligible
         )
 
+    def _prepare_mm_lora_batch(
+        self, scheduled: dict[str, list[int]]
+    ) -> dict[str, list[int]]:
+        """Encode earlier groups and leave the last mapping active for the caller."""
+        groups, padded_rows = plan_mm_lora_batches(
+            self.model,
+            self.lora_manager,
+            self.encoder_cache,
+            self.lora_state,
+            scheduled,
+            min(
+                self.scheduler_config.max_num_encoder_input_tokens,
+                self.scheduler_config.encoder_cache_size,
+            ),
+        )
+        for group in groups:
+            set_active_mm_loras(
+                model=self.model,
+                lora_manager=self.lora_manager,
+                encoder_cache=self.encoder_cache,
+                req_id_to_index=self.req_states.req_id_to_index,
+                lora_state=self.lora_state,
+                scheduled_encoder_inputs=group,
+                padded_rows_per_item=padded_rows,
+            )
+            if group is not groups[-1]:
+                self.model_state.execute_mm_encoder(group)
+        return groups[-1]
+
     def prepare_inputs(
         self,
         scheduler_output: SchedulerOutput,
@@ -2058,18 +2087,13 @@ class GPUModelRunner(LoRAModelRunnerMixin):
                 )
             else:
                 scheduled_encoder_inputs = scheduler_output.scheduled_encoder_inputs
-                if self.supports_mm_inputs and self.lora_config is not None:
-                    set_active_mm_loras(
-                        model=self.model,
-                        lora_manager=self.lora_manager,
-                        encoder_cache=self.encoder_cache,
-                        req_id_to_index=self.req_states.req_id_to_index,
-                        lora_state=self.lora_state,
-                        scheduled_encoder_inputs=scheduled_encoder_inputs,
-                    )
                 with self.ec_connector.maybe_get_output(
                     scheduler_output
                 ) as ec_connector_output:
+                    if self.supports_mm_inputs and self.lora_config is not None:
+                        scheduled_encoder_inputs = self._prepare_mm_lora_batch(
+                            scheduled_encoder_inputs
+                        )
                     inputs_embeds = self.model_state.prepare_inputs_embeds(
                         scheduled_encoder_inputs, input_batch, self.req_states
                     )

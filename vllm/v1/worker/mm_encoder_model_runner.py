@@ -25,7 +25,6 @@ from vllm.v1.outputs import (
     make_empty_encoder_model_runner_output,
 )
 from vllm.v1.worker.gpu.cudagraph_utils import BatchExecutionDescriptor
-from vllm.v1.worker.gpu.mm.lora import set_active_mm_loras
 from vllm.v1.worker.gpu.model_runner import GPUModelRunner
 from vllm.v1.worker.workspace import lock_workspace
 
@@ -154,19 +153,13 @@ class MMEncoderModelRunner(GPUModelRunner):
             )
 
         scheduled_encoder_inputs = scheduler_output.scheduled_encoder_inputs
-        if self.lora_config is not None:
-            set_active_mm_loras(
-                model=self.model,
-                lora_manager=self.lora_manager,
-                encoder_cache=self.encoder_cache,
-                req_id_to_index=self.req_states.req_id_to_index,
-                lora_state=self.lora_state,
-                scheduled_encoder_inputs=scheduled_encoder_inputs,
-            )
-
         with self.ec_connector.maybe_get_output(
             scheduler_output
         ) as ec_connector_output:
+            if self.lora_config is not None:
+                scheduled_encoder_inputs = self._prepare_mm_lora_batch(
+                    scheduled_encoder_inputs
+                )
             self.model_state.execute_mm_encoder(scheduled_encoder_inputs)
 
         return ModelRunnerOutput.with_ec_conn_output(

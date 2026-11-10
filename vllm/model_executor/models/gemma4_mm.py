@@ -2480,6 +2480,16 @@ class Gemma4ForConditionalGeneration(
             tower_model=tower_models,
         )
 
+    def get_mm_lora_padded_stride(
+        self, modality: str, mm_kwargs: MultiModalKwargsItem | None
+    ) -> int | None:
+        # Tower and connector LoRA share a mapping over the padded row stride.
+        if modality == "audio" and mm_kwargs is not None:
+            frames = mm_kwargs.get("input_features_padded")
+            if frames is not None:
+                return (frames.data.shape[-2] + 3) // 4
+        return None
+
     def get_mm_lora_token_counts(
         self,
         *,
