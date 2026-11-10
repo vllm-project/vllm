@@ -72,7 +72,7 @@ def _coerce(raw: str, types: tuple[str, ...]) -> Any:
                 decoded = json.loads(raw)
                 if isinstance(decoded, dict if type_name == "object" else list):
                     return decoded
-        except ValueError:
+        except (ValueError, RecursionError):
             continue
     return raw  # `string` params, unknown types and failed casts all keep the original text
 
