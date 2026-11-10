@@ -107,7 +107,7 @@ class EarlyKVRecvSender:
         self._next_poll = 0.0
 
     def step_rpc_done(self) -> None:
-        """Worker thread: an ``execute_model`` or ``sample_tokens`` RPC finished."""
+        """Worker thread: an `execute_model` or `sample_tokens` RPC finished."""
         self._last_step_rpc = time.monotonic()
 
     def wait_for_poll(self, rpc_mq: MessageQueue) -> bool:

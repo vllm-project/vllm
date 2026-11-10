@@ -1,7 +1,7 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 from collections.abc import Iterable
-from copy import deepcopy
+from copy import copy, deepcopy
 
 import torch
 import torch.nn as nn
@@ -16,6 +16,7 @@ from vllm.model_executor.layers.vocab_parallel_embedding import (
     ParallelLMHead,
     VocabParallelEmbedding,
 )
+from vllm.model_executor.model_loader.reload import weight_update_active
 from vllm.model_executor.models.interfaces import (
     MixtureOfExperts,
     MultiModalEmbeddings,
@@ -50,7 +51,10 @@ def _get_mtp_vllm_config(vllm_config: VllmConfig) -> VllmConfig:
     speculative_config = vllm_config.speculative_config
     if speculative_config is None or speculative_config.draft_model_config is None:
         return vllm_config
-    return replace(vllm_config, model_config=speculative_config.draft_model_config)
+    # A view of already-initialized configs: do not re-run deployment-level init.
+    model_config = copy(speculative_config.draft_model_config)
+    model_config.is_submodel_config = True
+    return replace(vllm_config, model_config=model_config)
 
 
 def _get_mtp_config(vllm_config: VllmConfig) -> PreTrainedConfig:
@@ -351,14 +355,11 @@ class Step5MTP(nn.Module, MixtureOfExperts, SupportsMultiModal):
         return self.model.get_top_tokens(hidden_states, spec_step_idx)
 
     def load_weights(self, weights: Iterable[tuple[str, torch.Tensor]]) -> set[str]:
-        from vllm.model_executor.model_loader.mtp_validation import (
-            is_mtp_completeness_check_enabled,
-        )
         from vllm.model_executor.model_loader.weight_utils import (
             default_weight_loader,
         )
 
-        validate_completeness = is_mtp_completeness_check_enabled()
+        validate_completeness = not weight_update_active()
         if validate_completeness:
             _reset_fused_qkv_indexer_load_state(self)
         params_dict = dict(self.named_parameters())
@@ -410,14 +411,6 @@ class Step5MTP(nn.Module, MixtureOfExperts, SupportsMultiModal):
             loaded_params.add(name)
         if validate_completeness:
             loaded_params.update(_validate_fused_qkv_indexer_weights(self))
-        missing_params = set(params_dict).difference(loaded_params)
-        if missing_params and validate_completeness:
-            param_name_example = min(missing_params)
-            raise RuntimeError(
-                "Some parameters like "
-                f"{param_name_example} are not in the checkpoint and will falsely "
-                "use random initialization"
-            )
         return loaded_params
 
     def _rewrite_spec_layer_name(self, spec_layer: int | None, name: str) -> str:
