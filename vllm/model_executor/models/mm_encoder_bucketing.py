@@ -78,7 +78,10 @@ LOSSLESS_APPROX = "approx"
 # `EncoderBucketingSpec` for bucketing to engage; a model still being adapted
 # stays off until maintainers add it here. This keeps the feature from ever
 # silently corrupting an unadapted encoder just because the config is set.
-_VERIFIED_FOR_BUCKETING: dict[str, str] = {"qwen2_audio": LOSSLESS_BIT_EXACT}
+_VERIFIED_FOR_BUCKETING: dict[str, str] = {
+    "qwen2_audio": LOSSLESS_BIT_EXACT,
+    "canary": LOSSLESS_BIT_EXACT,
+}
 
 
 # ---------------------------------------------------------- fixed-window shim

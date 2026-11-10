@@ -337,3 +337,28 @@ def test_bucket_accepts_list_shaped_crop():
     rungs = bucketer.bucket(batch, 3)
     got = {r[1]["input_features"][0].shape[1]: r[0] for r in rungs}
     assert got == {8: [0], 32: [1], 16: [2]}
+
+
+def test_canary_spec_buckets_list_shaped_features():
+    from vllm.model_executor.models.canary import CanaryBucketingSpec
+
+    feats = [torch.randn(5, 80), torch.randn(30, 80), torch.randn(12, 80)]
+    lengths = torch.tensor([5, 30, 12])
+    batch = {"input_features": feats, "feature_lengths": lengths}
+    bucketer = EncoderBucketing(
+        CanaryBucketingSpec(), LengthBucketingConfig((8, 16, 32))
+    )
+    rungs = bucketer.bucket(batch, 3)
+
+    # each item lands in its own rung; crop selects the row and keeps each list
+    # feature at its true length (list features are padded later in
+    # embed_multimodal, not in crop)
+    by_len = {}
+    all_lengths = []
+    for indices, kw in rungs:
+        assert isinstance(kw["input_features"], list)
+        assert len(indices) == 1
+        by_len[indices[0]] = kw["input_features"][0].shape[0]
+        all_lengths.append(kw["feature_lengths"].item())
+    assert by_len == {0: 5, 1: 30, 2: 12}
+    assert sorted(all_lengths) == [5, 12, 30]

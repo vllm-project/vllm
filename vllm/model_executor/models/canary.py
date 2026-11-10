@@ -54,6 +54,7 @@ from .interfaces import (
     SupportsMultiModal,
     SupportsTranscription,
 )
+from .mm_encoder_bucketing import EncoderBucketingSpec, install_encoder_bucketing
 from .utils import WeightsMapper, make_layers, maybe_prefix
 
 # See https://huggingface.co/nvidia/canary-1b-v2
@@ -84,6 +85,57 @@ CANARY_SUPPORTED_LANGS = {
     "ru": "Russian",
     "uk": "Ukrainian",
 }
+
+
+class CanaryBucketingSpec(EncoderBucketingSpec):
+    """Bucketing semantics for Canary's list-shaped mel encoder.
+
+    `input_features` is a list of per-item `[T_i, n_mel]` tensors (never padded
+    at the processor); `feature_lengths` is a `[B]` tensor of true mel-frame
+    counts. Bucketing groups items by length so `embed_multimodal` pads each
+    rung to its own window instead of the batch max. The FastConformer encoder
+    is mask-aware (the attention mask is built from `feature_lengths`), so the
+    crop is bit-exact.
+    """
+
+    frames_per_second = 100  # hop_length=160 @ 16 kHz
+    context_margin = 0  # list-shaped features are never pre-padded, and the
+    # pad_sequence in embed_multimodal zero-fills past the true length, so a
+    # rung >= the true length never clips content or the subsampling boundary.
+
+    def item_lengths(
+        self, mm_kwargs_batch: Mapping[str, object]
+    ) -> list[int] | None:
+        feature_lengths = mm_kwargs_batch.get("feature_lengths")
+        if feature_lengths is None:
+            return None
+        return feature_lengths.tolist()
+
+    def padded_time(self, mm_kwargs_batch: Mapping[str, object]) -> int:
+        input_features = mm_kwargs_batch.get("input_features")
+        if not input_features:
+            return 0
+        if is_list_of(input_features, torch.Tensor):
+            return max(int(f.shape[0]) for f in input_features)
+        return int(input_features.shape[1])  # [B, T, n_mel]
+
+    def crop(
+        self,
+        mm_kwargs_batch: Mapping[str, object],
+        indices: list[int],
+        rung: int,
+    ) -> dict[str, object]:
+        input_features = mm_kwargs_batch["input_features"]
+        feature_lengths = mm_kwargs_batch["feature_lengths"]
+        rows = torch.tensor(indices, dtype=torch.long, device=feature_lengths.device)
+        if is_list_of(input_features, torch.Tensor):
+            feats = [input_features[i][:rung] for i in indices]
+        else:
+            feats = input_features[rows, :rung]
+        return {
+            "input_features": feats,
+            "feature_lengths": feature_lengths[rows],
+        }
 
 
 # ----- Decoder -----
@@ -564,6 +616,13 @@ class CanaryForConditionalGeneration(
             self.model = CanaryModel(
                 vllm_config=vllm_config, prefix=maybe_prefix(prefix, "model")
             )
+        install_encoder_bucketing(
+            self,
+            {"audio": self.model.encoder},
+            CanaryBucketingSpec(),
+            model_type=config.model_type,
+            additional_config=getattr(vllm_config, "additional_config", None),
+        )
 
         decoder_config = config.decoder_config
         self.proj_out = ParallelLMHead(
