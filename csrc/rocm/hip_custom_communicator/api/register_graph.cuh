@@ -6,12 +6,9 @@
 #include "../types.cuh"
 #include "../utils.h"
 
-ErrorCode hip_custom_communicator_register_graph(int64_t state) {
-  using namespace hip_custom_communicator;
-  using namespace hip_custom_communicator::internal;
-  if (state == 0) return error_code(Error::not_open);
-  CommsState& s = *reinterpret_cast<CommsState*>(state);
+namespace hip_custom_communicator::internal {
 
+inline ErrorCode register_pending(CommsState& s) {
   constexpr size_t kHandleBytes = sizeof(hipIpcMemHandle_t);
   constexpr size_t kEntryBytes = kHandleBytes + sizeof(int64_t);
   bool made = true;
@@ -78,6 +75,19 @@ ErrorCode hip_custom_communicator_register_graph(int64_t state) {
       return error_code(Error::hip_failed);
     }
   }
-  s.input_tables.pending.clear();
   return std::nullopt;
+}
+
+}  // namespace hip_custom_communicator::internal
+
+ErrorCode hip_custom_communicator_register_graph(int64_t state) {
+  using namespace hip_custom_communicator;
+  using namespace hip_custom_communicator::internal;
+  if (state == 0) return error_code(Error::not_open);
+  CommsState& s = *reinterpret_cast<CommsState*>(state);
+  const ErrorCode error = register_pending(s);
+  // On an error, the capture's reserved slots go back unregistered.
+  if (error) s.input_tables.next_slot -= s.input_tables.pending.size();
+  s.input_tables.pending.clear();
+  return error;
 }
