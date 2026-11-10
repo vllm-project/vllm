@@ -530,6 +530,10 @@ class MiniMaxM3MoE(nn.Module):
         self.ep_size = ep_group.world_size
         self.ep_rank = ep_group.rank_in_group
         self.enable_eplb = parallel_config.enable_eplb
+        # One shared expert on MiniMax M3; the field is absent on variants
+        # without it, so the MegaMoE layout and the EPLB bookkeeping below
+        # treat None as zero. (Dropped by the 0.34 upstream merge.)
+        self.n_shared_experts = getattr(config, "n_shared_experts", None)
         self.n_routed_experts = config.num_local_experts
         self.n_logical_experts = self.n_routed_experts
         self.n_redundant_experts = (
