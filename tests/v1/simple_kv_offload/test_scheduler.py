@@ -1403,6 +1403,81 @@ def test_lazy_walk_does_not_offload_past_eviction_window() -> None:
 
 
 # ---------------------------------------------------------------------------
+# Test 2g: Lazy walk widens to cover a CPU load
+# ---------------------------------------------------------------------------
+def test_lazy_walk_covers_recent_load_allocations() -> None:
+    """Lazy: a load takes all its blocks in one step, outside the token budget.
+
+    The next walk widens by twice that, so it offloads cached blocks past
+    target_free that the next such load would evict, and narrows back once
+    loads stop.
+    """
+    fix = make_scheduler(num_cpu_blocks=64, num_gpu_blocks=64, lazy=True)
+    sched = fix.scheduler
+    gpu_pool = fix.gpu_block_pool
+    target = sched._target_free
+    load = 2 * target
+
+    # Put a request of `load` blocks on CPU, one window at a time.
+    req = make_request(num_blocks=load)
+    gpu_pool.free_blocks(_allocate_gpu_blocks(gpu_pool, req, load))
+    fillers = _flush_old_blocks_to_lru_head(
+        gpu_pool, num_filler_blocks=gpu_pool.get_num_free_blocks() - load
+    )
+    for _ in range(load // target):
+        meta = sched.build_connector_meta(make_scheduler_output({}))
+        assert len(meta.store_gpu_blocks) == target
+        simulate_store_completion(sched, meta.store_event)
+        # Stored blocks go back to the head; evict them to reach the rest.
+        fillers += gpu_pool.get_new_blocks(target)
+    gpu_pool.free_blocks(fillers)
+
+    # Reload it: the load takes `load` GPU blocks in this step.
+    req2 = Request(
+        request_id="req-load",
+        prompt_token_ids=req.prompt_token_ids,
+        sampling_params=req.sampling_params,
+        pooling_params=None,
+        mm_features=None,
+        block_hasher=get_request_block_hasher(BLOCK_SIZE, sha256),
+    )
+    hit_tokens, is_async = sched.get_num_new_matched_tokens(req2, num_computed_tokens=0)
+    assert hit_tokens == load * BLOCK_SIZE and is_async
+    load_blocks = gpu_pool.get_new_blocks(load)
+    sched.update_state_after_alloc(
+        req2, KVCacheBlocks(blocks=(load_blocks,)), num_external_tokens=hit_tokens
+    )
+
+    # Cached blocks at [2 * target, 3 * target) from the head: past target_free,
+    # within target_free + 2 * load.
+    other = make_request(num_blocks=target)
+    other_blocks = _allocate_gpu_blocks(gpu_pool, other, target)
+    gpu_pool.free_blocks(other_blocks)
+    fillers = _flush_old_blocks_to_lru_head(
+        gpu_pool, num_filler_blocks=gpu_pool.get_num_free_blocks() - 3 * target
+    )
+
+    meta = sched.build_connector_meta(make_scheduler_output({req2.request_id: 1}))
+    assert meta.load_event >= 0
+    assert sorted(meta.store_gpu_blocks) == sorted(b.block_id for b in other_blocks)
+    simulate_store_completion(sched, meta.store_event)
+    simulate_load_completion(sched, {req2.request_id})
+    gpu_pool.free_blocks(fillers + load_blocks)
+
+    # Once loads stop, the window decays back to target_free.
+    for _ in range(load):
+        sched.build_connector_meta(make_scheduler_output({}))
+    late = make_request(num_blocks=target)
+    gpu_pool.free_blocks(_allocate_gpu_blocks(gpu_pool, late, target))
+    fillers = _flush_old_blocks_to_lru_head(
+        gpu_pool, num_filler_blocks=gpu_pool.get_num_free_blocks() - 3 * target
+    )
+    meta = sched.build_connector_meta(make_scheduler_output({}))
+    assert not meta.store_gpu_blocks
+    gpu_pool.free_blocks(fillers)
+
+
+# ---------------------------------------------------------------------------
 # Test 3: LRU eviction order
 # ---------------------------------------------------------------------------
 def test_lru_eviction_order() -> None:
