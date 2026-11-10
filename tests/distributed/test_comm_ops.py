@@ -567,6 +567,61 @@ def test_aiter_all_gather_precedes_pynccl(monkeypatch: pytest.MonkeyPatch) -> No
     assert communicator.all_gatherv(torch.empty(1)) is output
 
 
+@pytest.mark.parametrize(
+    ("enabled", "world_size", "shape", "dim", "dtype", "transpose", "aiter_args"),
+    [
+        (True, 4, (7, 1296), 0, torch.bfloat16, False, ((7, 1296), 0)),
+        (True, 4, (7, 6, 256), 1, torch.bfloat16, False, ((7, 1536), -1)),
+        (True, 8, (7, 6400), -1, torch.float32, False, ((7, 6400), -1)),
+        (False, 4, (7, 6400), -1, torch.bfloat16, False, None),
+        (True, 4, (8, 12), 1, torch.bfloat16, False, None),
+        (True, 4, (0, 1536), 1, torch.bfloat16, False, None),
+        (True, 4, ((1 << 19) + 8,), 0, torch.bfloat16, False, None),
+        (True, 4, (7, 64), 0, torch.int32, False, None),
+        (True, 4, (64, 7), -1, torch.bfloat16, True, None),
+    ],
+)
+def test_rocm_tp_all_gather_uses_aiter(
+    monkeypatch: pytest.MonkeyPatch,
+    enabled,
+    world_size,
+    shape,
+    dim,
+    dtype,
+    transpose,
+    aiter_args,
+) -> None:
+    def gather(inp: torch.Tensor, dim: int) -> torch.Tensor:
+        return torch.cat([inp + rank for rank in range(world_size)], dim=dim)
+
+    aiter_comm = Mock()
+    aiter_comm.should_custom_ag.side_effect = lambda inp: inp.nbytes <= 1 << 20
+    aiter_comm.all_gather_unreg.side_effect = gather
+    communicator = CudaCommunicator.__new__(CudaCommunicator)
+    communicator.world_size = world_size
+    communicator.use_aiter_tp_all_gather = enabled
+    communicator.aiter_ar_comm = aiter_comm
+    communicator.pynccl_comm = Mock(disabled=False)
+    module = "vllm.distributed.device_communicators"
+    monkeypatch.setattr(
+        f"{module}.cuda_communicator.current_platform.is_rocm", lambda: True
+    )
+    monkeypatch.setattr(
+        f"{module}.base_device_communicator.DeviceCommunicatorBase.all_gather",
+        Mock(side_effect=gather),
+    )
+
+    inp = (torch.randn(shape) * 100).to(dtype)
+    if transpose:
+        inp = inp.t()
+    assert torch.equal(communicator.all_gather(inp, dim), gather(inp, dim))
+    if aiter_args is None:
+        aiter_comm.all_gather_unreg.assert_not_called()
+    else:
+        (aiter_inp,), kwargs = aiter_comm.all_gather_unreg.call_args
+        assert (aiter_inp.shape, kwargs["dim"]) == aiter_args
+
+
 def test_isend_object_posts_size_then_object_and_releases_on_wait(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:

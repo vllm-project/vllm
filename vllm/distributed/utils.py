@@ -168,10 +168,10 @@ def verify_group_size_divides_partition(
 def is_weak_contiguous(inp: torch.Tensor) -> bool:
     """Check that *inp* occupies a single contiguous block of memory.
 
-    Unlike ``torch.Tensor.is_contiguous()``, this also accepts tensors
+    Unlike `torch.Tensor.is_contiguous()`, this also accepts tensors
     whose strides are not strictly C-contiguous (e.g. column-major) as
     long as the underlying storage from the tensor's offset onward is
-    exactly ``numel * element_size`` bytes.
+    exactly `numel * element_size` bytes.
     """
     return inp.is_contiguous() or (
         inp.storage().nbytes() - inp.storage_offset() * inp.element_size()
@@ -262,7 +262,7 @@ def create_tcp_store(
     listen_socket: socket.socket | None = None,
     **kwargs: Any,
 ) -> TCPStore:
-    """Create a TCPStore, optionally taking ownership of ``listen_socket``."""
+    """Create a TCPStore, optionally taking ownership of `listen_socket`."""
     if listen_socket is None:
         return TCPStore(host_name=host, port=port, **kwargs)
 
@@ -601,8 +601,8 @@ class StatelessProcessGroup:
 def get_cached_tcp_store_client(host: str, port: int) -> TCPStore:
     """Return a cached TCPStore client.
 
-    Cached so that every call with the same ``(host, port)`` reuses the
-    same connection.  A new ``(host, port)`` evicts the old entry.
+    Cached so that every call with the same `(host, port)` reuses the
+    same connection.  A new `(host, port)` evicts the old entry.
     """
     return TCPStore(host, port, is_master=False, wait_for_workers=False)
 
@@ -612,7 +612,7 @@ def allocate_group_ports(
 ) -> tuple[list[int], list[socket.socket]]:
     """Bind sockets and publish the ports to *store*.
 
-    Returns ``(ports, sockets)`` with the sockets still open.
+    Returns `(ports, sockets)` with the sockets still open.
     """
     socks: list[socket.socket] = []
     ports: list[int] = []
@@ -743,7 +743,7 @@ def stateless_init_torch_distributed_process_group(
     channel is formed with process 9 and 10.
 
     When *listen_socket* is provided, the rendezvous step
-    is skipped and a ``TCPStore`` server is created directly using the
+    is skipped and a `TCPStore` server is created directly using the
     pre-bound socket.  This is useful for eliminating TOCTOU races
     between port allocation and binding.
 
