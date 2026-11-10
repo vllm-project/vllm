@@ -892,18 +892,17 @@ class HipCustomCommunicator:
     @final
     @property
     def disabled(self) -> bool:
-        life = self.lifecycle
-        if life.status == "broken":
-            assert life.error is not None
-            raise RuntimeError(
-                f"broken: {life.error.name}: {life.detail}. Close it and build a "
-                f"new one on every rank."
-            )
-        return life.status not in ("open", "capturing")
+        """Never usable. A broken communicator is not disabled: its calls raise."""
+        return self.lifecycle.status not in ("open", "capturing", "broken")
 
     @final
     def should_allreduce(self, input: torch.Tensor) -> bool:
         """Whether this communicator takes the all-reduce of `input`."""
+        if self.lifecycle.status == "broken":
+            raise RuntimeError(
+                f"broken: {self.lifecycle.detail}. Close it and build a new one on "
+                "every rank."
+            )
         return (
             not self.disabled
             and self.state is not None
@@ -921,6 +920,11 @@ class HipCustomCommunicator:
         self, input: torch.Tensor, *, config: AllReduceConfig | None = None
     ) -> torch.Tensor:
         """Sum `input` over the TP group."""
+        if self.lifecycle.status == "broken":
+            raise RuntimeError(
+                f"broken: {self.lifecycle.detail}. Close it and build a new one on "
+                "every rank."
+            )
         if self.disabled:
             raise RuntimeError(f"disabled: {type(self).__name__} runs no call")
         assert self.state is not None, "an open communicator has its state"
@@ -978,6 +982,11 @@ class HipCustomCommunicator:
         residual: torch.Tensor | None = None,
     ) -> bool:
         """Whether this communicator takes the fused all-reduce and RMSNorm."""
+        if self.lifecycle.status == "broken":
+            raise RuntimeError(
+                f"broken: {self.lifecycle.detail}. Close it and build a new one on "
+                "every rank."
+            )
         return (
             not self.disabled
             and self.state is not None
@@ -1018,6 +1027,11 @@ class HipCustomCommunicator:
         config: AllReduceAddRmsNormConfig | None = None,
     ) -> torch.Tensor | tuple[torch.Tensor, torch.Tensor]:
         """All-reduce `input`, then RMSNorm it, with an optional residual add."""
+        if self.lifecycle.status == "broken":
+            raise RuntimeError(
+                f"broken: {self.lifecycle.detail}. Close it and build a new one on "
+                "every rank."
+            )
         if self.disabled:
             raise RuntimeError(f"disabled: {type(self).__name__} runs no call")
         assert self.state is not None, "an open communicator has its state"
@@ -1109,6 +1123,11 @@ class HipCustomCommunicator:
             and prefix.untyped_storage().data_ptr()
             == blocks.untyped_storage().data_ptr()
         )
+        if self.lifecycle.status == "broken":
+            raise RuntimeError(
+                f"broken: {self.lifecycle.detail}. Close it and build a new one on "
+                "every rank."
+            )
         return (
             not self.disabled
             and self.state is not None
@@ -1168,6 +1187,11 @@ class HipCustomCommunicator:
         config: AllReduceAddAttnResRmsNormConfig | None = None,
     ) -> tuple[torch.Tensor, torch.Tensor]:
         """All-reduce `input`, then AttnRes. Returns the new prefix and the output."""
+        if self.lifecycle.status == "broken":
+            raise RuntimeError(
+                f"broken: {self.lifecycle.detail}. Close it and build a new one on "
+                "every rank."
+            )
         if self.disabled:
             raise RuntimeError(f"disabled: {type(self).__name__} runs no call")
         assert self.state is not None, "an open communicator has its state"

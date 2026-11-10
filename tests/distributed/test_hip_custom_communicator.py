@@ -6,13 +6,14 @@ import ray
 import torch
 import torch.distributed as dist
 
+from vllm.distributed.communication_op import tensor_model_parallel_all_reduce
 from vllm.distributed.device_communicators.hip_custom_communicator import (
     AllReduceAddAttnResRmsNormConfig,
     AllReduceAddRmsNormConfig,
     AllReduceConfig,
     HipCustomCommunicator,
 )
-from vllm.distributed.parallel_state import get_tp_group
+from vllm.distributed.parallel_state import get_tp_group, graph_capture
 from vllm.platforms import current_platform
 
 from ..utils import (
@@ -22,770 +23,52 @@ from ..utils import (
 )
 
 pytestmark = pytest.mark.skipif(
-    not current_platform.is_rocm(), reason="ROCm-only HipCustomCommunicator tests"
+    not current_platform.is_rocm()
+    or "gfx950" not in torch.cuda.get_device_properties(0).gcnArchName,
+    reason="HipCustomCommunicator is built for gfx950 only",
 )
 
 HIDDEN = 7168
 NUM_TOKENS = [1, 2, 4, 8, 16, 32, 64, 128, 512, 2048]
 MAX_TOKENS = 2048
+DTYPES = [torch.bfloat16, torch.float16]
 EPS = 1e-5
 ATTN_RES_EPS = 1e-6
-INT4_ONE_SHOT_RELATIVE_RMS = 0.15
-INT4_TWO_SHOT_RELATIVE_RMS = 0.25
+NUM_BLOCKS = 4
+INT4_RELATIVE_RMS = 0.02
+INT4_ROW_RELATIVE_RMS = 0.1
+TP_SIZES = [2, 4, 8]
+REFUSED_AT_SIZE = (
+    "staging_too_small",
+    "partials_too_small",
+    "unfenced_too_small",
+    "grid_not_resident",
+    "launch_out_of_range",
+)
+QUANTIZATIONS = ["exact", "int4"]
 
 
-def int4_bar(config) -> float:
-    two_shot = config.quantization == "int4" and config.algorithm.startswith("two_shot")
-    return INT4_TWO_SHOT_RELATIVE_RMS if two_shot else INT4_ONE_SHOT_RELATIVE_RMS
-
-
-@ray.remote(num_gpus=1, max_calls=1)
-def all_reduce_ranks(monkeypatch: pytest.MonkeyPatch, tp_size, pp_size, rank, port):
-    with monkeypatch.context() as m:
-        m.delenv("CUDA_VISIBLE_DEVICES", raising=False)
-        m.delenv("HIP_VISIBLE_DEVICES", raising=False)
-        m.delenv("ROCR_VISIBLE_DEVICES", raising=False)
-        device = torch.device(f"cuda:{rank}")
-        torch.accelerator.set_device_index(device)
-        init_test_distributed_environment(tp_size, pp_size, rank, port)
-        ensure_model_parallel_initialized(tp_size, pp_size)
-        group = get_tp_group()
-        dist.all_reduce(torch.zeros(1, device=device), group=group.device_group)
-        torch.accelerator.synchronize()
-        comm = HipCustomCommunicator(
-            group.cpu_group,
-            group.device_group,
-            device,
-            max_rows=MAX_TOKENS,
-            max_cols=HIDDEN,
-        )
-        assert not comm.disabled, comm.lifecycle
-        try:
-            for num_tokens in NUM_TOKENS:
-                for dtype in [torch.bfloat16, torch.float16]:
-                    g = torch.Generator(device=device).manual_seed(rank)
-                    x = torch.randint(
-                        -8, 8, (num_tokens, HIDDEN), generator=g, device=device
-                    ).to(dtype)
-                    want = x.clone()
-                    dist.all_reduce(want, group=group.device_group)
-                    assert comm.should_allreduce(x)
-
-                    out = comm.all_reduce(x)
-                    if comm.arguments.quantization == "int4":
-                        err = (out.float() - want.float()).square().mean().sqrt()
-                        rms = want.float().square().mean().sqrt()
-                        assert err / rms <= int4_bar(
-                            comm.tuned("all_reduce", num_tokens, HIDDEN, None)
-                        ), (num_tokens, dtype)
-                    else:
-                        assert torch.equal(out, want), (num_tokens, dtype)
-
-                    graph = torch.cuda.CUDAGraph()
-                    with comm.capture():
-                        comm.all_reduce(x)
-                        with torch.cuda.graph(graph):
-                            out = comm.all_reduce(x)
-                    x.copy_(x + 1)
-                    want = x.clone()
-                    dist.all_reduce(want, group=group.device_group)
-                    graph.replay()
-                    torch.accelerator.synchronize()
-                    if comm.arguments.quantization == "int4":
-                        err = (out.float() - want.float()).square().mean().sqrt()
-                        rms = want.float().square().mean().sqrt()
-                        assert err / rms <= int4_bar(
-                            comm.tuned("all_reduce", num_tokens, HIDDEN, None)
-                        ), (num_tokens, dtype)
-                    else:
-                        assert torch.equal(out, want), (num_tokens, dtype)
-        finally:
-            comm.close()
-
-
-@pytest.mark.parametrize("tp_size", [2, 4, 8])
-@pytest.mark.parametrize("quantization", ["NONE", "INT4"])
-def test_all_reduce(monkeypatch: pytest.MonkeyPatch, tp_size, quantization):
+def _on_ranks(monkeypatch, tp_size, quantization, body):
+    """Run `body(comm, group, device, rank)` on every rank of a TP group."""
     if tp_size > torch.accelerator.device_count():
         pytest.skip("Not enough GPUs to run the test.")
-    monkeypatch.setenv("VLLM_ROCM_HIP_CUSTOM_COMMUNICATOR_QUANTIZATION", quantization)
-    multi_process_parallel(monkeypatch, tp_size, 1, all_reduce_ranks)
 
-
-@ray.remote(num_gpus=1, max_calls=1)
-def all_reduce_add_rms_norm_no_residual_ranks(
-    monkeypatch: pytest.MonkeyPatch, tp_size, pp_size, rank, port
-):
-    from vllm.ir.ops import rms_norm
-
-    with monkeypatch.context() as m:
-        m.delenv("CUDA_VISIBLE_DEVICES", raising=False)
-        m.delenv("HIP_VISIBLE_DEVICES", raising=False)
-        m.delenv("ROCR_VISIBLE_DEVICES", raising=False)
-        device = torch.device(f"cuda:{rank}")
-        torch.accelerator.set_device_index(device)
-        init_test_distributed_environment(tp_size, pp_size, rank, port)
-        ensure_model_parallel_initialized(tp_size, pp_size)
-        group = get_tp_group()
-        dist.all_reduce(torch.zeros(1, device=device), group=group.device_group)
-        torch.accelerator.synchronize()
-        comm = HipCustomCommunicator(
-            group.cpu_group,
-            group.device_group,
-            device,
-            max_rows=MAX_TOKENS,
-            max_cols=HIDDEN,
-        )
-        assert not comm.disabled, comm.lifecycle
-        try:
-            for num_tokens in NUM_TOKENS:
-                for dtype in [torch.bfloat16, torch.float16]:
-                    g = torch.Generator(device=device).manual_seed(rank)
-                    x = torch.randint(
-                        -8, 8, (num_tokens, HIDDEN), generator=g, device=device
-                    ).to(dtype)
-                    weight = torch.empty(HIDDEN, dtype=dtype, device=device)
-                    weight.normal_(mean=1.0, std=0.1, generator=g.manual_seed(0))
-                    summed = x.clone()
-                    dist.all_reduce(summed, group=group.device_group)
-                    want = rms_norm(summed, weight, EPS)
-                    assert comm.should_allreduce_add_rms_norm(x, weight)
-
-                    forced = [
-                        comm.kernel_config(
-                            "all_reduce_add_rms_norm",
-                            algorithm,
-                            num_tokens,
-                            HIDDEN,
-                            comm.arguments.quantization,
-                        )
-                        for algorithm in AllReduceAddRmsNormConfig.algorithms
-                    ]
-                    for config in [None, *(c for c in forced if c is not None)]:
-                        out = comm.all_reduce_add_rms_norm(
-                            x, weight, EPS, config=config
-                        )
-                        if comm.arguments.quantization == "int4":
-                            err = (out.float() - want.float()).square().mean().sqrt()
-                            rms = want.float().square().mean().sqrt()
-                            assert err / rms <= int4_bar(
-                                config
-                                if config is not None
-                                else comm.tuned(
-                                    "all_reduce_add_rms_norm", num_tokens, HIDDEN, False
-                                )
-                            ), (
-                                num_tokens,
-                                dtype,
-                                config,
-                            )
-                        else:
-                            torch.testing.assert_close(
-                                out, want, atol=2e-2, rtol=2e-2, msg=str(config)
-                            )
-
-                    graph = torch.cuda.CUDAGraph()
-                    with comm.capture():
-                        comm.all_reduce_add_rms_norm(x, weight, EPS)
-                        with torch.cuda.graph(graph):
-                            out = comm.all_reduce_add_rms_norm(x, weight, EPS)
-                    x.copy_(x + 1)
-                    summed = x.clone()
-                    dist.all_reduce(summed, group=group.device_group)
-                    want = rms_norm(summed, weight, EPS)
-                    graph.replay()
-                    torch.accelerator.synchronize()
-                    if comm.arguments.quantization == "int4":
-                        err = (out.float() - want.float()).square().mean().sqrt()
-                        rms = want.float().square().mean().sqrt()
-                        assert err / rms <= int4_bar(
-                            comm.tuned(
-                                "all_reduce_add_rms_norm", num_tokens, HIDDEN, False
-                            )
-                        ), (num_tokens, dtype)
-                    else:
-                        torch.testing.assert_close(out, want, atol=2e-2, rtol=2e-2)
-        finally:
-            comm.close()
-
-
-@pytest.mark.parametrize("tp_size", [2, 4, 8])
-@pytest.mark.parametrize("quantization", ["NONE", "INT4"])
-def test_all_reduce_add_rms_norm_no_residual(
-    monkeypatch: pytest.MonkeyPatch, tp_size, quantization
-):
-    if tp_size > torch.accelerator.device_count():
-        pytest.skip("Not enough GPUs to run the test.")
-    monkeypatch.setenv("VLLM_ROCM_HIP_CUSTOM_COMMUNICATOR_QUANTIZATION", quantization)
-    multi_process_parallel(
-        monkeypatch, tp_size, 1, all_reduce_add_rms_norm_no_residual_ranks
-    )
-
-
-@ray.remote(num_gpus=1, max_calls=1)
-def all_reduce_add_rms_norm_ranks(
-    monkeypatch: pytest.MonkeyPatch, tp_size, pp_size, rank, port
-):
-    from vllm.ir.ops import fused_add_rms_norm
-
-    with monkeypatch.context() as m:
-        m.delenv("CUDA_VISIBLE_DEVICES", raising=False)
-        m.delenv("HIP_VISIBLE_DEVICES", raising=False)
-        m.delenv("ROCR_VISIBLE_DEVICES", raising=False)
-        device = torch.device(f"cuda:{rank}")
-        torch.accelerator.set_device_index(device)
-        init_test_distributed_environment(tp_size, pp_size, rank, port)
-        ensure_model_parallel_initialized(tp_size, pp_size)
-        group = get_tp_group()
-        dist.all_reduce(torch.zeros(1, device=device), group=group.device_group)
-        torch.accelerator.synchronize()
-        comm = HipCustomCommunicator(
-            group.cpu_group,
-            group.device_group,
-            device,
-            max_rows=MAX_TOKENS,
-            max_cols=HIDDEN,
-        )
-        assert not comm.disabled, comm.lifecycle
-        try:
-            for num_tokens in NUM_TOKENS:
-                for dtype in [torch.bfloat16, torch.float16]:
-                    g = torch.Generator(device=device).manual_seed(rank)
-                    x = torch.randint(
-                        -8, 8, (num_tokens, HIDDEN), generator=g, device=device
-                    ).to(dtype)
-                    g.manual_seed(0)
-                    residual = torch.randint(
-                        -8, 8, (num_tokens, HIDDEN), generator=g, device=device
-                    ).to(dtype)
-                    weight = torch.empty(HIDDEN, dtype=dtype, device=device)
-                    weight.normal_(mean=1.0, std=0.1, generator=g)
-                    summed = x.clone()
-                    dist.all_reduce(summed, group=group.device_group)
-                    want_out, want_residual = fused_add_rms_norm(
-                        summed, residual.clone(), weight, EPS
-                    )
-                    assert comm.should_allreduce_add_rms_norm(x, weight, residual)
-
-                    forced = [
-                        comm.kernel_config(
-                            "all_reduce_add_rms_norm",
-                            algorithm,
-                            num_tokens,
-                            HIDDEN,
-                            comm.arguments.quantization,
-                        )
-                        for algorithm in AllReduceAddRmsNormConfig.algorithms
-                    ]
-                    for config in [None, *(c for c in forced if c is not None)]:
-                        out, residual_out = comm.all_reduce_add_rms_norm(
-                            x, weight, EPS, residual=residual, config=config
-                        )
-                        for got, want in [
-                            (out, want_out),
-                            (residual_out, want_residual),
-                        ]:
-                            if comm.arguments.quantization == "int4":
-                                err = (
-                                    (got.float() - want.float()).square().mean().sqrt()
-                                )
-                                rms = want.float().square().mean().sqrt()
-                                assert err / rms <= int4_bar(
-                                    config
-                                    if config is not None
-                                    else comm.tuned(
-                                        "all_reduce_add_rms_norm",
-                                        num_tokens,
-                                        HIDDEN,
-                                        True,
-                                    )
-                                ), (
-                                    num_tokens,
-                                    dtype,
-                                    config,
-                                )
-                            else:
-                                torch.testing.assert_close(
-                                    got, want, atol=2e-2, rtol=2e-2, msg=str(config)
-                                )
-
-                    graph = torch.cuda.CUDAGraph()
-                    with comm.capture():
-                        comm.all_reduce_add_rms_norm(x, weight, EPS, residual=residual)
-                        with torch.cuda.graph(graph):
-                            out, residual_out = comm.all_reduce_add_rms_norm(
-                                x, weight, EPS, residual=residual
-                            )
-                    x.copy_(x + 1)
-                    summed = x.clone()
-                    dist.all_reduce(summed, group=group.device_group)
-                    want_out, want_residual = fused_add_rms_norm(
-                        summed, residual.clone(), weight, EPS
-                    )
-                    graph.replay()
-                    torch.accelerator.synchronize()
-                    for got, want in [(out, want_out), (residual_out, want_residual)]:
-                        if comm.arguments.quantization == "int4":
-                            err = (got.float() - want.float()).square().mean().sqrt()
-                            rms = want.float().square().mean().sqrt()
-                            assert err / rms <= int4_bar(
-                                comm.tuned(
-                                    "all_reduce_add_rms_norm", num_tokens, HIDDEN, True
-                                )
-                            ), (num_tokens, dtype)
-                        else:
-                            torch.testing.assert_close(got, want, atol=2e-2, rtol=2e-2)
-        finally:
-            comm.close()
-
-
-@pytest.mark.parametrize("tp_size", [2, 4, 8])
-@pytest.mark.parametrize("quantization", ["NONE", "INT4"])
-def test_all_reduce_add_rms_norm(
-    monkeypatch: pytest.MonkeyPatch, tp_size, quantization
-):
-    if tp_size > torch.accelerator.device_count():
-        pytest.skip("Not enough GPUs to run the test.")
-    monkeypatch.setenv("VLLM_ROCM_HIP_CUSTOM_COMMUNICATOR_QUANTIZATION", quantization)
-    multi_process_parallel(monkeypatch, tp_size, 1, all_reduce_add_rms_norm_ranks)
-
-
-@ray.remote(num_gpus=1, max_calls=1)
-def all_reduce_add_attn_res_rms_norm_ranks(
-    monkeypatch: pytest.MonkeyPatch, tp_size, pp_size, rank, port
-):
-    from vllm.models.kimi_k3.amd.ops.attn_res import attn_res
-
-    with monkeypatch.context() as m:
-        m.delenv("CUDA_VISIBLE_DEVICES", raising=False)
-        m.delenv("HIP_VISIBLE_DEVICES", raising=False)
-        m.delenv("ROCR_VISIBLE_DEVICES", raising=False)
-        device = torch.device(f"cuda:{rank}")
-        torch.accelerator.set_device_index(device)
-        init_test_distributed_environment(tp_size, pp_size, rank, port)
-        ensure_model_parallel_initialized(tp_size, pp_size)
-        group = get_tp_group()
-        dist.all_reduce(torch.zeros(1, device=device), group=group.device_group)
-        torch.accelerator.synchronize()
-        comm = HipCustomCommunicator(
-            group.cpu_group,
-            group.device_group,
-            device,
-            max_rows=MAX_TOKENS,
-            max_cols=HIDDEN,
-        )
-        assert not comm.disabled, comm.lifecycle
-        dtype = torch.bfloat16
-        try:
-            for num_tokens in NUM_TOKENS:
-                for has_prefix, num_blocks, write_index in [
-                    (True, 4, -1),
-                    (False, 4, 4),
-                ]:
-                    g = torch.Generator(device=device).manual_seed(rank)
-                    x = torch.randint(
-                        -8, 8, (num_tokens, HIDDEN), generator=g, device=device
-                    ).to(dtype)
-                    g.manual_seed(0)
-                    prefix = (
-                        torch.randint(
-                            -8, 8, (num_tokens, HIDDEN), generator=g, device=device
-                        ).to(dtype)
-                        if has_prefix
-                        else None
-                    )
-                    blocks = torch.randint(
-                        -8, 8, (num_tokens, 10, HIDDEN), generator=g, device=device
-                    ).to(dtype)
-                    norm_weight = torch.empty(HIDDEN, dtype=dtype, device=device)
-                    norm_weight.normal_(mean=1.0, std=0.1, generator=g)
-                    qk_weight = torch.empty(HIDDEN, dtype=dtype, device=device)
-                    qk_weight.normal_(mean=0.0, std=0.1, generator=g)
-                    output_norm_weight = torch.empty(HIDDEN, dtype=dtype, device=device)
-                    output_norm_weight.normal_(mean=1.0, std=0.1, generator=g)
-
-                    summed = x.clone()
-                    dist.all_reduce(summed, group=group.device_group)
-                    want_prefix = summed.clone() if prefix is None else prefix.clone()
-                    want_blocks = blocks.clone()
-                    want_out = attn_res(
-                        want_prefix,
-                        None if prefix is None else summed,
-                        want_blocks,
-                        norm_weight,
-                        qk_weight,
-                        output_norm_weight,
-                        num_blocks,
-                        write_index,
-                        ATTN_RES_EPS,
-                        EPS,
-                    )
-                    assert comm.should_allreduce_add_attn_res_rms_norm(
-                        x,
-                        prefix,
-                        blocks,
-                        norm_weight,
-                        qk_weight,
-                        output_norm_weight,
-                        num_blocks,
-                        write_index,
-                    )
-
-                    forced = [
-                        comm.kernel_config(
-                            "all_reduce_add_attn_res_rms_norm",
-                            algorithm,
-                            num_tokens,
-                            HIDDEN,
-                            comm.arguments.quantization,
-                        )
-                        for algorithm in AllReduceAddAttnResRmsNormConfig.algorithms
-                    ]
-                    original_blocks = blocks.clone()
-                    for config in [None, *(c for c in forced if c is not None)]:
-                        blocks.copy_(original_blocks)
-                        out_prefix, out = comm.all_reduce_add_attn_res_rms_norm(
-                            x,
-                            prefix,
-                            blocks,
-                            norm_weight,
-                            qk_weight,
-                            output_norm_weight,
-                            num_blocks,
-                            write_index,
-                            ATTN_RES_EPS,
-                            EPS,
-                            config=config,
-                        )
-                        for got, want in [
-                            (out, want_out),
-                            (out_prefix, want_prefix),
-                            (blocks, want_blocks),
-                        ]:
-                            if comm.arguments.quantization == "int4":
-                                err = (
-                                    (got.float() - want.float()).square().mean().sqrt()
-                                )
-                                rms = want.float().square().mean().sqrt()
-                                assert err / rms <= int4_bar(
-                                    config
-                                    if config is not None
-                                    else comm.tuned(
-                                        "all_reduce_add_attn_res_rms_norm",
-                                        num_tokens,
-                                        HIDDEN,
-                                        None,
-                                    )
-                                ), (
-                                    num_tokens,
-                                    dtype,
-                                    config,
-                                )
-                            else:
-                                torch.testing.assert_close(
-                                    got, want, atol=2e-2, rtol=2e-2, msg=str(config)
-                                )
-                    blocks.copy_(original_blocks)
-
-                    graph = torch.cuda.CUDAGraph()
-                    with comm.capture():
-                        comm.all_reduce_add_attn_res_rms_norm(
-                            x,
-                            prefix,
-                            blocks,
-                            norm_weight,
-                            qk_weight,
-                            output_norm_weight,
-                            num_blocks,
-                            write_index,
-                            ATTN_RES_EPS,
-                            EPS,
-                        )
-                        with torch.cuda.graph(graph):
-                            out_prefix, out = comm.all_reduce_add_attn_res_rms_norm(
-                                x,
-                                prefix,
-                                blocks,
-                                norm_weight,
-                                qk_weight,
-                                output_norm_weight,
-                                num_blocks,
-                                write_index,
-                                ATTN_RES_EPS,
-                                EPS,
-                            )
-                    x.copy_(x + 1)
-                    summed = x.clone()
-                    dist.all_reduce(summed, group=group.device_group)
-                    want_prefix = summed.clone() if prefix is None else prefix.clone()
-                    want_blocks = blocks.clone()
-                    want_out = attn_res(
-                        want_prefix,
-                        None if prefix is None else summed,
-                        want_blocks,
-                        norm_weight,
-                        qk_weight,
-                        output_norm_weight,
-                        num_blocks,
-                        write_index,
-                        ATTN_RES_EPS,
-                        EPS,
-                    )
-                    graph.replay()
-                    torch.accelerator.synchronize()
-                    for got, want in [
-                        (out, want_out),
-                        (out_prefix, want_prefix),
-                        (blocks, want_blocks),
-                    ]:
-                        if comm.arguments.quantization == "int4":
-                            err = (got.float() - want.float()).square().mean().sqrt()
-                            rms = want.float().square().mean().sqrt()
-                            assert err / rms <= int4_bar(
-                                comm.tuned(
-                                    "all_reduce_add_attn_res_rms_norm",
-                                    num_tokens,
-                                    HIDDEN,
-                                    None,
-                                )
-                            ), (num_tokens, dtype)
-                        else:
-                            torch.testing.assert_close(got, want, atol=2e-2, rtol=2e-2)
-        finally:
-            comm.close()
-
-
-@pytest.mark.parametrize("tp_size", [2, 4, 8])
-@pytest.mark.parametrize("quantization", ["NONE", "INT4"])
-def test_all_reduce_add_attn_res_rms_norm(
-    monkeypatch: pytest.MonkeyPatch, tp_size, quantization
-):
-    if tp_size > torch.accelerator.device_count():
-        pytest.skip("Not enough GPUs to run the test.")
-    monkeypatch.setenv("VLLM_ROCM_HIP_CUSTOM_COMMUNICATOR_QUANTIZATION", quantization)
-    multi_process_parallel(
-        monkeypatch, tp_size, 1, all_reduce_add_attn_res_rms_norm_ranks
-    )
-
-
-@ray.remote(num_gpus=1, max_calls=1)
-def outputs_independent_of_memory_ranks(
-    monkeypatch: pytest.MonkeyPatch, tp_size, pp_size, rank, port
-):
-    """Outputs must not depend on what their memory held before."""
-    with monkeypatch.context() as m:
-        m.delenv("CUDA_VISIBLE_DEVICES", raising=False)
-        m.delenv("HIP_VISIBLE_DEVICES", raising=False)
-        m.delenv("ROCR_VISIBLE_DEVICES", raising=False)
-        device = torch.device(f"cuda:{rank}")
-        torch.accelerator.set_device_index(device)
-        init_test_distributed_environment(tp_size, pp_size, rank, port)
-        ensure_model_parallel_initialized(tp_size, pp_size)
-        group = get_tp_group()
-        dist.all_reduce(torch.zeros(1, device=device), group=group.device_group)
-        torch.accelerator.synchronize()
-        comm = HipCustomCommunicator(
-            group.cpu_group,
-            group.device_group,
-            device,
-            max_rows=MAX_TOKENS,
-            max_cols=HIDDEN,
-        )
-        assert not comm.disabled, comm.lifecycle
-        dtype = torch.bfloat16
-        refused_at_size = (
-            "staging_too_small",
-            "partials_too_small",
-            "unfenced_too_small",
-            "grid_not_resident",
-            "launch_out_of_range",
-        )
-        failures = []
-        try:
-            for cols in [HIDDEN, HIDDEN // 2]:
-                for num_tokens in [8, 256, MAX_TOKENS]:
-                    g = torch.Generator(device=device).manual_seed(rank)
-                    x = torch.randn((num_tokens, cols), generator=g, device=device)
-                    g.manual_seed(0)
-                    x[:, torch.randperm(cols, generator=g, device=device)[:8]] *= 50
-                    x = x.to(dtype)
-                    residual = torch.randn(
-                        (num_tokens, cols), generator=g, device=device
-                    ).to(dtype)
-                    prefix = (
-                        torch.randn((num_tokens, cols), generator=g, device=device) * 4
-                    ).to(dtype)
-                    blocks = torch.randn(
-                        (num_tokens, 10, cols), generator=g, device=device
-                    ).to(dtype)
-                    weight = torch.empty(cols, dtype=dtype, device=device)
-                    weight.normal_(mean=1.0, std=0.1, generator=g)
-                    qk_weight = torch.empty(cols, dtype=dtype, device=device)
-                    qk_weight.normal_(mean=0.0, std=0.1, generator=g)
-
-                    calls = [
-                        ("all_reduce", "all_reduce"),
-                        ("rms_norm", "all_reduce_add_rms_norm"),
-                        ("add_rms_norm", "all_reduce_add_rms_norm"),
-                        ("attn_res", "all_reduce_add_attn_res_rms_norm"),
-                        ("attn_res_block_write", "all_reduce_add_attn_res_rms_norm"),
-                    ]
-                    for variant, op in calls:
-                        algorithms = {
-                            "all_reduce": AllReduceConfig,
-                            "all_reduce_add_rms_norm": AllReduceAddRmsNormConfig,
-                            "all_reduce_add_attn_res_rms_norm": (
-                                AllReduceAddAttnResRmsNormConfig
-                            ),
-                        }[op].algorithms
-                        forced = [
-                            comm.kernel_config(
-                                op,
-                                algorithm,
-                                num_tokens,
-                                cols,
-                                comm.arguments.quantization,
-                            )
-                            for algorithm in algorithms
-                        ]
-                        for config in [None, *(c for c in forced if c is not None)]:
-                            answers = []
-                            where = (variant, config, num_tokens, cols)
-                            for fill in [float("nan"), 1e4]:
-                                poison = [torch.full_like(x, fill) for _ in range(4)]
-                                del poison
-                                try:
-                                    outputs = []
-                                    if variant == "all_reduce":
-                                        outputs = [comm.all_reduce(x, config=config)]
-                                    elif variant == "rms_norm":
-                                        outputs = [
-                                            comm.all_reduce_add_rms_norm(
-                                                x, weight, EPS, config=config
-                                            )
-                                        ]
-                                    elif variant == "add_rms_norm":
-                                        outputs = list(
-                                            comm.all_reduce_add_rms_norm(
-                                                x,
-                                                weight,
-                                                EPS,
-                                                residual=residual,
-                                                config=config,
-                                            )
-                                        )
-                                    else:
-                                        has_prefix = variant == "attn_res"
-                                        written = blocks.clone()
-                                        outputs = [
-                                            written,
-                                            *comm.all_reduce_add_attn_res_rms_norm(
-                                                x,
-                                                prefix if has_prefix else None,
-                                                written,
-                                                weight,
-                                                qk_weight,
-                                                weight,
-                                                4,
-                                                -1 if has_prefix else 4,
-                                                ATTN_RES_EPS,
-                                                EPS,
-                                                config=config,
-                                            ),
-                                        ]
-                                except RuntimeError as e:
-                                    if not str(e).startswith(refused_at_size):
-                                        raise
-                                    break
-                                answers.append([t.clone() for t in outputs])
-                            torch.accelerator.synchronize()
-                            if len(answers) < 2:
-                                continue
-                            for poisoned_nan, poisoned_finite in zip(*answers):
-                                if not torch.isfinite(poisoned_nan).all():
-                                    failures.append(("not finite", *where))
-                                elif not torch.equal(poisoned_nan, poisoned_finite):
-                                    failures.append(("differs", *where))
-            assert not failures, "\n".join(map(str, failures))
-        finally:
-            comm.close()
-
-
-@pytest.mark.parametrize("tp_size", [2, 4, 8])
-@pytest.mark.parametrize("quantization", ["NONE", "INT4"])
-def test_outputs_independent_of_memory(
-    monkeypatch: pytest.MonkeyPatch, tp_size, quantization
-):
-    if tp_size > torch.accelerator.device_count():
-        pytest.skip("Not enough GPUs to run the test.")
-    monkeypatch.setenv("VLLM_ROCM_HIP_CUSTOM_COMMUNICATOR_QUANTIZATION", quantization)
-    multi_process_parallel(monkeypatch, tp_size, 1, outputs_independent_of_memory_ranks)
-
-
-@ray.remote(num_gpus=1, max_calls=1)
-def refused_calls_ranks(monkeypatch: pytest.MonkeyPatch, tp_size, pp_size, rank, port):
-    with monkeypatch.context() as m:
-        m.delenv("CUDA_VISIBLE_DEVICES", raising=False)
-        m.delenv("HIP_VISIBLE_DEVICES", raising=False)
-        m.delenv("ROCR_VISIBLE_DEVICES", raising=False)
-        device = torch.device(f"cuda:{rank}")
-        torch.accelerator.set_device_index(device)
-        init_test_distributed_environment(tp_size, pp_size, rank, port)
-        ensure_model_parallel_initialized(tp_size, pp_size)
-        group = get_tp_group()
-        dist.all_reduce(torch.zeros(1, device=device), group=group.device_group)
-        torch.accelerator.synchronize()
-        comm = HipCustomCommunicator(
-            group.cpu_group,
-            group.device_group,
-            device,
-            max_rows=MAX_TOKENS,
-            max_cols=HIDDEN,
-        )
-        assert not comm.disabled, comm.lifecycle
-        try:
-            past = torch.ones(
-                16 * MAX_TOKENS, HIDDEN, dtype=torch.bfloat16, device=device
-            )
-            assert not comm.should_allreduce(past)
-
-            with pytest.raises(RuntimeError, match="^not_two_d:"):
-                comm.all_reduce(
-                    torch.ones(2, 4, HIDDEN, dtype=torch.bfloat16, device=device)
-                )
-
-            x = torch.ones(4, 2 * HIDDEN, dtype=torch.bfloat16, device=device)[
-                :, :HIDDEN
-            ]
-            want = x.clone()
-            dist.all_reduce(want, group=group.device_group)
-            if comm.should_allreduce(x):
-                assert torch.equal(comm.all_reduce(x), want)
-        finally:
-            comm.close()
-
-
-def test_refused_calls(monkeypatch: pytest.MonkeyPatch):
-    if torch.accelerator.device_count() < 2:
-        pytest.skip("Not enough GPUs to run the test.")
-    monkeypatch.setenv("VLLM_ROCM_HIP_CUSTOM_COMMUNICATOR_QUANTIZATION", "NONE")
-    multi_process_parallel(monkeypatch, 2, 1, refused_calls_ranks)
-
-
-@ray.remote(num_gpus=1, max_calls=1)
-def tuned_table_ranks(monkeypatch: pytest.MonkeyPatch, tp_size, pp_size, rank, port):
-    with monkeypatch.context() as m:
-        m.delenv("CUDA_VISIBLE_DEVICES", raising=False)
-        m.delenv("HIP_VISIBLE_DEVICES", raising=False)
-        m.delenv("ROCR_VISIBLE_DEVICES", raising=False)
-        device = torch.device(f"cuda:{rank}")
-        torch.accelerator.set_device_index(device)
-        init_test_distributed_environment(tp_size, pp_size, rank, port)
-        ensure_model_parallel_initialized(tp_size, pp_size)
-        group = get_tp_group()
-        dist.all_reduce(torch.zeros(1, device=device), group=group.device_group)
-        torch.accelerator.synchronize()
-        for quantization in ["exact", "int4"]:
+    @ray.remote(num_gpus=1, max_calls=1)
+    def ranks(monkeypatch, tp_size, pp_size, rank, port):
+        with monkeypatch.context() as m:
+            for var in [
+                "CUDA_VISIBLE_DEVICES",
+                "HIP_VISIBLE_DEVICES",
+                "ROCR_VISIBLE_DEVICES",
+            ]:
+                m.delenv(var, raising=False)
+            device = torch.device(f"cuda:{rank}")
+            torch.accelerator.set_device_index(device)
+            init_test_distributed_environment(tp_size, pp_size, rank, port)
+            ensure_model_parallel_initialized(tp_size, pp_size)
+            group = get_tp_group()
+            dist.all_reduce(torch.zeros(1, device=device), group=group.device_group)
+            torch.accelerator.synchronize()
             comm = HipCustomCommunicator(
                 group.cpu_group,
                 group.device_group,
@@ -796,26 +79,664 @@ def tuned_table_ranks(monkeypatch: pytest.MonkeyPatch, tp_size, pp_size, rank, p
             )
             assert not comm.disabled, comm.lifecycle
             try:
-                for op, residual in [
-                    ("all_reduce", None),
-                    ("all_reduce_add_rms_norm", False),
-                    ("all_reduce_add_rms_norm", True),
-                    ("all_reduce_add_attn_res_rms_norm", None),
-                ]:
-                    for num_tokens in [1, MAX_TOKENS]:
-                        config = comm.tuned(op, num_tokens, HIDDEN, residual)
-                        assert config is not None, (
-                            op,
-                            residual,
-                            quantization,
-                            num_tokens,
-                        )
+                body(comm, group, device, rank)
             finally:
                 comm.close()
 
+    multi_process_parallel(monkeypatch, tp_size, 1, ranks)
 
-@pytest.mark.parametrize("tp_size", [2, 4, 8])
-def test_tuned_table(monkeypatch: pytest.MonkeyPatch, tp_size):
-    if tp_size > torch.accelerator.device_count():
+
+def _int4_sum(xs, config):
+    """The sum an INT4 config computes: each rank's input through the format,
+    summed in fp32, and the sum through it again where a two-shot gathers it."""
+
+    def through_int4(x):
+        groups = x.float().reshape(x.shape[0], -1, 32)
+        largest = groups.abs().amax(dim=-1, keepdim=True)
+        negative = (groups == -largest).any(dim=-1, keepdim=True)
+        extreme = torch.where(negative, -largest, largest)
+        scale = (extreme / -8).clamp(-65504, 65504).half().float()
+        inverse = torch.where(scale != 0, 1 / scale, torch.zeros_like(scale))
+        levels = torch.round(groups * inverse + 8).clamp(0, 15)
+        return (scale * (levels - 8)).reshape(x.shape)
+
+    summed = sum(through_int4(x) for x in xs)
+    if config.algorithm.startswith("two_shot"):
+        summed = through_int4(summed)
+    return summed
+
+
+def _compare(got, want, config, where, exact=False):
+    """For an INT4 config, close to the format's own answer, overall and in each
+    row; otherwise equal, or close."""
+    if config.quantization == "int4":
+        diff = (got.float() - want.float()).reshape(got.shape[0], -1)
+        ref = want.float().reshape(got.shape[0], -1)
+        rms = diff.square().mean().sqrt() / ref.square().mean().sqrt()
+        row_rms = diff.square().mean(-1).sqrt() / ref.square().mean(-1).sqrt()
+        assert rms <= INT4_RELATIVE_RMS, (where, config, rms.item())
+        worst = row_rms.nan_to_num(0.0).max()
+        assert worst <= INT4_ROW_RELATIVE_RMS, (where, config, worst.item())
+    elif exact:
+        assert torch.equal(got, want), (where, config)
+    else:
+        torch.testing.assert_close(
+            got, want, atol=2e-2, rtol=2e-2, msg=str((where, config))
+        )
+
+
+@pytest.mark.parametrize("tp_size", TP_SIZES)
+@pytest.mark.parametrize("quantization", QUANTIZATIONS)
+def test_all_reduce_correctness(monkeypatch, tp_size, quantization):
+    def body(comm, group, device, rank):
+        for rows in NUM_TOKENS:
+            for dtype in DTYPES:
+                xs = [
+                    torch.randint(
+                        -8,
+                        8,
+                        (rows, HIDDEN),
+                        generator=torch.Generator(device=device).manual_seed(r),
+                        device=device,
+                    ).to(dtype)
+                    for r in range(comm.arguments.world)
+                ]
+                x = xs[rank]
+                summed = x.clone()
+                dist.all_reduce(summed, group=group.device_group)
+                assert comm.should_allreduce(x)
+
+                q = comm.arguments.quantization
+                forced = [
+                    comm.kernel_config("all_reduce", a, rows, HIDDEN, q)
+                    for a in AllReduceConfig.algorithms
+                ]
+                for config in [None, *(c for c in forced if c is not None)]:
+                    try:
+                        got = comm.all_reduce(x, config=config)
+                    except RuntimeError as e:
+                        if config is None or not str(e).startswith(REFUSED_AT_SIZE):
+                            raise
+                        continue
+                    used = config or comm.tuned("all_reduce", rows, HIDDEN, None)
+                    if used.quantization == "int4":
+                        want = _int4_sum(xs, used).to(dtype)
+                    else:
+                        want = summed
+                    _compare(got, want, used, (rows, dtype), exact=True)
+
+    _on_ranks(monkeypatch, tp_size, quantization, body)
+
+
+@pytest.mark.parametrize("tp_size", TP_SIZES)
+@pytest.mark.parametrize("quantization", QUANTIZATIONS)
+def test_all_reduce_add_rms_norm_correctness(monkeypatch, tp_size, quantization):
+    def body(comm, group, device, rank):
+        from vllm.ir.ops import fused_add_rms_norm, rms_norm
+
+        for rows in NUM_TOKENS:
+            for dtype in DTYPES:
+                for with_residual in [False, True]:
+                    xs = [
+                        torch.randint(
+                            -8,
+                            8,
+                            (rows, HIDDEN),
+                            generator=torch.Generator(device=device).manual_seed(r),
+                            device=device,
+                        ).to(dtype)
+                        for r in range(comm.arguments.world)
+                    ]
+                    x = xs[rank]
+                    g = torch.Generator(device=device).manual_seed(0)
+                    residual = torch.randint(
+                        -8, 8, (rows, HIDDEN), generator=g, device=device
+                    ).to(dtype)
+                    weight = torch.empty(HIDDEN, dtype=dtype, device=device)
+                    weight.normal_(mean=1.0, std=0.1, generator=g)
+
+                    exact_sum = x.clone()
+                    dist.all_reduce(exact_sum, group=group.device_group)
+                    r = residual if with_residual else None
+                    assert comm.should_allreduce_add_rms_norm(x, weight, r)
+
+                    q = comm.arguments.quantization
+                    forced = [
+                        comm.kernel_config(
+                            "all_reduce_add_rms_norm", a, rows, HIDDEN, q
+                        )
+                        for a in AllReduceAddRmsNormConfig.algorithms
+                    ]
+                    for config in [None, *(c for c in forced if c is not None)]:
+                        got = comm.all_reduce_add_rms_norm(
+                            x, weight, EPS, residual=r, config=config
+                        )
+                        got = got if with_residual else (got,)
+                        used = config or comm.tuned(
+                            "all_reduce_add_rms_norm", rows, HIDDEN, with_residual
+                        )
+                        if used.quantization == "int4":
+                            summed = _int4_sum(xs, used).to(dtype)
+                        else:
+                            summed = exact_sum
+                        if with_residual:
+                            want = fused_add_rms_norm(
+                                summed, residual.clone(), weight, EPS
+                            )
+                        else:
+                            want = (rms_norm(summed, weight, EPS),)
+                        for g_, w_ in zip(got, want, strict=True):
+                            _compare(g_, w_, used, (rows, dtype, with_residual))
+
+    _on_ranks(monkeypatch, tp_size, quantization, body)
+
+
+@pytest.mark.parametrize("tp_size", TP_SIZES)
+@pytest.mark.parametrize("quantization", QUANTIZATIONS)
+def test_all_reduce_add_attn_res_rms_norm_correctness(
+    monkeypatch, tp_size, quantization
+):
+    def body(comm, group, device, rank):
+        from vllm.models.kimi_k3.amd.ops.attn_res import attn_res
+
+        dtype = torch.bfloat16
+        for rows in NUM_TOKENS:
+            for with_prefix, write_index in [(True, -1), (False, NUM_BLOCKS)]:
+                xs = [
+                    torch.randint(
+                        -8,
+                        8,
+                        (rows, HIDDEN),
+                        generator=torch.Generator(device=device).manual_seed(r),
+                        device=device,
+                    ).to(dtype)
+                    for r in range(comm.arguments.world)
+                ]
+                x = xs[rank]
+                g = torch.Generator(device=device).manual_seed(0)
+                prefix = (
+                    torch.randint(-8, 8, (rows, HIDDEN), generator=g, device=device).to(
+                        dtype
+                    )
+                    if with_prefix
+                    else None
+                )
+                blocks = torch.randint(
+                    -8, 8, (rows, 10, HIDDEN), generator=g, device=device
+                ).to(dtype)
+                norm_weight = torch.empty(HIDDEN, dtype=dtype, device=device)
+                norm_weight.normal_(mean=1.0, std=0.1, generator=g)
+                qk_weight = torch.empty(HIDDEN, dtype=dtype, device=device)
+                qk_weight.normal_(mean=0.0, std=0.1, generator=g)
+                out_weight = torch.empty(HIDDEN, dtype=dtype, device=device)
+                out_weight.normal_(mean=1.0, std=0.1, generator=g)
+
+                exact_sum = x.clone()
+                dist.all_reduce(exact_sum, group=group.device_group)
+                assert comm.should_allreduce_add_attn_res_rms_norm(
+                    x,
+                    prefix,
+                    blocks,
+                    norm_weight,
+                    qk_weight,
+                    out_weight,
+                    NUM_BLOCKS,
+                    write_index,
+                )
+
+                q = comm.arguments.quantization
+                forced = [
+                    comm.kernel_config(
+                        "all_reduce_add_attn_res_rms_norm", a, rows, HIDDEN, q
+                    )
+                    for a in AllReduceAddAttnResRmsNormConfig.algorithms
+                ]
+                for config in [None, *(c for c in forced if c is not None)]:
+                    got_blocks = blocks.clone()
+                    got_prefix, got_out = comm.all_reduce_add_attn_res_rms_norm(
+                        x,
+                        prefix,
+                        got_blocks,
+                        norm_weight,
+                        qk_weight,
+                        out_weight,
+                        NUM_BLOCKS,
+                        write_index,
+                        ATTN_RES_EPS,
+                        EPS,
+                        config=config,
+                    )
+                    used = config or comm.tuned(
+                        "all_reduce_add_attn_res_rms_norm", rows, HIDDEN, None
+                    )
+                    if used.quantization == "int4":
+                        summed = _int4_sum(xs, used).to(dtype)
+                    else:
+                        summed = exact_sum
+                    want_prefix = (
+                        prefix.clone() if prefix is not None else summed.clone()
+                    )
+                    want_blocks = blocks.clone()
+                    want_out = attn_res(
+                        want_prefix,
+                        summed if prefix is not None else None,
+                        want_blocks,
+                        norm_weight,
+                        qk_weight,
+                        out_weight,
+                        NUM_BLOCKS,
+                        write_index,
+                        ATTN_RES_EPS,
+                        EPS,
+                    )
+                    where = (rows, with_prefix)
+                    _compare(got_out, want_out, used, where)
+                    _compare(got_prefix, want_prefix, used, where)
+                    _compare(got_blocks, want_blocks, used, where)
+
+    _on_ranks(monkeypatch, tp_size, quantization, body)
+
+
+@pytest.mark.parametrize("tp_size", TP_SIZES)
+@pytest.mark.parametrize("quantization", QUANTIZATIONS)
+def test_hip_custom_communicator_capture(monkeypatch, tp_size, quantization):
+    """Each op captured in a CUDA graph replays to the right answer on new input."""
+
+    def body(comm, group, device, rank):
+        from vllm.ir.ops import fused_add_rms_norm, rms_norm
+        from vllm.models.kimi_k3.amd.ops.attn_res import attn_res
+
+        for rows in NUM_TOKENS:
+            for dtype in DTYPES:
+                attn = dtype == torch.bfloat16
+                xs = [
+                    torch.randint(
+                        -8,
+                        8,
+                        (rows, HIDDEN),
+                        generator=torch.Generator(device=device).manual_seed(r),
+                        device=device,
+                    ).to(dtype)
+                    for r in range(comm.arguments.world)
+                ]
+                x = xs[rank]
+                g = torch.Generator(device=device).manual_seed(0)
+                residual = torch.randint(
+                    -8, 8, (rows, HIDDEN), generator=g, device=device
+                ).to(dtype)
+                prefix = torch.randint(
+                    -8, 8, (rows, HIDDEN), generator=g, device=device
+                ).to(dtype)
+                blocks = torch.randint(
+                    -8, 8, (rows, 10, HIDDEN), generator=g, device=device
+                ).to(dtype)
+                write_blocks = blocks.clone()
+                weight = torch.empty(HIDDEN, dtype=dtype, device=device)
+                weight.normal_(mean=1.0, std=0.1, generator=g)
+                qk_weight = torch.empty(HIDDEN, dtype=dtype, device=device)
+                qk_weight.normal_(mean=0.0, std=0.1, generator=g)
+                attn_args = (weight, qk_weight, weight, NUM_BLOCKS)
+
+                graph = torch.cuda.CUDAGraph()
+                with comm.capture():
+                    comm.all_reduce(x)
+                    comm.all_reduce_add_rms_norm(x, weight, EPS)
+                    comm.all_reduce_add_rms_norm(x, weight, EPS, residual=residual)
+                    if attn:
+                        comm.all_reduce_add_attn_res_rms_norm(
+                            x, prefix, blocks, *attn_args, -1, ATTN_RES_EPS, EPS
+                        )
+                        comm.all_reduce_add_attn_res_rms_norm(
+                            x,
+                            None,
+                            write_blocks,
+                            *attn_args,
+                            NUM_BLOCKS,
+                            ATTN_RES_EPS,
+                            EPS,
+                        )
+                    with torch.cuda.graph(graph):
+                        reduced = comm.all_reduce(x)
+                        normed = comm.all_reduce_add_rms_norm(x, weight, EPS)
+                        added, added_residual = comm.all_reduce_add_rms_norm(
+                            x, weight, EPS, residual=residual
+                        )
+                        if attn:
+                            attn_prefix, attn_out = (
+                                comm.all_reduce_add_attn_res_rms_norm(
+                                    x,
+                                    prefix,
+                                    blocks,
+                                    *attn_args,
+                                    -1,
+                                    ATTN_RES_EPS,
+                                    EPS,
+                                )
+                            )
+                            write_prefix, write_out = (
+                                comm.all_reduce_add_attn_res_rms_norm(
+                                    x,
+                                    None,
+                                    write_blocks,
+                                    *attn_args,
+                                    NUM_BLOCKS,
+                                    ATTN_RES_EPS,
+                                    EPS,
+                                )
+                            )
+
+                later = [t + 1 for t in xs]
+                x.copy_(later[rank])
+                exact_sum = x.clone()
+                dist.all_reduce(exact_sum, group=group.device_group)
+                ar = comm.tuned("all_reduce", rows, HIDDEN, None)
+                norm = comm.tuned("all_reduce_add_rms_norm", rows, HIDDEN, False)
+                add = comm.tuned("all_reduce_add_rms_norm", rows, HIDDEN, True)
+                ra = comm.tuned("all_reduce_add_attn_res_rms_norm", rows, HIDDEN, None)
+                ar_sum, norm_sum, add_sum, ra_sum = (
+                    _int4_sum(later, c).to(dtype)
+                    if c.quantization == "int4"
+                    else exact_sum
+                    for c in (ar, norm, add, ra)
+                )
+                want_normed = rms_norm(norm_sum, weight, EPS)
+                want_added, want_residual = fused_add_rms_norm(
+                    add_sum, residual.clone(), weight, EPS
+                )
+                if attn:
+                    want_prefix = prefix.clone()
+                    want_attn = attn_res(
+                        want_prefix,
+                        ra_sum,
+                        blocks.clone(),
+                        *attn_args,
+                        -1,
+                        ATTN_RES_EPS,
+                        EPS,
+                    )
+                    want_write_prefix = ra_sum.clone()
+                    want_write_blocks = write_blocks.clone()
+                    want_write = attn_res(
+                        want_write_prefix,
+                        None,
+                        want_write_blocks,
+                        *attn_args,
+                        NUM_BLOCKS,
+                        ATTN_RES_EPS,
+                        EPS,
+                    )
+                graph.replay()
+                torch.accelerator.synchronize()
+
+                _compare(reduced, ar_sum, ar, (rows, dtype), exact=True)
+                _compare(normed, want_normed, norm, (rows, dtype))
+                _compare(added, want_added, add, (rows, dtype))
+                _compare(added_residual, want_residual, add, (rows, dtype))
+                if attn:
+                    _compare(attn_out, want_attn, ra, rows)
+                    _compare(attn_prefix, want_prefix, ra, rows)
+                    _compare(write_out, want_write, ra, rows)
+                    _compare(write_prefix, want_write_prefix, ra, rows)
+                    _compare(write_blocks, want_write_blocks, ra, rows)
+
+    _on_ranks(monkeypatch, tp_size, quantization, body)
+
+
+@pytest.mark.parametrize("tp_size", TP_SIZES)
+@pytest.mark.parametrize("quantization", QUANTIZATIONS)
+def test_hip_custom_communicator_independence(monkeypatch, tp_size, quantization):
+    """Outputs must not depend on what their memory held before."""
+
+    def body(comm, group, device, rank):
+        dtype = torch.bfloat16
+        failures = []
+        for cols in [HIDDEN, HIDDEN // 2]:
+            for rows in [8, 256, MAX_TOKENS]:
+                g = torch.Generator(device=device).manual_seed(rank)
+                x = torch.randn((rows, cols), generator=g, device=device)
+                g.manual_seed(0)
+                x[:, torch.randperm(cols, generator=g, device=device)[:8]] *= 50
+                x = x.to(dtype)
+                residual = torch.randn((rows, cols), generator=g, device=device)
+                residual = residual.to(dtype)
+                prefix = torch.randn((rows, cols), generator=g, device=device) * 4
+                prefix = prefix.to(dtype)
+                blocks = torch.randn((rows, 10, cols), generator=g, device=device)
+                blocks = blocks.to(dtype)
+                weight = torch.empty(cols, dtype=dtype, device=device)
+                weight.normal_(mean=1.0, std=0.1, generator=g)
+                qk_weight = torch.empty(cols, dtype=dtype, device=device)
+                qk_weight.normal_(mean=0.0, std=0.1, generator=g)
+
+                for variant, op, algorithms in [
+                    ("all_reduce", "all_reduce", AllReduceConfig.algorithms),
+                    (
+                        "rms_norm",
+                        "all_reduce_add_rms_norm",
+                        AllReduceAddRmsNormConfig.algorithms,
+                    ),
+                    (
+                        "add_rms_norm",
+                        "all_reduce_add_rms_norm",
+                        AllReduceAddRmsNormConfig.algorithms,
+                    ),
+                    (
+                        "attn_res",
+                        "all_reduce_add_attn_res_rms_norm",
+                        AllReduceAddAttnResRmsNormConfig.algorithms,
+                    ),
+                    (
+                        "attn_res_block_write",
+                        "all_reduce_add_attn_res_rms_norm",
+                        AllReduceAddAttnResRmsNormConfig.algorithms,
+                    ),
+                ]:
+                    q = comm.arguments.quantization
+                    forced = [
+                        comm.kernel_config(op, a, rows, cols, q) for a in algorithms
+                    ]
+                    for config in [None, *(c for c in forced if c is not None)]:
+                        answers = []
+                        for fill in [float("nan"), 1e4]:
+                            poison = [torch.full_like(x, fill) for _ in range(4)]
+                            del poison
+                            try:
+                                if variant == "all_reduce":
+                                    got = [comm.all_reduce(x, config=config)]
+                                elif variant == "rms_norm":
+                                    got = [
+                                        comm.all_reduce_add_rms_norm(
+                                            x, weight, EPS, config=config
+                                        )
+                                    ]
+                                elif variant == "add_rms_norm":
+                                    got = list(
+                                        comm.all_reduce_add_rms_norm(
+                                            x,
+                                            weight,
+                                            EPS,
+                                            residual=residual,
+                                            config=config,
+                                        )
+                                    )
+                                else:
+                                    with_prefix = variant == "attn_res"
+                                    written = blocks.clone()
+                                    got = [
+                                        written,
+                                        *comm.all_reduce_add_attn_res_rms_norm(
+                                            x,
+                                            prefix if with_prefix else None,
+                                            written,
+                                            weight,
+                                            qk_weight,
+                                            weight,
+                                            NUM_BLOCKS,
+                                            -1 if with_prefix else NUM_BLOCKS,
+                                            ATTN_RES_EPS,
+                                            EPS,
+                                            config=config,
+                                        ),
+                                    ]
+                            except RuntimeError as e:
+                                if not str(e).startswith(REFUSED_AT_SIZE):
+                                    raise
+                                break
+                            answers.append([t.clone() for t in got])
+                        torch.accelerator.synchronize()
+                        where = (variant, config, rows, cols)
+                        if len(answers) == 2:
+                            for nan_filled, finite_filled in zip(*answers):
+                                if not torch.isfinite(nan_filled).all():
+                                    failures.append(("not finite", *where))
+                                elif not torch.equal(nan_filled, finite_filled):
+                                    failures.append(("differs", *where))
+        assert not failures, "\n".join(map(str, failures))
+
+    _on_ranks(monkeypatch, tp_size, quantization, body)
+
+
+def test_hip_custom_communicator_refusal(monkeypatch):
+    def body(comm, group, device, rank):
+        past = torch.ones(16 * MAX_TOKENS, HIDDEN, dtype=torch.bfloat16, device=device)
+        assert not comm.should_allreduce(past)
+
+        three_d = torch.ones(2, 4, HIDDEN, dtype=torch.bfloat16, device=device)
+        with pytest.raises(RuntimeError, match="^not_two_d:"):
+            comm.all_reduce(three_d)
+
+        strided = torch.ones(4, 2 * HIDDEN, dtype=torch.bfloat16, device=device)
+        x = strided[:, :HIDDEN]
+        if comm.should_allreduce(x):
+            want = x.clone()
+            dist.all_reduce(want, group=group.device_group)
+            assert torch.equal(comm.all_reduce(x), want)
+
+        x = torch.ones(4, HIDDEN, dtype=torch.bfloat16, device=device)
+        want = x.clone()
+        dist.all_reduce(want, group=group.device_group)
+        graph = torch.cuda.CUDAGraph()
+        with (
+            pytest.raises(RuntimeError, match="^ranks_disagree:"),
+            comm.capture(),
+            torch.cuda.graph(graph),
+        ):
+            for _ in range(rank + 1):
+                comm.all_reduce(x)
+        assert not comm.disabled
+        with pytest.raises(RuntimeError, match="^broken: "):
+            comm.should_allreduce(x)
+        with pytest.raises(RuntimeError, match="^broken: "):
+            comm.all_reduce(x)
+        comm.close()
+        again = HipCustomCommunicator(
+            group.cpu_group,
+            group.device_group,
+            device,
+            max_rows=MAX_TOKENS,
+            max_cols=HIDDEN,
+            quantization="exact",
+        )
+        try:
+            assert torch.equal(again.all_reduce(x), want)
+        finally:
+            again.close()
+
+    _on_ranks(monkeypatch, 2, "exact", body)
+
+
+@pytest.mark.parametrize("tp_size", TP_SIZES)
+@pytest.mark.parametrize("quantization", QUANTIZATIONS)
+def test_hip_custom_communicator_routing(monkeypatch, tp_size, quantization):
+    """The tuned table picks a config for every op at both ends of the arena."""
+
+    def body(comm, group, device, rank):
+        for op, residual in [
+            ("all_reduce", None),
+            ("all_reduce_add_rms_norm", False),
+            ("all_reduce_add_rms_norm", True),
+            ("all_reduce_add_attn_res_rms_norm", None),
+        ]:
+            for rows in [1, MAX_TOKENS]:
+                assert comm.tuned(op, rows, HIDDEN, residual) is not None, (op, rows)
+
+    _on_ranks(monkeypatch, tp_size, quantization, body)
+
+
+def test_tensor_model_parallel_all_reduce_routing(monkeypatch):
+    """VLLM's TP all-reduce runs ours when it is on, eagerly and in graph_capture."""
+    if torch.accelerator.device_count() < 2:
         pytest.skip("Not enough GPUs to run the test.")
-    multi_process_parallel(monkeypatch, tp_size, 1, tuned_table_ranks)
+    monkeypatch.setenv("VLLM_ROCM_USE_HIP_CUSTOM_COMMUNICATOR", "1")
+    monkeypatch.setenv("VLLM_ROCM_HIP_CUSTOM_COMMUNICATOR_QUANTIZATION", "NONE")
+
+    @ray.remote(num_gpus=1, max_calls=1)
+    def ranks(monkeypatch, tp_size, pp_size, rank, port):
+        import tempfile
+
+        from transformers import LlamaConfig
+
+        from vllm.config import ModelConfig, VllmConfig, set_current_vllm_config
+
+        with monkeypatch.context() as m, tempfile.TemporaryDirectory() as model:
+            for var in [
+                "CUDA_VISIBLE_DEVICES",
+                "HIP_VISIBLE_DEVICES",
+                "ROCR_VISIBLE_DEVICES",
+            ]:
+                m.delenv(var, raising=False)
+            # vLLM sizes the communicator from the served model, as in serving.
+            LlamaConfig(
+                hidden_size=HIDDEN,
+                intermediate_size=512,
+                num_hidden_layers=1,
+                num_attention_heads=56,
+                num_key_value_heads=8,
+                vocab_size=256,
+            ).save_pretrained(model)
+            served = VllmConfig(
+                model_config=ModelConfig(
+                    model=model, skip_tokenizer_init=True, dtype="bfloat16"
+                )
+            )
+            device = torch.device(f"cuda:{rank}")
+            torch.accelerator.set_device_index(device)
+            with set_current_vllm_config(served):
+                init_test_distributed_environment(tp_size, pp_size, rank, port)
+                ensure_model_parallel_initialized(tp_size, pp_size)
+            group = get_tp_group()
+            ours = group.device_communicator.hip_custom_communicator
+            assert ours is not None and not ours.disabled
+
+            x = torch.randint(
+                -8,
+                8,
+                (16, HIDDEN),
+                generator=torch.Generator(device=device).manual_seed(rank),
+                device=device,
+            ).to(torch.bfloat16)
+            want = x.clone()
+            dist.all_reduce(want, group=group.device_group)
+            with torch.profiler.profile(
+                activities=[torch.profiler.ProfilerActivity.CUDA]
+            ) as profile:
+                got = tensor_model_parallel_all_reduce(x)
+                torch.accelerator.synchronize()
+            assert torch.equal(got, want)
+            kernels = [e.name for e in profile.events() if e.device_type.name == "CUDA"]
+            assert any("hip_custom_communicator" in k for k in kernels), kernels
+
+            graph = torch.cuda.CUDAGraph()
+            with graph_capture(device=device) as context:
+                assert ours.lifecycle.status == "capturing"
+                with torch.cuda.graph(graph, stream=context.stream):
+                    out = tensor_model_parallel_all_reduce(x)
+            assert ours.lifecycle.status == "open"
+            x.add_(1)
+            want = x.clone()
+            dist.all_reduce(want, group=group.device_group)
+            graph.replay()
+            torch.accelerator.synchronize()
+            assert torch.equal(out, want)
+
+    multi_process_parallel(monkeypatch, 2, 1, ranks)
