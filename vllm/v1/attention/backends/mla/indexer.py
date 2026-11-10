@@ -861,6 +861,7 @@ class DeepSeekV32IndexerDecodeMetadata:
     decode_is_uniform: bool = True
     write_max_decode_len: int = 0
     indices: torch.Tensor | None = None
+    query_start_loc: torch.Tensor | None = None
     # Views into builder-owned storage, refreshed before each graph replay.
     fp4_cta_info: torch.Tensor | None = None
     fp4_total_ctas: int | None = None
@@ -2152,6 +2153,7 @@ class DeepseekV32IndexerMetadataBuilder(AttentionMetadataBuilder):
                 per_req_decode_lens=self.per_req_decode_lens_buffer[:num_decodes],
                 decode_is_uniform=write_is_uniform,
                 write_max_decode_len=max_decode_len,
+                query_start_loc=common_attn_metadata.query_start_loc[: num_decodes + 1],
                 fp4_cta_info=fp4_cta_info,
                 fp4_total_ctas=fp4_total_ctas,
             )
