@@ -30,6 +30,37 @@ def test_supported_config_passes():
     assert _reasons(kit.make_vllm_config()) == []
 
 
+def test_refusals_read_a_real_vllm_config():
+    """The kit's fake config keeps a field vLLM drops; a real VllmConfig does not.
+    Only the model config stays the kit's (a real one loads the checkpoint), so its
+    fields are checked on ModelConfig itself."""
+    import dataclasses
+
+    from vllm.config import (
+        CacheConfig,
+        CompilationConfig,
+        DeviceConfig,
+        ModelConfig,
+        ParallelConfig,
+        VllmConfig,
+    )
+
+    cfg = VllmConfig(
+        device_config=DeviceConfig(device="cpu"),
+        parallel_config=ParallelConfig(tensor_parallel_size=4),
+        cache_config=CacheConfig(cache_dtype="fp8_e4m3"),
+        compilation_config=CompilationConfig(
+            cudagraph_mode=CUDAGraphMode.FULL_AND_PIECEWISE,
+            cudagraph_capture_sizes=[1, 2, 4, 8, 16, 32],
+        ),
+    )
+    model = kit.make_vllm_config().model_config
+    fields = {f.name for f in dataclasses.fields(ModelConfig)}
+    assert {"enable_sleep_mode", "enable_prompt_embeds", "hf_text_config"} <= fields
+    object.__setattr__(cfg, "model_config", model)
+    assert _reasons(cfg) == []
+
+
 def test_every_reason_is_reported_at_once():
     cfg = kit.make_vllm_config(
         parallel=dict(
