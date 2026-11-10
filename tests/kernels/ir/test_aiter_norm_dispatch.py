@@ -2,7 +2,7 @@
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 """Tests for the AITER norm support predicates.
 
-The AITER norm wrappers flatten >2-D activations with ``Tensor.reshape``, which
+The AITER norm wrappers flatten >2-D activations with `Tensor.reshape`, which
 silently copies when the flattened shape is not expressible with the input's
 strides. The support predicates must reject those inputs so dispatch falls
 through to a provider that handles arbitrary strides.

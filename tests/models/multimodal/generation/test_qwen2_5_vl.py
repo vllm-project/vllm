@@ -1,6 +1,7 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 
+import numpy as np
 import pytest
 
 from vllm.assets.image import ImageAsset
@@ -181,6 +182,40 @@ def test_qwen2_5_vl_evs_batched_videos(
 
             # Ensure the output is a string
             assert isinstance(output_text, str)
+
+
+@pytest.mark.core_model
+@pytest.mark.skipif(
+    current_platform.is_cpu(), reason="17k-token video prefill is too slow on CPU"
+)
+@pytest.mark.parametrize("model", models)
+def test_qwen2_5_vl_video_fits_max_model_len(vllm_runner, model) -> None:
+    num_frames = 60
+    video = np.zeros((num_frames, 504, 896, 3), dtype=np.uint8)
+    metadata = {
+        "fps": 2.0,
+        "duration": num_frames / 2.0,
+        "total_num_frames": num_frames,
+        "frames_indices": list(range(num_frames)),
+        "video_backend": "opencv",
+        "do_sample_frames": False,
+    }
+    prompt = qwen2_5_vl_chat_template(VIDEO_PLACEHOLDER, "Describe the video.")
+
+    with vllm_runner(
+        model,
+        runner="generate",
+        max_model_len=20000,
+        enable_chunked_prefill=True,
+        max_num_batched_tokens=8192,
+        dtype=target_dtype,
+        limit_mm_per_prompt={"image": 0, "video": 1},
+    ) as vllm_model:
+        outputs = vllm_model.generate_greedy([prompt], 8, videos=[(video, metadata)])
+
+    output_ids, output_text = outputs[0]
+    assert len(output_ids) > 17280
+    assert len(output_text) > 0
 
 
 @pytest.mark.core_model
