@@ -113,6 +113,7 @@ from vllm.v1.attention.backends.mla.indexer import (
 from vllm.v1.kv_cache_interface import KVCacheSpec, MLAAttentionSpec, SparseCacheRole
 
 from .interfaces import (
+    EagleModelMixin,
     MixtureOfExperts,
     SupportsEagle,
     SupportsEagle3,
@@ -127,6 +128,7 @@ from .utils import (
     make_empty_intermediate_tensors_factory,
     make_layers,
     maybe_prefix,
+    spec_decode_needs_target_embed,
 )
 
 logger = init_logger(__name__)
@@ -1428,8 +1430,9 @@ class DeepseekV2DecoderLayer(nn.Module):
 
 
 @support_torch_compile
-class DeepseekV2Model(nn.Module):
+class DeepseekV2Model(nn.Module, EagleModelMixin):
     fall_back_to_pt_during_load = False
+    supports_aux_hidden_states_over_pp = True
 
     def __init__(self, *, vllm_config: VllmConfig, prefix: str = ""):
         super().__init__()
@@ -1460,7 +1463,7 @@ class DeepseekV2Model(nn.Module):
             else None
         )
 
-        if get_pp_group().is_first_rank:
+        if get_pp_group().is_first_rank or spec_decode_needs_target_embed(vllm_config):
             self.embed_tokens = VocabParallelEmbedding(
                 config.vocab_size,
                 self.hidden_size,
@@ -1493,8 +1496,6 @@ class DeepseekV2Model(nn.Module):
         self.make_empty_intermediate_tensors = make_empty_intermediate_tensors_factory(
             ["hidden_states", "residual"], self.hidden_size
         )
-
-        self.aux_hidden_state_layers = tuple[int, ...]()
 
         # Needed by load_weights
         qk_nope_head_dim = getattr(config, "qk_nope_head_dim", 0)
@@ -1547,6 +1548,8 @@ class DeepseekV2Model(nn.Module):
             llama_4_scaling = None
 
         aux_hidden_states = []
+        if get_pp_group().is_first_rank:
+            self._maybe_add_hidden_state(aux_hidden_states, 0, hidden_states, residual)
         for idx, layer in enumerate(
             islice(self.layers, self.start_layer, self.end_layer),
             start=self.start_layer,
@@ -1562,7 +1565,10 @@ class DeepseekV2Model(nn.Module):
                 hidden_states, residual = combined_states.split(
                     [self.hidden_size, self.hidden_size], dim=-1
                 )
-            if idx in self.aux_hidden_state_layers:
+            hidden_states, residual = layer(
+                positions, hidden_states, residual, llama_4_scaling
+            )
+            if idx + 1 in self.aux_hidden_state_layers:
                 aux_hidden_state = hidden_states + residual
                 if aux_hidden_state.shape[0] != positions.shape[0]:
                     aux_hidden_state = tensor_model_parallel_all_gather(
@@ -1570,13 +1576,14 @@ class DeepseekV2Model(nn.Module):
                     )
                     aux_hidden_state = aux_hidden_state[: positions.shape[0]]
                 aux_hidden_states.append(aux_hidden_state)
-            hidden_states, residual = layer(
-                positions, hidden_states, residual, llama_4_scaling
-            )
 
         if not get_pp_group().is_last_rank:
             return IntermediateTensors(
-                {"hidden_states": hidden_states, "residual": residual}
+                {
+                    "hidden_states": hidden_states,
+                    "residual": residual,
+                    **self.pack_local_aux_hidden_states(aux_hidden_states),
+                }
             )
 
         if hidden_states.shape[0] != positions.shape[0]:
@@ -1586,9 +1593,6 @@ class DeepseekV2Model(nn.Module):
             hidden_states, residual = combined_states.split(
                 [self.hidden_size, self.hidden_size], dim=-1
             )
-
-        if self.end_layer in self.aux_hidden_state_layers:
-            aux_hidden_states.append(hidden_states + residual)
 
         hidden_states, _ = self.norm(hidden_states, residual)
         if len(aux_hidden_states) > 0:
@@ -1957,7 +1961,7 @@ class DeepseekV2ForCausalLM(
         self.extract_moe_parameters(example_moe)
 
     def set_aux_hidden_state_layers(self, layers: tuple[int, ...]) -> None:
-        self.model.aux_hidden_state_layers = layers
+        self.model._set_aux_hidden_state_layers(layers)
 
     def get_eagle3_aux_hidden_state_layers(self) -> tuple[int, ...]:
         num_layers = len(self.model.layers)

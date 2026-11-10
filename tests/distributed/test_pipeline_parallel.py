@@ -552,3 +552,101 @@ def test_pp_tied_word_embeddings(
         name_0="pp1",
         name_1="pp2",
     )
+
+
+@multi_gpu_only(num_gpus=2)
+@create_new_process_for_each_test()
+def test_pp_deepseek_dflash2_shared_embedding(vllm_runner, tmp_path, monkeypatch):
+    """Load the shared embedding and relay draft inputs across a PP boundary."""
+    import torch
+    from transformers import DeepseekV2Config, DeepseekV2ForCausalLM, Qwen3Config
+
+    from tests.v1.e2e.spec_decode.utils import get_spec_decode_metric_value
+
+    monkeypatch.setenv("VLLM_USE_V2_MODEL_RUNNER", "1")
+    torch.manual_seed(7)
+    target_config = DeepseekV2Config(
+        vocab_size=128,
+        hidden_size=256,
+        intermediate_size=512,
+        num_hidden_layers=4,
+        num_attention_heads=4,
+        num_key_value_heads=4,
+        q_lora_rank=64,
+        kv_lora_rank=512,
+        qk_nope_head_dim=128,
+        qk_rope_head_dim=64,
+        v_head_dim=128,
+        first_k_dense_replace=4,
+        n_routed_experts=0,
+        n_shared_experts=0,
+        tie_word_embeddings=False,
+        eos_token_id=None,
+    )
+    target = DeepseekV2ForCausalLM(target_config).bfloat16()
+    target.save_pretrained(tmp_path / "target")
+    expected_embedding = target.model.embed_tokens.weight.detach().clone()
+    del target
+    Qwen3Config(
+        architectures=["DFlash2DraftModel"],
+        vocab_size=128,
+        hidden_size=256,
+        intermediate_size=512,
+        num_hidden_layers=1,
+        num_attention_heads=4,
+        num_key_value_heads=2,
+        head_dim=64,
+        num_target_layers=4,
+        block_size=3,
+        dflash_config={
+            "target_layer_ids": [-1, 1, 3],
+            "mask_token_id": 127,
+            "conv_kernel_size": 3,
+            "conv_group_size": 16,
+            "selector_rank": 4,
+            "selector_top_k": 4,
+        },
+    ).save_pretrained(tmp_path / "draft")
+
+    outputs = {}
+    for pp_size in (1, 2):
+        with vllm_runner(
+            str(tmp_path / "target"),
+            skip_tokenizer_init=True,
+            enforce_eager=True,
+            max_model_len=64,
+            max_num_seqs=4,
+            kv_cache_memory_bytes=64 << 20,
+            pipeline_parallel_size=pp_size,
+            distributed_executor_backend="mp",
+            disable_log_stats=False,
+            speculative_config={
+                "method": "dflash",
+                "model": str(tmp_path / "draft"),
+                "num_speculative_tokens": 2,
+                "draft_load_config": {"load_format": "dummy"},
+            },
+        ) as runner:
+            embeddings = runner.apply_model(
+                lambda model: model.model.embed_tokens.weight.detach().cpu()
+            )
+            for embedding in embeddings:
+                torch.testing.assert_close(
+                    embedding[:128], expected_embedding, rtol=0, atol=0
+                )
+            outputs[pp_size] = runner.generate_greedy_logprobs(
+                [[5, 7, 11], [3, 9, 8, 6]], max_tokens=8, num_logprobs=5
+            )
+            assert (
+                get_spec_decode_metric_value(
+                    runner.llm.get_metrics(), "vllm:spec_decode_num_draft_tokens"
+                )
+                > 0
+            )
+
+    check_logprobs_close(
+        outputs_0_lst=outputs[1],
+        outputs_1_lst=outputs[2],
+        name_0="pp1",
+        name_1="pp2",
+    )

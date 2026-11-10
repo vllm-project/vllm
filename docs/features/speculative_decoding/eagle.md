@@ -58,15 +58,21 @@ for output in outputs:
 
 ## Pipeline Parallelism
 
-EAGLE3, DFlash, and DSpark support pipeline parallelism on Model Runner V2
+EAGLE3, DFlash (including DFlash2), and DSpark support pipeline parallelism on Model Runner V2
 with compatible target models. Auxiliary hidden states are collected from
 the target model and forwarded across pipeline stages to the final stage,
 where the draft model runs.
 
 Supported targets include Llama, Qwen2, dense Qwen3, Qwen3-VL (dense and
-MoE), gpt-oss, Gemma 4, and MiniMax-M3. DeepSeek-V4 and Kimi-K3 are also
+MoE), gpt-oss, Gemma 4, MiniMax-M3, and the DeepSeek-V2/V3 implementations
+(including GLM-5). DeepSeek-V4 and Kimi-K3 are also
 supported on NVIDIA GPUs. Other targets are rejected at startup with
 `<architecture> does not support <method> with pipeline parallelism`.
+
+When a hidden-state draft model needs the target's input embedding, these
+DeepSeek/GLM targets also load it on the final pipeline stage for sharing.
+This adds one embedding copy across that stage's tensor-parallel ranks;
+intermediate stages do not load it.
 
 For example, to run gpt-oss with an EAGLE3 draft model across two pipeline
 stages:
