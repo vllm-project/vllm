@@ -1227,7 +1227,7 @@ def test_aiter_fused_moe_mi350_mxfp4_w4a16_determinism():
 
 
 @pytest.mark.skipif(not on_gfx950(), reason="gfx950 ROCm only")
-def test_aiter_mxfp4_w4a16_mxfp8_dispatch_input_matches_bf16():
+def test_aiter_mxfp4_w4a16_mxfp8_dispatch_input_matches_bf16(monkeypatch):
     """Above AITER's fused quant + sort cut-over, feeding the experts the
     MXFP8 rows and scales the naive DP dispatch gathers matches feeding them
     BF16, within the experts' own rerun noise."""
@@ -1253,8 +1253,12 @@ def test_aiter_mxfp4_w4a16_mxfp8_dispatch_input_matches_bf16():
         seed=17,
     )
     experts = AiterMxfp4Experts(case.moe_config, case.quant_config)
-    assert not experts.quantizes_input_to_mxfp8(cut_over)
-    assert experts.quantizes_input_to_mxfp8(cut_over + 1)
+    assert not experts.quantizes_input_to_mxfp8(cut_over, topk)
+    assert experts.quantizes_input_to_mxfp8(cut_over + 1, topk)
+    monkeypatch.setenv("VLLM_ROCM_MOE_MXFP8_DISPATCH", "0")
+    assert experts.mxfp8_dispatch_predicate() is None
+    monkeypatch.setenv("VLLM_ROCM_MOE_MXFP8_DISPATCH", "1")
+    assert experts.mxfp8_dispatch_predicate() == experts.quantizes_input_to_mxfp8
 
     def run(hidden_states, a1q_scale):
         return rocm_aiter_fused_experts(
@@ -1288,6 +1292,99 @@ def test_aiter_mxfp4_w4a16_mxfp8_dispatch_input_matches_bf16():
         for _ in range(2)
     )
     torch.testing.assert_close(run(a1q, a1q_scale), ref, atol=2 * noise, rtol=0)
+
+
+@pytest.mark.skipif(not on_gfx950(), reason="gfx950 ROCm only")
+@pytest.mark.parametrize("with_lora", [False, True])
+def test_naive_dp_ep_mxfp8_dispatch_matches_quantized_gathered_batch(with_lora):
+    """The MXFP8 rows and E8M0 scales the naive DP dispatch gathers are
+    bit-identical to quantizing the gathered BF16 batch, and the LoRA mapping
+    still lines up with the rows."""
+    from aiter import dtypes
+    from aiter.ops.quant import per_1x32_mx_quant_hip
+
+    from vllm.model_executor.layers.fused_moe.config import (
+        FUSED_MOE_UNQUANTIZED_CONFIG,
+    )
+    from vllm.model_executor.layers.fused_moe.prepare_finalize import naive_dp_ep
+
+    def mxfp8_quant(x):
+        return per_1x32_mx_quant_hip(
+            x,
+            None,
+            quant_dtype=dtypes.fp8,
+            scale_type=dtypes.fp8_e8m0,
+            shuffle=False,
+        )
+
+    _assert_aiter_supported()
+    set_random_seed(0)
+    sizes, hidden_dim, topk = [5, 7], 512, 6
+    hidden = [
+        torch.randn(n, hidden_dim, device="cuda", dtype=torch.bfloat16) for n in sizes
+    ]
+    weights = [torch.rand(n, topk, device="cuda") for n in sizes]
+    ids = [
+        torch.randint(0, 8, (n, topk), device="cuda", dtype=torch.int32) for n in sizes
+    ]
+    lora = [torch.randint(0, 4, (n,), device="cuda", dtype=torch.int32) for n in sizes]
+
+    # The second rank's tensors as its own prepare() dispatches them.
+    peer_q, peer_scale = mxfp8_quant(hidden[1])
+    peer_extras = [peer_scale.view(torch.uint8)]
+    if with_lora:
+        peer_extras.append(lora[1])
+
+    def gather_two_ranks(a1q, topk_weights, topk_ids, extra_tensors, **kwargs):
+        assert extra_tensors is not None
+        assert len(extra_tensors) == len(peer_extras)
+        return (
+            torch.cat([a1q, peer_q]),
+            torch.cat([topk_weights, weights[1]]),
+            torch.cat([topk_ids, ids[1]]),
+            [torch.cat([t, p]) for t, p in zip(extra_tensors, peer_extras)],
+        )
+
+    ep_group = mock.MagicMock()
+    ep_group.dispatch.side_effect = gather_two_ranks
+    forward_context = mock.MagicMock()
+    forward_context.dp_metadata.get_chunk_sizes_across_dp_rank.return_value = sizes
+    predicate = mock.MagicMock(return_value=True)
+    pf = naive_dp_ep.MoEPrepareAndFinalizeNaiveDPEPModular()
+    pf.mxfp8_dispatch_predicate = predicate
+    lora_ctx = mock.MagicMock()
+    if with_lora:
+        # Longer than the batch, as the punica wrapper's buffer is.
+        mapping = torch.cat([lora[0], lora[0].new_full((3,), -1)])
+        lora_ctx.punica_wrapper.token_mapping_meta.token_lora_mapping = mapping
+        pf.set_lora_context(lora_ctx)
+    with (
+        mock.patch.object(naive_dp_ep, "get_ep_group", return_value=ep_group),
+        mock.patch.object(
+            naive_dp_ep, "get_forward_context", return_value=forward_context
+        ),
+    ):
+        a1q, a1q_scale, _, topk_ids, topk_weights = pf.prepare(
+            hidden[0],
+            weights[0],
+            ids[0],
+            num_experts=8,
+            expert_map=None,
+            apply_router_weight_on_input=False,
+            quant_config=FUSED_MOE_UNQUANTIZED_CONFIG,
+            defer_input_quant=True,
+        )
+
+    predicate.assert_called_once_with(sum(sizes), topk)
+    ref_q, ref_scale = mxfp8_quant(torch.cat(hidden))
+    assert a1q_scale is not None
+    assert a1q.dtype == ref_q.dtype and a1q_scale.dtype == ref_scale.dtype
+    assert torch.equal(a1q.view(torch.uint8), ref_q.view(torch.uint8))
+    assert torch.equal(a1q_scale.view(torch.uint8), ref_scale.view(torch.uint8))
+    assert torch.equal(topk_ids, torch.cat(ids))
+    assert torch.equal(topk_weights, torch.cat(weights))
+    if with_lora:
+        assert torch.equal(lora_ctx.local_token_lora_mapping, torch.cat(lora))
 
 
 # FP8 group-quant tests ---------------------------------------------------

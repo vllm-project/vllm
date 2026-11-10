@@ -1,11 +1,13 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
+from collections.abc import Callable
 from enum import IntEnum
 from functools import lru_cache
 from typing import TYPE_CHECKING
 
 import torch
 
+import vllm.envs as envs
 import vllm.model_executor.layers.fused_moe.modular_kernel as mk
 from vllm._aiter_ops import rocm_aiter_ops
 from vllm.model_executor.layers.fused_moe.activation import MoEActivation
@@ -781,11 +783,17 @@ class AiterMxfp4Experts(AiterExperts):
     def _extra_fused_moe_kwargs(self) -> dict:
         return mxfp4_w4a16_extra_kwargs(self.quant_config, self.moe_config)
 
-    def quantizes_input_to_mxfp8(self, num_tokens: int) -> bool:
-        """Whether `apply` on `num_tokens` BF16 rows quantizes them to MXFP8
-        with `per_1x32_mx_quant_hip` (unshuffled scales) before sorting, so
-        that a dispatch may run that quant itself and pass FP8 rows plus
-        their E8M0 scales, which AITER then only sorts."""
+    def mxfp8_dispatch_predicate(self) -> Callable[[int, int], bool] | None:
+        if not envs.VLLM_ROCM_MOE_MXFP8_DISPATCH:
+            return None
+        return self.quantizes_input_to_mxfp8
+
+    def quantizes_input_to_mxfp8(self, num_tokens: int, topk: int) -> bool:
+        """Whether `apply` on `num_tokens` BF16 rows routed to `topk` experts
+        each quantizes them to MXFP8 with `per_1x32_mx_quant_hip` (unshuffled
+        scales) before sorting, so that a dispatch may run that quant itself
+        and pass FP8 rows plus their E8M0 scales, which AITER then only sorts.
+        """
         moe_config = self.moe_config
         if (
             not self.quant_config.use_mxfp4_w4a16
@@ -793,7 +801,7 @@ class AiterMxfp4Experts(AiterExperts):
             or moe_config.activation == MoEActivation.SITU
             or moe_config.hidden_dim % 32 != 0
             # AITER's fused quant + sort, not the per-row kernel, up to here.
-            or num_tokens <= 8 * 256 / moe_config.experts_per_token
+            or num_tokens <= 8 * 256 / topk
         ):
             return False
 

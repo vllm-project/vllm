@@ -99,10 +99,10 @@ class MoEPrepareAndFinalizeNaiveDPEPModular(mk.FusedMoEPrepareAndFinalizeModular
         # hidden_states and writes the gathered result back to the context so
         # experts can use the per-rank-local mapping.
         self._lora_context = None
-        # Set when the experts quantize their deferred BF16 input to MXFP8
-        # with a per-row kernel: given the gathered token count, whether to
-        # run that quant here and gather FP8 rows and E8M0 scales instead.
-        self.quantizes_input_to_mxfp8: Callable[[int], bool] | None = None
+        # Set from the experts' mxfp8_dispatch_predicate(): given the gathered
+        # token count and top-k, whether to quantize the deferred BF16 input
+        # here and gather FP8 rows and E8M0 scales instead.
+        self.mxfp8_dispatch_predicate: Callable[[int, int], bool] | None = None
 
     def set_lora_context(self, ctx) -> None:
         self._lora_context = ctx
@@ -194,7 +194,12 @@ class MoEPrepareAndFinalizeNaiveDPEPModular(mk.FusedMoEPrepareAndFinalizeModular
             )
             a1 = a1 * topk_weights.to(a1.dtype)
 
-        mxfp8 = self._maybe_mxfp8_quantize(a1) if defer_input_quant else None
+        mxfp8 = (
+            self._maybe_mxfp8_quantize(a1, topk_ids.size(1))
+            if defer_input_quant
+            else None
+        )
+        scales: list[torch.Tensor] | None
         if mxfp8 is not None:
             a1q, a1q_scale_orig = mxfp8
             scales = [a1q_scale_orig.view(torch.uint8)]
@@ -260,7 +265,7 @@ class MoEPrepareAndFinalizeNaiveDPEPModular(mk.FusedMoEPrepareAndFinalizeModular
         return a1q, a1q_scale, None, topk_ids, topk_weights
 
     def _maybe_mxfp8_quantize(
-        self, a1: torch.Tensor
+        self, a1: torch.Tensor, topk: int
     ) -> tuple[torch.Tensor, torch.Tensor] | None:
         """MXFP8 rows and E8M0 scales of `a1`, quantized as the experts would
         quantize the gathered batch, or None to dispatch `a1` as is.
@@ -269,15 +274,16 @@ class MoEPrepareAndFinalizeNaiveDPEPModular(mk.FusedMoEPrepareAndFinalizeModular
         dispatch (whose gathered size is not the DP total) keeps BF16.
         """
         if (
-            self.quantizes_input_to_mxfp8 is None
+            self.mxfp8_dispatch_predicate is None
             or self.is_sequence_parallel
             or torch.cuda.is_current_stream_capturing()
         ):
             return None
         dp_metadata = get_forward_context().dp_metadata
-        if dp_metadata is None or not self.quantizes_input_to_mxfp8(
-            sum(dp_metadata.get_chunk_sizes_across_dp_rank())
-        ):
+        if dp_metadata is None:
+            return None
+        sizes = dp_metadata.get_chunk_sizes_across_dp_rank()
+        if sizes is None or not self.mxfp8_dispatch_predicate(sum(sizes), topk):
             return None
         from aiter import dtypes
         from aiter.ops.quant import per_1x32_mx_quant_hip
