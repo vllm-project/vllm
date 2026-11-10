@@ -26,7 +26,7 @@ from vllm.entrypoints.serve.engine.protocol import ErrorResponse, UsageInfo
 from vllm.entrypoints.serve.engine.typing import SpeechToTextRequest
 from vllm.entrypoints.serve.utils.api_utils import get_max_tokens
 from vllm.entrypoints.serve.utils.request_logger import RequestLogger
-from vllm.exceptions import VLLMValidationError
+from vllm.exceptions import GenerationError, RetryableRequestError, VLLMValidationError
 from vllm.inputs import EncoderDecoderInput, EngineInput
 from vllm.logger import init_logger
 from vllm.logprobs import FlatLogprobs, Logprob
@@ -600,6 +600,7 @@ class SpeechToTextBaseServing(GenerateBaseServing):
                 separator,
             )
         # Non-streaming response.
+        result_generator = merge_async_iterators(*list_result_generator)
         try:
             assert list_result_generator is not None
             chunk_segment_parts: list[list[SpeechToTextSegment]] = [
@@ -617,8 +618,14 @@ class SpeechToTextBaseServing(GenerateBaseServing):
                     "`max_audio_clip_s` is set to None, audio cannot be chunked"
                 )
             assert len(chunk_start_offsets) == len(list_result_generator)
-            result_generator = merge_async_iterators(*list_result_generator)
             async for idx, op in result_generator:
+                finish_reason = op.outputs[0].finish_reason
+                self._raise_if_error(finish_reason, engine_request_ids[idx])
+                # This handler stops reading before aborting its own requests,
+                # so an abort here came from elsewhere, e.g. engine shutdown.
+                if finish_reason == "abort":
+                    logger.info("Request %s was aborted", engine_request_ids[idx])
+                    raise RetryableRequestError("Request was aborted; please retry")
                 start_time = chunk_start_offsets[idx]
                 if request.response_format == "verbose_json":
                     assert op.outputs[0].logprobs
@@ -711,6 +718,15 @@ class SpeechToTextBaseServing(GenerateBaseServing):
                         ),
                     )
             return final_response
+        except GenerationError:
+            # Cancel pending pulls now; beam search sub-requests do not match
+            # the chunk ids aborted below.
+            await result_generator.aclose()
+            await asyncio.gather(
+                self.engine_client.abort(engine_request_ids),
+                return_exceptions=True,
+            )
+            raise
         except asyncio.CancelledError:
             logger.info(
                 "Request %s cancelled; aborting %d transcription engine request(s).",
@@ -753,6 +769,7 @@ class SpeechToTextBaseServing(GenerateBaseServing):
         try:
             for result_generator in list_result_generator:
                 beginning_of_chunk = True
+                chunk_aborted = False
                 post_processor = self.streaming_post_processor_cls()
                 async for res in result_generator:
                     # On first result.
@@ -770,6 +787,8 @@ class SpeechToTextBaseServing(GenerateBaseServing):
                     # Just one output (n=1) supported.
                     assert len(res.outputs) == 1
                     output = res.outputs[0]
+                    self._raise_if_error(output.finish_reason, request_id)
+                    chunk_aborted = output.finish_reason == "abort"
 
                     output_text = post_processor.process_delta(
                         output.text, output.finish_reason is not None
@@ -821,6 +840,9 @@ class SpeechToTextBaseServing(GenerateBaseServing):
                     data = chunk.model_dump_json(exclude_unset=True)
                     yield f"data: {data}\n\n"
 
+                if chunk_aborted:
+                    break
+
             # Once the final token is handled, if stream_options.include_usage
             # is sent, send the usage.
             if include_usage:
@@ -850,6 +872,8 @@ class SpeechToTextBaseServing(GenerateBaseServing):
                 total_tokens=num_prompt_tokens + completion_tokens,
             )
 
+        except GenerationError as e:
+            yield f"data: {self._convert_generation_error_to_streaming_response(e)}\n\n"
         except Exception as e:
             logger.exception("Error in %s stream generator.", self.task_type)
             data = self.create_streaming_error_response(e)
