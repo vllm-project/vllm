@@ -561,10 +561,10 @@ class ECMooncakeScheduler:
         ``reset_encoder_cache`` already clears EncoderCacheManager and the
         worker encoder cache. ``_local_cache`` is only a mirror of that
         cache; leaving it in place lets ``ensure_cache_available`` skip
-        Load and hit an encoder cache miss. Transfer records, including
-        consumed READY/RESIDENT and leftover AVAILABLE reservations, are
-        expired so a later request cannot treat a dead or stale
-        ``transfer_id`` as a cache hit. This does not make in-flight
+        Load and hit an encoder cache miss. Consumed READY/RESIDENT
+        records are expired so a later request cannot treat a consumed
+        ``transfer_id`` as a cache hit. Unconsumed AVAILABLE
+        reservations remain Load-able. This does not make in-flight
         reset concurrency-safe.
         """
         self._local_cache.clear()

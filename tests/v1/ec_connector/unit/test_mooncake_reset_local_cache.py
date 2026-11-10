@@ -159,16 +159,30 @@ def test_reset_expires_consumed_ready_and_does_not_plan_load():
     _assert_expired_and_no_load(conn, _MM_HASH)
 
 
-def test_reset_expires_available_and_does_not_plan_load():
+def test_reset_keeps_available_and_plans_load():
+    """Reset clears the local cache but leaves an unconsumed reservation Load-able."""
     conn = _consumer_scheduler()
     conn.update_state_after_alloc(_Req("r1", _MM_HASH, transfer_id=_TRANSFER_ID), 0)
     conn._transfers.observe_ready(_load_spec(_MM_HASH), deadline=1e18)
     assert conn._transfers.has_state(_MM_HASH, (SchedulerTransferState.AVAILABLE,))
     assert conn.has_cache_item(_MM_HASH)
+    assert _MM_HASH in conn._local_cache
 
     conn.reset()
 
-    _assert_expired_and_no_load(conn, _MM_HASH)
+    assert _MM_HASH not in conn._local_cache
+    assert conn._transfers.has_state(_MM_HASH, (SchedulerTransferState.AVAILABLE,))
+    assert not conn._transfers.has_state(_MM_HASH, (SchedulerTransferState.EXPIRED,))
+    assert conn.has_cache_item(_MM_HASH)
+
+    ready = conn.ensure_cache_available(
+        _Req("r2", _MM_HASH, transfer_id=_TRANSFER_ID), 0
+    )
+    assert ready is False
+    assert conn._scheduler_pending_work is True
+    assert conn._transfers.has_state(_MM_HASH, (SchedulerTransferState.LOADING,))
+    dispatched = conn._transfers.take_loads_to_dispatch()
+    assert [record.transfer_id for record in dispatched] == [_TRANSFER_ID]
 
 
 def test_reset_expires_resident_and_does_not_plan_load():
@@ -187,7 +201,12 @@ def test_reset_expires_resident_and_does_not_plan_load():
     _assert_expired_and_no_load(conn, _MM_HASH)
 
 
-def test_reset_expires_loading_and_does_not_rearm():
+def test_reset_leaves_loading_to_existing_async_flow():
+    """Reset does not expire or re-arm an in-flight LOADING transfer.
+
+    This does not claim in-flight reset concurrency safety; the existing
+    async Load path continues to own the record.
+    """
     conn = _consumer_scheduler()
     conn._transfers.observe_ready(_load_spec(_MM_HASH), deadline=1e18)
     record = conn._transfers.begin_load(_MM_HASH, _TRANSFER_ID, "r1", deadline=1e18)
@@ -196,8 +215,11 @@ def test_reset_expires_loading_and_does_not_rearm():
 
     conn.reset()
 
-    assert conn._transfers.take_loads_to_dispatch() == []
-    _assert_expired_and_no_load(conn, _MM_HASH)
+    assert conn._transfers.has_state(_MM_HASH, (SchedulerTransferState.LOADING,))
+    assert not conn._transfers.has_state(_MM_HASH, (SchedulerTransferState.EXPIRED,))
+    assert not conn._transfers.has_state(_MM_HASH, (SchedulerTransferState.AVAILABLE,))
+    dispatched = conn._transfers.take_loads_to_dispatch()
+    assert [record.transfer_id for record in dispatched] == [_TRANSFER_ID]
 
 
 def test_reset_without_transfer_record_does_not_false_hit():
