@@ -537,6 +537,22 @@ def test_3d_moe_lora_pinned_once(count_pins):
     assert len(count_pins) == 4
 
 
+def test_from_lora_tensors_leaves_pinning_to_the_manager(count_pins):
+    """Pinning at load time would pin every expert, before EP slicing."""
+    peft_helper = PEFTHelper.from_dict(
+        {"r": 4, "lora_alpha": 4, "target_modules": ["q_proj"]}
+    )
+    prefix = "base_model.model.model.layers.0.self_attn.q_proj"
+    tensors = {
+        f"{prefix}.lora_A.weight": torch.zeros(4, 8),
+        f"{prefix}.lora_B.weight": torch.zeros(8, 4),
+    }
+
+    LoRAModel.from_lora_tensors(1, tensors, peft_helper=peft_helper, device="cpu")
+
+    assert count_pins == []
+
+
 @pytest.mark.parametrize("ep_size", [1, 2, 3])
 def test_dummy_3d_moe_lora_is_sized_by_global_experts(ep_size):
     global_experts, rank = 6, 4
