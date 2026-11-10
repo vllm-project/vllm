@@ -66,8 +66,6 @@ class TieringOffloadingMetrics:
     BACKPRESSURE_STORES_DROPPED = "vllm:kv_offload_tiering_backpressure_stores_dropped"
     BACKPRESSURE_BLOCKS_DROPPED = "vllm:kv_offload_tiering_backpressure_blocks_dropped"
     PROMOTION_LATENCY = "vllm:kv_offload_tiering_promotion_latency_seconds"
-    CASCADES_DROPPED = "vllm:kv_offload_tiering_cascades_dropped"
-    PROMOTIONS_DROPPED = "vllm:kv_offload_tiering_promotions_dropped"
 
 
 @dataclass
@@ -109,7 +107,7 @@ class ParentManager(ABC):
         2. lookup(key, req_context)     — check chunk availability
            (repeat per chunk)
         3. create_store_job(keys, req_context) — pin chunks and get a
-           job handle (None if the admission policy rejected the store)
+           job handle
         4. on_request_finished(req_context) — clean up per-request state
 
     Steps 2-3 may be interleaved. Step 4 must be called even if no
@@ -128,7 +126,7 @@ class ParentManager(ABC):
         self,
         keys: Collection[OffloadKey],
         req_context: ReqContext,
-    ) -> TransferJob | None: ...
+    ) -> TransferJob: ...
 
     @abstractmethod
     def on_request_finished(self, req_context: ReqContext) -> None: ...

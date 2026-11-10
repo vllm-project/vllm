@@ -69,7 +69,7 @@ from vllm.v1.kv_offload.config import OffloadingConfig
 from vllm.v1.kv_offload.cpu.gpu_worker import CPUOffloadingWorker
 from vllm.v1.kv_offload.cpu.shared_offload_region import SharedOffloadRegion
 from vllm.v1.kv_offload.cpu.spec import CPUOffloadingSpec
-from vllm.v1.kv_offload.tiering.admission import BackpressureAdmissionPolicy
+from vllm.v1.kv_offload.tiering.admission import AdmissionPolicyFactory
 from vllm.v1.kv_offload.tiering.base import (
     TIER_LABEL,
     SecondaryTierManager,
@@ -279,34 +279,6 @@ class TieringOffloadingSpec(CPUOffloadingSpec):
         for tier_config, tier_cls in cls._get_secondary_tiers(extra_config):
             metrics.update(tier_cls.build_metric_definitions(tier_config))
 
-        metrics[TieringOffloadingMetrics.BACKPRESSURE_STORE_LATENCY_EMA] = (
-            OffloadingGaugeMetadata(
-                documentation=(
-                    "Exponential moving average of store latency "
-                    "for back-pressure detection, in s/MiB."
-                ),
-                labelnames=(TIER_LABEL,),
-            )
-        )
-        metrics[TieringOffloadingMetrics.BACKPRESSURE_STORES_DROPPED] = (
-            OffloadingCounterMetadata(
-                documentation=(
-                    "Number of store operations dropped due to "
-                    "back-pressure on a secondary tier."
-                ),
-                labelnames=(TIER_LABEL,),
-            )
-        )
-        metrics[TieringOffloadingMetrics.BACKPRESSURE_BLOCKS_DROPPED] = (
-            OffloadingCounterMetadata(
-                documentation=(
-                    "Number of blocks dropped due to back-pressure on a secondary tier."
-                ),
-                labelnames=(TIER_LABEL,),
-            )
-        )
-        metrics.update(BackpressureAdmissionPolicy.build_metric_definitions())
-
         return metrics
 
     def __init__(self, config: OffloadingConfig):
@@ -325,32 +297,6 @@ class TieringOffloadingSpec(CPUOffloadingSpec):
         self.tier_poll_interval_s = float(
             self.extra_config.get("tier_poll_interval_s", DEFAULT_TIER_POLL_INTERVAL_S)
         )
-
-        # Backpressure config is merged field-by-field in priority order
-        # (highest first):
-        #   1. Per-tier ``backpressure`` dict in the tier config
-        #   2. Top-level ``backpressure`` in kv_connector_extra_config
-        # Merging per field (rather than per whole dict) means a partial
-        # tier override still inherits missing fields from the top-level
-        # default, so the resolved dict reaching the factory is complete.
-        # Within each tier's resolved dict, tier-type-aware water marks
-        # are filled in last so a bare ``"backpressure": {}`` picks up
-        # sensible thresholds for the storage medium.
-        bp_defaults = self.extra_config.get("backpressure")
-
-        for tier_cfg in self.secondary_tier_configs:
-            tier_override = tier_cfg.get("backpressure")
-            # Overlay from lowest to highest precedence so higher-precedence
-            # fields win while lower-precedence ones fill in the gaps.
-            merged: dict[str, Any] = {}
-            for source in (bp_defaults, tier_override):
-                if source:
-                    merged.update(source)
-            # Only set a resolved dict when at least one source contributed
-            # (or an explicit ``backpressure`` key was present, e.g. ``{}``),
-            # so tiers without any backpressure config stay unconfigured.
-            if merged or "backpressure" in tier_cfg:
-                tier_cfg["backpressure"] = merged
 
         # Scheduler-side mmap (rank=None); kept for cleanup
         self._scheduler_mmap: SharedOffloadRegion | None = None
@@ -423,12 +369,13 @@ class TieringOffloadingSpec(CPUOffloadingSpec):
                 # Create TieringOffloadingManager. GPU↔CPU transfers use the inherited
                 # get_worker(). Secondary tier transfers are handled by the
                 # secondary tier managers and need no additional workers here.
-                # The backpressure policy needs the constructed tier instances.
                 tiering_manager = TieringOffloadingManager(
                     primary_tier=primary_tier,
                     secondary_tiers=secondary_tiers,
                     tier_poll_interval_s=self.tier_poll_interval_s,
-                    admission_policy=BackpressureAdmissionPolicy(secondary_tiers),
+                    admission_policy=AdmissionPolicyFactory.create_policy(
+                        self.extra_config.get("admission_policy", "always")
+                    ),
                 )
                 self._manager = tiering_manager
             except Exception:

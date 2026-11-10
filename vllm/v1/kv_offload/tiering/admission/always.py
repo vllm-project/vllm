@@ -18,7 +18,6 @@ class AlwaysAdmitPolicy(TieringAdmissionPolicy):
         self,
         keys: Collection[OffloadKey],
         tier_idx: int,
-        *,
         is_promotion: bool,
     ) -> bool:
         return True

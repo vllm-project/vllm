@@ -19,30 +19,32 @@ if TYPE_CHECKING:
 class TieringAdmissionPolicy(ABC):
     """Decides whether a tiering transfer may be submitted.
 
-    The manager consults the policy at five lifecycle points:
+    The manager consults the policy at these points:
 
-    1. ``should_admit`` — before any primary-tier pinning, job-ID
-       allocation, or transfer submission. A ``False`` return means the
-       transfer is skipped entirely (no side effects).
-    2. ``on_admitted`` — after the real ``TransferJob`` is registered,
+    1. ``should_lookup`` — before querying a secondary tier. A ``False``
+       return skips that tier for the current lookup.
+    2. ``should_admit`` — before creating a transfer job. A ``False`` return
+       means the transfer is skipped.
+    3. ``on_admitted`` — after the real ``TransferJob`` is registered,
        giving the policy the job metadata (job ID, chunk IDs, tier index).
-    3. ``on_completed`` — for every finished job, so the policy can feed
+    4. ``on_completed`` — for every finished job, so the policy can feed
        completion signals (e.g. latency) back into its detectors.
-    4. ``on_rejected`` — after a candidate is rejected, for accounting that
-       must not be performed by ``should_admit``.
-    5. ``on_reserved`` — after promotion storage is reserved and before the
-       batched transfer is submitted.
 
     ``JobMetadata`` is referenced under ``TYPE_CHECKING`` only; it stays
     defined in ``manager.py``.
     """
+
+    def should_lookup(
+        self, key: OffloadKey, tier_idx: int, req_context: object
+    ) -> bool:
+        """Whether a secondary tier should be queried for this key."""
+        return True
 
     @abstractmethod
     def should_admit(
         self,
         keys: Collection[OffloadKey],
         tier_idx: int,
-        *,
         is_promotion: bool,
     ) -> bool:
         """Whether the transfer may be submitted.
@@ -58,26 +60,6 @@ class TieringAdmissionPolicy(ABC):
 
     def on_admitted(self, metadata: "JobMetadata") -> None:
         """Record a transfer that passed admission and was registered."""
-        return
-
-    def on_rejected(
-        self,
-        keys: Collection[OffloadKey],
-        tier_idx: int,
-        *,
-        is_promotion: bool,
-    ) -> None:
-        """Record a candidate rejected by the admission policy."""
-        return
-
-    def on_reserved(
-        self,
-        keys: Collection[OffloadKey],
-        tier_idx: int,
-        *,
-        is_promotion: bool,
-    ) -> None:
-        """Record resources reserved after admission and before submission."""
         return
 
     def on_completed(self, metadata: "JobMetadata", result: JobResult) -> None:

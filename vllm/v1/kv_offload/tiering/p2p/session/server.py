@@ -254,7 +254,7 @@ class ServerRole:
         peer_id: str,
         transport: DataTransport,
         send: Callable[[dict], None],
-    ) -> list[OffloadKey]:
+    ) -> None:
         self._peer_id = peer_id
         self._transport = transport
         self._send = send
@@ -534,7 +534,7 @@ class ServerRole:
             else:
                 lookup.pending.add(h)
         if new_hits:
-            new_hits = self._pin_and_register_hits(lookup, new_hits, parent)
+            self._pin_and_register_hits(lookup, new_hits, parent)
         return new_hits
 
     def _process_inbound_lookup(
@@ -544,7 +544,7 @@ class ServerRole:
         enqueued_at: float,
         round_seq: int,
         parent: ParentManager,
-    ) -> list[OffloadKey]:
+    ) -> None:
         """Resolve one enqueued LookupMsg against ``parent``.
 
         For each key, query the tiering manager via ``parent.lookup``
@@ -603,28 +603,27 @@ class ServerRole:
         lookup: _ActiveLookup,
         keys: list[OffloadKey],
         parent: ParentManager,
-    ) -> list[OffloadKey]:
+    ) -> None:
         """Pin primary slots for HIT keys and park them as the lookup's
         round supply via ``add_stored_blocks``.
 
-        Caller has already confirmed every key is HIT, and a non-None
-        ``TransferJob`` carries parallel ``keys``/``chunk_ids``. Rejected
-        pins are reported back as MISS.
+        Caller has already confirmed every key is HIT, so the JobMetadata
+        returned by ``parent.create_store_job`` carries parallel
+        ``keys``/``block_ids`` of length ``len(keys)``. Nothing can evict
+        between that confirmation and the pin because the whole
+        ``serve_external_requests`` call runs inside one hold of the tiering
+        manager's lock -- which is why that call must never release it
+        partway through.
         """
-        transfer_job = parent.create_store_job(keys, lookup.ctx)
-        if transfer_job is None:
-            for h in keys:
-                lookup.resolved[h] = False
-            return []
+        meta = parent.create_store_job(keys, lookup.ctx)
         self.add_stored_blocks(
             lookup.kv_request_id,
-            list(transfer_job.keys),
-            transfer_job.chunk_ids.tolist(),
-            transfer_job.job_id,
+            list(meta.keys),
+            meta.chunk_ids.tolist(),
+            meta.job_id,
             round_seq=lookup.round_seq,
             from_lookup=True,
         )
-        return list(transfer_job.keys)
 
     def _resolve_pending_lookups(
         self, kv_request_id: str, parent: ParentManager

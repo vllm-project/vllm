@@ -610,6 +610,8 @@ class TieringOffloadingManager(OffloadingManager):
                 continue
             if not req_context.load_tier_filter.allows(tier.medium, tier.locality):
                 continue
+            if not self._admission_policy.should_lookup(key, i, req_context):
+                continue
             labelvalues = self._metrics.tier_label(i)
             start_time = time.monotonic()
             result = tier.lookup(key, req_context)
@@ -667,15 +669,9 @@ class TieringOffloadingManager(OffloadingManager):
             req_context: Per-request context forwarded to primary.prepare_write().
 
         Returns:
-            True if promotion was initiated, False if the admission policy
-            rejected it or the primary tier is full.
+            True if promotion was initiated, False if the primary tier is full.
 
         """
-        # Admission runs before primary allocation so a rejected promotion
-        # consumes no primary slot and no job ID.
-        if not self._admission_policy.should_admit([key], tier_idx, is_promotion=True):
-            self._admission_policy.on_rejected([key], tier_idx, is_promotion=True)
-            return False
         # Allocate space in primary tier for promoted chunk.
         # Must happen immediately so primary.lookup() returns None (in-flight)
         # for this key on any subsequent lookup() call within the same step,
@@ -687,12 +683,6 @@ class TieringOffloadingManager(OffloadingManager):
             # rather than retrying indefinitely.
             self._metrics.on_promotion_allocation_failure()
             return False
-
-        self._admission_policy.on_reserved(
-            primary_write_result.keys_to_store,
-            tier_idx,
-            is_promotion=True,
-        )
 
         store_spec = primary_write_result.store_spec
         assert isinstance(store_spec, CPULoadStoreSpec)
@@ -725,6 +715,21 @@ class TieringOffloadingManager(OffloadingManager):
         for tier_idx, pending_by_ctx in self._pending_load_submissions.items():
             tier = self.secondary_tiers[tier_idx]
             for entry in pending_by_ctx.values():
+                if not self._admission_policy.should_admit(
+                    entry.keys, tier_idx, is_promotion=True
+                ):
+                    self.primary_tier.complete_write(
+                        entry.keys, entry.req_context, False
+                    )
+                    load_sources = self._request_load_sources.get(
+                        entry.req_context.req_id
+                    )
+                    if load_sources is not None:
+                        source = tier.cache_hit_source
+                        for key in entry.keys:
+                            if load_sources.get(key) == source:
+                                del load_sources[key]
+                    continue
                 job_id = self._next_job_id()
                 transfer_job = TransferJob(
                     job_id=job_id,
@@ -982,15 +987,9 @@ class TieringOffloadingManager(OffloadingManager):
 
         """
         if not self._admission_policy.should_admit(keys, tier_idx, is_promotion=False):
-            self._admission_policy.on_rejected(keys, tier_idx, is_promotion=False)
             return None
         primary_chunks_spec = self.primary_tier.prepare_read(keys, req_context)
         assert isinstance(primary_chunks_spec, CPULoadStoreSpec)
-        self._admission_policy.on_reserved(
-            keys,
-            tier_idx,
-            is_promotion=False,
-        )
         job_id = self._next_job_id()
         transfer_job = TransferJob(
             job_id=job_id,
