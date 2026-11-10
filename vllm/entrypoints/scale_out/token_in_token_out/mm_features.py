@@ -5,7 +5,7 @@
 from __future__ import annotations
 
 from collections.abc import Callable, Collection, Mapping, Sequence
-from typing import cast
+from typing import TYPE_CHECKING, Any, cast
 
 import torch
 
@@ -23,12 +23,17 @@ from vllm.inputs import (
     MultiModalHashes,
     MultiModalInput,
     MultiModalPlaceholders,
+    mm_input,
 )
 from vllm.multimodal.inputs import (
     MultiModalKwargsItem,
+    MultiModalKwargsItems,
     MultiModalKwargsOptionalItems,
     PlaceholderRange,
 )
+
+if TYPE_CHECKING:
+    from vllm.multimodal.cache.base import BaseMultiModalProcessorCache
 
 
 def merge_mm_kwargs_items(
@@ -95,6 +100,23 @@ def _encode_mm_kwargs_with_metadata(
     return kwargs_data, mm_metadata
 
 
+def _decode_mm_item(item: str) -> MultiModalKwargsItem:
+    """Decode one serialized item, mapping any decode failure to ValueError.
+
+    A payload that is valid base64 and valid MessagePack can still fail
+    ``MultiModalKwargsItem`` reconstruction (e.g. a tensor field carrying a
+    non-tensor value raises ``KeyError``), and ``pybase64`` raises
+    ``binascii.Error`` on bad base64. Both callers convert ``ValueError`` to
+    HTTP 400; without this wrapper such payloads would surface as 500s.
+    """
+    try:
+        return decode_mm_kwargs_item(item)
+    except ValueError:
+        raise
+    except Exception as error:
+        raise ValueError(f"malformed multimodal item payload: {error}") from error
+
+
 def mm_kwargs_from_features(
     features: MultiModalFeatures,
 ) -> dict[str, list[MultiModalKwargsItem | None]]:
@@ -105,11 +127,11 @@ def mm_kwargs_from_features(
     for modality, hashes in features.mm_hashes.items():
         n = len(hashes)
         kwargs_items = [
-            decode_mm_kwargs_item(item) if item is not None else None
+            _decode_mm_item(item) if item is not None else None
             for item in kwargs_data.get(modality, [None] * n)
         ]
         metadata_items = [
-            decode_mm_kwargs_item(item) if item is not None else None
+            _decode_mm_item(item) if item is not None else None
             for item in mm_metadata.get(modality, [None] * n)
         ]
         mm_kwargs[modality] = [
@@ -138,6 +160,112 @@ def rebuild_mm_placeholders(
         ]
         for modality, ranges in mm_placeholders.items()
     }
+
+
+def validate_feature_bounds(
+    token_ids: Sequence[int], features: MultiModalFeatures
+) -> None:
+    """Check placeholder ranges stay within the token-id sequence.
+
+    Shared by the ``GenerateRequest`` parse-time validator and
+    ``engine_input_from_features`` so the two paths cannot drift.
+    """
+    prompt_len = len(token_ids)
+    for ranges in features.mm_placeholders.values():
+        for placeholder in ranges:
+            if placeholder.offset + placeholder.length > prompt_len:
+                raise ValueError(
+                    "mm_placeholders must remain within the token_ids sequence"
+                )
+
+
+def validate_metadata_only(
+    features: MultiModalFeatures, ec_transfer_params: dict[str, Any] | None
+) -> None:
+    """Check metadata-only items are only used with EC transfer.
+
+    A ``None`` entry in ``kwargs_data`` means the item's embeddings are
+    expected to arrive through the encoder-cache connector; without
+    ``ec_transfer_params`` the engine has no pixel values and would fail
+    deep in engine core instead of returning a 400. Shared by the
+    ``GenerateRequest`` parse-time validator and
+    ``engine_input_from_features``.
+    """
+    if ec_transfer_params:
+        return
+    if not any(
+        item is not None
+        for items in (features.mm_metadata or {}).values()
+        for item in items
+    ):
+        return
+    kwargs_data = features.kwargs_data or {}
+    for modality, metadata_items in (features.mm_metadata or {}).items():
+        kwargs_items = kwargs_data.get(modality, [None] * len(metadata_items))
+        if any(
+            metadata is not None and kwargs is None
+            for metadata, kwargs in zip(metadata_items, kwargs_items, strict=True)
+        ):
+            raise ValueError(
+                "metadata-only multimodal items require ec_transfer_params"
+            )
+
+
+def engine_input_from_features(
+    token_ids: Sequence[int],
+    features: MultiModalFeatures,
+    *,
+    cache_salt: str | None = None,
+    mm_cache: BaseMultiModalProcessorCache | None = None,
+    ec_transfer_params: dict[str, Any] | None = None,
+) -> MultiModalInput:
+    """Build a multimodal engine input from forwarded render features.
+
+    Single implementation shared by the generate endpoint and the chat
+    reuse path, performing the validations the generate protocol applies
+    to the same payload:
+
+    1. Placeholder ranges remain within ``token_ids``
+       (``validate_feature_bounds``).
+    2. Metadata-only items require ``ec_transfer_params``
+       (``validate_metadata_only``).
+    3. Deserialized items pass the multimodal processor cache's handle
+       authentication when a cache is configured. SHM cache handles are
+       untrusted client input (cf. #59357): ``address``, ``monotonic_id``
+       and ``signature`` must match what this process actually published.
+
+    Raises ``ValueError`` on the first violation so callers can map it
+    to an HTTP 400.
+
+    Note: the ``GenerateRequest`` parse-time validators run these same
+    two protocol checks when the request body is parsed, so the generate
+    path validates twice (parse + here). That is intentional and cheap;
+    do not remove one side — the chat path only has this gate.
+    """
+    validate_feature_bounds(token_ids, features)
+    validate_metadata_only(features, ec_transfer_params)
+
+    # Deserialize full tensor data and optional metadata-only data.
+    mm_kwargs = mm_kwargs_from_features(features)
+    if mm_cache is not None:
+        for modality, items in mm_kwargs.items():
+            for mm_hash, item in zip(features.mm_hashes[modality], items, strict=True):
+                if item is not None:
+                    mm_cache.validate_input_item(item, mm_hash)
+
+    # Convert PlaceholderRangeInfo → PlaceholderRange per modality,
+    # preserving is_embed through the round-trip.
+    mm_placeholders: MultiModalPlaceholders = rebuild_mm_placeholders(
+        features.mm_placeholders
+    )
+
+    return mm_input(
+        prompt_token_ids=list(token_ids),
+        mm_kwargs=MultiModalKwargsItems(mm_kwargs),
+        mm_hashes=features.mm_hashes,
+        mm_placeholders=mm_placeholders,
+        cache_salt=cache_salt,
+    )
 
 
 def placeholder_ranges_from_engine_input(

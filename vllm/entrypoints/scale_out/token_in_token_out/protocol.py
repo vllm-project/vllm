@@ -116,21 +116,16 @@ class PlaceholderRangeInfo(BaseModel):
     """Number of placeholder tokens."""
 
     is_embed: list[bool] | None = None
-    """Positions in the span that receive embeddings; `None` means all."""
+    """Which positions in the range receive embeddings, for models whose
+    placeholders interleave text/structural tokens (e.g. Gemma 3, Qwen-VL).
+    ``None`` means every position in the range is an embedding position.
+    Must match ``length`` when set."""
 
     @model_validator(mode="after")
-    def _check_is_embed_length(self) -> "PlaceholderRangeInfo":
+    def _validate_is_embed_length(self) -> "PlaceholderRangeInfo":
         if self.is_embed is not None and len(self.is_embed) != self.length:
-            raise ValueError("is_embed must have `length` entries")
+            raise ValueError("is_embed must match the placeholder length when set")
         return self
-
-
-def _has_serialized_mm_items(
-    payload: dict[str, list[str | None]] | None,
-) -> bool:
-    if not payload:
-        return False
-    return any(item is not None for items in payload.values() for item in items)
 
 
 class MultiModalFeatures(BaseModel):
@@ -268,23 +263,16 @@ class GenerateRequest(BaseModel):
 
     @model_validator(mode="after")
     def _require_ec_for_metadata_only(self) -> "GenerateRequest":
-        features = self.features
-        if features is None:
+        if self.features is None:
             return self
-        if not _has_serialized_mm_items(features.mm_metadata):
-            return self
-        if self.ec_transfer_params:
-            return self
-        kwargs_data = features.kwargs_data or {}
-        for modality, metadata_items in (features.mm_metadata or {}).items():
-            kwargs_items = kwargs_data.get(modality, [None] * len(metadata_items))
-            if any(
-                metadata is not None and kwargs is None
-                for metadata, kwargs in zip(metadata_items, kwargs_items, strict=True)
-            ):
-                raise ValueError(
-                    "metadata-only multimodal items require ec_transfer_params"
-                )
+        # Delegates to the shared check in mm_features (lazy import breaks
+        # the protocol ↔ mm_features import cycle) so the parse-time gate
+        # and engine_input_from_features cannot drift.
+        from vllm.entrypoints.scale_out.token_in_token_out.mm_features import (
+            validate_metadata_only,
+        )
+
+        validate_metadata_only(self.features, self.ec_transfer_params)
         return self
 
     sampling_params: SamplingParams
@@ -440,14 +428,14 @@ class GenerateRequest(BaseModel):
     def _validate_multimodal_feature_bounds(self) -> "GenerateRequest":
         if self.features is None:
             return self
+        # Delegates to the shared check in mm_features (lazy import breaks
+        # the protocol ↔ mm_features import cycle) so the parse-time gate
+        # and engine_input_from_features cannot drift.
+        from vllm.entrypoints.scale_out.token_in_token_out.mm_features import (
+            validate_feature_bounds,
+        )
 
-        prompt_len = len(self.token_ids)
-        for ranges in self.features.mm_placeholders.values():
-            for placeholder in ranges:
-                if placeholder.offset + placeholder.length > prompt_len:
-                    raise ValueError(
-                        "mm_placeholders must remain within the token_ids sequence"
-                    )
+        validate_feature_bounds(self.token_ids, self.features)
         return self
 
     def is_sampling_param_provided(self, name: str) -> bool:

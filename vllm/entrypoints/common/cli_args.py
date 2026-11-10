@@ -101,6 +101,15 @@ class BaseFrontendArgs:
     and `media_io_kwargs`). If False, the server rejects non-empty values
     because they can change multimodal preprocessing resource usage. Only
     enable this when API clients are trusted."""
+    trust_forwarded_prompt_token_ids: bool = False
+    """Whether to trust request-supplied `kv_transfer_params.prompt_token_ids`
+    and `kv_transfer_params.prompt_features` on aggregated serving. If False
+    (the default), a server with no KV-transfer consumer role ignores both
+    and renders `messages` itself, so a plain `vllm serve` never serves
+    caller-controlled token ids or multimodal tensors. A disaggregated decode
+    worker (a KV-transfer consumer) reuses forwarded ids without this flag;
+    the flag is the explicit opt-in for routers and gateways in front of
+    aggregated servers (see #62333 and the #65502 RFC)."""
     default_chat_template_kwargs: dict[str, Any] | None = None
     """Default keyword arguments to pass to the chat template renderer.
     These will be merged with request-level chat_template_kwargs,
