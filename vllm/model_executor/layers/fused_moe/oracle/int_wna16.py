@@ -251,6 +251,22 @@ def _backend_incompatibility_reason(
                     "supported: the XPU WNA16 MoE backend has no "
                     "symmetric AWQ layout"
                 )
+        if isinstance(quant_config, QuantizationArgs):
+            # QuantizationArgs leaves group_size unset for per-channel
+            # strategies; -1 is the in-tree encoding for that. The XPU
+            # grid only covers grouped layouts, and the int4 weight
+            # key does not encode grouping, so per-channel also
+            # matches. Refuse it loudly here instead of dying on
+            # the strategy assert in the CT MoE scheme.
+            group_size = (
+                -1 if quant_config.group_size is None else quant_config.group_size
+            )
+            if group_size <= 0:
+                return (
+                    "per-channel compressed-tensors checkpoints are not "
+                    "supported: the XPU WNA16 MoE backend needs grouped "
+                    "scales"
+                )
 
     # Marlin only supports certain problem/group sizes.
     allow_marlin = not isinstance(quant_config, MoeWNA16Config)
