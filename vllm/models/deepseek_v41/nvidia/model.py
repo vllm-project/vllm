@@ -379,7 +379,6 @@ class DeepseekV4DecoderLayer(nn.Module):
         self.attn.shard_fused_wqa_wkv = _shard_fused_wqa_wkv(vllm_config)
         self.attn.sequence_parallel_input = (
             self.use_sequence_parallel
-            and vllm_config.model_config.dtype == torch.bfloat16
             and vllm_config.lora_config is None
             and not vllm_config.parallel_config.use_ubatching
             and not envs.VLLM_BATCH_INVARIANT
