@@ -51,6 +51,7 @@ def test_rocm_unquantized_gemm_gfx1x_wvsplitk_path(monkeypatch, m):
     llmm1_mock.assert_not_called()
     assert torch.allclose(out, ref, atol=1e-3, rtol=1e-3)
 
+
 @pytest.mark.skipif(not current_platform.is_rocm(), reason="ROCm-only kernel test")
 @pytest.mark.parametrize("dtype", [torch.float16, torch.bfloat16])
 @pytest.mark.parametrize("n", range(1, 6))
@@ -292,6 +293,7 @@ def _check_rocm_unquantized_gemm_falls_back(monkeypatch, is_rdna4, n, m):
     weight = torch.randn(m, 64, dtype=torch.float16)
 
     monkeypatch.setattr(utils, "use_aiter_triton_gemm", lambda *args: False)
+    monkeypatch.setattr(utils.rocm_aiter_ops, "is_tgemm_enabled", lambda: False)
     monkeypatch.setattr(utils.envs, "VLLM_ROCM_USE_SKINNY_GEMM", True)
     monkeypatch.setattr("vllm.platforms.rocm.on_gfx1x", lambda: True)
     monkeypatch.setattr("vllm.platforms.rocm.on_gfx9", lambda: False)
