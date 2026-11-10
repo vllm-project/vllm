@@ -16,7 +16,7 @@
 # limitations under the License.
 """Transformers modeling backend mixin for Mixture of Experts (MoE) models."""
 
-from collections.abc import Iterable
+from collections.abc import Callable, Iterable
 from dataclasses import dataclass
 from functools import partial
 from typing import TYPE_CHECKING, Any
@@ -40,7 +40,6 @@ from vllm.model_executor.models.transformers.fuser import get_fuser
 from vllm.model_executor.models.transformers.fusers.glu import GLUFuser
 from vllm.model_executor.models.transformers.fusers.moe import MoEBlockFuser
 from vllm.model_executor.models.utils import extract_layer_index, maybe_prefix
-from vllm.model_executor.offloader import get_offloader
 from vllm.transformers_utils.config import CONFIG_FIELD_ALIASES
 from vllm.utils.torch_utils import STR_DTYPE_TO_TORCH_DTYPE, direct_register_custom_op
 
@@ -214,11 +213,17 @@ class MoEMixin(MixtureOfExperts, Base):
     # Redeclared because `recursive_replace` assigns it below the first read
     num_local_physical_experts: int
 
+    _fuse_experts: Callable[[nn.Module, str], None]
+    """Fuses the experts in a module, set by `recursive_replace`."""
+
     def __init__(self, *, vllm_config: "VllmConfig", prefix: str = ""):
         if vllm_config.model_config.hf_config.model_type == "aria":
             self.check_version("5.18.0", "Aria")
         # Skip MixtureOfExperts.__init__ and call the next class in MRO
         super(MixtureOfExperts, self).__init__(vllm_config=vllm_config, prefix=prefix)
+
+    def _pre_replace(self, layer: nn.Module, prefix: str):
+        self._fuse_experts(layer, prefix)
 
     def update_physical_experts_metadata(
         self,
@@ -309,6 +314,9 @@ class MoEMixin(MixtureOfExperts, Base):
 
         # Recursively fuse MoE layers
         def _recursive_replace(module: nn.Module, prefix: str):
+            # Decoder layers are fused as Base builds them, see `_pre_replace`
+            if module is self._decoder_layers:
+                return
             for child_name, child_module in module.named_children():
                 qual_name = maybe_prefix(prefix, child_name)
                 # Naive implementations will have experts as ModuleList
@@ -461,10 +469,6 @@ class MoEMixin(MixtureOfExperts, Base):
                     fused_experts = FusedMoEFactory(**kwargs)
                     moe_block.experts = fused_experts
                     log_replacement(qual_name, experts, fused_experts)
-                    # Offload experts as they are built, before the decoder layers
-                    if (offloader := get_offloader()).supports_tower_offload:
-                        modules = (m for m in [fused_experts])
-                        offloader.wrap_modules(modules, prefix=qual_name)
                     # Update MixtureOfExperts mixin state
                     self.mlp_layers.append(moe_block)
                     self.moe_layers.append(fused_experts)
@@ -472,9 +476,10 @@ class MoEMixin(MixtureOfExperts, Base):
                     _recursive_replace(child_module, prefix=qual_name)
 
         _recursive_replace(self.model, prefix="model")
-        self.num_moe_layers = len(self.moe_layers)
+        self._fuse_experts = _recursive_replace
         # Continue with the replacement of layers in Base
         super().recursive_replace()
+        self.num_moe_layers = len(self.moe_layers)
         # GLUFuser likely fused shared_experts. The down projection after the GLU
         # normally immediately reduces but we want FusedMoE to handle the reduction.
         for hf_shared, down_name in shared_down_projs:

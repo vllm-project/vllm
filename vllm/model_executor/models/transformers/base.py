@@ -87,7 +87,7 @@ from vllm.model_executor.models.utils import (
     maybe_prefix,
     spec_decode_needs_target_embed,
 )
-from vllm.model_executor.offloader import NoopOffloader, get_offloader
+from vllm.model_executor.offloader import BaseOffloader, NoopOffloader, get_offloader
 from vllm.sequence import IntermediateTensors
 
 if TYPE_CHECKING:
@@ -416,15 +416,14 @@ class Base(
                 tip,
             )
 
-        module_list_idxs = self._module_list_idxs
-        if len(module_list_idxs) > 1:
+        if (layers := self._decoder_layers) is None:
             raise ValueError(
-                "Pipeline parallel of models with multiple `ModuleList`s "
-                "in the base model are not supported yet!"
+                f"Could not find exactly one `ModuleList` in {type(module)}"
             )
-        if not module_list_idxs:
-            raise ValueError(f"Could not find `ModuleList` in {type(module)}")
-        module_list_idx = module_list_idxs[0]
+        # attrgetter in case the module is nested (e.g. "text_model.layers")
+        module_list_idx = next(
+            i for i, name in enumerate(names) if attrgetter(name)(module) is layers
+        )
 
         # Layers before module list
         for name in names[:module_list_idx]:
@@ -439,9 +438,6 @@ class Base(
 
         # Module list
         start_layer, end_layer = self._pp_indices()
-        layers_name = names[module_list_idx]
-        # attrgetter in case the module is nested (e.g. "text_model.layers")
-        layers = attrgetter(layers_name)(module)
         for i in range(len(layers)):
             if start_layer <= i and i < end_layer:
                 continue
@@ -465,33 +461,44 @@ class Base(
         return module, [n for n, c in module.named_children() if has_parameters(c)]
 
     @cached_property
-    def _module_list_idxs(self) -> list[int]:
-        """Indices of the `ModuleList`s among the names in `self._pp_split`."""
+    def _decoder_layers(self) -> nn.ModuleList | None:
+        """The decoder layers, i.e. the only `ModuleList` in `self._pp_split`."""
         module, names = self._pp_split
 
-        def is_module_list(name: str) -> bool:
-            # attrgetter in case the module is nested (e.g. "text_model.layers").
-            # A plan may name a module the model does not have (e.g. `MtpModel`'s
-            # inherited "norm"), which is only an error if PP actually splits it.
+        def get(name: str) -> nn.Module | None:
+            # A plan may name a module the model lacks (e.g. `MtpModel`'s "norm")
             try:
-                return isinstance(attrgetter(name)(module), nn.ModuleList)
+                return attrgetter(name)(module)
             except AttributeError:
-                return False
+                return None
 
-        return [i for i, name in enumerate(names) if is_module_list(name)]
+        module_lists = [m for n in names if isinstance(m := get(n), nn.ModuleList)]
+        return module_lists[0] if len(module_lists) == 1 else None
 
-    @cached_property
-    def _decoder_layers_qualname(self) -> str | None:
-        """Qualname (from `self`, e.g. "model.layers") of the decoder layers'
-        `ModuleList`, or `None` if it cannot be identified unambiguously.
+    def _register_decoder_layers(self, layers: nn.ModuleList, prefix: str):
+        """Record the decoder layers for Eagle3 and skip loading MTP weights."""
+        for name, layer in layers.named_children():
+            if not isinstance(layer, PPMissingLayer):
+                self._target_class = type(layer)
+            self._layer_names[int(name)] = f"{prefix}.{name}".removeprefix("model.")
+        num_hidden_layers = self.text_config.num_hidden_layers
+        names = (
+            "n_predict",  # Override from SpeculativeConfig
+            "num_nextn_predict_layers",  # Most models
+            "mtp_num_hidden_layers",  # Qwen 3.5
+        )
+        n_predict = getattr_iter(self.text_config, names, 0) or 0
+        for i in range(num_hidden_layers, num_hidden_layers + n_predict):
+            mtp_prefix = f"{prefix}.{i}."
+            if mtp_prefix not in self.ignore_unexpected_prefixes:
+                self.ignore_unexpected_prefixes.append(mtp_prefix)
 
-        It is the `ModuleList` that `pipeline_parallel` splits across ranks."""
-        if len(self._module_list_idxs) != 1:
-            return None
-        module, names = self._pp_split
-        module_prefix = next(n for n, m in self.model.named_modules() if m is module)
-        name = names[self._module_list_idxs[0]]
-        return maybe_prefix("model", maybe_prefix(module_prefix, name))
+    def _offloader(self) -> BaseOffloader:
+        """The offloader for the decoder layers."""
+        return get_offloader()
+
+    def _pre_replace(self, layer: nn.Module, prefix: str):
+        """Called on each decoder layer before `recursive_replace` replaces it."""
 
     def _vocab_embeddings(self) -> set[nn.Embedding]:
         """The `nn.Embedding`s in `self.model` which hold a vocab table."""
@@ -530,6 +537,7 @@ class Base(
         - Vocab `nn.Embedding`s with vLLM's `VocabParallelEmbedding`
         - RMSNorm (detected from their dataflow) with vLLM's `RMSNorm`or `GemmaRMSNorm`
         - `nn.LayerNorm` with vLLM's `LayerNorm`
+
         """
         tp_plan = self._tp_plan()
 
@@ -548,9 +556,6 @@ class Base(
 
         # Prefix the patterns because we always start from `self.model`
         tp_plan = {maybe_prefix("model", k): v for k, v in tp_plan.items()}
-        # Detect fusable patterns once per module class (cached, so this is cheap)
-        fusers = Fusers(self.model, self.vllm_config)
-
         vocab_embeddings = self._vocab_embeddings()
 
         orig_to_new_stacked: dict[str, tuple[str, ShardId]] = {}
@@ -579,54 +584,41 @@ class Base(
             if self.quant_config is not None:
                 self.quant_config.packed_modules_mapping.update(packed_modules_mapping)
 
-        layers_qualname = self._decoder_layers_qualname
-        if layers_qualname is None and not isinstance(get_offloader(), NoopOffloader):
+        offloader = self._offloader()
+        if (decoder_layers := self._decoder_layers) is None and not isinstance(
+            offloader, NoopOffloader
+        ):
             logger.warning_once(
                 "Could not identify the decoder layers of %s, so weight offloading "
                 "will not be applied to them.",
                 type(self.model).__name__,
             )
+        # Decoder layers are detected as they are built, after `_pre_replace`
+        fusers = Fusers(self.model, self.vllm_config, skip=decoder_layers)
 
         def _replace_decoder_layers(layers: nn.ModuleList, prefix: str):
-            """Replace the decoder layers one at a time, handing each to the
-            offloader as soon as it is materialised, as `make_layers` does. This
-            keeps at most one layer's weights on the device during construction
-            beyond what the offloader leaves there."""
-            for child_name, child_module in layers.named_children():
-                # Populate Eagle3 attrs
-                if not isinstance(child_module, PPMissingLayer):
-                    self._target_class = type(child_module)
-                layer_name = maybe_prefix(prefix, child_name).removeprefix("model.")
-                self._layer_names[int(child_name)] = layer_name
-            # MTP weights should not be loaded into the base model
-            num_hidden_layers = self.text_config.num_hidden_layers
-            names = (
-                "n_predict",  # Override from SpeculativeConfig
-                "num_nextn_predict_layers",  # Most models
-                "mtp_num_hidden_layers",  # Qwen 3.5
-            )
-            n_predict = getattr_iter(self.text_config, names, 0) or 0
-            for i in range(num_hidden_layers, num_hidden_layers + n_predict):
-                mtp_prefix = f"{prefix}.{i}."
-                if mtp_prefix not in self.ignore_unexpected_prefixes:
-                    self.ignore_unexpected_prefixes.append(mtp_prefix)
+            """Build this rank's decoder layers one at a time and offload each as
+            soon as it is built, as `make_layers` does."""
 
-            start, end = self._pp_indices()
-
-            def materialise_layers():
-                for i in range(start, end):
+            def build_layers():
+                for i in range(*self._pp_indices()):
+                    layer_prefix = f"{prefix}.{i}"
+                    self._pre_replace(layers[i], layer_prefix)
+                    fusers.add(layers[i])
                     _replace_child(layers, str(i), layers[i], prefix)
-                    layer = layers[i]
-                    self.init_parameters(layer)
-                    layer_prefix = maybe_prefix(prefix, str(i)).removeprefix("model.")
-                    self.keep_in_fp32(layer, prefix=layer_prefix)
-                    yield layer
+                    self.init_parameters(layers[i])
+                    self.keep_in_fp32(layers[i], layer_prefix.removeprefix("model."))
+                    yield layers[i]
 
-            wrapped = get_offloader().wrap_modules(materialise_layers())
-            for i, layer in zip(range(start, end), wrapped):
-                layers[i] = layer
+            offloader.wrap_modules(build_layers())
 
         def _recursive_replace(module: nn.Module, prefix: str):
+            num_hidden_layers = self.text_config.num_hidden_layers
+            if isinstance(module, nn.ModuleList) and len(module) == num_hidden_layers:
+                self._register_decoder_layers(module, prefix)
+            if module is decoder_layers:
+                _replace_decoder_layers(module, prefix)
+                return
             for child_name, child_module in module.named_children():
                 _replace_child(module, child_name, child_module, prefix)
 
@@ -635,9 +627,6 @@ class Base(
         ):
             new_module = child_module
             qual_name = maybe_prefix(prefix, child_name)
-            if qual_name == layers_qualname:
-                _replace_decoder_layers(child_module, prefix=qual_name)
-                return
             # Replace modules as needed
             if isinstance(child_module, nn.Linear):
                 generator = (p for p in tp_plan if re.match(p, qual_name))

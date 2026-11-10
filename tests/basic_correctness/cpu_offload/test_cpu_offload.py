@@ -144,60 +144,18 @@ def test_tower_weight_offloading(vllm_runner, monkeypatch, disable_uva):
         envs.disable_envs_cache()
 
 
-def test_transformers_backend_weight_offloading(vllm_runner, monkeypatch):
-    """`--cpu-offload-gb` must reach decoder layers built by the Transformers
-    modeling backend.
-
-    Regression test: decoder layers reached `wrap_modules` only through
-    `make_layers`, which the Transformers backend does not use, so the flag was
-    silently ignored (no "Total CPU offloaded parameters", same weight memory with
-    or without it).
-    """
-    monkeypatch.setenv("VLLM_ENABLE_V1_MULTIPROCESSING", "0")
-    envs.disable_envs_cache()
-    original_offloader = get_offloader()
-
-    try:
-        with vllm_runner(
-            "vllm-project/tiny-random-LlamaForCausalLM",
-            model_impl="transformers",
-            enforce_eager=True,
-            gpu_memory_utilization=0.03,
-            max_model_len=128,
-            max_num_seqs=1,
-            cpu_offload_gb=1,
-        ) as vllm_model:
-            engine_core = vllm_model.llm.llm_engine.engine_core.engine_core
-            model_runner = engine_core.model_executor.driver_worker.worker.model_runner
-
-            offloader = get_offloader()
-            assert isinstance(offloader, UVAOffloader)
-            assert offloader.cpu_offload_bytes > 0
-
-            model = model_runner.get_model()
-            layers = model.model.get_decoder().layers
-            assert all(_is_offloaded(p) for p in layers.parameters())
-    finally:
-        set_offloader(original_offloader)
-        envs.disable_envs_cache()
-
-
-def test_transformers_backend_offload_peak_memory(vllm_runner, monkeypatch):
-    """The Transformers backend must offload each decoder layer as soon as it is
-    materialised, so peak memory during construction is about one layer more than
-    what stays resident, not the whole model.
-
-    Regression test: offloading after the whole decoder was built on the device
-    lowered steady-state memory but not the peak, so a model that fits only because
-    of `--cpu-offload-gb` still failed to load.
-    """
+@pytest.mark.parametrize(
+    "model", ["vllm-project/tiny-random-LlamaForCausalLM", "TitanML/tiny-mixtral"]
+)
+def test_transformers_backend_weight_offloading(vllm_runner, monkeypatch, model):
+    """Transformers backend decoder layers (including MoE experts) are offloaded as
+    each one is built."""
     monkeypatch.setenv("VLLM_ENABLE_V1_MULTIPROCESSING", "0")
     envs.disable_envs_cache()
     original_offloader = get_offloader()
     original_wrap_modules = UVAOffloader.wrap_modules
 
-    # Device memory allocated as each layer reaches the offloader, before it is
-    # offloaded, and once all of them have been
+    # Device memory as each layer reaches the offloader, and after all are offloaded
     on_arrival: list[int] = []
     layer_bytes: list[int] = []
     after_offload: list[int] = []
@@ -205,14 +163,14 @@ def test_transformers_backend_offload_peak_memory(vllm_runner, monkeypatch):
     def wrap_modules(self, modules_generator, prefix=""):
         def spy():
             for module in modules_generator:
-                on_arrival.append(torch.cuda.memory_allocated())
+                on_arrival.append(torch.accelerator.memory_allocated())
                 layer_bytes.append(
                     sum(p.numel() * p.element_size() for p in module.parameters())
                 )
                 yield module
 
         modules = original_wrap_modules(self, spy(), prefix)
-        after_offload.append(torch.cuda.memory_allocated())
+        after_offload.append(torch.accelerator.memory_allocated())
         return modules
 
     monkeypatch.setattr(UVAOffloader, "wrap_modules", wrap_modules)
@@ -220,7 +178,7 @@ def test_transformers_backend_offload_peak_memory(vllm_runner, monkeypatch):
 
     try:
         with vllm_runner(
-            "vllm-project/tiny-random-LlamaForCausalLM",
+            model,
             model_impl="transformers",
             # Random weights, so the layers can be made large enough to measure
             load_format="dummy",
@@ -234,17 +192,20 @@ def test_transformers_backend_offload_peak_memory(vllm_runner, monkeypatch):
             max_model_len=128,
             max_num_seqs=1,
             # More than the decoder layers, so every one of them is offloaded
-            cpu_offload_gb=1,
-        ):
-            pass
+            cpu_offload_gb=4,
+        ) as vllm_model:
+            engine_core = vllm_model.llm.llm_engine.engine_core.engine_core
+            model_runner = engine_core.model_executor.driver_worker.worker.model_runner
+            layers = model_runner.get_model().model.get_decoder().layers
+            assert all(_is_offloaded(p) for p in layers.parameters())
     finally:
         set_offloader(original_offloader)
         envs.disable_envs_cache()
 
     assert len(on_arrival) == num_layers, on_arrival
     assert len(after_offload) == 1, after_offload
+    # About one layer is on the device at a time, not the whole decoder
     peak_above_resident = max(on_arrival) - after_offload[0]
-    # One layer is on the device while it is offloaded; all of them were before
     assert peak_above_resident <= 1.5 * max(layer_bytes), (
         peak_above_resident,
         layer_bytes,

@@ -24,6 +24,7 @@ from transformers import AutoModelForCausalLM
 from transformers.conversion_mapping import WeightTransform
 
 from vllm.model_executor.models.transformers.causal import CausalMixin
+from vllm.model_executor.offloader import BaseOffloader, NoopOffloader
 from vllm.sequence import IntermediateTensors
 
 if TYPE_CHECKING:
@@ -84,6 +85,10 @@ class MTPMixin(CausalMixin):
 
     def _pp_indices(self) -> tuple[int, int]:
         return 0, self.text_config.num_hidden_layers
+
+    # Like native drafts, and `PrefetchOffloader` can only wrap the target
+    def _offloader(self) -> BaseOffloader:
+        return NoopOffloader()
 
     def load_weights(self, weights: Iterable[tuple[str, torch.Tensor]]) -> set[str]:
         embed_prefix = None
