@@ -1200,3 +1200,151 @@ async def test_render_omits_null_token_id_override(client, override):
         assert "return_tokens_as_token_ids" not in context
     else:
         assert context["return_tokens_as_token_ids"] is override
+
+
+@pytest.fixture(
+    scope="module",
+    params=[
+        {},
+        {"thinking": False},
+        {"enable_thinking": True, "reasoning_effort": "low"},
+    ],
+    ids=["model-default", "default-off", "default-low"],
+)
+def deepseek_v41_reasoning_server(request):
+    defaults = request.param
+    args = [
+        "--tokenizer-mode",
+        "deepseek_v41",
+        "--reasoning-parser",
+        "deepseek_v41",
+        "--language-model-only",
+        "--max-model-len",
+        "4096",
+        "--default-chat-template-kwargs",
+        json.dumps(defaults),
+    ]
+    with RemoteLaunchRenderServer(DEEPSEEK_V41_MODEL_NAME, args) as server:
+        yield server, defaults
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize(
+    ("controls", "thinking", "budget"),
+    [
+        (
+            {"chat_template_kwargs": {"thinking": False}, "reasoning_effort": "high"},
+            False,
+            None,
+        ),
+        (
+            {"chat_template_kwargs": {"thinking": True}, "reasoning_effort": "none"},
+            True,
+            None,
+        ),
+        (
+            {"chat_template_kwargs": {"thinking": False, "reasoning_effort": "medium"}},
+            False,
+            None,
+        ),
+        (
+            {
+                "chat_template_kwargs": {"enable_thinking": False},
+                "reasoning_effort": "high",
+            },
+            False,
+            None,
+        ),
+        (
+            {
+                "chat_template_kwargs": {"enable_thinking": True},
+                "reasoning_effort": "none",
+            },
+            True,
+            None,
+        ),
+        ({"reasoning_effort": "high"}, True, 75),
+        (
+            {"chat_template_kwargs": {"thinking": False, "reasoning_effort": []}},
+            False,
+            None,
+        ),
+        (
+            {
+                "reasoning_effort": "low",
+                "chat_template_kwargs": {"reasoning_effort": 100},
+            },
+            True,
+            50,
+        ),
+    ],
+    ids=[
+        "D12",
+        "D13",
+        "D21",
+        "alias-off",
+        "alias-on",
+        "request-over-default",
+        "discard-unused-effort",
+        "top-level-effort",
+    ],
+)
+async def test_deepseek_v41_thinking_precedes_effort(
+    deepseek_v41_reasoning_server, controls, thinking, budget
+):
+    """Conflicting controls render and configure parsing with the same intent."""
+    server, defaults = deepseek_v41_reasoning_server
+    if thinking and budget is None:
+        budget = 50 if defaults.get("reasoning_effort") == "low" else 75
+    request = {
+        "model": DEEPSEEK_V41_MODEL_NAME,
+        "messages": [{"role": "user", "content": "Hi"}],
+    }
+    reference_kwargs = {
+        "thinking": thinking,
+        "enable_thinking": thinking,
+        "reasoning_effort": budget if thinking else "none",
+    }
+    async with httpx.AsyncClient(base_url=server.url_for(""), timeout=30) as client:
+        response = await client.post(
+            "/v1/chat/completions/render", json=request | controls
+        )
+        reference = await client.post(
+            "/v1/chat/completions/render",
+            json=request | {"chat_template_kwargs": reference_kwargs},
+        )
+    assert response.status_code == 200, response.text
+    assert reference.status_code == 200, reference.text
+    actual = response.json()
+    assert actual["token_ids"] == reference.json()["token_ids"]
+    assert actual["reasoning_ended"] is (not thinking)
+    kwargs = actual["reasoning_parser_kwargs"]["chat_template_kwargs"]
+    for key, value in reference_kwargs.items():
+        assert kwargs[key] == value
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize(
+    ("kwargs", "field"),
+    [
+        ({"thinking": "false"}, "thinking"),
+        ({"thinking": None}, "thinking"),
+        ({"enable_thinking": 1}, "enable_thinking"),
+        ({"thinking": True, "reasoning_effort": []}, "reasoning_effort"),
+    ],
+)
+async def test_deepseek_v41_invalid_reasoning_controls(
+    deepseek_v41_reasoning_server, kwargs, field
+):
+    server, _ = deepseek_v41_reasoning_server
+    async with httpx.AsyncClient(base_url=server.url_for(""), timeout=30) as client:
+        response = await client.post(
+            "/v1/chat/completions/render",
+            json={
+                "model": DEEPSEEK_V41_MODEL_NAME,
+                "messages": [{"role": "user", "content": "Hi"}],
+                "chat_template_kwargs": kwargs,
+            },
+        )
+    assert response.status_code == 400, response.text
+    assert field in response.json()["error"]["message"]
