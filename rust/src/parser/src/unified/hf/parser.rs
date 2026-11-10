@@ -32,7 +32,7 @@ use super::template::{
     FieldName, Region, RegionKind, Repeat, ResponseTemplate, TextRegion, TextRole, ToolCallRegion,
     Watch, WatchKind, WatchSet,
 };
-use crate::tool::{Tool, ToolCallDelta, ToolSchemas};
+use crate::tool::{JsonStyle, Tool, ToolCallDelta, ToolSchemas};
 use crate::unified::{
     Result, UnifiedParser, UnifiedParserError, UnifiedParserOutput, parsing_failed,
 };
@@ -625,9 +625,10 @@ fn convert_text_arguments(
     }
 }
 
-/// Serialize tool-call arguments to JSON text.
+/// Serialize tool-call arguments to JSON text with the separators of HF
+/// `tojson`, which chat templates render JSON values with.
 fn serialize_arguments(arguments: &impl serde::Serialize) -> Result<String> {
-    serde_json::to_string(arguments).map_err(|error| {
+    JsonStyle::Spaced.to_string(arguments).map_err(|error| {
         parsing_failed!("failed to serialize tool arguments: {}", error.as_report())
     })
 }
