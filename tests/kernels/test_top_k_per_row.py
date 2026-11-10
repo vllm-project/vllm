@@ -667,6 +667,47 @@ def test_top_k_per_row_decode_gfx950_k512_masked_graph_replay() -> None:
     _assert_exact_topk(logits, indices, lengths)
 
 
+@requires_gfx950
+@torch.inference_mode()
+def test_top_k_per_row_decode_gfx950_k512_few_rows_one_block() -> None:
+    """Keep rows of few-row calls up to 36K positions in one block."""
+    next_n, width, narrow_width, top_k = 7, 524_288, 36_864, 512
+    gen = torch.Generator(device="cuda").manual_seed(0)
+    lengths = torch.tensor([20_000, 36_864], dtype=torch.int32, device="cuda")
+    offsets = torch.arange(next_n, dtype=torch.int32, device="cuda")
+    rows = lengths.numel() * next_n
+    logits = torch.randn(rows, width, generator=gen, device="cuda")
+    indices = torch.full((rows, top_k), -777, dtype=torch.int32, device="cuda")
+
+    narrow = logits[:, :narrow_width]
+    torch.accelerator.reset_peak_memory_stats()
+    allocated = torch.accelerator.memory_allocated()
+    _run_topk_backend(
+        "top_k_per_row_decode", narrow, lengths, indices, top_k, narrow_width, next_n
+    )
+    assert torch.accelerator.max_memory_allocated() == allocated
+    row_ends = (lengths[:, None] - next_n + offsets + 1).flatten()
+    _assert_exact_topk(narrow, indices, row_ends)
+
+    def run() -> None:
+        _run_topk_backend(
+            "top_k_per_row_decode", logits, lengths, indices, top_k, width, next_n
+        )
+
+    run()
+    torch.accelerator.synchronize()
+    graph = torch.cuda.CUDAGraph()
+    with torch.cuda.graph(graph):
+        run()
+
+    for step_lengths in ([20_000, 36_865], [16_391, 70_000], [20_000, 36_864]):
+        lengths.copy_(torch.tensor(step_lengths, dtype=torch.int32))
+        indices.fill_(-777)
+        graph.replay()
+        row_ends = (lengths[:, None] - next_n + offsets + 1).flatten()
+        _assert_exact_topk(logits, indices, row_ends)
+
+
 @pytest.mark.skipif(not current_platform.is_rocm(), reason="This test requires ROCm")
 @torch.inference_mode()
 def test_aiter_c4a_prefill_topk_returns_sequence_local_indices() -> None:
