@@ -75,7 +75,9 @@ def test_dense_gptq_generation_is_deterministic_across_batch_sizes_e2e(
         seed=20240919,
         logprobs=5,
     )
-    needle_prompt = "Write one factual sentence about the moon."
+    # TinyLlama continues this prompt for multiple tokens; a prompt it answers
+    # with an immediate EOS would reduce the check to a single decode step.
+    needle_prompt = "On the surface of Mars, we found"
 
     llm = None
     baseline_completion = None
