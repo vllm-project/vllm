@@ -65,7 +65,10 @@ The token ids are passed to the decode stage through `kv_transfer_params`, the d
 prefill = client.chat.completions.create(
     model=model,
     messages=messages,
-    extra_body={"return_token_ids": True, "kv_transfer_params": {"do_remote_decode": True}},
+    extra_body={
+        "return_token_ids": True,
+        "kv_transfer_params": {"do_remote_decode": True},
+    },
 )
 ids = prefill.prompt_token_ids
 
@@ -73,7 +76,9 @@ decode = client.chat.completions.create(
     model=model,
     messages=messages,
     stream=True,
-    extra_body={"kv_transfer_params": {"do_remote_prefill": True, "prompt_token_ids": ids}},
+    extra_body={
+        "kv_transfer_params": {"do_remote_prefill": True, "prompt_token_ids": ids}
+    },
 )
 ```
 
@@ -81,6 +86,62 @@ If `messages` has non-text content, or `echo` or `return_prompt_text` is set, th
 
 !!! warning "Behavior change for aggregated servers without a KV connector"
     Forwarded `prompt_token_ids` used to be honored on any server. They are now ignored unless the server has a connector that supports prompt-id reuse or is started with `--enable-prompt-token-ids`. Offload-only configurations are included in the ignore path. A deployment that forwards ids to an aggregated server, such as a KV-cache-aware router that tokenizes once, goes back to rendering and tokenizing `messages` after the upgrade. The request still succeeds, but `usage.prompt_tokens` can differ from the forwarded list, and a one-time warning names `--enable-prompt-token-ids`. Start the server with that flag to keep reusing the ids.
+
+`prompt_features` (forwarded multimodal tensors) additionally require `--enable-prompt-token-ids` even on a decode worker: #48145 only covered text ids, and forwarded tensors skip `--limit-mm-per-prompt` and `--trust-request-mm-kwargs`. When the features are not honored, both keys are consumed and `messages` is rendered, so no half-forwarded payload reaches the engine.
+
+### Forwarding multimodal features (`prompt_features`)
+
+A router that already rendered the prompt — including multimodal preprocessing — can forward the render result alongside the ids, so media requests skip templating, tokenization and multimodal preprocessing on the decode side too (one render per request). Render first (the render endpoints return a `GenerateRequest` with `token_ids` and `features`), then forward both on the decode request:
+
+```python
+rendered = client.post(
+    "/v1/chat/completions/render",
+    json={
+        "model": model,
+        "messages": messages,
+        "return_token_ids": True,
+        # "tensors" by default; "none" strips kwargs_data/mm_metadata from
+        # `features` for cache-aware routers that only need the layout
+        "mm_payload": "tensors",
+    },
+).json()
+
+decode = client.chat.completions.create(
+    model=model,
+    messages=messages,
+    stream=True,
+    extra_body={
+        "kv_transfer_params": {
+            "do_remote_prefill": True,
+            "prompt_token_ids": rendered["token_ids"],
+            "prompt_features": rendered["features"],
+        }
+    },
+)
+```
+
+`prompt_features` uses the same `MultiModalFeatures` schema as the [Generate API](../serving/online_serving/token_in_token_out.md):
+
+| Field | Type | Description |
+|---|---|---|
+| `mm_hashes` | `dict[str, list[str]]` | Per-modality item hashes, used for processor-cache lookup. |
+| `mm_placeholders` | `dict[str, list[PlaceholderRangeInfo]]` | Per-modality placeholder ranges (`offset`, `length`) in the token sequence. Must stay within `prompt_token_ids`. |
+| `kwargs_data` | `dict[str, list[str \| None]]` | Per-modality serialized tensor data (base64 `MultiModalKwargsItem`). `None` entries are resolved from cache. |
+| `mm_metadata` | `dict[str, list[str \| None]]` | Per-modality metadata-only items for encoder-cache disaggregated prefill; requires `ec_transfer_params` on the same request. |
+
+Shared-memory cache handles are process-local: `verify_signature` checks a handle against the
+key index of the process that published it, so a handle from a separate render server is always
+rejected with HTTP 400. A deployment whose renderer runs in another process (for example an
+llm-d router rendering on a prefill pod) therefore forwards full tensors, not handles; handles
+only pay off when renderer and worker share one `--mm-processor-cache-type shm` region.
+
+The payload is validated exactly like the Generate API's `features` field: placeholder bounds, metadata-only/EC consistency, and shared-memory cache-handle authentication (`--mm-processor-cache-type shm`). Violations fail with HTTP 400 before the engine sees the request. When shared-memory processor caching is enabled, `kwargs_data` items carrying SHM handles must originate from this deployment's render responses — forged handles are rejected.
+
+Notes:
+
+- `prompt_features` without `prompt_token_ids` is ignored (with a server-side warning) — forward both or neither.
+- The Harmony (GPT-OSS) chat path does not support forwarded features; the ids are ignored there and `messages` are re-rendered.
+- When absent, behavior is unchanged: media requests fall back to rendering from `messages` on the decode side.
 
 ## Generate API output modes
 

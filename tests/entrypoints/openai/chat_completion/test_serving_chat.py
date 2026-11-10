@@ -3317,6 +3317,129 @@ async def test_chat_kv_transfer_prompt_token_ids_opt_in_is_not_warned_about(
     assert "--enable-prompt-token-ids" not in caplog.text
 
 
+def _forwarded_features_payload(token_len: int = 3) -> dict:
+    """A minimal valid prompt_features payload for the chat reuse path."""
+    from vllm.entrypoints.scale_out.token_in_token_out.mm_serde import (
+        encode_mm_kwargs_item,
+    )
+    from vllm.entrypoints.scale_out.token_in_token_out.protocol import (
+        MultiModalFeatures,
+        PlaceholderRangeInfo,
+    )
+    from vllm.multimodal.inputs import (
+        MultiModalBatchedField,
+        MultiModalFieldElem,
+        MultiModalKwargsItem,
+    )
+
+    features = MultiModalFeatures(
+        mm_hashes={"image": ["image_A"]},
+        mm_placeholders={"image": [PlaceholderRangeInfo(offset=0, length=1)]},
+        kwargs_data={
+            "image": [
+                encode_mm_kwargs_item(
+                    MultiModalKwargsItem(
+                        {
+                            "pixel_values": MultiModalFieldElem(
+                                data=[1.0], field=MultiModalBatchedField()
+                            ),
+                        }
+                    )
+                )
+            ]
+        },
+    )
+    return features.model_dump()
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("connector", ["OffloadingConnector", "LMCacheMPConnector"])
+async def test_chat_forwarded_features_not_trusted_on_offload_server(connector):
+    """kv_both CPU offloading must not trust forwarded multimodal tensors
+    without the flag: the whole payload is consumed and messages render."""
+    mock_engine = _build_mock_engine()
+    mock_engine.renderer.config.kv_transfer_config = KVTransferConfig(
+        kv_connector=connector, kv_role="kv_both"
+    )
+    serving_chat = _build_serving_chat(mock_engine)
+    messages = [{"role": "user", "content": "hi"}]
+    expected = await serving_chat.render_chat_request(
+        ChatCompletionRequest(model=MODEL_NAME, messages=messages)
+    )
+    request = ChatCompletionRequest(
+        model=MODEL_NAME,
+        messages=messages,
+        kv_transfer_params={
+            "prompt_token_ids": [10, 20, 30],
+            "prompt_features": _forwarded_features_payload(),
+            "do_remote_prefill": True,
+        },
+    )
+    result = await serving_chat.render_chat_request(request)
+
+    expected_conversation, expected_engine_inputs = expected
+    conversation, engine_inputs = result
+    assert conversation == expected_conversation
+    assert len(engine_inputs) == len(expected_engine_inputs)
+    assert request.kv_transfer_params == {"do_remote_prefill": True}
+
+
+@pytest.mark.asyncio
+async def test_chat_forwarded_features_dropped_on_decode_worker_without_flag():
+    """#48145's connector-backed reuse covers text ids only: a decode
+    worker still drops ids+features when tensors are forwarded."""
+    mock_engine = _build_mock_engine()
+    mock_engine.renderer.config.kv_transfer_config = KVTransferConfig(
+        kv_connector="NixlConnector", kv_role="kv_consumer"
+    )
+    serving_chat = _build_serving_chat(mock_engine)
+    messages = [{"role": "user", "content": "hi"}]
+    expected = await serving_chat.render_chat_request(
+        ChatCompletionRequest(model=MODEL_NAME, messages=messages)
+    )
+    request = ChatCompletionRequest(
+        model=MODEL_NAME,
+        messages=messages,
+        kv_transfer_params={
+            "prompt_token_ids": [10, 20, 30],
+            "prompt_features": _forwarded_features_payload(),
+        },
+    )
+    result = await serving_chat.render_chat_request(request)
+
+    expected_conversation, expected_engine_inputs = expected
+    conversation, engine_inputs = result
+    assert conversation == expected_conversation
+    assert len(engine_inputs) == len(expected_engine_inputs)
+    assert request.kv_transfer_params == {}
+
+
+@pytest.mark.asyncio
+async def test_chat_forwarded_features_reused_with_flag():
+    """With --enable-prompt-token-ids the chat path reuses ids+features:
+    the engine input is the multimodal render result, not a re-render."""
+    mock_engine = _build_mock_engine()
+    mock_engine.renderer.config.kv_transfer_config = KVTransferConfig(
+        kv_connector="NixlConnector", kv_role="kv_consumer"
+    )
+    serving_chat = _build_serving_chat(mock_engine, enable_prompt_token_ids=True)
+    messages = [{"role": "user", "content": "hi"}]
+    request = ChatCompletionRequest(
+        model=MODEL_NAME,
+        messages=messages,
+        kv_transfer_params={
+            "prompt_token_ids": [10, 20, 30],
+            "prompt_features": _forwarded_features_payload(),
+        },
+    )
+    conversation, engine_inputs = await serving_chat.render_chat_request(request)
+
+    assert conversation == []
+    assert len(engine_inputs) == 1
+    assert engine_inputs[0]["type"] == "multimodal"
+    assert engine_inputs[0]["prompt_token_ids"] == [10, 20, 30]
+
+
 @pytest.mark.asyncio
 async def test_chat_kv_transfer_prompt_token_ids_opt_in_without_kv_connector():
     """An explicit server opt-in preserves direct token-id reuse."""
