@@ -63,6 +63,7 @@ class MockModelConfig:
     task = "generate"
     runner_type = "generate"
     model = MODEL_NAME
+    served_model_name = MODEL_NAME
     tokenizer = MODEL_NAME
     trust_remote_code = False
     tokenizer_mode = "auto"
@@ -1589,10 +1590,10 @@ class _StubParser:
         self.history_tool_call_cnt = count
 
 
-def _derender_serving(engine, parser_cls=_StubParser):
+def _derender_serving(engine, parser_cls=_StubParser, **kwargs):
     """Serving whose derenderer builds real stream processors around
     `parser_cls`, or plain ones when it is None."""
-    serving = _build_serving_tokens(engine)
+    serving = _build_serving_tokens(engine, **kwargs)
     derenderer = serving.online_derenderer
     derenderer.parser = parser_cls
     derenderer.enable_auto_tools = False
@@ -1876,4 +1877,47 @@ async def test_stream_derender_chunk_has_no_null_delta_keys():
         .choices[0]
         .delta.content
         == "a"
+    )
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("server_flag", [False, True])
+@pytest.mark.parametrize("override", [None, False, True])
+async def test_stream_derender_logprob_request_override(server_flag, override):
+    engine = _mock_engine()
+
+    async def mock_generate(*args, **kwargs):
+        yield _make_request_output(
+            "req-1",
+            token_ids=[10],
+            text="é",
+            finish_reason="length",
+            finished=True,
+            logprobs=[
+                {
+                    10: Logprob(logprob=-0.5, decoded_token="é"),
+                    11: Logprob(logprob=-1.5, decoded_token="e"),
+                }
+            ],
+        )
+
+    engine.generate = MagicMock(side_effect=mock_generate)
+    serving = _derender_serving(engine, return_tokens_as_token_ids=server_flag)
+    request = _derender_request(ParseContext(return_tokens_as_token_ids=override))
+    request.sampling_params.logprobs = 2
+    parsed = await _collect_sse(await serving.serve_tokens(request))
+
+    chunk = parsed[0]
+    assert chunk["output_mode"] == "derender"
+    choice = chunk["choices"][0]
+    assert choice["delta"]["content"] == "é"
+    entry = choice["logprobs"]["content"][0]
+    placeholders = server_flag if override is None else override
+    assert (entry["token"], entry["bytes"]) == (
+        ("token_id:10", None) if placeholders else ("é", [195, 169])
+    )
+    assert [(top["token"], top["bytes"]) for top in entry["top_logprobs"]] == (
+        [("token_id:10", None), ("token_id:11", None)]
+        if placeholders
+        else [("é", [195, 169]), ("e", [101])]
     )
