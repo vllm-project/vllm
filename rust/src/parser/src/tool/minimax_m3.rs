@@ -11,10 +11,10 @@ use winnow::token::{literal, rest, take_until};
 
 use super::parameters::{ParamElement, ParamInput, ToolSchemas};
 use super::utils::{
-    Attributed, AttributedExt, Marker, MarkerScanState, SpecialToken,
-    parse_buffered_event_attributed, safe_text_len, take_until_marker,
+    Attributed, AttributedExt, Marker, MarkerScanState, MarkerStream, Scan, SpecialToken,
+    incomplete, parse_buffered_event_attributed, safe_text_len, scan_markers, take_until_marker,
 };
-use super::{JsonStyle, Result, ToolCallDelta, ToolParser, ToolParserError, ToolParserOutput};
+use super::{JsonStyle, OpenToolCall, Result, ToolParser, ToolParserError, ToolParserOutput};
 use crate::tool::Tool;
 use crate::utils::recursion::ParserRecursionGuard;
 
@@ -45,6 +45,7 @@ struct MinimaxM3Markers {
     invoke_start: Marker,
     invoke_end: Marker,
     element_start: Marker,
+    element_end_start: Marker,
 }
 
 impl MinimaxM3Markers {
@@ -62,6 +63,7 @@ impl MinimaxM3Markers {
             invoke_start: marker(INVOKE_START),
             invoke_end: marker(INVOKE_END),
             element_start: marker(ELEMENT_START),
+            element_end_start: marker(ELEMENT_END_START),
             namespace_token,
         }
     }
@@ -87,11 +89,46 @@ fn tag_marker(namespace: Option<&SpecialToken>, spelling: &str) -> Marker {
     }
 }
 
-#[derive(Debug, Clone, PartialEq, Eq)]
+#[derive(Debug)]
 enum MinimaxM3Mode {
     Text,
-    ToolBlock { invoke_end_scan: MarkerScanState },
+    /// Inside the tool block, between invokes.
+    ToolBlock,
+    /// Inside an invoke.
+    Invoke {
+        call: OpenToolCall,
+        body: InvokeBody,
+    },
     Done,
+}
+
+impl MinimaxM3Mode {
+    /// The open invoke and the position inside it, for an event inside an
+    /// invoke.
+    fn invoke_mut(&mut self) -> Result<(&mut OpenToolCall, &mut InvokeBody)> {
+        match self {
+            MinimaxM3Mode::Invoke { call, body } => Ok((call, body)),
+            _ => Err(parsing_failed!("MiniMax M3 invoke event outside an invoke")),
+        }
+    }
+}
+
+/// Where the parser is inside an invoke.
+#[derive(Debug)]
+enum InvokeBody {
+    /// Between parameters.
+    Parameters {
+        /// Scan for the invoke end once ordinary text ends the parameters.
+        invoke_end_scan: MarkerScanState,
+    },
+    /// Inside a top-level parameter whose text streams as it arrives.
+    Parameter { close_tag: Marker },
+    /// Inside a parameter that is converted through the tool's schema once its
+    /// element closes.
+    BufferedParameter {
+        name: String,
+        body_scan: ElementBodyScanState,
+    },
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -100,12 +137,34 @@ enum MinimaxM3Event {
         len: usize,
     },
     ToolBlockStart,
-    Invoke {
+    InvokeStart {
         name: String,
-        params: Vec<(String, ParamInput)>,
     },
+    ParameterStart {
+        name: String,
+    },
+    /// The first `len` buffered bytes continue a streamed parameter value.
+    ValueText {
+        len: usize,
+    },
+    ParameterEnd,
+    /// The complete value of a buffered parameter.
+    BufferedValue {
+        value: ParamInput,
+    },
+    InvokeEnd,
     ToolBlockEnd,
     IgnoredRest,
+}
+
+/// Streaming scan state for [`take_element_body`], so a resumed scan neither
+/// rescans the buffered body nor recounts its child tags.
+#[derive(Debug, Clone, Default, PartialEq, Eq)]
+struct ElementBodyScanState {
+    /// Offset relative to the body start from which the scan resumes.
+    scan_start: usize,
+    /// Child elements opened before `scan_start` and not yet closed.
+    depth: usize,
 }
 
 /// Tool parser for MiniMax M3 namespace-delimited XML-style tool calls.
@@ -150,7 +209,9 @@ enum MinimaxM3Event {
 /// ```
 ///
 /// MiniMax M3 emits the namespace marker `]<]minimax[>[` before each structural
-/// tag. Arguments are emitted only after a full `<invoke>` block is parsed.
+/// tag. A top-level parameter whose schema is exactly `string` streams as its
+/// text arrives; any other parameter, nested elements included, is converted
+/// through the schema once its element closes.
 ///
 /// A tag counts only where the namespace token produced its namespace marker,
 /// so the format spelled with ordinary tokens (the model quoting it) stays
@@ -181,27 +242,74 @@ impl MinimaxM3ToolParser {
             MinimaxM3Event::Text { len: consumed_len } => {
                 output.push_text(&self.buffer.text[..consumed_len]);
             }
-            MinimaxM3Event::ToolBlockStart => {
-                self.mode = MinimaxM3Mode::ToolBlock {
+            MinimaxM3Event::ToolBlockStart => self.mode = MinimaxM3Mode::ToolBlock,
+            MinimaxM3Event::InvokeStart { name } => {
+                // The template renders elements, not JSON, so the no-JSON default applies.
+                let call = OpenToolCall::new(name, self.emitted_tool_count, JsonStyle::Spaced);
+                self.emitted_tool_count += 1;
+                self.mode = MinimaxM3Mode::Invoke {
+                    call,
+                    body: InvokeBody::Parameters {
+                        invoke_end_scan: MarkerScanState::default(),
+                    },
+                };
+            }
+            MinimaxM3Event::ParameterStart { name } => {
+                let (call, body) = self.mode.invoke_mut()?;
+                *body = if self.tool_parameters.is_verbatim_string(&call.name, &name) {
+                    call.arguments.open_string(&name);
+                    InvokeBody::Parameter {
+                        close_tag: self.markers.close_tag(&name),
+                    }
+                } else {
+                    InvokeBody::BufferedParameter {
+                        name,
+                        body_scan: ElementBodyScanState::default(),
+                    }
+                };
+            }
+            MinimaxM3Event::ValueText { len } => {
+                let (call, _) = self.mode.invoke_mut()?;
+                call.arguments.push(&self.buffer.text[..len]);
+            }
+            MinimaxM3Event::ParameterEnd => {
+                let (call, body) = self.mode.invoke_mut()?;
+                call.arguments.close();
+                *body = InvokeBody::Parameters {
                     invoke_end_scan: MarkerScanState::default(),
                 };
             }
-            MinimaxM3Event::Invoke { name, params } => {
-                let arguments = self.tool_parameters.convert_params_with_schema(&name, params);
-                // The template renders elements, not JSON, so the no-JSON default applies.
-                let arguments = JsonStyle::Spaced
-                    .to_string(&arguments)
-                    .map_err(|error| parsing_failed!("failed to serialize arguments: {}", error))?;
-
-                output.push_call(ToolCallDelta {
-                    tool_index: self.emitted_tool_count,
-                    name: Some(name),
-                    arguments,
-                });
-                self.emitted_tool_count += 1;
+            MinimaxM3Event::BufferedValue { value } => {
+                let (call, body) = self.mode.invoke_mut()?;
+                let parameters = InvokeBody::Parameters {
+                    invoke_end_scan: MarkerScanState::default(),
+                };
+                let InvokeBody::BufferedParameter { name, .. } =
+                    std::mem::replace(body, parameters)
+                else {
+                    return Err(parsing_failed!(
+                        "MiniMax M3 buffered value outside a buffered parameter"
+                    ));
+                };
+                let value =
+                    self.tool_parameters.convert_param_with_schema(&call.name, &name, value);
+                call.arguments.write_value(&name, &value);
+            }
+            MinimaxM3Event::InvokeEnd => {
+                let MinimaxM3Mode::Invoke { call, .. } =
+                    std::mem::replace(&mut self.mode, MinimaxM3Mode::ToolBlock)
+                else {
+                    return Err(parsing_failed!("MiniMax M3 invoke end outside an invoke"));
+                };
+                output.push_call(call.finish());
             }
             MinimaxM3Event::ToolBlockEnd => self.mode = MinimaxM3Mode::Done,
             MinimaxM3Event::IgnoredRest => {}
+        }
+        if let MinimaxM3Mode::Invoke { call, .. } = &mut self.mode
+            && let Some(delta) = call.take_delta()
+        {
+            output.push_call(delta);
         }
         Ok(())
     }
@@ -236,12 +344,17 @@ impl ToolParser for MinimaxM3ToolParser {
             MinimaxM3Mode::Text => {
                 output.push_text(&self.buffer.text);
             }
-            MinimaxM3Mode::ToolBlock { .. } => {
+            MinimaxM3Mode::ToolBlock => {
                 if !self.buffer.text.trim_start().is_empty() {
                     return Err(ToolParserError::IncompleteToolCall {
                         parser: "MiniMax M3",
                     });
                 }
+            }
+            MinimaxM3Mode::Invoke { .. } => {
+                return Err(ToolParserError::IncompleteToolCall {
+                    parser: "MiniMax M3",
+                });
             }
             MinimaxM3Mode::Done => {}
         }
@@ -263,9 +376,16 @@ fn parse_next_minimax_m3_event(
 ) -> ModalResult<MinimaxM3Event> {
     match mode {
         MinimaxM3Mode::Text => parse_text_event(input),
-        MinimaxM3Mode::ToolBlock { invoke_end_scan } => {
-            parse_tool_block_event(input, invoke_end_scan)
-        }
+        MinimaxM3Mode::ToolBlock => parse_tool_block_event(input),
+        MinimaxM3Mode::Invoke { body, .. } => match body {
+            InvokeBody::Parameters { invoke_end_scan } => {
+                parse_invoke_event(input, invoke_end_scan)
+            }
+            InvokeBody::Parameter { close_tag } => parse_parameter_value_event(input, close_tag),
+            InvokeBody::BufferedParameter { name, body_scan } => {
+                buffered_value_event(input, name, body_scan)
+            }
+        },
         MinimaxM3Mode::Done => ignored_rest_event(input),
     }
 }
@@ -289,14 +409,8 @@ fn safe_text_event(input: &mut MinimaxM3Input<'_>) -> ModalResult<MinimaxM3Event
 }
 
 /// Parse one event inside a MiniMax M3 tool block.
-fn parse_tool_block_event(
-    input: &mut MinimaxM3Input<'_>,
-    invoke_end_scan: &mut MarkerScanState,
-) -> ModalResult<MinimaxM3Event> {
-    alt((tool_block_end_event, |input: &mut MinimaxM3Input<'_>| {
-        invoke_event(input, invoke_end_scan)
-    }))
-    .parse_next(input)
+fn parse_tool_block_event(input: &mut MinimaxM3Input<'_>) -> ModalResult<MinimaxM3Event> {
+    alt((tool_block_end_event, invoke_start_event)).parse_next(input)
 }
 
 /// Parse a MiniMax M3 tool-block end marker.
@@ -307,11 +421,8 @@ fn tool_block_end_event(input: &mut MinimaxM3Input<'_>) -> ModalResult<MinimaxM3
         .parse_next(input)
 }
 
-/// Parse a complete MiniMax M3 invoke block.
-fn invoke_event(
-    input: &mut MinimaxM3Input<'_>,
-    invoke_end_scan: &mut MarkerScanState,
-) -> ModalResult<MinimaxM3Event> {
+/// Parse a MiniMax M3 invoke start tag.
+fn invoke_start_event(input: &mut MinimaxM3Input<'_>) -> ModalResult<MinimaxM3Event> {
     let markers = input.markers();
     let (name,) = seq!(
         _: ws0,
@@ -321,53 +432,123 @@ fn invoke_event(
         _: literal(">"),
     )
     .parse_next(input)?;
-    // Wait for the whole invoke, then parse its body once.
-    let body = input.checkpoint();
-    (
-        take_until_marker(&markers.invoke_end, invoke_end_scan),
-        &markers.invoke_end,
-    )
-        .void()
-        .parse_next(input)?;
-    input.reset(&body);
-    let params = parse_invoke_params(input)?;
 
-    Ok(MinimaxM3Event::Invoke {
+    Ok(MinimaxM3Event::InvokeStart {
         name: name.trim().to_string(),
-        params,
     })
 }
 
-/// Parse all parameter elements inside a complete MiniMax M3 invoke body,
-/// through the invoke end.
-fn parse_invoke_params(input: &mut MinimaxM3Input<'_>) -> ModalResult<Vec<(String, ParamInput)>> {
+/// Parse one event inside a MiniMax M3 invoke, between parameters.
+fn parse_invoke_event(
+    input: &mut MinimaxM3Input<'_>,
+    invoke_end_scan: &mut MarkerScanState,
+) -> ModalResult<MinimaxM3Event> {
+    ws0.void().parse_next(input)?;
     let markers = input.markers();
-    let mut elements = Vec::new();
+    alt((
+        (&markers.invoke_end).value(MinimaxM3Event::InvokeEnd),
+        open_element_tag.map(|name: &str| MinimaxM3Event::ParameterStart {
+            name: name.to_string(),
+        }),
+        |input: &mut MinimaxM3Input<'_>| skipped_invoke_rest_event(input, invoke_end_scan),
+    ))
+    .parse_next(input)
+}
 
-    loop {
-        let _ = ws0.parse_next(input)?;
-        if opt(&markers.invoke_end).parse_next(input)?.is_some() {
-            break;
-        }
-        if opt(peek(&markers.element_start)).parse_next(input)?.is_some() {
-            elements.push(parameter_element(input)?);
-            continue;
-        }
-        if opt(peek(&markers.namespace)).parse_next(input)?.is_some() {
-            return malformed();
-        }
-        // Be tolerant: ordinary text at an invokeparameter boundary ends this invoke.
-        // Keep parsed parameters and drop the remaining invoke body.
-        (
-            take_until_marker(&markers.invoke_end, &mut MarkerScanState::default()),
-            &markers.invoke_end,
-        )
-            .void()
-            .parse_next(input)?;
-        break;
+/// Skip ordinary text at a parameter boundary through the invoke end.
+///
+/// Be tolerant: ordinary text at an invoke parameter boundary ends this invoke.
+/// Keep parsed parameters and drop the remaining invoke body.
+fn skipped_invoke_rest_event(
+    input: &mut MinimaxM3Input<'_>,
+    invoke_end_scan: &mut MarkerScanState,
+) -> ModalResult<MinimaxM3Event> {
+    let markers = input.markers();
+    if opt(peek(&markers.namespace)).parse_next(input)?.is_some() {
+        return malformed();
     }
+    seq!(
+        _: take_until_marker(&markers.invoke_end, invoke_end_scan),
+        _: &markers.invoke_end,
+    )
+    .value(MinimaxM3Event::InvokeEnd)
+    .parse_next(input)
+}
 
-    Ok(elements.into_iter().map(|element| (element.name, element.value)).collect())
+/// Parse a streamed value event inside a top-level string parameter.
+///
+/// A child element makes the value malformed, since its text already streamed.
+fn parse_parameter_value_event(
+    input: &mut MinimaxM3Input<'_>,
+    close_tag: &Marker,
+) -> ModalResult<MinimaxM3Event> {
+    alt((
+        close_tag.value(MinimaxM3Event::ParameterEnd),
+        |input: &mut MinimaxM3Input<'_>| {
+            let markers = input.markers();
+            safe_text_len(input, &markers.namespace).map(|len| MinimaxM3Event::ValueText { len })
+        },
+    ))
+    .parse_next(input)
+}
+
+/// Parse the complete element of a buffered parameter into its value.
+fn buffered_value_event<'i>(
+    input: &mut MinimaxM3Input<'i>,
+    name: &str,
+    body_scan: &mut ElementBodyScanState,
+) -> ModalResult<MinimaxM3Event> {
+    let close_tag = input.markers().close_tag(name);
+    // Wait for the whole element, then parse its body once.
+    let element = input.checkpoint();
+    (
+        |input: &mut MinimaxM3Input<'i>| take_element_body(input, body_scan),
+        &close_tag,
+    )
+        .void()
+        .parse_next(input)?;
+    input.reset(&element);
+    let _guard = ParserRecursionGuard::enter()?;
+    let value = element_body(input, name)?;
+    (&close_tag).void().parse_next(input)?;
+
+    Ok(MinimaxM3Event::BufferedValue { value })
+}
+
+/// Parse an element body up to the close tag matching its open tag, counting
+/// nested child tags, and leave the close tag for the caller.
+///
+/// Like [`take_until_marker`], it consumes nothing until that close tag has
+/// arrived, and keeps its progress in `state` across chunks. Only genuine
+/// namespace markers count as tags.
+fn take_element_body<'i>(
+    input: &mut MinimaxM3Input<'i>,
+    state: &mut ElementBodyScanState,
+) -> ModalResult<&'i str> {
+    let markers = input.markers();
+    // An element start is a prefix of an element end, so the end goes first:
+    // index 0 is a close tag.
+    let tags = [&markers.element_end_start, &markers.element_start];
+    let start = input.offset();
+    loop {
+        let (at, index) = match scan_markers(input, &tags, start + state.scan_start)? {
+            Scan::Found { at, index } => (at, index),
+            Scan::Pending(at) | Scan::Clear(at) => {
+                state.scan_start = at - start;
+                return incomplete();
+            }
+        };
+        match (index, state.depth) {
+            // A close tag still arriving is rescanned from here.
+            (0, 0) => {
+                state.scan_start = at - start;
+                return Ok(input.next_slice(at - start));
+            }
+            (0, _) => state.depth -= 1,
+            _ => state.depth += 1,
+        }
+        state.scan_start = at - start + tags[index].as_str().len();
+    }
 }
 
 /// Parse a MiniMax M3 parameter element.
@@ -956,16 +1137,54 @@ mod tests {
     }
 
     #[test]
-    fn minimax_m3_streaming_does_not_emit_incomplete_tool_call() {
+    fn minimax_m3_streams_string_parameters_before_the_invoke_closes() {
         let mut parser = parser();
-        let output = parser
-            .parse_chunk(&format!(
-                "{TOOL_CALL_START}{INVOKE_START} name=\"get_weather\">"
-            ))
-            .unwrap();
+        let mut output = ToolParserOutput::default();
 
-        assert!(output.normal_text().is_empty());
-        assert!(output.calls().is_empty());
+        // The call and its arguments so far, after each chunk.
+        let mut progress = Vec::new();
+        for chunk in [
+            format!("{TOOL_CALL_START}\n{INVOKE_START} name=\"create_order\">"),
+            format!("{ELEMENT_START}note>first line\nsec"),
+            format!("ond{ELEMENT_END_START}note>"),
+            format!("{ELEMENT_START}shipping>{}", element("city", "Singapore")),
+            format!("{ELEMENT_END_START}shipping>{}", element("user_id", "42")),
+            format!("{INVOKE_END}\n{TOOL_CALL_END}"),
+        ] {
+            output.append(parser.parse_chunk(&chunk).unwrap());
+            progress.push(match output.clone().coalesce().calls().first() {
+                Some(call) => format!("{}({})", call.name.as_deref().unwrap(), call.arguments),
+                None => "no call".to_string(),
+            });
+        }
+
+        expect![[r#"
+            create_order()
+            create_order({"note": "first line\nsec)
+            create_order({"note": "first line\nsecond")
+            create_order({"note": "first line\nsecond")
+            create_order({"note": "first line\nsecond", "shipping": {"city": "Singapore"}, "user_id": 42)
+            create_order({"note": "first line\nsecond", "shipping": {"city": "Singapore"}, "user_id": 42})"#]].assert_eq(&progress.join("\n"));
+    }
+
+    #[test]
+    fn minimax_m3_child_element_in_string_parameter_is_malformed() {
+        // The string value streams as it arrives, so it cannot become an object.
+        let mut parser = parser();
+        let body = element("note", &format!("text {}", element("child", "value")));
+
+        assert!(parser.parse_complete(&build_tool_block(&[("create_order", body)])).is_err());
+    }
+
+    #[test]
+    fn minimax_m3_streaming_matches_parse_complete_at_every_chunk_size() {
+        let text = build_tool_block(&[("create_order", order_arguments())]);
+        let complete = parser().parse_complete(&text).unwrap();
+        for size in 1..=8 {
+            let mut parser = parser();
+            let streamed = collect_stream(&mut parser, &split_by_chars(&text, size));
+            assert_eq!(streamed, complete, "chunk size {size}");
+        }
     }
 
     #[test]
@@ -1175,6 +1394,24 @@ mod tests {
 
         // Not held back: ordinary text cannot grow into the namespace token.
         assert_eq!(output.normal_text(), "Text ending in ]<]mini");
+    }
+
+    #[test]
+    fn minimax_m3_ordinary_partial_marker_in_string_parameter_streams_immediately() {
+        let mut parser = parser();
+        let mut output = ToolParserOutput::default();
+        let ids = [
+            dedicated(&format!(
+                "{TOOL_CALL_START}\n{INVOKE_START} name=\"create_order\">{ELEMENT_START}note>"
+            )),
+            ordinary("half ]<]mini"),
+        ]
+        .concat();
+        parser.parse_into(decode(&ids), &mut output).unwrap();
+
+        // Not held back: ordinary text cannot grow into the namespace token.
+        let output = output.coalesce();
+        assert_eq!(output.calls()[0].arguments, r#"{"note": "half ]<]mini"#);
     }
 
     #[test]
