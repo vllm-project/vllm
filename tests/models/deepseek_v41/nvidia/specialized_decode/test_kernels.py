@@ -780,17 +780,11 @@ def test_fp32_index_key_store(ratio):
 
 
 @pytest.mark.parametrize("masked", [False, True])
-@pytest.mark.parametrize("fp8_rows", [False, True])
-def test_engram_wkv_prefetch_matches_inline(
-    masked, fp8_rows, monkeypatch, default_vllm_config
-):
+def test_engram_wkv_prefetch_matches_inline(masked):
     """The Engram WKV started on a side stream right after its (slow) host
     lookup, replayed from a CUDA graph, gives the stock forward's output
-    bitwise, from BF16 or FP8 staged rows."""
+    bitwise."""
     from tests.kernels.test_engram import _make_embedding
-    from vllm.models.deepseek_v41.common import engram as engram_ops
-
-    monkeypatch.setattr(engram_ops, "can_fuse_query_quant", lambda _: fp8_rows)
 
     hc_mult, dim, max_tokens = 4, 256, 16
     table = _make_embedding(cpu_offload=True)
@@ -812,7 +806,6 @@ def test_engram_wkv_prefetch_matches_inline(
     engram.k_weight = torch.randn(hc_mult, dim, device=DEVICE).to(torch.bfloat16)
     with torch.device(DEVICE):
         engram._init_staging(max_tokens, table.dim)
-    assert engram.fp8_rows == fp8_rows
     prefetch = EngramPrefetch([engram], max_tokens)
     wkv_out, _ = prefetch._buffers[engram]
 

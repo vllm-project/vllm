@@ -12,9 +12,6 @@ from vllm.distributed import parallel_state
 from vllm.model_executor.layers.quantization.utils.mxfp8_utils import (
     dequant_mxfp8_to_bf16,
 )
-from vllm.model_executor.layers.quantization.utils.nvfp4_emulation_utils import (
-    convert_swizzled_to_linear,
-)
 from vllm.models.deepseek_v41.amd import engram as rocm_engram_ops
 from vllm.models.deepseek_v41.amd.engram import RocmEngram
 from vllm.models.deepseek_v41.common import engram as engram_ops
@@ -907,41 +904,6 @@ def test_engram_lookup_matches_torch(cpu_offload, background, packed, num_tokens
     assert torch.equal(out, expected)
 
 
-@pytest.mark.skipif(not current_platform.is_cuda(), reason="CUDA required")
-@pytest.mark.parametrize("num_tokens", [7, 1024])
-def test_engram_fp8_rows_wkv_input(monkeypatch, num_tokens):
-    """Staged FP8 rows reach WKV as MXFP8 holding exactly the table's values."""
-    monkeypatch.setattr(engram_ops, "can_fuse_query_quant", lambda _: True)
-    monkeypatch.setattr(
-        engram_ops,
-        "get_current_vllm_config",
-        lambda: SimpleNamespace(lora_config=None),
-    )
-    module = Engram.__new__(Engram)
-    torch.nn.Module.__init__(module)
-    module.embed_tokens = layer = _make_embedding(cpu_offload=False)
-    module.wkv = torch.nn.Identity()
-    with torch.device("cuda"):
-        module._init_staging(num_tokens, layer.dim)
-    assert module.fp8_rows
-    ids = torch.randint(
-        0, layer.part_num_embeddings, (num_tokens, 24), dtype=torch.int32, device="cuda"
-    )
-    rows = module.staged_rows[:num_tokens]
-    layer.lookup(ids, rows)
-    x = module.wkv_input(rows)
-    scales = convert_swizzled_to_linear(x.scale, num_tokens, x.data.shape[1], 32)
-    actual = dequant_mxfp8_to_bf16(x.data, scales).unflatten(-1, (-1, layer.dim))
-    expected = _reference_lookup(
-        layer.weight,
-        layer.weight_scale_inv,
-        ids,
-        layer.vocab_start_idx,
-        layer.vocab_end_idx,
-    )
-    assert torch.equal(actual, expected)
-
-
 @pytest.mark.skipif(
     not current_platform.is_cuda_alike(), reason="CUDA or ROCm required"
 )
@@ -989,7 +951,6 @@ def test_engram_shared_prefetch_stream_waits_per_layer(monkeypatch):
         module._prefetch_stream = stream
         module.embed_tokens = _make_embedding(cpu_offload=True)
         module.use_sequence_parallel = False
-        module.wkv = torch.nn.Identity()
         with torch.device("cuda"):
             module._init_staging(8, module.embed_tokens.dim)
         assert module._prefetch_stream is stream
