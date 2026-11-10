@@ -38,7 +38,11 @@ from vllm.model_executor.layers.mamba.ops.causal_conv1d import (
     causal_conv1d_fn,
     causal_conv1d_update,
 )
+from vllm.model_executor.layers.mamba.ops.gather_initial_states import (
+    gather_initial_states,
+)
 from vllm.model_executor.layers.mamba.ops.layernorm_gated import rms_norm_gated
+from vllm.model_executor.layers.mamba.ops.scatter_states import scatter_states
 from vllm.model_executor.layers.mamba.ops.selective_state_update_replayssm_output_only import (  # noqa: E501
     selective_state_update_replayssm_output_only,
 )
@@ -582,6 +586,20 @@ class MambaMixer2(MambaBase, PluggableLayer):
         # Check if running on Blackwell (SM100+) for kernel tuning
         self.is_blackwell = current_platform.is_device_capability_family(100)
 
+        if model_config is not None:
+            # Prefill final states go to a block-table column sliced at
+            # num_decodes.
+            spec = self.get_kv_cache_spec(vllm_config)
+            assert spec is not None and isinstance(spec, MambaSpec)
+            scatter_states.register_warmup(
+                state_shape=spec.shapes[1],
+                state_dtype=spec.dtypes[1],
+                indices_dtype=torch.int32,
+                max_num_tokens=vllm_config.scheduler_config.max_num_seqs,
+                indices_stride=1 + spec.num_speculative_blocks,
+                may_be_unaligned_indices=True,
+            )
+
     def forward(
         self,
         hidden_states: torch.Tensor,
@@ -865,11 +883,16 @@ class MambaMixer2(MambaBase, PluggableLayer):
             initial_states = zero_initial_states_p
             if has_initial_states_p is not None and prep_initial_states:
                 assert state_indices_tensor_p is not None
-                initial_states = torch.where(
-                    has_initial_states_p[:, None, None, None],
-                    ssm_state[state_indices_tensor_p],
-                    0,
-                )
+                if ssm_state.is_cpu:
+                    initial_states = torch.where(
+                        has_initial_states_p[:, None, None, None],
+                        ssm_state[state_indices_tensor_p],
+                        0,
+                    )
+                else:
+                    initial_states = gather_initial_states(
+                        ssm_state, state_indices_tensor_p, has_initial_states_p
+                    )
 
             # NOTE: final output is an in-place update of out tensor
             assert preallocated_ssm_out_p is not None

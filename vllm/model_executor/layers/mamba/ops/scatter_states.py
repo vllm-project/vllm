@@ -5,7 +5,11 @@ from typing import Any
 
 import torch
 
-from vllm.model_executor.warmup.jit_warmup import WarmupIntRange
+from vllm.model_executor.warmup.jit_warmup import (
+    WarmupChoices,
+    WarmupIntRange,
+    _when,
+)
 from vllm.model_executor.warmup.jit_warmup_triton_helper import (
     DispatchSpec,
     TritonWarmupTensor,
@@ -48,8 +52,12 @@ def _scatter_states_warmup_inputs(
     indices_dtype: torch.dtype,
     max_num_tokens: int,
     src_dtype: torch.dtype | None = None,
+    indices_stride: int = 1,
+    may_be_unaligned_indices: bool = False,
 ) -> dict[str, object]:
     num_tokens: Any = WarmupIntRange(1, max_num_tokens + 1)
+    indices_aligned: Any = WarmupChoices(True, False)
+    _when(indices_aligned or may_be_unaligned_indices)
     return dict(
         state=TritonWarmupTensor(
             state_dtype,
@@ -61,7 +69,9 @@ def _scatter_states_warmup_inputs(
         ),
         indices=TritonWarmupTensor(
             indices_dtype,
+            aligned=indices_aligned,
             shape=(num_tokens,),
+            strides=(indices_stride,),
         ),
     )
 

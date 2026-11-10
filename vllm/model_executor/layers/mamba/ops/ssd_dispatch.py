@@ -14,6 +14,8 @@ from vllm.utils.flashinfer import is_flashinfer_ssd_supported
 from vllm.v1.attention.backends.registry import MambaAttentionBackendEnum
 from vllm.v1.kv_cache_interface import KVCacheConfig, MambaSpec
 
+from .scatter_states import scatter_states
+
 logger = init_logger(__name__)
 
 
@@ -349,5 +351,8 @@ def mamba_chunk_scan_combined_varlen(
     )
     if final_states is not None and final_states_out is not None:
         assert final_state_indices is not None
-        final_states_out.index_copy_(0, final_state_indices.long(), final_states)
+        if final_states_out.is_cpu:
+            final_states_out[final_state_indices] = final_states
+        else:
+            scatter_states(final_states_out, final_states, final_state_indices)
     return checkpoint_states
