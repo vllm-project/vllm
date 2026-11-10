@@ -12,6 +12,8 @@ from typing import Any
 
 import torch
 
+from vllm.platforms import current_platform
+
 # Logical elements and encoded bytes per block.
 B12X_BLOCK_CODECS = {"iq2_xs": (256, 74), "iq2_xxs": (256, 66), "q8_0": (32, 34)}
 
@@ -97,7 +99,13 @@ def retain_b12x_programs_for_cudagraphs() -> Iterator[None]:
     launching the kernels.
     """
     compile_plan = _get_submodule("b12x._lib.compile_plan")
-    if compile_plan is None:
+    # FlashInfer ships B12X on every CUDA install and the retention scope hooks
+    # Triton launches, so it is limited to SM12x, where B12X kernels run.
+    if (
+        compile_plan is None
+        or not current_platform.is_cuda()
+        or not current_platform.is_device_capability_family(120)
+    ):
         yield
         return
     with compile_plan.retain_compiled_programs() as retained:

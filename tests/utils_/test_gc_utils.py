@@ -8,6 +8,7 @@ from typing import Any
 
 import pytest
 
+from vllm.platforms import current_platform
 from vllm.utils.gc_utils import (
     GCDebugConfig,
     _compute_detailed_type,
@@ -112,8 +113,13 @@ class _CyclicProgram:
         self.cycle = self
 
 
-def test_cudagraph_capture_keeps_b12x_programs_alive():
+@pytest.mark.parametrize("sm12x", [True, False])
+def test_cudagraph_capture_retains_b12x_programs_on_sm12x(monkeypatch, sm12x):
     compile_plan = pytest.importorskip("b12x._lib.compile_plan")
+    monkeypatch.setattr(current_platform, "is_cuda", lambda: True)
+    monkeypatch.setattr(
+        current_platform, "is_device_capability_family", lambda family: sm12x
+    )
 
     with freeze_gc_for_cudagraph_capture():
         program = _CyclicProgram()
@@ -123,4 +129,4 @@ def test_cudagraph_capture_keeps_b12x_programs_alive():
         del program
     gc.collect()
 
-    assert program_ref() is not None
+    assert (program_ref() is not None) == sm12x
