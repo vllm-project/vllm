@@ -55,7 +55,6 @@ import math
 from collections.abc import Mapping
 from dataclasses import dataclass
 
-import torch
 from torch import nn
 
 from vllm.logger import init_logger
@@ -65,13 +64,21 @@ logger = init_logger(__name__)
 _CONFIG_KEY = "audio_bucket_seconds"
 _CONFIG_PATH = f"additional_config.{_CONFIG_KEY}"
 
-# Model types verified for length bucketing. This is the gate that restricts the
-# feature to models that have been adapted and whose crop is lossless for their
-# numerics class (see the module docstring). A model must be listed here AND
-# declare an `EncoderBucketingSpec` for bucketing to engage; a model still being
-# adapted stays off until maintainers add it here. This keeps the feature from
-# ever silently corrupting an unadapted encoder just because the config is set.
-_VERIFIED_FOR_BUCKETING: frozenset[str] = frozenset({"qwen2_audio"})
+# Losslessness levels a whitelisted model may guarantee for its crop (see the
+# module docstring): bit-exact for mask-aware encoders, output-lossless-within-
+# a-1-frame-grid for unmasked + relative-PE encoders. Approx is the escape hatch
+# for mixed models (e.g. FunASR: bit-exact main encoder + unmasked adaptor).
+LOSSLESS_BIT_EXACT = "bit_exact"
+LOSSLESS_OUTPUT_LE_1FRAME = "output_le_1frame"
+LOSSLESS_APPROX = "approx"
+
+# Model types verified for length bucketing, mapped to their losslessness level.
+# This is the gate that restricts the feature to models that have been adapted
+# (see the module docstring). A model must be listed here AND declare an
+# `EncoderBucketingSpec` for bucketing to engage; a model still being adapted
+# stays off until maintainers add it here. This keeps the feature from ever
+# silently corrupting an unadapted encoder just because the config is set.
+_VERIFIED_FOR_BUCKETING: dict[str, str] = {"qwen2_audio": LOSSLESS_BIT_EXACT}
 
 
 # ---------------------------------------------------------- fixed-window shim
@@ -170,18 +177,23 @@ def _ladder_seconds(
 
 
 def _rungs_from_seconds(
-    seconds: tuple[float, ...], frames_per_second: int
+    seconds: tuple[float, ...], frames_per_second: int, align_to: int = 1
 ) -> tuple[int, ...]:
     """Convert a seconds ladder to mel-frame rungs at the model's frame rate.
 
     Args:
         seconds: Sorted ascending bucket edges in seconds.
         frames_per_second: Mel frames per second of input audio.
+        align_to: Align each rung up to a multiple of this many frames (e.g. a
+            conv/merge downsampling factor). `1` disables alignment.
 
     Returns:
         Rung lengths in mel frames (at least one frame per bucket).
     """
-    return tuple(max(1, int(round(s * frames_per_second))) for s in seconds)
+    rungs = [max(1, int(round(s * frames_per_second))) for s in seconds]
+    if align_to > 1:
+        rungs = [((r + align_to - 1) // align_to) * align_to for r in rungs]
+    return tuple(rungs)
 
 
 # ---------------------------------------------------------------- model spec
@@ -196,16 +208,19 @@ class EncoderBucketingSpec:
     rung) and frame-rate knobs next to the model code. The generic bucketer stays
     free of per-model field knowledge.
 
-    Subclasses set `frames_per_second` (mel frames per second of input audio) and
+    Subclasses set `frames_per_second` (mel frames per second of input audio),
     `context_margin` (extra frames past the published length so a rung window
-    never clips anything the encoder reads), and implement the three methods.
+    never clips anything the encoder reads), and `align_to` (align each rung up
+    to a multiple of this many frames, e.g. a conv/merge downsampling factor),
+    and implement the three methods.
     """
 
     frames_per_second: int
     context_margin: int = 0
+    align_to: int = 1
 
     def item_lengths(
-        self, mm_kwargs_batch: Mapping[str, torch.Tensor]
+        self, mm_kwargs_batch: Mapping[str, object]
     ) -> list[int] | None:
         """Per-item true lengths in feature frames.
 
@@ -217,7 +232,7 @@ class EncoderBucketingSpec:
         """
         raise NotImplementedError
 
-    def padded_time(self, mm_kwargs_batch: Mapping[str, torch.Tensor]) -> int:
+    def padded_time(self, mm_kwargs_batch: Mapping[str, object]) -> int:
         """The padded time extent of the batch (the no-bucket compute per item).
 
         Args:
@@ -230,10 +245,10 @@ class EncoderBucketingSpec:
 
     def crop(
         self,
-        mm_kwargs_batch: Mapping[str, torch.Tensor],
+        mm_kwargs_batch: Mapping[str, object],
         indices: list[int],
         rung: int,
-    ) -> dict[str, torch.Tensor]:
+    ) -> dict[str, object]:
         """Crop to the given rows, each truncated to `rung` feature frames.
 
         The frames past an item's real content are the producer's own padding and
@@ -278,9 +293,9 @@ class EncoderBucketing:
 
     def bucket(
         self,
-        mm_kwargs_batch: Mapping[str, torch.Tensor],
+        mm_kwargs_batch: Mapping[str, object],
         num_items: int,
-    ) -> list[tuple[list[int], Mapping[str, torch.Tensor]]]:
+    ) -> list[tuple[list[int], Mapping[str, object]]]:
         """Split a batch into fixed-length rung sub-batches.
 
         Falls back to a single full batch when bucketing cannot help: no
@@ -380,9 +395,11 @@ def install_encoder_bucketing(
             )
 
     ladder = None
+    lossless = None
     seconds = _ladder_seconds(additional_config)
     if seconds is not None:
-        if model_type not in _VERIFIED_FOR_BUCKETING:
+        lossless = _VERIFIED_FOR_BUCKETING.get(model_type)
+        if lossless is None:
             logger.warning(
                 "Encoder length bucketing requested for model_type %r, which is "
                 "not verified for bucketing; leaving it disabled. Only adapted "
@@ -397,7 +414,7 @@ def install_encoder_bucketing(
                     "EncoderBucketingSpec must set frames_per_second"
                 )
             ladder = LengthBucketingConfig(
-                _rungs_from_seconds(seconds, frames_per_second)
+                _rungs_from_seconds(seconds, frames_per_second, spec.align_to)
             )
 
     manifest: list[tuple[nn.Module, object]] = []
@@ -418,9 +435,11 @@ def install_encoder_bucketing(
     model._encoder_bucketing_installed = True
     if ladder is not None:
         logger.info(
-            "Encoder length bucketing enabled over rungs %s for modules %s",
+            "Encoder length bucketing enabled over rungs %s for modules %s "
+            "(lossless level: %s)",
             ladder.buckets,
             list(encoders),
+            lossless,
         )
     else:
         logger.info(

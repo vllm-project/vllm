@@ -287,3 +287,53 @@ def test_qwen2_audio_inputs_schema_contract():
         feature_attention_mask=mask,
         validate=False,
     )
+
+
+def test_rungs_from_seconds_aligns_to_multiple():
+    assert _rungs_from_seconds((2.0, 4.0), 10, align_to=8) == (24, 40)
+    assert _rungs_from_seconds((2.0,), 10) == (20,)  # align_to=1 disables it
+
+
+def test_whitelist_carries_lossless_level():
+    from vllm.model_executor.models.mm_encoder_bucketing import (
+        LOSSLESS_BIT_EXACT,
+        _VERIFIED_FOR_BUCKETING,
+    )
+
+    assert _VERIFIED_FOR_BUCKETING["qwen2_audio"] == LOSSLESS_BIT_EXACT
+
+
+def test_bucket_accepts_list_shaped_crop():
+    # Canary-style: features are per-item lists, so crop selects rows and
+    # truncates each row's own leading time axis rather than indexing a tensor.
+    class ListSpec(EncoderBucketingSpec):
+        frames_per_second = 100
+        context_margin = 0
+
+        def item_lengths(self, mm_kwargs_batch):
+            mask = mm_kwargs_batch.get("feature_attention_mask")
+            return [int(m.sum()) for m in mask] if mask is not None else None
+
+        def padded_time(self, mm_kwargs_batch):
+            return max(int(m.numel()) for m in mm_kwargs_batch["feature_attention_mask"])
+
+        def crop(self, mm_kwargs_batch, indices, rung):
+            feats = mm_kwargs_batch["input_features"]
+            mask = mm_kwargs_batch["feature_attention_mask"]
+            return {
+                "input_features": [feats[i][:, :rung] for i in indices],
+                "feature_attention_mask": [mask[i][:rung] for i in indices],
+            }
+
+    # three items padded to 40 frames; true lengths 5 / 30 / 12
+    feats = [torch.randn(4, 40) for _ in range(3)]
+    mask = [
+        torch.cat([torch.ones(5), torch.zeros(35)]),
+        torch.cat([torch.ones(30), torch.zeros(10)]),
+        torch.cat([torch.ones(12), torch.zeros(28)]),
+    ]
+    batch = {"input_features": feats, "feature_attention_mask": mask}
+    bucketer = EncoderBucketing(ListSpec(), LengthBucketingConfig((8, 16, 32)))
+    rungs = bucketer.bucket(batch, 3)
+    got = {r[1]["input_features"][0].shape[1]: r[0] for r in rungs}
+    assert got == {8: [0], 32: [1], 16: [2]}
