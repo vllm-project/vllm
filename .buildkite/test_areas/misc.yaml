@@ -309,6 +309,7 @@ steps:
 # TP1 <-> TP2), which needs 3 GPUs: 8 cases, ~36 min on MI355.
 - label: ":amd: (MI355) MoRIIO WRITE P/D Dummy-Weight Heterogeneous TP"
   key: amd-moriio-write-dummy-hetero-tp-mi355
+  automatic_shard: true
   dind: false
   device: mi355_4
   num_devices: 4
