@@ -453,10 +453,10 @@ class RequestOffloadState:
         Once the request has finished, no further spec-token rejection can
         rewrite the tail, so the exclusion is lifted and the final chunk
         becomes storable (issue #52735). The exclusion must be applied
-        consistently everywhere ``next_stored_chunk_idx`` is derived:
+        consistently everywhere `next_stored_chunk_idx` is derived:
         otherwise the trailing chunk of each step is skipped on collection but
-        jumped over by ``next_stored_chunk_idx``, so it is never re-considered
-        and a permanent hole breaks prefix-reuse lookup. ``is_finished`` is
+        jumped over by `next_stored_chunk_idx`, so it is never re-considered
+        and a permanent hole breaks prefix-reuse lookup. `is_finished` is
         monotonic, so the finish-time calls all see the lifted exclusion.
         """
         num_chunks = num_offloadable_tokens // group_config.tokens_per_chunk
@@ -952,6 +952,8 @@ class OffloadingConnectorScheduler:
         full_attention_hit_boundary: int | None = None
         while lookup_groups:
             looked_up_sliding_window: bool = False
+            full_attention_deferred = False
+            looked_up_full_attention = False
             groups_iter = iter(lookup_groups)
             lookup_groups = ()
             for group_idx in groups_iter:
@@ -989,15 +991,16 @@ class OffloadingConnectorScheduler:
                 sliding_window_size_in_chunks = (
                     group_config.sliding_window_size_in_chunks
                 )
+                # Zero cannot pin a junction, so a later confirmed hit may replace it.
                 if (
                     sliding_window_size_in_chunks is not None
-                    and full_attention_hit_boundary is None
+                    and not full_attention_hit_boundary
+                    and not full_attention_deferred
+                    and (looked_up_full_attention or not self._full_attention_groups)
                 ):
                     # Groups before the first sparse group are full attention.
                     full_attention_hit_boundary = (
-                        max_hit_size_tokens
-                        if self._full_attention_groups and not defer_lookup
-                        else 0
+                        max_hit_size_tokens if self._full_attention_groups else 0
                     )
 
                 # For legacy EAGLE groups, query one extra chunk that will be
@@ -1021,6 +1024,7 @@ class OffloadingConnectorScheduler:
                 # have backend-confirmed hits
                 num_hit_chunks: int | None
                 if sliding_window_size_in_chunks is None:
+                    looked_up_full_attention = True
                     num_hit_chunks = self._maximal_prefix_lookup(
                         offload_keys,
                         req_status.req_context,
@@ -1028,6 +1032,7 @@ class OffloadingConnectorScheduler:
                         group_config,
                         start_chunk_idx,
                     )
+                    full_attention_deferred |= num_hit_chunks is None
                     group_state.lookup_hit_end_chunk_idx = start_chunk_idx + (
                         num_hit_chunks or 0
                     )
@@ -1286,12 +1291,12 @@ class OffloadingConnectorScheduler:
         boundary: int,
         bridge_pending: bool,
     ) -> tuple[bool, bool]:
-        """Look up every key a partial-tail hit at ``boundary`` loads.
+        """Look up every key a partial-tail hit at `boundary` loads.
 
-        ``bridge_pending`` is True if a complete chunk that the hit also loads
+        `bridge_pending` is True if a complete chunk that the hit also loads
         is not ready yet.
-        Returns ``(hit, pending)``. ``hit`` is True only if every key is ready.
-        ``pending`` is True if a key looked up before the first miss is not
+        Returns `(hit, pending)`. `hit` is True only if every key is ready.
+        `pending` is True if a key looked up before the first miss is not
         ready yet.
         """
         req = req_status.req
@@ -1325,7 +1330,7 @@ class OffloadingConnectorScheduler:
         self, req_status: RequestOffloadState, boundary: int, num_hit_tokens: int
     ) -> None:
         """Pin a shared-prefix junction where a sparse group cut the hit, as
-        ``get_computed_blocks`` does for a local hit, so the recompute retains
+        `get_computed_blocks` does for a local hit, so the recompute retains
         the sliding-window/Mamba state at the full-attention hit boundary."""
         if self.config.retention_interval is None:
             return
@@ -1400,6 +1405,10 @@ class OffloadingConnectorScheduler:
             )
             return None, False
 
+        if request.resumable and self.use_lookahead_block_hashes:
+            # Core may have recomputed block hashes after preemption.
+            for group_state in req_status.group_states:
+                group_state.offload_keys.clear()
         req_status.update_offload_keys()
         req_status.num_locally_computed_tokens = num_computed_tokens
 
@@ -1460,7 +1469,7 @@ class OffloadingConnectorScheduler:
         Attention keys cover only their loaded token ranges; recurrent state
         covers the whole reused prefix. Overlaps report the outermost tier.
         Uncovered tokens, including omitted sliding-window history, are
-        ``external_unspecified``.
+        `external_unspecified`.
         """
         sources: dict[CacheHitSource, int] = {}
         if num_external_tokens == 0:
@@ -2587,8 +2596,8 @@ class OffloadingConnectorScheduler:
         the previous placeholder payload so consumers can ignore them.
 
         Yields:
-            ``BlockStored`` or ``BlockRemoved`` events corresponding to
-            the underlying :class:`OffloadingEvent` stream.
+            `BlockStored` or `BlockRemoved` events corresponding to
+            the underlying `OffloadingEvent` stream.
 
         """
         # Drain the manager eagerly, inside the region. manager.take_events() is

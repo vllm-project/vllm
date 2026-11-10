@@ -95,7 +95,7 @@ def record_row(args, request):
 
 
 def advance(base, n):
-    """``base + n``, or ``base`` itself for a static zero ``n`` (keeps q = 1 code)."""
+    """`base + n`, or `base` itself for a static zero `n` (keeps q = 1 code)."""
     return base + n if n else base
 
 
@@ -113,8 +113,11 @@ class KdaSplit:
     must be ready at launch; each run waits for prior cache restoration and slot
     publication.
 
-    ``schedule`` = (early, lanes per state row, minimum CTAs per SM, CTAs per head);
-    zeros keep the batch defaults. Two CTAs per head give each CTA 64 state rows and
+    `schedule` = (early, lanes per state row, minimum CTAs per SM, CTAs per head,
+    evict, lean); zeros keep the batch defaults. Lean (q > 1) computes each token's
+    inverse q and k norms on one lane and broadcasts them, and the output gate's
+    sigmoid only for the tokens the CTA normalizes (the same instructions per value,
+    so the same bits). Two CTAs per head give each CTA 64 state rows and
     each gate lane two decays. Early issues every load the predecessor does not
     produce (slot, state and conv rows, conv / F_B / norm weights) before the PDL
     wait, converts operands at first use, and syncs the cluster only before each
@@ -127,7 +130,7 @@ class KdaSplit:
     time, which frees the registers that held them across the input phase; early 3
     (two CTAs per head) also stages the gate warp's F_B rows.
 
-    ``tokens`` q > 1 (speculative verify; ``batch`` counts requests, rows b * q + t)
+    `tokens` q > 1 (speculative verify; `batch` counts requests, rows b * q + t)
     runs each request's q tokens in order with vLLM's spec cache semantics: slots
     [B, >= q] and accepted [B] (an extra last tensor, read early like the slots); the
     state comes from slot[b, accepted - 1] and token t's state goes to slot[b, t] if
@@ -135,14 +138,14 @@ class KdaSplit:
     [c_accepted, c_accepted + 1, x_0, ..., x_q-1]. Token t's F_B row is MMA column t;
     CTA t % C normalizes token t.
 
-    ``record`` (verify only, RecoverSSM): the state slot is a checkpoint the verify
+    `record` (verify only, RecoverSSM): the state slot is a checkpoint the verify
     leaves unchanged, and two more last tensors take the records the commit after
     sampling folds the accepted tokens in with: the correction [R, H, q, V] (FP32)
     and the key and raw gate [R, H, q, 2K] (BF16), row R = request.
 
     Every step has the precision of the composed decode production runs (next to its
-    speculative config, at q = 1 too), Triton ``causal_conv1d_update`` ->
-    ``fused_recurrent_kda`` -> ``rms_norm_gated``: the convolution's Q/K/V and the
+    speculative config, at q = 1 too), Triton `causal_conv1d_update` ->
+    `fused_recurrent_kda` -> `rms_norm_gated`: the convolution's Q/K/V and the
     recurrence's output round to BF16, and every step uses the Triton formula
     (x / (1 + exp(-x)), q / sqrt(|q|^2 + eps) * scale, 1 / sqrt(var + eps)) and
     instructions."""
@@ -164,7 +167,9 @@ class KdaSplit:
         self.heads, self.gate_mode, self.has_bias = heads, gate_mode, has_bias
         assert tokens > 1 or not record
         self.record = record
-        early, lanes, self.occupancy, cluster, evict = (*schedule, 0, 0)[:5]
+        early, lanes, self.occupancy, cluster, evict, lean = (*schedule, 0, 0, 0)[:6]
+        self.lean = bool(lean) and tokens > 1
+        assert not self.lean or 2 * tokens <= 32  # one lane per token's q and k norm
         self.early, self.staged = bool(early), early >= 2
         self.gate_staged, self.tokens = early == 3, tokens
         assert gate_mode != 2 or not (early or cluster)
@@ -329,7 +334,8 @@ class KdaSplit:
                     k = self.silu(accum[3 * t + 1])
                     v = self.silu(accum[3 * t + 2])
                     betas[t] = self.sigmoid(Float32(betas[t]))
-                    gates[t] = self.sigmoid(Float32(gates[t]))
+                    if cutlass.const_expr(not self.lean):
+                        gates[t] = self.sigmoid(Float32(gates[t]))
                     shared_q[advance(thread, 128 * t)] = q
                     shared_k[advance(thread, 128 * t)] = k
                     if cutlass.const_expr(self.record):  # noqa: SIM102
@@ -365,8 +371,18 @@ class KdaSplit:
                     return mul_rn(value, scale) if query else value
 
                 if cutlass.const_expr(T > 1):  # normalize each token's q, k once
+                    if cutlass.const_expr(self.lean):  # lanes 2 t, 2 t + 1: q, k of t
+                        norm_at = 8 * ((lane // 2) % T) + 4 * (lane % 2)
+                        norm_sq = (reductions[norm_at] + reductions[norm_at + 2]) + (
+                            reductions[norm_at + 1] + reductions[norm_at + 3]
+                        )
+                        lane_norm = reciprocal(sqrt_approx(norm_sq + 1.0e-6))
                     for t in cutlass.range_constexpr(T):
-                        fq, fk = factors(t)
+                        if cutlass.const_expr(self.lean):
+                            fq = cute.arch.shuffle_sync(lane_norm, 2 * t)
+                            fk = cute.arch.shuffle_sync(lane_norm, 2 * t + 1)
+                        else:
+                            fq, fk = factors(t)
                         q_n = normalize(qks[2 * t], fq, True)
                         k_n = normalize(qks[2 * t + 1], fk, False)
                         shared_q[128 * t + thread] = q_n
@@ -471,7 +487,10 @@ class KdaSplit:
                         sumsq = (sums[0] + sums[2]) + (sums[1] + sums[3])
                         variance = sumsq * (1.0 / 128) + eps
                         rstd = reciprocal(sqrt_approx(variance))
-                        result = raw_o * rstd * nw * gates[t]
+                        gate_t = gates[t]
+                        if cutlass.const_expr(self.lean):
+                            gate_t = self.sigmoid(Float32(gate_t))
+                        result = raw_o * rstd * nw * gate_t
                         output[advance(token, t), qk_channel] = BFloat16(result)
                         if cutlass.const_expr(t == 0):
                             for section in cutlass.range_constexpr(2):
@@ -485,7 +504,7 @@ class KdaSplit:
 
     @cute.jit
     def store_rows(self, history, state_row, span, lanes, when=None):
-        """Store the passes in ``span`` of the CTA's state rows (``when``: predicated
+        """Store the passes in `span` of the CTA's state rows (`when`: predicated
         on it, without branches)."""
         (start, stop), (group, group_lane) = span, lanes
         for p in cutlass.range_constexpr(start, stop):
@@ -508,8 +527,8 @@ class KdaSplit:
 
     @cute.jit
     def update(self, history, dots, operands, lanes, span, staged, record=(None, 0)):
-        """Decay, delta-rule update and query dot of the passes in ``span``, whose rows
-        ``staged`` (if given) first supplies from shared memory. ``record``: the
+        """Decay, delta-rule update and query dot of the passes in `span`, whose rows
+        `staged` (if given) first supplies from shared memory. `record`: the
         token's corrections [V] (if given) and the CTA's first value row."""
         kr, qr, decays, shared_v, beta = operands
         (group, lane), (start, stop) = lanes, span
@@ -549,7 +568,7 @@ class KdaSplit:
         """Project one value partition and multicast its decays to every CTA. Modes fix
         the F_B reduction order: 0 = one chain of eight MMAs, 1 = four chains of two,
         2 = sixteen 8-FMA partials summed in a butterfly. Projection math stays IEEE.
-        ``staged_rows``: shared [copy, lane, 4] words; each lane cp.asyncs its own
+        `staged_rows`: shared [copy, lane, 4] words; each lane cp.asyncs its own
         16-byte F_B operands there before the PDL wait and reads them back after it."""
         f_a, a_log, dt_bias, lower_bound, weight = (args[i] for i in (4, 6, 7, 13, 16))
         head, token, value_base, lane = coords
@@ -720,7 +739,7 @@ class KdaSplit:
     def multicast(self, acc, gates, targets, lane, key_gate=None):
         """Decays (q > 1) of the lane's D fragments (feature rows, token columns 2
         quarter + {0, 1}) to every CTA's shared [token, 128] decays; with
-        ``key_gate`` [q, 2K] (RecoverSSM), also the raw gates."""
+        `key_gate` [q, 2K] (RecoverSSM), also the raw gates."""
         (a, lower_bound, dt, features), (shared_decay, barrier, value_base) = (
             gates,
             targets,

@@ -14,26 +14,26 @@ import pytest
 import torch
 
 from tests.v1.attention.utils import dense_kv_cache_views
-from vllm.distributed.kv_transfer.kv_connector.v1.mooncake.store import (
+from vllm.distributed.kv_transfer.kv_connector.v1.mooncake_store import (
     worker as mooncake_store_worker,
 )
-from vllm.distributed.kv_transfer.kv_connector.v1.mooncake.store.coordinator import (  # noqa: E501
+from vllm.distributed.kv_transfer.kv_connector.v1.mooncake_store.coordinator import (  # noqa: E501
     MooncakeStoreCoordinator,
 )
-from vllm.distributed.kv_transfer.kv_connector.v1.mooncake.store.data import (
+from vllm.distributed.kv_transfer.kv_connector.v1.mooncake_store.data import (
     BoundaryPut,
     ChunkedTokenDatabase,
     LoadSpec,
     ReqMeta,
 )
-from vllm.distributed.kv_transfer.kv_connector.v1.mooncake.store.layout import (  # noqa: E501
+from vllm.distributed.kv_transfer.kv_connector.v1.mooncake_store.layout import (  # noqa: E501
     KeyMetadata,
     PoolKey,
 )
-from vllm.distributed.kv_transfer.kv_connector.v1.mooncake.store.scheduler import (  # noqa: E501
+from vllm.distributed.kv_transfer.kv_connector.v1.mooncake_store.scheduler import (  # noqa: E501
     _partial_tail_non_mamba_puts,
 )
-from vllm.distributed.kv_transfer.kv_connector.v1.mooncake.store.worker import (  # noqa: E501
+from vllm.distributed.kv_transfer.kv_connector.v1.mooncake_store.worker import (  # noqa: E501
     KVCacheStoreRecvingThread,
     KVCacheStoreSendingThread,
 )
@@ -130,26 +130,26 @@ def _build_worker_with_dict_store(vllm_config, kv_cache_config, store):
         sc.enable_offload = False
         with (
             patch(
-                "vllm.distributed.kv_transfer.kv_connector.v1.mooncake"
-                ".store.worker.get_tensor_model_parallel_rank",
+                "vllm.distributed.kv_transfer.kv_connector.v1.mooncake_store"
+                ".worker.get_tensor_model_parallel_rank",
                 return_value=0,
             ),
             patch(
-                "vllm.distributed.kv_transfer.kv_connector.v1.mooncake"
-                ".store.worker.get_tensor_model_parallel_world_size",
+                "vllm.distributed.kv_transfer.kv_connector.v1.mooncake_store"
+                ".worker.get_tensor_model_parallel_world_size",
                 return_value=1,
             ),
             patch(
-                "vllm.distributed.kv_transfer.kv_connector.v1.mooncake"
-                ".store.worker.get_pcp_group"
+                "vllm.distributed.kv_transfer.kv_connector.v1.mooncake_store"
+                ".worker.get_pcp_group"
             ) as mock_pcp,
             patch(
-                "vllm.distributed.kv_transfer.kv_connector.v1.mooncake"
-                ".store.worker.get_dcp_group"
+                "vllm.distributed.kv_transfer.kv_connector.v1.mooncake_store"
+                ".worker.get_dcp_group"
             ) as mock_dcp,
             patch(
-                "vllm.distributed.kv_transfer.kv_connector.v1.mooncake"
-                ".store.worker.get_ip",
+                "vllm.distributed.kv_transfer.kv_connector.v1.mooncake_store"
+                ".worker.get_ip",
                 return_value="127.0.0.1",
             ),
         ):
@@ -447,7 +447,7 @@ _MODELS = {
 
 
 def _byte_mask(t: torch.Tensor, nbytes: int) -> torch.Tensor:
-    """The bytes of the backing storage that ``t`` covers."""
+    """The bytes of the backing storage that `t` covers."""
     offsets = torch.tensor([t.storage_offset()])
     for size, stride in zip(t.shape, t.stride()):
         offsets = (offsets[:, None] + torch.arange(size) * stride).flatten()
@@ -925,10 +925,10 @@ def test_sub_block_partial_tail_offload_covers_smaller_group_blocks():
 def test_worker_lookup_hits_sub_block_partial_tail(num_lookahead):
     """worker.lookup must query sub-block keys when partial hash hits are on.
 
-    Regression test: ``lookup`` hard-coded ``fine_grained = False``, so the
+    Regression test: `lookup` hard-coded `fine_grained = False`, so the
     partial tail's sub-block keys were never probed and partial prefix hits
     silently returned 0 while the store side kept writing them. Here the
-    mamba block (16) exceeds the hash unit (4), so ``enable_partial_hash_hits``
+    mamba block (16) exceeds the hash unit (4), so `enable_partial_hash_hits`
     is on and the lookup must find the stored boundary at 8.
     """
     full = FullAttentionSpec(block_size=16, num_kv_heads=8, head_size=64, dtype=None)
@@ -1016,9 +1016,9 @@ def test_worker_setup_tolerates_finer_scratch_group():
     """Setup and lookup must tolerate a non-prefix-cacheable scratch group.
 
     Regression: GLM-5.3-Flash carries a kpool-tail scratch group whose block
-    size (``index_kpool`` tokens) is finer than the hash unit, so the
+    size (`index_kpool` tokens) is finer than the hash unit, so the
     coordinator's divisibility assert and the scratch group's
-    ``ChunkedTokenDatabase`` both rejected worker setup for any hash unit the
+    `ChunkedTokenDatabase` both rejected worker setup for any hash unit the
     scratch block does not divide. Scratch groups never participate in
     store/load/lookup, so setup must skip them and lookup must still hit
     stored sub-block boundaries on the participating groups.
@@ -1224,8 +1224,8 @@ def test_ring_scratch_group_is_never_stored_and_does_not_block_hits():
 class _LeaseTrackingStore(_DictStore):
     """Dict store that tells lease-free probes from leasing existence checks.
 
-    ``batch_probe_key`` grants no lease; ``batch_is_exist`` leases every key it
-    finds. Each leasing call is recorded separately, and ``evictions`` holds
+    `batch_probe_key` grants no lease; `batch_is_exist` leases every key it
+    finds. Each leasing call is recorded separately, and `evictions` holds
     keys to drop just before each successive leasing call, as evictions between
     probe and lease would.
     """
@@ -1249,7 +1249,7 @@ class _LeaseTrackingStore(_DictStore):
 
 
 def _full_plus_mamba_worker(store, *, partial_hash_hits=False):
-    """Full-attention + align-mode Mamba worker on ``store``."""
+    """Full-attention + align-mode Mamba worker on `store`."""
     full = FullAttentionSpec(block_size=16, num_kv_heads=8, head_size=64, dtype=None)
     mamba = MambaSpec(
         block_size=16,
@@ -1489,7 +1489,7 @@ def test_selective_lease_with_partial_hash_hits(monkeypatch):
 
 
 def test_selective_lease_requires_probe_support(monkeypatch):
-    """Enabling the flag on a Mooncake without ``batch_probe_key`` fails at
+    """Enabling the flag on a Mooncake without `batch_probe_key` fails at
     startup instead of silently leasing every key."""
     monkeypatch.setenv("VLLM_MOONCAKE_STORE_SELECTIVE_LEASE", "1")
     with pytest.raises(RuntimeError, match="batch_probe_key"):

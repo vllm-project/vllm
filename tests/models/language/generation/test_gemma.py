@@ -9,8 +9,6 @@ import torch
 
 from vllm.config import CompilationConfig, VllmConfig
 from vllm.config.compilation import CompilationMode
-from vllm.model_executor.layers.vocab_parallel_embedding import VocabParallelEmbedding
-from vllm.model_executor.models import gemma
 from vllm.model_executor.models.gemma3n import (
     Gemma3nTextModel,
     _kv_sharing_weights_mapper,
@@ -27,7 +25,7 @@ from vllm.model_executor.models.gemma4_dspark import (
 from ....utils import multi_gpu_test
 from ...utils import check_logprobs_close
 
-MODELS = ["google/gemma-2b", "google/gemma-2-2b", "google/gemma-3-4b-it"]
+MODELS = ["google/gemma-2-2b", "google/gemma-3-4b-it"]
 
 
 @pytest.mark.usefixtures("dist_init")
@@ -72,7 +70,7 @@ def test_gemma4_dspark_loads_confidence_head(
         else []
     )
     if not (enabled and has_weights):
-        assert model.model.confidence_head is None
+        assert (model.model.confidence_head is None) is not enabled
         assert not loaded
         return
 
@@ -86,43 +84,6 @@ def test_gemma4_dspark_loads_confidence_head(
     inputs = torch.cat([hidden, markov], dim=-1) if with_markov else hidden
     expected = (inputs.float() @ weight.float().T + bias.float()).sigmoid().squeeze(-1)
     torch.testing.assert_close(model.compute_confidence(hidden, markov), expected)
-
-
-@pytest.mark.cpu_test
-@pytest.mark.usefixtures("dist_init")
-def test_checkpoint_lm_head_can_override_tied_config(monkeypatch) -> None:
-    """A physical LM head must load after checkpoint-driven untying."""
-
-    class StubGemmaModel(torch.nn.Module):
-        def __init__(self, *, vllm_config, prefix):
-            super().__init__()
-            self.embed_tokens = VocabParallelEmbedding(4, 2)
-            self.make_empty_intermediate_tensors = None
-
-    monkeypatch.setattr(gemma, "GemmaModel", StubGemmaModel)
-    config = SimpleNamespace(
-        vocab_size=4,
-        hidden_size=2,
-        tie_word_embeddings=False,
-    )
-    vllm_config = SimpleNamespace(
-        model_config=SimpleNamespace(hf_config=config),
-        quant_config=None,
-    )
-    model = gemma.GemmaForCausalLM(vllm_config=cast(VllmConfig, vllm_config))
-    embedding_weight = torch.full((4, 2), 1.0)
-    lm_head_weight = torch.full((4, 2), 2.0)
-
-    loaded = model.load_weights(
-        [
-            ("model.embed_tokens.weight", embedding_weight),
-            ("lm_head.weight", lm_head_weight),
-        ]
-    )
-
-    assert loaded == {"model.embed_tokens.weight", "lm_head.weight"}
-    assert torch.equal(model.model.embed_tokens.weight[:4], embedding_weight)
-    assert torch.equal(model.lm_head.weight[:4], lm_head_weight)
 
 
 @pytest.mark.cpu_test

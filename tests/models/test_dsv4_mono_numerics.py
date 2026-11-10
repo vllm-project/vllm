@@ -8,7 +8,7 @@ them (aiter's preshuffled shared gate_up, its routed experts' layout).
 The whole layer (K1 + K2) against aiter's fused mHC seams, the ROCm attention
 op chain (block-scaled FP8 GEMMs, the fused q norm / RoPE / KV insert, the
 sparse MLA, the inverse-RoPE MXFP8 wo_a BMM), the TP all-reduce and
-``DeepseekV4MoE``: on CSA layers (their top-k) and HCA ones (every compressed
+`DeepseekV4MoE`: on CSA layers (their top-k) and HCA ones (every compressed
 row), bias-routed and hash-routed, at one- and two-hop widths.
 
 Each stage is compared on its own input, so a failure names the stage. The
@@ -53,7 +53,7 @@ def _cos(a: torch.Tensor, b: torch.Tensor) -> float:
 
 
 def _rel(a: torch.Tensor, b: torch.Tensor) -> float:
-    """Relative L2 error of ``a`` against ``b``: unlike the cosine, it sees a
+    """Relative L2 error of `a` against `b`: unlike the cosine, it sees a
     wrong scale."""
     a, b = a.float().reshape(-1), b.float().reshape(-1)
     return ((a - b).norm() / b.norm()).item()
@@ -61,9 +61,9 @@ def _rel(a: torch.Tensor, b: torch.Tensor) -> float:
 
 def _random_moe(moe, gd, gr, vocab: int) -> None:
     """Random parameters in the loaded layout, before post-load processing: this
-    rank's shards (``gd``, a device generator) of the MXFP4 routed experts
+    rank's shards (`gd`, a device generator) of the MXFP4 routed experts
     (random nibbles, E8M0 scales) and the FP8 shared expert (one E8M0 a
-    128 x 128 block); the replicated router from ``gr``, seeded alike on every
+    128 x 128 block); the replicated router from `gr`, seeded alike on every
     rank (a hash layer's table: distinct experts a token)."""
     u8 = torch.uint8
     for lin in (moe.shared_experts.gate_up_proj, moe.shared_experts.down_proj):
@@ -123,7 +123,7 @@ def _rope(kv: torch.Tensor, positions: torch.Tensor, cos_sin: torch.Tensor):
 
 
 def _write_records(cache, block: int, slots, kv):
-    """fp8_ds_mla records of roped bf16 kv rows at ``slots``: the 448 nope dims
+    """fp8_ds_mla records of roped bf16 kv rows at `slots`: the 448 nope dims
     in e4m3 with a UE8M0 per 64, the rope dims in bf16, as vLLM's insert."""
     nope = kv.float()[:, :NOPE].view(-1, 7, 64)
     exp = torch.ceil(torch.log2(nope.abs().amax(-1).clamp_min(1e-4) / 448.0))
@@ -157,7 +157,7 @@ def _record_offsets(cache, block: int, slots):
 
 
 def _read_records(cache, block: int, slots) -> torch.Tensor:
-    """The fp32 key rows of the records at ``slots``."""
+    """The fp32 key rows of the records at `slots`."""
     flat, d0, s0 = _record_offsets(cache, block, slots)
     data = flat[(d0[:, None] + torch.arange(DATA, device=cache.device)).reshape(-1)]
     data = data.view(-1, DATA)
@@ -398,7 +398,7 @@ class _ExactAttention:
 
 def _attn_output(runner, epoch: int, M: int, rank: int) -> torch.Tensor:
     """The wo_b partials every rank pushed to this rank's ATTN region in the
-    launch pair of ``epoch``, summed: [M, hidden] fp32. On two hops a rank
+    launch pair of `epoch`, summed: [M, hidden] fp32. On two hops a rank
     holds its own columns' partials only: the ranks' columns gathered."""
     from vllm.distributed import tensor_model_parallel_all_reduce
     from vllm.models.deepseek_v4.amd.mono.layer import peer_half_bytes

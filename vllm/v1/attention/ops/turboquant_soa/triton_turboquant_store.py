@@ -395,11 +395,11 @@ def triton_turboquant_store(
 ):
     """Launch TQ store kernel (FP8 or MSE path).
 
-    When ``norm_correction=True`` (default off; set by MSE norm-correction
+    When `norm_correction=True` (default off; set by MSE norm-correction
     presets), the centroid-vector norm ||c_t|| is folded into the stored
     per-token scalar at store time (stored value = ||k_t|| / ||c_t||). The
     load-side attention kernel no longer computes per-tile sum+sqrt+divide,
-    saving ~26% of TQ overhead on gpt-oss decode (ctx=4096). ``centroids``
+    saving ~26% of TQ overhead on gpt-oss decode (ctx=4096). `centroids`
     must be provided in this mode.
     """
     if norm_correction and not key_fp8:

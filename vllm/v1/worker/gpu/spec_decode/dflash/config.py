@@ -17,6 +17,7 @@ class DFlashSpeculatorConfig(DraftModelSpeculatorConfig):
         "vllm.v1.worker.gpu.spec_decode.dflash.speculator.DFlashSpeculator"
     )
     uses_target_hidden_states = True
+    parallel_drafting = True
     supports_watermarking = True
 
     @classmethod
@@ -27,7 +28,6 @@ class DFlashSpeculatorConfig(DraftModelSpeculatorConfig):
     def adapt_draft_model_config(cls, spec: "SpeculativeConfig") -> None:
         assert cls.base_method is not None
         wrap_eagle_hf_config(spec, cls.base_method)
-        spec.parallel_drafting = True
 
     @property
     def uses_aux_hidden_states(self) -> bool:
