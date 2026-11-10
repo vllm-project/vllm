@@ -89,7 +89,7 @@ logger = init_logger(__name__)
 class KVConnectorTransferResults:
     """Asynchronous transfer completions from one worker snapshot.
 
-    Failed receives also appear in ``finished_recving`` so the scheduler can
+    Failed receives also appear in `finished_recving` so the scheduler can
     release the request from its transfer wait state.
     """
 
@@ -194,6 +194,13 @@ class KVConnectorBase_V1(ABC):
         """
         return False
 
+    @classmethod
+    def supports_lookahead_block_hashes(
+        cls, kv_transfer_config: "KVTransferConfig"
+    ) -> bool:
+        """Whether the connector supports core lookahead hashing."""
+        return False
+
     @property
     def requires_kv_delivery(self) -> bool:
         """Whether this connector hands off KV that must be reliably delivered.
@@ -210,6 +217,16 @@ class KVConnectorBase_V1(ABC):
     def supports_sleep_mode(cls, kv_transfer_config: "KVTransferConfig") -> bool:
         """Whether the connector can follow the KV cache remap of sleep mode."""
         return True
+
+    @classmethod
+    def only_restores_canonical_kv(cls, kv_transfer_config: "KVTransferConfig") -> bool:
+        """Whether every KV block it loads is a whole block that vLLM's own
+        cache writer produced for an identical KV cache layout.
+
+        Attention backends may then keep fast paths that assume no foreign
+        bytes (e.g. NaNs in unwritten slots) ever reach the KV cache.
+        """
+        return False
 
     def __init__(
         self,
@@ -503,9 +520,9 @@ class KVConnectorBase_V1(ABC):
         return
 
     def get_loaded_kv_cache_group_ids(self, request: "Request") -> tuple[int, ...]:
-        """KV cache groups restored by this connector's load for ``request``.
+        """KV cache groups restored by this connector's load for `request`.
 
-        Called after ``get_num_new_matched_tokens`` returned a positive count.
+        Called after `get_num_new_matched_tokens` returned a positive count.
         Defaults to the prefix-cacheable groups, all a hash-addressed store
         holds; a connector transferring the request's own blocks restores
         every transfer group.
@@ -552,14 +569,14 @@ class KVConnectorBase_V1(ABC):
         request: "Request",
         num_external_tokens: int,
     ) -> dict[CacheHitSource, int]:
-        """Split ``num_external_tokens`` by the cache tier that supplied them.
+        """Split `num_external_tokens` by the cache tier that supplied them.
 
-        Called after :meth:`update_state_after_alloc`, so the load plan is
-        known. Counts must sum to ``num_external_tokens``; a mismatch is
-        reported as ``external_unspecified``. Only non-zero counts are
+        Called after `update_state_after_alloc`, so the load plan is
+        known. Counts must sum to `num_external_tokens`; a mismatch is
+        reported as `external_unspecified`. Only non-zero counts are
         included.
 
-        Default: all tokens under ``_cache_hit_source``.
+        Default: all tokens under `_cache_hit_source`.
         """
         if num_external_tokens == 0:
             return {}
@@ -577,9 +594,9 @@ class KVConnectorBase_V1(ABC):
         asynchronously loaded into, and second when any additional blocks
         are allocated, after the load/transfer is complete.
 
-        Decide whether to load based on ``num_external_tokens``, not on
-        whether ``blocks`` is empty: ``blocks`` may be non-empty even when
-        ``num_external_tokens == 0`` (e.g. a non-chosen sub-connector of
+        Decide whether to load based on `num_external_tokens`, not on
+        whether `blocks` is empty: `blocks` may be non-empty even when
+        `num_external_tokens == 0` (e.g. a non-chosen sub-connector of
         MultiConnector still receives the request's real blocks).
 
         Args:
@@ -618,6 +635,18 @@ class KVConnectorBase_V1(ABC):
         """
         return
 
+    def may_load_async(self, request: "Request") -> bool:
+        """Whether `get_num_new_matched_tokens` may return
+        `load_kv_async=True` for this request. With --max-num-inflight-kv-loads,
+        such requests can start loading while the running batch is full.
+
+        Called whenever the request enters the waiting queues, so must be cheap.
+        A false positive holds back other async loads until a slot is free.
+        Defaults to the P/D `do_remote_prefill` flag.
+        """
+        params = request.kv_transfer_params
+        return bool(params and params.get("do_remote_prefill"))
+
     def update_connector_output(self, connector_output: KVConnectorOutput):
         """Update KVConnector state from worker-side connectors output.
 
@@ -636,7 +665,7 @@ class KVConnectorBase_V1(ABC):
         """Called exactly once when a request has finished, before its blocks are
         freed.
 
-        The connector may assumes responsibility for freeing the blocks
+        The connector may assume responsibility for freeing the blocks
         asynchronously by returning True.
 
         Returns:
@@ -658,7 +687,7 @@ class KVConnectorBase_V1(ABC):
         """Register finish-time partial-tail sources before block cleanup.
 
         Returns True when the connector accepts responsibility for the sources
-        and the request's blocks must remain alive until ``get_finished()``.
+        and the request's blocks must remain alive until `get_finished()`.
         """
         return False
 

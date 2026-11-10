@@ -37,6 +37,12 @@ such as `sleep`, keep queueing new requests.
 
 The `clear_cache` parameter controls whether to clear the KV cache and prefix cache after pausing.
 
+`clear_cache=True` also resets a configured KV connector's cache. To clear only the local caches,
+pause with `clear_cache=False`, then call
+`reset_prefix_cache(reset_running_requests=True, reset_connector=False)`. Block hashes do not cover
+the weights, so keep the connector's cache only if the weights do not change, or give requests a
+`cache_salt` per weight version.
+
 ### resume_generation
 
 ```python

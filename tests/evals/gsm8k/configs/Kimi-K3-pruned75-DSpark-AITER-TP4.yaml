@@ -1,4 +1,4 @@
-model_name: "mgoin/Kimi-K3-pruned75"
+model_name: "vllm-project/Kimi-K3-pruned75"
 accuracy_threshold: 0.33
 min_acceptance_length: 4.8
 num_questions: 1319

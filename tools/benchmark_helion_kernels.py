@@ -6,17 +6,17 @@
 For each input case produced by the kernel's registered input generator, this
 checks the Helion kernel's numerics once against its eager reference, measures
 its latency against a chosen performance baseline, then reports the speedup.
-Use ``--numerics-with-perf-baseline`` to check numerics against the performance
+Use `--numerics-with-perf-baseline` to check numerics against the performance
 baseline instead.
 
-Two baselines are supported (``--baseline``):
+Two baselines are supported (`--baseline`):
 
-- ``autotune`` (default): the kernel's autotuning baseline
-  (``helion_settings.autotune_baseline_fn``), wrapped in ``torch.compile``
+- `autotune` (default): the kernel's autotuning baseline
+  (`helion_settings.autotune_baseline_fn`), wrapped in `torch.compile`
   (inductor). This is the native-torch reference used by kernel autotuning
   and correctness unit tests.
-- ``cuda``: the corresponding hand-written CUDA op (``torch.ops._C.*``). The
-  mapping from Helion kernel name to CUDA op lives in ``CUDA_BASELINE_OPS``
+- `cuda`: the corresponding hand-written CUDA op (`torch.ops._C.*`). The
+  mapping from Helion kernel name to CUDA op lives in `CUDA_BASELINE_OPS`
   below. Every Helion kernel shares the same argument interface as its CUDA
   counterpart, so inputs are forwarded verbatim.
 
@@ -77,8 +77,8 @@ def import_all_kernels() -> None:
     """Trigger Helion op registration, tolerating cross-version name drift.
 
     Current vLLM registers every Helion kernel as a side effect of importing
-    ``vllm.kernels.helion.ops``; some builds instead expose an explicit importer
-    whose name has drifted (``import_all_kernels`` / ``import_all_ops``). Call
+    `vllm.kernels.helion.ops`; some builds instead expose an explicit importer
+    whose name has drifted (`import_all_kernels` / `import_all_ops`). Call
     whichever exists; if none does, importing the module already registered
     them.
     """
@@ -197,7 +197,7 @@ def check_requirements() -> bool:
 
 
 def make_cuda_baseline(kernel_name: str) -> Callable:
-    """Return a callable invoking the CUDA op mapped to ``kernel_name``.
+    """Return a callable invoking the CUDA op mapped to `kernel_name`.
 
     The Helion kernel and its CUDA op share the same argument interface, so the
     input tuple is forwarded verbatim.
@@ -244,7 +244,7 @@ def make_eager_baseline(kernel_name: str) -> Callable:
 
 
 def make_autotune_baseline(kernel_name: str) -> Callable:
-    """Return the kernel's autotune baseline wrapped in ``torch.compile``."""
+    """Return the kernel's autotune baseline wrapped in `torch.compile`."""
     baseline_fn = make_eager_baseline(kernel_name)
 
     return torch.compile(
@@ -376,7 +376,7 @@ def check_kernel_correctness(
 ) -> list[CorrectnessResult]:
     """Run the per-shape numerics check for a kernel, continuing past failures.
 
-    Runs the same comparison as ``check_correctness`` for every shape case
+    Runs the same comparison as `check_correctness` for every shape case
     produced by the kernel's input generator, but records the outcome per case
     instead of raising on the first mismatch. This lets callers (e.g. a CI gate)
     report every failing shape in one pass rather than aborting early.
@@ -385,12 +385,12 @@ def check_kernel_correctness(
         kernel: The Helion kernel wrapper to check.
         baseline_fn: Reference callable sharing the kernel's argument interface.
         inputs_dict: Optional mapping of case key to input tuple. Defaults to
-            ``kernel.get_inputs()``.
+            `kernel.get_inputs()`.
 
     Returns:
-        One ``CorrectnessResult`` per shape case, in iteration order. A case that
+        One `CorrectnessResult` per shape case, in iteration order. A case that
         raises (compile/run error or numerics mismatch) is marked
-        ``passed=False`` with the exception text in ``error``; iteration
+        `passed=False` with the exception text in `error`; iteration
         continues regardless. An empty input mapping returns an empty list, which
         the CLI reports as a skipped check.
 
@@ -416,12 +416,12 @@ def do_bench_cudagraph_l2_clear(
 ) -> float:
     """CUDA-graph benchmark that flushes the L2 cache before every call.
 
-    ``triton.testing.do_bench_cudagraph`` captures back-to-back kernel launches
+    `triton.testing.do_bench_cudagraph` captures back-to-back kernel launches
     with a warm L2 cache, which over-estimates performance for memory-bound
     kernels. This clears L2 (via triton's benchmark cache buffer) before each
     call and subtracts the isolated cache-clear cost from the measured time.
 
-    Adapted from tritonbench's ``_do_bench_cudagraph_with_cache_clear`` using
+    Adapted from tritonbench's `_do_bench_cudagraph_with_cache_clear` using
     only triton/torch primitives so no extra dependency is introduced.
     """
     cache = triton.runtime.driver.active.get_empty_cache_for_benchmark()

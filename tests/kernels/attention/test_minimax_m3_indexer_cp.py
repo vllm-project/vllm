@@ -131,8 +131,8 @@ def test_indexer_context_scores_matches_reference():
 def test_indexer_context_scores_independent_of_shape_bound():
     """A grid sized for max_model_len scores a short batch identically.
 
-    CUDA graphs bake the grid and ``CHUNK`` at capture, where the dummy batch
-    is one token long. Shapes must therefore come from ``max_model_len``, and
+    CUDA graphs bake the grid and `CHUNK` at capture, where the dummy batch
+    is one token long. Shapes must therefore come from `max_model_len`, and
     scoring must not depend on how far past the batch that bound reaches.
     """
     bound = 65536
@@ -176,7 +176,7 @@ def test_indexer_context_scores_independent_of_shape_bound():
 def test_indexer_context_scores_unpopulated_block_table_is_safe():
     """Profiling runs score a max_model_len context off an empty block table.
 
-    ``_dummy_run`` with ``force_attention`` leaves the block table unwritten
+    `_dummy_run` with `force_attention` leaves the block table unwritten
     while seq_lens claim the full context, so every page id the score loop
     reads is out of range for the cache it is handed.
     """

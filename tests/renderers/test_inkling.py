@@ -3,9 +3,9 @@
 """Golden tests for the native Inkling renderer encoding.
 
 The message fixtures mirror the Rust renderer's fixture tests
-(``rust/src/chat/src/renderer/inkling/tests.rs``) so the two frontends stay
-in token-level parity. Image blocks emit the bare ``<|content_image|>`` marker;
-``InklingMultiModalProcessor`` inserts the per-patch placeholder run.
+(`rust/src/chat/src/renderer/inkling/tests.rs`) so the two frontends stay
+in token-level parity. Image blocks emit the bare `<|content_image|>` marker;
+`InklingMultiModalProcessor` inserts the per-patch placeholder run.
 """
 
 import pytest

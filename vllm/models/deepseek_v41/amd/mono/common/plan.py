@@ -25,7 +25,7 @@ WAVES = THREADS // 64
 
 
 def first_task(bid, base):
-    """CTA ``bid``'s first task of a stage placed from CTA ``base`` (any count of
+    """CTA `bid`'s first task of a stage placed from CTA `base` (any count of
     CTAs past 0: placements that add task counts run past the grid), then every
     BLOCKS-th."""
     return (bid - base % BLOCKS + BLOCKS) % BLOCKS
@@ -36,8 +36,8 @@ PAIR_BYTES = 8  # a (value, tag) pair
 
 
 def pair_layout(items, align: int = PAIR_BYTES, start: int = 0) -> dict:
-    """``items`` (name, pairs) laid out in order: name -> (byte offset, bytes),
-    each region from an ``align``-byte boundary at or past ``start``."""
+    """`items` (name, pairs) laid out in order: name -> (byte offset, bytes),
+    each region from an `align`-byte boundary at or past `start`."""
     out, off = {}, start
     for name, pairs in items:
         off = (off + align - 1) // align * align
@@ -48,7 +48,7 @@ def pair_layout(items, align: int = PAIR_BYTES, start: int = 0) -> dict:
 
 # ---------------------------------------------------------------- arithmetic
 def sel(pred, a, b):
-    """A if pred else b: a conditional on Python values, ``select`` on traced
+    """A if pred else b: a conditional on Python values, `select` on traced
     ones (rewrapped in the traced operand's type)."""
     if isinstance(pred, bool):
         return a if pred else b
@@ -62,7 +62,7 @@ def imin(a, b):
 
 
 def i32(x):
-    """``x``, asserted inside the device's Int32 range when it is a Python int."""
+    """`x`, asserted inside the device's Int32 range when it is a Python int."""
     if isinstance(x, int):
         assert -(2**31) <= x < 2**31, x
     return x
@@ -87,7 +87,7 @@ class Shard:
             raise ShardError(f"TP {self.tp}")
 
     def split(self, full: int, what: str) -> int:
-        """``full`` / tp, refusing a remainder: a rank's share of ``what``."""
+        """`full` / tp, refusing a remainder: a rank's share of `what`."""
         if full % self.tp:
             raise ShardError(f"{what} {full} is not divisible by TP {self.tp}")
         return full // self.tp
@@ -104,7 +104,7 @@ _ROOT = Path(__file__).resolve().parents[1]  # the mono package
 
 @functools.cache
 def source_digest(*paths: str) -> str:
-    """sha256 of every ``.py`` file under ``paths`` (files or directories,
+    """sha256 of every `.py` file under `paths` (files or directories,
     relative to the mono package), each file's path and contents: one model's
     kernel sources, so an edit to another model's rebuilds none of these."""
     h = hashlib.sha256()
@@ -120,8 +120,8 @@ def source_digest(*paths: str) -> str:
 
 
 def key_tuple(key, sources: str) -> tuple:
-    """``key``'s (field name, value) pairs, every value a scalar, then
-    ("sources", ``sources``): the model's ``source_digest``."""
+    """`key`'s (field name, value) pairs, every value a scalar, then
+    ("sources", `sources`): the model's `source_digest`."""
     out = []
     for f in fields(key):
         value = getattr(key, f.name)

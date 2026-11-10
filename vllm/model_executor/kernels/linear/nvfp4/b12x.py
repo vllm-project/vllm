@@ -8,7 +8,7 @@ import torch
 from vllm._custom_ops import scaled_fp4_quant
 from vllm.model_executor.utils import replace_parameter
 from vllm.platforms import current_platform
-from vllm.utils.b12x import B12xWarmupUnit
+from vllm.utils.b12x import B12xWarmupUnit, reuse_packed_weight_storage
 from vllm.utils.b12x import (
     get_b12x_blockscaled as _import_b12x_blockscaled,
 )
@@ -145,11 +145,14 @@ class B12xNvFp4W4A16LinearKernel(B12xNvFp4LinearKernel):
         super().process_weights_after_loading(layer)
         blockscaled = _import_b12x_blockscaled()
         assert blockscaled is not None
-        layer.b12x_nvfp4_packed_weight = blockscaled.pack_weight(
+        packed_weight = blockscaled.pack_weight(
             layer.weight,
             layer.weight_scale,
             recipe="nvfp4",
             global_scale=layer.weight_global_scale,
+        )
+        layer.b12x_nvfp4_packed_weight = reuse_packed_weight_storage(
+            getattr(layer, "b12x_nvfp4_packed_weight", None), packed_weight
         )
 
     def get_b12x_warmup_unit(

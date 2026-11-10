@@ -18,6 +18,16 @@ if not on_gfx950():
     pytest.skip("gfx950 instructions", allow_module_level=True)
 
 from tests.kernels.attention.minimax_m3_nvfp4_ref import dequant  # noqa: E402
+from tests.kernels.attention.test_minimax_m3_index_topk_decode import (  # noqa: E402
+    KINDS,
+    _scores,
+    _topk_out,
+    _width,
+)
+from vllm.models.minimax_m3.amd import indexer_nvfp4  # noqa: E402
+from vllm.models.minimax_m3.amd.ops.index_topk_decode.host import (  # noqa: E402
+    minimax_m3_index_topk_decode_indices,
+)
 from vllm.models.minimax_m3.amd.ops.nvfp4_index_decode import (  # noqa: E402
     host as decode_host,
 )
@@ -37,7 +47,7 @@ SPECIAL_LENS = [0, 1, 2, 3, 127, 128, 129, 1024]  # padding, short and edge rows
 
 
 def _index_cache(num_blocks: int, page_step: int = 1) -> torch.Tensor:
-    """Random NVFP4 index pages ``page_step`` pages apart (a view of a larger
+    """Random NVFP4 index pages `page_step` pages apart (a view of a larger
     cache)."""
     n = num_blocks * page_step
     cache = torch.randint(0, 256, (n, BLOCK * 72), device="cuda").to(torch.uint8)
@@ -57,7 +67,7 @@ def _fp8_keys(cache: torch.Tensor) -> torch.Tensor:
 
 
 def _block_table(seq_lens, share=False):
-    """Shuffled pages per request; ``share``: some requests start with another
+    """Shuffled pages per request; `share`: some requests start with another
     request's pages (a shared prefix)."""
     widths = [(s + BLOCK - 1) // BLOCK for s in seq_lens]
     num_blocks = sum(widths) + 2
@@ -170,7 +180,7 @@ def test_index_decode_matches_reference(
     num_heads, query_len, num_reqs, init_blocks, local_blocks, buffered, monkeypatch
 ):
     """Request chunks, shared prefixes, padding requests, sequences shorter
-    than the query; ``buffered`` forces the LDS-buffered variant."""
+    than the query; `buffered` forces the LDS-buffered variant."""
     if buffered:
         monkeypatch.setattr(decode_host, "BUFFER_MIN_BYTES", 0)
         monkeypatch.setattr(decode_host, "UNITS_PER_SLOT", 1)
@@ -308,6 +318,81 @@ def test_index_decode_cp_push_all_padding(grid):
     _check_cp_push([0] * 5, 1, 1, 2, grid)
 
 
+@pytest.mark.parametrize("num_reqs", [1, 5, 17, 45])
+@pytest.mark.parametrize("grid", [3, 768])
+def test_index_decode_cp_push_split_requests(num_reqs, grid):
+    """DSpark 7 (8 rows a request) scored as two 4-row CP requests
+    (`indexer_nvfp4._cp_requests`): the four ranks' blocks of every row's
+    visible context match the single-head scorer bit for bit, and so do the
+    top-k ids."""
+    from vllm.models.minimax_m3.amd.indexer_msa import _score_width
+    from vllm.models.minimax_m3.amd.indexer_nvfp4 import _cp_requests
+    from vllm.models.minimax_m3.amd.ops.index_topk_decode.host import (
+        minimax_m3_index_topk_decode_indices,
+    )
+    from vllm.models.minimax_m3.common.indexer import MiniMaxM3IndexerDecodeMetadata
+
+    torch.manual_seed(num_reqs)
+    query_len, heads, init_blocks, local_blocks = 8, cp.HEADS, 1, 2
+    lens = [s and max(s, query_len) for s in _lens(num_reqs, 9000)]  # 0: padding
+    lens[0] = 16 * cp.CP_CH * BLOCK + 2  # the first rows' last block opens a run
+    table, num_blocks = _block_table(lens, share=True)
+    seq_lens = torch.tensor(lens, dtype=torch.int32, device="cuda")
+    cache = _index_cache(num_blocks)
+    rows = num_reqs * query_len
+    q = (torch.randn(rows, heads, D, device="cuda") * 0.5).to(torch.float8_e4m3fn)
+    max_seq_len = max(lens)
+    width = _score_width(max_seq_len, BLOCK)  # the top-k's slots
+    expected = torch.full((heads, rows, width), float("nan"), device="cuda")
+    for h in range(heads):
+        decode_host.minimax_m3_nvfp4_index_score_decode(
+            q[:, h : h + 1], cache, expected[h : h + 1], table, seq_lens,
+            init_blocks, local_blocks, query_len, max_seq_len,
+        )  # fmt: skip
+    meta = MiniMaxM3IndexerDecodeMetadata(
+        seq_lens, table, max_seq_len, query_len, query_len
+    )
+    cp_table, cp_lens = _cp_requests(meta)
+    blocks = torch.arange(width, device="cuda")
+    gathered = torch.full_like(expected, float("nan"))
+    for rank in range(cp.WORLD):
+        counts = torch.zeros(cp.CNT_WORDS, dtype=torch.int32, device="cuda")
+        flags = torch.zeros(cp.FLAG_BYTES // 4, dtype=torch.int32, device="cuda")
+        flags[cp.SC_FLAGS : cp.SC_FLAGS + cp.WORLD] = 1 << 30
+        flags[cp.SC_FLAGS + rank] = 0
+        iq_buf = torch.full((heads, rows, D), 0x7F, dtype=torch.uint8, device="cuda")
+        iq_buf = iq_buf.view(torch.float8_e4m3fn)
+        for p in range(heads):
+            if p != rank:
+                iq_buf[p] = q[:, p]
+                w = cp.SC_IQ + p * cp.SC_MAX_REQS
+                flags[w : w + cp.SC_MAX_REQS] = 1 << 30
+        actual = torch.full_like(expected, float("nan"))
+        dests = [actual[h].data_ptr() for h in range(heads)]
+        decode_host.minimax_m3_nvfp4_index_score_push_cp(
+            q[:, rank].contiguous(), cache, dests, width, rows * width * 4,
+            cp_table, cp_lens, init_blocks, local_blocks,
+            rank, counts, [flags.data_ptr()] * 4, [iq_buf.data_ptr()] * 4, rows,
+            grid=grid,
+        )  # fmt: skip
+        mine = (blocks // cp.CP_CH) % cp.WORLD == rank
+        gathered[:, :, mine] = actual[:, :, mine]
+    torch.accelerator.synchronize()
+    row = torch.arange(rows, device="cuda")
+    visible = seq_lens.repeat_interleave(query_len) - query_len + 1 + row % query_len
+    seen = blocks[None, :] < ((visible + BLOCK - 1) // BLOCK)[:, None]
+    seen = seen[None].expand(heads, -1, -1)
+    assert torch.equal(
+        gathered[seen].view(torch.int32), expected[seen].view(torch.int32)
+    )
+    ids = [torch.empty(heads, rows, 16, dtype=torch.int32, device="cuda") for _ in "ab"]
+    for score, out in zip((expected, gathered), ids):
+        minimax_m3_index_topk_decode_indices(
+            score, out, seq_lens, max_seq_len=max_seq_len, query_len=query_len
+        )
+    assert torch.equal(ids[0], ids[1])
+
+
 def _prefill_case(q_lens, seq_lens_list, num_heads, page_step=1):
     torch.manual_seed(0)
     table, num_blocks = _block_table(seq_lens_list)
@@ -380,8 +465,8 @@ def test_index_prefill_matches_aiter_fp8(num_heads, q_lens, seq_lens_list, page_
 def test_index_prefill_matches_reference(
     q_lens, seq_lens_list, init_blocks, local_blocks, num_heads, monkeypatch
 ):
-    """Every kernel the host can pick (``kernel_shared.py`` with 128- and
-    256-row tiles, ``kernel.py``) bit for bit alike, and against an fp32
+    """Every kernel the host can pick (`kernel_shared.py` with 128- and
+    256-row tiles, `kernel.py`) bit for bit alike, and against an fp32
     reference."""
     table, seq_lens, cu, cache, q = _prefill_case(
         q_lens, seq_lens_list, num_heads, page_step=2 if num_heads == 2 else 1
@@ -427,3 +512,142 @@ def test_index_prefill_matches_reference(
             sl = seen[:, r0:r1]
             _assert_scores(got[sl], want[sl], (q_len, s))
         q_start += q_len
+
+
+@pytest.mark.parametrize(
+    ("num_decodes", "query_len", "scores_with_cp"),
+    [
+        (indexer_nvfp4.CP_MIN_REQS - 1, 8, False),  # DSpark 7 below the gate
+        (indexer_nvfp4.CP_MIN_REQS, 8, True),
+        (1, 4, True),  # DSpark 3 keeps CP at any batch size
+    ],
+)
+def test_decode_cp_gate(monkeypatch, num_decodes, query_len, scores_with_cp):
+    """DSpark 7 steps with fewer than `CP_MIN_REQS` requests score locally."""
+    from types import SimpleNamespace
+
+    from vllm.models.minimax_m3.amd.ops.index_cp import host as index_cp
+
+    cp = SimpleNamespace(max_rows=1024)
+    monkeypatch.setattr(index_cp, "get", lambda: cp)
+    impl = object.__new__(indexer_nvfp4.MiniMaxM3IndexerRocmNvfp4Impl)
+    impl.num_index_heads = 1
+    expected = cp if scores_with_cp else None
+    assert impl._decode_cp(num_decodes, query_len) is expected
+
+
+@pytest.mark.parametrize("kind", KINDS)
+@pytest.mark.parametrize(
+    "heads,reqs,query_len,max_seq_len",
+    [
+        (1, 16, 1, 1 << 20),
+        (1, 17, 1, 1 << 20),
+        (2, 2, 4, 1 << 20),
+        (2, 3, 4, 1 << 20),
+        (1, 2, 8, 1 << 20),
+        (1, 3, 8, 1 << 20),
+        (1, 2, 8, 0),
+        (1, 5, 4, 65536),
+    ],
+)
+def test_parallel_decode_matches_flydsl(
+    monkeypatch, kind, heads, reqs, query_len, max_seq_len
+):
+    """Both merge paths preserve FlyDSL ordering, causal masks and output guards."""
+    from vllm.models.minimax_m3.amd.ops.index_topk_decode.parallel_kernel import (
+        parallel_decode_topk,
+    )
+
+    rows = reqs * query_len
+    lengths = [1024 * BLOCK + query_len // 2, max_seq_len, 0, 1, 128, 65536]
+    seq = torch.tensor((lengths * reqs)[:reqs], dtype=torch.int32)
+    tok = torch.arange(rows) % query_len
+    live = (seq.repeat_interleave(query_len) - query_len + tok + 1).clamp(min=0)
+    gen = torch.Generator().manual_seed(4671)
+    scores = _scores(
+        kind, heads, rows, _width(max_seq_len), (live + BLOCK - 1) // BLOCK, gen
+    )
+    storage = torch.empty(heads, rows + 7, scores.shape[-1], device="cuda")
+    score = storage[:, 3 : 3 + rows]
+    score.copy_(scores)
+    seq = seq.cuda()
+    results = []
+    for enabled in ("0", "1"):
+        monkeypatch.setenv("VLLM_ROCM_PARALLEL_INDEX_TOPK", enabled)
+        output, compared = _topk_out(heads, rows, pad=True)
+        minimax_m3_index_topk_decode_indices(
+            score, output, seq, max_seq_len=max_seq_len, query_len=query_len
+        )
+        results.append(compared)
+    torch.testing.assert_close(results[1], results[0], rtol=0, atol=0)
+    output, compared = _topk_out(heads, rows, pad=True)
+    cols = 64 if max_seq_len == 0 else _width(max_seq_len)
+    parallel_decode_topk(score, output, seq, query_len, cols)
+    torch.testing.assert_close(compared, results[0], rtol=0, atol=0)
+
+
+@pytest.mark.parametrize("query_len", [1, 4, 8])
+@pytest.mark.parametrize("fused", [True, False])
+def test_parallel_decode_graph_replay_resets_counters(monkeypatch, query_len, fused):
+    """Two streams change the same rows between direct selection and merge."""
+    from vllm.models.minimax_m3.amd.ops.index_topk_decode.parallel_kernel import (
+        _buffers,
+        parallel_decode_topk,
+    )
+
+    reqs = 2 if fused else 16 // query_len + 1
+    rows, cols = reqs * query_len, 8192
+    gen = torch.Generator().manual_seed(65032)
+    score = _scores("nan", 1, rows, cols, torch.full((rows,), cols), gen).cuda()
+    # The first length crosses the adaptive boundary within one verify request.
+    # Subsequent replays cross it in both directions and change active CTA count.
+    cases = [
+        [1024 * BLOCK + query_len // 2, cols * BLOCK],
+        [0, 1],
+        [cols * BLOCK, 512 * BLOCK],
+        [128 * BLOCK, 2049 * BLOCK],
+    ]
+    lengths = [
+        torch.tensor((case * reqs)[:reqs], dtype=torch.int32, device="cuda")
+        for case in cases
+    ]
+    streams = [torch.cuda.Stream(), torch.cuda.Stream()]
+    graphs, inputs, outputs, counters = [], [], [], []
+    monkeypatch.setenv("VLLM_ROCM_PARALLEL_INDEX_TOPK", "0")
+    for stream in streams:
+        stream.wait_stream(torch.cuda.current_stream())
+        with torch.cuda.stream(stream):
+            seq = lengths[0].clone()
+            output, compared = _topk_out(1, rows, pad=True)
+            parallel_decode_topk(score, output, seq, query_len, cols)
+        stream.synchronize()
+        graph = torch.cuda.CUDAGraph()
+        with torch.cuda.graph(graph, stream=stream):
+            parallel_decode_topk(score, output, seq, query_len, cols)
+        graphs.append(graph)
+        inputs.append(seq)
+        outputs.append(compared)
+        counters.append(
+            _buffers(1, rows, cols, score.device.index, stream.cuda_stream)[1]
+        )
+    assert counters[0].data_ptr() != counters[1].data_ptr()
+    snapshots = []
+    for step in range(12):
+        for i, stream in enumerate(streams):
+            case = (step + i) % len(lengths)
+            with torch.cuda.stream(stream):
+                inputs[i].copy_(lengths[case])
+                graphs[i].replay()
+                snapshots.append((case, outputs[i].clone(), counters[i].clone()))
+    for stream in streams:
+        torch.cuda.current_stream().wait_stream(stream)
+    references = []
+    for seq in lengths:
+        output, compared = _topk_out(1, rows, pad=True)
+        minimax_m3_index_topk_decode_indices(
+            score, output, seq, max_seq_len=cols * BLOCK, query_len=query_len
+        )
+        references.append(compared)
+    for case, output, counter in snapshots:
+        torch.testing.assert_close(output, references[case], rtol=0, atol=0)
+        assert torch.count_nonzero(counter).item() == 0

@@ -579,6 +579,27 @@ impl BenchConfig {
             }
         }
 
+        // Synthetic datasets generate their own prompts and never read a
+        // dataset file, so a path given with one would be silently ignored.
+        if let Some(path) = &args.dataset_path
+            && matches!(
+                args.dataset_name,
+                DatasetName::Random
+                    | DatasetName::RandomMm
+                    | DatasetName::RandomRerank
+                    | DatasetName::PrefixRepetition
+            )
+        {
+            let name = clap::ValueEnum::to_possible_value(&args.dataset_name)
+                .expect("DatasetName has no skipped variants");
+            return Err(BenchError::Config(format!(
+                "Cannot use '{}' dataset with --dataset-path. Please specify the \
+                 appropriate --dataset-name (e.g., 'sharegpt', 'custom', 'hf') for \
+                 your dataset file: {path}",
+                name.get_name()
+            )));
+        }
+
         // Custom dataset validation
         if args.dataset_name == DatasetName::Custom {
             match args.dataset_path.as_deref() {
@@ -627,11 +648,11 @@ impl BenchConfig {
                     .into(),
             ));
         }
-        if let Some(len) = args.hf_output_len
-            && len == 0
+        if args.hf_output_len == Some(0)
+            || (args.dataset_name == DatasetName::Hf && args.output_len == Some(0))
         {
             return Err(BenchError::Config(
-                "--hf-output-len must be at least 1".into(),
+                "--hf-output-len and --output-len must be at least 1 for --dataset-name hf".into(),
             ));
         }
 
@@ -779,7 +800,7 @@ impl BenchConfig {
                 .unwrap_or(args.prefix_repetition_output_len),
             random_cache_hit_fraction: args.random_cache_hit_fraction,
             random_cache_ratio: args.random_cache_ratio,
-            sharegpt_output_len: args.sharegpt_output_len,
+            sharegpt_output_len: args.output_len.or(args.sharegpt_output_len),
             no_oversample: args.no_oversample,
             disable_shuffle: args.disable_shuffle,
             num_prompts: args.num_prompts,
@@ -838,7 +859,7 @@ impl BenchConfig {
             speed_bench_output_len: args.speed_bench_output_len,
             hf_split: args.hf_split.clone(),
             hf_subset: args.hf_subset.clone(),
-            hf_output_len: args.hf_output_len,
+            hf_output_len: args.output_len.or(args.hf_output_len),
             hf_text_column: args.hf_text_column.clone(),
             self_timed,
             timed_trace_chunk_hash_size: args.timed_trace_chunk_hash_size,
@@ -944,6 +965,20 @@ fn parse_ramp_up(args: &BenchServeArgs) -> Result<Option<RampUpConfig>> {
         Some(s) => s,
     };
 
+    // The ramp-up schedule replaces the request rate. Accepting one anyway
+    // would stamp the result JSON and its filename with a rate that never ran.
+    for (flag, set) in [
+        ("--request-rate", args.request_rate.is_finite()),
+        ("--sweep-request-rate", args.sweep_request_rate.is_some()),
+    ] {
+        if set {
+            return Err(BenchError::Config(format!(
+                "{flag} cannot be combined with --ramp-up-strategy; \
+                 the ramp-up parameters control the request rate"
+            )));
+        }
+    }
+
     let start_rps = args.ramp_up_start_rps.ok_or_else(|| {
         BenchError::Config("--ramp-up-start-rps is required when --ramp-up-strategy is set".into())
     })?;
@@ -955,6 +990,11 @@ fn parse_ramp_up(args: &BenchServeArgs) -> Result<Option<RampUpConfig>> {
     if start_rps <= 0.0 || end_rps <= 0.0 {
         return Err(BenchError::Config(
             "Ramp-up RPS values must be positive".into(),
+        ));
+    }
+    if start_rps > end_rps {
+        return Err(BenchError::Config(
+            "--ramp-up-start-rps must not exceed --ramp-up-end-rps".into(),
         ));
     }
 
@@ -1076,6 +1116,58 @@ mod tests {
         assert!(BenchConfig::from_args(&parse_args(args)).is_ok());
     }
 
+    fn ramp_up_args(start: &'static str, end: &'static str) -> Vec<&'static str> {
+        vec![
+            "vllm-bench",
+            "--model",
+            "test-model",
+            "--ramp-up-strategy",
+            "linear",
+            "--ramp-up-start-rps",
+            start,
+            "--ramp-up-end-rps",
+            end,
+        ]
+    }
+
+    /// The result filename names the ramp-up, as Python's does, instead of the
+    /// unused `--request-rate` (`infqps`).
+    #[test]
+    fn test_ramp_up_result_filename() {
+        let mut args = ramp_up_args("2", "10");
+        args.extend(["--max-concurrency", "8"]);
+        let config = BenchConfig::from_args(&parse_args(args)).unwrap();
+        assert_eq!(
+            crate::output::json::compute_result_filename(&config, "org/model", "20261028-120000"),
+            "openai-ramp-up-linear-2qps-10qps-concurrency8-model-20261028-120000.json"
+        );
+    }
+
+    /// The ramp-up schedule replaces the request rate, so a rate given next to
+    /// it would never run but still label the result.
+    #[test]
+    fn test_ramp_up_rejects_request_rate_flags() {
+        for flag in [
+            vec!["--request-rate", "5"],
+            vec!["--sweep-request-rate", "1,5"],
+        ] {
+            let mut args = ramp_up_args("2", "10");
+            args.extend(flag.iter().copied());
+            let msg = BenchConfig::from_args(&parse_args(args))
+                .expect_err("ramp-up should reject request-rate flags")
+                .to_string();
+            assert!(msg.contains(flag[0]), "{flag:?}: {msg}");
+        }
+    }
+
+    #[test]
+    fn test_ramp_up_rejects_start_above_end() {
+        let msg = BenchConfig::from_args(&parse_args(ramp_up_args("10", "2")))
+            .expect_err("start > end should be rejected")
+            .to_string();
+        assert!(msg.contains("must not exceed"), "{msg}");
+    }
+
     #[test]
     fn test_non_positive_sec_multiplier_fails() {
         // `=` form: clap reads a bare "-0.001" as a flag.
@@ -1102,6 +1194,75 @@ mod tests {
             "--model",
             "test-model",
         ]
+    }
+
+    #[test]
+    fn test_output_len_maps_to_sharegpt_and_hf() {
+        let config = |args: &[&str]| {
+            let mut argv = vec!["vllm-bench", "--model", "test-model"];
+            argv.extend_from_slice(args);
+            BenchConfig::from_args(&parse_args(argv)).unwrap()
+        };
+        let sharegpt = ["--dataset-name", "sharegpt", "--dataset-path", "data.json"];
+        let hf = ["--dataset-name", "hf", "--dataset-path", "org/data"];
+
+        assert_eq!(config(&sharegpt).sharegpt_output_len, None);
+        assert_eq!(config(&hf).hf_output_len, None);
+        assert_eq!(
+            config(&[&sharegpt[..], &["--output-len", "32"]].concat()).sharegpt_output_len,
+            Some(32)
+        );
+        assert_eq!(
+            config(&[&hf[..], &["--output-len", "32"]].concat()).hf_output_len,
+            Some(32)
+        );
+        // The dataset-specific flags still work on their own.
+        assert_eq!(
+            config(&[&sharegpt[..], &["--sharegpt-output-len", "16"]].concat()).sharegpt_output_len,
+            Some(16)
+        );
+        assert_eq!(
+            config(&[&hf[..], &["--hf-output-len", "16"]].concat()).hf_output_len,
+            Some(16)
+        );
+        // Like Python and the other datasets, --output-len wins over both.
+        assert_eq!(
+            config(
+                &[
+                    &sharegpt[..],
+                    &["--output-len", "32", "--sharegpt-output-len", "16"]
+                ]
+                .concat()
+            )
+            .sharegpt_output_len,
+            Some(32)
+        );
+        assert_eq!(
+            config(&[&hf[..], &["--output-len", "32", "--hf-output-len", "16"]].concat())
+                .hf_output_len,
+            Some(32)
+        );
+    }
+
+    #[test]
+    fn test_hf_rejects_zero_output_len() {
+        let hf_args = |flag| {
+            vec![
+                "vllm-bench",
+                "--model",
+                "test-model",
+                "--dataset-name",
+                "hf",
+                "--dataset-path",
+                "org/data",
+                flag,
+                "0",
+            ]
+        };
+        for flag in ["--output-len", "--hf-output-len"] {
+            let err = BenchConfig::from_args(&parse_args(hf_args(flag))).err().unwrap();
+            assert!(err.to_string().contains("must be at least 1"), "{err}");
+        }
     }
 
     #[test]
@@ -1408,6 +1569,58 @@ mod tests {
         let args = parse_args(args);
 
         assert!(BenchConfig::from_args(&args).is_err());
+    }
+
+    #[test]
+    fn test_synthetic_dataset_rejects_dataset_path() {
+        // Pair each dataset with a backend it supports, so --dataset-path is
+        // the only invalid argument.
+        for (name, backend) in [
+            ("random", "openai"),
+            ("random-mm", "openai-chat"),
+            ("random-rerank", "vllm-rerank"),
+            ("prefix_repetition", "openai"),
+        ] {
+            let args = parse_args([
+                "vllm-bench",
+                "--backend",
+                backend,
+                "--dataset-name",
+                name,
+                "--dataset-path",
+                "workload.jsonl",
+            ]);
+            let msg = BenchConfig::from_args(&args)
+                .expect_err("a synthetic dataset must reject --dataset-path")
+                .to_string();
+            assert!(
+                msg.contains(&format!("Cannot use '{name}' dataset with --dataset-path")),
+                "{name}: {msg}"
+            );
+        }
+    }
+
+    #[test]
+    fn test_default_dataset_rejects_dataset_path() {
+        // --dataset-name defaults to random, so a forgotten --dataset-name must
+        // not silently benchmark random prompts instead of the given file.
+        let args = parse_args(["vllm-bench", "--dataset-path", "workload.jsonl"]);
+        let msg = BenchConfig::from_args(&args)
+            .expect_err("the default random dataset must reject --dataset-path")
+            .to_string();
+        assert!(msg.contains("Cannot use 'random' dataset"), "{msg}");
+    }
+
+    #[test]
+    fn test_file_dataset_accepts_dataset_path() {
+        let args = parse_args([
+            "vllm-bench",
+            "--dataset-name",
+            "custom",
+            "--dataset-path",
+            "workload.jsonl",
+        ]);
+        assert!(BenchConfig::from_args(&args).is_ok());
     }
 
     #[test]

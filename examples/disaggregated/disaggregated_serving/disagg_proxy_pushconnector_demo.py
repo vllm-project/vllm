@@ -1,20 +1,20 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
-"""Push-mode disaggregated prefilling proxy demo.
+r"""Push-mode disaggregated prefilling proxy demo.
 
-Companion to ``disagg_proxy_demo.py`` (pull mode). The client-facing API is
+Companion to `disagg_proxy_demo.py` (pull mode). The client-facing API is
 the same; the difference is in how P and D coordinate the KV transfer:
 
-* Pull mode: proxy forwards P's ``kv_transfer_params`` (including
-  ``remote_block_ids``) to D, and D pulls KV from P via NIXL READ.
+* Pull mode: proxy forwards P's `kv_transfer_params` (including
+  `remote_block_ids`) to D, and D pulls KV from P via NIXL READ.
 * Push mode: proxy hands D **only** P's coordinates
-  (``remote_engine_id``, ``remote_host``, ``remote_port``, ``tp_size``,
-  ``pp_size``) and the shared ``remote_request_id``. D registers its locally
+  (`remote_engine_id`, `remote_host`, `remote_port`, `tp_size`,
+  `pp_size`) and the shared `remote_request_id`. D registers its locally
   allocated blocks with P over a NIXL notification; P then pushes the KV to D via
   NIXL WRITE.
 
-Launch multiple vLLM instances configured with ``NixlPushConnector`` and
-matching ``engine_id`` / ``side_channel_port``, then start this proxy:
+Launch multiple vLLM instances configured with `NixlPushConnector` and
+matching `engine_id` / `side_channel_port`, then start this proxy:
 
   python3 examples/disaggregated/disaggregated_serving/\
 disagg_proxy_pushconnector_demo.py \
@@ -66,15 +66,15 @@ class RoundRobinSchedulingPolicy(SchedulingPolicy):
 class PushProxy:
     """Push-mode proxy.
 
-    The structure mirrors the pull-mode ``Proxy`` in
-    ``disagg_proxy_demo.py``: an APIRouter with ``/v1/completions``,
-    ``/v1/chat/completions``, ``/status`` and ``/instances/add``, plus
+    The structure mirrors the pull-mode `Proxy` in
+    `disagg_proxy_demo.py`: an APIRouter with `/v1/completions`,
+    `/v1/chat/completions`, `/status` and `/instances/add`, plus
     round-robin scheduling across multiple P / D instances.
 
     Push-specific differences are confined to the request-handling
-    methods (``create_completion`` / ``create_chat_completion``):
+    methods (`create_completion` / `create_chat_completion`):
 
-    * D's ``kv_transfer_params`` is built from CLI-provided P
+    * D's `kv_transfer_params` is built from CLI-provided P
       coordinates instead of being derived from P's response.
     * P and D requests are issued concurrently — D registers blocks and
       waits while P prefills and pushes.
@@ -209,7 +209,7 @@ class PushProxy:
     def _build_decode_kv_params(self, request_id: str) -> dict:
         """Push-mode kv_transfer_params for D.
 
-        ``remote_block_ids`` is intentionally omitted: D allocates its
+        `remote_block_ids` is intentionally omitted: D allocates its
         own blocks and registers them with P; P determines the
         prefill-side block IDs and ships them via the WRITE.
         """

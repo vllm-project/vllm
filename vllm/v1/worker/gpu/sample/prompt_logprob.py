@@ -18,6 +18,9 @@ from vllm.v1.worker.gpu.sample.logprob import (
 )
 
 CHUNK_SIZE = 1024
+# Cap rows x k per torch.topk call, whose workspace grows with both (~5.5 GiB
+# for 1024 rows at a 152k vocab). Only splits chunks when k is very large.
+TOPK_MAX_ELEMENTS = 64 << 20
 
 
 @dataclass
@@ -293,12 +296,13 @@ def compute_prompt_logprobs_with_chunking(
 ) -> tuple[torch.Tensor, torch.Tensor, torch.Tensor]:
     # Since materializing the full prompt logits can take too much memory,
     # we compute it in chunks.
-    token_ids = []
-    scores = []
-    ranks = []
+    num_tokens = prompt_token_ids.shape[0]
+    token_ids: torch.Tensor | None = None
+    scores: torch.Tensor | None = None
+    ranks: torch.Tensor | None = None
     logits_mode = logprobs_mode in ("raw_logits", "processed_logits")
     prompt_token_ids = prompt_token_ids.to(torch.int64)
-    for start_idx in range(0, prompt_token_ids.shape[0], CHUNK_SIZE):
+    for start_idx in range(0, num_tokens, CHUNK_SIZE):
         end_idx = start_idx + CHUNK_SIZE
         # NOTE(woosuk): logits_fn can be slow because it involves all-gather.
         prompt_logits = logits_fn(prompt_hidden_states[start_idx:end_idx])
@@ -307,17 +311,30 @@ def compute_prompt_logprobs_with_chunking(
             if num_prompt_logprobs == -1
             else num_prompt_logprobs
         )
-        result = compute_topk_scores(
-            prompt_logits,
-            requested_num,
-            prompt_token_ids[start_idx:end_idx],
-            logits_mode=logits_mode,
-        )
-        token_ids.append(result.logprob_token_ids)
-        scores.append(result.logprobs)
-        ranks.append(result.selected_token_ranks)
+        rows_per_topk = max(1, TOPK_MAX_ELEMENTS // (requested_num + 1))
+        for block_start in range(0, prompt_logits.shape[0], rows_per_topk):
+            logits = prompt_logits[block_start : block_start + rows_per_topk]
+            num_logits = len(logits)
+            rows = slice(start_idx + block_start, start_idx + block_start + num_logits)
+            result = compute_topk_scores(
+                logits, requested_num, prompt_token_ids[rows], logits_mode=logits_mode
+            )
+            # Return token_ids as int32 to reduce peak memory usage.
+            if num_logits == num_tokens:
+                logprob_token_ids = result.logprob_token_ids.to(torch.int32)
+                return logprob_token_ids, result.logprobs, result.selected_token_ranks
+            if token_ids is None:
+                size = num_tokens, result.logprobs.shape[1]
+                token_ids = prompt_token_ids.new_empty(size, dtype=torch.int32)
+                scores = result.logprobs.new_empty(size)
+                ranks = result.selected_token_ranks.new_empty(num_tokens)
+            assert scores is not None and ranks is not None
+            token_ids[rows] = result.logprob_token_ids
+            scores[rows] = result.logprobs
+            ranks[rows] = result.selected_token_ranks
+            # Free each block's results before ranking the next.
+            del result
+        del prompt_logits, logits
 
-    token_ids = torch.cat(token_ids, dim=0) if len(token_ids) > 1 else token_ids[0]
-    scores = torch.cat(scores, dim=0) if len(scores) > 1 else scores[0]
-    ranks = torch.cat(ranks, dim=0) if len(ranks) > 1 else ranks[0]
+    assert token_ids is not None and scores is not None and ranks is not None
     return token_ids, scores, ranks

@@ -37,8 +37,8 @@ from vllm.v1.attention.backends.mla.sparse_utils import (
 from vllm.v1.kv_cache_interface import (
     MLAAttentionSpec,
     compute_layer_kv_cache_shape_bytes,
+    get_block_table_width,
 )
-from vllm.v1.worker.block_table import get_block_table_width
 from vllm.v1.worker.utils import select_common_block_size
 
 
@@ -56,7 +56,7 @@ def test_adaptive_indexer_uses_configured_max_decode_len():
         dtype=torch.bfloat16,
     )
     vllm_config = create_vllm_config(
-        model_name="hmellor/tiny-random-LlamaForCausalLM",
+        model_name="vllm-project/tiny-random-LlamaForCausalLM",
         max_model_len=1024,
     )
     vllm_config.speculative_config = SpeculativeConfig(
@@ -387,6 +387,7 @@ def test_indexer_preserves_deepseek_v41_mla_block_size():
 
 def test_indexer_warmup_normalizes_zero_compress_ratios():
     config = SimpleNamespace(
+        attention_config=SimpleNamespace(sparse_mla_shard_q=False),
         scheduler_config=SimpleNamespace(max_num_batched_tokens=8),
         model_config=SimpleNamespace(
             hf_text_config=SimpleNamespace(
@@ -416,6 +417,7 @@ def test_indexer_warmup_includes_pcp_normalized_dcp_key(monkeypatch):
         lambda: SimpleNamespace(rank_in_group=2),
     )
     config = SimpleNamespace(
+        attention_config=SimpleNamespace(sparse_mla_shard_q=False),
         scheduler_config=SimpleNamespace(max_num_batched_tokens=8),
         model_config=SimpleNamespace(
             hf_text_config=SimpleNamespace(compress_ratios=[32], index_kpool=32)

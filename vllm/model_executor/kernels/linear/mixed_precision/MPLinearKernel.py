@@ -8,12 +8,13 @@ from dataclasses import dataclass
 import torch
 
 from vllm.model_executor.layers.quantization.utils import replace_parameter
+from vllm.model_executor.layers.quantization.utils.quant_utils import QuantKey
 from vllm.model_executor.utils import retire_parameter
 from vllm.scalar_type import ScalarType
 
 
 def _shallow_copy(param: torch.Tensor) -> torch.Tensor:
-    """A new object of ``param``'s class sharing its data, with its own copy of
+    """A new object of `param`'s class sharing its data, with its own copy of
     the attributes (e.g. dim tags) for a transform to retag."""
     copy = torch.Tensor._make_subclass(type(param), param.data, param.requires_grad)
     copy.__dict__.update(param.__dict__)
@@ -56,6 +57,10 @@ class MPLinearKernel(ABC):
         if c.zero_points:
             assert w_zp_param_name is not None
         self.w_zp_name: str | None = w_zp_param_name
+
+    def input_quant_key(self) -> QuantKey | None:
+        """Mixed-precision kernels take unquantized inputs."""
+        return None
 
     @abstractmethod
     def process_weights_after_loading(self, layer: torch.nn.Module) -> None:

@@ -2,8 +2,9 @@
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 
 import dataclasses
+from collections.abc import Collection, Iterable, Mapping
 from contextlib import AbstractContextManager
-from typing import Protocol, TypeAlias
+from typing import Any, Protocol, TypeAlias
 
 import torch
 
@@ -25,10 +26,32 @@ class AllocationData:
     is_asleep: bool = False
 
 
+def discardable_allocations(
+    allocator_and_pools: Mapping[str, Iterable[tuple[Any, Any]]],
+    tensors: Collection[int],
+) -> set[int]:
+    """Weights allocations whose live tensors all start at these addresses."""
+    if not tensors:
+        return set()
+    return {
+        allocation["address"]
+        for pool, _ in allocator_and_pools.get("weights", ())
+        for allocation in pool.snapshot()
+        if all(
+            block["state"] == "inactive" or block["address"] in tensors
+            for block in allocation["blocks"]
+        )
+    }
+
+
 class MemAllocator(Protocol):
     def use_memory_pool(self, tag: str | None = None) -> AbstractContextManager: ...
 
-    def sleep(self, offload_tags: tuple[str, ...] | str | None = None) -> None: ...
+    def sleep(
+        self,
+        offload_tags: tuple[str, ...] | str | None = None,
+        discardable: Collection[int] = (),
+    ) -> None: ...
 
     def discard(self, tags: tuple[str, ...] | str) -> None: ...
 

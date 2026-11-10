@@ -28,6 +28,7 @@ serde_json.workspace = true
 serde_repr.workspace = true
 serde_tuple.workspace = true
 serde_with.workspace = true
+sha2.workspace = true
 socket2.workspace = true
 task-local.workspace = true
 tempfile = { workspace = true, optional = true }

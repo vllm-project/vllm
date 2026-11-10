@@ -52,7 +52,6 @@ class MarlinFP8ScaledMMLinearKernel(FP8ScaledMMLinearKernel):
         self, c: FP8ScaledMMLinearLayerConfig, layer_param_names: Sequence[str]
     ) -> None:
         super().__init__(c, layer_param_names)
-        self.marlin_input_dtype = None
         self.block_quant = self.config.weight_quant_key in {kFp8Static128BlockSym}
         self.size_k_first = not self.block_quant
 
@@ -74,9 +73,7 @@ class MarlinFP8ScaledMMLinearKernel(FP8ScaledMMLinearKernel):
         # Non-block: callers must pass weight in (K, N) layout.
 
         # A loaded input_scale stays registered; weight-only Marlin ignores it.
-        prepare_fp8_layer_for_marlin(
-            layer, self.size_k_first, input_dtype=self.marlin_input_dtype
-        )
+        prepare_fp8_layer_for_marlin(layer, self.size_k_first)
 
     def apply_weights(
         self,
@@ -95,7 +92,6 @@ class MarlinFP8ScaledMMLinearKernel(FP8ScaledMMLinearKernel):
             workspace=None,
             size_n=layer.output_size_per_partition,
             size_k=layer.input_size_per_partition,
-            input_dtype=self.marlin_input_dtype,
             bias=bias,
         )
 

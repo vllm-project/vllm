@@ -73,8 +73,10 @@ def processor():
         ),
         (
             f"before{IMAGE_PLACEHOLDER}{IMAGE_PLACEHOLDER}after",
-            f"before<|vision_start|>{IMAGE_TOKEN * 2}<|vision_end|>\n"
-            f"<|vision_start|>{IMAGE_TOKEN * 3}<|vision_end|>\nafter",
+            (
+                f"before<|vision_start|>{IMAGE_TOKEN * 2}<|vision_end|>\n"
+                f"<|vision_start|>{IMAGE_TOKEN * 3}<|vision_end|>\nafter"
+            ),
             [2, 3],
         ),
     ],

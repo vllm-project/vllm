@@ -76,6 +76,20 @@ vllm serve <MODEL> \
   }'
 ```
 
+#### Extensible KV cache
+
+The extensible KV cache (`--enable-extensible-kv-cache`) maps the KV cache with the driver's virtual memory API. Within a host, UCX can only reach that memory over NVLink through a CUDA fabric handle, which takes an IMEX channel; without one it falls back to TCP. So with NIXL on device memory and no channel, vLLM leaves the extensible KV cache off.
+
+To use both within a host, make a channel available to every prefill and decode process, for example:
+
+```bash
+major=$(awk '$2 == "nvidia-caps-imex-channels" {print $1}' /proc/devices)
+mkdir -p /dev/nvidia-caps-imex-channels
+mknod /dev/nvidia-caps-imex-channels/channel0 c "$major" 0
+```
+
+Check the transport with `UCX_PROTO_INFO=y`: KV reads should show `cuda_ipc`, not `tcp`. Transfers across hosts use RDMA and need no channel: pass `--enable-extensible-kv-cache` to keep the feature on.
+
 ## Basic Usage (on the same host)
 
 ### Producer (Prefiller) Configuration

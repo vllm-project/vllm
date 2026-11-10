@@ -1,9 +1,9 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 """The mono decode layer's two launches (README): K1 = the attention seam
-(``stages.seam``: slice, gate, the norm into vLLM's MXFP8) + the attention front
-(``attention.front``); K2 = the attention back (``attention.back``, wo_b pushed
-to every rank) + the FFN seam (the TP sum folded in) + the MoE (``stages.moe``,
+(`stages.seam`: slice, gate, the norm into vLLM's MXFP8) + the attention front
+(`attention.front`); K2 = the attention back (`attention.back`, wo_b pushed
+to every rank) + the FFN seam (the TP sum folded in) + the MoE (`stages.moe`,
 its all-reduce in-kernel too).
 
 Tags: K1's hand-offs carry 2 e + 1, K2's 2 e + 2 (e: the launch pair's epoch,
@@ -105,7 +105,7 @@ def _back_key(key: MonoBuild):
 def scratch_layout(s: int, tp: int, topk: int = 0) -> dict:
     """Every region of step width s's launches -> (byte offset, bytes), disjoint:
     K1's front and seam, K2's back, the MoE's regions, the normed rows and their
-    flags. Each width has a scratch of its own (``MonoRunner.scratch``):
+    flags. Each width has a scratch of its own (`MonoRunner.scratch`):
     under another width's layout a mailbox pair's tag word could be plain data,
     which a poll may take for a current tag. The MoE's counters, whose slots
     outlive a step width, are in the epoch buffer."""
@@ -154,8 +154,8 @@ def _epoch(epoch):
 
 @traced
 def store_x8(c, t, col, ys, live):
-    """The attention seam's norm output (``seam.stage_norm``'s 8 columns at
-    ``col``) -> vLLM's MXFP8 of each 32 (the attention's input quant) -> the
+    """The attention seam's norm output (`seam.stage_norm`'s 8 columns at
+    `col`) -> vLLM's MXFP8 of each 32 (the attention's input quant) -> the
     front's X8 / X8S, plain at device scope."""
     amax = abs(ys[0])
     for y in ys[1:]:
@@ -489,7 +489,7 @@ def _seam_lds(s):
 def run_ffn(key: MonoBuild, lds, a: dict, amb, bases, own, rank, ep):
     """K2's FFN half on this CTA: the FFN seam (the attention's TP partials
     summed and folded into the residual), the MoE and its all-reduce into
-    ``a["out"]``, then the launch pair's epoch moved on."""
+    `a["out"]`, then the launch pair's epoch moved on."""
     s, tp, d = key.tokens, key.tp, _dims(key)
     layout = scratch_layout(s, tp, key.topk)
     mkey = _moe_key(key)

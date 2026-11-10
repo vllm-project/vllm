@@ -159,7 +159,7 @@ def _collapse_placeholders(
 ) -> list[int]:
     """Undo placeholder expansion: each expanded range becomes one token.
 
-    ``/generate`` with ``content_parts`` expects unexpanded placeholders and
+    `/generate` with `content_parts` expects unexpanded placeholders and
     expands them itself, so the roundtrip must start from a collapsed prompt.
     """
     ranges = sorted(

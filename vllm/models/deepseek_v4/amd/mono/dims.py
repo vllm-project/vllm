@@ -1,6 +1,6 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
-"""DeepSeek-V4-Pro's widths as the mono kernels read them, and ``Dims``, a TP
+"""DeepSeek-V4-Pro's widths as the mono kernels read them, and `Dims`, a TP
 rank's share of them with every count the stages derive from it."""
 
 from dataclasses import dataclass
@@ -51,8 +51,8 @@ DOWN_TASKS = HIDDEN // ROWS
 
 
 def ld(k: int) -> int:
-    """The row stride of a row-major FP8 weight of K = ``k`` (bytes): vLLM pads
-    the rows of a multiple of 512 bytes by 256 (``VLLM_ROCM_FP8_PADDING``)."""
+    """The row stride of a row-major FP8 weight of K = `k` (bytes): vLLM pads
+    the rows of a multiple of 512 bytes by 256 (`VLLM_ROCM_FP8_PADDING`)."""
     return k + 256 if k % 512 == 0 else k
 
 
@@ -144,7 +144,7 @@ class Dims:
     @property
     def down_scale_cols(self) -> int:
         """w2_s's e8m0 columns: inter / 32, padded to a multiple of 8
-        (aiter ``shuffle_scale``)."""
+        (aiter `shuffle_scale`)."""
         return padded(self.inter // 32, 8)
 
 

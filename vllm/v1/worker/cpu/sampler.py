@@ -212,7 +212,7 @@ class CPUThinkingBudgetState:
 class CPUTraceReplayState:
     """Per-request state for inference trace-replay.
 
-    When a request carries ``SamplingParams.trace_decode_token_ids``, the
+    When a request carries `SamplingParams.trace_decode_token_ids`, the
     sampler overwrites the sampled token at each decode step with the
     predetermined trace token, while real logprobs and ranks are still computed
     from the unmodified logit distribution.

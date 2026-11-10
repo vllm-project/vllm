@@ -243,7 +243,7 @@ class SecondaryTierManager(ABC):
         calling thread.
 
         Preconditions (guaranteed by the framework):
-          - ``job_metadata.chunk_ids`` are valid primary-tier slots, pinned
+          - `job_metadata.chunk_ids` are valid primary-tier slots, pinned
             (ref-counted) for the duration of the transfer.
 
         The implementation is responsible for:
@@ -252,7 +252,7 @@ class SecondaryTierManager(ABC):
           3. Allocating space in this tier
           4. Submitting the async transfer (read from primary via chunk_ids)
 
-        Report completion via ``get_finished_jobs()``.
+        Report completion via `get_finished_jobs()`.
 
         Args:
             job_metadata: Job metadata including job_id, keys, and chunk_ids
@@ -271,13 +271,13 @@ class SecondaryTierManager(ABC):
         on the calling thread.
 
         Preconditions (guaranteed by the framework):
-          - ``job_metadata.chunk_ids`` are allocated primary-tier slots
+          - `job_metadata.chunk_ids` are allocated primary-tier slots
             ready to receive data.
 
         The implementation must copy data from this tier into the
-        primary-tier slots identified by ``chunk_ids``.
+        primary-tier slots identified by `chunk_ids`.
 
-        Report completion via ``get_finished_jobs()``.
+        Report completion via `get_finished_jobs()`.
 
         Args:
             job_metadata: Job metadata including job_id, keys, and chunk_ids
@@ -312,16 +312,6 @@ class SecondaryTierManager(ABC):
         """Take KV events for storage state owned by this tier."""
         return ()
 
-    def touch(self, keys: Collection[OffloadKey], req_context: ReqContext):
-        """Mark chunks as recently used for eviction policy.
-
-        Args:
-            keys: Offload keys to mark as recently used.
-            req_context: Per-request context.
-
-        """
-        return
-
     @abstractmethod
     def on_new_request(self, req_context: ReqContext) -> RequestOffloadingContext:
         """Called when a new request is first seen by the scheduler.
@@ -339,7 +329,7 @@ class SecondaryTierManager(ABC):
         """Called when a request has finished.
 
         By the time this is called, all per-request calls for this request
-        (submit_store, submit_load, touch) have already been issued, and none
+        (submit_store, submit_load) have already been issued, and none
         will follow. Note this does NOT imply the tier's transfers have
         completed: jobs already submitted may still be in flight and will
         report via get_finished_jobs(). This is the right place to release
@@ -395,7 +385,7 @@ class SecondaryTierManager(ABC):
         store. Queued (not-yet-started) transfers may be cancelled, but their
         failure result must still appear in `get_finished_jobs()`.
 
-        Likewise, every ``JobResult.deferred_release`` event must be set
+        Likewise, every `JobResult.deferred_release` event must be set
         before this returns, so the tier must bound how long it can defer a
         release.
         """

@@ -12,6 +12,7 @@ use vllm_text::backend::hf::{
 use vllm_text::tokenizer::DynTokenizer;
 use vllm_text::{DynTextBackend, TextBackend as _};
 
+use crate::backend::tokenizerless::TokenizerlessChatBackend;
 use crate::backend::{
     ChatBackend, DynChatBackend, LoadModelBackendsOptions, LoadedModelBackends,
     NewChatOutputProcessorOptions,
@@ -26,6 +27,7 @@ use crate::renderer::hf::{HfChatRenderer, MultimodalRenderInfo};
 use crate::renderer::{
     DeepSeekV4ChatRenderer, DeepSeekV32ChatRenderer, DeepSeekV41ChatRenderer, DynChatRenderer,
     Glm5NextChatRenderer, HarmonyChatRenderer, InklingChatRenderer, KimiK3ChatRenderer,
+    KimiK3Variant,
 };
 use crate::request::ChatRequest;
 use crate::{DynChatOutputProcessor, RendererSelection};
@@ -102,6 +104,7 @@ impl HfChatBackend {
             RendererSelection::KimiK3 => Arc::new(KimiK3ChatRenderer::new(
                 tokenizer.clone(),
                 options.default_chat_template_kwargs,
+                KimiK3Variant::from_model_type(model_type),
             )),
             RendererSelection::Glm5Next => Arc::new(
                 Glm5NextChatRenderer::new(options.default_chat_template_kwargs)
@@ -197,6 +200,7 @@ pub(super) async fn load_model_backends(
         },
         tokenizer: options.tokenizer.clone(),
         hf_config: options.hf_config.clone(),
+        skip_tokenizer_init: options.skip_tokenizer_init,
     })
     .await?;
     files.apply_overrides(&options.hf_overrides)?;
@@ -206,14 +210,18 @@ pub(super) async fn load_model_backends(
         options.generation_config,
     )?;
     let tokenizer = text_backend.tokenizer();
+    // Rendering and parsing a chat need a tokenizer.
+    let chat_backend: DynChatBackend = if text_backend.has_tokenizer() {
+        Arc::new(HfChatBackend::from_resolved_model_files(
+            files,
+            model_id.to_string(),
+            options,
+            tokenizer,
+        )?)
+    } else {
+        Arc::new(TokenizerlessChatBackend)
+    };
     let text_backend: DynTextBackend = Arc::new(text_backend);
-
-    let chat_backend: DynChatBackend = Arc::new(HfChatBackend::from_resolved_model_files(
-        files,
-        model_id.to_string(),
-        options,
-        tokenizer,
-    )?);
 
     Ok(LoadedModelBackends {
         text_backend,
@@ -247,7 +255,7 @@ mod tests {
     use super::HfChatBackend;
     use crate::backend::{ChatBackend, LoadModelBackendsOptions, NewChatOutputProcessorOptions};
     use crate::request::{ChatContent, ChatMessage, ChatRequest, ResolvedToolContext};
-    use crate::{ChatTool, ParserSelection, RendererSelection};
+    use crate::{ChatTool, EffortValue, ParserSelection, RendererSelection};
 
     fn request_with_user_text(text: &str) -> ChatRequest {
         ChatRequest {
@@ -316,6 +324,7 @@ mod tests {
                 trust_request_chat_template: false,
                 default_chat_template_kwargs: HashMap::new(),
                 limit_mm_per_prompt: HashMap::new(),
+                skip_tokenizer_init: false,
             },
             test_tokenizer(),
         )
@@ -346,6 +355,25 @@ mod tests {
         assert_eq!(
             prompt,
             "<｜begin▁of▁sentence｜><｜User｜>hello<｜Assistant｜></think>"
+        );
+    }
+
+    #[test]
+    fn auto_uses_kimi_k3_renderer_with_k31_efforts_for_kimi_k31_model_type() {
+        let backend = backend_for_selection(
+            RendererSelection::Auto,
+            r#"{"model_type":"kimi_k31"}"#,
+            r#"{}"#,
+        );
+        let mut request = request_with_user_text("hello");
+        request.chat_options.reasoning_effort = Some(EffortValue::from("medium"));
+
+        let rendered = backend.chat_renderer().render(&request).unwrap();
+
+        assert!(matches!(rendered.prompt, Prompt::TokenIds(_)));
+        assert_eq!(
+            rendered.effective_template_kwargs["thinking_effort"],
+            "medium"
         );
     }
 
@@ -642,5 +670,50 @@ mod tests {
             prompt,
             "<｜begin▁of▁sentence｜><｜User｜>hello<｜Assistant｜></think>"
         );
+    }
+
+    #[tokio::test]
+    async fn skip_tokenizer_init_rejects_every_chat_request() {
+        let dir = tempdir().unwrap();
+        write_json(
+            &dir.path().join("config.json"),
+            r#"{"model_type":"qwen3","vocab_size":128}"#,
+        );
+
+        let backends = super::load_model_backends(
+            dir.path().to_str().unwrap(),
+            LoadModelBackendsOptions {
+                skip_tokenizer_init: true,
+                ..Default::default()
+            },
+        )
+        .await
+        .unwrap();
+        assert!(!backends.text_backend.has_tokenizer());
+
+        let chat_backend = backends.chat_backend;
+        let mut request = request_with_user_text("hello");
+        let errors = [
+            chat_backend.chat_renderer().render(&request).err().unwrap(),
+            chat_backend
+                .new_chat_output_processor(
+                    &mut request,
+                    NewChatOutputProcessorOptions {
+                        tool_call_parser: &ParserSelection::Auto,
+                        reasoning_parser: &ParserSelection::Auto,
+                        tool_strict_level: None,
+                    },
+                )
+                .err()
+                .unwrap(),
+        ];
+        for error in errors {
+            assert!(error.is_request_validation_error());
+            assert_eq!(
+                error.to_report_string(),
+                "this request needs a tokenizer, which is not loaded when \
+                 `--skip-tokenizer-init` is set"
+            );
+        }
     }
 }

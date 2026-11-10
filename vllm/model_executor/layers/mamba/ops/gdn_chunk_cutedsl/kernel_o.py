@@ -111,7 +111,8 @@ class Sm100ChunkOKernel:
         num_sms: Int32,
         stream: CUstream,
     ):
-        grid = (num_sms // self.Hv, self.Hv, 1)
+        # Grid-stride kernel: at least one CTA per head even when Hv > num_sms.
+        grid = (cutlass.max(num_sms // self.Hv, 1), self.Hv, 1)
         block = (self.num_warps * 32, 1, 1)
         tma_g2s = cpasync.CopyBulkTensorTileG2SOp()
         tma_s2g = cpasync.CopyBulkTensorTileS2GOp()
@@ -288,7 +289,7 @@ class Sm100ChunkOKernel:
             tma_parity = 0
             mask_parity = 0
 
-            for global_chunk_id in range(bid, num_global_chunks, grid_x):
+            for _ in range(bid, num_global_chunks, grid_x):
                 qaddr = sQ[None, None, stage_id].iterator.toint()
                 kaddr = sK[None, None, stage_id].iterator.toint()
                 haddr = sH[None, None, stage_id].iterator.toint()

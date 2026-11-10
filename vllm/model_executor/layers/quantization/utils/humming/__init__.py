@@ -18,6 +18,7 @@ from vllm.model_executor.layers.quantization.utils.humming.moe import (
     make_humming_moe_kernel,
     make_humming_moe_quant_config,
     select_humming_moe_experts,
+    stage_moe_weights_for_humming,
 )
 from vllm.model_executor.layers.quantization.utils.humming.priority import (
     prefers_humming,
@@ -54,4 +55,5 @@ __all__ = [
     "resolve_humming_layer_config",
     "weight_schema_to_quant_key",
     "convert_to_humming_moe_kernel_format",
+    "stage_moe_weights_for_humming",
 ]

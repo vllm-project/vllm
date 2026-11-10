@@ -1,6 +1,6 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
-"""Accessors for the optional ``b12x`` package."""
+"""Accessors for the optional `b12x` package."""
 
 import importlib
 import importlib.util

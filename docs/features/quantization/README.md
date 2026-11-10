@@ -40,6 +40,25 @@ layers use CUTLASS. Per-quantization overrides take precedence over
 `--linear-backend`; schemes without an override continue to use the global
 setting, including automatic selection when it is `auto`.
 
+## Hadamard Input Transforms (QuIP)
+
+Compressed-tensors NVFP4 checkpoints with a QuIP-style Hadamard input transform (`transform_config` with `type: hadamard` and `head_dim` of 16, 32, 64, or 128) run on the Humming backend by default on compute capability 10.0 and newer. The Hadamard is fused with input quantization, and the activation dtype declared by the checkpoint is used, with no fallback to 16-bit activations.
+
+Other transforms, older GPUs, and an explicit `--linear-backend` other than `auto` or `humming` use the generic transform path, which applies the transform separately before the selected kernel.
+
+!!! note
+    The `fp_quant` quantization method and the QuTLASS backend have been removed. Use a compressed-tensors checkpoint instead.
+
+!!! note
+    Marlin kernels no longer quantize activations to INT8 or FP8, and the `VLLM_MARLIN_INPUT_DTYPE` environment variable has been removed (setting it is an error). Marlin always runs with 16-bit activations. To run GPTQ, AWQ, or compressed-tensors weight-only checkpoints with 8-bit activations (W4A8), use the `humming` quantization method and set the activation dtype with `VLLM_HUMMING_INPUT_QUANT_CONFIG`, for example:
+
+    ```bash
+    VLLM_HUMMING_INPUT_QUANT_CONFIG='{"dtype":"int8"}' \
+      vllm serve <model> --quantization humming
+    ```
+
+    Use `{"dtype":"float8e4m3"}` for FP8 activations. Checkpoints that declare 8-bit activations, such as compressed-tensors W4A8, select a kernel that supports them automatically.
+
 ## Supported Hardware
 
 The table below shows the compatibility of various quantization implementations with different hardware platforms in vLLM:

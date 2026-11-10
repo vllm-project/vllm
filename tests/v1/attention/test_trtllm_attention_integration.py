@@ -170,13 +170,13 @@ def _create_nvfp4_hnd_kv_cache(
     reshape_and_cache_flash, using the same block-table layout as
     create_and_prepopulate_kv_cache.
 
-    The returned tensor is dtype ``uint8`` with head-group layout
-      ``(num_blocks, 2 * num_kv_heads, block_size, full_dim)``
-    where K heads occupy the first ``num_kv_heads`` heads and V heads the second.
-    Each ``full_dim = head_size // 2 + head_size // 16`` block packs two regions:
-      - **FP4 data** (``head_size // 2`` bytes): pairs of E2M1 values,
+    The returned tensor is dtype `uint8` with head-group layout
+      `(num_blocks, 2 * num_kv_heads, block_size, full_dim)`
+    where K heads occupy the first `num_kv_heads` heads and V heads the second.
+    Each `full_dim = head_size // 2 + head_size // 16` block packs two regions:
+      - **FP4 data** (`head_size // 2` bytes): pairs of E2M1 values,
         two per byte.
-      - **FP8 block scales** (``head_size // 16`` bytes): one E4M3
+      - **FP8 block scales** (`head_size // 16` bytes): one E4M3
         scale per 16-element block.
 
     Args:
@@ -194,7 +194,7 @@ def _create_nvfp4_hnd_kv_cache(
             during quantization.
 
     Returns:
-        ``torch.Tensor``: The nvfp4 kv_cache tensor (uint8, LBHNC-strided).
+        `torch.Tensor`: The nvfp4 kv_cache tensor (uint8, LBHNC-strided).
 
     """
     # First create a bf16 cache so block tables are populated.

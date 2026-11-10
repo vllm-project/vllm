@@ -7,7 +7,7 @@ from unittest.mock import Mock, patch
 import pytest
 import torch
 
-from vllm.config import CUDAGraphMode, VllmConfig
+from vllm.config import CUDAGraphMode, DeviceConfig, ModelConfig, VllmConfig
 from vllm.config.compilation import CompilationMode
 from vllm.distributed.eplb.eplb_state import EplbLayerState
 from vllm.forward_context import (
@@ -15,6 +15,7 @@ from vllm.forward_context import (
     DPMetadata,
     ForwardContext,
     get_forward_context,
+    override_forward_context,
     set_forward_context,
 )
 from vllm.model_executor.layers.fused_moe.config import RoutingMethodType
@@ -64,6 +65,7 @@ def _capturer_with_buffer(
     c = RoutedExpertsCapturer.__new__(RoutedExpertsCapturer)
     c.dp_rank = dp_rank
     c.tp_size = tp_size
+    c.restore_rows = c._restore_local_topk_ids
     c.output_dtype = torch.uint8
     c.device_buffer = torch.full(
         (max_tokens, num_layers, num_experts_per_tok),
@@ -120,6 +122,29 @@ def _full_attention_kv_group(
             kv_cache_specs={"layer": full_attention},
         ),
     )
+
+
+class _CaptureSource(torch.nn.Module):
+    def __init__(self, layer_id):
+        super().__init__()
+        self.layer_id = layer_id
+        self.capture_fn = None
+
+    def forward(self, ids):
+        assert self.capture_fn is not None
+        self.capture_fn(ids)
+
+
+class _CaptureRestorer(_CaptureSource):
+    def __init__(self, layer_id):
+        super().__init__(layer_id)
+        self.restore_calls = 0
+
+    def restore_routed_experts_rows(self, ids, ctx):
+        self.restore_calls += 1
+        assert ctx.batch_descriptor is not None
+        start = ctx.additional_kwargs["start"]
+        return ids[start : start + ctx.batch_descriptor.num_tokens]
 
 
 @pytest.mark.parametrize("eplb_enabled", [False, True])
@@ -193,6 +218,83 @@ def test_public_binding_supports_direct_capture_source():
     topk_ids = torch.tensor([[1, 2]])
     source.capture_fn(topk_ids)
     assert calls == [(3, topk_ids)]
+
+
+def _cpu_capturer(tmp_path, monkeypatch):
+    from transformers import MixtralConfig
+
+    from vllm.platforms.cpu import CpuPlatform
+
+    MixtralConfig(
+        architectures=["MixtralForCausalLM"],
+        num_hidden_layers=4,
+        num_local_experts=16,
+        num_experts_per_tok=2,
+    ).save_pretrained(tmp_path)
+    config = VllmConfig(
+        model_config=ModelConfig(
+            model=str(tmp_path),
+            dtype="float32",
+            max_model_len=32,
+            enforce_eager=True,
+            skip_tokenizer_init=True,
+        ),
+        device_config=DeviceConfig(device="cpu"),
+    )
+    monkeypatch.setattr(f"{_REC_MODULE}.current_platform", CpuPlatform())
+    return RoutedExpertsCapturer(8, config)
+
+
+def test_custom_restorer_writes_returned_rows(tmp_path, monkeypatch):
+    """Capture writes the rows returned by the backend's single restorer."""
+    capturer = _cpu_capturer(tmp_path, monkeypatch)
+    capturer.device_buffer.fill_(-1)
+    source = _CaptureRestorer(0)
+    bind_routed_experts_capturer(source, capturer)
+
+    ids = torch.tensor([[1, 2], [3, 4], [5, 6]], dtype=torch.int32)
+    original = ids.clone()
+    ctx = _forward_context(
+        batch_descriptor=BatchDescriptor(num_tokens=2),
+        additional_kwargs={"start": 1},
+    )
+    with override_forward_context(ctx):
+        source(ids)
+
+    expected = torch.full_like(capturer.device_buffer, -1)
+    expected[:2, 0] = original[1:3]
+    torch.testing.assert_close(capturer.device_buffer, expected)
+    torch.testing.assert_close(ids, original)
+    assert source.restore_calls == 1
+
+
+def test_shared_restorer_uses_current_context_for_each_layer(tmp_path, monkeypatch):
+    """The same callback handles distinct layers and reads each forward's context."""
+    capturer = _cpu_capturer(tmp_path, monkeypatch)
+    model = torch.nn.ModuleList([_CaptureRestorer(0), _CaptureRestorer(1)])
+    bind_routed_experts_capturer(model, capturer)
+    ids_by_layer = (
+        torch.tensor([[1, 2], [3, 4], [5, 6]], dtype=torch.int32),
+        torch.tensor([[7, 8], [9, 10], [11, 12]], dtype=torch.int32),
+    )
+
+    for start, rows in ((0, 2), (2, 1)):
+        capturer.device_buffer.fill_(-1)
+        ctx = _forward_context(
+            batch_descriptor=BatchDescriptor(num_tokens=rows),
+            additional_kwargs={"start": start},
+        )
+        with override_forward_context(ctx):
+            for source, ids in zip(model, ids_by_layer, strict=True):
+                source(ids)
+
+        expected = torch.full_like(capturer.device_buffer, -1)
+        for layer_id, ids in enumerate(ids_by_layer):
+            expected[:rows, layer_id] = ids[start : start + rows]
+        torch.testing.assert_close(capturer.device_buffer, expected)
+
+    assert model[0].restore_calls == 4
+    assert model[1].restore_calls == 0
 
 
 _SINK_CONFIG = SimpleNamespace(
@@ -754,7 +856,7 @@ def test_aux_output_worker_connector_default_capacity(monkeypatch):
     assert background_store_constructor.call_args.kwargs["max_pending_batches"] == 16
 
 
-def test_v2_model_runner_accepts_routed_experts(monkeypatch):
+def test_model_runner_accepts_routed_experts(monkeypatch):
     monkeypatch.setattr("importlib.metadata.entry_points", lambda **_: ())
     config = SimpleNamespace(
         model_config=SimpleNamespace(
@@ -781,6 +883,6 @@ def test_v2_model_runner_accepts_routed_experts(monkeypatch):
         ec_transfer_config=None,
     )
 
-    unsupported = VllmConfig._get_v2_model_runner_unsupported_features(config)
+    unsupported = VllmConfig._get_model_runner_unsupported_features(config)
 
     assert "routed experts capture" not in unsupported

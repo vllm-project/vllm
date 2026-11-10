@@ -9,7 +9,7 @@ if TYPE_CHECKING:
 
 import torch
 
-from vllm import _custom_ops as ops
+from vllm import _cpu_ops as ops
 from vllm import envs
 from vllm.config import (
     VllmConfig,
@@ -337,7 +337,6 @@ class CPUAttentionBackendImpl(AttentionImpl):
         self.kv_cache_dtype = kv_cache_dtype
         self.num_queries_per_kv = self.num_heads // self.num_kv_heads
 
-        self.is_fp8_kv_cache = is_quantized_kv_cache(kv_cache_dtype)
         self.attn_type = attn_type
 
         self.sinks = sinks

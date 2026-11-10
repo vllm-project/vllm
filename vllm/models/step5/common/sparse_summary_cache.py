@@ -23,9 +23,9 @@ from .csa_tail_ring import Step5CSATailRing
 class Step5SparseSummaryCache:
     """FP8 summaries of each block's closed eight-token regions.
 
-    ``mean`` is ``[blocks, block_size // 8, 256]``; blocks may be strided. A
+    `mean` is `[blocks, block_size // 8, 256]`; blocks may be strided. A
     region is summarized once, by its eighth row, from the rows waiting in
-    ``Step5CSATailRing``; this cache holds no per-request state.
+    `Step5CSATailRing`; this cache holds no per-request state.
     """
 
     def __init__(self, mean: torch.Tensor):
@@ -117,7 +117,7 @@ class Step5SparseSummaryBackend(AttentionBackend):
 class Step5SparseSummaryCacheLayer(nn.Module, AttentionLayerBase):
     """One 256-byte FP8 summary per eight tokens, beside the DSA layer's KV.
 
-    It is a full-attention layer with ``tokens_per_state=8`` and the main block
+    It is a full-attention layer with `tokens_per_state=8` and the main block
     size, so it shares the DSA layer's KV cache group and block IDs, and is
     prefix cached and transferred like any other page.
     """

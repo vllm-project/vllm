@@ -7,7 +7,7 @@ the four alignment-padded pages side by side (layout BLHNC). The zeroer must ste
 the full packed row per block while zeroing only each layer's meaningful page — never
 the alignment padding, never an adjacent layer's page.
 
-CPU only: the zeroer's ``__init__`` precomputes the segment tables; no kernel is
+CPU only: the zeroer's `__init__` precomputes the segment tables; no kernel is
 launched.
 """
 

@@ -1,29 +1,29 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
-"""FlashInfer task-scheduled (``prims_ts``) paged decode.
+"""FlashInfer task-scheduled (`prims_ts`) paged decode.
 
-Wraps ``flashinfer.attention.prims_ts.BatchDecodePagedTSWrapper`` for uniform
-query-block decode: every request contributes exactly ``max_query_len`` query
+Wraps `flashinfer.attention.prims_ts.BatchDecodePagedTSWrapper` for uniform
+query-block decode: every request contributes exactly `max_query_len` query
 tokens over a paged KV cache. That is the DFlash/DSpark drafter shape, and the
-reason this backend exists is that ``mask_type="dense"`` expresses a
+reason this backend exists is that `mask_type="dense"` expresses a
 *non-causal* draft block directly -- the trtllm-gen paged decode kernel is
 bottom-right causal and silently ignores a supplied mask.
 
 Layout. No KV cache change: K and V are the two halves of vLLM's ordinary
-``[pages, Hkv, page_size, 2 * D]`` page, so their token stride is ``2 * D``.
+`[pages, Hkv, page_size, 2 * D]` page, so their token stride is `2 * D`.
 The kernel builds its TMA descriptors from the tensors' own strides
-(``_validate_native_hnd_tma_strides``), so the only requirement is a
+(`_validate_native_hnd_tma_strides`), so the only requirement is a
 contiguous head_dim. Verified numerically equal to the same data repacked
 into compact planes.
 
-Sliding window. ``prims_ts`` rejects ``window_left >= 0`` unless the mask is
+Sliding window. `prims_ts` rejects `window_left >= 0` unless the mask is
 causal, so a non-causal windowed layer cannot be expressed directly. The query
 block always sits at the end of the sequence, so the symmetric window reduces
 to a suffix, and we hand the kernel a block table restricted to the window's
-pages (see :func:`_restrict_to_window`). Because the restriction is page
-aligned, each query token sees up to ``page_size - 1`` extra tokens at the old
+pages (see `_restrict_to_window`). Because the restriction is page
+aligned, each query token sees up to `page_size - 1` extra tokens at the old
 edge, and all query tokens share one window start rather than each having its
-own (``max_query_len - 1`` tokens of drift).
+own (`max_query_len - 1` tokens of drift).
 """
 
 from dataclasses import dataclass
@@ -68,8 +68,8 @@ _TS_MAX_HEAD_RATIO = 128
 def _require_prims_ts():
     """Import the prims_ts wrapper, or explain which flashinfer is needed.
 
-    0.7.0.post1 ships prims_ts but calls ``Task._run_task_body_impl`` with a
-    ``context`` kwarg that cutlass-dsl 4.8.0 removed, so it raises TypeError
+    0.7.0.post1 ships prims_ts but calls `Task._run_task_body_impl` with a
+    `context` kwarg that cutlass-dsl 4.8.0 removed, so it raises TypeError
     deep inside kernel codegen.
     """
     try:
@@ -182,7 +182,7 @@ class FlashInferTSMetadataBuilder(AttentionMetadataBuilder[FlashInferTSMetadata]
         """Constant K/V capacity every plan compiles for.
 
         Keeping it constant is what makes one plan per (batch size, query
-        length) safe to replay from a CUDA graph: ``build()`` can never pick a
+        length) safe to replay from a CUDA graph: `build()` can never pick a
         differently-compiled plan for a batch the graph already captured.
         """
         if self.sliding_window is not None:
@@ -229,7 +229,7 @@ class FlashInferTSMetadataBuilder(AttentionMetadataBuilder[FlashInferTSMetadata]
         """Cut the page table down to the pages the window can reach.
 
         The query block ends the sequence, so a symmetric window around it is
-        the suffix ``[L - w - query_len + 1, L)``. Round that start down to a
+        the suffix `[L - w - query_len + 1, L)`. Round that start down to a
         page so the slice is expressible as a page table, then renumber the
         lengths relative to the new first page.
         """
@@ -362,9 +362,9 @@ class FlashInferTSImpl(AttentionImpl[FlashInferTSMetadata]):
         self.supports_quant_query_input = kv_cache_dtype.startswith("fp8")
 
     def _kv_views(self, kv_cache: torch.Tensor) -> tuple[torch.Tensor, torch.Tensor]:
-        """HND K/V views of vLLM's ``[pages, Hkv, page, 2 * D]`` page.
+        """HND K/V views of vLLM's `[pages, Hkv, page, 2 * D]` page.
 
-        Their token stride is ``2 * D`` rather than ``D``; the kernel builds its
+        Their token stride is `2 * D` rather than `D`; the kernel builds its
         TMA descriptors from the tensor's own strides, so no repacking and no
         layout change are needed.
         """

@@ -5,6 +5,7 @@ use std::future::Future;
 use std::path::Path;
 use std::pin::Pin;
 
+use bytes::Bytes;
 use tempfile::TempDir;
 use tokio::sync::oneshot;
 use zeromq::{DealerSocket, PushSocket};
@@ -16,6 +17,25 @@ use crate::mock_engine::{
     connect_to_hybrid_frontends, default_ready_response,
 };
 use crate::protocol::handshake::{EngineCoreReadyResponse, HandshakeInitMessage};
+use crate::protocol::request::EngineCoreRequest;
+
+/// Decode the `[request type, payload, aux frames...]` of an add request,
+/// resolving its prompt token ids if they were sent in an auxiliary frame.
+pub fn decode_add_request(frames: &[Bytes]) -> EngineCoreRequest {
+    let mut request: EngineCoreRequest =
+        rmp_serde::from_slice(&frames[1]).expect("decode add request");
+    if let Some(ids) = &mut request.prompt_token_ids {
+        ids.resolve_aux_frame(&frames[1..]).expect("resolve prompt token ids");
+    }
+    request
+}
+
+/// The prompt token ids of a request, which must be inline or resolved by
+/// [`decode_add_request`].
+pub fn decode_prompt_token_ids(request: &EngineCoreRequest) -> Option<Vec<u32>> {
+    let ids = request.prompt_token_ids.as_ref()?;
+    Some(ids.to_u32_vec().expect("prompt token ids are inline 32-bit integers"))
+}
 
 /// Per-test IPC endpoint namespace backed by a unique temporary directory.
 ///

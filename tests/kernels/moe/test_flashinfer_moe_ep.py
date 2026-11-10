@@ -3,7 +3,7 @@
 """End-to-end tests for the FlashInfer MoE-EP adapter on real Blackwell GPUs.
 
 Each test spawns one process per GPU, bootstraps vLLM's expert-parallel
-groups, builds a ``FlashInferMoeEp`` adapter from bf16 expert weights at the
+groups, builds a `FlashInferMoeEp` adapter from bf16 expert weights at the
 MoE geometry of a real model, warms it up and runs a forward whose inputs are
 chosen so that every quantization step in the megakernel is exact, for the
 CuTeDSL kernel (NVFP4 activations and weights, E4M3 scales per 16) as well as
@@ -220,7 +220,7 @@ def _check_expert_views_alias_kernel_memory(
     num_local_experts: int,
     device: torch.device,
 ) -> None:
-    """EPLB moves experts through ``expert_weight_views``; the kernel must see it.
+    """EPLB moves experts through `expert_weight_views`; the kernel must see it.
 
     Swap local experts 0 and 1 in place on every rank, then route through the
     swapped physical slots: the output must be the one the unswapped logical

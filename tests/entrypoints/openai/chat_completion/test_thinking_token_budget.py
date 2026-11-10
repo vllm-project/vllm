@@ -1,7 +1,7 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 
-"""E2E tests for ``thinking_token_budget`` with reasoning models.
+"""E2E tests for `thinking_token_budget` with reasoning models.
 
 Covers Qwen3-0.6B and Qwen3.5 FP8 + MTP.
 """
@@ -252,11 +252,11 @@ async def test_thinking_token_budget_responses_api(client: openai.AsyncOpenAI):
 async def test_thinking_token_budget_qwen35_fp8_mtp_concurrent_mixed_budget_and_plain(
     server_qwen35_fp8_mtp_tp2,
 ):
-    """Concurrent chat requests: some with ``thinking_token_budget``, some without.
+    """Concurrent chat requests: some with `thinking_token_budget`, some without.
 
     Exercises the scheduler / input processor under a mixed batch on the same
     Qwen3.5 FP8 + MTP (TP=2) server. Budgeted calls are checked with
-    ``_count_reasoning_decode_token_ids_between_markers`` on full token ids.
+    `_count_reasoning_decode_token_ids_between_markers` on full token ids.
     """
     _batch_spec: list[tuple[Literal["budget"], int] | tuple[Literal["plain"], None]] = [
         ("budget", 1),

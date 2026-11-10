@@ -35,7 +35,7 @@ pytestmark = pytest.mark.skip_global_cleanup
         pytest.param(
             "cuda",
             marks=pytest.mark.skipif(
-                not current_platform.is_cuda(), reason="CUDA only"
+                not current_platform.is_cuda_alike(), reason="CUDA/ROCm only"
             ),
         ),
     ],

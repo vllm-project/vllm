@@ -4,8 +4,8 @@ vLLM provides an HTTP server that implements OpenAI's [Completions API](https://
 
 !!! warning "API key authentication does not protect every endpoint"
     The `--api-key` option (or `VLLM_API_KEY` environment variable) only
-    authenticates requests to endpoints under the `/v1`, `/v2`, and
-    `/inference` path prefixes. Other endpoints on the same HTTP server are
+    authenticates requests to endpoints under the `/v1`, `/v2`, `/inference`, and
+    `/cohere` path prefixes. Other endpoints on the same HTTP server are
     **not** authenticated — most notably `/invocations`, which exposes the same
     inference capabilities as the `/v1` endpoints. Do not rely on `--api-key`
     alone to secure vLLM. See
@@ -173,6 +173,10 @@ see our [Multimodal Inputs](../../features/multimodal_inputs.md) guide for more 
 - *Note: `image_url.detail` parameter is not supported.*
 
 Code example: [examples/basic/online_serving/openai_chat_completion_client.py](../../../examples/basic/online_serving/openai_chat_completion_client.py)
+
+With `--enable-prompt-tokens-details`, `/v1/chat/completions/batch` sums `cached_tokens`, `created_cache_tokens` and per-modality `multimodal_tokens` across conversations in `usage.prompt_tokens_details`; an unreported cache count makes that total `null`, and disabling the flag leaves the details `null`.
+
+With `--reasoning-parser`, `/v1/chat/completions/batch` sums `reasoning_tokens` across conversations in `usage.completion_tokens_details`, as `/v1/chat/completions` does for one conversation, also when `include_reasoning` is `false`.
 
 #### Extra parameters
 

@@ -71,8 +71,8 @@ def compress_norm_rope_store_triton(
 ) -> None:
     """Shared triton launcher for the fused compress+norm+RoPE+insert path.
 
-    Picks one of the three kernels in this module based on ``head_dim`` and
-    ``use_fp4_cache``. Identical launch signature for all three.
+    Picks one of the three kernels in this module based on `head_dim` and
+    `use_fp4_cache`. Identical launch signature for all three.
     """
     if head_dim == 512:
         kernel = _fused_kv_compress_norm_rope_insert_sparse_attn
@@ -189,7 +189,7 @@ def _fused_kv_compress_norm_rope_insert_sparse_attn(
 
     One program per token; early-exits for non-boundary positions.
 
-    Cache block layout (``block_size`` tokens):
+    Cache block layout (`block_size` tokens):
       [0, bs*576):       token data (448 fp8 + 128 bf16 each)
       [bs*576, +bs*8):   uint8 UE8M0 scales (7 real + 1 pad each)
     """
@@ -756,7 +756,7 @@ def _fused_kv_compress_norm_rope_insert_indexer_attn(
 
     For head_dim=128 we have exactly one quant block, so we skip the
     [N_QUANT_BLOCKS, QUANT_BLOCK] reshape entirely and use a flat
-    ``tl.max`` reduction.
+    `tl.max` reduction.
     """
     token_idx = tl.program_id(0)
 
@@ -939,7 +939,7 @@ def _fused_kv_compress_norm_rope_insert_indexer_mxfp4_attn(
 
     One program per token; early-exits for non-boundary positions.
 
-    Cache block layout (``block_size`` tokens per cache block):
+    Cache block layout (`block_size` tokens per cache block):
       [0, bs*TOKEN_STRIDE):        packed MXFP4 nibbles (2 values/byte)
       [bs*TOKEN_STRIDE, +bs*SCALE_DIM): ue8m0 scale bytes (one per 32-elem block)
 

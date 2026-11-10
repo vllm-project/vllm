@@ -132,7 +132,7 @@ def _aiter_can_use_biased_grouped_topk(num_experts: int, topk: int) -> bool:
     """Whether AITER has an instantiated kernel for this routing shape.
 
     Both checks are needed: an unsupported group count can still be small
-    enough to satisfy ``topk >= g`` (num_experts=33 gives g=3).
+    enough to satisfy `topk >= g` (num_experts=33 gives g=3).
     """
     g = _aiter_get_num_expert_group(num_experts)
     return topk >= g and g in AITER_SUPPORTED_NUM_GRP
@@ -407,6 +407,10 @@ class FusedTopKBiasRouter(BaseRouter):
         # ``shared_expert_weight``, AFTER the routed top-k is renormalized.
         self.num_fused_shared_experts = num_fused_shared_experts
         self.shared_expert_weight = shared_expert_weight
+
+    @property
+    def masks_padding(self) -> bool:
+        return not rocm_aiter_ops.is_fused_moe_enabled()
 
     @property
     def routing_method_type(self) -> RoutingMethodType:

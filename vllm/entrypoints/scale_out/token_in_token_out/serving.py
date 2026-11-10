@@ -6,7 +6,7 @@ import asyncio
 import itertools
 import math
 import time
-from collections.abc import AsyncGenerator
+from collections.abc import AsyncGenerator, Callable
 from collections.abc import Sequence as GenericSequence
 from typing import Any
 
@@ -15,6 +15,7 @@ from fastapi import Request
 
 from vllm.engine.protocol import EngineClient
 from vllm.entrypoints.generate.base.protocol import (
+    DeltaMessage,
     PerRequestMetrics,
     RequestResponseMetadata,
 )
@@ -31,6 +32,9 @@ from vllm.entrypoints.openai.chat_completion.protocol import (
     ChatCompletionLogProbsContent,
     ChatCompletionRequest,
 )
+from vllm.entrypoints.openai.chat_completion.stream_processor import (
+    ChatStreamProcessor,
+)
 from vllm.entrypoints.openai.models.serving import OpenAIServingModels
 from vllm.entrypoints.serve.engine.protocol import (
     ErrorResponse,
@@ -46,7 +50,6 @@ from vllm.logprobs import Logprob
 from vllm.multimodal.inputs import (
     MultiModalKwargsItem,
     MultiModalKwargsItems,
-    PlaceholderRange,
 )
 from vllm.outputs import RequestOutput
 from vllm.renderers.chat_utils import AsyncMultiModalItemTracker
@@ -60,15 +63,20 @@ from vllm.utils.serial_utils import numpy2base64
 from .mm_features import (
     mm_kwargs_from_features,
     placeholder_ranges_from_engine_input,
+    rebuild_mm_placeholders,
 )
 from .protocol import (
     GenerateDerenderChoice,
     GenerateDerenderResponse,
+    GenerateDerenderStreamChoice,
+    GenerateDerenderStreamResponse,
     GenerateLogProb,
     GenerateLogProbs,
     GenerateLogProbsContent,
     GenerateRequest,
     GenerateResponse,
+    GenerateStreamChoiceBase,
+    GenerateStreamResponseBase,
     GenerateTextChoice,
     GenerateTextResponse,
     GenerateTextStreamChoice,
@@ -77,16 +85,35 @@ from .protocol import (
     GenerateTokensResponse,
     GenerateTokensStreamChoice,
     GenerateTokensStreamResponse,
+    OutputMode,
 )
 
 logger = init_logger(__name__)
 
+_STREAM_RESPONSE_CLS: dict[OutputMode, Callable[..., GenerateStreamResponseBase]] = {
+    "tokens": GenerateTokensStreamResponse,
+    "text": GenerateTextStreamResponse,
+    "derender": GenerateDerenderStreamResponse,
+}
+
+_background_tasks: set[asyncio.Task[None]] = set()
+
+
+async def _close_result_generator(
+    result_generator: AsyncGenerator[RequestOutput, None], request_id: str
+) -> None:
+    """Close `generate()` so it aborts this request by its internal ID."""
+    try:
+        await result_generator.aclose()
+    except Exception:
+        logger.exception("Failed to abort request %s.", request_id)
+
 
 def _clamp_logprob(logprob: float) -> float:
-    """The OpenAI shapes' floor for a logprob: ``-inf`` and NaN become ``-9999.0``.
+    """The OpenAI shapes' floor for a logprob: `-inf` and NaN become `-9999.0`.
 
-    ``max(nan, -9999.0)`` is NaN in Python, so NaN needs its own check; NaN
-    would otherwise fail ``JSONResponse`` or reach the client as ``null``.
+    `max(nan, -9999.0)` is NaN in Python, so NaN needs its own check; NaN
+    would otherwise fail `JSONResponse` or reach the client as `null`.
     """
     return -9999.0 if math.isnan(logprob) else max(logprob, -9999.0)
 
@@ -96,7 +123,7 @@ def _logprob_token(
 ) -> tuple[str, list[int] | None]:
     """Token string and UTF-8 bytes for one logprob entry.
 
-    Without a tokenizer the token is a ``token_id:N`` placeholder with no bytes.
+    Without a tokenizer the token is a `token_id:N` placeholder with no bytes.
     """
     if tokenizer is None:
         return format_token_id_placeholder(token_id), None
@@ -240,13 +267,11 @@ class ServingTokens(GenerateBaseServing):
             )
         # Built before generating so an invalid parse_context fails fast.
         derender_request: ChatCompletionRequest | None = None
+        processors: list[ChatStreamProcessor] | None = None
         if request.output_mode == "derender":
             # TODO(#57442, #60915): reject the sampled-only and top-k logprob
             # flags here once either lands.
-            if request.stream:
-                return self.create_error_response(
-                    "output_mode='derender' does not support stream=true."
-                )
+            history_tool_call_cnt = 0
             if self.online_derenderer.parser is not None:
                 if request.parse_context is None:
                     return self.create_error_response(
@@ -254,8 +279,21 @@ class ServingTokens(GenerateBaseServing):
                         "server with a tool or reasoning parser. Use the one "
                         "returned by /render."
                     )
+                history_tool_call_cnt = request.parse_context.history_tool_call_cnt
                 try:
                     derender_request = request.parse_context.to_chat_request()
+                except (ValueError, VLLMValidationError) as e:
+                    return self.create_error_response(e)
+            if request.stream:
+                # One parser per choice, built here so a bad parse_context
+                # fails fast.
+                try:
+                    processors = [
+                        self.online_derenderer.make_stream_processor(
+                            derender_request, history_tool_call_cnt
+                        )
+                        for _ in range(sampling_params.n)
+                    ]
                 except (ValueError, VLLMValidationError) as e:
                     return self.create_error_response(e)
         try:
@@ -295,13 +333,7 @@ class ServingTokens(GenerateBaseServing):
                 [prompt]
             )
         elif features := request.features:
-            # Convert PlaceholderRangeInfo → PlaceholderRange per modality.
-            mm_placeholders: dict[str, list[PlaceholderRange]] = {
-                modality: [
-                    PlaceholderRange(offset=p.offset, length=p.length) for p in ranges
-                ]
-                for modality, ranges in features.mm_placeholders.items()
-            }
+            mm_placeholders = rebuild_mm_placeholders(features.mm_placeholders)
 
             # Deserialize full tensor data and optional metadata-only data.
             # Metadata-only items are valid when ec_transfer_params is set.
@@ -407,6 +439,7 @@ class ServingTokens(GenerateBaseServing):
                 request_id,
                 model_name,
                 request_metadata,
+                processors=processors,
             )
 
         return await self.serve_tokens_full_generator(
@@ -432,17 +465,8 @@ class ServingTokens(GenerateBaseServing):
         sampling_params: SamplingParams = request.sampling_params
         derender_mode = request.output_mode == "derender"
         text_mode = request.output_mode == "text" or derender_mode
-        tokenizer = self._logprobs_tokenizer(text_mode)
-        # The derender level returns chat logprobs, so it honors
-        # logprob_token_ids and applies the chat top_logprobs cut.
-        if derender_mode:
-            num_logprobs = sampling_params.num_logprobs
-            top_limit = chat_top_logprobs_limit(
-                sampling_params.logprobs, bool(sampling_params.logprob_token_ids)
-            )
-        else:
-            num_logprobs = sampling_params.logprobs
-            top_limit = None
+        tokenizer = self._logprobs_tokenizer(request, text_mode)
+        num_logprobs, top_limit = self._logprob_settings(sampling_params, derender_mode)
 
         try:
             async for res in result_generator:
@@ -650,6 +674,7 @@ class ServingTokens(GenerateBaseServing):
         request_id: str,
         model_name: str,
         request_metadata: RequestResponseMetadata,
+        processors: list[ChatStreamProcessor] | None = None,
     ) -> AsyncGenerator[str, None]:
         num_prompt_tokens = 0
         first_iteration = True
@@ -659,8 +684,14 @@ class ServingTokens(GenerateBaseServing):
         # With n > 1, the first output may not include every choice yet.
         num_generated_tokens = [0] * sampling_params.n
         last_res: RequestOutput | None = None
-        text_mode = request.output_mode == "text"
-        tokenizer = self._logprobs_tokenizer(text_mode)
+        derender_mode = request.output_mode == "derender"
+        assert derender_mode == (processors is not None)
+        text_mode = request.output_mode == "text" or derender_mode
+        tokenizer = self._logprobs_tokenizer(request, text_mode)
+        num_logprobs, top_limit = self._logprob_settings(sampling_params, derender_mode)
+        response_cls = _STREAM_RESPONSE_CLS[request.output_mode]
+        role_sent = [False] * sampling_params.n
+        finish_reason_sent = [False] * sampling_params.n
 
         include_usage, include_continuous_usage = should_include_usage(
             request.stream_options, False
@@ -691,14 +722,32 @@ class ServingTokens(GenerateBaseServing):
                     # the finish reason, e.g. an abort, which has no new
                     # tokens. Text mode also emits text held back for stop
                     # string matching, which can arrive without token IDs.
+                    # Like coupled chat, derender keeps stepping the parser
+                    # once it has seen tokens.
                     if not (
                         delta_token_ids
                         or finish_reason is not None
                         or (text_mode and output.text)
+                        or (processors is not None and processors[i].num_output_tokens)
                     ):
                         continue
 
-                    if sampling_params.logprobs is not None:
+                    delta: DeltaMessage | None = None
+                    hide_metadata = False
+                    if processors is not None:
+                        if finish_reason_sent[i]:
+                            continue
+                        processor = processors[i]
+                        delta, finish_reason = processor.step(
+                            output.text,
+                            as_list(delta_token_ids),
+                            finish_reason,
+                            res.prompt_token_ids,
+                        )
+                        finish_reason_sent[i] = finish_reason is not None
+                        hide_metadata = processor.hide_metadata
+
+                    if num_logprobs is not None and not hide_metadata:
                         out_logprobs = output.logprobs
                         assert out_logprobs is not None, "Did not output logprobs"
                         logprobs: GenerateLogProbs | ChatCompletionLogProbs | None
@@ -707,6 +756,7 @@ class ServingTokens(GenerateBaseServing):
                                 token_ids=delta_token_ids,
                                 top_logprobs=out_logprobs,
                                 tokenizer=tokenizer,
+                                top_limit=top_limit,
                             )
                         else:
                             logprobs = self._create_tokens_logprobs(
@@ -725,31 +775,45 @@ class ServingTokens(GenerateBaseServing):
                     sampling_mask = None
                     if output.sampling_mask is not None:
                         sampling_mask = output.sampling_mask.token_ids
+                    token_ids_out: list[int] | None = as_list(delta_token_ids)
+                    if hide_metadata:
+                        token_ids_out = None
+                        sampling_mask = None
+
+                    if derender_mode and (
+                        delta is None
+                        and finish_reason is None
+                        and not (logprobs and logprobs.content)
+                        and not token_ids_out
+                    ):
+                        continue
+
                     choice_fields: dict[str, Any] = dict(
                         index=i,
                         logprobs=logprobs,
                         finish_reason=finish_reason,
                         stop_reason=output.stop_reason,
-                        token_ids=as_list(delta_token_ids),
+                        token_ids=token_ids_out,
                         routed_experts=routed_experts_b64,
                         sampling_mask=sampling_mask,
                         weight_versions=output.weight_versions,
                     )
-                    chunk: GenerateTokensStreamResponse | GenerateTextStreamResponse
-                    if text_mode:
-                        chunk = GenerateTextStreamResponse(
-                            request_id=request_id,
-                            choices=[
-                                GenerateTextStreamChoice(
-                                    text=output.text, **choice_fields
-                                )
-                            ],
+                    choice: GenerateStreamChoiceBase
+                    if derender_mode:
+                        delta = delta or DeltaMessage()
+                        if not role_sent[i]:
+                            delta.role = "assistant"
+                            role_sent[i] = True
+                        choice = GenerateDerenderStreamChoice(
+                            delta=delta, **choice_fields
+                        )
+                    elif text_mode:
+                        choice = GenerateTextStreamChoice(
+                            text=output.text, **choice_fields
                         )
                     else:
-                        chunk = GenerateTokensStreamResponse(
-                            request_id=request_id,
-                            choices=[GenerateTokensStreamChoice(**choice_fields)],
-                        )
+                        choice = GenerateTokensStreamChoice(**choice_fields)
+                    chunk = response_cls(request_id=request_id, choices=[choice])
 
                     if prompt_token_ids is not None:
                         chunk.prompt_token_ids = prompt_token_ids
@@ -790,21 +854,12 @@ class ServingTokens(GenerateBaseServing):
                         per_request_metrics = PerRequestMetrics(
                             speculative_decoding=spec_stats
                         )
-                final_chunk: GenerateTokensStreamResponse | GenerateTextStreamResponse
-                if text_mode:
-                    final_chunk = GenerateTextStreamResponse(
-                        request_id=request_id,
-                        choices=[],
-                        usage=final_usage_info,
-                        metrics=per_request_metrics,
-                    )
-                else:
-                    final_chunk = GenerateTokensStreamResponse(
-                        request_id=request_id,
-                        choices=[],
-                        usage=final_usage_info,
-                        metrics=per_request_metrics,
-                    )
+                final_chunk = response_cls(
+                    request_id=request_id,
+                    choices=[],
+                    usage=final_usage_info,
+                    metrics=per_request_metrics,
+                )
                 yield f"data: {final_chunk.model_dump_json(exclude_none=True)}\n\n"
 
             request_metadata.final_usage_info = final_usage_info
@@ -815,17 +870,42 @@ class ServingTokens(GenerateBaseServing):
             )
         except Exception as e:
             logger.exception("Error in token generation stream.")
+            # Stop the engine decoding for a stream nobody reads without
+            # delaying the error event or being cancelled by a disconnect.
+            task = asyncio.create_task(
+                _close_result_generator(result_generator, request_id)
+            )
+            _background_tasks.add(task)
+            task.add_done_callback(_background_tasks.discard)
             data = self.create_streaming_error_response(e)
             yield f"data: {data}\n\n"
         yield "data: [DONE]\n\n"
 
-    def _logprobs_tokenizer(self, text_mode: bool) -> TokenizerLike | None:
-        """Tokenizer that resolves logprob tokens, or None for placeholders.
+    @staticmethod
+    def _logprob_settings(
+        sampling_params: SamplingParams, derender_mode: bool
+    ) -> tuple[int | None, int | None]:
+        """Logprob count to gate on and the `top_logprobs` cut.
 
-        ``--return-tokens-as-token-ids`` keeps placeholders at every level, as
-        it does on ``/v1/completions``.
+        The derender level returns chat logprobs, so it honors
+        logprob_token_ids and applies the chat top_logprobs cut.
         """
-        if not text_mode or self.return_tokens_as_token_ids:
+        if derender_mode:
+            return sampling_params.num_logprobs, chat_top_logprobs_limit(
+                sampling_params.logprobs, bool(sampling_params.logprob_token_ids)
+            )
+        return sampling_params.logprobs, None
+
+    def _logprobs_tokenizer(
+        self, request: GenerateRequest, text_mode: bool
+    ) -> TokenizerLike | None:
+        """Tokenizer that resolves logprob tokens, or None for placeholders."""
+        return_tokens_as_token_ids = self.return_tokens_as_token_ids
+        if request.output_mode == "derender" and request.parse_context is not None:
+            override = request.parse_context.return_tokens_as_token_ids
+            if override is not None:
+                return_tokens_as_token_ids = override
+        if not text_mode or return_tokens_as_token_ids:
             return None
         return self.renderer.tokenizer
 
@@ -880,7 +960,7 @@ class ServingTokens(GenerateBaseServing):
     ) -> GenerateLogProbs:
         """Create generate-shaped logprobs (integer token ids, no tokenizer).
 
-        ``top_logprobs`` carries every candidate the engine returned for the
+        `top_logprobs` carries every candidate the engine returned for the
         position: the sampled token first, then the top k, so k entries when the
         sampled token is in the top k and k + 1 when it is not. It is not cut to
         the requested count: `/v1/chat/completions` and
@@ -888,7 +968,7 @@ class ServingTokens(GenerateBaseServing):
         cut the way the coupled server does.
 
         The engine reports rank 0 for a sampled token whose logprob is NaN; that
-        is not a rank, so it is sent as ``None`` (the logprob is clamped).
+        is not a rank, so it is sent as `None` (the logprob is clamped).
         """
         logprobs_content: list[GenerateLogProbsContent] = []
 

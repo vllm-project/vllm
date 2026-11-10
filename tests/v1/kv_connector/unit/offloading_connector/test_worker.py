@@ -27,6 +27,7 @@ from vllm.v1.kv_cache_interface import (
 from vllm.v1.kv_offload.base import (
     CanonicalKVCacheRef,
     CanonicalKVCaches,
+    CanonicalKVCacheTensor,
     GPULoadStoreSpec,
     LoadStoreSpec,
     OffloadingManager,
@@ -120,6 +121,15 @@ def _make_worker(
         kv_cache_config=kv_cache_config,
     )
     worker.worker = MagicMock()
+
+    page_size = 128
+    tensor = torch.zeros(NUM_BLOCKS, page_size, dtype=torch.int8, device=DEVICE_TYPE)
+    worker._kv_caches = CanonicalKVCaches(
+        tensors=[CanonicalKVCacheTensor(tensor=tensor, page_size_bytes=page_size)],
+        group_data_refs=[
+            [CanonicalKVCacheRef(tensor_idx=0, page_size_bytes=page_size)]
+        ],
+    )
 
     return worker, spec
 
@@ -402,9 +412,6 @@ def test_register_kv_caches(backend):
     KVCacheTensors mirror the real allocation in kv_cache_utils.py: each group is one
     run of the shared allocation starting at offset 0, so layer i of every group
     aliases the same bytes.
-
-    Uses the real GPUModelRunner.initialize_kv_cache_tensors to produce
-    the raw per-layer kv_caches registered by the connector.
 
     Verifies that the canonicalized CanonicalKVCaches has the correct
     block tensors, tensor_idx references, and page sizes across all groups.

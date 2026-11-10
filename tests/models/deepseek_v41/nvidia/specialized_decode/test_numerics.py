@@ -8,19 +8,19 @@ Each check runs one rank late, so a missing wait reads a peer's stale data:
   plain, with the MXFP8 layer input, with a deferred MoE finalize and
   residual-only, bitwise against the separate all-reduce and mHC kernels;
 * the executor's sublayer boundary on it, with the next mHC coefficients on
-  the side stream and inline, against the separate kernels and the stock mHC
-  pre;
-* the ``wo_b`` GEMM that publishes into the fused kernel's mailbox, per
+  the side stream, against the separate kernels and the stock mHC pre;
+* the `wo_b` GEMM that publishes into the fused kernel's mailbox, per
   split-K tactic, bitwise against FlashInfer's GEMM plus the separate publish;
-* logits gathered with the custom all-gather, bitwise against NCCL;
-* the row-sharded decode indexer against the replicated one (equal top-k
-  sets up to exactly tied scores);
-* one CUDA graph of all of these, replayed ``REPLAYS`` times bitwise.
+* logits gathered with the executor's all-gather (`LamportAllGather`),
+  bitwise against NCCL, and NCCL above its capacity;
+* the row-sharded decode indexer, its slices gathered with it, against the
+  replicated one (equal top-k sets up to exactly tied scores);
+* one CUDA graph of all of these, replayed `REPLAYS` times bitwise.
 
 Needs four SM100-family GPUs with NVLink multicast and flashinfer-python
 0.7.2 or newer; about 5 minutes. For a race stress run, run this file as a
-module (``python -m tests.models.deepseek_v41.nvidia.specialized_decode.test_numerics``)
-with ``--replays 100000``.
+module (`python -m tests.models.deepseek_v41.nvidia.specialized_decode.test_numerics`)
+with `--replays 100000`.
 """
 
 import argparse
@@ -186,8 +186,8 @@ def _check_all_reduce_mhc(arm, rank):
 
 
 def _check_boundaries(arm, rank):
-    """``Boundaries.sublayer`` on a partial sum and on a deferred MoE output,
-    with the next coefficients on the side stream and inline: the streams
+    """`Boundaries.sublayer` on a partial sum and on a deferred MoE output,
+    with the next coefficients on the side stream: the streams
     bitwise against the separate all-reduce and mHC post, the mixes bitwise
     against the stock mHC pre on those streams, and the layer input within
     the fused RMSNorm's ulp of it."""
@@ -262,28 +262,26 @@ def _check_boundaries(arm, rank):
                 stream=side,
             )
             torch.cuda.current_stream().wait_stream(side)
-            for side_stream in (True, False):
-                what = f"{name}, {rows} rows, side stream {side_stream}"
-                state = BoundaryState(
-                    mix["residual"], mix["post"], mix["comb"], mix["pre"], pending
-                )
-                decode_step = SimpleNamespace(side_stream=side_stream)
-                _late(rank, step := step + 1)
-                state, layer_input, _, aux = boundaries.sublayer(
-                    layer, False, state, decode_step, capture_aux=True
-                )
-                boundaries.join(layer, decode_step)
-                _assert_equal(
-                    (state.residual, aux),
-                    (streams, streams.mean(dim=1)),
-                    f"streams, {what}",
-                )
-                _assert_equal(
-                    (state.post, state.comb, state.pre),
-                    (want[0], want[1], want[3]),
-                    f"mixes, {what}",
-                )
-                assert _bf16_ulps(layer_input, want[2]) <= 1, what
+            what = f"{name}, {rows} rows"
+            state = BoundaryState(
+                mix["residual"], mix["post"], mix["comb"], mix["pre"], pending
+            )
+            _late(rank, step := step + 1)
+            state, layer_input, _, aux = boundaries.sublayer(
+                layer, False, state, capture_aux=True
+            )
+            boundaries.join(layer)
+            _assert_equal(
+                (state.residual, aux),
+                (streams, streams.mean(dim=1)),
+                f"streams, {what}",
+            )
+            _assert_equal(
+                (state.post, state.comb, state.pre),
+                (want[0], want[1], want[3]),
+                f"mixes, {what}",
+            )
+            assert _bf16_ulps(layer_input, want[2]) <= 1, what
 
 
 # ------------------------------------------------------- publishing wo_b
@@ -292,7 +290,7 @@ WO_B_K = 2048  # o_lora_rank x local groups at TP4
 
 
 def _wo_b(rank: int, index: int):
-    """A ``wo_b`` linear with its weights processed for the low-latency
+    """A `wo_b` linear with its weights processed for the low-latency
     MXFP8 kernel, different on each rank."""
     from vllm.model_executor.kernels.linear.mxfp8.flashinfer import (
         FlashInferCutedslMxfp8LinearKernel,
@@ -321,7 +319,7 @@ def _wo_b(rank: int, index: int):
 
 
 def _attention_output(rows: int, rank: int):
-    """``wo_b``'s MXFP8 input as the fused WO-A kernel emits it, with a zero
+    """`wo_b`'s MXFP8 input as the fused WO-A kernel emits it, with a zero
     row (zero outputs, whose negative zeros the publish clears)."""
     from vllm.model_executor.layers.fusion.quant_activation import (
         QuantizedActivation,
@@ -342,7 +340,7 @@ def _attention_output(rows: int, rank: int):
 
 
 def _flashinfer_wo_b(linear, qa, tactic):
-    """FlashInfer's low-latency MXFP8 GEMM with ``tactic`` (None: the
+    """FlashInfer's low-latency MXFP8 GEMM with `tactic` (None: the
     default), and the valid tactics."""
     from flashinfer.gemm import gemm_base
 
@@ -410,22 +408,22 @@ def _check_publishing_wo_b(arm, publisher, rank):
 # -------------------------------------------------------------- logits
 
 
-def _check_logits_gather(rank):
-    from vllm.distributed import get_tp_group
+VOCAB = 129280
+
+
+def _check_logits_gather(rank, all_gather):
     from vllm.model_executor.layers.logits_processor import LogitsProcessor
     from vllm.models.deepseek_v41.nvidia.specialized_decode.logits.logits import (
         SpecializedDecodeLogitsProcessor,
     )
 
-    vocab = 129280
-    processor = SpecializedDecodeLogitsProcessor(vocab)
+    processor = SpecializedDecodeLogitsProcessor(VOCAB, all_gather)
     generator = torch.Generator(device="cuda").manual_seed(rank)
-    for rows in (1, 6, 16, 48):
-        logits = _randn(generator, rows, vocab // TP)
-        if rows <= 16:
-            # Otherwise both sides would take NCCL.
-            custom = get_tp_group().device_communicator.custom_all_gather(logits)
-            assert custom is not None, f"no custom all-gather for {rows} rows"
+    # Up to 64 BF16 rows fit the all-gather; 80 take NCCL on both sides.
+    for rows in (1, 6, 16, 48, 64, 80):
+        logits = _randn(generator, rows, VOCAB // TP)
+        assert all_gather.accepts(logits) == (rows <= 64), rows
+        _late(rank, rows)
         got = processor._gather_logits(logits)
         want = LogitsProcessor._gather_logits(processor, logits)
         _assert_equal((got,), (want,), f"logits, {rows} rows")
@@ -440,8 +438,10 @@ CANDIDATE_BLOCKS, CANDIDATE_BLOCK_SIZE = 2048, 8
 MAX_MODEL_LEN = 655_360
 PAGE_TOKENS = 128
 ROPE_POSITIONS = 2048
-# (requests, of which trailing padding requests).
-INDEX_BATCHES = ((8, 0), (32, 10))
+# (requests, of which trailing padding requests): one request (replicated),
+# requests split across ranks (the last rank idles), a short last slice, whole
+# requests.
+INDEX_BATCHES = ((1, 0), (2, 0), (5, 0), (8, 0), (32, 10))
 # A dense index source (ratio 2) and the candidate source (ratio 1).
 INDEX_LAYERS = ((2, False), (1, True))
 
@@ -476,7 +476,7 @@ def _index_keys(ratio: int, generator):
 
 
 def _decode_step(requests, padding, ratio, keys, generator):
-    """The indexer metadata and queries of a pure-decode step of ``NEXT_N``
+    """The indexer metadata and queries of a pure-decode step of `NEXT_N`
     rows per request; padding requests have rows of length 0."""
     from vllm.models.deepseek_v41.common.ops import fused_indexer_q_rope_quant
     from vllm.utils.deep_gemm import get_paged_mqa_logits_metadata
@@ -543,7 +543,7 @@ def _decode_step(requests, padding, ratio, keys, generator):
 
 
 def _indexer(keys, ratio, candidates):
-    """The decode indexer of a layer, writing ``topk`` (and ``candidates``)."""
+    """The decode indexer of a layer, writing `topk` (and `candidates`)."""
     from vllm.model_executor.layers.sparse_attn_indexer import SparseAttnIndexer
 
     rows = max(r for r, _ in INDEX_BATCHES) * NEXT_N
@@ -571,9 +571,10 @@ def _indexer(keys, ratio, candidates):
     )
 
 
-def _run_indexer(indexer, step, stock=False):
-    """One decode forward, stock or the executor's; returns the top-k and
-    candidate rows it wrote."""
+def _run_indexer(indexer, step, stock=False, all_gather=None):
+    """One decode forward, stock or the executor's (gathering its row slices
+    with `all_gather`, else NCCL); returns the top-k and candidate rows it
+    wrote."""
     from vllm.forward_context import ForwardContext, override_forward_context
     from vllm.models.deepseek_v41.nvidia.specialized_decode.attention.indexer import (
         decode_rows,
@@ -584,7 +585,7 @@ def _run_indexer(indexer, step, stock=False):
         if stock:
             indexer.forward_cuda(hidden, step.q, None, step.weights)
         else:
-            decode_rows(indexer, hidden, step.q, step.weights)
+            decode_rows(indexer, hidden, step.q, step.weights, all_gather)
     candidates = indexer.candidate_blocks
     return (
         indexer.topk_indices_buffer[: step.rows],
@@ -604,7 +605,9 @@ def _index_scores(indexer, step):
     decode = step.metadata.decode
     q, q_scale = step.q
     q = q.unsqueeze(1).view(torch.int8)
-    q_scale, weights = mqa_logits_mx_inputs(q, q_scale.unsqueeze(1), step.weights)
+    q_scale, weights = mqa_logits_mx_inputs(
+        q, q_scale.unsqueeze(1), step.weights, indexer.logits_dtype
+    )
     ends = decode.seq_lens.view(-1)
     logits = as_fp32_logits(
         fp8_fp4_paged_mqa_logits(
@@ -615,6 +618,7 @@ def _index_scores(indexer, step):
             decode.block_table,
             decode.schedule_metadata,
             max_model_len=indexer.max_model_len,
+            logits_dtype=indexer.logits_dtype,
             indices=decode.indices,
         ),
         ends,
@@ -648,7 +652,7 @@ def _assert_same_sets(got, want, scores, limits, k, what):
             assert (row_scores[swapped] == boundary).all(), (what, row)
 
 
-def _check_row_sharded_indexer(rank):
+def _check_row_sharded_indexer(rank, all_gather):
     generator = torch.Generator(device="cuda").manual_seed(0)  # equal on all ranks
     keys = {ratio: _index_keys(ratio, generator) for ratio, _ in INDEX_LAYERS}
     for requests, padding in INDEX_BATCHES:
@@ -662,7 +666,7 @@ def _check_row_sharded_indexer(rank):
                 for t in _run_indexer(indexer, step, stock=True)
             ]
             _late(rank, requests)
-            got = _run_indexer(indexer, step)
+            got = _run_indexer(indexer, step, all_gather=all_gather)
             logits, blocks = _index_scores(indexer, step)
             ends = step.metadata.decode.seq_lens.view(-1)
             _assert_same_sets(got[0], want[0], logits, ends, INDEX_TOPK, what)
@@ -677,11 +681,12 @@ def _check_row_sharded_indexer(rank):
 # ------------------------------------------------------- graph replays
 
 
-def _check_replays(arm, publisher, keys, rank, replays):
-    """One CUDA graph of a decode step's collectives: a published ``wo_b``
+def _check_replays(arm, publisher, keys, rank, replays, all_gather):
+    """One CUDA graph of a decode step's collectives: a published `wo_b`
     boundary, a deferred finalize with the MXFP8 layer input, a residual-only
-    boundary, a full-capacity boundary and the row-sharded indexer, with the
-    ranks arriving in a fixed skew. Every replay must equal the first; the
+    boundary, a full-capacity boundary, the row-sharded indexer and two logits
+    gathers of other sizes on the indexer's all-gather, with the ranks
+    arriving in a fixed skew. Every replay must equal the first; the
     indexer's top-k rows as sets up to boundary ties, since top-k writes them
     in any order and picks any of the indices that tie at the boundary."""
     from vllm.distributed.parallel_state import graph_capture
@@ -697,6 +702,8 @@ def _check_replays(arm, publisher, keys, rank, replays):
     partials = {rows: _partial(rows, rank, seed=rows) for rows in (48, CAPACITY)}
     step = _decode_step(8, 0, 2, keys[2], torch.Generator(device="cuda").manual_seed(1))
     indexer = _indexer(keys[2], 2, candidates=False)
+    generator = torch.Generator(device="cuda").manual_seed(rank)
+    vocab_shards = [_randn(generator, rows, VOCAB // TP) for rows in (1, 6)]
 
     def decode_step():
         torch.cuda._sleep(rank * LATE_CYCLES)
@@ -711,7 +718,8 @@ def _check_replays(arm, publisher, keys, rank, replays):
         )
         out.append(streams)
         out += arm(partials[CAPACITY], **mixes[CAPACITY])
-        out.append(_run_indexer(indexer, step)[0])
+        out += [all_gather(vocab_shards[0]), all_gather(vocab_shards[1])]
+        out.append(_run_indexer(indexer, step, all_gather=all_gather)[0])
         return [t for t in out if t is not None]
 
     with graph_capture(device=torch.device("cuda")) as context:
@@ -741,11 +749,15 @@ def _worker(rank: int, port: int, replays: int, skip_path: str) -> None:
     from vllm.config import VllmConfig, set_current_vllm_config
     from vllm.distributed import cleanup_dist_env_and_memory, get_tp_group
     from vllm.models.deepseek_v41.nvidia.ops import mhc
+    from vllm.models.deepseek_v41.nvidia.ops.cute_dsl import LamportAllGather
     from vllm.models.deepseek_v41.nvidia.specialized_decode.boundary.all_reduce import (
         BoundaryAllReduce,
     )
     from vllm.models.deepseek_v41.nvidia.specialized_decode.boundary.publishing_gemm import (  # noqa: E501
         PublishingMxfp8Linear,
+    )
+    from vllm.models.deepseek_v41.nvidia.specialized_decode.runtime.decode import (
+        ALL_GATHER_RANK_BYTES,
     )
     from vllm.v1.worker.workspace import init_workspace_manager
 
@@ -776,12 +788,15 @@ def _worker(rank: int, port: int, replays: int, skip_path: str) -> None:
         arm = BoundaryAllReduce(config.model_config.hf_config, True)
         assert arm.capacity == CAPACITY and arm.quantize_layer_input
         publisher = PublishingMxfp8Linear(arm)
+        all_gather = LamportAllGather(
+            rank_capacity_bytes=ALL_GATHER_RANK_BYTES, device=torch.device("cuda", rank)
+        )
         _check_all_reduce_mhc(arm, rank)
         _check_boundaries(arm, rank)
         _check_publishing_wo_b(arm, publisher, rank)
-        _check_logits_gather(rank)
-        keys = _check_row_sharded_indexer(rank)
-        _check_replays(arm, publisher, keys, rank, replays)
+        _check_logits_gather(rank, all_gather)
+        keys = _check_row_sharded_indexer(rank, all_gather)
+        _check_replays(arm, publisher, keys, rank, replays, all_gather)
         torch.accelerator.synchronize()
         cleanup_dist_env_and_memory()
 

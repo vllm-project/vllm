@@ -104,7 +104,7 @@ class KVCacheSpecRegistry:
     def register_role_manager(
         cls, role: str, manager_class: type["SingleTypeKVCacheManager"]
     ) -> None:
-        """Select ``manager_class`` for every group with the given role."""
+        """Select `manager_class` for every group with the given role."""
         registered = _REGISTRY_ROLE_MANAGERS.get(role)
         assert registered is None or registered is manager_class, (
             f"Conflicting manager registration for group role {role}"

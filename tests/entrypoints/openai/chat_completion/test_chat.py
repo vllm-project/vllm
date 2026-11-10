@@ -31,7 +31,7 @@ def zephyr_lora_files():
     """Download zephyr LoRA files once per test session."""
     from vllm.transformers_utils.repo_utils import hf_api
 
-    return hf_api().snapshot_download(repo_id="typeof/zephyr-7b-beta-lora")
+    return hf_api().snapshot_download(repo_id="vllm-project/zephyr-7b-beta-lora")
 
 
 @pytest.fixture(scope="module")
@@ -163,7 +163,7 @@ async def test_too_many_chat_logprobs(client: openai.AsyncOpenAI, model_name: st
             top_logprobs=21,
             stream=True,
         )
-        async for chunk in stream:
+        async for _ in stream:
             ...
 
     with pytest.raises(openai.BadRequestError):

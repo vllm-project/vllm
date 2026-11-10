@@ -2,8 +2,8 @@
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 """DeepSeek-V4-Pro mono decode layer: host side.
 
-One ``MonoRunner`` a TP rank runs every mono layer of a decode step (at most
-``MAX_TOKENS`` rows): two persistent launches a layer (``layer``) from the
+One `MonoRunner` a TP rank runs every mono layer of a decode step (at most
+`MAX_TOKENS` rows): two persistent launches a layer (`layer`) from the
 layer's inputs at the attention seam to its outputs at the next one -- the
 MoE's reduced output, the residual after the FFN seam and that seam's mixes --
 with both TP all-reduces inside the kernels (symmetric peer memory). Every
@@ -63,8 +63,8 @@ def _ensure_writable_flydsl_cache() -> None:
 
 
 def _check_tensors(owner, tag: str, want: dict, lds: dict | None = None) -> None:
-    """Each named tensor of ``owner`` has the (shape, dtype) the kernels read,
-    contiguous -- or a 2-D one's rows ``lds[name]`` apart: their buffer loads
+    """Each named tensor of `owner` has the (shape, dtype) the kernels read,
+    contiguous -- or a 2-D one's rows `lds[name]` apart: their buffer loads
     are unbounded, so a mismatch would read garbage rather than fault."""
     for name, (shape, dtype) in want.items():
         t = getattr(owner, name)
@@ -163,7 +163,7 @@ class MonoLayerWeights:
 
 
 class MonoRunner:
-    """The mono decode runner of one TP rank (``group``: its TP group, for the
+    """The mono decode runner of one TP rank (`group`: its TP group, for the
     peer-memory handle exchange; a gloo / CPU group)."""
 
     def __init__(
@@ -175,9 +175,9 @@ class MonoRunner:
         max_topk: int = 0,
         timeline: bool = False,
     ):
-        """``max_topk``: the widest key table a layer's build takes (``Dims.topk``),
-        past the CSA top-k. ``timeline``: the kernels' stage stamps into
-        ``tl`` (K1's, K2's: [BLOCKS, points] of the device clock), a profile."""
+        """`max_topk`: the widest key table a layer's build takes (`Dims.topk`),
+        past the CSA top-k. `timeline`: the kernels' stage stamps into
+        `tl` (K1's, K2's: [BLOCKS, points] of the device clock), a profile."""
         _ensure_writable_flydsl_cache()
         from .common.peer_memory import PeerBuffer
 
@@ -219,8 +219,8 @@ class MonoRunner:
         )
 
     def scratch(self, tokens: int, topk: int = 0) -> torch.Tensor:
-        """Step width ``tokens``'s scratch (of the builds of key table width
-        ``topk``): a layout has memory of its own (``layer.scratch_layout``).
+        """Step width `tokens`'s scratch (of the builds of key table width
+        `topk`): a layout has memory of its own (`layer.scratch_layout`).
         Allocated at the width's first step, which is eager: vLLM runs every
         graph's batch eagerly before capturing it."""
         buf = self._scratch.get((tokens, topk))
@@ -243,7 +243,7 @@ class MonoRunner:
 
     @staticmethod
     def two_hop(tokens: int) -> bool:
-        """A step width's all-reduces in two hops (``stages.allreduce``)."""
+        """A step width's all-reduces in two hops (`stages.allreduce`)."""
         return tokens >= TWO_HOP_ROWS
 
     def kernels(
@@ -315,13 +315,13 @@ class MonoRunner:
         global_keys: bool = False,
     ):
         """-> (out, residual, post_mix, res_mix, pre_mix): the layer's outputs
-        (``outs``: buffers to write them into). ``select(normed, qr)``: vLLM's
+        (`outs`: buffers to write them into). `select(normed, qr)`: vLLM's
         compressor and, on a CSA layer, its top-k selection into
-        ``topk_indices``, run between the kernels on K1's normed input and qr.
-        ``route_ids``: a hash layer's experts of the step's tokens. ``topk``:
-        the build's key table width (``Dims.topk``); ``global_keys``:
-        ``topk_indices`` holds compressed slots (a row of its own width), not
-        indices through ``comp_block_table``."""
+        `topk_indices`, run between the kernels on K1's normed input and qr.
+        `route_ids`: a hash layer's experts of the step's tokens. `topk`:
+        the build's key table width (`Dims.topk`); `global_keys`:
+        `topk_indices` holds compressed slots (a row of its own width), not
+        indices through `comp_block_table`."""
         M = x.shape[0]
         assert self.supports(M), M
         a = w.attn

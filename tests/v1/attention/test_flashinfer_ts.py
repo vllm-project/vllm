@@ -88,7 +88,7 @@ def test_window_restriction_is_a_superset_of_the_true_window(query_len):
 
 def test_impl_accepts_the_arguments_the_attention_layer_passes():
     """Attention() calls impl_cls positionally and forwards extra_impl_args
-    (``sinks`` among them); a signature that only matches AttentionImpl's
+    (`sinks` among them); a signature that only matches AttentionImpl's
     abstract __init__ raises TypeError at engine init, not at import.
     """
     from vllm.v1.attention.backends.flashinfer_ts import FlashInferTSImpl

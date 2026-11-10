@@ -235,7 +235,6 @@ def marlin_create_bench_fn(bt: BenchmarkTensors) -> Callable:
             b_q_weight=w_q,
             b_bias=None,
             b_scales=w_s,
-            a_scales=None,
             global_scale=None,
             b_zeros=w_zp,
             workspace=workspace.scratch,

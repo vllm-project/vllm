@@ -3,9 +3,9 @@
 """Unit tests for MiniMax-M3 VL preprocessing (sglang-aligned size spec).
 
 These exercise the vendored processor directly (no checkpoint / GPU needed) and
-pin the ``compute_aligned_size`` / ``resolve_max_long_side_pixel`` contract
+pin the `compute_aligned_size` / `resolve_max_long_side_pixel` contract
 against the sglang reference algorithm
-(``python/sglang/srt/multimodal/processors/minimax_m3_vl.py``).
+(`python/sglang/srt/multimodal/processors/minimax_m3_vl.py`).
 """
 
 import pytest

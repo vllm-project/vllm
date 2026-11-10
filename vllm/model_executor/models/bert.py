@@ -928,11 +928,11 @@ class BertForTokenClassification(nn.Module, SupportsLoRA):
 @attn_type("encoder_only")
 @default_pooling_type(tok_pooling_type="ALL")
 class BertForMaskedLM(nn.Module):
-    """Bert with a masked-language-modeling head on top of ``BertModel``.
+    """Bert with a masked-language-modeling head on top of `BertModel`.
 
     Produces per-token logits over the vocabulary. In vLLM terms this is a
-    token-level pooling model (``tok_pooling_type="ALL"``): the encoder output
-    is projected by the MLM head to ``vocab_size`` logits for every position,
+    token-level pooling model (`tok_pooling_type="ALL"`): the encoder output
+    is projected by the MLM head to `vocab_size` logits for every position,
     and the token pooler returns one vector per token.
     """
 
