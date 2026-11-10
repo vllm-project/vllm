@@ -260,6 +260,35 @@ def kill_process_tree(pid: int):
         os.kill(pid, signal.SIGKILL)
 
 
+_PR_SET_PDEATHSIG = 1
+
+
+def set_parent_death_signal(sig: int = signal.SIGTERM) -> None:
+    """Send `sig` to this multiprocessing child when its parent process dies.
+
+    No-op outside Linux and outside a multiprocessing child. Call from the
+    child's main thread.
+    """
+    parent = multiprocessing.parent_process()
+    if sys.platform != "linux" or parent is None:
+        return
+    parent_pid = parent.pid
+
+    def on_parent_death(signum, frame):
+        # PR_SET_PDEATHSIG also fires when the creating thread exits.
+        if os.getppid() != parent_pid:
+            os.kill(os.getpid(), sig)
+
+    signal.signal(signal.SIGRTMIN, on_parent_death)
+    libc = ctypes.CDLL(None, use_errno=True)
+    if libc.prctl(_PR_SET_PDEATHSIG, signal.SIGRTMIN, 0, 0, 0) != 0:
+        logger.warning(
+            "prctl(PR_SET_PDEATHSIG) failed: %s", os.strerror(ctypes.get_errno())
+        )
+    if os.getppid() != parent_pid:
+        os.kill(os.getpid(), sig)
+
+
 # Resource utilities
 
 
