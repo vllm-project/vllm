@@ -17,7 +17,7 @@ if not current_platform.is_rocm():
 pytest.importorskip("quart")
 
 _PROXY_SERVER = (
-    Path(__file__).parents[4]
+    Path(__file__).parents[5]
     / "examples"
     / "disaggregated"
     / "disaggregated_serving"
