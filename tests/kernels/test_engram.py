@@ -761,14 +761,23 @@ def test_engram_rejects_empty_head_shards(tp_size, dp_size, n_heads, monkeypatch
     not current_platform.is_cuda_alike(), reason="CUDA or ROCm required"
 )
 @pytest.mark.parametrize(
-    "cpu_offload,sort_rows", [(False, False), (True, False), (True, True)]
+    "cpu_offload,sort_rows,integrated",
+    [
+        (False, False, False),
+        (False, False, True),
+        (True, False, False),
+        (True, True, False),
+    ],
 )
 @pytest.mark.parametrize("tp_size", [1, 2, 4, 8])
 def test_engram_head_shards_reconstruct_checkpoint(
-    cpu_offload, sort_rows, tp_size, monkeypatch
+    cpu_offload, sort_rows, integrated, tp_size, monkeypatch
 ):
     """Keep complete buckets and reconstruct head order, including TP padding,
-    whether or not the host lookup sorts its rows by table offset."""
+    whether or not the host lookup sorts its rows by table offset, and with
+    the chunked copy taken on integrated GPUs."""
+    if integrated:
+        monkeypatch.setattr(current_platform, "is_integrated_gpu", lambda _: True)
     if sort_rows:
         monkeypatch.setattr(
             engram_ops, "_engram_lookup_thresholds", lambda _: (0, None)

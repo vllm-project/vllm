@@ -487,7 +487,20 @@ def _engram_head_shard_weight_loader(
     assert shard.shape == param.shape, (
         f"engram shard {tuple(shard.shape)} does not fit param {tuple(param.shape)}"
     )
-    param.data.copy_(shard)
+    if not (
+        shard.is_cpu
+        and param.is_cuda
+        and current_platform.is_integrated_gpu(param.device.index)
+    ):
+        param.data.copy_(shard)
+        return
+    # On integrated GPUs a host-to-device copy straight from the mmap'd
+    # checkpoint takes about the table's size again in host memory until the
+    # file closes, which a 46 GiB table cannot afford. copy_weight_'s page
+    # pre-touch does not avoid that; cloned chunks do.
+    num_chunks = max(triton.cdiv(shard.nbytes, 256 << 20), 1)
+    for dst, src in zip(param.data.chunk(num_chunks), shard.chunk(num_chunks)):
+        dst.copy_(src.clone())
 
 
 # Branching on SORTED at runtime intermittently crashes Triton 3.8's
