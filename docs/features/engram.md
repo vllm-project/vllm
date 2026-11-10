@@ -164,8 +164,7 @@ lookups to remain on the same prefetch stream after capture; independently
 concurrent graph executions sharing one reader are not supported. Remote
 KV-producer processes use the same bounded decoder replay as local tables by
 default. Set `rdma_keep_prefill_rows` to `true` to retain all producer rows as
-a conservative comparison mode. Prefill batches whose
-token counts would be padded for a graph run eagerly. DP table sharing,
+a conservative comparison mode. DP table sharing,
 `embedding_across_dp`, and `use_thp` cannot be combined with it. The provider is
 responsible for checkpoint identity, remote memory registration, completion
 visibility and safe lifetime.
