@@ -584,26 +584,39 @@ def test_num_lookahead_tokens_without_speculation():
 def test_sizing_warmup_requests_prompt_logprobs_on_its_prefill(max_logprobs):
     """Prompt logprobs materialize full-vocab logits a chunk at a time, which
     no other step reaches. The sizing step requests them on its real prefill,
-    so the runtime path computes them from the model's own hidden states."""
+    so the runtime path computes them from the model's own hidden states.
+
+    They are computed for every token of a step that requests them, so with a
+    budget beyond max_model_len they are measured on a single-prompt step and
+    the full-budget step runs without them."""
     runner = _make_runner([_attention_group()], num_lookahead_tokens=0)
     runner.model_config = SimpleNamespace(
         get_vocab_size=lambda: 64, max_logprobs=max_logprobs, use_mla=False
     )
     recorder = _StepRecorder()
-    requested: dict[str, int | None] = {}
+    # (scheduled tokens, prompt_logprobs of each prefill request) per step
+    steps: list[tuple[int, list[int | None]]] = []
 
     def execute_model(scheduler_output) -> None:
-        for new_req in scheduler_output.scheduled_new_reqs:
-            requested[new_req.req_id] = new_req.sampling_params.prompt_logprobs
+        prefill = [
+            r.sampling_params.prompt_logprobs
+            for r in scheduler_output.scheduled_new_reqs
+            if "_prefill_" in r.req_id
+        ]
+        if prefill:
+            steps.append((scheduler_output.total_num_scheduled_tokens, prefill))
         recorder.execute_model(scheduler_output)
 
     warmup.run_kv_cache_sizing_warmup(runner, execute_model, recorder.sample_tokens)
 
     expected = None if max_logprobs == 0 else max_logprobs
-    assert {
-        "prefill" if "_prefill_" in req_id else "decode": value
-        for req_id, value in requested.items()
-    } == {"prefill": expected, "decode": None}
+    logprob_steps = [step for step in steps if step[1] != [None] * len(step[1])]
+    if expected is None:
+        assert logprob_steps == []
+    else:
+        assert logprob_steps == [(MAX_MODEL_LEN, [expected])]
+    budget = runner.scheduler_config.max_num_batched_tokens
+    assert max(n for n, _ in steps) == budget
 
 
 @pytest.mark.parametrize(

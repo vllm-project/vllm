@@ -405,14 +405,29 @@ def run_kv_cache_sizing_warmup(
         return
     # Profiling skipped attention; measure it on the largest possible step,
     # split across requests when max_model_len < max_num_batched_tokens.
-    # Its prompt logprobs materialize full-vocab logits a chunk at a time.
     max_logprobs = model_runner.model_config.max_logprobs
+    prompt_logprobs = max_logprobs if max_logprobs != 0 else None
+    max_num_tokens = model_runner.scheduler_config.max_num_batched_tokens
+    max_prompt_len = min(max_num_tokens, model_runner.max_model_len)
+    # Prompt logprobs are computed for every token of a step that requests
+    # them, so request them on a single-prompt step: on the full budget,
+    # max_logprobs=-1 would reserve full-vocab logprobs for every token.
+    if prompt_logprobs is not None and max_prompt_len < max_num_tokens:
+        run_mixed_prefill_decode_warmup(
+            model_runner,
+            worker_execute_model,
+            worker_sample_tokens,
+            max_prompt_len,
+            prompt_logprobs=prompt_logprobs,
+            prefill_only_fallback=True,
+        )
+        prompt_logprobs = None
     run_mixed_prefill_decode_warmup(
         model_runner,
         worker_execute_model,
         worker_sample_tokens,
-        model_runner.scheduler_config.max_num_batched_tokens,
-        prompt_logprobs=max_logprobs if max_logprobs != 0 else None,
+        max_num_tokens,
+        prompt_logprobs=prompt_logprobs,
         prefill_only_fallback=True,
     )
     if model_runner.model_config.use_mla:
