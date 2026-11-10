@@ -112,8 +112,8 @@ vllm serve deepseek-ai/DeepSeek-V4-Pro \
 
 | `VLLM_MORI_EP_V2` | Behavior |
 | ----------------- | -------- |
-| unset | EPv2, falling back to EPv1 with a warning when MoRI is older than 1.2.4, the GPU is not gfx950 or gfx1250, EP spans hosts (except on gfx1250, whose UALink team can span hosts), `MORI_ENABLE_SDMA=1`, `--moe-backend aiter_mega_moe`, the model is not BF16, or MoE activations use per-tensor FP8 |
-| `1` | Always EPv2. The checks above only log a warning; startup fails if the EP ranks are not in one CCO-LSA team |
+| unset | EPv2, falling back to EPv1 with a warning when MoRI is older than 1.2.4, the GPU is not gfx950 or gfx1250, EP spans hosts (except on gfx1250, whose UALink team can span hosts; across hosts EPv2 is opt-in), `MORI_ENABLE_SDMA=1`, `--moe-backend aiter_mega_moe`, the model is not BF16, or MoE activations use per-tensor FP8 |
+| `1` | Always EPv2. The checks above only log a warning. Across hosts EPv2 runs its internode path (see below); startup fails if the EP ranks do not split into equal CCO-LSA teams |
 | `0` | EPv1 |
 
 On EPv1, `mori` uses the IntraNode kernel within one node. Across nodes it uses InterNodeV1LL when the per-rank token budget (`--max-num-batched-tokens`) is at most `VLLM_MORI_DISPATCH_INTER_KERNEL_SWITCH_THRESHOLD` (default 256), and InterNodeV1 otherwise. `mori_high_throughput` and `mori_low_latency` always run EPv1 and pin the inter-node kernel to InterNodeV1 and InterNodeV1LL respectively.
@@ -124,13 +124,13 @@ Choosing a MoRI backend: use EPv2 wherever it applies, and EPv1 for deployments 
 | ---------- | ------- |
 | EP within one node (or one gfx1250 UALink fabric), BF16 model, AITER fused MoE | `mori` (runs EPv2) |
 | EP within one node, with experts that take activations quantized before dispatch (e.g. FP8 or INT8 Triton experts) | EPv2 rejects these experts at startup. Enable AITER fused MoE (`VLLM_ROCM_USE_AITER=1 VLLM_ROCM_USE_AITER_MOE=1`) so `mori` runs EPv2 with AITER experts; MoRI EPv1 (`VLLM_MORI_EP_V2=0`) also needs AITER fused MoE. To keep Triton experts without AITER, use a non-MoRI backend such as `allgather_reducescatter` |
-| EP across nodes | `mori` (falls back to EPv1; picks InterNodeV1LL when the per-rank token budget is at most `VLLM_MORI_DISPATCH_INTER_KERNEL_SWITCH_THRESHOLD`, else InterNodeV1) |
+| EP across nodes | `mori` (falls back to EPv1; picks InterNodeV1LL when the per-rank token budget is at most `VLLM_MORI_DISPATCH_INTER_KERNEL_SWITCH_THRESHOLD`, else InterNodeV1). `VLLM_MORI_EP_V2=1` runs EPv2's internode path instead |
 
 Within one node, all EPv1 options run the same IntraNode kernel. To pin the inter-node kernel, set the threshold: `0` always picks InterNodeV1, and a value at least the per-rank token budget always picks InterNodeV1LL. `mori_high_throughput` and `mori_low_latency` do the same pinning but are deprecated and will be removed in a future release; use `mori` instead.
 
 EPv2 limitations:
 
-- All EP ranks must be in one MoRI CCO-LSA team, i.e. GPUs that can load and store each other's memory: one node, or one UALink fabric. Startup fails otherwise; there is no multi-node RDMA path yet.
+- Within one MoRI CCO-LSA team (GPUs that can load and store each other's memory: one node, or one UALink fabric) EPv2 moves tokens through the shared window. Across nodes, with `VLLM_MORI_EP_V2=1`, it runs MoRI's internode path: ranks in the same team are reached as before and the others over GDA RDMA. The EP ranks must split into equal teams (e.g. 2 nodes x 8 GPUs), and MoRI must ship `mori.ops.dispatch_combine_v2.internode_regions`.
 - Activations are dispatched in BF16, so the model dtype must be BF16 and the experts must take unquantized inputs (AITER fused MoE, which quantizes after the all-to-all, or BF16 experts). Experts that expect activations quantized before dispatch, such as FP8 or INT8 Triton experts, are rejected at startup. Block FP8 and MXFP4 weights work; per-tensor FP8 activations (`--quantization fp8` without blocks, ModelOpt FP8) do not, since AITER cannot quantize the received rows per tensor.
 - AITER shared-expert fusion is not supported: set `VLLM_ROCM_USE_AITER_FUSION_SHARED_EXPERTS=0`.
 - Install a MoRI build that ships `mori.ops.dispatch_combine_v2`. On NICs that limit a registered memory region to 2 GiB, the window registration fails once the dispatch arena outgrows that limit (DeepSeek-V4-Pro at EP8 already does at the default 16k batched tokens).

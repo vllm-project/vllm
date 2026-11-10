@@ -144,8 +144,16 @@ def test_padding_tokens_are_routed_to_local_experts(monkeypatch):
     assert op.sent_ids.tolist() == [[0, 7], [2, 3]]
 
 
-@pytest.mark.parametrize("world_size,lsa_size", [(8, 8), (8, 4)])
-def test_manager_requires_one_lsa_team(monkeypatch, world_size, lsa_size):
+@pytest.mark.parametrize(
+    "world_size,lsa_size,gpu_per_node",
+    [
+        (8, 8, None),
+        # EP over two hosts: internode, with equal LSA teams.
+        (16, 8, 8),
+        (8, 3, "error"),
+    ],
+)
+def test_manager_lsa_teams(monkeypatch, world_size, lsa_size, gpu_per_node):
     from vllm.distributed.device_communicators import all2all
     from vllm.distributed.device_communicators.base_device_communicator import (
         All2AllManagerBase,
@@ -177,8 +185,8 @@ def test_manager_requires_one_lsa_team(monkeypatch, world_size, lsa_size):
             GDA_CONNECTION_NONE=0,
         ),
     )
-    if lsa_size != world_size:
-        with pytest.raises(ValueError, match="one LSA team"):
+    if gpu_per_node == "error":
+        with pytest.raises(ValueError, match="equal LSA teams"):
             all2all.MoriEPv2All2AllManager(object())
     else:
         cfg = dict(
@@ -192,16 +200,34 @@ def test_manager_requires_one_lsa_team(monkeypatch, world_size, lsa_size):
             combine_dtype=None,
             schedule=None,
         )
+        configs = []
+
+        def make_config(**kw):
+            config = SimpleNamespace(**(cfg | kw))
+            config.is_internode = config.__dict__.get("gpu_per_node") is not None
+            configs.append(config)
+            return config
+
         monkeypatch.setitem(
             sys.modules,
             "mori.ops.dispatch_combine_v2",
             SimpleNamespace(
-                EpDispatchCombineConfig=lambda **kw: SimpleNamespace(**(cfg | kw)),
+                EpDispatchCombineConfig=make_config,
                 EpDispatchCombineOp=lambda config, comm: calls.op,
             ),
         )
+        monkeypatch.setitem(
+            sys.modules,
+            "mori.ops.dispatch_combine_v2.internode_regions",
+            SimpleNamespace(internode_regions=lambda config: [("a", 1), ("b", 300)]),
+        )
         manager = all2all.MoriEPv2All2AllManager(object())
         assert manager.get_handle({}) is calls.op
+        (config,) = configs
+        assert config.__dict__.get("gpu_per_node") == gpu_per_node
+        assert config.__dict__.get("kernel_backend") == (
+            "hip" if gpu_per_node else None
+        )
         # The cache holds ops weakly; the manager keeps them alive itself.
         manager.handle_cache._cache.clear()
         manager.destroy()
@@ -345,8 +371,17 @@ def _quark(qscheme):
     "parallel,model,moe_backend,env,ep_v2",
     [
         ({}, {}, "aiter", {}, True),
-        # EP across hosts: DP over two nodes, even with ep_size <= 8.
+        # EP across hosts: DP over two nodes, even with ep_size <= 8. MORI's
+        # internode path is opt-in.
         ({"data_parallel_size": 16}, {}, "aiter", {}, False),
+        ({"data_parallel_size": 16}, {}, "aiter", {"VLLM_MORI_EP_V2": "1"}, True),
+        (
+            {"data_parallel_size": 16, "internode_reason": "no internode path"},
+            {},
+            "aiter",
+            {},
+            False,
+        ),
         ({"data_parallel_size_local": 4}, {}, "aiter", {}, False),
         # A DP replica (TP/PP) spanning nodes.
         ({"nnodes_within_dp": 2}, {}, "aiter", {}, False),
@@ -392,8 +427,14 @@ def test_mori_picks_epv2_where_supported(
     sdma_picks_epv1 = parallel.pop("sdma_picks_epv1", True)
     validated_arch = parallel.pop("validated_arch", True)
     mori_reason = parallel.pop("mori_reason", None)
+    internode_reason = parallel.pop("internode_reason", None)
     monkeypatch.setattr(
         import_utils, "mori_epv2_unavailable_reason", lambda: mori_reason
+    )
+    monkeypatch.setattr(
+        import_utils,
+        "mori_epv2_internode_unavailable_reason",
+        lambda: internode_reason,
     )
     parallel_config = _parallel_config(**parallel)
     model_config = _model_config(**model)

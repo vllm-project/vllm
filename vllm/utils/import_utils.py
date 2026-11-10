@@ -660,6 +660,17 @@ def mori_epv2_unavailable_reason() -> str | None:
     return None
 
 
+def mori_epv2_internode_unavailable_reason() -> str | None:
+    """Why the installed MoRI cannot run EPv2 across hosts, or None if it can.
+
+    The internode path (LSA within a host, GDA RDMA across hosts) lives in
+    MoRI's hip backend, which sizes its arena with `internode_regions`.
+    """
+    if not _has_module("mori.ops.dispatch_combine_v2.internode_regions"):
+        return "the installed MoRI has no EPv2 internode path"
+    return None
+
+
 def has_fbgemm_gpu() -> bool:
     """Whether the optional `fbgemm_gpu` package is available."""
     return _has_module("fbgemm_gpu")

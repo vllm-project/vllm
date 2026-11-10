@@ -1079,6 +1079,18 @@ def _mori_epv2_arena_bytes(cfg) -> int:
     return cfg.effective_max_recv * per_recv_row + per_rank + 4 + 12 * 256
 
 
+def _mori_epv2_internode_arena_bytes(cfg) -> int:
+    """Exact symmetric arena of a MORI EPv2 internode (hip backend) op.
+
+    MORI sizes the internode arena region by region (`internode_regions`) and
+    carves it out of the window with SymmArena, which aligns every region to
+    256 B.
+    """
+    from mori.ops.dispatch_combine_v2.internode_regions import internode_regions
+
+    return sum(round_up(nbytes, 256) for _, nbytes in internode_regions(cfg))
+
+
 # cco reserves each rank's window in 4 GiB steps.
 _MORI_EPV2_WINDOW_ALIGN = 4 << 30
 
@@ -1099,6 +1111,9 @@ class MoriEPv2All2AllManager(All2AllManagerBase):
         # arenas were charged to, so a dropped op is never charged twice.
         self._ops: list[Any] = []
         self.handle_cache = Cache()
+        # GPUs per CCO-LSA team when the EP group spans several (internode),
+        # None when it is one team (intranode).
+        self._gpu_per_node: int | None = None
         # Open the first window now so a wrong topology fails before the
         # weights load; ops that need more get their own window later.
         comm = self._open_window(_MORI_EPV2_WINDOW_ALIGN).comm
@@ -1109,15 +1124,31 @@ class MoriEPv2All2AllManager(All2AllManagerBase):
             lsa_size = device_comm.lsa_size
             device_comm.close()
             if lsa_size != self.world_size:
-                raise ValueError(
-                    "MORI EPv2 requires all expert-parallel ranks in one LSA team, "
-                    f"got LSA size {lsa_size} for {self.world_size} ranks"
-                )
+                # EP spans hosts: MORI's internode path reaches ranks in the
+                # same LSA team over LSA and the others over GDA RDMA. It needs
+                # equal LSA teams that tile the EP group.
+                if lsa_size <= 0 or self.world_size % lsa_size:
+                    raise ValueError(
+                        "MORI EPv2 needs the expert-parallel ranks in one LSA "
+                        "team or in equal LSA teams that tile them, got LSA size "
+                        f"{lsa_size} for {self.world_size} ranks"
+                    )
+                self._gpu_per_node = lsa_size
         except Exception as e:
             e.add_note("MORI EPv2: probing the CCO-LSA team of the EP group failed")
             self.destroy()
             raise
-        logger.debug("MORI EPv2 all2all over a %d-rank CCO-LSA team", self.world_size)
+        if self._gpu_per_node is None:
+            logger.debug(
+                "MORI EPv2 all2all over a %d-rank CCO-LSA team", self.world_size
+            )
+        else:
+            logger.info_once(
+                "MORI EPv2 internode all2all: %d ranks as %d LSA teams of %d",
+                self.world_size,
+                self.world_size // self._gpu_per_node,
+                self._gpu_per_node,
+            )
 
     def _open_window(self, nbytes: int) -> _MoriEPv2Window:
         from mori.cco import Communicator
@@ -1143,17 +1174,33 @@ class MoriEPv2All2AllManager(All2AllManagerBase):
             EpDispatchCombineOp,
         )
 
+        internode = {}
+        if self._gpu_per_node is not None:
+            # Only MORI's hip backend has the internode path; it combines by
+            # gather and dispatches unquantized, as this prepare/finalize does.
+            internode = dict(gpu_per_node=self._gpu_per_node, kernel_backend="hip")
         config = EpDispatchCombineConfig(
             rank=self.rank,
             world_size=self.world_size,
             data_type=torch.bfloat16,
             combine_mode="gather",
+            **internode,
             **kwargs,
         )
         # Each op carves its arena out of a cco window, which only reserves
         # address space, so open a big enough one instead of failing. Whole
         # GiB per op keeps MORI's allocation granularity inside the window.
-        arena = round_up(_mori_epv2_arena_bytes(config), 1 << 30)
+        if config.is_internode:
+            arena_bytes = _mori_epv2_internode_arena_bytes(config)
+            # The window is registered with the NIC as one memory region, so
+            # its size matters on NICs that limit a region's page entries.
+            logger.info_once(
+                "MORI EPv2 internode op arena: %.2f GiB per rank",
+                arena_bytes / (1 << 30),
+            )
+        else:
+            arena_bytes = _mori_epv2_arena_bytes(config)
+        arena = round_up(arena_bytes, 1 << 30)
         window = next((w for w in self._windows if w.free_bytes >= arena), None)
         if window is None:
             window = self._open_window(round_up(arena, _MORI_EPV2_WINDOW_ALIGN))
