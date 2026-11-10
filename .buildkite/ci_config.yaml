@@ -14,11 +14,7 @@ run_all_patterns:
   - "setup.py"
   - "cmake/"
   - ".buildkite/check-torch-abi.py"
-# Every AMD step runs on these. AMD is not selected by ci-selector yet, so
-# csrc/ still runs all of AMD (ROCm compiles it through HIPify) while
-# ci-selector decides it on CUDA. The rest build the ROCm test image or run
-# every AMD test; run_all_patterns does not cover them, as they cannot affect
-# CUDA.
+# Run every AMD step (ci-selector does not pick AMD steps). csrc/ is also built for ROCm.
 amd_run_all_patterns:
   - "csrc/"
   - "cmake/hipify.py"
@@ -34,8 +30,7 @@ amd_run_all_patterns:
   - "tools/install_torchcodec_rocm.sh"
   - "tools/vllm-rocm/therock_wheels.py"
   - "tools/ci/rocm_kernel_symbol_map.py"
-# amd_run_all_patterns has its own excludes: the list below names files that
-# do not affect CUDA, csrc/rocm/ among them.
+# Separate from run_all_exclude_patterns, which skips AMD files like csrc/rocm/.
 amd_run_all_exclude_patterns:
   - "csrc/cpu/"
 run_all_exclude_patterns:
