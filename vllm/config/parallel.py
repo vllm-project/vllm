@@ -277,10 +277,14 @@ class ParallelConfig:
     of its tensors (a multimodal request keeps its `pixel_values` until it
     finishes). With more image requests in flight than slots, the rest take the
     copying fallback path. The arena reserves slots x
-    `shm_tensor_arena_slot_mb` of `/dev/shm`."""
+    `shm_tensor_arena_slot_mb` of `/dev/shm`, and on CUDA-alike platforms the
+    readers page-lock all of it (`cudaHostRegister`), so that much host memory
+    is resident and pinned per node. Only used with
+    `enable_shm_tensor_arena`."""
     shm_tensor_arena_slot_mb: int = Field(default=256, ge=1)
-    """Size of one shared-memory tensor arena slot, in MiB. A message whose
-    large tensors do not fit in one slot takes the copying fallback path."""
+    """Size of one shared-memory tensor arena slot, in MiB (at least 8, the
+    smallest tensor the arena takes). A tensor larger than a slot takes the
+    copying fallback path. Only used with `enable_shm_tensor_arena`."""
 
     enable_elastic_ep: bool = False
     """Enable elastic expert parallelism with stateless NCCL groups for DP/EP."""
@@ -1250,6 +1254,32 @@ class ParallelConfig:
             isinstance(self.distributed_executor_backend, type)
             and getattr(self.distributed_executor_backend, "uses_ray", False)
         )
+
+    @model_validator(mode="after")
+    def _verify_shm_tensor_arena(self) -> Self:
+        from vllm.distributed.device_communicators.shm_tensor_arena import (
+            _ARENA_MIN_BYTES,
+            _ARENA_SLOT_BYTES,
+            _ARENA_SLOTS,
+        )
+
+        if self.shm_tensor_arena_slot_mb * 1024 * 1024 < _ARENA_MIN_BYTES:
+            raise ValueError(
+                f"shm_tensor_arena_slot_mb={self.shm_tensor_arena_slot_mb} is "
+                f"below the {_ARENA_MIN_BYTES >> 20} MiB minimum tensor size the "
+                "shared-memory tensor arena takes, so no tensor would ever use "
+                "it."
+            )
+        if not self.enable_shm_tensor_arena and (
+            self.shm_tensor_arena_slots != _ARENA_SLOTS
+            or self.shm_tensor_arena_slot_mb != _ARENA_SLOT_BYTES >> 20
+        ):
+            logger.warning(
+                "shm_tensor_arena_slots / shm_tensor_arena_slot_mb are set but "
+                "enable_shm_tensor_arena is off; they have no effect. Pass "
+                "--enable-shm-tensor-arena to use the arena."
+            )
+        return self
 
     @model_validator(mode="after")
     def _verify_args(self) -> Self:

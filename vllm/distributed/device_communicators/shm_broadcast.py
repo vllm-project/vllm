@@ -507,8 +507,8 @@ class MessageQueue:
         max_chunks: int = 10,
         connect_ip: str | None = None,
         enable_shm_tensor_arena: bool = False,
-        shm_tensor_arena_slots: int = 8,
-        shm_tensor_arena_slot_mb: int = 256,
+        shm_tensor_arena_slots: int | None = None,
+        shm_tensor_arena_slot_mb: int | None = None,
     ):
         if local_reader_ranks is None:
             local_reader_ranks = list(range(n_local_reader))
@@ -536,8 +536,16 @@ class MessageQueue:
 
                 self.tensor_arena = shm_tensor_arena.ShmTensorArena(
                     n_local_reader,
-                    slot_bytes=shm_tensor_arena_slot_mb * 1024 * 1024,
-                    n_slots=shm_tensor_arena_slots,
+                    slot_bytes=(
+                        shm_tensor_arena._ARENA_SLOT_BYTES
+                        if shm_tensor_arena_slot_mb is None
+                        else shm_tensor_arena_slot_mb * 1024 * 1024
+                    ),
+                    n_slots=(
+                        shm_tensor_arena._ARENA_SLOTS
+                        if shm_tensor_arena_slots is None
+                        else shm_tensor_arena_slots
+                    ),
                 )
 
             # XPUB is very similar to PUB,

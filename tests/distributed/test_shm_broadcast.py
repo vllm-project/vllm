@@ -1522,3 +1522,16 @@ def test_arena_broadcast():
         timeout=180,
         mp_context=mp.get_context("spawn"),
     )
+
+
+def test_tensor_arena_logs_oversized_tensor_fallback(caplog_vllm):
+    """A tensor larger than one slot takes the pickle path and says so."""
+    arena = shm_tensor_arena.ShmTensorArena(1, slot_bytes=1 << 20, n_slots=2)
+    try:
+        big = torch.zeros(2 << 20, dtype=torch.uint8)
+        with caplog_vllm.at_level("INFO", logger=shm_tensor_arena.logger.name):
+            assert arena.write_tensor(big) is None
+        assert "does not fit one slot" in caplog_vllm.text
+    finally:
+        arena.shared_memory.close()
+        arena.shared_memory.unlink()

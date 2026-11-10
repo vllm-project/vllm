@@ -435,9 +435,11 @@ class ModelConfig:
     requests.
 
     For generative models, multimodal preprocessing runs on its own
-    executor, which uses this many workers only when the multimodal
-    processor cache is disabled (`mm_processor_cache_gb=0`); with the cache
-    enabled it stays single-threaded to keep the cache order.
+    executor. When the multimodal processor cache is disabled
+    (`mm_processor_cache_gb=0`) that executor also uses this many workers, so
+    this one setting sizes both the tokenization pool and the multimodal
+    preprocessing pool; with the cache enabled it stays single-threaded to
+    keep the cache order.
 
     The offline `LLM` entrypoint uses the synchronous renderer path and
     processes prompts (including multimodal preprocessing) serially, so
