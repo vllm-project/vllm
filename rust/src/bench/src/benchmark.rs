@@ -1277,45 +1277,82 @@ async fn run_warmup(
 
     let semaphore = max_concurrency.map(|mc| Arc::new(Semaphore::new(mc)));
 
-    // Use the same rate-limited scheduling as the main benchmark run
-    let schedule = compute_schedule(num_warmups, request_rate, burstiness, seed, None);
-    let start = Instant::now();
+    // Warmups resend the first request. A unique cache_salt keeps them from
+    // filling the prefix cache for each other and for the run; if every salted
+    // warmup fails (a server that rejects cache_salt), retry without it.
+    for salted in [true, false] {
+        // Use the same rate-limited scheduling as the main benchmark run
+        let schedule = compute_schedule(num_warmups, request_rate, burstiness, seed, None);
+        let start = Instant::now();
 
-    let mut handles = Vec::with_capacity(num_warmups);
-    for i in 0..num_warmups {
-        // Wait until scheduled time
-        let target = std::time::Duration::from_secs_f64(schedule.delays[i]);
-        let elapsed = start.elapsed();
-        if target > elapsed {
-            tokio::time::sleep(target - elapsed).await;
+        let mut handles = Vec::with_capacity(num_warmups);
+        for i in 0..num_warmups {
+            // Wait until scheduled time
+            let target = std::time::Duration::from_secs_f64(schedule.delays[i]);
+            let elapsed = start.elapsed();
+            if target > elapsed {
+                tokio::time::sleep(target - elapsed).await;
+            }
+
+            let client = client.clone();
+            let input = if salted {
+                with_unique_cache_salt(test_input)
+            } else {
+                test_input.clone()
+            };
+            let sem = semaphore.clone();
+            let pb = pb.clone();
+            handles.push(tokio::spawn(async move {
+                let _permit = if let Some(ref s) = sem {
+                    Some(s.acquire().await.unwrap())
+                } else {
+                    None
+                };
+                let success = match get_backend(backend) {
+                    Ok(b) => b.send_request(&input, &client).await.is_ok_and(|o| o.success),
+                    Err(_) => false,
+                };
+                if let Some(pb) = pb {
+                    pb.inc(1);
+                }
+                success
+            }));
         }
 
-        let client = client.clone();
-        let input = test_input.clone();
-        let sem = semaphore.clone();
-        let pb = pb.clone();
-        handles.push(tokio::spawn(async move {
-            let _permit = if let Some(ref s) = sem {
-                Some(s.acquire().await.unwrap())
-            } else {
-                None
-            };
-            if let Ok(b) = get_backend(backend) {
-                let _ = b.send_request(&input, &client).await;
-            }
-            if let Some(pb) = pb {
-                pb.inc(1);
-            }
-        }));
-    }
-
-    for handle in handles {
-        let _ = handle.await;
+        let mut any_success = false;
+        for handle in handles {
+            any_success |= handle.await.unwrap_or(false);
+        }
+        if any_success || !salted {
+            break;
+        }
+        tracing::warn!("warmup requests with cache_salt failed; retrying without it");
+        if let Some(ref pb) = pb {
+            pb.reset();
+        }
     }
 
     if let Some(pb) = pb {
         pb.finish_and_clear();
     }
+}
+
+fn with_unique_cache_salt(input: &RequestFuncInput) -> RequestFuncInput {
+    let mut input = input.clone();
+    let mut body = match input.extra_body.take() {
+        Some(serde_json::Value::Object(map)) => map,
+        None => serde_json::Map::new(),
+        other => {
+            input.extra_body = other;
+            return input;
+        }
+    };
+    body.insert(
+        "cache_salt".to_string(),
+        format!("warmup-{}", uuid::Uuid::new_v4().simple()).into(),
+    );
+    input.extra_body = Some(serde_json::Value::Object(body));
+    input
 }
 
 /// Start the profiler (immediate mode — no batch threshold).
@@ -1922,7 +1959,7 @@ mod tests {
         args: BenchServeArgs,
     }
 
-    async fn read_request_path(stream: &mut tokio::net::TcpStream) -> String {
+    async fn read_request(stream: &mut tokio::net::TcpStream) -> (String, String) {
         let mut request = Vec::new();
         let mut buffer = [0_u8; 1024];
         let (header_end, content_length) = loop {
@@ -1954,7 +1991,9 @@ mod tests {
             request.extend_from_slice(&buffer[..read]);
         }
 
-        String::from_utf8_lossy(&request).split_whitespace().nth(1).unwrap().to_string()
+        let path = String::from_utf8_lossy(&request).split_whitespace().nth(1).unwrap().to_string();
+        let body = String::from_utf8_lossy(&request[header_end..]).to_string();
+        (path, body)
     }
 
     #[allow(
@@ -1971,7 +2010,7 @@ mod tests {
         let server = tokio::spawn(async move {
             loop {
                 let (mut stream, _) = listener.accept().await.unwrap();
-                let path = read_request_path(&mut stream).await;
+                let (path, _) = read_request(&mut stream).await;
                 if path != "/v1/completions" {
                     stream
                         .write_all(
@@ -2041,6 +2080,94 @@ mod tests {
         assert_eq!(workload_requests.load(Ordering::SeqCst), 1);
         assert_eq!(result["completed"], 0);
         assert_eq!(result["failed"], 1);
+    }
+
+    /// Records each completions request body; answers 400 when the body has a
+    /// `cache_salt` and `reject_salt` is set, else a one-token stream.
+    async fn spawn_recording_server(
+        reject_salt: bool,
+    ) -> (
+        String,
+        Arc<std::sync::Mutex<Vec<serde_json::Value>>>,
+        tokio::task::JoinHandle<()>,
+    ) {
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let addr = listener.local_addr().unwrap();
+        let bodies = Arc::new(std::sync::Mutex::new(Vec::new()));
+        let recorded = bodies.clone();
+
+        let server = tokio::spawn(async move {
+            loop {
+                let (mut stream, _) = listener.accept().await.unwrap();
+                let (_, body) = read_request(&mut stream).await;
+                let body: serde_json::Value = serde_json::from_str(&body).unwrap();
+                let salted = body.get("cache_salt").is_some();
+                recorded.lock().unwrap().push(body);
+
+                let response = if reject_salt && salted {
+                    "HTTP/1.1 400 Bad Request\r\ncontent-length: 0\r\nconnection: close\r\n\r\n"
+                        .to_string()
+                } else {
+                    let body = concat!(
+                        "data: {\"choices\":[{\"text\":\"ok\"}]}\n\n",
+                        "data: [DONE]\n\n",
+                    );
+                    format!(
+                        "HTTP/1.1 200 OK\r\ncontent-type: text/event-stream\r\n\
+                         content-length: {}\r\nconnection: close\r\n\r\n{body}",
+                        body.len()
+                    )
+                };
+                stream.write_all(response.as_bytes()).await.unwrap();
+            }
+        });
+
+        (format!("http://{addr}/v1/completions"), bodies, server)
+    }
+
+    async fn warmup_bodies(reject_salt: bool) -> Vec<serde_json::Value> {
+        let (api_url, bodies, server) = spawn_recording_server(reject_salt).await;
+        let input = RequestFuncInput {
+            prompt: Arc::from("hello"),
+            api_url,
+            output_len: 1,
+            model: "test-model".to_string(),
+            ..Default::default()
+        };
+
+        run_warmup(
+            BackendKind::Openai,
+            &reqwest::Client::new(),
+            &input,
+            2,
+            None,
+            f64::INFINITY,
+            1.0,
+            0,
+            true,
+        )
+        .await;
+        server.abort();
+
+        bodies.lock().unwrap().clone()
+    }
+
+    #[tokio::test]
+    async fn test_warmups_use_unique_cache_salts() {
+        let bodies = warmup_bodies(false).await;
+
+        let salts: std::collections::HashSet<_> =
+            bodies.iter().map(|body| body["cache_salt"].as_str().unwrap()).collect();
+        assert_eq!(bodies.len(), 2);
+        assert_eq!(salts.len(), 2);
+    }
+
+    #[tokio::test]
+    async fn test_warmups_retry_without_cache_salt_when_rejected() {
+        let bodies = warmup_bodies(true).await;
+
+        let salted = bodies.iter().filter(|body| body.get("cache_salt").is_some()).count();
+        assert_eq!((salted, bodies.len() - salted), (2, 2));
     }
 
     #[test]
