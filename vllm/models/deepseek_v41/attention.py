@@ -475,6 +475,7 @@ class DeepseekV4Attention(nn.Module, AttentionLayerBase, ABC):
         self.gemm_rs: GemmRsAr | None = None
         # Set by the NVIDIA decoder layer from _shard_fused_wqa_wkv.
         self.shard_fused_wqa_wkv = False
+        self.sequence_parallel_input = False
 
         # Initialize rotary embedding before the indexer/compressor consume it.
         self.rotary_emb = build_deepseek_v4_rope(
@@ -747,13 +748,35 @@ class DeepseekV4Attention(nn.Module, AttentionLayerBase, ABC):
         # The eager attention region writes into a caller-owned buffer
         # (breakable_cudagraph needs in-place outputs); its shape and how it is
         # projected afterwards follow the interface contract above.
-        attn_out = self._alloc_attn_out(hidden_states.shape[0], hidden_states)
+        num_tokens = (
+            positions.shape[0]
+            if self.sequence_parallel_input
+            else hidden_states.shape[0]
+        )
+        attn_out = self._alloc_attn_out(num_tokens, hidden_states)
 
         # Keep the attention input preparation in the captured graph. Only the
         # sparse indexer and MLA attention run in the eager break below.
         qr_kv, kv_score, indexer_weights = self._run_parallel_input_projections(
             hidden_states
         )
+        if self.sequence_parallel_input:
+            projections = [qr_kv]
+            if kv_score is not None:
+                # The compressor accumulates FP32 states; pack without rounding.
+                projections.append(kv_score.view(qr_kv.dtype))
+            if indexer_weights is not None:
+                projections.append(indexer_weights)
+            packed = torch.cat(projections, dim=-1) if len(projections) > 1 else qr_kv
+            gathered = sp_all_gather(packed)[: positions.shape[0]]
+            parts = iter(gathered.split([x.shape[-1] for x in projections], dim=-1))
+            qr_kv = next(parts)
+            if kv_score is not None:
+                kv_score = next(parts).view(torch.float32)
+            if indexer_weights is not None:
+                indexer_weights = next(parts)
+            # The indexer uses this only for the full token count and device.
+            hidden_states = qr_kv
         qr, qr_scale, kv = self._split_qkv_and_norm(qr_kv)
 
         self._prepare_and_attn(

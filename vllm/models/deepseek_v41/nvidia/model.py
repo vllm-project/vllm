@@ -377,6 +377,13 @@ class DeepseekV4DecoderLayer(nn.Module):
                 # forward keeps the separate reduce-scatter below.
                 self.attn.bind_gemm_rs()
         self.attn.shard_fused_wqa_wkv = _shard_fused_wqa_wkv(vllm_config)
+        self.attn.sequence_parallel_input = (
+            self.use_sequence_parallel
+            and vllm_config.model_config.dtype == torch.bfloat16
+            and vllm_config.lora_config is None
+            and not vllm_config.parallel_config.use_ubatching
+            and not envs.VLLM_BATCH_INVARIANT
+        )
         self.ffn = DeepseekV4MoE(
             vllm_config,
             prefix=f"{prefix}.ffn",
@@ -657,7 +664,7 @@ class DeepseekV4DecoderLayer(nn.Module):
             if capture_previous_aux:
                 previous_aux = aux
 
-        if self.use_sequence_parallel:
+        if self.use_sequence_parallel and not self.attn.sequence_parallel_input:
             x = sp_all_gather(x)[: positions.shape[0]]
 
         x = self.attn(positions, x, None)
