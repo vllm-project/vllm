@@ -739,6 +739,9 @@ class DeepseekV4Attention(nn.Module, AttentionLayerBase, ABC):
 
                 _COMBINE_TOPK_SWA_INDICES_KERNEL.register_warmup()
 
+    def use_sequence_parallel_input(self, num_tokens: int) -> bool:
+        return self.sequence_parallel_input and num_tokens >= 256
+
     def forward(
         self,
         positions: torch.Tensor,
@@ -748,10 +751,9 @@ class DeepseekV4Attention(nn.Module, AttentionLayerBase, ABC):
         # The eager attention region writes into a caller-owned buffer
         # (breakable_cudagraph needs in-place outputs); its shape and how it is
         # projected afterwards follow the interface contract above.
+        sequence_parallel_input = self.use_sequence_parallel_input(positions.shape[0])
         num_tokens = (
-            positions.shape[0]
-            if self.sequence_parallel_input
-            else hidden_states.shape[0]
+            positions.shape[0] if sequence_parallel_input else hidden_states.shape[0]
         )
         attn_out = self._alloc_attn_out(num_tokens, hidden_states)
 
@@ -760,7 +762,7 @@ class DeepseekV4Attention(nn.Module, AttentionLayerBase, ABC):
         qr_kv, kv_score, indexer_weights = self._run_parallel_input_projections(
             hidden_states
         )
-        if self.sequence_parallel_input:
+        if sequence_parallel_input:
             projections = [qr_kv]
             if kv_score is not None:
                 # The compressor accumulates FP32 states; pack without rounding.

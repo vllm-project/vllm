@@ -663,7 +663,9 @@ class DeepseekV4DecoderLayer(nn.Module):
             if capture_previous_aux:
                 previous_aux = aux
 
-        if self.use_sequence_parallel and not self.attn.sequence_parallel_input:
+        if self.use_sequence_parallel and not self.attn.use_sequence_parallel_input(
+            positions.shape[0]
+        ):
             x = sp_all_gather(x)[: positions.shape[0]]
 
         x = self.attn(positions, x, None)
