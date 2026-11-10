@@ -203,7 +203,7 @@ def unsupported(vllm_config) -> list[str]:
             "adaptive verification",
         ),
         (
-            spec is not None and spec.uses_variable_num_speculative_tokens(),
+            spec is not None and spec.uses_dynamic_speculative_decoding(),
             "dynamic speculative decoding or num_speculative_tokens_under_prefill_load",
         ),
         # K1 keeps a BF16 conv state and an FP32 recurrent state in place; it

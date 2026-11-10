@@ -687,7 +687,7 @@ class VllmConfig:
         num_new_sampled_tokens = decode_query_len - self.num_speculative_tokens
         if (
             speculative_config is None
-            or not speculative_config.uses_variable_num_speculative_tokens()
+            or not speculative_config.uses_dynamic_speculative_decoding()
             or num_new_sampled_tokens <= 0
         ):
             return {decode_query_len: max_num_seqs}
@@ -1035,32 +1035,20 @@ class VllmConfig:
         ):
             return
 
+        disabled = []
+        if speculative_config.num_speculative_tokens_per_batch_size is not None:
+            disabled.append("num_speculative_tokens_per_batch_size")
+        if speculative_config.num_speculative_tokens_under_prefill_load is not None:
+            disabled.append("num_speculative_tokens_under_prefill_load")
         logger.warning_once(
             "Dynamic speculative decoding is not supported with data "
             "parallelism because data-parallel ranks can select different "
             "speculative-token counts, causing DP divergence and deadlocks. "
-            "Disabling num_speculative_tokens_per_batch_size and falling back "
-            "to static num_speculative_tokens=%d.",
+            "Disabling %s and falling back to static num_speculative_tokens=%d.",
+            " and ".join(disabled),
             speculative_config.num_speculative_tokens,
         )
         speculative_config.num_speculative_tokens_per_batch_size = None
-
-    def _maybe_disable_spec_tokens_under_prefill_load(self) -> None:
-        speculative_config = self.speculative_config
-        if (
-            speculative_config is None
-            or speculative_config.num_speculative_tokens_under_prefill_load is None
-            or self.parallel_config.data_parallel_size <= 1
-        ):
-            return
-
-        logger.warning_once(
-            "num_speculative_tokens_under_prefill_load is not supported with data "
-            "parallelism, because ranks schedule prefills independently and would "
-            "pick different speculative-token counts. Disabling it and falling "
-            "back to static num_speculative_tokens=%d.",
-            speculative_config.num_speculative_tokens,
-        )
         speculative_config.num_speculative_tokens_under_prefill_load = None
 
     def _validate_spec_tokens_under_prefill_load(self) -> None:
@@ -1824,7 +1812,6 @@ class VllmConfig:
             )
 
         self._maybe_disable_dynamic_sd_for_data_parallel()
-        self._maybe_disable_spec_tokens_under_prefill_load()
 
         if (
             self.attention_config.sparse_mla_prefill_workspace_factor is None

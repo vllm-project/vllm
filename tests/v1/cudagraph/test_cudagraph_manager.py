@@ -353,7 +353,6 @@ def _create_decode_vllm_config(
     else:
         speculative_config = MagicMock()
         speculative_config.uses_dynamic_speculative_decoding.return_value = True
-        speculative_config.uses_variable_num_speculative_tokens.return_value = True
         speculative_config.num_speculative_tokens_per_batch_size = dynamic_spec_schedule
         speculative_config.enable_adaptive_verification = False
         speculative_config.num_speculative_tokens_under_prefill_load = None

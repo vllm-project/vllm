@@ -1858,13 +1858,9 @@ class SpeculativeConfig:
         return self.method == "dspark"
 
     def uses_dynamic_speculative_decoding(self) -> bool:
-        return self.num_speculative_tokens_per_batch_size is not None
-
-    def uses_variable_num_speculative_tokens(self) -> bool:
-        """Whether a step can verify fewer than num_speculative_tokens drafts
-        per request, by dynamic SD or num_speculative_tokens_under_prefill_load."""
+        """Whether a step can verify fewer than num_speculative_tokens drafts."""
         return (
-            self.uses_dynamic_speculative_decoding()
+            self.num_speculative_tokens_per_batch_size is not None
             or self.num_speculative_tokens_under_prefill_load is not None
         )
 
