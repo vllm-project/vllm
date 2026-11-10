@@ -10,7 +10,12 @@ from tests.lora.utils import (
     generate_data,
     generate_data_for_expand_nslices,
 )
-from vllm.lora.ops.xpu_ops import bgmv_expand, bgmv_expand_slice, bgmv_shrink
+from vllm.lora.ops.xpu_ops import (
+    bgmv_expand,
+    bgmv_expand_slice,
+    bgmv_shrink,
+    lora_linear,
+)
 from vllm.platforms import current_platform
 
 
@@ -290,3 +295,152 @@ def test_bgmv_expand_nslices(
         device=device,
         add_inputs=True,
     )
+
+
+def _uses_gemm(fn) -> bool:
+    """Whether `fn` took the dense GEMM path rather than BGMV."""
+    with torch.profiler.profile(
+        activities=[torch.profiler.ProfilerActivity.CPU]
+    ) as prof:
+        fn()
+    names = {event.name for event in prof.events()}
+    return bool(names & {"aten::mm", "aten::addmm"})
+
+
+def _lora_linear_reference(
+    y, x, lora_a, lora_b, indices, output_slices, scaling, add_inputs
+):
+    expected = y.float().clone()
+    offset = 0
+    for a, b, n in zip(lora_a, lora_b, output_slices):
+        for token, slot in enumerate(indices.tolist()):
+            if slot < 0:
+                # BGMV leaves rows without an adapter untouched.
+                continue
+            hidden = (x[token].float() @ a[slot, 0].float().t() * scaling).to(x.dtype)
+            delta = hidden.float() @ b[slot, 0].float().t()
+            if add_inputs:
+                expected[token, offset : offset + n] += delta
+            else:
+                expected[token, offset : offset + n] = delta
+        offset += n
+    return expected.to(y.dtype)
+
+
+def _make_lora_weights(output_slices, num_loras, rank, hidden_size, dtype, device):
+    lora_a = [
+        torch.randn(num_loras, 1, rank, hidden_size, dtype=dtype, device=device) * 0.1
+        for _ in output_slices
+    ]
+    lora_b = [
+        torch.randn(num_loras, 1, n, rank, dtype=dtype, device=device) * 0.1
+        for n in output_slices
+    ]
+    return lora_a, lora_b
+
+
+@pytest.mark.parametrize("mapping", ["single", "mixed", "with_base", "small"])
+@pytest.mark.parametrize("add_inputs", [True, False])
+@pytest.mark.parametrize("dtype", DTYPES)
+@pytest.mark.skipif(not current_platform.is_xpu(), reason="skip for non xpu platform")
+def test_lora_linear(mapping: str, add_inputs: bool, dtype):
+    """Both kernel paths of `lora_linear` must match the reference."""
+    torch.manual_seed(0)
+    device, rank, hidden_size, scaling = "xpu:0", 16, 512, 0.5
+    output_slices = [384, 128, 128]
+    num_tokens = 8 if mapping == "small" else 256
+    lora_a, lora_b = _make_lora_weights(
+        output_slices, 3, rank, hidden_size, dtype, device
+    )
+    indices = torch.full((num_tokens,), 1, dtype=torch.long)
+    if mapping == "mixed":
+        indices[num_tokens // 2 :] = 2
+    elif mapping == "with_base":
+        indices[num_tokens // 2 :] = -1
+    x = torch.randn(num_tokens, hidden_size, dtype=dtype, device=device)
+    y = torch.randn(num_tokens, sum(output_slices), dtype=dtype, device=device)
+    expected = _lora_linear_reference(
+        y, x, lora_a, lora_b, indices, output_slices, scaling, add_inputs
+    )
+
+    # The wrapper only reports a single slot when every token uses it.
+    slot = 1 if mapping in ("single", "small") else -1
+    single_lora_slot = torch.full((1,), slot, dtype=torch.int32)
+    used_gemm = _uses_gemm(
+        lambda: lora_linear(
+            y,
+            x,
+            lora_a,
+            lora_b,
+            indices.to(device),
+            single_lora_slot,
+            output_slices,
+            scaling,
+            add_inputs,
+            64,
+        )
+    )
+    assert used_gemm == (mapping == "single")
+    assert_close(y, expected)
+
+
+@pytest.mark.parametrize(
+    "cudagraph_mode, max_capture, mapping, num_tokens, expect_gemm",
+    [
+        # Work threshold for rank 16: 8192 / 16 = 512 tokens.
+        ("NONE", 0, "single", 511, False),
+        ("NONE", 0, "single", 512, True),
+        # Batches that may replay a captured graph never take the GEMM path.
+        ("FULL_AND_PIECEWISE", 1024, "single", 600, False),
+        ("FULL_AND_PIECEWISE", 1024, "single", 1025, True),
+        ("NONE", 0, "mixed", 1024, False),
+        ("NONE", 0, "with_base", 1024, False),
+    ],
+)
+@pytest.mark.skipif(not current_platform.is_xpu(), reason="skip for non xpu platform")
+def test_xpu_add_lora_linear_dispatch(
+    cudagraph_mode, max_capture, mapping, num_tokens, expect_gemm
+):
+    from vllm.config import CUDAGraphMode, VllmConfig, set_current_vllm_config
+    from vllm.config.lora import LoRAConfig
+    from vllm.lora.layers import LoRAMapping
+    from vllm.lora.punica_wrapper.punica_xpu import PunicaWrapperXPU
+
+    torch.manual_seed(0)
+    dtype, device, rank, hidden_size = torch.float16, "xpu:0", 16, 256
+    output_slices = (128, 64)
+    vllm_config = VllmConfig()
+    vllm_config.compilation_config.cudagraph_mode = CUDAGraphMode[cudagraph_mode]
+    vllm_config.compilation_config.max_cudagraph_capture_size = max_capture
+    with set_current_vllm_config(vllm_config):
+        wrapper = PunicaWrapperXPU(
+            2048, 4, device, lora_config=LoRAConfig(max_loras=2, max_lora_rank=rank)
+        )
+
+    # Adapter ids 2 and 3 occupy slots 0 and 1; id 0 means no adapter.
+    token_ids = [3] * num_tokens
+    if mapping == "mixed":
+        token_ids[num_tokens // 2 :] = [2] * (num_tokens - num_tokens // 2)
+    elif mapping == "with_base":
+        token_ids[num_tokens // 2 :] = [0] * (num_tokens - num_tokens // 2)
+    wrapper.update_metadata(
+        LoRAMapping(tuple(token_ids), tuple(token_ids)), [2, 3], 2, 32000
+    )
+    slot_of = {0: -1, 2: 0, 3: 1}
+    indices = torch.tensor([slot_of[i] for i in token_ids])
+
+    lora_a, lora_b = _make_lora_weights(
+        output_slices, 2, rank, hidden_size, dtype, device
+    )
+    x = torch.randn(num_tokens, hidden_size, dtype=dtype, device=device)
+    y = torch.randn(num_tokens, sum(output_slices), dtype=dtype, device=device)
+    expected = _lora_linear_reference(
+        y, x, lora_a, lora_b, indices, output_slices, 1.0, True
+    )
+    used_gemm = _uses_gemm(
+        lambda: wrapper.add_lora_linear(
+            y, x, tuple(lora_a), tuple(lora_b), 1.0, output_slices
+        )
+    )
+    assert used_gemm == expect_gemm
+    assert_close(y, expected)

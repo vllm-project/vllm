@@ -11,8 +11,14 @@ from typing import Any, final
 import torch
 
 from vllm import _custom_ops as ops
+from vllm.config import CUDAGraphMode, get_current_vllm_config_or_none
 from vllm.lora.layers import LoRAMapping
-from vllm.lora.ops.xpu_ops import bgmv_expand, bgmv_expand_slice, bgmv_shrink
+from vllm.lora.ops.xpu_ops import (
+    bgmv_expand,
+    bgmv_expand_slice,
+    bgmv_shrink,
+    lora_linear,
+)
 from vllm.lora.utils import get_captured_lora_counts
 from vllm.triton_utils import HAS_TRITON, triton
 from vllm.utils.math_utils import round_up
@@ -24,6 +30,10 @@ if HAS_TRITON:
     )
 
 from .punica_base import PunicaWrapperBase
+
+# Dense GEMM beats per-token BGMV for single-adapter batches once
+# num_tokens * rank reaches this value (measured on Arc Pro B-series).
+_SINGLE_LORA_GEMM_MIN_WORK = 8192
 
 
 @final
@@ -47,6 +57,21 @@ class PunicaWrapperXPU(PunicaWrapperBase):
 
         self.lora_config = kwargs["lora_config"]
         self.max_loras = self.lora_config.max_loras
+
+        # Slot used by every token of the current batch, or -1. Kept on the host
+        # so the linear op can choose its kernel at runtime without a sync.
+        self._single_lora_slot = torch.full((1,), -1, dtype=torch.int32)
+        # Captured graphs replay a fixed kernel choice, so the single-adapter
+        # path is only taken for batches larger than any captured graph.
+        vllm_config = get_current_vllm_config_or_none()
+        self._max_graph_tokens = 0
+        if vllm_config is not None:
+            compilation_config = vllm_config.compilation_config
+            if compilation_config.cudagraph_mode != CUDAGraphMode.NONE:
+                self._max_graph_tokens = max(
+                    compilation_config.max_cudagraph_capture_size or 0,
+                    compilation_config.max_prefill_cudagraph_capture_tokens or 0,
+                )
 
         # Compute captured LoRA counts for cudagraph specialization.
         captured_lora_counts = get_captured_lora_counts(
@@ -81,6 +106,14 @@ class PunicaWrapperXPU(PunicaWrapperBase):
     ):
         self.is_prefill = mapping.is_prefill
         self._update_base_metadata(mapping, lora_index_to_id, max_loras, vocab_size)
+
+        slot = -1
+        lora_ids = set(mapping.index_mapping)
+        if len(lora_ids) == 1:
+            (lora_id,) = lora_ids
+            if lora_id > 0 and lora_id in lora_index_to_id:
+                slot = lora_index_to_id.index(lora_id)
+        self._single_lora_slot.fill_(slot)
 
         # Prepare kernel metadata tensors
         self.token_mapping_meta.prepare_tensors(self.token_lora_indices)
@@ -265,27 +298,26 @@ class PunicaWrapperXPU(PunicaWrapperBase):
             "To minimize overhead, the buffer should be created by "
             ".add_lora_linear() instead of being passed in."
         )
-        r = lora_b_stacked[0].size(-1)
-        buffer = torch.zeros(  # type: ignore
-            (len(output_slices), x.size(0), r),
-            dtype=x.dtype,
-            device=x.device,
-        )
         add_inputs = kwargs.pop("add_inputs", True)
-        self.add_shrink(
-            buffer,  # type: ignore
-            x,
-            lora_a_stacked,
-            scale,
-            **kwargs,
+        rank = lora_b_stacked[0].size(-1)
+        gemm_min_tokens = max(
+            self._max_graph_tokens + 1, -(-_SINGLE_LORA_GEMM_MIN_WORK // rank)
         )
-        self.add_expand(
-            y,
-            buffer,  # type: ignore
-            lora_b_stacked,
-            output_slices,
-            add_inputs=add_inputs,
-            **kwargs,
+        if any(w.dtype != x.dtype for w in (y, *lora_a_stacked, *lora_b_stacked)):
+            # Mixed precision is only supported by the BGMV kernels.
+            gemm_min_tokens = torch.iinfo(torch.int64).max
+        y_2d = y.view(-1, y.shape[-1])
+        lora_linear(
+            y_2d,
+            x.view(-1, x.shape[-1]),
+            list(lora_a_stacked),
+            list(lora_b_stacked),
+            self._get_token_lora_indices(x),
+            self._single_lora_slot,
+            list(output_slices),
+            scale,
+            add_inputs,
+            gemm_min_tokens,
         )
 
     @property
