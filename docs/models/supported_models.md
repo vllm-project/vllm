@@ -399,7 +399,7 @@ th {
 | `DeepseekV4ForCausalLM` | DeepSeek-V4 | `deepseek-ai/DeepSeek-V4-Flash`, `deepseek-ai/DeepSeek-V4-Pro`, etc. | | ✅︎ |
 | `DomynEdgeForCausalLM` | Domyn Edge | `domyn/Domyn-Edge-Base`, `domyn/Domyn-Edge-SFT`, etc. | | |
 | `DoryForCausalLM` | Dory | `nvidia/NVIDIA-Nemotron-Labs-Dory1.0-4B-BF16` | | |
-| `DotsOCRForCausalLM` | dots_ocr | `rednote-hilab/dots.ocr` | ✅︎ | ✅︎ |
+| `DotsOCRForCausalLM` | [dots_ocr](../usage/troubleshooting.md#gpu-cpu-synchronization-errors) | `rednote-hilab/dots.ocr` | ✅︎ | ✅︎ |
 | `Ernie4_5ForCausalLM` | Ernie4.5 | `baidu/ERNIE-4.5-0.3B-PT`, etc. | ✅︎ | ✅︎ |
 | `Ernie4_5_MoeForCausalLM` | Ernie4.5MoE | `baidu/ERNIE-4.5-21B-A3B-PT`, `baidu/ERNIE-4.5-300B-A47B-PT`, etc. | ✅︎ | ✅︎ |
 | `ExaoneForCausalLM` | EXAONE-3 | `LGAI-EXAONE/EXAONE-3.0-7.8B-Instruct`, etc. | ✅︎ | ✅︎ |
