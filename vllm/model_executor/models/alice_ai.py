@@ -47,7 +47,7 @@ from vllm.model_executor.models.interfaces import (
     MixtureOfExperts,
     SupportsLoRA,
 )
-from vllm.model_executor.models.qwen2_moe import Qwen2MoeMLP
+from vllm.model_executor.models.qwen3_moe import Qwen3MoeMLP
 from vllm.model_executor.models.qwen3_next import (
     Qwen3NextAttention,
     _should_replicate_misaligned_shared_expert,
@@ -255,7 +255,7 @@ class AliceAISparseMoeBlock(nn.Module):
         ):
             self.shared_expert = None
         else:
-            self.shared_expert = Qwen2MoeMLP(
+            self.shared_expert = Qwen3MoeMLP(
                 hidden_size=config.hidden_size,
                 intermediate_size=config.shared_expert_intermediate_size,
                 hidden_act=config.hidden_act,
