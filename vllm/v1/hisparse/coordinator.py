@@ -1001,6 +1001,10 @@ def get_hisparse_coordinator(
     Built on first call and memoised on the HiSparse managers it binds itself
     to. Must run before the first request is admitted.
     """
+    # The Rust KV cache manager (`VLLM_USE_RUST_CORE`) owns its coordinator.
+    rust_coordinator = getattr(kv_cache_manager, "hisparse_coordinator", None)
+    if rust_coordinator is not None:
+        return rust_coordinator(import_step_tokens=import_step_tokens)
     managers = tuple(kv_cache_manager.coordinator.single_type_managers)
     for manager in managers:
         coordinator = getattr(manager, "coordinator", None)

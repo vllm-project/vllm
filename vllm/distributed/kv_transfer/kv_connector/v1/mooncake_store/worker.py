@@ -74,6 +74,9 @@ from vllm.distributed.kv_transfer.kv_connector.v1.mooncake_store.protocol import
     decode_lookup_response,
     encode_lookup_response,
 )
+from vllm.distributed.kv_transfer.kv_connector.v1.mooncake_store.rust_core import (  # noqa: E501
+    make_rust_lookup,
+)
 from vllm.distributed.kv_transfer.kv_connector.v1.mooncake_store.selective_lease import (  # noqa: E501
     SelectiveLookupLease,
 )
@@ -2458,6 +2461,12 @@ class MooncakeStoreWorker:
             return None
         return MooncakeStoreWorkerMetadata(completed_saves=completed_saves)
 
+    @functools.cached_property
+    def _rust_lookup(self) -> Any | None:
+        """Rust `lookup` (without the selective lease) if enabled and
+        supported, built on first use from the final lookup state."""
+        return make_rust_lookup(self)
+
     def lookup(
         self, num_tokens: int, block_hashes: Sequence[BlockHash]
     ) -> MooncakeLookupResult:
@@ -2469,6 +2478,19 @@ class MooncakeStoreWorker:
         """
         if self._capacity_only:
             return MooncakeLookupResult(0)
+
+        rust_lookup = self._rust_lookup
+        if rust_lookup is not None and self._selective_lease is None:
+            candidates = rust_lookup.candidates(num_tokens, block_hashes)
+            if candidates is None:
+                return MooncakeLookupResult(0)
+            res = self._probe_lookup_keys(candidates.keys)
+            if res is None:
+                return MooncakeLookupResult(0)
+            hit_length, boundaries = rust_lookup.resolve(candidates, res)
+            return MooncakeLookupResult(
+                hit_length, tuple(TailKeyBoundary(*b) for b in boundaries)
+            )
 
         token_len = self.coord.align_lookup_length(num_tokens)
         if not block_hashes or token_len <= 0:
@@ -2508,28 +2530,8 @@ class MooncakeStoreWorker:
         if not candidate_keys:
             return MooncakeLookupResult(0)
 
-        exists_fn = (
-            self.store.batch_is_exist
-            if self._selective_lease is None
-            else self._selective_lease.probe
-        )
-        lookup_start = time.perf_counter()
-        try:
-            res = exists_fn(candidate_keys)
-            self._record_kv_connector_operation(
-                "lookup_exists",
-                time.perf_counter() - lookup_start,
-                len(candidate_keys),
-            )
-        except Exception as e:
-            self._record_kv_connector_operation(
-                "lookup_exists",
-                time.perf_counter() - lookup_start,
-                len(candidate_keys),
-                status="error",
-                num_failed_keys=len(candidate_keys),
-            )
-            logger.error("Remote connection failed in lookup: %s", e)
+        res = self._probe_lookup_keys(candidate_keys)
+        if res is None:
             return MooncakeLookupResult(0)
 
         # A (group, hash) is "present" only when every namespace that will be
@@ -2566,6 +2568,34 @@ class MooncakeStoreWorker:
             exists_set,
             functools.partial(self._longest_hit, num_tokens, token_len, block_hashes),
         )
+
+    def _probe_lookup_keys(self, keys: list[str]) -> list[int] | None:
+        """Existence of each lookup key (1 = present), or None if the store
+        could not be reached."""
+        exists_fn = (
+            self.store.batch_is_exist
+            if self._selective_lease is None
+            else self._selective_lease.probe
+        )
+        lookup_start = time.perf_counter()
+        try:
+            res = exists_fn(keys)
+            self._record_kv_connector_operation(
+                "lookup_exists",
+                time.perf_counter() - lookup_start,
+                len(keys),
+            )
+        except Exception as e:
+            self._record_kv_connector_operation(
+                "lookup_exists",
+                time.perf_counter() - lookup_start,
+                len(keys),
+                status="error",
+                num_failed_keys=len(keys),
+            )
+            logger.error("Remote connection failed in lookup: %s", e)
+            return None
+        return res
 
     def _longest_hit(
         self,

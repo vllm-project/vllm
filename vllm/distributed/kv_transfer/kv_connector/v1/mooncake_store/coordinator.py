@@ -6,6 +6,9 @@ from collections.abc import Sequence
 from dataclasses import replace
 from typing import TYPE_CHECKING, NamedTuple, cast
 
+from vllm.distributed.kv_transfer.kv_connector.v1.mooncake_store.rust_core import (  # noqa: E501
+    make_rust_coordinator,
+)
 from vllm.utils.math_utils import cdiv
 from vllm.v1.core.block_pool import BlockPool
 from vllm.v1.core.kv_cache_coordinator import replay_boundaries
@@ -123,6 +126,7 @@ class MooncakeStoreCoordinator:
         # Mirror vLLM core's KVCacheCoordinator.retention_interval.
         self.retention_interval = retention_interval
         self._verify_and_split_kv_cache_groups()
+        self._rust_coord = make_rust_coordinator(self)
 
     @classmethod
     def from_kv_cache_config(
@@ -252,6 +256,8 @@ class MooncakeStoreCoordinator:
         spec would populate physical block `i` at length `token_len`
         (e.g. SWA / Mamba tail-only).
         """
+        if self._rust_coord is not None:
+            return self._rust_coord.load_mask(block_hashes, token_len)
         # Lookup has already applied Eagle's last-block drop.
         masks, _ = self.find_longest_cache_hit(
             block_hashes,
