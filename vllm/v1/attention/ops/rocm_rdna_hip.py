@@ -1,10 +1,10 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
-"""Lookup of the RDNA3.5 attention kernels built into ``_rocm_C``.
+"""Lookup of the RDNA3.5 attention kernels built into `_rocm_C`.
 
-Each entry of ``csrc/rocm/rdna_{decode,prefill}_configs.h`` is one
+Each entry of `csrc/rocm/rdna_{decode,prefill}_configs.h` is one
 build, with its shape and launch knobs as compile-time constants; those of
-``rdna_decode_batch_configs.h`` serve a batch.
+`rdna_decode_batch_configs.h` serve a batch.
 """
 
 import contextlib
