@@ -1,10 +1,16 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
+import functools
+from types import ModuleType
 from typing import Any
 
 import torch
 
 from vllm.logger import init_logger
+from vllm.model_executor.layers.quantization.utils.mxfp4_torch import (
+    dq_mxfp4_torch,
+    qdq_mxfp4_torch,
+)
 from vllm.platforms import current_platform
 from vllm.triton_utils import tl, triton
 from vllm.utils.import_utils import get_triton_kernels_version, has_triton_kernels
@@ -172,18 +178,31 @@ def _swizzle_mxfp4(quant_tensor, scale, num_warps=8):
     return quant_tensor, InFlexData(), scale
 
 
-def _dequant_mxfp4(
-    x: torch.Tensor, scale: torch.Tensor, float_dtype: torch.dtype
-) -> torch.Tensor:
+@functools.cache
+def _get_quark_mx_kernels() -> ModuleType | None:
+    """Return `quark.torch.kernel.mx`, or None when it cannot be imported."""
     try:
         from quark.torch.kernel import mx
     except ImportError as err:
-        raise ImportError(
-            "The package `amd-quark` is required to use "
-            "MX-FP4 models. Please install it with `pip install "
-            "amd-quark`."
-        ) from err
+        # Also hit when `has_quark()` is True but a version-skewed
+        # `quark.torch` does not import.
+        logger.warning(
+            "The `amd-quark` MX-FP4 kernels cannot be imported (%s); falling "
+            "back to a pure-torch MX-FP4 implementation, which is slower and "
+            "uses more memory. Install a compatible `amd-quark` for the fast "
+            "path.",
+            err,
+        )
+        return None
+    return mx
 
+
+def _dequant_mxfp4(
+    x: torch.Tensor, scale: torch.Tensor, float_dtype: torch.dtype
+) -> torch.Tensor:
+    mx = _get_quark_mx_kernels()
+    if mx is None:
+        return dq_mxfp4_torch(x, scale, float_dtype)
     return mx.dq_mxfp4(x, scale, float_dtype)
 
 
@@ -198,15 +217,9 @@ def _dequant_mxfp4_fake(
 def _quant_dequant_mxfp4(
     x: torch.Tensor, scale_calculation_mode: str = "even"
 ) -> torch.Tensor:
-    try:
-        from quark.torch.kernel import mx
-    except ImportError as err:
-        raise ImportError(
-            "The package `amd-quark` is required to use "
-            "MX-FP4 models. Please install it with `pip install "
-            "amd-quark`."
-        ) from err
-
+    mx = _get_quark_mx_kernels()
+    if mx is None:
+        return qdq_mxfp4_torch(x, scale_calculation_mode)
     return mx.qdq_mxfp4(x, scale_calculation_mode)
 
 

@@ -4,7 +4,7 @@
 
 Each backend (Triton, aiter, XPU) quantizes a synthetic bf16/fp16
 tensor to MXFP4, the result is dequantized back to bf16/fp16, and compared
-against the pure-torch reference in `reference_mxfp4.py`.
+against the pure-torch reference in `mxfp4_torch.py`.
 """
 
 import pytest
@@ -31,6 +31,10 @@ from vllm.model_executor.layers.quantization.quark.schemes.quark_ocp_mx import (
 from vllm.model_executor.layers.quantization.quark.utils import (
     quark_quantize_weight_to_mxfp4,
 )
+from vllm.model_executor.layers.quantization.utils.mxfp4_torch import (
+    dq_mxfp4_torch,
+    qdq_mxfp4_torch,
+)
 from vllm.model_executor.layers.quantization.utils.mxfp4_utils import (
     downcast_to_mxfp,
     mxfp4_quantize,
@@ -43,8 +47,6 @@ from vllm.model_executor.layers.quantization.utils.quant_utils import (
 from vllm.model_executor.model_loader.weight_utils import default_weight_loader
 from vllm.model_executor.utils import replace_parameter
 from vllm.platforms import PlatformEnum, current_platform
-
-from .reference_mxfp4 import dq_mxfp4_torch, qdq_mxfp4_torch
 
 
 def fix_negative_zeros(tensor: torch.Tensor) -> torch.Tensor:

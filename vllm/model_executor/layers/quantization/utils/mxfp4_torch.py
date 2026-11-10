@@ -1,5 +1,13 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
+"""Pure-torch OCP MX-FP4 dequantize and quantize-dequantize.
+
+Bit-exact with `quark.torch.kernel.mx`; `mxfp4_utils` falls back to these when
+that cannot be imported. Plain tensor ops with no host synchronization, so they
+run on any backend and can be captured in a CUDA graph, but they are slower and
+use more memory than the `amd-quark` kernels.
+"""
+
 import torch
 
 BFLOAT16_EXP_BIAS = 127
@@ -24,8 +32,13 @@ BFLOAT16_SIGN_EXPONENT_MASK = (
     (1 << (BFLOAT16_EXP_BITS + 1)) - 1
 ) << BFLOAT16_MANTISSA_BITS
 
+_HALF_DTYPE_PARAMS = {
+    torch.float16: (FLOAT16_EXP_BIAS, FLOAT16_MANTISSA_BITS, FLOAT16_EXP_BITS),
+    torch.bfloat16: (BFLOAT16_EXP_BIAS, BFLOAT16_MANTISSA_BITS, BFLOAT16_EXP_BITS),
+}
 
-def e8m0_to_half(scale, half_dtype: torch.dtype):
+
+def e8m0_to_half(scale: torch.Tensor, half_dtype: torch.dtype) -> torch.Tensor:
     assert scale.dtype == torch.uint8
 
     scale_exp = scale.to(torch.int16) - 127
@@ -37,8 +50,11 @@ def e8m0_to_half(scale, half_dtype: torch.dtype):
 
 
 def upcast_fp4_to_fp16_or_bf16(
-    val, float_dtype: torch.dtype, half_exp_bias: int, half_mantissa_bits: int
-):
+    val: torch.Tensor,
+    float_dtype: torch.dtype,
+    half_exp_bias: int,
+    half_mantissa_bits: int,
+) -> torch.Tensor:
     assert val.dtype == torch.uint8
 
     unpacked = torch.zeros(
@@ -47,7 +63,7 @@ def upcast_fp4_to_fp16_or_bf16(
     unpacked[..., 1::2] = (val >> 4) & 0x0F  # Extract high 4 bits.
     unpacked[..., ::2] = val & 0x0F  # Extract low 4 bits.
 
-    # Takes one float4 values represented as b0000xxxx,
+    # Takes one float4 value represented as b0000xxxx,
     # and converts it to the corresponding float16 value.
 
     sign = unpacked >> 3
@@ -79,27 +95,20 @@ def upcast_fp4_to_fp16_or_bf16(
         + (new_mantissa << (half_mantissa_bits - 1))
     )
 
-    assert qdq_val.max() <= 65535
-    assert qdq_val.min() >= 0
     qdq_val = qdq_val.to(torch.uint16)
 
-    result = qdq_val.view(float_dtype)
-
-    return result
+    return qdq_val.view(float_dtype)
 
 
-def dq_mxfp4_torch(
+# Decoding makes several int32 temporaries per element: tens of GiB at once
+# for a full MoE weight, so `dq_mxfp4_torch` decodes this many at a time.
+_DQ_CHUNK_NUMEL = 1 << 26
+
+
+def _dq_mxfp4_rows(
     x: torch.Tensor, scale: torch.Tensor, float_dtype: torch.dtype
 ) -> torch.Tensor:
-    assert x.dtype == torch.uint8
-    assert scale.dtype == torch.uint8
-
-    if float_dtype == torch.float16:
-        half_exp_bias = FLOAT16_EXP_BIAS
-        half_mantissa_bits = FLOAT16_MANTISSA_BITS
-    elif float_dtype == torch.bfloat16:
-        half_exp_bias = BFLOAT16_EXP_BIAS
-        half_mantissa_bits = BFLOAT16_MANTISSA_BITS
+    half_exp_bias, half_mantissa_bits, _ = _HALF_DTYPE_PARAMS[float_dtype]
 
     scale_half = e8m0_to_half(scale, half_dtype=float_dtype)
 
@@ -112,14 +121,49 @@ def dq_mxfp4_torch(
 
     x_half = x_half.reshape(*x_half.shape[:-1], -1, 32)
     x_half = x_half * scale_half[..., None]
-    x_half = x_half.reshape(*x_half.shape[:-2], -1)
+    return x_half.reshape(*x_half.shape[:-2], -1)
 
-    return x_half
+
+def dq_mxfp4_torch(
+    x: torch.Tensor, scale: torch.Tensor, float_dtype: torch.dtype
+) -> torch.Tensor:
+    """Dequantize packed OCP MX-FP4 values with E8M0 block-32 scales.
+
+    `x` holds two E2M1 values per byte (low nibble first) along its last
+    dimension, `scale` one uint8 E8M0 exponent per 32 unpacked elements.
+    """
+    assert x.dtype == torch.uint8
+    assert scale.dtype == torch.uint8
+
+    if float_dtype not in _HALF_DTYPE_PARAMS:
+        raise ValueError(
+            f"MX-FP4 dequantization to {float_dtype} is not implemented, "
+            "only torch.float16 and torch.bfloat16 are supported."
+        )
+
+    out = torch.empty(
+        (*x.shape[:-1], x.shape[-1] * 2), dtype=float_dtype, device=x.device
+    )
+    if out.numel() == 0:
+        return out
+    x_rows = x.reshape(-1, x.shape[-1])
+    scale_rows = scale.reshape(-1, scale.shape[-1])
+    out_rows = out.view(-1, out.shape[-1])
+    step = max(1, _DQ_CHUNK_NUMEL // out_rows.shape[-1])
+    for start in range(0, out_rows.shape[0], step):
+        end = start + step
+        out_rows[start:end] = _dq_mxfp4_rows(
+            x_rows[start:end], scale_rows[start:end], float_dtype
+        )
+    return out
 
 
 def fp16_to_fp4_simulate(
-    val, half_mantissa_bits: int, half_exp_bits: int, half_exp_bias: int
-):
+    val: torch.Tensor,
+    half_mantissa_bits: int,
+    half_exp_bits: int,
+    half_exp_bias: int,
+) -> torch.Tensor:
     # Casts an fp16/bf16 input to the restricted values of float4_e2m1,
     # that is to say [0., 0.5, 1.0, 1.5, 2.0, 3.0, 4.0, 6.0, -0.0,
     # -0.5, -1.0, -1.5, -2.0, -3.0, -4.0, -6.0].
@@ -127,7 +171,7 @@ def fp16_to_fp4_simulate(
     float_type = val.dtype
 
     # "rshift_cuda" not implemented for 'UInt16'
-    val_view = val.view(torch.int16)  # .to(torch.int32)
+    val_view = val.view(torch.int16)
 
     exp = val_view >> half_mantissa_bits
     exp = exp & ((1 << half_exp_bits) - 1)
@@ -146,8 +190,7 @@ def fp16_to_fp4_simulate(
     # Typically 9.
     # Take the min to prevent overflow on `uint16_t half`. This is the case for
     # very small values, correctly mapped to `round_close`.
-    tail_bits = half_mantissa_bits - FLOAT4_MANTISSA_BITS + exp_shift
-    tail_bits[tail_bits >= 16] = 16
+    tail_bits = (half_mantissa_bits - FLOAT4_MANTISSA_BITS + exp_shift).clamp(max=16)
 
     mantissa_plus_one = val_view & ((1 << (half_mantissa_bits + 1)) - 1)
 
@@ -158,14 +201,6 @@ def fp16_to_fp4_simulate(
     round_close = tail < half  # round towards 0
     round_away = tail > half  # round away from 0
     tie = tail == half
-
-    new_mantissa_close = torch.zeros(val.shape, device=val.device, dtype=torch.bool)
-    new_exp_close = torch.zeros(val.shape, device=val.device, dtype=torch.uint16)
-
-    new_mantissa_away = torch.zeros(val.shape, device=val.device, dtype=torch.bool)
-    new_exp_away = torch.zeros(val.shape, device=val.device, dtype=torch.uint16)
-
-    new_exp_tie = torch.zeros(val.shape, device=val.device, dtype=torch.uint16)
 
     # 1. round down
     # if new_exp == 0: # case [0.5, 0.749999]
@@ -226,34 +261,35 @@ def fp16_to_fp4_simulate(
         + (new_mantissa << (half_mantissa_bits - 1))
     )
 
-    assert qdq_val.max() <= 65535
-    assert qdq_val.min() >= 0
     assert qdq_val.dtype == torch.int32
     qdq_val = qdq_val.to(torch.uint16)
 
-    result = qdq_val.view(float_type)
-    return result
+    return qdq_val.view(float_type)
 
 
 def qdq_mxfp4_torch(
     x: torch.Tensor, scale_calculation_mode: str = "even"
 ) -> torch.Tensor:
-    half_dtype = x.dtype
+    """OCP MX-FP4 quantize/dequantize round trip over block-32 groups."""
+    if scale_calculation_mode != "even":
+        raise NotImplementedError(
+            "MX-FP4 quantize-dequantize only implements "
+            f"scale_calculation_mode='even', got {scale_calculation_mode!r}."
+        )
 
+    half_dtype = x.dtype
+    if half_dtype not in _HALF_DTYPE_PARAMS:
+        raise ValueError(
+            f"MX-FP4 quantize-dequantize of {half_dtype} is not implemented, "
+            "only torch.float16 and torch.bfloat16 are supported."
+        )
+    half_exp_bias, half_mantissa_bits, half_exp_bits = _HALF_DTYPE_PARAMS[half_dtype]
     if half_dtype == torch.float16:
-        half_mantissa_bits = FLOAT16_MANTISSA_BITS
-        half_exp_bits = FLOAT16_EXP_BITS
-        half_exp_bias = FLOAT16_EXP_BIAS
         val_to_add = FLOAT16_VAL_TO_ADD
         sign_exponent_mask = FLOAT16_SIGN_EXPONENT_MASK
-    elif half_dtype == torch.bfloat16:
-        half_mantissa_bits = BFLOAT16_MANTISSA_BITS
-        half_exp_bits = BFLOAT16_EXP_BITS
-        half_exp_bias = BFLOAT16_EXP_BIAS
+    else:
         val_to_add = BFLOAT16_VAL_TO_ADD
         sign_exponent_mask = BFLOAT16_SIGN_EXPONENT_MASK
-    else:
-        raise ValueError("not implemented")
 
     x = x.reshape(*x.shape[:-1], -1, 32)
 
@@ -263,8 +299,6 @@ def qdq_mxfp4_torch(
 
     block_max_uint = torch.bitwise_and(block_max + val_to_add, sign_exponent_mask)
 
-    assert block_max_uint.max() <= 65535
-    assert block_max_uint.min() >= 0
     assert block_max_uint.dtype == torch.int32
     block_max_uint = block_max_uint.to(torch.uint16)
 

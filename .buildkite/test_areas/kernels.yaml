@@ -1001,7 +1001,7 @@ steps:
 #   - tests/model_executor/kernels/test_b12x_linear.py
 #   - tests/model_executor/test_b12x_warmup.py
 #   - tests/kernels/quantization/test_block_fp8.py
-#   - tests/quantization/reference_mxfp4.py
+#   - vllm/model_executor/layers/quantization/utils/mxfp4_torch.py
 #   - tests/quantization/test_auto_round.py
 #   commands:
 #   - uv pip install --system b12x==1.5.1
@@ -1246,7 +1246,6 @@ steps:
   - tests/kernels/quantization/test_rocm_mxfp4.py
   - tests/kernels/quantization/test_rocm_mxfp8_linear.py
   - tests/kernels/quantization/test_rocm_skinny_gemms.py
-  - tests/quantization/reference_mxfp4.py
   - tests/kernels/quant_utils.py
   - tests/kernels/utils.py
   commands:

@@ -20,7 +20,10 @@ import pytest
 import torch
 
 from tests.kernels.utils import _assert_accurate, _assert_deterministic
-from tests.quantization.reference_mxfp4 import dq_mxfp4_torch, qdq_mxfp4_torch
+from vllm.model_executor.layers.quantization.utils.mxfp4_torch import (
+    dq_mxfp4_torch,
+    qdq_mxfp4_torch,
+)
 from vllm.platforms import current_platform
 from vllm.platforms.rocm import on_gfx950
 

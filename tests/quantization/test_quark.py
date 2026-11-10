@@ -7,7 +7,9 @@ Run `pytest tests/quantization/test_quark.py`.
 See also `tests/kernels/moe/test_ocp_mx_moe.py`.
 """
 
+import importlib.abc
 import importlib.metadata
+import sys
 from dataclasses import dataclass
 from importlib.util import find_spec
 from types import SimpleNamespace
@@ -73,7 +75,14 @@ from vllm.model_executor.layers.quantization.quark.utils import (
     canonicalize_quark_packed_int4,
     should_ignore_layer,
 )
+from vllm.model_executor.layers.quantization.utils import mxfp4_torch
+from vllm.model_executor.layers.quantization.utils.mxfp4_torch import (
+    dq_mxfp4_torch,
+    qdq_mxfp4_torch,
+)
 from vllm.model_executor.layers.quantization.utils.mxfp4_utils import (
+    _get_quark_mx_kernels,
+    dequant_mxfp4,
     quant_dequant_mxfp4,
 )
 from vllm.model_executor.layers.quantization.utils.quant_utils import (
@@ -120,8 +129,6 @@ else:
     def on_gfx950() -> bool:
         return False
 
-
-from .reference_mxfp4 import dq_mxfp4_torch, qdq_mxfp4_torch
 
 # Minimum amd-quark version for MXFP4/OCP_MX tests (single source of truth).
 QUARK_MXFP4_MIN_VERSION = "0.12"
@@ -1955,6 +1962,91 @@ def test_mxfp4_dynamic_quant_match_quark(
     out_quark_qdq = quant_dequant_mxfp4(inp)
 
     assert torch.equal(out_dynamic_quant, out_quark_qdq)
+
+
+def _mxfp4_test_inputs(float_dtype: torch.dtype):
+    torch.manual_seed(0)
+    x = (torch.rand(48, 32 * 8, dtype=float_dtype, device=DEVICE_TYPE) - 0.5) * 20
+    packed = torch.randint(0, 256, (48, 128), dtype=torch.uint8, device=DEVICE_TYPE)
+    # E8M0 exponents that keep every decoded value finite in `float_dtype`.
+    exp_lo, exp_hi = (80, 170) if float_dtype == torch.bfloat16 else (118, 136)
+    scale = torch.randint(
+        exp_lo, exp_hi, (48, 8), dtype=torch.uint8, device=DEVICE_TYPE
+    )
+    return x, packed, scale
+
+
+class _BlockQuarkTorch(importlib.abc.MetaPathFinder):
+    """Fails `import quark.torch*` like a version-skewed `amd-quark` does."""
+
+    def find_spec(self, fullname, path=None, target=None):
+        if fullname == "quark.torch" or fullname.startswith("quark.torch."):
+            raise ModuleNotFoundError(f"No module named {fullname!r}", name=fullname)
+        return None
+
+
+@pytest.mark.skipif(
+    not QUARK_MXFP4_AVAILABLE,
+    reason=f"amd-quark>={QUARK_MXFP4_MIN_VERSION} is not available",
+)
+@pytest.mark.parametrize("float_dtype", [torch.bfloat16, torch.float16])
+def test_mxfp4_emulation_without_quark_kernels(
+    float_dtype: torch.dtype, monkeypatch: pytest.MonkeyPatch
+):
+    """`amd-quark` can be installed (so `has_quark()` is True and emulation is
+    selected) while `quark.torch` fails to import. MX-FP4 emulation must then
+    fall back to the pure-torch implementation, bit-exact with Quark's kernels.
+    """
+    x, packed, scale = _mxfp4_test_inputs(float_dtype)
+
+    _get_quark_mx_kernels.cache_clear()
+    assert _get_quark_mx_kernels() is not None
+    dq_quark = dequant_mxfp4(packed, scale, float_dtype)
+    qdq_quark = quant_dequant_mxfp4(x)
+
+    for name in [m for m in sys.modules if m.split(".")[:2] == ["quark", "torch"]]:
+        monkeypatch.delitem(sys.modules, name)
+    monkeypatch.setattr(sys, "meta_path", [_BlockQuarkTorch(), *sys.meta_path])
+    _get_quark_mx_kernels.cache_clear()
+    try:
+        assert _get_quark_mx_kernels() is None
+        dq_torch = dequant_mxfp4(packed, scale, float_dtype)
+        qdq_torch = quant_dequant_mxfp4(x)
+        # Decode in several chunks, the last one partial.
+        monkeypatch.setattr(mxfp4_torch, "_DQ_CHUNK_NUMEL", 5 * packed.shape[-1] * 2)
+        dq_torch_chunked = dequant_mxfp4(packed, scale, float_dtype)
+    finally:
+        _get_quark_mx_kernels.cache_clear()
+
+    assert torch.equal(dq_torch, dq_quark)
+    assert torch.equal(dq_torch_chunked, dq_quark)
+    assert torch.equal(qdq_torch, qdq_quark)
+
+
+@pytest.mark.skipif(not current_platform.is_cuda_alike(), reason="needs CUDA graphs")
+@pytest.mark.parametrize("float_dtype", [torch.bfloat16, torch.float16])
+def test_mxfp4_torch_is_cuda_graph_capturable(float_dtype: torch.dtype):
+    """The pure-torch MX-FP4 fallback runs inside vLLM's CUDA graphs, so it
+    must not synchronize with the host."""
+    x, packed, scale = _mxfp4_test_inputs(float_dtype)
+    dq_eager = dq_mxfp4_torch(packed, scale, float_dtype)
+    qdq_eager = qdq_mxfp4_torch(x)
+
+    stream = torch.cuda.Stream()
+    stream.wait_stream(torch.cuda.current_stream())
+    with torch.cuda.stream(stream):
+        dq_mxfp4_torch(packed, scale, float_dtype)
+        qdq_mxfp4_torch(x)
+    torch.cuda.current_stream().wait_stream(stream)
+
+    graph = torch.cuda.CUDAGraph()
+    with torch.cuda.graph(graph):
+        dq_graph = dq_mxfp4_torch(packed, scale, float_dtype)
+        qdq_graph = qdq_mxfp4_torch(x)
+    graph.replay()
+
+    assert torch.equal(dq_graph, dq_eager)
+    assert torch.equal(qdq_graph, qdq_eager)
 
 
 # Unit tests for ``is_layer_skipped`` fused-name handling.

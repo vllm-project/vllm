@@ -18,7 +18,6 @@ from tests.kernels.quantization.nvfp4_utils import (
     quant_nvfp4_tensor,
 )
 from tests.kernels.utils import torch_moe
-from tests.quantization.reference_mxfp4 import dq_mxfp4_torch
 from vllm import _custom_ops as ops
 from vllm.config import ParallelConfig, VllmConfig, set_current_vllm_config
 from vllm.model_executor.layers.fused_moe import fused_topk
@@ -45,6 +44,7 @@ from vllm.model_executor.layers.fused_moe.oracle.nvfp4 import (
 from vllm.model_executor.layers.quantization.utils.b12x_moe import (
     prepare_nvfp4_moe_layer_for_b12x,
 )
+from vllm.model_executor.layers.quantization.utils.mxfp4_torch import dq_mxfp4_torch
 from vllm.model_executor.layers.quantization.utils.mxfp4_utils import mxfp4_quantize
 from vllm.model_executor.layers.quantization.utils.quant_utils import (
     kMxfp4Static,
