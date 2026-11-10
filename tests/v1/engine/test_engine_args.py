@@ -638,7 +638,11 @@ def test_extensible_kv_cache_off_with_lmcache_mp(monkeypatch, multi, requested):
     monkeypatch.setattr(
         vllm.platforms,
         "current_platform",
-        SimpleNamespace(is_cuda_alike=lambda: True, is_rocm=lambda: False),
+        # MultiConnector builds each child's KVTransferConfig, whose
+        # kv_buffer_device defaults to the platform's device_type.
+        SimpleNamespace(
+            device_type="cuda", is_cuda_alike=lambda: True, is_rocm=lambda: False
+        ),
     )
     config = SimpleNamespace(
         cache_config=SimpleNamespace(
