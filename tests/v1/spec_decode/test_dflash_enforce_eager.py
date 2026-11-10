@@ -1,9 +1,9 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
-"""``--speculative-config.enforce_eager`` must reach the drafter (#61337).
+"""`--speculative-config.enforce_eager` must reach the drafter (#61337).
 
 The override was accepted by the CLI but never read: the draft
-``ModelConfig`` unconditionally inherited the target's ``enforce_eager``, and
+`ModelConfig` unconditionally inherited the target's `enforce_eager`, and
 the DFlash speculator sized its CUDA-graph manager off the target runner's
 mode. A drafter-only eager run therefore still captured draft graphs.
 """
@@ -35,6 +35,7 @@ def _make_speculative_config(enforce_eager, target_enforce_eager):
         hf_config=hf_config, architectures=hf_config.architectures, max_model_len=128
     )
     draft.registry.inspect_model_cls.return_value = (None, "DSparkDraftModel")
+    draft.hf_text_config.max_position_embeddings = 128
     # No declared speculator-config class: let the configured method win.
     draft.speculator_config_class = None
     target = MagicMock(
@@ -84,6 +85,8 @@ def _fake_dflash_self(draft_enforce_eager: bool) -> SimpleNamespace:
         vllm_config=SimpleNamespace(),
         device="cpu",
         num_query_per_req=4,
+        max_num_reqs=8,
+        context_kv_only=False,
     )
 
 

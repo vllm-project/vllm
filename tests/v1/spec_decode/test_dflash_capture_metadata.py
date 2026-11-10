@@ -2,11 +2,11 @@
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 """DFlash CUDA-graph capture metadata (#61337).
 
-FlexAttention's capture path requires ``seq_lens_cpu_upper_bound`` to size the
+FlexAttention's capture path requires `seq_lens_cpu_upper_bound` to size the
 recorded graph's static buffers, and the DFlash query-capture path built its
 metadata without it, so capture died on the backend's assertion before any
 draft weight was touched. These tests pin the field through
-``_prepare_dflash_inputs_to_capture`` without needing a GPU.
+`_prepare_dflash_inputs_to_capture` without needing a GPU.
 """
 
 from types import SimpleNamespace

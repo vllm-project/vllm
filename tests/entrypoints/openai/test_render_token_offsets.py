@@ -1,9 +1,9 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 """Unit tests for the token-offsets request/response protocol wiring:
-the request flag flowing into ``TokenizeParams`` and the ``GenerateRequest``
+the request flag flowing into `TokenizeParams` and the `GenerateRequest`
 serialization boundary. End-to-end behavior is covered by
-``tests/entrypoints/scale_out/render/test_render.py``; plain Pydantic field
+`tests/entrypoints/scale_out/render/test_render.py`; plain Pydantic field
 storage is not retested here.
 """
 

@@ -20,6 +20,7 @@ from vllm.entrypoints.openai.chat_completion.protocol import (
 from vllm.entrypoints.openai.chat_completion.serving import (
     OpenAIServingChat,
     _get_mm_token_counts,
+    _make_completion_tokens_details,
     _make_prompt_tokens_details,
 )
 from vllm.entrypoints.serve.engine.protocol import ErrorResponse, UsageInfo
@@ -37,7 +38,7 @@ logger = init_logger(__name__)
 
 
 def _sum_or_none(counts: list[int | None]) -> int | None:
-    """Sum per-prompt counts; ``None`` unless every prompt reported one."""
+    """Sum per-prompt counts; `None` unless every prompt reported one."""
     return None if None in counts else sum(count or 0 for count in counts)
 
 
@@ -68,8 +69,8 @@ class OpenAIServingChatBatch(OpenAIServingChat):
         Returns:
             A tuple of (single_requests, all_conversations, engine_prompts) on
             success — one entry per conversation — or an ErrorResponse on
-            failure. The renderer adjusts ``single_requests`` in place, so
-            sampling must read them rather than rebuilding from ``request``.
+            failure. The renderer adjusts `single_requests` in place, so
+            sampling must read them rather than rebuilding from `request`.
 
         """
         error_check_ret = await self._check_model(request)
@@ -235,10 +236,10 @@ class OpenAIServingChatBatch(OpenAIServingChat):
 
         Fans out N generators (one per conversation in the batch), collects
         the final output for each, and assembles a single
-        ``ChatCompletionResponse`` whose ``choices`` are indexed 0,...,N-1.
+        `ChatCompletionResponse` whose `choices` are indexed 0,...,N-1.
 
         Tool-use and streaming are rejected upstream by the
-        ``check_batch_mode`` validator, so neither needs to be handled here.
+        `check_batch_mode` validator, so neither needs to be handled here.
         """
         created_time = int(time.time())
         final_results: dict[int, RequestOutput] = {}
@@ -251,6 +252,7 @@ class OpenAIServingChatBatch(OpenAIServingChat):
         choices: list[ChatCompletionResponseChoice] = []
         total_prompt_tokens = 0
         total_completion_tokens = 0
+        total_reasoning_tokens = 0
         cached_tokens: list[int | None] = []
         cache_creation_tokens: list[int | None] = []
 
@@ -307,6 +309,9 @@ class OpenAIServingChatBatch(OpenAIServingChat):
                         request=single_request,
                         model_output_token_ids=output.token_ids,
                     )
+                    total_reasoning_tokens += parser.count_reasoning_tokens(
+                        output.token_ids
+                    )
                     if not request.include_reasoning:
                         reasoning = None
                 else:
@@ -358,6 +363,11 @@ class OpenAIServingChatBatch(OpenAIServingChat):
             prompt_tokens=total_prompt_tokens,
             completion_tokens=total_completion_tokens,
             total_tokens=total_prompt_tokens + total_completion_tokens,
+            completion_tokens_details=(
+                _make_completion_tokens_details(total_reasoning_tokens)
+                if self._include_reasoning_tokens_details
+                else None
+            ),
             prompt_tokens_details=_make_prompt_tokens_details(
                 self.enable_prompt_tokens_details,
                 _sum_or_none(cached_tokens),
