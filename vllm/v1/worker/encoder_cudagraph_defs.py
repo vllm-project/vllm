@@ -39,6 +39,10 @@ class EncoderItemSpec:
     default path.
     """
 
+    eager_only: bool = False
+    """Whether the item must run eager, e.g. because it exceeds a shape the
+    captured graphs assume."""
+
     def get_path_output_tokens(self, path: str) -> int:
         if path == "default" and not self.path_output_tokens:
             return self.output_tokens

@@ -37,7 +37,9 @@ For two-tower vision encoders (e.g., DeepSeek-OCR's SAM + CLIP with dynamic tili
 !!! note
     Encoder CUDA Graph has currently been tested with `--mm-encoder-attn-backend=FLASH_ATTN` and `--mm-encoder-attn-backend=FLASHINFER` on Blackwell GPUs.
     For Qwen2-VL and Qwen2.5-VL only FA2 and FA3 has been tested.
+    Gemma 4 has been tested on H100 with `FLASH_ATTN`, `FLASHINFER` and `TRITON_ATTN`.
     Encoder CUDA Graph has also been tested with AMD MI350X (gfx950) used `--mm-encoder-attn-backend=FLASH_ATTN` (the ROCm default).
+    Models that pack images with `cu_seqlens` cannot be captured with `--mm-encoder-attn-backend=TORCH_SDPA`, which splits the sequences on the host: startup stops with an error naming another backend (e.g. `TRITON_ATTN` on RDNA GPUs, where `TORCH_SDPA` is the default without the flash-attn Triton backend).
 
 ## Motivation
 

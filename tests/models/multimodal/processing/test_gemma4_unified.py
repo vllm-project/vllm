@@ -2,6 +2,7 @@
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 
 from collections.abc import Mapping
+from types import SimpleNamespace
 
 import pytest
 import torch
@@ -500,3 +501,10 @@ def test_cuda_execution_with_gpu_sync_allowed():
     assert len(out) == 2
     assert out[0].device.type == "cuda"
     assert out[0].dtype == torch.bfloat16
+
+
+def test_encoder_cudagraph_config_has_no_modalities():
+    """No vision tower to capture: the embedder runs eager."""
+    model = object.__new__(Gemma4UnifiedForConditionalGeneration)  # type: ignore[type-abstract]
+    model.config = SimpleNamespace(text_config=SimpleNamespace(hidden_size=8))
+    assert model.get_encoder_cudagraph_config().modalities == []
