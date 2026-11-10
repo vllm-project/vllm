@@ -4,34 +4,34 @@
 vLLM DP ranks with expert parallelism.
 
 The reference example for the backend, sized to fit a CI runner:
-``CheckpointNameSource`` over an FSDP2 model, one serve actor per rank, the
+`CheckpointNameSource` over an FSDP2 model, one serve actor per rank, the
 HTTP control plane, and assertions so it can run unattended.
 
 Why a MoE model rather than a small dense one: the point of sharded RDT is that
 each inference worker pulls only the slices it consumes, so the example is only
 meaningful when no rank holds the whole model. That needs experts on both sides.
-``Qwen/Qwen1.5-MoE-A2.7B`` is the reference shape, a real MoE of the same family
+`Qwen/Qwen1.5-MoE-A2.7B` is the reference shape, a real MoE of the same family
 as the 30B model the big example uses. Its WEIGHTS are never read: the trainer
-builds the config and the server runs ``--load-format dummy``, so the sync is
+builds the config and the server runs `--load-format dummy`, so the sync is
 what is under test and nothing is downloaded but the config and tokenizer. A
-smaller MoE via ``RDT_MODEL`` changes nothing about what is exercised, which is
+smaller MoE via `RDT_MODEL` changes nothing about what is exercised, which is
 what CI runs.
 
 The trainer publishes CHECKPOINT names, not the names its own modules carry:
-Transformers fuses each layer's experts into ``[E, ...]`` tensors
-(``mlp.experts.gate_up_proj``/``down_proj``) while the checkpoint stores them per
-expert, and vLLM's MoE loaders read the per-expert form. ``CheckpointNameSource``
+Transformers fuses each layer's experts into `[E, ...]` tensors
+(`mlp.experts.gate_up_proj`/`down_proj`) while the checkpoint stores them per
+expert, and vLLM's MoE loaders read the per-expert form. `CheckpointNameSource`
 splits them back, which is the same conversion a real trainer does when it maps
 its internal layout onto checkpoint names. Publishing the fused names instead
 works only for the Qwen families, whose loaders happen to accept them.
 
 FSDP2 shards those fused tensors on dim 0 — the expert dimension — so after
 sharding no rank stores every expert, and the inference side gets real EP from
-``--enable-expert-parallel`` over DP2. Two simplifications an example can afford
+`--enable-expert-parallel` over DP2. Two simplifications an example can afford
 and a real trainer cannot: each rank BUILDS the whole model before
-``fully_shard`` splits it (fine for a tiny config, so nothing here streams a
+`fully_shard` splits it (fine for a tiny config, so nothing here streams a
 checkpoint), and iteration all-gathers every parameter, so ownership stays
-uniform. Serving only the experts a rank holds (``held_names``) is where a real
+uniform. Serving only the experts a rank holds (`ParamMeta.owners`) is where a real
 trainer earns its keep and is deliberately out of scope.
 
 Model naming is load-bearing: names are mapped onto checkpoint keys one-to-one,
@@ -47,8 +47,8 @@ Run:
     python examples/rl/rlhf_sharded_rdt_small_ep.py
 
 Needs 4 GPUs on one node, each big enough for the whole model, since every rank
-builds it before ``fully_shard`` splits it: the default is ~29 GiB in bf16, so
-40 GiB cards and up. Set ``RDT_MODEL`` to a tiny MoE on smaller GPUs. Joins an
+builds it before `fully_shard` splits it: the default is ~29 GiB in bf16, so
+40 GiB cards and up. Set `RDT_MODEL` to a tiny MoE on smaller GPUs. Joins an
 existing Ray cluster if there is one and otherwise starts its own.
 """
 

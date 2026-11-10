@@ -86,7 +86,7 @@ For more advanced usage, including parallel tool calls and different model-speci
 ## Named Function Calling
 
 vLLM supports named function calling in the chat completion API by default. This should work with most structured outputs backends supported by vLLM. You are guaranteed a validly-parsable function call - not a
-high-quality one.
+high-quality one. On recent Mistral models in the official Mistral format, a call is not guaranteed; see [Mistral Models](#mistral-models-mistral).
 
 vLLM will use structured outputs to ensure the response matches the tool parameter object defined by the JSON schema in the `tools` parameter.
 For best results, we recommend ensuring that the expected output format / schema is specified in the prompt to ensure that the model's intended generation is aligned with the schema that it's being forced to generate by the structured outputs backend.
@@ -100,7 +100,7 @@ In the Responses API, `tool_choice={"type": "function", "name": "..."}` can sele
 
 vLLM supports the `tool_choice='required'` option in the chat completion API. Similar to the named function calling, it also uses structured outputs, so this is enabled by default and will work with any supported model. However, support for alternative decoding backends are on the [roadmap](../usage/v1_guide.md#features) for the V1 engine.
 
-When tool_choice='required' is set, the model is guaranteed to generate one or more tool calls based on the specified tool list in the `tools` parameter. The number of tool calls depends on the user's query. The output format strictly follows the schema defined in the `tools` parameter.
+When tool_choice='required' is set, the model is guaranteed to generate one or more tool calls based on the specified tool list in the `tools` parameter. The number of tool calls depends on the user's query. The output format strictly follows the schema defined in the `tools` parameter. On recent Mistral models in the official Mistral format, a call is not guaranteed; see [Mistral Models](#mistral-models-mistral).
 
 ## None Function Calling
 
@@ -261,6 +261,12 @@ Known issues:
     * [examples/tool_chat_template_mistral_parallel.jinja](../../examples/tool_chat_template_mistral_parallel.jinja) - this is a "better" version that adds a tool-use system prompt
       when tools are provided, that results in much better reliability when working with parallel tool calling.
 
+3. With the official Mistral format (`--tokenizer_mode mistral`) and a Tekken v11+ tokenizer, as in recent models such as Mistral Small 3.2, Ministral 3 and Magistral,
+   Chat Completions tool calls are constrained by [mistral-common](https://github.com/mistralai/mistral-common)'s grammar.
+   For `tool_choice="required"` and named tool choice, this grammar allows content, including reasoning, before the tool calls, and the model is not told that a call is required.
+   A call is therefore not guaranteed: the model can keep answering in text until `max_tokens` (`finish_reason="length"`).
+   Tool names are enforced only for a named tool choice or when at least one tool sets `strict: true`, and argument schemas only for tools with `strict: true`.
+
 Recommended flags:
 
 1. To use the official Mistral AI's format:
@@ -325,6 +331,12 @@ Supported models:
 * `ibm-granite/granite-4.0-h-small` and other Granite 4.0 models
 
     Recommended flags: `--tool-call-parser granite4`
+
+* `ibm-granite/granite-4.2-8b` and other Granite 4.2 models
+
+    Recommended flags: `--tool-call-parser granite_toolcall_parser`
+
+    Granite 4.2 emits tool calls in an XML format (`<tool_call><function=...><parameter=...>`). The chat template from Hugging Face can be used directly. Parallel function calls are supported.
 
 * `ibm-granite/granite-3.0-8b-instruct`
 
@@ -429,6 +441,18 @@ Supported models:
 * `moonshotai/Kimi-K2-Instruct`
 
 Flags: `--tool-call-parser kimi_k2`
+
+### Kolibri 1 Models (`hf`)
+
+Supported models:
+
+* `Aleph-Alpha/Kolibri-1`
+* `Aleph-Alpha/Kolibri-1-BF16`
+
+Flags: `--tool-call-parser hf --reasoning-parser hf --enable-auto-tool-choice`
+
+The `hf` parsers read Kolibri 1's output format from the [checkpoint response template](#checkpoint-response-templates-hf), so the limits of the `hf` parser apply.
+Kolibri 1 emits Hermes-style tool calls, so `--tool-call-parser hermes --reasoning-parser qwen3` also works, for example for tool choices the `hf` parser rejects.
 
 ### Hunyuan Models (`hunyuan_a13b`)
 
@@ -575,7 +599,7 @@ Flags: `--tool-call-parser apertus`
 
 The Muse parser supports the ATEM tool-call format used by Muse Spark Open.
 Enable tool calling with `--enable-auto-tool-choice`,
-`--tool-call-parser muse`, and `--reasoning-parser muse`. `musespark1x` is an
+`--tool-call-parser muse`, and `--reasoning-parser muse`. `musespark` is an
 alias for both parsers. The `muse_glimmer` entry points share the Muse implementation while retaining
 their original channel semantics, including recipient-less tool-parser content.
 
@@ -585,10 +609,37 @@ ATEM tool-call extraction. `to=developer` messages are omitted. Framing
 special tokens are preserved for parsing and removed from surfaced content.
 
 The Rust frontend also provides a Muse unified parser under `muse` and
-`musespark1x`, and selects it automatically for Muse Spark model names.
+`musespark`, and selects it automatically for Muse Spark model names.
 Existing automatic parser selection for Muse Glimmer is unchanged.
 
 Parser availability alone does not enable Muse Spark model execution.
+
+### ZAYA1 Models (`zaya`)
+
+Supported models:
+
+* `Zyphra/ZAYA1-8B`
+* `Zyphra/ZAYA1-74B-preview`
+
+ZAYA1 uses the Qwen3-Coder XML format inside `<zyphra_tool_call>` tags. Pair it
+with `--reasoning-parser zaya`, which also treats a tool call as the end of
+reasoning.
+
+Flags: `--enable-auto-tool-choice --tool-call-parser zaya --reasoning-parser zaya`
+
+`zaya_xml` is an alias of `zaya`.
+
+### Ripple Models (`ripple`)
+
+Supported models:
+
+* `ricursiveAI/Ripple-65B-Preview`
+* `ricursiveAI/Ripple-65B-Preview-NVFP4`
+
+Ripple emits Hermes-style JSON tool calls inside `<tool_call>` tags after an
+optional `<think>` block. Pair it with `--reasoning-parser ripple`.
+
+Flags: `--enable-auto-tool-choice --tool-call-parser ripple --reasoning-parser ripple`
 
 ### Models with Pythonic Tool Calls (`pythonic`)
 

@@ -6,10 +6,10 @@ This module hosts the thin facade classes that vLLM's KV-connector layer
 instantiates. Almost all the real work lives in the per-mode scheduler
 and worker classes; the connector classes here only forward calls.
 
-* :class:`NixlBaseConnector` – common logic shared by pull and push.
-* :class:`NixlPullConnector` – pull-based (READ) KV transfer.
-* :class:`NixlPushConnector` – push-based (WRITE) KV transfer.
-* ``NixlConnector`` – backward-compatible alias for :class:`NixlPullConnector`.
+* `NixlBaseConnector` – common logic shared by pull and push.
+* `NixlPullConnector` – pull-based (READ) KV transfer.
+* `NixlPushConnector` – push-based (WRITE) KV transfer.
+* `NixlConnector` – backward-compatible alias for `NixlPullConnector`.
 """
 
 from typing import TYPE_CHECKING, Any
@@ -79,6 +79,12 @@ class NixlBaseConnector(KVConnectorBase_V1, SupportsHMA):
     """Base connector with common logic shared by pull and push modes."""
 
     _cache_hit_source = CacheHitSource.P2P
+
+    @classmethod
+    def supports_lookahead_block_hashes(
+        cls, kv_transfer_config: "KVTransferConfig"
+    ) -> bool:
+        return True
 
     @property
     def supports_divergent_local_hybrid_hits(self) -> bool:
@@ -419,7 +425,7 @@ class NixlPushConnector(NixlBaseConnector):
         """Drive push processing on the worker.
 
         The worker enqueues registrations / finished blocks for the
-        background ``nixl-push-writer`` thread; the writer issues the
+        background `nixl-push-writer` thread; the writer issues the
         WRITE transfers and polls NIXL notifs without further
         engine-thread involvement.
         """

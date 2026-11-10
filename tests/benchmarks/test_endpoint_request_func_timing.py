@@ -25,10 +25,13 @@ import pytest
 import vllm.benchmarks.lib.endpoint_request_func as request_func_module
 from vllm.benchmarks.lib.endpoint_request_func import (
     RequestFuncInput,
+    RequestFuncOutput,
+    _update_server_metrics,
     async_request_openai_audio,
     async_request_openai_chat_completions,
     async_request_openai_completions,
 )
+from vllm.benchmarks.serve import _get_server_metrics_results
 
 pytestmark = pytest.mark.skip_global_cleanup
 
@@ -73,19 +76,20 @@ def _token_chunk(index: int, *, chat: bool) -> bytes:
     return _sse({"id": "cmpl-test", "object": "x", "choices": [choice]})
 
 
-def _usage_chunk(n_tokens: int) -> bytes:
-    return _sse(
-        {
-            "id": "cmpl-test",
-            "object": "x",
-            "choices": [],
-            "usage": {
-                "prompt_tokens": 7,
-                "completion_tokens": n_tokens,
-                "total_tokens": 7 + n_tokens,
-            },
-        }
-    )
+def _usage_chunk(n_tokens: int, *, metrics: dict[str, Any] | None = None) -> bytes:
+    payload = {
+        "id": "cmpl-test",
+        "object": "x",
+        "choices": [],
+        "usage": {
+            "prompt_tokens": 7,
+            "completion_tokens": n_tokens,
+            "total_tokens": 7 + n_tokens,
+        },
+    }
+    if metrics is not None:
+        payload["metrics"] = metrics
+    return _sse(payload)
 
 
 def _role_chunk(role: str = "assistant") -> bytes:
@@ -109,17 +113,18 @@ def _build_stream(
     ttft_delay: float = 0.0,
     itl_delay: float = 0.0,
     usage_delay: float = 0.0,
+    metrics: dict[str, Any] | None = None,
 ) -> list[tuple[float, bytes]]:
-    """Build ``(delay_before_chunk, payload)`` pairs for one streamed response.
+    """Build `(delay_before_chunk, payload)` pairs for one streamed response.
 
-    ``vllm bench serve`` always requests ``stream_options.include_usage``, so a
+    `vllm bench serve` always requests `stream_options.include_usage`, so a
     choice-less usage chunk always trails the final token.
     """
     chunks = [
         (ttft_delay if i == 0 else itl_delay, _token_chunk(i, chat=chat))
         for i in range(n_tokens)
     ]
-    chunks.append((usage_delay, _usage_chunk(n_tokens)))
+    chunks.append((usage_delay, _usage_chunk(n_tokens, metrics=metrics)))
     chunks.append((0.0, b"data: [DONE]\n\n"))
     return chunks
 
@@ -170,6 +175,29 @@ class _FakeSession:
 
 
 # (id, request function, api url, is_chat_payload)
+_STREAM_ERROR_MESSAGE = "internal server error during generation"
+
+
+def _error_chunk(message: str = _STREAM_ERROR_MESSAGE) -> bytes:
+    """The error envelope the server sends inside an HTTP 200 stream.
+
+    The stream generators dump an `ErrorResponse` through
+    `create_streaming_error_response`, so the event carries an `error`
+    object and no `choices`. A dead engine, a failed tool parser and a
+    generation error all arrive this way, so the message itself is arbitrary.
+    """
+    return _sse(
+        {
+            "error": {
+                "message": message,
+                "type": "InternalServerError",
+                "param": None,
+                "code": 500,
+            }
+        }
+    )
+
+
 STREAMING_ENDPOINTS = [
     (
         "completions",
@@ -230,6 +258,75 @@ def _run(
     if expect_success:
         assert output.success, output.error
     return output
+
+
+@pytest.mark.parametrize(
+    "endpoint_id,request_func,api_url,chat",
+    STREAMING_ENDPOINTS[:2],
+    ids=[e[0] for e in STREAMING_ENDPOINTS[:2]],
+)
+def test_openai_request_preserves_server_queue_time_and_ttft(
+    monkeypatch: pytest.MonkeyPatch,
+    endpoint_id: str,
+    request_func,
+    api_url: str,
+    chat: bool,
+) -> None:
+    """Capture final-chunk server metrics while retaining client timing."""
+    monkeypatch.setattr(request_func_module, "time", _FakeTime(_ScriptedClock()))
+    chunks = _build_stream(
+        1,
+        chat=chat,
+        metrics={"queue_time_ms": 0, "time_to_first_token_ms": 1250.0},
+    )
+    output = _run(request_func, api_url, endpoint_id, chunks, 1)
+
+    assert output.server_queue_time == 0.0
+    assert output.server_ttft == pytest.approx(1.25)
+    assert output.ttft == pytest.approx(1.0)
+    assert output.latency == pytest.approx(1.0)
+
+
+@pytest.mark.parametrize(
+    "data",
+    [
+        {"metrics": None},
+        {"metrics": {"queue_time_ms": None}},
+        {"metrics": "invalid"},
+        {},
+        {"metrics": {"queue_time_ms": True, "time_to_first_token_ms": False}},
+        {"metrics": {"speculative_decoding": {}}},
+    ],
+)
+def test_server_metrics_tolerate_unavailable_values(data: dict[str, Any]) -> None:
+    output = RequestFuncOutput()
+
+    _update_server_metrics(output, data)
+
+    assert output.server_queue_time is None
+    assert output.server_ttft is None
+
+
+def test_server_metrics_results_preserve_alignment() -> None:
+    outputs = [
+        RequestFuncOutput(server_queue_time=0.1, server_ttft=0.2),
+        RequestFuncOutput(),
+        RequestFuncOutput(server_ttft=0.3),
+    ]
+
+    assert _get_server_metrics_results(outputs) == {
+        "server_queue_times": [0.1, None, None],
+        "server_ttfts": [0.2, None, 0.3],
+    }
+    assert _get_server_metrics_results([RequestFuncOutput(server_queue_time=0.0)]) == {
+        "server_queue_times": [0.0],
+        "server_ttfts": [None],
+    }
+    assert _get_server_metrics_results([RequestFuncOutput(server_ttft=0.0)]) == {
+        "server_queue_times": [None],
+        "server_ttfts": [0.0],
+    }
+    assert _get_server_metrics_results([RequestFuncOutput()]) == {}
 
 
 @pytest.mark.parametrize(
@@ -407,6 +504,37 @@ def test_streamed_output_is_invariant_to_transport_chunk_boundaries(
     assert asyncio.run(run_all_splits()) == []
 
 
+@pytest.mark.parametrize(
+    "endpoint_id,request_func,api_url,chat",
+    STREAMING_ENDPOINTS,
+    ids=[e[0] for e in STREAMING_ENDPOINTS],
+)
+def test_error_event_stream_is_not_reported_as_success(
+    endpoint_id: str,
+    request_func,
+    api_url: str,
+    chat: bool,
+) -> None:
+    """A stream ending in a server error event must fail, tokens or not.
+
+    Generation that fails after the response has started cannot change the
+    HTTP 200 already sent, so the server reports the failure as an error event
+    before `[DONE]`. Counting that request as complete hides the failure and
+    feeds its truncated token count and short latency into the aggregates.
+    """
+    n_tokens = 2
+    chunks = [(0.0, _token_chunk(i, chat=chat)) for i in range(n_tokens)]
+    chunks.append((0.0, _error_chunk()))
+    chunks.append((0.0, b"data: [DONE]\n\n"))
+
+    output = _run(
+        request_func, api_url, endpoint_id, chunks, n_tokens, expect_success=False
+    )
+
+    assert not output.success
+    assert _STREAM_ERROR_MESSAGE in output.error
+
+
 # ``benchmarks/backend_request_func.py`` is a standalone script rather than a
 # package module, so it is loaded by path. It also builds its own ClientSession,
 # so the scripted stream is injected by swapping the module's aiohttp reference.
@@ -524,6 +652,30 @@ def test_legacy_usage_only_stream_is_not_reported_as_success(
 
     assert not output.success
     assert output.itl == []
+
+
+@pytest.mark.parametrize(
+    "endpoint_id,func_name,api_url,chat",
+    LEGACY_ENDPOINTS,
+    ids=[e[0] for e in LEGACY_ENDPOINTS],
+)
+def test_legacy_error_event_stream_is_not_reported_as_success(
+    monkeypatch: pytest.MonkeyPatch,
+    endpoint_id: str,
+    func_name: str,
+    api_url: str,
+    chat: bool,
+) -> None:
+    """The standalone script must fail an error-terminated stream too."""
+    n_tokens = 2
+    chunks = [(0.0, _token_chunk(i, chat=chat)) for i in range(n_tokens)]
+    chunks.append((0.0, _error_chunk()))
+    chunks.append((0.0, b"data: [DONE]\n\n"))
+
+    output = _run_legacy(monkeypatch, func_name, api_url, endpoint_id, chunks, n_tokens)
+
+    assert not output.success
+    assert _STREAM_ERROR_MESSAGE in output.error
 
 
 def _run_chat(
@@ -694,3 +846,74 @@ def test_chat_empty_string_token_is_counted(
     assert residual == pytest.approx(0.0, abs=tick / 1000), (
         f"{client}: (latency - ttft) - sum(itl) = {residual!r}"
     )
+
+
+def _reasoning_chunk(field: str, text: str) -> bytes:
+    choice = {"index": 0, "delta": {field: text}}
+    return _sse(
+        {"id": "cmpl-test", "object": "chat.completion.chunk", "choices": [choice]}
+    )
+
+
+@pytest.mark.parametrize("client", ["packaged", "legacy"])
+@pytest.mark.parametrize("reasoning_field", ["reasoning", "reasoning_content"])
+def test_chat_reasoning_chunk_is_streamed_output(
+    monkeypatch: pytest.MonkeyPatch, client: str, reasoning_field: str
+) -> None:
+    """Reasoning deltas count toward TTFT under either field name.
+
+    vLLM streams `reasoning`; SGLang streams `reasoning_content` and omits
+    `content` from reasoning deltas.
+    """
+    tick = 1.0
+    clock = _ScriptedClock(tick=tick)
+    n_tokens = 4
+
+    chunks = [
+        (0.0, _role_chunk()),
+        (0.0, _reasoning_chunk(reasoning_field, "think")),
+        (0.0, _reasoning_chunk(reasoning_field, "ing")),
+        (0.0, _token_chunk(0, chat=True)),
+        (0.0, _token_chunk(1, chat=True)),
+        (0.0, _usage_chunk(n_tokens)),
+        (0.0, b"data: [DONE]\n\n"),
+    ]
+    output = _run_chat(monkeypatch, client, chunks, n_tokens, clock=clock)
+
+    assert output.success, output.error
+    assert len(output.itl) == n_tokens - 1
+
+    # Clock read 0 is start_time (1000.0).
+    # Clock read 1 is role chunk (1001.0); skipped because delta carries role.
+    # Clock read 2 is the first reasoning chunk (1002.0); sets TTFT = 2 * tick.
+    expected_ttft = 2.0 * tick
+    assert output.ttft == pytest.approx(expected_ttft, abs=tick / 1000), (
+        f"{client}/{reasoning_field}: TTFT {output.ttft} should be measured to the "
+        f"first reasoning chunk ({expected_ttft}), not the first content chunk "
+        f"({4.0 * tick})"
+    )
+
+    residual = (output.latency - output.ttft) - sum(output.itl)
+    assert residual == pytest.approx(0.0, abs=tick / 1000), (
+        f"{client}/{reasoning_field}: (latency - ttft) - sum(itl) = {residual!r}"
+    )
+
+
+@pytest.mark.parametrize("client", ["packaged", "legacy"])
+@pytest.mark.parametrize("reasoning_field", ["reasoning", "reasoning_content"])
+def test_chat_reasoning_only_stream_succeeds(
+    monkeypatch: pytest.MonkeyPatch, client: str, reasoning_field: str
+) -> None:
+    """A request that stops while still reasoning, e.g. at max_tokens, succeeds."""
+    n_tokens = 2
+    chunks = [
+        (0.0, _role_chunk()),
+        (0.0, _reasoning_chunk(reasoning_field, "think")),
+        (0.0, _reasoning_chunk(reasoning_field, "ing")),
+        (0.0, _usage_chunk(n_tokens)),
+        (0.0, b"data: [DONE]\n\n"),
+    ]
+    output = _run_chat(monkeypatch, client, chunks, n_tokens)
+
+    assert output.success, f"{client}/{reasoning_field}: {output.error}"
+    assert len(output.itl) == n_tokens - 1

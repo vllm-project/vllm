@@ -2,12 +2,13 @@
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 import time
 from collections.abc import Sequence
+from functools import cached_property
 from typing import Any, TypeAlias, cast
 
 import torch.nn.functional as F
 
 from vllm import PoolingParams, PoolingRequestOutput, TokensPrompt
-from vllm.exceptions import ChatTemplateResolutionError
+from vllm.exceptions import ChatTemplateResolutionError, VLLMValidationError
 from vllm.logger import init_logger
 from vllm.renderers import TokenizeParams, merge_kwargs
 from vllm.renderers.hf import resolve_chat_template, safe_apply_chat_template
@@ -39,6 +40,7 @@ from ..typing import (
     RequestGenerator,
     ScoringRenderParams,
 )
+from ..utils import reserve_tokens
 from .protocol import RerankRequest, ScoreRequest, ScoringRequest
 from .typing import ScoreData, ScoreInput, ScoringData
 from .utils import (
@@ -619,6 +621,14 @@ class CrossEncoderIOProcessor(ScoringIOProcessor):
     #######################################
     # helpers
 
+    @cached_property
+    def num_post_process_tokens(self) -> int:
+        if self.model is None:
+            return 0
+        probe = TokensPrompt(prompt_token_ids=[])
+        self.model.post_process_tokens(probe)
+        return len(probe["prompt_token_ids"])
+
     def render(
         self,
         render_params: EncodeCMPLRenderParams
@@ -637,6 +647,11 @@ class CrossEncoderIOProcessor(ScoringIOProcessor):
         params = render_params["params"]
         prompt_extras = render_params["prompt_extras"]
 
+        # Leave room for the tokens that post_process_tokens appends after
+        # truncation (e.g. the JinaVL score token), so the limits count them.
+        if self.num_post_process_tokens:
+            tok_params = reserve_tokens(tok_params, self.num_post_process_tokens)
+
         _, engine_prompt = self.get_score_prompt(
             data_1=render_params["data_1"],
             data_2=render_params["data_2"],
@@ -650,6 +665,9 @@ class CrossEncoderIOProcessor(ScoringIOProcessor):
         )
 
         tok_params.apply_post_tokenization(self.tokenizer, engine_prompt)
+
+        if self.model is not None:
+            self.model.post_process_tokens(engine_prompt)
 
         if token_type_ids := engine_prompt.pop("token_type_ids", None):
             params = params.clone()
@@ -736,7 +754,11 @@ class CrossEncoderIOProcessor(ScoringIOProcessor):
                         query_tokens = tokenizer.encode(
                             prompt_1, add_special_tokens=False
                         )
-                        num_special = get_num_special_tokens_for_pair(tokenizer)
+                        num_special = (
+                            get_num_special_tokens_for_pair(tokenizer)
+                            if local_kwargs.get("add_special_tokens", True)
+                            else 0
+                        )
                         doc_limit_max_length = (
                             len(query_tokens) + max_tokens_per_doc + num_special
                         )
@@ -747,8 +769,9 @@ class CrossEncoderIOProcessor(ScoringIOProcessor):
                             )
                         else:
                             effective_max_length = doc_limit_max_length
-                        local_kwargs["truncation"] = "only_second"
-                        local_kwargs["max_length"] = effective_max_length
+                        if len(query_tokens) + num_special < effective_max_length:
+                            local_kwargs["truncation"] = "only_second"
+                            local_kwargs["max_length"] = effective_max_length
 
                     prompt_inputs = tokenizer(
                         text=prompt_1, text_pair=prompt_2, **local_kwargs
@@ -802,9 +825,6 @@ class CrossEncoderIOProcessor(ScoringIOProcessor):
         if (token_type_ids := prompt_inputs.get("token_type_ids")) is not None:
             engine_prompt["token_type_ids"] = token_type_ids
 
-        if self.model is not None:
-            self.model.post_process_tokens(engine_prompt)
-
         if mm_data is not None:
             engine_prompt["multi_modal_data"] = mm_data
         if mm_uuids is not None:
@@ -813,7 +833,17 @@ class CrossEncoderIOProcessor(ScoringIOProcessor):
         return full_prompt, engine_prompt
 
 
-class JinaRankingIOProcessorMixin:
+class JinaRankingIOProcessorMixin(PoolingIOProcessor):
+    def render(self, render_params: AnyRenderParam) -> PoolingEngineInput:
+        if render_params["tok_params"].truncate_prompt_tokens is not None:
+            raise VLLMValidationError(
+                "JinaForRanking does not support truncate_prompt_tokens. Use "
+                "max_tokens_per_query and max_tokens_per_doc for scoring, or "
+                "truncate each input text on the client.",
+                parameter="truncate_prompt_tokens",
+            )
+        return super().render(render_params)
+
     @staticmethod
     def format_docs_prompts_func(
         query: str,
@@ -832,9 +862,12 @@ class JinaRankingIOProcessorMixin:
             special_tokens = default_special_tokens
 
         def sanitize_input(text: str) -> str:
-            for token in special_tokens.values():
-                text = text.replace(token, "")
-            return text
+            while True:
+                previous = text
+                for token in special_tokens.values():
+                    text = text.replace(token, "")
+                if text == previous:
+                    return text
 
         query = sanitize_input(query)
         docs = [sanitize_input(doc) for doc in docs]
@@ -930,10 +963,6 @@ class JinaRankingIOProcessor(LateInteractionIOProcessor, JinaRankingIOProcessorM
                 for q, d in zip(queries, docs)
             ]
 
-        # Forward truncation from the real request: the base factory reads
-        # these off ctx.request, so omitting them here silently drops
-        # truncate_prompt_tokens for Jina rerank/score (unlike the embed and
-        # bi/cross-encoder paths, which read them from the real request).
         ctx.request = PoolingCompletionRequest(
             task="token_embed",
             input=prompts,
