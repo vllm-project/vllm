@@ -92,6 +92,7 @@ steps:
     - tests/v1/worker
     - tests/v1/streaming_input
     - tests/v1/kv_connector/unit
+    - tests/distributed/test_kv_cache_events.py
     - tests/v1/ec_connector/unit
     - tests/v1/metrics
     - tests/entrypoints/openai/correctness/test_lmeval.py
@@ -380,6 +381,7 @@ steps:
     - vllm/utils/
     - vllm/v1/
     - tests/v1
+    - tests/distributed/test_kv_cache_events.py
     - tests/watermarking
     - examples/disaggregated/mooncake_connector/mooncake_connector_proxy.py
     - rust/src/engine-core-client/src/tests/prompt_block_hash_vectors.json

@@ -1063,12 +1063,17 @@ def test_obj_scope_reaches_successful_store(scope_config, global_events, tier_ev
 
 
 @pytest.mark.parametrize("scope", ["local", "", "SHARED", True, 1, [], {}])
-def test_obj_rejects_invalid_scope_at_construction(scope):
+@pytest.mark.parametrize("global_events", [False, True])
+def test_obj_rejects_invalid_scope_at_construction(scope, global_events):
+    from dataclasses import replace
+
     from tests.v1.kv_offload.conftest import make_offloading_config
     from vllm.v1.kv_offload.cpu.spec import CPUOffloadingSpec
 
     with pytest.raises(ValueError, match="sharing_scope"):
         _make_tier(
-            offloading_spec=CPUOffloadingSpec(make_offloading_config()),
+            offloading_spec=CPUOffloadingSpec(
+                replace(make_offloading_config(), enable_kv_cache_events=global_events)
+            ),
             sharing_scope=scope,
         )

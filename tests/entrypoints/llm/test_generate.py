@@ -133,8 +133,9 @@ def test_log_stats(vllm_runner):
         assert all(output.metrics is not None for output in outputs)
 
 
-def test_kv_event_metadata_live_and_replay(vllm_runner):
-    """Real generation publishes native metadata automatically and replays its bytes."""
+@pytest.mark.parametrize("metadata", [None, False, True])
+def test_kv_event_metadata_live_and_replay(vllm_runner, metadata):
+    """Real generation honors metadata opt-in and replays the original bytes."""
     import time
 
     import msgspec
@@ -173,6 +174,7 @@ def test_kv_event_metadata_live_and_replay(vllm_runner):
                 "endpoint": f"tcp://*:{pub_port}",
                 "replay_endpoint": f"tcp://*:{replay_port}",
                 "topic": "metadata",
+                **({} if metadata is None else {"enable_kv_event_metadata": metadata}),
             },
         ) as runner:
             # A received warm-up event proves the PUB subscription is active.
@@ -214,12 +216,27 @@ def test_kv_event_metadata_live_and_replay(vllm_runner):
             assert topic == b"metadata"
             assert batch.data_parallel_rank == 0
             assert all(
-                event.source == KVEventSource("cache_manager") for event in batch.events
+                event.source == (KVEventSource("cache_manager") if metadata else None)
+                for event in batch.events
             )
             assert all(
-                event.medium == "GPU" and event.sharing_scope == "instance"
+                event.medium == "GPU"
+                and event.sharing_scope == ("instance" if metadata else None)
                 for event in stored
             )
+
+            if not metadata:
+                from tests.distributed.test_kv_cache_events import (
+                    _STRICT_PRE_METADATA_EVENT,
+                )
+
+                for event_payload in msgspec.msgpack.decode(payload)[1]:
+                    assert "source" not in event_payload
+                    assert "sharing_scope" not in event_payload
+                    msgspec.msgpack.decode(
+                        msgspec.msgpack.encode(event_payload),
+                        type=_STRICT_PRE_METADATA_EVENT,
+                    )
 
             replay.send_multipart([b"", sequence])
             replayed = {}

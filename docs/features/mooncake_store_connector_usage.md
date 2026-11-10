@@ -7,6 +7,31 @@ MooncakeStoreConnector is a KV cache connector that uses [MooncakeDistributedSto
 - **Single-node and multi-node deployment**: Works both as a standalone KV cache extension and in disaggregated prefill-decode setups.
 - **EGM shared KV cache**: Opt in to an external Extended GPU Memory provider over NVLink; see [Standalone EGM over NVLink](#standalone-egm-over-nvlink).
 
+## KV event metadata
+
+Mooncake Store KV events omit `source` and `sharing_scope` by default. To opt in,
+add the following to a launch command using `MooncakeStoreConnector`:
+
+```bash
+--kv-events-config '{"enable_kv_cache_events":true,"enable_kv_event_metadata":true,"publisher":"zmq","endpoint":"tcp://*:5557","replay_endpoint":"tcp://*:5558"}'
+```
+
+A successful store retains its existing lowercase `medium: "cpu"` payload. With
+metadata enabled it also publishes `sharing_scope: "shared"` and, for a
+standalone connector, `source: {"source_id": "connector/0", "connector_name":
+"MooncakeStoreConnector"}`. Worker shard success and tensor-parallel replication
+quorum still determine which stores are reported. Omitting the metadata option
+or setting it to `false` strips both fields while preserving those events and
+their original payloads.
+
+`shared` does not identify a Mooncake pool or authorize access. Consumers must
+associate each publisher runtime and data-parallel rank with the deployed Store
+domain separately. A connector's successful-store report does not guarantee
+continued backend residency, and it does not introduce backend eviction/remove
+notifications. Source attribution also does not add MultiConnector worker-event
+transport. See [KV event metadata](kv_event_metadata.md) for source paths,
+compatibility, replay, and unchanged clear semantics.
+
 ## Prerequisites
 
 ### Install Mooncake

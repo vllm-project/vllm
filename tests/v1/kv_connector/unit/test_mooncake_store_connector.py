@@ -665,11 +665,16 @@ def test_store_events_persist_across_polls():
 
 @pytest.mark.cpu_test
 @pytest.mark.parametrize("replication_factor", [1, 2, 4])
-def test_worker_shared_scope_survives_quorum_and_source_drain(replication_factor):
+@pytest.mark.parametrize("metadata", [None, False, True])
+def test_worker_shared_scope_survives_quorum_and_source_drain(
+    replication_factor, metadata
+):
     """Keep incomplete worker contributions until the existing TP quorum is met."""
     config = _make_vllm_config()
     config.kv_events_config = KVEventsConfig(
-        enable_kv_cache_events=True, publisher="null"
+        enable_kv_cache_events=True,
+        publisher="null",
+        **({} if metadata is None else {"enable_kv_event_metadata": metadata}),
     )
     with patch.object(scheduler, "LookupKeyClient"):
         connector = KVConnectorFactory.create_connector(
@@ -703,9 +708,11 @@ def test_worker_shared_scope_survives_quorum_and_source_drain(replication_factor
         assert len(emitted) == 1
         original = originals[0]
         event = emitted[0]
-        assert event.source == KVEventSource("connector/0", "MooncakeStoreConnector")
+        assert event.source == (
+            KVEventSource("connector/0", "MooncakeStoreConnector") if metadata else None
+        )
         assert event.sharing_scope == "shared"
-        assert event is not original
+        assert (event is not original) is bool(metadata)
         for field in original.__struct_fields__:
             if field != "source":
                 assert getattr(event, field) == getattr(original, field)

@@ -268,6 +268,11 @@ class KVConnectorBase_V1(ABC):
             vllm_config.kv_events_config is not None
             and vllm_config.kv_events_config.enable_kv_cache_events
         )
+        self._enable_kv_event_metadata = (
+            self._enable_kv_cache_events
+            and vllm_config.kv_events_config is not None
+            and vllm_config.kv_events_config.enable_kv_event_metadata
+        )
 
     @property
     def role(self) -> KVConnectorRole:
@@ -735,7 +740,7 @@ class KVConnectorBase_V1(ABC):
         for event in self.take_events():
             yield (
                 replace(event, source=self._kv_event_source)
-                if self._enable_kv_cache_events
+                if self._enable_kv_event_metadata
                 else event
             )
 

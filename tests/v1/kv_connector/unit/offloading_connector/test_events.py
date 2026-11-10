@@ -1198,7 +1198,10 @@ def test_events_preserve_lookahead_tokens(partial):
 
 @pytest.mark.parametrize("scope", [None, "instance", "shared"])
 @pytest.mark.parametrize("self_describing", [False, True])
-def test_resource_scope_survives_store_and_remove_translation(scope, self_describing):
+@pytest.mark.parametrize("metadata", [None, False, True])
+def test_resource_scope_survives_store_and_remove_translation(
+    tmp_path, scope, self_describing, metadata
+):
     """Metadata preserves full-chunk versus hash-only payload and removal hashes."""
     hashes = [_hash(0), _hash(1)]
     request = Request(
@@ -1252,3 +1255,20 @@ def test_resource_scope_survives_store_and_remove_translation(scope, self_descri
         assert event.medium == "STORAGE"
         assert event.locality == "LOCAL"
         assert event.ownership == "shared-fs"
+
+    from tests.v1.kv_connector.unit.test_multi_connector import (
+        publish_test_events_with_scheduler,
+    )
+
+    published = publish_test_events_with_scheduler(
+        tmp_path, [stored, removed], metadata
+    ).events[1:]
+    assert len(published) == 4
+    for original, event in zip([stored, removed] * 2, published):
+        assert event.block_hashes == original.block_hashes
+        assert event.group_idx == original.group_idx
+        assert event.locality == original.locality
+        assert event.ownership == original.ownership
+        assert event.sharing_scope == (scope if metadata else None)
+        assert (event.source is not None) is bool(metadata)
+    assert stored.sharing_scope == removed.sharing_scope == scope

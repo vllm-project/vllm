@@ -2,6 +2,7 @@
 
 ## KV Cache Offloading
 
+- [KV Event Metadata](kv_event_metadata.md)
 - [UMBPStoreConnector](umbp_store_connector_usage.md)
 
 ## Compatibility Matrix

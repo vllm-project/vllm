@@ -3869,6 +3869,7 @@ def test_kv_cache_events(blocks_to_cache: int):
     assert len(block.token_ids) == block.block_size * len(block.block_hashes)
     assert block.kv_cache_spec_kind == KVCacheSpecKind.FULL_ATTENTION.value
     assert block.sharing_scope == "instance"
+    assert block.source is None
     assert len(manager.block_pool.kv_event_queue) == 0
 
     stored_block_hash = block.block_hashes
@@ -3885,6 +3886,7 @@ def test_kv_cache_events(blocks_to_cache: int):
         assert isinstance(blocks, BlockRemoved)
         assert blocks.block_hashes[0] in stored_block_hash
         assert blocks.sharing_scope == "instance"
+        assert blocks.source is None
     assert len(events) == blocks_to_cache + 1
     assert isinstance(events[-2], BlockRemoved)
     assert (
@@ -3900,6 +3902,7 @@ def test_kv_cache_events(blocks_to_cache: int):
     events = manager.take_events()
 
     assert isinstance(events[-1], AllBlocksCleared)
+    assert events[-1].source is None
     assert "sharing_scope" not in events[-1].__struct_fields__
     assert len(manager.block_pool.cached_block_hash_to_block) == 0
 

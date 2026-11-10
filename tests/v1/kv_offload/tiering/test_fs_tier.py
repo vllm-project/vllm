@@ -1127,8 +1127,9 @@ def test_fs_factory_rejects_invalid_scope_before_io(tmp_path, scope):
 
 @pytest.mark.parametrize("tier_type", ["fs", "obj"])
 @pytest.mark.parametrize("self_describing", [False, True])
+@pytest.mark.parametrize("metadata", [None, False, True])
 def test_private_cpu_and_shared_tier_keep_scope_through_translation(
-    tmp_path, monkeypatch, tier_type, self_describing
+    tmp_path, monkeypatch, tier_type, self_describing, metadata
 ):
     """A real cascade preserves each resource's scope in one logical drain."""
     from dataclasses import replace
@@ -1239,5 +1240,24 @@ def test_private_cpu_and_shared_tier_keep_scope_through_translation(
             == events[1].token_ids
             == (list(range(8)) if self_describing else [])
         )
+
+        from tests.v1.kv_connector.unit.test_multi_connector import (
+            publish_test_events_with_scheduler,
+        )
+
+        published = publish_test_events_with_scheduler(
+            tmp_path, events, metadata
+        ).events[1:]
+        assert len(published) == 4
+        assert [event.sharing_scope for event in published] == (
+            ["instance", "shared"] * 2 if metadata else [None] * 4
+        )
+        for original, event in zip(events * 2, published):
+            assert event.block_hashes == original.block_hashes
+            assert event.token_ids == original.token_ids
+            assert event.block_size == original.block_size
+            assert event.locality == original.locality
+            assert event.ownership == original.ownership
+        assert [event.sharing_scope for event in events] == ["instance", "shared"]
     finally:
         manager.shutdown()

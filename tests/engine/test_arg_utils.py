@@ -1138,3 +1138,17 @@ def test_get_batch_defaults_gb10_stays_on_small_tier(
     tokens, seqs = EngineArgs.get_batch_defaults(1)
     assert tokens[UsageContext.OPENAI_API_SERVER] == expected_api_tokens
     assert seqs[UsageContext.OPENAI_API_SERVER] == expected_api_seqs
+
+
+@pytest.mark.parametrize("metadata", [None, False, True])
+def test_kv_event_metadata_json_cli(metadata):
+    """The existing KV events JSON argument supports the publication opt-in."""
+    config = {"enable_kv_cache_events": True}
+    if metadata is not None:
+        config["enable_kv_event_metadata"] = metadata
+    parser = EngineArgs.add_cli_args(FlexibleArgumentParser())
+    args = EngineArgs.from_cli_args(
+        parser.parse_args(["--kv-events-config", json.dumps(config)])
+    )
+    assert args.kv_events_config.enable_kv_cache_events is True
+    assert args.kv_events_config.enable_kv_event_metadata is bool(metadata)

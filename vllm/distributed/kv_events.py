@@ -622,8 +622,13 @@ class EventPublisherFactory:
 
         kind = config_dict.pop("publisher")
         config_dict.pop("enable_kv_cache_events")
+        enable_metadata = config_dict.pop("enable_kv_event_metadata")
         try:
             constructor = cls._registry[kind]
         except KeyError as exc:
             raise ValueError(f"Unknown event publisher '{kind}'") from exc
-        return constructor(data_parallel_rank=data_parallel_rank, **config_dict)
+        publisher = constructor(data_parallel_rank=data_parallel_rank, **config_dict)
+        publisher_config = publisher.get_publisher_config()
+        if publisher_config is not None:
+            publisher_config.enable_kv_event_metadata = enable_metadata
+        return publisher

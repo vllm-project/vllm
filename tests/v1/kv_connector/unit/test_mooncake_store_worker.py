@@ -715,7 +715,7 @@ def _make_scope_event_sender(store, *, enable_kv_event=True):
     ],
 )
 def test_successful_store_events_declare_shared_scope(
-    exists, results, enabled, expected_count
+    tmp_path, exists, results, enabled, expected_count
 ):
     """Only successful logical stores report shared scope, with their old payload."""
     store = MagicMock()
@@ -742,6 +742,22 @@ def test_successful_store_events_declare_shared_scope(
             )
         ]
         assert events[0].source is None
+        from tests.v1.kv_connector.unit.test_multi_connector import (
+            publish_test_events_with_scheduler,
+        )
+
+        for metadata in (False, True):
+            published = publish_test_events_with_scheduler(
+                tmp_path, events, metadata
+            ).events[1:]
+            assert len(published) == 2
+            for event in published:
+                assert event.medium == "cpu"
+                assert event.block_hashes == events[0].block_hashes
+                assert event.token_ids == events[0].token_ids
+                assert event.sharing_scope == ("shared" if metadata else None)
+            assert events[0].sharing_scope == "shared"
+            assert events[0].source is None
     assert sender.get_kv_events() == []
     assert sender.take_completed_saves() == {request.store_job_id: 1}
 

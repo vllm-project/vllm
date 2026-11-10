@@ -76,6 +76,42 @@ class _PreSessionBlockStored(
     locality: str | None = None
 
 
+class _StrictPreMetadataBlockStored(
+    _PreSessionBlockStored,
+    forbid_unknown_fields=True,  # type: ignore[call-arg]
+):
+    """Exact store schema immediately before source and scope were introduced."""
+
+    block_hashes: list[bytes | int]
+    parent_block_hash: bytes | int | None
+    ownership: str | None = None
+    session_id: str | None = None
+    lookahead_token_ids: list[list[int]] | None = None
+
+
+class _StrictPreMetadataBlockRemoved(
+    _LegacyBlockRemoved,
+    forbid_unknown_fields=True,  # type: ignore[call-arg]
+):
+    block_hashes: list[bytes | int]
+    locality: str | None = None
+    ownership: str | None = None
+
+
+class _StrictPreMetadataAllBlocksCleared(
+    _LegacyAllBlocksCleared,
+    forbid_unknown_fields=True,  # type: ignore[call-arg]
+):
+    pass
+
+
+_STRICT_PRE_METADATA_EVENT = (
+    _StrictPreMetadataBlockStored
+    | _StrictPreMetadataBlockRemoved
+    | _StrictPreMetadataAllBlocksCleared
+)
+
+
 def _make_block_stored(
     group_idx: int | None = None,
     kv_cache_spec_sliding_window: int | None = None,
@@ -355,3 +391,37 @@ def test_invalid_event_scope_rejected_on_decode(scope):
     payload["sharing_scope"] = scope
     with pytest.raises(msgspec.ValidationError):
         msgspec.msgpack.decode(msgspec.msgpack.encode(payload), type=BlockRemoved)
+
+
+@pytest.mark.parametrize(
+    ("make_event", "legacy_type"),
+    [
+        (_make_block_stored, _StrictPreMetadataBlockStored),
+        (_make_block_removed, _StrictPreMetadataBlockRemoved),
+        (AllBlocksCleared, _StrictPreMetadataAllBlocksCleared),
+    ],
+)
+def test_strict_pre_metadata_schema_accepts_only_legacy_fields(make_event, legacy_type):
+    """Strict consumers accept omitted metadata but reject even explicit nulls."""
+    event = make_event()
+    payload = msgspec.msgpack.decode(msgspec.msgpack.encode(event))
+    if not isinstance(event, AllBlocksCleared):
+        payload.update(locality="LOCAL", ownership="tier-a", group_idx=2)
+    if isinstance(event, BlockStored):
+        payload.update(session_id="session-a", lookahead_token_ids=[[5]])
+    legacy = msgspec.msgpack.decode(msgspec.msgpack.encode(payload), type=legacy_type)
+    assert msgspec.msgpack.decode(msgspec.msgpack.encode(legacy)) == payload
+    fields = (
+        ["source"]
+        if isinstance(event, AllBlocksCleared)
+        else ["source", "sharing_scope"]
+    )
+    for field in fields:
+        for value in (
+            None,
+            {"source_id": "cache_manager"} if field == "source" else "instance",
+        ):
+            with pytest.raises(msgspec.ValidationError, match="unknown field"):
+                msgspec.msgpack.decode(
+                    msgspec.msgpack.encode({**payload, field: value}), type=legacy_type
+                )
