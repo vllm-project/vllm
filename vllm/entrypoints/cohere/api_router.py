@@ -222,7 +222,11 @@ if _SDK_AVAILABLE:
                     CitationSourceEntry(
                         bucket=bucket,
                         idx=idx,
-                        source=source.model_dump(exclude_none=True),
+                        # mode="json" turns non-finite floats (from
+                        # json.loads of tool text like {"score": NaN})
+                        # into null so JSONResponse(allow_nan=False)
+                        # does not 500.
+                        source=source.model_dump(mode="json", exclude_none=True),
                     )
                     for (bucket, idx), source in position_to_source.items()
                 ]
