@@ -1335,9 +1335,7 @@ def test_num_hash_lookahead_tokens(overrides: dict[str, Any], expected: int):
         ),
     )
 
-    assert VllmConfig.num_hash_lookahead_tokens.fget(vllm_config) == (  # type: ignore[attr-defined]
-        expected
-    )
+    assert vllm_config.num_hash_lookahead_tokens == expected
 
 
 @pytest.mark.parametrize("hash_fn", [sha256, sha256_cbor])
