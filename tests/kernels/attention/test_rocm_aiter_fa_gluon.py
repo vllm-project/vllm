@@ -1,7 +1,7 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
-"""ROCM_AITER_FA_GLUON: which layers it decodes on gluon, when the Qwen3.5
-config hook selects it, and how it wires the null block and the kernel call."""
+"""ROCM_AITER_FA_GLUON: which layers it decodes on gluon, when the ROCm selector
+picks it, and how it wires the null block and the kernel call."""
 
 import importlib
 from types import SimpleNamespace
@@ -55,58 +55,63 @@ def aiter_env(monkeypatch):
 def test_pa_gluon_supports(
     num_heads, num_kv_heads, head_size, kv_cache_dtype, shuffle, expected, aiter_env
 ):
+    from vllm.platforms.rocm import on_gfx950
     from vllm.v1.attention.backends.rocm_aiter_fa_gluon import pa_gluon_supports
 
     aiter_env(shuffle)
-    assert (
-        pa_gluon_supports(num_heads, num_kv_heads, head_size, kv_cache_dtype)
-        is expected
+    assert pa_gluon_supports(num_heads, num_kv_heads, head_size, kv_cache_dtype) is (
+        expected and on_gfx950()
     )
 
 
 @pytest.mark.parametrize(
-    ("backend", "heads", "kv_cache_dtype", "shuffle", "parallel", "spec", "expected"),
+    ("heads", "kv_cache_dtype", "shuffle", "parallel", "spec", "gluon"),
     [
-        (None, (24, 4), "auto", True, (1, False), False, "ROCM_AITER_FA_GLUON"),
-        (None, (24, 4), "auto", False, (1, False), False, None),
-        ("ROCM_ATTN", (24, 4), "auto", True, (1, False), False, "ROCM_ATTN"),
-        (None, (16, 2), "auto", True, (1, False), False, None),
-        (None, (24, 4), "fp8", True, (1, False), False, None),
-        (None, (24, 4), "auto", True, (2, False), False, None),
-        (None, (24, 4), "auto", True, (1, True), False, None),
-        (None, (24, 4), "auto", True, (1, False), True, None),
+        ((24, 4), "auto", True, (1, False), False, True),
+        ((24, 4), "auto", False, (1, False), False, False),
+        ((16, 2), "auto", True, (1, False), False, False),
+        ((24, 4), "fp8", True, (1, False), False, False),
+        ((24, 4), "auto", True, (2, False), False, False),
+        ((24, 4), "auto", True, (1, True), False, False),
+        ((24, 4), "auto", True, (1, False), True, False),
     ],
-    ids=["qwen38", "plain-kv", "user-backend", "gqa-8", "fp8-kv", "tp2", "ep", "spec"],
+    ids=["qwen38", "plain-kv", "gqa-8", "fp8-kv", "tp2", "ep", "spec"],
 )
-def test_qwen3_5_config_selects_gluon_backend(
-    backend, heads, kv_cache_dtype, shuffle, parallel, spec, expected, aiter_env
+def test_selector_picks_gluon_for_supported_layers(
+    heads, kv_cache_dtype, shuffle, parallel, spec, gluon, aiter_env, monkeypatch
 ):
-    from vllm.config import AttentionConfig
-    from vllm.model_executor.models.config import _default_rocm_aiter_fa_gluon
-    from vllm.platforms.rocm import on_gfx950
+    from vllm.platforms.rocm import RocmPlatform, on_gfx950
+    from vllm.v1.attention.backends import rocm_aiter_fa_gluon
     from vllm.v1.attention.backends.registry import AttentionBackendEnum
+    from vllm.v1.attention.selector import AttentionSelectorConfig
 
     if not on_gfx950():
         pytest.skip("gfx950 only")
     aiter_env(shuffle)
     config = SimpleNamespace(
-        attention_config=AttentionConfig(
-            backend=AttentionBackendEnum[backend] if backend else None
-        ),
         model_config=SimpleNamespace(
             get_num_attention_heads=lambda _: heads[0],
             get_num_kv_heads=lambda _: heads[1],
-            get_head_size=lambda: 256,
         ),
         parallel_config=SimpleNamespace(
             world_size=parallel[0], enable_expert_parallel=parallel[1]
         ),
-        cache_config=SimpleNamespace(cache_dtype=kv_cache_dtype),
         speculative_config=SimpleNamespace() if spec else None,
     )
-    _default_rocm_aiter_fa_gluon(config)
-    chosen = config.attention_config.backend
-    assert (chosen.name if chosen else None) == expected
+    monkeypatch.setattr(
+        rocm_aiter_fa_gluon, "get_current_vllm_config_or_none", lambda: config
+    )
+    selected = RocmPlatform.get_attn_backend_cls(
+        None,
+        AttentionSelectorConfig(
+            head_size=256,
+            dtype=torch.bfloat16,
+            kv_cache_dtype=kv_cache_dtype,
+            block_size=None,
+        ),
+    )
+    gluon_path = AttentionBackendEnum.ROCM_AITER_FA_GLUON.get_path()
+    assert (selected == gluon_path) is gluon
 
 
 def test_build_zeroes_null_block(monkeypatch):

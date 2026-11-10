@@ -562,6 +562,8 @@ def _get_backend_priorities(
     if not use_kv_connector:
         backends.append(AttentionBackendEnum.ROCM_ATTN)
     if rocm_aiter_ops.is_mha_enabled():
+        if rocm_aiter_ops.is_shuffle_kv_cache_enabled():
+            backends.insert(0, AttentionBackendEnum.ROCM_AITER_FA_GLUON)
         backends.append(AttentionBackendEnum.ROCM_AITER_FA)
     if is_aiter_found_and_supported():
         backends.append(AttentionBackendEnum.ROCM_AITER_UNIFIED_ATTN)

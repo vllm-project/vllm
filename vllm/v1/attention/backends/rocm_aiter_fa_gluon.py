@@ -5,9 +5,15 @@
 import torch
 
 from vllm._aiter_ops import rocm_aiter_ops
-from vllm.config import VllmConfig, get_layers_from_vllm_config
+from vllm.config import (
+    VllmConfig,
+    get_current_vllm_config_or_none,
+    get_layers_from_vllm_config,
+)
+from vllm.config.cache import CacheDType
 from vllm.model_executor.layers.attention import Attention
 from vllm.platforms import current_platform
+from vllm.platforms.interface import DeviceCapability
 from vllm.v1.attention.backend import CommonAttentionMetadata, MultipleOf
 from vllm.v1.attention.backends.rocm_aiter_fa import (
     AiterFlashAttentionBackend,
@@ -32,9 +38,13 @@ if current_platform.is_rocm():
 def pa_gluon_supports(
     num_heads_q: int, num_heads_kv: int, head_size: int, kv_cache_dtype: str
 ) -> bool:
-    """Whether a layer's head config and KV cache can use the gluon decode."""
+    """Whether this GPU can run the gluon decode for a layer with this head
+    config and KV cache."""
+    from vllm.platforms.rocm import on_gfx950
+
     return (
-        rocm_aiter_ops.is_shuffle_kv_cache_enabled()
+        on_gfx950()
+        and rocm_aiter_ops.is_shuffle_kv_cache_enabled()
         and num_heads_kv > 0
         and num_heads_q % num_heads_kv == 0
         and num_heads_q // num_heads_kv in _QUERY_GROUP_SIZES
@@ -47,6 +57,56 @@ class AiterFlashAttentionGluonBackend(AiterFlashAttentionBackend):
     @staticmethod
     def get_supported_kernel_block_sizes(kv_cache_spec=None) -> list[int | MultipleOf]:
         return [_BLOCK_SIZE]
+
+    @classmethod
+    def get_supported_head_sizes(cls) -> list[int]:
+        return [_HEAD_SIZE]
+
+    @classmethod
+    def supports_sink(cls) -> bool:
+        return False
+
+    @classmethod
+    def supports_sliding_window(cls) -> bool:
+        return False
+
+    @classmethod
+    def supports_combination(
+        cls,
+        head_size: int,
+        dtype: torch.dtype,
+        kv_cache_dtype: CacheDType | None,
+        block_size: int | None,
+        use_mla: bool,
+        has_sink: bool,
+        use_sparse: bool,
+        use_mm_prefix: bool,
+        device_capability: DeviceCapability,
+    ) -> str | None:
+        vllm_config = get_current_vllm_config_or_none()
+        if vllm_config is None or vllm_config.model_config is None:
+            return "ROCM_AITER_FA_GLUON needs the model's head counts"
+        parallel_config = vllm_config.parallel_config
+        if parallel_config.world_size != 1 or parallel_config.enable_expert_parallel:
+            return (
+                "ROCM_AITER_FA_GLUON is validated only for TP x PP x PCP = 1 "
+                "without expert parallelism"
+            )
+        if vllm_config.speculative_config is not None:
+            return "ROCM_AITER_FA_GLUON does not support speculative decoding"
+        model_config = vllm_config.model_config
+        if not pa_gluon_supports(
+            model_config.get_num_attention_heads(parallel_config),
+            model_config.get_num_kv_heads(parallel_config),
+            head_size,
+            kv_cache_dtype or "auto",
+        ):
+            return (
+                f"ROCM_AITER_FA_GLUON needs gfx950, the shuffle KV-cache layout, "
+                f"head size {_HEAD_SIZE}, a GQA group in {_QUERY_GROUP_SIZES} and "
+                "an unquantized KV cache"
+            )
+        return None
 
     @staticmethod
     def get_impl_cls() -> type["AiterFlashAttentionGluonImpl"]:
@@ -98,14 +158,6 @@ class AiterFlashAttentionGluonMetadataBuilder(AiterFlashAttentionMetadataBuilder
             self._zero_null_block()
         return metadata
 
-    def build_for_drafting(
-        self,
-        common_attn_metadata: CommonAttentionMetadata,
-        draft_index: int,
-    ) -> AiterFlashAttentionMetadata:
-        self._zero_null_block()
-        return super().build_for_drafting(common_attn_metadata, draft_index)
-
 
 class AiterFlashAttentionGluonImpl(AiterFlashAttentionImpl):
     def __init__(self, *args, **kwargs) -> None:
@@ -114,8 +166,6 @@ class AiterFlashAttentionGluonImpl(AiterFlashAttentionImpl):
             pa_gluon_supports(
                 self.num_heads, self.num_kv_heads, self.head_size, self.kv_cache_dtype
             )
-            and self.sliding_window[0] == -1
-            and self.sinks is None
             and self.alibi_slopes is None
             and not self.logits_soft_cap
         )
