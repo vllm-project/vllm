@@ -40,11 +40,9 @@ def test_every_reason_is_reported_at_once():
         hf=dict(hidden_size=2048, hc_mult=2),
         lora_config=object(),
         speculative_config=object(),
-        use_v2_model_runner=False,
     )
     reasons = _reasons(cfg)
     for expected in (
-        "needs Model Runner V2",
         "pipeline parallel",
         "EPLB",
         "LoRA",
@@ -80,8 +78,8 @@ def test_switch_off_is_none_and_on_raises_with_every_reason():
     off = kit.make_vllm_config()
     off.kernel_config.monokernel = False
     assert spec.specialized_decode_config(off) is None
-    cfg = kit.make_vllm_config(lora_config=object(), use_v2_model_runner=False)
-    with pytest.raises(ValueError, match="needs Model Runner V2.*LoRA"):
+    cfg = kit.make_vllm_config(lora_config=object(), speculative_config=object())
+    with pytest.raises(ValueError, match="LoRA.*speculative decoding"):
         spec.specialized_decode_config(cfg)
 
 

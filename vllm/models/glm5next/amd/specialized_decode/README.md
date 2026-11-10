@@ -21,7 +21,7 @@ post contracts the streams) run vLLM's code.
 - Checkpoint: `amd/GLM-5.3-Flash-Quark-MXFP4` (exact geometry checked), routed
   experts on the `AITER_MXFP4_MXFP4` MoE backend; attention projections FP8
   block-128 or bf16.
-- TP 2, 4 or 8 on dedicated, unpartitioned GPUs; Model Runner V2.
+- TP 2, 4 or 8 on dedicated, unpartitioned GPUs.
 - Pure decode of 1, 2, 4 or 8 rows (widths 2/4/8; 2/4 at TP2), eager or
   replayed from a FULL CUDA graph. Prefill, mixed and larger steps and
   PIECEWISE replays run vLLM's layers.

@@ -195,8 +195,6 @@ def refusal_reasons(vllm_config: VllmConfig) -> list[str]:
             reasons.append("needs a CDNA4 (gfx950) GPU")
     else:
         reasons.append("needs ROCm")
-    if not vllm_config.use_v2_model_runner:
-        reasons.append("needs Model Runner V2")
     reasons += [f.value for f in features_in_use(vllm_config)]
     reasons += graph_reasons(vllm_config, STEP_TOKENS)
     if getattr(hf, "model_type", None) != "glm5_next_text":

@@ -62,7 +62,6 @@ def make_vllm_config(**overrides: Any) -> SimpleNamespace:
         lora_config=None,
         kv_transfer_config=None,
         weight_transfer_config=None,
-        use_v2_model_runner=True,
     )
     for key, value in overrides.items():
         setattr(cfg, key, value)
