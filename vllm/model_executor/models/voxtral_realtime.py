@@ -270,6 +270,7 @@ class VoxtralRealtimeGeneration(VoxtralForConditionalGeneration, SupportsRealtim
         audio_stream: AsyncGenerator[np.ndarray, None],
         input_stream: asyncio.Queue[list[int]],
         model_config: ModelConfig,
+        unbounded: bool = False,
     ) -> AsyncGenerator[PromptType, None]:
         tokenizer = cached_tokenizer_from_config(model_config)
         audio_encoder = tokenizer.instruct.audio_encoder
@@ -284,7 +285,9 @@ class VoxtralRealtimeGeneration(VoxtralForConditionalGeneration, SupportsRealtim
         left_pad, right_pad = audio_encoder.get_padding_audio()
 
         buffer = VoxtralRealtimeBuffer(
-            config, prompt_tokens, max_model_len=model_config.max_model_len
+            config,
+            prompt_tokens,
+            max_model_len=None if unbounded else model_config.max_model_len,
         )
 
         # Feed audio with padding into buffer in background

@@ -73,12 +73,23 @@ class OpenAIServingRealtime(GenerateBaseServing):
         model_config = self.model_config
         renderer = self.renderer
 
+        # Only when on: models outside this repo may not take the keyword.
+        scheduler_config = self.engine_client.vllm_config.scheduler_config
+        unbounded_kwargs = (
+            {"unbounded": True}
+            if scheduler_config.enable_unbounded_streaming_input
+            else {}
+        )
+
         # mypy is being stupid
         # TODO(Patrick) - fix this
         stream_input_iter = cast(
             AsyncGenerator[PromptType, None],
             self.model_cls.buffer_realtime_audio(
-                audio_stream, input_stream, model_config
+                audio_stream,
+                input_stream,
+                model_config,
+                **unbounded_kwargs,
             ),
         )
 
