@@ -11,10 +11,12 @@
 //! [`PyEcConnector`] and [`PyAuxOutputConnector`] wrap the EC connector and
 //! the aux output connector.
 //!
-//! The native Mooncake store connector replaces the Python one's hooks;
-//! [`SchedulerContext`] gives it the binding's Python requests.
+//! Native collaborators replace some of them: [`StructuredOutputHooks`]
+//! routes the requests the native xgrammar manager holds to it, and
+//! [`SchedulerContext`] gives the native Mooncake store connector the
+//! binding's Python requests.
 
-use std::sync::{Arc, Mutex};
+use std::sync::{Arc, Mutex, MutexGuard, OnceLock};
 
 use indexmap::IndexSet;
 use pyo3::intern;
@@ -27,6 +29,7 @@ use vllm_engine_core::sched::scheduler::{
     AuxOutputConnector, EcConnector, GrammarStatus, KvConnector, KvConnectorBlockState,
     KvConnectorOutput, KvTransferParams, RequestFinished, Requests, StructuredOutput,
 };
+use vllm_engine_core::structured_output::StructuredOutputManager;
 
 use super::output::{opaque, opaque_obj, scheduler_output_to_py};
 use super::request::{Shared, sync_block_hashes, sync_request};
@@ -462,6 +465,56 @@ impl StructuredOutput for PyStructuredOutput {
                 )?
                 .extract()
         })
+    }
+}
+
+/// The native xgrammar manager, once the binding has one
+/// (`RustSchedulerCore.set_native_structured_output`).
+pub type NativeStructuredOutput = Arc<OnceLock<Arc<Mutex<StructuredOutputManager>>>>;
+
+/// The scheduler's [`StructuredOutput`]: the native manager for the requests
+/// it holds (those whose grammar it initialized), the Python manager for the
+/// others.
+pub struct StructuredOutputHooks {
+    native: NativeStructuredOutput,
+    python: PyStructuredOutput,
+}
+
+impl StructuredOutputHooks {
+    pub fn new(native: NativeStructuredOutput, python: PyStructuredOutput) -> Self {
+        Self { native, python }
+    }
+}
+
+/// The native manager, if it holds `request_id`.
+fn native_holding<'a>(
+    native: &'a NativeStructuredOutput,
+    request_id: &str,
+) -> Option<MutexGuard<'a, StructuredOutputManager>> {
+    let manager = native.get()?.lock().unwrap();
+    manager.has_request(request_id).then_some(manager)
+}
+
+impl StructuredOutput for StructuredOutputHooks {
+    fn grammar_status(&mut self, request: &Request) -> GrammarStatus {
+        match native_holding(&self.native, &request.request_id) {
+            Some(mut native) => native.grammar_status(&request.request_id),
+            None => self.python.grammar_status(request),
+        }
+    }
+
+    fn accept_tokens(&mut self, request: &Request, new_token_ids: &[i32]) -> bool {
+        match native_holding(&self.native, &request.request_id) {
+            Some(mut native) => native.accept_tokens(request.into(), new_token_ids),
+            None => self.python.accept_tokens(request, new_token_ids),
+        }
+    }
+
+    fn trim_spec_tokens(&mut self, request: &Request, spec_token_ids: Vec<i32>) -> Vec<i32> {
+        match native_holding(&self.native, &request.request_id) {
+            Some(mut native) => native.trim_spec_tokens(request.into(), spec_token_ids),
+            None => self.python.trim_spec_tokens(request, spec_token_ids),
+        }
     }
 }
 

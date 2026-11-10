@@ -5782,12 +5782,14 @@ dependencies = [
  "expect-test",
  "indexmap 2.13.0",
  "libc",
+ "rayon",
  "rustc-hash 1.1.0",
  "serde",
  "serde_json",
  "sha2",
  "smallvec",
  "thiserror 2.0.18",
+ "vllm-xgrammar",
  "xxhash-rust",
 ]
 

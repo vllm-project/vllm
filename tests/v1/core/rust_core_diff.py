@@ -15,10 +15,10 @@ Run as a script for long fuzzing campaigns:
 N+1 is scheduled before the output of step N is processed.
 
 `--nixl` and `--mooncake` add the real NIXL / Mooncake store connector
-(scheduler role, worker side faked). With `--mode rust-sched`, each asserts
-that the Rust scheduler runs the native port (`VLLM_RUST_CORE_NATIVE_HOOKS=0`
-tests the Python hooks). `--structured` adds xgrammar structured output
-requests, sampled from the grammar bitmasks, which are compared every step.
+(scheduler role, worker side faked); `--structured` adds xgrammar structured
+output requests, sampled from the grammar bitmasks, which are compared every
+step. With `--mode rust-sched`, each asserts that the Rust scheduler runs the
+native port (`VLLM_RUST_CORE_NATIVE_HOOKS=0` tests the Python hooks).
 """
 
 import argparse
@@ -171,8 +171,8 @@ class FuzzConfig:
 
     @classmethod
     def sample_structured(cls, seed: int) -> "FuzzConfig":
-        """`sample` with structured output requests, optionally with a
-        reasoning parser."""
+        """`sample` with structured output requests, optionally reasoning
+        (a think-token parser, or one the native manager calls in Python)."""
         cfg = cls.sample(seed)
         rng = random.Random(seed * 6151 + 5)
         cfg.structured = True
@@ -382,9 +382,9 @@ _SKIP_FIELDS = {
     "scheduler_stats",
 }
 # Fields of `Request` objects not compared: the NIXL connector keeps
-# per-request flags in `request.kv_transfer_params`, which its native port
-# keeps to itself, and the structured output manager its grammar state in
-# `request.structured_output_request`. The outputs' `kv_transfer_params` and
+# per-request flags in `request.kv_transfer_params`, and the structured output
+# manager its grammar state in `request.structured_output_request`, which
+# their native ports keep to themselves. The outputs' `kv_transfer_params` and
 # the grammar bitmasks are compared.
 _SKIP_REQUEST_FIELDS = {"kv_transfer_params", "structured_output_request"}
 
@@ -780,12 +780,22 @@ def _fake_mooncake_store(cfg: FuzzConfig, hasher: Callable):
 
 
 def _wait_for_grammar(scheduler: Scheduler, request: Request) -> None:
-    """Wait until the request's grammar compiled, so both schedulers see it
-    ready at the same step."""
+    """Wait until the request's grammar compiled (Python or native), so both
+    schedulers see it ready at the same step."""
+    import time
     from concurrent.futures import Future
 
     structured_req = request.structured_output_request
     if structured_req is None:
+        return
+    native = getattr(scheduler, "_native_structured_output", None)
+    if (
+        native is not None
+        and native.native is not None
+        and native.native.has_request(request.request_id)
+    ):
+        while native.native.grammar_status(request.request_id) == "pending":
+            time.sleep(0.0005)
         return
     grammar = structured_req._grammar
     if isinstance(grammar, Future):
@@ -899,6 +909,8 @@ def run_one(
             return False, f"connector_impl is {core.connector_impl}, not {expected}"
         if cfg.nixl is not None:
             core.native_nixl_connector.set_fixed_clock(NIXL_CLOCK)
+        if cfg.structured and test._native_structured_output is None:
+            return False, "the native structured output manager is not used"
     if expect_manager_module is not None:
         module = type(test.kv_cache_manager).__module__
         if module != expect_manager_module:

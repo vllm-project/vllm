@@ -8,18 +8,21 @@ bitwise-identical behavior, selected with `--scheduler-cls` or by
 connector, structured output manager, KV event publisher) are constructed as
 `Scheduler` does and called by the Rust scheduler through the extension.
 
-Unless `VLLM_RUST_CORE_NATIVE_HOOKS=0`, native ports replace the scheduler
-half of the NIXL and Mooncake store KV connectors where they support the
-configuration (`_native_connector`; the reason is logged when they do not).
-The Python connector stays the engine's, for the handshake side channel or the
-store lookups.
+Unless `VLLM_RUST_CORE_NATIVE_HOOKS=0`, native ports replace Python
+collaborators where they support the configuration (the reason is logged
+when they do not):
+- the scheduler half of the NIXL and Mooncake store KV connectors
+  (`_native_connector`); the Python connector stays the engine's, for the
+  handshake side channel or the store lookups;
+- the xgrammar structured output manager, for requests using the xgrammar
+  backend (`_NativeStructuredOutput`).
 
 Not supported (rejected at construction): custom encoder cache managers and
 custom KV cache managers; per request: prompt embeds with KV cache events.
 """
 
 from collections.abc import Iterable, Iterator, Mapping
-from typing import Any
+from typing import TYPE_CHECKING, Any
 
 import vllm.envs as envs
 from vllm.config import KVEventsConfig, VllmConfig
@@ -52,6 +55,9 @@ from vllm.v1.outputs import DraftTokenIds, ModelRunnerOutput
 from vllm.v1.request import Request, RequestStatus
 from vllm.v1.spec_decode.dynamic.utils import build_dynamic_sd_schedule_lookup
 from vllm.v1.structured_output import StructuredOutputManager
+
+if TYPE_CHECKING:
+    from vllm.reasoning import ReasoningParser
 
 logger = init_logger(__name__)
 
@@ -259,6 +265,177 @@ def _native_connector(connector: KVConnectorBase_V1) -> tuple[Any, str | None]:
     return None, f"{type(connector).__name__} has no native scheduler half"
 
 
+def _is_think_token_parser(parser: "ReasoningParser") -> bool:
+    """Whether the token-id methods `StructuredOutputManager` calls are
+    `BaseThinkingReasoningParser`'s, which the extension ports."""
+    from vllm.reasoning.abs_reasoning_parsers import ReasoningParser
+    from vllm.reasoning.basic_parsers import BaseThinkingReasoningParser
+
+    cls = type(parser)
+    return (
+        isinstance(parser, BaseThinkingReasoningParser)
+        and all(
+            getattr(cls, name) is getattr(BaseThinkingReasoningParser, name)
+            for name in ("is_reasoning_end", "is_reasoning_end_streaming")
+        )
+        and all(
+            getattr(cls, name) is getattr(ReasoningParser, name)
+            for name in (
+                "find_reasoning_end",
+                "reasoning_end_token_ids",
+                "implicit_reasoning_end_token_ids",
+            )
+        )
+    )
+
+
+class _NativeStructuredOutput:
+    """Runs the requests that use the xgrammar backend on the native manager
+    (`RustStructuredOutputManager`) instead of `manager`.
+
+    The engine calls `manager.grammar_init` (on its input thread); for
+    xgrammar requests it only claims the backend, as Python does, and builds
+    the native manager on first use. `RustScheduler.add_request` then
+    initializes the grammar natively (on the scheduler's thread, since the
+    scheduler shares the native manager), and the scheduler routes the
+    request's structured output calls to it."""
+
+    def __init__(
+        self, vllm_config: VllmConfig, manager: StructuredOutputManager, core: Any
+    ):
+        self.vllm_config = vllm_config
+        self.manager = manager
+        self.core = core
+        self.native: Any = None
+        self.registered = False
+        self.failed = False
+        python_grammar_init = manager.grammar_init
+
+        def grammar_init(request: Request) -> None:
+            structured_req = request.structured_output_request
+            if structured_req is None:
+                return
+            if (
+                structured_req.params._backend != "xgrammar"
+                or manager.backend is not None
+                or manager.backend_name not in (None, "xgrammar")
+                or not self._ensure_native()
+            ):
+                python_grammar_init(request)
+                return
+            manager.backend_name = "xgrammar"
+
+        manager.grammar_init = grammar_init  # type: ignore[method-assign]
+
+    @staticmethod
+    def unsupported_reason(
+        vllm_config: VllmConfig, manager: StructuredOutputManager
+    ) -> str | None:
+        """Why the native manager cannot run this engine's xgrammar requests,
+        if so."""
+        from vllm.utils.mistral import is_mistral_tokenizer
+
+        if not envs.VLLM_RUST_CORE_NATIVE_HOOKS:
+            return "VLLM_RUST_CORE_NATIVE_HOOKS=0"
+        if manager.backend is not None:
+            return "the manager has a backend already"
+        backend = vllm_config.structured_outputs_config.backend
+        if backend not in ("auto", "xgrammar"):
+            return f"the {backend} backend"
+        model_config = vllm_config.model_config
+        if model_config.hf_config.model_type == "plamo3":
+            return "the PLaMo 3 tokenizer"
+        tokenizer = manager.tokenizer
+        if is_mistral_tokenizer(tokenizer):
+            return "Mistral tokenizers"
+        if getattr(tokenizer, "backend_tokenizer", None) is None:
+            return "tokenizers other than Hugging Face fast tokenizers"
+        # The grammars' rollback depth is the drafts', the bitmask rows also
+        # cover a diffusion LLM's canvas.
+        spec = vllm_config.speculative_config
+        if vllm_config.num_speculative_tokens != (
+            spec.num_speculative_tokens if spec is not None else 0
+        ):
+            return "diffusion LLMs"
+        return None
+
+    def _ensure_native(self) -> bool:
+        """Build the native manager on first use; False if that failed."""
+        if self.native is not None or self.failed:
+            return not self.failed
+        from vllm._rust_core import RustStructuredOutputManager
+
+        config = self.vllm_config
+        try:
+            self.native = RustStructuredOutputManager(
+                self.manager.tokenizer,
+                config.model_config.get_vocab_size(),
+                max_num_seqs=config.scheduler_config.max_num_seqs,
+                num_speculative_tokens=config.num_speculative_tokens,
+                is_diffusion=config.model_config.is_diffusion,
+                enable_in_reasoning=self.manager.enable_in_reasoning,
+                disable_any_whitespace=(
+                    config.structured_outputs_config.disable_any_whitespace
+                ),
+                async_grammar_compilation=self.manager._use_async_grammar_compilation,
+                cache_limit_bytes=envs.VLLM_XGRAMMAR_CACHE_MB * 1024 * 1024,
+                regex_compilation_timeout_s=envs.VLLM_REGEX_COMPILATION_TIMEOUT_S,
+            )
+        except (NotImplementedError, RuntimeError) as e:
+            logger.info_once(
+                "The Rust scheduler uses the Python structured output manager: %s",
+                e,
+            )
+            self.failed = True
+            return False
+        logger.info_once("The Rust scheduler uses the native xgrammar manager.")
+        return True
+
+    def add_request(self, request: Request) -> None:
+        """Initialize the grammar of a new xgrammar request."""
+        structured_req = request.structured_output_request
+        if (
+            structured_req is None
+            or self.native is None
+            or self.manager.backend is not None
+            or structured_req.params._backend != "xgrammar"
+            or self.core.has_request(request.request_id)
+        ):
+            return
+        if not self.registered:
+            self.core.set_native_structured_output(self.native)
+            self.registered = True
+        request_type, grammar_spec = structured_req.structured_output_key
+        sampling_params = request.sampling_params
+        stop_token_ids = (
+            sorted(sampling_params.all_stop_token_ids) if sampling_params else None
+        )
+        reasoner = think_tokens = None
+        if (
+            self.manager.reasoner_cls is not None
+            and not self.manager.enable_in_reasoning
+        ):
+            parser = self.manager._get_reasoner(request)
+            assert parser is not None
+            if _is_think_token_parser(parser):
+                think_tokens = (parser.start_token_id, parser.end_token_id)  # type: ignore[attr-defined]
+            else:
+                reasoner = parser
+        self.native.grammar_init(
+            request.request_id,
+            request_type.name,
+            grammar_spec,
+            stop_token_ids or None,
+            reasoner=reasoner,
+            think_tokens=think_tokens,
+        )
+
+    def discard(self, request: Request) -> None:
+        """Drop the state of a request the scheduler did not take."""
+        if self.native is not None and not self.core.has_request(request.request_id):
+            self.native.remove_request(request.request_id)
+
+
 class _RequestsView(Mapping[str, Request]):
     """`Scheduler.requests`: the requests the scheduler holds, each brought up
     to date with the Rust scheduler when read."""
@@ -383,6 +560,21 @@ class RustScheduler(SchedulerInterface):
             native_connector,
         )
         logger.info_once("Using the Rust scheduler (%s).", type(self).__name__)
+        self._native_structured_output: _NativeStructuredOutput | None = None
+        if not vllm_config.model_config.skip_tokenizer_init:
+            reason = _NativeStructuredOutput.unsupported_reason(
+                vllm_config, structured_output_manager
+            )
+            if reason is None:
+                self._native_structured_output = _NativeStructuredOutput(
+                    vllm_config, structured_output_manager, self._core
+                )
+            else:
+                logger.info_once(
+                    "The Rust scheduler uses the Python structured output "
+                    "manager: it does not support %s natively.",
+                    reason,
+                )
         self.kv_cache_manager = self._core.kv_cache_manager
         # Bind after construction so connectors can access the cache manager.
         if self.connector is not None:
@@ -462,7 +654,16 @@ class RustScheduler(SchedulerInterface):
         self._core.update_draft_token_ids_in_output(draft_token_ids, scheduler_output)
 
     def add_request(self, request: Request) -> None:
-        self._core.add_request(request)
+        native = self._native_structured_output
+        if native is None:
+            self._core.add_request(request)
+            return
+        native.add_request(request)
+        try:
+            self._core.add_request(request)
+        except BaseException:
+            native.discard(request)
+            raise
 
     def has_request(self, request_id: str) -> bool:
         return self._core.has_request(request_id)

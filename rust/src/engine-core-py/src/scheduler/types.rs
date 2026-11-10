@@ -41,6 +41,10 @@ pub struct PyTypes {
     pub deque: Py<PyAny>,
     /// `StreamingUpdate.from_request`.
     pub streaming_update_from_request: Py<PyAny>,
+    /// `numpy.frombuffer`.
+    pub np_frombuffer: Py<PyAny>,
+    /// `numpy.int32`.
+    pub np_int32: Py<PyAny>,
 }
 
 static TYPES: PyOnceLock<PyTypes> = PyOnceLock::new();
@@ -130,6 +134,8 @@ pub fn types(py: Python<'_>) -> PyResult<&'static PyTypes> {
                 .bind(py)
                 .getattr("from_request")?
                 .unbind(),
+            np_frombuffer: attr("numpy", "frombuffer")?,
+            np_int32: attr("numpy", "int32")?,
         })
     })
 }

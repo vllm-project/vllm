@@ -19,12 +19,12 @@ outputs:
 - prefix-caching block hashing (`sha256`, `sha256_cbor`, `xxhash`,
   `xxhash_cbor`);
 - the scheduler halves of the NIXL and Mooncake store KV connectors, and the
-  Mooncake store worker's lookup paths.
+  Mooncake store worker's lookup paths;
+- structured output with the xgrammar backend (grammar matching, bitmasks,
+  accept and rollback), built on a vendored copy of xgrammar's C++ sources.
 
 GPU workers, the model runner, the worker halves of KV connectors and the API
-frontend are not part of it. Structured output stays in Python: the Rust
-scheduler calls the Python `StructuredOutputManager` (every backend) through
-hooks. The Python `EngineCore` loop, ZMQ I/O and the
+frontend are not part of it. The Python `EngineCore` loop, ZMQ I/O and the
 executor stay in Python.
 
 ## Enabling it
@@ -40,7 +40,7 @@ implementation of every component.
 | --- | --- | --- |
 | `VLLM_USE_RUST_CORE=1` | `0` | Use the Rust scheduler, KV cache manager, block hasher and Mooncake store lookup paths where supported, falling back to Python otherwise. |
 | `--scheduler-cls vllm.v1.core.sched.rust_scheduler.RustScheduler` | unset | Select the Rust scheduler explicitly (`RustAsyncScheduler` for async scheduling). Fails at startup if the configuration is unsupported. |
-| `VLLM_RUST_CORE_NATIVE_HOOKS=0` | `1` | Keep the Python NIXL / Mooncake store scheduler halves, called from the Rust scheduler through hooks. |
+| `VLLM_RUST_CORE_NATIVE_HOOKS=0` | `1` | Keep the Python NIXL / Mooncake store scheduler halves and the Python structured output manager, called from the Rust scheduler through hooks. |
 
 For example:
 
@@ -63,8 +63,9 @@ flowchart LR
             KV[KV cache manager]
             Hash[Block hasher]
             Conn[NIXL / Mooncake<br/>scheduler halves]
+            XG[xgrammar matcher]
         end
-        Hooks[Python plugins via hooks:<br/>other KV connectors, EC and aux<br/>connectors, structured output<br/>manager]
+        Hooks[Python plugins via hooks:<br/>other KV connectors, EC and aux<br/>connectors, other structured<br/>output backends]
         Loop -- "schedule() / update_from_output()" --> Sched
         Sched -.-> Hooks
     end
@@ -75,8 +76,9 @@ The crates are:
 
 | Crate | Owns |
 | --- | --- |
-| `rust/src/engine-core` (`vllm-engine-core`) | Pure Rust, no PyO3: hashing (pickle protocol 5 and canonical CBOR serializers), KV cache manager, scheduler, connector scheduler halves |
+| `rust/src/engine-core` (`vllm-engine-core`) | Pure Rust, no PyO3: hashing (pickle protocol 5 and canonical CBOR serializers), KV cache manager, scheduler, connector scheduler halves, structured output |
 | `rust/src/engine-core-py` (`vllm-engine-core-py`) | PyO3 bindings (`vllm._rust_core`): config conversion, request bridging, Python output objects, hook adapters |
+| `rust/src/xgrammar` (`vllm-xgrammar`) | Vendored xgrammar C++ (with its `LICENSE` and `NOTICE`) behind a C shim |
 
 Python collaborators that are not ported are reached through traits
 (`KvConnector`, `StructuredOutput`, ...) that the binding crate implements over
@@ -122,6 +124,12 @@ used instead and the reason is logged once.
       `MultiConnector` or subclasses), and not with KV cache events enabled.
       The per-request store lookup RPC stays in the Python client.
     - Any other KV connector is called through hooks.
+- **Native structured output** (with `VLLM_RUST_CORE_NATIVE_HOOKS=1`): only
+  requests using the xgrammar backend with a Hugging Face fast tokenizer.
+  Mistral and PLaMo 3 tokenizers, other backends (`guidance`, `outlines`,
+  `lm-format-enforcer`) and diffusion LLMs use the Python manager. Only
+  think-token reasoning parsers run natively; other reasoning parsers are
+  called in Python.
 
 ## Parity and how it is tested
 
@@ -134,7 +142,7 @@ layers:
 | --- | --- | --- |
 | Unit parity | `cargo test -p vllm-engine-core` (hash, `heapq`, `set[int]` order, encoder cache fixtures) and `tests/v1/core/test_rust_core_hash.py` | Serialization and container-order differences |
 | Trace replay | Python generators next to the Rust tests record every call and result of the real Python component; `cargo test` replays them | Logic differences in the pure Rust core |
-| Lockstep fuzzing | `tests/v1/core/rust_core_diff.py`, `tests/v1/core/test_rust_scheduler.py`, `tests/v1/kv_connector/unit/test_*_rust*.py` | Binding, conversion and Python-object differences |
+| Lockstep fuzzing | `tests/v1/core/rust_core_diff.py`, `tests/v1/core/test_rust_scheduler.py`, `tests/v1/kv_connector/unit/test_*_rust*.py`, `tests/v1/structured_output/test_rust_xgrammar_parity.py` | Binding, conversion and Python-object differences |
 | Existing suites | `pytest -p tests.v1.core.rust_scheduler_plugin tests/v1/core/test_scheduler.py` | Behavior covered by the Python scheduler's tests |
 
 A few small traces are checked in so `cargo test` is meaningful offline. CI
@@ -164,6 +172,8 @@ queue).
 - Some existing tests inspect Python internals (`isinstance` checks against
   Python classes, private attributes such as `scheduler.waiting`) and fail with
   the Rust scheduler; the behavior they cover is unchanged.
+- Parity with xgrammar relies on the vendored C++ matching the installed
+  `xgrammar` wheel. Bump both together.
 
 ## Performance
 
@@ -179,5 +189,6 @@ CPU time of the ported paths, Python vs Rust (microbenchmarks, single process):
 | Mooncake store `build_connector_meta` per step, DeepSeek-V4.1, 16 × 128K | 366 µs | 31 µs |
 | Mooncake store worker lookup, 128K-token DeepSeek-V4.1 request | 3.3 ms | 0.26 ms |
 | NIXL scheduler half per step, 1000 tracked requests, 16 × 120K-token admissions | 4.7 ms | 0.7 ms |
+| Structured output bitmask, 256 JSON requests, no spec / 4 spec tokens | 3.2 / 119 ms | 1.5 / 17.6 ms |
 
 The Rust figures include building the Python output objects.

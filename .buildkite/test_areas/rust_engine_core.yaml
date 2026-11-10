@@ -16,6 +16,7 @@ steps:
     - rust/Cargo.lock
     - rust/src/engine-core/
     - rust/src/engine-core-py/
+    - rust/src/xgrammar/
     - rust-toolchain.toml
     - tools/build_rust.py
     - vllm/envs.py
@@ -33,6 +34,7 @@ steps:
     - tests/v1/kv_connector/unit/test_mooncake_store_rust.py
     - tests/v1/kv_connector/unit/test_mooncake_store_rust_scheduler.py
     - tests/v1/kv_connector/unit/test_nixl_rust_scheduler.py
+    - tests/v1/structured_output/test_rust_xgrammar_parity.py
     - .buildkite/test_areas/rust_engine_core.yaml
   commands:
     # The image builds `vllm._rust_core` with the wheel; fail rather than skip.
@@ -43,6 +45,7 @@ steps:
       tests/v1/kv_connector/unit/test_mooncake_store_rust.py
       tests/v1/kv_connector/unit/test_mooncake_store_rust_scheduler.py
       tests/v1/kv_connector/unit/test_nixl_rust_scheduler.py
+    - pytest -v -s tests/v1/structured_output/test_rust_xgrammar_parity.py
     # Differential fuzzing smoke: Rust scheduler vs Python, per workload mode.
     - python3 -m tests.v1.core.rust_core_diff --mode rust-kv --seeds 0-20
     - python3 -m tests.v1.core.rust_core_diff --mode rust-sched --seeds 0-20
@@ -64,6 +67,7 @@ steps:
     - rust/Cargo.toml
     - rust/Cargo.lock
     - rust/src/engine-core/
+    - rust/src/xgrammar/
     - rust-toolchain.toml
     - vllm/config/scheduler.py
     - vllm/v1/core/

@@ -10,6 +10,7 @@ mod kv_cache;
 mod mooncake;
 mod nixl;
 mod scheduler;
+mod structured_output;
 
 #[pymodule]
 fn _rust_core(m: &Bound<'_, PyModule>) -> PyResult<()> {
@@ -18,5 +19,6 @@ fn _rust_core(m: &Bound<'_, PyModule>) -> PyResult<()> {
     mooncake::register(m)?;
     nixl::register(m)?;
     scheduler::register(m)?;
+    structured_output::register(m)?;
     Ok(())
 }
