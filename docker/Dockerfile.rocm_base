@@ -27,6 +27,8 @@ ARG ROCM_SDK_VERSION=10.0.0
 # Build configuration
 ARG PYTORCH_ROCM_ARCH="gfx90a;gfx942;gfx950;gfx1100;gfx1101;gfx1200;gfx1201;gfx1150;gfx1151"
 ARG AITER_ROCM_ARCH="gfx942;gfx950"
+# FlashAttention arches; empty: PYTORCH_ROCM_ARCH. CI builds only the arches it tests (bake file).
+ARG FA_ROCM_ARCH=""
 
 FROM ${BASE_IMAGE} AS base
 
@@ -190,11 +192,12 @@ RUN mkdir -p /app/install && cp /app/mori/dist/*.whl /app/install
 FROM base AS build_fa
 ARG FA_BRANCH
 ARG FA_REPO
+ARG FA_ROCM_ARCH
 RUN git clone ${FA_REPO}
 RUN cd flash-attention \
     && git checkout ${FA_BRANCH} \
     && git submodule update --init \
-    && GPU_ARCHS="${PYTORCH_ROCM_ARCH}" python3 setup.py bdist_wheel --dist-dir=dist
+    && GPU_ARCHS="${FA_ROCM_ARCH:-${PYTORCH_ROCM_ARCH}}" python3 setup.py bdist_wheel --dist-dir=dist
 RUN mkdir -p /app/install && cp /app/flash-attention/dist/*.whl /app/install
 
 
