@@ -102,6 +102,8 @@ pub enum Error {
     ToolCallStreamInvariant { message: String },
     #[error("duplicate tool name `{name}`")]
     DuplicateToolName { name: String },
+    #[error("{message}")]
+    InvalidMessageTools { message: String },
     #[error("tool_choice requires at least one available tool")]
     ToolChoiceRequiresTools,
     #[error("tool_choice function `{name}` was not found in the available tools")]
@@ -131,6 +133,7 @@ impl Error {
             | Self::InvalidReasoningEffort(_)
             | Self::InvalidReasoningControl { .. }
             | Self::DuplicateToolName { .. }
+            | Self::InvalidMessageTools { .. }
             | Self::ToolChoiceRequiresTools
             | Self::ToolChoiceFunctionNotFound { .. }
             | Self::ToolReferenceNotFound { .. }

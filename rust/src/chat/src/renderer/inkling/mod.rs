@@ -293,6 +293,7 @@ impl InklingChatRenderer {
 
 impl ChatRenderer for InklingChatRenderer {
     fn render(&self, request: &ChatRequest) -> Result<RenderedPrompt> {
+        super::reject_system_tools(request)?;
         request.validate()?;
         if request.chat_options.continue_final_message() {
             return Err(Error::ChatTemplate(
@@ -324,7 +325,7 @@ impl ChatRenderer for InklingChatRenderer {
             }
 
             match message {
-                ChatMessage::System { content } => {
+                ChatMessage::System { content, .. } => {
                     self.write_chat_content(&mut out, self.special.message_system, content)?;
                 }
                 ChatMessage::Developer { content, .. } => {

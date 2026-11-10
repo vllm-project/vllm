@@ -101,6 +101,7 @@ pub(super) fn render_request_with_media_order(
     dialect: DsDialect,
     reasoning: &ReasoningControl,
 ) -> Result<(String, Vec<MediaPartSource>)> {
+    super::reject_system_tools(request)?;
     let thinking_mode = if reasoning.is_enabled() {
         ThinkingMode::Thinking
     } else {
@@ -168,7 +169,7 @@ pub(super) fn render_request_with_media_order(
         render_index += 1;
 
         match message {
-            ChatMessage::System { content } => {
+            ChatMessage::System { content, .. } => {
                 if dialect == DsDialect::V41 && current_render_index > 0 {
                     out.push_str(SYSTEM_SP_TOKEN);
                 }
@@ -436,7 +437,7 @@ fn starts_user_turn(
 fn reject_image_placeholder_text(messages: &[ChatMessage]) -> Result<()> {
     let has_placeholder = |text: &str| text.contains(DEEPSEEK_V41_IMAGE_PLACEHOLDER);
     let found = messages.iter().any(|message| match message {
-        ChatMessage::System { content }
+        ChatMessage::System { content, .. }
         | ChatMessage::Developer { content, .. }
         | ChatMessage::User { content }
         | ChatMessage::ToolResponse { content, .. }

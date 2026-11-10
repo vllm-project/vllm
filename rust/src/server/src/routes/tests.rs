@@ -598,7 +598,7 @@ fn render_fake_message_content(
     placeholder: &str,
 ) -> vllm_chat::Result<String> {
     match message {
-        ChatMessage::System { content }
+        ChatMessage::System { content, .. }
         | ChatMessage::Developer { content, .. }
         | ChatMessage::User { content }
         | ChatMessage::ToolResponse { content, .. }
@@ -722,6 +722,18 @@ async fn test_models_with_engine_outputs_and_backend_inner(
     check_request: impl FnOnce(&EngineCoreRequest) + Send + 'static,
     backend: Arc<dyn ChatTextBackend>,
 ) -> (ChatLlm, MockEngineTask) {
+    test_models_with_engine_outputs_and_chat_inner(engine_id, outputs, check_request, |llm| {
+        ChatLlm::from_shared_backend(llm, backend)
+    })
+    .await
+}
+
+async fn test_models_with_engine_outputs_and_chat_inner(
+    engine_id: impl Into<EngineId>,
+    outputs: impl FnOnce(&str) -> EngineCoreOutputs + Send + 'static,
+    check_request: impl FnOnce(&EngineCoreRequest) + Send + 'static,
+    build_chat: impl FnOnce(EngineCoreLlm) -> ChatLlm,
+) -> (ChatLlm, MockEngineTask) {
     let ipc = IpcNamespace::new().expect("create ipc namespace");
     let handshake_address = ipc.handshake_endpoint();
     let engine_id = engine_id.into();
@@ -751,8 +763,7 @@ async fn test_models_with_engine_outputs_and_backend_inner(
     .expect("connect client");
 
     (
-        ChatLlm::from_shared_backend(test_llm(client), backend)
-            .with_served_model_name("test-model"),
+        build_chat(test_llm(client)).with_served_model_name("test-model"),
         engine_task,
     )
 }
@@ -1994,6 +2005,446 @@ async fn render_chat_accepts_assistant_turn_without_content() {
         token_ids.windows(2).all(|pair| pair[0] == pair[1]),
         "{token_ids:?}"
     );
+}
+
+/// Real model backends with a local byte tokenizer; no checkpoint download.
+async fn system_tools_backend(
+    model_type: &str,
+    renderer: vllm_chat::RendererSelection,
+) -> (
+    tempfile::TempDir,
+    Arc<vllm_chat::HfChatBackend>,
+    Arc<vllm_text::backend::hf::HfTextBackend>,
+    DynTokenizer,
+) {
+    use base64::Engine as _;
+    use vllm_text::backend::hf::{HfTextBackend, ResolvedModelFiles};
+
+    let dir = tempfile::tempdir().unwrap();
+    fs::write(
+        dir.path().join("config.json"),
+        json!({"model_type": model_type, "vocab_size": 261, "num_reserved_special_tokens": 5})
+            .to_string(),
+    )
+    .unwrap();
+    let bpe = (0u8..=255)
+        .map(|byte| {
+            format!(
+                "{} {}\n",
+                base64::engine::general_purpose::STANDARD.encode([byte]),
+                byte
+            )
+        })
+        .collect::<String>();
+    fs::write(dir.path().join("tiktoken.model"), bpe).unwrap();
+    let tokens: serde_json::Map<String, serde_json::Value> = [
+        "<|open|>",
+        "<|close|>",
+        "<|sep|>",
+        "<|end_of_msg|>",
+        "<|media_pad|>",
+    ]
+    .into_iter()
+    .enumerate()
+    .map(|(index, token)| {
+        (
+            (256 + index).to_string(),
+            json!({"content": token, "special": true}),
+        )
+    })
+    .collect();
+    fs::write(
+        dir.path().join("tokenizer_config.json"),
+        json!({"added_tokens_decoder": tokens}).to_string(),
+    )
+    .unwrap();
+    let files = ResolvedModelFiles::new(dir.path().to_str().unwrap(), None).await.unwrap();
+    let text = Arc::new(
+        HfTextBackend::from_resolved_model_files(
+            files.clone(),
+            "tool-model".into(),
+            vllm_text::GenerationConfigMode::Vllm,
+        )
+        .unwrap(),
+    );
+    let tokenizer = text.tokenizer();
+    let backend = Arc::new(
+        vllm_chat::HfChatBackend::from_resolved_model_files(
+            files,
+            "tool-model".into(),
+            vllm_chat::LoadModelBackendsOptions {
+                renderer,
+                language_model_only: true,
+                ..Default::default()
+            },
+            tokenizer.clone(),
+        )
+        .unwrap(),
+    );
+    (dir, backend, text, tokenizer)
+}
+
+fn system_tools_render_app(
+    backend: Arc<vllm_chat::HfChatBackend>,
+    text: Arc<vllm_text::backend::hf::HfTextBackend>,
+) -> axum::Router {
+    build_render_router(Arc::new(RenderState {
+        model: "tool-model".into(),
+        served_model_names: ServedModelNames::new(vec!["tool-model".into()]),
+        max_model_len: Some(4096),
+        max_n_sequences: crate::DEFAULT_MAX_N_SEQUENCES,
+        text: TextRequestProcessor::new(text, 4096),
+        chat: ChatRequestProcessor::render_only(backend).with_parser_selections(
+            ParserSelection::Explicit("kimi_k3".into()),
+            ParserSelection::Explicit("kimi_k3".into()),
+        ),
+    }))
+}
+
+fn system_tool(name: &str) -> serde_json::Value {
+    json!({"type": "function", "function": {
+        "name": name, "parameters": {"type": "object", "properties": {"city": {"type": "string"}}, "required": ["city"]},
+        "strict": false,
+    }})
+}
+
+/// Required/named tool choice resolves the union, while declarations stay in history.
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+#[serial]
+async fn render_chat_system_tools_preserve_position_and_effective_union() {
+    let (_dir, backend, text, tokenizer) =
+        system_tools_backend("kimi_k3", vllm_chat::RendererSelection::KimiK3).await;
+    let mut app = system_tools_render_app(backend, text);
+    let mut rendered_prompts = Vec::new();
+    for tool_choice in [
+        json!("required"),
+        json!({"type":"function","function":{"name":"get_weather"}}),
+    ] {
+        let request = json!({
+            "model":"tool-model",
+            "messages":[
+                {"role":"user","content":"before declaration"},
+                {"role":"assistant","content":"acknowledged"},
+                {"role":"system","content":"","tools":[system_tool("get_weather")]},
+                {"role":"user","content":"after declaration"},
+            ],
+            "tools":[system_tool("get_time")],
+            "tool_choice":tool_choice,
+            "chat_template_kwargs":{"thinking":false},
+        });
+        let (status, rendered) = post_json(&mut app, "/v1/chat/completions/render", request).await;
+        assert_eq!(status, StatusCode::OK, "{rendered}");
+        let ids: Vec<u32> = serde_json::from_value(rendered["token_ids"].clone()).unwrap();
+        let prompt = tokenizer.decode(&ids, false).unwrap();
+        assert!(prompt.find("get_time").unwrap() < prompt.find("before declaration").unwrap());
+        assert!(
+            prompt.find("acknowledged").unwrap() < prompt.find("## New Tools Available").unwrap()
+        );
+        assert!(prompt.find("get_weather").unwrap() < prompt.find("after declaration").unwrap());
+        rendered_prompts.push(prompt);
+    }
+    expect_test::expect_file!["fixtures/system_tools_required_and_named.txt"]
+        .assert_debug_eq(&rendered_prompts);
+}
+
+/// Only a nonempty declaration may omit content; malformed declarations never disappear.
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+#[serial]
+async fn render_chat_system_tools_reject_invalid_declarations() {
+    let (_dir, backend, text, _) =
+        system_tools_backend("kimi_k3", vllm_chat::RendererSelection::KimiK3).await;
+    let mut app = system_tools_render_app(backend, text);
+    let valid = system_tool("get_weather");
+    let mut missing_type = valid.clone();
+    missing_type.as_object_mut().unwrap().remove("type");
+    let mut missing_function = valid.clone();
+    missing_function.as_object_mut().unwrap().remove("function");
+    let mut missing_name = valid.clone();
+    missing_name["function"].as_object_mut().unwrap().remove("name");
+    let mut wrong_type = valid.clone();
+    wrong_type["type"] = json!("other");
+    let mut cases = vec![
+        ("missing_content", json!({"role":"system"})),
+        (
+            "empty_tools_missing_content",
+            json!({"role":"system","tools":[]}),
+        ),
+        (
+            "null_tools_missing_content",
+            json!({"role":"system","tools":null}),
+        ),
+        (
+            "null_content",
+            json!({"role":"system","content":null,"tools":[valid.clone()]}),
+        ),
+        (
+            "user_tools",
+            json!({"role":"user","content":"hello","tools":[valid.clone()]}),
+        ),
+        (
+            "assistant_tools",
+            json!({"role":"assistant","content":"hello","tools":[valid.clone()]}),
+        ),
+        (
+            "user_malformed_tools",
+            json!({"role":"user","content":"hello","tools":{}}),
+        ),
+        (
+            "assistant_malformed_tools",
+            json!({"role":"assistant","content":"hello","tools":"invalid"}),
+        ),
+        (
+            "content_and_tools",
+            json!({"role":"system","content":"instructions","tools":[valid.clone()]}),
+        ),
+        (
+            "non_array",
+            json!({"role":"system","content":"","tools":valid.clone()}),
+        ),
+        (
+            "non_object",
+            json!({"role":"system","content":"","tools":[null]}),
+        ),
+        (
+            "missing_type",
+            json!({"role":"system","content":"","tools":[missing_type]}),
+        ),
+        (
+            "missing_function",
+            json!({"role":"system","content":"","tools":[missing_function]}),
+        ),
+        (
+            "missing_name",
+            json!({"role":"system","content":"","tools":[missing_name]}),
+        ),
+        (
+            "wrong_type",
+            json!({"role":"system","content":"","tools":[valid.clone(),wrong_type]}),
+        ),
+    ];
+    for (label, name) in [
+        ("empty_name", "".to_string()),
+        ("leading_digit", "1tool".to_string()),
+        ("name_punctuation", "bad@name".to_string()),
+        ("long_name", "x".repeat(257)),
+    ] {
+        cases.push((
+            label,
+            json!({"role":"system","content":"","tools":[system_tool(&name)]}),
+        ));
+    }
+    let mut errors = Vec::new();
+    for (name, declaration) in cases {
+        let (status, result) = post_json(
+            &mut app,
+            "/v1/chat/completions/render",
+            json!({
+                "model":"tool-model", "messages":[declaration, {"role":"user","content":"hello"}],
+            }),
+        )
+        .await;
+        assert_eq!(status, StatusCode::BAD_REQUEST, "{name}: {result}");
+        errors.push(format!(
+            "{name}: {}",
+            result["error"]["message"].as_str().unwrap()
+        ));
+    }
+    for messages in [
+        json!([{"role":"system","tools":[valid.clone(),valid.clone()]}]),
+        json!([{"role":"system","tools":[valid.clone()]},{"role":"system","tools":[valid.clone()]}]),
+    ] {
+        let (status, result) = post_json(
+            &mut app,
+            "/v1/chat/completions/render",
+            json!({
+                "model":"tool-model", "messages":messages,
+            }),
+        )
+        .await;
+        assert_eq!(status, StatusCode::BAD_REQUEST, "{result}");
+        assert!(result["error"]["message"].as_str().unwrap().contains("duplicate tool name"));
+    }
+    let (status, result) = post_json(&mut app, "/v1/chat/completions/render", json!({
+        "model":"tool-model", "messages":[{"role":"system","tools":[valid.clone()]}], "tools":[valid],
+    })).await;
+    assert_eq!(status, StatusCode::BAD_REQUEST, "{result}");
+    assert!(result["error"]["message"].as_str().unwrap().contains("duplicate tool name"));
+    expect_test::expect_file!["fixtures/system_tools_invalid_declarations.txt"]
+        .assert_debug_eq(&errors);
+}
+
+/// Existing developer behavior and K3.1 instructions must not inherit the K3 system-only restriction.
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+#[serial]
+async fn render_chat_system_tools_keep_variant_and_empty_declaration_semantics() {
+    let mut prompts = Vec::new();
+    for (model_type, role) in [("kimi_k3", "developer"), ("kimi_k31", "system")] {
+        let (_dir, backend, text, tokenizer) =
+            system_tools_backend(model_type, vllm_chat::RendererSelection::KimiK3).await;
+        let mut app = system_tools_render_app(backend, text);
+        let (status, result) = post_json(&mut app, "/v1/chat/completions/render", json!({
+            "model":"tool-model", "messages":[
+                {"role":role,"content":"keep these instructions","tools":[system_tool("get_weather")]},
+                {"role":"user","content":"hello"},
+            ], "chat_template_kwargs":{"thinking":false},
+        })).await;
+        assert_eq!(status, StatusCode::OK, "{model_type}/{role}: {result}");
+        let ids: Vec<u32> = serde_json::from_value(result["token_ids"].clone()).unwrap();
+        prompts.push(tokenizer.decode(&ids, false).unwrap());
+    }
+    assert_eq!(prompts[0], prompts[1]);
+    expect_test::expect![[r#"
+        <|open|>message role="system" type="tool-declare"<|sep|>## New Tools Available
+        The system dynamically extends the toolset via lazy-loading.
+        You have access to all existing and extended tools.
+        Here are the specs for the extended tools.
+
+        ```json
+        [{"function":{"name":"get_weather","parameters":{"properties":{"city":{"type":"string"}},"required":["city"],"type":"object"},"strict":false},"type":"function"}]
+        ```<|close|>message<|sep|><|end_of_msg|><|open|>message role="system"<|sep|>keep these instructions<|close|>message<|sep|><|end_of_msg|><|open|>message role="user"<|sep|>hello<|close|>message<|sep|><|end_of_msg|><|open|>message role="assistant"<|sep|><|open|>response<|sep|>"#]].assert_eq(&prompts[0]);
+
+    let (_dir, backend, text, _) =
+        system_tools_backend("kimi_k3", vllm_chat::RendererSelection::KimiK3).await;
+    let mut app = system_tools_render_app(backend, text);
+    for role in ["system", "user", "assistant"] {
+        let mut ids = Vec::new();
+        for message in [
+            json!({"role":role,"content":"instructions"}),
+            json!({"role":role,"content":"instructions","tools":null}),
+            json!({"role":role,"content":"instructions","tools":[]}),
+        ] {
+            let (status, result) = post_json(
+                &mut app,
+                "/v1/chat/completions/render",
+                json!({
+                    "model":"tool-model", "messages":[message, {"role":"user","content":"hello"}],
+                }),
+            )
+            .await;
+            assert_eq!(status, StatusCode::OK, "{role}: {result}");
+            ids.push(result["token_ids"].clone());
+        }
+        assert!(ids.windows(2).all(|pair| pair[0] == pair[1]), "{role}");
+    }
+}
+
+/// Unsupported native renderers must not discard a declared system tool.
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+#[serial]
+async fn render_chat_rejects_system_tools_unsupported_by_native_renderer() {
+    let (_dir, backend, text, _) =
+        system_tools_backend("deepseek_v32", vllm_chat::RendererSelection::DeepSeekV32).await;
+    let mut app = system_tools_render_app(backend, text);
+    let (status, result) = post_json(
+        &mut app,
+        "/v1/chat/completions/render",
+        json!({
+            "model": "tool-model",
+            "messages": [{"role": "system", "tools": [system_tool("get_weather")]},
+                {"role": "user", "content": "hello"}],
+        }),
+    )
+    .await;
+    assert_eq!(status, StatusCode::BAD_REQUEST);
+    assert!(
+        result["error"]["message"]
+            .as_str()
+            .unwrap()
+            .contains("system-message tools are not supported by this chat renderer")
+    );
+}
+
+/// A scripted engine call reaches the existing parser in both response modes.
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+#[serial]
+async fn chat_system_tools_required_survive_buffered_and_streaming_output() {
+    let (_dir, backend, text, tokenizer) =
+        system_tools_backend("kimi_k3", vllm_chat::RendererSelection::KimiK3).await;
+    let output = "<|close|>response<|sep|><|open|>tools<|sep|><|open|>call tool=\"get_weather\" index=\"1\"<|sep|><|open|>argument key=\"city\" type=\"string\"<|sep|>Paris<|close|>argument<|sep|><|close|>call<|sep|><|close|>tools<|sep|><|close|>message<|sep|>";
+    let output_ids = tokenizer.encode(output, false).unwrap();
+    let mut results = Vec::new();
+    for stream in [false, true] {
+        let prompt_tokenizer = tokenizer.clone();
+        let tokens = output_ids.clone();
+        let (chat, task) = test_models_with_engine_outputs_and_chat_inner(
+            b"engine-system-tools",
+            move |request_id| {
+                engine_outputs_for_request(
+                    request_id,
+                    vec![(tokens, Some(EngineCoreFinishReason::Stop))],
+                )
+            },
+            move |request| {
+                let prompt = prompt_tokenizer
+                    .decode(&decode_prompt_token_ids(request).unwrap(), false)
+                    .unwrap();
+                assert!(prompt.contains("## New Tools Available"));
+                assert!(prompt.contains("get_weather"));
+            },
+            |llm| ChatLlm::new(TextLlm::new(llm, text.clone()), backend.clone()),
+        )
+        .await;
+        let chat = chat
+            .with_tool_call_parser(ParserSelection::Explicit("kimi_k3".into()))
+            .with_reasoning_parser(ParserSelection::Explicit("kimi_k3".into()));
+        let mut app = build_router(Arc::new(AppState::new(vec!["tool-model".into()], chat)));
+        let response = app.call(Request::builder().method("POST").uri("/v1/chat/completions")
+            .header("content-type", "application/json").body(Body::from(json!({
+                "model":"tool-model", "messages":[{"role":"system","tools":[system_tool("get_weather")]},
+                    {"role":"user","content":"weather?"}], "tool_choice":"required", "stream":stream,
+                "chat_template_kwargs":{"thinking":false},
+            }).to_string())).unwrap()).await.unwrap();
+        assert_eq!(response.status(), StatusCode::OK);
+        let body = to_bytes(response.into_body(), usize::MAX).await.unwrap();
+        task.await.unwrap();
+        let packets = if stream {
+            sse_json_payloads(std::str::from_utf8(&body).unwrap())
+        } else {
+            vec![serde_json::from_slice::<serde_json::Value>(&body).unwrap()]
+        };
+        let mut name = String::new();
+        let mut arguments = String::new();
+        let mut finish = None;
+        for packet in packets {
+            let choice = &packet["choices"][0];
+            if let Some(value) = choice["finish_reason"].as_str() {
+                finish = Some(value.to_owned());
+            }
+            let message = &choice[if stream { "delta" } else { "message" }];
+            if let Some(calls) = message["tool_calls"].as_array() {
+                for call in calls {
+                    if let Some(value) = call["function"]["name"].as_str() {
+                        name.push_str(value);
+                    }
+                    if let Some(value) = call["function"]["arguments"].as_str() {
+                        arguments.push_str(value);
+                    }
+                }
+            }
+        }
+        results.push((stream, name, arguments, finish));
+    }
+    expect_test::expect![[r#"
+        [
+            (
+                false,
+                "get_weather",
+                "{\"city\":\"Paris\"}",
+                Some(
+                    "tool_calls",
+                ),
+            ),
+            (
+                true,
+                "get_weather",
+                "{\"city\":\"Paris\"}",
+                Some(
+                    "tool_calls",
+                ),
+            ),
+        ]
+    "#]]
+    .assert_debug_eq(&results);
 }
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]

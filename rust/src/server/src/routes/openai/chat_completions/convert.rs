@@ -303,9 +303,10 @@ fn extract_last_assistant_content(messages: &[ChatMessage]) -> Option<String> {
 /// Lower one OpenAI chat message into the `vllm-chat` message shape.
 pub(crate) fn convert_message(message: ChatMessage) -> Result<VllmChatMessage, ApiError> {
     match message {
-        ChatMessage::System { content, .. } => {
-            Ok(VllmChatMessage::system(convert_content(content)?))
-        }
+        ChatMessage::System { content, tools, .. } => Ok(VllmChatMessage::System {
+            content: convert_content(content)?,
+            tools: convert_message_tools(tools)?,
+        }),
         ChatMessage::User { content, .. } => Ok(VllmChatMessage::user(convert_content(content)?)),
         ChatMessage::Assistant {
             content,

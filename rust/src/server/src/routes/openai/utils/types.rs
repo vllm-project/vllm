@@ -345,6 +345,34 @@ fn default_function_tool_type() -> String {
     "function".to_string()
 }
 
+/// System-message declarations require an explicit type, without changing the
+/// defaults of request-level or existing developer tools.
+fn deserialize_system_tools<'de, D>(deserializer: D) -> Result<Option<Vec<Tool>>, D::Error>
+where
+    D: Deserializer<'de>,
+{
+    #[derive(Deserialize)]
+    struct Declaration {
+        #[serde(rename = "type")]
+        tool_type: String,
+        function: Function,
+        defer_loading: Option<bool>,
+    }
+
+    Ok(
+        Option::<Vec<Declaration>>::deserialize(deserializer)?.map(|tools| {
+            tools
+                .into_iter()
+                .map(|tool| Tool {
+                    tool_type: tool.tool_type,
+                    function: tool.function,
+                    defer_loading: tool.defer_loading,
+                })
+                .collect()
+        }),
+    )
+}
+
 #[serde_with::skip_serializing_none]
 #[derive(Debug, Clone, PartialEq, Deserialize, Serialize)]
 pub struct Function {
@@ -515,6 +543,8 @@ pub enum ChatMessage {
     #[serde(rename = "system")]
     System {
         content: MessageContent,
+        #[serde(default, deserialize_with = "deserialize_system_tools")]
+        tools: Option<Vec<Tool>>,
         name: Option<String>,
     },
     #[serde(rename = "user")]
@@ -617,6 +647,29 @@ impl<'de> Deserialize<'de> for ChatMessage {
     {
         let mut value = Value::deserialize(deserializer)?;
         normalize_reasoning_aliases(&mut value);
+        let role = value.get("role").and_then(Value::as_str);
+        if matches!(role, Some("user" | "assistant"))
+            && value.get("tools").is_some_and(|tools| match tools {
+                Value::Null => false,
+                Value::Array(tools) => !tools.is_empty(),
+                _ => true,
+            })
+        {
+            return Err(serde::de::Error::custom(
+                "tools cannot be declared in user or assistant messages",
+            ));
+        }
+        if role == Some("system")
+            && value.get("content").is_none()
+            && value
+                .get("tools")
+                .and_then(Value::as_array)
+                .is_some_and(|tools| !tools.is_empty())
+        {
+            // Only a tool declaration may omit content. Its typed tools still
+            // pass through normal deserialization and function validation.
+            value["content"] = Value::String(String::new());
+        }
         let is_custom = value
             .get("role")
             .and_then(Value::as_str)

@@ -8,8 +8,8 @@ use serde_json::{Map, Value};
 use tracing::warn;
 use vllm_text::Prompt;
 
-use crate::error::Result;
-use crate::request::ChatRequest;
+use crate::error::{Result, bail_invalid_message_tools};
+use crate::request::{ChatMessage, ChatRequest};
 
 mod deepseek;
 pub mod deepseek_v32;
@@ -92,3 +92,15 @@ pub trait ChatRenderer: Send + Sync {
 
 /// Shared trait-object form of [`ChatRenderer`].
 pub type DynChatRenderer = Arc<dyn ChatRenderer>;
+
+/// Reject system declarations in native renderers that do not render them.
+fn reject_system_tools(request: &ChatRequest) -> Result<()> {
+    if request.messages.iter().any(|message| {
+        matches!(message, ChatMessage::System { tools: Some(tools), .. } if !tools.is_empty())
+    }) {
+        bail_invalid_message_tools!(
+            "system-message tools are not supported by this chat renderer"
+        );
+    }
+    Ok(())
+}

@@ -45,6 +45,7 @@ impl Glm5NextChatRenderer {
 
 impl ChatRenderer for Glm5NextChatRenderer {
     fn render(&self, request: &ChatRequest) -> Result<RenderedPrompt> {
+        super::reject_system_tools(request)?;
         request.validate()?;
         let mut kwargs = self.default_template_kwargs.clone();
         kwargs.extend(request.chat_options.template_kwargs.clone());
