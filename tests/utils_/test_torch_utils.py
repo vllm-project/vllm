@@ -1,9 +1,12 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
+import os
+
 import numpy as np
 import pytest
 import torch
 
+from vllm.utils import torch_utils
 from vllm.utils.torch_utils import (
     OMP_NUM_THREADS_SET_BY_VLLM,
     LayerName,
@@ -13,6 +16,7 @@ from vllm.utils.torch_utils import (
     current_stream,
     get_kv_cache_torch_dtype,
     is_lossless_cast,
+    largest_numa_node_cpu_count,
     set_default_torch_dtype,
     set_random_seed,
     set_torch_threads_for_runtime,
@@ -188,15 +192,57 @@ def restore_torch_threads(monkeypatch: pytest.MonkeyPatch):
     torch.set_num_threads(original)
 
 
-def test_startup_omp_num_threads_divides_between_local_workers():
+def test_startup_omp_num_threads_divides_between_local_workers(
+    monkeypatch: pytest.MonkeyPatch,
+):
     """Workers share the node's usable CPUs rather than each taking them all."""
-    available = available_cpu_count()
-    if available < 4:
-        pytest.skip("needs at least 4 usable CPUs")
-    assert startup_omp_num_threads(1) == available
-    assert startup_omp_num_threads(2) == available // 2
+    monkeypatch.setattr(torch_utils, "available_cpu_count", lambda: 96)
+    monkeypatch.setattr(torch_utils, "largest_numa_node_cpu_count", lambda: None)
+    assert startup_omp_num_threads(1) == 96
+    assert startup_omp_num_threads(2) == 48
     # Never zero, however many workers share the node.
-    assert startup_omp_num_threads(available * 4) == 1
+    assert startup_omp_num_threads(96 * 4) == 1
+
+
+def test_startup_omp_num_threads_shares_one_numa_node(
+    monkeypatch: pytest.MonkeyPatch,
+):
+    """On a multi-socket host the share comes out of one socket's CPUs, since
+    the collective library narrows each worker to the CPUs local to its GPU."""
+    monkeypatch.setattr(torch_utils, "available_cpu_count", lambda: 236)
+    monkeypatch.setattr(torch_utils, "largest_numa_node_cpu_count", lambda: 118)
+    assert startup_omp_num_threads(1) == 118
+    assert startup_omp_num_threads(4) == 29
+    assert startup_omp_num_threads(8) == 14
+    assert startup_omp_num_threads(1024) == 1
+    # A cgroup quota smaller than a node still wins.
+    monkeypatch.setattr(torch_utils, "available_cpu_count", lambda: 12)
+    assert startup_omp_num_threads(4) == 3
+
+
+def _write_numa_nodes(root, cpulists: dict[str, str]) -> None:
+    for name, cpulist in cpulists.items():
+        (root / name).mkdir()
+        (root / name / "cpulist").write_text(cpulist + "\n")
+
+
+def test_largest_numa_node_cpu_count_reads_sysfs(
+    tmp_path, monkeypatch: pytest.MonkeyPatch
+):
+    if not hasattr(os, "sched_getaffinity"):
+        pytest.skip("needs os.sched_getaffinity")
+    # Two sockets with split ranges, plus a CPU-less (memory-only) node.
+    _write_numa_nodes(
+        tmp_path, {"node0": "0-3,8-11", "node1": "4-7,12-13", "node2": ""}
+    )
+    (tmp_path / "possible").write_text("0-2\n")
+    monkeypatch.setattr(os, "sched_getaffinity", lambda pid: set(range(14)))
+    assert largest_numa_node_cpu_count(str(tmp_path)) == 8
+    # Only CPUs this process may run on count.
+    monkeypatch.setattr(os, "sched_getaffinity", lambda pid: {0, 1, 4, 5, 6, 12})
+    assert largest_numa_node_cpu_count(str(tmp_path)) == 4
+    # No topology: the caller falls back to the plain CPU count.
+    assert largest_numa_node_cpu_count(str(tmp_path / "missing")) is None
 
 
 def test_set_torch_threads_for_runtime(restore_torch_threads):

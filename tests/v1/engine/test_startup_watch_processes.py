@@ -74,6 +74,7 @@ def test_engine_core_startup_threads_are_scoped_to_launch(
     if user_threads is not None:
         monkeypatch.setenv("OMP_NUM_THREADS", user_threads)
     monkeypatch.setattr(torch_utils, "available_cpu_count", lambda: 12)
+    monkeypatch.setattr(torch_utils, "largest_numa_node_cpu_count", lambda: None)
     platform = SimpleNamespace(
         is_cpu=lambda: False, is_cuda_alike=lambda: True, is_xpu=lambda: False
     )

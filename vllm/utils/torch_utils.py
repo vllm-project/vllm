@@ -255,6 +255,36 @@ def available_cpu_count() -> int:
     return max(1, count)
 
 
+def largest_numa_node_cpu_count(
+    node_root: str = "/sys/devices/system/node",
+) -> int | None:
+    """CPUs of the largest NUMA node that this process may run on.
+
+    `None` when the topology is unavailable (non-Linux, or no sysfs), so
+    callers can fall back to the plain CPU count.
+    """
+    if sys.platform != "linux":
+        return None
+    try:
+        allowed = os.sched_getaffinity(0)
+        largest = 0
+        for name in os.listdir(node_root):
+            if not (name.startswith("node") and name[len("node") :].isdigit()):
+                continue
+            with open(os.path.join(node_root, name, "cpulist")) as f:
+                cpulist = f.read().strip()
+            cpus: set[int] = set()
+            for group in cpulist.split(","):
+                if not group:
+                    continue
+                first, _, last = group.partition("-")
+                cpus.update(range(int(first), int(last or first) + 1))
+            largest = max(largest, len(cpus & allowed))
+        return largest or None
+    except (OSError, ValueError):
+        return None
+
+
 # Marks OMP_NUM_THREADS as chosen by vLLM for its worker processes rather than
 # set by the user, so a worker knows it may drop the value once startup is done.
 OMP_NUM_THREADS_SET_BY_VLLM = "VLLM_OMP_NUM_THREADS_SET_BY_VLLM"
@@ -268,8 +298,16 @@ def startup_omp_num_threads(num_local_procs: int) -> int:
     actually use: torch's default is the host core count, which ignores both
     scheduling affinity and any cgroup CPU quota, and doesn't account for the
     other workers sharing the node.
+
+    The CPUs are counted per NUMA node: NCCL/RCCL narrows each worker's
+    affinity to the CPUs local to its GPU before the lazily created OMP pool
+    exists, so a share of the whole host would oversubscribe a socket that
+    holds several of this node's workers.
     """
-    return max(1, available_cpu_count() // max(1, num_local_procs))
+    budget = available_cpu_count()
+    if (numa_cpus := largest_numa_node_cpu_count()) is not None:
+        budget = min(budget, numa_cpus)
+    return max(1, budget // max(1, num_local_procs))
 
 
 def set_torch_threads_for_runtime() -> None:
