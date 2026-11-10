@@ -90,7 +90,6 @@ from .protocol import (
     GenerateTokensResponse,
     GenerateTokensStreamChoice,
     GenerateTokensStreamResponse,
-    MultiModalFeatures,
     OutputMode,
 )
 
@@ -197,27 +196,6 @@ class ServingTokens(GenerateBaseServing):
             if mc.generation_config not in ("auto", "vllm")
             else getattr(mc, "override_generation_config", {}).get("max_new_tokens")
         )
-
-    async def _placeholders_before_features(
-        self, prompt: TokensPrompt, prefix: list[int], features: MultiModalFeatures
-    ) -> bool:
-        """Whether `prompt` renders once `prefix` minus the features ranges
-        is prepended, i.e. its placeholders sit before the last range."""
-        covered = {
-            i
-            for rs in features.mm_placeholders.values()
-            for p in rs
-            for i in range(p.offset, p.offset + p.length)
-        }
-        retry = prompt.copy()
-        retry["prompt_token_ids"] = [
-            t for i, t in enumerate(prefix) if i not in covered
-        ] + prompt["prompt_token_ids"]
-        try:
-            await self.online_renderer.renderer.render_cmpl_async([retry])
-        except VLLMValidationError:
-            return False
-        return True
 
     def _validate_mm_cache_handles(
         self,
@@ -368,12 +346,10 @@ class ServingTokens(GenerateBaseServing):
                     [prompt]
                 )
             except PromptUpdateMismatchError as e:
-                if not features or not await self._placeholders_before_features(
-                    prompt, request.token_ids[:start], features
-                ):
+                if not features:
                     raise
                 raise VLLMValidationError(
-                    "content_parts placeholders must come after the last "
+                    f"{e}; content_parts placeholders must come after the last "
                     f"features range, which ends at offset {start}"
                 ) from e
         if features:
