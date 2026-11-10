@@ -232,9 +232,8 @@ class Scheduler(SchedulerInterface):
         # self.waiting: a block-holder must never sit behind a request whose
         # failed allocation would stop the scheduling scan.
         self.kv_holding_waiting = create_request_queue(self.policy)
-        # With --max-num-inflight-kv-loads, requests that may load KV async but
-        # haven't started, kept apart so their loads can start while the batch
-        # is full without scanning past requests that need a running slot.
+        # With either async-load limit, keep requests that may load KV async
+        # separate so throttling their loads doesn't block local requests.
         self.async_kv_waiting = create_request_queue(self.policy)
         # Waiting requests that are deferred, i.e. were skipped by the scheduling
         # scan or enqueued in a blocked status.
@@ -1031,6 +1030,10 @@ class Scheduler(SchedulerInterface):
                 else:
                     step_skipped_waiting.appendleft(request_to_skip)
 
+            num_async_kv_loads = 0
+            max_async_kv_loads = (
+                self.scheduler_config.max_async_kv_loads_per_step or float("inf")
+            )
             # Cleared once self.async_kv_waiting's head can't start a load.
             take_async_kv = True
             while True:
@@ -1046,7 +1049,11 @@ class Scheduler(SchedulerInterface):
                     request_queue = self.kv_holding_waiting
                     if not request_queue and self._pause_state == PauseState.UNPAUSED:
                         request_queue = self._next_waiting_queue(take_async_kv)
-                elif take_async_kv and self._pause_state == PauseState.UNPAUSED:
+                elif (
+                    take_async_kv
+                    and self.scheduler_config.max_num_inflight_kv_loads
+                    and self._pause_state == PauseState.UNPAUSED
+                ):
                     # No running slot or token budget left: start async KV loads
                     # only, which take neither until their KV has arrived.
                     request_queue = self.async_kv_waiting
@@ -1267,12 +1274,15 @@ class Scheduler(SchedulerInterface):
                 # has arrived (_update_waiting_for_remote_kv).
                 num_replay_tokens = 0
 
-                if (load_kv_async and not self._admits_inflight_kv_load()) or (
-                    loads_only and not load_kv_async
-                ):
-                    # Past --max-num-inflight-kv-loads, or needs a running slot
-                    # while none is free. It waits at the head of its queue;
-                    # other queues may still admit.
+                if (
+                    load_kv_async
+                    and (
+                        num_async_kv_loads >= max_async_kv_loads
+                        or not self._admits_inflight_kv_load()
+                    )
+                ) or (loads_only and not load_kv_async):
+                    # Past an async KV load limit, or needs a running slot while none
+                    # is free. It waits at the head of its queue; others may admit.
                     if request_queue is not self.async_kv_waiting:
                         break
                     take_async_kv = False
@@ -1522,6 +1532,7 @@ class Scheduler(SchedulerInterface):
                     # If loading async, allocate memory and put request
                     # into the WAITING_FOR_REMOTE_KV state.
                     request.status = RequestStatus.WAITING_FOR_REMOTE_KVS
+                    num_async_kv_loads += 1
                     # Set num_computed_tokens even though KVs are not yet loaded.
                     # request.num_computed_tokens will not be used anywhere until
                     # the request finished the KV transfer.
@@ -2702,7 +2713,10 @@ class Scheduler(SchedulerInterface):
             self.kv_holding_waiting.add_request(request)
         elif (
             self.connector is not None
-            and self.scheduler_config.max_num_inflight_kv_loads
+            and (
+                self.scheduler_config.max_num_inflight_kv_loads
+                or self.scheduler_config.max_async_kv_loads_per_step
+            )
             and self.connector.may_load_async(request)
         ):
             self.async_kv_waiting.add_request(request)
