@@ -41,12 +41,15 @@ def test_quantize_and_sum_matches_reference(dtype, tokens):
     from vllm.triton_utils import triton
 
     hidden = 256
+    torch.manual_seed(0)
     xs = [torch.randn(tokens, hidden, dtype=dtype, device="cuda") for _ in range(2)]
     ng = xs[0].numel() // GROUP
     q = [torch.empty(ng * 16, dtype=torch.uint8, device="cuda") for _ in xs]
     s = [torch.empty(ng, dtype=torch.float16, device="cuda") for _ in xs]
     for x, qi, si in zip(xs, q, s):
-        _quant_int4_kernel[(triton.cdiv(ng, 128),)](x, qi, si, ng, BLOCK_G=128)
+        _quant_int4_kernel[(triton.cdiv(ng, 128),)](
+            x, qi, si, ng, BLOCK_G=128, enable_fp_fusion=False
+        )
     out = torch.empty_like(xs[0])
     _dq_sum_kernel[(triton.cdiv(ng, 128),)](
         q[0], s[0], q[1], s[1], out, ng, BLOCK_G=128, num_warps=2

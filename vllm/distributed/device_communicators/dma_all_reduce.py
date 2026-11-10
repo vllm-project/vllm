@@ -240,7 +240,13 @@ class DmaAllReduce:
             for dtype in (torch.bfloat16, torch.float16):
                 x = torch.zeros(GROUP, dtype=dtype, device=self.device)
                 _quant_int4_kernel[(1,)](
-                    x, _Ptr(src, u8), _Ptr(src + 16, f16), 1, BLOCK_G=qg, num_warps=qw
+                    x,
+                    _Ptr(src, u8),
+                    _Ptr(src + 16, f16),
+                    1,
+                    BLOCK_G=qg,
+                    num_warps=qw,
+                    enable_fp_fusion=False,
                 )
                 _dq_sum_kernel[(1,)](
                     _Ptr(src, u8),
@@ -309,8 +315,16 @@ class DmaAllReduce:
         stream = ctypes.c_void_p(torch.cuda.current_stream(self.device).cuda_stream)
         u8, f16 = torch.uint8, torch.float16
         (qg, qw), (dg, dw) = _Q_LAUNCH, _DQ_LAUNCH
+        # No FMA contraction: floor(x * inv + 0.5) rounds twice, so a value on an
+        # exact half-step tie quantizes the same as the reference.
         _quant_int4_kernel[(triton.cdiv(ng, qg),)](
-            x, _Ptr(send, u8), _Ptr(send + s_off, f16), ng, BLOCK_G=qg, num_warps=qw
+            x,
+            _Ptr(send, u8),
+            _Ptr(send + s_off, f16),
+            ng,
+            BLOCK_G=qg,
+            num_warps=qw,
+            enable_fp_fusion=False,
         )
         if k >= _SLOTS:
             self.hip(
