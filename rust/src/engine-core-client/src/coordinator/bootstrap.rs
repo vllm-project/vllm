@@ -9,16 +9,21 @@ use zeromq::{PullSocket, XPubSocket, ZmqMessage};
 
 use crate::error::{Error, Result, bail_unexpected_handshake_message};
 
-/// Engine-facing sockets owned by the in-process coordinator.
+/// Sockets owned by the in-process coordinator: the engine-facing broadcast
+/// and control sockets, and the frontend-facing state publish socket.
 pub(crate) struct CoordinatorBootstrap {
     pub input_address: String,
     pub output_address: String,
+    /// Sent to engines in INIT, which report it back to every frontend as
+    /// READY `dp_stats_address`.
+    pub frontend_publish_address: String,
     pub input_socket: XPubSocket,
     pub output_socket: PullSocket,
+    pub frontend_publish_socket: XPubSocket,
 }
 
 impl CoordinatorBootstrap {
-    /// Bind the engine-facing coordinator sockets on the given host.
+    /// Bind the coordinator sockets on the given host.
     pub(crate) async fn bind(local_host: &str) -> Result<Self> {
         let mut input_socket = XPubSocket::new();
         let input_address = input_socket.bind(&format!("tcp://{local_host}:0")).await?.to_string();
@@ -27,11 +32,19 @@ impl CoordinatorBootstrap {
         let output_address =
             output_socket.bind(&format!("tcp://{local_host}:0")).await?.to_string();
 
+        let mut frontend_publish_socket = XPubSocket::new();
+        let frontend_publish_address = frontend_publish_socket
+            .bind(&format!("tcp://{local_host}:0"))
+            .await?
+            .to_string();
+
         Ok(Self {
             input_address,
             output_address,
+            frontend_publish_address,
             input_socket,
             output_socket,
+            frontend_publish_socket,
         })
     }
 
@@ -63,7 +76,7 @@ async fn wait_for_engine_subscriptions(
                     timeout: ready_timeout,
                 }
             })??;
-        if !is_engine_subscription(&message) {
+        if !is_subscribe_all(&message) {
             bail_unexpected_handshake_message!(
                 "expected coordinator subscription [0x01], got {message:?}"
             );
@@ -75,9 +88,9 @@ async fn wait_for_engine_subscriptions(
 }
 
 /// Whether `message` is the single-frame subscribe-all notification (`[0x01]`)
-/// that an engine's XSUB sends whenever it connects or reconnects to the
-/// coordinator broadcast socket.
-pub(super) fn is_engine_subscription(message: &ZmqMessage) -> bool {
+/// that an XSUB peer sends whenever it connects or reconnects to a coordinator
+/// XPUB socket.
+pub(super) fn is_subscribe_all(message: &ZmqMessage) -> bool {
     message.len() == 1 && message.get(0).is_some_and(|frame| frame.as_ref() == [0x01])
 }
 

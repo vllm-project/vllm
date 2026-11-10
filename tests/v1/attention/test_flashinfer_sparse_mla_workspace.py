@@ -8,6 +8,7 @@ from unittest.mock import patch
 import pytest
 import torch
 
+from vllm.v1.attention.backends.mla import flashinfer_mla_sparse as fi
 from vllm.v1.attention.backends.mla.flashinfer_mla_sparse import (
     _DEFAULT_WORKSPACE_BUFFER_SIZE,
     FlashInferMLASparseTRTLLMBackend,
@@ -60,6 +61,23 @@ def test_non_dcp_size_is_unchanged():
         max_num_batched_tokens=65536,
     )
     assert computed == _DEFAULT_WORKSPACE_BUFFER_SIZE
+
+
+def test_dcp_size_is_capped_at_one_launch():
+    # Launches cover at most 65535 tokens, so larger token budgets reuse the slab.
+    at_limit = compute_trtllm_sparse_mla_workspace_bytes(
+        base_workspace_bytes=0,
+        dcp_world_size=2,
+        num_heads_per_rank=8,
+        max_num_batched_tokens=65535,
+    )
+    above_limit = compute_trtllm_sparse_mla_workspace_bytes(
+        base_workspace_bytes=0,
+        dcp_world_size=2,
+        num_heads_per_rank=8,
+        max_num_batched_tokens=131072,
+    )
+    assert above_limit == at_limit
 
 
 def test_combined_pcp_dcp_rejects_flashinfer_sparse():
@@ -164,3 +182,39 @@ def test_env_override_above_computed_is_respected_without_warning(monkeypatch):
         )
     assert required == override
     mock_logger.warning_once.assert_not_called()
+
+
+def test_prims_ts_shardq_reserves_the_rank_slice():
+    """A prims_ts ShardQ step attends cdiv(T, tp) + 2 * max_num_seqs tokens
+    with every head; the profile reservation covers that slice, not all T
+    tokens with every head."""
+    impl = object.__new__(fi.FlashInferMLASparseImpl)
+    impl.__dict__.update(
+        use_prims_ts=True,
+        use_shardq=True,
+        num_heads=12,
+        dcp_world_size=1,
+        kv_lora_rank=512,
+        qk_rope_head_dim=64,
+        topk_indices_buffer=None,
+        prims_ts_buckets=(1024, 2048, 4096),
+    )
+    scheduler = SimpleNamespace(max_num_batched_tokens=32768, max_num_seqs=64)
+    reserved = []
+    with (
+        patch.object(
+            fi,
+            "get_current_vllm_config",
+            return_value=SimpleNamespace(scheduler_config=scheduler),
+        ),
+        patch.object(fi, "get_tensor_model_parallel_world_size", return_value=8),
+        patch.object(fi.torch, "empty", side_effect=lambda n, **_: reserved.append(n)),
+    ):
+        impl.reserve_workspace()
+
+    # 96 heads in 4096-row chunks; the step output holds the rank's
+    # 4096 + 2 * 64 tokens.
+    shardq_peak = 4096 * 96 * (512 + 64 + 1024 + 4) + 4224 * 96 * 512 * 2
+    head_sharded_peak = 4096 * 12 * (512 + 64 + 1024 + 4) + 32768 * 12 * 512 * 2
+    assert reserved == [max(shardq_peak, head_sharded_peak)]
+    assert reserved[0] < 4096 * 96 * 1604 + 32768 * 96 * 512 * 2

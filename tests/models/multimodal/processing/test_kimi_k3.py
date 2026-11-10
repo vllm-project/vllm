@@ -23,7 +23,7 @@ _MODEL_ID = "moonshotai/Kimi-K3"
 def image_processors():
     ctx = build_model_context(_MODEL_ID, limit_mm_per_prompt={"image": 1})
     processor = MULTIMODAL_REGISTRY.create_processor(ctx.model_config)
-    k25_fused = processor.info.image_processor
+    k25_fused = getattr(processor.info, "image_processor")  # noqa: B009
     assert isinstance(k25_fused, KimiK25FusedVisionProcessor)
     k3_hf = AutoImageProcessor.from_pretrained(_MODEL_ID, trust_remote_code=True)
     return k25_fused, k3_hf
@@ -68,10 +68,12 @@ def test_mm_device_do_normalize():
 
     normalized_inputs = processor(prompt, mm_items=mm_items)
     normalized_values = normalized_inputs["mm_kwargs"].get_data()["pixel_values"]
+    assert isinstance(normalized_values, torch.Tensor)
 
     ctx.model_config.multimodal_config.mm_device_do_normalize = True
     raw_inputs = processor(prompt, mm_items=mm_items)
     raw_values = raw_inputs["mm_kwargs"].get_data()["pixel_values"]
+    assert isinstance(raw_values, torch.Tensor)
     assert raw_values.dtype == torch.uint8
 
     input_norm = build_mm_input_norm(ctx.model_config).to(device)

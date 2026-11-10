@@ -273,7 +273,7 @@ def test_auto_tool_choice_with_reasoning_parser_passes(serve_parser):
     """Auto tool choice combined with a reasoning parser is supported.
 
     See docs/features/tool_calling.md, which documents using
-    ``--tool-call-parser`` together with ``--reasoning-parser``. This
+    `--tool-call-parser` together with `--reasoning-parser`. This
     combination must pass validation as long as a tool call parser is set.
     """
     args = serve_parser.parse_args(
@@ -336,10 +336,10 @@ def test_per_request_metrics_requires_log_stats(serve_parser):
 def _build_launch_render_parser():
     """Mirror `vllm launch render`.
 
-    `vllm/entrypoints/cli/main.py` parses subcommands with ``dest="subparser"``,
+    `vllm/entrypoints/cli/main.py` parses subcommands with `dest="subparser"`,
     and `LaunchSubcommandBase.add_cli_args` builds the component parser with
     `make_arg_parser`, so a launch component carries serve args under
-    ``args.subparser == "launch"``.
+    `args.subparser == "launch"`.
     """
     vllm_parser = FlexibleArgumentParser()
     subparsers = vllm_parser.add_subparsers(required=False, dest="subparser")
@@ -429,6 +429,22 @@ def test_middleware(serve_parser, cli_args, expected_middleware):
     """Ensure multiple middleware args are parsed properly."""
     args = serve_parser.parse_args(args=cli_args)
     assert args.middleware == expected_middleware
+
+
+def test_reasoning_effort_map_parsing(serve_parser):
+    args = serve_parser.parse_args(
+        args=["--reasoning-effort-map", '{"medium": "low", "xhigh": "max"}']
+    )
+    validate_parsed_serve_args(args)
+    assert args.reasoning_effort_map == {"medium": "low", "xhigh": "max"}
+
+
+@pytest.mark.parametrize("value", ['{"ultra": "max"}', '{"medium": 1}', '["medium"]'])
+def test_reasoning_effort_map_rejects_invalid(serve_parser, value):
+    """Typos in the efforts being mapped fail at startup, not silently."""
+    args = serve_parser.parse_args(args=["--reasoning-effort-map", value])
+    with pytest.raises(ValueError, match="--reasoning-effort-map"):
+        validate_parsed_serve_args(args)
 
 
 def test_default_chat_template_kwargs_parsing(serve_parser):
