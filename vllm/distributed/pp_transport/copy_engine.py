@@ -20,9 +20,10 @@ The waits omit CU_STREAM_WAIT_VALUE_FLUSH, which x86 hosts do not support. As
 in NCCL's zero-SM copy-engine path, this relies on NVLink delivering the peer
 copy before the flag write that follows it, so all PP GPUs must be NVLink peers.
 
-With TP > 1, each TP rank's PP chain is its own transport: a stage's TP ranks
-hold the same outputs, and each sends all of them to the same TP rank of the
-next stage.
+With TP or PCP > 1, each (PCP, TP) position's PP chain is its own transport,
+sending to the same position in the next stage: a stage's TP ranks hold the
+same outputs and each sends all of them, and each PCP rank sends its own
+tokens.
 
 A chain on one node shares its receive buffers through CUDA IPC. A chain that
 spans nodes (multi-node NVLink, e.g. GB200/GB300 NVL72) shares them through
@@ -254,25 +255,29 @@ class CopyEngineTransport(PPTransport):
         pp_group: "GroupCoordinator",
         persistent: dict[str, torch.Tensor] | None,
     ) -> None:
-        """Collective over the PP and TP groups. Raises `CopyEngineUnavailable`
+        """Collective over the PP, TP and PCP groups. Raises `CopyEngineUnavailable`
         on every rank alike, with nothing left allocated, if copy engines are
         not usable on some rank."""
-        from vllm.distributed.parallel_state import get_tp_group, in_the_same_node_as
+        from vllm.distributed.parallel_state import (
+            get_pcp_group,
+            get_tp_group,
+            in_the_same_node_as,
+        )
         from vllm.platforms import current_platform
 
-        # The same on every rank, so these raise before any collective.
-        parallel_config = vllm_config.parallel_config
+        # The same on every rank, so this raises before any collective.
         if not current_platform.is_cuda():
             raise CopyEngineUnavailable("PP copy engines need CUDA")
-        if parallel_config.prefill_context_parallel_size != 1:
-            raise CopyEngineUnavailable("PP copy engines need PCP=1")
 
         # Anything that can differ between ranks runs inside `step`, and the
         # ranks share its outcome before going on, so they all agree. That
-        # includes the other TP ranks' chains: a stage's TP ranks must all use
-        # copy engines or none, since NCCL's receive all-gathers over TP.
+        # includes the other chains over TP (a stage's TP ranks must all use
+        # copy engines or none, since NCCL's receive all-gathers over TP) and
+        # PCP, so every rank makes the same choice.
         rank, world = pp_group.rank_in_group, pp_group.world_size
-        tp_group = get_tp_group()
+        other_chains = [
+            g for g in (get_tp_group(), get_pcp_group()) if g.world_size > 1
+        ]
         one_node = all(in_the_same_node_as(pp_group.cpu_group, source_rank=0))
         share, open_peer = _ipc_share, _ipc_open
         if not one_node:
@@ -291,12 +296,13 @@ class CopyEngineTransport(PPTransport):
                 gathered, (out, error), group=pp_group.cpu_group
             )
             errors = [e for _, e in gathered if e]
-            if tp_group.world_size > 1:
-                tp_errors: list[Any] = [None] * tp_group.world_size
+            # In turn over TP then PCP, so each rank sees every chain's errors.
+            for group in other_chains:
+                group_errors: list[Any] = [None] * group.world_size
                 torch.distributed.all_gather_object(
-                    tp_errors, errors[0] if errors else None, group=tp_group.cpu_group
+                    group_errors, errors[0] if errors else None, group=group.cpu_group
                 )
-                errors = errors or [e for e in tp_errors if e]
+                errors = errors or [e for e in group_errors if e]
             if errors:
                 # Best effort: every rank must still raise the same error.
                 for release in reversed(releases):
