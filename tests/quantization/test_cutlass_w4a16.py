@@ -21,17 +21,23 @@ if not current_platform.has_device_capability(90) or current_platform.is_rocm():
     )
 
 from vllm.model_executor.kernels.linear import (
+    HummingLinearKernel,
     MPLinearLayerConfig,
     choose_mp_linear_kernel,
 )
 from vllm.model_executor.kernels.linear.mixed_precision import (
     MacheteLinearKernel,
 )
+from vllm.model_executor.layers.quantization.auto_gptq import (
+    AutoGPTQConfig,
+    AutoGPTQLinearMethod,
+)
 from vllm.model_executor.layers.quantization.compressed_tensors.compressed_tensors import (  # noqa: E501
     CompressedTensorsLinearMethod,
     CompressedTensorsWNA16,
 )
 from vllm.scalar_type import scalar_types
+from vllm.utils.import_utils import has_humming
 
 
 @pytest.fixture(scope="function", autouse=True)
@@ -117,6 +123,48 @@ def test_kernel_selection_with_disabled_machete(monkeypatch):
     )
     kernel = choose_mp_linear_kernel(config)
     assert kernel is not MacheteLinearKernel, "MacheteLinearKernel should be disabled"
+
+
+def _make_batch_invariant_gptq_method() -> AutoGPTQLinearMethod:
+    method = AutoGPTQLinearMethod(AutoGPTQConfig(4, 128, False, True, False, {}, {}))
+    method.create_weights(
+        torch.nn.Module(),
+        input_size_per_partition=4096,
+        output_partition_sizes=[4096],
+        input_size=4096,
+        output_size=4096,
+        params_dtype=torch.float16,
+        weight_loader=lambda *args, **kwargs: None,
+    )
+    return method
+
+
+@pytest.mark.skipif(not has_humming(), reason="requires humming-kernels")
+@pytest.mark.parametrize(
+    ("disabled_kernels", "expected_kernel"),
+    [
+        # Selection resolves to Machete, which is not batch-invariant: keep
+        # the dequantize + batch-invariant matmul fallback.
+        (["HummingLinearKernel"], None),
+        # Selection resolves to Humming, which honors VLLM_BATCH_INVARIANT:
+        # run the normal Humming path.
+        (["MacheteLinearKernel"], HummingLinearKernel),
+    ],
+    ids=["non-humming-selection-keeps-fallback", "humming-selection-is-used"],
+)
+def test_batch_invariant_gptq_follows_humming_selection(
+    monkeypatch, dist_init, disabled_kernels, expected_kernel
+):
+    """Under VLLM_BATCH_INVARIANT, GPTQ linear runs the Humming kernel only
+    when kernel selection resolves to it."""
+    monkeypatch.setattr("vllm.envs.VLLM_DISABLED_KERNELS", disabled_kernels)
+    monkeypatch.setattr("vllm.envs.VLLM_BATCH_INVARIANT", True)
+
+    method = _make_batch_invariant_gptq_method()
+    if expected_kernel is None:
+        assert method.kernel is None
+    else:
+        assert isinstance(method.kernel, expected_kernel)
 
 
 @pytest.mark.parametrize(
