@@ -93,6 +93,26 @@ def _decode_lazy_block_hash(
     return group_id, block_hash, codec.key(block_hash, group_id)
 
 
+def _free_to_cached_front(pool: BlockPool, block_ids: Sequence[int]) -> None:
+    """Free blocks so they are the first cached blocks the pool evicts.
+
+    Core keeps uncached blocks at the front of the free queue, to be reused
+    first. `evict_first` alone would put these blocks ahead of them and drop a
+    prefix-cache hit while empty blocks are still free.
+    """
+    queue = pool.free_block_queue
+    uncached = 0
+    for block in queue.iter_blocks_after(None):
+        if block.block_hash is not None:
+            break
+        uncached += 1
+    front = queue.popleft_n(uncached)
+    pool.free_blocks(
+        (pool.blocks[block_id] for block_id in block_ids), evict_first=True
+    )
+    queue.prepend_n(front)
+
+
 def _unwrap_store_spec(spec: KVCacheSpec) -> KVCacheSpec:
     if isinstance(spec, UniformTypeKVCacheSpecs):
         return next(iter(spec.kv_cache_specs.values()))
@@ -103,8 +123,11 @@ def _unwrap_store_spec(spec: KVCacheSpec) -> KVCacheSpec:
 class _StoreEvent:
     plan_groups: tuple[Sequence[BlockTransferPlan], ...]
     result: StoreEventResult = field(default_factory=StoreEventResult)
-    # Free-queue blocks pinned by a lazy scan, nearest eviction first.
+    # Free-queue blocks pinned by a lazy scan.
     lazy_block_ids: tuple[int, ...] = ()
+    # Those the scan found in its window, in free-queue order. The others are
+    # prefix blocks pulled in from elsewhere in the queue.
+    lazy_window_block_ids: tuple[int, ...] = ()
 
     def iter_plans(self):
         for plans in self.plan_groups:
@@ -870,6 +893,7 @@ class UMBPStoreConnectorScheduler:
         for plans in finished_stores.values():
             meta.store_plans.extend(plans)
         lazy_plans: list[BlockTransferPlan] = []
+        lazy_window: tuple[int, ...] = ()
         if self.lazy_offload:
             # Requests finishing (request_finished), admitted or preempted, or
             # growing into new blocks are what move the eviction end of the
@@ -886,7 +910,9 @@ class UMBPStoreConnectorScheduler:
                 self._lazy_scan_pending = True
             now = time.monotonic()
             if now >= self._lazy_retry_at and now >= self._lazy_store_retry_at:
-                lazy_plans, lookup_succeeded = self._prepare_lazy_store_plans()
+                lazy_plans, lazy_window, lookup_succeeded = (
+                    self._prepare_lazy_store_plans()
+                )
                 meta.store_plans.extend(lazy_plans)
                 self._record_lazy_lookup(lookup_succeeded)
                 if lazy_plans:
@@ -902,6 +928,7 @@ class UMBPStoreConnectorScheduler:
                 lazy_block_ids=tuple(
                     dict.fromkeys(plan.block_id for plan in lazy_plans)
                 ),
+                lazy_window_block_ids=lazy_window,
             )
             if self._gpu_block_pool is not None:
                 self._gpu_block_pool.touch(
@@ -926,7 +953,10 @@ class UMBPStoreConnectorScheduler:
                     )
         return meta
 
-    def _prepare_lazy_store_plans(self) -> tuple[list[BlockTransferPlan], bool]:
+    def _prepare_lazy_store_plans(
+        self,
+    ) -> tuple[list[BlockTransferPlan], tuple[int, ...], bool]:
+        """Return plans, their blocks found in the window, and lookup success."""
         pool = self._gpu_block_pool
         if (
             pool is None
@@ -935,13 +965,13 @@ class UMBPStoreConnectorScheduler:
             or self._lazy_target_blocks <= 0
         ):
             self._lazy_scan_pending = False
-            return [], True
+            return [], (), True
         now = time.monotonic()
         if now < self._lazy_store_retry_at:
-            return [], True
+            return [], (), True
         recheck = now >= self._lazy_recheck_at
         if not self._lazy_scan_pending and not recheck:
-            return [], True
+            return [], (), True
         self._lazy_scan_pending = False
         candidates: list[_LazyCandidate] = []
         seen_keys: set[str] = set()
@@ -950,6 +980,7 @@ class UMBPStoreConnectorScheduler:
         visited_by_group: dict[int, int] = {}
         unhashed = 0
         walked: list[KVCacheBlock] = []
+        window_position: dict[int, int] = {}
         in_flight_keys = {
             key for event in self._store_events.values() for key in event.iter_keys()
         }
@@ -982,6 +1013,7 @@ class UMBPStoreConnectorScheduler:
             if block.is_null or block.block_hash is None:
                 unhashed += 1
                 continue
+            window_position[block.block_id] = covered
             # Allocation moves this window nearly every step under load, so
             # most blocks were already resolved by an earlier scan.
             if settled.get(block.block_id) == block.block_hash:
@@ -1059,7 +1091,7 @@ class UMBPStoreConnectorScheduler:
             self._lazy_recheck_at = now + _LAZY_RECHECK_S
         if not candidates:
             self._settle_lazy_blocks(walked)
-            return [], True
+            return [], (), True
         keys = [
             rank_key
             for _, _, group_id, block_hash in candidates
@@ -1074,11 +1106,15 @@ class UMBPStoreConnectorScheduler:
             hits = list(self.runtime.lookup(keys))
         except Exception as exc:
             logger.warning("UMBP lazy residency lookup failed: %s", exc)
-            return [], False
+            return [], (), False
         plans, ok = self._lazy_plans_for_hits(candidates, hits)
         if ok:
             self._settle_lazy_blocks(walked)
-        return plans, ok
+        window = sorted(
+            {plan.block_id for plan in plans} & window_position.keys(),
+            key=window_position.__getitem__,
+        )
+        return plans, tuple(window), ok
 
     def _settle_lazy_blocks(self, walked: Sequence[KVCacheBlock]) -> None:
         """Mark walked blocks whose keys and prefix chain are all confirmed."""
@@ -1694,6 +1730,7 @@ class UMBPStoreConnectorScheduler:
                 self._record_lazy_store(event)
             if pool is not None:
                 lazy_block_ids = set(event.lazy_block_ids)
+                window = set(event.lazy_window_block_ids)
                 block_ids = [
                     block_id
                     for block_id in dict.fromkeys(event.block_ids())
@@ -1702,13 +1739,16 @@ class UMBPStoreConnectorScheduler:
                 pool.free_blocks(
                     pool.blocks[block_id] for block_id in reversed(block_ids)
                 )
-                if event.lazy_block_ids:
+                # Prefix blocks may come from the MRU end, so they are freed
+                # like a request's, tail first, not to the eviction end.
+                pool.free_blocks(
+                    pool.blocks[block_id]
+                    for block_id in event.lazy_block_ids
+                    if block_id not in window
+                )
+                if event.lazy_window_block_ids:
                     # These were picked because they were next to be evicted.
-                    # Return them to that end, not to the MRU tail.
-                    pool.free_blocks(
-                        (pool.blocks[block_id] for block_id in event.lazy_block_ids),
-                        evict_first=True,
-                    )
+                    _free_to_cached_front(pool, event.lazy_window_block_ids)
             if self.enable_kv_cache_events:
                 self._queue_event_objects(event)
         self._reconcile_kv_events()
