@@ -127,6 +127,33 @@ def test_moe_wna16_accepts_channelwise_gptq_activation_order():
             False,
             "group-wise scales",
         ),
+        (
+            WNA16MoEBackend.XPU,
+            AutoAWQConfig(4, 16, True, False),
+            True,
+            False,
+            "group size",
+        ),
+        (
+            WNA16MoEBackend.XPU,
+            AutoAWQConfig(4, 128, False, False),
+            False,
+            False,
+            "without zero points",
+        ),
+        (
+            WNA16MoEBackend.XPU,
+            QuantizationArgs(
+                num_bits=4,
+                type=QuantizationType.INT,
+                strategy=QuantizationStrategy.CHANNEL,
+                symmetric=False,
+                dynamic=False,
+            ),
+            True,
+            False,
+            "per-channel",
+        ),
     ],
 )
 def test_wna16_oracle_rejects_incompatible_quant_structures(
@@ -147,6 +174,46 @@ def test_wna16_oracle_rejects_incompatible_quant_structures(
 
     assert reason is not None
     assert expected in reason
+
+
+@pytest.mark.parametrize(
+    ("quant_config", "may_have_zp"),
+    [
+        (AutoAWQConfig(4, 128, True, False), True),
+        (
+            QuantizationArgs(
+                num_bits=4,
+                type=QuantizationType.INT,
+                strategy=QuantizationStrategy.GROUP,
+                symmetric=False,
+                dynamic=False,
+                group_size=128,
+            ),
+            True,
+        ),
+    ],
+)
+def test_wna16_oracle_accepts_supported_xpu_configs(quant_config, may_have_zp):
+    """Supported XPU configs must return None, not a refusal string.
+
+    Guards the accept path next to the XPU refusals above: grouped AWQ
+    with zero points, and grouped compressed-tensors args, must not trip
+    the act-order, group-size or per-channel checks. A stray refusal
+    string here would silently drop the layer to a slower backend or
+    fail selection.
+    """
+    from tests.kernels.moe.utils import make_dummy_moe_config
+
+    reason = _backend_incompatibility_reason(
+        backend=WNA16MoEBackend.XPU,
+        moe_config=make_dummy_moe_config(),
+        quant_config=quant_config,
+        may_have_zp=may_have_zp,
+        may_have_bias=False,
+        allow_tile_padding=True,
+    )
+
+    assert reason is None
 
 
 def test_compressed_tensors_nfirst_weights_pass_through_for_triton():
