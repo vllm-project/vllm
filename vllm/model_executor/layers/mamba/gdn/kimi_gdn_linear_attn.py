@@ -283,10 +283,11 @@ class KimiGatedDeltaNetAttention(GatedDeltaNetAttention):
             else "auto"
         )
         backend = "triton" if backend == "auto" else backend
-        assert backend == "triton", (
-            "The shared Kimi GDN layer only supports the Triton KDA "
-            f"prefill backend, got {backend!r}."
-        )
+        if backend != "triton":
+            raise ValueError(
+                "The shared Kimi GDN layer only supports the Triton KDA "
+                f"prefill backend, got {backend!r}."
+            )
         if not self.use_full_rank_gate:
             self.g_a_proj = ReplicatedLinear(
                 self.hidden_size,
