@@ -271,8 +271,9 @@ class SpecDecodingProm:
                 name="vllm:spec_decode_scheduled_steps",
                 documentation=(
                     "Dynamic-SD scheduler steps that scheduled request work, by "
-                    "the number of draft tokens the schedule requested from the "
-                    "drafter in that step, including 0."
+                    "the draft depth K the schedule selected, including 0. K "
+                    "does not necessarily equal the number of draft tokens "
+                    "actually requested or produced."
                 ),
                 labelnames=k_labelnames,
             )
@@ -287,8 +288,11 @@ class SpecDecodingProm:
     def observe_scheduled_k(self, scheduled_k: int, engine_idx: int = 0):
         """Record the K the dynamic-SD schedule selected for one step.
 
-        K is the draft length requested from the drafter in that step; the
-        drafts are verified in the next step. Only steps that scheduled request
+        K is the draft depth selected by the dynamic schedule. It does not
+        necessarily equal the number of draft tokens actually requested or
+        produced: the model runner proposes none in a step where no scheduled
+        request can use drafts (skip_drafts). Drafts proposed in a step are
+        verified in the next step. Only steps that scheduled request
         work are observations: the schedule is consulted per scheduled batch, so
         a step that scheduled nothing carries the default K rather than a
         selected one.
