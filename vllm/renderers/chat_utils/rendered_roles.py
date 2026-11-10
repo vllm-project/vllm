@@ -119,9 +119,11 @@ def _literal_role_names(node: jinja2.nodes.Node) -> list[str] | None:
     return None
 
 
-# Inclusion tests passed to selectattr/rejectattr. Exclusion tests (``ne``)
-# and rejectattr do not name roles the template keeps.
+# Inclusion tests passed to selectattr/rejectattr. A negated test (``ne``)
+# does not name roles the template keeps.
 _ROLE_INCLUDE_TESTS = frozenset({"equalto", "eq", "==", "sameas", "in"})
+_ROLE_NEGATED_TESTS = frozenset({"ne", "!=", "notin", "not in"})
+_ROLE_COMPARE_OPS = frozenset({"eq", "ne", "in", "notin"})
 
 
 # Extra conversation renders spent proving a drop. Past this, unresolved
@@ -136,9 +138,11 @@ class _TemplateRoles(NamedTuple):
     """Literal roles named by one parsed template.
 
     ``handled is None`` means the template does not filter on role.
-    ``excluded`` is roles a ``rejectattr`` test drops by name. Standard
-    roles in that set, or outside a non-empty ``handled`` set, are warned
-    and not probed.
+    ``excluded`` is roles an inclusion ``rejectattr``, or a negated
+    ``selectattr``, drops by name. Neither set proves the content was
+    omitted. A standard role in ``excluded``, or outside a non-empty
+    ``handled`` set, is probed and warned only when that probe shows the
+    content is gone.
     """
 
     handled: frozenset[str] | None
@@ -152,16 +156,18 @@ def _roles_from_attr_filter(
 
     ``selectattr('role', 'equalto', 'user')`` keeps that literal role.
     ``rejectattr('role', 'equalto', 'tool')`` names a role the template
-    drops. A non-literal target, or a test that is not an inclusion
-    (``ne``), still means the template filters by role, but the kept
-    names are not a literal allow-list.
+    drops. ``selectattr('role', 'ne', 'wizard')`` drops the named role, so
+    those names are exclusions and must not stay on an allow-list.
+    ``rejectattr('role', 'ne', 'user')`` keeps the named role and drops
+    every other one; that name is not an allow-list either. A non-literal
+    target still means the template filters by role.
 
     Returns:
         ``("ignore", empty)`` when the filter does not test ``role``,
         ``("literal", names)`` when ``selectattr`` names kept roles,
-        ``("exclude", names)`` when ``rejectattr`` names dropped roles,
-        or ``("dynamic", empty)`` when the filter is real but the names
-        are not literals.
+        ``("exclude", names)`` when the filter names dropped roles,
+        or ``("dynamic", empty)`` when the filter is real but the kept
+        names are not a literal allow-list.
 
     """
     if node.name not in {"selectattr", "rejectattr"} or not node.args:
@@ -172,35 +178,56 @@ def _roles_from_attr_filter(
     if len(node.args) < 3:
         return "dynamic", set()
     test = node.args[1]
-    if (
-        not isinstance(test, jinja2.nodes.Const)
-        or test.value not in _ROLE_INCLUDE_TESTS
-    ):
+    if not isinstance(test, jinja2.nodes.Const):
+        return "dynamic", set()
+    negative = test.value in _ROLE_NEGATED_TESTS
+    if not negative and test.value not in _ROLE_INCLUDE_TESTS:
         return "dynamic", set()
     names = _literal_role_names(node.args[2])
-    if names is None:
+    if names is None or (negative and node.name == "rejectattr"):
         return "dynamic", set()
-    if node.name == "rejectattr":
+    if node.name == "rejectattr" or negative:
         return "exclude", set(names)
     return "literal", set(names)
 
 
+def _negated_compare_ids(parsed: jinja2.nodes.Node) -> set[int]:
+    """Compares sitting under an odd number of ``not`` expressions."""
+    negated: set[int] = set()
+
+    def walk(node: jinja2.nodes.Node, depth: int) -> None:
+        if isinstance(node, jinja2.nodes.Not):
+            depth += 1
+        elif isinstance(node, jinja2.nodes.Compare) and depth % 2 == 1:
+            negated.add(id(node))
+        for child in node.iter_child_nodes():
+            walk(child, depth)
+
+    walk(parsed, 0)
+    return negated
+
+
 def _roles_from_compare(
     node: jinja2.nodes.Compare,
+    *,
+    negated: bool = False,
 ) -> tuple[_RoleFinding, set[str]]:
     """Classify one comparison that might select rendered roles.
 
-    Only ``==`` and ``in`` count. ``!=`` and ``not in`` are generation-prompt
-    guards (ChatML checks ``messages[-1]['role'] != 'assistant'``) and do not
-    select which roles are rendered. A non-literal target, whether
-    ``message.role in allowed_roles`` or ``message.role == some_var``, is
-    dynamic.
+    Positive ``==`` / ``in`` with string literals name roles the template
+    may keep. ``!=``, ``not in``, and ``not (role == ...)`` are possible
+    filters, but the literals are not an allow-list: a generation-prompt
+    guard (``messages[-1]['role'] != 'assistant'``) and a ``continue`` that
+    skips every other role look the same here. Those roles stay unresolved
+    until a render probe. A non-literal target, whether ``message.role in
+    allowed_roles`` or ``message.role == some_var``, is dynamic too.
 
     Returns:
-        ``("ignore", empty)`` when the node is not a role inclusion test,
+        ``("ignore", empty)`` when the node does not test a role,
         ``("literal", names)`` when the accepted roles are string literals
         (an empty list is a literal filter that names nothing), or
-        ``("dynamic", empty)`` when the allow-list is not a literal.
+        ``("dynamic", empty)`` when a filter exists but the kept names are
+        not literals.
 
     """
     if not node.ops:
@@ -209,14 +236,16 @@ def _roles_from_compare(
     # the role expression.
     operand = node.ops[0]
     op = operand.op
-    if op not in {"eq", "in"}:
+    if op not in _ROLE_COMPARE_OPS:
         return "ignore", set()
 
     left_is_role = _is_role_access(node.expr)
     right_is_role = _is_role_access(operand.expr)
-    if op == "eq":
+    if op in {"eq", "ne"}:
         if not left_is_role and not right_is_role:
             return "ignore", set()
+        if negated or op == "ne":
+            return "dynamic", set()
         literal_node = operand.expr if left_is_role else node.expr
         names = _literal_role_names(literal_node)
         if names is None:
@@ -228,6 +257,8 @@ def _roles_from_compare(
 
     if not left_is_role:
         return "ignore", set()
+    if negated or op == "notin":
+        return "dynamic", set()
     names = _literal_role_names(operand.expr)
     if names is None:
         return "dynamic", set()
@@ -249,8 +280,10 @@ def _template_roles(chat_template: str) -> _TemplateRoles:
     included: set[str] = set()
     excluded: set[str] = set()
     saw_role_filter = False
+    negated = _negated_compare_ids(parsed)
     findings = [
-        _roles_from_compare(node) for node in parsed.find_all(jinja2.nodes.Compare)
+        _roles_from_compare(node, negated=id(node) in negated)
+        for node in parsed.find_all(jinja2.nodes.Compare)
     ]
     findings.extend(
         _roles_from_attr_filter(node) for node in parsed.find_all(jinja2.nodes.Filter)
@@ -274,17 +307,19 @@ def roles_rendered_by_chat_template(chat_template: str) -> frozenset[str] | None
     The Jinja AST is walked once for comparisons that read ``.role`` or
     ``['role']``, and for ``selectattr`` / ``rejectattr`` on ``role``.
     ``None`` means the template does not filter by role, so every role is
-    emitted (ChatML-style ``{{ message['role'] }}``). A frozenset, possibly
-    empty, means unknown roles can be dropped and must be checked after
-    render.
+    emitted. A frozenset, possibly empty, means unknown roles can be
+    dropped and must be checked after render. A ChatML generation guard
+    (``messages[-1]['role'] != 'assistant'``) is one of those filters: it
+    does not name an allow-list, but it is not ignored.
 
     Args:
         chat_template: Resolved Jinja source.
 
     Returns:
-        Roles named by ``==`` / ``in`` tests or by ``selectattr`` on
-        ``role``. An empty set means the template filters on role, but the
-        allowed names are not literals (``message.role in allowed_roles``,
+        Roles named by positive ``==`` / ``in`` tests or by ``selectattr``
+        on ``role``. An empty set means the template filters on role, but
+        the kept names are not a literal allow-list (``not in``, ``!=``,
+        ``not (role == ...)``, ``message.role in allowed_roles``,
         ``message.role == some_var``, or ``rejectattr``). ``None`` means
         there is no role filter.
 
@@ -595,16 +630,22 @@ def _indexes_missing_text_marker(
     )
 
 
-def _ignored_standard_roles(
-    roles: Sequence[str],
-    info: _TemplateRoles,
-) -> list[str]:
-    """Standard roles the literal role set shows the template skips."""
-    ignored: list[str] = []
-    for role in _unique_roles(roles):
-        if role in info.excluded or (info.handled and role not in info.handled):
-            ignored.append(role)
-    return ignored
+def _standard_role_needs_probe(info: _TemplateRoles, role: str) -> bool:
+    """Whether the AST leaves this standard role unresolved.
+
+    Absence from a literal allow-list, or a name on an exclusion filter,
+    does not mean the content was dropped. A formatting check on
+    ``assistant`` still prints every other role. The caller probes, and
+    warns only when the rendered prompt loses the content. An empty
+    allow-list is a dynamic filter and does not put every standard role
+    on that list.
+    """
+    handled = info.handled
+    if role in info.excluded:
+        return True
+    if not handled:
+        return False
+    return role not in handled
 
 
 def _named_by_template(info: _TemplateRoles, role: str) -> bool:
@@ -632,9 +673,10 @@ def assert_chat_template_rendered_messages(
 
     Standard roles from the OpenAI message schema (``system``, ``user``,
     ``assistant``, ``tool``, ``developer``, and legacy ``function``) are
-    not rejected. When the literal role set shows the template ignores
-    one, a warning is logged and the request continues. That path does
-    not copy the conversation or render it again. Empty and
+    not rejected. When a non-empty literal set omits one, or an exclusion
+    filter names it, the turn is probed with the same budget as a custom
+    role. A warning is logged only when that probe shows the content is
+    absent. Dynamic filters do not probe every standard role. Empty and
     whitespace-only messages are not an error.
 
     Args:
@@ -658,7 +700,7 @@ def assert_chat_template_rendered_messages(
         return
 
     hard: list[tuple[int, str]] = []
-    soft: list[str] = []
+    soft: list[tuple[int, str]] = []
     for index, message in enumerate(conversation):
         role = message.get("role")
         if not isinstance(role, str) or _named_by_template(info, role):
@@ -666,13 +708,11 @@ def assert_chat_template_rendered_messages(
         if not message_has_nonempty_payload(message):
             continue
         if role in _STANDARD_CHAT_ROLES:
-            soft.append(role)
+            if _standard_role_needs_probe(info, role):
+                soft.append((index, role))
         else:
             hard.append((index, role))
-    ignored = _ignored_standard_roles(soft, info)
-    if ignored:
-        _warn_ignored_standard_roles(ignored)
-    if not hard:
+    if not hard and not soft:
         return
 
     budget = _RenderBudget()
@@ -684,11 +724,16 @@ def assert_chat_template_rendered_messages(
     if baseline is None:
         return
 
+    # One probe pass so a standard role and a custom role share the budget.
     dropped = _roles_with_no_prompt_contribution(
-        conversation, hard, baseline, render_text, budget
+        conversation, hard + soft, baseline, render_text, budget
     )
-    if dropped:
-        raise _unrendered_role_error(dropped)
+    ignored = [role for role in dropped if role in _STANDARD_CHAT_ROLES]
+    rejected = [role for role in dropped if role not in _STANDARD_CHAT_ROLES]
+    if ignored:
+        _warn_ignored_standard_roles(ignored)
+    if rejected:
+        raise _unrendered_role_error(rejected)
 
 
 def _roles_with_no_prompt_contribution(
