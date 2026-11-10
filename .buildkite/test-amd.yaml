@@ -1521,6 +1521,7 @@ steps:
   - vllm/engine/arg_utils.py
   - vllm/config/model.py
   - vllm/model_executor
+  - vllm/models/deepseek_v32
   - tests/model_executor
   - tests/entrypoints/openai/completion/test_tensorizer_entrypoint.py
   - vllm/_aiter_ops.py
@@ -5671,13 +5672,13 @@ steps:
   - vllm/distributed/kv_transfer/kv_connector/v1/base.py
   - vllm/distributed/kv_transfer/kv_connector/v1/ssm_conv_transfer_utils.py
   - examples/disaggregated/disaggregated_serving/moriio_toy_proxy_server.py
-  - tests/v1/kv_connector/unit/test_moriio_
+  - tests/v1/kv_connector/unit/moriio/
   - tests/v1/kv_connector/unit/utils.py
   - requirements/test/rocm.txt
   commands:
   - bash /vllm-workspace/.buildkite/scripts/check-kv-connectors.sh
   - export VLLM_WORKER_MULTIPROC_METHOD=spawn
-  - pytest -v -s -rs v1/kv_connector/unit/test_moriio_*.py
+  - pytest -v -s -rs v1/kv_connector/unit/moriio
 
 - label: ":amd: (MI355 DPX) UMBP Connector Unit Tests"
   timeout_in_minutes: 30
