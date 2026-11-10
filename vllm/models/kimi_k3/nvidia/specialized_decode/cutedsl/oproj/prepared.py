@@ -4,7 +4,7 @@
 partials go into Lamport slots of a multicast [TP, 64, 7168] mailbox (parity alternates
 by layer) and the consumer sums and re-arms them. TP16 B<=8 fuses producer and consumer
 (MLA layers below B5 keep them split); above B8 the producer runs 16-token groups.
-At ``twoshot_batches``, given ``TwoShot`` buffers, the all-reduce is ``common.twoshot``
+At `twoshot_batches`, given `TwoShot` buffers, the all-reduce is `common.twoshot`
 (chunks pushed to their column owner, owner sums + multicasts, all Lamport-polled), so
 each GPU receives ~2 x 14 KB per token instead of TP x 14 KB."""
 
@@ -26,7 +26,7 @@ from .producer import OprojProducer, OprojUmma
 
 class OprojMailbox:
     """Sentinel-armed multicast mailbox; defaults to [parity, TP, 64, 7168] BF16.
-    ``multicast=False``: a peer-store mailbox (``handle.buffer_ptrs`` only, ``mc``
+    `multicast=False`: a peer-store mailbox (`handle.buffer_ptrs` only, `mc`
     0), which spends no NVLink multicast object."""
 
     def __init__(self, group, device, tp, rank, shape=None, multicast=True):
@@ -71,7 +71,7 @@ def engine(batch, tp):
 
 def producer(k, batch, tp, mla, twoshot=False, kind=None):
     """B<=8: one mma.sync pass, TP8 stages 8 (MLA 4) of 12 K blocks per warp. Above
-    B8 (``kind`` overrides ``engine``): the tcgen05 engine, or 2-tile warps over 8 K
+    B8 (`kind` overrides `engine`): the tcgen05 engine, or 2-tile warps over 8 K
     parts in 16-token groups, TP8 staging 2 of 6 K blocks per warp."""
     if batch <= 8:
         staged = 0 if tp == 16 else 4 if mla else 8
@@ -87,8 +87,8 @@ def compile_oproj(
     kind, k, batch, tp, nb, has_delta, mla, front=False, cap=64, twoshot=False
 ):
     """Producer, consumer or fused kernel over a [TP, cap, 7168] parity view;
-    ``front``: the consumer also publishes x_moe [1, 4, 7168] and the epoch hint.
-    ``twoshot``: the two-shot pair (arguments as ``TwoShot.views``)."""
+    `front`: the consumer also publishes x_moe [1, 4, 7168] and the epoch hint.
+    `twoshot`: the two-shot pair (arguments as `TwoShot.views`)."""
     box = fake((1 if twoshot else tp, cap, 7168), (cap * 7168, 7168, 1))
     x, w = fake((batch, k), (k, 1)), fake((7168, k), (k, 1))
     mc, slot, eps = cutlass.Int64(0), cutlass.Int32(0), cutlass.Float32(1e-6)

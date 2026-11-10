@@ -4,7 +4,7 @@
 
 These lock in the redesign that addresses the PR #45043 review feedback
 (njhill): the connector must NOT self-derive a DP rank, and the prefill leg
-must *return* the rank it actually ran on via ``request_finished`` so the
+must *return* the rank it actually ran on via `request_finished` so the
 decode->prefill notify is routed by pure propagation (READ / serial WRITE),
 not by an independent hash on each side.
 

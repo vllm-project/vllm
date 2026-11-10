@@ -94,7 +94,7 @@ def _uniform_type_kv_cache_config(
 ) -> KVCacheConfig:
     """One UniformTypeKVCacheSpecs group whose two layers have unequal pages.
 
-    Without ``block_stride`` each layer is laid out layer-major with its own
+    Without `block_stride` each layer is laid out layer-major with its own
     page as the block stride; with it both pages share one block-major stride.
     """
     specs = {"layer1": _LAYER1_SPEC, "layer2": layer2}

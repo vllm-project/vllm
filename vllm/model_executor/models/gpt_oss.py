@@ -1260,7 +1260,7 @@ class GptOssModel(nn.Module, EagleModelMixin):
         name: str,
         params_dict: dict[str, torch.nn.Parameter],
     ) -> tuple[int, str, str] | None:
-        """Parse ``...experts.<expert_id>.<fused_param>`` checkpoint keys."""
+        """Parse `...experts.<expert_id>.<fused_param>` checkpoint keys."""
         if ".mlp.experts." not in name:
             return None
         suffix = name.rsplit(".", 1)[-1]

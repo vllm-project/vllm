@@ -796,7 +796,7 @@ def decode_attention_fwd(
     is_mla=False,
     sliding_window: int | None = None,
 ):
-    """``sliding_window`` limits each row to its last ``sliding_window`` keys."""
+    """`sliding_window` limits each row to its last `sliding_window` keys."""
     assert num_kv_splits == attn_logits.shape[2]
     sliding_window = sliding_window or 0
 
@@ -1311,7 +1311,7 @@ def verify_num_kv_splits(
 
     The kernel splits each request's own length into
     max(cdiv(L, splits), MIN_SPLIT_LEN) chunks, so this only caps the split
-    count. The config's ``occupancy`` is the number of resident stage-1
+    count. The config's `occupancy` is the number of resident stage-1
     programs per CU. If one split of every request fits in a single dispatch
     round, use as many splits as fit in that round; otherwise pick
     n <= max_splits minimising rounds(n) / n (the idle tail of the last round),
@@ -1504,7 +1504,7 @@ def select_verify_config(batch: int, qlen: int, num_heads: int) -> dict[str, Any
 
 
 def _storage_view(t, shape):
-    """Contiguous ``shape`` over ``t``'s storage, or a new tensor if too small."""
+    """Contiguous `shape` over `t`'s storage, or a new tensor if too small."""
     if math.prod(shape) > t.untyped_storage().nbytes() // t.element_size():
         return t.new_empty(shape)
     strides = [1]

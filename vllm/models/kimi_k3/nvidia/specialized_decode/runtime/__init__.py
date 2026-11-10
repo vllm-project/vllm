@@ -1,7 +1,7 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 """Kimi K3 specialized decode: a CuTe decode executor over the stock backbone, enabled
-by ``additional_config={"decode_backend": "latency_specialized"}``."""
+by `additional_config={"decode_backend": "latency_specialized"}`."""
 
 from dataclasses import dataclass
 

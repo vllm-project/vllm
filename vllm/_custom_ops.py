@@ -74,7 +74,7 @@ def create_fp4_output_tensors(
     (quantized_output, output_scale).
 
     Must match the C++ scaled_fp4_quant_func allocation exactly when
-    ``padded_n`` is ``None``. When ``padded_n`` is provided, allocate a larger
+    `padded_n` is `None`. When `padded_n` is provided, allocate a larger
     packed-FP4 output/scale buffer so the quantization kernel can write
     CUTLASS-compatible K padding directly
     """
@@ -225,8 +225,8 @@ def vocab_parallel_embedding(
     so an all-reduce over the ranks yields the full embedding.
 
     Args:
-        input_ids: ``[num_tokens]`` int32 or int64 token ids.
-        weight: ``[num_embeddings_per_partition, embedding_dim]`` shard.
+        input_ids: `[num_tokens]` int32 or int64 token ids.
+        weight: `[num_embeddings_per_partition, embedding_dim]` shard.
         org_vocab_start_index: First original vocab id owned by this rank.
         org_vocab_end_index: One past the last original vocab id owned by
             this rank.
@@ -237,7 +237,7 @@ def vocab_parallel_embedding(
             this rank.
 
     Returns:
-        ``[num_tokens, embedding_dim]`` partial embeddings.
+        `[num_tokens, embedding_dim]` partial embeddings.
 
     """
     out = torch.empty(
@@ -274,7 +274,7 @@ def ngram_compute_n_gram_ids(
 ) -> None:
     """Compute concatenated (offset) n-gram ids for a ragged prefill batch.
 
-    Writes ``n_gram_ids`` of shape ``[token_num, (ne_n-1)*ne_k]``.
+    Writes `n_gram_ids` of shape `[token_num, (ne_n-1)*ne_k]`.
     """
     torch.ops._C.ngram_compute_n_gram_ids(
         ne_n,
@@ -305,7 +305,7 @@ def muse_spark_mul_tanh_soft_cap(
     multiplier: float,
     soft_cap_temp: float,
 ) -> torch.Tensor:
-    """Cast to FP32 and apply ``temp * tanh(x * multiplier / temp)`` in one pass."""
+    """Cast to FP32 and apply `temp * tanh(x * multiplier / temp)` in one pass."""
     out = torch.empty_like(x, dtype=torch.float32)
     torch.ops._C.muse_spark_mul_tanh_soft_cap(out, x, multiplier, soft_cap_temp)
     return out
@@ -1491,7 +1491,7 @@ def scaled_fp4_quant(
             backends the 8x4 scale-factor layout is selected for small
             batches (m <= 32) instead of the 128x4 layout.
         padded_n: Optional padded K dimension. When provided, the quantized
-            output and scale tensors are allocated for ``padded_n``
+            output and scale tensors are allocated for `padded_n`
 
     Returns:
         tuple[torch.Tensor, torch.Tensor]: The output tensor in FP4 but every
@@ -2241,10 +2241,10 @@ def lut_b_moe_gemm(
 ) -> None:
     """Grouped GEMM of MXFP8 activations with LUT-B expert weights.
 
-    ``c[i] = a[sorted_token_ids[i] // top_k] @ W[expert].T`` for each routed
-    row ``i`` (scaled by ``topk_weights[i]`` when given), using routing
-    aligned to blocks of 128 by ``moe_align_block_size``. ``b`` holds the
-    weights in the kernel tile layout from ``lut_b_to_sm107_tiles``.
+    `c[i] = a[sorted_token_ids[i] // top_k] @ W[expert].T` for each routed
+    row `i` (scaled by `topk_weights[i]` when given), using routing
+    aligned to blocks of 128 by `moe_align_block_size`. `b` holds the
+    weights in the kernel tile layout from `lut_b_to_sm107_tiles`.
     """
     torch.ops._moe_C.lut_b_moe_gemm(
         a,
@@ -2659,8 +2659,8 @@ def fused_muse_spark_qknorm_rope_kv_insert(
 ) -> None:
     """In-place weightless QK RMSNorm + GPT-J RoPE, optionally writing k/v to cache.
 
-    When ``kv_cache`` is given, the caller must skip the attention layer's own KV write.
-    With ``q_fp8_out``, write scaled E4M3 Q there instead of rewriting Q in ``qkv``.
+    When `kv_cache` is given, the caller must skip the attention layer's own KV write.
+    With `q_fp8_out`, write scaled E4M3 Q there instead of rewriting Q in `qkv`.
     """
     torch.ops._C.fused_muse_spark_qknorm_rope_kv_insert(
         qkv,
@@ -2712,45 +2712,45 @@ def fused_minimax_m3_qknorm_rope_kv_insert(
 ) -> None:
     """Fused MiniMax-M3 attention pre-processing (in-place).
 
-    Applies Gemma RMSNorm + partial NeoX RoPE to ``qkv`` in place. ``qkv`` is a
+    Applies Gemma RMSNorm + partial NeoX RoPE to `qkv` in place. `qkv` is a
     single fused tensor:
 
-    - dense layer (``num_index_heads == 0``): ``[q | k | v]``;
-    - sparse layer (``num_index_heads > 0``): ``[q | k | v | index_q |
-      index_k]`` — the index branch is read straight out of ``qkv``.
+    - dense layer (`num_index_heads == 0`): `[q | k | v]`;
+    - sparse layer (`num_index_heads > 0`): `[q | k | v | index_q |
+      index_k]` — the index branch is read straight out of `qkv`.
 
-    When ``kv_cache`` is given, also scatter-inserts the normed/roped k & v
-    into the paged KV cache by ``slot_mapping`` and, on sparse layers, the
-    index key into ``index_cache`` by ``index_slot_mapping``.
-    ``kv_cache_dtype`` selects the cache storage/conversion path; a dense
-    layer's insert stores exactly what ``reshape_and_cache_flash`` would with
-    unit k/v scales. If ``index_slot_mapping`` is omitted, ``slot_mapping`` is
+    When `kv_cache` is given, also scatter-inserts the normed/roped k & v
+    into the paged KV cache by `slot_mapping` and, on sparse layers, the
+    index key into `index_cache` by `index_slot_mapping`.
+    `kv_cache_dtype` selects the cache storage/conversion path; a dense
+    layer's insert stores exactly what `reshape_and_cache_flash` would with
+    unit k/v scales. If `index_slot_mapping` is omitted, `slot_mapping` is
     used for both caches.
 
-    If ``q_out`` / ``index_q_out`` (contiguous ``[N, nq*128]`` / ``[N,
-    niq*128]``) are given, the normed/roped q / index_q are written there
+    If `q_out` / `index_q_out` (contiguous `[N, nq*128]` / `[N,
+    niq*128]`) are given, the normed/roped q / index_q are written there
     instead of in place — folding the de-interleave into this kernel's store so
-    callers skip a separate ``.contiguous()`` copy before the SM100 sparse
+    callers skip a separate `.contiguous()` copy before the SM100 sparse
     attention's flat TMA descriptor.
 
-    If ``q_fp8_out`` is given, the same normalized q is also written in FP8
-    E4M3 using ``q_fp8_scale`` as its dequantization scale. Without ``q_out``,
-    q is then written only in FP8 and the q slice of ``qkv`` is left as is.
+    If `q_fp8_out` is given, the same normalized q is also written in FP8
+    E4M3 using `q_fp8_scale` as its dequantization scale. Without `q_out`,
+    q is then written only in FP8 and the q slice of `qkv` is left as is.
 
-    ``kv_cache_dtype="nvfp4"`` quantizes k/v into the packed HND
-    ``[num_blocks, 2 * num_kv_heads, block_size, 72]`` uint8 cache using the
-    device dequantization scales ``kv_k_scale``/``kv_v_scale``. Slot
-    ``2 * head + side`` (K = 0, V = 1) holds that head's E2M1 data followed by
+    `kv_cache_dtype="nvfp4"` quantizes k/v into the packed HND
+    `[num_blocks, 2 * num_kv_heads, block_size, 72]` uint8 cache using the
+    device dequantization scales `kv_k_scale`/`kv_v_scale`. Slot
+    `2 * head + side` (K = 0, V = 1) holds that head's E2M1 data followed by
     its E4M3 block scales, so every head is one contiguous run of the page.
 
-    When ``skip_index_branch`` is true, sparse rows still keep their packed
-    ``[index_q | index_k]`` tail, but the kernel only processes the main q/k/v
+    When `skip_index_branch` is true, sparse rows still keep their packed
+    `[index_q | index_k]` tail, but the kernel only processes the main q/k/v
     branches and main KV cache. This is used by MiniMax-M3 index-topk reuse
     layers that consume top-k block ids selected by an earlier sparse layer.
 
-    ``write_qkv=False`` needs ``q_fp8_out`` without ``q_out``, for callers that
-    read only the FP8 q, ``index_q_out`` and the caches: k and index_k need not
-    be rewritten in ``qkv``. The persistent kernel (SM80+, ``rotary_dim`` 64)
+    `write_qkv=False` needs `q_fp8_out` without `q_out`, for callers that
+    read only the FP8 q, `index_q_out` and the caches: k and index_k need not
+    be rewritten in `qkv`. The persistent kernel (SM80+, `rotary_dim` 64)
     skips those stores; the fallback kernel may still make them.
     """
     torch.ops._C.fused_minimax_m3_qknorm_rope_kv_insert(
@@ -2799,13 +2799,13 @@ def fused_minimax_m3_dspark_context_kv(
 ) -> None:
     """Store the MiniMax-M3 DSpark draft's context K/V for every layer.
 
-    ``all_kv`` ``[N, L, 2, nkv, 128]`` holds each layer's K and V. K gets the
-    layer's Gemma RMSNorm (``k_norm_weight[L, 128]``) and partial NeoX RoPE;
-    both are stored like ``reshape_and_cache_flash`` into the layers' caches.
-    Layer ``l``'s cache is ``kv_cache`` (layer 0, ``[nb, nkv, bs, 2 * 128]``)
-    shifted by ``cache_offsets[l]`` elements; its fp8 k/v scales are
-    ``k_scale`` (layer 0's) shifted by ``scale_offsets[0, l]`` /
-    ``scale_offsets[1, l]`` floats. Slots < 0 are skipped.
+    `all_kv` `[N, L, 2, nkv, 128]` holds each layer's K and V. K gets the
+    layer's Gemma RMSNorm (`k_norm_weight[L, 128]`) and partial NeoX RoPE;
+    both are stored like `reshape_and_cache_flash` into the layers' caches.
+    Layer `l`'s cache is `kv_cache` (layer 0, `[nb, nkv, bs, 2 * 128]`)
+    shifted by `cache_offsets[l]` elements; its fp8 k/v scales are
+    `k_scale` (layer 0's) shifted by `scale_offsets[0, l]` /
+    `scale_offsets[1, l]` floats. Slots < 0 are skipped.
     """
     torch.ops._C.fused_minimax_m3_dspark_context_kv(
         all_kv,
@@ -3019,7 +3019,7 @@ def swap_blocks(
     This method assumes each of the two input tensors is composed of
     consecutive contiguous blocks, of size block_size_in_bytes.
     i.e. the memory layout for each tensor is:
-    [block0] [block1] ... [block N]
+    `[block0] [block1] ... [block N]`
 
     block_mapping determines the subset of blocks to copy of the source tensor,
     and their matching destination block number on the destination tensor.
@@ -3478,9 +3478,9 @@ def dsv3_fused_a_gemm(
 ) -> None:
     """Low-latency fused-A-style GEMM (SM 9.0+, BF16, 1-16 tokens).
 
-    Computes ``output = mat_a @ mat_b`` for the compiled Kimi K3 and
-    DeepSeek V3 projection shapes. ``mat_a`` and ``output`` are row-major;
-    ``mat_b`` is the column-major transposed weight. ``enable_pdl`` permits
+    Computes `output = mat_a @ mat_b` for the compiled Kimi K3 and
+    DeepSeek V3 projection shapes. `mat_a` and `output` are row-major;
+    `mat_b` is the column-major transposed weight. `enable_pdl` permits
     programmatic dependent launch for callers that have validated it.
 
     Requires SM 9.0+.

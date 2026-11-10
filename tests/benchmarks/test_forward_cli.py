@@ -36,7 +36,7 @@ MODEL_NAME = "meta-llama/Llama-3.2-1B-Instruct"
 def test_bench_forward_muse_synthetic_routing(tmp_path, routing):
     """Muse's native router supports finite, reproducible synthetic graph replay."""
     config = dict(
-        architectures=["MuseSpark1xForCausalLM"],
+        architectures=["MuseSparkForCausalLM"],
         model_type="muse_spark_text",
         vocab_size=128,
         hidden_size=512,
@@ -70,8 +70,8 @@ def test_bench_forward_muse_synthetic_routing(tmp_path, routing):
     (tmp_path / "config.json").write_text(json.dumps(config))
     entrypoint = (
         "from vllm.model_executor.models import ModelRegistry; "
-        "ModelRegistry.register_model('MuseSpark1xForCausalLM', "
-        "'vllm.models.muse_spark.nvidia.model:MuseSpark1xForCausalLM'); "
+        "ModelRegistry.register_model('MuseSparkForCausalLM', "
+        "'vllm.models.muse_spark.nvidia.model:MuseSparkForCausalLM'); "
         "from vllm.entrypoints.cli.main import main; main()"
     )
     output = tmp_path / "results.json"
@@ -161,7 +161,7 @@ def test_balanced_routing_restores_expert_bias(dist_init):
     from vllm.config import get_current_vllm_config
     from vllm.forward_context import set_forward_context
     from vllm.model_executor.layers.fused_moe.router.gate_linear import GateLinear
-    from vllm.models.muse_spark.common.moe import MuseSpark1xRouter
+    from vllm.models.muse_spark.common.moe import MuseSparkRouter
 
     device = torch.device(current_platform.device_type)
     layer = torch.nn.Module()
@@ -170,7 +170,7 @@ def test_balanced_routing_restores_expert_bias(dist_init):
     layer.top_k = 2
     bias = torch.tensor([100.0, 100.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0], device=device)
     layer.register_buffer("expert_bias", bias.clone())
-    selector = MuseSpark1xRouter(
+    selector = MuseSparkRouter(
         top_k=2,
         num_experts=8,
         expert_bias=layer.expert_bias,

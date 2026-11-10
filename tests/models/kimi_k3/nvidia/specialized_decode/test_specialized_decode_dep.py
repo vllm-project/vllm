@@ -20,7 +20,7 @@ HEADS = 96  # TP1
 
 
 def pitch(heads=HEADS):
-    """The packed [q_a | kv_a | gate | wk | wv] row of ``heads`` local heads."""
+    """The packed [q_a | kv_a | gate | wk | wv] row of `heads` local heads."""
     return 2112 + heads * 128 + 128 + 32
 
 
@@ -39,7 +39,7 @@ def cache(blocks, block, row):
 
 
 def split_query(batch, weights, mla, index, nvfp4, heads=HEADS):
-    """The split query of ``batch`` rows at ``heads`` local heads: (run(projected,
+    """The split query of `batch` rows at `heads` local heads: (run(projected,
     slots, q_scale_inv, k_scale) -> (query, q_c, Q_B rows))."""
     import cutlass
 

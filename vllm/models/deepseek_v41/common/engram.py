@@ -2,18 +2,18 @@
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 """Engram: n-gram hash lookups gated into the hyper-connection stream.
 
-Port of the reference ``inference/engram.py`` + ``Engram`` /
-``ParallelEngramEmbedding`` from ``inference/model.py`` (DeepSeek V4.1
+Port of the reference `inference/engram.py` + `Engram` /
+`ParallelEngramEmbedding` from `inference/model.py` (DeepSeek V4.1
 checkpoint layout). Engram modules live on the backbone layers listed in
-``engram_layer_ids`` only.
+`engram_layer_ids` only.
 
-An n-gram at position ``p`` needs the token ids at ``p-1..p-3`` while vLLM
+An n-gram at position `p` needs the token ids at `p-1..p-3` while vLLM
 streams tokens chunk-by-chunk:
 
-- ``token_map``: token id -> compressed vocab id, built once from the
+- `token_map`: token id -> compressed vocab id, built once from the
   model's tokenizer at init (deterministic; asserted against
-  ``engram_compressed_vocab_size``).
-- ``lookback_token_ids``: the ids just before each request's chunk start,
+  `engram_compressed_vocab_size`).
+- `lookback_token_ids`: the ids just before each request's chunk start,
   which the runner reads from its device-resident token history.
 """
 
@@ -1407,14 +1407,10 @@ def _engram_unpack_fp8_kernel(
     tl.store(scales + layer * scales_stride + offset, scale)
 
 
-class EngramBatch(nn.Module):
-    """Stage every Engram layer's WKV input as MXFP8 with one exchange.
-
-    A module so the model owns the peer exchange's pointer buffers.
-    """
+class EngramBatch:
+    """Stage every Engram layer's WKV input as MXFP8 with one exchange."""
 
     def __init__(self, layers: list["Engram"], max_tokens: int) -> None:
-        super().__init__()
         first = layers[0].layer_hash_index
         hash_indices = [layer.layer_hash_index for layer in layers]
         assert hash_indices == list(range(first, first + len(layers)))
@@ -1451,8 +1447,7 @@ class EngramBatch(nn.Module):
 
             self.peer_exchange = EngramPeerExchange.create(layers, max_peer_slot)
         for layer in layers:
-            # Owned by the model; keep it out of each layer's submodules.
-            object.__setattr__(layer, "_batch", self)
+            layer._batch = self
             # The layers read this batch's staging instead of their BF16 rows.
             layer.staged_rows = layer.staged_rows.new_empty(
                 (0, *layer.staged_rows.shape[1:])

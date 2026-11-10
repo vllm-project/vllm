@@ -209,7 +209,7 @@ def merge_interleaved_embeddings(
 
     When use_audio_in_video=True, video and audio tokens are interleaved in
     the token sequence, but embeddings are provided as separate contiguous
-    tensors. This function scatters each modality by the ``modality`` attribute
+    tensors. This function scatters each modality by the `modality` attribute
     attached to each embedding tensor (set during encoder gather) and also
     supports image embeddings in the same interleaved request.
 

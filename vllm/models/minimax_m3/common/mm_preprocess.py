@@ -109,7 +109,7 @@ class MiniMaxM3VLProcessingInfo(BaseProcessingInfo):
     ) -> tuple[ImageSize, int]:
         """Compute resized image size and number of vision tokens.
 
-        Mirrors the processor's ``compute_aligned_size`` so token counts
+        Mirrors the processor's `compute_aligned_size` so token counts
         match the actual processor output.
         """
         patch_size: int = image_processor.patch_size

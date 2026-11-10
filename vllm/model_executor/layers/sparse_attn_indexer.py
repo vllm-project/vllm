@@ -119,18 +119,18 @@ def _merge_dcp_topk_global(
 ) -> None:
     """Merge each DCP rank's local top-K into the global top-K.
 
-    ``topk_indices`` are this rank's local top-K positions into its 1/N KV
+    `topk_indices` are this rank's local top-K positions into its 1/N KV
     shard. A token in the global top-K must also be in its owning rank's local
-    top-K (at most ``topk_tokens - 1`` tokens rank globally above it, hence at
+    top-K (at most `topk_tokens - 1` tokens rank globally above it, hence at
     most that many on its own rank), so exchanging only the per-rank local
     candidates is exact -- equivalent to all-gathering the full logit matrix,
-    but it ships ``dcp_world_size * topk_tokens`` candidates instead of the whole
-    score row. Overwrites ``topk_indices`` with global token ids (``-1`` for
+    but it ships `dcp_world_size * topk_tokens` candidates instead of the whole
+    score row. Overwrites `topk_indices` with global token ids (`-1` for
     padding); the attention backend localizes them back to physical slots per
     rank.
-    The selector keys only the score bits that ``logits_dtype`` (the dtype the
+    The selector keys only the score bits that `logits_dtype` (the dtype the
     MQA logits were computed in, before the FP32 upcast) carries and the id
-    bits that positions below ``num_positions`` use.
+    bits that positions below `num_positions` use.
     """
     if dcp_world_size <= 1:
         return
@@ -332,7 +332,7 @@ def _upcast_logits_kernel(src_ptr, dst_ptr, row_ends_ptr, stride, BLOCK: tl.cons
 def as_fp32_logits(logits: torch.Tensor, row_ends: torch.Tensor) -> torch.Tensor:
     """Upcast BF16 MQA logits for the FP32 top-k kernels.
 
-    Only columns below ``row_ends`` (int32, one per row) are converted, the
+    Only columns below `row_ends` (int32, one per row) are converted, the
     span the consumers read; DeepGEMM's aligned row stride is kept.
     """
     if logits.dtype == torch.float32:
@@ -356,7 +356,7 @@ def _decode_chunk_ranges(
     rows: int, width: int, budget: int, itemsize: int
 ) -> list[tuple[int, int]]:
     """Partition independent Q rows under a payload budget of logits whose
-    elements take ``itemsize`` bytes."""
+    elements take `itemsize` bytes."""
     if budget < 0:
         raise ValueError("Decode logits budget must be nonnegative")
     if not rows or not budget or rows * width * itemsize <= budget:
@@ -396,7 +396,7 @@ def _varlen_decode_rows(
     end: int,
 ) -> None:
     """The varlen (SM100) decode logits, candidate selection and top-k of rows
-    ``[start, end)``, with the slice's own DeepGEMM schedule."""
+    `[start, end)`, with the slice's own DeepGEMM schedule."""
     assert decode.indices is not None
     seq_lens = decode.seq_lens[start:end]
     indices = decode.indices[start:end]
@@ -475,7 +475,7 @@ def kv_cache_as_quant_view(
     head_dim: int,
     use_fp4_cache: bool,
 ) -> torch.Tensor:
-    """4D ``[num_blocks, block_size, 1, head_width]`` view expected by
+    """4D `[num_blocks, block_size, 1, head_width]` view expected by
     DeepGEMM, from the 3D indexer kv-cache allocation."""
     if use_fp4_cache:
         assert kv_cache.ndim == 3 and kv_cache.dtype == torch.uint8
@@ -1440,12 +1440,12 @@ class SparseAttnIndexer(CustomOp):
         """CPU sparse attention indexer: cache write stays eager Python glue
         (own K-cache layout, not shared with the main attention cache
         write). PREFILL and DECODE both call the ported
-        ``fp8_paged_mqa_logits_cpu``/``topk_transform_512_cpu`` kernels,
-        which read the paged K-cache directly via ``page_table`` -- no
+        `fp8_paged_mqa_logits_cpu`/`topk_transform_512_cpu` kernels,
+        which read the paged K-cache directly via `page_table` -- no
         eager gather step, no per-request Python loop.
 
-        ``prefill_metadata.chunks`` always has exactly one entry here:
-        ``DeepseekV4CPUIndexerMetadataBuilder`` overrides the base chunk
+        `prefill_metadata.chunks` always has exactly one entry here:
+        `DeepseekV4CPUIndexerMetadataBuilder` overrides the base chunk
         split to always return the whole step's prefill batch as one
         chunk, since the base chunking only bounds CUDA/XPU's dense M*N
         logits tensor and flat K-gather workspace, neither of which this

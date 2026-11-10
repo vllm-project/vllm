@@ -3,21 +3,21 @@
 """Inkling chat-encoding core.
 
 Pure implementation of Inkling chat rendering, kept deliberately free of
-vLLM imports: it depends only on the :class:`InklingTextTokenizer` protocol
+vLLM imports: it depends only on the `InklingTextTokenizer` protocol
 and speaks OpenAI-style message dicts. If a standalone Inkling
 input-processing library becomes available, this module is the unit to
-swap out — the swap point is marked in ``vllm/renderers/inkling.py``.
+swap out — the swap point is marked in `vllm/renderers/inkling.py`.
 
 Multimodal parts follow the contract of vLLM's Inkling multimodal processor
-(``InklingMultiModalProcessor`` anchors prompt updates on the bare
+(`InklingMultiModalProcessor` anchors prompt updates on the bare
 content-kind marker and inserts the per-patch placeholder run itself):
 
-* image parts emit only ``<|content_image|>`` — no seed placeholder id;
-* audio parts emit ``<|content_audio_input|><|audio_end|>`` — no seed
+* image parts emit only `<|content_image|>` — no seed placeholder id;
+* audio parts emit `<|content_audio_input|><|audio_end|>` — no seed
   placeholder id between them.
 
-``reasoning_effort`` (a float in [0, 0.99], sourced from
-``chat_template_kwargs`` only) renders the ``Thinking effort level:``
+`reasoning_effort` (a float in [0, 0.99], sourced from
+`chat_template_kwargs` only) renders the `Thinking effort level:`
 system control block after the tool declarations and initial system messages.
 """
 
@@ -102,7 +102,7 @@ def render_inkling_messages(
 
     PURE renderer: emits Inkling framing plus bare media markers; media
     encoding and placeholder expansion happen later in the MM processor.
-    ``add_generation_prompt`` appends the assistant turn opener so the
+    `add_generation_prompt` appends the assistant turn opener so the
     model continues into the response.
     """
     input_ids: list[int] = []

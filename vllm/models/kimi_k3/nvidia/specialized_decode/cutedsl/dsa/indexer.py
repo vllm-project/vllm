@@ -24,7 +24,7 @@ then the logical -> physical conversion on a side stream):
                  select over them (11-bit bins, then the low 5 bits) and one
                  ordered pass write the selected keys' physical rows in key
                  order. Ties at the threshold go to the lowest key indices, so
-                 the result is deterministic. A row of at most ``topk`` keys
+                 the result is deterministic. A row of at most `topk` keys
                  takes all of them without reading logits (the short-context
                  bypass).
 
@@ -145,20 +145,20 @@ def load_i32(address):
 
 @cute.jit
 def stride_pages(page, tensor):
-    """The element offset of page ``page`` of ``tensor`` (mode 0), in 64 bits."""
+    """The element offset of page `page` of `tensor` (mode 0), in 64 bits."""
     return Int64(page) * Int64(tensor.stride[0])
 
 
 @cute.jit
 def table_entry(table, r: Int32, column: Int32) -> Int32:
-    """``table``: (address, row stride, width) of an int32 block table."""
+    """`table`: (address, row stride, width) of an int32 block table."""
     address, pitch, _ = table
     return load_i32(address + (Int64(r) * Int64(pitch) + Int64(column)) * 4)
 
 
 @asm(Uint32, pure=True)
 def relu_bf16x2(lo: Float32, hi: Float32):
-    """BF16x2 (``lo`` in the low half) of relu(x), round to nearest even (DeepGEMM's
+    """BF16x2 (`lo` in the low half) of relu(x), round to nearest even (DeepGEMM's
     cvt_relu_bf16x2_f32)."""
     return "cvt.rn.relu.bf16x2.f32 $0, $2, $1;", "=r,f,f", (lo, hi)
 
@@ -187,13 +187,13 @@ def bf16_bits(x: Float32) -> Uint32:
 
 
 def half(words, e):
-    """BF16 element ``e`` of eight packed in four words."""
+    """BF16 element `e` of eight packed in four words."""
     return (words[e // 2] >> Uint32(16 * (e % 2))) & Uint32(0xFFFF)
 
 
 @cute.jit
 def order16(bits: Uint32) -> Uint32:
-    """Order-preserving 16-bit key of BF16 ``bits`` (a larger value, a larger
+    """Order-preserving 16-bit key of BF16 `bits` (a larger value, a larger
     key)."""
     flip = Uint32(0x8000)
     if (bits & Uint32(0x8000)) != Uint32(0):
@@ -218,7 +218,7 @@ def max_u16x2(a, b):
 @asm()
 def mma_mxf4(d, a, b, instruction, sfa, sfb, accumulate):
     """One block-scaled MXF4 tcgen05 MMA (K 64, UE8M0 per 32, DeepGEMM's FP4 MQA
-    logits instruction); ``accumulate`` is a runtime flag."""
+    logits instruction); `accumulate` is a runtime flag."""
     words = (Uint32(v) for v in (instruction, sfa, sfb, accumulate))
     code = "{ .reg .pred p; setp.ne.b32 p,$6,0; tcgen05.mma.cta_group::1"
     code += ".kind::mxf4.block_scale.scale_vec::2X [$0],$1,$2,$3,[$4],[$5],p; }"
@@ -227,7 +227,7 @@ def mma_mxf4(d, a, b, instruction, sfa, sfb, accumulate):
 
 def fp4_instruction(n: int, k: int) -> int:
     """MXF4 instruction descriptor: E2M1 A and B (K-major), FP32 D, UE8M0 scales,
-    M 128, N ``n``; K step ``k`` of two reads scale bytes 2k, 2k + 1."""
+    M 128, N `n`; K step `k` of two reads scale bytes 2k, 2k + 1."""
     sf = 2 * k
     return 1 << 7 | 1 << 10 | (n >> 3) << 17 | 1 << 23 | 8 << 24 | sf << 29 | sf << 4
 
@@ -247,7 +247,7 @@ def scale_desc(address: Uint32):
 
 @cute.jit
 def transpose_scales(words, chunk, lane):
-    """In place, the 128 UE8M0 x4 words of rows 0..127 at ``chunk`` (Int32 smem
+    """In place, the 128 UE8M0 x4 words of rows 0..127 at `chunk` (Int32 smem
     tensor offset) into tcgen05.cp's 32x128b layout: lane l's 16 bytes are rows l,
     32 + l, 64 + l, 96 + l (TMEM columns 0..3 of lane l: rows c * 32 + l)."""
     values = [words[chunk + i * 32 + lane] for i in range(4)]
@@ -259,7 +259,7 @@ def transpose_scales(words, chunk, lane):
 @cute.jit
 def vector_keys(words, v: Int32, length: Int32):
     """The order-preserving keys of a vector's eight BF16 logits (two per word);
-    keys at or past ``length`` are 0."""
+    keys at or past `length` are 0."""
     keys = []
     for i in cutlass.range_constexpr(4):
         w = words[i]
@@ -284,7 +284,7 @@ def vector_max(keys) -> Uint32:
 
 @cute.jit
 def fine_bin_of(key: Uint32, b0: Uint32) -> Uint32:
-    """A candidate's 11-bit bin above the bound's ``b0``; the keys FINE - 1 or
+    """A candidate's 11-bit bin above the bound's `b0`; the keys FINE - 1 or
     more bins above share the last."""
     return cutlass.min((key >> Uint32(5)) - b0, Uint32(FINE - 1))
 
@@ -302,7 +302,7 @@ def topdown(
     lane,
 ):
     """info[slot] = the bin where the counts summed from the top bin down reach
-    ``need``, info[slot + 1] = the count above it (unchanged when they never
+    `need`, info[slot + 1] = the count above it (unchanged when they never
     do)."""
     per = max(1, bins // SELECT_THREADS)
     top = bins - 1 - per * tid
@@ -331,8 +331,8 @@ def topdown(
 
 @cute.jit
 def low_digit(count: Uint32, need: Uint32, lane: Int32):
-    """Warp-wide over 32 bins (lane b holds bin b's ``count``): the bin where the
-    counts summed from bin 31 down reach ``need``, and the count above it."""
+    """Warp-wide over 32 bins (lane b holds bin b's `count`): the bin where the
+    counts summed from bin 31 down reach `need`, and the count above it."""
     rev = cute.arch.shuffle_sync(count, 31 - lane)
     above = warp_inclusive(rev, lane) - rev  # the bins above bin 31 - lane
     hit = Int32(0)
@@ -345,7 +345,7 @@ def low_digit(count: Uint32, need: Uint32, lane: Int32):
 
 @cute.jit
 def warp_totals(scan, warp, lane):
-    """(sum of ``scan`` over the warps before ``warp``, sum over all): every
+    """(sum of `scan` over the warps before `warp`, sum over all): every
     warp scans the per-warp words itself."""
     x = Uint32(0)
     if lane < SELECT_WARPS:
@@ -359,7 +359,7 @@ def warp_totals(scan, warp, lane):
 
 @cute.jit
 def block_exclusive(value: Uint32, scan, warp, lane):
-    """(exclusive prefix over the CTA's threads in order, total); ``scan``:
+    """(exclusive prefix over the CTA's threads in order, total); `scan`:
     one word per warp."""
     inclusive = warp_inclusive(value, lane)
     if lane == 31:
@@ -372,7 +372,7 @@ def block_exclusive(value: Uint32, scan, warp, lane):
 
 @cute.jit
 def request_tiles(row_ends: cute.Tensor, r: Int32, q: cutlass.Constexpr[int], topk):
-    """128-key tiles of request ``r``; 0 when all its rows fit the top-k (its
+    """128-key tiles of request `r`; 0 when all its rows fit the top-k (its
     last row sees the most keys)."""
     end = row_ends[r * q + q - 1]
     tiles = Int32(0)
@@ -386,7 +386,7 @@ def request_tiles(row_ends: cute.Tensor, r: Int32, q: cutlass.Constexpr[int], to
 # --------------------------------------------------------------------------
 @cute.jit
 def _first_request(start: cute.Tensor, requests: Int32, g: Int32) -> Int32:
-    """The request whose tiles contain global tile ``g`` (binary search)."""
+    """The request whose tiles contain global tile `g` (binary search)."""
     lo = Int32(0)
     hi = requests
     while lo < hi:
@@ -400,8 +400,8 @@ def _first_request(start: cute.Tensor, requests: Int32, g: Int32) -> Int32:
 
 @cute.jit
 def _next_item(start: cute.Tensor, requests: Int32, g: Int32, r: Int32, hi: Int32):
-    """The work item at global tile ``g`` of request ``r`` (the CTA range ends at
-    ``hi``): (request, first key, tiles, next g, next r)."""
+    """The work item at global tile `g` of request `r` (the CTA range ends at
+    `hi`): (request, first key, tiles, next g, next r)."""
     r_end = start[r + 1]
     tiles = cutlass.min(cutlass.min(hi, r_end) - g, Int32(ITEM_TILES))
     k0 = (g - start[r]) * Int32(TILE)
@@ -423,13 +423,13 @@ def _mn_layout(t):
 
 
 class IndexerScore:
-    """BF16 logits of ``rows`` rows (``q`` per request) into the request-compact
-    scratch: request r's rows are consecutive ``tiles(r) * 128``-key rows starting
-    at element ``q * 128 * (tiles of the requests before r)``.
+    """BF16 logits of `rows` rows (`q` per request) into the request-compact
+    scratch: request r's rows are consecutive `tiles(r) * 128`-key rows starting
+    at element `q * 128 * (tiles of the requests before r)`.
 
-    ``pitch`` > 0 (DCP): DeepGEMM's paged MQA logits layout instead, row ``t`` at
-    element ``t * pitch`` (key index = column; ``pitch`` a multiple of 512, so
-    1 KiB rows), no vector maxima, and every request is scored (``topk`` 0: a
+    `pitch` > 0 (DCP): DeepGEMM's paged MQA logits layout instead, row `t` at
+    element `t * pitch` (key index = column; `pitch` a multiple of 512, so
+    1 KiB rows), no vector maxima, and every request is scored (`topk` 0: a
     rank's share of the global top-k is unknown before the merge)."""
 
     def __init__(
@@ -475,8 +475,8 @@ class IndexerScore:
         q_scales: cute.Tensor,  # FP4: Int32 (UE8M0 x4) [rows, 32]; FP8: unused
         s,
     ):
-        """FP4: ``query`` is E2M1 bytes [64, 32, rows] (row stride 4 KiB), ``keys``
-        E2M1 bytes [64, 64, blocks] and ``scales`` the keys' UE8M0 x4 words."""
+        """FP4: `query` is E2M1 bytes [64, 32, rows] (row stride 4 KiB), `keys`
+        E2M1 bytes [64, 64, blocks] and `scales` the keys' UE8M0 x4 words."""
         ab = cutlass.Float8E4M3FN
         mma = sm100_utils.make_trivial_tiled_mma(
             ab,
@@ -559,7 +559,7 @@ class IndexerScore:
     def row_weights(
         self, sW, qs, lo: cutlass.Constexpr[int], hi: cutlass.Constexpr[int]
     ):
-        """Rows [lo, hi)'s BF16 head weights of Q stage ``qs`` (16 BF16x2 words a
+        """Rows [lo, hi)'s BF16 head weights of Q stage `qs` (16 BF16x2 words a
         row; nothing for an empty range)."""
         rows = []
         for tok in cutlass.range_constexpr(lo, hi):
@@ -587,7 +587,7 @@ class IndexerScore:
         scale -> BF16 logits, and each 8 keys' largest (the select's bound). The
         rows' accumulators are read from TMEM and packed to relu'd BF16 pairs
         first (16 registers a row), then the accumulator is released
-        (``release``: its empty barrier) so the next MMA overlaps the head sums."""
+        (`release`: its empty barrier) so the next MMA overlaps the head sums."""
         row0, pitch, key, kscale, qs, acc, lt = rows
         out_base, tops_base, release, weights = bases
         # tcgen05.ld's registers are valid only after tcgen05.wait::ld: each row
@@ -1126,12 +1126,12 @@ class IndexerScore:
 # Select
 # --------------------------------------------------------------------------
 class IndexerSelect:
-    """The exact top-``topk`` of every row (one CTA per row) -> ``out`` [rows,
-    topk]: the physical KV rows (``block_rows`` rows per ``page``-token block of
+    """The exact top-`topk` of every row (one CTA per row) -> `out` [rows,
+    topk]: the physical KV rows (`block_rows` rows per `page`-token block of
     the MLA cache, a power of two: 64, or e.g. 2048 in hybrid models whose
     attention pages match the mamba state's) of the selected keys in key order,
-    -1 past the row's count, and ``valid`` [rows]: the counts. ``ids``
-    (``logical``): the key indices too.
+    -1 past the row's count, and `valid` [rows]: the counts. `ids`
+    (`logical`): the key indices too.
 
     The K-th largest of the scorer's per-8 vector maxima bounds the K-th largest
     key from below (each of those vectors holds a key at least as large), so only
@@ -1202,7 +1202,7 @@ class IndexerSelect:
 
     @cute.jit
     def vector_top(self, tops_s, tops_address, v):
-        """Vector ``v``'s largest key: pass 1 kept the first TOPS in shared
+        """Vector `v`'s largest key: pass 1 kept the first TOPS in shared
         memory."""
         top = Uint32(0)
         if v < TOPS:  # noqa: SIM108 (a branch: the global load stays conditional)
@@ -1221,7 +1221,7 @@ class IndexerSelect:
 
     @cute.jit
     def publish(self, whist, wabove, pub, tid):
-        """Into ``pub``: the low-digit histogram and the count above its bin."""
+        """Into `pub`: the low-digit histogram and the count above its bin."""
         if tid < LOW:
             total = Uint32(0)
             for w in cutlass.range_constexpr(SELECT_WARPS):
@@ -1236,7 +1236,7 @@ class IndexerSelect:
 
     @cute.jit
     def resolve(self, pub, info, whist, wabove, wpre, above_high, warp, lane):
-        """From ``pub`` and ``above_high`` (keys above the threshold's bin):
+        """From `pub` and `above_high` (keys above the threshold's bin):
         info[4] = the threshold's low digit, info[5] = the ties at the threshold
         to take, and wpre = each warp's count of keys above the threshold and of
         ties before it (in key order)."""
@@ -1266,8 +1266,8 @@ class IndexerSelect:
     def write_selected(
         self, keys, indices, n, threshold, take, carry_a, carry_t, lane, emit_args
     ):
-        """One warp round of the ordered output: ``n`` (0/1) per lane of key
-        ``keys`` at ``indices``; returns the carries."""
+        """One warp round of the ordered output: `n` (0/1) per lane of key
+        `keys` at `indices`; returns the carries."""
         out, ids, table, request, row, block_rows = emit_args
         n_a = Uint32(0)
         n_t = Uint32(0)
@@ -1639,8 +1639,8 @@ def shared_or(pointer, value):
 
 @cute.jit
 def warp_topdown(hist, need: Uint32, lane: Int32):
-    """One warp over the BINS-bin ``hist``: (the bin where the counts summed from
-    the top bin down reach ``need``, the count above it); (0, 0) when they never
+    """One warp over the BINS-bin `hist`: (the bin where the counts summed from
+    the top bin down reach `need`, the count above it); (0, 0) when they never
     do. Lane l first sums the 64 bins [BINS - 64 (l + 1), BINS - 64 l), then the
     warp splits the hit chunk two bins per lane."""
     per = BINS // 32
@@ -1685,25 +1685,25 @@ LOCAL_ABOVE_BITS = 10  # a scanned count: keys above the threshold (< n), then t
 
 
 class IndexerLocalTopk:
-    """DCP: the local top-``n`` keys of every row (one CTA per row) of the
-    DeepGEMM-layout logits (``IndexerScore`` with ``pitch``) as the DCP top-k
-    merge's B' rows (``dcp_topk_merge``): ``out`` [rows, n + n / 32] int32,
-    word j < n ``(ord16 << 16) | (0xFFFF - (l & 0xFFFF))`` of a selected key l
-    (0: empty), bit j % 32 of word n + j // 32 bit 16 of l; ``valid``: the
+    """DCP: the local top-`n` keys of every row (one CTA per row) of the
+    DeepGEMM-layout logits (`IndexerScore` with `pitch`) as the DCP top-k
+    merge's B' rows (`dcp_topk_merge`): `out` [rows, n + n / 32] int32,
+    word j < n `(ord16 << 16) | (0xFFFF - (l & 0xFFFF))` of a selected key l
+    (0: empty), bit j % 32 of word n + j // 32 bit 16 of l; `valid`: the
     counts. The selected keys are in key order: those above the threshold, then
-    the ties at it (the lowest key indices). A row of at most ``n`` keys takes
+    the ties at it (the lowest key indices). A row of at most `n` keys takes
     all of them.
 
     A row holds 1 / DCP of a context (a few thousand keys), so the select is
     bound by its chain of dependent steps: each thread owns a contiguous run of
-    the row's 8-key vectors (the first ``LOCAL_CACHED`` kept in registers) and
+    the row's 8-key vectors (the first `LOCAL_CACHED` kept in registers) and
     every histogram is scanned by one warp.
       0  each thread's largest key; the n-th largest of those bounds the n-th
          largest key from below (n threads hold a key at least as large), so
          only the keys at or above the bound's 11-bit bin are candidates (all
          keys when under n threads hold keys);
       1  the candidates, block-scanned into a shared list in key order (a few
-         n at most; past ``LOCAL_CANDIDATES`` the passes below read every key
+         n at most; past `LOCAL_CANDIDATES` the passes below read every key
          instead, e.g. rows of many equal logits);
       2  their 11-bit histogram -> the threshold's bin;
       3  the low 5 bits of the candidates in it -> the threshold, the ties;
@@ -1719,9 +1719,9 @@ class IndexerLocalTopk:
 
     @cute.jit
     def __call__(self, logits, row_ends, out, valid, peers, epoch, xrank, xrows, s):
-        """``peers`` [W] int64 / ``epoch`` [>= rows] / ``xrank`` / ``xrows``: the
+        """`peers` [W] int64 / `epoch` [>= rows] / `xrank` / `xrows`: the
         TopkExchange's slot addresses, epochs, this rank and its rows (unused
-        without ``exchange``)."""
+        without `exchange`)."""
         self.kernel(logits, row_ends, out, valid, peers, epoch, xrank, xrows).launch(
             grid=(self.rows, 1, 1),
             block=(SELECT_THREADS, 1, 1),
@@ -1753,7 +1753,7 @@ class IndexerLocalTopk:
 
     @cute.jit
     def word(self, out, row, plane, slot, index, key):
-        """Key ``index`` (16-bit ``key``) into B' slot ``slot``."""
+        """Key `index` (16-bit `key`) into B' slot `slot`."""
         out[row, slot] = Int32(
             (key << Uint32(16)) | (Uint32(0xFFFF) - (Uint32(index) & Uint32(0xFFFF)))
         )
@@ -1762,8 +1762,8 @@ class IndexerLocalTopk:
 
     @cute.jit
     def candidate(self, step: cutlass.Constexpr[int], key, index, state, smem, args):
-        """One candidate (key >= the bound) in pass ``step`` (2: histogram, 3:
-        low histogram, 4: count, 5: write); ``state``: (the threshold's bin, the
+        """One candidate (key >= the bound) in pass `step` (2: histogram, 3:
+        low histogram, 4: count, 5: write); `state`: (the threshold's bin, the
         threshold, the ties to take, the next slot above, the next tie rank)."""
         hist, low_hist, plane = smem
         out, row = args
@@ -1794,8 +1794,8 @@ class IndexerLocalTopk:
     def keys_pass(
         self, step: cutlass.Constexpr[int], vec, cached, low, state, smem, args
     ):
-        """Pass ``step`` over this thread's keys >= ``low`` (1: count them; else
-        ``candidate``'s) -> (the count, the state)."""
+        """Pass `step` over this thread's keys >= `low` (1: count them; else
+        `candidate`'s) -> (the count, the state)."""
         address, v0, v1, length, per = vec
         count = Uint32(0)
         for i in cutlass.range(per, unroll=1):
@@ -2002,8 +2002,8 @@ class IndexerLocalTopk:
         cand_key,
         cand_index,
     ):
-        """Pass ``step`` over this thread's share of the candidate list, or over
-        its keys >= ``low`` when the list overflowed -> (pass 4's count, the
+        """Pass `step` over this thread's share of the candidate list, or over
+        its keys >= `low` when the list overflowed -> (pass 4's count, the
         state)."""
         c0, c1, listed_ok = ranges
         count = Uint32(0)
@@ -2051,9 +2051,9 @@ def select_outputs(device, rows, topk, fill=-1):
 
 
 def reserve(indexer, device, max_rows, local_topk=0, blocks=None):
-    """The fused indexer's buffers of ``max_rows`` rows, shared by every layer:
-    (logits, tops, rows, counts, ends, pitch). ``local_topk`` > 0: DCP (the
-    merge's candidates per rank). ``blocks``: the indexer cache's (None: no KV
+    """The fused indexer's buffers of `max_rows` rows, shared by every layer:
+    (logits, tops, rows, counts, ends, pitch). `local_topk` > 0: DCP (the
+    merge's candidates per rank). `blocks`: the indexer cache's (None: no KV
     cache yet, so the longest context bounds the TP logits). PreparedDsa reserves
     them when the specialized decode is built, before vLLM profiles its memory for
     the KV cache; FusedIndexer (prepare_cache, after the KV cache is allocated)
@@ -2129,10 +2129,10 @@ def compile_indexer(
     exchange=0,
 ):
     """The score and select kernels of one (rows, q) for an indexer cache layout
-    (every DSA layer's is the same). DCP (``pitch``): DeepGEMM-layout logits and,
-    ``packed``, the local top-``topk`` select into B' rows (else none), which
-    with ``exchange`` (W > 0) also pushes them to the W ranks (topk_exchange).
-    ``page``: the MLA cache's tokens per block (TP select). ``fp4``: MXFP4 keys
+    (every DSA layer's is the same). DCP (`pitch`): DeepGEMM-layout logits and,
+    `packed`, the local top-`topk` select into B' rows (else none), which
+    with `exchange` (W > 0) also pushes them to the W ranks (topk_exchange).
+    `page`: the MLA cache's tokens per block (TP select). `fp4`: MXFP4 keys
     and query."""
     score = IndexerScore(rows, q, ctas, 0 if pitch else topk, pitch, fp4=fp4)
     fp8 = cutlass.Float8E4M3FN
@@ -2178,14 +2178,14 @@ def compile_indexer(
 
 class FusedIndexer:
     """The fused decode indexer of one DSA layer, compiled per (rows, q) for the
-    layer's indexer cache. TP: ``run`` -> (physical rows [B, topk] of the MLA
-    cache, valid counts [B]). DCP (``local_topk`` N > 0, the top-k merge's
-    candidates per rank): ``run_dcp`` scores this rank's keys into DeepGEMM's
-    logits layout and, ``packed``, selects each row's local top-N as the merge's
-    B' rows. With an ``exchange`` (topk_exchange.TopkExchange) and the #63
-    merge's rescue workspace, ``run_exchange`` instead pushes the B' rows to
+    layer's indexer cache. TP: `run` -> (physical rows [B, topk] of the MLA
+    cache, valid counts [B]). DCP (`local_topk` N > 0, the top-k merge's
+    candidates per rank): `run_dcp` scores this rank's keys into DeepGEMM's
+    logits layout and, `packed`, selects each row's local top-N as the merge's
+    B' rows. With an `exchange` (topk_exchange.TopkExchange) and the #63
+    merge's rescue workspace, `run_exchange` instead pushes the B' rows to
     every rank over NVLink and merges them (ExchangeMerge) at the rows
-    ``exchanges`` (``page``: the MLA cache's tokens per block)."""
+    `exchanges` (`page`: the MLA cache's tokens per block)."""
 
     def __init__(
         self,
@@ -2256,7 +2256,7 @@ class FusedIndexer:
         return compile_indexer(*args, release=release, page=self.page, fp4=self.fp4)
 
     def exchanges(self, rows):
-        """DCP: whether ``run_exchange`` serves ``rows`` rows (the exchange and
+        """DCP: whether `run_exchange` serves `rows` rows (the exchange and
         rescue workspace hold them; the same on every rank). Also past the SM
         count: there the local select's rows share SMs (~1.7x slower than one
         row per SM), but the exchange still drops the NCCL all-gather, #63's
@@ -2289,7 +2289,7 @@ class FusedIndexer:
         return local, merge
 
     def packs(self, rows):
-        """DCP: whether ``run_dcp`` selects the B' rows itself: one CTA per row
+        """DCP: whether `run_dcp` selects the B' rows itself: one CTA per row
         on its own SM (past the SM count, rows sharing an SM select about 1.7x
         slower, behind DeepSelect + #63's pack; measured on GB300 at 160-320
         rows)."""
@@ -2297,7 +2297,7 @@ class FusedIndexer:
 
     def write_ids(self, ids: torch.Tensor):
         """Also write the selected key indices (the logical top-k, -1 past the
-        count) into ``ids`` [>= rows, topk] (tests; TP only)."""
+        count) into `ids` [>= rows, topk] (tests; TP only)."""
         assert not self.pitch
         self.ids = ids
         self.kernels = {shape: self.compile(*shape) for shape in self.kernels}
@@ -2348,8 +2348,8 @@ class FusedIndexer:
         return ends
 
     def run(self, q_fp8, head_w, index_decode, block_table, block_rows, rows, q):
-        """TP. ``index_decode``: the indexer's decode metadata (per-row ends and
-        index block table); ``block_table`` / ``block_rows``: the MLA cache's."""
+        """TP. `index_decode`: the indexer's decode metadata (per-row ends and
+        index block table); `block_table` / `block_rows`: the MLA cache's."""
         assert not self.pitch
         _, select = self.kernels[rows, q]
         ends = self.score(q_fp8, head_w, index_decode, rows, q)
@@ -2369,9 +2369,9 @@ class FusedIndexer:
 
     def run_dcp(self, q_fp8, head_w, index_decode, rows, q):
         """DCP -> (this rank's local top-N of every row as B' rows [rows, N + N /
-        32] when ``packs(rows)``, else None; the BF16 logits [rows, pitch] in
+        32] when `packs(rows)`, else None; the BF16 logits [rows, pitch] in
         DeepGEMM's layout; the row ends [rows]). The B' rows' counts land in
-        ``valid``. The exact merge takes the logits with the B' rows (a saturated
+        `valid`. The exact merge takes the logits with the B' rows (a saturated
         rank re-reads its row), so nothing here writes them until the next call."""
         assert self.pitch
         ends = self.score(q_fp8, head_w, index_decode, rows, q)
@@ -2405,11 +2405,11 @@ class FusedIndexer:
     def run_exchange(
         self, q_fp8, head_w, index_decode, rows, q, merge, ids=None
     ):  # fmt: skip
-        """DCP over the exchange (``exchanges(rows)``): score this rank's keys,
+        """DCP over the exchange (`exchanges(rows)`): score this rank's keys,
         push the local top-N B' rows to every rank, and merge every rank's
-        into this rank's KV rows. ``merge``: ExchangeMerge's (req_id,
+        into this rank's KV rows. `merge`: ExchangeMerge's (req_id,
         block_table, stride_rows, rows_out, valid_out, max_local_len) of the
-        ``rows`` rows; ``ids``: also the global ids [rows, K] (tests).
+        `rows` rows; `ids`: also the global ids [rows, K] (tests).
         Collective over the DCP group (every rank the same rows)."""
         assert self.pitch and (rows, q) in self.exchange_kernels
         req_id, block_table, stride_rows, rows_out, valid_out, max_local_len = merge

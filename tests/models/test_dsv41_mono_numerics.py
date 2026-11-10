@@ -5,16 +5,16 @@ ops vLLM runs for the same decode step: random weights in the checkpoint's
 formats, the step's KV caches as vLLM's insert writes them.
 
 - The whole layer (K1 + K2) against the mHC seams, the ROCm attention op chain,
-  the TP all-reduce and ``DeepseekV4MoE``.
+  the TP all-reduce and `DeepseekV4MoE`.
 - The FFN launch against the same FFN half, from wo_b's unreduced output.
 
 Each stage is compared on its own input, so a failure names the stage; the MoE
 is checked on the kernels' own FFN input, where routing cannot differ.
 
-On gfx942 at TP4, ``test_mono_decode_942_replays`` runs the composed runner on
+On gfx942 at TP4, `test_mono_decode_942_replays` runs the composed runner on
 the copies of the weights that the model makes at load, at steps of 6, 8 and 42
 rows, and replays the steps in one CUDA graph. The real model's numerics on
-gfx942 are checked by ``test_dsv41_mono_layers.py``."""
+gfx942 are checked by `test_dsv41_mono_layers.py`."""
 
 import shutil
 import subprocess
@@ -62,7 +62,7 @@ def _cos(a: torch.Tensor, b: torch.Tensor) -> float:
 
 
 def _rel(a: torch.Tensor, b: torch.Tensor) -> float:
-    """Relative L2 error of ``a`` against ``b``: unlike the cosine, it sees a
+    """Relative L2 error of `a` against `b`: unlike the cosine, it sees a
     wrong scale."""
     a, b = a.float().reshape(-1), b.float().reshape(-1)
     return ((a - b).norm() / b.norm()).item()
@@ -91,9 +91,9 @@ def _rope(kv: torch.Tensor, positions: torch.Tensor, cos_sin: torch.Tensor):
 
 
 def _write_records(cache, block: int, slots, kv, fnuz: bool = False):
-    """fp8_ds_mla records of roped bf16 kv rows at ``slots``: the 448 nope dims
+    """fp8_ds_mla records of roped bf16 kv rows at `slots`: the 448 nope dims
     in e4m3 with a UE8M0 per 64, the rope dims in bf16, as vLLM's insert.
-    ``fnuz``: the e4m3 bytes in FNUZ with a maximum of 224, as vLLM's gfx942
+    `fnuz`: the e4m3 bytes in FNUZ with a maximum of 224, as vLLM's gfx942
     window cache holds them. In FNUZ the OCP -0 byte would be NaN."""
     fp8, fp8_max = torch.float8_e4m3fn, 448.0
     if fnuz:
@@ -134,7 +134,7 @@ def _decode_step(
 ):
     """R requests x T tokens past random contexts: the step's metadata as
     vLLM's builders lay it out, its window rows and (ratio > 0) the compressed
-    cache filled, a random top-512 a token. ``fnuz``: the window records in
+    cache filled, a random top-512 a token. `fnuz`: the window records in
     FNUZ, as on gfx942. The compressed records stay OCP, as vLLM's Triton
     compressor writes them on gfx942 too."""
     g = torch.Generator().manual_seed(seed)
@@ -219,9 +219,9 @@ def _decode_step(
 
 
 def _rows(s: dict, a: int, b: int) -> dict:
-    """The decode step ``s`` cut to its rows a .. b - 1, as a step of its own
+    """The decode step `s` cut to its rows a .. b - 1, as a step of its own
     on the same caches. The rows keep their request numbers, so the block
-    tables of ``s`` stay valid."""
+    tables of `s` stay valid."""
     cut = dict(s, M=b - a)
     for k in ("positions", "slot_mapping", "token_to_req", "swa_indices", "swa_lens"):
         cut[k] = s[k][a:b]
@@ -242,10 +242,10 @@ def _mxfp8(n: int, k: int, g, device):
 
 def _random_moe(moe, gd, gr, inter: int) -> None:
     """Random parameters in the loaded layout, before post-load processing: this
-    rank's shards (``gd``, a device generator) of the MXFP4 routed experts
-    (random nibbles, E8M0 scales; the intermediate past ``inter`` zero, as the
+    rank's shards (`gd`, a device generator) of the MXFP4 routed experts
+    (random nibbles, E8M0 scales; the intermediate past `inter` zero, as the
     loader pads it) and the MXFP8 shared expert (one E8M0 a 32 x 32 block); the
-    replicated router from ``gr``, seeded alike on every rank."""
+    replicated router from `gr`, seeded alike on every rank."""
     u8 = torch.uint8
     for lin in (moe.shared_experts.gate_up_proj, moe.shared_experts.down_proj):
         n = lin.weight.shape[0]
