@@ -46,6 +46,7 @@ QuantizationMethods = Literal[
     "fp8_per_channel",
     "int8_per_channel_weight_only",
     "nvfp4_per_token",
+    "nvfp4_weight_only",
     "mxfp8",
     "lut_b_moe",
     "mxfp4_hadamard32",

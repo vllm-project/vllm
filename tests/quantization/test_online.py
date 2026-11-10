@@ -54,6 +54,7 @@ from vllm.model_executor.layers.linear import (
     ColumnParallelLinear,
     LinearBase,
     MergedColumnParallelLinear,
+    ReplicatedLinear,
     RowParallelLinear,
     UnquantizedLinearMethod,
 )
@@ -101,7 +102,9 @@ from vllm.model_executor.layers.quantization.online.mxfp8 import (
 )
 from vllm.model_executor.layers.quantization.online.nvfp4 import (
     Nvfp4OnlineMoEMethod,
+    Nvfp4WeightOnlyOnlineLinearMethod,
     _quantize_moe_weight_to_nvfp4,
+    _quantize_nvfp4,
 )
 from vllm.model_executor.layers.quantization.quark.quark import (
     QuarkConfig,
@@ -111,11 +114,15 @@ from vllm.model_executor.layers.quantization.quark.quark_moe import (
     QuarkNvfp4MoEMethod,
 )
 from vllm.model_executor.layers.quantization.utils import quant_utils
+from vllm.model_executor.layers.quantization.utils.marlin_utils_fp4 import (
+    is_fp4_marlin_supported,
+)
 from vllm.model_executor.layers.quantization.utils.mxfp8_utils import (
     MXFP8_SCALE_DTYPE,
     MXFP8_VALUE_DTYPE,
 )
 from vllm.model_executor.layers.quantization.utils.nvfp4_emulation_utils import (
+    dequantize_to_dtype,
     ref_nvfp4_quant,
 )
 from vllm.model_executor.layers.quantization.utils.quant_utils import (
@@ -205,6 +212,7 @@ class _TestRoutedExperts(RoutedExperts):
         (Fp8PtpcOnlineLinearMethod, kFp8StaticChannelSym, kFp8DynamicTokenSym),
         (Mxfp8OnlineLinearMethod, kMxfp8Static, None),
         (Mxfp4OnlineLinearMethod, kMxfp4Static, kMxfp4Dynamic),
+        (Nvfp4WeightOnlyOnlineLinearMethod, kNvfp4Static, None),
     ],
 )
 def test_online_linear_methods_resolve_activation_quant_key(
@@ -235,6 +243,7 @@ def test_online_linear_methods_resolve_activation_quant_key(
         ("linear", _TestLinear, kFp8StaticChannelSym, True),
         ("linear", _TestLinear, kMxfp8Static, True),
         ("linear", _TestLinear, kMxfp4Static, False),
+        ("linear", _TestLinear, kNvfp4Static, True),
         ("moe", _TestRoutedExperts, kFp8StaticTensorSym, True),
         ("moe", _TestRoutedExperts, kFp8Static128BlockSym, True),
         ("moe", _TestRoutedExperts, kFp8StaticChannelSym, True),
@@ -306,6 +315,52 @@ def test_online_mxfp4_activation_key_is_honoured_or_rejected(
             else _backend_activation_key(method.mxfp4_backend)
         )
         assert computed_key == activation_quant_key
+
+
+def test_online_nvfp4_weight_only_shorthand_is_linear_only() -> None:
+    """`nvfp4_weight_only` quantizes linear layers and leaves MoE unquantized."""
+    args = resolve_quantization_config("nvfp4_weight_only", None)
+    assert args is not None
+    config = OnlineQuantizationConfig(args)
+
+    resolved = config.resolve_quant_method_cls(_TestLinear, "linear")
+    assert resolved is not None
+    assert resolved[4] is Nvfp4WeightOnlyOnlineLinearMethod
+    assert config.resolve_quant_method_cls(_TestRoutedExperts, "moe") is None
+
+
+@pytest.mark.skipif(
+    not is_fp4_marlin_supported(), reason="No NVFP4 W4A16 kernel on this platform."
+)
+def test_online_nvfp4_weight_only_linear_matches_dequantized_weight(
+    default_vllm_config, dist_init
+) -> None:
+    """The W4A16 GEMM computes `x @ dequant(W).T` with the online NVFP4 weight."""
+    default_vllm_config.model_config = SimpleNamespace(
+        quantization_config=None, dtype=torch.bfloat16
+    )
+    config = OnlineQuantizationConfig(quant_config_args(linear="nvfp4_weight_only"))
+    torch.manual_seed(0)
+    weight = torch.randn(256, 512, device="cuda", dtype=torch.bfloat16)
+    x = torch.randn(8, 512, device="cuda", dtype=torch.bfloat16)
+    with torch.device("cuda"):
+        layer = ReplicatedLinear(
+            512,
+            256,
+            bias=False,
+            params_dtype=torch.bfloat16,
+            quant_config=config,
+            prefix="linear",
+        )
+    layer.weight.weight_loader(layer.weight, weight)
+
+    packed, scales, global_scale = _quantize_nvfp4(weight)
+    dequantized = dequantize_to_dtype(
+        packed, scales, global_scale, torch.bfloat16, swizzle=False
+    )
+    ref = x.float() @ dequantized.float().T
+    out = layer(x)[0].float()
+    assert ((out - ref).norm() / ref.norm()).item() < 1e-2
 
 
 @pytest.mark.skipif(

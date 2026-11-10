@@ -5,6 +5,7 @@ import torch
 from torch.nn import Module
 
 from vllm._custom_ops import scaled_fp4_quant
+from vllm.model_executor.kernels.linear import init_nvfp4_linear_kernel
 from vllm.model_executor.layers.fused_moe import RoutedExperts
 from vllm.model_executor.layers.fused_moe.config import (
     FusedMoEConfig,
@@ -16,6 +17,7 @@ from vllm.model_executor.layers.fused_moe.oracle.nvfp4 import (
     make_nvfp4_moe_quant_config,
     select_nvfp4_moe_backend,
 )
+from vllm.model_executor.layers.quantization.online.fp8 import OnlineLinearBase
 from vllm.model_executor.layers.quantization.online.moe_base import (
     OnlineMoEMethodBase,
 )
@@ -24,8 +26,10 @@ from vllm.model_executor.layers.quantization.utils.flashinfer_utils import (
 )
 from vllm.model_executor.layers.quantization.utils.nvfp4_emulation_utils import (
     FLOAT4_E2M1_MAX,
+    ref_nvfp4_quant,
 )
 from vllm.model_executor.layers.quantization.utils.quant_utils import (
+    QuantKey,
     amax_for_moe_weight_quant,
     kNvfp4DynamicToken,
     kNvfp4Static,
@@ -35,6 +39,104 @@ from vllm.model_executor.utils import replace_parameter
 from vllm.platforms import current_platform
 
 FLOAT8_E4M3_MAX = torch.finfo(torch.float8_e4m3fn).max
+NVFP4_BLOCK_SIZE = 16
+
+
+def _quantize_nvfp4(
+    weight: torch.Tensor, chunk_rows: int = 8192
+) -> tuple[torch.Tensor, torch.Tensor, torch.Tensor]:
+    """NVFP4-quantize the rows of `weight` without the SM100+ quant kernel.
+
+    Returns packed E2M1 codes (low nibble first), E4M3 scales per 16 values and
+    the fp32 dequantization global scale, in the checkpoint layout.
+    """
+    global_scale = (
+        weight_amax(weight).float() / (FLOAT4_E2M1_MAX * FLOAT8_E4M3_MAX)
+    ).clamp(min=1e-12)
+    inv_global_scale = (1.0 / global_scale).reshape(())
+    # E2M1 magnitudes 0, 0.5, ..., 6 doubled to integers, mapped to their codes.
+    code_of = torch.zeros(13, dtype=torch.uint8, device=weight.device)
+    code_of[torch.tensor([0, 1, 2, 3, 4, 6, 8, 12])] = torch.arange(
+        8, dtype=torch.uint8
+    ).to(weight.device)
+    n, k = weight.shape
+    packed = torch.empty(n, k // 2, dtype=torch.uint8, device=weight.device)
+    scales = torch.empty(
+        n, k // NVFP4_BLOCK_SIZE, dtype=torch.float8_e4m3fn, device=weight.device
+    )
+    for start in range(0, n, chunk_rows):
+        rows = slice(start, start + chunk_rows)
+        values, block_scales = ref_nvfp4_quant(
+            weight[rows], inv_global_scale, NVFP4_BLOCK_SIZE
+        )
+        codes = code_of[(values.abs() * 2).long()] | ((values < 0).to(torch.uint8) << 3)
+        packed[rows] = codes[:, 0::2] | (codes[:, 1::2] << 4)
+        scales[rows] = block_scales.to(torch.float8_e4m3fn)
+    return packed, scales, global_scale
+
+
+class Nvfp4WeightOnlyOnlineLinearMethod(OnlineLinearBase):
+    """Online weight-only NVFP4 (W4A16) linear method.
+
+    Quantizes fp16/bf16 weights to NVFP4 during loading, with one global scale
+    per weight shard, and runs them on the platform's W4A16 kernel.
+    Activations stay in the model dtype.
+    """
+
+    activation_quant_key: QuantKey | None = None
+
+    def create_weights(
+        self,
+        layer: torch.nn.Module,
+        input_size_per_partition: int,
+        output_partition_sizes: list[int],
+        input_size: int,
+        output_size: int,
+        params_dtype: torch.dtype,
+        **extra_weight_attrs,
+    ):
+        if input_size_per_partition % NVFP4_BLOCK_SIZE != 0:
+            raise ValueError(
+                f"NVFP4 requires input_size_per_partition "
+                f"({input_size_per_partition}) to be divisible by "
+                f"{NVFP4_BLOCK_SIZE}."
+            )
+
+        super().create_weights(
+            layer,
+            input_size_per_partition,
+            output_partition_sizes,
+            input_size,
+            output_size,
+            params_dtype,
+            **extra_weight_attrs,
+        )
+
+        self.kernel = init_nvfp4_linear_kernel(use_a16=True)
+
+    def process_weights_after_loading(self, layer: Module) -> None:
+        if getattr(layer, "_already_called_process_weights_after_loading", False):
+            return
+
+        weight = self.get_weight_for_quantization(layer)
+        packed, scales, global_scale = _quantize_nvfp4(weight)
+
+        replace_parameter(layer, "weight", packed)
+        replace_parameter(layer, "weight_scale", scales)
+        replace_parameter(layer, "weight_global_scale", global_scale)
+
+        self.kernel.process_weights_after_loading(layer)
+        self.release_requantization_source_weights(layer)
+
+        layer._already_called_process_weights_after_loading = True
+
+    def apply(
+        self,
+        layer: torch.nn.Module,
+        x: torch.Tensor,
+        bias: torch.Tensor | None = None,
+    ) -> torch.Tensor:
+        return self.kernel.apply_weights(layer, x, bias)
 
 
 def _quantize_moe_weight_to_nvfp4(

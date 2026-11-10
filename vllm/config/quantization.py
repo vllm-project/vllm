@@ -308,6 +308,11 @@ _ONLINE_SHORTHANDS: dict[str, QuantizationConfigArgs] = {
     "nvfp4_per_token": QuantizationConfigArgs(
         moe=QuantSpec(weight=kNvfp4Static),
     ),
+    # Weight-only NVFP4 (W4A16) linear on the platform's W4A16 kernel; MoE
+    # stays unquantized (no `moe` field).
+    "nvfp4_weight_only": QuantizationConfigArgs(
+        linear=QuantSpec(weight=kNvfp4Static),
+    ),
     # LUT-B routed experts with MXFP8 activations; native on Rubin (SM107),
     # emulated elsewhere. Dense layers stay unquantized.
     "lut_b_moe": QuantizationConfigArgs(
