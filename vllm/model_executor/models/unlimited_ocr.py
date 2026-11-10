@@ -197,7 +197,7 @@ class UnlimitedOCRProcessingInfo(DeepseekOCRProcessingInfo):
 class UnlimitedOCRMultiModalProcessor(DeepseekOCRMultiModalProcessor):
     """Multimodal processor for Unlimited-OCR.
 
-    Disables crop mode for multi-image requests (to stay consistent with
+    For v1, disables crop mode for multi-image requests (to stay consistent with
     `UnlimitedOCRProcessor.tokenize_with_images`), and -- since that makes the
     per-image output depend on the request's image count -- bypasses the
     per-item processing cache for multi-image requests, exactly like
@@ -282,7 +282,7 @@ class UnlimitedOCRMultiModalProcessor(DeepseekOCRMultiModalProcessor):
         inputs: ProcessorInputs,
         timing_ctx: TimingContext,
     ) -> MultiModalProcessingResult:
-        # The processor logic differs for single-image (crop) vs multi-image
+        # For v1, the processor logic differs for single-image (crop) vs multi-image
         # (no crop) requests. The processing cache assumes per-item output is
         # invariant of how many images are passed per prompt, so we only cache
         # the single-image case and recompute multi-image requests fresh.
