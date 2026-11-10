@@ -3301,7 +3301,11 @@ def _v4_gather_repack_kernel(
 
     off = tl.arange(0, 512)
     m = off < NOPE
-    tl.store(out_nope_ptr + dst * QK + off, tl.load(base + off, mask=m, other=0), mask=m)
+    tl.store(
+        out_nope_ptr + dst * QK + off,
+        tl.load(base + off, mask=m, other=0),
+        mask=m,
+    )
 
     s = tl.arange(0, 16)
     sm = s < NT * 2
@@ -3352,9 +3356,7 @@ def _v4_iota(n: int, device: torch.device) -> torch.Tensor:
     """
     buf = _V4_IOTA.get(device)
     if buf is None or buf.numel() < n:
-        buf = torch.arange(
-            max(n, 1 << 12), dtype=torch.int32, device=device
-        )
+        buf = torch.arange(max(n, 1 << 12), dtype=torch.int32, device=device)
         _V4_IOTA[device] = buf
     return buf[:n]
 
@@ -3528,8 +3530,10 @@ def _rocm_sparse_attn_decode_aiter_asm(
     # The planner scans a whole query in one program, so a query longer than
     # _V4_PLAN_BLOCK would be silently truncated, and the combine holds every
     # query in one program. Decline rather than drop entries.
-    if T > _V4_COMBINE_BLOCK or n_extra > T * _V4_PLAN_BLOCK or (
-        n_main > T * _V4_PLAN_BLOCK
+    if (
+        T > _V4_COMBINE_BLOCK
+        or n_extra > T * _V4_PLAN_BLOCK
+        or (n_main > T * _V4_PLAN_BLOCK)
     ):
         return False
 
@@ -3545,13 +3549,21 @@ def _rocm_sparse_attn_decode_aiter_asm(
     lens_e = torch.empty((T,), dtype=torch.int32, device=dev)
     lens_m = torch.empty((T,), dtype=torch.int32, device=dev)
     _v4_plan_kernel[(T,)](
-        extra_indices, extra_indptr, rank_e, lens_e,
-        extra_cache.shape[0] * extra_cache.shape[1], n_extra,
+        extra_indices,
+        extra_indptr,
+        rank_e,
+        lens_e,
+        extra_cache.shape[0] * extra_cache.shape[1],
+        n_extra,
         MAX_LEN=_V4_PLAN_BLOCK,
     )
     _v4_plan_kernel[(T,)](
-        main_indices, main_indptr, rank_m, lens_m,
-        main_cache.shape[0] * main_cache.shape[1], n_main,
+        main_indices,
+        main_indptr,
+        rank_m,
+        lens_m,
+        main_cache.shape[0] * main_cache.shape[1],
+        n_main,
         MAX_LEN=_V4_PLAN_BLOCK,
     )
     combined = torch.empty((T + 1,), dtype=torch.int32, device=dev)
@@ -3573,14 +3585,32 @@ def _rocm_sparse_attn_decode_aiter_asm(
     # the SWA base is the query's start plus however many compressed rows it
     # kept. `combined` doubles as the per-query start and as the CSR indptr.
     _v4_gather_repack_kernel[(n_extra,)](
-        nope, rope, extra_cache, extra_cache.stride(0), extra_indices,
-        rank_e, combined, extra_indptr, n_extra, T,
-        block_size=extra_cache.shape[1], **cfg
+        nope,
+        rope,
+        extra_cache,
+        extra_cache.stride(0),
+        extra_indices,
+        rank_e,
+        combined,
+        extra_indptr,
+        n_extra,
+        T,
+        block_size=extra_cache.shape[1],
+        **cfg,
     )
     _v4_gather_repack_kernel[(n_main,)](
-        nope, rope, main_cache, main_cache.stride(0), main_indices,
-        rank_m, base_m, main_indptr, n_main, T,
-        block_size=main_cache.shape[1], **cfg
+        nope,
+        rope,
+        main_cache,
+        main_cache.stride(0),
+        main_indices,
+        rank_m,
+        base_m,
+        main_indptr,
+        n_main,
+        T,
+        block_size=main_cache.shape[1],
+        **cfg,
     )
 
     q_packed, q_rope = _v4_pack_query(q)

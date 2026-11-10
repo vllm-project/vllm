@@ -13,6 +13,7 @@ import pytest
 import torch
 
 from vllm.platforms import current_platform
+from vllm.utils.torch_utils import set_random_seed
 
 pytestmark = pytest.mark.skipif(
     not current_platform.is_rocm(), reason="Only used by ROCm"
@@ -51,9 +52,7 @@ def _pack_tokens(latent: torch.Tensor):
     q = (nope / torch.pow(2.0, exp).unsqueeze(-1)).clamp(-FP8_MAX, FP8_MAX)
 
     tokens = torch.empty((n, TOK), dtype=torch.uint8, device=latent.device)
-    tokens[:, :DIM_NOPE] = (
-        q.to(torch.float8_e4m3fn).view(n, DIM_NOPE).view(torch.uint8)
-    )
+    tokens[:, :DIM_NOPE] = q.to(torch.float8_e4m3fn).view(n, DIM_NOPE).view(torch.uint8)
     tokens[:, DIM_NOPE:] = latent[:, DIM_NOPE:].contiguous().view(torch.uint8)
     scales = torch.zeros((n, 8), dtype=torch.uint8, device=latent.device)
     scales[:, :NTILES] = (exp.to(torch.int32) + 127).clamp(0, 255).to(torch.uint8)
@@ -76,11 +75,21 @@ def _make_cache(num_blocks: int, block_size: int, device: torch.device):
     return cache.view(num_blocks, block_size, block_bytes // block_size)
 
 
-def _run_both(*, num_blocks, block_size, num_tokens, heads, len_extra, len_main,
-              slack=0, corrupt=False, device="cuda"):
+def _run_both(
+    *,
+    num_blocks,
+    block_size,
+    num_tokens,
+    heads,
+    len_extra,
+    len_main,
+    slack=0,
+    corrupt=False,
+    device="cuda",
+):
     from vllm.v1.attention.ops import rocm_aiter_mla_sparse as ops
 
-    torch.manual_seed(0)
+    set_random_seed(0)
     dev = torch.device(device)
     extra_cache = _make_cache(num_blocks, block_size, dev)
     main_cache = _make_cache(num_blocks, block_size, dev)
@@ -122,16 +131,14 @@ def _run_both(*, num_blocks, block_size, num_tokens, heads, len_extra, len_main,
 
     outs = []
     for enabled in (True, False):
-        out = torch.empty(
-            (num_tokens, heads, DIM_QK), dtype=torch.bfloat16, device=dev
-        )
+        out = torch.empty((num_tokens, heads, DIM_QK), dtype=torch.bfloat16, device=dev)
         saved = ops._V4_ASM_DECODE
         ops._V4_ASM_DECODE = enabled
         try:
             ops._rocm_sparse_attn_decode_triton(out=out, **common)
         finally:
             ops._V4_ASM_DECODE = saved
-        torch.cuda.synchronize()
+        torch.accelerator.synchronize()
         outs.append(out.float())
     return outs
 
@@ -205,6 +212,6 @@ def test_asm_decode_falls_back_on_small_caches():
         len_extra=96,
         len_main=32,
     )
-    assert 8 * 64 < ops._V4_MIN_CACHE_ROWS
+    assert ops._V4_MIN_CACHE_ROWS > 8 * 64
     # Both arms took the Triton path, so they agree exactly.
     torch.testing.assert_close(asm, triton_out, atol=0.0, rtol=0.0)
