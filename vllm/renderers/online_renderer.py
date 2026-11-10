@@ -333,10 +333,10 @@ class OnlineRenderer:
                 request, should_include_tools
             )
 
-        self._observe_render_duration("chat", render_start)
+        self.observe_render_duration("chat", render_start)
         return conversation, engine_inputs
 
-    def _observe_render_duration(self, request_type: str, render_start: float) -> None:
+    def observe_render_duration(self, request_type: str, render_start: float) -> None:
         observe_request_render_duration(
             cast(str, self.model_config.served_model_name),
             request_type,
@@ -370,7 +370,7 @@ class OnlineRenderer:
                 tool_server=tool_server,
             )
             if not isinstance(render_result, ErrorResponse):
-                self._observe_render_duration("responses", render_start)
+                self.observe_render_duration("responses", render_start)
             return render_result
 
         if previous_messages is not None and any(
@@ -410,7 +410,7 @@ class OnlineRenderer:
             parser=self.parser,
             skip_mm_cache=skip_mm_cache,
         )
-        self._observe_render_duration("responses", render_start)
+        self.observe_render_duration("responses", render_start)
         return self._responses_render_result(messages, engine_inputs)
 
     def _render_responses_with_harmony(
@@ -701,7 +701,7 @@ class OnlineRenderer:
             skip_mm_cache=skip_mm_cache,
         )
 
-        self._observe_render_duration("completion", render_start)
+        self.observe_render_duration("completion", render_start)
         return engine_inputs
 
     def create_error_response(
