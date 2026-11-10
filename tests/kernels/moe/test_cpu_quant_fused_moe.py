@@ -36,6 +36,30 @@ def _prepack_experts(w: torch.Tensor) -> torch.Tensor:
     return torch.ops._C.convert_weight_packed(w)
 
 
+def test_cpu_wna16_supports_grouped_int8_weights():
+    from vllm.model_executor.layers.fused_moe.experts.cpu_moe import (
+        CPUExpertsWNA16,
+    )
+    from vllm.model_executor.layers.quantization.utils.quant_utils import kInt8Static
+
+    assert CPUExpertsWNA16._supports_quant_scheme(kInt8Static, None)
+
+
+def test_cpu_wna16_dequantizes_grouped_int8_weights():
+    from vllm.model_executor.layers.fused_moe.experts.cpu_moe import (
+        dequantize_int8_moe_weight,
+    )
+
+    weight = torch.tensor([[[1, -2, 3, -4, 5, -6, 7, -8]]], dtype=torch.int8)
+    scale = torch.tensor([[[2.0, 3.0]]], dtype=torch.float32)
+    packed_weight = weight.view(torch.int32)
+
+    result = dequantize_int8_moe_weight(packed_weight, scale, 4, torch.float32)
+
+    expected = torch.tensor([[[2, -4, 6, -8, 15, -18, 21, -24]]], dtype=torch.float32)
+    torch.testing.assert_close(result, expected)
+
+
 def _deterministic_expert_routes(
     block_sizes: tuple[int, ...],
 ) -> tuple[torch.Tensor, torch.Tensor]:
