@@ -30,7 +30,9 @@ POLL_TIMEOUT_S = 120
 
 @pytest.fixture(scope="module")
 def server():
-    args = ["--max-num-seqs", "1"]
+    # One sequence at a time queues the chunks. Whisper's 448-token context would
+    # clamp the default batch budget below one 1500-token audio item.
+    args = ["--max-num-seqs", "1", "--max-num-batched-tokens", "1500"]
     env_dict = {"VLLM_SERVER_DEV_MODE": "1"}
     with RemoteOpenAIServer(MODEL_NAME, args, env_dict=env_dict) as remote_server:
         yield remote_server
