@@ -15,8 +15,8 @@ from vllm.outputs import LateChunkingMetadata
 from vllm.renderers import ChatParams, TokenizeParams
 from vllm.renderers.chat_utils import ChatCompletionMessageParam
 from vllm.renderers.inputs import DictPrompt
+from vllm.tasks import PoolingTask
 
-from ...tasks import PoolingTask
 from .classify.protocol import (
     ClassificationChatRequest,
     ClassificationCompletionRequest,
@@ -39,7 +39,7 @@ from .pooling.protocol import (
     PoolingResponse,
 )
 from .scoring.protocol import ScoringRequest, ScoringResponse
-from .scoring.typing import ScoreData, ScoringData
+from .scoring.types import ScoreData, ScoringData
 from .token_embed.protocol import TokenEmbeddingRequest, TokenEmbeddingResponse
 
 PoolingCompletionLikeRequest: TypeAlias = (
