@@ -35,26 +35,32 @@ instead of waiting for the request to finish. Enable it on the producer with:
 
 The option is off by default. It currently requires a device KV buffer, PP1,
 PCP1, DCP1, and one transferable full-attention cache group. P and D must use
-the same TP and block size for early chunks. An incompatible peer, a late D
-registration, or a single-chunk prompt falls back to the existing monolithic
-WRITE on the final chunk.
+the same TP and block size for chunks; otherwise the request is pushed whole.
 
-The scheduler pins every source block referenced by an asynchronous chunk job.
-Those references are released through the existing `finished_sending`
-aggregation only after every producer worker completes the request. A
-preempted request drains its earlier WRITEs, then uses the existing monolithic
-path for the final hand-off. This prevents old WRITEs from racing the resumed
-request or publishing its completion notification.
+Chunked push changes only when blocks are written. Block lifetimes are those of
+whole-request push: a running request owns its blocks, preemption and abort
+release them, and a finished request holds them under the KV lease
+(`kv_lease_duration`), which D's heartbeats extend.
 
-Intermediate chunk WRITEs carry no notification. After the final chunk and all
-earlier jobs complete, each producer rank sends the normal request-level
-completion notification once. The D-side scheduler and decode admission path
-are unchanged.
+- While the request runs, each step's newly computed prompt blocks are written
+  to D once the step's CUDA event completes. D decodes once the normal
+  completion notification arrives, so it must follow all of the request's
+  data: it rides on the WRITE of the last prompt block, which is submitted only
+  after the request's earlier WRITEs have completed successfully.
+- When the request finishes, the existing whole-request path reports it once
+  its last chunk WRITE completed. If a chunk was not written (an incompatible
+  peer or a failed WRITE), the whole request is written instead; if D has not
+  registered yet, the request waits for its registration as a whole-request
+  push does.
+- When the request is preempted or aborted, `handle_preemptions` drops its
+  queued chunk jobs and waits for its submitted WRITEs before the blocks can be
+  reused. A preempted request is pushed again from the first block once
+  recomputed, so D's blocks end up holding a single complete version before
+  the notification. If its last chunk already handed it off to D, which async
+  scheduling allows before the request finishes, nothing is pushed again.
 
-`chunked_push_defer_timeout` in `kv_connector_extra_config` bounds how long a
-chunk job may retain its source blocks while waiting for D's registration. The
-default is 60 seconds. A timed-out attempt releases its pins without notifying
-D; the existing D-side registration watchdog handles the missing hand-off.
+D only reads its blocks after the completion notification, so the D-side
+scheduler and decode admission path are unchanged.
 
 This document describes the threading, queues, and scheduling
 interactions specific to the push design. The pull-mode design is

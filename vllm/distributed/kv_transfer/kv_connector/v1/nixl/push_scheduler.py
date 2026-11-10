@@ -46,7 +46,6 @@ from vllm.v1.kv_cache_interface import is_full_attention_spec
 
 if TYPE_CHECKING:
     from vllm.config import VllmConfig
-    from vllm.v1.core.block_pool import BlockPool
     from vllm.v1.core.kv_cache_manager import KVCacheBlocks
     from vllm.v1.core.sched.output import SchedulerOutput
     from vllm.v1.kv_cache_interface import KVCacheConfig
@@ -60,8 +59,6 @@ logger = init_logger(__name__)
 class _ChunkPushTracker:
     request: Request
     next_block: int = 0
-    final_job_enqueued: bool = False
-    fallback: bool = False
 
 
 class NixlPushConnectorScheduler(NixlBaseConnectorScheduler):
@@ -116,10 +113,6 @@ class NixlPushConnectorScheduler(NixlBaseConnectorScheduler):
         extra_config = vllm_config.kv_transfer_config.kv_connector_extra_config
         self._chunked_push = bool(extra_config.get("enable_chunked_push", False))
         self._chunk_trackers: dict[ReqId, _ChunkPushTracker] = {}
-        self._chunk_fallbacks: set[ReqId] = set()
-        self._chunk_cancellations: set[ReqId] = set()
-        self._pinned_chunk_blocks: dict[ReqId, set[int]] = {}
-        self._gpu_block_pool: BlockPool | None = None
 
         if self._chunked_push:
             transfer_groups = kv_cache_config.transfer_groups
@@ -129,11 +122,8 @@ class NixlPushConnectorScheduler(NixlBaseConnectorScheduler):
                 raise ValueError("NIXL chunked push requires a device KV buffer")
             elif vllm_config.parallel_config.pipeline_parallel_size != 1:
                 raise ValueError("NIXL chunked push currently requires PP=1")
-            elif (
-                vllm_config.parallel_config.prefill_context_parallel_size != 1
-                or vllm_config.parallel_config.decode_context_parallel_size != 1
-            ):
-                raise ValueError("NIXL chunked push currently requires PCP=DCP=1")
+            elif vllm_config.parallel_config.prefill_context_parallel_size != 1:
+                raise ValueError("NIXL chunked push currently requires PCP=1")
             elif len(transfer_groups) != 1 or not is_full_attention_spec(
                 transfer_groups[0].kv_cache_spec
             ):
@@ -141,9 +131,6 @@ class NixlPushConnectorScheduler(NixlBaseConnectorScheduler):
                     "NIXL chunked push currently requires one full-attention "
                     "transfer group"
                 )
-
-    def bind_gpu_block_pool(self, gpu_block_pool: BlockPool) -> None:
-        self._gpu_block_pool = gpu_block_pool
 
     def get_num_new_matched_tokens(
         self, request: Request, num_computed_tokens: int
@@ -192,13 +179,8 @@ class NixlPushConnectorScheduler(NixlBaseConnectorScheduler):
         if params.get("do_remote_decode"):
             self._reqs_in_batch.add(request.request_id)
             if self._chunked_push:
-                tracker = self._chunk_trackers.get(request.request_id)
-                if tracker is None:
-                    self._chunk_trackers[request.request_id] = _ChunkPushTracker(
-                        request
-                    )
-                else:
-                    tracker.request = request
+                # A preempted request starts again from the first block.
+                self._chunk_trackers[request.request_id] = _ChunkPushTracker(request)
 
         # P side with host-buffer offload: defer save to the worker.
         if self.use_host_buffer and params.get("do_remote_decode"):
@@ -302,58 +284,36 @@ class NixlPushConnectorScheduler(NixlBaseConnectorScheduler):
         if not is_p_node:
             return False, None
 
+        if self._chunked_push:
+            self._chunk_trackers.pop(request.request_id, None)
         if request.status not in (
             RequestStatus.FINISHED_LENGTH_CAPPED,
             RequestStatus.FINISHED_STOPPED,
         ):
-            if self._chunked_push:
-                tracker = self._chunk_trackers.pop(request.request_id, None)
-                # After the final job no more jobs follow, and the worker reports
-                # the request finished once its WRITEs complete.
-                if request.request_id in self._pinned_chunk_blocks and not (
-                    tracker and tracker.final_job_enqueued
-                ):
-                    self._chunk_cancellations.add(request.request_id)
             self._reqs_not_processed.add(request.request_id)
             self._reqs_need_save.pop(request.request_id, None)
-            delay_free_blocks = bool(
-                self._chunked_push and request.request_id in self._pinned_chunk_blocks
-            )
-            return delay_free_blocks, None
+            return False, None
 
         delay_free_blocks = any(len(group) > 0 for group in block_ids)
         remote_num_tokens = 0
-        tracker = (
-            self._chunk_trackers.get(request.request_id) if self._chunked_push else None
-        )
-        chunk_handoff = bool(tracker and tracker.final_job_enqueued)
         if delay_free_blocks:
+            logger.debug(
+                "NixlPushConnector request_finished(%s) waiting for %d seconds "
+                "before releasing blocks",
+                request.request_id,
+                self._kv_lease_duration,
+            )
+            self._reqs_need_send[request.request_id] = (
+                time.perf_counter() + self._kv_lease_duration
+            )
+
             block_ids = self.get_exchange_clipped_blocks(block_ids)
             remote_num_tokens = request.num_computed_tokens
 
-            if not chunk_handoff:
-                logger.debug(
-                    "NixlPushConnector request_finished(%s) waiting for %d "
-                    "seconds before releasing blocks",
-                    request.request_id,
-                    self._kv_lease_duration,
-                )
-                self._reqs_need_send[request.request_id] = (
-                    time.perf_counter() + self._kv_lease_duration
-                )
-
-                # Store finished blocks for worker-level matching with D
-                # registrations (via NIXL notifications).
-                self._finished_request_blocks[request.request_id] = block_ids
-                self._newly_finished_push_blocks[request.request_id] = block_ids
-
-        if chunk_handoff:
-            # Keep the finished request registered until every worker reports
-            # finished_sending; the explicit pins also protect blocks across
-            # preemption before the request reaches this terminal path.
-            delay_free_blocks = request.request_id in self._pinned_chunk_blocks
-        if self._chunked_push:
-            self._chunk_trackers.pop(request.request_id, None)
+            # Store finished blocks for worker-level matching with D
+            # registrations (via NIXL notifications).
+            self._finished_request_blocks[request.request_id] = block_ids
+            self._newly_finished_push_blocks[request.request_id] = block_ids
 
         return delay_free_blocks, dict(
             do_remote_prefill=True,
@@ -425,50 +385,34 @@ class NixlPushConnectorScheduler(NixlBaseConnectorScheduler):
         scheduler_output: SchedulerOutput,
     ) -> None:
         for req_id in scheduler_output.preempted_req_ids or ():
-            if tracker := self._chunk_trackers.get(req_id):
-                tracker.next_block = 0
-                tracker.final_job_enqueued = False
-                tracker.fallback = True
-                self._chunk_fallbacks.add(req_id)
-
-        if self._chunk_fallbacks:
-            meta.push_chunk_fallbacks = set(self._chunk_fallbacks)
-            self._chunk_fallbacks.clear()
-        if self._chunk_cancellations:
-            meta.push_chunk_cancellations = set(self._chunk_cancellations)
-            self._chunk_cancellations.clear()
+            if req_id in self._chunk_trackers:
+                meta.push_chunk_preemptions.add(req_id)
 
         block_state = scheduler_output.kv_connector_block_state
         assert block_state is not None
         group = self.kv_cache_config.transfer_groups[0]
         block_size = group.kv_cache_spec.block_size
-        pool = self._gpu_block_pool
-        assert pool is not None, (
-            "GPU block pool must be bound before NIXL chunk jobs are emitted"
-        )
 
         for (
             req_id,
             num_scheduled_tokens,
         ) in scheduler_output.num_scheduled_tokens.items():
             tracker = self._chunk_trackers.get(req_id)
-            if tracker is None or tracker.final_job_enqueued:
+            if tracker is None:
                 continue
             request = tracker.request
             computed_after = min(
                 request.num_computed_tokens + num_scheduled_tokens,
                 request.num_prompt_tokens,
             )
-            is_final = computed_after >= request.num_prompt_tokens
-            if tracker.fallback and not is_final:
-                continue
+            # The partial last block is complete once the whole prompt is.
             end_block = (
                 cdiv(computed_after, block_size)
-                if is_final
+                if computed_after >= request.num_prompt_tokens
                 else computed_after // block_size
             )
             start_block = tracker.next_block
-            if not is_final and end_block <= start_block:
+            if end_block <= start_block:
                 continue
 
             all_block_ids = block_state.get_block_ids(req_id)
@@ -476,68 +420,28 @@ class NixlPushConnectorScheduler(NixlBaseConnectorScheduler):
             transfer_block_ids = self.kv_cache_config.select_transfer_block_ids(
                 all_block_ids
             )
-            assert len(transfer_block_ids) == 1
-            block_table = list(transfer_block_ids[0])
-            total_blocks = cdiv(request.num_prompt_tokens, block_size)
-            assert end_block <= len(block_table), (
-                f"NIXL chunk job for {req_id} needs {end_block} blocks, "
-                f"but the current table has {len(block_table)}"
+            meta.push_chunk_jobs.append(
+                NixlPushChunkJob(
+                    request_id=req_id,
+                    block_ids=list(transfer_block_ids[0][start_block:end_block]),
+                    start_block=start_block,
+                    end_block=end_block,
+                    total_blocks=cdiv(request.num_prompt_tokens, block_size),
+                )
             )
-
-            job = NixlPushChunkJob(
-                request_id=req_id,
-                local_block_ids=(block_table[:end_block],),
-                start_block=0 if tracker.fallback else start_block,
-                end_block=end_block,
-                total_blocks=total_blocks,
-                is_final=is_final,
-            )
-            meta.push_chunk_jobs.append(job)
-
-            # The final job also owns the full table so the worker can safely
-            # fall back to the stock monolithic WRITE after a late registration
-            # or an incompatible peer handshake.
-            referenced = (
-                block_table[:end_block]
-                if is_final
-                else block_table[start_block:end_block]
-            )
-            pinned = self._pinned_chunk_blocks.setdefault(req_id, set())
-            new_blocks = set(referenced) - pinned
-            if new_blocks:
-                pool.touch([pool.blocks[block_id] for block_id in new_blocks])
-                pinned.update(new_blocks)
-
             tracker.next_block = end_block
-            tracker.final_job_enqueued = is_final
 
     def has_pending_push_work(self) -> bool:
         # Keep the engine main loop alive while we have:
         # - finished P blocks awaiting WRITE completion, or
         # - pending D registrations the worker has not yet shipped, or
-        # - newly finished blocks not yet shipped to P workers, or
-        # - chunk jobs still pinning source blocks.
-        return bool(
-            self._finished_request_blocks
-            or self._push_pending_registrations
-            or (self._chunked_push and self._pinned_chunk_blocks)
-        )
+        # - newly finished blocks not yet shipped to P workers.
+        return bool(self._finished_request_blocks or self._push_pending_registrations)
 
     def update_connector_output(self, connector_output: KVConnectorOutput) -> None:
         """Clean up finished request blocks after push completes."""
         super().update_connector_output(connector_output)
         for req_id in connector_output.finished_sending or ():
-            block_ids = (
-                self._pinned_chunk_blocks.pop(req_id, None)
-                if self._chunked_push
-                else None
-            )
-            if block_ids:
-                pool = self._gpu_block_pool
-                assert pool is not None
-                pool.free_blocks(
-                    pool.blocks[bid] for bid in sorted(block_ids, reverse=True)
-                )
             self._finished_request_blocks.pop(req_id, None)
         # On D side, finished_recving means the push completed; clear the
         # watchdog so we don't trip an expiration on a fulfilled request.
