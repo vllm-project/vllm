@@ -129,18 +129,34 @@ def test_kimi_k3_render_server_rejects_jinja_fallback(model_with_jinja_template)
 
 
 def test_k3_media_io_defaults_preserve_original_mode():
+    video = {"num_frames": -1, "fps": 8}
     # Default: K3 keeps the original image mode (no background flattening).
-    assert _merge_k3_media_io_kwargs(None) == {"image": {"image_mode": None}}
+    assert _merge_k3_media_io_kwargs(None) == {
+        "image": {"image_mode": None},
+        "video": video,
+    }
 
     # Server-/request-level values take precedence over the K3 default.
     assert _merge_k3_media_io_kwargs({"image": {"image_mode": "RGB"}}) == {
-        "image": {"image_mode": "RGB"}
+        "image": {"image_mode": "RGB"},
+        "video": video,
     }
 
     # Unrelated image kwargs are merged with the default.
     assert _merge_k3_media_io_kwargs(
         {"image": {"rgba_background_color": (0, 0, 0)}}
-    ) == {"image": {"image_mode": None, "rgba_background_color": (0, 0, 0)}}
+    ) == {
+        "image": {"image_mode": None, "rgba_background_color": (0, 0, 0)},
+        "video": video,
+    }
+
+
+def test_k3_media_io_defaults_sample_video_at_checkpoint_fps():
+    # A frame-count override replaces the 8 fps default instead of combining.
+    assert _merge_k3_media_io_kwargs({"video": {"num_frames": 16}}) == {
+        "image": {"image_mode": None},
+        "video": {"num_frames": 16},
+    }
 
 
 def test_apply_chat_template_forces_tokenize_and_pins_return_dict():

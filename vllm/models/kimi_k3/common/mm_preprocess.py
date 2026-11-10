@@ -168,7 +168,7 @@ def plan_kimi_k3_video(
     cfg_fps = float(media_proc_cfg.get("sample_fps") or 1.0)
     src_fps = float(metadata.get("fps") or 0.0)
     src_indices = metadata.get("frames_indices")
-    if src_indices is None or len(src_indices) != num_decoded_frames:
+    if src_fps <= 0 or src_indices is None or len(src_indices) != num_decoded_frames:
         src_indices = list(range(num_decoded_frames))
     if src_fps <= 0:
         # Unknown source rate: treat the decoded frames as already sampled at
@@ -241,15 +241,18 @@ def _iter_video_chunk_batches(
     return groups
 
 
-def get_kimi_k3_image_patch_limit(model_config: ModelConfig) -> int:
-    """ViT patches of the largest single image (`in_patch_limit`)."""
-    image_processor = cached_get_image_processor(
+def _get_image_processor(model_config: ModelConfig) -> KimiK25FusedVisionProcessor:
+    return cached_get_image_processor(
         model_config.model,
         revision=model_config.revision,
         trust_remote_code=model_config.trust_remote_code,
         processor_cls_overrides=KimiK25FusedVisionProcessor,
     )
-    return int(image_processor.media_proc_cfg["in_patch_limit"])
+
+
+def get_kimi_k3_image_patch_limit(model_config: ModelConfig) -> int:
+    """ViT patches of the largest single image (`in_patch_limit`)."""
+    return int(_get_image_processor(model_config).media_proc_cfg["in_patch_limit"])
 
 
 def encode_kimi_k3_videos(
@@ -308,20 +311,6 @@ def encode_kimi_k3_videos(
     return list(out.split(per_video))
 
 
-def _frame_size(frame: Any) -> tuple[int, int]:
-    """`(width, height)` of a decoded frame (HWC array/tensor or PIL)."""
-    if isinstance(frame, PILImage.Image):
-        return frame.size
-    shape = frame.shape
-    return int(shape[1]), int(shape[0])
-
-
-def _split_video_item(item: Any) -> tuple[Any, Mapping[str, Any] | None]:
-    if isinstance(item, tuple) and len(item) == 2:
-        return item[0], item[1]
-    return item, None
-
-
 class KimiK3ProcessingInfo(BaseProcessingInfo):
     """Processing information for the Kimi-K3 model (images and videos).
 
@@ -337,12 +326,7 @@ class KimiK3ProcessingInfo(BaseProcessingInfo):
         self.hf_config = hf_config = self.get_hf_config()
 
         tokenizer = self.get_tokenizer()
-        image_processor = cached_get_image_processor(
-            self.ctx.model_config.model,
-            revision=self.ctx.model_config.revision,
-            trust_remote_code=self.ctx.model_config.trust_remote_code,
-            processor_cls_overrides=KimiK25FusedVisionProcessor,
-        )
+        image_processor = _get_image_processor(self.ctx.model_config)
 
         # Resolve token ID from the tokenizer because transformers v5
         # may remap token IDs vs config.json.
@@ -392,6 +376,7 @@ class KimiK3ProcessingInfo(BaseProcessingInfo):
         return MultiModalDataParser(
             video_needs_metadata=True,
             expected_hidden_size=self._get_expected_hidden_size(),
+            allow_missing_mm_embeddings=self.allow_missing_mm_embeddings,
         )
 
     @property
@@ -461,9 +446,13 @@ class KimiK3ProcessingInfo(BaseProcessingInfo):
         self, item: Any
     ) -> tuple[KimiK3VideoPlan, list[dict[str, Any]]]:
         """Plan one decoded video and build its `video_chunk` media dicts."""
-        frames, metadata = _split_video_item(item)
+        frames, metadata = item if isinstance(item, tuple) else (item, None)
         plan = plan_kimi_k3_video(len(frames), metadata, self.media_proc_cfg)
-        width, height = _frame_size(frames[0])
+        first = frames[0]
+        if isinstance(first, PILImage.Image):
+            width, height = first.size
+        else:
+            height, width = first.shape[:2]  # HWC array or tensor
         # Keep every video within the encoder cache the profile sized: lower
         # the per-frame patch limit until the padded token count fits.
         limit = self.max_video_tokens

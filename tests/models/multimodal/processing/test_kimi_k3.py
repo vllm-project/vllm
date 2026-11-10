@@ -162,9 +162,13 @@ def test_plan_kimi_k3_video_keeps_loader_timestamps():
     assert plan.chunk_starts == (0.0, 2.0, 4.0, 6.0, 8.0)
 
 
-def test_plan_kimi_k3_video_without_fps():
-    # Unknown source rate: the decoded frames count as already sampled.
-    plan = plan_kimi_k3_video(6, None, _MEDIA_PROC_CFG)
+@pytest.mark.parametrize(
+    "metadata", [None, {"frames_indices": [0, 30, 60, 90, 120, 150]}]
+)
+def test_plan_kimi_k3_video_without_fps(metadata):
+    # Unknown source rate: the decoded frames count as already sampled, and
+    # source frame indices cannot be turned into times.
+    plan = plan_kimi_k3_video(6, metadata, _MEDIA_PROC_CFG)
     assert list(plan.frame_indices) == list(range(6))
     assert plan.chunk_starts == (0.0, 0.5)
 
@@ -204,6 +208,14 @@ def test_video_prompt_expansion(video_processor, num_frames: int):
 
     [placeholder] = outputs["mm_placeholders"]["video"]
     assert placeholder.get_num_embeds() == 20 * num_chunks
+
+
+def test_video_as_pil_frames(video_processor):
+    processor = video_processor
+    frames = [_noise_image(56, 84) for _ in range(4)]
+    mm_items = processor.info.parse_mm_data({"video": [(frames, {"fps": 8.0})]})
+    outputs = processor(KIMI_K3_VIDEO_PLACEHOLDER, mm_items=mm_items)
+    assert outputs["mm_kwargs"].get_data()["video_grid_thws"].tolist() == [[4, 6, 4]]
 
 
 def test_image_and_video_in_one_prompt(video_processor):

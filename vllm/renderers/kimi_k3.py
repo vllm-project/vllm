@@ -22,9 +22,14 @@ from .inputs.preprocess import parse_dec_only_prompt
 from .params import ChatParams
 
 # Keep the original image mode (including the alpha channel) for K3 instead of
-# flattening images onto a background color. Server-level (--media-io-kwargs)
-# and request-level media_io_kwargs still take precedence over this default.
-_K3_MEDIA_IO_DEFAULTS: dict[str, dict[str, Any]] = {"image": {"image_mode": None}}
+# flattening images onto a background color, and decode videos at the
+# checkpoints' `media_proc_cfg.sample_fps` (8) rather than a fixed frame count.
+# Server-level (--media-io-kwargs) and request-level media_io_kwargs still take
+# precedence over these defaults.
+_K3_MEDIA_IO_DEFAULTS: dict[str, dict[str, Any]] = {
+    "image": {"image_mode": None},
+    "video": {"num_frames": -1, "fps": 8},
+}
 _K3_THINKING_EFFORTS = ("low", "high", "max")
 _K31_THINKING_EFFORTS = ("low", "medium", "high", "max")
 
