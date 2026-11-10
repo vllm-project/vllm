@@ -424,16 +424,12 @@ class QuickAllReduce:
         return quant == QuickReduceRegime.INT4.value
 
     def flydsl_boundary_bf16(self, rows: int, hidden: int) -> bool:
-        """Whether a bf16 ``rows x hidden`` partial would take the fused
+        """Whether a bf16 `rows x hidden` partial would take the fused
         FlyDSL norm/residual/norm boundary."""
         nbytes = int(rows) * int(hidden) * 2
         if not self._flydsl_int4_bf16_nbytes(nbytes):
             return False
-        fly = self._flydsl_int4
-        supports = getattr(fly, "supports_boundary", None)
-        if supports is None or not hasattr(fly, "allreduce_norm_residual_norm"):
-            return False
-        return bool(supports(int(hidden), nbytes))
+        return bool(self._flydsl_int4.supports_boundary(int(hidden), nbytes))
 
     def allreduce_norm_residual_norm(
         self,
@@ -454,18 +450,13 @@ class QuickAllReduce:
     ) -> tuple[torch.Tensor, torch.Tensor] | None:
         """FlyDSL INT4 all-reduce fused with the two-norm residual boundary.
 
-        Returns ``None`` when this partial would not take FlyDSL QuickReduce,
-        or when the installed AITER has no such epilogue. A CUDA graph capture
-        that arrives before an eager call has compiled the build also returns
-        ``None``; the caller all-reduces instead.
+        Returns `None` when this partial would not take FlyDSL QuickReduce.
+        A CUDA graph capture that arrives before an eager call has compiled
+        the build also returns `None`; the caller all-reduces instead.
         """
         if out_dtype is not torch.bfloat16 or not self.uses_flydsl_int4(partial):
             return None
         fly = self._flydsl_int4
-        op = getattr(fly, "allreduce_norm_residual_norm", None)
-        prepared = getattr(fly, "boundary_prepared", None)
-        if op is None or prepared is None:
-            return None
         hidden = int(partial.shape[-1])
         if not fly.supports_boundary(hidden, partial.numel() * partial.element_size()):
             return None
@@ -477,11 +468,13 @@ class QuickAllReduce:
             "gate_stream": isinstance(alpha, torch.Tensor),
             "per_channel": beta.numel() > 1,
         }
-        if torch.cuda.is_current_stream_capturing() and not prepared(hidden, **flags):
+        if torch.cuda.is_current_stream_capturing() and not fly.boundary_prepared(
+            hidden, **flags
+        ):
             return None
         out = torch.empty(partial.shape, dtype=torch.bfloat16, device=partial.device)
         new_stream = torch.empty_like(residual_stream)
-        op(
+        fly.allreduce_norm_residual_norm(
             partial,
             residual_stream,
             post_weight,

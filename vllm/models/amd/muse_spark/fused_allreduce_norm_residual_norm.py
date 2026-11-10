@@ -49,9 +49,8 @@ def fused_allreduce_norm_residual_then_norm(
 ) -> tuple[torch.Tensor, torch.Tensor] | None:
     """All-reduce the o_proj partial inside the residual boundary.
 
-    Returns ``None`` when FlyDSL QuickReduce would not take the partial, or
-    the installed AITER has no boundary epilogue. The caller all-reduces and
-    uses the unfused boundary.
+    Returns `None` when FlyDSL QuickReduce would not take the partial. The
+    caller all-reduces and uses the unfused boundary.
     """
     post_norm, connection = boundary.post_norm, boundary.connection
     branch, stream = boundary.branch, boundary.stream
