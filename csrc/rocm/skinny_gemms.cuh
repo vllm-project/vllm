@@ -977,6 +977,7 @@ __global__ void __launch_bounds__(WV_PER_GROUP* THREADS_PER_WAVE)
 
 #endif
 
+#ifdef VLLM_ROCM_DEFINE_SWMMAC_GEMM
 torch::Tensor swmmacGEMM(const at::Tensor& in_a, const at::Tensor& in_b,
                          const std::optional<at::Tensor>& in_bias,
                          const int64_t logical_M, const int64_t CuCount) {
@@ -1182,6 +1183,7 @@ torch::Tensor swmmacGEMM(const at::Tensor& in_a, const at::Tensor& in_b,
 
   return out_c;
 }
+#endif
 
 #if defined(__HIP__GFX9__) || defined(__HIP__GFX1X__)
 // This version targets cases where A[] fits LDS capacity
