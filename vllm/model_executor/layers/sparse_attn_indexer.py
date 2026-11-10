@@ -1450,6 +1450,8 @@ class SparseAttnIndexer(CustomOp):
                 candidate_blocks=self.candidate_blocks,
                 candidate_block_size=self.candidate_block_size,
                 candidate_write=self.candidate_write,
+                use_pcp=self.use_pcp,
+                pcp_shard_decode_requests=self.pcp_shard_decode_requests,
                 cache_layout=self.cache_layout,
                 dcp_rank=self.dcp_rank,
                 dcp_world_size=self.dcp_world_size,

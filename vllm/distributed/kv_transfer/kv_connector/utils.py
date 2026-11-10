@@ -62,6 +62,20 @@ def get_kv_connector_cache_layout(vllm_config: VllmConfig | None = None):
     return None
 
 
+def kv_connector_may_load_foreign_kv(vllm_config: VllmConfig) -> bool:
+    """Whether the configured KV connector may load bytes that vLLM's own
+    cache writer did not produce for this KV cache layout.
+
+    Attention backends whose fast paths assume no foreign bytes (e.g. NaNs in
+    unwritten slots) reach the KV cache keep them only when this is False.
+    """
+    kv_config = vllm_config.kv_transfer_config
+    if kv_config is None:
+        return False
+    connector_cls = KVConnectorFactory.get_connector_class(kv_config)
+    return not connector_cls.only_restores_canonical_kv(kv_config)
+
+
 class KVOutputAggregator:
     """Utility class to aggregate the output of all workers into a single
     output corresponding to Rank 0 for scheduler."""

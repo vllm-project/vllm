@@ -32,8 +32,14 @@ from vllm.model_executor.layers.fused_moe.moe_output import UnfinalizedMoEOutput
 from vllm.model_executor.layers.fused_moe.routed_experts import (
     RoutedExperts,
 )
+from vllm.model_executor.layers.fused_moe.router.base_router import (
+    get_moe_padding_mask,
+)
 from vllm.model_executor.layers.fused_moe.router.fused_moe_router import (
     FusedMoERouter,
+)
+from vllm.model_executor.layers.fused_moe.router.routing_simulator_router import (
+    RoutingSimulatorRouter,
 )
 from vllm.model_executor.layers.fused_moe.router.zero_expert_router import (
     ZeroExpertRouter,
@@ -621,7 +627,28 @@ class MoERunner(MoERunnerInterface):
             shared_experts_input, SharedExpertsOrder.NO_OVERLAP
         )
 
-        if self.routed_experts.quant_method.is_monolithic:
+        if (
+            self.routed_experts.quant_method.is_monolithic
+            and self.moe_config.dp_size > 1
+            and self.routed_experts.supports_precomputed_routing
+            # The simulator feeds the kernel random logits to route itself.
+            and not isinstance(self.router, RoutingSimulatorRouter)
+            and (is_padding := get_moe_padding_mask(hidden_states.shape[0])) is not None
+        ):
+            # The kernel's own routing would send padding rows to experts; use
+            # vLLM's top-k, which marks them -1.
+            topk_weights, topk_ids = self.router.select_experts(
+                hidden_states=hidden_states,
+                router_logits=router_logits,
+                topk_indices_dtype=torch.int32,
+                input_ids=input_ids,
+            )
+            if not self.router.masks_padding:
+                topk_ids = topk_ids.masked_fill(is_padding.unsqueeze(1), -1)
+            fused_out = self.routed_experts.forward_monolithic_routed(
+                hidden_states, topk_weights, topk_ids
+            )
+        elif self.routed_experts.quant_method.is_monolithic:
             # Monolithic kernels: pass router_logits to routed_experts
             router_logits = self.router.prepare_monolithic_logits(router_logits)
             fused_out = self.routed_experts.forward_monolithic(
