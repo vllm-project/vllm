@@ -216,7 +216,7 @@ async def test_thinking_token_budget_limits_reasoning(client: openai.AsyncOpenAI
 @pytest.mark.asyncio
 @pytest.mark.skipif(
     envs.VLLM_USE_RUST_FRONTEND,
-    reason="the Rust frontend does not serve /v1/responses",
+    reason="the Rust frontend ignores thinking_token_budget on /v1/responses",
 )
 @pytest.mark.parametrize("client", ["default"], indirect=True)
 async def test_thinking_token_budget_responses_api(client: openai.AsyncOpenAI):
