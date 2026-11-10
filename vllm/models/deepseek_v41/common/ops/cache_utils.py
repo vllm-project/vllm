@@ -872,7 +872,7 @@ def combine_topk_swa_indices(
 _COMBINE_TOPK_SWA_NUM_WORKERS = 256
 
 
-# Representative pointer alignment variants for Triton pointer specialization.
+# Representative topk_indices alignment variants for Triton specialization.
 _COMBINE_TOPK_SWA_POINTER_INPUTS = zip_inputs(
     dict(topk_indices=True),
     dict(topk_indices=False),
@@ -910,18 +910,18 @@ class CombineTopkSwaIndicesKernel(
 
     @staticmethod
     @triton.jit(
+        # Each program reads one value from the per-request tensors, so their
+        # alignment buys nothing, while the chunked prefill passes them at any
+        # num_decodes / chunk_start offset.
         do_not_specialize=[
             "combined_indices_stride",
             "topk_indices_stride",
-            "M",
-            "N",
-        ],
-        # Prefill chunks slice these at num_decodes + chunk_start or chunk_start.
-        do_not_specialize_on_alignment=[
             "query_start_loc_ptr",
             "seq_lens_ptr",
             "gather_lens_ptr",
-        ],
+            "M",
+            "N",
+        ]
     )
     def kernel(
         combined_indices_ptr,
@@ -1020,7 +1020,7 @@ class CombineTopkSwaIndicesKernel(
     ) -> CompileKey:
         padded_topk = next_power_of_2(topk_width)
         input_variant = TritonPointerInputVariant.from_alignment(
-            topk_indices=topk_indices
+            topk_indices=topk_indices,
         )
         return self.CompileKey(
             TOP_K=topk,
@@ -1049,9 +1049,9 @@ class CombineTopkSwaIndicesKernel(
             int32_ptr,
             input_variant.pointer("topk_indices", torch.int32),
             1,  # do not specialize topk_indices_stride
-            int32_ptr,
-            int32_ptr,
-            int32_ptr,
+            int32_ptr,  # do not specialize query_start_loc
+            int32_ptr,  # do not specialize seq_lens
+            int32_ptr,  # do not specialize gather_lens
             1,  # do not specialize M
             1,  # do not specialize N
             TOP_K=compile_key.TOP_K,
