@@ -604,3 +604,40 @@ def test_sizing_warmup_requests_prompt_logprobs_on_its_prefill(max_logprobs):
         "prefill" if "_prefill_" in req_id else "decode": value
         for req_id, value in requested.items()
     } == {"prefill": expected, "decode": None}
+
+
+@pytest.mark.parametrize(
+    "max_num_reqs, committable_blocks, expected_prefill_lens",
+    [
+        # Two full-length prompts plus the remainder fill the 2048-token budget.
+        (4, None, [MAX_MODEL_LEN - 1, MAX_MODEL_LEN - 1, 1]),
+        # One decode request leaves room for a single prefill request.
+        (2, None, [MAX_MODEL_LEN - 1]),
+        # 1 decode + 64 prefill blocks fit; a second 64-block prompt does not.
+        (4, 100, [MAX_MODEL_LEN - 1]),
+    ],
+)
+def test_sizing_warmup_fills_token_budget_beyond_max_model_len(
+    max_num_reqs, committable_blocks, expected_prefill_lens
+):
+    """max_num_batched_tokens can exceed max_model_len, so the scheduler can
+    pack several prompts into one step. The sizing step must reach that
+    budget, splitting it across requests the runner and KV cache can hold."""
+    runner = _make_runner([_attention_group()], num_lookahead_tokens=0)
+    runner.model_config = SimpleNamespace(
+        get_vocab_size=lambda: 64, max_logprobs=0, use_mla=False
+    )
+    runner.max_num_reqs = max_num_reqs
+    if committable_blocks is not None:
+        runner.extensible_kv_cache = _StubExtensibleCache(committable_blocks)
+    outputs: list[SchedulerOutput] = []
+
+    warmup.run_kv_cache_sizing_warmup(
+        runner, outputs.append, lambda grammar_output: None
+    )
+
+    mixed = next(o for o in outputs if o.scheduled_cached_reqs.req_ids)
+    prefill_lens = [len(r.prompt_token_ids) for r in mixed.scheduled_new_reqs]
+    assert prefill_lens == expected_prefill_lens
+    assert mixed.total_num_scheduled_tokens == 1 + sum(expected_prefill_lens)
+    assert mixed.total_num_scheduled_tokens == sum(mixed.num_scheduled_tokens.values())
