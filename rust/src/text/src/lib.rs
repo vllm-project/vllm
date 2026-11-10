@@ -287,12 +287,15 @@ impl TextLlm {
     }
 
     /// Tokenize if needed, lower to a generate request, and return the raw
-    /// token stream. Like Python's token-in-token-out route, this records no
-    /// render duration.
-    pub async fn generate_raw(&self, request: TextRequest) -> Result<BoxGenerateOutputStream> {
+    /// token stream of each of its `n` parallel samples, in index order. Like
+    /// Python's token-in-token-out route, this records no render duration.
+    pub async fn generate_raw_n(
+        &self,
+        request: TextRequest,
+        n: NonZeroU32,
+    ) -> Result<Vec<BoxGenerateOutputStream>> {
         let prepared = self.processor.prepare(request)?;
-        let mut streams = self.submit(prepared.generate_request, NonZeroU32::MIN).await?;
-        Ok(streams.pop().expect("one output stream per sample"))
+        self.submit(prepared.generate_request, n).await
     }
 
     /// Tokenize if needed, lower to a generate request, and stream
@@ -331,13 +334,6 @@ impl TextLlm {
         }: PreparedTextRequest,
         n: NonZeroU32,
     ) -> Result<Vec<impl TextOutputStream + use<>>> {
-        // Like Python's `SamplingParams`, checked against the resolved
-        // temperature, after model generation-config defaults. Python raises a
-        // positive temperature below 0.01 to 0.01 first, so only zero is greedy.
-        if n > NonZeroU32::MIN && generate_request.sampling_params.temperature == 0.0 {
-            return Err(Error::GreedyParallelSampling { n: n.get() });
-        }
-
         let raw_streams = self.submit(generate_request, n).await?;
         let tokenizer = self.processor.tokenizer();
         Ok(raw_streams
@@ -360,6 +356,13 @@ impl TextLlm {
         generate_request: GenerateRequest,
         n: NonZeroU32,
     ) -> Result<Vec<BoxGenerateOutputStream>> {
+        // Like Python's `SamplingParams`, checked against the resolved
+        // temperature, after model generation-config defaults. Python raises a
+        // positive temperature below 0.01 to 0.01 first, so only zero is greedy.
+        if n > NonZeroU32::MIN && generate_request.sampling_params.temperature == 0.0 {
+            return Err(Error::GreedyParallelSampling { n: n.get() });
+        }
+
         // The engine compiles grammars with its own tokenizer, which it skips
         // along with this frontend under `--skip-tokenizer-init`. A render-only
         // frontend forwards the constraint to an engine it does not configure.

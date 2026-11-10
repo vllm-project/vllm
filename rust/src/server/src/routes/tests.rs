@@ -7192,32 +7192,163 @@ async fn raw_generate_rejects_empty_token_ids() {
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 #[serial]
-async fn raw_generate_rejects_parallel_sampling() {
+async fn raw_generate_rejects_invalid_parallel_sampling() {
     let mut app = test_app().await;
 
-    let response = app
-        .call(
-            Request::builder()
-                .method("POST")
-                .uri("/inference/v1/generate")
-                .header("content-type", "application/json")
-                .body(Body::from(
-                    json!({
-                        "model": "Qwen/Qwen1.5-0.5B-Chat",
-                        "token_ids": [11, 22],
-                        "sampling_params": {"n": 4}
-                    })
-                    .to_string(),
-                ))
-                .expect("build request"),
+    // The mock engine reports `max_num_seqs = 256`.
+    for (sampling_params, message) in [
+        (json!({"n": 0}), "n must be at least 1"),
+        (json!({"n": 257}), "at most the server's max_num_seqs (256)"),
+        (
+            json!({"n": 2, "temperature": 0.0}),
+            "n must be 1 when using greedy sampling",
+        ),
+    ] {
+        let (status, json) = post_json(
+            &mut app,
+            "/inference/v1/generate",
+            json!({
+                "model": "Qwen/Qwen1.5-0.5B-Chat",
+                "token_ids": [11, 22],
+                "sampling_params": sampling_params
+            }),
         )
-        .await
-        .expect("call app");
+        .await;
+        assert_eq!(status, StatusCode::BAD_REQUEST, "{json}");
+        assert!(
+            json["error"]["message"].as_str().is_some_and(|text| text.contains(message)),
+            "{json}"
+        );
+    }
+}
 
-    assert_eq!(response.status(), StatusCode::BAD_REQUEST);
-    let body = to_bytes(response.into_body(), usize::MAX).await.expect("read body");
-    let json: serde_json::Value = serde_json::from_slice(&body).expect("decode json");
-    assert_eq!(json["error"]["param"], "n");
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+#[serial]
+async fn raw_generate_n_returns_one_choice_per_sample() {
+    let (mut app, engine_task, requests) =
+        test_app_with_parallel_samples(two_sample_outputs()).await;
+    let (status, json) = post_json(
+        &mut app,
+        "/inference/v1/generate",
+        json!({
+            "model": "Qwen/Qwen1.5-0.5B-Chat",
+            "request_id": "raw-n",
+            "token_ids": [11, 22],
+            "sampling_params": {"n": 2, "seed": 7}
+        }),
+    )
+    .await;
+    // Checked first: an unexpected error leaves the engine waiting for samples.
+    assert_eq!(status, StatusCode::OK, "{json}");
+    engine_task.await.expect("mock engine task");
+
+    let requests = requests.await.expect("engine requests");
+    let mut children = requests
+        .iter()
+        .map(|request| {
+            (
+                request.request_id.clone(),
+                request.external_req_id.clone(),
+                request.sampling_params.as_ref().and_then(|params| params.seed),
+            )
+        })
+        .collect::<Vec<_>>();
+    children.sort();
+    assert_eq!(
+        children,
+        [
+            ("0_raw-n".to_string(), Some("raw-n".to_string()), Some(7)),
+            ("1_raw-n".to_string(), Some("raw-n".to_string()), Some(8)),
+        ]
+    );
+
+    assert_eq!(json["request_id"], "raw-n");
+    let choices = json["choices"]
+        .as_array()
+        .expect("choices")
+        .iter()
+        .map(|choice| {
+            (
+                choice["index"].clone(),
+                choice["token_ids"].clone(),
+                choice["finish_reason"].clone(),
+            )
+        })
+        .collect::<Vec<_>>();
+    assert_eq!(
+        choices,
+        [
+            (json!(0), json!([104, 105, 33]), json!("stop")),
+            (json!(1), json!([121, 111]), json!("length")),
+        ]
+    );
+    // The prompt counts once; completion tokens add up over the samples.
+    assert_eq!(json["usage"]["prompt_tokens"], 2);
+    assert_eq!(json["usage"]["completion_tokens"], 5);
+    assert_eq!(json["usage"]["total_tokens"], 7);
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+#[serial]
+async fn stream_raw_generate_n_sends_prompt_once_and_one_usage_chunk() {
+    let (mut app, engine_task, _requests) =
+        test_app_with_parallel_samples(two_sample_outputs()).await;
+    let (status, json) = post_json(
+        &mut app,
+        "/inference/v1/generate",
+        json!({
+            "model": "Qwen/Qwen1.5-0.5B-Chat",
+            "token_ids": [11, 22],
+            "stream": true,
+            "stream_options": {"include_usage": true},
+            "return_token_ids": true,
+            "sampling_params": {"n": 2}
+        }),
+    )
+    .await;
+    // Checked first: an unexpected error leaves the engine waiting for samples.
+    assert_eq!(status, StatusCode::OK, "{json}");
+    engine_task.await.expect("mock engine task");
+    let text = json["raw"].as_str().expect("SSE body");
+    let payloads = sse_json_payloads(text);
+
+    for (index, token_ids, finish_reason) in [
+        (0, vec![104, 105, 33], "stop"),
+        (1, vec![121, 111], "length"),
+    ] {
+        let choice_chunks = payloads
+            .iter()
+            .filter_map(|payload| payload["choices"].as_array()?.first())
+            .filter(|choice| choice["index"] == json!(index))
+            .collect::<Vec<_>>();
+        let streamed = choice_chunks
+            .iter()
+            .flat_map(|choice| choice["token_ids"].as_array().cloned().unwrap_or_default())
+            .collect::<Vec<_>>();
+        assert_eq!(json!(streamed), json!(token_ids), "{text}");
+        let finish_reasons = choice_chunks
+            .iter()
+            .filter_map(|choice| choice["finish_reason"].as_str())
+            .collect::<Vec<_>>();
+        assert_eq!(finish_reasons, [finish_reason], "{text}");
+    }
+
+    let prompt_chunks = payloads
+        .iter()
+        .filter(|payload| !payload["prompt_token_ids"].is_null())
+        .collect::<Vec<_>>();
+    assert_eq!(prompt_chunks.len(), 1, "{text}");
+    assert_eq!(prompt_chunks[0]["prompt_token_ids"], json!([11, 22]));
+
+    let usage_chunks = payloads
+        .iter()
+        .filter(|payload| payload["choices"] == json!([]))
+        .collect::<Vec<_>>();
+    assert_eq!(usage_chunks.len(), 1, "{text}");
+    assert_eq!(usage_chunks[0]["usage"]["prompt_tokens"], 2);
+    assert_eq!(usage_chunks[0]["usage"]["completion_tokens"], 5);
+    assert_eq!(usage_chunks[0]["usage"]["total_tokens"], 7);
+    assert_eq!(payloads.last(), Some(usage_chunks[0]));
 }
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
@@ -11878,10 +12009,16 @@ async fn test_app_with_parallel_samples(
     .expect("connect client");
     let chat = ChatLlm::from_shared_backend(test_llm(client), Arc::new(FakeChatBackend::new()));
     (
-        build_router(Arc::new(AppState::new(
-            vec!["Qwen/Qwen1.5-0.5B-Chat".to_string()],
-            chat,
-        ))),
+        build_router_with_gates(
+            Arc::new(AppState::new(
+                vec!["Qwen/Qwen1.5-0.5B-Chat".to_string()],
+                chat,
+            )),
+            RouteGates {
+                scale_out: true,
+                ..RouteGates::default()
+            },
+        ),
         engine_task,
         requests_rx,
     )
@@ -12249,7 +12386,7 @@ async fn n_limit_follows_max_n_sequences_option() {
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 #[serial]
-async fn render_forwards_n_to_the_generate_request_check() {
+async fn render_forwards_n_to_the_generate_request() {
     let mut app = test_render_app();
     let (status, json) = post_json(
         &mut app,
@@ -12261,6 +12398,6 @@ async fn render_forwards_n_to_the_generate_request_check() {
         }),
     )
     .await;
-    assert_eq!(status, StatusCode::BAD_REQUEST);
-    assert_eq!(json["error"]["param"], "n");
+    assert_eq!(status, StatusCode::OK, "{json}");
+    assert_eq!(json["sampling_params"]["n"], 2, "{json}");
 }

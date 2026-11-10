@@ -1,6 +1,8 @@
 // SPDX-License-Identifier: Apache-2.0
 // SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 
+use std::num::NonZeroU32;
+
 use vllm_engine_core_client::protocol::multimodal::MmFeatures;
 use vllm_text::{Prompt, TextDecodeOptions, TextRequest};
 
@@ -8,6 +10,7 @@ use super::types::GenerateRequest;
 use super::validate;
 use crate::error::ApiError;
 use crate::lora::LoraModelResolution;
+use crate::routes::openai::utils::resolve_n;
 use crate::utils::{ResolvedRequestContext, merge_ec_transfer_params, merge_kv_transfer_params};
 
 /// Lowered generate request plus the response request ID.
@@ -17,6 +20,8 @@ pub(super) struct PreparedRequest {
     /// The `model` reported in non-streaming responses.
     pub response_model: String,
     pub text_request: TextRequest,
+    /// Number of parallel samples to generate.
+    pub n: NonZeroU32,
     pub stream: bool,
     /// Public response rendering options for route-layer helpers.
     pub options: ResponseOptions,
@@ -46,6 +51,7 @@ pub(super) fn prepare_generate_request(
 ) -> Result<PreparedRequest, ApiError> {
     validate::validate_request_compat(&request, &lora_resolution.model_names)?;
 
+    let n = resolve_n(request.sampling_params.n)?;
     let stream = request.stream;
     let include_usage = request
         .stream_options
@@ -95,6 +101,7 @@ pub(super) fn prepare_generate_request(
         request_id: ctx.request_id,
         response_model: lora_resolution.response_model(),
         text_request,
+        n,
         stream,
         options: ResponseOptions {
             include_usage,

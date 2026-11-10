@@ -22,9 +22,7 @@ use crate::routes::openai::utils::types::{Normalizable, StreamOptions, StringOrA
 ///
 /// Wraps [`SamplingParams`] to additionally capture `n`, which the shared
 /// northbound type intentionally omits (parallel sampling is handled by
-/// higher layers, and the Rust frontend does not implement it). Capturing it
-/// here lets validation reject `n > 1` explicitly instead of silently
-/// dropping the key and returning a single choice.
+/// higher layers).
 ///
 /// It also captures Python sampling fields that the route does not support
 /// yet, so validation can reject their non-default values instead of
@@ -32,7 +30,7 @@ use crate::routes::openai::utils::types::{Normalizable, StreamOptions, StringOrA
 #[serde_with::skip_serializing_none]
 #[derive(Debug, Clone, Deserialize, Serialize)]
 pub struct GenerateSamplingParams {
-    /// Number of output sequences to generate. Only `1` is supported.
+    /// Number of output sequences to generate.
     pub n: Option<u32>,
     /// Stop strings. Not supported yet: the route does not detokenize.
     pub stop: Option<StringOrArray>,
