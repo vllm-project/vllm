@@ -1530,6 +1530,11 @@ class AsyncMPClient(MPClient):
             res = await self.call_utility_async(FT_UTILITY_METHOD, ft_request)
             result = msgspec.convert(res, FaultToleranceResult)
         except Exception as e:
+            logger.exception(
+                "[FT] request_id=%s instruction=%s dispatch failed",
+                ft_request.request_id,
+                ft_request.instruction,
+            )
             result = FaultToleranceResult(ft_request.request_id, False, str(e))
 
         if not result.success:

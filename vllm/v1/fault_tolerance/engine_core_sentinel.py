@@ -102,12 +102,18 @@ class EngineCoreSentinel:
     def handle_command(self, client_idx: int, call_id: int, ft_args: dict):
         """Dispatch an FT command by instruction name."""
         ft_request = FaultToleranceRequest(**ft_args)
+        context = (
+            f"[FT] request_id={ft_request.request_id} "
+            f"instruction={ft_request.instruction}"
+        )
+        start_time = time.monotonic()
+        logger.info("%s started", context)
         if ft_request.instruction not in ALLOWED_FT_INSTRUCTIONS:
             reason = (
                 f"[FT] Rejecting unknown instruction "
                 f"'{ft_request.instruction}' on engine {self.engine_index}"
             )
-            logger.warning(reason)
+            logger.warning("%s failed: %s", context, reason)
             result = FaultToleranceResult(
                 request_id=ft_request.request_id,
                 success=False,
@@ -118,7 +124,7 @@ class EngineCoreSentinel:
                 f"[FT] Rejecting {ft_request.instruction} on engine "
                 f"{self.engine_index}: status is {self.status_type.name}"
             )
-            logger.warning(reason)
+            logger.warning("%s failed: %s", context, reason)
             result = FaultToleranceResult(
                 request_id=ft_request.request_id,
                 success=False,
@@ -128,10 +134,18 @@ class EngineCoreSentinel:
             try:
                 result = run_method(self, ft_request.instruction, (ft_request,), {})
             except Exception as e:
-                logger.exception("[FT] Instruction '%s' failed", ft_request.instruction)
+                logger.exception("%s failed", context)
                 result = FaultToleranceResult(
                     request_id=ft_request.request_id, success=False, reason=str(e)
                 )
+
+        if result.success:
+            logger.info(
+                "%s completed; status=%s; elapsed=%.3fs",
+                context,
+                self.status_type.name,
+                time.monotonic() - start_time,
+            )
 
         uo = UtilityOutput(call_id)
         uo.result = UtilityResult(msgspec.structs.asdict(result))
@@ -142,9 +156,7 @@ class EngineCoreSentinel:
     def on_fault(self, exc: Exception):
         """Called by the wrapper when the busy loop raises an exception."""
         self.resumed.clear()
-        logger.warning(
-            "[FT] Busy loop raised %s. Waiting for recovery.", type(exc).__name__
-        )
+        logger.warning("[FT] Busy loop failed; waiting for recovery", exc_info=exc)
 
         engine = self.engine
         scheduler = cast(Scheduler, engine.scheduler)
@@ -179,17 +191,16 @@ class EngineCoreSentinel:
             try:
                 mask = self._query_mask()
             except Exception:
-                logger.warning("[FT] Failed to query mask for status push")
+                logger.warning("[FT] Failed to query EP mask", exc_info=True)
                 mask = None
             # on_executor_failed may have set DEAD concurrently.
             if self.status_type == EngineStatusType.DIAGNOSING:
                 self.status_type = EngineStatusType.UNHEALTHY
         self.fault_info = f"{type(exc).__name__}"
         logger.info(
-            "[FT] Engine %d status -> %s:",
-            self.engine_index,
+            "[FT] status -> %s; EP mask=%s",
             self.status_type.name,
-            exc_info=exc,
+            mask,
         )
         self._push_status(mask)
 
@@ -358,10 +369,10 @@ class EngineCoreSentinel:
         self._recover_and_vote(ft_request, terminal=True)
         # Commit the dead set only after the full recovery succeeded.
         self._dead_dp_ranks = new_dead
-        logger.info(
-            "[FT] Engine %d scale_down complete: removed %s, "
+        logger.debug(
+            "[FT] request_id=%s scale_down committed: removed %s, "
             "cumulative dead_dp_ranks=%s",
-            self.engine_index,
+            ft_request.request_id,
             sorted(newly_dead),
             sorted(new_dead),
         )
@@ -497,7 +508,14 @@ class EngineCoreSentinel:
                     op=dist.ReduceOp.MIN,
                     group=cast("DPEngineCoreProc", engine).dp_group,
                 )
-            except Exception:
+            except Exception as exc:
+                logger.error(
+                    "[FT] request_id=%s recovery vote collective failed: %s",
+                    ft_request.request_id,
+                    exc,
+                )
+                if local_error is None:
+                    local_error = exc
                 success.zero_()
         if success.item():
             return
@@ -505,14 +523,21 @@ class EngineCoreSentinel:
         if terminal:
             self.status_type = EngineStatusType.DEAD
             self.fault_info = "Recovery failed; full restart required"
+            logger.error(
+                "[FT] request_id=%s status -> DEAD; "
+                "scale_down could not commit; full restart required",
+                ft_request.request_id,
+            )
             self._push_status()
         if local_error is not None:
             raise local_error
-        raise RuntimeError("[FT] Recovery vote failed")
+        raise RuntimeError(
+            "[FT] Recovery rejected by another engine; "
+            "check peer engine logs for the cause"
+        )
 
     def _mark_healthy(self, ft_request: FaultToleranceRequest) -> FaultToleranceResult:
         self.status_type = EngineStatusType.HEALTHY
-        logger.info("[FT] Engine %d status -> HEALTHY", self.engine_index)
         self.resumed.set()
         self._push_status()
         return FaultToleranceResult(request_id=ft_request.request_id, success=True)

@@ -522,9 +522,10 @@ class MultiprocExecutor(Executor):
 
         def get_response():
             responses = []
-            has_failure = False
+            failures = []
 
-            for mq in response_mqs:
+            for response_rank, mq in enumerate(response_mqs):
+                rank = response_rank if output_rank is None else output_rank
                 dequeue_timeout = (
                     None if deadline is None else max(0.0, deadline - time.monotonic())
                 )
@@ -534,14 +535,18 @@ class MultiprocExecutor(Executor):
                     raise TimeoutError(f"RPC call to {method} timed out.") from e
 
                 if status == WorkerProc.ResponseStatus.FAILURE_WITH_KV_OUTPUT:
+                    error, kv_output = result
                     if (
                         not self.vllm_config.parallel_config.enable_fault_tolerance
                         or self.is_failed
                     ):
-                        raise RuntimeError("Worker failed with KV connector output")
-                    has_failure = True
-                    assert isinstance(result, KVConnectorOutput)
-                    responses.append(result)
+                        raise RuntimeError(f"Worker {rank} failed with error '{error}'")
+                    failures.append(f"Worker {rank}: {error}")
+                    logger.error(
+                        "[FT] RPC %s failed on worker %d: %s", method, rank, error
+                    )
+                    assert isinstance(kv_output, KVConnectorOutput)
+                    responses.append(kv_output)
                 elif status != WorkerProc.ResponseStatus.SUCCESS:
                     if (
                         not self.vllm_config.parallel_config.enable_fault_tolerance
@@ -551,11 +556,14 @@ class MultiprocExecutor(Executor):
                             f"Worker failed with error '{result}', please check the"
                             " stack trace above for the root cause"
                         )
-                    has_failure = True
+                    failures.append(f"Worker {rank}: {result}")
+                    logger.error(
+                        "[FT] RPC %s failed on worker %d: %s", method, rank, result
+                    )
                 else:
                     responses.append(result)
 
-            if has_failure:
+            if failures:
                 kv_connector_outputs: list[KVConnectorOutput | None] = []
                 for resp in responses:
                     if isinstance(resp, KVConnectorOutput):
@@ -570,7 +578,7 @@ class MultiprocExecutor(Executor):
                         kv_connector_outputs
                     )
 
-                raise RuntimeError("One or more workers failed")
+                raise RuntimeError("One or more workers failed: " + "; ".join(failures))
 
             return responses[0] if output_rank is not None else responses
 
@@ -1152,7 +1160,7 @@ class WorkerProc:
         if isinstance(output, ExceptionWithKVConnectorOutput):
             result: tuple[WorkerProc.ResponseStatus, Any] = (
                 WorkerProc.ResponseStatus.FAILURE_WITH_KV_OUTPUT,
-                output.kv_connector_output,
+                (str(output), output.kv_connector_output),
             )
         elif isinstance(output, Exception):
             result = (WorkerProc.ResponseStatus.FAILURE, str(output))

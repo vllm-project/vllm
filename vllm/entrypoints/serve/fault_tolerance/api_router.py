@@ -84,17 +84,19 @@ async def _run_fault_recovery(
     client: EngineClient, ft_request: FaultToleranceRequest
 ) -> None:
     """Drive recovery to completion after the 202 response is sent."""
+    context = (
+        f"[FT] request_id={ft_request.request_id} instruction={ft_request.instruction}"
+    )
+    logger.info("%s dispatch started", context)
     try:
         result = await client.handle_fault(ft_request)
     except Exception:
-        logger.exception("[FT] Recovery dispatch failed.")
+        logger.exception("%s dispatch failed", context)
         return
     if not result.success:
-        logger.error(
-            "[FT] Recovery failed for request %s: %s",
-            ft_request.request_id,
-            result.reason,
-        )
+        logger.error("%s recovery failed: %s", context, result.reason)
+    else:
+        logger.info("%s recovery committed", context)
 
 
 @router.get("/v1/fault_tolerance/status")
