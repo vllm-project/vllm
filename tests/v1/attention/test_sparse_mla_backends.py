@@ -153,6 +153,7 @@ def _skip_cuda_specific_sparse_mla_tests_on_rocm(request):
         "test_sparse_backend_prefill_correctness",
         "test_rocm_fused_v32_dense_prefill_matches_mqa",
         "test_rocm_long_bf16_prefill_avoids_nonpersistent_aiter",
+        "test_rocm_hisparse_backend_rejects_fp8_ds_mla",
         "test_split_indexer_prefill_chunks",
         "test_split_indexer_prefill_chunks_single_request_overflow",
         "test_sparse_mla_common_impl_resolves_buffer_lazily",
@@ -5825,3 +5826,32 @@ def test_rocm_fused_v32_dense_prefill_matches_mqa(
                 rtol=0.01,
                 atol=0.01,
             )
+
+
+@pytest.mark.parametrize(
+    "cache_dtype_str,rejected",
+    [("fp8_ds_mla", True), ("fp8", False), (None, False)],
+)
+def test_rocm_hisparse_backend_rejects_fp8_ds_mla(
+    cache_dtype_str: str | None, rejected: bool
+):
+    from vllm.v1.hisparse.backend import ROCmHiSparseBackend
+
+    # Only the second spec of the second group carries the layout.
+    kv_cache_config = SimpleNamespace(
+        kv_cache_groups=[
+            SimpleNamespace(kv_cache_specs={"indexer": SimpleNamespace()}),
+            SimpleNamespace(
+                kv_cache_specs={
+                    "attn.0": SimpleNamespace(cache_dtype_str="auto"),
+                    "attn.1": SimpleNamespace(cache_dtype_str=cache_dtype_str),
+                }
+            ),
+        ]
+    )
+    backend = ROCmHiSparseBackend()
+    if rejected:
+        with pytest.raises(ValueError, match="fp8_ds_mla"):
+            backend.validate_kv_cache_config(kv_cache_config)
+    else:
+        backend.validate_kv_cache_config(kv_cache_config)

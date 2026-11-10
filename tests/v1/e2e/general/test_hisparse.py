@@ -88,6 +88,18 @@ def _offload_load_bytes() -> float:
     )
 
 
+def _skip_without_sparse_mla() -> None:
+    if current_platform.is_rocm():
+        from vllm.platforms.rocm import on_gfx950
+
+        if not on_gfx950():
+            pytest.skip("HiSparse on ROCm requires gfx950")
+        return
+    capability = current_platform.get_device_capability()
+    if capability is None or capability.major < 9:
+        pytest.skip("Sparse MLA requires Hopper or newer")
+
+
 def _get_hisparse_worker(runner: VllmRunner) -> HiSparseConnectorWorker:
     client = runner.llm.llm_engine.engine_core
     assert isinstance(client, InprocClient)
@@ -106,7 +118,8 @@ def _get_hisparse_worker(runner: VllmRunner) -> HiSparseConnectorWorker:
 
 
 @pytest.mark.skipif(
-    not current_platform.is_cuda(), reason="HiSparse requires NVIDIA CUDA"
+    current_platform.get_hisparse_backend_cls() is None,
+    reason="HiSparse is not supported on this platform",
 )
 @pytest.mark.parametrize(
     "with_offloading,attention_backend",
@@ -131,9 +144,7 @@ def test_hisparse_spill_and_prefix_restore(
     MTP layers write after the target forward; their rows used to be mirrored
     before the drafter wrote them, so the drafter later read stale host rows.
     """
-    capability = current_platform.get_device_capability()
-    if capability is None or capability.major < 9:
-        pytest.skip("Sparse MLA requires Hopper or newer")
+    _skip_without_sparse_mla()
     if attention_backend and not current_platform.is_device_capability_family(100):
         pytest.skip("FA4 sparse MLA requires SM 10.x")
 
@@ -289,7 +300,8 @@ def test_hisparse_spill_and_prefix_restore(
 
 
 @pytest.mark.skipif(
-    not current_platform.is_cuda(), reason="HiSparse requires NVIDIA CUDA"
+    current_platform.get_hisparse_backend_cls() is None,
+    reason="HiSparse is not supported on this platform",
 )
 @fork_new_process_for_each_test
 def test_hisparse_extensible_kv_cache(
@@ -303,9 +315,7 @@ def test_hisparse_extensible_kv_cache(
     hot group within its fixed-size block-table rows. The host pool stays in
     host memory, and the caches passed to connectors match the fixed path's.
     """
-    capability = current_platform.get_device_capability()
-    if capability is None or capability.major < 9:
-        pytest.skip("Sparse MLA requires Hopper or newer")
+    _skip_without_sparse_mla()
     monkeypatch.setenv("VLLM_ENABLE_V1_MULTIPROCESSING", "0")
     monkeypatch.setenv("VLLM_DEEP_GEMM_WARMUP", "skip")
 
@@ -370,7 +380,8 @@ def test_hisparse_extensible_kv_cache(
 
 
 @pytest.mark.skipif(
-    not current_platform.is_cuda(), reason="HiSparse requires NVIDIA CUDA"
+    current_platform.get_hisparse_backend_cls() is None,
+    reason="HiSparse is not supported on this platform",
 )
 @fork_new_process_for_each_test
 def test_hisparse_host_exhaustion_defers_requests(
@@ -378,9 +389,7 @@ def test_hisparse_host_exhaustion_defers_requests(
     vllm_runner: type[VllmRunner],
 ):
     """A full host pool defers requests instead of leaving pages GPU-only."""
-    capability = current_platform.get_device_capability()
-    if capability is None or capability.major < 9:
-        pytest.skip("Sparse MLA requires Hopper or newer")
+    _skip_without_sparse_mla()
     monkeypatch.setenv("VLLM_ENABLE_V1_MULTIPROCESSING", "0")
     monkeypatch.setenv("VLLM_DEEP_GEMM_WARMUP", "skip")
     prompts = [
@@ -448,7 +457,8 @@ def test_hisparse_host_exhaustion_defers_requests(
 
 
 @pytest.mark.skipif(
-    not current_platform.is_cuda(), reason="HiSparse requires NVIDIA CUDA"
+    current_platform.get_hisparse_backend_cls() is None,
+    reason="HiSparse is not supported on this platform",
 )
 @fork_new_process_for_each_test
 def test_hisparse_terminal_prefix_reuse(
@@ -456,9 +466,7 @@ def test_hisparse_terminal_prefix_reuse(
     vllm_runner: type[VllmRunner],
 ):
     """Finished requests publish mirrored host KV after a late acknowledgement."""
-    capability = current_platform.get_device_capability()
-    if capability is None or capability.major < 9:
-        pytest.skip("Sparse MLA requires Hopper or newer")
+    _skip_without_sparse_mla()
     monkeypatch.setenv("VLLM_ENABLE_V1_MULTIPROCESSING", "0")
     monkeypatch.setenv("VLLM_DEEP_GEMM_WARMUP", "skip")
     target = [1000 + i % 64 for i in range(257)]
