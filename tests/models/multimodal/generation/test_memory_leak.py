@@ -123,10 +123,11 @@ def llm(monkeypatch):
     # Shut down explicitly: if the in-process engine were left to the garbage
     # collector, its finalizer could run during the next test's LLM startup
     # and destroy that engine's freshly initialized parallel groups.
-    llm.llm_engine.engine_core.shutdown()
-    del llm
-
-    cleanup_dist_env_and_memory()
+    try:
+        llm.llm_engine.engine_core.shutdown()
+    finally:
+        del llm
+        cleanup_dist_env_and_memory()
 
 
 @pytest.mark.core_model
