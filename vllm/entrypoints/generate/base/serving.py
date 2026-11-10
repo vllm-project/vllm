@@ -18,6 +18,7 @@ from vllm.entrypoints.openai.chat_completion.protocol import ChatCompletionReque
 from vllm.entrypoints.openai.completion.protocol import CompletionRequest
 from vllm.entrypoints.openai.models.serving import OpenAIServingModels
 from vllm.entrypoints.openai.responses.protocol import ResponsesRequest
+from vllm.entrypoints.scale_out.token_in_token_out.protocol import GenerateRequest
 from vllm.entrypoints.serve.engine.protocol import ErrorResponse
 from vllm.entrypoints.serve.engine.serving import BaseServing
 from vllm.entrypoints.serve.utils.request_logger import RequestLogger
@@ -229,7 +230,12 @@ class GenerateBaseServing(BaseServing, BeamSearchOnlineMixin):
 
     @staticmethod
     def _get_priority(
-        request: ChatCompletionRequest | CompletionRequest | ResponsesRequest,
+        request: (
+            ChatCompletionRequest
+            | CompletionRequest
+            | ResponsesRequest
+            | GenerateRequest
+        ),
         raw_request: Request | None,
     ) -> int:
         if raw_request is not None:

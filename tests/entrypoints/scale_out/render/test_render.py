@@ -623,6 +623,32 @@ async def test_chat_render_header_request_id_wins(client):
 
 
 @pytest.mark.asyncio
+@pytest.mark.parametrize(
+    "path, body",
+    [
+        ("/v1/chat/completions/render", CHAT_BODY),
+        ("/v1/completions/render", {"model": MODEL_NAME, "prompt": "Hello"}),
+        ("/v1/responses/render", {"model": MODEL_NAME, "input": "Hello"}),
+    ],
+    ids=["chat", "completion", "responses"],
+)
+@pytest.mark.parametrize("header", [None, "-5", "0"])
+async def test_render_priority_header_overrides_body(client, path, body, header):
+    """`X-Vllm-Priority` overrides the body priority, as on the coupled APIs."""
+    response = await client.post(
+        path,
+        json={**body, "priority": 3},
+        headers={} if header is None else {"X-Vllm-Priority": header},
+    )
+
+    assert response.status_code == 200
+    rendered = response.json()
+    if isinstance(rendered, list):
+        (rendered,) = rendered
+    assert rendered["priority"] == (3 if header is None else int(header))
+
+
+@pytest.mark.asyncio
 async def test_chat_render_generates_unique_request_ids(client):
     ids = set()
     for _ in range(2):

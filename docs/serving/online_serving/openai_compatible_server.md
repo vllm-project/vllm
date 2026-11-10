@@ -122,9 +122,13 @@ The `X-Request-Id` HTTP request header can be enabled with
     ```
 
 The Completions, Chat Completions, and Responses APIs also support the
-`X-Vllm-Priority` request header. Its value must be an integer and overrides
-the `priority` value in the JSON request body. Non-zero priorities require the
-server to use priority scheduling.
+`X-Vllm-Priority` request header, as do their scale-out
+[`/render`](renderer.md) endpoints and
+[`/inference/v1/generate`](token_in_token_out.md). Its value must be an
+integer and overrides the `priority` value in the JSON request body; a
+`/render` endpoint returns it as the `priority` of the rendered
+`GenerateRequest`. Non-zero priorities require the server to use priority
+scheduling.
 
 ```python
 completion = client.chat.completions.create(

@@ -107,5 +107,5 @@ async def render_responses(request: ResponsesRequest, raw_request: Request):
     if handler is None:
         raise NotImplementedError("The model does not support Responses Render API")
 
-    result = await handler.render_responses_request(request)
+    result = await handler.render_responses_request(request, raw_request)
     return create_json_response(result)

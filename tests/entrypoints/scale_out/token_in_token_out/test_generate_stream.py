@@ -9,6 +9,7 @@ from typing import Any
 from unittest.mock import AsyncMock, MagicMock, patch
 
 import pytest
+from fastapi import Request
 
 from vllm.config.multimodal import MultiModalConfig
 from vllm.entrypoints.generate.base.protocol import DeltaMessage, StreamOptions
@@ -281,6 +282,36 @@ async def test_serve_tokens_threads_session_id_header_to_engine():
     await serving.serve_tokens(request, raw_request)
 
     assert engine.generate.call_args.kwargs["session_id"] == "header-session"
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("header", [None, "-5", "0"])
+async def test_serve_tokens_priority_header_overrides_body(header):
+    """`X-Vllm-Priority` overrides the body priority, as on the coupled APIs."""
+    engine = _mock_engine()
+
+    async def mock_generate(*args, **kwargs):
+        yield _make_request_output(
+            "req-1", token_ids=[10], finish_reason="stop", finished=True
+        )
+
+    engine.generate = MagicMock(side_effect=mock_generate)
+    serving = _build_serving_tokens(engine)
+
+    request = GenerateRequest(
+        token_ids=[1, 2, 3],
+        sampling_params=SamplingParams(max_tokens=1),
+        model=MODEL_NAME,
+        stream=False,
+        priority=3,
+    )
+    headers = [] if header is None else [(b"x-vllm-priority", header.encode())]
+
+    await serving.serve_tokens(request, Request({"type": "http", "headers": headers}))
+
+    assert engine.generate.call_args.kwargs["priority"] == (
+        3 if header is None else int(header)
+    )
 
 
 @pytest.mark.asyncio

@@ -14,6 +14,7 @@ from vllm.entrypoints.anthropic.serving import (
     DisabledThinkingEffortResolver,
 )
 from vllm.entrypoints.generate.base.protocol import MMPayload
+from vllm.entrypoints.generate.base.serving import GenerateBaseServing
 from vllm.entrypoints.openai.chat_completion.protocol import ChatCompletionRequest
 from vllm.entrypoints.openai.completion.protocol import CompletionRequest
 from vllm.entrypoints.openai.models.serving import (
@@ -215,7 +216,7 @@ class ServingRender(BaseServing):
             stream_options=(request.stream_options if request.stream else None),
             return_token_ids=request.return_token_ids,
             cache_salt=request.cache_salt,
-            priority=request.priority,
+            priority=GenerateBaseServing._get_priority(request, raw_request),
             token_offsets=engine_input.get("prompt_token_offsets"),
             parse_context=self._build_parse_context(
                 request,
@@ -330,7 +331,7 @@ class ServingRender(BaseServing):
                     stream_options=(request.stream_options if request.stream else None),
                     return_token_ids=request.return_token_ids,
                     cache_salt=request.cache_salt,
-                    priority=request.priority,
+                    priority=GenerateBaseServing._get_priority(request, raw_request),
                     token_offsets=engine_input.get("prompt_token_offsets"),
                 )
             )
@@ -340,6 +341,7 @@ class ServingRender(BaseServing):
     async def render_responses_request(
         self,
         request: ResponsesRequest,
+        raw_request: Request | None = None,
     ) -> GenerateRequest | ErrorResponse:
         error_check_ret = await self._check_model(request)
         if error_check_ret is not None:
@@ -395,7 +397,7 @@ class ServingRender(BaseServing):
             ),
             stream=bool(request.stream),
             cache_salt=request.cache_salt,
-            priority=request.priority,
+            priority=GenerateBaseServing._get_priority(request, raw_request),
             kv_transfer_params=kv_transfer_params,
             ec_transfer_params=ec_transfer_params,
             token_offsets=engine_input.get("prompt_token_offsets"),
