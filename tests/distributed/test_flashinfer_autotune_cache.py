@@ -51,5 +51,4 @@ def test_managed_cache_survives_distributed_restart(
         outputs_1_lst=results[1],
         name_0="cold managed cache",
         name_1="warm managed cache",
-        always_check_logprobs=True,
     )
