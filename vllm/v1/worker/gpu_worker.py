@@ -605,19 +605,13 @@ class Worker(WorkerBase):
             self._scoped_allocator_max_split(max_split_size_mb=20),
             self._external_weight_charges.track(),
         ):
-            snapshot = self._weight_snapshot_path()
-            restore = snapshot is not None and snapshot.exists()
-            self.model_runner.load_model(
-                load_dummy_weights=load_dummy_weights or restore
-            )
-        if snapshot is not None and not load_dummy_weights:
-            from vllm.device_allocator import weight_snapshot
-
-            roots = self._weight_snapshot_roots()
-            if restore:
-                weight_snapshot.restore(roots, snapshot)
+            snapshot = None if load_dummy_weights else self._weight_snapshot_path()
+            if snapshot is None:
+                self.model_runner.load_model(load_dummy_weights=load_dummy_weights)
             else:
-                weight_snapshot.save(roots, snapshot)
+                from vllm.device_allocator import weight_snapshot
+
+                weight_snapshot.load_model(self.model_runner, snapshot)
 
         if self._external_weight_charges.fallback_bytes:
             self.requested_memory = self._resolve_requested_memory()
@@ -651,7 +645,7 @@ class Worker(WorkerBase):
         set_torch_threads_for_runtime()
 
     def _weight_snapshot_path(self):
-        # Prototype: snapshot of post-processed weights, keyed by config hash.
+        """Snapshot file of this rank's post-processed weights, if enabled."""
         if not envs.VLLM_WEIGHT_SNAPSHOT_DIR:
             return None
         from vllm.device_allocator import weight_snapshot
@@ -661,14 +655,6 @@ class Worker(WorkerBase):
             weight_snapshot.weights_key(self.vllm_config),
             self.rank,
         )
-
-    def _weight_snapshot_roots(self) -> dict[str, nn.Module]:
-        roots = {"model": self.model_runner.model}
-        speculator = getattr(self.model_runner, "speculator", None)
-        for name, value in vars(speculator).items() if speculator else ():
-            if isinstance(value, nn.Module):
-                roots[f"speculator.{name}"] = value
-        return roots
 
     def update_config(self, overrides: dict[str, Any]) -> None:
         """Apply config overrides to the worker, its model runner and the

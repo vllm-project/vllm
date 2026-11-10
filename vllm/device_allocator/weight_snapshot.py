@@ -6,6 +6,8 @@ The first start saves every CUDA tensor and Python scalar reachable from the
 model modules after process_weights_after_loading. Later starts build the model
 with dummy weights, which gives the same structure, and copy the saved bytes
 back, skipping checkpoint reads and weight conversion.
+
+Enabled with VLLM_WEIGHT_SNAPSHOT_DIR; see load_model().
 """
 
 import contextlib
@@ -20,6 +22,7 @@ import regex as re
 import torch
 from torch import nn
 
+import vllm.envs as envs
 from vllm.logger import init_logger
 
 logger = init_logger(__name__)
@@ -131,20 +134,17 @@ def _walk(value, key: str, depth: int, seen: set[int]) -> Iterator[tuple[str, ob
             yield from _walk(v, f"{key}.{k}", depth - 1, seen)
 
 
-# Other keys under which each collected tensor was reached (same storage view).
-aliases: dict[str, list[str]] = {}
-
-
 def collect_state(
     roots: dict[str, nn.Module],
-) -> tuple[list[tuple[str, torch.Tensor]], dict[str, object]]:
-    """CUDA and pinned host tensors (deduplicated by view) and scalars, in a stable
-    order keyed by module path and attribute name."""
+) -> tuple[list[tuple[str, torch.Tensor]], dict[str, object], dict[str, list[str]]]:
+    """CUDA and pinned host tensors (deduplicated by view), scalars, and the other
+    keys each tensor was reached under, in a stable order keyed by module path and
+    attribute name."""
     tensors: list[tuple[str, torch.Tensor]] = []
     scalars: dict[str, object] = {}
+    aliases: dict[str, list[str]] = {}
     seen: dict[tuple, str] = {}
     visited: set[int] = set()
-    aliases.clear()
     for root_name, root in roots.items():
         for mod_name, module in root.named_modules():
             for attr, value in vars(module).items():
@@ -163,10 +163,10 @@ def collect_state(
                         tensors.append((key, v))
                     else:
                         scalars[key] = v
-    return tensors, scalars
+    return tensors, scalars, aliases
 
 
-def _describe(tensors) -> list[dict]:
+def _describe(tensors, aliases) -> list[dict]:
     return [
         {
             "key": k,
@@ -190,11 +190,11 @@ def _pinned() -> torch.Tensor:
 def save(roots: dict[str, nn.Module], path: Path) -> None:
     torch.accelerator.synchronize()
     t0 = time.perf_counter()
-    tensors, scalars = collect_state(roots)
+    tensors, scalars, aliases = collect_state(roots)
     header = json.dumps(
         {
             "magic": _MAGIC,
-            "tensors": _describe(tensors),
+            "tensors": _describe(tensors, aliases),
             "scalars": scalars,
             "skipped_funcs": {k: v for k, v in _recorded.items() if v},
         }
@@ -236,15 +236,23 @@ def _read_header(fd: int) -> tuple[dict, int]:
     return json.loads(bytes(hbuf[8 : 8 + hlen])), _round_up(hlen + 8)
 
 
+def _open_direct(path: Path) -> int:
+    """O_DIRECT bypasses the page cache; tmpfs and some overlay setups reject it."""
+    try:
+        return os.open(path, os.O_RDONLY | getattr(os, "O_DIRECT", 0))
+    except OSError:
+        return os.open(path, os.O_RDONLY)
+
+
 def restore(roots: dict[str, nn.Module], path: Path) -> None:
     """Copy the snapshot into the dummy-initialized model state."""
-    tensors, scalars = collect_state(roots)
-    fd = os.open(path, os.O_RDONLY | getattr(os, "O_DIRECT", 0))
+    tensors, scalars, aliases = collect_state(roots)
+    fd = _open_direct(path)
     try:
         header, offset = _read_header(fd)
         if header.get("magic") != _MAGIC:
             raise RuntimeError(f"weight snapshot {path} has an old format; delete it")
-        plan = _plan(roots, header.get("tensors", []), tensors, offset, path)
+        plan = _plan(roots, header.get("tensors", []), tensors, aliases, offset, path)
         # Two pinned buffers: the disk read of one overlaps the H2D copy of the other.
         bufs = [_pinned(), _pinned()]
         views = [memoryview(b.numpy()) for b in bufs]
@@ -271,7 +279,7 @@ def restore(roots: dict[str, nn.Module], path: Path) -> None:
     finally:
         os.close(fd)
     _restore_scalars(roots, header.get("scalars", {}), scalars)
-    if os.environ.get("VLLM_WEIGHT_SNAPSHOT_AUDIT"):
+    if envs.VLLM_WEIGHT_SNAPSHOT_AUDIT:
         _audit(roots, tensors)
     total = sum(t.nbytes for _, t in tensors)
     elapsed = time.perf_counter() - t0
@@ -284,7 +292,7 @@ def restore(roots: dict[str, nn.Module], path: Path) -> None:
     )
 
 
-def _plan(roots, saved: list[dict], tensors, offset: int, path) -> list:
+def _plan(roots, saved: list[dict], tensors, aliases, offset: int, path) -> list:
     """Match saved entries to live tensors by key or alias; return (tensor, offset).
 
     Attributes the real load created but the dummy build did not (e.g. fused
@@ -440,87 +448,7 @@ def _plausible_dummy_weights():
     return lambda: setattr(dummy_loader, "initialize_single_dummy_weight", orig)
 
 
-def _profile_build():
-    """Time the dummy build phases and cProfile process_weights_after_loading."""
-    import cProfile
-    import io
-    import pstats
-
-    from vllm.model_executor.model_loader import base_loader, dummy_loader
-
-    undo = []
-
-    def timed(mod, name, label, profile=False):
-        orig = getattr(mod, name)
-
-        def wrapper(*args, **kwargs):
-            torch.accelerator.synchronize()
-            prof = cProfile.Profile() if profile else None
-            t0 = time.perf_counter()
-            out = prof.runcall(orig, *args, **kwargs) if prof else orig(*args, **kwargs)
-            torch.accelerator.synchronize()
-            logger.info(
-                "Snapshot build: %s took %.2f s", label, time.perf_counter() - t0
-            )
-            if prof:
-                buf = io.StringIO()
-                pstats.Stats(prof, stream=buf).sort_stats("cumulative").print_stats(25)
-                logger.info("Snapshot build profile:\n%s", buf.getvalue())
-            return out
-
-        setattr(mod, name, wrapper)
-        undo.append(lambda: setattr(mod, name, orig))
-
-    timed(dummy_loader.DummyModelLoader, "load_weights", "dummy fill")
-    timed(base_loader, "process_weights_after_loading", "process_weights", True)
-    return lambda: [u() for u in undo]
-
-
-def _profile_call(obj, name: str) -> None:
-    """CProfile one method call and log the top functions by cumulative time."""
-    import cProfile
-    import io
-    import pstats
-
-    orig = getattr(obj, name)
-
-    def wrapper(*args, **kwargs):
-        prof = cProfile.Profile()
-        t0 = time.perf_counter()
-        out = prof.runcall(orig, *args, **kwargs)
-        torch.accelerator.synchronize()
-        buf = io.StringIO()
-        stats = pstats.Stats(prof, stream=buf)
-        stats.sort_stats("cumulative").print_stats(40)
-        stats.sort_stats("tottime").print_stats(25)
-        logger.info(
-            "Snapshot %s took %.2f s:\n%s",
-            name,
-            time.perf_counter() - t0,
-            buf.getvalue(),
-        )
-        return out
-
-    setattr(obj, name, wrapper)
-
-
-def _fast_profile_run(runner, tokens: int):
-    """With an explicit KV size, profile_run only warms up: use fewer tokens."""
-    orig = runner.profile_run
-
-    def profile_run(*args, **kwargs):
-        saved = runner.max_num_tokens
-        runner.max_num_tokens = min(saved, tokens)
-        try:
-            return orig(*args, **kwargs)
-        finally:
-            runner.max_num_tokens = saved
-
-    runner.profile_run = profile_run
-
-
-# Pure, expensive weight-preparation functions whose output the snapshot overwrites.
-_SKIP_FUNCS = ("b12x.moe._shared.kernels.w4a16.iq2_xs:pack_iq2_xs_matrix",)
+# Output structure of skip-listed calls during a save, written to the header.
 _recorded: dict[str, list] = {}
 
 
@@ -553,10 +481,7 @@ def _patch_skip_funcs(replay: dict | None):
     with that structure (restore), falling back when input shapes differ."""
     import importlib
 
-    names = list(_SKIP_FUNCS)
-    names += [
-        n for n in os.environ.get("VLLM_WEIGHT_SNAPSHOT_SKIP_FUNCS", "").split(",") if n
-    ]
+    names = [n for n in envs.VLLM_WEIGHT_SNAPSHOT_SKIP_FUNCS.split(",") if n]
     undo = []
     for name in names:
         mod_name, fn_name = name.split(":")
@@ -581,55 +506,39 @@ def _patch_skip_funcs(replay: dict | None):
     return lambda: [u() for u in undo]
 
 
-def install(worker_cls) -> None:
-    """Wrap worker_cls.load_model for vLLM builds without the built-in hook."""
-    import inspect
+_restoring = False
 
-    orig = worker_cls.load_model
-    takes_dummy = "load_dummy_weights" in inspect.signature(orig).parameters
 
-    def load_model(self, *args, **kwargs):
-        root = os.environ.get("VLLM_WEIGHT_SNAPSHOT_DIR")
-        if not root or kwargs.get("load_dummy_weights"):
-            return orig(self, *args, **kwargs)
-        path = snapshot_path(root, weights_key(self.vllm_config), self.rank)
-        restore = path.exists()
-        if restore and takes_dummy:
-            kwargs["load_dummy_weights"] = True
-        elif restore:
-            self.vllm_config.load_config.load_format = "dummy"
-        # Lets model-specific checkpoint validation skip the dummy load.
-        os.environ["VLLM_WEIGHT_SNAPSHOT_RESTORING"] = "1" if restore else ""
-        undo = _plausible_dummy_weights() if restore else None
-        replay = None
-        if restore:
-            fd = os.open(path, os.O_RDONLY)
-            try:
-                replay = _read_header(fd)[0].get("skipped_funcs", {})
-            finally:
-                os.close(fd)
-        undo_skip = _patch_skip_funcs(replay)
-        prof = os.environ.get("VLLM_WEIGHT_SNAPSHOT_PROFILE") and restore
-        undo_prof = _profile_build() if prof else None
+def is_restoring() -> bool:
+    """True while a restore builds the model with dummy weights. Model code that
+    validates checkpoint coverage in its weight loader should skip that check."""
+    return _restoring
+
+
+def load_model(model_runner, path: Path) -> None:
+    """Load the model through the snapshot at `path`.
+
+    If it exists, build the model with dummy weights and restore the saved state
+    into it; otherwise load normally and save the post-processed state."""
+    global _restoring
+    restore_ = path.exists()
+    replay = None
+    if restore_:
+        fd = os.open(path, os.O_RDONLY)
         try:
-            out = orig(self, *args, **kwargs)
+            replay = _read_header(fd)[0].get("skipped_funcs", {})
         finally:
-            os.environ.pop("VLLM_WEIGHT_SNAPSHOT_RESTORING", None)
-            if undo is not None:
-                undo()
-            if undo_prof is not None:
-                undo_prof()
-            undo_skip()
-        if prof:
-            _profile_call(self.model_runner, "profile_run")
-        fast = int(os.environ.get("VLLM_WEIGHT_SNAPSHOT_FAST_PROFILE", "0"))
-        if restore and fast and self.cache_config.kv_cache_memory_bytes:
-            _fast_profile_run(self.model_runner, fast)
-        roots = _roots(self.model_runner)
-        (restore_fn if restore else save)(roots, path)
-        return out
-
-    worker_cls.load_model = load_model
-
-
-restore_fn = restore
+            os.close(fd)
+    undo = [_patch_skip_funcs(replay)]
+    if restore_:
+        undo.append(_plausible_dummy_weights())
+        _restoring = True
+    try:
+        model_runner.load_model(load_dummy_weights=restore_)
+    finally:
+        _restoring = False
+        for u in undo:
+            if u is not None:
+                u()
+    roots = _roots(model_runner)
+    (restore if restore_ else save)(roots, path)

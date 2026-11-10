@@ -175,6 +175,8 @@ if TYPE_CHECKING:
     VLLM_RUST_FRONTEND_PATH: str | None = "auto"
     VLLM_SERVER_DEV_MODE: bool = False
     VLLM_WEIGHT_SNAPSHOT_DIR: str | None = None
+    VLLM_WEIGHT_SNAPSHOT_AUDIT: bool = False
+    VLLM_WEIGHT_SNAPSHOT_SKIP_FUNCS: str = ""
     VLLM_V1_OUTPUT_PROC_CHUNK_SIZE: int = 128
     VLLM_MLA_DISABLE: bool = False
     VLLM_RAY_PER_WORKER_GPUS: float = 1.0
@@ -1543,8 +1545,27 @@ environment_variables: dict[str, Callable[[], Any]] = {
     # some additional endpoints for developing and debugging,
     # e.g. `/reset_prefix_cache`, and default `--enable-scale-out` to on
     "VLLM_SERVER_DEV_MODE": lambda: bool(int(os.getenv("VLLM_SERVER_DEV_MODE", "0"))),
-    # Directory for snapshots of the post-processed model weights.
+    # Directory for snapshots of the post-processed model state (one file per
+    # rank). The first start with a given model and setup saves it after
+    # process_weights_after_loading; later starts build the model with dummy
+    # weights and restore the state instead of reading the checkpoint. Files are
+    # keyed by checkpoint identity, dtype, quantization, KV cache dtype,
+    # parallel sizes, speculative config, GPU capability and torch/CUDA/vLLM
+    # versions, so they can be copied to another server with the same setup.
     "VLLM_WEIGHT_SNAPSHOT_DIR": lambda: os.getenv("VLLM_WEIGHT_SNAPSHOT_DIR"),
+    # After a weight snapshot restore, log the live CUDA storages the snapshot
+    # did not cover (to find state a model keeps outside module attributes).
+    "VLLM_WEIGHT_SNAPSHOT_AUDIT": lambda: bool(
+        int(os.getenv("VLLM_WEIGHT_SNAPSHOT_AUDIT", "0"))
+    ),
+    # Comma-separated "module:function" list of pure weight-preparation
+    # functions called during process_weights_after_loading whose output the
+    # snapshot overwrites anyway. A save records their output shapes; a
+    # restore returns empty tensors of those shapes instead of running them
+    # (falls back to the real call if the input shapes differ).
+    "VLLM_WEIGHT_SNAPSHOT_SKIP_FUNCS": lambda: os.getenv(
+        "VLLM_WEIGHT_SNAPSHOT_SKIP_FUNCS", ""
+    ),
     # Controls the maximum number of requests to handle in a
     # single asyncio task when processing per-token outputs in the
     # V1 AsyncLLM interface. It is applicable when handling a high
@@ -2511,6 +2532,8 @@ def compile_factors() -> dict[str, object]:
         "LD_LIBRARY_PATH",
         "VLLM_SERVER_DEV_MODE",
         "VLLM_WEIGHT_SNAPSHOT_DIR",
+        "VLLM_WEIGHT_SNAPSHOT_AUDIT",
+        "VLLM_WEIGHT_SNAPSHOT_SKIP_FUNCS",
         "VLLM_DP_MASTER_IP",
         "VLLM_DP_MASTER_PORT",
         "VLLM_NIXL_SIDE_CHANNEL_HOST",
