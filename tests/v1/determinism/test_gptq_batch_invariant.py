@@ -22,7 +22,7 @@ from vllm.utils.import_utils import has_humming
 E2E_BACKENDS = ["TRITON_ATTN"] if current_platform.is_rocm() else ["FLASH_ATTN"]
 
 GPTQ_TEST_MODEL = os.getenv(
-    "VLLM_TEST_GPTQ_MODEL", "LnL-AI/TinyLlama-1.1B-Chat-v1.0-GPTQ-4bit"
+    "VLLM_TEST_GPTQ_MODEL", "Qwen/Qwen2.5-7B-Instruct-GPTQ-Int4"
 )
 
 
@@ -31,7 +31,7 @@ def _make_llm(max_num_seqs: int, backend: str) -> LLM:
         model=GPTQ_TEST_MODEL,
         max_num_seqs=max_num_seqs,
         gpu_memory_utilization=float(
-            os.getenv("VLLM_GPTQ_TEST_GPU_MEMORY_UTILIZATION", "0.05")
+            os.getenv("VLLM_GPTQ_TEST_GPU_MEMORY_UTILIZATION", "0.15")
         ),
         max_model_len=int(os.getenv("VLLM_GPTQ_TEST_MAX_MODEL_LEN", "2048")),
         dtype="auto",
@@ -75,8 +75,9 @@ def test_dense_gptq_generation_is_deterministic_across_batch_sizes_e2e(
         seed=20240919,
         logprobs=5,
     )
-    # TinyLlama continues this prompt for multiple tokens; a prompt it answers
-    # with an immediate EOS would reduce the check to a single decode step.
+    # The model continues this prompt for the full 16 tokens; a prompt it
+    # answers with an immediate EOS would reduce the check to a single
+    # decode step.
     needle_prompt = "On the surface of Mars, we found"
 
     llm = None
