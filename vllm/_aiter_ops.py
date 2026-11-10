@@ -5401,13 +5401,13 @@ class rocm_aiter_ops:
     ) -> torch.Tensor:
         """Run AITER FlashKDA chunked prefill over a paged recurrent state.
 
-        ``q``, ``k`` and ``v`` are ``[1, T, H, 128]`` bf16, ``g`` is the raw
-        gate of the same shape and ``beta`` the raw ``[1, T, H]`` logits; the
-        gate activation and the sigmoid run in the kernel. ``A_log`` is
-        ``[H]`` and ``dt_bias`` ``[H * 128]``, both fp32. ``state_cache`` is the
-        fp32 V-first ``[slots, H, V, K]`` pool: sequence ``n`` reads and writes
-        row ``state_indices[n]`` in place. ``out`` must be contiguous with
-        ``v``'s shape. Returns ``out``.
+        `q`, `k` and `v` are `[1, T, H, 128]` bf16, `g` is the raw
+        gate of the same shape and `beta` the raw `[1, T, H]` logits; the
+        gate activation and the sigmoid run in the kernel. `A_log` is
+        `[H]` and `dt_bias` `[H * 128]`, both fp32. `state_cache` is the
+        fp32 V-first `[slots, H, V, K]` pool: sequence `n` reads and writes
+        row `state_indices[n]` in place. `out` must be contiguous with
+        `v`'s shape. Returns `out`.
         """
         from aiter.ops.triton.kimi_delta_attn import chunk_kimi_delta_attn
 

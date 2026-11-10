@@ -451,7 +451,7 @@ def test_prefill_checkpoint_resumes_suffix(monkeypatch, dim_first, num_spec, off
 def test_aiter_flashkda_prefill_matches_triton(
     monkeypatch, heads, lengths, has_initial
 ):
-    """With ``flashkda`` on ROCm the layer's prefill runs AITER FlashKDA on
+    """With `flashkda` on ROCm the layer's prefill runs AITER FlashKDA on
     the paged state and output in place, and matches the Triton chunk path
     to bf16 precision (chunk size 32 vs 64)."""
     from types import SimpleNamespace
