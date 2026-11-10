@@ -30,6 +30,7 @@ from vllm.model_executor.layers.fused_moe.experts.cpu_moe import (
     X86CPUUnquantizedExperts,
 )
 from vllm.model_executor.layers.fused_moe.router.cpu_router import (
+    CPURouter,
     _softmax_topk,
     select_experts,
 )
@@ -740,6 +741,52 @@ def test_select_experts_sigmoid_scoring(with_bias):
     torch.testing.assert_close(
         topk_ids.gather(1, order).to(torch.int64),
         expected_ids.gather(1, expected_order),
+    )
+    torch.testing.assert_close(
+        topk_weights.gather(1, order), expected_weights.gather(1, expected_order)
+    )
+
+
+@pytest.mark.parametrize("routed_scaling_factor", [1.0, 2.5])
+@pytest.mark.parametrize("renormalize", [True, False])
+def test_cpu_router_softmax_correction_bias(renormalize, routed_scaling_factor):
+    """Ungrouped softmax routing with a correction bias, as Ernie 4.5 MoE uses,
+    must match FusedTopKBiasRouter: the bias orders the selection only, the
+    weights come from the unbiased probabilities, then renormalize and scale."""
+    set_random_seed(0)
+    num_tokens, expert_num, topk = 7, 16, 4
+    router_logits = torch.randn(num_tokens, expert_num)
+    bias = torch.randn(expert_num)
+
+    router = CPURouter(
+        top_k=topk,
+        global_num_experts=expert_num,
+        renormalize=renormalize,
+        scoring_func="softmax",
+        routed_scaling_factor=routed_scaling_factor,
+        e_score_correction_bias=bias,
+    )
+    topk_weights, topk_ids = router.select_experts(
+        hidden_states=torch.empty(num_tokens, 0), router_logits=router_logits
+    )
+
+    scores = router_logits.softmax(dim=-1)
+    expected_ids = torch.topk(scores + bias, k=topk, dim=-1)[1]
+    unbiased_ids = torch.topk(scores, k=topk, dim=-1)[1]
+    assert not torch.equal(expected_ids.sort()[0], unbiased_ids.sort()[0])
+    expected_weights = scores.gather(1, expected_ids)
+    if renormalize:
+        expected_weights = expected_weights / expected_weights.sum(-1, keepdim=True)
+    expected_weights = expected_weights * routed_scaling_factor
+
+    assert topk_ids.dtype == torch.int32
+    order = topk_ids.argsort(dim=-1)
+    expected_order = expected_ids.argsort(dim=-1)
+    torch.testing.assert_close(
+        topk_ids.gather(1, order).to(torch.int64),
+        expected_ids.gather(1, expected_order),
+        rtol=0,
+        atol=0,
     )
     torch.testing.assert_close(
         topk_weights.gather(1, order), expected_weights.gather(1, expected_order)

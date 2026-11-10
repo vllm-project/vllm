@@ -236,11 +236,12 @@ class CPURouter(BaseRouter):
                 hash_indices_table=self._hash_indices_table,
             )
         elif self.custom_routing_function is None:
-            if self.scoring_func == "softmax":
+            if self.scoring_func == "softmax" and self.e_score_correction_bias is None:
                 return _softmax_topk(router_logits, self.top_k, self.renormalize)
-            elif self.scoring_func == "sigmoid":
+            elif self.scoring_func in ("softmax", "sigmoid"):
                 # One expert group makes the group masking a no-op, leaving the
-                # plain sigmoid top-k that MiniMax2 routing asks for.
+                # plain (optionally bias-corrected) top-k that MiniMax2 and
+                # Ernie 4.5 routing ask for.
                 return _grouped_topk(
                     gating_output=router_logits,
                     topk=self.top_k,
