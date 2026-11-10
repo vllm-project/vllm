@@ -1,5 +1,6 @@
 Qwen3-30B-A3B-Fp8-AutoFp8-deepgemm.yaml
 Qwen3-30B-A3B-BF16-fi-cutlass.yaml
+Qwen3-30B-A3B-BF16-fi-cutedsl.yaml
 Qwen3-30B-A3B-Fp8-AutoFp8-marlin.yaml
 Qwen3-30B-A3B-Fp8-AutoFp8-triton.yaml
 Qwen3-30B-A3B-BF16-triton.yaml

@@ -681,3 +681,45 @@ def test_quantization_only_backend_falls_back_to_auto(moe_backend):
     assert select_unquantized_moe_backend(
         moe_config=moe_config
     ) == select_unquantized_moe_backend(moe_config=make_dummy_moe_config())
+
+
+@pytest.mark.parametrize(
+    ("moe_backend", "has_bias", "expected_backend"),
+    [
+        ("auto", False, UnquantizedMoeBackend.TRITON),
+        ("flashinfer_cutedsl", False, UnquantizedMoeBackend.FLASHINFER_CUTEDSL),
+        ("flashinfer_cutedsl", True, None),
+    ],
+)
+@patch(
+    "vllm.model_executor.layers.fused_moe.experts.flashinfer_cutedsl_sm90_moe."
+    "has_flashinfer_cutedsl_moe_bf16",
+    return_value=True,
+)
+def test_select_flashinfer_cutedsl_sm90_backend_is_opt_in(
+    mock_has_cutedsl_bf16, moe_backend, has_bias, expected_backend
+):
+    """On Hopper the SM90 CuTe-DSL experts are used only when requested with
+    `--moe-backend flashinfer_cutedsl`, and refuse expert biases."""
+    with (
+        patch.object(current_platform, "is_cuda", return_value=True),
+        patch.object(current_platform, "is_rocm", return_value=False),
+        patch.object(current_platform, "is_cpu", return_value=False),
+        patch.object(current_platform, "is_xpu", return_value=False),
+        patch.object(current_platform, "is_tpu", return_value=False),
+        patch.object(current_platform, "is_out_of_tree", return_value=False),
+        patch.object(
+            current_platform,
+            "is_device_capability_family",
+            side_effect=lambda family: family == 90,
+        ),
+    ):
+        moe_config = make_dummy_moe_config(hidden_dim=128, intermediate_size=128)
+        moe_config.moe_backend = moe_backend
+        moe_config.has_bias = has_bias
+        if expected_backend is None:
+            with pytest.raises(ValueError, match="expert biases"):
+                select_unquantized_moe_backend(moe_config=moe_config)
+            return
+        selected_backend, _ = select_unquantized_moe_backend(moe_config=moe_config)
+    assert selected_backend == expected_backend

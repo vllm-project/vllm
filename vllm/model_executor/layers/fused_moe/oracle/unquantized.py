@@ -23,6 +23,7 @@ from vllm.model_executor.layers.fused_moe.oracle.base import (
 from vllm.model_executor.layers.quantization.utils.flashinfer_utils import (
     align_moe_weights_for_fi,
     convert_moe_weights_to_flashinfer_trtllm_block_layout,
+    interleave_w13_up_gate_for_flashinfer_cutedsl_sm90,
     swap_w13_to_w31,
 )
 from vllm.platforms import current_platform
@@ -37,6 +38,7 @@ logger = init_logger(__name__)
 class UnquantizedMoeBackend(Enum):
     FLASHINFER_TRTLLM = "FlashInfer TRTLLM"
     FLASHINFER_CUTLASS = "FlashInfer CUTLASS"
+    FLASHINFER_CUTEDSL = "FlashInfer CuTeDSL"
     AITER = "ROCm AITER"
     TRITON = "TRITON"
     BATCHED_TRITON = "BATCHED_TRITON"
@@ -133,6 +135,13 @@ def backend_to_kernel_cls(
 
         return [FlashInferExperts]
 
+    elif backend == UnquantizedMoeBackend.FLASHINFER_CUTEDSL:
+        from vllm.model_executor.layers.fused_moe.experts.flashinfer_cutedsl_sm90_moe import (  # noqa: E501
+            FlashInferCuteDSLSm90Experts,
+        )
+
+        return [FlashInferCuteDSLSm90Experts]
+
     elif backend == UnquantizedMoeBackend.AITER:
         from vllm.model_executor.layers.fused_moe.experts.rocm_aiter_moe import (
             AiterUnquantizedExperts,
@@ -193,6 +202,7 @@ def map_unquantized_backend(runner_backend: MoEBackend) -> UnquantizedMoeBackend
         "batched_triton": UnquantizedMoeBackend.BATCHED_TRITON,
         "flashinfer_trtllm": UnquantizedMoeBackend.FLASHINFER_TRTLLM,
         "flashinfer_cutlass": UnquantizedMoeBackend.FLASHINFER_CUTLASS,
+        "flashinfer_cutedsl": UnquantizedMoeBackend.FLASHINFER_CUTEDSL,
         "aiter": UnquantizedMoeBackend.AITER,
     }
     if backend := mapping.get(runner_backend):
@@ -367,6 +377,14 @@ def unquantized_round_up_hidden_size_and_intermediate_size(
     """Round up dimensions before allocation to satisfy the selected kernel."""
     if backend == UnquantizedMoeBackend.FLASHINFER_TRTLLM:
         intermediate_size = round_up(intermediate_size, 128)
+    elif backend == UnquantizedMoeBackend.FLASHINFER_CUTEDSL:
+        from vllm.model_executor.layers.fused_moe.experts.flashinfer_cutedsl_sm90_moe import (  # noqa: E501
+            FLASHINFER_CUTEDSL_SM90_INTERMEDIATE_ALIGNMENT,
+        )
+
+        intermediate_size = round_up(
+            intermediate_size, FLASHINFER_CUTEDSL_SM90_INTERMEDIATE_ALIGNMENT
+        )
     elif backend == UnquantizedMoeBackend.AITER:
         intermediate_size = round_up(
             intermediate_size, aiter_moe_intermediate_alignment(intermediate_size)
@@ -444,6 +462,15 @@ def convert_to_unquantized_kernel_format(
             # Swap halves to arrange as [w3; w1] (kernel expectation)
             # Non-gated MoE: w13 is a single projection, no need to swap.
             w13_weight = swap_w13_to_w31(w13_weight)
+
+    elif unquantized_backend == UnquantizedMoeBackend.FLASHINFER_CUTEDSL:
+        if moe_config.activation == MoEActivation.SWIGLUOAI:
+            # gpt-oss interleaves the gate/up rows; unpack to `[gate; up]`.
+            w13_weight = torch.cat([w13_weight[:, 0::2], w13_weight[:, 1::2]], dim=1)
+        _zero_intermediate_padding(moe_config, w13_weight, w2_weight)
+        if moe_config.is_act_and_mul:
+            w13_weight = interleave_w13_up_gate_for_flashinfer_cutedsl_sm90(w13_weight)
+        return w13_weight.contiguous(), w2_weight.contiguous()
 
     elif unquantized_backend == UnquantizedMoeBackend.FLASHINFER_TRTLLM:
         is_act_and_mul = moe_config.is_act_and_mul
