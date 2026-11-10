@@ -75,6 +75,9 @@ from vllm.model_executor.layers.llama import (
 )
 from vllm.model_executor.layers.quantization import QuantizationConfig
 from vllm.model_executor.layers.quantization.modelopt import ModelOptNvFp4Config
+from vllm.model_executor.layers.quantization.online.base import (
+    OnlineQuantizationConfig,
+)
 from vllm.model_executor.layers.rotary_embedding import get_rope
 from vllm.model_executor.layers.rotary_embedding.base import RotaryEmbedding
 from vllm.model_executor.layers.utils import dispatch_unquantized_gemm
@@ -1973,8 +1976,12 @@ class MuseSparkForCausalLM(LlamaForCausalLM, SupportsLoRA, MixtureOfExperts):
     decoder_layer_cls = MuseSparkDecoderLayer
     supported_quantization_configs: tuple[type[QuantizationConfig], ...] = (
         ModelOptNvFp4Config,
+        OnlineQuantizationConfig,
     )
-    supported_quantization_description = "NVFP4 (modelopt_fp4)"
+    supported_quantization_description = (
+        "NVFP4 (modelopt_fp4) or online quantization (routed experts: "
+        "quantization_config={'moe': 'fp8_per_channel'})"
+    )
 
     packed_modules_mapping = {
         "qkv_proj": ["q_proj", "k_proj", "v_proj"],

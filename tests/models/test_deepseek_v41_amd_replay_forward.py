@@ -213,6 +213,7 @@ def _model(monkeypatch):
     vllm_config = SimpleNamespace(
         model_config=SimpleNamespace(hf_config=config, dtype=torch.bfloat16),
         quant_config=None,
+        kernel_config=SimpleNamespace(moe_backend="auto"),
         cache_config=SimpleNamespace(swa_bounded_replay=True),
         parallel_config=SimpleNamespace(
             prefill_context_parallel_size=1,

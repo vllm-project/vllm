@@ -188,7 +188,6 @@ _TEXT_GENERATION_MODELS = {
     "PanguProMoEV2ForCausalLM": ("openpangu", "PanguProMoEV2ForCausalLM"),
     "PanguUltraMoEForCausalLM": ("openpangu", "PanguUltraMoEForCausalLM"),
     "Param2MoEForCausalLM": ("param2moe", "Param2MoEForCausalLM"),
-    "Phi3ForCausalLM": ("phi3", "Phi3ForCausalLM"),
     "PhiMoEForCausalLM": ("phimoe", "PhiMoEForCausalLM"),
     "Plamo3ForCausalLM": ("plamo3", "Plamo3ForCausalLM"),
     "Qwen2ForCausalLM": ("qwen2", "Qwen2ForCausalLM"),
@@ -231,7 +230,6 @@ _EMBEDDING_MODELS = {
     ),
     "ModernBertModel": ("modernbert", "ModernBertModel"),
     "NomicBertModel": ("bert_with_rope", "NomicBertModel"),
-    "Phi3ForCausalLM": ("phi3", "Phi3ForCausalLM"),
     "Qwen2Model": ("qwen2", "Qwen2ForCausalLM"),
     "Qwen2ForCausalLM": ("qwen2", "Qwen2ForCausalLM"),
     "RobertaForMaskedLM": ("roberta", "RobertaEmbeddingModel"),
@@ -783,6 +781,7 @@ _TRANSFORMERS_SUPPORTED_MODELS = {
     "Olmo3ForCausalLM": ("transformers", "TransformersForCausalLM"),
     "OlmoeForCausalLM": ("transformers", "TransformersMoEForCausalLM"),
     "PhiForCausalLM": ("transformers", "TransformersForCausalLM"),
+    "Phi3ForCausalLM": ("transformers", "TransformersForCausalLM"),
     "SeedOssForCausalLM": ("transformers", "TransformersForCausalLM"),
     "SmolLM3ForCausalLM": ("transformers", "TransformersForCausalLM"),
     "StableLmForCausalLM": ("transformers", "TransformersForCausalLM"),
@@ -808,7 +807,7 @@ _TRANSFORMERS_SUPPORTED_MODELS = {
     ),
     "VibeVoiceAsrForConditionalGeneration": (
         "transformers",
-        "TransformersMultiModalForCausalLM",
+        "TransformersMultiModalForTranscription",
     ),
 }
 
@@ -823,6 +822,10 @@ _TRANSFORMERS_BACKEND_MODELS = {
     "TransformersMultiModalForCausalLM": (
         "transformers",
         "TransformersMultiModalForCausalLM",
+    ),
+    "TransformersMultiModalForTranscription": (
+        "transformers",
+        "TransformersMultiModalForTranscription",
     ),
     "TransformersMultiModalMoEForCausalLM": (
         "transformers",
