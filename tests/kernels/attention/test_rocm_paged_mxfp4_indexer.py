@@ -646,3 +646,56 @@ def test_selection_from_bf16_matches_torch(monkeypatch, step, ratio, block):
         )
         agree.append(_recall(out[mine], ref))
     assert torch.cat(agree).mean().item() >= 0.99
+
+
+@pytest.mark.parametrize("rows, heads", [(128, HEADS), (512, HEADS), (4097, 64)])
+def test_q_quant_matches_aiter_and_projects_weights(rows, heads):
+    """The Q quant writes aiter's bytes and can project rounded-once weights."""
+    from aiter.ops.triton.rope.q_rope_mxfp4_quant import q_rope_mxfp4_quant
+
+    g = torch.Generator(device=DEVICE).manual_seed(rows)
+    q = torch.randn(rows, heads, HEAD_DIM, generator=g, device=DEVICE) * 3
+    q = q.to(torch.bfloat16)
+    pos = torch.randint(0, MAX_LEN, (rows,), generator=g, device=DEVICE)
+    cos_sin = torch.randn(MAX_LEN, 64, generator=g, device=DEVICE)
+    hidden = torch.randn(rows, 5120, generator=g, device=DEVICE).to(torch.bfloat16)
+    weight = torch.randn(heads, 5120, generator=g, device=DEVICE) * 0.02
+    weight = weight.to(torch.bfloat16)
+    weights = (hidden.float() @ weight.float().T).to(torch.bfloat16)
+    scales = (HEAD_DIM**-0.5, heads**-0.5)
+    scale = scales[0] * scales[1]
+    e_q, e_scale, e_weights = q_rope_mxfp4_quant(q, pos, cos_sin, weights, scale)
+    e_scale = e_scale.view(torch.int32).squeeze(-1)
+
+    (q_fp4, q_scale), w = rocm_mxfp4_indexer_q_quant(pos, q, cos_sin, weights, *scales)
+    assert torch.equal(q_fp4, e_q) and torch.equal(q_scale, e_scale)
+    assert torch.equal(w, e_weights)
+    assert ops.rocm_mxfp4_indexer_q_projects_weights(hidden, weight) == (rows <= 128)
+    assert not ops.rocm_mxfp4_indexer_q_projects_weights(
+        hidden.new_empty(129, 5120), weight
+    )
+    if rows > 128:
+        return
+
+    def project(r, dtype=torch.bfloat16):
+        return rocm_mxfp4_indexer_q_quant(
+            pos[r],
+            q[r],
+            cos_sin,
+            None,
+            *scales,
+            hidden_states=hidden[r].to(dtype),
+            weights_proj=weight.to(dtype),
+        )
+
+    (q_fp4, q_scale), w = project(slice(None))
+    assert torch.equal(q_fp4, e_q) and torch.equal(q_scale, e_scale)
+    full = project(slice(None), torch.float16)[1]
+    alone = [project(slice(r, r + 1), torch.float16)[1] for r in range(rows)]
+    assert torch.equal(torch.cat(alone), full)
+    exact = hidden.double() @ weight.double().T
+    ulp = torch.exp2(torch.floor(torch.log2(exact.abs().clamp(min=2.0**-120))) - 7)
+    bound = ulp / 2 + (hidden.double().abs() @ weight.double().abs().T) * 2.0**-18
+    assert bool(((w / scale).double() - exact).abs().le(bound).all())
+    rounded = exact.float().to(torch.bfloat16).float()
+    assert int((w / scale != rounded).sum()) <= 1 + w.numel() // 1000

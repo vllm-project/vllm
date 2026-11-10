@@ -31,6 +31,10 @@ from vllm.v1.attention.ops.rocm_aiter_mla_sparse import (
     _apply_candidate_mask_strided,
     _max_decode_logits_rows,
 )
+from vllm.v1.attention.ops.rocm_mxfp4_indexer_q import (
+    can_project_weights,
+    q_rope_mxfp4_quant,
+)
 from vllm.v1.worker.workspace import current_workspace_manager
 
 if TYPE_CHECKING:
@@ -122,14 +126,13 @@ def rocm_paged_mxfp4_cache_layout(
 
 
 @functools.cache
-def _aiter_indexer_cache_ops() -> tuple[Callable[..., None], Callable[..., tuple]]:
-    """The aiter indexer key writer and query quantizer."""
+def _aiter_indexer_k_store() -> Callable[..., None]:
+    """The aiter indexer key writer."""
     from aiter.ops.triton.fusions.k_norm_rope_mxfp4_cache import (
         k_norm_rope_mxfp4_cache,
     )
-    from aiter.ops.triton.rope.q_rope_mxfp4_quant import q_rope_mxfp4_quant
 
-    return k_norm_rope_mxfp4_cache, q_rope_mxfp4_quant
+    return k_norm_rope_mxfp4_cache
 
 
 def rocm_mxfp4_indexer_k_store(
@@ -150,8 +153,7 @@ def rocm_mxfp4_indexer_k_store(
     query heads."""
     assert use_fp4_cache, "the ROCm indexer cache op writes MXFP4 only"
     layout = rocm_paged_mxfp4_cache_layout(num_heads, k_pre.shape[1], k_cache.shape[1])
-    k_norm_rope_mxfp4_cache, _ = _aiter_indexer_cache_ops()
-    k_norm_rope_mxfp4_cache(
+    _aiter_indexer_k_store()(
         k_pre,
         positions,
         cos_sin_cache,
@@ -164,30 +166,51 @@ def rocm_mxfp4_indexer_k_store(
     )
 
 
+ROCM_MXFP4_Q_PROJECT_MAX_ROWS = 128
+
+
+def rocm_mxfp4_indexer_q_projects_weights(
+    hidden_states: torch.Tensor, weights_proj: torch.Tensor
+) -> bool:
+    """Whether `rocm_mxfp4_indexer_q_quant` should project these rows' weights."""
+    return (
+        not envs.VLLM_BATCH_INVARIANT
+        and hidden_states.shape[0] <= ROCM_MXFP4_Q_PROJECT_MAX_ROWS
+        and can_project_weights(hidden_states, weights_proj, weights_proj.shape[0])
+    )
+
+
 def rocm_mxfp4_indexer_q_quant(
     positions: torch.Tensor,
     index_q: torch.Tensor,
     index_q_cos_sin_cache: torch.Tensor,
-    index_weights: torch.Tensor,
+    index_weights: torch.Tensor | None,
     index_weights_softmax_scale: float,
     index_weights_head_scale: float,
     use_fp4: bool = True,
     weights_out_dtype: torch.dtype = torch.float32,
+    *,
+    hidden_states: torch.Tensor | None = None,
+    weights_proj: torch.Tensor | None = None,
 ) -> tuple[tuple[torch.Tensor, torch.Tensor], torch.Tensor]:
-    """`fused_indexer_q_rope_quant` for the ROCm MXFP4 indexer, on aiter's op:
+    """`fused_indexer_q_rope_quant` for the ROCm MXFP4 indexer, on the aiter port:
     ((packed [T, H, D // 2], e8m0 as one int32 per head [T, H]), fp32
     weights)."""
     assert use_fp4 and weights_out_dtype == torch.float32, (
         "the ROCm indexer quantizes Q to MXFP4 and scores with fp32 weights"
     )
-    _, q_rope_mxfp4_quant = _aiter_indexer_cache_ops()
+    if index_weights is not None:
+        hidden_states = weights_proj = None
     q_packed, q_scale, weights_out = q_rope_mxfp4_quant(
         index_q,
         positions,
         index_q_cos_sin_cache,
         index_weights,
         index_weights_softmax_scale * index_weights_head_scale,
+        hidden_states=hidden_states,
+        weights_proj=weights_proj,
     )
+    assert weights_out is not None
     return (q_packed, q_scale.view(torch.int32).squeeze(-1)), weights_out
 
 

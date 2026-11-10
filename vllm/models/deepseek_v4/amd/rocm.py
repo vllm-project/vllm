@@ -2054,7 +2054,7 @@ class DeepseekV4RocmMxfp4Indexer(DeepseekV4Indexer):
         return RocmSparseAttnIndexer
 
     def _register_q_quant_warmup(self) -> None:
-        # The shared MXFP4 Q kernel packs FP4 with CUDA PTX; aiter's op runs here.
+        # The shared MXFP4 Q kernel packs FP4 with CUDA PTX; the ROCm port runs here.
         pass
 
     def _q_rope_quant(
