@@ -43,9 +43,29 @@ vllm serve $MODEL \
 On ROCm, `VLLM_ROCM_VIT_FP8_PAD_HEAD_DIM=128` zero-pads head_dims below 128
 to 128 so AITER runs its assembly FP8 head_dim-128 kernel instead of its
 CK-tile kernel. The attention result is the same (padded columns are zero and
-are sliced off). It is opt-in because it has only been validated on MI355X
-(gfx950) with head_dim 80, where it halves the attention time of large images;
-padding a smaller head_dim such as 64 or 72 nearly doubles the work.
+are sliced off). To confirm the asm kernel ran, look for `fmha_fwd_hd128_fp8`
+in a profile; an AITER build without it falls back to a slower kernel without
+a warning.
+
+This option is opt-in, and it helps only large images. Measured per 32-layer
+ViT pass (head_dim 80, MI350X, `ROCM_AITER_FA`), against the BF16 CK-tile
+head_dim-80 path:
+
+| Image | Patches | Speed vs BF16 |
+|---|---|---|
+| 2048x1600 | 16,416 | 1.72x faster |
+| 768x1024 | 4,144 | 0.86x (slower) |
+
+The break-even is about 5,000 patches in a single-image pass. Below it the
+extra Q/K/V pad-quantize launches and the output slice cost more than the
+faster kernel saves. At 16,416 patches the attention call alone is about 1.7x
+faster (2.43 to 1.42 ms). End-to-end serving gains are smaller and depend on
+the workload. It has only been validated on MI355X/MI350X (gfx950) with
+head_dim 80, and padding a smaller head_dim such as 64 or 72 nearly doubles
+the work.
+
+This option is a workaround for AITER lacking a native head_dim-80 asm FP8
+kernel. It should be removed once AITER provides one.
 
 By default (no scale file), **dynamic scaling** is used: a 16-entry circular
 buffer of observed Q/K/V amax values drives per-forward scale updates. This
