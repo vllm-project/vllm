@@ -26,10 +26,15 @@ with suppress(Exception):
 
 
 @pytest.mark.parametrize(
-    "ordinary_rank,failed",
-    [(None, False), (0, False), (1, False), (0, True), (1, True)],
+    "ordinary_rank,failed,invalid",
+    [(None, False, False)]
+    + [
+        (rank, failed, invalid)
+        for rank in (0, 1)
+        for failed, invalid in ((False, False), (False, True), (True, False))
+    ],
 )
-def test_early_receives_share_normal_quorum(ordinary_rank, failed):
+def test_early_receives_share_normal_quorum(ordinary_rank, failed, invalid):
     aggregator = EarlyKVOutputAggregator(2)
 
     def aggregate(kv_output=None):
@@ -42,13 +47,12 @@ def test_early_receives_share_normal_quorum(ordinary_rank, failed):
     normal = KVConnectorOutput()
     for rank in range(2):
         if rank == ordinary_rank:
-            # A worker reports a load in its step output only with an error:
-            # a failure, or (Mooncake Store) invalid blocks alone.
+            # Ordinary votes include successful NIXL fallbacks and failures.
             normal = aggregate(
                 KVConnectorOutput(
                     finished_recving={"request"},
                     failed_recving={"request"} if failed else set(),
-                    invalid_block_ids=set() if failed else {7},
+                    invalid_block_ids={7} if invalid else set(),
                 ),
             )
         else:

@@ -6,7 +6,6 @@ import time
 from typing import TYPE_CHECKING
 
 import numpy as np
-import torch
 
 from vllm.distributed.kv_transfer.kv_connector.utils import BlockIds, EngineId
 from vllm.distributed.kv_transfer.kv_connector.v1.base import KVConnectorTransferResults
@@ -38,9 +37,8 @@ _KV_BLOCKS_EXPIRY_SAFETY_MARGIN = 5.0
 class NixlPullConnectorWorker(NixlBaseConnectorWorker):
     """Pull-specific (READ) worker logic."""
 
-    # With early receive: successful receives held for the next poll, each
-    # batch with the event that ends its post-processing, if it had any.
-    _early_recved: list[tuple[torch.Event | None, set[str]]] | None = None
+    # Successful receives held for the next poll.
+    _early_recved: set[str] | None = None
 
     def __init__(
         self,
@@ -59,61 +57,66 @@ class NixlPullConnectorWorker(NixlBaseConnectorWorker):
             )
         super().__init__(vllm_config, engine_id, kv_cache_config)
         if self.kv_transfer_config.enable_early_recv:
-            self._early_recved = []
+            self._early_recved = set()
         # Registration generation of each remote engine's loaded agent.
         self._remote_registration_generations: dict[EngineId, int] = {}
 
+    def _can_early_recv(self, req_id: str) -> bool:
+        if req_id in self._recv_failures:
+            return False
+        meta = self._recving_metadata[req_id]
+        assert meta.remote is not None and self.transfer_topo is not None
+        remote_info = self.transfer_topo.get_engine_info(meta.remote.engine_id)
+        # Post-processing stays on the ordinary step path until heterogeneous
+        # receive/abort correctness has been established.
+        return (
+            not self.use_host_buffer
+            and not self.enable_permute_local_kv
+            and not self.enable_heterogeneous_attn_post_process
+            and self.block_size == remote_info.remote_block_size
+            and self._physical_blocks_per_logical_kv_block
+            == remote_info.remote_physical_blocks_per_logical
+            and not any(meta.region_blocks_to_zero or ())
+        )
+
     def _finish_recved(
         self, done_recving: set[str], failed_recv_reqs: set[str]
-    ) -> bool:
-        post_processed = super()._finish_recved(done_recving, failed_recv_reqs)
-        succeeded = done_recving - failed_recv_reqs
-        if self._early_recved is not None and succeeded:
-            # Hold post-processed receives until the device has run the work;
-            # reporting an aborted request allows its blocks to be freed.
-            event = None
-            # CPU post-processing is synchronous and has no device events.
-            if post_processed and self.device_type != "cpu":
-                event = torch.Event()
-                event.record()
-            self._early_recved.append((event, succeeded))
-        return post_processed
+    ) -> None:
+        early = (
+            {r for r in done_recving - failed_recv_reqs if self._can_early_recv(r)}
+            if self._early_recved is not None
+            else set()
+        )
+        super()._finish_recved(done_recving, failed_recv_reqs)
+        if self._early_recved is not None:
+            self._early_recved.update(early)
 
     def get_transfer_results(self) -> KVConnectorTransferResults:
         results = super().get_transfer_results()
         if self._early_recved is not None:
-            # _finish_recved() held the successful ones for the next poll.
-            results.finished_recving.intersection_update(results.failed_recving)
+            results.finished_recving.difference_update(self._early_recved)
         return results
 
     def has_pending_recving(self) -> bool:
         return self._early_recved is not None and (
             bool(self._early_recved)
-            or any(r not in self._recv_failures for r in self._recving_transfers)
+            or any(self._can_early_recv(r) for r in self._recving_transfers)
         )
 
     def poll_finished_recving(self) -> set[str]:
         if not self.has_pending_recving():
             return set()
         assert self._early_recved is not None
-        # Failed requests keep their handles for normal collection, which
-        # retries releasing them once per step.
-        healthy = [r for r in self._recving_transfers if r not in self._recv_failures]
-        transfers = {r: self._recving_transfers.pop(r) for r in healthy}
+        # Ineligible and failed requests stay untouched for ordinary collection.
+        eligible = [r for r in self._recving_transfers if self._can_early_recv(r)]
+        transfers = {r: self._recving_transfers.pop(r) for r in eligible}
         done, failed = self._pop_done_transfers(transfers)
-        # Put back what is still in progress.
         self._recving_transfers.update(transfers)
         self._recv_failures.update(failed)
         if done := done - failed:
             self._finish_recved(done, set())
-        finished = set[str]()
-        held = []
-        for event, req_ids in self._early_recved:
-            if event is None or event.query():
-                finished |= req_ids
-            else:
-                held.append((event, req_ids))
-        self._early_recved = held
+        finished = self._early_recved
+        self._early_recved = set()
         return finished
 
     def start_load_kv(self, metadata: NixlConnectorMetadata):

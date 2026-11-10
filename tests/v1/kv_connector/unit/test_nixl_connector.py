@@ -549,6 +549,7 @@ class FakeNixlConnectorWorker(NixlConnectorWorker):
         hand_shake_latency: float = 1.8,
         kv_cache_layout="LBHNC",
         kv_cache_config=None,
+        remote_block_size=None,
         **kwargs,
     ):
         if kv_cache_config is None:
@@ -556,11 +557,18 @@ class FakeNixlConnectorWorker(NixlConnectorWorker):
                 block_size=args[0].cache_config.block_size
             )
         super().__init__(*args, kv_cache_config=kv_cache_config, **kwargs)
+        self._remote_block_size = remote_block_size or self.block_size
         self._hand_shake_latency = hand_shake_latency
         self.kv_cache_layout = kv_cache_layout
         # Mock register_kv_caches attributes needed for tests that do not call it.
-        self.src_xfer_handles_by_block_size = {self.block_size: 1}
+        self.src_xfer_handles_by_block_size = {
+            self.block_size: 1,
+            self._remote_block_size: 1,
+        }
         self.src_blocks_data = np.empty((0, 5), dtype=np.uint64)
+        self.src_blocks_data_by_block_size[self._remote_block_size] = (
+            self.src_blocks_data
+        )
         rep_spec = self.kv_cache_config.kv_cache_groups[0].kv_cache_spec
         test_shape = compute_layer_kv_cache_shape_bytes(rep_spec, 1)
         self.transfer_topo = TransferTopology(
@@ -613,7 +621,10 @@ class FakeNixlConnectorWorker(NixlConnectorWorker):
         # Adjust remote block length metadata to satisfy heterogeneous TP
         # invariants enforced during handshake validation.  Use per-rank
         # head ratio (not tp_ratio) to account for GQA replication capping.
-        remote_block_lens = list(self.block_len_per_layer)
+        remote_block_lens = [
+            size * self._remote_block_size // self.block_size
+            for size in self.block_len_per_layer
+        ]
         tp_ratio = self.transfer_topo.tp_ratio(remote_tp_size)
         total_kv = self.transfer_topo.total_num_kv_heads
         local_heads = self.transfer_topo.local_physical_heads
@@ -639,7 +650,7 @@ class FakeNixlConnectorWorker(NixlConnectorWorker):
                     block_lens=remote_block_lens,
                     block_strides=remote_block_lens,
                     kv_cache_layout="LBHNC",
-                    block_size=self.block_size,
+                    block_size=self._remote_block_size,
                     ssm_sizes=(0, 0),
                     attn_backend_name=self.backend_name,
                     physical_blocks_per_logical_kv_block=1,
@@ -2543,6 +2554,7 @@ def recv_worker():
     worker.transfer_topo.get_engine_info.return_value = SimpleNamespace(
         remote_block_size=16, remote_physical_blocks_per_logical=1
     )
+    worker.block_size = 16
     worker._physical_blocks_per_logical_kv_block = 1
     worker._recving_metadata = {"request": MagicMock(local_block_ids=([1, 2, 3],))}
     worker._recving_transfers = defaultdict(list)
@@ -4570,7 +4582,7 @@ def test_recv_failure_waits_for_sibling_transfer(recv_worker, sibling_state):
 @pytest.mark.parametrize("collect_in_step", [False, True])
 def test_early_recv_reports_successes_only_through_poll(recv_worker, collect_in_step):
     worker = recv_worker
-    worker._early_recved = []
+    worker._early_recved = set()
     worker._recving_transfers["request"] = [101]
     worker.nixl_wrapper.check_xfer_state.return_value = "PROC"
     assert worker.poll_finished_recving() == set()
@@ -4583,44 +4595,19 @@ def test_early_recv_reports_successes_only_through_poll(recv_worker, collect_in_
 
 
 @pytest.mark.cpu_test
-@pytest.mark.parametrize("collect_in_step", [False, True])
-def test_early_recv_waits_for_post_processing(
-    recv_worker, monkeypatch, collect_in_step
-):
-    """A request aborted before it runs frees its blocks once reported, so a
-    pull is reported only after its post-processing has run on the device."""
-    worker = recv_worker
-    worker.device_type = "cuda"
-    worker._early_recved = []
-    worker._recving_metadata["request"].region_blocks_to_zero = ([7],)
-    worker._zero_region_blocks = MagicMock()
-    event = MagicMock()
-    event.query.return_value = False
-    monkeypatch.setattr(torch, "Event", lambda: event)
-    worker._recving_transfers["request"] = [101]
-    worker.nixl_wrapper.check_xfer_state.return_value = "DONE"
-    if collect_in_step:
-        assert worker.get_transfer_results().finished_recving == set()
-    assert worker.poll_finished_recving() == set()
-    event.record.assert_called_once()
-    assert worker.has_pending_recving()
-    event.query.return_value = True
-    assert worker.poll_finished_recving() == {"request"}
-    assert not worker.has_pending_recving()
-
-
-@pytest.mark.cpu_test
-@pytest.mark.parametrize("collect_in_step", [False, True])
+@pytest.mark.parametrize("permute,remote_block_size", [(True, 32), (False, 16)])
 @patch(
     "vllm.distributed.kv_transfer.kv_connector.v1.nixl.base_worker.NixlWrapper",
     FakeNixlWrapper,
 )
-def test_early_recv_cpu_post_processing(dist_init, monkeypatch, collect_in_step):
-    """Synchronous CPU layout conversion completes once without a device event."""
+def test_early_recv_post_processing_uses_step(
+    dist_init, monkeypatch, permute, remote_block_size
+):
+    """Layout conversion and heterogeneous blocks finish only through step output."""
     from vllm.distributed.kv_transfer.kv_connector.v1.nixl import base_worker
     from vllm.platforms.cpu import CpuPlatform
 
-    config = create_vllm_config(block_size=32, enable_permute_local_kv=True)
+    config = create_vllm_config(block_size=32, enable_permute_local_kv=permute)
     config.kv_transfer_config.kv_buffer_device = "cpu"
     config.kv_transfer_config.enable_early_recv = True
     monkeypatch.setattr(base_worker, "current_platform", CpuPlatform())
@@ -4629,7 +4616,11 @@ def test_early_recv_cpu_post_processing(dist_init, monkeypatch, collect_in_step)
     event_factory = torch.Event
     monkeypatch.setattr(torch, "Event", lambda: event_factory(device="cpu"))
     worker = FakeNixlConnectorWorker(
-        config, "cpu", hand_shake_latency=0, kv_cache_layout="LBNHC"
+        config,
+        "cpu",
+        hand_shake_latency=0,
+        kv_cache_layout="LBNHC" if permute else "LBHNC",
+        remote_block_size=remote_block_size,
     )
     try:
         cache = (
@@ -4639,8 +4630,13 @@ def test_early_recv_cpu_post_processing(dist_init, monkeypatch, collect_in_step)
             .reshape(3, 32, 4, 32)
             .transpose(1, 2)
         )
+        if not permute:
+            cache.fill_(3)
         expected = cache.clone()
-        expected[1] = cache[1].transpose(0, 1).reshape(4, 32, 32)
+        if permute:
+            expected[1] = cache[1].transpose(0, 1).reshape(4, 32, 32)
+        else:
+            expected[1, :, 16:] = 0
         worker.device_kv_caches = {"layer0": cache, "layer2": cache.clone()}
         metadata = NixlConnectorMetadata()
         metadata.add_new_req_to_recv(
@@ -4653,6 +4649,7 @@ def test_early_recv_cpu_post_processing(dist_init, monkeypatch, collect_in_step)
                 "remote_host": "localhost",
                 "remote_port": 1234,
                 "remote_tp_size": 1,
+                "remote_num_tokens": remote_block_size,
             },
         )
         worker.start_load_kv(metadata)
@@ -4660,9 +4657,8 @@ def test_early_recv_cpu_post_processing(dist_init, monkeypatch, collect_in_step)
         finished = set[str]()
         while not finished and time.monotonic() < deadline:
             worker.start_load_kv(NixlConnectorMetadata())
-            if collect_in_step:
-                assert worker.get_transfer_results().finished_recving == set()
-            finished = worker.poll_finished_recving()
+            assert worker.poll_finished_recving() == set()
+            finished = worker.get_transfer_results().finished_recving
         assert finished == {"request"}
         for converted in worker.device_kv_caches.values():
             assert torch.equal(converted, expected)
@@ -4687,7 +4683,7 @@ def test_early_recv_rejects_pipeline_parallel():
 @pytest.mark.cpu_test
 def test_early_recv_leaves_failures_to_the_step(recv_worker):
     worker = recv_worker
-    worker._early_recved = []
+    worker._early_recved = set()
     worker._recving_transfers["request"] = [101]
     worker.nixl_wrapper.check_xfer_state.return_value = "ERR"
     worker.nixl_wrapper.release_xfer_handle.side_effect = [
