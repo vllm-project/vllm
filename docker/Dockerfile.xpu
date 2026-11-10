@@ -239,6 +239,8 @@ RUN --mount=type=cache,target=/root/.cache/uv \
       --index https://wheels.vllm.ai/nightly/xpu/ \
       --index https://download.pytorch.org/whl/xpu \
       --index-strategy unsafe-first-match \
-      --find-links https://vllm-project.github.io/vllm-xpu-kernels/whl/vllm-xpu-kernels/
+    --find-links https://vllm-project.github.io/vllm-xpu-kernels/whl/vllm-xpu-kernels/ && \
+    cp "$(python -c 'import importlib.metadata; print(importlib.metadata.distribution("vllm").locate_file("vllm/_version.py"))')" \
+     vllm/_version.py
 
 ENTRYPOINT ["vllm", "serve"]
