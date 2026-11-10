@@ -2049,6 +2049,37 @@ def test_scheduler_reports_allocation_failure(request_runner):
 
 
 @pytest.mark.parametrize("async_scheduling", [True, False])
+def test_store_beyond_manager_capacity_continues_on_later_steps(
+    request_runner, async_scheduling: bool
+):
+    """A request with more unstored chunks than the manager can hold is still
+    offloaded: each step offers what fits and later steps offer the rest.
+
+    Offering everything at once is rejected as a whole, on every step.
+    """
+    capacity = 2
+    block_size = 4
+    runner = request_runner(
+        block_size=block_size,
+        num_gpu_blocks=10,
+        async_scheduling=async_scheduling,
+    )
+    runner.new_request(token_ids=[0] * (6 * block_size))
+    runner.manager.max_storable_chunks.return_value = capacity
+    runner.manager.prepare_store.side_effect = lambda keys, req_context: (
+        generate_store_output(keys) if len(keys) <= capacity else None
+    )
+
+    runner.run(
+        decoded_tokens=[0, 0, EOS_TOKEN_ID],
+        expected_stored=(0, 1, 2, 3, 4, 5),
+    )
+
+    reduced = _reduce_kv_connector_stats(runner)
+    assert not reduced.get(_ConnectorMetricName.ALLOCATION_FAILURE)
+
+
+@pytest.mark.parametrize("async_scheduling", [True, False])
 @pytest.mark.parametrize("prompt_offset", [-1, -2])
 def test_final_sampled_token_does_not_complete_an_offloaded_block(
     request_runner, async_scheduling: bool, prompt_offset: int

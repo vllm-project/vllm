@@ -378,6 +378,10 @@ class CPUOffloadingManager(OffloadingManager):
         )
 
     @override
+    def max_storable_chunks(self) -> int:
+        return self._get_num_free_chunks() + self._num_evictable_cache_chunks
+
+    @override
     def complete_store(
         self,
         keys: Collection[OffloadKey],

@@ -363,6 +363,22 @@ def test_cpu_manager_reports_allocation_size_on_eviction_failure():
     assert reduced[f"{CPUOffloadingMetrics.CPU_ALLOCATION_SIZE}_sum"] == 1
 
 
+def test_cpu_manager_max_storable_chunks_is_the_largest_accepted_store():
+    """Write-pending and pinned chunks cannot make room for a store."""
+    manager = make_cpu_manager(num_chunks=5, cache_policy="lru")
+    assert manager.max_storable_chunks() == 5
+
+    manager.prepare_store(to_keys([1, 2, 3]), _EMPTY_REQ_CTX)
+    manager.complete_store(to_keys([1, 2]), _EMPTY_REQ_CTX)
+    manager.prepare_load(to_keys([1]), _EMPTY_REQ_CTX)
+    # 2 free chunks and the evictable key 2; key 1 is pinned, key 3 pending.
+    assert manager.max_storable_chunks() == 3
+
+    assert manager.prepare_store(to_keys(range(4, 8)), _EMPTY_REQ_CTX) is None
+    assert manager.prepare_store(to_keys(range(4, 7)), _EMPTY_REQ_CTX) is not None
+    assert manager.max_storable_chunks() == 0
+
+
 def test_cpu_manager_reports_cache_write_and_read_usage_gauges():
     manager = make_cpu_manager(num_chunks=4)
 

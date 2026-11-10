@@ -415,6 +415,16 @@ class OffloadingManager(ABC):
         """
         pass
 
+    def max_storable_chunks(self) -> int | None:
+        """Upper bound on the keys a single prepare_store call can allocate now.
+
+        Returns:
+            The number of chunks that are free or evictable, or None if the
+            manager does not bound a store.
+
+        """
+        return None
+
     def complete_store(
         self,
         keys: Collection[OffloadKey],

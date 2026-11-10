@@ -2014,6 +2014,8 @@ class OffloadingConnectorScheduler:
             # Filter out chunks skipped due to sliding window attention / SSM
             # or unreachable by the load path's alignment constraints.
             new_offload_keys: list[OffloadKey] = []
+            # (index into group_store_ranges, chunk index) of each key above.
+            new_offload_key_chunks: list[tuple[int, int]] = []
             group_store_ranges: list[tuple[int, int]] = []
 
             reachable_boundaries: tuple[int, ...] = ()
@@ -2022,8 +2024,8 @@ class OffloadingConnectorScheduler:
                 if req.shared_prefix_boundary:
                     reachable_boundaries += (req.shared_prefix_boundary,)
 
-            for group_config, group_state in zip(
-                self.config.kv_group_configs, req_status.group_states
+            for group_pos, (group_config, group_state) in enumerate(
+                zip(self.config.kv_group_configs, req_status.group_states)
             ):
                 num_chunks = req_status.storable_chunks(
                     group_config,
@@ -2149,10 +2151,23 @@ class OffloadingConnectorScheduler:
                     ):
                         continue
                     new_offload_keys.append(offload_key)
+                    new_offload_key_chunks.append((group_pos, abs_chunk_idx))
 
             if not new_offload_keys:
                 req_status.advance_stored_idx(num_offloadable_tokens, apply_eagle_drop)
                 continue
+
+            # Offer only the leading chunks that fit. Each group's range ends
+            # at its first withheld chunk, which is offered on a later step.
+            max_chunks = self.manager.max_storable_chunks()
+            if max_chunks is not None:
+                num_offered = max(max_chunks, 1)
+                for group_pos, chunk_idx in reversed(
+                    new_offload_key_chunks[num_offered:]
+                ):
+                    start_chunk_idx, _ = group_store_ranges[group_pos]
+                    group_store_ranges[group_pos] = (start_chunk_idx, chunk_idx)
+                del new_offload_keys[num_offered:]
 
             store_output = self.manager.prepare_store(
                 new_offload_keys, req_status.req_context
@@ -2165,7 +2180,12 @@ class OffloadingConnectorScheduler:
                 continue
 
             if not store_output.keys_to_store:
-                req_status.advance_stored_idx(num_offloadable_tokens, apply_eagle_drop)
+                for group_state, (_, end_chunk_idx) in zip(
+                    req_status.group_states, group_store_ranges
+                ):
+                    group_state.next_stored_chunk_idx = max(
+                        group_state.next_stored_chunk_idx, end_chunk_idx
+                    )
                 continue
 
             ordered_keys_to_store = tuple(dict.fromkeys(store_output.keys_to_store))

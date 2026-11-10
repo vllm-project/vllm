@@ -973,6 +973,13 @@ class TieringOffloadingManager(OffloadingManager):
 
         return primary_result
 
+    @override
+    def max_storable_chunks(self) -> int:
+        # Like prepare_store(): completed transfers unpin primary chunks.
+        self._processed_jobs_this_step = True
+        self._process_finished_jobs()
+        return self.primary_tier.max_storable_chunks()
+
     def _cascade_existing_chunks_to_request_level_tiers(
         self,
         keys: Sequence[OffloadKey],
