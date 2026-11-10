@@ -24,6 +24,7 @@ import torch.nn as nn
 from transformers import (
     BatchFeature,
     CLIPVisionConfig,
+    Phi3Config,
     PreTrainedConfig,
     ProcessorMixin,
 )
@@ -577,8 +578,10 @@ class Phi3VForCausalLM(nn.Module, SupportsMultiModal, SupportsPP, SupportsQuant)
                 # The prefix is empty intentionally because default prefix of
                 # Phi3ForCausalLM is "model"
                 prefix="",
-                # We don't directly initialize vLLM's Phi3ForCausalLM so we
-                # can automatically apply embedding wrapper if this model is
+                # The remote config isn't a Transformers `Phi3Config`
+                hf_config=Phi3Config.from_dict(config.to_dict()),
+                # We don't directly initialize Phi3ForCausalLM so we can
+                # automatically apply embedding wrapper if this model is
                 # initialized as an embedding model
                 architectures=["Phi3ForCausalLM"],
             )
