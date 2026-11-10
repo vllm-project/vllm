@@ -23,8 +23,6 @@ amd_run_all_patterns:
   - "docker/docker-bake-rocm.hcl"
   - ".buildkite/hardware_tests/amd.yaml"
   - ".buildkite/scripts/rocm/build.sh"
-  - ".buildkite/scripts/hardware_ci/run-amd-test.sh"
-  - ".buildkite/scripts/hardware_ci/amd_ci_"
   - "requirements/rocm.txt"
   - "requirements/test/rocm.txt"
   - "tools/install_torchcodec_rocm.sh"
