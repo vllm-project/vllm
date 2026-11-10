@@ -17,6 +17,11 @@ from vllm.forward_context import get_forward_context
 from vllm.logger import init_logger
 from vllm.model_executor.layers.rocm_paged_mxfp4_indexer import RocmSparseAttnIndexer
 from vllm.model_executor.layers.sparse_attn_indexer import SparseAttnIndexer
+from vllm.model_executor.utils import (
+    is_weights_pre_processed,
+    refill_derived,
+    replace_parameter,
+)
 from vllm.model_executor.warmup.jit_warmup_triton_helper import (
     DispatchSpec,
     TritonWarmupTensor,
@@ -35,7 +40,7 @@ from vllm.models.deepseek_v4.sparse_mla import (
     DeepseekV4SparseMLAMetadataBuilder,
 )
 from vllm.platforms import current_platform
-from vllm.platforms.rocm import _ON_GFX950, on_gfx1250
+from vllm.platforms.rocm import _ON_GFX950, on_gfx1250, on_rdna
 from vllm.triton_utils import tl, triton
 from vllm.utils.multi_stream_utils import execute_in_parallel
 from vllm.v1.attention.backend import (
@@ -83,13 +88,13 @@ def _wo_a_block_scale_to_e8m0(scale: torch.Tensor) -> torch.Tensor | None:
     """Normalize checkpoint WO_A scales to raw OCP MX E8M0 bytes.
 
     E8M0 is an unsigned exponent-only scale format with bias 127. A finite
-    encoded byte ``b`` in ``[0, 254]`` represents ``2 ** (b - 127)``;
-    ``0xFF`` is reserved for NaN. This is the vendor-neutral OCP encoding used
+    encoded byte `b` in `[0, 254]` represents `2 ** (b - 127)`;
+    `0xFF` is reserved for NaN. This is the vendor-neutral OCP encoding used
     by AMD AITER/OPUS, not an NVIDIA-specific convention. Reference: OCP
     Microscaling Formats (MX) Specification, section 5.4.1:
     https://www.opencompute.org/documents/ocp-microscaling-formats-mx-v1-0-spec-final-pdf
 
-    Loaders may preserve the encoded byte as ``float8_e8m0fnu``/``uint8``,
+    Loaders may preserve the encoded byte as `float8_e8m0fnu`/`uint8`,
     or decode it to a floating-point power of two. Floating-point inputs are
     accepted only when the original E8M0 byte can be recovered losslessly.
     This function does not quantize or round arbitrary scales.
@@ -580,8 +585,8 @@ def compress_pool(
     overlap: bool,
 ) -> DispatchSpec:
     """Pool each boundary token's compressor states into a bf16 row of
-    ``pooled_k``, one program per token. Tensor inputs bind to the kernel's
-    ``<name>_ptr`` arguments; the same launch spec drives the JIT warmup."""
+    `pooled_k`, one program per token. Tensor inputs bind to the kernel's
+    `<name>_ptr` arguments; the same launch spec drives the JIT warmup."""
     return (pooled_k.shape[0],), dict(
         state_cache_stride0=state_cache.stride(0),
         state_cache_stride1=state_cache.stride(1),
@@ -662,10 +667,10 @@ def _dsv4_unified_decode_indices_kernel(
     BLOCK: tl.constexpr,
 ):
     """One decode token's row of the unified stream: its SWA records, then its
-    top-k records, at ``swa_indptr[t] + topk_indptr[t]``.
+    top-k records, at `swa_indptr[t] + topk_indptr[t]`.
 
-    The top-k half is ``_pack_global_topk_ragged_kernel``'s block-table walk
-    and the record mapping is ``_dsv4_merge_streams_kernel``'s, fused so the
+    The top-k half is `_pack_global_topk_ragged_kernel`'s block-table walk
+    and the record mapping is `_dsv4_merge_streams_kernel`'s, fused so the
     global-slot ragged array and the merge pass over it are never written.
     """
     t = tl.program_id(0)
@@ -733,8 +738,8 @@ def compute_dsv4_unified_decode_indices(
     """The C4A decode's SWA + top-k streams, written once as one stream of
     record-grid indices.
 
-    Same result as ``compute_global_topk_ragged_indices_and_indptr`` followed
-    by ``_dsv4_merge_to_unified_kv_buffer``, one launch and one pass shorter.
+    Same result as `compute_global_topk_ragged_indices_and_indptr` followed
+    by `_dsv4_merge_to_unified_kv_buffer`, one launch and one pass shorter.
     """
     topk_indices = topk_indices.reshape(topk_indices.shape[0], -1).contiguous()
     num_tokens, topk = topk_indices.shape
@@ -1163,7 +1168,7 @@ class DeepseekV4ROCMAiterMLAAttention(DeepseekV4Attention):
                 self._run_parallel_input_projections(hidden_states)
             )
             qr, qr_scale, kv = self._split_qkv_and_norm(qr_kv)
-            self._prepare_and_attn_fn(
+            self._prepare_and_attn(
                 hidden_states,
                 qr,
                 kv,
@@ -1197,7 +1202,7 @@ class DeepseekV4ROCMAiterMLAAttention(DeepseekV4Attention):
         ):
             # The ROCm override consumes these sentinels inside the capture
             # boundary, moving the stream fan-out ahead of the projections.
-            self._prepare_and_attn_fn(
+            self._prepare_and_attn(
                 hidden_states,
                 None,
                 None,
@@ -1219,7 +1224,7 @@ class DeepseekV4ROCMAiterMLAAttention(DeepseekV4Attention):
     def get_kv_cache_spec(self, vllm_config: VllmConfig) -> KVCacheSpec | None:
         """The base spec, re-pitched to aiter's aligned 640 B record on gfx1250.
 
-        ``alignment`` has to move WITH the record size: left at 576 the pooled
+        `alignment` has to move WITH the record size: left at 576 the pooled
         block stride stays a multiple of 576, the descriptor unit falls back to
         gcd(640, stride) = 64, and the row index stops being the slot index.
         A replace() of the base's spec rather than a rebuild of it, so a change
@@ -1258,7 +1263,7 @@ class DeepseekV4ROCMAiterMLAAttention(DeepseekV4Attention):
         """Aiter's fused Q-norm/RoPE + KV insert when the SWA cache holds the
         aligned 640 B record; the base's producer (packed record) otherwise.
 
-        The aiter decode packs Q to fp8 itself (``_dsv4_aiter_sparse_decode``),
+        The aiter decode packs Q to fp8 itself (`_dsv4_aiter_sparse_decode`),
         so this writes the bf16 Q only.
         """
         kernels = dsv4_aiter_sparse_mla_kernels()
@@ -1323,14 +1328,6 @@ class DeepseekV4ROCMAiterMLAAttention(DeepseekV4Attention):
                 )
             finally:
                 self.aux_stream_list = saved_streams
-            return
-
-        # Re-check: forward's gate ran inside a captured segment that
-        # _prepare_and_attn_eager (MRV1) then broke, making this region eager.
-        if not current_platform.enable_multi_stream_overlap(
-            self.aux_stream_list, get_forward_context().attn_metadata
-        ):
-            self._run_sequential_pipeline(hidden_states, positions, o_padded)
             return
 
         indexer = self.indexer
@@ -1440,7 +1437,6 @@ class DeepseekV4ROCMAiterMLAAttention(DeepseekV4Attention):
             _upcast_e8m0_to_fp32,
             get_fp8_block_weight_scale,
         )
-        from vllm.model_executor.utils import replace_parameter
 
         def _prep(linear) -> torch.Tensor | None:
             w = getattr(linear, "weight", None)
@@ -1456,16 +1452,22 @@ class DeepseekV4ROCMAiterMLAAttention(DeepseekV4Attention):
                 ws = _upcast_e8m0_to_fp32(ws).contiguous()
             # Shuffle the weight in place (single weight, no unshuffled copy),
             # unless the linear kernel already B-preshuffled it at load time.
-            if not getattr(linear, "aiter_bpreshuffled", False):
+            if not (
+                getattr(linear, "aiter_bpreshuffled", False)
+                or is_weights_pre_processed()
+            ):
                 replace_parameter(
                     linear,
                     "weight",
                     rocm_aiter_ops.shuffle_weight(w.data, layout=(16, 16)),
                 )
-            return ws
+            # A plain tensor: assigning the scale Parameter itself would register
+            # it a second time on this module, under the name below.
+            return ws.detach()
 
-        self._wqa_wkv_scale = _prep(self.fused_wqa_wkv)
-        self._wo_b_scale = _prep(self.wo_b)
+        # Refilled in place on reloads: captured CUDA graphs read them.
+        refill_derived(self, "_wqa_wkv_scale", _prep(self.fused_wqa_wkv))
+        refill_derived(self, "_wo_b_scale", _prep(self.wo_b))
         if _ON_GFX950 and envs.VLLM_ROCM_USE_AITER_FP8BMM:
             self._prepare_fp8_wo_a()
 
@@ -1544,15 +1546,18 @@ class DeepseekV4ROCMAiterMLAAttention(DeepseekV4Attention):
             return
 
         self._wo_a_fp8_weight = weight.view(groups, out_per_group, in_features)
-        self._wo_a_e8m0_scale = e8m0_scale.view(
-            groups, out_per_group // 128, in_features // 128
+        # Refilled in place on reloads: captured CUDA graphs read them.
+        refill_derived(
+            self,
+            "_wo_a_e8m0_scale",
+            e8m0_scale.view(groups, out_per_group // 128, in_features // 128),
         )
         cache = getattr(self.rotary_emb, "cos_sin_cache_bf16", None)
         if cache is None:
             cache = self.rotary_emb.cos_sin_cache.to(dtype=torch.bfloat16)
         cos_cache, sin_cache = cache.chunk(2, dim=-1)
-        self._wo_a_cos_cache = cos_cache.contiguous()
-        self._wo_a_sin_cache = sin_cache.contiguous()
+        refill_derived(self, "_wo_a_cos_cache", cos_cache.contiguous())
+        refill_derived(self, "_wo_a_sin_cache", sin_cache.contiguous())
 
     def prepare_compressor_gemm_fusion(self) -> bool:
         if self._fused_compressor_weight is not None:
@@ -1831,7 +1836,7 @@ class DeepseekV4ROCMAiterMLAAttention(DeepseekV4Attention):
             )
         rotated = 0
         if num_decodes > 0:
-            fuse_decode_inv_rope = fuse_inv_rope and not on_gfx1250()
+            fuse_decode_inv_rope = fuse_inv_rope and not on_gfx1250() and not on_rdna()
             rotated = self._forward_decode(
                 q=q[:num_decode_tokens],
                 positions=(
