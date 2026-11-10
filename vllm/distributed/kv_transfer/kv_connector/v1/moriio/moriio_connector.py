@@ -975,6 +975,7 @@ class MoRIIOConnectorScheduler:
         host=None,
         port=None,
         num_skip_blocks: int = 0,
+        num_prompt_tokens: int | None = None,
     ):
         path = make_zmq_path("tcp", host, port)
         if path not in self.paths:
@@ -995,6 +996,7 @@ class MoRIIOConnectorScheduler:
             # local == global.
             "decode_rank": self._global_dp_rank,
             "type": "remote_blocks",
+            "num_prompt_tokens": num_prompt_tokens,
         }
         if num_skip_blocks:
             data["num_skip_blocks"] = num_skip_blocks
@@ -1399,6 +1401,9 @@ class MoRIIOConnectorScheduler:
                             req_id=request.request_id,
                             transfer_id=request.kv_transfer_params["transfer_id"],
                             block_notify_list=block_notify_list,
+                            num_prompt_tokens=(
+                                request.num_prompt_tokens - int(self._has_mamba)
+                            ),
                             host=_notify_host,
                             port=target_port,
                             num_skip_blocks=num_skip_blocks,
@@ -1566,6 +1571,7 @@ class MoRIIOConnectorScheduler:
                     local_block_ids=save_block_ids,
                     kv_transfer_params=kv_params,
                     write_mode=True,
+                    num_prompt_tokens=req.num_prompt_tokens,
                 )
                 del self._reqs_need_pending_save[req_id]
 
@@ -1619,6 +1625,7 @@ class MoRIIOConnectorScheduler:
                 local_block_ids=save_block_ids,
                 kv_transfer_params=kv_params,
                 write_mode=True,
+                num_prompt_tokens=req.num_prompt_tokens,
             )
         # Clear the list once workers start the transfers
 
@@ -2307,6 +2314,7 @@ class MoRIIOConnectorWorker:
         remote_tp_size: int | None = None,
         tp_mapping: MoRIIOWriteTPMapping | None = None,
         transfer_state: WriteTransferState | None = None,
+        num_prompt_tokens: int | None = None,
     ) -> None:
         """Schedule a block write operation.
 
@@ -2326,6 +2334,7 @@ class MoRIIOConnectorWorker:
             remote_tp_size: Tensor parallel size advertised by the peer
             tp_mapping: Decode ranks this rank writes and what each receives
             transfer_state: Shared gate retained by pending handshakes
+            num_prompt_tokens: Number of prompt tokens computed by prefill
 
         """
         # synchronization to prevent dirty reads between
@@ -2353,6 +2362,7 @@ class MoRIIOConnectorWorker:
             remote_tp_size=remote_tp_size,
             tp_mapping=tp_mapping,
             transfer_state=transfer_state,
+            num_prompt_tokens=num_prompt_tokens,
         )
         self._writer.schedule_write(task)
 
@@ -3901,6 +3911,7 @@ class MoRIIOConnectorWorker:
             remote_tp_size=int(meta.tp_size),
             tp_mapping=tp_mapping,
             transfer_state=meta.transfer_state,
+            num_prompt_tokens=meta.num_prompt_tokens,
         )
 
     def merge_contiguous_blocks(

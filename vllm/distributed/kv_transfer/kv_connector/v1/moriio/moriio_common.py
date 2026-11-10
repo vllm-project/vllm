@@ -92,6 +92,7 @@ class WriteTask:
     enqueue_time: float = field(default_factory=time.perf_counter)
     retried: int = 0
     transfer_state: WriteTransferState | None = None
+    num_prompt_tokens: int | None = None
 
 
 @dataclass(slots=True)
@@ -115,6 +116,7 @@ class RemoteAllocInfo:
     block_ids: BlockIds | None
     # Leading blocks the consumer already holds from its own prefix cache.
     num_skip_blocks: int = 0
+    num_prompt_tokens: int | None = None
     writes_done: int = 0
     writes_expected: int | None = None
     decode_dp_rank: int = 0
@@ -609,6 +611,7 @@ class ReqMeta:
     # read must target this rank's memory registration; the default 0 preserves
     # the symmetric single-DP behaviour.
     remote_dp_rank: int = 0
+    num_prompt_tokens: int | None = None
     # Multi-pod: list of remote pod IPs indexed by pod_idx.
     multi_pod_hosts: list[str] = field(default_factory=list)
     # Per-pod DP size; 0 means fallback to remote_dp_size.
@@ -656,6 +659,7 @@ class MoRIIOConnectorMetadata(KVConnectorMetadata):
         local_block_ids: BlockIds,
         kv_transfer_params: dict[str, Any],
         write_mode=False,
+        num_prompt_tokens: int | None = None,
     ):
         """Ingest a peer's `kv_transfer_params` into a typed `ReqMeta`.
 
@@ -729,6 +733,7 @@ class MoRIIOConnectorMetadata(KVConnectorMetadata):
         )
 
         _req = ReqMeta(
+            num_prompt_tokens=num_prompt_tokens,
             transfer_id=transfer_id,
             local_block_ids=local_block_ids,
             remote_block_ids=kv_transfer_params["remote_block_ids"],
