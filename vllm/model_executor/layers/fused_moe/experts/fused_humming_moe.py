@@ -319,11 +319,12 @@ class HummingExpertsBase(mk.FusedMoEExpertsModular):
         activation_key: QuantKey | None,
     ) -> QuantKey | None:
         # Humming runs the input schema its weights are converted with. The
-        # Humming quant method, the WNA16/W4A8 oracles and
-        # VLLM_HUMMING_INPUT_QUANT_CONFIG supply one; the FP8/NVFP4/MXFP8/INT8
-        # oracles convert checkpoint weights for unquantized activations.
+        # Humming quant method, VLLM_HUMMING_INPUT_QUANT_CONFIG and the W4A8
+        # (INT4) and MXFP4 oracles supply one; the FP8/NVFP4/MXFP8/INT8 oracles
+        # convert checkpoint weights for unquantized activations.
         if (
             envs.VLLM_HUMMING_INPUT_QUANT_CONFIG
+            or weight_key in (kInt4Static, kMxfp4Static)
             or _is_supported_wna16_weight_key(weight_key)
             or _is_humming_quant_method()
         ):

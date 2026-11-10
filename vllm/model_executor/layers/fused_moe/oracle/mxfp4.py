@@ -561,22 +561,30 @@ def _humming_input_schema(model_activation_key: QuantKey | None):
     return quant_key_to_input_schema(activation_key)
 
 
-def _warn_on_bf16_fallback(
+def _applies_requested_activation(
     backend: Mxfp4MoeBackend, requested_activation_key: QuantKey | None
-) -> None:
+) -> bool:
+    """Whether `backend` quantizes activations to the requested key itself
+    rather than to a key of its own."""
     # Humming quantizes activations itself to the user's override.
-    applies_request = backend == Mxfp4MoeBackend.EMULATION or (
+    return backend == Mxfp4MoeBackend.EMULATION or (
         backend == Mxfp4MoeBackend.HUMMING
         and requested_activation_key == _user_moe_activation_override()
     )
+
+
+def _warn_on_bf16_fallback(
+    backend: Mxfp4MoeBackend, requested_activation_key: QuantKey | None
+) -> None:
     if (
         requested_activation_key is not None
-        and not applies_request
+        and not _applies_requested_activation(backend, requested_activation_key)
         and _backend_activation_key(backend) is None
     ):
         logger.warning_once(
             "No Mxfp4 MoE backend supports activation=%s for the deployment "
-            "configuration. Falling back to '%s' with BF16 activations.",
+            "configuration. Falling back to '%s' with BF16 activations. Set "
+            "VLLM_STRICT_QUANT_SCHEME=1 to forbid this fallback.",
             requested_activation_key,
             backend.value,
         )
@@ -622,9 +630,10 @@ def _filter_by_activation(
     requested_activation_key: QuantKey | None,
 ) -> list[Mxfp4MoeBackend]:
     """Pick variants matching `requested_activation_key`, followed by BF16
-    variants as a higher-precision fallback; without one, prefer BF16 if the
-    list has any, else keep the list as-is so explicit non-BF16 picks (e.g.
-    the `_afp8` aliases) still land."""
+    variants as a higher-precision fallback unless VLLM_STRICT_QUANT_SCHEME
+    forbids it; without one, prefer BF16 if the list has any, else keep the
+    list as-is so explicit non-BF16 picks (e.g. the `_afp8` aliases) still
+    land."""
     bf16 = [b for b in backends if _backend_activation_key(b) is None]
     if requested_activation_key is not None:
         matching = [
@@ -633,6 +642,12 @@ def _filter_by_activation(
             if _backend_activation_key(b) == requested_activation_key
             or b == Mxfp4MoeBackend.EMULATION
         ]
+        if envs.VLLM_STRICT_QUANT_SCHEME:
+            bf16 = [
+                b
+                for b in bf16
+                if _applies_requested_activation(b, requested_activation_key)
+            ]
         return matching + [b for b in bf16 if b not in matching]
     return bf16 if bf16 else backends
 
@@ -684,9 +699,14 @@ def select_mxfp4_moe_backend(
                 for b in requested_backends
             ]
         if not requested_backends:
+            strict = (
+                " (VLLM_STRICT_QUANT_SCHEME=1 forbids running it with BF16 activations)"
+                if envs.VLLM_STRICT_QUANT_SCHEME
+                else ""
+            )
             raise ValueError(
                 f"moe_backend={runner_backend!r} does not support "
-                f"activation={requested_activation_key}"
+                f"activation={requested_activation_key}{strict}"
             )
         oracle = Mxfp4MoEKernelOracle(config, kMxfp4Static, requested_activation_key)
         last_error: Exception | None = None

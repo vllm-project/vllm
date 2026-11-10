@@ -2735,6 +2735,7 @@ def select_linear_kernel(
         return init_mxfp8_linear_kernel(
             weight_shape=weight_shape or layer.weight.shape,
             bmm_batch_size=getattr(layer, "bmm_batch_size", None),
+            activation_quant_key=spec.activation,
         )
     # fp8 family: init_fp8 routes block-vs-plain itself off the activation key,
     # and needs a real key -- weight-only fp8 is not a ModelOpt format.
@@ -2950,6 +2951,7 @@ class ModelOptLinearMethod(LinearMethodBase):
             self.kernel = init_mxfp8_linear_kernel(
                 weight_shape=(layer.weight.shape[-2], layer.weight.shape[-1]),
                 bmm_batch_size=layer.bmm_batch_size,
+                activation_quant_key=self.spec.activation,
             )
         if is_weights_pre_processed():
             if not self.supports_pre_processed_weights:
