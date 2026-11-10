@@ -51,6 +51,38 @@ In short, for decode context parallel, try to increase `-tp` size until you get 
 
 Decode context parallel is supported in vLLM, for both MLA and GQA models. Some attention backends also support the combination of decode context parallel and MTP (multi-token prediction) to further accelerate the decoding phase.
 
+### Gather MLA queries before latent expansion
+
+For MLA backends that use the absorbed MQA path for prefill, DCP normally gathers
+queries after expanding their NoPE dimension to `kv_lora_rank`. When that dimension
+is larger than `qk_nope_head_dim`, gathering first can reduce communication:
+
+```bash
+vllm serve MODEL -tp 8 -dcp 8 \
+    --attention-config '{"mla_dcp_query_gather_min_tokens": 2048}'
+```
+
+The default is `0` (disabled). A positive value enables the optimization for MQA
+batches with at least that many query tokens, including mixed prefill/decode
+batches. Dense MHA prefill and queries already replicated by the model retain
+their existing paths. It requires DCP greater than one, FP16/BF16 query projection,
+`qk_nope_head_dim < kv_lora_rank`, and a path without quantized query input or
+head padding. PCP, AMX, and AITER FP4/FP8 projection paths retain their existing
+behavior.
+
+Eligible batches prepare queries during normal forward execution, keeping the
+regular gather outside query/indexer overlap.
+
+The per-rank query payload changes from
+`tokens * local_heads * (kv_lora_rank + qk_rope_head_dim)` to
+`tokens * local_heads * (qk_nope_head_dim + qk_rope_head_dim)` elements. Each rank
+stores all DCP ranks' query up-projection weights and projects all gathered heads.
+The additional replicated weight tensor per layer contains
+`dcp_size * local_heads * qk_nope_head_dim * kv_lora_rank` elements, unless those
+weights are already replicated. The local weights are retained for smaller
+batches. This trades memory and projection work for less communication; benchmark
+the threshold on the intended hardware and workload.
+
 ## Technical Discussions
 
 The main discussions happen in the `#sig-context-parallel` channel of [vLLM Slack](https://slack.vllm.ai/).

@@ -186,6 +186,14 @@ class AttentionConfig:
     When False (default), pure prefill batches use forward_mha when implemented.
     Set to True to always use the MQA path."""
 
+    mla_dcp_query_gather_min_tokens: int = Field(default=0, ge=0)
+    """Gather MLA queries before their latent projection for MQA batches of at
+    least this size under DCP. Zero (default) disables this optimization. It
+    reduces communication when qk_nope_head_dim < kv_lora_rank, at the cost of
+    replicating the query up-projection weights and computation across DCP ranks.
+    Applies to unquantized query projection without PCP or head padding; dense
+    MHA prefill and queries already replicated by the model are unchanged."""
+
     sparse_mla_prefill_workspace_factor: int | None = Field(default=None, ge=2)
     """Sparse MLA prefill workspace size, in multiples of `max_model_len`.
     FlashMLA sparse gathers a prefill step's context KV into this workspace and

@@ -808,6 +808,25 @@ class MLAAttention(nn.Module, AttentionLayerBase):
             )
         )
 
+        self.dcp_query_gather_min_tokens = 0
+        if (
+            self.dcp_manager is not None
+            and not self.use_pcp
+            and self.q_pad_num_heads is None
+            and not self.is_amx_bmm_enabled
+            and not self.is_aiter_triton_fp4_bmm_enabled
+            and not self.is_aiter_triton_fp8_bmm_enabled
+            and not (
+                is_quantized_kv_cache(self.kv_cache_dtype)
+                and self.impl.supports_quant_query_input
+            )
+            and dtype in (torch.float16, torch.bfloat16)
+            and self.qk_nope_head_dim < self.kv_lora_rank
+        ):
+            self.dcp_query_gather_min_tokens = (
+                vllm_config.attention_config.mla_dcp_query_gather_min_tokens
+            )
+
         # Attributes for forward_impl method
         self._vllm_config = get_current_vllm_config()
         self._chunked_prefill_workspace_size: int | None = None
@@ -1323,7 +1342,11 @@ class MLAAttention(nn.Module, AttentionLayerBase):
             return None
         if self.impl.dcp_world_size > 1:
             assert self.dcp_manager is not None
-            if q.shape[0] > self.dcp_manager.direct_query_gather_max_tokens:
+            if (
+                q.shape[0] > self.dcp_manager.direct_query_gather_max_tokens
+                or 0 < self.dcp_query_gather_min_tokens <= q.shape[0]
+            ):
+                # Narrow gathering uses the regular collective, outside overlap.
                 return None
         if self.kv_sharing_target_layer_name is None:
             torch.ops.vllm.unified_mla_kv_cache_update(
@@ -1356,6 +1379,16 @@ class MLAAttention(nn.Module, AttentionLayerBase):
         fused_q_heads: int | None = None,
     ) -> torch.Tensor | tuple[torch.Tensor, torch.Tensor]:
         fp8_attention = is_quantized_kv_cache(self.kv_cache_dtype)
+        if (
+            not qrep_decode
+            and self.dcp_query_gather_min_tokens > 0
+            and mqa_q.shape[0] >= self.dcp_query_gather_min_tokens
+        ):
+            # Move the collective before W_UK_T expands the NoPE dimension.
+            # The replicated weights preserve rank-major head ordering.
+            mqa_q = get_dcp_group().all_gather(mqa_q, dim=1)
+            qrep_decode = True
+
         mqa_q_nope, mqa_q_pe = mqa_q.split(
             [self.qk_nope_head_dim, self.qk_rope_head_dim], dim=-1
         )
@@ -1608,7 +1641,9 @@ class MLAAttention(nn.Module, AttentionLayerBase):
             replace_parameter(self, "W_UV", W_UV.transpose(0, 1))
             # Convert from (L, N, P) to (N, P, L)
             replace_parameter(self, "W_UK_T", W_UK.permute(1, 2, 0))
-            if self.dcp_q_replicate:
+            if self.dcp_q_replicate or (
+                self.dcp_manager is not None and self.dcp_query_gather_min_tokens > 0
+            ):
                 replace_parameter(
                     self,
                     "W_UK_T_dcp_qrep",
