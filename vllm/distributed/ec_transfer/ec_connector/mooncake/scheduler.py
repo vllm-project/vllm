@@ -555,6 +555,25 @@ class ECMooncakeScheduler:
             return False, None
         return False, items
 
+    def reset(self) -> None:
+        """Invalidate local encoder-cache bookkeeping after a cache reset.
+
+        ``reset_encoder_cache`` already clears EncoderCacheManager and the
+        worker encoder cache. ``_local_cache`` is only a mirror of that
+        cache, and READY / RESIDENT / LOADING records mean a tensor is
+        still in it. Leaving them in place lets ``ensure_cache_available``
+        skip Load and hit an encoder cache miss. Remote AVAILABLE
+        reservations are kept so a later request can reload without
+        waiting for a new push.
+        """
+        self._local_cache.clear()
+        self._transfers.invalidate_local(time.monotonic())
+        self._scheduler_pending_work = False
+        self._pushes_to_prepare.clear()
+        self._prepared_push_transfer_ids.clear()
+        self._store_candidates.clear()
+        self._failed_saves.clear()
+
     def close(self) -> None:
         self._control_executor.shutdown(wait=True, cancel_futures=True)
         self._control_client.close()

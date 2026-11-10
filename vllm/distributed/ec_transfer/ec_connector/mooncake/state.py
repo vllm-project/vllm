@@ -250,6 +250,39 @@ class SchedulerTransferTable:
         self._transition(record, SchedulerTransferState.FAILED, now=now)
         return True
 
+    def invalidate_local(self, now: float) -> None:
+        """Forget scheduler-side local residency after encoder-cache reset.
+
+        READY and LOADING mean a tensor is, or is being placed, in the
+        engine encoder cache, which reset just cleared. RESIDENT means the
+        consumer pool still holds a local copy after a normal free. After
+        reset those copies must not be treated as already loaded: records
+        that still have a load spec return to AVAILABLE so
+        ``begin_load`` can dispatch again. Records without a spec expire.
+        """
+        to_rearm: list[SchedulerTransfer] = []
+        to_expire: list[SchedulerTransfer] = []
+        for transfer_id in list(self._active_ids):
+            record = self._records[transfer_id]
+            if record.state not in {
+                SchedulerTransferState.READY,
+                SchedulerTransferState.LOADING,
+                SchedulerTransferState.RESIDENT,
+            }:
+                continue
+            self._loads_to_dispatch.pop(transfer_id, None)
+            if record.spec is None:
+                to_expire.append(record)
+            else:
+                to_rearm.append(record)
+        for record in to_expire:
+            self._transition(record, SchedulerTransferState.EXPIRED, now=now)
+        for record in to_rearm:
+            if record.spec is not None and record.spec.local:
+                record.spec = replace(record.spec, local=False)
+            record.deadline = now + self._tombstone_ttl
+            self._transition(record, SchedulerTransferState.AVAILABLE)
+
     def release_ready(self, mm_hash: str, now: float) -> None:
         ready = self.records_for_hash(mm_hash, (SchedulerTransferState.READY,))
         if ready:

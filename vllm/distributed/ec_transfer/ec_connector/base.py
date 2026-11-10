@@ -110,6 +110,16 @@ class ECConnectorBase(ABC):
         """
         return None
 
+    def reset(self) -> None:
+        """Invalidate connector-side encoder cache bookkeeping.
+
+        Called from ``Scheduler.reset_encoder_cache`` after the
+        EncoderCacheManager is cleared. The default is a no-op; connectors
+        that mirror local cache residency must drop that state so a later
+        request cannot skip a necessary Load or Encode.
+        """
+        return
+
     # ==============================
     # Worker-side methods
     # ==============================
