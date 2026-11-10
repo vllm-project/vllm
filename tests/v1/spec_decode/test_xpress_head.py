@@ -1,10 +1,15 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 
+import copy
+
 import pytest
 import torch
 
 from vllm.model_executor.models.qwen3_xpress import XPressRefinerHead
+from vllm.utils.mem_utils import get_max_shared_memory_bytes
+from vllm.utils.torch_utils import set_random_seed
+from vllm.v1.worker.gpu.spec_decode.xpress import kernels
 
 V, H, B, R = 61, 32, 8, 16
 
@@ -99,6 +104,90 @@ def test_jacobi_is_deterministic(topc: int):
     if not topc:
         picked = logits.gather(1, first.reshape(-1, 1)).squeeze(1)
         torch.testing.assert_close(picked, logits.max(dim=-1).values)
+
+
+# Every launch config of the latent pass must compute the same latent, at the
+# Qwen3-8B-XPress-b16 shapes the tile sizes were chosen for. Each pipeline stage of
+# the in-kernel MLP holds its three [R, HT] weight tiles in shared memory (plus one
+# more as headroom); per stage count, the largest HT that fits this device runs.
+_RANK, _MLP_HIDDEN, _BLOCK = 256, 512, 16
+
+
+def _fused_mlp_tiles() -> list[tuple[int, int]]:
+    if not torch.cuda.is_available():
+        return []
+    smem = get_max_shared_memory_bytes()
+    tiles = []
+    for stages in (1, 2, 3):
+        fit = [ht for ht in (64, 32, 16) if (3 * stages + 1) * _RANK * ht * 2 <= smem]
+        tiles += [(fit[0], stages)] if fit else []
+    return tiles
+
+
+@pytest.mark.skipif(not torch.cuda.is_available(), reason="needs a GPU")
+@pytest.mark.parametrize("kc", [None, _RANK // 2, _RANK // 4])
+@pytest.mark.parametrize(
+    "do_mlp,rc,ht,num_stages",
+    [(None, None, 64, None)]
+    + [(False, rc, 64, 1) for rc in (None, 16, _RANK)]
+    + [(True, None, ht, s) for ht, s in _fused_mlp_tiles()],
+)
+def test_latent_pass_matches_reference(
+    do_mlp: bool | None,
+    rc: int | None,
+    kc: int | None,
+    ht: int,
+    num_stages: int | None,
+):
+    set_random_seed(0)
+    n, v = 5, 1000
+    head = XPressRefinerHead(
+        vocab_size=v,
+        hidden_size=64,
+        block_size=_BLOCK,
+        rank=_RANK,
+        mlp_hidden=_MLP_HIDDEN,
+    ).to(device="cuda", dtype=torch.bfloat16)
+    with torch.no_grad():
+        # At the default init the MLP adds only ~5% to its input, below what the
+        # tolerance can tell apart; doubling its weights makes it ~45%.
+        for w in (head.mlp_gate.weight, head.mlp_up.weight, head.mlp_down.weight):
+            w.mul_(2)
+    head.fold_from_raw_(torch.randn(_RANK, _BLOCK, _BLOCK, device="cuda") * 0.3)
+    head.process_weights_after_loading()
+    ref_head = copy.deepcopy(head).float()
+    buf = head._fused_buf
+    blk = torch.randint(0, v, (n, _BLOCK), device="cuda")
+    tok_am1 = torch.randint(0, v, (n,), device="cuda")
+    hcache = ref_head.hidden_cache(torch.randn(n, _BLOCK, 64, device="cuda"))
+    prev = torch.cat([tok_am1[:, None], blk[:, :-1]], dim=1)
+    expected = ref_head._refine_latent(prev, hcache)[:, 1:]
+
+    xh = (hcache @ ref_head.in_proj.weight[:, : 2 * _RANK].t()).bfloat16()
+    lat = torch.empty(n, _BLOCK - 1, _RANK, dtype=torch.bfloat16, device="cuda")
+    kernels.xpress_latent_pass(
+        blk,
+        tok_am1,
+        xh,
+        lat,
+        head.w1.weight,
+        buf["wlat_t"],
+        buf["mix_kjc"],
+        buf["wg_t"],
+        buf["wu_t"],
+        buf["wd_t"],
+        # On ROCm this is the buffer process_weights_after_loading built, so the
+        # concatenation the GEMM MLP actually runs on is covered here too.
+        buf.get("wgu_t", torch.cat([buf["wg_t"], buf["wu_t"]], dim=1)),
+        do_mlp=do_mlp,
+        kc=kc,
+        rc=rc,
+        ht=ht,
+        num_stages=num_stages,
+    )
+
+    # The latent is stored in bf16 and stays below 4, where one bf16 ulp is 2**-6.
+    torch.testing.assert_close(lat.float(), expected, atol=2**-6, rtol=1.6e-2)
 
 
 def _head(

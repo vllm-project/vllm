@@ -110,6 +110,7 @@ def test_kimi_grouped_topk_masks_padding_when_enabled(
     torch.testing.assert_close(
         topk_weights[0][order], baseline_weights[0][baseline_order]
     )
+    assert router.masks_padding is skip_padding
     if skip_padding:
         assert torch.all(topk_ids[1] == -1)
         assert torch.all(topk_weights[1] == 0)
