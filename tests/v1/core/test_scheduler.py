@@ -8954,7 +8954,7 @@ class TestSinglePassReads:
         return make_read(**getattr(request, "param", {}))
 
     @pytest.fixture
-    def scheduler(self, request, diffusion_model_runner) -> DiffusionScheduler:
+    def scheduler(self, request) -> DiffusionScheduler:
         kwargs = {
             "async_scheduling": False,
             "diffusion_single_pass_reads": True,

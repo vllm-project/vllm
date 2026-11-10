@@ -181,7 +181,7 @@ def sampler() -> SimpleNamespace:
         req_states=SimpleNamespace(draft_tokens=torch.full((MAX_REQS, CANVAS), -1)),
         sampling_states=_NoOpRequestState(),
         logprob_token_ids_state=_NoOpRequestState(),
-        _pending_logprobs={},
+        _wide_logprobs={},
     )
 
 
