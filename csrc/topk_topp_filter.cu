@@ -53,8 +53,11 @@ constexpr int TIER_P = 64,
                   1024;  // top-p only rows try their best TIER_P logits first
 constexpr int STORE1 =
     512;  // candidates of that tier, outside the level-1 maxima
-constexpr float BIN_SCALE = 8.f;  // level bins per nat
-constexpr int LAST_BIN = 255;     // the open bin, 32 nats below the max
+constexpr float BIN_SCALE = 8.f;    // level bins per nat
+constexpr int LAST_BIN = 255;       // the open bin, 32 nats below the max
+constexpr int FINE = 2048;          // fallback bins, the last one open
+constexpr float FINE_SCALE = 64.f;  // fallback bins per nat
+static_assert(GL * 2 >= 2 * FINE * 4, "the fallback bins live in glist");
 constexpr float MASS_SCALE = 17592186044416.f;  // 2^44
 constexpr unsigned ALL_IDX = 0xffffffffu;
 constexpr int MAX_VOCAB = 1 << 20;
@@ -102,11 +105,20 @@ struct Pub {
   unsigned floor, count;
   int fallback;
 };
+// The fallback's plan: keep the bins above lo, gather bins lo to hi and bin k
+// into the leader, mask the others. rank is the k-th logit's rank among the
+// gathered, count their number.
+struct Win {
+  int lo, hi, k;
+  unsigned rank, count;
+  bool keep_all;
+};
 struct Shared {
   Hist hist;
   Hist* ghist;  // the leader's histogram that clustered passes combine into
   Res res;
   Pub pub;
+  Win win;
   float max_r[MAX_S];
   double sum_r[MAX_S];
   U64 slot[2][MAX_S];
@@ -178,6 +190,7 @@ struct Grp<false> {
   __device__ T* peer(T* p, int) const {
     return p;
   }
+  __device__ void add(unsigned* p, int, unsigned v) const { atomicAdd(p, v); }
 };
 template <>
 struct Grp<true> {
@@ -194,6 +207,17 @@ struct Grp<true> {
   __device__ T* peer(T* p, int r) const {
     return cg::this_cluster().map_shared_rank(p, r);
   }
+  // Adds v into CTA r's *p without waiting (a generic atomic would).
+  __device__ void add(unsigned* p, int r, unsigned v) const {
+    unsigned local = unsigned(__cvta_generic_to_shared(p)), remote;
+    asm("mapa.shared::cluster.u32 %0, %1, %2;"
+        : "=r"(remote)
+        : "r"(local), "r"(r));
+    asm volatile(
+        "red.relaxed.cluster.shared::cluster.add.u32 [%0], %1;" ::"r"(remote),
+        "r"(v)
+        : "memory");
+  }
 };
 
 __device__ Row row_params(const Args& a, int row);
@@ -204,9 +228,13 @@ template <bool CL>
 __device__ void select_row(Grp<CL> g, const Ctx& c, const Row& r,
                            const Layout& ly);
 template <bool CL>
-__device__ Cut fallback(Grp<CL> g, const Ctx& c, const Row& r, const Pub& pub,
-                        const Layout& ly);
+__device__ void bin_slice(Grp<CL> g, const Ctx& c, const Row& r,
+                          const Layout& ly);
+template <bool CL>
+__device__ void fallback(Grp<CL> g, const Ctx& c, const Row& r, const Pub& pub,
+                         const Layout& ly, bool binned);
 __device__ void fill(const Ctx& c);
+__device__ float row_max(int n);
 __device__ void mask(const Ctx& c, Cut cut);
 __device__ void scatter(const Ctx& c, const Pub& pub, const Layout& ly,
                         bool leader);
@@ -232,10 +260,16 @@ __global__ void __launch_bounds__(THREADS, 2) filter_kernel(Args a) {
   else
     stream<CL, false>(g, c, a.ly);
   g.sync();
-  if (g.rank() == 0) select_row<CL>(g, c, r, a.ly);
+  // Peers wait for the leader's selection: they bin the row meanwhile when
+  // the fallback is likely (top-p only, or k beyond half the store).
+  bool binned = CL && (!r.use_k || r.k > unsigned(a.ly.cap / 2));
+  if (g.rank() == 0)
+    select_row<CL>(g, c, r, a.ly);
+  else if (binned)
+    bin_slice(g, c, r, a.ly);
   g.sync();
   const Pub pub = sh().pub;
-  if (pub.fallback) return mask(c, fallback<CL>(g, c, r, pub, a.ly));
+  if (pub.fallback) return fallback<CL>(g, c, r, pub, a.ly, binned);
   fill(c);
   __syncthreads();
   scatter(c, pub, a.ly, g.rank() == 0);
@@ -321,10 +355,8 @@ __device__ void stream(Grp<CL> g, const Ctx& c, const Layout& ly) {
   g.wait();
   Shared& s = sh();
   int rank = g.rank();
-  if (threadIdx.x == 0) {
-    *g.peer(&s.max_r[rank], 0) = rmax;
-    *g.peer(&s.sum_r[rank], 0) = rsum;
-  }
+  if (threadIdx.x < g.size()) *g.peer(&s.max_r[rank], threadIdx.x) = rmax;
+  if (threadIdx.x == 0) *g.peer(&s.sum_r[rank], 0) = rsum;
   if (CL) {
     float* dst = g.peer(dyn<float>(ly.l2all), 0) + rank * (c.chunk / 256);
     for (int i = threadIdx.x; i < c.nsl; i += THREADS) dst[i] = l2[i];
@@ -430,9 +462,16 @@ __device__ int compact(const Items& items, const Keep& keep, uint16_t* list,
                        int cap);
 __device__ unsigned gather(const Ctx& c, const Layout& ly, Store st, int ng,
                            Bins bins, int b1, U64* mass, unsigned& lo);
+// Where items sit in the row: the k-th logit's rank among them, the exact
+// mass above them, and that of the top-k logits below them.
+struct Part {
+  unsigned rank;
+  U64 above, below;
+};
 template <bool CL, class Items>
 __device__ Cut finish(Grp<CL> g, const Items& items, const Row& r,
-                      float maximum, double total, unsigned lo);
+                      float maximum, double total, unsigned lo, unsigned hi,
+                      Part part);
 __device__ Cut finish_small(const unsigned* keys, const unsigned* idxs,
                             unsigned m, unsigned* sorted, const Row& r,
                             float maximum, double total);
@@ -441,6 +480,7 @@ __device__ void push_kept(Grp<CL> g, const Ctx& c, const Layout& ly,
                           const Pub& pub);
 template <bool MASS = true>
 __device__ void clear_hist(Hist& h);
+__device__ void clear_words(unsigned* w, int n);
 
 template <bool CL>
 __device__ __forceinline__ float l1_value(Grp<CL> g, const Ctx& c,
@@ -499,10 +539,13 @@ __device__ int candidate_groups(Grp<CL> g, const Ctx& c, const Layout& ly,
 }
 
 // Top-k (also with top-p): the logits reaching the bin of the k-th best group
-// max. Returns the lowest candidate key.
+// max. Returns the lowest candidate key. k beyond half the store takes the
+// fallback.
 template <bool CL>
 __device__ unsigned candidates(Grp<CL> g, const Ctx& c, const Layout& ly,
                                Store st, U64 k, Bins bins, unsigned& count) {
+  count = ~0u;
+  if (k > unsigned(st.cap / 2)) return 0u;
   int ng;
   int b1 = candidate_groups<CL>(g, c, ly, k, bins, ng);
   unsigned lo = 0;
@@ -510,10 +553,11 @@ __device__ unsigned candidates(Grp<CL> g, const Ctx& c, const Layout& ly,
   return lo;
 }
 
-// Top-p only: the best TIER_P logits, then the best TIER_P2, settle every
-// nucleus inside them. Their exact mass decides, and the missing mass bounds
-// the nucleus size from below (it comes from logits below the tier's lowest).
-// Larger nuclei take the fallback (count beyond the store, floor 0).
+// Top-p only: the best TIER_P logits, then (one CTA per row) the best TIER_P2,
+// settle every nucleus inside them. Their exact mass decides, and the missing
+// mass bounds the nucleus size from below (it comes from logits below the
+// tier's lowest). Larger nuclei take the fallback (count beyond the store),
+// which costs clusters less than the second tier.
 template <bool CL>
 __device__ unsigned nucleus_candidates(Grp<CL> g, const Ctx& c,
                                        const Layout& ly, Store& st, U64 target,
@@ -534,7 +578,7 @@ __device__ unsigned nucleus_candidates(Grp<CL> g, const Ctx& c,
       return lo;
     }
     U64 unit = max(fixed_mass(lo, bins.maximum), 1ull);
-    if (ng > GL ||
+    if (CL || ng > GL ||
         count + (target - mass + unit - 1) / unit > unsigned(TIER_P2))
       break;
   }
@@ -547,8 +591,7 @@ template <bool CL>
 __device__ void select_row(Grp<CL> g, const Ctx& c, const Row& r,
                            const Layout& ly) {
   Shared& s = sh();
-  float maximum = -INFINITY;
-  for (int i = 0; i < g.size(); ++i) maximum = fmaxf(maximum, s.max_r[i]);
+  float maximum = row_max(g.size());
   double total = 0.0;
   for (int i = 0; i < g.size(); ++i)
     total += rescale(s.sum_r[i], s.max_r[i], maximum);
@@ -569,9 +612,12 @@ __device__ void select_row(Grp<CL> g, const Ctx& c, const Row& r,
     pub.cut = finish_small(keys, idxs, count, dyn<unsigned>(ly.glist), r,
                            maximum, total);
   else if (!pub.fallback)
-    pub.cut = finish(Grp<false>(), store_items, r, maximum, total, lo);
-  else
-    clear_hist(*dyn<Hist>(ly.region));
+    pub.cut = finish(Grp<false>(), store_items, r, maximum, total, lo,
+                     ordered(maximum), Part{r.k, 0, 0});
+  else {  // the fallback's bins and radix histograms
+    clear_words(dyn<unsigned>(ly.glist), 2 * FINE);
+    clear_hist(*s.ghist);
+  }
   if (CL && !pub.fallback) push_kept(g, c, ly, pub);
   __syncthreads();
   if (threadIdx.x < g.size()) *g.peer(&s.pub, threadIdx.x) = pub;
@@ -596,94 +642,263 @@ __device__ void push_kept(Grp<CL> g, const Ctx& c, const Layout& ly,
   }
 }
 
-template <bool CL, class Items>
-__device__ bool binned_nucleus(Grp<CL> g, const Ctx& c, const Layout& ly,
-                               const Items& items, const Row& r, const Pub& pub,
-                               Cut& cut);
 template <bool CL, bool MASS, class Items>
 __device__ Cut select(Grp<CL> g, const Items& items, Cut within, U64 target,
                       unsigned lo, unsigned hi, float maximum);
-template <bool CL, bool MASS>
-__device__ Res combine_scan(Grp<CL> g, U64 need);
-template <bool MASS>
-__device__ __forceinline__ void hist_add(Hist& h, unsigned d, U64 w);
 __device__ __forceinline__ unsigned append(unsigned* counter, unsigned n);
 template <bool CL>
 __device__ U64 group_sum(Grp<CL> g, U64 v);
+template <class F>
+__device__ void each(const Ctx& c, const F& f);
+__device__ __forceinline__ void store4(float* x, int i, int end, bool vec,
+                                       float4 v);
+template <class T>
+__device__ T block_scan(T v, T& total);
 
-// Exact fallback over this CTA's chunk of the row, with the histograms combined
-// across the cluster: for top-p only the boundary value bin, else radix passes.
+// Fallback bins of 1/FINE_SCALE nat below the row max, the last one open, in
+// 256 positions each: round(256 FINE_SCALE (maximum - x)) through the float's
+// mantissa (no conversion instruction), so bin b starts 1/512 before b.
+struct Fine {
+  float maximum;
+  __device__ unsigned at(float x) const {
+    float y = fmaf(maximum - x, 256.f * FINE_SCALE, 8388608.f);
+    return min(__float_as_uint(y) - 0x4B000000u, 256u * (FINE - 1));
+  }
+};
+template <bool OFFSETS>
+__device__ void count_bins(const Ctx& part, unsigned* cnt, Fine fine);
+__device__ Win plan(unsigned* cnt, const Row& r, double total);
+template <bool CL, bool MASS>
+__device__ U64 window_pass(Grp<CL> g, const Ctx& c, const Layout& ly,
+                           const Win& w, Fine fine, U64& between);
+__device__ void cut_window(const Ctx& c, const Layout& ly, const Row& r,
+                           const Pub& pub, Part part);
+
+// Exact fallback in a fixed number of passes over the row, by all CTAs of the
+// row: a histogram of fine value bins locates the top-k bin and a window of
+// bins that holds the top-p cut (exact counts, while in-bin offsets bound the
+// masses). One pass masks the bins below, sums the mass above and gathers the
+// window and the top-k bin into the leader, which cuts exactly among them.
+// Windows beyond the leader's store (heavy ties) take radix passes instead.
+// binned: the peers binned the row already.
 template <bool CL>
-__device__ Cut fallback(Grp<CL> g, const Ctx& c, const Row& r, const Pub& pub,
-                        const Layout& ly) {
-  auto row_items = [&](auto f) {
-    int n = (c.end - c.begin + 3) / 4;
-    batched(
-        n, [&](int j) { return load4(c.x, c.begin + 4 * j, c.end, c.vec); },
-        [&](int j, float4 v) {
-          unsigned i = unsigned(c.begin + 4 * j);
-          f(ordered(v.x), i);
-          if (i + 1 < unsigned(c.end)) f(ordered(v.y), i + 1);
-          if (i + 2 < unsigned(c.end)) f(ordered(v.z), i + 2);
-          if (i + 3 < unsigned(c.end)) f(ordered(v.w), i + 3);
-        });
-  };
-  Cut cut;
-  if (!r.use_k && binned_nucleus(g, c, ly, row_items, r, pub, cut)) return cut;
-  cut = finish(g, row_items, r, pub.maximum, pub.total, pub.floor);
-  return cut;
-}
-
-// Top-p only, AIR style: the value bin where the row's mass reaches the
-// nucleus, then the exact cut among that bin's logits, gathered into the
-// leader. False (before any state changes) if the bin does not fit the leader's
-// store.
-template <bool CL, class Items>
-__device__ bool binned_nucleus(Grp<CL> g, const Ctx& c, const Layout& ly,
-                               const Items& items, const Row& r, const Pub& pub,
-                               Cut& cut) {
+__device__ void fallback(Grp<CL> g, const Ctx& c, const Row& r, const Pub& pub,
+                         const Layout& ly, bool binned) {
   Shared& s = sh();
-  Bins bins{pub.maximum};
-  U64 target = mass_target(r.p, pub.total * double(MASS_SCALE));
-  clear_hist<true>(s.hist);
-  __syncthreads();
-  items([&](unsigned key, unsigned) {
-    int b =
-        bins.of(key);  // the open bin stays out: a boundary there fails anyway
-    if (b < LAST_BIN)
-      hist_add<true>(s.hist, LAST_BIN - b, fixed_mass(key, bins.maximum));
-  });
-  __syncthreads();
-  Res res = combine_scan<CL, true>(g, target);
-  if (!res.found || res.at_c > unsigned(ly.cap)) return false;
-  int b = LAST_BIN - int(res.digit);
-  Store st{ly.region, ly.cap};
-  unsigned* counter = g.peer(&s.kept, 0);
-  unsigned* keys = g.peer(st.keys(), 0);
-  unsigned* idxs = g.peer(st.idxs(), 0);
-  items([&](unsigned key, unsigned idx) {
-    bool take = bins.of(key) == b;
-    unsigned pos = append(counter, take ? 1u : 0u);
-    if (!take) return;
-    keys[pos] = key;
-    idxs[pos] = idx;
-  });
+  Fine fine{pub.maximum};
+  unsigned* cnt = dyn<unsigned>(ly.glist);
+  if (!binned && (g.size() == 1 || g.rank())) bin_slice(g, c, r, ly);
+  if (CL && g.rank())
+    for (int b = threadIdx.x; b < 2 * FINE; b += THREADS)
+      if (cnt[b]) g.add(cnt + b, 0, cnt[b]);
   g.sync();
   if (g.rank() == 0) {
-    unsigned n = s.kept;
-    auto bin_items = [&](auto f) {
-      for (unsigned i = threadIdx.x; i < n; i += THREADS)
-        f(st.keys()[i], st.idxs()[i]);
-    };
-    Cut found =
-        select<false, true>(Grp<false>(), bin_items, ALL, target - res.above,
-                            0u, ordered(bins.maximum), bins.maximum);
-    __syncthreads();
-    if (threadIdx.x < g.size()) g.peer(&s.pub, threadIdx.x)->cut = found;
+    Win w = plan(cnt, r, pub.total);
+    if (threadIdx.x < g.size()) *g.peer(&s.win, threadIdx.x) = w;
   }
   g.sync();
-  cut = s.pub.cut;
-  return true;
+  const Win w = s.win;
+  if (w.keep_all) return;
+  if (w.count > unsigned(ly.cap)) {
+    auto row_items = [&](auto f) {
+      each(c, [&](float x, int i) { f(ordered(x), unsigned(i)); });
+    };
+    return mask(c, finish(g, row_items, r, pub.maximum, pub.total, pub.floor,
+                          ordered(pub.maximum), Part{r.k, 0, 0}));
+  }
+  U64 below, above = r.use_p ? window_pass<CL, true>(g, c, ly, w, fine, below)
+                             : window_pass<CL, false>(g, c, ly, w, fine, below);
+  above = group_sum(g, above);
+  if (r.use_k && r.use_p) below = group_sum(g, below);
+  if (g.rank() == 0) cut_window(c, ly, r, pub, Part{w.rank, above, below});
+}
+
+// The fine bin counts and sums of in-bin offsets (in 1/256 bin) of this CTA's
+// slice of the row, in its glist space: all of it for one CTA, else the peers
+// split it (the leader, cleared by select_row, collects them).
+template <bool CL>
+__device__ void bin_slice(Grp<CL> g, const Ctx& c, const Row& r,
+                          const Layout& ly) {
+  int workers = max(g.size() - 1, 1),
+      per = (c.vocab + 4 * workers - 1) / (4 * workers) * 4;
+  Ctx part = c;
+  part.begin = min(c.vocab, max(g.rank() - 1, 0) * per);
+  part.end = min(c.vocab, part.begin + per);
+  unsigned* cnt = dyn<unsigned>(ly.glist);
+  clear_words(cnt, 2 * FINE);
+  __syncthreads();
+  Fine fine{row_max(g.size())};
+  if (r.use_p)
+    count_bins<true>(part, cnt, fine);
+  else
+    count_bins<false>(part, cnt, fine);
+  __syncthreads();
+}
+
+template <bool OFFSETS>
+__device__ void count_bins(const Ctx& part, unsigned* cnt, Fine fine) {
+  each(part, [&](float x, int) {
+    unsigned at = fine.at(x);
+    atomicAdd(&cnt[at >> 8], 1u);
+    if (OFFSETS && (at & 255u)) atomicAdd(&cnt[FINE + (at >> 8)], at & 255u);
+  });
+}
+
+__device__ U64 mass_bound(unsigned n, unsigned offsets, int b, bool upper);
+
+// The leader's plan from the combined bins, thread t holding bins PER t to
+// PER t + PER - 1. The top-p window runs from the first bin where the upper
+// bounds of the cumulative mass reach the target to the first where the lower
+// bounds do. With top-k, the target itself is bounded through the top-k bin.
+__device__ Win plan(unsigned* cnt, const Row& r, double total) {
+  constexpr int PER = FINE / THREADS;
+  unsigned* off = cnt + FINE;  // then the counts above each bin
+  int first = PER * int(threadIdx.x);
+  unsigned n[PER], ns = 0, all;
+  U64 lo[PER], hi[PER], ls = 0, hs = 0, sum;
+#pragma unroll
+  for (int j = 0; j < PER; ++j) {
+    n[j] = cnt[first + j];
+    lo[j] = r.use_p ? mass_bound(n[j], off[first + j], first + j, false) : 0;
+    hi[j] = r.use_p ? mass_bound(n[j], off[first + j], first + j, true) : 0;
+    ns += n[j];
+    ls += lo[j];
+    hs += hi[j];
+  }
+  unsigned n0 = block_scan(ns, all) - ns;
+  U64 lo0 = block_scan(ls, sum) - ls, hi0 = block_scan(hs, sum) - hs;
+#pragma unroll
+  for (int j = 0; j < PER; ++j) {
+    off[first + j] = n0;
+    n0 += n[j];
+  }
+  __syncthreads();
+  auto count = [&](int b) { return U64(b < FINE ? off[b] : all); };
+  auto reach = [&](const auto& w, U64 acc, U64 need) {
+    int hit = FINE;
+#pragma unroll
+    for (int j = 0; j < PER; ++j) {
+      acc += w[j];
+      if (hit == FINE && acc >= need) hit = first + j;
+    }
+    return block_reduce(hit, Min());
+  };
+  auto above = [&](const U64(&w)[PER], int b) {
+    U64 s = 0;
+#pragma unroll
+    for (int j = 0; j < PER; ++j) s += first + j < b ? w[j] : 0;
+    return block_reduce(s, Sum());
+  };
+  Win w{0, FINE - 1, FINE, 0u, 0u, false};
+  if (r.use_k) w.lo = w.hi = w.k = reach(n, count(first), r.k);
+  if (r.use_p) {
+    U64 least = mass_target(r.p, total * double(MASS_SCALE)), most = least;
+    if (r.use_k) {
+      unsigned need = r.k - unsigned(count(w.k));
+      U64 bottom = mass_bound(need, 255 * need, w.k, false);
+      least = mass_target(r.p, double(above(lo, w.k) + bottom));
+      most = mass_target(
+          r.p, double(above(hi, w.k) + mass_bound(need, 0u, w.k, true)));
+    }
+    w.lo = reach(hi, hi0, least);
+    w.hi = min(reach(lo, lo0, most), min(w.k, FINE - 1));
+    w.keep_all = w.lo == FINE;  // the cut lies beyond every logit
+  }
+  bool apart = w.k > w.hi && w.k < FINE;
+  U64 between = apart ? count(w.k) - count(w.hi + 1) : 0;
+  w.count = unsigned(count(w.hi + 1) - count(w.lo) +
+                     (apart ? count(w.k + 1) - count(w.k) : 0));
+  w.rank = unsigned(r.k - count(w.lo) - between);
+  return w;
+}
+
+// One read-modify-write of the chunk: -inf over the bins below the window
+// (bin k included), the window and bin k into the leader's store. Returns the
+// exact mass above the window, and in between that of the bins between it and
+// bin k.
+template <bool CL, bool MASS>
+__device__ U64 window_pass(Grp<CL> g, const Ctx& c, const Layout& ly,
+                           const Win& w, Fine fine, U64& between) {
+  Store st{ly.region, ly.cap};
+  unsigned* counter = g.peer(&sh().kept, 0);
+  unsigned* keys = g.peer(st.keys(), 0);
+  unsigned* idxs = g.peer(st.idxs(), 0);
+  U64 above = 0, mid = 0;
+  int n = (c.end - c.begin + 3) / 4;
+  auto rmw = [&](int j, float4 v) {
+    int i = c.begin + 4 * j;
+    float e[4] = {v.x, v.y, v.z, v.w};
+    unsigned key[4], t = 0;
+    bool take[4], changed = false;
+#pragma unroll
+    for (int q = 0; q < 4; ++q) {
+      int b = int(fine.at(e[q]) >> 8);
+      key[q] = ordered(e[q]);
+      take[q] = i + q < c.end && ((b >= w.lo && b <= w.hi) || b == w.k);
+      t += take[q];
+      if (MASS && (b < w.lo || (b > w.hi && b < w.k)))
+        (b < w.lo ? above : mid) += fixed_mass(key[q], fine.maximum);
+      if (b > w.hi && e[q] != -INFINITY) {
+        e[q] = -INFINITY;
+        changed = true;
+      }
+    }
+    if (__any_sync(__activemask(), t)) {
+      unsigned pos = append(counter, t);
+#pragma unroll
+      for (int q = 0; q < 4; ++q) {
+        if (!take[q]) continue;
+        keys[pos] = key[q];
+        idxs[pos++] = unsigned(i + q);
+      }
+    }
+    if (changed)
+      store4(c.x, i, c.end, c.vec, make_float4(e[0], e[1], e[2], e[3]));
+  };
+  batched(
+      n, [&](int j) { return load4(c.x, c.begin + 4 * j, c.end, c.vec); }, rmw);
+  between = block_reduce(mid, Sum());
+  return block_reduce(above, Sum());
+}
+
+// The leader's exact cut among the gathered logits, then -inf over those cut.
+__device__ void cut_window(const Ctx& c, const Layout& ly, const Row& r,
+                           const Pub& pub, Part part) {
+  Store st{ly.region, ly.cap};
+  const unsigned* keys = st.keys();
+  const unsigned* idxs = st.idxs();
+  unsigned n = sh().kept, lo = ~0u, hi = 0u;
+  auto items = [&](auto f) {
+    for (unsigned i = threadIdx.x; i < n; i += THREADS) f(keys[i], idxs[i]);
+  };
+  items([&](unsigned key, unsigned) {
+    lo = min(lo, key);
+    hi = max(hi, key);
+  });
+  lo = block_reduce(lo, Min());
+  hi = block_reduce(hi, Max());
+  Cut cut =
+      finish(Grp<false>(), items, r, pub.maximum, pub.total, lo, hi, part);
+  items([&](unsigned key, unsigned idx) {
+    if (!cut.keep(key, idx)) c.x[idx] = -INFINITY;
+  });
+}
+
+// Bounds of the fixed-point mass of n logits in fine bin b (from b - 1/512 to
+// b + 1 - 1/512) from the sum of their in-bin offsets: the chord of exp above,
+// Jensen at the mean below, with slack for the rounding of expf and of the
+// fixed point.
+__device__ __noinline__ U64 mass_bound(unsigned n, unsigned offsets, int b,
+                                       bool upper) {
+  if (n == 0 || (b == FINE - 1 && !upper)) return 0;
+  float start = float(b) - 1.f / 512.f;
+  float top = expf(-start / FINE_SCALE);
+  float next = b == FINE - 1 ? top : expf(-(start + 1.f) / FINE_SCALE);
+  float mean = (float(offsets) + float(n)) / (256.f * float(n));
+  double m = upper ? double(n) * top - offsets / 256.0 * double(top - next)
+                   : double(n) * expf(-(start + mean) / FINE_SCALE);
+  m *= double(MASS_SCALE) * (upper ? 1.00001 : 0.99999);
+  return upper ? U64(m) + n : U64(fmax(m - double(n), 0.0));
 }
 
 // ---------------------------------------------------------------------------
@@ -705,15 +920,17 @@ __device__ U64 cut_mass(Grp<CL> g, const Items& items, Cut cut, unsigned lo,
 
 template <bool CL, class Items>
 __device__ Cut finish(Grp<CL> g, const Items& items, const Row& r,
-                      float maximum, double total, unsigned lo) {
-  unsigned hi = ordered(maximum);
-  Cut cut =
-      r.use_k ? select<CL, false>(g, items, ALL, r.k, lo, hi, maximum) : ALL;
+                      float maximum, double total, unsigned lo, unsigned hi,
+                      Part part) {
+  Cut cut = r.use_k
+                ? select<CL, false>(g, items, ALL, part.rank, lo, hi, maximum)
+                : ALL;
   if (!r.use_p) return cut;
-  double mass = r.use_k ? double(cut_mass(g, items, cut, lo, maximum))
+  double mass = r.use_k ? double(part.above + part.below +
+                                 cut_mass(g, items, cut, lo, maximum))
                         : total * double(MASS_SCALE);
-  return select<CL, true>(g, items, cut, mass_target(r.p, mass), lo, hi,
-                          maximum);
+  return select<CL, true>(g, items, cut, mass_target(r.p, mass) - part.above,
+                          lo, hi, maximum);
 }
 
 template <class T>
@@ -1038,6 +1255,21 @@ __device__ __forceinline__ void store4(float* x, int i, int end, bool vec,
   if (i + 3 < end) x[i + 3] = v.w;
 }
 
+// f(x, i) over this CTA's chunk.
+template <class F>
+__device__ void each(const Ctx& c, const F& f) {
+  int n = (c.end - c.begin + 3) / 4;
+  batched(
+      n, [&](int j) { return load4(c.x, c.begin + 4 * j, c.end, c.vec); },
+      [&](int j, float4 v) {
+        int i = c.begin + 4 * j;
+        f(v.x, i);
+        if (i + 1 < c.end) f(v.y, i + 1);
+        if (i + 2 < c.end) f(v.z, i + 2);
+        if (i + 3 < c.end) f(v.w, i + 3);
+      });
+}
+
 __device__ void fill(const Ctx& c) {
   float4 ninf = make_float4(-INFINITY, -INFINITY, -INFINITY, -INFINITY);
 #pragma unroll 4
@@ -1079,9 +1311,18 @@ __device__ void scatter(const Ctx& c, const Pub& pub, const Layout& ly,
 
 template <bool MASS>
 __device__ void clear_hist(Hist& h) {
-  unsigned* w = reinterpret_cast<unsigned*>(&h);
-  int words = MASS ? int(sizeof(Hist) / 4) : 256;
-  for (int i = threadIdx.x; i < words; i += THREADS) w[i] = 0u;
+  clear_words(reinterpret_cast<unsigned*>(&h),
+              MASS ? int(sizeof(Hist) / 4) : 256);
+}
+
+__device__ void clear_words(unsigned* w, int n) {
+  for (int i = threadIdx.x; i < n; i += THREADS) w[i] = 0u;
+}
+
+__device__ float row_max(int n) {
+  float m = -INFINITY;
+  for (int i = 0; i < n; ++i) m = fmaxf(m, sh().max_r[i]);
+  return m;
 }
 
 template <class T, class Op>
@@ -1135,7 +1376,7 @@ __device__ U64 group_sum(Grp<CL> g, U64 v) {
   U64 total = 0;
   for (int i = 0; i < g.size(); ++i) total += s.slot[turn][i];
   __syncthreads();
-  if (threadIdx.x == 0) s.turn = turn ^ 1;
+  s.turn = turn ^ 1;  // by every thread, so the next call reads the new set
   return total;
 }
 

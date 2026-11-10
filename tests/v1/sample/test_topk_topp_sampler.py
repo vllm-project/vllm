@@ -1047,8 +1047,9 @@ def _make_param(kind, batch: int, vocab: int, gen: Generator, dtype: torch.dtype
 )
 class TestCudaTopkToppExact:
     """Exact selection on every kernel path: row clusters (small batches) and
-    one CTA per row, the top-p tiers, the value-bin fallback for large nuclei,
-    and the full-row radix fallback (large k, heavy ties)."""
+    one CTA per row, the top-p tiers, the fine-bin fallback (large nuclei, large
+    k, the top-k bin apart from the top-p window, ties, cuts near the end), and
+    the full-row radix fallback (heavy ties)."""
 
     @pytest.fixture(autouse=True)
     def setup(self):
@@ -1072,6 +1073,13 @@ class TestCudaTopkToppExact:
             ("normal", 3, 65537, "mixed", "mixed"),
             ("normal", 300, 248320, 20, 0.95),
             ("normal", 300, 524287, 1000, 0.9),
+            ("zipf", 4, 248320, 10000, 0.9),
+            ("zipf", 160, 131072, 3000, 0.9),
+            ("zipf", 4, 131072, 3000, None),
+            ("bf16", 8, 131072, 4000, 0.95),
+            ("normal", 4, 131072, None, 0.99999),
+            ("zeros", 4, 65536, None, 0.5),
+            ("zeros", 130, 65536, 3000, None),
         ],
     )
     def test_exact_selection(self, kind, batch, vocab, k, p):
