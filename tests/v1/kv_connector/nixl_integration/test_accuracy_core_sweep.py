@@ -1,6 +1,7 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
-"""Core PD-disagg accuracy sweep, one test per config.
+"""Core PD-disagg accuracy sweep: dense, engine-mode and architecture
+configs, one test per config.
 
 Sized for a 2-GPU pod so it can run on every PR; the full 4-GPU sweeps
 (TP2/TP2, FlashInfer, the wider DP-EP and SW sets, cross-layer, Mamba1) run
@@ -32,7 +33,7 @@ RUN_ACCURACY_TEST = Path(__file__).parent / "run_accuracy_test.sh"
 # caller's environment sets DECODER_CUDAGRAPH.
 DEFAULT_ENV = {"DECODER_CUDAGRAPH": "1"}
 
-CONFIGS = [
+DENSE_CONFIGS = [
     # TP shapes and modes on the dense default model (Qwen3-0.6B). TP1/TP1
     # gets one dedicated GPU per side. The hetero-TP configs (P TP1/D TP2 and
     # P TP2/D TP1) share one GPU between the prefiller and one decoder rank
@@ -46,7 +47,7 @@ CONFIGS = [
             "PREFILLER_TP_SIZE": "1",
             "DECODER_TP_SIZE": "1",
         },
-        id="dense-p-tp1-d-tp1",
+        id="p-tp1-d-tp1",
     ),
     pytest.param(
         {
@@ -54,7 +55,7 @@ CONFIGS = [
             "PREFILLER_TP_SIZE": "1",
             "DECODER_TP_SIZE": "2",
         },
-        id="dense-p-tp1-d-tp2",
+        id="p-tp1-d-tp2",
     ),
     pytest.param(
         {
@@ -62,7 +63,7 @@ CONFIGS = [
             "PREFILLER_TP_SIZE": "2",
             "DECODER_TP_SIZE": "1",
         },
-        id="dense-p-tp2-d-tp1",
+        id="p-tp2-d-tp1",
     ),
     pytest.param(
         {
@@ -72,7 +73,7 @@ CONFIGS = [
             "DECODER_TP_SIZE": "2",
             "MODEL_NAMES": "deepseek-ai/deepseek-vl2-tiny",
         },
-        id="dp-ep-p-tp1-d-dp2-deepseek-vl2-tiny",
+        id="dp-ep-p-tp1-d-dp2",
     ),
     pytest.param(
         {
@@ -84,6 +85,9 @@ CONFIGS = [
         },
         id="push-p-pp2-d-tp2",
     ),
+]
+
+MODE_CONFIGS = [
     # Engine modes on the dense default model, TP1/TP1 on dedicated GPUs: the
     # sleep/wake round-trip, previously nightly only.
     pytest.param(
@@ -95,6 +99,9 @@ CONFIGS = [
         },
         id="sleep-wake",
     ),
+]
+
+ARCH_CONFIGS = [
     # Architecture coverage at TP1/TP1 on dedicated GPUs: MLA, hybrid SSM
     # conv-state transfer (Mamba2 and GDN), and sliding-window attention
     # combined with cross-layer KV sharing (gemma-4-E2B-it declares
@@ -136,9 +143,8 @@ CONFIGS = [
 ]
 
 
-@pytest.mark.parametrize("config", CONFIGS)
-def test_pd_accuracy(config: dict[str, str]):
-    """Run one config of the sweep through run_accuracy_test.sh.
+def run_accuracy_test(config: dict[str, str]):
+    """Run run_accuracy_test.sh with one config's environment.
 
     Args:
         config: Environment variables run_accuracy_test.sh reads, such as the
@@ -150,3 +156,18 @@ def test_pd_accuracy(config: dict[str, str]):
         env={**DEFAULT_ENV, **os.environ, **config},
         check=True,
     )
+
+
+@pytest.mark.parametrize("config", DENSE_CONFIGS)
+def test_dense(config: dict[str, str]):
+    run_accuracy_test(config)
+
+
+@pytest.mark.parametrize("config", MODE_CONFIGS)
+def test_engine_mode(config: dict[str, str]):
+    run_accuracy_test(config)
+
+
+@pytest.mark.parametrize("config", ARCH_CONFIGS)
+def test_architecture(config: dict[str, str]):
+    run_accuracy_test(config)
