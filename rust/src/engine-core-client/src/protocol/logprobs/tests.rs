@@ -396,3 +396,121 @@ fn rejects_zero_column_logprobs_with_rows() {
         "new_logprobs: zero-column logprobs payload with 2 rows"
     );
 }
+
+fn logprobs_value(ids: &[i64], probs: &[f32], ranks: &[i64]) -> Value {
+    let rows = ranks.len();
+    let cols = ids.len() / rows;
+    Value::Array(vec![
+        ndarray_value(
+            "<i8",
+            &[rows, cols],
+            Value::Ext(3, ids.iter().flat_map(|v| v.to_le_bytes()).collect()),
+        ),
+        ndarray_value(
+            "<f4",
+            &[rows, cols],
+            Value::Ext(3, probs.iter().flat_map(|v| v.to_le_bytes()).collect()),
+        ),
+        ndarray_value(
+            "<i8",
+            &[rows],
+            Value::Ext(3, ranks.iter().flat_map(|v| v.to_le_bytes()).collect()),
+        ),
+        Value::Nil,
+    ])
+}
+
+#[test]
+fn zero_sampled_rank_does_not_fail_frame_mates() {
+    // A batched EngineCoreOutputs frame where one request's row has rank 0
+    // must still resolve; the other requests' logprobs stay intact.
+    let frames = vec![Bytes::from(encode_value(&Value::Array(vec![
+        Value::from(0),
+        Value::Array(vec![
+            Value::Array(vec![
+                Value::from("req-nan"),
+                Value::Array(vec![Value::from(7), Value::from(8)]),
+                logprobs_value(&[1, 2], &[f32::NAN, f32::NEG_INFINITY], &[0]),
+                logprobs_value(&[7, 8], &[f32::NAN, f32::NEG_INFINITY], &[0]),
+                Value::Nil,
+                Value::from(EngineCoreFinishReason::Length as u8),
+            ]),
+            Value::Array(vec![
+                Value::from("req-ok"),
+                Value::Array(vec![Value::from(9)]),
+                logprobs_value(&[3, 4], &[-3.0, -0.5], &[7]),
+                Value::Nil,
+                Value::Nil,
+                Value::from(EngineCoreFinishReason::Length as u8),
+            ]),
+        ]),
+        Value::Nil,
+        Value::from(0.0),
+        Value::Nil,
+        Value::Nil,
+    ])))];
+    let decoded = decode_engine_core_outputs(&frames).unwrap().into_request_batch().unwrap();
+
+    let bad = decoded.outputs[0].new_logprobs.as_ref().unwrap();
+    let prompt = decoded.outputs[0].new_prompt_logprobs_tensors.as_ref().unwrap();
+    let good = decoded.outputs[1].new_logprobs.as_ref().unwrap();
+    expect_test::expect![[r#"
+        (
+            Logprobs {
+                positions: [
+                    PositionLogprobs {
+                        entries: [
+                            TokenLogprob {
+                                token_id: 1,
+                                logprob: NaN,
+                                rank: 0,
+                            },
+                            TokenLogprob {
+                                token_id: 2,
+                                logprob: -inf,
+                                rank: 1,
+                            },
+                        ],
+                    },
+                ],
+            },
+            Logprobs {
+                positions: [
+                    PositionLogprobs {
+                        entries: [
+                            TokenLogprob {
+                                token_id: 7,
+                                logprob: NaN,
+                                rank: 0,
+                            },
+                            TokenLogprob {
+                                token_id: 8,
+                                logprob: -inf,
+                                rank: 1,
+                            },
+                        ],
+                    },
+                ],
+            },
+            Logprobs {
+                positions: [
+                    PositionLogprobs {
+                        entries: [
+                            TokenLogprob {
+                                token_id: 3,
+                                logprob: -3.0,
+                                rank: 7,
+                            },
+                            TokenLogprob {
+                                token_id: 4,
+                                logprob: -0.5,
+                                rank: 1,
+                            },
+                        ],
+                    },
+                ],
+            },
+        )
+    "#]]
+    .assert_debug_eq(&(&**bad, &**prompt, &**good));
+}

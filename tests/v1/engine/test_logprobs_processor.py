@@ -10,11 +10,17 @@ row), the trailing positions are populated with sentinel values
 `num_logprobs + 1` entries so those sentinels never reach the user.
 """
 
+from types import SimpleNamespace
+
 import numpy as np
+import pytest
+import torch
 
 from vllm.logprobs import create_sample_logprobs
+from vllm.sampling_params import SamplingParams
+from vllm.v1.engine import EngineCoreOutput
 from vllm.v1.engine.logprobs import LogprobsProcessor
-from vllm.v1.outputs import LogprobsLists
+from vllm.v1.outputs import LogprobsLists, LogprobsTensors
 
 
 def _make_processor(num_logprobs: int) -> LogprobsProcessor:
@@ -64,3 +70,50 @@ def test_accepts_exactly_sized_row():
 
     pos = processor.logprobs[0]
     assert set(pos.keys()) == {7, 11, 13}
+
+
+def test_prompt_token_id_logprobs_are_popped_once():
+    """DELTA outputs carry fixed-ID prompt scores exactly once."""
+    processor = _make_processor(num_logprobs=1)
+    assert processor.pop_prompt_token_id_logprobs() is None
+
+    processor.update_from_output(
+        EngineCoreOutput(
+            request_id="req-0",
+            new_token_ids=[],
+            prompt_token_id_logprobs=torch.tensor(
+                [[-0.5, -1.5], [-2.5, -3.5]], dtype=torch.float32
+            ),
+        )
+    )
+
+    scores = processor.pop_prompt_token_id_logprobs()
+    assert scores is not None
+    assert scores.tolist() == [[-0.5, -1.5], [-2.5, -3.5]]
+    assert processor.pop_prompt_token_id_logprobs() is None
+
+
+@pytest.mark.parametrize("flat_logprobs", [False, True])
+def test_prompt_logprob_start_pads_unscored_positions(flat_logprobs):
+    """Positions up to prompt_logprob_start are None, so the rows the worker
+    returns from the start onward stay aligned with prompt positions."""
+    params = SamplingParams(
+        prompt_logprobs=0, prompt_logprob_start=2, flat_logprobs=flat_logprobs
+    )
+    processor = LogprobsProcessor.from_new_request(
+        None, SimpleNamespace(sampling_params=params)
+    )
+    processor._update_prompt_logprobs(
+        LogprobsTensors(
+            logprob_token_ids=torch.tensor([[7], [8]]),
+            logprobs=torch.tensor([[-0.5], [-1.5]]),
+            selected_token_ranks=torch.tensor([1, 1]),
+        )
+    )
+
+    prompt_logprobs = processor.pop_prompt_logprobs()
+    assert prompt_logprobs is not None
+    assert len(prompt_logprobs) == 5
+    assert not any(prompt_logprobs[i] for i in range(3))
+    assert prompt_logprobs[3][7].logprob == -0.5
+    assert prompt_logprobs[4][8].logprob == -1.5

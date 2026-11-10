@@ -15,10 +15,6 @@ import torch
 import torch.nn as nn
 
 from vllm.config import VllmConfig, get_current_vllm_config
-from vllm.distributed import (
-    get_tensor_model_parallel_rank,
-    get_tensor_model_parallel_world_size,
-)
 from vllm.logger import init_logger
 from vllm.model_executor.layers.fused_moe import (
     fused_moe_make_expert_params_mapping,
@@ -132,7 +128,7 @@ class DSparkDeepseekV4Model(nn.Module):
         """Insert the sliding-window context KV for every draft layer.
 
         Each layer derives its context KV from the SAME projected target hidden
-        ``main_x``, via that layer's own wkv + kv_norm + RoPE + quant, then
+        `main_x`, via that layer's own wkv + kv_norm + RoPE + quant, then
         writes it at the layer's context slots.
         """
         for i, layer in enumerate(self.layers):
@@ -291,7 +287,7 @@ class DSparkDeepseekV4ForCausalLM(nn.Module):
     # --- Weight loading ---
 
     def load_weights(self, weights: Iterable[tuple[str, torch.Tensor]]) -> set[str]:
-        """Load ``mtp.{0,1,2}.*`` draft weights from the target checkpoint."""
+        """Load `mtp.{0,1,2}.*` draft weights from the target checkpoint."""
         first_layer = self.model.layers[0]
         use_mega_moe = first_layer.ffn.use_mega_moe
         if use_mega_moe:
@@ -321,12 +317,6 @@ class DSparkDeepseekV4ForCausalLM(nn.Module):
 
         params_dict = dict(self.named_parameters())
         loaded_params: set[str] = set()
-
-        tp_size = get_tensor_model_parallel_world_size()
-        tp_rank = get_tensor_model_parallel_rank()
-        n_local_head = self.config.num_attention_heads // tp_size
-        head_start = n_local_head * tp_rank
-        head_end = n_local_head * (tp_rank + 1)
 
         for name, loaded_weight in weights:
             mapped = self._remap_dspark_name(name)
@@ -383,13 +373,6 @@ class DSparkDeepseekV4ForCausalLM(nn.Module):
                 loaded_params.add(name)
                 break
             else:
-                if "attn_sink" in name:
-                    if name not in params_dict:
-                        continue
-                    narrow = loaded_weight[head_start:head_end]
-                    params_dict[name][: narrow.shape[0]].copy_(narrow)
-                    loaded_params.add(name)
-                    continue
                 if ".shared_experts.w2" in name:
                     name = name.replace(
                         ".shared_experts.w2", ".shared_experts.down_proj"
@@ -405,16 +388,15 @@ class DSparkDeepseekV4ForCausalLM(nn.Module):
                 weight_loader(param, loaded_weight)
                 loaded_params.add(name)
 
-        self._finalize_moe()
         logger.info_once("DSpark XPU draft model loaded: %d params", len(loaded_params))
         return loaded_params
 
-    def _finalize_moe(self) -> None:
+    def process_weights_after_loading(self) -> None:
         for layer in self.model.layers:
             layer.ffn.finalize_mega_moe_weights()
 
     def _remap_dspark_name(self, name: str) -> str | None:
-        """Map checkpoint ``mtp.{i}.*`` name to this model's parameter path."""
+        """Map checkpoint `mtp.{i}.*` name to this model's parameter path."""
         m = re.match(r"mtp\.(\d+)\.(.*)", name)
         if m is None:
             return None

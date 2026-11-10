@@ -13,6 +13,7 @@ import torch.types
 
 from vllm.logger import init_logger
 from vllm.platforms import current_platform
+from vllm.platforms.interface import in_wsl
 
 from .mem_constants import GiB_bytes, KiB_bytes, MiB_bytes
 
@@ -54,6 +55,7 @@ def release_device_memory_under_pressure(device: torch.device) -> bool:
 
     Returns:
         True if memory was released.
+
     """
     if device.type != "cuda" or not current_platform.is_integrated_gpu(device.index):
         return False
@@ -100,6 +102,28 @@ class DeviceMemoryProfiler:
         gc.collect()
 
 
+def device_memory_info(device: torch.types.Device = None) -> tuple[int, int]:
+    """Free and total device memory in bytes, like
+    `torch.accelerator.get_memory_info`, with the free memory corrected on
+    integrated GPUs.
+
+    On UMA (Unified Memory Architecture) platforms where CPU and GPU share
+    physical memory (e.g. GH200, DGX Spark, Jetson Orin), cudaMemGetInfo
+    underreports free memory because it does not account for reclaimable OS
+    memory (page cache, buffers), which a device allocation does reclaim.
+    psutil reports the true available memory there.
+    https://docs.nvidia.com/cuda/cuda-for-tegra-appnote/#estimating-total-allocatable-device-memory-on-an-integrated-gpu-device
+    """
+    free_memory, total_memory = torch.accelerator.get_memory_info(device)
+    index = torch.device(device).index if device is not None else None
+    # WSL guest RAM does not describe CUDA's memory allocation budget.
+    if current_platform.is_integrated_gpu(index) and not (
+        current_platform.is_cuda() and in_wsl()
+    ):
+        free_memory = psutil.virtual_memory().available
+    return free_memory, total_memory
+
+
 @dataclass
 class MemorySnapshot:
     """Memory snapshot."""
@@ -139,15 +163,7 @@ class MemorySnapshot:
         self.torch_peak = stats.get("allocated_bytes.all.peak", 0)
         self.torch_allocated = stats.get("allocated_bytes.all.current", 0)
 
-        self.free_memory, self.total_memory = torch.accelerator.get_memory_info(device)
-        if current_platform.is_integrated_gpu(device.index):
-            # On UMA (Unified Memory Architecture) platforms where CPU and
-            # GPU share physical memory (e.g. GH200, DGX Spark, Jetson Orin),
-            # cudaMemGetInfo underreports free memory because it does not
-            # account for reclaimable OS memory (page cache, buffers).
-            # Use psutil to get the true available memory.
-            # https://docs.nvidia.com/cuda/cuda-for-tegra-appnote/#estimating-total-allocatable-device-memory-on-an-integrated-gpu-device
-            self.free_memory = psutil.virtual_memory().available
+        self.free_memory, self.total_memory = device_memory_info(device)
 
         self.cuda_memory = self.total_memory - self.free_memory
 
@@ -230,8 +246,7 @@ def memory_profiling(
     baseline_snapshot: MemorySnapshot,
     weights_memory: int = 0,
 ) -> Generator[MemoryProfilingResult, None, None]:
-    """
-    Memory profiling context manager.
+    """Memory profiling context manager.
 
     baseline_snapshot: the memory snapshot before the current vLLM instance.
     weights_memory: memory used by PyTorch when loading the model weights.

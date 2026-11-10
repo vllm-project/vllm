@@ -95,7 +95,7 @@ def layer_norm_fwd_kernel(
     ACTIVATION: tl.constexpr,
 ):
     # Map the program id to the starting row of X and Y it should compute.
-    row_start = tl.program_id(0) * ROWS_PER_BLOCK
+    row_start = tl.program_id(0).to(tl.int64) * ROWS_PER_BLOCK
     group = tl.program_id(1)
 
     # Create 2D tile: [ROWS_PER_BLOCK, BLOCK_N]
@@ -335,9 +335,7 @@ class LayerNormFwdKernel(VllmJitKernel["LayerNormFwdKernel.CompileKey"]):
         assert warmup is not None
         variant = compile_key.input_variant
 
-        def pointer(
-            name: str, dtype: torch.dtype | None
-        ) -> TritonWarmupTensor | None:
+        def pointer(name: str, dtype: torch.dtype | None) -> TritonWarmupTensor | None:
             return None if dtype is None else variant.pointer(name, dtype)
 
         warmup(

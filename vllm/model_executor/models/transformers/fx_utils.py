@@ -15,17 +15,19 @@ import operator
 import textwrap
 from collections.abc import Callable
 from itertools import chain
+from typing import Any
 from unittest import mock
 
 import torch
 from torch import fx, nn
 from torch.nn import functional as F
+from typing_extensions import TypeIs
 
 from vllm.logger import init_logger
 
 logger = init_logger(__name__)
 
-_UNKNOWN = object()
+_UNKNOWN: Any = object()
 """Sentinel meta value for proxies whose concrete value could not be inferred.
 Distinct from `None`, which is a valid concrete value (e.g. `attn_weights`)."""
 
@@ -33,8 +35,23 @@ _MODULE_CALL = nn.Module.__call__
 """The unpatched `nn.Module.__call__`. During tracing fx patches it to record
 `call_module` nodes; meta execution must call modules for real."""
 
+_MODULE_GETATTR = nn.Module.__getattr__
+"""The unpatched `nn.Module.__getattr__`. During tracing fx patches it to record
+`get_attr` nodes; reading one while inferring a `get_attr`'s own value would
+recurse until the stack runs out, truncating the graph."""
 
-def is_leaf_call(node: object) -> bool:
+
+@contextlib.contextmanager
+def _unpatched_modules():
+    """Restores the module hooks fx patches, so meta execution records nothing."""
+    with (
+        mock.patch.object(nn.Module, "__call__", _MODULE_CALL),
+        mock.patch.object(nn.Module, "__getattr__", _MODULE_GETATTR),
+    ):
+        yield
+
+
+def is_leaf_call(node: object) -> TypeIs[fx.Node]:
     """Is node a call recorded by `_as_leaf_call` (e.g. an attention interface)."""
     return isinstance(node, fx.Node) and node.meta.get("leaf_call", False)
 
@@ -60,7 +77,7 @@ class _MetaProxy(fx.Proxy):
     executing each op on the meta values, so PyTorch's meta kernels are the
     single source of shape inference — no per-op rules."""
 
-    meta: object = _UNKNOWN
+    meta: Any = _UNKNOWN
 
     def __len__(self) -> int:
         if self.meta is not _UNKNOWN:
@@ -130,7 +147,8 @@ class _AllLeafTracer(fx.Tracer):
                 )
             return _UNKNOWN
         if kind == "get_attr":
-            value = operator.attrgetter(str(target))(self.root)
+            with _unpatched_modules():
+                value = operator.attrgetter(str(target))(self.root)
             if isinstance(value, torch.Tensor):
                 value = torch.empty_like(value, device="meta")
             return value
@@ -149,6 +167,7 @@ class _AllLeafTracer(fx.Tracer):
         if unknown:
             return _UNKNOWN
         if kind == "call_function":
+            assert callable(target)
             return target(*meta_args, **meta_kwargs)
         if kind == "call_method":
             receiver, *rest = meta_args
@@ -156,8 +175,6 @@ class _AllLeafTracer(fx.Tracer):
         if kind == "call_module":
             # Run the child's forward with all its state on "meta", without
             # mutating it (at match time params may be meta but buffers real).
-            # fx patches `nn.Module.__call__` while tracing; restore the real
-            # one so this execution is not itself recorded.
             child = self.root.get_submodule(str(target))
             state = {
                 name: torch.empty_like(tensor, device="meta")
@@ -165,7 +182,7 @@ class _AllLeafTracer(fx.Tracer):
                     child.named_parameters(), child.named_buffers()
                 )
             }
-            with mock.patch.object(nn.Module, "__call__", _MODULE_CALL):
+            with _unpatched_modules():
                 return torch.func.functional_call(child, state, meta_args, meta_kwargs)
         return _UNKNOWN
 
@@ -576,7 +593,7 @@ def _aliasing_reads(node: ast.expr) -> set[str]:
     would taint nearly every later name.
     """
     names: set[str] = set()
-    stack = [node]
+    stack: list[ast.AST] = [node]
     while stack:
         current = stack.pop()
         if isinstance(current, ast.Attribute) and current.attr in _METADATA_ATTRS:
@@ -646,7 +663,7 @@ def aliasing_names(
     """
     names = set(seed)
     assigns = [
-        node
+        (node, node.value)
         for node in ast.walk(funcdef)
         if isinstance(node, (ast.Assign, ast.AnnAssign))
         and node.value is not None
@@ -655,10 +672,10 @@ def aliasing_names(
     changed = True
     while changed:
         changed = False
-        for node in assigns:
-            if not _aliasing_reads(node.value) & names:
+        for node, value in assigns:
+            if not _aliasing_reads(value) & names:
                 continue
-            targets = getattr(node, "targets", None) or [node.target]
+            targets = node.targets if isinstance(node, ast.Assign) else [node.target]
             stores = {
                 child.id
                 for target in targets
@@ -681,6 +698,14 @@ def replace_expr(module: ast.AST, old: ast.expr, new: ast.expr) -> None:
             return super().generic_visit(node)
 
     _Replacer().visit(module)
+
+
+def is_complete(graph: fx.Graph) -> bool:
+    """Did the trace run to completion? A partial graph has no `output` node.
+
+    Only a complete graph can be read for the *absence* of an op; in a partial
+    one the tail is exactly what is missing."""
+    return any(node.op == "output" for node in graph.nodes)
 
 
 def find_node(graph: fx.Graph, predicate: Callable[[fx.Node], bool]) -> fx.Node | None:
@@ -770,7 +795,7 @@ def peel(node: object) -> object:
     return node
 
 
-def is_fn(node: object, target: Callable) -> bool:
+def is_fn(node: object, target: object) -> TypeIs[fx.Node]:
     """Is node `<target>()`."""
     return (
         isinstance(node, fx.Node)
@@ -779,17 +804,15 @@ def is_fn(node: object, target: Callable) -> bool:
     )
 
 
-def is_method(node: object, name: str) -> bool:
+def is_method(node: object, name: str) -> TypeIs[fx.Node]:
     """Is node `.<name>()`."""
     return (
         isinstance(node, fx.Node) and node.op == "call_method" and node.target == name
     )
 
 
-def is_op(node: object, name: str) -> bool:
-    """
-    Is node `torch.<name>()`, `F.<name>()`, `operator.<name>()`, or `Tensor.<name>()`.
-    """
+def is_op(node: object, name: str) -> TypeIs[fx.Node]:
+    """Is node `<mod>.<name>()` for torch, F, operator, or Tensor."""
     return any(
         is_fn(node, getattr(module, name, None)) for module in (torch, F, operator)
     ) or (hasattr(torch.Tensor, name) and is_method(node, name))

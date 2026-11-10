@@ -20,6 +20,8 @@
 #   SKIP_BASELINE               set to 1 to reuse existing BASELINE_FILE
 #   CONCURRENCY / REPEAT        concurrent requests / rounds (defaults 3 / 2)
 #   MAX_MODEL_LEN               context length (default 16384)
+#   E_CUDAGRAPH_MM_ENCODER       enable encoder CUDA graphs (default 0)
+#   E_MM_ENCODER_ATTN_BACKEND    optional encoder attention backend override
 
 set -euo pipefail
 
@@ -35,6 +37,15 @@ if [[ "$USE_MM_PROMPTS" == "1" ]]; then
   TEST_ARGS+=(--use_mm_prompts --mm_smoke_test)
 fi
 MAX_MODEL_LEN="${MAX_MODEL_LEN:-16384}"
+E_ATTN_ARGS=()
+if [[ -n "${E_MM_ENCODER_ATTN_BACKEND:-}" ]]; then
+  E_ATTN_ARGS+=(--mm-encoder-attn-backend "$E_MM_ENCODER_ATTN_BACKEND")
+fi
+case "${E_CUDAGRAPH_MM_ENCODER:-0}" in
+  0) E_COMPILATION_CONFIG='{"cudagraph_mm_encoder":false}' ;;
+  1) E_COMPILATION_CONFIG='{"cudagraph_mm_encoder":true}' ;;
+  *) echo "E_CUDAGRAPH_MM_ENCODER must be 0 or 1"; exit 1 ;;
+esac
 
 GPU_SINGLE="${GPU_SINGLE:-0}"
 GPU_E="${GPU_E:-0}"
@@ -203,7 +214,7 @@ run_epd_mooncake() {
   cleanup_instances
 
   echo "Starting ENCODER on GPU $GPU_E port $ENCODE_PORT"
-  CUDA_VISIBLE_DEVICES="$GPU_E" "${VLLM_SERVE[@]}" "$MODEL" \
+  VLLM_SERVER_DEV_MODE=1 CUDA_VISIBLE_DEVICES="$GPU_E" "${VLLM_SERVE[@]}" "$MODEL" \
     --port "$ENCODE_PORT" \
     --gpu-memory-utilization 0.35 \
     --mm-tensor-ipc torch_shm \
@@ -215,6 +226,9 @@ run_epd_mooncake() {
     --limit-mm-per-prompt '{"image":2,"video":0}' \
     --allowed-local-media-path "${GIT_ROOT}/tests/v1/ec_connector/integration" \
     --ec-transfer-config "$ENC_EC_JSON" \
+    --compilation-config "$E_COMPILATION_CONFIG" \
+    "${E_ATTN_ARGS[@]}" \
+    --worker-extension-cls tests.v1.ec_connector.integration.test_epd_correctness.EncoderGraphTestWorkerExtension \
     >"${LOG_PATH}/mooncake_epd_encoder.log" 2>&1 &
   local ENCODER_PID=$!
   PIDS+=("$ENCODER_PID")
@@ -265,6 +279,26 @@ run_epd_mooncake() {
     --mode disagg \
     --baseline_file "$BASELINE_FILE" \
     "${TEST_ARGS[@]}"
+
+  curl -fsS "http://localhost:${ENCODE_PORT}/collective_rpc" \
+    -H 'Content-Type: application/json' \
+    -d '{"method":"encoder_graph_stats"}' \
+    >"${LOG_PATH}/encoder_graph_stats.json"
+  "$PYTHON_BIN" - "${LOG_PATH}/encoder_graph_stats.json" "${E_CUDAGRAPH_MM_ENCODER:-0}" <<'PY'
+import json
+import sys
+
+with open(sys.argv[1]) as f:
+    results = json.load(f)["results"]
+assert results, "No encoder workers returned graph statistics"
+for stats in results:
+    if sys.argv[2] == "1":
+        assert stats["is_captured"], stats
+        assert stats["graph_hits"] > 0, stats
+    else:
+        assert stats["graph_hits"] == 0, stats
+print("Encoder graph statistics:", results)
+PY
 
   cleanup_instances
 }

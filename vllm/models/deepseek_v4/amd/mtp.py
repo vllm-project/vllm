@@ -2,13 +2,13 @@
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 """MTP draft model for DeepSeek V4 (internal codename: DeepseekV4).
 
-Split from ``deepseek_mtp.py`` because the V4 architecture introduces several
+Split from `deepseek_mtp.py` because the V4 architecture introduces several
 pieces that have no analogue in V3/V32:
-  * separate ``e_proj`` / ``h_proj`` with fp8 linear quantization (instead of
-    the fused ``eh_proj``);
-  * ``hc_head`` hypercompressed vocab projection applied in ``compute_logits``;
-  * ``DeepseekV4DecoderLayer`` with its own aux-stream management;
-  * V4-specific checkpoint weight-name remapping in ``load_weights``.
+  * separate `e_proj` / `h_proj` with fp8 linear quantization (instead of
+    the fused `eh_proj`);
+  * `hc_head` hypercompressed vocab projection applied in `compute_logits`;
+  * `DeepseekV4DecoderLayer` with its own aux-stream management;
+  * V4-specific checkpoint weight-name remapping in `load_weights`.
 """
 
 import typing
@@ -19,10 +19,6 @@ import torch
 import torch.nn as nn
 
 from vllm.config import VllmConfig
-from vllm.distributed import (
-    get_tensor_model_parallel_rank,
-    get_tensor_model_parallel_world_size,
-)
 from vllm.logger import init_logger
 from vllm.model_executor.layers.fused_moe import fused_moe_make_expert_params_mapping
 from vllm.model_executor.layers.layernorm import RMSNorm
@@ -32,9 +28,6 @@ from vllm.model_executor.layers.mhc import HCHeadOp
 from vllm.model_executor.layers.vocab_parallel_embedding import (
     VocabParallelEmbedding,
 )
-from vllm.model_executor.model_loader.mtp_validation import (
-    is_mtp_completeness_check_enabled,
-)
 from vllm.model_executor.model_loader.weight_utils import default_weight_loader
 from vllm.model_executor.models.deepseek_mtp import SharedHead
 from vllm.model_executor.models.deepseek_v2 import get_spec_layer_idx_from_weight_name
@@ -43,10 +36,12 @@ from vllm.models.deepseek_v4.common.ops.fused_mtp_input_rmsnorm import (
     _FUSED_MTP_INPUT_RMSNORM_KERNEL,
     _MTP_SHARED_HEAD_RMSNORM_KERNEL,
 )
+from vllm.models.deepseek_v4.quant_config import align_mtp_quant_config
 from vllm.platforms import current_platform
 from vllm.sequence import IntermediateTensors
 
-from .model import DeepseekV4DecoderLayer
+from .mega_moe import finalize_mega_moe_weights
+from .model import DeepseekV4DecoderLayer, DeepseekV4ForCausalLM
 
 logger = init_logger(__name__)
 
@@ -160,7 +155,7 @@ class DeepSeekV4MultiTokenPredictorLayer(nn.Module):
             inputs_embeds
         ).unsqueeze(-2)
         hidden_states, residual, post_mix, res_mix = self.mtp_block(
-            positions=positions, x=hidden_states, input_ids=None
+            positions=positions, x=hidden_states, input_ids=input_ids
         )
         if self.mtp_block.use_fused_mhc:
             hidden_states = self.mtp_block.hc_post(
@@ -240,13 +235,11 @@ class DeepSeekV4MultiTokenPredictor(nn.Module):
             current_step_idx,
         )
 
-    def compute_logits(
+    def _pre_head(
         self,
+        mtp_layer: DeepSeekV4MultiTokenPredictorLayer,
         hidden_states: torch.Tensor,
-        spec_step_idx: int = 0,
     ) -> torch.Tensor:
-        current_step_idx = spec_step_idx % self.num_mtp_layers
-        mtp_layer = self.layers[str(self.mtp_start_layer_idx + current_step_idx)]
         # MTP forward returns the pre-hc_head residual (T, hc_mult * D); apply
         # hc_head here so logits are computed from the dense hidden state.
         hidden_states = hidden_states.view(
@@ -260,23 +253,64 @@ class DeepSeekV4MultiTokenPredictor(nn.Module):
             mtp_layer.rms_norm_eps,
             mtp_layer.hc_eps,
         )
-        hidden_states = _MTP_SHARED_HEAD_RMSNORM_KERNEL(
+        return _MTP_SHARED_HEAD_RMSNORM_KERNEL(
             hidden_states,
             mtp_layer.shared_head.norm.weight.data,
             mtp_layer.shared_head.norm.variance_epsilon,
         )
-        logits = self.logits_processor(mtp_layer.shared_head.head, hidden_states)
+
+    def compute_logits(
+        self,
+        hidden_states: torch.Tensor,
+        spec_step_idx: int = 0,
+    ) -> torch.Tensor:
+        current_step_idx = spec_step_idx % self.num_mtp_layers
+        mtp_layer = self.layers[str(self.mtp_start_layer_idx + current_step_idx)]
+        logits = self.logits_processor(
+            mtp_layer.shared_head.head, self._pre_head(mtp_layer, hidden_states)
+        )
         return logits
+
+    def get_top_tokens(
+        self,
+        hidden_states: torch.Tensor,
+        spec_step_idx: int = 0,
+    ) -> torch.Tensor:
+        current_step_idx = spec_step_idx % self.num_mtp_layers
+        mtp_layer = self.layers[str(self.mtp_start_layer_idx + current_step_idx)]
+        # Vocab-parallel argmax for the greedy draft: per-rank head projection
+        # + local argmax + a [batch, 2*tp] (value, index) reduce, instead of
+        # all-gathering the full vocab logits.
+        return self.logits_processor.get_top_tokens(
+            mtp_layer.shared_head.head, self._pre_head(mtp_layer, hidden_states)
+        )
 
 
 class DeepSeekV4MTP(nn.Module):
+    # The draft head reuses DeepseekV4DecoderLayer, so its fused linears must
+    # unfold to the same checkpoint shards for per-layer quant config lookup.
+    packed_modules_mapping = DeepseekV4ForCausalLM.packed_modules_mapping
+
     def __init__(self, *, vllm_config: VllmConfig, prefix: str = ""):
         super().__init__()
         self.config = vllm_config.model_config.hf_config
         self.quant_config = vllm_config.quant_config
+        align_mtp_quant_config(self.quant_config, self.config)
         self.model = DeepSeekV4MultiTokenPredictor(
             vllm_config=vllm_config, prefix=maybe_prefix(prefix, "model")
         )
+        if any(
+            getattr(
+                layer.mtp_block.ffn,
+                "is_fused_shared_expert_enabled",
+                False,
+            )
+            for layer in self.model.layers.values()
+        ):
+            raise NotImplementedError(
+                "DeepSeek-V4 MTP fused shared experts are not supported yet; "
+                "please open an issue."
+            )
 
     def embed_input_ids(self, input_ids: torch.Tensor) -> torch.Tensor:
         return self.model.embed_input_ids(input_ids)
@@ -301,6 +335,15 @@ class DeepSeekV4MTP(nn.Module):
         spec_step_idx: int = 0,
     ) -> torch.Tensor | None:
         return self.model.compute_logits(hidden_states, spec_step_idx)
+
+    def get_top_tokens(
+        self,
+        hidden_states: torch.Tensor,
+        spec_step_idx: int = 0,
+    ) -> torch.Tensor:
+        # Greedy-draft path used when use_local_argmax_reduction is enabled:
+        # vocab-parallel argmax, no full-vocab logits.
+        return self.model.get_top_tokens(hidden_states, spec_step_idx)
 
     def load_weights(self, weights: Iterable[tuple[str, torch.Tensor]]) -> set[str]:
         # Weight name remapping for checkpoint compatibility.
@@ -352,21 +395,17 @@ class DeepSeekV4MTP(nn.Module):
             # KeyError downstream rather than be silently rewritten.
             return name
 
-        # TP for attention
-        tp_size = get_tensor_model_parallel_world_size()
-        tp_rank = get_tensor_model_parallel_rank()
-        n_head = self.config.num_attention_heads
-        n_local_head = n_head // tp_size
-        head_rank_start = n_local_head * tp_rank
-        head_rank_end = n_local_head * (tp_rank + 1)
-
         # Pre-compute expert mapping ONCE.
+        first_layer = next(iter(self.model.layers.values()))
         expert_mapping = fused_moe_make_expert_params_mapping(
             self,
             ckpt_gate_proj_name="w1",
             ckpt_down_proj_name="w2",
             ckpt_up_proj_name="w3",
             num_experts=self.config.n_routed_experts,
+            routed_experts_prefix=(
+                "" if first_layer.mtp_block.ffn.use_mega_moe else "routed_experts"
+            ),
         )
 
         # FP8 experts register ``..._weight_scale_inv`` (block_quant) while
@@ -453,12 +492,6 @@ class DeepSeekV4MTP(nn.Module):
                             loaded_params.add(name_mapped)
                             break
                     continue
-                elif "attn_sink" in name:
-                    narrow_weight = loaded_weight[head_rank_start:head_rank_end]
-                    n = narrow_weight.shape[0]
-                    params_dict[name][:n].copy_(narrow_weight)
-                    loaded_params.add(name)
-                    continue
                 else:
                     if ".shared_experts.w2" in name:
                         name = name.replace(
@@ -474,30 +507,14 @@ class DeepSeekV4MTP(nn.Module):
                     weight_loader(param, loaded_weight)
                     loaded_params.add(name)
                     continue
-
-        loaded_layers: set[int] = set()
-        for param_name in loaded_params:
-            spec_layer = get_spec_layer_idx_from_weight_name(self.config, param_name)
-            if spec_layer is not None:
-                loaded_layers.add(spec_layer)
-        for layer_idx in range(
-            self.model.mtp_start_layer_idx,
-            self.model.mtp_start_layer_idx + self.model.num_mtp_layers,
-        ):
-            if layer_idx not in loaded_layers and is_mtp_completeness_check_enabled():
-                raise ValueError(
-                    f"MTP speculative decoding layer {layer_idx} weights "
-                    f"missing from checkpoint. The checkpoint may have "
-                    f"been quantized without including the MTP layers. "
-                    f"Use a checkpoint that includes MTP layer weights, "
-                    f"or disable speculative decoding."
-                )
         logger.info_once("MTP draft model loaded: %d params", len(loaded_params))
         return loaded_params
 
+    def process_weights_after_loading(self) -> None:
+        finalize_mega_moe_weights(self)
+
     def _rewrite_spec_layer_name(self, spec_layer: int, name: str) -> str:
-        """
-        Rewrite the weight name to match the format of the original model.
+        """Rewrite the weight name to match the format of the original model.
         Add .mtp_block for modules in transformer layer block for spec layer
         and rename shared layer weights to be top level.
         """

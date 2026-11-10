@@ -1,15 +1,25 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 
+import dataclasses
+
 import torch
 
 from vllm.logger import init_logger
-from vllm.model_executor.layers.quantization.utils.humming_utils import (
+from vllm.model_executor.layers.quantization.utils.humming import (
     apply_humming_linear,
     get_humming_linear_compute_config,
     prepare_humming_linear_layer_config,
+    quant_key_to_input_schema,
+)
+from vllm.model_executor.layers.quantization.utils.quant_utils import kNvfp4Dynamic
+from vllm.model_executor.utils import (
+    move_parameter,
+    replace_parameter,
+    set_kernel_parameter,
 )
 from vllm.platforms import current_platform
+from vllm.utils.humming import create_humming_locks
 from vllm.utils.import_utils import has_humming
 
 from .base import NvFp4LinearKernel, NvFp4LinearLayerConfig
@@ -19,6 +29,8 @@ logger = init_logger(__name__)
 
 class HummingNvFp4LinearKernel(NvFp4LinearKernel):
     """Humming GEMM Kernel for NVFP4."""
+
+    allow_input_schema_fallback = True
 
     @classmethod
     def is_supported(
@@ -40,9 +52,7 @@ class HummingNvFp4LinearKernel(NvFp4LinearKernel):
         return True, None
 
     def process_weights_after_loading(self, layer: torch.nn.Module) -> None:
-        # Route through humming's compressed-tensors nvfp4 loader (same path as
-        # the MoE oracle); the native group_tensor schema mishandles a scalar
-        # global scale.
+        # Reuse the CT loader for packed FP4 weights and tensor scales.
         quant_config = {
             "quant_method": "compressed-tensors",
             "format": "nvfp4-pack-quantized",
@@ -51,18 +61,30 @@ class HummingNvFp4LinearKernel(NvFp4LinearKernel):
             "strategy": "group",
             "group_size": 16,
         }
-        # CT pack-quantized reads `weight_packed`; the scheme renamed it to `weight`.
-        if not hasattr(layer, "weight_packed"):
-            layer.weight_packed = layer.weight
-            del layer.weight
+        # CT pack-quantized reads `weight_packed`: make it the weight's runtime name
+        # (a CT checkpoint already has it as an alias of `weight`).
+        move_parameter(layer, "weight", "weight_packed")
         # The CT linear scheme inverts the global scale (1/scale) for
         # marlin/cutlass; humming wants the original.
-        layer.weight_global_scale = torch.nn.Parameter(
-            1.0 / layer.weight_global_scale, requires_grad=False
+        replace_parameter(layer, "weight_global_scale", 1.0 / layer.weight_global_scale)
+        input_quant_key = None
+        if hasattr(layer, "input_global_scale"):
+            # Quark keeps its loaded (retired) `input_scale_2`: revive that one.
+            if "input_scale_2" not in layer._parameters:
+                move_parameter(layer, "input_global_scale", "input_scale_2")
+            set_kernel_parameter(
+                layer, "input_scale_2", layer.input_global_scale.reshape(-1)
+            )
+            input_quant_key = kNvfp4Dynamic
+        input_schema = quant_key_to_input_schema(input_quant_key)
+        self.layer_config = prepare_humming_linear_layer_config(
+            layer,
+            quant_config,
+            input_schema=input_schema,
+            allow_input_schema_fallback=self.allow_input_schema_fallback,
         )
-        self.layer_config = prepare_humming_linear_layer_config(layer, quant_config)
         self.compute_config = get_humming_linear_compute_config()
-        self.locks = torch.zeros(1024, dtype=torch.int32, device=layer.weight.device)
+        self.locks = create_humming_locks(layer.weight.device)
 
     def apply_weights(
         self,
@@ -73,7 +95,37 @@ class HummingNvFp4LinearKernel(NvFp4LinearKernel):
         return apply_humming_linear(
             layer,
             x,
+            skip_bias_add=bias is None,
             layer_config=self.layer_config,
             compute_config=self.compute_config,
             locks=self.locks,
+        )
+
+
+class HummingHadamardNvFp4LinearKernel(HummingNvFp4LinearKernel):
+    """Humming W4A4 NVFP4 with a Sylvester Hadamard fused into input quantization.
+
+    Runs the activation dtype the checkpoint declares, without A16 fallback.
+    """
+
+    allow_input_schema_fallback = False
+
+    def __init__(
+        self, config: NvFp4LinearLayerConfig, hadamard_block_size: int
+    ) -> None:
+        super().__init__(config)
+        self.hadamard_block_size = hadamard_block_size
+
+    @classmethod
+    def is_supported(
+        cls, compute_capability: int | None = None
+    ) -> tuple[bool, str | None]:
+        if not current_platform.has_device_capability(100):
+            return False, "Humming FP4 activations require SM100+"
+        return super().is_supported(compute_capability)
+
+    def process_weights_after_loading(self, layer: torch.nn.Module) -> None:
+        super().process_weights_after_loading(layer)
+        layer.weight_schema = dataclasses.replace(
+            layer.weight_schema, hadamard_block_size=self.hadamard_block_size
         )

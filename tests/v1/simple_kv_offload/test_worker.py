@@ -9,11 +9,13 @@ read partially written / stale blocks and silently corrupt the CPU cache.
 
 from __future__ import annotations
 
+import mmap
 import time
 from unittest.mock import MagicMock
 
 import pytest
 import torch
+import torch.distributed as dist
 
 from vllm.platforms import current_platform
 
@@ -22,13 +24,18 @@ if not current_platform.is_cuda_alike():
 
 from tests.v1.attention.utils import dense_kv_cache_tensor, dense_kv_cache_views
 from vllm.config import CacheConfig
-from vllm.v1.core.kv_cache_utils import (
+from vllm.distributed.kv_transfer.kv_connector.v1.simple_cpu_offload_connector import (
+    SimpleCPUOffloadConnector,
+)
+from vllm.v1.core.kv_cache_planning import (
     get_kv_cache_config_from_groups,
     is_kv_cache_spec_uniform,
-    resolve_kv_cache_block_sizes,
 )
+from vllm.v1.core.kv_cache_utils import resolve_kv_cache_block_sizes
+from vllm.v1.core.sched.output import CachedRequestData, SchedulerOutput
 from vllm.v1.kv_cache_interface import (
     FullAttentionSpec,
+    KVCacheConfig,
     KVCacheGroupSpec,
     KVCacheLayout,
     KVCacheSpec,
@@ -41,10 +48,15 @@ from vllm.v1.simple_kv_offload.cuda_mem_ops import (
     CU_MEMCPY_SRC_ACCESS_ORDER_ANY,
     CU_MEMCPY_SRC_ACCESS_ORDER_STREAM,
     build_params,
-    pin_tensor,
 )
-from vllm.v1.simple_kv_offload.metadata import SimpleCPUOffloadMetadata
+from vllm.v1.simple_kv_offload.disk_backend import DiskBackend
+from vllm.v1.simple_kv_offload.metadata import (
+    SimpleCPUOffloadMetadata,
+    SimpleCPUOffloadWorkerMetadata,
+)
+from vllm.v1.simple_kv_offload.sizing import sync_num_offload_blocks_across_workers
 from vllm.v1.simple_kv_offload.worker import SimpleCPUOffloadWorker
+from vllm.v1.worker.gpu.kv_connector import ActiveKVConnector
 from vllm.v1.worker.utils import allocate_kv_cache
 
 NUM_BLOCKS = 64
@@ -55,10 +67,32 @@ ITERS = 30
 SLEEP_CYCLES = 50_000_000
 
 
+def _make_empty_scheduler_output() -> SchedulerOutput:
+    return SchedulerOutput(
+        scheduled_new_reqs=[],
+        scheduled_cached_reqs=CachedRequestData.make_empty(),
+        num_scheduled_tokens={},
+        total_num_scheduled_tokens=0,
+        scheduled_spec_decode_tokens={},
+        scheduled_encoder_inputs={},
+        finished_req_ids=set(),
+        free_encoder_mm_hashes=[],
+    )
+
+
+def _make_worker(
+    kv_cache_config: KVCacheConfig | None, cpu_capacity_bytes: int
+) -> SimpleCPUOffloadWorker:
+    return SimpleCPUOffloadWorker(None, kv_cache_config, cpu_capacity_bytes)
+
+
 def _make_backend() -> tuple[DmaCopyBackend, torch.Tensor, torch.Tensor]:
     gpu = {"k": torch.zeros((NUM_BLOCKS, BLOCK_BYTES), dtype=torch.int8, device="cuda")}
-    cpu = {"k": torch.zeros((NUM_BLOCKS, BLOCK_BYTES), dtype=torch.int8, device="cpu")}
-    pin_tensor(cpu["k"])
+    cpu = {
+        "k": torch.zeros(
+            (NUM_BLOCKS, BLOCK_BYTES), dtype=torch.int8, device="cpu", pin_memory=True
+        )
+    }
     low_pri, _ = torch.cuda.Stream.priority_range()
     backend = DmaCopyBackend()
     backend.init(
@@ -69,6 +103,114 @@ def _make_backend() -> tuple[DmaCopyBackend, torch.Tensor, torch.Tensor]:
         torch.cuda.Stream(priority=low_pri),
     )
     return backend, gpu["k"], cpu["k"]
+
+
+def test_no_forward_step_completes_cpu_store(monkeypatch):
+    """A finished request's final store must drain without another model step."""
+    backend, gpu, cpu = _make_backend()
+    worker = _make_worker(None, 0)
+    worker._backend = backend
+    connector = SimpleCPUOffloadConnector.__new__(SimpleCPUOffloadConnector)
+    connector.worker_handler = worker
+    output = _make_empty_scheduler_output()
+    output.kv_connector_metadata = SimpleCPUOffloadMetadata(
+        store_event=0, store_gpu_blocks=[0], store_cpu_blocks=[0]
+    )
+    try:
+        gpu.fill_(91)
+        active = ActiveKVConnector.__new__(ActiveKVConnector)
+        active.kv_connector = connector
+        active._disabled = False
+        active._pending_load_kwargs = None
+        module = "vllm.v1.worker.gpu.kv_connector"
+        monkeypatch.setattr(f"{module}.is_forward_context_available", lambda: True)
+        monkeypatch.setattr(f"{module}.get_forward_context", lambda: None)
+        result = active.no_forward(output)
+        completion = (
+            result.kv_connector_output.kv_connector_worker_meta
+            if result.kv_connector_output is not None
+            else None
+        )
+        deadline = time.monotonic() + 5
+        while completion is None and time.monotonic() < deadline:
+            connector.get_finished(set())
+            completion = connector.build_connector_worker_meta()
+            time.sleep(0.001)
+        assert completion is not None, "CPU store never completed on the empty step"
+        assert isinstance(completion, SimpleCPUOffloadWorkerMetadata)
+        assert completion.completed_store_events == {0: 1}
+        assert torch.equal(cpu[0], gpu[0].cpu())
+    finally:
+        backend.shutdown()
+
+
+def test_deferred_store_waits_for_draft_forward(monkeypatch):
+    """Target completion must not submit the store before draft finalization."""
+    backend, gpu, cpu = _make_backend()
+    worker = _make_worker(None, 0)
+    worker._backend = backend
+    connector = SimpleCPUOffloadConnector.__new__(SimpleCPUOffloadConnector)
+    connector.worker_handler = worker
+    output = _make_empty_scheduler_output()
+    output.kv_connector_metadata = SimpleCPUOffloadMetadata(
+        store_event=0, store_gpu_blocks=[0], store_cpu_blocks=[0]
+    )
+    active = ActiveKVConnector.__new__(ActiveKVConnector)
+    active.kv_connector = connector
+    active._disabled = False
+    active._pending_load_kwargs = None
+    module = "vllm.v1.worker.gpu.kv_connector"
+    monkeypatch.setattr(f"{module}.is_forward_context_available", lambda: True)
+    monkeypatch.setattr(f"{module}.get_forward_context", lambda: None)
+    launch = MagicMock(wraps=backend.launch_copy)
+    monkeypatch.setattr(backend, "launch_copy", launch)
+    try:
+        active.pre_forward(output)
+        # Target forward.
+        gpu.fill_(17)
+        active.finish_forward()
+        active.post_forward(set(), defer_finalize=True)
+        launch.assert_not_called()
+        # Draft forward writes the final KV.
+        gpu.fill_(91)
+        active.finalize_step()
+        assert launch.call_count == 1
+        completion = None
+        deadline = time.monotonic() + 5
+        while completion is None and time.monotonic() < deadline:
+            connector.get_finished(set())
+            completion = connector.build_connector_worker_meta()
+            time.sleep(0.001)
+        assert completion is not None
+        assert completion.completed_store_events == {0: 1}
+        assert torch.equal(cpu[0], gpu[0].cpu())
+        assert launch.call_count == 1
+    finally:
+        backend.shutdown()
+
+
+def _launch_and_wait(
+    backend: DmaCopyBackend,
+    block_ids: list[int],
+    *,
+    is_store: bool,
+    event_idx: int = 0,
+    wait_event: torch.Event | None = None,
+) -> None:
+    events: list[tuple[int, torch.Event]] = []
+    backend.launch_copy(
+        block_ids,
+        block_ids,
+        is_store=is_store,
+        event_idx=event_idx,
+        events_list=events,
+        wait_event=wait_event,
+    )
+    deadline = time.time() + 10.0
+    while not events and time.time() < deadline:
+        time.sleep(0.0005)
+    assert events, "background copy was never enqueued"
+    events[0][1].synchronize()
 
 
 def _drive_store(
@@ -100,21 +242,9 @@ def _drive_store(
             wait_event = torch.Event()
             wait_event.record(compute_stream)
 
-        store_events: list[tuple[int, torch.Event]] = []
-        backend.launch_copy(
-            block_ids,
-            block_ids,
-            is_store=True,
-            event_idx=it,
-            events_list=store_events,
-            wait_event=wait_event,
+        _launch_and_wait(
+            backend, block_ids, is_store=True, event_idx=it, wait_event=wait_event
         )
-
-        deadline = time.time() + 10.0
-        while not store_events and time.time() < deadline:
-            time.sleep(0.0005)
-        assert store_events, "background copy was never enqueued"
-        store_events[0][1].synchronize()
 
         if int((cpu[:, 0].to(torch.int32) != val).sum().item()):
             corrupt += 1
@@ -169,8 +299,9 @@ class _RecordingBackend:
 
 def test_transfer_hooks_pass_wait_event_for_store_only():
     """wait_for_save gates stores on a compute-done event; start_load_kv does not."""
-    worker = SimpleCPUOffloadWorker(
-        vllm_config=None, kv_cache_config=None, cpu_capacity_bytes=0
+    worker = _make_worker(
+        kv_cache_config=None,
+        cpu_capacity_bytes=0,
     )
     recording = _RecordingBackend()
     worker._backend = recording
@@ -234,8 +365,7 @@ def test_register_shared_kv_cache_storage(monkeypatch, layout: KVCacheLayout):
             )
         ],
     )
-    worker = SimpleCPUOffloadWorker(
-        vllm_config=None,
+    worker = _make_worker(
         kv_cache_config=cache_config,
         cpu_capacity_bytes=raw.nbytes,
     )
@@ -262,14 +392,81 @@ def test_register_shared_kv_cache_storage(monkeypatch, layout: KVCacheLayout):
     }
 
 
+@pytest.mark.parametrize("num_layers", [1, 2])
+def test_explicit_cpu_blocks_bound_live_worker_allocation(monkeypatch, num_layers):
+    """Different live KV strides must honor the same explicit CPU pool size."""
+    num_blocks = 4
+    names = [f"layer.{i}" for i in range(num_layers)]
+    raw = torch.zeros(
+        num_layers * num_blocks * BLOCK_BYTES, dtype=torch.int8, device="cuda"
+    )
+    config = KVCacheConfig(
+        num_blocks=num_blocks,
+        kv_cache_tensors=[
+            KVCacheTensor(
+                size=raw.nbytes,
+                layers=names,
+                layer_stride=num_blocks * BLOCK_BYTES,
+                block_stride=BLOCK_BYTES,
+            )
+        ],
+        kv_cache_groups=[],
+    )
+    caches = dict(zip(names, raw.view(num_layers, num_blocks, BLOCK_BYTES)))
+    worker = SimpleCPUOffloadWorker(None, config, 8 * BLOCK_BYTES, num_cpu_blocks=4)
+    monkeypatch.setattr("vllm.v1.simple_kv_offload.worker.PIN_MEMORY", False)
+    try:
+        worker.register_kv_caches(caches)
+        assert worker.num_cpu_blocks == 4
+        assert worker.cpu_kv_caches is not None
+        assert all(t.shape[0] == 4 for t in worker.cpu_kv_caches.values())
+        assert sum(t.nbytes for t in worker.cpu_kv_caches.values()) <= 8 * BLOCK_BYTES
+        allocated_bytes = (
+            next(iter(worker.cpu_kv_caches.values())).untyped_storage().nbytes()
+        )
+        cache_bytes = num_layers * 4 * BLOCK_BYTES
+        assert cache_bytes <= allocated_bytes < cache_bytes + mmap.PAGESIZE
+    finally:
+        if worker._backend is not None:
+            worker._backend.shutdown()
+
+
+@pytest.mark.parametrize(
+    "capacity_bytes, count, local_capacity",
+    [(8 * BLOCK_BYTES, 5, 4), (BLOCK_BYTES, 1, 0)],
+)
+def test_explicit_cpu_blocks_reject_heavier_worker_before_allocation(
+    capacity_bytes, count, local_capacity
+):
+    """A count that fits the scheduler's stage must fail on a smaller worker."""
+    names = ["layer.0", "layer.1"]
+    raw = torch.zeros(2 * 4 * BLOCK_BYTES, dtype=torch.int8, device="cuda")
+    config = KVCacheConfig(
+        num_blocks=4,
+        kv_cache_tensors=[
+            KVCacheTensor(
+                size=raw.nbytes,
+                layers=names,
+                layer_stride=4 * BLOCK_BYTES,
+                block_stride=BLOCK_BYTES,
+            )
+        ],
+        kv_cache_groups=[],
+    )
+    worker = SimpleCPUOffloadWorker(None, config, capacity_bytes, num_cpu_blocks=count)
+    caches = dict(zip(names, raw.view(2, 4, BLOCK_BYTES)))
+    with pytest.raises(ValueError, match=f"local offload capacity {local_capacity}"):
+        worker.register_kv_caches(caches)
+    assert worker.cpu_kv_caches is None
+
+
 def test_register_kv_cache_storage_with_trailing_padding(monkeypatch):
     num_blocks = 4
     block_bytes = 32
     cache_bytes = num_blocks * block_bytes
     raw = torch.zeros(4096, dtype=torch.int8, device="cuda")
     cache = raw[:cache_bytes].view(num_blocks, block_bytes)
-    worker = SimpleCPUOffloadWorker(
-        vllm_config=None,
+    worker = _make_worker(
         kv_cache_config=MagicMock(
             num_blocks=num_blocks,
             kv_cache_tensors=[
@@ -314,8 +511,7 @@ def test_register_separate_kv_head_groups(monkeypatch):
     )
     caches = dense_kv_cache_views(raw, spec, num_blocks, num_layers, layout)
     layer_names = [f"layer.{i}" for i in range(num_layers)]
-    worker = SimpleCPUOffloadWorker(
-        vllm_config=None,
+    worker = _make_worker(
         kv_cache_config=MagicMock(
             num_blocks=num_blocks,
             kv_cache_tensors=[
@@ -343,16 +539,69 @@ def test_register_separate_kv_head_groups(monkeypatch):
     }
 
 
+def test_sync_num_cpu_blocks_across_workers_noop_when_dist_uninitialized(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    monkeypatch.setattr(
+        "vllm.v1.simple_kv_offload.sizing.dist.is_initialized",
+        lambda: False,
+    )
+    assert sync_num_offload_blocks_across_workers(42) == 42
+
+
+def test_sync_num_cpu_blocks_across_workers_noop_when_world_size_one(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    class FakeGroup:
+        world_size = 1
+
+    monkeypatch.setattr(
+        "vllm.v1.simple_kv_offload.sizing.dist.is_initialized",
+        lambda: True,
+    )
+    monkeypatch.setattr(
+        "vllm.distributed.parallel_state.get_world_group",
+        lambda: FakeGroup(),
+    )
+    assert sync_num_offload_blocks_across_workers(42) == 42
+
+
+def test_sync_num_cpu_blocks_across_workers_all_reduce_min(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    class FakeGroup:
+        world_size = 4
+        cpu_group = object()
+
+    def fake_all_reduce(tensor, group, op) -> None:
+        assert op is dist.ReduceOp.MIN
+        tensor.fill_(5)
+
+    monkeypatch.setattr(
+        "vllm.v1.simple_kv_offload.sizing.dist.is_initialized",
+        lambda: True,
+    )
+    monkeypatch.setattr(
+        "vllm.distributed.parallel_state.get_world_group",
+        lambda: FakeGroup(),
+    )
+    monkeypatch.setattr(
+        "vllm.v1.simple_kv_offload.sizing.dist.all_reduce",
+        fake_all_reduce,
+    )
+    assert sync_num_offload_blocks_across_workers(10) == 5
+
+
 def _dsa_specs(num_layers: int, block_size: int) -> dict[str, KVCacheSpec]:
     """A DSA model's per-layer specs (DeepSeek-V3.2, GLM-5.2).
 
     Each decoder layer contributes an MLA latent cache and the indexer's key
-    cache, whose pages differ in size (``MLAAttentionSpec`` off ``head_size``:
+    cache, whose pages differ in size (`MLAAttentionSpec` off `head_size`:
     512 + 64 for the latent, 128 fp8 keys + one fp32 scale per 128 elements for
-    the indexer). Both are ``MLAAttentionSpec`` with the same block size, so the
-    hybrid allocator puts them in one ``UniformTypeKVCacheSpecs`` cache group.
-    See ``DeepseekV32IndexerCache.get_kv_cache_spec`` and
-    ``MLAAttention.get_kv_cache_spec``.
+    the indexer). Both are `MLAAttentionSpec` with the same block size, so the
+    hybrid allocator puts them in one `UniformTypeKVCacheSpecs` cache group.
+    See `DeepseekV32IndexerCache.get_kv_cache_spec` and
+    `MLAAttention.get_kv_cache_spec`.
     """
     specs: dict[str, KVCacheSpec] = {}
     for i in range(num_layers):
@@ -377,7 +626,7 @@ def test_register_mixed_page_sizes_in_one_cache_group(monkeypatch):
 
     The MLA latent and indexer key caches of a layer have different page sizes,
     so the allocation has no single per-layer block size to reinterpret it with:
-    ``num_layers * (mla_page + indexer_page)`` is not a multiple of either page.
+    `num_layers * (mla_page + indexer_page)` is not a multiple of either page.
     Registration must derive each region from the placement metadata instead.
     """
     num_layers = 4
@@ -399,6 +648,8 @@ def test_register_mixed_page_sizes_in_one_cache_group(monkeypatch):
     vllm_config.cache_config = CacheConfig()
     vllm_config.cache_config.kv_cache_layout = layout.name
     vllm_config.cache_config.num_gpu_blocks_override = None
+    vllm_config.attention_config.hisparse_config = None
+    vllm_config.kv_transfer_config = None
 
     pages = [spec.page_size_bytes for spec in specs.values()]
     num_blocks = 4
@@ -409,8 +660,7 @@ def test_register_mixed_page_sizes_in_one_cache_group(monkeypatch):
     assert len(set(pages)) > 1, "the mixed page sizes are what this test covers"
 
     kv_caches = allocate_kv_cache(kv_cache_config, torch.device("cuda"), layout)
-    worker = SimpleCPUOffloadWorker(
-        vllm_config=None,
+    worker = _make_worker(
         kv_cache_config=kv_cache_config,
         cpu_capacity_bytes=sum(pages) * num_blocks,
     )
@@ -439,7 +689,7 @@ def test_register_mixed_page_sizes_in_one_cache_group(monkeypatch):
 def test_register_mixed_page_sizes_odd_block_counts(monkeypatch, rank_blocks):
     """Registration holds at block counts that are not powers of two.
 
-    ``num_blocks`` comes out of ``available_memory // bytes_per_block``, so
+    `num_blocks` comes out of `available_memory // bytes_per_block`, so
     any integer is reachable. Registration derives regions from the config's
     own block count and strides, and the CPU pool rounds down from the same
     per-block byte total; none of it assumes anything about how the count
@@ -457,6 +707,8 @@ def test_register_mixed_page_sizes_odd_block_counts(monkeypatch, rank_blocks):
     vllm_config.cache_config = CacheConfig()
     vllm_config.cache_config.kv_cache_layout = layout.name
     vllm_config.cache_config.num_gpu_blocks_override = None
+    vllm_config.attention_config.hisparse_config = None
+    vllm_config.kv_transfer_config = None
 
     pages = [spec.page_size_bytes for spec in specs.values()]
     kv_cache_config = get_kv_cache_config_from_groups(
@@ -465,8 +717,7 @@ def test_register_mixed_page_sizes_odd_block_counts(monkeypatch, rank_blocks):
     assert kv_cache_config.num_blocks == rank_blocks
 
     kv_caches = allocate_kv_cache(kv_cache_config, torch.device("cuda"), layout)
-    worker = SimpleCPUOffloadWorker(
-        vllm_config=None,
+    worker = _make_worker(
         kv_cache_config=kv_cache_config,
         cpu_capacity_bytes=sum(pages) * rank_blocks,
     )
@@ -485,10 +736,10 @@ def test_register_mixed_page_sizes_odd_block_counts(monkeypatch, rank_blocks):
 def test_mixed_page_byte_placement_is_dcp_invariant():
     """DCP scales a block's token span, not its byte placement.
 
-    ``get_kv_cache_config_from_groups`` never reads
-    ``decode_context_parallel_size``, so every placement field registration
+    `get_kv_cache_config_from_groups` never reads
+    `decode_context_parallel_size`, so every placement field registration
     derives regions from is identical at dcp=1 and dcp=2. What DCP scales is
-    the block's token span, reported by ``resolve_kv_cache_block_sizes``;
+    the block's token span, reported by `resolve_kv_cache_block_sizes`;
     checking that it doubles proves DCP was actually in effect, or the
     identity above would be trivially true.
     """
@@ -506,6 +757,8 @@ def test_mixed_page_byte_placement_is_dcp_invariant():
         vllm_config.cache_config.kv_cache_layout = KVCacheLayout.LBNHC.name
         vllm_config.cache_config.num_gpu_blocks_override = None
         vllm_config.parallel_config.decode_context_parallel_size = dcp_size
+        vllm_config.attention_config.hisparse_config = None
+        vllm_config.kv_transfer_config = None
 
         page_bytes = sum(spec.page_size_bytes for spec in specs.values())
         config = get_kv_cache_config_from_groups(vllm_config, [group], page_bytes * 4)
@@ -519,3 +772,95 @@ def test_mixed_page_byte_placement_is_dcp_invariant():
         )
 
     assert placements[0] == placements[1]
+
+
+@pytest.mark.parametrize(
+    ("block_bytes", "use_page_cache", "expect_ok"),
+    [
+        (4096, True, True),  # aligned control
+        (3 * 512, True, True),  # 512-aligned only: fine for buffered I/O
+        (3 * 512, False, False),  # O_DIRECT keeps enforcing 4096 alignment
+    ],
+)
+def test_disk_backend_alignment_only_required_for_direct_io(
+    tmp_path, monkeypatch, block_bytes: int, use_page_cache: bool, expect_ok: bool
+):
+    """The 4096 stride assert belongs to O_DIRECT; page-cache I/O must not hit it.
+
+    Hybrid models (e.g. 101 per-rank cache tensors) sum to a block stride that
+    is 512- but not 4096-aligned, which previously made disk offload unbootable
+    even with use_page_cache=True.
+    """
+    # Host pinning is a separate lifecycle concern with its own tests; the
+    # alignment gate must not depend on registration state, so stub both ends.
+    monkeypatch.setattr(
+        "vllm.v1.simple_kv_offload.disk_backend.pin_tensor", lambda t: None
+    )
+    monkeypatch.setattr(
+        "vllm.v1.simple_kv_offload.disk_backend.unpin_tensor",
+        lambda t: None,
+        raising=False,  # harmless on branches without teardown-side unpins
+    )
+    num_blocks = 4
+    gpu = {"k": torch.zeros((num_blocks, block_bytes), dtype=torch.int8, device="cuda")}
+    backend = DiskBackend()
+    disk_path = tmp_path / "kv-offload.bin"
+
+    def _init() -> None:
+        backend.init(
+            gpu,
+            gpu["k"].device,
+            torch.cuda.Stream(),
+            torch.cuda.Stream(),
+            str(disk_path),
+            num_blocks,
+            block_bytes,
+            use_page_cache=use_page_cache,
+        )
+
+    if not expect_ok:
+        with pytest.raises(AssertionError, match="not aligned"):
+            _init()
+        return
+
+    _init()
+    try:
+        assert disk_path.stat().st_size == num_blocks * block_bytes
+    finally:
+        backend.shutdown()
+
+
+@pytest.mark.parametrize("hugepages", [False, True])
+def test_cpu_caches_round_trip_on_pinned_host_buffer(hugepages, hugepage_with_free):
+    """Store then load returns the same bytes on ordinary or HugeTLB pages."""
+    num_layers, num_blocks = 2, 4
+    names = [f"layer.{i}" for i in range(num_layers)]
+    raw = (torch.arange(num_layers * num_blocks * BLOCK_BYTES, device="cuda") % 127).to(
+        torch.int8
+    )
+    config = KVCacheConfig(
+        num_blocks=num_blocks,
+        kv_cache_tensors=[
+            KVCacheTensor(
+                size=raw.nbytes,
+                layers=names,
+                layer_stride=num_blocks * BLOCK_BYTES,
+                block_stride=BLOCK_BYTES,
+            )
+        ],
+        kv_cache_groups=[],
+    )
+    caches = dict(zip(names, raw.view(num_layers, num_blocks, BLOCK_BYTES)))
+    page = hugepage_with_free(1) if hugepages else None
+    worker = SimpleCPUOffloadWorker(None, config, raw.nbytes, cpu_hugepage_size=page)
+    blocks = list(range(num_blocks))
+    expected = raw.clone()
+    try:
+        worker.register_kv_caches(caches)
+        _launch_and_wait(worker._backend, blocks, is_store=True)
+        raw.zero_()
+        _launch_and_wait(worker._backend, blocks, is_store=False)
+        assert torch.equal(raw, expected)
+    finally:
+        if worker._backend is not None:
+            worker._backend.shutdown()

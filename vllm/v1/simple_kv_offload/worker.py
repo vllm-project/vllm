@@ -2,20 +2,27 @@
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 """Worker-side handler for SimpleCPUOffloadConnector."""
 
+import mmap
 from typing import TYPE_CHECKING
 
 import torch
 
 from vllm.config import VllmConfig
 from vllm.logger import init_logger
+from vllm.utils.host_memory import (
+    host_registration_ranges,
+    pin_tensor,
+    unpin_tensor,
+)
 from vllm.utils.torch_utils import PIN_MEMORY
 from vllm.v1.simple_kv_offload.copy_backend import DmaCopyBackend
-from vllm.v1.simple_kv_offload.cuda_mem_ops import pin_tensor
 from vllm.v1.simple_kv_offload.disk_backend import DiskBackend
+from vllm.v1.simple_kv_offload.host_buffer import alloc_host_buffer
 from vllm.v1.simple_kv_offload.metadata import (
     SimpleCPUOffloadMetadata,
     SimpleCPUOffloadWorkerMetadata,
 )
+from vllm.v1.simple_kv_offload.sizing import sync_num_offload_blocks_across_workers
 
 if TYPE_CHECKING:
     from vllm.v1.kv_cache_interface import KVCacheConfig
@@ -36,15 +43,19 @@ class SimpleCPUOffloadWorker:
         disk_capacity_bytes: int = 0,
         disk_buffer_slots: int = 2,
         use_page_cache: bool = False,
+        num_cpu_blocks: int | None = None,
+        cpu_hugepage_size: int | None = None,
     ):
         self.vllm_config = vllm_config
         self.kv_cache_config = kv_cache_config
         self.cpu_capacity_bytes = cpu_capacity_bytes
+        self._num_cpu_blocks_override = num_cpu_blocks
         self.disk_path = disk_path
         self.disk_capacity_bytes = disk_capacity_bytes
         self.disk_buffer_slots = disk_buffer_slots
         self.use_page_cache = use_page_cache
         self.disk_mode = kv_offload_backend == "disk"
+        self.cpu_hugepage_size = cpu_hugepage_size
 
         self.gpu_kv_caches: dict[str, torch.Tensor] | None = None
         self.cpu_kv_caches: dict[str, torch.Tensor] | None = None
@@ -90,6 +101,7 @@ class SimpleCPUOffloadWorker:
                 tensor (attention layers) or a list of tensors (Mamba layers
                 in hybrid models). All values are included for offloading
                 by resolving to their underlying raw storage.
+
         """
         if not kv_caches:
             logger.warning("No KV caches to offload.")
@@ -158,7 +170,10 @@ class SimpleCPUOffloadWorker:
         ]
         total_bytes_per_block = sum(per_tensor_bpb)
 
-        self.num_cpu_blocks = max(1, self.cpu_capacity_bytes // total_bytes_per_block)
+        self.num_cpu_blocks = self._resolve_num_cpu_blocks(
+            self.disk_capacity_bytes if self.disk_mode else self.cpu_capacity_bytes,
+            total_bytes_per_block,
+        )
 
         # Use lowest priority so KV cache I/O yields to compute streams.
         low_pri, _ = torch.cuda.Stream.priority_range()
@@ -172,20 +187,29 @@ class SimpleCPUOffloadWorker:
         else:
             self._init_cpu_mode(unique_gpu_caches, total_bytes_per_block, self.device)
 
+    def _resolve_num_cpu_blocks(self, capacity_bytes: int, bytes_per_block: int) -> int:
+        local_capacity = capacity_bytes // bytes_per_block
+        requested = self._num_cpu_blocks_override
+        if requested is None:
+            return sync_num_offload_blocks_across_workers(max(1, local_capacity))
+        if type(requested) is not int or not 0 < requested <= local_capacity:
+            raise ValueError(
+                f"num_cpu_blocks={requested!r} must be between 1 and "
+                f"local offload capacity {local_capacity}"
+            )
+        return requested
+
     def _init_disk_mode(
         self,
         unique_gpu_caches: dict[str, torch.Tensor],
         total_bytes_per_block: int,
         device: torch.device,
     ) -> None:
-        num_disk_slots = max(1, self.disk_capacity_bytes // total_bytes_per_block)
-        self.num_cpu_blocks = num_disk_slots
-
         logger.info(
             "SimpleCPUOffloadWorker [DISK]: %d tensors, %d disk slots (%.2f GB)",
             len(unique_gpu_caches),
-            num_disk_slots,
-            (num_disk_slots * total_bytes_per_block) / (1024**3),
+            self.num_cpu_blocks,
+            (self.num_cpu_blocks * total_bytes_per_block) / (1024**3),
         )
 
         assert self.disk_path is not None
@@ -197,7 +221,7 @@ class SimpleCPUOffloadWorker:
             self.load_stream,
             self.store_stream,
             rank_path,
-            num_disk_slots,
+            self.num_cpu_blocks,
             total_bytes_per_block,
             self.disk_buffer_slots,
             self.use_page_cache,
@@ -222,16 +246,7 @@ class SimpleCPUOffloadWorker:
                 "Pinned memory not available. CPU offload performance may be degraded."
             )
 
-        self.cpu_kv_caches = {}
-        for name, gpu_tensor in unique_gpu_caches.items():
-            cpu_shape = (self.num_cpu_blocks,) + gpu_tensor.shape[1:]
-            # Allocate non-pinned first, then pin via cudaHostRegister to
-            # bypass PyTorch's CUDACachingHostAllocator which rounds up to
-            # the next power of 2 (e.g. 100 GB -> 128 GB).
-            tensor = torch.zeros(cpu_shape, dtype=gpu_tensor.dtype, device="cpu")
-            if pin_memory:
-                pin_tensor(tensor)
-            self.cpu_kv_caches[name] = tensor
+        self.cpu_kv_caches = self._alloc_cpu_caches(unique_gpu_caches, pin_memory)
 
         self._backend = DmaCopyBackend()
         self._backend.init(
@@ -241,6 +256,40 @@ class SimpleCPUOffloadWorker:
             self.load_stream,
             self.store_stream,
         )
+
+    def _alloc_cpu_caches(
+        self, unique_gpu_caches: dict[str, torch.Tensor], pin_memory: bool
+    ) -> dict[str, torch.Tensor]:
+        """Carve per-layer caches out of one mapping, pinned in bounded chunks."""
+        layer_bytes = [
+            self.num_cpu_blocks * t[0].nbytes for t in unique_gpu_caches.values()
+        ]
+        buf = alloc_host_buffer(sum(layer_bytes), self.cpu_hugepage_size)
+
+        cpu_kv_caches = {}
+        offset = 0
+        for size, (name, gpu_tensor) in zip(layer_bytes, unique_gpu_caches.items()):
+            cpu_shape = (self.num_cpu_blocks,) + gpu_tensor.shape[1:]
+            view = buf[offset : offset + size].view(gpu_tensor.dtype)
+            cpu_kv_caches[name] = view.view(cpu_shape)
+            offset += size
+        if pin_memory:
+            registered = []
+            try:
+                for start, end in host_registration_ranges(
+                    layer_bytes,
+                    self.num_cpu_blocks,
+                    buf.nbytes,
+                    page_size=self.cpu_hugepage_size or mmap.PAGESIZE,
+                ):
+                    tensor = buf[start:end]
+                    pin_tensor(tensor)
+                    registered.append(tensor)
+            except Exception:
+                for tensor in reversed(registered):
+                    unpin_tensor(tensor)
+                raise
+        return cpu_kv_caches
 
     def bind_connector_metadata(self, metadata: SimpleCPUOffloadMetadata) -> None:
         self._connector_metadata = metadata
@@ -304,6 +353,7 @@ class SimpleCPUOffloadWorker:
             tuple of (finished_sending, finished_recving).
             - finished_sending: always None (stores use worker metadata).
             - finished_recving: req_ids whose loads have completed.
+
         """
         metadata = self._connector_metadata
         finished_recving: set[str] = set()

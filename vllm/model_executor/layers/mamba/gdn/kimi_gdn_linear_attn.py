@@ -39,6 +39,7 @@ from ..mamba_utils import (
 )
 from ..ops.causal_conv1d import causal_conv1d_fn, causal_conv1d_update
 from ..ops.gather_initial_states import gather_initial_states
+from ..ops.scatter_states import scatter_states
 
 # Empirical lower bound for the KDA gate to avoid numerical underflow.
 _KDA_GATE_LOGBOUND_MIN = -5.0
@@ -95,8 +96,8 @@ def _make_fused_conv1d_weight_loader(
 class _KimiGDNMergedColumnParallelLinear(MergedColumnParallelLinear):
     """Merged projection with one output replicated across TP ranks.
 
-    The replicated shard is represented as ``size * tp_size`` so the merged
-    parameter reserves ``size`` local rows on every rank. Loading that shard
+    The replicated shard is represented as `size * tp_size` so the merged
+    parameter reserves `size` local rows on every rank. Loading that shard
     from rank zero then gives every rank the complete checkpoint weight.
     """
 
@@ -315,6 +316,15 @@ class KimiGatedDeltaNetAttention(GatedDeltaNetAttention):
             raise ValueError(f"Duplicate layer name: {prefix}")
         compilation_config.static_forward_context[prefix] = self
 
+        _, recurrent_state_shape = self.get_state_shape()
+        _, recurrent_state_dtype = self.get_state_dtype()
+        scatter_states.register_warmup(
+            state_shape=recurrent_state_shape,
+            state_dtype=recurrent_state_dtype,
+            indices_dtype=torch.int32,
+            max_num_tokens=vllm_config.scheduler_config.max_num_seqs,
+        )
+
     def rearrange_mixed_qkv(
         self, mixed_qkv: torch.Tensor
     ) -> tuple[torch.Tensor, torch.Tensor, torch.Tensor]:
@@ -329,8 +339,7 @@ class KimiGatedDeltaNetAttention(GatedDeltaNetAttention):
         self,
         hidden_states: torch.Tensor,
         positions: torch.Tensor,
-        output: torch.Tensor,
-    ) -> None:
+    ) -> torch.Tensor:
         num_tokens = hidden_states.size(0)
         projected_qkvgfab = self.in_proj_qkvgfab(hidden_states)[0]
         if self.use_full_rank_gate:
@@ -375,7 +384,7 @@ class KimiGatedDeltaNetAttention(GatedDeltaNetAttention):
             core_attn_out=core_attn_out,
         )
         core_attn_out = rearrange(core_attn_out, "1 n h d -> n (h d)")
-        output[:] = self.o_proj(core_attn_out)[0]
+        return self.o_proj(core_attn_out)[0]
 
     @eager_break_during_capture
     def _forward(
@@ -591,7 +600,9 @@ class KimiGatedDeltaNetAttention(GatedDeltaNetAttention):
                     cu_seqlens=non_spec_query_start_loc,
                 )
                 # Init cache
-                recurrent_state[non_spec_state_indices_tensor] = last_recurrent_state
+                scatter_states(
+                    recurrent_state, last_recurrent_state, non_spec_state_indices_tensor
+                )
 
             else:
                 # pure-decode non-spec batch

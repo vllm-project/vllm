@@ -37,7 +37,7 @@ class LLBf16Dotprod:
 
     :note: K is handled as vectorized main/tail loops plus scalar remainder.
 
-    :compile-key: ``(M, K, bs)`` selects the token count, hidden size,
+    :compile-key: `(M, K, bs)` selects the token count, hidden size,
         and CTA thread/K-stripe width specialization.
     """
 
@@ -192,18 +192,18 @@ class LLBf16Dotprod:
         stream: CUstream,
     ):
         """Execute the dot-product GEMM operation in steps:
-        - Launch one CTA per output column ``n`` with ``bs`` threads.
-        - Keep one FP32 accumulator per token ``m`` in each thread.
+        - Launch one CTA per output column `n` with `bs` threads.
+        - Keep one FP32 accumulator per token `m` in each thread.
         - Traverse K with vectorized 128-bit, vectorized 64-bit, scalar, and
           ragged-tail loops from the precomputed K decomposition.
         - Reduce each token accumulator first within the warp, then across
-          warps through shared memory, and store ``C[:, n]``.
+          warps through shared memory, and store `C[:, n]`.
 
-        :param gA: Input tensor A with shape ``[M, K]``.
+        :param gA: Input tensor A with shape `[M, K]`.
         :type gA: cute.Tensor
-        :param gB: Input tensor B with shape ``[N, K]``.
+        :param gB: Input tensor B with shape `[N, K]`.
         :type gB: cute.Tensor
-        :param gC: Output tensor C with shape ``[M, N]``.
+        :param gC: Output tensor C with shape `[M, N]`.
         :type gC: cute.Tensor
         :param M: Token count selected by the compile key.
         :type M: cutlass.Constexpr
@@ -356,10 +356,12 @@ class LLBf16Dotprod:
         if tidx == 0:
             for m in cutlass.range_constexpr(M):
                 partials = sm[m, None].load()
-                gC[m, n_idx] = partials.reduce(
-                    cute.ReductionOp.ADD,
-                    init_val=cutlass.Float32(0.0),
-                    reduction_profile=0,
-                )
+                gC[m, n_idx] = cutlass.Float32(
+                    partials.reduce(
+                        cute.ReductionOp.ADD,
+                        init_val=cutlass.Float32(0.0),
+                        reduction_profile=0,
+                    )
+                ).to(gC.element_type)
         if const_expr(self.use_pdl):
             cute.arch.griddepcontrol_launch_dependents()

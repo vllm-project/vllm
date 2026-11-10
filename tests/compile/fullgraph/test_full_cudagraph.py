@@ -10,6 +10,7 @@ from tests.utils import wait_for_gpu_memory_to_clear
 from tests.v1.attention.utils import full_cg_backend_configs as backend_configs
 from vllm import LLM, SamplingParams
 from vllm.config import CompilationConfig, CUDAGraphMode
+from vllm.outputs import RequestOutput
 from vllm.platforms import current_platform
 from vllm.utils.torch_utils import is_torch_equal_or_newer
 from vllm.v1.attention.backends.registry import AttentionBackendEnum
@@ -17,8 +18,7 @@ from vllm.v1.attention.backends.registry import AttentionBackendEnum
 
 @contextlib.contextmanager
 def temporary_environ(env_vars):
-    """
-    Temporarily set environment variables and restore them afterward.
+    """Temporarily set environment variables and restore them afterward.
     We have to do this vs monkeypatch because monkeypatch doesn't work
     with "module" scoped fixtures.
     """
@@ -37,7 +37,7 @@ def temporary_environ(env_vars):
 model_backends_full_cudagraph = []
 
 # deepseek-ai/DeepSeek-V2-Lite with MLA
-MLA_backends = ["FlashMLA", "FlashAttentionMLA", "CutlassMLA"]
+MLA_backends = ["FlashMLA", "FlashAttentionMLA", "CutlassMLA", "FlashInferMLA"]
 for mla_backend in MLA_backends:
     model_backends_full_cudagraph.append(
         ("deepseek-ai/DeepSeek-V2-Lite", backend_configs[mla_backend])
@@ -54,26 +54,27 @@ for backend_config in other_backend_configs:
 @pytest.fixture(scope="class")
 def llm_pair(request):
     model, backend_config, use_inductor_graph_partition = request.param
-    backend_config.comp_config["use_inductor_graph_partition"] = (
-        use_inductor_graph_partition
-    )
-
     if use_inductor_graph_partition and not is_torch_equal_or_newer("2.9.0.dev"):
         pytest.skip("Inductor graph partition only supported in torch>=2.9")
 
+    backend = AttentionBackendEnum[backend_config.attention_config["backend"]]
+    if current_platform.is_rocm() and backend not in (
+        AttentionBackendEnum.TRITON_ATTN,
+        AttentionBackendEnum.ROCM_ATTN,
+    ):
+        pytest.skip(f"{backend_config.name} is a CUDA-only attention backend")
+    if backend == AttentionBackendEnum.ROCM_ATTN and not current_platform.is_rocm():
+        pytest.skip("ROCM_ATTN requires ROCm")
+
     # Dynamically skip test if GPU capability is not met
-    if (
-        backend_config.specific_gpu_arch
-        and backend_config.specific_gpu_arch != current_platform.get_device_capability()
+    if backend_config.specific_gpu_arch and (
+        not current_platform.is_cuda()
+        or backend_config.specific_gpu_arch != current_platform.get_device_capability()
     ):
         if backend_config.specific_gpu_arch == (9, 0):
             pytest.skip("Only Hopper GPUs support FA3 and FlashMLA")
         elif backend_config.specific_gpu_arch == (10, 0):
             pytest.skip("Only Blackwell GPUs support Cutlass MLA")
-
-    # FlashInfer is not supported on ROCm
-    if backend_config == AttentionBackendEnum.FLASHINFER and current_platform.is_rocm():
-        pytest.skip("FlashInfer is not supported on ROCm")
 
     env_vars = {
         # Force native sampler to avoid potential nondeterminism in FlashInfer
@@ -87,7 +88,11 @@ def llm_pair(request):
             trust_remote_code=True,
             max_model_len=1024,
             max_num_seqs=128,
-            compilation_config=CompilationConfig(**backend_config.comp_config),
+            attention_config=backend_config.attention_config,
+            compilation_config=CompilationConfig(
+                **backend_config.comp_config,
+                use_inductor_graph_partition=use_inductor_graph_partition,
+            ),
             generation_config="vllm",
             seed=42,
         )
@@ -97,8 +102,10 @@ def llm_pair(request):
             trust_remote_code=True,
             max_model_len=1024,
             max_num_seqs=128,
+            attention_config=backend_config.attention_config,
             compilation_config=CompilationConfig(
-                cudagraph_mode=CUDAGraphMode.PIECEWISE
+                cudagraph_mode=CUDAGraphMode.PIECEWISE,
+                use_inductor_graph_partition=use_inductor_graph_partition,
             ),
             generation_config="vllm",
             seed=42,
@@ -118,15 +125,17 @@ def llm_pair(request):
 @pytest.mark.parametrize(
     "llm_pair",
     [
-        pytest.param((model, backend_config, use_inductor_graph_partition))
+        pytest.param(
+            (model, backend_config, use_inductor_graph_partition),
+            id=f"{backend_config.name}-partition={use_inductor_graph_partition}",
+        )
         for model, backend_config in model_backends_full_cudagraph
         for use_inductor_graph_partition in [True, False]
     ],
     indirect=True,
 )
 class TestFullCUDAGraph:
-    """
-    Use a class such that an llm pair is constructed once for all
+    """Use a class such that an llm pair is constructed once for all
     batch_size/max_tokens combinations and released immediately after.
 
     Module-scope fixtures would stick around the whole time,
@@ -149,11 +158,9 @@ class TestFullCUDAGraph:
         ],
     )
     def test_full_cudagraph(self, batch_size, max_tokens, llm_pair: tuple[LLM, LLM]):
-        """
-        Test various batch sizes and max_tokens to ensure that the
+        """Test various batch sizes and max_tokens to ensure that the
         full cudagraph compilation works for padded cases too.
         """
-
         full_cudagraph_llm, piecewise_llm = llm_pair
 
         prompts = ["the quick brown fox"] * batch_size
@@ -163,10 +170,20 @@ class TestFullCUDAGraph:
             temperature=0.0, max_tokens=max_tokens, top_p=1.0
         )
 
-        piecewise_responses = piecewise_llm.generate(prompts, sampling_params)
-        full_responses = full_cudagraph_llm.generate(prompts, sampling_params)
+        responses = []
+        for llm in (piecewise_llm, full_cudagraph_llm):
+            # Queue the whole batch before scheduling so both engines exercise
+            # the requested batch size instead of timing-dependent sub-batches.
+            llm.sleep(level=0, mode="keep")
+            try:
+                llm.enqueue(prompts, sampling_params)
+            finally:
+                llm.wake_up(tags=["scheduling"])
+            responses.append(llm.wait_for_completion(output_type=RequestOutput))
+        piecewise_responses, full_responses = responses
 
         # Check that all responses are the same
+        assert len(piecewise_responses) == len(full_responses) == batch_size
         for piecewise_res, full_res in zip(piecewise_responses, full_responses):
             assert (
                 piecewise_res.outputs[0].text.lower()

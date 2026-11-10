@@ -187,7 +187,7 @@ Multi-image input can be extended to perform video captioning. We show this with
 
 #### Custom RGBA Background Color
 
-When loading RGBA images (images with transparency), vLLM converts them to RGB format. By default, transparent pixels are replaced with white background. You can customize this background color using the `rgba_background_color` parameter in `media_io_kwargs`.
+When loading images with transparency (including RGBA images and PNGs with a tRNS chunk), vLLM converts them to RGB format. By default, transparent pixels are replaced with white background. You can customize this background color using the `rgba_background_color` parameter in `media_io_kwargs`.
 
 ??? code
 
@@ -212,7 +212,7 @@ When loading RGBA images (images with transparency), vLLM converts them to RGB f
 
 !!! note
     - The `rgba_background_color` accepts RGB values as a list `[R, G, B]` or tuple `(R, G, B)` where each value is 0-255
-    - This setting only affects RGBA images with transparency; RGB images are unchanged
+    - This setting affects images with transparency, including RGB PNGs with a transparent color; opaque RGB images are unchanged
     - If not specified, the default white background `(255, 255, 255)` is used for backward compatibility
 
 #### Moondream3 Prompt Recipes { #moondream3-prompt-recipes }
@@ -378,6 +378,11 @@ vllm serve Qwen/Qwen3-VL-8B-Instruct \
 ### Audio Inputs
 
 You can pass a tuple `(array, sampling_rate)` to the `'audio'` field of the multi-modal dictionary.
+
+You can also pass a one-dimensional `torch.Tensor` directly. vLLM detaches
+the tensor, moves it to CPU, and converts it to a NumPy array before audio
+processing, so tensors on CUDA devices and tensors with `requires_grad=True`
+are supported.
 
 Full example: [examples/generate/multimodal/audio_language_offline.py](../../examples/generate/multimodal/audio_language_offline.py)
 
@@ -643,6 +648,13 @@ Our OpenAI-compatible server accepts multi-modal data via the [Chat Completions 
 
     For certain models, we provide alternative chat templates inside [examples](../../examples).
     For example, VLM2Vec uses [examples/pooling/embed/template/vlm2vec_phi3v.jinja](../../examples/pooling/embed/template/vlm2vec_phi3v.jinja) which is different from the default one for Phi-3-Vision.
+
+### Media Download Cache
+
+Set `VLLM_MEDIA_CACHE` to a directory to cache media downloaded from URLs on disk.
+This cache is disabled by default. If another request evicts an entry while it
+is being read, vLLM downloads the media again. The source URL must still be
+accessible when this happens.
 
 ### Image Inputs
 
@@ -1020,6 +1032,13 @@ vllm serve Qwen/Qwen3-VL-30B-A3B-Instruct \
 
 When you extract video frames on the client side and send them as `video/jpeg` (base64-concatenated JPEG frames), you can preserve the original video metadata by using `media_io_kwargs` in your request. This enables more accurate video understanding by preserving temporal information that would otherwise be lost during client-side frame extraction.
 
+!!! warning
+    Per-request `media_io_kwargs` (and `mm_processor_kwargs`) are rejected by
+    default because they let a client change media loading and preprocessing
+    resource usage. Start the server with `--trust-request-mm-kwargs` only when
+    your API clients are trusted; see
+    [Per-request multimodal arguments](../usage/security.md#per-request-multimodal-arguments).
+
 **Supported Parameters:**
 
 | Parameter | Type | Description |
@@ -1042,7 +1061,7 @@ When you extract video frames on the client side and send them as `video/jpeg` (
     frames_b64 = ",".join([encode_image(f) for f in frames])
     video_url = f"data:video/jpeg;base64,{frames_b64}"
 
-    # Pass video metadata via media_io_kwargs
+    # Pass video metadata via media_io_kwargs (server started with --trust-request-mm-kwargs)
     response = client.chat.completions.create(
         model="your-multimodal-model",
         messages=[{
@@ -1082,7 +1101,7 @@ By passing this metadata, the model can better understand the temporal distribut
 
 #### Custom RGBA Background Color
 
-To use a custom background color for RGBA images, pass the `rgba_background_color` parameter via `--media-io-kwargs`:
+To use a custom background color for images with transparency, pass the `rgba_background_color` parameter via `--media-io-kwargs`:
 
 ```bash
 # Example: Black background for dark theme
@@ -1210,7 +1229,7 @@ vLLM decodes audio bytes into waveforms using a selectable decoding backend:
 
 | Backend | Description |
 | --- | --- |
-| `auto` (default) | soundfile, falling back to torchcodec, then PyAV |
+| `auto` (default) | torchcodec, falling back to soundfile, then PyAV |
 | `soundfile` | libsndfile only, no fallback |
 | `pyav` | PyAV (FFmpeg) only, no fallback |
 | `torchcodec` | TorchCodec (PyTorch-native) only, no fallback |
@@ -1226,17 +1245,18 @@ vllm serve mistralai/Voxtral-Mini-3B-2507 \
     `pyav` drives FFmpeg through a per-frame Python generator, so under
     concurrency the Python/C crossings contend on the GIL. `torchcodec`
     decodes each stream in a single call that releases the GIL for its whole
-    duration. Select it explicitly for concurrent decoding workloads.
-    `auto` prefers soundfile for supported formats to preserve their existing
-    decoding behavior, including encoder padding. Audio extracted from formats
-    that soundfile cannot read, such as video containers, can use torchcodec
-    through the fallback chain.
+    duration, which is why `auto` prefers it when many requests decode audio
+    concurrently, such as when audio tracks are extracted from video.
+    vLLM normalizes codec padding on this path (e.g. it trims trailing Vorbis
+    padding that older system FFmpeg versions (< 5.0) fail to trim), so the
+    decoded waveform matches the soundfile reference length.
 
 !!! note
     `torchcodec` ships as a requirement on CUDA, CPU and XPU builds. On other
-    platforms (e.g. ROCm, TPU), install it manually to enable that backend.
-    torchcodec also links against a system FFmpeg installation. If the package
-    or FFmpeg is unavailable, `auto` uses the soundfile → PyAV chain.
+    platforms (e.g. ROCm, TPU) `auto` falls back to the soundfile → PyAV
+    chain unless you install it manually. torchcodec also links against a
+    system FFmpeg installation; if FFmpeg is missing, `auto` falls back the
+    same way.
 
 ### Embedding Inputs
 

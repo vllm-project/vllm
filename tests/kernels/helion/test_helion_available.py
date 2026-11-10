@@ -1,7 +1,6 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
-"""
-Tests for Helion kernel availability and basic functionality.
+"""Tests for Helion kernel availability and basic functionality.
 
 This module demonstrates the pattern for testing optional Helion kernels.
 Tests in this directory will be skipped if Helion is not installed.
