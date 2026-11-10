@@ -6,8 +6,8 @@ from scratch. The design is extensible to different kinds of artifacts; it
 currently supports **model weights** via the weight cache daemon.
 
 With weight preloading, a daemon process per GPU holds its rank's
-post-quantized, TP-sharded weights and serves CUDA IPC handles to vLLM engines
-over a Unix domain socket, so a restarting engine maps the weights via
+post-quantized, parallel-sharded weights and serves CUDA IPC handles to vLLM
+engines over a Unix domain socket, so a restarting engine maps the weights via
 zero-copy IPC instead of reloading them from disk.
 
 Key benefits:
@@ -24,8 +24,9 @@ Key benefits:
 
 !!! note
     Weight preloading is only supported on CUDA and ROCm platforms. Tensor,
-    expert and data parallelism are supported, including across nodes;
-    pipeline parallelism is rejected when launching the daemon.
+    expert, pipeline, prefill-context, decode-context and data parallelism are
+    supported, including across nodes. The model and attention backend must
+    also support the selected PCP/DCP configuration.
 
 ## Quick start
 
@@ -49,6 +50,31 @@ vllm serve meta-llama/Llama-3.1-8B-Instruct \
 
 The daemon itself must load from disk; passing `--load-format ipc_cache` to
 `vllm preload` is an error.
+
+### Pipeline and context parallelism
+
+Pass the same PP, PCP and DCP options to the daemon and engine. For example,
+PP2 x PCP2 x TP2 launches eight daemons; DCP2 reuses those ranks rather than
+adding another eight:
+
+```bash
+vllm preload --model /path/to/model \
+    --pipeline-parallel-size 2 \
+    --prefill-context-parallel-size 2 \
+    --decode-context-parallel-size 2 \
+    --tensor-parallel-size 2
+
+vllm serve /path/to/model \
+    --pipeline-parallel-size 2 \
+    --prefill-context-parallel-size 2 \
+    --decode-context-parallel-size 2 \
+    --tensor-parallel-size 2 \
+    --load-format ipc_cache
+```
+
+PCP expands the process world, while DCP shards the decode KV cache across
+existing processes. Preload does not lift the model's or attention backend's
+own restrictions on either feature.
 
 ## Preloading the FlashInfer autotune cache
 
@@ -170,11 +196,13 @@ deployment.
    GPU.
 3. Before serving anything, the engine and daemon compare a fingerprint of the
    cached weights: checkpoint content (hashed from safetensors metadata, so
-   identical weights in different directories still match), model
-   architecture, TP/DP size/rank, dtype, quantization method and config, text
-   RoPE parameters, model revision, KV cache dtype and quantization skip layers,
-   and vLLM version. On any mismatch the engine falls back to disk loading
-   (unless `fallback` is disabled).
+   identical weights in different directories still match), model architecture,
+   TP/PP/PCP/DCP sizes and ranks, DCP query replication (`--dcp-q-replicate`
+   and `VLLM_DCP_Q_REPLICATE`), DCP communication backend and direct-all-to-all
+   settings (`--dcp-comm-backend` and `VLLM_USE_DIRECT_DCP_A2A`), dtype,
+   quantization method and config, text RoPE parameters, model revision, KV
+   cache dtype and quantization skip layers, and vLLM version. On any mismatch
+   the engine falls back to disk loading (unless `fallback` is disabled).
 4. The engine also verifies the daemon's GPU UUID matches its own device, so a
    stale socket cannot serve weights for the wrong GPU.
 
@@ -189,6 +217,18 @@ The updated budget must still fit the available GPU memory; fallback does not
 stop the daemon or release its cached weights in zero-copy mode.
 
 ## Multi-node and data parallelism
+
+The daemon world size is `dp_size * pp_size * pcp_size * tp_size`; DCP does not
+add processes. Global ranks enumerate DP, PP, PCP, then TP:
+
+```text
+global_rank = (
+    dp_rank * pp_size * pcp_size * tp_size
+    + pp_rank * pcp_size * tp_size
+    + pcp_rank * tp_size
+    + tp_rank
+)
+```
 
 CUDA IPC handles are node-local, so each node serves only its local GPUs'
 shards. For multi-node tensor parallelism, run one `vllm preload` launcher per
@@ -208,11 +248,21 @@ vllm preload --model /path/to/model --tensor-parallel-size 16 \
 ```
 
 For data parallelism (e.g. a TP1 x DP16 x EP decode fleet), run one launcher
-per node with the engine's DP placement flags. Local GPU `i` serves DP rank
-`start_rank + i // tp_size` and TP rank `i % tp_size`, and all
-`dp_size * tp_size` daemons form one world group on `--data-parallel-address`
-/ `--weight-cache-master-port` so the expert shards are laid out exactly as in
-the engine:
+per node with the engine's DP placement flags. With
+`ranks_per_dp = pp_size * pcp_size * tp_size`, local GPU `i` has these
+coordinates:
+
+```text
+dp_rank = start_rank + i // ranks_per_dp
+rank_in_dp = i % ranks_per_dp
+pp_rank = rank_in_dp // (pcp_size * tp_size)
+pcp_rank = (rank_in_dp // tp_size) % pcp_size
+tp_rank = rank_in_dp % tp_size
+```
+
+All `dp_size * ranks_per_dp` daemons form one world group on
+`--data-parallel-address` / `--weight-cache-master-port` so the expert shards
+are laid out exactly as in the engine:
 
 ```bash
 # node r (4 local GPUs)
@@ -223,9 +273,9 @@ vllm preload --model /path/to/model --tensor-parallel-size 1 \
     --weight-cache-master-port 29600
 ```
 
-Data parallelism also combines with multi-node tensor parallelism: pass both
-flag sets. Each node then serves a contiguous block of the
-`dp_size * tp_size` global ranks.
+Data parallelism also combines with multi-node TP/PP/PCP: pass both flag sets.
+Each node then serves a contiguous block of the `dp_size * ranks_per_dp` global
+ranks.
 
 ## Speculative decoding
 
@@ -281,8 +331,10 @@ Socket paths are derived from the GPU UUID, so they are stable regardless of
 - **Platform**: CUDA and ROCm only; other platforms raise
   `UnsupportedPlatformForIPCError` even when `fallback` is enabled, since it
   is a permanent misconfiguration rather than a transient daemon outage.
-- **Parallelism**: tensor, expert, pipeline and data parallelism are
-  supported, including across nodes.
+- **Parallelism**: tensor, expert, pipeline, prefill-context, decode-context
+  and data parallelism are supported, including across nodes. DCP reuses
+  existing daemon ranks. Model and attention-backend restrictions on PCP/DCP
+  still apply.
 - **Autotune preloading**: tuning runs across the daemon's world group,
   including across nodes and DP ranks. With model-based speculative decoding
   both daemon groups skip it (the target cannot run the drafter's dummy
@@ -319,8 +371,9 @@ Socket paths are derived from the GPU UUID, so they are stable regardless of
   CUTLASS, the daemon fuses activation scales once; engines reuse the fused
   scales without modifying the daemon's shared tensors.
 - **Consistency**: the daemon and engine must run the same vLLM version and
-  agree on model, dtype, quantization, and TP/DP layout, otherwise the
-  fingerprint mismatch triggers the disk fallback.
+  agree on model, dtype, quantization, TP/PP/PCP/DCP layout, and DCP query
+  replication and communication settings, otherwise the fingerprint mismatch
+  triggers the disk fallback.
 - **Localhost only**: the daemon serves over a Unix domain socket; both the
   daemon and the engines must run on the same node as the same user.
 

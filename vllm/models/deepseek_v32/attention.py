@@ -606,6 +606,7 @@ class DeepseekV32Attention(MLAAttention):
 
         if self.impl.dcp_world_size > 1:
             assert lse is not None and self.dcp_manager is not None
+            assert self.dcp_manager.combine is not None
             seq_lens: torch.Tensor | None
             query_start_loc: torch.Tensor | None
             if self.use_pcp:

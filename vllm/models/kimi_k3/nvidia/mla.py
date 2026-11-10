@@ -726,6 +726,7 @@ class MultiHeadLatentAttention(nn.Module, AttentionLayerBase):
             if self.dcp_world_size > 1:
                 assert lse is not None
                 assert self.dcp_manager is not None
+                assert self.dcp_manager.combine is not None
                 assert attn_metadata.decode is not None
                 seq_lens = attn_metadata.decode.seq_lens
                 query_start_loc = attn_metadata.query_start_loc[

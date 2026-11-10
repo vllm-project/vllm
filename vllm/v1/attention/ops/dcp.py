@@ -1503,6 +1503,19 @@ def get_direct_dcp_kv_gather_workspace(
     )
 
 
+def release_direct_dcp_workspaces(model: torch.nn.Module | None) -> None:
+    """Release daemon-only direct DCP workspaces after warmup."""
+    if model is not None:
+        for module in model.modules():
+            manager = getattr(module, "dcp_manager", None)
+            if manager is not None:
+                manager.close()
+                setattr(module, "dcp_manager", None)  # noqa: B010
+    get_direct_dcp_a2a_workspace.cache_clear()
+    get_direct_dcp_q_gather_workspace.cache_clear()
+    get_direct_dcp_kv_gather_workspace.cache_clear()
+
+
 # MLA DCP backend selection
 
 
@@ -1520,7 +1533,9 @@ class DCPCombine(Protocol):
 class MLADCPManager:
     """Select and own layer-level collective implementations for MLA DCP."""
 
-    _kv_gather: Callable[[torch.Tensor, torch.Tensor], object]
+    combine: DCPCombine | None
+    query_gather: Callable[[torch.Tensor], torch.Tensor] | None
+    _kv_gather: Callable[[torch.Tensor, torch.Tensor], object] | None
 
     def __init__(
         self,
@@ -1538,6 +1553,12 @@ class MLADCPManager:
         parallel_config = vllm_config.parallel_config
         self.group = get_dcp_group()
         self.device = torch.device(device)
+        if self.device.type == "meta":
+            accelerator = torch.accelerator.current_accelerator()
+            assert accelerator is not None
+            self.device = torch.device(
+                accelerator.type, torch.accelerator.current_device_index()
+            )
         self.num_ubatches = max(parallel_config.num_ubatches, 1)
         self.max_num_tokens = get_dcp_workspace_max_num_tokens(vllm_config)
         self.use_a2a = parallel_config.dcp_comm_backend == "a2a"
@@ -1569,6 +1590,13 @@ class MLADCPManager:
                 query_dtype,
             )
         )
+
+    def close(self) -> None:
+        """Drop callables that retain workspaces or this manager."""
+        self.combine = None
+        self.query_gather = None
+        self.v_up_proj_combine = None
+        self._kv_gather = None
 
     def _init_combine(
         self,
@@ -1727,6 +1755,7 @@ class MLADCPManager:
         gathered_kv: torch.Tensor,
         local_kv: torch.Tensor,
     ) -> object:
+        assert self._kv_gather is not None
         return self._kv_gather(gathered_kv, local_kv)
 
 

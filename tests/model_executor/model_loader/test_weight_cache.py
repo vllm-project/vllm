@@ -208,6 +208,7 @@ class ModelCase:
     images: list | None = None
     llm_kwargs: dict[str, Any] = field(default_factory=dict)
     daemon_args: list[str] = field(default_factory=list)
+    env_extra: dict[str, str] = field(default_factory=dict)
     # Additionally assert the daemons tune in place before serving and write
     # the on-disk FlashInfer autotune cache, and the restart engine reuses it
     # (needs SM90+/FlashInfer).
@@ -335,6 +336,71 @@ DSV2_EP_CASE = ModelCase(
         max_model_len=1024,
     ),
     daemon_args=["--enable-expert-parallel", "--dtype", "bfloat16"],
+)
+
+DSV2_PCP2_EP_CASE = replace(
+    DSV2_EP_CASE,
+    llm_kwargs={
+        **DSV2_EP_CASE.llm_kwargs,
+        "tensor_parallel_size": 1,
+        "prefill_context_parallel_size": 2,
+        "enable_chunked_prefill": True,
+    },
+    daemon_args=[
+        *DSV2_EP_CASE.daemon_args,
+        "--prefill-context-parallel-size",
+        "2",
+        "--enable-chunked-prefill",
+    ],
+)
+
+DSV2_DCP2_CASE = replace(
+    DSV2_EP_CASE,
+    llm_kwargs={
+        **DSV2_EP_CASE.llm_kwargs,
+        "decode_context_parallel_size": 2,
+        "dcp_q_replicate": False,
+    },
+    daemon_args=[
+        *DSV2_EP_CASE.daemon_args,
+        "--decode-context-parallel-size",
+        "2",
+        "--no-dcp-q-replicate",
+    ],
+)
+
+DSV2_DCP2_QREP_CASE = replace(
+    DSV2_EP_CASE,
+    llm_kwargs={
+        **DSV2_EP_CASE.llm_kwargs,
+        "decode_context_parallel_size": 2,
+        "dcp_q_replicate": True,
+    },
+    daemon_args=[
+        *DSV2_EP_CASE.daemon_args,
+        "--decode-context-parallel-size",
+        "2",
+        "--dcp-q-replicate",
+    ],
+)
+
+DSV2_DCP2_QREP_A2A_CASE = replace(
+    DSV2_DCP2_QREP_CASE,
+    llm_kwargs={
+        **DSV2_DCP2_QREP_CASE.llm_kwargs,
+        "dcp_comm_backend": "a2a",
+    },
+    daemon_args=[
+        *DSV2_DCP2_QREP_CASE.daemon_args,
+        "--dcp-comm-backend",
+        "a2a",
+    ],
+    env_extra={"VLLM_USE_DIRECT_DCP_A2A": "0"},
+)
+
+DSV2_DCP2_QREP_A2A_DIRECT_CASE = replace(
+    DSV2_DCP2_QREP_A2A_CASE,
+    env_extra={"VLLM_USE_DIRECT_DCP_A2A": "1"},
 )
 
 
@@ -547,6 +613,67 @@ def test_ipc_cache_cold_start_and_warm_restart_tp2_ep(vllm_runner, tmp_path):
 
 @create_new_process_for_each_test()
 @pytest.mark.distributed(num_gpus=2)
+def test_ipc_cache_cold_start_and_warm_restart_pcp(vllm_runner, tmp_path):
+    """PCP daemon shards serve identical outputs across engine restarts."""
+    run_cold_start_and_warm_restart(vllm_runner, DSV2_PCP2_EP_CASE, tmp_path)
+
+
+@create_new_process_for_each_test()
+@pytest.mark.distributed(num_gpus=2)
+@pytest.mark.parametrize(
+    "case",
+    [
+        DSV2_DCP2_CASE,
+        DSV2_DCP2_QREP_CASE,
+        DSV2_DCP2_QREP_A2A_CASE,
+        DSV2_DCP2_QREP_A2A_DIRECT_CASE,
+    ],
+    ids=[
+        "dcp2-ag-rs",
+        "dcp2-qrep-ag-rs",
+        "dcp2-qrep-a2a",
+        "dcp2-qrep-a2a-direct",
+    ],
+)
+def test_ipc_cache_cold_start_and_warm_restart_dcp(
+    vllm_runner, tmp_path, monkeypatch, case: ModelCase
+):
+    """DCP daemon shards serve identical outputs across engine restarts."""
+    for name, value in case.env_extra.items():
+        monkeypatch.setenv(name, value)
+    run_cold_start_and_warm_restart(vllm_runner, case, tmp_path)
+
+
+@create_new_process_for_each_test()
+@pytest.mark.distributed(num_gpus=2)
+def test_ipc_cache_rejects_dcp_q_replicate_mismatch_e2e(vllm_runner):
+    from vllm.model_executor.model_loader.weight_cache.protocol import (
+        CacheConfigMismatchError,
+    )
+    from vllm.v1.engine.exceptions import EngineDeadError
+
+    case = DSV2_DCP2_QREP_CASE
+    engine_case = replace(
+        case,
+        llm_kwargs={**case.llm_kwargs, "dcp_q_replicate": False},
+    )
+    with WeightCacheDaemon(
+        case.model,
+        tp_size=case.llm_kwargs["tensor_parallel_size"],
+        extra_args=[*case.daemon_args, "--disable-flashinfer-autotune"],
+    ) as daemon:
+        daemon.wait_until_ready()
+        with pytest.raises((RuntimeError, CacheConfigMismatchError, EngineDeadError)):
+            generate(vllm_runner, engine_case, daemon.socket_dir, fallback=False)
+        expected_log = "WeightCacheKey mismatch on fields: ['dcp_q_replicate']"
+        deadline = time.monotonic() + 5
+        while expected_log not in daemon.logs and time.monotonic() < deadline:
+            time.sleep(0.05)
+        assert expected_log in daemon.logs
+
+
+@create_new_process_for_each_test()
+@pytest.mark.distributed(num_gpus=2)
 def test_d2d_warmup_cache_seeding(vllm_runner, tmp_path):
     """A mirror daemon adopts the source's autotune cache over D2D, skips
     re-tuning, and serves outputs identical to the default-loader baseline."""
@@ -730,6 +857,7 @@ def run_cold_start_and_warm_restart(vllm_runner, case: ModelCase, tmp_path, capf
         case.model,
         tp_size=case.llm_kwargs.get("tensor_parallel_size", 1),
         extra_args=case.daemon_args,
+        env_extra=case.env_extra,
     ) as d:
         d.wait_until_ready()
         warm_outputs = generate(vllm_runner, case, d.socket_dir, fallback=False)
@@ -763,7 +891,7 @@ def run_cold_start_and_warm_restart(vllm_runner, case: ModelCase, tmp_path, capf
 
 
 def _parallel(**kw):
-    from types import SimpleNamespace
+    from vllm.config import ParallelConfig
 
     base = dict(
         tensor_parallel_size=1,
@@ -773,24 +901,32 @@ def _parallel(**kw):
         data_parallel_rank=0,
         nnodes=1,
         node_rank=0,
+        distributed_executor_backend="mp",
     )
     base.update(kw)
-    return SimpleNamespace(**base)
+    return ParallelConfig(**base)
 
 
 def test_daemon_places_tp_and_dp_ranks_on_local_gpus():
     """Each node serves a contiguous global-rank block (DP-major), so without
     DP local GPU i is TP rank r*local+i, and single-node DP launchers offset
     by --data-parallel-start-rank."""
-    from vllm.model_executor.model_loader.weight_cache.daemon import plan_local_ranks
+    from vllm.model_executor.model_loader.weight_cache.daemon import (
+        DaemonPlacement,
+        plan_local_ranks,
+    )
 
     tp_second_node = _parallel(tensor_parallel_size=8, nnodes=2, node_rank=1)
-    assert plan_local_ranks(tp_second_node) == [(i, 0, 0, 4 + i) for i in range(4)]
+    assert plan_local_ranks(tp_second_node) == [
+        DaemonPlacement(4 + i, i, 0, 0, 0, 4 + i) for i in range(4)
+    ]
 
     dp_third_node = _parallel(
         data_parallel_size=16, data_parallel_size_local=4, data_parallel_rank=8
     )
-    assert plan_local_ranks(dp_third_node) == [(i, 8 + i, 0, 0) for i in range(4)]
+    assert plan_local_ranks(dp_third_node) == [
+        DaemonPlacement(8 + i, i, 8 + i, 0, 0, 0) for i in range(4)
+    ]
 
     dp_tp = _parallel(
         tensor_parallel_size=2,
@@ -799,42 +935,171 @@ def test_daemon_places_tp_and_dp_ranks_on_local_gpus():
         data_parallel_rank=2,
     )
     assert plan_local_ranks(dp_tp) == [
-        (0, 2, 0, 0),
-        (1, 2, 0, 1),
-        (2, 3, 0, 0),
-        (3, 3, 0, 1),
+        DaemonPlacement(4, 0, 2, 0, 0, 0),
+        DaemonPlacement(5, 1, 2, 0, 0, 1),
+        DaemonPlacement(6, 2, 3, 0, 0, 0),
+        DaemonPlacement(7, 3, 3, 0, 0, 1),
     ]
 
     # DP + nnodes: node-local TP replicas
     dp_tp_node0 = _parallel(tensor_parallel_size=8, data_parallel_size=2, nnodes=2)
-    assert plan_local_ranks(dp_tp_node0) == [(i, 0, 0, i) for i in range(8)]
+    assert plan_local_ranks(dp_tp_node0) == [
+        DaemonPlacement(i, i, 0, 0, 0, i) for i in range(8)
+    ]
     dp_tp_node1 = _parallel(
         tensor_parallel_size=8, data_parallel_size=2, nnodes=2, node_rank=1
     )
-    assert plan_local_ranks(dp_tp_node1) == [(i, 1, 0, i) for i in range(8)]
+    assert plan_local_ranks(dp_tp_node1) == [
+        DaemonPlacement(8 + i, i, 1, 0, 0, i) for i in range(8)
+    ]
 
     # DP + nnodes: TP group spans nodes (TP8 x DP2 on 4 nodes)
     tp_span_node1 = _parallel(
         tensor_parallel_size=8, data_parallel_size=2, nnodes=4, node_rank=1
     )
-    assert plan_local_ranks(tp_span_node1) == [(i, 0, 0, 4 + i) for i in range(4)]
+    assert plan_local_ranks(tp_span_node1) == [
+        DaemonPlacement(4 + i, i, 0, 0, 0, 4 + i) for i in range(4)
+    ]
     tp_span_node2 = _parallel(
         tensor_parallel_size=8, data_parallel_size=2, nnodes=4, node_rank=2
     )
-    assert plan_local_ranks(tp_span_node2) == [(i, 1, 0, i) for i in range(4)]
+    assert plan_local_ranks(tp_span_node2) == [
+        DaemonPlacement(8 + i, i, 1, 0, 0, i) for i in range(4)
+    ]
 
     # DP + nnodes: several DP replicas per node (TP4 x DP4 on 2 nodes)
     dp_multi_node0 = _parallel(tensor_parallel_size=4, data_parallel_size=4, nnodes=2)
-    assert plan_local_ranks(dp_multi_node0) == [(i, i // 4, 0, i % 4) for i in range(8)]
+    assert plan_local_ranks(dp_multi_node0) == [
+        DaemonPlacement(i, i, i // 4, 0, 0, i % 4) for i in range(8)
+    ]
 
     # PP adds one daemon placement per stage while preserving TP rank order.
     pp_tp = _parallel(tensor_parallel_size=2, pipeline_parallel_size=2)
     assert plan_local_ranks(pp_tp) == [
-        (0, 0, 0, 0),
-        (1, 0, 0, 1),
-        (2, 0, 1, 0),
-        (3, 0, 1, 1),
+        DaemonPlacement(0, 0, 0, 0, 0, 0),
+        DaemonPlacement(1, 1, 0, 0, 0, 1),
+        DaemonPlacement(2, 2, 0, 1, 0, 0),
+        DaemonPlacement(3, 3, 0, 1, 0, 1),
     ]
+
+
+def test_daemon_places_tp_pcp_pp_in_global_rank_order():
+    from vllm.model_executor.model_loader.weight_cache.daemon import (
+        DaemonPlacement,
+        plan_local_ranks,
+    )
+
+    config = _parallel(
+        tensor_parallel_size=2,
+        prefill_context_parallel_size=2,
+        pipeline_parallel_size=2,
+    )
+    assert plan_local_ranks(config) == [
+        DaemonPlacement(0, 0, 0, 0, 0, 0),
+        DaemonPlacement(1, 1, 0, 0, 0, 1),
+        DaemonPlacement(2, 2, 0, 0, 1, 0),
+        DaemonPlacement(3, 3, 0, 0, 1, 1),
+        DaemonPlacement(4, 4, 0, 1, 0, 0),
+        DaemonPlacement(5, 5, 0, 1, 0, 1),
+        DaemonPlacement(6, 6, 0, 1, 1, 0),
+        DaemonPlacement(7, 7, 0, 1, 1, 1),
+    ]
+
+
+def test_daemon_places_pcp_with_multinode_and_local_dp_offsets():
+    from vllm.model_executor.model_loader.weight_cache.daemon import (
+        DaemonPlacement,
+        plan_local_ranks,
+    )
+
+    second_node = _parallel(
+        tensor_parallel_size=2,
+        prefill_context_parallel_size=2,
+        data_parallel_size=2,
+        nnodes=2,
+        node_rank=1,
+    )
+    assert plan_local_ranks(second_node) == [
+        DaemonPlacement(4, 0, 1, 0, 0, 0),
+        DaemonPlacement(5, 1, 1, 0, 0, 1),
+        DaemonPlacement(6, 2, 1, 0, 1, 0),
+        DaemonPlacement(7, 3, 1, 0, 1, 1),
+    ]
+
+    local_dp = _parallel(
+        tensor_parallel_size=1,
+        prefill_context_parallel_size=2,
+        data_parallel_size=4,
+        data_parallel_size_local=2,
+        data_parallel_rank=2,
+    )
+    assert plan_local_ranks(local_dp) == [
+        DaemonPlacement(4, 0, 2, 0, 0, 0),
+        DaemonPlacement(5, 1, 2, 0, 1, 0),
+        DaemonPlacement(6, 2, 3, 0, 0, 0),
+        DaemonPlacement(7, 3, 3, 0, 1, 0),
+    ]
+
+
+def test_daemon_dcp_does_not_change_placements():
+    from vllm.model_executor.model_loader.weight_cache.daemon import plan_local_ranks
+
+    base = dict(tensor_parallel_size=2, prefill_context_parallel_size=2)
+    assert plan_local_ranks(
+        _parallel(**base, decode_context_parallel_size=2)
+    ) == plan_local_ranks(_parallel(**base))
+
+
+def test_daemon_places_external_dp_rank_with_pcp():
+    from vllm.model_executor.model_loader.weight_cache.daemon import (
+        DaemonPlacement,
+        plan_local_ranks,
+    )
+
+    config = _parallel(
+        tensor_parallel_size=1,
+        prefill_context_parallel_size=2,
+        data_parallel_size=4,
+        data_parallel_rank=2,
+        data_parallel_size_local=1,
+        data_parallel_external_lb=True,
+        nnodes=2,
+        node_rank=0,
+    )
+    assert plan_local_ranks(config) == [
+        DaemonPlacement(4, 0, 2, 0, 0, 0),
+        DaemonPlacement(5, 1, 2, 0, 1, 0),
+    ]
+
+
+@pytest.mark.parametrize(
+    "dcp_size,expected_ranks",
+    [(2, [0, 0, 1, 1]), (4, [0, 2, 1, 3])],
+)
+def test_daemon_computes_dcp_rank_like_engine(tmp_path, dcp_size, expected_ranks):
+    from transformers import DeepseekV2Config
+
+    from vllm.config import CacheConfig, KernelConfig, ModelConfig, VllmConfig
+    from vllm.model_executor.model_loader.weight_cache.daemon import WeightCacheDaemon
+
+    hf_config = DeepseekV2Config()
+    hf_config.architectures = ["DeepseekV2ForCausalLM"]
+    hf_config.save_pretrained(tmp_path)
+    config = VllmConfig(
+        model_config=ModelConfig(
+            model=str(tmp_path), skip_tokenizer_init=True, max_model_len=128
+        ),
+        parallel_config=_parallel(
+            tensor_parallel_size=2,
+            prefill_context_parallel_size=2,
+            decode_context_parallel_size=dcp_size,
+        ),
+        cache_config=CacheConfig(),
+        kernel_config=KernelConfig(),
+    )
+    for global_rank, expected_rank in enumerate(expected_ranks):
+        server = WeightCacheDaemon(config, global_rank, global_rank, "unused")
+        assert server.dcp_rank == expected_rank, f"global_rank={global_rank}"
 
 
 def test_daemon_rejects_unmappable_parallelism():
@@ -849,7 +1114,12 @@ def test_daemon_rejects_unmappable_parallelism():
     )
     # DP combines with --nnodes when the world size divides evenly.
     _reject_unsupported_parallelism(
-        _parallel(tensor_parallel_size=4, data_parallel_size=4, nnodes=2)
+        _parallel(
+            tensor_parallel_size=4,
+            data_parallel_size=4,
+            data_parallel_size_local=2,
+            nnodes=2,
+        )
     )
     _reject_unsupported_parallelism(_parallel(pipeline_parallel_size=2))
     with pytest.raises(ValueError, match="evenly divide"):
@@ -923,12 +1193,10 @@ def test_daemon_sets_its_rank_like_engine_workers(monkeypatch):
         assert server.vllm_config.parallel_config.rank == global_rank
 
 
-def test_weight_cache_key_distinguishes_dp_ranks():
-    from dataclasses import replace
-
+def _weight_cache_key():
     from vllm.model_executor.model_loader.weight_cache.protocol import WeightCacheKey
 
-    key = WeightCacheKey(
+    return WeightCacheKey(
         checkpoint="ckpt",
         model_arch="Arch",
         tp_size=1,
@@ -946,9 +1214,106 @@ def test_weight_cache_key_distinguishes_dp_ranks():
         pp_size=2,
         pp_rank=1,
     )
+
+
+PCP_DCP_KEY_DEFAULTS = {
+    "pcp_size": 1,
+    "pcp_rank": 0,
+    "dcp_size": 1,
+    "dcp_rank": 0,
+    "dcp_comm_backend": None,
+    "dcp_q_replicate": None,
+    "dcp_q_replicate_env": None,
+    "direct_dcp_a2a": None,
+    "mla_bmm_layout": "generic",
+}
+
+PCP_DCP_KEY_MISMATCH_VALUES = {
+    "pcp_size": 2,
+    "pcp_rank": 1,
+    "dcp_size": 2,
+    "dcp_rank": 1,
+    "dcp_comm_backend": "a2a",
+    "dcp_q_replicate": True,
+    "dcp_q_replicate_env": True,
+    "direct_dcp_a2a": True,
+}
+
+
+def test_weight_cache_key_distinguishes_dp_ranks():
+    key = _weight_cache_key()
     assert key.mismatched_fields(replace(key, dp_rank=4)) == ["dp_rank"]
     assert key.mismatched_fields(replace(key, dp_size=8, dp_rank=3)) == ["dp_size"]
     assert key.mismatched_fields(replace(key, pp_rank=0)) == ["pp_rank"]
+
+
+def test_weight_cache_key_pcp_dcp_defaults():
+    key = _weight_cache_key()
+    actual = {name: getattr(key, name) for name in PCP_DCP_KEY_DEFAULTS}
+    assert actual == PCP_DCP_KEY_DEFAULTS
+
+
+def test_weight_cache_key_distinguishes_mla_bmm_layout():
+    key = _weight_cache_key()
+    changed = replace(key, mla_bmm_layout="dcp")
+    assert key.mismatched_fields(changed) == ["mla_bmm_layout"]
+
+
+def test_weight_cache_key_fingerprints_qrep_env_tri_state(
+    tmp_path, monkeypatch, default_vllm_config
+):
+    from transformers import DeepseekV2Config
+
+    from vllm.config import ModelConfig
+    from vllm.model_executor.model_loader.weight_cache.protocol import WeightCacheKey
+
+    hf_config = DeepseekV2Config()
+    hf_config.architectures = ["DeepseekV2ForCausalLM"]
+    hf_config.save_pretrained(tmp_path)
+    model_config = ModelConfig(
+        model=str(tmp_path), skip_tokenizer_init=True, max_model_len=128
+    )
+    keys = {}
+    for value in (None, "0", "1"):
+        if value is None:
+            monkeypatch.delenv("VLLM_DCP_Q_REPLICATE", raising=False)
+        else:
+            monkeypatch.setenv("VLLM_DCP_Q_REPLICATE", value)
+        keys[value] = WeightCacheKey.from_model_config(
+            model_config,
+            tp_size=1,
+            tp_rank=0,
+            cache_config=default_vllm_config.cache_config,
+            parallel_config=default_vllm_config.parallel_config,
+        )
+
+    assert [key.dcp_q_replicate_env for key in keys.values()] == [None, False, True]
+    for left, right in ((None, "0"), (None, "1"), ("0", "1")):
+        assert keys[left].mismatched_fields(keys[right]) == ["dcp_q_replicate_env"]
+
+
+@pytest.mark.parametrize("field_name,value", list(PCP_DCP_KEY_MISMATCH_VALUES.items()))
+def test_weight_cache_key_distinguishes_each_pcp_dcp_field(field_name, value):
+    key = _weight_cache_key()
+    changed = replace(key, **{field_name: value})
+    assert key.mismatched_fields(changed) == [field_name]
+
+
+def test_weight_cache_key_safely_mismatches_legacy_pcp_dcp_fields():
+    from dataclasses import fields
+    from types import SimpleNamespace
+
+    key = replace(_weight_cache_key(), **PCP_DCP_KEY_MISMATCH_VALUES)
+    legacy_key = SimpleNamespace(
+        **{
+            f.name: getattr(key, f.name)
+            for f in fields(key)
+            if f.name not in PCP_DCP_KEY_MISMATCH_VALUES
+        }
+    )
+
+    mismatches = key.mismatched_fields(legacy_key)
+    assert sorted(mismatches) == sorted(PCP_DCP_KEY_MISMATCH_VALUES)
 
 
 @pytest.mark.parametrize("hf_quant_config", [None, {"quant_algo": "NVFP4"}])
@@ -1058,7 +1423,11 @@ def test_ipc_rope_matching(
     model_config.hf_text_config.max_position_embeddings = 512
     server = object.__new__(daemon.WeightCacheDaemon)
     server.cache_key = WeightCacheKey.from_model_config(
-        model_config, 1, 0, cache_config=default_vllm_config.cache_config
+        model_config,
+        1,
+        0,
+        cache_config=default_vllm_config.cache_config,
+        parallel_config=default_vllm_config.parallel_config,
     )
     rope = model_config.hf_text_config.rope_parameters
     # DeepseekV2 construction normalizes yarn to deepseek_yarn.
@@ -1071,7 +1440,7 @@ def test_ipc_rope_matching(
     server.role, server.global_rank = "target", 0
     for module in (daemon, ipc_loader):
         monkeypatch.setattr(module, "get_current_device_uuid", lambda: "test-device")
-    for name in ("get_dp_group", "get_pp_group"):
+    for name in ("get_dp_group", "get_pp_group", "get_pcp_group", "get_dcp_group"):
         monkeypatch.setattr(
             ipc_loader, name, lambda: SimpleNamespace(world_size=1, rank_in_group=0)
         )
@@ -1124,6 +1493,54 @@ def test_ipc_loader_copy_mode_reports_no_external_weight_memory():
     )
     loader = IpcModelLoader(copy_mode)
     assert loader.get_external_weight_memory(None) == 0
+
+
+def test_ipc_loader_replaces_none_dcp_weight_attributes():
+    import torch
+
+    from vllm.config import LoadConfig
+    from vllm.model_executor.model_loader.weight_cache.ipc_loader import (
+        IpcModelLoader,
+    )
+    from vllm.model_executor.model_loader.weight_cache.protocol import (
+        TensorEntry,
+        WeightCacheState,
+    )
+
+    def state(tensors):
+        return WeightCacheState(
+            entries={
+                name: TensorEntry.from_tensor(tensor, "param")
+                for name, tensor in tensors.items()
+            },
+            aliases={},
+            attrs={},
+        )
+
+    tensors = {
+        "W_UK_T_dcp_qrep": torch.arange(6, dtype=torch.float32).reshape(2, 3),
+        "W_UV_dcp": torch.arange(4, dtype=torch.float32).reshape(2, 2),
+    }
+    model = torch.nn.Module()
+    for name in tensors:
+        setattr(model, name, None)
+    loader = IpcModelLoader(LoadConfig(load_format="ipc_cache"))
+    loader._apply_entries(model, state(tensors), 0)
+
+    for name, expected in tensors.items():
+        actual = getattr(model, name)
+        assert isinstance(actual, torch.nn.Parameter)
+        torch.testing.assert_close(actual, expected)
+
+    plain_model = torch.nn.Module()
+    plain_model.regular_attribute = "unchanged"
+    with pytest.raises(KeyError, match="regular_attribute"):
+        loader._apply_entries(
+            plain_model,
+            state({"regular_attribute": torch.zeros(1)}),
+            0,
+        )
+    assert plain_model.regular_attribute == "unchanged"
 
 
 def _serve_one(handler):
@@ -1258,6 +1675,37 @@ def test_daemon_releases_cublas_workspaces():
     torch.testing.assert_close(result, torch.full_like(result, 128), rtol=0, atol=0)
 
 
+def test_release_direct_dcp_workspaces_breaks_manager_cycles():
+    import functools
+    import gc
+    import weakref
+
+    import torch
+
+    from vllm.v1.attention.ops.dcp import (
+        MLADCPManager,
+        release_direct_dcp_workspaces,
+    )
+
+    manager = object.__new__(MLADCPManager)
+    workspace = torch.empty(1)
+    manager_ref = weakref.ref(manager)
+    workspace_ref = weakref.ref(workspace)
+    manager.combine = functools.partial(manager._direct_workspace_combine, workspace)
+    manager.query_gather = functools.partial(
+        manager._direct_workspace_query_gather, workspace
+    )
+    module = torch.nn.Module()
+    module.dcp_manager = manager
+
+    release_direct_dcp_workspaces(module)
+    assert module.dcp_manager is None
+    del manager, workspace
+    gc.collect()
+    assert manager_ref() is None
+    assert workspace_ref() is None
+
+
 @pytest.mark.parametrize("is_draft,fallback_bytes", [(False, 8), (True, 4)])
 def test_external_weight_fallback_preserves_other_role(is_draft, fallback_bytes):
     """Only the failed role's charge is reported, at most once."""
@@ -1369,7 +1817,7 @@ def test_ipc_cache_key_tracks_kv_quantization(
     config.cache_config = CacheConfig(
         cache_dtype=cache_dtype, kv_cache_dtype_skip_layers=skip_layers
     )
-    for name in ("get_dp_group", "get_pp_group"):
+    for name in ("get_dp_group", "get_pp_group", "get_pcp_group", "get_dcp_group"):
         monkeypatch.setattr(
             ipc_loader, name, lambda: SimpleNamespace(world_size=1, rank_in_group=0)
         )
@@ -1450,7 +1898,7 @@ def test_ipc_cache_key_tracks_kernel_backends(
     )
     server = daemon.WeightCacheDaemon(config, 0, 0, "unused")
     config.kernel_config = KernelConfig(**engine_kernel_config)
-    for name in ("get_dp_group", "get_pp_group"):
+    for name in ("get_dp_group", "get_pp_group", "get_pcp_group", "get_dcp_group"):
         monkeypatch.setattr(
             ipc_loader, name, lambda: SimpleNamespace(world_size=1, rank_in_group=0)
         )
@@ -1477,6 +1925,73 @@ def test_ipc_cache_key_tracks_kernel_backends(
     assert len(requested_keys) == 2
     for key in requested_keys:
         assert server.cache_key.mismatched_fields(key) == mismatched_fields
+
+
+def test_ipc_cache_key_rejects_dcp_q_replicate_mismatch(tmp_path, monkeypatch):
+    from types import SimpleNamespace
+
+    from transformers import DeepseekV2Config
+
+    from vllm.config import (
+        CacheConfig,
+        KernelConfig,
+        LoadConfig,
+        ModelConfig,
+        ParallelConfig,
+        VllmConfig,
+    )
+    from vllm.model_executor.model_loader.weight_cache import daemon, ipc_loader
+    from vllm.model_executor.model_loader.weight_cache.protocol import WeightCacheState
+
+    hf_config = DeepseekV2Config()
+    hf_config.architectures = ["DeepseekV2ForCausalLM"]
+    hf_config.save_pretrained(tmp_path)
+    model_config = ModelConfig(
+        model=str(tmp_path), skip_tokenizer_init=True, max_model_len=128
+    )
+    config = VllmConfig(
+        model_config=model_config,
+        parallel_config=ParallelConfig(
+            tensor_parallel_size=2,
+            decode_context_parallel_size=2,
+            dcp_q_replicate=True,
+            distributed_executor_backend="mp",
+        ),
+        cache_config=CacheConfig(),
+        kernel_config=KernelConfig(),
+    )
+    server = daemon.WeightCacheDaemon(config, 1, 1, "unused")
+    config.parallel_config.dcp_q_replicate = False
+
+    for name in ("get_dp_group", "get_pp_group", "get_pcp_group"):
+        monkeypatch.setattr(
+            ipc_loader, name, lambda: SimpleNamespace(world_size=1, rank_in_group=0)
+        )
+    monkeypatch.setattr(
+        ipc_loader,
+        "get_dcp_group",
+        lambda: SimpleNamespace(world_size=2, rank_in_group=1),
+    )
+    monkeypatch.setattr(ipc_loader, "get_tensor_model_parallel_world_size", lambda: 2)
+    monkeypatch.setattr(ipc_loader, "get_tensor_model_parallel_rank", lambda: 1)
+    requested_keys = []
+
+    def request_state(key, *, is_reload=False):
+        requested_keys.append(key)
+        return WeightCacheState(entries={}, aliases={}, attrs={})
+
+    loader = ipc_loader.IpcModelLoader(LoadConfig(load_format="ipc_cache"))
+    monkeypatch.setattr(loader, "_request_state", request_state)
+    loader._fetch_entries(
+        model_config,
+        config.cache_config,
+        config.parallel_config,
+        config.kernel_config,
+    )
+
+    assert len(requested_keys) == 1
+    assert server.cache_key.dcp_rank == requested_keys[0].dcp_rank == 1
+    assert server.cache_key.mismatched_fields(requested_keys[0]) == ["dcp_q_replicate"]
 
 
 def _warmup_cache_request(config_hash: str = "a" * 64, **overrides) -> dict:

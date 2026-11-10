@@ -25,7 +25,9 @@ from vllm.config import (
 )
 from vllm.config.load import LoadConfig
 from vllm.distributed import (
+    get_dcp_group,
     get_dp_group,
+    get_pcp_group,
     get_pp_group,
     get_tensor_model_parallel_rank,
     get_tensor_model_parallel_world_size,
@@ -354,6 +356,8 @@ class IpcModelLoader(BaseModelLoader):
             # Replace via registration rather than param.data assignment,
             # which fails for meta tensors. Entries may also introduce
             # post-quantization tensors absent from the meta model.
+            if leaf in module.__dict__ and module.__dict__[leaf] is None:
+                del module.__dict__[leaf]
             module._parameters.pop(leaf, None)
             module._buffers.pop(leaf, None)
             if is_param:
@@ -399,13 +403,22 @@ class IpcModelLoader(BaseModelLoader):
     ) -> WeightCacheState:
         dp_group = get_dp_group()
         pp_group = get_pp_group()
+        pcp_group = get_pcp_group()
+        pcp_size, pcp_rank = pcp_group.world_size, pcp_group.rank_in_group
+        dcp_group = get_dcp_group()
+        dcp_size, dcp_rank = dcp_group.world_size, dcp_group.rank_in_group
         cache_key = WeightCacheKey.from_model_config(
             model_config,
             cache_config=cache_config,
+            parallel_config=parallel_config,
             tp_size=get_tensor_model_parallel_world_size(),
             tp_rank=get_tensor_model_parallel_rank(),
             pp_size=pp_group.world_size,
             pp_rank=pp_group.rank_in_group,
+            pcp_size=pcp_size,
+            pcp_rank=pcp_rank,
+            dcp_size=dcp_size,
+            dcp_rank=dcp_rank,
             dp_size=dp_group.world_size,
             dp_rank=dp_group.rank_in_group,
             is_draft=self.is_draft,

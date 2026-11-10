@@ -34,7 +34,11 @@ def flashinfer_autotune_cache_hash(runner: "GPUModelRunner") -> str:
     cache_config = _normalize_cache_config_for_hash(vllm_config.cache_config)
     if cache_config is not vllm_config.cache_config:
         vllm_config = replace(vllm_config, cache_config=cache_config)
-    return hash_factors(vllm_config.compile_factors(include_version=False))
+    factors = vllm_config.compile_factors(include_version=False)
+    factors["dcp_q_replicate_env"] = (
+        envs.VLLM_DCP_Q_REPLICATE if envs.is_set("VLLM_DCP_Q_REPLICATE") else None
+    )
+    return hash_factors(factors)
 
 
 def flashinfer_autotune_root() -> Path:

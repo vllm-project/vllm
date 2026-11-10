@@ -3,7 +3,7 @@
 """The `preload` subcommand for the vLLM CLI.
 
 Launches one weight cache daemon per GPU; each daemon holds the
-post-quantized, TP-sharded weights of its rank in GPU memory and serves
+post-quantized, parallel-sharded weights of its rank in GPU memory and serves
 CUDA IPC handles to vLLM engines over a Unix domain socket, so restarting
 engines can map the weights via zero-copy IPC instead of reloading from disk:
 
@@ -13,9 +13,10 @@ Engines then load from the daemons with:
 
     vllm serve /path/to/model --tensor-parallel-size 4 --load-format ipc_cache
 
-Tensor, expert and data parallelism are supported, including across nodes;
-see vllm/model_executor/model_loader/weight_cache/daemon.py for the rank
-layout and rendezvous details.
+Tensor, expert, data, pipeline, prefill-context and decode-context parallelism
+are supported, including across nodes; see
+vllm/model_executor/model_loader/weight_cache/daemon.py for the rank layout and
+rendezvous details.
 """
 
 import argparse
@@ -253,10 +254,13 @@ class PreloadSubcommand(CLISubcommand):
         check_ipc_platform_support()
         parallel_config = vllm_config.parallel_config
         _reject_unsupported_parallelism(parallel_config)
-        tp_size = parallel_config.tensor_parallel_size
-        pp_size = parallel_config.pipeline_parallel_size
         dp_size = parallel_config.data_parallel_size
-        world_size = dp_size * pp_size * tp_size
+        world_size = (
+            dp_size
+            * parallel_config.pipeline_parallel_size
+            * parallel_config.prefill_context_parallel_size
+            * parallel_config.tensor_parallel_size
+        )
 
         placements = plan_local_ranks(parallel_config)
         local_world_size = len(placements)
@@ -316,15 +320,9 @@ class PreloadSubcommand(CLISubcommand):
 
         ctx = multiprocessing.get_context("spawn")
         ready_queue: multiprocessing.Queue[tuple[str, int]] = ctx.Queue()
-        # Local index == device index; global rank enumerates DP, PP, then TP.
         expected_ready = {
-            (
-                format_daemon_role(is_draft),
-                dp_rank * pp_size * tp_size + pp_rank * tp_size + tp_rank,
-            )
-            for (is_draft, _, _), (_, dp_rank, pp_rank, tp_rank) in product(
-                groups, placements
-            )
+            (format_daemon_role(is_draft), placement.global_rank)
+            for (is_draft, _, _), placement in product(groups, placements)
         }
         _validate_seed_args(args, world_size=world_size, num_groups=len(groups))
         warmup_cache_stores = [
@@ -346,9 +344,8 @@ class PreloadSubcommand(CLISubcommand):
             # Draft daemons live past the target group's port block so both
             # roles can be reached over a single seed host:base_port.
             port_offset = group_index * world_size
-            for local_rank, dp_rank, pp_rank, tp_rank in placements:
-                global_rank = dp_rank * pp_size * tp_size + pp_rank * tp_size + tp_rank
-                offset = port_offset + global_rank
+            for placement in placements:
+                offset = port_offset + placement.global_rank
                 seed_config = SeedConfig(
                     listen=_seed_endpoint(
                         args.seed_listen_host, args.seed_listen_port, offset
@@ -362,21 +359,21 @@ class PreloadSubcommand(CLISubcommand):
                     ctx.Process(
                         target=_run_daemon,
                         args=(
-                            global_rank,
-                            local_rank,
+                            placement.global_rank,
+                            placement.local_rank,
                             config,
                             init_method,
                             args.weight_cache_socket_dir,
                             ready_queue,
                             is_draft,
-                            dp_rank,
-                            pp_rank,
+                            placement.dp_rank,
+                            placement.pp_rank,
                             seed_config,
                             warmup_cache_stores,
                         ),
                         name=(
                             f"vllm-weight-cache-{format_daemon_role(is_draft)}-"
-                            f"{global_rank}"
+                            f"{placement.global_rank}"
                         ),
                     )
                 )

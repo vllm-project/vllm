@@ -260,7 +260,7 @@ from vllm.model_executor.layers.quantization.utils.quant_utils import (
     kFp8StaticTensorSym,
     kNvfp4Dynamic,
 )
-from vllm.model_executor.utils import replace_parameter
+from vllm.model_executor.utils import is_weights_pre_processed, replace_parameter
 from vllm.platforms import current_platform
 from vllm.transformers_utils.deepseek_v4_utils import get_compress_ratios
 from vllm.utils.flashinfer import has_flashinfer
@@ -1201,6 +1201,7 @@ class MLAAttention(nn.Module, AttentionLayerBase):
             if self.impl.dcp_world_size > 1:
                 assert lse is not None
                 assert self.dcp_manager is not None
+                assert self.dcp_manager.combine is not None
                 decode_metadata = getattr(attn_metadata, "decode", None)
                 if not use_mha and not self.use_pcp:
                     seq_lens = cast(torch.Tensor, attn_metadata.seq_lens)  # type: ignore[attr-defined]
@@ -1357,101 +1358,104 @@ class MLAAttention(nn.Module, AttentionLayerBase):
                     "FP4/FP8 MLA BMM paths."
                 )
 
-        W_UK, W_UV = split_kv_b_proj(
-            self.kv_b_proj,
-            act_dtype,
-            self.kv_lora_rank,
-            self.num_heads,
-            self.qk_nope_head_dim,
-            self.v_head_dim,
-        )
-
-        # If kv_b_proj_weight is unquantized, quantize it to mxfp4 if supported
-        if self.is_aiter_triton_fp4_bmm_enabled:
-            from vllm.model_executor.layers.quantization.quark.utils import (
-                quark_quantize_weight_to_mxfp4,
+        # The IPC loader maps the daemon's absorbed tensors; recomputing them
+        # would replace or write back into its shared allocation.
+        if not is_weights_pre_processed():
+            W_UK, W_UV = split_kv_b_proj(
+                self.kv_b_proj,
+                act_dtype,
+                self.kv_lora_rank,
+                self.num_heads,
+                self.qk_nope_head_dim,
+                self.v_head_dim,
             )
 
-            W_K, W_K_scale = quark_quantize_weight_to_mxfp4(W_UK)
-            W_V, W_V_scale = quark_quantize_weight_to_mxfp4(W_UV.permute(1, 2, 0))
-            # Copy in place on reload so captured CUDA graphs stay valid.
-            # Convert W_K from (L, N, P) to (N, L, P).
-            for name, tensor in (
-                ("W_K", W_K.transpose(0, 1)),
-                ("W_K_scale", W_K_scale.transpose(0, 1)),
-                ("W_V", W_V),
-                ("W_V_scale", W_V_scale),
-            ):
-                replace_parameter(self, name, tensor)
-        elif self.is_aiter_triton_fp8_bmm_enabled:
-            W_K = W_UK.transpose(0, 1)  # 16 512 128
-            W_V = W_UV.permute(1, 2, 0)  # 16 128 512
-            W_K, W_K_scale = dynamic_per_batched_tensor_quant(
-                W_K, dtype=current_platform.fp8_dtype()
-            )
-            W_V, W_V_scale = dynamic_per_batched_tensor_quant(
-                W_V, dtype=current_platform.fp8_dtype()
-            )
-            # Copy in place on reload so captured CUDA graphs stay valid.
-            for name, tensor in (
-                ("W_K", W_K),
-                ("W_K_scale", W_K_scale),
-                ("W_V", W_V),
-                ("W_V_scale", W_V_scale),
-            ):
-                replace_parameter(self, name, tensor)
-
-            # The kernel operates on non-padded inputs. Hence, pre-compiling
-            # triton kernel to avoid runtime compilation for unseen batch sizes
-            # Pre-compile for batch sizes 1 to 1024 to cover most use-cases.
-            # On DS-R1, this step adds roughly 50s to the model loading time.
-            max_batch_size = 1024  # [ToDo] Find the optimal upper limit
-            pre_compilation_list = list(range(1, max_batch_size + 1))
-            if is_global_first_rank():
-                pre_compilation_list = tqdm(
-                    pre_compilation_list,
-                    desc="[Aiter Triton] Pre-compiling fp8 BMM kernel",
-                    total=max_batch_size,
+            # If kv_b_proj_weight is unquantized, quantize it to mxfp4 if supported
+            if self.is_aiter_triton_fp4_bmm_enabled:
+                from vllm.model_executor.layers.quantization.quark.utils import (
+                    quark_quantize_weight_to_mxfp4,
                 )
 
-            for m in pre_compilation_list:
-                x = torch.empty(
-                    (self.W_K.shape[0], m, self.W_K.shape[2]),
-                    dtype=torch.bfloat16,
-                    device=self.W_K.device,
+                W_K, W_K_scale = quark_quantize_weight_to_mxfp4(W_UK)
+                W_V, W_V_scale = quark_quantize_weight_to_mxfp4(W_UV.permute(1, 2, 0))
+                # Copy in place on reload so captured CUDA graphs stay valid.
+                # Convert W_K from (L, N, P) to (N, L, P).
+                for name, tensor in (
+                    ("W_K", W_K.transpose(0, 1)),
+                    ("W_K_scale", W_K_scale.transpose(0, 1)),
+                    ("W_V", W_V),
+                    ("W_V_scale", W_V_scale),
+                ):
+                    replace_parameter(self, name, tensor)
+            elif self.is_aiter_triton_fp8_bmm_enabled:
+                W_K = W_UK.transpose(0, 1)  # 16 512 128
+                W_V = W_UV.permute(1, 2, 0)  # 16 128 512
+                W_K, W_K_scale = dynamic_per_batched_tensor_quant(
+                    W_K, dtype=current_platform.fp8_dtype()
                 )
-                rocm_aiter_ops.triton_fp8_bmm(
-                    x, self.W_K, self.W_K_scale, group_size=128, transpose_bm=True
+                W_V, W_V_scale = dynamic_per_batched_tensor_quant(
+                    W_V, dtype=current_platform.fp8_dtype()
                 )
+                # Copy in place on reload so captured CUDA graphs stay valid.
+                for name, tensor in (
+                    ("W_K", W_K),
+                    ("W_K_scale", W_K_scale),
+                    ("W_V", W_V),
+                    ("W_V_scale", W_V_scale),
+                ):
+                    replace_parameter(self, name, tensor)
 
-                x = torch.empty(
-                    (self.W_V.shape[0], m, self.W_V.shape[2]),
-                    dtype=torch.bfloat16,
-                    device=self.W_V.device,
-                )
-                rocm_aiter_ops.triton_fp8_bmm(
-                    x, self.W_V, self.W_V_scale, group_size=128, transpose_bm=True
-                )
-        else:
-            # Convert from (L, N, V) to (N, L, V)
-            replace_parameter(self, "W_UV", W_UV.transpose(0, 1))
-            # Convert from (L, N, P) to (N, P, L)
-            replace_parameter(self, "W_UK_T", W_UK.permute(1, 2, 0))
-            if self.dcp_q_replicate:
-                replace_parameter(
-                    self,
-                    "W_UK_T_dcp_qrep",
-                    get_dcp_group().all_gather(self.W_UK_T.contiguous(), dim=0),
-                )
-            if (
-                self.dcp_manager is not None
-                and self.dcp_manager.v_up_proj_combine is not None
-            ):
-                replace_parameter(
-                    self,
-                    "W_UV_dcp",
-                    get_dcp_group().all_gather(self.W_UV.contiguous(), dim=0),
-                )
+                # The kernel operates on non-padded inputs. Hence, pre-compiling
+                # triton kernel to avoid runtime compilation for unseen batch sizes
+                # Pre-compile for batch sizes 1 to 1024 to cover most use-cases.
+                # On DS-R1, this step adds roughly 50s to the model loading time.
+                max_batch_size = 1024  # [ToDo] Find the optimal upper limit
+                pre_compilation_list = list(range(1, max_batch_size + 1))
+                if is_global_first_rank():
+                    pre_compilation_list = tqdm(
+                        pre_compilation_list,
+                        desc="[Aiter Triton] Pre-compiling fp8 BMM kernel",
+                        total=max_batch_size,
+                    )
+
+                for m in pre_compilation_list:
+                    x = torch.empty(
+                        (self.W_K.shape[0], m, self.W_K.shape[2]),
+                        dtype=torch.bfloat16,
+                        device=self.W_K.device,
+                    )
+                    rocm_aiter_ops.triton_fp8_bmm(
+                        x, self.W_K, self.W_K_scale, group_size=128, transpose_bm=True
+                    )
+
+                    x = torch.empty(
+                        (self.W_V.shape[0], m, self.W_V.shape[2]),
+                        dtype=torch.bfloat16,
+                        device=self.W_V.device,
+                    )
+                    rocm_aiter_ops.triton_fp8_bmm(
+                        x, self.W_V, self.W_V_scale, group_size=128, transpose_bm=True
+                    )
+            else:
+                # Convert from (L, N, V) to (N, L, V)
+                replace_parameter(self, "W_UV", W_UV.transpose(0, 1))
+                # Convert from (L, N, P) to (N, P, L)
+                replace_parameter(self, "W_UK_T", W_UK.permute(1, 2, 0))
+                if self.dcp_q_replicate:
+                    replace_parameter(
+                        self,
+                        "W_UK_T_dcp_qrep",
+                        get_dcp_group().all_gather(self.W_UK_T.contiguous(), dim=0),
+                    )
+                if (
+                    self.dcp_manager is not None
+                    and self.dcp_manager.v_up_proj_combine is not None
+                ):
+                    replace_parameter(
+                        self,
+                        "W_UV_dcp",
+                        get_dcp_group().all_gather(self.W_UV.contiguous(), dim=0),
+                    )
 
         # If we should not load quant weights, we initialize the scales to 1.0
         # as the default value. See [Note: Register q/k/v/prob scales in state dict]

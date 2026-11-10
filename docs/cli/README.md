@@ -308,8 +308,8 @@ See [vllm run-batch](./run-batch.md) for the full reference of all available arg
 ## preload
 
 Launch weight cache daemons (one per GPU) that hold the post-quantized,
-TP-sharded weights in GPU memory and serve CUDA IPC handles to vLLM engines
-over a Unix domain socket. Restarting engines then map the weights via
+parallel-sharded weights in GPU memory and serve CUDA IPC handles to vLLM
+engines over a Unix domain socket. Restarting engines then map the weights via
 zero-copy IPC instead of reloading from disk, enabling fast engine restarts.
 
 ```bash
@@ -322,11 +322,33 @@ vllm serve meta-llama/Llama-3.2-1B-Instruct --tensor-parallel-size 4 \
 ```
 
 The daemon accepts the standard engine arguments (model, dtype, quantization,
-tensor-parallel-size, ...) plus `--weight-cache-socket-dir` to override the
-directory holding the per-GPU Unix sockets, and `--weight-cache-master-port` /
+parallelism, ...) plus `--weight-cache-socket-dir` to override the directory
+holding the per-GPU Unix sockets, and `--weight-cache-master-port` /
 `--weight-cache-draft-master-port` to pin the daemon rendezvous ports for
-multi-node and speculative-decoding setups. Tensor, expert and data
-parallelism are supported; pipeline parallelism is rejected at launch.
+multi-node and speculative-decoding setups. Tensor, expert, pipeline,
+prefill-context, decode-context and data parallelism are supported, including
+across nodes. The model and attention backend must also support the selected
+PCP/DCP configuration.
+
+The daemon world size is `DP x PP x PCP x TP`, with ranks enumerated in DP, PP,
+PCP, then TP order. DCP reuses existing ranks and does not add daemons. Pass
+the same parallel options to both commands; this PP2 x PCP2 x TP2 example
+launches eight daemons, with DCP2 mapped onto them:
+
+```bash
+vllm preload --model /path/to/model \
+    --pipeline-parallel-size 2 \
+    --prefill-context-parallel-size 2 \
+    --decode-context-parallel-size 2 \
+    --tensor-parallel-size 2
+
+vllm serve /path/to/model \
+    --pipeline-parallel-size 2 \
+    --prefill-context-parallel-size 2 \
+    --decode-context-parallel-size 2 \
+    --tensor-parallel-size 2 \
+    --load-format ipc_cache
+```
 
 See [Preload](../features/preload.md) for how it works, cache modes, and
 limitations, and [vllm preload](./preload.md) for the full reference of all

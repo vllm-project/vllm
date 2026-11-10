@@ -849,10 +849,34 @@ steps:
   source_file_dependencies:
   - vllm/entrypoints/cli/preload.py
   - vllm/model_executor/model_loader/weight_cache/
+  - vllm/model_executor/layers/attention/mla_attention.py
   - vllm/model_executor/layers/fused_moe/expert_map_manager.py
+  - vllm/model_executor/warmup/flashinfer_autotune_cache.py
+  - vllm/v1/attention/ops/dcp.py
   - tests/model_executor/model_loader/test_weight_cache.py
   commands:
-  - pytest -v -s model_executor/model_loader/test_weight_cache.py -m 'distributed(num_gpus=2)'
+  - >-
+    pytest -v -s
+    model_executor/model_loader/test_weight_cache.py::test_daemon_places_tp_and_dp_ranks_on_local_gpus
+    model_executor/model_loader/test_weight_cache.py::test_daemon_places_tp_pcp_pp_in_global_rank_order
+    model_executor/model_loader/test_weight_cache.py::test_daemon_places_pcp_with_multinode_and_local_dp_offsets
+    model_executor/model_loader/test_weight_cache.py::test_daemon_dcp_does_not_change_placements
+    model_executor/model_loader/test_weight_cache.py::test_weight_cache_key_pcp_dcp_defaults
+    model_executor/model_loader/test_weight_cache.py::test_weight_cache_key_distinguishes_each_pcp_dcp_field
+    model_executor/model_loader/test_weight_cache.py::test_weight_cache_key_safely_mismatches_legacy_pcp_dcp_fields
+    model_executor/model_loader/test_weight_cache.py::test_daemon_places_external_dp_rank_with_pcp
+    model_executor/model_loader/test_weight_cache.py::test_daemon_computes_dcp_rank_like_engine
+    model_executor/model_loader/test_weight_cache.py::test_weight_cache_key_distinguishes_mla_bmm_layout
+    model_executor/model_loader/test_weight_cache.py::test_weight_cache_key_fingerprints_qrep_env_tri_state
+    model_executor/model_loader/test_weight_cache.py::test_ipc_cache_key_rejects_dcp_q_replicate_mismatch
+    model_executor/model_loader/test_weight_cache.py::test_release_direct_dcp_workspaces_breaks_manager_cycles
+    model_executor/model_loader/test_weight_cache.py::test_ipc_loader_replaces_none_dcp_weight_attributes
+  - >-
+    pytest -v -s
+    model_executor/model_loader/test_weight_cache.py
+    -m 'distributed(num_gpus=2)'
+    --deselect model_executor/model_loader/test_weight_cache.py::test_ipc_cache_cold_start_and_warm_restart_dcp
+    --deselect model_executor/model_loader/test_weight_cache.py::test_ipc_cache_rejects_dcp_q_replicate_mismatch_e2e
   mirror:
     amd:
       automatic_shard: true
@@ -866,9 +890,33 @@ steps:
       source_file_dependencies:
       - vllm/entrypoints/cli/preload.py
       - vllm/model_executor/model_loader/weight_cache/
+      - vllm/model_executor/layers/attention/mla_attention.py
       - vllm/model_executor/layers/fused_moe/expert_map_manager.py
+      - vllm/model_executor/warmup/flashinfer_autotune_cache.py
+      - vllm/v1/attention/ops/dcp.py
       - tests/model_executor/model_loader/test_weight_cache.py
       - vllm/platforms/rocm.py
+
+- label: ":nvidia: (H100) Distributed Preload DCP"
+  key: preload-dcp-2xh100
+  automatic_shard: true
+  timeout_in_minutes: 45
+  working_dir: "/vllm-workspace/tests"
+  device: h100
+  num_devices: 2
+  source_file_dependencies:
+  - vllm/entrypoints/cli/preload.py
+  - vllm/model_executor/model_loader/weight_cache/
+  - vllm/model_executor/layers/attention/mla_attention.py
+  - vllm/model_executor/layers/fused_moe/expert_map_manager.py
+  - vllm/model_executor/warmup/flashinfer_autotune_cache.py
+  - vllm/v1/attention/ops/dcp.py
+  - tests/model_executor/model_loader/test_weight_cache.py
+  commands:
+  - >-
+    pytest -v -s
+    model_executor/model_loader/test_weight_cache.py::test_ipc_cache_cold_start_and_warm_restart_dcp
+    model_executor/model_loader/test_weight_cache.py::test_ipc_cache_rejects_dcp_q_replicate_mismatch_e2e
 
 - label: ":nvidia: (B200) Distributed Preload with Mooncake Store"
   key: preload-mooncake-store-2xb200

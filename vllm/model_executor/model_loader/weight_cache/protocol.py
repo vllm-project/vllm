@@ -27,8 +27,10 @@ import torch
 from torch.multiprocessing.reductions import rebuild_cuda_tensor, reduce_tensor
 from transformers.utils import SAFE_WEIGHTS_INDEX_NAME
 
+import vllm.envs as envs
 import vllm.version
-from vllm.config import CacheConfig, KernelConfig, ModelConfig
+from vllm._aiter_ops import rocm_aiter_ops
+from vllm.config import CacheConfig, KernelConfig, ModelConfig, ParallelConfig
 from vllm.config.utils import normalize_value
 from vllm.model_executor.layers.quantization.base_config import QuantizeMethodBase
 from vllm.model_executor.model_loader.weight_cache.utils import (
@@ -337,6 +339,15 @@ class WeightCacheKey:
     repacked), so weights processed for one backend are wrong for another."""
     linear_backend: str = "auto"
     linear_backend_per_quant: tuple[tuple[str, str], ...] = ()
+    pcp_size: int = 1
+    pcp_rank: int = 0
+    dcp_size: int = 1
+    dcp_rank: int = 0
+    dcp_comm_backend: str | None = None
+    dcp_q_replicate: bool | None = None
+    dcp_q_replicate_env: bool | None = None
+    direct_dcp_a2a: bool | None = None
+    mla_bmm_layout: str = "generic"
 
     @classmethod
     def from_model_config(
@@ -346,8 +357,13 @@ class WeightCacheKey:
         tp_rank: int,
         *,
         cache_config: CacheConfig,
+        parallel_config: ParallelConfig | None = None,
         pp_size: int = 1,
         pp_rank: int = 0,
+        pcp_size: int = 1,
+        pcp_rank: int = 0,
+        dcp_size: int = 1,
+        dcp_rank: int = 0,
         is_draft: bool = False,
         dp_size: int = 1,
         dp_rank: int = 0,
@@ -371,6 +387,15 @@ class WeightCacheKey:
         quant_config = getattr(hf_config, "quantization_config", None)
         checkpoint = hash_checkpoint(model_config.model) or model_config.model
         kernel_config = kernel_config or KernelConfig()
+        dcp_q_replicate_env = (
+            envs.VLLM_DCP_Q_REPLICATE if envs.is_set("VLLM_DCP_Q_REPLICATE") else None
+        )
+        if rocm_aiter_ops.is_fp4bmm_enabled():
+            mla_bmm_layout = "fp4"
+        elif rocm_aiter_ops.is_fp8bmm_enabled():
+            mla_bmm_layout = "fp8"
+        else:
+            mla_bmm_layout = "generic"
         return cls(
             checkpoint=checkpoint,
             model_arch=arch,
@@ -378,6 +403,18 @@ class WeightCacheKey:
             tp_rank=tp_rank,
             pp_size=pp_size,
             pp_rank=pp_rank,
+            pcp_size=pcp_size,
+            pcp_rank=pcp_rank,
+            dcp_size=dcp_size,
+            dcp_rank=dcp_rank,
+            dcp_comm_backend=(
+                parallel_config.dcp_comm_backend if parallel_config else None
+            ),
+            dcp_q_replicate=(
+                parallel_config.dcp_q_replicate if parallel_config else None
+            ),
+            dcp_q_replicate_env=dcp_q_replicate_env,
+            direct_dcp_a2a=envs.VLLM_USE_DIRECT_DCP_A2A,
             dtype=str(model_config.dtype),
             quantization=model_config.quantization,
             quant_config_hash=_hash_quant_config(
@@ -401,13 +438,15 @@ class WeightCacheKey:
             linear_backend_per_quant=tuple(
                 sorted((kernel_config.linear_backend_per_quant or {}).items())
             ),
+            mla_bmm_layout=mla_bmm_layout,
         )
 
     def mismatched_fields(self, other: "WeightCacheKey") -> list[str]:
+        missing = object()
         return [
             f.name
             for f in fields(self)
-            if getattr(self, f.name) != getattr(other, f.name)
+            if getattr(self, f.name) != getattr(other, f.name, missing)
         ]
 
 
