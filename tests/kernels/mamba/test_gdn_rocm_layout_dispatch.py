@@ -1,8 +1,8 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
-"""Layout dispatch tests for ``QwenGatedDeltaNetAttention._forward_core_rocm``.
+"""Layout dispatch tests for `QwenGatedDeltaNetAttention._forward_core_rocm`.
 
-The AITER fused reshape+conv kernel learned Qwen3.5's flat ``[q|k|v|z]``
+The AITER fused reshape+conv kernel learned Qwen3.5's flat `[q|k|v|z]`
 packing in https://github.com/ROCm/aiter/pull/3251, so flat-layout models take
 the decode fast path too instead of falling back to the generic path.
 
@@ -60,7 +60,7 @@ def _make_metadata(
 
 
 def _make_layer(gqa_interleaved_layout: bool):
-    """Stub layer running the real ``_forward_core_rocm``, recording dispatch."""
+    """Stub layer running the real `_forward_core_rocm`, recording dispatch."""
     layer = types.SimpleNamespace()
     layer.prefix = PREFIX
     layer.gqa_interleaved_layout = gqa_interleaved_layout
@@ -104,7 +104,7 @@ def test_pure_decode_takes_the_fast_path(gqa_interleaved_layout: bool) -> None:
 
 @pytest.mark.parametrize("gqa_interleaved_layout", [True, False])
 def test_layout_string_matches_the_packing(gqa_interleaved_layout: bool) -> None:
-    """The value handed to the kernel's ``qkvz_layout`` parameter."""
+    """The value handed to the kernel's `qkvz_layout` parameter."""
     layer = _make_layer(gqa_interleaved_layout)
     expected = "interleaved" if gqa_interleaved_layout else "flat"
     assert layer.qkvz_layout == expected

@@ -183,7 +183,7 @@ def _decode_csf(fixed: torch.Tensor, exceptions: torch.Tensor) -> np.ndarray:
 @functools.cache
 def _csf32_blocks(rows: int, cols: int):
     """Origin, width and page of each 32x2 block in storage order, and the flat
-    ``[rows, cols]`` position of each code."""
+    `[rows, cols]` position of each code."""
     tile_r, tile_c, pair, block = np.meshgrid(
         np.arange(-(-rows // 128)),
         np.arange(-(-cols // 4)),
@@ -267,7 +267,7 @@ CSF_SCALE_ENCODINGS: dict[str, tuple[tuple[str, ...], Callable[..., np.ndarray]]
 
 
 def decode_csf_scale(encoding: str, streams: dict[str, torch.Tensor]) -> torch.Tensor:
-    """Rebuild one ``[rows, cols]`` float8_e4m3fn block-scale matrix."""
+    """Rebuild one `[rows, cols]` float8_e4m3fn block-scale matrix."""
     names, decode = CSF_SCALE_ENCODINGS[encoding]
     out = decode(*(streams[name].cpu() for name in names))
     return torch.from_numpy(out).view(torch.float8_e4m3fn)
@@ -278,10 +278,10 @@ def csf_weights_transform(
 ) -> Callable[[Iterable[tuple[str, torch.Tensor]]], Iterable[tuple[str, torch.Tensor]]]:
     """Pair CSF scale streams back into canonical E4M3 scale tensors.
 
-    The returned transform is lazy over a ``(name, tensor)`` weight stream:
-    tensors named ``<name>.<stream>`` for a declared encoding are buffered per
+    The returned transform is lazy over a `(name, tensor)` weight stream:
+    tensors named `<name>.<stream>` for a declared encoding are buffered per
     scale and, once the encoding's stream set completes, replaced by the
-    decoded ``<name>`` tensor; everything else passes through unchanged.
+    decoded `<name>` tensor; everything else passes through unchanged.
     """
     suffixes = {
         f".{stream}": (encoding, stream)

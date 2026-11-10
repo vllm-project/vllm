@@ -14,6 +14,8 @@ from vllm.config import get_current_vllm_config_or_none
 from vllm.config.quantization import QuantizationConfigArgs, QuantSpec
 from vllm.logger import init_logger
 from vllm.model_executor.kernels.linear import (
+    MPLinearLayerConfig,
+    choose_mp_linear_kernel,
     init_fp8_linear_kernel,
     init_mxfp8_linear_kernel,
     init_nvfp4_linear_kernel,
@@ -99,6 +101,7 @@ from vllm.model_executor.layers.quantization.utils.quant_utils import (
     kFp8Static128BlockSym,
     kFp8StaticTensorSym,
     kFp8StaticTokenSym,
+    kInt8Static,
     kMxfp8Dynamic,
     kMxfp8Static,
     kNvfp4Dynamic,
@@ -117,7 +120,9 @@ from vllm.model_executor.models.utils import WeightsMapper
 from vllm.model_executor.parameter import (
     BlockQuantScaleParameter,
     ChannelQuantScaleParameter,
+    GroupQuantScaleParameter,
     ModelWeightParameter,
+    PackedvLLMParameter,
     PerTensorScaleParameter,
 )
 from vllm.model_executor.utils import (
@@ -143,7 +148,7 @@ _BLOCK_FP8_MOE_ALGOS = ("FP8_PB_WO", "FP8_BLOCK_SCALES")
 # Each entry is (owning config's name, mixed-precision sub-config attribute).
 # ``resolve`` turns the algo into a QuantSpec; this table only records which
 # config object holds the checkpoint parameters resolve may read -- today just
-# group_size, and only for the NVFP4 family.
+# group_size, for the NVFP4 family and INT8_PB_WO.
 #
 # To add a format: one row here plus one row in resolve(). Every consumer below
 # is derived, so nothing else needs editing.
@@ -160,6 +165,9 @@ LINEAR_ALGOS: dict[str, tuple[str, str]] = {
     "W4A16_NVFP4": ("modelopt_fp4", "w4a16_nvfp4_config"),
     # MXFP8: e4m3 weights with per-32-block e8m0 scales.
     "MXFP8": ("modelopt_mxfp8", "mxfp8_config"),
+    # INT8_PB_WO: int8 weights with per-block (group_size) scales, 16-bit
+    # activations.
+    "INT8_PB_WO": ("modelopt_int8", "int8_pb_wo_config"),
 }
 
 # MIXED_PRECISION is not a linear algo; it selects a per-layer algo from the
@@ -170,6 +178,14 @@ QUANT_ALGOS = [*LINEAR_ALGOS, "MIXED_PRECISION"]
 def algos_owned_by(config_name: str) -> tuple[str, ...]:
     """The linear algos a given config accepts, for its quant_algo validation."""
     return tuple(a for a, (owner, _) in LINEAR_ALGOS.items() if owner == config_name)
+
+
+def _reject_int8_pb_wo_moe(algo: str | None, prefix: str) -> None:
+    if algo == "INT8_PB_WO":
+        raise NotImplementedError(
+            f"ModelOpt INT8_PB_WO supports linear layers only; {prefix} is a "
+            "FusedMoE layer."
+        )
 
 
 class ModelOptKVCacheMethod(BaseKVCacheMethod):
@@ -927,7 +943,7 @@ class ModelOptNvFp4FusedMoE(FusedMoEMethodBase):
     def dequantize_weight(
         self, layer: torch.nn.Module
     ) -> Iterator[tuple[slice, torch.Tensor, torch.Tensor]]:
-        """Yield ``(experts, w13, w2)`` dequantized ModelOpt NVFP4 experts."""
+        """Yield `(experts, w13, w2)` dequantized ModelOpt NVFP4 experts."""
         return dequantize_nvfp4_moe_weights(
             layer.w13_weight,
             layer.w13_weight_scale,
@@ -1158,7 +1174,7 @@ class ModelOptNvFp4FusedMoE(FusedMoEMethodBase):
         self.moe_kernel.fused_experts.process_weights_after_loading(layer)
 
     def _restore_padded_moe_dims(self, layer: RoutedExperts) -> None:
-        """Recover the padded ``moe_config`` dims from the exported weights."""
+        """Recover the padded `moe_config` dims from the exported weights."""
         mc = layer.moe_config
         padded_hidden = layer.w2_weight.shape[1]
         if padded_hidden != mc.hidden_dim:
@@ -1353,7 +1369,7 @@ class ModelOptMxFp8Config(ModelOptQuantConfigBase):
     def routed_expert_weight_key(self) -> QuantKey:
         """The weight format the routed experts are stored in.
 
-        MXFP8, or NVFP4 (``moe_quant_algo: NVFP4``).
+        MXFP8, or NVFP4 (`moe_quant_algo: NVFP4`).
         """
         if self.moe_quant_algo != "NVFP4":
             return kMxfp8Static
@@ -1509,13 +1525,13 @@ class ModelOptMxFp8FusedMoE(FusedMoEMethodBase):
         """One-time MXFP8->BF16 weight dequant for the emulation path.
 
         On devices without a native MXFP8 MoE kernel (e.g. gfx942 / MI300),
-        ``Mxfp8EmulationTritonExperts`` otherwise dequantizes every expert
+        `Mxfp8EmulationTritonExperts` otherwise dequantizes every expert
         weight to BF16 on *every* forward step -- the dominant cost (conc1
         ~1.3 tok/s). Doing the dequant once here and replacing the MXFP8
         parameters with BF16 makes the MoE run exactly like a plain BF16
         checkpoint (full precision, no per-step dequant); SwiGLU-OAI is still
-        applied by the experts' ``activation()`` override. The MXFP8 weights
-        are freed by ``replace_parameter`` (BF16 is 2x their size; the small
+        applied by the experts' `activation()` override. The MXFP8 weights
+        are freed by `replace_parameter` (BF16 is 2x their size; the small
         E8M0 scale tensors are left in place, unused).
         """
         from vllm.model_executor.layers.quantization.utils.mxfp8_utils import (
@@ -1664,14 +1680,82 @@ ModelOptMxFp8Config.FusedMoEMethodCls = ModelOptMxFp8FusedMoE
 ModelOptMxFp8Config.KVCacheMethodCls = ModelOptKVCacheMethod
 
 
+class ModelOptInt8Config(ModelOptQuantConfigBase):
+    """Config class for ModelOpt INT8_PB_WO (per-block INT8 weight-only)."""
+
+    def __init__(
+        self,
+        group_size: int,
+        kv_cache_quant_algo: str | None,
+        exclude_modules: list[str],
+    ) -> None:
+        super().__init__(exclude_modules)
+        self.quant_method = "INT8_PB_WO"
+        self.group_size = group_size
+        self.kv_cache_quant_algo = kv_cache_quant_algo
+
+    def layer_group_size(self, prefix: str) -> int:
+        return self.group_size
+
+    def get_name(self) -> QuantizationMethods:
+        return "modelopt_int8"
+
+    def get_supported_act_dtypes(self) -> list[torch.dtype]:
+        return [torch.bfloat16, torch.half]
+
+    @classmethod
+    def get_min_capability(cls) -> int:
+        # Marlin and Humming serve int8 weight groups from Turing (SM75) up.
+        return 75
+
+    @classmethod
+    def override_quantization_method(
+        cls, hf_quant_cfg, user_quant, hf_config=None
+    ) -> QuantizationMethods | None:
+        if cls._extract_modelopt_quant_algo(hf_quant_cfg) == "INT8_PB_WO":
+            return "modelopt_int8"
+        return None
+
+    @classmethod
+    def _from_config(
+        cls,
+        *,
+        quant_method: str,
+        kv_cache_quant_method: str | None,
+        exclude_modules: list[str],
+        original_config: dict[str, Any],
+        group_size: int | None,
+        **kwargs: Any,
+    ) -> "ModelOptInt8Config":
+        supported = algos_owned_by("modelopt_int8")
+        if quant_method not in supported:
+            raise ValueError(
+                f"Unsupported ModelOpt INT8 quant_algo: {quant_method}. "
+                f"Supported: {' / '.join(supported)}."
+            )
+        if not group_size:
+            raise ValueError("ModelOpt INT8_PB_WO requires a group_size.")
+        return cls(group_size, kv_cache_quant_method, exclude_modules)
+
+    def get_quant_method(
+        self, layer: torch.nn.Module, prefix: str
+    ) -> "QuantizeMethodBase | None":
+        if isinstance(layer, RoutedExperts) and not self.is_layer_excluded(prefix):
+            _reject_int8_pb_wo_moe(self.quant_method, prefix)
+        return super().get_quant_method(layer, prefix)
+
+
+ModelOptInt8Config.KVCacheMethodCls = ModelOptKVCacheMethod
+
+
 class ModelOptMixedPrecisionConfig(ModelOptQuantConfigBase):
     """Config class for ModelOpt MIXED_PRECISION.
 
     Supports checkpoints where different layers use different quantization
     algorithms (e.g., FP8 for dense layers and NVFP4 for MoE experts).
-    The per-layer algorithm is specified in the ``quantized_layers`` dict
-    inside ``config.json``'s ``quantization_config`` (preferred) or the
-    legacy ``hf_quant_config.json``.
+    The per-layer algorithm is specified in the `quantized_layers` dict
+    inside `config.json`'s `quantization_config` (preferred) or the
+    legacy `hf_quant_config.json`.
     """
 
     def __init__(
@@ -1737,6 +1821,15 @@ class ModelOptMixedPrecisionConfig(ModelOptQuantConfigBase):
             info.get("quant_algo", "").upper() in _BLOCK_FP8_MOE_ALGOS
             for info in self.quantized_layers.values()
         )
+
+    @property
+    def int8_pb_wo_config(self) -> "ModelOptMixedPrecisionConfig":
+        # Each INT8_PB_WO layer declares its own group_size (e.g. 16 and 32 side
+        # by side), so resolve() asks this config, which owns the per-layer map.
+        return self
+
+    def layer_group_size(self, prefix: str) -> int | None:
+        return self._resolve_layer_field(prefix, "group_size")
 
     def get_name(self) -> QuantizationMethods:
         return "modelopt_mixed"
@@ -1860,40 +1953,48 @@ class ModelOptMixedPrecisionConfig(ModelOptQuantConfigBase):
         )
 
     def _resolve_quant_algo(self, prefix: str) -> str | None:
-        """Look up the quant_algo for a vLLM-side layer prefix.
+        """Look up the upper-cased quant_algo for a vLLM-side layer prefix, or
+        *None* if the prefix is not found."""
+        return self._resolve_layer_field(prefix, "quant_algo")
+
+    def _resolve_layer_field(self, prefix: str, field: str) -> Any:
+        """Look up a `quantized_layers` field for a vLLM-side layer prefix.
 
         Tries three strategies in order:
-        1. Direct lookup in ``quantized_layers``.
-        2. Packed/fused-layer lookup (unfuse via ``packed_modules_mapping``).
+        1. Direct lookup in `quantized_layers`.
+        2. Packed/fused-layer lookup (unfuse via `packed_modules_mapping`).
         3. Prefix-based lookup for RoutedExperts (any child key starts with
-           ``prefix + "."``).
+           `prefix + "."`).
 
-        Returns the upper-cased quant_algo string, or *None* if the prefix
-        is not found.
+        Returns the field's value (upper-cased if a string), or *None* if the
+        prefix is not found or its entry lacks the field.
         """
+
+        def value(info: dict[str, Any]) -> Any:
+            v = info.get(field)
+            return v.upper() if isinstance(v, str) else v
+
         # 1. Direct lookup
         for candidate in self._quantized_layer_prefix_candidates(prefix):
             if candidate in self.quantized_layers:
-                return self.quantized_layers[candidate]["quant_algo"].upper()
+                return value(self.quantized_layers[candidate])
 
         # 2. Packed / fused layer lookup
         proj_name = prefix.rsplit(".", 1)[-1]
         if self.packed_modules_mapping and proj_name in self.packed_modules_mapping:
-            algos: set[str] = set()
+            values: set[Any] = set()
             base = prefix.rsplit(".", 1)[0]
             for base_candidate in self._quantized_layer_prefix_candidates(base):
                 for shard_name in self.packed_modules_mapping[proj_name]:
                     shard_prefix = f"{base_candidate}.{shard_name}"
                     if shard_prefix in self.quantized_layers:
-                        algos.add(
-                            self.quantized_layers[shard_prefix]["quant_algo"].upper()
-                        )
-            if len(algos) == 1:
-                return algos.pop()
-            if len(algos) > 1:
+                        values.add(value(self.quantized_layers[shard_prefix]))
+            if len(values) == 1:
+                return values.pop()
+            if len(values) > 1:
                 raise ValueError(
-                    f"Mixed quant_algo within fused layer {prefix}: "
-                    f"{algos}. All shards must use the same quantization."
+                    f"Mixed {field} within fused layer {prefix}: "
+                    f"{values}. All shards must use the same quantization."
                 )
 
         # 3. Prefix-based lookup (for RoutedExperts / parent modules)
@@ -1901,7 +2002,7 @@ class ModelOptMixedPrecisionConfig(ModelOptQuantConfigBase):
             prefix_dot = candidate + "."
             for key, info in self.quantized_layers.items():
                 if key.startswith(prefix_dot):
-                    return info["quant_algo"].upper()
+                    return value(info)
 
         # RoutedExperts expert prefix is e.g. "...moe.experts", while ModelOpt's
         # quantized_layers entries use "...moe.gate_proj" / "...moe.up_proj".
@@ -1909,7 +2010,7 @@ class ModelOptMixedPrecisionConfig(ModelOptQuantConfigBase):
             parent_dot = prefix.rsplit(".experts", 1)[0] + "."
             for key, info in self.quantized_layers.items():
                 if key.startswith(parent_dot):
-                    return info["quant_algo"].upper()
+                    return value(info)
 
         # 4. Parent-prefix fallback for fused projections whose config lists
         # shard names instead of vLLM's packed module name.
@@ -1921,18 +2022,17 @@ class ModelOptMixedPrecisionConfig(ModelOptQuantConfigBase):
         if shard_names is not None:
             for candidate in self._quantized_layer_prefix_candidates(prefix):
                 parent_dot = candidate.rsplit(".", 1)[0] + "."
-                shard_algos: set[str] = set()
+                shard_values: set[Any] = set()
                 for shard_name in shard_names:
                     shard_prefix = f"{parent_dot}{shard_name}"
                     if shard_prefix in self.quantized_layers:
-                        algo = self.quantized_layers[shard_prefix]["quant_algo"].upper()
-                        shard_algos.add(algo)
-                if len(shard_algos) == 1:
-                    return shard_algos.pop()
-                if len(shard_algos) > 1:
+                        shard_values.add(value(self.quantized_layers[shard_prefix]))
+                if len(shard_values) == 1:
+                    return shard_values.pop()
+                if len(shard_values) > 1:
                     raise ValueError(
-                        f"Mixed quant_algo within fused layer {prefix}: "
-                        f"{shard_algos}. All shards must use the same quantization."
+                        f"Mixed {field} within fused layer {prefix}: "
+                        f"{shard_values}. All shards must use the same quantization."
                     )
 
         return None
@@ -2001,6 +2101,7 @@ class ModelOptMixedPrecisionConfig(ModelOptQuantConfigBase):
             return build_linear_method(getattr(self, subcfg_attr), quant_algo, prefix)
 
         if isinstance(layer, RoutedExperts):
+            _reject_int8_pb_wo_moe(quant_algo, prefix)
             if quant_algo in _BLOCK_FP8_MOE_ALGOS:
                 return Fp8MoEMethod(self.fp8_block_config, layer)
             if quant_algo == "FP8":
@@ -2099,9 +2200,9 @@ class Shapes:
 
 class QuantKeyScheme:
     """One scheme per QuantKey. Selected by key *content*; the base supplies the
-    ``role`` from the slot it fills the key into (wkey->WEIGHT, akey->ACT).
+    `role` from the slot it fills the key into (wkey->WEIGHT, akey->ACT).
 
-    Every scheme branches on ``role`` explicitly and ``reject``s any role it has
+    Every scheme branches on `role` explicitly and `reject`s any role it has
     not validated — never falling through to the wrong role's registration,
     which would allocate the wrong parameters and produce garbage silently.
     """
@@ -2494,6 +2595,70 @@ class KMxfp8Static(QuantKeyScheme):
         assert layer.weight_scale.dtype == MXFP8_SCALE_DTYPE
 
 
+class KInt8Static(QuantKeyScheme):
+    """Symmetric int8 weight with a scale per `ctx.group_size` input elements
+    (INT8_PB_WO). Weight-role only.
+
+    The checkpoint stores int8 `[out, in]`; the loader repacks it into the
+    WNA16 kernels' layout: uint8b128 (`q + 128`), four per int32 along the
+    input dim.
+    """
+
+    key = kInt8Static
+
+    def create_weights(self, layer, role, ctx, shapes, wl) -> None:
+        if role is not WEIGHT:
+            self.reject(role)
+        out, in_ = shapes.output_size_per_partition, shapes.input_size_per_partition
+        group_size = ctx.group_size
+        if in_ % 4 or in_ % group_size:
+            raise ValueError(
+                f"INT8_PB_WO requires input size per partition ({in_}) divisible "
+                f"by 4 and by group_size ({group_size})"
+            )
+
+        def weight_loader(param, loaded_weight, *args, **kwargs):
+            if loaded_weight.dtype != torch.int8:
+                raise ValueError(f"expected an int8 weight, got {loaded_weight.dtype}")
+            packed = loaded_weight.contiguous().view(torch.uint8) ^ 0x80
+            return wl(param, packed.view(torch.int32), *args, **kwargs)
+
+        self.register_params(
+            layer,
+            "weight",
+            (out, in_ // 4),
+            torch.int32,
+            PackedvLLMParameter,
+            weight_loader,
+            input_dim=1,
+            output_dim=0,
+            packed_dim=1,
+            packed_factor=4,
+        )
+        # NaN until loaded, so a missing scale fails in process().
+        self.register_params(
+            layer,
+            "weight_scale",
+            (out, in_ // group_size),
+            shapes.params_dtype,
+            GroupQuantScaleParameter,
+            wl,
+            input_dim=1,
+            output_dim=0,
+            init=float("nan"),
+        )
+
+    def process(self, layer, role) -> None:
+        if role is not WEIGHT:
+            self.reject(role)
+        if torch.isnan(layer.weight_scale).any():
+            raise RuntimeError(
+                f"INT8_PB_WO weight_scale of {getattr(layer, 'prefix', layer)!r} "
+                "was never loaded; the checkpoint does not store this layer as "
+                "INT8_PB_WO."
+            )
+
+
 class KDynamicNoParam(QuantKeyScheme):
     """Dynamic activation with no stored scale (W8A8): quantized at runtime in
     the kernel. NOT the same as activation=None (weight-only) — init_fp8 needs a
@@ -2517,6 +2682,7 @@ SCHEME_FOR: dict[QuantKey | None, QuantKeyScheme] = {
     kFp8StaticTokenSym: KFp8StaticChannel(),
     kFp8Static128BlockSym: KFp8Block128(),
     kMxfp8Static: KMxfp8Static(),
+    kInt8Static: KInt8Static(),
     kFp8DynamicTokenSym: KDynamicNoParam(),
     kFp8Dynamic128Sym: KDynamicNoParam(),
     kMxfp8Dynamic: KDynamicNoParam(),
@@ -2539,10 +2705,27 @@ def select_linear_kernel(
     layer,
     rt: RuntimeDtypes,
     weight_shape: tuple[int, int] | None = None,
+    ctx: CkptCtx | None = None,
 ):
-    """Thin family dispatcher on the weight key: nvfp4 / mxfp8 / fp8."""
+    """Thin family dispatcher on the weight key: nvfp4 / mxfp8 / int8 / fp8."""
     w = spec.weight
     assert isinstance(w, QuantKey), f"resolve() must supply a weight key, got {w!r}"
+    if w == kInt8Static:
+        assert ctx is not None and ctx.group_size, "INT8_PB_WO needs a group_size"
+        config = MPLinearLayerConfig(
+            full_weight_shape=(layer.input_size, layer.output_size),
+            partition_weight_shape=(
+                layer.input_size_per_partition,
+                layer.output_size_per_partition,
+            ),
+            weight_type=w.dtype,
+            act_type=rt.input_dtype,
+            group_size=ctx.group_size,
+            zero_points=False,
+        )
+        return choose_mp_linear_kernel(config)(
+            config, w_q_param_name="weight", w_s_param_name="weight_scale"
+        )
     if w.dtype == FP4_DTYPE:
         # W4A16 (activation is None) → use_a16=True, auto prefers FlashInfer
         # CuTe-DSL backend on SM100/103 when available and Marlin otherwise,
@@ -2572,11 +2755,11 @@ class FormatScheme:
 
     Extension seam for residue that belongs to a format as a whole rather than a
     single QuantKey — an extra parameter the weight/activation schemes don't
-    cover, or a tweak before/after their ``process``. All hooks default to
-    no-ops; most formats need none (they are a pure ``(weight, activation)`` key
+    cover, or a tweak before/after their `process`. All hooks default to
+    no-ops; most formats need none (they are a pure `(weight, activation)` key
     pair). To add one: subclass, override the hooks you need, and return an
-    instance from the format's ``resolve()`` branch — no change to
-    ``ModelOptLinearMethod`` itself.
+    instance from the format's `resolve()` branch — no change to
+    `ModelOptLinearMethod` itself.
     """
 
     def extra_weights(self, layer, shapes: "Shapes", ctx: CkptCtx, wl) -> None:
@@ -2587,31 +2770,31 @@ class FormatScheme:
         return tuple(layer.weight.shape)
 
     def pre_process(self, layer) -> None:
-        """Run before the key schemes' ``process``."""
+        """Run before the key schemes' `process`."""
 
     def post_process(self, layer) -> None:
-        """Run after the key schemes' ``process``, before the kernel's."""
+        """Run after the key schemes' `process`, before the kernel's."""
 
     def apply(self, layer, x, bias, kernel_apply):
-        """Wrap the kernel's forward. ``kernel_apply(layer, x, bias) -> Tensor``.
+        """Wrap the kernel's forward. `kernel_apply(layer, x, bias) -> Tensor`.
 
         Default: delegate unchanged. A format whose residue lives at compute
         time (e.g. run the GEMM on a padded weight then slice the output back
         to its logical width, #53132-style) overrides this and calls
-        ``kernel_apply`` in the middle.
+        `kernel_apply` in the middle.
         """
         return kernel_apply(layer, x, bias)
 
 
 class _Fp8PbWoPartialBlock(FormatScheme):
     """FP8_PB_WO output width that is not a multiple of 128 (a partial trailing
-    block; e.g. GLM's replicated ``fused_qkv_a_proj`` = 2048 + 576 = 2624).
+    block; e.g. GLM's replicated `fused_qkv_a_proj` = 2048 + 576 = 2624).
 
     The block kernel needs full 128-blocks, so pad the weight up to the block
     boundary with zeros before the kernel's post-load, then slice the GEMM
     output back to the logical width. This is #53132's approach, expressed as
     the format's compute-time residue on the generic method. The cdiv-sized
-    scale from ``KFp8Block128`` already matches the padded block count, so only
+    scale from `KFp8Block128` already matches the padded block count, so only
     the weight rows and the output need adjusting.
     """
 
@@ -2676,11 +2859,11 @@ _DROP_INPUT_SCALE = _DropInputScale()
 class ModelOptLinearMethod(LinearMethodBase):
     """Generic, format-agnostic ModelOpt linear method. Holds a weight scheme +
     an activation scheme (from the QuantSpec pair) and an optional
-    ``FormatScheme``, runs a fixed lifecycle, selects the kernel from the pair,
+    `FormatScheme`, runs a fixed lifecycle, selects the kernel from the pair,
     and applies.
 
     Registered for weight_loader_v2 (like every ModelOpt linear method) so the
-    ``BasevLLMParameter`` params route through the v2 fused loader, not the
+    `BasevLLMParameter` params route through the v2 fused loader, not the
     legacy shape-assert path.
     """
 
@@ -2758,6 +2941,7 @@ class ModelOptLinearMethod(LinearMethodBase):
             layer,
             rt,
             weight_shape=self.fmt.kernel_weight_shape(layer),
+            ctx=self.ctx,
         )
         expose_input_quant_key(layer, self.kernel)
 
@@ -2828,7 +3012,7 @@ class ModelOptLinearMethod(LinearMethodBase):
 def resolve(algo: str, subcfg, prefix: str):
     """Turn a sub-config into (QuantSpec, CkptCtx, format_scheme).
 
-    Strictly read-only over ``subcfg``: in mixed precision the same sub-config
+    Strictly read-only over `subcfg`: in mixed precision the same sub-config
     is shared with the MoE method, so writing back would leak a linear-only
     change into MoE.
     """
@@ -2864,6 +3048,13 @@ def resolve(algo: str, subcfg, prefix: str):
         # MXFP8: block(32) e4m3 weight + e8m0 scale, dynamic activation.
         ctx = CkptCtx()
         return QuantSpec(weight=kMxfp8Static, activation=kMxfp8Dynamic), ctx, None
+    if algo == "INT8_PB_WO":
+        # Per-block int8 weight, no activation quant (-> WNA16 kernels).
+        group_size = subcfg.layer_group_size(prefix)
+        if not group_size:
+            raise ValueError(f"ModelOpt INT8_PB_WO requires a group_size ({prefix!r}).")
+        ctx = CkptCtx(group_size=group_size)
+        return QuantSpec(weight=kInt8Static, activation=None), ctx, None
 
     # NVFP4 family (W4A4 / W4A16).
     ctx = CkptCtx(group_size=subcfg.group_size)
@@ -2893,13 +3084,13 @@ LINEAR_METHOD_BUILDERS: dict[str, Callable[..., LinearMethodBase]] = {}
 
 
 def build_linear_method(config, algo: str, prefix: str) -> LinearMethodBase:
-    """Construct the linear method for ``algo``.
+    """Construct the linear method for `algo`.
 
-    Returns a bespoke method if one is registered in ``LINEAR_METHOD_BUILDERS``,
-    else the generic ``ModelOptLinearMethod`` built from ``resolve(algo, config,
-    prefix)``. Single indirection point shared by the homogeneous and
+    Returns a bespoke method if one is registered in `LINEAR_METHOD_BUILDERS`,
+    else the generic `ModelOptLinearMethod` built from `resolve(algo, config,
+    prefix)`. Single indirection point shared by the homogeneous and
     mixed-precision dispatch, so a new format plugs in without editing either
-    ``get_quant_method``.
+    `get_quant_method`.
     """
     builder = LINEAR_METHOD_BUILDERS.get(algo)
     if builder is not None:

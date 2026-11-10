@@ -2,19 +2,19 @@
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 """Inkling MTP (Multi-Token Prediction) draft model (NVIDIA).
 
-Mirrors the reference ``mtp_model.py`` shipped with the checkpoint: each MTP
-depth ``i`` owns ``hidden_norm`` / ``embed_norm`` RMSNorms, an ``input_proj``
-(``2H -> H``) and a full Inkling transformer block (dense MLP, with the
+Mirrors the reference `mtp_model.py` shipped with the checkpoint: each MTP
+depth `i` owns `hidden_norm` / `embed_norm` RMSNorms, an `input_proj`
+(`2H -> H`) and a full Inkling transformer block (dense MLP, with the
 same short convolutions as the backbone; its attention is full or sliding-window
-per depth, selected by ``mtp_config.local_layer_ids``). When enabled, a shared
-``chain_norm`` is applied after every depth; its output is both the logits input
+per depth, selected by `mtp_config.local_layer_ids`). When enabled, a shared
+`chain_norm` is applied after every depth; its output is both the logits input
 and the previous hidden state fed to the next depth.
 
 The draft shares the target's token embedding table and LM head
-(``load_eagle_model`` wires those references) and applies the backbone
-``embed_norm`` on top: the depth layers were trained on the same normed
-embeddings the backbone consumes (their own ``embed_norm`` weights are
-near-identity trims, unlike the backbone's whitening ``embed_norm``).
+(`load_eagle_model` wires those references) and applies the backbone
+`embed_norm` on top: the depth layers were trained on the same normed
+embeddings the backbone consumes (their own `embed_norm` weights are
+near-identity trims, unlike the backbone's whitening `embed_norm`).
 """
 
 from __future__ import annotations
@@ -359,13 +359,13 @@ def _load_inkling_mtp_weights(
     module: InklingMTP,
     weights: Iterable[tuple[str, torch.Tensor]],
 ) -> set[str]:
-    """Load ``model.mtp.*`` weights into the MTP module.
+    """Load `model.mtp.*` weights into the MTP module.
 
-    Checkpoint keys look like ``model.mtp.chain_norm.weight`` and
-    ``model.mtp.layers.{i}.{...}``. The transformer block reuses the backbone
+    Checkpoint keys look like `model.mtp.chain_norm.weight` and
+    `model.mtp.layers.{i}.{...}`. The transformer block reuses the backbone
     layer's fused-projection layout, so we apply the same qkvr / gate_up / down
-    remapping as ``_load_inkling_weights``. Token embedding and LM head are shared
-    (provided by ``load_eagle_model``) and are not present in mtp.safetensors.
+    remapping as `_load_inkling_weights`. Token embedding and LM head are shared
+    (provided by `load_eagle_model`) and are not present in mtp.safetensors.
     """
     # Per-depth attention is full or sliding-window (config.local_layer_ids);
     # each depth's qkvr MergedColumnParallelLinear is built with the matching

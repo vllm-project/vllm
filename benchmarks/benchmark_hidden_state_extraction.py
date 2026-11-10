@@ -63,7 +63,7 @@ def consume_hidden_states(path: str) -> float:
     Returns a single float: the grand mean of all hidden state values.
     This forces the benchmark to actually read and reduce the data.
 
-    Uses :func:`load_hidden_states` which acquires a shared flock,
+    Uses `load_hidden_states` which acquires a shared flock,
     blocking (without polling) until the async writer releases its
     exclusive lock.
     """

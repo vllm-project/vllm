@@ -3,14 +3,14 @@
 """Indexer K production for DeepSeek V4.1 kv-source layers.
 
 In v4.1 the index key is derived from the *main* compressor's latent:
-``k = k_norm(wk(latent))`` (reference model.py Indexer.forward), then RoPE'd
+`k = k_norm(wk(latent))` (reference model.py Indexer.forward), then RoPE'd
 at the group's first-token position and MXFP4/FP8-quantized into the paged
-indexer K cache. The ``wk(latent)`` GEMM runs in torch; this kernel fuses the
+indexer K cache. The `wk(latent)` GEMM runs in torch; this kernel fuses the
 remaining k_norm → RoPE → quant → paged store, one program per token.
 
 Unlike the legacy (v4.0) indexer path there is no per-token pooling from a
 compressor state cache: the latent already stands for a whole group, so only
-group-boundary tokens ``(position + 1) % compress_ratio == 0`` produce a key.
+group-boundary tokens `(position + 1) % compress_ratio == 0` produce a key.
 """
 
 import torch
@@ -42,7 +42,7 @@ def indexer_k_norm_rope_store(
     """k_norm → RoPE → quant → paged store for indexer keys.
 
     Args:
-        k_pre: [num_tokens, 128] bf16, the ``wk(latent)`` projection. Only
+        k_pre: [num_tokens, 128] bf16, the `wk(latent)` projection. Only
             group-boundary rows are read.
         positions: [num_tokens] int64 token positions.
         cos_sin_cache: [max_pos, rope_head_dim] GPT-J layout (cos half, then

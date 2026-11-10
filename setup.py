@@ -1532,8 +1532,8 @@ def get_rocm_device_requirements() -> list[str]:
     """GPU kernel packages for TheRock builds.
 
     TheRock ships GPU kernels as separate per-arch wheels selected through
-    ``[device-<arch>]`` extras on torch, torchvision and rocm. Require them for
-    every arch this wheel was compiled for, so ``pip install vllm`` works on
+    `[device-<arch>]` extras on torch, torchvision and rocm. Require them for
+    every arch this wheel was compiled for, so `pip install vllm` works on
     any supported GPU.
     """
     if not _is_hip() or importlib.util.find_spec("rocm_sdk") is None:
@@ -1718,7 +1718,7 @@ setup(
         # AMD Zen CPU optimizations via zentorch
         "zen": ["zentorch==2.14.0.2"],
         "bench": ["pandas", "matplotlib", "seaborn", "datasets", "scipy", "plotly"],
-        "tensorizer": ["tensorizer==2.10.1"],
+        "tensorizer": ["tensorizer==2.12.1"],
         "fastsafetensors": ["fastsafetensors >= 0.3.3"],
         "instanttensor": ["instanttensor >= 0.2.2"],
         "runai": ["runai-model-streamer[s3,gcs,azure] >= 0.17.1"],

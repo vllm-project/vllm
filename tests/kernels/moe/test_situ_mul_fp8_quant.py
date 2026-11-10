@@ -1,9 +1,9 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 """Correctness tests for the persistent cp.async-pipelined SITU + block-FP8
-quant kernel (``situ_and_mul_quant``).
+quant kernel (`situ_and_mul_quant`).
 
-Mirrors ``test_silu_mul_fp8_quant_deep_gemm.py`` in structure: build a reference
+Mirrors `test_silu_mul_fp8_quant_deep_gemm.py` in structure: build a reference
 activation + block-FP8 quant, drive random per-row scale magnitudes, exercise
 the masked contiguous layout, and compare per valid row.
 
@@ -68,8 +68,8 @@ def ref_situ_block_fp8_quant(
 ) -> tuple[torch.Tensor, torch.Tensor]:
     """Ideal FP8 block-quant of the exact fp64 SITU activation.
 
-    The kernel rounds the activation to ``scalar_t`` before quantizing (it stores
-    ``(float)(scalar_t)situ(...)``), so the reference does the same before taking
+    The kernel rounds the activation to `scalar_t` before quantizing (it stores
+    `(float)(scalar_t)situ(...)`), so the reference does the same before taking
     the per-group absmax.
     """
     d = inp.shape[-1] // 2

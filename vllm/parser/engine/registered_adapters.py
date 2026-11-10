@@ -2,9 +2,9 @@
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 """Concrete adapter classes for each registered parser engine.
 
-These are created via :func:`make_adapters` and exposed as module-level
-names so that :class:`ReasoningParserManager` and
-:class:`ToolParserManager` can load them lazily.
+These are created via `make_adapters` and exposed as module-level
+names so that `ReasoningParserManager` and
+`ToolParserManager` can load them lazily.
 """
 
 from vllm.parser.deepseek_v4 import DeepSeekV4Parser
