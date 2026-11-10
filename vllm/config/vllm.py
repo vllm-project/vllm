@@ -372,6 +372,25 @@ OPTIMIZATION_LEVEL_TO_CONFIG = {
 }
 
 
+def _has_heterogeneous_moe_layers(model_config: "ModelConfig") -> bool:
+    """Whether MoE layers differ in num_experts or top_k (per-layer block_configs)."""
+    block_configs = getattr(model_config.hf_text_config, "block_configs", None)
+    if not block_configs:
+        return False
+
+    def field(block: Any, name: str) -> Any:
+        if isinstance(block, dict):
+            return block.get(name)
+        return getattr(block, name, None)
+
+    shapes = {
+        (field(block, "n_routed_experts"), field(block, "num_experts_per_tok"))
+        for block in block_configs
+        if field(block, "block_type") == "moe"
+    }
+    return len(shapes) > 1
+
+
 @config(config=ConfigDict(arbitrary_types_allowed=True))
 class VllmConfig:
     """Dataclass which contains all vllm-related configuration. This
@@ -1035,6 +1054,11 @@ class VllmConfig:
         model_config = self.model_config
         if model_config is None:
             return None
+        # One shared communication object serves every MoE layer, so all of
+        # them must have the same num_experts and top_k (e.g. Nemotron Puzzle
+        # varies them per layer).
+        if _has_heterogeneous_moe_layers(model_config):
+            return "MoE layers with different num_experts or top_k"
         # One-sided dispatch carries BF16/FP16, NVFP4 or 128x128 block FP8.
         quantization = model_config.quantization
         if quantization is None:

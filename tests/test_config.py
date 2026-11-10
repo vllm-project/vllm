@@ -1736,6 +1736,12 @@ def test_one_sided_all2all_default_falls_back_without_flashinfer(monkeypatch):
 
 _MOE_MODEL = "Qwen/Qwen3-Coder-30B-A3B-Instruct"
 
+# The fixture pretends to be a CUDA host, so FP8 quantization setup calls a CUDA
+# op that ROCm builds lack and leaves vllm.models half-imported for later tests.
+_SKIP_FP8_ON_ROCM = pytest.mark.skipif(
+    current_platform.is_rocm(), reason="FP8 setup needs CUDA ops"
+)
+
 
 def _one_full_ep_node_config(**kwargs) -> VllmConfig:
     kwargs.setdefault("model_config", ModelConfig(_MOE_MODEL))
@@ -1753,9 +1759,16 @@ def _one_full_ep_node_config(**kwargs) -> VllmConfig:
     ("model", "quantization", "expected"),
     [
         (_MOE_MODEL, None, "flashinfer_nvlink_one_sided"),
-        (f"{_MOE_MODEL}-FP8", None, "flashinfer_nvlink_one_sided"),
+        pytest.param(
+            f"{_MOE_MODEL}-FP8",
+            None,
+            "flashinfer_nvlink_one_sided",
+            marks=_SKIP_FP8_ON_ROCM,
+        ),
         # Online FP8 is per-tensor, which one-sided cannot dispatch.
-        (_MOE_MODEL, "fp8", "allgather_reducescatter"),
+        pytest.param(
+            _MOE_MODEL, "fp8", "allgather_reducescatter", marks=_SKIP_FP8_ON_ROCM
+        ),
     ],
 )
 def test_one_sided_all2all_default_follows_dispatch_format(
@@ -1767,6 +1780,37 @@ def test_one_sided_all2all_default_follows_dispatch_format(
         model_config=ModelConfig(model, quantization=quantization)
     )
     assert config.parallel_config.all2all_backend == expected
+
+
+def test_one_sided_all2all_default_skips_heterogeneous_moe_layers(
+    hgx_host, monkeypatch
+):
+    """One shared communication object needs the same num_experts and top_k in
+    every MoE layer, so "auto" must keep allgather_reducescatter otherwise."""
+    config = _one_full_ep_node_config()
+    parallel_config = config.parallel_config
+    assert parallel_config.all2all_backend == "flashinfer_nvlink_one_sided"
+
+    def blocks(*shapes):
+        return [
+            SimpleNamespace(block_type="moe", n_routed_experts=n, num_experts_per_tok=k)
+            for n, k in shapes
+        ] + [SimpleNamespace(block_type="mamba")]
+
+    hf_text_config = config.model_config.hf_text_config
+    monkeypatch.setattr(
+        hf_text_config, "block_configs", blocks((128, 6), (64, 6)), raising=False
+    )
+    config._maybe_fall_back_from_auto_one_sided_all2all()
+    assert parallel_config.all2all_backend == "allgather_reducescatter"
+
+    # Identical MoE layers keep the one-sided default.
+    parallel_config.all2all_backend = "flashinfer_nvlink_one_sided"
+    monkeypatch.setattr(
+        hf_text_config, "block_configs", blocks((128, 6), (128, 6)), raising=False
+    )
+    config._maybe_fall_back_from_auto_one_sided_all2all()
+    assert parallel_config.all2all_backend == "flashinfer_nvlink_one_sided"
 
 
 def test_one_sided_all2all_default_skips_lora(hgx_host):
