@@ -524,9 +524,6 @@ class MLAAttentionSpec(AttentionSpec):
     model_version: str | None = None
     cache_role: SparseCacheRole = SparseCacheRole.SPARSE
     is_index_group_leader: bool = False
-    # Group capability enabled when any member flattens a non-causal query block
-    # into decode rows. Runtime metadata still selects causal vs. non-causal mode.
-    non_causal_multi_token_decode: bool = False
     # MLA stores a single latent vector per state; there is no separate V.
     head_size_v: int = 0
 
@@ -675,7 +672,7 @@ class KVCacheLayerConfig:
         return self.manager_config.manager_cls
 
     def max_memory_usage_bytes(self, vllm_config: VllmConfig) -> int:
-        blocks = self.manager_cls.max_blocks_per_request(
+        blocks = self.manager_cls.max_allocated_blocks_per_request(
             self.manager_config,
             self.spec.block_size,
             self.spec.dcp_sharded,
@@ -762,14 +759,14 @@ class KVCacheGroup:
             or any(spec.uses_slot_mapping for spec in self.kv_cache_specs.values())
         )
 
-    def max_blocks_per_request(self, vllm_config: VllmConfig) -> int:
+    def max_allocated_blocks_per_request(self, vllm_config: VllmConfig) -> int:
         """Blocks one request at `max_model_len` holds in this group."""
-        return self.manager_cls.max_blocks_per_request(
+        return self.manager_cls.max_allocated_blocks_per_request(
             self.manager_config, self.block_size, self.dcp_sharded, vllm_config
         )
 
     def max_memory_usage_bytes(self, vllm_config: VllmConfig) -> int:
-        return self.max_blocks_per_request(vllm_config) * self.page_size_bytes
+        return self.max_allocated_blocks_per_request(vllm_config) * self.page_size_bytes
 
     def max_num_blocks_per_req(
         self, vllm_config: VllmConfig, max_len: int | None = None

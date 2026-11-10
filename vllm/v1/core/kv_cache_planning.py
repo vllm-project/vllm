@@ -691,6 +691,10 @@ def _promote_local_kv_cache_specs(
 
     The returned specs affect KV cache management only. Attention modules keep
     their original sliding-window or chunked-local compute behavior.
+
+    Promoted layers also take the full-attention block size when there is
+    exactly one, so they can share its block table, and their page padding is
+    raised to cover the resized page (#48776).
     """
     promoted_specs = layer_configs.copy()
 
@@ -707,30 +711,29 @@ def _promote_local_kv_cache_specs(
         next(iter(full_block_sizes)) if len(full_block_sizes) == 1 else None
     )
 
-    def promoted_page_size_padded(spec: AttentionSpec, block_size: int) -> int | None:
-        if spec.page_size_padded is None:
-            return None
-        unpadded_page_size = (
-            spec.unpadded_page_size_bytes * block_size // spec.block_size
-        )
-        return max(spec.page_size_padded, unpadded_page_size)
-
     if full_block_sizes and has_local_attention:
         for layer_name, layer_config in layer_configs.items():
             if not _is_local_attention(layer_config):
                 continue
             spec = layer_config.spec
             assert isinstance(spec, AttentionSpec)
-            block_size = full_attention_block_size or spec.block_size
-            # Promoted specs allocate blocks for all tokens and never free
-            # below the window, so the trailing-edge extension and replay
-            # bound are moot.
-            promoted_specs[layer_name] = FullAttentionManager.layer_config(
-                replace(
-                    spec,
-                    block_size=block_size,
-                    page_size_padded=promoted_page_size_padded(spec, block_size),
+            promoted_spec = replace(
+                spec, block_size=full_attention_block_size or spec.block_size
+            )
+            if spec.page_size_padded is not None:
+                promoted_spec = replace(
+                    promoted_spec,
+                    page_size_padded=max(
+                        spec.page_size_padded, promoted_spec.unpadded_page_size_bytes
+                    ),
                 )
+            # Full allocation holds blocks for all tokens and never frees below
+            # the window, so the window, trailing-edge extension and replay
+            # bound are dropped.
+            promoted_specs[layer_name] = replace(
+                layer_config,
+                manager_config=FullAttentionManager.config(),
+                spec=promoted_spec,
             )
 
     if not can_share_block_table(promoted_specs):
@@ -1200,7 +1203,7 @@ def _max_memory_usage_bytes_from_groups(
         builder, vllm_config, kv_cache_groups
     )
     total_blocks = sum(
-        group.max_blocks_per_request(vllm_config) for group in kv_cache_groups
+        group.max_allocated_blocks_per_request(vllm_config) for group in kv_cache_groups
     )
 
     return bytes_per_block * total_blocks

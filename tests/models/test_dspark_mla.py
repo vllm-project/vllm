@@ -474,13 +474,10 @@ def test_k3_dspark_mla_kv_cache_spec_groups_with_target_mla():
         head_size=576,
         sliding_window=None,
         indexer=None,
-        non_causal_multi_token_decode=False,
         attn_backend=SimpleNamespace(get_name=lambda: "ROCM_AITER_MLA"),
         _uses_flat_kv_cache=lambda: False,
     )
-    draft_attn = SimpleNamespace(
-        kv_cache_dtype="fp8", head_size=576, non_causal_multi_token_decode=True
-    )
+    draft_attn = SimpleNamespace(kv_cache_dtype="fp8", head_size=576)
     target_config = MLAAttention.get_kv_cache_config(target_attn, vllm_config)
     draft_config = MultiHeadLatentAttention.get_kv_cache_config(draft_attn, vllm_config)
 

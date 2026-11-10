@@ -1542,7 +1542,7 @@ def test_windowed_dspark_draft_keeps_its_dcp_layout(draft_dcp_sharded):
     [
         new_sliding_window_layer(block_size=16),
         sliding_window_layer(
-            replace(new_mla_spec(), non_causal_multi_token_decode=True),
+            new_mla_spec(),
             sliding_window=128,
             bounded_replay=True,
         ),
@@ -1799,7 +1799,9 @@ def test_unify_hybrid_kv_cache_specs():
         before_spec_1, spec=replace(before_spec_1.spec, dcp_sharded=False)
     )
     kv_cache_spec["draft_layer_2"] = replace(
-        before_spec_2, spec=replace(before_spec_2.spec, dcp_sharded=False)
+        before_spec_2,
+        spec=replace(before_spec_2.spec, dcp_sharded=False),
+        is_draft=True,
     )
     kv_cache_planning.unify_hybrid_kv_cache_specs(kv_cache_spec)
     expected_spec_1 = new_kv_cache_layer(block_size=64)
@@ -1810,6 +1812,7 @@ def test_unify_hybrid_kv_cache_specs():
     assert kv_cache_spec["draft_layer_2"] == replace(
         expected_spec_2, spec=replace(expected_spec_2.spec, dcp_sharded=False)
     )
+    assert kv_cache_spec["draft_layer_2"].is_draft
 
     # 2. has_full_attention and has_chunked_local_attention
     before_spec_1 = new_kv_cache_layer()

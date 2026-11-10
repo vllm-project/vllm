@@ -1073,7 +1073,7 @@ def get_max_concurrency_for_kv_cache_config(
     num_blocks_per_request = 0
     host_blocks_per_request = 0
     for group in kv_cache_config.kv_cache_groups:
-        required = group.max_blocks_per_request(vllm_config)
+        required = group.max_allocated_blocks_per_request(vllm_config)
         if group.host_resident:
             host_blocks_per_request += required
         else:

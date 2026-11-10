@@ -1551,7 +1551,6 @@ class MLAAttention(nn.Module, AttentionLayerBase):
                 if self.kv_cache_dtype == "fp8_ds_mla"
                 else DS_MLA_STATE_CONTENT_BYTES.get(self.kv_cache_dtype)
             ),
-            non_causal_multi_token_decode=self.non_causal_multi_token_decode,
         )
         if self.sliding_window is not None:
             return SlidingWindowManager.layer_config(
@@ -2579,8 +2578,7 @@ class MLACommonMetadataBuilder(AttentionMetadataBuilder[M]):
         self.vllm_config = vllm_config
         self.device = device
         self.use_pcp = parallel_config.prefill_context_parallel_size > 1
-        # merge() unions this flag across the KV group, so a shared target/draft
-        # group would mark the target builder as non-causal.
+        # Per builder: a KV group can mix target and draft layers.
         ctx = self.compilation_config.static_forward_context
         self.non_causal_multi_token_decode = any(
             getattr(ctx[name], "non_causal_multi_token_decode", False)

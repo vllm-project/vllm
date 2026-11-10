@@ -26,6 +26,7 @@ from vllm.v1.kv_cache_interface import (
     KVCacheLayerConfig,
     KVCacheSpec,
     KVCacheSpecKind,
+    MambaSpec,
     ManagerConfig,
     MLAAttentionSpec,
     get_mamba_prefill_checkpoint_position,
@@ -105,14 +106,14 @@ class SingleTypeKVCacheManager(ABC):
         """Per-request admission cap in blocks, for managers that recycle blocks.
 
         Single source of truth for both startup pool sizing
-        (`max_blocks_per_request`) and the runtime admission gate, so requests
+        (`max_allocated_blocks_per_request`) and the runtime admission gate, so requests
         admitted by startup can also be admitted at runtime. `None` means no
         cap: the request holds every block until it finishes.
         """
         return None
 
     @classmethod
-    def max_blocks_per_request(
+    def max_allocated_blocks_per_request(
         cls,
         config: ManagerConfig,
         block_size: int,
@@ -1110,7 +1111,7 @@ class SlidingWindowManager(SingleTypeKVCacheManager):
         return cdiv(num_tokens, block_size) + 1
 
     @classmethod
-    def max_blocks_per_request(
+    def max_allocated_blocks_per_request(
         cls,
         config: ManagerConfig,
         block_size: int,
@@ -1121,7 +1122,7 @@ class SlidingWindowManager(SingleTypeKVCacheManager):
             not dcp_sharded
             or vllm_config.parallel_config.decode_context_parallel_size == 1
         ), "DCP not support sliding window."
-        return super().max_blocks_per_request(
+        return super().max_allocated_blocks_per_request(
             config, block_size, dcp_sharded, vllm_config
         )
 
@@ -1386,7 +1387,7 @@ class CircularBufferManager(SingleTypeKVCacheManager):
         return False
 
     @classmethod
-    def max_blocks_per_request(
+    def max_allocated_blocks_per_request(
         cls,
         config: ManagerConfig,
         block_size: int,
@@ -1688,15 +1689,17 @@ class MambaManager(SingleTypeKVCacheManager):
 
     @classmethod
     def can_share_block_table(cls, specs: Sequence[KVCacheSpec]) -> bool:
+        mamba_specs = [spec for spec in specs if isinstance(spec, MambaSpec)]
+        assert len(mamba_specs) == len(specs)
         # Each state block holds one state, so every layer's page must match.
         return (
-            len({spec.page_size_bytes for spec in specs}) == 1
-            and len({getattr(spec, "state_alignment", 1) for spec in specs}) == 1
-            and len({getattr(spec, "tp_replicated", False) for spec in specs}) == 1
+            len({spec.page_size_bytes for spec in mamba_specs}) == 1
+            and len({spec.state_alignment for spec in mamba_specs}) == 1
+            and len({spec.tp_replicated for spec in mamba_specs}) == 1
         )
 
     @classmethod
-    def max_blocks_per_request(
+    def max_allocated_blocks_per_request(
         cls,
         config: ManagerConfig,
         block_size: int,
@@ -1729,9 +1732,11 @@ class MambaManager(SingleTypeKVCacheManager):
             # even though only 2 + num_speculative_blocks state blocks are
             # resident at a time (earlier states are nulled out by
             # remove_skipped_blocks), so the row length must cover max_len
-            # rather than max_blocks_per_request.
+            # rather than max_allocated_blocks_per_request.
             return cdiv(max_len, block_size) + params.num_speculative_blocks
-        return cls.max_blocks_per_request(config, block_size, dcp_sharded, vllm_config)
+        return cls.max_allocated_blocks_per_request(
+            config, block_size, dcp_sharded, vllm_config
+        )
 
     def __init__(
         self, kv_cache_group: KVCacheGroup, block_pool: BlockPool, **kwargs
@@ -2430,7 +2435,7 @@ class CrossAttentionManager(SingleTypeKVCacheManager):
     """Manager for cross-attention KV cache in encoder-decoder models."""
 
     @classmethod
-    def max_blocks_per_request(
+    def max_allocated_blocks_per_request(
         cls,
         config: ManagerConfig,
         block_size: int,
@@ -2505,7 +2510,7 @@ class EncoderOnlyAttentionManager(SingleTypeKVCacheManager):
     """
 
     @classmethod
-    def max_blocks_per_request(
+    def max_allocated_blocks_per_request(
         cls,
         config: ManagerConfig,
         block_size: int,
@@ -2735,7 +2740,7 @@ class HiSparseHotManager(_HiSparseAuxiliaryManager):
     block_table_token_alignment: ClassVar[int | None] = None
 
     @classmethod
-    def max_blocks_per_request(
+    def max_allocated_blocks_per_request(
         cls,
         config: ManagerConfig,
         block_size: int,

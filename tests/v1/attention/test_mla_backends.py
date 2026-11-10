@@ -258,7 +258,6 @@ def test_mla_kv_cache_spec_uses_layer_cache_dtype(
         head_size=kv_lora_rank + rope_dim,
         topk_buffer_width=None,
         indexer=None,
-        non_causal_multi_token_decode=False,
         sliding_window=None,
     )
     layer._uses_flat_kv_cache = MethodType(MLAAttention._uses_flat_kv_cache, layer)

@@ -276,7 +276,6 @@ def test_packed_dsa_block_counts_a_dense_mla_draft_in_the_row(monkeypatch):
                 576,
                 dtype=torch.float8_e4m3fn,
                 cache_dtype_str="fp8",
-                non_causal_multi_token_decode=True,
             )
         )
     vllm_config = SimpleNamespace(

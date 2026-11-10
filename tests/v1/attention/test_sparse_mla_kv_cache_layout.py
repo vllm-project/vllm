@@ -86,7 +86,6 @@ def test_allocation_and_warmup_follow_addressing_mode(
         topk_buffer_width=None,
         sliding_window=None,
         indexer=None,
-        non_causal_multi_token_decode=False,
     )
     layer._uses_flat_kv_cache = MethodType(MLAAttention._uses_flat_kv_cache, layer)
     layer_config = customize_layer_config(

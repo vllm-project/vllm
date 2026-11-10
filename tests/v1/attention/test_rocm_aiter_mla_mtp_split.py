@@ -1929,10 +1929,6 @@ def test_varlen_cudagraph_bound_follows_adaptive_verification(monkeypatch):
         bound(_adaptive_config(dcp=8, num_speculative_tokens=1), SimpleNamespace())
         is None
     )
-    # Kimi-K3 DSpark draft layers share the target's group; causality is
-    # decided per batch, so the merged non-causal spec keeps the bound.
-    shared_draft_group = SimpleNamespace(non_causal_multi_token_decode=True)
-    assert bound(_adaptive_config(), shared_draft_group) == 8
 
 
 def test_backend_rejects_unsupported_adaptive_dcp(monkeypatch):
