@@ -48,6 +48,7 @@ constexpr int ROUND = THREADS * U * 4;  // elements per streaming round
 constexpr int GL = 8192;                // candidate groups
 constexpr int MIN_CAP = 4096;  // candidate logits in shared memory, at least
 constexpr int MAX_S = 16;      // CTAs per row
+constexpr int MIN_WIDE = 8;    // wide clusters bin early and skip tier TIER_P2
 constexpr int TIER_P = 64,
               TIER_P2 =
                   1024;  // top-p only rows try their best TIER_P logits first
@@ -224,12 +225,14 @@ __device__ Row row_params(const Args& a, int row);
 __device__ Ctx context(const Args& a, int row, int rank, int size);
 template <bool CL, bool SUM>
 __device__ void stream(Grp<CL> g, const Ctx& c, const Layout& ly);
-template <bool CL>
+template <bool CL, bool WIDE>
 __device__ void select_row(Grp<CL> g, const Ctx& c, const Row& r,
                            const Layout& ly);
 template <bool CL>
-__device__ void bin_slice(Grp<CL> g, const Ctx& c, const Row& r,
+__device__ void bin_slice(Grp<CL> g, const Ctx& part, const Row& r,
                           const Layout& ly);
+template <bool CL>
+__device__ Ctx peer_slice(Grp<CL> g, const Ctx& c);
 template <bool CL>
 __device__ void fallback(Grp<CL> g, const Ctx& c, const Row& r, const Pub& pub,
                          const Layout& ly, bool binned);
@@ -240,9 +243,10 @@ __device__ void scatter(const Ctx& c, const Pub& pub, const Layout& ly,
                         bool leader);
 
 // ---------------------------------------------------------------------------
-// Kernel: one row per CTA (CL = false) or per cluster.
+// Kernel: one row per CTA (CL = false) or per cluster, of at least MIN_WIDE
+// CTAs if WIDE.
 
-template <bool CL>
+template <bool CL, bool WIDE>
 __global__ void __launch_bounds__(THREADS, 2) filter_kernel(Args a) {
   Grp<CL> g;
   g.arrive();  // the matching wait precedes the first access to a peer
@@ -260,13 +264,14 @@ __global__ void __launch_bounds__(THREADS, 2) filter_kernel(Args a) {
   else
     stream<CL, false>(g, c, a.ly);
   g.sync();
-  // Peers wait for the leader's selection: they bin the row meanwhile when
-  // the fallback is likely (top-p only, or k beyond half the store).
-  bool binned = CL && (!r.use_k || r.k > unsigned(a.ly.cap / 2));
+  // Peers of wide clusters wait for the leader's selection: they bin the row
+  // meanwhile when the fallback is likely (top-p only, or k beyond half the
+  // store).
+  bool binned = WIDE && (!r.use_k || r.k > unsigned(a.ly.cap / 2));
   if (g.rank() == 0)
-    select_row<CL>(g, c, r, a.ly);
+    select_row<CL, WIDE>(g, c, r, a.ly);
   else if (binned)
-    bin_slice(g, c, r, a.ly);
+    bin_slice(g, peer_slice(g, c), r, a.ly);
   g.sync();
   const Pub pub = sh().pub;
   if (pub.fallback) return fallback<CL>(g, c, r, pub, a.ly, binned);
@@ -553,12 +558,12 @@ __device__ unsigned candidates(Grp<CL> g, const Ctx& c, const Layout& ly,
   return lo;
 }
 
-// Top-p only: the best TIER_P logits, then (one CTA per row) the best TIER_P2,
-// settle every nucleus inside them. Their exact mass decides, and the missing
-// mass bounds the nucleus size from below (it comes from logits below the
-// tier's lowest). Larger nuclei take the fallback (count beyond the store),
-// which costs clusters less than the second tier.
-template <bool CL>
+// Top-p only: the best TIER_P logits, then (except in wide clusters) the best
+// TIER_P2, settle every nucleus inside them. Their exact mass decides, and the
+// missing mass bounds the nucleus size from below (it comes from logits below
+// the tier's lowest). Larger nuclei take the fallback (count beyond the
+// store), which costs wide clusters less than the second tier.
+template <bool CL, bool WIDE>
 __device__ unsigned nucleus_candidates(Grp<CL> g, const Ctx& c,
                                        const Layout& ly, Store& st, U64 target,
                                        Bins bins, unsigned& count) {
@@ -578,7 +583,7 @@ __device__ unsigned nucleus_candidates(Grp<CL> g, const Ctx& c,
       return lo;
     }
     U64 unit = max(fixed_mass(lo, bins.maximum), 1ull);
-    if (CL || ng > GL ||
+    if (WIDE || ng > GL ||
         count + (target - mass + unit - 1) / unit > unsigned(TIER_P2))
       break;
   }
@@ -587,7 +592,7 @@ __device__ unsigned nucleus_candidates(Grp<CL> g, const Ctx& c,
   return 0u;
 }
 
-template <bool CL>
+template <bool CL, bool WIDE>
 __device__ void select_row(Grp<CL> g, const Ctx& c, const Row& r,
                            const Layout& ly) {
   Shared& s = sh();
@@ -599,9 +604,9 @@ __device__ void select_row(Grp<CL> g, const Ctx& c, const Row& r,
   Store st{ly.region, ly.cap};
   Bins bins{maximum};
   unsigned count;
-  unsigned lo = r.use_k
-                    ? candidates<CL>(g, c, ly, st, target, bins, count)
-                    : nucleus_candidates<CL>(g, c, ly, st, target, bins, count);
+  unsigned lo =
+      r.use_k ? candidates<CL>(g, c, ly, st, target, bins, count)
+              : nucleus_candidates<CL, WIDE>(g, c, ly, st, target, bins, count);
   Pub pub{st, ALL, maximum, total, lo, count, count > unsigned(st.cap)};
   const unsigned* keys = st.keys();
   const unsigned* idxs = st.idxs();
@@ -687,7 +692,7 @@ __device__ void fallback(Grp<CL> g, const Ctx& c, const Row& r, const Pub& pub,
   Shared& s = sh();
   Fine fine{pub.maximum};
   unsigned* cnt = dyn<unsigned>(ly.glist);
-  if (!binned && (g.size() == 1 || g.rank())) bin_slice(g, c, r, ly);
+  if (!binned) bin_slice(g, c, r, ly);
   if (CL && g.rank())
     for (int b = threadIdx.x; b < 2 * FINE; b += THREADS)
       if (cnt[b]) g.add(cnt + b, 0, cnt[b]);
@@ -713,17 +718,12 @@ __device__ void fallback(Grp<CL> g, const Ctx& c, const Row& r, const Pub& pub,
   if (g.rank() == 0) cut_window(c, ly, r, pub, Part{w.rank, above, below});
 }
 
-// The fine bin counts and sums of in-bin offsets (in 1/256 bin) of this CTA's
-// slice of the row, in its glist space: all of it for one CTA, else the peers
-// split it (the leader, cleared by select_row, collects them).
+// The fine bin counts and sums of in-bin offsets (in 1/256 bin) of a part of
+// the row, in this CTA's glist space (the leader's, cleared by select_row,
+// collects them).
 template <bool CL>
-__device__ void bin_slice(Grp<CL> g, const Ctx& c, const Row& r,
+__device__ void bin_slice(Grp<CL> g, const Ctx& part, const Row& r,
                           const Layout& ly) {
-  int workers = max(g.size() - 1, 1),
-      per = (c.vocab + 4 * workers - 1) / (4 * workers) * 4;
-  Ctx part = c;
-  part.begin = min(c.vocab, max(g.rank() - 1, 0) * per);
-  part.end = min(c.vocab, part.begin + per);
   unsigned* cnt = dyn<unsigned>(ly.glist);
   clear_words(cnt, 2 * FINE);
   __syncthreads();
@@ -733,6 +733,17 @@ __device__ void bin_slice(Grp<CL> g, const Ctx& c, const Row& r,
   else
     count_bins<false>(part, cnt, fine);
   __syncthreads();
+}
+
+// The peers' share of the whole row, binned while the leader selects.
+template <bool CL>
+__device__ Ctx peer_slice(Grp<CL> g, const Ctx& c) {
+  int workers = g.size() - 1,
+      per = (c.vocab + 4 * workers - 1) / (4 * workers) * 4;
+  Ctx part = c;
+  part.begin = min(c.vocab, (g.rank() - 1) * per);
+  part.end = min(c.vocab, part.begin + per);
+  return part;
 }
 
 template <bool OFFSETS>
@@ -812,6 +823,41 @@ __device__ Win plan(unsigned* cnt, const Row& r, double total) {
   return w;
 }
 
+// Fixed-point masses of the logits above the window (or between it and bin
+// k), summed by full warps from a per-warp queue: inline, the few such logits
+// would hold every lane of their warp in the exp.
+struct Masses {
+  unsigned* q;  // 256 keys
+  unsigned size;
+  Win w;
+  Fine fine;
+  U64 above, between;
+  __device__ void push(const unsigned (&key)[4], unsigned want) {
+    unsigned lt = (1u << (threadIdx.x & 31)) - 1, n = __popc(want);
+    unsigned b0 = __ballot_sync(~0u, n & 1), b1 = __ballot_sync(~0u, n & 2),
+             b2 = __ballot_sync(~0u, n & 4);
+    unsigned pos =
+        size + __popc(b0 & lt) + 2 * __popc(b1 & lt) + 4 * __popc(b2 & lt);
+#pragma unroll
+    for (int k = 0; k < 4; ++k)
+      if ((want >> k) & 1) q[pos++] = key[k];
+    size += __popc(b0) + 2 * __popc(b1) + 4 * __popc(b2);
+    if (size >= 128) drain(128);
+  }
+  __device__ void drain(unsigned m) {
+    unsigned lane = threadIdx.x & 31;
+    __syncwarp();
+    for (unsigned i = lane; i < m; i += 32) {
+      U64 mass = fixed_mass(q[i], fine.maximum);
+      (int(fine.at(from_ordered(q[i])) >> 8) < w.lo ? above : between) += mass;
+    }
+    __syncwarp();
+    for (unsigned i = lane; i + m < size; i += 32) q[i] = q[i + m];
+    size -= m;
+    __syncwarp();
+  }
+};
+
 // One read-modify-write of the chunk: -inf over the bins below the window
 // (bin k included), the window and bin k into the leader's store. Returns the
 // exact mass above the window, and in between that of the bins between it and
@@ -823,12 +869,12 @@ __device__ U64 window_pass(Grp<CL> g, const Ctx& c, const Layout& ly,
   unsigned* counter = g.peer(&sh().kept, 0);
   unsigned* keys = g.peer(st.keys(), 0);
   unsigned* idxs = g.peer(st.idxs(), 0);
-  U64 above = 0, mid = 0;
-  int n = (c.end - c.begin + 3) / 4;
+  Masses masses{
+      dyn<unsigned>(ly.glist) + 256 * (threadIdx.x >> 5), 0u, w, fine, 0, 0};
   auto rmw = [&](int j, float4 v) {
     int i = c.begin + 4 * j;
     float e[4] = {v.x, v.y, v.z, v.w};
-    unsigned key[4], t = 0;
+    unsigned key[4], t = 0, want = 0;
     bool take[4], changed = false;
 #pragma unroll
     for (int q = 0; q < 4; ++q) {
@@ -836,14 +882,14 @@ __device__ U64 window_pass(Grp<CL> g, const Ctx& c, const Layout& ly,
       key[q] = ordered(e[q]);
       take[q] = i + q < c.end && ((b >= w.lo && b <= w.hi) || b == w.k);
       t += take[q];
-      if (MASS && (b < w.lo || (b > w.hi && b < w.k)))
-        (b < w.lo ? above : mid) += fixed_mass(key[q], fine.maximum);
+      want |= unsigned(b < w.lo || (b > w.hi && b < w.k && w.k < FINE)) << q;
       if (b > w.hi && e[q] != -INFINITY) {
         e[q] = -INFINITY;
         changed = true;
       }
     }
-    if (__any_sync(__activemask(), t)) {
+    if (MASS) masses.push(key, want);
+    if (__any_sync(~0u, t)) {
       unsigned pos = append(counter, t);
 #pragma unroll
       for (int q = 0; q < 4; ++q) {
@@ -855,10 +901,23 @@ __device__ U64 window_pass(Grp<CL> g, const Ctx& c, const Layout& ly,
     if (changed)
       store4(c.x, i, c.end, c.vec, make_float4(e[0], e[1], e[2], e[3]));
   };
-  batched(
-      n, [&](int j) { return load4(c.x, c.begin + 4 * j, c.end, c.vec); }, rmw);
-  between = block_reduce(mid, Sum());
-  return block_reduce(above, Sum());
+  // Uniform trip counts keep every warp whole for the queue.
+  int n = (c.end - c.begin + 3) / 4;
+  float4 none = make_float4(-INFINITY, -INFINITY, -INFINITY, -INFINITY);
+  for (int base = threadIdx.x; base - int(threadIdx.x) < n;
+       base += 4 * THREADS) {
+    float4 v[4];
+#pragma unroll
+    for (int u = 0; u < 4; ++u) {
+      int j = base + u * THREADS;
+      v[u] = j < n ? load4(c.x, c.begin + 4 * j, c.end, c.vec) : none;
+    }
+#pragma unroll
+    for (int u = 0; u < 4; ++u) rmw(base + u * THREADS, v[u]);
+  }
+  if (MASS) masses.drain(masses.size);
+  between = block_reduce(masses.between, Sum());
+  return block_reduce(masses.above, Sum());
 }
 
 // The leader's exact cut among the gathered logits, then -inf over those cut.
@@ -1398,13 +1457,15 @@ void init_plan(Plan& p, int device) {
   check(cudaDeviceGetAttribute(&p.max_smem,
                                cudaDevAttrMaxSharedMemoryPerBlockOptin, device),
         "shared memory size");
-  for (auto kernel : {filter_kernel<false>, filter_kernel<true>})
+  for (auto kernel : {filter_kernel<false, false>, filter_kernel<true, false>,
+                      filter_kernel<true, true>})
     check(cudaFuncSetAttribute(
               kernel, cudaFuncAttributeMaxDynamicSharedMemorySize, p.max_smem),
           "shared memory attribute");
-  check(cudaFuncSetAttribute(filter_kernel<true>,
-                             cudaFuncAttributeNonPortableClusterSizeAllowed, 1),
-        "cluster attribute");
+  for (auto kernel : {filter_kernel<true, false>, filter_kernel<true, true>})
+    check(cudaFuncSetAttribute(
+              kernel, cudaFuncAttributeNonPortableClusterSizeAllowed, 1),
+          "cluster attribute");
 }
 
 const Plan& plan(int device) {
@@ -1475,7 +1536,7 @@ int active_clusters(int device, int vocab, int splits) {
   config.dynamicSmemBytes = make_layout(vocab, splits, chunk).bytes;
   config.attrs = &attr;
   config.numAttrs = 1;
-  if (cudaOccupancyMaxActiveClusters(&it->second, filter_kernel<true>,
+  if (cudaOccupancyMaxActiveClusters(&it->second, filter_kernel<true, false>,
                                      &config) != cudaSuccess) {
     cudaGetLastError();
     it->second = 0;
@@ -1537,7 +1598,7 @@ void top_k_top_p_filter(torch::stable::Tensor& logits,
   config.dynamicSmemBytes = a.ly.bytes;
   config.stream = get_current_cuda_stream(device);
   if (splits == 1) {
-    tf::check(cudaLaunchKernelEx(&config, tf::filter_kernel<false>, a),
+    tf::check(cudaLaunchKernelEx(&config, tf::filter_kernel<false, false>, a),
               "launch");
     return;
   }
@@ -1546,6 +1607,7 @@ void top_k_top_p_filter(torch::stable::Tensor& logits,
   attr.val.clusterDim.y = attr.val.clusterDim.z = 1;
   config.attrs = &attr;
   config.numAttrs = 1;
-  tf::check(cudaLaunchKernelEx(&config, tf::filter_kernel<true>, a),
-            "cluster launch");
+  auto kernel = splits >= tf::MIN_WIDE ? tf::filter_kernel<true, true>
+                                       : tf::filter_kernel<true, false>;
+  tf::check(cudaLaunchKernelEx(&config, kernel, a), "cluster launch");
 }
