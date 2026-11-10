@@ -2768,9 +2768,9 @@ class Scheduler(SchedulerInterface):
         reordered = list(head)
         for slot, source in zip(slots, order):
             reordered[slot] = head[source]
-        # One pass to drop the whole window, then re-insert in the new order;
-        # removing each request individually would be quadratic.
-        self.waiting.remove_requests(head)
+        # Drop only the window; filtering the whole queue scales with its backlog.
+        for _ in head:
+            self.waiting.pop_request()
         for request in reversed(reordered):
             self.waiting.prepend_request(request)
 
