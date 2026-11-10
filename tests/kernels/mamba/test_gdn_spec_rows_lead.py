@@ -8,7 +8,8 @@ slices the spec and non-spec rows instead of gathering them by
 `spec_token_indx` / `non_spec_token_indx` and scattering the outputs back
 (and FlashInfer writes the prefill output in place). The two paths run the same
 kernels on the same values, so the core-attention output, the conv state and
-the recurrent state must be bitwise equal. A decode row without draft tokens is
+the recurrent state must be bitwise equal, for every prefill backend the GPU
+has (FlashInfer, CuTe DSL, Triton). A decode row without draft tokens is
 a spec row that the runner can sort among the prefills; such a batch must keep
 the index path.
 """
@@ -24,13 +25,8 @@ import torch
 
 from vllm.platforms import current_platform
 
-if not (
-    current_platform.is_cuda() and current_platform.is_device_capability_family(100)
-):
-    pytest.skip(
-        reason="The FlashInfer and CuteDSL GDN prefill backends need CUDA SM10x.",
-        allow_module_level=True,
-    )
+if not current_platform.is_cuda():
+    pytest.skip(reason="The GDN prefill backends need CUDA.", allow_module_level=True)
 
 from tests.v1.attention.utils import (  # noqa: E402
     BatchSpec,
@@ -139,7 +135,7 @@ def _build_layer(vllm_config, conv_state, ssm_state, a_log, dt_bias, conv_weight
     return layer
 
 
-@pytest.mark.parametrize("backend", ["flashinfer", "cutedsl"])
+@pytest.mark.parametrize("backend", ["flashinfer", "cutedsl", "triton"])
 @pytest.mark.parametrize("batch_name", list(BATCHES))
 @torch.inference_mode()
 def test_spec_rows_lead_matches_index_path(backend: str, batch_name: str) -> None:
