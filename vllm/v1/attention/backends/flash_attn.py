@@ -318,34 +318,6 @@ class FlashAttentionBackend(AttentionBackend):
             return 64
         return None
 
-    @classmethod
-    def _get_fa4_hd256_block_size(
-        cls, kv_cache_spec: KVCacheSpec | None = None
-    ) -> int | None:
-        if kv_cache_spec is None:
-            vllm_config = get_current_vllm_config_or_none()
-            if vllm_config is None or vllm_config.model_config is None:
-                return None
-            head_size = vllm_config.model_config.get_head_size()
-            head_size_v = cls.head_size_v
-        else:
-            if not isinstance(kv_cache_spec, AttentionSpec):
-                return None
-            head_size = kv_cache_spec.head_size
-            head_size_v = kv_cache_spec.head_size_v
-
-        if (
-            uses_fa4_hd256_kernel(head_size, head_size_v)
-            and get_flash_attn_version(
-                head_size=head_size,
-                head_size_v=head_size_v,
-                supports_fa4_hd256=True,
-            )
-            == 4
-        ):
-            return FA4_HD256_PAGE_SIZE
-        return None
-
     @staticmethod
     def _get_xpu_kernel_block_sizes() -> list[int | MultipleOf]:
         # XPU kernels run any multiple of 16; multiples of 64 are perf optimized.
