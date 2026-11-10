@@ -188,6 +188,7 @@ def _make_builder(max_num_batched_tokens: int = 8):
     builder._prev_req_extent = 0
     builder._prev_indices_extent = 0
     builder._prev_metadata_key = None
+    builder._query_lens_from_device = False
     return builder
 
 
@@ -504,6 +505,89 @@ def test_build_skips_metadata_aiter_ignores(monkeypatch, offset):
     assert fake_aiter.get_mla_metadata_v1.called == uses_persistent
     assert bool(host_reads) == uses_persistent
     assert (md.work_meta_data is not None) == uses_persistent
+
+
+# Adaptive verification with K=3: the CPU spreads 5 drafts across three
+# verification requests as 2/2/1, while the device admits them unevenly.
+_ADAPTIVE_CPU_QUERY_START_LOC = [0, 3, 6, 8]
+_ADAPTIVE_SEQ_LENS = [6, 4, 5]
+
+
+def _make_adaptive_builder():
+    builder = _make_builder()
+    builder._query_lens_from_device = True
+    builder.reorder_batch_threshold = 4
+    return builder
+
+
+def _make_adaptive_common_metadata(device_query_start_loc):
+    seq_lens = torch.tensor(_ADAPTIVE_SEQ_LENS, dtype=torch.int32, device="cpu")
+    return CommonAttentionMetadata(
+        query_start_loc=torch.tensor(
+            device_query_start_loc, dtype=torch.int32, device="cpu"
+        ),
+        query_start_loc_cpu=torch.tensor(
+            _ADAPTIVE_CPU_QUERY_START_LOC, dtype=torch.int32, device="cpu"
+        ),
+        seq_lens=seq_lens,
+        seq_lens_cpu_upper_bound=seq_lens,
+        num_reqs=3,
+        num_actual_tokens=8,
+        max_query_len=4,
+        max_seq_len=6,
+        block_table_tensor=torch.arange(24, dtype=torch.int32, device="cpu").view(3, 8),
+        slot_mapping=torch.arange(8, dtype=torch.int64, device="cpu"),
+    )
+
+
+def test_adaptive_build_maps_tokens_by_device_query_start_loc(monkeypatch):
+    builder = _make_adaptive_builder()
+    _patch_build_deps(monkeypatch)
+    sparse_seqlen_query_start_locs = []
+
+    def fake_generate_sparse_seqlen_triton(
+        seq_lens, cu_query_lens, topk_token, num_tokens, max_query_len
+    ):
+        sparse_seqlen_query_start_locs.append(cu_query_lens.tolist())
+        return torch.zeros(num_tokens, dtype=torch.int32, device="cpu")
+
+    monkeypatch.setattr(
+        sparse_mod, "generate_sparse_seqlen_triton", fake_generate_sparse_seqlen_triton
+    )
+
+    metadata = builder.build(
+        common_prefix_len=0,
+        common_attn_metadata=_make_adaptive_common_metadata([0, 4, 5, 8]),
+    )
+
+    assert metadata.num_decodes == 3
+    # The CPU split would map tokens as [0, 0, 0, 1, 1, 1, 2, 2].
+    assert metadata.req_id_per_token.tolist() == [0, 0, 0, 0, 1, 2, 2, 2]
+    assert sparse_seqlen_query_start_locs == [[0, 4, 5, 8]]
+
+
+def test_adaptive_persistent_metadata_recomputes_after_reallocation(monkeypatch):
+    """Device admission changes per-token KV lengths and must rebuild metadata."""
+    builder = _make_adaptive_builder()
+    events: list[str] = []
+    fake_aiter = _patch_build_deps(monkeypatch, events)
+    fake_aiter.get_mla_metadata_v1.side_effect = lambda *args, **kwargs: events.append(
+        "metadata"
+    )
+
+    step_a = _make_adaptive_common_metadata([0, 4, 5, 8])
+    step_b = _make_adaptive_common_metadata([0, 3, 5, 8])
+
+    builder.build(common_prefix_len=0, common_attn_metadata=step_a)
+    assert events == ["metadata"]
+
+    events.clear()
+    builder.build(common_prefix_len=0, common_attn_metadata=step_a)
+    assert events == []
+
+    builder.build(common_prefix_len=0, common_attn_metadata=step_b)
+    assert events == ["metadata"]
+    assert fake_aiter.get_mla_metadata_v1.call_count == 2
 
 
 def test_dense_prefill_builds_sparse_metadata_for_decode_subset(monkeypatch):

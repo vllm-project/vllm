@@ -34,7 +34,7 @@ from vllm.models.mistral.common.layer_spec import MistralLayerSpec
 from vllm.models.mistral.common.rope import MistralRotaryEmbedding
 from vllm.v1.attention.backend import AttentionBackend
 from vllm.v1.attention.backends.mla.indexer import (
-    DeepseekV32IndexerBackend,
+    MistralLarge4IndexerBackend,
     get_max_prefill_buffer_size,
 )
 from vllm.v1.attention.ops.rocm_aiter_mla_sparse import indexer_k_cache_is_shuffled
@@ -102,7 +102,7 @@ class MistralIndexerCache(nn.Module, AttentionLayerBase):
         )
 
     def get_attn_backend(self) -> type[AttentionBackend]:
-        return DeepseekV32IndexerBackend
+        return MistralLarge4IndexerBackend
 
 
 class MistralIndexer(nn.Module):

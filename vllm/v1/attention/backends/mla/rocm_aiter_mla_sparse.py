@@ -27,9 +27,11 @@ from vllm.v1.attention.backend import (
     AttentionLayer,
     CommonAttentionMetadata,
     MultipleOf,
+    max_decode_query_len,
 )
 from vllm.v1.attention.backends.mla.rocm_aiter_mla import (
     AiterMLAHelper,
+    _adaptive_varlen_verify_enabled,
 )
 from vllm.v1.attention.backends.mla.sparse_utils import (
     align_blocks_to_rows,
@@ -43,7 +45,7 @@ from vllm.v1.attention.ops.rocm_aiter_mla_sparse import (
     rocm_sparse_attn_prefill,
     rocm_sparse_decode_bf16_num_splits,
 )
-from vllm.v1.kv_cache_interface import AttentionSpec, KVCacheLayout
+from vllm.v1.kv_cache_interface import AttentionSpec, KVCacheLayout, KVCacheSpec
 from vllm.v1.worker.workspace import current_workspace_manager
 
 if TYPE_CHECKING:
@@ -285,6 +287,15 @@ def _aiter_uses_persistent_mla_decode(
     except ImportError:
         return True
     return _use_persistent_mla_decode(num_tokens, num_heads, 1, q_dtype, kv_dtype)
+
+
+def _req_id_per_token_from_device(
+    query_start_loc: torch.Tensor, token_ids: torch.Tensor, out: torch.Tensor
+) -> torch.Tensor:
+    """Map each token to its request from device-owned query boundaries."""
+    return torch.searchsorted(
+        query_start_loc[1:], token_ids, right=True, out_int32=True, out=out
+    )
 
 
 @triton.jit
@@ -650,6 +661,18 @@ class ROCMAiterMLASparseMetadataBuilder(
     _cudagraph_support: ClassVar[AttentionCGSupport] = AttentionCGSupport.UNIFORM_BATCH
     metadata_cls = ROCMAiterMLASparseMetadata
 
+    @classmethod
+    def get_varlen_cudagraph_max_query_len(
+        cls,
+        vllm_config: VllmConfig,
+        kv_cache_spec: KVCacheSpec,
+    ) -> int | None:
+        # Adaptive verification executes each query token as a batch entry and
+        # its request assignment follows device query_start_loc.
+        if not _adaptive_varlen_verify_enabled(vllm_config):
+            return None
+        return max_decode_query_len(vllm_config)
+
     def __init__(
         self,
         kv_cache_spec: AttentionSpec,
@@ -665,6 +688,13 @@ class ROCMAiterMLASparseMetadataBuilder(
 
         self._init_reorder_batch_threshold(
             1, supports_spec_as_decode=True, supports_dcp_with_varlen=True
+        )
+        speculative_config = vllm_config.speculative_config
+        # Adaptive verification reallocates drafts on device while the CPU
+        # query_start_loc retains its evenly distributed planning split.
+        self._query_lens_from_device = bool(
+            speculative_config is not None
+            and speculative_config.enable_adaptive_verification
         )
 
         self.num_heads = self.model_config.get_num_attention_heads(parallel_config)
@@ -799,6 +829,47 @@ class ROCMAiterMLASparseMetadataBuilder(
         )
         return min(ideal_splits, self._num_compute_units)
 
+    def _fill_req_id_per_token(
+        self,
+        common_attn_metadata: CommonAttentionMetadata,
+        num_reqs: int,
+        num_tokens: int,
+        seg_lengths: np.ndarray,
+    ) -> None:
+        out = self.req_id_per_token_buffer[:num_tokens]
+        if self._query_lens_from_device:
+            _req_id_per_token_from_device(
+                common_attn_metadata.query_start_loc[: num_reqs + 1],
+                self.qo_indptr[:num_tokens],
+                out,
+            )
+            return
+        req_id_per_token = np.repeat(np.arange(num_reqs, dtype=np.int32), seg_lengths)
+        out.copy_(np_to_pinned_tensor(req_id_per_token), non_blocking=True)
+
+    def _persistent_metadata_key(
+        self,
+        common_attn_metadata: CommonAttentionMetadata,
+        num_reqs: int,
+        num_tokens: int,
+        seg_lengths: np.ndarray,
+    ) -> tuple:
+        """Fingerprint the persistent metadata's query and context boundaries."""
+        with gpu_sync_allowed():
+            seq_lens = common_attn_metadata.seq_lens[:num_reqs].cpu().numpy()
+            if self._query_lens_from_device:
+                seg_lengths = np.diff(
+                    common_attn_metadata.query_start_loc[: num_reqs + 1].cpu().numpy()
+                )
+        return (
+            num_tokens,
+            int(common_attn_metadata.max_query_len),
+            self._num_attention_heads,
+            np.minimum(seq_lens, self.topk_tokens).tobytes(),
+            np.minimum(seq_lens - seg_lengths, self.topk_tokens).tobytes(),
+            seg_lengths.tobytes(),
+        )
+
     def build(
         self,
         common_prefix_len: int,
@@ -818,14 +889,11 @@ class ROCMAiterMLASparseMetadataBuilder(
         num_decode_tokens = metadata.num_decode_tokens
         starts = np.asarray(common_attn_metadata.query_start_loc_cpu, dtype=np.int32)
         seg_lengths = np.diff(starts[: num_reqs + 1])
-        req_id_per_token = np.repeat(
-            np.arange(seg_lengths.shape[0], dtype=np.int32), seg_lengths
-        )
         # Only re-zero the shrink-tail. paged_kv_indptr is fully rewritten
         # by the cumsum below. paged_kv_indices entries past new_indices_extent
         # are never read (the attention kernel only touches the ranges
         # defined by paged_kv_indptr).
-        new_req_extent = int(req_id_per_token.shape[0])
+        new_req_extent = num_tokens
         new_indices_extent = num_tokens * self.topk_tokens
         if self._prev_req_extent > new_req_extent:
             self.req_id_per_token_buffer[new_req_extent : self._prev_req_extent].fill_(
@@ -839,8 +907,8 @@ class ROCMAiterMLASparseMetadataBuilder(
             )
         self._prev_req_extent = new_req_extent
         self._prev_indices_extent = new_indices_extent
-        self.req_id_per_token_buffer[:new_req_extent].copy_(
-            np_to_pinned_tensor(req_id_per_token), non_blocking=True
+        self._fill_req_id_per_token(
+            common_attn_metadata, num_reqs, num_tokens, seg_lengths
         )
         if not dcp:
             query_start_loc = common_attn_metadata.query_start_loc[: num_reqs + 1]
@@ -903,23 +971,8 @@ class ROCMAiterMLASparseMetadataBuilder(
                 self._mla_kv_dtype,
             )
         ):
-            with gpu_sync_allowed():
-                seq_lens_cpu = common_attn_metadata.seq_lens[:num_reqs].cpu().numpy()
-            clamped_seq_lens = np.minimum(
-                seq_lens_cpu,
-                self.topk_tokens,
-            )
-            clamped_context_lens = np.minimum(
-                seq_lens_cpu - seg_lengths,
-                self.topk_tokens,
-            )
-            metadata_key = (
-                num_tokens,
-                int(common_attn_metadata.max_query_len),
-                self._num_attention_heads,
-                clamped_seq_lens.tobytes(),
-                clamped_context_lens.tobytes(),
-                seg_lengths.tobytes(),
+            metadata_key = self._persistent_metadata_key(
+                common_attn_metadata, num_reqs, num_tokens, seg_lengths
             )
             if metadata_key != self._prev_metadata_key:
                 from aiter import get_mla_metadata_v1

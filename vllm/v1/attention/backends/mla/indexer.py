@@ -286,6 +286,19 @@ class KpoolTailBackend(DeepseekV32IndexerBackend):
         return KpoolTailMetadataBuilder
 
 
+class MistralLarge4IndexerBackend(DeepseekV32IndexerBackend):
+    """Mistral Large 4 indexer cache; retains the V3.2 backend name."""
+
+    @classmethod
+    def supports_device_cpu_query_lens_mismatch(cls) -> bool:
+        # ROCm flattens Adaptive verification rows and derives their ownership
+        # from device decode lengths.
+        return (
+            current_platform.is_rocm()
+            or super().supports_device_cpu_query_lens_mismatch()
+        )
+
+
 class DeepseekV4IndexerBackend(DeepseekV32IndexerBackend):
     @classmethod
     def supports_device_cpu_query_lens_mismatch(cls) -> bool:
@@ -936,12 +949,14 @@ def _supports_flattened_device_query_lens() -> bool:
 
 def _supports_deepseek_v4_flattened_device_query_lens(vllm_config: VllmConfig) -> bool:
     model_config = vllm_config.model_config
+    hf_text_config = getattr(model_config, "hf_text_config", None)
     return (
         (current_platform.is_rocm() or current_platform.is_xpu())
         and model_config is not None
         and (
             "DeepseekV4ForCausalLM" in model_config.architectures
             or "DeepseekV41ForCausalLM" in model_config.architectures
+            or getattr(hf_text_config, "model_type", None) == "mistral_large_4"
         )
     )
 
