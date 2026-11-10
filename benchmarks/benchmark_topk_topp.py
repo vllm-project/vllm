@@ -3,9 +3,10 @@
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 """Benchmark top-k/top-p filtering with Triton, FlashInfer, and optional PyTorch.
 
-All implementations return masked logits. Timings include a fresh-input copy.
+All implementations return masked logits. Each measured iteration restores the
+input and flushes the GPU caches outside the timed region, so only the filtering
+call is timed, on an input in DRAM.
 FlashInfer timings include softmax and mask reconstruction when its APIs require them.
-L2 is flushed before each measured iteration, outside the timed region.
 
 Scenarios:
 - top_k only (whole batch, partial batch)
@@ -23,13 +24,15 @@ from pathlib import Path
 import flashinfer.sampling as fi_sampling
 import pandas as pd
 import torch
-from flashinfer.testing import bench_gpu_time_with_cupti
 
 from vllm.v1.sample.ops.topk_topp_sampler import apply_top_k_top_p_pytorch
 from vllm.v1.sample.ops.topk_topp_triton import (
     apply_top_k_top_p_triton,
     reset_buffer_cache,
 )
+
+# Larger than the L2 of NVIDIA GPUs and the 256 MiB Infinity Cache of MI355X.
+FLUSH_BYTES = 1 << 30
 
 
 @dataclass
@@ -296,14 +299,7 @@ def run_benchmark(
         for name in implementations:
             func = IMPLEMENTATIONS[name]
             reset_memory_stats()
-            times = bench_gpu_time_with_cupti(
-                # note: measured runtime includes logits.clone()
-                lambda func=func, logits=logits, k=k, p=p: func(logits.clone(), k, p),
-                dry_run_iters=warmup_iters,
-                repeat_iters=benchmark_iters,
-                use_cuda_graph=False,  # sampling is outside cuda graph
-                cold_l2_cache=True,
-            )
+            times = bench_gpu_time(func, logits, k, p, warmup_iters, benchmark_iters)
             elapsed = sum(times) / len(times)
             _, memory = measure_memory()
             timings[name] = dict(time_ms=elapsed, peak_memory=memory)
@@ -318,6 +314,28 @@ def run_benchmark(
         reset_memory_stats()
 
     return results
+
+
+def bench_gpu_time(
+    func, logits: torch.Tensor, k, p, warmup_iters: int, benchmark_iters: int
+) -> list[float]:
+    """Milliseconds per call of func(fresh, k, p), with CUDA/HIP events around the
+    call only. Before each call, untimed: restore the input from logits (func may
+    filter in place), then flush the caches, so the input is read from DRAM."""
+    fresh = torch.empty_like(logits)
+    flush = torch.empty(FLUSH_BYTES, dtype=torch.int8, device=logits.device)
+    events = [
+        (torch.cuda.Event(enable_timing=True), torch.cuda.Event(enable_timing=True))
+        for _ in range(warmup_iters + benchmark_iters)
+    ]
+    for start, end in events:
+        fresh.copy_(logits)
+        flush.zero_()
+        start.record()
+        func(fresh, k, p)
+        end.record()
+    torch.accelerator.synchronize()
+    return [start.elapsed_time(end) for start, end in events[warmup_iters:]]
 
 
 def check_implementations(
