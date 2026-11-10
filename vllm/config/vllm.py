@@ -3382,8 +3382,10 @@ class VllmConfig:
             unsupported.append("dual batch overlap with pipeline parallelism")
         if parallel_config.prefill_context_parallel_size > 1:
             unsupported.append("dual batch overlap with prefill context parallelism")
+        # A multimodal checkpoint served text-only (e.g. --language-model-only)
+        # never runs its encoder, so only real multimodal inputs rule DBO out.
         if model_config is not None and (
-            model_config.is_multimodal_model or model_config.is_encoder_decoder
+            model_config.supports_multimodal_inputs or model_config.is_encoder_decoder
         ):
             unsupported.append("dual batch overlap with multimodal models")
         if model_config is not None and model_config.is_hybrid:
