@@ -267,8 +267,8 @@ def test_rdna_hybrid_w4a16_dense_dispatch(M, has_dense, expected_path, monkeypat
 def _make_prefill_case(M, K, N, G, dtype, has_zp):
     """Random [M,K] activations + skinny [N,K//8] weights and their metadata.
 
-    Zero points come back twice: ``zp_raw`` as [N, K//G] int32 nibbles for the
-    float32 oracle, and ``zp_packed`` as [N//8, K//G] int32 in the packed layout
+    Zero points come back twice: `zp_raw` as [N, K//G] int32 nibbles for the
+    float32 oracle, and `zp_packed` as [N//8, K//G] int32 in the packed layout
     the kernel reads.
     """
     x = (0.25 * torch.randn((M, K), device=device, dtype=torch.float32)).to(dtype)
@@ -745,7 +745,7 @@ def _hip_skinny_reference(
 ) -> torch.Tensor:
     """Reference for HIP skinny: C = A @ (W - zp) * S.
 
-    ``zp_nkg`` is [N, K//G] int32 raw zero points for the asymmetric case, or
+    `zp_nkg` is [N, K//G] int32 raw zero points for the asymmetric case, or
     None for symmetric uint4b8, where the kernel subtracts a constant 8.
     """
     K = a_mk.shape[1]
@@ -794,6 +794,14 @@ def _hip_skinny_reference(
         (1, 4096, 256, 32),
         (1, 8192, 256, 128),
         (1, 16384, 256, 64),
+        # Wider outputs reach the gfx1150 / gfx1151 per-target tuples; K
+        # values that are not a multiple of their K step hit the ragged tail.
+        (1, 1536, 2560, 32),
+        (1, 896, 1152, 128),
+        (2, 2048, 1024, 32),
+        (2, 1024, 1024, 64),
+        (4, 1024, 2048, 128),
+        (5, 1024, 2048, 32),
         # K * batch beyond what LDS holds (32768 fp16 elements), so gfx115x
         # walks K in chunks; elsewhere the op rejects these, as the layer
         # routes them to Triton. The per-row window shrinks as the batch grows,
@@ -1039,7 +1047,7 @@ def test_act_pad_bytes_only_moves_strides_on_the_cliff():
 
 
 def _row_padded_copy(t: torch.Tensor, pad_cols: int) -> torch.Tensor:
-    """Copy of ``t`` whose stride(0) is ``t.shape[1] + pad_cols``."""
+    """Copy of `t` whose stride(0) is `t.shape[1] + pad_cols`."""
     rows, cols = t.shape
     buf = torch.empty((rows, cols + pad_cols), dtype=t.dtype, device=t.device)
     buf[:, :cols].copy_(t)
@@ -1227,3 +1235,33 @@ def test_rdna_hybrid_w4a16_medium_skinny_matches_reference(dtype, has_zp):
     reference = _rdna_hybrid_w4a16_reference(x_mk, w_int4_nk, scales, zp, G, bias=None)
 
     torch.testing.assert_close(output, reference, rtol=2e-2, atol=2e-2)
+
+
+# ---------------------------------------------------------------------------
+# Row offsets past int32
+# ---------------------------------------------------------------------------
+
+
+@pytest.mark.skipif(not on_gfx1x(), reason="Hybrid path is gfx11/gfx12 only")
+@pytest.mark.parametrize(
+    "K,N",
+    [
+        (256, 34816),  # M * N passes 2**31: output offsets
+        (17408, 256),  # M * K passes 2**31: activation offsets
+    ],
+)
+def test_triton_prefill_gemm_rows_past_int32_offsets(K, N):
+    """Rows whose element offset in A or C does not fit in int32."""
+    if not torch.cuda.is_available():
+        pytest.skip("CUDA/HIP device not available")
+    M = 2**31 // max(K, N) + 128
+    G = 128
+
+    set_random_seed(0)
+    x, w_int4, b_q, scales, _, _ = _make_prefill_case(M, K, N, G, torch.bfloat16, False)
+    out = triton_w4a16_skinny_fmt_gemm(a=x, b_q=b_q, scales=scales, group_size=G)
+
+    # Dequantize in bf16 like the kernel does, so a long K adds no rounding gap.
+    w = (w_int4 - 8).to(torch.bfloat16) * scales.repeat_interleave(G, dim=1)
+    ref = (x[-64:].float() @ w.float().t()).to(torch.bfloat16)
+    torch.testing.assert_close(out[-64:], ref, rtol=1e-2, atol=5e-2)

@@ -1,6 +1,6 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
-"""Accessors for the ``b12x`` package shipped with flashinfer-python."""
+"""Accessors for the `b12x` package shipped with flashinfer-python."""
 
 import importlib
 import importlib.util

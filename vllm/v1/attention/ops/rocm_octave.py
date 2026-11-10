@@ -5,18 +5,18 @@
 Each (token, KV head) is stored in one byte slot. V is always quantized
 whole; K has two layouts:
 
-* Block K (``octave_k3v4``, ``octave_k3v3``): random sign flips plus a
+* Block K (`octave_k3v4`, `octave_k3v3`): random sign flips plus a
   Walsh-Hadamard transform over each 64-dim block. The RoPE blocks get 4-bit
   codes, the NoPE blocks 3-bit codes, and every block has its own scale.
-* Compact K (``octave_k3v3_compact``): sign flips plus one Hadamard transform
+* Compact K (`octave_k3v3_compact`): sign flips plus one Hadamard transform
   over all dims, 3-bit codes, one scale. Spreading the RoPE dims over the
   whole head lets them share the 3-bit budget.
-* V: sign flips plus one Hadamard transform over all dims, ``v_bits`` codes.
+* V: sign flips plus one Hadamard transform over all dims, `v_bits` codes.
 
 The rotated coordinates are close to Gaussian, so each code indexes a
-Lloyd-Max codebook for N(0, 1), stored as int8 (``LUT``): a code ``c`` of a
-block with scale ``s`` stands for ``LUT[c] * s / LUT_ONE``. The scale makes
-``x . x_hat = |x|^2``: a least-squares fit would shrink every reconstructed
+Lloyd-Max codebook for N(0, 1), stored as int8 (`LUT`): a code `c` of a
+block with scale `s` stands for `LUT[c] * s / LUT_ONE`. The scale makes
+`x . x_hat = |x|^2`: a least-squares fit would shrink every reconstructed
 vector, which flattens the softmax and scales down the attention output.
 Everything is computed on the fly; there is no calibration.
 
@@ -30,12 +30,12 @@ Slot layout (bytes)::
 Compact K has no 4-bit part and pads to 4 bytes.
 
 4-bit codes: each little-endian uint32 covers 8 dims; byte j holds dim j in
-its low nibble and dim j + 4 in its high nibble, so ``w & 0x0F0F0F0F`` and
-``(w >> 4) & 0x0F0F0F0F`` give dims 0..3 and 4..7 as bytes.
+its low nibble and dim j + 4 in its high nibble, so `w & 0x0F0F0F0F` and
+`(w >> 4) & 0x0F0F0F0F` give dims 0..3 and 4..7 as bytes.
 
-3-bit codes: a 2-bit plane (uint32 per 16 dims; ``(w >> 2i) & 0x03030303``
+3-bit codes: a 2-bit plane (uint32 per 16 dims; `(w >> 2i) & 0x03030303`
 gives dims 4i..4i+3) followed by a 1-bit plane (uint32 per 32 dims;
-``(w >> i) & 0x01010101`` gives dims 4i..4i+3). code = lo + 4 * hi.
+`(w >> i) & 0x01010101` gives dims 4i..4i+3). code = lo + 4 * hi.
 
 Scales (fp16): one per 64-dim K block (one in total for compact K), then V.
 """
@@ -239,7 +239,7 @@ def _lut(bits: int, device_str: str) -> torch.Tensor:
 
 def _quantize_lut(x: torch.Tensor, bits: int):
     """Nearest Lloyd-Max code on the block RMS; the scale keeps
-    ``x . x_hat = |x|^2``.
+    `x . x_hat = |x|^2`.
 
     Returns (codes uint8 in [0, 2**bits), scale) with
     x ≈ LUT[codes] * scale / LUT_ONE.
@@ -323,7 +323,7 @@ def reference_dequantize(
 ) -> tuple[torch.Tensor, torch.Tensor]:
     """(T, H, slot) slots -> fp32 K and V of shape (T, H, D).
 
-    With ``rotated=True`` K and V stay in the rotated space, which is what
+    With `rotated=True` K and V stay in the rotated space, which is what
     the kernels consume.
     """
     t, h, _ = slots.shape
@@ -366,8 +366,8 @@ def reference_attention(
     """Per-query-token attention over a Octave paged cache.
 
     query: (Q, Hq, D). cache: (num_blocks, Hkv, block_size, slot) uint8.
-    Query token i attends to the first ``q_to_klen[i]`` tokens of request
-    ``q_to_req[i]``.
+    Query token i attends to the first `q_to_klen[i]` tokens of request
+    `q_to_req[i]`.
     """
     num_q, hq, d = query.shape
     _, hkv, block_size, _ = cache.shape

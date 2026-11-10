@@ -43,7 +43,7 @@ from vllm.v1.attention.ops.rocm_aiter_mla_sparse import (
 from .test_fused_indexer_q_rope_quant import quantize_to_mxfp4
 
 
-@pytest.mark.skipif(not current_platform.is_cuda(), reason="CUDA only")
+@pytest.mark.skipif(not current_platform.is_cuda_alike(), reason="CUDA/ROCm only")
 @pytest.mark.parametrize(
     "cache_dtype,kv_mxfp8",
     [
@@ -159,7 +159,7 @@ def test_dspark_context_kv_matches_query_insert(
         torch.testing.assert_close(kv, before, rtol=0, atol=0)
 
 
-@pytest.mark.skipif(not current_platform.is_cuda(), reason="CUDA only")
+@pytest.mark.skipif(not current_platform.is_cuda_alike(), reason="CUDA/ROCm only")
 @pytest.mark.parametrize("kv_mxfp8", [False, True])
 def test_v41_pcp_swa_cache_matches_non_pcp_writer(kv_mxfp8, monkeypatch):
     """PCP SWA writes must preserve the established CUDA cache bytes."""
@@ -240,6 +240,7 @@ def test_v41_pcp_swa_cache_matches_non_pcp_writer(kv_mxfp8, monkeypatch):
         _flashinfer_fp8_kv_scale=None,
         kv_mxfp8=kv_mxfp8,
         accepts_unnormed_unroped_query=False,
+        _pads_q_by_copy=False,
         n_local_heads=num_heads,
         padded_heads=num_heads,
         eps=1e-20,
@@ -277,7 +278,7 @@ def test_v41_fused_save_compress_and_insert(
 ):
     """Ring states: a group boundary whose previous token is outside the chunk
     pools the ring row that chunk left behind, even when this chunk overwrites
-    that row; only the last ``capacity`` tokens of a chunk are stored.
+    that row; only the last `capacity` tokens of a chunk are stored.
 
     Exercise historical group starts, adjacent requests, a chunk longer than
     the ring, single-token decode pairs, empty requests, wrap thresholds at
@@ -453,7 +454,7 @@ def _mxfp8_record_reference(
 ) -> tuple[torch.Tensor, torch.Tensor]:
     """Reference V4.1 record for one token: 512 fp8 bytes + 16 UE8M0 scales.
 
-    Mirrors FlashMLA's ``KVCacheLayout.V41_FP8Sparse`` quantizer: rotate the
+    Mirrors FlashMLA's `KVCacheLayout.V41_FP8Sparse` quantizer: rotate the
     RoPE tail first, then scale every 32-dim tile, RoPE tiles included.
     """
     rotated = _rotate_rope_tail(latent_row, cos_sin_row)
@@ -461,11 +462,11 @@ def _mxfp8_record_reference(
     return quantized.view(torch.uint8), (scales.log2() + 127).to(torch.uint8)
 
 
-@pytest.mark.skipif(not current_platform.is_cuda(), reason="CUDA only")
+@pytest.mark.skipif(not current_platform.is_cuda_alike(), reason="CUDA/ROCm only")
 @pytest.mark.parametrize("compress_ratio", [1, 2])
 def test_v41_rope_insert_mxfp8_record(compress_ratio: int):
     """The 528-byte V4.1 record quantizes the RoPE dims instead of keeping them
-    in bf16, so a token is [512 fp8][16 UE8M0].
+    in bf16, so a token is `[512 fp8][16 UE8M0]`.
 
     Byte-exact against the reference quantizer, including the rows and page
     padding the kernel must leave alone.
@@ -583,7 +584,7 @@ def test_v41_fp8_gather_is_grid_width_invariant(gather_len, one_pass, monkeypatc
         )
 
 
-@pytest.mark.skipif(not current_platform.is_cuda(), reason="CUDA only")
+@pytest.mark.skipif(not current_platform.is_cuda_alike(), reason="CUDA/ROCm only")
 def test_v41_mxfp8_cache_round_trip():
     """quantize_and_insert -> dequantize_and_gather recovers the V4.1 record.
 
@@ -670,9 +671,9 @@ def test_v41_rope_insert_nvfp4_record(compress_ratio: int):
     """The 288-byte V4.1 NVFP4 record: 256 B of e2m1 pairs then 32 e4m3 scales
     per token.
 
-    Scales are byte-exact against the reference (``amax / 6`` clamped to the
+    Scales are byte-exact against the reference (`amax / 6` clamped to the
     e4m3 range); values are checked as round-to-nearest on the e2m1 grid, whose
-    coarsest step is 2 between 4 and 6, so half a step is ``1.0 * scale``.
+    coarsest step is 2 between 4 and 6, so half a step is `1.0 * scale`.
     """
     from vllm.models.deepseek_v41.common.ops.fused_compress_quant_cache import (
         rope_quant_insert,
@@ -1017,7 +1018,7 @@ def test_v41_cache_writers_match_flashmla_decode(record: str):
     assert cos > (0.98 if extra is not None else 0.999)
 
 
-@pytest.mark.skipif(not current_platform.is_cuda(), reason="CUDA only")
+@pytest.mark.skipif(not current_platform.is_cuda_alike(), reason="CUDA/ROCm only")
 @pytest.mark.parametrize("compress_ratio", [1, 2])
 @pytest.mark.parametrize("store_fp8", [False, True])
 def test_v41_rope_insert_plain_row(compress_ratio: int, store_fp8: bool):
@@ -1096,11 +1097,11 @@ def test_v41_rope_insert_plain_row(compress_ratio: int, store_fp8: bool):
         )
 
 
-@pytest.mark.skipif(not current_platform.is_cuda(), reason="Triton kernel")
+@pytest.mark.skipif(not current_platform.is_cuda_alike(), reason="Triton kernel")
 def test_v41_compressor_metadata_maps_tokens_to_their_ring():
     """The ring group's generic slot mapping is disabled (all PAD), so the
-    builder must map every real token to ``ring_block * capacity + pos %
-    capacity``. Padding tokens and requests on the null block (block 0, as in
+    builder must map every real token to `ring_block * capacity + pos %
+    capacity`. Padding tokens and requests on the null block (block 0, as in
     dummy batches) must stay at PAD."""
     from unittest.mock import MagicMock
 
@@ -1480,7 +1481,7 @@ def _build_pcp_ring_metadata(ranks, all_gather, spec, config, device, monkeypatc
         local.metadata = builder.build(0, local.common)
 
 
-@pytest.mark.skipif(not current_platform.is_cuda(), reason="Triton kernel")
+@pytest.mark.skipif(not current_platform.is_cuda_alike(), reason="Triton kernel")
 @pytest.mark.parametrize("pcp_size", [2, 4])
 @pytest.mark.parametrize("num_speculative_tokens", [0, 5, 9])
 def test_v41_pcp_compressor_preserves_pairs_and_decode_state(
