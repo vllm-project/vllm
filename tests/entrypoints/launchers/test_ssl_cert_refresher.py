@@ -118,7 +118,6 @@ async def test_serve_http_stops_ssl_refresher_when_server_exits(
         load=MagicMock(),
     )
     server_error = RuntimeError("server failed") if failure_stage == "serve" else None
-    server = SimpleNamespace(serve=AsyncMock(side_effect=server_error))
     ssl_cert_refresher = MagicMock()
     loop = asyncio.get_running_loop()
 
@@ -140,7 +139,9 @@ async def test_serve_http_stops_ssl_refresher_when_server_exits(
     monkeypatch.setattr(loop, "add_signal_handler", add_signal_handler)
     monkeypatch.setattr(loop, "create_task", create_task_or_fail)
     monkeypatch.setattr(launcher.uvicorn, "Config", lambda *_args, **_kwargs: config)
-    monkeypatch.setattr(launcher, "NoSignalServer", lambda _config, **_kwargs: server)
+    monkeypatch.setattr(
+        launcher.NoSignalServer, "serve", AsyncMock(side_effect=server_error)
+    )
     monkeypatch.setattr(
         launcher,
         "SSLCertRefresher",
