@@ -31,15 +31,6 @@ R = TypeVar("R")
 P = ParamSpec("P")
 
 
-def _updates_module_buffers(code: CodeType) -> bool:
-    """Whether `code` calls `<module>._buffers.update`, which Dynamo emits for
-    buffers assigned during forward."""
-    return any(
-        a.argval == "_buffers" and b.argval == "update"
-        for a, b in itertools.pairwise(dis.get_instructions(code))
-    )
-
-
 @contextmanager
 def _compilation_context() -> Generator[None, None, None]:
     """Context manager for compilation settings.
@@ -279,9 +270,11 @@ class TorchCompileWithNoGuardsWrapper:
                 except Exception:
                     pass
 
+        # Dynamo emits `<module>._buffers.update` for buffers assigned during forward
+        pairs = itertools.pairwise(dis.get_instructions(new_code))
         if (
             self.vllm_config.compilation_config.cudagraph_mode != CUDAGraphMode.NONE
-            and _updates_module_buffers(new_code)
+            and any(a.argval == "_buffers" and b.argval == "update" for a, b in pairs)
         ):
             import depyf
 
