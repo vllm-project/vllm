@@ -1,7 +1,7 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 from collections.abc import Iterable
-from typing import cast
+from types import cast
 
 import torch
 
@@ -19,7 +19,7 @@ from vllm.renderers.chat_utils import (
 )
 from vllm.utils.mistral import is_mistral_tokenizer
 
-from .typing import (
+from .types import (
     ScoreContentPartParam,
     ScoreData,
     ScoreInput,

@@ -6,7 +6,7 @@ import math
 from collections.abc import Callable, Sequence
 from dataclasses import dataclass, replace
 from functools import partial
-from typing import Any, Literal, cast
+from types import Any, Literal, cast
 
 import pybase64
 import torch

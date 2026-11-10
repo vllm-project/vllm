@@ -2,7 +2,7 @@
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 
 from collections.abc import Callable, Sequence
-from typing import Any
+from types import Any
 
 from tqdm.auto import tqdm
 
@@ -23,8 +23,8 @@ from vllm.tasks import SCORE_TYPE_MAP, PoolingTask, SupportedTask
 from .base.io_processor import PoolingIOProcessor
 from .factories import init_pooling_io_processors
 from .scoring.io_processor import ScoringIOProcessor
-from .scoring.typing import ScoreInput
-from .typing import (
+from .scoring.types import ScoreInput
+from .types import (
     AnyOfflineInputsContext,
     OfflineEncodeInputsContext,
     OfflineOutputsContext,

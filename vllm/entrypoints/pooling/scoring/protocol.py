@@ -1,7 +1,7 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 import time
-from typing import Any, TypeAlias
+from types import Any, TypeAlias
 
 from pydantic import BaseModel, Field, model_validator
 
@@ -13,7 +13,7 @@ from vllm.tasks import PoolingTask
 from vllm.utils import random_uuid
 
 from ..base.protocol import ClassifyRequestMixin, PoolingBasicRequestMixin
-from .typing import ScoreContentPartParam, ScoreInput
+from .types import ScoreContentPartParam, ScoreInput
 
 
 class ScoringRequestMixin(PoolingBasicRequestMixin, ClassifyRequestMixin):

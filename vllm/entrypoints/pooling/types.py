@@ -3,7 +3,7 @@
 import time
 from collections.abc import AsyncGenerator, Callable, Generator, Sequence
 from dataclasses import dataclass, field
-from typing import Any, Generic, NotRequired, TypeAlias, TypedDict, TypeVar
+from types import Any, Generic, NotRequired, TypeAlias, TypedDict, TypeVar
 
 from fastapi import Request
 from pydantic import ConfigDict
@@ -39,7 +39,7 @@ from .pooling.protocol import (
     PoolingResponse,
 )
 from .scoring.protocol import ScoringRequest, ScoringResponse
-from .scoring.typing import ScoreData, ScoringData
+from .scoring.types import ScoreData, ScoringData
 from .token_embed.protocol import TokenEmbeddingRequest, TokenEmbeddingResponse
 
 PoolingCompletionLikeRequest: TypeAlias = (
