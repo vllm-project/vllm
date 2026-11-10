@@ -132,17 +132,30 @@ def render_inkling_messages(
             reasoning_effort = None
 
         if role == "tool":
-            tool_name = message.get("name") or tool_call_id_to_name.get(
-                str(message.get("tool_call_id") or ""), ""
+            tool_name = str(
+                message.get("name")
+                or tool_call_id_to_name.get(str(message.get("tool_call_id") or ""), "")
             )
-            _append_message(
-                input_ids,
-                tokenizer,
-                "tool",
-                "text",
-                _flatten_text_content(message.get("content")),
-                author_name=str(tool_name),
-            )
+            # Tool responses may carry media parts (e.g. screenshots). Render
+            # every part so the MM processor sees one marker per item; coercing
+            # the content to one text string would drop the media and desync
+            # the placeholder count.
+            tool_parts = list(_iter_render_parts(message.get("content")))
+            if not tool_parts:
+                # Keep an empty block so the tool call it answers is not left
+                # dangling.
+                tool_parts = [("text", "")]
+            for kind, text in tool_parts:
+                if kind == "thinking":
+                    raise ValueError("Inkling thinking parts require role='assistant'")
+                _append_message(
+                    input_ids,
+                    tokenizer,
+                    "tool",
+                    kind,
+                    text,
+                    author_name=tool_name,
+                )
             continue
 
         if role == "assistant":
