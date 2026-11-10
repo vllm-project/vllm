@@ -252,8 +252,10 @@ vllm serve mistralai/Voxtral-Mini-4B-Realtime-2602 --tokenizer-mode mistral \
 | Audio (encoder) | `audio_config.sliding_window` | frame (20 ms of audio) | 750 (15 s) |
 
 Smaller windows use less KV cache per session, so more sessions fit in the same
-memory. A session holds about 32 MiB + 0.125 MiB per text token + 0.25 MiB per
-audio frame: 224 MiB with 1024 and 256, 1.2 GiB with the defaults.
+memory. With `--block-size 16`, a session holds about 32 MiB + 0.125 MiB per text
+token + 0.25 MiB per audio frame: 224 MiB with 1024 and 256, 1.2 GiB with the
+defaults. The default block size of 64 rounds the windows up to larger blocks:
+320 MiB with 1024 and 256.
 
 !!! warning
     Keep the text window at 1024 or more. On long read speech, with a 256 text window
@@ -281,15 +283,16 @@ rounding. The KV cache of the session stays bounded by the windows.
   is CUDA. KV connectors, KV offloading, encoder cache connectors, speculative
   decoding, pipeline parallelism and prefill context parallelism are refused. Any
   streaming-input session on such a model works the same way.
-- `--max-model-len` must be at least the text window plus 2 KV cache blocks (256
-  tokens on Voxtral), so `--max-model-len 8192` with the default text window of
-  8192 is refused. It no longer limits the session, and a large value costs CPU:
-  every token resends the session since the last shift. 8192 is enough with a 1024
-  text window.
+- `--max-model-len` must be at least the text window plus 2 KV cache blocks (1024
+  tokens on Voxtral, 256 with `--block-size 16`), so `--max-model-len 8192` with
+  the default text window of 8192 is refused. It no longer limits the session,
+  and a large value costs CPU: every token resends the session since the last
+  shift. 8192 is enough with a 1024 text window.
 - `--unbounded-streaming-input-margin-tokens` (default: half of
   `max_model_len - text window`): the shift happens this many tokens before
   `--max-model-len`. The rest of the room is roughly the distance between two
-  shifts: with 8192 and 1024, a shift every 3456 tokens, about 4.5 min.
+  shifts: with 8192 and 1024, a shift every 3072 tokens, about 4 min (3456 tokens
+  with `--block-size 16`).
 - A shift only happens when a new input chunk arrives. A chunk can hold up to
   `max_model_len - text window - 1 block` input tokens. If it generates more
   tokens than the margin, the turn ends early with `finish_reason` `length` and
@@ -303,7 +306,7 @@ PYTORCH_CUDA_ALLOC_CONF=expandable_segments:True \
 vllm serve mistralai/Voxtral-Mini-4B-Realtime-2602 --tokenizer-mode mistral \
   --hf-overrides '{"text_config":{"sliding_window":1024},"audio_config":{"sliding_window":256}}' \
   --max-model-len 8192 --max-num-batched-tokens 512 --max-num-seqs 12 \
-  --gpu-memory-utilization 0.82 --disable-prefix-caching \
+  --gpu-memory-utilization 0.82 --disable-prefix-caching --block-size 16 \
   --compilation-config '{"cudagraph_mode":"PIECEWISE"}' \
   --enable-unbounded-streaming-input
 ```
@@ -314,7 +317,8 @@ reduces memory fragmentation.
 
 `--max-num-seqs` must also stay under what fits in the KV cache: `Available KV cache
 memory` in the startup log divided by the KV cache of a session. On this card that
-line says 3.4 to 4.2 GiB, so 15 to 19 sessions fit with windows of 1024 and 256.
+line says 3.4 to 4.2 GiB, so 15 to 19 sessions fit with windows of 1024 and 256,
+and 10 to 13 without `--block-size 16`.
 Sessions above `--max-num-seqs` wait for a free slot. If more sessions run than fit,
 all of them stall ([#60137](https://github.com/vllm-project/vllm/issues/60137)).
 `Maximum concurrency` in the startup log does not limit sessions: it is the worst
