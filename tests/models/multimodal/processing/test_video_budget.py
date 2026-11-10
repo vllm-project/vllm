@@ -30,3 +30,21 @@ def test_video_budget_matches_profiled_video(model_id: str, max_model_len: int):
     num_embeds = sum(p.get_num_embeds() for p in dummy["mm_placeholders"]["video"])
 
     assert budget["video"] == num_embeds
+
+
+@pytest.mark.parametrize(
+    ("model_id", "max_model_len"),
+    [("baidu/ERNIE-4.5-VL-28B-A3B-PT", 16384)],
+)
+def test_video_budget_ignores_image_count(model_id: str, max_model_len: int):
+    ctx = build_model_context(
+        model_id,
+        model_config_kwargs={"max_model_len": max_model_len},
+        limit_mm_per_prompt={"image": 1, "video": 1},
+    )
+    processor = MULTIMODAL_REGISTRY.create_processor(ctx.model_config)
+
+    with_image = get_mm_max_toks_per_item(processor, {"image": 1, "video": 1}, None)
+    video_only = get_mm_max_toks_per_item(processor, {"video": 1}, None)
+
+    assert with_image["video"] == video_only["video"]

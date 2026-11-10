@@ -283,7 +283,9 @@ class MultiModalProcessingInfo(BaseProcessingInfo):
         return self._get_num_image_tokens(size)
 
     def get_max_video_tokens(self, seq_len: int, mm_counts: Mapping[str, int]) -> int:
-        num_frames = self.get_num_frames_with_most_features(seq_len, mm_counts)
+        num_frames = self.get_num_frames_with_most_features(
+            seq_len, mm_counts.get("video", 0)
+        )
         return self._get_max_video_tokens_for_frames(num_frames)
 
     def _get_max_video_tokens_for_frames(self, num_frames: int) -> int:
@@ -369,15 +371,13 @@ class MultiModalProcessingInfo(BaseProcessingInfo):
             lambda size: self._get_num_video_tokens(num_frames, size),
         )
 
-    def get_num_frames_with_most_features(
-        self, seq_len: int, mm_counts: Mapping[str, int]
-    ) -> int:
-        max_videos = max(mm_counts.get("video", 0), 1)
+    def get_num_frames_with_most_features(self, seq_len: int, num_videos: int) -> int:
+        num_videos = max(num_videos, 1)
         step = self._get_min_video_frames()
         num_frames = step
         while (
             num_frames + step <= _MAX_FRAMES_PER_VIDEO
-            and self._get_max_video_tokens_for_frames(num_frames + step) * max_videos
+            and self._get_max_video_tokens_for_frames(num_frames + step) * num_videos
             <= seq_len
         ):
             num_frames += step
@@ -443,7 +443,9 @@ class MultiModalDummyInputsBuilder(BaseDummyInputsBuilder[MultiModalProcessingIn
                 overrides=mm_options.get("image"),
             )
         if self.info._is_video_model and (num_videos := mm_counts.get("video", 0)):
-            num_frames = self.info.get_num_frames_with_most_features(seq_len, mm_counts)
+            num_frames = self.info.get_num_frames_with_most_features(
+                seq_len, num_videos
+            )
             width, height = self.info.get_video_size_with_most_features(num_frames)
             videos = self._get_dummy_videos(
                 width=width,
