@@ -339,6 +339,8 @@ class EngineCoreSentinel:
         self._recover_and_vote(ft_request, terminal=True)
         # Commit the dead set only after the full recovery succeeded.
         self._dead_dp_ranks = new_dead
+        # Wake idle survivors without relying on the lost DP coordinator.
+        self.engine.engines_running = True
         logger.info(
             "[FT] Engine %d scale_down complete: removed %s, "
             "cumulative dead_dp_ranks=%s",

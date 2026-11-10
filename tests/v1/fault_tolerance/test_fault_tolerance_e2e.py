@@ -265,17 +265,17 @@ def _arm_ft_injection(servers) -> None:
         assert resp.status_code == 200, resp.text
 
 
-def _kill_worker_process(server) -> None:
-    """SIGKILL only the worker proc, leaving EngineCore and API server alive."""
-    workers = []
+def _kill_server_process(server, process_name: str) -> None:
+    """SIGKILL one named child process, leaving the API server alive."""
+    processes = []
     for p in psutil.Process(server.proc.pid).children(recursive=True):
         # Skip descendants that already exited: cmdline() raises ZombieProcess
-        # if unreaped, NoSuchProcess if reaped. A dead worker still fails below.
+        # if unreaped, NoSuchProcess if reaped. A dead target still fails below.
         with contextlib.suppress(psutil.ZombieProcess, psutil.NoSuchProcess):
-            if "Worker" in " ".join(p.cmdline()):
-                workers.append(p)
-    assert len(workers) == 1, f"expected 1 worker proc, found: {workers}"
-    workers[0].kill()
+            if process_name in " ".join(p.cmdline()):
+                processes.append(p)
+    assert len(processes) == 1, f"expected 1 {process_name} proc, found: {processes}"
+    processes[0].kill()
 
 
 def _wait_for_engines(
@@ -548,7 +548,8 @@ def test_scale_down_removes_dead_rank_and_recovers(quantization, proactive):
                 )
                 for response in responses:
                     response.raise_for_status()
-        _kill_worker_process(victim)
+            _kill_server_process(victim, "DPCoordinator")
+        _kill_server_process(victim, "Worker")
         if proactive:
             dead = _wait_for_engines(
                 [victim], match_key="status", match_values={"dead"}
