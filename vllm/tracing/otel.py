@@ -5,6 +5,7 @@ import atexit
 import functools
 import inspect
 import os
+import threading
 import traceback
 from collections.abc import Mapping
 from contextlib import contextmanager
@@ -28,9 +29,10 @@ try:
     from opentelemetry.sdk.environment_variables import (
         OTEL_EXPORTER_OTLP_TRACES_PROTOCOL,
     )
-    from opentelemetry.sdk.resources import Resource
+    from opentelemetry.sdk.resources import OTELResourceDetector, Resource
     from opentelemetry.sdk.trace import TracerProvider
     from opentelemetry.sdk.trace.export import BatchSpanProcessor
+    from opentelemetry.semconv.resource import ResourceAttributes
     from opentelemetry.trace import (
         SpanKind,  # noqa: F401
         Tracer,
@@ -49,19 +51,59 @@ except ImportError:
     Context = Any  # type: ignore
     Tracer = Any  # type: ignore
     inject = None  # type: ignore
+    OTELResourceDetector = None  # type: ignore
     Resource = None  # type: ignore
     SpanKind = Any  # type: ignore
+    ResourceAttributes = Any  # type: ignore
+    TracerProvider = Any  # type: ignore
+
+# OTel spec constants.
+_SERVICE_NAME_KEY = "service.name"
+_OTEL_SERVICE_NAME_ENV = "OTEL_SERVICE_NAME"
+
+# Process-wide cache of TracerProvider instances, keyed by OTLP endpoint.
+_PROCESS_TRACE_PROVIDERS: dict[str, "TracerProvider"] = {}
+_PROCESS_TRACE_PROVIDERS_LOCK = threading.Lock()
 
 
 def is_otel_available() -> bool:
     return _IS_OTEL_AVAILABLE
 
 
-def init_otel_tracer(
-    instrumenting_module_name: str,
+def _resolve_service_name(extra_attributes: dict[str, str]) -> str | None:
+    """Decide whether to inject ``service.name`` explicitly into the resource.
+
+    Returns ``None`` when ``service.name`` must be left for the
+    ``OTELResourceDetector`` inside ``Resource.create`` to pick up from
+    ``OTEL_RESOURCE_ATTRIBUTES``. Returns a string when we should inject it.
+
+    Precedence (matches the OTel spec):
+      1. explicit ``service.name`` in ``extra_attributes`` -> do not inject
+      2. ``OTEL_SERVICE_NAME`` (non-empty)                 -> inject
+      3. ``service.name`` in ``OTEL_RESOURCE_ATTRIBUTES``  -> do not inject
+      4. otherwise                                         -> inject ``"vllm"``
+    """
+    if _SERVICE_NAME_KEY in extra_attributes:
+        # The caller set it explicitly; resource_attrs.update() below will
+        # place it on the resource as-is.
+        return None
+
+    explicit = os.environ.get(_OTEL_SERVICE_NAME_ENV)
+    if explicit:
+        return explicit
+
+    # Inspect OTEL_RESOURCE_ATTRIBUTES directly via OTELResourceDetector.
+    detected = OTELResourceDetector().detect()
+    if detected.attributes.get(_SERVICE_NAME_KEY) is not None:
+        return None
+
+    return "vllm"
+
+
+def init_otel_trace_provider(
     otlp_traces_endpoint: str,
     extra_attributes: dict[str, str] | None = None,
-) -> Tracer:
+) -> TracerProvider:
     """Initializes the OpenTelemetry tracer provider."""
     if not _IS_OTEL_AVAILABLE:
         raise ValueError(
@@ -70,22 +112,69 @@ def init_otel_tracer(
             f"Original error:\n{otel_import_error_traceback}"
         )
 
-    # Store the endpoint in environment so child processes can inherit it
-    os.environ["OTEL_EXPORTER_OTLP_TRACES_ENDPOINT"] = otlp_traces_endpoint
+    # Fast path: provider already exists for this endpoint.
+    cached = _PROCESS_TRACE_PROVIDERS.get(otlp_traces_endpoint)
+    if cached is not None:
+        return cached
 
-    resource_attrs = {}
-    resource_attrs["vllm.instrumenting_module_name"] = instrumenting_module_name
-    resource_attrs["vllm.process_id"] = str(os.getpid())
-    if extra_attributes:
+    # Slow path: create once. Double-check under the lock so concurrent
+    # initializers do not both create a provider.
+    with _PROCESS_TRACE_PROVIDERS_LOCK:
+        cached = _PROCESS_TRACE_PROVIDERS.get(otlp_traces_endpoint)
+        if cached is not None:
+            return cached
+
+        # Store the endpoint in environment so child processes can inherit it.
+        os.environ["OTEL_EXPORTER_OTLP_TRACES_ENDPOINT"] = otlp_traces_endpoint
+
+        # Copy so we never mutate the caller's dict.
+        extra_attributes = dict(extra_attributes or {})
+
+        resource_attrs: dict[str, str] = {"vllm.process_id": str(os.getpid())}
+
+        service_name = _resolve_service_name(extra_attributes)
+        if service_name is not None:
+            resource_attrs[_SERVICE_NAME_KEY] = service_name
+
+        # Caller-supplied attributes win over the defaults above. This is
+        # also where an explicit extra_attributes["service.name"] lands.
         resource_attrs.update(extra_attributes)
-    resource = Resource.create(resource_attrs)
 
-    trace_provider = TracerProvider(resource=resource)
-    span_exporter = get_span_exporter(otlp_traces_endpoint)
-    trace_provider.add_span_processor(BatchSpanProcessor(span_exporter))
-    set_tracer_provider(trace_provider)
+        resource = Resource.create(resource_attrs)
 
-    atexit.register(trace_provider.shutdown)
+        trace_provider = TracerProvider(resource=resource)
+        span_exporter = get_span_exporter(otlp_traces_endpoint)
+        trace_provider.add_span_processor(BatchSpanProcessor(span_exporter))
+        set_tracer_provider(trace_provider)
+
+        atexit.register(trace_provider.shutdown)
+        _PROCESS_TRACE_PROVIDERS[otlp_traces_endpoint] = trace_provider
+        return trace_provider
+
+
+def init_otel_tracer(
+    instrumenting_module_name: str,
+    otlp_traces_endpoint: str,
+    extra_attributes: dict[str, str] | None = None,
+) -> Tracer:
+    """Initializes the OpenTelemetry tracer."""
+    if not _IS_OTEL_AVAILABLE:
+        raise ValueError(
+            "OpenTelemetry is not available. Unable to initialize "
+            "a tracer. Ensure OpenTelemetry packages are installed. "
+            f"Original error:\n{otel_import_error_traceback}"
+        )
+
+    if extra_attributes is None:
+        extra_attributes = {}
+
+    trace_provider = init_otel_trace_provider(
+        otlp_traces_endpoint,
+        extra_attributes={
+            **extra_attributes,
+            "vllm.instrumenting_module_name": instrumenting_module_name,
+        },
+    )
 
     tracer = trace_provider.get_tracer(instrumenting_module_name)
     return tracer

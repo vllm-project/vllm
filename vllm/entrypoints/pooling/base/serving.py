@@ -1,6 +1,7 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 import asyncio
+import time
 from abc import ABC, abstractmethod
 from collections.abc import AsyncGenerator
 from concurrent.futures import Executor
@@ -16,6 +17,7 @@ from vllm.config import VllmConfig
 from vllm.engine.protocol import EngineClient
 from vllm.entrypoints.generate.base.protocol import validate_request_mm_kwargs
 from vllm.entrypoints.openai.models.serving import OpenAIServingModels
+from vllm.entrypoints.serve.engine.protocol import ErrorResponse
 from vllm.entrypoints.serve.engine.serving import BaseServing
 from vllm.entrypoints.serve.engine.typing import AnyRequest
 from vllm.entrypoints.serve.utils.request_logger import RequestLogger
@@ -24,12 +26,12 @@ from vllm.renderers.base import BaseRenderer
 from vllm.renderers.chat_utils import ChatTemplateConfig
 from vllm.utils.async_utils import make_async, merge_async_iterators
 
-from ...serve.engine.protocol import ErrorResponse
 from ..typing import AnyPoolingRequest, PoolingServeContext
 from .io_processor import PoolingIOProcessor
+from .observability import TO_S, ObservabilityMixin
 
 
-class PoolingBaseServing(ABC, BaseServing):
+class PoolingBaseServing(BaseServing, ObservabilityMixin, ABC):
     request_id_prefix: ClassVar[str]
 
     def __init__(
@@ -63,23 +65,78 @@ class PoolingBaseServing(ABC, BaseServing):
             self._postprocessing, executor=self._executor
         )
 
+        self._init_observability()
+
     async def __call__(
         self,
         request: AnyPoolingRequest,
         raw_request: Request | None = None,
     ) -> Response:
+        arrival_time_ns = time.time_ns()
+
         io_processor = self.get_io_processor(request)
         ctx = await self._init_ctx(io_processor, request, raw_request)
-        await self._preprocessing(io_processor, ctx)
-        await self._prepare_generators(ctx)
-        await self._collect_batch(ctx)
-        return await self._postprocessing_async(io_processor, ctx)
+        ctx.arrival_time_ns = arrival_time_ns
+
+        async with self.maybe_tracing(ctx, io_processor):
+            await self.preprocessing(io_processor, ctx)
+            await self.engine_call(ctx)
+            return await self.postprocessing(io_processor, ctx)
+
+    async def preprocessing(
+        self, io_processor: PoolingIOProcessor, ctx: PoolingServeContext
+    ):
+        async with self.maybe_start_span_async(
+            ctx.entrypoint_tracer,
+            self.span_entrypoint_preprocessing,
+            context=ctx.request_span_context,
+        ):
+            await self._preprocessing_async(io_processor, ctx)
+
+        if self.is_tracing_request:
+            ctx.preprocessing_finished = time.time_ns()
+
+            assert ctx.engine_inputs is not None
+            for engine_inputs in ctx.engine_inputs:
+                engine_inputs["prompts"]["arrival_time"] = (
+                    ctx.preprocessing_finished / TO_S
+                )
+
+    async def engine_call(self, ctx: PoolingServeContext):
+        async with self.maybe_start_span_async(
+            ctx.entrypoint_tracer,
+            self.span_entrypoint_engine_call,
+            context=ctx.request_span_context,
+        ) as span:
+            if span is not None:
+                ctx.trace_headers = self._get_span_trace_headers(span)
+
+            await self._prepare_generators(ctx)
+            await self._collect_batch(ctx)
+
+        if self.is_tracing_request:
+            ctx.engine_call_finished = time.time_ns()
+
+    async def postprocessing(
+        self, io_processor: PoolingIOProcessor, ctx: PoolingServeContext
+    ):
+        async with self.maybe_start_span_async(
+            ctx.entrypoint_tracer,
+            self.span_entrypoint_postprocessing,
+            context=ctx.request_span_context,
+        ):
+            response = await self._postprocessing_async(io_processor, ctx)
+
+        if self.is_tracing_request:
+            ctx.postprocessing_finished = time.time_ns()
+
+        return response
 
     @abstractmethod
     def get_io_processor(self, request: AnyPoolingRequest) -> PoolingIOProcessor:
         raise NotImplementedError
 
-    async def _preprocessing(
+    async def _preprocessing_async(
         self, io_processor: PoolingIOProcessor, ctx: PoolingServeContext
     ):
         requests = io_processor.get_request_factory_online(ctx)
@@ -103,7 +160,7 @@ class PoolingBaseServing(ABC, BaseServing):
         io_processor: PoolingIOProcessor,
         request: AnyPoolingRequest,
         raw_request: Request | None = None,
-    ):
+    ) -> PoolingServeContext:
         validate_request_mm_kwargs(
             mm_processor_kwargs=getattr(request, "mm_processor_kwargs", None),
             media_io_kwargs=getattr(request, "media_io_kwargs", None),
@@ -148,12 +205,6 @@ class PoolingBaseServing(ABC, BaseServing):
 
         generators: list[AsyncGenerator[PoolingRequestOutput, None]] = []
 
-        trace_headers = (
-            None
-            if ctx.raw_request is None
-            else await self._get_trace_headers(ctx.raw_request.headers)
-        )
-
         assert ctx.pooling_params is not None
         pooling_params = ctx.pooling_params
         pooling_params.verify(self.model_config)
@@ -178,7 +229,7 @@ class PoolingBaseServing(ABC, BaseServing):
                 pooling_params=engine_input["params"],
                 lora_request=engine_input["lora_requests"],
                 priority=engine_input["priorities"],
-                trace_headers=trace_headers,
+                trace_headers=ctx.trace_headers,
             )
 
             generators.append(generator)
