@@ -8,6 +8,7 @@ from fnmatch import fnmatch
 from typing import Any, cast
 
 import torch
+from compressed_tensors.quantization import QuantizationArgs
 
 import vllm.envs as envs
 from vllm.config import get_current_vllm_config_or_none
@@ -67,6 +68,9 @@ from vllm.model_executor.layers.quantization import QuantizationMethods
 from vllm.model_executor.layers.quantization.base_config import (
     QuantizationConfig,
     QuantizeMethodBase,
+)
+from vllm.model_executor.layers.quantization.compressed_tensors.compressed_tensors_moe.compressed_tensors_moe_wna16 import (  # noqa: E501
+    CompressedTensorsWNA16MoEMethod,
 )
 from vllm.model_executor.layers.quantization.fp8 import Fp8Config, Fp8MoEMethod
 from vllm.model_executor.layers.quantization.kv_cache import BaseKVCacheMethod
@@ -181,12 +185,12 @@ def algos_owned_by(config_name: str) -> tuple[str, ...]:
     return tuple(a for a, (owner, _) in LINEAR_ALGOS.items() if owner == config_name)
 
 
-def _reject_int8_pb_wo_moe(algo: str | None, prefix: str) -> None:
-    if algo == "INT8_PB_WO":
-        raise NotImplementedError(
-            f"ModelOpt INT8_PB_WO supports linear layers only; {prefix} is a "
-            "FusedMoE layer."
-        )
+def _pack_int8_pb_wo(weight: torch.Tensor) -> torch.Tensor:
+    """An INT8_PB_WO int8 `[out, in]` weight in the WNA16 kernels' layout:
+    uint8b128 (`q + 128`), four per int32 along the input dim."""
+    if weight.dtype != torch.int8:
+        raise ValueError(f"expected an int8 weight, got {weight.dtype}")
+    return (weight.contiguous().view(torch.uint8) ^ 0x80).view(torch.int32)
 
 
 class ModelOptKVCacheMethod(BaseKVCacheMethod):
@@ -1745,7 +1749,7 @@ class ModelOptInt8Config(ModelOptQuantConfigBase):
         self, layer: torch.nn.Module, prefix: str
     ) -> "QuantizeMethodBase | None":
         if isinstance(layer, RoutedExperts) and not self.is_layer_excluded(prefix):
-            _reject_int8_pb_wo_moe(self.quant_method, prefix)
+            return Int8PbWoMoEMethod(self.group_size, layer.moe_config)
         return super().get_quant_method(layer, prefix)
 
 
@@ -1891,6 +1895,51 @@ class ModelOptNvFp4EmbeddingMethod(QuantizeMethodBase):
         codes = torch.stack((packed & 0x0F, packed >> 4), dim=-1).flatten(-2)
         values = layer.e2m1_lut[codes.int()].unflatten(-1, (-1, 16))
         return (values * scale.unsqueeze(-1)).flatten(-2).to(layer.output_dtype)
+
+
+# Not named ModelOpt*: RoutedExperts.weight_loader special-cases those names,
+# while these group scales load the way compressed-tensors' do.
+class Int8PbWoMoEMethod(CompressedTensorsWNA16MoEMethod):
+    """INT8_PB_WO routed experts on the WNA16 MoE kernels.
+
+    INT8_PB_WO is compressed-tensors' symmetric 8-bit group format with int8
+    instead of packed weights, so this loads ModelOpt's per-expert `weight` and
+    `weight_scale`, packs the weights on load, and leaves the backend choice and
+    the kernels to `CompressedTensorsWNA16MoEMethod`.
+    """
+
+    def __init__(self, group_size: int, moe: FusedMoEConfig):
+        super().__init__(
+            QuantizationArgs(
+                num_bits=8,
+                type="int",
+                symmetric=True,
+                strategy="group",
+                group_size=group_size,
+            ),
+            None,
+            moe,
+        )
+
+    def create_weights(self, layer: torch.nn.Module, *args, **kwargs) -> None:
+        super().create_weights(layer, *args, **kwargs)
+        load = kwargs["weight_loader"]
+
+        def weight_loader(param, loaded_weight, *args, **kwargs):
+            return load(param, _pack_int8_pb_wo(loaded_weight), *args, **kwargs)
+
+        for w in ("w13", "w2"):
+            # ModelOpt checkpoints name the weights `weight` and carry no shapes.
+            weight = layer._parameters.pop(f"{w}_weight_packed")
+            weight.weight_loader = weight_loader
+            layer.register_parameter(f"{w}_weight", weight)
+            delattr(layer, f"{w}_weight_shape")
+
+    def process_weights_after_loading(self, layer: torch.nn.Module) -> None:
+        for w in ("w13", "w2"):
+            weight = layer._parameters.pop(f"{w}_weight")
+            layer.register_parameter(f"{w}_weight_packed", weight)
+        super().process_weights_after_loading(layer)
 
 
 class ModelOptMixedPrecisionConfig(ModelOptQuantConfigBase):
@@ -2182,6 +2231,34 @@ class ModelOptMixedPrecisionConfig(ModelOptQuantConfigBase):
 
         return None
 
+    def _int8_pb_wo_experts_group_size(
+        self, prefix: str, quant_algo: str | None
+    ) -> int | None:
+        """The group size of INT8_PB_WO routed experts, or None if they are not.
+
+        One kernel serves every expert and projection of a MoE layer, so if
+        any of them is INT8_PB_WO, all must be, with one group size.
+        """
+        entries = {
+            (str(info.get("quant_algo")).upper(), info.get("group_size"))
+            for candidate in self._quantized_layer_prefix_candidates(prefix)
+            for key, info in self.quantized_layers.items()
+            if key.startswith(candidate + ".")
+        }
+        if not entries and quant_algo == "INT8_PB_WO":
+            entries = {(quant_algo, self._resolve_layer_field(prefix, "group_size"))}
+        if all(algo != "INT8_PB_WO" for algo, _ in entries):
+            return None
+        if len(entries) == 1:
+            ((_, group_size),) = entries
+            if group_size:
+                return group_size
+        raise ValueError(
+            f"INT8_PB_WO routed experts {prefix} need one quant_algo and "
+            f"group_size for every expert and projection, got "
+            f"{sorted(entries, key=str)}."
+        )
+
     @staticmethod
     def _quantized_layer_prefix_candidates(prefix: str) -> tuple[str, ...]:
         candidates = [prefix]
@@ -2261,7 +2338,9 @@ class ModelOptMixedPrecisionConfig(ModelOptQuantConfigBase):
             return build_linear_method(getattr(self, subcfg_attr), quant_algo, prefix)
 
         if isinstance(layer, RoutedExperts):
-            _reject_int8_pb_wo_moe(quant_algo, prefix)
+            group_size = self._int8_pb_wo_experts_group_size(prefix, quant_algo)
+            if group_size is not None:
+                return Int8PbWoMoEMethod(group_size, layer.moe_config)
             if quant_algo in _BLOCK_FP8_MOE_ALGOS:
                 return Fp8MoEMethod(self.fp8_block_config, layer)
             if quant_algo == "FP8":
@@ -2778,10 +2857,7 @@ class KInt8Static(QuantKeyScheme):
             )
 
         def weight_loader(param, loaded_weight, *args, **kwargs):
-            if loaded_weight.dtype != torch.int8:
-                raise ValueError(f"expected an int8 weight, got {loaded_weight.dtype}")
-            packed = loaded_weight.contiguous().view(torch.uint8) ^ 0x80
-            return wl(param, packed.view(torch.int32), *args, **kwargs)
+            return wl(param, _pack_int8_pb_wo(loaded_weight), *args, **kwargs)
 
         self.register_params(
             layer,
