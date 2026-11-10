@@ -1,7 +1,7 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 import time
-from types import Any, TypeAlias
+from typing import Any, TypeAlias
 
 from pydantic import BaseModel, Field, model_validator
 

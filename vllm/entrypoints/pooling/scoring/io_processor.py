@@ -3,7 +3,7 @@
 import time
 from collections.abc import Sequence
 from functools import cached_property
-from types import Any, TypeAlias, cast
+from typing import Any, TypeAlias, cast
 
 import torch.nn.functional as F
 

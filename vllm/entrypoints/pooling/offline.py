@@ -2,7 +2,7 @@
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 
 from collections.abc import Callable, Sequence
-from types import Any
+from typing import Any
 
 from tqdm.auto import tqdm
 
