@@ -382,6 +382,7 @@ class RustScheduler(SchedulerInterface):
             self.connector,
             native_connector,
         )
+        logger.info_once("Using the Rust scheduler (%s).", type(self).__name__)
         self.kv_cache_manager = self._core.kv_cache_manager
         # Bind after construction so connectors can access the cache manager.
         if self.connector is not None:
