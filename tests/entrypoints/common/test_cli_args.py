@@ -51,6 +51,18 @@ def test_cors_origins_require_explicit_opt_in(serve_parser):
     ).allowed_origins == ["http://trusted.example"]
 
 
+@pytest.mark.parametrize(
+    "flags,expected",
+    [
+        ([], None),
+        (["--allow-header-priority"], True),
+        (["--no-allow-header-priority"], False),
+    ],
+)
+def test_header_priority_cli_tristate(serve_parser, flags, expected):
+    assert serve_parser.parse_args(flags).allow_header_priority is expected
+
+
 ### Test config parsing
 def test_config_arg_parsing(serve_parser, cli_config_file):
     args = serve_parser.parse_args([])

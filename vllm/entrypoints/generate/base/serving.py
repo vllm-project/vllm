@@ -21,6 +21,7 @@ from vllm.entrypoints.openai.responses.protocol import ResponsesRequest
 from vllm.entrypoints.serve.engine.protocol import ErrorResponse
 from vllm.entrypoints.serve.engine.serving import BaseServing
 from vllm.entrypoints.serve.utils.request_logger import RequestLogger
+from vllm.entrypoints.serve.utils.request_priority import get_header_priority
 from vllm.exceptions import GenerationError
 from vllm.logger import init_logger
 from vllm.logprobs import Logprob, PromptLogprobs
@@ -238,7 +239,11 @@ class GenerateBaseServing(BaseServing, BeamSearchOnlineMixin):
                 try:
                     return int(priority)
                 except ValueError:
-                    pass
+                    return request.priority
+            if "priority" not in request.model_fields_set:
+                header_priority = get_header_priority(raw_request)
+                if header_priority is not None:
+                    return header_priority
         return request.priority
 
     async def _with_kv_transfer_rejection_cleanup(

@@ -134,6 +134,69 @@ completion = client.chat.completions.create(
 )
 ```
 
+### Ingress priority headers
+
+The Python Completions, Chat Completions, and Responses APIs also accept
+`X-Priority: <integer>` and [RFC 9218](https://www.rfc-editor.org/rfc/rfc9218)
+`Priority: u=<0..7>` headers. Lower numbers mean higher scheduling priority;
+RFC urgency is multiplied by ten (`u=0` becomes `0`, `u=7` becomes `70`).
+Negative `X-Priority` values remain valid and are passed through unchanged.
+This is a vLLM scheduling extension, not OpenAI's `service_tier` parameter or
+a guarantee about HTTP transport scheduling.
+
+`--allow-header-priority` enables these two headers, and
+`--no-allow-header-priority` explicitly disables them. When neither is set,
+they are enabled only with `--scheduling-policy priority` (disabled with the
+default `fcfs` policy). Explicitly enabling header parsing does not enable
+priority scheduling or change the existing policy validation. For example:
+
+```bash
+vllm serve Qwen/Qwen3-0.6B --scheduling-policy priority
+```
+
+Resolution order is:
+
+1. The legacy `X-Vllm-Priority` override, if present. This remains independent
+   of `--allow-header-priority` and takes precedence over the body. A malformed
+   legacy override still falls back directly to the body priority.
+2. Explicit JSON body `priority`, **including zero**.
+3. A single valid `X-Priority` signed decimal integer header.
+4. A valid integer `u` member in the RFC 9218 `Priority` Dictionary, times ten.
+5. The request's default priority (`0`).
+
+The new `X-Priority` header accepts signed 64-bit integers
+(`-9223372036854775808` through `9223372036854775807`). Values outside this
+range follow the same fallback as malformed headers.
+Malformed `X-Priority` values, including comma-joined values, are ignored;
+duplicate `X-Priority` field lines are also ignored, allowing fallback to
+`Priority`. Surrounding spaces/tabs and a leading sign are accepted. Unlike
+the new header, the legacy override retains Python integer parsing and its
+existing first-field-line behavior.
+
+`Priority` is parsed as an [RFC 8941](https://www.rfc-editor.org/rfc/rfc8941)
+Structured Fields Dictionary, not by searching for `u=`. Multiple field lines
+are combined with commas; the last duplicate Dictionary key wins. Unknown
+valid members and item parameters are ignored. Invalid Dictionary syntax
+causes the whole field to be ignored. Boolean, string, decimal, inner-list,
+or out-of-range urgency values are ignored. Only an explicit valid integer
+urgency injects a scheduling priority; otherwise the existing request default
+is retained (not RFC 9218's transport urgency default of 3). `i` does not
+change vLLM scheduling.
+
+These headers do not authenticate callers or enforce tenant quotas. At an
+untrusted ingress, strip or overwrite **all three** priority headers and
+enforce authorization for body priorities. Disabling the new headers alone
+does not disable the legacy override. Batch-chat and token-input endpoints
+retain their existing priority behavior; the Rust frontend is not covered.
+
+```python
+completion = client.chat.completions.create(
+    model="Qwen/Qwen3-0.6B",
+    messages=[{"role": "user", "content": "Hello!"}],
+    extra_headers={"Priority": "u=1, i"},  # scheduling priority 10
+)
+```
+
 ## API Reference
 
 ### Completions API
