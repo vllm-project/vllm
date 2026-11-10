@@ -174,12 +174,19 @@ class UsageMessage:
 
     def _report_tpu_inference_usage(self) -> bool:
         try:
-            from tpu_inference import tpu_info, utils
+            try:
+                from vllm_jax import tpu_info, utils
+
+                runtime = "vllm_jax"
+            except ImportError:
+                from tpu_inference import tpu_info, utils
+
+                runtime = "tpu_inference"
 
             self.gpu_count = tpu_info.get_num_chips()
             self.gpu_type = tpu_info.get_tpu_type()
             self.gpu_memory_per_device = utils.get_device_hbm_limit()
-            self.cuda_runtime = "tpu_inference"
+            self.cuda_runtime = runtime
             return True
         except Exception:
             return False
