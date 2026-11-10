@@ -18,10 +18,12 @@ from vllm.v1.core.kv_cache_utils import KVCacheBlock, KVCacheBlockCopy, trim_nul
 from vllm.v1.core.single_type_kv_cache_manager import MambaManager
 from vllm.v1.kv_cache_interface import (
     AttentionSpec,
+    ChunkedLocalAttentionSpec,
     CrossAttentionSpec,
     EncoderOnlyAttentionSpec,
     KVCacheConfig,
     MambaSpec,
+    SlidingWindowSpec,
     get_kv_cache_spec_kind,
     get_kv_cache_spec_sliding_window,
 )
@@ -224,6 +226,8 @@ class KVCacheManager:
         self.empty_kv_cache_blocks = KVCacheBlocks(
             tuple(() for _ in range(self.num_kv_cache_groups))
         )
+        # {req_id: max tokens per prefill chunk}, see `set_prefill_chunk_cap`.
+        self.prefill_chunk_caps: dict[str, int] = {}
 
     @property
     def usage(self) -> float:
@@ -656,7 +660,51 @@ class KVCacheManager:
             request: The request to free the blocks.
 
         """
+        self.prefill_chunk_caps.pop(request.request_id, None)
         self.coordinator.free(request.request_id)
+
+    def get_prefill_chunk_cap(self, request_id: str) -> int | None:
+        """Get the prefill chunk cap set by `set_prefill_chunk_cap`, if any."""
+        return self.prefill_chunk_caps.get(request_id)
+
+    def set_prefill_chunk_cap(
+        self, request_id: str, chunk_tokens: int | None, max_in_flight_tokens: int
+    ) -> None:
+        """Cap the request's prefill chunks at `chunk_tokens` tokens until its
+        blocks are freed, or remove the cap if `chunk_tokens` is None.
+
+        The admission cap of the request's recycling-aware (sliding-window,
+        chunked-local) groups is lowered to the blocks such chunks hold, so the
+        full-sequence admission check matches the smaller chunks.
+
+        Args:
+            request_id: The request ID.
+            chunk_tokens: The max number of tokens per prefill chunk.
+            max_in_flight_tokens: The max number of the request's tokens that
+                are scheduled but not yet processed under this chunk cap; see
+                `VllmConfig.max_in_flight_tokens`.
+
+        """
+        if chunk_tokens is None:
+            self.prefill_chunk_caps.pop(request_id, None)
+        else:
+            self.prefill_chunk_caps[request_id] = chunk_tokens
+        for manager in self.coordinator.single_type_managers:
+            spec = manager.kv_cache_spec
+            if manager.max_admission_blocks_per_request is None or not isinstance(
+                spec, (SlidingWindowSpec, ChunkedLocalAttentionSpec)
+            ):
+                continue
+            if chunk_tokens is None:
+                manager.admission_cap_overrides.pop(request_id, None)
+                continue
+            manager.admission_cap_overrides[request_id] = min(
+                manager.max_admission_blocks_per_request,
+                spec.max_admission_blocks_per_request(
+                    max_in_flight_tokens=max_in_flight_tokens,
+                    max_model_len=self.max_model_len,
+                ),
+            )
 
     def remove_skipped_blocks(
         self,
@@ -690,6 +738,7 @@ class KVCacheManager:
             The request's blocks in allocation order.
 
         """
+        self.prefill_chunk_caps.pop(request.request_id, None)
         return self.coordinator.pop_blocks_for_free(request.request_id)
 
     def evict_blocks(self, block_ids: set[int]) -> None:

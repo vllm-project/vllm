@@ -219,6 +219,23 @@ class SchedulerConfig:
     checking the first chunk. Prevents over-admission and KV cache thrashing
     with chunked prefill."""
 
+    prefill_chunk_backoff: bool = False
+    """If True, when a step would otherwise schedule nothing (no running
+    request) because the head of the waiting queue cannot allocate KV blocks
+    for its next prefill chunk, retry it with halved, block-aligned chunk sizes.
+    The full-sequence admission check is evaluated at the reduced chunk size
+    and the reservations of other in-flight prefills are kept, so the request
+    can finish its prefill at that chunk size, which then sticks until its KV
+    blocks are freed. Steps that schedule anything are not affected.
+
+    This is a liveness backstop for KV cache held outside admission
+    reservations (e.g. a P/D producer waiting for the decode side to pull
+    finished requests' KV), which otherwise stalls the engine until it is
+    released.
+
+    **Experimental**: this option may be changed or removed in a future release.
+    """
+
     watermark: float = Field(default=0.0, ge=0.0, lt=1.0)
     """Fraction of total KV cache blocks to keep free (the watermark) when
     admitting waiting or preempted requests into the running queue. This headroom
@@ -337,6 +354,7 @@ class SchedulerConfig:
             "scheduler_cls",
             "disable_hybrid_kv_cache_manager",
             "scheduler_reserve_full_isl",
+            "prefill_chunk_backoff",
             "watermark",
             "prefill_schedule_interval",
             "async_scheduling",

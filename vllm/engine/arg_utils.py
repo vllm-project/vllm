@@ -718,6 +718,7 @@ class EngineArgs:
     disable_chunked_mm_input: bool = SchedulerConfig.disable_chunked_mm_input
 
     scheduler_reserve_full_isl: bool = SchedulerConfig.scheduler_reserve_full_isl
+    prefill_chunk_backoff: bool = SchedulerConfig.prefill_chunk_backoff
     prefill_schedule_interval: int = SchedulerConfig.prefill_schedule_interval
     cache_aware_admission_window: int = SchedulerConfig.cache_aware_admission_window
     cache_aware_admission_threshold: float = (
@@ -1828,6 +1829,9 @@ class EngineArgs:
             "--scheduler-reserve-full-isl",
             **scheduler_kwargs["scheduler_reserve_full_isl"],
         )
+        scheduler_group.add_argument(
+            "--prefill-chunk-backoff", **scheduler_kwargs["prefill_chunk_backoff"]
+        )
         scheduler_group.add_argument("--watermark", **scheduler_kwargs["watermark"])
         scheduler_group.add_argument(
             "--prefill-schedule-interval",
@@ -2718,6 +2722,7 @@ class EngineArgs:
                 self.long_prefill_token_threshold_adaptive
             ),
             scheduler_reserve_full_isl=self.scheduler_reserve_full_isl,
+            prefill_chunk_backoff=self.prefill_chunk_backoff,
             watermark=self.watermark,
             prefill_schedule_interval=self.prefill_schedule_interval,
             cache_aware_admission_window=self.cache_aware_admission_window,
