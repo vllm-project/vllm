@@ -96,6 +96,7 @@ def _vllm_config(**over) -> SimpleNamespace:
         cache_config=SimpleNamespace(
             cache_dtype="fp8",
             mamba_cache_dtype="auto",
+            mamba_ssm_cache_dtype="auto",
             use_replayssm=False,
             use_kda_recoverssm=False,
         ),
@@ -352,6 +353,7 @@ def test_mla_without_m1_runs_vllm_ops(on_mi355x, monkeypatch, over, env, why):
         ({"speculative_config.enable_adaptive_verification": True}, "adaptive"),
         ({"speculative_config.dynamic": True}, "dynamic speculative"),
         ({"cache_config.mamba_cache_dtype": "float32"}, "KDA cache dtypes"),
+        ({"cache_config.mamba_ssm_cache_dtype": "bfloat16"}, "KDA cache dtypes"),
         ({"cache_config.use_replayssm": True}, "ReplaySSM"),
         (
             {"compilation_config.mode": CompilationMode.STOCK_TORCH_COMPILE},
