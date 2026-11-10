@@ -11,3 +11,7 @@ ray[default]
 ray[data]
 setuptools-rust>=1.9.0
 nixl==0.3.0
+
+# TPU runtime backends live out-of-tree (install matching release or from source):
+# - JAX backend: https://github.com/vllm-project/vllm-jax (`uv pip install vllm-jax`)
+# - PyTorch backend: https://github.com/vllm-project/vllm-torchtpu (`uv pip install vllm-torchtpu`)
