@@ -22,7 +22,6 @@ from vllm.model_executor.layers.linear import (
 )
 from vllm.model_executor.layers.mla import MultiHeadLatentAttentionWrapper
 from vllm.model_executor.layers.quantization.utils.quant_utils import QuantKey
-from vllm.model_executor.layers.utils import warmup_rocm_skinny_gemm_workspaces
 from vllm.model_executor.utils import refill_derived
 from vllm.platforms import current_platform
 
@@ -46,9 +45,6 @@ def _fused_decode_applicable(attn_metadata, slot_mapping, kv_cache) -> bool:
 class KimiK3MultiHeadLatentAttentionWrapper(MultiHeadLatentAttentionWrapper):
     """Kimi-K3 MLA wrapper with eager AITER q/kv RMSNorm and output gate
     fusions and a fused decode Q-prep path."""
-
-    def warmup_before_capture(self, device: torch.device) -> None:
-        warmup_rocm_skinny_gemm_workspaces(device)
 
     def __init__(self, *args, **kwargs) -> None:
         super().__init__(*args, **kwargs)

@@ -33,24 +33,6 @@ def _make_layer(self_attn: nn.Module) -> KimiDecoderLayer:
     return layer
 
 
-def test_warmup_before_capture_reaches_nested_submodules() -> None:
-    from vllm.model_executor.models.interfaces import warmup_before_capture
-
-    class Warmable(nn.Module):
-        def __init__(self) -> None:
-            super().__init__()
-            self.devices: list[torch.device] = []
-
-        def warmup_before_capture(self, device: torch.device) -> None:
-            self.devices.append(device)
-
-    model = nn.Sequential(nn.Linear(2, 2), nn.Sequential(Warmable()))
-    device = torch.device("cpu")
-    warmup_before_capture(model, device)
-
-    assert model[1][0].devices == [device]
-
-
 def test_mla_self_attention_returns_projection_storage_directly() -> None:
     hidden_states = torch.randn(4, 8)
     projected = torch.randn_like(hidden_states)
