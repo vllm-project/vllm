@@ -372,6 +372,10 @@ OPTIMIZATION_LEVEL_TO_CONFIG = {
 }
 
 
+# top_k values the pinned FlashInfer NVLinkOneSidedAlltoAll accepts.
+_ONE_SIDED_SUPPORTED_TOP_K = frozenset({1, 2, 3, 4, 6, 8, 10, 12, 14, 16, 18, 22})
+
+
 def _has_heterogeneous_moe_layers(model_config: "ModelConfig") -> bool:
     """Whether MoE layers differ in num_experts or top_k (per-layer block_configs)."""
     block_configs = getattr(model_config.hf_text_config, "block_configs", None)
@@ -1059,6 +1063,9 @@ class VllmConfig:
         # varies them per layer).
         if _has_heterogeneous_moe_layers(model_config):
             return "MoE layers with different num_experts or top_k"
+        top_k = model_config.get_num_experts_per_tok()
+        if top_k and top_k not in _ONE_SIDED_SUPPORTED_TOP_K:
+            return f"top_k={top_k}"
         # One-sided dispatch carries BF16/FP16, NVFP4 or 128x128 block FP8.
         quantization = model_config.quantization
         if quantization is None:

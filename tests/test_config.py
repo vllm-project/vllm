@@ -1813,6 +1813,23 @@ def test_one_sided_all2all_default_skips_heterogeneous_moe_layers(
     assert parallel_config.all2all_backend == "flashinfer_nvlink_one_sided"
 
 
+@pytest.mark.parametrize(
+    ("top_k", "expected"),
+    [
+        (8, "flashinfer_nvlink_one_sided"),
+        (5, "allgather_reducescatter"),
+    ],
+)
+def test_one_sided_all2all_default_follows_supported_top_k(hgx_host, top_k, expected):
+    """FlashInfer's one-sided kernels only accept some top_k values."""
+    config = _one_full_ep_node_config(
+        model_config=ModelConfig(
+            _MOE_MODEL, hf_overrides={"num_experts_per_tok": top_k}
+        )
+    )
+    assert config.parallel_config.all2all_backend == expected
+
+
 def test_one_sided_all2all_default_skips_lora(hgx_host):
     """Fused MoE LoRA with EP only supports allgather_reducescatter."""
     config = _one_full_ep_node_config(lora_config=LoRAConfig())
