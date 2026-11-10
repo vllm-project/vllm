@@ -176,3 +176,17 @@ def test_all_reduce_uses_device_communicator_outside_a_microbatch(monkeypatch):
     assert torch.equal(group._all_reduce_out_place(x), x + 1)
     group.dbo_overlap = True
     assert torch.equal(group._all_reduce_out_place(x), x + 1)
+
+
+def test_tp_all_reduce_outside_a_microbatch_takes_the_regular_path(monkeypatch):
+    # The quantized microbatch paths must not run for steps that are not split.
+    calls = []
+    comm = SimpleNamespace(all_reduce=lambda x: calls.append("regular") or x)
+    dma = SimpleNamespace(
+        should_reduce=lambda x: True,
+        all_reduce=lambda x, out: calls.append("dma") or x,
+    )
+    monkeypatch.setattr(ubatching, "_DMA_AR", dma)
+    monkeypatch.setattr(ubatching, "_THREAD_ID_TO_CONTEXT", {})
+    ubatching.dbo_tp_all_reduce(comm, torch.ones(4))
+    assert calls == ["regular"]

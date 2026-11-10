@@ -316,6 +316,10 @@ def dbo_tp_all_reduce(device_communicator, input_: torch.Tensor) -> torch.Tensor
     time, so the calls are issued in the same order on every rank and never
     overlap: QuickReduce's single buffer is enough.
     """
+    # Outside a microbatch (no split, warmup, decode) this is the regular TP
+    # all-reduce: the quantized paths only pay off when they overlap compute.
+    if threading.get_ident() not in _THREAD_ID_TO_CONTEXT:
+        return device_communicator.all_reduce(input_)
     # Stream write/wait operations cannot be captured into a graph: QuickReduce
     # or the regular dispatch there.
     if (
