@@ -1,6 +1,6 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
-"""Tests for running the generation lm_head in fp32 via ``head_dtype``.
+"""Tests for running the generation lm_head in fp32 via `head_dtype`.
 
 An fp32 head lets rollout logits match a trainer that computes the lm_head in
 fp32, which is required for RL training-inference consistency.

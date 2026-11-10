@@ -142,7 +142,7 @@ def is_strictly_contiguous(t: torch.Tensor) -> bool:
 def is_non_overlapping_and_dense(t: torch.Tensor) -> bool:
     """Check if the tensor's elements cover one gapless, non-overlapping byte
     range, in any dimension order (i.e. a permuted view of a contiguous
-    tensor); ``is_contiguous()`` additionally requires row-major order.
+    tensor); `is_contiguous()` additionally requires row-major order.
     """
     expected_stride = 1
     for size, stride in sorted(zip(t.shape, t.stride()), key=lambda p: p[1]):
@@ -570,17 +570,17 @@ def nvfp4_split_data_scale(
     """Split one side (K or V) of an NVFP4 KV cache into data and scale.
 
     The input is a 4D uint8 tensor whose last dimension is
-    ``full_dim = data_dim + scale_dim``.  The physical layout within each
-    side is ``[data | scale]``, both packed contiguously.
+    `full_dim = data_dim + scale_dim`.  The physical layout within each
+    side is `[data | scale]`, both packed contiguously.
 
     The caller is responsible for slicing K and V from the combined cache
-    first (e.g. ``kv_cache.split(num_kv_heads, dim=1)``).
+    first (e.g. `kv_cache.split(num_kv_heads, dim=1)`).
 
     Args:
-        kv_side: 4D uint8 tensor ``(B, H, N, full_dim)``.
+        kv_side: 4D uint8 tensor `(B, H, N, full_dim)`.
 
     Returns:
-        ``(data, scale)`` where *data* is uint8 and *scale* is
+        `(data, scale)` where *data* is uint8 and *scale* is
         float8_e4m3fn, both views of the same storage.
 
     """
