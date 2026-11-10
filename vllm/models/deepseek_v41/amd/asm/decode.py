@@ -17,8 +17,9 @@ Per decoder layer:
 - the Engram layers' wkv on the prefetch stream, their gate · value applied by
   the next attention seam (`engram.py`).
 
-The folded all-reduces compute what vLLM's custom all-reduce does: the four
-ranks' partials summed in fp32 in rank order, rounded once to bf16.
+The folded all-reduces sum the four ranks' partials in fp32 in rank order and
+round once to bf16, as vLLM's all-reduce does (AITER's rotates the order, so
+the last bit can differ).
 
 The mono decode layer hands this layer the decoder layer's forward for steps of
 17-256 rows (`AsmDecodeLayer.__call__`, model.py's forward with our kernels
