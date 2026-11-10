@@ -233,6 +233,8 @@ steps:
           - "docker push public.ecr.aws/q9t5s3a7/vllm-release-repo:$BUILDKITE_COMMIT-$(uname -m)"
           - 'bash .buildkite/scripts/annotate-build-artifact.sh "$$BUILDKITE_LABEL" "public.ecr.aws/q9t5s3a7/vllm-release-repo:$BUILDKITE_COMMIT-$(uname -m)" release-images'
 
+      # The Rubin build stage stays on the cuda13.4 builders until PyTorch
+      # publishes cuda13.5 ones; CUDA_VERSION must match FINAL_BASE_IMAGE.
       - label: "Build release image - x86_64 - Rubin CUDA 13.5"
         depends_on: ~
         id: build-release-image-x86-rubin-cuda-13-5
@@ -255,7 +257,7 @@ steps:
               --build-arg TRITON_INSTALL_FROM_SOURCE_REPO=https://github.com/triton-lang/triton.git \
               --build-arg TRITON_INSTALL_FROM_SOURCE_REVISION=3f6e41132b5edf639bfb872ad73d4688765e08b8 \
               --build-arg RUN_WHEEL_CHECK=false \
-              --build-arg BUILD_BASE_IMAGE=pytorch/manylinux2_28-builder:cuda13.5 \
+              --build-arg BUILD_BASE_IMAGE=pytorch/manylinux2_28-builder:cuda13.4 \
               --build-arg FINAL_BASE_IMAGE=nvidia/cuda:13.5.0-base-ubuntu24.04 \
               --build-arg NCCL_VERSION=2.32.3 \
               --target vllm-openai \
@@ -286,7 +288,7 @@ steps:
               --build-arg TRITON_INSTALL_FROM_SOURCE_REPO=https://github.com/triton-lang/triton.git \
               --build-arg TRITON_INSTALL_FROM_SOURCE_REVISION=3f6e41132b5edf639bfb872ad73d4688765e08b8 \
               --build-arg RUN_WHEEL_CHECK=false \
-              --build-arg BUILD_BASE_IMAGE=pytorch/manylinuxaarch64-builder:cuda13.5 \
+              --build-arg BUILD_BASE_IMAGE=pytorch/manylinuxaarch64-builder:cuda13.4 \
               --build-arg FINAL_BASE_IMAGE=nvidia/cuda:13.5.0-base-ubuntu24.04 \
               --build-arg NCCL_VERSION=2.32.3 \
               --target vllm-openai \
