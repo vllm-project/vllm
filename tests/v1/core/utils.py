@@ -379,8 +379,8 @@ def new_mamba_spec(
     )
 
 
-def full_layer(spec: KVCacheSpec, non_causal: bool = False) -> KVCacheLayerConfig:
-    return FullAttentionManager.layer_config(spec, non_causal=non_causal)
+def full_layer(spec: KVCacheSpec) -> KVCacheLayerConfig:
+    return FullAttentionManager.layer_config(spec)
 
 
 def sliding_window_layer(

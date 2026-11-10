@@ -847,12 +847,6 @@ class SingleTypeKVCacheManager(ABC):
 class FullAttentionManager(SingleTypeKVCacheManager):
     supports_fine_grained_hash_lookup: ClassVar[bool] = True
 
-    @dataclass(frozen=True)
-    class Params(SingleTypeKVCacheManager.Params):
-        non_causal: bool = False
-        """Whether the layer attends non-causally (e.g. Prefix LM). The engine
-        core disables chunked prefill and prefix caching for such models."""
-
     @classmethod
     def find_longest_cache_hit(
         cls,
@@ -1015,7 +1009,7 @@ class RSWAManager(FullAttentionManager):
     """
 
     @dataclass(frozen=True, kw_only=True)
-    class Params(FullAttentionManager.Params):
+    class Params(SingleTypeKVCacheManager.Params):
         rswa_window: int
 
     def __init__(self, kv_cache_group: KVCacheGroup, **kwargs) -> None:
@@ -2527,7 +2521,7 @@ class EncoderOnlyAttentionManager(SingleTypeKVCacheManager):
 
 class SinkFullAttentionManager(FullAttentionManager):
     @dataclass(frozen=True, kw_only=True)
-    class Params(FullAttentionManager.Params):
+    class Params(SingleTypeKVCacheManager.Params):
         sink_len: int
 
     def __init__(self, kv_cache_group: KVCacheGroup, **kwargs) -> None:
