@@ -32,19 +32,19 @@ _TEXT_PART_TYPES = frozenset(
 def _parse_chat_template(chat_template: str) -> jinja2.nodes.Template:
     """Parse with the Jinja environment Hugging Face renders templates with.
 
-    ``transformers.utils.chat_template_utils._compile_jinja_template`` is
+    `transformers.utils.chat_template_utils._compile_jinja_template` is
     private, but it is the only place that environment is built (the
-    ``generation`` tag, loop controls, and the ``tojson`` /
-    ``raise_exception`` / ``strftime_now`` helpers). The renderer already
+    `generation` tag, loop controls, and the `tojson` /
+    `raise_exception` / `strftime_now` helpers). The renderer already
     parses through it for content-format detection, and the supported
-    transformers range (``>=5.16.1,<5.20``) keeps the helper.
+    transformers range (`>=5.16.1,<5.20`) keeps the helper.
     """
     compiled = hf_chat_utils._compile_jinja_template(chat_template)
     return compiled.environment.parse(chat_template)
 
 
 def _literal_strings(annotation: Any) -> set[str]:
-    """String members of a ``Literal``, including wrapped annotations."""
+    """String members of a `Literal`, including wrapped annotations."""
     if get_origin(annotation) is Literal:
         return {value for value in get_args(annotation) if isinstance(value, str)}
     found: set[str] = set()
@@ -54,11 +54,11 @@ def _literal_strings(annotation: Any) -> set[str]:
 
 
 def _roles_from_message_params(annotation: Any) -> frozenset[str]:
-    """Literal ``role`` values on a chat-message union.
+    """Literal `role` values on a chat-message union.
 
-    ``CustomChatCompletionMessageParam.role`` is a free-form string, so
+    `CustomChatCompletionMessageParam.role` is a free-form string, so
     those stay out of this set and can still be a hard error. Only the
-    fixed OpenAI roles are collected. Legacy ``function`` is one of them.
+    fixed OpenAI roles are collected. Legacy `function` is one of them.
     """
     roles: set[str] = set()
     pending: list[Any] = [annotation]
@@ -95,7 +95,7 @@ _STANDARD_CHAT_ROLES = _roles_from_message_params(OpenAIChatCompletionMessagePar
 
 
 def _is_role_access(node: jinja2.nodes.Node) -> bool:
-    """Whether ``node`` reads ``.role`` or ``['role']``."""
+    """Whether `node` reads `.role` or `['role']`."""
     if isinstance(node, jinja2.nodes.Getattr):
         return node.attr == "role"
     if isinstance(node, jinja2.nodes.Getitem):
@@ -104,7 +104,7 @@ def _is_role_access(node: jinja2.nodes.Node) -> bool:
 
 
 def _literal_role_names(node: jinja2.nodes.Node) -> list[str] | None:
-    """String literal, or a list/tuple of them. ``None`` if not pure literals."""
+    """String literal, or a list/tuple of them. `None` if not pure literals."""
     if isinstance(node, jinja2.nodes.Const) and isinstance(node.value, str):
         return [node.value]
     if isinstance(node, (jinja2.nodes.List, jinja2.nodes.Tuple)):
@@ -137,11 +137,11 @@ _RoleFinding = Literal["ignore", "literal", "dynamic", "exclude"]
 class _TemplateRoles(NamedTuple):
     """Literal roles named by one parsed template.
 
-    ``handled is None`` means the template does not filter on role.
-    ``excluded`` is roles an inclusion ``rejectattr``, or a negated
-    ``selectattr``, drops by name. Neither set proves the content was
-    omitted. A standard role in ``excluded``, or outside a non-empty
-    ``handled`` set, is probed and warned only when that probe shows the
+    `handled is None` means the template does not filter on role.
+    `excluded` is roles an inclusion `rejectattr`, or a negated
+    `selectattr`, drops by name. Neither set proves the content was
+    omitted. A standard role in `excluded`, or outside a non-empty
+    `handled` set, is probed and warned only when that probe shows the
     content is gone.
     """
 
@@ -152,21 +152,21 @@ class _TemplateRoles(NamedTuple):
 def _roles_from_attr_filter(
     node: jinja2.nodes.Filter,
 ) -> tuple[_RoleFinding, set[str]]:
-    """Classify a ``selectattr`` / ``rejectattr`` call on ``role``.
+    """Classify a `selectattr` / `rejectattr` call on `role`.
 
-    ``selectattr('role', 'equalto', 'user')`` keeps that literal role.
-    ``rejectattr('role', 'equalto', 'tool')`` names a role the template
-    drops. ``selectattr('role', 'ne', 'wizard')`` drops the named role, so
+    `selectattr('role', 'equalto', 'user')` keeps that literal role.
+    `rejectattr('role', 'equalto', 'tool')` names a role the template
+    drops. `selectattr('role', 'ne', 'wizard')` drops the named role, so
     those names are exclusions and must not stay on an allow-list.
-    ``rejectattr('role', 'ne', 'user')`` keeps the named role and drops
+    `rejectattr('role', 'ne', 'user')` keeps the named role and drops
     every other one; that name is not an allow-list either. A non-literal
     target still means the template filters by role.
 
     Returns:
-        ``("ignore", empty)`` when the filter does not test ``role``,
-        ``("literal", names)`` when ``selectattr`` names kept roles,
-        ``("exclude", names)`` when the filter names dropped roles,
-        or ``("dynamic", empty)`` when the filter is real but the kept
+        `("ignore", empty)` when the filter does not test `role`,
+        `("literal", names)` when `selectattr` names kept roles,
+        `("exclude", names)` when the filter names dropped roles,
+        or `("dynamic", empty)` when the filter is real but the kept
         names are not a literal allow-list.
 
     """
@@ -192,7 +192,7 @@ def _roles_from_attr_filter(
 
 
 def _negated_compare_ids(parsed: jinja2.nodes.Node) -> set[int]:
-    """Compares sitting under an odd number of ``not`` expressions."""
+    """Compares sitting under an odd number of `not` expressions."""
     negated: set[int] = set()
 
     def walk(node: jinja2.nodes.Node, depth: int) -> None:
@@ -214,19 +214,19 @@ def _roles_from_compare(
 ) -> tuple[_RoleFinding, set[str]]:
     """Classify one comparison that might select rendered roles.
 
-    Positive ``==`` / ``in`` with string literals name roles the template
-    may keep. ``!=``, ``not in``, and ``not (role == ...)`` are possible
+    Positive `==` / `in` with string literals name roles the template
+    may keep. `!=`, `not in`, and `not (role == ...)` are possible
     filters, but the literals are not an allow-list: a generation-prompt
-    guard (``messages[-1]['role'] != 'assistant'``) and a ``continue`` that
+    guard (`messages[-1]['role'] != 'assistant'`) and a `continue` that
     skips every other role look the same here. Those roles stay unresolved
-    until a render probe. A non-literal target, whether ``message.role in
-    allowed_roles`` or ``message.role == some_var``, is dynamic too.
+    until a render probe. A non-literal target, whether `message.role in
+    allowed_roles` or `message.role == some_var`, is dynamic too.
 
     Returns:
-        ``("ignore", empty)`` when the node does not test a role,
-        ``("literal", names)`` when the accepted roles are string literals
+        `("ignore", empty)` when the node does not test a role,
+        `("literal", names)` when the accepted roles are string literals
         (an empty list is a literal filter that names nothing), or
-        ``("dynamic", empty)`` when a filter exists but the kept names are
+        `("dynamic", empty)` when a filter exists but the kept names are
         not literals.
 
     """
@@ -267,7 +267,7 @@ def _roles_from_compare(
 
 @lru_cache(maxsize=32)
 def _template_roles(chat_template: str) -> _TemplateRoles:
-    """Parse ``chat_template`` once for literal role names and exclusions."""
+    """Parse `chat_template` once for literal role names and exclusions."""
     try:
         parsed = _parse_chat_template(chat_template)
     except Exception:
@@ -304,23 +304,23 @@ def _template_roles(chat_template: str) -> _TemplateRoles:
 def roles_rendered_by_chat_template(chat_template: str) -> frozenset[str] | None:
     """Return roles a template explicitly dispatches on.
 
-    The Jinja AST is walked once for comparisons that read ``.role`` or
-    ``['role']``, and for ``selectattr`` / ``rejectattr`` on ``role``.
-    ``None`` means the template does not filter by role, so every role is
+    The Jinja AST is walked once for comparisons that read `.role` or
+    `['role']`, and for `selectattr` / `rejectattr` on `role`.
+    `None` means the template does not filter by role, so every role is
     emitted. A frozenset, possibly empty, means unknown roles can be
     dropped and must be checked after render. A ChatML generation guard
-    (``messages[-1]['role'] != 'assistant'``) is one of those filters: it
+    (`messages[-1]['role'] != 'assistant'`) is one of those filters: it
     does not name an allow-list, but it is not ignored.
 
     Args:
         chat_template: Resolved Jinja source.
 
     Returns:
-        Roles named by positive ``==`` / ``in`` tests or by ``selectattr``
-        on ``role``. An empty set means the template filters on role, but
-        the kept names are not a literal allow-list (``not in``, ``!=``,
-        ``not (role == ...)``, ``message.role in allowed_roles``,
-        ``message.role == some_var``, or ``rejectattr``). ``None`` means
+        Roles named by positive `==` / `in` tests or by `selectattr`
+        on `role`. An empty set means the template filters on role, but
+        the kept names are not a literal allow-list (`not in`, `!=`,
+        `not (role == ...)`, `message.role in allowed_roles`,
+        `message.role == some_var`, or `rejectattr`). `None` means
         there is no role filter.
 
     """
@@ -370,7 +370,7 @@ def _has_structural_payload(message: Mapping[str, Any]) -> bool:
 
 
 def _strip_structural_payload(message: Mapping[str, Any]) -> dict[str, Any]:
-    """Copy ``message`` without tool calls or multimodal parts.
+    """Copy `message` without tool calls or multimodal parts.
 
     Text stays, and the message keeps its index. Removing the whole turn
     would hide a dropped tool call behind echoed text, and would also shift
@@ -401,7 +401,7 @@ def _is_text_part(part: Mapping[str, Any]) -> bool:
 
 
 def _blank_text_payload(message: Mapping[str, Any]) -> dict[str, Any]:
-    """Copy ``message`` with content text cleared and everything else kept."""
+    """Copy `message` with content text cleared and everything else kept."""
     updated = dict(message)
     content = updated.get("content")
     if isinstance(content, str):
@@ -425,7 +425,7 @@ def _blank_text_payload(message: Mapping[str, Any]) -> dict[str, Any]:
 
 
 def _inject_probe_token(message: dict[str, Any], token: str) -> bool:
-    """Append ``token`` to content text so a render can prove inclusion.
+    """Append `token` to content text so a render can prove inclusion.
 
     Reasoning is not probed. Templates often keep it out of the prompt, and
     a missing reasoning string is not a dropped turn.
@@ -495,7 +495,7 @@ def _role_probe_token(prefix: str, index: int) -> str:
 
 
 class _RenderBudget:
-    """At most ``_MAX_EXTRA_RENDERS`` calls. Further probes are unresolved."""
+    """At most `_MAX_EXTRA_RENDERS` calls. Further probes are unresolved."""
 
     def __init__(self) -> None:
         self.remaining = _MAX_EXTRA_RENDERS
@@ -536,9 +536,9 @@ def _dropped_by_omission(
     budget: _RenderBudget,
     transform: Callable[[Mapping[str, Any]], Mapping[str, Any]],
 ) -> set[int]:
-    """Indexes whose transformed copy leaves ``baseline`` unchanged.
+    """Indexes whose transformed copy leaves `baseline` unchanged.
 
-    A group that still changes the prompt is split only while ``budget``
+    A group that still changes the prompt is split only while `budget`
     has renders left. When the budget is spent, the rest are kept.
     """
 
@@ -635,7 +635,7 @@ def _standard_role_needs_probe(info: _TemplateRoles, role: str) -> bool:
 
     Absence from a literal allow-list, or a name on an exclusion filter,
     does not mean the content was dropped. A formatting check on
-    ``assistant`` still prints every other role. The caller probes, and
+    `assistant` still prints every other role. The caller probes, and
     warns only when the rendered prompt loses the content. An empty
     allow-list is a dynamic filter and does not put every standard role
     on that list.
@@ -668,11 +668,11 @@ def assert_chat_template_rendered_messages(
     A missing marker is checked by clearing the original text. Tool calls
     and multimodal parts are checked by stripping them in place, so a
     neighbor lookup by index stays put. Each check stops after
-    ``_MAX_EXTRA_RENDERS`` extra renders and keeps whatever is still
+    `_MAX_EXTRA_RENDERS` extra renders and keeps whatever is still
     unresolved.
 
-    Standard roles from the OpenAI message schema (``system``, ``user``,
-    ``assistant``, ``tool``, ``developer``, and legacy ``function``) are
+    Standard roles from the OpenAI message schema (`system`, `user`,
+    `assistant`, `tool`, `developer`, and legacy `function`) are
     not rejected. When a non-empty literal set omits one, or an exclusion
     filter names it, the turn is probed with the same budget as a custom
     role. A warning is logged only when that probe shows the content is
@@ -685,7 +685,7 @@ def assert_chat_template_rendered_messages(
         chat_template: Resolved Jinja source.
         render_text: Renders a conversation to prompt text with the same
             template options as the request.
-        rendered: Prompt text already produced for ``conversation``, when
+        rendered: Prompt text already produced for `conversation`, when
             the caller has it. Tokenized calls leave this empty and one
             text baseline is rendered only if a probe is needed.
 
