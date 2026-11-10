@@ -1,26 +1,26 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 """The DeepSeek-V4-Pro mono decode path through the real model: a five-layer
-DeepSeek-V4-Pro at TP8 on CDNA4, served with ``--monokernel`` on and off on
+DeepSeek-V4-Pro at TP8 on CDNA4, served with `--monokernel` on and off on
 the same random weights: every decoder layer's outputs at every decode step
-must match. Unlike ``test_dsv4_mono_numerics.py``, which checks the kernels
+must match. Unlike `test_dsv4_mono_numerics.py`, which checks the kernels
 against vLLM's ops one stage at a time, this runs
-``DeepseekV4DecoderLayer.forward`` in the engine -- the model's hook, the
+`DeepseekV4DecoderLayer.forward` in the engine -- the model's hook, the
 per-step path choice, the weights taken off the layer, the metadata, the
 compressor and the indexer's top-k -- so a change to the decoder layer that
 the kernels do not follow fails here. Scope: eager steps of one token a
 request; speculative decoding's multi-token rows and graph replays are not
 covered.
 
-The checkpoint's own first five layers (``compress_ratios`` 128, 128, 4, 128,
-4; ``num_hash_layers`` 3) hold every variant the kernels build, each taking the
+The checkpoint's own first five layers (`compress_ratios` 128, 128, 4, 128,
+4; `num_hash_layers` 3) hold every variant the kernels build, each taking the
 whole layer (K1 + K2):
 - 0: hash-routed HCA, the first layer (K1 takes the embedding, no fold)
 - 1: hash-routed HCA
 - 2: hash-routed CSA (vLLM's indexer between K1 and K2)
 - 3: bias-routed HCA
 - 4: bias-routed CSA
-A 32K ``max_model_len`` builds the HCA kernels 256 keys wide; the prompts
+A 32K `max_model_len` builds the HCA kernels 256 keys wide; the prompts
 (under 8.3K) keep vLLM's c128a decode table at its 128-wide floor, so the
 kernels read a table narrower than they are built for.
 """
@@ -123,7 +123,7 @@ class RandomWeightLoader(DummyModelLoader):
 
 
 class MonoProbe:
-    """Worker extension (``worker_extension_cls``): it also brings this module,
+    """Worker extension (`worker_extension_cls`): it also brings this module,
     and so the loader, into the workers."""
 
     def _decoder_layers(self) -> dict:
@@ -143,7 +143,7 @@ class MonoProbe:
         mono path takes), keyed by (layer, prompt length, position): a
         request's step and row can differ between engines, its prompt length
         and position cannot.
-        ``lens``: the prompt lengths, more than ``STEPS`` apart; a row's
+        `lens`: the prompt lengths, more than `STEPS` apart; a row's
         request is the longest prompt not past its position."""
         from vllm.forward_context import get_forward_context
 
@@ -221,10 +221,10 @@ class MonoProbe:
 
 
 def _decode(vllm_runner, monkeypatch, mono: bool, prompts, path: str):
-    """Greedy decode of ``prompts`` with the mono path on or off: (each
+    """Greedy decode of `prompts` with the mono path on or off: (each
     prompt's output, the workers' mono layers); each decoder layer's outputs
     for the decode tokens of decode-only steps, and vLLM's routing margins,
-    saved under ``path``."""
+    saved under `path`."""
     from vllm import SamplingParams
     from vllm.inputs import TokensPrompt
 

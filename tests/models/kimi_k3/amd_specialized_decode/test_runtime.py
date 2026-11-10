@@ -35,13 +35,31 @@ from vllm.models.kimi_k3.amd.specialized_decode.runtime.guards import (
     mla_weight_reasons,
     weight_reasons,
 )
+from vllm.transformers_utils.configs.kimi_linear import KimiLinearConfig
 from vllm.v1.attention.backends.registry import AttentionBackendEnum
+
+
+def test_dsa_layers_use_k2_after_sparse_attention():
+    """Sparse attention supplies gated pre-o_proj activations to K2."""
+    config = KimiLinearConfig(
+        num_hidden_layers=16,
+        num_experts=896,
+        first_k_dense_replace=1,
+        attn_res_block_size=12,
+        linear_attn_config={
+            "kda_layers": [i for i in range(1, 17) if i % 4],
+            "full_attn_layers": [4, 8, 12, 16],
+        },
+        dsa_config={"dsa_layers": [4, 8, 12, 16]},
+    )
+    kinds = layer_kinds(config)
+    assert kinds == {i: WHOLE if config.is_kda_layer(i) else FFN for i in range(1, 16)}
 
 
 def _vllm_config(**over) -> SimpleNamespace:
     """A supported config: TP8, DCP8 (interleave 1), 7 speculative tokens,
     max_num_seqs 1, an fp8 KV cache, FULL graphs, MRV2.
-    ``over`` sets dotted paths, e.g. ``{"parallel_config.data_parallel_size": 2}``."""
+    `over` sets dotted paths, e.g. `{"parallel_config.data_parallel_size": 2}`."""
     spec = SimpleNamespace(
         num_speculative_tokens=7,
         enable_adaptive_verification=False,
@@ -92,7 +110,6 @@ def _vllm_config(**over) -> SimpleNamespace:
         speculative_config=spec,
         scheduler_config=SimpleNamespace(max_num_seqs=1),
         attention_config=SimpleNamespace(backend=None),
-        use_v2_model_runner=True,
         compilation_config=SimpleNamespace(
             mode=CompilationMode.VLLM_COMPILE,
             cudagraph_mode=CUDAGraphMode.FULL_AND_PIECEWISE,
@@ -148,13 +165,15 @@ def _k3_text_config():
     """Kimi-K3's layer pattern: 93 layers, MLA every 4th, AttnRes blocks of 12,
     layer 0 dense."""
     mla = {i for i in range(93) if i % 4 == 3} | {92}
-    return SimpleNamespace(
+    return KimiLinearConfig(
         num_hidden_layers=93,
         attn_res_block_size=12,
         num_experts=896,
         first_k_dense_replace=1,
-        moe_layer_freq=1,
-        is_kda_layer=lambda i: i not in mla,
+        linear_attn_config={
+            "kda_layers": [i + 1 for i in range(93) if i not in mla],
+            "full_attn_layers": [i + 1 for i in sorted(mla)],
+        },
     )
 
 
@@ -189,7 +208,6 @@ def test_supported_config_is_accepted(supported_vllm_config):
 def supported_vllm_config(tmp_path, monkeypatch, on_mi355x):
     from vllm.transformers_utils.configs.kimi_linear import KimiLinearConfig
 
-    monkeypatch.setenv("VLLM_USE_V2_MODEL_RUNNER", "1")
     # CUDA must not auto-enable a process-wide setting in this ROCm fixture.
     monkeypatch.setenv("VLLM_USE_BREAKABLE_CUDAGRAPH", "0")
     KimiLinearConfig(
@@ -335,7 +353,6 @@ def test_mla_without_m1_runs_vllm_ops(on_mi355x, monkeypatch, over, env, why):
         ({"speculative_config.dynamic": True}, "dynamic speculative"),
         ({"cache_config.mamba_cache_dtype": "float32"}, "KDA cache dtypes"),
         ({"cache_config.use_replayssm": True}, "ReplaySSM"),
-        ({"use_v2_model_runner": False}, "V1 model runner"),
         (
             {"compilation_config.mode": CompilationMode.STOCK_TORCH_COMPILE},
             "torch.compile",
@@ -440,12 +457,10 @@ def test_every_refusal_is_reported_at_once(monkeypatch):
     monkeypatch.setattr(
         runtime, "platform_reasons", lambda: ["this GPU (gfx950 / MI355X only)"]
     )
-    cfg = _vllm_config(
-        **{"parallel_config.tensor_parallel_size": 4, "use_v2_model_runner": False}
-    )
+    cfg = _vllm_config(**{"parallel_config.tensor_parallel_size": 4})
     with pytest.raises(ValueError) as e:
         specialized_decode_config(cfg)
-    for reason in ("TP 4", "V1 model runner", "this GPU", "decode_backend=auto"):
+    for reason in ("TP 4", "this GPU", "decode_backend=auto"):
         assert reason in str(e.value)
 
 
@@ -549,7 +564,7 @@ class _Kernel:
 
 def _decode(monkeypatch, mode=CUDAGraphMode.FULL, md=None):
     """An executor with kernels on layers 1 and 2 at widths 4 and 8, bound to a
-    KV cache, under a forward context of ``mode``."""
+    KV cache, under a forward context of `mode`."""
     decode = object.__new__(SpecializedDecode)
     decode.config = DecodeConfig(q=4)
     decode.runner = SimpleNamespace(kda_prefix="kda", mla_prefix="")
@@ -677,7 +692,7 @@ def test_qkv_gate_weights_split_the_merged_gate():
 def test_m1c_runs_where_its_splits_share_out():
     """M1c's KV splits share out evenly over a width's requests: qlen 4's 80
     splits over 12 rows (3 requests) don't (DCP1 refuses that step,
-    ``test_unserved_steps_are_refused``)."""
+    `test_unserved_steps_are_refused`)."""
     from vllm.models.kimi_k3.amd.specialized_decode.runtime.layers import (
         m1c_at,
         m1c_splits,
