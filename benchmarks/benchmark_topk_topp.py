@@ -30,6 +30,7 @@ from vllm.v1.sample.ops.topk_topp_triton import (
     apply_top_k_top_p_triton,
     reset_buffer_cache,
 )
+from vllm.v1.sample.ops.topk_topp_triton_hier import apply_top_k_top_p_triton_hier
 
 
 @dataclass
@@ -117,6 +118,7 @@ def apply_top_k_top_p_flashinfer_mask(logits, k, p):
 
 IMPLEMENTATIONS = {
     "triton": apply_top_k_top_p_triton,
+    "triton-hier": apply_top_k_top_p_triton_hier,
     "flashinfer-mask": apply_top_k_top_p_flashinfer_mask,
     "pytorch": apply_top_k_top_p_pytorch,
 }

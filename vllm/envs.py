@@ -49,6 +49,7 @@ if TYPE_CHECKING:
     VLLM_LOG_STATS_INTERVAL: float = 10.0
     VLLM_TRACE_FUNCTION: int = 0
     VLLM_USE_FLASHINFER_SAMPLER: bool = True
+    VLLM_USE_TRITON_HIER_TOPK_TOPP: bool = True
     VLLM_PP_LAYER_PARTITION: str | None = None
     VLLM_CPU_KVCACHE_SPACE: int | None = 0
     VLLM_CPU_OMP_THREADS_BIND: str = "auto"
@@ -930,6 +931,11 @@ environment_variables: dict[str, Callable[[], Any]] = {
         bool(int(os.environ["VLLM_USE_FLASHINFER_SAMPLER"]))
         if "VLLM_USE_FLASHINFER_SAMPLER" in os.environ
         else True
+    ),
+    # Whether apply_top_k_top_p masks FP32 CUDA logits on SM90+ with the
+    # group-maxima Triton kernel. Set to 0 to use the pivot-based Triton kernel.
+    "VLLM_USE_TRITON_HIER_TOPK_TOPP": lambda: bool(
+        int(os.getenv("VLLM_USE_TRITON_HIER_TOPK_TOPP", "1"))
     ),
     # Pipeline stage partition strategy
     "VLLM_PP_LAYER_PARTITION": lambda: os.getenv("VLLM_PP_LAYER_PARTITION", None),

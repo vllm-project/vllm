@@ -23,6 +23,10 @@ if HAS_TRITON:
         _topp_split_step,
         apply_top_k_top_p_triton,
     )
+    from vllm.v1.sample.ops.topk_topp_triton_hier import (
+        apply_top_k_top_p_triton_hier,
+        can_use_top_k_top_p_triton_hier,
+    )
 
 logger = init_logger(__name__)
 
@@ -516,6 +520,8 @@ def apply_top_k_top_p(
         return logits
 
     if HAS_TRITON:
+        if can_use_top_k_top_p_triton_hier(logits):
+            return apply_top_k_top_p_triton_hier(logits, k, p)
         return apply_top_k_top_p_triton(
             logits, k, p, has_topp_only_rows=has_topp_only_rows
         )
