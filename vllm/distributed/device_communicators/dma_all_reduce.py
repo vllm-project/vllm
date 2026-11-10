@@ -9,13 +9,13 @@ QuickReduce of an 8k-token microbatch next to a GEMM burst on another stream
 hides only 1-9% of the shorter of the two. A peer copy on the SDMA engines needs
 no CUs and hides 89-100% under the same GEMMs.
 
-How, per call k (slot k % slots, everything on the caller's stream, no host
+How, per call k (slot k % 2, everything on the caller's stream, no host
 sync):
 
 1. quantize x into send[slot]: INT4, one fp16 scale per 32 values (4.5 bits
    per value);
-2. wait until the peer has consumed our call k - slots (own counter
-   ``consumed`` >= k - slots + 1, hipStreamWaitValue64);
+2. wait until the peer has consumed our call k - 2 (own counter
+   ``consumed`` >= k - 1, hipStreamWaitValue64);
 3. copy send[slot] into the peer's recv[slot] (hipMemcpyAsync with
    hipMemcpyDeviceToDeviceNoCU: the SDMA engines);
 4. peer.arrived = k + 1 (hipStreamWriteValue64 into the peer's memory);
@@ -32,22 +32,22 @@ one dequantize-add pass, both memory-bound.
 
 Shared buffers are uncached (hipDeviceMallocUncached, like the custom
 all-reduce buffers on ROCm), so the peer's SDMA writes are never hidden behind
-stale L2 lines. Every rank must call all_reduce in the same order with the same
-sizes (true for TP collectives); calls run on the current stream. Stream
+stale L2 lines. Each rank allocates its receive slots and counters on its own
+GPU and maps the peer's through IPC; the push is a copy into IPC-mapped memory.
+
+Invariants: every rank must call all_reduce in the same order with the same
+sizes (true for TP collectives), or the surviving rank's stream waits forever
+(hipStreamWaitValue64 has no timeout). Calls run on the current stream. Stream
 write/wait operations cannot be captured into a graph, so callers must not use
 this inside CUDA graph capture.
 
-Buffer layouts (``layout``):
-
-- ``ipc``: each rank allocates its receive slots and counters on its own GPU
-  and maps the peer's through IPC; the push is a copy into IPC-mapped memory.
-- ``peer``: each rank allocates its outbox (slots and its counters) on the
-  peer's GPU and the peer maps it through IPC, so the push is a true
-  peer-to-peer copy and every wait polls memory in the waiting rank's own HBM.
-  Same speed as ``ipc`` on MI355X.
+ROCm only. The constructor probes the HIP calls this module needs (the NoCU copy
+kind and the stream write/wait operations) and raises at startup if the
+runtime or driver lacks them.
 """
 
 import ctypes
+import time
 
 import torch
 import torch.distributed as dist
@@ -57,10 +57,11 @@ from vllm.triton_utils import tl, triton
 GROUP = 32
 _ALIGN = 256
 _HIP_D2D_NOCU = 1024  # hipMemcpyDeviceToDeviceNoCU
-_HIP_D2D = 3  # hipMemcpyDeviceToDevice
 _HIP_MALLOC_UNCACHED = 0x3  # hipDeviceMallocUncached
 _HIP_IPC_LAZY_PEER = 1  # hipIpcMemLazyEnablePeerAccess
 _WAIT_GTE = 0x0  # hipStreamWaitValueGte
+_SLOTS = 2
+_PROBE_TIMEOUT_S = 10.0
 # Launch configs (groups per program, warps), measured on MI355X: within 1-4% of
 # the best per size for 2k-16k tokens of hidden size 6144.
 _Q_LAUNCH = (128, 1)
@@ -145,13 +146,11 @@ class _Hip:
             "hipDeviceSynchronize": [],
             "hipIpcGetMemHandle": [ctypes.POINTER(_IpcHandle), vp],
             "hipIpcOpenMemHandle": [ctypes.POINTER(vp), _IpcHandle, u],
+            "hipIpcCloseMemHandle": [vp],
+            "hipFree": [vp],
             "hipMemcpyAsync": [vp, vp, sz, ctypes.c_int, vp],
             "hipStreamWriteValue64": [vp, vp, u64, u],
             "hipStreamWaitValue64": [vp, vp, u64, u, u64],
-            "hipSetDevice": [ctypes.c_int],
-            "hipDeviceGetPCIBusId": [ctypes.c_char_p, ctypes.c_int, ctypes.c_int],
-            "hipDeviceGetByPCIBusId": [ctypes.POINTER(ctypes.c_int), ctypes.c_char_p],
-            "hipDeviceEnablePeerAccess": [ctypes.c_int, u],
         }
         for name, args in sig.items():
             f = getattr(L, name)
@@ -166,39 +165,23 @@ class _Hip:
 class DmaAllReduce:
     """All-reduce (sum) of bf16/fp16 tensors between the two ranks of ``group``
     (a CPU/gloo group, for the handle exchange at init). Tensors up to
-    ``max_bytes``; ``numel`` must be a multiple of 32."""
+    ``max_bytes``; ``numel`` must be a multiple of 32. Collective: both ranks
+    construct it in the same order."""
 
-    def __init__(
-        self,
-        group,
-        device: torch.device,
-        max_bytes: int = 256 << 20,
-        slots: int = 2,
-        copy_kind: int = _HIP_D2D_NOCU,
-        layout: str = "ipc",
-    ):
+    def __init__(self, group, device: torch.device, max_bytes: int):
         assert dist.get_world_size(group) == 2, "DmaAllReduce is for two ranks"
-        assert layout in ("ipc", "peer"), layout
         self.rank = dist.get_rank(group)
         self.device = device
         self.hip = _Hip()
-        self.slots = slots
-        self.copy_kind = copy_kind
-        self.layout = layout
         self.max_elems = max_bytes // 2
-        self.q_off_s = _align(
-            self.max_elems // 2
-        )  # scales start here in a slot at max size
+        # scales start here in a slot at max size
+        self.q_off_s = _align(self.max_elems // 2)
         self.slot_bytes = _align(self.q_off_s + self.max_elems // GROUP * 2)
         self.calls = 0
-        if layout == "peer":
-            self._init_peer(group)
-            return
         with torch.cuda.device(device):
-            self.send = self._malloc(self.slots * self.slot_bytes)
+            self.send = self._malloc(_SLOTS * self.slot_bytes)
             # shared region: [arrived u64][consumed u64] ... recv slots from _ALIGN on
-            self.shared_bytes = _ALIGN + self.slots * self.slot_bytes
-            self.shared = self._malloc(self.shared_bytes)
+            self.shared = self._malloc(_ALIGN + _SLOTS * self.slot_bytes)
             self.hip("hipDeviceSynchronize")
             h = _IpcHandle()
             self.hip(
@@ -214,55 +197,86 @@ class DmaAllReduce:
                 _HIP_IPC_LAZY_PEER,
             )
             self.peer_shared = peer.value
+            error = self._probe()
+        # Every rank raises together, so no rank is left waiting for a peer.
+        errors = [None, None]
+        dist.all_gather_object(errors, error, group=group)
+        if any(errors):
+            self.close()
+            raise RuntimeError(
+                "VLLM_DBO_TP_DMA_AR needs HIP stream memory operations and "
+                "hipMemcpyDeviceToDeviceNoCU, which this ROCm runtime or driver "
+                f"does not provide (per rank: {errors}). Unset VLLM_DBO_TP_DMA_AR "
+                "or upgrade ROCm."
+            )
         dist.barrier(group=group)
         self.arrived, self.consumed = self.shared, self.shared + 8
         self.peer_arrived, self.peer_consumed = self.peer_shared, self.peer_shared + 8
         self.recv, self.peer_recv = self.shared + _ALIGN, self.peer_shared + _ALIGN
 
-    def _init_peer(self, group) -> None:
-        """Layout "peer": outbox = [arrived u64][consumed u64], then the slots from
-        _ALIGN, allocated on the peer's GPU."""
-        hip = self.hip
-        with torch.cuda.device(self.device):
-            me = torch.cuda.current_device()
-            bus = ctypes.create_string_buffer(64)
-            hip("hipDeviceGetPCIBusId", bus, 64, me)
-            buses = [None, None]
-            dist.all_gather_object(buses, bus.value, group=group)
-            peer = ctypes.c_int()
-            hip("hipDeviceGetByPCIBusId", ctypes.byref(peer), buses[1 - self.rank])
-            self.peer_device = peer.value
-            hip(
-                "hipDeviceEnablePeerAccess", self.peer_device, 0, ok=(704,)
-            )  # 704: already enabled
-            self.send = self._malloc(self.slots * self.slot_bytes)
-            self.shared_bytes = _ALIGN + self.slots * self.slot_bytes
-            h = _IpcHandle()
-            hip("hipSetDevice", self.peer_device)
-            try:
-                self.box = self._malloc(self.shared_bytes)
-                hip("hipDeviceSynchronize")
-                hip("hipIpcGetMemHandle", ctypes.byref(h), ctypes.c_void_p(self.box))
-            finally:
-                hip("hipSetDevice", me)
-            torch.cuda.set_device(me)
-            hip("hipDeviceSynchronize")
-            handles = [None, None]
-            dist.all_gather_object(handles, bytes(h), group=group)
-            inbox = ctypes.c_void_p()
-            hip(
-                "hipIpcOpenMemHandle",
-                ctypes.byref(inbox),
-                _IpcHandle.from_buffer_copy(handles[1 - self.rank]),
-                _HIP_IPC_LAZY_PEER,
+    def _probe(self) -> str | None:
+        """Exercise, on this rank only, the HIP calls the all-reduce needs and
+        compile the Triton kernels for both dtypes, so a missing feature fails
+        at startup and the first microbatch does not stall on JIT. Returns an
+        error string, or None."""
+        try:
+            stream = ctypes.c_void_p(torch.cuda.current_stream(self.device).cuda_stream)
+            flag = ctypes.c_void_p(self.shared)  # own counters are 0 until used
+            src, dst = self.send, self.send + _ALIGN
+            self.hip(
+                "hipMemcpyAsync",
+                ctypes.c_void_p(dst),
+                ctypes.c_void_p(src),
+                _ALIGN,
+                _HIP_D2D_NOCU,
+                stream,
             )
-            self.inbox = inbox.value
-        dist.barrier(group=group)
-        # Waits poll the peer's outbox, which lives in our HBM; signals and data
-        # go into our outbox on the peer's GPU.
-        self.arrived, self.consumed = self.inbox, self.inbox + 8
-        self.peer_arrived, self.peer_consumed = self.box, self.box + 8
-        self.recv, self.peer_recv = self.inbox + _ALIGN, self.box + _ALIGN
+            self.hip("hipStreamWriteValue64", stream, flag, 1, 0)
+            self.hip(
+                "hipStreamWaitValue64", stream, flag, 1, _WAIT_GTE, 0xFFFFFFFFFFFFFFFF
+            )
+            u8, f16 = torch.uint8, torch.float16
+            (qg, qw), (dg, dw) = _Q_LAUNCH, _DQ_LAUNCH
+            for dtype in (torch.bfloat16, torch.float16):
+                x = torch.zeros(GROUP, dtype=dtype, device=self.device)
+                _quant_int4_kernel[(1,)](
+                    x, _Ptr(src, u8), _Ptr(src + 16, f16), 1, BLOCK_G=qg, num_warps=qw
+                )
+                _dq_sum_kernel[(1,)](
+                    _Ptr(src, u8),
+                    _Ptr(src + 16, f16),
+                    _Ptr(src, u8),
+                    _Ptr(src + 16, f16),
+                    x,
+                    1,
+                    BLOCK_G=dg,
+                    num_warps=dw,
+                )
+            done = torch.cuda.Event()
+            done.record()
+            deadline = time.monotonic() + _PROBE_TIMEOUT_S
+            while not done.query():
+                if time.monotonic() > deadline:
+                    return "probe timed out"
+                time.sleep(0.001)
+            self.hip("hipMemset", ctypes.c_void_p(self.shared), 0, 16)  # counters
+            self.hip("hipDeviceSynchronize")
+        except Exception as e:  # missing symbol, HIP error, Triton failure
+            return f"{type(e).__name__}: {e}"
+        return None
+
+    def close(self) -> None:
+        """Release the buffers and the IPC mapping. Collective in spirit: call
+        only after no all-reduce is in flight."""
+        hip = self.hip
+        if getattr(self, "peer_shared", None):
+            hip("hipIpcCloseMemHandle", ctypes.c_void_p(self.peer_shared), ok=(1,))
+            self.peer_shared = None
+        for name in ("shared", "send"):
+            ptr = getattr(self, name, None)
+            if ptr:
+                hip("hipFree", ctypes.c_void_p(ptr), ok=(1,))
+                setattr(self, name, None)
 
     def _malloc(self, nbytes: int) -> int:
         p = ctypes.c_void_p()
@@ -287,8 +301,8 @@ class DmaAllReduce:
         ng = n // GROUP
         s_off = _align(n // 2)
         nbytes = s_off + ng * 2
-        k, self.calls = self.calls, self.calls + 1
-        slot = k % self.slots
+        k = self.calls
+        slot = k % _SLOTS
         send = self.send + slot * self.slot_bytes
         recv = self.recv + slot * self.slot_bytes
         peer_recv = self.peer_recv + slot * self.slot_bytes
@@ -298,12 +312,12 @@ class DmaAllReduce:
         _quant_int4_kernel[(triton.cdiv(ng, qg),)](
             x, _Ptr(send, u8), _Ptr(send + s_off, f16), ng, BLOCK_G=qg, num_warps=qw
         )
-        if k >= self.slots:
+        if k >= _SLOTS:
             self.hip(
                 "hipStreamWaitValue64",
                 stream,
                 ctypes.c_void_p(self.consumed),
-                k - self.slots + 1,
+                k - _SLOTS + 1,
                 _WAIT_GTE,
                 0xFFFFFFFFFFFFFFFF,
             )
@@ -312,7 +326,7 @@ class DmaAllReduce:
             ctypes.c_void_p(peer_recv),
             ctypes.c_void_p(send),
             nbytes,
-            self.copy_kind,
+            _HIP_D2D_NOCU,
             stream,
         )
         self.hip(
@@ -348,22 +362,7 @@ class DmaAllReduce:
             k + 1,
             0,
         )
+        # Counted only once the whole call is enqueued, so the ranks' counters
+        # stay equal if an enqueue raises.
+        self.calls = k + 1
         return out
-
-
-def reference_int4_one_shot(xs: list[torch.Tensor]) -> torch.Tensor:
-    """What all_reduce computes, in torch (for tests): the sum over ranks of
-    dq(q(x_r)) in fp32, then x's dtype."""
-    acc = None
-    for x in xs:
-        g = x.float().reshape(-1, GROUP)
-        s = (
-            torch.clamp(g.abs().amax(dim=1) / 7.0, max=65504.0)
-            .to(torch.float16)
-            .float()
-        )
-        inv = torch.where(s > 0, 1.0 / s, torch.zeros_like(s))
-        q = torch.clamp(torch.floor(g * inv[:, None] + 0.5), -7, 7)
-        d = q * s[:, None]
-        acc = d if acc is None else acc + d
-    return acc.reshape(xs[0].shape).to(xs[0].dtype)

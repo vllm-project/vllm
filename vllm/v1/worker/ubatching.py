@@ -258,44 +258,54 @@ def make_ubatch_contexts(
 
 # DBO under pure TP: each TP all-reduce is a hand-off point and runs on the comm
 # stream while the other microbatch computes.
-# VLLM_DBO_TP_DMA_AR=1 (TP2 only): a microbatch's all-reduce runs as a one-shot
-# INT4 all-reduce over the SDMA copy engines, which needs no CUs while the other
-# microbatch computes; QuickReduce and RCCL are CU kernels that contend with the
-# GEMMs under DBO.
-_DMA_AR = None
-
-
-def enable_dbo_tp_overlap(parallel_config, comm_stream: torch.cuda.Stream) -> None:
+# VLLM_DBO_TP_DMA_AR=1 (TP2 only, ROCm): a microbatch's all-reduce runs as a
+# one-shot INT4 all-reduce over the SDMA copy engines, which needs no CUs while
+# the other microbatch computes; QuickReduce and RCCL are CU kernels that contend
+# with the GEMMs under DBO. The helper lives on the TP group's CudaCommunicator.
+def enable_dbo_tp_overlap(
+    parallel_config, comm_stream: torch.cuda.Stream, vllm_config=None
+) -> None:
     """Collective: every rank calls it in the same order."""
-    global _DMA_AR
     if not parallel_config.dbo_tp_only:
         return
     tp = parallel_state.get_tp_group()
-    pynccl_comm = getattr(tp.device_communicator, "pynccl_comm", None)
+    pynccl_comm = tp.device_communicator.pynccl_comm
     if pynccl_comm is not None:
         pynccl_comm.bind_stream(comm_stream)
     tp.dbo_overlap = True
-    if envs.VLLM_DBO_TP_DMA_AR and _DMA_AR is None:
-        if tp.world_size == 2:
-            from vllm.distributed.device_communicators.dma_all_reduce import (
-                DmaAllReduce,
-            )
+    if envs.VLLM_DBO_TP_DMA_AR:
+        _enable_dma_all_reduce(tp, vllm_config)
 
-            max_mb = envs.VLLM_DBO_TP_DMA_AR_MAX_MB
-            layout = envs.VLLM_DBO_TP_DMA_AR_LAYOUT
-            _DMA_AR = DmaAllReduce(
-                tp.cpu_group, tp.device, max_bytes=max_mb << 20, layout=layout
-            )
-            logger.info(
-                "DBO: microbatch all-reduces up to %d MiB run as one-shot INT4 "
-                "over SDMA (layout %s)",
-                max_mb,
-                layout,
-            )
-        else:
-            logger.warning(
-                "DBO: VLLM_DBO_TP_DMA_AR=1 needs TP 2, got %d; ignored", tp.world_size
-            )
+
+def _enable_dma_all_reduce(tp, vllm_config) -> None:
+    from vllm.platforms import current_platform
+
+    if not current_platform.is_rocm():
+        logger.warning("DBO: VLLM_DBO_TP_DMA_AR=1 is ROCm only; ignored")
+        return
+    if tp.world_size != 2:
+        logger.warning(
+            "DBO: VLLM_DBO_TP_DMA_AR=1 needs TP 2, got %d; ignored", tp.world_size
+        )
+        return
+    if vllm_config is None:
+        logger.warning("DBO: VLLM_DBO_TP_DMA_AR=1 needs the model config; ignored")
+        return
+    from vllm.distributed.device_communicators.dma_all_reduce import DmaAllReduce
+
+    # Largest all-reduce: one full batch of hidden states, 2 bytes per value.
+    max_elems = (
+        vllm_config.scheduler_config.max_num_batched_tokens
+        * vllm_config.model_config.get_hidden_size()
+    )
+    # Raises on a ROCm runtime without the needed HIP calls.
+    tp.device_communicator.dma_ar = DmaAllReduce(
+        tp.cpu_group, tp.device, max_bytes=max_elems * 2
+    )
+    logger.info(
+        "DBO: microbatch all-reduces up to %d MiB run as one-shot INT4 over SDMA",
+        max_elems * 2 >> 20,
+    )
 
 
 def dbo_comm_stream_priority() -> int:
@@ -309,35 +319,21 @@ def dbo_comm_stream_priority() -> int:
 def dbo_tp_all_reduce(device_communicator, input_: torch.Tensor) -> torch.Tensor:
     """The TP all-reduce of a microbatch, issued on the comm stream.
 
-    With VLLM_DBO_TP_DMA_AR set (TP2) and ``input_`` small enough, it runs over
-    the SDMA engines. With VLLM_DBO_TP_QUICK_REDUCE set and ``input_`` in
-    QuickReduce's window, it runs QuickReduce, ahead of the other backends. Both
-    microbatches share one comm stream and only one microbatch thread runs at a
-    time, so the calls are issued in the same order on every rank and never
-    overlap: QuickReduce's single buffer is enough.
+    With VLLM_DBO_TP_DMA_AR set (TP2, ROCm) and ``input_`` small enough, it runs
+    over the SDMA engines. Both microbatches share one comm stream and only one
+    microbatch thread runs at a time, so the calls are issued in the same order
+    on every rank and never overlap.
     """
+    dma = getattr(device_communicator, "dma_ar", None)
     # Outside a microbatch (no split, warmup, decode) this is the regular TP
-    # all-reduce: the quantized paths only pay off when they overlap compute.
-    if threading.get_ident() not in _THREAD_ID_TO_CONTEXT:
-        return device_communicator.all_reduce(input_)
-    # Stream write/wait operations cannot be captured into a graph: QuickReduce
-    # or the regular dispatch there.
+    # all-reduce: the SDMA path only pays off when it overlaps compute. Stream
+    # write/wait operations cannot be captured into a graph either.
     if (
-        _DMA_AR is not None
-        and _DMA_AR.should_reduce(input_)
+        dma is not None
+        and threading.get_ident() in _THREAD_ID_TO_CONTEXT
+        and dma.should_reduce(input_)
         and not torch.cuda.is_current_stream_capturing()
     ):
         logger.info_once("DBO: microbatch all-reduces run over SDMA (one-shot INT4)")
-        return _DMA_AR.all_reduce(input_, out=torch.empty_like(input_))
-    qr = getattr(device_communicator, "qr_comm", None)
-    if (
-        envs.VLLM_DBO_TP_QUICK_REDUCE
-        and qr is not None
-        and not qr.disabled
-        and qr.should_quick_allreduce(input_)
-    ):
-        logger.info_once(
-            "DBO: microbatch all-reduces in the QuickReduce window run QuickReduce"
-        )
-        return qr.quick_all_reduce(input_, out=torch.empty_like(input_))
+        return dma.all_reduce(input_, out=torch.empty_like(input_))
     return device_communicator.all_reduce(input_)

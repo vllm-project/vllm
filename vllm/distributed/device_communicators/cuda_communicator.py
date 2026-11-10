@@ -1,6 +1,7 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 
+from typing import TYPE_CHECKING
 
 import torch
 from torch.distributed import ProcessGroup
@@ -24,6 +25,9 @@ from vllm.platforms import current_platform
 from ..utils import StatelessProcessGroup
 from .aiter_custom_all_reduce import AiterCustomAllreduce
 from .base_device_communicator import DeviceCommunicatorBase
+
+if TYPE_CHECKING:
+    from .dma_all_reduce import DmaAllReduce
 
 logger = init_logger(__name__)
 
@@ -118,6 +122,9 @@ class CudaCommunicator(DeviceCommunicatorBase):
         self.fi_ar_comm: FlashInferAllReduce | None = None
         self.fi_pcie_ipc_ar_comm: FlashInferPcieIpcAllReduce | None = None
         self.aiter_ar_comm: AiterCustomAllreduce | None = None
+        # SDMA INT4 all-reduce for DBO microbatches (ROCm, TP2); see
+        # vllm.v1.worker.ubatching.enable_dbo_tp_overlap.
+        self.dma_ar: DmaAllReduce | None = None
         self.use_aiter_ag_rs: bool = False
         self.use_aiter_tp_all_gather: bool = False
 
@@ -865,6 +872,9 @@ class CudaCommunicator(DeviceCommunicatorBase):
             self.pynccl_comm = None
         if self.ca_comm is not None:
             self.ca_comm = None
+        if self.dma_ar is not None:
+            self.dma_ar.close()
+            self.dma_ar = None
         if self.aiter_ar_comm is not None:
             self.aiter_ar_comm.close()
             self.aiter_ar_comm = None

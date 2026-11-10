@@ -2,6 +2,7 @@
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 """DBO under pure tensor parallelism (one DP rank, no EP), without GPUs."""
 
+import threading
 from types import SimpleNamespace
 
 import pytest
@@ -178,15 +179,48 @@ def test_all_reduce_uses_device_communicator_outside_a_microbatch(monkeypatch):
     assert torch.equal(group._all_reduce_out_place(x), x + 1)
 
 
-def test_tp_all_reduce_outside_a_microbatch_takes_the_regular_path(monkeypatch):
-    # The quantized microbatch paths must not run for steps that are not split.
-    calls = []
-    comm = SimpleNamespace(all_reduce=lambda x: calls.append("regular") or x)
+def _comm_with_dma(calls):
     dma = SimpleNamespace(
         should_reduce=lambda x: True,
         all_reduce=lambda x, out: calls.append("dma") or x,
     )
-    monkeypatch.setattr(ubatching, "_DMA_AR", dma)
+    return SimpleNamespace(
+        all_reduce=lambda x: calls.append("regular") or x, dma_ar=dma
+    )
+
+
+def test_tp_all_reduce_outside_a_microbatch_takes_the_regular_path(monkeypatch):
+    # The SDMA path must not run for steps that are not split.
+    calls = []
     monkeypatch.setattr(ubatching, "_THREAD_ID_TO_CONTEXT", {})
-    ubatching.dbo_tp_all_reduce(comm, torch.ones(4))
+    ubatching.dbo_tp_all_reduce(_comm_with_dma(calls), torch.ones(4))
     assert calls == ["regular"]
+
+
+def test_tp_all_reduce_inside_a_microbatch_takes_the_sdma_path(monkeypatch):
+    calls = []
+    monkeypatch.setattr(
+        ubatching, "_THREAD_ID_TO_CONTEXT", {threading.get_ident(): object()}
+    )
+    monkeypatch.setattr(torch.cuda, "is_current_stream_capturing", lambda: False)
+    ubatching.dbo_tp_all_reduce(_comm_with_dma(calls), torch.ones(4))
+    assert calls == ["dma"]
+    # Graph capture cannot hold stream write/wait operations.
+    calls.clear()
+    monkeypatch.setattr(torch.cuda, "is_current_stream_capturing", lambda: True)
+    ubatching.dbo_tp_all_reduce(_comm_with_dma(calls), torch.ones(4))
+    assert calls == ["regular"]
+
+
+def test_dma_all_reduce_flag_is_ignored_with_a_warning_off_rocm(monkeypatch):
+    from vllm.platforms import current_platform
+
+    monkeypatch.setattr(current_platform.__class__, "is_rocm", lambda self: False)
+    monkeypatch.setattr(ubatching.envs, "VLLM_DBO_TP_DMA_AR", True, raising=False)
+    comm = SimpleNamespace(pynccl_comm=None, dma_ar=None)
+    tp = SimpleNamespace(
+        dbo_overlap=False, device_communicator=comm, world_size=2, cpu_group=None
+    )
+    monkeypatch.setattr(parallel_state, "_TP", tp)
+    ubatching.enable_dbo_tp_overlap(_parallel_config(tp=2), comm_stream=None)
+    assert tp.dbo_overlap and comm.dma_ar is None
