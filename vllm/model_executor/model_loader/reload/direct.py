@@ -9,7 +9,7 @@ which must keep addresses (captured CUDA graphs) and refill derived tensors.
 Between `begin` and a successful `finish` the model must not run; there is
 no rollback, the next full update repairs it.
 
-Online-quantized modules (``uses_meta_device``) cannot hold BF16 checkpoint
+Online-quantized modules (`uses_meta_device`) cannot hold BF16 checkpoint
 bytes: they reload as they cold start, staged layerwise and quantized in place.
 
 Delivery contract (not checked here): an update delivers every checkpoint
