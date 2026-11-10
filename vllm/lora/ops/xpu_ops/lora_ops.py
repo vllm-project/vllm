@@ -95,13 +95,16 @@ def _lora_linear_impl(
     output_slices: list[int],
     scaling: float,
     add_inputs: bool,
+    allow_gemm: bool,
     gemm_min_tokens: int,
 ) -> None:
     num_tokens = inputs.size(0)
     # `single_lora_slot` is a host tensor, so reading it does not synchronize.
-    # It is only consulted above the largest captured graph size, so captured
-    # graphs never bake in a slot.
-    slot = int(single_lora_slot[0]) if num_tokens >= gemm_min_tokens else -1
+    # The caller keeps `gemm_min_tokens` above the largest captured graph size,
+    # so captured graphs never bake in a slot.
+    slot = -1
+    if allow_gemm and num_tokens >= gemm_min_tokens:
+        slot = int(single_lora_slot[0])
     if slot >= 0:
         # Every token uses the same adapter: two dense GEMMs per slice are much
         # faster than per-token BGMV for prefill-sized batches.
@@ -219,13 +222,15 @@ def lora_linear(
     output_slices: list[int],
     scaling: float,
     add_inputs: bool,
+    allow_gemm: bool,
     gemm_min_tokens: int,
 ) -> None:
     """Apply shrink and expand for all slices of a linear layer.
 
-    If `single_lora_slot` (a one-element host tensor) holds a slot index and the
-    batch has at least `gemm_min_tokens` tokens, every token is assumed to use
-    that adapter and dense GEMMs are used; otherwise BGMV is used.
+    If `allow_gemm` is set, `single_lora_slot` (a one-element host tensor) holds
+    a slot index and the batch has at least `gemm_min_tokens` tokens, every
+    token is assumed to use that adapter and dense GEMMs are used; otherwise
+    BGMV is used.
     """
     torch.ops.vllm.xpu_lora_linear(
         output_tensor,
@@ -237,5 +242,6 @@ def lora_linear(
         output_slices,
         scaling,
         add_inputs,
+        allow_gemm,
         gemm_min_tokens,
     )

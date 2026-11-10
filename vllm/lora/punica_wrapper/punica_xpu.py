@@ -21,7 +21,7 @@ from vllm.lora.ops.xpu_ops import (
 )
 from vllm.lora.utils import get_captured_lora_counts
 from vllm.triton_utils import HAS_TRITON, triton
-from vllm.utils.math_utils import round_up
+from vllm.utils.math_utils import cdiv, round_up
 
 if HAS_TRITON:
     from vllm.lora.ops.triton_ops import (
@@ -62,16 +62,17 @@ class PunicaWrapperXPU(PunicaWrapperBase):
         # so the linear op can choose its kernel at runtime without a sync.
         self._single_lora_slot = torch.full((1,), -1, dtype=torch.int32)
         # Captured graphs replay a fixed kernel choice, so the single-adapter
-        # path is only taken for batches larger than any captured graph.
+        # path is only taken for batches larger than any captured graph. Without
+        # the config the captured sizes are unknown, so the path stays disabled.
         vllm_config = get_current_vllm_config_or_none()
-        self._max_graph_tokens = 0
+        self._max_graph_tokens: int | None = None
         if vllm_config is not None:
             compilation_config = vllm_config.compilation_config
-            if compilation_config.cudagraph_mode != CUDAGraphMode.NONE:
-                self._max_graph_tokens = max(
-                    compilation_config.max_cudagraph_capture_size or 0,
-                    compilation_config.max_prefill_cudagraph_capture_tokens or 0,
-                )
+            self._max_graph_tokens = (
+                0
+                if compilation_config.cudagraph_mode == CUDAGraphMode.NONE
+                else compilation_config.max_cudagraph_capture_size or 0
+            )
 
         # Compute captured LoRA counts for cudagraph specialization.
         captured_lora_counts = get_captured_lora_counts(
@@ -107,6 +108,8 @@ class PunicaWrapperXPU(PunicaWrapperBase):
         self.is_prefill = mapping.is_prefill
         self._update_base_metadata(mapping, lora_index_to_id, max_loras, vocab_size)
 
+        # Use the per-token mapping: a chunked-prefill step need not sample, so
+        # the prompt mapping can miss a request's adapter.
         slot = -1
         lora_ids = set(mapping.index_mapping)
         if len(lora_ids) == 1:
@@ -299,16 +302,18 @@ class PunicaWrapperXPU(PunicaWrapperBase):
             ".add_lora_linear() instead of being passed in."
         )
         add_inputs = kwargs.pop("add_inputs", True)
-        rank = lora_b_stacked[0].size(-1)
-        gemm_min_tokens = max(
-            self._max_graph_tokens + 1, -(-_SINGLE_LORA_GEMM_MIN_WORK // rank)
-        )
-        if any(w.dtype != x.dtype for w in (y, *lora_a_stacked, *lora_b_stacked)):
-            # Mixed precision is only supported by the BGMV kernels.
-            gemm_min_tokens = torch.iinfo(torch.int64).max
-        y_2d = y.view(-1, y.shape[-1])
+        allow_gemm, gemm_min_tokens = False, 0
+        # Mixed precision is only supported by the BGMV kernels.
+        if self._max_graph_tokens is not None and all(
+            w.dtype == x.dtype for w in (y, *lora_a_stacked, *lora_b_stacked)
+        ):
+            rank = lora_b_stacked[0].size(-1)
+            allow_gemm = True
+            gemm_min_tokens = max(
+                self._max_graph_tokens + 1, cdiv(_SINGLE_LORA_GEMM_MIN_WORK, rank)
+            )
         lora_linear(
-            y_2d,
+            y.view(-1, y.shape[-1]),
             x.view(-1, x.shape[-1]),
             list(lora_a_stacked),
             list(lora_b_stacked),
@@ -317,6 +322,7 @@ class PunicaWrapperXPU(PunicaWrapperBase):
             list(output_slices),
             scale,
             add_inputs,
+            allow_gemm,
             gemm_min_tokens,
         )
 

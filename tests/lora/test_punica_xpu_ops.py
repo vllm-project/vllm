@@ -377,6 +377,7 @@ def test_lora_linear(mapping: str, add_inputs: bool, dtype):
             output_slices,
             scaling,
             add_inputs,
+            True,
             64,
         )
     )
@@ -395,13 +396,20 @@ def test_lora_linear(mapping: str, add_inputs: bool, dtype):
         ("FULL_AND_PIECEWISE", 1024, "single", 1025, True),
         ("NONE", 0, "mixed", 1024, False),
         ("NONE", 0, "with_base", 1024, False),
+        # Without a config the captured sizes are unknown: stay on BGMV.
+        (None, 0, "single", 1024, False),
     ],
 )
 @pytest.mark.skipif(not current_platform.is_xpu(), reason="skip for non xpu platform")
 def test_xpu_add_lora_linear_dispatch(
     cudagraph_mode, max_capture, mapping, num_tokens, expect_gemm
 ):
-    from vllm.config import CUDAGraphMode, VllmConfig, set_current_vllm_config
+    from vllm.config import (
+        CUDAGraphMode,
+        VllmConfig,
+        get_current_vllm_config_or_none,
+        set_current_vllm_config,
+    )
     from vllm.config.lora import LoRAConfig
     from vllm.lora.layers import LoRAMapping
     from vllm.lora.punica_wrapper.punica_xpu import PunicaWrapperXPU
@@ -409,13 +417,16 @@ def test_xpu_add_lora_linear_dispatch(
     torch.manual_seed(0)
     dtype, device, rank, hidden_size = torch.float16, "xpu:0", 16, 256
     output_slices = (128, 64)
-    vllm_config = VllmConfig()
-    vllm_config.compilation_config.cudagraph_mode = CUDAGraphMode[cudagraph_mode]
-    vllm_config.compilation_config.max_cudagraph_capture_size = max_capture
-    with set_current_vllm_config(vllm_config):
-        wrapper = PunicaWrapperXPU(
-            2048, 4, device, lora_config=LoRAConfig(max_loras=2, max_lora_rank=rank)
-        )
+    lora_config = LoRAConfig(max_loras=2, max_lora_rank=rank)
+    if cudagraph_mode is None:
+        assert get_current_vllm_config_or_none() is None
+        wrapper = PunicaWrapperXPU(2048, 4, device, lora_config=lora_config)
+    else:
+        vllm_config = VllmConfig()
+        vllm_config.compilation_config.cudagraph_mode = CUDAGraphMode[cudagraph_mode]
+        vllm_config.compilation_config.max_cudagraph_capture_size = max_capture
+        with set_current_vllm_config(vllm_config):
+            wrapper = PunicaWrapperXPU(2048, 4, device, lora_config=lora_config)
 
     # Adapter ids 2 and 3 occupy slots 0 and 1; id 0 means no adapter.
     token_ids = [3] * num_tokens
