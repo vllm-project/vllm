@@ -25,6 +25,7 @@ use std::collections::{BTreeMap, btree_map};
 use std::sync::Once;
 
 pub use arguments::JsonStyle;
+pub(crate) use arguments::OpenToolCall;
 pub use deepseek_dsml::{DeepSeekV4ToolParser, DeepSeekV32ToolParser, DeepSeekV41ToolParser};
 pub use deepseek_json::{DeepSeekV3ToolParser, DeepSeekV31ToolParser};
 pub use error::{Result, ToolParserError};
