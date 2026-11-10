@@ -23,6 +23,7 @@ steps:
   - tests/entrypoints/openai/chat_completion/test_logprob_token_ids.py
   - tests/entrypoints/openai/chat_completion/test_thinking_token_budget.py
   - tests/entrypoints/openai/chat_completion/test_root_path.py
+  - tests/entrypoints/openai/chat_completion/test_enable_force_include_usage.py
   - tests/entrypoints/openai/completion/test_completion.py
   - tests/entrypoints/openai/completion/test_tensorizer_entrypoint.py
   - tests/entrypoints/openai/completion/test_token_in_token_out.py
@@ -47,6 +48,7 @@ steps:
   # The Qwen3.5-35B FP8 MTP case needs two GPUs.
   - pytest -v -s entrypoints/openai/chat_completion/test_thinking_token_budget.py -k "not qwen35"
   - pytest -v -s entrypoints/openai/chat_completion/test_root_path.py
+  - pytest -v -s entrypoints/openai/chat_completion/test_enable_force_include_usage.py
   # The Rust frontend rejects batched prompts.
   - pytest -v -s entrypoints/openai/completion/test_completion.py -k "not test_prompt_logprobs_completion and not test_batch_completions"
   - pytest -v -s entrypoints/openai/completion/test_tensorizer_entrypoint.py --timeout=900 --timeout-method=thread
@@ -84,6 +86,7 @@ steps:
       - tests/entrypoints/openai/chat_completion/test_logprob_token_ids.py
       - tests/entrypoints/openai/chat_completion/test_thinking_token_budget.py
       - tests/entrypoints/openai/chat_completion/test_root_path.py
+      - tests/entrypoints/openai/chat_completion/test_enable_force_include_usage.py
       - tests/entrypoints/openai/completion/test_completion.py
       - tests/entrypoints/openai/completion/test_tensorizer_entrypoint.py
       - tests/entrypoints/openai/completion/test_token_in_token_out.py
