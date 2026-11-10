@@ -36,7 +36,7 @@ from vllm.distributed.kv_transfer.kv_connector.v1.moriio.moriio_tp_mapping impor
     compute_write_tp_mapping,
 )
 
-from .utils import make_moriio_writer
+from ..utils import make_moriio_writer
 
 pytestmark = pytest.mark.cpu_test
 
