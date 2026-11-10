@@ -79,9 +79,13 @@ class EngramPrefetch:
             stream.wait_event(engram._prefetch_done)
             with torch.cuda.stream(stream):
                 heads = engram.staged_rows[:num_tokens]
-                if engram.embed_tokens.tp_size > 1:
-                    heads = tensor_model_parallel_all_gather(heads, dim=1)
-                kv = engram.wkv(heads[:, : engram.embed_tokens.n_hash_cols].flatten(-2))
+                if engram.staged_scales is not None:
+                    kv = engram.wkv(engram.fp8_wkv_input(heads))
+                else:
+                    if engram.embed_tokens.tp_size > 1:
+                        heads = tensor_model_parallel_all_gather(heads, dim=1)
+                    heads = heads[:, : engram.embed_tokens.n_hash_cols]
+                    kv = engram.wkv(heads.flatten(-2))
                 # Temporaries stay on this stream; only the persistent output
                 # reaches the consumer, after the event below.
                 out[:num_tokens].copy_(kv)

@@ -12,6 +12,9 @@ from vllm.distributed import parallel_state
 from vllm.model_executor.layers.quantization.utils.mxfp8_utils import (
     dequant_mxfp8_to_bf16,
 )
+from vllm.model_executor.layers.quantization.utils.nvfp4_emulation_utils import (
+    convert_swizzled_to_linear,
+)
 from vllm.models.deepseek_v41.amd import engram as rocm_engram_ops
 from vllm.models.deepseek_v41.amd.engram import RocmEngram
 from vllm.models.deepseek_v41.common import engram as engram_ops
@@ -20,6 +23,7 @@ from vllm.models.deepseek_v41.common.engram import (
     NgramHashState,
     ParallelEngramEmbedding,
 )
+from vllm.models.deepseek_v41.common.ops.query_quant import mxfp8_scale_bytes
 from vllm.models.deepseek_v41.quant_config import DeepseekV4FP8Config
 from vllm.platforms import current_platform
 from vllm.utils.torch_utils import set_default_torch_dtype
@@ -878,7 +882,8 @@ def test_engram_lookup_reuses_jit_across_token_shapes():
 @pytest.mark.parametrize("cpu_offload", [False, True])
 @pytest.mark.parametrize("background", [False, True])
 @pytest.mark.parametrize("packed", [False, True])
-@pytest.mark.parametrize("num_tokens", [1, 7, 256])
+# 1024 tokens fill the grid with 128-row tiles.
+@pytest.mark.parametrize("num_tokens", [1, 7, 256, 1024])
 def test_engram_lookup_matches_torch(cpu_offload, background, packed, num_tokens):
     """The fused gather must be bit-exact with the torch dequant path it
     replaces, from HBM and from pinned host memory alike, and must contribute
@@ -901,6 +906,35 @@ def test_engram_lookup_matches_torch(cpu_offload, background, packed, num_tokens
         values = out[..., : layer.dim].view(torch.float8_e4m3fn)
         out = dequant_mxfp8_to_bf16(values, out[..., layer.dim :])
     assert torch.equal(out, expected)
+
+
+@pytest.mark.skipif(not current_platform.is_cuda(), reason="CUDA required")
+@pytest.mark.parametrize("cpu_offload", [False, True])
+# 1024 tokens fill the grid with 128-row tiles.
+@pytest.mark.parametrize("num_tokens", [7, 1024])
+def test_engram_lookup_mxfp8_matches_torch(cpu_offload, num_tokens):
+    """MXFP8 values and F8_128x4 scales hold the table's rows exactly."""
+    layer = _make_embedding(cpu_offload)
+    cols, dim = 24, layer.dim
+    ids = torch.randint(
+        0, layer.part_num_embeddings, (num_tokens, cols), dtype=torch.int32
+    ).cuda()
+    values = torch.empty(num_tokens, cols, dim, dtype=torch.uint8, device="cuda")
+    scales = torch.zeros(
+        mxfp8_scale_bytes(num_tokens, cols * dim), dtype=torch.uint8, device="cuda"
+    )
+    layer.lookup(ids, values, out_scales=scales)
+    values = values.flatten(1).view(torch.float8_e4m3fn)
+    scales = convert_swizzled_to_linear(scales, num_tokens, cols * dim, 32)
+    actual = dequant_mxfp8_to_bf16(values, scales).unflatten(-1, (cols, dim))
+    expected = _reference_lookup(
+        layer.weight.cuda(),
+        layer.weight_scale_inv.cuda(),
+        ids,
+        layer.vocab_start_idx,
+        layer.vocab_end_idx,
+    )
+    assert torch.equal(actual, expected)
 
 
 @pytest.mark.skipif(
@@ -950,6 +984,7 @@ def test_engram_shared_prefetch_stream_waits_per_layer(monkeypatch):
         module._prefetch_stream = stream
         module.embed_tokens = _make_embedding(cpu_offload=True)
         module.use_sequence_parallel = False
+        module.wkv = torch.nn.Identity()
         with torch.device("cuda"):
             module._init_staging(8, module.embed_tokens.dim)
         assert module._prefetch_stream is stream
@@ -1030,9 +1065,9 @@ def test_engram_constructor_honors_offload(monkeypatch, cpu_offload):
     streams = []
     lookup = layer.lookup
 
-    def track_lookup(ids, out, background=False):
+    def track_lookup(ids, out, background=False, out_scales=None):
         streams.append(torch.cuda.current_stream())
-        lookup(ids, out, background=background)
+        lookup(ids, out, background=background, out_scales=out_scales)
 
     monkeypatch.setattr(layer, "lookup", track_lookup)
     main = torch.cuda.current_stream()
@@ -1123,9 +1158,9 @@ def _run_engram_prepared_rows(
     if delay == "lookup":
         lookup = layer.lookup
 
-        def delayed_lookup(indices, out, background=False):
+        def delayed_lookup(indices, out, **kwargs):
             torch.cuda._sleep(2_000_000)
-            lookup(indices, out, background=background)
+            lookup(indices, out, **kwargs)
 
         layer.lookup = delayed_lookup
     cols, num_tokens = (23, 65) if use_sequence_parallel else (24, 64)
