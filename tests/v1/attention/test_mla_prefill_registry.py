@@ -8,6 +8,10 @@ from unittest.mock import MagicMock
 import pytest
 import torch
 
+from vllm.model_executor.layers.attention.sparse_mla_attention import (
+    SparseMLACommonImpl,
+)
+from vllm.model_executor.layers.attention_layer_base import AttentionLayerBase
 from vllm.v1.attention.backends.mla.prefill.base import MLAPrefillBackend
 from vllm.v1.attention.backends.mla.prefill.flashinfer import FlashInferPrefillBackend
 from vllm.v1.attention.backends.mla.prefill.registry import (
@@ -94,6 +98,34 @@ def test_prefill_backend_does_not_pin_grown_workspace(monkeypatch, backend_cls):
         del backend
     finally:
         reset_workspace_manager()
+
+
+def test_prefill_hyperparameters_from_sparse_mla_layers(monkeypatch):
+    monkeypatch.setenv("VLLM_FLASHINFER_WORKSPACE_BUFFER_SIZE", "4096")
+    impl = MagicMock(spec=SparseMLACommonImpl)
+    impl.scale = 0.125
+    impl.get_impl_variants.return_value = (impl,)
+    layer = MagicMock(spec=AttentionLayerBase)
+    layer.impl = impl
+    vllm_config = MagicMock()
+    vllm_config.compilation_config.static_forward_context = {"layers.0.attn": layer}
+
+    init_workspace_manager(torch.device("cpu"))
+    try:
+        backend = FlashInferPrefillBackend(
+            num_heads=4,
+            scale=0.125,
+            kv_lora_rank=8,
+            qk_nope_head_dim=16,
+            qk_rope_head_dim=8,
+            v_head_dim=32,
+            vllm_config=vllm_config,
+        )
+        params = backend._resolve_global_hyperparameters()
+    finally:
+        reset_workspace_manager()
+
+    assert params.sm_scale == 0.125
 
 
 @pytest.fixture(autouse=True)
