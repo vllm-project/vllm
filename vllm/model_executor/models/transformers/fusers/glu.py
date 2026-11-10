@@ -160,17 +160,13 @@ class GLUFuser(MergedColumnParallelFuser):
         gate_call.func.attr = self.merged_name
         replace_expr(funcdef, muls[0], act_call)
         # down(act(y)) -> down(maybe_fused_act_quant(act, y, down))
-        for node in ast.walk(funcdef):
-            if (
-                isinstance(node, ast.Call)
-                and isinstance(node.func, ast.Attribute)
-                and node.func.attr == self.down_name
-                and node.args == [act_call]
-            ):
-                fused_args = [act_call.func, *act_call.args, copy.deepcopy(node.func)]
+        if self.down_name is not None:
+            down_call = single_self_call(funcdef, self.down_name)
+            if down_call.args == [act_call]:
+                down = copy.deepcopy(down_call.func)
+                fused_args = [act_call.func, *act_call.args, down]
                 fused_fn = ast.Name(maybe_fused_act_quant.__name__, ast.Load())
-                node.args = [ast.Call(fused_fn, fused_args, [])]
-                break
+                down_call.args = [ast.Call(fused_fn, fused_args, [])]
         extra_globals = {maybe_fused_act_quant.__name__: maybe_fused_act_quant}
         self.fused_forward = compile_forward(funcdef, fn, extra_globals)
 
