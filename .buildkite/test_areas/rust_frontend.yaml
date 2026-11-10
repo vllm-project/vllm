@@ -44,9 +44,9 @@ steps:
   - pytest -v -s entrypoints/openai/chat_completion/test_logprob_token_ids.py
   # The Qwen3.5-35B FP8 MTP case needs two GPUs.
   - pytest -v -s entrypoints/openai/chat_completion/test_thinking_token_budget.py -k "not qwen35"
-  # The Rust frontend drops prompt_tokens_details when nothing was cached, rejects batched
-  # prompts, and supports only n=1 (so no parallel sampling or beam search).
-  - pytest -v -s entrypoints/openai/completion/test_completion.py -k "not test_single_completion and not test_prompt_logprobs_completion and not test_parallel and not test_batch_completions"
+  # The Rust frontend rejects batched prompts and supports only n=1 (so no parallel sampling or
+  # beam search).
+  - pytest -v -s entrypoints/openai/completion/test_completion.py -k "not test_prompt_logprobs_completion and not test_parallel and not test_batch_completions"
   - pytest -v -s entrypoints/openai/completion/test_tensorizer_entrypoint.py --timeout=900 --timeout-method=thread
   - pytest -v -s entrypoints/openai/test_chunked_prompt.py
 
@@ -54,9 +54,7 @@ steps:
   # test_shutdown_on_engine_failure launches the Python API server directly, not the Rust frontend.
   - pytest -v -s entrypoints/launchers/test_shutdown.py -k "not engine_failure"
   - pytest -v -s entrypoints/openai/test_return_token_ids.py
-  # The Rust frontend lists legacy completions top_logprobs in no fixed order, and the completions
-  # cases read the first key as the sampled token.
-  - pytest -v -s entrypoints/openai/test_return_tokens_as_ids.py -k "not test_completion_return_tokens_as_token_ids_completion"
+  - pytest -v -s entrypoints/openai/test_return_tokens_as_ids.py
   - pytest -v -s entrypoints/serve/instrumentator/test_uds.py
   - pytest -v -s v1/sample/test_logprobs_e2e.py -k "test_prompt_logprobs_e2e_server"
   mirror:
@@ -261,11 +259,11 @@ steps:
   - export VLLM_WORKER_MULTIPROC_METHOD=spawn
   - export NCCL_CUMEM_HOST_ENABLE=0
   - TP_SIZE=1 DP_SIZE=4 pytest -v -s v1/distributed/test_dense_dp_world_size.py
-  # /server_info reports the Rust frontend's own config, which has no parallel_config. The Rust frontend
-  # ignores --api-server-count, so the api-server-count=4 cases run against one multithreaded server.
-  - TP_SIZE=1 DP_SIZE=4 pytest -v -s v1/distributed/test_internal_lb_dp.py -k "not server_info"
-  - TP_SIZE=1 DP_SIZE=2 pytest -v -s v1/distributed/test_external_lb_dp.py -k "not server_info"
-  - TP_SIZE=1 DP_SIZE=4 pytest -v -s v1/distributed/test_hybrid_lb_dp.py -k "not server_info"
+  # The Rust frontend ignores --api-server-count, so the api-server-count=4 cases run against one
+  # multithreaded server, and their /server_info check of the API process count and rank does not apply.
+  - TP_SIZE=1 DP_SIZE=4 pytest -v -s v1/distributed/test_internal_lb_dp.py -k "not (server_info and 4)"
+  - TP_SIZE=1 DP_SIZE=2 pytest -v -s v1/distributed/test_external_lb_dp.py -k "not (server_info and 4)"
+  - TP_SIZE=1 DP_SIZE=4 pytest -v -s v1/distributed/test_hybrid_lb_dp.py -k "not (server_info and 4)"
   mirror:
     amd:
       # Run on PRs even when the L4 step is optional (nightly only).
