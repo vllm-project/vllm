@@ -48,6 +48,7 @@ def _layerwise_copy_worker(
     names=("model.layers.0.self_attn",),
     register=True,
     kv_role="kv_producer",
+    writes=None,
 ):
     config = _make_worker_vllm_config(
         kv_role, {"transfer_mode": "layerwise", **(extra or {})}
@@ -62,6 +63,8 @@ def _layerwise_copy_worker(
     cache = KVCacheConfig(64, [], [KVCacheGroupSpec(list(names), spec)])
 
     def write(_session, sources, destinations, lengths):
+        if writes is not None:
+            writes.append(tuple(lengths))
         for src, dst, length in zip(sources, destinations, lengths):
             ctypes.memmove(dst, src, length)
         return 0
@@ -208,6 +211,66 @@ async def test_layerwise_batch_copies_each_request_and_layer(source_blocks):
 
 
 @pytest.mark.asyncio
+@pytest.mark.parametrize("interval", [1, 2, 4, 8])
+async def test_layerwise_interval_batches_layers_and_flushes_each_chunk(interval):
+    """Batch real copies across layers/requests, including a partial final batch."""
+    names = tuple(f"model.layers.{i}.self_attn" for i in range(5))
+    writes = []
+    with _layerwise_copy_worker(
+        names=names, extra={"layerwise_transfer_interval": interval}, writes=writes
+    ) as worker:
+        sources = [worker.device_kv_caches[name] for name in names]
+        destinations = [torch.zeros_like(source) for source in sources]
+        remote = _copy_destination_metadata(
+            worker, destinations, {"a": (5, 6), "b": (7, 8)}
+        )
+        await worker.send_kv_to_decode(b"decode", AsyncMock(), remote)
+        size = worker.logical_block_size
+        for chunk in (1, 2):
+            writes.clear()
+            metadata = MooncakeConnectorMetadata()
+            metadata.requests = tuple(
+                mooncake_connector.PushReqMeta(
+                    req, req, (blocks,), chunk * size, 2 * size
+                )
+                for req, blocks in (("a", (1, 2)), ("b", (3, 4)))
+            )
+            worker.start_load_kv(metadata)
+            for i, (name, source) in enumerate(zip(names, sources)):
+                source[chunk].fill_(10 + i)
+                source[chunk + 2].fill_(20 + i)
+                worker.save_kv_layer(name)
+                # A repeated hook must not count as another layer.
+                if i == 0:
+                    worker.save_kv_layer(name)
+                worker._finish_pending_send(wait=True)
+                assert len(writes) == (i + 1) // interval
+                copied = ((i + 1) // interval) * interval
+                for j, destination in enumerate(destinations):
+                    expected = 10 + j if j < copied else 0
+                    assert torch.all(destination[chunk + 4] == expected)
+            worker.wait_for_save()
+            assert len(writes) == (len(names) + interval - 1) // interval
+            for source, destination in zip(sources, destinations):
+                assert torch.equal(destination[5 : 5 + chunk], source[1 : 1 + chunk])
+                assert torch.equal(destination[7 : 7 + chunk], source[3 : 3 + chunk])
+            assert sum(map(sum, writes)) == 2 * len(names) * sources[0][0].numel()
+
+
+@pytest.mark.parametrize("interval", [0, -1, True, 1.5, "4"])
+def test_layerwise_rejects_invalid_transfer_interval(interval):
+    config = _make_worker_vllm_config(
+        "kv_producer",
+        {"transfer_mode": "layerwise", "layerwise_transfer_interval": interval},
+    )
+    config.compilation_config.cudagraph_mode = CUDAGraphMode.NONE
+    with pytest.raises(ValueError, match="layerwise_transfer_interval"):
+        MooncakeConnector(
+            config, KVConnectorRole.SCHEDULER, _make_test_kv_cache_config()
+        )
+
+
+@pytest.mark.asyncio
 @pytest.mark.parametrize("prefix_delta", [-1, 0, 1])
 @pytest.mark.parametrize("ready_before_start", [False, True])
 @pytest.mark.parametrize("delayed_send", [False, True])
@@ -348,9 +411,14 @@ async def test_layerwise_ready_at_bootstrap_publication_copies_registered_cache(
 @pytest.mark.parametrize(
     ("warm_prefix", "write_status"), [(False, 0), (True, 0), (False, -1)]
 )
-async def test_layerwise_finished_prefill_drains_late_ready(warm_prefix, write_status):
+@pytest.mark.parametrize("interval", [1, 4])
+async def test_layerwise_finished_prefill_drains_late_ready(
+    warm_prefix, write_status, interval
+):
     names = ("model.layers.0.self_attn", "model.layers.1.self_attn")
-    with _layerwise_copy_worker(names=names) as worker:
+    with _layerwise_copy_worker(
+        names=names, extra={"layerwise_transfer_interval": interval}
+    ) as worker:
         config = worker.vllm_config
         config.scheduler_config.async_scheduling = False
         scheduler = create_scheduler(
