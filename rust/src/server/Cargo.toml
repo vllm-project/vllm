@@ -26,6 +26,7 @@ rmp-serde.workspace = true
 rmpv.workspace = true
 serde.workspace = true
 serde_json.workspace = true
+serde_path_to_error.workspace = true
 serde_with.workspace = true
 sha2.workspace = true
 socket2.workspace = true

@@ -2,8 +2,8 @@
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 """The DeepSeek-V4.1 specialized decode through the real model: a five-layer
 DeepSeek-V4.1-Flash on random weights at TP4 with DSpark, served with
-``decode_backend`` ``latency_specialized`` and ``auto``. Unlike
-``test_kernels.py`` and ``test_numerics.py`` next to it, which
+`decode_backend` `latency_specialized` and `auto`. Unlike
+`test_kernels.py` and `test_numerics.py` next to it, which
 check each path against the op it replaces, this runs the engine: the
 executor and its per-step gates, the CUDA graphs, the recorded metadata builds
 and the weights the executor takes off the layers.
@@ -57,9 +57,9 @@ TRUNCATED = {
 
 
 def _truncate(config):
-    """``hf_overrides`` for the target and, being callable, the DSpark draft
+    """`hf_overrides` for the target and, being callable, the DSpark draft
     too: the target takes its aux hidden-state layers from the draft's
-    ``dspark_target_layer_ids``. Module level, so engine processes unpickle it."""
+    `dspark_target_layer_ids`. Module level, so engine processes unpickle it."""
     for key, value in TRUNCATED.items():
         setattr(config, key, value)
     return config
@@ -198,7 +198,7 @@ class _Probe:
         self.output[: out.shape[0]].copy_(out)
 
     def values(self, rows: torch.Tensor) -> dict:
-        """The kept tensors of ``rows``, the residual streams' hc mean."""
+        """The kept tensors of `rows`, the residual streams' hc mean."""
         return {
             "residual": [
                 t[rows].float().mean(1).bfloat16().cpu() for t in self.residual
@@ -212,7 +212,7 @@ class _Probe:
 @register_model_loader(LOAD_FORMAT)
 class RandomWeightLoader(DummyModelLoader):
     """Dummy loading with weights in the checkpoint's ranges, before post-load
-    processing, so every processed copy follows. Also puts a ``_Probe`` on
+    processing, so every processed copy follows. Also puts a `_Probe` on
     the target model before its CUDA graphs are captured."""
 
     def load_weights(self, model, model_config) -> None:
@@ -243,7 +243,7 @@ class RandomWeightLoader(DummyModelLoader):
 
 
 class StepRecorder:
-    """Worker extension (``worker_extension_cls``): it also brings this module,
+    """Worker extension (`worker_extension_cls`): it also brings this module,
     and so the loader, into the workers. Rank 0 keeps every step's rows."""
 
     model_runner: "GPUModelRunner"
@@ -373,8 +373,8 @@ class StepRecorder:
 
 
 def _serve(vllm_runner, specialized_decode: bool, prompts, max_tokens, path: str):
-    """Greedy decode of ``prompts``: each prompt's output tokens and the
-    paths each rank took; the steps' rows saved under ``path``."""
+    """Greedy decode of `prompts`: each prompt's output tokens and the
+    paths each rank took; the steps' rows saved under `path`."""
     from vllm import SamplingParams
     from vllm.inputs import TokensPrompt
 
@@ -440,7 +440,7 @@ def _assert_quantiles(errs: list[float], what, median: float, p99: float) -> Non
 
 
 def _check_close(got: dict, want: dict, keys: list, layers, output: bool) -> None:
-    """The kept tensors of ``keys`` on both runs, close in distribution.
+    """The kept tensors of `keys` on both runs, close in distribution.
 
     Random weights amplify any difference layer by layer, and the stock paths
     do not reproduce either: single decode tokens of two stock runs

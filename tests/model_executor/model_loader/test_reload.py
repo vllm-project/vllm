@@ -280,7 +280,7 @@ def test_attention_sink_layerwise_reload(monkeypatch, tp_rank, padding):
 def _fp8_reload_unsupported() -> bool:
     """Whether the FP8 reload/online-quantize tests should be skipped.
 
-    ``supports_fp8()`` returns True on MI250 (gfx90a) and RDNA3 (gfx11)
+    `supports_fp8()` returns True on MI250 (gfx90a) and RDNA3 (gfx11)
     because the general quantization paths upcast FP8 weights, but neither has
     native FP8 and cannot run these reload models, so treat them as
     unsupported here.
@@ -737,6 +737,13 @@ def test_padded_moe_reload_releases_each_layer(
         UnquantizedFusedMoEMethod,
     )
 
+    # Fresh allocations hold garbage; padding must not inherit it.
+    empty_strided = torch.empty_strided
+    monkeypatch.setattr(
+        torch,
+        "empty_strided",
+        lambda *a, **k: empty_strided(*a, **k).fill_(float("nan")),
+    )
     hidden, intermediate, experts = 4, 3, 2
     stored_hidden, stored_intermediate = (8, 8) if padded else (hidden, intermediate)
     config = SimpleNamespace(
@@ -828,9 +835,9 @@ def test_padded_moe_reload_releases_each_layer(
             assert all(source() is None for source in inputs)
             for name, original in original_params[layer_index].items():
                 assert getattr(layer, name) is original
-                # Kernel-specific tests cover padding, which is not checkpoint data.
                 mask = torch.isfinite(expected[name])
                 assert torch.equal(original[mask], expected[name][mask])
+                assert torch.count_nonzero(original[~mask]) == 0
 
 
 def test_get_numel_loaded():
@@ -894,8 +901,8 @@ def test_layerwise_loading_warning_only_checks_new_layers(monkeypatch):
 class _ComposedLoaderLayer(torch.nn.Module):
     """Mimics a Mamba2 mixer's equal-numel direct params (A, D, dt_bias).
 
-    ``A`` uses ``composed_weight_loader`` (an extra in-place transform copy),
-    matching ``MambaMixer2`` where ``A`` is loaded as ``-exp(A_log)``.
+    `A` uses `composed_weight_loader` (an extra in-place transform copy),
+    matching `MambaMixer2` where `A` is loaded as `-exp(A_log)`.
     """
 
     def __init__(self):
@@ -1004,6 +1011,70 @@ def test_online_processing_waits_for_late_registered_bias():
     layer.bias.weight_loader(layer.bias, loaded_bias)
     assert quant_method.bias_at_process is not None
     assert torch.equal(quant_method.bias_at_process, loaded_bias)
+
+
+@pytest.mark.parametrize("num_heads", [96, 128])
+@pytest.mark.parametrize("tp_rank", [0, 3])
+@pytest.mark.parametrize("reverse", [False, True])
+def test_kda_online_loading_releases_sources_and_zeros_padding(
+    monkeypatch, default_vllm_config, num_heads, tp_rank, reverse
+):
+    """Finish KDA's merged projection after six inputs, before model finalization."""
+    from vllm.models.kimi_k3.amd.kda import KimiK3DeltaAttention
+    from vllm.transformers_utils.configs.kimi_linear import KimiLinearConfig
+
+    monkeypatch.setattr(
+        "vllm.distributed.parallel_state.get_tp_group",
+        lambda: SimpleNamespace(world_size=8, rank_in_group=tp_rank),
+    )
+    default_vllm_config.model_config = SimpleNamespace(dtype=torch.float32)
+    config = KimiLinearConfig(
+        hidden_size=16,
+        linear_attn_config={
+            "kda_layers": [0],
+            "full_attn_layers": [],
+            "head_dim": 128,
+            "num_heads": num_heads,
+            "short_conv_kernel_size": 4,
+            "use_full_rank_gate": True,
+        },
+    )
+    attention = KimiK3DeltaAttention(
+        config, default_vllm_config, prefix="model.layers.0.self_attn"
+    )
+    projection = attention.in_proj_qkvgfab
+    # Exercise online loading on CPU without selecting a GPU quantization kernel.
+    projection.weight = to_meta_tensor(projection.weight)
+    projection.quant_method = None
+    initialize_online_processing(projection)
+
+    empty_strided = torch.empty_strided
+
+    def poisoned_empty(*args, **kwargs):
+        return empty_strided(*args, **kwargs).fill_(float("nan"))
+
+    monkeypatch.setattr(torch, "empty_strided", poisoned_empty)
+    widths = [128 * num_heads] * 4 + [128, num_heads]
+    expected = {}
+    sources = []
+    for shard in reversed(range(6)) if reverse else range(6):
+        source = torch.arange(widths[shard] * 16, dtype=torch.float32).reshape(-1, 16)
+        sources.append(ref(source))
+        local_width = widths[shard] if shard == 4 else widths[shard] // 8
+        start = 0 if shard == 4 else tp_rank * local_width
+        expected[shard] = source[start : start + local_width].clone()
+        assert projection.weight.is_meta
+        projection.weight.weight_loader(projection.weight, source, shard)
+        del source
+
+    assert not projection.weight.is_meta
+    assert all(source() is None for source in sources)
+    expected_weight = torch.cat([expected[shard] for shard in range(6)])
+    torch.testing.assert_close(
+        projection.weight[: len(expected_weight)], expected_weight
+    )
+    padding = projection.weight[len(expected_weight) :]
+    assert torch.equal(padding, torch.zeros_like(padding))
 
 
 def test_layerwise_reload_skips_non_persistent_parameter_alias_buffers(monkeypatch):
@@ -1188,7 +1259,7 @@ def test_layerwise_reload_updates_loaded_non_persistent_buffers(monkeypatch):
 
 @pytest.fixture
 def hpc_rope_norm(monkeypatch, default_vllm_config):
-    """Import HpcRopeNorm with the external ``hpc`` package stubbed out."""
+    """Import HpcRopeNorm with the external `hpc` package stubbed out."""
     if "hpc" not in sys.modules:
         stub = types.ModuleType("hpc")
         stub.__spec__ = importlib.machinery.ModuleSpec("hpc", loader=None)
@@ -1205,7 +1276,7 @@ def hpc_rope_norm(monkeypatch, default_vllm_config):
 def test_hpc_rope_norm_kernel_sees_refit_norm_weights(monkeypatch, hpc_rope_norm):
     """The fused HPC kernel is handed the live QK-norm weights after a refit.
 
-    Drives the production ``_forward_impl`` with a recording ``hpc`` stub. The
+    Drives the production `_forward_impl` with a recording `hpc` stub. The
     Q/K norm weights it receives must be the model's own float32 parameters,
     so a layerwise reload that rewrites them in place (same storage) is what
     the kernel sees. Previously the kernel read separate mirrors that no
@@ -1430,8 +1501,11 @@ def test_reload_weights_with_lora_moe(vllm_runner, monkeypatch):
         repo_id="vllm-project/qwen3-moe-text2sql-spider"
     )
     prompts = [
-        "<|im_start|>user\nCount the rows of table candidate.<|im_end|>\n"
-        "<|im_start|>assistant\n<think>\n\n</think>\n\nSELECT count(*) FROM candidate"
+        (
+            "<|im_start|>user\nCount the rows of table candidate.<|im_end|>\n"
+            "<|im_start|>assistant\n<think>\n\n</think>\n\n"
+            "SELECT count(*) FROM candidate"
+        )
     ]
 
     def prompt_logprobs(llm, lora_id):
@@ -1624,7 +1698,8 @@ def test_finalize_runs_every_module_hook_after_its_submodules():
     for child, parent in [("a.x", "a"), ("shared", "a"), ("shared", "b")]:
         assert log.index(child) < log.index(parent)
     assert log[-1] == "root"
-    assert not model.attn.post_load_called
+    # attention-like layers run in the same traversal
+    assert model.attn.post_load_called
 
 
 class _TransformReadingAttention(_ReloadableAttentionLayer):
