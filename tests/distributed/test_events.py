@@ -160,7 +160,7 @@ def test_buffer_limit(publisher, subscriber, publisher_config):
     buffer_size = publisher_config.buffer_steps
 
     # Publish more events than the buffer can hold
-    for i in range(buffer_size + 10):
+    for _ in range(buffer_size + 10):
         batch = create_test_events(1)
         publisher.publish(batch)
 
