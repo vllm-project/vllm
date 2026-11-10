@@ -526,8 +526,9 @@ class SpeculativeConfig:
     or the same as the target model's tensor parallel size."""
     draft_decode_context_parallel_size: int | None = Field(default=None, ge=1)
     """The degree of decode context parallelism for the draft model. Can only be
-    1 or the same as the target model's decode context parallel size, which is
-    the default."""
+    1 or the same as the target model's decode context parallel size. Defaults to
+    the target's, except for DFlash/DSpark drafts, which default to 1 unless they
+    are full-attention MLA."""
     tensor_parallel_size: int | None = None
     """Users should pass "draft_tensor_parallel_size". This parameter's purpose is to
     warn users when they mistakenly provide the wrong argument."""

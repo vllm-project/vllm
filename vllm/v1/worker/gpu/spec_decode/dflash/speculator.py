@@ -277,8 +277,8 @@ class DFlashSpeculator(DraftModelSpeculator):
         super().load_model(target_model)
         if self.dcp_size == 1:
             return
-        # The DCP choice in __init__ is resolved from config; catch drafts whose
-        # built layers disagree instead of failing inside the attention kernel.
+        # The default draft DCP is resolved from config; catch drafts whose built
+        # layers disagree instead of failing inside the attention kernel.
         draft_layers = get_layers_from_vllm_config(
             self.vllm_config,
             AttentionLayerBase,  # type: ignore[type-abstract]
@@ -293,8 +293,7 @@ class DFlashSpeculator(DraftModelSpeculator):
             raise ValueError(
                 f"{self._speculator_name} draft layers {windowed} use sliding-window "
                 f"attention, which cannot run at decode_context_parallel_size="
-                f"{self.dcp_size}. Set sliding_window, dflash_config.use_swa or "
-                "layer_types in the draft config so the draft runs at DCP=1."
+                f"{self.dcp_size}. Set draft_decode_context_parallel_size=1."
             )
 
     def set_attn(
