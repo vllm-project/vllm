@@ -809,3 +809,21 @@ def test_asm_decode_matches_the_model(vllm_runner, monkeypatch, tmp_path):
     replay, state = _run(vllm_runner, monkeypatch, True, True, phases)
     _check_state(state, MODE_ROWS, set())
     _check_replay(on["steps"], replay["steps"])
+
+
+def test_asm_decode_needs_flash_shapes():
+    """A checkpoint differing from DeepSeek-V4.1-Flash in any shape the asm
+    kernels assume keeps vLLM's path, and the warning names the field (the
+    model test above checks that Flash's own config turns them on)."""
+    import types
+
+    from vllm.models.deepseek_v41.amd.asm import decode
+
+    assert decode._shape_mismatch(types.SimpleNamespace(**decode.SHAPES)) is None
+    for name, want in decode.SHAPES.items():
+        other = types.SimpleNamespace(**{**decode.SHAPES, name: want * 2})
+        assert decode._shape_mismatch(other).startswith(f"{name}: "), name
+        missing = types.SimpleNamespace(
+            **{k: v for k, v in decode.SHAPES.items() if k != name}
+        )
+        assert decode._shape_mismatch(missing) == f"{name}: None (needs {want})"
