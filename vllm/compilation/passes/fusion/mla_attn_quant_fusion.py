@@ -435,6 +435,15 @@ class MLAAttnFp8GroupQuantPattern(
             is_e8m0=is_e8m0,
             is_tma_aligned=is_tma_aligned,
         )
+        if (
+            is_e8m0
+            and self._group_size == 128
+            and current_platform.is_cuda()
+            and current_platform.is_device_capability(90)
+        ):
+            self._quant_matcher.QUANT_OP = (
+                torch.ops.vllm.per_token_group_fp8_quant_ue8m0_row.default
+            )
 
     @property
     def pattern(

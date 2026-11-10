@@ -228,6 +228,11 @@ Supported quantization scheme/hardware combinations:
 - FP8 dynamic per-token: CUDA & HIP kernel, AITER
 - FP8 dynamic per-token-group (128/64): CUDA & HIP kernel, AITER
 
+On SM90, group-128 UE8M0 quantization automatically uses a row-wise kernel for
+contiguous 2D FP16/BF16 inputs with at least 2,048 rows and widths up to 32,768.
+Smaller or unsupported inputs retain the native CUDA kernel. The UE8M0 operation
+stays separate from RMSNorm fusion to preserve power-of-two scale rounding.
+
 **Code locations.**
 
 - Pass: [`vllm/compilation/passes/fusion/rms_quant_fusion.py`](https://github.com/vllm-project/vllm/blob/main/vllm/compilation/passes/fusion/rms_quant_fusion.py)

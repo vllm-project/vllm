@@ -36,6 +36,9 @@ from vllm.model_executor.kernels.linear import (
 )
 from vllm.model_executor.layers.activation import SiluAndMul
 from vllm.model_executor.layers.quantization.input_quant_fp8 import QuantFP8
+from vllm.model_executor.layers.quantization.utils.fp8_utils import (
+    per_token_group_quant_fp8,
+)
 from vllm.model_executor.layers.quantization.utils.quant_utils import (
     GroupShape,
     create_fp8_quant_key,
@@ -52,6 +55,52 @@ FP4_DTYPE = torch.uint8
 
 def is_nvfp4_supported():
     return current_platform.has_device_capability(100)
+
+
+@pytest.mark.skipif(
+    not (current_platform.is_cuda() and current_platform.is_device_capability(90)),
+    reason="SM90 UE8M0 row path",
+)
+def test_silu_mul_ue8m0_preserves_power_of_two_scales():
+    """An ordinary-scale fused activation must not replace UE8M0 rounding."""
+    config = VllmConfig(
+        compilation_config=CompilationConfig(
+            mode=CompilationMode.VLLM_COMPILE,
+            custom_ops=["+silu_and_mul", "+quant_fp8"],
+            pass_config=PassConfig(fuse_act_quant=True, eliminate_noops=True),
+        )
+    )
+
+    class Model(torch.nn.Module):
+        def __init__(self):
+            super().__init__()
+            self.activation = SiluAndMul()
+
+        def forward(self, x):
+            return per_token_group_quant_fp8(
+                self.activation(x), 128, column_major_scales=True, use_ue8m0=True
+            )
+
+    with set_current_vllm_config(config):
+        torch.manual_seed(0)
+        model = Model()
+        x = torch.rand(2234, 10240, device="cuda", dtype=torch.bfloat16)
+        torch._dynamo.mark_dynamic(x, 0)
+        fusion = ActivationQuantFusionPass(config)
+        backend = TestBackend(
+            NoOpEliminationPass(config), fusion, PostCleanupPass(config)
+        )
+        reference_backend = TestBackend(
+            NoOpEliminationPass(config), PostCleanupPass(config)
+        )
+        actual = torch.compile(model, backend=backend, fullgraph=True)(x)
+        reference = torch.compile(model, backend=reference_backend, fullgraph=True)(x)
+        assert torch.equal(actual[0].view(torch.uint8), reference[0].view(torch.uint8))
+        torch.testing.assert_close(actual[1], reference[1], rtol=0, atol=0)
+        assert fusion.matched_count == 0
+        op = torch.ops.vllm.per_token_group_fp8_quant_ue8m0_row.default
+        assert backend.op_count(op, before=True) == 1
+        assert backend.op_count(op) == 1
 
 
 class TestSiluMulFp8QuantModel(torch.nn.Module):

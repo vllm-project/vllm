@@ -49,6 +49,9 @@ from vllm.model_executor.kernels.linear import (
     _KernelT,
 )
 from vllm.model_executor.layers.layernorm import RMSNorm, RMSNormGated
+from vllm.model_executor.layers.quantization.utils.fp8_utils import (
+    per_token_group_quant_fp8,
+)
 from vllm.model_executor.layers.quantization.utils.quant_utils import (
     GroupShape,
     create_fp8_quant_key,
@@ -444,6 +447,73 @@ def test_fusion_rmsnorm_quant(
         backend.check_before_ops(
             model.ops_in_model_before_partial(), fully_replaced=False
         )
+
+
+@pytest.mark.parametrize("has_residual", [False, True])
+@pytest.mark.skipif(
+    not (current_platform.is_cuda() and current_platform.is_device_capability(90)),
+    reason="SM90 UE8M0 row path",
+)
+def test_rmsnorm_ue8m0_group_quant_preserves_scales(has_residual):
+    """RMS fusion must not replace UE8M0 scales with ordinary FP32 scales."""
+    hidden_size, num_tokens = 5120, 2234
+    dtype = torch.bfloat16
+    config = VllmConfig(
+        model_config=ModelConfig(dtype=dtype),
+        compilation_config=CompilationConfig(
+            mode=CompilationMode.VLLM_COMPILE,
+            custom_ops=["+rms_norm", "+quant_fp8"],
+            pass_config=PassConfig(fuse_norm_quant=True, eliminate_noops=True),
+        ),
+    )
+
+    class Model(torch.nn.Module):
+        def __init__(self):
+            super().__init__()
+            self.norm = RMSNorm(hidden_size, 1e-6)
+
+        def forward(self, x):
+            if has_residual:
+                x, residual = self.norm(torch.relu(x), torch.ones_like(x))
+            else:
+                x, residual = self.norm(torch.relu(x)), None
+            quant, scales = per_token_group_quant_fp8(
+                x, 128, column_major_scales=True, use_ue8m0=True
+            )
+            return quant, scales, residual
+
+    with (
+        vllm.config.set_current_vllm_config(config),
+        config.kernel_config.ir_op_priority.set_priority(),
+    ):
+        torch.set_default_device("cuda")
+        torch.set_default_dtype(dtype)
+        torch.manual_seed(0)
+        model = Model()
+        x = torch.rand(num_tokens, hidden_size)
+        torch._dynamo.mark_dynamic(x, 0)
+
+        fusion_pass = RMSNormQuantFusionPass(config)
+        backend = TestBackend(
+            NoOpEliminationPass(config), fusion_pass, PostCleanupPass(config)
+        )
+        reference_backend = TestBackend(
+            NoOpEliminationPass(config), PostCleanupPass(config)
+        )
+        result = torch.compile(model, backend=backend, fullgraph=True)(x)
+        reference = torch.compile(model, backend=reference_backend, fullgraph=True)(x)
+
+        assert result[1].dtype == torch.float32
+        torch.testing.assert_close(result[1], reference[1], atol=0, rtol=0)
+        assert torch.equal(result[0].view(torch.uint8), reference[0].view(torch.uint8))
+        if has_residual:
+            torch.testing.assert_close(result[2], reference[2], atol=0, rtol=0)
+
+        assert fusion_pass.matched_count == 0
+        quant_op = torch.ops.vllm.per_token_group_fp8_quant_ue8m0_row.default
+        assert backend.op_count(quant_op, before=True) == 1
+        assert backend.op_count(quant_op) == 1
+        assert backend.op_count(torch.ops._C.rms_norm_per_block_quant.default) == 0
 
 
 @pytest.mark.parametrize("dtype", [torch.float16, torch.bfloat16])

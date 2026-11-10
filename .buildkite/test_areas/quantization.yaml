@@ -176,4 +176,7 @@ steps:
       - vllm/platforms/rocm.py
       - vllm/model_executor/model_loader/
       commands:
-      - pytest -v -s models/quantization
+      - >-
+        pytest -v -s
+        models/quantization
+        --deselect=models/quantization/test_fp8.py::test_ue8m0_rms_fusion_logprobs

@@ -9,9 +9,66 @@ Note: these tests will only pass on L4 GPU.
 import pytest
 
 from tests.quantization.utils import is_quant_method_supported
+from vllm import SamplingParams
+from vllm.model_executor.kernels.linear import DeepGemmFp8BlockScaledMMKernel
 from vllm.v1.attention.backends.fa_utils import flash_attn_supports_kv_cache_dtype
 from vllm.platforms import current_platform
 from ..utils import check_logprobs_close
+
+
+def test_ue8m0_rms_fusion_logprobs(
+    vllm_runner, monkeypatch, model="Qwen/Qwen3-0.6B-FP8"
+):
+    """Compiled RMS fusion must preserve Hopper UE8M0 model predictions."""
+    assert current_platform.is_device_capability(90)
+    monkeypatch.setenv("VLLM_USE_DEEP_GEMM", "1")
+    monkeypatch.setenv("VLLM_USE_DEEP_GEMM_E8M0", "1")
+    monkeypatch.setenv("VLLM_USE_BREAKABLE_CUDAGRAPH", "0")
+    monkeypatch.setenv("VLLM_ALLOW_INSECURE_SERIALIZATION", "1")
+
+    def uses_ue8m0(model):
+        for module in model.modules():
+            kernel = getattr(getattr(module, "quant_method", None), "fp8_linear", None)
+            if isinstance(kernel, DeepGemmFp8BlockScaledMMKernel):
+                return kernel.quant_fp8.use_ue8m0
+        return False
+
+    def compiled_model(model):
+        return any(getattr(module, "compiled", False) for module in model.modules())
+
+    outputs = []
+    params = SamplingParams(temperature=0, min_tokens=4, max_tokens=4, logprobs=10)
+    for fuse in (False, True):
+        with vllm_runner(
+            model,
+            dtype="bfloat16",
+            max_model_len=4096,
+            max_num_batched_tokens=4096,
+            max_num_seqs=1,
+            enable_prefix_caching=False,
+            kernel_config={"linear_backend": "deep_gemm", "enable_jit_warmup": False},
+            compilation_config={
+                "mode": 3,
+                "cudagraph_mode": "NONE",
+                "custom_ops": ["+rms_norm", "+quant_fp8"],
+                "pass_config": {"fuse_norm_quant": fuse},
+            },
+        ) as llm:
+            assert llm.llm.llm_engine.vllm_config.compilation_config.mode == 3
+            assert llm.apply_model(uses_ue8m0) == [True]
+            tokens = llm.llm.get_tokenizer().encode("The capital of France is Paris. ")
+            prompt = (tokens * 512)[:2234]
+            assert len(prompt) == 2234
+            outputs.append(llm.generate_w_logprobs([prompt], params))
+            assert llm.apply_model(compiled_model) == [True]
+            assert len(outputs[-1][0][0]) == 4
+    check_logprobs_close(
+        outputs_0_lst=outputs[0],
+        outputs_1_lst=outputs[1],
+        name_0="unfused_ue8m0",
+        name_1="compiled_rms_fusion",
+        always_check_logprobs=True,
+    )
 
 
 @pytest.mark.skipif(
