@@ -261,6 +261,7 @@ impl pb::inference_server::Inference for InferenceServiceImpl {
             sampling_mask: collected.sampling_mask,
             spec_decode_metrics: collected.spec_decode_metrics,
             weight_versions: collected.weight_versions,
+            routed_experts: collected.routed_experts.map(Box::new),
             timestamps: collected.timestamps,
         };
 
