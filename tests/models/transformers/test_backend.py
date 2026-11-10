@@ -707,6 +707,16 @@ def test_marking_skipped_without_tokenizer():
     assert not isinstance(vision_tower, StageMissingLayer)
 
 
+def test_missing_encoders_are_skipped():
+    """Gemma 4 31B has no audio tower, so `get_encoder` returns `None` for audio."""
+
+    class Model(nn.Module):
+        def get_encoder(self, modality: str) -> nn.Module | None:
+            return nn.Identity() if modality == "image" else None
+
+    assert MarkingStub()._find_encoder_classes(Model()) == {"image": nn.Identity}
+
+
 NUM_LAYERS = 4
 
 

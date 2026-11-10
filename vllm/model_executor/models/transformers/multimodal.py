@@ -957,15 +957,15 @@ class MultiModalMixin(SupportsMultiModal, SupportsMRoPE, Base):
         self, model: "PreTrainedModel"
     ) -> dict[str, type["PreTrainedModel"]]:
         """Modalities whose encoder cannot be told apart from the model itself are
-        omitted, as are those `get_encoder` rejects."""
+        omitted, as are those `get_encoder` rejects or has no encoder for."""
         encoder_classes: dict[str, type[PreTrainedModel]] = {}
         for modality in _MODALITY_TO_TOKEN_TYPE_ID:
             try:
-                encoder_cls = type(model.get_encoder(modality=modality))
+                encoder = model.get_encoder(modality=modality)
             except (TypeError, ValueError):
                 continue
-            if encoder_cls is not type(model):
-                encoder_classes[modality] = encoder_cls
+            if encoder is not None and type(encoder) is not type(model):
+                encoder_classes[modality] = type(encoder)
         return encoder_classes
 
     @contextmanager
