@@ -261,7 +261,7 @@ impl AppState {
     }
 
     /// The [`EngineCoreLlm`] under the chat facade, if that is what it runs.
-    fn engine_core_llm(&self) -> Option<&EngineCoreLlm> {
+    pub(crate) fn engine_core_llm(&self) -> Option<&EngineCoreLlm> {
         (self.llm() as &dyn Any).downcast_ref()
     }
 

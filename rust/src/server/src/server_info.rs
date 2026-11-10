@@ -30,9 +30,9 @@ pub(crate) struct ServerInfoSnapshot {
 }
 
 impl ServerInfoSnapshot {
-    pub(crate) fn new(config: &Config, client: &EngineCoreClient) -> Self {
+    pub(crate) fn new(config: &Config, client: Option<&EngineCoreClient>) -> Self {
         Self {
-            vllm_config: engine_vllm_config(client),
+            vllm_config: client.and_then(engine_vllm_config),
             rust_frontend_config: serde_json::to_value(config)
                 .expect("server info value must serialize"),
             vllm_env: collect_vllm_env(),

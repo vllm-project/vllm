@@ -199,12 +199,9 @@ fn build_router_with_gates(state: Arc<AppState>, gates: RouteGates) -> Router {
     }
 
     // Process checkpoint lifecycle, which requires sleep mode.
-    if state
-        .engine_core_client()
-        .ready_responses()
-        .iter()
-        .all(|ready| ready.enable_sleep_mode)
-    {
+    if state.engine_core_llm().is_some_and(|llm| {
+        (llm.engine_core_client().ready_responses().iter()).all(|ready| ready.enable_sleep_mode)
+    }) {
         router = router
             .route("/checkpoint/prepare", post(checkpoint::prepare))
             .route("/checkpoint/restore", post(checkpoint::restore))

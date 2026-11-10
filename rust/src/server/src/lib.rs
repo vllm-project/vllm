@@ -56,7 +56,7 @@ pub use vllm_chat::{
     ChatTemplateContentFormatOption, GenerationConfigMode, ParserSelection, RendererSelection,
 };
 use vllm_engine_core_client::{EngineCoreClient, EngineCoreClientConfig};
-use vllm_llm::EngineCoreLlm;
+use vllm_llm::{EngineCoreLlm, Llm};
 pub use vllm_metrics::CustomHistogramBuckets;
 use vllm_metrics::METRICS;
 use vllm_text::TextLlm;
@@ -82,9 +82,10 @@ fn effective_served_model_names(model: &str, served_model_name: &[String]) -> Ve
     }
 }
 
-/// Build the shared application state for one configured model and one engine
-/// client, including any static LoRA adapters from `--lora-modules`.
-async fn build_state(config: &Config) -> Result<Arc<AppState>> {
+/// Build the shared application state for one configured model around `llm`,
+/// or around one engine client when it is `None`, including any static LoRA
+/// adapters from `--lora-modules`.
+async fn build_state<L: Llm>(config: &Config, llm: Option<L>) -> Result<Arc<AppState>> {
     // Fix the histogram buckets before the engine connection records metrics.
     METRICS.set_custom_histogram_buckets(config.custom_histogram_buckets.clone());
 
@@ -121,33 +122,47 @@ async fn build_state(config: &Config) -> Result<Arc<AppState>> {
     let text_backend = loaded.text_backend;
     let chat_backend = loaded.chat_backend;
 
-    let coordinator_mode = config.effective_coordinator_mode(text_backend.is_moe());
-    info!(
-        engine_count = config.engine_count(),
-        model_is_moe = text_backend.is_moe(),
-        ?coordinator_mode,
-        "resolved coordinator mode"
-    );
+    let (text, server_info, system_fingerprint) = match llm {
+        Some(llm) => (
+            TextLlm::new(llm, text_backend),
+            ServerInfoSnapshot::new(config, None),
+            None,
+        ),
+        None => {
+            let coordinator_mode = config.effective_coordinator_mode(text_backend.is_moe());
+            info!(
+                engine_count = config.engine_count(),
+                model_is_moe = text_backend.is_moe(),
+                ?coordinator_mode,
+                "resolved coordinator mode"
+            );
 
-    let client = EngineCoreClient::connect(EngineCoreClientConfig {
-        transport_mode: config.transport_mode.clone(),
-        coordinator_mode,
-        model_name: metrics_model_name.clone(),
-        client_index: 0,
-        engine_stats_enabled: !config.disable_log_stats,
-    })
-    .await
-    .context("failed to connect to engine core")?;
-    let server_info = ServerInfoSnapshot::new(config, &client);
-    let system_fingerprint = config
-        .fingerprint_mode
-        .fingerprint(&client.ready_responses(), client.data_parallel_size());
+            let client = EngineCoreClient::connect(EngineCoreClientConfig {
+                transport_mode: config.transport_mode.clone(),
+                coordinator_mode,
+                model_name: metrics_model_name.clone(),
+                client_index: 0,
+                engine_stats_enabled: !config.disable_log_stats,
+            })
+            .await
+            .context("failed to connect to engine core")?;
+            let server_info = ServerInfoSnapshot::new(config, Some(&client));
+            let system_fingerprint = config
+                .fingerprint_mode
+                .fingerprint(&client.ready_responses(), client.data_parallel_size());
 
-    let llm = EngineCoreLlm::new(client)
-        .with_log_stats(config.log_stats_interval.filter(|_| !config.disable_log_stats))
-        .with_request_id_randomization(!config.disable_request_id_randomization)
-        .with_stream_interval(config.stream_interval);
-    let text = TextLlm::new(llm, text_backend)
+            let llm = EngineCoreLlm::new(client)
+                .with_log_stats(config.log_stats_interval.filter(|_| !config.disable_log_stats))
+                .with_request_id_randomization(!config.disable_request_id_randomization)
+                .with_stream_interval(config.stream_interval);
+            (
+                TextLlm::new(llm, text_backend),
+                server_info,
+                system_fingerprint,
+            )
+        }
+    };
+    let text = text
         .with_served_model_name(metrics_model_name)
         .with_max_logprobs(config.max_logprobs)
         .with_structured_outputs_backend(config.structured_outputs_backend);
@@ -223,6 +238,38 @@ pub async fn serve_with_router_extension<F>(
 where
     F: FnOnce(Router) -> Router,
 {
+    serve_inner(config, None::<EngineCoreLlm>, shutdown, extend_router).await
+}
+
+/// Run the OpenAI-compatible HTTP server over a caller-supplied [`Llm`]
+/// instead of an engine-core connection, until `shutdown` is cancelled.
+///
+/// The tokenizer, chat template and model config still load from
+/// `config.model`. Features that need engine-core, such as gRPC, LoRA and the
+/// engine admin routes, are not supported.
+pub async fn serve_with_llm<L, F>(
+    config: Config,
+    llm: L,
+    shutdown: CancellationToken,
+    extend_router: F,
+) -> Result<()>
+where
+    L: Llm,
+    F: FnOnce(Router) -> Router,
+{
+    serve_inner(config, Some(llm), shutdown, extend_router).await
+}
+
+async fn serve_inner<L, F>(
+    config: Config,
+    llm: Option<L>,
+    shutdown: CancellationToken,
+    extend_router: F,
+) -> Result<()>
+where
+    L: Llm,
+    F: FnOnce(Router) -> Router,
+{
     config.validate().context("invalid OpenAI frontend configuration")?;
 
     // Build the TLS server config once, up front, so a bad cert/key fails fast
@@ -237,7 +284,7 @@ where
     // Also check shutdown during the (potentially long) startup handshake and
     // static LoRA loading.
     let state = tokio::select! {
-        result = build_state(&config) => result?,
+        result = build_state(&config, llm) => result?,
         _ = shutdown.cancelled() => return Ok(()),
     };
     let model = state.primary_model_name().to_owned();
