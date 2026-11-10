@@ -19,7 +19,7 @@ from vllm.v1.kv_cache_interface import (
     MLAAttentionSpec,
 )
 
-from .utils import make_moriio_writer
+from ..utils import make_moriio_writer
 
 aiter_available = importlib.util.find_spec("aiter") is not None
 mori_available = importlib.util.find_spec("mori") is not None
@@ -98,7 +98,7 @@ def _wrapper_for_messages() -> Any:
     wrapper.done_remote_allocate_req_dict = {}
     wrapper.done_req_ids = []
     wrapper.done_write_cache_req_ids = []
-    wrapper._write_done_counts = {}
+    wrapper._write_done_senders = {}
     wrapper._terminal_transfer_ids = OrderedDict()
     return wrapper
 
@@ -441,6 +441,39 @@ def test_hybrid_write_attention_uses_its_own_group_not_the_first_group():
     assert plan.sess_idx == 5
 
 
+def test_write_skips_blocks_the_consumer_prefix_cache_already_holds():
+    worker = SimpleNamespace(
+        _has_mamba=False,
+        kv_caches={"dense": torch.empty((8, 2, 4, 2, 3))},
+        layer_to_group={"dense": 0},
+        _region_session_indices=lambda _: [0],
+        _check_peer_block_size=lambda layer_name, remote_moriio_meta: None,
+        _compute_block_transfer_offsets=Mock(return_value=([1], [2], [3])),
+    )
+    writer = make_moriio_writer(worker)
+    task = _write_task("dense")
+    task.local_block_ids = [[10, 11, 12]]
+    set_role(ROLE.PRODUCER)
+    wrapper = _wrapper_for_messages()
+    wrapper._handle_message(
+        msgpack.dumps(
+            {
+                "type": "remote_blocks",
+                "transfer_id": "xfer",
+                "block_notify_list": [40, 41, 42, 43],
+                "num_skip_blocks": 2,
+            }
+        )
+    )
+    meta = _remote_meta()
+    writer._prepare_transfer_plan(
+        task, wrapper.done_remote_allocate_req_dict["xfer"], meta
+    )
+    worker._compute_block_transfer_offsets.assert_called_once_with(
+        "dense", [12], [42, 43], meta, remote_engine_id=task.dst_engine_id
+    )
+
+
 def test_hybrid_write_posts_both_regions_before_layer_completion():
     from unittest.mock import Mock
 
@@ -537,7 +570,9 @@ def test_write_completion_notifies_once_after_all_sealed_writes_finish():
     request_info.completion_notify_port = 7002
     request_info.completion_remote_ip = "127.0.0.1"
     wrapper.done_remote_allocate_req_dict["xfer"] = request_info
-    writer = make_moriio_writer(SimpleNamespace(moriio_wrapper=wrapper, tp_rank=2))
+    writer = make_moriio_writer(
+        SimpleNamespace(moriio_wrapper=wrapper, tp_rank=2, pp_rank=0, pp_size=1)
+    )
     writer._scheduled_writes["xfer"] = 2
     writer._scheduled_layers["xfer"] = {"dense0", "indexer"}
     writer._sealed_writes["xfer"] = 2

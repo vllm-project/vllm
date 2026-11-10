@@ -548,8 +548,7 @@ def test_ubatch_runner_names_the_microbatch_that_failed(failed_ubatch):
     registering a recv hook on the exited microbatch 1. A microbatch that fails
     *while its sibling is parked at a yield* hangs the step instead -- the
     shared handoff protocol in `ubatching.py` has no way to unwind a parked
-    microbatch, and the V1 runner has the same gap. Fixing that means changing
-    `ubatching.py`, which is out of scope for the V2 runner.
+    microbatch. Fixing that requires changing `ubatching.py`.
     """
     vllm_config = _make_dbo_config()
     device = torch.device("cuda:0")

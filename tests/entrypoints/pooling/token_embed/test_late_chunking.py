@@ -29,7 +29,7 @@ from vllm.entrypoints.pooling.token_embed.protocol import (
     TokenEmbeddingResponse,
 )
 from vllm.entrypoints.pooling.token_embed.serving import ServingTokenEmbedding
-from vllm.entrypoints.pooling.typing import (
+from vllm.entrypoints.pooling.types import (
     OfflineEncodeInputsContext,
     OfflineOutputsContext,
     PoolingServeContext,
