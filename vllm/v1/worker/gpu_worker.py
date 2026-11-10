@@ -1490,7 +1490,7 @@ class Worker(WorkerBase):
         forward_pass = scheduler_output.total_num_scheduled_tokens > 0
         num_scheduled_tokens = scheduler_output.total_num_scheduled_tokens
         activation_transport = self._get_pp_activation_transport()
-        all_gather_tensors = {}
+        all_gather_tensors: dict[str, bool] = {}
         use_fixed_pp_transport = (
             forward_pass
             and activation_transport is not None
@@ -1503,6 +1503,8 @@ class Worker(WorkerBase):
         if forward_pass and self._pp_transport and not get_pp_group().is_first_rank:
             intermediate_tensors = self._pp_transport.recv(get_pp_group())
         elif forward_pass and not get_pp_group().is_first_rank:
+            tensor_dict: dict[str, Any] | None
+            comm_postprocess: list[Callable[[], None]]
             if use_fixed_pp_transport:
                 assert activation_transport is not None
                 tensor_dict, comm_handles = activation_transport.receive()
