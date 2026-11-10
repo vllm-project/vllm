@@ -505,7 +505,7 @@ def _make_requests(
     block_ids_per_req: list[list[int]],
     num_prompt_tokens: list[int] | None = None,
 ) -> dict[str, MagicMock]:
-    """Create mock CachedRequestState objects."""
+    """Create mock request state objects."""
     requests = {}
     for i, req_id in enumerate(req_ids):
         req = MagicMock()
