@@ -40,6 +40,8 @@ class ParallelSetup(NamedTuple):
 class PPTestOptions(NamedTuple):
     multi_node_only: bool
     load_format: str | None = None
+    # Merged over the default dummy-load size overrides.
+    text_overrides: dict[str, int] | None = None
 
 
 @dataclass
@@ -81,6 +83,7 @@ class PPTestSettings:
         runner: RunnerOption = "auto",
         multi_node_only: bool = False,
         load_format: str | None = None,
+        text_overrides: dict[str, int] | None = None,
     ):
         return PPTestSettings(
             parallel_setups=[
@@ -89,7 +92,9 @@ class PPTestSettings:
             distributed_backends=["mp"],
             runner=runner,
             test_options=PPTestOptions(
-                multi_node_only=multi_node_only, load_format=load_format
+                multi_node_only=multi_node_only,
+                load_format=load_format,
+                text_overrides=text_overrides,
             ),
         )
 
@@ -176,6 +181,11 @@ MULTIMODAL_MODELS = {
     # [Decoder-only]
     "Salesforce/blip2-opt-6.7b": PPTestSettings.fast(),
     "zai-org/glm-4v-9b": PPTestSettings.fast(),
+    "zai-org/GLM-5.3-Flash": PPTestSettings.fast(
+        load_format="dummy",
+        # Block-FP8 checkpoint: dense MLP widths must be multiples of 128.
+        text_overrides={"intermediate_size": 1024},
+    ),
     "OpenGVLab/InternVL3-1B": PPTestSettings.fast(),
     "llava-hf/llava-1.5-7b-hf": PPTestSettings.fast(),
     "llava-hf/llava-v1.6-mistral-7b-hf": PPTestSettings.fast(),
@@ -207,6 +217,7 @@ TEST_MODELS = [
     "OpenGVLab/InternVL3-1B",
     "microsoft/Phi-3.5-vision-instruct",
     "fixie-ai/ultravox-v0_5-llama-3_2-1b",
+    "zai-org/GLM-5.3-Flash",
     # [LANGUAGE GENERATION - HYBRID ARCH]
     "ai21labs/Jamba-tiny-dev",
 ]
@@ -229,7 +240,8 @@ def _compare_tp(
         eager_mode,
     ) = parallel_setup
 
-    multi_node_only, load_format = test_options
+    multi_node_only = test_options.multi_node_only
+    load_format = test_options.load_format
 
     model_info = HF_EXAMPLE_MODELS.find_hf_info(model_id)
     model_info.check_transformers_version(on_fail="skip")
@@ -255,6 +267,7 @@ def _compare_tp(
             "num_attention_heads": 4,
             "num_key_value_heads": 1,
         }
+        text_overrides.update(test_options.text_overrides or {})
 
         if is_multimodal:
             hf_overrides.update({"text_config": text_overrides})

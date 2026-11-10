@@ -2456,6 +2456,8 @@ _FLOAT16_NOT_SUPPORTED_MODELS = {
     "gemma3": "Numerical instability. Please use bfloat16 or float32 instead.",
     "gemma3_text": "Numerical instability. Please use bfloat16 or float32 instead.",
     "glm4": "Numerical instability. Please use bfloat16 or float32 instead.",
+    "glm5_next": "The mHC kernels only support bfloat16.",
+    "glm5_next_text": "The mHC kernels only support bfloat16.",
 }
 
 
