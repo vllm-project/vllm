@@ -2513,11 +2513,19 @@ async fn client_decodes_multipart_logprob_outputs() {
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn client_sends_prompt_block_hashes_for_engine_prefix_hash_config() {
+    assert_client_prompt_block_hashes("spanning_image_lookahead_3").await;
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn client_omits_all_prompt_block_hashes_when_later_media_overlap() {
+    assert_client_prompt_block_hashes("late_overlapping_images_lookahead_0").await;
+}
+
+async fn assert_client_prompt_block_hashes(name: &str) {
     init_tracing();
     let vectors: serde_json::Value =
         serde_json::from_str(include_str!("prompt_block_hash_vectors.json")).unwrap();
     let algorithm = "sha256_cbor";
-    let name = "spanning_image_lookahead_3";
     let case = vectors["cases"]
         .as_array()
         .unwrap()
@@ -2538,8 +2546,11 @@ async fn client_sends_prompt_block_hashes_for_engine_prefix_hash_config() {
         ..default_ready_response()
     };
     let token_ids: Vec<u32> = serde_json::from_value(case["prompt_token_ids"].clone()).unwrap();
-    let expected_hashes: Vec<String> =
-        serde_json::from_value(case["block_hashes"].clone()).unwrap();
+    let expected_hashes: Option<Vec<String>> = if case["frontend_fallback"] == true {
+        None
+    } else {
+        Some(serde_json::from_value(case["block_hashes"].clone()).unwrap())
+    };
     let request = EngineCoreRequest {
         prompt_token_ids: Some(token_ids.into()),
         mm_features: serde_json::from_value(case["mm_features"].clone()).unwrap(),
@@ -2568,8 +2579,9 @@ async fn client_sends_prompt_block_hashes_for_engine_prefix_hash_config() {
             Box::pin(async move {
                 let add = recv_engine_message(dealer).await;
                 let request: EngineCoreRequest = rmp_serde::from_slice(&add[1]).unwrap();
-                let hashes = request.block_hashes.expect("prompt block hashes");
-                let hashes = hashes.iter().map(|hash| hex::encode(&hash.0)).collect::<Vec<_>>();
+                let hashes = request.block_hashes.map(|hashes| {
+                    hashes.iter().map(|hash| hex::encode(&hash.0)).collect::<Vec<_>>()
+                });
                 assert_eq!(hashes, expected_hashes);
 
                 send_outputs(

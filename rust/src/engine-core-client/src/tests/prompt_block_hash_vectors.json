@@ -579,6 +579,7 @@
       "hash_algo": "sha256_cbor",
       "block_size": 8,
       "num_lookahead_tokens": 0,
+      "frontend_fallback": false,
       "lora": {
         "name": "adapter-é",
         "path": "/m/é"
@@ -608,6 +609,7 @@
       "hash_algo": "sha256_cbor",
       "block_size": 8,
       "num_lookahead_tokens": 1,
+      "frontend_fallback": false,
       "lora": {
         "name": "adapter-é",
         "path": "/m/é"
@@ -636,6 +638,7 @@
       "hash_algo": "sha256_cbor",
       "block_size": 8,
       "num_lookahead_tokens": 3,
+      "frontend_fallback": false,
       "lora": {
         "name": "adapter-é",
         "path": "/m/é"
@@ -664,6 +667,7 @@
       "hash_algo": "sha256_cbor",
       "block_size": 8,
       "num_lookahead_tokens": 0,
+      "frontend_fallback": false,
       "lora": {
         "name": "adapter-é",
         "path": "/m/é"
@@ -693,6 +697,7 @@
       "hash_algo": "sha256_cbor",
       "block_size": 8,
       "num_lookahead_tokens": 0,
+      "frontend_fallback": false,
       "lora": {
         "name": "adapter-é",
         "path": "/m/é"
@@ -722,6 +727,7 @@
       "hash_algo": "sha256_cbor",
       "block_size": 8,
       "num_lookahead_tokens": 0,
+      "frontend_fallback": false,
       "lora": {
         "name": "adapter-é",
         "path": "/m/é"
@@ -760,6 +766,7 @@
       "hash_algo": "sha256_cbor",
       "block_size": 8,
       "num_lookahead_tokens": 0,
+      "frontend_fallback": false,
       "lora": {
         "name": "adapter-é",
         "path": "/m/é"
@@ -798,6 +805,7 @@
       "hash_algo": "sha256_cbor",
       "block_size": 8,
       "num_lookahead_tokens": 0,
+      "frontend_fallback": false,
       "lora": {
         "name": "adapter-é",
         "path": "/m/é"
@@ -827,6 +835,7 @@
       "hash_algo": "sha256_cbor",
       "block_size": 8,
       "num_lookahead_tokens": 1,
+      "frontend_fallback": false,
       "lora": {
         "name": "adapter-é",
         "path": "/m/é"
@@ -855,6 +864,7 @@
       "hash_algo": "sha256_cbor",
       "block_size": 8,
       "num_lookahead_tokens": 3,
+      "frontend_fallback": false,
       "lora": {
         "name": "adapter-é",
         "path": "/m/é"
@@ -883,6 +893,7 @@
       "hash_algo": "sha256_cbor",
       "block_size": 8,
       "num_lookahead_tokens": 0,
+      "frontend_fallback": false,
       "lora": {
         "name": "adapter-é",
         "path": "/m/é"
@@ -914,6 +925,54 @@
         "c61d0aebe93ff5e2e5ce4fb5c968e9b2f7469f1815f160642faee0bdc3d3f12f",
         "b8c6ac5b4ff8bc11b01baa89071b45b6fcd6cfe79874fdb245970148a828867c",
         "a4424e228b824669216efad0270b1e3de033cbc7812ffb3d0ded056cb732e3cf"
+      ]
+    },
+    {
+      "name": "late_overlapping_images_lookahead_0",
+      "hash_algo": "sha256_cbor",
+      "block_size": 8,
+      "num_lookahead_tokens": 0,
+      "frontend_fallback": true,
+      "lora": {
+        "name": "adapter-é",
+        "path": "/m/é"
+      },
+      "cache_salt": "tenant-1",
+      "prompt_token_ids": [0, 1, 23, 24, 255, 256, 65535, 65536, 151645, 2147483647, 0, 1, 23, 24, 255, 256, 65535, 65536, 151645, 2147483647, 0, 1, 23, 24, 255, 256, 65535, 65536, 151645, 2147483647, 7, 8],
+      "mm_features": [
+        {
+          "data": null,
+          "modality": "image",
+          "identifier": "image-a",
+          "mm_position": {
+            "offset": 3,
+            "length": 4
+          }
+        },
+        {
+          "data": null,
+          "modality": "image",
+          "identifier": "image-b",
+          "mm_position": {
+            "offset": 18,
+            "length": 4
+          }
+        },
+        {
+          "data": null,
+          "modality": "image",
+          "identifier": "image-c",
+          "mm_position": {
+            "offset": 20,
+            "length": 4
+          }
+        }
+      ],
+      "block_hashes": [
+        "6233cff5649a0502c5c4bfd16ea624ed995b89f402fc10f4d39539e012cb0d3f",
+        "5e68750e7f3f0072a17e9fd7c55fd52d79294bffd177d4bbe5a728ed53ed6f94",
+        "b440dbf0f5f921c0ac3261ca37e944b1d315859991f009cf1c9fcf2a97037b2b",
+        "dd3075638c12afafaebc7073457194d2c5fa8ff3559221fdfc270e921c74fa78"
       ]
     },
     {
