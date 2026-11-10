@@ -528,7 +528,6 @@ _ONLINE = object.__new__(OnlineQuantizationConfig)
             {
                 "engram_config": EngramConfig(
                     shared_host_endpoint="owner:56000",
-                    shared_host_token_file="/tmp/token",
                     shared_host_generation="generation",
                 )
             },
@@ -619,7 +618,6 @@ def test_external_engram_rejects_in_place_weight_updates():
     config = VllmConfig()
     config.engram_config = EngramConfig(
         shared_host_endpoint="owner:56000",
-        shared_host_token_file="/tmp/token",
         shared_host_generation="generation",
     )
     with pytest.raises(ValueError, match="new external Engram owner generation"):

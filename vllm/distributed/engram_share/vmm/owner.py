@@ -185,19 +185,18 @@ def publish_checkpoint(model_dir: Path, device: int) -> tuple[dict, list[TableMa
 
 
 class _OwnerState:
-    def __init__(self, manifest: dict, token: str) -> None:
+    def __init__(self, manifest: dict) -> None:
         self.manifest = manifest
-        self.token = token
         self.active: set[str] = set()
         self.uncertain: set[str] = set()
         self.lease_clients: dict[str, dict] = {}
         self.draining = False
         self.condition = threading.Condition()
 
-    def attach(self, token: str, client: dict | None = None) -> str:
+    def attach(self, client: dict | None = None) -> str:
         with self.condition:
-            if self.draining or not secrets.compare_digest(token, self.token):
-                raise PermissionError("shared Engram attachment rejected")
+            if self.draining:
+                raise RuntimeError("shared Engram owner is draining")
             lease = secrets.token_hex(16)
             self.active.add(lease)
             self.lease_clients[lease] = client or {}
@@ -278,7 +277,7 @@ class _RequestHandler(socketserver.StreamRequestHandler):
                         and len(value) <= 128
                     ):
                         client[key] = value
-            lease = state.attach(str(request.get("token", "")), client)
+            lease = state.attach(client)
             reply = {"ok": True, "lease": lease, "manifest": state.manifest}
             self.wfile.write(json.dumps(reply).encode() + b"\n")
             self.wfile.flush()
@@ -314,13 +313,10 @@ class _OwnerServer(socketserver.ThreadingTCPServer):
         self.owner_state = state
 
 
-def run_owner(model_dir: Path, address: tuple[str, int], token_file: Path, device: int):
-    token = token_file.read_text().strip()
-    if len(token) < 32 or token_file.stat().st_mode & 0o077:
-        raise ValueError("token file must hold at least 32 private characters")
+def run_owner(model_dir: Path, address: tuple[str, int], device: int):
     torch.accelerator.set_device_index(device)
     manifest, mappings = publish_checkpoint(model_dir, device)
-    state = _OwnerState(manifest, token)
+    state = _OwnerState(manifest)
     stop = threading.Event()
     for sig in (signal.SIGINT, signal.SIGTERM):
         signal.signal(sig, lambda _sig, _frame: stop.set())
@@ -381,7 +377,6 @@ def run_owner(model_dir: Path, address: tuple[str, int], token_file: Path, devic
 
 def attach_table(
     endpoint: str,
-    token_file: Path,
     layer: int,
     rows: int,
     dim: int,
@@ -395,10 +390,8 @@ def attach_table(
     connection = socket.create_connection((host, int(port)), timeout=30)
     lease = None
     try:
-        token = token_file.read_text().strip()
         request = {
             "op": "attach",
-            "token": token,
             "client": {
                 "hostname": socket.gethostname(),
                 "pid": os.getpid(),
@@ -507,18 +500,15 @@ def main() -> None:
     parser.add_argument("--model-dir", type=Path, required=True)
     parser.add_argument("--listen-host", required=True)
     parser.add_argument("--listen-port", type=int, required=True)
-    parser.add_argument("--token-file", type=Path, required=True)
     parser.add_argument("--device", type=int, default=0)
     args = parser.parse_args()
     if not args.model_dir.is_dir():
         parser.error("--model-dir must be a local checkpoint directory")
     if args.listen_port < 1 or args.listen_port > 65535:
         parser.error("--listen-port must be between 1 and 65535")
-    os.umask(0o077)
     run_owner(
         args.model_dir,
         (args.listen_host, args.listen_port),
-        args.token_file,
         args.device,
     )
 

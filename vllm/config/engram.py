@@ -65,9 +65,6 @@ class EngramConfig:
     shared_host_endpoint: str | None = None
     """Opt-in owner host:port for an immutable external Engram generation."""
 
-    shared_host_token_file: str | None = None
-    """Private token file used to attach to the shared Engram owner."""
-
     shared_host_generation: str | None = None
     """Expected generation printed by the owner after checkpoint publication."""
 
@@ -75,13 +72,10 @@ class EngramConfig:
     def _validate_shared_memory(self) -> Self:
         shared_values = (
             self.shared_host_endpoint,
-            self.shared_host_token_file,
             self.shared_host_generation,
         )
         if any(shared_values) and not all(shared_values):
-            raise ValueError(
-                "shared Engram requires endpoint, token file and generation"
-            )
+            raise ValueError("shared Engram requires endpoint and generation")
         if self.shared_host_endpoint and (
             not self.cpu_offload
             or self.dp_shared_memory

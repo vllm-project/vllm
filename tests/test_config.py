@@ -1537,12 +1537,11 @@ def test_engram_dp_shared_memory_requires_cpu_offload():
 
 
 def test_shared_engram_rejects_incomplete_and_unsafe_loading():
-    with pytest.raises(ValueError, match="endpoint, token file and generation"):
+    with pytest.raises(ValueError, match="endpoint and generation"):
         EngramConfig(shared_host_endpoint="owner:5000")
 
     config = EngramConfig(
         shared_host_endpoint="owner:5000",
-        shared_host_token_file="/private/token",
         shared_host_generation="0123456789abcdef",
     )
     config.resolve_dp_shared_memory(ParallelConfig(data_parallel_size=1))

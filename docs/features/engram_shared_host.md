@@ -18,9 +18,8 @@ initialize, or load table replicas.
 
 - CUDA with HOST_NUMA VMM, Fabric handles, and a common NVIDIA IMEX channel for
   owner and consumers. Cross-host use requires the same NVLink fabric domain.
-- A trusted, reachable TCP control network and the same private token file on
-  every participant. The control channel is not encrypted; use cluster network
-  isolation. FABRIC handles are accepted only by processes with IMEX access.
+- A reachable cluster TCP control network. FABRIC handles are accepted only by
+  processes with IMEX access.
 - A local DeepSeek-V4.1-Flash safetensors checkpoint directory on the owner and
   consumers. Consumers need the mixed shards for their small Engram projection
   weights, but the two large table tensors are skipped before `get_tensor`.
@@ -41,31 +40,29 @@ The complete single-host P TP2 + D TP2 NIXL example, including owner,
 consumer launch commands and a routed request, is in
 `examples/disaggregated/shared_engram/`. SGLang consumers can use the same
 provider with their own launch recipe in
-[SGLang's VMM port](https://github.com/foraxe/sglang/tree/nyx/engram-vmm-port-99fd0104)
+[SGLang's VMM port](https://github.com/foraxe/sglang/tree/feat/dsv41-engram-shared-fabric)
 (intended for [SGLang #47478](https://github.com/sgl-project/sglang/pull/47478)). The two
 engines use separate KV-transfer paths; the shared contract is the Engram
 owner generation and FABRIC handles.
 
-Create a private random token file, then start the owner on a host whose GPUs
-can access both Grace NUMA nodes. Keep it running while workers use its
+Start the owner on a host whose GPUs can access both Grace NUMA nodes. Keep it
+running while workers use its
 generation. The owner prints `ENGRAM_OWNER_READY` after both real tables and
 their SHA256 digests are complete.
 
 ```bash
-umask 077
-openssl rand -hex 32 > /shared/private/engram.token
 python -m vllm.distributed.engram_share.vmm.owner \
   --model-dir /models/DeepSeek-V4.1-Flash \
   --listen-host OWNER_ADDRESS --listen-port 56000 \
-  --token-file /shared/private/engram.token --device 0
+  --device 0
 ```
 
-The ready line contains a generation ID. Give that ID, the owner address, and
-access to the token file to each independent worker. For example, add these
+The ready line contains a generation ID. Give that ID and the owner address
+to each independent worker. For example, add these
 settings to otherwise normal `vllm serve` arguments:
 
 ```bash
---engram-config '{"cpu_offload":true,"shared_host_endpoint":"OWNER_ADDRESS:56000","shared_host_token_file":"/shared/private/engram.token","shared_host_generation":"GENERATION_ID"}' \
+--engram-config '{"cpu_offload":true,"shared_host_endpoint":"OWNER_ADDRESS:56000","shared_host_generation":"GENERATION_ID"}' \
 --load-format safetensors --safetensors-load-strategy lazy
 ```
 

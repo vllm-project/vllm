@@ -939,7 +939,6 @@ class ParallelEngramEmbedding(nn.Module):
         dp_shared_memory: bool = False,
         use_thp: bool = False,
         shared_host_endpoint: str | None = None,
-        shared_host_token_file: str | None = None,
         shared_host_generation: str | None = None,
         layer_id: int | None = None,
     ) -> None:
@@ -954,13 +953,8 @@ class ParallelEngramEmbedding(nn.Module):
         self._external_mapping: Any = None
         self._external_lease = None
         if shared_host_endpoint:
-            if not (
-                shared_host_token_file
-                and shared_host_generation
-                and layer_id is not None
-            ):
+            if not (shared_host_generation and layer_id is not None):
                 raise ValueError("shared Engram attachment is incomplete")
-            self._external_token_file = Path(shared_host_token_file)
             self._external_generation = shared_host_generation
             self._external_layer_id = layer_id
         self.dp_size = get_engram_dp_size()
@@ -1080,7 +1074,6 @@ class ParallelEngramEmbedding(nn.Module):
                 device = torch.accelerator.current_device_index()
                 connection, mapping, manifest = attach_table(
                     self.shared_host_endpoint,
-                    self._external_token_file,
                     self._external_layer_id,
                     self.num_embeddings,
                     self.dim,
@@ -1718,7 +1711,6 @@ class Engram(nn.Module):
             dp_shared_memory=bool(engram_config.dp_shared_memory),
             use_thp=engram_config.use_thp,
             shared_host_endpoint=engram_config.shared_host_endpoint,
-            shared_host_token_file=engram_config.shared_host_token_file,
             shared_host_generation=engram_config.shared_host_generation,
             layer_id=(
                 layout.layer_ids[layer_hash_index]

@@ -20,22 +20,22 @@ from vllm.models.deepseek_v41.common.engram import external_table_views
 
 
 def test_disconnected_consumer_prevents_owner_drain(caplog):
-    state = _OwnerState({"generation": "generation-1"}, "private-token")
+    state = _OwnerState({"generation": "generation-1"})
     client = {"peer": "192.0.2.7", "hostname": "worker-7", "pid": 42}
-    lease = state.attach("private-token", client)
+    lease = state.attach(client)
     state.lose_control(lease)
     assert not state.active
     assert state.uncertain == {lease}
     assert state.drain_status()["clients"][lease] == client
     assert "retaining backing" in caplog.text
     state.draining = True
-    with pytest.raises(PermissionError, match="rejected"):
-        state.attach("private-token")
+    with pytest.raises(RuntimeError, match="draining"):
+        state.attach()
 
 
 def test_normal_detach_removes_client_from_drain_status(capsys):
-    state = _OwnerState({"generation": "generation-1"}, "private-token")
-    lease = state.attach("private-token", {"peer": "127.0.0.1", "pid": 4})
+    state = _OwnerState({"generation": "generation-1"})
+    lease = state.attach({"peer": "127.0.0.1", "pid": 4})
     state.detach(lease)
     output = capsys.readouterr().out
     assert "ENGRAM_OWNER_ATTACH" in output
@@ -79,8 +79,6 @@ def test_worker_shutdown_releases_leases_after_mapping_quiescence():
 
 
 def test_checkpoint_metadata_mismatch_detaches_without_import(tmp_path):
-    token_file = tmp_path / "token"
-    token_file.write_text("private-token")
     (tmp_path / "config.json").write_text("{}")
     (tmp_path / "model.safetensors.index.json").write_text("{}")
     state = _OwnerState(
@@ -90,7 +88,6 @@ def test_checkpoint_metadata_mismatch_detaches_without_import(tmp_path):
             "index_sha256": "wrong",
             "tables": {},
         },
-        "private-token",
     )
     with _OwnerServer(("127.0.0.1", 0), state) as server:
         thread = threading.Thread(target=server.serve_forever)
@@ -100,7 +97,6 @@ def test_checkpoint_metadata_mismatch_detaches_without_import(tmp_path):
             with pytest.raises(ValueError, match="checkpoint metadata mismatch"):
                 owner.attach_table(
                     endpoint,
-                    token_file,
                     1,
                     3,
                     64,
@@ -118,8 +114,6 @@ def test_checkpoint_metadata_mismatch_detaches_without_import(tmp_path):
 
 
 def test_failed_import_cleanup_keeps_owner_lease(tmp_path, monkeypatch):
-    token_file = tmp_path / "token"
-    token_file.write_text("private-token")
     config = tmp_path / "config.json"
     index = tmp_path / "model.safetensors.index.json"
     config.write_text("{}")
@@ -141,7 +135,7 @@ def test_failed_import_cleanup_keeps_owner_lease(tmp_path, monkeypatch):
             }
         },
     }
-    state = _OwnerState(manifest, "private-token")
+    state = _OwnerState(manifest)
 
     def failed_import(_table, _device):
         raise vmm.IncompleteTableMapCleanup("mapping may remain")
@@ -155,7 +149,6 @@ def test_failed_import_cleanup_keeps_owner_lease(tmp_path, monkeypatch):
             with pytest.raises(vmm.IncompleteTableMapCleanup):
                 owner.attach_table(
                     endpoint,
-                    token_file,
                     1,
                     3,
                     64,

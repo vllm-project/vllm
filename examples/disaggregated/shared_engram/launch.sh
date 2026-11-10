@@ -4,7 +4,6 @@ set -euo pipefail
 
 role=${1:?usage: launch.sh owner|prefill|decode}
 : "${MODEL_DIR:?set MODEL_DIR to the local DeepSeek-V4.1-Flash checkpoint}"
-: "${TOKEN_FILE:?set TOKEN_FILE to a private token file shared with consumers}"
 
 python_bin=${VLLM_PYTHON:-python}
 owner_endpoint=${OWNER_ENDPOINT:-127.0.0.1:56000}
@@ -19,18 +18,12 @@ run() {
   fi
 }
 
-if [[ ! -r "$TOKEN_FILE" ]]; then
-  echo "TOKEN_FILE is not readable: $TOKEN_FILE" >&2
-  exit 2
-fi
-
 case "$role" in
   owner)
     run "$python_bin" -m vllm.distributed.engram_share.vmm.owner \
       --model-dir "$MODEL_DIR" \
       --listen-host "${OWNER_BIND_HOST:-127.0.0.1}" \
       --listen-port "$owner_port" \
-      --token-file "$TOKEN_FILE" \
       --device "${OWNER_DEVICE:-0}"
     ;;
   prefill|decode)
@@ -53,8 +46,8 @@ case "$role" in
     export UCX_TLS=${UCX_TLS:-cuda_copy,cuda_ipc,tcp}
     export UCX_NET_DEVICES=${UCX_NET_DEVICES:-all}
     engram_json=$(OWNER_ENDPOINT="$owner_endpoint" GENERATION="$GENERATION" \
-      TOKEN_FILE="$TOKEN_FILE" "$python_bin" -c \
-      'import json, os; print(json.dumps({"cpu_offload": True, "shared_host_endpoint": os.environ["OWNER_ENDPOINT"], "shared_host_token_file": os.environ["TOKEN_FILE"], "shared_host_generation": os.environ["GENERATION"]}))')
+      "$python_bin" -c \
+      'import json, os; print(json.dumps({"cpu_offload": True, "shared_host_endpoint": os.environ["OWNER_ENDPOINT"], "shared_host_generation": os.environ["GENERATION"]}))')
     kv_json=$(KV_ROLE="$kv_role" "$python_bin" -c \
       'import json, os; print(json.dumps({"kv_connector": "NixlConnector", "kv_role": os.environ["KV_ROLE"]}))')
     run "$python_bin" -m vllm.entrypoints.cli.main serve "$MODEL_DIR" \
