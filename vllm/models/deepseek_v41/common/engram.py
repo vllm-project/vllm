@@ -709,7 +709,8 @@ def _allow_any_numa_node(address: int, num_bytes: int) -> None:
 
 class DPSharedEngramStorage:
     """Host weights shared by a node-local DP group with one writer: host-NUMA
-    cuMem where FABRIC handles work, else a registered /dev/shm mapping."""
+    cuMem where FABRIC handles work, HIP VMM host memory on ROCm, else a
+    registered /dev/shm mapping."""
 
     def __init__(
         self, num_rows: int, dim: int, block_size: int, group: GroupCoordinator
@@ -727,7 +728,13 @@ class DPSharedEngramStorage:
             from vllm.models.deepseek_v41.nvidia.ops import engram_host_table
 
             views = engram_host_table.share_host_table(num_bytes, group)
-        # The GPU maps cuMem host memory with 2M pages, /dev/shm with 64K pages.
+        elif current_platform.is_rocm():
+            from vllm.models.deepseek_v41.amd.ops import (
+                engram_host_table as hip_host_table,
+            )
+
+            views = hip_host_table.share_host_table(num_bytes, group)
+        # The GPU maps cuMem host memory with 2M pages, /dev/shm with smaller ones.
         self.huge_pages = views is not None
         host, gpu = views or self.share_shm_table(num_bytes, group)
         self.weight, self.weight_scale_inv = split_table(host)
@@ -1016,7 +1023,11 @@ class ParallelEngramEmbedding(nn.Module):
                 "per rank"
                 if self._shared_memory is None
                 else "shared across DP replicas via "
-                + ("cuMem" if self._shared_memory.huge_pages else "/dev/shm"),
+                + (
+                    ("HIP VMM" if current_platform.is_rocm() else "cuMem")
+                    if self._shared_memory.huge_pages
+                    else "/dev/shm"
+                ),
             )
 
     def _get_shard_info(self) -> tuple[int, int]:

@@ -371,12 +371,11 @@ def _check_shared_storage_lifetime_and_failures(failure):
         assert result.value == 0
         return result
 
-    with pytest.MonkeyPatch.context() as patch:
-        if current_platform.is_cuda():
-            from vllm.models.deepseek_v41.nvidia.ops import engram_host_table
+    engram_host_table = _engram_host_table()
 
-            # Exercise the /dev/shm path even where cuMem tables are used.
-            patch.setattr(engram_host_table, "share_host_table", lambda *args: None)
+    with pytest.MonkeyPatch.context() as patch:
+        # Exercise the /dev/shm path even where cuMem tables are used.
+        patch.setattr(engram_host_table, "share_host_table", lambda *args: None)
         patch.setattr(
             engram_ops,
             "tempfile",
@@ -425,6 +424,14 @@ def _check_shared_storage_lifetime_and_failures(failure):
         assert all(not path.exists() for path in paths)
 
 
+def _engram_host_table():
+    if current_platform.is_rocm():
+        from vllm.models.deepseek_v41.amd.ops import engram_host_table
+    else:
+        from vllm.models.deepseek_v41.nvidia.ops import engram_host_table
+    return engram_host_table
+
+
 def _check_ple_shared_table(shm_fits):
     """Qwen4Exp's PLE table is one /dev/shm mapping per EDP group, loaded by its
     leader; without room in /dev/shm, every rank loads its own table."""
@@ -452,11 +459,11 @@ def _check_ple_shared_table(shm_fits):
 def _check_cumem_host_table(failure):
     """Chunked cuMem tables read back across ranks; a failed allocation or
     import on any rank falls back to /dev/shm on all of them."""
-    if not current_platform.is_cuda():
-        return
-    from vllm.models.deepseek_v41.nvidia.ops import engram_host_table
-
-    if not engram_host_table.fabric_host_memory_supported():
+    engram_host_table = _engram_host_table()
+    is_rocm = current_platform.is_rocm()
+    if is_rocm:
+        assert engram_host_table.host_memory_supported()
+    elif not engram_host_table.fabric_host_memory_supported():
         return
 
     group = get_engram_dp_group()
@@ -467,14 +474,24 @@ def _check_cumem_host_table(failure):
         if failure == "create" and group.rank_in_group == 0:
             patch.setattr(engram_host_table, "NUMA_RESERVE_FRACTION", 1.0)
         if failure == "import" and group.rank_in_group == 1:
-            patch.setattr(
-                engram_host_table.cu,
-                "cuMemImportFromShareableHandle",
-                lambda *args: (
-                    engram_host_table.cu.CUresult.CUDA_ERROR_INVALID_VALUE,
-                    None,
-                ),
-            )
+            if is_rocm:
+                call = engram_host_table._call
+
+                def fail_import(name, *args):
+                    if name == "hipMemImportFromShareableHandle":
+                        raise RuntimeError(f"{name} failed: hipErrorInvalidValue")
+                    call(name, *args)
+
+                patch.setattr(engram_host_table, "_call", fail_import)
+            else:
+                patch.setattr(
+                    engram_host_table.cu,
+                    "cuMemImportFromShareableHandle",
+                    lambda *args: (
+                        engram_host_table.cu.CUresult.CUDA_ERROR_INVALID_VALUE,
+                        None,
+                    ),
+                )
         storage = engram_ops.DPSharedEngramStorage(rows, DIM, BLOCK, group)
     assert storage.huge_pages == (failure is None)
     table = torch.arange(rows * DIM).remainder(251).to(torch.uint8).view(rows, DIM)
@@ -564,13 +581,20 @@ def _check_table(
                 layer.weight_scale_inv.weight_loader(
                     layer.weight_scale_inv, loader_scale
                 )
+            if layer.peer_rows:
+                # Peers read this rank's slice as soon as they finish loading.
+                torch.accelerator.synchronize()
+                get_engram_dp_group().barrier()
             # Shared host tables and GPU peer reads look up only local tokens.
             local = layer.dp_size == 1
             assert (layer.peer_rows > 0) == (not cpu_offload and tp_size == 1 and p2p)
             if dp_shared_memory:
                 assert layer.dp_size == 1
                 assert layer.head_start == tp_rank * layer.part_n_hash_cols
-                assert layer.weight.is_pinned() and layer.weight_scale_inv.is_pinned()
+                # A dmabuf CPU mapping cannot be pinned; lookups use the GPU views.
+                if not (current_platform.is_rocm() and layer._shared_memory.huge_pages):
+                    assert layer.weight.is_pinned()
+                    assert layer.weight_scale_inv.is_pinned()
             if local:
 
                 def unexpected_collective(*args, **kwargs):
