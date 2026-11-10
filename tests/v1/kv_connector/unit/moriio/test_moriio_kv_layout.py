@@ -19,7 +19,7 @@ from vllm.v1.kv_cache_interface import (
     MLAAttentionSpec,
 )
 
-from .utils import make_moriio_writer
+from ..utils import make_moriio_writer
 
 aiter_available = importlib.util.find_spec("aiter") is not None
 mori_available = importlib.util.find_spec("mori") is not None
