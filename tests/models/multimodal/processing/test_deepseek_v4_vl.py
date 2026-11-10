@@ -285,8 +285,8 @@ def test_v41_renderer_keeps_reordered_image_data_aligned(image_order, with_embed
 def test_mm_device_do_normalize(model_id: str, placeholder: str):
     """On-device normalization must match the CPU processor output.
 
-    Uses the ViT's own ``enable_mm_device_normalize`` since DeepSeek-V4 has
-    no HF image processor config for ``build_mm_input_norm`` to read.
+    Uses the ViT's own `enable_mm_device_normalize` since DeepSeek-V4 has
+    no HF image processor config for `build_mm_input_norm` to read.
     """
     device = current_platform.device_type
     ctx = build_model_context(model_id, limit_mm_per_prompt={"image": 2})
