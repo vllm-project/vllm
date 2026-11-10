@@ -560,11 +560,12 @@ class ECMooncakeScheduler:
 
         ``reset_encoder_cache`` already clears EncoderCacheManager and the
         worker encoder cache. ``_local_cache`` is only a mirror of that
-        cache, and READY / RESIDENT / LOADING records mean a tensor is
-        still in it. Leaving them in place lets ``ensure_cache_available``
-        skip Load and hit an encoder cache miss. Remote AVAILABLE
-        reservations are kept so a later request can reload without
-        waiting for a new push.
+        cache; leaving it in place lets ``ensure_cache_available`` skip
+        Load and hit an encoder cache miss. Transfer records, including
+        consumed READY/RESIDENT and leftover AVAILABLE reservations, are
+        expired so a later request cannot treat a dead or stale
+        ``transfer_id`` as a cache hit. This does not make in-flight
+        reset concurrency-safe.
         """
         self._local_cache.clear()
         self._transfers.invalidate_local(time.monotonic())
@@ -573,6 +574,7 @@ class ECMooncakeScheduler:
         self._prepared_push_transfer_ids.clear()
         self._store_candidates.clear()
         self._failed_saves.clear()
+        self._event_ready_shards.clear()
 
     def close(self) -> None:
         self._control_executor.shutdown(wait=True, cancel_futures=True)

@@ -251,37 +251,43 @@ class SchedulerTransferTable:
         return True
 
     def invalidate_local(self, now: float) -> None:
-        """Forget scheduler-side local residency after encoder-cache reset.
+        """Expire transfer records after a full encoder-cache reset.
 
-        READY and LOADING mean a tensor is, or is being placed, in the
-        engine encoder cache, which reset just cleared. RESIDENT means the
-        consumer pool still holds a local copy after a normal free. After
-        reset those copies must not be treated as already loaded: records
-        that still have a load spec return to AVAILABLE so
-        ``begin_load`` can dispatch again. Records without a spec expire.
+        ``reset_encoder_cache`` invalidates embeddings, including after
+        weight updates. READY and RESIDENT records have already been
+        loaded, so ``ConsumerReservationManager.take()`` has consumed
+        their Worker reservation; re-arming them to AVAILABLE would
+        advertise a dead ``transfer_id`` as a remote cache hit. Leftover
+        AVAILABLE reservations may still point at stale embeddings, so
+        they are expired too. LOADING and WAITING_EVENT records are
+        expired rather than re-armed; this does not make in-flight reset
+        concurrency-safe.
+
+        Expired records are no longer cache hits. A later request must
+        take a new Encode/Push path instead of loading the old
+        ``transfer_id``.
         """
-        to_rearm: list[SchedulerTransfer] = []
         to_expire: list[SchedulerTransfer] = []
         for transfer_id in list(self._active_ids):
             record = self._records[transfer_id]
             if record.state not in {
+                SchedulerTransferState.WAITING_EVENT,
+                SchedulerTransferState.AVAILABLE,
                 SchedulerTransferState.READY,
                 SchedulerTransferState.LOADING,
                 SchedulerTransferState.RESIDENT,
             }:
                 continue
             self._loads_to_dispatch.pop(transfer_id, None)
-            if record.spec is None:
-                to_expire.append(record)
-            else:
-                to_rearm.append(record)
+            to_expire.append(record)
         for record in to_expire:
+            # READY/RESIDENT → EXPIRED is already queued in _transition.
+            if record.state not in {
+                SchedulerTransferState.READY,
+                SchedulerTransferState.RESIDENT,
+            }:
+                self._orphaned.append(record.transfer_id)
             self._transition(record, SchedulerTransferState.EXPIRED, now=now)
-        for record in to_rearm:
-            if record.spec is not None and record.spec.local:
-                record.spec = replace(record.spec, local=False)
-            record.deadline = now + self._tombstone_ttl
-            self._transition(record, SchedulerTransferState.AVAILABLE)
 
     def release_ready(self, mm_hash: str, now: float) -> None:
         ready = self.records_for_hash(mm_hash, (SchedulerTransferState.READY,))
