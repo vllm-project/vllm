@@ -154,6 +154,42 @@ class RocmTokenspeedMHAMetadataBuilder(
         common_attn_metadata.query_start_loc_cpu.zero_()
         return attn_metadata
 
+    def _per_token_seq_lens(
+        self,
+        common_attn_metadata: CommonAttentionMetadata,
+        req_slice: slice,
+        query_lens_cpu: torch.Tensor,
+    ) -> tuple[torch.Tensor, torch.Tensor]:
+        """Per-token request index and causal KV length of the requests in
+        req_slice, so they can run through the decode kernel."""
+        num_reqs = query_lens_cpu.numel()
+        token_to_req = torch.repeat_interleave(
+            torch.arange(num_reqs, dtype=torch.int32), query_lens_cpu
+        ).to(self.device, non_blocking=True)
+        query_start = common_attn_metadata.query_start_loc[req_slice.start :][
+            : num_reqs + 1
+        ]
+        query_lens = query_start[1:] - query_start[:-1]
+        # Token t of a request with q query tokens and s KV tokens sees
+        # s - q + (t - start) + 1 keys.
+        positions = (
+            torch.arange(token_to_req.numel(), dtype=torch.int32, device=self.device)
+            + query_start[0]
+            - query_start[token_to_req.long()]
+        )
+        seq_lens = common_attn_metadata.seq_lens[req_slice].to(torch.int32)
+        per_token = (seq_lens - query_lens)[token_to_req.long()] + positions + 1
+        return token_to_req, per_token.to(torch.int32)
+
+    @staticmethod
+    def _max_seq_len(
+        common_attn_metadata: CommonAttentionMetadata, req_slice: slice
+    ) -> int:
+        upper_bound = common_attn_metadata.seq_lens_cpu_upper_bound
+        if upper_bound is None:
+            return common_attn_metadata.max_seq_len
+        return int(upper_bound[req_slice].max().item())
+
     def build(
         self,
         common_prefix_len: int,
@@ -193,28 +229,14 @@ class RocmTokenspeedMHAMetadataBuilder(
                 prefill_query_start_loc_cpu[1:] - prefill_query_start_loc_cpu[:-1]
             )
             prefill_max_query_len = prefill_query_lens_cpu.max().item()
-            prefill_seq_lens = common_attn_metadata.seq_lens_cpu[first_prefill:]
-            token_to_req_cpu = torch.repeat_interleave(
-                torch.arange(num_prefills, dtype=torch.int32),
+            prefill_token_to_req, prefill_decode_seq_lens = self._per_token_seq_lens(
+                common_attn_metadata,
+                slice(first_prefill, first_prefill + num_prefills),
                 prefill_query_lens_cpu,
             )
-            decode_seq_lens_cpu = torch.empty(num_prefill_tokens, dtype=torch.int32)
-            offset = 0
-            for req_idx in range(num_prefills):
-                query_len = prefill_query_lens_cpu[req_idx].item()
-                seq_len = prefill_seq_lens[req_idx].item()
-                start_seq_len = seq_len - query_len + 1
-                decode_seq_lens_cpu[offset : offset + query_len] = torch.arange(
-                    start_seq_len,
-                    seq_len + 1,
-                    dtype=torch.int32,
-                )
-                offset += query_len
-            prefill_token_to_req = token_to_req_cpu.to(self.device, non_blocking=True)
-            prefill_decode_seq_lens = decode_seq_lens_cpu.to(
-                self.device, non_blocking=True
+            prefill_decode_max_seq_len = self._max_seq_len(
+                common_attn_metadata, slice(first_prefill, None)
             )
-            prefill_decode_max_seq_len = prefill_seq_lens.max().item()
 
         extend_token_to_req = None
         extend_decode_seq_lens = None
@@ -226,26 +248,8 @@ class RocmTokenspeedMHAMetadataBuilder(
             query_lens_cpu = query_start_loc_cpu[1:] - query_start_loc_cpu[:-1]
             extend_slice = slice(num_decodes, num_decodes + num_extends)
             extend_query_lens = query_lens_cpu[extend_slice]
-            extend_seq_lens = common_attn_metadata.seq_lens_cpu[extend_slice]
-            token_to_req_cpu = torch.repeat_interleave(
-                torch.arange(num_extends, dtype=torch.int32),
-                extend_query_lens,
-            )
-            decode_seq_lens_cpu = torch.empty(num_extend_tokens, dtype=torch.int32)
-            offset = 0
-            for req_idx in range(num_extends):
-                query_len = extend_query_lens[req_idx].item()
-                seq_len = extend_seq_lens[req_idx].item()
-                start_seq_len = seq_len - query_len + 1
-                decode_seq_lens_cpu[offset : offset + query_len] = torch.arange(
-                    start_seq_len,
-                    seq_len + 1,
-                    dtype=torch.int32,
-                )
-                offset += query_len
-            extend_token_to_req = token_to_req_cpu.to(self.device, non_blocking=True)
-            extend_decode_seq_lens = decode_seq_lens_cpu.to(
-                self.device, non_blocking=True
+            extend_token_to_req, extend_decode_seq_lens = self._per_token_seq_lens(
+                common_attn_metadata, extend_slice, extend_query_lens
             )
             extend_start_token = query_start_loc_cpu[num_decodes].item()
             extend_query_start_loc = (
@@ -255,7 +259,7 @@ class RocmTokenspeedMHAMetadataBuilder(
                 - extend_start_token
             )
             extend_max_query_len = extend_query_lens.max().item()
-            extend_max_seq_len = extend_seq_lens.max().item()
+            extend_max_seq_len = self._max_seq_len(common_attn_metadata, extend_slice)
 
         return RocmTokenspeedMHAMetadata(
             num_actual_tokens=common_attn_metadata.num_actual_tokens,
