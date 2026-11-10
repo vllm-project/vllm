@@ -3,6 +3,7 @@
 
 
 import os
+from contextlib import nullcontext
 
 import pytest
 import torch
@@ -160,25 +161,16 @@ def test_compile_model_with_stock_torch(monkeypatch):
     assert len(graphs) == 1
 
 
-class BufferMod(torch.nn.Module):
-    def __init__(self):
-        super().__init__()
-        self.register_buffer("buffer", torch.ones(1))
-
-    def forward(self, x: torch.Tensor):
-        return x + self.buffer
-
-
 class BufferAssignWrapper(MyWrapper):
     def forward(self, x: torch.Tensor):  # type: ignore[override]
-        self.model.buffer = self.model.buffer.to(x.device)
-        return self.model(x)
+        self.model.buffer = self.model.buffer * 2
+        return x
 
 
 class KwargsUpdateWrapper(MyWrapper):
     def forward(self, x: torch.Tensor, **kwargs):  # type: ignore[override]
         kwargs["scale"] = 2
-        return self.model(x) * kwargs["scale"]
+        return x * kwargs["scale"]
 
 
 @pytest.mark.parametrize(
@@ -190,19 +182,19 @@ def test_cudagraph_buffer_assignment_check(wrapper_cls, raises, monkeypatch):
     monkeypatch.setenv("VLLM_USE_BYTECODE_HOOK", "1")
     monkeypatch.setattr("depyf.decompile", lambda code: "")
     vllm_config = VllmConfig()
+    # After construction, which disables cudagraphs without a GPU
     vllm_config.compilation_config = CompilationConfig(
         mode=CompilationMode.DYNAMO_TRACE_ONCE,
         backend="eager",
         cudagraph_mode=CUDAGraphMode.PIECEWISE,
     )
+    model = torch.nn.Module()
+    model.register_buffer("buffer", torch.ones(2))
+    rejected = pytest.raises(RuntimeError, match="modifying buffers")
+    expectation = rejected if raises else nullcontext()
     torch._dynamo.reset()
-    with set_current_vllm_config(vllm_config):
-        wrapper = wrapper_cls(BufferMod())
-        if raises:
-            with pytest.raises(Exception, match="modifying buffers"):
-                wrapper(torch.ones(2))
-        else:
-            wrapper(torch.ones(2))
+    with set_current_vllm_config(vllm_config), expectation:
+        wrapper_cls(model)(torch.ones(2))
 
 
 if __name__ == "__main__":
