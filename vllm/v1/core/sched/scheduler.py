@@ -44,9 +44,9 @@ from vllm.v1.core.sched.interface import PauseState, SchedulerInterface
 from vllm.v1.core.sched.output import (
     CachedRequestData,
     GrammarOutput,
+    IterationDetails,
     KVConnectorBlockState,
     NewRequestData,
-    ScheduledEncoderInputStats,
     SchedulerOutput,
 )
 from vllm.v1.core.sched.request_queue import (
@@ -232,9 +232,8 @@ class Scheduler(SchedulerInterface):
         # self.waiting: a block-holder must never sit behind a request whose
         # failed allocation would stop the scheduling scan.
         self.kv_holding_waiting = create_request_queue(self.policy)
-        # With --max-num-inflight-kv-loads, requests that may load KV async but
-        # haven't started, kept apart so their loads can start while the batch
-        # is full without scanning past requests that need a running slot.
+        # With either async-load limit, keep requests that may load KV async
+        # separate so throttling their loads doesn't block local requests.
         self.async_kv_waiting = create_request_queue(self.policy)
         # Waiting requests that are deferred, i.e. were skipped by the scheduling
         # scan or enqueued in a blocked status.
@@ -700,6 +699,13 @@ class Scheduler(SchedulerInterface):
         scheduled_running_reqs: list[Request] = []
         preempted_reqs: list[Request] = []
 
+        iteration_details = None
+        if (
+            self.log_stats
+            and self.observability_config.enable_logging_iteration_details
+        ) or self.vllm_config.profiler_config.profiler is not None:
+            iteration_details = IterationDetails()
+
         req_to_new_blocks: dict[str, KVCacheBlocks] = {}
         num_scheduled_tokens: dict[str, int] = {}
         token_budget = self.max_num_scheduled_tokens
@@ -712,6 +718,7 @@ class Scheduler(SchedulerInterface):
 
         # Encoder-related.
         scheduled_encoder_inputs: dict[str, list[int]] = {}
+        num_scheduled_encoder_inputs = 0
         encoder_compute_budget = self.max_num_encoder_input_tokens
         # Spec decode-related.
         scheduled_spec_decode_tokens: dict[str, list[int]] = {}
@@ -927,6 +934,10 @@ class Scheduler(SchedulerInterface):
                                     for i in preempted_encoder_inputs
                                 )
                                 encoder_compute_budget += num_embeds_to_restore
+                                if iteration_details is not None:
+                                    num_scheduled_encoder_inputs -= len(
+                                        preempted_encoder_inputs
+                                    )
                     else:
                         preempted_req = self.running.pop()
 
@@ -988,6 +999,8 @@ class Scheduler(SchedulerInterface):
             # Encoder-related.
             if encoder_inputs_to_schedule:
                 scheduled_encoder_inputs[request_id] = encoder_inputs_to_schedule
+                if iteration_details is not None:
+                    num_scheduled_encoder_inputs += len(encoder_inputs_to_schedule)
                 encoder_compute_budget = new_encoder_compute_budget
             if encoder_inputs_to_schedule or external_load_encoder_input:
                 self._allocate_encoder_inputs(
@@ -1031,6 +1044,10 @@ class Scheduler(SchedulerInterface):
                 else:
                     step_skipped_waiting.appendleft(request_to_skip)
 
+            num_async_kv_loads = 0
+            max_async_kv_loads = (
+                self.scheduler_config.max_async_kv_loads_per_step or float("inf")
+            )
             # Cleared once self.async_kv_waiting's head can't start a load.
             take_async_kv = True
             while True:
@@ -1046,7 +1063,11 @@ class Scheduler(SchedulerInterface):
                     request_queue = self.kv_holding_waiting
                     if not request_queue and self._pause_state == PauseState.UNPAUSED:
                         request_queue = self._next_waiting_queue(take_async_kv)
-                elif take_async_kv and self._pause_state == PauseState.UNPAUSED:
+                elif (
+                    take_async_kv
+                    and self.scheduler_config.max_num_inflight_kv_loads
+                    and self._pause_state == PauseState.UNPAUSED
+                ):
                     # No running slot or token budget left: start async KV loads
                     # only, which take neither until their KV has arrived.
                     request_queue = self.async_kv_waiting
@@ -1267,12 +1288,15 @@ class Scheduler(SchedulerInterface):
                 # has arrived (_update_waiting_for_remote_kv).
                 num_replay_tokens = 0
 
-                if (load_kv_async and not self._admits_inflight_kv_load()) or (
-                    loads_only and not load_kv_async
-                ):
-                    # Past --max-num-inflight-kv-loads, or needs a running slot
-                    # while none is free. It waits at the head of its queue;
-                    # other queues may still admit.
+                if (
+                    load_kv_async
+                    and (
+                        num_async_kv_loads >= max_async_kv_loads
+                        or not self._admits_inflight_kv_load()
+                    )
+                ) or (loads_only and not load_kv_async):
+                    # Past an async KV load limit, or needs a running slot while none
+                    # is free. It waits at the head of its queue; others may admit.
                     if request_queue is not self.async_kv_waiting:
                         break
                     take_async_kv = False
@@ -1522,6 +1546,7 @@ class Scheduler(SchedulerInterface):
                     # If loading async, allocate memory and put request
                     # into the WAITING_FOR_REMOTE_KV state.
                     request.status = RequestStatus.WAITING_FOR_REMOTE_KVS
+                    num_async_kv_loads += 1
                     # Set num_computed_tokens even though KVs are not yet loaded.
                     # request.num_computed_tokens will not be used anywhere until
                     # the request finished the KV transfer.
@@ -1594,6 +1619,8 @@ class Scheduler(SchedulerInterface):
                 # Encoder-related.
                 if encoder_inputs_to_schedule:
                     scheduled_encoder_inputs[request_id] = encoder_inputs_to_schedule
+                    if iteration_details is not None:
+                        num_scheduled_encoder_inputs += len(encoder_inputs_to_schedule)
                     encoder_compute_budget = new_encoder_compute_budget
                 if encoder_inputs_to_schedule or external_load_encoder_input:
                     self._allocate_encoder_inputs(
@@ -1650,6 +1677,21 @@ class Scheduler(SchedulerInterface):
                 num_scheduled_tokens,
                 scheduled_spec_decode_tokens,
                 req_to_new_blocks,
+                iteration_details=iteration_details,
+            )
+
+        if iteration_details is not None:
+            # Decode requests are counted in _make_cached_request_data()
+            # Other scheduled requests - including new requests - are prefill
+            iteration_details.num_prefill_requests = (
+                len(num_scheduled_tokens) - iteration_details.num_decode_requests
+            )
+            iteration_details.num_prefill_tokens = (
+                total_num_scheduled_tokens - iteration_details.num_decode_tokens
+            )
+            iteration_details.num_encoder_inputs = num_scheduled_encoder_inputs
+            iteration_details.num_encoder_output_tokens = (
+                self.max_num_encoder_input_tokens - encoder_compute_budget
             )
 
         # Mamba "align" boundary states must be handed off with exact block ids;
@@ -1690,15 +1732,6 @@ class Scheduler(SchedulerInterface):
                 len(num_scheduled_tokens)
             ]
 
-        scheduled_encoder_input_stats = None
-        if (
-            self.log_stats
-            and self.observability_config.enable_logging_iteration_details
-        ):
-            scheduled_encoder_input_stats = self._make_scheduled_encoder_input_stats(
-                scheduled_encoder_inputs
-            )
-
         scheduler_output = SchedulerOutput(
             scheduled_new_reqs=new_reqs_data,
             scheduled_cached_reqs=cached_reqs_data,
@@ -1706,7 +1739,7 @@ class Scheduler(SchedulerInterface):
             total_num_scheduled_tokens=total_num_scheduled_tokens,
             scheduled_spec_decode_tokens=scheduled_spec_decode_tokens,
             scheduled_encoder_inputs=scheduled_encoder_inputs,
-            scheduled_encoder_input_stats=scheduled_encoder_input_stats,
+            iteration_details=iteration_details,
             preempted_req_ids=self.reset_preempted_req_ids,
             # finished_req_ids is an existing state in the scheduler,
             # instead of being newly scheduled in this step.
@@ -1904,6 +1937,7 @@ class Scheduler(SchedulerInterface):
         num_scheduled_tokens: dict[str, int],
         spec_decode_tokens: dict[str, list[int]],
         req_to_new_blocks: dict[str, KVCacheBlocks],
+        iteration_details: IterationDetails | None = None,
     ) -> CachedRequestData:
         req_ids: list[str] = []
         new_token_ids: list[list[int]] = []
@@ -1914,6 +1948,7 @@ class Scheduler(SchedulerInterface):
         for req in running_reqs:
             req_id = req.request_id
             req_ids.append(req_id)
+            is_prefill = req.is_prefill_chunk
             # NOTE: In PP+async scheduling, we consume token ids via a direct GPU
             # broadcast path (`input_batch.prev_sampled_token_ids`), so we can
             # omit this payload.
@@ -1937,6 +1972,10 @@ class Scheduler(SchedulerInterface):
             num_output_tokens.append(
                 req.num_output_tokens + req.num_output_placeholders
             )
+            if iteration_details is not None and not is_prefill:
+                # Count decode requests here; all other scheduled reqs are prefills
+                iteration_details.num_decode_requests += 1
+                iteration_details.num_decode_tokens += num_scheduled_tokens[req_id]
 
         return CachedRequestData(
             req_ids=req_ids,
@@ -2178,23 +2217,6 @@ class Scheduler(SchedulerInterface):
             external_load_encoder_input,
             duplicate_encoder_inputs,
         )
-
-    def _make_scheduled_encoder_input_stats(
-        self, scheduled_encoder_inputs: dict[str, list[int]]
-    ) -> ScheduledEncoderInputStats | None:
-        stats = ScheduledEncoderInputStats()
-
-        for req_id, input_ids in scheduled_encoder_inputs.items():
-            request = self.requests.get(req_id)
-            if request is None:
-                continue
-
-            for input_id in input_ids:
-                mm_feature = request.mm_features[input_id]
-                stats.num_inputs += 1
-                stats.output_tokens += mm_feature.mm_position.get_num_embeds()
-
-        return stats if stats.num_inputs else None
 
     def get_grammar_bitmask(
         self, scheduler_output: SchedulerOutput
@@ -2702,7 +2724,10 @@ class Scheduler(SchedulerInterface):
             self.kv_holding_waiting.add_request(request)
         elif (
             self.connector is not None
-            and self.scheduler_config.max_num_inflight_kv_loads
+            and (
+                self.scheduler_config.max_num_inflight_kv_loads
+                or self.scheduler_config.max_async_kv_loads_per_step
+            )
             and self.connector.may_load_async(request)
         ):
             self.async_kv_waiting.add_request(request)
