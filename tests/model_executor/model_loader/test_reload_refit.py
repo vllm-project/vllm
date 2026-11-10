@@ -353,11 +353,9 @@ async def _rpc(engine: AsyncLLM, fn, *args) -> list:
 
 
 async def _last(stream):
-    out = None
-    async for out in stream:
-        pass
-    assert out is not None, "the request produced no output"
-    return out
+    outs = [out async for out in stream]
+    assert outs, "the request produced no output"
+    return outs[-1]
 
 
 async def _generate(engine: AsyncLLM, case: "RefitCase") -> list:
