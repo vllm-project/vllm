@@ -189,8 +189,11 @@ class RMSNormFuser(BaseFuser):
         # The `x * rsqrt(...)` normalize multiply.
         normalize = find_node(
             graph,
-            lambda n: is_op(n, "mul")
-            and rsqrt in map(peel, (_operand(n, 0, "input"), _operand(n, 1, "other"))),
+            lambda n: (
+                is_op(n, "mul")
+                and rsqrt
+                in map(peel, (_operand(n, 0, "input"), _operand(n, 1, "other")))
+            ),
         )
         if normalize is None:
             return None
