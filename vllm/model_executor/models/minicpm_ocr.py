@@ -2,25 +2,25 @@
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 """Inference-only MiniCPM-OCR model.
 
-Same vision/LLM stack as MiniCPM-V 4.6. ``MiniCPMOcrForConditionalGeneration``
-is a plain subclass of ``MiniCPMV4_6ForConditionalGeneration`` in transformers
+Same vision/LLM stack as MiniCPM-V 4.6. `MiniCPMOcrForConditionalGeneration`
+is a plain subclass of `MiniCPMV4_6ForConditionalGeneration` in transformers
 too; what differs is the image geometry:
 
-* ``downsample_mode`` defaults to ``"4x"``, and in that mode
-  ``MiniCPMOcrImageProcessor.find_best_resize`` aligns the patch grid to
-  ``patch_size * 2`` instead of ``patch_size * 4``, because ``"4x"`` goes
+* `downsample_mode` defaults to `"4x"`, and in that mode
+  `MiniCPMOcrImageProcessor.find_best_resize` aligns the patch grid to
+  `patch_size * 2` instead of `patch_size * 4`, because `"4x"` goes
   through one 2x2 merge (downsample MLP) rather than two (ViT insert merger as
   well).
 * An image small enough not to be sliced may be resized to a target picked from
-  its own pixels (``adaptive_small_image_upsize``) or kept at its native
-  resolution (``disable_small_image_upsize``).
+  its own pixels (`adaptive_small_image_upsize`) or kept at its native
+  resolution (`disable_small_image_upsize`).
 
 The second point is why the image placeholder here is measured from the
-``target_sizes`` the image processor actually returned rather than recomputed
+`target_sizes` the image processor actually returned rather than recomputed
 from the image dimensions: the adaptive tier is decided by an Otsu threshold
 plus connected-component analysis over the pixels, which a size-only
 reimplementation cannot reproduce. This mirrors
-``MiniCPMOcrProcessor.replace_image_token``, which reads the same tensor.
+`MiniCPMOcrProcessor.replace_image_token`, which reads the same tensor.
 """
 
 import copy
@@ -72,9 +72,9 @@ class MiniCPMOcrProcessingInfo(MiniCPMV4_6ProcessingInfo):
     def _pinned_image_processor(self, downsample_mode: str | None = None):
         """Image processor view pinned to the mode resolved for this request.
 
-        ``MiniCPMOcrImageProcessor.find_best_resize`` reads ``downsample_mode``
+        `MiniCPMOcrImageProcessor.find_best_resize` reads `downsample_mode`
         off the instance, so a per-request override only reaches it through the
-        shallow copy that ``MiniCPMOcrImageProcessor.__call__`` makes. Measure
+        shallow copy that `MiniCPMOcrImageProcessor.__call__` makes. Measure
         the token count on a copy pinned the same way, otherwise the pixels are
         aligned to one grid and the placeholder is counted on another.
         """
@@ -115,14 +115,14 @@ class MiniCPMOcrProcessingInfo(MiniCPMV4_6ProcessingInfo):
         """Grid, source tokens and per-slice tokens for one image.
 
         Same contract as 4.6, re-derived on the pinned processor so that the
-        ``"4x"`` patch-grid alignment is applied.
+        `"4x"` patch-grid alignment is applied.
 
-        The unsliced branch upscales to ``scale_resolution``, which is what
-        ``MiniCPMOcrImageProcessor._preprocess`` does for the default options
+        The unsliced branch upscales to `scale_resolution`, which is what
+        `MiniCPMOcrImageProcessor._preprocess` does for the default options
         and what the video path does unconditionally. The remaining
-        ``*_small_image_upsize`` combinations depend on the pixels, so for
-        images the placeholder is taken from ``target_sizes`` instead; see
-        ``MiniCPMOcrMultiModalProcessor._ocr_image_prompt_text``.
+        `*_small_image_upsize` combinations depend on the pixels, so for
+        images the placeholder is taken from `target_sizes` instead; see
+        `MiniCPMOcrMultiModalProcessor._ocr_image_prompt_text`.
         """
         image_processor = self._pinned_image_processor(downsample_mode)
         if max_slice_nums is None:
@@ -147,6 +147,7 @@ class MiniCPMOcrProcessingInfo(MiniCPMV4_6ProcessingInfo):
                 hf_image_size,
                 scale_res,
                 patch_size,
+                downsample_mode=image_processor.downsample_mode,
                 allow_upscale=True,
             )
             source_tokens = best_size[0] * best_size[1] // tokens_per_patch
@@ -156,6 +157,7 @@ class MiniCPMOcrProcessingInfo(MiniCPMV4_6ProcessingInfo):
             hf_image_size,
             scale_res,
             patch_size,
+            downsample_mode=image_processor.downsample_mode,
         )
         source_tokens = best_resize[0] * best_resize[1] // tokens_per_patch
 
@@ -164,6 +166,7 @@ class MiniCPMOcrProcessingInfo(MiniCPMV4_6ProcessingInfo):
             grids,
             scale_res,
             patch_size,
+            downsample_mode=image_processor.downsample_mode,
             allow_upscale=True,
         )
         patch_h = refine_size[0] // grids[0]
@@ -179,11 +182,11 @@ class MiniCPMOcrMultiModalProcessor(MiniCPMV4_6MultiModalProcessor):
     ) -> Mapping[str, object]:
         """Resolve the OCR-only upsize options into the flat form.
 
-        ``process_images`` forwards flat keys only (``_flat_processor_kwargs``
-        drops the nested scopes), and 4.6 recovers just ``downsample_mode`` /
-        ``max_slice_nums`` from the merge. Resolve the OCR options the same way
-        so that a server-level ``mm_processor_kwargs`` value, and the nested
-        ``images_kwargs`` form, both reach the image processor instead of being
+        `process_images` forwards flat keys only (`_flat_processor_kwargs`
+        drops the nested scopes), and 4.6 recovers just `downsample_mode` /
+        `max_slice_nums` from the merge. Resolve the OCR options the same way
+        so that a server-level `mm_processor_kwargs` value, and the nested
+        `images_kwargs` form, both reach the image processor instead of being
         silently dropped.
         """
         info = self.info
@@ -206,9 +209,9 @@ class MiniCPMOcrMultiModalProcessor(MiniCPMV4_6MultiModalProcessor):
     ) -> Mapping[str, object]:
         """Remove the image-only upsize options from the video path.
 
-        ``process_videos`` runs the *image* processor per frame, so a flat
+        `process_videos` runs the *image* processor per frame, so a flat
         upsize option would reach frames as well. In transformers frames go
-        through ``MiniCPMOcrVideoProcessor``, which never applies these, and
+        through `MiniCPMOcrVideoProcessor`, which never applies these, and
         the video placeholder is counted without them.
         """
         if not any(key in mm_kwargs for key in _OCR_IMAGE_UPSIZE_KWARGS):
@@ -250,23 +253,23 @@ class MiniCPMOcrMultiModalProcessor(MiniCPMV4_6MultiModalProcessor):
         downsample_mode: str | None,
         max_slice_nums: int | None,
     ) -> str | None:
-        """Placeholder text for one image, measured from its ``target_sizes``.
+        """Placeholder text for one image, measured from its `target_sizes`.
 
-        ``MiniCPMOcrProcessor.replace_image_token`` counts
-        ``target_sizes.prod(-1) // token_divisor`` per patch, row 0 being the
+        `MiniCPMOcrProcessor.replace_image_token` counts
+        `target_sizes.prod(-1) // token_divisor` per patch, row 0 being the
         source image and row 1 a slice. Doing the same here keeps the count
-        correct for ``adaptive_small_image_upsize``, whose resize target is
-        decided from the pixels and cannot be recovered from ``image_size``.
+        correct for `adaptive_small_image_upsize`, whose resize target is
+        decided from the pixels and cannot be recovered from `image_size`.
 
-        ``target_sizes`` is already in *patch* units -- the image processor
-        stores ``source_h // patch_size`` -- so the divisor here is the bare
-        ``token_divisor``, unlike the pixel-side computation in
-        ``_compute_visual_tokens`` which also divides by ``patch_size ** 2``.
+        `target_sizes` is already in *patch* units -- the image processor
+        stores `source_h // patch_size` -- so the divisor here is the bare
+        `token_divisor`, unlike the pixel-side computation in
+        `_compute_visual_tokens` which also divides by `patch_size ** 2`.
 
-        The slice grid is not pixel-dependent (``get_sliced_grid`` is a
-        function of the image size, ``max_slice_nums`` and
-        ``scale_resolution``), so it still comes from the geometry helper.
-        Returns ``None`` when the two disagree, leaving the caller on the 4.6
+        The slice grid is not pixel-dependent (`get_sliced_grid` is a
+        function of the image size, `max_slice_nums` and
+        `scale_resolution`), so it still comes from the geometry helper.
+        Returns `None` when the two disagree, leaving the caller on the 4.6
         path rather than emitting a count we cannot justify.
         """
         info = self.info

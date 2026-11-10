@@ -53,7 +53,7 @@ class _FakeProducerServer:
     it is published (simulating the consumers' free_group barrier) so the
     gather loop's credit gate never parks. Mirrors the real server's
     per-group barrier: publish/free are keyed by GROUP INDEX, signals count
-    to the ``begin_sync`` live total, publish_group returns nothing, and freed
+    to the `begin_sync` live total, publish_group returns nothing, and freed
     groups flow back only through wait_freed / end_sync (see
     test_sharded_rdt_producer.TestFakeServerAgreesWithTheRealOne)."""
 
@@ -98,7 +98,7 @@ class _FakeProducerServer:
         """The engine's credit gate. The real server blocks here; the fake
         must already have a banked credit when the gate asks (auto_free, or a
         test's own free_group) — anything else is the deadlock the real
-        watchdog would kill, so fail loudly. Not appended to ``order``: it is
+        watchdog would kill, so fail loudly. Not appended to `order`: it is
         pacing, not a lifecycle milestone."""
         assert self._pending_freed, (
             "wait_freed with nothing freed: the gather loop would deadlock"
@@ -404,7 +404,7 @@ def test_sharded_rdt_begin_sync_carries_the_live_count(monkeypatch):
 
 
 class TestLiveCountPlumbing:
-    """``send_weights(live_consumer_ids)`` -> the barrier target. The
+    """`send_weights(live_consumer_ids)` -> the barrier target. The
     provisioned geometry is frozen; a degraded sync only lowers the target and
     narrows each slot-sharing group's rendezvous."""
 
@@ -501,7 +501,7 @@ def test_sharded_rdt_rejects_metadata_disagreement_across_ranks(monkeypatch):
 def _serve_ring_server(src_name, src):
     """A producer server with one cached tensor and a pre-seeded serve ring, so a
     pull needs no Ray and no NIXL registration. Returns (server, serve) where
-    ``serve(chain)`` packs one spec into the SAME ring slot every time — which is
+    `serve(chain)` packs one spec into the SAME ring slot every time — which is
     what puts the destination-view cache, and only it, under test."""
     from vllm.distributed.weight_transfer.sharded_rdt_trainer import (
         _RDTProducerServer,
@@ -558,11 +558,11 @@ def test_serve_does_not_reuse_packed_views_of_another_shape():
 def test_serve_does_not_reuse_packed_views_of_another_dtype():
     """The SILENT case of the same cache: two requests whose slices have the same
     name and the same shape but different dtypes pack at identical offsets, so
-    reusing the stale views raises nothing — ``copy_`` just casts, and the blob
+    reusing the stale views raises nothing — `copy_` just casts, and the blob
     carries the wrong bytes with no check downstream.
 
-    ``view(dtype)`` rather than ``to(dtype)`` because the chain is replayed under
-    ``ALLOWED_OPS``, which rejects ``to``: same-itemsize dtypes keep the byte
+    `view(dtype)` rather than `to(dtype)` because the chain is replayed under
+    `ALLOWED_OPS`, which rejects `to`: same-itemsize dtypes keep the byte
     length identical, which is exactly what makes the stale view fit.
     """
     name = "model.layers.0.w"

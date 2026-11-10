@@ -10,9 +10,9 @@ set -euo pipefail
 
 TARGET="${1:-all}"
 case "${TARGET}" in
-  cuda-13-0 | cuda-13-0-efa | rocm | rocm72 | xpu | cpu | all) ;;
+  cuda-13-0 | cuda-13-0-efa | rocm | xpu | cpu | all) ;;
   *)
-    echo "Usage: $0 {cuda-13-0|cuda-13-0-efa|rocm|rocm72|xpu|cpu|all}"
+    echo "Usage: $0 {cuda-13-0|cuda-13-0-efa|rocm|xpu|cpu|all}"
     exit 2
     ;;
 esac
@@ -117,35 +117,37 @@ if target_enabled cuda-13-0-efa; then
 fi
 
 # ---- ROCm ----
-# Each ROCm stack is identified by its base Dockerfile (see rocm/stack.sh). The
-# default stack also owns the plain :latest / :v<ver> tags.
+# Copied from ECR (publish.sh). The default stack (rocm) also owns the plain :latest / :v<ver> tags.
+
+# pin_rocm <ref>  — <ref>@<digest>, so what was checked is what is published
+pin_rocm() {
+  local d
+  d=$(docker buildx imagetools inspect "$1" | awk '$1 == "Digest:" { print $2; exit }')
+  [[ $d =~ ^sha256:[0-9a-f]{64}$ ]] || { echo "cannot resolve the digest of $1" >&2; return 1; }
+  echo "$1@$d"
+}
 
 publish_rocm_stack() {
-  local base_dockerfile="$1" default="$2" suffix
-  (
-    # shellcheck source=.buildkite/scripts/rocm/stack.sh
-    source .buildkite/scripts/rocm/stack.sh "$base_dockerfile"
-    local suffixes=("-${ROCM_STACK_VARIANT}")
-    [[ "$default" == "1" ]] && suffixes=("" "-${ROCM_STACK_VARIANT}")
-    docker pull "$ROCM_STACK_ECR_IMAGE"
-    docker pull "$ROCM_STACK_ECR_BASE"
-    for suffix in "${suffixes[@]}"; do
-      for tag in "latest${suffix}" "v${RELEASE_VERSION}${suffix}"; do
-        docker tag "$ROCM_STACK_ECR_IMAGE" "vllm/vllm-openai-rocm:${tag}"
-        docker tag "$ROCM_STACK_ECR_BASE" "vllm/vllm-openai-rocm:${tag}-base"
-        docker push "vllm/vllm-openai-rocm:${tag}"
-        docker push "vllm/vllm-openai-rocm:${tag}-base"
-      done
-    done
-  )
+  local v s sfx img base ver ecr=public.ecr.aws/q9t5s3a7/vllm-release-repo:${COMMIT} hub=vllm/vllm-openai-rocm
+  v=$(buildkite-agent meta-data get "rocm-$1-variant")
+  img=$(pin_rocm "$ecr-$v")
+  base=$(pin_rocm "$ecr-$v-base")
+  # Another build of this commit (e.g. a branch push) may have retagged it with its own version.
+  ver=$(docker buildx imagetools inspect "$img" \
+    --format '{{index .Image.Config.Labels "org.opencontainers.image.version"}}')
+  if [[ ${ver%%+*} != "$RELEASE_VERSION" ]]; then
+    echo "ERROR: $img is version '$ver', not $RELEASE_VERSION" >&2
+    exit 1
+  fi
+  sfx=("-$v"); if [[ $1 == rocm ]]; then sfx+=(""); fi
+  for s in "${sfx[@]}"; do
+    docker buildx imagetools create -t "$hub:latest$s" -t "$hub:v${RELEASE_VERSION}$s" "$img"
+    docker buildx imagetools create -t "$hub:latest$s-base" -t "$hub:v${RELEASE_VERSION}$s-base" "$base"
+  done
 }
 
 if target_enabled rocm; then
-  publish_rocm_stack docker/Dockerfile.rocm_base 1
-fi
-
-if target_enabled rocm72; then
-  publish_rocm_stack docker/Dockerfile.rocm_72_base 0
+  publish_rocm_stack rocm
 fi
 
 # ---- XPU ----

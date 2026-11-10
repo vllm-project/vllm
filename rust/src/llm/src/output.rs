@@ -21,6 +21,7 @@ use vllm_engine_core_client::{
 };
 
 use crate::RequestTimestamps;
+use crate::aux_output::AuxOutputRows;
 use crate::error::Result;
 use crate::inflight::RequestGuard;
 use crate::request_metrics::{RequestMetricsTracker, current_unix_timestamp_secs};
@@ -208,10 +209,17 @@ pub struct GenerateOutput {
     pub sampling_mask: Option<SamplingMask>,
     /// Per-request speculative-decoding metrics, present on terminal outputs.
     pub spec_decode_metrics: Option<Box<RequestSpecDecodeMetrics>>,
-    /// Weight-version spans over all output tokens, set on terminal outputs only.
+    /// Weight-version spans over all output tokens so far; `None` if tokens
+    /// arrived but no label was reported. Set on every output, not only
+    /// terminal ones, because text decoding may finish the request locally
+    /// after matching a stop string and then cuts the spans at the truncated
+    /// token count.
     pub weight_versions: Option<Vec<WeightVersionSpan>>,
-    /// Routed-expert rows for the whole request, set on terminal outputs only.
-    pub routed_experts: Option<Box<WireNdArray>>,
+    /// Routed-expert rows the engine sent with this output. Consumers append
+    /// the rows of every output they keep and concatenate them when the
+    /// request finishes, so text decoding can drop the rows of tokens cut off
+    /// by a stop string.
+    pub routed_experts: AuxOutputRows,
     /// Snapshot of engine lifecycle timestamps after this output.
     ///
     /// Every output carries a snapshot because text decoding may finish the
@@ -272,7 +280,7 @@ impl GenerateOutput {
         self.ec_transfer_params = next.ec_transfer_params;
         self.spec_decode_metrics = next.spec_decode_metrics;
         self.weight_versions = next.weight_versions;
-        self.routed_experts = next.routed_experts;
+        self.routed_experts.append(next.routed_experts);
         self.timestamps = next.timestamps;
     }
 }
@@ -303,7 +311,7 @@ impl GenerateOutput {
             sampling_mask: None,
             spec_decode_metrics: None,
             weight_versions: None,
-            routed_experts: None,
+            routed_experts: AuxOutputRows::default(),
             timestamps: RequestTimestamps::default(),
         }
     }
@@ -323,8 +331,6 @@ pub struct GenerateOutputStream {
     /// (weight version, first output-token index) for each span.
     weight_version_starts: Vec<(Arc<str>, usize)>,
     num_output_tokens: usize,
-    /// Routed-expert rows received so far, concatenated on the terminal output.
-    routed_experts_chunks: Vec<WireNdArray>,
     /// Removes this request's external→internal tracking edge on drop. Held for
     /// its `Drop` side effect only; never read directly.
     _request_guard: RequestGuard,
@@ -351,7 +357,6 @@ impl GenerateOutputStream {
             request_metrics,
             weight_version_starts: Vec::new(),
             num_output_tokens: 0,
-            routed_experts_chunks: Vec::new(),
             _request_guard: request_guard,
         }
     }
@@ -394,9 +399,6 @@ impl GenerateOutputStream {
         self.num_output_tokens += num_new_tokens;
 
         let raw = raw.output;
-        if let Some(rows) = raw.routed_experts {
-            self.routed_experts_chunks.push(*rows);
-        }
 
         // Populate the one-time prompt info on the first output.
         if let Some(info) = &mut self.pending_prompt_info
@@ -444,16 +446,7 @@ impl GenerateOutputStream {
         {
             self.request_metrics.record_finished(received_at, finish_reason.clone());
         }
-        let weight_versions = if finish_reason.is_some() {
-            self.weight_version_spans()
-        } else {
-            None
-        };
-        let routed_experts = if finish_reason.is_some() {
-            self.take_routed_experts(&raw.request_id)?
-        } else {
-            None
-        };
+        let weight_versions = self.weight_version_spans();
 
         let output = GenerateOutput {
             request_id: raw.request_id,
@@ -467,39 +460,11 @@ impl GenerateOutputStream {
             sampling_mask,
             spec_decode_metrics: raw.spec_decode_metrics,
             weight_versions,
-            routed_experts,
+            routed_experts: AuxOutputRows::from_engine(raw.routed_experts),
             timestamps: self.request_metrics.timestamps(),
         };
 
         Ok(output)
-    }
-
-    /// Concatenate the routed-expert rows received so far along the token
-    /// axis, like Python's `np.concatenate`.
-    fn take_routed_experts(&mut self, request_id: &str) -> Result<Option<Box<WireNdArray>>> {
-        let chunks = std::mem::take(&mut self.routed_experts_chunks);
-        let Some(first) = chunks.first() else {
-            return Ok(None);
-        };
-        let row_shape = first.shape.get(1..);
-        let mut num_rows = 0;
-        let mut data = Vec::new();
-        for chunk in &chunks {
-            if chunk.dtype != first.dtype || chunk.shape.get(1..) != row_shape {
-                return Err(crate::Error::RoutedExpertsShapeMismatch {
-                    request_id: request_id.to_string(),
-                });
-            }
-            num_rows += chunk.shape[0];
-            data.extend_from_slice(chunk.data.as_raw_view().expect("resolved on decode"));
-        }
-        let mut shape = first.shape.clone();
-        shape[0] = num_rows;
-        Ok(Some(Box::new(WireNdArray::from_raw(
-            first.dtype,
-            shape,
-            data,
-        ))))
     }
 
     /// Spans over the output so far; `[]` for no tokens, `None` if no label was reported.
@@ -578,9 +543,11 @@ impl<T: Stream<Item = Result<GenerateOutput>> + Send> T {
             let mut prompt_token_id_logprobs = None;
             let mut prompt_cache_usage = PromptCacheUsage::default();
             let mut collected: Option<CollectedGenerateOutput> = None;
+            let mut routed_experts = AuxOutputRows::default();
 
             while let Some(output) = stream.next().await.transpose()? {
                 prompt_cache_usage.merge(output.prompt_cache_usage);
+                routed_experts.append(output.routed_experts);
                 let sampling_mask = output.sampling_mask;
                 if let Some(info) = output.prompt_info {
                     if prompt_token_ids.is_none() {
@@ -641,7 +608,7 @@ impl<T: Stream<Item = Result<GenerateOutput>> + Send> T {
                     collected.ec_transfer_params = output.ec_transfer_params.map(|value| *value);
                     collected.spec_decode_metrics = output.spec_decode_metrics.map(|value| *value);
                     collected.weight_versions = output.weight_versions;
-                    collected.routed_experts = output.routed_experts.map(|value| *value);
+                    collected.routed_experts = routed_experts.concat()?;
                     if let Some(mask) = collected.sampling_mask.as_ref()
                         && mask.rows.len() != collected.token_ids.len()
                     {

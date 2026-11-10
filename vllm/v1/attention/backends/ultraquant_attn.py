@@ -12,8 +12,8 @@ seams:
   * decode        -> FlyDSL D=256 scaled-MFMA kernel, Triton unified fallback
   * continuation  -> small chunk: Triton unified; large chunk: dequant + FA
 
-``UltraQuantAttentionBackend`` is a standalone backend with its own identity
-(``ULTRAQUANT``) and dtype (``ultraquant_4bit``); the TurboQuant backend/impl
+`UltraQuantAttentionBackend` is a standalone backend with its own identity
+(`ULTRAQUANT`) and dtype (`ultraquant_4bit`); the TurboQuant backend/impl
 carry no UltraQuant knowledge.
 """
 
@@ -61,9 +61,9 @@ _CK_MAX_HEAD_DIM = 256
 
 
 class UltraQuantAttentionBackend(TurboQuantAttentionBackend):
-    """Standalone backend for the ``ultraquant_4bit`` KV-cache dtype.
+    """Standalone backend for the `ultraquant_4bit` KV-cache dtype.
 
-    Subclasses :class:`TurboQuantAttentionBackend` for the shared metadata and
+    Subclasses `TurboQuantAttentionBackend` for the shared metadata and
     cache-layout plumbing, and overrides identity, spec, impl, block size, and
     capabilities so no UltraQuant knowledge lives in the TurboQuant backend.
     """
@@ -111,8 +111,8 @@ class UltraQuantAttentionImpl(TurboQuantAttentionImpl):
     """UltraQuant 4-bit KV-cache attention (FP4 E2M1 + UE8M0, rotated K).
 
     Overrides the init, on-device setup, store, decode, and prefill/continuation
-    seams of :class:`TurboQuantAttentionImpl`; the shared ``forward`` /
-    ``do_kv_cache_update`` orchestration and metadata handling are inherited.
+    seams of `TurboQuantAttentionImpl`; the shared `forward` /
+    `do_kv_cache_update` orchestration and metadata handling are inherited.
     """
 
     # FlyDSL D=256 decode loads query as bf16; fp16 is not supported.
@@ -163,7 +163,7 @@ class UltraQuantAttentionImpl(TurboQuantAttentionImpl):
         """Build the shared Hadamard rotation and pre-warm FlyDSL buffers.
 
         UltraQuant needs no Lloyd-Max centroids, but the inherited forward reads
-        ``layer._tq_centroids``, so an empty tensor is kept on the layer.
+        `layer._tq_centroids`, so an empty tensor is kept on the layer.
         """
         if self._use_ultraquant_flydsl:
             # CUDA-graph capture safety for the FlyDSL decode path on ROCm:

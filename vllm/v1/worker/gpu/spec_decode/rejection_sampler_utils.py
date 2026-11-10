@@ -3,7 +3,6 @@
 import torch
 
 from vllm.triton_utils import tl, tldevice, triton
-from vllm.v1.spec_decode.fly import compute_fly_entropy
 from vllm.v1.worker.gpu.sample.gumbel import (
     gumbel_block_argmax,
     spec_step_seed,
@@ -14,6 +13,7 @@ from vllm.v1.worker.gpu.spec_decode.draft_logits import (
     DraftLogitsCache,
     draft_logits_row,
 )
+from vllm.v1.worker.gpu.spec_decode.fly import compute_fly_entropy
 
 
 @triton.jit
@@ -213,7 +213,8 @@ def _is_bonus_logit(expanded_local_pos_ptr, logit_idx, num_logits):
     return next_local_pos == 0
 
 
-@triton.jit
+# num_logits only bounds the bonus-logit lookahead; one kernel serves every value.
+@triton.jit(do_not_specialize=["num_logits"])
 def _compute_local_logits_stats_kernel(
     # [num_logits, num_blocks]
     target_local_argmax_ptr,
@@ -413,7 +414,7 @@ def _compute_cumulative_log_p_kernel(
         tl.store(cumulative_log_p_ptr + logit_idx, log_p)
 
 
-@triton.jit
+@triton.jit(do_not_specialize=["num_logits"])
 def _compute_local_residual_mass_kernel(
     # [num_logits, num_blocks]
     local_residual_mass_ptr,
@@ -871,6 +872,7 @@ def _resample_kernel(
     CONTEXT_WIDTH: tl.constexpr,
     WATERMARK: tl.constexpr,
     DEDUPLICATE_CONTEXTS: tl.constexpr,
+    SKIP_MASKED_BLOCKS: tl.constexpr,
 ):
     req_idx = tl.program_id(0)
     resample_idx = tl.load(rejected_step_ptr + req_idx)
@@ -901,6 +903,21 @@ def _resample_kernel(
         mask=mask,
         other=float("-inf"),
     ).to(tl.float32)
+
+    if SKIP_MASKED_BLOCKS and tl.max(target_logits, axis=0) == float("-inf"):
+        # No target token survives in this block (e.g. top-k/top-p masked it),
+        # so neither does the residual: skip the draft load and the Gumbel draw.
+        tl.store(
+            resampled_local_argmax_ptr
+            + req_idx * resampled_local_argmax_stride
+            + block_idx,
+            block_idx * BLOCK_SIZE,
+        )
+        tl.store(
+            resampled_local_max_ptr + req_idx * resampled_local_max_stride + block_idx,
+            float("-inf"),
+        )
+        return
 
     # Compute the residual logits to resample the rejected token from.
     is_watermarked = False
@@ -1137,6 +1154,7 @@ def rejection_sample(
     fly_window_size: int = 0,
     fly_entropy_threshold: float = 0.3,
     fly_entropy_top_k: int = 3,
+    skip_masked_vocab_blocks: bool = False,
 ) -> tuple[torch.Tensor, torch.Tensor]:
     assert target_logits.ndim == 2 and target_logits.stride(-1) == 1
     draft_logits = None
@@ -1423,6 +1441,7 @@ def rejection_sample(
         CONTEXT_WIDTH=context_width,
         WATERMARK=watermark,
         DEDUPLICATE_CONTEXTS=watermarking_skip_mask is not None,
+        SKIP_MASKED_BLOCKS=skip_masked_vocab_blocks,
     )
 
     # Insert the resampled tokens into the output sampled.
@@ -1439,5 +1458,8 @@ def rejection_sample(
         expanded_idx_mapping,
         temperature,
         PADDED_RESAMPLE_NUM_BLOCKS=padded_resample_num_blocks,
+        # The kernel reads and updates num_sampled in place. Multiple warps can
+        # observe the increment before loading the original resampling index.
+        num_warps=1,
     )
     return sampled, num_sampled
