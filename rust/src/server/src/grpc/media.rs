@@ -6,8 +6,7 @@
 use std::io::Cursor;
 
 use llm_multimodal::tracker::{MAX_SAMPLE_FPS, MIN_SAMPLE_FPS};
-use prost_types::value::Kind;
-use serde::Deserialize as _;
+use serde::Deserialize;
 use thiserror_ext::AsReport as _;
 use tonic::Status;
 use url::Url;
@@ -18,6 +17,7 @@ use vllm_engine_core_client::protocol::multimodal::{
 };
 use vllm_engine_core_client::protocol::tensor::WireTensor;
 
+use super::convert::proto_struct_to_json;
 use super::pb;
 
 /// Maximum total serialized kwargs size accepted in one gRPC request.
@@ -124,31 +124,49 @@ fn decode_inline_mm_kwargs(bytes: &[u8]) -> Result<MmKwargsItem, Status> {
     Ok(kwargs)
 }
 
-fn video_fps(media_io_kwargs: Option<&prost_types::Struct>) -> Result<Option<f64>, Status> {
-    let mut fps = None;
-    for (modality, options) in media_io_kwargs.into_iter().flat_map(|kwargs| &kwargs.fields) {
-        let (true, Some(Kind::StructValue(options))) = (modality == "video", &options.kind) else {
-            return Err(invalid_media_io_kwarg(modality));
-        };
-        for (key, value) in &options.fields {
-            match &value.kind {
-                Some(Kind::NumberValue(value))
-                    if key == "fps" && (MIN_SAMPLE_FPS..=MAX_SAMPLE_FPS).contains(value) =>
-                {
-                    fps = Some(*value);
-                }
-                _ => return Err(invalid_media_io_kwarg(&format!("{modality}.{key}"))),
-            }
-        }
-    }
-    Ok(fps)
+/// The `media_io_kwargs` options the Rust media loader applies; any other
+/// modality or option is rejected rather than ignored.
+#[derive(Deserialize)]
+#[serde(deny_unknown_fields)]
+struct MediaIoKwargs {
+    #[serde(default)]
+    video: VideoIoKwargs,
 }
 
-fn invalid_media_io_kwarg(name: &str) -> Status {
-    Status::invalid_argument(format!(
-        "invalid media_io_kwargs.{name}: only video.fps, a number between {MIN_SAMPLE_FPS} and \
-         {MAX_SAMPLE_FPS}, is supported"
-    ))
+#[derive(Default, Deserialize)]
+#[serde(deny_unknown_fields)]
+struct VideoIoKwargs {
+    /// Frames sampled per second.
+    fps: Option<f64>,
+}
+
+fn video_fps(media_io_kwargs: Option<&prost_types::Struct>) -> Result<Option<f64>, Status> {
+    let Some(kwargs) = media_io_kwargs else {
+        return Ok(None);
+    };
+    let kwargs = proto_struct_to_json(kwargs);
+    // A derived struct also deserializes from a positional array, which would
+    // read `{"video": [1]}` as fps 1.
+    if kwargs.get("video").is_some_and(|video| !video.is_object()) {
+        return Err(Status::invalid_argument(
+            "invalid media_io_kwargs: video must be a map of options",
+        ));
+    }
+    let kwargs = MediaIoKwargs::deserialize(kwargs).map_err(|error| {
+        Status::invalid_argument(format!(
+            "invalid media_io_kwargs: {}; only video.fps is supported",
+            error.as_report()
+        ))
+    })?;
+    let fps = kwargs.video.fps;
+    if let Some(fps) = fps
+        && !(MIN_SAMPLE_FPS..=MAX_SAMPLE_FPS).contains(&fps)
+    {
+        return Err(Status::invalid_argument(format!(
+            "invalid media_io_kwargs.video.fps: {fps} is outside [{MIN_SAMPLE_FPS}, {MAX_SAMPLE_FPS}]"
+        )));
+    }
+    Ok(fps)
 }
 
 fn mixed_media_error() -> Status {
@@ -346,7 +364,7 @@ mod tests {
             (url.clone(), serde_json::json!({"video": {"num_frames": 8}})),
             (url.clone(), serde_json::json!({"image": {}})),
             (url.clone(), serde_json::json!({"video": {"fps": 30}})),
-            (url.clone(), serde_json::json!({"video": {"fps": null}})),
+            (url.clone(), serde_json::json!({"video": {"fps": "1"}})),
             (url, serde_json::json!({"video": [1]})),
             (
                 video(pb::media_item::Source::RawBytes(vec![1])),
@@ -365,11 +383,11 @@ mod tests {
             .collect::<Vec<_>>();
         expect_test::expect![[r#"
             [
-                "invalid media_io_kwargs.video.num_frames: only video.fps, a number between 0.2 and 5, is supported",
-                "invalid media_io_kwargs.image: only video.fps, a number between 0.2 and 5, is supported",
-                "invalid media_io_kwargs.video.fps: only video.fps, a number between 0.2 and 5, is supported",
-                "invalid media_io_kwargs.video.fps: only video.fps, a number between 0.2 and 5, is supported",
-                "invalid media_io_kwargs.video: only video.fps, a number between 0.2 and 5, is supported",
+                "invalid media_io_kwargs: unknown field `num_frames`, expected `fps`; only video.fps is supported",
+                "invalid media_io_kwargs: unknown field `image`, expected `video`; only video.fps is supported",
+                "invalid media_io_kwargs.video.fps: 30 is outside [0.2, 5]",
+                "invalid media_io_kwargs: invalid type: string \"1\", expected f64; only video.fps is supported",
+                "invalid media_io_kwargs: video must be a map of options",
                 "media[0]: media_io_kwargs.video.fps requires a url or data_uri source",
                 "media_io_kwargs cannot change preprocessed media features",
             ]
