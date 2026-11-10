@@ -38,7 +38,7 @@ _MODEL_TYPE_TO_CHAT_TEMPLATE_FALLBACK: dict[str, ChatTemplatePath] = {
     "openvla": CHAT_TEMPLATES_DIR / "template_openvla.jinja",
     "paligemma": CHAT_TEMPLATES_DIR / "template_basic.jinja",
     "siglip": CHAT_TEMPLATES_DIR / "template_siglip.jinja",
-    "siglip2": CHAT_TEMPLATES_DIR / "template_basic.jinja",
+    "siglip2": CHAT_TEMPLATES_DIR / "template_siglip.jinja",
 }
 
 # Model types whose fallback also replaces a chat template shipped with the
