@@ -62,12 +62,12 @@ class LogitsProcRequestState:
 
 @dataclass(frozen=True)
 class LogitsContext:
-    """The current step's batch layout, passed to every ``apply()`` call.
+    """The current step's batch layout, passed to every `apply()` call.
 
     A row is a logits row, not a request: rows are reordered every step, and
     under speculative decoding a request owns one row per draft token.
-    Committed tokens live in ``req_states.all_token_ids`` (valid up to
-    ``total_len``); this step's draft tokens are only in ``input_ids``.
+    Committed tokens live in `req_states.all_token_ids` (valid up to
+    `total_len`); this step's draft tokens are only in `input_ids`.
     """
 
     # [num_logits_rows] row -> persistent request slot.
@@ -94,16 +94,16 @@ class LogitsProcessor(ABC):
 
     Per-request state is keyed by the request slot index; slots are recycled
     through a free list, so per-slot state must be fully (re)initialized in
-    ``add_request()``.
+    `add_request()`.
 
-    ``apply()`` runs after the built-in bias, penalty, bad-words and grammar
+    `apply()` runs after the built-in bias, penalty, bad-words and grammar
     stages and before temperature, min_p and top-k/top-p, so it sees unscaled
     logits and must not re-inflate grammar-masked tokens. Thinking-budget
-    forcing runs after ``apply()`` and wins over its edits for requests whose
+    forcing runs after `apply()` and wins over its edits for requests whose
     budget is exhausted.
 
-    State that is constant for a request belongs in ``__init__()`` or
-    ``add_request()``; ``apply()`` receives only what changes per step.
+    State that is constant for a request belongs in `__init__()` or
+    `add_request()`; `apply()` receives only what changes per step.
     """
 
     def __init__(  # noqa: B027
@@ -111,13 +111,13 @@ class LogitsProcessor(ABC):
     ):
         """Capture what stays constant for the processor's lifetime.
 
-        ``req_states`` exposes the on-device token history and batch constants a
+        `req_states` exposes the on-device token history and batch constants a
         processor may read. Treat it as read-only.
         """
 
     @classmethod  # noqa: B027
     def validate_params(cls, sampling_params: SamplingParams) -> None:
-        """Raise ``ValueError`` for invalid per-request arguments.
+        """Raise `ValueError` for invalid per-request arguments.
 
         Runs at request admission, so invalid arguments fail the request
         with an error instead of reaching the sampler.
@@ -134,10 +134,10 @@ class LogitsProcessor(ABC):
         return True
 
     def apply_staged_writes(self) -> None:  # noqa: B027
-        """Flush any host-side writes staged by ``add_request()`` to the device.
+        """Flush any host-side writes staged by `add_request()` to the device.
 
         Called before the forward pass of every step that admits new requests,
-        after the model runner has flushed ``req_states``, so a processor that
+        after the model runner has flushed `req_states`, so a processor that
         stages writes here can read the request's tokens back on device.
         """
 
@@ -146,9 +146,9 @@ class LogitsProcessor(ABC):
         """Modify logits in place or return a new tensor. In-place modification
         is preferred for efficiency.
 
-        ``apply()`` is called once for the whole batch, including rows of
-        requests this processor declined in ``add_request()``, so filter rows
-        via ``ctx.expanded_idx_mapping``.
+        `apply()` is called once for the whole batch, including rows of
+        requests this processor declined in `add_request()`, so filter rows
+        via `ctx.expanded_idx_mapping`.
 
         Args:
             logits: [num_logits_rows, vocab_size] float32 tensor.
