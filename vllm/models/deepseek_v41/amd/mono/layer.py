@@ -1,12 +1,12 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 """The mono decode layer's two launches (README): K1 = the attention seam
-(``stages.seam``: slice, gate, the norm into vLLM's MXFP8) + the attention front
-(``attention.front``); K2 = the attention back (``attention.back``, wo_b pushed
-to every rank) + the FFN seam (the TP sum folded in) + the MoE (``stages.moe``,
+(`stages.seam`: slice, gate, the norm into vLLM's MXFP8) + the attention front
+(`attention.front`); K2 = the attention back (`attention.back`, wo_b pushed
+to every rank) + the FFN seam (the TP sum folded in) + the MoE (`stages.moe`,
 its all-reduce in-kernel too). A layer whose attention vLLM runs takes the FFN
 launch instead: K2 with the attention back replaced by a push of vLLM's
-unreduced wo_b output (``seam.stage_push``).
+unreduced wo_b output (`seam.stage_push`).
 
 Tags: K1's hand-offs carry 2 e + 1, K2's 2 e + 2 (e: the launch pair's epoch,
 moved on by K2's CTA 0 at its end), so K2's seam may reuse K1's seam regions.
@@ -19,21 +19,39 @@ from dataclasses import dataclass
 import flydsl.compiler as flyc
 import flydsl.expr as fx
 from aiter.ops.flydsl.kernels import buffer_ops as bo
+from flydsl._mlir.dialects import llvm
 from flydsl.expr import const_expr, gpu, range_constexpr, rocdl
 from flydsl.expr.typing import Int32, Int64, T
 
 from .attention import back as mb_back
 from .attention import front as mb_front
-from .attention.device import BLOCKS, CM_DEV, THREADS, gstore, kernel_symbol, rsrc
-from .attention.plan import HIDDEN, Dims, back_scratch, front_scratch
+from .attention.device import (
+    BLOCKS,
+    CM_DEV,
+    THREADS,
+    gstore,
+    kernel_symbol,
+    memrealtime,
+    rsrc,
+)
+from .attention.plan import (
+    COPIES,
+    HIDDEN,
+    WINDOW,
+    Dims,
+    back_scratch,
+    flag_stride,
+    front_scratch,
+)
+from .common.arch import GFX942
 from .common.mx import clamp_fp8
-from .common.ops import butterfly, fp8_pack4, peer_bases, traced
-from .common.plan import WAVES, first_task, key_tuple
+from .common.ops import bf16_pair, butterfly, fp8_pack4, peer_bases, traced
+from .common.plan import first_task, key_tuple
 from .common.sync import Mailbox, preg, publish, sreg
 from .sources import SOURCES
 from .stages import moe, seam
 from .stages.dims import Dims as StageDims
-from .stages.moe_shape import SORT_NETS, MoeBuild, route_shape
+from .stages.moe_shape import EXPERTS, SORT_NETS, TOPK, MoeBuild, route_shape
 
 _STREAM = fx.Stream(None)
 MAX_TOKENS = 48
@@ -50,6 +68,14 @@ COUNTERS = ("ugq", "dq")
 # lines of their own the MoE's counters
 EPOCH_COUNTERS = -(-(mb_back.EPOCH_MARKS + BLOCKS) // 64) * 64
 EPOCH_WORDS = EPOCH_COUNTERS + COUNTER_WORDS
+# A timeline build of K2 stamps the clock into one record of K2_POINTS i64 a
+# CTA. The attention back uses points 0 .. BACK_POINTS - 1. The FFN seam's
+# three task loops (push, reduce and slice, then gate, then norm) end at the
+# next three points, and the MoE's seven stages (moe.TL_STAGES) at the seven
+# after those. The last points (moe.TL_UG_POINTS) split the ug stage of a
+# step with one token tile.
+K2_SEAM_POINT = mb_back.BACK_POINTS
+K2_POINTS = K2_SEAM_POINT + 3 + len(moe.TL_STAGES) + len(moe.TL_UG_POINTS)
 
 
 @dataclass(frozen=True)
@@ -64,27 +90,97 @@ class MonoBuild:
     # the layer selects its own top-k (an index source): K1 hands its normed
     # input and qr out for vLLM's indexer, K2 builds the key table
     index: bool = False
+    # a layer of the DSpark draft: its routed experts and top-k, the FP4 groups
+    # of an ug task, and the width of its (non-causal) SWA index rows. On
+    # gfx942 a draft layer takes only the FFN launch, built with its routed
+    # experts and top-k.
+    experts: int = EXPERTS
+    topk: int = TOPK
+    ug_groups: int = 2
+    swa_width: int = WINDOW
+    # the generic code where the tuned paths would apply (the tests' reference)
+    generic: bool = False
+
+    @property
+    def tuned(self) -> bool:
+        """A target layer of compress ratio 2 at TP2 on gfx950: its tuned paths
+        are on (bit-exact against the generic ones), every other build compiles
+        the generic code. Its scratch layout is its own (`scratch_layout`)."""
+        return (
+            not GFX942
+            and not self.generic
+            and self.tp == 2
+            and self.ratio == 2
+            and (self.experts, self.topk, self.ug_groups, self.swa_width)
+            == (EXPERTS, TOPK, 2, WINDOW)
+            # the shared offload needs that many CTAs (``moe.DSH_RANKS``)
+            and moe.DSH_RANKS <= BLOCKS
+        )
 
 
 def _moe_key(key: MonoBuild) -> MoeBuild:
-    return MoeBuild(tokens=key.tokens, tp=key.tp)
+    return MoeBuild(
+        tokens=key.tokens,
+        experts=key.experts,
+        topk=key.topk,
+        tp=key.tp,
+        ug_groups=key.ug_groups,
+        tuned=key.tuned,
+    )
+
+
+def _ffn_symbol_params(key: MonoBuild) -> dict:
+    """The FFN launch's symbol parameters. The timeline flag tells a timeline
+    build apart, as in K1's and K2's symbols. The draft's build adds its
+    expert count, so that a profile tells the two FFN launches apart."""
+    params = dict(s=key.tokens, tp=key.tp, tl=key.timeline)
+    if key.experts != EXPERTS:
+        params["e"] = key.experts
+    return params
 
 
 def _front_key(key: MonoBuild):
-    return mb_front.FrontBuild(key.tokens, key.tp, key.ratio, key.timeline)
+    return mb_front.FrontBuild(
+        key.tokens, key.tp, key.ratio, key.timeline, key.swa_width, key.tuned
+    )
+
+
+def _symbol_params(key: MonoBuild) -> dict:
+    """The kernel symbol's draft-only parameters (none for a target layer)."""
+    out = {}
+    if key.experts != EXPERTS:
+        out["e"] = key.experts
+    if key.topk != TOPK:
+        out["k"] = key.topk
+    if key.ug_groups != 2:
+        out["g"] = key.ug_groups
+    if key.swa_width != WINDOW:
+        out["w"] = key.swa_width
+    return out
 
 
 def _back_key(key: MonoBuild):
-    return mb_back.BackBuild(key.tokens, key.tp, key.ratio, key.timeline)
+    return mb_back.BackBuild(key.tokens, key.tp, key.ratio, key.timeline, key.tuned)
 
 
-def scratch_layout(s: int, tp: int) -> dict:
+def scratch_layout(
+    s: int,
+    tp: int,
+    experts: int = EXPERTS,
+    topk: int = TOPK,
+    ug_groups: int = 2,
+    tuned: bool = False,
+) -> dict:
     """Every region of step width s's launches -> (byte offset, bytes), disjoint:
     K1's front and seam, K2's back, the MoE's regions, the normed rows and their
-    flags. Each width has a scratch of its own (``DSV41MonoLayer.scratch``):
+    flags. Each width has a scratch of its own (`DSV41MonoLayer.scratch`):
     under another width's layout a mailbox pair's tag word could be plain data,
     which a poll may take for a current tag. The MoE's counters, whose slots
-    outlive a step width, are in the epoch buffer."""
+    outlive a step width, are in the epoch buffer. The MoE regions follow the
+    runner's routing and FP4 groups of an ug task: with one group a task (the
+    DSpark draft's runner) the ug flags take twice the room of two groups.
+    `tuned`: a tuned build's layout (`MonoBuild.tuned`), in a scratch of its
+    own."""
     d = Dims(tp)
     out: dict = {}
     off = 0
@@ -98,10 +194,13 @@ def scratch_layout(s: int, tp: int) -> dict:
         off = max(off, base + max(o + n for o, n in regions.values()))
         off = -(-off // 256) * 256
 
-    place(front_scratch(s, d))
+    place(front_scratch(s, d, tuned))
     place(seam.scratch_layout(s))
-    place(back_scratch(s, d, start=0))
-    regions = moe.scratch_layout(_moe_key(MonoBuild(s, tp, 1))).items()
+    place(back_scratch(s, d, start=0, tuned=tuned))
+    mkey = MoeBuild(
+        tokens=s, experts=experts, topk=topk, tp=tp, ug_groups=ug_groups, tuned=tuned
+    )
+    regions = moe.scratch_layout(mkey).items()
     mr = {n: v for n, v in regions if n not in COUNTERS}
     lo = min(o for o, _ in mr.values())
     place({n: (o - lo, n_) for n, (o, n_) in mr.items()})
@@ -110,8 +209,16 @@ def scratch_layout(s: int, tp: int) -> dict:
     return out
 
 
-def scratch_bytes(s: int = MAX_TOKENS, tp: int = 2) -> int:
-    return max(o + n for o, n in scratch_layout(s, tp).values())
+def scratch_bytes(
+    s: int = MAX_TOKENS,
+    tp: int = 2,
+    experts: int = EXPERTS,
+    topk: int = TOPK,
+    ug_groups: int = 2,
+    tuned: bool = False,
+) -> int:
+    layout = scratch_layout(s, tp, experts, topk, ug_groups, tuned)
+    return max(o + n for o, n in layout.values())
 
 
 def peer_half_bytes(tp: int) -> int:
@@ -128,8 +235,8 @@ def _epoch(epoch):
 
 @traced
 def store_x8(c, t, col, ys, live):
-    """The attention seam's norm output (``seam.stage_norm``'s 8 columns at
-    ``col``) -> vLLM's MXFP8 of each 32 (the attention's input quant) -> the
+    """The attention seam's norm output (`seam.stage_norm`'s 8 columns at
+    `col`) -> vLLM's MXFP8 of each 32 (the attention's input quant) -> the
     front's X8 / X8S, plain at device scope."""
     amax = abs(ys[0])
     for y in ys[1:]:
@@ -156,7 +263,12 @@ def publish_x8(c, t):
     """Token t's two XRDY flags (one a wqkv K half) once its X8 / X8S landed."""
     rocdl.s_waitcnt(vmcnt=0)
     gpu.barrier()
-    if c["tid"] < 2:
+    if const_expr(c["tuned"]):
+        # every copy (``plan.COPIES``): thread 2 j + h copy j's flag of half h
+        if c["tid"] < 2 * COPIES:
+            at = c["tid"] // 2 * flag_stride(2 * c["S"]) + 2 * t + c["tid"] % 2
+            c["mb"].put(c["xrdy"], at, fx.Int32(1))
+    elif c["tid"] < 2:
         c["mb"].put(c["xrdy"], 2 * t + c["tid"], fx.Int32(1))
     gpu.barrier()
 
@@ -164,16 +276,21 @@ def publish_x8(c, t):
 def build_mono_k1(key: MonoBuild):
     s, tp = key.tokens, key.tp
     assert 1 <= s <= MAX_TOKENS
-    layout = scratch_layout(s, tp)
+    layout = scratch_layout(s, tp, key.experts, key.topk, key.ug_groups, key.tuned)
     fkey = _front_key(key)
     FrontLds = mb_front.front_lds(s, Dims(tp))
     NORM0 = SLICES  # the norms on the CTAs past the slices: the wqkv waits on them
     GATE0 = SLICES + s
+    n_wqkv = mb_front.WQKV_TASKS * mb_front.WQKV_KPARTS
+    if key.tuned and n_wqkv + 2 * s <= BLOCKS:
+        # the gates on CTAs without a wqkv part (past the front's key-table /
+        # qkv CTAs) while they fit: on a wqkv CTA a gate holds up its partials
+        GATE0 = n_wqkv + s
     assert GATE0 + s <= BLOCKS
 
     @fx.struct
     class SeamLds:
-        red: fx.Array[fx.Float32, WAVES * 2 * 64 * 4, 16]
+        red: fx.Array[fx.Float32, seam.red_words(s, key.tuned), 16]
         rl: fx.Array[fx.Float32, s * seam.KT, 16]
         fl: fx.Array[fx.Float32, seam.MIX * seam.KT, 16]
 
@@ -190,6 +307,7 @@ def build_mono_k1(key: MonoBuild):
         tl=key.timeline,
         f=key.fold,
         i=key.index,
+        **_symbol_params(key),
     )
     keyed = key_tuple(key, SOURCES)
 
@@ -269,7 +387,7 @@ def build_mono_k1(key: MonoBuild):
             "klen": klen,
             "qr_out": qr_out,
         }
-        flayout = {n: layout[n] for n in front_scratch(s, Dims(tp))}
+        flayout = {n: layout[n] for n in front_scratch(s, Dims(tp), key.tuned)}
         c = mb_front.front_context(fkey, lds.front.peek(), fargs, scratch, tag, flayout)
         c["index"] = key.index
         amb = Mailbox(tag)
@@ -304,6 +422,7 @@ def build_mono_k1(key: MonoBuild):
             },
             "d": StageDims(tp),
             "fold": key.fold,
+            "tuned": key.tuned,
         }
         for region in ("lin", "pmix"):
             ca[region] = sreg(scratch, layout[region][0], region)
@@ -312,13 +431,18 @@ def build_mono_k1(key: MonoBuild):
 
         def seam_slice():
             for task in range(first_task(bid, 0), SLICES, BLOCKS):
-                seam.stage_slice(ca, task)
+                if const_expr(key.tuned and key.fold):
+                    # the fold and the slice fused, a thread's columns in
+                    # registers throughout
+                    seam.stage_reduce_slice(ca, task, reduce=False)
+                else:
+                    seam.stage_slice(ca, task)
             gpu.barrier()
 
         def store(*v):
             store_x8(c, *v)
             if const_expr(key.index):
-                store_normed(normed_out, *v)
+                store_normed(normed_out, *v, wide=key.tuned)
 
         def seam_rest():
             for t in range(first_task(bid, NORM0), s, BLOCKS):
@@ -427,10 +551,22 @@ def build_mono_k1(key: MonoBuild):
 
 
 @traced
-def store_normed(normed, t, col, ys, live):
+def store_normed(normed, t, col, ys, live, wide=False):
     """The FFN seam's norm output -> the MoE input row (bf16, device scope:
-    this launch reads it)."""
-    if live:
+    this launch reads it). `wide`: the 8 values as one 16-byte store (a store
+    each kept the publish's drain behind 24 of them)."""
+    if const_expr(wide):  # noqa: SIM102 (a build-time and a run-time test)
+        if live:
+            words = [
+                bf16_pair(ys[2 * j], ys[2 * j + 1]).bitcast(fx.Int32) for j in range(4)
+            ]
+            bo.buffer_store(
+                fx.Vector.from_elements(words, fx.Int32),
+                rsrc(normed),
+                (t * HIDDEN + col) // 2,
+                cache_modifier=CM_DEV,
+            )
+    elif live:
         for j in range_constexpr(8):
             bo.buffer_store(
                 ys[j].to(fx.BFloat16),
@@ -440,10 +576,11 @@ def store_normed(normed, t, col, ys, live):
             )
 
 
-def _seam_lds(s):
+def _seam_lds(s, tuned=False):
     @fx.struct
     class SeamLds:
-        red: fx.Array[fx.Float32, WAVES * 2 * 64 * 4, 16]
+        # a token tile's mix partials, tuned every tile's (``seam.slice_mix_all``)
+        red: fx.Array[fx.Float32, seam.red_words(s, tuned), 16]
         rl: fx.Array[fx.Float32, s * seam.KT, 16]
         fl: fx.Array[fx.Float32, seam.MIX * seam.KT, 16]
         pl: fx.Array[fx.Float32, s * seam.COLS, 16]
@@ -452,19 +589,48 @@ def _seam_lds(s):
 
 
 @traced
-def run_ffn(key: MonoBuild, lds, a: dict, amb, bases, own, rank, ep, part=None):
+def run_ffn(
+    key: MonoBuild, lds, a: dict, amb, bases, own, rank, ep, part=None, tl=None
+):
     """K2's FFN half on this CTA: the FFN seam (the attention's TP partials --
-    ``part`` pushed to every rank's ATTN region first -- summed and folded into
-    the residual), the MoE and its all-reduce into ``a["out"]``, then the
-    launch pair's epoch moved on."""
+    `part` pushed to every rank's ATTN region first -- summed and folded into
+    the residual), the MoE and its all-reduce into `a["out"]`, then the
+    launch pair's epoch moved on. `tl`: K2's timeline record base (a
+    timeline build), stamped from point K2_SEAM_POINT on."""
     s, tp = key.tokens, key.tp
-    layout = scratch_layout(s, tp)
+    # The scratch is laid out for the routing and the FP4 groups of the
+    # runner that owns it. K2 runs on the runner of its own layers, the
+    # target's or the DSpark draft's. The FFN launch (``part``) always runs on
+    # the target's runner, also for a gfx942 draft layer, so it reads the
+    # target's layout.
+    if const_expr(part is None):
+        layout = scratch_layout(s, tp, key.experts, key.topk, key.ug_groups, key.tuned)
+    else:
+        layout = scratch_layout(s, tp)
     mkey = _moe_key(key)
     rs = route_shape(mkey)
     GATE0 = SLICES
     NORM0 = SLICES + s
     bid = fx.block_idx.x
     tid = fx.thread_idx.x
+
+    def mark(point, core_clock=False):
+        # Thread 0 of the CTA stores the 100 MHz clock at this CTA's record,
+        # the same way the attention back's stamps do. With core_clock it
+        # stores the shader clock counter (s_memtime) instead. Two such
+        # stamps divided by two 100 MHz stamps give the clock the CUs ran
+        # at in between.
+        if const_expr(tl is not None):  # noqa: SIM102 (a build-time and a run-time test)
+            if tid == 0:
+                if const_expr(core_clock):
+                    t = fx.Int64(
+                        llvm.call_intrinsic(T.i64, "llvm.amdgcn.s.memtime", [], [], [])
+                    )
+                else:
+                    t = memrealtime()
+                w = fx.Vector.from_elements([fx.Int32(t), fx.Int32(t >> 32)], fx.Int32)
+                bo.buffer_store(w, rsrc(tl), (bid * K2_POINTS + point) * 2)
+
     sl = lds.seam.peek()
     scratch = a["scratch"]
     seam_args = (
@@ -490,6 +656,7 @@ def run_ffn(key: MonoBuild, lds, a: dict, amb, bases, own, rank, ep, part=None):
         "fl": sl.fl.ptr,
         "red": sl.red.ptr,
         "pend_lds": sl.pl.ptr,
+        "tuned": key.tuned,
         "put": amb.put,
         "put_bf": amb.put_bf,
         "put_words": amb.put_words,
@@ -503,7 +670,15 @@ def run_ffn(key: MonoBuild, lds, a: dict, amb, bases, own, rank, ep, part=None):
     normed = scratch + fx.Int64(layout["normed"][0])
     for region in ("lin", "pmix"):
         ca[region] = sreg(scratch, layout[region][0], region)
-    mlayout = {n: layout[n] for n in moe.scratch_layout(mkey) if n not in COUNTERS}
+    # In the FFN launch the layout holds the MoE regions at the target's
+    # routing. A build with fewer experts or picks (a gfx942 DSpark draft
+    # layer's) uses the same regions, so each of its regions must fit in the
+    # target's. The MoE's counters are in the epoch buffer, not in this
+    # layout.
+    mregions = {n: v for n, v in moe.scratch_layout(mkey).items() if n not in COUNTERS}
+    for region, (_, size) in mregions.items():
+        assert size <= layout[region][1], (region, size, layout[region][1])
+    mlayout = {n: layout[n] for n in mregions}
     mlayout["xrdy"] = layout["xrdy_moe"]
     margs = moe.moe_args(
         normed,
@@ -523,23 +698,57 @@ def run_ffn(key: MonoBuild, lds, a: dict, amb, bases, own, rank, ep, part=None):
         s, rs, lds.moe.peek(), amb, bases, mlayout, scratch, margs, rank, own
     )
     cb["x_cm"], cb["x_ready"] = CM_DEV, True
+    cb["push_bases"] = a.get("push_bases") if tp == 4 else None
     cb["tag"] = ep & 255
     for i, region in enumerate(COUNTERS):
         cb[region] = sreg(a["epoch"], 4 * (EPOCH_COUNTERS + i * moe.TAGS), region)
-    for task in range(first_task(bid, 0), SLICES, BLOCKS):
-        if const_expr(part is not None):
-            seam.stage_push(ca, task, part)
-        seam.stage_reduce(ca, task)
-        seam.stage_slice(ca, task)
-    for t in range(first_task(bid, GATE0), s, BLOCKS):
-        seam.stage_gate(ca, t)
-    for t in range(first_task(bid, NORM0), s, BLOCKS):
-        seam.stage_norm(ca, t, lambda *v: store_normed(normed, *v))
-        publish(cb["put"], cb["xrdy"], t, 1, tid == 0)
+    # In K2 the attention back half stamps point 0. The FFN launch has no
+    # attention, so it stamps its own start here.
+    if const_expr(part is not None):
+        mark(0)
+    if const_expr(key.tuned):
+        # reduce and slice fused, then the norms (the MoE waits on them), then
+        # the gates, whose outputs nothing in this launch waits on: past one
+        # router group on the route CTAs after the route (``after_route``)
+        for task in range(first_task(bid, 0), SLICES, BLOCKS):
+            if const_expr(part is not None):
+                seam.stage_push(ca, task, part)
+            seam.stage_reduce_slice(ca, task)
+        mark(K2_SEAM_POINT)
+        for t in range(first_task(bid, NORM0), s, BLOCKS):
+            seam.stage_norm(
+                ca,
+                t,
+                lambda *v: store_normed(normed, *v, wide=True),
+                tail_barrier=False,
+            )
+            publish(cb["put"], cb["xrdy"], t, 1, tid == 0)
+        mark(K2_SEAM_POINT + 1)
+        if const_expr(rs.router_groups[0] > 1):
+            cb["after_route"] = lambda t: seam.stage_gate(ca, t)
+        else:
+            for t in range(first_task(bid, GATE0), s, BLOCKS):
+                seam.stage_gate(ca, t)
+    else:
+        for task in range(first_task(bid, 0), SLICES, BLOCKS):
+            if const_expr(part is not None):
+                seam.stage_push(ca, task, part)
+            seam.stage_reduce(ca, task)
+            seam.stage_slice(ca, task)
+        mark(K2_SEAM_POINT)
+        for t in range(first_task(bid, GATE0), s, BLOCKS):
+            seam.stage_gate(ca, t)
+        mark(K2_SEAM_POINT + 1)
+        for t in range(first_task(bid, NORM0), s, BLOCKS):
+            seam.stage_norm(ca, t, lambda *v: store_normed(normed, *v))
+            publish(cb["put"], cb["xrdy"], t, 1, tid == 0)
     gpu.barrier()
+    mark(K2_SEAM_POINT + 2)
 
     # ---- the MoE, its all-reduce into ``out``
-    moe.run_moe(cb, mkey, bid, 0, 0)
+    if const_expr(tl is not None):
+        cb["tl_mark"] = mark
+    moe.run_moe(cb, mkey, bid, 0, K2_SEAM_POINT + 2)
 
     def reset():
         # the MoE counter slot 128 launch pairs ahead: its last use long
@@ -554,7 +763,7 @@ def run_ffn(key: MonoBuild, lds, a: dict, amb, bases, own, rank, ep, part=None):
 def build_mono_k2(key: MonoBuild):
     s, tp = key.tokens, key.tp
     assert 1 <= s <= MAX_TOKENS
-    layout = scratch_layout(s, tp)
+    layout = scratch_layout(s, tp, key.experts, key.topk, key.ug_groups, key.tuned)
     bkey = _back_key(key)
     mkey = _moe_key(key)
     rs = route_shape(mkey)
@@ -564,7 +773,7 @@ def build_mono_k2(key: MonoBuild):
     MoeLds = moe.moe_smem(s, rs, False)
     half = peer_half_bytes(tp)
     assert SLICES + 2 * s <= BLOCKS
-    SeamLds = _seam_lds(s)
+    SeamLds = _seam_lds(s, key.tuned)
 
     @fx.union
     class K2Lds:
@@ -574,7 +783,13 @@ def build_mono_k2(key: MonoBuild):
         moe: MoeLds  # type: ignore[valid-type]
 
     name = kernel_symbol(
-        "dsv41_mono_k2", s=s, tp=tp, r=key.ratio, tl=key.timeline, i=key.index
+        "dsv41_mono_k2",
+        s=s,
+        tp=tp,
+        r=key.ratio,
+        tl=key.timeline,
+        i=key.index,
+        **_symbol_params(key),
     )
     keyed = key_tuple(key, SOURCES)
 
@@ -665,7 +880,9 @@ def build_mono_k2(key: MonoBuild):
             "out_stride": 0,
             "zrec": zrec,
         }
-        blayout = {n: layout[n] for n in back_scratch(s, Dims(tp), start=0)}
+        blayout = {
+            n: layout[n] for n in back_scratch(s, Dims(tp), start=0, tuned=key.tuned)
+        }
         views = {"split": lds.split.peek(), "gemv": lds.gemv.peek()}
         c = mb_back.back_context(bkey, views, bargs, scratch, tag, blayout)
         amb = Mailbox(tag)
@@ -678,7 +895,7 @@ def build_mono_k2(key: MonoBuild):
 
         c["wob_out"] = push
         if const_expr(key.timeline):
-            c["tl"], c["tl_points"] = tl, mb_back.BACK_POINTS
+            c["tl"], c["tl_points"] = tl, K2_POINTS
         mb_back.epoch_begin(c, epoch, ep)
         if const_expr(key.index):
             # the key table, from the top-k vLLM's indexer selected after K1,
@@ -688,6 +905,7 @@ def build_mono_k2(key: MonoBuild):
                 "tid": c["tid"],
                 "dev": True,
                 "ratio": key.ratio,
+                "swa_width": key.swa_width,
                 "args": {
                     "slot": slot,
                     "swa_idx": swa_idx,
@@ -735,8 +953,11 @@ def build_mono_k2(key: MonoBuild):
             out=out,
             scratch=scratch,
             epoch=epoch,
+            push_bases=lambda: [b + par for b in peer_bases(peers, tp)],
         )
-        run_ffn(key, lds, ffn, amb, bases, own, rank, ep)
+        run_ffn(
+            key, lds, ffn, amb, bases, own, rank, ep, tl=tl if key.timeline else None
+        )
 
     @flyc.jit
     def launch(
@@ -861,7 +1082,7 @@ def build_mono_k2(key: MonoBuild):
 
 
 def build_mono_ffn(key: MonoBuild):
-    """The FFN launch of a layer whose attention vLLM ran (``part``: this rank's
+    """The FFN launch of a layer whose attention vLLM ran (`part`: this rank's
     unreduced wo_b output, bf16 [S, HIDDEN]): K2's FFN half, the partial pushed
     to every rank first. It takes a launch pair's epoch, as K2 does."""
     s, tp = key.tokens, key.tp
@@ -878,7 +1099,7 @@ def build_mono_ffn(key: MonoBuild):
         seam: SeamLds  # type: ignore[valid-type]
         moe: MoeLds  # type: ignore[valid-type]
 
-    name = kernel_symbol("dsv41_mono_ffn", s=s, tp=tp)
+    name = kernel_symbol("dsv41_mono_ffn", **_ffn_symbol_params(key))
     keyed = key_tuple(key, SOURCES)
 
     @flyc.kernel(name=name, known_block_size=[THREADS, 1, 1])
@@ -912,6 +1133,7 @@ def build_mono_ffn(key: MonoBuild):
         peers: Int64,
         rank: Int32,
         epoch: Int64,
+        tl: Int64,
     ):
         _ = keyed
         lds = fx.SharedAllocator().allocate(FfnLds)
@@ -947,7 +1169,10 @@ def build_mono_ffn(key: MonoBuild):
             epoch=epoch,
         )
         amb = Mailbox((ep << 1) + 2)
-        run_ffn(key, lds, a, amb, bases, sym + par, rank, ep, part=part)
+        run_ffn(
+            key, lds, a, amb, bases, sym + par, rank, ep, part=part,
+            tl=tl if key.timeline else None,
+        )  # fmt: skip
 
     @flyc.jit
     def launch(
@@ -980,6 +1205,7 @@ def build_mono_ffn(key: MonoBuild):
         peers: Int64,
         rank: Int32,
         epoch: Int64,
+        tl: Int64,
         stream: fx.Stream = _STREAM,
     ):
         _ = keyed
@@ -1013,6 +1239,7 @@ def build_mono_ffn(key: MonoBuild):
             peers,
             rank,
             epoch,
+            tl,
         ).launch(grid=(BLOCKS,), block=(THREADS,), stream=stream)
 
     return launch

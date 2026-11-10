@@ -44,6 +44,7 @@ def state(monkeypatch):
     cfg.model_config.enable_prompt_embeds = False
     cfg.model_config.uses_mrope = False
     cfg.model_config.is_multimodal_model = False
+    cfg.parallel_config.prefill_context_parallel_size = 1
     cfg.scheduler_config.max_num_seqs = 8
     cfg.scheduler_config.max_num_batched_tokens = 64
     seen: dict = {}

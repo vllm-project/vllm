@@ -20,11 +20,18 @@ new, reading vLLM's KV records and weights as loaded.
   their compressor; 24, 28, 32, 36) K1 also hands out its normed input and bf16
   qr, vLLM's compressor and indexer run between K1 and K2, and K2 builds the
   key table from that top-k. The FFN launch serves a layer outside these (an
-  MXFP8 KV cache, another indexer); the DSpark draft layers keep vLLM's path.
+  MXFP8 KV cache, another indexer). The DSpark draft's three layers run the same
+  K1 / K2 on a runner of their own (128 experts / top-3, window-only attention over
+  the block's non-causal SWA rows).
   The paths interleave freely (same tensors at the layer boundary).
 - Steps: decode only (FULL graph or eager), M <= 48 rows (8 requests x 6
-  DSpark tokens), TP2 / TP4, `fp8_ds_mla` KV records (ROCm), text tokens (the
+  DSpark tokens), TP2 / TP4 / TP8 (gfx950), `fp8_ds_mla` KV records (ROCm), text tokens (the
   routing bias is `e_score_correction_bias`).
+- Tuned builds (`MonoBuild.tuned`): the target's compress-ratio-2 layers at TP2
+  on gfx950 compile paths tuned for those step widths, bit-exact against the
+  generic code that every other build compiles unchanged; they have a scratch
+  layout of their own. `MonoBuild.generic` builds the generic code for them
+  too: the numerics test's bit-for-bit reference.
 - Contract: a drop-in for `DeepseekV4DecoderLayer.forward`:
   in  `x` (the previous FFN output, reduced, bf16 [M, 5120]), `residual`
       (bf16 [M, 4, 5120]), `post_mix` [M, 4, 1], `res_mix` [M, 4, 4],

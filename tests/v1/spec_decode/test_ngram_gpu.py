@@ -3,12 +3,9 @@
 """Unit tests for the V2 GPU-accelerated n-gram speculator.
 
 These tests target the Triton proposer in
-``vllm.v1.worker.gpu.spec_decode.ngram.speculator`` and complement the CPU
-``NgramProposer`` tests in ``test_ngram.py``. The GPU speculator follows a
-slightly different policy than the CPU one: when multiple n-gram matches of
-the same length exist, the GPU kernel picks the right-most (most recent)
-match inside the active context, whereas the CPU implementation returns the
-left-most. The expectations below reflect the GPU behavior.
+`vllm.v1.worker.gpu.spec_decode.ngram.speculator`. When multiple n-gram
+matches of the same length exist, the GPU kernel picks the right-most (most
+recent) match inside the active context.
 """
 
 from __future__ import annotations
@@ -24,16 +21,17 @@ from vllm.config import (
     SpeculativeConfig,
     VllmConfig,
 )
+from vllm.platforms import current_platform
 from vllm.v1.worker.gpu.spec_decode.ngram.speculator import NgramGPUSpeculator
 from vllm.v1.worker.gpu.states import RequestState
 
-if not torch.cuda.is_available():
+if not (current_platform.is_cuda_alike() or current_platform.is_xpu()):
     pytest.skip(
         "CUDA required for NgramGPUSpeculator tests",
         allow_module_level=True,
     )
 
-DEVICE = torch.device("cuda")
+DEVICE = torch.device(current_platform.device_type)
 
 
 def _make_vllm_config(
