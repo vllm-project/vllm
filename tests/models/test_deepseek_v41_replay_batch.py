@@ -334,6 +334,7 @@ def test_remote_producer_keeps_prefill_rows(state, remote, role, keep_option, ke
     request = NewRequestData(
         req_id="test",
         prompt_token_ids=[1] * 300,
+        prefill_token_ids=[1] * 300,
         mm_features=[],
         sampling_params=SamplingParams(),
         pooling_params=None,

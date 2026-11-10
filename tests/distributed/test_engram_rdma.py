@@ -248,7 +248,7 @@ class Row264OwnerCpuTests(unittest.TestCase):
             )
 
             offset = 0
-            for layer, rows, shard in (
+            for _layer, rows, shard in (
                 (1, 2, "model-00047-of-00048.safetensors"),
                 (14, 3, "model-00048-of-00048.safetensors"),
             ):

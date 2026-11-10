@@ -185,9 +185,11 @@ def test_loader_does_not_read_shards_the_model_skips(mtp_checkpoint, monkeypatch
     ]
 
 
-@pytest.mark.parametrize("multithread", [False, True])
+@pytest.mark.parametrize(
+    "multithread,shuffle", [(False, False), (True, False), (True, True)]
+)
 def test_loader_filters_external_weights_in_mixed_shard(
-    tmp_path, multithread, monkeypatch
+    tmp_path, multithread, shuffle, monkeypatch
 ):
     """External tables must not be materialized even in a mixed shard."""
     save_file(
@@ -218,6 +220,10 @@ def test_loader_filters_external_weights_in_mixed_shard(
             return self.file.get_tensor(name)
 
     monkeypatch.setattr(weight_utils, "safe_open", TrackingOpen)
+    if shuffle:
+        monkeypatch.setattr(
+            weight_utils, "get_world_group", lambda: SimpleNamespace(rank=0)
+        )
 
     class Model(torch.nn.Module):
         filter_unused_checkpoint_weights = True
@@ -227,6 +233,7 @@ def test_loader_filters_external_weights_in_mixed_shard(
 
     config = LoadConfig(
         safetensors_load_strategy="lazy",
+        shuffle_safetensors_files=shuffle,
         model_loader_extra_config={"enable_multithread_load": multithread},
     )
     loader = DefaultModelLoader(config)
