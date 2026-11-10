@@ -140,8 +140,7 @@ steps:
   - pytest -v -s entrypoints/rl/return_routed_experts/test_scale_out_api.py
   # The other tests in this file drive the Python sleep routes in-process.
   - pytest -v -s entrypoints/rl/state_transitions/test_sleep.py::test_sleep_mode
-  # The Rust frontend reports an invalid query parameter as `mode`, not `query.mode`.
-  - pytest -v -s entrypoints/rl/state_transitions/test_pause_resume.py -k "not test_invalid_mode_preserves_state"
+  - pytest -v -s entrypoints/rl/state_transitions/test_pause_resume.py
   - pytest -v -s entrypoints/rl/state_transitions/test_weight_checker.py
   mirror:
     amd:
