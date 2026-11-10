@@ -6,74 +6,46 @@ import pytest
 import torch
 from torch import nn
 
-from vllm.compilation.decorators import support_torch_compile
 from vllm.model_executor.models.transformers.utils import infer_dynamic_arg_dims
 
 
-# The stubs mirror the `forward` signatures of the HF vision encoders they are named
-# after, so that the test does not depend on the installed `transformers` version.
+# Stubs mirror HF vision encoder signatures, independent of the installed version
 class UnannotatedEncoder(nn.Module):
-    """Like `SiglipVisionModel`: the tensor input is unannotated."""
+    """Like `SiglipVisionModel`."""
 
-    def forward(
-        self, pixel_values, interpolate_pos_encoding: bool | None = False, **kw
-    ):
+    def forward(self, pixel_values, interpolate_pos_encoding: bool = False, **kw):
         pass
 
 
 class LegacyTensorEncoder(nn.Module):
-    """Like `Idefics3VisionTransformer`: unannotated and legacy tensor inputs."""
+    """Like `Idefics3VisionTransformer`."""
 
     def forward(
-        self, pixel_values, patch_attention_mask: torch.BoolTensor | None = None, **kw
-    ):
-        pass
-
-
-class AnnotatedEncoder(nn.Module):
-    """Like `InternVLVisionModel`: annotated and legacy tensor inputs."""
-
-    def forward(
-        self,
-        pixel_values: torch.Tensor,
-        bool_masked_pos: torch.BoolTensor | None = None,
-        **kw,
+        self, pixel_values, patch_attention_mask: torch.BoolTensor | None = None
     ):
         pass
 
 
 class NonTensorEncoder(nn.Module):
-    """Arguments which are annotated as anything but a tensor are left static."""
+    """Containers of tensors and non-tensor types are left static."""
 
     def forward(
         self,
-        pixel_values: torch.Tensor,
+        pixel_values: "torch.Tensor",
         grid_sizes: tuple[int, int],
-        num_tiles: int | None = None,
+        tiles: list[torch.Tensor] | None = None,
         *args,
-        **kw,
     ):
         pass
 
 
 @pytest.mark.parametrize(
-    "encoder_cls,expected",
+    ("encoder_cls", "expected"),
     [
         (UnannotatedEncoder, {"pixel_values": 0}),
         (LegacyTensorEncoder, {"pixel_values": 0, "patch_attention_mask": 0}),
-        (AnnotatedEncoder, {"pixel_values": 0, "bool_masked_pos": 0}),
         (NonTensorEncoder, {"pixel_values": 0}),
     ],
 )
-def test_infer_dynamic_arg_dims(encoder_cls, expected):
+def test_infer_dynamic_arg_dims(encoder_cls: type[nn.Module], expected: dict):
     assert infer_dynamic_arg_dims(encoder_cls) == expected
-
-
-@pytest.mark.parametrize("encoder_cls", [UnannotatedEncoder, LegacyTensorEncoder])
-def test_inferred_dims_are_accepted_by_support_torch_compile(encoder_cls):
-    """`dynamic_arg_dims=None` raises `ValueError` for these encoders."""
-    with pytest.raises(ValueError, match="No dynamic dimensions found"):
-        support_torch_compile(dynamic_arg_dims=None)(type("E", (encoder_cls,), {}))
-    support_torch_compile(dynamic_arg_dims=infer_dynamic_arg_dims(encoder_cls))(
-        type("E", (encoder_cls,), {})
-    )

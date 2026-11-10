@@ -2,12 +2,12 @@
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 """KIMI_K3_KV_BALANCED_MLA: an FP8 MLA decode backend on the KV-balanced kernel.
 
-Selected with ``--attention-backend KIMI_K3_KV_BALANCED_MLA`` (and the speculative
-config's ``attention_backend`` for the DSpark draft); it is never chosen
+Selected with `--attention-backend KIMI_K3_KV_BALANCED_MLA` (and the speculative
+config's `attention_backend` for the DSpark draft); it is never chosen
 automatically. Its cache layout, decode metadata and LSE convention are those the
 kernel was written for (TokenSpeed MLA's): an FP8 cache of 576 values per token in
 pages of 32 or 64, uniform decode query lengths, and a log2 LSE for the DCP combine.
-Every decode step runs on the kernel (``decode.py``), which raises for a step it
+Every decode step runs on the kernel (`decode.py`), which raises for a step it
 can't run. Prefill uses the configured MLA prefill backend.
 """
 

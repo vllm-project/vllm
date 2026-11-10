@@ -22,7 +22,16 @@ from contextlib import contextmanager
 from itertools import chain
 from operator import attrgetter
 from pathlib import Path
-from typing import TYPE_CHECKING, Literal, TypeAlias, TypeVar, get_args
+from types import UnionType
+from typing import (
+    TYPE_CHECKING,
+    Literal,
+    TypeAlias,
+    TypeVar,
+    Union,
+    get_args,
+    get_origin,
+)
 
 import torch
 from torch import nn
@@ -378,52 +387,81 @@ def can_enable_torch_compile(vllm_config: "VllmConfig") -> bool:
     Defaults to `True` but is disabled in the following situations:
 
     - The model uses dynamic rope scaling that can still rescale within
-      `max_model_len` (otherwise `disable_noop_dynamic_rope` removes it).
+      `max_model_len` (otherwise `maybe_disable_dynamic_rope_update` removes it).
     """
     text_config = vllm_config.model_config.hf_config.get_text_config()
     rope_types = {rp["rope_type"] for rp in iter_rope_parameters(text_config)}
-    if "dynamic" not in rope_types:
-        return True
-    # Layer types using longrope still sync, even once dynamic rope is disabled
-    return "longrope" not in rope_types and dynamic_rope_update_is_noop(vllm_config)
+    return "dynamic" not in rope_types or dynamic_rope_update_is_noop(vllm_config)
+
+
+def _is_tensor_type(annotation: object) -> bool:
+    """Match `torch.Tensor` and legacy types like `torch.BoolTensor`."""
+    return (
+        isinstance(annotation, type)
+        and annotation.__module__ == "torch"
+        and annotation.__name__.endswith("Tensor")
+    )
 
 
 def infer_dynamic_arg_dims(cls: type[nn.Module]) -> "DynamicArgDims":
     """Infer `dynamic_arg_dims` from the signature of `cls.forward`.
 
     The 0-th dimension is dynamic for every argument which is either unannotated
-    or annotated with a `torch` tensor type, including legacy ones such as
-    `torch.BoolTensor` which `support_torch_compile` does not recognise.
+    or annotated with a tensor type, optionally in a union with other types.
     """
+    try:
+        sig = inspect.signature(cls.forward, eval_str=True)
+    except NameError:
+        sig = inspect.signature(cls.forward)
     dims: DynamicArgDims = {}
-    for name, param in inspect.signature(cls.forward).parameters.items():
+    for name, param in sig.parameters.items():
         if name == "self" or param.kind in (param.VAR_POSITIONAL, param.VAR_KEYWORD):
             continue
-        members = get_args(param.annotation) or (param.annotation,)
-        if param.annotation is param.empty or any(
-            getattr(m, "__module__", None) == "torch" and m.__name__.endswith("Tensor")
-            for m in members
-        ):
+        annotation = param.annotation
+        is_union = get_origin(annotation) in (Union, UnionType)
+        members = get_args(annotation) if is_union else (annotation,)
+        if annotation is param.empty or any(map(_is_tensor_type, members)):
             dims[name] = 0
     return dims
 
 
-def disable_noop_dynamic_rope(model: nn.Module, vllm_config: "VllmConfig") -> None:
-    """Skip `@dynamic_rope_update` in rotary modules where it can never rescale.
+def maybe_disable_dynamic_rope_update(
+    model: nn.Module, vllm_config: "VllmConfig"
+) -> None:
+    """Skip `@dynamic_rope_update` in rotary modules where `inv_freq` can be fixed.
 
     The update syncs on `torch.max(position_ids)` every forward, which breaks
     torch.compile and CUDA graph capture. Relabelling the module's `rope_type` as
-    "default" skips it while keeping the `inv_freq` computed at init.
+    "default" skips it:
+
+    - dynamic: where it can never rescale, keeping the `inv_freq` from init
+    - longrope: always, picking the long factors iff `max_model_len` exceeds
+      `original_max_position_embeddings` like native vLLM, since switching per
+      forward would read KV cached under one set with the other
     """
-    if not dynamic_rope_update_is_noop(vllm_config):
-        return
+    from transformers.modeling_rope_utils import ROPE_INIT_FUNCTIONS
+
+    max_model_len = vllm_config.model_config.max_model_len
+    dynamic_is_noop = dynamic_rope_update_is_noop(vllm_config)
     for module in model.modules():
         rope_type = getattr(module, "rope_type", None)
         if not hasattr(module, "max_seq_len_cached") or rope_type is None:
             continue
-        if isinstance(rope_type, dict):
-            module.rope_type = {
-                k: "default" if v == "dynamic" else v for k, v in rope_type.items()
-            }
-        elif rope_type == "dynamic":
-            module.rope_type = "default"
+        per_layer = isinstance(rope_type, dict)
+        rope_types = dict(rope_type) if per_layer else {None: rope_type}
+        for layer_type, value in rope_types.items():
+            if value == "dynamic" and dynamic_is_noop:
+                rope_types[layer_type] = "default"
+            elif value == "longrope":
+                rope_parameters = module.config.rope_parameters
+                if per_layer:
+                    rope_parameters = rope_parameters[layer_type]
+                original = rope_parameters["original_max_position_embeddings"]
+                if max_model_len > original:
+                    inv_freq, _ = ROPE_INIT_FUNCTIONS["longrope"](
+                        module.config, None, seq_len=original + 1, layer_type=layer_type
+                    )
+                    prefix = f"{layer_type}_" if per_layer else ""
+                    getattr(module, f"{prefix}inv_freq").copy_(inv_freq)
+                rope_types[layer_type] = "default"
+        module.rope_type = rope_types if per_layer else rope_types[None]

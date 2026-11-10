@@ -35,12 +35,12 @@ class MultiModalCacheMissError(RuntimeError):
     are not cached.
 
     P0 (frontend) keeps a metadata-only shadow of P1 (engine) and sends
-    ``data=None`` on a shadow hit. The two caches are updated in different orders
+    `data=None` on a shadow hit. The two caches are updated in different orders
     across processes, so they can drift -- leaving P0 referencing items P1 has
     evicted. Raising (instead of asserting) lets the engine return a retryable
     response and have P0 drop the stale entries
-    (``BaseMultiModalProcessorCache.invalidate``) so the client resends the data.
-    Carries every drifted ``mm_hash`` in the request so P0 can drop them all in one
+    (`BaseMultiModalProcessorCache.invalidate`) so the client resends the data.
+    Carries every drifted `mm_hash` in the request so P0 can drop them all in one
     pass -- one retry then recovers the whole request, not one item per retry.
     """
 
@@ -349,12 +349,12 @@ class BaseMultiModalProcessorCache(
         """Return a locally stored payload without updating eviction order.
 
         Metadata-only and shared-memory sender caches do not retain a local
-        payload, so they return ``None``.
+        payload, so they return `None`.
         """
         return None
 
     def invalidate(self, mm_hash: str) -> None:
-        """Drop ``mm_hash`` from this P0 shadow cache to recover from P0/P1 drift.
+        """Drop `mm_hash` from this P0 shadow cache to recover from P0/P1 drift.
 
         No-op by default; shadow caches that can drift from P1 override this.
         """

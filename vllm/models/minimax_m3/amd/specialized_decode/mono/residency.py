@@ -10,8 +10,8 @@ import regex as re
 
 
 def code_object(ir_text: str) -> bytes:
-    """The linked ELF of a FlyDSL artifact's ``gpu.binary`` (MLIR escapes
-    non-printable bytes as ``\\XX``)."""
+    """The linked ELF of a FlyDSL artifact's `gpu.binary` (MLIR escapes
+    non-printable bytes as `\\XX`)."""
     m = re.search(r'bin = "((?:[^"\\]|\\.)*)"', ir_text, re.S)
     if m is None:
         raise RuntimeError("FlyDSL artifact holds no gpu.binary")
@@ -62,7 +62,7 @@ def _check(rc: int, what: str) -> None:
 
 
 def active_workgroups_per_cu(compiled, name: str, threads: int) -> int:
-    """``compiled``: a ``flyc.compile`` result; ``name``: its kernel symbol."""
+    """`compiled`: a `flyc.compile` result; `name`: its kernel symbol."""
     hip = _hip()
     module, func, count = ctypes.c_void_p(), ctypes.c_void_p(), ctypes.c_int()
     image = code_object(compiled._keepalive._ir_text)
