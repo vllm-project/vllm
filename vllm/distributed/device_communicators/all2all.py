@@ -1082,13 +1082,20 @@ def _mori_epv2_arena_bytes(cfg) -> int:
 def _mori_epv2_internode_arena_bytes(cfg) -> int:
     """Exact symmetric arena of a MORI EPv2 internode (hip backend) op.
 
-    MORI sizes the internode arena region by region (`internode_regions`) and
-    carves it out of the window with SymmArena, which aligns every region to
-    256 B.
+    MORI sizes the internode arena region by region and carves it out of the
+    window with SymmArena, which aligns every region to 256 B. Like the hip
+    backend, take the AsyncLL table for an AsyncLL op: its send buffers are
+    per rank rather than per node, so `internode_regions` would undersize it.
     """
-    from mori.ops.dispatch_combine_v2.internode_regions import internode_regions
+    if getattr(cfg, "async_ll", False):
+        from mori.ops.dispatch_combine_v2.internode_regions import asyncll_regions
 
-    return sum(round_up(nbytes, 256) for _, nbytes in internode_regions(cfg))
+        table = asyncll_regions(cfg)
+    else:
+        from mori.ops.dispatch_combine_v2.internode_regions import internode_regions
+
+        table = internode_regions(cfg)
+    return sum(round_up(nbytes, 256) for _, nbytes in table)
 
 
 # cco reserves each rank's window in 4 GiB steps.
@@ -1156,6 +1163,11 @@ class MoriEPv2All2AllManager(All2AllManagerBase):
         uid = Communicator.get_unique_id() if self.rank == 0 else None
         values = [uid]
         dist.broadcast_object_list(values, group_src=0, group=self.cpu_group)
+        # Line the ranks up first: cco's init exchanges P2P handles with the
+        # node's other ranks, and a window opened late (after weight loading,
+        # where hosts finish tens of seconds apart) failed across hosts with
+        # "failed to connect to peer 0".
+        dist.barrier(group=self.cpu_group)
         comm = Communicator.init(
             self.world_size, self.rank, values[0], per_rank_vmm=nbytes
         )
@@ -1184,12 +1196,13 @@ class MoriEPv2All2AllManager(All2AllManagerBase):
             world_size=self.world_size,
             data_type=torch.bfloat16,
             combine_mode="gather",
-            **internode,
-            **kwargs,
+            # An op's own kwargs win, e.g. a kernel_backend it sets itself.
+            **(internode | kwargs),
         )
-        # Each op carves its arena out of a cco window, which only reserves
-        # address space, so open a big enough one instead of failing. Whole
-        # GiB per op keeps MORI's allocation granularity inside the window.
+        # Each op carves its arena out of a cco window, so open a big enough
+        # one instead of failing. The window is backed by memory across hosts,
+        # so it is sized to what the ops need rather than generously. Whole GiB
+        # per op keeps MORI's allocation granularity inside the window.
         if config.is_internode:
             arena_bytes = _mori_epv2_internode_arena_bytes(config)
             # The window is registered with the NIC as one memory region, so
