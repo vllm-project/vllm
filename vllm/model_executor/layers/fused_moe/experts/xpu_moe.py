@@ -139,6 +139,14 @@ class XPUExperts(mk.FusedMoEExpertsModular):
                 w2 = w2.view(torch.float4_e2m1fn_x2)
             # XpuFusedMoe relayouts the loaded [E, N, K] weights and scales
             # in place for this device's grouped GEMM.
+            _validate_xpu_moe_zp_planes(
+                self.w1_zp, self.w2_zp, self.w1_scale, self.w2_scale
+            )
+            # Only asymmetric checkpoints carry zero-points; keep the
+            # call compatible with kernels that predate them.
+            zp_kwargs = {}
+            if self.w1_zp is not None:
+                zp_kwargs = {"w13_zps": self.w1_zp, "w2_zps": self.w2_zp}
             self.fused_moe_impl = XpuFusedMoe(
                 w13=w1,
                 w13_scales=self.w1_scale,
@@ -153,6 +161,7 @@ class XPUExperts(mk.FusedMoEExpertsModular):
                 ep_size=self.moe_config.ep_size,
                 expert_map=expert_map,
                 gemm1_clamp_limit=self.gemm1_clamp_limit,
+                **zp_kwargs,
             )
         assert self.fused_moe_impl is not None
         if self.moe_config.ep_size > 1:
@@ -250,8 +259,46 @@ class XPUExpertsBlockFp8(XPUExperts):
         return (weight_key, activation_key) in SUPPORTED_W_A
 
 
+def _validate_xpu_moe_zp_planes(
+    w13_zps: torch.Tensor | None,
+    w2_zps: torch.Tensor | None,
+    w13_scales: torch.Tensor | None,
+    w2_scales: torch.Tensor | None,
+) -> None:
+    """Refuse non-grid zero-point planes before XpuFusedMoe sees them.
+
+    `_replace_or_register_parameter` skips `None`, so an unset
+    conversion keeps the raw AWQ int32 qzeros on the layer; those must
+    never reach the kernel as if they were uint8 `[E, N, G]` planes.
+    """
+    if w13_zps is None and w2_zps is None:
+        return
+    if w13_zps is None or w2_zps is None:
+        raise ValueError("XPU MoE zero-points must be both defined or both undefined.")
+    for name, zp, sc in (
+        ("w13_zps", w13_zps, w13_scales),
+        ("w2_zps", w2_zps, w2_scales),
+    ):
+        if (
+            zp.dtype != torch.uint8
+            or zp.dim() != 3
+            or sc is None
+            or (zp.shape != sc.shape)
+        ):
+            raise ValueError(
+                f"{name} must be uint8 with the scales' [E, N, G] "
+                f"geometry, got dtype={zp.dtype} "
+                f"shape={tuple(zp.shape)}."
+            )
+
+
 class XPUExpertsWNA16(XPUExperts):
-    """W4A16 INT4-symmetric MoE backed by `xpu_fused_moe(is_int4=True)`.
+    """W4A16 INT4 MoE backed by `xpu_fused_moe(is_int4=True)`.
+
+    Symmetric checkpoints ride the in-place uint4b8→s4 rewrite with no
+    zp planes; asymmetric (AWQ with zero points) checkpoints
+    additionally carry raw uint8 [E, N, G] zp planes alongside the
+    scales.
 
     Weight layout when `is_int4=True` (per `xpu_fused_moe` docstring):
         w13: [num_experts, 2*inter_size, hidden_size]   contiguous int4-packed

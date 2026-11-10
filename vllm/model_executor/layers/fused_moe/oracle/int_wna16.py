@@ -233,6 +233,25 @@ def _backend_incompatibility_reason(
         ):
             return "group activation ordering is not supported"
 
+    if backend == WNA16MoEBackend.XPU:
+        # The XPU int4 grid reads N-first uint8 pairs plus optional raw
+        # uint8 [E, N, G] zero-point planes. AWQ repack only covers the
+        # grouped sizes below, and only asymmetric checkpoints carry
+        # zero points at all.
+        if isinstance(quant_config, AutoAWQConfig):
+            if quant_config.group_size not in (32, 64, 128, 256):
+                return (
+                    "AWQ group size "
+                    f"{quant_config.group_size!r} is not supported: "
+                    "the XPU WNA16 MoE backend needs 32, 64, 128 or 256"
+                )
+            if not quant_config.zero_point:
+                return (
+                    "AWQ checkpoints without zero points are not "
+                    "supported: the XPU WNA16 MoE backend has no "
+                    "symmetric AWQ layout"
+                )
+
     # Marlin only supports certain problem/group sizes.
     allow_marlin = not isinstance(quant_config, MoeWNA16Config)
 
@@ -1062,6 +1081,102 @@ def _process_weights_xpu(
     )
 
 
+def _process_awq_weights_xpu(
+    layer: torch.nn.Module,
+    quant_config: QuantizationConfig,
+    w13_qweight: torch.Tensor,
+    w2_qweight: torch.Tensor,
+    w13_scales: torch.Tensor,
+    w2_scales: torch.Tensor,
+    w13_qzeros: torch.Tensor | None,
+    w2_qzeros: torch.Tensor | None,
+    w13_bias: torch.Tensor | None = None,
+    w2_bias: torch.Tensor | None = None,
+) -> tuple[
+    torch.Tensor,  # w13_qweight
+    torch.Tensor,  # w2_qweight
+    torch.Tensor,  # w13_scales
+    torch.Tensor,  # w2_scales
+    torch.Tensor | None,  # w13_qzeros
+    torch.Tensor | None,  # w2_qzeros
+    torch.Tensor | None,  # w13_input_global_scale
+    torch.Tensor | None,  # w2_input_global_scale
+    torch.Tensor | None,  # w13_bias
+    torch.Tensor | None,  # w2_bias
+]:
+    """AWQ MoE weight post-processing for the XPU zp-capable grid.
+
+    AWQ checkpoints pack along the output axis with AWQ nibble order
+    (`[E, K, N/8]` int32), while the XPU kernel reads N-first uint8
+    pairs (`[E, N, K/2]`) plus optional raw uint8 `[E, N, G]`
+    zero-point planes. `repack_awq_moe_for_grid` does the layout and
+    zero-point conversion; its weight output is already
+    `implement_zp`-folded, but `XpuFusedMoe` folds pre-fold pairs
+    itself at init, so unfold once here (`implement_zp` is an
+    involution on packed bytes).
+
+    The fused `w13` (gate rows then up rows) goes straight into
+    repack; no extra gate/up stacking is needed.
+    """
+    from vllm_xpu_kernels.fused_moe_interface import implement_zp
+    from vllm_xpu_kernels.moe_shared_fused_int4_interface import (
+        repack_awq_moe_for_grid,
+    )
+
+    from vllm.model_executor.layers.quantization.auto_awq import AutoAWQConfig
+
+    del layer  # kept for parity with the other per-backend helpers
+    assert isinstance(quant_config, AutoAWQConfig)
+    group_size = quant_config.group_size
+    if group_size not in (32, 64, 128, 256):
+        raise ValueError(
+            f"AWQ group size {group_size!r} is not supported for the XPU "
+            "WNA16 MoE backend (supported: 32, 64, 128, 256)."
+        )
+    if not quant_config.zero_point:
+        raise ValueError(
+            "AWQ checkpoints without zero points are not supported for "
+            "the XPU WNA16 MoE backend (no symmetric AWQ layout)."
+        )
+    if w13_qzeros is None or w2_qzeros is None:
+        raise ValueError("AWQ XPU MoE requires zero-point tensors.")
+
+    # Pin the repack output dtype to the scales' (params) dtype, which is
+    # the grid's expected dtype for this layer.
+    w13_grid, w13_scales_grid, w13_zps = repack_awq_moe_for_grid(
+        w13_qweight,
+        w13_qzeros,
+        w13_scales,
+        group_size,
+        target_dtype=w13_scales.dtype,
+    )
+    w2_grid, w2_scales_grid, w2_zps = repack_awq_moe_for_grid(
+        w2_qweight,
+        w2_qzeros,
+        w2_scales,
+        group_size,
+        target_dtype=w2_scales.dtype,
+    )
+    # Undo repack's fold: XpuFusedMoe applies implement_zp to pre-fold
+    # uint8 pairs at init (and flags the result), so hand it pre-fold
+    # bytes, not the folded ones.
+    w13_pre = implement_zp(w13_grid.view(torch.uint8)).contiguous()
+    w2_pre = implement_zp(w2_grid.view(torch.uint8)).contiguous()
+
+    return (
+        w13_pre,
+        w2_pre,
+        w13_scales_grid,
+        w2_scales_grid,
+        w13_zps,
+        w2_zps,
+        None,  # w13_input_global_scale
+        None,  # w2_input_global_scale
+        w13_bias,
+        w2_bias,
+    )
+
+
 def _humming_wna16_weight_schema(
     quant_config: QuantizationConfig | QuantizationArgs | None,
 ) -> dict[str, Any]:
@@ -1582,6 +1697,23 @@ def convert_to_wna16_moe_kernel_format(
         )
     elif backend == WNA16MoEBackend.XPU:
         assert quant_config is not None
+        from vllm.model_executor.layers.quantization.auto_awq import (
+            AutoAWQConfig,
+        )
+
+        if isinstance(quant_config, AutoAWQConfig):
+            return _process_awq_weights_xpu(
+                layer,
+                quant_config,
+                w13,
+                w2,
+                w13_scale,
+                w2_scale,
+                w13_qzeros,
+                w2_qzeros,
+                w13_bias,
+                w2_bias,
+            )
         (
             w13_xpu,
             w2_xpu,
