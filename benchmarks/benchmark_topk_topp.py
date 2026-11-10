@@ -127,8 +127,6 @@ IMPLEMENTATIONS = {
     "flashinfer-mask": apply_top_k_top_p_flashinfer_mask,
     "pytorch": apply_top_k_top_p_pytorch,
 }
-if fi_sampling is None:
-    del IMPLEMENTATIONS["flashinfer-mask"]
 
 
 def bench_gpu_time(fn, warmup_iters: int, benchmark_iters: int) -> list[float]:
@@ -445,7 +443,7 @@ def main():
         "--implementations",
         nargs="+",
         choices=list(IMPLEMENTATIONS),
-        default=[name for name in IMPLEMENTATIONS if name != "pytorch"],
+        default=["triton"],
         help="Implementations to compare (PyTorch is an optional reference)",
     )
 
