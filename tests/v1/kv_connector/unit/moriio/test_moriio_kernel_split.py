@@ -2,7 +2,7 @@
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 """MoRIIO on KV caches the allocator splits into smaller kernel blocks.
 
-Backends whose kernels need a smaller block than ``--block-size`` (e.g. the
+Backends whose kernels need a smaller block than `--block-size` (e.g. the
 ROCm sparse MLA and indexer backends at block size 8) get caches viewed as
 kernel blocks. Transfers still move whole manager blocks, so prefill and
 decode may split differently.
@@ -26,6 +26,7 @@ from vllm.distributed.kv_transfer.kv_connector.v1.moriio.moriio_layout import (
 from vllm.v1.kv_cache_interface import FullAttentionSpec, MLAAttentionSpec
 from vllm.v1.kv_cache_layout import KVCacheLayout
 
+from ..utils import make_moriio_writer
 from .test_moriio_hetero_tp_write import (
     BLOCK_SIZE,
     DECODE_BLOCKS,
@@ -38,7 +39,6 @@ from .test_moriio_hetero_tp_write import (
     _consumer_wrapper,
     _global_state,
 )
-from .utils import make_moriio_writer
 
 pytestmark = pytest.mark.cpu_test
 

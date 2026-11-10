@@ -175,7 +175,7 @@ class Rank:
 def _build_rank(
     model, tp_rank, tp_size, layout, hma, state, is_producer, kernel_block_size=None
 ) -> Rank:
-    """``kernel_block_size`` builds attention caches through the allocator, split
+    """`kernel_block_size` builds attention caches through the allocator, split
     into kernel blocks of that size; MLA only, as the content is seeded as bytes."""
     heads, layers = MODELS[model]
     groups = _groups(model, hma)
