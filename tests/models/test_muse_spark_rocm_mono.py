@@ -538,9 +538,10 @@ _REPLICAS = " w13r w13sr w2r w2sr eptab"
 _DESC_WORDS = 12
 
 
-def _params(head: str, world_size: int, tail: str) -> list[str]:
-    """A launch's parameters in order."""
-    return head.split() + [f"peer{r}" for r in range(world_size)] + tail.split()
+def _params(head: str, tail: str) -> list[str]:
+    """A launch's parameters in order: 8 peer slots at every group size (a smaller
+    group passes 0 for the others)."""
+    return head.split() + [f"peer{r}" for r in range(8)] + tail.split()
 
 
 def _device_view(ptr: int, shape, dtype: torch.dtype, strides=None) -> torch.Tensor:
@@ -674,15 +675,15 @@ class _Kernel:
         return _Key(S, W, next_rope, attn, bnd, kv_fp8)
 
     def build(self, key: _Key):
-        o, w = self.owner, key.W
+        o = self.owner
         if self.name == "k3":
-            params = _params(_K3_HEAD, w, "layer rank g_stride" + _REPLICAS)
+            params = _params(_K3_HEAD, "layer rank g_stride" + _REPLICAS)
             return o.launcher("k3", params, lambda a: _run_k3(o, key, a))
         if self.name == "k5m":
-            params = _params(_HM_HEAD, w, "layer rank nrows" + _REPLICAS)
+            params = _params(_HM_HEAD, "layer rank nrows" + _REPLICAS)
             return o.launcher("hm", params, lambda a: None)
-        ha = _params(_HA_HEAD, w, "layer rank g_stride s_full nrows")
-        hb = _params(_HB_HEAD, w, "layer rank so_stride so_off gather nrows")
+        ha = _params(_HA_HEAD, "layer rank g_stride s_full nrows")
+        hb = _params(_HB_HEAD, "layer rank so_stride so_off gather nrows")
 
         def run_ha(a):
             o.pending[a["layer"]] = a | {"fused": bool(key.attn)}
