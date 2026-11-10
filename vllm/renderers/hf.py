@@ -1053,9 +1053,10 @@ class HfRenderer(BaseRenderer[HfTokenizer]):
             _ensure_prompt_embeds_placeholder_token(tokenizer)
         # Pool this copy in place. Another copy would rebuild the cached vocab
         # with the placeholder in it and miss the placeholder id cache.
-        tokenizer = maybe_make_thread_pool(
-            tokenizer, config.model_config.renderer_num_workers + 1
-        )
+        if tokenizer is not None:
+            tokenizer = maybe_make_thread_pool(
+                tokenizer, config.model_config.renderer_num_workers + 1
+            )
         super().__init__(config, tokenizer)
 
         self.use_unified_vision_chunk = getattr(
