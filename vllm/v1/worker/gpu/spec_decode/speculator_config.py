@@ -9,9 +9,6 @@ describes its behavior to code outside the speculator (queried through
 its implementation class. Config modules must not import the speculators, as
 they're used in every process. Custom speculators are registered with
 `register_speculative_method`.
-
-Parts only needed by the V1 model runner are marked "V1 model runner only", and
-will be removed with it.
 """
 
 from typing import TYPE_CHECKING, Any, ClassVar, final, get_args
@@ -53,8 +50,9 @@ class SpeculatorConfig:
     # Proposes draft tokens (unlike e.g. hidden state extraction).
     proposes_draft_tokens: ClassVar[bool] = True
     adaptive_verification_uses_draft_logits: ClassVar[bool] = True
-    # The draft model has its own vocabulary, which must match the target's
-    # unless use_heterogeneous_vocab is set.
+    # Generates all draft tokens in one forward pass (e.g. DFlash).
+    parallel_drafting: ClassVar[bool] = False
+    # The draft model has its own vocabulary, which must match the target's.
     draft_has_own_vocab: ClassVar[bool] = False
 
     supports_watermarking: ClassVar[bool] = False
@@ -138,7 +136,7 @@ class SpeculatorConfig:
         return None
 
     def hash_factors(self) -> list[Any]:
-        """Extra factors of `SpeculativeConfig.compute_hash`."""
+        """Extra factors of `SpeculativeConfig.compile_factors`."""
         return []
 
     def pcp_unsupported_reason(self, parallel_config: "ParallelConfig") -> str | None:
@@ -160,14 +158,20 @@ class DraftModelSpeculatorConfig(SpeculatorConfig):
 
     @property
     def max_model_len(self) -> int | None:
-        from vllm.config.speculative import _rope_only_sizes_cache
+        from vllm.config.speculative import (
+            _rope_only_sizes_cache,
+            _yarn_cache_positions,
+        )
 
         draft = self.spec_config.draft_model_config
-        if draft is None or (
-            # Its max_position_embeddings was raised to the target's.
-            self.shares_target_positions and _rope_only_sizes_cache(draft.hf_config)
-        ):
+        if draft is None:
             return None
+        if self.shares_target_positions:
+            if _rope_only_sizes_cache(draft.hf_text_config):
+                # Its max_position_embeddings was raised to the target's.
+                return None
+            if (positions := _yarn_cache_positions(draft.hf_text_config)) is not None:
+                return positions
         return draft.max_model_len
 
     @classmethod
@@ -186,17 +190,15 @@ class DraftModelSpeculatorConfig(SpeculatorConfig):
             return
 
         target = spec.target_model_config
-        # Callable target hf_overrides also apply to the draft; dict ones don't.
+        # Callable target hf_overrides also apply to the draft; rope-relevant
+        # dict keys (YaRN / RoPE) do too. Other dict patches stay target-only.
         draft_hf_overrides = SpeculativeConfig.compose_draft_hf_overrides(
             target.hf_overrides, cls.transformers_backend_hf_overrides(spec)
         )
         spec.draft_model_config = ModelConfig(
             model=spec.model,
             runner="draft",
-            # use_heterogeneous_vocab is V1 model runner only.
-            tokenizer=(
-                spec.model if spec.use_heterogeneous_vocab else target.tokenizer
-            ),
+            tokenizer=target.tokenizer,
             tokenizer_mode=target.tokenizer_mode,
             trust_remote_code=target.trust_remote_code,
             allowed_local_media_path=target.allowed_local_media_path,
@@ -221,7 +223,7 @@ class DraftModelSpeculatorConfig(SpeculatorConfig):
 
         if config_cls.shares_target_positions:
             SpeculativeConfig._maybe_override_draft_max_position_embeddings(
-                spec.draft_model_config.hf_config, target.max_model_len
+                spec.draft_model_config.hf_text_config, target.max_model_len
             )
         config_cls.adapt_draft_model_config(spec)
         config_cls.resolve_num_speculative_tokens(spec)
@@ -291,16 +293,13 @@ _CONFIG_BY_METHOD: dict[str, str] = {
     "draft_model": _builtin("standalone_ar.config", "StandaloneARSpeculatorConfig"),
     "ngram": _builtin("ngram.config", "NgramSpeculatorConfig"),
     "ngram_gpu": _builtin("ngram.config", "NgramGPUSpeculatorConfig"),
+    "suffix": _builtin("suffix.config", "SuffixSpeculatorConfig"),
     "eagle": _builtin("eagle.config", "EagleSpeculatorConfig"),
     "eagle3": _builtin("eagle.config", "Eagle3SpeculatorConfig"),
     "mtp": _builtin("mtp.config", "MTPSpeculatorConfig"),
     "dflash": _builtin("dflash.config", "DFlashSpeculatorConfig"),
     "dspark": _builtin("dspark.config", "DSparkSpeculatorConfig"),
 }
-
-
-# V1 model runner only (see `v1_speculator_configs`).
-_V1_ONLY_METHODS = ("suffix", "custom_class")
 
 # Custom speculative methods' configs (or their qualified names), by name.
 _CUSTOM_CONFIGS: dict[str, "type[SpeculatorConfig] | str"] = {}
@@ -313,8 +312,8 @@ def register_speculative_method(
 
     `config_cls` is its `SpeculatorConfig` subclass, or its qualified name to
     import it lazily. Register it from a vLLM general plugin, so that it's
-    registered in every process. Custom methods require the V2 model runner.
-    This is an experimental interface that may change between releases.
+    registered in every process. This is an experimental interface that may
+    change between releases.
     """
     from vllm.config.speculative import SpeculativeMethod
 
@@ -362,15 +361,6 @@ def get_method_config_class(spec_config: "SpeculativeConfig") -> type[Speculator
     if method is None:
         # Not configured: a draft model, unless the checkpoint shows otherwise.
         method = "draft_model"
-    if method in _V1_ONLY_METHODS:
-        from vllm.v1.worker.gpu.spec_decode.v1_speculator_configs import (
-            SuffixSpeculatorConfig,
-            V1CustomProposerConfig,
-        )
-
-        if method == "suffix":
-            return SuffixSpeculatorConfig
-        return V1CustomProposerConfig
     if method not in _CONFIG_BY_METHOD:
         raise ValueError(f"Unsupported speculative method: '{method}'")
     return resolve_obj_by_qualname(_CONFIG_BY_METHOD[method])

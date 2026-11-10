@@ -583,7 +583,7 @@ def fused_indexer_q_rope_quant(
 ]:
     """Fused RoPE + quantize Q for the sparse indexer.
 
-    ``weights_out_dtype`` is the dtype the downstream scoring kernel takes:
+    `weights_out_dtype` is the dtype the downstream scoring kernel takes:
     fp32 for the dense MQA-logits kernels, bf16 for DeepGEMM's sparse
     MQA-logits kernels (CUDA MXFP4 path only).
 
@@ -735,7 +735,7 @@ def fused_indexer_q_rope_quant(
             index_weights_out,
         )
     elif current_platform.is_cpu():
-        from vllm._custom_ops import fused_indexer_q_rope_quant_cpu
+        from vllm._cpu_ops import fused_indexer_q_rope_quant_cpu
 
         fused_indexer_q_rope_quant_cpu(
             positions.contiguous(),

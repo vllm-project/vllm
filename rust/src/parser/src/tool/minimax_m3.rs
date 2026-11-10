@@ -11,7 +11,7 @@ use winnow::token::{literal, rest, take_until};
 
 use super::parameters::{ParamElement, ParamInput, ToolSchemas};
 use super::utils::{MarkerScanState, parse_buffered_event, safe_text_len, take_until_marker};
-use super::{Result, ToolCallDelta, ToolParser, ToolParserOutput};
+use super::{JsonStyle, Result, ToolCallDelta, ToolParser, ToolParserError, ToolParserOutput};
 use crate::tool::Tool;
 use crate::utils::recursion::ParserRecursionGuard;
 
@@ -121,7 +121,9 @@ impl MinimaxM3ToolParser {
             }
             MinimaxM3Event::Invoke { name, params } => {
                 let arguments = self.tool_parameters.convert_params_with_schema(&name, params);
-                let arguments = serde_json::to_string(&arguments)
+                // The template renders elements, not JSON, so the no-JSON default applies.
+                let arguments = JsonStyle::Spaced
+                    .to_string(&arguments)
                     .map_err(|error| parsing_failed!("failed to serialize arguments: {}", error))?;
 
                 output.push_call(ToolCallDelta {
@@ -167,7 +169,9 @@ impl ToolParser for MinimaxM3ToolParser {
             }
             MinimaxM3Mode::ToolBlock { .. } => {
                 if !self.buffer.trim_start().is_empty() {
-                    return Err(parsing_failed!("incomplete MiniMax M3 tool call"));
+                    return Err(ToolParserError::IncompleteToolCall {
+                        parser: "MiniMax M3",
+                    });
                 }
             }
             MinimaxM3Mode::Done => {}
