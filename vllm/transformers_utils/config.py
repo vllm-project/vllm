@@ -1005,6 +1005,39 @@ def get_config(
         quantization_config = get_hf_file_to_dict(
             "hf_quant_config.json", model, revision
         )
+    elif (
+        isinstance(quantization_config, dict)
+        and str(
+            quantization_config.get(
+                "quant_algo",
+                (quantization_config.get("quantization") or {}).get("quant_algo", ""),
+            )
+        ).upper()
+        == "MIXED_PRECISION"
+        and file_or_path_exists(model, "hf_quant_config.json", revision)
+    ):
+        # Some MIXED_PRECISION checkpoints (e.g. Nemotron-H with MTP) omit
+        # auxiliary layer entries from config.json's quantized_layers that are
+        # present in hf_quant_config.json. Backfill any missing layer entries.
+        hf_quant_config = get_hf_file_to_dict("hf_quant_config.json", model, revision)
+        hf_layers = (
+            hf_quant_config.get("quantization", {}).get("quantized_layers")
+            if isinstance(hf_quant_config.get("quantization"), dict)
+            else hf_quant_config.get("quantized_layers")
+        )
+        if isinstance(hf_layers, dict):
+            target = (
+                quantization_config["quantization"]
+                if isinstance(quantization_config.get("quantization"), dict)
+                else quantization_config
+            )
+            if isinstance(target.get("quantized_layers"), dict):
+                target["quantized_layers"] = {
+                    **hf_layers,
+                    **target["quantized_layers"],
+                }
+            elif "quantized_layers" not in target:
+                target["quantized_layers"] = dict(hf_layers)
 
     if quantization_config is not None:
         config.quantization_config = quantization_config
