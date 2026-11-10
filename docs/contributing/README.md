@@ -309,6 +309,36 @@ Each custom kernel needs a schema and one or more implementations to be register
 - If a new custom type is needed, see the following document:
   [Custom Class Support in PT2](https://docs.google.com/document/d/18fBMPuOJ0fY5ZQ6YyrHUppw9FA332CpNtgB6SOIgyuA).
 
+#### AMD GPU Architecture Identification
+
+Use [`csrc/core/amd_arch.h`](../../csrc/core/amd_arch.h) to parse AMD GPU names
+in host C++ code. It returns a specific target and an architecture family,
+without querying a device or requiring HIP:
+
+```cpp
+#include "core/amd_arch.h"
+
+using namespace vllm::amd;
+constexpr auto arch = parse_gcn_arch("gfx942:sramecc+:xnack-");
+static_assert(arch.target == GPUTarget::GFX942);
+static_assert(arch.architecture == GPUArchitecture::CDNA3);
+```
+
+Names are case-sensitive. The parser ignores `:` feature suffixes and accepts
+`gfx1250-strict` as an alias for `gfx1250`. Unlisted names return `UNKNOWN` for
+both fields. RDNA3.5 (`RDNA35`) is distinct from RDNA3 (`RDNA3`).
+
+Callers decide which targets or families their kernels support; classification
+alone does not imply kernel support. The header records the mappings, pinned
+upstream references, and local differences.
+
+Run the [CPU-only tests](../../tests/cpp/core/test_amd_arch.py) from the repository
+root with a C++17 compiler available:
+
+```bash
+.venv/bin/python -m pytest -q --confcutdir=tests/cpp tests/cpp
+```
+
 ### Notes for Large Changes
 
 Please keep the changes as concise as possible. For major architectural changes

@@ -1,0 +1,15 @@
+group: C++
+depends_on:
+  - image-build-cpu
+steps:
+- label: ":computer: (CPU) C++ Core"
+  key: cpu-cpp-core
+  timeout_in_minutes: 5
+  device: cpu-small
+  source_file_dependencies:
+    - csrc/core/amd_arch.h
+    - tests/cpp/
+    - CMakeLists.txt
+    - docker/Dockerfile.cpu
+  commands:
+    - pytest -v -s --confcutdir=cpp cpp
