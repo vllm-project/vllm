@@ -2,34 +2,34 @@
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 """The sparse-attention indexers in a specialized decode step.
 
-``decode_rows`` runs a dense indexer (``SparseAttnIndexer``) on a copy of the
-varlen decode branch of ``sparse_attn_indexer``, with two additions:
+`decode_rows` runs a dense indexer (`SparseAttnIndexer`) on a copy of the
+varlen decode branch of `sparse_attn_indexer`, with two additions:
 
 - Row sharding. The indexer is replicated across the TP ranks. In a uniform
-  decode step of at least ``ROW_SHARD_MIN_ROWS`` rows, each rank scores,
+  decode step of at least `ROW_SHARD_MIN_ROWS` rows, each rank scores,
   selects candidates for and top-k's only its contiguous slice of the rows
   (an even number of them, so the last ranks' slices may be short or empty);
-  TP all-gathers of the int32 rows (see ``_all_gather_rows``; the executor's
-  ``LamportAllGather``) rebuild ``topk_indices_buffer`` and, in the candidate
+  TP all-gathers of the int32 rows (see `_all_gather_rows`; the executor's
+  `LamportAllGather`) rebuild `topk_indices_buffer` and, in the candidate
   source, the candidate blocks.
   A slice may split a request: varlen rows are independent.
-- Selection from the BF16 logits. For up to 64 rows per rank, ``decode_topk``
-  (``decode_topk_cute``) selects the token top-k, and in the candidate source
+- Selection from the BF16 logits. For up to 64 rows per rank, `decode_topk`
+  (`decode_topk_cute`) selects the token top-k, and in the candidate source
   the candidate blocks, from SM100's BF16 logits without upcasting them. The
   candidate source's logits are twice as wide (compress ratio 1), so at a 1M
   context they need 16 CTAs a row and take that path only up to two waves of
   such clusters (14 rows on a GB300); otherwise the candidate source selects
-  with ``cooperative_topk`` (see ``candidate_topk``) on the upcast logits.
+  with `cooperative_topk` (see `candidate_topk`) on the upcast logits.
 
 Steps it does not take run the stock indexer.
 
-``decode_rows`` runs in two parts. ``plan_decode_rows`` takes the gates,
+`decode_rows` runs in two parts. `plan_decode_rows` takes the gates,
 resets the top-k rows and builds the slice's DeepGEMM schedule: none of it
 reads the layer's index query or keys, so the attention step issues it while
-the current stream would otherwise wait for them. ``finish_decode_rows``
+the current stream would otherwise wait for them. `finish_decode_rows`
 scores, selects and gathers once they are ready.
 
-``CandidateOverlap`` moves the candidate consumers' candidate expansion and
+`CandidateOverlap` moves the candidate consumers' candidate expansion and
 sparse MQA-logits schedule onto a side stream.
 
 The row-sharded path issues TP collectives, so its gates read only host state
@@ -93,11 +93,11 @@ ROW_SHARD_MIN_ROWS = 12
 
 def row_shard_rows(num_rows: int, num_requests: int, world_size: int) -> int | None:
     """Rows each rank's slice spans in a pure-decode step, or None when the
-    step stays replicated. Rank ``r`` scores rows ``[r n, (r + 1) n)``
+    step stays replicated. Rank `r` scores rows `[r n, (r + 1) n)`
     clipped to the step's rows.
 
     Slices start on an even row: DeepGEMM's paged MQA logits needs its int32
-    ``indices`` 8-byte aligned. Varlen rows are independent, so a slice may
+    `indices` 8-byte aligned. Varlen rows are independent, so a slice may
     split a request. Steps whose rows are not a multiple of their requests
     (some capture and profiling runs) stay replicated.
     """
@@ -112,7 +112,7 @@ def row_shard_rows(num_rows: int, num_requests: int, world_size: int) -> int | N
 def row_shard_bounds(
     num_rows: int, num_requests: int, world_size: int, rank: int
 ) -> tuple[int, int] | None:
-    """Rows ``[start, end)`` that ``rank`` scores in a pure-decode step (an
+    """Rows `[start, end)` that `rank` scores in a pure-decode step (an
     empty range for a rank past the last row), or None when the step stays
     replicated."""
     rows = row_shard_rows(num_rows, num_requests, world_size)
@@ -129,8 +129,8 @@ def rope_quant_q(
     positions: torch.Tensor,
     rotary_emb: nn.Module,
 ) -> tuple[torch.Tensor, torch.Tensor | None, torch.Tensor]:
-    """The second half of ``indexer.forward_q``: RoPE and quantize the
-    projected queries ``q`` and scale the per-head ``indexer_weights``."""
+    """The second half of `indexer.forward_q`: RoPE and quantize the
+    projected queries `q` and scale the per-head `indexer_weights`."""
     q_quant, weights = fused_indexer_q_rope_quant(
         positions,
         q.view(-1, indexer.n_head, indexer.head_dim),
@@ -157,9 +157,9 @@ def _all_gather_rows(
     num_rows: int,
     all_gather: "LamportAllGather | None",
 ) -> None:
-    """Gather every rank's ``rows``-row slice of ``buffer`` into its first
-    ``num_rows`` rows; rows past ``num_rows`` (a short or empty last slice)
-    are dropped. The slices go through ``all_gather`` when it takes them,
+    """Gather every rank's `rows`-row slice of `buffer` into its first
+    `num_rows` rows; rows past `num_rows` (a short or empty last slice)
+    are dropped. The slices go through `all_gather` when it takes them,
     else NCCL."""
     group = get_tp_group()
     local = buffer[group.rank_in_group * rows : (group.rank_in_group + 1) * rows]
@@ -178,7 +178,7 @@ def _all_gather_rows(
 
 @dataclass
 class DecodeRowsPlan:
-    """The rows a rank scores in ``finish_decode_rows`` and their schedule."""
+    """The rows a rank scores in `finish_decode_rows` and their schedule."""
 
     decode: DeepSeekV32IndexerDecodeMetadata
     max_seq_len: int
@@ -199,15 +199,15 @@ def decode_rows(
     weights: torch.Tensor,
     all_gather: "LamportAllGather | None" = None,
 ) -> torch.Tensor:
-    """``op(hidden_states, q_quant, None, weights)`` for a pure-decode step,
+    """`op(hidden_states, q_quant, None, weights)` for a pure-decode step,
     row-sharded and with cooperative candidates where they apply; the row
-    slices are gathered with ``all_gather`` where it takes them."""
+    slices are gathered with `all_gather` where it takes them."""
     plan = plan_decode_rows(op, hidden_states.shape[0])
     return finish_decode_rows(op, hidden_states, q_quant, weights, plan, all_gather)
 
 
 def plan_decode_rows(op: SparseAttnIndexer, num_tokens: int) -> DecodeRowsPlan | None:
-    """The first part of ``decode_rows`` for a step of ``num_tokens`` tokens:
+    """The first part of `decode_rows` for a step of `num_tokens` tokens:
     reset the top-k rows and build the slice's schedule. None when the stock
     indexer runs instead (and nothing was issued)."""
     attn_metadata = get_forward_context().attn_metadata
@@ -290,9 +290,9 @@ def finish_decode_rows(
     plan: DecodeRowsPlan | None,
     all_gather: "LamportAllGather | None" = None,
 ) -> torch.Tensor:
-    """The rest of ``decode_rows`` once the index query and keys are ready:
+    """The rest of `decode_rows` once the index query and keys are ready:
     score and select the planned rows and gather the slices (with
-    ``all_gather`` where it takes them)."""
+    `all_gather` where it takes them)."""
     if plan is None:
         return op(hidden_states, q_quant, None, weights)
     q_values, q_scale = q_quant if isinstance(q_quant, tuple) else (q_quant, None)
@@ -319,7 +319,7 @@ def _decode_rows(
     plan: DecodeRowsPlan,
 ) -> None:
     """The varlen decode branch of `sparse_attn_indexer` on the planned rows
-    ``[start, end)``: paged MQA logits, candidate selection or mask, and
+    `[start, end)`: paged MQA logits, candidate selection or mask, and
     top-k into the same rows of the shared buffers."""
     decode, start, end = plan.decode, plan.start, plan.end
     assert decode.indices is not None
@@ -388,7 +388,7 @@ def _decode_rows(
 def _selects_from_bf16(
     op: SparseAttnIndexer, logits: torch.Tensor, fast_candidates: bool
 ) -> bool:
-    """Whether ``decode_topk`` selects the token top-k, and the candidate
+    """Whether `decode_topk` selects the token top-k, and the candidate
     blocks if the layer writes them, from these logits."""
     rows = logits.shape[0]
     if not (
@@ -413,10 +413,10 @@ def decode_schedule(
     sparse_block_kv: int,
     scratch: bool = False,
 ) -> torch.Tensor:
-    """Expand the decode rows' candidates into ``rows.sparse_indices`` /
-    ``rows.end`` and return their DeepGEMM schedule; the same kernels and
+    """Expand the decode rows' candidates into `rows.sparse_indices` /
+    `rows.end` and return their DeepGEMM schedule; the same kernels and
     inputs as the inline step of `sparse_mqa_logits_paged_decode`. With
-    ``scratch``, expand zero candidates into private outputs instead."""
+    `scratch`, expand zero candidates into private outputs instead."""
     assert rows.block_table is not None and rows.row_indices is not None
     candidates = op.candidate_blocks[: rows.row_ke.shape[0]]
     sparse_indices, end = rows.sparse_indices, rows.end
@@ -448,19 +448,19 @@ class CandidateOverlap:
     The first candidate consumer of a decode step expands the candidate blocks
     into DeepGEMM sparse block ids and builds the paged sparse MQA-logits
     schedule, which later consumers reuse. Neither reads Q, the KV cache or the
-    hidden states, so the candidate source forks them onto ``stream`` once it
-    has written the candidates (``fork``) and every consumer waits for them
-    (``join``) before scoring. The kernels and inputs are those of the inline
+    hidden states, so the candidate source forks them onto `stream` once it
+    has written the candidates (`fork`) and every consumer waits for them
+    (`join`) before scoring. The kernels and inputs are those of the inline
     path, so the outputs match.
 
     The side stream issues no collectives. The fork waits on the main stream,
-    so a step's writes to the builder's ``sparse_indices`` / ``end`` cannot
+    so a step's writes to the builder's `sparse_indices` / `end` cannot
     overtake the previous step's reads, and the schedule allocated on
-    ``stream`` is recorded as used by the main stream.
+    `stream` is recorded as used by the main stream.
 
     DeepGEMM's schedule kernel keeps a per-stream workspace that it creates on
-    first use and refuses to create during a capture, so ``warm`` runs the
-    schedule on ``stream`` once from an eager decode step, on zero candidates
+    first use and refuses to create during a capture, so `warm` runs the
+    schedule on `stream` once from an eager decode step, on zero candidates
     and private outputs; the executor forks only after that.
     """
 

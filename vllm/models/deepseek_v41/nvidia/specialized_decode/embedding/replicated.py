@@ -3,17 +3,17 @@
 """A decode step's token embedding from a full copy of the table on every rank.
 
 Under tensor parallelism vLLM shards the token embedding table by vocabulary
-(``VocabParallelEmbedding``): each rank looks up the tokens its shard holds,
+(`VocabParallelEmbedding`): each rank looks up the tokens its shard holds,
 writes zeros for the others, and an all-reduce sums the ranks' rows. The
-DeepSeek-V4.1 backbone then copies the embedding into its ``hc_mult``
+DeepSeek-V4.1 backbone then copies the embedding into its `hc_mult`
 hyper-connection streams ([n, H] -> [n, hc, H]) at the first layer. At a
 few rows both are fixed costs on the critical path of every step.
 
-``ReplicatedEmbedding`` keeps a full copy of the table on every rank: the
+`ReplicatedEmbedding` keeps a full copy of the table on every rank: the
 ranks broadcast their shards into it once, when the decode executor is built
 (1.32 GB a GPU for DeepSeek-V4.1-Flash), which is before the KV cache is
 sized, so the memory profile counts it. A captured decode step then looks its
-tokens up in one launch of ``StreamEmbedding`` that writes the embedding (for
+tokens up in one launch of `StreamEmbedding` that writes the embedding (for
 the target's first layer, whose pre-mix reads it) and its streams, and needs
 no collective. A token outside the vocabulary gets zeros, as the sharded
 lookup's sum gives it, so the result equals the all-reduced embedding (up to
@@ -47,9 +47,9 @@ MAX_CTAS = 1024
 
 
 class StreamEmbedding:
-    """Rows of a ``[vocab, H]`` BF16 table into an ``[n, H]`` embedding and
-    its ``[n, hc_mult, H]`` streams, by 16-byte vectors; a token outside
-    ``[0, vocab)`` gets zeros."""
+    """Rows of a `[vocab, H]` BF16 table into an `[n, H]` embedding and
+    its `[n, hc_mult, H]` streams, by 16-byte vectors; a token outside
+    `[0, vocab)` gets zeros."""
 
     def __init__(self, hidden: int, hc_mult: int) -> None:
         assert hidden * 2 % VECTOR_BYTES == 0
@@ -68,8 +68,8 @@ class StreamEmbedding:
         num_ctas: Int32,
         stream: cuda.CUstream,
     ):
-        """Every tensor as int32 words; a row's vector ``v`` is the column
-        ``v`` of four words."""
+        """Every tensor as int32 words; a row's vector `v` is the column
+        `v` of four words."""
         row_vectors = self.row_vectors
         self.kernel(
             cute.make_tensor(ids_ptr, cute.make_layout((rows,))),
@@ -125,7 +125,7 @@ def _pointer(address: int, align: int = VECTOR_BYTES):
 
 @cache
 def _kernel(device_index: int, hidden: int, hc_mult: int):
-    """``StreamEmbedding`` compiled for a device."""
+    """`StreamEmbedding` compiled for a device."""
     with torch.accelerator.device_index(device_index):
         return cute.compile(
             StreamEmbedding(hidden, hc_mult),
@@ -146,8 +146,8 @@ def embed_streams(
     embedding: torch.Tensor,
     streams: torch.Tensor,
 ) -> None:
-    """Write ``table``'s rows of ``ids`` (int32 ``[n]``) into ``embedding``
-    (``[n, H]``) and ``streams`` (``[n, hc, H]``), on the current stream;
+    """Write `table`'s rows of `ids` (int32 `[n]`) into `embedding`
+    (`[n, H]`) and `streams` (`[n, hc, H]`), on the current stream;
     zeros for an id outside the table."""
     rows, hc_mult, hidden = streams.shape
     assert ids.dtype == torch.int32 and ids.shape == (rows,) and ids.is_contiguous()
@@ -178,7 +178,7 @@ class ReplicatedEmbedding:
 
     @classmethod
     def create(cls, embed: nn.Module, hc_mult: int) -> "ReplicatedEmbedding | None":
-        """The copy of ``embed``'s table, or None when ``embed`` is not the
+        """The copy of `embed`'s table, or None when `embed` is not the
         plain sharded BF16 lookup this replaces. The decision reads only the
         configuration, which every TP rank shares; building the copy is
         collective."""
@@ -229,7 +229,7 @@ class ReplicatedEmbedding:
         torch.accelerator.synchronize(weight.device)
 
     def accepts(self, ids: torch.Tensor) -> bool:
-        """Whether ``__call__`` takes ``ids``: a non-empty int32 vector."""
+        """Whether `__call__` takes `ids`: a non-empty int32 vector."""
         return (
             ids.dtype == torch.int32
             and ids.dim() == 1
@@ -238,8 +238,8 @@ class ReplicatedEmbedding:
         )
 
     def __call__(self, ids: torch.Tensor) -> tuple[torch.Tensor, torch.Tensor]:
-        """The embedding ``[n, H]`` and its streams ``[n, hc, H]`` of the
-        tokens ``ids``."""
+        """The embedding `[n, H]` and its streams `[n, hc, H]` of the
+        tokens `ids`."""
         rows, hidden = ids.shape[0], self.table.shape[1]
         streams = self.table.new_empty(rows, self.hc_mult, hidden)
         embedding = self.table.new_empty(rows, hidden)

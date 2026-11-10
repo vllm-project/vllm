@@ -413,9 +413,6 @@ def test_register_kv_caches(backend):
     run of the shared allocation starting at offset 0, so layer i of every group
     aliases the same bytes.
 
-    Uses the real GPUModelRunner.initialize_kv_cache_tensors to produce
-    the raw per-layer kv_caches registered by the connector.
-
     Verifies that the canonicalized CanonicalKVCaches has the correct
     block tensors, tensor_idx references, and page sizes across all groups.
     """
