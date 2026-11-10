@@ -15,6 +15,7 @@ from vllm.model_executor.layers.fusion.mm_input_norm import (
     build_mm_input_norm,
 )
 from vllm.model_executor.model_loader import get_model_cls
+from vllm.model_executor.models.gemma3n_mm import Gemma3nForConditionalGeneration
 from vllm.model_executor.models.gemma4_mm import (
     Gemma4ForConditionalGeneration,
     Gemma4ImagePixelInputs,
@@ -543,3 +544,24 @@ def test_encoder_cudagraph_config_respects_max_soft_tokens(mm_processor_kwargs):
 
     config = model.get_encoder_cudagraph_config()
     assert config.capture_axes == ((70, 140, 280, 560),)
+
+
+@pytest.mark.parametrize(
+    "model_cls", [Gemma4ForConditionalGeneration, Gemma3nForConditionalGeneration]
+)
+def test_ple_cache_follows_inputs_device(model_cls):
+    """A model built on meta (or moved after init) must not read a stale cache."""
+    model = object.__new__(model_cls)  # type: ignore[type-abstract]
+    torch.nn.Module.__init__(model)
+    model.per_layer_embeddings = torch.zeros(8, 2, 4, device="meta")
+    model._full_attn_layer_idxs = ()
+    seen = {}
+
+    def backbone(*args, per_layer_inputs, **kwargs):
+        seen["ple"] = per_layer_inputs
+
+    model.language_model = SimpleNamespace(model=backbone)
+    model(None, None, inputs_embeds=torch.zeros(3, 1))
+
+    assert seen["ple"].device.type == "cpu"
+    assert seen["ple"].shape == (3, 2, 4)
