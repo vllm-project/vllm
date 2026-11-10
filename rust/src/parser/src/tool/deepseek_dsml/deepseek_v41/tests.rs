@@ -12,6 +12,7 @@ use xgrammar_structural_tag::{
 
 use super::super::test_utils::{collect_stream, tokenizer};
 use super::DeepSeekV41ToolParser;
+use crate::tool::test_utils::split_by_chars;
 use crate::tool::{Tool, ToolParser};
 
 fn tools() -> Vec<Tool> {
@@ -35,7 +36,11 @@ fn tools() -> Vec<Tool> {
 }
 
 #[test]
-fn spaced_dsml_streaming_preserves_shared_schema_coercion() {
+fn spaced_dsml_streaming_passes_json_values_through() {
+    // `string="true"` values are raw text and every other value is JSON text
+    // as the encoder wrote it, regardless of the schema (`label` is a string
+    // parameter), or a string when it is not valid JSON. A repeated parameter
+    // keeps its first value.
     let wire = concat!(
         "summary\n\n<｜DSML｜ calls>\n",
         "<｜DSML｜ invoke name=\"lookup\">\n",
@@ -47,28 +52,36 @@ fn spaced_dsml_streaming_preserves_shared_schema_coercion() {
         "<｜DSML｜ parameter name=\"label\" string=\"false\">42</｜DSML｜ parameter>\n",
         "<｜DSML｜ parameter name=\"unknown\" string=\"false\">42</｜DSML｜ parameter>\n",
         "<｜DSML｜ parameter name=\"nullish\" string=\"false\">null</｜DSML｜ parameter>\n",
+        "<｜DSML｜ parameter name=\"city\" string=\"false\">Hangzhou</｜DSML｜ parameter>\n",
+        "<｜DSML｜ parameter name=\"query\" string=\"true\">again</｜DSML｜ parameter>\n",
         "</｜DSML｜ invoke>\n",
         "<｜DSML｜ invoke name=\"lookup\">\n",
         "<｜DSML｜ parameter name=\"query\" string=\"true\">second</｜DSML｜ parameter>\n",
         "</｜DSML｜ invoke>\n</｜DSML｜ calls>",
     );
     let expected = [
-        json!({"query":"  value\n","limit":2,"enabled":true,"data":{"x":1},"items":[1,2],"label":"42","unknown":"42","nullish":null}),
+        json!({"query":"  value\n","limit":2,"enabled":true,"data":{"x":1},"items":[1,2],"label":42,"unknown":42,"nullish":null,"city":"Hangzhou"}),
         json!({"query":"second"}),
     ];
-    for split in wire.char_indices().map(|(i, _)| i).chain(std::iter::once(wire.len())) {
+    let two_chunks = wire
+        .char_indices()
+        .map(|(i, _)| i)
+        .chain(std::iter::once(wire.len()))
+        .map(|split| vec![&wire[..split], &wire[split..]]);
+    for chunks in two_chunks.chain([split_by_chars(wire, 1)]) {
         let mut parser = DeepSeekV41ToolParser::create(&tools(), Arc::new(tokenizer())).unwrap();
-        let output = collect_stream(parser.as_mut(), &[&wire[..split], &wire[split..]]);
+        let output = collect_stream(parser.as_mut(), &chunks);
+        let chunks = chunks.len();
         // Protocol framing follows the current shared DSML behavior.
-        assert_eq!(output.normal_text(), "summary", "split {split}");
-        assert_eq!(output.calls().len(), 2, "split {split}");
+        assert_eq!(output.normal_text(), "summary", "{chunks} chunks");
+        assert_eq!(output.calls().len(), 2, "{chunks} chunks");
         for (index, call) in output.calls().iter().enumerate() {
-            assert_eq!(call.tool_index, index, "split {split}");
-            assert_eq!(call.name.as_deref(), Some("lookup"), "split {split}");
+            assert_eq!(call.tool_index, index, "{chunks} chunks");
+            assert_eq!(call.name.as_deref(), Some("lookup"), "{chunks} chunks");
             assert_eq!(
                 serde_json::from_str::<serde_json::Value>(&call.arguments).unwrap(),
                 expected[index],
-                "split {split}"
+                "{chunks} chunks"
             );
         }
     }

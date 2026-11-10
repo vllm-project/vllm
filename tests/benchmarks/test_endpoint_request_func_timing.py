@@ -115,9 +115,9 @@ def _build_stream(
     usage_delay: float = 0.0,
     metrics: dict[str, Any] | None = None,
 ) -> list[tuple[float, bytes]]:
-    """Build ``(delay_before_chunk, payload)`` pairs for one streamed response.
+    """Build `(delay_before_chunk, payload)` pairs for one streamed response.
 
-    ``vllm bench serve`` always requests ``stream_options.include_usage``, so a
+    `vllm bench serve` always requests `stream_options.include_usage`, so a
     choice-less usage chunk always trails the final token.
     """
     chunks = [
@@ -181,9 +181,9 @@ _STREAM_ERROR_MESSAGE = "internal server error during generation"
 def _error_chunk(message: str = _STREAM_ERROR_MESSAGE) -> bytes:
     """The error envelope the server sends inside an HTTP 200 stream.
 
-    The stream generators dump an ``ErrorResponse`` through
-    ``create_streaming_error_response``, so the event carries an ``error``
-    object and no ``choices``. A dead engine, a failed tool parser and a
+    The stream generators dump an `ErrorResponse` through
+    `create_streaming_error_response`, so the event carries an `error`
+    object and no `choices`. A dead engine, a failed tool parser and a
     generation error all arrive this way, so the message itself is arbitrary.
     """
     return _sse(
@@ -519,7 +519,7 @@ def test_error_event_stream_is_not_reported_as_success(
 
     Generation that fails after the response has started cannot change the
     HTTP 200 already sent, so the server reports the failure as an error event
-    before ``[DONE]``. Counting that request as complete hides the failure and
+    before `[DONE]`. Counting that request as complete hides the failure and
     feeds its truncated token count and short latency into the aggregates.
     """
     n_tokens = 2
@@ -846,3 +846,74 @@ def test_chat_empty_string_token_is_counted(
     assert residual == pytest.approx(0.0, abs=tick / 1000), (
         f"{client}: (latency - ttft) - sum(itl) = {residual!r}"
     )
+
+
+def _reasoning_chunk(field: str, text: str) -> bytes:
+    choice = {"index": 0, "delta": {field: text}}
+    return _sse(
+        {"id": "cmpl-test", "object": "chat.completion.chunk", "choices": [choice]}
+    )
+
+
+@pytest.mark.parametrize("client", ["packaged", "legacy"])
+@pytest.mark.parametrize("reasoning_field", ["reasoning", "reasoning_content"])
+def test_chat_reasoning_chunk_is_streamed_output(
+    monkeypatch: pytest.MonkeyPatch, client: str, reasoning_field: str
+) -> None:
+    """Reasoning deltas count toward TTFT under either field name.
+
+    vLLM streams `reasoning`; SGLang streams `reasoning_content` and omits
+    `content` from reasoning deltas.
+    """
+    tick = 1.0
+    clock = _ScriptedClock(tick=tick)
+    n_tokens = 4
+
+    chunks = [
+        (0.0, _role_chunk()),
+        (0.0, _reasoning_chunk(reasoning_field, "think")),
+        (0.0, _reasoning_chunk(reasoning_field, "ing")),
+        (0.0, _token_chunk(0, chat=True)),
+        (0.0, _token_chunk(1, chat=True)),
+        (0.0, _usage_chunk(n_tokens)),
+        (0.0, b"data: [DONE]\n\n"),
+    ]
+    output = _run_chat(monkeypatch, client, chunks, n_tokens, clock=clock)
+
+    assert output.success, output.error
+    assert len(output.itl) == n_tokens - 1
+
+    # Clock read 0 is start_time (1000.0).
+    # Clock read 1 is role chunk (1001.0); skipped because delta carries role.
+    # Clock read 2 is the first reasoning chunk (1002.0); sets TTFT = 2 * tick.
+    expected_ttft = 2.0 * tick
+    assert output.ttft == pytest.approx(expected_ttft, abs=tick / 1000), (
+        f"{client}/{reasoning_field}: TTFT {output.ttft} should be measured to the "
+        f"first reasoning chunk ({expected_ttft}), not the first content chunk "
+        f"({4.0 * tick})"
+    )
+
+    residual = (output.latency - output.ttft) - sum(output.itl)
+    assert residual == pytest.approx(0.0, abs=tick / 1000), (
+        f"{client}/{reasoning_field}: (latency - ttft) - sum(itl) = {residual!r}"
+    )
+
+
+@pytest.mark.parametrize("client", ["packaged", "legacy"])
+@pytest.mark.parametrize("reasoning_field", ["reasoning", "reasoning_content"])
+def test_chat_reasoning_only_stream_succeeds(
+    monkeypatch: pytest.MonkeyPatch, client: str, reasoning_field: str
+) -> None:
+    """A request that stops while still reasoning, e.g. at max_tokens, succeeds."""
+    n_tokens = 2
+    chunks = [
+        (0.0, _role_chunk()),
+        (0.0, _reasoning_chunk(reasoning_field, "think")),
+        (0.0, _reasoning_chunk(reasoning_field, "ing")),
+        (0.0, _usage_chunk(n_tokens)),
+        (0.0, b"data: [DONE]\n\n"),
+    ]
+    output = _run_chat(monkeypatch, client, chunks, n_tokens)
+
+    assert output.success, f"{client}/{reasoning_field}: {output.error}"
+    assert len(output.itl) == n_tokens - 1

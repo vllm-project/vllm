@@ -12,7 +12,7 @@ from vllm.distributed import get_pcp_group
 from vllm.forward_context import get_forward_context
 from vllm.model_executor.layers.attention_layer_base import AttentionLayerBase
 from vllm.model_executor.layers.layernorm import RMSNorm
-from vllm.model_executor.layers.linear import MergedColumnParallelLinear
+from vllm.models.deepseek_v4.compressor import DeepseekV4CompressorKVScoreLinear
 from vllm.models.deepseek_v41.common.ops.fused_compress_quant_cache import (
     fused_save_compress_norm,
     rope_quant_insert,
@@ -271,18 +271,10 @@ class CompressorStateCache(torch.nn.Module, AttentionLayerBase):
         return CompressorBackend
 
 
-class DeepseekV4CompressorKVScoreLinear(MergedColumnParallelLinear):
-    """Fused ``wkv``/``wgate`` projection with the FP32 output the compressor
-    state accumulates in."""
-
-    def forward(self, input_: torch.Tensor) -> torch.Tensor:
-        return torch.mm(input_, self.weight.T, out_dtype=torch.float32)
-
-
 class DeepseekCompressor(nn.Module):
     """DeepSeek V4.1 KV/score compressor.
 
-    Pools ``compress_ratio`` consecutive tokens into one KV latent with a
+    Pools `compress_ratio` consecutive tokens into one KV latent with a
     learned softmax gate (ratio 1 has no gate and no pooling). Owns the
     linear, norm and state cache. State saving, compression and RMSNorm share
     one Triton kernel. The emitted latent feeds independent main-cache and
