@@ -26,6 +26,48 @@ vllm serve <model> --enable-scale-out
 - [Responses Render API](renderer.md) (`/v1/responses/render`)
     - Render a self-contained Responses request
 
+## System-message tools in the Rust frontend
+
+The Rust Chat Completions and Chat Completions render endpoints accept
+message-local function declarations in `system.tools`. The renderer receives
+the system role and declarations at their original conversation position. Tool
+choice and output parsing use the combined request-level and message-local
+tools; duplicate names are rejected across both sets.
+
+For example, a Kimi K3 request can declare a tool without a request-level
+`tools` array:
+
+```json
+{
+  "model": "my-served-model",
+  "messages": [
+    {
+      "role": "system",
+      "tools": [{"type": "function", "function": {
+        "name": "get_weather",
+        "parameters": {"type": "object", "properties": {}}
+      }}]
+    },
+    {"role": "user", "content": "What is the weather?"}
+  ],
+  "tool_choice": "required"
+}
+```
+
+Each declaration requires an explicit `type: "function"`, a `function` object,
+and a name. A system message may omit `content` only when it declares a nonempty
+tool list. Empty or null `tools` does not make missing content valid. User and
+assistant messages cannot declare tools; empty or null `tools` remains a no-op.
+
+The native Kimi K3 renderer requires empty content for system tool declarations
+and names matching `[A-Za-z_][A-Za-z0-9_]*`, at most 256 ASCII bytes. Kimi K3.1
+also permits instruction text with a declaration, rendering the declaration
+before the text. Existing developer-message behavior is unchanged. Hugging Face
+templates receive the original system role and its `tools` field; the template
+must support that representation. Other native renderers reject nonempty system
+tool declarations instead of discarding them. This is a Rust frontend extension;
+it does not imply Python frontend parity.
+
 ## Get Responses prompt token IDs
 
 Use `/v1/responses/render` to get prompt token IDs before choosing a model

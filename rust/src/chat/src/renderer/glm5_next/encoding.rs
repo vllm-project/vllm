@@ -446,7 +446,7 @@ fn content(value: &ChatContent, message_index: usize) -> Value {
 /// indices of the message they came from.
 pub(super) fn messages(messages: &[ChatMessage]) -> Vec<Value> {
     let mut values: Vec<Value> = messages.iter().enumerate().map(|(index, message)| match message {
-        ChatMessage::System { content: value } | ChatMessage::Developer { content: value, .. } => json!({"role": "system", "content": content(value, index)}),
+        ChatMessage::System { content: value, .. } | ChatMessage::Developer { content: value, .. } => json!({"role": "system", "content": content(value, index)}),
         ChatMessage::User { content: value } => json!({"role": "user", "content": content(value, index)}),
         ChatMessage::Custom { role, content: value } => json!({"role": role, "content": content(value, index)}),
         ChatMessage::ToolResponse { content: value, tool_call_id } => {
@@ -490,7 +490,7 @@ pub(super) fn messages(messages: &[ChatMessage]) -> Vec<Value> {
             .filter(|(message, _)| {
                 !matches!(
                     message,
-                    ChatMessage::System { content } | ChatMessage::Developer { content, .. }
+                    ChatMessage::System { content, .. } | ChatMessage::Developer { content, .. }
                         if content.is_empty()
                 )
             })

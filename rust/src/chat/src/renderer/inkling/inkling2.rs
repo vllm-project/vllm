@@ -50,7 +50,9 @@ impl InklingChatRenderer {
                 tool_choice_instruction(request.tool_choice(), request.parallel_tool_calls())
         {
             match messages.first() {
-                Some(ChatMessage::System { content } | ChatMessage::Developer { content, .. }) => {
+                Some(
+                    ChatMessage::System { content, .. } | ChatMessage::Developer { content, .. },
+                ) => {
                     first_system_content = Some(with_appended_text(content, &instruction));
                 }
                 _ => {
@@ -70,7 +72,7 @@ impl InklingChatRenderer {
             }
 
             match message {
-                ChatMessage::System { content } | ChatMessage::Developer { content, .. } => {
+                ChatMessage::System { content, .. } | ChatMessage::Developer { content, .. } => {
                     let content = match &first_system_content {
                         Some(first) if index == 0 => first,
                         _ => content,

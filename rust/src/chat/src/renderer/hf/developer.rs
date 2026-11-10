@@ -109,6 +109,8 @@ impl DeveloperRole {
                     message,
                     ChatMessage::System { .. } | ChatMessage::Developer { .. }
                 )
+                    // Keep a system declaration at its original position.
+                    && !matches!(message, ChatMessage::System { tools: Some(tools), .. } if !tools.is_empty())
             })
             .count();
         let (leading, rest) = messages.split_at(leading_run);
@@ -116,13 +118,13 @@ impl DeveloperRole {
         if leading.iter().any(is_developer) {
             let mut content = ChatContent::Text(String::new());
             for message in leading {
-                if let ChatMessage::System { content: next }
+                if let ChatMessage::System { content: next, .. }
                 | ChatMessage::Developer { content: next, .. } = message
                 {
                     content.append(next.clone());
                 }
             }
-            lowered.push(ChatMessage::System { content });
+            lowered.push(ChatMessage::system(content));
         } else {
             lowered.extend_from_slice(leading);
         }
@@ -136,9 +138,7 @@ impl DeveloperRole {
                         Some(pending) => pending.append(content.clone()),
                         None => pending = Some(content.clone()),
                     },
-                    _ => lowered.push(ChatMessage::System {
-                        content: content.clone(),
-                    }),
+                    _ => lowered.push(ChatMessage::system(content.clone())),
                 },
                 ChatMessage::User { content } if pending.is_some() => {
                     let mut merged = pending.take().expect("checked above");

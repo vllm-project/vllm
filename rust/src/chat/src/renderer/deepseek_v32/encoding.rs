@@ -122,7 +122,7 @@ fn render_message(
     let add_generation_prompt = message_index + 1 != messages.len() || add_generation_prompt;
 
     match message {
-        ChatMessage::System { content } => render_system_message(out, Some(content), &[]),
+        ChatMessage::System { content, .. } => render_system_message(out, Some(content), &[]),
         ChatMessage::Developer { content, tools } => render_developer_message(
             out,
             content,

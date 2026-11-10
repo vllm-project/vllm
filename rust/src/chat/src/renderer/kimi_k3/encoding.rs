@@ -171,9 +171,13 @@ pub(super) fn render_request_with_media_order(
 
         match message {
             // Python: role=system with a `tools` field renders a dynamic
-            // tool-declare (`## New Tools Available`). Map that to Developer
-            // messages that carry tools (OpenAI "developer" / system-tools).
-            ChatMessage::Developer {
+            // tool-declare (`## New Tools Available`). Keep declarations at
+            // their original position, including developer declarations.
+            ChatMessage::System {
+                content,
+                tools: Some(local_tools),
+            }
+            | ChatMessage::Developer {
                 content,
                 tools: Some(local_tools),
             } if !local_tools.is_empty() => {
@@ -182,7 +186,7 @@ pub(super) fn render_request_with_media_order(
                     write_role_message(&mut out, "system", None, message_index, content)?;
                 }
             }
-            ChatMessage::System { content } | ChatMessage::Developer { content, .. } => {
+            ChatMessage::System { content, .. } | ChatMessage::Developer { content, .. } => {
                 write_role_message(&mut out, "system", None, message_index, content)?;
             }
             ChatMessage::User { content } => {
