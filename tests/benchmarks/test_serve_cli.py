@@ -8,6 +8,7 @@ from pathlib import Path
 import pytest
 import requests
 import urllib3
+from prometheus_client.parser import text_string_to_metric_families
 
 from ..utils import RemoteOpenAIServer
 
@@ -138,7 +139,7 @@ def test_bench_serve_warmups_do_not_prime_prefix_cache(server):
         "--dataset-name",
         "random",
         "--random-input-len",
-        "64",
+        "256",
         "--random-output-len",
         "4",
         "--num-prompts",
@@ -153,13 +154,13 @@ def test_bench_serve_warmups_do_not_prime_prefix_cache(server):
     print(result.stderr)
 
     assert result.returncode == 0, f"Benchmark failed: {result.stderr}"
+    counters: dict[str, float] = {}
     metrics = requests.get(server.url_for("metrics")).text
-    hits = sum(
-        float(line.rsplit(" ", 1)[1])
-        for line in metrics.splitlines()
-        if line.startswith("vllm:prefix_cache_hits_total")
-    )
-    assert hits == 0
+    for family in text_string_to_metric_families(metrics):
+        for sample in family.samples:
+            counters[sample.name] = counters.get(sample.name, 0.0) + sample.value
+    assert counters["vllm:prefix_cache_queries_total"] > 0
+    assert counters["vllm:prefix_cache_hits_total"] == 0
 
 
 @pytest.mark.benchmark

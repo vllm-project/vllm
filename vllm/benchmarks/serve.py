@@ -933,8 +933,8 @@ async def benchmark(
         )
 
         async def warmup_limited_request_func(salted: bool) -> RequestFuncOutput:
-            # Warmups resend the first request. A unique cache_salt keeps them
-            # from filling the prefix cache for each other and for the run.
+            # A unique cache_salt per warmup prevents prefix cache hits among
+            # warmups and the run.
             warmup_input = test_input
             if salted:
                 warmup_input = replace(
@@ -954,8 +954,9 @@ async def benchmark(
         )
         if not any(output.success for output in warmup_outputs):
             print(
-                "WARNING: warmup requests with cache_salt failed "
-                f"({warmup_outputs[0].error.strip()[:200]}), retrying without it."
+                f"WARNING: all {num_warmups} warmup requests failed "
+                f"({warmup_outputs[0].error.strip()[-200:]}); "
+                "retrying without cache_salt."
             )
             if warmup_pbar is not None:
                 warmup_pbar.reset()
@@ -1800,7 +1801,9 @@ def add_cli_args(parser: FlexibleArgumentParser):
         "--num-warmups",
         type=int,
         default=0,
-        help="Number of warmup requests.",
+        help="Number of warmup requests. Each resends the first request with a "
+        "unique cache_salt, so warmups do not prime the prefix cache for the "
+        "run; if all fail, they are retried without it.",
     )
     parser.add_argument(
         "--profile",
