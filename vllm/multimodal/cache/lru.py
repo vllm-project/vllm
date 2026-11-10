@@ -106,6 +106,12 @@ class LruKeyReplicatedReceiverCache(BaseMultiModalReceiverCache):
             MultiModalKwargsItem,
         )
 
+    @property
+    def capacity_bytes(self) -> int:
+        # Item sizes are integers, so flooring the float capacity keeps the
+        # same eviction decisions.
+        return int(self._cache.maxsize)
+
     @override
     def get_and_update_item(
         self,

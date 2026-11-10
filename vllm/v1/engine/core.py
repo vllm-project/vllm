@@ -39,6 +39,7 @@ from vllm.logger import configure_logging, init_logger
 from vllm.logging_utils.dump_input import dump_engine_exception
 from vllm.lora.request import LoRARequest
 from vllm.multimodal.cache import (
+    LruKeyReplicatedReceiverCache,
     MultiModalCacheMissError,
     engine_receiver_cache_from_config,
 )
@@ -2171,6 +2172,11 @@ class EngineCoreProc(EngineCore):
             cache_config_info=self.vllm_config.cache_config.metrics_info(),
             config_hash=self._config_hash(),
             enable_expert_parallel=parallel_config.enable_expert_parallel,
+            mm_receiver_cache_bytes=(
+                self.mm_receiver_cache.capacity_bytes
+                if isinstance(self.mm_receiver_cache, LruKeyReplicatedReceiverCache)
+                else None
+            ),
         )
 
     def process_input_sockets(

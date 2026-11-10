@@ -130,9 +130,7 @@ pub struct EngineCoreOutput {
     /// keeps a metadata-only shadow of the engine cache drops these entries and
     /// resends the request with the item data attached.
     ///
-    /// TODO: always `None` here, since this client has no multi-modal processor
-    /// cache and always sends item data inline. Act on it once the Rust
-    /// frontend grows one.
+    /// The client drops these entries from its multimodal sender cache.
     #[serde(default)]
     pub mm_cache_miss_hashes: Option<Vec<String>>,
     #[serde(default)]

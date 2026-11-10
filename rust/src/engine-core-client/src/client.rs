@@ -29,6 +29,7 @@ use crate::runtime::{BackgroundShutdownRuntime, build_zmq_runtime};
 use crate::transport::{self, ConnectedEngine};
 
 pub(crate) mod imp;
+mod mm_sender_cache;
 mod output_channel;
 mod readiness;
 mod state;
@@ -990,6 +991,7 @@ impl EngineCoreClient {
 
     /// Reset the multi-modal cache.
     pub async fn reset_mm_cache(&self) -> Result<()> {
+        self.inner.clear_mm_sender_caches().await;
         self.call_utility::<(), _>("reset_mm_cache", ()).await?;
         Ok(())
     }

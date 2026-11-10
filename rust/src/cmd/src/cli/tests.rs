@@ -517,6 +517,27 @@ fn serve_args_forward_shutdown_timeout_to_managed_engine() {
 }
 
 #[test]
+fn serve_args_forward_mm_processor_cache_flags_to_managed_engine() {
+    let cli = Cli::try_parse_from([
+        "vllm-rs",
+        "serve",
+        "Qwen/Qwen3-0.6B",
+        "--mm-processor-cache-gb",
+        "8",
+        "--mm-processor-cache-type",
+        "lru",
+    ])
+    .unwrap();
+
+    let Command::Serve(args) = cli.command else {
+        panic!("expected serve args");
+    };
+    let python_args = args.to_managed_engine_config(5555, &topology(&args), None).python_args;
+    assert!(python_args.windows(2).any(|pair| pair == ["--mm-processor-cache-gb", "8"]));
+    assert!(python_args.windows(2).any(|pair| pair == ["--mm-processor-cache-type", "lru"]));
+}
+
+#[test]
 fn skip_tokenizer_init_reaches_backends_and_managed_engine() {
     let cli = Cli::try_parse_from([
         "vllm-rs",

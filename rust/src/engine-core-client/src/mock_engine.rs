@@ -81,6 +81,7 @@ pub fn default_ready_response() -> EngineCoreReadyResponse {
         cache_config_info: None,
         config_hash: None,
         enable_expert_parallel: false,
+        mm_receiver_cache_bytes: None,
     }
 }
 
