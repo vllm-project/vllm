@@ -711,6 +711,20 @@ __device__ int gfx950TopK512ActiveBlocks(int rowLength, int numRows,
   return min(min(activeBlocks, maxBlocks), max(1, rowLength / 512));
 }
 
+constexpr int kGfx950TopK512FewRowsOneBlockMaxRowLength = 36 * 1024;
+static_assert(kGfx950TopK512FewRowsOneBlockMaxRowLength <= 64 * 1024);
+
+__device__ bool gfx950TopK512FewRowsFitOneBlock(const int* seqLens, int numRows,
+                                                int next_n, int seqLensIs2D) {
+  const int row = threadIdx.x % 32;
+  int rowEnd = 0;
+  if (row < numRows) {
+    rowEnd = seqLensIs2D ? seqLens[row]
+                         : seqLens[row / next_n] - next_n + row % next_n + 1;
+  }
+  return __ballot(rowEnd > kGfx950TopK512FewRowsOneBlockMaxRowLength) == 0;
+}
+
 template <int kNumThreadsPerBlock, bool mergeBlocks = false>
 static __global__
 __launch_bounds__(kNumThreadsPerBlock) void topKPerRowDecode512DeviceLengthAware(
@@ -725,8 +739,13 @@ __launch_bounds__(kNumThreadsPerBlock) void topKPerRowDecode512DeviceLengthAware
       seqLensIs2D
           ? max(0, seqLens[rowIdx])
           : max(0, seqLens[rowIdx / next_n] - next_n + rowIdx % next_n + 1);
-  const int activeBlocks =
-      gfx950TopK512ActiveBlocks(rowEnd, gridDim.x, maxBlocks);
+  int activeBlocks = gfx950TopK512ActiveBlocks(rowEnd, gridDim.x, maxBlocks);
+  if (gridDim.x <= 32 && activeBlocks > 1 &&
+      rowEnd <= kGfx950TopK512FewRowsOneBlockMaxRowLength &&
+      gfx950TopK512FewRowsFitOneBlock(seqLens, gridDim.x, next_n,
+                                      seqLensIs2D)) {
+    activeBlocks = 1;
+  }
   outIndices += static_cast<int64_t>(rowIdx) * topK;
   if constexpr (mergeBlocks) {
     if (activeBlocks == 1) return;
@@ -826,7 +845,8 @@ void top_k_per_row_decode(const torch::stable::Tensor& logits, int64_t next_n,
       std::strncmp(get_device_prop()->gcnArchName, "gfx950", 6) == 0;
   if (useGfx950DeviceLengthAwareTopK512) {
     int multipleBlocksPerRowConfig = 1;
-    if (numRows <= 32 && numColumns > 16 * 1024) {
+    if (numRows <= 32 &&
+        numColumns > vllm::kGfx950TopK512FewRowsOneBlockMaxRowLength) {
       multipleBlocksPerRowConfig = 16;
     } else if (numRows <= 128 && numColumns > 64 * 1024) {
       multipleBlocksPerRowConfig = 10;
