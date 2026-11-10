@@ -2603,6 +2603,24 @@ class rocm_aiter_ops:
 
         return cls.is_linear_enabled() and on_gfx950()
 
+    @classmethod
+    @if_aiter_supported
+    def is_fp32_out_tgemm_enabled(cls) -> bool:
+        """Use aiter tgemm for BF16 x BF16 -> FP32 GEMMs (the DeepSeek-V4
+        compressor scores) on CDNA4+; older archs keep torch.mm."""
+        from vllm.platforms.rocm import get_cdna_version
+
+        return cls.is_linear_enabled() and get_cdna_version() >= 4
+
+    @classmethod
+    @if_aiter_supported
+    def is_triton_bf16_bmm_enabled(cls) -> bool:
+        """Use aiter's Triton BF16 batched GEMM on CDNA4+ (tuned for gfx950 and
+        gfx1250); older archs keep torch.einsum."""
+        from vllm.platforms.rocm import get_cdna_version
+
+        return cls._AITER_ENABLED and get_cdna_version() >= 4
+
     @staticmethod
     @functools.cache
     def _kda_gluon_prefill_importable() -> bool:

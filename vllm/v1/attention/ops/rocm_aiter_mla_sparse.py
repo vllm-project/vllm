@@ -1786,12 +1786,12 @@ def rocm_inv_rope_einsum(
         wo_a, n_local_groups, o_lora_rank, o_ref.shape[-1]
     )
 
-    from vllm.platforms.rocm import get_cdna_version
+    from vllm._aiter_ops import rocm_aiter_ops
 
-    # aiter's Triton BF16 BMM is tuned for gfx950 (CDNA4) and gfx1250; older
-    # archs (e.g. gfx942) keep the einsum. On gfx950 this path only runs with the
+    # aiter's Triton BF16 BMM on CDNA4+ (gfx950, gfx1250) with aiter enabled;
+    # everything else keeps the einsum. On gfx950 this path only runs with the
     # FP8 wo_a BMM disabled (VLLM_ROCM_USE_AITER_FP8BMM=0).
-    if get_cdna_version() < 4:
+    if not rocm_aiter_ops.is_triton_bf16_bmm_enabled():
         return torch.einsum("tgd,grd->tgr", o_ref, wo_a_weight)
 
     from aiter.ops.triton.gemm.batched.batched_gemm_bf16 import batched_gemm_bf16
