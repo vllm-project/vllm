@@ -231,7 +231,10 @@ def test_rocm_fp8_env_overrides(env_name, raw_value, expected, monkeypatch):
 
 @pytest.mark.parametrize("is_fnuz", [False, True])
 @pytest.mark.parametrize("has_scheme", [False, True])
-def test_compressed_tensors_kv_scales_fnuz_doubling(monkeypatch, is_fnuz, has_scheme):
+@pytest.mark.parametrize("has_q_scale", [False, True])
+def test_compressed_tensors_kv_scales_fnuz_doubling(
+    monkeypatch, is_fnuz, has_scheme, has_q_scale
+):
     """compressed-tensors KV scales double on fnuz only for a configured scheme."""
     from types import SimpleNamespace
 
@@ -256,18 +259,21 @@ def test_compressed_tensors_kv_scales_fnuz_doubling(monkeypatch, is_fnuz, has_sc
     layer.kv_cache_dtype = "fp8"
     layer.num_kv_heads = 1
     method.create_weights(layer)
-    for name in ("k_scale", "v_scale", "q_scale"):
+    for name in ("k_scale", "v_scale"):
         getattr(layer, name).data.fill_(0.3)
+    if has_q_scale:
+        layer.q_scale.data.fill_(0.3)
 
     method.process_weights_after_loading(layer)
 
     expected = 0.6 if (is_fnuz and has_scheme) else 0.3
+    assert layer._k_scale.item() == pytest.approx(expected)
     assert layer._k_scale_float == pytest.approx(expected)
     assert layer._v_scale_float == pytest.approx(expected)
-    assert layer._q_scale_float == pytest.approx(expected)
+    assert layer._q_scale_float == pytest.approx(expected if has_q_scale else 1.0)
     assert layer._k_scale_cpu.item() == pytest.approx(expected)
 
-    # Sleep/wake re-enters this hook, so the factor must not compound.
+    # Reloading weights re-runs this hook, so the factor must not compound.
     method.process_weights_after_loading(layer)
     assert layer._k_scale_float == pytest.approx(expected)
 

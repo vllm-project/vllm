@@ -1163,8 +1163,9 @@ class CompressedTensorsKVCacheMethod(BaseKVCacheMethod):
         layer.v_scale = torch.nn.Parameter(
             torch.ones(n_scales, requires_grad=False, dtype=torch.float32)
         )
+        # -1.0 marks a q_scale the checkpoint does not provide.
         layer.q_scale = torch.nn.Parameter(
-            torch.ones(n_scales, requires_grad=False, dtype=torch.float32)
+            torch.full((n_scales,), -1.0, requires_grad=False, dtype=torch.float32)
         )
 
         # Zero points are not used in vLLM as currently only symmetric quantization is
@@ -1253,7 +1254,7 @@ class CompressedTensorsKVCacheMethod(BaseKVCacheMethod):
         """Override the default vLLM placeholder scales with the llm-compressor loaded
         scales. Zero points are not used as only symmetric quantization is supported.
         """
-        # Scales default to 1.0 here, so only a configured scheme means calibrated.
+        # k/v scales default to 1.0, so only a configured scheme means they were loaded.
         fnuz_factor = (
             2.0
             if current_platform.is_fp8_fnuz()
@@ -1261,12 +1262,18 @@ class CompressedTensorsKVCacheMethod(BaseKVCacheMethod):
             and self.quant_config.kv_cache_scheme is not None
             else 1.0
         )
+        q_loaded = bool((layer.q_scale > 0).all())
 
         # Buffers, not Parameters: updates don't rewrite them, so level-2 sleep
         # must keep them. ATTN_HEAD changes shape.
         layer.register_buffer("_k_scale", layer.k_scale.detach() * fnuz_factor)
         layer.register_buffer("_v_scale", layer.v_scale.detach() * fnuz_factor)
-        layer.register_buffer("_q_scale", layer.q_scale.detach() * fnuz_factor)
+        layer.register_buffer(
+            "_q_scale",
+            layer.q_scale.detach() * fnuz_factor
+            if q_loaded
+            else torch.ones_like(layer.q_scale),
+        )
 
         # Set the _float variants that the attention backend uses.
         def _to_scalar(tensor: torch.Tensor) -> float:
