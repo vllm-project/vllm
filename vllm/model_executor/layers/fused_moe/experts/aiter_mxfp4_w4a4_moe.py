@@ -126,36 +126,25 @@ def aiter_triton_kernel_w4a4_moe_forward(
         if quant_config.gemm1_clamp_limit is not None
         else 7.0
     )
-    # The swiglu is fused into the GEMM1 epilogue, which reads gate/up
-    # interleaved along N (see the oracle's weight prep). SILU is the same
-    # epilogue with alpha 1 and no residual.
-    fused_swiglu = activation in (
-        MoEActivation.SWIGLUOAI,
-        MoEActivation.SWIGLUOAI_UNINTERLEAVE,
-        MoEActivation.SILU,
+    # Every supported activation runs the swiglu fused into the GEMM1
+    # epilogue, which reads gate/up interleaved along N (see the oracle's
+    # weight prep). SILU is the same epilogue with alpha 1 and no residual:
+    # plain silu(gate) * up, whatever gemm1_alpha / gemm1_beta say.
+    assert AiterW4A4ExpertsMonolithic._supports_activation(activation), activation
+    is_silu = activation == MoEActivation.SILU
+    assert is_silu or quant_config.gemm1_beta in (None, 1.0), (
+        "aiter's fused swiglu hardcodes the residual to (up + 1); "
+        f"gemm1_beta={quant_config.gemm1_beta} cannot be expressed"
     )
-    swiglu_kwargs: dict[str, object] = {}
-    if fused_swiglu:
-        # SILU is plain silu(gate) * up: no residual, whatever gemm1_beta says.
-        add_residual = (
-            activation != MoEActivation.SILU and quant_config.gemm1_beta == 1.0
-        )
-        assert activation == MoEActivation.SILU or quant_config.gemm1_beta in (
-            None,
-            1.0,
-        ), (
-            "aiter's fused swiglu hardcodes the residual to (up + 1); "
-            f"gemm1_beta={quant_config.gemm1_beta} cannot be expressed"
-        )
-        swiglu_kwargs = {
-            "alpha": (
-                quant_config.gemm1_alpha
-                if quant_config.gemm1_alpha is not None
-                else 1.0
-            ),
-            "limit": swiglu_limit,
-            "swiglu_add_residual": add_residual,
-        }
+    swiglu_kwargs: dict[str, object] = {
+        "alpha": (
+            1.0
+            if is_silu or quant_config.gemm1_alpha is None
+            else quant_config.gemm1_alpha
+        ),
+        "limit": swiglu_limit,
+        "swiglu_add_residual": not is_silu and quant_config.gemm1_beta == 1.0,
+    }
     swizzle_mx_scale = get_aiter_mx_scale_swizzle()
 
     x_q, x_scale = mxfp4_quant(hidden_states.to(torch.bfloat16))
@@ -166,8 +155,7 @@ def aiter_triton_kernel_w4a4_moe_forward(
     n_w1 = w1_data.shape[-1] * 16 if preshuffle_weights else w1_data.shape[-1]
     # Quantize GEMM1's output to MXFP4 in its epilogue, feeding GEMM2 directly.
     fused_out_quant = (
-        fused_swiglu
-        and on_gfx1250()
+        on_gfx1250()
         and (unpadded_N_w1 is None or unpadded_N_w1 == n_w1)
         and (n_w1 // 2) % 32 == 0
     )
@@ -184,7 +172,7 @@ def aiter_triton_kernel_w4a4_moe_forward(
         gammas=gammas if apply_router_weight_on_input else None,
         preshuffle_weights=preshuffle_weights,
         swizzle_mx_scale=swizzle_mx_scale,
-        apply_swiglu=fused_swiglu,
+        apply_swiglu=True,
         out_mx_quant=fused_out_quant,
         **swiglu_kwargs,
     )
@@ -192,37 +180,12 @@ def aiter_triton_kernel_w4a4_moe_forward(
     if fused_out_quant:
         mid_q, mid_scale = raw_intermediate
     else:
-        if fused_swiglu:
-            # The swiglu epilogue already halved N.
-            intermediate = (
-                raw_intermediate
-                if unpadded_N_w1 is None
-                else raw_intermediate[:, : unpadded_N_w1 // 2]
-            )
-        else:
-            if unpadded_N_w1 is not None:
-                raw_intermediate = raw_intermediate[:, :unpadded_N_w1]
-
-            # SiLU(gate) * up on the concatenated [gate | up] halves
-            from aiter.ops.triton.fusions.fused_clamp_act_mul import (
-                fused_clamp_act_mul,
-            )
-
-            half_n = raw_intermediate.shape[-1] // 2
-            intermediate = torch.empty(
-                raw_intermediate.shape[0],
-                half_n,
-                dtype=raw_intermediate.dtype,
-                device=raw_intermediate.device,
-            )
-            fused_clamp_act_mul(
-                raw_intermediate,
-                out=intermediate,
-                swiglu_limit=swiglu_limit,
-                activation="silu",
-                dtype_quant=None,
-            )
-
+        # The swiglu epilogue already halved N.
+        intermediate = (
+            raw_intermediate
+            if unpadded_N_w1 is None
+            else raw_intermediate[:, : unpadded_N_w1 // 2]
+        )
         mid_q, mid_scale = mxfp4_quant(intermediate.to(torch.bfloat16))
 
     # GEMM2: down projection with scatter-reduce
@@ -264,13 +227,14 @@ class AiterW4A4ExpertsMonolithic(mk.FusedMoEExpertsMonolithic):
             RoutingMethodType.DeepSeekV3,
             RoutingMethodType.MiniMax2,
         )
-        # SILU weights are always preshuffled into the WMMA 16x16 tile order:
-        # the oracle interleaves gate/up for SILU and the tile shuffle below
-        # assumes that layout. Besides ~5.6% on the DeepSeek-V4-Pro MoE GEMMs
+        # Weights are always preshuffled into the WMMA 16x16 tile order on
+        # gfx1250 (the only arch this class runs on): the oracle interleaves
+        # gate/up for every supported activation, which is the layout the tile
+        # shuffle below assumes. Besides ~5.6% on the DeepSeek-V4-Pro MoE GEMMs
         # in isolation, the non-preshuffled gluon kernel returns intermittent
         # garbage on identical inputs at some tile configs; the preshuffled
         # one does not.
-        self.preshuffle_weights = moe_config.activation is MoEActivation.SILU
+        self.preshuffle_weights = True
 
     def process_weights_after_loading(self, layer: torch.nn.Module) -> None:
         """Shuffle the oracle's weights into the WMMA 16x16 tile order.
@@ -282,10 +246,8 @@ class AiterW4A4ExpertsMonolithic(mk.FusedMoEExpertsMonolithic):
         """
         if not self.preshuffle_weights:
             return
-        if getattr(layer, "w13_bias", None) is not None or (
-            getattr(layer, "w2_bias", None) is not None
-        ):
-            raise NotImplementedError("preshuffled MoE weights do not carry a bias")
+        # Expert biases are per output column, so the byte shuffle leaves them
+        # as they are.
 
         from aiter.ops.shuffle import shuffle_weight
         from aiter.ops.triton.utils.shuffle import moe_weight_decode_view
