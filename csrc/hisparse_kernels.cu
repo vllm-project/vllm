@@ -623,7 +623,7 @@ __global__ __launch_bounds__(1024) void hisparse_resolve_residency_kernel(
       int32_t k = s_hash_keys[h];
       bool is_hit = g >= 0 && k == g;
       bool probing = g >= 0 && !is_hit && k != kHashEmpty;
-      while (__any_sync(0xFFFFFFFF, probing)) {
+      while (HISPARSE_BALLOT(probing) != 0) {
         if (probing) h = next_slot(h, table_size);
         k = probing ? s_hash_keys[h] : kHashEmpty;
         const bool found = probing && k == g;
@@ -1109,8 +1109,6 @@ void hisparse_resolve_residency(
                   "hot-cache rows must be contiguous");
   const int64_t hot_block_size = hot_cache.size(1);
   const int64_t hot_rows = hot_cache.size(0) * hot_block_size;
-  const int64_t hot_block_stride =
-      hot_cache.stride(0) * hot_cache.element_size();
   const int64_t host_rows = check_2d_rows(host_cache, "host_cache", row_bytes);
   const auto launch_rows = static_cast<int32_t>(num_rows);
   const auto top_k = static_cast<int32_t>(global_indices.size(1));
@@ -1338,7 +1336,8 @@ void hisparse_resolve_residency(
     }
     if (configured[device_index] < smem_bytes) {
       const cudaError_t attribute_error = cudaFuncSetAttribute(
-          kernel, cudaFuncAttributeMaxDynamicSharedMemorySize, smem_bytes);
+          reinterpret_cast<const void*>(kernel),
+          cudaFuncAttributeMaxDynamicSharedMemorySize, smem_bytes);
       STD_TORCH_CHECK(attribute_error == cudaSuccess,
                       "failed to configure HiSparse swap-in shared memory: ",
                       cudaGetErrorString(attribute_error));

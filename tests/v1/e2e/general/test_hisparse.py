@@ -88,6 +88,23 @@ def _offload_load_bytes() -> float:
     )
 
 
+@pytest.fixture(autouse=True)
+def _use_aiter_on_rocm(monkeypatch: pytest.MonkeyPatch):
+    # Without AITER the ROCm DSv3.2 indexer falls back to PyTorch paged MQA
+    # logits, which cannot be captured in a FULL CUDA graph.
+    if not current_platform.is_rocm():
+        yield
+        return
+    from vllm._aiter_ops import rocm_aiter_ops
+
+    # rocm_aiter_ops caches the env at import, which conftest already did.
+    monkeypatch.setenv("VLLM_ROCM_USE_AITER", "1")
+    rocm_aiter_ops.refresh_env_variables()
+    yield
+    monkeypatch.undo()
+    rocm_aiter_ops.refresh_env_variables()
+
+
 def _skip_without_sparse_mla() -> None:
     if current_platform.is_rocm():
         from vllm.platforms.rocm import on_gfx950

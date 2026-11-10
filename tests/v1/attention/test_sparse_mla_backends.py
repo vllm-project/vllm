@@ -157,6 +157,43 @@ def _skip_cuda_specific_sparse_mla_tests_on_rocm(request):
         "test_split_indexer_prefill_chunks",
         "test_split_indexer_prefill_chunks_single_request_overflow",
         "test_sparse_mla_common_impl_resolves_buffer_lazily",
+        # HiSparse runtime and kernels, which ROCm builds too.
+        "test_hisparse_compact_gather_preserves_strided_payload",
+        "test_hisparse_flashmla_reorders_full_speculative_window_as_decode",
+        "test_hisparse_fp8_decode_resolves_rows_once_then_runs_batched_attention",
+        "test_hisparse_fp8_prefill_gather_uses_dedicated_stream",
+        "test_hisparse_gather_prefill_cache_prefers_resident_rows",
+        "test_hisparse_gather_zeroes_unaligned_destination",
+        "test_hisparse_generic_stream_orders_ipc_event",
+        "test_hisparse_index_group_preserves_row_width",
+        "test_hisparse_invalidation_covers_every_index_group",
+        "test_hisparse_kv_update_writes_resident_cache",
+        "test_hisparse_maps_speculative_rows_through_request_state",
+        "test_hisparse_metadata_keeps_short_prefill_indexer_enabled",
+        "test_hisparse_mixed_single_token_batch_is_not_decode_only",
+        "test_hisparse_multi_step_swaps_match_independent",
+        "test_hisparse_multi_step_writes_request_major_output",
+        "test_hisparse_newest_write_and_recycled_slot_invalidation",
+        "test_hisparse_prefill_resident_sources_follow_each_resident_group",
+        "test_hisparse_prefill_reuses_builder_staging_plan",
+        "test_hisparse_prefill_staging_plan_masks_unused_blocks",
+        "test_hisparse_prefill_staging_plan_resolves_resident_sources",
+        "test_hisparse_prefill_staging_remap",
+        "test_hisparse_profiling_releases_device_storage",
+        "test_hisparse_rejects_union_bound_beyond_shared_memory",
+        "test_hisparse_remaps_strided_hma_rows_for_attention",
+        "test_hisparse_resident_prefill_reads_residency_by_state_row",
+        "test_hisparse_resident_rows_bypass_hot_lru",
+        "test_hisparse_resolver_reads_current_request_ids",
+        "test_hisparse_routes_prefill_to_sparse_mqa",
+        "test_hisparse_row_dma_copies_discontiguous_spans_across_layers",
+        "test_hisparse_speculative_prefetch_preserves_current_resident_kv",
+        "test_hisparse_speculative_rows_count_a_shared_load_once",
+        "test_hisparse_speculative_rows_resolve_host_misses_consistently",
+        "test_hisparse_staged_prefill_cache_backs_min_attention_rows",
+        "test_hisparse_swap_in_preserves_rows_across_eviction",
+        "test_hisparse_union_table_scales_with_union_bound",
+        "test_hisparse_uses_graph_stable_request_state_mapping",
     }
     if (
         current_platform.is_rocm()
@@ -2680,6 +2717,8 @@ def test_hisparse_speculative_rows_resolve_host_misses_consistently(
     another row's KV. Overlapping rows must share one slot per host row, and
     long_mtp's rows span several resolution passes.
     """
+    if current_platform.is_rocm() and top_k == 2048:
+        pytest.skip("The 2048-wide union table exceeds the 160 KiB of LDS on CDNA")
     device = torch.device(DEVICE_TYPE)
     block_size, row_width = 64, 64
     num_blocks = 2 * num_rows * top_k // block_size
