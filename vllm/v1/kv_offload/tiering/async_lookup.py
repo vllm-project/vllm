@@ -111,7 +111,7 @@ class AsyncLookupManager(ABC):
             list[tuple[OffloadKey, ReqContext, int]] | None
         ] = queue.SimpleQueue()
 
-        # Worker → scheduler: completed result batches.
+        # Worker → scheduler: completed request-group result batches.
         # Each item is a list of (key, generation, found) triples.
         # SimpleQueue is explicitly thread-safe for one writer / one reader.
         self._pending_results: queue.SimpleQueue[list[tuple[OffloadKey, int, bool]]] = (
@@ -220,7 +220,7 @@ class AsyncLookupManager(ABC):
                 state.phase = LookupPhase.RESOLVED
 
     def mark_miss(self, keys: Collection[OffloadKey]) -> None:
-        """Force the cached verdict for ``keys`` to False after a failed load, so
+        """Force the cached verdict for `keys` to False after a failed load, so
         the scheduler stops re-issuing the doomed promotion (livelock, #49176).
         Keys with no cached entry are skipped, and so are keys whose entry is
         a newer probe still PENDING or IN_FLIGHT: its own result will land,
@@ -298,7 +298,6 @@ class AsyncLookupManager(ABC):
             if not batches:
                 continue
 
-            results: list[tuple[OffloadKey, int, bool]] = []
             for req_context, entries in batches.values():
                 keys = [key for key, _ in entries]
                 try:
@@ -312,9 +311,11 @@ class AsyncLookupManager(ABC):
                     )
                     hits = (False for _ in keys)
 
+                group_results: list[tuple[OffloadKey, int, bool]] = []
                 for (key, generation), hit in zip(entries, hits):
-                    results.append((key, generation, hit))
+                    group_results.append((key, generation, hit))
 
-            # Post the entire batch as one item — no lock needed.
-            if results:
-                self._pending_results.put(results)
+                # Post each completed request group before processing the next
+                # group. The list is not modified after it is enqueued.
+                if group_results:
+                    self._pending_results.put(group_results)

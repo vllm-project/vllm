@@ -206,6 +206,7 @@ class OpenPanguMoE(nn.Module):
             scoring_func="sigmoid",
             routed_scaling_factor=self.routed_scaling_factor,
             apply_routed_scale_to_output=True,
+            divide_shared_output_in_fp16=True,
             e_score_correction_bias=self.gate.e_score_correction_bias,
             enable_eplb=self.enable_eplb,
             num_redundant_experts=self.n_redundant_experts,
@@ -1091,7 +1092,7 @@ class OpenPanguModel(nn.Module):
         return loaded
 
     def post_weight_load(self) -> None:
-        for name, module in self.named_modules():
+        for _, module in self.named_modules():
             if module is self:
                 continue
             if hasattr(module, "post_weight_load"):
