@@ -25,7 +25,7 @@ use std::future::Future;
 use std::sync::{Arc, OnceLock};
 use std::time::Duration;
 
-use anyhow::{Context as _, Result};
+use anyhow::{Context as _, Result, bail};
 use axum::Router;
 use axum::body::Body;
 use axum::extract::ConnectInfo;
@@ -45,6 +45,7 @@ use hyper_util::service::TowerToHyperService;
 pub use render::{RenderConfig, serve_render};
 pub use routes::openai::utils::types::ReasoningEffort;
 use thiserror_ext::AsReport as _;
+use tokio::sync::watch;
 use tokio::time::{Instant, sleep_until};
 use tokio_util::sync::CancellationToken;
 use tonic::transport::Server as TonicServer;
@@ -72,6 +73,36 @@ const GRPC_KEEPALIVE_INTERVAL: Duration = Duration::from_secs(7200);
 /// How long the server waits for a keepalive PING reply before dropping the gRPC
 /// connection. 20s matches the gRPC-core default.
 const GRPC_KEEPALIVE_TIMEOUT: Duration = Duration::from_secs(20);
+
+async fn monitor_llm_health(
+    mut health: watch::Receiver<bool>,
+    shutdown: CancellationToken,
+    keep_alive: bool,
+    grpc_failure_published: Option<CancellationToken>,
+) -> Result<()> {
+    if keep_alive {
+        shutdown.cancelled().await;
+        return Ok(());
+    }
+
+    let health_result = tokio::select! {
+        biased;
+
+        result = health.wait_for(|healthy| !*healthy) => result,
+        _ = shutdown.cancelled() => return Ok(()),
+    };
+    let health_channel_error = health_result.err();
+
+    if let Some(published) = grpc_failure_published {
+        published.cancelled().await;
+    }
+
+    shutdown.cancel();
+    match health_channel_error {
+        None => bail!("LLM became permanently unhealthy"),
+        Some(error) => Err(error).context("LLM health channel closed"),
+    }
+}
 
 /// Resolve the public model names accepted by the frontend.
 fn effective_served_model_names(model: &str, served_model_name: &[String]) -> Vec<String> {
@@ -256,6 +287,8 @@ where
     // Optionally bind the gRPC Inference server on a separate port. Bind
     // synchronously here so bind errors (port in use, permission denied, ...)
     // surface before serving rather than being deferred until shutdown.
+    let grpc_failure_published =
+        config.grpc_listener_mode.as_ref().map(|_| CancellationToken::new());
     let grpc_setup = if let Some(grpc_listener_mode) = &config.grpc_listener_mode {
         let grpc_listener = Listener::bind(grpc_listener_mode)
             .await
@@ -270,7 +303,14 @@ where
             .context("invalid gRPC TLS configuration")?;
         let (health_reporter, health_service) = health_reporter();
         let engine_health = grpc::EngineHealth::subscribe(state.llm());
-        let health_monitor = grpc::HealthMonitor::register(health_reporter, engine_health).await;
+        let health_monitor = grpc::HealthMonitor::register(health_reporter, engine_health)
+            .await
+            .with_engine_failure_notification(
+                grpc_failure_published
+                    .as_ref()
+                    .expect("gRPC setup has an engine-failure notification")
+                    .clone(),
+            );
         let control_service = grpc::ControlGrpcService::new(
             grpc::ControlServiceImpl::new(state.clone())
                 .with_engine_shutdown(config.manages_engine.then(|| shutdown.clone())),
@@ -305,6 +345,12 @@ where
     let server_shutdown = shutdown.child_token();
     let force_shutdown = CancellationToken::new();
     let shutdown_deadline = Arc::new(OnceLock::new());
+    let health_fut = monitor_llm_health(
+        state.llm().subscribe_health(),
+        server_shutdown.clone(),
+        config.keep_alive_on_engine_death,
+        grpc_failure_published,
+    );
 
     // Spawn a task to trigger `force_shutdown` after shutdown deadline elapses.
     tokio::spawn({
@@ -404,14 +450,16 @@ where
         }
     };
 
-    let (http_res, grpc_res) = tokio::join!(http_fut, grpc_fut);
+    let (http_res, grpc_res, health_res) = tokio::join!(http_fut, grpc_fut, health_fut);
     http_res.and(grpc_res)?;
 
     let shutdown_deadline = shutdown_deadline
         .get()
         .copied()
         .unwrap_or_else(|| Instant::now() + config.shutdown_timeout);
-    state.shutdown(shutdown_deadline).await
+    let shutdown_result = state.shutdown(shutdown_deadline).await;
+    health_res?;
+    shutdown_result
 }
 
 /// Per-connection timeouts applied while serving HTTP/HTTPS.
@@ -477,6 +525,8 @@ where
 
 #[cfg(test)]
 mod tests {
+    use std::task::Poll;
+
     use super::*;
 
     #[test]
@@ -495,5 +545,82 @@ mod tests {
             effective_served_model_names("backend-model", &served_names),
             served_names
         );
+    }
+
+    #[tokio::test]
+    async fn unhealthy_llm_cancels_server_shutdown_and_returns_error() {
+        let (health_tx, health) = watch::channel(true);
+        let shutdown = CancellationToken::new();
+        let mut monitor = Box::pin(monitor_llm_health(health, shutdown.clone(), false, None));
+
+        assert!(futures::poll!(&mut monitor).is_pending());
+        health_tx.send(false).expect("publish unhealthy LLM");
+
+        let Poll::Ready(result) = futures::poll!(&mut monitor) else {
+            panic!("health monitor did not react to an unhealthy LLM");
+        };
+        assert_eq!(
+            result.unwrap_err().to_string(),
+            "LLM became permanently unhealthy"
+        );
+        assert!(shutdown.is_cancelled());
+    }
+
+    #[tokio::test]
+    async fn unhealthy_llm_remains_fatal_when_shutdown_is_already_requested() {
+        let (health_tx, health) = watch::channel(true);
+        let shutdown = CancellationToken::new();
+
+        health_tx.send(false).expect("publish unhealthy LLM");
+        shutdown.cancel();
+
+        let result = monitor_llm_health(health, shutdown, false, None).await;
+        assert_eq!(
+            result.unwrap_err().to_string(),
+            "LLM became permanently unhealthy"
+        );
+    }
+
+    #[tokio::test]
+    async fn keep_alive_ignores_unhealthy_llm_until_shutdown() {
+        let (health_tx, health) = watch::channel(true);
+        let shutdown = CancellationToken::new();
+        let mut monitor = Box::pin(monitor_llm_health(health, shutdown.clone(), true, None));
+
+        assert!(futures::poll!(&mut monitor).is_pending());
+        health_tx.send(false).expect("publish unhealthy LLM");
+        assert!(futures::poll!(&mut monitor).is_pending());
+        assert!(!shutdown.is_cancelled());
+
+        shutdown.cancel();
+        let Poll::Ready(result) = futures::poll!(&mut monitor) else {
+            panic!("health monitor did not finish during shutdown");
+        };
+        result.expect("keep-alive shutdown is graceful");
+    }
+
+    #[tokio::test]
+    async fn unhealthy_llm_waits_for_grpc_health_before_shutdown() {
+        let (health_tx, health) = watch::channel(true);
+        let shutdown = CancellationToken::new();
+        let grpc_failure_published = CancellationToken::new();
+        let mut monitor = Box::pin(monitor_llm_health(
+            health,
+            shutdown.clone(),
+            false,
+            Some(grpc_failure_published.clone()),
+        ));
+
+        assert!(futures::poll!(&mut monitor).is_pending());
+        health_tx.send(false).expect("publish unhealthy LLM");
+        assert!(futures::poll!(&mut monitor).is_pending());
+        assert!(!shutdown.is_cancelled());
+
+        grpc_failure_published.cancel();
+        let Poll::Ready(result) = futures::poll!(&mut monitor) else {
+            panic!("health monitor did not finish after gRPC health publication");
+        };
+        assert!(result.is_err());
+        assert!(shutdown.is_cancelled());
     }
 }

@@ -44,6 +44,7 @@ pub(crate) struct HealthMonitor {
     engine: EngineHealth,
     /// Readiness as last published to `readiness` and `vllm.Inference`.
     ready: bool,
+    engine_failure_published: Option<CancellationToken>,
 }
 
 impl HealthMonitor {
@@ -59,7 +60,14 @@ impl HealthMonitor {
             reporter,
             engine,
             ready,
+            engine_failure_published: None,
         }
+    }
+
+    /// Notify after an engine failure is visible to every gRPC health service.
+    pub fn with_engine_failure_notification(mut self, published: CancellationToken) -> Self {
+        self.engine_failure_published = Some(published);
+        self
     }
 
     /// Run a gRPC server until shutdown, keeping the health services in line
@@ -105,6 +113,8 @@ impl HealthMonitor {
         let mut readiness_open = true;
         let engine_failed = loop {
             let ready = tokio::select! {
+                biased;
+
                 result = self.engine.liveness.wait_for(|healthy| !*healthy) => {
                     match result {
                         Ok(_) => warn!(
@@ -151,6 +161,9 @@ impl HealthMonitor {
 
         if engine_failed {
             reporter.set_service_status(LIVENESS_SERVICE, status).await;
+            if let Some(published) = self.engine_failure_published {
+                published.cancel();
+            }
             shutdown.cancelled().await;
             info!(
                 reason = "server_shutdown",
@@ -182,6 +195,7 @@ async fn set_readiness(reporter: &HealthReporter, ready: bool) {
 #[cfg(test)]
 mod tests {
     use std::sync::{Arc, Mutex};
+    use std::time::Duration;
 
     use futures::FutureExt as _;
     use tonic::Request;
@@ -264,5 +278,41 @@ mod tests {
 
         assert_eq!(output, None);
         assert_eq!(*serving_at_drop.lock().unwrap(), Some(false));
+    }
+
+    #[tokio::test]
+    async fn engine_failure_notification_follows_liveness_withdrawal() {
+        let (monitor, health, engine) = monitor().await;
+        let shutdown = CancellationToken::new();
+        let published = CancellationToken::new();
+        let monitor = monitor.with_engine_failure_notification(published.clone());
+        let server_shutdown = shutdown.clone();
+        let server_task = tokio::spawn(async move {
+            monitor
+                .serve(server_shutdown, std::future::pending(), |stop| async move {
+                    stop.await;
+                })
+                .await
+        });
+
+        engine[0].send(false).expect("publish unhealthy engine");
+        tokio::time::timeout(Duration::from_secs(2), published.cancelled())
+            .await
+            .expect("engine failure notification");
+
+        let request = Request::new(HealthCheckRequest {
+            service: LIVENESS_SERVICE.to_string(),
+        });
+        let response = health.check(request).await.expect("read liveness status");
+        assert_eq!(response.get_ref().status, ServingStatus::NotServing as i32);
+
+        shutdown.cancel();
+        assert_eq!(
+            tokio::time::timeout(Duration::from_secs(2), server_task)
+                .await
+                .expect("health monitor shutdown")
+                .expect("health monitor task"),
+            Some(())
+        );
     }
 }

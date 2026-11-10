@@ -598,6 +598,20 @@ pub struct SharedRuntimeArgs {
     #[serde(skip)]
     pub disable_request_id_randomization: bool,
 
+    /// Keep the API server running after the engine becomes permanently
+    /// unhealthy. Like Python, it is set only through
+    /// `VLLM_KEEP_ALIVE_ON_ENGINE_DEATH`.
+    #[arg(
+        long,
+        hide = true,
+        env = "VLLM_KEEP_ALIVE_ON_ENGINE_DEATH",
+        action = ArgAction::Set,
+        value_parser = parse_int_flag,
+        default_value = "0"
+    )]
+    #[serde(skip)]
+    pub keep_alive_on_engine_death: bool,
+
     /// Maximum HTTP request body size in bytes (default 32 MiB); `0` removes
     /// the limit, like the Python frontend, which has none. It is set only
     /// through `VLLM_HTTP_MAX_REQUEST_BODY_SIZE`.
@@ -859,6 +873,10 @@ impl SharedRuntimeArgs {
                 format!("invalid VLLM_DISABLE_REQUEST_ID_RANDOMIZATION: {error}")
             })?;
         }
+        if let Some(value) = lookup("VLLM_KEEP_ALIVE_ON_ENGINE_DEATH") {
+            self.keep_alive_on_engine_death = parse_int_flag(&value)
+                .map_err(|error| format!("invalid VLLM_KEEP_ALIVE_ON_ENGINE_DEATH: {error}"))?;
+        }
         if let Some(value) = lookup("VLLM_HTTP_MAX_REQUEST_BODY_SIZE") {
             let size = parse_byte_count(&value)
                 .map_err(|error| format!("invalid VLLM_HTTP_MAX_REQUEST_BODY_SIZE: {error}"))?;
@@ -962,6 +980,7 @@ impl SharedRuntimeArgs {
             custom_histogram_buckets: self.custom_histogram_buckets,
             log_stats_interval,
             disable_request_id_randomization: self.disable_request_id_randomization,
+            keep_alive_on_engine_death: self.keep_alive_on_engine_death,
             shutdown_timeout,
             // The engine is launched and supervised by another process.
             manages_engine: false,
@@ -1050,6 +1069,7 @@ impl SharedRuntimeArgs {
             custom_histogram_buckets: self.custom_histogram_buckets,
             log_stats_interval,
             disable_request_id_randomization: self.disable_request_id_randomization,
+            keep_alive_on_engine_death: self.keep_alive_on_engine_death,
             shutdown_timeout,
             manages_engine,
             keep_alive_timeout,
