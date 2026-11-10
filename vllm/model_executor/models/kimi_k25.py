@@ -17,6 +17,7 @@ from vllm.config import VllmConfig
 from vllm.config.multimodal import MultiModalDummyOptions
 from vllm.inputs import MultiModalDataDict
 from vllm.logger import init_logger
+from vllm.model_executor.layers.attention import MMEncoderAttention
 from vllm.model_executor.layers.fusion.mm_input_norm import build_mm_input_norm
 from vllm.model_executor.layers.quantization import QuantizationConfig
 from vllm.model_executor.layers.quantization.compressed_tensors import (
@@ -71,9 +72,7 @@ from vllm.transformers_utils.processors.kimi_k25_vision_fused import (
 )
 from vllm.utils.import_utils import is_numba_available
 from vllm.utils.tensor_schema import TensorSchema, TensorShape
-from vllm.v1.attention.backends.registry import AttentionBackendEnum
 
-from .qwen2_5_vl import _pad_flashinfer_cu_seqlens_buffer
 from .utils import (
     AutoWeightsLoader,
     WeightsMapper,
@@ -487,15 +486,12 @@ class KimiK25ForConditionalGeneration(
     # ------------------------------------------------------------------ #
 
     def get_encoder_cudagraph_config(self) -> "EncoderCudaGraphConfig":
-        from vllm.v1.worker.encoder_cudagraph_defs import (
-            EncoderCudaGraphConfig,
-            EncoderCudaGraphPaddingLogic,
-        )
+        from vllm.v1.worker.encoder_cudagraph_defs import EncoderCudaGraphConfig
 
         attn_backend = self.vision_tower.encoder.blocks[0].attn.attn_backend
-        padding_logics: dict[str, EncoderCudaGraphPaddingLogic] = {}
-        if attn_backend == AttentionBackendEnum.FLASHINFER:
-            padding_logics["cu_seqlens"] = _pad_flashinfer_cu_seqlens_buffer
+        padding_logics = MMEncoderAttention.get_cu_seqlens_padding_logics(
+            attn_backend, "cu_seqlens"
+        )
 
         return EncoderCudaGraphConfig(
             modalities=["vision_chunk"],

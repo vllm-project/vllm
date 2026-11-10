@@ -133,27 +133,6 @@ from .vision import (
 logger = init_logger(__name__)
 
 
-def _pad_flashinfer_cu_seqlens_buffer(
-    dst: torch.Tensor,
-    src: torch.Tensor,
-) -> None:
-    src_mid = src.shape[0] // 2
-    dst_mid = dst.shape[0] // 2
-    assert src_mid <= dst_mid, (
-        f"FlashInfer cu_seqlens replay buffer is larger than capture buffer: "
-        f"src_section={src_mid}, dst_section={dst_mid}"
-    )
-
-    dst.zero_()
-    dst[:src_mid].copy_(src[:src_mid])
-    if src_mid < dst_mid:
-        dst[src_mid:dst_mid] = src[src_mid - 1]
-
-    dst[dst_mid : dst_mid + src_mid].copy_(src[src_mid:])
-    if dst_mid + src_mid < dst.shape[0]:
-        dst[dst_mid + src_mid :] = src[-1]
-
-
 # === Vision Inputs === #
 
 
@@ -1758,7 +1737,6 @@ class Qwen2_5_VLForConditionalGeneration(
     def get_encoder_cudagraph_config(self):
         from vllm.v1.worker.encoder_cudagraph_defs import (
             EncoderCudaGraphConfig,
-            EncoderCudaGraphPaddingLogic,
         )
 
         # NOTE: With EVS pruning enabled, multimodal embeddings are post-processed
@@ -1769,12 +1747,9 @@ class Qwen2_5_VLForConditionalGeneration(
         modalities = [] if self.is_multimodal_pruning_enabled else ["image", "video"]
 
         max_frames = self.get_max_frames_per_video() if "video" in modalities else 1
-        padding_logics: dict[str, EncoderCudaGraphPaddingLogic] = {}
-        if self.visual.attn_backend == AttentionBackendEnum.FLASHINFER:
-            padding_logics = {
-                "cu_seqlens": _pad_flashinfer_cu_seqlens_buffer,
-                "cu_window_seqlens": _pad_flashinfer_cu_seqlens_buffer,
-            }
+        padding_logics = MMEncoderAttention.get_cu_seqlens_padding_logics(
+            self.visual.attn_backend, "cu_seqlens", "cu_window_seqlens"
+        )
         return EncoderCudaGraphConfig(
             modalities=modalities,
             buffer_keys=[

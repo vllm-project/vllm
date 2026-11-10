@@ -121,7 +121,6 @@ from .interfaces import (
     SupportsMultiModal,
     SupportsPP,
 )
-from .qwen2_5_vl import _pad_flashinfer_cu_seqlens_buffer
 from .qwen2_vl import _create_qwen2vl_field_factory
 from .utils import (
     AutoWeightsLoader,
@@ -2162,7 +2161,6 @@ class Glm4vForConditionalGeneration(
     def get_encoder_cudagraph_config(self):
         from vllm.v1.worker.encoder_cudagraph_defs import (
             EncoderCudaGraphConfig,
-            EncoderCudaGraphPaddingLogic,
         )
 
         # When EVS pruning is enabled, embed_multimodal post-processes both
@@ -2174,9 +2172,9 @@ class Glm4vForConditionalGeneration(
 
         # Compute max_frames_per_video for budget sizing.
         max_frames = self.get_max_frames_per_video() if "video" in modalities else 1
-        padding_logics: dict[str, EncoderCudaGraphPaddingLogic] = {}
-        if self.visual.attn_backend == AttentionBackendEnum.FLASHINFER:
-            padding_logics["cu_seqlens"] = _pad_flashinfer_cu_seqlens_buffer
+        padding_logics = MMEncoderAttention.get_cu_seqlens_padding_logics(
+            self.visual.attn_backend, "cu_seqlens"
+        )
 
         return EncoderCudaGraphConfig(
             modalities=modalities,
