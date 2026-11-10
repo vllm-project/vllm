@@ -2209,12 +2209,13 @@ class GPUModelRunner(LoRAModelRunnerMixin):
         )
 
         if not self.is_last_pp_rank:
-            # Non-last PP rank: return IntermediateTensors for sending.
+            # Non-last PP rank: return IntermediateTensors for sending. Send only
+            # the unpadded tokens; the next stage pads for its own CUDA graphs.
             assert output_intermediate_tensors is not None
             assert self.pp_handler is not None
             return self.pp_handler.relay_aux_hidden_states(
                 model_inputs["intermediate_tensors"], output_intermediate_tensors
-            )
+            )[: input_batch.num_tokens]
         return None
 
     @torch.inference_mode()
