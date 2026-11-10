@@ -281,6 +281,7 @@ def test_xpu_qwen3_5_default_mtp_weight_update_graph(vllm_runner, enable_pickle)
         language_model_only=True,
         max_model_len=256,
         max_num_batched_tokens=128,
+        enable_chunked_prefill=True,
         max_num_seqs=8,
         kv_cache_memory_bytes=128 * 1024 * 1024,
         enable_prefix_caching=False,
@@ -404,6 +405,7 @@ def _run_transition_requests(llm):
     engine = llm.llm_engine
     anchor = SamplingParams(temperature=0, max_tokens=64, ignore_eos=True, logprobs=3)
     short = SamplingParams(temperature=0, max_tokens=8, ignore_eos=True, logprobs=3)
+
     engine.add_request("anchor", {"prompt_token_ids": [100] * 128 + [200]}, anchor)
     latest = {}
     added_pair = added_eight = False
@@ -464,7 +466,7 @@ def test_xpu_qwen3_5_default_specialized_state_transitions(
             max_num_batched_tokens=128,
             enable_chunked_prefill=True,
             max_num_seqs=16,
-            kv_cache_memory_bytes=128 * 1024 * 1024,
+            kv_cache_memory_bytes=512 * 1024 * 1024,
             enable_prefix_caching=False,
             compilation_config=CompilationConfig(
                 mode=0,
@@ -499,17 +501,28 @@ def test_xpu_qwen3_5_default_specialized_state_transitions(
                             and step["padded_rows"] == padded <= 8
                             for _, step, padded in report["graph_steps"]
                         )
-                    steps = [step for ids, step in report["history"] if "anchor" in ids]
+                    steps = [
+                        step
+                        for ids, step in report["history"]
+                        if any(
+                            req_id == "anchor" or req_id.startswith("anchor-")
+                            for req_id in ids
+                        )
+                    ]
                     assert any(s["reason"] == "prefill_or_mixed" for s in steps)
                     assert any(
                         s["actual_rows"] == 1 and s["reason"] == "prefill_or_mixed"
                         for s in steps
                     ), "A one-token prompt tail must retain the stock prefill path"
                     boundary = next(
-                        i
-                        for i, s in enumerate(steps)
-                        if s["actual_rows"] == 9 and s["reason"] == "token_rows"
+                        (
+                            i
+                            for i, s in enumerate(steps)
+                            if s["actual_rows"] == 9 and s["reason"] == "token_rows"
+                        ),
+                        None,
                     )
+                    assert boundary is not None, steps
                     assert any(s["reason"] is None for s in steps[:boundary])
                     assert any(s["reason"] is None for s in steps[boundary + 1 :])
                     assert any(
