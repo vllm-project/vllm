@@ -829,6 +829,7 @@ class WhisperForConditionalGeneration(
     supports_transcription_only = True
     supports_segment_timestamp = True
     supports_explicit_language_detection = True
+    supports_temperature_fallback = True
     supported_languages = ISO639_1_SUPPORTED_LANGS
 
     @classmethod

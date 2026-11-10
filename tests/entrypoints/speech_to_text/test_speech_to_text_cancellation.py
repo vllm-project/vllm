@@ -49,7 +49,9 @@ async def test_non_streaming_cancel_aborts_engine_requests(
     server.task_type = "transcribe"
     server.models = SimpleNamespace(model_name=lambda: "audio")
     server.model_config = SimpleNamespace(max_model_len=1024)
-    server.model_cls = SimpleNamespace(no_space_languages=set())
+    server.model_cls = SimpleNamespace(
+        no_space_languages=set(), supports_temperature_fallback=False
+    )
     server.default_sampling_params = {}
     server.asr_config = SimpleNamespace(max_audio_clip_s=30)
     server._check_model = AsyncMock(return_value=None)
@@ -125,7 +127,9 @@ async def test_non_streaming_cancel_advances_all_chunk_generators():
     server.task_type = "transcribe"
     server.models = SimpleNamespace(model_name=lambda: "audio")
     server.model_config = SimpleNamespace(max_model_len=1024)
-    server.model_cls = SimpleNamespace(no_space_languages=set())
+    server.model_cls = SimpleNamespace(
+        no_space_languages=set(), supports_temperature_fallback=False
+    )
     server.default_sampling_params = {}
     server.asr_config = SimpleNamespace(max_audio_clip_s=30)
     server._check_model = AsyncMock(return_value=None)

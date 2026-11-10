@@ -1306,6 +1306,13 @@ class SupportsTranscription(Protocol):
     :meth:`get_language_token_ids`.
     """
 
+    supports_temperature_fallback: ClassVar[bool] = False
+    """
+    Enables the HF/OpenAI Whisper temperature fallback for greedy transcription:
+    retry at increasing temperatures when the output looks degenerate (high
+    gzip compression ratio or low average logprob).
+    """
+
     no_space_languages: ClassVar[set[str]] = {"ja", "zh"}
     """
     Languages that don't need a space between words.

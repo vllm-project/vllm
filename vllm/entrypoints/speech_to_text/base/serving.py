@@ -55,6 +55,7 @@ from ..translation.protocol import (
     TranslationSegment,
     TranslationStreamResponse,
 )
+from .fallback import generate_with_temperature_fallback
 
 SpeechToTextResponse: TypeAlias = (
     TranscriptionResponse | TranslationResponse | TranscriptionResponseDiarized
@@ -162,19 +163,6 @@ class SpeechToTextBaseServing(GenerateBaseServing):
 
     def shutdown(self) -> None:
         self._preprocess_executor.shutdown(wait=False)
-
-    def _engine_generate(
-        self,
-        request,
-        engine_input,
-        sampling_params,
-        request_id: str,
-        **generate_kwargs,
-    ):
-        """Hook for transcription gzip fallback; translation keeps this path."""
-        return self.engine_client.generate(
-            engine_input, sampling_params, request_id, **generate_kwargs
-        )
 
     def _decode_and_chunk_speech(
         self,
@@ -569,9 +557,23 @@ class SpeechToTextBaseServing(GenerateBaseServing):
                         lora_request=lora_request,
                         trace_headers=trace_headers,
                     )
+                elif (
+                    self.task_type == "transcribe"
+                    and self.model_cls.supports_temperature_fallback
+                    and not request.stream
+                    and sampling_params.temperature == 0
+                ):
+                    generator = generate_with_temperature_fallback(
+                        self.engine_client.generate,
+                        engine_input,
+                        sampling_params,
+                        request_id_item,
+                        vocab_size=self.model_config.get_vocab_size(),
+                        lora_request=lora_request,
+                        trace_headers=trace_headers,
+                    )
                 else:
-                    generator = self._engine_generate(
-                        request,
+                    generator = self.engine_client.generate(
                         engine_input,
                         sampling_params,
                         request_id_item,
