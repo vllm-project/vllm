@@ -93,7 +93,9 @@ class MoEKernelOracle(ABC, Generic[BackendT]):
         """Map a backend enum value to its concrete `FusedMoEExperts`
         subclasses, in selection priority order.
 
-        Overrides with a module-level mapping must forward to it at call time.
+        The default resolves `experts_mapping` at call time. Subclasses that
+        support replacing their module-level lookup should override this method
+        to call that function.
         """
         if self.experts_mapping is None:
             raise NotImplementedError(
@@ -102,20 +104,20 @@ class MoEKernelOracle(ABC, Generic[BackendT]):
             )
         return resolve_moe_experts(backend, self.experts_mapping, self.name)
 
-    def map_backend(self, runner_backend: MoEBackend) -> BackendT:
+    @classmethod
+    def map_backend(cls, runner_backend: MoEBackend) -> BackendT:
         """Map a user-facing `MoEBackend` (from the runner config) to
         this oracle's enum."""
-        if self.backend_mapping is None:
+        if cls.backend_mapping is None:
             raise NotImplementedError(
-                f"{type(self).__name__} must define backend_mapping "
-                "or override map_backend()."
+                f"{cls.__name__} must define backend_mapping or override map_backend()."
             )
-        backend = self.backend_mapping.get(runner_backend)
+        backend = cls.backend_mapping.get(runner_backend)
         if backend is not None:
             return backend
         raise ValueError(
-            f"moe_backend='{runner_backend}' is not supported for {self.name} MoE. "
-            f"Expected one of {list(self.backend_mapping)}."
+            f"moe_backend='{runner_backend}' is not supported for {cls.name} MoE. "
+            f"Expected one of {list(cls.backend_mapping)}."
         )
 
     def select_backend(self) -> tuple[BackendT, type[mk.FusedMoEExperts] | None]:

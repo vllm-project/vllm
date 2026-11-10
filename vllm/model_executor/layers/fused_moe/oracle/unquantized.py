@@ -537,7 +537,8 @@ class UnquantizedMoEKernelOracle(MoEKernelOracle[UnquantizedMoeBackend]):
     ) -> list[type[mk.FusedMoEExperts]]:
         return backend_to_kernel_cls(backend)
 
-    def map_backend(self, runner_backend: MoEBackend) -> UnquantizedMoeBackend:
+    @classmethod
+    def map_backend(cls, runner_backend: MoEBackend) -> UnquantizedMoeBackend:
         return map_unquantized_backend(runner_backend)
 
     def select_backend(

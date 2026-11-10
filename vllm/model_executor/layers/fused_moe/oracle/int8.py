@@ -1,7 +1,7 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 
-from collections.abc import Mapping
+from collections.abc import Callable, Mapping
 from enum import Enum
 from types import MappingProxyType
 from typing import Any
@@ -42,25 +42,21 @@ class Int8MoeBackend(Enum):
 def _get_priority_backends(
     moe_config: FusedMoEConfig,
 ) -> list[Int8MoeBackend]:
-    """Get available backends in priority order based on platform and config."""
-    return Int8MoEKernelOracle(moe_config).get_priority_backends()
+    """Return the fixed INT8 backend priority order."""
+    return list(Int8MoEKernelOracle.priority_backends)
 
 
 def backend_to_kernel_cls(
     backend: Int8MoeBackend,
 ) -> list[type[mk.FusedMoEExperts]]:
-    return resolve_moe_experts(backend, Int8MoEKernelOracle.experts_mapping, "Int8")
-
-
-def map_int8_backend(runner_backend: MoEBackend) -> Int8MoeBackend:
-    """Map user's MoEBackend to Int8MoeBackend."""
-    mapping = Int8MoEKernelOracle.backend_mapping
-    if backend := mapping.get(runner_backend):
-        return backend
-    raise ValueError(
-        f"moe_backend='{runner_backend}' is not supported for Int8 MoE. "
-        f"Expected one of {list(mapping.keys())}."
+    return resolve_moe_experts(
+        backend, Int8MoEKernelOracle.experts_mapping, Int8MoEKernelOracle.name
     )
+
+
+map_int8_backend: Callable[[MoEBackend], Int8MoeBackend] = lambda runner_backend: (
+    Int8MoEKernelOracle.map_backend(runner_backend)
+)
 
 
 class Int8MoEKernelOracle(MoEKernelOracle[Int8MoeBackend]):
@@ -94,11 +90,6 @@ class Int8MoEKernelOracle(MoEKernelOracle[Int8MoeBackend]):
             ),
         }
     )
-
-    def backend_to_kernel_cls(
-        self, backend: Int8MoeBackend
-    ) -> list[type[mk.FusedMoEExperts]]:
-        return backend_to_kernel_cls(backend)
 
 
 def select_int8_moe_backend(
