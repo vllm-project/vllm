@@ -26,6 +26,7 @@ def _create_new_requests_data(prompt_embeds: torch.Tensor | None) -> NewRequestD
         block_ids=([],),
         num_computed_tokens=0,
         lora_request=None,
+        prefill_token_ids=[],
         prompt_embeds=prompt_embeds,
     )
 

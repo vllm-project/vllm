@@ -73,6 +73,17 @@ def test_split_k_segments_follow_sm_occupancy(
     )
 
 
+TRITON_BUILDERS = [TritonAttentionMetadataBuilder, TritonAttentionDiffKVMetadataBuilder]
+# A ROCm backend can only be imported with a ROCm build of torch.
+ROCM_DRAFT_UPDATE_BUILDERS: list[type] = []
+if current_platform.is_rocm():
+    from vllm.v1.attention.backends.rocm_aiter_unified_attn import (
+        RocmAiterUnifiedAttentionMetadataBuilder,
+    )
+
+    ROCM_DRAFT_UPDATE_BUILDERS.append(RocmAiterUnifiedAttentionMetadataBuilder)
+
+
 def _draft_builder(builder_cls, rswa_window: int | None):
     config = SimpleNamespace(
         model_config=SimpleNamespace(
@@ -99,11 +110,12 @@ def _draft_decode_batch(seq_lens: list[int]):
     return create_common_attn_metadata(batch, 16, "cpu")
 
 
+# Only the Triton backends support RSWA.
 @pytest.mark.parametrize(
-    "builder_cls",
-    [TritonAttentionMetadataBuilder, TritonAttentionDiffKVMetadataBuilder],
+    "builder_cls,rswa_window",
+    [(cls, rswa) for cls in TRITON_BUILDERS for rswa in (None, 64)]
+    + [(cls, None) for cls in ROCM_DRAFT_UPDATE_BUILDERS],
 )
-@pytest.mark.parametrize("rswa_window", [None, 64])
 def test_draft_decode_update_flag_matches_build_writes(builder_cls, rswa_window):
     """The update is a no-op, so the builder may claim support only when
     build() writes no builder-owned tensor that a captured graph reads."""
@@ -128,10 +140,7 @@ def test_draft_decode_update_flag_matches_build_writes(builder_cls, rswa_window)
     assert builder.supports_draft_decode_metadata_update is (rswa_window is None)
 
 
-@pytest.mark.parametrize(
-    "builder_cls",
-    [TritonAttentionMetadataBuilder, TritonAttentionDiffKVMetadataBuilder],
-)
+@pytest.mark.parametrize("builder_cls", TRITON_BUILDERS + ROCM_DRAFT_UPDATE_BUILDERS)
 def test_draft_decode_update_matches_fresh_build(builder_cls):
     """A replayed graph reads metadata built at capture; after an in-place
     update it must match a fresh build of the replayed batch."""

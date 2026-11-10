@@ -573,7 +573,7 @@ def select_regions(
 ) -> torch.Tensor:
     """Select stable top-k historical regions and append current.
 
-    With ``sort=False`` selected regions keep top-k order, left-padded with -1.
+    With `sort=False` selected regions keep top-k order, left-padded with -1.
     """
     rows, regions = scores.shape
     k = min(topk, regions)

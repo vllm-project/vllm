@@ -29,6 +29,16 @@ from .qwen3_omni_moe_thinker import (
 MAX_FRAME_PIXELS = 256 * 32 * 32
 
 
+def capped_frame_size(width: int, height: int) -> ImageSize:
+    if width * height <= MAX_FRAME_PIXELS:
+        return ImageSize(width=width, height=height)
+    scale = math.sqrt(MAX_FRAME_PIXELS / (width * height))
+    return ImageSize(
+        width=max(2, round(width * scale / 2) * 2),
+        height=max(2, round(height * scale / 2) * 2),
+    )
+
+
 def cap_frame_pixels(frames: np.ndarray | torch.Tensor) -> np.ndarray | torch.Tensor:
     """The reference reads each video frame at at most 256 * 32 * 32 pixels,
     in even sizes. Frames are NHWC uint8, numpy or tensor; tensors stay on
@@ -36,9 +46,7 @@ def cap_frame_pixels(frames: np.ndarray | torch.Tensor) -> np.ndarray | torch.Te
     height, width = frames.shape[1:3]
     if height * width <= MAX_FRAME_PIXELS:
         return frames
-    scale = math.sqrt(MAX_FRAME_PIXELS / (width * height))
-    new_width = max(2, round(width * scale / 2) * 2)
-    new_height = max(2, round(height * scale / 2) * 2)
+    new_width, new_height = capped_frame_size(width, height)
     is_tensor = isinstance(frames, torch.Tensor)
     tensor = frames if is_tensor else torch.from_numpy(frames)
     resized = F.interpolate(
@@ -65,6 +73,9 @@ class ClefOmniProcessingInfo(Qwen3OmniMoeThinkerProcessingInfo):
         if size.width * size.height <= MAX_FRAME_PIXELS:
             return size
         return self.get_image_size_with_most_features(max_pixels=MAX_FRAME_PIXELS)
+
+    def get_video_frame_size(self, width: int, height: int) -> ImageSize:
+        return capped_frame_size(width, height)
 
 
 class ClefOmniMultiModalProcessor(Qwen3OmniMoeThinkerMultiModalProcessor):

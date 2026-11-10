@@ -1,6 +1,6 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
-"""Causal target verify under DCP on gfx942 (MI300/MI325).
+r"""Causal target verify under DCP on gfx942 (MI300/MI325).
 
 Reproduces the attention shape of
 
@@ -15,9 +15,9 @@ Triton split-KV kernel. DeepSeek-V3 with MTP and an fp8 KV cache at DCP 8 hits
 the same limit through its 128 gathered heads. Shapes segmented MLA fits stay
 on it.
 
-The real metadata builder and ``forward_mqa`` run on one GPU with the DCP ranks
+The real metadata builder and `forward_mqa` run on one GPU with the DCP ranks
 simulated one after another. That is sound because this path has no
-collective: the query all-gather happens in the layer, before ``forward_mqa``.
+collective: the query all-gather happens in the layer, before `forward_mqa`.
 """
 
 from types import SimpleNamespace
@@ -65,13 +65,6 @@ class _FakeGroup:
         raise RuntimeError("DCP verify must not issue a collective")
 
 
-@pytest.fixture(autouse=True)
-def _use_v2_model_runner(monkeypatch):
-    """max_decode_query_len reads use_v2_model_runner, which would otherwise
-    inspect the stand-in speculative config from _vllm_config."""
-    monkeypatch.setenv("VLLM_USE_V2_MODEL_RUNNER", "1")
-
-
 @pytest.fixture
 def fake_dcp_groups(monkeypatch):
     """Point every importer of get_dcp_group at a settable rank stub."""
@@ -100,7 +93,6 @@ def _vllm_config(heads_per_rank: int, qlen: int, fp8_kv: bool):
     # multi-token row is classified as prefill and never reaches decode.
     config.speculative_config = SimpleNamespace(
         num_speculative_tokens=qlen - 1,
-        parallel_drafting=False,
         max_num_new_slots_for_drafting=0,
     )
     config.parallel_config.decode_context_parallel_size = DCP
@@ -149,7 +141,7 @@ def _impl(dcp_rank: int, heads_per_rank: int, fp8_kv: bool):
 
 
 def _run_rank(config, spec, layer_name, group, rank, q, kv_cache_src, k_scale):
-    """Shard the KV round-robin onto ``rank`` and run its verify step."""
+    """Shard the KV round-robin onto `rank` and run its verify step."""
     from vllm.v1.attention.backend import CommonAttentionMetadata
     from vllm.v1.attention.backends.mla.rocm_aiter_mla import AiterMLAMetadataBuilder
 

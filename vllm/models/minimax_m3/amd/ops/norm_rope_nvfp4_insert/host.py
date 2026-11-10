@@ -45,7 +45,7 @@ def minimax_m3_norm_rope_nvfp4_insert(
     eps: float,
 ) -> None:
     """Norm + RoPE of q / k / index-q / index-k and the NVFP4 K/V and index-K
-    inserts in one launch; k and index-k are not written back into ``qkv``."""
+    inserts in one launch; k and index-k are not written back into `qkv`."""
     n = qkv.shape[0]
     if n == 0:
         return

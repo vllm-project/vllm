@@ -6,7 +6,7 @@
 //! Ported from `llm-multimodal`'s `vision::transforms`, whose PIL resampling
 //! helpers are private there and cannot be imported.
 //!
-//! MuseSpark1x image/video processors resize via `PIL.Image.resize(size,
+//! Muse Spark image/video processors resize via `PIL.Image.resize(size,
 //! LANCZOS)` on the uint8 image. The SIMD `fast_image_resize` path is the same
 //! filter *family* but diverges bit-wise on non-integer ratios (support
 //! scaling + fixed-point details), which the vision encoder amplifies into a
