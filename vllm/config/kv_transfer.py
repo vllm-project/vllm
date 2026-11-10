@@ -1,6 +1,7 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 
+import enum
 import uuid
 from dataclasses import field
 from typing import Any, Literal, get_args
@@ -46,16 +47,31 @@ def hisparse_host_pool_gib(
     return host_pool_gib
 
 
-# Connectors that register the device KV cache with an RDMA engine whatever
-# their buffer device; NIXL is checked separately as it can stage through host.
-_KV_CACHE_REGISTERING_CONNECTORS = frozenset(
-    {
-        "MooncakeConnector",
-        "MooncakeStoreConnector",
-        "MoRIIOConnector",
-        "UMBPStoreConnector",
-    }
-)
+class KVCacheAccess(enum.IntFlag):
+    """How a KV connector accesses the device KV cache, as flags of what it
+    requires from the allocation; MultiConnector combines its children's."""
+
+    IN_PROCESS = 0
+    """In-process only (torch ops, copy kernels): any allocation works."""
+
+    REGISTERS = enum.auto()
+    """Registers it with UCX or RDMA: one physical allocation per segment."""
+
+    EXPORTS_FD = enum.auto()
+    """Another process imports it through POSIX file descriptors: one physical
+    allocation per segment, exportable (not yet implemented)."""
+
+    EXPORTS_FABRIC = enum.auto()
+    """Another process on the host imports it through FABRIC handles (UCX
+    cuda_ipc): one physical allocation per segment, and an IMEX channel."""
+
+    LEGACY_IPC = enum.auto()
+    """Shares it through legacy CUDA IPC: the extensible KV cache is unsupported."""
+
+    def needs_single_chunk(self) -> bool:
+        """Whether each segment must be backed by one physical allocation."""
+        exports = KVCacheAccess.EXPORTS_FD | KVCacheAccess.EXPORTS_FABRIC
+        return bool(self & (KVCacheAccess.REGISTERS | exports))
 
 
 def kv_buffer_device_default_factory() -> str:
@@ -170,22 +186,23 @@ class KVTransferConfig:
             return self.kv_connector_extra_config.get("connectors", [])
         return [{"kv_connector": self.kv_connector}]
 
-    def uses_nixl_on_device_memory(self) -> bool:
-        """Whether NIXL transfers the device KV cache itself, directly or in
-        MultiConnector. With a CPU kv_buffer_device it uses host staging buffers."""
-        return any(
-            (child.get("kv_connector") or "").startswith("Nixl")
-            and child.get("kv_buffer_device", self.kv_buffer_device) != "cpu"
-            for child in self._connector_children()
+    def kv_cache_access(self) -> KVCacheAccess:
+        """How the configured connectors reach the device KV cache, directly or
+        in MultiConnector. Imports the connector class to ask it, through
+        `KVConnectorBase_V1.kv_cache_access`."""
+        if self.kv_connector is None:
+            return KVCacheAccess.IN_PROCESS
+        from vllm.distributed.kv_transfer.kv_connector.factory import (
+            KVConnectorFactory,
         )
 
+        return KVConnectorFactory.kv_cache_access(self)
+
     def registers_kv_cache_memory(self) -> bool:
-        """Whether a connector registers the device KV cache itself with UCX or
-        RDMA (NIXL, Mooncake, MoRIIO, UMBP), directly or in MultiConnector."""
-        return self.uses_nixl_on_device_memory() or any(
-            child.get("kv_connector") in _KV_CACHE_REGISTERING_CONNECTORS
-            for child in self._connector_children()
-        )
+        """Whether a connector registers the device KV cache with UCX or RDMA,
+        or another process imports it, directly or in MultiConnector: each
+        segment must then be backed by one physical allocation."""
+        return self.kv_cache_access().needs_single_chunk()
 
     def has_connector(self, connector_name: str) -> bool:
         """Whether `connector_name` is configured, directly or in MultiConnector."""

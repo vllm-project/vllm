@@ -395,7 +395,10 @@ class CacheConfig:
     unsupported is an error. On unpartitioned discrete ROCm GPUs, the sizing
     adds back free memory that HIP hides by counting each allocation as at
     least 2 MiB, so gpu_memory_utilization bounds exact device memory use
-    there."""
+    there. When a KV connector registers the KV cache for RDMA or exports it to
+    another process, each segment is backed by a single physical allocation;
+    connectors declare this by overriding
+    `KVConnectorBase_V1.kv_cache_access`."""
 
     kv_offloading_size: float | None = None
     """Size of the KV cache offloading buffer in GiB. When TP > 1, this is

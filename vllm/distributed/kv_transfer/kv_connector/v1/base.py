@@ -48,6 +48,7 @@ from typing import TYPE_CHECKING, Any, Literal
 
 import torch
 
+from vllm.config.kv_transfer import KVCacheAccess
 from vllm.logger import init_logger
 from vllm.v1.attention.backend import AttentionMetadata
 from vllm.v1.core.sched.output import SchedulerOutput
@@ -200,6 +201,16 @@ class KVConnectorBase_V1(ABC):
     ) -> bool:
         """Whether the connector supports core lookahead hashing."""
         return False
+
+    @classmethod
+    def kv_cache_access(cls, kv_transfer_config: "KVTransferConfig") -> KVCacheAccess:
+        """How the connector's workers reach the device KV cache, as
+        `KVCacheAccess` flags, which decide how the extensible KV cache
+        allocates it, or whether it can be used: e.g. `REGISTERS` if they
+        register it with a UCX or RDMA engine, which requires each segment to
+        be backed by a single physical allocation. Defaults to `IN_PROCESS`.
+        """
+        return KVCacheAccess.IN_PROCESS
 
     @property
     def requires_kv_delivery(self) -> bool:
