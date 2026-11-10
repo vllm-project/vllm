@@ -63,6 +63,7 @@ from .interfaces import (
     SupportsTranscription,
     _require_is_multimodal,
 )
+from .mm_encoder_bucketing import EncoderBucketingSpec, install_encoder_bucketing
 from .qwen3 import Qwen3Model
 from .utils import (
     AutoWeightsLoader,
@@ -72,6 +73,67 @@ from .utils import (
 )
 
 logger = init_logger(__name__)
+
+
+class FunASRBucketingSpec(EncoderBucketingSpec):
+    """Bucketing semantics for FunASR/SenseVoice's SANM encoder.
+
+    `input_features` is `[B][T][560]` (time on dim 1) padded to a fixed
+    1000-frame window; `speech_lengths` carries the true frame count. The main
+    SANM encoder is mask-aware (bit-exact), but the trailing `audio_adaptor` is
+    unmasked dense SDPA with merge/pooling, so the overall crop is only
+    approx-lossless.
+    """
+
+    frames_per_second = 100  # hop_length=160 @ 16 kHz
+    context_margin = 8  # SANM FSMN conv receptive field
+
+    def item_lengths(
+        self, mm_kwargs_batch: Mapping[str, object]
+    ) -> list[int] | None:
+        speech_lengths = mm_kwargs_batch.get("speech_lengths")
+        if speech_lengths is None:
+            return None
+        if isinstance(speech_lengths, torch.Tensor):
+            return speech_lengths.tolist()
+        return [int(s.item()) for s in speech_lengths]
+
+    def padded_time(self, mm_kwargs_batch: Mapping[str, object]) -> int:
+        input_features = mm_kwargs_batch.get("input_features")
+        if input_features is None:
+            return 0
+        if isinstance(input_features, torch.Tensor):
+            return int(input_features.shape[1])
+        return max(int(f.shape[0]) for f in input_features)
+
+    def crop(
+        self,
+        mm_kwargs_batch: Mapping[str, object],
+        indices: list[int],
+        rung: int,
+    ) -> dict[str, object]:
+        input_features = mm_kwargs_batch["input_features"]
+        speech_lengths = mm_kwargs_batch["speech_lengths"]
+        fake_token_lengths = mm_kwargs_batch.get("fake_token_lengths")
+
+        def select(seq):
+            if isinstance(seq, torch.Tensor):
+                return seq[torch.tensor(indices, dtype=torch.long, device=seq.device)]
+            return [seq[i] for i in indices]
+
+        if isinstance(input_features, torch.Tensor):
+            rows = torch.tensor(indices, dtype=torch.long, device=input_features.device)
+            feats = input_features[rows, :rung]
+        else:
+            feats = [input_features[i][:rung] for i in indices]
+
+        result = {
+            "input_features": feats,
+            "speech_lengths": select(speech_lengths),
+        }
+        if fake_token_lengths is not None:
+            result["fake_token_lengths"] = select(fake_token_lengths)
+        return result
 
 
 def sequence_mask(lengths, maxlen=None, dtype=torch.float32, device=None):
@@ -930,6 +992,13 @@ class FunASRForConditionalGeneration(
         self.model = FunASRModel(
             vllm_config=vllm_config,
             prefix=maybe_prefix(prefix, "model"),
+        )
+        install_encoder_bucketing(
+            self,
+            {"audio": self.model.encoder.audio_encoder},
+            FunASRBucketingSpec(),
+            model_type="funasr",
+            additional_config=getattr(vllm_config, "additional_config", None),
         )
         logit_scale = getattr(config, "logit_scale", 1.0)
 

@@ -403,3 +403,25 @@ def test_cohere_spec_buckets_on_dim2_time_axis():
     assert got == {800: [0], 3000: [1], 1600: [2]}
     for indices, kw in rungs:
         assert kw["length"].shape == (len(indices),)
+
+
+def test_funasr_spec_buckets_tensor_features():
+    from vllm.model_executor.models.funasr import FunASRBucketingSpec
+
+    feats = torch.randn(3, 1000, 560)  # [B, T, feat], time dim 1, fixed window 1000
+    speech_lengths = torch.tensor([400, 900, 600])
+    fake_token_lengths = torch.tensor([100, 225, 150])
+    batch = {
+        "input_features": feats,
+        "speech_lengths": speech_lengths,
+        "fake_token_lengths": fake_token_lengths,
+    }
+    bucketer = EncoderBucketing(
+        FunASRBucketingSpec(), LengthBucketingConfig((500, 800, 1000))
+    )
+    rungs = bucketer.bucket(batch, 3)
+    # windows (margin 8): 400->500, 900->1000, 600->800
+    got = {r[1]["input_features"].shape[1]: r[0] for r in rungs}
+    assert got == {500: [0], 1000: [1], 800: [2]}
+    for indices, kw in rungs:
+        assert kw["speech_lengths"].shape == (len(indices),)

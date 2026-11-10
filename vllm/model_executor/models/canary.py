@@ -113,7 +113,7 @@ class CanaryBucketingSpec(EncoderBucketingSpec):
 
     def padded_time(self, mm_kwargs_batch: Mapping[str, object]) -> int:
         input_features = mm_kwargs_batch.get("input_features")
-        if not input_features:
+        if input_features is None:
             return 0
         if is_list_of(input_features, torch.Tensor):
             return max(int(f.shape[0]) for f in input_features)
