@@ -200,3 +200,19 @@ def test_pad_unpad_round_trip_preserves_head_order(num_heads):
 def test_a_non_causal_block_never_routes_to_gluon(gluon_available):
     """A small-head block that normally uses Gluon must use ASM when non-causal."""
     assert not AiterMLAHelper.use_gluon_verify(12, 8, "auto", causal=False)
+
+
+@pytest.mark.parametrize(
+    ("gfx1250", "preset", "expected"),
+    [(True, None, "1"), (True, "0", "0"), (False, None, None)],
+)
+def test_gfx1250_persistent_decode_uses_flydsl_ps1(
+    monkeypatch, gfx1250, preset, expected
+):
+    """gfx1250 has no asm persistent decode kernel, so AITER must take FlyDSL
+    PS1 there."""
+    env = {} if preset is None else {"AITER_MLA_DECODE_PS1_FLYDSL": preset}
+    monkeypatch.setattr("os.environ", env)
+    monkeypatch.setattr("vllm.platforms.rocm.on_gfx1250", lambda: gfx1250)
+    rocm_aiter_mla._enable_gfx1250_flydsl_ps1_decode()
+    assert env.get("AITER_MLA_DECODE_PS1_FLYDSL") == expected
