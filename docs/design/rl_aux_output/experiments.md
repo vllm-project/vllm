@@ -15,7 +15,7 @@ Measurements behind the [protocol](protocol.md). The designs are described in [d
 
 Correctness is checked against an independent reference, not only against what the engine itself returned. Each request is read back through its manifest and compared three ways:
 
-- **Inline:** the R3 rows the engine returned with the response (inline mode carries R3 only).
+- **Inline:** the R3 rows the engine returned with the response (the current build returns R3 only inline).
 - **Reference:** each trajectory's own first computation, dumped by the engine per step after the rejected speculative suffix is dropped. For a fork, positions before the fork point come from the parent. Rows of drafts the scheduler later truncated are skipped.
 - **Version segments:** the manifest's segments must match the weight versions the trajectory saw.
 
