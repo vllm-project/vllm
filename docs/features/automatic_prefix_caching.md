@@ -27,8 +27,14 @@ VLLM_USE_RUST_FRONTEND=1 vllm serve <model> \
 ```
 
 Other multimodal hash configurations, overlapping placeholder ranges, and prompt
-embeddings continue to use engine-side hashing. No additional flag is needed to
-select the frontend optimization for supported requests.
+embeddings continue to use engine-side hashing. This fallback applies to the
+**whole request**, not individual blocks: one unsupported placeholder, even
+after a supported prefix, means the frontend sends no prompt block hashes and
+the engine hashes the entire prompt. Partial frontend prompt-hash lists are not
+accepted. For supported requests, the frontend sends all currently hashable
+prompt blocks; the engine extends that chain when generated tokens complete
+additional blocks. No additional flag is needed to select the frontend
+optimization for supported requests.
 
 ## Hybrid Mamba models
 

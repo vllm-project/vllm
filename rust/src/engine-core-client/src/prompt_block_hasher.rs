@@ -123,6 +123,8 @@ impl PromptBlockHasher {
 
     /// Return the request's prompt block hashes, or `None` if the engine has to
     /// compute them because they need inputs this frontend doesn't encode.
+    /// Fallback is request-wide: an unsupported input anywhere in the prompt
+    /// returns `None`, never the hashes of just its supported prefix.
     pub(crate) fn hash_request(&self, request: &EngineCoreRequest) -> Option<Vec<BlockHash>> {
         // TODO: encode prompt-embeds keys once this frontend supports them.
         let unsupported = request.prompt_embeds.is_some() || request.prompt_is_token_ids.is_some();
@@ -457,6 +459,8 @@ mod tests {
         prompt_token_ids: Vec<u32>,
         block_hashes: Vec<String>,
         mm_features: Option<Vec<MmFeatureSpec>>,
+        #[serde(default)]
+        frontend_fallback: bool,
     }
 
     #[derive(Deserialize)]
@@ -482,9 +486,18 @@ mod tests {
                 mm_features: case.mm_features,
                 ..request(case.prompt_token_ids)
             };
-            let hashes = hasher(&case.hash_algo, case.block_size, case.num_lookahead_tokens)
-                .hash_request(&request)
-                .unwrap_or_else(|| panic!("{} {}: not hashed", case.hash_algo, case.name));
+            let hasher = hasher(&case.hash_algo, case.block_size, case.num_lookahead_tokens);
+            let hashes = hasher.hash_request(&request);
+            if case.frontend_fallback {
+                assert_eq!(
+                    hashes, None,
+                    "{}: fallback must discard the whole prefix",
+                    case.name
+                );
+                continue;
+            }
+            let hashes =
+                hashes.unwrap_or_else(|| panic!("{} {}: not hashed", case.hash_algo, case.name));
             let hashes: Vec<_> = hashes.iter().map(|hash| hex::encode(&hash.0)).collect();
             assert_eq!(
                 hashes, case.block_hashes,
@@ -508,8 +521,8 @@ mod tests {
     }
 
     #[test]
-    fn token_id_beyond_i32_is_left_to_the_engine() {
-        let tokens = vec![1, 0x8000_0000];
+    fn token_id_beyond_i32_discards_the_supported_pickle_prefix() {
+        let tokens = vec![1, 2, 3, 0x8000_0000];
         assert_eq!(
             hasher("sha256", 2, 0).hash_request(&request(tokens.clone())),
             None
@@ -580,7 +593,7 @@ mod tests {
     }
 
     #[test]
-    fn unsupported_multimodal_hashes_are_left_to_the_engine() {
+    fn unsupported_multimodal_hashes_fall_back_for_the_whole_request() {
         let feature = |offset, length| MmFeatureSpec {
             data: None,
             modality: MmModality::Image,
@@ -593,11 +606,13 @@ mod tests {
             mm_hash: None,
         };
         let mut request = request(vec![1; 32]);
-        request.mm_features = Some(vec![feature(3, 18)]);
+        request.mm_features = Some(vec![feature(3, 4)]);
         assert!(hasher("sha256_cbor", 8, 0).hash_request(&request).is_some());
         assert!(hasher("sha256", 8, 0).hash_request(&request).is_none());
 
         for features in [
+            // The first two blocks are supported; the third contains an overlap.
+            vec![feature(3, 4), feature(18, 4), feature(20, 4)],
             vec![feature(3, 18), feature(3, 18)],
             vec![feature(12, 2), feature(3, 2)],
             vec![feature(3, 0)],
