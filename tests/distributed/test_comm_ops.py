@@ -937,13 +937,29 @@ def _pp_transport_test_worker(
 
 
 @ray.remote(num_gpus=1, max_calls=1)
-def pp_stream_transport_test_worker(*args):
-    _pp_transport_test_worker(*args, mode="stream")
+def pp_stream_transport_test_worker(
+    monkeypatch: pytest.MonkeyPatch,
+    tp_size: int,
+    pp_size: int,
+    rank: int,
+    distributed_init_port: str,
+):
+    _pp_transport_test_worker(
+        monkeypatch, tp_size, pp_size, rank, distributed_init_port, mode="stream"
+    )
 
 
 @ray.remote(num_gpus=1, max_calls=1)
-def pp_fp8_transport_test_worker(*args):
-    _pp_transport_test_worker(*args, mode="fp8")
+def pp_fp8_transport_test_worker(
+    monkeypatch: pytest.MonkeyPatch,
+    tp_size: int,
+    pp_size: int,
+    rank: int,
+    distributed_init_port: str,
+):
+    _pp_transport_test_worker(
+        monkeypatch, tp_size, pp_size, rank, distributed_init_port, mode="fp8"
+    )
 
 
 @multi_gpu_test(num_gpus=2)

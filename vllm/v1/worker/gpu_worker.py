@@ -1529,6 +1529,7 @@ class Worker(WorkerBase):
         if forward_pass and self._pp_transport and not get_pp_group().is_first_rank:
             intermediate_tensors = self._pp_transport.recv(get_pp_group())
         elif forward_pass and not get_pp_group().is_first_rank:
+            tensor_dict: dict[str, Any] | None
             if use_fixed_pp_transport:
                 assert self._rocm_pp_transport is not None
                 tensor_dict, comm_handles, comm_postprocess = (
