@@ -486,11 +486,9 @@ class TestStreaming:
 class TestTruncatedArgsFlush:
     """Generation that stops inside the args object must still stream valid JSON.
 
-    The converter returns the args span verbatim, so the flush extends the
-    streamed prefix with a span that was cut off mid-value. A span with no
-    completion (a key, a comma, a partial literal or escape) is closed after its
-    last complete value, which the streamed prefix may not have reached. Schema
-    coercion at the flush must likewise leave the streamed prefix intact.
+    A span with no completion (a key, a comma, a partial literal or escape) is
+    closed after its last complete value, and flush-time coercion must leave the
+    streamed prefix intact.
     """
 
     @pytest.mark.parametrize(

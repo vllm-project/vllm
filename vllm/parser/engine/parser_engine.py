@@ -446,10 +446,8 @@ class ParserEngine(Parser):
             or json_str[end] != '"'
             or (string_keys is not None and last_key not in string_keys)
         ):
-            # The trailing value cannot stream. Stop after the last complete
-            # top-level value rather than after ``"key": ``: the flush can
-            # drop an unfinished parameter, and a prefix that ends on the
-            # separator then has no valid completion.
+            # The trailing value cannot stream: stop after the last complete
+            # value so the prefix never ends on a dangling `"key": `.
             return (json_str[:last_comma] if last_comma >= 0 else ""), False
 
         escape = False
@@ -1284,12 +1282,9 @@ class ParserEngine(Parser):
             try:
                 json.loads(final_json)
             except (json.JSONDecodeError, ValueError):
-                # A converter that returns its input span verbatim (inkling)
-                # can extend the prefix with a value that EOS cut off. If that
-                # span has no completion (a key, a comma, a partial literal or
-                # escape), close it after its last complete value instead. The
-                # streamed prefix can stop short of that value, on the
-                # ``"key": `` of a middle field _safe_arg_prefix withheld.
+                # A verbatim converter (inkling) can return a span that EOS cut
+                # off. Without a completion (a key, a comma, a partial literal
+                # or escape), close it after its last complete value instead.
                 suffix = self._json_prefix_terminator(final_json)
                 if not suffix:
                     cut, _ = self._safe_arg_prefix(final_json)
@@ -1306,16 +1301,11 @@ class ParserEngine(Parser):
         return None
 
     def _close_streamed_json(self, slot: ToolCallSlot, prev: str) -> str | None:
-        """Terminate an argument prefix the flush cannot extend.
+        """Close the streamed argument prefix `prev`.
 
-        `_safe_arg_prefix` deliberately streams unterminated string values for
-        prefix-stable keys, on the understanding that the flush completes them.
-        If the model never closes a parameter, the non-partial re-derivation
-        drops that parameter entirely, so it is neither longer than nor a prefix
-        of what was already sent. Returning `None` there ends the stream with
-        `finish_reason` set while the client holds a half-written string, which
-        no JSON parser accepts. Close what was already sent instead: the client
-        gets the truncated value rather than an unparsable message.
+        Returns `None` when `prev` has no completion. Used when the flush
+        result does not extend `prev`, e.g. it drops a parameter the model
+        left open.
         """
         suffix = self._json_prefix_terminator(prev)
         if not suffix:
@@ -1354,13 +1344,9 @@ class ParserEngine(Parser):
         if in_string:
             suffix += '"'
         else:
-            # A dangling separator has no value to close. ``null`` is used
-            # purely to make the prefix PARSE: the client is being handed a
-            # truncated call either way, and a null placeholder may still fail
-            # the tool's schema, which is strictly better than arguments no
-            # JSON parser accepts. An object cannot be completed after a comma
-            # without inventing a key, so that case falls through to the parse
-            # check below and yields no suffix.
+            # `null` only makes the prefix parse; it may still fail the tool's
+            # schema. An object cannot be completed after a comma without
+            # inventing a key, so that case yields no suffix.
             tail = prefix.rstrip()
             if tail.endswith(":") or (
                 tail.endswith(",") and stack and stack[-1] == "]"

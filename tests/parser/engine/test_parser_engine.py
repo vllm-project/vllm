@@ -1953,14 +1953,10 @@ class TestCoercionInstabilityRegression:
         assert parsed["extra"] == "ok"
 
     def test_integer_middle_field_not_truncated_by_coercion(self):
-        """Integer middle field must not cause truncation when coerced at flush.
+        """Flush-time coercion of a quoted integer must not drop later arguments.
 
-        Three chunks are required: the first triggers tool-name emission
-        (consuming the chunk without calling _compute_arg_delta), the second
-        leaves the integer value complete in streamed_json as a quoted string
-        ("42") while the JSON is still open, and the third closes the JSON.
-        Without the fix, flush-time coercion changes "42"→42, breaking the
-        startswith invariant and silently dropping the rest of the arguments.
+        The second chunk leaves `"42"` complete in the streamed prefix while the
+        JSON is still open; the flush then coerces it to `42`.
         """
         tool = _make_tool("f", {"n": {"type": "integer"}, "s": {"type": "string"}})
         engine = _make_engine(_converter_config(_json_converter), tools=[tool])
