@@ -21,7 +21,7 @@ def use_tensor_descriptor(override: bool | None = None) -> bool:
 
 def tensor_descriptor_compatible(*tensors: "torch.Tensor | None") -> bool:
     """Whether every tensor can back a tensor descriptor spanning its last dim.
-    ``None`` (unused optional operand) is accepted."""
+    `None` (unused optional operand) is accepted."""
     for t in tensors:
         if t is None:
             continue

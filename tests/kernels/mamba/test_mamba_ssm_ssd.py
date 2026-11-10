@@ -623,8 +623,8 @@ def _ssd_pins(scan_cfg, state_cfg):
 
 
 def _find_config(kernel, kwargs, stages_warps):
-    """The matching config of ``kernel``, or None if this platform drops it
-    (e.g. ``_drop_racy_wgmma_configs`` on sm90)."""
+    """The matching config of `kernel`, or None if this platform drops it
+    (e.g. `_drop_racy_wgmma_configs` on sm90)."""
     matches = [
         c
         for c in kernel.configs
@@ -700,7 +700,7 @@ def _spy_use_td(monkeypatch) -> dict[str, list[bool]]:
 
 
 def _misaligned(t: torch.Tensor) -> torch.Tensor:
-    """Copy of ``t`` with data_ptr one element off 16 B alignment."""
+    """Copy of `t` with data_ptr one element off 16 B alignment."""
     out = torch.empty(t.numel() + 1, dtype=t.dtype, device=t.device)[1:]
     return out.view(t.shape).copy_(t)
 
