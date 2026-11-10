@@ -412,7 +412,7 @@ steps:
       - pytest -v -s models/qwen4_exp/test_qsa_reference.py
 
 - label: ":nvidia: (B200) Qwen4 Exp Kernels"
-  key: qwen4-exp-hc-kernels-b200
+  key: qwen4-exp-kernels-b200
   automatic_shard: true
   timeout_in_minutes: 20
   device: b200-k8s
@@ -422,11 +422,15 @@ steps:
   - vllm/models/qwen4_exp/nvidia/mega_moe.py
   - vllm/models/qwen4_exp/nvidia/ops/hc.py
   - vllm/model_executor/layers/fused_moe/deep_gemm_mega_moe.py
+  - vllm/models/qwen4_exp/nvidia/ops/qsa.py
+  - vllm/models/qwen4_exp/nvidia/ops/qsa_fp8.py
   - tests/models/qwen4_exp/test_hc_ops.py
   - tests/models/qwen4_exp/test_mega_moe.py
+  - tests/models/qwen4_exp/test_qsa_reference.py
   commands:
     - pytest -v -s models/qwen4_exp/test_hc_ops.py
     - pytest -v -s models/qwen4_exp/test_mega_moe.py
+    - pytest -v -s models/qwen4_exp/test_qsa_reference.py
   mirror:
     amd:
       label: ":amd: (MI355) Qwen4 Exp HC Kernels"
