@@ -534,8 +534,8 @@ def _gfx942_monokernel() -> bool:
 
 
 class DeepseekV41ROCMAiterMLASparseBackend(DeepseekV4SparseMLABackend):
-    # fp8_e4m3 selects plain per-tensor fp8 KV rows (GLM-5's format) instead
-    # of the UE8M0 block-scaled fp8_ds_mla record; aiter sparse MLA only.
+    # fp8_e4m3 selects plain per-tensor fp8 KV rows instead of the UE8M0
+    # block-scaled fp8_ds_mla record; aiter sparse MLA only.
     supported_kv_cache_dtypes: ClassVar[list[CacheDType]] = [
         *DeepseekV4SparseMLABackend.supported_kv_cache_dtypes,
         "fp8_e4m3",
