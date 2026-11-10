@@ -52,6 +52,7 @@ from vllm.model_executor.utils import (
 )
 from vllm.platforms import current_platform
 from vllm.third_party.flash_linear_attention.ops.kda import FusedRMSNormGated
+from vllm.third_party.flash_linear_attention.ops.l2norm import l2norm_fwd_block
 from vllm.utils.gpu_sync_debug import gpu_sync_allowed
 from vllm.v1.attention.backends.gdn_attn import GDNAttentionMetadata
 from vllm.v1.kv_cache_interface import MambaSpec
@@ -77,7 +78,7 @@ _AITER_CONV1D_MIN_TOKENS = 4096
 class _Glm5NextMergedColumnParallelLinear(MergedColumnParallelLinear):
     """Merged projection with multiple replicated output shards.
 
-    Extends K3's ``_KimiGDNMergedColumnParallelLinear`` to support two
+    Extends K3's `_KimiGDNMergedColumnParallelLinear` to support two
     replicated shards (f_a, g_a) instead of one. Pre-multiplies each
     replicated entry's output_size by tp_size so the per-rank shard
     divides back to the full size, and forces tp_rank=0 during weight
@@ -156,12 +157,12 @@ def _resolve_kda_prefill_backend(
 ) -> str:
     """Pick the chunked-prefill kernel: FlashKDA (fused CUDA, ~2-4x faster on
     SM90/SM10x/SM12x for bf16, head_dim 128 and a bounded gate) or the Triton
-    ``chunk_kda_with_fused_gate`` path. ``backend`` comes from
-    ``additional_config.kda_prefill_backend`` (auto / triton / flashkda).
+    `chunk_kda_with_fused_gate` path. `backend` comes from
+    `additional_config.kda_prefill_backend` (auto / triton / flashkda).
 
-    On ROCm, ``flashkda`` runs AITER's FlashKDA kernels and resolves to
-    ``aiter_flashkda``, which reserves no prefix-cache checkpoint blocks;
-    ``auto`` keeps Triton there."""
+    On ROCm, `flashkda` runs AITER's FlashKDA kernels and resolves to
+    `aiter_flashkda`, which reserves no prefix-cache checkpoint blocks;
+    `auto` keeps Triton there."""
     if backend not in ("auto", "triton", "flashkda"):
         raise ValueError(f"Unsupported KDA prefill backend: {backend}")
     if backend == "flashkda" and current_platform.is_rocm():
@@ -217,10 +218,10 @@ def _aiter_flashkda_runs_prefill(backend: str, metadata: GDNAttentionMetadata) -
 def _fused_qkv_conv1d(
     conv_size: int, projection_size: int, tp_size: int, tp_rank: int, prefix: str
 ) -> ColumnParallelLinear:
-    """The q|k|v short convs as one ``[3 * C_local, 1, K]`` parameter.
+    """The q|k|v short convs as one `[3 * C_local, 1, K]` parameter.
 
-    Checkpoint ``q/k/v_conv1d`` weights load as shards 0/1/2 (see
-    ``stacked_params_mapping``). The conv kernels read this parameter directly,
+    Checkpoint `q/k/v_conv1d` weights load as shards 0/1/2 (see
+    `stacked_params_mapping`). The conv kernels read this parameter directly,
     so every weight write (load, refit, offload, IPC cache) lands in it and its
     address stays fixed for cudagraphs (#55087).
     """
@@ -454,6 +455,11 @@ class Glm5NextLinearAttention(GatedDeltaNetAttention):
             self.kda_lower_bound,
             recurrent_state_dtype,
         )
+        if self.kda_prefill_backend == "triton":
+            l2norm_fwd_block.register_warmup(
+                dtype=vllm_config.model_config.dtype,
+                dim=self.head_dim,
+            )
         self._flashkda_buffer_specs: (
             tuple[tuple[tuple[int, ...], torch.dtype], ...] | None
         ) = None
@@ -610,12 +616,12 @@ class Glm5NextLinearAttention(GatedDeltaNetAttention):
         conv_state: torch.Tensor | None = None,
         recurrent_state: torch.Tensor | None = None,
     ) -> tuple[torch.Tensor, torch.Tensor]:
-        """Fused KDA chunked prefill (FlashKDA). Takes the raw gate logits ``g``
-        and raw ``beta`` logits, l2-normalizes q/k in-kernel and applies the
-        bounded gate ``lower_bound * sigmoid(exp(A_log) * (g + dt_bias))``,
-        matching ``chunk_kda_with_fused_gate(..., safe_gate=True)``. Writes the
-        attention output into ``out`` (a workspace buffer when ``None``) and
-        returns ``(out, final_state)``."""
+        """Fused KDA chunked prefill (FlashKDA). Takes the raw gate logits `g`
+        and raw `beta` logits, l2-normalizes q/k in-kernel and applies the
+        bounded gate `lower_bound * sigmoid(exp(A_log) * (g + dt_bias))`,
+        matching `chunk_kda_with_fused_gate(..., safe_gate=True)`. Writes the
+        attention output into `out` (a workspace buffer when `None`) and
+        returns `(out, final_state)`."""
         assert self._flashkda_buffer_specs is not None
         final_state, checkpoint_state, workspace, workspace_out = (
             current_workspace_manager().get_simultaneous(*self._flashkda_buffer_specs)

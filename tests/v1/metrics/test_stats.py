@@ -1,11 +1,13 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 
-from vllm.v1.core.sched.output import ScheduledEncoderInputStats, SchedulerOutput
-from vllm.v1.engine import EngineCoreOutputs, FinishReason
+import pytest
+
+from vllm.v1.engine import EngineCoreOutput, EngineCoreOutputs, FinishReason
 from vllm.v1.metrics.cache_hit_source import CacheHitSource
 from vllm.v1.metrics.stats import (
     IterationStats,
+    LoRARequestStates,
     PrefillStats,
     PrefixCacheStats,
     PromptTokenStats,
@@ -14,7 +16,6 @@ from vllm.v1.metrics.stats import (
     SchedulerStats,
 )
 from vllm.v1.serial_utils import MsgpackDecoder, MsgpackEncoder
-from vllm.v1.utils import compute_iteration_details
 
 
 def test_iteration_stats_repr():
@@ -136,19 +137,6 @@ def test_prefix_cache_stats_hits_by_source_serialization():
         CacheHitSource.P2P: 4,
         CacheHitSource.HOST: 4,
     }
-
-
-def test_compute_iteration_details_includes_encoder_stats():
-    scheduler_output = SchedulerOutput.make_empty()
-    scheduler_output.scheduled_encoder_input_stats = ScheduledEncoderInputStats(
-        num_inputs=2,
-        output_tokens=392,
-    )
-
-    iteration_details = compute_iteration_details(scheduler_output)
-
-    assert iteration_details.num_encoder_inputs == 2
-    assert iteration_details.num_encoder_output_tokens == 392
 
 
 def test_prefill_kv_computed_with_cache():
@@ -381,3 +369,19 @@ def test_prompt_token_stats_full_external_transfer_recompute():
     assert stats.external_kv_transfer == 999
     assert stats.cached_tokens == 999
     assert stats.total == 1000
+
+
+@pytest.mark.parametrize("reported", [None, True, False])
+@pytest.mark.parametrize("frontend", [True, False])
+def test_engine_core_watermarking_overrides_frontend_flag(frontend, reported):
+    """EngineCore's flag replaces the frontend's guess; None keeps it."""
+    req_stats = RequestStateStats(is_watermarked=frontend)
+    IterationStats().update_from_output(
+        EngineCoreOutput(request_id="r", new_token_ids=[1], watermarking=reported),
+        engine_core_timestamp=0.0,
+        is_prefilling=True,
+        req_stats=req_stats,
+        lora_states=LoRARequestStates(),
+        lora_name=None,
+    )
+    assert req_stats.is_watermarked == (frontend if reported is None else reported)

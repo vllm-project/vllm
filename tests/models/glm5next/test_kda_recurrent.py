@@ -2,8 +2,8 @@
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 """GLM-5.3-Flash KDA recurrent (decode) kernel.
 
-The decode path hands the kernel column slices of the merged ``q|k|v`` conv
-output and of the fused ``qkvbfg_a`` projection (beta), so q/k/v/beta are
+The decode path hands the kernel column slices of the merged `q|k|v` conv
+output and of the fused `qkvbfg_a` projection (beta), so q/k/v/beta are
 token-strided rather than contiguous. Both backends must match a pure-PyTorch
 recurrence, read these slices in place and reject unsupported layouts.
 """
@@ -36,7 +36,7 @@ def naive_recurrent_kda(
     g_bias: torch.Tensor,
     state: torch.Tensor,
 ) -> tuple[torch.Tensor, torch.Tensor]:
-    """fp32 reference for one sequence: ``[T, H, D]`` inputs, ``[H, D, D]``
+    """fp32 reference for one sequence: `[T, H, D]` inputs, `[H, D, D]`
     (v-major) state; mirrors the kernel's in-kernel gate, beta sigmoid and
     q/k l2norm.
     """
@@ -57,8 +57,8 @@ def naive_recurrent_kda(
 
 def make_inputs(num_seqs: int, query_len: int, device: torch.device):
     """Token-strided q/k/v/beta as the decode path produces them: column
-    slices of a merged ``[T, q|k|v]`` conv output and of the fused
-    ``[T, qkv|beta|f_a|g_a]`` projection.
+    slices of a merged `[T, q|k|v]` conv output and of the fused
+    `[T, qkv|beta|f_a|g_a]` projection.
     """
     T, proj = num_seqs * query_len, H * D
     qkv = torch.randn(T, 3 * proj, dtype=torch.bfloat16, device=device)
@@ -172,7 +172,7 @@ def test_fused_recurrent_kda_strided_inputs_bit_identical_to_contiguous(
 def test_fused_recurrent_kda_rejects_unaddressable_layouts():
     """Layouts the token-stride addressing cannot express must fail loudly
     rather than read the wrong tokens: a batch slice of a wider buffer
-    (``stride(0) != T * stride(1)``), overlapping tokens, and a head-strided
+    (`stride(0) != T * stride(1)`), overlapping tokens, and a head-strided
     (transposed) block.
     """
     torch.manual_seed(0)
@@ -204,8 +204,8 @@ def test_fused_recurrent_kda_more_than_65535_programs(num_seqs: int, num_heads: 
     GLM-5.3-Flash has 64 KDA value heads; at TP=1 (every DP rank) a decode
     batch of 1024 sequences needs 1024 * 64 = 65536 (sequence, head)
     programs. The kernel used to put that product into gridDim.z, whose CUDA
-    limit is 65535, so the launch failed with ``Triton Error [CUDA]: invalid
-    argument`` at CUDA-graph capture and DP deployments could not start. The
+    limit is 65535, so the launch failed with `Triton Error [CUDA]: invalid
+    argument` at CUDA-graph capture and DP deployments could not start. The
     grid now carries the product in gridDim.x. Small head dims keep the test
     cheap; the shape that matters is the number of programs. Every (sequence,
     head) pair is independent, so the full batch must be bitwise identical to
