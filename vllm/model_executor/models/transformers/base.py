@@ -126,8 +126,6 @@ class Base(
         self.vllm_config = vllm_config
         self.config = vllm_config.model_config.hf_config
         if (thinker_config := get_thinker_config(self.config)) is not None:
-            if not thinker_config.architectures:
-                thinker_config.architectures = self.config.architectures
             self.config = thinker_config
         self.text_config = self.config.get_text_config()
         self.cache_config = vllm_config.cache_config

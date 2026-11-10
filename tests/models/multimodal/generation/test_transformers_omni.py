@@ -4,6 +4,8 @@
 from typing import Any
 
 import pytest
+import transformers
+from packaging.version import Version
 from transformers import (
     Gemma3nForConditionalGeneration,
     Gemma4ForConditionalGeneration,
@@ -18,6 +20,11 @@ from vllm.envs import disable_envs_cache
 from ....conftest import HfRunner, VllmRunner
 from ...utils import check_logprobs_close
 from .vlm_utils import model_utils
+
+pytestmark = pytest.mark.skipif(
+    Version(transformers.__version__) < Version("5.23.0.dev0"),
+    reason="Requires Omni token counting and text replacement offsets",
+)
 
 AUDIO_ASSET = AudioAsset("mary_had_lamb")
 IMAGE_ASSET = ImageAsset("stop_sign")

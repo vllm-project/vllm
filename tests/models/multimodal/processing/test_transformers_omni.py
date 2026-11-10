@@ -5,11 +5,18 @@ from typing import Any
 import numpy as np
 import pytest
 import torch
+import transformers
+from packaging.version import Version
 
 from vllm.config import ModelConfig
 from vllm.model_executor.models.transformers.multimodal import MultiModalProcessingInfo
 from vllm.multimodal import MULTIMODAL_REGISTRY
 from vllm.multimodal.cache import MultiModalProcessorOnlyCache
+
+pytestmark = pytest.mark.skipif(
+    Version(transformers.__version__) < Version("5.23.0.dev0"),
+    reason="Requires Omni token counting and text replacement offsets",
+)
 
 OMNI_MODEL_SETTINGS: dict[str, dict[str, Any]] = {
     "Qwen/Qwen2.5-Omni-3B": {

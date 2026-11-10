@@ -169,6 +169,14 @@ class NotAnRMSNorm(RMSNorm):
         return self.weight * x / torch.sqrt(variance + self.variance_epsilon)
 
 
+class ChannelRMSNorm(RMSNorm):
+    """timm's RmsNorm2d means over the channels of NCHW -> not a last-dim RMSNorm."""
+
+    def forward(self, x):
+        x = x * torch.rsqrt(x.pow(2).mean(1, keepdim=True) + self.variance_epsilon)
+        return x * self.weight.reshape(1, -1, 1, 1)
+
+
 class GatedRMSNorm(RMSNorm):
     """Second input and tail compute -> not an RMSNorm."""
 
@@ -221,7 +229,7 @@ def test_detects_rms_norm_variants(cls, eps, zero_centered):
     assert fuser.zero_centered == zero_centered
 
 
-@pytest.mark.parametrize("cls", [NotAnRMSNorm, nn.LayerNorm, nn.SiLU])
+@pytest.mark.parametrize("cls", [NotAnRMSNorm, ChannelRMSNorm, nn.LayerNorm, nn.SiLU])
 def test_non_rms_norms_are_not_matched(cls):
     with torch.device("meta"):
         module = cls(16) if cls is nn.LayerNorm else cls()

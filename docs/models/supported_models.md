@@ -47,6 +47,9 @@ If a model has a vLLM implementation but you would prefer to use the Transformer
 !!! note
     For vision-language models, if you are loading with `dtype="auto"`, vLLM loads the whole model with config's `dtype` if it exists. In contrast the native Transformers will respect the `dtype` attribute of each backbone in the model. That might cause a slight difference in performance.
 
+!!! note
+    For omni models, `use_audio_in_video` can only be set for the whole model with `mm_processor_kwargs` for [offline inference](../serving/offline_inference.md) or `--mm-processor-kwargs` for the [online serving](../serving/online_serving/README.md). In contrast the vLLM implementations of Qwen2.5-Omni and Qwen3-Omni also accept it per request.
+
 #### Custom models
 
 If a model is neither supported natively by vLLM nor Transformers, it can still be used in vLLM!

@@ -104,11 +104,8 @@ def _count_embed_tokens(
     """Number of embedding tokens in each item's replacement."""
     counts = []
     for seq in seqs:
-        if preferred is not None and (count := seq.count(preferred)):
-            counts.append(count)
-            continue
         ids = torch.tensor(seq)
-        counts.append(int(ids.eq(_get_embed_token_id(ids)).sum()))
+        counts.append(int(ids.eq(_get_embed_token_id(ids, preferred)).sum()))
     return torch.tensor(counts)
 
 
@@ -176,8 +173,6 @@ class MultiModalProcessingInfo(BaseProcessingInfo):
                 "or audio processor, so the Transformers modeling backend cannot "
                 "serve this model as multi-modal."
             )
-        if "audio" in modalities and len(modalities) > 1:
-            Base.check_version("5.23.0.dev0", "omni models")
         return modalities
 
     @cached_property
@@ -1117,6 +1112,11 @@ class MultiModalMixin(SupportsMultiModal, SupportsMRoPE, Base):
         # Pre-allocate PLE buffer for CUDA graph compatibility.
         if getattr(self.model.get_decoder(), "hidden_size_per_layer_input", 0):
             self.check_version("5.21.0", "per-layer input models")
+            if self.pp_group.world_size > 1:
+                raise ValueError(
+                    "Transformers modeling backend does not support pipeline "
+                    "parallelism for per-layer input models."
+                )
             self.per_layer_inputs = torch.zeros(
                 vllm_config.scheduler_config.max_num_batched_tokens,
                 self.text_config.num_hidden_layers,
@@ -1570,6 +1570,12 @@ class MultiModalMixin(SupportsMultiModal, SupportsMRoPE, Base):
 
         def accepts_kwarg(name: str) -> bool:
             return kwarg_names is None or name in kwarg_names
+
+        if audio_feature_lengths is not None and not accepts_kwarg("audio_seqlens"):
+            raise NotImplementedError(
+                "Transformers modeling backend does not support audio inputs in "
+                "M-RoPE models whose `get_rope_index` takes no `audio_seqlens`."
+            )
 
         seconds_name = (
             "second_per_grid_ts"
