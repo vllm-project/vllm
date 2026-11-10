@@ -95,6 +95,12 @@ class TransferJobStatus:
     fenced_block_ids: list[int] | None = None
 
 
+@dataclass(slots=True)
+class SyncLoadBudgetReservation:
+    num_bytes: int
+    committed: bool = False
+
+
 class GroupOffloadConfig(NamedTuple):
     group_idx: int
     tokens_per_block: int
@@ -679,8 +685,8 @@ class OffloadingConnectorScheduler:
 
         self._req_status: dict[ReqId, RequestOffloadState] = {}
         self._current_batch_load_jobs: dict[int, TransferJob] = {}
-        # Requests loading synchronously in the current engine step
-        self._current_batch_sync_loads: set[ReqId] = set()
+        # Lookup-time reservations are tentative until allocation confirms them.
+        self._current_batch_sync_loads: dict[ReqId, SyncLoadBudgetReservation] = {}
         self._current_batch_sync_load_bytes = 0
         self._current_batch_jobs_to_flush: set[int] = set()
         # GPU block IDs allocated in the current engine step
@@ -1400,6 +1406,10 @@ class OffloadingConnectorScheduler:
             )
             return None, False
 
+        # Core finishes each candidate before querying the next request. Any
+        # tentative reservation still present here belongs to a rejected hit.
+        self._release_uncommitted_sync_loads()
+
         if request.resumable and self.use_lookahead_block_hashes:
             # Core may have recomputed block hashes after preemption.
             for group_state in req_status.group_states:
@@ -1437,7 +1447,10 @@ class OffloadingConnectorScheduler:
     ) -> bool:
         """Reserve the step's sync-load budget for a hit, if it fits."""
         req_id = req_status.req.request_id
-        self._current_batch_sync_loads.discard(req_id)
+        reservation = self._current_batch_sync_loads.get(req_id)
+        if reservation is not None and reservation.committed:
+            return True
+        self._release_sync_load_budget(req_id)
         # Keep at least one token to compute, or the request can't be scheduled.
         if (
             not self.config.sync_load_budget_bytes
@@ -1451,8 +1464,20 @@ class OffloadingConnectorScheduler:
         if self._current_batch_sync_load_bytes + num_bytes > budget:
             return False
         self._current_batch_sync_load_bytes += num_bytes
-        self._current_batch_sync_loads.add(req_id)
+        self._current_batch_sync_loads[req_id] = SyncLoadBudgetReservation(num_bytes)
         return True
+
+    def _release_sync_load_budget(self, req_id: ReqId) -> None:
+        reservation = self._current_batch_sync_loads.get(req_id)
+        if reservation is None or reservation.committed:
+            return
+        del self._current_batch_sync_loads[req_id]
+        self._current_batch_sync_load_bytes -= reservation.num_bytes
+
+    def _release_uncommitted_sync_loads(self) -> None:
+        for req_id, reservation in tuple(self._current_batch_sync_loads.items()):
+            if not reservation.committed:
+                self._release_sync_load_budget(req_id)
 
     def get_external_cache_hit_sources(
         self,
@@ -1513,6 +1538,7 @@ class OffloadingConnectorScheduler:
             )
 
         if num_external_tokens == 0:
+            self._release_sync_load_budget(request.request_id)
             return
 
         # prepare_load() below pins keys that get_num_new_matched_tokens()
@@ -1521,7 +1547,14 @@ class OffloadingConnectorScheduler:
 
         req_status = self._req_status[request.request_id]
         req_status.loaded_from_offload = True
-        sync_load = request.request_id in self._current_batch_sync_loads
+        reservation = self._current_batch_sync_loads.get(request.request_id)
+        sync_load = reservation is not None
+        if reservation is not None and not reservation.committed:
+            actual_bytes = num_external_tokens * self.config.kv_bytes_per_token
+            assert actual_bytes <= reservation.num_bytes
+            self._current_batch_sync_load_bytes -= reservation.num_bytes - actual_bytes
+            reservation.num_bytes = actual_bytes
+            reservation.committed = True
 
         num_locally_computed_tokens = req_status.num_locally_computed_tokens
         num_cached_tokens = num_locally_computed_tokens + num_external_tokens
@@ -2357,7 +2390,7 @@ class OffloadingConnectorScheduler:
             if not req_status.transfer_jobs:
                 del self._req_status[req_id]
         self._current_batch_load_jobs = {}
-        self._current_batch_sync_loads = set()
+        self._current_batch_sync_loads = {}
         self._current_batch_sync_load_bytes = 0
         self._current_batch_jobs_to_flush = set()
         self._current_batch_allocated_block_ids = set()
