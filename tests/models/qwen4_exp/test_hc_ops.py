@@ -122,6 +122,23 @@ def test_hc_combine_norm() -> None:
     torch.testing.assert_close(actual_norm, expected_norm.to(torch.bfloat16))
 
 
+def test_hc_combine_norm_early_dependent_launch() -> None:
+    """Launching dependents early changes when the next kernel starts, not
+    the results."""
+    torch.manual_seed(0)
+    block_output = torch.randn(4, HIDDEN_SIZE, dtype=torch.bfloat16, device="cuda")
+    residual = torch.randn(4, HYPER_HIDDEN_SIZE, dtype=torch.bfloat16, device="cuda")
+    injection = torch.randn(4, HC, dtype=torch.bfloat16, device="cuda")
+    weight = torch.randn(HYPER_HIDDEN_SIZE, dtype=torch.bfloat16, device="cuda")
+    args = (residual, block_output, injection, weight, EPS, HC)
+
+    expected = hc_combine_norm(*args)
+    actual = hc_combine_norm(*args, launch_dependents_early=True)
+
+    assert torch.equal(actual[0], expected[0])
+    assert torch.equal(actual[1], expected[1])
+
+
 @pytest.mark.parametrize("num_tokens", [1, 17, 2048])
 def test_hc_combine_norm_unit_injection(num_tokens: int) -> None:
     torch.manual_seed(0)

@@ -14,6 +14,7 @@ The MTP draft model reuses the Qwen4Exp backbone (PLE/HC/MoE) but:
 """
 
 from collections.abc import Iterable
+from typing import TYPE_CHECKING
 
 import regex as re
 import torch
@@ -62,6 +63,14 @@ from .model import (
     Qwen4ExpSparseMoeBlock,
     get_qsa_topk_buffer_width,
 )
+from .specialized_decode import specialized_decode_config
+from .specialized_decode.logits import (
+    SpecializedDecodeLogitsProcessor,
+    bind_token_choice,
+)
+
+if TYPE_CHECKING:
+    from .specialized_decode.runtime.draft_front import DraftFront
 
 
 def _remap_ignored_layers(
@@ -180,6 +189,10 @@ def _make_draft_vllm_config(
 
 class Qwen4ExpMultiTokenPredictor(nn.Module):
     hf_to_vllm_mapper = Qwen3_5Model.hf_to_vllm_mapper | _EXTRA_WEIGHTS_MAPPER
+    # The specialized decode's front of the draft passes captured into FULL
+    # CUDA graphs of pure decode steps; None runs every pass stock. A class
+    # default, so a predictor built without __init__ runs stock too.
+    draft_front: "DraftFront | None" = None
 
     def __init__(self, *, vllm_config: VllmConfig, prefix: str = "") -> None:
         super().__init__()
@@ -276,6 +289,12 @@ class Qwen4ExpMultiTokenPredictor(nn.Module):
         self.make_empty_intermediate_tensors = make_empty_intermediate_tensors_factory(
             ["hidden_states"], self.hidden_size * self.hc_count
         )
+        decode_config = specialized_decode_config(vllm_config)
+        if decode_config is not None:
+            # Imported here: CuTe DSL kernels (CUDA builds only).
+            from .specialized_decode.runtime import draft_front
+
+            self.draft_front = draft_front.DraftFront(self, decode_config)
 
     def _iter_qsa_attentions(self):
         """Yield MTP attention modules that own a QSA indexer."""
@@ -323,6 +342,14 @@ class Qwen4ExpMultiTokenPredictor(nn.Module):
             if inputs_embeds is None:
                 assert input_ids is not None
                 inputs_embeds = self.embed_input_ids(input_ids)
+            if self.draft_front is not None and self.draft_front.takes(
+                inputs_embeds, hidden_states
+            ):
+                # decode_backend=latency_specialized: the fused front, then the
+                # draft layer with the specialized decode's GEMM plans.
+                return self.draft_front.run_pass(
+                    self, inputs_embeds, hidden_states, positions, spec_step_idx
+                )
             # Embedding branch: pre-norm -> fc_embedding -> [T, H].
             inputs_embeds = self.pre_fc_norm_embedding(inputs_embeds)
             inputs_embeds = self.fc_embedding(inputs_embeds)
@@ -455,7 +482,19 @@ class Qwen4ExpMTP(nn.Module, SupportsHCSP, SupportsPP, Qwen4ExpMixtureOfExperts)
         else:
             self.lm_head = PPMissingLayer()
 
-        self.logits_processor = LogitsProcessor(config.vocab_size)
+        # With the specialized decode (which builds the draft front) and
+        # use_local_argmax_reduction (with which Model Runner V2 asks for the
+        # draft tokens), a processor that chooses them on the vocabulary
+        # shard once load_weights binds its kernel.
+        speculative_config = vllm_config.speculative_config
+        self.logits_processor = (
+            SpecializedDecodeLogitsProcessor(config.vocab_size)
+            if self.model.draft_front is not None
+            and speculative_config is not None
+            and speculative_config.use_local_argmax_reduction
+            else LogitsProcessor(config.vocab_size)
+        )
+        self.max_num_seqs = vllm_config.scheduler_config.max_num_seqs
         self.make_empty_intermediate_tensors = (
             self.model.make_empty_intermediate_tensors
         )
@@ -488,6 +527,15 @@ class Qwen4ExpMTP(nn.Module, SupportsHCSP, SupportsPP, Qwen4ExpMixtureOfExperts)
     ) -> torch.Tensor | None:
         return self.logits_processor(self.lm_head, hidden_states)
 
+    def get_top_tokens(
+        self, hidden_states: torch.Tensor, spec_step_idx: int = 0
+    ) -> torch.Tensor:
+        """Greedy draft tokens from a per-rank argmax over the vocabulary
+        shard: the tokens of `compute_logits` and an argmax, without
+        gathering the logits. The speculator calls it with
+        `use_local_argmax_reduction`."""
+        return self.logits_processor.get_top_tokens(self.lm_head, hidden_states)
+
     def load_weights(self, weights: Iterable[tuple[str, torch.Tensor]]) -> set[str]:
         def remap_weight_names():
             for name, weight in weights:
@@ -502,7 +550,18 @@ class Qwen4ExpMTP(nn.Module, SupportsHCSP, SupportsPP, Qwen4ExpMixtureOfExperts)
             self,
             ignore_unexpected_suffixes=_QWEN4_EXP_IGNORED_MISSING_SUFFIXES.copy(),
         )
-        return loader.load_weights(remap_weight_names(), mapper=mapper)
+        loaded = loader.load_weights(remap_weight_names(), mapper=mapper)
+        if self.model.draft_front is not None:
+            # Binds the front's weights and warms up its kernels: before the
+            # model runner builds the model state, profiles memory and
+            # captures CUDA graphs (runtime/draft_front.py).
+            self.model.draft_front.finish_loading()
+        if isinstance(self.logits_processor, SpecializedDecodeLogitsProcessor):
+            # Collective over the TP group, before the model state, memory
+            # profiling and the speculator's captures (specialized_decode/
+            # logits/processor.py).
+            bind_token_choice(self.logits_processor, self.lm_head, self.max_num_seqs)
+        return loaded
 
 
 __all__ = ["Qwen4ExpMTP", "Qwen4ExpMultiTokenPredictor"]

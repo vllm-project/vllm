@@ -14,13 +14,14 @@ shared by the generic cache-layout planner.
 import math
 from dataclasses import dataclass
 from functools import cache
-from typing import ClassVar
+from typing import ClassVar, SupportsInt
 
 import torch
 from torch import nn
 
 from vllm.config import CacheConfig, VllmConfig
 from vllm.config.cache import CacheDType
+from vllm.logger import init_logger
 from vllm.model_executor.layers.attention_layer_base import AttentionLayerBase
 from vllm.platforms import current_platform
 from vllm.triton_utils import HAS_TRITON, tl, triton
@@ -43,6 +44,8 @@ from vllm.v1.kv_cache_interface import (
     KVCacheSpec,
     MLAAttentionSpec,
 )
+
+logger = init_logger(__name__)
 
 
 def canonical_qsa_rope_positions(positions: torch.Tensor) -> torch.Tensor:
@@ -227,12 +230,18 @@ def _build_qsa_metadata_kernel(
     circular_buffer_size: tl.constexpr,
     num_block_table_columns: tl.constexpr,
     launch_pdl: tl.constexpr,
+    MAPPED_TOKENS_FROM_DEVICE: tl.constexpr,
     TOKEN_BLOCK_SIZE: tl.constexpr,
     REQUEST_SCAN_SIZE: tl.constexpr,
     WORK_BLOCK_SIZE: tl.constexpr,
 ):
     if launch_pdl:
         tl.extra.cuda.gdc_wait()
+
+    if MAPPED_TOKENS_FROM_DEVICE:
+        # The batch's own token count is its last query start, which the runner
+        # writes on the device, so a CUDA graph replay follows the live batch.
+        num_mapped_tokens = tl.load(query_start_loc_ptr + num_reqs)
 
     pid = tl.program_id(0)
     token_idx = pid * TOKEN_BLOCK_SIZE + tl.arange(0, TOKEN_BLOCK_SIZE)
@@ -401,50 +410,92 @@ def build_qsa_metadata_triton(
 ) -> tuple[torch.Tensor, torch.Tensor, torch.Tensor, torch.Tensor]:
     """Build QSA indexer cache and optional pre-indexer work metadata."""
     num_tokens = common_attn_metadata.num_actual_tokens
-    num_mapped_tokens = int(common_attn_metadata.query_start_loc_cpu[-1])
     token_to_req = token_to_req_buffer[:num_tokens]
     logical_positions = logical_positions_buffer[:num_tokens]
     visible_blocks = visible_blocks_buffer[:num_tokens]
     slot_mapping = slot_mapping_buffer[:num_tokens]
-    num_reqs = common_attn_metadata.query_start_loc.shape[0] - 1
-    assert num_reqs > 0
-
-    if k_work_metadata_buffer is not None:
-        if request_capacity is None:
-            request_capacity = num_reqs
-        assert request_capacity >= num_reqs
-        # Pad for tl.arange while keeping the scan width stable across live batches.
-        request_scan_size = 1 << int(math.ceil(math.log2(request_capacity)))
-        max_num_work = k_work_metadata_buffer.shape[0]
-    else:
-        request_scan_size = 1
-        max_num_work = 0
-
-    if num_tokens == 0 and k_work_metadata_buffer is None:
-        return token_to_req, logical_positions, visible_blocks, slot_mapping
-
-    block_table = common_attn_metadata.block_table_tensor
-    num_search_steps = int(math.ceil(math.log2(num_reqs)))
-    work_search_steps = int(math.ceil(math.log2(num_reqs)))
-    # The same grid covers token tiles and, for the compressed cache, work tiles.
-    num_token_blocks = cdiv(num_tokens, 128)
-    num_work_blocks = (
-        cdiv(max_num_work, 256) if k_work_metadata_buffer is not None else 0
-    )
-    _build_qsa_metadata_kernel[(max(num_token_blocks, num_work_blocks, 1),)](
+    _launch_qsa_metadata_kernel(
         common_attn_metadata.query_start_loc,
         common_attn_metadata.seq_lens,
         common_attn_metadata.slot_mapping,
-        block_table,
+        common_attn_metadata.block_table_tensor,
         token_to_req,
         logical_positions,
         visible_blocks,
         slot_mapping,
         k_work_metadata_buffer,
+        num_mapped_tokens=int(common_attn_metadata.query_start_loc_cpu[-1]),
+        storage_block_size=storage_block_size,
+        compress_ratio=compress_ratio,
+        circular_buffer_size=circular_buffer_size,
+        request_capacity=request_capacity,
+    )
+    if circular_buffer_size == 0 and compress_ratio == 1:
+        slot_mapping = common_attn_metadata.slot_mapping[:num_tokens]
+    return token_to_req, logical_positions, visible_blocks, slot_mapping
+
+
+def _launch_qsa_metadata_kernel(
+    query_start_loc: torch.Tensor,
+    seq_lens: torch.Tensor,
+    common_slot_mapping: torch.Tensor,
+    block_table: torch.Tensor,
+    token_to_req: torch.Tensor,
+    logical_positions: torch.Tensor,
+    visible_blocks: torch.Tensor,
+    slot_mapping: torch.Tensor,
+    k_work_metadata: torch.Tensor | None,
+    *,
+    num_mapped_tokens: int | None,
+    storage_block_size: int,
+    compress_ratio: int,
+    circular_buffer_size: int,
+    request_capacity: int | None,
+) -> None:
+    """Write the metadata rows of `token_to_req.shape[0]` tokens in place.
+
+    `num_mapped_tokens` is the batch's own token count; the rows after it are
+    CUDA graph padding. `None` reads it on the device from the last query
+    start instead, so a CUDA graph that records this launch follows each
+    replayed batch rather than the captured one.
+    """
+    num_tokens = token_to_req.shape[0]
+    num_reqs = query_start_loc.shape[0] - 1
+    assert num_reqs > 0
+
+    if k_work_metadata is not None:
+        if request_capacity is None:
+            request_capacity = num_reqs
+        assert request_capacity >= num_reqs
+        # Pad for tl.arange while keeping the scan width stable across live batches.
+        request_scan_size = 1 << int(math.ceil(math.log2(request_capacity)))
+        max_num_work = k_work_metadata.shape[0]
+    else:
+        request_scan_size = 1
+        max_num_work = 0
+
+    if num_tokens == 0 and k_work_metadata is None:
+        return
+
+    num_search_steps = int(math.ceil(math.log2(num_reqs)))
+    work_search_steps = int(math.ceil(math.log2(num_reqs)))
+    # The same grid covers token tiles and, for the compressed cache, work tiles.
+    num_token_blocks = cdiv(num_tokens, 128)
+    num_work_blocks = cdiv(max_num_work, 256) if k_work_metadata is not None else 0
+    _build_qsa_metadata_kernel[(max(num_token_blocks, num_work_blocks, 1),)](
+        query_start_loc,
+        seq_lens,
+        common_slot_mapping,
+        block_table,
+        token_to_req,
+        logical_positions,
+        visible_blocks,
+        slot_mapping,
+        k_work_metadata,
         block_table.stride(0),
         block_table.stride(1),
         num_reqs,
-        num_mapped_tokens,
+        0 if num_mapped_tokens is None else num_mapped_tokens,
         num_tokens,
         max_num_work,
         num_search_steps,
@@ -454,14 +505,157 @@ def build_qsa_metadata_triton(
         circular_buffer_size,
         block_table.shape[1],
         launch_pdl=_metadata_launch_pdl(),
+        MAPPED_TOKENS_FROM_DEVICE=num_mapped_tokens is None,
         TOKEN_BLOCK_SIZE=128,
         REQUEST_SCAN_SIZE=request_scan_size,
         WORK_BLOCK_SIZE=256,
         num_warps=4,
     )
-    if circular_buffer_size == 0 and compress_ratio == 1:
-        slot_mapping = common_attn_metadata.slot_mapping[:num_tokens]
-    return token_to_req, logical_positions, visible_blocks, slot_mapping
+
+
+# The cuda.bindings runtime entry points that _DraftRefreshCaptureCheck calls.
+_CAPTURE_CHECK_API = (
+    "cudaStreamGetCaptureInfo",
+    "cudaGraphNodeGetDependentNodes",
+    "cudaGraphDependencyType",
+    "cudaGraphKernelNodePortDefault",
+)
+
+
+@cache
+def _can_check_captures() -> bool:
+    """Whether CUDA graph captures can be inspected (`cuda-python`).
+
+    `QSAIndexerMetadataBuilder.__init__` probes once, outside any CUDA graph
+    capture, so no capture imports the bindings. If they are missing or lack
+    an entry point the check calls, the capture-time check of the in-place
+    draft refresh is off, with one warning.
+    """
+    if not current_platform.is_cuda():
+        return False
+    try:
+        from cuda.bindings import runtime
+
+        missing = [name for name in _CAPTURE_CHECK_API if not hasattr(runtime, name)]
+    except Exception as error:
+        logger.warning(
+            "QSA indexer: cannot import cuda.bindings (%s); the capture-time "
+            "check of the in-place draft metadata refresh is off.",
+            error,
+        )
+        return False
+    if missing:
+        logger.warning(
+            "QSA indexer: cuda.bindings has no %s; the capture-time check of "
+            "the in-place draft metadata refresh is off.",
+            ", ".join(missing),
+        )
+        return False
+    return True
+
+
+def _cuda_result(result: tuple, call: str) -> tuple:
+    """`result` of a `cuda.bindings` call without its error code, which
+    must be success."""
+    from cuda.bindings import runtime
+
+    if result[0] != runtime.cudaError_t.cudaSuccess:
+        raise RuntimeError(f"{call} failed: {result[0]}")
+    return result[1:]
+
+
+def _capture_frontier(stream: torch.cuda.Stream) -> tuple[int, list[SupportsInt]]:
+    """The id of `stream`'s CUDA graph capture and the captured nodes that
+    the next operation on `stream` will depend on."""
+    from cuda.bindings import runtime
+
+    # (status, id, graph, dependencies, ...): CUDA 13 also returns the edge
+    # data before the count.
+    info = _cuda_result(
+        runtime.cudaStreamGetCaptureInfo(stream.cuda_stream),
+        "cudaStreamGetCaptureInfo",
+    )
+    return int(info[1]), list(info[3])
+
+
+class _DraftRefreshCaptureCheck:
+    """Checks, while Model Runner V2 captures its draft decode graph, the two
+    facts of the refresh's ordering argument that code outside this module
+    decides (`QSAIndexerMetadataBuilder.update_draft_decode_metadata`): the
+    refresh is recorded on the capturing stream, and a node recorded after it
+    starts only once it completes, unless that node is another refresh.
+
+    A refresh's successors exist only once the runner captures them, so each
+    call checks those of the refreshes recorded before it in the same capture:
+    every draft step but the last, which repeats the same loop body.
+    """
+
+    def __init__(self) -> None:
+        self.capture_id: int | None = None
+        self.refreshes: set[int] = set()
+        self.unchecked: list[SupportsInt] = []
+
+    def before_refresh(self, stream: torch.cuda.Stream) -> list[SupportsInt]:
+        """Check the successors of earlier refreshes of this capture; return
+        the frontier that the refresh about to launch will depend on."""
+        capture_id, frontier = _capture_frontier(stream)
+        if capture_id != self.capture_id:
+            self.capture_id, self.refreshes, self.unchecked = capture_id, set(), []
+        self.unchecked = [
+            node for node in self.unchecked if not self._check_successors(node)
+        ]
+        return frontier
+
+    def after_refresh(
+        self, stream: torch.cuda.Stream, before: list[SupportsInt]
+    ) -> None:
+        """Check that the refresh just launched is the one node now ending
+        `stream`'s capture, then remember it."""
+        _, frontier = _capture_frontier(stream)
+        if len(frontier) != 1 or int(frontier[0]) in {int(node) for node in before}:
+            raise RuntimeError(
+                "QSA indexer: the in-place draft metadata refresh was not "
+                "recorded as one kernel on the capturing stream, so the draft "
+                "decode graph does not order it with the draft steps."
+            )
+        self.refreshes.add(int(frontier[0]))
+        self.unchecked.append(frontier[0])
+
+    def _check_successors(self, node: SupportsInt) -> bool:
+        """Raise if a node other than a refresh follows `node` on an edge
+        that does not wait for `node` to complete; return whether `node`
+        has successors yet."""
+        from cuda.bindings import runtime
+
+        # CUDA 12 returns edge data only from the _v2 entry point, CUDA 13
+        # from the plain one.
+        dependents = (
+            getattr(runtime, "cudaGraphNodeGetDependentNodes_v2", None)
+            or runtime.cudaGraphNodeGetDependentNodes
+        )
+        call = "cudaGraphNodeGetDependentNodes"
+        count = _cuda_result(dependents(node, 0), call)[2]
+        if count == 0:
+            return False
+        successors, edges, count = _cuda_result(dependents(node, count), call)
+        for successor, edge in zip(successors[:count], edges[:count]):
+            dependency_type = runtime.cudaGraphDependencyType
+            full_completion = (
+                edge.type == dependency_type.cudaGraphDependencyTypeDefault
+                and edge.from_port == runtime.cudaGraphKernelNodePortDefault
+            )
+            if not full_completion and int(successor) not in self.refreshes:
+                raise RuntimeError(
+                    "QSA indexer: in the draft decode graph, the node after the "
+                    "in-place draft metadata refresh may start before the "
+                    "refresh completes (a programmatic edge), so the draft "
+                    "model's reads of the refreshed rows are no longer "
+                    "ordered after it."
+                )
+        return True
+
+
+_draft_refresh_capture_check = _DraftRefreshCaptureCheck()
 
 
 def _build_qsa_metadata_torch(
@@ -578,6 +772,9 @@ class QSAIndexerMetadata(AttentionMetadata):
 
     block_table: torch.Tensor
     slot_mapping: torch.Tensor
+    # The KV-cache group's per-token slots that ``slot_mapping`` derives from;
+    # the in-place draft decode update rereads them.
+    common_slot_mapping: torch.Tensor
     seq_lens: torch.Tensor
     query_start_loc: torch.Tensor
     token_to_req: torch.Tensor
@@ -606,6 +803,8 @@ class QSAIndexerMetadataBuilder(AttentionMetadataBuilder[QSAIndexerMetadata]):
     """Build QSA metadata from vLLM's cache-group-specific common metadata."""
 
     _cudagraph_support: ClassVar[AttentionCGSupport] = AttentionCGSupport.UNIFORM_BATCH
+    # The in-place update reruns the Triton metadata kernel.
+    supports_draft_decode_metadata_update = HAS_TRITON
 
     def __init__(
         self,
@@ -653,6 +852,9 @@ class QSAIndexerMetadataBuilder(AttentionMetadataBuilder[QSAIndexerMetadata]):
             self.k_work_metadata_buffer = torch.empty(
                 0, 2, dtype=torch.int32, device=device
             )
+        # Probe the bindings of the refresh's capture-time check now, outside
+        # any CUDA graph capture.
+        _can_check_captures()
 
     def build(
         self,
@@ -711,6 +913,7 @@ class QSAIndexerMetadataBuilder(AttentionMetadataBuilder[QSAIndexerMetadata]):
         return QSAIndexerMetadata(
             block_table=common_attn_metadata.block_table_tensor,
             slot_mapping=slot_mapping,
+            common_slot_mapping=common_attn_metadata.slot_mapping,
             seq_lens=common_attn_metadata.seq_lens,
             query_start_loc=common_attn_metadata.query_start_loc,
             token_to_req=token_to_req,
@@ -728,6 +931,99 @@ class QSAIndexerMetadataBuilder(AttentionMetadataBuilder[QSAIndexerMetadata]):
             storage_block_size=self.storage_block_size,
             compress_ratio=self.compress_ratio,
         )
+
+    def update_draft_decode_metadata(self, metadata: QSAIndexerMetadata) -> None:
+        """Rewrite the token and work rows of `metadata` for the next draft step.
+
+        Reruns `build`'s kernel on the tensors `metadata` references: the
+        runner's query starts, sequence lengths and slot mapping, which it
+        advances on the device between draft steps, and this builder's output
+        buffers. The batch's token count is read on the device too, so a CUDA
+        graph that records this call writes, at every replay, the rows a fresh
+        `build` of the replayed batch would write. Shapes and host fields
+        stay those of the build: a draft decode step keeps the batch's request
+        and token counts and its uniform query length of one.
+
+        Ordering. The runner records every draft step in one CUDA graph, on
+        one stream. Step k is::
+
+            compute_slot_mappings -> refresh (each indexer cache) -> fill_
+                -> draft forward (reads these rows) -> draft input update
+
+        and the refresh of step k overwrites the rows that the forward of step
+        k-1 read. A full-completion edge (successor without the PDL attribute)
+        starts its node after its predecessor has completed and its stores are
+        visible. A PDL edge may start it as soon as every CTA of the
+        predecessor has issued `griddepcontrol.launch_dependents` or exited;
+        only its own `griddepcontrol.wait` then waits for the predecessor to
+        complete. Every PDL-launched kernel is assumed to wait before it
+        completes (the PDL contract), so a node's completion implies that of
+        all earlier nodes. The edges:
+
+        1. Into the refresh. The kernel is launched with the PDL attribute
+           where the platform supports it. Its `gdc_wait` comes before its
+           first load and before its first store, so every access follows the
+           completion of every earlier node: the forward of step k-1 has
+           finished reading these rows (write after read), and the slot
+           mapping, sequence lengths and positions it reads are final (read
+           after write). In the recorded graph `compute_slot_mappings` has
+           no PDL attribute and already orders the refresh after step k-1;
+           the wait keeps that true if the nodes before the refresh start
+           early.
+        2. Between the caches' refreshes the edge is PDL; they share only
+           inputs, and the second waits for the first before any access.
+        3. The trigger. `gdc_launch_dependents` only lets the next grid
+           launch; with no release fence before it, it publishes no store. In
+           the compressed cache's work tiles it comes after the kernel's last
+           load and before the `k_work_metadata` stores; every other CTA
+           triggers at its end. After it a CTA only stores and never waits,
+           so co-resident dependents cannot keep it from completing. A reader
+           sees the rows only through the refresh's completion, never through
+           the trigger.
+        4. Out of the refresh. `fill_` has no PDL attribute: a
+           full-completion edge. It starts once the refresh has completed and
+           its stores are visible, so every later node of the draft forward,
+           including code before its own wait, reads complete rows (read after
+           write). `fill_` executes no wait: with the PDL attribute it could
+           complete before the refresh, and the forward's waits would cover
+           only `fill_`.
+        5. Step one's refresh follows the graph launch, so all earlier stream
+           work.
+
+        `tests/models/qwen4_exp/test_qsa_draft_metadata.py` checks these
+        orders on the runner's recorded draft steps and shows the check
+        failing on injected defects. While a graph is captured,
+        `_DraftRefreshCaptureCheck` raises if the refresh is not recorded on
+        the capturing stream or if a node other than a refresh follows it on a
+        PDL edge: the two facts here that code outside this module decides.
+        """
+        assert metadata.num_prefills == 0, "draft decode steps hold no prefills"
+        build_k_work = not self.is_circular_buffer and self.compress_ratio != 1
+        stream: torch.cuda.Stream | None = None
+        frontier: list[SupportsInt] = []
+        if _can_check_captures() and torch.cuda.is_current_stream_capturing():
+            stream = torch.cuda.current_stream()
+            frontier = _draft_refresh_capture_check.before_refresh(stream)
+        _launch_qsa_metadata_kernel(
+            metadata.query_start_loc,
+            metadata.seq_lens,
+            metadata.common_slot_mapping,
+            metadata.block_table,
+            metadata.token_to_req,
+            metadata.logical_positions,
+            metadata.visible_blocks,
+            metadata.slot_mapping,
+            metadata.k_work_metadata if build_k_work else None,
+            num_mapped_tokens=None,
+            storage_block_size=self.storage_block_size,
+            compress_ratio=self.compress_ratio,
+            circular_buffer_size=(
+                self.kv_cache_spec.block_size if self.is_circular_buffer else 0
+            ),
+            request_capacity=self.request_capacity if build_k_work else None,
+        )
+        if stream is not None:
+            _draft_refresh_capture_check.after_refresh(stream, frontier)
 
 
 class QSAIndexerBackend(AttentionBackend):

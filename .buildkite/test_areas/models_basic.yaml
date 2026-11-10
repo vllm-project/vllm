@@ -386,11 +386,14 @@ steps:
   - vllm/config/compilation.py
   - vllm/v1/attention/backends/short_conv_attn.py
   - vllm/model_executor/layers/mamba/checkpoint.py
+  # The QSA draft metadata test replays Model Runner V2's draft loop.
+  - vllm/v1/worker/gpu/spec_decode/
   - tests/models/qwen4_exp/
   commands:
     - >-
       pytest -v -s
       models/qwen4_exp/test_hc_ops.py
+      models/qwen4_exp/test_qsa_draft_metadata.py
       models/qwen4_exp/test_qsa_prepare.py
       models/qwen4_exp/test_qsa_reference.py
     - pytest -v -s models/qwen4_exp/test_ple.py
@@ -424,13 +427,33 @@ steps:
   - vllm/model_executor/layers/fused_moe/deep_gemm_mega_moe.py
   - vllm/models/qwen4_exp/nvidia/ops/qsa.py
   - vllm/models/qwen4_exp/nvidia/ops/qsa_fp8.py
+  - vllm/models/qwen4_exp/nvidia/specialized_decode/hc/
+  - vllm/models/qwen4_exp/nvidia/specialized_decode/boundary/
+  - vllm/models/qwen4_exp/nvidia/specialized_decode/runtime/decode.py
+  - vllm/models/qwen4_exp/nvidia/specialized_decode/runtime/boundary.py
   - tests/models/qwen4_exp/test_hc_ops.py
   - tests/models/qwen4_exp/test_mega_moe.py
   - tests/models/qwen4_exp/test_qsa_reference.py
+  - tests/models/qwen4_exp/specialized_decode/test_hc.py
+  - tests/models/qwen4_exp/specialized_decode/test_boundary.py
+  - tests/models/qwen4_exp/specialized_decode/test_boundary_fold.py
+  # The row-split reads at TP4 (their cases skip on one GPU).
+  - vllm/models/qwen4_exp/nvidia/specialized_decode/runtime/split.py
+  - vllm/models/qwen4_exp/nvidia/specialized_decode/logits/gather.py
+  - tests/models/qwen4_exp/specialized_decode/test_split.py
+  # The TP1 routed MoE front and its expert body against FlashInfer's MoE.
+  - vllm/models/qwen4_exp/nvidia/specialized_decode/moe/
+  - vllm/models/qwen4_exp/nvidia/specialized_decode/runtime/moe.py
+  - tests/models/qwen4_exp/specialized_decode/test_moe_front.py
   commands:
     - pytest -v -s models/qwen4_exp/test_hc_ops.py
     - pytest -v -s models/qwen4_exp/test_mega_moe.py
     - pytest -v -s models/qwen4_exp/test_qsa_reference.py
+    - pytest -v -s models/qwen4_exp/specialized_decode/test_hc.py
+    - pytest -v -s models/qwen4_exp/specialized_decode/test_boundary.py
+    - pytest -v -s models/qwen4_exp/specialized_decode/test_boundary_fold.py
+    - pytest -v -s models/qwen4_exp/specialized_decode/test_split.py
+    - pytest -v -s models/qwen4_exp/specialized_decode/test_moe_front.py
   mirror:
     amd:
       label: ":amd: (MI355) Qwen4 Exp HC Kernels"
@@ -445,6 +468,123 @@ steps:
       - tests/models/qwen4_exp/test_hc_ops_amd.py
       commands:
       - pytest -v -s models/qwen4_exp/test_hc_ops_amd.py
+
+- label: ":nvidia: (B200) Qwen4 Exp GDN Decode Core"
+  key: qwen4-exp-gdn-decode-core-b200
+  timeout_in_minutes: 20
+  device: b200-k8s
+  source_file_dependencies:
+  - csrc/gdn/
+  - vllm/model_executor/layers/mamba/gdn/qwen_gdn_linear_attn.py
+  - vllm/model_executor/layers/mamba/ops/causal_conv1d.py
+  - vllm/v1/attention/backends/gdn_attn.py
+  - vllm/models/qwen4_exp/nvidia/specialized_decode/gdn/
+  - vllm/models/qwen4_exp/nvidia/specialized_decode/hc/_ptx.py
+  - vllm/models/qwen4_exp/nvidia/specialized_decode/runtime/gdn.py
+  - vllm/models/qwen4_exp/nvidia/specialized_decode/runtime/gdn_records.py
+  - vllm/models/qwen4_exp/nvidia/specialized_decode/runtime/boundary.py
+  - vllm/models/qwen4_exp/nvidia/specialized_decode/boundary/all_reduce_hc.py
+  - tests/models/qwen4_exp/specialized_decode/test_gdn.py
+  - tests/models/qwen4_exp/specialized_decode/test_gdn_records.py
+  - tests/models/qwen4_exp/specialized_decode/test_gdn_proj.py
+  - tests/models/qwen4_exp/specialized_decode/test_gdn_chain_order.py
+  - tests/models/qwen4_exp/specialized_decode/test_boundary_fold.py
+  commands:
+    - pytest -v -s models/qwen4_exp/specialized_decode/test_gdn.py
+    - pytest -v -s models/qwen4_exp/specialized_decode/test_gdn_records.py
+    - pytest -v -s models/qwen4_exp/specialized_decode/test_gdn_proj.py
+    - pytest -v -s models/qwen4_exp/specialized_decode/test_gdn_chain_order.py
+
+- label: ":nvidia: (B200) Qwen4 Exp MTP Draft Front"
+  key: qwen4-exp-mtp-draft-front-b200
+  timeout_in_minutes: 20
+  device: b200-k8s
+  source_file_dependencies:
+  - vllm/model_executor/layers/layernorm.py
+  - vllm/model_executor/kernels/linear/cute_dsl/skinny_gemm.py
+  - vllm/models/qwen4_exp/nvidia/low_latency_gemm.py
+  - vllm/models/qwen4_exp/nvidia/mtp.py
+  - vllm/models/qwen4_exp/nvidia/specialized_decode/mtp/
+  - vllm/models/qwen4_exp/nvidia/specialized_decode/hc/_ptx.py
+  - vllm/models/qwen4_exp/nvidia/specialized_decode/runtime/decode.py
+  - vllm/models/qwen4_exp/nvidia/specialized_decode/runtime/draft_front.py
+  - vllm/models/qwen4_exp/nvidia/specialized_decode/runtime/gemm.py
+  - vllm/models/qwen4_exp/nvidia/specialized_decode/runtime/qsa.py
+  - tests/models/qwen4_exp/specialized_decode/test_draft_front.py
+  # The draft layer's exchange order, read from the kernels' CuTe DSL source.
+  - vllm/models/qwen4_exp/nvidia/specialized_decode/boundary/all_reduce_hc.py
+  - vllm/models/qwen4_exp/nvidia/specialized_decode/hc/
+  - vllm/models/qwen4_exp/nvidia/specialized_decode/logits/choice.py
+  - tests/models/qwen4_exp/specialized_decode/test_boundary_fold.py
+  - tests/models/qwen4_exp/specialized_decode/test_draft_exchange_order.py
+  commands:
+    - pytest -v -s models/qwen4_exp/specialized_decode/test_draft_front.py
+    - pytest -v -s models/qwen4_exp/specialized_decode/test_draft_exchange_order.py
+
+- label: ":nvidia: (B200) Qwen4 Exp Decode GEMM Plans and Metadata"
+  key: qwen4-exp-decode-gemm-plans-b200
+  timeout_in_minutes: 20
+  device: b200-k8s
+  source_file_dependencies:
+  - vllm/model_executor/kernels/linear/cute_dsl/skinny_gemm.py
+  - vllm/model_executor/kernels/linear/cute_dsl/_skinny_gemm.py
+  - vllm/model_executor/layers/linear.py
+  - vllm/models/qwen4_exp/nvidia/low_latency_gemm.py
+  - vllm/models/qwen4_exp/nvidia/mtp.py
+  - vllm/models/qwen4_exp/nvidia/specialized_decode/runtime/
+  - tests/models/qwen4_exp/specialized_decode/test_gemm.py
+  # The replayed decode metadata records the stock build of these builders and
+  # model states.
+  - vllm/compilation/cudagraph_pool.py
+  - vllm/config/compilation.py
+  - vllm/model_executor/layers/mamba/gdn/qwen_gdn_linear_attn.py
+  - vllm/models/qwen4_exp/common/qsa.py
+  - vllm/models/qwen4_exp/common/qsa_indexer.py
+  - vllm/models/qwen4_exp/nvidia/model_state.py
+  - vllm/models/qwen4_exp/nvidia/qsa.py
+  - vllm/models/qwen4_exp/nvidia/specialized_decode/__init__.py
+  - vllm/v1/attention/backends/gdn_attn.py
+  - vllm/v1/attention/backends/mamba_attn.py
+  - vllm/v1/attention/backends/short_conv_attn.py
+  - vllm/v1/attention/backends/utils.py
+  - vllm/v1/worker/gpu/attn_utils.py
+  - vllm/v1/worker/gpu/block_table.py
+  - vllm/v1/worker/gpu/input_batch.py
+  - vllm/v1/worker/gpu/model_states/mamba_hybrid.py
+  - vllm/v1/worker/mamba_utils.py
+  - vllm/v1/worker/utils.py
+  - tests/models/qwen4_exp/specialized_decode/test_metadata.py
+  # The MTP token choice and the logits all-gather (their TP4 cases skip on
+  # one GPU), checked against greedy_argmax.
+  - vllm/models/qwen4_exp/nvidia/model.py
+  - vllm/models/qwen4_exp/nvidia/specialized_decode/logits/
+  - vllm/v1/worker/gpu/sample/greedy_argmax.py
+  - tests/models/qwen4_exp/specialized_decode/test_logits.py
+  # The QSA row attention of large decode steps (and the layers' swap to it),
+  # checked against an FP32 reference and the stock Triton kernels.
+  - vllm/models/qwen4_exp/nvidia/ops/qsa.py
+  - vllm/models/qwen4_exp/nvidia/specialized_decode/qsa/
+  - vllm/models/qwen4_exp/nvidia/specialized_decode/boundary/_ptx.py
+  - vllm/models/qwen4_exp/nvidia/specialized_decode/gdn/_ptx.py
+  - vllm/models/qwen4_exp/nvidia/specialized_decode/hc/_ptx.py
+  - tests/models/qwen4_exp/specialized_decode/test_qsa_attention.py
+  # The QSA decode select against the stock top-k and expansion, and the
+  # indexers' swap to it.
+  - vllm/models/qwen4_exp/nvidia/ops/qsa_indexer.py
+  - vllm/models/qwen4_exp/nvidia/ops/qsa_prepare.py
+  - vllm/models/qwen4_exp/nvidia/qsa_indexer.py
+  - tests/models/qwen4_exp/specialized_decode/test_qsa_select.py
+  # The PLE row gather and the replicated token embedding at TP4 (their cases
+  # skip on one GPU).
+  - vllm/models/qwen4_exp/nvidia/specialized_decode/ple/
+  - tests/models/qwen4_exp/specialized_decode/test_ple.py
+  commands:
+    - pytest -v -s models/qwen4_exp/specialized_decode/test_gemm.py
+    - pytest -v -s models/qwen4_exp/specialized_decode/test_metadata.py
+    - pytest -v -s models/qwen4_exp/specialized_decode/test_logits.py
+    - pytest -v -s models/qwen4_exp/specialized_decode/test_ple.py
+    - pytest -v -s models/qwen4_exp/specialized_decode/test_qsa_attention.py
+    - pytest -v -s models/qwen4_exp/specialized_decode/test_qsa_select.py
 
 - label: ":amd: (MI300) Qwen4 Exp"
   key: qwen4-exp-unit-tests-mi300
@@ -475,6 +615,9 @@ steps:
   source_file_dependencies:
   - vllm/models/qwen4_exp/
   - vllm/config/compilation.py
+  - vllm/model_executor/layers/mamba/gdn/qwen_gdn_linear_attn.py
+  - vllm/v1/worker/gpu/model_states/mamba_hybrid.py
+  - vllm/v1/worker/mamba_utils.py
   - vllm/v1/attention/backends/short_conv_attn.py
   - tests/models/qwen4_exp/
   commands:
@@ -482,6 +625,14 @@ steps:
       pytest -v -s
       models/qwen4_exp/test_config.py
       models/qwen4_exp/test_ple.py
+      models/qwen4_exp/specialized_decode/test_config.py
+      models/qwen4_exp/specialized_decode/test_executor.py
+      models/qwen4_exp/specialized_decode/test_boundary_protocol.py
+      models/qwen4_exp/specialized_decode/test_logits_protocol.py
+      models/qwen4_exp/specialized_decode/test_ple_protocol.py
+      models/qwen4_exp/specialized_decode/test_gdn_records_protocol.py
+      models/qwen4_exp/specialized_decode/test_metadata_protocol.py
+      models/qwen4_exp/specialized_decode/test_draft_head.py
 
 - label: ":nvidia: (B200) Qwen3.5"
   key: qwen3-5-unit-tests-b200

@@ -1826,6 +1826,20 @@ class QwenGatedDeltaNetAttention(GatedDeltaNetAttention):
         ssm_state = self_kv_cache[1]
         num_actual_tokens = attn_metadata.num_actual_tokens
         num_accepted_tokens = attn_metadata.num_accepted_tokens
+        # In a batch mixing spec decodes with prefills whose spec rows come
+        # first (checked by the metadata builder), the spec tokens are the rows
+        # [0, num_spec_tokens) and the non-spec tokens [num_spec_tokens,
+        # non_spec_end): row slices then replace the gathers by token index
+        # and the scatters of the outputs back.
+        spec_rows_lead = spec_sequence_masks is not None and (
+            attn_metadata.spec_rows_lead
+        )
+        num_spec_tokens = attn_metadata.num_spec_decode_tokens
+        non_spec_end = (
+            num_spec_tokens
+            + attn_metadata.num_prefill_tokens
+            + attn_metadata.num_decode_tokens
+        )
 
         mixed_qkv = mixed_qkv[:num_actual_tokens]
         b = b[:num_actual_tokens]
@@ -1842,6 +1856,18 @@ class QwenGatedDeltaNetAttention(GatedDeltaNetAttention):
                 a_spec = a
                 b_spec = b
                 mixed_qkv_non_spec = None
+            elif spec_rows_lead:
+                # Views, not copies. causal_conv1d_update below writes its
+                # output in place, into these rows of the caller's mixed_qkv,
+                # as it already does in the pure spec-decode case above. No
+                # one reads those rows afterwards: the caller's other views of
+                # the projection (z or the output gate) are different columns,
+                # and the prefill checkpoint export reads only the non-spec
+                # rows, which causal_conv1d_fn does not modify.
+                mixed_qkv_spec = mixed_qkv[:num_spec_tokens]
+                a_spec = a[:num_spec_tokens]
+                b_spec = b[:num_spec_tokens]
+                mixed_qkv_non_spec = mixed_qkv[num_spec_tokens:non_spec_end]
             else:
                 mixed_qkv_spec = mixed_qkv.index_select(0, spec_token_indx)
                 a_spec = a.index_select(0, spec_token_indx)
@@ -1918,7 +1944,10 @@ class QwenGatedDeltaNetAttention(GatedDeltaNetAttention):
             assert mixed_qkv_non_spec is not None, (
                 "mixed_qkv_non_spec must be provided for prefill path"
             )
-            if spec_sequence_masks is not None:
+            if spec_rows_lead:
+                a_non_spec = a[num_spec_tokens:non_spec_end]
+                b_non_spec = b[num_spec_tokens:non_spec_end]
+            elif spec_sequence_masks is not None:
                 a_non_spec = a.index_select(0, non_spec_token_indx)
                 b_non_spec = b.index_select(0, non_spec_token_indx)
             else:
@@ -2028,11 +2057,14 @@ class QwenGatedDeltaNetAttention(GatedDeltaNetAttention):
             assert prefill_has_initial_state is not None
             if self.gdn_prefill_backend == "flashinfer":
                 # Without spec decodes the prefill rows follow the peeled
-                # decodes contiguously, so FlashInfer writes them straight
-                # into core_attn_out. Spec batches scatter by token index.
+                # decodes contiguously, and with leading spec rows they follow
+                # the spec rows, so FlashInfer writes them straight into
+                # core_attn_out. Other spec batches scatter by token index.
                 prefill_out = None
                 if spec_sequence_masks is None:
                     prefill_out = core_attn_out[num_decode_tokens:num_actual_tokens]
+                elif spec_rows_lead:
+                    prefill_out = core_attn_out[num_spec_tokens:non_spec_end]
                 core_attn_out_non_spec, last_recurrent_state = (
                     self._forward_flashinfer_prefill(
                         query_non_spec,
@@ -2104,7 +2136,13 @@ class QwenGatedDeltaNetAttention(GatedDeltaNetAttention):
             core_attn_out_non_spec, last_recurrent_state = None, None
 
         # 3. Merge core attention output
-        if spec_sequence_masks is not None and core_attn_out_non_spec is not None:
+        if spec_rows_lead and core_attn_out_non_spec is not None:
+            core_attn_out[:num_spec_tokens] = core_attn_out_spec.squeeze(0)
+            if not prefill_in_place:
+                core_attn_out[num_spec_tokens:non_spec_end] = (
+                    core_attn_out_non_spec.squeeze(0)
+                )
+        elif spec_sequence_masks is not None and core_attn_out_non_spec is not None:
             core_attn_out.index_copy_(0, spec_token_indx, core_attn_out_spec.squeeze(0))
             core_attn_out.index_copy_(
                 0, non_spec_token_indx, core_attn_out_non_spec.squeeze(0)
