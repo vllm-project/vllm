@@ -65,8 +65,8 @@ def experts_backend_reason(layer: nn.Module) -> str | None:
 
 
 def _mxfp4_rows(name: str, linear: nn.Module, rows: int, k: int):
-    """A Quark MXFP4 linear in the AITER Triton GEMM layout (weight ``[rows, K/2]``,
-    scale stored ``[K/32, rows]``); returns the weight and a ``[rows, K/32]`` scale."""
+    """A Quark MXFP4 linear in the AITER Triton GEMM layout (weight `[rows, K/2]`,
+    scale stored `[K/32, rows]`); returns the weight and a `[rows, K/32]` scale."""
     w, sc = linear.weight, getattr(linear, "weight_scale", None)
     if (
         sc is None

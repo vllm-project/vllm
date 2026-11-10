@@ -250,7 +250,7 @@ class _Caches:
 
 
 def _box(rt, name, n, packed=False):
-    """The first ``n`` values of a mailbox: f32 pairs, or packed bf16 pairs."""
+    """The first `n` values of a mailbox: f32 pairs, or packed bf16 pairs."""
     words = rt.scratch[rt.sc[name] :].view(torch.int32)
     if packed:
         return words[:n:2].contiguous().view(torch.bfloat16)
@@ -265,7 +265,7 @@ def _rms(x, w, eps=1e-5):
 
 
 def _e4m3(x: torch.Tensor, scale: torch.Tensor) -> torch.Tensor:
-    """The fp8 MLA cache write of vLLM (``concat_and_cache_mla``): x / scale,
+    """The fp8 MLA cache write of vLLM (`concat_and_cache_mla`): x / scale,
     saturated to the e4m3 range, as raw bytes."""
     e4m3 = (x.float() / scale).clamp(-448, 448).to(torch.float8_e4m3fn)
     return e4m3.view(torch.uint8)
@@ -631,7 +631,7 @@ TIE_LENS = (62593, 65536, 40000, 2050, 64, 16001, 62592)
 
 def _check_ties(rank: int, tp: int, device, live: float) -> None:
     """Rows up to the model length on an index cache whose pools mostly score
-    exactly 0 (``live``: the share of pools with nonzero keys), so the top-512
+    exactly 0 (`live`: the share of pools with nonzero keys), so the top-512
     threshold falls in a bin of thousands of tied pools: every row still
     attends 2048 distinct tokens of its own, and the launch completes."""
     import torch.distributed as dist

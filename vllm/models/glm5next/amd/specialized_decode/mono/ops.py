@@ -50,12 +50,12 @@ def spin_pause() -> None:
 
 
 def read_lane_i32(value, lane):
-    """Read one i32 from ``lane`` while keeping IR conversion local."""
+    """Read one i32 from `lane` while keeping IR conversion local."""
     return fx.Int32(rocdl.readlane(T.i32, fx.Int32(value), fx.Int32(lane)))
 
 
 def write_lane_i32(value, lane, vector):
-    """Write one i32 into ``lane`` of a wave-distributed value."""
+    """Write one i32 into `lane` of a wave-distributed value."""
     return fx.Int32(
         llvm.call_intrinsic(
             T.i32,
@@ -100,7 +100,7 @@ def exp(value):
 
 
 def xshfl(value, offset):
-    """Return the value from ``lane ^ offset`` using VALU/DPP operations."""
+    """Return the value from `lane ^ offset` using VALU/DPP operations."""
     if offset >= 16:
         return value.shuffle_xor(offset, 64)
     is_float = isinstance(value, fx.Float32)
@@ -127,7 +127,7 @@ def wave_umax_dpp(value):
 
 
 def xred(value, offset, op):
-    """Combine a value with ``lane ^ offset`` using a symmetric operation."""
+    """Combine a value with `lane ^ offset` using a symmetric operation."""
     if offset < 16:
         return op(value, xshfl(value, offset))
     is_float = isinstance(value, fx.Float32)
@@ -169,7 +169,7 @@ def f8_word(k):
 
 
 def fp8_to_bf16x8(word0, word1, scale=None):
-    """Convert two dwords of eight FP8 values to a BF16 vector, times ``scale``
+    """Convert two dwords of eight FP8 values to a BF16 vector, times `scale`
     (an f32 value; 1 when omitted)."""
     one = as_ir_value(fx.Float32(1.0) if scale is None else scale)
     parts = []

@@ -18,9 +18,9 @@ FLAG_BYTES = 4
 
 @dataclass(frozen=True)
 class FaultSpec:
-    """Test-only: stall ``rank`` for ``us`` microseconds at kernel step ``step``.
+    """Test-only: stall `rank` for `us` microseconds at kernel step `step`.
     The values are closure constants of the kernel, which FlyDSL folds into its
-    disk-cache key; ``us > 0`` keeps that key apart from a build without a fault
+    disk-cache key; `us > 0` keeps that key apart from a build without a fault
     (0, 0, 0), so a later run never loads a fault build."""
 
     rank: int

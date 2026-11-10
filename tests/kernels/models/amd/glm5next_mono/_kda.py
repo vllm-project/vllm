@@ -106,7 +106,7 @@ def _seam(k: _Kda, x, res, post, comb):
 
 def _kda_reference(k: _Kda, proj, gates, conv, rec, idx, dim_first):
     """The decode ops of vLLM on the kernel's own projection and gate rows; update
-    ``conv`` and ``rec`` in place and return the gated-RMSNorm output [S, P]."""
+    `conv` and `rec` in place and return the gated-RMSNorm output [S, P]."""
     from vllm.config import VllmConfig, set_current_vllm_config
     from vllm.model_executor.layers.mamba.ops.causal_conv1d import (
         causal_conv1d_update,
@@ -155,7 +155,7 @@ def _kda_reference(k: _Kda, proj, gates, conv, rec, idx, dim_first):
 
 
 def _box(rt, name, n, packed=False):
-    """The first ``n`` values of a mailbox: f32 pairs, or packed bf16 pairs."""
+    """The first `n` values of a mailbox: f32 pairs, or packed bf16 pairs."""
     words = rt.scratch[rt.sc[name] :].view(torch.int32)
     if packed:
         return words[:n:2].contiguous().view(torch.bfloat16)

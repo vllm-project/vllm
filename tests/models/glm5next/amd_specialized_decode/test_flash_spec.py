@@ -114,7 +114,7 @@ def test_dsa_weights_name_every_mismatch():
 
 def test_kda_weights_view_vllms_fused_conv_in_qkv_order(dist_init):
     """The conv taps are a view of the fused conv1d vLLM loads, q | k | v, so a
-    rename or a reorder in ``common/kda.py`` fails here, not at serving."""
+    rename or a reorder in `common/kda.py` fails here, not at serving."""
     from types import SimpleNamespace
 
     pytest.importorskip("flydsl")

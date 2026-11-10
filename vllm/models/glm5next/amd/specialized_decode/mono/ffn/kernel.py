@@ -8,7 +8,7 @@
 
 """GLM-5.3-Flash FFN-layer MonoKernel: one persistent launch per TP rank.
 
-``grid = 256 CTAs x 512 threads`` (one CTA per MI355X CU) runs one MoE layer's
+`grid = 256 CTAs x 512 threads` (one CTA per MI355X CU) runs one MoE layer's
 FFN for this rank's TP shard::
 
     seam: TP sum of vLLM's attention partials -> mHC post -> R' + mix partials
@@ -18,12 +18,12 @@ FFN for this rank's TP shard::
          clamped SiLU -> mid MXFP8 quant -> expert down + route weighting
       -> MoE TP peer reduce -> x_out
 
-Every stage is a list of tasks; task ``t`` of a stage runs on CTA
-``(stage_base + t) % 256`` and every CTA walks the stages in order. There is
+Every stage is a list of tasks; task `t` of a stage runs on CTA
+`(stage_base + t) % 256` and every CTA walks the stages in order. There is
 no grid-wide barrier: dependencies only point to earlier stages and all CTAs
 are co-resident, so every bounded spin wait makes progress.
 
-Mailboxes are tagged pairs ``(value, tag)`` with this launch's epoch as the tag;
+Mailboxes are tagged pairs `(value, tag)` with this launch's epoch as the tag;
 a consumer polls the payload until the tags match. Each rank pushes its MoE
 partial rows into every peer's symmetric buffer and sums the TP partials in
 rank order, so every rank produces bit-identical outputs.
@@ -168,25 +168,25 @@ def build_flash_ffn_kernel(
     kv_fp8: bool = False,
     fault: abi.FaultSpec | None = None,
 ):
-    """Return the ``@flyc.jit`` launcher of one rank's FFN layer for S rows; with
-    ``kda`` the whole KDA decoder layer (attention-side mHC, projections, short conv,
+    """Return the `@flyc.jit` launcher of one rank's FFN layer for S rows; with
+    `kda` the whole KDA decoder layer (attention-side mHC, projections, short conv,
     gated delta rule, gated RMSNorm, o_proj and its TP reduce) runs first; with
-    ``dsa`` the whole sparse-attention decoder layer (attention-side mHC, q / kv
+    `dsa` the whole sparse-attention decoder layer (attention-side mHC, q / kv
     LoRA projections and norms, KV cache write, kpool indexer, sparse MLA, o_proj)
-    for rows of at most ``max_pools`` kpool pools. ``dsa_fp8`` says which of q_a | kv_a,
+    for rows of at most `max_pools` kpool pools. `dsa_fp8` says which of q_a | kv_a,
     q_b and o_proj are FP8 with 128 x 128 block scales (else row-major bf16).
-    ``kv_fp8``: the MLA latent cache holds e4m3 bytes over vLLM's per-tensor
-    ``k_scale`` (written as vLLM's ``concat_and_cache_mla`` does, read back
+    `kv_fp8`: the MLA latent cache holds e4m3 bytes over vLLM's per-tensor
+    `k_scale` (written as vLLM's `concat_and_cache_mla` does, read back
     dequantized to bf16 for the attention).
 
-    ``poll_timeout_us`` bounds every mailbox wait in time. An expired wait
-    stores 1 into its stage's error word (``poll_err_addr``) and, with TP peers,
-    into this rank's flag on rank 0 (``poll_xrank_addr``), then continues, so a
+    `poll_timeout_us` bounds every mailbox wait in time. An expired wait
+    stores 1 into its stage's error word (`poll_err_addr`) and, with TP peers,
+    into this rank's flag on rank 0 (`poll_xrank_addr`), then continues, so a
     stalled peer finishes the launch with wrong values instead of hanging. With
-    ``poll_early_out`` every later wait of the same step returns at its first retry.
-    ``fault`` (tests only): a rank to stall at a kernel step; None builds no fault
+    `poll_early_out` every later wait of the same step returns at its first retry.
+    `fault` (tests only): a rank to stall at a kernel step; None builds no fault
     code.
-    The shared expert is read from ``w_sh_*`` (one expert each), not the routed
+    The shared expert is read from `w_sh_*` (one expert each), not the routed
     tensors, so it may be fused into them or stored apart.
     """
     assert 2 <= S <= 16 and 1 <= launches_per_step <= LAYER_SLOTS
@@ -392,7 +392,7 @@ def build_flash_ffn_kernel(
             return scratch + fx.Int64(SC[name])
 
         def put(base_addr, i, v, cm=CM_DEV):
-            """Pair i := (v, tag); ``v`` f32 (or int32 bits)."""
+            """Pair i := (v, tag); `v` f32 (or int32 bits)."""
             bits = v.bitcast(fx.Int32) if isinstance(v, fx.Float32) else fx.Int32(v)
             bo.buffer_store(
                 fx.Vector.from_elements([bits, tag], fx.Int32),
@@ -458,7 +458,7 @@ def build_flash_ffn_kernel(
                 fx.memory_fence(ordering=fx.AtomicOrdering.Release)
 
         def poll(specs, scope="agent", batch=POLL_MAX):
-            """Batched poll of mailbox pairs: ``specs`` = [(base_addr, pair index,
+            """Batched poll of mailbox pairs: `specs` = [(base_addr, pair index,
             npairs in {1, 2})]; re-load the batch while any tag is stale."""
             if const_expr(len(specs) == 0):
                 return []
@@ -692,7 +692,7 @@ def build_flash_ffn_kernel(
 
         def run_units(make_unit, cpw, batch, pre=None):
             """Software pipelined: issue batch b+1's loads before computing batch b.
-            ``pre`` = the already-issued first batch (prefetched before a wait)."""
+            `pre` = the already-issued first batch (prefetched before a wait)."""
             acc = [fx.Float32(0.0) for _ in range(4)]
             starts = list(range(0, cpw, batch))
             cur = (
@@ -754,7 +754,7 @@ def build_flash_ffn_kernel(
             return q0, q1, exponent
 
         def stage_xq(samples):
-            """Poll the router's packed FP8 activation + block scales of ``samples``
+            """Poll the router's packed FP8 activation + block scales of `samples`
             into LDS."""
             nxw = HIDDEN // 4 // THREADS
             nscale = XQ_GROUPS
@@ -810,7 +810,7 @@ def build_flash_ffn_kernel(
 
             Every FP32 bit of (sigmoid + bias) is kept; equal keys go to the smaller
             expert id. Returns (expert id, route weight = raw score / sum of the 8 raw
-            scores * ROUTE_SCALE) of pick ``lane``, valid in lanes < TOP_K."""
+            scores * ROUTE_SCALE) of pick `lane`, valid in lanes < TOP_K."""
             raws = getf_many(
                 [
                     (mb("scores"), s * N_EXPERTS + fx.min(candidate(i), N_EXPERTS - 1))
@@ -924,7 +924,7 @@ def build_flash_ffn_kernel(
         MIX_A = HC_MULT * (1 + HC_MULT)
 
         def run_seam(stage, mode):
-            """``mode``: "ffn" (vLLM's attention partials), "attn" (the previous
+            """`mode`: "ffn" (vLLM's attention partials), "attn" (the previous
             layer's output, attention-side mHC) or "ffn_own" (this launch's o_proj
             partials, R / post / comb from its attention-side mHC)."""
             r_attn = _rsrc(attn_part)
@@ -1064,9 +1064,9 @@ def build_flash_ffn_kernel(
         CPT = HIDDEN // THREADS
 
         def run_gate(stage, mode):
-            """``mode`` "attn" writes post / comb to mailbox ``mix_a`` and the
-            attention input to ``a_in``; "ffn" writes them out and the FFN input
-            to ``a``."""
+            """`mode` "attn" writes post / comb to mailbox `mix_a` and the
+            attention input to `a_in`; "ffn" writes them out and the FFN input
+            to `a`."""
             attn = mode == "attn"
             r_scale = _rsrc(hc_a_scale if attn else hc_scale)
             r_base = _rsrc(hc_a_base if attn else hc_base)
@@ -1225,8 +1225,8 @@ def build_flash_ffn_kernel(
             return ("bf16", wv, None, b_word + (lane // 16) * 4)
 
         def stage_rows(box, K):
-            """Poll every row's bf16 [K] vector of mailbox ``box`` into LDS words
-            ``n * K / 2 ..``, the B operand layout of ``unit_rm``."""
+            """Poll every row's bf16 [K] vector of mailbox `box` into LDS words
+            `n * K / 2 ..`, the B operand layout of `unit_rm`."""
             nq = S * K // 4
             full = nq // THREADS
             if const_expr(full > 0):
@@ -1314,7 +1314,7 @@ def build_flash_ffn_kernel(
         QO, KO, VO, G1O, G2O, OO = 0, KD, 2 * KD, 3 * KD, 4 * KD, 5 * KD
 
         def conv_at(ch, j):
-            """Element of channel ``ch``, tap ``j`` in a conv state slot, laid out
+            """Element of channel `ch`, tap `j` in a conv state slot, laid out
             [3P, taps] (dim first) or [taps, 3P]."""
             if const_expr(conv_dim_first):
                 return ch * (CONV_TAPS - 1) + j
@@ -1482,7 +1482,7 @@ def build_flash_ffn_kernel(
             return fx.Int32(bo.buffer_load(r, i, vec_width=1, dtype=T.i32))
 
         def start_at(b):
-            """First task of a stage whose task 0 runs on CTA ``b``."""
+            """First task of a stage whose task 0 runs on CTA `b`."""
             return (bid + (G - b % G)) & (G - 1)
 
         def wave_max(v):
@@ -1491,8 +1491,8 @@ def build_flash_ffn_kernel(
             return v
 
         def unit_fp8_rm(w_rsrc, s_rsrc, row0, kb, K, rows, b_word, scale_cols):
-            """One 128-K block ``kb`` of a 16-row tile of a row-major FP8 [rows, K]
-            weight with f32 [rows / 128, K / 128] block scales (``row0 % 16 == 0``)."""
+            """One 128-K block `kb` of a 16-row tile of a row-major FP8 [rows, K]
+            weight with f32 [rows / 128, K / 128] block scales (`row0 % 16 == 0`)."""
             r = fx.min(row0 + lane % 16, rows - 1)
             word = (r * K + kb * 128 + (lane // 16) * 32) // 4
             wv = [
@@ -1505,7 +1505,7 @@ def build_flash_ffn_kernel(
             return ("fp8rm", wv, sc, b_word + (lane // 16) * 16)
 
         def proj_unit(fp8, w_rsrc, s_rsrc, row0, kc, K, rows, n_words):
-            """K chunk ``kc`` (128 FP8 or 64 bf16 values) of a 16-row tile of a
+            """K chunk `kc` (128 FP8 or 64 bf16 values) of a 16-row tile of a
             row-major [rows, K] projection; the B row starts at LDS word n_words."""
             if const_expr(fp8):
                 return unit_fp8_rm(
@@ -2146,7 +2146,7 @@ def build_flash_ffn_kernel(
                         gpu.barrier()
 
                     def select_wide(shift, prefix, remain):
-                        """The 12-bit digit at ``shift`` holding the remain-th largest
+                        """The 12-bit digit at `shift` holding the remain-th largest
                         key: (prefix with it, keys still needed, keys in that bin)."""
                         per = SEL_BINS // THREADS
                         cs = [
@@ -2189,7 +2189,7 @@ def build_flash_ffn_kernel(
 
                     def scan_pair(first_flags, second_flags, parity):
                         """Exclusive block offsets of two flag lists in one scan
-                        (running bases double-buffered by ``parity``)."""
+                        (running bases double-buffered by `parity`)."""
                         local = fx.Int32(0)
                         local_offsets = []
                         for a, b in zip(first_flags, second_flags):
@@ -2235,8 +2235,8 @@ def build_flash_ffn_kernel(
                     def gather(
                         chunk, valid, item_keys, values, threshold, out_gt, remain
                     ):
-                        """Keys above ``threshold`` append to red from the running
-                        base; the first ``remain`` ties fill red[out_gt:]."""
+                        """Keys above `threshold` append to red from the running
+                        base; the first `remain` ties fill red[out_gt:]."""
                         gt = [v & (k > threshold) for v, k in zip(valid, item_keys)]
                         eq = [v & (k == threshold) for v, k in zip(valid, item_keys)]
                         gt_offsets, eq_offsets = scan_pair(gt, eq, chunk & 1)
@@ -2271,7 +2271,7 @@ def build_flash_ffn_kernel(
                             )
 
                     def candidates(level, prefix, remain, n_cand):
-                        """Keys above the ``level`` bin go to red, the bin's to LDS."""
+                        """Keys above the `level` bin go to red, the bin's to LDS."""
                         set_bases(fx.Int32(0), fx.Int32(0))
                         for chunk in range(fx.Int32(0), n_chunks, fx.Int32(1)):
                             chunk = fx.Int32(chunk)

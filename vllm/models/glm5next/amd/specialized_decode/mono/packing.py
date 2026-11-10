@@ -13,7 +13,7 @@ import torch
 
 
 def pack_bf16(w: torch.Tensor) -> torch.Tensor:
-    """Pack BF16 ``[N, K]`` for the kernel's 16-row, 64-K MFMA tiles."""
+    """Pack BF16 `[N, K]` for the kernel's 16-row, 64-K MFMA tiles."""
     if w.ndim != 2:
         raise ValueError(f"BF16 packing expects a matrix, got shape {tuple(w.shape)}")
     rows, k = w.shape
@@ -33,9 +33,9 @@ def pack_shared_expert(
 ) -> tuple[torch.Tensor, torch.Tensor, torch.Tensor, torch.Tensor]:
     """A row-major MXFP4 SwiGLU MLP as one expert of the AITER-shuffled MoE layout.
 
-    ``gate_up`` ``[2 * I, K // 2]`` (gate rows, then up rows), ``down``
-    ``[N, I // 2]``, each scale one E8M0 per 32 inputs, ``[rows, inputs // 32]``.
-    Returns ``(w_ug, s_ug, w_dn, s_dn)`` as bytes."""
+    `gate_up` `[2 * I, K // 2]` (gate rows, then up rows), `down`
+    `[N, I // 2]`, each scale one E8M0 per 32 inputs, `[rows, inputs // 32]`.
+    Returns `(w_ug, s_ug, w_dn, s_dn)` as bytes."""
     from aiter.ops.shuffle import shuffle_scale, shuffle_weight
 
     def weight(t):

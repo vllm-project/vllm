@@ -16,7 +16,7 @@ teacher-forced decode (trace replay) with full-vocabulary logprobs, with the
 MonoKernel eager, under FULL graphs and with an e4m3 KV cache, against vLLM's
 layers in the same mode; eager also compares every decoder layer's outputs on
 every rank for each decode token, as the DeepSeek-V4/V4.1 mono tests do
-(``test_mono_decode_matches_the_model``), with their weight ranges. Prompts mix
+(`test_mono_decode_matches_the_model`), with their weight ranges. Prompts mix
 short contexts with ones past the indexer's 2048 tokens, so the sparse layer
 selects."""
 
@@ -137,7 +137,7 @@ class RandomWeightLoader(DummyModelLoader):
 
 
 class Probe:
-    """Worker extension (``worker_extension_cls``): it also brings this module,
+    """Worker extension (`worker_extension_cls`): it also brings this module,
     and so the loader, into the workers."""
 
     def mono_steps(self) -> int:
@@ -149,10 +149,10 @@ class Probe:
         """Keep every decoder layer's outputs (hidden states, residual) for each
         decode token of a decode-only step, keyed by (layer, prompt length,
         position), as the DeepSeek-V4.1 mono test does: a token's step and row
-        can differ between engines, its prompt and position cannot (``lens``:
+        can differ between engines, its prompt and position cannot (`lens`:
         the batch's prompt lengths, more than STEPS apart). vLLM's layers are
         read through forward hooks, the kernel layers by wrapping the launch
-        ``plan()`` returns; vLLM's MoE also keeps each token's margin between
+        `plan()` returns; vLLM's MoE also keeps each token's margin between
         its last chosen and first unchosen routing score. Eager only (hooks do
         not run in graph replay)."""
         from vllm.forward_context import get_forward_context
@@ -298,9 +298,9 @@ def _requests(tp: int):
 
 def _decode(llm, tp: int, capture: str | None = None):
     """Full-vocabulary logprobs of every decode step (the first output token
-    comes from prefill, which runs stock), every token forced; with ``capture``
+    comes from prefill, which runs stock), every token forced; with `capture`
     each rank also saves each batch's decoder-layer outputs, routing margins and
-    the layers the kernels ran to ``{capture}.b{batch}.rank{rank}``."""
+    the layers the kernels ran to `{capture}.b{batch}.rank{rank}`."""
     from vllm import SamplingParams
 
     rows = []
@@ -415,7 +415,7 @@ def _rel(a: torch.Tensor, b: torch.Tensor) -> float:
 
 def _assert_layers_close(got: str, want: str, tp: int) -> None:
     """Every decoder layer's outputs on every rank, token by token, kernels
-    (``got``) against vLLM's layers (``want``), for the decode tokens whose
+    (`got`) against vLLM's layers (`want`), for the decode tokens whose
     input to layer 3 is the same in both runs (see RESIDUAL_BOUND)."""
     batches = _batches(tp)
     for rank in range(tp):

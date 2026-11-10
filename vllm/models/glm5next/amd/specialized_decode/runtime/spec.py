@@ -2,12 +2,12 @@
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 """Side-effect-free configuration of the GLM-5.3-Flash specialized decode.
 
-``specialized_decode_config`` runs in the model's ``__init__``, before the weights
-load. It returns None unless ``--monokernel`` or
-``decode_backend=latency_specialized`` is set, and raises with every reason
+`specialized_decode_config` runs in the model's `__init__`, before the weights
+load. It returns None unless `--monokernel` or
+`decode_backend=latency_specialized` is set, and raises with every reason
 when the deployment cannot run it. Checks that need the loaded weights run when the
-executor is built (``guards.model_refusals``), those that need the KV caches when
-they are bound (``decode.SpecializedDecode.bind_caches``)."""
+executor is built (`guards.model_refusals`), those that need the KV caches when
+they are bound (`decode.SpecializedDecode.bind_caches`)."""
 
 from __future__ import annotations
 
@@ -219,7 +219,7 @@ def refusal_reasons(vllm_config: VllmConfig) -> list[str]:
 
 def specialized_decode_config(vllm_config: VllmConfig) -> DecodeConfig | None:
     """The deployment's specialized decode, None unless it is requested
-    (``--monokernel`` or ``decode_backend=latency_specialized``). Raises when it is
+    (`--monokernel` or `decode_backend=latency_specialized`). Raises when it is
     requested for a deployment it cannot serve, listing every reason."""
     if not requested(vllm_config):
         return None

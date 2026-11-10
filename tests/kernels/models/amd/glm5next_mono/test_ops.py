@@ -7,15 +7,15 @@ ops vLLM itself runs for the same decode step, on the kernel's own inputs to eac
 stage, at every width; then every width is captured in one graph and replayed,
 bit for bit against the first run. The checks live beside this file:
 
-- ``_ffn``: the FFN half (mHC seam, RMSNorm, router, top-8, shared expert, MXFP4
+- `_ffn`: the FFN half (mHC seam, RMSNorm, router, top-8, shared expert, MXFP4
   experts, MoE TP reduce), a stalled rank's expired waits and a late rank waited
   out;
-- ``_kda``: the whole KDA layer (in-projections, short conv, gated delta rule,
+- `_kda`: the whole KDA layer (in-projections, short conv, gated delta rule,
   gated norm, o_proj and its TP reduce), then the FFN half;
-- ``_dsa``: the whole sparse-attention layer (MLA and kpool index caches, the
+- `_dsa`: the whole sparse-attention layer (MLA and kpool index caches, the
   indexer, top-2048 selection, split attention), bf16 or e4m3 KV cache;
-- ``_moe``: the FFN stages against vLLM's own ``Glm5NextMoE`` built from the
-  model config, through ``process_weights_after_loading``."""
+- `_moe`: the FFN stages against vLLM's own `Glm5NextMoE` built from the
+  model config, through `process_weights_after_loading`."""
 
 import pytest
 import torch
@@ -96,7 +96,7 @@ def test_kda_layer_matches_vllm_ops(
 def test_dsa_layer_matches_vllm_ops(
     monkeypatch: pytest.MonkeyPatch, tp: int, fmt: str, kv_fp8: bool
 ):
-    """``kv_fp8``: an e4m3 MLA cache, as ``--kv-cache-dtype fp8_e4m3`` gives."""
+    """`kv_fp8`: an e4m3 MLA cache, as `--kv-cache-dtype fp8_e4m3` gives."""
     _ready(tp)
     check = _ffn._worker(_dsa._check, _dsa.FORMATS[fmt], kv_fp8)
     multi_process_parallel(monkeypatch, tp, 1, check)

@@ -24,7 +24,7 @@ from vllm.models.glm5next.amd.specialized_decode.mono.peer import PeerBuffers
 
 @dataclass
 class FlashFfnWeights:
-    """One layer's tensors as the kernel reads them; ``*_sh_*`` is the shared
+    """One layer's tensors as the kernel reads them; `*_sh_*` is the shared
     expert, a slice of the routed tensors or a packed copy."""
 
     w_r: torch.Tensor
@@ -46,9 +46,9 @@ class FlashFfnWeights:
 @dataclass
 class FlashKdaWeights:
     """One KDA layer's attention-side tensors, every projection row-major bf16:
-    ``w_in`` [3P + H + 2 * 128, HIDDEN] (q | k | v | beta | f_a | g_a), ``w_fb`` and
-    ``w_gb`` [P, 128], ``w_o`` [HIDDEN, P]; ``conv_w`` [3P, 4], ``a_log`` [H],
-    ``dt_bias`` [P] and ``w_on`` [128] fp32."""
+    `w_in` [3P + H + 2 * 128, HIDDEN] (q | k | v | beta | f_a | g_a), `w_fb` and
+    `w_gb` [P, 128], `w_o` [HIDDEN, P]; `conv_w` [3P, 4], `a_log` [H],
+    `dt_bias` [P] and `w_on` [128] fp32."""
 
     hc_fn: torch.Tensor
     hc_scale: torch.Tensor
@@ -67,12 +67,12 @@ class FlashKdaWeights:
 @dataclass
 class FlashDsaWeights:
     """One sparse-attention layer's attention-side tensors as vLLM holds them.
-    ``w_qkv`` [1536 + 512, HIDDEN] (q_a | kv_a), ``w_qb`` [H * 256, 1536] and ``w_o``
+    `w_qkv` [1536 + 512, HIDDEN] (q_a | kv_a), `w_qb` [H * 256, 1536] and `w_o`
     [HIDDEN, H * 256] are each FP8 with f32 128 x 128 block scales, or bf16 with no
-    scale; ``w_idx`` bf16 [128 + 32, HIDDEN] (wk | weights_proj), ``w_gate`` bf16
+    scale; `w_idx` bf16 [128 + 32, HIDDEN] (wk | weights_proj), `w_gate` bf16
     [128, HIDDEN]; q_a / kv_a RMSNorm weights; k LayerNorm weight and bias and kpool
-    ``ape`` [4, 128] f32; ``w_iq`` bf16 [32 * 128, 1536]; ``w_uk`` bf16 [H, 512, 256]
-    (W_UK^T, packed once); ``w_kvb`` bf16 [H * 512, 512] (kv_b_proj, W_UV rows at
+    `ape` [4, 128] f32; `w_iq` bf16 [32 * 128, 1536]; `w_uk` bf16 [H, 512, 256]
+    (W_UK^T, packed once); `w_kvb` bf16 [H * 512, 512] (kv_b_proj, W_UV rows at
     256 ..)."""
 
     hc_fn: torch.Tensor
@@ -110,7 +110,7 @@ class FlashDsaWeights:
 class FlashDsaCaches:
     """One sparse-attention layer's caches: the MLA latent cache
     [blocks, block_tokens, 512] (block stride may be padded), bf16 or e4m3
-    bytes over the f32 scalar ``k_scale``; the uint8 index cache
+    bytes over the f32 scalar `k_scale`; the uint8 index cache
     [blocks, block_tokens / 4, 132] (pool FP8 values, then f32 scales) and the
     bf16 kpool tail ring [blocks, 2, 4, 128] (k, gate)."""
 
@@ -139,7 +139,7 @@ class FlashKdaState:
 
 
 class FlashFfnRuntime:
-    """The compiled launch for ``width`` rows plus the state every layer shares:
+    """The compiled launch for `width` rows plus the state every layer shares:
     scratch mailboxes, the symmetric peer buffer, error words, the step epoch."""
 
     def __init__(
@@ -319,12 +319,12 @@ class FlashFfnOp:
         block_table: torch.Tensor | None = None,
         idx_block_table: torch.Tensor | None = None,
     ) -> tuple[torch.Tensor, torch.Tensor, torch.Tensor, torch.Tensor]:
-        """``attn_part``: this rank's unreduced attention output [S, HIDDEN];
-        ``residual`` [S, HC, HIDDEN], ``post`` [S, HC, 1], ``comb`` [S, HC, HC]: the
+        """`attn_part`: this rank's unreduced attention output [S, HIDDEN];
+        `residual` [S, HC, HIDDEN], `post` [S, HC, 1], `comb` [S, HC, HC]: the
         attention pre's state. A KDA op takes the previous layer's output, its
-        state, and ``state_idx`` int32 [S] (not positive: padding) instead. A
+        state, and `state_idx` int32 [S] (not positive: padding) instead. A
         sparse-attention op takes the previous layer's output, its caches, the
-        step's ``rows`` int32 [S, ROW_WORDS] and the int32 block tables of the MLA
+        step's `rows` int32 [S, ROW_WORDS] and the int32 block tables of the MLA
         cache and of the index cache (default: the MLA one).
         Returns the layer's (x, residual, post, comb)."""
         rt, w, S = self.rt, self.w, self.rt.width

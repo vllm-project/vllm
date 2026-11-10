@@ -1,6 +1,6 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
-"""GLM-5.3-Flash MonoKernel geometry (``amd/GLM-5.3-Flash-Quark-MXFP4``)."""
+"""GLM-5.3-Flash MonoKernel geometry (`amd/GLM-5.3-Flash-Quark-MXFP4`)."""
 
 from dataclasses import dataclass
 

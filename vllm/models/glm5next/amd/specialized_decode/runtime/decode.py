@@ -4,11 +4,11 @@
 then a whole-layer MonoKernel launch for every MoE decoder layer 3..43 inside the
 stock layer loop.
 
-Built by the model state once the weights are loaded (``Glm5NextModelState``): reads
-vLLM's loaded weights in place (``weights``) and builds every width's launches
-before memory profiling and graph capture. ``bind_caches`` binds them to every KV
+Built by the model state once the weights are loaded (`Glm5NextModelState`): reads
+vLLM's loaded weights in place (`weights`) and builds every width's launches
+before memory profiling and graph capture. `bind_caches` binds them to every KV
 cache vLLM allocates (the CUDA-graph memory-profiling cache, then the real one).
-Each step ``plan`` returns a ``Step`` or None; ``Step.layer(i)`` is the launch
+Each step `plan` returns a `Step` or None; `Step.layer(i)` is the launch
 replacing decoder layer i (None for vLLM's layers). Weight reloads are not
 supported."""
 
@@ -65,7 +65,7 @@ class Step:
 
     def layer(self, idx: int) -> Callable[..., Any] | None:
         """The launch replacing decoder layer idx (it takes and returns what
-        ``Glm5NextDecoderLayer`` does), or None for vLLM's layer."""
+        `Glm5NextDecoderLayer` does), or None for vLLM's layer."""
         kernel = self.kernels.get(idx)
         if kernel is None:
             return None
@@ -182,7 +182,7 @@ class SpecializedDecode:
 
     def plan(self, positions: torch.Tensor, intermediate_tensors: Any) -> Step | None:
         """This step's plan, or None to run vLLM's layers: pipeline stage inputs and
-        steps ``routing.step_reason`` or the layers' eligibility decline. A kernel
+        steps `routing.step_reason` or the layers' eligibility decline. A kernel
         step re-binds the caches if they moved (a no-op otherwise)."""
         if intermediate_tensors is not None or not is_forward_context_available():
             return None

@@ -899,7 +899,7 @@ class Glm5NextModel(nn.Module, EagleModelMixin):
         self.specialized_decode: Any = None
 
     def build_specialized_decode(self) -> None:
-        """Called by ``Glm5NextModelState`` once the weights are loaded."""
+        """Called by `Glm5NextModelState` once the weights are loaded."""
         from vllm.models.glm5next.amd.specialized_decode.runtime.decode import (
             SpecializedDecode,
         )

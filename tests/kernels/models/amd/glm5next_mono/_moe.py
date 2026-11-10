@@ -1,12 +1,12 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
-"""The Flash MonoKernel's FFN stages against vLLM's own ``Glm5NextMoE``.
+"""The Flash MonoKernel's FFN stages against vLLM's own `Glm5NextMoE`.
 
 vLLM builds the layer from the model config with its Quark MXFP4 quantization; the
 test fills the parameters in their loaded layout with random values, runs
-``process_weights_after_loading`` and hands the kernel the views
-``layer_weights`` takes of the result, as in serving. The seam is checked against
-vLLM's mHC op, the MoE against ``Glm5NextMoE.forward`` on the kernel's own FFN
+`process_weights_after_loading` and hands the kernel the views
+`layer_weights` takes of the result, as in serving. The seam is checked against
+vLLM's mHC op, the MoE against `Glm5NextMoE.forward` on the kernel's own FFN
 input, and both against an fp32 MoE on the dequantized weights and unquantized
 inputs. vLLM quantizes expert inputs to MXFP4 and the kernel to MXFP8, so the gap
 between them is vLLM's own error (~0.2 relative on random weights): the test checks
@@ -34,7 +34,7 @@ ROWS = WIDTHS
 
 def _random_moe(moe, gd, gr) -> None:
     """Random MXFP4 experts (nibbles, E8M0 scales) in the loaded layout, this rank's
-    shards from ``gd``; the replicated router from ``gr``, alike on every rank."""
+    shards from `gd`; the replicated router from `gr`, alike on every rank."""
     u8 = torch.uint8
     e = moe.experts.routed_experts
     for name, lo, hi in (("weight", 0, 256), ("weight_scale", 118, 123)):
@@ -63,7 +63,7 @@ def _random_moe(moe, gd, gr) -> None:
 
 
 def _mxfp8(v: torch.Tensor) -> torch.Tensor:
-    """``v`` rounded as the kernel rounds expert inputs (AITER's W4A8): per 32
+    """`v` rounded as the kernel rounds expert inputs (AITER's W4A8): per 32
     values an E8M0 scale, amax / 448 rounded up to a power of two, and the
     values to E4M3."""
     from vllm.models.glm5next.amd.specialized_decode.mono.config import FP8_MAX
@@ -77,8 +77,8 @@ def _mxfp8(v: torch.Tensor) -> torch.Tensor:
 
 
 def _exact_moe(x, gate, bias, w13, s13, w2, s2, shared, act=None):
-    """``shared``: the shared expert's slot in the routed tensors, or its own
-    (gate_up, scale, down, scale) MXFP4 shards; ``act``: how both expert GEMMs'
+    """`shared`: the shared expert's slot in the routed tensors, or its own
+    (gate_up, scale, down, scale) MXFP4 shards; `act`: how both expert GEMMs'
     inputs are rounded (None: not at all)."""
     """fp32 MoE on dequantized MXFP4 weights and unquantized inputs, vLLM's
     routing (sigmoid + bias, top-8, renormalized, x2.5) and SwiGLU clamp."""

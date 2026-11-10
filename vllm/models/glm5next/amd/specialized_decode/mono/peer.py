@@ -83,9 +83,9 @@ def _open(handle: bytes) -> int:
 
 
 class PeerBuffers:
-    """``nbytes`` of zeroed device memory on every TP rank; ``addresses[r]`` is
+    """`nbytes` of zeroed device memory on every TP rank; `addresses[r]` is
     rank r's buffer as mapped in this process. Collective: every rank builds it
-    at the same point, and every rank must call ``close`` in the same order."""
+    at the same point, and every rank must call `close` in the same order."""
 
     def __init__(self, nbytes: int, rank: int, npes: int, group) -> None:
         import torch.distributed as dist

@@ -6,7 +6,7 @@ and the launch of each width.
 Every kernel layer is one launch for the whole decoder layer: the attention-side
 mHC, the attention (KDA, or sparse MLA with its kpool indexer and cache writes),
 o_proj with its TP reduce, the FFN mHC seam, the RMSNorm, the router and the MoE
-with its TP reduce. It takes and returns what ``Glm5NextDecoderLayer`` does."""
+with its TP reduce. It takes and returns what `Glm5NextDecoderLayer` does."""
 
 from __future__ import annotations
 
@@ -103,7 +103,7 @@ def _bind_dsa(
     caches: Mapping[str, torch.Tensor], kv_fp8: bool, k_scales: Mapping[int, Any]
 ) -> tuple[dict, list[str]]:
     """Each sparse-attention layer's MLA latent cache [blocks, tokens, 512] (bf16,
-    or e4m3 bytes with ``kv_fp8``), index cache [blocks, 16 n pools, 132] (16-pool
+    or e4m3 bytes with `kv_fp8`), index cache [blocks, 16 n pools, 132] (16-pool
     tiles) and kpool tail ring [blocks, 2, 4, 128]; the kernel addresses every
     block with a 64-bit base."""
     from vllm.models.glm5next.amd.specialized_decode.mono.ffn.op import FlashDsaCaches
@@ -259,7 +259,7 @@ class _Width:
         self.rows_step: MonoStep | None = None
 
     def state_idx(self, step: MonoStep, src: torch.Tensor) -> torch.Tensor:
-        """KDA layers of one cache group share ``src``; vLLM pads graph rows with
+        """KDA layers of one cache group share `src`; vLLM pads graph rows with
         the null block 0. A step narrower than the width gets one padded copy per
         group (padding -1), in the same order every step."""
         n = step.tokens
@@ -350,7 +350,7 @@ def _pad(w: _Width, step: MonoStep, ins):
 
 
 class FlashLayer:
-    """One whole decoder layer's kernel at one width; ``ends`` the runtimes the
+    """One whole decoder layer's kernel at one width; `ends` the runtimes the
     step's last kernel layer advances."""
 
     def __init__(self, ctx: MonoContext, layer: nn.Module, op, w: _Width, ends, idx):

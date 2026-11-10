@@ -38,7 +38,7 @@ class HealthWatch:
     """Error words of every kernel runtime on this rank (one int32 per stage) and,
     on the output rank, every rank's expiry flag.
 
-    ``health()`` is what the runner reads after a step. ``after_step()`` checks the
+    `health()` is what the runner reads after a step. `after_step()` checks the
     last copy once it has landed, without blocking the stream, and starts the next
     copy only after that check, so under async scheduling every copy is checked a
     step or two late instead of being overwritten unchecked. Words are sticky (the

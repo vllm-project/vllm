@@ -231,7 +231,7 @@ def layout(
 def stage_tasks(
     samples: int, inter: int, npes: int = 1, kda: bool = False, dsa: bool = False
 ):
-    """``(stage name, task count)`` pairs in execution order. ``iscore`` is sized
+    """`(stage name, task count)` pairs in execution order. `iscore` is sized
     per row at run time; its count here only places the next stage."""
     shard = FlashShard(npes)
     attention = []

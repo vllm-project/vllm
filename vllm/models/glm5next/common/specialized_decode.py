@@ -14,8 +14,8 @@ AUTO, SPECIALIZED = "auto", "latency_specialized"
 
 
 def requested(vllm_config: VllmConfig) -> bool:
-    """Whether the deployment asks for the specialized decode: ``--monokernel``, or
-    ``additional_config={"decode_backend": "latency_specialized"}`` (RFC #60904)."""
+    """Whether the deployment asks for the specialized decode: `--monokernel`, or
+    `additional_config={"decode_backend": "latency_specialized"}` (RFC #60904)."""
     extra = vllm_config.additional_config
     backend = extra.get("decode_backend", AUTO) if isinstance(extra, dict) else AUTO
     if backend not in (AUTO, SPECIALIZED):
