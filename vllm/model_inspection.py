@@ -12,7 +12,8 @@ import torch.nn as nn
 # are reported: a concrete kernel object is preferred over the backend enum
 # below, which is recorded earlier and can go stale (e.g. the MXFP4 MoE method
 # defaults the enum to MARLIN, then selects Cutlass experts without updating
-# it).
+# it). New methods must add their attribute name here;
+# `test_kernel_attributes_cover_every_selector_call_site` catches in-tree drift.
 _KERNEL_ATTRIBUTES = (
     "moe_kernel",
     "fp8_linear",
@@ -63,13 +64,13 @@ def _get_selected_kernel(quant_method: object, scheme: object | None) -> str | N
     unquantized layers and for inspection that runs before the weights have
     been processed.
     """
-    for source in (scheme, quant_method):
-        if source is None:
-            continue
+    sources = [source for source in (scheme, quant_method) if source is not None]
+    for source in sources:
         for attribute in _KERNEL_ATTRIBUTES:
             kernel = getattr(source, attribute, None)
             if kernel is not None:
                 return _describe_kernel(kernel)
+    for source in sources:
         for attribute in _BACKEND_ATTRIBUTES:
             backend = getattr(source, attribute, None)
             if isinstance(backend, enum.Enum):

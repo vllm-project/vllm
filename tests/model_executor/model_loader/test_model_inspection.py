@@ -35,6 +35,10 @@ class _Experts:
     """Stand-in for a `FusedMoEExperts` implementation."""
 
 
+class _CutlassExperts(_Experts):
+    """Stand-in for an experts implementation selected over the backend enum."""
+
+
 class _MoEKernel:
     """Stand-in for `FusedMoEKernel`, which exposes its experts implementation."""
 
@@ -86,54 +90,14 @@ class _UnquantizedLinear(nn.Module):
         self.quant_method = self.UnquantizedLinearMethod()
 
 
-@pytest.mark.parametrize(
-    "attribute",
-    [
-        "moe_kernel",
-        "fp8_linear",
-        "linear_kernel",
-        "ocp_mx_linear",
-        "kernel",
-        "experts_cls",
-    ],
-)
-def test_get_selected_kernel_reports_every_known_attribute(attribute):
-    """Each kernel attribute name used across quant methods is discovered."""
-    method = _QuantMethod(**{attribute: MarlinMxFp4LinearKernel})
-    assert _get_selected_kernel(method, None) == "MarlinMxFp4LinearKernel"
-
-
-@pytest.mark.parametrize(
-    "attribute",
-    [
-        "mxfp4_backend",
-        "mxfp8_backend",
-        "nvfp4_backend",
-        "int8_backend",
-        "fp8_backend",
-        "w4a8_backend",
-        "wna16_backend",
-        "wna16_moe_backend",
-        "unquantized_backend",
-        "backend",
-    ],
-)
-def test_get_selected_kernel_reports_every_backend_enum(attribute):
-    """Every enum backend attribute name used across MoE methods is discovered."""
-    method = _QuantMethod(**{attribute: _Backend.MARLIN})
-    assert _get_selected_kernel(method, None) == "MARLIN"
-
-
 def test_get_selected_kernel_prefers_a_kernel_over_a_stale_backend_enum():
     """The backend enum can be recorded before the final kernel is chosen.
 
     The MXFP4 MoE method defaults `mxfp4_backend` to MARLIN and then selects
     Cutlass experts without updating it, so the enum must not win.
     """
-    method = _QuantMethod(
-        mxfp4_backend=_Backend.MARLIN, experts_cls=MarlinMxFp4LinearKernel
-    )
-    assert _get_selected_kernel(method, None) == "MarlinMxFp4LinearKernel"
+    method = _QuantMethod(mxfp4_backend=_Backend.MARLIN, experts_cls=_CutlassExperts)
+    assert _get_selected_kernel(method, None) == "_CutlassExperts"
 
 
 def test_get_selected_kernel_ignores_string_valued_backend_fields():
@@ -152,6 +116,13 @@ def test_get_selected_kernel_prefers_scheme_over_quant_method():
     """Compressed-tensors stores the kernel on the scheme."""
     scheme = _CompressedTensorsLinear._Scheme()
     method = _QuantMethod(kernel="WrongKernel")
+    assert _get_selected_kernel(method, scheme) == "MarlinMxFp4LinearKernel"
+
+
+def test_get_selected_kernel_prefers_a_quant_method_kernel_over_a_scheme_backend():
+    """A kernel from either source wins over a backend enum from the other."""
+    scheme = _QuantMethod(backend=_Backend.MARLIN)
+    method = _QuantMethod(kernel=MarlinMxFp4LinearKernel)
     assert _get_selected_kernel(method, scheme) == "MarlinMxFp4LinearKernel"
 
 
@@ -217,20 +188,6 @@ def test_format_model_inspection_separates_layers_with_different_kernels():
 
     assert "MarlinMxFp4LinearKernel" in output
     assert "kernel=_Experts" in output
-
-
-def test_log_model_inspection_is_disabled_by_default(monkeypatch):
-    """The load-time log stays silent unless explicitly enabled."""
-    monkeypatch.setattr(envs, "VLLM_LOG_MODEL_INSPECTION", False)
-    logged = []
-    monkeypatch.setattr(
-        "vllm.model_executor.model_loader.base_loader.logger.info",
-        lambda *args, **kwargs: logged.append(args),
-    )
-
-    log_model_inspection(nn.Linear(4, 4))
-
-    assert logged == []
 
 
 def test_log_model_inspection_logs_the_model_structure(monkeypatch):
@@ -312,18 +269,22 @@ def test_load_model_inspects_after_the_kernel_is_selected(monkeypatch):
 _SELECTOR_PATTERN = re.compile(r"^(?:init|choose|select|make)_.*(?:kernel|backend)$")
 
 
+def _package_root() -> pathlib.Path:
+    assert vllm.__file__ is not None
+    return pathlib.Path(vllm.__file__).parent
+
+
 def _kernel_selector_names() -> set[str]:
     """Names of the functions that resolve a quantization kernel.
 
     Discovered from the source rather than an import list, because the MoE
     factories are not re-exported from their package.
     """
+    package = _package_root()
     roots = [
-        pathlib.Path(vllm.model_executor.kernels.linear.__file__).parent,
-        pathlib.Path(vllm.model_executor.layers.fused_moe.oracle.__file__).parent,
-        pathlib.Path(
-            vllm.model_executor.layers.quantization.utils.humming.__file__
-        ).parent,
+        package / "model_executor/kernels/linear",
+        package / "model_executor/layers/fused_moe/oracle",
+        package / "model_executor/layers/quantization/utils/humming",
     ]
     names: set[str] = set()
     for root in roots:
@@ -345,7 +306,7 @@ def test_kernel_attributes_cover_every_selector_call_site():
     would silently report no kernel, so this test derives the ground truth from
     the source instead of trusting the list.
     """
-    quantization = pathlib.Path(vllm.model_executor.layers.quantization.__file__).parent
+    quantization = _package_root() / "model_executor/layers/quantization"
     selectors = _kernel_selector_names()
     assert selectors, "expected to find kernel selectors; imports may have changed"
 

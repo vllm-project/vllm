@@ -393,6 +393,8 @@ class WeightCacheDaemon:
             loader.load_weights(model, model_config)
             process_weights_after_loading(model, model_config, target_device)
         model = model.eval()
+        # The daemon calls create_model/load_weights directly instead of
+        # load_model, so log the inspection here.
         log_model_inspection(model)
         return model
 

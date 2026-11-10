@@ -125,8 +125,8 @@ class BaseModelLoader(ABC):
             torch.accelerator.empty_cache()
 
         model = model.eval()
-        # Report the resolved quantization kernels, which are selected while
-        # processing the weights above.
+        # Inspect after weight processing: that is where the quantization
+        # kernels are selected, so `create_model` cannot report them.
         log_model_inspection(model)
         return model
 
