@@ -6,7 +6,7 @@ Run `pytest tests/kernels/quantization/test_mxfp8_kernel_selection.py`.
 """
 
 from contextlib import contextmanager
-from unittest.mock import patch
+from unittest.mock import MagicMock, patch
 
 import pytest
 import torch
@@ -218,15 +218,11 @@ def test_rocm_mxfp8_aiter_tuned_lookup_failure_is_untuned():
     """A failing AITER tuned-config lookup reports the shape as untuned
     instead of failing kernel selection."""
     import sys
-    import types
 
     from vllm._aiter_ops import rocm_aiter_ops
 
-    def _lookup(m, n, k, w_scale_block):
-        raise KeyError("gfx")
-
-    fake = types.ModuleType("aiter.ops.gemm_op_a8w8")
-    fake.get_mxscale_bpreshuffle_config = _lookup
+    fake = MagicMock()
+    fake.get_mxscale_bpreshuffle_config.side_effect = KeyError("gfx")
     lookup = rocm_aiter_ops.is_mxfp8_bpreshuffle_gemm_tuned.__wrapped__
     with (
         patch.dict(sys.modules, {"aiter.ops.gemm_op_a8w8": fake}),
