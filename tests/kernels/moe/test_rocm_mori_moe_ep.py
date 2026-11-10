@@ -79,7 +79,7 @@ def test_mori_dispatch_aiter_combine_trim_regression():
         FUSED_MOE_UNQUANTIZED_CONFIG,
     )
     from vllm.model_executor.layers.fused_moe.experts.rocm_aiter_moe import (
-        AiterExperts,
+        AiterUnquantizedExperts,
     )
     from vllm.model_executor.layers.fused_moe.prepare_finalize.mori import (
         MoriPrepareAndFinalize,
@@ -135,7 +135,7 @@ def test_mori_dispatch_aiter_combine_trim_regression():
         in_dtype=torch.bfloat16,
         max_num_tokens=MAX_TOK,
     )
-    experts = AiterExperts(
+    experts = AiterUnquantizedExperts(
         moe_config=moe_config, quant_config=FUSED_MOE_UNQUANTIZED_CONFIG
     )
     vllm_config = VllmConfig()
