@@ -74,7 +74,7 @@ repos:
         # The image pins NCCL itself (NCCL_VERSION + UV_OVERRIDE).
         --no-emit-package, nvidia-nccl-cu13,
         --index-strategy, unsafe-best-match,
-        --torch-backend, cu130,
+        --torch-backend, cu132,
         --python-platform, x86_64-manylinux_2_28,
         --python-version, "3.12",
       ]
