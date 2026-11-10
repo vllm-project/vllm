@@ -316,7 +316,9 @@ def kpool_compress_and_write_cache(
 # Seed each request's incomplete pool into its paged tail during prefill.
 
 
-@triton.jit
+@triton.jit(
+    do_not_specialize=["n_tokens"], do_not_specialize_on_alignment=["tslot_ptr"]
+)
 def _kpool_tail_seed_kernel(
     key_ptr,
     score_ptr,
