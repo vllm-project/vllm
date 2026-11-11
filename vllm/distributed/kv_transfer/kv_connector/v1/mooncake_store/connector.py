@@ -236,12 +236,15 @@ class MooncakeStoreConnector(KVConnectorBase_V1, SupportsHMA):
         Closes the worker's MooncakeDistributedStore handle. A TransferEngine
         the store created is released with that handle. An engine borrowed from
         MooncakeConnector stays owned by that connector. Invoked from the
-        engine's explicit shutdown path and as a backstop from `__del__`;
-        a no-op on the scheduler role, which holds no store handle.
+        engine's explicit shutdown path and as a backstop from `__del__`.
+        On the scheduler role, closes the lookup client's socket and thread.
         """
         worker = getattr(self, "connector_worker", None)
         if worker is not None:
             worker.close()
+        scheduler = getattr(self, "connector_scheduler", None)
+        if scheduler is not None:
+            scheduler.client.close()
 
     def __del__(self):
         self.shutdown()

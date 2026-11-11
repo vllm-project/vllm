@@ -339,13 +339,14 @@ Strict isolation requires a Mooncake master started with `--enable_multi_tenants
 
 ### Lookup timeout and circuit breaker
 
-Prefix lookups (blocking, async, and arrival-time prefetch) wait at most
-`lookup_timeout_s` (see below), including time queued on the lookup executor.
-A timeout or lookup error returns a cache miss so the request computes locally.
-Only lookups that reached the store count as failures; lookups that expire
-while queued behind others do not. After 3 consecutive failures, lookups are
-skipped for 30 seconds. After the cooldown, a single probe lookup either closes
-the breaker or reopens it.
+Prefix lookups (blocking, async, and arrival-time prefetch) are sent to worker
+rank 0 as soon as they are made and run concurrently there, on
+`lookup_server_threads` workers. Each waits at most `lookup_timeout_s` (see
+below), including time queued on rank 0. A timeout or lookup error returns a
+cache miss so the request computes locally, and rank 0 skips a lookup that is
+still queued once the scheduler has stopped waiting for it. After 3
+consecutive failures, lookups are skipped for 30 seconds. After the cooldown, a
+single probe lookup either closes the breaker or reopens it.
 
 This bounds the scheduler's wait for prefix lookup. It does not cancel a master
 RPC already running inside the worker or apply to KV loads and saves. Store
@@ -357,7 +358,8 @@ reset waits at most 60 seconds.
 - `lookup_async` (bool): Run the external prefix-cache lookup on a background thread without waiting for its result. With a positive `lookup_prefetch_limit`, lookup starts as soon as the request is added to the scheduler, so it overlaps the time the request waits in the queue. GPU KV allocation and loading still happen through the scheduler. Default: `false`.
 - `lookup_prefetch_limit` (int): Maximum number of arrival-time lookups in flight. Beyond it, a request is looked up when the scheduler first reaches it; scheduler lookups are not capped. Set to a positive value to enable arrival-time lookup. Default: `0` (disabled).
 - `lookup_prefetch_ttl_s` (float): Maximum age of a completed async lookup result, measured from when its RPC returned. Older results are looked up again, as are lookups whose token/hash range changed. Pending lookups use the separate lookup timeout above. Default: `2.0` seconds.
-- `lookup_timeout_s` (float): Maximum wait for a prefix lookup, including executor queue time. Default: `1.0` seconds.
+- `lookup_timeout_s` (float): Maximum wait for a prefix lookup, including time queued on worker rank 0. Default: `1.0` seconds.
+- `lookup_server_threads` (int): Number of prefix lookups worker rank 0 runs at once. Default: `4`.
 - `lookup_rpc_port` (int): Custom port for the ZMQ lookup RPC socket. Default: `0`.
 - `custom_mem_pool` (str): Optional Mooncake allocator for the GPU KV cache.
   `"NVLINK"` is used in the [EGM deployment example](#standalone-egm-over-nvlink);

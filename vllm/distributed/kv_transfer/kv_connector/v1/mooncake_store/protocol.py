@@ -5,9 +5,18 @@
 This is the single source of truth shared by `LookupKeyClient` and
 `LookupKeyServer` on the scheduler<->worker rank-0 admin channel.
 
-Wire format (REQ/REP over IPC):
+Wire format (DEALER/ROUTER over IPC). The client may have many requests in
+flight; the server answers them out of order and the request id pairs each
+reply with its request.
 
-    Request: [msg_type: bytes] [payload_frames...]
+    Request: [request_id] [budget_ms] [msg_type: bytes] [payload_frames...]
+      request_id: u64 big-endian, 8 bytes; echoed back in the reply
+      budget_ms: u32 big-endian, 4 bytes; time the client will wait. The
+                 server skips a request still queued once its budget is spent.
+
+    Reply: [request_id] [status] [payload]
+      status: RESP_OK, RESP_ERR (the handler failed) or RESP_EXPIRED (the
+              budget ran out before the handler started)
 
       msg_type == LOOKUP_MSG:
           frame 1: num_tokens (u32 big-endian, 4 bytes); the worker derives
@@ -16,13 +25,13 @@ Wire format (REQ/REP over IPC):
                    fixed-size block hash (0 when there are no hashes)
           frame 3: raw block hashes concatenated back-to-back (each hash_len
                    bytes); the server splits on hash_len
-        Response: hit_length (u32 big-endian, first 4 bytes), followed by zero
-                  or more 8-byte tail-key boundaries. Each entry is group_id
-                  (u32), then boundary_tokens (u32).
+        Reply payload (RESP_OK): hit_length (u32 big-endian, first 4 bytes),
+                  followed by zero or more 8-byte tail-key boundaries. Each
+                  entry is group_id (u32), then boundary_tokens (u32).
 
       msg_type == RESET_MSG:
           (no payload frames)
-        Response: [RESP_OK] or [RESP_ERR]
+        Reply payload: empty; status RESP_OK or RESP_ERR
 
 The first frame of every request is a named bytes tag (not a numeric
 sentinel that aliases the data field) so the protocol stays
@@ -42,9 +51,13 @@ from vllm.distributed.kv_transfer.kv_connector.v1.mooncake_store.data import (
 LOOKUP_MSG: bytes = b"lookup"
 RESET_MSG: bytes = b"reset"
 
-# Single-byte response status codes for admin commands.
+# Single-byte reply status codes.
 RESP_OK: bytes = b"\x01"
 RESP_ERR: bytes = b"\x00"
+RESP_EXPIRED: bytes = b"\x02"
+
+REQUEST_ID_SIZE: int = 8
+BUDGET_MS_SIZE: int = 4
 
 # group_id (u32), boundary_tokens (u32).
 TAIL_KEY_BOUNDARY_ENTRY_SIZE: int = 8

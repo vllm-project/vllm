@@ -1,7 +1,7 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 
-import threading
+import tempfile
 import time
 from types import SimpleNamespace
 from unittest.mock import MagicMock, patch
@@ -59,6 +59,7 @@ from vllm.v1.metrics.cache_hit_source import CacheHitSource
 from vllm.v1.outputs import KVConnectorOutput, ModelRunnerOutput
 from vllm.v1.request import Request, RequestStatus
 
+from .mooncake_lookup_peer import LookupPeer, hit
 from .utils import create_scheduler, create_vllm_config, set_mtp_config
 
 
@@ -760,54 +761,39 @@ def test_scheduler_reset_store_handles_rpc_exception():
     assert sched.reset_store() is False
 
 
-def test_lookup_key_client_lookup_prepends_typed_tag():
-    """LookupKeyClient.lookup() puts LOOKUP_MSG tag at frame 0."""
-    vllm_config = _make_vllm_config()
+@pytest.fixture
+def lookup_peer(monkeypatch):
+    """Factory for a `LookupKeyClient` (or scheduler connector) wired to a
+    scripted `LookupPeer` in a private socket directory."""
+    created: list = []
+    # Keep Unix socket paths below the platform limit.
+    with tempfile.TemporaryDirectory(prefix="mc-", dir="/tmp") as rpc_dir:
+        monkeypatch.setenv("VLLM_RPC_BASE_PATH", rpc_dir)
 
-    with patch(
-        "vllm.distributed.kv_transfer.kv_connector.v1.mooncake_store."
-        "worker.make_zmq_socket"
-    ) as mock_make_socket:
-        client = worker.LookupKeyClient(vllm_config)
+        def make(vllm_config, responder=None):
+            peer = LookupPeer(vllm_config, responder)
+            created.append(peer)
+            return peer
 
-    fake_socket = mock_make_socket.return_value
-    fake_socket.recv.return_value = (5).to_bytes(4, "big")
-
-    # Blocking lookup (non_block defaults to False) runs on the executor and
-    # returns the resolved hit length.
-    result = client.lookup("req0", num_tokens=128, block_hashes=[])
-    assert result is not None
-    assert result.hit_length == 5
-
-    sent_frames = fake_socket.send_multipart.call_args[0][0]
-    assert sent_frames[0] == protocol.LOOKUP_MSG
-    assert int.from_bytes(sent_frames[1], "big") == 128
+        try:
+            yield make
+        finally:
+            for peer in created:
+                peer.close()
 
 
-def test_lookup_key_client_reset_uses_typed_protocol():
-    """LookupKeyClient.reset() sends RESET_MSG and parses RESP_OK / RESP_ERR."""
-    vllm_config = _make_vllm_config()
-
-    with patch(
-        "vllm.distributed.kv_transfer.kv_connector.v1.mooncake_store."
-        "worker.make_zmq_socket"
-    ) as mock_make_socket:
-        client = worker.LookupKeyClient(vllm_config)
-
-    fake_socket = mock_make_socket.return_value
-
-    # ACK path: server returns RESP_OK -> client returns True.
-    fake_socket.recv.return_value = protocol.RESP_OK
-    assert client.reset() is True
-    assert fake_socket.send_multipart.call_args[0][0] == (protocol.RESET_MSG,)
-
-    # NACK path: server returns RESP_ERR -> client returns False.
-    fake_socket.recv.return_value = protocol.RESP_ERR
-    assert client.reset() is False
+def _make_lookup_client(lookup_peer, extra_config=None, responder=None):
+    vllm_config = create_vllm_config(
+        kv_connector="MooncakeStoreConnector",
+        kv_role="kv_both",
+        kv_connector_extra_config=extra_config,
+    )
+    peer = lookup_peer(vllm_config, responder)
+    return worker.LookupKeyClient(vllm_config), peer
 
 
 def _poll_lookup(client, req_id, num_tokens=128, block_hashes=(), timeout=5.0):
-    """Drive non-blocking lookup until the executor completes it."""
+    """Drive non-blocking lookup until its reply arrives."""
     deadline = time.monotonic() + timeout
     while time.monotonic() < deadline:
         result = client.lookup(req_id, num_tokens, list(block_hashes), non_block=True)
@@ -817,18 +803,41 @@ def _poll_lookup(client, req_id, num_tokens=128, block_hashes=(), timeout=5.0):
     return None
 
 
-def _gated_recv(gate: threading.Event, value: int):
-    """Mock recv side-effect that blocks until `gate` is set, so the
-    executor's lookup can be held pending deterministically."""
+def test_lookup_key_client_lookup_prepends_typed_tag(lookup_peer):
+    """LookupKeyClient.lookup() sends request id, budget, then LOOKUP_MSG."""
+    client, peer = _make_lookup_client(lookup_peer, responder=lambda _: hit(5))
+    try:
+        result = client.lookup("req0", num_tokens=128, block_hashes=[])
+        assert result is not None
+        assert result.hit_length == 5
 
-    def recv(flags: int = 0) -> bytes:
-        gate.wait()
-        return value.to_bytes(4, "big")
+        [request] = peer.requests
+        assert len(request.request_id) == protocol.REQUEST_ID_SIZE
+        assert 0 < request.budget_ms <= 1000
+        assert request.msg_type == protocol.LOOKUP_MSG
+        assert int.from_bytes(request.payload[0], "big") == 128
+    finally:
+        client.close()
 
-    return recv
+
+def test_lookup_key_client_reset_uses_typed_protocol(lookup_peer):
+    """LookupKeyClient.reset() sends RESET_MSG and maps RESP_OK / RESP_ERR."""
+    statuses = iter([protocol.RESP_OK, protocol.RESP_ERR])
+    client, peer = _make_lookup_client(
+        lookup_peer, responder=lambda _: (next(statuses), b"")
+    )
+    try:
+        # ACK path: server returns RESP_OK -> client returns True.
+        assert client.reset() is True
+        assert peer.requests[0].msg_type == protocol.RESET_MSG
+        assert peer.requests[0].payload == []
+        # NACK path: server returns RESP_ERR -> client returns False.
+        assert client.reset() is False
+    finally:
+        client.close()
 
 
-def test_admission_lookup_retains_completed_result_until_scheduled():
+def test_admission_lookup_retains_completed_result_until_scheduled(lookup_peer):
     """A lookup started by on_new_request is reused, not consumed or
     submitted again, by the scheduler's probes."""
     vllm_config = create_vllm_config(
@@ -836,13 +845,8 @@ def test_admission_lookup_retains_completed_result_until_scheduled():
         kv_role="kv_both",
         kv_connector_extra_config={"lookup_async": True, "lookup_prefetch_limit": 1},
     )
-    with (
-        set_current_vllm_config(vllm_config),
-        patch(
-            "vllm.distributed.kv_transfer.kv_connector.v1.mooncake_store."
-            "worker.make_zmq_socket"
-        ) as mock_make_socket,
-    ):
+    peer = lookup_peer(vllm_config, responder=lambda _: hit(32))
+    with set_current_vllm_config(vllm_config):
         connector = mooncake_store_connector.MooncakeStoreConnector(
             vllm_config, KVConnectorRole.SCHEDULER, _make_kv_cache_config()
         )
@@ -852,7 +856,6 @@ def test_admission_lookup_retains_completed_result_until_scheduled():
         block_hashes=[b"h0", b"h1", b"h2"],
         skip_reading_external_kv=False,
     )
-    mock_make_socket.return_value.recv.return_value = (32).to_bytes(4, "big")
     try:
         connector.on_new_request(request)
         sched = connector.connector_scheduler
@@ -862,9 +865,9 @@ def test_admission_lookup_retains_completed_result_until_scheduled():
         assert sched.load_specs == {}
         assert connector.get_num_new_matched_tokens(request, 16) == (16, True)
         assert sched.client._lookups[request.request_id].future is future
-        assert mock_make_socket.return_value.send_multipart.call_count == 1
+        assert len(peer.requests) == 1
         assert connector.get_num_new_matched_tokens(request, 16) == (16, True)
-        assert mock_make_socket.return_value.send_multipart.call_count == 1
+        assert len(peer.requests) == 1
         # Once allocated, a reschedule (e.g. after a failed load) looks up anew.
         connector.update_state_after_alloc(request, MagicMock(), 16)
         assert request.request_id not in sched.client._lookups
@@ -873,71 +876,51 @@ def test_admission_lookup_retains_completed_result_until_scheduled():
 
 
 @pytest.mark.parametrize("all_groups", [False, True])
-def test_finished_request_cancels_queued_lookup_before_next_step(all_groups):
-    """An aborted request's lookup queued behind a slow RPC must never run,
-    even if the executor frees up before the next build_connector_meta."""
+def test_finished_request_drops_in_flight_lookup(lookup_peer, all_groups):
+    """An aborted request's in-flight lookup is forgotten: its late reply is
+    dropped and leaves no state behind."""
     vllm_config = create_vllm_config(
         kv_connector="MooncakeStoreConnector",
         kv_role="kv_both",
         kv_connector_extra_config={"lookup_async": True},
     )
-    with (
-        set_current_vllm_config(vllm_config),
-        patch.object(worker, "make_zmq_socket") as make_socket,
-    ):
+    peer = lookup_peer(vllm_config)
+    with set_current_vllm_config(vllm_config):
         connector = mooncake_store_connector.MooncakeStoreConnector(
             vllm_config, KVConnectorRole.SCHEDULER, _make_kv_cache_config()
         )
     sched = connector.connector_scheduler
     assert sched is not None
     client = sched.client
-    sock = make_socket.return_value
-    gate, started = threading.Event(), threading.Event()
-    sock.send_multipart.side_effect = lambda *args, **kwargs: started.set()
-    sock.recv.side_effect = _gated_recv(gate, 32)
     request = SimpleNamespace(request_id="dead")
     try:
-        assert client.lookup("busy", 48, [], non_block=True) is None
-        assert started.wait(5)
         assert client.lookup(request.request_id, 48, [], non_block=True) is None
+        future = client._lookups[request.request_id].future
+        [dead] = peer.wait_for_requests(1)
 
         if all_groups:
             finished = connector.request_finished_all_groups(request, ([],))
         else:
             finished = connector.request_finished(request, [])
         assert finished == (False, None)
-
-        gate.set()
-        assert client.lookup("busy", 48, []).hit_length == 32
-        client.executor.submit(lambda: None).result(timeout=5)
-        assert sock.send_multipart.call_count == 1
         assert request.request_id not in client._lookups
+        assert future.cancelled()
+
+        peer.reply_hit(dead, 32)
+        peer.responder = lambda _: hit(16)
+        # A later request is answered normally after the stale reply.
+        assert client.lookup("next", 48, []).hit_length == 16
+        assert request.request_id not in client._lookups
+        assert client._pending == {}
     finally:
-        gate.set()
         connector.shutdown()
 
 
-def _make_lookup_client(extra_config=None):
-    vllm_config = create_vllm_config(
-        kv_connector="MooncakeStoreConnector",
-        kv_role="kv_both",
-        kv_connector_extra_config=extra_config,
-    )
-    with patch(
-        "vllm.distributed.kv_transfer.kv_connector.v1.mooncake_store."
-        "worker.make_zmq_socket"
-    ) as make_socket:
-        client = worker.LookupKeyClient(vllm_config)
-    return client, make_socket.return_value
-
-
 @pytest.mark.parametrize("limit", [None, 0, 1])
-def test_lookup_prefetch_cap_bounds_in_flight_prefetches(limit):
-    client, sock = _make_lookup_client(
-        {} if limit is None else {"lookup_prefetch_limit": limit}
+def test_lookup_prefetch_cap_bounds_in_flight_prefetches(lookup_peer, limit):
+    client, peer = _make_lookup_client(
+        lookup_peer, {} if limit is None else {"lookup_prefetch_limit": limit}
     )
-    gate = threading.Event()
-    sock.recv.side_effect = _gated_recv(gate, 32)
     try:
         assert client.prefetch("first", 48, []) == bool(limit)
         assert client.prefetch("second", 48, []) is False
@@ -946,15 +929,16 @@ def test_lookup_prefetch_cap_bounds_in_flight_prefetches(limit):
         assert client.lookup("next", 48, [], non_block=True) is None
         assert "next" in client._lookups
         if limit:
-            gate.set()
+            first = peer.wait_for_requests(2)[0]
+            peer.reply_hit(first, 32)
             client._lookups["first"].future.result(timeout=5)
             deadline = time.monotonic() + 5.0
             while not client.prefetch("later", 48, []):
                 assert time.monotonic() < deadline
                 time.sleep(0.005)
+            peer.reply_hit(peer.wait_for_requests(3)[2], 32)
             client._lookups["later"].future.result(timeout=5)
     finally:
-        gate.set()
         client.close()
 
 
@@ -969,9 +953,12 @@ def _wait_completed(state: worker.LookupState) -> None:
 
 
 @pytest.mark.parametrize("change", ["tokens", "hash", "expired", "cached_expired"])
-def test_lookup_client_refreshes_changed_or_expired_query(monkeypatch, change):
-    client, sock = _make_lookup_client({"lookup_prefetch_limit": 1})
-    sock.recv.return_value = (32).to_bytes(4, "big")
+def test_lookup_client_refreshes_changed_or_expired_query(
+    monkeypatch, lookup_peer, change
+):
+    client, peer = _make_lookup_client(
+        lookup_peer, {"lookup_prefetch_limit": 1}, responder=lambda _: hit(32)
+    )
     clock = [0.0]
     monkeypatch.setattr(worker.time, "monotonic", lambda: clock[0])
     num_tokens, hashes = 48, [b"h0", b"h1", b"h2"]
@@ -998,21 +985,18 @@ def test_lookup_client_refreshes_changed_or_expired_query(monkeypatch, change):
         assert refreshed is not first
         assert refreshed.result(timeout=5).hit_length == 32
         assert client.lookup("req", num_tokens, hashes, non_block=True).hit_length == 32
-        assert sock.send_multipart.call_count == 2
+        assert len(peer.requests) == 2
     finally:
         client.close()
 
 
 @pytest.mark.parametrize("prefetched", [False, True])
-def test_pending_lookup_is_not_restarted_by_ttl(monkeypatch, prefetched):
-    """A lookup still queued past the TTL is kept, not resubmitted behind
-    the backlog it is waiting on."""
+def test_pending_lookup_is_not_restarted_by_ttl(monkeypatch, lookup_peer, prefetched):
+    """A lookup still pending past the TTL is kept, not sent again."""
     # Keep the RPC deadline beyond the clock advance that expires the result TTL.
-    client, sock = _make_lookup_client(
-        {"lookup_prefetch_limit": 1, "lookup_timeout_s": 5.0}
+    client, peer = _make_lookup_client(
+        lookup_peer, {"lookup_prefetch_limit": 1, "lookup_timeout_s": 5.0}
     )
-    gate = threading.Event()
-    sock.recv.side_effect = _gated_recv(gate, 32)
     clock = [0.0]
     monkeypatch.setattr(worker.time, "monotonic", lambda: clock[0])
     try:
@@ -1024,94 +1008,69 @@ def test_pending_lookup_is_not_restarted_by_ttl(monkeypatch, prefetched):
         clock[0] = 3.0
         assert client.lookup("req", 48, [], non_block=True) is None
         assert client._lookups["req"].future is first
-        gate.set()
+        peer.reply_hit(peer.wait_for_requests(1)[0], 32)
         assert first.result(timeout=5).hit_length == 32
         assert client.lookup("req", 48, [], non_block=True).hit_length == 32
-        assert sock.send_multipart.call_count == 1
+        assert len(peer.requests) == 1
     finally:
-        gate.set()
         client.close()
 
 
-def test_prefetch_after_close_starts_nothing():
-    client, _ = _make_lookup_client({"lookup_prefetch_limit": 1})
+def test_prefetch_after_close_starts_nothing(lookup_peer):
+    client, _ = _make_lookup_client(lookup_peer, {"lookup_prefetch_limit": 1})
     client.close()
     assert client.prefetch("req", 48, []) is False
     assert client._lookups == {}
     assert client._prefetch_slots.acquire(blocking=False)
 
 
-def test_reset_clears_cached_async_results():
-    client, sock = _make_lookup_client()
-    sock.recv.return_value = (32).to_bytes(4, "big")
+def test_reset_clears_cached_async_results(lookup_peer):
+    def respond(request):
+        if request.msg_type == protocol.RESET_MSG:
+            return protocol.RESP_OK, b""
+        return hit(32)
+
+    client, _ = _make_lookup_client(lookup_peer, responder=respond)
     try:
         client.lookup("req", 48, [], non_block=True)
         assert client._lookups["req"].future.result(timeout=5).hit_length == 32
-        sock.recv.return_value = protocol.RESP_OK
         assert client.reset() is True
         assert client._lookups == {}
     finally:
         client.close()
 
 
-def test_lookup_key_client_non_block_lookup_async():
-    """Non-blocking lookup defers to the executor: None first, hit once the
-    Future resolves."""
-    vllm_config = _make_vllm_config()
-
-    with patch(
-        "vllm.distributed.kv_transfer.kv_connector.v1.mooncake_store."
-        "worker.make_zmq_socket"
-    ) as mock_make_socket:
-        client = worker.LookupKeyClient(vllm_config)
-
-    fake_socket = mock_make_socket.return_value
-    # Hold the executor's lookup pending until we release the gate.
-    gate = threading.Event()
-    fake_socket.recv.side_effect = _gated_recv(gate, 7)
-
-    # First query submits the lookup and returns None while it is in flight.
-    assert client.lookup("req1", 128, [], non_block=True) is None
-    # Release the executor; a later poll returns the hit length.
-    gate.set()
-    assert _poll_lookup(client, "req1") == 7
-    # Repeated reads reuse the completed result until expiry or discard.
-    assert _poll_lookup(client, "req1") == 7
-    assert fake_socket.send_multipart.call_count == 1
-    client.close()
+def test_lookup_key_client_non_block_lookup_async(lookup_peer):
+    """Non-blocking lookup returns None while the request is in flight, then
+    the hit once its reply arrives."""
+    client, peer = _make_lookup_client(lookup_peer)
+    try:
+        # First query sends the lookup and returns None while it is in flight.
+        assert client.lookup("req1", 128, [], non_block=True) is None
+        peer.reply_hit(peer.wait_for_requests(1)[0], 7)
+        assert _poll_lookup(client, "req1") == 7
+        # Repeated reads reuse the completed result until expiry or discard.
+        assert _poll_lookup(client, "req1") == 7
+        assert len(peer.requests) == 1
+    finally:
+        client.close()
 
 
-def test_lookup_key_client_discard_clears_state():
+def test_lookup_key_client_discard_clears_state(lookup_peer):
     """discard() drops a completed lookup Future so it is not served stale."""
-    vllm_config = _make_vllm_config()
-
-    with patch(
-        "vllm.distributed.kv_transfer.kv_connector.v1.mooncake_store."
-        "worker.make_zmq_socket"
-    ) as mock_make_socket:
-        client = worker.LookupKeyClient(vllm_config)
-
-    fake_socket = mock_make_socket.return_value
-    gate = threading.Event()
-    fake_socket.recv.side_effect = _gated_recv(gate, 9)
-
-    # Submit while gated so the call returns None and the Future stays in
-    # the client once it resolves.
-    assert client.lookup("req2", 128, [], non_block=True) is None
-    gate.set()
-    deadline = time.monotonic() + 5.0
-    while time.monotonic() < deadline:
-        if client._lookups["req2"].future.done():
-            break
-        time.sleep(0.005)
-    # discard() drops the completed result before any lookup consumes it.
-    client.discard("req2")
-    assert "req2" not in client._lookups
-    # A fresh query re-submits rather than returning a stale value: hold the
-    # gate so the resubmitted lookup stays in flight.
-    gate.clear()
-    assert client.lookup("req2", 128, [], non_block=True) is None
-    gate.set()  # release the executor so the worker thread can drain
+    client, peer = _make_lookup_client(lookup_peer)
+    try:
+        assert client.lookup("req2", 128, [], non_block=True) is None
+        peer.reply_hit(peer.wait_for_requests(1)[0], 9)
+        client._lookups["req2"].future.result(timeout=5)
+        # discard() drops the completed result before any lookup consumes it.
+        client.discard("req2")
+        assert "req2" not in client._lookups
+        # A fresh query sends a new request rather than returning a stale value.
+        assert client.lookup("req2", 128, [], non_block=True) is None
+        assert len(peer.wait_for_requests(2)) == 2
+    finally:
+        client.close()
 
 
 def test_get_num_new_matched_tokens_async_defers_then_reports():
@@ -1261,6 +1220,14 @@ def test_reset_cache_scheduler_role_clears_local_state():
     assert conn._kv_cache_events is None
 
 
+def _reset_store(store_worker) -> bool:
+    """Run LookupKeyServer's reset handler without binding its socket."""
+    server = object.__new__(worker.LookupKeyServer)
+    server.store_worker = store_worker
+    server._store_lock = worker._SharedExclusiveLock()
+    return server._reset_store()
+
+
 def test_lookup_key_server_reset_drains_send_queue_before_remove_all():
     """LookupKeyServer RESET handler must drain the send thread's
     request_queue BEFORE calling store.remove_all -- otherwise stale
@@ -1268,15 +1235,9 @@ def test_lookup_key_server_reset_drains_send_queue_before_remove_all():
     can land on the master AFTER remove_all and silently repopulate it
     with KV hashed against the previous-policy weights.
     """
-    # Exercise the handler logic directly with mocks for the send thread
-    # and store. We assert (a) join() is called, (b) remove_all is called,
-    # and (c) join() comes BEFORE remove_all in the call order. The full
-    # LookupKeyServer is heavy (binds a real ZMQ REP socket), so we drive
-    # just the dispatch branch here via a stub equivalent.
-    from vllm.distributed.kv_transfer.kv_connector.v1.mooncake_store import (
-        protocol,
-    )
-
+    # Exercise the handler with mocks for the send thread and store. We
+    # assert (a) join() is called, (b) remove_all is called, and (c) join()
+    # comes BEFORE remove_all in the call order.
     call_order: list[str] = []
 
     fake_send_queue = MagicMock()
@@ -1294,27 +1255,10 @@ def test_lookup_key_server_reset_drains_send_queue_before_remove_all():
     fake_store_worker.kv_send_thread = fake_send_thread
     fake_store_worker.store = fake_store
 
-    fake_socket = MagicMock()
-    sent: list[bytes] = []
-    fake_socket.send.side_effect = lambda frame: sent.append(frame)
-
-    # Mirror the body of LookupKeyServer.process_request RESET_MSG branch.
-    # Keeping this inline (instead of importing the closure) keeps the
-    # test independent of the live thread lifecycle.
-    msg_type = protocol.RESET_MSG
-    if msg_type == protocol.RESET_MSG:
-        try:
-            if fake_store_worker.kv_send_thread is not None:
-                fake_store_worker.kv_send_thread.request_queue.join()
-            fake_store_worker.store.remove_all(force=True)
-            fake_socket.send(protocol.RESP_OK)
-        except Exception:
-            fake_socket.send(protocol.RESP_ERR)
+    assert _reset_store(fake_store_worker) is True
 
     # Drain must happen before remove_all.
     assert call_order == ["join", "remove_all(force=True)"]
-    # Worker reported success.
-    assert sent == [protocol.RESP_OK]
 
 
 def test_lookup_key_server_reset_skips_drain_when_no_send_thread():
@@ -1322,10 +1266,6 @@ def test_lookup_key_server_reset_skips_drain_when_no_send_thread():
     configurations), the RESET handler must still call remove_all
     instead of dereferencing a None send thread.
     """
-    from vllm.distributed.kv_transfer.kv_connector.v1.mooncake_store import (
-        protocol,
-    )
-
     call_order: list[str] = []
     fake_store = MagicMock()
     fake_store.remove_all.side_effect = lambda force: call_order.append("remove_all")
@@ -1334,22 +1274,8 @@ def test_lookup_key_server_reset_skips_drain_when_no_send_thread():
     fake_store_worker.kv_send_thread = None
     fake_store_worker.store = fake_store
 
-    fake_socket = MagicMock()
-    sent: list[bytes] = []
-    fake_socket.send.side_effect = lambda frame: sent.append(frame)
-
-    msg_type = protocol.RESET_MSG
-    if msg_type == protocol.RESET_MSG:
-        try:
-            if fake_store_worker.kv_send_thread is not None:
-                fake_store_worker.kv_send_thread.request_queue.join()
-            fake_store_worker.store.remove_all(force=True)
-            fake_socket.send(protocol.RESP_OK)
-        except Exception:
-            fake_socket.send(protocol.RESP_ERR)
-
+    assert _reset_store(fake_store_worker) is True
     assert call_order == ["remove_all"]
-    assert sent == [protocol.RESP_OK]
 
 
 def test_shutdown_closes_worker_store():
