@@ -550,6 +550,32 @@ class PrometheusStatLogger(AggregateStatLoggerBase):
             gauge_scheduler_waiting, per_engine_labelvalues
         )
 
+        gauge_prefill_remaining = self._gauge_cls(
+            name="vllm:prefill_tokens_remaining",
+            documentation=(
+                "Remaining prefill work in tokens across all requests the engine "
+                "knows about; queued requests count as their prompt length."
+            ),
+            multiprocess_mode="mostrecent",
+            labelnames=labelnames,
+        )
+        self.gauge_prefill_remaining = create_metric_per_engine(
+            gauge_prefill_remaining, per_engine_labelvalues
+        )
+
+        gauge_prefill_sample_seq = self._gauge_cls(
+            name="vllm:prefill_sample_seq",
+            documentation=(
+                "Monotonic sample counter for the prefill work counters; lets a "
+                "consumer tell unchanged from stale."
+            ),
+            multiprocess_mode="mostrecent",
+            labelnames=labelnames,
+        )
+        self.gauge_prefill_sample_seq = create_metric_per_engine(
+            gauge_prefill_sample_seq, per_engine_labelvalues
+        )
+
         gauge_waiting_by_reason = self._gauge_cls(
             name="vllm:num_requests_waiting_by_reason",
             documentation=(
@@ -1158,6 +1184,12 @@ class PrometheusStatLogger(AggregateStatLoggerBase):
                 + scheduler_stats.num_skipped_waiting_reqs
             )
             self.gauge_scheduler_waiting[engine_idx].set(total_waiting)
+            self.gauge_prefill_remaining[engine_idx].set(
+                scheduler_stats.remaining_prefill_tokens
+            )
+            self.gauge_prefill_sample_seq[engine_idx].set(
+                scheduler_stats.prefill_sample_seq
+            )
             self.gauge_waiting_by_reason[WAITING_REASON_CAPACITY][engine_idx].set(
                 scheduler_stats.num_waiting_reqs
             )

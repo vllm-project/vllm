@@ -76,6 +76,19 @@ struct EngineRoutingState {
     admitted_since_stats: usize,
     /// Identifies admissions made after the latest scheduler snapshot.
     stats_generation: u64,
+    /// Latest remaining prefill work reported by this engine, if any.
+    prefill: Option<PrefillLoad>,
+}
+
+/// Remaining prefill work reported by one engine, for consumers outside the
+/// routing score (the `/load` endpoint).
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
+pub struct PrefillLoad {
+    /// Work across all requests the engine knows about; queued requests count
+    /// as their prompt length.
+    pub remaining_tokens: u64,
+    /// Monotonic sample counter, so a reader can detect staleness.
+    pub sample_seq: u64,
 }
 
 impl EngineRoutingState {
@@ -324,13 +337,44 @@ impl RequestRegistry {
     /// routing state. Returns `false` if the engine is unknown to the
     /// client.
     pub fn apply_scheduler_stats(&mut self, engine_index: u32, stats: &SchedulerStats) -> bool {
-        self.apply_scheduler_counts(
+        let applied = self.apply_scheduler_counts(
             engine_index,
             EngineLoadSnapshot {
                 waiting: stats.num_waiting_reqs as usize,
                 running: stats.num_running_reqs as usize,
             },
-        )
+        );
+        if !applied {
+            return false;
+        }
+        if let Ok(index) = u16::try_from(engine_index)
+            && let Some(state) = self
+                .routing_per_engine
+                .get_mut(&EngineId::from_engine_index(index))
+        {
+            state.prefill = Some(PrefillLoad {
+                remaining_tokens: stats.remaining_prefill_tokens,
+                sample_seq: stats.prefill_sample_seq,
+            });
+        }
+        true
+    }
+
+    /// Remaining prefill work summed over the engines that reported it.
+    ///
+    /// Served by `/load`; the routing score keeps using request counts.
+    pub fn prefill_load(&self) -> Option<PrefillLoad> {
+        let mut total = PrefillLoad::default();
+        let mut reported = false;
+        for state in self.routing_per_engine.values() {
+            let Some(load) = state.prefill else {
+                continue;
+            };
+            total.remaining_tokens = total.remaining_tokens.saturating_add(load.remaining_tokens);
+            total.sample_seq = total.sample_seq.max(load.sample_seq);
+            reported = true;
+        }
+        reported.then_some(total)
     }
 
     /// Mark the registry as closed, detach and return all tracked senders.

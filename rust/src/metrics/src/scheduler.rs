@@ -268,6 +268,10 @@ pub struct SchedulerMetrics {
     pub scheduler_running: Family<EngineLabels, U64Gauge>,
     pub scheduler_waiting: Family<EngineLabels, U64Gauge>,
     pub scheduler_waiting_by_reason: Family<WaitingReasonLabels, U64Gauge>,
+    /// Remaining prefill work in tokens across all requests the engine knows about.
+    pub prefill_tokens_remaining: Family<EngineLabels, U64Gauge>,
+    /// Monotonic sample counter for the counter above.
+    pub prefill_sample_seq: Family<EngineLabels, U64Gauge>,
     pub scheduler_kv_fetch_by_stage: Family<KvFetchStageLabels, U64Gauge>,
     pub kv_cache_usage: Family<EngineLabels, F64Gauge>,
 
@@ -375,6 +379,20 @@ impl SchedulerMetrics {
              'deferred' = deferred by transient constraints (LoRA budget, KV transfer, \
              blocked status). Sum of all reasons equals vllm:num_requests_waiting.",
             scheduler_waiting_by_reason.clone(),
+        );
+
+        let prefill_tokens_remaining = Family::default();
+        registry.register(
+            "vllm:prefill_tokens_remaining",
+            "Remaining prefill work in tokens across all requests the engine knows about",
+            prefill_tokens_remaining.clone(),
+        );
+
+        let prefill_sample_seq = Family::default();
+        registry.register(
+            "vllm:prefill_sample_seq",
+            "Monotonic sample counter for the prefill work counters",
+            prefill_sample_seq.clone(),
         );
 
         let scheduler_kv_fetch_by_stage = Family::default();
@@ -769,6 +787,8 @@ impl SchedulerMetrics {
             scheduler_running,
             scheduler_waiting,
             scheduler_waiting_by_reason,
+            prefill_tokens_remaining,
+            prefill_sample_seq,
             scheduler_kv_fetch_by_stage,
             kv_cache_usage,
             engine_sleep_state,

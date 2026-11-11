@@ -85,6 +85,8 @@ struct SchedulerStatsHandles {
     scheduler_waiting: U64Gauge,
     scheduler_waiting_capacity: U64Gauge,
     scheduler_waiting_deferred: U64Gauge,
+    prefill_tokens_remaining: U64Gauge,
+    prefill_sample_seq: U64Gauge,
     /// One handle per `KvFetchReqsByStage::STAGES` entry.
     scheduler_kv_fetch_by_stage: [U64Gauge; 3],
     kv_cache_usage: F64Gauge,
@@ -253,6 +255,10 @@ fn resolve_scheduler_stats_handles(
         scheduler_waiting_deferred: metrics
             .scheduler_waiting_by_reason
             .get_or_create_owned(&deferred),
+        prefill_tokens_remaining: metrics
+            .prefill_tokens_remaining
+            .get_or_create_owned(&labels),
+        prefill_sample_seq: metrics.prefill_sample_seq.get_or_create_owned(&labels),
         scheduler_kv_fetch_by_stage: KvFetchReqsByStage::STAGES.map(|stage| {
             metrics.scheduler_kv_fetch_by_stage.get_or_create_owned(&KvFetchStageLabels {
                 model_name: model_name.to_string(),
@@ -359,6 +365,10 @@ fn record_scheduler_stats_with_handles(handles: &SchedulerStatsHandles, stats: &
         .set(stats.num_waiting_reqs + stats.num_skipped_waiting_reqs);
     handles.scheduler_waiting_capacity.set(stats.num_waiting_reqs);
     handles.scheduler_waiting_deferred.set(stats.num_skipped_waiting_reqs);
+    handles
+        .prefill_tokens_remaining
+        .set(stats.remaining_prefill_tokens);
+    handles.prefill_sample_seq.set(stats.prefill_sample_seq);
     for (handle, count) in handles
         .scheduler_kv_fetch_by_stage
         .iter()
