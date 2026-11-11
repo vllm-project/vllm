@@ -234,6 +234,7 @@ steps:
   source_file_dependencies:
     - vllm/distributed/kv_transfer/kv_connector/v1/nixl/
     - vllm/v1/core/sched/
+    - vllm/v1/engine/parallel_sampling.py
     - tests/v1/kv_connector/nixl_integration/
   env:
     PREFILL_GPU_ID: "0"
@@ -252,6 +253,7 @@ steps:
       source_file_dependencies:
         - vllm/distributed/kv_transfer/kv_connector/v1/nixl/
         - vllm/v1/core/sched/
+        - vllm/v1/engine/parallel_sampling.py
         - tests/v1/kv_connector/nixl_integration/
         - vllm/platforms/rocm.py
       commands:
