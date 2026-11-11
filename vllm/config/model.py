@@ -1427,7 +1427,11 @@ class ModelConfig:
         return convert_type
 
     def _verify_quantization(self) -> None:
-        from vllm.config.quantization import resolve_quantization_config
+        from vllm.config.quantization import (
+            _ONLINE_SHORTHANDS,
+            merge_quantization_config,
+            resolve_quantization_config,
+        )
 
         requested_quantization = self.quantization
         supported_quantization = me_quant.QUANTIZATION_METHODS
@@ -1516,9 +1520,14 @@ class ModelConfig:
             and requested_quantization == "mxfp4"
             and self.quantization == "modelopt_fp4"
         ):
-            self.quantization_config = resolve_quantization_config(
-                requested_quantization, self.quantization_config or {}
+            online_args = resolve_quantization_config(
+                requested_quantization, self.quantization_config
             )
+            if online_args is None or online_args.targets is None:
+                online_args = merge_quantization_config(
+                    _ONLINE_SHORTHANDS[requested_quantization], online_args
+                )
+            self.quantization_config = online_args
 
         if self.quantization is not None:
             if self.quantization not in supported_quantization:
@@ -1533,12 +1542,24 @@ class ModelConfig:
             if (
                 self.quantization == "modelopt_fp4"
                 and online_args is not None
-                and online_args.linear is not None
-                and online_args.linear.weight is not None
-                and online_args.moe is not None
-                and online_args.moe.weight is not None
-                and not online_args.ignore
+                and (
+                    (
+                        online_args.linear is not None
+                        and online_args.linear.weight is not None
+                        and online_args.moe is not None
+                        and online_args.moe.weight is not None
+                        and not online_args.ignore
+                    )
+                    or (
+                        online_args.targets is not None
+                        and any(
+                            isinstance(target, str) or target.weight is not None
+                            for target in online_args.targets.values()
+                        )
+                    )
+                )
             ):
+                # Untargeted checkpoint layers still require a supported kernel.
                 execution_quantization = "online"
             current_platform.verify_quantization(execution_quantization)
 

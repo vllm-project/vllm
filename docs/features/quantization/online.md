@@ -162,19 +162,43 @@ vllm serve RedHatAI/Qwen3-30B-A3B-NVFP4 \
   --quantization-config '{"targets":{"*mlp.experts*":"mxfp4"}}'
 ```
 
-For ModelOpt NVFP4 checkpoints, `--quantization mxfp4` converts both dense
-linear and MoE expert weights to MXFP4 while retaining the ModelOpt checkpoint
-loader:
+For ModelOpt NVFP4 checkpoints, `--quantization mxfp4` selects online MXFP4
+for both linear and MoE layers while retaining the ModelOpt checkpoint loader.
+Checkpoint-quantized layers are re-quantized; eligible BF16/FP16 layers are also
+quantized, including attention projections and router gates unless ignored.
 
 ```bash
 vllm serve nvidia/Qwen3-30B-A3B-NVFP4 \
     --quantization mxfp4
 ```
 
-The target backend determines activation precision; XPU may use BF16
-activations. Unquantized linear layers, including router gates, are also
-quantized unless excluded through `quantization_config.ignore`. Conversion
-can introduce additional quantization error and does not export a checkpoint.
+This shorthand is resolved after detecting the ModelOpt NVFP4 checkpoint,
+preserving the checkpoint loader while selecting the online MXFP4 backend.
+
+The following configuration rules apply to ModelOpt NVFP4 checkpoints.
+Configuration fragments are passed to `--quantization-config`.
+
+| `--quantization` | Configuration | Effective selection |
+| ---------------- | ------------- | ------------------- |
+| `mxfp4` | Omitted or `{}` | MXFP4 for eligible linear and MoE layers |
+| `mxfp4` | `{"linear":"mxfp8"}` | MXFP8 for linear layers; the MoE MXFP4 default remains |
+| `mxfp4` or omitted | `{"targets":{"*mlp*":"mxfp4"}}` | Only matching MLP layers; no global linear/MoE defaults are added |
+| `mxfp4` or omitted | `{"targets":{"*":"mxfp4"}}` | All eligible linear and MoE layers; embeddings and LM head retain their checkpoint methods |
+| Omitted | `{"linear":"mxfp4"}` | Linear MXFP4 only; no MoE default is added |
+| `mxfp4` | `{"targets":{}}` | No layers selected; does not restore the shorthand defaults |
+
+Explicit `linear`/`moe` fields override the corresponding shorthand fields;
+unspecified fields retain their defaults. `ignore` excludes matching layers
+from online conversion, not from checkpoint loading.
+
+To convert only selected layers, use `targets`. For example, the following
+converts the NVFP4 MLP layers of Ripple to MXFP4 while leaving its BF16 attention
+projections unchanged:
+
+```bash
+vllm serve ricursiveAI/Ripple-65B-Preview-NVFP4 \
+    --quantization-config '{"targets":{"*mlp*":"mxfp4"}}'
+```
 
 !!! info
 
