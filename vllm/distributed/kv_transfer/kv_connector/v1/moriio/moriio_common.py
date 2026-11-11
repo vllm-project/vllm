@@ -465,13 +465,16 @@ class MoRIIOConfig:
         )
 
 
-def supports_zero_submit_abort(local_tp_size: int, remote_tp_size: int) -> bool:
+def supports_zero_submit_abort(
+    local_tp_size: int, remote_tp_size: int, pp_size: int = 1
+) -> bool:
     """Admission shared by scheduler retention and worker cancellation.
 
     Unknown peer TP (0) follows the existing homogeneous-TP convention.
-    Heterogeneous transfers retain their pre-existing completion behavior.
+    Heterogeneous-TP and pipeline-parallel transfers have several writers per
+    decode rank, so they retain their pre-existing behavior.
     """
-    return remote_tp_size in (0, local_tp_size)
+    return pp_size == 1 and remote_tp_size in (0, local_tp_size)
 
 
 class MoRIIOConstants:

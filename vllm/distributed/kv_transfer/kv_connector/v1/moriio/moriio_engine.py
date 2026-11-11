@@ -378,14 +378,14 @@ class MoRIIOWriter:
     def _mark_request_done(
         self, transfer_id: str, state: WriteTransferState | None = None
     ) -> None:
-        """Release a failed task only while its transfer is still unsubmitted."""
+        """Release a failed transfer's source blocks exactly once.
+
+        Decode is not notified here: after a possible submit, telling it to
+        reuse its blocks needs a transport fence this path does not have.
+        """
         wrapper = self.worker.moriio_wrapper
         with self._write_state_lock:
             state = self._transfer_states.get(transfer_id, state)
-            if state is not None and (state.cancelled or state.submit_started):
-                # A failed preparation or submit call cannot revoke an earlier
-                # attempt. Retain ownership; an exception is not a DMA fence.
-                return
             with wrapper.lock:
                 if wrapper._is_transfer_terminal_locked(transfer_id):
                     return

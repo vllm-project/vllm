@@ -1685,6 +1685,7 @@ class MoRIIOConnectorScheduler:
             and supports_zero_submit_abort(
                 self.tp_size,
                 int(params.get("remote_tp_size") or params.get("tp_size") or 0),
+                self.vllm_config.parallel_config.pipeline_parallel_size,
             )
         ):
             transfer_id = params.setdefault("transfer_id", f"sidecar-{request_id}")

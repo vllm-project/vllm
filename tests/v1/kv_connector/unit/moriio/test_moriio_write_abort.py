@@ -2,7 +2,7 @@
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 """MoRIIO WRITE cancellation before the first transport submission.
 
-Writer cases drive the real ``MoRIIOWriter``/``MoRIIOWrapper``; only the
+Writer cases drive the real `MoRIIOWriter`/`MoRIIOWrapper`; only the
 transfer plan, sessions and notification socket are replaced. Scheduler cases
 add the real producer scheduler, allocator and connector worker.
 """
@@ -37,8 +37,8 @@ from vllm.distributed.kv_transfer.kv_connector.v1.moriio.moriio_tp_mapping impor
 )
 from vllm.v1.request import RequestStatus
 
-from .test_moriio_connector import _setup_kv_transfer_request, create_vllm_config
 from ..utils import create_model_runner_output, create_request, create_scheduler
+from .test_moriio_connector import _setup_kv_transfer_request, create_vllm_config
 
 pytestmark = [pytest.mark.cpu_test, pytest.mark.skip_global_cleanup]
 
@@ -67,6 +67,8 @@ def _setup(*, targets=1, mamba=False):
     vars(worker).update(
         world_size=1,
         tp_rank=0,
+        pp_rank=0,
+        pp_size=1,
         moriio_wrapper=wrapper,
         moriio_config=SimpleNamespace(defer_timeout=60.0),
         is_producer=True,
@@ -156,15 +158,16 @@ def _run_deferred(h, task=None):
     h.writer._process_deferred_tasks()
 
 
-def _assert_held(h):
-    """A possible submission keeps ownership; abort or timeout cannot release it."""
+def _assert_source_released_once(h):
+    """A failure after a possible submit frees the source, as on main, but
+    never tells decode to reuse its blocks; a later abort changes nothing."""
     assert h.attempts
     assert h.task.transfer_state.submit_started
     assert not h.writer.abort_before_write(h.task.request_id, h.meta)
-    assert not h.writer._fail_deferred_task(h.task, age=120)
-    assert h.wrapper.done_req_ids == []
+    h.writer._mark_request_done(h.task.transfer_id, h.task.transfer_state)
+    assert _acks(h) == ["transfer"]
     assert h.notifications == []
-    assert h.wrapper.done_remote_allocate_req_dict[h.task.transfer_id] is h.allocation
+    assert h.wrapper.done_remote_allocate_req_dict == {}
 
 
 @pytest.mark.parametrize("allocation_arrived", [False, True])
@@ -226,7 +229,7 @@ def test_abort_and_first_submit_have_one_winner(submit_wins, mamba):
 @pytest.mark.parametrize(
     "failure", ["submit_raises", "second_target_prepare", "later_layer_prepare"]
 )
-def test_failure_after_possible_submit_keeps_ownership(failure):
+def test_failure_after_possible_submit_releases_source_only(failure):
     h = _setup(targets=2)
     _allocate(h)
     if failure == "submit_raises":
@@ -246,8 +249,6 @@ def test_failure_after_possible_submit_keeps_ownership(failure):
         h.controls.before_plan = fail_second
         _run_deferred(h)
         assert h.attempts == ["decode_dp0_tp0"]
-        # The first target's status is kept for the existing completion wait.
-        assert len(h.allocation.transfer_statuses) == 1
     else:
         # Separate state objects for the two layers still share one gate.
         h.task.transfer_state = WriteTransferState()
@@ -265,7 +266,7 @@ def test_failure_after_possible_submit_keeps_ownership(failure):
         h.controls.before_plan = fail
         _run_deferred(h, later)
         assert later.transfer_state is h.task.transfer_state
-    _assert_held(h)
+    _assert_source_released_once(h)
 
 
 def _add_producer_request(scheduler, h, num_tokens):
@@ -324,14 +325,17 @@ def test_producer_scheduler_frees_once_on_worker_ack(monkeypatch, path):
     assert free.call_count == 1
 
 
-@pytest.mark.parametrize("tp_key", ["remote_tp_size", "tp_size"])
-def test_heterogeneous_producer_abort_keeps_existing_behavior(tp_key):
+@pytest.mark.parametrize("topology", ["remote_tp_size", "tp_size", "pipeline"])
+def test_multi_writer_producer_abort_keeps_existing_behavior(topology):
     scheduler = create_scheduler(create_vllm_config(role="kv_producer"))
     connector = scheduler.connector.connector_scheduler
     request = create_request(num_tokens=32, do_remote_decode=True)
     _setup_kv_transfer_request(request, fake_transfer_id="hetero")
-    request.kv_transfer_params.pop("remote_tp_size", None)
-    request.kv_transfer_params[tp_key] = 2
+    if topology == "pipeline":
+        connector.vllm_config.parallel_config.pipeline_parallel_size = 2
+    else:
+        request.kv_transfer_params.pop("remote_tp_size", None)
+        request.kv_transfer_params[topology] = 2
     pool = scheduler.kv_cache_manager.block_pool
     free_before = pool.get_num_free_blocks()
     scheduler.add_request(request)
