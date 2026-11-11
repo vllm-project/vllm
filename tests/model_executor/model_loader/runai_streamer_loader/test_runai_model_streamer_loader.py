@@ -620,7 +620,9 @@ def test_runai_distributed_loads_engram_tables_on_cpu(
     table = torch.arange(64 * 32).remainder(256).to(torch.uint8).reshape(64, 32)
     tables = {
         "layers.1.engram.embed.weight": table.view(torch.float8_e4m3fn),
-        "layers.1.engram.embed.scale": table[:, :1].view(torch.float8_e8m0fnu),
+        "layers.1.engram.embed.scale": table[:, :1]
+        .contiguous()
+        .view(torch.float8_e8m0fnu),
         "layers.14.engram.embed.weight": table.flip(0).view(torch.float8_e4m3fn),
     }
     weights = {
