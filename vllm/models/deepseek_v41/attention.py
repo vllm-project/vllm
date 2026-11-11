@@ -740,7 +740,7 @@ class DeepseekV4Attention(nn.Module, AttentionLayerBase, ABC):
                 _COMBINE_TOPK_SWA_INDICES_KERNEL.register_warmup()
 
     def use_sequence_parallel_input(self, num_tokens: int) -> bool:
-        return self.sequence_parallel_input and num_tokens >= 256
+        return self.sequence_parallel_input and num_tokens >= 512
 
     def forward(
         self,
