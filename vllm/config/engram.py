@@ -61,6 +61,20 @@ class EngramConfig:
     startup takes longer. Requires cpu_offload without dp_shared_memory.
     Always on for private tables on ROCm."""
 
+    shared_host_table_dir: str | None = None
+    """Share CPU-offloaded Qwen4Exp PLE tables between independent engine
+    processes on this host through files in this directory (a tmpfs such as
+    /dev/shm), one per ETP shard of each layer. The first process to lock a
+    file loads the table and marks it ready; later ones map it, skip the load
+    and wait for the mark, and a load interrupted by its process's exit is
+    redone by the next process to start. No process group is involved, so two
+    single-GPU servers whose GPUs cannot reach each other can share a table
+    that does not fit twice in host memory, and a restart maps the loaded
+    table instead of reading it again. The files outlive the processes: remove
+    them to free the memory or after a checkpoint change (the name carries the
+    shape, not the contents). Requires cpu_offload without dp_shared_memory,
+    disk_offload or use_thp."""
+
     @model_validator(mode="after")
     def _validate_shared_memory(self) -> Self:
         if self.dp_shared_memory and not self.cpu_offload:
@@ -68,6 +82,16 @@ class EngramConfig:
         if self.use_thp and (not self.cpu_offload or self.dp_shared_memory):
             raise ValueError(
                 "use_thp requires cpu_offload=True and dp_shared_memory=False"
+            )
+        if self.shared_host_table_dir is not None and (
+            not self.cpu_offload
+            or self.dp_shared_memory
+            or self.disk_offload
+            or self.use_thp
+        ):
+            raise ValueError(
+                "shared_host_table_dir requires cpu_offload=True and "
+                "dp_shared_memory, disk_offload and use_thp disabled"
             )
         return self
 
@@ -92,6 +116,13 @@ class EngramConfig:
 
             if field != "ple_layer_ids" or not current_platform.is_cuda():
                 raise ValueError("disk_offload requires a Qwen4Exp model on CUDA")
+        if self.shared_host_table_dir is not None:
+            from vllm.platforms import current_platform
+
+            if field != "ple_layer_ids" or not current_platform.is_cuda():
+                raise ValueError(
+                    "shared_host_table_dir requires a Qwen4Exp model on CUDA"
+                )
 
     def resolve_dp_shared_memory(self, parallel_config: "ParallelConfig") -> None:
         """Share host tables by default wherever the configuration permits."""
@@ -99,6 +130,7 @@ class EngramConfig:
             self.dp_shared_memory = (
                 self.cpu_offload
                 and not self.use_thp
+                and self.shared_host_table_dir is None
                 and parallel_config.data_parallel_size > 1
                 and not parallel_config.enable_elastic_ep
             )

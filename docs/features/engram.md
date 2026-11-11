@@ -151,7 +151,43 @@ vllm serve deepseek-ai/DeepSeek-V4.1-Flash \
 
 `embedding_across_dp` is not supported with elastic expert parallelism yet.
 Qwen4Exp PLE tables are ETP-sharded instead and honor only `cpu_offload`,
-`disk_offload` and, on NVIDIA, `dp_shared_memory`.
+`disk_offload` and, on NVIDIA, `dp_shared_memory` and `shared_host_table_dir`.
+
+## Sharing host tables across independent servers (Qwen4Exp)
+
+`shared_host_table_dir` shares an offloaded PLE table between **engine
+processes started separately** on one host: separate `vllm serve` instances,
+or separate deployments such as prefill and decode engines. No process group
+is involved, so the processes need not be launched together, and one exiting
+leaves the others serving. Each process maps a file in that directory (a
+tmpfs such as `/dev/shm`), one per ETP shard of each layer, named by model,
+revision, layer, shape and the shard (ETP rank, ETP size and vocabulary
+range).
+
+```bash
+# one single-GPU server per GPU, same model and flags
+CUDA_VISIBLE_DEVICES=0 vllm serve Qwen/Qwen3.8-Flash-Next --port 8000 \
+  --engram-config '{"cpu_offload": true, "shared_host_table_dir": "/dev/shm"}'
+CUDA_VISIBLE_DEVICES=1 vllm serve Qwen/Qwen3.8-Flash-Next --port 8001 \
+  --engram-config '{"cpu_offload": true, "shared_host_table_dir": "/dev/shm"}'
+```
+
+The first process to take a file's lock (`<file>.lock`, an exclusive
+`flock`) loads the table and marks it ready (`<file>.ready`) once its weights
+are loaded; later processes map the same file, skip the load and wait for the
+mark. Host memory drops from one table per process to one per host, and a
+process that restarts maps the loaded table instead of reading it again. If
+the loading process exits before the mark, its lock is released: the next
+process to start loads the table again, and processes already waiting on it
+fail at once with the reason rather than waiting for a timeout.
+
+The files outlive the processes by design. Remove them (with their `.ready`
+and `.lock` files) to free the memory, and after changing the checkpoint
+served under the same model name and revision: the file name carries the
+shape, not the contents. Requirements: `cpu_offload` without
+`dp_shared_memory`, `disk_offload` or `use_thp`, and a directory large enough
+for the table in every process's mount namespace (in containers, share one
+tmpfs volume or use `--ipc=host` with a `/dev/shm` sized for it).
 
 ## Sharing host tables across DP replicas
 
