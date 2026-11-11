@@ -6,8 +6,10 @@
 from __future__ import annotations
 
 from collections.abc import Collection
+from copy import copy
 from typing import TYPE_CHECKING
 
+from vllm.config.quantization import resolve_quantization_config
 from vllm.config.utils import hash_factors, normalize_value
 from vllm.distributed.ec_transfer.ec_connector.cpu.common import (
     ECCPUConnectorMetadata,
@@ -109,18 +111,18 @@ class ECTieringScheduler(ECCPUScheduler):
     @staticmethod
     def _build_namespace(vllm_config: VllmConfig) -> ECCacheNamespace:
         model_config = vllm_config.model_config
-        ec_config = vllm_config.ec_transfer_config
-        assert ec_config is not None
-        widths = tuple(sorted(ec_config.mm_encoder_output_widths.items()))
+        model_identity = copy(model_config)
+        model_identity.quantization_config = resolve_quantization_config(
+            model_config.quantization, model_config.quantization_config
+        )
+        encoder_config = {
+            "model_config": model_identity.compute_hash(),
+            "multimodal_config": model_config.multimodal_config,
+            "kernel_config": vllm_config.kernel_config,
+        }
         return ECCacheNamespace(
-            model_id=str(model_config.model),
-            model_revision=model_config.revision,
-            dtype=str(model_config.dtype),
-            hidden_dim=model_config.get_inputs_embeds_size(),
-            encoder_output_widths=widths,
-            element_size=model_config.dtype.itemsize,
             encoder_config_hash=hash_factors(
-                {"hf_config": normalize_value(model_config.hf_config.to_dict())}
+                {"encoder_config": normalize_value(encoder_config)}
             ),
         )
 

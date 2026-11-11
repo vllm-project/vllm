@@ -44,44 +44,14 @@ class ECCacheNamespace:
     """Stable factors that determine encoder-output byte compatibility.
 
     The digest excludes process- and request-local identity so compatible model
-    configurations can reuse files across restarts. The caller should provide
-    an immutable model revision whenever one is known.
+    configurations can reuse files across restarts. Model identity and effective
+    configuration are captured by ``encoder_config_hash``.
     """
 
-    model_id: str
-    dtype: str
-    hidden_dim: int
-    encoder_output_widths: tuple[tuple[str, int], ...]
-    element_size: int
     encoder_config_hash: str
-    model_revision: str | None = None
 
     def __post_init__(self) -> None:
         _validate_digest(self.encoder_config_hash, "encoder_config_hash")
-        for field_name in ("model_id", "dtype"):
-            if not getattr(self, field_name):
-                raise ValueError(f"{field_name} must not be empty")
-        if self.model_revision is not None and not self.model_revision:
-            raise ValueError("model_revision must not be empty when provided")
-        if not self.encoder_output_widths:
-            raise ValueError("encoder_output_widths must not be empty")
-        if tuple(sorted(self.encoder_output_widths)) != self.encoder_output_widths:
-            raise ValueError("encoder_output_widths must be sorted by modality")
-        modalities = [modality for modality, _ in self.encoder_output_widths]
-        if len(set(modalities)) != len(modalities):
-            raise ValueError("encoder_output_widths modalities must be unique")
-        if any(
-            not modality or width <= 0 for modality, width in self.encoder_output_widths
-        ):
-            raise ValueError(
-                "encoder_output_widths entries must be non-empty and positive"
-            )
-        for field_name in (
-            "hidden_dim",
-            "element_size",
-        ):
-            if getattr(self, field_name) <= 0:
-                raise ValueError(f"{field_name} must be positive")
 
     def digest(self) -> str:
         factors = asdict(self)
