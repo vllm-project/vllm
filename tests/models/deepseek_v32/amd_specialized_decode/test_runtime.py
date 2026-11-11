@@ -441,24 +441,24 @@ def _quark(attention):
 
 _FP8_W = dict(dtype="fp8_e4m3", qscheme="per_channel", ch_axis=0, is_dynamic=False)
 _FP8_X = dict(dtype="fp8_e4m3", qscheme="per_channel", ch_axis=1, is_dynamic=True)
+# GLM-5.3's attention: 128 x 128 weight blocks, per-128 dynamic activations
+_BLOCK = (
+    dict(_FP8_W, qscheme="per_block", block_size=[128, 128], symmetric=True),
+    dict(_FP8_X, qscheme="per_group", group_size=128, symmetric=True),
+)
 
 
 @pytest.mark.usefixtures("gfx950")
 def test_attention_quant_selection(make_vc):
-    """BF16 (excluded) and Quark PTPC FP8 attention are served as checkpointed;
-    block / per-tensor FP8 and non-Quark quantization are refused."""
-    for ok in ("bf16", (_FP8_W, _FP8_X)):
+    """BF16 (excluded), Quark PTPC FP8 and Quark 128 x 128 block FP8 attention are
+    served as checkpointed; per-tensor FP8 and non-Quark quantization are refused."""
+    for ok in ("bf16", (_FP8_W, _FP8_X), _BLOCK):
         vc = _set(make_vc(), "quant_config", _quark(ok))
         assert R.unsupported(vc) == [], ok
-    block = (
-        dict(_FP8_W, qscheme="per_block", block_size=[128, 128], symmetric=True),
-        dict(_FP8_X, qscheme="per_group", group_size=128, symmetric=True),
-    )
     tensor = (dict(_FP8_W, qscheme="per_tensor"), dict(_FP8_X, qscheme="per_tensor"))
-    for bad in (block, tensor):
-        reasons = R.unsupported(_set(make_vc(), "quant_config", _quark(bad)))
-        assert reasons and all("per-channel FP8 with per-token" in r for r in reasons)
-        assert any("q_b_proj" in r and "layers 3..77" in r for r in reasons), reasons
+    reasons = R.unsupported(_set(make_vc(), "quant_config", _quark(tensor)))
+    assert reasons and all("per-channel FP8 with per-token" in r for r in reasons)
+    assert any("q_b_proj" in r and "layers 3..77" in r for r in reasons), reasons
     fp8 = NS(get_name=lambda: "fp8")  # e.g. zai-org/GLM-5.2-FP8 (block FP8)
     (why,) = R.unsupported(_set(make_vc(), "quant_config", fp8))
     assert "quantization fp8" in why
@@ -536,3 +536,24 @@ def test_attention_quant_partial_or_mixed(make_vc):
     mixed = {L: every for L in range(3, 40)}
     (why,) = R.unsupported(_set(make_vc(), "quant_config", _quark_split(mixed)))
     assert "mixed attention precision" in why and "3..39" in why
+
+
+@pytest.mark.usefixtures("gfx950")
+def test_attention_quant_one_fp8_format(make_vc):
+    """The kernel is built for one FP8 scale format: per-channel and block FP8 in one
+    layer's attention, or an FP8 indexer wq_b of the other format, are refused."""
+    from vllm.model_executor.layers.quantization.quark.quark import QuarkConfig
+
+    def quark(per_channel):
+        cfg = _quark(_BLOCK).quant_config
+        for p in per_channel:
+            cfg["layer_quant_config"][f"*self_attn.{p}"] = dict(
+                weight=_FP8_W, input_tensors=_FP8_X, output_tensors=None
+            )
+        return QuarkConfig(quant_config=cfg)
+
+    (why,) = R.unsupported(_set(make_vc(), "quant_config", quark(["o_proj"])))
+    assert "partial FP8 attention on layers 3..77" in why
+    assert "per-channel FP8 ['o_proj']" in why, why
+    (why,) = R.unsupported(_set(make_vc(), "quant_config", quark(["indexer.wq_b"])))
+    assert "indexer.wq_b per-channel FP8 on layers 3..77 with block FP8" in why, why

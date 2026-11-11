@@ -273,11 +273,13 @@ def builds_indexer(hf_config, layer: int) -> bool:
 
 def attention_quant_reasons(vllm_config, layers) -> list[str]:
     """Why the mono layers' attention linears cannot be read as checkpointed: each must
-    be BF16 (excluded from quantization) or Quark per-channel FP8 with per-token
-    dynamic activations (PTPC), which the kernel reads with its per-row scales, and the
-    attention proper (all but `indexer.wq_b`) one precision on every mono layer.
-    Block / per-tensor FP8 and non-Quark quantization (e.g. zai-org/GLM-5.2-FP8) are
-    refused: the specialized decode never requantizes weights."""
+    be BF16 (excluded from quantization), Quark per-channel FP8 with per-token dynamic
+    activations (PTPC), which the kernel reads with its per-row scales, or Quark 128 x
+    128 block FP8 with per-128 dynamic activations (GLM-5.3), read with its block
+    scales; the attention proper (all but `indexer.wq_b`) one format on every mono
+    layer, and an FP8 `wq_b` the attention's FP8 format. Per-tensor FP8 and non-Quark
+    quantization (e.g. zai-org/GLM-5.2-FP8) are refused: the specialized decode never
+    requantizes weights."""
     qc = getattr(vllm_config, "quant_config", None)
     if qc is None:
         return []
@@ -286,13 +288,22 @@ def attention_quant_reasons(vllm_config, layers) -> list[str]:
         return [f"quantization {name} (Quark with BF16 or per-channel FP8 attention)"]
     from vllm.model_executor.layers.linear import LinearBase, UnquantizedLinearMethod
     from vllm.model_executor.layers.quantization.utils.quant_utils import (
+        kFp8Dynamic128Sym,
         kFp8DynamicTokenSym,
+        kFp8Static128BlockE8M0Sym,
+        kFp8Static128BlockSym,
         kFp8StaticChannelSym,
     )
 
+    formats = {
+        (kFp8StaticChannelSym, kFp8DynamicTokenSym): "per-channel FP8",
+        (kFp8Static128BlockSym, kFp8Dynamic128Sym): "block FP8",
+        (kFp8Static128BlockE8M0Sym, kFp8Dynamic128Sym): "block FP8",
+    }
     bad: dict[str, set[int]] = {}
-    # (layer, linear) -> FP8 of the attention proper's linears
-    fp8: dict[int, dict[str, bool]] = {}
+    # (layer, linear) -> format of the attention proper's linears
+    fmt: dict[int, dict[str, str]] = {}
+    index_fmt: dict[int, str] = {}  # FP8 indexer wq_b
     hf = vllm_config.model_config.hf_config
     for L in layers:
         for proj in ATTENTION_LINEARS:
@@ -304,34 +315,56 @@ def attention_quant_reasons(vllm_config, layers) -> list[str]:
             except (NotImplementedError, ValueError) as e:
                 why = f"{proj}: {e}"
             else:
-                is_bf16 = method is UnquantizedLinearMethod
-                if is_bf16 or (
-                    wk == kFp8StaticChannelSym and ak == kFp8DynamicTokenSym
-                ):
+                f = (
+                    "BF16"
+                    if method is UnquantizedLinearMethod
+                    else formats.get((wk, ak))
+                )
+                if f is not None:
                     if proj != "indexer.wq_b":
-                        fp8.setdefault(L, {})[proj] = not is_bf16
+                        fmt.setdefault(L, {})[proj] = f
+                    elif f != "BF16":
+                        index_fmt[L] = f
                     continue
                 why = f"{proj} quantized as {wk} / {ak}"
             bad.setdefault(why, set()).add(L)
     reasons = [
-        f"{why} on layers {sorted(Ls)[0]}..{sorted(Ls)[-1]} (attention must be BF16 or "
-        "per-channel FP8 with per-token activations)"
+        f"{why} on layers {sorted(Ls)[0]}..{sorted(Ls)[-1]} (attention must be BF16, "
+        "per-channel FP8 with per-token activations or 128 x 128 block FP8 with "
+        "per-128 activations)"
         for why, Ls in bad.items()
     ]
-    partial = sorted(L for L, d in fp8.items() if len(set(d.values())) > 1)
+    partial = sorted(L for L, d in fmt.items() if len(set(d.values())) > 1)
+    attn_fmt = {L: next(iter(d.values())) for L, d in fmt.items() if d}
     if partial:
-        d = fp8[partial[0]]
+        d = fmt[partial[0]]
         reasons.append(
             f"partial FP8 attention on layers {partial[0]}..{partial[-1]} (layer "
-            f"{partial[0]}: FP8 {[p for p, v in d.items() if v]}, BF16 "
-            f"{[p for p, v in d.items() if not v]}; a layer's attention is read all "
-            "BF16 or all FP8)"
+            f"{partial[0]}: "
+            + ", ".join(
+                f"{f} {[p for p, v in d.items() if v == f]}"
+                for f in sorted(set(d.values()))
+            )
+            + "; a layer's attention is read all BF16 or all one FP8 format)"
         )
-    elif len({next(iter(d.values())) for d in fp8.values() if d}) > 1:
-        on = sorted(L for L, d in fp8.items() if any(d.values()))
+    elif len(set(attn_fmt.values())) > 1:
+        by: dict[str, list[int]] = {}
+        for L, f in sorted(attn_fmt.items()):
+            by.setdefault(f, []).append(L)
         reasons.append(
-            f"mixed attention precision across mono layers (FP8 on {len(on)} layers, "
-            f"{on[0]}..{on[-1]}; BF16 on the others)"
+            "mixed attention precision across mono layers ("
+            + "; ".join(
+                f"{f} on {len(Ls)} layers, {Ls[0]}..{Ls[-1]}" for f, Ls in by.items()
+            )
+            + ")"
+        )
+    odd = sorted(
+        L for L, f in index_fmt.items() if attn_fmt.get(L, "BF16") not in ("BF16", f)
+    )
+    if odd:
+        reasons.append(
+            f"indexer.wq_b {index_fmt[odd[0]]} on layers {odd[0]}..{odd[-1]} with "
+            f"{attn_fmt[odd[0]]} attention (the kernel reads one FP8 scale format)"
         )
     return reasons
 

@@ -25,13 +25,16 @@ Attention precision follows the checkpoint. Nothing is re-quantized at load time
 | `amd/GLM-5.2-MXFP4` (MXFP4 experts) | BF16 | vLLM's indexer (`indexer_only`) | GPU: speed, GSM8K |
 | `amd/GLM-5.2-Quark-MXFP4-AttnFP8` (MXFP4 experts, Quark per-channel FP8 attention), `max_model_len` ≤ 4096 | FP8, with the checkpoint's per-row scales | Fused into the kernel | GPU: speed, GSM8K |
 | Same, `max_model_len` > 4096 | FP8, with the checkpoint's per-row scales | vLLM's indexer | CPU tests and compile only |
+| `amd/GLM-5.3-Quark-MXFP4-AttnFP8` (MXFP4 experts, Quark 128 x 128 block FP8 attention), `max_model_len` ≤ 4096 | FP8, with the checkpoint's block scales | Fused into the kernel | CPU tests and compile only |
+| Same, `max_model_len` > 4096 | FP8, with the checkpoint's block scales | vLLM's indexer | CPU tests and compile only |
 
 The fused indexer also needs an FP8 `indexer.wq_b` and a first mono layer that is not
 an indexer layer; otherwise vLLM's indexer runs. The startup log names the path and,
 when the fused indexer is off, why.
 
-Any other attention quantization is refused at startup. That includes block or
-per-tensor FP8, a non-Quark method, and FP8 on only some layers or matrices.
+Any other attention quantization is refused at startup. That includes per-tensor FP8,
+a non-Quark method, FP8 on only some layers or matrices, and per-channel and block
+FP8 mixed in one model.
 
 ## Supported deployments
 
@@ -110,7 +113,7 @@ Debug only:
 | `runtime/__init__.py` | `DecodeConfig`, `BATCH_SIZES` / `MAX_BATCH_SIZE`, `specialized_decode_config()`, `unsupported()` |
 | `runtime/decode.py` | `SpecializedDecode`: `prepare_kv`, `plan`, `Step.layer` (layer mode) |
 | `runtime/mono_layers.py` | Per-layer kernels, step inputs, attention path selection, KV-bind checks |
-| `runtime/vllm_weights.py` | Views of vLLM's loaded weights (BF16, FP8 per-channel, MXFP4 experts) |
+| `runtime/vllm_weights.py` | Views of vLLM's loaded weights (BF16, FP8 per-channel or 128 x 128 block, MXFP4 experts) |
 | `runtime/indexer_only.py` | The non-fused indexer refresh |
 | `runtime/guards.py` | Build checks, fail-stop and the poll-error watch (`PollErrorWatch`) |
 | `flydsl/` | The vendored FlyDSL kernel (JIT-compiled) |

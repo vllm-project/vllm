@@ -103,5 +103,9 @@ FP8_MAX = 448.0
 # attention matrices the kernel can read as checkpoint FP8 E4M3 with one F32 scale per
 # output row (w_uk stays BF16: kv_b_proj's per-row scale runs along its K)
 FP8_ATTENTION = ("qkv_a", "q_b", "uv", "o")
+# or (GLM-5.3) one F32 scale per 128 x 128 block; uv's block scales are regrouped to
+# 64-row blocks (its rows are kv_b's per-head value rows, which start 64-aligned)
+FP8_BLOCK = 128
+FP8_BLOCK_ROWS = {"uv": 64}
 SOFTMAX_SCALE = GLM5_CONFIG.softmax_scale
 MAX_LAYERS_PER_STEP = 128

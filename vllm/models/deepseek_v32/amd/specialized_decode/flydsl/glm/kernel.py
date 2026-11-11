@@ -16,8 +16,9 @@
 #   cache-stage loads, 64-key split tasks), a 3-pass 11/11/10-bit radix select and
 #   index-K/W projections on idle CTAs; checkpoint FP8 attention / index-Q weights
 #   with per-output-row scales (per matrix, BF16 index-K/W from vLLM's
-#   wk_weights_proj) in place of the block-128 format; the other weight / KV-cache
-#   formats, DCP, single-request indexer and stage timeline vLLM never builds removed.
+#   wk_weights_proj) in place of the block-128 format (block scales again as the
+#   `fp8_block` option, for GLM-5.3's checkpoints); the other weight / KV-cache formats,
+#   DCP, single-request indexer and stage timeline vLLM never builds removed.
 
 """GLM-5 indexed decode MonoKernel: one persistent launch per TP rank.
 
@@ -74,6 +75,8 @@ from flydsl.expr.typing import Int32, Int64, T
 from vllm.models.deepseek_v32.amd.specialized_decode.flydsl.config import (
     EPS,
     FP8_ATTENTION,
+    FP8_BLOCK,
+    FP8_BLOCK_ROWS,
     FP8_MAX,
     HIDDEN,
     INTER,
@@ -207,6 +210,7 @@ def build_glm5_monokernel(
     with_indexer: bool = False,
     index_max_seq: int = 4096,
     fp8_attention: tuple[str, ...] = (),
+    fp8_block: bool = False,
     inter: int = INTER,
     scale: float = SOFTMAX_SCALE,
     poll_limit: int | None = None,
@@ -224,6 +228,11 @@ def build_glm5_monokernel(
     `fp8_attention`: the attention matrices (of `FP8_ATTENTION`) given as the
     checkpoint's FP8 E4M3 values (host-packed by `pack_fp8`) with one F32 scale per
     output row at `s_<name>`; the others are BF16 row-major (scale slot unused).
+    `fp8_block`: the FP8 matrices (and the fused indexer's `wq_b`) carry the
+    checkpoint's 128 x 128 block scales instead, F32 `[rows / R, K / 128]` row-major
+    with R = `FP8_BLOCK_ROWS` (64 for `uv`: its rows are kv_b's per-head value rows,
+    64-aligned in kv_b's 128-row blocks): each 128-k unit's partial is scaled by its
+    block's scale as it is accumulated, the row scale is not applied.
 
     `with_indexer`: the fused indexer on vLLM's paged FP8 index cache (all of
     `FP8_ATTENTION` FP8). Index projections: Q from the checkpoint's FP8 `wq_b`
@@ -248,6 +257,9 @@ def build_glm5_monokernel(
     assert heads % WAVES == 0, "split attention maps one local head to each wave"
     fp8_attention = tuple(fp8_attention)
     assert set(fp8_attention) <= set(FP8_ATTENTION), fp8_attention
+    assert not fp8_block or set(fp8_attention) == set(FP8_ATTENTION), (
+        "block-scaled FP8 attention: all of FP8_ATTENTION"
+    )
 
     def kpu(name):
         """64-k chunks per weight unit: FP8 loads both halves of a 128-k span."""
@@ -744,11 +756,13 @@ def build_glm5_monokernel(
             return t
 
         # ------------------------------------------------ MFMA GEMV machinery
-        def unit_fp8x2(w_rsrc, rg, kc, NKC, b_word):
+        def unit_fp8x2(w_rsrc, rg, kc, NKC, b_word, s_rsrc=None, scale_rows=FP8_BLOCK):
             """Both 64-k halves (64-k chunks kc, kc + 1) of row group `rg` of a
             `pack_fp8` FP8 matrix; the bf16 activation chunk starts at LDS word
             `b_word`. Unscaled: the per-row scale is applied once to the sum
-            (`row_scaled`)."""
+            (`row_scaled`). With `s_rsrc` (`fp8_block`): the unit is one 128-k column
+            of the block scales `[rows / scale_rows, K / 128]`, its partial scaled by
+            that block's scale."""
             wv = [
                 fx.Vector(
                     bo.buffer_load(
@@ -760,7 +774,10 @@ def build_glm5_monokernel(
                 )
                 for h in range(2)
             ]
-            return ("fp8x2", wv, None, b_word + (lane // 16) * 4)
+            coef = None
+            if const_expr(s_rsrc is not None):
+                coef = ld_f32(s_rsrc, (rg * 16 // scale_rows) * (NKC // 2) + kc // 2)
+            return ("fp8x2", wv, coef, b_word + (lane // 16) * 4)
 
         def row_scale(s_rsrc, rg):
             """This lane's 4 MFMA output rows' F32 scales (rows rg * 16 + 4 (lane //
@@ -843,15 +860,26 @@ def build_glm5_monokernel(
             ]
             return ("bf16", wv, None, b_word + (lane // 16) * 4)
 
-        def unit_attention(name, w_rsrc, rg, kc, NKC, b_word):
-            """A chunk unit of attention matrix `name` (FP8: 128 k, BF16: 64 k)."""
+        def unit_attention(name, w_rsrc, rg, kc, NKC, b_word, s_rsrc=None):
+            """A chunk unit of attention matrix `name` (FP8: 128 k, BF16: 64 k);
+            `s_rsrc`: its scales, read per unit when they are block scales."""
+            if const_expr(name in fp8_attention and fp8_block):
+                return unit_fp8x2(
+                    w_rsrc,
+                    rg,
+                    kc,
+                    NKC,
+                    b_word,
+                    s_rsrc,
+                    FP8_BLOCK_ROWS.get(name, FP8_BLOCK),
+                )
             if const_expr(name in fp8_attention):
                 return unit_fp8x2(w_rsrc, rg, kc, NKC, b_word)
             return unit_bf16(w_rsrc, rg, kc, NKC, b_word)
 
         def attention_scale(name, s_rsrc, rg):
-            """The per-row scales of an FP8 matrix (None for BF16)."""
-            if const_expr(name in fp8_attention):
+            """The per-row scales of an FP8 matrix (None for BF16 and block scales)."""
+            if const_expr(name in fp8_attention and not fp8_block):
                 return row_scale(s_rsrc, rg)
             return None
 
@@ -1329,6 +1357,7 @@ def build_glm5_monokernel(
                         kc,
                         QA_NKC,
                         (n_sel(group_count) * HIDDEN + kc * 64) // 2,
+                        r_sqa,
                     )
 
                 sv = attention_scale("qkv_a", r_sqa, t)
@@ -1577,7 +1606,7 @@ def build_glm5_monokernel(
         r_wqb, r_sqb = _rsrc(w_q_b), _rsrc(s_q_b)
         QB_NKC = Q_LORA // 64
         QB_UNITS = QB_NKC // (kpu("q_b") * WAVES)
-        # index-Q: the checkpoint's FP8 wq_b (per-row scales)
+        # index-Q: the checkpoint's FP8 wq_b (per-row or, with fp8_block, block scales)
         IQ_UNITS = QB_NKC // (2 * WAVES)
         if const_expr(with_indexer):
             r_wiq, r_siq = _rsrc(index_arg(3)), _rsrc(index_arg(4))
@@ -1585,6 +1614,15 @@ def build_glm5_monokernel(
         def u_index_q(iq_t):
             def mk(c):
                 kc = (wave * IQ_UNITS + c) * 2
+                if const_expr(fp8_block):
+                    return unit_fp8x2(
+                        r_wiq,
+                        iq_t,
+                        kc,
+                        QB_NKC,
+                        (n_sel() * Q_LORA + kc * 64) // 2,
+                        r_siq,
+                    )
                 return unit_fp8x2(
                     r_wiq,
                     iq_t,
@@ -1596,7 +1634,8 @@ def build_glm5_monokernel(
             return mk
 
         def index_q_out(iq_t, acc, sv):
-            acc = row_scaled(acc, sv)
+            if const_expr(sv is not None):
+                acc = row_scaled(acc, sv)
             reduce_rows(1, acc, emit_out(INDEX_TILE))
             gpu.barrier()
             if tid < S * INDEX_TILE // 4:
@@ -1621,6 +1660,7 @@ def build_glm5_monokernel(
                     kc,
                     QB_NKC,
                     (n_sel() * Q_LORA + kc * 64) // 2,
+                    r_sqb,
                 )
 
             sv = attention_scale("q_b", r_sqb, t)
@@ -1665,7 +1705,7 @@ def build_glm5_monokernel(
                 # this CTA's normalized q_lora tile also feeds one index-query tile; the
                 # complementary CTAs compute the other half below
                 stage("index_q")
-                iq_sv = row_scale(r_siq, t)
+                iq_sv = None if fp8_block else row_scale(r_siq, t)
                 index_q_out(t, run_units(u_index_q(t), IQ_UNITS, IQ_UNITS), iq_sv)
 
         if const_expr(with_indexer):
@@ -1678,7 +1718,7 @@ def build_glm5_monokernel(
                 iq_t = N_QB + tt
                 stage("index_q")
                 mk = u_index_q(iq_t)
-                iq_sv = row_scale(r_siq, iq_t)
+                iq_sv = None if fp8_block else row_scale(r_siq, iq_t)
                 pre = [mk(c) for c in range(IQ_UNITS)]
                 gpu.barrier()
                 stage_x_pairs("q_an", S * Q_LORA, lambda k: k)
@@ -2433,6 +2473,7 @@ def build_glm5_monokernel(
                     kc,
                     UV_NKC,
                     (kc * 64) // 2,
+                    r_suv,
                 )
 
             pre = [u_uv(c) for c in range(UV_UNITS)]
@@ -2530,6 +2571,7 @@ def build_glm5_monokernel(
                     kc,
                     O_NKC,
                     (n_sel() * O_K + kc * 64) // 2,
+                    r_so,
                 )
 
             pre = [u_o(c) for c in range(O_UNITS)]

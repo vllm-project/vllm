@@ -17,8 +17,9 @@ final norm writes its residual into it).
 
 Attention precision follows the checkpoint (`attention_path`): BF16 attention, or a
 checkpoint's per-channel FP8 attention read with its own per-row scales (never
-requantized). With FP8 attention, an FP8 indexer `wq_b`, max_model_len <= 4096 and a
-first mono layer that is not an indexer layer, the indexer layers run the fused indexer
+requantized), or (GLM-5.3) its 128 x 128 block FP8 attention with its block scales.
+With FP8 attention, an FP8 indexer `wq_b`, max_model_len <= 4096 and a first mono
+layer that is not an indexer layer, the indexer layers run the fused indexer
 (in-kernel index-K cache write, scores and top-k select); otherwise non-fused indexer
 layers refresh vLLM's top-k buffer and index-K cache through vLLM's attention
 (`indexer_mode="attn"`, output discarded, its MLA row then overwritten by the kernel)
@@ -212,9 +213,15 @@ class MonoLayers:
         )
         self.index_max_seq = index_max_seq(cfg.max_model_len)
         if self.rank == 0:
+            from .vllm_weights import is_fp8_block
+
             logger.info(
                 "GLM-5.2 specialized decode: %s attention (checkpoint precision); %s",
-                "FP8 per-channel" if self.fp8_attention else "BF16",
+                "BF16"
+                if not self.fp8_attention
+                else "FP8 128 x 128 block"
+                if is_fp8_block(self.layers[self.first].self_attn.q_b_proj)
+                else "FP8 per-channel",
                 f"fused indexer on {len(self.fused_layers)} indexer layers "
                 f"(max_model_len {cfg.max_model_len})"
                 if self.fused_layers

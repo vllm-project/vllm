@@ -499,6 +499,32 @@ def test_rope_tables_and_layer_metadata(monkeypatch):
         assert ML.layer_metadata(name) == want
 
 
+def test_op_fp8_scale_formats(import_kernel):
+    """The op packs per-row ([rows]) or block ([rows / R, K / 128], uv R = 64) F32
+    scales, checks their shape, and builds the kernel for one format only."""
+    OP = import_kernel("glm.op")
+    fp8 = lambda *s: torch.zeros(*s, dtype=torch.float8_e4m3fn)
+    shapes = dict(qkv_a=(2624, 6144), q_b=(2048, 2048), uv=(2048, 512), o=(6144, 2048))
+    rows = {
+        k: {f"w_{k}": fp8(*v), f"s_{k}": torch.ones(v[0])} for k, v in shapes.items()
+    }
+    blocks = {
+        k: {f"w_{k}": fp8(*v), f"s_{k}": torch.ones(-(-v[0] // r), v[1] // 128)}
+        for (k, v), r in zip(shapes.items(), (128, 128, 64, 128))
+    }
+    t_rows = {k: v for d in rows.values() for k, v in d.items()}
+    t_blocks = {k: v for d in blocks.values() for k, v in d.items()}
+    assert not OP.fp8_block_of(t_rows) and OP.fp8_block_of(t_blocks)
+    for t in (t_rows, t_blocks):
+        for k in shapes:
+            w, sc = OP._fp8_rows(t, k)
+            assert w.numel() == t[f"w_{k}"].numel() and sc is t[f"s_{k}"]
+    with pytest.raises(ValueError, match="all per-row or all 128 x 128 blocks"):
+        OP.fp8_block_of(dict(t_blocks, **rows["o"]))
+    with pytest.raises(ValueError, match="s_uv"):  # uv's blocks are 64 rows
+        OP._fp8_rows(dict(t_blocks, s_uv=torch.ones(16, 4)), "uv")
+
+
 def test_op_launch_caching(monkeypatch, import_kernel):
     """Glm5MonoKernel.forward validates once per input signature and builds the weight
     pointers once; the layer range is checked on every launch."""

@@ -14,8 +14,9 @@
 #   options, build-time stage options), the cross-rank poll-expiry flag and per-launch
 #   argument caching; torch.accelerator in place of torch.cuda device calls; BF16
 #   attention weights read in place, a checkpoint's FP8 attention / index-Q weights
-#   tile-packed with their per-row scales; the unused format / DCP / timeline options
-#   and the debug / intermediates / close accessors removed.
+#   tile-packed with their per-row (or, for GLM-5.3, 128 x 128 block) scales; the
+#   unused format / DCP / timeline options and the debug / intermediates / close
+#   accessors removed.
 
 """Host wrapper for the GLM-5 sparse-MLA decode MonoKernel (optionally with the fused
 indexer)."""
@@ -26,6 +27,8 @@ import torch
 
 from vllm.models.deepseek_v32.amd.specialized_decode.flydsl.config import (
     FP8_ATTENTION,
+    FP8_BLOCK,
+    FP8_BLOCK_ROWS,
     GLM5_KERNEL_SAMPLES,
     HIDDEN,
     KV_LORA,
@@ -69,11 +72,31 @@ def fp8_attention_of(t: dict) -> tuple[str, ...]:
     return tuple(name for name in FP8_ATTENTION if f"s_{name}" in t)
 
 
+def fp8_block_of(t: dict) -> bool:
+    """Whether the FP8 matrices carry block scales (2-D `s_<name>`, `fp8_block`)
+    rather than per-row scales (1-D); all of them, the index-Q included, one way."""
+    names = [*fp8_attention_of(t), *(("index_q",) if "s_index_q" in t else ())]
+    dims = {t[f"s_{name}"].dim() for name in names}
+    if len(dims) > 1:
+        raise ValueError(
+            "FP8 scales must be all per-row or all 128 x 128 blocks, got "
+            f"{ {name: tuple(t[f's_{name}'].shape) for name in names} }"
+        )
+    return dims == {2}
+
+
 def _fp8_rows(t: dict, name: str) -> tuple[torch.Tensor, torch.Tensor]:
-    """`pack_fp8` tiles of FP8 [rows, K] `w_<name>` + its F32 [rows] scales."""
+    """`pack_fp8` tiles of FP8 [rows, K] `w_<name>` + its F32 scales: [rows] per-row,
+    or [rows / R, K / 128] blocks (R = `FP8_BLOCK_ROWS`, a partial last block
+    included)."""
     w, s = t[f"w_{name}"], t[f"s_{name}"]
     _expect(w, f"w_{name}", tuple(w.shape), torch.float8_e4m3fn)
-    _expect(s, f"s_{name}", (w.shape[0],), torch.float32)
+    if s.dim() == 2:
+        rows = FP8_BLOCK_ROWS.get(name, FP8_BLOCK)
+        shape = (-(-w.shape[0] // rows), w.shape[1] // FP8_BLOCK)
+        _expect(s, f"s_{name}", shape, torch.float32)
+    else:
+        _expect(s, f"s_{name}", (w.shape[0],), torch.float32)
     return pack_fp8(w), s
 
 
@@ -228,6 +251,7 @@ class Glm5MonoKernel:
         self.packed = dict(prepared_weights)  # from prepare_glm5_weights(W)
         t = W.t
         self.fp8_attention = fp8_attention_of(t)
+        self.fp8_block = fp8_block_of(t)
         if with_indexer:
             if set(self.fp8_attention) != set(FP8_ATTENTION):
                 raise ValueError(
@@ -307,6 +331,7 @@ class Glm5MonoKernel:
             with_indexer=with_indexer,
             index_max_seq=index_max_seq,
             fp8_attention=self.fp8_attention,
+            fp8_block=self.fp8_block,
             inter=W.config.inter,
             poll_limit=poll_limit,
             poll_early_out=poll_early_out,

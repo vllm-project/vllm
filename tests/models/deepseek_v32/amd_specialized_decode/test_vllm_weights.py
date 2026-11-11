@@ -421,3 +421,143 @@ def test_index_weights_from_model():
     # a BF16 wq_b (BF16 checkpoint): no fused indexer
     attn.indexer.wq_b = NS(weight=_p(torch.zeros(4096, 2048, dtype=torch.bfloat16)))
     assert VW.index_weights_from_model(attn) is None
+
+
+# ------------------------------------------------ FP8 block checkpoints (GLM-5.3)
+def _block_linear(g, rows, k, kernel="AiterFp8BlockScaledMMKernel", shuffled=False):
+    """A Quark 128 x 128 block FP8 linear as process_weights_after_loading leaves it
+    (weight [rows, k], F32 block scales [ceil(rows / 128), k / 128]; `shuffled`:
+    AITER's gfx1250 B-preshuffle); returns (module, values, block scales)."""
+    from vllm.model_executor.layers.quantization.utils.quant_utils import (
+        kFp8Static128BlockSym,
+    )
+
+    q = _fp8(g, rows, k)
+    s = torch.rand(-(-rows // 128), k // 128, generator=g) * 1e-2 + 1e-4
+    w = shuffle(q.view(torch.uint8)).view(torch.float8_e4m3fn) if shuffled else q
+    scheme = type("QuarkW8A8Fp8PerBlock", (), {})()
+    scheme.weight_quant_key = kFp8Static128BlockSym
+    scheme.fp8_linear = type(kernel, (), {})()
+    mod = NS(weight=_p(w), weight_scale=_p(s), scheme=scheme)
+    if shuffled:
+        mod.aiter_bpreshuffled = True
+    return mod, q, s
+
+
+def _dequant_blocks(q, s, rows_per_scale=128):
+    return q.float() * s.repeat_interleave(rows_per_scale, 0)[
+        : q.shape[0]
+    ].repeat_interleave(128, 1)
+
+
+@pytest.mark.parametrize(
+    "kernel,shuffled",
+    [(k, False) for k in VW.FP8_BLOCK_LINEAR_KERNELS]
+    + [("AiterFp8BlockScaledMMKernel", True)],
+)
+def test_fp8_linear_blocks_every_layout(kernel, shuffled):
+    """The checkpoint's bytes and block scales back (a partial last row block, as
+    fused_qkv_a_proj's 2624 rows); a view unless vLLM preshuffled the bytes."""
+    mod, q, s = _block_linear(_g(21), 2624, 512, kernel, shuffled)
+    w, sc = VW.fp8_linear_blocks(mod, "x", (2624, 512))
+    assert torch.equal(w.view(torch.uint8), q.view(torch.uint8)) and w.is_contiguous()
+    assert torch.equal(sc, s) and sc.shape == (21, 4)
+    same = w.untyped_storage().data_ptr() == mod.weight.untyped_storage().data_ptr()
+    assert same is not shuffled
+    assert VW.fp8_linear(mod, "x", (2624, 512))[1].data_ptr() == sc.data_ptr()
+
+
+def test_fp8_linear_blocks_refusals():
+    from vllm.model_executor.layers.quantization.utils.quant_utils import (
+        kFp8StaticChannelSym,
+    )
+
+    def refused(mod, what):
+        with pytest.raises(VW.WeightViewError, match=what):
+            VW.fp8_linear_blocks(mod, "o_proj", (2048, 512))
+
+    g = _g(22)
+    mod, _, _ = _block_linear(g, 2048, 512, "SomeOtherFp8Kernel")
+    refused(mod, "unknown FP8 block linear kernel SomeOtherFp8Kernel")
+    mod, _, _ = _block_linear(g, 2048, 512)
+    mod.scheme.weight_quant_key = kFp8StaticChannelSym
+    refused(mod, "128 x 128 block FP8")
+    mod, _, _ = _block_linear(g, 2048, 512)
+    mod.weight = _p(mod.weight.data.view(torch.uint8).view(torch.float8_e4m3fnuz))
+    refused(mod, "e4m3fnuz")
+    mod, _, _ = _block_linear(g, 2048, 512)
+    mod.weight = _p(mod.weight.data.t())
+    refused(mod, "dense")
+    mod, _, _ = _block_linear(g, 2048, 512)
+    mod.weight_scale = _p(torch.ones(2048))
+    refused(mod, "expected F32")
+    mod, _, _ = _block_linear(g, 2048, 512)
+    mod.weight_scale.data[3, 1] = float("inf")
+    refused(mod, "non-finite")
+
+
+def test_uv_block_scales_dequantize_exactly():
+    """Each 64 value rows of w_uv carry the scale of the kv_b block they lie in: the
+    regrouped w_uv dequantizes to exactly kv_b's value rows."""
+    q, s = _fp8(_g(23), 8 * 448, 512), torch.rand(28, 4, generator=_g(24)) + 0.5
+    s_uv = VW.uv_block_scales(s)
+    assert s_uv.shape == (8 * 256 // 64, 4) and s_uv.is_contiguous()
+    ref = _dequant_blocks(q, s).view(8, 448, 512)[:, 192:].reshape(8 * 256, 512)
+    w_uv = q.view(8, 448, 512)[:, 192:].reshape(8 * 256, 512)
+    assert torch.equal(_dequant_blocks(w_uv, s_uv, 64), ref)
+
+
+def _block_layer(g):
+    """_layer with the FP8 block attention of amd/GLM-5.3-Quark-MXFP4-AttnFP8 at TP8."""
+    lay = _layer(g)
+    a, ref = lay.self_attn, {}
+    for name, shape in (
+        ("fused_qkv_a_proj", (2624, HIDDEN)),
+        ("q_b_proj", (2048, 2048)),
+        ("o_proj", (HIDDEN, 2048)),
+        ("kv_b_proj", (8 * 448, 512)),
+    ):
+        mod, q, s = _block_linear(g, *shape)
+        setattr(a, name, mod)
+        ref[name] = (q, s)
+    q, s = ref["kv_b_proj"]
+    deq = _dequant_blocks(q, s).to(torch.bfloat16).view(8, 448, 512)
+    a.W_UK_T = _p(deq[:, :192].contiguous())
+    return lay, ref
+
+
+def test_weights_from_model_fp8_block_checkpoint():
+    lay, ref = _block_layer(_g(25))
+    t, _ = VW.weights_from_model(lay)
+    for key, name in (
+        ("qkv_a", "fused_qkv_a_proj"),
+        ("q_b", "q_b_proj"),
+        ("o", "o_proj"),
+    ):
+        q, s = ref[name]
+        mod = getattr(lay.self_attn, name)
+        assert t[f"w_{key}"].data_ptr() == mod.weight.data_ptr()  # views
+        assert t[f"s_{key}"].data_ptr() == mod.weight_scale.data_ptr()
+        assert torch.equal(t[f"s_{key}"], s)
+    q, s = ref["kv_b_proj"]
+    deq = _dequant_blocks(q, s).view(8, 448, 512)[:, 192:].reshape(8 * 256, 512)
+    assert torch.equal(_dequant_blocks(t["w_uv"], t["s_uv"], 64), deq)
+    assert torch.equal(
+        t["w_uk"].view(8, 512, 192), lay.self_attn.W_UK_T.data.transpose(1, 2)
+    )
+
+
+def test_index_weights_from_model_block():
+    g = _g(26)
+    wq_b, q, s = _block_linear(g, 4096, 2048)
+    kw = torch.randn(160, HIDDEN, generator=g).to(torch.bfloat16)
+    attn = NS(
+        indexer=NS(
+            wq_b=wq_b,
+            wk_weights_proj=NS(weight=_p(kw)),
+            k_norm=NS(weight=_p(torch.randn(128)), bias=_p(torch.randn(128))),
+        )
+    )
+    t = VW.index_weights_from_model(attn)
+    assert t is not None and t["w_index_q"].data_ptr() == wq_b.weight.data_ptr()
+    assert torch.equal(t["s_index_q"], s) and t["s_index_q"].shape == (32, 16)

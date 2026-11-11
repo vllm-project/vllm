@@ -45,11 +45,19 @@ per-row scale runs along w_uk's K, so w_uk is then MLA's BF16 `W_UK_T` (vLLM's o
 dequantization, transposed into a copy). The kernel's FP8 matrices are the keys with an
 `s_<name>` entry.
 
+FP8 block checkpoints (Quark `QuarkW8A8Fp8PerBlock`, 128 x 128 weight blocks, per-128
+dynamic activations, e.g. amd/GLM-5.3-Quark-MXFP4-AttnFP8): `w_<name>` the same
+[rows, K] values, `s_<name>` the checkpoint's F32 block scales [ceil(rows / 128),
+K / 128] (vLLM widens E8M0 scales), a view (`fp8_linear_blocks`). w_uv's scales are
+regrouped per 64 value rows (`FP8_BLOCK_ROWS`; a copy of 128 scales), w_uk is MLA's
+BF16 `W_UK_T` as above. All FP8 linears of a layer, the indexer's `wq_b` included, use
+one scale format (the kernel is built for one).
+
 Refused (`WeightViewError`): a shared expert fused into the routed tensors, any MoE
 backend other than AITER_MXFP4_MXFP4 (the expert layout is the backend's), attention
-linears quantized any other way (block / per-tensor FP8, FNUZ, unknown FP8 linear
-kernels), and every shape / dtype / contiguity mismatch: the kernel's buffer loads are
-unbounded, so a wrong layout would read garbage rather than fault.
+linears quantized any other way (non-Quark block FP8, per-tensor FP8, FNUZ, unknown
+FP8 linear kernels), and every shape / dtype / contiguity mismatch: the kernel's
+buffer loads are unbounded, so a wrong layout would read garbage rather than fault.
 """
 
 from __future__ import annotations
@@ -58,6 +66,8 @@ import torch
 
 from vllm.models.deepseek_v32.amd.specialized_decode.flydsl.config import (
     FP8_ATTENTION,
+    FP8_BLOCK,
+    FP8_BLOCK_ROWS,
     GLM5_CONFIG,
     HIDDEN,
     INTER,
@@ -91,6 +101,14 @@ FP8_LINEAR_LAYOUTS = {
     "RowWiseTorchFP8ScaledMMLinearKernel": "rows",
     "ChannelWiseTorchFP8ScaledMMLinearKernel": "rows",
 }
+# vLLM's FP8 block-scaled kernels on ROCm: process_fp8_weight_block_strategy keeps the
+# checkpoint's [N, K] bytes; AITER's B-preshuffle (gfx1250 only) marks the layer
+# `aiter_bpreshuffled` after a (16, 16) shuffle
+FP8_BLOCK_LINEAR_KERNELS = (
+    "AiterFp8BlockScaledMMKernel",
+    "TritonFp8BlockScaledMMKernel",
+    "BlockWiseTorchFP8ScaledMMLinearKernel",
+)
 
 
 class WeightViewError(RuntimeError):
@@ -207,6 +225,80 @@ def fp8_linear_rows(mod, name: str, shape: tuple[int, int]):
     return m, s
 
 
+def is_fp8_block(mod) -> bool:
+    """A Quark per-block FP8 linear (GLM-5.3's attention), read by fp8_linear_blocks."""
+    return type(getattr(mod, "scheme", None)).__name__ == "QuarkW8A8Fp8PerBlock"
+
+
+def fp8_linear_blocks(mod, name: str, shape: tuple[int, int]):
+    """(values float8_e4m3fn [rows, K] row-major, scales F32 [ceil(rows / 128), K /
+    128]) of a loaded Quark per-block FP8 linear: the checkpoint's bytes and block
+    scales, never requantized (QuarkW8A8Fp8PerBlock keeps both as loaded; vLLM widens
+    E8M0 scales to F32)."""
+    from vllm.model_executor.kernels.linear.scaled_mm.BlockScaledMMLinearKernel import (
+        FP8BlockParams,
+    )
+    from vllm.model_executor.layers.quantization.utils.quant_utils import (
+        kFp8Static128BlockSym,
+    )
+
+    sch = getattr(mod, "scheme", None)
+    _need(
+        is_fp8_block(mod)
+        and getattr(sch, "weight_quant_key", None) == kFp8Static128BlockSym,
+        f"{name}: FP8 block weights need Quark 128 x 128 block FP8, got "
+        f"{type(sch).__name__} {getattr(sch, 'weight_quant_key', None)}",
+    )
+    kern = type(getattr(sch, "fp8_linear", None)).__name__
+    _need(
+        kern in FP8_BLOCK_LINEAR_KERNELS,
+        f"{name}: unknown FP8 block linear kernel {kern} (layout)",
+    )
+    w, (rows, k) = _data(mod.weight), shape
+    _need(w.dtype is FP8, f"{name} is {w.dtype}, expected float8_e4m3fn (OCP)")
+    _need(
+        tuple(w.shape) == (rows, k) and w.is_contiguous(),
+        f"{name} FP8 weight {tuple(w.shape)} strides {w.stride()}, expected {shape} "
+        "dense",
+    )
+    if getattr(mod, "aiter_bpreshuffled", False):
+        w = unshuffle_16x16(w)
+    s = _data(FP8BlockParams.from_layer(mod).block_scale)
+    blocks = (-(-rows // FP8_BLOCK), k // FP8_BLOCK)
+    _need(
+        s.dtype is torch.float32 and tuple(s.shape) == blocks and s.is_contiguous(),
+        f"{name} block scale {tuple(s.shape)} {s.dtype}: expected F32 {blocks}",
+    )
+    _need(
+        bool(torch.isfinite(s).all() and (s > 0).all()),
+        f"{name} block scale: non-finite or non-positive",
+    )
+    return w, s
+
+
+def uv_block_scales(s: torch.Tensor) -> torch.Tensor:
+    """kv_b_proj's [HEADS * 448 / 128, 4] block scales as w_uv's [HEADS * 256 / 64, 4]:
+    every 64 value rows lie in one of kv_b's 128-row blocks (the value rows of a head
+    start at 448 h + 192, both multiples of 64)."""
+    r = FP8_BLOCK_ROWS["uv"]
+    _need(
+        NOPE_DIM % r == 0 and (NOPE_DIM + V_DIM) % r == 0 and FP8_BLOCK % r == 0,
+        "uv value rows not aligned to its scale blocks",
+    )
+    g = torch.arange(HEADS * V_DIM // r, device=s.device)
+    kv_row = (
+        (g // (V_DIM // r)) * (NOPE_DIM + V_DIM) + NOPE_DIM + (g % (V_DIM // r)) * r
+    )
+    return s[kv_row // FP8_BLOCK].contiguous()
+
+
+def fp8_linear(mod, name: str, shape: tuple[int, int]):
+    """(values, scales) of a loaded FP8 attention linear: per-row or block scales."""
+    if is_fp8_block(mod):
+        return fp8_linear_blocks(mod, name, shape)
+    return fp8_linear_rows(mod, name, shape)
+
+
 def routed_experts_module(mlp):
     """The expert parameters live on the MoERunner's RoutedExperts child."""
     ex = mlp.experts
@@ -251,16 +343,20 @@ def weights_from_model(layer) -> tuple[dict[str, torch.Tensor], dict]:
         name = ATTENTION_MODULES[key]
         mod = getattr(a, name)
         if is_fp8(mod.weight):
-            t[f"w_{key}"], t[f"s_{key}"] = fp8_linear_rows(mod, name, rows_k)
+            t[f"w_{key}"], t[f"s_{key}"] = fp8_linear(mod, name, rows_k)
         else:
             t[f"w_{key}"] = _bf16(mod.weight, name, rows_k)
     kv_b_shape = (HEADS * (NOPE_DIM + V_DIM), KV_LORA)
     if is_fp8(a.kv_b_proj.weight):
-        q, s = fp8_linear_rows(a.kv_b_proj, "kv_b_proj", kv_b_shape)
+        q, s = fp8_linear(a.kv_b_proj, "kv_b_proj", kv_b_shape)
         t["w_uv"] = q.view(HEADS, -1, KV_LORA)[:, NOPE_DIM:].reshape(
             HEADS * V_DIM, KV_LORA
         )
-        t["s_uv"] = s.view(HEADS, -1)[:, NOPE_DIM:].reshape(HEADS * V_DIM)
+        t["s_uv"] = (
+            uv_block_scales(s)
+            if is_fp8_block(a.kv_b_proj)
+            else s.view(HEADS, -1)[:, NOPE_DIM:].reshape(HEADS * V_DIM)
+        )
         uk_t = getattr(a, "W_UK_T", None)
         _need(
             isinstance(uk_t, torch.Tensor)
@@ -329,14 +425,14 @@ def weights_from_model(layer) -> tuple[dict[str, torch.Tensor], dict]:
 def index_weights_from_model(attn) -> dict[str, torch.Tensor] | None:
     """The fused indexer's projections, or None when the checkpoint's `wq_b` is not
     FP8 (the fused indexer then stays off): index Q = the FP8 `wq_b` [4096, 2048] +
-    per-row scales (as fp8_linear_rows), index K / head weights = row views of vLLM's
-    BF16 `wk_weights_proj` [128 | 32, 6144] (vLLM dequantizes an FP8 `wk` itself
+    per-row or block scales (as fp8_linear), index K / head weights = row views of
+    vLLM's BF16 `wk_weights_proj` [128 | 32, 6144] (vLLM dequantizes an FP8 `wk` itself
     at load, deepseek_v2._try_load_fp8_indexer_wk), k_norm F32 [128] weight / bias."""
     ind = attn.indexer
     if not is_fp8(ind.wq_b.weight):
         return None
     t: dict[str, torch.Tensor] = {}
-    t["w_index_q"], t["s_index_q"] = fp8_linear_rows(
+    t["w_index_q"], t["s_index_q"] = fp8_linear(
         ind.wq_b, "indexer.wq_b", (INDEX_HEADS * INDEX_DIM, Q_LORA)
     )
     kw = _bf16(
