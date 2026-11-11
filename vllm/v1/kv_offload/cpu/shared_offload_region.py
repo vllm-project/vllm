@@ -19,6 +19,13 @@ from vllm.distributed.device_communicators.shm_broadcast import (
 from vllm.logger import init_logger
 from vllm.utils.math_utils import cdiv, round_up
 from vllm.v1.kv_offload.cpu.host_register import host_unregister
+from vllm.v1.kv_offload.cpu.memory import (
+    DEFAULT_SHM_PATH,
+    CPUOffloadMemoryBackend,
+    CPUOffloadMemoryConfig,
+    _wait_for_file_size,
+    create_shared_memory_allocation,
+)
 
 logger = init_logger(__name__)
 
@@ -31,23 +38,6 @@ _MIN_SEGMENT_BYTES = 1 << 30
 # Split the shared region into this many shm files so workers pre-fault them
 # in parallel (page-cache inserts are serialized per file).
 REGION_SEGMENTS = 32
-
-
-def _wait_for_file_size(fd: int, expected_size: int, timeout: float = 30.0) -> None:
-    """Spin-wait until the file reaches expected_size (creator truncated it)."""
-    deadline = time.monotonic() + timeout
-    while True:
-        if os.fstat(fd).st_size >= expected_size:
-            return
-        if os.fstat(fd).st_nlink == 0:
-            raise RuntimeError(
-                "Shared offload region creator failed during initialization."
-            )
-        if time.monotonic() > deadline:
-            raise TimeoutError(
-                f"Timed out waiting for mmap file to reach {expected_size} bytes"
-            )
-        time.sleep(0.005)
 
 
 @functools.cache
@@ -94,15 +84,20 @@ class SharedOffloadRegion:
     the rest open the existing file and wait until it reaches the expected
     size.  Each worker then mmap()s the full file.
 
-    File path: /dev/shm/vllm_offload_{engine_id}.mmap.  When a barrier is
-    given, the path is unlinked once every worker has mapped the file, so
-    the kernel reclaims the memory when the last worker exits, no matter
-    how it exits; mappings taken before the unlink stay valid.
+    File path: /dev/shm/vllm_offload_{engine_id}.mmap, or a directory chosen
+    via `memory_config` (e.g. a hugetlbfs mount for hugepage backing).
+    When a barrier is given, the path is unlinked once every worker has
+    mapped the file, so the kernel reclaims the memory when the last worker
+    exits, no matter how it exits; mappings taken before the unlink stay
+    valid.
 
     `populate_shard=(index, count)` pre-faults only this worker's contiguous
     share, for layouts where every worker maps the same bytes. The barrier
     also waits for all shards to finish pre-faulting before returning.
     `num_segments` splits backing files beneath the contiguous mapping.
+
+    With a `hugetlbfs` memory config the mapping is rounded up to whole
+    hugepages; bytes past the logical region are never addressed.
     """
 
     BLOCK_SIZE_ALIGNMENT: int = mmap.PAGESIZE
@@ -119,16 +114,38 @@ class SharedOffloadRegion:
         creator_memory_check: Callable[[int], None] | None = None,
         populate_shard: tuple[int, int] | None = None,
         num_segments: int = 1,
+        memory_config: CPUOffloadMemoryConfig | None = None,
     ) -> None:
         self.page_size = mmap.PAGESIZE
         assert kv_bytes_per_chunk % self.page_size == 0
 
+        self.memory_config = memory_config or CPUOffloadMemoryConfig()
         self.num_chunks = num_chunks
         self._row_stride = kv_bytes_per_chunk
         self.total_size_bytes = self.num_chunks * self._row_stride
         self.cpu_page_size = cpu_page_size
+        self.mapped_size_bytes = self.memory_config.mapped_size(self.total_size_bytes)
 
-        self.mmap_path = f"/dev/shm/vllm_offload_{engine_id}.mmap"
+        self.mmap_path = self.memory_config.mmap_path(engine_id)
+        self._creator = False  # set True only if this worker creates the file
+        self.rank = rank
+        self.fd: int | None = None
+        self.mmap_obj: mmap.mmap | None = None
+        self._base: torch.Tensor | None = None
+        self._views: list[torch.Tensor] = []
+        self.is_pinned: bool = False
+        if rank is not None:
+            # byte offset to this worker's first slot within each chunk row
+            self._worker_offset = rank * cpu_page_size
+            # exclusive upper bound for this worker's area within each row
+            self._worker_area_end = (rank + 1) * cpu_page_size
+        use_hugetlbfs = (
+            self.memory_config.effective_backend == CPUOffloadMemoryBackend.HUGETLBFS
+        )
+        if use_hugetlbfs:
+            # Segment splitting is a /dev/shm pre-fault optimization; hugepages
+            # are backed by one file rounded up to the hugepage size.
+            num_segments = 1
         num_segments = min(num_segments, self.total_size_bytes // _MIN_SEGMENT_BYTES)
         alignment = 2 << 20 if num_chunks == 1 else self._row_stride
         segment_bytes = round_up(
@@ -143,71 +160,84 @@ class SharedOffloadRegion:
             )
             for i, offset in enumerate(range(0, self.total_size_bytes, segment_bytes))
         ]
-        self._creator = False  # set True only if this worker creates the file
-        self.rank = rank
-        if rank is not None:
-            # byte offset to this worker's first slot within each chunk row
-            self._worker_offset = rank * cpu_page_size
-            # exclusive upper bound for this worker's area within each row
-            self._worker_area_end = (rank + 1) * cpu_page_size
         barriers_remaining = 2 if populate_shard is not None else 1
         try:
-            try:
-                self.fd: int | None = os.open(
-                    self.mmap_path, os.O_CREAT | os.O_EXCL | os.O_RDWR, 0o600
+            if use_hugetlbfs:
+                allocation = create_shared_memory_allocation(
+                    instance_id=engine_id,
+                    logical_size_bytes=self.total_size_bytes,
+                    memory_config=self.memory_config,
                 )
-            except FileExistsError:
-                # Joiner path — another worker won O_EXCL. Reopen and wait
-                # for the file to reach expected size.
-                self.fd = os.open(self.mmap_path, os.O_RDWR)
-                _wait_for_file_size(self.fd, self._segments[0][2])
-                logger.info("Opened existing mmap file %s", self.mmap_path)
-            else:
-                # Creator path. We won O_EXCL, so we own the file: any
-                # failure here must clean up so concurrent joiners don't
-                # land on a 0-byte stub and spin in _wait_for_file_size
-                # for the full 30 s timeout.
-                self._creator = True
-                if creator_memory_check is not None:
+                self.mmap_path = allocation.path
+                self.fd = allocation.fd
+                self._creator = allocation.creator
+                if allocation.creator and creator_memory_check is not None:
                     creator_memory_check(self.total_size_bytes)
-                check_shm_free_space(
-                    self.total_size_bytes,
-                    allocation_name="CPU KV offload shared region in /dev/shm",
-                )
-                for path, _, length in self._segments[1:]:
-                    fd = os.open(path, os.O_CREAT | os.O_EXCL | os.O_RDWR, 0o600)
-                    os.ftruncate(fd, length)
-                    os.close(fd)
-                # Joiners wait for the first file, so size it last.
-                os.ftruncate(self.fd, self._segments[0][2])
-                logger.info(
-                    "Created mmap file %s (%.2f GB)",
-                    self.mmap_path,
-                    self.total_size_bytes / 1e9,
-                )
-
-            single = len(self._segments) == 1
-            self.mmap_obj: mmap.mmap | None = None
-            if single:
                 self.mmap_obj = mmap.mmap(
                     self.fd,
-                    self.total_size_bytes,
+                    self.mapped_size_bytes,
                     flags=mmap.MAP_SHARED,
                     prot=mmap.PROT_READ | mmap.PROT_WRITE,
                 )
             else:
-                reservation = os.memfd_create("vllm_offload_reservation")
                 try:
-                    os.ftruncate(reservation, self.total_size_bytes)
-                    self.mmap_obj = mmap.mmap(
-                        reservation,
+                    self.fd = os.open(
+                        self.mmap_path, os.O_CREAT | os.O_EXCL | os.O_RDWR, 0o600
+                    )
+                except FileExistsError:
+                    # Joiner path — another worker won O_EXCL. Reopen and wait
+                    # for the file to reach expected size.
+                    self.fd = os.open(self.mmap_path, os.O_RDWR)
+                    _wait_for_file_size(self.fd, self._segments[0][2])
+                    logger.info("Opened existing mmap file %s", self.mmap_path)
+                else:
+                    # Creator path. We won O_EXCL, so we own the file: any
+                    # failure here must clean up so concurrent joiners don't
+                    # land on a 0-byte stub and spin in _wait_for_file_size
+                    # for the full 30 s timeout.
+                    self._creator = True
+                    if creator_memory_check is not None:
+                        creator_memory_check(self.total_size_bytes)
+                    shm_path = self.memory_config.path or DEFAULT_SHM_PATH
+                    check_shm_free_space(
                         self.total_size_bytes,
+                        shm_path,
+                        allocation_name=f"CPU KV offload shared region in {shm_path}",
+                    )
+                    for path, _, length in self._segments[1:]:
+                        fd = os.open(path, os.O_CREAT | os.O_EXCL | os.O_RDWR, 0o600)
+                        os.ftruncate(fd, length)
+                        os.close(fd)
+                    # Joiners wait for the first file, so size it last.
+                    os.ftruncate(self.fd, self._segments[0][2])
+                    logger.info(
+                        "Created mmap file %s (%.2f GB)",
+                        self.mmap_path,
+                        self.total_size_bytes / 1e9,
+                    )
+
+                single = len(self._segments) == 1
+                self.mmap_obj = None
+                if single:
+                    self.mmap_obj = mmap.mmap(
+                        self.fd,
+                        self.mapped_size_bytes,
                         flags=mmap.MAP_SHARED,
                         prot=mmap.PROT_READ | mmap.PROT_WRITE,
                     )
-                finally:
-                    os.close(reservation)
-                self._map_segments()
+                else:
+                    reservation = os.memfd_create("vllm_offload_reservation")
+                    try:
+                        os.ftruncate(reservation, self.total_size_bytes)
+                        self.mmap_obj = mmap.mmap(
+                            reservation,
+                            self.total_size_bytes,
+                            flags=mmap.MAP_SHARED,
+                            prot=mmap.PROT_READ | mmap.PROT_WRITE,
+                        )
+                    finally:
+                        os.close(reservation)
+                    self._map_segments()
             if barrier is not None:
                 barriers_remaining -= 1
                 barrier()
@@ -251,16 +281,17 @@ class SharedOffloadRegion:
                         )
             raise
 
-        self._base = torch.frombuffer(memoryview(self.mmap_obj), dtype=torch.int8)
-        self._views: list[torch.Tensor] = []
+        self._base = torch.frombuffer(
+            memoryview(self.mmap_obj), dtype=torch.int8, count=self.total_size_bytes
+        )
+        self._views = []
         self._canonical_offset = 0
-        self.is_pinned: bool = False
+        self.is_pinned = False
         self.pinned_addresses: list[int] = []
 
         if populate_shard is not None:
             return
         populate_write_fn = _get_populate_write_fn(self.mmap_obj)
-
         if rank is not None:
             # Populate only this worker's pages (one slot per chunk row).
             _t0 = time.perf_counter()
@@ -350,6 +381,7 @@ class SharedOffloadRegion:
 
         """
         assert self.rank is not None
+        assert self._base is not None
         new_offset = self._worker_offset + tensor_page_size
         assert new_offset <= self._worker_area_end, (
             f"Worker offset {new_offset} exceeds worker area end "
@@ -417,6 +449,7 @@ class SharedOffloadRegion:
         Shape: (num_chunks, row_stride_bytes). Secondary tiers address
         chunk *b* as `view[b]`.
         """
+        assert self._base is not None
         kv_tensor = self._base.view(self.num_chunks, self._row_stride)
         np_arr = kv_tensor.numpy()
         assert np_arr.ctypes.data == self._base.data_ptr(), (
