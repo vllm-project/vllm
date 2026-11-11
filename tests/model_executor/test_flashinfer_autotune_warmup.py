@@ -5,6 +5,9 @@ import json
 import sys
 from collections import defaultdict
 from contextlib import contextmanager, nullcontext
+from copy import deepcopy
+from dataclasses import dataclass
+from enum import Enum
 from inspect import signature
 from pathlib import Path
 from types import ModuleType, SimpleNamespace
@@ -90,6 +93,353 @@ def test_flashinfer_autotune_token_counts_are_bounded_and_deduplicated():
         token_counts = _flashinfer_autotune_token_counts(runner)
 
     assert token_counts == (32,)
+
+
+@pytest.fixture
+def megamoe_profiles(monkeypatch):
+    """Record the external FlashInfer service around a real vLLM profile owner."""
+    from vllm.model_executor.layers.fused_moe.flashinfer_moe_ep_profiles import (
+        FlashInferMoeEpProfiles,
+    )
+
+    @dataclass(frozen=True)
+    class ProfileInputs:
+        hidden_states: torch.Tensor
+        topk_ids: torch.Tensor
+        topk_weights: torch.Tensor
+        scales: torch.Tensor | None = None
+        output: torch.Tensor | None = None
+
+        @property
+        def num_tokens(self) -> int:
+            return self.hidden_states.shape[0]
+
+    @dataclass(frozen=True)
+    class Bootstrap:
+        world_size: int = 2
+        rank: int = 0
+        process_group: object = object()
+
+    @dataclass(frozen=True)
+    class Fleet:
+        num_experts: int = 8
+        token_hidden_size: int = 4
+        max_tokens_per_rank: int = 128
+        tuning_live_tokens: int | None = None
+
+    class FinalizeMode(Enum):
+        SINGLE_CTA = "single_cta"
+
+    @dataclass(frozen=True)
+    class Kernel:
+        intermediate_size: int = 8
+        finalize_mode: FinalizeMode = FinalizeMode.SINGLE_CTA
+        knobs: str | None = None
+
+    @dataclass(frozen=True)
+    class Backend:
+        megakernel: Kernel = Kernel()
+        quantize_input: bool = True
+        preprocess_weights: bool = False
+        transformed_weights: object = object()
+
+    class RecordingLayer:
+        instances: list["RecordingLayer"] = []
+        tuned: list[tuple[int, int]] = []
+        fail_profile: tuple[int, int] | None = None
+
+        def __init__(self, bootstrap, fleet, weights, backend):
+            assert weights is None
+            assert not backend.preprocess_weights
+            self.bootstrap, self.fleet, self.backend = bootstrap, fleet, backend
+            self.warmed_workspaces = []
+            self.selected_workspaces = []
+            self.workspace_knobs = {}
+            self.destroyed = False
+            self.instances.append(self)
+
+        def create_workspace(self, capacity, *, live_tokens, knobs):
+            workspace = (capacity, live_tokens)
+            # The native backend consumes tuple-valued shape knobs, including
+            # when the selected configuration came from a JSON cache.
+            assert isinstance(knobs["tile_shape"], tuple)
+            assert isinstance(knobs["cluster_shape"], tuple)
+            self.workspace_knobs[workspace] = knobs
+            return workspace
+
+        def warmup(self, inputs, *, workspace=None):
+            if self.backend.megakernel.knobs == "auto":
+                profile = (
+                    self.fleet.max_tokens_per_rank,
+                    self.fleet.tuning_live_tokens,
+                )
+                assert inputs.num_tokens == profile[1]
+                assert self.backend.transformed_weights is Backend.transformed_weights
+                self.tuned.append(profile)
+                if profile == self.fail_profile:
+                    raise RuntimeError("external tuner failed")
+            else:
+                assert inputs.num_tokens == workspace[1]
+                self.warmed_workspaces.append(workspace)
+
+        def get_tuned_knobs(self):
+            return {
+                "tile_shape": (64, 128),
+                "cluster_shape": (1, 2, 1),
+                "num_stages": self.fleet.tuning_live_tokens % 3 + 1,
+            }
+
+        def forward(self, inputs, *, workspace, return_workspace_view):
+            assert not return_workspace_view
+            assert workspace in self.warmed_workspaces
+            self.selected_workspaces.append(workspace)
+            return inputs.hidden_states
+
+        def destroy(self):
+            self.destroyed = True
+
+    def inputs(num_tokens):
+        return ProfileInputs(
+            hidden_states=torch.zeros(num_tokens, 4),
+            topk_ids=torch.zeros(num_tokens, 2, dtype=torch.int32),
+            topk_weights=torch.full((num_tokens, 2), 0.5),
+        )
+
+    def agree(values, value, *, group):
+        values[:] = [value] * 2
+
+    monkeypatch.setattr(torch.distributed, "all_gather_object", agree)
+    monkeypatch.setattr(
+        torch.distributed, "broadcast_object_list", lambda *args, **kwargs: None
+    )
+    owners = []
+
+    def make(*, rank=0, sp_size=1, intermediate_size=8):
+        bootstrap = Bootstrap(rank=rank)
+        fleet = Fleet()
+        backend = Backend(megakernel=Kernel(intermediate_size=intermediate_size))
+        layer = RecordingLayer(bootstrap, fleet, None, backend)
+        profiles = FlashInferMoeEpProfiles(
+            layer, bootstrap, fleet, backend=backend, sp_size=sp_size
+        )
+        owners.append(profiles)
+        return profiles, layer
+
+    yield make, inputs, RecordingLayer
+    for owner in owners:
+        owner.destroy()
+
+
+def test_flashinfer_moe_ep_profiles_select_smallest_fitting_workspace(megamoe_profiles):
+    from vllm.forward_context import (
+        DPMetadata,
+        ForwardContext,
+        override_forward_context,
+    )
+    from vllm.model_executor.layers.fused_moe.flashinfer_moe_ep_profiles import (
+        flashinfer_moe_ep_profile_token_context,
+    )
+
+    make, inputs, _ = megamoe_profiles
+    profiles, layer = make()
+    with flashinfer_moe_ep_profile_token_context(decode_tokens=4, prefill_tokens=128):
+        profiles.forward(inputs(1), return_workspace_view=False)
+
+    for num_tokens in (2, 4, 5):
+        profiles.forward(inputs(num_tokens), return_workspace_view=False)
+    context = ForwardContext(
+        no_compile_layers={},
+        attn_metadata={},
+        slot_mapping={},
+        dp_metadata=DPMetadata(torch.tensor([1, 4])),
+    )
+    with override_forward_context(context):
+        profiles.forward(inputs(1), return_workspace_view=False)
+
+    assert layer.warmed_workspaces == [(4, 1), (4, 2), (4, 4), (128, 128)]
+    assert layer.selected_workspaces == [(4, 1), (4, 2), (4, 4), (128, 128), (4, 4)]
+
+
+def test_megamoe_startup_tunes_once_per_geometry_and_reuses_disk_cache(
+    megamoe_profiles, tmp_path
+):
+    from vllm.model_executor.layers.fused_moe.flashinfer_moe_ep_profiles import (
+        flashinfer_moe_ep_profile_token_context,
+    )
+
+    make, inputs, service = megamoe_profiles
+    cache = tmp_path / "megamoe.json"
+    context_kwargs = dict(
+        decode_tokens=4,
+        prefill_tokens=16,
+        cache_file=cache,
+        cache_identity={"flashinfer": "test-version"},
+    )
+    first, first_layer = make()
+    second, second_layer = make()
+    different, _ = make(intermediate_size=16)
+    with flashinfer_moe_ep_profile_token_context(**context_kwargs):
+        for profiles in (first, second, different):
+            profiles.forward(inputs(1), return_workspace_view=False)
+    expected = [(4, 1), (4, 2), (4, 4), (16, 16)]
+    assert service.tuned == expected * 2
+    assert first_layer.workspace_knobs == second_layer.workspace_knobs
+    assert cache.exists()
+    temporary = [layer for layer in service.instances if layer.backend.megakernel.knobs]
+    assert len(temporary) == 8 and all(layer.destroyed for layer in temporary)
+
+    hot, hot_layer = make()
+    with flashinfer_moe_ep_profile_token_context(**context_kwargs):
+        result = hot.forward(inputs(3), return_workspace_view=False)
+    assert torch.equal(result, inputs(3).hidden_states)
+    assert service.tuned == expected * 2
+    assert hot_layer.workspace_knobs == first_layer.workspace_knobs
+    assert hot_layer.selected_workspaces == [(4, 4)]
+
+
+@pytest.mark.parametrize("leader_cache_hit", [False, True])
+def test_megamoe_ranks_follow_leader_cache_decision(
+    megamoe_profiles, monkeypatch, tmp_path, leader_cache_hit
+):
+    """Asymmetric files must not let one rank tune while its peers skip."""
+    from vllm.model_executor.layers.fused_moe.flashinfer_moe_ep_profiles import (
+        flashinfer_moe_ep_profile_token_context,
+    )
+
+    make, inputs, service = megamoe_profiles
+    leader_cache = tmp_path / "leader.json"
+    peer_cache = tmp_path / "peer.json"
+    options = dict(decode_tokens=2, prefill_tokens=4, cache_identity={"version": 1})
+    primer, _ = make()
+    with flashinfer_moe_ep_profile_token_context(cache_file=leader_cache, **options):
+        primer.forward(inputs(1), return_workspace_view=False)
+    if not leader_cache_hit:
+        leader_cache.rename(peer_cache)
+    service.tuned.clear()
+
+    rank = 0
+    broadcasts = []
+    received = 0
+
+    def broadcast(values, *, group, group_src):
+        nonlocal received
+        assert group_src == 0
+        if rank == 0:
+            broadcasts.append(deepcopy(values[0]))
+        else:
+            values[0] = deepcopy(broadcasts[received])
+            received += 1
+
+    monkeypatch.setattr(torch.distributed, "is_initialized", lambda: True)
+    monkeypatch.setattr(torch.distributed, "get_world_size", lambda: 2)
+    monkeypatch.setattr(torch.distributed, "get_rank", lambda: rank)
+    monkeypatch.setattr(torch.distributed, "broadcast_object_list", broadcast)
+    previous_peer_cache = peer_cache.read_bytes() if peer_cache.exists() else None
+    layers = []
+    for rank, cache in enumerate((leader_cache, peer_cache)):
+        profiles, layer = make(rank=rank)
+        layers.append(layer)
+        with flashinfer_moe_ep_profile_token_context(cache_file=cache, **options):
+            profiles.forward(inputs(1), return_workspace_view=False)
+
+    assert received == len(broadcasts)
+    assert layers[0].workspace_knobs == layers[1].workspace_knobs
+    assert service.tuned == ([] if leader_cache_hit else [(2, 1), (2, 2), (4, 4)] * 2)
+    assert (
+        peer_cache.read_bytes() if peer_cache.exists() else None
+    ) == previous_peer_cache
+
+
+@pytest.mark.parametrize("cache_state", ["corrupt", "environment_changed"])
+def test_megamoe_invalid_cache_retunes(megamoe_profiles, tmp_path, cache_state):
+    from vllm.model_executor.layers.fused_moe.flashinfer_moe_ep_profiles import (
+        flashinfer_moe_ep_profile_token_context,
+    )
+
+    make, inputs, service = megamoe_profiles
+    cache = tmp_path / "megamoe.json"
+    options = dict(decode_tokens=2, prefill_tokens=4, cache_file=cache)
+    first, _ = make()
+    with flashinfer_moe_ep_profile_token_context(
+        cache_identity={"version": 1}, **options
+    ):
+        first.forward(inputs(1), return_workspace_view=False)
+    if cache_state == "corrupt":
+        cache.write_text("{truncated")
+    identity = {"version": 2 if cache_state == "environment_changed" else 1}
+    second, second_layer = make()
+    with flashinfer_moe_ep_profile_token_context(cache_identity=identity, **options):
+        second.forward(inputs(1), return_workspace_view=False)
+    assert service.tuned == [(2, 1), (2, 2), (4, 4)] * 2
+    assert second_layer.selected_workspaces == [(2, 1)]
+    assert json.loads(cache.read_text())["identity"]["environment"] == identity
+
+
+def test_megamoe_same_capacity_keeps_distinct_live_token_knobs(megamoe_profiles):
+    from vllm.model_executor.layers.fused_moe.flashinfer_moe_ep_profiles import (
+        flashinfer_moe_ep_profile_token_context,
+    )
+
+    make, inputs, service = megamoe_profiles
+    profiles, layer = make()
+    with flashinfer_moe_ep_profile_token_context(decode_tokens=5, prefill_tokens=5):
+        profiles.forward(inputs(1), return_workspace_view=False)
+    for tokens in (2, 3, 5):
+        profiles.forward(inputs(tokens), return_workspace_view=False)
+    assert service.tuned == [(5, 1), (5, 2), (5, 4), (5, 5)]
+    assert layer.selected_workspaces == [(5, 1), (5, 2), (5, 4), (5, 5)]
+    assert layer.workspace_knobs[(5, 1)] != layer.workspace_knobs[(5, 2)]
+
+
+def test_megamoe_startup_destroys_temporary_tuner_on_failure(
+    megamoe_profiles, tmp_path
+):
+    from vllm.model_executor.layers.fused_moe.flashinfer_moe_ep_profiles import (
+        flashinfer_moe_ep_profile_token_context,
+    )
+
+    make, inputs, service = megamoe_profiles
+    profiles, layer = make()
+    service.fail_profile = (4, 2)
+    cache = tmp_path / "failed.json"
+    with (
+        pytest.raises(RuntimeError, match="external tuner failed"),
+        flashinfer_moe_ep_profile_token_context(
+            decode_tokens=4, prefill_tokens=16, cache_file=cache
+        ),
+    ):
+        profiles.forward(inputs(1), return_workspace_view=False)
+    temporary = [layer for layer in service.instances if layer.backend.megakernel.knobs]
+    assert len(temporary) == 2 and all(layer.destroyed for layer in temporary)
+    assert (4, 2) not in layer.warmed_workspaces
+    assert not cache.exists()
+
+
+@pytest.mark.parametrize("with_local_sizes", [False, True])
+def test_megamoe_idle_rank_uses_maximum_after_sequence_parallel_split(
+    megamoe_profiles, with_local_sizes
+):
+    from vllm.forward_context import (
+        DPMetadata,
+        ForwardContext,
+        override_forward_context,
+    )
+    from vllm.model_executor.layers.fused_moe.flashinfer_moe_ep_profiles import (
+        flashinfer_moe_ep_profile_token_context,
+    )
+
+    make, inputs, _ = megamoe_profiles
+    profiles, layer = make(sp_size=2)
+    with flashinfer_moe_ep_profile_token_context(decode_tokens=8, prefill_tokens=128):
+        profiles.forward(inputs(0), return_workspace_view=False)
+    metadata = DPMetadata(torch.tensor([0, 5]))
+    context = ForwardContext(
+        no_compile_layers={}, attn_metadata={}, slot_mapping={}, dp_metadata=metadata
+    )
+    local_sizes = metadata.sp_local_sizes(2) if with_local_sizes else nullcontext()
+    with override_forward_context(context), local_sizes:
+        profiles.forward(inputs(0), return_workspace_view=False)
+    assert layer.selected_workspaces[-1] == (4, 4)
 
 
 @pytest.mark.parametrize("skip_attn", [False, True])
