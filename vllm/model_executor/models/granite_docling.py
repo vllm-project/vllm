@@ -11,8 +11,12 @@ GraniteDocling converts document page images to DocLang markup. It combines
 * a dense Granite decoder that adds the projected DeepStack features to the
   hidden states of its first layers.
 
-Parameter names follow the Hugging Face implementation
-(``transformers.models.granite_docling``).
+The decoder, its tied ``lm_head`` and the logits scaling live under
+``language_model``; ``hf_to_vllm_mapper`` maps the Hugging Face parameter
+names (``transformers.models.granite_docling``) onto this layout.
+
+Supports EAGLE-3 speculative decoding; the auxiliary hidden states match the
+Hugging Face model's ``hidden_states``.
 """
 
 from collections.abc import Iterable, Mapping, Sequence
@@ -50,15 +54,17 @@ from vllm.multimodal.processing import (
 from vllm.sequence import IntermediateTensors
 from vllm.utils.tensor_schema import TensorSchema, TensorShape
 
-from .granite import GraniteModel
+from .granite import GraniteForCausalLM, GraniteModel
 from .idefics2_vision_model import Idefics2VisionTransformer
 from .interfaces import (
     MultiModalEmbeddings,
+    SupportsEagle3,
     SupportsMultiModal,
     _require_is_multimodal,
 )
 from .utils import (
     AutoWeightsLoader,
+    PPMissingLayer,
     WeightsMapper,
     _merge_multimodal_embeddings,
     maybe_prefix,
@@ -571,7 +577,11 @@ class GraniteDoclingConnector(nn.Module):
 )
 class GraniteDoclingTextModel(GraniteModel):
     """`GraniteModel` that adds DeepStack feature `i` to the hidden states of the
-    image tokens after decoder layer `i`."""
+    image tokens after decoder layer `i`.
+
+    With EAGLE-3 auxiliary layers set, also returns the hidden states entering
+    those layers (after the DeepStack add), matching the Hugging Face model's
+    `hidden_states`."""
 
     def forward(
         self,
@@ -580,45 +590,61 @@ class GraniteDoclingTextModel(GraniteModel):
         intermediate_tensors: IntermediateTensors | None = None,
         inputs_embeds: torch.Tensor | None = None,
         deepstack_input_embeds: IntermediateTensors | None = None,
-    ) -> torch.Tensor | IntermediateTensors:
+    ) -> torch.Tensor | IntermediateTensors | tuple[torch.Tensor, list[torch.Tensor]]:
         if inputs_embeds is None:
             inputs_embeds = self.embed_input_ids(input_ids)
         hidden_states = inputs_embeds * self.config.embedding_multiplier
 
+        aux_hidden_states = self._maybe_add_hidden_state([], 0, hidden_states, None)
         for layer_idx, layer in enumerate(self.layers):
             hidden_states = layer(positions, hidden_states)
             if deepstack_input_embeds is not None:
                 key = f"deepstack_input_embeds_{layer_idx}"
                 if key in deepstack_input_embeds.tensors:
                     hidden_states = hidden_states + deepstack_input_embeds[key]
-        return self.norm(hidden_states)
+            self._maybe_add_hidden_state(
+                aux_hidden_states, layer_idx + 1, hidden_states, None
+            )
+        hidden_states = self.norm(hidden_states)
+
+        if len(aux_hidden_states) > 0:
+            return hidden_states, aux_hidden_states
+        return hidden_states
 
 
-class GraniteDoclingModel(nn.Module):
-    """Vision encoder, connector and text model, named like the HF checkpoint
-    (`model.vision_model.connector.*` is loaded into `model.connector.*`)."""
+class GraniteDoclingForCausalLM(GraniteForCausalLM):
+    """`GraniteForCausalLM` over `GraniteDoclingTextModel`: the decoder, the
+    tied `lm_head` and the logits scaled by `1 / logits_scaling`."""
 
     def __init__(self, *, vllm_config: VllmConfig, prefix: str = "") -> None:
-        super().__init__()
+        # Skip `GraniteForCausalLM.__init__`, which would build a `GraniteModel`
+        super(GraniteForCausalLM, self).__init__()
         config = vllm_config.model_config.hf_config
         quant_config = vllm_config.quant_config
 
-        self.vision_model = GraniteDoclingVisionTransformer(
-            config.vision_config,
-            quant_config,
-            prefix=maybe_prefix(prefix, "vision_model"),
+        self.config = config
+        self.quant_config = quant_config
+        self.model = GraniteDoclingTextModel(
+            vllm_config=vllm_config, prefix=maybe_prefix(prefix, "model")
         )
-        self.connector = GraniteDoclingConnector(
-            config.vision_config,
-            quant_config,
-            prefix=maybe_prefix(prefix, "connector"),
-        )
-        self.text_model = GraniteDoclingTextModel(
-            vllm_config=vllm_config.with_hf_config(
-                config.text_config, architectures=["GraniteForCausalLM"]
-            ),
-            prefix=maybe_prefix(prefix, "text_model"),
-        )
+        if get_pp_group().is_last_rank:
+            self.lm_head = ParallelLMHead(
+                config.vocab_size,
+                config.hidden_size,
+                quant_config=quant_config,
+                prefix=maybe_prefix(prefix, "lm_head"),
+            )
+            if config.tie_word_embeddings:
+                self.lm_head = self.lm_head.tie_weights(self.model.embed_tokens)
+
+            logit_scale = getattr(config, "logit_scale", 1.0)
+            if hasattr(config, "logits_scaling"):
+                logit_scale /= config.logits_scaling
+            self.logits_processor = LogitsProcessor(
+                config.vocab_size, scale=logit_scale
+            )
+        else:
+            self.lm_head = PPMissingLayer()
 
 
 # -----------------------------------------------------------------------------
@@ -631,10 +657,17 @@ class GraniteDoclingModel(nn.Module):
     info=GraniteDoclingProcessingInfo,
     dummy_inputs=GraniteDoclingDummyInputsBuilder,
 )
-class GraniteDoclingForConditionalGeneration(nn.Module, SupportsMultiModal):
+class GraniteDoclingForConditionalGeneration(
+    nn.Module, SupportsMultiModal, SupportsEagle3
+):
     hf_to_vllm_mapper = WeightsMapper(
-        # In HF the connector is a child of the vision model
-        orig_to_new_prefix={"model.vision_model.connector.": "model.connector."}
+        orig_to_new_prefix={
+            # In HF the connector is a child of the vision model
+            "model.vision_model.connector.": "connector.",
+            "model.vision_model.": "vision_model.",
+            "model.text_model.": "language_model.model.",
+            "lm_head.": "language_model.lm_head.",
+        }
     )
 
     @classmethod
@@ -665,13 +698,26 @@ class GraniteDoclingForConditionalGeneration(nn.Module, SupportsMultiModal):
 
         with self._mark_composite_model(
             vllm_config,
-            language_targets=(GraniteDoclingTextModel,),
+            language_targets=(GraniteDoclingForCausalLM,),
             tower_targets={
                 "image": (GraniteDoclingVisionTransformer, GraniteDoclingConnector)
             },
         ):
-            self.model = GraniteDoclingModel(
-                vllm_config=vllm_config, prefix=maybe_prefix(prefix, "model")
+            self.vision_model = GraniteDoclingVisionTransformer(
+                vision_config,
+                quant_config,
+                prefix=maybe_prefix(prefix, "vision_model"),
+            )
+            self.connector = GraniteDoclingConnector(
+                vision_config,
+                quant_config,
+                prefix=maybe_prefix(prefix, "connector"),
+            )
+            self.language_model = GraniteDoclingForCausalLM(
+                vllm_config=vllm_config.with_hf_config(
+                    config.text_config, architectures=["GraniteForCausalLM"]
+                ),
+                prefix=maybe_prefix(prefix, "language_model"),
             )
             # DeepStack scratch buffers, one per level, allocated up front so the
             # language model signature is stable from the first warmup run on.
@@ -684,19 +730,6 @@ class GraniteDoclingForConditionalGeneration(nn.Module, SupportsMultiModal):
             ]
             # Number of tokens currently staged in the buffers (0: all zero)
             self.deepstack_input_embeds_num_tokens = 0
-
-        text_config = config.text_config
-        self.lm_head = ParallelLMHead(
-            text_config.vocab_size,
-            text_config.hidden_size,
-            quant_config=quant_config,
-            prefix=maybe_prefix(prefix, "lm_head"),
-        )
-        if text_config.tie_word_embeddings:
-            self.lm_head = self.lm_head.tie_weights(self.model.text_model.embed_tokens)
-        self.logits_processor = LogitsProcessor(
-            text_config.vocab_size, scale=1.0 / text_config.logits_scaling
-        )
 
     # ---- multimodal embeddings ----
 
@@ -720,12 +753,12 @@ class GraniteDoclingForConditionalGeneration(nn.Module, SupportsMultiModal):
     ) -> tuple[torch.Tensor, ...]:
         pixel_values = image_input["pixel_values"]
         tile_fine_mask = image_input["tile_fine_mask"]
-        vision_model = self.model.vision_model
+        vision_model = self.vision_model
         vision_dtype = vision_model.embeddings.patch_embedding.weight.dtype
         last_hidden_state, deepstack_features = vision_model(
             pixel_values.to(dtype=vision_dtype)
         )
-        image_features = self.model.connector(
+        image_features = self.connector(
             last_hidden_state, deepstack_features, tile_fine_mask
         )
         # Split per image: a tile has `image_seq_len` tokens, or four times as
@@ -824,7 +857,7 @@ class GraniteDoclingForConditionalGeneration(nn.Module, SupportsMultiModal):
     ) -> torch.Tensor:
         inputs_embeds = self._embed_text_input_ids(
             input_ids,
-            self.model.text_model.embed_input_ids,
+            self.language_model.embed_input_ids,
             is_multimodal=is_multimodal,
         )
         if multimodal_embeddings is None or len(multimodal_embeddings) == 0:
@@ -851,14 +884,14 @@ class GraniteDoclingForConditionalGeneration(nn.Module, SupportsMultiModal):
         intermediate_tensors: IntermediateTensors | None = None,
         inputs_embeds: torch.Tensor | None = None,
         **kwargs: object,
-    ) -> torch.Tensor | IntermediateTensors:
+    ) -> torch.Tensor | IntermediateTensors | tuple[torch.Tensor, list[torch.Tensor]]:
         deepstack_input_embeds = None
         if inputs_embeds is not None and get_pp_group().is_first_rank:
             deepstack_input_embeds = self._get_deepstack_input_embeds(
                 inputs_embeds.size(0)
             )
 
-        hidden_states = self.model.text_model(
+        hidden_states = self.language_model.model(
             input_ids,
             positions,
             intermediate_tensors,
@@ -871,7 +904,7 @@ class GraniteDoclingForConditionalGeneration(nn.Module, SupportsMultiModal):
         return hidden_states
 
     def compute_logits(self, hidden_states: torch.Tensor) -> torch.Tensor | None:
-        return self.logits_processor(self.lm_head, hidden_states)
+        return self.language_model.compute_logits(hidden_states)
 
     def load_weights(self, weights: Iterable[tuple[str, torch.Tensor]]) -> set[str]:
         # Tensors of modules that are not implemented here (the multi-token
