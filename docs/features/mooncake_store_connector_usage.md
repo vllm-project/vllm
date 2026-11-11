@@ -343,10 +343,12 @@ Prefix lookups (blocking, async, and arrival-time prefetch) are sent to worker
 rank 0 as soon as they are made and run concurrently there, on
 `lookup_server_threads` workers. Each waits at most `lookup_timeout_s` (see
 below), including time queued on rank 0. A timeout or lookup error returns a
-cache miss so the request computes locally, and rank 0 skips a lookup that is
-still queued once the scheduler has stopped waiting for it. After 3
-consecutive failures, lookups are skipped for 30 seconds. After the cooldown, a
-single probe lookup either closes the breaker or reopens it.
+cache miss so the request computes locally. Rank 0 drops a lookup still queued
+just before the scheduler stops waiting for it, without querying the store;
+that also returns a miss, but since it says nothing about the store it does not
+count as a failure. After 3 consecutive failures, lookups are skipped for 30
+seconds. After the cooldown, a single probe lookup either closes the breaker or
+reopens it.
 
 This bounds the scheduler's wait for prefix lookup. It does not cancel a master
 RPC already running inside the worker or apply to KV loads and saves. Store

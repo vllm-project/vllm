@@ -1,7 +1,9 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 
+import queue
 import tempfile
+import threading
 import time
 from types import SimpleNamespace
 from unittest.mock import MagicMock, patch
@@ -1235,13 +1237,19 @@ def test_lookup_key_server_reset_drains_send_queue_before_remove_all():
     can land on the master AFTER remove_all and silently repopulate it
     with KV hashed against the previous-policy weights.
     """
-    # Exercise the handler with mocks for the send thread and store. We
-    # assert (a) join() is called, (b) remove_all is called, and (c) join()
-    # comes BEFORE remove_all in the call order.
+    # Exercise the handler with a real send queue holding one in-flight put
+    # that finishes shortly, and a mock store. remove_all must come after it.
     call_order: list[str] = []
 
-    fake_send_queue = MagicMock()
-    fake_send_queue.join.side_effect = lambda: call_order.append("join")
+    fake_send_queue: queue.Queue = queue.Queue()
+    fake_send_queue.put("put")
+
+    def finish_put():
+        fake_send_queue.get()
+        call_order.append("drained")
+        fake_send_queue.task_done()
+
+    threading.Timer(0.1, finish_put).start()
 
     fake_store = MagicMock()
     fake_store.remove_all.side_effect = lambda force: call_order.append(
@@ -1258,7 +1266,7 @@ def test_lookup_key_server_reset_drains_send_queue_before_remove_all():
     assert _reset_store(fake_store_worker) is True
 
     # Drain must happen before remove_all.
-    assert call_order == ["join", "remove_all(force=True)"]
+    assert call_order == ["drained", "remove_all(force=True)"]
 
 
 def test_lookup_key_server_reset_skips_drain_when_no_send_thread():

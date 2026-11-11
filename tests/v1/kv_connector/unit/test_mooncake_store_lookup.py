@@ -65,7 +65,6 @@ def lookup_service(
         yield client, peer
     finally:
         client.close()
-        client.ctx.term()
         peer.close()
 
 
@@ -125,14 +124,45 @@ def test_lookups_are_in_flight_together_and_matched_by_id(
     assert not client.circuit_breaker.is_open
 
 
-@pytest.mark.parametrize("status", [protocol.RESP_ERR, protocol.RESP_EXPIRED])
-def test_server_error_or_expiry_returns_miss_and_counts_as_failure(
-    lookup_service: tuple[worker.LookupKeyClient, LookupPeer], status: bytes
+@pytest.mark.parametrize(
+    "status,counts_as_failure",
+    [(protocol.RESP_ERR, True), (protocol.RESP_EXPIRED, False)],
+)
+def test_server_error_or_expiry_returns_miss(
+    lookup_service: tuple[worker.LookupKeyClient, LookupPeer],
+    status: bytes,
+    counts_as_failure: bool,
 ) -> None:
     client, peer = lookup_service
     peer.responder = lambda _: (status, b"")
     assert client.lookup("req", 128, []).hit_length == 0
-    assert client.circuit_breaker.is_open
+    # Expiring while queued on rank 0 says nothing about the store.
+    assert client.circuit_breaker.is_open == counts_as_failure
+
+
+def test_unanswered_prefetch_frees_its_slot_at_the_deadline(
+    lookup_service: tuple[worker.LookupKeyClient, LookupPeer],
+) -> None:
+    client, peer = lookup_service
+    # The peer never replies, and the scheduler never asks for "a" again.
+    assert client.prefetch("a", 128, [])
+    assert not client.prefetch("b", 128, [])
+    deadline = time.monotonic() + 5
+    while not client.prefetch("b", 128, []):
+        assert time.monotonic() < deadline
+        threading.Event().wait(0.01)
+    assert len(peer.wait_for_requests(2)) == 2
+
+
+def test_lookup_after_close_is_a_quiet_miss(
+    lookup_service: tuple[worker.LookupKeyClient, LookupPeer],
+) -> None:
+    client, peer = lookup_service
+    client.close()
+    assert client.lookup("req", 128, []).hit_length == 0
+    assert client.lookup("req", 128, [], non_block=True).hit_length == 0
+    assert not client.circuit_breaker.is_open
+    assert not peer.requests
 
 
 def test_circuit_breaker_reopens_after_failed_retry(
@@ -224,6 +254,14 @@ def lookup_server(
         server.close()
 
 
+def test_server_threads_do_not_block_exit(
+    lookup_server: tuple[worker.LookupKeyServer, worker.LookupKeyClient, MagicMock],
+) -> None:
+    threads = [t for t in threading.enumerate() if t.name.startswith("MooncakeLookup")]
+    assert threads
+    assert all(t.daemon for t in threads)
+
+
 @pytest.mark.parametrize("lookup_server", [3], indirect=True)
 def test_server_runs_lookups_concurrently(
     lookup_server: tuple[worker.LookupKeyServer, worker.LookupKeyClient, MagicMock],
@@ -269,15 +307,68 @@ def test_server_skips_lookup_queued_past_its_deadline(
 
     store_worker.lookup.side_effect = lookup
     assert client.lookup("busy", 128, [], non_block=True) is None
-    # Queued on the server behind "busy" until after the client gives up.
+    # Queued on the server behind "busy"; rank 0 expires it just before the
+    # client would give up, so the client gets a miss but no failure.
+    started = time.monotonic()
     assert client.lookup("queued", 128, []).hit_length == 0
-    # The server's budget starts when the request arrives, a bit after the
-    # client's; release only once that later deadline has passed too.
-    threading.Event().wait(0.2)
+    assert time.monotonic() - started < LOOKUP_TIMEOUT_S
+    assert client.circuit_breaker._failures == 0
     release.set()
-    # The pool has one worker, so this runs after "queued" was handled.
-    server._lookup_pool.submit(lambda: None).result(timeout=5)
+    # One worker, so this runs once the worker is free again.
+    done = threading.Event()
+    server._lookup_tasks.submit(done.set)
+    assert done.wait(5)
     assert store_worker.lookup.call_count == 1
+
+
+@pytest.mark.parametrize("lookup_server", [1], indirect=True)
+def test_server_skips_lookup_that_waited_out_a_reset(
+    lookup_server: tuple[worker.LookupKeyServer, worker.LookupKeyClient, MagicMock],
+) -> None:
+    server, client, store_worker = lookup_server
+    store_worker.lookup.return_value = MooncakeLookupResult(16)
+    with server._store_lock.exclusive():
+        # A worker picks this up at once, then waits for the reset to end.
+        assert client.lookup("held", 128, []).hit_length == 0
+    # One worker, so this runs once "held" has been handled.
+    done = threading.Event()
+    server._lookup_tasks.submit(done.set)
+    assert done.wait(5)
+    store_worker.lookup.assert_not_called()
+
+
+def test_reset_gives_up_when_saves_do_not_drain(
+    lookup_server: tuple[worker.LookupKeyServer, worker.LookupKeyClient, MagicMock],
+) -> None:
+    server, client, store_worker = lookup_server
+    store_worker.kv_send_thread = MagicMock()
+    store_worker.kv_send_thread.request_queue.unfinished_tasks = 1
+    assert not server._reset_store(deadline=time.monotonic() + 0.1)
+    store_worker.store.remove_all.assert_not_called()
+    # Lookups are not left blocked behind the abandoned reset.
+    store_worker.lookup.return_value = MooncakeLookupResult(8)
+    assert client.lookup("after", 128, []).hit_length == 8
+
+
+def test_server_close_waits_for_running_lookups(
+    lookup_server: tuple[worker.LookupKeyServer, worker.LookupKeyClient, MagicMock],
+) -> None:
+    server, client, store_worker = lookup_server
+    lookup_started, release = threading.Event(), threading.Event()
+    finished = threading.Event()
+
+    def lookup(num_tokens, block_hashes):
+        lookup_started.set()
+        assert release.wait(5)
+        finished.set()
+        return MooncakeLookupResult(16)
+
+    store_worker.lookup.side_effect = lookup
+    assert client.lookup("running", 128, [], non_block=True) is None
+    assert lookup_started.wait(5)
+    threading.Timer(0.2, release.set).start()
+    server.close()
+    assert finished.is_set()
 
 
 def test_server_answers_after_a_failed_lookup(
