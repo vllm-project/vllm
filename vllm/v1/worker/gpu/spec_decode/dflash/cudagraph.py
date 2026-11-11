@@ -87,9 +87,11 @@ class DFlashCudaGraphManager(CudaGraphManager):
         causal: bool | Mapping[int, bool],
         prepare_forward: Callable[[int, dict[str, Any] | None], None],
         progress_bar_desc: str = "Capturing CUDA graphs",
+        set_query_len: Callable[[int], None] | None = None,
     ) -> None:
         """`prepare_forward(num_reqs, attn_metadata)` is captured ahead of the
-        query forward."""
+        query forward. `set_query_len(q)` is called before each forward with
+        the descriptor's tokens per request."""
 
         def create_forward_fn(
             desc: BatchExecutionDescriptor,
@@ -116,6 +118,8 @@ class DFlashCudaGraphManager(CudaGraphManager):
             attn_metadata, slot_mappings = attn_state
 
             def forward(cg_mode: CUDAGraphMode) -> None:
+                if set_query_len is not None:
+                    set_query_len(num_tokens // num_reqs)
                 prepare_forward(num_reqs, attn_metadata)
                 forward_fn(
                     num_reqs,

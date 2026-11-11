@@ -12,6 +12,7 @@ from vllm.v1.worker.gpu.spec_decode.eagle.utils import get_target_lm_head
 
 class LiLiCorrSpeculator(DFlash2Speculator):
     _speculator_name = "LiLiCorr"
+    _supports_narrow_draft_block = False
     _candidate_top_k_key = "lilicorr_candidate_topk"
 
     def __init__(self, vllm_config: VllmConfig, device: torch.device):

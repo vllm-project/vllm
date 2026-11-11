@@ -15,6 +15,7 @@ logger = init_logger(__name__)
 
 class XPressSpeculator(DFlashSpeculator):
     _speculator_name = "XPress"
+    _supports_narrow_draft_block = False
 
     def __init__(self, vllm_config: VllmConfig, device: torch.device):
         super().__init__(vllm_config, device)
