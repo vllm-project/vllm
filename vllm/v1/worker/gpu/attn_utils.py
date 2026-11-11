@@ -206,6 +206,7 @@ def init_attn_backend(
     draft_layer_names: set[str] | None = None,
     maps_slot_mapping: bool = False,
     slot_mapped_layers: Collection[str] = (),
+    layer_causal: Mapping[str, bool] | None = None,
 ) -> tuple[list[list[AttentionGroup]], AttentionCGSupportInfo, list[int]]:
     """`maps_slot_mapping`: the caller maps every slot mapping it builds to
     kernel blocks (AttentionGroup.map_to_kernel_slot_mapping); or only for the
@@ -238,9 +239,11 @@ def init_attn_backend(
         attn_layers = get_layers_from_vllm_config(vllm_config, layer_type, layer_names)
 
         group_map: dict[
-            tuple[tuple[str, str], KVCacheSpec, int, bool], AttentionGroup
+            tuple[tuple[str, str], KVCacheSpec, int, bool, bool | None], AttentionGroup
         ] = {}
-        group_order: list[tuple[tuple[str, str], KVCacheSpec, int, bool]] = []
+        group_order: list[
+            tuple[tuple[str, str], KVCacheSpec, int, bool, bool | None]
+        ] = []
 
         for layer_name in layer_names:
             attn_backend = attn_layers[layer_name].get_attn_backend()
@@ -268,14 +271,16 @@ def init_attn_backend(
             # Split on per-rank num_heads_q so layers with different Q-head
             # counts (e.g. a spec-decode draft head and its target) get separate
             # metadata builders, and on whether a speculator maps the layer's
-            # slot mappings.
+            # slot mappings and the layer's causal mode.
             num_heads_q = getattr(attn_layers[layer_name], "num_heads", 0)
             maps = maps_slot_mapping or layer_name in slot_mapped_layers
+            causal_mode = layer_causal.get(layer_name) if layer_causal else None
             key = (
                 attn_backend.full_cls_name(),
                 layer_kv_cache_spec,
                 num_heads_q,
                 maps,
+                causal_mode,
             )
             if key not in group_map:
                 group_map[key] = AttentionGroup(
@@ -520,7 +525,7 @@ def build_attn_metadata(
     mm_req_doc_ranges: dict[int, list[tuple[int, int]]] | None = None,
     model_specific_attn_metadata: ModelSpecificAttnMetadata | None = None,
     for_cudagraph_capture: bool = False,
-    causal: bool | torch.Tensor | Mapping[int, bool] = True,
+    causal: bool | torch.Tensor | Mapping[Any, bool] = True,
     rswa_prefix_lens: torch.Tensor | None = None,
     ubatch_idx: int = 0,
     fast_prefill: FastPrefillBatchMetadata | None = None,
@@ -599,6 +604,17 @@ def build_attn_metadata(
         )
 
         for attn_group in attn_groups[i]:
+            group_metadata = common_attn_metadata
+            if isinstance(causal, Mapping):
+                layer_modes = {
+                    causal.get(name, group_causal) for name in attn_group.layer_names
+                }
+                if len(layer_modes) != 1:
+                    raise ValueError(
+                        "Attention subgroup has conflicting per-layer causality: "
+                        f"{attn_group.layer_names}. Split its metadata builders."
+                    )
+                group_metadata = replace(common_attn_metadata, causal=layer_modes.pop())
             attn_metadata_builder = attn_group.get_metadata_builder(ubatch_idx)
             reuse_key = None
             if attn_metadata_builder.supports_update_block_table and isinstance(
@@ -611,7 +627,7 @@ def build_attn_metadata(
                 )
             elif for_cudagraph_capture:
                 metadata = attn_group.build_metadata_for_cudagraph_capture(
-                    common_attn_metadata, ubatch_idx
+                    group_metadata, ubatch_idx
                 )
             else:
                 attn_metadata_extra_kwargs = (
@@ -623,7 +639,7 @@ def build_attn_metadata(
                     else {}
                 )
                 metadata = attn_group.build_metadata(
-                    common_attn_metadata, ubatch_idx, **attn_metadata_extra_kwargs
+                    group_metadata, ubatch_idx, **attn_metadata_extra_kwargs
                 )
             if reuse_key is not None and reuse_key not in cached_metadata:
                 cached_metadata[reuse_key] = metadata
