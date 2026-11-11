@@ -49,7 +49,7 @@ except (ImportError, AttributeError):  # pragma: no cover - optional FlashInfer 
 import vllm.envs as envs
 from vllm import _custom_ops as ops
 from vllm.compilation.decorators import ignore_torch_compile
-from vllm.config import CacheConfig, VllmConfig
+from vllm.config import CacheConfig, CompilationMode, VllmConfig
 from vllm.distributed import (
     get_ep_group,
     get_pp_group,
@@ -421,6 +421,11 @@ def replicates_attention(vllm_config: VllmConfig) -> bool:
         ),
         # Turns the TP-synced autotune off: replicated attention would drift.
         (pc.enable_expert_parallel, "expert parallelism"),
+        # Inductor tunes the replicated DSpark draft layers per process.
+        (
+            vllm_config.compilation_config.mode != CompilationMode.NONE,
+            "torch.compile (Muse runs with breakable CUDA graphs by default)",
+        ),
         (bool(vllm_config.cache_config.kv_cache_dtype_skip_layers), "KV skip layers"),
         (vllm_config.kv_transfer_config is not None, "KV transfer connectors"),
     ):
