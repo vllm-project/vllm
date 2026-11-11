@@ -56,8 +56,7 @@ def test_mtp_local_argmax_reduction(
     vllm_runner,
 ):
     """The DeepSeek MTP drafter starts with local-argmax drafting and keeps the
-    greedy outputs of full-vocab drafting. The dummy model's drafts are never
-    accepted, so draft-token equality is left to test_mtp_local_argmax.py."""
+    greedy outputs of full-vocab drafting."""
     monkeypatch.setenv("VLLM_MLA_DISABLE", "1")
     prompts = get_test_prompts(mm_enabled=False)
     outputs = {}

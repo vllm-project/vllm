@@ -1,15 +1,6 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
-"""`get_top_tokens` on the generic MTP drafter (`deepseek_mtp.py`).
-
-The speculator opts into `use_local_argmax_reduction` by probing the draft
-model for `get_top_tokens`, and expects it to select the same greedy draft
-token as `compute_logits(...).argmax(-1)`.
-
-Tensor parallelism is emulated in one process: every rank holds its own vocab
-shard of the LM head, and the TP all-gather returns the concatenation of what
-each rank actually contributed.
-"""
+"""`get_top_tokens` on the generic MTP drafter (`deepseek_mtp.py`)."""
 
 from collections.abc import Callable
 from types import SimpleNamespace
@@ -48,13 +39,12 @@ def _make_rank_predictors(
     config.vocab_size = vocab_size
     config.rms_norm_eps = 1e-6
 
-    # One checkpoint shared by every rank, with a different head per MTP layer.
     head_weights = [
         torch.randn(vocab_size, hidden_size, device=DEVICE_TYPE) * 0.02
         for _ in range(NUM_MTP_LAYERS)
     ]
-    # The argmax is invariant to the norm's per-row rescale, so the default
-    # all-ones weight would hide a skipped shared_head; vary the gain.
+    # argmax ignores a per-row rescale: a unit norm weight would hide a skipped
+    # shared_head.
     norm_weights = [
         torch.randn(hidden_size, device=DEVICE_TYPE) * 0.5 + 1.0
         for _ in range(NUM_MTP_LAYERS)
@@ -78,8 +68,7 @@ def _make_rank_predictors(
             head = shared_head.head
             assert head is not None and head.tp_size == tp_size
             head.weight_loader(head.weight, head_weights[i])
-            # The loader zero-fills vocab padding, which a random hidden state
-            # rarely beats anyway. Make the padding rows win unless masked.
+            # Make the vocab padding rows win unless masked.
             num_padding = head.shard_indices.num_org_vocab_padding
             if num_padding:
                 head.weight.data[-num_padding:] = 100 * head.weight.data[0]
@@ -88,8 +77,6 @@ def _make_rank_predictors(
                 shared_head=shared_head.to(DTYPE)
             )
 
-        # Only the attributes the two methods read; a real predictor would
-        # also build the MLA/MoE draft block, which is irrelevant here.
         predictor = object.__new__(DeepSeekMultiTokenPredictor)
         torch.nn.Module.__init__(predictor)
         predictor.layers = layers
@@ -129,7 +116,6 @@ def _run_on_every_rank(
 
 
 @pytest.mark.parametrize("tp_size", [1, 2, 4, 8])
-# 500 leaves vocab padding on the last shard; 129280 is DeepSeek-V3's vocab.
 @pytest.mark.parametrize("vocab_size", [500, 129280])
 @pytest.mark.parametrize("hidden_size", [64, 1024])
 @pytest.mark.parametrize("num_tokens", [1, 16, 1024])
@@ -142,13 +128,7 @@ def test_get_top_tokens_matches_full_argmax(
     num_tokens: int,
     spec_step_idx: int,
 ):
-    """Every rank selects the token the full-vocab argmax would.
-
-    `get_top_tokens` has to apply `shared_head` (the final RMSNorm) just as
-    `compute_logits` does. The v3.2 MTP hands its LM head an already-normed
-    hidden state and so legitimately omits this; reusing that form here would
-    silently change the draft token rather than fail.
-    """
+    """Every rank selects the token the full-vocab argmax would."""
     predictors = _make_rank_predictors(tp_size, vocab_size, hidden_size)
     hidden_states = torch.randn(
         num_tokens, hidden_size, device=DEVICE_TYPE, dtype=DTYPE
