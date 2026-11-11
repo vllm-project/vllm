@@ -127,9 +127,6 @@ MAX_FUSED_GDN_MTP_TOKENS = 9  # kMaxMtpTokens in fused_gdn_decode_kernel.cu
 # stream. On GB300, across Qwen3.5/3.8 shapes, quant formats and TP 1-8, the first
 # regression was at 272 tokens (27B BF16 TP8).
 _BA_PROJ_OVERLAP_MAX_TOKENS = 256
-# Longest non-spec query of a batch with prefills that still runs through the
-# recurrent kernel (see _resolve_recurrent_prefill_max_query_len).
-DEFAULT_RECURRENT_PREFILL_MAX_QUERY_LEN = 32
 FUSED_GDN_STATE_DTYPES = (torch.float32, torch.bfloat16)
 
 
@@ -349,36 +346,6 @@ def _resolve_gdn_prefill_backend(
     if backend == "cutedsl" and supports_cutedsl:
         return backend, "cutedsl"
     return backend, "triton"
-
-
-def _resolve_recurrent_prefill_max_query_len(vllm_config: VllmConfig) -> int:
-    """Longest prefill chunk that runs through the recurrent GDN kernel.
-
-    When every non-spec query of a batch with prefills is at most this many
-    tokens long, the decodes and the prefills of that batch run in one
-    recurrent-kernel launch. That launch replaces the decode launch plus the
-    chunked prefill pipeline, whose six kernels cost about the same for 1 token
-    as for a full 64-token chunk. Longer batches keep the chunked pipeline,
-    because the recurrent kernel is sequential in the tokens of a sequence.
-
-    Set `additional_config["gdn_recurrent_prefill_max_query_len"]`; 0
-    disables the recurrent prefill route.
-    """
-    additional_config = vllm_config.additional_config
-    value = (
-        additional_config.get(
-            "gdn_recurrent_prefill_max_query_len",
-            DEFAULT_RECURRENT_PREFILL_MAX_QUERY_LEN,
-        )
-        if isinstance(additional_config, dict)
-        else DEFAULT_RECURRENT_PREFILL_MAX_QUERY_LEN
-    )
-    max_query_len = int(value)
-    if max_query_len < 0:
-        raise ValueError(
-            f"gdn_recurrent_prefill_max_query_len must be >= 0, got {max_query_len}."
-        )
-    return max_query_len
 
 
 def _log_gdn_backend_decision(

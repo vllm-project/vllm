@@ -34,6 +34,11 @@ from vllm.v1.kv_cache_interface import KVCacheSpec, MambaSpec
 # 64-token chunk, so checkpoint offsets must be multiples of 64.
 FLASHINFER_GDN_CHECKPOINT_ALIGNMENT = 64
 
+# Longest non-spec query of a batch with prefills that still runs through the
+# recurrent kernel: one launch then replaces the decode launch plus the six
+# kernels of the chunked prefill pipeline.
+RECURRENT_PREFILL_MAX_QUERY_LEN = 32
+
 
 def plan_flashinfer_checkpoints(
     offsets: list[int], query_lens: list[int]
@@ -174,7 +179,6 @@ class GDNAttentionMetadataBuilder(AttentionMetadataBuilder[GDNAttentionMetadata]
         )
         from vllm.model_executor.layers.mamba.gdn.qwen_gdn_linear_attn import (
             _resolve_gdn_prefill_backend,
-            _resolve_recurrent_prefill_max_query_len,
         )
 
         self.gdn_prefill_backend: Literal[
@@ -193,11 +197,9 @@ class GDNAttentionMetadataBuilder(AttentionMetadataBuilder[GDNAttentionMetadata]
         # Measured against the FLA (Triton) chunk pipeline only; the other
         # prefill backends keep their chunk path. The recurrent kernel also
         # exports no prefill checkpoints.
-        self.recurrent_prefill_max_query_len = (
-            _resolve_recurrent_prefill_max_query_len(vllm_config)
-            if self.gdn_prefill_backend == "triton"
+        self.allow_recurrent_prefill = (
+            self.gdn_prefill_backend == "triton"
             and not self.plan_flashinfer_checkpoints
-            else 0
         )
 
         if self.speculative_config:
@@ -538,8 +540,13 @@ class GDNAttentionMetadataBuilder(AttentionMetadataBuilder[GDNAttentionMetadata]
             else:
                 num_accepted_tokens = num_accepted_tokens[spec_sequence_masks_cpu]
 
-        use_recurrent_prefill = num_prefills > 0 and self._fits_recurrent_prefill(
-            non_spec_query_start_loc_cpu
+        # The recurrent kernel walks each sequence token by token, while the
+        # chunked pipeline has a fixed cost per layer. Host tensors: no sync.
+        use_recurrent_prefill = (
+            num_prefills > 0
+            and self.allow_recurrent_prefill
+            and int(non_spec_query_start_loc_cpu.diff().max())  # type: ignore[union-attr]
+            <= RECURRENT_PREFILL_MAX_QUERY_LEN
         )
 
         chunk_indices: torch.Tensor | None = None
@@ -737,19 +744,6 @@ class GDNAttentionMetadataBuilder(AttentionMetadataBuilder[GDNAttentionMetadata]
             token_chunk_offset_ptr=token_chunk_offset_ptr,
         )
         return attn_metadata
-
-    def _fits_recurrent_prefill(
-        self, non_spec_query_start_loc_cpu: torch.Tensor | None
-    ) -> bool:
-        """Whether the longest non-spec query is short enough for the recurrent
-        kernel. The kernel walks each sequence token by token, so its run time
-        grows with the longest sequence, while the chunked pipeline has a fixed
-        cost per layer. Reads only host tensors: no device sync."""
-        if self.recurrent_prefill_max_query_len == 0:
-            return False
-        assert non_spec_query_start_loc_cpu is not None
-        max_query_len = int(non_spec_query_start_loc_cpu.diff().max())
-        return max_query_len <= self.recurrent_prefill_max_query_len
 
     def _stage_spec_decode(
         self,

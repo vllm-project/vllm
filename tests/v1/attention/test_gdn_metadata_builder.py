@@ -152,15 +152,12 @@ def _create_gdn_builder(
     num_speculative_tokens: int = 0,
     full_cuda_graph: bool = False,
     adaptive_verification: bool = False,
-    additional_config: dict | None = None,
 ) -> GDNAttentionMetadataBuilder:
     """Create a GDNAttentionMetadataBuilder with minimal config."""
     vllm_config = create_vllm_config(
         model_name="Qwen/Qwen3.5-0.8B",
         block_size=BLOCK_SIZE,
     )
-    if additional_config is not None:
-        vllm_config.additional_config = additional_config
     vllm_config.compilation_config.cudagraph_mode = (
         CUDAGraphMode.FULL_AND_PIECEWISE if full_cuda_graph else CUDAGraphMode.NONE
     )
@@ -573,26 +570,17 @@ def test_plan_flashinfer_checkpoints_selects_the_state_at_each_offset():
 
 
 @pytest.mark.parametrize(
-    ("query_lens", "max_query_len_setting", "expected"),
+    ("query_lens", "expected"),
     [
-        pytest.param([1, 28], None, True, id="short-prefill-default-limit"),
-        pytest.param([1, 32], 32, True, id="at-limit"),
-        pytest.param([1, 33], 32, False, id="above-limit"),
-        pytest.param([1, 28], 0, False, id="disabled"),
-        pytest.param([1, 1], None, False, id="decode-only"),
+        pytest.param([1, 32], True, id="at-limit"),
+        pytest.param([1, 33], False, id="above-limit"),
+        pytest.param([1, 1], False, id="decode-only"),
     ],
 )
-def test_recurrent_prefill_selection(
-    query_lens: list[int], max_query_len_setting: int | None, expected: bool
-):
+def test_recurrent_prefill_selection(query_lens: list[int], expected: bool):
     """Short prefills join the decodes in the recurrent kernel; the decision
     reads only host lengths and never applies to decode-only batches."""
-    additional_config = (
-        None
-        if max_query_len_setting is None
-        else {"gdn_recurrent_prefill_max_query_len": max_query_len_setting}
-    )
-    builder = _create_gdn_builder(additional_config=additional_config)
+    builder = _create_gdn_builder()
     is_prefilling = [False, query_lens[1] > 1]
     common = create_common_attn_metadata(
         BatchSpec(seq_lens=[100, query_lens[1]], query_lens=query_lens),
@@ -618,10 +606,3 @@ def test_recurrent_prefill_selection_with_spec_decode():
     assert meta.num_prefills == 1
     assert meta.num_spec_decodes == 1
     assert meta.use_recurrent_prefill is True
-
-
-def test_recurrent_prefill_rejects_negative_limit():
-    with pytest.raises(ValueError, match="gdn_recurrent_prefill_max_query_len"):
-        _create_gdn_builder(
-            additional_config={"gdn_recurrent_prefill_max_query_len": -1}
-        )
