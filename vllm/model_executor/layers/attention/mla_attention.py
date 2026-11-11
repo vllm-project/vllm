@@ -312,6 +312,10 @@ from vllm.v1.kv_cache_interface import (
     get_kv_quant_mode,
     is_quantized_kv_cache,
 )
+from vllm.v1.worker.workspace import (
+    current_workspace_manager,
+    is_workspace_manager_initialized,
+)
 
 if TYPE_CHECKING:
     from vllm.v1.attention.backends.mla.index_group import (
@@ -1000,19 +1004,26 @@ class MLAAttention(nn.Module, AttentionLayerBase):
             )
 
         if attn_metadata is None:
-            # During the profile run try to simulate to worse case output size
-            # for `self.kv_b_proj(kv_c_normed)` in `_compute_prefill_context`
-            # since this can be large
-            _ = torch.empty(
-                (
-                    self.chunked_prefill_workspace_size,
-                    self.num_heads,
-                    self.qk_nope_head_dim + self.v_head_dim,
-                ),
-                device=k_c_normed.device,
-                dtype=k_c_normed.dtype,
-            )
-            self.impl.reserve_workspace()
+            # Once the workspace is locked, no metadata means a DBO microbatch
+            # wholly in the DP padding, not the profile run: there is nothing
+            # to simulate, and reserving would grow its locked workspace.
+            if not (
+                is_workspace_manager_initialized()
+                and current_workspace_manager().is_locked()
+            ):
+                # During the profile run try to simulate to worse case output
+                # size for `self.kv_b_proj(kv_c_normed)` in
+                # `_compute_prefill_context` since this can be large
+                _ = torch.empty(
+                    (
+                        self.chunked_prefill_workspace_size,
+                        self.num_heads,
+                        self.qk_nope_head_dim + self.v_head_dim,
+                    ),
+                    device=k_c_normed.device,
+                    dtype=k_c_normed.dtype,
+                )
+                self.impl.reserve_workspace()
 
             # The zero fill is required when used with DP + EP
             # to ensure all ranks within a DP group compute the

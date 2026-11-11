@@ -140,6 +140,10 @@ from vllm.v1.kv_cache_interface import (
     KVCacheSpec,
     get_kv_quant_mode,
 )
+from vllm.v1.worker.workspace import (
+    current_workspace_manager,
+    is_workspace_manager_initialized,
+)
 
 if TYPE_CHECKING:
     from vllm.model_executor.kernels.linear.cute_dsl.gemm_rs_ar import GemmRsAr
@@ -1123,8 +1127,14 @@ class MiniMaxM3SparseAttention(nn.Module, AttentionLayerBase):
             or self.layer_name not in fwd_slot_mapping
         ):
             # Memory-profiling run: caches not yet bound, slot_mapping is empty.
+            # Once the workspace is locked this is a DBO microbatch wholly in
+            # the DP padding instead, and reserving would grow its workspace.
             qkv, _ = self.qkv_proj(hidden_states)
-            self.indexer.reserve_workspace()
+            if not (
+                is_workspace_manager_initialized()
+                and current_workspace_manager().is_locked()
+            ):
+                self.indexer.reserve_workspace()
             output = qkv.new_zeros((qkv.shape[0], self.hidden_size))
             return sp_shard(output) if self.use_sequence_parallel else output
 

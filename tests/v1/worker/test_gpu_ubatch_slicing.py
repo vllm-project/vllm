@@ -11,7 +11,7 @@ import threading
 from dataclasses import replace
 from types import SimpleNamespace
 from typing import Any, cast
-from unittest.mock import patch
+from unittest.mock import Mock, patch
 
 import numpy as np
 import pytest
@@ -25,6 +25,7 @@ from vllm.config import (
     VllmConfig,
 )
 from vllm.forward_context import create_forward_context
+from vllm.model_executor.layers.attention import mla_attention
 from vllm.model_executor.layers.fused_moe.routed_experts_capturer import (
     RoutedExpertsCapturer,
 )
@@ -415,6 +416,40 @@ def test_all_padding_microbatch_skips_attention(monkeypatch, cg_mode):
         assert built == [6]
         assert contexts[0][0] == {"attn": 6} and contexts[0][1] is not None
         assert contexts[1] == (None, None)
+
+
+@pytest.mark.parametrize("locked", [False, True])
+def test_mla_without_metadata_reserves_only_before_the_workspace_locks(
+    monkeypatch, locked
+):
+    """MLA takes missing attention metadata for the profile run and reserves
+    its worst-case workspace. Once the workspace is locked it is a microbatch
+    wholly in the DP padding instead, whose workspace must not be asked to
+    grow."""
+    manager = SimpleNamespace(is_locked=lambda: locked)
+    monkeypatch.setattr(mla_attention, "is_workspace_manager_initialized", lambda: True)
+    monkeypatch.setattr(mla_attention, "current_workspace_manager", lambda: manager)
+    impl = Mock()
+    layer = SimpleNamespace(
+        num_heads=2,
+        v_head_dim=4,
+        qk_nope_head_dim=4,
+        chunked_prefill_workspace_size=8,
+        impl=impl,
+    )
+
+    output = mla_attention.MLAAttention.forward_impl(
+        layer,
+        torch.zeros(3, 2, 8),
+        torch.zeros(3, 4),
+        torch.zeros(3, 1, 4),
+        torch.empty(0),
+        None,
+        output=torch.ones(3, 8),
+    )
+
+    assert impl.reserve_workspace.called is not locked
+    assert torch.equal(output, torch.zeros(3, 8))
 
 
 def test_microbatching_off_when_a_rank_does_not_allow_it():
