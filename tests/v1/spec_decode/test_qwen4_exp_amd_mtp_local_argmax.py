@@ -1,8 +1,8 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
-"""``Qwen4ExpMTP.get_top_tokens`` must pick the same draft token
-``compute_logits`` would. A typo delegating to the wrong head or tensor
-(e.g. ``self.model`` instead of ``self.lm_head``) would otherwise silently
+"""`Qwen4ExpMTP.get_top_tokens` must pick the same draft token
+`compute_logits` would. A typo delegating to the wrong head or tensor
+(e.g. `self.model` instead of `self.lm_head`) would otherwise silently
 return a different draft token instead of failing.
 """
 
