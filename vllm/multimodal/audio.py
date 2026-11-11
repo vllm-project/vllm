@@ -3,7 +3,7 @@
 import math
 import threading
 from dataclasses import dataclass
-from enum import Enum
+from enum import StrEnum
 from functools import lru_cache
 from typing import Literal
 
@@ -60,7 +60,7 @@ def get_audio_duration(*, y: npt.NDArray[np.floating], sr: float = 22050) -> flo
     return float(n_samples) / sr
 
 
-class ChannelReduction(str, Enum):
+class ChannelReduction(StrEnum):
     """Method to reduce multi-channel audio to target channels."""
 
     MEAN = "mean"  # Average across channels (default, preserves energy balance)
@@ -200,8 +200,8 @@ def resample_audio_pyav(
 
     Args:
         audio: Input audio. Can be:
-            - 1D array ``(samples,)``: mono audio
-            - 2D array ``(channels, samples)``: stereo audio
+            - 1D array `(samples,)`: mono audio
+            - 2D array `(channels, samples)`: stereo audio
         orig_sr: Original sample rate in Hz.
         target_sr: Target sample rate in Hz.
 
@@ -313,13 +313,13 @@ def resample_audio_torchaudio(
     """Resample audio using torchaudio's bandlimited sinc interpolation.
 
     Unlike the PyAV resampler, this handles any input length without padding
-    and applies the kernel over the trailing axis, so 2D ``(channels,
-    samples)`` input needs no per-channel loop.
+    and applies the kernel over the trailing axis, so 2D `(channels,
+    samples)` input needs no per-channel loop.
 
     Args:
         audio: Input audio. Can be:
-            - 1D array ``(samples,)``: mono audio
-            - 2D array ``(channels, samples)``: stereo audio
+            - 1D array `(samples,)`: mono audio
+            - 2D array `(channels, samples)`: stereo audio
         orig_sr: Original sample rate in Hz.
         target_sr: Target sample rate in Hz.
 
@@ -453,7 +453,7 @@ class VAD:
 
 
 class ThreadLocalVADProvider:
-    """Create and cache one loaded ``VAD`` instance per worker thread.
+    """Create and cache one loaded `VAD` instance per worker thread.
 
     Each worker thread gets its own ONNX Runtime session so concurrent
     requests run VAD in parallel without sharing a session or serializing
@@ -478,7 +478,7 @@ class ThreadLocalVADProvider:
 
 
 def _join_pieces(audio_data: np.ndarray, pieces: list[tuple[int, int]]) -> np.ndarray:
-    """Join ``(start, end)`` sample ranges of the original audio into one chunk."""
+    """Join `(start, end)` sample ranges of the original audio into one chunk."""
     return np.concatenate(
         [audio_data[..., start:end] for start, end in pieces], axis=-1
     )
@@ -490,7 +490,7 @@ def _pack_pieces(
     max_chunk_samples: int,
 ) -> list[np.ndarray]:
     """Greedily pack consecutive pieces into chunks of at most
-    ``max_chunk_samples``, dropping the audio between pieces."""
+    `max_chunk_samples`, dropping the audio between pieces."""
     chunks: list[np.ndarray] = []
     current: list[tuple[int, int]] = []
     current_samples = 0
@@ -520,16 +520,16 @@ def split_audio_with_vad(
     hence we have to use 2 stage chunking for best quality.
 
     Behavior depends on whether chunking is enabled via
-    ``SpeechToTextConfig.allow_audio_chunking`` and whether VAD is enabled:
+    `SpeechToTextConfig.allow_audio_chunking` and whether VAD is enabled:
 
     * VAD + RMS: run Silero VAD first, then further split only those
-      individual speech segments that exceed ``max_audio_clip_s``, and pack
-      consecutive speech into chunks of up to ``max_audio_clip_s`` with the
+      individual speech segments that exceed `max_audio_clip_s`, and pack
+      consecutive speech into chunks of up to `max_audio_clip_s` with the
       non-speech between them removed. Packing keeps the number of chunks
       bounded by the amount of speech, whatever the VAD parameters. If no
       speech is detected, return an empty list.
-    * RMS only: run ``split_audio()`` on the full waveform when the
-      overall clip duration exceeds ``max_audio_clip_s``.
+    * RMS only: run `split_audio()` on the full waveform when the
+      overall clip duration exceeds `max_audio_clip_s`.
     * VAD only: remove non-speech by concatenating detected speech spans into
       a single trimmed chunk, since these models expect the whole clip in one
       request. If no speech is detected, return an empty list.
@@ -631,7 +631,7 @@ def split_audio(
         List of 1D audio chunks.
 
     Raises:
-        AssertionError: If ``audio_data`` is not 1D.
+        AssertionError: If `audio_data` is not 1D.
 
     Example:
         >>> audio = np.random.randn(1040000)  # 65 seconds at 16kHz

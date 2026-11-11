@@ -56,7 +56,7 @@ def make_async_with_semaphore(
 
     The function is wrapped in a semaphore to limit the number of
     concurrent executions making it easier to cancel tasks before they start.
-    Wrappers that share an executor should share one ``semaphore``; otherwise
+    Wrappers that share an executor should share one `semaphore`; otherwise
     each gets its own, and together they can admit more jobs than the
     executor has workers.
     """
