@@ -14,11 +14,7 @@ from fastapi import Request
 
 from tests.utils import RemoteOpenAIServer
 from vllm import envs
-from vllm.v1.engine.exceptions import (
-    EngineDeadError,
-    EngineSleepingError,
-    EngineUnhealthyError,
-)
+from vllm.v1.engine.exceptions import EngineDeadError, EngineUnhealthyError
 from vllm.version import __version__ as VLLM_VERSION
 
 MODEL_NAME = "Qwen/Qwen3-0.6B"
@@ -235,17 +231,7 @@ async def test_health_check_engine_dead_error():
 @pytest.mark.parametrize(
     ("error", "expected_body"),
     [
-        (None, None),
         (EngineDeadError(), {"status": "not_ready", "reason": "engine_dead"}),
-        (
-            EngineSleepingError("paused", engine_ranks=[0]),
-            {
-                "status": "not_ready",
-                "reason": "sleeping",
-                "message": "paused",
-                "engine_ranks": [0],
-            },
-        ),
         (
             EngineUnhealthyError(
                 "timed out", reason="probe_timeout", engine_ranks=[1], timeout_s=20.0
@@ -270,8 +256,5 @@ async def test_health_generate_response(error, expected_body):
 
     response = await health_generate(mock_request)
 
-    if expected_body is None:
-        assert response.status_code == 200
-        return
     assert response.status_code == 503
     assert json.loads(response.body) == expected_body

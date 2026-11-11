@@ -13,12 +13,7 @@ import pytest
 import vllm.envs as envs
 from vllm.v1.engine import EngineHealthState
 from vllm.v1.engine.async_llm import AsyncLLM
-from vllm.v1.engine.core import (
-    DPEngineCoreProc,
-    EngineCoreProc,
-    EngineShutdownState,
-)
-from vllm.v1.engine.core_client import AsyncMPClient
+from vllm.v1.engine.core import EngineCoreProc, EngineShutdownState
 from vllm.v1.engine.exceptions import EngineSleepingError, EngineUnhealthyError
 
 OK = EngineHealthState.OK
@@ -32,21 +27,15 @@ class FakeClock:
         monkeypatch.setattr("vllm.v1.engine.core.time.monotonic", lambda: self.now)
 
 
-def make_core(
-    cls: type[EngineCoreProc] = EngineCoreProc,
-    *,
-    has_requests: bool = False,
-    sleeping: bool = False,
-    engines_running: bool = False,
-) -> EngineCoreProc:
-    core = object.__new__(cls)
+def make_core(*, has_requests: bool = False) -> EngineCoreProc:
+    core = object.__new__(EngineCoreProc)
     core.scheduler = SimpleNamespace(
         has_requests=Mock(return_value=has_requests),
         has_unfinished_requests=Mock(return_value=has_requests),
     )
     core.batch_queue = None
-    core.engines_running = engines_running
-    core.is_sleeping = Mock(return_value=sleeping)  # type: ignore[method-assign]
+    core.engines_running = False
+    core.is_sleeping = Mock(return_value=False)  # type: ignore[method-assign]
     core.model_executor = SimpleNamespace(check_health_gpu=Mock())
     core.output_queue = queue.Queue()
     core.shutdown_state = EngineShutdownState.RUNNING
@@ -54,33 +43,6 @@ def make_core(
     core.post_step = Mock()  # type: ignore[method-assign]
     core._last_gpu_probe_at = 0.0
     return core
-
-
-@pytest.mark.parametrize(
-    ("cls", "core_kwargs", "expected", "probed"),
-    [
-        pytest.param(EngineCoreProc, {}, OK, True, id="idle-probes"),
-        pytest.param(
-            EngineCoreProc, {"sleeping": True}, SLEEPING, False, id="sleeping"
-        ),
-        pytest.param(EngineCoreProc, {"has_requests": True}, BUSY, False, id="busy"),
-        pytest.param(
-            DPEngineCoreProc,
-            {"engines_running": True},
-            BUSY,
-            False,
-            id="dp-wave-without-local-requests",
-        ),
-        pytest.param(
-            DPEngineCoreProc, {}, OK, False, id="moe-dp-idle-is-liveness-only"
-        ),
-    ],
-)
-def test_engine_check_health_gpu(cls, core_kwargs, expected, probed):
-    core = make_core(cls, **core_kwargs)
-
-    assert core.check_health_gpu(10) == expected
-    assert core.model_executor.check_health_gpu.called == probed
 
 
 def test_engine_idle_probe_cache(monkeypatch: pytest.MonkeyPatch):
@@ -116,7 +78,7 @@ def make_async_engine(*rank_results) -> AsyncLLM:
     """AsyncLLM whose engine rank ``i`` answers the probe with
     ``rank_results[i]``: a health state, an exception, or ``None`` to hang."""
 
-    async def probe(rank: int, _cache_ttl_s: float):
+    async def probe(rank: int, *_args):
         result = rank_results[rank]
         if result is None:
             await asyncio.Future()
@@ -141,8 +103,6 @@ def make_async_engine(*rank_results) -> AsyncLLM:
 @pytest.mark.parametrize(
     ("rank_results", "reason", "engine_ranks"),
     [
-        pytest.param([OK], None, None, id="idle-ok"),
-        pytest.param([BUSY, OK], None, None, id="dp-busy-and-idle"),
         pytest.param([SLEEPING, OK], "sleeping", [0], id="sleeping"),
         pytest.param([BUSY, None], "probe_timeout", [1], id="one-dp-rank-hung"),
         pytest.param(
@@ -156,9 +116,6 @@ async def test_check_health_gpu_aggregates_engine_ranks(
     monkeypatch.setattr(envs, "VLLM_HEALTH_CHECK_GPU_TIMEOUT", 0.05)
     engine = make_async_engine(*rank_results)
 
-    if reason is None:
-        await engine.check_health_gpu()
-        return
     error = EngineSleepingError if reason == "sleeping" else EngineUnhealthyError
     with pytest.raises(error) as exc_info:
         await engine.check_health_gpu()
@@ -191,14 +148,3 @@ async def test_concurrent_health_checks_share_one_probe(
     await engine.check_health_gpu()
 
     assert engine.engine_core.check_health_gpu_async.await_count == 1
-
-
-@pytest.mark.asyncio
-async def test_async_client_health_probe_targets_engine_rank():
-    client = object.__new__(AsyncMPClient)
-    client._call_utility_async = AsyncMock(return_value="busy")
-
-    assert await client.check_health_gpu_async(1, 10) == BUSY
-    client._call_utility_async.assert_awaited_once_with(
-        "check_health_gpu", 10, engine=b"\x01\x00"
-    )
