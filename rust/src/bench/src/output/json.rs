@@ -993,6 +993,7 @@ mod tests {
     fn test_save_point_result() {
         let dir =
             std::env::temp_dir().join(format!("vllm-bench-save-point-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&dir);
         let dir_str = dir.to_str().unwrap();
         let result = serde_json::json!({"model_id": "org/model"});
 

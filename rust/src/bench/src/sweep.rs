@@ -195,13 +195,7 @@ pub async fn run_rate_sweep(base_config: &BenchConfig, values: &[f64]) -> Result
         config.request_rate = rate;
 
         let result = crate::benchmark::run_benchmark(&config.without_save()).await?;
-        let point = config.result_filename.is_some().then(|| {
-            if rate.is_infinite() {
-                "infqps".to_string()
-            } else {
-                format!("{rate:?}qps")
-            }
-        });
+        let point = config.result_filename.is_some().then(|| format!("{rate:?}qps"));
         save_point_result(&config, &result, &current_dt, point.as_deref())?;
 
         points.push(SweepPoint {
