@@ -4530,6 +4530,29 @@ class rocm_aiter_ops:
 
     @staticmethod
     @functools.cache
+    def is_mxfp8_bpreshuffle_gemm_tuned(n: int, k: int) -> bool:
+        """Whether gemm_a8w8_blockscale_bpreshuffle has tuned 1x32 E8M0 rows
+        for (N, K) on the current arch."""
+        if not current_platform.is_rocm():
+            return False
+        try:
+            from aiter.ops.gemm_op_a8w8 import get_mxscale_bpreshuffle_config
+
+            return all(
+                get_mxscale_bpreshuffle_config(m, n, k, "1x32") is not None
+                for m in (1, 8192)
+            )
+        except ImportError:
+            return False
+        except Exception as e:
+            # A broken or overridden tuned table: run the next MXFP8 kernel.
+            logger.warning_once(
+                "AITER MXFP8 tuned-config lookup failed for N=%d, K=%d: %s", n, k, e
+            )
+            return False
+
+    @staticmethod
+    @functools.cache
     def is_asm_fp4_gemm_tuned(n: int, k_bytes: int) -> bool:
         if not current_platform.is_rocm():
             return False
