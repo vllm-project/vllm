@@ -143,7 +143,6 @@ def _make_alice_ai_full_attention_config(
     adapted = copy(config)
     adapted.attn_output_gate = True
     adapted.qkv_bias = False
-    adapted.dual_chunk_attention_config = None
     adapted.is_causal = True
     return cast(Qwen3NextConfig, adapted)
 
