@@ -709,7 +709,7 @@ _SPECULATIVE_DECODING_MODELS = {
     "Qwen3XPressModel": ("qwen3_xpress", "Qwen3XPressForCausalLM"),
     "DFlashQwen3XPressModel": ("qwen3_xpress", "Qwen3XPressForCausalLM"),
     "K3DSparkModel": (
-        "vllm.models.kimi_k3.nvidia.dspark_mla",
+        "vllm.models.kimi_k3",
         "K3DSparkForCausalLM",
     ),
     "MuseSparkDSparkModel": (
