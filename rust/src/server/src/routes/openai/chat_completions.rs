@@ -5,7 +5,6 @@ pub(crate) mod convert;
 mod types;
 mod validate;
 
-use std::convert::Infallible;
 use std::result::Result;
 use std::sync::Arc;
 
@@ -13,12 +12,11 @@ use asynk_strim_attr::{TryYielder, try_stream};
 use axum::Json;
 use axum::extract::State;
 use axum::http::HeaderMap;
-use axum::response::sse::Event;
 use axum::response::{IntoResponse, Response};
-use futures::{Stream, StreamExt as _, pin_mut};
+use futures::{StreamExt as _, future};
 use serde_json::Value;
 use thiserror_ext::AsReport as _;
-use tracing::{debug, error, info, trace};
+use tracing::{debug, error, info};
 use tracing_futures::Instrument as _;
 use vllm_chat::{
     AssistantBlockKind, AssistantMessageExt as _, ChatEvent, ChatEventStream, ChatEventStreamTrait,
@@ -37,6 +35,7 @@ use crate::routes::openai::chat_completions::types::{
     ChatCompletionStreamChoice, ChatCompletionStreamPrompt, ChatCompletionStreamResponse,
     ChatMessageDelta,
 };
+use crate::routes::openai::utils::choices::{ChoiceChunk, merge_choice_chunk_streams};
 use crate::routes::openai::utils::logprobs::{
     decoded_logprobs_to_openai_chat, prompt_logprobs_to_maps,
 };
@@ -46,11 +45,15 @@ use crate::routes::openai::utils::types::{
     ToolCallDelta, Usage,
 };
 use crate::routes::openai::utils::usage::ContinuousUsage;
-use crate::routes::openai::utils::validate_max_output_tokens;
 use crate::routes::openai::utils::validated_json::ValidatedJson;
+use crate::routes::openai::utils::{validate_max_output_tokens, validate_n_limit};
 use crate::routes::output_log::{LoggedOutput, chat_output_text};
 use crate::state::AppState;
-use crate::utils::{ResolvedRequestContext, resolve_request_context, sse_response, unix_timestamp};
+use crate::utils::npy_base64;
+use crate::utils::{
+    ResolvedRequestContext, openai_sse_stream, resolve_request_context, sse_response,
+    unix_timestamp,
+};
 
 pub(crate) fn lower_chat_request(
     request: ChatCompletionRequest,
@@ -76,6 +79,10 @@ pub async fn chat_completions(
         Ok(prepared) => prepared,
         Err(error) => return error.into_response(),
     };
+    if let Err(error) = validate_n_limit(prepared.n.get(), state.api_server_options.max_n_sequences)
+    {
+        return error.into_response();
+    }
     if let Err(error) = validate_max_output_tokens(
         "max_completion_tokens",
         prepared.chat_request.sampling_params.max_tokens,
@@ -95,47 +102,97 @@ pub async fn chat_completions(
     // is configured to count them.
     let count_reasoning_tokens = state.chat.reasoning_parser_name().is_some();
 
-    let mut chat_stream =
-        match state.chat.chat(prepared.chat_request).instrument(request_span.clone()).await {
-            Ok(stream) => stream,
-            Err(error) => {
-                return chat_submit_error("failed to submit chat request", error).into_response();
-            }
-        };
+    let n = prepared.n;
+    let chat_streams = match state
+        .chat
+        .chat_n(prepared.chat_request, n)
+        .instrument(request_span.clone())
+        .await
+    {
+        Ok(streams) => streams,
+        Err(error) => {
+            return chat_submit_error("failed to submit chat request", error).into_response();
+        }
+    };
 
     if stream {
-        let prompt_text = chat_stream.take_prompt_text();
-        let chunk_stream = chat_completion_chunk_stream(
-            chat_stream,
-            prompt_text,
-            prepared.request_id,
-            prepared.response_model,
-            created,
-            api_server_options,
-            count_reasoning_tokens,
-            prepared.options,
-        );
-        let sse_stream = chat_completion_sse_stream(chunk_stream).instrument(request_span);
+        let chunk_streams = chat_streams
+            .into_iter()
+            .map(|mut chat_stream| {
+                let prompt_text = chat_stream.take_prompt_text();
+                chat_completion_chunk_stream(
+                    chat_stream,
+                    prompt_text,
+                    prepared.request_id.clone(),
+                    prepared.response_model.clone(),
+                    created,
+                    state.system_fingerprint.clone(),
+                    api_server_options,
+                    count_reasoning_tokens,
+                    prepared.options.clone(),
+                )
+            })
+            .collect();
+        let sse_stream =
+            openai_sse_stream(merge_choice_chunk_streams(chunk_streams)).instrument(request_span);
 
         sse_response(sse_stream, api_server_options.sse_keep_alive_interval)
     } else {
-        let response = match collect_chat_completion(
-            chat_stream,
-            prepared.request_id,
-            prepared.response_model,
-            created,
-            api_server_options,
-            count_reasoning_tokens,
-            prepared.options,
-        )
+        let responses = future::try_join_all(chat_streams.into_iter().map(|chat_stream| {
+            collect_chat_completion(
+                chat_stream,
+                prepared.request_id.clone(),
+                prepared.response_model.clone(),
+                created,
+                state.system_fingerprint.clone(),
+                api_server_options,
+                count_reasoning_tokens,
+                prepared.options.clone(),
+            )
+        }))
         .instrument(request_span.clone())
-        .await
-        {
-            Ok(response) => response,
-            Err(error) => return error.into_response(),
-        };
+        .await;
+        match responses {
+            Ok(responses) => Json(merge_choice_responses(responses)).into_response(),
+            Err(error) => error.into_response(),
+        }
+    }
+}
 
-        Json(response).into_response()
+/// Merge the responses of a request's choices, in index order, like Python's
+/// non-streaming response for `n > 1`: the prompt-level fields come from the
+/// first choice, usage adds up per [`Usage::add_choice`], and per-request
+/// metrics, which describe a single sample, are reported only for `n = 1`.
+fn merge_choice_responses(responses: Vec<ChatCompletionResponse>) -> ChatCompletionResponse {
+    let mut responses = responses.into_iter();
+    let mut merged = responses.next().expect("a request has at least one choice");
+    for (index, response) in (1..).zip(responses) {
+        merged.metrics = None;
+        if let (Some(usage), Some(other)) = (&mut merged.usage, &response.usage) {
+            usage.add_choice(other);
+        }
+        merged.choices.extend(response.choices.into_iter().map(|mut choice| {
+            choice.index = index;
+            choice
+        }));
+    }
+    merged
+}
+
+impl ChoiceChunk for ChatCompletionStreamResponse {
+    fn set_choice_index(&mut self, index: u32) {
+        for choice in &mut self.choices {
+            choice.index = index;
+        }
+    }
+
+    fn final_usage_mut(&mut self) -> Option<&mut Usage> {
+        // OpenAI's final usage chunk is the one chunk without choices.
+        self.choices.is_empty().then_some(self.usage.as_mut()).flatten()
+    }
+
+    fn clear_metrics(&mut self) {
+        self.metrics = None;
     }
 }
 
@@ -144,6 +201,7 @@ async fn collect_chat_completion(
     request_id: String,
     response_model: String,
     created: u64,
+    system_fingerprint: Option<String>,
     ApiServerOptions {
         enable_log_requests,
         log_outputs,
@@ -191,7 +249,9 @@ async fn collect_chat_completion(
         kv_transfer_params,
         ec_transfer_params,
         weight_versions,
+        routed_experts,
     } = collected;
+    let routed_experts = routed_experts.as_ref().map(npy_base64).transpose()?;
     let stop_reason = finish_reason.as_stop_reason().map(stop_reason_to_json);
     let saw_tool_calls = message.tool_calls().next().is_some();
     let reasoning = message.reasoning();
@@ -299,13 +359,13 @@ async fn collect_chat_completion(
             finish_reason: Some(finish_reason),
             stop_reason,
             token_ids: (return_token_ids && include_output_metadata).then_some(token_ids),
-            routed_experts: None,
+            routed_experts,
             weight_versions: weight_versions.filter(|_| return_weight_versions),
         }],
         service_tier: None,
         usage: Some(usage),
         metrics,
-        system_fingerprint: None,
+        system_fingerprint,
         prompt_logprobs,
         prompt_token_ids: return_token_ids.then(|| prompt_token_ids.to_vec()),
         prompt_text,
@@ -322,12 +382,14 @@ async fn chat_completion_chunk_stream(
     request_id: String,
     response_model: String,
     created: u64,
+    system_fingerprint: Option<String>,
     ApiServerOptions {
         enable_log_requests,
         log_outputs,
         enable_prompt_tokens_details,
         default_return_tokens_as_token_ids,
         enable_per_request_metrics,
+        force_include_usage,
         ..
     }: ApiServerOptions,
     count_reasoning_tokens: bool,
@@ -349,6 +411,8 @@ async fn chat_completion_chunk_stream(
 ) -> Result<(), ApiError> {
     let return_tokens_as_token_ids =
         return_tokens_as_token_ids.unwrap_or(default_return_tokens_as_token_ids);
+    let include_usage = include_usage || force_include_usage;
+    let include_continuous_usage = include_continuous_usage || force_include_usage;
     let envelope = Arc::new(StreamResponseEnvelope::new(
         request_id,
         "chat.completion.chunk",
@@ -557,7 +621,12 @@ async fn chat_completion_chunk_stream(
                     kv_transfer_params.map(|value| *value),
                     weight_versions.filter(|_| return_weight_versions),
                 ) {
-                    Ok(chunk) => {
+                    Ok(mut chunk) => {
+                        // Like Python, the last chunk carries the fingerprint:
+                        // this one, or the usage chunk that follows.
+                        if !include_usage {
+                            chunk.system_fingerprint = system_fingerprint.clone();
+                        }
                         let finish_reason = chunk.choices[0].finish_reason.as_deref();
                         if let Some(delta_log) = delta_log.as_mut() {
                             delta_log.finish(finish_reason);
@@ -601,6 +670,7 @@ async fn chat_completion_chunk_stream(
                             count_reasoning_tokens.then_some(final_usage.reasoning_tokens),
                         ),
                         metrics,
+                        system_fingerprint,
                     ))
                     .await;
                 }
@@ -623,10 +693,12 @@ fn usage_chunk(
     envelope: &Arc<StreamResponseEnvelope>,
     usage: Usage,
     metrics: Option<PerRequestMetrics>,
+    system_fingerprint: Option<String>,
 ) -> ChatCompletionStreamResponse {
     let mut chunk = ChatCompletionStreamResponse::new(envelope);
     chunk.usage = Some(usage);
     chunk.metrics = metrics.map(Into::into);
+    chunk.system_fingerprint = system_fingerprint;
     chunk
 }
 
@@ -851,55 +923,6 @@ fn append_delta_text(slot: &mut Option<String>, delta: String) {
         Some(existing) => existing.push_str(&delta),
         None => *slot = Some(delta),
     }
-}
-
-/// Convert one chunk stream into OpenAI-style SSE events.
-///
-/// OpenAI-style streaming errors are encoded as ordinary `data: {"error": ...}`
-/// events followed by `data: [DONE]`, so the transport stream itself stays
-/// infallible even when generation fails after the HTTP response has started.
-#[try_stream]
-async fn chat_completion_sse_stream(
-    stream: impl Stream<Item = Result<ChatCompletionStreamResponse, ApiError>>,
-    mut y: TryYielder<Event, Infallible>,
-) -> Result<(), Infallible> {
-    pin_mut!(stream);
-
-    while let Some(next) = stream.next().await {
-        match next {
-            Ok(chunk) => y.yield_ok(to_sse_event(&chunk)).await,
-            Err(error) => {
-                y.yield_ok(to_error_sse_event(&error)).await;
-                break;
-            }
-        }
-    }
-
-    y.yield_ok(done_sse_event()).await;
-    Ok(())
-}
-
-/// Serialize one OpenAI chunk payload into one SSE `data:` event.
-fn to_sse_event(chunk: &ChatCompletionStreamResponse) -> Event {
-    trace!(?chunk, "chat completion emitting chunk");
-    Event::default()
-        .json_data(chunk)
-        .expect("ChatCompletionStreamResponse must serialize to JSON")
-}
-
-/// Serialize one OpenAI error payload into one SSE `data:` event.
-fn to_error_sse_event(error: &ApiError) -> Event {
-    let response = error.to_error_response();
-    trace!(?response, "chat completion emitting error");
-    Event::default()
-        .json_data(response)
-        .expect("ErrorResponse must serialize to JSON")
-}
-
-/// Build the terminal OpenAI SSE sentinel event.
-fn done_sse_event() -> Event {
-    trace!("chat completion emitting done");
-    Event::default().data("[DONE]")
 }
 
 /// Build the initial assistant-role SSE chunk required by the OpenAI streaming
@@ -1259,6 +1282,7 @@ mod tests {
                 kv_transfer_params: None,
                 ec_transfer_params: None,
                 weight_versions: None,
+                routed_experts: None,
             }),
         ]);
 
@@ -1268,6 +1292,7 @@ mod tests {
             "chatcmpl-1".to_string(),
             "model".to_string(),
             1,
+            None,
             ApiServerOptions {
                 enable_prompt_tokens_details: true,
                 enable_per_request_metrics: true,
@@ -1356,6 +1381,7 @@ mod tests {
                 kv_transfer_params: None,
                 ec_transfer_params: None,
                 weight_versions: None,
+                routed_experts: None,
             }),
         ]);
 
@@ -1365,6 +1391,7 @@ mod tests {
             "chatcmpl-1".to_string(),
             "model".to_string(),
             1,
+            None,
             ApiServerOptions::default(),
             false,
             ResponseOptions {
@@ -1406,6 +1433,7 @@ mod tests {
                 timestamps: Default::default(),
                 spec_decode_metrics: None,
                 weight_versions: None,
+                routed_experts: None,
                 finish_reason: FinishReason::stop_eos(),
                 kv_transfer_params: Some(Box::new(json!({"remote_block_ids": [1, 2]}))),
                 ec_transfer_params: None,
@@ -1418,6 +1446,7 @@ mod tests {
             "chatcmpl-1".to_string(),
             "model".to_string(),
             1,
+            None,
             ApiServerOptions::default(),
             false,
             ResponseOptions {
@@ -1475,6 +1504,7 @@ mod tests {
                 kv_transfer_params: None,
                 ec_transfer_params: None,
                 weight_versions: None,
+                routed_experts: None,
             }),
         ]);
 
@@ -1484,6 +1514,7 @@ mod tests {
             "chatcmpl-1".to_string(),
             "model".to_string(),
             1,
+            None,
             ApiServerOptions::default(),
             false,
             ResponseOptions::default(),
@@ -1560,6 +1591,7 @@ mod tests {
                 kv_transfer_params: None,
                 ec_transfer_params: None,
                 weight_versions: None,
+                routed_experts: None,
             }),
         ]);
 
@@ -1569,6 +1601,7 @@ mod tests {
             "chatcmpl-1".to_string(),
             "model".to_string(),
             1,
+            None,
             ApiServerOptions::default(),
             false,
             ResponseOptions {
@@ -1697,6 +1730,7 @@ mod tests {
                 kv_transfer_params: None,
                 ec_transfer_params: None,
                 weight_versions: None,
+                routed_experts: None,
             }),
         ]);
 
@@ -1706,6 +1740,7 @@ mod tests {
             "chatcmpl-1".to_string(),
             "model".to_string(),
             1,
+            None,
             ApiServerOptions::default(),
             false,
             ResponseOptions {
@@ -1780,6 +1815,7 @@ mod tests {
                 kv_transfer_params: None,
                 ec_transfer_params: None,
                 weight_versions: None,
+                routed_experts: None,
             }),
         ]);
 
@@ -1789,6 +1825,7 @@ mod tests {
             "chatcmpl-1".to_string(),
             "model".to_string(),
             1,
+            None,
             ApiServerOptions::default(),
             false,
             ResponseOptions {
@@ -1846,6 +1883,7 @@ mod tests {
                 kv_transfer_params: None,
                 ec_transfer_params: None,
                 weight_versions: None,
+                routed_experts: None,
             }),
         ]);
 
@@ -1855,6 +1893,7 @@ mod tests {
             "chatcmpl-1".to_string(),
             "model".to_string(),
             1,
+            None,
             ApiServerOptions::default(),
             false,
             ResponseOptions {
@@ -1930,6 +1969,7 @@ mod tests {
                 kv_transfer_params: None,
                 ec_transfer_params: None,
                 weight_versions: None,
+                routed_experts: None,
             }),
         ]);
 
@@ -1939,6 +1979,7 @@ mod tests {
             "chatcmpl-1".to_string(),
             "model".to_string(),
             1,
+            None,
             ApiServerOptions::default(),
             true,
             ResponseOptions {
@@ -2006,6 +2047,7 @@ mod tests {
                 kv_transfer_params: None,
                 ec_transfer_params: None,
                 weight_versions: None,
+                routed_experts: None,
             }),
         ]);
 
@@ -2015,6 +2057,7 @@ mod tests {
             "chatcmpl-1".to_string(),
             "model".to_string(),
             1,
+            None,
             ApiServerOptions::default(),
             true,
             ResponseOptions {
@@ -2071,6 +2114,7 @@ mod tests {
                     kv_transfer_params: None,
                     ec_transfer_params: None,
                     weight_versions: None,
+                    routed_experts: None,
                 }),
             ]);
 
@@ -2080,6 +2124,7 @@ mod tests {
                 "chatcmpl-1".to_string(),
                 "model".to_string(),
                 1,
+                None,
                 ApiServerOptions::default(),
                 count_reasoning_tokens,
                 ResponseOptions {

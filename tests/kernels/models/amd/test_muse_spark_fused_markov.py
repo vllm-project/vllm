@@ -54,7 +54,7 @@ class _Model:
     base logits are fixed, so both paths sample from the same ones."""
 
     def __init__(self, w1, w2, base):
-        from vllm.models.muse_spark.common.dspark import MuseSparkDSparkForCausalLM
+        from vllm.models.muse_spark.amd.dspark import MuseSparkDSparkForCausalLM
 
         head = torch.nn.Module()
         head.markov_w1 = torch.nn.Embedding(VOCAB, RANK, _weight=w1)
@@ -117,6 +117,7 @@ def _speculator(temp, seed, greedy=False, fp64=False, exact=False):
     s.model = _Model(w1, w2, base.to(bf16))
     s.num_speculative_steps = N_SPEC
     s._draft_topk = None
+    s._fuse_markov_bias = False  # review: main (#64476) added this; Muse has an output transform, so False
     s.use_confidence_head = False
     s.acceptance_estimator = None
     s.draft_watermarker = None
