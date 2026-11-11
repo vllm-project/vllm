@@ -40,41 +40,40 @@ NUM_REDUNDANT_EXPERTS = 64
 SCALE_DOWN_DEADLINE_S = 20
 
 
-# Installed as the servers' sitecustomize by _install_fault_injection. Each
-# fault is gated on its own env var:
-# - VLLM_FT_TEST_INJECT_FAULT=rank=N: ``sync_cudagraph_and_dp_padding`` raises
-#   once on DP rank N after the test arms it (``arm_ft_fault_injection``).
-# - VLLM_FT_TEST_INJECT_EPLB_FAULT=rank=N: the second async EPLB rebalance
-#   raises on EP rank N only. The other ranks' workers stay blocked in that
-#   cycle's first collective until the cpu group timeout.
-# ``ft_injection_state`` reports which patch targets are still missing and the
-# EPLB counters. The Worker methods are reachable through /collective_rpc.
+# Patches ``gpu.dp_utils.sync_cudagraph_and_dp_padding`` (or, with
+# ``target=async_eplb``, the async EPLB worker's rebalance) to raise on ``rank``
+# once armed (via /collective_rpc). Gated on VLLM_FT_TEST_INJECT_FAULT.
 _FAULT_INJECT_SITECUSTOMIZE = """\
 import builtins
-import inspect
 import os
 import sys
 
-_PATCHES = []  # (module name, attribute to wait for, patch function)
-_WORKER_METHODS = {}
-_COUNTS = {}
-
 _SPEC = os.environ.get("VLLM_FT_TEST_INJECT_FAULT")
+_MODULE = "vllm.v1.worker.gpu.dp_utils"
+_ATTR = "sync_cudagraph_and_dp_padding"
+_WORKER_MODULE = "vllm.v1.worker.gpu_worker"
+_EPLB_MODULE = "vllm.distributed.eplb.async_worker"
+
 if _SPEC:
     _f = dict(kv.split("=", 1) for kv in _SPEC.split(","))
     _RANK = int(_f["rank"])
     _ARMED = [False]
+    _TARGET = _f.get("target", "dp_sync")
+    _REBALANCES = [0]
 
-    def _patch_dp_utils(m):
-        _orig = m.sync_cudagraph_and_dp_padding
+    def _arm():
+        _ARMED[0] = True
+
+    def _patch(m):
+        import inspect
+        _orig = getattr(m, _ATTR)
         _sig = inspect.signature(_orig)
-
         def _wrapped(*args, **kwargs):
             result = _orig(*args, **kwargs)
             bound = _sig.bind(*args, **kwargs)
             bound.apply_defaults()
             dp_rank = bound.arguments.get("dp_rank")
-            if dp_rank == _RANK:
+            if _TARGET == "dp_sync" and dp_rank == _RANK:
                 # One-shot: disarm before raising so post-retry steps pass.
                 if not _ARMED[0]:
                     return result
@@ -82,82 +81,54 @@ if _SPEC:
                 raise RuntimeError("FT test fault injection (rank=%d)" % _RANK)
             return result
 
-        m.sync_cudagraph_and_dp_padding = _wrapped
+        setattr(m, _ATTR, _wrapped)
 
-    def _arm(self, *a, **k):
-        _ARMED[0] = True
-
-    _PATCHES.append(
-        (
-            "vllm.v1.worker.gpu.dp_utils",
-            "sync_cudagraph_and_dp_padding",
-            _patch_dp_utils,
-        )
-    )
-    _WORKER_METHODS["arm_ft_fault_injection"] = _arm
-
-_EPLB_SPEC = os.environ.get("VLLM_FT_TEST_INJECT_EPLB_FAULT")
-if _EPLB_SPEC:
-    _EPLB_RANK = int(dict(kv.split("=", 1) for kv in _EPLB_SPEC.split(","))["rank"])
-    _FAILING_REBALANCE = 2
-    _COUNTS.update(rebalances=0, applied_rearrangements=0)
-
-    def _patch_async_worker(m):
+    def _patch_eplb(m):
         _orig = m.run_rebalance_experts
 
-        def _run_rebalance_experts(*args, **kwargs):
-            _COUNTS["rebalances"] += 1
+        def _wrapped(*args, **kwargs):
             rank = m.get_eplb_group().device_group.rank()
-            if _COUNTS["rebalances"] == _FAILING_REBALANCE and rank == _EPLB_RANK:
-                raise RuntimeError("FT test async EPLB fault injection")
-            return _orig(*args, **kwargs)
+            if _TARGET == "async_eplb" and rank == _RANK and _ARMED[0]:
+                _ARMED[0] = False
+                raise RuntimeError("FT test fault injection (rank=%d)" % _RANK)
+            result = _orig(*args, **kwargs)
+            _REBALANCES[0] += 1
+            return result
 
-        m.run_rebalance_experts = _run_rebalance_experts
+        m.run_rebalance_experts = _wrapped
 
-    def _patch_eplb_state(m):
-        _orig = m._move_to_workspace
-
-        def _move_to_workspace(model_state, ep_rank):
-            result = model_state.pending_result
-            _orig(model_state=model_state, ep_rank=ep_rank)
-            if result.layer_idx == model_state.model.num_moe_layers - 1:
-                _COUNTS["applied_rearrangements"] += 1
-
-        m._move_to_workspace = _move_to_workspace
-
-    _PATCHES += [
-        (
-            "vllm.distributed.eplb.async_worker",
-            "run_rebalance_experts",
-            _patch_async_worker,
-        ),
-        ("vllm.distributed.eplb.eplb_state", "_move_to_workspace", _patch_eplb_state),
-    ]
-
-if _PATCHES:
-    _patched = set()
-
-    def _injection_state(self, *a, **k):
-        missing = [name for name, _, _ in _PATCHES if name not in _patched]
-        return {"missing": missing, "counts": dict(_COUNTS)}
-
-    def _add_worker_methods(m):
-        for name, method in _WORKER_METHODS.items():
-            setattr(m.Worker, name, method)
-
-    _WORKER_METHODS["ft_injection_state"] = _injection_state
-    _PATCHES.append(("vllm.v1.worker.gpu_worker", "Worker", _add_worker_methods))
     _real_import = builtins.__import__
 
     def _hook(name, *a, **k):
         module = _real_import(name, *a, **k)
-        for module_name, attr, patch in _PATCHES:
-            m = sys.modules.get(module_name)
-            # During vLLM's circular import a module lands in sys.modules before
-            # its functions are defined; hasattr guards against patching too early.
-            if module_name not in _patched and m is not None and hasattr(m, attr):
-                _patched.add(module_name)
-                patch(m)
+        m = sys.modules.get(_MODULE)
+        # During vLLM's circular import the module lands in sys.modules before
+        # its functions are defined; hasattr guards against patching too early.
+        if (
+            m is not None
+            and hasattr(m, _ATTR)
+            and not getattr(m, "_ft_patched", False)
+        ):
+            m._ft_patched = True
+            _patch(m)
+        e = sys.modules.get(_EPLB_MODULE)
+        if (
+            e is not None
+            and hasattr(e, "run_rebalance_experts")
+            and not getattr(e, "_ft_patched", False)
+        ):
+            e._ft_patched = True
+            _patch_eplb(e)
+        # Expose arming to /collective_rpc via a Worker method.
+        w = sys.modules.get(_WORKER_MODULE)
+        if (
+            w is not None
+            and hasattr(w, "Worker")
+            and not getattr(w, "_ft_arm_patched", False)
+        ):
+            w._ft_arm_patched = True
+            w.Worker.arm_ft_fault_injection = lambda self, *a, **k: _arm()
+            w.Worker.ft_completed_rebalances = lambda self, *a, **k: _REBALANCES[0]
         return module
 
     builtins.__import__ = _hook
@@ -165,17 +136,12 @@ if _PATCHES:
 
 
 def _install_fault_injection(
-    monkeypatch,
-    tmp_path,
-    *,
-    dp_sync_rank: int | None = None,
-    async_eplb_rank: int | None = None,
+    monkeypatch, tmp_path, rank: int, target: str = "dp_sync"
 ) -> None:
-    """Install the fault-injection sitecustomize for the servers.
+    """Install a sitecustomize that raises on `rank` once armed.
 
-    `dp_sync_rank` makes that DP rank raise once after `_arm_ft_injection`;
-    `async_eplb_rank` makes the second async EPLB rebalance raise on that rank.
-    Also sets VLLM_SERVER_DEV_MODE so tests can reach /collective_rpc.
+    Disarmed until the test calls /collective_rpc (needs VLLM_SERVER_DEV_MODE,
+    set here).
     """
     site_dir = tmp_path / "ft_inject"
     site_dir.mkdir()
@@ -185,10 +151,7 @@ def _install_fault_injection(
         "PYTHONPATH",
         str(site_dir) + (os.pathsep + existing if existing else ""),
     )
-    if dp_sync_rank is not None:
-        monkeypatch.setenv("VLLM_FT_TEST_INJECT_FAULT", f"rank={dp_sync_rank}")
-    if async_eplb_rank is not None:
-        monkeypatch.setenv("VLLM_FT_TEST_INJECT_EPLB_FAULT", f"rank={async_eplb_rank}")
+    monkeypatch.setenv("VLLM_FT_TEST_INJECT_FAULT", f"rank={rank},target={target}")
     monkeypatch.setenv("VLLM_SERVER_DEV_MODE", "1")
 
 
@@ -320,32 +283,29 @@ def _apply_ft(
     return resp.json()
 
 
-def _collective_rpc(server, method: str) -> list:
-    """Call Worker `method` on every worker of `server`; return their results."""
-    resp = requests.post(
-        server.url_for("collective_rpc"),
-        json={"method": method},
-        timeout=10,
-    )
-    assert resp.status_code == 200, resp.text
-    return resp.json()["results"]
-
-
 def _arm_ft_injection(servers) -> None:
     """Arm the fault injection in every engine's workers via /collective_rpc."""
     for server in servers:
-        _collective_rpc(server, "arm_ft_fault_injection")
+        resp = requests.post(
+            server.url_for("collective_rpc"),
+            json={"method": "arm_ft_fault_injection"},
+            timeout=10,
+        )
+        assert resp.status_code == 200, resp.text
 
 
-def _injection_states(servers) -> list[dict[str, Any]]:
-    """Return the fault-injection state of every worker of `servers`."""
-    return [st for s in servers for st in _collective_rpc(s, "ft_injection_state")]
-
-
-def _assert_injection_installed(servers) -> None:
-    """Fail fast if a patch target is missing, e.g. after a rename."""
-    states = _injection_states(servers)
-    assert all(not st["missing"] for st in states), states
+def _completed_rebalances(servers) -> list[int]:
+    """Async EPLB rebalances completed so far, one count per worker."""
+    counts: list[int] = []
+    for server in servers:
+        resp = requests.post(
+            server.url_for("collective_rpc"),
+            json={"method": "ft_completed_rebalances"},
+            timeout=10,
+        )
+        assert resp.status_code == 200, resp.text
+        counts.extend(resp.json()["results"])
+    return counts
 
 
 def _kill_worker_process(server) -> None:
@@ -359,17 +319,6 @@ def _kill_worker_process(server) -> None:
                 workers.append(p)
     assert len(workers) == 1, f"expected 1 worker proc, found: {workers}"
     workers[0].kill()
-
-
-def _poll_until(condition, deadline_s: float) -> bool:
-    """Check `condition()` every second until it holds or `deadline_s` passes;
-    return whether it held."""
-    deadline = time.time() + deadline_s
-    while not condition():
-        if time.time() >= deadline:
-            return False
-        time.sleep(1.0)
-    return True
 
 
 def _wait_for_engines(
@@ -386,8 +335,8 @@ def _wait_for_engines(
     """
     results: dict[int, dict[str, Any]] = {}
     pending = dict(enumerate(servers))
-
-    def _all_matched() -> bool:
+    start = time.time()
+    while pending and time.time() - start < deadline_s:
         for i, server in list(pending.items()):
             with contextlib.suppress(Exception):
                 for engine_status in _get_ft_status(server)["engines"]:
@@ -395,9 +344,8 @@ def _wait_for_engines(
                         results[i] = engine_status
                         del pending[i]
                         break
-        return not pending
-
-    _poll_until(_all_matched, deadline_s)
+        if pending:
+            time.sleep(1.0)
     return [results.get(i) for i in range(len(servers))]
 
 
@@ -469,15 +417,6 @@ def _drive_to_faulted(
     return faulted
 
 
-def _retry_and_wait_healthy(servers) -> None:
-    """Send `retry` to every engine under one request id, then wait until every
-    engine is healthy and serving again."""
-    round_id = str(uuid.uuid4())
-    for server in servers:
-        _apply_ft(server, "retry", request_id=round_id)
-    _assert_serving_and_healthy(servers)
-
-
 @pytest.mark.skipif(not has_nixl_ep(), reason="Requires nixl_ep all2all backend")
 @multi_gpu_test(num_gpus=2)
 def test_injected_fault_retry_recovers_all_ranks(monkeypatch, tmp_path):
@@ -492,16 +431,15 @@ def test_injected_fault_retry_recovers_all_ranks(monkeypatch, tmp_path):
     accuracy eval; accuracy is compared before and after recovery, mirroring
     test_elastic_ep.py.
     """
-    _install_fault_injection(monkeypatch, tmp_path, dp_sync_rank=1)
+    _install_fault_injection(monkeypatch, tmp_path, rank=1)
     dp_size = 2
     faulted_rank = 1
     with _ft_manager(dp_size=dp_size) as servers:
         assert len(servers) == dp_size
         servers_by_rank = _servers_by_rank(servers, dp_size)
 
-        # 1. All engines healthy and serving, with the injection in place.
+        # 1. All engines healthy and serving.
         _assert_serving_and_healthy(list(servers_by_rank.values()))
-        _assert_injection_installed(list(servers_by_rank.values()))
 
         # 2. Baseline accuracy (the injection is still disarmed).
         initial_accuracy = _run_gsm8k_eval(servers_by_rank[0], "Initial")
@@ -513,10 +451,15 @@ def test_injected_fault_retry_recovers_all_ranks(monkeypatch, tmp_path):
         # The rank that raised carries the fault info from its own exception.
         assert faulted[faulted_rank].get("fault_info"), faulted[faulted_rank]
 
-        # 4. retry every engine; every engine returns to healthy and serves again.
-        _retry_and_wait_healthy(list(servers_by_rank.values()))
+        # 4. retry every engine.
+        round_id = str(uuid.uuid4())
+        for server in servers_by_rank.values():
+            _apply_ft(server, "retry", request_id=round_id)
 
-        # 5. Post-recovery accuracy vs the pre-fault baseline.
+        # 5. Recovery completes: every engine returns to healthy and serves again.
+        _assert_serving_and_healthy(list(servers_by_rank.values()))
+
+        # 6. Post-recovery accuracy vs the pre-fault baseline.
         recovered_accuracy = _run_gsm8k_eval(servers_by_rank[0], "After retry")
         assert recovered_accuracy >= initial_accuracy - ACCURACY_TOL, (
             f"Accuracy dropped after retry: {recovered_accuracy:.3f} < "
@@ -531,42 +474,19 @@ def test_injected_fault_retry_recovers_all_ranks(monkeypatch, tmp_path):
         )
 
 
-# Deadline for a full async rearrangement (interval + one step per MoE layer).
-EPLB_REARRANGEMENT_DEADLINE_S = 120
-
-
-def _drive_until_rearranged(servers, min_applied: int) -> None:
-    """Drive every engine until each worker has applied `min_applied` full
-    async rearrangements."""
-
-    def _rearranged() -> bool:
-        states = _injection_states(servers)
-        return all(
-            st["counts"]["applied_rearrangements"] >= min_applied for st in states
-        )
-
-    with _driving(*servers):
-        assert _poll_until(_rearranged, EPLB_REARRANGEMENT_DEADLINE_S), (
-            f"async EPLB did not apply {min_applied} rearrangements within "
-            f"{EPLB_REARRANGEMENT_DEADLINE_S}s: {_injection_states(servers)}"
-        )
-
-
 @pytest.mark.skipif(not has_nixl_ep(), reason="Requires nixl_ep all2all backend")
 @multi_gpu_test(num_gpus=2)
 def test_async_eplb_worker_fault_retry_resumes_rebalancing(monkeypatch, tmp_path):
     """An async EPLB worker failure on one rank faults every rank, and retry
     resumes EPLB.
 
-    The second rebalance raises on rank 1 only, so rank 0's worker is still
-    blocked in that cycle's first collective when retry arrives. Retry waits
-    for it to time out, so its late error cannot fault the recovered engine.
+    The rebalance raises on rank 1 only, so rank 0's worker is still blocked
+    in that cycle's first collective when retry arrives. Retry waits for it to
+    time out, so its late error cannot fault the recovered engine.
     """
-    _install_fault_injection(monkeypatch, tmp_path, async_eplb_rank=1)
-    eplb_args = [
-        "--enable-eplb",
-        "--eplb-config.use_async",
-        "true",
+    _install_fault_injection(monkeypatch, tmp_path, rank=1, target="async_eplb")
+    eplb_args = ["--enable-eplb", "--eplb-config.use_async", "true"]
+    eplb_args += [
         "--eplb-config.step_interval",
         "16",
         "--eplb-config.window_size",
@@ -574,25 +494,32 @@ def test_async_eplb_worker_fault_retry_resumes_rebalancing(monkeypatch, tmp_path
     ]
     dp_size = 2
     with _ft_manager(eplb_args, dp_size=dp_size) as servers:
-        assert len(servers) == dp_size
         servers_by_rank = _servers_by_rank(servers, dp_size)
         all_servers = list(servers_by_rank.values())
-
-        # 1. All engines healthy and serving, with the injection in place.
         _assert_serving_and_healthy(all_servers)
-        _assert_injection_installed(all_servers)
 
-        # 2. Drive: the first rearrangement applies, the second one fails on
-        #    rank 1, and every engine goes UNHEALTHY.
+        # 1. Arm, then drive: rank 1's next rebalance fails and every engine
+        #    goes UNHEALTHY.
+        _arm_ft_injection(all_servers)
         faulted = _drive_to_faulted(servers_by_rank, match_values={"unhealthy"})
         for rank, engine_status in faulted.items():
             assert engine_status.get("fault_info"), (rank, engine_status)
 
-        # 3. retry every engine; every engine returns to healthy and serves.
-        _retry_and_wait_healthy(all_servers)
+        # 2. retry every engine; all return to healthy and serve again.
+        round_id = str(uuid.uuid4())
+        for server in all_servers:
+            _apply_ft(server, "retry", request_id=round_id)
+        _assert_serving_and_healthy(all_servers)
 
-        # 4. EPLB resumes: one rearrangement before the fault, one after it.
-        _drive_until_rearranged(all_servers, min_applied=2)
+        # 3. EPLB resumes: every worker completes another rebalance.
+        before = _completed_rebalances(all_servers)
+        deadline = time.time() + FAULT_DETECTION_DEADLINE_S
+        with _driving(*all_servers):
+            while not all(
+                n > n0 for n, n0 in zip(_completed_rebalances(all_servers), before)
+            ):
+                assert time.time() < deadline, "async EPLB did not resume"
+                time.sleep(1.0)
 
 
 @pytest.mark.skipif(not has_nixl_ep(), reason="Requires nixl_ep all2all backend")

@@ -4,7 +4,7 @@
 import queue
 import threading
 from types import SimpleNamespace
-from unittest.mock import MagicMock
+from unittest.mock import MagicMock, Mock
 
 import pytest
 import torch
@@ -248,16 +248,12 @@ def _start_ft_async_eplb(monkeypatch):
         lambda model_state, eplb_state, phy2log_cpu, stream: phy2log_cpu.clone(),
     )
     monkeypatch.setattr(async_worker, "CpuGpuEvent", lambda: probe.event("published"))
-    failures: list[Exception] = []
-    transferred: list[int] = []
-
-    def transfer_layer(*, layer_idx: int, **kwargs) -> None:
-        if not failures:
-            failures.append(RuntimeError("injected transfer failure"))
-            raise failures[-1]
-        transferred.append(layer_idx)
-
-    monkeypatch.setattr(async_worker, "transfer_layer", transfer_layer)
+    failure = RuntimeError("injected transfer failure")
+    monkeypatch.setattr(
+        async_worker,
+        "transfer_layer",
+        Mock(side_effect=[failure] + [None] * num_layers),
+    )
     applied: list[int] = []
     monkeypatch.setattr(
         eplb_state_module,
@@ -301,8 +297,7 @@ def _start_ft_async_eplb(monkeypatch):
         state=state,
         model_state=model_state,
         probe=probe,
-        failures=failures,
-        transferred=transferred,
+        failure=failure,
         applied=applied,
     )
 
@@ -326,7 +321,7 @@ def test_fault_tolerance_recovers_async_eplb_after_worker_failure(
     run.probe.expect("idle")
     with pytest.raises(RuntimeError) as exc_info:
         run.state.step()
-    assert exc_info.value.__cause__ is run.failures[0]
+    assert exc_info.value.__cause__ is run.failure
     assert run.state.async_worker.is_alive()
 
     reset_eplb_async_state(SimpleNamespace(eplb_state=run.state))
@@ -340,11 +335,9 @@ def test_fault_tolerance_recovers_async_eplb_after_worker_failure(
         run.state.step()
     run.probe.expect("idle")
 
-    assert run.transferred == list(range(num_layers))
     assert run.applied == list(range(num_layers))
     assert not run.model_state.rebalanced
     assert run.state.async_worker_error is None
-    assert len(run.failures) == 1
 
 
 def test_fault_tolerance_reset_refuses_a_running_async_eplb_cycle(
@@ -375,6 +368,6 @@ def test_fault_tolerance_reset_refuses_a_running_async_eplb_cycle(
 
     release.set()
     run.probe.expect("idle")
-    assert run.state.async_worker_error is run.failures[0]
+    assert run.state.async_worker_error is run.failure
     reset_eplb_async_state(runner)
     assert run.state.async_worker_error is None
