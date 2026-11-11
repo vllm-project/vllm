@@ -223,6 +223,7 @@ if TYPE_CHECKING:
     VLLM_KIMI_K3_AUX_ATTN_RES_STREAM: bool = False
     VLLM_K3_ATTN_RES_REGTILE: bool = True
     VLLM_KIMI_K3_GEMM_AR: bool = True
+    VLLM_K3_LATENT_NORM_UP_PROJ: bool = True
     VLLM_K3_FUSED_INDEXER_PREP: bool = True
     VLLM_KIMI_SD_DSA: Literal["off", "split", "fused", "auto"] = "auto"
     VLLM_KIMI_SD_DSA_SPLITS: int = 16
@@ -1753,6 +1754,12 @@ environment_variables: dict[str, Callable[[], Any]] = {
     # Use the SM100 BF16 GEMM-AR kernel for eligible Kimi-K3 row-parallel
     # attention projections. All TP ranks must belong to one NVLink domain.
     "VLLM_KIMI_K3_GEMM_AR": lambda: bool(int(os.getenv("VLLM_KIMI_K3_GEMM_AR", "1"))),
+    # Kimi-K3 on ROCm: fold the latent-MoE routed-expert RMSNorm into the TP
+    # tail's sharded up-projection (one Triton GEMM for decode batches of up to
+    # 192 tokens, replacing the RMSNorm and hipBLASLt addmm launches).
+    "VLLM_K3_LATENT_NORM_UP_PROJ": lambda: bool(
+        int(os.getenv("VLLM_K3_LATENT_NORM_UP_PROJ", "1"))
+    ),
     # Kimi-K3.1 MXFP4 indexer on ROCm: fold the key LayerNorm and the top-k
     # -1 fill into the key quantize/store launch, and the FP32 head weight
     # scaling and tile start clamp into the query quantize launch.

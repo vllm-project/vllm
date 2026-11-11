@@ -79,7 +79,10 @@ def _build_transform(
 
 
 def _tail_runner(
-    transform: KimiRoutedOutputTransform, tp_world: int, use_ep: bool = False
+    transform: KimiRoutedOutputTransform,
+    tp_world: int,
+    use_ep: bool = False,
+    fuse_norm: bool = False,
 ) -> ROCmLatentMoERunner:
     """A runner carrying only what the tail reads, so no engine is needed.
 
@@ -89,13 +92,15 @@ def _tail_runner(
     ``tp_world`` is the size of the TP process group, which is what the hidden
     dim is split by. Under expert parallelism the MoE config reports
     ``tp_size=1``/``ep_size=tp_world`` for that same group, so ``use_ep`` pins
-    that the final reduce still fires.
+    that the final reduce still fires. ``fuse_norm`` takes the folded
+    RMSNorm + up-projection op instead of the unfused chain.
     """
     runner = object.__new__(ROCmLatentMoERunner)
     attrs = {
         "routed_output_transform": transform,
         "_up_proj_preshard": bool(getattr(transform, "row_sharded", False)),
         "_up_proj_shard_size": HIDDEN_SIZE // tp_world,
+        "_fuse_norm_up_proj": fuse_norm,
         "_logged_sharded_tail": False,
         "moe_config": SimpleNamespace(
             tp_size=1 if use_ep else tp_world,
@@ -129,13 +134,19 @@ def _check_matches_replicated(
     rank: int,
     use_ep: bool = False,
     row_sharded: bool = False,
+    fuse_norm: bool = False,
 ) -> None:
     transform, up_weight = _build_transform(device, row_sharded=row_sharded)
     assert transform.norm is not None
-    runner = _tail_runner(transform, tp_world, use_ep)
+    runner = _tail_runner(transform, tp_world, use_ep, fuse_norm)
     group = get_tp_group().device_group
 
-    for iteration, num_tokens in enumerate((1, 5, 8, 16, 5)):
+    # The fused op switches kernels at 16 / 128 tokens and falls back to the
+    # unfused chain above 192, so walk across each boundary.
+    token_counts = (1, 5, 8, 16, 5)
+    if fuse_norm:
+        token_counts = (1, 5, 16, 17, 64, 129, 192, 193, 4)
+    for iteration, num_tokens in enumerate(token_counts):
         torch.manual_seed(100 * iteration + rank + 1)
         routed_output, shared_output = _rank_partials(num_tokens, device)
 
@@ -170,6 +181,12 @@ def _check_presharded_matches_replicated(
     _check_matches_replicated(device, tp_world, rank, row_sharded=True)
 
 
+def _check_fused_norm_matches_replicated(
+    device: torch.device, tp_world: int, rank: int
+) -> None:
+    _check_matches_replicated(device, tp_world, rank, row_sharded=True, fuse_norm=True)
+
+
 def _check_unfused_tail_gathers_full_hidden(
     device: torch.device, tp_world: int, rank: int
 ) -> None:
@@ -191,13 +208,13 @@ def _check_unfused_tail_gathers_full_hidden(
 
 
 def _check_writes_only_its_own_shard(
-    device: torch.device, tp_world: int, rank: int
+    device: torch.device, tp_world: int, rank: int, fuse_norm: bool = False
 ) -> None:
     """Two ranks that swapped both weight rows and write offsets still sum to
     the right total, so inspect each slice before the final collective."""
     transform, up_weight = _build_transform(device)
     assert transform.norm is not None
-    runner = _tail_runner(transform, tp_world)
+    runner = _tail_runner(transform, tp_world, fuse_norm=fuse_norm)
     group = get_tp_group().device_group
 
     torch.manual_seed(rank + 1)
@@ -233,12 +250,20 @@ def _check_writes_only_its_own_shard(
     torch.testing.assert_close(local[:, end:], before[:, end:], atol=0, rtol=0)
 
 
+def _check_fused_norm_writes_only_its_own_shard(
+    device: torch.device, tp_world: int, rank: int
+) -> None:
+    _check_writes_only_its_own_shard(device, tp_world, rank, fuse_norm=True)
+
+
 _CHECKS = {
     "matches_replicated": _check_matches_replicated,
     "matches_replicated_ep": _check_matches_replicated_under_ep,
     "presharded_matches_replicated": _check_presharded_matches_replicated,
     "unfused_gathers": _check_unfused_tail_gathers_full_hidden,
     "own_shard_only": _check_writes_only_its_own_shard,
+    "fused_norm_matches_replicated": _check_fused_norm_matches_replicated,
+    "fused_norm_own_shard_only": _check_fused_norm_writes_only_its_own_shard,
 }
 
 
@@ -289,6 +314,16 @@ def test_presharded_unfused_tail_gathers_the_full_hidden_dim() -> None:
 @multi_gpu_test(num_gpus=4)
 def test_sharded_tail_tp4_writes_only_its_own_shard() -> None:
     _run_ranks("own_shard_only", 4)
+
+
+@multi_gpu_test(num_gpus=8)
+def test_fused_norm_tail_tp8_matches_replicated_projection() -> None:
+    _run_ranks("fused_norm_matches_replicated", 8)
+
+
+@multi_gpu_test(num_gpus=4)
+def test_fused_norm_tail_tp4_writes_only_its_own_shard() -> None:
+    _run_ranks("fused_norm_own_shard_only", 4)
 
 
 def _runner(**attrs) -> ROCmLatentMoERunner:
@@ -349,6 +384,7 @@ def build_runner(monkeypatch: pytest.MonkeyPatch):
         has_up_proj: bool = True,
         has_shared_experts: bool = True,
         routed_scaling_factor: float = 1.0,
+        norm: RMSNorm | None = None,
     ) -> None:
         self.moe_config = SimpleNamespace(
             tp_size=tp_size,
@@ -356,7 +392,7 @@ def build_runner(monkeypatch: pytest.MonkeyPatch):
             is_sequence_parallel=is_sequence_parallel,
         )
         self.routed_output_transform = SimpleNamespace(
-            norm=None,
+            norm=norm,
             up_proj=SimpleNamespace(weight=torch.zeros(hidden, LATENT_SIZE))
             if has_up_proj
             else None,
@@ -415,6 +451,24 @@ def test_shards_by_the_process_group_not_the_dp_flattened_tp_size(
 
     assert runner._tail_shardable
     assert runner._up_proj_shard_size == HIDDEN_SIZE // 2
+
+
+@pytest.mark.parametrize("enabled", [True, False])
+def test_folds_the_norm_into_the_up_proj_only_when_enabled(
+    build_runner, monkeypatch: pytest.MonkeyPatch, enabled: bool, default_vllm_config
+) -> None:
+    monkeypatch.setenv("VLLM_K3_LATENT_NORM_UP_PROJ", "1" if enabled else "0")
+
+    assert (
+        build_runner(norm=RMSNorm(LATENT_SIZE, eps=EPS))._fuse_norm_up_proj is enabled
+    )
+    assert not build_runner()._fuse_norm_up_proj
+    assert not build_runner(tp_world=1, tp_size=1)._fuse_norm_up_proj
+
+    # The split-K depends on the token count, so batch invariance keeps the
+    # unfused chain.
+    monkeypatch.setenv("VLLM_BATCH_INVARIANT", "1")
+    assert not build_runner(norm=RMSNorm(LATENT_SIZE, eps=EPS))._fuse_norm_up_proj
 
 
 @pytest.mark.parametrize(

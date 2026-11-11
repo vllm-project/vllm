@@ -4,6 +4,7 @@ from typing import TYPE_CHECKING, cast
 
 import torch
 
+from vllm import envs
 from vllm._aiter_ops import rocm_aiter_ops
 from vllm.config import get_current_vllm_config
 from vllm.distributed import (
@@ -21,8 +22,10 @@ from vllm.model_executor.layers.fused_moe.prepare_finalize.no_dp_ep import (
     MoEPrepareAndFinalizeNoDPEPModular,
 )
 from vllm.model_executor.layers.fused_moe.runner.moe_runner import MoERunner
+from vllm.model_executor.layers.layernorm import RMSNorm
 from vllm.model_executor.layers.quantization.online.fp8 import Fp8PtpcOnlineLinearMethod
 from vllm.model_executor.layers.quantization.online.mxfp4 import Mxfp4OnlineLinearMethod
+from vllm.models.kimi_k3.amd.ops import latent_norm_up_proj  # noqa: F401
 
 if TYPE_CHECKING:
     from vllm.models.kimi_k3.amd.linear import KimiRoutedInputLinear
@@ -74,6 +77,19 @@ class ROCmLatentMoERunner(MoERunner):
                 "falling back to the replicated up-projection.",
                 scope="global",
             )
+        # Fold the routed-expert RMSNorm into the sharded up-projection: one
+        # Triton GEMM for decode batches (ops/latent_norm_up_proj.py), the
+        # RMSNorm + addmm otherwise. Its split-K depends on the token count, so
+        # batch-invariant runs keep the unfused chain.
+        norm = getattr(transform, "norm", None)
+        self._fuse_norm_up_proj = (
+            self._tail_shardable
+            and envs.VLLM_K3_LATENT_NORM_UP_PROJ
+            and not envs.VLLM_BATCH_INVARIANT
+            and type(norm) is RMSNorm
+            and norm.has_weight
+            and norm.variance_size_override is None
+        )
         self._logged_sharded_tail = False
         self._quantized_routed_input: bool | None = None
 
@@ -96,8 +112,6 @@ class ROCmLatentMoERunner(MoERunner):
         assert transform is not None
 
         latent = tensor_model_parallel_all_reduce(fused_output)
-        if transform.norm is not None:
-            latent = transform.norm(latent)
 
         shard_size = self._up_proj_shard_size
         shard_start = get_tensor_model_parallel_rank() * shard_size
@@ -107,6 +121,24 @@ class ROCmLatentMoERunner(MoERunner):
             if self._up_proj_preshard
             else weight.narrow(0, shard_start, shard_size)
         )
+
+        if self._fuse_norm_up_proj:
+            # shared_output[:, shard] += rms_norm(latent) @ up_proj_shard.T; the
+            # op picks the fused kernel or the unfused chain by token count.
+            torch.ops.vllm.k3_latent_norm_up_proj(
+                latent,
+                transform.norm.weight,
+                transform.norm.variance_epsilon,
+                up_proj_shard,
+                shared_output,
+                shard_start,
+            )
+            return self._maybe_reduce_final_output(
+                shared_output, trunc_size, output_is_reduced=False
+            )
+
+        if transform.norm is not None:
+            latent = transform.norm(latent)
         hidden_shard = shared_output.narrow(-1, shard_start, shard_size)
 
         # hidden_shard += latent @ up_proj_shard.T, accumulated in the GEMM's
