@@ -287,6 +287,7 @@ def check_and_fallback_input_schema(
     input_schema: "BaseInputSchema",
     param_dtype: torch.dtype | None = None,
     allow_fallback: bool = True,
+    warn: bool = True,
 ) -> "HummingInputSchema":
     from vllm.utils.humming import HummingInputSchema, InputQuantizationMode
     from vllm.utils.humming import dtypes as humming_dtypes
@@ -361,7 +362,7 @@ def check_and_fallback_input_schema(
 
     if input_schema.is_compatible_with(weight_schema, param_dtype):
         if not allow_fallback:
-            if is_deprecated(a_dtype):
+            if warn and is_deprecated(a_dtype):
                 msg = f"Humming {a_dtype} activation is slow on SM{sm_version} now."
                 logger.warning_once(msg)
             return input_schema
@@ -380,7 +381,8 @@ def check_and_fallback_input_schema(
             is_groupwise = input_group_size > 0 or weight_group_size > 0
             if input_bits == 8 and is_groupwise and not is_mxfp8:
                 # prefer wna16 for groupwise weight or groupwise input
-                _warn_input_fallback(a_dtype, None)
+                if warn:
+                    _warn_input_fallback(a_dtype, None)
                 return HummingInputSchema()
 
             return input_schema
@@ -418,7 +420,8 @@ def check_and_fallback_input_schema(
                 input_quant_mode=quant_mode,
             )
             if candidate.is_compatible_with(weight_schema, param_dtype):
-                _warn_input_fallback(a_dtype, dtype)
+                if warn:
+                    _warn_input_fallback(a_dtype, dtype)
                 return candidate
 
     raise ValueError(
@@ -426,6 +429,30 @@ def check_and_fallback_input_schema(
         f"weight schema {weight_schema} on SM{sm_version} "
         f"({allow_fallback=})"
     )
+
+
+def humming_executed_input_quant_key(
+    weight_quant_config: dict[str, Any],
+    activation_key: QuantKey | None,
+    allow_fallback: bool = True,
+) -> QuantKey | None:
+    """The activation quantization Humming runs on this device for weights
+    described by `weight_quant_config` when `activation_key` is requested.
+    None if it runs unquantized activations or rejects the request."""
+    from vllm.utils.humming import BaseWeightSchema
+
+    if activation_key is None:
+        return None
+    try:
+        executed = check_and_fallback_input_schema(
+            BaseWeightSchema.from_config(weight_quant_config),
+            quant_key_to_input_schema(activation_key),
+            allow_fallback=allow_fallback,
+            warn=False,
+        )
+    except ValueError:
+        return None
+    return input_schema_to_quant_key(executed)
 
 
 def resolve_humming_layer_config(config: dict[str, Any], prefix: str) -> dict[str, Any]:
