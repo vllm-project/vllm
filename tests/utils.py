@@ -1453,10 +1453,16 @@ def multi_process_parallel(
         ),
         **{env_var: "1" for env_var in current_platform.ray_noset_device_env_vars},
     }
+    # Ray only detects XPUs as GPU resources when dpctl is installed, so
+    # declare the available GPUs explicitly to avoid that dependency.
+    ray_init_kwargs = {}
+    if current_platform.is_xpu():
+        ray_init_kwargs["num_gpus"] = current_platform.device_count()
     ray.init(
         runtime_env={
             "env_vars": env_vars,
-        }
+        },
+        **ray_init_kwargs,
     )
 
     distributed_init_port = get_open_port()
