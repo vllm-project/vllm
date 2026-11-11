@@ -320,6 +320,9 @@ def plan_entry(compiled, jit, grid: tuple, kwargs: dict) -> tuple:
     defaults = {param.name: param.default for param in jit.params}
     values = [kwargs.get(name, defaults[name]) for name in jit.arg_names]
     slots = [jit.arg_names.index(n) for n in ("logits_ptr", "k_ptr", "p_ptr")]
+    per_call = ["logits_ptr", "p_ptr"] + (["k_ptr"] if kwargs["has_k"] else [])
+    for name in per_call:  # each call sets these: do not keep this call's tensors
+        values[jit.arg_names.index(name)] = None
     return compiled, grid, values, slots
 
 
