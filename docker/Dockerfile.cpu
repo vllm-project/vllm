@@ -89,16 +89,19 @@ ARG PYTHON_VERSION=3.12
 ARG max_jobs=32
 ENV MAX_JOBS=${max_jobs}
 
+# The toolchain PPA is added from its pinned signing key (fingerprint
+# 60C317803A41BA51845E371A1E9377A2BA9EF27F) rather than add-apt-repository,
+# which needs the Launchpad API and fails the build whenever that API is down.
+COPY docker/keys/ubuntu-toolchain-r.asc /etc/apt/keyrings/ubuntu-toolchain-r.asc
+
 # Install minimal dependencies and uv
 RUN --mount=type=cache,target=/var/cache/apt,sharing=locked \
     --mount=type=cache,target=/var/lib/apt,sharing=locked \
     apt-get update -y \
     && apt-get install -y --no-install-recommends sudo ccache git curl wget ca-certificates zlib1g-dev \
     software-properties-common libtcmalloc-minimal4 libnuma-dev ffmpeg libsm6 libxext6 libgl1 jq lsof make xz-utils \
-    && for i in 1 2 3; do \
-        add-apt-repository -y ppa:ubuntu-toolchain-r/test && break || \
-        { echo "Attempt $i failed, retrying toolchain PPA..."; sleep 5; }; \
-    done \
+    && echo "deb [signed-by=/etc/apt/keyrings/ubuntu-toolchain-r.asc] https://ppa.launchpadcontent.net/ubuntu-toolchain-r/test/ubuntu $(. /etc/os-release && echo "$VERSION_CODENAME") main" \
+        > /etc/apt/sources.list.d/ubuntu-toolchain-r-test.list \
     && apt-get update -y \
     && apt-get install -y --no-install-recommends gcc-15 g++-15 \
     && update-alternatives --install /usr/bin/gcc gcc /usr/bin/gcc-15 10 --slave /usr/bin/g++ g++ /usr/bin/g++-15 \
