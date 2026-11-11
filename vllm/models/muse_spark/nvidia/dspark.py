@@ -329,6 +329,11 @@ class MuseSparkDSparkModel(DFlashQwen3Model):
                 self._fused_context_norms = build_context_norms(self)
                 logger.debug("DSpark context KV store remains unfused: %s", reason)
 
+    def context_kv_modules(self) -> list[nn.Module]:
+        if self.specialized_draft is not None:
+            return [self]  # its fused context K/V chain may read any weight
+        return [self.fc, self.hidden_norm, *self._context_pre_norms, *self._attn_layers]
+
     def _project_muse_context_kv(self, context_states: torch.Tensor) -> torch.Tensor:
         """Apply the two trained Muse input norms, then each layer's K/V map."""
         if (

@@ -204,6 +204,9 @@ class MuseSparkDSparkModel(DFlashQwen3Model):
             ):
                 raise ValueError("Muse Spark DSpark layers must share KV geometry")
 
+    def context_kv_modules(self) -> list[nn.Module]:
+        return [self.fc, self.hidden_norm, *self._context_pre_norms, *self._attn_layers]
+
     def _project_muse_context_kv(self, context_states: torch.Tensor) -> torch.Tensor:
         """Apply the two trained Muse input norms, then each layer's K/V map."""
         fc_output = self.hidden_norm(context_states)
