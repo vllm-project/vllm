@@ -20,6 +20,9 @@ import torch
 from tests.v1.attention.utils import dense_kv_cache_views
 from vllm.distributed import mooncake_store
 from vllm.distributed.kv_events import KVEventAggregator
+from vllm.distributed.kv_transfer.kv_connector.v1.mooncake import (
+    transfer_engine_registry,
+)
 from vllm.distributed.kv_transfer.kv_connector.v1.mooncake_store import (
     rdma_utils,
     worker,
@@ -69,6 +72,12 @@ def _reset_conv_state_layout_cache():
     get_conv_state_layout.cache_clear()
     yield
     get_conv_state_layout.cache_clear()
+
+
+@pytest.fixture(autouse=True)
+def _reset_shared_transfer_engine():
+    yield
+    transfer_engine_registry._SHARED = None
 
 
 _TP_SHARED_NAMESPACE = (
@@ -798,6 +807,47 @@ def test_setup_passes_the_current_gpus_device_names(
     assert store.setup.call_args.args[5] == expected
     if physical_gpu is None:
         platform.visible_device_id_to_physical_device_id.assert_not_called()
+
+
+def test_setup_passes_an_existing_transfer_engine():
+    config = mooncake_store.MooncakeStoreConfig(
+        metadata_server="P2PHANDSHAKE",
+        master_server_address="127.0.0.1:50051",
+        protocol="rdma",
+        device_name="mlx5_0",
+    )
+    store = MagicMock()
+    store.setup.return_value = 0
+    engine = object()
+    mooncake_store.setup_mooncake_store(store, config, "10.0.0.1:15051", engine=engine)
+
+    assert store.setup.call_args.kwargs == {"engine": engine}
+    assert store.setup.call_args.args[5] == ""
+
+
+def test_setup_rejects_an_engine_the_store_cannot_accept():
+    class _Store:
+        def setup(
+            self,
+            local_hostname,
+            metadata_server,
+            global_segment_size,
+            local_buffer_size,
+            protocol,
+            rdma_devices,
+            master_server_addr,
+            tenant_id="default",
+        ):
+            raise AssertionError("setup should not be called")
+
+    config = mooncake_store.MooncakeStoreConfig(
+        metadata_server="P2PHANDSHAKE",
+        master_server_address="127.0.0.1:50051",
+        protocol="rdma",
+        device_name="",
+    )
+    with pytest.raises(RuntimeError, match="setup accepts engine="):
+        mooncake_store.setup_mooncake_store(_Store(), config, "host", engine=object())
 
 
 @pytest.mark.parametrize(
@@ -2850,6 +2900,109 @@ def test_requester_worker_init_uses_positional_setup(tmp_path, monkeypatch):
         "10.0.0.7:50051",
     )
     assert w.coord.retention_interval == 0
+
+
+def _p2p_store_config(**overrides: object) -> dict[str, object]:
+    config: dict[str, object] = {
+        "metadata_server": "P2PHANDSHAKE",
+        "global_segment_size": "4gb",
+        "local_buffer_size": "64mb",
+        "protocol": "rdma",
+        "device_name": "mlx5_0",
+        "master_server_address": "10.0.0.7:50051",
+    }
+    config.update(overrides)
+    return config
+
+
+def test_worker_reuses_pd_transfer_engine(tmp_path, monkeypatch):
+    from vllm.distributed.kv_transfer.kv_connector.v1.mooncake.transfer_engine_registry import (  # noqa: E501
+        clear_shared_transfer_engine,
+        register_shared_transfer_engine,
+    )
+
+    class _Engine:
+        def __init__(self) -> None:
+            self.inner = object()
+
+        def get_engine(self):
+            return self.inner
+
+    engine = _Engine()
+    register_shared_transfer_engine(
+        engine=engine,
+        hostname="10.9.8.7",
+        rpc_port=16000,
+        protocol="rdma",
+    )
+    try:
+        store = MagicMock()
+        store.setup.return_value = 0
+        _install_fake_mooncake(monkeypatch, store)
+        _patch_worker_runtime(monkeypatch)
+        monkeypatch.setenv("MOONCAKE_REQUESTER_LOCAL_HOSTNAME", "worker-a:50053")
+        monkeypatch.setenv(
+            "MOONCAKE_CONFIG_PATH",
+            _write_mooncake_config(tmp_path, _p2p_store_config(protocol="tcp")),
+        )
+        worker.MooncakeStoreWorker(
+            _make_vllm_config(
+                extra_config={"reuse_pd_transfer_engine": True},
+            ),
+            _make_kv_cache_config(),
+        )
+        assert store.setup.call_args.args[0] == "10.9.8.7:16000"
+        assert store.setup.call_args.args[1] == ""
+        assert store.setup.call_args.args[4] == "rdma"
+        assert store.setup.call_args.kwargs["engine"] is engine.inner
+    finally:
+        clear_shared_transfer_engine(engine)
+
+
+def test_worker_reuse_requires_pd_engine(tmp_path, monkeypatch):
+    store = MagicMock()
+    store.setup.return_value = 0
+    _install_fake_mooncake(monkeypatch, store)
+    _patch_worker_runtime(monkeypatch)
+    monkeypatch.setenv(
+        "MOONCAKE_CONFIG_PATH",
+        _write_mooncake_config(tmp_path, _p2p_store_config()),
+    )
+    with pytest.raises(RuntimeError, match="no MooncakeConnector TransferEngine"):
+        worker.MooncakeStoreWorker(
+            _make_vllm_config(extra_config={"reuse_pd_transfer_engine": True}),
+            _make_kv_cache_config(),
+        )
+    store.setup.assert_not_called()
+
+
+def test_supports_sleep_mode_with_reused_engine_ignores_store_json(
+    tmp_path, monkeypatch
+):
+    from vllm.config import KVTransferConfig
+    from vllm.distributed.kv_transfer.kv_connector.v1.mooncake_store.connector import (  # noqa: E501
+        MooncakeStoreConnector,
+    )
+
+    monkeypatch.setenv(
+        "MOONCAKE_CONFIG_PATH",
+        _write_mooncake_config(
+            tmp_path,
+            _p2p_store_config(protocol="tcp", device_name=""),
+        ),
+    )
+    reused = KVTransferConfig(
+        kv_connector="MooncakeStoreConnector",
+        kv_role="kv_both",
+        kv_connector_extra_config={"reuse_pd_transfer_engine": True},
+    )
+    assert MooncakeStoreConnector.supports_sleep_mode(reused) is True
+    plain = KVTransferConfig(
+        kv_connector="MooncakeStoreConnector",
+        kv_role="kv_both",
+    )
+    with pytest.raises(ValueError, match="sleep requires"):
+        MooncakeStoreConnector.supports_sleep_mode(plain)
 
 
 def test_requester_worker_init_prefers_local_hostname_override(
@@ -5814,6 +5967,78 @@ def _registered_worker(kind: str = "dense"):
     host = {c.data_ptr(): c.nbytes for n, c in caches.items() if n == "source"}
     device = {c.data_ptr(): c.nbytes for n, c in caches.items() if n != "source"}
     return worker, device, host
+
+
+def _enable_reuse(worker: mooncake_store_worker.MooncakeStoreWorker) -> None:
+    worker._reuse_pd_transfer_engine = True
+
+
+@pytest.mark.cpu_test
+def test_reused_engine_skips_device_kv_registration():
+    store_worker = _make_bare_worker(num_gpu_blocks=2)
+    store_worker.token_dbs[0].store_layout = MagicMock()
+    _enable_reuse(store_worker)
+    _register_with_mocked_threads(store_worker, {"layer0": torch.zeros(2, 4)})
+    store_worker.store.register_buffer.assert_not_called()
+    assert store_worker._device_regions == {}
+
+
+@pytest.mark.cpu_test
+def test_reused_engine_registers_host_kv_only():
+    from vllm.v1.kv_cache_interface import KVCacheTensor
+
+    store_worker = _make_bare_worker(num_gpu_blocks=2)
+    spec = FullAttentionSpec(
+        block_size=16, num_kv_heads=1, head_size=1, dtype=torch.float16
+    )
+    config = KVCacheConfig(
+        num_blocks=2,
+        kv_cache_tensors=[
+            KVCacheTensor(
+                size=4 * 32,
+                layers=["source"],
+                layer_stride=4 * 32,
+                block_stride=32,
+                host_resident=True,
+            ),
+            KVCacheTensor(
+                size=2 * 32, layers=["layer0"], layer_stride=2 * 32, block_stride=32
+            ),
+        ],
+        kv_cache_groups=[
+            KVCacheGroupSpec(["source"], spec, host_resident=True),
+            KVCacheGroupSpec(["layer0"], spec),
+        ],
+        hisparse_host_num_blocks=4,
+    )
+    store_worker._kv_cache_config = config
+    store_worker._kv_cache_groups = list(config.transfer_groups)
+    store_worker.token_dbs = [
+        ChunkedTokenDatabase(KeyMetadata("test-model", 0, 0, 0, 0), chunk_size=16)
+        for _ in store_worker._kv_cache_groups
+    ]
+    _enable_reuse(store_worker)
+    caches = {
+        "source": torch.zeros(4, 32, dtype=torch.uint8),
+        "layer0": torch.zeros(2, 32, dtype=torch.uint8),
+    }
+    store_worker.store = _FakeRegistrationStore()
+    _register_with_mocked_threads(store_worker, caches)
+    assert store_worker.store.registered == {}
+    assert store_worker._device_regions == {}
+
+
+@pytest.mark.cpu_test
+def test_reused_engine_sleep_cycle_is_noop():
+    store_worker = _make_bare_worker(num_gpu_blocks=2)
+    store_worker.token_dbs[0].store_layout = MagicMock()
+    _enable_reuse(store_worker)
+    _register_with_mocked_threads(store_worker, {"layer0": torch.zeros(2, 4)})
+    store_worker.store.register_buffer.reset_mock()
+    store_worker.unregister_kv_caches()
+    store_worker.restore_kv_caches()
+    store_worker.store.unregister_buffer.assert_not_called()
+    store_worker.store.register_buffer.assert_not_called()
 
 
 @pytest.mark.cpu_test
