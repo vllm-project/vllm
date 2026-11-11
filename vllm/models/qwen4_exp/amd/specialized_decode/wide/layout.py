@@ -1,7 +1,7 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 """The shapes the wide kernels are compiled for: Qwen3.8-Flash-Next at TP2,
-one rank's share. ``SHAPES`` is what the runtime checks the checkpoint's text
+one rank's share. `SHAPES` is what the runtime checks the checkpoint's text
 config against; every other constant follows from it."""
 
 TP = 2
@@ -77,4 +77,4 @@ LDS_BYTES = 160 * 1024
 
 # rows a step: the CUDA graph capture sizes in this range get a build
 MIN_TOKENS = 1
-MAX_TOKENS = 128
+MAX_TOKENS = 192

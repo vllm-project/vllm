@@ -1,6 +1,6 @@
 # Qwen3.8-Flash-Next specialized decode (wide)
 
-`--monokernel` on MI355X/gfx950 runs each pure decode step of 1 to 128 rows
+`--monokernel` on MI355X/gfx950 runs each pure decode step of 1 to 192 rows
 of Qwen3.8-Flash-Next (`amd/Qwen3.8-Flash-Next-Quark-MXFP4`) at TP2 as one
 persistent FlyDSL launch per decoder layer (`runtime/decode.py`,
 `wide/layer.py`):
@@ -13,9 +13,15 @@ persistent FlyDSL launch per decoder layer (`runtime/decode.py`,
 The embedding, the PLE layer, the final mixer, the head and sampling stay
 vLLM's. Steps of a width without a build, prefill and mixed steps run vLLM's
 forward. The kernels are built for each of the deployment's CUDA graph capture
-sizes in 1-128; a decode step runs the smallest captured width that holds it
+sizes in 1-192; a decode step runs the smallest captured width that holds it
 (vLLM's graph padding), so capture sizes 1, 2, 4, 8, 16 serve 3 rows at width
 4 and 12 at 16.
+
+To serve decode steps above 128 rows on these kernels, include capture sizes
+up to 192 (for example 136, 144, 152, 160, 168, 176, 184, 192). Every added
+size builds four layer kernels, increasing cold-start compilation time.
+Steps above 192 rows run vLLM's forward; include graph capture sizes up to
+`--max-num-seqs` to avoid uncaptured decode steps on that path.
 
 The kernels are built from an expert-major fused W4A4 MoE, batch-tiled
 MFMA GEMMs with split-K folded by the last arriver, a line-based in-kernel TP
@@ -50,8 +56,10 @@ a layer, up to ~80 rows on one; uniform: ~470), so the schedule
 
 - TP2 on dedicated, unpartitioned GPUs (256 CUs, one CTA per CU), Model
   Runner V2, FULL CUDA graphs for decode (PIECEWISE steps run vLLM's forward);
-- pure decode of 1-128 rows (graph padding rows are inert: their GDN state
+- pure decode of 1-192 rows (graph padding rows are inert: their GDN state
   slot is the null block);
+- HC sequence parallelism (`--enable-hc-sp`): stock steps keep their sharded
+  layout; specialized steps run every row, including the PLE, on every rank;
 - the checkpoint's shapes (`wide/layout.py`, `SHAPES`) and formats: online
   MXFP4 GDN projections (`--quantization-config.targets` for
   `linear_attn.in_proj_qkv`, `in_proj_z`, `out_proj`) on either AITER FP4
@@ -69,7 +77,7 @@ PP, DP, EP, EPLB, DCP, PCP, DBO, MoE sequence parallelism, LoRA, KV
 connectors, routed-expert capture, speculative decoding, sleep mode, CPU
 weight offload, weight updates, GDN prefix caching, other GDN cache dtypes,
 an unfused shared expert, `STOCK_TORCH_COMPILE`, other model shapes, no
-capture size in 1-128, a platform other than unpartitioned gfx950); the
+capture size in 1-192, a platform other than unpartitioned gfx950); the
 loaded model (every layer's modules, quantization methods,
 weight layouts and shapes); the GDN caches at every bind (dtypes, shapes,
 dense slots). The TP ranks agree on every stage.

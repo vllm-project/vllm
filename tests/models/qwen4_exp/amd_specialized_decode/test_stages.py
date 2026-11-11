@@ -36,8 +36,8 @@ pytestmark = pytest.mark.skipif(
 
 ROWS = 128
 # the step widths each stage is checked at: every width 1-5, the partial
-# exchange lines of 12 and the whole ones of 8, 16, 32, 128
-WIDTHS = [1, 2, 3, 4, 5, 8, 12, 16, 32, 128]
+# exchange lines of 12 and 129, and every new capture size through 192
+WIDTHS = [1, 2, 3, 4, 5, 8, 12, 16, 32, 128, 129, *range(136, 193, 8)]
 SMALL = [w for w in WIDTHS if w <= 16]
 CODECS = ["bf16", "int4"]
 
@@ -88,12 +88,12 @@ class Harness:
         ]
 
     def exchange_y(self, rows, slot, codec="bf16"):
-        """The rank's partial in exchange slot ``slot`` as [rows, HIDDEN]."""
+        """The rank's partial in exchange slot `slot` as [rows, HIDDEN]."""
         return exchange_lines(self.mbox_t, 1, slot, 0, rows, codec)
 
 
 def exchange_lines(mbox, tp, slot, src, rows, codec):
-    """Source rank ``src``'s lines in exchange slot ``slot`` of a mailbox (i32
+    """Source rank `src`'s lines in exchange slot `slot` of a mailbox (i32
     words) as [rows, HIDDEN]."""
     from vllm.models.qwen4_exp.amd.specialized_decode.wide.layout import HIDDEN
     from vllm.models.qwen4_exp.amd.specialized_decode.wide.stages import (
@@ -248,11 +248,12 @@ def _check_gemm(harness, rows, n, k, splits, fmt, fold):
 @pytest.mark.parametrize(
     "rows, fmt",
     [(ROWS, "fp4_triton"), (ROWS, "fp4_asm"), (1, "fp4_asm"), (12, "fp4_asm")]
+    + [(w, fmt) for w in (136, 160, 192) for fmt in ("fp4_triton", "fp4_asm")]
     + [(w, "bf16") for w in WIDTHS],
 )
 @pytest.mark.parametrize("fold", [False, True])
 def test_tiled_gemm(harness, rows, fmt, fold):
-    """``x @ W.T`` of the gated residual's down shape (split K, summed in order
+    """`x @ W.T` of the gated residual's down shape (split K, summed in order
     or folded by the last arriver), bf16 or MXFP4 weights in either AITER
     layout: f32 accumulation of exact bf16 products."""
     _check_gemm(harness, rows, 352, 2560, 4, fmt, fold)
@@ -268,13 +269,13 @@ def test_tiled_gemm(harness, rows, fmt, fold):
     ],
 )
 def test_tiled_gemm_resident(harness, rows, n, k, splits, fmt, fold):
-    """The resident stage of widths up to ``tiled.RESIDENT_MAX``: a unit's
+    """The resident stage of widths up to `tiled.RESIDENT_MAX`: a unit's
     whole K slice (10 chunks, 5 chunks, a ragged K of 320) staged once."""
     _check_gemm(harness, rows, n, k, splits, fmt, fold)
 
 
 def test_fp4_shuffle_matches_aiter():
-    """The shuffled layout the kernels read is AITER's ``shuffle_weight``."""
+    """The shuffled layout the kernels read is AITER's `shuffle_weight`."""
     from aiter.ops.shuffle import shuffle_weight
 
     gen = torch.Generator().manual_seed(1)
@@ -319,12 +320,12 @@ def _hc_kernel(rows, codec="bf16", combine=True, cold=False):
     from vllm.models.qwen4_exp.amd.specialized_decode.wide.stages import hc, tiled
 
     chunks = max(hc.down_plan(rows).per, hc.UP_CHUNKS)
+    aux_words = max(hc.up_lds_words(rows), ex.GroupTile.words(rows))
 
     @fx.struct
     class Smem:
         stage: fx.Array[fx.Int32, tiled.stage_words(rows, chunks), 16]
-        red: fx.Array[fx.Float32, hc.up_lds_words(rows), 16]
-        tile: fx.Array[fx.Int32, ex.GroupTile.words(rows), 16]
+        aux: fx.Array[fx.Int32, aux_words, 16]
         word: fx.Array[fx.Int32, 4, 16]
 
     @flyc.kernel(
@@ -375,7 +376,7 @@ def _hc_kernel(rows, codec="bf16", combine=True, cold=False):
                 g,
                 gemm,
                 up,
-                sm.red.ptr,
+                sm.aux.ptr,
                 state,
                 rrms,
                 norm_w,
@@ -395,14 +396,14 @@ def _hc_kernel(rows, codec="bf16", combine=True, cold=False):
             grid_sync(g)
             hc.mix_reduce(g, part, down, inj, rows, True)
             grid_sync(g)
-            hc.mix_up(g, up, sm.red.ptr, down, w_up, x_out, rows, pre_up)
+            hc.mix_up(g, up, sm.aux.ptr, down, w_up, x_out, rows, pre_up)
         if fx.const_expr(combine):
             grid_sync(g)
             # y through a one-rank exchange (a 64-column group a CTA), then the
             # combine
             tag = fx.Int32(ld_i32x4(epoch, 0)[0]) * 128 + 5
             xch = ex.Exchange([fx.Int64(mbox)], mbox, 0, 1, 1, tag, rows, codec)
-            tile = ex.GroupTile(sm.tile.ptr, rows)
+            tile = ex.GroupTile(sm.aux.ptr, rows)
             for grp in range(bid, ex.GROUPS, BLOCKS):
                 for idx in range(tid, rows * 8, THREADS):
                     token, piece = idx // 8, idx % 8
@@ -462,7 +463,7 @@ def _hc_kernel(rows, codec="bf16", combine=True, cold=False):
 @pytest.mark.parametrize("rows", WIDTHS)
 def test_gated_residual(harness, rows, codec):
     """The mix's normalized gated mean and injection scales, the combine's new
-    state and its rrms; with ``int4`` exchange lines the combine adds the
+    state and its rrms; with `int4` exchange lines the combine adds the
     codec's round trip of the block output."""
     _check_gated_residual(harness, rows, codec, True)
 
@@ -471,7 +472,7 @@ def test_gated_residual(harness, rows, codec):
 @pytest.mark.parametrize("rows", [1, 2, 4, 8, 16])
 def test_gated_residual_resident(harness, rows, cold):
     """The one-phase mix of the resident widths, its weights issued ahead or
-    (``cold``) in the phase, then the combine."""
+    (`cold`) in the phase, then the combine."""
     _check_gated_residual(harness, rows, "bf16", True, cold)
 
 
@@ -560,10 +561,10 @@ def mailboxes():
 
 
 def _exchange_kernel(rows, codec):
-    """Rank ``rank`` of a two-rank exchange in slot 1: with ``push``, its
-    partial ``y`` [rows, HIDDEN] into both mailboxes (a 64-column group a
-    CTA, as ``gdn.out``'s last arrivers push); with ``combine``, the combine
-    of both ranks' lines from its own mailbox into ``state``."""
+    """Rank `rank` of a two-rank exchange in slot 1: with `push`, its
+    partial `y` [rows, HIDDEN] into both mailboxes (a 64-column group a
+    CTA, as `gdn.out`'s last arrivers push); with `combine`, the combine
+    of both ranks' lines from its own mailbox into `state`."""
     import flydsl.compiler as flyc
     import flydsl.expr as fx
     from flydsl.expr.typing import Int32, Int64
@@ -1216,7 +1217,7 @@ def _moe_kernel(rows, codec="bf16"):
 
 def _expert_weights(gen, experts, rows, k, rows_real, k_real):
     """MXFP4 experts [experts, rows, k] in AITER's shuffled layouts, zero past
-    ``rows_real`` rows of each half (``rows`` covers two) and past ``k_real``:
+    `rows_real` rows of each half (`rows` covers two) and past `k_real`:
     (data, scales [experts, rows, pad8(k / 32)], dequantized f32)."""
     codes = torch.randint(0, 16, (experts, rows, k), generator=gen, dtype=torch.uint8)
     codes[:, :, k_real:] = 0
@@ -1240,10 +1241,10 @@ def _expert_weights(gen, experts, rows, k, rows_real, k_real):
 
 
 def _routed_inputs(gen, rows, picks):
-    """``x`` and a router gate whose top-k of row ``b`` is ``picks[b]``: each
-    expert has a near-orthogonal direction ``u_e``; a row is the sum of its
-    experts' directions (slightly unequal) plus noise, the gate rows ``2
-    u_e``."""
+    """`x` and a router gate whose top-k of row `b` is `picks[b]`: each
+    expert has a near-orthogonal direction `u_e`; a row is the sum of its
+    experts' directions (slightly unequal) plus noise, the gate rows `2
+    u_e`."""
     from vllm.models.qwen4_exp.amd.specialized_decode.wide.layout import (
         E_ALL,
         EXPERTS,
@@ -1262,7 +1263,7 @@ def _routed_inputs(gen, rows, picks):
 
 
 def _split_assignments(ids):
-    """The (row, slot) assignments of a step's split units (``moe.pieces``):
+    """The (row, slot) assignments of a step's split units (`moe.pieces`):
     units are (expert, <= 16 rows) in expert order, and a last round at most
     half full (every unit below 129 units, so every row of a narrow step)
     runs as two halves a unit."""
@@ -1304,16 +1305,19 @@ def _skewed_picks(rows, gen):
         (32, "hot", "bf16"),
         (128, "skewed", "bf16"),
         (128, "random", "int4"),
+        (192, "hot", "bf16"),
+        (192, "skewed", "bf16"),
     ]
+    + [(w, "random", c) for w in (129, 136, 160, 192) for c in CODECS]
     + [(w, "random", c) for w in SMALL for c in CODECS]
     + [(w, "hot", "bf16") for w in (1, 4, 12)],
 )
 def test_moe(harness, rows, routing, codec):
     """Routing (as sets: bf16 logits tie at the top-k boundary) and weights,
     then the rows whose routing agrees against the reference's MXFP4
-    activations; at most a few rows may route differently. ``hot`` (every
-    row on the same experts) and ``skewed`` routings run split units as
-    intermediate halves; their marks must be set."""
+    activations; at most a few rows may route differently. Narrow `hot`
+    (every row on the same experts) and `skewed` routings run split units
+    as intermediate halves; 192 hot rows fill over half a grid, so do not."""
     from vllm.models.qwen4_exp.amd.specialized_decode.wide.layout import (
         E_ALL,
         EXPERTS,
@@ -1389,14 +1393,14 @@ def test_moe(harness, rows, routing, codec):
     assert marked == _split_assignments(ids)
     if routing == "random" and rows >= 32:
         assert marked == 0
-    if routing != "random":
+    if routing == "skewed":
         assert marked > 0
     if routing == "hot":
-        assert marked == rows * SLOTS
+        assert marked == (0 if rows == 192 else rows * SLOTS)
 
 
 class _LazyDequant:
-    """``w[e]``: expert ``e`` of e2m1 ``codes`` / E8M0 ``scales`` dequantized to
+    """`w[e]`: expert `e` of e2m1 `codes` / E8M0 `scales` dequantized to
     f32 on first use (a test routes to few of the 513 experts)."""
 
     def __init__(self, codes, scales, k):
@@ -1412,7 +1416,7 @@ class _LazyDequant:
 
 
 def _lazy_expert_weights(gen, experts, rows, k, rows_real, k_real):
-    """``_expert_weights`` with the dequantized copy made per expert on use."""
+    """`_expert_weights` with the dequantized copy made per expert on use."""
     codes = torch.randint(0, 16, (experts, rows, k), generator=gen, dtype=torch.uint8)
     codes[:, :, k_real:] = 0
     cols = (k // 32 + 7) // 8 * 8
@@ -1466,13 +1470,13 @@ def small_moe_weights():
     ],
 )
 def test_moe_small(harness, small_moe_weights, rows, routing, codec):
-    """The small-batch MoE path (rows <= ``moe.SMALL_MAX``: GEMV router, local
+    """The small-batch MoE path (rows <= `moe.SMALL_MAX`: GEMV router, local
     routing, gate/up pieces, down by output owners into the exchange) against
-    the reference, as ``test_moe``. ``picked``: every row its own 10 experts
-    with clear logit margins; ``hot``: every row the same 10; ``shared``: rows
-    drawing 10 of 16 experts; ``inactive``: the last three rows zero (padding),
+    the reference, as `test_moe`. `picked`: every row its own 10 experts
+    with clear logit margins; `hot`: every row the same 10; `shared`: rows
+    drawing 10 of 16 experts; `inactive`: the last three rows zero (padding),
     which route to experts 0..9 (ties go to the lower expert) with equal
-    weights and give exactly zero. ``int4``: the exchange's INT4 lines."""
+    weights and give exactly zero. `int4`: the exchange's INT4 lines."""
     from vllm.models.qwen4_exp.amd.specialized_decode.wide.layout import (
         E_ALL,
         EXPERTS,
@@ -1568,22 +1572,22 @@ def test_moe_small(harness, small_moe_weights, rows, routing, codec):
 
 
 def test_decode_widths_take_every_capture_size():
-    """Every CUDA graph capture size in 1-128 gets a build (vLLM pads a step
+    """Every CUDA graph capture size in 1-192 gets a build (vLLM pads a step
     to the smallest captured width that holds it), and a build of any width
     in that range is valid."""
-    from types import SimpleNamespace
-
+    from vllm.config import CompilationConfig, VllmConfig
     from vllm.models.qwen4_exp.amd.specialized_decode.runtime import decode_widths
     from vllm.models.qwen4_exp.amd.specialized_decode.wide.layer import LayerBuild
 
-    sizes = [1, 2, 3, 4, 8, 12, 16, 24, 32, 64, 128, 136, 256]
-    config = SimpleNamespace(
-        compilation_config=SimpleNamespace(cudagraph_capture_sizes=sizes)
+    widths = (1, 2, 3, 4, 8, 12, 16, 24, 32, 64, 128, 129, 136, 160, 184, 192)
+    config = VllmConfig()
+    config.compilation_config = CompilationConfig(
+        cudagraph_capture_sizes=[*widths, 193, 200, 256]
     )
-    assert decode_widths(config) == (1, 2, 3, 4, 8, 12, 16, 24, 32, 64, 128)
-    for rows in (1, 3, 12, 128):
+    assert decode_widths(config) == widths
+    for rows in range(1, 193):
         LayerBuild(kind="gdn", tokens=rows, tp=2)
-    for rows in (0, 129):
+    for rows in (0, 193):
         with pytest.raises(ValueError):
             LayerBuild(kind="gdn", tokens=rows, tp=2)
 
@@ -1611,7 +1615,7 @@ def test_allreduce_codec_follows_quickreduce(monkeypatch, level, codec):
 
 @pytest.mark.parametrize("rows", WIDTHS)
 def test_qsa_sparse_attention(rows):
-    """``wide.attention`` over a strided paged K | V pool against float64
+    """`wide.attention` over a strided paged K | V pool against float64
     softmax attention of each row's tokens: the selected compressed blocks
     (all of a row's complete blocks in any order up to 512, else 512 of them)
     and the open tail, from no context to past the 2048-token budget, with a
@@ -1677,8 +1681,8 @@ def test_qsa_sparse_attention(rows):
 
 @pytest.mark.parametrize("rows", WIDTHS)
 def test_qsa_indexer_scores(rows):
-    """``wide.indexer.score`` over a strided paged compressed-key pool
-    against float64 ``sum_h relu(q_h . k_c) / sqrt(128)`` on each row's
+    """`wide.indexer.score` over a strided paged compressed-key pool
+    against float64 `sum_h relu(q_h . k_c) / sqrt(128)` on each row's
     visible columns, and the visible counts exactly (a padded row, from three
     rows, sees none)."""
     from vllm.models.qwen4_exp.amd.specialized_decode.wide import indexer
@@ -1729,15 +1733,15 @@ def test_qsa_indexer_scores(rows):
         assert rel(logits[r, :want], expect) < 1e-5
 
 
-@pytest.mark.parametrize("rows", [1, 4, 8, 16, 128])
+@pytest.mark.parametrize("rows", [1, 4, 8, 16, 128, 136, 192])
 def test_qsa_select(rows):
-    """``wide.indexer.score`` with the in-kernel top-k (``selected``) against
-    vLLM's ``top_k_per_row_decode`` on the same scores, compared as sets: a
+    """`wide.indexer.score` with the in-kernel top-k (`selected`) against
+    vLLM's `top_k_per_row_decode` on the same scores, compared as sets: a
     row within the budget lists all of its blocks in order (-1 after) without
     scoring; a longer row picks stock's 512 but for ties at the boundary
     (stock's pick among ties is arbitrary; ours takes the lowest blocks), in
     ascending order. Rows from no context to the most keys the select stages
-    in LDS (``select.MAX_KEYS``) and past them, and a padded row."""
+    in LDS (`select.MAX_KEYS`) and past them, and a padded row."""
     from vllm import _custom_ops as ops
     from vllm.models.qwen4_exp.amd.specialized_decode.wide import indexer, select
 
@@ -1820,11 +1824,11 @@ def test_qsa_select(rows):
 
 
 @pytest.mark.parametrize("spread", [False, True])
-@pytest.mark.parametrize("rows", [1, 8, 16, 32, 128])
+@pytest.mark.parametrize("rows", [1, 8, 16, 32, 128, 192])
 def test_qsa_sparse_attention_dense(rows, spread):
-    """``wide.attention`` with ``dense``: a row within the budget attends all
+    """`wide.attention` with `dense`: a row within the budget attends all
     of its complete blocks and the tail whatever its list holds; a longer row
-    reads its list as before. ``spread``: every split merges a slice of the
+    reads its list as before. `spread`: every split merges a slice of the
     output. Twice (the arrival counters reset themselves), against float64
     softmax attention."""
     from vllm.models.qwen4_exp.amd.specialized_decode.wide import attention
@@ -1950,12 +1954,12 @@ def _qsa_proj_kernel(rows):
     return launch
 
 
-@pytest.mark.parametrize("rows", [1, 4, 8, 16, 128])
+@pytest.mark.parametrize("rows", [1, 4, 8, 16, 128, 136, 192])
 def test_qsa_proj(harness, rows):
-    """qsa_front's projection phase: ``x @ W_qkv.T`` and ``x @ W_ix.T`` (bf16
+    """qsa_front's projection phase: `x @ W_qkv.T` and `x @ W_ix.T` (bf16
     weights in vLLM's row-major layout), f32 accumulation of exact bf16
     products rounded to bf16 once, against float64 and against torch's bf16
-    GEMM (the stock ``qkv_proj`` / ``index_qk_proj``); rows past the step
+    GEMM (the stock `qkv_proj` / `index_qk_proj`); rows past the step
     untouched."""
     from vllm.models.qwen4_exp.amd.specialized_decode.wide.layout import HIDDEN
     from vllm.models.qwen4_exp.amd.specialized_decode.wide.stages import qsa
@@ -1991,8 +1995,8 @@ def test_qsa_proj(harness, rows):
 
 @pytest.mark.parametrize("rows", [1, 4, 8, 16, 32])
 def test_qsa_score_prepare(rows):
-    """``wide.indexer.score`` with vLLM's fused prepare in the launch
-    (``prep``) against ``ops.qsa_prepare`` and the plain score on its output:
+    """`wide.indexer.score` with vLLM's fused prepare in the launch
+    (`prep`) against `ops.qsa_prepare` and the plain score on its output:
     the main queries, gates, K | V cache rows, the raw-key ring (keys and
     MRoPE positions), the compressed keys of the rows that complete a group
     (rotated at MRoPE positions read from the ring) and the scores, from
