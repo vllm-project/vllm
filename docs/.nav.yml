@@ -26,10 +26,11 @@ nav:
       - models/supported_models.md
       - models/generative_models.md
       - Pooling Models: models/pooling_models
+      - models/structured_decisions_models.md
       - models/extensions
       - Hardware Supported Models:
         - models/hardware_supported_models/*
-        - TPU: https://docs.vllm.ai/projects/tpu/en/latest/recommended_models_features/
+        - TPU: https://docs.vllm.ai/projects/tpu/en/latest/recommended_models/
     - Features: features
   - Developer Guide:
     - contributing/README.md

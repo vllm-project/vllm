@@ -7,6 +7,7 @@ from collections.abc import Generator
 import pytest
 from openai.types.responses import FunctionTool
 
+from tests.tool_parsers.utils import ToolState, ToolStateWithHeader
 from vllm.entrypoints.generate.base.protocol import (
     DeltaMessage,
     FunctionCall,
@@ -630,7 +631,7 @@ def test_extract_tool_calls_streaming(
     request = ChatCompletionRequest(model=MODEL, messages=[], tools=sample_tools)
 
     other_content = ""
-    tool_states = {}  # Track state per tool index
+    tool_states: dict[int, ToolStateWithHeader] = {}  # Track state per tool index
 
     for delta_message in stream_delta_message_generator(
         step3p5_tool_parser, step3p5_tokenizer, model_output, request
@@ -757,7 +758,7 @@ fahrenheit
     request = ChatCompletionRequest(model=MODEL, messages=[], tools=sample_tools)
 
     other_content = ""
-    tool_states = {}
+    tool_states: dict[int, ToolStateWithHeader] = {}
 
     for delta_message in stream_delta_message_generator(
         step3p5_tool_parser, step3p5_tokenizer, model_output, request
@@ -844,6 +845,7 @@ TX
     for chunk in chunks:
         if chunk.tool_calls and chunk.tool_calls[0].id:
             header_found = True
+            assert chunk.tool_calls[0].function is not None
             assert chunk.tool_calls[0].function.name == "get_current_weather"
             assert chunk.tool_calls[0].type == "function"
             # Empty initially
@@ -854,7 +856,10 @@ TX
     # Should have chunks with incremental arguments
     arg_chunks = []
     for chunk in chunks:
-        if chunk.tool_calls and chunk.tool_calls[0].function.arguments:
+        if not chunk.tool_calls:
+            continue
+        assert chunk.tool_calls[0].function is not None
+        if chunk.tool_calls[0].function.arguments:
             arg_chunks.append(chunk.tool_calls[0].function.arguments)
 
     # Arguments should be streamed incrementally
@@ -900,7 +905,7 @@ rectangle
     request = ChatCompletionRequest(model=MODEL, messages=[], tools=sample_tools)
 
     other_content = ""
-    tool_states = {}
+    tool_states: dict[int, ToolStateWithHeader] = {}
 
     for delta_message in stream_delta_message_generator(
         step3p5_tool_parser, step3p5_tokenizer, model_output, request
@@ -1207,7 +1212,7 @@ rectangle
     request = ChatCompletionRequest(model=MODEL, messages=[], tools=sample_tools)
 
     other_content = ""
-    tool_states = {}
+    tool_states: dict[int, ToolStateWithHeader] = {}
 
     for delta_message in stream_delta_message_generator(
         step3p5_tool_parser, step3p5_tokenizer, model_output, request
@@ -1297,7 +1302,7 @@ rectangle""",
     boundary_chunk = delta_text_chunks[1]
     assert len(step3p5_tokenizer.encode(boundary_chunk, add_special_tokens=False)) > 1
 
-    tool_states = {}
+    tool_states: dict[int, ToolState] = {}
     for delta_message in stream_delta_message_generator_from_chunks(
         step3p5_tool_parser, step3p5_tokenizer, delta_text_chunks, request
     ):

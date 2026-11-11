@@ -4,6 +4,7 @@
 from __future__ import annotations
 
 import contextlib
+import ctypes
 import logging
 import multiprocessing
 import os
@@ -136,9 +137,12 @@ def _maybe_force_spawn():
         os.environ["RAY_ADDRESS"] = ray.get_runtime_context().gcs_address
         reasons.append("In a Ray actor and can only be spawned")
 
-    # Force spawn if NUMA binding is enabled via --numa-bind.
-    # NUMA binding uses executable hijacking which requires spawn
-    if "--numa-bind" in sys.argv:
+    # NUMA binding uses executable hijacking, which requires spawn.
+    if any(
+        arg.split("=", 1)[0].replace("_", "-")
+        in ("--numa-bind", "--numa-bind-nodes", "--numa-bind-cpus")
+        for arg in sys.argv
+    ):
         reasons.append("NUMA binding requires spawn method")
 
     if cuda_is_initialized():
@@ -161,6 +165,26 @@ def _maybe_force_spawn():
         os.environ["VLLM_WORKER_MULTIPROC_METHOD"] = "spawn"
 
 
+_OMP_PAUSE_HARD = 2  # omp_pause_resource_t, OpenMP 5.0
+
+
+def _release_libgomp_threads() -> None:
+    """Join libgomp's idle worker threads so a forked child can use OpenMP.
+
+    libgomp has no fork handler: once this process has run a parallel region
+    (e.g. any multi-threaded torch CPU op), a forked child deadlocks in its
+    own first parallel region. Pausing the runtime (OpenMP 5.0) joins the
+    workers; this process recreates them on its next parallel region.
+    """
+    try:
+        paths = find_loaded_libraries("libgomp")
+    except OSError:
+        return
+    for path in paths:
+        with contextlib.suppress(OSError, AttributeError):
+            ctypes.CDLL(path).omp_pause_resource_all(_OMP_PAUSE_HARD)
+
+
 def get_mp_context():
     """Get a multiprocessing context with a particular method (spawn or fork).
     By default we follow the value of the VLLM_WORKER_MULTIPROC_METHOD to
@@ -174,6 +198,8 @@ def get_mp_context():
     # of whether spawn was already set.
     _sync_visible_devices_env_vars()
     mp_method = envs.VLLM_WORKER_MULTIPROC_METHOD
+    if mp_method == "fork":
+        _release_libgomp_threads()
     return multiprocessing.get_context(mp_method)
 
 
@@ -199,7 +225,7 @@ def decorate_logs(
 ) -> None:
     """Add vLLM process metadata to subsequent log records."""
     if process_name is None:
-        process_name = get_mp_context().current_process().name
+        process_name = multiprocessing.current_process().name
 
     set_vllm_process_name(process_name, skip_if_set=skip_if_decorated)
 
@@ -221,7 +247,7 @@ def kill_process_tree(pid: int):
 
     # Send SIGKILL to all children first
     for child in children:
-        with contextlib.suppress(ProcessLookupError):
+        with contextlib.suppress(ProcessLookupError, psutil.NoSuchProcess):
             logger.warning(
                 "[shutdown] force killing sub process %s pid %d",
                 child.name(),
@@ -262,7 +288,7 @@ def set_ulimit(target_soft_limit: int = 65535):
             )
 
 
-def find_loaded_library(lib_name: str) -> str | None:
+def find_loaded_libraries(lib_name: str) -> list[str]:
     """
     According to https://man7.org/linux/man-pages/man5/proc_pid_maps.5.html,
     the file `/proc/self/maps` contains the memory maps of the process, which includes the
@@ -276,6 +302,7 @@ def find_loaded_library(lib_name: str) -> str | None:
     # {lib_name}-<hash>.so[.*], and /proc/self/maps is ordered by mapping
     # address rather than load order, so a substring hit is a
     # nondeterministic hijack.
+    paths: dict[str, None] = {}
     with open("/proc/self/maps") as f:
         for line in f:
             start = line.find("/")
@@ -284,6 +311,10 @@ def find_loaded_library(lib_name: str) -> str | None:
             path = line[start:].strip()
             filename = path.rsplit("/", maxsplit=1)[-1]
             if filename.startswith((f"{lib_name}.", f"{lib_name}-")):
-                return path
-    # the library is not loaded in the current process
-    return None
+                paths[path] = None
+    return list(paths)
+
+
+def find_loaded_library(lib_name: str) -> str | None:
+    paths = find_loaded_libraries(lib_name)
+    return paths[0] if paths else None

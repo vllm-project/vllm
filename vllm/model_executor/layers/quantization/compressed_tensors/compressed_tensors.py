@@ -7,7 +7,6 @@ from typing import TYPE_CHECKING, Any, Literal, cast
 import torch
 from compressed_tensors.config import CompressionFormat, SparsityCompressionConfig
 from compressed_tensors.quantization import (
-    ActivationOrdering,
     QuantizationArgs,
     QuantizationStrategy,
     QuantizationType,
@@ -44,6 +43,8 @@ from vllm.model_executor.layers.quantization.compressed_tensors.schemes import (
     CompressedTensorsW4A4Mxfp4,
     CompressedTensorsW4A8Fp8,
     CompressedTensorsW4A8Int,
+    CompressedTensorsW4A8Mxfp4,
+    CompressedTensorsW6A8Mxfp6,
     CompressedTensorsW8A8Fp8,
     CompressedTensorsW8A8Int8,
     CompressedTensorsW8A8Mxfp8,
@@ -63,6 +64,12 @@ from vllm.model_executor.layers.quantization.compressed_tensors.utils import (
     should_ignore_layer,
 )
 from vllm.model_executor.layers.quantization.kv_cache import BaseKVCacheMethod
+from vllm.model_executor.layers.quantization.utils.quant_utils import (
+    GroupShape,
+    QuantKey,
+    create_fp8_quant_key,
+    kMxfp8Dynamic,
+)
 from vllm.model_executor.layers.vocab_parallel_embedding import (
     ParallelLMHead,
     VocabParallelEmbedding,
@@ -327,16 +334,6 @@ class CompressedTensorsConfig(QuantizationConfig):
                 weight_quant = QuantizationArgs.model_validate(
                     quant_config.get("weights")
                 )
-                if weight_quant.actorder in (
-                    ActivationOrdering.GROUP.value,
-                    ActivationOrdering.DYNAMIC.value,
-                ):
-                    raise ValueError(
-                        "Compressed-tensors group/dynamic activation ordering "
-                        f"(actorder={weight_quant.actorder!r}) is no longer supported. "
-                        "Use a checkpoint with static/weight activation ordering or "
-                        "without activation ordering."
-                    )
                 target_scheme_map[target]["weights"] = weight_quant
 
                 target_scheme_map[target]["input_activations"] = None
@@ -447,6 +444,50 @@ class CompressedTensorsConfig(QuantizationConfig):
             and is_4_bits
             and is_group_size_32
             and is_symmetric
+        )
+
+    @classmethod
+    def _is_mxfp4_w4a8_fp8(
+        cls, weight_quant: QuantizationArgs, input_quant: QuantizationArgs
+    ) -> bool:
+        if not cls._is_mxfp4(weight_quant) or input_quant is None:
+            return False
+
+        is_float_type = input_quant.type == QuantizationType.FLOAT
+        is_8_bits = input_quant.num_bits == 8
+        is_static_weight = not weight_quant.dynamic
+        is_dynamic_input = bool(input_quant.dynamic)
+        is_token_or_group = input_quant.strategy in (
+            QuantizationStrategy.TOKEN,
+            QuantizationStrategy.GROUP,
+        )
+
+        return (
+            is_float_type
+            and is_8_bits
+            and is_static_weight
+            and is_dynamic_input
+            and is_token_or_group
+            and input_quant.symmetric
+        )
+
+    @staticmethod
+    def _fp8_dynamic_input_key(input_quant: QuantizationArgs) -> QuantKey:
+        if input_quant.strategy == QuantizationStrategy.GROUP:
+            group_shape = GroupShape(1, input_quant.group_size)
+        else:
+            group_shape = GroupShape.PER_TOKEN
+        return create_fp8_quant_key(static=False, group_shape=group_shape)
+
+    @staticmethod
+    def _is_mxfp6(quant_args: QuantizationArgs) -> bool:
+        return (
+            quant_args is not None
+            and quant_args.strategy == QuantizationStrategy.GROUP.value
+            and quant_args.symmetric
+            and quant_args.group_size == 32
+            and quant_args.type == QuantizationType.FLOAT
+            and quant_args.num_bits == 6
         )
 
     @staticmethod
@@ -764,8 +805,23 @@ class CompressedTensorsConfig(QuantizationConfig):
                 )
             return CompressedTensorsW4A4Fp4()
 
+        if self._is_mxfp4_w4a8_fp8(weight_quant, input_quant):
+            return CompressedTensorsW4A8Mxfp4(
+                activation_quant_key=self._fp8_dynamic_input_key(input_quant)
+            )
+
         if self._is_mxfp4(weight_quant):
             return CompressedTensorsW4A4Mxfp4()
+
+        if self._is_mxfp6(weight_quant):
+            if input_quant is None:
+                return CompressedTensorsW6A8Mxfp6(activation_quant_key=None)
+            if self._is_mxfp8(input_quant) and input_quant.dynamic:
+                return CompressedTensorsW6A8Mxfp6(activation_quant_key=kMxfp8Dynamic)
+            raise ValueError(
+                "MXFP6 weights require 16-bit or dynamic MXFP8 activations, "
+                f"got {input_quant}"
+            )
 
         if self._is_mxfp8(weight_quant):
             return CompressedTensorsW8A8Mxfp8()
@@ -1208,7 +1264,8 @@ class CompressedTensorsKVCacheMethod(BaseKVCacheMethod):
         """Override the default vLLM placeholder scales with the llm-compressor loaded
         scales. Zero points are not used as only symmetric quantization is supported.
         """
-        # Buffers (not Parameters) so sleep snapshots them; ATTN_HEAD changes shape.
+        # Buffers, not Parameters: updates don't rewrite them, so level-2 sleep
+        # must keep them. ATTN_HEAD changes shape.
         layer.register_buffer("_k_scale", layer.k_scale.detach())
         layer.register_buffer("_v_scale", layer.v_scale.detach())
         layer.register_buffer("_q_scale", layer.q_scale.detach())
@@ -1227,11 +1284,3 @@ class CompressedTensorsKVCacheMethod(BaseKVCacheMethod):
         # Sync host (cpu) scale copies read by AITER fused kernels.
         layer._k_scale_cpu.fill_(layer._k_scale_float)
         layer._v_scale_cpu.fill_(layer._v_scale_float)
-
-        # Discard all placeholders.
-        del layer.k_scale
-        del layer.v_scale
-        del layer.q_scale
-        del layer.k_zero_point
-        del layer.v_zero_point
-        del layer.q_zero_point
