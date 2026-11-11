@@ -1883,6 +1883,26 @@ def test_one_sided_all2all_default_follows_draft_model_experts(
     assert config.parallel_config.all2all_backend == expected
 
 
+def test_draft_all2all_backend_follows_target_after_fallback(hgx_host):
+    """The draft copies the target's backend before the target's "auto"
+    fallback runs, so it has to be synced afterwards."""
+    config = _one_full_ep_node_config()
+    draft_parallel = SpeculativeConfig.create_draft_parallel_config(
+        config.parallel_config, 1
+    )
+    assert draft_parallel.all2all_backend == "flashinfer_nvlink_one_sided"
+    config.speculative_config = SimpleNamespace(
+        draft_model_config=ModelConfig(
+            _MOE_MODEL, hf_overrides={"num_experts_per_tok": 4}
+        ),
+        draft_parallel_config=draft_parallel,
+    )
+    config._maybe_fall_back_from_auto_one_sided_all2all()
+    config._sync_draft_all2all_backend()
+    assert config.parallel_config.all2all_backend == "allgather_reducescatter"
+    assert draft_parallel.all2all_backend == "allgather_reducescatter"
+
+
 def test_one_sided_all2all_default_skips_lora(hgx_host):
     """Fused MoE LoRA with EP only supports allgather_reducescatter."""
     config = _one_full_ep_node_config(lora_config=LoRAConfig())
