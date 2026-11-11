@@ -229,6 +229,7 @@ if TYPE_CHECKING:
     VLLM_KIMI_SD_DSA_PART_FP32: bool = False
     VLLM_KIMI_SD_DSA_VERIFY: bool = False
     VLLM_KIMI_SD_DSA_PROLOGUE: bool = False
+    VLLM_K3_DSA_FUSED_NORM_GATE: bool = True
     VLLM_ENABLE_GEMM_RS: bool = False
     VLLM_BLOCKSCALE_FP8_GEMM_FLASHINFER: bool = True
     VLLM_USE_FLASHINFER_MOE_INT4: bool = False
@@ -1777,6 +1778,12 @@ environment_variables: dict[str, Callable[[], Any]] = {
     # write, q_b, wq, W_UK) before the indexer's scoring and K2.
     "VLLM_KIMI_SD_DSA_PROLOGUE": lambda: bool(
         int(os.getenv("VLLM_KIMI_SD_DSA_PROLOGUE", "0"))
+    ),
+    # Kimi-K3.1 DSA layers on ROCm: run the q_a/kv_a RMSNorms as one Triton
+    # launch and the output gate (attn_out * sigmoid(g_proj)) as one fused
+    # sigmoid-multiply instead of two launches each.
+    "VLLM_K3_DSA_FUSED_NORM_GATE": lambda: bool(
+        int(os.getenv("VLLM_K3_DSA_FUSED_NORM_GATE", "1"))
     ),
     # Fuse eligible sequence-parallel row-parallel projections with their TP
     # reduce-scatter using the SM100 BF16/MXFP8 GEMM-RS kernel (Kimi-K3

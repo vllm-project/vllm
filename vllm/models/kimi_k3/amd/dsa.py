@@ -66,6 +66,10 @@ from .ops.fp4_indexer_prefill import prefill_chunks, prefill_workspace_bytes
 
 logger = init_logger(__name__)
 
+# Largest batch for the fused q_a/kv_a RMSNorm (MI355X crossover vs. AITER is
+# around 2K tokens).
+_FUSED_QKV_NORM_MAX_TOKENS = 1024
+
 
 @triton.jit
 def _index_weights_kernel(
@@ -862,6 +866,11 @@ class KimiK3DSAAttention(nn.Module):
         # The plain wrapper, not the AMD KimiK3MultiHeadLatentAttentionWrapper:
         # its fused decode Q-prep path writes dense 576-wide rows, which the
         # 656-byte fp8_ds_mla records cannot take.
+        # VLLM_K3_DSA_FUSED_NORM_GATE only fuses the q_a/kv_a RMSNorms into one
+        # launch and the output gate into one sigmoid-multiply; kv_c_normed and
+        # the KV cache write are unchanged. The fused norm (one row per program)
+        # loses to the AITER norms on large prefill chunks, so those keep them.
+        fuse_norm_gate = envs.VLLM_K3_DSA_FUSED_NORM_GATE
         self.mla_attn = MultiHeadLatentAttentionWrapper(
             self.hidden_size,
             self.num_local_heads,
@@ -875,6 +884,9 @@ class KimiK3DSAAttention(nn.Module):
             cache_config,
             quant_config,
             prefix,
+            fuse_qkv_rmsnorm=fuse_norm_gate and self.q_lora_rank is not None,
+            fuse_output_gate=fuse_norm_gate,
+            fuse_qkv_rmsnorm_max_tokens=_FUSED_QKV_NORM_MAX_TOKENS,
         )
 
     def get_input_quant_key(self) -> None:
