@@ -205,7 +205,7 @@ def run_mixed_prefill_decode_warmup(
 
     decode_prefill_output = SchedulerOutput.make_empty()
     decode_prefill_output.num_spec_tokens_to_schedule = (
-        model_runner.num_speculative_steps
+        model_runner.vllm_config.num_scheduled_spec_tokens
     )
     decode_prefill_output.scheduled_new_reqs = [
         NewRequestData(
@@ -235,7 +235,9 @@ def run_mixed_prefill_decode_warmup(
     ]
 
     mixed_output = SchedulerOutput.make_empty()
-    mixed_output.num_spec_tokens_to_schedule = model_runner.num_speculative_steps
+    mixed_output.num_spec_tokens_to_schedule = (
+        model_runner.vllm_config.num_scheduled_spec_tokens
+    )
     mixed_output.scheduled_cached_reqs = cached_decode_req
     mixed_output.scheduled_new_reqs = [
         NewRequestData(
@@ -322,7 +324,9 @@ def run_context_prefill_warmup(
     token_ids = _warmup_token_ids(model_runner, context_len + query_len)
     sampling_params = SamplingParams(max_tokens=1, temperature=0.0)
     prefill_output = SchedulerOutput.make_empty()
-    prefill_output.num_spec_tokens_to_schedule = model_runner.num_speculative_steps
+    prefill_output.num_spec_tokens_to_schedule = (
+        model_runner.vllm_config.num_scheduled_spec_tokens
+    )
     prefill_output.scheduled_new_reqs = [
         NewRequestData(
             req_id=req_id,
@@ -446,7 +450,7 @@ def _warmup_kernels(
     if model_runner.vllm_config.is_mm_encoder_only:
         return
 
-    num_spec_steps = model_runner.num_speculative_steps
+    num_spec_steps = model_runner.vllm_config.num_scheduled_spec_tokens
     decode_query_len = model_runner.decode_query_len
     # Use decode_query_len + 1 tokens so the prefill batch's per-request query
     # length exceeds decode_query_len, preventing it from being misclassified as
