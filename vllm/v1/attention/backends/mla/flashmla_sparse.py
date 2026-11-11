@@ -1407,6 +1407,10 @@ class FlashMLASparseImpl(SparseMLACommonImpl[FlashMLASparseMetadata]):
         out: torch.Tensor | None = None,
     ) -> tuple[torch.Tensor, torch.Tensor]:
         num_tokens = q.shape[0]
+        if kv_c_and_k_pe_cache.dim() == 3:
+            kv_c_and_k_pe_cache, _ = flat_kv_row_view(
+                kv_c_and_k_pe_cache, kv_c_and_k_pe_cache.shape[1]
+            )
         kv_c_and_k_pe_cache = kv_c_and_k_pe_cache.view(
             -1, 1, kv_c_and_k_pe_cache.shape[-1]
         )

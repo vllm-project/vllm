@@ -176,6 +176,12 @@ def _lay_out_hisparse_groups(
                 f"{sorted(page_sizes)}."
             )
         page_size = page_sizes.pop()
+        alignments = {spec.block_stride_alignment for _, spec in layers}
+        if len(alignments) != 1:
+            raise ValueError(
+                "HiSparse hot-cache groups require one block stride alignment, "
+                f"got {alignments}."
+            )
         names = [name for name, _ in layers]
         resident_groups.append(
             KVCacheGroupSpec(
@@ -197,6 +203,7 @@ def _lay_out_hisparse_groups(
                     block_size=gpu_block_size,
                     page_size=page_size,
                     blocks_per_request=hot_blocks_per_request,
+                    block_stride_alignment=alignments.pop(),
                 ),
                 enable_kv_transfer=False,
             )

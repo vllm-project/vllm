@@ -41,6 +41,7 @@ from vllm.multimodal.inputs import (
 from vllm.platforms import current_platform
 from vllm.sampling_params import SamplingParams
 from vllm.utils.hashing import sha256, sha256_cbor, xxhash, xxhash_cbor
+from vllm.v1.attention.backend import MultipleOf
 from vllm.v1.attention.backends.utils import resolve_kv_cache_layout
 from vllm.v1.core.kv_cache_manager import KVCacheBlocks, KVCacheManager
 from vllm.v1.core.kv_cache_planning import (
@@ -226,15 +227,25 @@ def test_hisparse_derived_specs_do_not_affect_kv_cache_layout(monkeypatch):
     assert layouts[0] == layouts[1]
 
 
-def test_hisparse_packs_hot_layers_up_to_largest_device_page():
+@pytest.mark.parametrize(
+    ("source_alignment", "hot_alignment"),
+    [(None, 576 * 2), (MultipleOf(64), 64 * 576 * 2)],
+)
+def test_hisparse_packs_hot_layers_up_to_largest_device_page(
+    source_alignment, hot_alignment
+):
     """Hybrid models share the device pool with larger non-MLA pages; hot
     layers must pack up to that page, not one group per index group, and
-    indexer blocks fill it."""
+    indexer blocks fill it. Hot blocks are whole rows apart unless the
+    attention kernel reads fixed pages."""
     mla = dict(block_size=64, num_kv_heads=1, dtype=torch.bfloat16)
     specs: dict[str, KVCacheSpec] = {}
     for layer in range(2):
         specs[f"model.layers.{layer}.self_attn"] = MLAAttentionSpec(
-            head_size=576, is_index_group_leader=True, **mla
+            head_size=576,
+            is_index_group_leader=True,
+            block_stride_alignment=source_alignment,
+            **mla,
         )
         specs[f"model.layers.{layer}.self_attn.indexer"] = MLAAttentionSpec(
             head_size=128,
@@ -253,6 +264,7 @@ def test_hisparse_packs_hot_layers_up_to_largest_device_page():
     hot_groups = [g for g in groups if isinstance(g.kv_cache_spec, HiSparseHotSpec)]
     assert len(hot_groups) == 1
     assert len(hot_groups[0].layer_names) == 2
+    assert hot_groups[0].kv_cache_spec.get_block_stride_alignment() == hot_alignment
     (indexer_group,) = (
         g for g in groups if g.role == KVCacheGroupRole.HISPARSE_INDEXER
     )
