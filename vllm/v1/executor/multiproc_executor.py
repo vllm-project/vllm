@@ -372,8 +372,8 @@ class MultiprocExecutor(Executor):
         )
 
     def check_health_gpu(self) -> None:
-        # Every rank must reply: PP stages other than the output rank fail
-        # independently.
+        # Unlike execute_dummy_batch, wait for every rank: PP stages other
+        # than the output rank fail independently.
         self.collective_rpc(
             "check_health_gpu", timeout=envs.VLLM_EXECUTE_MODEL_TIMEOUT_SECONDS
         )

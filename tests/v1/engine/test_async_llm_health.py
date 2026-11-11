@@ -4,7 +4,6 @@
 health state, and AsyncLLM aggregates the ranks into one answer."""
 
 import asyncio
-import queue
 from types import SimpleNamespace
 from unittest.mock import AsyncMock, Mock
 
@@ -13,7 +12,7 @@ import pytest
 import vllm.envs as envs
 from vllm.v1.engine import EngineHealthState
 from vllm.v1.engine.async_llm import AsyncLLM
-from vllm.v1.engine.core import EngineCoreProc, EngineShutdownState
+from vllm.v1.engine.core import EngineCoreProc
 from vllm.v1.engine.exceptions import EngineSleepingError, EngineUnhealthyError
 
 OK = EngineHealthState.OK
@@ -29,16 +28,11 @@ class FakeClock:
 
 def make_core(*, has_requests: bool = False) -> EngineCoreProc:
     core = object.__new__(EngineCoreProc)
-    core.scheduler = SimpleNamespace(
-        has_requests=Mock(return_value=has_requests),
-        has_unfinished_requests=Mock(return_value=has_requests),
-    )
+    core.scheduler = SimpleNamespace(has_requests=Mock(return_value=has_requests))
     core.batch_queue = None
     core.engines_running = False
     core.is_sleeping = Mock(return_value=False)  # type: ignore[method-assign]
     core.model_executor = SimpleNamespace(check_health_gpu=Mock())
-    core.output_queue = queue.Queue()
-    core.shutdown_state = EngineShutdownState.RUNNING
     core.step_fn = Mock(return_value=({}, False))
     core.post_step = Mock()  # type: ignore[method-assign]
     core._last_gpu_probe_at = 0.0
@@ -72,6 +66,21 @@ def test_engine_idle_probe_cache(monkeypatch: pytest.MonkeyPatch):
     probe.side_effect = None
     core.check_health_gpu(10)
     assert probe.call_count == 5
+
+
+@pytest.mark.parametrize(
+    ("has_requests", "sleeping", "expected"),
+    [(True, False, BUSY), (False, True, SLEEPING)],
+)
+def test_engine_skips_probe_when_busy_or_sleeping(
+    has_requests: bool, sleeping: bool, expected: EngineHealthState
+):
+    """Busy ranks get no extra GPU work, and sleeping ranks are not probed."""
+    core = make_core(has_requests=has_requests)
+    core.is_sleeping.return_value = sleeping
+
+    assert core.check_health_gpu(10) == expected
+    core.model_executor.check_health_gpu.assert_not_called()
 
 
 def make_async_engine(*rank_results) -> AsyncLLM:

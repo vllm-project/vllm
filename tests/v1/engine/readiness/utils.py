@@ -45,14 +45,6 @@ class ReadyProbeServer:
             time.sleep(0.5)
         return None
 
-    def wait_until_ready(self) -> bool:
-        start = time.monotonic()
-        while time.monotonic() - start < DETECT_DEADLINE_S:
-            if self.status() == 200:
-                return True
-            time.sleep(0.5)
-        return False
-
     def stays_ready(self, duration_s: float) -> bool:
         start = time.monotonic()
         while time.monotonic() - start < duration_s:
