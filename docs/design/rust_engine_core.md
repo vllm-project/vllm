@@ -24,8 +24,10 @@ outputs:
 GPU workers, the model runner, the worker halves of KV connectors and the API
 frontend are not part of it. Structured output stays in Python: the Rust
 scheduler calls the Python `StructuredOutputManager` (every backend) through
-hooks. The Python `EngineCore` loop, ZMQ I/O and the
-executor stay in Python.
+hooks. The Python `EngineCore` loop and the executor stay in Python. With the
+Rust scheduler, the engine's ZMQ I/O runs on Rust threads that speak the Rust
+frontend's wire types ([Native I/O](#native-io)), so the Rust scheduler serves
+the Rust frontend only.
 
 ## Enabling it
 
@@ -38,14 +40,15 @@ implementation of every component.
 
 | Setting | Default | Effect |
 | --- | --- | --- |
-| `VLLM_USE_RUST_CORE=1` | `0` | Use the Rust scheduler, KV cache manager, block hasher and Mooncake store lookup paths where supported, falling back to Python otherwise. |
-| `--scheduler-cls vllm.v1.core.sched.rust_scheduler.RustScheduler` | unset | Select the Rust scheduler explicitly (`RustAsyncScheduler` for async scheduling). Fails at startup if the configuration is unsupported. |
+| `VLLM_USE_RUST_CORE=1` | `0` | Use the Rust scheduler, KV cache manager, block hasher and Mooncake store lookup paths where supported, falling back to Python otherwise. The Rust scheduler needs the Rust frontend: with another frontend, or an engine in process, the Python scheduler is used. |
+| `--scheduler-cls vllm.v1.core.sched.rust_scheduler.RustScheduler` | unset | Select the Rust scheduler explicitly (`RustAsyncScheduler` for async scheduling). Fails at startup if the configuration is unsupported or the frontend is not the Rust frontend. |
 | `VLLM_RUST_CORE_NATIVE_HOOKS=0` | `1` | Keep the Python NIXL / Mooncake store scheduler halves, called from the Rust scheduler through hooks. |
 
 For example:
 
 ```bash
-VLLM_USE_RUST_CORE=1 vllm serve Qwen/Qwen3-8B --enable-prefix-caching
+VLLM_USE_RUST_FRONTEND=1 VLLM_USE_RUST_CORE=1 vllm serve Qwen/Qwen3-8B \
+    --enable-prefix-caching --prefix-caching-hash-algo sha256_cbor
 ```
 
 With `VLLM_USE_RUST_CORE=1` and no `--scheduler-cls`, the scheduler class is
@@ -55,9 +58,10 @@ With `VLLM_USE_RUST_CORE=1` and no `--scheduler-cls`, the scheduler class is
 
 ```mermaid
 flowchart LR
-    FE[API server] -- ZMQ --> EC
+    FE[Rust frontend] -- ZMQ --> IO
     subgraph EC[EngineCore process]
-        Loop[Python EngineCore loop<br/>I/O threads, executor]
+        Loop[Python EngineCore loop<br/>executor]
+        IO[Rust input and output<br/>threads]
         subgraph RC["vllm._rust_core (Rust)"]
             Sched[Scheduler]
             KV[KV cache manager]
@@ -65,7 +69,9 @@ flowchart LR
             Conn[NIXL / Mooncake<br/>scheduler halves]
         end
         Hooks[Python plugins via hooks:<br/>other KV connectors, EC and aux<br/>connectors, structured output<br/>manager]
+        IO -- requests --> Loop
         Loop -- "schedule() / update_from_output()" --> Sched
+        Sched -- outputs --> IO
         Sched -.-> Hooks
     end
     EC -- SchedulerOutput --> W[GPU workers<br/>unchanged]
@@ -76,13 +82,15 @@ The crates are:
 | Crate | Owns |
 | --- | --- |
 | `rust/src/engine-core` (`vllm-engine-core`) | Pure Rust, no PyO3: hashing (pickle protocol 5 and canonical CBOR serializers), KV cache manager, scheduler, connector scheduler halves |
-| `rust/src/engine-core-py` (`vllm-engine-core-py`) | PyO3 bindings (`vllm._rust_core`): config conversion, request bridging, Python output objects, hook adapters |
+| `rust/src/engine-core-io` (`vllm-engine-core-io`) | The engine's ZMQ input and output threads, and the outputs in the Rust frontend's wire types (`vllm-engine-core-client`) |
+| `rust/src/engine-core-py` (`vllm-engine-core-py`) | PyO3 bindings (`vllm._rust_core`): config conversion, request bridging, hook adapters, the payloads Python objects hold |
 
 Python collaborators that are not ported are reached through traits
 (`KvConnector`, `StructuredOutput`, ...) that the binding crate implements over
 the Python objects. On the native path there are two Python-to-Rust crossings
-per engine step, and the binding builds the regular Python `SchedulerOutput`
-and `EngineCoreOutputs`, so the executor, workers and frontend are unchanged.
+per engine step. The binding builds the regular Python `SchedulerOutput`, so
+the executor and workers are unchanged; the outputs go to the Rust frontend
+without Python objects ([Native I/O](#native-io)).
 Connector metadata sent to workers is the same Python object type, so the
 connector worker halves are unchanged too.
 
@@ -91,6 +99,31 @@ queue membership). The Python `Request` keeps opaque payloads (sampling
 parameters, multimodal data, LoRA) and is brought up to date only before a
 Python hook or caller reads it through the scheduler. Rust panics become Python
 exceptions.
+
+## Native I/O
+
+With the Rust scheduler, `EngineCoreProc` runs the input and output threads of
+`vllm-engine-core-io` in place of its Python ones. The Rust frontend announces
+itself in the startup handshake (`EngineHandshakeMetadata.rust_frontend`); the
+wire types cover only what it reads.
+
+- **Output**: `update_from_output` converts the step's outputs to the wire
+  types, and the output thread encodes and sends them, off the GIL. The
+  payloads `ModelRunnerOutput` holds as arrays (logprobs, sampling masks) are
+  read once per step and sliced per request. Everything else the engine sends
+  (utility results, DP coordinator messages, error outputs) is encoded in
+  Python and sent by the same thread, so message order is kept. Without an
+  output writer (tests), `RustScheduler.update_from_output` returns the
+  outputs as the frontend decodes them.
+- **Input**: the input thread decodes each add request off the GIL and
+  classifies it once. A request that meets no Python collaborator is admitted
+  without a Python `Request` (`NativeAddRequest`); structured outputs, extra
+  args such as KV transfer params, multimodal inputs, sessions and every
+  other message go to the Python preprocessing with their original frames.
+  The native input thread needs no KV, EC or aux output connector and a
+  `*_cbor` prefix-caching hash algorithm; otherwise the Python input thread
+  is used. It announces no `prefix_hash_config`, so the frontend does not
+  hash prompt blocks the engine hashes itself.
 
 ## Fallback rules and unsupported configurations
 
@@ -101,6 +134,8 @@ used instead and the reason is logged once.
 - **Extension missing**: all components use Python (a warning is logged).
 - **Scheduler** (`vllm/v1/core/sched/rust_scheduler.py`) falls back to
   `Scheduler` / `AsyncScheduler` for:
+    - frontends other than the Rust frontend, and engines in process;
+    - pooling models;
     - custom encoder cache managers;
     - KV cache managers registered by platforms or plugins (any manager class
       outside `vllm.v1.core.single_type_kv_cache_manager`);
