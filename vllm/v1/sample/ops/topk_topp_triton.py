@@ -26,7 +26,7 @@ every batch size and k/p mix, and the launches are cached per shape.
 """
 
 import functools
-from typing import Any
+from typing import Any, NamedTuple
 
 import torch
 
@@ -101,28 +101,21 @@ def apply_top_k_top_p_triton(
         return logits
     if logits.stride(1) != 1:
         logits = logits.contiguous()
-    k = None if k is None else k.to(torch.int32)  # the dtypes that are warmed up
-    p = None if p is None else p.to(torch.float32)
-    key = (logits.device, *logits.shape, logits.stride(0), k is not None, p is not None)
+    rows, vocab = logits.shape
+    key = Key(
+        logits.device, rows, vocab, logits.stride(0), k is not None, p is not None
+    )
+    # An absent k or p: an empty tensor (a null pointer the kernels never read), so the
+    # pointer dtypes, and thus the compiled variant, do not change.
+    empty = functools.partial(torch.empty, 0, device=logits.device)
+    k = empty(dtype=torch.int32) if k is None else k.to(torch.int32)
+    p = empty(dtype=torch.float32) if p is None else p.to(torch.float32)
     plan = _PLANS.get(key)
     if plan is None:
         return launch_jit(logits, k, p, key)
     stream = torch.cuda.current_stream(logits.device).cuda_stream
-    for kernel, grid, args, (at_logits, at_k, at_p) in plan:
-        args[at_logits] = logits
-        args[at_k] = k if k is not None else args[at_k]  # else a stand-in buffer
-        args[at_p] = p if p is not None else logits
-        kernel.run(
-            *grid,
-            stream,
-            kernel.function,
-            kernel.packed_metadata,
-            None,
-            None,
-            None,
-            *args,
-        )
-        args[at_logits] = args[at_p] = None  # do not keep the caller's tensors alive
+    run(plan.levels, stream, (logits, k, p))
+    run(plan.filter, stream, (logits, k, p))
     return logits
 
 
@@ -158,29 +151,65 @@ def _supported_device() -> bool:
     return capability is not None and capability.major >= 8
 
 
+class Key(NamedTuple):
+    """The shape of a call: the logits' device, shape and row stride, and whether k and
+    p are given."""
+
+    device: torch.device
+    logits_shape0: int
+    logits_shape1: int
+    logits_stride0: int
+    has_k: bool
+    has_p: bool
+
+
+class Launch(NamedTuple):
+    """A compiled kernel, its grid, and its arguments after logits, k and p."""
+
+    kernel: Any  # triton CompiledKernel
+    grid: tuple
+    fixed: list
+
+
+class Plan(NamedTuple):
+    """The launches of one shape."""
+
+    levels: Launch
+    filter: Launch
+
+
 # Launches cached per shape: Triton's launcher with ~40 keyword arguments costs tens
-# of µs of host time per call, which shows at small batch.
-_PLANS: dict[tuple, list] = {}
+# of µs of host time per call, which shows at small batch. They never hold the
+# caller's logits, k or p.
+_PLANS: dict[Key, Plan] = {}
 
 
 def launch_jit(
-    logits: torch.Tensor, k: torch.Tensor | None, p: torch.Tensor | None, key: tuple
+    logits: torch.Tensor, k: torch.Tensor, p: torch.Tensor, key: Key
 ) -> torch.Tensor:
     """Launch through Triton's JIT (compiling if needed) and cache the launches."""
     rows, vocab = logits.shape
     device = logits.device
     b = buffers(device, rows, vocab)
-    levels_args, filter_args = kernel_args(logits, k, p, b, num_sms(device))
+    args = (logits, k, p, key.has_k, key.has_p, b, num_sms(device))
+    levels_args, filter_args = kernel_args(*args)
     levels_grid = (rows, levels_args["splits"], 1)
     levels = _levels_kernel[levels_grid](**levels_args, **LEVELS_OPTS)
     capacity_key = (device, filter_args["SUPERGROUPS_P2"])
     programs = min(capacity(capacity_key, filter_args), rows * levels_args["splits"])
     filter_ = _filter_kernel[(programs,)](**filter_args, **FILTER_OPTS)
-    _PLANS[key] = [
-        plan_entry(levels, _levels_kernel, levels_grid, levels_args),
-        plan_entry(filter_, _filter_kernel, (programs, 1, 1), filter_args),
-    ]
+    _PLANS[key] = Plan(
+        levels=cached_launch(levels, _levels_kernel, levels_grid, levels_args),
+        filter=cached_launch(filter_, _filter_kernel, (programs, 1, 1), filter_args),
+    )
     return logits
+
+
+def run(launch: Launch, stream: int, per_call: tuple) -> None:
+    """Launch a cached kernel directly, without Triton's argument handling."""
+    kernel = launch.kernel
+    meta = (kernel.function, kernel.packed_metadata, None, None, None)
+    kernel.run(*launch.grid, stream, *meta, *per_call, *launch.fixed)
 
 
 LEVELS_OPTS = dict(num_warps=4)
@@ -203,13 +232,14 @@ WORKSPACE = [
 
 def kernel_args(
     logits: torch.Tensor,
-    k: torch.Tensor | None,
-    p: torch.Tensor | None,
+    k: torch.Tensor,
+    p: torch.Tensor,
+    has_k: bool,
+    has_p: bool,
     b: dict[str, torch.Tensor],
     sms: int,
 ) -> tuple[dict, dict]:
-    """Arguments of the levels and the filter kernel. Unused k/p pointers get buffers
-    of the same dtype, so the signature does not vary."""
+    """Arguments of the levels and the filter kernel."""
     rows, vocab = logits.shape
     splits = num_splits(rows, sms)
     fill_splits = max(splits, FILL_SPLITS)
@@ -224,10 +254,10 @@ def kernel_args(
         chunk=split_chunk(vocab, splits),
         groups=triton.cdiv(vocab, 16),
         supergroups=supergroups,
-        k_ptr=k if k is not None else b["state"],
-        p_ptr=p if p is not None else logits,
-        has_k=int(k is not None),
-        has_p=int(p is not None),
+        k_ptr=k,
+        p_ptr=p,
+        has_k=int(has_k),
+        has_p=int(has_p),
         splits=splits,
         MAX_SPLITS=MAX_SPLITS,
         BLOCK=BLOCK,
@@ -303,7 +333,7 @@ def allocate(device: torch.device, rows: int, vocab: int) -> dict[str, torch.Ten
         state=empty(rows, dtype=torch.int32),
         kept=empty(rows * KEPT, dtype=torch.int64),
         hist=empty(rows * BINS, dtype=torch.int32),
-        scratch=empty(rows * WINDOW, dtype=torch.int64),
+        scratch=empty(rows * WINDOW, dtype=torch.int32),
         window=empty(rows * 4, dtype=torch.int32),
         found=empty(rows, dtype=torch.int32),
         more=empty(rows * 2, dtype=torch.float64),
@@ -314,16 +344,9 @@ def allocate(device: torch.device, rows: int, vocab: int) -> dict[str, torch.Ten
     )
 
 
-def plan_entry(compiled, jit, grid: tuple, kwargs: dict) -> tuple:
-    """A compiled kernel's launch: its arguments in order, and where logits, k and p
-    go."""
-    defaults = {param.name: param.default for param in jit.params}
-    values = [kwargs.get(name, defaults[name]) for name in jit.arg_names]
-    slots = [jit.arg_names.index(n) for n in ("logits_ptr", "k_ptr", "p_ptr")]
-    per_call = ["logits_ptr", "p_ptr"] + (["k_ptr"] if kwargs["has_k"] else [])
-    for name in per_call:  # each call sets these: do not keep this call's tensors
-        values[jit.arg_names.index(name)] = None
-    return compiled, grid, values, slots
+def cached_launch(compiled, jit, grid: tuple, kwargs: dict) -> Launch:
+    assert jit.arg_names[:3] == ["logits_ptr", "k_ptr", "p_ptr"]
+    return Launch(compiled, grid, [kwargs[name] for name in jit.arg_names[3:]])
 
 
 def split_chunk(vocab: int, splits: int) -> int:
@@ -343,6 +366,8 @@ def num_sms(device: torch.device) -> int:
 @triton.jit(do_not_specialize=LEVELS_INTS)
 def _levels_kernel(
     logits_ptr,
+    k_ptr,
+    p_ptr,
     stride,
     level1_ptr,
     level2_ptr,
@@ -351,8 +376,6 @@ def _levels_kernel(
     chunk,
     groups,
     supergroups,
-    k_ptr,
-    p_ptr,
     has_k,
     has_p,
     splits,
@@ -395,6 +418,8 @@ def _levels_kernel(
 @triton.jit(do_not_specialize=FILTER_INTS)
 def _filter_kernel(
     logits_ptr,
+    k_ptr,
+    p_ptr,
     stride,
     level1_ptr,
     level2_ptr,
@@ -416,8 +441,6 @@ def _filter_kernel(
     chunk,
     groups,
     supergroups,
-    k_ptr,
-    p_ptr,
     fchunk,
     has_k,
     has_p,
@@ -785,10 +808,10 @@ def _pick(values, items, mask, need, row_max, slots, C: tl.constexpr):
         count = above + tl.sum(tl.where(j == last2, cum2, 0))
         take = mask & ((b < last) | (inside & (b2 <= last2)))
     pos = tl.cumsum(take.to(tl.int32), 0) - 1
-    tl.store(slots + pos, items.to(tl.int64), mask=take & (pos < C))
+    tl.store(slots + pos, items.to(tl.int32), mask=take & (pos < C))
     tl.debug_barrier()
     rank = tl.arange(0, C)
-    picked = tl.load(slots + rank, mask=rank < count, other=0).to(tl.int32)
+    picked = tl.load(slots + rank, mask=rank < count, other=0)
     tl.debug_barrier()
     return (count >= need) & (count <= C), picked, count
 
@@ -1238,8 +1261,7 @@ def _gather_part(
             )
         # The index alone: each scattered tensor costs layout conversions. The gathered
         # logits keep their values (bin kb's are masked by the cut).
-        index_slot = scratch.to(tl.pointer_type(tl.int32)) + pos
-        tl.store(index_slot, idx, mask=hit & (pos < WINDOW))
+        tl.store(scratch + pos, idx, mask=hit & (pos < WINDOW))
         below = valid & (b > hi) & (b != kb) & (x > -float("inf"))
         tl.store(row_ptr + idx, -float("inf"), mask=below)
     tl.atomic_add(more_row, tl.sum(above).to(tl.float64), sem="relaxed", scope="gpu")
@@ -1349,9 +1371,7 @@ def _cut_window(
     valid = rank < found
     # Volatile: other programs gathered these, and this program's L1 may hold stale
     # lines of the same scratch (its tier's slots).
-    idx = tl.load(
-        scratch.to(tl.pointer_type(tl.int32)) + rank, mask=valid, other=0, volatile=True
-    )
+    idx = tl.load(scratch + rank, mask=valid, other=0, volatile=True)
     x = tl.load(row_ptr + idx, mask=valid, other=0.0)
     key = tl.sort(tl.where(valid, _key(x, idx), 0x7FFFFFFFFFFFFFFF))
     last = tl.where(use_k, k_at, N)
@@ -1575,6 +1595,8 @@ def _grid_exit(sync_ptr, programs):
 
 @triton.jit
 def _row_params(k_ptr, p_ptr, row, vocab, has_k, has_p):
+    """The row's k and p, or the values that disable them (an absent k or p is a null
+    pointer)."""
     k = vocab
     p = vocab.to(tl.float32) * 0.0 + 1.0
     if has_k:
@@ -1649,4 +1671,5 @@ def _filter_warmup(logits: Any, k: Any, p: Any) -> DispatchSpec:
 def _warmup_args(logits: Any, k: Any, p: Any) -> tuple[dict, dict]:
     rows, vocab = logits.shape
     device = torch.device(current_platform.device_type)
-    return kernel_args(logits, k, p, buffers(device, rows, vocab), num_sms(device))
+    b = buffers(device, rows, vocab)
+    return kernel_args(logits, k, p, True, True, b, num_sms(device))

@@ -31,9 +31,6 @@ from vllm.v1.sample.ops.topk_topp_triton import (
     reset_buffer_cache,
 )
 
-# Larger than the L2 of NVIDIA GPUs and the 256 MiB Infinity Cache of MI355X.
-FLUSH_BYTES = 1 << 30
-
 
 @dataclass
 class BenchmarkConfig:
@@ -323,7 +320,8 @@ def bench_gpu_time(
     call only. Before each call, untimed: restore the input from logits (func may
     filter in place), then flush the caches, so the input is read from DRAM."""
     fresh = torch.empty_like(logits)
-    flush = torch.empty(FLUSH_BYTES, dtype=torch.int8, device=logits.device)
+    # 1 GiB: larger than the L2 of NVIDIA GPUs and the 256 MiB Infinity Cache of MI355X.
+    flush = torch.empty(1 << 30, dtype=torch.int8, device=logits.device)
     events = [
         (torch.cuda.Event(enable_timing=True), torch.cuda.Event(enable_timing=True))
         for _ in range(warmup_iters + benchmark_iters)

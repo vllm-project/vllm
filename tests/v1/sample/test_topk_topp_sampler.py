@@ -962,19 +962,21 @@ class TestTritonTopkToppExact:
         assert torch.accelerator.memory_allocated() == reserved
 
     def test_launch_cache_releases_inputs(self):
-        """A call with a new shape caches its launch, but not its logits: verification
-        sees hundreds of row counts, and keeping each one's logits ran out of memory."""
+        """Launches are cached per shape, but not their logits, k and p: verification
+        sees hundreds of row counts, and keeping each one's logits ran out of memory.
+        Checked after the first call (cache miss) and after a repeated one (hit)."""
         import vllm.v1.sample.ops.topk_topp_triton as tt
 
         tt.reset_buffer_cache()
         batch, vocab = 40, 65536
         tt.reserve_workspace(torch.device(DEVICE_TYPE, 0), batch, vocab)
         before = torch.accelerator.memory_allocated()
-        logits = torch.randn(batch, vocab, generator=self.generator)
-        k = torch.full((batch,), 20, dtype=torch.int32)
-        tt.apply_top_k_top_p_triton(logits, k, torch.full((batch,), 0.9))
-        del logits, k
-        assert torch.accelerator.memory_allocated() == before
+        for _ in range(2):
+            logits = torch.randn(batch, vocab, generator=self.generator)
+            k = torch.full((batch,), 20, dtype=torch.int32)
+            tt.apply_top_k_top_p_triton(logits, k, torch.full((batch,), 0.9))
+            del logits, k
+            assert torch.accelerator.memory_allocated() == before
 
     def test_sampler_dispatches_to_triton_kernel(self, monkeypatch: pytest.MonkeyPatch):
         import vllm.v1.sample.ops.topk_topp_sampler as sampler_ops
