@@ -428,6 +428,33 @@ def test_attention_quant_selection(make_vc):
     assert "quantization fp8" in why
 
 
+@pytest.mark.usefixtures("gfx950")
+def test_attention_quant_skips_layers_without_an_indexer(make_vc):
+    """With IndexCache (GLM-5.2: `index_topk_freq` 4, `index_skip_topk_offset` 3) only
+    layers 0-2, 6, 10, ... have an indexer, and the checkpoint excludes `wq_b` only
+    there. The others have no `wq_b`, so the MXFP4 that Quark's global config gives
+    their absent prefix must not count as a refusal."""
+    from vllm.model_executor.layers.quantization.quark.quark import QuarkConfig
+
+    hf = NS(model_type="glm_moe_dsa", index_topk_freq=4, index_skip_topk_offset=3)
+    with_indexer = [L for L in range(78) if R.builds_indexer(hf, L)]
+    assert with_indexer[:6] == [0, 1, 2, 6, 10, 14] and len(with_indexer) == 21
+    cfg = _quark("bf16").quant_config
+    cfg["exclude"] = ["lm_head"] + [
+        f"model.layers.{L}.self_attn.{p}"
+        for L in range(78)
+        for p in R.ATTENTION_LINEARS
+        if p != "indexer.wq_b" or L in with_indexer
+    ]
+    vc = _set(make_vc(), "quant_config", QuarkConfig(quant_config=cfg))
+    assert R.unsupported(_set(vc, "model_config.hf_config", hf)) == []
+    # without the IndexCache keys every layer has an indexer: layer 3's MXFP4 wq_b
+    # is refused, as before
+    vc = _set(vc, "model_config.hf_config", NS(model_type="glm_moe_dsa"))
+    (why,) = R.unsupported(vc)
+    assert "indexer.wq_b quantized as" in why and "layers 3..77" in why
+
+
 def _quark_split(fp8):
     """A QuarkConfig with Quark PTPC FP8 on the attention linears `fp8` gives as
     {layer: names} and BF16 (excluded) on all others."""

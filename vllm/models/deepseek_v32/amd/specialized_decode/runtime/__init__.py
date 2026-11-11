@@ -212,6 +212,19 @@ ATTENTION_LINEARS = (
 )
 
 
+def builds_indexer(hf_config, layer: int) -> bool:
+    """Whether decoder layer `layer` has its own indexer, by the IndexCache rule of
+    `DeepseekV2MLAAttention` (`index_topk_freq`, `index_skip_topk_offset`,
+    `index_topk_pattern`): the other layers reuse the previous indexer's top-k and have
+    no `indexer.*` linears, so their (absent) `wq_b` has no quantization to check."""
+    pattern = getattr(hf_config, "index_topk_pattern", None)
+    if pattern is not None:
+        return not (0 <= layer < len(pattern) and pattern[layer] == "S")
+    freq = getattr(hf_config, "index_topk_freq", 1)
+    offset = getattr(hf_config, "index_skip_topk_offset", 2)
+    return max(layer - offset + 1, 0) % freq == 0
+
+
 def attention_quant_reasons(vllm_config, layers) -> list[str]:
     """Why the mono layers' attention linears cannot be read as checkpointed: each must
     be BF16 (excluded from quantization) or Quark per-channel FP8 with per-token
@@ -234,8 +247,11 @@ def attention_quant_reasons(vllm_config, layers) -> list[str]:
     bad: dict[str, set[int]] = {}
     # (layer, linear) -> FP8 of the attention proper's linears
     fp8: dict[int, dict[str, bool]] = {}
+    hf = vllm_config.model_config.hf_config
     for L in layers:
         for proj in ATTENTION_LINEARS:
+            if proj == "indexer.wq_b" and not builds_indexer(hf, L):
+                continue
             prefix = f"model.layers.{L}.self_attn.{proj}"
             try:
                 wk, ak, method = qc.get_quant_method_target(prefix, LinearBase)
