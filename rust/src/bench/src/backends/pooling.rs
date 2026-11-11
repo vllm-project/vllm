@@ -100,6 +100,7 @@ impl PoolingBackend {
             }
         } else {
             let status = response.status();
+            output.status_code = Some(status.as_u16());
             let body = response.text().await.unwrap_or_default();
             output.error = format!("HTTP {status}: {body}");
         }

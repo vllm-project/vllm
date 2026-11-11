@@ -1284,8 +1284,8 @@ async fn run_warmup(
     let schedule = compute_schedule(num_warmups, request_rate, burstiness, seed, None);
 
     // A unique cache_salt per warmup prevents prefix cache hits among warmups
-    // and the run. If every salted warmup fails (e.g. a server that rejects
-    // cache_salt), retry without it.
+    // and the run. If the server rejects every salted warmup (e.g. it does not
+    // accept cache_salt), retry without it.
     let salted = send_warmups(
         backend,
         client,
@@ -1297,7 +1297,7 @@ async fn run_warmup(
     )
     .await;
     if let Err(error) = salted {
-        tracing::warn!(%error, "all warmup requests with cache_salt failed; retrying without it");
+        tracing::warn!(%error, "server rejected all warmup requests with cache_salt; retrying without it");
         if let Some(pb) = &pb {
             pb.reset();
         }
@@ -1318,8 +1318,8 @@ async fn run_warmup(
     }
 }
 
-/// Send one warmup per scheduled delay. Returns `Ok` if any succeeded, otherwise
-/// the first error.
+/// Send one warmup per scheduled delay. Returns the first error if the server
+/// rejected every warmup as invalid (HTTP 400 or 422), otherwise `Ok`.
 async fn send_warmups(
     backend: BackendKind,
     client: &reqwest::Client,
@@ -1361,30 +1361,25 @@ async fn send_warmups(
                 pb.inc(1);
             }
             match result {
-                Ok(output) if output.success => Ok(()),
-                Ok(output) => Err(output.error),
-                Err(e) => Err(e.to_report_string()),
+                Ok(output) if output.is_rejected() => Err(output.error),
+                _ => Ok(()),
             }
         }));
     }
 
     let mut first_error = None;
-    let mut any_success = false;
+    let mut all_rejected = true;
     for handle in handles {
         match handle.await {
-            Ok(Ok(())) => any_success = true,
             Ok(Err(error)) => {
                 first_error.get_or_insert(error);
             }
-            Err(e) => {
-                first_error.get_or_insert(e.to_report_string());
-            }
+            _ => all_rejected = false,
         }
     }
-    if any_success {
-        Ok(())
-    } else {
-        Err(first_error.unwrap_or_default())
+    match first_error {
+        Some(error) if all_rejected => Err(error),
+        _ => Ok(()),
     }
 }
 
@@ -2130,10 +2125,12 @@ mod tests {
         assert_eq!(result["failed"], 1);
     }
 
-    /// Records each completions request body; answers 400 to the first
-    /// `reject_salted` requests that carry a `cache_salt`, else a one-token stream.
+    /// Records each completions request body; answers `status` (e.g. "400 Bad
+    /// Request") to the first `fail_salted` requests that carry a `cache_salt`,
+    /// else a one-token stream.
     async fn spawn_recording_server(
-        reject_salted: usize,
+        fail_salted: usize,
+        status: &'static str,
     ) -> (
         String,
         Arc<std::sync::Mutex<Vec<serde_json::Value>>>,
@@ -2145,7 +2142,7 @@ mod tests {
         let recorded = bodies.clone();
 
         let server = tokio::spawn(async move {
-            let mut rejected = 0;
+            let mut failed = 0;
             loop {
                 let (mut stream, _) = listener.accept().await.unwrap();
                 let (path, body) = read_request(&mut stream).await;
@@ -2163,10 +2160,9 @@ mod tests {
                 let salted = body.get("cache_salt").is_some();
                 recorded.lock().unwrap().push(body);
 
-                let response = if salted && rejected < reject_salted {
-                    rejected += 1;
-                    "HTTP/1.1 400 Bad Request\r\ncontent-length: 0\r\nconnection: close\r\n\r\n"
-                        .to_string()
+                let response = if salted && failed < fail_salted {
+                    failed += 1;
+                    format!("HTTP/1.1 {status}\r\ncontent-length: 0\r\nconnection: close\r\n\r\n")
                 } else {
                     let body = concat!(
                         "data: {\"choices\":[{\"text\":\"ok\"}]}\n\n",
@@ -2185,8 +2181,8 @@ mod tests {
         (format!("http://{addr}/v1/completions"), bodies, server)
     }
 
-    async fn warmup_bodies(reject_salted: usize) -> Vec<serde_json::Value> {
-        let (api_url, bodies, server) = spawn_recording_server(reject_salted).await;
+    async fn warmup_bodies(fail_salted: usize, status: &'static str) -> Vec<serde_json::Value> {
+        let (api_url, bodies, server) = spawn_recording_server(fail_salted, status).await;
         let input = RequestFuncInput {
             prompt: Arc::from("hello"),
             api_url,
@@ -2215,8 +2211,11 @@ mod tests {
 
     /// Run a one-prompt benchmark with the ready check on; return every
     /// completions request body in order (ready check first, then the run).
-    async fn ready_check_bodies(reject_salted: usize) -> Vec<serde_json::Value> {
-        let (api_url, bodies, server) = spawn_recording_server(reject_salted).await;
+    async fn ready_check_bodies(
+        fail_salted: usize,
+        status: &'static str,
+    ) -> Vec<serde_json::Value> {
+        let (api_url, bodies, server) = spawn_recording_server(fail_salted, status).await;
         let base_url = api_url.trim_end_matches("/v1/completions").to_string();
         let dataset_path = crate::datasets::test_support::write_temp_jsonl(
             "ready-check-cache-salt",
@@ -2241,7 +2240,7 @@ mod tests {
             "--num-prompts",
             "1",
             "--ready-check-timeout-sec",
-            "5",
+            "15",
             "--disable-tqdm",
         ]);
         let config = BenchConfig::from_args(&cli.args).unwrap();
@@ -2254,7 +2253,7 @@ mod tests {
 
     #[tokio::test]
     async fn test_ready_check_uses_cache_salt() {
-        let bodies = ready_check_bodies(0).await;
+        let bodies = ready_check_bodies(0, "400 Bad Request").await;
 
         let salted: Vec<_> = bodies.iter().map(|body| body.get("cache_salt").is_some()).collect();
         assert_eq!(salted, [true, false]);
@@ -2262,10 +2261,18 @@ mod tests {
 
     #[tokio::test]
     async fn test_ready_check_retries_without_cache_salt_when_rejected() {
-        let bodies = ready_check_bodies(usize::MAX).await;
+        let bodies = ready_check_bodies(usize::MAX, "400 Bad Request").await;
 
         let salted: Vec<_> = bodies.iter().map(|body| body.get("cache_salt").is_some()).collect();
         assert_eq!(salted, [true, false, false]);
+    }
+
+    #[tokio::test]
+    async fn test_ready_check_keeps_cache_salt_on_transient_errors() {
+        let bodies = ready_check_bodies(1, "503 Service Unavailable").await;
+
+        let salted: Vec<_> = bodies.iter().map(|body| body.get("cache_salt").is_some()).collect();
+        assert_eq!(salted, [true, true, false]);
     }
 
     fn count_salted(bodies: &[serde_json::Value]) -> (usize, usize) {
@@ -2275,7 +2282,7 @@ mod tests {
 
     #[tokio::test]
     async fn test_warmups_use_unique_cache_salts() {
-        let bodies = warmup_bodies(0).await;
+        let bodies = warmup_bodies(0, "400 Bad Request").await;
 
         let salts: std::collections::HashSet<_> =
             bodies.iter().filter_map(|body| body["cache_salt"].as_str()).collect();
@@ -2290,14 +2297,21 @@ mod tests {
 
     #[tokio::test]
     async fn test_warmups_retry_without_cache_salt_when_rejected() {
-        let bodies = warmup_bodies(usize::MAX).await;
+        let bodies = warmup_bodies(usize::MAX, "400 Bad Request").await;
 
         assert_eq!(count_salted(&bodies), (2, 2));
     }
 
     #[tokio::test]
+    async fn test_warmups_keep_cache_salt_on_transient_errors() {
+        let bodies = warmup_bodies(usize::MAX, "503 Service Unavailable").await;
+
+        assert_eq!(count_salted(&bodies), (2, 0));
+    }
+
+    #[tokio::test]
     async fn test_warmups_keep_cache_salt_when_some_succeed() {
-        let bodies = warmup_bodies(1).await;
+        let bodies = warmup_bodies(1, "400 Bad Request").await;
 
         assert_eq!(count_salted(&bodies), (2, 0));
     }
