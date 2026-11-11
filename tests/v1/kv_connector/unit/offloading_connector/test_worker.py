@@ -177,6 +177,7 @@ def _offloading_config(rank: int = 0) -> OffloadingConfig:
         parallel=OffloadingParallelConfig(
             rank=rank,
             world_size=2,
+            local_world_size=2,
             tp_size=2,
             pp_size=1,
             pcp_size=1,

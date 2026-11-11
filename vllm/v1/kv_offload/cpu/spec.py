@@ -205,10 +205,12 @@ class CPUOffloadingSpec(OffloadingSpec):
                 row_bytes = round_up(
                     self.cpu_page_size_per_worker, self.BLOCK_SIZE_ALIGNMENT
                 )
-                # Every rank checks the aggregate before any of them pre-faults.
+                # Every rank checks its node's aggregate before any pre-faults.
                 try:
                     check_shm_free_space(
-                        self.num_chunks * row_bytes * world_size,
+                        self.num_chunks
+                        * row_bytes
+                        * self.config.parallel.local_world_size,
                         allocation_name="CPU KV offload regions in /dev/shm",
                     )
                 finally:

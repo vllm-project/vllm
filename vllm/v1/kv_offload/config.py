@@ -45,6 +45,8 @@ class OffloadingParallelConfig:
     rank: int
     # Total number of workers.
     world_size: int
+    # Number of workers on this node.
+    local_world_size: int
     # Tensor parallel size.
     tp_size: int
     # Pipeline parallel size.

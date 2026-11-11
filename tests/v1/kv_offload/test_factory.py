@@ -679,16 +679,19 @@ def test_cpu_spec_create_worker_skips_mmap_for_empty_cache(monkeypatch):
         "rank",
         "device_index",
         "world_size",
+        "local_world_size",
         "expected_engine_id",
         "capacity_error",
     ),
     [
-        (True, 1, 5, 4, "test-engine", False),
-        (True, 0, 0, 4, "test-engine", False),
-        (False, 1, 5, 4, "test-engine_1", False),
-        (False, 0, 5, 4, "test-engine_0", False),
-        (False, 3, 6, 4, "test-engine_3", False),
-        (False, 0, 5, 4, "test-engine_0", True),
+        (True, 1, 5, 4, 4, "test-engine", False),
+        (True, 0, 0, 4, 4, "test-engine", False),
+        (False, 1, 5, 4, 4, "test-engine_1", False),
+        (False, 0, 5, 4, 4, "test-engine_0", False),
+        (False, 3, 6, 4, 4, "test-engine_3", False),
+        # Ranks on other nodes do not allocate in this node's /dev/shm.
+        (False, 3, 1, 4, 2, "test-engine_3", False),
+        (False, 0, 5, 4, 4, "test-engine_0", True),
     ],
 )
 def test_cpu_spec_create_worker_region_assignment(
@@ -697,6 +700,7 @@ def test_cpu_spec_create_worker_region_assignment(
     rank,
     device_index,
     world_size,
+    local_world_size,
     expected_engine_id,
     capacity_error,
 ):
@@ -710,6 +714,7 @@ def test_cpu_spec_create_worker_region_assignment(
         worker_kv_bytes_per_block=worker_kv_bytes_per_block,
         rank=rank,
         world_size=world_size,
+        local_world_size=local_world_size,
         replicated_layout=replicated_layout,
     )
     assert isinstance(spec, CPUOffloadingSpec)
@@ -753,7 +758,7 @@ def test_cpu_spec_create_worker_region_assignment(
         assert region_calls[0]["barrier"] is None
         region_bytes = spec.num_chunks * region_calls[0]["kv_bytes_per_chunk"]
         memory_check.assert_called_once_with(
-            region_bytes * world_size,
+            region_bytes * local_world_size,
             allocation_name="CPU KV offload regions in /dev/shm",
         )
         barrier.assert_called_once_with()

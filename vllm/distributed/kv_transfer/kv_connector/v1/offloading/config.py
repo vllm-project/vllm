@@ -290,6 +290,7 @@ def build_offloading_config(
         parallel=OffloadingParallelConfig(
             rank=parallel_config.rank,
             world_size=parallel_config.world_size,
+            local_world_size=parallel_config.local_world_size,
             tp_size=parallel_config.tensor_parallel_size,
             pp_size=parallel_config.pipeline_parallel_size,
             pcp_size=parallel_config.prefill_context_parallel_size,
