@@ -115,6 +115,7 @@ def _make_runner(
         ),
         vllm_config=SimpleNamespace(
             num_lookahead_tokens=num_lookahead_tokens,
+            num_scheduled_spec_tokens=num_spec_steps,
             is_mm_encoder_only=False,
             cache_config=SimpleNamespace(mamba_cache_mode="none"),
             parallel_config=SimpleNamespace(decode_context_parallel_size=1),
