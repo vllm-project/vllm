@@ -265,6 +265,8 @@ def test_unlimited_ocr2_excess_markers_survive_preemption(
     """Recomputation preserves raw logits after routing passes the last page."""
     import torch
 
+    monkeypatch.setenv("VLLM_BATCH_INVARIANT", "1")
+    monkeypatch.setenv("VLLM_WORKER_MULTIPROC_METHOD", "spawn")
     requests = []
     for idx in range(2):
         pages = []
