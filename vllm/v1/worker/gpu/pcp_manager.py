@@ -27,7 +27,7 @@ if TYPE_CHECKING:
 logger = init_logger(__name__)
 
 
-@dataclass(frozen=True)
+@dataclass(frozen=True, slots=True)
 class PCPBatchMetadata:
     """Per-step metadata of a PCP rank-local batch."""
 
@@ -41,7 +41,7 @@ class PCPBatchMetadata:
     dcp_local_seq_lens_cpu_upper_bound: torch.Tensor | None = None
 
 
-@dataclass(frozen=True)
+@dataclass(frozen=True, slots=True)
 class RankSegment:
     global_batch_req_idx: int
     global_batch_slice: slice
