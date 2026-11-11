@@ -1053,12 +1053,16 @@ def _decode_one(scheduler, output, req_ids: list[str]) -> None:
     )
 
 
-def _start_decoding(scheduler, req_id: str = "run0"):
+def _start_decoding(
+    scheduler, req_id: str = "run0", *, num_tokens: int = 8, load_kv: bool = False
+):
     """Prefill one request and take it into the decode state."""
     (request,) = create_requests(
-        num_requests=1, num_tokens=8, max_tokens=100, req_ids=[req_id]
+        num_requests=1, num_tokens=num_tokens, max_tokens=100, req_ids=[req_id]
     )
     scheduler.add_request(request)
+    if load_kv:
+        _step_until_kv_transfer_finished(scheduler, [req_id])
     output = scheduler.schedule()
     assert req_id in output.num_scheduled_tokens
     _decode_one(scheduler, output, [req_id])
@@ -3522,6 +3526,57 @@ def _runner_output(
         sampled_token_ids=[[1] for _ in req_ids],
         kv_connector_output=KVConnectorOutput(finished_recving=finished_recving),
     )
+
+
+@pytest.mark.parametrize(
+    "active_sequence_limit,expected_background",
+    [(1, True), (2, False)],
+    ids=["batch-full", "slot-free"],
+)
+def test_immediate_async_restore_priority_and_readiness(
+    active_sequence_limit, expected_background
+):
+    """Mark loads behind a full batch as background; wait for KV before compute."""
+    from tests.v1.kv_connector.unit.utils import create_request
+
+    block_size = 16
+    scheduler = create_scheduler(
+        max_num_seqs=4,
+        max_num_active_seqs=active_sequence_limit,
+        max_num_inflight_kv_loads=1,
+        block_size=block_size,
+        use_kv_connector=mock_kv(matched_tokens=block_size, is_async=True),
+    )
+    _start_decoding(scheduler, "decoding", num_tokens=3 * block_size, load_kv=True)
+    restore_request = create_request(
+        num_tokens=3 * block_size, do_remote_prefill=True, block_size=block_size
+    )
+
+    scheduler.add_request(restore_request)
+    restore_step = scheduler.schedule()
+    connector = scheduler.connector
+    assert connector.is_background_by_request["decoding"] is False
+    assert (
+        connector.is_background_by_request[restore_request.request_id]
+        is expected_background
+    )
+    assert restore_request.status == RequestStatus.WAITING_FOR_REMOTE_KVS
+    assert restore_request.request_id not in restore_step.num_scheduled_tokens
+    _decode_one(scheduler, restore_step, ["decoding"])
+
+    # Free the compute slot without completing the outstanding restore.
+    scheduler.finish_requests("decoding", RequestStatus.FINISHED_ABORTED)
+    waiting_step = scheduler.schedule()
+    assert not scheduler.running
+    assert restore_request.status == RequestStatus.WAITING_FOR_REMOTE_KVS
+    assert restore_request.request_id not in waiting_step.num_scheduled_tokens
+
+    scheduler.update_from_output(
+        waiting_step, _runner_output([], finished_recving={restore_request.request_id})
+    )
+    ready_step = scheduler.schedule()
+    assert restore_request in scheduler.running
+    assert restore_request.request_id in ready_step.num_scheduled_tokens
 
 
 @pytest.mark.parametrize(
@@ -8060,6 +8115,7 @@ def test_async_load_reservation_prevents_wedge_e2e():
     assert b.status == RequestStatus.WAITING
     assert b.request_id not in req_to_blocks
     assert len(scheduler.running) == 0
+    assert scheduler.connector.blocked_loads == [b.request_id]
     scheduler.update_from_output(out1, EMPTY_OUTPUT)
 
     # Step 2: nothing changes until A's recv lands.

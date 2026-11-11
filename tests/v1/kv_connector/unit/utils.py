@@ -459,6 +459,14 @@ class MockKVConnector(KVConnectorBase_V1):
         self._defers_left: defaultdict[str, int] = defaultdict(
             lambda: self.config.num_defers_before_matching
         )
+        self.blocked_loads: list[str] = []
+        self.is_background_by_request: dict[str, bool] = {}
+
+    def set_load_priority(self, request: Request, *, is_background: bool) -> None:
+        self.is_background_by_request[request.request_id] = is_background
+
+    def on_load_blocked(self, request: Request) -> None:
+        self.blocked_loads.append(request.request_id)
 
     @property
     def supports_divergent_local_hybrid_hits(self) -> bool:

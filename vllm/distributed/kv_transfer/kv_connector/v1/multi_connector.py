@@ -499,6 +499,15 @@ class MultiConnector(KVConnectorBase_V1, SupportsHMA):
             request, num_external_tokens
         )
 
+    def set_load_priority(self, request: "Request", *, is_background: bool) -> None:
+        for connector in self._connectors:
+            connector.set_load_priority(request, is_background=is_background)
+
+    def on_load_blocked(self, request: "Request") -> None:
+        chosen = self._requests_to_connector.get(request.request_id)
+        if chosen is not None:
+            self._connectors[chosen].on_load_blocked(request)
+
     def update_state_after_alloc(
         self, request: "Request", blocks: "KVCacheBlocks", num_external_tokens: int
     ):

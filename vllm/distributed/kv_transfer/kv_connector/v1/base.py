@@ -598,6 +598,34 @@ class KVConnectorBase_V1(ABC):
         """
         pass
 
+    def set_load_priority(self, request: "Request", *, is_background: bool) -> None:
+        """Hint the priority of an external KV load. Defaults to no-op.
+
+        Called after ``update_state_after_alloc``, before metadata is built.
+        This does not indicate transfer progress or change block ownership.
+        A background load may become urgent later; no promotion is signalled.
+
+        Args:
+            request: The request being loaded.
+            is_background: Whether this async load is prepared with a full
+                running batch. False does not guarantee immediate execution.
+
+        """
+        return None
+
+    def on_load_blocked(self, request: "Request") -> None:
+        """Report external KV hits blocked by allocation. Defaults to no-op.
+
+        The request remains waiting with no newly allocated destination blocks.
+        Return promptly without changing admission or completion state. Retries
+        may repeat this notification; deduplicate background work as needed.
+
+        Args:
+            request: The request whose load allocation failed.
+
+        """
+        return None
+
     @abstractmethod
     def build_connector_meta(
         self, scheduler_output: SchedulerOutput

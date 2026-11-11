@@ -1492,6 +1492,9 @@ class Scheduler(SchedulerInterface):
                 if new_blocks is None:
                     # The request cannot be scheduled.
 
+                    if num_external_computed_tokens and self.connector is not None:
+                        self.connector.on_load_blocked(request)
+
                     # NOTE: we need to untouch the request from the encode cache
                     # manager
                     if request.has_encoder_inputs:
@@ -1522,6 +1525,14 @@ class Scheduler(SchedulerInterface):
                             self.kv_cache_manager.get_blocks(request_id),
                             num_external_computed_tokens,
                         )
+                        if num_external_computed_tokens:
+                            self.connector.set_load_priority(
+                                request,
+                                is_background=(
+                                    load_kv_async
+                                    and len(self.running) >= self.max_num_active_reqs
+                                ),
+                            )
                     if (
                         self.connector_prefix_cache_stats is not None
                         and connector_prefix_cache_queries != 0
@@ -3215,6 +3226,9 @@ class Scheduler(SchedulerInterface):
             request = self.requests[request_id]
             self.connector.update_state_after_alloc(
                 request, self.kv_cache_manager.get_blocks(request_id), num_tokens
+            )
+            self.connector.set_load_priority(
+                request, is_background=len(self.running) >= self.max_num_active_reqs
             )
             if self.connector_prefix_cache_stats is not None and queries != 0:
                 preempted = request.num_preemptions > 0
