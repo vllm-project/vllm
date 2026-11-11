@@ -719,7 +719,15 @@ steps:
   depends_on:
   - image-build-amd
   source_file_dependencies:
+  - vllm/models/common/ops/sequence_parallel.py
   - vllm/models/qwen4_exp/amd/
+  - vllm/models/qwen4_exp/common/
   - tests/models/qwen4_exp/amd_specialized_decode/
+  - tests/models/qwen4_exp/test_ple.py
+  - tests/models/qwen4_exp/test_tpsp.py
   commands:
   - VLLM_ROCM_USE_AITER=1 pytest -v -s tests/models/qwen4_exp/amd_specialized_decode
+  - >-
+    pytest -v -s
+    tests/models/qwen4_exp/test_tpsp.py::test_hc_sp_decoder_and_ple
+    tests/models/qwen4_exp/test_tpsp.py::test_compiled_sp_ops_handle_untraced_token_counts
