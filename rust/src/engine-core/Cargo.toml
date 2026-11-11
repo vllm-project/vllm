@@ -5,12 +5,16 @@ edition.workspace = true
 license.workspace = true
 description = "Rust port of the vLLM v1 engine core (KV cache management, scheduling)."
 
+[features]
+# Test support for the crates built on this one (`test_util`).
+test-util = ["dep:serde_json"]
+
 [dependencies]
 easy-ext = { workspace = true }
 indexmap = { workspace = true }
 libc = { workspace = true }
 rustc-hash = { workspace = true }
-serde_json = { workspace = true }
+serde_json = { workspace = true, optional = true }
 sha2 = { workspace = true }
 smallvec = { workspace = true }
 thiserror = { workspace = true }

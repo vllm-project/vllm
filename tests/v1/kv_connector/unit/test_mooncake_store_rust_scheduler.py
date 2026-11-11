@@ -23,7 +23,7 @@ pytestmark = pytest.mark.cpu_test
 
 REPO_ROOT = os.path.abspath(os.path.join(os.path.dirname(__file__), *[".."] * 4))
 GEN_TRACES = os.path.join(
-    REPO_ROOT, "rust/src/engine-core/src/sched/scheduler/tests/gen_mooncake_traces.py"
+    REPO_ROOT, "rust/src/engine-core-connectors/src/tests/gen_mooncake_traces.py"
 )
 
 

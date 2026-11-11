@@ -8,7 +8,7 @@ use std::sync::Arc;
 
 use super::meta::{FromTracker, RequestTracker, from_request_tracker, partial_tail_non_mamba_puts};
 use super::*;
-use crate::kv_cache::{BlockPool, MEDIUM_GPU};
+use vllm_engine_core::kv_cache::{BlockPool, MEDIUM_GPU};
 
 fn tracker(token_len: usize, blocks: Vec<u32>) -> RequestTracker {
     RequestTracker::new("r".into(), token_len, Arc::new(vec![blocks]), 48)

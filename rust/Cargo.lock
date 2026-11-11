@@ -5835,6 +5835,19 @@ dependencies = [
 ]
 
 [[package]]
+name = "vllm-engine-core-connectors"
+version = "0.1.0"
+dependencies = [
+ "expect-test",
+ "indexmap 2.13.0",
+ "libc",
+ "rustc-hash 1.1.0",
+ "serde_json",
+ "thiserror 2.0.18",
+ "vllm-engine-core",
+]
+
+[[package]]
 name = "vllm-engine-core-io"
 version = "0.1.0"
 dependencies = [
@@ -5858,6 +5871,7 @@ dependencies = [
  "thiserror-ext",
  "vllm-engine-core",
  "vllm-engine-core-client",
+ "vllm-engine-core-connectors",
  "vllm-engine-core-io",
 ]
 

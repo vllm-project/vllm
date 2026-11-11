@@ -36,8 +36,6 @@ use pyo3::prelude::*;
 use pyo3::types::{PyBytes, PyDict, PyList, PyModule, PyString};
 use rustc_hash::FxHashSet;
 use thiserror_ext::AsReport;
-use vllm_engine_core::connectors::mooncake_store_scheduler::SavePinPolicy;
-use vllm_engine_core::connectors::nixl::NixlKvTransferParams;
 use vllm_engine_core::sched::request::{NewRequest, Request, RequestStatus};
 use vllm_engine_core::sched::scheduler::{
     AuxOutputConnector, EcConnector, ErrorRequestIds, IdSetOrder, KvConnector, PauseState,
@@ -46,6 +44,8 @@ use vllm_engine_core::sched::scheduler::{
 use vllm_engine_core_client::protocol::output::{
     EngineCoreOutputs, RequestBatchOutputs, encode_engine_core_outputs,
 };
+use vllm_engine_core_connectors::mooncake_store_scheduler::SavePinPolicy;
+use vllm_engine_core_connectors::nixl::NixlKvTransferParams;
 
 use self::hooks::{
     PyAuxOutputConnector, PyEcConnector, PyKvConnector, PyStructuredOutput, SchedulerContext,

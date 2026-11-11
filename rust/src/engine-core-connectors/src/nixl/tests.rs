@@ -11,7 +11,7 @@ use std::sync::Arc;
 use expect_test::expect;
 
 use super::*;
-use crate::sched::request::RequestStatus;
+use vllm_engine_core::sched::request::RequestStatus;
 
 fn config(mode: TransferMode) -> NixlSchedulerConfig {
     NixlSchedulerConfig {
@@ -500,7 +500,7 @@ fn wire_request_truncates_the_p_side_prompt() {
             ..Default::default()
         })
     };
-    let mut request = Request::new(crate::sched::request::NewRequest::for_test(
+    let mut request = Request::new(vllm_engine_core::sched::request::NewRequest::for_test(
         "p",
         (0..9).collect(),
     ))
@@ -514,7 +514,7 @@ fn wire_request_truncates_the_p_side_prompt() {
     assert_eq!((request.num_prompt_tokens, request.max_tokens), (8, 1));
 
     // Without a resolved hash block size, as Python asserts.
-    let mut request = Request::new(crate::sched::request::NewRequest::for_test(
+    let mut request = Request::new(vllm_engine_core::sched::request::NewRequest::for_test(
         "q",
         (0..9).collect(),
     ))
@@ -522,7 +522,7 @@ fn wire_request_truncates_the_p_side_prompt() {
     assert!(connector.add_wire_request(&mut request, params(), 0, 0).is_err());
 
     // A decode-side request is left alone.
-    let mut request = Request::new(crate::sched::request::NewRequest::for_test(
+    let mut request = Request::new(vllm_engine_core::sched::request::NewRequest::for_test(
         "d",
         (0..9).collect(),
     ))

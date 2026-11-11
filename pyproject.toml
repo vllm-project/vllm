@@ -192,6 +192,7 @@ extend-exclude = ["tests/models/fixtures/*", "tests/prompts/*", "tests/tokenizer
     "vllm/third_party/*",
     "rust/src/engine-core/src/kv_cache/tests/traces/*",
     "rust/src/engine-core/src/sched/scheduler/tests/*traces/*",
+    "rust/src/engine-core-connectors/src/tests/*traces/*",
     "rust/src/engine-core/tests/fixtures/*.json",
     "vllm/entrypoints/serve/instrumentator/static/*",
     "tests/entrypoints/speech_to_text/transcription/test_transcription_validation.py",

@@ -12,15 +12,15 @@ use std::path::{Path, PathBuf};
 const TRACE_DIR_ENV: &str = "ENGINE_CORE_TRACE_DIR";
 
 /// Replays every `*.{ext}` trace of `suite` and fails with all the traces that
-/// panicked. `checked_in` is the suite's directory relative to the crate root.
-pub(crate) fn replay_all(
+/// panicked. `checked_in` is the suite's directory of checked-in traces.
+pub fn replay_all(
     suite: &str,
-    checked_in: &str,
+    checked_in: &Path,
     ext: &str,
     replay: impl Fn(&Path) + RefUnwindSafe,
 ) {
     let dir = std::env::var_os(TRACE_DIR_ENV).map_or_else(
-        || Path::new(env!("CARGO_MANIFEST_DIR")).join(checked_in),
+        || checked_in.to_path_buf(),
         |root| PathBuf::from(root).join(suite),
     );
     let mut paths: Vec<PathBuf> = std::fs::read_dir(&dir)

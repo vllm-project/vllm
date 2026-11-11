@@ -6,9 +6,8 @@
 //! behavioral reference; every component here must produce bitwise identical
 //! results.
 
-pub mod connectors;
 pub mod hash;
 pub mod kv_cache;
 pub mod sched;
-#[cfg(test)]
-mod trace_replay;
+#[cfg(any(test, feature = "test-util"))]
+pub mod test_util;

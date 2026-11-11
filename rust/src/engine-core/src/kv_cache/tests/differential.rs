@@ -546,7 +546,8 @@ fn replay(name: &str, text: &str) -> Result<usize, String> {
 
 #[test]
 fn replay_python_traces() {
-    crate::trace_replay::replay_all("kv_cache", "src/kv_cache/tests/traces", "trace", |path| {
+    let traces = std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("src/kv_cache/tests/traces");
+    crate::test_util::trace_replay::replay_all("kv_cache", &traces, "trace", |path| {
         let name = path.file_name().unwrap().to_string_lossy();
         let text = std::fs::read_to_string(path).unwrap();
         match replay(&name, &text) {

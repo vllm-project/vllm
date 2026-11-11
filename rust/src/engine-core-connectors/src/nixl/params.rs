@@ -10,7 +10,7 @@
 
 use std::sync::Arc;
 
-use crate::kv_cache::BlockId;
+use vllm_engine_core::kv_cache::BlockId;
 
 /// The Python sequence type of a block id list. Pickles of a `list` and a
 /// `tuple` differ, and the worker receives what the scheduler built.

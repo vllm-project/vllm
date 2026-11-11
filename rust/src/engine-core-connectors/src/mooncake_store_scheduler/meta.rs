@@ -16,10 +16,10 @@ use std::sync::Arc;
 
 use indexmap::IndexSet;
 
-use crate::connectors::mooncake_store::TailKeyBoundary;
-use crate::hash::BlockHash;
-use crate::kv_cache::{BlockId, NULL_BLOCK_ID};
-use crate::sched::output::GroupedBlockIds;
+use crate::mooncake_store::TailKeyBoundary;
+use vllm_engine_core::hash::BlockHash;
+use vllm_engine_core::kv_cache::{BlockId, NULL_BLOCK_ID};
+use vllm_engine_core::sched::output::GroupedBlockIds;
 
 /// `LoadSpec`: specification for loading KV cache from external store.
 #[derive(Clone, Debug, PartialEq, Eq)]

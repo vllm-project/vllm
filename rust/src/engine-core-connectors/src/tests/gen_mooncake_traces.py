@@ -24,9 +24,12 @@ import random
 import sys
 from collections import deque
 
-REPO_ROOT = os.path.abspath(os.path.join(os.path.dirname(__file__), *[".."] * 7))
+REPO_ROOT = os.path.abspath(os.path.join(os.path.dirname(__file__), *[".."] * 5))
 sys.path.insert(0, REPO_ROOT)
-sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
+# The scheduler suite's `gen_traces.py`.
+sys.path.insert(
+    0, os.path.join(REPO_ROOT, "rust/src/engine-core/src/sched/scheduler/tests")
+)
 
 import torch  # noqa: E402
 from gen_traces import (  # noqa: E402

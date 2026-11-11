@@ -917,7 +917,7 @@ impl fmt::Debug for Request {
     }
 }
 
-#[cfg(test)]
+#[cfg(any(test, feature = "test-util"))]
 impl NewRequest {
     /// A generative request with `prompt_token_ids` and default sampling
     /// params.

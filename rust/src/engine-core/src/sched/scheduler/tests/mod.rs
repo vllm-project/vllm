@@ -6,41 +6,17 @@
 //! `test_priority_scheduler_random.py`.
 
 mod differential;
-mod mooncake_store;
-mod nixl_differential;
 
 use std::sync::Arc;
 
 use super::*;
-use crate::hash::{BlockHash, HashAlgo, RequestBlockHasher, RequestExtraKeys};
 use crate::kv_cache::{KvCacheBlocks, KvCacheGroupSpec, KvCacheSpec, KvCacheSpecType};
 use crate::sched::multimodal::{MultiModalData, MultiModalFeatureSpec, PlaceholderRange};
 use crate::sched::output::{CachedRequestData, Opaque};
-use crate::sched::request::{BlockHasher, FinishReason, NewRequest, SamplingParams, StopReason};
+use crate::sched::request::{FinishReason, NewRequest, SamplingParams, StopReason};
+use crate::test_util::sched_trace::hasher;
 
 const EOS: i32 = 50256;
-
-struct TestHasher(RequestBlockHasher);
-
-impl BlockHasher for TestHasher {
-    fn hash_new_blocks(&self, request: &Request) -> Vec<BlockHash> {
-        self.0.new_block_hashes(
-            request.all_token_ids(),
-            request.block_hashes.len(),
-            request.block_hashes.last(),
-            &RequestExtraKeys::default(),
-        )
-    }
-}
-
-fn hasher(block_size: usize) -> Arc<dyn BlockHasher> {
-    Arc::new(TestHasher(RequestBlockHasher::new(
-        HashAlgo::Sha256,
-        BlockHash::from_slice(&[0; 32]),
-        block_size,
-        0,
-    )))
-}
 
 fn full_attention(block_size: usize) -> KvCacheGroupSpec {
     KvCacheGroupSpec::new(KvCacheSpec::new(KvCacheSpecType::FullAttention, block_size))

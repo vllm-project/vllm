@@ -10,8 +10,8 @@ meaningful offline. CI records many more traces with
 | --- | --- | --- | --- |
 | `kv_cache` | `src/kv_cache/tests/gen_traces.py` | `kv_cache::tests::differential` | `src/kv_cache/tests/traces` |
 | `sched` | `src/sched/scheduler/tests/gen_traces.py` | `sched::scheduler::tests::differential` | `src/sched/scheduler/tests/traces` |
-| `nixl` | `src/sched/scheduler/tests/gen_nixl_traces.py` | `sched::scheduler::tests::nixl_differential` | `src/sched/scheduler/tests/nixl_traces` |
-| `mooncake` | `src/sched/scheduler/tests/gen_mooncake_traces.py` | `sched::scheduler::tests::mooncake_store` | `src/sched/scheduler/tests/mooncake_traces` |
+| `nixl` | `../engine-core-connectors/src/tests/gen_nixl_traces.py` | `vllm-engine-core-connectors`: `tests::nixl_trace` | `../engine-core-connectors/src/tests/nixl_traces` |
+| `mooncake` | `../engine-core-connectors/src/tests/gen_mooncake_traces.py` | `vllm-engine-core-connectors`: `tests::mooncake_store_trace` | `../engine-core-connectors/src/tests/mooncake_traces` |
 
 The generators need vLLM installed (CPU is enough) and run from the
 repository root. They share one command line:

@@ -23,9 +23,12 @@ import sys
 from collections import deque
 
 HERE = os.path.dirname(os.path.abspath(__file__))
-REPO_ROOT = os.path.abspath(os.path.join(HERE, *[".."] * 7))
+REPO_ROOT = os.path.abspath(os.path.join(HERE, *[".."] * 5))
 sys.path.insert(0, REPO_ROOT)
-sys.path.insert(0, HERE)
+# The scheduler suite's `gen_traces.py`.
+sys.path.insert(
+    0, os.path.join(REPO_ROOT, "rust/src/engine-core/src/sched/scheduler/tests")
+)
 
 from gen_traces import (  # noqa: E402
     eco_json,

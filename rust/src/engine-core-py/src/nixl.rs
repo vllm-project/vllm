@@ -2,7 +2,7 @@
 // SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 
 //! Bindings for the native NIXL scheduler half
-//! (`vllm_engine_core::connectors::nixl`).
+//! (`vllm_engine_core_connectors::nixl`).
 //!
 //! [`RustNixlConnectorScheduler`] is built from a constructed Python
 //! `NixlPullConnector` / `NixlPushConnector` (scheduler role), whose resolved
@@ -39,14 +39,14 @@ use pyo3::prelude::*;
 use pyo3::sync::PyOnceLock;
 use pyo3::types::{PyBool, PyDict, PyFloat, PyInt, PyList, PySet, PySlice, PyString, PyTuple};
 use thiserror_ext::AsReport;
-use vllm_engine_core::connectors::nixl::{
+use vllm_engine_core::kv_cache::BlockId;
+use vllm_engine_core::sched::output::Opaque;
+use vllm_engine_core::sched::request::{Request, RequestStatus};
+use vllm_engine_core_connectors::nixl::{
     AllocatedBlocks, BlockIds, NixlConnectorMetadata, NixlConnectorScheduler, NixlFinishedParams,
     NixlKvConnector, NixlKvTransferParams, NixlRequestView, NixlSchedulerConfig, PyNumber,
     RemoteBlockIds, ReqMeta, ScheduledReq, Seq, SeqKind, TransferMode,
 };
-use vllm_engine_core::kv_cache::BlockId;
-use vllm_engine_core::sched::output::Opaque;
-use vllm_engine_core::sched::request::{Request, RequestStatus};
 
 pub fn register(m: &Bound<'_, PyModule>) -> PyResult<()> {
     m.add_class::<RustNixlConnectorScheduler>()?;

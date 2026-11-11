@@ -12,7 +12,7 @@ connector, one whose connector hooks are served by
 rest of the scheduler outputs must match, down to the pickled bytes.
 
 The workload also feeds
-`rust/src/engine-core/src/sched/scheduler/tests/gen_nixl_traces.py`, whose
+`rust/src/engine-core-connectors/src/tests/gen_nixl_traces.py`, whose
 traces the Rust scheduler replays with the native connector.
 
     .venv/bin/python -m tests.v1.kv_connector.unit.nixl_rust_diff --seeds 0-20

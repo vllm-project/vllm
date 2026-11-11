@@ -4,7 +4,7 @@
 //! Replays the `MooncakeStoreConnector` traces recorded from the Python
 //! scheduler and connector (`gen_mooncake_traces.py`) against the Rust
 //! scheduler with the native connector
-//! ([`crate::connectors::mooncake_store_scheduler`]), and checks every
+//! ([`crate::mooncake_store_scheduler`]), and checks every
 //! `SchedulerOutput`, connector metadata, `EngineCoreOutputs`, block pool
 //! state (ref counts and free queue order), store-job pins and lookup client
 //! call.
@@ -16,17 +16,26 @@ use std::sync::{Arc, Mutex};
 use indexmap::IndexSet;
 use serde_json::{Value, json};
 
-use super::differential::{eco_json, first_diff, floats_match, so_json, trace_setup, usize_of};
-use super::*;
-use crate::connectors::mooncake_store::{LookupResult, TailKeyBoundary};
-use crate::connectors::mooncake_store_scheduler::{
+use crate::mooncake_store::{LookupResult, TailKeyBoundary};
+use crate::mooncake_store_scheduler::{
     KvRole, LookupClient, MooncakeStoreConnectorMetadata, MooncakeStoreScheduler,
     MooncakeStoreSchedulerConfig, MooncakeStoreWorkerMetadata, ReqBlockHashes, SavePinPolicy,
     SetOp, StoreGeometry,
 };
-use crate::kv_cache::{BlockId, BoundaryStateOffload, KvCacheBlocks};
-use crate::sched::output::Opaque;
-use crate::sched::request::{NewRequest, SamplingParams};
+use vllm_engine_core::kv_cache::KvCacheManager;
+use vllm_engine_core::kv_cache::{BlockId, BoundaryStateOffload, KvCacheBlocks};
+use vllm_engine_core::sched::output::Opaque;
+use vllm_engine_core::sched::output::SchedulerOutput;
+use vllm_engine_core::sched::request::{NewRequest, SamplingParams};
+use vllm_engine_core::sched::request::{Request, RequestStatus};
+use vllm_engine_core::sched::scheduler::{
+    AcceptAllStructuredOutput, DraftTokenIds, KvConnector, KvConnectorBlockState,
+    KvConnectorOutput, KvTransferConfig, ModelRunnerOutput, RequestFinished, Scheduler,
+};
+use vllm_engine_core::test_util::sched_trace::{
+    eco_json, first_diff, floats_match, so_json, trace_setup, usize_of,
+};
+use vllm_engine_core::test_util::trace_replay::replay_all;
 
 /// The lookup client calls an op is expected to make, in order.
 type ExpectedCalls = Arc<Mutex<VecDeque<Value>>>;
@@ -280,7 +289,7 @@ fn fnv_bytes(bytes: impl IntoIterator<Item = u8>) -> String {
 }
 
 fn pool_json(scheduler: &Scheduler) -> Value {
-    let pool = scheduler.kv_cache_manager.block_pool();
+    let pool = scheduler.kv_cache_manager().block_pool();
     json!({
         "refs": fnv(pool.blocks().iter().map(|b| b.ref_cnt as u32)),
         "free": fnv(pool.free_block_queue.get_all_free_blocks()),
@@ -575,9 +584,9 @@ fn bench_mooncake_store_build_connector_meta() {
 
 #[test]
 fn matches_python_mooncake_store_traces() {
-    crate::trace_replay::replay_all(
+    replay_all(
         "mooncake",
-        "src/sched/scheduler/tests/mooncake_traces",
+        &Path::new(env!("CARGO_MANIFEST_DIR")).join("src/tests/mooncake_traces"),
         "jsonl",
         |path| {
             replay(path);

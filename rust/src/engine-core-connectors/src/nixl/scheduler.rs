@@ -16,8 +16,8 @@ use super::metadata::{
 use super::params::{
     BlockIds, NixlFinishedParams, NixlKvTransferParams, RemoteBlockIds, Seq, SeqKind, TransferMode,
 };
-use crate::kv_cache::BlockId;
-use crate::sched::request::RequestStatus;
+use vllm_engine_core::kv_cache::BlockId;
+use vllm_engine_core::sched::request::RequestStatus;
 
 /// A clock in seconds on the `time.perf_counter()` timeline.
 ///

@@ -80,7 +80,8 @@ The crates are:
 
 | Crate | Owns |
 | --- | --- |
-| `rust/src/engine-core` (`vllm-engine-core`) | Pure Rust, no PyO3: hashing (pickle protocol 5 and canonical CBOR serializers), KV cache manager, scheduler and its outputs in the frontend's wire types (`vllm-engine-core-client`), connector scheduler halves |
+| `rust/src/engine-core` (`vllm-engine-core`) | Pure Rust, no PyO3: hashing (pickle protocol 5 and canonical CBOR serializers), KV cache manager, scheduler and its outputs in the frontend's wire types (`vllm-engine-core-client`), the `KvConnector` trait |
+| `rust/src/engine-core-connectors` (`vllm-engine-core-connectors`) | Native KV connectors on the Rust request: the NIXL and Mooncake store scheduler halves, and Mooncake store's per-block hot paths |
 | `rust/src/engine-core-io` (`vllm-engine-core-io`) | The engine's ZMQ input and output threads |
 | `rust/src/engine-core-py` (`vllm-engine-core-py`) | PyO3 bindings (`vllm._rust_core`): config conversion, request bridging, hook adapters, the payloads Python objects hold |
 

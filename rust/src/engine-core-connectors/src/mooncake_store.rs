@@ -19,8 +19,8 @@ use std::collections::BTreeSet;
 use rustc_hash::FxHashSet;
 use thiserror::Error;
 
-use crate::hash::BlockHash;
-use crate::kv_cache::{
+use vllm_engine_core::hash::BlockHash;
+use vllm_engine_core::kv_cache::{
     BlockId, CachedBlockLookup, CachedBlocks, KvCacheSpec, ManagerType, NULL_BLOCK_ID, SpecGroup,
     eagle_proof_margin,
 };
@@ -634,7 +634,7 @@ fn push_hex(out: &mut String, bytes: &[u8]) {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::kv_cache::{KvCacheSpec, KvCacheSpecType};
+    use vllm_engine_core::kv_cache::{KvCacheSpec, KvCacheSpecType};
 
     fn hashes(n: usize) -> Vec<BlockHash> {
         (0..n).map(|i| BlockHash::from_slice(&[i as u8; 4])).collect()

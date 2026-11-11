@@ -37,18 +37,19 @@ TRACE_DIR="$(mktemp -d)"
 trap 'rm -rf "$TRACE_DIR"' EXIT
 
 ENGINE_CORE=rust/src/engine-core/src
+CONNECTORS=rust/src/engine-core-connectors/src
 echo "--- Recording traces (seeds: $SEEDS) into $TRACE_DIR"
 "$PYTHON" "$ENGINE_CORE/kv_cache/tests/gen_traces.py" \
   --seeds "$SEEDS" --out "$TRACE_DIR/kv_cache"
 "$PYTHON" "$ENGINE_CORE/sched/scheduler/tests/gen_traces.py" \
   --seeds "$SEEDS" --out "$TRACE_DIR/sched"
-"$PYTHON" "$ENGINE_CORE/sched/scheduler/tests/gen_nixl_traces.py" \
+"$PYTHON" "$CONNECTORS/tests/gen_nixl_traces.py" \
   --seeds "$SEEDS" --out "$TRACE_DIR/nixl"
-"$PYTHON" "$ENGINE_CORE/sched/scheduler/tests/gen_mooncake_traces.py" \
+"$PYTHON" "$CONNECTORS/tests/gen_mooncake_traces.py" \
   --seeds "$SEEDS" --out "$TRACE_DIR/mooncake"
 du -sh "$TRACE_DIR"/*
 
-echo "--- Replaying traces against vllm-engine-core"
+echo "--- Replaying traces against vllm-engine-core and vllm-engine-core-connectors"
 ENGINE_CORE_TRACE_DIR="$TRACE_DIR" cargo test \
   --manifest-path rust/Cargo.toml \
   --locked \
@@ -56,6 +57,12 @@ ENGINE_CORE_TRACE_DIR="$TRACE_DIR" cargo test \
   -p vllm-engine-core \
   -- \
   kv_cache::tests::differential \
-  sched::scheduler::tests::differential \
-  sched::scheduler::tests::nixl_differential \
-  sched::scheduler::tests::mooncake_store
+  sched::scheduler::tests::differential
+ENGINE_CORE_TRACE_DIR="$TRACE_DIR" cargo test \
+  --manifest-path rust/Cargo.toml \
+  --locked \
+  --release \
+  -p vllm-engine-core-connectors \
+  -- \
+  tests::nixl_trace \
+  tests::mooncake_store_trace

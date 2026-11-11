@@ -2,7 +2,7 @@
 // SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 
 //! The native scheduler half of the `MooncakeStoreConnector`
-//! (`vllm_engine_core::connectors::mooncake_store_scheduler`) as the Rust
+//! (`vllm_engine_core_connectors::mooncake_store_scheduler`) as the Rust
 //! scheduler's [`KvConnector`], with what it needs from Python:
 //!
 //! - its configuration, read from a constructed (scheduler-role) Python
@@ -26,18 +26,18 @@ use pyo3::sync::PyOnceLock;
 use pyo3::types::{PyBytes, PyDict, PyList, PySet, PyString, PyTuple};
 use rustc_hash::FxHashMap;
 use thiserror_ext::AsReport;
-use vllm_engine_core::connectors::mooncake_store::{LookupResult, TailKeyBoundary};
-use vllm_engine_core::connectors::mooncake_store_scheduler::{
-    BoundaryPut, KvRole, LoadSpec, LookupClient, MooncakeStoreConnectorMetadata,
-    MooncakeStoreScheduler, MooncakeStoreSchedulerConfig, MooncakeStoreWorkerMetadata,
-    ReqBlockHashes, ReqMeta, SavePinPolicy, SetOp, StoreGeometry,
-};
 use vllm_engine_core::hash::BlockHash;
 use vllm_engine_core::kv_cache::{BlockId, BoundaryStateOffload, KvCacheBlocks, KvCacheManager};
 use vllm_engine_core::sched::output::{GroupedBlockIds, Opaque, SchedulerOutput};
 use vllm_engine_core::sched::request::Request;
 use vllm_engine_core::sched::scheduler::{
     KvConnector, KvConnectorBlockState, KvConnectorOutput, RequestFinished,
+};
+use vllm_engine_core_connectors::mooncake_store::{LookupResult, TailKeyBoundary};
+use vllm_engine_core_connectors::mooncake_store_scheduler::{
+    BoundaryPut, KvRole, LoadSpec, LookupClient, MooncakeStoreConnectorMetadata,
+    MooncakeStoreScheduler, MooncakeStoreSchedulerConfig, MooncakeStoreWorkerMetadata,
+    ReqBlockHashes, ReqMeta, SavePinPolicy, SetOp, StoreGeometry,
 };
 
 const MOONCAKE_STORE: &str = "vllm.distributed.kv_transfer.kv_connector.v1.mooncake_store";

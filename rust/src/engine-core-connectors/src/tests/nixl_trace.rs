@@ -13,14 +13,22 @@ use std::sync::{Arc, Mutex};
 
 use serde_json::{Value, json};
 
-use super::differential::{eco_json, first_diff, floats_match, so_json, trace_setup, usize_of};
-use super::*;
-use crate::connectors::nixl::{
+use crate::nixl::{
     BlockIds, NixlConnectorMetadata, NixlConnectorScheduler, NixlFinishedParams, NixlKvConnector,
     NixlKvTransferParams, NixlSchedulerConfig, PyNumber, RemoteBlockIds, ReqMeta, Seq, SeqKind,
     TransferMode,
 };
-use crate::sched::request::{FinishReason, NewRequest, SamplingParams};
+use vllm_engine_core::sched::output::SchedulerOutput;
+use vllm_engine_core::sched::request::{FinishReason, NewRequest, SamplingParams};
+use vllm_engine_core::sched::request::{Request, RequestStatus};
+use vllm_engine_core::sched::scheduler::{
+    AcceptAllStructuredOutput, DraftTokenIds, ErrorRequestIds, KvConnector, KvConnectorOutput,
+    KvTransferConfig, KvTransferParams, ModelRunnerOutput, Scheduler,
+};
+use vllm_engine_core::test_util::sched_trace::{
+    eco_json, first_diff, floats_match, so_json, trace_setup, usize_of,
+};
+use vllm_engine_core::test_util::trace_replay::replay_all;
 
 fn ints<T: TryFrom<i64>>(v: &Value) -> Vec<T>
 where
@@ -498,9 +506,9 @@ fn replay(path: &Path) {
 
 #[test]
 fn matches_python_nixl_traces() {
-    crate::trace_replay::replay_all(
+    replay_all(
         "nixl",
-        "src/sched/scheduler/tests/nixl_traces",
+        &Path::new(env!("CARGO_MANIFEST_DIR")).join("src/tests/nixl_traces"),
         "jsonl",
         replay,
     );

@@ -116,7 +116,7 @@ impl ErrorRequestIds {
     }
 
     /// All ids, in order of discovery.
-    fn all(&self) -> IndexSet<String> {
+    pub fn all(&self) -> IndexSet<String> {
         let f = &self.failed_kv_loads;
         self.grammar
             .iter()

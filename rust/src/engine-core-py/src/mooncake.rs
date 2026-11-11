@@ -2,7 +2,7 @@
 // SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 
 //! Bindings for the Mooncake store connector hot paths
-//! (`vllm_engine_core::connectors::mooncake_store`).
+//! (`vllm_engine_core_connectors::mooncake_store`).
 //!
 //! The Python objects stay the source of truth: the Rust objects are built
 //! from a constructed `MooncakeStoreCoordinator` / `MooncakeStoreWorker` and
@@ -25,12 +25,12 @@ use pyo3::sync::PyOnceLock;
 use pyo3::types::{PyBytes, PyList, PyTuple};
 use rustc_hash::FxHashSet;
 use thiserror_ext::AsReport;
-use vllm_engine_core::connectors::mooncake_store::{
+use vllm_engine_core::hash::BlockHash;
+use vllm_engine_core::kv_cache::{KvCacheGroupRole, KvCacheSpec, ManagerType, SpecGroup};
+use vllm_engine_core_connectors::mooncake_store::{
     ExternalCachedBlockPool, LookupCandidates, LookupGroup, MooncakeStoreError, StoreCoordinator,
     StoreLookup,
 };
-use vllm_engine_core::hash::BlockHash;
-use vllm_engine_core::kv_cache::{KvCacheGroupRole, KvCacheSpec, ManagerType, SpecGroup};
 
 use crate::kv_cache::config::{convert_spec, to_py_err as kv_cache_py_err};
 

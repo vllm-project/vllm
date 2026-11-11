@@ -33,16 +33,16 @@ pub use self::meta::{
     ReqBlockHashes, ReqMeta, SetOp, StoreGeometry,
 };
 use self::meta::{FromTracker, RequestTracker, from_request_tracker, partial_tail_non_mamba_puts};
-use crate::connectors::mooncake_store::LookupResult;
-use crate::kv_cache::{
+use crate::mooncake_store::LookupResult;
+use vllm_engine_core::kv_cache::{
     BlockId, BlockPool, BoundaryStateOffload, KvCacheBlocks, KvCacheManager, NULL_BLOCK_ID,
 };
-use crate::sched::output::{GroupedBlockIds, Opaque, SchedulerOutput};
-use crate::sched::request::Request;
-use crate::sched::scheduler::{
+use vllm_engine_core::sched::output::{GroupedBlockIds, Opaque, SchedulerOutput};
+use vllm_engine_core::sched::request::Request;
+use vllm_engine_core::sched::scheduler::{
     KvConnector, KvConnectorBlockState, KvConnectorOutput, RequestFinished, Requests,
 };
-use crate::sched::stats::CACHE_HIT_SOURCE_EXTERNAL_UNSPECIFIED;
+use vllm_engine_core::sched::stats::CACHE_HIT_SOURCE_EXTERNAL_UNSPECIFIED;
 
 /// `kv_transfer_config.kv_role`.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]

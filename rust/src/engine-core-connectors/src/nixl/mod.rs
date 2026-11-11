@@ -38,10 +38,10 @@ pub use self::scheduler::{
     AllocatedBlocks, NixlConfigError, NixlConnectorScheduler, NixlParamsError, NixlRequestView,
     NixlSchedulerConfig, PerfClock, ScheduledReq, perf_counter,
 };
-use crate::kv_cache::{BlockId, BoundaryStateOffload, KvCacheBlocks, KvCacheManager};
-use crate::sched::output::{Opaque, SchedulerOutput};
-use crate::sched::request::Request;
-use crate::sched::scheduler::{
+use vllm_engine_core::kv_cache::{BlockId, BoundaryStateOffload, KvCacheBlocks, KvCacheManager};
+use vllm_engine_core::sched::output::{Opaque, SchedulerOutput};
+use vllm_engine_core::sched::request::Request;
+use vllm_engine_core::sched::scheduler::{
     KvConnector, KvConnectorBlockState, KvConnectorOutput, KvTransferParams, RequestFinished,
 };
 
