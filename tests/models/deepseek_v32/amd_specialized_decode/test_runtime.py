@@ -84,8 +84,9 @@ def test_unsupported_fused_shared_experts(make_vc, monkeypatch):
 
 
 def test_unsupported_platform_and_config(make_vc, monkeypatch):
-    """The platform probe (CPU host: not gfx950), step_sync under FULL graphs and
-    malformed options are reasons too."""
+    """The platform probe (not gfx950), step_sync under FULL graphs and malformed
+    options are reasons too."""
+    monkeypatch.setattr(R, "_platform_reason", lambda: "this GPU (gfx950 only)")
     assert any("gfx950" in r for r in R.unsupported(make_vc()))
     monkeypatch.setattr(R, "_platform_reason", lambda: None)
     (why,) = R.unsupported(make_vc(graphs="full", options={"step_sync": True}))
@@ -99,15 +100,16 @@ def test_unsupported_platform_and_config(make_vc, monkeypatch):
         assert '"specialized_decode"' in why and frag in why, why
 
 
-def test_all_reasons_reported(make_vc):
+def test_all_reasons_reported(make_vc, monkeypatch):
     """Startup lists every reason, not only the first."""
+    monkeypatch.setattr(R, "_platform_reason", lambda: "this GPU (gfx950 only)")
     vc = make_vc(tp=4, pp=2, kv="fp8")
     _set(vc, "lora_config", object())
     with pytest.raises(ValueError) as e:
         R.specialized_decode_config(vc)
     for frag in ("TP 4", "pipeline", "kv_cache_dtype", "LoRA"):
         assert frag in str(e.value), (frag, str(e.value))
-    assert "gfx950" in str(e.value)  # the platform probe of the CPU host
+    assert "gfx950" in str(e.value)  # the platform probe
 
 
 @pytest.mark.usefixtures("gfx950")

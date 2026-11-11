@@ -503,6 +503,8 @@ def test_op_launch_caching(monkeypatch, import_kernel):
         rank=0,
         _validated_sig=None,
         _wptrs=None,
+        _index_tables=None,
+        with_indexer=False,
     ).items():
         setattr(op, k, v)
     counts = dict(val=0, wp=0)
