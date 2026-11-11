@@ -108,6 +108,8 @@ pub fn scheduler_output_to_py<'a, 'py>(
             && prompt.len()? == nr.prefill_token_ids.len()
         {
             prompt.clone()
+        } else if entry.native {
+            super::native_input::token_buffer(py, &nr.prefill_token_ids)?
         } else {
             let request = lookup(&nr.req_id).expect("a scheduled request exists");
             sync_tokens(req, request)?;

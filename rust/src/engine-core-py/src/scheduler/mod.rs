@@ -17,6 +17,7 @@
 
 mod config;
 mod hooks;
+mod native_input;
 mod native_output;
 mod output;
 mod request;
@@ -60,6 +61,8 @@ use crate::nixl::RustNixlConnectorScheduler;
 pub fn register(m: &Bound<'_, PyModule>) -> PyResult<()> {
     m.add_class::<RustSchedulerCore>()?;
     m.add_class::<native_output::EngineOutputWriter>()?;
+    m.add_class::<native_input::EngineInputReader>()?;
+    m.add_class::<native_input::NativeAddRequest>()?;
     m.add_class::<SchedulerKvManagerView>()?;
     Ok(())
 }
@@ -234,6 +237,48 @@ impl RustSchedulerCore {
         Ok((update, mo, extra))
     }
 
+    /// `add_request` of a request the native input path admitted without a
+    /// Python `Request` (`NativeAddRequest`).
+    fn add_native_request(
+        &mut self,
+        py: Python<'_>,
+        native: &Bound<'_, native_input::NativeAddRequest>,
+    ) -> PyResult<()> {
+        if self.connector.is_some() {
+            // Its hooks take Python requests; the native input path is off then.
+            return Err(PyRuntimeError::new_err(
+                "a request without a Python Request needs a scheduler without a KV connector",
+            ));
+        }
+        let new = (native.borrow().take_new_request())
+            .ok_or_else(|| PyValueError::new_err("the request was already added"))?;
+        let request_id = new.request_id.clone();
+        if self.inner.has_request(&request_id) {
+            return Err(PyValueError::new_err(format!(
+                "request {request_id} is already in the scheduler"
+            )));
+        }
+        let id = native.getattr(intern!(py, "request_id"))?.cast_into::<PyString>()?;
+        self.shared.table.lock().unwrap().insert(
+            request_id.clone(),
+            PyReq {
+                obj: native.clone().into_any().unbind(),
+                native: true,
+                id: id.unbind(),
+                trace_headers: None,
+            },
+        );
+        let result = self
+            .run(|_| Request::new(new))
+            .and_then(|r| r.map_err(|e| PyValueError::new_err(e.to_report_string())))
+            .and_then(|rust_request| self.run(|s| s.add_request(rust_request)));
+        if result.is_err() && !self.inner.has_request(&request_id) {
+            self.shared.table.lock().unwrap().shift_remove(&request_id);
+        }
+        self.drain_removed(py)?;
+        result
+    }
+
     /// Run `f` on the scheduler: the KV cache manager is unreachable from
     /// Python meanwhile (except from the hooks that receive it), and a
     /// Python exception raised by a hook, or a panic, becomes the call's
@@ -271,7 +316,9 @@ impl RustSchedulerCore {
         let mut table = self.shared.table.lock().unwrap();
         let mut removed_ids = FxHashSet::default();
         for request in &removed {
-            if let Some(entry) = table.get(request.request_id.as_str()) {
+            if let Some(entry) = table.get(request.request_id.as_str())
+                && !entry.native
+            {
                 sync_request(entry.obj.bind(py), request)?;
             }
             removed_ids.insert(request.request_id.as_str());
@@ -363,8 +410,11 @@ impl RustSchedulerCore {
         let Some(request) = self.inner.get_request(request_id) else {
             return Ok(None);
         };
-        let obj = self.shared.py_request(py, request_id).into_bound(py);
-        sync_request(&obj, request)?;
+        let (obj, native) = self.shared.py_request_entry(py, request_id);
+        let obj = obj.into_bound(py);
+        if !native {
+            sync_request(&obj, request)?;
+        }
         Ok(Some(obj))
     }
 
@@ -835,6 +885,9 @@ impl RustSchedulerCore {
     }
 
     fn add_request(&mut self, py: Python<'_>, request: &Bound<'_, PyAny>) -> PyResult<()> {
+        if let Ok(native) = request.cast::<native_input::NativeAddRequest>() {
+            return self.add_native_request(py, native);
+        }
         let id = request.getattr(intern!(py, "request_id"))?.cast_into::<PyString>()?;
         let request_id = id.to_str()?.to_owned();
         if self.inner.has_request(&request_id) {
@@ -863,6 +916,7 @@ impl RustSchedulerCore {
             request_id.clone(),
             PyReq {
                 obj: request.clone().unbind(),
+                native: false,
                 id: id.unbind(),
                 trace_headers: (!trace_headers.is_none()).then(|| trace_headers.unbind()),
             },
@@ -919,8 +973,10 @@ impl RustSchedulerCore {
             if let Some(request) = self.inner.get_request(id)
                 && !request.is_finished()
             {
-                let obj = self.shared.py_request(py, id).into_bound(py);
-                sync_request(&obj, request)?;
+                let (obj, native) = self.shared.py_request_entry(py, id);
+                if !native {
+                    sync_request(obj.bind(py), request)?;
+                }
             }
         }
         let objs: Vec<Py<PyAny>> = {
@@ -1049,7 +1105,9 @@ impl RustSchedulerCore {
     fn sync_all_requests(&self, py: Python<'_>) -> PyResult<()> {
         let table = self.shared.table.lock().unwrap();
         for (id, entry) in table.iter() {
-            if let Some(request) = self.inner.get_request(id) {
+            if let Some(request) = self.inner.get_request(id)
+                && !entry.native
+            {
                 sync_request(entry.obj.bind(py), request)?;
             }
         }

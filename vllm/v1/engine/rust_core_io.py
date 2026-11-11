@@ -15,7 +15,7 @@ from typing import Any
 
 from vllm.config import VllmConfig
 from vllm.v1.core.sched.interface import SchedulerInterface
-from vllm.v1.engine import EngineCoreOutputs
+from vllm.v1.engine import EngineCoreOutputs, PrefixHashConfig
 from vllm.v1.serial_utils import MsgpackEncoder
 
 # `EngineCoreProc.ENGINE_CORE_DEAD`.
@@ -33,6 +33,29 @@ def native_output_unsupported_reason(
     # TODO: pooling outputs, which the Rust frontend does not request yet.
     if vllm_config.model_config.runner_type == "pooling":
         return "it does not support pooling models"
+    return None
+
+
+def native_input_unsupported_reason(
+    vllm_config: VllmConfig, prefix_hash_config: PrefixHashConfig | None
+) -> str | None:
+    """Why the engine core cannot use the native input path, which needs the
+    native output path too, if so."""
+    # The hooks of these connectors take Python requests, which the fast path
+    # does without.
+    if vllm_config.kv_transfer_config is not None:
+        return "it does not support KV connectors"
+    if vllm_config.ec_transfer_config is not None:
+        return "it does not support EC connectors"
+    if vllm_config.aux_output_config.enabled:
+        return "it does not support aux output connectors"
+    if prefix_hash_config is not None and not prefix_hash_config.hash_algo.endswith(
+        "_cbor"
+    ):
+        return (
+            f"it hashes prompt blocks with *_cbor algorithms only, not "
+            f"{prefix_hash_config.hash_algo}"
+        )
     return None
 
 

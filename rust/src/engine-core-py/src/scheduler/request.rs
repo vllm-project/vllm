@@ -38,8 +38,12 @@ use crate::kv_cache::views::SchedulerKv;
 
 /// The binding's side of a request.
 pub struct PyReq {
-    /// The engine's `Request`.
+    /// The engine's `Request`, or the `NativeAddRequest` of a request the
+    /// native input path admitted without one.
     pub obj: Py<PyAny>,
+    /// Whether `obj` is a `NativeAddRequest`: nothing to sync, and the
+    /// payloads it exposes are all Python reads of it.
+    pub native: bool,
     /// `request.request_id`, the object used as the key in Python outputs.
     pub id: Py<PyString>,
     pub trace_headers: Option<Py<PyAny>>,
@@ -100,6 +104,14 @@ impl Shared {
     pub fn py_request(&self, py: Python<'_>, request_id: &str) -> Py<PyAny> {
         self.table.lock().unwrap()[request_id].obj.clone_ref(py)
     }
+
+    /// The Python request of `request_id`, and whether it is a
+    /// `NativeAddRequest`.
+    pub fn py_request_entry(&self, py: Python<'_>, request_id: &str) -> (Py<PyAny>, bool) {
+        let table = self.table.lock().unwrap();
+        let entry = &table[request_id];
+        (entry.obj.clone_ref(py), entry.native)
+    }
 }
 
 static ARRAY_TYPE: PyOnceLock<Py<PyType>> = PyOnceLock::new();
@@ -125,6 +137,19 @@ pub fn token_ids_of(tokens: &Bound<'_, PyAny>) -> PyResult<Vec<i32>> {
 }
 
 fn sampling_params(request: &Bound<'_, PyAny>, sp: &Bound<'_, PyAny>) -> PyResult<SamplingParams> {
+    let py = request.py();
+    let use_structured_output =
+        !request.getattr(intern!(py, "structured_output_request"))?.is_none();
+    sampling_params_of(sp, use_structured_output, kv_cache_report_mode(request)?)
+}
+
+/// The Rust request's view of a Python `SamplingParams`, with what the
+/// Python `Request` derives from it.
+pub(super) fn sampling_params_of(
+    sp: &Bound<'_, PyAny>,
+    use_structured_output: bool,
+    kv_cache_report_mode: KvCacheReportMode,
+) -> PyResult<SamplingParams> {
     let py = sp.py();
     let is_set =
         |name: &Bound<'_, PyString>| -> PyResult<bool> { Ok(!sp.getattr(name)?.is_none()) };
@@ -163,10 +188,8 @@ fn sampling_params(request: &Bound<'_, PyAny>, sp: &Bound<'_, PyAny>) -> PyResul
             .getattr(intern!(py, "num_logprobs"))?
             .extract::<Option<i64>>()?
             .map(|n| n.max(0) as usize),
-        use_structured_output: !request
-            .getattr(intern!(py, "structured_output_request"))?
-            .is_none(),
-        kv_cache_report_mode: kv_cache_report_mode(request)?,
+        use_structured_output,
+        kv_cache_report_mode,
         watermarking: sp.getattr(intern!(py, "watermarking"))?.is_truthy()?,
         temperature: sp.getattr(intern!(py, "temperature"))?.extract()?,
         has_trace_decode_token_ids: is_set(intern!(py, "trace_decode_token_ids"))?,

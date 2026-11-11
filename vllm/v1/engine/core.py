@@ -43,6 +43,7 @@ from vllm.multimodal.cache import (
     engine_receiver_cache_from_config,
 )
 from vllm.outputs import RequestError
+from vllm.sampling_params import SamplingParams
 from vllm.tasks import POOLING_TASKS, SupportedTask
 from vllm.tracing import instrument, maybe_init_worker_tracer
 from vllm.transformers_utils.config import maybe_register_config_serialize_by_value
@@ -1289,6 +1290,21 @@ class EngineCore:
         """Return the latest committed weight version."""
         return self._weight_version
 
+    def _enforce_watermarking(self, params: SamplingParams) -> None:
+        """Watermark the request if the watermark config enforces it."""
+        watermark_config = self.vllm_config.watermark_config
+        # Greedy decoding and trace replay cannot be watermarked; leave their
+        # flag as the frontend resolved it.
+        if (
+            watermark_config
+            and watermark_config.enforce
+            and params.temperature != 0
+            and params.trace_decode_token_ids is None
+        ):
+            if params.watermarking is False:
+                warn_watermarking_override()
+            params.watermarking = True
+
     def preprocess_add_request(self, request: EngineCoreRequest) -> tuple[Request, int]:
         """Preprocess the request.
 
@@ -1303,20 +1319,8 @@ class EngineCore:
                 request.mm_features
             )
 
-        watermark_config = self.vllm_config.watermark_config
-        params = request.sampling_params
-        # Greedy decoding and trace replay cannot be watermarked; leave their
-        # flag as the frontend resolved it.
-        if (
-            watermark_config
-            and watermark_config.enforce
-            and params
-            and params.temperature != 0
-            and params.trace_decode_token_ids is None
-        ):
-            if params.watermarking is False:
-                warn_watermarking_override()
-            params.watermarking = True
+        if request.sampling_params is not None:
+            self._enforce_watermarking(request.sampling_params)
 
         frontend_hashes = frontend_block_hashes(request, self.prefix_hash_config)
         req = Request.from_engine_core_request(
@@ -1380,6 +1384,8 @@ class EngineCoreProc(EngineCore):
     ):
         self.input_queue = queue.Queue[tuple[EngineCoreRequestType, Any]]()
         self.output_queue = queue.Queue[tuple[int, EngineCoreOutputs] | bytes]()
+        # The decoders of the input thread (`_process_input_message`).
+        self._input_decoders: tuple[MsgpackDecoder, MsgpackDecoder] | None = None
         # Inputs taken from input_queue while waiting for a step's output that
         # must not be handled until the step completes (see _wait_for_output).
         self._deferred_inputs = deque[tuple[EngineCoreRequestType, Any]]()
@@ -1453,20 +1459,27 @@ class EngineCoreProc(EngineCore):
             # and to overlap some serialization/deserialization with the
             # model forward pass.
             # Threads handle Socket <-> Queues and core_busy_loop uses Queue.
+            native_output = self._use_native_output(vllm_config)
             ready_event = threading.Event()
-            input_thread = threading.Thread(
-                target=self.process_input_sockets,
-                args=(
-                    addresses.inputs,
-                    addresses.coordinator_input,
-                    identity,
-                    ready_event,
-                ),
-                daemon=True,
-            )
-            input_thread.start()
+            input_thread: Any
+            if native_output and self._use_native_input(vllm_config):
+                input_thread = self._start_native_input(
+                    addresses, identity, ready_event
+                )
+            else:
+                input_thread = threading.Thread(
+                    target=self.process_input_sockets,
+                    args=(
+                        addresses.inputs,
+                        addresses.coordinator_input,
+                        identity,
+                        ready_event,
+                    ),
+                    daemon=True,
+                )
+                input_thread.start()
 
-            if self._use_native_output(vllm_config):
+            if native_output:
                 self.output_thread = self._start_native_output(addresses)
             else:
                 self.output_thread = threading.Thread(
@@ -1504,6 +1517,49 @@ class EngineCoreProc(EngineCore):
             logger.info("Not using the native output path: %s.", reason)
             return False
         return True
+
+    def _use_native_input(self, vllm_config: VllmConfig) -> bool:
+        from vllm.v1.engine.rust_core_io import native_input_unsupported_reason
+
+        reason = native_input_unsupported_reason(vllm_config, self.prefix_hash_config)
+        if reason is not None:
+            logger.info("Not using the native input path: %s.", reason)
+            return False
+        return True
+
+    def _start_native_input(
+        self,
+        addresses: EngineZmqAddresses,
+        identity: bytes,
+        ready_event: threading.Event,
+    ) -> Any:
+        """Start the native input thread in place of `process_input_sockets`;
+        returns its handle, which tells `is_alive` like the thread."""
+        from vllm._rust_core import EngineInputReader
+
+        sampling_params_decoder = MsgpackDecoder(SamplingParams)
+
+        def decode_sampling_params(data: bytes) -> SamplingParams:
+            params = sampling_params_decoder.decode(data)
+            self._enforce_watermarking(params)
+            return params
+
+        ready_response = self._make_ready_response()
+        # TODO: honor the prompt block hashes of the Rust frontend; until then
+        # it need not compute them.
+        ready_response.prefix_hash_config = None
+        reader = EngineInputReader(
+            self,
+            addresses.inputs,
+            addresses.coordinator_input,
+            identity,
+            msgspec.msgpack.encode(ready_response),
+            ready_event,
+            decode_sampling_params,
+            self.prefix_hash_config,
+        )
+        logger.info("Using the native input path.")
+        return reader
 
     def _start_native_output(self, addresses: EngineZmqAddresses) -> Any:
         """Start the native output thread in place of `process_output_sockets`;
@@ -2232,12 +2288,6 @@ class EngineCoreProc(EngineCore):
         ready_event: threading.Event,
     ):
         """Input socket IO thread."""
-        # Msgpack serialization decoding with optional tensor IPC receiver.
-        add_request_decoder = MsgpackDecoder(
-            EngineCoreRequest, oob_tensor_provider=self.tensor_ipc_receiver
-        )
-        generic_decoder = MsgpackDecoder(oob_tensor_provider=self.tensor_ipc_receiver)
-
         with ExitStack() as stack, zmq.Context() as ctx:
             input_sockets = [
                 stack.enter_context(
@@ -2289,49 +2339,61 @@ class EngineCoreProc(EngineCore):
                     if type_frame.buffer == b"READY":
                         assert input_socket == coord_socket
                         continue
-                    request_type = EngineCoreRequestType(bytes(type_frame.buffer))
+                    self._process_input_message(bytes(type_frame.buffer), data_frames)
 
-                    # Deserialize the request data.
-                    request: Any
-                    if request_type == EngineCoreRequestType.ADD:
-                        req: EngineCoreRequest = add_request_decoder.decode(data_frames)
-                        try:
-                            request = self.preprocess_add_request(req)
-                        except MultiModalCacheMissError as e:
-                            # P0/P1 shadow drift -- return a retryable signal (P0
-                            # drops the stale entry, client resends with data).
-                            self._handle_mm_cache_miss(req, e)
-                            continue
-                        except VLLMValidationError as e:
-                            # Note(arpera):
-                            # Currently we validate in engine core
-                            # only if request uses the same structured output backend
-                            # as engine core latched
-                            self._handle_request_validation_error(req, e)
-                            continue
-                        except Exception:
-                            self._handle_request_preproc_error(req)
-                            continue
-                    elif request_type == EngineCoreRequestType.UTILITY:
-                        request = generic_decoder.decode(data_frames)
-                        client_idx, call_id, method, args = request
-                        if method == FT_UTILITY_METHOD:
-                            self.ft_sentinel.handle_command(
-                                client_idx, call_id, args[0]
-                            )
-                            continue
-                    else:
-                        request = generic_decoder.decode(data_frames)
+    def _process_input_message(self, type_frame: bytes, data_frames: list) -> None:
+        """Decode one message of an input socket (on the input thread), and
+        queue it for the busy loop."""
+        request_type = EngineCoreRequestType(type_frame)
+        if self._input_decoders is None:
+            # Msgpack serialization decoding with optional tensor IPC receiver.
+            self._input_decoders = (
+                MsgpackDecoder(
+                    EngineCoreRequest, oob_tensor_provider=self.tensor_ipc_receiver
+                ),
+                MsgpackDecoder(oob_tensor_provider=self.tensor_ipc_receiver),
+            )
+        add_request_decoder, generic_decoder = self._input_decoders
 
-                        if request_type == EngineCoreRequestType.ABORT:
-                            # Aborts are added to *both* queues, allows us to eagerly
-                            # process aborts while also ensuring ordering in the input
-                            # queue to avoid leaking requests. This is ok because
-                            # aborting in the scheduler is idempotent.
-                            self.aborts_queue.put_nowait(request)
+        # Deserialize the request data.
+        request: Any
+        if request_type == EngineCoreRequestType.ADD:
+            req: EngineCoreRequest = add_request_decoder.decode(data_frames)
+            try:
+                request = self.preprocess_add_request(req)
+            except MultiModalCacheMissError as e:
+                # P0/P1 shadow drift -- return a retryable signal (P0
+                # drops the stale entry, client resends with data).
+                self._handle_mm_cache_miss(req, e)
+                return
+            except VLLMValidationError as e:
+                # Note(arpera):
+                # Currently we validate in engine core
+                # only if request uses the same structured output backend
+                # as engine core latched
+                self._handle_request_validation_error(req, e)
+                return
+            except Exception:
+                self._handle_request_preproc_error(req)
+                return
+        elif request_type == EngineCoreRequestType.UTILITY:
+            request = generic_decoder.decode(data_frames)
+            client_idx, call_id, method, args = request
+            if method == FT_UTILITY_METHOD:
+                self.ft_sentinel.handle_command(client_idx, call_id, args[0])
+                return
+        else:
+            request = generic_decoder.decode(data_frames)
 
-                    # Push to input queue for core busy loop.
-                    self.input_queue.put_nowait((request_type, request))
+            if request_type == EngineCoreRequestType.ABORT:
+                # Aborts are added to *both* queues, allows us to eagerly
+                # process aborts while also ensuring ordering in the input
+                # queue to avoid leaking requests. This is ok because
+                # aborting in the scheduler is idempotent.
+                self.aborts_queue.put_nowait(request)
+
+        # Push to input queue for core busy loop.
+        self.input_queue.put_nowait((request_type, request))
 
     def process_output_sockets(
         self, output_paths: list[str], coord_output_path: str | None, engine_index: int
