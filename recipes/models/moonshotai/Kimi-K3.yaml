@@ -226,7 +226,7 @@ hardware_overrides:
       VLLM_ROCM_USE_AITER: "1"
       SAFETENSORS_FAST_GPU: "1"
       VLLM_ROCM_USE_AITER_MOE_SITUV2: "1"
-      VLLM_USE_BREAKABLE_CUDAGRAPH: "0" # REQUIRED on ROCm: the build auto-enables =1
+      VLLM_USE_BREAKABLE_CUDAGRAPH: "0"
     extra_args:
       - "--load-format"
       - "auto"
