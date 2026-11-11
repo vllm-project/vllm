@@ -26,6 +26,7 @@ from quack.compile_utils import make_fake_tensor
 from vllm.cute_utils import _tcgen05, simple_tma_copy
 from vllm.triton_utils import tl, triton
 from vllm.utils import math_utils
+from vllm.utils.platform_utils import num_compute_units
 from vllm.utils.torch_utils import direct_register_custom_op
 
 __all__ = ["bf16x3_router_gemm"]
@@ -610,18 +611,13 @@ def warmup_bf16x3_router_gemm(
     return configs
 
 
-@cache
-def _num_sms(device_index: int | None) -> int:
-    return torch.cuda.get_device_properties(device_index).multi_processor_count
-
-
 def _bf16x3_router_gemm(X: torch.Tensor, W: torch.Tensor) -> torch.Tensor:
     """Return `X @ W.T` using the SM100 BF16x3 router GEMM kernel."""
     N, K = X.shape
     M, _ = W.shape
     if N == 0:
         return X.new_empty((N, M), dtype=torch.float32)
-    BN, split_k = _pick_tile_config(N, K, M, _num_sms(X.device.index))
+    BN, split_k = _pick_tile_config(N, K, M, num_compute_units(X.device.index))
 
     partials = X.new_empty(split_k, N, M, dtype=torch.float32)
     Sm100BF16x3RouterGemm.compile(K, BN)(X, W, partials, split_k)
