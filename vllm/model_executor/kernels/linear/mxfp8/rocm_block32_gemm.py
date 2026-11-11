@@ -115,7 +115,7 @@ def _block32_tiled_kernel(
     M,
     N: tl.constexpr,
     K: tl.constexpr,
-    stride_om,
+    stride_om: tl.constexpr,
     BLOCK_M: tl.constexpr,
     BLOCK_N: tl.constexpr,
     BLOCK_K: tl.constexpr,
@@ -123,6 +123,7 @@ def _block32_tiled_kernel(
     N_FIRST: tl.constexpr,
     EVEN_K: tl.constexpr,
     FUSED_SPLITS: tl.constexpr,
+    EVEN_M: tl.constexpr = False,
 ):
     if FUSED_SPLITS > 1:
         pid_m, pid_n, tile, pid_k = _split_tile(N, BLOCK_N, FUSED_SPLITS)
@@ -138,8 +139,12 @@ def _block32_tiled_kernel(
         pid_k = tl.program_id(2)
     offs_m = pid_m * BLOCK_M + tl.arange(0, BLOCK_M)
     offs_n = pid_n * BLOCK_N + tl.arange(0, BLOCK_N)
-    m_mask = offs_m < M
-    n_mask = offs_n < N
+    m_mask = tl.full((BLOCK_M,), True, tl.int1) if EVEN_M else offs_m < M
+    n_mask = (
+        tl.full((BLOCK_N,), True, tl.int1)
+        if EVEN_M and N % BLOCK_N == 0
+        else offs_n < N
+    )
     k0 = pid_k * K_PER_SPLIT
     offs_k = k0 + tl.arange(0, BLOCK_K)
     offs_sk = k0 // 32 + tl.arange(0, BLOCK_K // 32)
@@ -773,6 +778,53 @@ def _launch(
     x per 32-block in registers (see _block32_packed_quant_kernel)."""
     M, K = x.shape
     N = weight.shape[0]
+    if (
+        not quant_in_kernel
+        and not cfg.packed
+        and cfg.k_split == 1
+        and cfg.fused_splits == 1
+        and cfg.block_k == 128
+        and K % 128 == 0
+        and N >= 1792
+    ):
+        bm, bn = 256, 256
+        n_first = K < 4096
+        grid = (
+            (triton.cdiv(N, bn), triton.cdiv(M, bm), 1)
+            if n_first
+            else (triton.cdiv(M, bm), triton.cdiv(N, bn), 1)
+        )
+        _block32_tiled_kernel[grid](
+            x,
+            x_scale,
+            weight,
+            weight_scale,
+            out,
+            out,
+            out,
+            M,
+            N,
+            K,
+            out.stride(0),
+            BLOCK_M=bm,
+            BLOCK_N=bn,
+            BLOCK_K=cfg.block_k,
+            K_PER_SPLIT=K,
+            N_FIRST=n_first,
+            EVEN_K=True,
+            FUSED_SPLITS=1,
+            EVEN_M=M % bm == 0,
+            num_warps=8,
+            num_stages=2,
+            llvm_fn_attrs=(
+                "amdgpu-sched-strategy=coexec"
+                if N >= 4096 and K >= 1280 and M % bm == 0
+                else ""
+            ),
+            matrix_instr_nonkdim=(16 if K >= 4096 else cfg.matrix_instr_nonkdim),
+            waves_per_eu=cfg.waves_per_eu,
+        )
+        return
     opts = dict(
         num_warps=cfg.num_warps,
         num_stages=cfg.num_stages,
