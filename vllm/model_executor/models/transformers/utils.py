@@ -16,12 +16,22 @@
 # limitations under the License.
 """Transformers modeling backend utilities."""
 
+import inspect
 from collections.abc import Callable, Iterator
 from contextlib import contextmanager
 from itertools import chain
 from operator import attrgetter
 from pathlib import Path
-from typing import TYPE_CHECKING, Literal, TypeAlias, TypeVar
+from types import UnionType
+from typing import (
+    TYPE_CHECKING,
+    Literal,
+    TypeAlias,
+    TypeVar,
+    Union,
+    get_args,
+    get_origin,
+)
 
 import torch
 from torch import nn
@@ -39,6 +49,7 @@ from vllm.model_executor.models.utils import maybe_prefix
 from vllm.transformers_utils.config import iter_rope_parameters
 
 if TYPE_CHECKING:
+    from vllm.compilation.decorators import DynamicArgDims
     from vllm.config import VllmConfig
     from vllm.model_executor.layers.quantization import QuantizationConfig
 
@@ -381,6 +392,34 @@ def can_enable_torch_compile(vllm_config: "VllmConfig") -> bool:
     text_config = vllm_config.model_config.hf_config.get_text_config()
     rope_types = {rp["rope_type"] for rp in iter_rope_parameters(text_config)}
     return "dynamic" not in rope_types or dynamic_rope_update_is_noop(vllm_config)
+
+
+def _is_tensor_type(annotation: object) -> bool:
+    """Match `torch.Tensor` and legacy types like `torch.BoolTensor`."""
+    return (
+        isinstance(annotation, type)
+        and annotation.__module__ == "torch"
+        and annotation.__name__.endswith("Tensor")
+    )
+
+
+def infer_dynamic_arg_dims(cls: type[nn.Module]) -> "DynamicArgDims":
+    """Infer `dynamic_arg_dims` from the signature of `cls.forward`.
+
+    The 0-th dimension is dynamic for every argument which is either unannotated
+    or annotated with a tensor type, optionally in a union with other types.
+    String annotations are not resolved.
+    """
+    dims: DynamicArgDims = {}
+    for name, param in inspect.signature(cls.forward).parameters.items():
+        if name == "self" or param.kind in {param.VAR_POSITIONAL, param.VAR_KEYWORD}:
+            continue
+        annotation = param.annotation
+        is_union = get_origin(annotation) in {Union, UnionType}
+        members = get_args(annotation) if is_union else (annotation,)
+        if annotation is param.empty or any(map(_is_tensor_type, members)):
+            dims[name] = 0
+    return dims
 
 
 def maybe_disable_dynamic_rope_update(
