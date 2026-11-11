@@ -78,7 +78,7 @@ class Scenario:
     offload_block_size: int  # KV block_size (tokens) written to the FS tier
     prefix_tokens: int  # shared prefix length (tokens) driven into the FS tier
     cpu_bytes: int
-    gpu_bytes: int
+    gpu_bytes: int  # total GPU KV bytes across all TP ranks
     isl_tokens: int = BENCH_PROMPT_TOKENS  # per-turn prompt tokens
     phase: str = "prefill"  # PHASES key
 
@@ -251,7 +251,7 @@ class VLLMServer:
             MODEL,
             "--tensor-parallel-size",
             str(TP_SIZE),
-            "--kv-cache-memory",
+            "--kv-cache-memory-bytes",
             str(self.kv_cache_bytes),
             "--kv-transfer-config",
             self.config_path.read_text(),
@@ -440,7 +440,10 @@ class BenchmarkRun:
         self._write_config(config_path)
         print("  [3/5] Starting vLLM server...")
         with VLLMServer(
-            config_path, self.run_dir / "vllm.log", self.port, self.spec.gpu_bytes
+            config_path,
+            self.run_dir / "vllm.log",
+            self.port,
+            self.spec.gpu_bytes // TP_SIZE,
         ):
             print("  [4/5] Running guidellm benchmark...")
             result = {
