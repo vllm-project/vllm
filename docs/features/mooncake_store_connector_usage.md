@@ -339,11 +339,11 @@ Strict isolation requires a Mooncake master started with `--enable_multi_tenants
 
 ### Lookup process
 
-Prefix lookups are served on each engine's worker rank 0 by a separate,
-low-priority process with its own lookup-only Mooncake client (no segment,
-TCP). Long prompts build and probe many keys per lookup, and the Mooncake
-client holds the GIL while probing; running lookups out of the worker keeps
-them from delaying GPU kernel launches. The worker waits for this process
+Prefix lookups are served on each engine's worker rank 0 by a separate
+process with its own lookup-only Mooncake client (no segment, TCP). Long
+prompts build and probe many keys per lookup, and the Mooncake client holds the
+GIL while probing; running lookups out of the worker keeps them from delaying
+GPU kernel launches. The worker waits for this process
 before serving requests and restarts it if it exits; while it is down, lookups
 are cache misses.
 

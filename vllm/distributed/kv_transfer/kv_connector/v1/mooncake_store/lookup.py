@@ -5,8 +5,8 @@
 A lookup builds and probes one key per Store chunk and rank namespace, so for
 long prompts it holds the GIL for milliseconds, including inside the native
 `batch_is_exist`. Rank 0 therefore serves the scheduler's lookups from a
-separate, low-priority process with its own lookup-only store client, so they
-never delay the worker's GPU launches.
+separate process with its own lookup-only store client, so they never delay
+the worker's GPU launches.
 """
 
 import functools
@@ -59,7 +59,6 @@ logger = init_logger(__name__)
 
 # The lookup client only queries the master; it moves no KV data.
 _LOOKUP_CLIENT_BUFFER_SIZE = 16 * 1024 * 1024
-_LOOKUP_PROCESS_NICE = 10
 _LOOKUP_PROCESS_READY = b"ready\n"
 _LOOKUP_PROCESS_MAX_RESTART_DELAY_S = 30.0
 _LOOKUP_PROCESS_START_TIMEOUT_S = 600.0
@@ -487,7 +486,6 @@ def _serve(spec: LookupProcessSpec, ready_fd: int) -> None:
 
 def main() -> None:
     signal.signal(signal.SIGINT, signal.SIG_IGN)
-    os.nice(_LOOKUP_PROCESS_NICE)
     threading.Thread(
         target=_exit_with_parent, args=(os.getppid(),), daemon=True
     ).start()
