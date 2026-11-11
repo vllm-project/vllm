@@ -412,6 +412,7 @@ def test_async_step_skips_sampling_for_mm_encoder_only(encoder_only):
     core = MagicMock()
     core.batch_queue = deque()
     core.batch_queue_size = 2
+    core.deferred_step = None
     core.is_mm_encoder_only = encoder_only
     core.is_pooling_model = False
     core.scheduler.has_requests.side_effect = [True, False, False]

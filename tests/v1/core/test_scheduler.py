@@ -8545,6 +8545,17 @@ def test_drafts_unused_with_async_placeholders():
     request.num_output_placeholders = 2
     assert not scheduler._drafts_unused(request, 17, 3)
 
+    # Depth > 2: 1 verified + 2 in-flight steps + this step = max_tokens.
+    (request,) = create_requests(num_requests=1, num_tokens=16, max_tokens=4)
+    request.append_output_token_ids(100)
+    request.num_output_placeholders = 4
+    request.num_output_placeholder_steps = 2
+    assert scheduler._drafts_unused(request, 21, 3)
+    # With one of them in flight, it may not.
+    request.num_output_placeholders = 2
+    request.num_output_placeholder_steps = 1
+    assert not scheduler._drafts_unused(request, 19, 3)
+
 
 @pytest.mark.parametrize("async_scheduling", [False, True])
 def test_cpu_encoder_input_updates_wait_for_completed_prefill(async_scheduling):

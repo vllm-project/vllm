@@ -76,7 +76,7 @@ def test_without_spec_decoding(
     ]
 
     # test_preemption, executor, async_scheduling,
-    # spec_config, test_prefill_chunking
+    # spec_config, test_prefill_chunking[, async_scheduling_depth]
     test_configs = [
         (False, "mp", False, None, False),
         (True, "mp", False, None, True),
@@ -87,6 +87,8 @@ def test_without_spec_decoding(
         (False, "mp", True, None, True),
         (True, "mp", True, None, True),
         (True, "uni", True, None, True),
+        (False, "mp", True, None, False, 4),
+        (True, "mp", True, None, True, 4),
     ]
 
     if current_platform.is_rocm():
@@ -138,7 +140,7 @@ def test_with_eagle3_spec_decoding(sample_json_schema, monkeypatch: pytest.Monke
     ]
 
     # test_preemption, executor, async_scheduling,
-    # spec_config, test_prefill_chunking
+    # spec_config, test_prefill_chunking[, async_scheduling_depth]
     test_configs = [
         (False, "mp", False, None, False),
         (False, "mp", False, spec_config, False),
@@ -151,6 +153,9 @@ def test_with_eagle3_spec_decoding(sample_json_schema, monkeypatch: pytest.Monke
         (True, "uni", True, spec_config_short, False),
         (True, "mp", True, spec_config, True),
         (True, "uni", True, spec_config_short, True),
+        (False, "mp", True, spec_config, False, 4),
+        (True, "mp", True, spec_config, True, 3),
+        (True, "uni", True, spec_config_short, True, 4),
     ]
 
     run_tests(monkeypatch, MTP_MODEL, test_configs, test_sampling_params)
@@ -180,7 +185,7 @@ def test_with_ngram_gpu_spec_decoding(monkeypatch: pytest.MonkeyPatch):
 
     # Test configurations covering various scenarios
     # test_preemption, executor, async_scheduling,
-    # spec_config, test_prefill_chunking
+    # spec_config, test_prefill_chunking[, async_scheduling_depth]
     test_configs = [
         (False, "mp", False, None, False),
         (False, "mp", False, ngram_gpu_config, False),
@@ -189,6 +194,7 @@ def test_with_ngram_gpu_spec_decoding(monkeypatch: pytest.MonkeyPatch):
         (True, "mp", True, ngram_gpu_config, False),
         (True, "uni", True, ngram_gpu_config, False),
         (True, "mp", True, ngram_gpu_config, True),
+        (True, "mp", True, ngram_gpu_config, True, 4),
     ]
 
     # Use MODEL (Qwen) for ngram_gpu tests as it's lighter weight
@@ -218,6 +224,7 @@ def run_tests(
             async_scheduling,
             spec_config,
             test_prefill_chunking,
+            *async_scheduling_depth,
         ) in enumerate(test_configs, 1):
             test_str = f"{n}/{len(test_configs)}"
             test_results = run_test(
@@ -230,6 +237,9 @@ def run_tests(
                 spec_config,
                 test_prefill_chunking=test_prefill_chunking,
                 attention_config=attention_config,
+                async_scheduling_depth=(
+                    async_scheduling_depth[0] if async_scheduling_depth else 2
+                ),
             )
             outputs.append(test_results)
 
@@ -326,6 +336,7 @@ def run_test(
     spec_config: dict[str, Any] | None,
     test_prefill_chunking: bool,
     attention_config: dict[str, Any] | None = None,
+    async_scheduling_depth: int = 2,
 ):
     spec_decoding = spec_config is not None
     cache_arg: dict[str, Any] = (
@@ -346,6 +357,8 @@ def run_test(
         f"chunk_prefill={test_prefill_chunking}, "
         f"spec_decoding={spec_decoding}, spec_method={spec_method}, spec_mml={spec_mml}"
     )
+    if async_scheduling:
+        test_config += f", async_depth={async_scheduling_depth}"
     print("-" * 80)
     print(f"---- TESTING {test_str}: {test_config}")
     print("-" * 80)
@@ -357,6 +370,7 @@ def run_test(
         max_num_batched_tokens=48 if test_prefill_chunking else None,
         enforce_eager=ENFORCE_EAGER,
         async_scheduling=async_scheduling,
+        async_scheduling_depth=async_scheduling_depth,
         distributed_executor_backend=executor,
         dtype="float32",
         speculative_config=spec_config,
