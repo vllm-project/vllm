@@ -2725,6 +2725,25 @@ def test_local_reset_still_publishes_when_connector_reset_fails():
     publisher.publish.assert_called_once()
 
 
+
+
+def test_reset_prefix_cache_publishes_real_manager_event():
+    scheduler = create_scheduler(
+        enable_prefix_caching=True,
+        kv_events_config=KVEventsConfig(enable_kv_cache_events=True, publisher="null"),
+    )
+    publisher = Mock()
+    scheduler.kv_event_publisher = publisher
+
+    request = create_requests(num_requests=1)[0]
+    scheduler.add_request(request)
+    scheduler.schedule()
+    request.num_in_flight_tokens = 0
+
+    assert scheduler.reset_prefix_cache(reset_running_requests=True)
+    publisher.publish.assert_called_once()
+    batch = publisher.publish.call_args.args[0]
+    assert any(isinstance(event, AllBlocksCleared) for event in batch.events)
 @pytest.mark.parametrize("reset_successful", [False, True])
 def test_aux_output_reset_follows_kv_reset_result(reset_successful: bool):
     scheduler = create_scheduler(enable_prefix_caching=True)
