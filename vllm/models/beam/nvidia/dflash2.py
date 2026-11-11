@@ -19,6 +19,11 @@ from .dflash2_context_ops import store_context_kv
 
 
 class _NVIDIABackend:
+    def __init__(self) -> None:
+        self._context_cache_ptrs: torch.Tensor | None = None
+        self._context_scale_ptrs: torch.Tensor | None = None
+        self._context_cache_addresses: tuple[int, ...] | None = None
+
     def configure_attention(self, attention: DFlash2BeamAttention) -> None:
         pass
 
@@ -126,27 +131,28 @@ class _NVIDIABackend:
             else ()
         )
         pointers = cache_pointers + scale_pointers
-        if getattr(model, "_context_cache_addresses", None) != pointers:
-            model._context_cache_ptrs = torch.tensor(
+        if self._context_cache_addresses != pointers:
+            self._context_cache_ptrs = torch.tensor(
                 cache_pointers, dtype=torch.int64, device=kv.device
             )
-            model._context_scale_ptrs = (
+            self._context_scale_ptrs = (
                 torch.tensor(scale_pointers, dtype=torch.int64, device=kv.device)
                 if scale_pointers
                 else None
             )
-            model._context_cache_addresses = pointers
-        assert model._context_cache_ptrs.device == kv.device
+            self._context_cache_addresses = pointers
+        assert self._context_cache_ptrs is not None
+        assert self._context_cache_ptrs.device == kv.device
         store_context_kv(
             kv,
             model._context_k_norm_weight,
             positions,
             rotary.cos_sin_cache,
-            model._context_cache_ptrs,
+            self._context_cache_ptrs,
             slots,
             cache.view(fp8_dtype) if fp8_dtype is not None else cache,
             first.k_norm.variance_epsilon,
-            model._context_scale_ptrs,
+            self._context_scale_ptrs,
         )
 
 
