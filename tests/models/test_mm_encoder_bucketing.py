@@ -370,10 +370,14 @@ def test_rungs_from_seconds_aligns_to_multiple():
 def test_whitelist_carries_lossless_level():
     from vllm.model_executor.models.mm_encoder_bucketing import (
         LOSSLESS_BIT_EXACT,
+        LOSSLESS_OUTPUT_LE_1FRAME,
         _VERIFIED_FOR_BUCKETING,
     )
 
     assert _VERIFIED_FOR_BUCKETING["qwen2_audio"] == LOSSLESS_BIT_EXACT
+    # GLM-ASR's attention is mask-less: output frame counts are exact but
+    # values drift, so it is whitelisted at the output-counts-only level.
+    assert _VERIFIED_FOR_BUCKETING["glmasr"] == LOSSLESS_OUTPUT_LE_1FRAME
 
 
 def test_bucket_accepts_list_shaped_crop():
@@ -410,6 +414,104 @@ def test_bucket_accepts_list_shaped_crop():
     rungs = bucketer.bucket(batch, 3)
     got = {r[1]["input_features"][0].shape[1]: r[0] for r in rungs}
     assert got == {8: [0], 32: [1], 16: [2]}
+
+
+def test_glmasr_spec_buckets_tensor_chunked_features():
+    from vllm.model_executor.models.glmasr import GlmAsrBucketingSpec
+
+    # chunked mel input: rows are chunks, chunk_counts maps chunks -> audio
+    # audio 0: chunks [1200, 300] frames, audio 1: chunk [2000] frames
+    feats = torch.randn(3, 4, 3000)  # [chunks, nmb, chunk_length], time last
+    mask = torch.zeros(3, 3000, dtype=torch.long)
+    mask[0, :1200] = 1
+    mask[1, :300] = 1
+    mask[2, :2000] = 1
+    counts = torch.tensor([2, 1])
+    batch = {
+        "input_features": feats,
+        "feature_attention_mask": mask,
+        "chunk_counts": counts,
+    }
+    bucketer = EncoderBucketing(
+        GlmAsrBucketingSpec(), LengthBucketingConfig((800, 1600, 3000))
+    )
+    rungs = bucketer.bucket(batch, 2)
+
+    # item length is the audio's longest chunk; windows (margin 4):
+    # 1200 -> 1600, 2000 -> 3000
+    got = {tuple(r[0]): r[1]["input_features"].shape[-1] for r in rungs}
+    assert got == {(0,): 1600, (1,): 3000}
+    for indices, kw in rungs:
+        # crop expands audio indices to their chunk rows and subsets counts
+        expected_rows = sum(counts[i].item() for i in indices)
+        assert kw["input_features"].shape == (expected_rows, 4, kw["input_features"].shape[-1])
+        assert kw["feature_attention_mask"].shape == (
+            expected_rows,
+            kw["input_features"].shape[-1],
+        )
+        assert kw["chunk_counts"].tolist() == [counts[i].item() for i in indices]
+    # audio 0's two chunks land together in the 1600 rung
+    by_indices = {tuple(r[0]): r[1] for r in rungs}
+    assert by_indices[(0,)]["feature_attention_mask"].sum(-1).tolist() == [1200, 300]
+
+
+def test_glmasr_spec_full_window_chunk_keeps_full_batch():
+    # A chunk at the full window has no safe rung once the context margin is
+    # counted, so the batch runs unbucketed rather than clip content.
+    from vllm.model_executor.models.glmasr import GlmAsrBucketingSpec
+
+    feats = torch.randn(2, 4, 3000)
+    mask = torch.zeros(2, 3000, dtype=torch.long)
+    mask[0, :3000] = 1
+    mask[1, :500] = 1
+    counts = torch.tensor([1, 1])
+    batch = {
+        "input_features": feats,
+        "feature_attention_mask": mask,
+        "chunk_counts": counts,
+    }
+    bucketer = EncoderBucketing(
+        GlmAsrBucketingSpec(), LengthBucketingConfig((800, 1600, 3000))
+    )
+    rungs = bucketer.bucket(batch, 2)
+    assert len(rungs) == 1
+    assert rungs[0][0] == [0, 1]
+    assert rungs[0][1] is batch
+
+
+def test_glmasr_spec_buckets_list_shaped_features():
+    from vllm.model_executor.models.glmasr import GlmAsrBucketingSpec
+
+    # list branch: one element per audio (its chunk stack), time last
+    feats = [torch.randn(1, 4, 3000), torch.randn(2, 4, 3000)]
+    mask = [torch.zeros(1, 3000, dtype=torch.long), torch.zeros(2, 3000, dtype=torch.long)]
+    mask[0][0, :500] = 1
+    mask[1][0, :1200] = 1
+    mask[1][1, :300] = 1
+    counts = torch.tensor([1, 2])
+    batch = {
+        "input_features": feats,
+        "feature_attention_mask": mask,
+        "chunk_counts": counts,
+    }
+    bucketer = EncoderBucketing(
+        GlmAsrBucketingSpec(), LengthBucketingConfig((800, 1600, 3000))
+    )
+    rungs = bucketer.bucket(batch, 2)
+
+    # windows (margin 4): 500 -> 800, max(1200, 300) -> 1600
+    got = {r[0][0]: r[1]["input_features"][0].shape[-1] for r in rungs}
+    assert got == {0: 800, 1: 1600}
+    for indices, kw in rungs:
+        assert isinstance(kw["input_features"], list)
+        assert len(indices) == 1
+        i = indices[0]
+        assert kw["input_features"][0].shape == feats[i][:, :, : got[i]].shape
+        assert kw["chunk_counts"].tolist() == [counts[i].item()]
+        # true chunk lengths survive the crop
+        assert kw["feature_attention_mask"][0].sum(-1).tolist() == (
+            mask[i].sum(-1).tolist()
+        )
 
 
 def test_canary_spec_buckets_list_shaped_features():
