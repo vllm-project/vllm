@@ -158,12 +158,13 @@ def test_relu2_nvfp4_matches_unfused(native_vllm_config, shape, scale_value):
     assert isinstance(actual, QuantizedActivation)
     assert torch.equal(x, before)
     assert torch.equal(actual.data, expected[0])
-    expected_scale = recover_swizzled_scales(expected[1], *shape)
-    actual_scale = recover_swizzled_scales(actual.scale, *shape, include_padding=True)
+    m, k = shape
+    expected_scale = recover_swizzled_scales(expected[1], m, k)
+    actual_scale = recover_swizzled_scales(actual.scale, m, k, include_padding=True)
     torch.testing.assert_close(
-        actual_scale[: shape[0], : shape[1] // 16], expected_scale, rtol=0, atol=0
+        actual_scale[:m, : k // 16], expected_scale, rtol=0, atol=0
     )
-    actual_scale[: shape[0], : shape[1] // 16] = 0
+    actual_scale[:m, : k // 16] = 0
     assert not torch.count_nonzero(actual_scale)
 
 
