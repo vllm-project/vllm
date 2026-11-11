@@ -107,7 +107,7 @@ else:
 
 @pytest.fixture(
     scope="module",
-    params=[pytest.param((backend, "auto"), id=backend) for backend in ATTN_BACKENDS]
+    params=[pytest.param((backend, "string"), id=backend) for backend in ATTN_BACKENDS]
     + [pytest.param(("auto", "openai"), id="structured")],
 )
 def server(request, tmp_path_factory):
@@ -125,9 +125,12 @@ def server(request, tmp_path_factory):
         "--chat-template",
         str(template),
         "--chat-template-content-format",
-        content_format,
+        "string" if content_format == "openai" else "openai",
         *ROCM_EXTRA_ARGS,
     ]
+
+    if content_format == "openai":
+        args += ["--score-template-content-format", "openai"]
 
     env = dict()
     if backend != "auto":

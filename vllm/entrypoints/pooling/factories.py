@@ -1,6 +1,7 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 
+from dataclasses import replace
 from typing import TYPE_CHECKING
 
 from fastapi import FastAPI
@@ -223,7 +224,10 @@ def init_pooling_state(
             state.openai_serving_models,
             supported_tasks=supported_tasks,
             request_logger=request_logger,
-            chat_template_config=chat_template_config,
+            chat_template_config=replace(
+                chat_template_config,
+                chat_template_content_format=args.score_template_content_format,
+            ),
             enable_flash_late_interaction=getattr(
                 args, "enable_flash_late_interaction", True
             ),

@@ -25,6 +25,7 @@ from vllm.entrypoints.openai.models.protocol import LoRAModulePath
 from vllm.logger import init_logger
 from vllm.renderers import ReasoningEffort
 from vllm.renderers.chat_utils import (
+    ChatTemplateContentFormat,
     ChatTemplateContentFormatOption,
     validate_chat_template,
 )
@@ -92,6 +93,11 @@ class BaseFrontendArgs:
     * "string" will render the content as a string. Example: `"Hello World"`
     * "openai" will render the content as a list of dictionaries, similar to
       OpenAI schema. Example: `[{"type": "text", "text": "Hello world!"}]`"""
+    score_template_content_format: ChatTemplateContentFormat = "string"
+    """Content format supplied to cross-encoder templates for `/score` and
+    `/rerank`: `string` preserves plain text and model-specific image
+    placeholders; `openai` supplies structured text/image blocks.
+    Independent of `--chat-template-content-format`."""
     trust_request_chat_template: bool = False
     """Whether to trust the chat template provided in the request. If False,
     the server will always use the chat template specified by `--chat-template`

@@ -115,7 +115,7 @@ def test_llm_reranker_tokenization_is_independent_of_nonbinding_doc_limit(
     assert nonbinding["prompt_token_ids"] == expected
 
 
-@pytest.mark.parametrize("content_format", [None, "auto", "string"])
+@pytest.mark.parametrize("content_format", [None, "string"])
 def test_scoring_keeps_legacy_character_loops_without_structured_opt_in(
     llm_reranker_processor, content_format
 ):
@@ -129,7 +129,7 @@ def test_scoring_keeps_legacy_character_loops_without_structured_opt_in(
         "bc",
         {},
         chat_template=template,
-        chat_template_content_format=content_format,
+        score_template_content_format=content_format,
     )
     assert prompt == "abc"
     assert inputs["prompt_token_ids"] == llm_reranker_processor.tokenizer.encode("abc")
@@ -199,7 +199,7 @@ def test_truncation_keeps_jinavl_score_token(
             data_1="a",
             data_2="bc bc bc bc",
             chat_template=None,
-            chat_template_content_format="auto",
+            score_template_content_format="string",
             max_tokens_per_query=0,
             max_tokens_per_doc=0,
             tok_params=TokenizeParams(
@@ -488,9 +488,8 @@ def test_scoring_text_limit_is_independent_of_adjacent_block_boundaries(
 
 
 @pytest.mark.parametrize("multimodal_reranker_processor", ["qwen3_vl"], indirect=True)
-@pytest.mark.parametrize("content_format", ["auto", "string"])
 def test_string_scoring_templates_keep_model_placeholders(
-    multimodal_reranker_processor, content_format
+    multimodal_reranker_processor,
 ):
     processor = multimodal_reranker_processor
     prompt, _ = processor.get_score_prompt(
@@ -503,7 +502,7 @@ def test_string_scoring_templates_keep_model_placeholders(
         ],
         {},
         chat_template="{{ messages[0].content + messages[1].content }}",
-        chat_template_content_format=content_format,
+        score_template_content_format="string",
     )
     assert prompt == "a<|vision_start|><|image_pad|><|vision_end|>"
 
@@ -519,7 +518,7 @@ def test_scoring_template_formats_plain_strings_as_text_blocks(
         "bc",
         {},
         chat_template=None if saved_template else _BLOCK_TEMPLATE,
-        chat_template_content_format=content_format,
+        score_template_content_format=content_format,
     )
     assert prompt == "query:adocument:bc"
 
@@ -533,6 +532,6 @@ def test_scoring_content_format_override_for_indirect_template(
         "bc",
         {},
         chat_template="{{ messages[1].content | tojson }}",
-        chat_template_content_format="openai",
+        score_template_content_format="openai",
     )
     assert json.loads(prompt) == [{"type": "text", "text": "bc"}]

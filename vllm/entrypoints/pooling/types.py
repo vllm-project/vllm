@@ -15,7 +15,7 @@ from vllm.outputs import LateChunkingMetadata
 from vllm.renderers import ChatParams, TokenizeParams
 from vllm.renderers.chat_utils import (
     ChatCompletionMessageParam,
-    ChatTemplateContentFormatOption,
+    ChatTemplateContentFormat,
 )
 from vllm.renderers.inputs import DictPrompt
 from vllm.tasks import PoolingTask
@@ -155,7 +155,7 @@ class OfflineScoringInputsContext(OfflineInputsContext):
     scoring_data: ScoringData
     chat_template: str | None
     pooling_params: PoolingParams
-    chat_template_content_format: ChatTemplateContentFormatOption = "string"
+    score_template_content_format: ChatTemplateContentFormat = "string"
 
 
 @dataclass
@@ -204,7 +204,7 @@ class ScoringRenderParams(RenderParams):
     data_1: ScoreData
     data_2: ScoreData
     chat_template: str | None
-    chat_template_content_format: ChatTemplateContentFormatOption
+    score_template_content_format: ChatTemplateContentFormat
     max_tokens_per_query: int
     max_tokens_per_doc: int
 

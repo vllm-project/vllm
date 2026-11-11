@@ -457,9 +457,9 @@ Some scoring models require a specific prompt format to work correctly. You can 
 
 For offline scoring, pass `chat_template` to the `LLM` constructor to use it for every `LLM.score` call. A `chat_template` passed to `LLM.score` overrides the constructor's template for that call.
 
-Scoring passes string content to templates by default, preserving existing template behavior. To opt into structured text/image blocks, set `--chat-template-content-format openai` when serving or pass `chat_template_content_format="openai"` to `LLM.score()`.
+Scoring passes string content to templates by default, preserving existing template behavior. To opt into structured text/image blocks, set `--score-template-content-format openai` when serving or pass `score_template_content_format="openai"` to `LLM.score()`.
 
-For scoring, both `auto` and `string` keep string content with model-specific image placeholders. Scoring does not infer the content format from the template. Templates that expect content blocks must explicitly opt into `openai`, including templates saved with a checkpoint.
+The scoring format accepts `string` and `openai`; it is independent of `--chat-template-content-format`. The default `string` format keeps model-specific image placeholders. Templates that expect content blocks must explicitly opt into `openai`, including templates saved with a checkpoint.
 
 Like chat templates, the score template receives a `messages` list. For scoring, each message has a `role` attribute—either `"query"` or `"document"`. For the usual kind of point-wise cross-encoder, you can expect exactly two messages: one query and one document. To access the query and document content, use Jinja's `selectattr` filter:
 
