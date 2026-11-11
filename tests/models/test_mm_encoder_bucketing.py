@@ -18,6 +18,7 @@ is covered directly; the variable-length shim is covered for install/uninstall.
 """
 
 import functools
+import math
 from contextlib import contextmanager
 
 import torch
@@ -414,6 +415,71 @@ def test_bucket_accepts_list_shaped_crop():
     rungs = bucketer.bucket(batch, 3)
     got = {r[1]["input_features"][0].shape[1]: r[0] for r in rungs}
     assert got == {8: [0], 32: [1], 16: [2]}
+
+
+def test_granite_spec_buckets_tensor_features():
+    from vllm.model_executor.models.granite_speech import (
+        GraniteSpeechBucketingSpec,
+    )
+
+    # [B, T, 160] with time on dim -2; 50 fps encoder frames
+    feats = torch.randn(3, 300, 160)
+    sizes = torch.tensor([21, 66, 30])  # projector tokens
+    batch = {"input_features": feats, "audio_embed_sizes": sizes}
+    bucketer = EncoderBucketing(
+        GraniteSpeechBucketingSpec(), LengthBucketingConfig((100, 200, 400))
+    )
+    rungs = bucketer.bucket(batch, 3)
+
+    # item lengths are the feature time extents (300 each -> no shrink past
+    # the window for any of them once margin is added), so grouping is driven
+    # by the rung ladder: 300 + 7 -> 400 for all three.
+    assert len(rungs) == 1
+    assert rungs[0][0] == [0, 1, 2]
+    assert rungs[0][1]["input_features"].shape[-2] == 300
+
+    # crop truncates the time axis and keeps sizes aligned
+    cropped = rungs[0][1]
+    assert cropped["audio_embed_sizes"].tolist() == [21, 66, 30]
+
+
+def test_granite_spec_crop_truncates_time_axis():
+    from vllm.model_executor.models.granite_speech import (
+        GraniteSpeechBucketingSpec,
+    )
+
+    feats = [torch.randn(250, 160), torch.randn(80, 160)]
+    sizes = [torch.tensor(50), torch.tensor(15)]
+    batch = {"input_features": feats, "audio_embed_sizes": sizes}
+    spec = GraniteSpeechBucketingSpec()
+    assert spec.item_lengths(batch) == [250, 80]
+    assert spec.padded_time(batch) == 250
+
+    cropped = spec.crop(batch, [1], 100)
+    assert isinstance(cropped["input_features"], list)
+    assert cropped["input_features"][0].shape == (80, 160)  # never clips
+    assert cropped["audio_embed_sizes"] == [torch.tensor(15)]
+
+    cropped = spec.crop(batch, [0], 100)
+    assert cropped["input_features"][0].shape == (100, 160)  # truncates
+
+
+def test_granite_spec_lengths_from_embed_sizes():
+    from vllm.model_executor.models.granite_speech import (
+        GraniteSpeechBucketingSpec,
+    )
+
+    # tokens = ceil(T/15) * 3 -> upper bound tokens // 3 * 15 covers T
+    spec = GraniteSpeechBucketingSpec()
+    for t_enc, tokens in ((164, 33), (250, 51), (1500, 300)):
+        assert math.ceil(t_enc / 15) * 3 == tokens
+        upper = spec._lengths_from_embed_sizes([tokens])[0]
+        assert upper >= t_enc and upper - t_enc < 15
+    # fallback path: no input_features -> sizes drive the rung choice
+    assert spec.item_lengths({"audio_embed_sizes": torch.tensor([33, 66])}) == [
+        165,
+        330,
+    ]
 
 
 def test_glmasr_spec_buckets_tensor_chunked_features():

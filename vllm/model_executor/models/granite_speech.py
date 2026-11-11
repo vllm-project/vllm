@@ -65,6 +65,10 @@ from vllm.utils.tensor_schema import TensorSchema, TensorShape
 from vllm.utils.torch_utils import PIN_MEMORY
 
 from .blip2 import Blip2QFormerModel
+from .mm_encoder_bucketing import (
+    EncoderBucketingSpec,
+    install_encoder_bucketing,
+)
 from .interfaces import (
     MultiModalEmbeddings,
     SupportsLoRA,
@@ -228,6 +232,93 @@ class GraniteSpeechDummyInputsBuilder(
 
 
 ### QFormer Projector
+
+class GraniteSpeechBucketingSpec(EncoderBucketingSpec):
+    """Bucketing semantics for Granite-Speech's batch-max padded CTC encoder.
+
+    `input_features` is `[B, T, 160]` (time on dim -2: two mel frames stacked
+    into the 160-wide feature) or a per-audio list of unpadded `[T_i, 160]`
+    tensors (one audio per request, so items carry their true extent); the
+    model zero-pads the batch to its longest item inside
+    `_pad_and_stack_input_features`. Cropping the shared time axis to a rung
+    caps that padding so short clips stop paying for long ones.
+
+    The Conformer attention is Shaw-relative and block-partitioned (200-frame
+    blocks) with only the tail block masked, so batch padding still
+    participates in softmax: output token counts are derived from
+    `audio_embed_sizes` (the true lengths) and are strictly rung-independent,
+    while values drift -- the output-lossless-up-to-1-frame class.
+
+    Item length is the feature time extent (exact: items arrive unpadded),
+    falling back to the `audio_embed_sizes` conversion (projector tokens ->
+    encoder frames, `tokens // 3 * 15`, within 15 frames of the true length).
+    Crop selects items, truncates the shared time axis and keeps
+    `audio_embed_sizes` aligned. Rungs align to the projector window (15
+    encoder frames -> 3 tokens) so truncation never lands inside a block.
+    """
+
+    frames_per_second = 50  # hop 160 @ 16 kHz mel = 100 fps, 2 frames stacked
+    context_margin = 7  # depthwise conv kernel_size=15 (radius (15-1)//2):
+    # the rung keeps 7 frames past the published length so the last valid
+    # frame's conv reads its full neighbourhood even if the window truncates.
+    align_to = 15  # projector_window_size (QFormer block boundary)
+
+    @staticmethod
+    def _lengths_from_embed_sizes(audio_embed_sizes) -> list[int]:
+        # projector tokens = ceil(T_enc / 15) * 3 -> T_enc <= tokens // 3 * 15
+        if isinstance(audio_embed_sizes, torch.Tensor):
+            sizes = audio_embed_sizes.tolist()
+        else:
+            sizes = [int(s) for s in audio_embed_sizes]
+        return [(int(s) // 3) * 15 for s in sizes]
+
+    def item_lengths(
+        self, mm_kwargs_batch: Mapping[str, object]
+    ) -> list[int] | None:
+        feats = mm_kwargs_batch.get("input_features")
+        if feats is not None:
+            if isinstance(feats, list):
+                return [int(f.shape[-2]) for f in feats]
+            return [int(feats.shape[-2])] * int(feats.shape[0])
+        sizes = mm_kwargs_batch.get("audio_embed_sizes")
+        if sizes is not None:
+            return self._lengths_from_embed_sizes(sizes)
+        return None
+
+    def padded_time(self, mm_kwargs_batch: Mapping[str, object]) -> int:
+        feats = mm_kwargs_batch.get("input_features")
+        if feats is None:
+            return 0
+        if isinstance(feats, list):
+            return max(int(f.shape[-2]) for f in feats)
+        return int(feats.shape[-2])  # [B, T, 160]
+
+    def crop(
+        self,
+        mm_kwargs_batch: Mapping[str, object],
+        indices: list[int],
+        rung: int,
+    ) -> dict[str, object]:
+        feats = mm_kwargs_batch["input_features"]
+        sizes = mm_kwargs_batch.get("audio_embed_sizes")
+
+        def select(seq):
+            if isinstance(seq, torch.Tensor):
+                return seq[torch.tensor(indices, dtype=torch.long, device=seq.device)]
+            return [seq[i] for i in indices]
+
+        if isinstance(feats, list):
+            out_feats = [feats[i][..., :rung, :] for i in indices]
+        else:
+            sel = torch.tensor(indices, dtype=torch.long, device=feats.device)
+            out_feats = feats[sel, ..., :rung, :]
+
+        result: dict[str, object] = {"input_features": out_feats}
+        if sizes is not None:
+            result["audio_embed_sizes"] = select(sizes)
+        return result
+
+
 class GraniteSpeechEncoderProjector(nn.Module):
     def __init__(
         self,
@@ -625,6 +716,14 @@ class GraniteSpeechForConditionalGeneration(
 
         self.make_empty_intermediate_tensors = (
             self.language_model.make_empty_intermediate_tensors
+        )
+
+        install_encoder_bucketing(
+            self,
+            {"audio": self.encoder},
+            GraniteSpeechBucketingSpec(),
+            model_type=config.model_type,
+            additional_config=getattr(vllm_config, "additional_config", None),
         )
 
     def _build_encoder(
