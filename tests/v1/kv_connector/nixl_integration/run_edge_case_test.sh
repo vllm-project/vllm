@@ -5,6 +5,9 @@ set -xe
 KV_BUFFER_DEVICE="cuda"  # Default to cuda
 PREFILL_GPU_ID="${PREFILL_GPU_ID:-4}"  # Default GPU IDs
 DECODE_GPU_ID="${DECODE_GPU_ID:-5}"
+# 1: run the proxy with --super-prefill, capped at 8 tokens on the prefiller so
+# that every answer switches to the decoder mid-way.
+SUPER_PREFILL="${SUPER_PREFILL:-0}"
 while [[ $# -gt 0 ]]; do
   case $1 in
     --kv_buffer_device)
@@ -103,6 +106,9 @@ run_tests_for_model() {
   PROXY_CMD="python3 ${GIT_ROOT}/tests/v1/kv_connector/nixl_integration/toy_proxy_server.py --port $PROXY_PORT"
   PROXY_CMD+=" --prefiller-ports ${PREFILL_PORT}"
   PROXY_CMD+=" --decoder-ports ${DECODE_PORT}"
+  if [[ "$SUPER_PREFILL" == "1" ]]; then
+    PROXY_CMD+=" --super-prefill --super-prefill-max-tokens 8"
+  fi
   # Start the proxy server
   echo "Starting proxy server with command: $PROXY_CMD"
   $PROXY_CMD &

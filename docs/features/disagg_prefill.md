@@ -79,6 +79,10 @@ decode = client.chat.completions.create(
 
 If `messages` has non-text content, or `echo` or `return_prompt_text` is set, the ids are ignored and `messages` is rendered instead, so it must match the prefill request. Otherwise `kv_transfer_params["prompt_token_ids"]` must be a non-empty list of non-negative integers, or the request fails with HTTP 400, as it always does on `/v1/chat/completions/batch`.
 
+## Generating on the prefill instance during the KV transfer
+
+With NixlConnector, the toy proxy's `--super-prefill` option keeps the prefill instance generating while the decode instance pulls the KV cache, so the transfer no longer delays the first token or the end of the request. It is off by default; see [Super Prefill](nixl_connector_usage.md#super-prefill).
+
 ## Generate API output modes
 
 When the prefill and decode stages use the [Generate API](../serving/online_serving/token_in_token_out.md) (`/inference/v1/generate`), only the decode response reaches the client, so set `output_mode` on the decode request only. A proxy that reuses the client's request body for the prefill request must reset `output_mode` to `tokens` there. A prefill instance started with `--tokens-only` has no tokenizer and rejects `output_mode: "text"` with a 400.

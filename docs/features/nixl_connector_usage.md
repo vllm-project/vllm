@@ -135,6 +135,27 @@ python tests/v1/kv_connector/nixl_integration/toy_proxy_server.py \
   --decoder-ports 8200
 ```
 
+#### Super Prefill
+
+By default the proxy asks the prefiller for one token, waits until the decoder has pulled the KV cache, and only then streams the answer from the decoder. With `--super-prefill`, the prefiller keeps generating the answer while the decoder pulls the KV cache, and the decoder continues from the prefiller's last token once the pull completes. The KV transfer then no longer delays the first token or the end of the request. The cost is decode work on the prefiller and a short pause at the switch, while the decoder recomputes the prefiller's tokens in one step.
+
+It is off by default, experimental, and applies to `/v1/completions` with `NixlConnector` in pull mode only:
+
+```bash
+python tests/v1/kv_connector/nixl_integration/toy_proxy_server.py \
+  --port 8192 \
+  --prefiller-hosts localhost \
+  --prefiller-ports 8100 \
+  --decoder-hosts localhost \
+  --decoder-ports 8200 \
+  --super-prefill \
+  --super-prefill-max-tokens 256
+```
+
+- It relies on prefix caching on both instances, which is on by default: the prefiller continues from its own cached prompt blocks, and the decoder from the blocks it pulled. Without it the answer is still correct, but each instance recomputes the prompt.
+- `--super-prefill-max-tokens N` bounds the decode work on the prefiller. After `N` tokens it stops and waits for the pull. The default, `0`, sets no limit.
+- Requests whose state cannot carry across the switch take the default path: several prompts or `n > 1`, `stop` strings, `min_tokens`, a `max_tokens` of `null`, logprobs, `echo`, `suffix`, penalties, beam search, structured outputs and `return_token_ids`. Sampling with a fixed `seed` restarts its random sequence at the switch.
+
 ## Environment Variables
 
 - `VLLM_NIXL_SIDE_CHANNEL_PORT`: Port for NIXL handshake communication
