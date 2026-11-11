@@ -2265,7 +2265,6 @@ class MoRIIOConnectorWorker:
         logger.debug(
             "Size of encoded MoRIIOAgentMetadata: %s bytes", str(size_in_bytes)
         )
-        tensor_metadata = msgpack.dumps(layer_name_to_local_kv_cache_metadata)
 
         # Listen for new requests for metadata.
         host = "*"
@@ -2283,7 +2282,10 @@ class MoRIIOConnectorWorker:
                     continue
                 try:
                     MoRIIOConnectorWorker._handle_handshake_msg(
-                        sock, frames, encoded_data, tensor_metadata
+                        sock,
+                        frames,
+                        encoded_data,
+                        layer_name_to_local_kv_cache_metadata,
                     )
                 except Exception as e:
                     logger.warning(
@@ -2300,7 +2302,7 @@ class MoRIIOConnectorWorker:
         sock: zmq.Socket,
         frames: list[bytes],
         encoded_data: bytes,
-        tensor_metadata: bytes,
+        layer_name_to_local_kv_cache_metadata: dict,
     ) -> None:
         if len(frames) != 2:
             raise HandshakeError(f"expected 2 frames, got {len(frames)}")
@@ -2309,7 +2311,10 @@ class MoRIIOConnectorWorker:
             # Engine metadata first, then the per-layer tensor metadata.
             sock.send_multipart((identity, b"", encoded_data))
             logger.debug("MoRIIO handshake listener sent metadata")
-            sock.send_multipart((identity, b"", tensor_metadata))
+            # Encoded per request: the regions may be re-registered in place
+            # after the listener starts.
+            buf = msgpack.dumps(layer_name_to_local_kv_cache_metadata)
+            sock.send_multipart((identity, b"", buf))
         elif msg == MoRIIOConstants.POP_DONE_RECV:
             _, req_id = sock.recv_multipart()
             logger.debug(

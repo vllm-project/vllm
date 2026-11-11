@@ -760,7 +760,8 @@ def test_moriio_handshake_returns_metadata(mock_parallel_groups):
 
 def test_moriio_handshake_listener_survives_bad_messages_and_stops():
     """A malformed or unknown message must not kill the P-side handshake
-    listener (it would accept no new handshakes until restart), and
+    listener (it would accept no new handshakes until restart), each handshake
+    must send the current tensor metadata, and
     MoRIIOConnectorWorker.shutdown() must end the thread."""
     metadata = MoRIIOAgentMetadata(
         engine_id="engine-p",
@@ -795,8 +796,19 @@ def test_moriio_handshake_listener_survives_bad_messages_and_stops():
             _, engine_meta = sock.recv_multipart()
             _, tensor_meta = sock.recv_multipart()
 
-        assert msgspec.msgpack.decode(engine_meta, type=MoRIIOAgentMetadata) == metadata
-        assert msgpack.loads(tensor_meta) == layer_metadata
+            assert (
+                msgspec.msgpack.decode(engine_meta, type=MoRIIOAgentMetadata)
+                == metadata
+            )
+            assert msgpack.loads(tensor_meta) == layer_metadata
+
+            # Regions re-registered in place (e.g. after a wake-up) must reach
+            # the next handshake.
+            layer_metadata["layer0"] = [b"meta1"]
+            sock.send(MoRIIOConstants.GET_META_MSG)
+            sock.recv_multipart()
+            _, tensor_meta = sock.recv_multipart()
+            assert msgpack.loads(tensor_meta) == {"layer0": [b"meta1"]}
 
         # shutdown() joins without a timeout; run it on a helper thread so a
         # listener that ignores the stop event fails the test instead of
