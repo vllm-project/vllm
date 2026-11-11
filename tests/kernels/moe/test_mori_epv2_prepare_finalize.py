@@ -128,7 +128,8 @@ def test_receive_rows_are_bounded_by_dp_tokens(
     assert (ids[:recv] == 5).all() and (ids[recv:] == -1).all()
     assert (weights[recv:] == 0).all()
     assert torch.isnan(op.recv_a1[rows:]).all()
-    assert int(meta.expert_num_tokens) == recv
+    # The experts process every bounded row, without the received-row count.
+    assert meta is None
     # combine sees only the bounded expert output, under dispatch's routing.
     assert op.combine_input is not None and op.combine_input.shape[0] == rows
     assert op.combine_routing is op.routing

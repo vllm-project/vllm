@@ -37,17 +37,12 @@ class MoriEPv2PrepareAndFinalize(mk.FusedMoEPrepareAndFinalizeModular):
         self.rank_expert_offset = rank_expert_offset
         self._padding_expert_ids: torch.Tensor | None = None
         self._routing = None
-        self._experts_read_recv_rows_only = False
 
     @property
     def activation_format(self) -> mk.FusedMoEActivationFormat:
         return mk.FusedMoEActivationFormat.Standard
 
     def post_init_setup(self, fused_experts: mk.FusedMoEExperts):
-        from vllm.model_executor.layers.fused_moe.experts.rocm_aiter_moe import (
-            AiterExperts,
-        )
-
         if fused_experts.moe_config.in_dtype != torch.bfloat16:
             raise ValueError(
                 "MORI EPv2 only dispatches BF16 activations; got "
@@ -76,9 +71,6 @@ class MoriEPv2PrepareAndFinalize(mk.FusedMoEPrepareAndFinalizeModular):
                 "per-tensor quant does not support. Set VLLM_MORI_EP_V2=0 to use "
                 "MORI EPv1, which quantizes before dispatch."
             )
-
-        # AITER computes only the first expert_num_tokens rows.
-        self._experts_read_recv_rows_only = isinstance(fused_experts, AiterExperts)
 
     def allocate_fused_expert_output(
         self,
@@ -204,27 +196,20 @@ class MoriEPv2PrepareAndFinalize(mk.FusedMoEPrepareAndFinalizeModular):
             dispatch_ids = dispatch_ids[:rows]
             if dispatch_scale is not None:
                 dispatch_scale = dispatch_scale[:rows]
-        # MORI reuses capacity-sized buffers without clearing unused rows.
+        # The experts get no received-row count and read every bounded row, and
+        # MORI reuses its buffers, so make the unused rows inert: zero
+        # activations and weights, routed to expert -1.
         unused = (
             torch.arange(dispatch_a1.shape[0], device=dispatch_a1.device)
             >= dispatch_recv_token_num
         ).unsqueeze(1)
-        # Experts that read only the received rows can skip clearing the rest,
-        # unless a dynamic per-tensor activation scale is taken over every row.
-        if not self._experts_read_recv_rows_only or (
-            quant_config.act_scale_is_tensor_wide(quant_config.a1_scale)
-        ):
-            dispatch_a1.masked_fill_(unused, 0)
+        dispatch_a1.masked_fill_(unused, 0)
         dispatch_weights.masked_fill_(unused, 0)
         dispatch_ids.masked_fill_(unused, -1)
-        expert_tokens_meta = mk.ExpertTokensMetadata(
-            expert_num_tokens=dispatch_recv_token_num,
-            expert_num_tokens_cpu=None,
-        )
         return (
             dispatch_a1,
             dispatch_scale,
-            expert_tokens_meta,
+            None,
             dispatch_ids,
             dispatch_weights,
         )
