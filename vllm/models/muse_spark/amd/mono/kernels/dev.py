@@ -385,6 +385,36 @@ def mb_put_sys(tag, base, i, v):
     mb_put(tag, base, i, v, CM_SYS)
 
 
+def _mb_put_peer_dev(tag, base, i, v):
+    mb_put(tag, base, i, v, CM_DEV)
+
+
+def _release_sys():
+    fx.memory_fence(ordering=fx.AtomicOrdering.Release, syncscope=rocdl.SyncScope.OneAs)
+
+
+def _release_none():
+    pass
+
+
+def peer_ops(pcie):
+    """(put, release, store cache modifier) for the stores into a peer GPU's buffer.
+
+    pcie (128-CTA grids: MI350P): device-scope stores. Over PCIe, system-scope
+    (sc0 sc1) stores to a peer run at a few GB/s and device-scope stores at the
+    link rate, which cuts K3's peer exchanges from 0.1-0.7 ms to 10-40 us.
+    Tagged pairs need no fence: a reader takes a pair only with this launch's
+    tag. Plain data announced by a flag is published as all threads store,
+    waitcnt + barrier, then the flag thread calls release() (a system-scope
+    release: the L2 writeback and wait that put the data before the flag) and
+    stores the flag. Otherwise (256 CTAs: MI355X, xGMI): system-scope stores
+    and no fence, as before.
+    """
+    if pcie:
+        return _mb_put_peer_dev, _release_sys, CM_DEV
+    return mb_put_sys, _release_none, CM_SYS
+
+
 def mb_put2(tag, base, i, w0, w1):
     """Pairs i, i+1 := (w0, tag), (w1, tag): one 16 B store (i even)."""
     bo.buffer_store(

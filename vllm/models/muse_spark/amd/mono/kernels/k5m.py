@@ -58,7 +58,6 @@ from . import k5
 from .dev import (
     BLOCKS,
     CM_DEV,
-    CM_SYS,
     THREADS,
     WAVES,
     ballot,
@@ -76,7 +75,7 @@ from .dev import (
     ld_vec_if,
     mb_poll,
     mb_put,
-    mb_put_sys,
+    peer_ops,
     popcount,
     readlane,
     st_if,
@@ -139,6 +138,8 @@ def build(key: BuildM):
     assert S in (32, 64, 96, 128), S
     W = key.W  # shadows the module-level defaults for every closure below
     GRID = key.grid
+    # peer stores: device scope + release fences on PCIe (128 CTAs), else as before
+    mb_put_sys, peer_release, CM_PEER = peer_ops(GRID < BLOCKS)
     VC = BLOCKS // GRID  # virtual CTAs a physical CTA (V is the virtual expert count)
     EL = E // W
     CPR = BLOCKS // W  # 16-column blocks a rank owns in the EP reduce-scatter
@@ -521,11 +522,12 @@ def build(key: BuildM):
                 w2,
                 pd + fx.Int64(play["moep"][0]),
                 (((par * W + rank) * BLOCKS + bid) * S + t) * 8 + rp,
-                CM_SYS,
+                CM_PEER,
             )
         rocdl.s_waitcnt(vmcnt=0, expcnt=0, lgkmcnt=0)
         gpu.barrier()
         if tid == 0:
+            peer_release()
             mb_put_sys(
                 tag,
                 pd + fx.Int64(play["mf"][0]),

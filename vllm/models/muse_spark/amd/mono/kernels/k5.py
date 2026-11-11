@@ -86,8 +86,8 @@ from .dev import (
     mb_poll,
     mb_put,
     mb_put_if,
-    mb_put_sys,
     mfma_bf16,
+    peer_ops,
     readlane,
     rsrc,
     st_if,
@@ -310,6 +310,8 @@ def build(key: Build):
     OK_K, NQTILES, NQT = d.OK_K, d.NQTILES, d.NQT
     assert W == 8 or S == 32, (S, W)
     GRID = key.grid
+    # peer stores: device scope + release fences on PCIe (128 CTAs), else as before
+    mb_put_sys, peer_release, CM_PEER = peer_ops(GRID < BLOCKS)
     assert GRID in GRIDS, GRID
     V = BLOCKS // GRID  # virtual CTAs a physical CTA (passes of every stage)
     assert V == 1 or (key.bnd and not key.attn), key
@@ -580,12 +582,13 @@ def build(key: Build):
                     w2,
                     rsrc(sel_peer(pl, dw) + fx.Int64(play["op"][0])),
                     idx,
-                    cache_modifier=CM_SYS,
+                    cache_modifier=CM_PEER,
                 )
         if const_expr(not BND):  # bnd: tagged pairs, no flags
             rocdl.s_waitcnt(vmcnt=0, expcnt=0, lgkmcnt=0)
             gpu.barrier()
             if tid == 0:
+                peer_release()
                 for pb in pl:
                     mb_put_sys(
                         tag,
@@ -704,11 +707,12 @@ def build(key: Build):
                     xv,
                     rsrc(pb + fx.Int64(play["xin"][0])),
                     (par * S + t) * (HID // 2) + cq // 2,
-                    cache_modifier=CM_SYS,
+                    cache_modifier=CM_PEER,
                 )
         rocdl.s_waitcnt(vmcnt=0, expcnt=0, lgkmcnt=0)
         gpu.barrier()
         if tid == 0:
+            peer_release()
             for pb in pl:
                 mb_put_sys(tag, pb + fx.Int64(play["xf"][0]), par * S + t, fx.Int32(1))
 
@@ -925,11 +929,12 @@ def build(key: Build):
                         hw,
                         rsrc(pb + fx.Int64(play["hraw"][0])),
                         hidx,
-                        cache_modifier=CM_SYS,
+                        cache_modifier=CM_PEER,
                     )
         rocdl.s_waitcnt(vmcnt=0, expcnt=0, lgkmcnt=0)
         gpu.barrier()
         if tid == 0:
+            peer_release()
             for pb in pl:
                 mb_put_sys(
                     tag,
@@ -1393,11 +1398,12 @@ def build(key: Build):
                     mw,
                     pb + fx.Int64(play["moem"][0]),
                     ((par * BLOCKS + bid) * S + t) * 8 + p,
-                    CM_SYS,
+                    CM_PEER,
                 )
         rocdl.s_waitcnt(vmcnt=0, expcnt=0, lgkmcnt=0)
         gpu.barrier()
         if tid == 0:
+            peer_release()
             for pb in pl:
                 mb_put_sys(
                     tag, pb + fx.Int64(play["mmf"][0]), par * BLOCKS + bid, fx.Int32(1)
@@ -1591,11 +1597,12 @@ def build(key: Build):
                             w2,
                             rsrc(sel_peer(pl, dw) + fx.Int64(play["yt"][0])),
                             idx,
-                            cache_modifier=CM_SYS,
+                            cache_modifier=CM_PEER,
                         )
             rocdl.s_waitcnt(vmcnt=0, expcnt=0, lgkmcnt=0)
             gpu.barrier()
             if (tid == 0) & (kh == 0):
+                peer_release()
                 for pb in pl:
                     mb_put_sys(
                         tag,
@@ -1695,7 +1702,7 @@ def build(key: Build):
                             swv,
                             rsrc(pb + fx.Int64(play["sg"][0])),
                             (par * S + t) * HID + cq + 4 * h2,
-                            cache_modifier=CM_SYS,
+                            cache_modifier=CM_PEER,
                         )
         ss2 = fx.Float32(0.0)
         for k in range_constexpr(16):
@@ -1720,11 +1727,12 @@ def build(key: Build):
                     xv,
                     rsrc(pb + fx.Int64(play["xn"][0])),
                     (par * S + t) * (HID // 2) + cq // 2,
-                    cache_modifier=CM_SYS,
+                    cache_modifier=CM_PEER,
                 )
         rocdl.s_waitcnt(vmcnt=0, expcnt=0, lgkmcnt=0)
         gpu.barrier()
         if tid == 0:
+            peer_release()
             for pb in pl:
                 mb_put_sys(tag, pb + fx.Int64(play["xnf"][0]), par * S + t, fx.Int32(1))
                 if gather != 0:

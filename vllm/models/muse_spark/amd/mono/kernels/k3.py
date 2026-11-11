@@ -92,8 +92,8 @@ from .dev import (
     ld_vec_if,
     mb_poll,
     mb_put,
-    mb_put_sys,
     mfma_bf16,
+    peer_ops,
     permlane_swap,
     popcount,
     readlane,
@@ -547,6 +547,8 @@ def build(key: Build):
     assert S in (8, 16), S
     d = _DIMS[key.W]
     GRID = key.grid
+    # peer stores: device scope + release fences on PCIe (128 CTAs), else as before
+    mb_put_sys, peer_release, CM_PEER = peer_ops(GRID < BLOCKS)
     assert GRID in GRIDS, GRID
     V = BLOCKS // GRID  # virtual CTAs a physical CTA (passes of every stage)
     assert not (key.attn and V > 1), "the fused attention runs on BLOCKS CTAs"
@@ -864,11 +866,15 @@ def build(key: Build):
             idx = (par * S * DM + tt * DM + col) // 2
             for pb in pl:
                 bo.buffer_store(
-                    hw, rsrc(pb + fx.Int64(play["hraw"][0])), idx, cache_modifier=CM_SYS
+                    hw,
+                    rsrc(pb + fx.Int64(play["hraw"][0])),
+                    idx,
+                    cache_modifier=CM_PEER,
                 )
         rocdl.s_waitcnt(vmcnt=0, expcnt=0, lgkmcnt=0)
         gpu.barrier()
         if tid == 0:
+            peer_release()
             fidx = (par * W + rank) * BLOCKS + bid
             for pb in pl:
                 mb_put_sys(tag, pb + fx.Int64(play["hf"][0]), fidx, fx.Int32(1))
@@ -1981,7 +1987,7 @@ def build(key: Build):
                         ),
                         rsrc(base),
                         i0 * 2,
-                        cache_modifier=CM_SYS,
+                        cache_modifier=CM_PEER,
                     )
                     bo.buffer_store(
                         fx.Vector.from_elements(
@@ -1990,7 +1996,7 @@ def build(key: Build):
                         ),
                         rsrc(base),
                         (i0 + 2) * 2,
-                        cache_modifier=CM_SYS,
+                        cache_modifier=CM_PEER,
                     )
             for pb in pl:
                 mb_put_sys(
