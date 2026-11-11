@@ -216,6 +216,7 @@ class UMBPStoreConnectorScheduler:
         assert transfer_config is not None
         extra = transfer_config.kv_connector_extra_config
         self.load_async = bool(extra.get("load_async", True))
+        self.early_restore = bool(extra.get("early_restore", True))
         if not self.load_async and (
             len(kv_cache_config.kv_cache_groups) > 1
             or any(
@@ -339,6 +340,7 @@ class UMBPStoreConnectorScheduler:
             max_workers=1,
             thread_name_prefix="umbp-prefetch",
         )
+        self._promotion_submissions: dict[str, Future[None]] = {}
         self._requests: dict[str, Request] = {}
         self._request_trackers: dict[str, RequestTracker] = {}
         self._pending_finished_stores: dict[str, list[BlockTransferPlan]] = {}
@@ -379,12 +381,22 @@ class UMBPStoreConnectorScheduler:
         self.codec = codec
 
     def on_new_request(self, request: Request) -> None:
+        if not self.early_restore:
+            self._queue_dram_promotion(request, 0)
+
+    def on_load_blocked(self, request: Request) -> None:
+        spec = self._load_specs.get(request.request_id)
+        if self.early_restore and spec is not None:
+            self._queue_dram_promotion(request, spec.local_tokens)
+
+    def _queue_dram_promotion(self, request: Request, local_tokens: int) -> None:
         if (
             not self.prefetch_waiting_requests
             or not self.enable_lookup
             or self.runtime is None
             or self.codec is None
             or request.resumable
+            or request.request_id in self._promotion_submissions
         ):
             return
         hashes = tuple(request.block_hashes)
@@ -393,14 +405,21 @@ class UMBPStoreConnectorScheduler:
         )
         if not hashes or request.num_tokens < align:
             return
-        context = self._build_lookup_context(request, 0, hashes)
+        context = self._build_lookup_context(request, local_tokens, hashes)
         if not context.keys:
             return
-        self._prefetch_executor.submit(
-            self._prefetch,
-            request.request_id,
-            context.keys,
+        self._promotion_submissions[request.request_id] = (
+            self._prefetch_executor.submit(
+                self._prefetch,
+                request.request_id,
+                context.keys,
+            )
         )
+
+    def _cancel_dram_promotion(self, request_id: str) -> None:
+        future = self._promotion_submissions.pop(request_id, None)
+        if future is not None:
+            future.cancel()
 
     def _prefetch(self, request_id: str, keys: Sequence[str]) -> None:
         assert self.runtime is not None
@@ -681,6 +700,17 @@ class UMBPStoreConnectorScheduler:
         )
         self._pending_loads[request.request_id] = plans
 
+    def set_load_priority(self, request: Request, *, is_background: bool) -> None:
+        plans = self._pending_loads.get(request.request_id)
+        if isinstance(plans, BlockLoadBatch):
+            self._pending_loads[request.request_id] = replace(
+                plans, is_background=is_background
+            )
+        elif plans:
+            self._pending_loads[request.request_id] = [
+                replace(plan, is_background=is_background) for plan in plans
+            ]
+
     def build_connector_meta(
         self, scheduler_output: SchedulerOutput
     ) -> KVConnectorMetadata:
@@ -689,6 +719,7 @@ class UMBPStoreConnectorScheduler:
             key for event in self._store_events.values() for key in event.iter_keys()
         }
         for request_id in scheduler_output.finished_req_ids:
+            self._cancel_dram_promotion(request_id)
             self._pending_loads.pop(request_id, None)
             self._load_specs.pop(request_id, None)
             self._request_trackers.pop(request_id, None)
@@ -1206,6 +1237,7 @@ class UMBPStoreConnectorScheduler:
     def request_finished(
         self, request: Request, block_ids: tuple[list[int], ...]
     ) -> tuple[bool, dict[str, Any] | None]:
+        self._cancel_dram_promotion(request.request_id)
         self._pending_loads.pop(request.request_id, None)
         self._load_specs.pop(request.request_id, None)
         self._requests.pop(request.request_id, None)
@@ -1488,6 +1520,8 @@ class UMBPStoreConnectorScheduler:
     def reset_store(self) -> bool:
         if self._store_events or self._pending_finished_stores:
             return False
+        for request_id in tuple(self._promotion_submissions):
+            self._cancel_dram_promotion(request_id)
         for pending in self._pending_lookups.values():
             pending.future.cancel()
         self._pending_lookups.clear()
@@ -1504,6 +1538,7 @@ class UMBPStoreConnectorScheduler:
 
     def close(self) -> None:
         self._prefetch_executor.shutdown(wait=True, cancel_futures=True)
+        self._promotion_submissions.clear()
         self._lookup_executor.shutdown(wait=True, cancel_futures=True)
         self._pending_lookups.clear()
         if self.runtime is not None:

@@ -548,6 +548,7 @@ class BlockTransferPlan:
     token_ids: tuple[int, ...] = ()
     block_size: int = 0
     medium: str = "CPU"
+    is_background: bool = False
 
 
 @dataclass(frozen=True)
@@ -558,6 +559,7 @@ class BlockLoadBatch(Sequence[BlockTransferPlan]):
     block_ids: list[int]
     group_ids: list[int]
     request_id: str
+    is_background: bool = False
 
     def __post_init__(self) -> None:
         if len(self.keys) != len(self.block_ids) or len(self.keys) != len(
@@ -584,6 +586,7 @@ class BlockLoadBatch(Sequence[BlockTransferPlan]):
             block_id=self.block_ids[index],
             group_id=self.group_ids[index],
             request_id=self.request_id,
+            is_background=self.is_background,
         )
 
 

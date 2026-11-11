@@ -31,6 +31,11 @@ class UMBPRuntimeConfig:
         mode = options.get("mode", "embedded")
         if mode not in {"embedded", "standalone"}:
             raise ValueError(f"unknown UMBP mode: {mode!r}")
+        if "prefetch_copy_mode" in options:
+            raise ValueError(
+                "prefetch_copy_mode was removed; early_restore controls "
+                "prefetching with low-priority native gather"
+            )
         namespace = options.get("key_namespace", "auto")
         if namespace != "auto" and (not isinstance(namespace, str) or not namespace):
             raise ValueError("key_namespace must be a non-empty string or 'auto'")

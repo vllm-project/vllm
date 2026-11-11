@@ -218,6 +218,23 @@ class UMBPStoreConnector(KVConnectorBase_V1, SupportsHMA):
         assert self.connector_scheduler is not None
         self.connector_scheduler.on_new_request(request)
 
+    def on_load_blocked(self, request: Request) -> None:
+        assert self.connector_scheduler is not None
+        self.connector_scheduler.on_load_blocked(request)
+
+    def may_load_async(self, request: Request) -> bool:
+        """Allow early restoration into final KV blocks when core enables it."""
+        assert self.connector_scheduler is not None
+        return (
+            self.connector_scheduler.enable_lookup
+            and self.connector_scheduler.load_async
+            and self.connector_scheduler.early_restore
+        )
+
+    def set_load_priority(self, request: Request, *, is_background: bool) -> None:
+        assert self.connector_scheduler is not None
+        self.connector_scheduler.set_load_priority(request, is_background=is_background)
+
     def update_state_after_alloc(
         self,
         request: Request,

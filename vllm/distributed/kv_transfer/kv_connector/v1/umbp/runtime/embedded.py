@@ -70,7 +70,9 @@ class _MoriClient(_LookupClient, Protocol):
 
     def deregister_memory(self, *args: Any) -> bool: ...
 
-    def batch_get_ranges_into_ptr(self, *args: Any) -> Sequence[bool]: ...
+    def batch_get_ranges_into_ptr(
+        self, *args: Any, **kwargs: Any
+    ) -> Sequence[bool]: ...
 
     def batch_put_ranges_from_ptr(self, *args: Any) -> list[bool]: ...
 
@@ -603,7 +605,15 @@ class _MoriWorkerHandle(UMBPWorkerHandle):
             sum(len(plan_sizes) for plan_sizes in sizes),
             sum(sum(plan_sizes) for plan_sizes in sizes),
         )
-        results = self.client.batch_get_ranges_into_ptr(keys, pointers, sizes, offsets)
+        is_background = (
+            plans.is_background
+            if isinstance(plans, BlockLoadBatch)
+            else plans[0].is_background
+        )
+        copy_mode = "low_priority" if is_background else "default"
+        results = self.client.batch_get_ranges_into_ptr(
+            keys, pointers, sizes, offsets, copy_mode=copy_mode
+        )
         logger.debug(
             "MORI UMBP range load returned request=%s plans=%d elapsed=%.3fs",
             request_id,
