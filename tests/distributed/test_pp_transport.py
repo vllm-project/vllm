@@ -27,11 +27,11 @@ from vllm.distributed.parallel_state import (
     destroy_model_parallel,
     get_pp_group,
 )
-from vllm.distributed.pp_transport import (
-    copy_engine_transport_class,
-    create_pp_transport,
+from vllm.distributed.pp_transport import create_pp_transport
+from vllm.distributed.pp_transport.copy_engine import (
+    CopyEngineTransport,
+    CopyEngineUnavailable,
 )
-from vllm.distributed.pp_transport.copy_engine import CopyEngineUnavailable
 from vllm.platforms import current_platform
 from vllm.sequence import IntermediateTensors
 
@@ -95,7 +95,7 @@ class PPTransportWorker:
                     k: torch.zeros(MAX_ROWS, WIDTH, dtype=torch.bfloat16, device="cuda")
                     for k in KEYS
                 }
-            transport = copy_engine_transport_class()(_config(), pp_group, persistent)
+            transport = CopyEngineTransport(_config(), pp_group, persistent)
 
             lag = torch.randn(4096, 4096, device="cuda")
             for step in range(STEPS):
