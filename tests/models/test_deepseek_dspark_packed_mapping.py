@@ -4,25 +4,13 @@
 from types import SimpleNamespace
 
 import pytest
-import torch
 import torch.nn as nn
-
-if not torch.cuda.is_available():
-    torch.cuda.get_device_properties = lambda *args, **kwargs: SimpleNamespace(
-        gcnArchName="gfx942"
-    )
 
 from vllm.model_executor.layers.quantization.fp8 import Fp8Config
 from vllm.model_executor.layers.quantization.utils.quant_utils import (
     is_layer_skipped,
 )
 from vllm.model_executor.model_loader.utils import configure_quant_config
-from vllm.models.deepseek_v4.amd.dspark import (
-    DSparkDeepseekV4ForCausalLM as V4AMD,
-)
-from vllm.models.deepseek_v4.amd.model import (
-    DeepseekV4ForCausalLM as TargetV4AMD,
-)
 from vllm.models.deepseek_v4.nvidia import dspark as dsv4_dspark
 from vllm.models.deepseek_v4.nvidia.dspark import (
     DSparkDeepseekV4ForCausalLM as V4Nvidia,
@@ -36,12 +24,6 @@ from vllm.models.deepseek_v4.xpu.dspark import (
 from vllm.models.deepseek_v4.xpu.model import (
     DeepseekV4ForCausalLM as TargetV4XPU,
 )
-from vllm.models.deepseek_v41.amd.dspark import (
-    DSparkDeepseekV4ForCausalLM as V41AMD,
-)
-from vllm.models.deepseek_v41.amd.model import (
-    DeepseekV41LLMForCausalLM as TargetV41AMD,
-)
 from vllm.models.deepseek_v41.nvidia import dspark as dsv41_dspark
 from vllm.models.deepseek_v41.nvidia.dspark import (
     DSparkDeepseekV4ForCausalLM as V41Nvidia,
@@ -49,20 +31,39 @@ from vllm.models.deepseek_v41.nvidia.dspark import (
 from vllm.models.deepseek_v41.nvidia.model import (
     DeepseekV41LLMForCausalLM as TargetV41Nvidia,
 )
+from vllm.platforms import current_platform
+
+PACKED_MAPPING_CASES = [
+    pytest.param(V4Nvidia, TargetV4Nvidia, id="v4_nvidia"),
+    pytest.param(V4XPU, TargetV4XPU, id="v4_xpu"),
+    pytest.param(V41Nvidia, TargetV41Nvidia, id="v41_nvidia"),
+]
+
+# Importing the ROCm platform on x86 CPU loads a second _C extension.
+if current_platform.is_rocm():
+    from vllm.models.deepseek_v4.amd.dspark import (
+        DSparkDeepseekV4ForCausalLM as V4AMD,
+    )
+    from vllm.models.deepseek_v4.amd.model import (
+        DeepseekV4ForCausalLM as TargetV4AMD,
+    )
+    from vllm.models.deepseek_v41.amd.dspark import (
+        DSparkDeepseekV4ForCausalLM as V41AMD,
+    )
+    from vllm.models.deepseek_v41.amd.model import (
+        DeepseekV41LLMForCausalLM as TargetV41AMD,
+    )
+
+    PACKED_MAPPING_CASES.extend(
+        [
+            pytest.param(V4AMD, TargetV4AMD, id="v4_amd"),
+            pytest.param(V41AMD, TargetV41AMD, id="v41_amd"),
+        ]
+    )
 
 
 @pytest.mark.cpu_test
-@pytest.mark.parametrize(
-    ("model_cls", "target_cls"),
-    [
-        (V4AMD, TargetV4AMD),
-        (V4Nvidia, TargetV4Nvidia),
-        (V4XPU, TargetV4XPU),
-        (V41AMD, TargetV41AMD),
-        (V41Nvidia, TargetV41Nvidia),
-    ],
-    ids=["v4_amd", "v4_nvidia", "v4_xpu", "v41_amd", "v41_nvidia"],
-)
+@pytest.mark.parametrize(("model_cls", "target_cls"), PACKED_MAPPING_CASES)
 def test_deepseek_dspark_packed_modules_mapping(model_cls, target_cls):
     """Verify that all DSpark draft model entry points reuse their target model's
     packed_modules_mapping so configure_quant_config() wires it into quant_config
