@@ -732,8 +732,8 @@ class EplbState:
                         ep_rank=ep_group.rank(),
                     )
                     if not self._async_rearrangement_in_progress():
-                        # Count the interval from when the new placement is fully
-                        # in place, so the next load window is recorded under it.
+                        # Start the next interval after the final commit, allowing
+                        # the load window to fill under the new placement.
                         self.expert_rearrangement_step = 0
 
         if self.expert_rearrangement_step >= self.expert_rearrangement_step_interval:

@@ -1,13 +1,17 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 
-from unittest.mock import MagicMock
+from datetime import timedelta
+from unittest.mock import MagicMock, patch
 
 import numpy as np
 import pytest
 import torch
+import torch.distributed as dist
+import torch.multiprocessing as mp
 
 from vllm.config import ParallelConfig
+from vllm.distributed.eplb import eplb_state
 from vllm.distributed.eplb.eplb_state import (
     EplbState,
     _commit_eplb_maps,
@@ -18,7 +22,9 @@ from vllm.distributed.eplb.rebalance_execute import (
     AsyncEplbLayerResult,
     TransferMetadata,
 )
+from vllm.distributed.parallel_state import GroupCoordinator
 from vllm.platforms import current_platform
+from vllm.utils.network_utils import get_open_port
 
 
 def _make_model_state(
@@ -226,6 +232,60 @@ def test_async_rearrangement_interval_starts_after_last_layer_commit(dist_init):
             rearrange_steps.append(step)
 
     assert rearrange_steps == [0, last_commit_step + interval]
+
+
+def _overrun_warning_worker(rank: int, world_size: int, port: int):
+    dist.init_process_group(
+        "gloo",
+        init_method=f"tcp://127.0.0.1:{port}",
+        rank=rank,
+        world_size=world_size,
+    )
+    ep_group = GroupCoordinator(
+        group_ranks=[list(range(world_size))],
+        local_rank=0,
+        torch_distributed_backend="gloo",
+        use_device_communicator=False,
+        group_name="eplb_overrun_warning_test",
+    )
+    # A rank that skips the collective fails the test instead of hanging it.
+    ep_group.cpu_timeout = timedelta(seconds=30)
+
+    interval = 4
+    model_state = MagicMock()
+    model_state.model_name = "m"
+    model_state.model.num_moe_layers = 3
+    model_state.rebalanced = True
+    model_state.pending_result = None
+    model_state.num_committed_layers = 1
+    # Rank 0 has published layer 1; rank 1 is still transferring it.
+    model_state.worker_progress = 3 - rank
+    state = EplbState(ParallelConfig(), torch.device("cpu"))
+    state.is_async = True
+    state.expert_rearrangement_step_interval = interval
+    state.expert_rearrangement_step = interval - 1
+    state.model_states = {"m": model_state}
+
+    with (
+        patch.object(eplb_state, "get_ep_group", return_value=ep_group),
+        patch.object(eplb_state.logger, "warning") as warning,
+    ):
+        state.step()
+
+    if rank == 0:
+        warning.assert_called_once()
+        message = warning.call_args.args[0] % warning.call_args.args[1:]
+        assert message.endswith("slowest EP ranks [1]: transferring layer 1")
+    else:
+        warning.assert_not_called()
+    dist.destroy_process_group()
+
+
+def test_async_rearrangement_overrun_warning_names_slowest_rank():
+    """When an async cycle overruns step_interval, every EP rank must enter
+    the progress all-reduce, and only rank 0 logs the rank that is behind.
+    """
+    mp.spawn(_overrun_warning_worker, args=(2, get_open_port()), nprocs=2, join=True)
 
 
 @pytest.mark.skipif(not torch.cuda.is_available(), reason="requires CUDA")
