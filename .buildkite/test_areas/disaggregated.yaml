@@ -207,6 +207,7 @@ steps:
 # configs keep one dedicated GPU per side.
 - label: ":nvidia: (L4) NixlConnector PD accuracy core"
   key: nixlconnector-pd-accuracy-core-2-gpus
+  automatic_shard: true
   timeout_in_minutes: 90
   working_dir: "/vllm-workspace/tests"
   device: l4
@@ -219,7 +220,10 @@ steps:
     - tests/v1/kv_connector/nixl_push_integration/
   commands:
     - bash /vllm-workspace/.buildkite/scripts/check-kv-connectors.sh
-    - bash v1/kv_connector/nixl_integration/config_sweep_accuracy_core_test.sh
+    # Import canary. As `python3 -m pytest` it runs as setup, in every shard,
+    # so a broken NIXL install fails each job in seconds.
+    - python3 -m pytest -s -x v1/kv_connector/nixl_integration/test_nixl_imports.py
+    - pytest -v -s v1/kv_connector/nixl_integration/test_accuracy_core_sweep.py
 
 - label: ":nvidia: (L4) NixlConnector PD edge case"
   key: nixlconnector-pd-edge-cases-2-gpus
@@ -327,7 +331,6 @@ steps:
 #   num_devices: 2
 #   source_file_dependencies:
 #     - vllm/distributed/kv_transfer/kv_connector/v1/nixl/
-#     - vllm/v1/worker/kv_connector_model_runner_mixin.py
 #     - tests/v1/kv_connector/nixl_integration/
 #   commands:
 #     - bash /vllm-workspace/.buildkite/scripts/check-kv-connectors.sh
@@ -342,7 +345,6 @@ steps:
 #         - image-build-amd
 #       source_file_dependencies:
 #         - vllm/distributed/kv_transfer/kv_connector/v1/nixl/
-#         - vllm/v1/worker/kv_connector_model_runner_mixin.py
 #         - tests/v1/kv_connector/nixl_integration/
 #         - vllm/platforms/rocm.py
 #       commands:

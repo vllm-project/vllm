@@ -18,9 +18,7 @@ from .quant_utils import (
 class MarlinWorkspace:
     def __init__(self, out_features, min_thread_n, max_parallel):
         assert out_features % min_thread_n == 0, (
-            "out_features = {} is indivisible by min_thread_n = {}".format(
-                out_features, min_thread_n
-            )
+            f"{out_features = } is indivisible by {min_thread_n = }"
         )
 
         max_workspace_size = (out_features // min_thread_n) * max_parallel
@@ -85,7 +83,7 @@ def get_weight_perm(num_bits: int):
     elif num_bits == 8:
         interleave = np.array([0, 2, 1, 3])
     else:
-        raise Exception("num_bits must be 4 or 8, got {}".format(num_bits))
+        raise Exception(f"num_bits must be 4 or 8, got {num_bits}")
 
     perm = perm.reshape((-1, len(interleave)))[:, interleave].ravel()
     perm = torch.from_numpy(perm)

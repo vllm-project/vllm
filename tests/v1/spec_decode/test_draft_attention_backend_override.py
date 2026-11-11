@@ -1,9 +1,9 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
-"""The draft must honour ``attention_backend`` from --speculative-config.
+"""The draft must honour `attention_backend` from --speculative-config.
 
-``init_attn_backend`` reads the backend off each constructed layer, so these
-assert on the config ``load_eagle_model`` hands to ``get_model``.
+`init_attn_backend` reads the backend off each constructed layer, so these
+assert on the config `load_eagle_model` hands to `get_model`.
 """
 
 from dataclasses import dataclass, field
