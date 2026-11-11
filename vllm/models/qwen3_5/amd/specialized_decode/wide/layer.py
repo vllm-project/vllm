@@ -401,7 +401,7 @@ def build(key: LayerBuild):
             combine(None, n_in, _q4(key.first_q4), first=True)
             end_phase("first_combine")
 
-        def mlp_half():
+        def mlp_half(pre=None):
             mw = moe.Weights(w_gate, w13, w13s, w2, w2s)
             b = moe.Bufs(
                 part=scr.part,
@@ -413,6 +413,7 @@ def build(key: LayerBuild):
             moe.mlp(
                 g, shape, gemm, ml, scr.x, mw, b, push, end_phase,
                 (FOLD_PROJ, FOLD_PIECES),
+                pre,
             )
             if const_expr(key.trace):
                 end_phase(moe.phase_names(S)[-1])
@@ -435,7 +436,13 @@ def build(key: LayerBuild):
                 end_phase(name.removesuffix("+allreduce+combine"))
             reduce(push)
             combine(read, n_post, "plain")
-            end_phase("allreduce+combine" if key.trace else name)
+            # the router's first weights, in the barrier's wait
+            return end_phase(
+                "allreduce+combine" if key.trace else name,
+                lambda: tiled.issue_unit(
+                    bid, tid, moe.router_weights(w_gate), moe.router_plan()
+                ),
+            )
 
         if const_expr(key.kind == "gdn"):
             w = gdn.Bufs(
@@ -477,7 +484,9 @@ def build(key: LayerBuild):
                     pending = tiled.issue_unit(bid, tid, out_w, gdn.out_plan())
                     gdn.recur(g, w, b, aux_f32, S, key.gdn_eps, "bf16", None, gtag)
                     source = tagged.Pairs(g, scr.core, VALUE_DIM, gtag)
-                    back(out_w, source, VALUE_DIM, pending, "gdn+out+allreduce+combine")
+                    pre = back(
+                        out_w, source, VALUE_DIM, pending, "gdn+out+allreduce+combine"
+                    )
                 else:
                     gdn.recur(g, w, b, aux_f32, S, key.gdn_eps, key.out, None, gtag)
                     pending = end_phase(
@@ -485,7 +494,7 @@ def build(key: LayerBuild):
                         lambda: tiled.issue_unit(bid, tid, out_w, gdn.out_plan()),
                     )
                     source = tiled.Mx4Source(scr.core, scr.core_s, VALUE_DIM)
-                    back(out_w, source, VALUE_DIM, pending)
+                    pre = back(out_w, source, VALUE_DIM, pending)
             else:
                 gdn.proj(g, gemm, w, b, S, FOLD_PROJ)
                 end_phase("gdn_proj+conv")
@@ -495,16 +504,16 @@ def build(key: LayerBuild):
                     source = tiled.Source(scr.core, VALUE_DIM)
                 else:
                     source = tiled.Mx4Source(scr.core, scr.core_s, VALUE_DIM)
-                back(out_w, source, VALUE_DIM)
-            mlp_half()
+                pre = back(out_w, source, VALUE_DIM)
+            mlp_half(pre)
         if const_expr(key.kind == "attn"):
-            back(
+            pre = back(
                 tiled.Bf16Weights(w_out, HIDDEN, ATTN_CORE),
                 gdn.GatedCore(attn, gate, ATTN_CORE),
                 ATTN_CORE,
                 name="o_proj+allreduce+combine",
             )
-            mlp_half()
+            mlp_half(pre)
         if const_expr(key.trace):
             assert names == phase_names(key), (names, phase_names(key))
 

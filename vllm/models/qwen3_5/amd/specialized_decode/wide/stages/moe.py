@@ -959,6 +959,7 @@ XCD_RUN = 8  # consecutive units placed on one XCD
 # a half piece: half the intermediate rows (gate, up and the down K)
 HALF_TILES = UP_TILES * WAVES // 2
 HALF_GROUPS = AGROUPS // 2
+# the expert-major path routes in its own phase
 assert MAJOR_MIN > LOCAL_ROUTE_MAX and UP_TILES % 2 == 0
 
 
@@ -1287,6 +1288,20 @@ def major_combine(g, xch, b, rows: int):
 
 
 @traced
+def _local_route(g, s, lds, b):
+    """Every CTA routes every row from the logits into ``lds.ids`` /
+    ``lds.wts`` (CTA 0 also to ``b.route``) and builds the schedule."""
+    assert s.assignments <= THREADS
+    rl = _route_loads(g, b.logits, s.rows)
+    route_rows(g, rl, lds.ids, lds.wts, s.rows)
+    fx.barrier()
+    if (g.bid == 0) & (g.tid < s.assignments):
+        st(b.route, g.tid, lds_ld(lds.ids + g.tid), CM_DEV)
+        st(b.route, s.assignments + g.tid, lds_ld(lds.wts + g.tid), CM_DEV)
+    build_schedule(g.tid, s, lds, lambda a: lds_ld(lds.ids + a))
+
+
+@traced
 def mlp(g, s: Shape, gemm, ml, x, w: Weights, b: Bufs, xch, end_phase, folds, pre=None):
     """The MoE of ``x`` ([rows, HIDDEN] bf16, its MXFP4 rows in ``b.x4`` /
     ``b.x4s``) into exchange ``xch``: every phase of ``phase_names``,
@@ -1297,30 +1312,20 @@ def mlp(g, s: Shape, gemm, ml, x, w: Weights, b: Bufs, xch, end_phase, folds, pr
     lds = Lds(ml, lds_words(s))
     router(g, gemm, w.w_gate, x, b, s.rows, folds[0], pre)
     end_phase(names[0])
-    if const_expr(major(s.rows)):
-        route(g, b.part, b.route, s.rows)
-        end_phase(names[1])
-        build_schedule(g.tid, s, lds, lambda a: ld(b.route, a, fx.Int32, cm=CM_DEV))
-        experts(g, s, lds, w, b, xch.tag)
-        end_phase(names[2])
-        major_combine(g, xch, b, s.rows)
-        return
     local = local_route(s.rows)
     if const_expr(local):
-        assert s.assignments <= THREADS
-        rl = _route_loads(g, b.logits, s.rows)
-        route_rows(g, rl, lds.ids, lds.wts, s.rows)
-        fx.barrier()
-        if (g.bid == 0) & (g.tid < s.assignments):
-            st(b.route, g.tid, lds_ld(lds.ids + g.tid), CM_DEV)
-            st(b.route, s.assignments + g.tid, lds_ld(lds.wts + g.tid), CM_DEV)
-        build_schedule(g.tid, s, lds, lambda a: lds_ld(lds.ids + a))
+        _local_route(g, s, lds, b)
     else:
         route(g, b.part, b.route, s.rows)
         end_phase(names[1])
         build_schedule(
             g.tid, s, lds, lambda a: ld(b.route, a, fx.Int32, cm=CM_DEV)
         )
+    if const_expr(major(s.rows)):
+        experts(g, s, lds, w, b, xch.tag)
+        end_phase(names[2])
+        major_combine(g, xch, b, s.rows)
+        return
     up(g, s, lds, w, b, folds[1])
     end_phase(names[-2])
     down(g, s, lds, w, b, xch, local)
