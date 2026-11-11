@@ -4,6 +4,7 @@
 import inspect
 import itertools
 import math
+import sys
 from types import SimpleNamespace
 from typing import Any
 
@@ -11,6 +12,8 @@ import pytest
 import torch
 from torch import nn
 
+from vllm import _aiter_ops
+from vllm._aiter_ops import rocm_aiter_ops
 from vllm.model_executor.layers.layernorm import GemmaRMSNorm
 from vllm.model_executor.warmup import qwen4_exp_qsa_warmup
 from vllm.models.qwen4_exp.amd import (
@@ -45,6 +48,13 @@ pytestmark = pytest.mark.skipif(
 requires_qsa_kernels = pytest.mark.skipif(
     not HAS_TRITON,
     reason="AMD QSA kernels require Triton",
+)
+
+# AITER's own answers (the cache's pool, the slot table, the op): older AITER
+# builds lack them, so what depends on them is skipped there.
+requires_aiter_qsa = pytest.mark.skipif(
+    not rocm_aiter_ops._qsa_sparse_prefill_importable(),
+    reason="needs an AITER with the QSA sparse prefill API (ROCm/aiter#7556)",
 )
 
 
@@ -943,13 +953,13 @@ def test_qsa_sparse_paged_attention_matches_reference(
             rows[first:],
             tuple(context_length - n for n in rows[first:]),
         )
-        op = fly._flydsl_op()
+        op = rocm_aiter_ops.qsa_sparse_prefill
 
         def counted(q, *args, **kwargs):
             flydsl_rows.append(q.shape[0])
             return op(q, *args, **kwargs)
 
-        monkeypatch.setattr(fly, "_flydsl_op", lambda: counted)
+        monkeypatch.setattr(rocm_aiter_ops, "qsa_sparse_prefill", counted)
     actual = qsa_ops.qsa_sparse_paged_attention(
         q,
         k_cache,
@@ -1191,81 +1201,6 @@ def test_qsa_rocm_builder_collects_layouts_when_the_op_runs(
     assert swapped.prefill_layout == expected
 
 
-def test_qsa_flydsl_op_needs_an_aiter_that_supports_gfx950(
-    monkeypatch: pytest.MonkeyPatch,
-) -> None:
-    aiter_op = object()
-
-    def importer(platforms):
-        def import_module(name):
-            if platforms is None:
-                raise ImportError(f"No module named {name!r}")
-            if name.endswith("qsa_sparse_prefill"):
-                return SimpleNamespace(flydsl_qsa_sparse_prefill=aiter_op)
-            return SimpleNamespace(PLATFORMS=platforms)
-
-        return import_module
-
-    try:
-        for platforms, expected in [
-            (None, None),
-            ({("gfx942", 80): 1}, None),
-            ({("gfx942", 80): 1, ("gfx950", 256): 2}, aiter_op),
-        ]:
-            fly._flydsl_op.cache_clear()
-            monkeypatch.setattr(
-                fly, "importlib", SimpleNamespace(import_module=importer(platforms))
-            )
-            assert fly._flydsl_op() is expected
-    finally:
-        fly._flydsl_op.cache_clear()
-
-
-def test_qsa_flydsl_prefill_runs_where_vllm_uses_aiter_on_gfx950(
-    monkeypatch: pytest.MonkeyPatch,
-) -> None:
-    on = {"aiter": True, "gfx950": True, "op": True}
-    aiter_ops = SimpleNamespace(is_enabled=lambda: on["aiter"])
-    monkeypatch.setattr(fly, "rocm_aiter_ops", aiter_ops)
-    monkeypatch.setattr(fly, "_on_gfx950", lambda: on["gfx950"])
-    monkeypatch.setattr(fly, "_flydsl_op", lambda: object() if on["op"] else None)
-    for values in itertools.product((False, True), repeat=3):
-        on.update(zip(on, values))
-        assert fly.flydsl_prefill_available() is all(values)
-
-
-def test_qsa_flydsl_prefill_gate(monkeypatch: pytest.MonkeyPatch) -> None:
-    """bf16 caches, at least 768 rows, heads and a selection width the op
-    takes, a contiguous selection and a contiguous 16-byte aligned output, on a
-    device and AITER that run the op, outside graph capture."""
-    available, capturing = [True], [False]
-    monkeypatch.setattr(fly, "flydsl_prefill_available", lambda: available[0])
-    monkeypatch.setattr(torch.cuda, "is_current_stream_capturing", lambda: capturing[0])
-
-    def applies(rows=768, heads=12, head_dim=_D, width=_WIDTH, dtype=None, **kw):
-        q = torch.empty(rows, heads, head_dim, dtype=torch.bfloat16)
-        k_cache = torch.empty(2, _PAGE, 1, head_dim, dtype=dtype or torch.bfloat16)
-        indices = kw.get("indices", torch.empty(rows, width, dtype=torch.int32))
-        out = kw.get("out", torch.empty_like(q))
-        return fly.flydsl_prefill_applies(rows, q, k_cache, indices, out)
-
-    assert applies() and applies(heads=16)
-    assert applies(width=4 * 256 + 3) and applies(width=4 * 1024 + 3)
-    assert not applies(rows=767)
-    assert not applies(dtype=current_platform.fp8_dtype())
-    assert not applies(head_dim=128) and not applies(heads=17)
-    assert not applies(width=_WIDTH - 1) and not applies(width=4 * 1280 + 3)
-    wide = torch.empty(768, _WIDTH + 1, dtype=torch.int32)
-    assert not applies(indices=wide[:, :_WIDTH])
-    assert not applies(out=torch.empty(768, 24, _D, dtype=torch.bfloat16)[:, ::2])
-    shifted = torch.empty(768 * 12 * _D + 1, dtype=torch.bfloat16)[1:]
-    assert not applies(out=shifted.view(768, 12, _D))
-    capturing[0] = True
-    assert not applies()
-    capturing[0], available[0] = False, False
-    assert not applies()
-
-
 _IN_PLACE_CACHES = {
     "interleaved K|V records": lambda: _interleaved_cache(
         40, per_page=_PAGE + 4, base_rows=8
@@ -1277,126 +1212,145 @@ _IN_PLACE_CACHES = {
 }
 
 
-@pytest.mark.parametrize("cache", _IN_PLACE_CACHES.values(), ids=_IN_PLACE_CACHES)
-@pytest.mark.parametrize("layout", _LAYOUTS.values(), ids=_LAYOUTS)
-def test_qsa_flydsl_reads_the_cache_in_place(layout, cache) -> None:
-    layout = QSAPrefillLayout(*layout)
-    k_cache, v_cache = cache()
-    table = _layout_table(layout)
-    expected = _reference_kv(k_cache, v_cache, table, layout)
-    # the requests before the layout's are not read
-    table[: layout.first_req] = 10**6
-    pools = fly._pools(k_cache, v_cache)
-    assert pools is not None
-    k, v, per_page = pools
-    slots = fly.token_slots(layout, table, _PAGE, per_page)
-    lengths = [q + p for q, p in zip(layout.query_lens, layout.prefix_lens)]
-    assert slots.dtype == torch.int32 and slots.shape == (sum(lengths),)
-    # what the op does with a slot: row ``slot`` of each pool
-    assert torch.equal(k[slots.long()], expected[0])
-    assert torch.equal(v[slots.long()], expected[1])
-    # in place: each pool starts where its cache starts, a token row apart
-    assert k.data_ptr() == k_cache.data_ptr() and v.data_ptr() == v_cache.data_ptr()
-    assert k.stride(0) == v.stride(0) == k_cache.stride(1)
-    # the op reads four-token blocks at four consecutive rows from a multiple
-    # of four
-    for start, n in zip(itertools.accumulate([0, *lengths]), lengths):
-        for block in slots[start : start + n].long().split(4):
-            assert block[0] % 4 == 0
-            assert torch.equal(block, block[0] + torch.arange(len(block)))
-
-
-def test_qsa_flydsl_slots_copy_the_lengths_once_per_step(
+def test_qsa_flydsl_needs_an_aiter_with_the_qsa_prefill_api(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    copies = []
-
-    def h2d(data, device, dtype):
-        copies.append(list(data))
-        return torch.tensor(data, dtype=dtype, device=device)
-
-    monkeypatch.setattr(fly, "async_tensor_h2d", h2d)
-    layout = QSAPrefillLayout(*_LAYOUTS["queries across pages"])
-    table = _layout_table(layout)
-    first = fly.token_slots(layout, table, _PAGE, _PAGE + 4)
-    assert fly.token_slots(layout, table, _PAGE, _PAGE + 4) is first
-    assert copies == [[q + p for q, p in zip(layout.query_lens, layout.prefix_lens)]]
-    # another block table (another KV cache group) gets its own slots
-    assert (
-        fly.token_slots(layout, _layout_table(layout, 5), _PAGE, _PAGE + 4) is not first
+    names = (
+        "qsa_paged_kv_pool",
+        "qsa_paged_kv_slots",
+        "qsa_sparse_prefill",
+        "qsa_sparse_prefill_available",
+        "qsa_sparse_prefill_problem",
+        "qsa_sparse_prefill_warmup",
     )
-    assert len(copies) == 2
+    probe = rocm_aiter_ops._qsa_sparse_prefill_importable
+    # (names AITER has, whether its FlyDSL backend imports, expected)
+    cases = [(names, True, True), ((), True, False), (names, False, False)]
+    cases += [(tuple(n for n in names if n != gone), True, False) for gone in names]
+    try:
+        for present, backend, expected in cases:
+            probe.cache_clear()
+            fake = SimpleNamespace(**dict.fromkeys(present))
+            if "qsa_sparse_prefill_available" in present:
+                fake.qsa_sparse_prefill_available = lambda backend=backend: backend
+            monkeypatch.setitem(sys.modules, "aiter.ops.qsa", fake)
+            assert probe() is expected, (present, backend)
+        probe.cache_clear()
+        monkeypatch.setitem(sys.modules, "aiter.ops.qsa", None)  # not importable
+        assert probe() is False
+    finally:
+        probe.cache_clear()
 
 
-def _paged(page_stride):
-    """K and V halves of 2 D records, pages `page_stride` elements apart."""
-    storage = torch.zeros(41 * page_stride, dtype=torch.bfloat16)
-    shape, stride = (40, _PAGE, 1, _D), (page_stride, 2 * _D, _D, 1)
-    return storage.as_strided(shape, stride), storage.as_strided(shape, stride, _D)
+def test_qsa_flydsl_availability_follows_vllm_use_aiter(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    monkeypatch.setattr(_aiter_ops, "is_aiter_found_and_supported", lambda: True)
+    monkeypatch.setattr(rocm_aiter_ops, "_qsa_sparse_prefill_importable", lambda: True)
+    for enabled in (False, True):
+        monkeypatch.setattr(rocm_aiter_ops, "_AITER_ENABLED", enabled)
+        assert rocm_aiter_ops.is_qsa_sparse_prefill_available() is enabled
 
 
-_NOT_IN_PLACE = {
-    "two heads whose vectors are not adjacent (TP1)": lambda: _interleaved_cache(40, 2),
-    "pages 10 rows apart": lambda: _paged(10 * 2 * _D),
-    "pages 9.5 rows apart": lambda: _paged(19 * _D),
-    "views off a 16-byte boundary": lambda: tuple(
-        c.as_strided(c.shape, c.stride(), c.storage_offset() + 1)
-        for c in _interleaved_cache(40, per_page=_PAGE + 4, base_rows=8)
-    ),
-}
+def test_qsa_flydsl_wrappers_forward_to_aiters_functions(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    calls = []
+
+    def function(name):
+        def call(*args, **kwargs):
+            calls.append((name, args, kwargs))
+            return name
+
+        return call
+
+    names = (
+        "qsa_paged_kv_pool",
+        "qsa_paged_kv_slots",
+        "qsa_sparse_prefill",
+        "qsa_sparse_prefill_problem",
+        "qsa_sparse_prefill_warmup",
+    )
+    monkeypatch.setitem(
+        sys.modules, "aiter.ops.qsa", SimpleNamespace(**{n: function(n) for n in names})
+    )
+    for name in names:
+        kwargs = {} if name == "qsa_paged_kv_pool" else {"key": 3}
+        assert getattr(rocm_aiter_ops, name)(1, 2, **kwargs) == name
+        assert calls[-1] == (name, (1, 2), kwargs)
 
 
-@pytest.mark.parametrize("cache", _NOT_IN_PLACE.values(), ids=_NOT_IN_PLACE)
-def test_qsa_flydsl_leaves_a_cache_it_cannot_read_in_place_to_triton(cache) -> None:
-    assert fly._pools(*cache()) is None
+def test_qsa_flydsl_prefill_runs_where_vllm_uses_aiter_on_gfx950(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    on = {"aiter": True, "gfx950": True}
+    aiter_ops = SimpleNamespace(is_qsa_sparse_prefill_available=lambda: on["aiter"])
+    monkeypatch.setattr(fly, "rocm_aiter_ops", aiter_ops)
+    monkeypatch.setattr(fly, "_on_gfx950", lambda: on["gfx950"])
+    # AITER's availability is None where AITER is unsupported
+    for values in itertools.product((False, None, True), (False, True)):
+        on.update(zip(on, values))
+        assert fly.flydsl_prefill_available() is all(values)
 
 
-def test_qsa_flydsl_reads_the_served_cache_in_place() -> None:
-    # K and V of one QSA layer in the served pool (Qwen3.8-Flash-Next, TP2,
-    # bf16): 1568-token pages 10,235,904 elements apart, a 512-element K|V
-    # record per token
-    pool = torch.empty(10175 * 10235904, dtype=torch.bfloat16, device="meta")
-    shape, stride = (10175, 1568, 1, 256), (10235904, 512, 256, 1)
-    k, v = pool.as_strided(shape, stride), pool.as_strided(shape, stride, 256)
-    pools = fly._pools(k, v)
-    assert pools is not None and pools[2] == 19992
-    for view, cache in zip(pools[:2], (k, v)):
-        assert view.shape == (10174 * 19992 + 1568, 1, 256)
-        assert view.stride() == (512, 256, 1)
-        assert view.storage_offset() == cache.storage_offset()
+class _FakeAiter:
+    """Stands for `rocm_aiter_ops` as far as the QSA prefill goes: answers like
+    AITER's helpers where that takes no logic (the pool is the cache's views,
+    the slots count the keys) and records every call it gets."""
 
+    def __init__(self, declines: str | None = None, readable: bool = True):
+        self.declines, self.readable = declines, readable
+        self.slots: list[torch.Tensor] = []
+        self.slot_calls: list[SimpleNamespace] = []
+        self.problems: list[SimpleNamespace] = []
+        self.ops: list[SimpleNamespace] = []
+        self.warmup = None
 
-class _FakeOp:
-    """Stands for flydsl_qsa_sparse_prefill: records each call and writes ones."""
+    def is_qsa_sparse_prefill_available(self):
+        return True
 
-    def __init__(self):
-        self.calls: list[SimpleNamespace] = []
+    def qsa_paged_kv_pool(self, k_cache, v_cache):
+        if not self.readable:
+            return None
+        return SimpleNamespace(
+            k=k_cache, v=v_cache, page_size=_PAGE, rows_per_page=_PAGE + 4
+        )
 
-    def __call__(self, q, k, v, indices, *, query_lens, prefix_lens, **kwargs):
-        self.calls.append(
+    def qsa_paged_kv_slots(
+        self, query_lens, prefix_lens, block_table, page_size, rows_per_page
+    ):
+        self.slot_calls.append(
             SimpleNamespace(
-                q=q,
-                k=k,
-                v=v,
-                indices=indices,
                 query_lens=query_lens,
                 prefix_lens=prefix_lens,
-                **kwargs,
+                block_table=block_table,
+                page_size=page_size,
+                rows_per_page=rows_per_page,
             )
         )
-        if kwargs.get("out") is not None:
-            kwargs["out"].fill_(1)
+        self.slots.append(torch.zeros(sum(query_lens) + sum(prefix_lens)).int())
+        return self.slots[-1]
+
+    def qsa_sparse_prefill_problem(self, q, k, v, indices, **kwargs):
+        self.problems.append(SimpleNamespace(q=q, k=k, v=v, indices=indices, **kwargs))
+        return self.declines
+
+    def qsa_sparse_prefill(self, q, k, v, indices, **kwargs):
+        self.ops.append(SimpleNamespace(q=q, k=k, v=v, indices=indices, **kwargs))
+        kwargs["out"].fill_(1)
+
+    def qsa_sparse_prefill_warmup(self, run, **kwargs):
+        return self.warmup(run, **kwargs)
 
 
 @pytest.fixture
-def flydsl_op(monkeypatch: pytest.MonkeyPatch) -> _FakeOp:
-    """A fake op where vLLM uses AITER on gfx950, outside graph capture."""
-    op = _FakeOp()
-    monkeypatch.setattr(fly, "rocm_aiter_ops", SimpleNamespace(is_enabled=lambda: True))
+def aiter(monkeypatch: pytest.MonkeyPatch) -> _FakeAiter:
+    """A fake AITER where vLLM uses it on gfx950, outside graph capture."""
+    fake = _FakeAiter()
+    monkeypatch.setattr(fly, "rocm_aiter_ops", fake)
     monkeypatch.setattr(fly, "_on_gfx950", lambda: True)
-    monkeypatch.setattr(fly, "_flydsl_op", lambda: op)
     monkeypatch.setattr(torch.cuda, "is_current_stream_capturing", lambda: False)
-    return op
+    return fake
 
 
 def _step_inputs(layout, heads=12):
@@ -1409,7 +1363,7 @@ def _step_inputs(layout, heads=12):
 
 @pytest.mark.parametrize("strided_q", [False, True])
 def test_qsa_flydsl_takes_the_prefill_rows_with_the_hosts_lengths(
-    monkeypatch: pytest.MonkeyPatch, flydsl_op: _FakeOp, strided_q: bool
+    monkeypatch: pytest.MonkeyPatch, aiter: _FakeAiter, strided_q: bool
 ) -> None:
     monkeypatch.setattr(fly, "FLYDSL_PREFILL_MIN_ROWS", 1)
     layout = QSAPrefillLayout(*_LAYOUTS["ragged requests"])
@@ -1423,12 +1377,22 @@ def test_qsa_flydsl_takes_the_prefill_rows_with_the_hosts_lengths(
     first = layout.first_row
     args = (q, k_cache, v_cache, indices, table, out, layout)
     assert fly.try_flydsl_prefill(*args) == first
-    (call,) = flydsl_op.calls
+    (call,) = aiter.ops
     assert call.q.is_contiguous() and torch.equal(call.q, q[first:])
     assert torch.equal(call.indices, indices[first:])
-    expected = _reference_kv(k_cache, v_cache, table, layout)
-    assert torch.equal(call.k[call.kv_slots.long()], expected[0])
-    assert torch.equal(call.v[call.kv_slots.long()], expected[1])
+    # the pools AITER made of the cache, and the slots it made of the layout's
+    # requests: the block table's rows from the layout's first request
+    assert call.k is k_cache and call.v is v_cache
+    (slots,) = aiter.slot_calls
+    assert call.kv_slots is aiter.slots[0]
+    assert (slots.query_lens, slots.prefix_lens) == (
+        layout.query_lens,
+        layout.prefix_lens,
+    )
+    assert torch.equal(
+        slots.block_table, table[layout.first_req : layout.first_req + 3]
+    )
+    assert (slots.page_size, slots.rows_per_page) == (_PAGE, _PAGE + 4)
     assert (call.query_lens, call.prefix_lens) == (
         layout.query_lens,
         layout.prefix_lens,
@@ -1437,30 +1401,107 @@ def test_qsa_flydsl_takes_the_prefill_rows_with_the_hosts_lengths(
     # the op wrote the prefill rows of the output and nothing else
     assert call.out.data_ptr() == out[first:].data_ptr()
     assert not out[:first].any() and out[first:].eq(1).all()
+    # AITER was asked about exactly this call
+    (asked,) = aiter.problems
+    for name in ("q", "k", "v", "indices", "kv_slots", "out", "softmax_scale"):
+        assert getattr(asked, name) is getattr(call, name), name
+    assert (asked.query_lens, asked.prefix_lens) == (call.query_lens, call.prefix_lens)
 
 
 def test_qsa_flydsl_leaves_a_step_it_declines_untouched(
-    monkeypatch: pytest.MonkeyPatch, flydsl_op: _FakeOp
+    monkeypatch: pytest.MonkeyPatch, aiter: _FakeAiter
 ) -> None:
     layout = QSAPrefillLayout(*_LAYOUTS["ragged requests"])
     k_cache, v_cache = _interleaved_cache(40, per_page=_PAGE + 4, base_rows=8)
     table = _layout_table(layout)
     q, indices, out = _step_inputs(layout)
+    args = (q, k_cache, v_cache, indices, table, out, layout)
+
+    def declined() -> bool:
+        taken = fly.try_flydsl_prefill(*args) is None
+        assert not aiter.ops and not out.any()
+        return taken
+
     monkeypatch.setattr(fly, "FLYDSL_PREFILL_MIN_ROWS", layout.num_rows + 1)
-    assert (
-        fly.try_flydsl_prefill(q, k_cache, v_cache, indices, table, out, layout) is None
-    )
+    assert declined()
     monkeypatch.setattr(fly, "FLYDSL_PREFILL_MIN_ROWS", layout.num_rows)
     # rows that do not match the layout (a sliced micro-batch)
     sliced = (q[:-1], k_cache, v_cache, indices[:-1], table, out[:-1], layout)
     assert fly.try_flydsl_prefill(*sliced) is None
-    # a cache the op cannot read in place
-    k_heads, v_heads = _interleaved_cache(40, 2)
-    args = (q, k_heads, v_heads, indices, table, out, layout)
-    assert fly.try_flydsl_prefill(*args) is None
-    assert not flydsl_op.calls and not out.any()
-    args = (q, k_cache, v_cache, indices, table, out, layout)
+    # graph capture
+    monkeypatch.setattr(torch.cuda, "is_current_stream_capturing", lambda: True)
+    assert declined()
+    monkeypatch.setattr(torch.cuda, "is_current_stream_capturing", lambda: False)
+    # a device that does not run the op
+    monkeypatch.setattr(fly, "_on_gfx950", lambda: False)
+    assert declined()
+    monkeypatch.setattr(fly, "_on_gfx950", lambda: True)
+    # a cache AITER cannot read in place, and a call AITER's rules decline
+    aiter.readable = False
+    assert declined()
+    aiter.readable, aiter.declines = True, "a rule the call breaks"
+    assert declined()
+    assert aiter.problems, "AITER is asked, not second-guessed"
+    aiter.declines = None
     assert fly.try_flydsl_prefill(*args) == layout.first_row
+
+
+def test_qsa_flydsl_slots_are_built_once_per_step_and_block_table(
+    aiter: _FakeAiter,
+) -> None:
+    layout = QSAPrefillLayout(*_LAYOUTS["queries across pages"])
+    pool = SimpleNamespace(page_size=_PAGE, rows_per_page=_PAGE + 4)
+    table = _layout_table(layout)
+    first = fly._kv_slots(layout, table, pool)
+    assert fly._kv_slots(layout, table, pool) is first
+    assert len(aiter.slot_calls) == 1
+    # another block table (another KV cache group) gets its own slots
+    assert fly._kv_slots(layout, _layout_table(layout, 5), pool) is not first
+    assert len(aiter.slot_calls) == 2
+
+
+@requires_aiter_qsa
+@pytest.mark.parametrize("cache", _IN_PLACE_CACHES.values(), ids=_IN_PLACE_CACHES)
+@pytest.mark.parametrize("layout", _LAYOUTS.values(), ids=_LAYOUTS)
+def test_qsa_flydsl_reads_the_cache_in_place(layout, cache) -> None:
+    """What the owner's cache views give AITER's helpers, end to end: pools on
+    the cache's own memory, and slots that address the keys of the layout's
+    requests (not the requests before them)."""
+    layout = QSAPrefillLayout(*layout)
+    k_cache, v_cache = cache()
+    table = _layout_table(layout)
+    expected = _reference_kv(k_cache, v_cache, table, layout)
+    # the requests before the layout's are not read
+    table[: layout.first_req] = 10**6
+    pool = rocm_aiter_ops.qsa_paged_kv_pool(k_cache, v_cache)
+    assert pool is not None
+    slots = fly._kv_slots(layout, table, pool)
+    lengths = [q + p for q, p in zip(layout.query_lens, layout.prefix_lens)]
+    assert slots.dtype == torch.int32 and slots.shape == (sum(lengths),)
+    # what the op does with a slot: row ``slot`` of each pool
+    assert torch.equal(pool.k[slots.long()], expected[0])
+    assert torch.equal(pool.v[slots.long()], expected[1])
+    # in place: each pool starts where its cache starts, a token row apart
+    assert pool.k.data_ptr() == k_cache.data_ptr()
+    assert pool.v.data_ptr() == v_cache.data_ptr()
+    assert pool.k.stride(0) == pool.v.stride(0) == k_cache.stride(1)
+
+
+@requires_aiter_qsa
+def test_qsa_flydsl_reads_the_served_cache_in_place() -> None:
+    # K and V of one QSA layer in the served pool (Qwen3.8-Flash-Next, TP2,
+    # bf16): 1568-token pages 10,235,904 elements apart, a 512-element K|V
+    # record per token
+    pool = torch.empty(10175 * 10235904, dtype=torch.bfloat16, device="meta")
+    shape, stride = (10175, 1568, 1, 256), (10235904, 512, 256, 1)
+    k, v = pool.as_strided(shape, stride), pool.as_strided(shape, stride, 256)
+    pools = rocm_aiter_ops.qsa_paged_kv_pool(k, v)
+    assert pools is not None and pools.rows_per_page == 19992
+    assert pools.page_size == 1568
+    for view, cache in zip((pools.k, pools.v), (k, v)):
+        assert view.shape == (10174 * 19992 + 1568, 1, 256)
+        assert view.stride() == (512, 256, 1)
+        assert view.storage_offset() == cache.storage_offset()
 
 
 class _Launches:
@@ -1545,77 +1586,86 @@ def test_qsa_owner_passes_the_metadata_layout_to_the_op(
     assert calls == [{"prefill_layout": None}, {"prefill_layout": layout}]
 
 
-def _assert_the_ops_selection(row: list[int], v: int, blocks: int) -> None:
-    """The op's contract for a row whose causal window holds v tokens:
-    columns [0, 4 min(v // 4, T)) hold that many distinct complete blocks
-    j < v // 4 of four tokens, the next v % 4 columns the tail tokens, the
-    rest -1."""
-    whole = min(v // 4, blocks)
-    starts = row[: 4 * whole : 4]
-    assert len(set(starts)) == whole
-    for j, start in enumerate(starts):
-        assert start % 4 == 0 and start // 4 < v // 4
-        assert row[4 * j : 4 * j + 4] == [start + i for i in range(4)]
-    tail = [4 * (v // 4) + i for i in range(v % 4)]
-    assert row[4 * whole : 4 * whole + v % 4] == tail
-    assert set(row[4 * whole + v % 4 :]) <= {-1}
-
-
-def test_qsa_flydsl_warmup_calls_through_the_layers_cache(
-    monkeypatch: pytest.MonkeyPatch, flydsl_op: _FakeOp
+@pytest.mark.parametrize(
+    "cache,kv_heads",
+    [
+        pytest.param(
+            lambda: _interleaved_cache(3, per_page=_PAGE + 4, base_rows=8),
+            1,
+            id="interleaved K|V records",
+        ),
+        pytest.param(
+            lambda: _planes(3, 2, _PAGE + 4, base_rows=8), 2, id="two heads in planes"
+        ),
+    ],
+)
+def test_qsa_flydsl_warmup_runs_the_served_call_through_aiters_warmup(
+    aiter: _FakeAiter, cache, kv_heads: int
 ) -> None:
-    synced = []
-    monkeypatch.setattr(
-        torch.accelerator, "synchronize", lambda device=None: synced.append(device)
-    )
-    k_cache, v_cache = _interleaved_cache(3, per_page=_PAGE + 4, base_rows=8)
-    layouts = ((768,), (4096,), (2048, 2048))
+    k_cache, v_cache = cache()
+    seen = {}
+    layouts = ((768,), (8, 8))
+
+    def warmup(run, **kwargs):
+        seen.update(kwargs)
+        ran = []
+        for query_lens in layouts:
+            q = torch.zeros(sum(query_lens), 12, _D, dtype=torch.bfloat16)
+            indices = torch.zeros(sum(query_lens), _WIDTH, dtype=torch.int32)
+            if run(q, indices, query_lens, (0,) * len(query_lens)):
+                ran.append(query_lens)
+        return tuple(ran)
+
+    aiter.warmup = warmup
     assert fly.warmup_flydsl_qsa_prefill(12, k_cache, v_cache, _WIDTH) == layouts
-    assert [call.query_lens for call in flydsl_op.calls] == list(layouts)
-    for call in flydsl_op.calls:
-        assert call.prefix_lens == (0,) * len(call.query_lens)
-        assert call.q.shape == (sum(call.query_lens), 12, _D)
+    assert seen == {
+        "num_q_heads": 12,
+        "num_kv_heads": kv_heads,
+        "selection_width": _WIDTH,
+        "device": k_cache.device,
+    }
+    assert [call.query_lens for call in aiter.ops] == list(layouts)
+    for call, slots, table_slots in zip(aiter.ops, aiter.slot_calls, aiter.slots):
         # the layer's own cache, read in place at its record pitch: the row
         # stride and pool span the served steps compile for
-        assert call.k.data_ptr() == k_cache.data_ptr()
-        assert call.v.data_ptr() == v_cache.data_ptr()
-        assert call.k.stride(0) == call.v.stride(0) == 2 * _D
-        assert call.k.shape[0] == 2 * (_PAGE + 4) + _PAGE
+        assert call.k is k_cache and call.v is v_cache
+        assert (slots.page_size, slots.rows_per_page) == (_PAGE, _PAGE + 4)
         # every key on block 0, the one block an extensible cache has mapped
-        positions = torch.cat([torch.arange(n) for n in call.query_lens])
-        assert torch.equal(call.kv_slots.long(), positions % _PAGE)
-        # a selection the op takes: the first rows, the rows around 4 T = 2048
-        # tokens (from where a row selects its last T blocks) and each last row
-        ends = set(itertools.accumulate(call.query_lens))
-        for row, position in enumerate(positions.tolist()):
-            if position < 8 or 2044 <= position < 2060 or row + 1 in ends:
-                indices = call.indices[row].tolist()
-                _assert_the_ops_selection(indices, position + 1, 512)
-    assert synced == [k_cache.device]
+        pages = cdiv(max(call.query_lens), _PAGE)
+        assert slots.block_table.shape == (len(call.query_lens), pages)
+        assert slots.block_table.dtype == torch.int32 and not slots.block_table.any()
+        assert call.kv_slots is table_slots
+        assert call.prefix_lens == (0,) * len(call.query_lens)
+        assert call.softmax_scale == _D**-0.5
+        # a scratch output, not an input of the call
+        assert call.out.shape == call.q.shape and call.out is not call.q
 
 
 @pytest.mark.parametrize(
-    "heads,width,fp8,op",
+    "readable,declines",
     [
-        pytest.param(12, _WIDTH, False, False, id="no op"),
-        pytest.param(12, _WIDTH - 1, False, True, id="odd width"),
-        pytest.param(17, _WIDTH, False, True, id="17 heads per KV head"),
-        pytest.param(12, _WIDTH, True, True, id="fp8 cache"),
+        pytest.param(False, None, id="a cache AITER cannot read in place"),
+        pytest.param(True, "a rule the call breaks", id="a call AITER declines"),
     ],
 )
-def test_qsa_flydsl_warmup_skips_what_the_op_does_not_take(
-    monkeypatch: pytest.MonkeyPatch, flydsl_op: _FakeOp, heads, width, fp8, op
+def test_qsa_flydsl_warmup_skips_what_aiter_does_not_take(
+    aiter: _FakeAiter, readable: bool, declines: str | None
 ) -> None:
-    monkeypatch.setattr(torch.accelerator, "synchronize", lambda device=None: None)
-    if not op:
-        monkeypatch.setattr(fly, "_flydsl_op", lambda: None)
+    aiter.readable, aiter.declines = readable, declines
+    asked = []
+
+    def warmup(run, **kwargs):
+        asked.append(kwargs)
+        q = torch.zeros(768, 12, _D, dtype=torch.bfloat16)
+        indices = torch.zeros(768, _WIDTH, dtype=torch.int32)
+        return () if run(q, indices, (768,), (0,)) is False else ((768,),)
+
+    aiter.warmup = warmup
     k_cache, v_cache = _interleaved_cache(3, per_page=_PAGE + 4, base_rows=8)
-    if fp8:
-        k_cache, v_cache = (
-            c.to(current_platform.fp8_dtype()) for c in (k_cache, v_cache)
-        )
-    assert fly.warmup_flydsl_qsa_prefill(heads, k_cache, v_cache, width) == ()
-    assert not flydsl_op.calls
+    assert fly.warmup_flydsl_qsa_prefill(12, k_cache, v_cache, _WIDTH) == ()
+    assert not aiter.ops
+    # a cache with no pool never reaches AITER's warmup
+    assert bool(asked) is readable
 
 
 @pytest.mark.parametrize(

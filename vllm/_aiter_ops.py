@@ -2906,6 +2906,68 @@ class rocm_aiter_ops:
             use_qk_l2norm_in_kernel=use_qk_l2norm_in_kernel,
         )
 
+    @staticmethod
+    @functools.cache
+    def _qsa_sparse_prefill_importable() -> bool:
+        try:
+            from aiter.ops.qsa import (  # noqa: F401
+                qsa_paged_kv_pool,
+                qsa_paged_kv_slots,
+                qsa_sparse_prefill,
+                qsa_sparse_prefill_available,
+                qsa_sparse_prefill_problem,
+                qsa_sparse_prefill_warmup,
+            )
+
+            # The names import without FlyDSL; AITER says whether its backend does.
+            return bool(qsa_sparse_prefill_available())
+        except (ImportError, ModuleNotFoundError):
+            return False
+
+    @classmethod
+    @if_aiter_supported
+    def is_qsa_sparse_prefill_available(cls) -> bool:
+        """Whether this AITER has the QSA sparse prefill op with its operand
+        rules, paged-cache helpers and warmup (ROCm/aiter#7556; older builds
+        lack the names) and its FlyDSL backend imports. Whether the op runs a
+        given call is AITER's answer, `qsa_sparse_prefill_problem`.
+        """
+        return cls._AITER_ENABLED and cls._qsa_sparse_prefill_importable()
+
+    @staticmethod
+    def qsa_sparse_prefill_problem(*args: Any, **kwargs: Any) -> str | None:
+        """The first operand rule a `qsa_sparse_prefill` call breaks, or None."""
+        from aiter.ops.qsa import qsa_sparse_prefill_problem
+
+        return qsa_sparse_prefill_problem(*args, **kwargs)
+
+    @staticmethod
+    def qsa_paged_kv_pool(k_cache: torch.Tensor, v_cache: torch.Tensor) -> Any:
+        """K and V of a paged cache as the op's token pools, or None."""
+        from aiter.ops.qsa import qsa_paged_kv_pool
+
+        return qsa_paged_kv_pool(k_cache, v_cache)
+
+    @staticmethod
+    def qsa_paged_kv_slots(*args: Any, **kwargs: Any) -> torch.Tensor:
+        """The op's `kv_slots` for the requests of a block table."""
+        from aiter.ops.qsa import qsa_paged_kv_slots
+
+        return qsa_paged_kv_slots(*args, **kwargs)
+
+    @staticmethod
+    def qsa_sparse_prefill(*args: Any, **kwargs: Any) -> torch.Tensor:
+        from aiter.ops.qsa import qsa_sparse_prefill
+
+        return qsa_sparse_prefill(*args, **kwargs)
+
+    @staticmethod
+    def qsa_sparse_prefill_warmup(*args: Any, **kwargs: Any) -> tuple[Any, ...]:
+        """Compile the op's kernel variants through the caller's own call."""
+        from aiter.ops.qsa import qsa_sparse_prefill_warmup
+
+        return qsa_sparse_prefill_warmup(*args, **kwargs)
+
     @classmethod
     def are_rdna_gdn_triton_kernels_available(cls) -> bool:
         """RDNA analog of are_gdn_triton_kernels_available()."""
