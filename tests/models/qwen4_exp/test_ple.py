@@ -2,12 +2,16 @@
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 
 import logging
+import mmap
+import multiprocessing
 import os
+import time
 from dataclasses import dataclass
 from itertools import accumulate
 from pathlib import Path
 from types import SimpleNamespace
 
+import numpy as np
 import pytest
 import torch
 from compressed_tensors.quantization import QuantizationArgs
@@ -46,6 +50,11 @@ from vllm.models.qwen4_exp.amd import ple_layer as amd_ple_layer
 from vllm.models.qwen4_exp.amd.ple_layer import (
     Qwen4ExpPLELayer as Qwen4ExpPLELayerAMD,
 )
+from vllm.models.qwen4_exp.common.ngram_embedding import (
+    SharedPLETable,
+    shared_ple_table_identity,
+    shared_ple_table_path,
+)
 from vllm.models.qwen4_exp.common.ops.ple import ple_conv
 from vllm.models.qwen4_exp.common.ple import (
     PLEShardOverlap,
@@ -56,6 +65,7 @@ from vllm.models.qwen4_exp.nvidia.ngram_embedding import (
     Qwen4ExpPLEDeviceEmbedding,
     Qwen4ExpPLEDiskOffloadEmbedding,
     Qwen4ExpPLEEmbeddingMethod,
+    Qwen4ExpPLEFileSharedHostEmbedding,
     Qwen4ExpPLEFp8EmbeddingMethod,
     Qwen4ExpPLENvFp4EmbeddingMethod,
     Qwen4ExpPLEPinnedHostEmbedding,
@@ -2832,3 +2842,369 @@ def test_amd_ngram_embedding_matches_reference_under_compile(
     )
     expected = loaded_weight[ngram_ids.cpu()].flatten(-2).to(device)
     torch.testing.assert_close(output.float(), expected.float(), rtol=0, atol=0)
+
+
+class _BuiltEmbedding(Exception):
+    """Raised by a stub embedding class to report what it was built with."""
+
+    def __init__(self, cls: type, kwargs: dict) -> None:
+        super().__init__(cls.__name__)
+        self.cls = cls
+        self.kwargs = kwargs
+
+
+@pytest.mark.parametrize(
+    ("options", "expected"),
+    [
+        ({"cpu_offload": True}, "pinned"),
+        ({"cpu_offload": True, "shared_host_table_dir": "/shm"}, "file_shared"),
+        ({"cpu_offload": False, "shared_host_table_dir": "/shm"}, "device"),
+        (
+            {
+                "cpu_offload": True,
+                "disk_offload": True,
+                "shared_host_table_dir": "/shm",
+            },
+            "disk",
+        ),
+    ],
+)
+def test_ple_embedding_shares_files_only_for_a_pinned_host_table(
+    monkeypatch: pytest.MonkeyPatch, options: dict, expected: str
+) -> None:
+    """shared_host_table_dir replaces only the private pinned table; the file
+    names carry the model, its revision and the layer. dp_shared_memory is off
+    throughout, so the table-sharing group is never asked for."""
+    _mock_etp_group(monkeypatch)
+    group = SimpleNamespace(world_size=1)
+    engram_config = SimpleNamespace(
+        cpu_offload=False,
+        disk_offload=False,
+        dp_shared_memory=False,
+        shared_host_table_dir=None,
+    )
+    for key, value in options.items():
+        setattr(engram_config, key, value)
+    vllm_config = SimpleNamespace(
+        engram_config=engram_config,
+        model_config=SimpleNamespace(model="org/model", revision="r1"),
+    )
+    for name, value in (
+        ("get_current_vllm_config", vllm_config),
+        ("get_etp_group", group),
+        ("get_tp_group", group),
+    ):
+        monkeypatch.setattr(nvidia_ngram_embedding_module, name, lambda v=value: v)
+
+    def stub(name: str) -> type:
+        def __init__(self, *args, **kwargs):
+            raise _BuiltEmbedding(type(self), kwargs)
+
+        return type(name, (), {"__init__": __init__})
+
+    stubs = {
+        "pinned": ("Qwen4ExpPLEPinnedHostEmbedding", stub("Pinned")),
+        "file_shared": ("Qwen4ExpPLEFileSharedHostEmbedding", stub("FileShared")),
+        "device": ("Qwen4ExpPLEDeviceEmbedding", stub("Device")),
+        "disk": ("Qwen4ExpPLEDiskOffloadEmbedding", stub("Disk")),
+    }
+    for attr, cls in stubs.values():
+        monkeypatch.setattr(nvidia_ngram_embedding_module, attr, cls)
+    config = SimpleNamespace(
+        ngram_size=2,
+        heads_per_ngram=2,
+        eos_token_id=0,
+        vocab_size=64,
+        split_ngram_parts=4,
+        ngram_vocab_size_base=8,
+        make_ngram_vocab_size_divisible_by=1,
+        ple_embedding_dtype=None,
+    )
+    with pytest.raises(_BuiltEmbedding) as built:
+        Qwen4ExpNGramEmbedding(
+            config,
+            64,
+            0,
+            8,
+            data_parallel_rank=0,
+            prefix="t",
+            params_dtype=torch.bfloat16,
+        )
+    assert built.value.cls is stubs[expected][1]
+    if expected == "file_shared":
+        assert built.value.kwargs["shared_table"] == SharedPLETable(
+            "/shm", "org/model|r1|t.ngram_embedding"
+        )
+    else:
+        assert "shared_table" not in built.value.kwargs
+
+
+def _table_identity(**overrides) -> dict[str, object]:
+    fields = dict(
+        table_id="m|r1|l.1",
+        shape=(8, 2),
+        dtype=torch.float8_e4m3fn,
+        etp_rank=0,
+        etp_size=2,
+        vocab_range=(0, 8),
+    )
+    fields.update(overrides)
+    table_id, shape, dtype = (fields.pop(k) for k in ("table_id", "shape", "dtype"))
+    return shared_ple_table_identity(table_id, shape, dtype, **fields)
+
+
+@pytest.mark.parametrize(
+    "overrides",
+    [
+        {"table_id": "m|r1|l.2"},
+        {"shape": (9, 2)},
+        {"etp_rank": 1, "vocab_range": (8, 16)},
+        {"etp_rank": 1},
+        {"etp_size": 4},
+        {"vocab_range": (8, 16)},
+    ],
+)
+def test_shared_ple_table_path_names_the_etp_shard(overrides) -> None:
+    """Every ETP shard has the same shape, so the shard is in the name."""
+    path = shared_ple_table_path("/dev/shm", _table_identity())
+    assert path.startswith("/dev/shm/vllm_ple_")
+    assert path == shared_ple_table_path("/dev/shm", _table_identity())
+    assert path != shared_ple_table_path("/dev/shm", _table_identity(**overrides))
+
+
+def _cpu_mapping(path: str, num_bytes: int):
+    with open(path, "r+b") as file:
+        mapping = mmap.mmap(file.fileno(), num_bytes, flags=mmap.MAP_SHARED)
+    owner = np.frombuffer(mapping, dtype=np.uint8)
+    return torch.from_numpy(owner), owner, mapping
+
+
+def _file_shared_embedding(
+    tmp_path, etp_rank: int = 0, etp_size: int = 2, rows: int = 4
+) -> Qwen4ExpPLEFileSharedHostEmbedding:
+    embedding = Qwen4ExpPLEFileSharedHostEmbedding.__new__(
+        Qwen4ExpPLEFileSharedHostEmbedding
+    )
+    nn.Module.__init__(embedding)
+    embedding._shared_table = SharedPLETable(str(tmp_path), "m|r|l")
+    embedding._table_path = ""
+    embedding._table_identity = {}
+    embedding._table_bytes = 0
+    embedding._table_lock_fd = None
+    embedding.tp_rank, embedding.tp_size = etp_rank, etp_size
+    embedding.shard_indices = SimpleNamespace(
+        org_vocab_start_index=etp_rank * rows,
+        org_vocab_end_index=(etp_rank + 1) * rows,
+    )
+    return embedding
+
+
+def test_file_shared_ple_etp_ranks_each_load_their_own_shard(
+    monkeypatch: pytest.MonkeyPatch, tmp_path
+) -> None:
+    """Two ETP ranks with equal-sized shards must not share one file: each
+    loads its own rows instead of mapping the other's."""
+    monkeypatch.setattr(ngram_embedding_module, "_map_shared_ple_file", _cpu_mapping)
+    rank0 = _file_shared_embedding(tmp_path, etp_rank=0)
+    rank1 = _file_shared_embedding(tmp_path, etp_rank=1)
+    rank0.allocate_embedding_weight(4, 2, torch.float8_e4m3fn)
+    rank1.allocate_embedding_weight(4, 2, torch.float8_e4m3fn)
+    assert rank0._table_path != rank1._table_path
+    assert rank0._table_is_writer and rank1._table_is_writer
+    rank0.bind_file_shards()
+    rank1.bind_file_shards()
+
+    # A restart of rank 1 maps rank 1's table, not rank 0's.
+    restarted = _file_shared_embedding(tmp_path, etp_rank=1)
+    restarted.allocate_embedding_weight(4, 2, torch.float8_e4m3fn)
+    assert restarted._table_path == rank1._table_path
+    assert not restarted._table_is_writer
+    restarted.bind_file_shards()
+
+
+def test_file_shared_ple_shares_only_the_table(
+    monkeypatch: pytest.MonkeyPatch, tmp_path
+) -> None:
+    """NVFP4's block scales, allocated after the table, stay per process."""
+    monkeypatch.setattr(ngram_embedding_module, "_map_shared_ple_file", _cpu_mapping)
+    private: list[tuple[int, int]] = []
+
+    def pinned(self, num_embeddings, embedding_dim, dtype):
+        private.append((num_embeddings, embedding_dim))
+        return torch.zeros(num_embeddings, embedding_dim, dtype=dtype)
+
+    monkeypatch.setattr(
+        Qwen4ExpPLEPinnedHostEmbedding, "allocate_embedding_weight", pinned
+    )
+    embedding = _file_shared_embedding(tmp_path)
+    table = embedding.allocate_embedding_weight(4, 8, torch.uint8)
+    embedding.allocate_embedding_weight(4, 1, torch.float8_e4m3fn)
+    assert table.shape == (4, 8) and private == [(4, 1)]
+    assert os.stat(embedding._table_path).st_size == 32
+
+
+def test_file_shared_ple_refuses_a_ready_table_of_another_shard(tmp_path) -> None:
+    """The ready mark names the shard it holds; a size match is not enough."""
+    path = str(tmp_path / "table")
+    lock_fd = ngram_embedding_module._claim_shared_table(path, _table_identity(), 16)
+    assert lock_fd is not None
+    ngram_embedding_module._publish_shared_table(path, _table_identity(), 16, lock_fd)
+    with pytest.raises(RuntimeError, match="holds"):
+        ngram_embedding_module._claim_shared_table(
+            path, _table_identity(etp_rank=1), 16
+        )
+
+
+@pytest.mark.parametrize("writer", [True, False])
+def test_file_shared_ple_loader_writes_only_in_the_loading_process(
+    monkeypatch: pytest.MonkeyPatch, tmp_path, writer: bool
+) -> None:
+    embedding = _file_shared_embedding(tmp_path)
+    embedding._table_lock_fd = -1 if writer else None
+    embedding.weight = nn.Parameter(torch.zeros(4, 2), requires_grad=False)
+    embedding.weight_scale = nn.Parameter(torch.zeros(1), requires_grad=False)
+    parent_calls: list[str] = []
+
+    def parent_loader(self, param, loaded_weight, checkpoint_start=None):
+        parent_calls.append("weight" if param is self.weight else "scale")
+
+    monkeypatch.setattr(Qwen4ExpPLEPinnedHostEmbedding, "weight_loader", parent_loader)
+    embedding.weight_loader(embedding.weight, torch.ones(2, 2), checkpoint_start=0)
+    embedding.weight_loader(embedding.weight_scale, torch.tensor([0.5]))
+    assert parent_calls == (["weight", "scale"] if writer else ["scale"])
+
+
+def _claim_in_child(path: str, hold: float, results) -> None:
+    """Claim the table; a loader holds it for `hold` seconds, then publishes."""
+    lock_fd = ngram_embedding_module._claim_shared_table(path, _table_identity(), 16)
+    results.put(lock_fd is not None)
+    if lock_fd is not None:
+        time.sleep(hold)
+        ngram_embedding_module._publish_shared_table(
+            path, _table_identity(), 16, lock_fd
+        )
+
+
+def _start_loader(path: str, results) -> multiprocessing.process.BaseProcess:
+    """A child process that becomes the loader and never finishes loading."""
+    child = multiprocessing.get_context("fork").Process(
+        target=_claim_in_child, args=(path, 3600, results), daemon=True
+    )
+    child.start()
+    assert results.get(timeout=30) is True
+    return child
+
+
+def test_file_shared_ple_load_interrupted_by_exit_is_taken_over(tmp_path) -> None:
+    """A loader killed after sizing the file leaves no ready mark; the next
+    process to start (the restarted loader itself, say) loads it again at
+    once instead of waiting for the ready timeout."""
+    path = str(tmp_path / "table")
+    results = multiprocessing.get_context("fork").Queue()
+    child = _start_loader(path, results)
+    assert os.stat(path).st_size == 16
+    child.kill()
+    child.join()
+
+    start = time.monotonic()
+    lock_fd = ngram_embedding_module._claim_shared_table(path, _table_identity(), 16)
+    assert lock_fd is not None
+    assert time.monotonic() - start < 5
+    ngram_embedding_module._publish_shared_table(path, _table_identity(), 16, lock_fd)
+    assert (
+        ngram_embedding_module._claim_shared_table(path, _table_identity(), 16) is None
+    )
+
+
+def test_file_shared_ple_waiters_fail_fast_when_the_loader_exits(
+    monkeypatch: pytest.MonkeyPatch, tmp_path
+) -> None:
+    """A process that mapped the table and skipped its load cannot take over;
+    it fails within a poll of the loader's exit, not after the timeout."""
+    monkeypatch.setattr(ngram_embedding_module, "PLE_SHARED_TABLE_POLL_S", 0.05)
+    path = str(tmp_path / "table")
+    results = multiprocessing.get_context("fork").Queue()
+    child = _start_loader(path, results)
+    assert (
+        ngram_embedding_module._claim_shared_table(path, _table_identity(), 16) is None
+    )
+    child.kill()
+    child.join()
+    start = time.monotonic()
+    with pytest.raises(RuntimeError, match="exited before marking it ready"):
+        ngram_embedding_module._await_shared_table(path, _table_identity(), 16)
+    assert time.monotonic() - start < 5
+
+
+def test_file_shared_ple_waiters_wait_for_a_live_loader(
+    monkeypatch: pytest.MonkeyPatch, tmp_path
+) -> None:
+    """While the loader is alive nobody takes over: a new process maps the
+    table and waits, and only the ready timeout ends the wait."""
+    monkeypatch.setattr(ngram_embedding_module, "PLE_SHARED_TABLE_POLL_S", 0.05)
+    monkeypatch.setattr(ngram_embedding_module, "PLE_SHARED_TABLE_READY_TIMEOUT_S", 1)
+    path = str(tmp_path / "table")
+    results = multiprocessing.get_context("fork").Queue()
+    child = _start_loader(path, results)
+    try:
+        assert (
+            ngram_embedding_module._claim_shared_table(path, _table_identity(), 16)
+            is None
+        )
+        with pytest.raises(RuntimeError, match="still loading"):
+            ngram_embedding_module._await_shared_table(path, _table_identity(), 16)
+    finally:
+        child.kill()
+        child.join()
+
+
+def test_file_shared_ple_concurrent_starts_elect_one_loader(tmp_path) -> None:
+    path = str(tmp_path / "table")
+    context = multiprocessing.get_context("fork")
+    results = context.Queue()
+    children = [
+        context.Process(target=_claim_in_child, args=(path, 0.5, results), daemon=True)
+        for _ in range(6)
+    ]
+    for child in children:
+        child.start()
+    loaders = [results.get(timeout=30) for _ in children]
+    for child in children:
+        child.join(timeout=60)
+        assert child.exitcode == 0
+    assert loaders.count(True) == 1
+    ngram_embedding_module._await_shared_table(path, _table_identity(), 16)
+
+
+def test_file_shared_ple_ready_table_needs_no_lock(tmp_path) -> None:
+    path = str(tmp_path / "table")
+    lock_fd = ngram_embedding_module._claim_shared_table(path, _table_identity(), 16)
+    ngram_embedding_module._publish_shared_table(path, _table_identity(), 16, lock_fd)
+    os.unlink(path + ".lock")
+    assert (
+        ngram_embedding_module._claim_shared_table(path, _table_identity(), 16) is None
+    )
+    assert not os.path.exists(path + ".lock")
+
+
+@pytest.mark.parametrize(
+    "method",
+    [Qwen4ExpPLEUnquantizedEmbeddingMethod, Qwen4ExpPLEFp8EmbeddingMethod],
+)
+def test_file_shared_ple_ready_mark_is_published_through_the_post_load_hook(
+    monkeypatch: pytest.MonkeyPatch, tmp_path, method
+) -> None:
+    """The post-load hook of every embedding method reaches the mark protocol:
+    the loader publishes, a process that mapped the table returns once the
+    mark exists."""
+    monkeypatch.setattr(ngram_embedding_module, "_map_shared_ple_file", _cpu_mapping)
+    loader = _file_shared_embedding(tmp_path)
+    loader.allocate_embedding_weight(4, 2, torch.float8_e4m3fn)
+    reader = _file_shared_embedding(tmp_path)
+    reader.allocate_embedding_weight(4, 2, torch.float8_e4m3fn)
+    for embedding in (loader, reader):
+        embedding.weight_scale = nn.Parameter(torch.ones(1), requires_grad=False)
+    assert loader._table_is_writer and not reader._table_is_writer
+    method().process_weights_after_loading(loader)
+    assert os.path.exists(loader.ready_mark)
+    method().process_weights_after_loading(reader)

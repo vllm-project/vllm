@@ -1536,6 +1536,57 @@ def test_engram_dp_shared_memory_requires_cpu_offload():
         EngramConfig(cpu_offload=False, dp_shared_memory=True)
 
 
+@pytest.mark.parametrize(
+    "options",
+    [
+        {"cpu_offload": False},
+        {"dp_shared_memory": True},
+        {"disk_offload": True},
+        {"use_thp": True},
+    ],
+)
+def test_engram_shared_host_table_dir_requires_private_cpu_offload(options):
+    with pytest.raises(ValueError, match="shared_host_table_dir requires"):
+        EngramConfig(shared_host_table_dir="/dev/shm", **options)
+
+
+@pytest.mark.skip_global_cleanup
+def test_engram_shared_host_table_dir_keeps_dp_shared_memory_off():
+    """Independent processes share files; DP replicas never default to /dev/shm
+    tables of their own beside them."""
+    config = EngramConfig(shared_host_table_dir="/dev/shm")
+    assert config.shared_host_table_dir == "/dev/shm"
+    config.resolve_dp_shared_memory(ParallelConfig(data_parallel_size=2))
+    assert config.dp_shared_memory is False
+
+
+@pytest.mark.parametrize(
+    "architecture,platform,supported",
+    [
+        ("Qwen4ExpForCausalLM", "cuda", True),
+        ("Qwen4ExpForCausalLM", "rocm", False),
+        ("DeepseekV41ForCausalLM", "cuda", False),
+    ],
+)
+def test_engram_shared_host_table_dir_model_support(
+    monkeypatch, architecture, platform, supported
+):
+    monkeypatch.setattr(current_platform, "is_cuda", lambda: platform == "cuda")
+    model = cast(
+        ModelConfig,
+        SimpleNamespace(
+            architecture=architecture,
+            hf_text_config=SimpleNamespace(ple_layer_ids=[1], engram_layer_ids=[1]),
+        ),
+    )
+    config = EngramConfig(shared_host_table_dir="/dev/shm")
+    if supported:
+        config.verify_model_config(model)
+    else:
+        with pytest.raises(ValueError, match="Qwen4Exp model on CUDA"):
+            config.verify_model_config(model)
+
+
 @pytest.mark.skip_global_cleanup
 @pytest.mark.parametrize(
     "cpu_offload,use_thp,dp_shared_memory,dp_size,elastic_ep,expected",
