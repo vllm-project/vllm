@@ -618,8 +618,10 @@ def sparse_attn_indexer(
         # prefill chunk's, or the decode logits, which eager and piecewise
         # steps allocate outside the CUDA graph pools. DeepGEMM emits them in
         # `logits_dtype`, each row holding whole KV splits at a 1024-byte
-        # stride; an FP32 copy of BF16 logits keeps that stride. Prefill always
-        # reads FP32 logits, and the chunk splitter caps them at the budget.
+        # stride; an FP32 copy of BF16 logits keeps that stride. The chunk
+        # splitter caps prefill logits at the budget in FP32. DeepSelect ranks
+        # BF16 logits without the copy, but the bound keeps it for chunks that
+        # DeepSelect does not take (e.g. under DCP).
         split_kv = 384 if current_platform.is_device_capability_family(100) else 256
         row_align = math.lcm(split_kv, 1024 // logits_dtype.itemsize)
         copy_bytes = 0 if logits_dtype == torch.float32 else torch.float32.itemsize
