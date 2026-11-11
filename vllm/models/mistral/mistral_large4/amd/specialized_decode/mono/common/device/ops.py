@@ -4,7 +4,7 @@
 approximate hardware math, bf16 / fp8 packing, buffer resources, the
 execution-model constants and the kernel symbol naming.
 
-Ported from the FlyDSL GLM-5 layer kernel (ROCm/FlyDSL branch
+Ported from the FlyDSL MLA+MoE layer kernel (ROCm/FlyDSL branch
 `glm5-mla-moe-layer-monokernel` @ 1e28fd8a,
 `kernels/mla_moe_layer/shared_reuse_moe_kernel.py`). Only published flydsl APIs
 and aiter's vendored `buffer_ops` / `dpp_utils` are used.
@@ -466,7 +466,7 @@ def fp8_pack4(a, b, c, d):
     return fx.Int32(rocdl.cvt_pk_fp8_f32(T.i32, c, d, lo, True))
 
 
-# --- moved verbatim from GLM-5.2's second copy of this file ---
+# --- moved verbatim from the upstream kernel's second copy of this file ---
 
 _UMAX_DPP_ASM = "\n".join(
     [
@@ -543,7 +543,7 @@ def wave_umax(value):
 
 
 def wave_umax_dpp(value):
-    """Return a wave maximum through the tuned GLM/TileRT DPP schedule."""
+    """Return a wave maximum through the tuned TileRT DPP schedule."""
     result = llvm.InlineAsmOp(
         T.i32, [as_ir_value(fx.Int32(value))], _UMAX_DPP_ASM, "=v,0"
     ).result

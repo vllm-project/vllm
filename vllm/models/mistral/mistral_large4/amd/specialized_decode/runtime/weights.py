@@ -216,7 +216,7 @@ def build_moe_layer(layer, variant: KernelVariant, rank: int, npes: int) -> MoeL
     spec = attn.spec
     kind = layer_kind(spec)
     gc = variant.geometry_config
-    C = gc.glm5_tp_config(npes)
+    C = gc.ml4_tp_config(npes)
     nh, nope, pe, kvl, vd = C.local_heads, C.nope_dim, C.pe_dim, C.kv_lora, C.v_dim
     hidden = C.hidden
     dev = layer.input_layernorm.weight.device
@@ -288,7 +288,7 @@ def build_moe_layer(layer, variant: KernelVariant, rank: int, npes: int) -> MoeL
         mxfp4_scale_layout=Mxfp4ScaleLayout.ATOM,
         physical_experts=N_ROUTED,
     )  # fmt: skip
-    packed = variant.op.prepare_glm5_weights(W, "fp8_block128")
+    packed = variant.op.prepare_ml4_weights(W, "fp8_block128")
     if ix is not None:
         packed["w_index_k"] = pack_fp8(t["w_index_k"])
         packed["w_index_q"] = pack_fp8(t["w_index_q"])

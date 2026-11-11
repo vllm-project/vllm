@@ -2,7 +2,7 @@
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 # Copyright (c) 2025 FlyDSL Project Contributors
 
-"""GLM-5 indexed decode MonoKernel: one persistent launch per TP rank.
+"""ML4 indexed decode MonoKernel: one persistent launch per TP rank.
 
 One launch of `grid = 256 CTAs x 512 threads` (one CTA per MI355X CU) runs the
 whole decoder-layer body for this rank's TP shard.  The indexed path adds the
@@ -261,7 +261,7 @@ FAULT_TICKS = 10 * 100_000_000
 FAULT_CHECK_SPINS = 32  # power of two
 
 
-def build_glm5_monokernel(
+def build_ml4_monokernel(
     S: int = 1,
     heads: int = 8,
     npes: int = 8,
@@ -365,7 +365,7 @@ def build_glm5_monokernel(
     D = dcp_size
     expert_inter = inter
     # up/gate: TOP_K * inter/8 tasks (one 8-row column tile of one routed slot each; the first inter/8 also
-    # run the shared expert), in ceil(.. / 256) rounds -- whole rounds for GLM (top-8) and ML4 (top-4, 1536).
+    # run the shared expert), in ceil(.. / 256) rounds -- whole rounds for top-8 and ML4's top-4 (1536).
     paired_ug_rows = expert_mxfp4 and not atom_experts
     assert D == 1 or (D == W and H == L * D)
     I_PER_SLOT = expert_inter // UG_TILE
@@ -453,8 +453,8 @@ def build_glm5_monokernel(
     INDEX_Q_BF16_OFF = S * Q_LORA // 4
     DN_TILE = dn_tile(S, expert_mxfp4)
     N_DN_TILES = HIDDEN // DN_TILE
-    # Both of these MUST live here, in ``build_glm5_monokernel``'s scope, and
-    # not inside ``glm5_monokernel``: FlyDSL's compile-cache key folds in the
+    # Both of these MUST live here, in ``build_ml4_monokernel``'s scope, and
+    # not inside ``ml4_monokernel``: FlyDSL's compile-cache key folds in the
     # kernel's *closure* scalars (``_collect_closure_scalar_vals``), so a
     # compile-time constant that is a plain local of the kernel body does not
     # change the key and a second build silently replays the first binary.
@@ -561,7 +561,7 @@ def build_glm5_monokernel(
     # is an AssertionError, which the runner's `except (MonoUnsupported,
     # ValueError)` does not catch.
     # A ValueError, not an `assert`: this is "that configuration does not fit",
-    # which `Glm52MonoRunner` already handles by falling back to the external
+    # which the mono runner already handles by falling back to the external
     # indexer (`except (MonoUnsupported, ValueError)`). An AssertionError is
     # not in that tuple, so the overrun used to take the engine down instead --
     # and `fused_indexer_refusal` has no width check to catch it earlier, so
@@ -640,7 +640,7 @@ def build_glm5_monokernel(
         work: fx.Array[fx.Float32, WORK_WORDS, 16]
 
     @flyc.kernel(known_block_size=[THREADS, 1, 1])
-    def glm5_monokernel(
+    def ml4_monokernel(
         h_in: Int64,
         x_out: Int64,
         cur_pos: Int64,
@@ -1948,7 +1948,7 @@ def build_glm5_monokernel(
 
             Preserve all FP32 bits of (sigmoid + bias). Each round reduces the score
             first, then the expert ID only among exactly equal winners. Packing the
-            ID into the score's low byte can change GLM's top-k on real checkpoints.
+            ID into the score's low byte can change the top-k on real checkpoints.
             Candidate i of this lane is expert lane + 64 i.
             Returns (expert id, route weight = raw score / sum of
             the 8 raw scores * ROUTE_SCALE) of pick `lane` in score order, valid in
@@ -4553,7 +4553,7 @@ def build_glm5_monokernel(
             UG8_CPW = UG_NKC // WAVES
             N_UG1 = TOP_K * (
                 expert_inter // UG8
-            )  # GLM: TOP_K = 8 makes this == expert_inter
+            )  # TOP_K = 8 makes this == expert_inter
             for u in range(start("ug"), N_UG1, G):
                 u = fx.Int32(u)
                 stamp("ug", u, 0)
@@ -4829,7 +4829,7 @@ def build_glm5_monokernel(
             )
             # Same number of rounds either way: ``2 * S`` (sample) rounds become
             # ``2 * S`` (group) rounds, of which only ``ug_n`` carry work.
-            # Per-sample schedule: TOP_K * UG_C tasks (GLM's top-8: == inter; ug_task_rounds assumed that).
+            # Per-sample schedule: TOP_K * UG_C tasks (top-8: == inter; ug_task_rounds assumed that).
             UG_TASKS = TOP_K * UG_C
             assert moe_dedup or UG_TASKS % G == 0, (
                 "the per-sample up/gate schedule needs whole CTA rounds"
@@ -5226,7 +5226,7 @@ def build_glm5_monokernel(
             # DN_HOIST is a gcd because a wave's units start at
             # (wave % DN_WPR) * DN_UPW, so a run of DN_HOIST units is inside
             # one (sample, slot) only when DN_HOIST divides DN_UPW as well as
-            # DN_NKC // 2. TP4 GLM-5.2: 4 at S=12 (DN_UPW 108), 2 at S=6 (54).
+            # DN_NKC // 2. On a TP4 top-8 shard: 4 at S=12 (DN_UPW 108), 2 at S=6 (54).
             # The partial-tail case (`live` masking, DN_NU % DN_WPR != 0) opts
             # out, because there `num_records_bytes` is per-unit.
             DN_HOIST = (
@@ -5539,7 +5539,7 @@ def build_glm5_monokernel(
         layer: Int32,
         stream: fx.Stream = fx.Stream(None),  # noqa: B008
     ):
-        glm5_monokernel(
+        ml4_monokernel(
             h_in,
             x_out,
             cur_pos,

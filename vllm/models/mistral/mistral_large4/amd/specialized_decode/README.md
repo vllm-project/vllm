@@ -11,7 +11,7 @@ the router (softmax top-4), the shared and routed MXFP4 experts and both TP
 all-reduces (in-kernel, over peer memory). The embedding, the dense layer 0 and
 the final norm run vLLM's modules.
 
-The kernel is ROCm/ATOM's GLM-5.2 mono kernel adapted to the ML4 layer: no
+The kernel is ROCm/ATOM's mono decode kernel adapted to the ML4 layer: no
 q-LoRA, SSMax on the query and the index query, LayerNorm'd index inputs,
 softmax routing, NoPE layers, KV-sharing layers (39, 43, ..., 71 attend to
 layer 35's latent cache) and index-sharing layers (4k+1, 4k+2 for k >= 4 reuse

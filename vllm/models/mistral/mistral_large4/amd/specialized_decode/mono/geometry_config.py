@@ -1,11 +1,11 @@
 # SPDX-License-Identifier: Apache-2.0
 # Copyright (c) 2026 FlyDSL Project Contributors
 
-"""GLM-5.2's own geometry, and the widths its kernel is built for.
+"""ML4's own geometry, and the widths its kernel is built for.
 
 The vocabulary these are expressed in -- `LayerConfig`, `MoeMode`, the weight
 and cache layouts -- is model-free and lives in `vllm.models.mistral.mistral_large4.amd.specialized_decode.mono.common.weights.config`;
-what is GLM-5.2's alone is here. The shared names are re-exported, so a kernel
+what is ML4's alone is here. The shared names are re-exported, so a kernel
 source taking both from one place need not care which is which.
 """
 
@@ -43,7 +43,7 @@ from vllm.models.mistral.mistral_large4.amd.specialized_decode.mono.common.weigh
 
 from .variant import KV_SHARE, NOPE_LAYER  # noqa: F401  (re-exported)
 
-GLM5_CONFIG = register_layer_config(
+ML4_CONFIG = register_layer_config(
     LayerConfig(
         name="ml4",
         hidden=6144,
@@ -56,110 +56,110 @@ GLM5_CONFIG = register_layer_config(
         v_dim=128,
         n_experts=128,
         top_k=4,
-        inter=768,  # 6144 / TP8; glm5_tp_config(4) gives 1536
+        inter=768,  # 6144 / TP8; ml4_tp_config(4) gives 1536
         route_scale=1.0,
         local_heads=8,
     )
 )
-GLM5_REFERENCE_TP = 8
+ML4_REFERENCE_TP = 8
 
 
-GLM5_TP_SIZES = (4, GLM5_REFERENCE_TP)
+ML4_TP_SIZES = (4, ML4_REFERENCE_TP)
 
 
-GLM5_GRAPH_BATCHES = tuple(range(1, 97))
+ML4_GRAPH_BATCHES = tuple(range(1, 97))
 
 
-GLM5_AGENTX_BATCHES = (1, 2)
+ML4_AGENTX_BATCHES = (1, 2)
 
 
-GLM5_QUERY_LENGTHS = (1, 4, 5, 6)
+ML4_QUERY_LENGTHS = (1, 4, 5, 6)
 
 
-GLM5_KERNEL_SAMPLES = (1, 2, 4, 5, 6, 8, 10, 12)
+ML4_KERNEL_SAMPLES = (1, 2, 4, 5, 6, 8, 10, 12)
 
 
-GLM5_GLOBAL_HEADS = GLM5_CONFIG.local_heads * GLM5_REFERENCE_TP
+ML4_GLOBAL_HEADS = ML4_CONFIG.local_heads * ML4_REFERENCE_TP
 
 
-GLM5_GLOBAL_INTER = GLM5_CONFIG.inter * GLM5_REFERENCE_TP
+ML4_GLOBAL_INTER = ML4_CONFIG.inter * ML4_REFERENCE_TP
 
 
-def glm5_tp_config(tp_size: int) -> LayerConfig:
-    """Return the one GLM-5 shard geometry for `tp_size`."""
-    if tp_size not in GLM5_TP_SIZES:
+def ml4_tp_config(tp_size: int) -> LayerConfig:
+    """Return the one ML4 shard geometry for `tp_size`."""
+    if tp_size not in ML4_TP_SIZES:
         raise ValueError(
-            f"GLM-5 tensor parallel size must be one of {GLM5_TP_SIZES}, got {tp_size}"
+            f"ML4 tensor parallel size must be one of {ML4_TP_SIZES}, got {tp_size}"
         )
     return replace(
-        GLM5_CONFIG,
-        local_heads=GLM5_GLOBAL_HEADS // tp_size,
-        inter=GLM5_GLOBAL_INTER // tp_size,
+        ML4_CONFIG,
+        local_heads=ML4_GLOBAL_HEADS // tp_size,
+        inter=ML4_GLOBAL_INTER // tp_size,
     )
 
 
-def glm5_attention_heads(tp_size: int, dcp_size: int = 1) -> int:
+def ml4_attention_heads(tp_size: int, dcp_size: int = 1) -> int:
     if dcp_size not in (1, 4) or tp_size % dcp_size:
         raise ValueError(
-            f"unsupported GLM-5 TP/DCP geometry: tp={tp_size}, dcp={dcp_size}"
+            f"unsupported ML4 TP/DCP geometry: tp={tp_size}, dcp={dcp_size}"
         )
-    return GLM5_GLOBAL_HEADS // (tp_size // dcp_size)
+    return ML4_GLOBAL_HEADS // (tp_size // dcp_size)
 
 
-def glm5_kernel_samples(samples: int, query_length: int) -> int:
+def ml4_kernel_samples(samples: int, query_length: int) -> int:
     """Choose an LDS-safe request-aligned launch width."""
-    if query_length not in GLM5_QUERY_LENGTHS or samples % query_length:
+    if query_length not in ML4_QUERY_LENGTHS or samples % query_length:
         raise ValueError(
-            f"unsupported GLM-5 decode shape samples={samples}, query_length={query_length}"
+            f"unsupported ML4 decode shape samples={samples}, query_length={query_length}"
         )
-    for chunk in reversed(GLM5_KERNEL_SAMPLES):
+    for chunk in reversed(ML4_KERNEL_SAMPLES):
         if chunk % query_length == 0 and samples % chunk == 0:
             return chunk
     raise ValueError(
-        f"no GLM-5 kernel chunk for samples={samples}, query_length={query_length}"
+        f"no ML4 kernel chunk for samples={samples}, query_length={query_length}"
     )
 
 
-HIDDEN = GLM5_CONFIG.hidden
+HIDDEN = ML4_CONFIG.hidden
 
 
-Q_LORA = GLM5_CONFIG.q_lora
+Q_LORA = ML4_CONFIG.q_lora
 
 
-KV_LORA = GLM5_CONFIG.kv_lora
+KV_LORA = ML4_CONFIG.kv_lora
 
 
-PE_DIM = GLM5_CONFIG.pe_dim
+PE_DIM = ML4_CONFIG.pe_dim
 
 
-NOPE_DIM = GLM5_CONFIG.nope_dim
+NOPE_DIM = ML4_CONFIG.nope_dim
 
 
-V_DIM = GLM5_CONFIG.v_dim
+V_DIM = ML4_CONFIG.v_dim
 
 
-QKV_A_ROWS = GLM5_CONFIG.qkv_a_rows
+QKV_A_ROWS = ML4_CONFIG.qkv_a_rows
 
 
-N_EXPERTS = GLM5_CONFIG.n_experts
+N_EXPERTS = ML4_CONFIG.n_experts
 
 
-EXPERT_TOP_K = GLM5_CONFIG.top_k
+EXPERT_TOP_K = ML4_CONFIG.top_k
 
 
 TOP_K = EXPERT_TOP_K
 
 
-MOE_SLOTS = GLM5_CONFIG.moe_slots
+MOE_SLOTS = ML4_CONFIG.moe_slots
 
 
-SHARED_EXPERT = GLM5_CONFIG.shared_expert
+SHARED_EXPERT = ML4_CONFIG.shared_expert
 
 
-INTER = GLM5_CONFIG.inter
+INTER = ML4_CONFIG.inter
 
 
-ROUTE_SCALE = GLM5_CONFIG.route_scale
+ROUTE_SCALE = ML4_CONFIG.route_scale
 
 
 SOFTMAX_SCALE = 128**-0.5  # ML4: qk_head_dim**-0.5 on every layer (NoPE layers keep it)
@@ -168,7 +168,7 @@ Q_PE_DIM = 0 if NOPE_LAYER else 64
 INDEX_ROPE = not NOPE_LAYER
 
 
-LOCAL_HEADS = GLM5_CONFIG.local_heads
+LOCAL_HEADS = ML4_CONFIG.local_heads
 
 
 def validate_shard(
@@ -177,7 +177,7 @@ def validate_shard(
     rank: int,
     npes: int,
     sparse_attention_topk: int,
-    model_config: LayerConfig | str = GLM5_CONFIG,
+    model_config: LayerConfig | str = ML4_CONFIG,
     supported_samples=SUPPORTED_SAMPLES,
     expected_heads: int | None = None,
 ) -> None:

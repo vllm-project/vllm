@@ -3,7 +3,7 @@
 """GPU tests of the Mistral Large 4 specialized decode on an fp8 latent KV cache.
 
 One TP4 rank's shard of one MoE layer per kind runs on a single GPU through
-`Glm5MonoKernel` (npes=1), with random weights, a randomly paged cache and one
+`Ml4MonoKernel` (npes=1), with random weights, a randomly paged cache and one
 DSpark verify step of 4 rows whose last row is padding (slot -1: KV-sharing
 layers used to load it ~4 GiB past the source cache, a GPU memory fault).
 
@@ -70,7 +70,7 @@ def build_layer(kind: str):
     q128 = weights._q128
     nope_layer, kv_share, _ = weights.KINDS[kind]
     v = load_variant(nope_layer, kv_share)
-    C = v.geometry_config.glm5_tp_config(4)
+    C = v.geometry_config.ml4_tp_config(4)
     bf, f32 = torch.bfloat16, torch.float32
     t = {}
     t["w_q_b"], t["s_q_b"] = q128(_randn(NH * 128, HIDDEN, scale=HIDDEN**-0.5))
@@ -170,7 +170,7 @@ def make_step():
 
 def run_layer(kind, kv_cache_dtype, kv, index_cache, step, W=None):
     v, W0 = build_layer(kind)
-    kernel = v.op.Glm5MonoKernel(
+    kernel = v.op.Ml4MonoKernel(
         W or W0, S, rank=0, npes=1, group=None, topk=TOPK, launches_per_step=1,
         with_indexer=True, index_max_seq=PAGES * PAGE, index_request_width=S,
         index_page_size=PAGE, index_block_table_stride=PAGES,

@@ -126,7 +126,7 @@ class PeerBuffer:
 
 
 # ---------------------------------------------------------------------------
-# A SECOND implementation of the same idea, used by GLM-5.2's kernel.
+# A SECOND implementation of the same idea, used by the mono kernel.
 #
 # `PeerBuffer` above gets its memory from aiter (`UncachedIpcHeap`);
 # `SymmetricPeerBuffer` below drives HIP directly through `hip_ipc`. They are
@@ -185,7 +185,7 @@ class SymmetricPeerBuffer:
             ]
             if failed:
                 detail = "; ".join(f"rank {peer}: {error}" for peer, error in failed)
-                # MonoUnsupported, not RuntimeError: the GLM runner's _build
+                # MonoUnsupported, not RuntimeError: the mono runner's _build
                 # and LazyRunner both route on MonoUnsupported, so an OOM or a
                 # failed IPC export here must disable mono, not take the server
                 # down with it. The old PeerBuffer raised MonoUnsupported for

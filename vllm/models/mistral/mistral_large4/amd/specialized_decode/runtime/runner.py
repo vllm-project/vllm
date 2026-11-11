@@ -46,7 +46,7 @@ logger = init_logger(__name__)
 HIDDEN = 6144
 FAULT_WORD_BYTES = 64
 
-# launch-order weight arguments (see mono/op.py Glm5MonoKernel.forward)
+# launch-order weight arguments (see mono/op.py Ml4MonoKernel.forward)
 _WEIGHT_ARGS = (
     "g_in", "g_q", "g_kv", "g_post", "w_qkv_a", "s_qkv_a", "w_q_b", "s_q_b",
     "w_uk", "s_uk", "w_uv", "s_uv", "w_o", "s_o", "w_r", "bias",
@@ -199,7 +199,7 @@ class MonoRunner:
             for kind in sorted(set(self.kinds)):
                 nope, kvs, with_indexer = KINDS[kind]
                 v = _variant(kind)
-                inter = v.geometry_config.glm5_tp_config(npes).inter
+                inter = v.geometry_config.ml4_tp_config(npes).inter
                 scr, sym_l = v.layout.layout(
                     rows, heads, npes, cfg.topk, with_indexer, index_max_seq,
                     inter=inter, native_fp4_mfma=True,
@@ -217,7 +217,7 @@ class MonoRunner:
                 sym_bytes = max(sym_bytes, sym_l["_bytes"])
         fault_offset = -(-sym_bytes // FAULT_WORD_BYTES) * FAULT_WORD_BYTES
         self.launch = {
-            (rows, kind): v.op.build_glm5_monokernel(
+            (rows, kind): v.op.build_ml4_monokernel(
                 **build_kwargs,
                 S=rows,
                 inter=inter,

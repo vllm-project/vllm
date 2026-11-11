@@ -1,7 +1,7 @@
 # SPDX-License-Identifier: Apache-2.0
 # Copyright (c) 2025 FlyDSL Project Contributors
 
-"""Compile-time storage layout and CTA schedule for the GLM-5 MonoKernel."""
+"""Compile-time storage layout and CTA schedule for the ML4 MonoKernel."""
 
 import math
 import os
@@ -156,7 +156,7 @@ def indexer_uses_tiles(index_max_seq: int, indexer_cp: bool) -> bool:
 # valid entries, so the merged input is dense and in index order, and a global
 # winner is always inside its own list's top-``topk``, so no level drops one.
 # The tree ends at the level holding a single list.  This is DeepSeek-V4.1's
-# design (``atom/models/deepseek_v41/mono/index_plan.py:95-154``) at GLM's
+# design (``atom/models/deepseek_v41/mono/index_plan.py:95-154``) at these
 # constants: INDEX_SEG 16384, topk 2048 -> fan 8 -> two merge levels reach
 # 16384 * 8 * 8 = 1048576, with no LDS beyond today's.
 INDEX_SEG = INDEX_LOCAL_LDS_CAPACITY
@@ -241,9 +241,7 @@ N_UG_PER_SLOT = INTER // UG_TILE
 XQ_BLOCKS = HIDDEN // 128
 XQ_GROUPS = HIDDEN // 32
 XQ_WAVES = (XQ_BLOCKS + N_ROUTER - 1) // N_ROUTER
-assert (
-    XQ_WAVES <= WAVES
-)  # ML4: 128 experts -> 16 router tasks, 3 quant waves each (GLM: 2 of 32 tasks)
+assert XQ_WAVES <= WAVES  # ML4: 128 experts -> 16 router tasks, 3 quant waves each
 
 
 def dn_tile(samples: int, expert_mxfp4: bool = False) -> int:
@@ -274,13 +272,12 @@ def down_prefetch_batch(
     bit-identical -- `run_units` walks the units in index order whatever the
     batch size, so the MFMA accumulation order does not move.
 
-    Measured on the TP4 GLM-5.2 shard, this stage is **not** latency-starved:
+    Measured upstream on a TP4 shard, this stage is **not** latency-starved:
     sweeping 2..8 at S=6 and S=12 is monotone the *wrong* way (bigger is
     slower, presumably register pressure), and 2 is the best of the values
     tried at both widths.
 
-    `MONO_DN_BATCH` overrides it for an A/B (see
-    `tests/models/glm52/kernels/bench_glm52_atom_shape.py --ab-env`).
+    `MONO_DN_BATCH` overrides it for an A/B.
     """
     override = os.environ.get("MONO_DN_BATCH", "")
     if override:
@@ -301,8 +298,8 @@ def ptpc_stage_chunk(samples: int) -> int:
     term from `q_b`, `uk` and `o` -- stages whose task count and weight
     bytes do not depend on `S` at all.
 
-    Measured on the TP4 GLM-5.2 shard (`bench_glm52_atom_shape --ab-env
-    MONO_PTPC_CHUNK=...`, 7 trials, interleaved, spread <= 0.27%):
+    Measured upstream on a TP4 shard (`MONO_PTPC_CHUNK=...`,
+    7 trials, interleaved, spread <= 0.27%):
 
     ==========  ===============  ================
     chunk       S=6 us/launch    S=12 us/launch
@@ -604,7 +601,7 @@ def stage_tasks(
         ("o", N_ROW_TILES),
         ("router", samples * N_ROUTER),
         # one 8-row column tile of one routed slot per task (the per-sample loop
-        # is inside the task); == inter for GLM's top-8
+        # is inside the task); == inter for top-8
         ("ug", TOP_K * (inter // 8)),
         ("down", HIDDEN // dn_tile(samples, expert_mxfp4)),
     ]

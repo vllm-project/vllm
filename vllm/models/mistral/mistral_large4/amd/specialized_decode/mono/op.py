@@ -1,7 +1,7 @@
 # SPDX-License-Identifier: Apache-2.0
 # Copyright (c) 2025 FlyDSL Project Contributors
 
-"""Host wrapper for the GLM-5 indexed decode MonoKernel."""
+"""Host wrapper for the ML4 indexed decode MonoKernel."""
 
 from __future__ import annotations
 
@@ -30,10 +30,10 @@ from vllm.models.mistral.mistral_large4.amd.specialized_decode.mono.common.weigh
 
 from .geometry import WAVES as MONO_WAVES
 from .geometry_config import (
-    GLM5_CONFIG,
-    GLM5_KERNEL_SAMPLES,
     HIDDEN,
     KV_LORA,
+    ML4_CONFIG,
+    ML4_KERNEL_SAMPLES,
     MOE_SLOTS,
     N_EXPERTS,
     NOPE_DIM,
@@ -47,10 +47,10 @@ from .geometry_config import (
     Mxfp4WeightLayout,
     RouterWeightLayout,
     as_kv_cache_layout,
-    glm5_tp_config,
+    ml4_tp_config,
     validate_shard,
 )
-from .kernel import build_glm5_monokernel
+from .kernel import build_ml4_monokernel
 from .layout import (
     INDEX_DIM,
     INDEX_PAGE_ROW,
@@ -60,10 +60,10 @@ from .layout import (
     stage_tasks,
 )
 
-__all__ = ["Glm5MonoKernel"]
+__all__ = ["Ml4MonoKernel"]
 
 
-def prepare_glm5_weights(
+def prepare_ml4_weights(
     W: LayerWeights, attention_weight: AttentionWeight | str
 ) -> dict[str, torch.Tensor]:
     """Pack one layer once for every graph bucket using it."""
@@ -175,8 +175,8 @@ def param_table(
     return table
 
 
-class Glm5MonoKernel:
-    """One TP rank of GLM-5's indexed decode MonoKernel.
+class Ml4MonoKernel:
+    """One TP rank of ML4's indexed decode MonoKernel.
 
     With `with_indexer=True`, a single persistent launch covers index K/Q/W
     projection, index K normalization/RoPE/cache update, scoring, exact sparse
@@ -218,7 +218,7 @@ class Glm5MonoKernel:
         kv_cache_layout: KvCacheLayout | str = KvCacheLayout.SPLIT,
         kv_cache_dtype: str = "bf16",
         prepared_weights: dict[str, torch.Tensor] | None = None,
-        runtime: Glm5MonoKernel | None = None,
+        runtime: Ml4MonoKernel | None = None,
         dcp_size: int = 1,
         native_fp4_mfma: bool = False,
         rope_dtype: str = "fp32",
@@ -226,9 +226,9 @@ class Glm5MonoKernel:
         separate_shared: bool = False,
         fail_stop: bool = False,
     ):
-        if W.config not in (GLM5_CONFIG, glm5_tp_config(4)):
-            raise ValueError(f"unsupported GLM-5 shard configuration: {W.config}")
-        if W.config == glm5_tp_config(4) and npes not in (
+        if W.config not in (ML4_CONFIG, ml4_tp_config(4)):
+            raise ValueError(f"unsupported ML4 shard configuration: {W.config}")
+        if W.config == ml4_tp_config(4) and npes not in (
             1,
             4,
         ):  # npes=1: one TP4 rank's shard without the peer reduce (tests)
@@ -242,7 +242,7 @@ class Glm5MonoKernel:
             npes,
             topk,
             W.config,
-            supported_samples=GLM5_KERNEL_SAMPLES,
+            supported_samples=ML4_KERNEL_SAMPLES,
             expected_heads=attention_heads,
         )
         if dcp_size not in (1, npes):
@@ -321,7 +321,7 @@ class Glm5MonoKernel:
             raise ValueError("native FP4 MFMA requires ATOM MXFP4 expert storage")
         self.native_fp4_mfma = native_fp4_mfma
         self.packed = dict(
-            prepare_glm5_weights(W, self.attention_weight)
+            prepare_ml4_weights(W, self.attention_weight)
             if prepared_weights is None
             else prepared_weights
         )
@@ -450,7 +450,7 @@ class Glm5MonoKernel:
                 runtime.scr_layout != self.scr_layout
                 or runtime.sym_layout != self.sym_layout
             ):
-                raise ValueError("shared GLM runtime geometry mismatch")
+                raise ValueError("shared mono runtime geometry mismatch")
             self.scratch = runtime.scratch
             self.fault_offset = runtime.fault_offset
             self.peer_buffer = runtime.peer_buffer
@@ -458,7 +458,7 @@ class Glm5MonoKernel:
         self.sym_storage = self.peer_buffer.storage
         self.sym = self.peer_buffer.local_address
         self.peers = self.peer_buffer.addresses
-        self.launch = build_glm5_monokernel(
+        self.launch = build_ml4_monokernel(
             samples,
             W.heads,
             npes,
@@ -661,7 +661,7 @@ class Glm5MonoKernel:
                         f"block_tables must be contiguous int32 {expected_blocks} for fused indexer"
                     )
         if self.kv_cache_layout is KvCacheLayout.ATOM:
-            cache_width = GLM5_CONFIG.kv_lora + GLM5_CONFIG.pe_dim
+            cache_width = ML4_CONFIG.kv_lora + ML4_CONFIG.pe_dim
             fp8_dtypes = {
                 dtype
                 for dtype in (

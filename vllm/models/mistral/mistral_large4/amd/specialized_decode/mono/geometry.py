@@ -6,8 +6,8 @@
 from __future__ import annotations
 
 from .geometry_config import (
-    GLM5_CONFIG,
     MAX_LAYERS_PER_STEP,
+    ML4_CONFIG,
     LayerConfig,
     MoeMode,
     as_layer_config,
@@ -34,7 +34,7 @@ POLL_MAX = 12
 TL_COLS = 8
 
 
-def dn_tile(samples: int, hidden: int = GLM5_CONFIG.hidden) -> int:
+def dn_tile(samples: int, hidden: int = ML4_CONFIG.hidden) -> int:
     """Return hidden rows per expert-down / FFN peer-reduce task."""
     return 32 if samples == 1 else hidden // BLOCKS
 
@@ -49,7 +49,7 @@ def layout(
     npes: int,
     sparse_attention_topk: int,
     moe_mode: MoeMode | str = MoeMode.W8A8,
-    model_config: LayerConfig | str = GLM5_CONFIG,
+    model_config: LayerConfig | str = ML4_CONFIG,
     attention_only: bool = False,
     dedicated_input_norm: bool = False,
 ):
@@ -124,7 +124,7 @@ def stage_tasks(
     samples: int,
     heads: int,
     sparse_attention_topk: int,
-    model_config: LayerConfig | str = GLM5_CONFIG,
+    model_config: LayerConfig | str = ML4_CONFIG,
     attention_only: bool = False,
     dedicated_input_norm: bool = False,
 ):
