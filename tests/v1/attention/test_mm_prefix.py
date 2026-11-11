@@ -454,9 +454,7 @@ def test_per_request_causal_flags(window_mode):
     )
 
     args = (q, k, v, query_lens, seq_lens, mm_ranges, sliding_window_left, scale)
-    expected = _reference(
-        *args, mm_clamp_sw=mm_clamp_sw, per_req_causal=per_req_causal
-    )
+    expected = _reference(*args, mm_clamp_sw=mm_clamp_sw, per_req_causal=per_req_causal)
     torch.testing.assert_close(out.float(), expected, atol=2e-2, rtol=2e-2)
     # The flags must matter, or the test would pass with them ignored.
     assert not torch.allclose(
