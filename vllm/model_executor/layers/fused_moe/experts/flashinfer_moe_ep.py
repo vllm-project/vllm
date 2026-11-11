@@ -54,6 +54,9 @@ _supported_activations: frozenset[MoEActivation] = frozenset((MoEActivation.SILU
 
 
 class FlashInferMoeEpExperts(mk.FusedMoEExpertsModular):
+    # apply() runs on weights its adapter holds, not on w1/w2.
+    reads_weight_args = False
+
     def __init__(
         self,
         moe_config: FusedMoEConfig,
