@@ -1373,11 +1373,10 @@ class FlashMLASparseImpl(SparseMLACommonImpl[FlashMLASparseMetadata]):
         assert isinstance(physical_topk, torch.Tensor)
         q = reshape_query_for_spec_decode(q, num_decodes)
         physical_topk = physical_topk.view(num_decodes, q.shape[1], -1)
+        hot_cache = self.index_group.physical_kv_cache(self.index_group_index)
         output, _ = self._fp8_flash_mla_kernel(
             q=q,
-            kv_c_and_k_pe_cache=self.index_group.physical_kv_cache(
-                self.index_group_index
-            ),
+            kv_c_and_k_pe_cache=_fp8_kv_pages(hot_cache, hot_cache.shape[1])[0],
             topk_indices=physical_topk,
             kernel_metadata=kernel_metadata,
         )

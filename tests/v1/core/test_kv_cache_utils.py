@@ -45,6 +45,7 @@ from vllm.v1.attention.backend import MultipleOf
 from vllm.v1.attention.backends.utils import resolve_kv_cache_layout
 from vllm.v1.core.kv_cache_manager import KVCacheBlocks, KVCacheManager
 from vllm.v1.core.kv_cache_planning import (
+    _pool_bytes_per_block,
     get_kv_cache_groups,
 )
 from vllm.v1.core.kv_cache_utils import (
@@ -171,7 +172,7 @@ def test_hisparse_host_pool_must_fit_max_model_len(monkeypatch, extra_blocks, ok
             hf_text_config=SimpleNamespace(index_topk=128), max_model_len=64 * 4
         ),
         parallel_config=SimpleNamespace(tensor_parallel_size=1, world_size=1),
-        cache_config=SimpleNamespace(num_gpu_blocks_override=7),
+        cache_config=SimpleNamespace(num_gpu_blocks_override=7, kv_cache_layout=None),
     )
     host_page = specs["model.layers.0.self_attn"].page_size_bytes
     host_budget = (4 + extra_blocks) * host_page
@@ -229,7 +230,7 @@ def test_hisparse_derived_specs_do_not_affect_kv_cache_layout(monkeypatch):
 
 @pytest.mark.parametrize(
     ("source_alignment", "hot_alignment"),
-    [(None, 576 * 2), (MultipleOf(64), 64 * 576 * 2)],
+    [(None, 576 * 2), (MultipleOf(64), 64 * 576 * 2), (MultipleOf(32), 32 * 576 * 2)],
 )
 def test_hisparse_packs_hot_layers_up_to_largest_device_page(
     source_alignment, hot_alignment
@@ -271,6 +272,42 @@ def test_hisparse_packs_hot_layers_up_to_largest_device_page(
     assert indexer_group.kv_cache_spec.block_size == 2048
 
 
+@pytest.mark.parametrize(
+    ("kv_cache_layout", "indexer_block_size"), [(None, 4096), ("BLHNC", 4608)]
+)
+def test_hisparse_indexer_fills_rounded_pool_block(kv_cache_layout, indexer_block_size):
+    """A block-outer pool block rounds up past the largest page to the lcm of
+    hot rows and indexer kernel pages; indexer blocks fill the padding."""
+    mla = dict(block_size=64, num_kv_heads=1, dtype=torch.bfloat16)
+    specs: dict[str, KVCacheSpec] = {
+        "model.layers.0.self_attn": MLAAttentionSpec(
+            head_size=576, is_index_group_leader=True, **mla
+        ),
+        "model.layers.0.self_attn.indexer": MLAAttentionSpec(
+            head_size=128,
+            cache_role=SparseCacheRole.INDEXER,
+            block_stride_alignment=MultipleOf(64),
+            **mla,
+        ),
+        "model.layers.1.self_attn": FullAttentionSpec(
+            block_size=64, num_kv_heads=1, head_size=4096, dtype=torch.bfloat16
+        ),
+    }
+    config = VllmConfig(model_config=ModelConfig(max_model_len=1024))
+    config.attention_config.hisparse_config = HiSparseConfig()
+    config.cache_config.kv_cache_layout = kv_cache_layout
+    config.model_config.hf_text_config.index_topk = 128
+
+    groups = get_hisparse_kv_cache_groups(config, specs)
+    assert groups is not None
+    (indexer_group,) = (
+        g for g in groups if g.role == KVCacheGroupRole.HISPARSE_INDEXER
+    )
+    assert indexer_group.kv_cache_spec.block_size == indexer_block_size
+    if kv_cache_layout is not None:
+        assert _pool_bytes_per_block(config, groups) == 1_179_648
+
+
 def test_hisparse_rejects_deepseek_v4():
     full_specs = {
         "model.layers.0.attn": MLAAttentionSpec(
@@ -284,7 +321,7 @@ def test_hisparse_rejects_deepseek_v4():
     config = SimpleNamespace(
         attention_config=SimpleNamespace(hisparse_config=HiSparseConfig()),
         model_config=SimpleNamespace(hf_text_config=SimpleNamespace(index_topk=512)),
-        cache_config=SimpleNamespace(num_gpu_blocks_override=7),
+        cache_config=SimpleNamespace(num_gpu_blocks_override=7, kv_cache_layout=None),
     )
 
     with pytest.raises(ValueError, match="does not support DeepSeek V4"):

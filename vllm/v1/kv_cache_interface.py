@@ -508,10 +508,11 @@ class HiSparseHotSpec(KVCacheSpec):
     def get_block_stride_alignment(self) -> int:
         from vllm.v1.attention.backend import MultipleOf
 
+        row_bytes = self.page_size // self.block_size
         alignment = self.block_stride_alignment
         if isinstance(alignment, MultipleOf):
-            return self.page_size
-        return math.lcm(self.page_size // self.block_size, alignment or 1)
+            return math.gcd(alignment.base, self.block_size) * row_bytes
+        return math.lcm(row_bytes, alignment or 1)
 
     @property
     def block_table_token_alignment(self) -> int | None:

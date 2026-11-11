@@ -79,6 +79,29 @@ def get_hisparse_kv_cache_groups(
     return _lay_out_hisparse_groups(vllm_config, mla_specs, regular_groups)
 
 
+def _lay_out_hisparse_groups(
+    vllm_config: VllmConfig,
+    mla_specs: dict[str, KVCacheSpec],
+    regular_groups: list[KVCacheGroupSpec],
+) -> list[KVCacheGroupSpec]:
+    """Lay out the groups to fill the largest regular page, or the pool block
+    when a block-outer layout rounds it up to every group's block stride
+    alignment. Before the layout is resolved, only the per-layer specs are
+    used."""
+    from vllm.v1.core.kv_cache_planning import _pool_bytes_per_block
+
+    block_bytes = max(map(_group_page_bytes, regular_groups), default=0)
+    groups = _fill_hisparse_groups(vllm_config, mla_specs, regular_groups, block_bytes)
+    if not block_bytes or vllm_config.cache_config.kv_cache_layout is None:
+        return groups
+    pool_block_bytes = _pool_bytes_per_block(vllm_config, groups)
+    if pool_block_bytes == block_bytes:
+        return groups
+    return _fill_hisparse_groups(
+        vllm_config, mla_specs, regular_groups, pool_block_bytes
+    )
+
+
 def get_hisparse_host_pool_bytes(vllm_config: VllmConfig) -> int:
     host_pool_gib = hisparse_host_pool_gib(vllm_config.kv_transfer_config)
     if host_pool_gib is None:
@@ -114,10 +137,11 @@ def _partition_hisparse_specs(
     return source_specs, indexer_specs
 
 
-def _lay_out_hisparse_groups(
+def _fill_hisparse_groups(
     vllm_config: VllmConfig,
     mla_specs: dict[str, KVCacheSpec],
     regular_groups: list[KVCacheGroupSpec],
+    block_bytes: int,
 ) -> list[KVCacheGroupSpec]:
     source_specs, indexer_specs = _partition_hisparse_specs(mla_specs)
     block_sizes = {spec.block_size for spec in source_specs.values()}
@@ -139,10 +163,7 @@ def _lay_out_hisparse_groups(
     )
     assert config is not None
     indexer_page_bytes = sum(spec.page_size_bytes for spec in indexer_specs.values())
-    pages_per_block = max(
-        max(map(_group_page_bytes, regular_groups), default=0) // indexer_page_bytes,
-        1,
-    )
+    pages_per_block = max(block_bytes // indexer_page_bytes, 1)
     indexer_group_spec = UniformTypeKVCacheSpecs.from_specs(
         {
             name: spec.copy_with_new_block_size(spec.block_size * pages_per_block)
@@ -157,7 +178,7 @@ def _lay_out_hisparse_groups(
         role=KVCacheGroupRole.HISPARSE_INDEXER,
     )
 
-    hot_group_page_limit = max(map(_group_page_bytes, [indexer_group, *regular_groups]))
+    hot_group_page_limit = max(block_bytes, _group_page_bytes(indexer_group))
     hot_blocks_per_request = cdiv(config.device_buffer_size, gpu_block_size)
     hot_units: list[list[tuple[str, MLAAttentionSpec]]] = []
     for layer_name, layer_spec in source_specs.items():

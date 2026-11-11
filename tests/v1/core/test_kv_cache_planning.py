@@ -110,6 +110,7 @@ def test_hisparse_hma_uses_resolved_gpu_block_size(
         cache_config=SimpleNamespace(
             num_gpu_blocks_override=7,
             prefix_cache_retention_interval=None,
+            kv_cache_layout=KVCacheLayout.BLHNC.name,
             get_resolved_kv_cache_layout=lambda: KVCacheLayout.BLHNC,
         ),
     )
@@ -707,6 +708,7 @@ def test_kv_cache_config_skips_uniform_group_owned_by_other_pp_stage():
         cache_config=SimpleNamespace(
             num_gpu_blocks_override=None,
             prefix_cache_retention_interval=None,
+            kv_cache_layout=KVCacheLayout.BLHNC.name,
             get_resolved_kv_cache_layout=lambda: KVCacheLayout.BLHNC,
         ),
     )
