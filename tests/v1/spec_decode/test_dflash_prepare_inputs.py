@@ -122,6 +122,7 @@ def _run_prepare(
         max_num_tokens=max_num_tokens,
         max_model_len=128,
         sample_from_anchor=True,
+        context_kv_only=False,
     )
     with (
         patch(
