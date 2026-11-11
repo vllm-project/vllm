@@ -80,6 +80,13 @@ def get_chat_template_override_path(
     model_type: str,
     tokenizer_name_or_path: str,
 ) -> Path | None:
+    """Return the predefined template that replaces the tokenizer's own.
+
+    Only for model types whose Hub tokenizers ship a wrong chat template. Remove
+    "siglip" from `_MODEL_TYPES_OVERRIDING_TOKENIZER_CHAT_TEMPLATE` once the
+    SigLIP2 checkpoints drop the Gemma template upstream:
+    https://huggingface.co/google/siglip2-base-patch16-224/discussions/23
+    """
     if model_type not in _MODEL_TYPES_OVERRIDING_TOKENIZER_CHAT_TEMPLATE:
         return None
 
