@@ -183,6 +183,27 @@ and falls back to per-replica (or DP-sharded) tables with a warning when:
 Requirements: `cpu_offload` enabled, `--data-parallel-size > 1`, and a shared
 IPC namespace across the co-located replicas.
 
+## Splitting GPU tables across engines (DeepSeek V4.1)
+
+Engines in one NVLink domain, such as the prefill engines of a disaggregated
+deployment, can split each GPU table's rows over all of their GPUs instead of
+keeping a host copy per engine. Each GPU holds 1/`peer_group_size` of every
+table and reads the other rows from their owner's HBM:
+
+```bash
+# Every engine of the group, e.g. 9 DEP2 prefill engines (18 GPUs):
+--engram-config.cpu_offload false \
+--engram-config.peer_group_size 18 \
+--engram-config.peer_group_store "$HOME/engram-peers/$SLURM_JOB_ID/store"
+```
+
+`peer_group_size` is the sum of the engines' GPU counts. `peer_group_store` is
+a file the engines meet through once at startup: give every engine the same
+path, reachable by all of them (a shared filesystem across nodes) and fresh per
+launch. Requires CUDA FABRIC handles (an IMEX channel, as on NVL72), TP=1, PP=1
+and `cpu_offload` disabled. Weights cannot be reloaded, and restarting one
+engine means restarting the group.
+
 ## Limitations
 
 - CUDA-alike platforms only.

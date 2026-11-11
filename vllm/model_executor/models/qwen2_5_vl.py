@@ -1823,7 +1823,7 @@ class Qwen2_5_VLForConditionalGeneration(
         assert isinstance(info, Qwen2VLProcessingInfo)
         max_frames_per_video = info.get_num_frames_with_most_features(
             seq_len=self.model_config.max_model_len,
-            mm_counts={"video": self.multimodal_config.get_limit_per_prompt("video")},
+            num_videos=self.multimodal_config.get_limit_per_prompt("video"),
         )
         return max_frames_per_video
 

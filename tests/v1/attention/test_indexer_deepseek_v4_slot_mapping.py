@@ -11,6 +11,7 @@ from tests.v1.attention.utils import (
     create_common_attn_metadata,
     create_vllm_config,
 )
+from tests.v1.core.utils import new_kv_cache_group
 from vllm.config import SpeculativeConfig
 from vllm.model_executor.layers.attention.sparse_mla_attention import (
     SparseMLACommonMetadataBuilder,
@@ -68,7 +69,8 @@ def test_adaptive_indexer_uses_configured_max_decode_len():
         num_speculative_tokens=num_speculative_tokens,
         enable_adaptive_verification=True,
     )
-    max_num_blocks = kv_cache_spec.max_num_blocks_per_req(vllm_config, 1024)
+    group = new_kv_cache_group(["layer"], kv_cache_spec)
+    max_num_blocks = group.max_num_blocks_per_req(vllm_config, 1024)
     block_table_width = get_block_table_width(max_num_blocks, kv_cache_spec.block_size)
     builder = DeepseekV32IndexerMetadataBuilder(
         kv_cache_spec=kv_cache_spec,
@@ -632,7 +634,8 @@ def test_indexer_builder_deepseek_v4_compressed_slot_mapping_uses_num_states():
         tokens_per_state=4,
     )
     vllm_config = create_vllm_config(max_model_len=1024)
-    max_num_blocks = kv_cache_spec.max_num_blocks_per_req(vllm_config, 1024)
+    group = new_kv_cache_group(["layer"], kv_cache_spec)
+    max_num_blocks = group.max_num_blocks_per_req(vllm_config, 1024)
     block_table_width = get_block_table_width(max_num_blocks, kv_cache_spec.block_size)
     builder = DeepseekV32IndexerMetadataBuilder(
         kv_cache_spec=kv_cache_spec,
@@ -713,7 +716,8 @@ def test_indexer_prefill_budget_matches_compressed_workspace(compress_ratio):
         tokens_per_state=compress_ratio,
     )
     vllm_config = create_vllm_config(max_model_len=max_model_len)
-    max_num_blocks = kv_cache_spec.max_num_blocks_per_req(vllm_config, max_model_len)
+    group = new_kv_cache_group(["layer"], kv_cache_spec)
+    max_num_blocks = group.max_num_blocks_per_req(vllm_config, max_model_len)
     block_table_width = get_block_table_width(max_num_blocks, kv_cache_spec.block_size)
     builder = DeepseekV32IndexerMetadataBuilder(
         kv_cache_spec=kv_cache_spec,
@@ -754,7 +758,8 @@ def test_indexer_expanded_block_table_sized_by_decode_tokens():
     vllm_config = create_vllm_config(
         max_model_len=1024, max_num_seqs=8, max_num_batched_tokens=8192
     )
-    max_num_blocks = kv_cache_spec.max_num_blocks_per_req(vllm_config, 1024)
+    group = new_kv_cache_group(["layer"], kv_cache_spec)
+    max_num_blocks = group.max_num_blocks_per_req(vllm_config, 1024)
     block_table_width = get_block_table_width(max_num_blocks, kv_cache_spec.block_size)
     builder = DeepseekV32IndexerMetadataBuilder(
         kv_cache_spec=kv_cache_spec,
