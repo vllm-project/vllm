@@ -187,10 +187,14 @@ class SpanReader {
       for (int t = 0; t < threads && rc == 0; t++) rc = rings_[t].init(depth);
       if (rc != 0) rings_.clear();  // fall back to pread
     }
+    // Allocate before starting the pool: on failure the caller deletes the
+    // reader, which must not happen while detached workers wait on it.
+    const int rc = grow_stage(static_cast<size_t>(64) << 20);
+    if (rc != 0) return rc;
     for (int t = 1; t < threads; t++) {
       std::thread([this, t] { worker(t); }).detach();
     }
-    return grow_stage(static_cast<size_t>(64) << 20);
+    return 0;
   }
 
   bool uses_io_uring() const { return !rings_.empty(); }

@@ -4,6 +4,8 @@
 offload: every span must match the file's bytes, whatever its alignment."""
 
 import os
+import subprocess
+import sys
 
 import numpy as np
 import pytest
@@ -100,3 +102,22 @@ def test_bad_arguments_raise(backend, files, fds, offsets, length, out_rows):
 def test_backend_is_reported(backend):
     assert backend in ("io_uring", "pread")
     assert fs_io_C.read_spans_init() == backend
+
+
+def test_init_failure_raises_instead_of_hanging():
+    # The reader is a process-wide singleton, so initialize it in a new process
+    # whose address space cannot hold the 64 MiB staging buffer.
+    code = """
+import os, resource
+from vllm import fs_io_C
+vm = int(open("/proc/self/statm").read().split()[0]) * os.sysconf("SC_PAGE_SIZE")
+resource.setrlimit(resource.RLIMIT_AS, (vm + (32 << 20), resource.RLIM_INFINITY))
+try:
+    fs_io_C.read_spans_init(4, 8)
+except OSError:
+    print("raised")
+"""
+    result = subprocess.run(
+        [sys.executable, "-c", code], capture_output=True, text=True, timeout=120
+    )
+    assert result.stdout.strip() == "raised", result.stderr

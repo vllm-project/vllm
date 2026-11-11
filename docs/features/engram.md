@@ -111,19 +111,37 @@ vllm serve <qwen4exp-checkpoint> --engram-config '{"disk_offload": true}'
 
 It applies only to Qwen4Exp on CUDA and takes precedence over `cpu_offload`.
 
-Rows are read with `preadv` and copied to fixed device buffers before the
-forward, so CUDA graphs replay unchanged. They stay in the checkpoint format
-(BF16, FP8 or NVFP4) and are decoded on the GPU, so an unquantized table must
-match `--dtype`. Rows that were read recently are served from the OS page
-cache, which is shared by co-located ranks, not counted in the worker's RSS,
-and reclaimed by the kernel under memory pressure.
+Each step's rows are copied to fixed device buffers before the forward, so
+CUDA graphs replay unchanged. They stay in the checkpoint format (BF16, FP8 or
+NVFP4) and are decoded on the GPU, so an unquantized table must match
+`--dtype`.
+
+`disk_offload_reader` selects how the rows are read:
+
+- `auto` (default): `io_uring`, else `pread`, else `buffered` when the shard
+  files cannot be opened with `O_DIRECT` (for example on tmpfs or overlayfs).
+- `io_uring`: batched `O_DIRECT` reads on `disk_offload_threads` threads, each
+  keeping `disk_offload_queue_depth` reads in flight. Containers need a seccomp
+  profile that allows `io_uring_setup`, `io_uring_enter` and
+  `io_uring_register`; Docker's default profile does not, and `auto` then uses
+  `pread`.
+- `pread`: the same batched `O_DIRECT` reads with `pread` on the reader threads.
+- `buffered`: one `preadv` per row through the OS page cache. Recently read
+  rows are served from the page cache, which is shared by co-located ranks, not
+  counted in the worker's RSS, and reclaimed by the kernel under memory
+  pressure.
+
+An explicit `io_uring` or `pread` fails at load time when it is unavailable.
+The `O_DIRECT` readers bypass the page cache, so they do not fill host memory
+with the table, and every step reads its rows from the disk.
 
 Costs and limits:
 
 - The read needs the step's token ids, so it waits for the previous step on
   the GPU, and every TP rank reads all of its rows.
-- A row that is not in the page cache is read from disk. For a fast first
-  request, read the PLE shard files once after the server has started.
+- With `buffered`, a row that is not in the page cache is read from disk. For
+  a fast first request, read the PLE shard files once after the server has
+  started.
 - The checkpoint files must not change while the server runs. Truncation stops
   the engine with an error naming the file; deleting or renaming is safe.
 - Weight reload and elastic EP are unsupported. Loading fails when tensors are
