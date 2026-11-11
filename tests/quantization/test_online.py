@@ -3078,7 +3078,7 @@ class _OotOnlineConfig(OnlineQuantizationConfig):
 
 
 def _register_online_config(name: str):
-    """Register ``_OotOnlineConfig`` for ``name`` and return a restore hook."""
+    """Register `_OotOnlineConfig` for `name` and return a restore hook."""
     previous = _CUSTOMIZED_METHOD_TO_QUANT_CONFIG.get(name)
     added_to_methods = name not in QUANTIZATION_METHODS
     supported = current_platform.supported_quantization
@@ -3114,7 +3114,7 @@ def _register_online_config(name: str):
 def test_registered_online_config_is_instantiated(
     tmp_path, quantization, quant_args
 ) -> None:
-    """``get_quant_config`` builds the class registered for the method name."""
+    """`get_quant_config` builds the class registered for the method name."""
     restore = _register_online_config(quantization)
     try:
         _write_minimal_llama_config(tmp_path)
