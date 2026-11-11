@@ -22,15 +22,25 @@ pub struct BaseCacheStats {
 }
 
 /// Cache-hit tokens per source tier. Python sends a sparse
-/// `dict[CacheHitSource, int]`, so absent tiers default to zero.
+/// `dict[CacheHitSource, int]`, so absent tiers default to zero, and only
+/// non-zero tiers are serialized.
 #[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(default)]
 pub struct CachedTokensBySource {
+    #[serde(skip_serializing_if = "is_zero")]
     pub device: u64,
+    #[serde(skip_serializing_if = "is_zero")]
     pub host: u64,
+    #[serde(skip_serializing_if = "is_zero")]
     pub p2p: u64,
+    #[serde(skip_serializing_if = "is_zero")]
     pub disk: u64,
+    #[serde(skip_serializing_if = "is_zero")]
     pub external_unspecified: u64,
+}
+
+fn is_zero(n: &u64) -> bool {
+    *n == 0
 }
 
 impl CachedTokensBySource {
@@ -513,6 +523,11 @@ mod tests {
         let stats: PrefixCacheStats = rmp_serde::from_slice(&wire).unwrap();
         assert_eq!(stats.hits_by_source.counts(), [0, 8, 4, 0, 0]);
         assert_eq!(CachedTokensBySource::SOURCES[1], "host");
+
+        // Serialized as sparsely as Python sends it.
+        let encoded: serde_json::Value =
+            rmp_serde::from_slice(&rmp_serde::to_vec_named(&stats).unwrap()).unwrap();
+        assert_eq!(encoded, payload);
     }
 
     #[test]

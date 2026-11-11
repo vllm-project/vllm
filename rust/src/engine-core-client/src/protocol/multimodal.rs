@@ -140,6 +140,24 @@ impl MmFeatureSpec {
     }
 }
 
+impl MmFeatureSpec {
+    /// Resolve tensor buffers sent in auxiliary frames, the inverse of
+    /// [`Self::extract_aux_frames`].
+    pub(crate) fn resolve_aux_frames(&mut self, frames: &[Bytes]) -> Result<(), String> {
+        if let Some(data) = &mut self.data {
+            for elem in data.values_mut() {
+                if let Some(value) = &mut elem.data {
+                    value.resolve_aux_frames(frames)?;
+                }
+            }
+        }
+        if let Some(is_embed) = &mut self.mm_position.is_embed {
+            is_embed.resolve_aux_frame(frames)?;
+        }
+        Ok(())
+    }
+}
+
 impl MmFieldElem {
     /// Extract large tensor buffers from this field element.
     fn extract_aux_frames(&mut self, aux_frames: &mut Vec<Bytes>, threshold: usize) {
@@ -150,6 +168,15 @@ impl MmFieldElem {
 }
 
 impl MmKwargValue {
+    /// Recursively resolve tensor buffers sent in auxiliary frames.
+    fn resolve_aux_frames(&mut self, frames: &[Bytes]) -> Result<(), String> {
+        match self {
+            Self::Tensor(tensor) => tensor.resolve_aux_frame(frames),
+            Self::List(values) => values.iter_mut().try_for_each(|v| v.resolve_aux_frames(frames)),
+            Self::Int(_) | Self::Float(_) => Ok(()),
+        }
+    }
+
     /// Recursively extract large tensor buffers from this nested value.
     fn extract_aux_frames(&mut self, aux_frames: &mut Vec<Bytes>, threshold: usize) {
         match self {

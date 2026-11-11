@@ -17,17 +17,12 @@ use crate::mock_engine::{
     connect_to_hybrid_frontends, default_ready_response,
 };
 use crate::protocol::handshake::{EngineCoreReadyResponse, HandshakeInitMessage};
-use crate::protocol::request::EngineCoreRequest;
+use crate::protocol::request::{EngineCoreRequest, decode_engine_core_request};
 
 /// Decode the `[request type, payload, aux frames...]` of an add request,
-/// resolving its prompt token ids if they were sent in an auxiliary frame.
+/// resolving the arrays sent in auxiliary frames.
 pub fn decode_add_request(frames: &[Bytes]) -> EngineCoreRequest {
-    let mut request: EngineCoreRequest =
-        rmp_serde::from_slice(&frames[1]).expect("decode add request");
-    if let Some(ids) = &mut request.prompt_token_ids {
-        ids.resolve_aux_frame(&frames[1..]).expect("resolve prompt token ids");
-    }
-    request
+    decode_engine_core_request(&frames[1..]).expect("decode add request")
 }
 
 /// The prompt token ids of a request, which must be inline or resolved by

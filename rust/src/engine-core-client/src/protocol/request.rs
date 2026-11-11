@@ -13,7 +13,7 @@ use crate::protocol::kv_hints::KvHintsEnvelope;
 use crate::protocol::multimodal::MmFeatures;
 use crate::protocol::sampling::EngineCoreSamplingParams;
 use crate::protocol::tensor::WireNdArray;
-use crate::protocol::{OpaqueValue, lora};
+use crate::protocol::{OpaqueValue, decode_msgpack, lora};
 use crate::{Error, Result};
 
 /// Request types are encoded as single-byte protocol constants so they can be
@@ -179,6 +179,42 @@ impl EngineCoreRequest {
         }
         aux_frames
     }
+
+    /// Resolve the arrays sent in auxiliary frames, the inverse of
+    /// [`Self::extract_aux_frames`].
+    fn resolve_in_place(&mut self, frames: &[Bytes]) -> Result<()> {
+        let resolve = |field: &str, result: std::result::Result<(), String>| {
+            result.map_err(|message| Error::ExtValueDecode {
+                message: format!("{field}: {message}"),
+            })
+        };
+        if let Some(ids) = &mut self.prompt_token_ids {
+            resolve("prompt_token_ids", ids.resolve_aux_frame(frames))?;
+        }
+        if let Some(features) = &mut self.mm_features {
+            for feature in features {
+                resolve("mm_features", feature.resolve_aux_frames(frames))?;
+            }
+        }
+        if let Some(params) = &mut self.sampling_params
+            && let Some(ids) = &mut params.prompt_logprob_token_ids
+        {
+            resolve("prompt_logprob_token_ids", ids.resolve_aux_frame(frames))?;
+        }
+        Ok(())
+    }
+}
+
+/// Decode an add request from its payload frame and auxiliary frames
+/// (`[payload, aux...]`, without the request-type frame), resolving the arrays
+/// sent in auxiliary frames.
+pub fn decode_engine_core_request(frames: &[Bytes]) -> Result<EngineCoreRequest> {
+    let payload = frames.first().ok_or_else(|| Error::ExtValueDecode {
+        message: "missing add request payload frame".to_string(),
+    })?;
+    let mut request: EngineCoreRequest = decode_msgpack(payload)?;
+    request.resolve_in_place(frames)?;
+    Ok(request)
 }
 
 #[cfg(test)]
@@ -349,6 +385,7 @@ mod tests {
             }]),
             ..EngineCoreRequest::default()
         };
+        let original = request.clone();
 
         let aux_frames = request.extract_aux_frames(AUX_FRAME_THRESHOLD);
 
@@ -376,6 +413,14 @@ mod tests {
             WireArrayData::AuxIndex(2)
         );
         assert!(request.extract_aux_frames(AUX_FRAME_THRESHOLD).is_empty());
+
+        // The engine resolves them back into the original request.
+        let frames = [
+            Bytes::from(encode_msgpack(&request).unwrap()),
+            aux_frames[0].clone(),
+            aux_frames[1].clone(),
+        ];
+        assert_eq!(decode_engine_core_request(&frames).unwrap(), original);
     }
 
     #[test]
