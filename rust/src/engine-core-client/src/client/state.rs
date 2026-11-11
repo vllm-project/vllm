@@ -267,29 +267,6 @@ impl RequestRegistry {
     }
 
     /// Route prefill progress to the streams that own it; best effort.
-    pub fn send_prefill_progress(
-        &mut self,
-        engine_index: u32,
-        timestamp: f64,
-        weight_version: Option<Arc<str>>,
-        updates: Vec<PrefillProgress>,
-    ) {
-        for progress in updates {
-            let Some(tracked) = self.requests.get_mut(progress.request_id.as_str()) else {
-                continue;
-            };
-            tracked.sender.send(EngineCoreStreamOutput {
-                engine_index,
-                timestamp,
-                weight_version: weight_version.clone(),
-                output: EngineCoreOutput {
-                    request_id: progress.request_id.clone(),
-                    prefill_progress: Some(Box::new(progress)),
-                    ..Default::default()
-                },
-            });
-        }
-    }
 
     /// Advance the request's LoRA scheduling phase from the engine-core events
     /// attached to one output, mirroring the Python frontend's

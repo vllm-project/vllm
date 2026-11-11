@@ -204,20 +204,6 @@ impl ClientInner {
     }
 
     /// Route one batch of replaceable prefill progress to the request streams.
-    pub fn send_prefill_progress(
-        &self,
-        engine_index: u32,
-        timestamp: f64,
-        weight_version: Option<Arc<str>>,
-        updates: Vec<PrefillProgress>,
-    ) {
-        self.request_reg.lock().send_prefill_progress(
-            engine_index,
-            timestamp,
-            weight_version,
-            updates,
-        );
-    }
 
     /// Remove a batch of requests that have finished or aborted, returning
     /// their stream senders.

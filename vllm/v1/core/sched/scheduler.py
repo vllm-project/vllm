@@ -2282,11 +2282,8 @@ class Scheduler(SchedulerInterface):
             if state is None:
                 return
             del self._prefill_progress[request.request_id]
-            self._queue_prefill_progress(
-                pending,
-                state.client_index,
-                request.request_id,
-                remaining_prefill_tokens=0,
+            pending.setdefault(state.client_index, []).append(
+                PrefillProgress(request_id=request.request_id, remaining_prefill_tokens=0)
             )
             return
         if state is None:
@@ -2295,25 +2292,8 @@ class Scheduler(SchedulerInterface):
         if state.last_remaining is not None and remaining > state.last_remaining * 3 // 4:
             return
         state.last_remaining = remaining
-        self._queue_prefill_progress(
-            pending,
-            state.client_index,
-            request.request_id,
-            remaining_prefill_tokens=remaining,
-        )
-
-    @staticmethod
-    def _queue_prefill_progress(
-        pending: dict[int, list[PrefillProgress]],
-        client_index: int,
-        request_id: str,
-        remaining_prefill_tokens: int,
-    ) -> None:
-        pending.setdefault(client_index, []).append(
-            PrefillProgress(
-                request_id=request_id,
-                remaining_prefill_tokens=remaining_prefill_tokens,
-            )
+        pending.setdefault(state.client_index, []).append(
+            PrefillProgress(request_id=request.request_id, remaining_prefill_tokens=remaining)
         )
 
     def update_from_output(
@@ -2645,12 +2625,8 @@ class Scheduler(SchedulerInterface):
                 if request_id in running_req_ids:
                     continue
                 del self._prefill_progress[request_id]
-                self._queue_prefill_progress(
-                    prefill_progress,
-                    state.client_index,
-                    request_id,
-                    remaining_prefill_tokens=0,
-                    sequence=state.sequence + 1,
+                prefill_progress.setdefault(state.client_index, []).append(
+                    PrefillProgress(request_id=request_id, remaining_prefill_tokens=0)
                 )
 
         request_errors = self.grammar_compile_error_reqs
