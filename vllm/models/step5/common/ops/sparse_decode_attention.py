@@ -272,13 +272,13 @@ def sparse_decode_attention(
 ) -> None:
     """Attention for (token, KV group) rows over their selected regions.
 
-    With ``gate`` ([tokens, G * heads]) the headwise sigmoid gate is applied
+    With `gate` ([tokens, G * heads]) the headwise sigmoid gate is applied
     to the output, as the separate gate kernel would.
 
-    ``query``/``output``: [rows, heads, 192] with rows = tokens * G;
-    ``cache``: [pages, G, block, 384] (K then V); ``regions``: [rows, R]
-    region ids (-1 unused); ``positions``/``active``: per row. Rows of one
-    request are ``G * query_len`` consecutive rows sharing a table row.
+    `query`/`output`: [rows, heads, 192] with rows = tokens * G;
+    `cache`: [pages, G, block, 384] (K then V); `regions`: [rows, R]
+    region ids (-1 unused); `positions`/`active`: per row. Rows of one
+    request are `G * query_len` consecutive rows sharing a table row.
     """
     rows, heads, dim = query.shape
     groups = cache.shape[1]

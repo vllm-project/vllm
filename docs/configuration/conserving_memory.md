@@ -78,8 +78,10 @@ llm = LLM(model="meta-llama/Llama-3.1-8B-Instruct", enforce_eager=True)
 ## Sparse indexer decode logits
 
 On SM100, the sparse indexer computes decode logits in chunks of query rows whose
-BF16 logits fit `VLLM_SPARSE_INDEXER_MAX_DECODE_LOGITS_MB` (default `2048`; `0`
-disables chunking). Batches that fit are not split. A larger budget launches fewer
+logits fit `VLLM_SPARSE_INDEXER_MAX_DECODE_LOGITS_MB` (default `2048`; `0`
+disables chunking). The logits are BF16 for DeepSeek models and FP32 for the
+others; `--attention-config.indexer_logits_dtype bfloat16` halves FP32 logits.
+Batches that fit are not split. A larger budget launches fewer
 chunks in eager and piecewise steps; a smaller one reserves less memory.
 
 ## Adjust cache size
@@ -164,6 +166,7 @@ For backward compatibility, passing an integer works as before and is interprete
 !!! note
     - The size hints affect memory profiling only. They shape the dummy inputs used to compute reserved activation sizes. They do not change how inputs are actually processed at inference time.
     - If a hint exceeds what the model can accept, vLLM clamps it to the model's effective maximum and may log a warning.
+    - For Qwen2-VL-family models, increasing `max_model_len` can increase the profiled video size and reduce the memory available for the KV cache. Profiling remains subject to the processor's pixel limits and the frame cap. Set `video` hints to profile the videos you expect instead.
 
 !!! warning
     These size hints currently only affect activation memory profiling. Encoder cache size is determined by the actual inputs at runtime and is not limited by these hints.

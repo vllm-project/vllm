@@ -85,7 +85,7 @@ def _run(rank: int, port: int, query_len: int, seq_lens_list: list[int]) -> None
 
     full = BatchDecodeIndexerQ8KV4Wrapper(num_heads=H)
     full.plan(block_table, seq_lens)
-    for step in range(3):
+    for _ in range(3):
         for layer in layers:
             q = (torch.randn(rows, H, 128, device="cuda", generator=gen) * 0.5).to(
                 torch.float8_e4m3fn

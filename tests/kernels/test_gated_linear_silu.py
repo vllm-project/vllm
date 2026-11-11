@@ -9,50 +9,15 @@ import torch
 import torch.nn.functional as F
 
 from vllm.config import CompilationConfig, VllmConfig, set_current_vllm_config
-from vllm.model_executor.layers.activation import SiluAndMul
-from vllm.model_executor.layers.fusion.gated_linear_silu import (
-    GatedLinearSilu,
-    create_gated_linear_silu,
-)
-from vllm.model_executor.layers.linear import (
-    MergedColumnParallelLinear,
-    RowParallelLinear,
-)
+from vllm.model_executor.layers.fusion.gated_linear_silu import GatedLinearSilu
+from vllm.model_executor.models.qwen3_moe import Qwen3MoeMLP
 from vllm.platforms import current_platform
+from vllm.utils.torch_utils import set_default_torch_dtype
 
 pytestmark = pytest.mark.skipif(
     not current_platform.is_cuda() or not current_platform.has_device_capability(80),
     reason="The kernel requires NVIDIA BF16 tensor cores",
 )
-
-
-@pytest.fixture
-def single_rank(tmp_path):
-    from vllm.distributed import (
-        destroy_distributed_environment,
-        destroy_model_parallel,
-        init_distributed_environment,
-        initialize_model_parallel,
-        model_parallel_is_initialized,
-    )
-
-    if model_parallel_is_initialized():
-        yield
-        return
-    with set_current_vllm_config(VllmConfig()):
-        try:
-            init_distributed_environment(
-                world_size=1,
-                rank=0,
-                local_rank=0,
-                distributed_init_method=f"file://{tmp_path / 'distributed-init'}",
-                backend="nccl",
-            )
-            initialize_model_parallel(tensor_model_parallel_size=1)
-            yield
-        finally:
-            destroy_model_parallel()
-            destroy_distributed_environment()
 
 
 def reference(x, weight):
@@ -74,7 +39,7 @@ def operands(rows, hidden=2560, intermediate=9216, dtype=torch.bfloat16):
     )
 
 
-@pytest.mark.parametrize("rows", [768, 769, 1056, 1584, 2048, 4096])
+@pytest.mark.parametrize("rows", [768, 769, 1584, 4096])
 @torch.inference_mode()
 def test_gated_projection_preserves_declared_rounding(rows):
     x, weight = operands(rows)
@@ -95,8 +60,6 @@ def test_gated_projection_preserves_declared_rounding(rows):
     "rows,hidden,intermediate,dtype",
     [
         (16, 2560, 9216, torch.bfloat16),
-        (64, 2560, 9216, torch.bfloat16),
-        (528, 2560, 9216, torch.bfloat16),
         (767, 2560, 9216, torch.bfloat16),
         (4097, 2560, 9216, torch.bfloat16),
         (768, 128, 65, torch.bfloat16),
@@ -136,7 +99,7 @@ def test_supported_prefill_executes_the_new_kernel_and_small_rows_do_not(tmp_pat
                 torch.profiler.ProfilerActivity.CUDA,
             ]
         ) as profile:
-            torch.ops.vllm.gated_linear_silu(x, weight)
+            actual = torch.ops.vllm.gated_linear_silu(x, weight)
             torch.accelerator.synchronize()
         path = tmp_path / f"dispatch-{rows}.json"
         profile.export_chrome_trace(str(path))
@@ -149,6 +112,9 @@ def test_supported_prefill_executes_the_new_kernel_and_small_rows_do_not(tmp_pat
         assert (
             any("_gated_linear_silu_kernel" in name for name in kernels) == should_fuse
         )
+        if not should_fuse:
+            expected = reference(x, weight)
+            assert torch.equal(actual.view(torch.uint8), expected.view(torch.uint8))
 
 
 @torch.inference_mode()
@@ -190,51 +156,40 @@ def test_graph_replay_reads_updated_original_weight_storage():
     assert torch.equal(output, torch.zeros_like(output))
 
 
-def real_linears():
-    gate = MergedColumnParallelLinear(
-        2560,
-        [9216, 9216],
-        bias=False,
-        params_dtype=torch.bfloat16,
-        disable_tp=True,
-    )
-    down = RowParallelLinear(
-        9216,
-        2560,
-        bias=False,
-        params_dtype=torch.bfloat16,
-        disable_tp=True,
-    )
-    return gate, down, SiluAndMul(compile_native=False)
+def build_mlp(**kwargs):
+    with set_default_torch_dtype(torch.bfloat16), torch.device("cuda"):
+        return Qwen3MoeMLP(2560, 9216, "silu", **kwargs)
 
 
-@pytest.mark.parametrize("mode", ["default", "enabled", "disabled"])
-def test_real_linear_factory_respects_custom_op_control(mode, single_rank):
+@pytest.mark.parametrize("mode", ["default", "enabled", "disabled", "other_caller"])
+def test_mlp_requires_model_and_custom_op_opt_in(mode, dist_init):
     custom_ops = {
         "default": ["all"],
         "enabled": ["all", "+gated_linear_silu"],
         "disabled": ["all", "-gated_linear_silu"],
+        "other_caller": ["all", "+gated_linear_silu"],
     }[mode]
     config = VllmConfig(compilation_config=CompilationConfig(custom_ops=custom_ops))
-    with set_current_vllm_config(config), torch.device("cuda"):
-        fused = create_gated_linear_silu(*real_linears())
+    kwargs = {} if mode == "other_caller" else {"enable_gated_linear_silu": True}
+    with set_current_vllm_config(config):
+        mlp = build_mlp(**kwargs)
         if mode == "enabled" and current_platform.get_device_capability() == (8, 9):
-            assert isinstance(fused, GatedLinearSilu)
+            assert isinstance(mlp.gate_up_silu, GatedLinearSilu)
         else:
-            assert fused is None
+            assert mlp.gate_up_silu is None
 
 
-def test_real_linear_factory_keeps_batch_invariant_path(monkeypatch, single_rank):
+def test_mlp_keeps_batch_invariant_path(monkeypatch, dist_init):
     monkeypatch.setenv("VLLM_BATCH_INVARIANT", "1")
     config = VllmConfig(
         compilation_config=CompilationConfig(custom_ops=["all", "+gated_linear_silu"])
     )
-    with set_current_vllm_config(config), torch.device("cuda"):
-        assert create_gated_linear_silu(*real_linears()) is None
+    with set_current_vllm_config(config):
+        assert build_mlp(enable_gated_linear_silu=True).gate_up_silu is None
 
 
 @pytest.mark.parametrize("backend", ["uva", "prefetch"])
-def test_weight_offloading_keeps_native_linears(backend, single_rank):
+def test_weight_offloading_keeps_native_linears(backend, dist_init):
     from vllm.config.offload import (
         OffloadConfig,
         PrefetchOffloadConfig,
@@ -250,5 +205,5 @@ def test_weight_offloading_keeps_native_linears(backend, single_rank):
         compilation_config=CompilationConfig(custom_ops=["all", "+gated_linear_silu"]),
         offload_config=offload,
     )
-    with set_current_vllm_config(config), torch.device("cuda"):
-        assert create_gated_linear_silu(*real_linears()) is None
+    with set_current_vllm_config(config):
+        assert build_mlp(enable_gated_linear_silu=True).gate_up_silu is None

@@ -1,6 +1,6 @@
 # SM89 BF16 gated projection
 
-The dense Qwen MLP has an opt-in gate/up projection and SiLU-and-multiply fusion
+The dense Qwen3.5 MLP has an opt-in gate/up projection and SiLU-and-multiply fusion
 on SM89. Measurements used RTX 4090; other SM89 devices need their own performance
 qualification. The measured path targets BF16, hidden size 2560, intermediate size 9216,
 and 768–4096 input tokens. Other input sizes use the existing linear and
