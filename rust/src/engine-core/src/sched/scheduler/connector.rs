@@ -494,6 +494,7 @@ impl Scheduler {
     ) -> (IndexSet<String>, usize, PyIntSet) {
         let mut affected_req_ids = IndexSet::new();
         let mut total_affected_tokens = 0;
+        // TODO(rust-engine-core): a spec-defined order (see `py_int_set`).
         let mut blocks_to_evict = PyIntSet::default();
         // If a block is invalid and shared by multiple requests in the batch,
         // these requests must be rescheduled, but only the first will recompute

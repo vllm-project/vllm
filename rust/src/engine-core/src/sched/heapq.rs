@@ -6,6 +6,13 @@
 //! for any `<` relation, including ones whose keys changed while queued.
 //!
 //! `lt(a, b)` is `a < b`, the only comparison `heapq` makes.
+//!
+//! TODO(rust-engine-core): with keys fixed while queued, ties broken by the
+//! insertion sequence and the raw list out of the parity checks, this is
+//! `std::collections::BinaryHeap` over `(priority, arrival_time, seq)`. The
+//! keys are not fixed yet: a streaming-session update sets `arrival_time` of a
+//! queued request (`_update_request_as_session`), and Python's pop order then
+//! depends on heapq's algorithm. Requeue the session on both sides first.
 
 /// Follow the path to the root, moving parents down until finding a place
 /// `heap[pos]` fits.

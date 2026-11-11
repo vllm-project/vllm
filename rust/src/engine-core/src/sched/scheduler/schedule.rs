@@ -1998,6 +1998,7 @@ impl Scheduler {
             // request's: covered payloads are dropped, unless M-RoPE keeps
             // their CPU-side metadata.
             let num_computed_tokens = request.num_computed_tokens;
+            // TODO(rust-engine-core): a spec-defined order (see `py_int_set`).
             let mut pending = PyIntSet::default();
             for (i, feature) in request.mm_features.iter().enumerate() {
                 let covered = num_computed_tokens > 0

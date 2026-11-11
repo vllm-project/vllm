@@ -3,6 +3,10 @@
 
 //! Byte-exact reproduction of CPython's `pickle.dumps(obj, protocol=5)` (the C
 //! `_pickle` implementation) for [`Value`]s.
+//!
+//! TODO(rust-engine-core): a development-time regression oracle only; the engine core with
+//! native frontend I/O requires a `*_cbor` algorithm. Remove before the port
+//! is split into PRs: pickle bytes are a CPython implementation detail.
 
 use rustc_hash::FxHashMap;
 

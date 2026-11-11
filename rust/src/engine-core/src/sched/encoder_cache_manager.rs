@@ -144,6 +144,7 @@ pub struct EncoderCacheManager {
     ///
     /// A [`PyIntSet`] so [`EncoderCacheManager::get_cached_input_ids`]
     /// yields Python's set iteration order.
+    // TODO(rust-engine-core): a spec-defined order (see `py_int_set`).
     request_cached_ids: FxHashMap<String, PyIntSet>,
     /// request_id => mm_hash => number of that request's cached input_ids
     /// with the mm_hash

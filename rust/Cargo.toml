@@ -78,9 +78,9 @@ paste = "1.0.15"
 prometheus-client = "0.24.0"
 prometheus-client-derive-encode = "0.5.0"
 prost = "0.14.3"
-pyo3 = { version = "0.28.3", features = ["extension-module", "abi3-py310"] }
 prost-types = "0.14.3"
 protox = "0.9.1"
+pyo3 = { version = "0.28.3", features = ["extension-module", "abi3-py311"] }
 rand = "0.9.3"
 rand_distr = "0.5.1"
 rayon = "1.11.0"

@@ -58,6 +58,9 @@ fn extend_encoded(out: &mut Vec<u8>, tokens: &[i32], encode: impl Fn(i32) -> ([u
 }
 
 /// A prefix-caching hash algorithm (`--prefix-caching-hash-algo`).
+// TODO(rust-engine-core): drop the pickle algorithms (`Sha256`, `Xxhash`) with
+// `pickle`: the native I/O path already requires a `*_cbor` one, and the
+// binding falls back to the Python hasher for the rest.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum HashAlgo {
     /// SHA-256 of the pickled key (`vllm.utils.hashing.sha256`).

@@ -133,6 +133,7 @@ impl ErrorRequestIds {
 /// `set` of their ids, whose order follows the string hashes and how the set
 /// was built. The order is observable (which freed blocks are reused first,
 /// the order of the outputs), so a binding layer reproduces it.
+// TODO(rust-engine-core): drop with Python's `set[str]` order of error requests.
 pub type IdSetOrder = Box<dyn Fn(&ErrorRequestIds) -> IndexSet<String> + Send>;
 
 /// `time.monotonic()`.
@@ -380,6 +381,7 @@ pub struct Scheduler {
     encoder_cache_mismatch_reqs: IndexSet<String>,
 
     connector_prefix_cache_stats: Option<ConnectorPrefixCacheStats>,
+    // TODO(rust-engine-core): a spec-defined order (see `py_int_set`).
     pending_encoder_input_ids: FxHashMap<String, PyIntSet>,
     /// Scheduler iteration counter. Drives the PP+async decode-throttle
     /// cadence (`next_decode_eligible_step`).

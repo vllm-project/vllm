@@ -84,6 +84,8 @@ class EncoderCacheManager:
         # mm_hash of mm_data => number of cached encoder embeddings
         self.num_embeds_by_hash: dict[str, int] = {}
         # request_id => set of input_ids cached for that request
+        # TODO(rust-engine-core): its iteration order decides which entries become
+        # evictable first; make it spec-defined, not a `set[int]`'s.
         self.request_cached_ids: dict[str, set[int]] = {}
         # request_id => mm_hash => number of that request's cached input_ids
         # with the mm_hash

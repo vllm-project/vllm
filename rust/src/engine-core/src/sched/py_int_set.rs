@@ -12,6 +12,10 @@
 //! `Objects/setobject.c`: open addressing with linear probing then
 //! perturbation, dummy (deleted) slots reused by the next insertion probing
 //! past them, and resizing once three fifths of the table is filled.
+//!
+//! TODO(rust-engine-core): a development-time regression oracle only. Remove once no scheduler
+//! decision depends on `set` iteration order, which is a CPython
+//! implementation detail.
 
 const MINSIZE: usize = 8;
 const LINEAR_PROBES: usize = 9;

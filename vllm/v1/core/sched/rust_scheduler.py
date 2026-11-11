@@ -198,6 +198,8 @@ def _core_config(
     )
 
 
+# TODO(rust-engine-core): drop once `Scheduler.update_from_output` finishes
+# error requests in a spec-defined order.
 def _error_request_order(
     grammar: list[str],
     encoder_cache_mismatch: list[str],
