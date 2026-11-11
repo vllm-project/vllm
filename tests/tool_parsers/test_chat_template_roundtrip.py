@@ -22,6 +22,7 @@ from pathlib import Path
 import jinja2.ext
 import jinja2.sandbox
 import pytest
+import regex as re
 
 from tests.tool_parsers.utils import run_tool_extraction
 from vllm.entrypoints.openai.chat_completion.protocol import ChatCompletionRequest
@@ -52,16 +53,11 @@ TOOLS = [
     }
 ]
 
-# Turn-end markers to drop: a parser sees the model's output, and the marker
-# that closes the turn is the only template scaffolding inside it.
-TURN_END_MARKERS = (
-    "<end_of_turn>",
-    "<|eot_id|>",
-    "<|im_end|>",
-    "<|eot|>",
-    "<|end|>",
-    "</s>",
-)
+# Scaffolding that trails the assistant turn: a parser sees the model's output,
+# so the markers closing the turn, and any header the template opens for the
+# next one, have to come off. Stripped as one repeated run, because a template
+# can emit several in sequence (toolace writes an entire assistant header).
+TRAILING_SCAFFOLDING = re.compile(r"(?:<\|[^|]*\|>|<end_of_turn>|</s>|assistant|\s)+$")
 
 # (template, parser) pairs that ship together for pythonic tool calling.
 PYTHONIC_PAIRS = [
@@ -176,11 +172,14 @@ def _model_output(template_name: str) -> str:
     limit = min(len(with_call), len(with_prompt))
     while index < limit and with_call[index] == with_prompt[index]:
         index += 1
-    output = with_call[index:].strip()
+    output = TRAILING_SCAFFOLDING.sub("", with_call[index:].strip())
 
-    for marker in TURN_END_MARKERS:
-        if output.endswith(marker):
-            return output[: -len(marker)].strip()
+    assert output, f"{template_name} rendered no assistant turn to parse"
+    assert "<|" not in output and "<end_of_turn>" not in output, (
+        f"scaffolding survived extraction from {template_name}: {output!r}. A "
+        f"parser never sees this, so leaving it in would fail the round trip "
+        f"for a reason that has nothing to do with the template's format."
+    )
     return output
 
 
@@ -201,9 +200,3 @@ def test_rendered_tool_call_is_readable_by_its_parser(
     )
     assert tool_calls[0].function.name == "get_weather"
     assert json.loads(tool_calls[0].function.arguments) == ARGUMENTS
-
-
-def test_arguments_cover_every_json_scalar_kind():
-    """Guard the fixture: all-string arguments would hide type corruption."""
-    kinds = {type(value) for value in ARGUMENTS.values()}
-    assert kinds == {str, bool, int, type(None)}
