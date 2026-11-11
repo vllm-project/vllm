@@ -12,15 +12,6 @@ import torch.nn.functional as F
 from torch import Tensor, nn
 
 
-class BlockBase(nn.Module):
-    """Block abstract module."""
-
-    def __init__(self, input_size: int, output_size: int) -> None:
-        super().__init__()
-        self.input_size = input_size
-        self.output_size = output_size
-
-
 def get_activation(name: str = "relu") -> torch.nn.Module:
     """Select an activation function by name.
 
@@ -1130,7 +1121,7 @@ class NemoConvSubsampling(torch.nn.Module):
             in_channels = conv_channels
             layers.append(activation)
 
-            for i in range(self._sampling_num - 1):
+            for _ in range(self._sampling_num - 1):
                 if self.is_causal:
                     layers.append(
                         CausalConv2D(
@@ -1181,7 +1172,7 @@ class NemoConvSubsampling(torch.nn.Module):
                 self._right_padding = (self._kernel_size - 1) // 2
                 self._max_cache_len = 0
 
-            for i in range(self._sampling_num):
+            for _ in range(self._sampling_num):
                 if self.is_causal:
                     layers.append(
                         CausalConv2D(
@@ -1574,37 +1565,6 @@ def calc_length_int(
         length_f = (length_f + add_pad) / stride + one
         length_f = math.ceil(length_f) if ceil_mode else math.floor(length_f)
     return int(length_f)
-
-
-####  multihead attention starts here
-class AttModule(nn.Module):
-    """Attention abstraction module."""
-
-    def __init__(self) -> None:
-        super().__init__()
-        self.export_mode = False
-
-    def set_export(self, mode: bool = True) -> None:
-        """Set the export mode."""
-        self.export_mode = mode
-
-    def forward(
-        self,
-        x: Tensor,
-        memory: Tensor | None = None,
-        pos_emb: Tensor | None = None,
-        att_mask: Tensor | None = None,
-    ) -> tuple[Tensor, Tensor, Tensor | None, Tensor | None]:
-        """AttModule forward.
-
-        Args:
-            x: input tensor.
-            memory: memory tensor.
-            pos_emb: positional encoder embedding.
-            att_mask: attention mask tensor.
-
-        """
-        return x, memory, pos_emb, att_mask
 
 
 def masked_softmax(

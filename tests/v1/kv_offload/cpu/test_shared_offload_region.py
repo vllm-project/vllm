@@ -7,6 +7,7 @@ import ctypes
 import errno
 import mmap
 import os
+import tempfile
 import threading
 import time
 import uuid
@@ -227,6 +228,8 @@ def _mp_barrier_construct_and_hold(
         if not replicated or rank == 0:
             t[:, :] = fill_value
         barrier.wait(30)
+        # fd is only cleared by cleanup(), which this holder never calls.
+        assert region.fd is not None
         done_queue.put(
             {
                 "rank": rank,
@@ -423,6 +426,7 @@ def test_create_next_worker_view_multiprocess_slots(iid):
         result = done_queue.get(timeout=30)
         assert result["error"] is None, result["error"]
 
+        assert region.mmap_obj is not None
         raw = memoryview(region.mmap_obj)
         for chunk in range(num_chunks):
             row_start = chunk * num_workers * PAGE_SIZE
@@ -657,6 +661,27 @@ def test_segmented_region_maps_files_back_to_back(iid, monkeypatch):
     """Rows split over three shm files mapped back to back: each worker sees
     the other's writes in every file, and the creator removes every file."""
     monkeypatch.setattr(region_module, "_MIN_SEGMENT_BYTES", PAGE_SIZE)
+    # The reservation must not need a writable temp directory.
+    monkeypatch.setattr(tempfile, "tempdir", "/nonexistent")
+    map_segments = SharedOffloadRegion._map_segments
+
+    def check_reservation(region):
+        base = ctypes.addressof(ctypes.c_char.from_buffer(region.mmap_obj))
+        in_reservation = False
+        with open("/proc/self/smaps") as smaps:
+            for line in smaps:
+                fields = line.split()
+                if "-" in fields[0]:
+                    start, end = (int(value, 16) for value in fields[0].split("-"))
+                    in_reservation = start <= base < end
+                elif in_reservation and fields[0] == "VmFlags:":
+                    assert "ac" not in fields[1:]
+                    break
+            else:
+                pytest.fail("Reservation mapping was absent from smaps")
+        map_segments(region)
+
+    monkeypatch.setattr(SharedOffloadRegion, "_map_segments", check_reservation)
     regions = [
         SharedOffloadRegion(
             engine_id=iid,
@@ -753,6 +778,7 @@ def test_multi_worker_race_exactly_one_creator(iid):
         )
 
         for r in regions:
+            assert r.mmap_obj is not None
             assert not r.mmap_obj.closed
             assert r.total_size_bytes == 4 * num_workers * PAGE_SIZE
     finally:
@@ -767,8 +793,11 @@ def test_multi_worker_race_shared_memory_visible(iid):
     regions, errors = _race_construct(iid, num_workers=num_workers)
     assert not errors
     try:
-        regions[0].mmap_obj[0:1] = b"\xab"
+        writer_mmap = regions[0].mmap_obj
+        assert writer_mmap is not None
+        writer_mmap[0:1] = b"\xab"
         for r in regions[1:]:
+            assert r.mmap_obj is not None
             assert memoryview(r.mmap_obj)[0:1] == b"\xab"
     finally:
         for r in regions:
@@ -844,8 +873,11 @@ def test_cleanup_creator_all_effects(iid):
     """cleanup() on the creator closes mmap, closes fd, and removes the file."""
     r = _make_region(iid)
     path = r.mmap_path
+    # captured before cleanup(), which clears both attributes on the region
     fd = r.fd
     mmap_obj = r.mmap_obj
+    assert fd is not None
+    assert mmap_obj is not None
 
     r.cleanup()
 
@@ -860,8 +892,11 @@ def test_cleanup_non_creator_all_effects(iid):
     r0 = _make_region(iid)  # creator
     r1 = _make_region(iid)  # joiner
     path = r0.mmap_path
+    # captured before cleanup(), which clears both attributes on the region
     fd1 = r1.fd
     mmap_obj1 = r1.mmap_obj
+    assert fd1 is not None
+    assert mmap_obj1 is not None
     try:
         r1.cleanup()
 
@@ -903,7 +938,7 @@ def host_register(monkeypatch):
     """Mock the cross-platform host_register/host_unregister helpers with
     registrations capped at seven pages. The same unregister mock backs both
     pin_mmap_region's rollback path and the region's cleanup() on exit from
-    ``_region``.
+    `_region`.
     """
     register = MagicMock(return_value=True)
     unregister = MagicMock()
@@ -1075,7 +1110,8 @@ def test_cleanup_after_create_next_worker_view_releases_mmap(iid):
     create_next_worker_view returns a view that shares storage with _base; both must be
     released before mmap.close() can succeed."""
     r = _make_region(iid)
-    mmap_obj = r.mmap_obj
+    mmap_obj = r.mmap_obj  # captured before cleanup() clears it
+    assert mmap_obj is not None
 
     t = r.create_next_worker_view(PAGE_SIZE)
     del t
@@ -1262,7 +1298,7 @@ def test_cleanup_keeps_region_mapped_while_buffers_are_exported(iid):
         assert region.mmap_obj[0:1] == b"\x00", "mapping must stay readable"
     finally:
         del export
-        region.mmap_obj.close()
+        region.mmap_obj.close()  # type: ignore[union-attr]
         _cleanup_file(region.mmap_path)
 
 
@@ -1281,6 +1317,7 @@ def test_backing_file_unlinked_after_barrier(iid):
         assert region._creator is False, "nothing left for cleanup() to unlink"
         t = region.create_next_worker_view(PAGE_SIZE)
         t[:, :] = 7
+        assert region.mmap_obj is not None
         assert memoryview(region.mmap_obj)[0] == 7, "mapping must stay valid"
         del t
     finally:

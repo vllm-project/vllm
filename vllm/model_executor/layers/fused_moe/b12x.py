@@ -24,7 +24,7 @@ from vllm.model_executor.layers.quantization.utils.quant_utils import (
     kNvfp4Dynamic,
     kNvfp4Static,
 )
-from vllm.model_executor.utils import replace_parameter
+from vllm.model_executor.utils import set_weight_attrs
 from vllm.platforms import current_platform
 from vllm.utils.b12x import (
     B12X_BLOCK_CODECS,
@@ -175,9 +175,17 @@ def _replace_parameter_with_empty(
     parameter = getattr(layer, name, None)
     if not isinstance(parameter, torch.Tensor):
         return None
-    empty = torch.empty((0,), dtype=parameter.dtype, device=parameter.device)
-    replace_parameter(layer, name, empty)
-    return getattr(layer, name)
+    # The prepared experts may own this parameter object, so register a new
+    # empty one instead of emptying it in place.
+    empty = torch.nn.Parameter(
+        torch.empty((0,), dtype=parameter.dtype, device=parameter.device),
+        requires_grad=False,
+    )
+    weight_loader = getattr(parameter, "weight_loader", None)
+    if weight_loader is not None:
+        set_weight_attrs(empty, {"weight_loader": weight_loader})
+    setattr(layer, name, empty)
+    return empty
 
 
 def _normalize_expert_scale(scale: torch.Tensor) -> torch.Tensor:

@@ -28,6 +28,9 @@ _MAP_FIXED = 0x10
 # Page-cache inserts are serialized per shm file, capping pre-faulting of one
 # file near 10 GiB/s; smaller segments are not worth a file.
 _MIN_SEGMENT_BYTES = 1 << 30
+# Split the shared region into this many shm files so workers pre-fault them
+# in parallel (page-cache inserts are serialized per file).
+REGION_SEGMENTS = 32
 
 
 def _wait_for_file_size(fd: int, expected_size: int, timeout: float = 30.0) -> None:
@@ -96,10 +99,10 @@ class SharedOffloadRegion:
     the kernel reclaims the memory when the last worker exits, no matter
     how it exits; mappings taken before the unlink stay valid.
 
-    ``populate_shard=(index, count)`` pre-faults only this worker's contiguous
+    `populate_shard=(index, count)` pre-faults only this worker's contiguous
     share, for layouts where every worker maps the same bytes. The barrier
     also waits for all shards to finish pre-faulting before returning.
-    ``num_segments`` splits backing files beneath the contiguous mapping.
+    `num_segments` splits backing files beneath the contiguous mapping.
     """
 
     BLOCK_SIZE_ALIGNMENT: int = mmap.PAGESIZE
@@ -184,13 +187,26 @@ class SharedOffloadRegion:
                 )
 
             single = len(self._segments) == 1
-            self.mmap_obj: mmap.mmap | None = mmap.mmap(
-                self.fd if single else -1,
-                self.total_size_bytes,
-                flags=mmap.MAP_SHARED if single else mmap.MAP_PRIVATE,
-                prot=mmap.PROT_READ | mmap.PROT_WRITE,
-            )
-            if not single:
+            self.mmap_obj: mmap.mmap | None = None
+            if single:
+                self.mmap_obj = mmap.mmap(
+                    self.fd,
+                    self.total_size_bytes,
+                    flags=mmap.MAP_SHARED,
+                    prot=mmap.PROT_READ | mmap.PROT_WRITE,
+                )
+            else:
+                reservation = os.memfd_create("vllm_offload_reservation")
+                try:
+                    os.ftruncate(reservation, self.total_size_bytes)
+                    self.mmap_obj = mmap.mmap(
+                        reservation,
+                        self.total_size_bytes,
+                        flags=mmap.MAP_SHARED,
+                        prot=mmap.PROT_READ | mmap.PROT_WRITE,
+                    )
+                finally:
+                    os.close(reservation)
                 self._map_segments()
             if barrier is not None:
                 barriers_remaining -= 1
@@ -399,7 +415,7 @@ class SharedOffloadRegion:
         """Return a zero-copy memoryview over the entire KV buffer.
 
         Shape: (num_chunks, row_stride_bytes). Secondary tiers address
-        chunk *b* as ``view[b]``.
+        chunk *b* as `view[b]`.
         """
         kv_tensor = self._base.view(self.num_chunks, self._row_stride)
         np_arr = kv_tensor.numpy()
