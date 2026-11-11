@@ -61,7 +61,10 @@ feature_configs=(
   "P2P_MODE=p2p MODEL_NAMES=${HYBRID_MODEL}"
   "P2P_MODE=pd  MODEL_NAMES=${SWA_MODEL}"
   # fp8 pages through the canonical mixed-TP path that bf16 already covers.
-  "P2P_MODE=pd  CANONICAL_LAYOUT=1 PREFILLER_TP_SIZE=1 DECODER_TP_SIZE=2 VLLM_SERVE_EXTRA_ARGS=--kv-cache-dtype,fp8 MODEL_NAMES=${DENSE_MODEL}"
+  # fp8 KV selects FlashInfer on L4, whose kernel blocks top out at 64 tokens
+  # before Blackwell; 128-token blocks get split, which canonical_layout
+  # cannot yet certify, so use 64-token blocks.
+  "P2P_MODE=pd  CANONICAL_LAYOUT=1 PREFILLER_TP_SIZE=1 DECODER_TP_SIZE=2 PREFILL_BLOCK_SIZE=64 DECODE_BLOCK_SIZE=64 VLLM_SERVE_EXTRA_ARGS=--kv-cache-dtype,fp8 MODEL_NAMES=${DENSE_MODEL}"
 )
 
 run_tests() {

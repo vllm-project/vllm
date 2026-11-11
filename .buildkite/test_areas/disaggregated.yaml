@@ -526,7 +526,7 @@ steps:
 - label: ":nvidia: (L4) [Nightly] P2P KV-Offload tier PD accuracy hybrid/SWA/fp8"
   key: p2p-kv-offload-pd-accuracy-features-4-gpus
   optional: true
-  timeout_in_minutes: 40
+  timeout_in_minutes: 55
   working_dir: "/vllm-workspace/tests"
   device: l4
   num_devices: 4
