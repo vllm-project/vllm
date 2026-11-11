@@ -1203,7 +1203,10 @@ class Qwen3VLDummyInputsBuilder(BaseDummyInputsBuilder[Qwen3VLProcessingInfo]):
         # over enough frames that the cap is not binding for the dummy.
         # This takes precedence over a shrinking num_frames override, which
         # would otherwise reintroduce the under-profiling.
-        if video_mm_kwargs.get("cap_pixels_per_frame"):
+        if video_mm_kwargs.get(
+            "cap_pixels_per_frame",
+            getattr(video_processor, "cap_pixels_per_frame", False),
+        ):
             max_video_tokens = video_mm_kwargs.get(
                 "max_video_tokens",
                 getattr(video_processor, "max_video_tokens", 768),
