@@ -20,7 +20,9 @@ def initialize_replayssm_ring_trackers(
     kv_cache_config: KVCacheConfig,
     forward_context: Mapping[str, Any],
 ) -> None:
-    """Allocate and bind one tracker pair per ReplaySSM cache group."""
+    """Allocate and bind one tracker pair per ReplaySSM cache group, and the
+    stochastic-rounding seed slots of the FlashInfer ReplaySSM layers."""
+    seeded: list[str] = []
     for group in kv_cache_config.kv_cache_groups:
         names = [
             name
@@ -56,6 +58,35 @@ def initialize_replayssm_ring_trackers(
         # Triton plans each decode step in the group's first executed layer.
         planner = min(names, key=extract_layer_index)
         forward_context[planner]._plans_replayssm_decode = True
+        seeded.extend(
+            name
+            for name, layer in zip(names, layers)
+            if layer.use_flashinfer_replayssm
+            and layer.mamba_config.enable_stochastic_rounding
+        )
+    _bind_replayssm_rand_seeds(forward_context, seeded)
+
+
+def _bind_replayssm_rand_seeds(
+    forward_context: Mapping[str, Any], names: list[str]
+) -> None:
+    """Give each layer one slot of a shared Philox seed buffer.
+
+    The first executed layer refreshes the whole buffer with one launch per
+    step instead of every layer drawing its own seed.
+    """
+    if not names:
+        return
+    layers = [forward_context[name] for name in sorted(names, key=extract_layer_index)]
+    device = layers[0].kv_cache[1].device
+    seeds = layers[0]._replayssm_rand_seeds
+    # Extensible caches rebind after capture. Keep the captured address.
+    if seeds is None or seeds.numel() != len(layers) or seeds.device != device:
+        seeds = torch.zeros(len(layers), dtype=torch.int64, device=device)
+    for slot, layer in enumerate(layers):
+        layer._replayssm_rand_seed = seeds[slot : slot + 1]
+        layer._replayssm_rand_seeds = None
+    layers[0]._replayssm_rand_seeds = seeds
 
 
 def get_replayssm_block_copy_tensors(
