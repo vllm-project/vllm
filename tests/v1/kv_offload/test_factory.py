@@ -91,9 +91,13 @@ def test_create_cpu_offloading_spec():
 
 @pytest.mark.parametrize("shared_region", [False, True])
 def test_cpu_spec_sizes_normalized_worker_layout(monkeypatch, shared_region):
+    import vllm.v1.kv_offload.cpu.spec as cpu_spec_module
+
     monkeypatch.setattr(
         CPUOffloadingSpec, "_uses_shared_region", lambda _: shared_region
     )
+    log_info = MagicMock()
+    monkeypatch.setattr(cpu_spec_module.logger, "info", log_info)
     alignment = SharedOffloadRegion.BLOCK_SIZE_ALIGNMENT
     budget = alignment * 18
     spec = _create_spec(
@@ -110,6 +114,10 @@ def test_cpu_spec_sizes_normalized_worker_layout(monkeypatch, shared_region):
     assert spec.kv_bytes_per_chunk == alignment * (6 if shared_region else 1)
     assert spec.num_chunks == (3 if shared_region else 18)
     assert spec.num_chunks * spec.kv_bytes_per_chunk <= budget
+    # The chunks lost to per-rank padding are reported.
+    assert log_info.called is shared_region
+    if shared_region:
+        assert log_info.call_args.args[1:] == (3, 15)
 
 
 def test_cpu_spec_zero_worker_bytes_produces_empty_cache():

@@ -5,6 +5,7 @@ from typing import Any
 from typing_extensions import override
 
 from vllm.distributed.device_communicators.shm_broadcast import check_shm_free_space
+from vllm.logger import init_logger
 from vllm.platforms import current_platform
 from vllm.utils.math_utils import round_up
 from vllm.v1.kv_offload.base import (
@@ -25,6 +26,8 @@ from vllm.v1.kv_offload.cpu.shared_offload_region import (
     REGION_SEGMENTS,
     SharedOffloadRegion,
 )
+
+logger = init_logger(__name__)
 
 
 def _all_workers_barrier() -> None:
@@ -121,6 +124,7 @@ class CPUOffloadingSpec(OffloadingSpec):
             aligned_kv_bytes_per_chunk = round_up(
                 kv_bytes_per_chunk, self.BLOCK_SIZE_ALIGNMENT
             )
+            shared_row_chunks = int(cpu_bytes_to_use) // aligned_kv_bytes_per_chunk
             if (
                 self.SHARED_REGION_PER_RANK
                 and self._uses_shared_region()
@@ -130,6 +134,14 @@ class CPUOffloadingSpec(OffloadingSpec):
                     self.cpu_page_size_per_worker, self.BLOCK_SIZE_ALIGNMENT
                 )
             self.num_chunks = int(cpu_bytes_to_use) // aligned_kv_bytes_per_chunk
+            if self.num_chunks < shared_row_chunks and config.parallel.rank == 0:
+                logger.info(
+                    "Per-rank CPU offload regions page-align each rank's slot: "
+                    "%d chunks fit in cpu_bytes_to_use, %d fewer than with one "
+                    "shared row per chunk.",
+                    self.num_chunks,
+                    shared_row_chunks - self.num_chunks,
+                )
 
             # Expose aligned_kv_bytes_per_chunk as
             # kv_bytes_per_chunk. Note that this might contain
