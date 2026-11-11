@@ -115,9 +115,14 @@ class PlaceholderRangeInfo(BaseModel):
     length: int = Field(gt=0)
     """Number of placeholder tokens."""
 
-    # TODO: add `is_embed: list[bool] | None` once the /generate side
-    # consumes features — some models (e.g. Qwen-VL) use sparse
-    # placeholder masks that cannot be recomputed from offset+length alone.
+    is_embed: list[bool] | None = None
+    """Positions in the span that receive embeddings; `None` means all."""
+
+    @model_validator(mode="after")
+    def _check_is_embed_length(self) -> "PlaceholderRangeInfo":
+        if self.is_embed is not None and len(self.is_embed) != self.length:
+            raise ValueError("is_embed must have `length` entries")
+        return self
 
 
 def _has_serialized_mm_items(
@@ -879,7 +884,7 @@ class DerenderStreamState(BaseModel):
         return v
 
     role_sent: bool = False
-    """True once the initial `role: "assistant"` delta has been emitted.
+    """True once the initial role delta (and any `echo` text) has been emitted.
 
     Prevents re-emitting the role on subsequent chunks even when the detok
     window is transiently empty (e.g. usage only final chunk).

@@ -110,7 +110,7 @@ from vllm.v1.outputs import (
     DraftTokenIds,
     ModelRunnerOutput,
 )
-from vllm.v1.utils import compute_iteration_details, report_usage_stats
+from vllm.v1.utils import report_usage_stats
 from vllm.v1.worker.extensible_kv_cache import (
     extend_kv_cache,
     kv_cache_lent_for_weight_update,
@@ -1302,6 +1302,7 @@ class Worker(WorkerBase):
             and self.model_runner.get_draft_model() is not None
             and speculative_config is not None
             and speculative_config.draft_model_config is not None
+            and not speculative_config.prefill_context_kv_only
         )
 
     def _set_draft_weight_update_target(self) -> None:
@@ -1347,7 +1348,8 @@ class Worker(WorkerBase):
         if not self.profiler.should_annotate:
             return nullcontext()
 
-        iteration_details = compute_iteration_details(scheduler_output)
+        iteration_details = scheduler_output.iteration_details
+        assert iteration_details is not None
 
         if self.vllm_config.profiler_config.detailed_trace_annotation:
             # Compute roofline-model metrics per request, split by phase
@@ -1695,6 +1697,16 @@ class Worker(WorkerBase):
             raise RuntimeError(
                 f"{type(self.weight_transfer_engine).__name__} does not support "
                 "draft model weight updates."
+            )
+        speculative_config = self.vllm_config.speculative_config
+        if (
+            is_draft
+            and speculative_config is not None
+            and speculative_config.prefill_context_kv_only
+        ):
+            raise RuntimeError(
+                "Draft model weight updates are not supported with "
+                "prefill_context_kv_only, which frees draft weights."
             )
 
         if self._weight_update_active:

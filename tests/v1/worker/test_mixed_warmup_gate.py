@@ -57,6 +57,7 @@ def test_mixed_warmup_disables_watermarking():
         ),
         vllm_config=SimpleNamespace(
             num_lookahead_tokens=0,
+            num_scheduled_spec_tokens=0,
             parallel_config=SimpleNamespace(decode_context_parallel_size=1),
         ),
         max_model_len=128,
@@ -98,6 +99,7 @@ def test_mixed_warmup_reserves_drafting_slots():
         ),
         vllm_config=SimpleNamespace(
             num_lookahead_tokens=0,
+            num_scheduled_spec_tokens=0,
             parallel_config=SimpleNamespace(decode_context_parallel_size=1),
         ),
         max_model_len=128,
@@ -122,6 +124,7 @@ def test_mixed_warmup_skips_when_drafting_slots_exhaust_budget():
         is_pooling_model=False,
         max_num_reqs=2,
         max_num_tokens=4,
+        max_model_len=128,
         speculative_config=SimpleNamespace(max_num_new_slots_for_drafting=1),
     )
 
