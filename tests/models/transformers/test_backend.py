@@ -40,7 +40,7 @@ from vllm.model_executor.models.transformers.utils import infer_dynamic_arg_dims
 from vllm.model_executor.models.utils import StageMissingLayer
 
 from ...conftest import HfRunner, VllmRunner
-from ...utils import multi_gpu_test, prep_prompts
+from ...utils import create_new_process_for_each_test, multi_gpu_test, prep_prompts
 from ..registry import HF_EXAMPLE_MODELS
 from ..utils import check_embeddings_close, check_logprobs_close
 
@@ -150,8 +150,7 @@ def test_models(
     )
 
 
-# forked needed to workaround https://github.com/vllm-project/vllm/issues/21073
-@pytest.mark.forked
+@create_new_process_for_each_test("spawn")
 def test_compile_mm_encoder(
     vllm_runner: type[VllmRunner], monkeypatch: pytest.MonkeyPatch
 ) -> None:
