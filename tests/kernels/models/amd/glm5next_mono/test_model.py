@@ -412,6 +412,10 @@ def _engine(vllm_runner, model_dir, tp, mono, graphs=False, kv="auto"):
         enable_trace_replay=True,
         max_logprobs=-1,
         gpu_memory_utilization=0.3,
+        # ROCm's default, pinned: graphs capture on the null-block cache views and
+        # replay after the cache grows to its full size (as fixed for Kimi-K3 in
+        # #66370), which the kernels' cache binding must follow
+        enable_extensible_kv_cache=True,
     )
 
 
