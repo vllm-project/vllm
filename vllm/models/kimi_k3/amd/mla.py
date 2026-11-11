@@ -30,18 +30,6 @@ _OPT_ROT_DIM = 64
 _OPT_MIN_SIZE = 2048
 
 
-def _fused_decode_applicable(attn_metadata, slot_mapping, kv_cache) -> bool:
-    # PIECEWISE graphs replay any batch shape; this check only sees the
-    # decode-only capture batch.
-    return (
-        attn_metadata is not None
-        and slot_mapping is not None
-        and kv_cache.numel() > 0
-        and attn_metadata.num_actual_tokens == attn_metadata.num_decode_tokens
-        and not in_piecewise_cudagraph()
-    )
-
-
 class KimiK3MultiHeadLatentAttentionWrapper(MultiHeadLatentAttentionWrapper):
     """Kimi-K3 MLA wrapper with eager AITER q/kv RMSNorm and output gate
     fusions and a fused decode Q-prep path."""
@@ -387,7 +375,15 @@ class KimiK3MultiHeadLatentAttentionWrapper(MultiHeadLatentAttentionWrapper):
             attn_metadata, layer, kv_cache, slot_mapping = get_attention_context(
                 self.mla_attn.layer_name
             )
-            fuse = _fused_decode_applicable(attn_metadata, slot_mapping, kv_cache)
+            # PIECEWISE graphs replay any batch shape; this check only sees the
+            # decode-only capture batch.
+            fuse = (
+                attn_metadata is not None
+                and slot_mapping is not None
+                and kv_cache.numel() > 0
+                and attn_metadata.num_actual_tokens == attn_metadata.num_decode_tokens
+                and not in_piecewise_cudagraph()
+            )
 
         if fuse and self._fold_qb_uk and llama_4_scaling is None:
             q = q_proj_input
