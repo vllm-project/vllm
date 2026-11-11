@@ -328,6 +328,8 @@ steps:
   device: b200-k8s
   source_file_dependencies:
   - vllm/models/minimax_m3/
+  - vllm/models/deepseek_v41/nvidia/specialized_decode/moe/
+  - vllm/models/common/ops/moe_tail_fusion/
   - vllm/cute_utils/
   - vllm/utils/flashinfer.py
   - tests/models/minimax_m3/
