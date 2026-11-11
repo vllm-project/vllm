@@ -597,7 +597,7 @@ A common use case for our metrics is to support automated scaling of
 vLLM instances.
 
 For related discussion from the
-[Kubernetes Serving Working Group](https://github.com/kubernetes/community/tree/master/wg-serving),
+[Kubernetes Serving Working Group](https://github.com/kubernetes/community/tree/main/archive/wg-serving),
 see:
 
 - [Standardizing Large Model Server Metrics in Kubernetes](https://docs.google.com/document/d/1SpSp1E6moa4HSrJnS4x3NpLuj88sMXr2tbofKlzTZpk)

@@ -23,13 +23,17 @@ def _custom_collective(name: str, x: torch.Tensor) -> torch.Tensor | None:
 
 
 @lru_cache
-def is_sequence_parallel_active(is_enabled: bool, num_tokens: int) -> bool:
-    """Whether a batch of ``num_tokens`` shards the stream along the sequence.
+def is_sequence_parallel_active(
+    is_enabled: bool, num_tokens: int, min_tokens: int = 0
+) -> bool:
+    """Whether a batch of `num_tokens` shards the stream along the sequence.
 
     Below one token per rank the shards are mostly padding, so the batch
-    stays replicated.
+    stays replicated. A model may raise this lower bound with `min_tokens`.
     """
-    return is_enabled and num_tokens >= get_tensor_model_parallel_world_size()
+    return is_enabled and num_tokens >= max(
+        get_tensor_model_parallel_world_size(), min_tokens
+    )
 
 
 def sp_all_gather(x: torch.Tensor) -> torch.Tensor:
@@ -37,6 +41,42 @@ def sp_all_gather(x: torch.Tensor) -> torch.Tensor:
     if output is not None:
         return output
     return tensor_model_parallel_all_gather(x, 0)
+
+
+# Below this many tokens per rank the pipelined copy-engine all-gather costs
+# more than it hides behind the GEMM (B300 TP4, K=8192).
+_FUSED_AG_MATMUL_MIN_TOKENS_PER_RANK = 1024
+
+
+@lru_cache
+def _has_fused_all_gather_matmul() -> bool:
+    try:
+        import torch.distributed._symmetric_memory  # noqa: F401
+    except ImportError:
+        return False
+    return hasattr(torch.ops.symm_mem, "fused_all_gather_matmul")
+
+
+def can_sp_all_gather_matmul(x: torch.Tensor, weight: torch.Tensor) -> bool:
+    """Whether `sp_all_gather_matmul` applies to this shard and weight."""
+    return (
+        x.shape[0] >= _FUSED_AG_MATMUL_MIN_TOKENS_PER_RANK
+        and x.dtype == weight.dtype == torch.bfloat16
+        and weight.ndim == 2
+        and not torch.cuda.is_current_stream_capturing()
+        and _has_fused_all_gather_matmul()
+    )
+
+
+def sp_all_gather_matmul(x: torch.Tensor, weight: torch.Tensor) -> torch.Tensor:
+    """`sp_all_gather(x) @ weight.T`, overlapping the gather with the GEMM."""
+    _, outputs = torch.ops.symm_mem.fused_all_gather_matmul(
+        x.contiguous(),
+        [weight.t()],
+        gather_dim=0,
+        group_name=get_tp_group().device_group.group_name,
+    )
+    return outputs[0]
 
 
 def sp_reduce_scatter(x: torch.Tensor) -> torch.Tensor:

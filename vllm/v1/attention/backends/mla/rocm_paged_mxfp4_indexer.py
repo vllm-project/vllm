@@ -8,7 +8,7 @@ packed through query_start_loc into one launch, and the decode rows as
 next_n-row sequences on uniform steps. `RocmMxfp4IndexerMetadataBuilder` plans
 this for any model's indexer, and a two-level indexer's candidate blocks once
 a subclass sets their size. DeepSeek-V4.1's builder does, and with
-``AttentionConfig.indexer_sparse_logits`` adds the per-step state the
+`AttentionConfig.indexer_sparse_logits` adds the per-step state the
 candidate consumers share.
 """
 
@@ -56,7 +56,7 @@ class RocmMxfp4PrefillPlan:
 
     requests: list[tuple[int, int, int]]
     """(first row, end row, request) per request with rows in the chunk; rows
-    count from ``chunk.token_start``, requests index ``chunk.block_table``."""
+    count from `chunk.token_start`, requests index `chunk.block_table`."""
     width: int
     """Logits columns: an upper bound on the chunk's compressed contexts."""
     row_ends: torch.Tensor
@@ -113,8 +113,8 @@ def native_decode(
 ) -> RocmMxfp4NativeDecode | None:
     """The step as next_n-row sequences, or None when a request has fewer rows.
 
-    ``row_lens`` and ``row_block_table`` are the flattened rows' bounds and
-    block table, ``query_lens`` the decode requests' query lengths. Trailing
+    `row_lens` and `row_block_table` are the flattened rows' bounds and
+    block table, `query_lens` the decode requests' query lengths. Trailing
     empty requests are cudagraph padding: they keep their next_n rows, with no
     context. Only the step's shape decides, so a FULL graph captured on a
     uniform batch replays the same launch on a padded one.
@@ -135,7 +135,7 @@ def native_decode(
 @dataclass
 class RocmMxfp4IndexerMetadata(DeepseekV32IndexerMetadata):
     prefill_plans: list[RocmMxfp4PrefillPlan] = field(default_factory=list)
-    """Parallel to ``prefill.chunks``."""
+    """Parallel to `prefill.chunks`."""
     decode_row_lens: torch.Tensor | None = None
     """[rows] int32 compressed context of each decode query row."""
     decode_block_ends: torch.Tensor | None = None
@@ -166,11 +166,11 @@ def plan_prefill_chunks(
 ) -> list[RocmMxfp4PrefillPlan]:
     """Split each chunk into its requests.
 
-    ``query_start_loc`` and ``seq_lens_cpu`` are the step's host copies (the
-    latter an upper bound), ``context_lens`` the device compressed lengths.
+    `query_start_loc` and `seq_lens_cpu` are the step's host copies (the
+    latter an upper bound), `context_lens` the device compressed lengths.
     A chunk covers whole requests, or a query slice of one request; either
     way it launches once, packed through the chunk's part of the device
-    ``query_start_loc``.
+    `query_start_loc`.
     """
     block = candidate_block_size
     plans = []
@@ -213,7 +213,7 @@ def split_prefill_chunks(
 
     Nothing gathers K here, so the requests' contexts do not add up: a chunk's
     logits are [rows, widest compressed context] fp32, at most
-    ``max_logits_bytes``. A request too wide to launch whole is cut on its
+    `max_logits_bytes`. A request too wide to launch whole is cut on its
     query rows.
     """
 
@@ -249,7 +249,7 @@ def plan_gather_launches(
     A consumer's logits are [rows, pool] however long the context, so the
     dense split, sized for the context, would launch it far more often than
     its memory needs. Each request's rows go back together across the chunks
-    that cut them, then out again at most ``max_rows`` a launch.
+    that cut them, then out again at most `max_rows` a launch.
     """
     # Per request: (first token, [(plan, first row, end row)]), and the chunk
     # and request index its block table and context come from.
@@ -392,6 +392,7 @@ class RocmMxfp4IndexerMetadataBuilder(DeepseekV32IndexerMetadataBuilder):
         workspace_size: int,
         max_logits_bytes: int,
         request_offset: int = 0,
+        fused_mqa_topk_eligible: bool = False,
     ) -> list[tuple[slice, slice]]:
         return split_prefill_chunks(
             compressed_seq_lens_cpu,
@@ -458,7 +459,7 @@ class RocmMxfp4IndexerMetadataBuilder(DeepseekV32IndexerMetadataBuilder):
 
 class DeepseekV41RocmMxfp4IndexerMetadataBuilder(RocmMxfp4IndexerMetadataBuilder):
     """DeepSeek-V4.1's two-level indexer: sets the candidate block size the
-    base plans with and, with ``indexer_sparse_logits``, adds the consumers'
+    base plans with and, with `indexer_sparse_logits`, adds the consumers'
     gathers."""
 
     def __init__(
