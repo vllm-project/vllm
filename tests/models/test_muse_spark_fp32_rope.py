@@ -21,10 +21,14 @@ from vllm.config import (
     VllmConfig,
     set_current_vllm_config,
 )
-from vllm.models.muse_spark.common.dspark import MuseSparkDSparkModel
 from vllm.platforms import current_platform
 from vllm.utils.torch_utils import set_default_torch_dtype
 from vllm.v1.attention.backends.registry import AttentionBackendEnum
+
+if current_platform.is_rocm():
+    from vllm.models.muse_spark.amd.dspark import MuseSparkDSparkModel
+else:
+    from vllm.models.muse_spark.nvidia.dspark import MuseSparkDSparkModel
 
 HIDDEN, NUM_LAYERS, NUM_HEADS, NUM_KV_HEADS, HEAD_DIM = 512, 3, 4, 2, 64
 MAX_POSITION = 32768
@@ -35,8 +39,8 @@ pytestmark = pytest.mark.skipif(
 )
 
 
-@pytest.fixture
-def drafter(tmp_path, dist_init):
+@pytest.fixture(params=[["all"], None], ids=["custom_ops_all", "default_custom_ops"])
+def drafter(request, tmp_path, dist_init):
     target_path, draft_path = tmp_path / "target", tmp_path / "draft"
     target_path.mkdir()
     draft_path.mkdir()
@@ -92,8 +96,13 @@ def drafter(tmp_path, dist_init):
             target_model_config=target_config,
             target_parallel_config=ParallelConfig(),
         ),
-        # Exercise the serving RoPE CustomOp dispatch.
-        compilation_config=CompilationConfig(custom_ops=["all"]),
+        # Serving dispatches RoPE as a CustomOp; by default compiled models
+        # disable it and the module falls back to forward_native.
+        compilation_config=(
+            CompilationConfig(custom_ops=request.param)
+            if request.param
+            else CompilationConfig()
+        ),
         # Writes K/V in the backend, so attention takes the unfused RoPE path.
         attention_config=AttentionConfig(backend=AttentionBackendEnum.TRITON_ATTN),
     )
