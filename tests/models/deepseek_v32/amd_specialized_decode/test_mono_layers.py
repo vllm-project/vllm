@@ -258,7 +258,8 @@ def test_plan(monkeypatch, forward_context):
     """One decision per step, before the layer loop: a Step whose layer(i) is the
     kernel of mono layer i (None for vLLM's layers); stage inputs, steps before a KV
     bind, PIECEWISE steps and no-go steps run vLLM's layers; a KV cache re-bound
-    without prepare_kv raises."""
+    without prepare_kv (the extensible KV cache) is re-bound by plan(), except inside
+    a capture."""
     ml = mono_layers()
     kv = torch.zeros(4, 16, 576)
     for L in ml.layers:
@@ -293,8 +294,19 @@ def test_plan(monkeypatch, forward_context):
     ml.active = True
     obj._kv = None  # no KV cache bound yet (profiling / dummy runs)
     assert obj.plan(torch.zeros(2), None) is None and not ml.active
+    rebinds: list[int] = []
+
+    def prepare_kv():
+        rebinds.append(1)
+        obj._kv = (kv.data_ptr(), kv.numel())
+
+    obj.prepare_kv = prepare_kv
+    obj._kv = (kv.data_ptr(), kv.numel() // 2)  # the same views, fewer blocks
+    assert obj.plan(torch.zeros(2), None) is not None and rebinds == [1]
+    assert obj.plan(torch.zeros(2), None) is not None and rebinds == [1]
     obj._kv = (1, 1)
-    with pytest.raises(RuntimeError, match="re-bound without prepare_kv"):
+    monkeypatch.setattr(torch.cuda, "is_current_stream_capturing", lambda: True)
+    with pytest.raises(RuntimeError, match="moved inside a CUDA graph capture"):
         obj.plan(torch.zeros(2), None)
 
 

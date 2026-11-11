@@ -137,9 +137,19 @@ class SpecializedDecode:
             return None
         kv = mla_cache(mono.layers[mono.first])
         if (kv.data_ptr(), kv.numel()) != self._kv:
-            raise RuntimeError(
-                "GLM-5.2 specialized decode: the KV cache was re-bound without "
-                "prepare_kv (ModelState.initialize_kv_cache)"
+            # The extensible KV cache re-binds every view after warm-up, at the same
+            # addresses with the final block count, without a ModelState hook:
+            # re-check and re-bind here. Never inside a capture (bind_caches copies
+            # to the device), where a moved cache is a bug.
+            if torch.cuda.is_current_stream_capturing():
+                raise RuntimeError(
+                    "GLM-5.2 specialized decode: the KV cache moved inside a CUDA "
+                    "graph capture"
+                )
+            self.prepare_kv()
+            logger.info_once(
+                "GLM-5.2 specialized decode: KV cache re-bound (%d MLA rows per layer)",
+                kv.shape[0] * kv.shape[-2],
             )
         S = mono.begin_step(positions)
         return None if S is None else Step(positions.shape[0], S, self.kernels)
