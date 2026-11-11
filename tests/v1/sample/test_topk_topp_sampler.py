@@ -893,6 +893,43 @@ class TestTritonTopkToppExact:
         actual = apply_top_k_top_p_triton(source.clone(), k, p)
         _assert_exact_filter(source, actual, k, p)
 
+    @pytest.mark.parametrize("max_k", [1, 4, 32, 64])
+    @pytest.mark.parametrize("use_p", [True, False])
+    def test_exact_hazards_at_the_cut(self, max_k, use_p):
+        """Exact cut with ties, signed zeros, underflow, -inf or NaN at the cut."""
+        from vllm.v1.sample.ops.topk_topp_triton import apply_top_k_top_p_triton
+
+        vocab = 151936
+        source = torch.randn(12, vocab, generator=self.generator) * 4
+        source = source.bfloat16().float()
+        k = torch.tensor(
+            [1, 64, 17, 20, 20, 20, 20, 20, 20, 20, 0, 0], dtype=torch.int32
+        )
+        k = k.clamp(max=max_k)
+        k[10:] = vocab
+        source[3, ::997] = source[3].topk(int(k[3])).values[-1]
+        source[4] = -30.0
+        source[4, 5:65:3] = 0.5
+        source[4, [9000, 70000, 140000]] = torch.tensor([2.0, 1.5, 1.0])
+        source[5, 7] = 150.0
+        source[6] = float("-inf")
+        source[6, [0, 7, 300]] = torch.tensor([1.0, 3.0, 2.0])
+        source[7] = float("nan")
+        source[8] = -30.0
+        source[8, 0:200:5] = torch.tensor([0.0, -0.0] * 20)
+        source[8, [7, 11]] = torch.tensor([1.0, 0.5])
+        source[9, [3, 50, 500]] = float("nan")
+        p = torch.tensor(
+            [0.9, 1 - 1e-6, 1e-6, 0.95, 0.5, 1, 0.95, 0.95, 0.9, 0.9, 0.9, 1]
+        )
+        p = p if use_p else None
+        actual = apply_top_k_top_p_triton(source.clone(), k, p)
+        # NaN is never kept, so the reference orders it as -inf.
+        source, actual = (
+            t.masked_fill(t.isnan(), float("-inf")) for t in (source, actual)
+        )
+        _assert_exact_filter(source, actual, k, p)
+
     def test_cuda_graph_replay(self):
         """Device k/p are read at replay time, and the grid barrier resets."""
         from vllm.v1.sample.ops.topk_topp_triton import (
