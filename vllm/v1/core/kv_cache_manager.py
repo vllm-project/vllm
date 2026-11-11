@@ -24,6 +24,7 @@ from vllm.v1.core.single_type_kv_cache_manager import (
 from vllm.v1.kv_cache_interface import (
     AttentionSpec,
     KVCacheConfig,
+    get_reusable_prefix_length,
 )
 from vllm.v1.metrics.stats import PrefixCacheStats
 from vllm.v1.request import Request, RequestStatus
@@ -922,6 +923,20 @@ class KVCacheManager:
         ]
         retained_blocks = [block for pair in pending_copies for block in pair]
         return copies, retained_blocks
+
+    def get_state_checkpoint_tokens(self, num_tokens: int) -> int:
+        """Prompt position whose Mamba state a prefill of `num_tokens`
+        tokens leaves prefix-cached (the boundary a later request can hit),
+        or 0 if no group prefix-caches recurrent states at block boundaries.
+        Accounts for the hash lookahead."""
+        for mgr in self.coordinator.single_type_managers:
+            if isinstance(mgr, MambaManager) and mgr.prefix_caching:
+                return get_reusable_prefix_length(
+                    num_tokens,
+                    num_hash_lookahead_tokens=self.block_pool.num_hash_lookahead_tokens,
+                    alignment_tokens=mgr.cache_hit_alignment_tokens,
+                )
+        return 0
 
     def take_boundary_state_offloads(
         self,
