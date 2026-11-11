@@ -130,7 +130,11 @@ from vllm.model_executor.model_loader.weight_cache.utils import (
     format_daemon_role,
     is_draft_model_cacheable,
 )
-from vllm.model_executor.model_loader.weight_cache.warmup_cache import (
+from vllm.model_executor.model_loader.weight_cache.warmup_cache.base import WarmupCache
+from vllm.model_executor.model_loader.weight_cache.warmup_cache.compiled import (
+    CompileArtifactWarmupCache,
+)
+from vllm.model_executor.model_loader.weight_cache.warmup_cache.flashinfer_autotune import (  # noqa: E501
     FlashInferWarmupCache,
 )
 from vllm.platforms import current_platform
@@ -224,8 +228,13 @@ class WeightCacheDaemon:
         parallel_config = vllm_config.parallel_config
         if parallel_config.enable_eplb:
             raise ValueError("The weight cache daemon does not support EPLB.")
-        self.warmup_caches = [FlashInferWarmupCache(warmup_cache_stores)]
-        self.d2d = SeedTransport(self.warmup_caches, seed_config)
+        self.seed_config = seed_config or SeedConfig()
+        warmup_cache_stores = tuple(warmup_cache_stores)
+        self.warmup_caches: list[WarmupCache] = [
+            FlashInferWarmupCache(warmup_cache_stores),
+            CompileArtifactWarmupCache(warmup_cache_stores),
+        ]
+        self.d2d = SeedTransport(self.warmup_caches, self.seed_config)
         self.tp_size = parallel_config.tensor_parallel_size
         self.pp_size = parallel_config.pipeline_parallel_size
         self.dp_size = parallel_config.data_parallel_size
@@ -308,6 +317,8 @@ class WeightCacheDaemon:
             local_rank=self.local_rank,
             backend=current_platform.dist_backend,
         )
+        for cache in self.warmup_caches:
+            cache.adopt_before_load(self, self.d2d)
         with set_current_vllm_config(self.vllm_config):
             ensure_model_parallel_initialized(self.tp_size, self.pp_size)
             with single_pp_stage() if self.is_draft else contextlib.nullcontext():
@@ -596,6 +607,9 @@ def _run_daemon(
     )
     daemon.load_model()
     daemon.warmup()
+    # FlashInfer warmup has populated the compiler caches before the source
+    # listener becomes available to target daemons.
+    daemon.d2d.start_listener()
     daemon.release_distributed()
     daemon.serve_forever(
         ready_callback=lambda: ready_queue.put((daemon.role, daemon.global_rank))
