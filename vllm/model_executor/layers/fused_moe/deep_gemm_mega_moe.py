@@ -255,9 +255,10 @@ class DeepGemmMegaMoEExperts(nn.Module):
 
     Parameters are registered in the kernel layout and every checkpoint shard is
     written straight into it, so loading (and reloading) needs no post-load
-    transform. Whether the shared expert runs inside the launch is decided here,
-    before any weight loads; a fused layer owns the shared-expert weights and
-    the caller drops its shared MLP.
+    transform, except the SM90 requantization of a fused FP8 shared expert.
+    Whether the shared expert runs inside the launch is decided here, before
+    any weight loads; a fused layer owns the shared-expert weights and the
+    caller drops its shared MLP.
 
     NVFP4 experts also take per-expert `weight_scale_2` (`w1` and `w3`
     must match: one L1 scale per expert) and `w2` `input_scale`; the kernel
@@ -345,8 +346,10 @@ class DeepGemmMegaMoEExperts(nn.Module):
         self.l2_activation_scale = 1.0
         # The first of each expert's w1/w3 weight_scale_2 until the other loads.
         self._pending_l1_scales: dict[int, tuple[str, float]] = {}
-        # Shared-expert shards loaded since the last SM90 requantization.
-        self._loaded_shared_shards: dict[str, set[tuple[str, bool]]] = {}
+        # Shared-expert shards whose weight / scale loaded since the last SM90
+        # requantization.
+        self._new_shared_weights: set[str] = set()
+        self._new_shared_scales: set[str] = set()
 
         self.num_shared_experts, self.shared_spec = self._fusable_shared_experts(
             shared_experts
@@ -588,24 +591,38 @@ class DeepGemmMegaMoEExperts(nn.Module):
         is_scale = "weight_scale" in weight_name
         self._load_weight(param.data, loaded_weight, shard_id, is_scale)
         if self.weight_format == MEGA_MOE_MXFP4_SM90 and not loaded_weight.is_meta:
-            self._requantize_loaded_shared_weight(shard_id, is_scale)
+            new = self._new_shared_scales if is_scale else self._new_shared_weights
+            new.add(shard_id)
 
-    def _requantize_loaded_shared_weight(self, shard_id: str, is_scale: bool) -> None:
-        """Requantize a shared linear to SM90 scales once all its shards loaded."""
-        name = "shared_l2" if shard_id == "w2" else "shared_l1"
-        loaded = self._loaded_shared_shards.setdefault(name, set())
-        loaded.add((shard_id, is_scale))
-        if len(loaded) < (2 if shard_id == "w2" else 4):
-            return
-        loaded.clear()
+    @torch.no_grad()
+    def process_weights_after_loading(self) -> None:
+        """Requantize newly loaded shared-expert shards to SM90 scales.
+
+        Requantization is row-local and leaves requantized rows unchanged, so a
+        reloaded shard is exact when both its weight and scale arrived.
+
+        Raises:
+            ValueError: If a shard's weight or scale loaded without the other.
+
+        """
+        weights, scales = self._new_shared_weights, self._new_shared_scales
+        if weights != scales:
+            raise ValueError(
+                f"{self.prefix}: shared-expert shards {sorted(weights ^ scales)} "
+                "loaded without their weight or weight_scale; the SM90 "
+                "requantization needs both."
+            )
         from vllm.utils.deep_gemm import requantize_fp8_weights_for_sm90_mega_moe
 
-        weight, scale = self._kernel_weights(name)
-        requantized = requantize_fp8_weights_for_sm90_mega_moe(
-            (weight.data, scale.data), is_sf_transposed_for_utccp=True
-        )
-        for param, data in zip((weight, scale), requantized):
-            param.data.copy_(data)
+        for name in {"shared_l2" if s == "w2" else "shared_l1" for s in weights}:
+            weight, scale = self._kernel_weights(name)
+            requantized = requantize_fp8_weights_for_sm90_mega_moe(
+                (weight.data, scale.data), is_sf_transposed_for_utccp=True
+            )
+            for param, data in zip((weight, scale), requantized):
+                param.data.copy_(data)
+        weights.clear()
+        scales.clear()
 
     def _load_weight(
         self,

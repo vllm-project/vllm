@@ -31,6 +31,7 @@ from vllm.model_executor.layers.quantization.utils.quant_utils import (
     kMxfp8Dynamic,
     kNvfp4DynamicToken,
 )
+from vllm.model_executor.model_loader.weight_utils import finalize_model_weights
 from vllm.platforms import current_platform
 from vllm.utils.deep_gemm import _import_deep_gemm, is_deep_gemm_supported
 
@@ -520,12 +521,6 @@ def test_deep_gemm_mega_moe_loads_shared_experts_into_kernel_layout(monkeypatch)
     monkeypatch.setattr(
         DeepGemmMegaMoEExperts, "_kernel_fuses_shared_experts", lambda self, spec: True
     )
-    # Compare the layout before SM90 requantization.
-    monkeypatch.setattr(
-        DeepGemmMegaMoEExperts,
-        "_requantize_loaded_shared_weight",
-        lambda self, *args: None,
-    )
     experts = _make_experts(
         num_experts=2,
         num_local_experts=2,
@@ -586,6 +581,75 @@ def test_deep_gemm_mega_moe_loads_shared_experts_into_kernel_layout(monkeypatch)
     assert torch.equal(l1_halves()[:, 1], w3.view(-1, 8, hidden))
     with pytest.raises(ValueError):
         experts.load_shared_expert_weight("shared_experts.gate_up_proj.weight", w1)
+
+
+@pytest.mark.skipif(
+    not is_deep_gemm_supported()
+    or not hasattr(_import_deep_gemm(), "requantize_fp8_weights_for_sm90_mega_moe"),
+    reason="The installed DeepGEMM has no SM90 MegaMoE requantization",
+)
+def test_deep_gemm_mega_moe_sm90_requantizes_reloaded_shared_shards(monkeypatch):
+    """SM90 requantizes the shared shards a load wrote and refuses a weight or a
+    scale that arrived alone."""
+    monkeypatch.setattr(
+        DeepGemmMegaMoEExperts, "_kernel_fuses_shared_experts", lambda self, spec: True
+    )
+    hidden, inter = 256, 384
+    experts = _make_experts(
+        num_experts=2,
+        num_local_experts=2,
+        experts_start_idx=0,
+        top_k=1,
+        hidden_size=hidden,
+        intermediate_size=inter,
+        shared_experts=_shared_mlp(hidden, inter),
+    )
+    experts.weight_format = MEGA_MOE_MXFP4_SM90
+    generator = torch.Generator().manual_seed(0)
+
+    def rand(low, high, *shape):
+        return torch.randint(low, high, shape, dtype=torch.uint8, generator=generator)
+
+    def checkpoint(n, k):
+        # Finite E4M3 codes of both signs; scales that differ within 128 K.
+        weight = rand(0, 0x7F, n, k) | (rand(0, 2, n, k) << 7)
+        scale = rand(120, 124, n, k // 32)
+        return weight.view(torch.float8_e4m3fn), scale.view(torch.float8_e8m0fnu)
+
+    shards = {
+        "w1": checkpoint(inter, hidden),
+        "w3": checkpoint(inter, hidden),
+        "w2": checkpoint(hidden, inter),
+    }
+
+    def load(*names):
+        for name in names:
+            shard, _, kind = name.partition(".")
+            tensor = shards[shard][kind == "weight_scale"]
+            experts.load_shared_expert_weight(f"shared_experts.{name}", tensor)
+        finalize_model_weights(experts)
+        return [
+            param.data.contiguous().view(torch.uint8).clone()
+            for name, param in experts.named_parameters()
+            if name.startswith("shared_")
+        ]
+
+    everything = [f"{s}.{kind}" for s in shards for kind in ("weight", "weight_scale")]
+    clean = load(*everything)
+    # One exponent per (row, 128 K): the four bytes of every scale word agree.
+    for scale in (experts.shared_l1_weight_scale, experts.shared_l2_weight_scale):
+        exponents = scale.contiguous().view(torch.uint8).view(-1, 4)
+        assert torch.equal(exponents, exponents[:, :1].expand(-1, 4))
+
+    # Reloading one shard, or everything in another order, lands on the same bytes.
+    assert all(map(torch.equal, load("w1.weight", "w1.weight_scale"), clean))
+    assert all(map(torch.equal, load("w2.weight_scale", "w2.weight"), clean))
+    assert all(map(torch.equal, load(*reversed(everything)), clean))
+    # A weight or a scale alone would stay raw under requantized partners.
+    for name in ("w3.weight", "w1.weight_scale", "w2.weight"):
+        with pytest.raises(ValueError, match=name.partition(".")[0]):
+            load(name)
+        assert all(map(torch.equal, load(*everything), clean))
 
 
 def _fake_deep_gemm(with_shared: bool):
@@ -1455,6 +1519,7 @@ def test_deep_gemm_mega_moe_matches_reference(dist_init, fmt_name, shared, act_n
                 experts.load_shared_expert_weight(
                     f"shared_experts.{shard}.weight_scale", scale
                 )
+        finalize_model_weights(experts)
 
     hidden_states = torch.randn(NUM_TOKENS, HIDDEN, device=device).bfloat16()
     scores = torch.randn(NUM_TOKENS, NUM_EXPERTS, device=device)
