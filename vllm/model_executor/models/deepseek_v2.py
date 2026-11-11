@@ -1547,7 +1547,7 @@ class DeepseekV2Model(nn.Module, EagleModelMixin):
         else:
             llama_4_scaling = None
 
-        aux_hidden_states = []
+        aux_hidden_states: list[torch.Tensor] = []
         if get_pp_group().is_first_rank:
             self._maybe_add_hidden_state(aux_hidden_states, 0, hidden_states, residual)
         for idx, layer in enumerate(
@@ -1595,10 +1595,6 @@ class DeepseekV2Model(nn.Module, EagleModelMixin):
             )
 
         hidden_states, _ = self.norm(hidden_states, residual)
-        aux_hidden_states = (
-            self.collect_remote_aux_hidden_states(intermediate_tensors)
-            + aux_hidden_states
-        )
         if len(aux_hidden_states) > 0:
             return hidden_states, aux_hidden_states
         return hidden_states

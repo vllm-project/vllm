@@ -753,6 +753,7 @@ steps:
   - vllm/v1/core/kv_cache_utils.py
   - vllm/v1/kv_cache_interface.py
   - vllm/model_executor/models/
+  - vllm/models/deepseek_v32/nvidia/
   - vllm/v1/worker/gpu/
   - vllm/v1/worker/gpu_worker.py
   - tests/distributed/

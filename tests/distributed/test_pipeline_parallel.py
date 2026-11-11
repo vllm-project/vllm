@@ -554,13 +554,18 @@ def test_pp_tied_word_embeddings(
     )
 
 
+def _get_target_embedding(model):
+    # Module scope is required by the multiprocessing executor's pickle transport.
+    return model.model.embed_tokens.weight.detach().cpu()
+
+
 @multi_gpu_only(num_gpus=2)
 @pytest.mark.parametrize(
     "aux_layers", [(0, 2, 4), (0, 1, 2)], ids=["boundary-and-final", "all-upstream"]
 )
 @create_new_process_for_each_test()
 def test_pp_deepseek_dflash2_shared_embedding(
-    vllm_runner, tmp_path, monkeypatch, aux_layers
+    vllm_runner, tmp_path, monkeypatch, enable_pickle, aux_layers
 ):
     """Load the shared embedding and relay draft inputs across a PP boundary."""
     import torch
@@ -621,6 +626,10 @@ def test_pp_deepseek_dflash2_shared_embedding(
             enforce_eager=True,
             max_model_len=64,
             max_num_seqs=4,
+            max_num_batched_tokens=64,
+            enable_chunked_prefill=True,
+            gpu_memory_utilization=0.01,
+            numa_bind=False,
             kv_cache_memory_bytes=64 << 20,
             pipeline_parallel_size=pp_size,
             distributed_executor_backend="mp",
@@ -632,9 +641,7 @@ def test_pp_deepseek_dflash2_shared_embedding(
                 "draft_load_config": {"load_format": "dummy"},
             },
         ) as runner:
-            embeddings = runner.apply_model(
-                lambda model: model.model.embed_tokens.weight.detach().cpu()
-            )
+            embeddings = runner.apply_model(_get_target_embedding)
             for embedding in embeddings:
                 torch.testing.assert_close(
                     embedding[:128], expected_embedding, rtol=0, atol=0
