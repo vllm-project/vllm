@@ -926,6 +926,23 @@ def choose_mp_linear_kernel(
         compute_capability=compute_capability,
     )
 
+    # Measured on RTX 5060 Laptop (sm_120): for fp16 W4A16 with K <= 2048,
+    # Exllama beats Marlin at every M in [1, 512] (up to ~2x at M=1). At
+    # K = 4096 Exllama loses for M in [64, 128], so the reorder is K-scoped
+    # (#66232).
+    sm120_fp16 = compute_capability == 120 and config.act_type == torch.float16
+    if (
+        sm120_fp16
+        and config.full_weight_shape[0] <= 2048
+        and MarlinLinearKernel in platform_kernels
+        and ExllamaLinearKernel in platform_kernels
+    ):
+        platform_kernels = list(platform_kernels)
+        platform_kernels.remove(ExllamaLinearKernel)
+        platform_kernels.insert(
+            platform_kernels.index(MarlinLinearKernel), ExllamaLinearKernel
+        )
+
     failure_reasons = []
     for kernel in platform_kernels:
         if kernel.__name__ in envs.VLLM_DISABLED_KERNELS:
