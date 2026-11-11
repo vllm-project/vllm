@@ -4032,7 +4032,7 @@ class MoRIIOConnectorWorker:
         remote_moriio_meta: MoRIIOAgentMetadata | None,
         remote_engine_id: EngineId | None,
     ) -> tuple[list[int], list[int]]:
-        offsets = getattr(self, "kv_region_mr_offsets", {}).get(layer_name)
+        offsets = self.kv_region_mr_offsets.get(layer_name)
         if offsets is None:
             return local, remote
         if remote_moriio_meta is None or remote_engine_id is None:

@@ -1591,10 +1591,6 @@ class MooncakeStoreWorker:
         self.block_size, self.hash_block_size = resolve_kv_cache_block_sizes(
             kv_cache_config, vllm_config
         )
-        # Use the engine core's hash unit: worker-only platform hooks may change
-        # prefix_match_unit, and keys would then index the wrong block hash.
-        if kv_cache_config.hash_block_size is not None:
-            self.hash_block_size = kv_cache_config.hash_block_size
         self.num_layers = model_config.get_num_layers(parallel_config)
 
         self.num_kv_head = model_config.get_total_num_kv_heads()
@@ -1626,14 +1622,8 @@ class MooncakeStoreWorker:
                 "Mooncake package does not support ReplicateConfig.group_ids. "
                 "Falling back to the existing batch_put_from_multi_buffers path."
             )
-        if preferred_segment == "self":
-            preferred_segment = self.store.get_hostname()
-            self.preferred_segment = preferred_segment
         if preferred_segment is not None:
             self.store_replicate_config.preferred_segment = preferred_segment
-        if os.getenv("MOONCAKE_PREFER_SAME_NODE", "0") == "1":
-            self.store_replicate_config.prefer_alloc_in_same_node = True
-            logger.info("Mooncake prefer_alloc_in_same_node=True")
 
         logger.info(
             "Mooncake mode=%s (global_segment_size=%d, local_buffer_size=%d, "
