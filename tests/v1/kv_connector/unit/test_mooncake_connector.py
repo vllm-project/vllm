@@ -1343,6 +1343,35 @@ async def test_receive_kv_selects_remote_pp_workers(
         decode_worker.shutdown()
 
 
+@pytest.mark.cpu_test
+@pytest.mark.asyncio
+async def test_prefill_early_abort_cleanup_is_idempotent():
+    """An abort for a transfer the worker never recorded must not stop cleanup."""
+    worker = MooncakeConnectorWorker.__new__(MooncakeConnectorWorker)
+    worker.async_zmq_ctx = MagicMock()
+    worker.is_kv_consumer = True
+    worker.is_kv_producer = True
+
+    def pending(transfer_id: str) -> SendBlockMeta:
+        return SendBlockMeta(
+            p_req_id=transfer_id,
+            transfer_id=transfer_id,
+            local_block_ids=[],
+            ready=asyncio.Event(),
+        )
+
+    unrelated = pending("unrelated")
+    worker.reqs_need_send = {"recorded": pending("recorded"), "unrelated": unrelated}
+
+    metadata = MooncakeConnectorMetadata()
+    metadata.reqs_not_processed = {"never-recorded", "recorded"}
+
+    # The second call repeats the abort after the record is already gone.
+    for _ in range(2):
+        await worker.record_send_reqs(metadata)
+        assert worker.reqs_need_send == {"unrelated": unrelated}
+
+
 def test_resolve_need_send_accounts_for_remote_tp_fanout():
     """Producer-side completion waits for every paired consumer TP pull."""
     worker = MooncakeConnectorWorker.__new__(MooncakeConnectorWorker)
