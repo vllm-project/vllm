@@ -871,9 +871,7 @@ class Moondream3TextModel(nn.Module):
             assert intermediate_tensors is not None
             hidden_states = intermediate_tensors["hidden_states"]
 
-        for i, layer in enumerate(
-            islice(self.blocks, self.start_layer, self.end_layer)
-        ):
+        for layer in islice(self.blocks, self.start_layer, self.end_layer):
             hidden_states = layer(positions, hidden_states)
 
         if not pp_group.is_last_rank:
@@ -1091,6 +1089,11 @@ class Moondream3ForCausalLM(nn.Module, SupportsMultiModal, SupportsPP):
             )
 
         self.logits_processor = LogitsProcessor(self.config.text_config.vocab_size)
+        self.register_buffer(
+            "_bos_ids",
+            torch.tensor([self.config.bos_token_id], dtype=torch.long),
+            persistent=False,
+        )
         self.make_empty_intermediate_tensors = self.text.make_empty_intermediate_tensors
         self._answer_id = getattr(
             self.config,
@@ -1281,9 +1284,7 @@ class Moondream3ForCausalLM(nn.Module, SupportsMultiModal, SupportsPP):
         if not image_inputs:
             return []
 
-        device = self.vision.patch_emb.weight.device
-        bos_ids = torch.tensor([self.config.bos_token_id], device=device)
-        bos_embedding = self.text.embed_input_ids(bos_ids)
+        bos_embedding = self.text.embed_input_ids(self._bos_ids)
 
         embeddings: list[torch.Tensor] = []
         for image_input in image_inputs:
