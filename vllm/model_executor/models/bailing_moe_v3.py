@@ -20,7 +20,13 @@ from einops import rearrange
 from transformers.configuration_utils import PreTrainedConfig
 
 from vllm.compilation.decorators import support_torch_compile
-from vllm.config import CacheConfig, ModelConfig, VllmConfig, get_current_vllm_config
+from vllm.config import (
+    CacheConfig,
+    ModelConfig,
+    VllmConfig,
+    get_current_vllm_config,
+    get_current_vllm_config_or_none,
+)
 from vllm.distributed import (
     get_pp_group,
     get_tensor_model_parallel_rank,
@@ -61,6 +67,7 @@ from vllm.model_executor.layers.quantization.base_config import QuantizationConf
 from vllm.model_executor.layers.quantization.fp8 import Fp8Config
 from vllm.model_executor.layers.quantization.utils.quant_utils import is_layer_skipped
 from vllm.model_executor.layers.rotary_embedding import get_rope
+from vllm.model_executor.layers.rotary_embedding.common import yarn_get_mscale
 from vllm.model_executor.layers.vocab_parallel_embedding import (
     ParallelLMHead,
     VocabParallelEmbedding,
@@ -171,6 +178,17 @@ def _build_rope_parameters(config: PreTrainedConfig) -> dict | None:
     return rope_parameters or None
 
 
+def _get_mla_attention_scale(config: PreTrainedConfig, head_dim: int) -> float:
+    scaling = head_dim**-0.5
+    rope_parameters = _build_rope_parameters(config) or {}
+    mscale_all_dim = rope_parameters.get("mscale_all_dim", 0)
+    if mscale_all_dim:
+        scaling *= (
+            yarn_get_mscale(rope_parameters.get("factor", 1.0), mscale_all_dim) ** 2
+        )
+    return scaling
+
+
 def _build_mla_rotary_embedding(
     config: PreTrainedConfig,
     head_size: int,
@@ -178,11 +196,14 @@ def _build_mla_rotary_embedding(
     rope_parameters = _build_rope_parameters(config)
     if rope_parameters is not None and "mrope_section" in rope_parameters:
         rope_type = rope_parameters.get("rope_type", "default")
-        if rope_type != "default":
+        if rope_type not in ("default", "yarn"):
             raise ValueError(
-                f"Bailing M-RoPE only supports rope_type='default', got {rope_type!r}"
+                "Bailing M-RoPE only supports rope_type='default' or 'yarn', "
+                f"got {rope_type!r}"
             )
-        rope_parameters["rope_type"] = "bailing_mrope"
+        rope_parameters["rope_type"] = (
+            "bailing_mrope_yarn" if rope_type == "yarn" else "bailing_mrope"
+        )
 
     return get_rope(
         head_size=head_size,
@@ -230,6 +251,12 @@ def _configure_ling_fp8_quant_config(
 
     quant_config.ignored_layers_match_mode = "suffix"
     hf_quant_config = getattr(config, "quantization_config", None)
+    if hf_quant_config is None:
+        vllm_config = get_current_vllm_config_or_none()
+        model_config = getattr(vllm_config, "model_config", None)
+        hf_quant_config = getattr(
+            getattr(model_config, "hf_config", None), "quantization_config", None
+        )
     if not isinstance(hf_quant_config, dict):
         return
 
@@ -467,7 +494,7 @@ class BailingMoeV3MLAAttention(nn.Module):
         tp_size = get_tensor_model_parallel_world_size()
         assert self.num_heads % tp_size == 0
         self.num_local_heads = self.num_heads // tp_size
-        self.scaling = self.qk_head_dim**-0.5
+        self.scaling = _get_mla_attention_scale(config, self.qk_head_dim)
 
         self.q_proj: ColumnParallelLinear | None
         self.kv_a_proj_with_mqa: ReplicatedLinear | None
@@ -526,6 +553,26 @@ class BailingMoeV3MLAAttention(nn.Module):
             g_out = self.num_heads * self.v_head_dim
         else:
             g_out = 0
+        block_size = (
+            quant_config.weight_block_size
+            if _is_block_fp8_config(quant_config)
+            else None
+        )
+        self.replicate_g_proj = (
+            self.gated_attention_proj_granularity_type == "head_wise"
+            and tp_size > 1
+            and block_size is not None
+            and g_out <= block_size[0]
+            and not _is_fp8_module_excluded(quant_config, f"{prefix}.g_proj")
+            and self.num_local_heads % block_size[0] != 0
+        )
+        # A gate spanning at most one FP8 row block cannot split its scales
+        # across TP ranks. Replicate it and select each rank's heads instead.
+        self.g_proj_start = (
+            get_tensor_model_parallel_rank() * self.num_local_heads
+            if self.replicate_g_proj
+            else 0
+        )
         self.g_proj = (
             ColumnParallelLinear(
                 self.hidden_size,
@@ -533,6 +580,7 @@ class BailingMoeV3MLAAttention(nn.Module):
                 bias=False,
                 quant_config=quant_config,
                 prefix=f"{prefix}.g_proj",
+                disable_tp=self.replicate_g_proj,
             )
             if g_out > 0
             else None
@@ -581,9 +629,12 @@ class BailingMoeV3MLAAttention(nn.Module):
     def forward(self, hidden_states: torch.Tensor, positions: torch.Tensor):
         attn_out = self.mla_attn(positions, hidden_states)
         if self.g_proj is not None:
-            gate = torch.sigmoid(self.g_proj(hidden_states)[0].float()).to(
-                hidden_states.dtype
-            )
+            gate = self.g_proj(hidden_states)[0]
+            if self.replicate_g_proj:
+                gate = gate[
+                    ..., self.g_proj_start : self.g_proj_start + self.num_local_heads
+                ]
+            gate = torch.sigmoid(gate.float()).to(hidden_states.dtype)
             if self.gated_attention_proj_granularity_type == "head_wise":
                 attn_out = attn_out.view(-1, self.num_local_heads, self.v_head_dim)
                 attn_out = attn_out * gate.unsqueeze(-1)
@@ -1064,9 +1115,8 @@ class BailingMoeV3KimiDeltaAttention(PluggableLayer, MambaBase):
             assert g1_non_spec is not None and beta_non_spec is not None
             assert state_indices is not None
             assert has_initial_state is not None
-            zero_idx = state_indices[~has_initial_state]
-            recurrent_state[zero_idx] = 0
             initial_state = recurrent_state_active[state_indices].contiguous()
+            initial_state.masked_fill_(~has_initial_state[:, None, None, None], 0)
             out, last_state = chunk_kda(
                 q=q,
                 k=k,
@@ -1168,7 +1218,9 @@ class BailingMoeV3MoE(nn.Module):
             intermediate_size=config.moe_intermediate_size,
             renormalize=True,
             quant_config=quant_config,
-            activation="silu",
+            activation=(
+                "swiglustep" if self.expert_swiglu_limit is not None else "silu"
+            ),
             swiglu_limit=self.expert_swiglu_limit,
             prefix=f"{prefix}.experts",
             scoring_func="sigmoid",
@@ -1376,7 +1428,10 @@ class BailingMoeV3Model(nn.Module):
 
 
 class BailingMoeV3ForCausalLM(nn.Module, HasInnerState, IsHybrid, SupportsPP):
-    hf_to_vllm_mapper = WeightsMapper(orig_to_new_substr={".attention.": ".self_attn."})
+    hf_to_vllm_mapper = WeightsMapper(
+        orig_to_new_substr={".attention.": ".self_attn."},
+        orig_to_new_prefix={"attention.": "self_attn."},
+    )
 
     packed_modules_mapping = {
         "gate_up_proj": ["gate_proj", "up_proj"],

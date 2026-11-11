@@ -4,7 +4,7 @@
 """CPU hardware discovery for optional vLLM Recipes runtime tuning.
 
 Keep this module focused on facts exposed to the current process/container.
-Tuning decisions belong in runtime_tuning.py.
+Tuning decisions belong in sweep/runtime_tuning.py.
 """
 
 from __future__ import annotations

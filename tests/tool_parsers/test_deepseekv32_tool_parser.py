@@ -891,8 +891,8 @@ class TestExtractToolCallsStreaming:
     def _stream_chunked(self, parser, full_text: str, chunk_size: int, request=None):
         """Drive the parser with fixed-size chunks (simulates stream interval).
 
-        Unlike ``_stream`` which splits on newlines, this splits the text
-        into ``chunk_size``-character pieces so the start token can be
+        Unlike `_stream` which splits on newlines, this splits the text
+        into `chunk_size`-character pieces so the start token can be
         split across chunks — exactly what happens with stream interval > 1.
         """
         if request is None:
@@ -968,6 +968,45 @@ class TestExtractToolCallsStreaming:
         combined = "".join(arg_chunks)
         assert combined  # some partial args emitted
         assert combined.startswith('{"k"')
+
+    def test_long_string_argument_streams_before_close(self):
+        """A string body has no ">" and must not be buffered until
+        </parameter> arrives (GitHub #52846)."""
+        tool = ChatCompletionToolsParam(
+            function=FunctionDefinition(
+                name="emit",
+                parameters={
+                    "type": "object",
+                    "properties": {"text": {"type": "string"}},
+                },
+            ),
+        )
+        parser = make_parser(tools=[tool])
+        body = "A" * 4096
+        chunks = [
+            f'{FC_START}\n{INV_START}emit">\n{PARAM_START}text" string="true">',
+            *(body[i : i + 32] for i in range(0, len(body), 32)),
+            f"{PARAM_END}\n{INV_END}\n{FC_END}",
+        ]
+        per_chunk_args = []
+        prev = ""
+        for chunk in chunks:
+            result = parser.extract_tool_calls_streaming(
+                previous_text=prev,
+                current_text=prev + chunk,
+                delta_text=chunk,
+                previous_token_ids=[],
+                current_token_ids=[],
+                delta_token_ids=[1],
+                request=make_request(),
+            )
+            prev += chunk
+            per_chunk_args.append(
+                self._reconstruct_args([result]) if result is not None else ""
+            )
+
+        assert sum(1 for args in per_chunk_args[1:-1] if args) > 1
+        assert json.loads("".join(per_chunk_args)) == {"text": body}
 
     def test_no_marker_leak_chunked(self, parser):
         """Chunked streaming must NOT leak DSML start-marker fragments

@@ -24,7 +24,6 @@
 """Inference-only Qwen3 model compatible with HuggingFace weights."""
 
 from collections.abc import Iterable
-from typing import Any
 
 import torch
 from torch import nn
@@ -57,7 +56,7 @@ from .interfaces import (
 )
 from .qwen2 import Qwen2MLP as Qwen3MLP
 from .qwen2 import Qwen2Model
-from .utils import AutoWeightsLoader, PPMissingLayer, extract_layer_index, maybe_prefix
+from .utils import AutoWeightsLoader, PPMissingLayer, maybe_prefix
 
 logger = init_logger(__name__)
 
@@ -77,8 +76,8 @@ class Qwen3Attention(nn.Module):
         quant_config: QuantizationConfig | None = None,
         prefix: str = "",
         attn_type: str = AttentionType.DECODER,
-        dual_chunk_attention_config: dict[str, Any] | None = None,
         per_layer_sliding_window: int | None = None,
+        mrope_positions_factor: int = 4,
     ) -> None:
         super().__init__()
         self.hidden_size = hidden_size
@@ -100,7 +99,6 @@ class Qwen3Attention(nn.Module):
         self.q_size = self.num_heads * self.head_dim
         self.kv_size = self.num_kv_heads * self.head_dim
         self.scaling = self.head_dim**-0.5
-        self.dual_chunk_attention_config = dual_chunk_attention_config
 
         self.qkv_proj = QKVParallelLinear(
             hidden_size,
@@ -123,19 +121,13 @@ class Qwen3Attention(nn.Module):
             self.head_dim,
             max_position=max_position,
             rope_parameters=rope_parameters,
-            dual_chunk_attention_config=dual_chunk_attention_config,
+            mrope_positions_factor=mrope_positions_factor,
         )
         attn_cls = (
             EncoderOnlyAttention
             if attn_type == AttentionType.ENCODER_ONLY
             else Attention
         )
-        attention_kwargs: dict[str, Any] = {}
-        if dual_chunk_attention_config:
-            attention_kwargs = {
-                "layer_idx": extract_layer_index(prefix),
-                "dual_chunk_attention_config": dual_chunk_attention_config,
-            }
         self.attn = attn_cls(
             self.num_heads,
             self.head_dim,
@@ -146,7 +138,6 @@ class Qwen3Attention(nn.Module):
             per_layer_sliding_window=per_layer_sliding_window,
             prefix=f"{prefix}.attn",
             attn_type=attn_type,
-            **attention_kwargs,
         )
         self.q_norm = RMSNorm(self.head_dim, eps=rms_norm_eps)
         self.k_norm = RMSNorm(self.head_dim, eps=rms_norm_eps)
@@ -179,13 +170,11 @@ class Qwen3DecoderLayer(nn.Module):
         quant_config: QuantizationConfig | None = None,
         prefix: str = "",
         per_layer_sliding_window: int | None = None,
+        mrope_positions_factor: int = 4,
     ) -> None:
         super().__init__()
         self.hidden_size = config.hidden_size
         set_default_rope_theta(config, default_theta=1000000)
-        dual_chunk_attention_config = getattr(
-            config, "dual_chunk_attention_config", None
-        )
 
         # By default, Qwen3 uses causal attention as it is a decoder-only model.
         # You can override the HF config with `is_causal=False` to enable
@@ -209,8 +198,8 @@ class Qwen3DecoderLayer(nn.Module):
             rope_parameters=config.rope_parameters,
             prefix=f"{prefix}.self_attn",
             attn_type=attn_type,
-            dual_chunk_attention_config=dual_chunk_attention_config,
             per_layer_sliding_window=per_layer_sliding_window,
+            mrope_positions_factor=mrope_positions_factor,
         )
         self.mlp = Qwen3MLP(
             hidden_size=self.hidden_size,
@@ -263,9 +252,13 @@ ALL_DECODER_LAYER_TYPES = {
     }
 )
 class Qwen3Model(Qwen2Model):
+    decoder_layer_type: type[nn.Module] = Qwen3DecoderLayer
+
     def __init__(self, *, vllm_config: VllmConfig, prefix: str = ""):
         super().__init__(
-            vllm_config=vllm_config, prefix=prefix, decoder_layer_type=Qwen3DecoderLayer
+            vllm_config=vllm_config,
+            prefix=prefix,
+            decoder_layer_type=self.decoder_layer_type,
         )
 
 
@@ -334,6 +327,12 @@ class Qwen3ForCausalLM(
     ) -> torch.Tensor | None:
         logits = self.logits_processor(self.lm_head, hidden_states)
         return logits
+
+    def compute_logits_local(
+        self,
+        hidden_states: torch.Tensor,
+    ) -> torch.Tensor:
+        return self.logits_processor(self.lm_head, hidden_states, skip_gather=True)
 
     def load_weights(self, weights: Iterable[tuple[str, torch.Tensor]]) -> set[str]:
         loader = AutoWeightsLoader(self)

@@ -1,6 +1,8 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 
+import dis
+import itertools
 import os
 import sys
 from abc import abstractmethod
@@ -76,7 +78,7 @@ class TorchCompileWithNoGuardsWrapper:
             args_list = list(args)
             kwargs_dict = dict(kwargs)
             with layerwise_nvtx_marker_context(
-                "Torch Compiled Module (input):{}".format(self.__class__.__name__),
+                f"Torch Compiled Module (input):{self.__class__.__name__}",
                 self,
                 in_tensor=args_list,
                 kwargs=kwargs_dict,
@@ -84,6 +86,8 @@ class TorchCompileWithNoGuardsWrapper:
                 ctx.result = callable_fn(*args, **kwargs)
             return ctx.result
         return callable_fn(*args, **kwargs)
+
+    _allow_aot_compile: bool = True
 
     def __init__(
         self,
@@ -104,7 +108,10 @@ class TorchCompileWithNoGuardsWrapper:
             raise RuntimeError("Compilation mode cannot be NO_COMPILATION")
 
         backend = vllm_config.compilation_config.init_backend(
-            vllm_config, prefix=compile_prefix, is_encoder=is_encoder
+            vllm_config,
+            prefix=compile_prefix,
+            is_encoder=is_encoder,
+            use_aot_compile=self._allow_aot_compile,
         )
         options = {}
 
@@ -151,7 +158,7 @@ class TorchCompileWithNoGuardsWrapper:
         _apply_constrain_to_fx_strides_patch()
 
         aot_context = nullcontext()
-        if envs.VLLM_USE_AOT_COMPILE:
+        if self._allow_aot_compile and envs.VLLM_USE_AOT_COMPILE:
             if hasattr(torch._dynamo.config, "enable_aot_compile"):
                 aot_context = torch._dynamo.config.patch(enable_aot_compile=True)
             else:
@@ -263,9 +270,11 @@ class TorchCompileWithNoGuardsWrapper:
                 except Exception:
                     pass
 
+        # Dynamo emits `<module>._buffers.update` for buffers assigned during forward
+        pairs = itertools.pairwise(dis.get_instructions(new_code))
         if (
             self.vllm_config.compilation_config.cudagraph_mode != CUDAGraphMode.NONE
-            and "update" in new_code.co_names
+            and any(a.argval == "_buffers" and b.argval == "update" for a, b in pairs)
         ):
             import depyf
 

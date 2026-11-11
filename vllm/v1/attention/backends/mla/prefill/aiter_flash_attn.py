@@ -2,9 +2,9 @@
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 """AITER FlashAttention backend for MLA prefill (ROCm).
 
-This backend calls ``aiter.flash_attn_varlen_func`` directly, which natively
+This backend calls `aiter.flash_attn_varlen_func` directly, which natively
 supports different q/k and v head dims (qk headdim 192, v headdim 128) without
-padding V, and dispatches to the fast ``aiter::fmha_fwd_`` kernel on
+padding V, and dispatches to the fast `aiter::fmha_fwd_` kernel on
 gfx942/gfx950 (fp16/bf16).
 """
 
@@ -12,6 +12,7 @@ from typing import TYPE_CHECKING
 
 import torch
 
+import vllm.envs as envs
 from vllm.platforms import current_platform
 from vllm.v1.attention.backends.mla.prefill.base import MLAPrefillBackend
 
@@ -46,6 +47,15 @@ class AiterFlashAttnPrefillBackend(MLAPrefillBackend):
         from vllm._aiter_ops import rocm_aiter_ops
 
         return rocm_aiter_ops.is_enabled()
+
+    @classmethod
+    def validate_configuration(cls, device_capability, selector_config):
+        invalid_reasons = super().validate_configuration(
+            device_capability, selector_config
+        )
+        if envs.VLLM_BATCH_INVARIANT:
+            invalid_reasons.append("batch invariance not supported")
+        return invalid_reasons
 
     def __init__(
         self,

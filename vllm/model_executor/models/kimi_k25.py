@@ -11,7 +11,7 @@ from typing import TYPE_CHECKING, Annotated, Any, ClassVar, Literal
 
 import torch
 from torch import nn
-from transformers import BatchFeature
+from transformers import BatchFeature, Kimi_K25Config
 
 from vllm.config import VllmConfig
 from vllm.config.multimodal import MultiModalDummyOptions
@@ -63,7 +63,6 @@ from vllm.multimodal.processing import (
 )
 from vllm.platforms import current_platform
 from vllm.sequence import IntermediateTensors
-from vllm.transformers_utils.configs.kimi_k25 import KimiK25Config
 from vllm.transformers_utils.processor import cached_get_image_processor
 from vllm.transformers_utils.processors.kimi_k25 import KimiK25Processor
 from vllm.transformers_utils.processors.kimi_k25_vision_fused import (
@@ -135,7 +134,7 @@ class KimiK25ProcessingInfo(BaseProcessingInfo):
 
         # Resolve token ID from the tokenizer because transformers v5
         # may remap token IDs vs config.json.
-        config_token_id = hf_config.media_placeholder_token_id
+        config_token_id = hf_config.image_token_id
         resolved_token_id = tokenizer.convert_tokens_to_ids("<|media_pad|>")
         unk_token_id = getattr(tokenizer, "unk_token_id", None)
         is_valid_resolved = isinstance(resolved_token_id, int) and (
@@ -143,7 +142,7 @@ class KimiK25ProcessingInfo(BaseProcessingInfo):
         )
         if is_valid_resolved and resolved_token_id != config_token_id:
             logger.warning_once(
-                "Kimi-K2.5 config.media_placeholder_token_id (%d) disagrees "
+                "Kimi-K2.5 config.image_token_id (%d) disagrees "
                 "with tokenizer mapping for <|media_pad|> (%d). "
                 "Using tokenizer value.",
                 config_token_id,
@@ -151,7 +150,7 @@ class KimiK25ProcessingInfo(BaseProcessingInfo):
             )
             media_token_id = resolved_token_id
             # Patch config so downstream code also sees the correct ID.
-            hf_config.media_placeholder_token_id = resolved_token_id
+            hf_config.image_token_id = resolved_token_id
         else:
             media_token_id = config_token_id
 
@@ -170,7 +169,7 @@ class KimiK25ProcessingInfo(BaseProcessingInfo):
         return self.hf_processor
 
     def get_hf_config(self):
-        return self.ctx.get_hf_config(KimiK25Config)
+        return self.ctx.get_hf_config(Kimi_K25Config)
 
     def get_supported_mm_limits(self) -> Mapping[str, int | None]:
         # None means unlimited
@@ -338,7 +337,7 @@ class KimiK25ForConditionalGeneration(
     ) -> None:
         super().__init__()
         model_config = vllm_config.model_config
-        config: KimiK25Config = model_config.hf_config
+        config: Kimi_K25Config = model_config.hf_config
         self.config = config
         quant_config = vllm_config.quant_config
 
@@ -347,7 +346,6 @@ class KimiK25ForConditionalGeneration(
         )
         self.hidden_size = config.text_config.hidden_size
         self.device = current_platform.current_device()
-        # Build vision tower directly with KimiK25VisionConfig
         with self._mark_tower_model(vllm_config, "vision_chunk"):
             self.vision_tower = MoonViT3dPretrainedModel(
                 config.vision_config,
@@ -364,6 +362,7 @@ class KimiK25ForConditionalGeneration(
 
             self.mm_projector = KimiK25MultiModalProjector(
                 config=config.vision_config,
+                out_hidden_size=config.text_config.hidden_size,
                 use_data_parallel=self.use_data_parallel,
                 quant_config=self._maybe_ignore_quant_config(quant_config),
                 prefix=maybe_prefix(prefix, "mm_projector"),
@@ -383,7 +382,7 @@ class KimiK25ForConditionalGeneration(
         self.make_empty_intermediate_tensors = (
             self.language_model.make_empty_intermediate_tensors
         )
-        self.media_placeholder: int = self.config.media_placeholder_token_id
+        self.media_placeholder: int = self.config.image_token_id
 
     def _maybe_ignore_quant_config(self, quant_config: QuantizationConfig | None):
         if isinstance(quant_config, compressed_tensors.CompressedTensorsConfig):

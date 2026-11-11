@@ -8,7 +8,9 @@ downloaded model; these exercise the loader alone and need no model.
 
 import pytest
 
-from vllm.v1.sample.logits_processor import _load_logitsprocs_by_fqcns
+from vllm.v1.worker.gpu.sample.logits_processor.loader import (
+    _load_v2_logitsprocs_by_fqcns,
+)
 
 
 @pytest.mark.parametrize(
@@ -21,4 +23,4 @@ from vllm.v1.sample.logits_processor import _load_logitsprocs_by_fqcns
 )
 def test_invalid_fqcn_rejected(fqcn: str):
     with pytest.raises(ValueError, match="Invalid logits processor FQCN"):
-        _load_logitsprocs_by_fqcns([fqcn])
+        _load_v2_logitsprocs_by_fqcns([fqcn])
