@@ -496,18 +496,35 @@ def test_aligned_boundary_store_uses_exact_source_with_partial_tail():
 
 
 def test_partial_tail_store_skips_ambiguous_boundaries():
-    """Two retained boundaries for one request must not kill the engine."""
+    """An ambiguous request is dropped without affecting other requests."""
     scheduler = _make_partial_tail_scheduler()
-    _make_partial_tail_request(scheduler)
-    output = SimpleNamespace(
-        kv_connector_block_state=KVConnectorBlockState(
-            req_ids=set(),
-            resolve_block_ids={}.__getitem__,
-            boundary_state_offloads={"req": [(1, 99, 28), (1, 98, 20)]},
-        )
+    _make_partial_tail_request(scheduler, request_id="ambiguous")
+    _make_partial_tail_request(scheduler, request_id="clean")
+    for req_id in ("ambiguous", "clean"):
+        req_status = scheduler._req_status[req_id]
+        req_status.group_states[0].block_ids[:] = [11, 12]
+        req_status.group_states[1].block_ids[:] = [0, 21]
+    _as_mock(scheduler.manager.prepare_store).side_effect = lambda keys, req_context: (
+        generate_store_output(keys)
     )
 
-    assert scheduler._build_partial_tail_store_jobs(output) == {}
+    def build(boundary_state_offloads):
+        output = SimpleNamespace(
+            kv_connector_block_state=KVConnectorBlockState(
+                req_ids=set(),
+                resolve_block_ids={}.__getitem__,
+                boundary_state_offloads=boundary_state_offloads,
+            )
+        )
+        return scheduler._build_partial_tail_store_jobs(output)
+
+    ambiguous_entries = [(1, 99, 28), (1, 98, 20)]
+    clean_entries = [(1, 99, 28)]
+    assert build({"ambiguous": ambiguous_entries}) == {}
+    expected = len(build({"clean": clean_entries}))
+    assert expected > 0
+    mixed = build({"ambiguous": ambiguous_entries, "clean": clean_entries})
+    assert len(mixed) == expected
 
 
 def test_aligned_boundary_store_maps_sparse_group_id_to_dense_transfer_slot():

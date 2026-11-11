@@ -1808,8 +1808,8 @@ class OffloadingConnectorScheduler:
                 # hand-off carrying several cannot be stored. Dropping it only
                 # loses the offload hit.
                 logger.warning_once(
-                    "Skipping partial-tail store: expected one boundary, got %s",
-                    tuple(sorted(boundaries)),
+                    "Skipping partial-tail store for a hand-off with several "
+                    "boundaries."
                 )
                 continue
             boundary = boundaries.pop()
