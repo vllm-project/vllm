@@ -2049,21 +2049,40 @@ def _padded_ragged_decode_batch(
     ("head_dim", "dtype"),
     [(16, torch.float32), (128, torch.bfloat16)],
 )
+# MiniMax M3 selects 16 blocks; 6 keeps the generic selector covered.
+@pytest.mark.parametrize("topk", [6, 16])
+# On gfx950 the bf16, head_dim 128 score launch depends on the padded request
+# count (balanced kernel up to 11, high-batch split for 20-64, default split
+# otherwise), and the topk=16 selector takes a single short chunk up to 128
+# blocks and 16 chunks above. Two padding requests are added to each batch.
+@pytest.mark.parametrize(
+    ("num_active_reqs", "max_seq_len"),
+    [(3, 1025), (24, 4096), (70, 2048), (2, 20000)],
+    ids=["balanced", "high-batch", "default-split", "long-context"],
+)
 def test_decode_index_topk_varlen_with_padded_rows(
     head_dim: int,
     dtype: torch.dtype,
+    topk: int,
+    num_active_reqs: int,
+    max_seq_len: int,
 ):
     from vllm.models.minimax_m3.amd.ops.index_topk import (
         minimax_m3_index_decode as minimax_m3_index_decode_varlen,
     )
 
     set_random_seed(0)
-    topk = 6
     init_blocks = 0
     local_blocks = 1
     num_idx_heads = 2
-    active_seq_lens = torch.tensor((7, 129, 1025), device="cuda", dtype=torch.int32)
-    active_q_lens = torch.tensor((1, 4, 2), device="cuda", dtype=torch.int32)
+    # Adaptive verification gives each request 1 to 1 + K query tokens (K = 7).
+    active_q_lens = torch.randint(
+        1, 9, (num_active_reqs,), device="cuda", dtype=torch.int32
+    )
+    active_seq_lens = torch.randint(
+        8, max_seq_len + 1, (num_active_reqs,), device="cuda", dtype=torch.int32
+    )
+    active_seq_lens[0] = max_seq_len
     prefix_lens = active_seq_lens - active_q_lens
     seq_lens, query_start_loc, token_to_req = _padded_ragged_decode_batch(
         active_seq_lens, active_q_lens
@@ -2072,13 +2091,12 @@ def test_decode_index_topk_varlen_with_padded_rows(
     num_active_tokens = int(active_q_lens.sum())
     total_q = token_to_req.numel()
 
-    max_seq_len = int(active_seq_lens.max())
     max_blocks = (max_seq_len + BLOCK_SIZE - 1) // BLOCK_SIZE
-    num_pages = active_seq_lens.numel() * max_blocks
+    num_pages = num_active_reqs * max_blocks
     block_table = torch.zeros(batch, max_blocks, device="cuda", dtype=torch.int32)
-    block_table[:3] = torch.randperm(
+    block_table[:num_active_reqs] = torch.randperm(
         num_pages, device="cuda", dtype=torch.int32
-    ).reshape(3, max_blocks)
+    ).reshape(num_active_reqs, max_blocks)
     idx_q = torch.randn(total_q, num_idx_heads, head_dim, device="cuda", dtype=dtype)
     index_kv_cache = torch.randn(
         num_pages, BLOCK_SIZE, head_dim, device="cuda", dtype=dtype
@@ -2103,7 +2121,7 @@ def test_decode_index_topk_varlen_with_padded_rows(
     expected[:, :num_active_tokens] = _reference_index_topk(
         idx_q[:num_active_tokens],
         index_kv_cache,
-        block_table[:3],
+        block_table[:num_active_reqs],
         active_q_lens,
         active_seq_lens,
         prefix_lens,
