@@ -3,16 +3,16 @@
 """The Qwen3.8-Flash-Next specialized decode executor (step mode): one routing
 decision per step, then the whole forward on the wide kernels.
 
-Built by the model state once the weights are loaded (``Qwen4ExpModelState``):
-checks the loaded model, builds the per-rank launch state (``Launcher``) and
+Built by the model state once the weights are loaded (`Qwen4ExpModelState`):
+checks the loaded model, builds the per-rank launch state (`Launcher`) and
 compiles every kernel build of every width, before memory profiling and graph
-capture. ``bind_caches`` checks the GDN states vLLM binds (the CUDA-graph
-memory-profiling cache, then the real one). Each step ``plan`` returns a
-``Step`` or None, and ``run`` runs a planned step's forward. Weight reloads are
+capture. `bind_caches` checks the GDN states vLLM binds (the CUDA-graph
+memory-profiling cache, then the real one). Each step `plan` returns a
+`Step` or None, and `run` runs a planned step's forward. Weight reloads are
 not supported.
 
 A planned step runs one persistent launch per GDN layer and two per QSA layer
-around vLLM's attention (``wide.layer``):
+around vLLM's attention (`wide.layer`):
 
     GDN layer   gdn        attn mix, GDN, out_proj + all-reduce + combine,
                            MLP mix, MoE + all-reduce + combine
@@ -55,14 +55,14 @@ logger = init_logger(__name__)
 
 
 class Step(NamedTuple):
-    """A planned step: ``width`` rows, one decode token a request."""
+    """A planned step: `width` rows, one decode token a request."""
 
     width: int
     attn_metadata: dict[str, Any]  # by layer name
 
 
 def agree(reasons: list[str], group, what: str) -> None:
-    """Raises on every TP rank if any rank has ``reasons``: a rank that refused
+    """Raises on every TP rank if any rank has `reasons`: a rank that refused
     alone would leave the others spinning in-kernel."""
     from vllm.models.qwen4_exp.amd.specialized_decode.runtime.peer import tp_agree
 
@@ -75,7 +75,7 @@ def agree(reasons: list[str], group, what: str) -> None:
 
 
 class SpecializedDecode:
-    """The executor over one ``Qwen4ExpModel``: builds the launch state, binds
+    """The executor over one `Qwen4ExpModel`: builds the launch state, binds
     it to each KV cache and plans and runs every decode step."""
 
     def __init__(self, model, config: DecodeConfig):
@@ -118,7 +118,7 @@ class SpecializedDecode:
         )
 
     def _keys(self, rows: int) -> list:
-        """Every layer's builds at ``rows``, in step order."""
+        """Every layer's builds at `rows`, in step order."""
         out, stats = [], True
         for layer in self.model.layers:
             stats |= layer.ple is not None
@@ -162,8 +162,8 @@ class SpecializedDecode:
         - PIECEWISE steps: they run (or capture) the compiled stock model's
           graphs, and taking one would leave them uncaptured for the prefills
           of that size;
-        - widths without a build (``DecodeConfig.widths``);
-        - steps that are not pure decode steps (``step_reason``).
+        - widths without a build (`DecodeConfig.widths`);
+        - steps that are not pure decode steps (`step_reason`).
 
         Eager steps of a built width run the kernels too. Every predicate is the
         same on all TP ranks: the kernels' exchanges need every rank on one
@@ -198,8 +198,8 @@ class SpecializedDecode:
         query_start_loc: torch.Tensor | None,
         ngram_context: torch.Tensor | None,
     ) -> torch.Tensor:
-        """``Qwen4ExpModel.forward`` of a planned step -> the final mixer's
-        hidden states [S, H]. ``inputs_embeds``: the multimodal wrapper's
+        """`Qwen4ExpModel.forward` of a planned step -> the final mixer's
+        hidden states [S, H]. `inputs_embeds`: the multimodal wrapper's
         embeddings of the step's tokens (decode rows are sampled text tokens,
         so the token embeddings), else None."""
         model, la, md, rows = self.model, self.launch, step.attn_metadata, step.width

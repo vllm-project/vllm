@@ -328,8 +328,8 @@ class Qwen4ExpQSAImpl(AttentionImplBase[Qwen4ExpQSAMetadata]):
     def kv_cache_views(
         self, kv_cache: torch.Tensor
     ) -> tuple[torch.Tensor, torch.Tensor]:
-        """K and V of a bf16 or fp8 cache as ``[pages, page_size, kv_heads,
-        head_size]`` views: the two halves of each token's K|V record."""
+        """K and V of a bf16 or fp8 cache as `[pages, page_size, kv_heads,
+        head_size]` views: the two halves of each token's K|V record."""
         key_cache, value_cache = kv_cache.transpose(1, 2).split(self.head_size, dim=-1)
         key_cache = canonicalize_singleton_dim_strides(key_cache)
         value_cache = canonicalize_singleton_dim_strides(value_cache)

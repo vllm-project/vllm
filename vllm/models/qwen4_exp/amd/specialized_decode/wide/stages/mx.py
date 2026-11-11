@@ -4,11 +4,11 @@
 
 A 32-value group is sixteen bytes of e2m1 codes (low nibble first) and one
 E8M0 scale code. The scale follows AITER's activation quantization (the stock
-MoE's, ``_mxfp4_quant_op``): ``amax`` rounded on its top mantissa bits
-(``+ 0x200000``, the mantissa then dropped), the code that exponent minus 2,
-so values past 6 x scale saturate. ``mfma_f4`` (``common.ops``) multiplies two
-16 x 128 operands of such groups: a lane holds row (token) ``lane % 16`` and
-the 32 values of K block ``lane // 16``, the block's scale code in the low byte
+MoE's, `_mxfp4_quant_op`): `amax` rounded on its top mantissa bits
+(`+ 0x200000`, the mantissa then dropped), the code that exponent minus 2,
+so values past 6 x scale saturate. `mfma_f4` (`common.ops`) multiplies two
+16 x 128 operands of such groups: a lane holds row (token) `lane % 16` and
+the 32 values of K block `lane // 16`, the block's scale code in the low byte
 of a register.
 """
 
@@ -27,14 +27,14 @@ def i32(v):
 
 
 def scale_code(amax):
-    """The E8M0 code of a group whose largest magnitude is ``amax`` (f32)."""
+    """The E8M0 code of a group whose largest magnitude is `amax` (f32)."""
     bits = fx.Float32(amax).bitcast(fx.Int32)
     e = ((bits + i32(0x200000)) >> i32(23)) & i32(0xFF)
     return fx.min(fx.max(e - i32(2), i32(0)), i32(254))
 
 
 def scale_value(code):
-    """``2 ** (code - 127)`` as f32 (code 0 gives 0, as a zero group's)."""
+    """`2 ** (code - 127)` as f32 (code 0 gives 0, as a zero group's)."""
     return (fx.Int32(code) << i32(23)).bitcast(fx.Float32)
 
 
@@ -57,7 +57,7 @@ def _pack_bf16(word, pair, scale, byte: int):
 
 def quant_bf16_group(pairs, code):
     """Sixteen packed bf16 pairs (Int32) of a 32-value group as four Int32 words
-    of e2m1 codes over ``scale_value(code)``."""
+    of e2m1 codes over `scale_value(code)`."""
     scale = scale_value(code)
     words = []
     for w in range(4):
@@ -69,8 +69,8 @@ def quant_bf16_group(pairs, code):
 
 
 def quant_f32_word(values, scale):
-    """8 f32 values as one Int32 word of e2m1 codes over ``scale``
-    (``scale_value`` of the group's code)."""
+    """8 f32 values as one Int32 word of e2m1 codes over `scale`
+    (`scale_value` of the group's code)."""
     lo = _pack_f32(
         _pack_f32(i32(0), values[0], values[1], scale, 0),
         values[2],

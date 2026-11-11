@@ -1,7 +1,7 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 """Model-runner state for Qwen4Exp PLE inputs, and the lifecycle of the
-specialized decode when ``--monokernel`` selects it."""
+specialized decode when `--monokernel` selects it."""
 
 from typing import TYPE_CHECKING, Any
 
@@ -23,7 +23,7 @@ if TYPE_CHECKING:
 
 class Qwen4ExpModelState(MambaHybridModelState):
     """Add rollback-safe PLE n-gram context to the model inputs. With
-    ``--monokernel``, build the specialized decode once the weights are loaded,
+    `--monokernel`, build the specialized decode once the weights are loaded,
     and check it against every bound KV cache (the CUDA-graph memory-profiling
     cache, then the real one)."""
 

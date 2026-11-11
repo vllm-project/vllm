@@ -1,27 +1,27 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
-"""The gated residual (``GatedResidual`` of the AMD Qwen4Exp model) as grid
+"""The gated residual (`GatedResidual` of the AMD Qwen4Exp model) as grid
 phases over every row of the step, with the stock path's bf16 roundings.
 
-The multi-stream state ``[rows, HC * HIDDEN]`` (bf16) is materialized at every
+The multi-stream state `[rows, HC * HIDDEN]` (bf16) is materialized at every
 kernel boundary: the block that consumes a pending combine writes it, with the
-reciprocal RMS of each (row, stream), ``rrms`` (``combine``); a kernel whose
-input state came from vLLM computes ``rrms`` first (``stats``). A mix is then
+reciprocal RMS of each (row, stream), `rrms` (`combine`); a kernel whose
+input state came from vLLM computes `rrms` first (`stats`). A mix is then
 
-- ``mix_down``: ``[down | inject] = xn @ W_di.T`` (K = HC * HIDDEN, split K),
-  ``xn = bf16(x rrms (1 + w))`` built as the activations are staged;
-- ``mix_reduce``: the splits summed in order, rounded to bf16 (the GEMM's
-  output); ``down = bf16(silu(down / HC))``, the injection scale ``2
-  sigmoid(inject / HC)`` for the block's combine;
-- ``mix_up``: ``gate = bf16(down @ W_up.T)`` and the gated mean ``x =
-  bf16(sum_s sigmoid(gate_s) xn_s / HC)``: a unit is 16 columns of every
-  stream, wave ``s`` stream ``s``, the streams summed in order through LDS.
+- `mix_down`: `[down | inject] = xn @ W_di.T` (K = HC * HIDDEN, split K),
+  `xn = bf16(x rrms (1 + w))` built as the activations are staged;
+- `mix_reduce`: the splits summed in order, rounded to bf16 (the GEMM's
+  output); `down = bf16(silu(down / HC))`, the injection scale `2
+  sigmoid(inject / HC)` for the block's combine;
+- `mix_up`: `gate = bf16(down @ W_up.T)` and the gated mean `x =
+  bf16(sum_s sigmoid(gate_s) xn_s / HC)`: a unit is 16 columns of every
+  stream, wave `s` stream `s`, the streams summed in order through LDS.
 
-Up to ``tiled.RESIDENT_MAX`` rows the three are one phase (``mix_resident``):
+Up to `tiled.RESIDENT_MAX` rows the three are one phase (`mix_resident`):
 the down GEMM's K-wave units hand their sums to mix_up through tagged pairs.
 
-``combine`` takes the block's output ``y`` (the TP ranks' partials, summed in
-rank order through the exchange) into the state: ``bf16(x + y inj_s)``.
+`combine` takes the block's output `y` (the TP ranks' partials, summed in
+rank order through the exchange) into the state: `bf16(x + y inj_s)`.
 """
 
 from __future__ import annotations
@@ -75,9 +75,9 @@ assert UP_UNITS < BLOCKS  # ``inject`` runs on a CTA without a mix_up unit
 
 def down_plan(rows: int = MAX_TOKENS, cold: bool = False):
     """The down GEMM's split: at the resident widths five K slices of each
-    16-row tile, the four waves sharing a slice (``mix_resident``), or ten
-    when the weights load in the phase (``cold``: twice the CTAs share them);
-    else 40 slices of each 64-row group, summed by ``mix_reduce``."""
+    16-row tile, the four waves sharing a slice (`mix_resident`), or ten
+    when the weights load in the phase (`cold`: twice the CTAs share them);
+    else 40 slices of each 64-row group, summed by `mix_reduce`."""
     if tiled.resident(rows):
         splits = DOWN_KW_COLD if cold else DOWN_KW_SPLITS
         return tiled.SplitK(DOWN_ROWS, HC_HIDDEN, splits, kwaves=True)
@@ -85,7 +85,7 @@ def down_plan(rows: int = MAX_TOKENS, cold: bool = False):
 
 
 def up_lds_words(rows: int) -> int:
-    """f32 words of ``mix_up``'s LDS: a wave's gated stream, every token."""
+    """f32 words of `mix_up`'s LDS: a wave's gated stream, every token."""
     return WAVES * rows * UP_COLS
 
 
@@ -95,7 +95,7 @@ def i32(v):
 
 @traced
 def stats(g, state, rrms, rows: int, eps: float):
-    """``rrms[row, s]`` of a state that came from outside the kernels: a wave
+    """`rrms[row, s]` of a state that came from outside the kernels: a wave
     a (row, stream)."""
     for unit in range(g.bid * WAVES + g.wave, rows * HC, BLOCKS * WAVES):
         base = unit * HIDDEN  # (row, stream) is the state's unit-th HIDDEN run
@@ -112,9 +112,9 @@ def stats(g, state, rrms, rows: int, eps: float):
 
 
 class NormedState(tiled.Source):
-    """The normalized state ``xn = bf16(x rrms (1 + w))`` as GEMM activations:
+    """The normalized state `xn = bf16(x rrms (1 + w))` as GEMM activations:
     the loads of x, w and rrms are issued a K step ahead, the arithmetic after.
-    The affine is Gemma's ``y + y w`` (the stock kernel's FMA form)."""
+    The affine is Gemma's `y + y w` (the stock kernel's FMA form)."""
 
     def __init__(self, state, rrms, norm_w):
         self.state, self.rrms, self.norm_w = (
@@ -143,9 +143,9 @@ def down_weights(w_di):
 
 
 def mix_down(g, gemm, state, rrms, norm_w, w_di, part, pending=None):
-    """``[down | inject]`` partials of every split to ``part``; ``pending``:
-    the CTA's ``tiled.unit_preload`` of ``down_weights`` (past
-    ``tiled.RESIDENT_MAX``)."""
+    """`[down | inject]` partials of every split to `part`; `pending`:
+    the CTA's `tiled.unit_preload` of `down_weights` (past
+    `tiled.RESIDENT_MAX`)."""
     plan = down_plan(gemm.batch)
     tiled.gemm_units(
         g.bid,
@@ -183,7 +183,7 @@ def mix_words(rows: int) -> tuple[int, int]:
 
 def _mix_ctas(rows: int):
     """The first CTA of the resident mix's down units and of its mix_up units.
-    CTAs ``0 .. rows`` take none: they finish a block's combine (a wave a
+    CTAs `0 .. rows` take none: they finish a block's combine (a wave a
     (row, stream)), the last to reach the barrier before a mix, where a CTA's
     issued weights would hold it."""
     return rows, BLOCKS - UP_UNITS
@@ -226,9 +226,9 @@ def mix_resident(
     pending,
 ):
     """The mix of a resident width as one phase: the down units, then the
-    mix_up units (on CTAs ``_mix_ctas`` on).
-    ``bufs``: the tagged partials and low-rank rows (``mix_words``);
-    ``pending``: ``mix_issue``'s loads, or None (``down_plan``'s ``cold``)."""
+    mix_up units (on CTAs `_mix_ctas` on).
+    `bufs`: the tagged partials and low-rank rows (`mix_words`);
+    `pending`: `mix_issue`'s loads, or None (`down_plan`'s `cold`)."""
     plan = down_plan(rows, cold=pending is None)
     d0, u0 = _mix_ctas(rows)
     part, low = bufs
@@ -313,8 +313,8 @@ def _down_unit(
 
 @traced
 def mix_reduce(g, part, down, inj, rows: int, inject: bool):
-    """Sum the splits in order (bf16, the GEMM's output), then ``down =
-    bf16(silu(v / HC))`` and, with ``inject``, ``inj = 2 sigmoid(v / HC)``."""
+    """Sum the splits in order (bf16, the GEMM's output), then `down =
+    bf16(silu(v / HC))` and, with `inject`, `inj = 2 sigmoid(v / HC)`."""
     plan = down_plan(rows)
     used = MIXED if inject else LOWRANK
     pairs = used // 2
@@ -356,13 +356,13 @@ def mix_reduce(g, part, down, inj, rows: int, inject: bool):
 
 class UpLoads(TraceInvariant):
     """The loads of the CTA's mix_up unit (a CTA has at most one) that do not
-    depend on ``down``: the first chunks of its W_up rows (``Gemm.preload``)
+    depend on `down`: the first chunks of its W_up rows (`Gemm.preload`)
     and its epilogue's norm weight, state and rrms (final before mix_down,
-    which reads them too). ``mix_up`` waits only for ``down``, so they are
-    issued early: up to ``tiled.PRELOAD_ROWS`` before mix_down, landing during
+    which reads them too). `mix_up` waits only for `down`, so they are
+    issued early: up to `tiled.PRELOAD_ROWS` before mix_down, landing during
     its GEMM, and above that as mix_reduce starts, landing while the grid waits
     for the reduce. A CTA with no unit issues no request. Not at the resident
-    widths, whose mix is one phase (``mix_resident``)."""
+    widths, whose mix is one phase (`mix_resident`)."""
 
     def __init__(self, g, gemm, w_up, state, rrms, norm_w, rows: int):
         live = g.bid < i32(UP_UNITS)
@@ -406,10 +406,10 @@ class UpLoads(TraceInvariant):
 
 @traced
 def mix_up(g, gemm, red, down, w_up, x_out, rows: int, pre):
-    """``x = bf16(sum_s sigmoid(bf16(down @ W_up[s].T)) xn_s / HC)``: unit
-    ``u`` is columns ``16 u ..`` of every stream, wave ``s`` stream ``s``'s
-    rows of W_up; ``red`` (LDS, ``up_lds_words`` f32) adds the streams in
-    order. ``pre``: the CTA's ``UpLoads``."""
+    """`x = bf16(sum_s sigmoid(bf16(down @ W_up[s].T)) xn_s / HC)`: unit
+    `u` is columns `16 u ..` of every stream, wave `s` stream `s`'s
+    rows of W_up; `red` (LDS, `up_lds_words` f32) adds the streams in
+    order. `pre`: the CTA's `UpLoads`."""
     weights = tiled.Bf16Weights(w_up, HC_HIDDEN, LOWRANK)
     src = tiled.Source(down, LOWRANK)
     for unit in range(g.bid, UP_UNITS, BLOCKS):
@@ -419,8 +419,8 @@ def mix_up(g, gemm, red, down, w_up, x_out, rows: int, pre):
 
 
 def _up_row(g, unit):
-    """The lane's W_up row of ``unit``: stream ``wave``'s column ``16 unit +
-    lane % 16``."""
+    """The lane's W_up row of `unit`: stream `wave`'s column `16 unit +
+    lane % 16`."""
     return g.wave * HIDDEN + unit * UP_COLS + g.lane % 16
 
 
@@ -440,9 +440,9 @@ def _up_unit(
     pending,
     pre=None,
 ):
-    """One mix_up unit. ``pending``: its W_up chunks in flight (resident
-    widths); ``pre`` (``mix_up``): the CTA's ``UpLoads``, its epilogue's loads
-    and first W_up chunks already issued (``state``, ``rrms`` and ``norm_w``
+    """One mix_up unit. `pending`: its W_up chunks in flight (resident
+    widths); `pre` (`mix_up`): the CTA's `UpLoads`, its epilogue's loads
+    and first W_up chunks already issued (`state`, `rrms` and `norm_w`
     then unused)."""
     lane = g.lane
     c0 = unit * UP_COLS
@@ -512,8 +512,8 @@ def _up_unit(
 
 @traced
 def combine(g, xch, state, inj, rrms, rows: int, eps: float):
-    """``state[b, s] = bf16(state + y[b] inj[b, s])`` and its ``rrms``, a wave a
-    (row, stream); ``y`` is the ranks' partials from the exchange ``xch``,
+    """`state[b, s] = bf16(state + y[b] inj[b, s])` and its `rrms`, a wave a
+    (row, stream); `y` is the ranks' partials from the exchange `xch`,
     added in rank order and rounded to bf16. A lane's pieces are disjoint, so
     every piece's loads (the ranks' lines, then the state) are issued before
     the first piece's store, rather than a round trip a piece."""

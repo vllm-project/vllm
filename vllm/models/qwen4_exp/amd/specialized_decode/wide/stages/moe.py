@@ -1,24 +1,24 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
-"""The sparse MoE block (``Qwen4ExpSparseMoeBlock`` with the shared expert
-fused as routed expert ``EXPERTS``) as grid phases: an expert-major W4A4
+"""The sparse MoE block (`Qwen4ExpSparseMoeBlock` with the shared expert
+fused as routed expert `EXPERTS`) as grid phases: an expert-major W4A4
 MoE whose units stream one expert's weights each.
 
-- ``router``: ``logits = x @ [W_gate; w_shared_gate].T`` (bf16) in K slices.
-- ``route``: a wave a row sums the slices in order and rounds to bf16 (the
+- `router`: `logits = x @ [W_gate; w_shared_gate].T` (bf16) in K slices.
+- `route`: a wave a row sums the slices in order and rounds to bf16 (the
   stock GEMM's output), takes the top-k (renormalized softmax weights) and
-  the shared expert's ``sigmoid`` weight, into ``route`` (``[rows, SLOTS]``
-  expert ids, then the weights' f32 bits); the other threads quantize ``x``
-  to MXFP4 (``x4`` codes, ``x4s`` scale codes), AITER's activation scaling.
-- ``experts``: every CTA builds the same (expert, <= 16 tokens) unit list
-  (a counting sort of the ``rows * SLOTS`` assignments in LDS); a CTA runs a
-  whole unit: the tokens' ``x4`` rows into LDS, gate/up on the scaled fp4
-  MFMA, ``silu(gate) * up`` requantized to MXFP4 in LDS, down, and one f32
-  partial a (row, slot) to ``part``. The experts are vLLM's tensors in place
-  (``AITER_MXFP4_MXFP4``: ``shuffle_weight(16, 16)`` codes, ``e8m0_shuffle``
-  scales; each of gate and up padded from ``RI`` to ``rip`` rows, the down
+  the shared expert's `sigmoid` weight, into `route` (`[rows, SLOTS]`
+  expert ids, then the weights' f32 bits); the other threads quantize `x`
+  to MXFP4 (`x4` codes, `x4s` scale codes), AITER's activation scaling.
+- `experts`: every CTA builds the same (expert, <= 16 tokens) unit list
+  (a counting sort of the `rows * SLOTS` assignments in LDS); a CTA runs a
+  whole unit: the tokens' `x4` rows into LDS, gate/up on the scaled fp4
+  MFMA, `silu(gate) * up` requantized to MXFP4 in LDS, down, and one f32
+  partial a (row, slot) to `part`. The experts are vLLM's tensors in place
+  (`AITER_MXFP4_MXFP4`: `shuffle_weight(16, 16)` codes, `e8m0_shuffle`
+  scales; each of gate and up padded from `RI` to `rip` rows, the down
   projection's K likewise); the padded rows are skipped.
-- ``combine``: a wave a TP exchange line, ``y = sum_j w_j part_j`` in slot
+- `combine`: a wave a TP exchange line, `y = sum_j w_j part_j` in slot
   order, rounded to bf16 and pushed to every rank.
 """
 
@@ -92,7 +92,7 @@ def i32(v):
 
 
 class Shape:
-    """A step's MoE sizes: ``rows`` tokens, ``rip`` the experts' padded
+    """A step's MoE sizes: `rows` tokens, `rip` the experts' padded
     intermediate rows a rank (the weights' layout)."""
 
     def __init__(self, rows: int, rip: int):
@@ -154,9 +154,9 @@ def router_weights(w_gate):
 
 
 def router(g, gemm, w_gate, x, part, pending=None):
-    """The router logits' K-slice partials to ``part``. ``w_gate``: the 513 x
+    """The router logits' K-slice partials to `part`. `w_gate`: the 513 x
     HIDDEN bf16 gate with the shared expert's gate as its last row.
-    ``pending``: the CTA's ``tiled.unit_preload`` of ``router_weights``."""
+    `pending`: the CTA's `tiled.unit_preload` of `router_weights`."""
     plan = router_plan()
     tiled.gemm_units(
         g.bid,
@@ -172,8 +172,8 @@ def router(g, gemm, w_gate, x, part, pending=None):
 
 @traced
 def quantize_rows(g, x, x4, x4s, rows: int):
-    """``x`` [rows, HIDDEN] bf16 as MXFP4: a thread a 32-value group, four code
-    words to ``x4`` and the scale code to ``x4s`` (a word each)."""
+    """`x` [rows, HIDDEN] bf16 as MXFP4: a thread a 32-value group, four code
+    words to `x4` and the scale code to `x4s` (a word each)."""
     groups = rows * XGROUPS
     # runs of 64 groups a wave, spread (``Grid.spread``)
     for run in range(g.spread, -(-groups // 64), BLOCKS * WAVES):
@@ -202,7 +202,7 @@ def quantize_rows(g, x, x4, x4s, rows: int):
 def route(g, part, route_buf, rows: int):
     """A wave a row: the top-k of the summed router partials (rounded to bf16)
     and their renormalized softmax weights; slot TOPK is the shared expert
-    with its sigmoid weight. ``route_buf``: [rows * SLOTS] ids, then [rows *
+    with its sigmoid weight. `route_buf`: [rows * SLOTS] ids, then [rows *
     SLOTS] f32 weights."""
     plan = router_plan()
     first = g.lane * PER
@@ -241,7 +241,7 @@ def route(g, part, route_buf, rows: int):
         for s in range_constexpr(1, plan.splits):
             sg = sg + shared[s]
         picks = []
-        for j in range_constexpr(TOPK):
+        for _j in range_constexpr(TOPK):
             best_v, best_i = values[0], index[0]
             for p in range_constexpr(1, PER):
                 take = values[p] > best_v
@@ -286,7 +286,7 @@ def route(g, part, route_buf, rows: int):
 
 @traced
 def _block_scan(tid, scan, value):
-    """(exclusive prefix of ``value`` over the CTA in thread order, total)."""
+    """(exclusive prefix of `value` over the CTA in thread order, total)."""
     lane, wave = tid % 64, tid // 64
     x = value
     for step in range_constexpr(6):
@@ -307,10 +307,10 @@ def _block_scan(tid, scan, value):
 
 @traced
 def build_schedule(tid, s: Shape, idx, units, scan, route_buf):
-    """Every CTA the same (expert, <= 16 token) units from ``route_buf``'s ids:
-    per-expert token bitmasks, counts, starts, a flat unit list ``units``
-    ([n][3]: expert, start, count) and the sorted assignments; bitmask ranks
-    give every CTA the same order. The unit count is ``idx[2 E_ALL]``."""
+    """Every CTA the same (expert, <= 16 token) units from `route_buf`'s ids:
+    per-expert token bitmasks, counts, starts, a flat unit list `units`
+    (`[n][3]`: expert, start, count) and the sorted assignments; bitmask ranks
+    give every CTA the same order. The unit count is `idx[2 E_ALL]`."""
     E, A = E_ALL, s.assignments
     rounds = -(-E // THREADS)
     for r in range_constexpr(-(-(E * s.mask_words) // THREADS)):
@@ -402,7 +402,7 @@ XCD_RUN = 8  # consecutive units placed on one XCD
 
 
 def unit_slot(bid):
-    """CTA ``bid``'s place in unit order. Runs of ``XCD_RUN`` consecutive
+    """CTA `bid`'s place in unit order. Runs of `XCD_RUN` consecutive
     units go to one XCD, so the units of one expert's rows (consecutive in
     the schedule) read its weights through the same L2; the runs rotate over
     the XCDs, so a partial round still spreads over all of them."""
@@ -418,7 +418,7 @@ HALF_GROUPS = AGROUPS // 2
 
 
 def pieces(n):
-    """``(whole, split)`` units of a step's ``n``: a last round at most half
+    """`(whole, split)` units of a step's `n`: a last round at most half
     full is run as two half pieces a unit, so it ends after about half a
     unit's time (a unit's time is one CU's weight stream, so a short round
     otherwise costs as much as a full one)."""
@@ -431,10 +431,10 @@ def pieces(n):
 def experts(
     g, s: Shape, lds, route_buf, x4, x4s, w13, w13s, w2, w2s, part, part2, flags, tag
 ):
-    """Build the schedule, then every piece of it (CTA ``bid``: pieces ``p, p
-    + BLOCKS, ..`` from its slot ``p``): the whole units, then the split
-    units' halves. A second half writes ``part2`` and marks its (row, slot)
-    with ``tag`` in ``flags``."""
+    """Build the schedule, then every piece of it (CTA `bid`: pieces `p, p
+    + BLOCKS, ..` from its slot `p`): the whole units, then the split
+    units' halves. A second half writes `part2` and marks its (row, slot)
+    with `tag` in `flags`."""
     build_schedule(g.tid, s, lds.index, lds.units, lds.scan, route_buf)
     n = lds_ld(lds.index + 2 * E_ALL)
     whole, split = pieces(n)
@@ -471,7 +471,7 @@ def experts(
 
 @traced
 def gather_rows(g, s, lds, x4, x4s, start, count):
-    """The unit's 16 token rows of ``x4`` (1280 bytes each) and their scale
+    """The unit's 16 token rows of `x4` (1280 bytes each) and their scale
     codes into LDS, every load issued before the first store; a padding token
     repeats the unit's last."""
     row_words = HIDDEN // 8
@@ -498,8 +498,8 @@ def gather_rows(g, s, lds, x4, x4s, start, count):
 
 
 def pipelined(steps: int, depth: int, issue, compute):
-    """Unrolled software pipeline: step ``k + depth - 1``'s loads are issued
-    before step ``k`` computes."""
+    """Unrolled software pipeline: step `k + depth - 1`'s loads are issued
+    before step `k` computes."""
     ring = [issue(k) for k in range(min(depth - 1, steps))]
     for k in range(steps):
         if k + depth - 1 < steps:
@@ -512,9 +512,9 @@ def pipelined(steps: int, depth: int, issue, compute):
 def unit(
     g, s, lds, x4, x4s, ub, us, db, ds, start, count, part, part2, flags, tag, half
 ):
-    """One (expert, <= 16 tokens) unit, or one half of it (``half`` 1, 2; 0 the
+    """One (expert, <= 16 tokens) unit, or one half of it (`half` 1, 2; 0 the
     whole unit): gate/up -> silu * up -> MXFP4 -> down -> f32 partials of
-    each (row, slot), a second half's into ``part2``."""
+    each (row, slot), a second half's into `part2`."""
     lane, wave = g.lane, g.wave
     whole = half == 0
     hh = half - 1
@@ -683,8 +683,8 @@ def down_block(g, s, lds, db, ds, part, wave, lane, dest, blk, xb, xc, group_liv
 
 @traced
 def combine(g, xch, route_buf, part, part2, flags, rows: int):
-    """``y[b] = sum_j w[b, j] part[b, j]`` in slot order, a wave an exchange
-    line: lane ``l`` sums 8 columns of token ``l // 8`` and pushes them to
+    """`y[b] = sum_j w[b, j] part[b, j]` in slot order, a wave an exchange
+    line: lane `l` sums 8 columns of token `l // 8` and pushes them to
     every rank (a partial line's lanes past the rows repeat the last row and
     push nothing), then lane 0 the line's flag."""
     lpg = ex_.lines_per_group(rows)
@@ -806,9 +806,9 @@ class Weights(TraceInvariant):
 
 class Bufs(TraceInvariant):
     """The MoE's scratch (byte addresses): router partials, the route, MXFP4
-    rows of ``x``, the f32 partials and their split marks. The small-batch
-    path keeps its activation rows and schedule in ``mpart``, ``y`` in
-    ``mpart2``."""
+    rows of `x`, the f32 partials and their split marks. The small-batch
+    path keeps its activation rows and schedule in `mpart`, `y` in
+    `mpart2`."""
 
     def __init__(self, part, route, x4, x4s, mpart, mpart2, split):
         self.part, self.route = fx.Int64(part), fx.Int64(route)
@@ -821,8 +821,8 @@ class Bufs(TraceInvariant):
 
 
 class SmallScratch(TraceInvariant):
-    """The small-batch path's global regions: ``act4`` / ``act4s`` (an
-    assignment's MXFP4 activation row and scale codes, a word each), ``y``
+    """The small-batch path's global regions: `act4` / `act4s` (an
+    assignment's MXFP4 activation row and scale codes, a word each), `y`
     ([rows, HIDDEN] f32)."""
 
     def __init__(self, s: Shape, b: Bufs):
@@ -832,7 +832,7 @@ class SmallScratch(TraceInvariant):
 
 
 def phase_names(rows: int) -> list[str]:
-    """The MoE's phases, in order; ``mlp`` ends all but the last, whose end
+    """The MoE's phases, in order; `mlp` ends all but the last, whose end
     is the caller's (the MLP exchange's readers follow it)."""
     if small(rows):
         return ["router", "route+experts_up", "experts_down+allreduce+combine"]
@@ -840,7 +840,7 @@ def phase_names(rows: int) -> list[str]:
 
 
 def _lds_struct(name: str, words: dict[str, int]):
-    """An ``fx.struct`` of i32 arrays (built here: this module's annotations
+    """An `fx.struct` of i32 arrays (built here: this module's annotations
     are strings)."""
     fields = {k: fx.Array[fx.Int32, n, 16] for k, n in words.items()}
     return fx.struct(type(name, (), {"__annotations__": fields}))
@@ -853,11 +853,11 @@ ROUTER_STRIDE = (
 
 def small_work(s: Shape) -> dict[str, int]:
     """Word offsets in the small path's LDS work area, aliased by phase: every
-    row's e2m1 codes ``x`` and scale codes ``xs`` (written in the router phase,
-    read in the gate/up phase); the router's staged gate rows ``rw``, rows of
-    ``x`` ``rx`` and wave sums ``red``, then a piece's f32 gate | up
-    ``panel``; every assignment's act4 | act4s rows ``acts`` and the down
-    results ``contrib``. ``words``: its size."""
+    row's e2m1 codes `x` and scale codes `xs` (written in the router phase,
+    read in the gate/up phase); the router's staged gate rows `rw`, rows of
+    `x` `rx` and wave sums `red`, then a piece's f32 gate | up
+    `panel`; every assignment's act4 | act4s rows `acts` and the down
+    results `contrib`. `words`: its size."""
     A = s.assignments
     acts = -(-A * (RI // 8 + AGROUPS) // 4) * 4
     x4 = s.rows * (HIDDEN // 8) + s.rows * XGROUPS
@@ -876,7 +876,7 @@ def small_work(s: Shape) -> dict[str, int]:
 
 
 def lds_struct(s: Shape):
-    """The MoE's LDS struct for ``s``'s width."""
+    """The MoE's LDS struct for `s`'s width."""
     w = lds_words(s)
     if small(s.rows):
         return _lds_struct(
@@ -906,13 +906,13 @@ def lds_struct(s: Shape):
 
 
 def mlp(g, s: Shape, gemm, ml, x, w: Weights, b: Bufs, xch, end_phase, pre=None):
-    """The MoE of ``x`` ([rows, HIDDEN] bf16) into exchange ``xch``: every phase
-    of ``phase_names``, ``end_phase(name, between=None)`` after each but the
-    last (the phase's grid barrier, ``between()`` run in its wait, as
-    ``grid_sync``'s: on the small path the router's quantizes ``x`` there,
-    ``stage_rows``). ``ml``: the ``lds_struct`` view; ``pre``: the router's
-    weights in flight, on the small path ``prefetch``'s (issued here if
-    None), else the CTA's ``tiled.unit_preload`` of ``router_weights`` (or
+    """The MoE of `x` ([rows, HIDDEN] bf16) into exchange `xch`: every phase
+    of `phase_names`, `end_phase(name, between=None)` after each but the
+    last (the phase's grid barrier, `between()` run in its wait, as
+    `grid_sync`'s: on the small path the router's quantizes `x` there,
+    `stage_rows`). `ml`: the `lds_struct` view; `pre`: the router's
+    weights in flight, on the small path `prefetch`'s (issued here if
+    None), else the CTA's `tiled.unit_preload` of `router_weights` (or
     None)."""
     names = phase_names(s.rows)
     if const_expr(small(s.rows)):
@@ -976,7 +976,7 @@ ROUTER_STEPS = HIDDEN // (WAVES * 32)  # a wave's K quarter in 32-wide MFMA step
 
 
 def prefetch(g, s: Shape, w: Weights):
-    """Loads ``mlp`` can issue before the MLP mix (its input does not depend
+    """Loads `mlp` can issue before the MLP mix (its input does not depend
     on them): the small path's router gate rows of this CTA, whole 16-byte
     loads (16 VGPRs a thread); None for the expert-major path."""
     if not small(s.rows):
@@ -1002,11 +1002,11 @@ def prefetch(g, s: Shape, w: Weights):
 
 @traced
 def router_gemv(g, lds, wl, x, part, rows: int):
-    """The router logits whole: CTA ``c`` the gate rows ``c, c + BLOCKS, ..``
-    (``wl``: ``prefetch``'s loads) and every row of ``x``, staged in LDS by
+    """The router logits whole: CTA `c` the gate rows `c, c + BLOCKS, ..`
+    (`wl`: `prefetch`'s loads) and every row of `x`, staged in LDS by
     whole 16-byte loads; the rows the A operand of one 16 x 16 MFMA tile, the
-    tokens its columns, wave ``w`` K quarter ``w``; the quarters summed in wave
-    order and rounded to bf16 into ``part[token * padded + e]`` (``route``'s
+    tokens its columns, wave `w` K quarter `w`; the quarters summed in wave
+    order and rounded to bf16 into `part[token * padded + e]` (`route`'s
     logits)."""
     plan = router_plan()
     lane, wave = g.lane, g.wave
@@ -1072,8 +1072,8 @@ def router_gemv(g, lds, wl, x, part, rows: int):
 
 
 def _route_key(v, expert):
-    """An order-preserving i32 key of a bf16-valued logit over ``511 -
-    expert``: distinct keys, equal logits ranked by the lower expert; NaN
+    """An order-preserving i32 key of a bf16-valued logit over `511 -
+    expert`: distinct keys, equal logits ranked by the lower expert; NaN
     last."""
     v = (v == v).select(v, fx.Float32(-3.0e38))
     bits = v.bitcast(fx.Int32)
@@ -1094,8 +1094,8 @@ def _route_lanes(rows: int) -> int:
 
 
 def _route_loads(g, logits, rows: int):
-    """Each pass's lane's row (pass ``k``, wave ``w``'s half ``h``: row ``8 k +
-    w + 4 h``): its logits of the lane's ``EXPERTS / lanes`` experts, and the
+    """Each pass's lane's row (pass `k`, wave `w`'s half `h`: row `8 k +
+    w + 4 h`): its logits of the lane's `EXPERTS / lanes` experts, and the
     shared expert's gate logit."""
     plan = router_plan()
     lanes = _route_lanes(rows)
@@ -1138,8 +1138,8 @@ def _sort_desc(ks):
 
 @traced
 def route_rows(g, loaded, ids, wts, rows: int):
-    """``route`` of the lane's rows from their logits (``_route_loads``, a
-    pass each) into LDS (``ids``, ``wts``: [rows * SLOTS]), the passes
+    """`route` of the lane's rows from their logits (`_route_loads`, a
+    pass each) into LDS (`ids`, `wts`: [rows * SLOTS]), the passes
     interleaved: the lane's keys sorted, a pick one max of keys over the row's
     lanes."""
     lanes = _route_lanes(rows)
@@ -1183,9 +1183,9 @@ def route_rows(g, loaded, ids, wts, rows: int):
 
 @traced
 def stage_rows(g, rows: int, lds):
-    """``quantize_rows`` from the router's staged bf16 rows (``lds.rx``) into
-    LDS: the e2m1 rows ``lds.x`` ([rows][HIDDEN / 8] words), their scale codes
-    ``lds.xs`` ([rows][XGROUPS]), for the gate/up phase; run in the router
+    """`quantize_rows` from the router's staged bf16 rows (`lds.rx`) into
+    LDS: the e2m1 rows `lds.x` (`[rows][HIDDEN / 8]` words), their scale codes
+    `lds.xs` (`[rows][XGROUPS]`), for the gate/up phase; run in the router
     barrier's wait (no global access)."""
     for r in range_constexpr(-(-(rows * XGROUPS) // THREADS)):
         unit = g.tid + i32(r * THREADS)
@@ -1209,9 +1209,9 @@ def stage_rows(g, rows: int, lds):
 
 
 def _piece_loads(g, s, lds, w, p, total):
-    """Piece ``p``'s gate/up operands for this wave: 16-row tile ``w % 2`` of
+    """Piece `p`'s gate/up operands for this wave: 16-row tile `w % 2` of
     gate (w < 2) or up of the piece's 32 rows, all of K, and their scale
-    words; none past ``total`` (no memory access)."""
+    words; none past `total` (no memory access)."""
     live = p < total
     pp = live.select(p, i32(0))
     u, blk = pp // PIECES, pp % PIECES
@@ -1251,9 +1251,9 @@ def _piece_loads(g, s, lds, w, p, total):
 
 @traced
 def up_piece(g, s, lds, sc, p, loaded):
-    """Piece ``p`` (unit ``p // PIECES``, intermediate rows ``32 (p % PIECES)
-    ..``) on its operands (``_piece_loads``) against its tokens' rows of the
-    staged ``x``: ``silu(gate) * up`` through MXFP4 to the tokens' ``act4``
+    """Piece `p` (unit `p // PIECES`, intermediate rows `32 (p % PIECES)
+    ..`) on its operands (`_piece_loads`) against its tokens' rows of the
+    staged `x`: `silu(gate) * up` through MXFP4 to the tokens' `act4`
     rows."""
     lane, wave = g.lane, g.wave
     row, group = lane % TILE, lane // TILE
@@ -1297,9 +1297,9 @@ def up_piece(g, s, lds, sc, p, loaded):
 def schedule_units(g, s, lds):
     """The small path's unit list from the route in LDS (rows <= 32, so an
     expert's tokens are one mask word and at most one unit): token masks,
-    then one block scan of (units, tokens) packed in a word; ``units`` ([n][3]:
-    expert, start, count), each expert's token start, ``n`` at ``index[2
-    E_ALL]``. The masks must be zero."""
+    then one block scan of (units, tokens) packed in a word; `units` (`[n][3]`:
+    expert, start, count), each expert's token start, `n` at `index[2
+    E_ALL]`. The masks must be zero."""
     E, idx = E_ALL, lds.index
     masks = idx + s.mask_base
     if g.tid < s.assignments:
@@ -1334,7 +1334,7 @@ def schedule_units(g, s, lds):
 
 @traced
 def schedule_tokens(g, s, lds):
-    """Each unit's assignments in row order at its start (``schedule_units``)."""
+    """Each unit's assignments in row order at its start (`schedule_units`)."""
     idx = lds.index
     if g.tid < s.assignments:
         e = lds_ld(lds.ids + g.tid)
@@ -1346,11 +1346,11 @@ def schedule_tokens(g, s, lds):
 
 @traced
 def small_up(g, s, lds, x, w, b, sc):
-    """Route every row, list the units, then the pieces ``bid, bid + BLOCKS,
-    ..`` against the rows of ``x`` the router phase left in LDS as MXFP4: past
+    """Route every row, list the units, then the pieces `bid, bid + BLOCKS,
+    ..` against the rows of `x` the router phase left in LDS as MXFP4: past
     a piece a CTA, two pieces' operands loaded together (carrying the next
     piece's through the loop measured slower). CTA 0 also stores the route
-    (``route``'s layout)."""
+    (`route`'s layout)."""
     A = s.assignments
     assert s.rows <= 32 and A <= THREADS
     rl = _route_loads(g, b.part, s.rows)
@@ -1385,12 +1385,12 @@ def small_up(g, s, lds, x, w, b, sc):
 
 @traced
 def small_down(g, s, lds, w, b, sc, xch):
-    """CTA ``t`` < OWNERS, with the route and schedule it built in LDS in the
-    previous phase: output rows ``16 t ..`` of every unit into LDS by
+    """CTA `t` < OWNERS, with the route and schedule it built in LDS in the
+    previous phase: output rows `16 t ..` of every unit into LDS by
     (row, slot), their slot-order sum
-    with the routing weights to ``y``; the line group's last owner pushes its
+    with the routing weights to `y`; the line group's last owner pushes its
     lines. The first units' down weights depend only on the schedule: they
-    are issued with the activation rows' loads (``stage_acts``)."""
+    are issued with the activation rows' loads (`stage_acts`)."""
     A, rows = s.assignments, s.rows
     assert A <= THREADS, "a thread an assignment"
     tile = g.bid
@@ -1416,9 +1416,9 @@ def small_down(g, s, lds, w, b, sc, xch):
 
 @traced
 def stage_acts(g, s, lds, sc, between):
-    """Every assignment's MXFP4 activation row (``act4``, ``act4s``) into
-    LDS (``lds.acts``: codes then scale words), whole 16-byte loads first;
-    ``between()`` runs after them and before the stores, held there (the
+    """Every assignment's MXFP4 activation row (`act4`, `act4s`) into
+    LDS (`lds.acts`: codes then scale words), whole 16-byte loads first;
+    `between()` runs after them and before the stores, held there (the
     stores wait for these loads only, and its loads are in flight under
     them), its result returned."""
     quads = -(-s.assignments * (RI // 8 + AGROUPS) // 4)
@@ -1446,7 +1446,7 @@ def stage_acts(g, s, lds, sc, between):
 
 
 def _down_unit(g, s, lds, i):
-    """The wave's ``i``-th unit (``w + 4 i``): (live, expert, the lane's
+    """The wave's `i`-th unit (`w + 4 i`): (live, expert, the lane's
     token's assignment, the unit's token count; 0 past the unit count)."""
     n = uniform(lds_ld(lds.index + 2 * E_ALL))
     u = g.wave + i32(WAVES * i)
@@ -1460,7 +1460,7 @@ def _down_unit(g, s, lds, i):
 
 
 def _down_weights(g, s, lds, w, i):
-    """Unit ``i``'s down weights of output tile ``bid`` (every K step; K past
+    """Unit `i`'s down weights of output tile `bid` (every K step; K past
     RI is padding) and their scale words."""
     tile, lane = g.bid, g.lane
     live, expert, _, _ = _down_unit(g, s, lds, i)
@@ -1487,7 +1487,7 @@ def _down_weights(g, s, lds, w, i):
 
 
 def _down_acts(g, s, lds, i):
-    """Unit ``i``'s activation operands from LDS: (codes and scale codes a K
+    """Unit `i`'s activation operands from LDS: (codes and scale codes a K
     step, the lane's token's assignment, the token count)."""
     live, _, a, count = _down_unit(g, s, lds, i)
     group = g.lane // TILE
@@ -1510,8 +1510,8 @@ def _wave_units(s) -> int:
 
 
 def down_issue(g, s, lds, w):
-    """The down weights of the wave's first ``DOWN_AHEAD`` units of output
-    tile ``bid``, for ``down_units``."""
+    """The down weights of the wave's first `DOWN_AHEAD` units of output
+    tile `bid`, for `down_units`."""
     return [
         _down_weights(g, s, lds, w, i) for i in range(min(DOWN_AHEAD, _wave_units(s)))
     ]
@@ -1519,10 +1519,10 @@ def down_issue(g, s, lds, w):
 
 @traced
 def down_units(g, s, lds, w, pending):
-    """Wave ``w``: units ``w, w + 4, ..`` of output tile ``bid``, each a K
-    chain over its tokens' activation rows in LDS, ``DOWN_AHEAD`` units'
-    operands loaded ahead (``pending``: the first units' weights, issued by
-    ``down_issue``); a token's 16 results to ``lds.contrib[(row, slot)]``."""
+    """Wave `w`: units `w, w + 4, ..` of output tile `bid`, each a K
+    chain over its tokens' activation rows in LDS, `DOWN_AHEAD` units'
+    operands loaded ahead (`pending`: the first units' weights, issued by
+    `down_issue`); a token's 16 results to `lds.contrib[(row, slot)]`."""
     lane = g.lane
     group = lane // TILE
     odd = g.bid % 2
@@ -1548,9 +1548,9 @@ def down_units(g, s, lds, w, pending):
 
 @traced
 def push_group(g, xch, y, grp, rows: int):
-    """Line group ``grp``'s exchange lines from ``y`` ([rows, HIDDEN] f32), a
-    wave a line (``combine``'s lanes: token ``l // 8``, columns ``8 (l % 8)
-    ..``), then each line's flag in every rank's mailbox."""
+    """Line group `grp`'s exchange lines from `y` ([rows, HIDDEN] f32), a
+    wave a line (`combine`'s lanes: token `l // 8`, columns `8 (l % 8)
+    ..`), then each line's flag in every rank's mailbox."""
     lpg = ex_.lines_per_group(rows)
     row = xch._row(xch.rank)
     for blk in range(g.wave, i32(lpg), i32(WAVES)):

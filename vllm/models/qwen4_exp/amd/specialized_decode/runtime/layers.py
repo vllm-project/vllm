@@ -1,13 +1,13 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 """The launches of one decoder layer: vLLM's modules and tensors in, the
-kernels' arguments out (``Launcher``), and ``qsa_core``, the QSA attention
+kernels' arguments out (`Launcher`), and `qsa_core`, the QSA attention
 up to o_proj's input (the wide indexer launch: vLLM's fused prepare, the
 scores and the top-k selection; then the sparse attention).
 
-``Launcher`` holds the per-rank state every launch reads: the scratch every
+`Launcher` holds the per-rank state every launch reads: the scratch every
 width shares (launches of a step run in order), the block-input buffer, the
-two barrier slots the launches of a step alternate (``wide.common.grid``), the
+two barrier slots the launches of a step alternate (`wide.common.grid`), the
 fold counters, the step epoch (bumped once a step; a CUDA graph captures the
 bump, and the TP exchange tags carry it), the health words and the peer
 mailboxes of the TP exchange."""
@@ -55,7 +55,7 @@ TRACE = False
 def allreduce_codec() -> str:
     """The TP exchange's line codec: QuickReduce's INT4 codec when the
     deployment asks QuickReduce for INT4 (or INT3) all-reduces
-    (``VLLM_ROCM_QUICK_REDUCE_QUANTIZATION``), else exact bf16 lines."""
+    (`VLLM_ROCM_QUICK_REDUCE_QUANTIZATION`), else exact bf16 lines."""
     level = envs.VLLM_ROCM_QUICK_REDUCE_QUANTIZATION
     return "int4" if level in ("INT4", "INT3") else "bf16"
 
@@ -182,7 +182,7 @@ class Launcher:
                 }
 
     def keys(self, layer, rows: int, stats: bool) -> list:
-        """The builds a layer's launches use at ``rows`` (``stats``: its input
+        """The builds a layer's launches use at `rows` (`stats`: its input
         state came from vLLM)."""
         common = dict(
             tokens=rows,
@@ -210,8 +210,8 @@ class Launcher:
         ]
 
     def launch(self, key, i: int, seq: int, dynamic: dict) -> int:
-        """Launch ``key`` for layer ``i`` as the step's launch ``seq`` (which
-        picks its barrier slot); returns the next ``seq``."""
+        """Launch `key` for layer `i` as the step's launch `seq` (which
+        picks its barrier slot); returns the next `seq`."""
         a = self.args[i] | dynamic
         a["sync"] = self.slots[seq % 2]
         a["sync_next"] = self.slots[(seq + 1) % 2]
@@ -255,7 +255,7 @@ def _select_buffers(rows: int, columns: int, blocks: int, device):
 
 
 def _prep(attn, rows, qkv, ixqk, query, gate, positions, main, raw, comp):
-    """The score launch's fused prepare (``indexer.Prep``) when the layer's
+    """The score launch's fused prepare (`indexer.Prep`) when the layer's
     rope, caches and metadata are the ones it is written for, else None
     (vLLM's prepare runs)."""
     ix = attn.indexer
@@ -310,14 +310,14 @@ def _prep(attn, rows, qkv, ixqk, query, gate, positions, main, raw, comp):
 
 
 def qsa_core(attn, x, qkv, ixqk, positions) -> tuple[torch.Tensor, torch.Tensor]:
-    """``Qwen4ExpQSAAttention.forward`` up to the output gate (the qsa_back
+    """`Qwen4ExpQSAAttention.forward` up to the output gate (the qsa_back
     launch applies it to o_proj's input) -> (attention output [S, heads HD],
-    gate [S, heads HD]). ``qkv`` and ``ixqk``: ``attn.qkv_proj(x)`` and
-    ``attn.indexer.index_qk_proj(x)`` (qsa_front's projections). The wide
+    gate [S, heads HD]). `qkv` and `ixqk`: `attn.qkv_proj(x)` and
+    `attn.indexer.index_qk_proj(x)` (qsa_front's projections). The wide
     indexer launch runs vLLM's fused prepare (the queries, the gate, the K/V
-    and indexer caches; ``indexer.Prep``), scores the compressed blocks and
+    and indexer caches; `indexer.Prep`), scores the compressed blocks and
     selects them (the decode top-k's set; a row within the budget takes all
-    of its blocks unscored), and ``wide.attention`` attends their tokens in
+    of its blocks unscored), and `wide.attention` attends their tokens in
     place (other cache formats run vLLM's whole QSA; other ropes or metadata
     vLLM's prepare)."""
     from vllm.models.qwen4_exp.amd import qsa

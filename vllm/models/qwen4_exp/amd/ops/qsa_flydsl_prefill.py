@@ -2,11 +2,11 @@
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 """AITER's FlyDSL sparse prefill for the Qwen4Exp QSA owner on gfx950.
 
-When vLLM uses AITER (``VLLM_ROCM_USE_AITER``) on gfx950 and the installed
+When vLLM uses AITER (`VLLM_ROCM_USE_AITER`) on gfx950 and the installed
 AITER has the op for gfx950, the ROCm metadata builder describes each step's
 trailing prefilling requests with their host lengths, and
-``qsa_sparse_paged_attention`` hands those requests' rows to the op when they
-number at least ``FLYDSL_PREFILL_MIN_ROWS`` and the op can read the K/V cache
+`qsa_sparse_paged_attention` hands those requests' rows to the op when they
+number at least `FLYDSL_PREFILL_MIN_ROWS` and the op can read the K/V cache
 in place. The leading decode rows, and every step the op does not take, run
 the Triton kernel.
 """
@@ -51,7 +51,7 @@ def _on_gfx950() -> bool:
 
 @cache
 def _flydsl_op():
-    """AITER's ``flydsl_qsa_sparse_prefill``, or None when this AITER lacks it
+    """AITER's `flydsl_qsa_sparse_prefill`, or None when this AITER lacks it
     or has no gfx950 entry (AITER lists gfx950 from ROCm/aiter#7556, which also
     lets the op read strided K/V)."""
     try:
@@ -69,13 +69,13 @@ def _flydsl_op():
 
 
 def flydsl_prefill_available() -> bool:
-    """Whether vLLM uses AITER (``VLLM_ROCM_USE_AITER``), the device is gfx950
+    """Whether vLLM uses AITER (`VLLM_ROCM_USE_AITER`), the device is gfx950
     and the installed AITER runs the op."""
     return rocm_aiter_ops.is_enabled() and _on_gfx950() and _flydsl_op() is not None
 
 
 def _selection_blocks(width: int) -> int | None:
-    """T of the op's ``[rows, 4 T + 3]`` indices (T = 256, 512, 768 or 1024)."""
+    """T of the op's `[rows, 4 T + 3]` indices (T = 256, 512, 768 or 1024)."""
     blocks, rest = divmod(width - 3, 4)
     return blocks if rest == 0 and blocks in (256, 512, 768, 1024) else None
 
@@ -87,8 +87,8 @@ def flydsl_prefill_applies(
     logical_indices: torch.Tensor,
     out: torch.Tensor,
 ) -> bool:
-    """Whether a prefill tail of ``num_rows`` rows takes the FlyDSL op (the
-    caller has validated ``q`` and the cache)."""
+    """Whether a prefill tail of `num_rows` rows takes the FlyDSL op (the
+    caller has validated `q` and the cache)."""
     return (
         num_rows >= FLYDSL_PREFILL_MIN_ROWS
         and k_cache.dtype == torch.bfloat16
@@ -106,12 +106,12 @@ def flydsl_prefill_applies(
 def _pools(
     k_cache: torch.Tensor, v_cache: torch.Tensor
 ) -> tuple[torch.Tensor, torch.Tensor, int] | None:
-    """K and V as the op's ``[rows, heads, head_dim]`` token pools, read in
+    """K and V as the op's `[rows, heads, head_dim]` token pools, read in
     place, and the rows from one page to the next; None when the op cannot read
     the cache that way.
 
     K and V are the two halves of one record per token (one split of the QSA
-    cache), so they share every stride. A pool row is ``heads`` adjacent head
+    cache), so they share every stride. A pool row is `heads` adjacent head
     vectors, 16-byte aligned. The op reads four-token blocks at four
     consecutive rows from a multiple of four: a block starts in a page at a
     multiple of four (pages hold a multiple of 16 tokens), so its row is a
@@ -144,8 +144,8 @@ def token_slots(
 ) -> torch.Tensor:
     """int32 pool row of every key of the layout's requests, in packed order
     (request r's tokens 0 .. prefix_r + query_r - 1, requests in batch order):
-    token t of request r is row ``block_table[r, t // page_size] * per_page +
-    t % page_size``. Built once per step and block table, for every layer. The
+    token t of request r is row `block_table[r, t // page_size] * per_page +
+    t % page_size`. Built once per step and block table, for every layer. The
     step never waits for it: the lengths are host values copied without a sync,
     and the rest is device work."""
     key = (block_table.data_ptr(), tuple(block_table.shape), page_size, per_page)
@@ -230,8 +230,8 @@ def warmup_flydsl_qsa_prefill(
     selection_width: int,
 ) -> tuple[tuple[int, ...], ...]:
     """Compile the op's kernels for a layer's K/V cache views, so that no served
-    step compiles them: each of ``WARMUP_LAYOUTS`` goes through
-    ``try_flydsl_prefill`` on the cache itself, whose row pitch and pool span
+    step compiles them: each of `WARMUP_LAYOUTS` goes through
+    `try_flydsl_prefill` on the cache itself, whose row pitch and pool span
     select the kernels. Every key is read from block 0, the null block, which
     is mapped even while an extensible KV cache has mapped nothing else.
     Returns the layouts the op took."""

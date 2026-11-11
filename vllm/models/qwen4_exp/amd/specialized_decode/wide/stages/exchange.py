@@ -1,23 +1,23 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 """The tensor-parallel exchange of a block's output: every rank's partial
-``y_r [rows, HIDDEN]`` (bf16) lands in every rank's mailbox, and a reader sums
+`y_r [rows, HIDDEN]` (bf16) lands in every rank's mailbox, and a reader sums
 the ranks' copies in rank order, so every rank holds the same bf16 sum.
 
 Lines: a partial is stored as lines ordered by
-(column group, token block): group ``g`` is columns ``64 g .. 64 g + 63`` (one
+(column group, token block): group `g` is columns `64 g .. 64 g + 63` (one
 row group of the output GEMM, whose last arriving unit pushes it), a line
-eight tokens of one group. Lane ``l`` of the wave that writes a line holds
-token ``l // 8`` of the block, columns ``8 (l % 8) ..``. A step whose rows are
+eight tokens of one group. Lane `l` of the wave that writes a line holds
+token `l // 8` of the block, columns `8 (l % 8) ..`. A step whose rows are
 not a multiple of eight ends each group with a partial line: only its rows'
 tokens are stored and read (a one-row step moves 128 B a line), at the same
-addresses as in a whole line. A line's ``codec``:
+addresses as in a whole line. A line's `codec`:
 
-- ``bf16`` (exact): 256 dwords (1 KiB), a lane's four packed bf16 dwords;
-- ``int4`` (QuickReduce's INT4 codec, opt-in): 80 dwords (320 B), a lane's
+- `bf16` (exact): 256 dwords (1 KiB), a lane's four packed bf16 dwords;
+- `int4` (QuickReduce's INT4 codec, opt-in): 80 dwords (320 B), a lane's
   eight 4-bit codes in one dword, then each token's four group scales as bf16.
   A group is 16 columns (a lane pair); its scale maps the group's signed
-  extremum to -8 (codes ``round(x / scale)`` clamped to [-8, 7]). Every rank
+  extremum to -8 (codes `round(x / scale)` clamped to [-8, 7]). Every rank
   reads every rank's copy, its own included, so the ranks' sums agree.
 
 After its payload a wave drains its stores and sets the line's flag to the
@@ -25,9 +25,9 @@ use's tag, in every rank's mailbox; a reader polls the flags of the lines it
 needs and gates its payload loads on them. Payload and flags carry 99.6 %
 payload on the link (bf16 lines), where tagged pairs would carry half.
 
-A rank's mailbox (uncached, peer-mapped): ``SLOTS`` slots, a slot a row per
+A rank's mailbox (uncached, peer-mapped): `SLOTS` slots, a slot a row per
 source rank of the widest step's payload, then one flag a line at a fixed
-offset (``FLAGS_AT``): a flag word is never a narrower or wider step's
+offset (`FLAGS_AT`): a flag word is never a narrower or wider step's
 payload, so it only ever holds a tag. A layer's two
 exchanges (attention, MLP) and the layer's parity pick the slot: a rank can be
 at most one layer ahead of its peer, so a slot is never rewritten before every
@@ -106,9 +106,9 @@ def mailbox_bytes(tp: int) -> int:
 
 
 class Exchange(TraceInvariant):
-    """One use of the exchange: slot ``slot`` of every rank's mailbox, this
-    rank ``rank`` of ``tp``, tagged ``tag``. ``bases``: every rank's mailbox
-    base (wave-uniform Int64, rank order), ``own``: this rank's."""
+    """One use of the exchange: slot `slot` of every rank's mailbox, this
+    rank `rank` of `tp`, tagged `tag`. `bases`: every rank's mailbox
+    base (wave-uniform Int64, rank order), `own`: this rank's."""
 
     def __init__(
         self, bases, own, rank, tp: int, slot, tag, rows: int, codec: str = "bf16"
@@ -137,9 +137,9 @@ class Exchange(TraceInvariant):
         return line * fx.Int32(self.words), token % fx.Int32(TOKENS)
 
     def put(self, group, token, seg, vals):
-        """The lane's 8 values (f32) of ``token``, columns ``64 group + 8 seg
-        ..``, into every rank's row of this rank. Lane ``l`` of the wave holds
-        token ``l // 8`` of the line, ``seg = l % 8``; every lane of the wave
+        """The lane's 8 values (f32) of `token`, columns `64 group + 8 seg
+        ..`, into every rank's row of this rank. Lane `l` of the wave holds
+        token `l // 8` of the line, `seg = l % 8`; every lane of the wave
         takes part (the int4 groups pair lanes), and a token past the step's
         rows (a partial line's) stores nothing."""
         row = self._row(self.rank)
@@ -154,8 +154,8 @@ class Exchange(TraceInvariant):
             _put_int4(self, row + at + t8 * 8 + seg, row + at + 64 + t8 * 2, seg, vals)
 
     def get(self, src: int, group, token, seg, gate):
-        """``src``'s 8 values (f32) of ``token``, columns ``64 group + 8 seg
-        ..``, after the poll whose difference ``gate`` (zero) covers their
+        """`src`'s 8 values (f32) of `token`, columns `64 group + 8 seg
+        ..`, after the poll whose difference `gate` (zero) covers their
         line."""
         row = self._row(fx.Int32(src)) + gate
         at, t8 = self._line_at(group, token)
@@ -181,9 +181,9 @@ def _put_int4(xch, code_at, scale_at, seg, vals):
 
 @traced
 def _put_partial(xch, line_at, t8, seg, vals, live):
-    """``put`` into a partial line (``line_at``: its first word in this rank's
+    """`put` into a partial line (`line_at`: its first word in this rank's
     row): every lane encodes (the int4 groups pair lanes), only the lanes of
-    the step's rows (``live``) store."""
+    the step's rows (`live`) store."""
     if const_expr(xch.codec == "bf16"):
         words = pack_bf16x8(vals)
         if live:
@@ -200,10 +200,10 @@ def _put_partial(xch, line_at, t8, seg, vals, live):
 
 
 def _int4_encode(vals):
-    """A lane's 8 values as 4-bit codes (one dword, value ``e`` in bits ``4 e
-    ..``) under its 16-column group's scale (the lane and its ``lane ^ 1``
-    partner): ``scale = bf16(extremum / -8)``. Returns the codes and, for the
-    lanes ``seg % 4 == 0``, the dword of its two groups' bf16 scales."""
+    """A lane's 8 values as 4-bit codes (one dword, value `e` in bits `4 e
+    ..`) under its 16-column group's scale (the lane and its `lane ^ 1`
+    partner): `scale = bf16(extremum / -8)`. Returns the codes and, for the
+    lanes `seg % 4 == 0`, the dword of its two groups' bf16 scales."""
     hi, lo = vals[0], vals[0]
     for v in vals[1:]:
         hi = (v > hi).select(v, hi)
@@ -227,7 +227,7 @@ def _int4_encode(vals):
 
 @traced
 def wait_lines(g, ex, lines):
-    """Poll, from every lane, the flags of ``lines`` (a list of Int32 line
+    """Poll, from every lane, the flags of `lines` (a list of Int32 line
     indices, the lane's own) of every source rank until all carry the tag,
     bounded. Returns the per (line, source) differences from the tag (zero
     once the poll ends), to add to the lines' payload loads."""
@@ -255,9 +255,9 @@ def wait_lines(g, ex, lines):
 
 
 class GroupTile(TraceInvariant):
-    """An LDS ``[rows, 64]`` bf16 tile (i32 words, a 16-byte pad a row) that a
+    """An LDS `[rows, 64]` bf16 tile (i32 words, a 16-byte pad a row) that a
     block's producer gathers one column group of every token in before it
-    pushes the group's lines (``push_tile``)."""
+    pushes the group's lines (`push_tile`)."""
 
     STRIDE = COLS // 2 + 4
 
@@ -269,9 +269,9 @@ class GroupTile(TraceInvariant):
         return rows * GroupTile.STRIDE
 
     def put_acc(self, col0, lane, acc, tiles: int):
-        """A wave's GEMM accumulators (16 columns from ``col0`` within the
-        group, the epilogue layout: lane ``l`` holds columns ``col0 + 4 (l //
-        16) ..`` of token ``16 t + l % 16``) rounded to bf16."""
+        """A wave's GEMM accumulators (16 columns from `col0` within the
+        group, the epilogue layout: lane `l` holds columns `col0 + 4 (l //
+        16) ..` of token `16 t + l % 16`) rounded to bf16."""
         for t in range(tiles):
             token = fx.Int32(t * 16) + lane % 16
             tk = (token < self.rows).select(token, fx.Int32(self.rows - 1))
@@ -284,8 +284,8 @@ class GroupTile(TraceInvariant):
 
 @traced
 def push_tile(g, xch, tile, group):
-    """The tile (column group ``group`` of every token) as exchange lines to
-    every rank: wave ``w`` pushes lines ``w, w + 4, ..``, the payload first,
+    """The tile (column group `group` of every token) as exchange lines to
+    every rank: wave `w` pushes lines `w, w + 4, ..`, the payload first,
     one drain, then each line's flag from lane 0."""
     lpg = lines_per_group(tile.rows)
     seg = g.lane % 8

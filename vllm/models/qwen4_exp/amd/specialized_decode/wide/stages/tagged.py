@@ -4,8 +4,8 @@
 barrier.
 
 A producer stores each 32-bit value next to a tag, a pair a 64-bit half of
-one store (``put``); a consumer re-loads its pairs until every tag is the
-hand-off's (``poll``). A hand-off then costs one round trip after the
+one store (`put`); a consumer re-loads its pairs until every tag is the
+hand-off's (`poll`). A hand-off then costs one round trip after the
 producer's store lands: no store drain, flag or grid barrier. A tag is unique
 to a step, a layer and a hand-off of that layer, so no pair from an earlier
 step or layer passes, and a buffer holds one hand-off's pairs at a time.
@@ -37,8 +37,8 @@ def i32(v):
 
 
 def put(addr, first, values, tag):
-    """``values`` (32-bit, one or an even count) as (value, tag) pairs from pair
-    index ``first`` of ``addr``, two pairs a 16-byte store."""
+    """`values` (32-bit, one or an even count) as (value, tag) pairs from pair
+    index `first` of `addr`, two pairs a 16-byte store."""
     for h in range(-(-len(values) // 2)):
         words = []
         for v in values[2 * h : 2 * h + 2]:
@@ -73,8 +73,8 @@ def _stale(seen, tag):
 
 @traced
 def poll(g, specs, tag):
-    """The values of every ``(addr, first pair, pairs)`` of ``specs`` (pairs 1, 2
-    or 4), all re-loaded together until every tag is ``tag``; bounded, a
+    """The values of every `(addr, first pair, pairs)` of `specs` (pairs 1, 2
+    or 4), all re-loaded together until every tag is `tag`; bounded, a
     timeout recorded as a fold's. Returns per spec its value words (Int32)."""
     seen = _loads(specs)
     t0 = memrealtime()
@@ -90,7 +90,7 @@ def poll(g, specs, tag):
     out, i = [], 0
     for _, _, n in specs:
         words = []
-        for h in range(-(-n // 2)):
+        for _h in range(-(-n // 2)):
             words += [seen[i][e] for e in range(0, seen[i].numel, 2)]
             i += 1
         out.append(words)
@@ -98,9 +98,9 @@ def poll(g, specs, tag):
 
 
 class Pairs(tiled.Source):
-    """GEMM activations published as (bf16 pair, tag) pairs, a ``[tokens, ld /
-    2]`` pair matrix at ``addr``: a resident stage's items of a thread are
-    polled together (``tiled.Gemm.fill_resident``)."""
+    """GEMM activations published as (bf16 pair, tag) pairs, a `[tokens, ld /
+    2]` pair matrix at `addr`: a resident stage's items of a thread are
+    polled together (`tiled.Gemm.fill_resident`)."""
 
     def __init__(self, g, addr, ld_elems: int, tag):
         self.g, self.addr, self.ld, self.tag = g, fx.Int64(addr), ld_elems, tag

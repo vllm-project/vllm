@@ -1,16 +1,16 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
-"""The QSA layer's projections in ``qsa_front``: vLLM's ``qkv_proj`` and the
-indexer's ``index_qk_proj`` (both bf16, read in place) on the launch's ``x``,
+"""The QSA layer's projections in `qsa_front`: vLLM's `qkv_proj` and the
+indexer's `index_qk_proj` (both bf16, read in place) on the launch's `x`,
 as one grid phase.
 
-- ``qkv``: ``x @ W_qkv.T`` ([q | gate] per head, then k, v: QKVParallelLinear's
-  rank shard, ``QKV`` rows) in ``QKV_SPLITS`` K slices a 64-row group,
+- `qkv`: `x @ W_qkv.T` ([q | gate] per head, then k, v: QKVParallelLinear's
+  rank shard, `QKV` rows) in `QKV_SPLITS` K slices a 64-row group,
   folded by the group's last arriving unit, which stores the group's bf16
-  columns of ``qkv_out`` [rows, QKV].
-- ``ix``: ``x @ W_ix.T`` (the replicated indexer Q heads then K, ``IX`` rows)
-  likewise in ``IX_SPLITS`` slices, on the CTAs after the ``qkv`` units, into
-  ``ix_out`` [rows, IX].
+  columns of `qkv_out` [rows, QKV].
+- `ix`: `x @ W_ix.T` (the replicated indexer Q heads then K, `IX` rows)
+  likewise in `IX_SPLITS` slices, on the CTAs after the `qkv` units, into
+  `ix_out` [rows, IX].
 
 Each output is the f32 sum of its splits' partials in split order, rounded
 to bf16 once, as the stock bf16 GEMMs round their f32 accumulators.
@@ -67,8 +67,8 @@ assert qkv_plan().groups <= FOLD_IX
 
 @traced
 def _store_rows(out, cols: int, rows: int, first, lane, acc):
-    """A fold's summed rows ``r .. r + 3`` (output columns) of each token,
-    rounded to bf16, at ``out[token, r]``."""
+    """A fold's summed rows `r .. r + 3` (output columns) of each token,
+    rounded to bf16, at `out[token, r]`."""
     col = first + lane // i32(16) * i32(4)
     for t in range_constexpr(len(acc)):
         token = i32(t * 16) + lane % i32(16)
@@ -89,8 +89,8 @@ def _store_bf16(out, cols: int, rows: int):
 
 @traced
 def proj(g, gemm, w_qkv, w_ix, x, qkv_out, ix_out, part, rows: int):
-    """Both projections of the step's ``rows`` rows of ``x`` [rows, HIDDEN]
-    bf16 (written earlier in the launch); ``part``: the scratch's partials."""
+    """Both projections of the step's `rows` rows of `x` [rows, HIDDEN]
+    bf16 (written earlier in the launch); `part`: the scratch's partials."""
     source = tiled.Source(x, HIDDEN)
     plan = qkv_plan()
     epi, after = tiled.fold(g, gemm, plan, part, 0, _store_bf16(qkv_out, QKV, rows))

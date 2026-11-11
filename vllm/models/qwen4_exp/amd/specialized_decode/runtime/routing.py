@@ -10,7 +10,7 @@ import torch
 
 def step_reason(attn_metadata, gdn_prefix: str, width: int) -> str | None:
     """None if a step's GDN metadata (identical on every TP rank) is a pure
-    decode step of one token a request whose state indices cover ``width``
+    decode step of one token a request whose state indices cover `width`
     rows, else why not."""
     if not isinstance(attn_metadata, dict):
         return "no metadata"

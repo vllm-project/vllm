@@ -8,13 +8,13 @@ kernel's argument list, named once.
 FlyDSL keys a compiled kernel by the scalars its launcher's closures capture;
 a parameter used only by build-time Python would not be keyed, and two builds
 differing only there would share one binary. So a build's parameters are one
-frozen dataclass of scalars, ``key_tuple`` turns it into one (name, value)
+frozen dataclass of scalars, `key_tuple` turns it into one (name, value)
 tuple, and the launcher references that tuple. The tuple also carries the
-digest of the kernel sources (``source_digest``): FlyDSL does not reach every
+digest of the kernel sources (`source_digest`): FlyDSL does not reach every
 helper's source when it hashes a kernel.
 
 A FlyDSL kernel and its launcher each spell out their positional parameters
-and the host passes them by position, so ``KernelAbi`` is the one list of
+and the host passes them by position, so `KernelAbi` is the one list of
 names: the build checks both signatures against it and the host packs by name.
 """
 
@@ -31,7 +31,7 @@ _ROOT = Path(__file__).resolve().parents[1]
 
 @functools.cache
 def source_digest() -> str:
-    """sha256 of every ``.py`` file of the ``wide`` package, path and contents."""
+    """sha256 of every `.py` file of the `wide` package, path and contents."""
     h = hashlib.sha256()
     for f in sorted(_ROOT.rglob("*.py")):
         h.update(str(f.relative_to(_ROOT)).encode())
@@ -40,7 +40,7 @@ def source_digest() -> str:
 
 
 def key_tuple(key) -> tuple:
-    """``key``'s (field name, value) pairs, every value a scalar, then the
+    """`key`'s (field name, value) pairs, every value a scalar, then the
     kernel sources' digest."""
     out = []
     for f in fields(key):
@@ -67,7 +67,7 @@ class KernelAbi:
     names: tuple[str, ...]
 
     def check(self, kernel, launcher) -> None:
-        """The kernel takes exactly ``names``; the launcher too, then ``stream``."""
+        """The kernel takes exactly `names`; the launcher too, then `stream`."""
         got = _python_params(kernel)
         if got != self.names:
             raise TypeError(f"kernel parameters {got} != ABI {self.names}")
@@ -76,7 +76,7 @@ class KernelAbi:
             raise TypeError(f"launcher parameters {got} != ABI {self.names} + stream")
 
     def pack(self, values: dict) -> list:
-        """``values`` (every name, nothing else) in ABI order."""
+        """`values` (every name, nothing else) in ABI order."""
         if set(values) != set(self.names):
             extra = sorted(set(values) - set(self.names))
             missing = sorted(set(self.names) - set(values))

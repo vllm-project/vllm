@@ -1,7 +1,7 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 """Float64 references of the wide decode's stages with the stock path's bf16
-rounding points (``bf``), at Qwen3.8-Flash-Next's TP2 shapes."""
+rounding points (`bf`), at Qwen3.8-Flash-Next's TP2 shapes."""
 
 import torch
 import torch.nn.functional as F
@@ -42,14 +42,14 @@ def mxfp4(n, k, gen, lo=118, hi=124):
 
 
 def shuffle_data(packed):
-    """AITER's ``shuffle_weight(layout=(16, 16))`` of fp4 codes [.., n, k / 2]."""
+    """AITER's `shuffle_weight(layout=(16, 16))` of fp4 codes [.., n, k / 2]."""
     *lead, n, kb = packed.shape
     v = packed.reshape(-1, n // 16, 16, kb // 16, 16).permute(0, 1, 3, 2, 4)
     return v.contiguous().view(*lead, n, kb)
 
 
 def shuffle_scale(sc):
-    """AITER's ``e8m0_shuffle`` of [rows, cols] scales (cols padded to 8)."""
+    """AITER's `e8m0_shuffle` of [rows, cols] scales (cols padded to 8)."""
     rows, cols = sc.shape
     pad = (cols + 7) // 8 * 8
     if pad != cols:
@@ -63,8 +63,8 @@ def shuffle_scale(sc):
 
 
 def dequant_mx(q, s):
-    """Dequantized [.., k] of packed e2m1 codes ``q`` [.., k / 2] and E8M0
-    scales ``s`` [.., >= k / 32]."""
+    """Dequantized [.., k] of packed e2m1 codes `q` [.., k / 2] and E8M0
+    scales `s` [.., >= k / 32]."""
     q = q.cpu().long()
     vals = torch.stack([E2M1[q & 15], E2M1[q >> 4]], -1).flatten(-2)
     return (
@@ -76,8 +76,8 @@ def dequant_mx(q, s):
 
 
 def gated_residual(state, norm_w, w_di, w_up, y, hc: int, lowrank: int, eps: float):
-    """The gated residual's mix of ``state`` [rows, hc * hidden] and the
-    combine of a block output ``y`` [rows, hidden]: (mixed x, injection
+    """The gated residual's mix of `state` [rows, hc * hidden] and the
+    combine of a block output `y` [rows, hidden]: (mixed x, injection
     scales, new state, rrms of state, rrms of the new state)."""
     rows = state.shape[0]
     hidden = y.shape[1]
@@ -98,10 +98,10 @@ def gated_residual(state, norm_w, w_di, w_up, y, hc: int, lowrank: int, eps: flo
 def gated_delta_net(
     x, wq, wba, wconv, a_log, dt_bias, normw, wo, st_idx, conv_state, ssm, eps: float
 ):
-    """The GDN block of rows ``x`` with state slots ``st_idx`` (<= 0: none):
+    """The GDN block of rows `x` with state slots `st_idx` (<= 0: none):
     (conv output q | k | v, z, new conv states, new recurrent states, core
-    [rows, NV * 128], out_proj output). Dims from the weights: ``wq`` [q | k |
-    v | z rows, hidden], ``wba`` [b | a rows, hidden]."""
+    [rows, NV * 128], out_proj output). Dims from the weights: `wq` [q | k |
+    v | z rows, hidden], `wba` [b | a rows, hidden]."""
     rows = x.shape[0]
     nv = a_log.numel()
     dk = 128
@@ -150,8 +150,8 @@ def gated_delta_net(
 
 
 def moe(x, w_gate, w13d, w2d, experts: int, topk: int, ri: int, rip: int):
-    """The MoE of rows ``x``: softmax top-k over the bf16 router logits of the
-    routed experts plus the shared expert (index ``experts``, sigmoid
+    """The MoE of rows `x`: softmax top-k over the bf16 router logits of the
+    routed experts plus the shared expert (index `experts`, sigmoid
     weight), activations quantized to MXFP4 as AITER does (input and the
     gate-up product). Returns (y f64, expert ids, weights)."""
     from aiter.ops.triton.quant import dynamic_mxfp4_quant
@@ -179,9 +179,9 @@ def moe(x, w_gate, w13d, w2d, experts: int, topk: int, ri: int, rip: int):
 
 
 def int4_roundtrip(y):
-    """The TP exchange's INT4 line codec on ``y`` [rows, cols] (f32 math as
-    the kernels do): groups of 16 columns, ``scale = bf16(extremum / -8)``,
-    codes ``roundeven(y * (1 / scale))`` clamped to [-8, 7]."""
+    """The TP exchange's INT4 line codec on `y` [rows, cols] (f32 math as
+    the kernels do): groups of 16 columns, `scale = bf16(extremum / -8)`,
+    codes `roundeven(y * (1 / scale))` clamped to [-8, 7]."""
     v = y.float().view(y.shape[0], -1, 16)
     hi, lo = v.amax(-1, keepdim=True), v.amin(-1, keepdim=True)
     ext = torch.where(hi > -lo, hi, lo)
@@ -192,8 +192,8 @@ def int4_roundtrip(y):
 
 
 def int4_lines(words, rows: int, groups: int, lpg: int, hidden: int):
-    """Decode an exchange row of INT4 lines (i32 ``words``) to [rows, hidden]
-    f32: a line's 64 code dwords (token ``t``, segment ``s`` at ``8 t + s``),
+    """Decode an exchange row of INT4 lines (i32 `words`) to [rows, hidden]
+    f32: a line's 64 code dwords (token `t`, segment `s` at `8 t + s`),
     then each token's two scale dwords (bf16 pairs of its four groups)."""
     lines = words.view(groups, lpg, 80).cpu().long() & 0xFFFFFFFF
     codes = lines[..., :64].view(groups, lpg, 8, 8)  # [g, blk, token, seg]

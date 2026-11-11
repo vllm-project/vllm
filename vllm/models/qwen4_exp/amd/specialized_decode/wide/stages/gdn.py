@@ -1,31 +1,31 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
-"""The gated delta net of a GDN layer (vLLM's ``QwenGatedDeltaNetAttention``
+"""The gated delta net of a GDN layer (vLLM's `QwenGatedDeltaNetAttention`
 decode on one rank) as grid phases over every row of the step.
 
-- ``proj``: ``[q | k | v | z] = x @ W_qkvz.T`` (MXFP4) in two K slices a
+- `proj`: `[q | k | v | z] = x @ W_qkvz.T` (MXFP4) in two K slices a
   64-row group, folded by the group's last arriving unit, whose epilogue runs
-  the causal conv on ``q | k | v`` with its state update:
-  ``silu(w0 s0 + w1 s1 + w2 s2 + w3 x)``, new state ``[s1, s2, x]``, ``x``
-  the projection rounded to bf16 (the stock GEMM's output); ``z`` is stored
-  as is. The ``[b | a]`` rows (bf16 ``W_ba``) are one-chunk units
+  the causal conv on `q | k | v` with its state update:
+  `silu(w0 s0 + w1 s1 + w2 s2 + w3 x)`, new state `[s1, s2, x]`, `x`
+  the projection rounded to bf16 (the stock GEMM's output); `z` is stored
+  as is. The `[b | a]` rows (bf16 `W_ba`) are one-chunk units
   whose partials the recurrence sums, run by the first arrivers of the
   first groups, so no last arriver's conv waits behind one.
-- ``recur``: a unit is (row, key head), a CTA: the key head's three value
+- `recur`: a unit is (row, key head), a CTA: the key head's three value
   heads in turn, each the gated delta rule on its 128 x 128 fp32 state in
-  place, then the gated RMSNorm of the output (``RMSNormGated`` with the
-  model's sigmoid output gate: ``norm(o) w sigmoid(z)``). A row whose state slot is
+  place, then the gated RMSNorm of the output (`RMSNormGated` with the
+  model's sigmoid output gate: `norm(o) w sigmoid(z)`). A row whose state slot is
   the null block (<= 0, CUDA graph padding) skips its state and outputs zeros,
   as stock does.
-- ``out``: ``core @ W_out.T`` (MXFP4; bf16 for a QSA layer's ``o_proj``, the
+- `out`: `core @ W_out.T` (MXFP4; bf16 for a QSA layer's `o_proj`, the
   output gate applied as its activations are staged) in six K slices a
   64-column group, folded by the group's last arriver, which pushes the group
   to the TP exchange.
 
-Up to ``tiled.RESIDENT_MAX`` rows the three are one phase: a recurrence unit
+Up to `tiled.RESIDENT_MAX` rows the three are one phase: a recurrence unit
 is (row, value head), and the projection's outputs and the recurrence's
-reach their consumers as tagged pairs (``tagged``) instead of through grid
-barriers; the ``[b | a]`` chunks ride on the projection units' stages.
+reach their consumers as tagged pairs (`tagged`) instead of through grid
+barriers; the `[b | a]` chunks ride on the projection units' stages.
 """
 
 from __future__ import annotations
@@ -128,9 +128,9 @@ class Bufs(TraceInvariant):
 
 
 def handoff_words(rows: int) -> tuple[int, int, int]:
-    """i32 words of the ``qkv``, ``ba`` and ``core`` buffers: plain, or at the
-    resident widths tagged pairs (``[rows, QKVZ / 2]`` bf16 pairs, the
-    partials' f32 values, ``[rows, VALUE_DIM / 2]`` bf16 pairs)."""
+    """i32 words of the `qkv`, `ba` and `core` buffers: plain, or at the
+    resident widths tagged pairs (`[rows, QKVZ / 2]` bf16 pairs, the
+    partials' f32 values, `[rows, VALUE_DIM / 2]` bf16 pairs)."""
     if tiled.resident(rows):
         return rows * QKVZ, 2 * ba_plan().partial_words(rows), rows * VALUE_DIM
     return rows * CONV_DIM // 2, ba_plan().partial_words(rows), rows * VALUE_DIM // 2
@@ -145,21 +145,21 @@ def ba_weights(w):
 
 
 def proj(g, gemm, w, b, rows: int, fold0: int, pending=None, tag=None):
-    """The input projection and its conv. ``w``: ``qkvz`` / ``qkvz_s`` (MXFP4,
-    ``shuffled`` its layout), ``ba`` (bf16), ``conv`` ([CONV_DIM, 4] bf16);
-    ``b``: ``x``, ``qkv``, ``z``, ``ba`` (partials), ``part``, ``st_idx``,
-    ``conv_state`` (a slot [3, CONV_DIM] bf16, slots ``conv_stride`` elements
-    apart). Fold counters ``fold0 ..``. ``pending``: the first unit's weights,
-    at the resident widths ``proj_issue``'s, else the CTA's
-    ``tiled.unit_preload`` of ``proj_weights``.
+    """The input projection and its conv. `w`: `qkvz` / `qkvz_s` (MXFP4,
+    `shuffled` its layout), `ba` (bf16), `conv` ([CONV_DIM, 4] bf16);
+    `b`: `x`, `qkv`, `z`, `ba` (partials), `part`, `st_idx`,
+    `conv_state` (a slot [3, CONV_DIM] bf16, slots `conv_stride` elements
+    apart). Fold counters `fold0 ..`. `pending`: the first unit's weights,
+    at the resident widths `proj_issue`'s, else the CTA's
+    `tiled.unit_preload` of `proj_weights`.
 
-    At the resident widths the [b | a] chunk ``c`` is multiplied by the unit
-    of split ``c // per`` and group ``c % per``, whose stage holds it, before
+    At the resident widths the [b | a] chunk `c` is multiplied by the unit
+    of split `c // per` and group `c % per`, whose stage holds it, before
     the unit's fold; wider steps run it as one-chunk units on the first
-    arrivers of the projection's groups (``_proj_streamed``). With ``tag``
-    (resident widths) the outputs are tagged pairs (``tagged``) the
-    recurrence polls, with no grid barrier between: ``qkv`` holds ``[rows,
-    QKVZ / 2]`` (bf16 pair, tag) pairs, z included, ``ba`` the partials'
+    arrivers of the projection's groups (`_proj_streamed`). With `tag`
+    (resident widths) the outputs are tagged pairs (`tagged`) the
+    recurrence polls, with no grid barrier between: `qkv` holds `[rows,
+    QKVZ / 2]` (bf16 pair, tag) pairs, z included, `ba` the partials'
     (value, tag) pairs."""
     plan = proj_plan()
     source = tiled.Source(b.x, HIDDEN)
@@ -209,13 +209,13 @@ def proj(g, gemm, w, b, rows: int, fold0: int, pending=None, tag=None):
 
 
 def _proj_streamed(g, gemm, w, b, rows: int, fold0: int, pending, plan, source):
-    """``proj`` past ``tiled.RESIDENT_MAX``. The conv's inputs do not depend on
+    """`proj` past `tiled.RESIDENT_MAX`. The conv's inputs do not depend on
     the projection, so they leave the group's fold chain: the slots load
-    before the GEMM. Up to ``CONV_LATE_ROWS`` the last arriver issues the taps
-    and states with its partial loads (``tiled.fold``'s ``begin``), so their
+    before the GEMM. Up to `CONV_LATE_ROWS` the last arriver issues the taps
+    and states with its partial loads (`tiled.fold`'s `begin`), so their
     round trips overlap; above, every unit issues them after its partials,
-    before the fold arrival, which then drains them. The ``[b | a]`` units run
-    on the first arrivers of groups ``0 ..``, which have nothing else to do in
+    before the fold arrival, which then drains them. The `[b | a]` units run
+    on the first arrivers of groups `0 ..`, which have nothing else to do in
     the phase."""
     tokens, _ = _conv_tokens(rows, gemm.lane, gemm.tiles)
     slots = [ld(b.st_idx, tk, fx.Int32, cm=CM_DEV) for tk in tokens]
@@ -240,7 +240,7 @@ def _proj_streamed(g, gemm, w, b, rows: int, fold0: int, pending, plan, source):
 
     @traced
     def ba_unit(group):
-        """The [b | a] unit ``group`` (one chunk), on the group's first arriver."""
+        """The [b | a] unit `group` (one chunk), on the group's first arriver."""
         if group < i32(bplan.units):
             _, split, firsts, rws = tiled.unit_rows(bplan, group, gemm.tid)
             acc = gemm.run(source, bw, rws, split * i32(bplan.per), bplan.per)
@@ -277,7 +277,7 @@ def _proj_streamed(g, gemm, w, b, rows: int, fold0: int, pending, plan, source):
 
 
 def _tagged_partials(gemm, plan, part, tag):
-    """``tiled.partial_epilogue`` storing (value, tag) pairs."""
+    """`tiled.partial_epilogue` storing (value, tag) pairs."""
 
     @traced
     def epilogue(unit, split, first_row, lane, acc):
@@ -292,7 +292,7 @@ def _tagged_partials(gemm, plan, part, tag):
 
 
 def proj_issue(g, w):
-    """The first unit's weights of ``proj`` at the resident widths, in flight:
+    """The first unit's weights of `proj` at the resident widths, in flight:
     its input projection chunks and its [b | a] chunk (a unit without one
     loads the last chunk's and drops them)."""
     plan = proj_plan()
@@ -318,8 +318,8 @@ def _conv_tokens(rows: int, lane, tiles: int):
 
 
 def conv_loads(w, b, row, tokens, slots=None):
-    """The conv's loads for projection rows ``row .. row + 3`` (conv rows):
-    their taps and each token's state (``slots``: the ``tokens``' state slots,
+    """The conv's loads for projection rows `row .. row + 3` (conv rows):
+    their taps and each token's state (`slots`: the `tokens`' state slots,
     loaded here if None)."""
     words = [
         ld_i32x4(w.conv, row * 2),
@@ -344,14 +344,14 @@ def conv_loads(w, b, row, tokens, slots=None):
 
 @traced
 def conv_rows(w, b, rows: int, row, lane, acc, tiles: int, tag=None, loads=None):
-    """Projection rows ``row .. row + 3`` of every token (a fold's summed
+    """Projection rows `row .. row + 3` of every token (a fold's summed
     accumulators): conv + silu with the state update for q | k | v, the plain
-    store for z. A group of four never straddles the two. ``loads``: the rows'
-    ``conv_loads``, issued before the summed partials were loaded; without
+    store for z. A group of four never straddles the two. `loads`: the rows'
+    `conv_loads`, issued before the summed partials were loaded; without
     them every token tile's slot and state loads are issued here before the
     first use. A padding token's lane reads the last token's and stores
-    nothing. With ``tag`` q | k | v and z are stored as tagged pairs
-    (``proj``)."""
+    nothing. With `tag` q | k | v and z are stored as tagged pairs
+    (`proj`)."""
     tokens, valid = _conv_tokens(rows, lane, tiles)
     if row < CONV_DIM:
         if const_expr(loads is None):
@@ -438,16 +438,16 @@ def _state_offsets(g):
 
 
 def recur(g, w, b, lds, rows: int, eps: float, first=None, tag=None):
-    """``w``: ``a_log`` (f32), ``dt_bias`` (bf16), ``norm`` ([GDN_DV] bf16);
-    ``b``: ``qkv``, ``z``, ``ba`` (partials), ``st_idx``, ``ssm`` (a slot [NV,
-    DV, DK] f32, slots ``ssm_stride`` apart), ``core`` [rows, VALUE_DIM] bf16; ``lds``:
-    ``recur_lds_words()`` f32 words. A unit is a CTA: (row, key head), its
+    """`w`: `a_log` (f32), `dt_bias` (bf16), `norm` ([GDN_DV] bf16);
+    `b`: `qkv`, `z`, `ba` (partials), `st_idx`, `ssm` (a slot [NV,
+    DV, DK] f32, slots `ssm_stride` apart), `core` [rows, VALUE_DIM] bf16; `lds`:
+    `recur_lds_words()` f32 words. A unit is a CTA: (row, key head), its
     three value heads in turn, or at the resident widths (row, value head),
     three times the units; the next head's state loads are in flight while a
-    head computes. At the resident widths (``tag`` required) the projection's
-    outputs are tagged pairs (``proj``), ``core`` is published as (bf16 pair,
-    tag) pairs, and ``first`` may be the first unit's state loads
-    (``recur_first``)."""
+    head computes. At the resident widths (`tag` required) the projection's
+    outputs are tagged pairs (`proj`), `core` is published as (bf16 pair,
+    tag) pairs, and `first` may be the first unit's state loads
+    (`recur_first`)."""
     if tiled.resident(rows):
         if tag is None:
             raise ValueError("the resident widths' recurrence takes tagged pairs")
@@ -465,8 +465,8 @@ def recur_first(g, b, rows: int):
 
 
 def load_head(b, unit, at):
-    """This thread's 16 state quads of value head ``unit % NV`` of row ``unit //
-    NV``."""
+    """This thread's 16 state quads of value head `unit % NV` of row `unit //
+    NV`."""
     row, vh = unit // NV, unit % NV
     slot = uniform(ld(b.st_idx, row, fx.Int32, cm=CM_DEV))
     hb = state_base(b, slot, vh // HEADS_PER_K) + fx.Int64(vh % HEADS_PER_K) * fx.Int64(
@@ -582,9 +582,9 @@ def recur_lds_words() -> int:
 
 
 def state_base(b, slot, kh):
-    """Byte address of value head ``3 kh``'s state in slot ``slot`` (clamped to
+    """Byte address of value head `3 kh`'s state in slot `slot` (clamped to
     the null block 0 for a padding row, whose state is never written); slots
-    are ``ssm_stride`` f32 apart, a slot's heads dense."""
+    are `ssm_stride` f32 apart, a slot's heads dense."""
     s = (slot > 0).select(slot, i32(0))
     return (
         b.ssm
@@ -594,7 +594,7 @@ def state_base(b, slot, kh):
 
 
 def load_heads(g, b, unit, at, i: int):
-    """This thread's 16 state quads of head ``i`` of ``unit``."""
+    """This thread's 16 state quads of head `i` of `unit`."""
     row, kh = unit // NK, unit % NK
     slot = uniform(ld(b.st_idx, row, fx.Int32, cm=CM_DEV))
     hb = state_base(b, slot, kh) + fx.Int64(i * HEAD_BYTES)
@@ -663,9 +663,9 @@ def stage_unit(g, w, b, lds, rows: int, row, kh):
 
 
 def _gate_partial(g, rows: int, row, kh):
-    """The [b | a] partial thread ``tid < 6 splits`` stages: gate ``j = tid /
-    splits`` (beta 0..2, decay 3..5) of the key head's value heads, split
-    ``tid % splits``."""
+    """The [b | a] partial thread `tid < 6 splits` stages: gate `j = tid /
+    splits` (beta 0..2, decay 3..5) of the key head's value heads, split
+    `tid % splits`."""
     bplan = ba_plan()
     j, s = g.tid // bplan.splits, g.tid % bplan.splits
     r = (j < 3).select(kh * HEADS_PER_K + j, NV + kh * HEADS_PER_K + j - 3)
@@ -693,7 +693,7 @@ def _gates(g, w, lds, kh):
 
 @traced
 def stage_tagged(g, w, b, lds, rows: int, row, kh, tag):
-    """``stage_unit`` from the projection's tagged pairs (``proj``): every
+    """`stage_unit` from the projection's tagged pairs (`proj`): every
     thread polls its four q | k, v or z values and its gate partial together."""
     bplan = ba_plan()
     t = g.tid
@@ -735,7 +735,7 @@ def _halve(v, lane):
     lane holds, one a state row, by halving: at each level a lane keeps half
     its values and adds its partner's copy of that half, so 16 rows cost
     16 exchanges, not 80. Returns the sum of
-    row ``(lane % 32) // 2``, in both lanes of each pair."""
+    row `(lane % 32) // 2`, in both lanes of each pair."""
     # level 1 (lane ^ 16): v_permlane16_swap of (low half, high half) leaves
     # the row-0 lanes' low and the row-1 lanes' high partial pairs in place
     out = []
@@ -761,11 +761,11 @@ def _permlane16(x, y):
 
 @traced
 def head(g, b, nw, h, hb, at, q, k, lds, i_head, row, vh, rp, kq, eps, tag=None):
-    """One value head of one row: the delta rule on the state (``h``, this
+    """One value head of one row: the delta rule on the state (`h`, this
     thread's 16 rows of 4 keys, loaded), stored back in place; then the gated
-    RMSNorm of the head's output into ``core``. ``k . h`` of each row is
-    reduced by halving (``_halve``) and broadcast to the row's lanes through
-    the wave's LDS words (``B_AT``); ``q . h`` stays in the lanes that hold it."""
+    RMSNorm of the head's output into `core`. `k . h` of each row is
+    reduced by halving (`_halve`) and broadcast to the row's lanes through
+    the wave's LDS words (`B_AT`); `q . h` stays in the lanes that hold it."""
     beta = lds_ld(lds + G_AT + i_head)
     decay = lds_ld(lds + G_AT + 3 + i_head)
     vl, zl, nl = lds + V_AT + i_head * GDN_DV, lds + Z_AT + i_head * GDN_DV, lds + N_AT
@@ -832,7 +832,7 @@ def head(g, b, nw, h, hb, at, q, k, lds, i_head, row, vh, rp, kq, eps, tag=None)
 
 
 class GatedCore(tiled.Source):
-    """A QSA layer's o_proj input: ``bf16(attn * bf16(sigmoid(gate)))``, as the
+    """A QSA layer's o_proj input: `bf16(attn * bf16(sigmoid(gate)))`, as the
     stock path's two bf16 tensors multiply."""
 
     def __init__(self, attn, gate, ld_elems: int):
@@ -848,11 +848,11 @@ class GatedCore(tiled.Source):
 
 
 def out(g, gemm, weights, source, part, tile, xch, k: int, fold0: int, pending=None):
-    """``source @ weights.T`` (K = ``k``) to the exchange ``xch``: each
+    """`source @ weights.T` (K = `k`) to the exchange `xch`: each
     64-column group's last arriving unit sums its six slices into the LDS
-    ``tile`` and pushes the group's lines. ``pending``: the first unit's
-    weights, at the resident widths ``tiled.issue_unit``'s of ``weights`` and
-    ``out_plan(k)``, else the CTA's ``tiled.unit_preload`` of them."""
+    `tile` and pushes the group's lines. `pending`: the first unit's
+    weights, at the resident widths `tiled.issue_unit`'s of `weights` and
+    `out_plan(k)`, else the CTA's `tiled.unit_preload` of them."""
     plan = out_plan(k)
 
     def finish(group, first, lane, acc):

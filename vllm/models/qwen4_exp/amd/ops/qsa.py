@@ -620,9 +620,9 @@ def qsa_mqa_paged(
 ) -> tuple[torch.Tensor, torch.Tensor]:
     """Compute QSA scores directly from a paged compressed-key cache.
 
-    ``allow_mfma`` marks rows of prefill requests: such a call with at least
-    ``MFMA_SCORER_MIN_ROWS`` rows and a bf16 or fp16 query and cache is scored
-    by the MFMA tile kernel (``qsa_mfma_scorer.py``), which is not bitwise
+    `allow_mfma` marks rows of prefill requests: such a call with at least
+    `MFMA_SCORER_MIN_ROWS` rows and a bf16 or fp16 query and cache is scored
+    by the MFMA tile kernel (`qsa_mfma_scorer.py`), which is not bitwise
     equal to the per-row kernel.
     """
     _validate_mqa(q)
@@ -782,17 +782,17 @@ def qsa_select_paged_tokens(
 ) -> torch.Tensor:
     """Score, select, and expand QSA indices without host synchronization.
 
-    ``max_seq_len``, a host-side bound on every ``sequence_lengths`` entry,
+    `max_seq_len`, a host-side bound on every `sequence_lengths` entry,
     trims the score width to the compressed columns a row can see, as the
     NVIDIA prefill path does: visible = min((pos + 1) // ratio,
     seq_len // ratio) <= cdiv(max_seq_len, ratio). A captured graph keeps the
     full width, since it replays at any length. The narrower rows also let
     more rows share one logits workspace chunk.
 
-    ``num_decode_tokens`` counts the leading decode rows (the batch puts
+    `num_decode_tokens` counts the leading decode rows (the batch puts
     decode requests first). Chunks never mix decode and prefill rows, and only
-    prefill chunks may take the MFMA scorer (``qsa_mqa_paged``'s
-    ``allow_mfma``); with None every row keeps the per-row kernel.
+    prefill chunks may take the MFMA scorer (`qsa_mqa_paged`'s
+    `allow_mfma`); with None every row keeps the per-row kernel.
     """
     rows = q.shape[0]
     output_width = token_topk + compress_ratio - 1
@@ -895,7 +895,7 @@ def qsa_sparse_paged_attention(
 ) -> torch.Tensor:
     """Run sparse GQA directly over paged bf16 or fp8 K/V caches.
 
-    ``prefill_layout`` (host lengths of the trailing prefilling requests) is
+    `prefill_layout` (host lengths of the trailing prefilling requests) is
     given when AITER's FlyDSL sparse prefill runs on this device; the step's
     prefill rows may then run that op, and the rows before them run here.
     """

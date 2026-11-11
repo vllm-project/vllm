@@ -1,23 +1,23 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 """QSA indexer scores of a decode batch over vLLM's paged compressed-key
-cache, in the stock scoring op's format: ``logits[row, c]`` = sum over the
-indexer heads of ``relu(q_h . k_c)`` / ``divisor`` for the row's visible
-columns ``c < visible[row]`` (columns past it unwritten but for the last
-4-column store), and ``visible`` = complete compressed blocks the row sees.
+cache, in the stock scoring op's format: `logits[row, c]` = sum over the
+indexer heads of `relu(q_h . k_c)` / `divisor` for the row's visible
+columns `c < visible[row]` (columns past it unwritten but for the last
+4-column store), and `visible` = complete compressed blocks the row sees.
 
-``splits`` CTAs a row each score a contiguous range of 256-column rounds:
+`splits` CTAs a row each score a contiguous range of 256-column rounds:
 the CTA first loads the row's page table into LDS (byte offsets of its pages
 in the cache); a wave then multiplies four 16-column tiles of keys with the
-row's queries on the matrix unit (``S^T = K Q^T``, 16x16x32, the indexer
+row's queries on the matrix unit (`S^T = K Q^T`, 16x16x32, the indexer
 heads in four of the 16 columns) per round, with the next round's key loads
 in flight.
 
-With a selection budget (``ScoreBuild.top``, the decode top-k's blocks) the
-launch also selects, replacing ``top_k_per_row_decode``: a row with at most
-``top`` visible blocks is not scored (its first CTA lists them all), and in
+With a selection budget (`ScoreBuild.top`, the decode top-k's blocks) the
+launch also selects, replacing `top_k_per_row_decode`: a row with at most
+`top` visible blocks is not scored (its first CTA lists them all), and in
 a longer row the CTA that arrives last on the row's counter selects the
-``top`` best (``wide.select``) into ``sel``.
+`top` best (`wide.select`) into `sel`.
 """
 
 import math
@@ -88,12 +88,12 @@ class ScoreBuild:
 
 def score_splits(rows: int) -> int:
     """Score CTAs a row: 64 up to 4 rows (a 128K row's 129 rounds 2-3 a CTA,
-    against 8-9 at 16), else attention's ``splits_for``."""
+    against 8-9 at 16), else attention's `splits_for`."""
     return 64 if rows <= 4 else splits_for(rows)
 
 
 def _head_sum(vals, heads: int):
-    """Sums over the 16-lane group's first ``heads`` lanes (the others hold
+    """Sums over the 16-lane group's first `heads` lanes (the others hold
     zeros), into its lane 0."""
     off = 1
     while off < heads:
@@ -105,7 +105,7 @@ def _head_sum(vals, heads: int):
 @traced
 def _select_last(tid, end, counters, row, splits: int, verdict, keys, staged, *args):
     """A row past the budget: the row's last-arriving CTA selects its blocks
-    (``select.select(..., *args)``) from the scores every CTA wrote."""
+    (`select.select(..., *args)`) from the scores every CTA wrote."""
     if end > i32(0):
         last = _arrive(counters, row, splits, tid, verdict)
         if last:
@@ -117,8 +117,8 @@ def _select_last(tid, end, counters, row, splits: int, verdict, keys, staged, *a
 
 @traced
 def _store_scores(logits, base, c, end, n, vals, cm: int):
-    """Lane ``n == 0``'s four scores of columns ``c ..``: whole when they are
-    all before ``end``, else one by one (the columns at ``end`` and past it
+    """Lane `n == 0`'s four scores of columns `c ..`: whole when they are
+    all before `end`, else one by one (the columns at `end` and past it
     are not this tile's)."""
     if (n == 0) & (c < end):
         if c + i32(4) <= end:
@@ -131,8 +131,8 @@ def _store_scores(logits, base, c, end, n, vals, cm: int):
 
 @traced
 def _index_queries(wave, lane, row, heads: int, ixqk, qx, w, eps: float, *args):
-    """Wave ``w``'s indexer query head ``w`` of the row, normed and rotated,
-    into LDS (``qx``) as bf16 pairs."""
+    """Wave `w`'s indexer query head `w` of the row, normed and rotated,
+    into LDS (`qx`) as bf16 pairs."""
     cos_sin, axes, mrope = args
     if wave < i32(heads):
         xq = prep_.load_pair(ixqk, row * IX_ROW + wave * DIM + lane * 2)
@@ -143,7 +143,7 @@ def _index_queries(wave, lane, row, heads: int, ixqk, qx, w, eps: float, *args):
 @traced
 def _main_heads(first, step: int, lane, row, qkv, q_out, gate_out, *args):
     """The row's main query heads (and their gates) and its key | value
-    head, items ``first, first + step, ..`` of 13 (a wave each)."""
+    head, items `first, first + step, ..` of 13 (a wave each)."""
     qn_w, kn_w, eps, cos_sin, axes, mrope, kv, kv_block, kv_page, slots = args
     for item in range(first, i32(MAIN_HEADS + 1), i32(step)):
         if item < i32(MAIN_HEADS):
@@ -171,7 +171,7 @@ def _main_heads(first, step: int, lane, row, qkv, q_out, gate_out, *args):
 @traced
 def _new_key(lane, row, lp, live, req, k, axes, fresh, visible, qx, heads: int, *args):
     """The row's indexer key: the ring commit and, at a completed group, the
-    compressed key and (``fresh``) its score at column ``visible - 1``."""
+    compressed key and (`fresh`) its score at column `visible - 1`."""
     eps, w, cos_sin, mrope, tail, raw, comp, logits, base, inv = args
     done, key = prep_.index_key(
         lane, row, lp, live, req, k, eps, w, cos_sin, mrope, tail, raw, comp
@@ -418,8 +418,8 @@ def build(key: ScoreBuild):
                 qs.append((n < heads).select(v, zeros(4, Int32)).bitcast(fx.BFloat16))
 
         def key_loads(r):
-            """Round ``r``'s keys of the lane's column of each tile: its
-            quarter (``g``) of each 32-dim step, as stored."""
+            """Round `r`'s keys of the lane's column of each tile: its
+            quarter (`g`) of each 32-dim step, as stored."""
             out = []
             for u in range_constexpr(TILES):
                 c = (r0 + r) * ROUND + (wave * TILES + u) * 16 + n
@@ -578,7 +578,7 @@ def _counters(rows: int, device) -> torch.Tensor:
 
 class Prep(NamedTuple):
     """What the score launch needs to run vLLM's fused prepare for a decode
-    batch (``ScoreBuild.prep``): the projections, the outputs, the rope, the
+    batch (`ScoreBuild.prep`): the projections, the outputs, the rope, the
     norms and every cache with its slots."""
 
     ixqk: torch.Tensor  # [rows, (heads + 1) 128] bf16: index_qk_proj(x)
@@ -664,15 +664,15 @@ def score(
     selected: torch.Tensor | None = None,
     prep: Prep | None = None,
 ) -> None:
-    """``qsa_mqa_paged`` into ``logits`` [rows, columns] f32 and ``visible``
-    [rows] int32: ``q`` [rows, heads, 128] bf16, ``k_cache`` [pages,
-    page_size, 1, 128] bf16. With ``selected`` [rows, top] int32, also the
-    decode top-k's selection (``top_k_per_row_decode(logits, 1, visible,
-    selected, ...)``'s set, ascending; -1 past a short row's blocks); a row
-    within the budget then leaves its logits unwritten. With ``prep`` (a
-    decode batch, ``q`` None), first vLLM's fused prepare of the rows
-    (``ops.qsa_prepare``): the queries from the projections, the caches;
-    ``positions`` are then the rows' logical positions."""
+    """`qsa_mqa_paged` into `logits` [rows, columns] f32 and `visible`
+    [rows] int32: `q` [rows, heads, 128] bf16, `k_cache` [pages,
+    page_size, 1, 128] bf16. With `selected` [rows, top] int32, also the
+    decode top-k's selection (`top_k_per_row_decode(logits, 1, visible,
+    selected, ...)`'s set, ascending; -1 past a short row's blocks); a row
+    within the budget then leaves its logits unwritten. With `prep` (a
+    decode batch, `q` None), first vLLM's fused prepare of the rows
+    (`ops.qsa_prepare`): the queries from the projections, the caches;
+    `positions` are then the rows' logical positions."""
     from vllm.v1.attention.ops.flydsl_kernels import _run_compiled
 
     if prep is None:

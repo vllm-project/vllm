@@ -1,7 +1,7 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 """The wide decode's launches: one persistent kernel per GDN layer, and two per
-QSA layer around vLLM's attention (``LayerBuild.kind``):
+QSA layer around vLLM's attention (`LayerBuild.kind`):
 
     gdn        [stats] attn mix -> GDN proj + conv -> recurrence + gated norm
                -> out_proj -> TP exchange -> attn combine
@@ -12,13 +12,13 @@ QSA layer around vLLM's attention (``LayerBuild.kind``):
     qsa_back   o_proj (gated) -> TP exchange -> attn combine -> the MLP half
 
 Phases are separated by grid barriers; an exchange's readers wait on its line
-flags instead. Up to ``tiled.RESIDENT_MAX`` rows a mix is one phase and so is
+flags instead. Up to `tiled.RESIDENT_MAX` rows a mix is one phase and so is
 GDN proj -> out_proj -> attn combine: their hand-offs are tagged pairs
-(``stages.tagged``), and each GEMM's first weights are issued inside the
+(`stages.tagged`), and each GEMM's first weights are issued inside the
 barrier before it. A launch reads the multi-stream state, updates it in place
-(``state``, [rows, HC * HIDDEN] bf16, materialized: the next launch, a PLE
-layer and the final mixer read it as is) and leaves ``rrms`` of every (row,
-stream) in its scratch for the next launch's mix; ``stats`` computes them
+(`state`, [rows, HC * HIDDEN] bf16, materialized: the next launch, a PLE
+layer and the final mixer read it as is) and leaves `rrms` of every (row,
+stream) in its scratch for the next launch's mix; `stats` computes them
 first when the state comes from vLLM (layer 0, after a PLE layer).
 """
 
@@ -147,7 +147,7 @@ TRACE_BACK = 8  # where a QSA layer's second launch stamps in its layer's row
 
 
 def phase_names(key) -> list[str]:
-    """The stamps of a traced build (``LayerBuild.trace``), in order: each
+    """The stamps of a traced build (`LayerBuild.trace`), in order: each
     marks the end of the named phase ("start": the kernel's start)."""
     parts = ["mix_down", "mix_reduce", "mix_up"]
     if tiled.resident(key.tokens):
@@ -202,7 +202,7 @@ def _resident_chunks() -> int:
 
 def scratch_layout(rows: int) -> dict[str, tuple[int, int]]:
     """Name -> (byte offset, bytes) of a width's scratch, 256-byte aligned.
-    ``split`` (the MoE's split-unit marks) comes first and is sized for the
+    `split` (the MoE's split-unit marks) comes first and is sized for the
     widest step, so every width's marks share one zeroed region that nothing
     else writes."""
     sizes = {
@@ -236,7 +236,7 @@ def scratch_bytes(rows: int) -> int:
 
 
 class Scratch(TraceInvariant):
-    """A width's scratch buffers (``scratch_layout``) as byte addresses."""
+    """A width's scratch buffers (`scratch_layout`) as byte addresses."""
 
     rrms: fx.Int64
     inj_a: fx.Int64
@@ -374,9 +374,9 @@ def build(key: LayerBuild):
                 names.append(name)
 
         def end_phase(name, issue=None):
-            """The phase's grid barrier; at resident widths ``issue()`` (the
+            """The phase's grid barrier; at resident widths `issue()` (the
             next phase's first weights, or the small MoE path's
-            ``stage_rows``) runs inside it, its result returned."""
+            `stage_rows`) runs inside it, its result returned."""
             out = grid_sync(g, issue if tiled.resident(S) else None)
             stamp(name)
             return out
@@ -402,10 +402,10 @@ def build(key: LayerBuild):
             return tiled.unit_preload(gemm, weights, plan, g.bid) if early else None
 
         def mix(tag, kind, norm, di, up, inj, pending=None, then=None, nxt=None):
-            """``pending``: the down GEMM's first weights in flight, at the
-            resident widths ``hc.mix_issue``'s, else ``ahead``'s. The next
-            GEMM's are issued by ``then()`` inside the last barrier at the
-            resident widths, by ``ahead(*nxt)`` as mix_reduce starts at the
+            """`pending`: the down GEMM's first weights in flight, at the
+            resident widths `hc.mix_issue`'s, else `ahead`'s. The next
+            GEMM's are issued by `then()` inside the last barrier at the
+            resident widths, by `ahead(*nxt)` as mix_reduce starts at the
             others, and returned."""
             if const_expr(tiled.resident(S)):
                 hc.mix_resident(
@@ -660,7 +660,7 @@ def build(key: LayerBuild):
 
 
 def run(key: LayerBuild, args: dict) -> None:
-    """Launch ``key``'s kernel on the current stream; ``args``: every ABI name
+    """Launch `key`'s kernel on the current stream; `args`: every ABI name
     (tensors by data pointer, ints as is)."""
     from vllm.v1.attention.ops.flydsl_kernels import _run_compiled
 
@@ -671,7 +671,7 @@ def run(key: LayerBuild, args: dict) -> None:
 
 
 def compile_only(key: LayerBuild) -> None:
-    """Compile ``key``'s kernel without launching it (FlyDSL's compile-only
+    """Compile `key`'s kernel without launching it (FlyDSL's compile-only
     mode returns before the launch)."""
     import os
 

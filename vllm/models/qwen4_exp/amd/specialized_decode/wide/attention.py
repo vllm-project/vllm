@@ -3,31 +3,31 @@
 """QSA sparse attention of a decode batch over vLLM's paged K/V cache.
 
 A row attends to the tokens of the compressed blocks its indexer selected
-(``sel``: [rows, top_blocks] the top-k's block indices; all of them while
-the row has at most ``top_blocks``), each block ``ratio`` tokens, then to
+(`sel`: [rows, top_blocks] the top-k's block indices; all of them while
+the row has at most `top_blocks`), each block `ratio` tokens, then to
 the open tail of its last incomplete block: the list the stock expansion
-builds. ``splits`` CTAs a row each attend a contiguous range of the list's
+builds. `splits` CTAs a row each attend a contiguous range of the list's
 64-token stages:
 
 * The CTA first expands its tokens and translates them through the block
   table into an LDS table of byte offsets into the cache (-1: not
   attended), every load issued before the first use.
 * A stage is 16 tokens a wave. The wave multiplies their keys with the kv
-  head's queries on the matrix unit (``S^T = K Q^T``, 16x16x32) and keeps a
-  running max, sum and full-width output of its own (``O^T += V^T P^T``,
+  head's queries on the matrix unit (`S^T = K Q^T`, 16x16x32) and keeps a
+  running max, sum and full-width output of its own (`O^T += V^T P^T`,
   16x16x16, V read transposed from LDS), with the next stage's K and V loads
   in flight while it computes. The softmax is wave-private: the bounds of a
   joint one, not its reduction order.
 * The four waves merge through LDS; with several splits, each stores its
-  partial and the row's last-arriving CTA merges them in the ``exp2`` domain
-  and resets the row's counter for the next launch. With ``spread`` (four
+  partial and the row's last-arriving CTA merges them in the `exp2` domain
+  and resets the row's counter for the next launch. With `spread` (four
   splits a row or more, the small batches) every split instead waits until
   the row's splits have all arrived and merges its own slice of the output
   (one CTA reading every partial is the slowest part of a short row).
 
 The kernel reads the cache in place: a token's K and V are one 1 KiB record
-(``[blocks, kv heads, block_size, 2 head_dim]``, one kv head on a rank), pages
-any stride apart. Rows past the batch's requests (``token_to_req`` out of
+(`[blocks, kv heads, block_size, 2 head_dim]`, one kv head on a rank), pages
+any stride apart. Rows past the batch's requests (`token_to_req` out of
 range) output zeros, like the stock kernel.
 """
 
@@ -231,8 +231,8 @@ def build(key: AttnBuild):
         ]
 
         def kv_loads(s):
-            """Stage ``s``'s K and V of the lane's token (``n``): the 32-dim
-            steps' 8 dims of the lane's quarter (``g``), as stored."""
+            """Stage `s`'s K and V of the lane's token (`n`): the 32-dim
+            steps' 8 dims of the lane's quarter (`g`), as stored."""
             off = lds_ld(tbl + s * STAGE + wave * 16 + n)
             # past the split (the last stage's prefetch) or no token: the
             # cache's first record, one hot line for every lane
@@ -414,7 +414,7 @@ def build(key: AttnBuild):
 
 @traced
 def _store_out(out, orow, ok, dims, nums, tot):
-    """A thread's 16 normalized outputs of its head (``ok``) as bf16; zeros
+    """A thread's 16 normalized outputs of its head (`ok`) as bf16; zeros
     for a row without attended tokens."""
     inv = (tot > f32(0.0)).select(hw_rcp(tot), f32(0.0))
     if ok:
@@ -460,8 +460,8 @@ def _depart(counters, row, arrivals: int, tid):
 
 @traced
 def _merge_slice(part, ml, out, row, member, splits: int, group: int, tid):
-    """Split ``member``'s slice of the row's output (``HEAD_DIM / splits``
-    dims of every head) from all splits' partials, in the ``exp2`` domain."""
+    """Split `member`'s slice of the row's output (`HEAD_DIM / splits`
+    dims of every head) from all splits' partials, in the `exp2` domain."""
     span = HEAD_DIM // splits
     quads = span // 4
     chunks = group * quads
@@ -561,12 +561,12 @@ def sparse_attention(
     dense: bool = False,
     spread: bool | None = None,
 ) -> torch.Tensor:
-    """``out`` [rows, heads, 256] bf16: attention of ``q`` [rows, heads, 256]
-    over the tokens of the compressed blocks ``selected`` [rows, top_blocks]
-    lists (the indexer top-k's) and the open tail, in ``kv_cache`` [blocks, 1,
-    block_size, 512] bf16 (K | V a token). ``dense``: a row with at most
-    ``top_blocks`` complete blocks attends all of them, its list unread.
-    ``spread``: every split merges a slice of the output (``AttnBuild.spread``;
+    """`out` [rows, heads, 256] bf16: attention of `q` [rows, heads, 256]
+    over the tokens of the compressed blocks `selected` [rows, top_blocks]
+    lists (the indexer top-k's) and the open tail, in `kv_cache` [blocks, 1,
+    block_size, 512] bf16 (K | V a token). `dense`: a row with at most
+    `top_blocks` complete blocks attends all of them, its list unread.
+    `spread`: every split merges a slice of the output (`AttnBuild.spread`;
     default: at 4 splits a row or more, where it is faster)."""
     from vllm.v1.attention.ops.flydsl_kernels import _run_compiled
 

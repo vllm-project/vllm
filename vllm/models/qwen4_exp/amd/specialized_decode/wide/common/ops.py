@@ -4,14 +4,14 @@
 descriptors with explicit cache policies, LDS vectors, wave reductions,
 activations, bf16 packing and the clock.
 
-Kernels take raw ``Int64`` byte addresses. A buffer descriptor's offset is 32
+Kernels take raw `Int64` byte addresses. A buffer descriptor's offset is 32
 bits, so a pool past 4 GiB (the GDN state) is addressed from a 64-bit base per
 slot. Offsets here count elements of the access's dtype.
 
-Cache policy (gfx950 ``CPol``): data one CTA writes and another CTA reads in
-the same launch goes through ``CM_DEV`` (sc1) on both sides, past the per-XCD
-caches; peer data through ``CM_SYS`` (sc0 | sc1). Weights a launch reads once
-stream with ``CM_NT``.
+Cache policy (gfx950 `CPol`): data one CTA writes and another CTA reads in
+the same launch goes through `CM_DEV` (sc1) on both sides, past the per-XCD
+caches; peer data through `CM_SYS` (sc0 | sc1). Weights a launch reads once
+stream with `CM_NT`.
 """
 
 from __future__ import annotations
@@ -34,7 +34,7 @@ LOG2E = 1.4426950408889634
 
 
 def traced(fn):
-    """FlyDSL's AST rewriting on a helper, so its ``while`` / ``if`` over
+    """FlyDSL's AST rewriting on a helper, so its `while` / `if` over
     traced values lower to scf ops (kernels rewrite only their own body)."""
     return ASTRewriter.transform(fn)
 
@@ -45,15 +45,15 @@ def traced(fn):
 
 
 def rsrc(addr, nbytes=None):
-    """A buffer descriptor at byte address ``addr``, which must be wave-uniform:
+    """A buffer descriptor at byte address `addr`, which must be wave-uniform:
     a lane-varying base makes the compiler loop over the wave's distinct
     descriptors one at a time. Lane variation goes in the access's offset."""
     return bo.create_buffer_resource_from_addr(fx.Int64(addr), num_records_bytes=nbytes)
 
 
 def ld(addr, i, dtype=fx.Int32, n=1, cm=0, nbytes=None, mask=None):
-    """``n`` (1, 2, 4) elements of ``dtype`` at element ``i`` of address ``addr``.
-    With ``mask`` (and the descriptor bounded by ``nbytes``), a lane whose mask
+    """`n` (1, 2, 4) elements of `dtype` at element `i` of address `addr`.
+    With `mask` (and the descriptor bounded by `nbytes`), a lane whose mask
     is false reads zeros without a memory request."""
     v = bo.buffer_load(
         rsrc(addr, nbytes),
@@ -67,8 +67,8 @@ def ld(addr, i, dtype=fx.Int32, n=1, cm=0, nbytes=None, mask=None):
 
 
 def st(addr, i, value, cm=0, nbytes=None):
-    """``value`` (a Numeric or a Vector) at element ``i`` of address ``addr``; with
-    ``nbytes``, a store past the extent is dropped by the hardware."""
+    """`value` (a Numeric or a Vector) at element `i` of address `addr`; with
+    `nbytes`, a store past the extent is dropped by the hardware."""
     bo.buffer_store(
         fx.Vector(value).ir_value() if isinstance(value, fx.Vector) else value,
         rsrc(addr, nbytes),
@@ -78,7 +78,7 @@ def st(addr, i, value, cm=0, nbytes=None):
 
 
 def ld_bf8(addr, i, cm=0):
-    """Eight bf16 at bf16 element ``i`` (a multiple of 8) as a bf16 Vector."""
+    """Eight bf16 at bf16 element `i` (a multiple of 8) as a bf16 Vector."""
     w = fx.Vector(
         bo.buffer_load(
             rsrc(addr), fx.Int32(i) // 2, vec_width=4, dtype=T.i32, cache_modifier=cm
@@ -88,7 +88,7 @@ def ld_bf8(addr, i, cm=0):
 
 
 def ld_i32x4(addr, i, cm=0):
-    """Four i32 words at word ``i``."""
+    """Four i32 words at word `i`."""
     return fx.Vector(
         bo.buffer_load(
             rsrc(addr), fx.Int32(i), vec_width=4, dtype=T.i32, cache_modifier=cm
@@ -110,14 +110,14 @@ def _gptr(addr, dtype, n):
 
 
 def gld(addr, dtype=fx.Int32, n=1):
-    """``n`` elements at a per-lane 64-bit byte address (no descriptor): a
+    """`n` elements at a per-lane 64-bit byte address (no descriptor): a
     gather whose base differs by lane and lies past a descriptor's 4 GiB."""
     v = fx.generic_load(_gptr(addr, dtype, n), dtype=dtype, count=n)
     return fx.Vector(v) if n > 1 else v
 
 
 def gst(addr, value):
-    """``value`` (a Numeric or Vector) at a per-lane 64-bit byte address."""
+    """`value` (a Numeric or Vector) at a per-lane 64-bit byte address."""
     v = fx.Vector(value) if isinstance(value, fx.Vector) else value
     dtype = v.dtype if isinstance(v, fx.Vector) else type(v)
     n = v.numel if isinstance(v, fx.Vector) else 1
@@ -125,14 +125,14 @@ def gst(addr, value):
 
 
 def gptr(addr):
-    """An i32 global pointer at byte address ``addr`` (for atomics)."""
+    """An i32 global pointer at byte address `addr` (for atomics)."""
     return fx.inttoptr(
         fx.PointerType.get(T.i32, fx.AddressSpace.Global, 4), fx.Int64(addr)
     )
 
 
 def atomic_add(addr, v):
-    """Agent-scope atomic add on the i32 at byte address ``addr``; the old value."""
+    """Agent-scope atomic add on the i32 at byte address `addr`; the old value."""
     return fx.Int32(fx.llvm.atomic_add(gptr(addr), fx.Int32(v), syncscope="agent"))
 
 
@@ -162,7 +162,7 @@ def uniform_i64(v):
 
 
 def ld_ptr64(table, i):
-    """Entry ``i`` of an i64 table in memory, wave-uniform."""
+    """Entry `i` of an i64 table in memory, wave-uniform."""
     w = ld(table, fx.Int32(i) * 2, fx.Int32, 2)
     lo, hi = uniform(w[0]), uniform(w[1])
     return (fx.Int64(hi) << fx.Int64(32)) | fx.Int64(fx.Uint32(lo))
@@ -174,8 +174,8 @@ def ld_ptr64(table, i):
 
 
 def lds_ld(ptr, n=1, dtype=fx.Int32):
-    """``n`` elements at LDS pointer ``ptr`` (an ``fx.Array`` iterator plus an
-    element offset): one ds_read of ``n`` x width bits."""
+    """`n` elements at LDS pointer `ptr` (an `fx.Array` iterator plus an
+    element offset): one ds_read of `n` x width bits."""
     if n == 1:
         return fx.ptr_load(ptr)
     return fx.Vector(fx.ptr_load(ptr, result_type=fx.Vector.make_type(n, dtype)))
@@ -203,7 +203,7 @@ def _permlane_swap(off, x, y):
 
 
 def _xshfl(v, off):
-    """Lane ``lane ^ off``'s value for off 1..8 (DPP); 16 / 32 via shuffle."""
+    """Lane `lane ^ off`'s value for off 1..8 (DPP); 16 / 32 via shuffle."""
     if off >= 16:
         return v.shuffle_xor(off, 64)
     is_f = isinstance(v, fx.Float32)
@@ -237,7 +237,7 @@ def _add(a, b):
 
 
 def butterfly(v, offsets, op=_add):
-    """Butterfly reduction over the xor ``offsets`` in order: every lane of the
+    """Butterfly reduction over the xor `offsets` in order: every lane of the
     covered group receives the result."""
     for off in offsets:
         v = _xred(v, off, op)
@@ -340,7 +340,7 @@ def zeros(n, dtype=fx.Float32):
 
 
 def mfma_bf16(a, b, acc):
-    """``acc + A @ B.T`` over 32 K: ``a``, ``b`` a lane's 8 bf16 (16x16x32)."""
+    """`acc + A @ B.T` over 32 K: `a`, `b` a lane's 8 bf16 (16x16x32)."""
     return fx.Vector(
         rocdl.mfma_f32_16x16x32_bf16(
             T.vec(4, T.f32),
@@ -357,8 +357,8 @@ def mfma_bf16(a, b, acc):
 
 
 def mfma_bf16_k16(a, b, acc):
-    """``acc + A @ B.T`` over 16 K: ``a``, ``b`` a lane's 4 bf16 as Int16
-    (16x16x16): lane ``l`` holds row ``l % 16``, K ``4 (l / 16) + [0, 4)``."""
+    """`acc + A @ B.T` over 16 K: `a`, `b` a lane's 4 bf16 as Int16
+    (16x16x16): lane `l` holds row `l % 16`, K `4 (l / 16) + [0, 4)`."""
     return fx.Vector(
         rocdl.mfma_f32_16x16x16bf16_1k(
             T.vec(4, T.f32),
@@ -375,7 +375,7 @@ def mfma_bf16_k16(a, b, acc):
 
 
 def lds_ld_tr16(ptr):
-    """ds_read_b64_tr_b16 at LDS pointer ``ptr`` (a bf16 iterator plus an
+    """ds_read_b64_tr_b16 at LDS pointer `ptr` (a bf16 iterator plus an
     element offset): four bf16 transposed across the lanes, as Int16."""
     return fx.Vector(
         rocdl.ds_read_tr16_b64(
@@ -385,9 +385,9 @@ def lds_ld_tr16(ptr):
 
 
 def mfma_f4(a, b, acc, sa, sb, opsel_a=0):
-    """``acc + A @ B.T`` over 128 K of e2m1: ``a`` / ``b`` a lane's four Int32 (32
-    codes), ``sa`` / ``sb`` its E8M0 scale codes (``opsel_a`` picks A's byte of
-    the ``sa`` word; B's is the low byte)."""
+    """`acc + A @ B.T` over 128 K of e2m1: `a` / `b` a lane's four Int32 (32
+    codes), `sa` / `sb` its E8M0 scale codes (`opsel_a` picks A's byte of
+    the `sa` word; B's is the low byte)."""
     return fx.Vector(
         rocdl.mfma_scale_f32_16x16x128_f8f6f4(
             T.vec(4, T.f32),
@@ -413,7 +413,7 @@ def sched_barrier():
 
 
 def unlikely(cond):
-    """``cond`` marked cold (llvm.expect)."""
+    """`cond` marked cold (llvm.expect)."""
     return fx.Boolean(
         llvm.call_intrinsic(
             ir.IntegerType.get_signless(1),

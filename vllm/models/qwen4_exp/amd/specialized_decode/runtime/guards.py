@@ -1,9 +1,9 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
-"""The refusals that need the loaded model (``model_reasons``: the module
+"""The refusals that need the loaded model (`model_reasons`: the module
 variants and every weight's dtype and layout as the kernels read it in place)
-and the GDN states vLLM binds (``cache_reasons``), each listing every reason;
-and ``FailStop``, which stops the engine once an in-kernel wait gave up."""
+and the GDN states vLLM binds (`cache_reasons`), each listing every reason;
+and `FailStop`, which stops the engine once an in-kernel wait gave up."""
 
 import torch
 
@@ -191,7 +191,7 @@ def _layer_reasons(layer) -> list[str]:
 
 
 def model_reasons(model, tp: int) -> list[str]:
-    """Every reason the kernels cannot serve the loaded ``Qwen4ExpModel``."""
+    """Every reason the kernels cannot serve the loaded `Qwen4ExpModel`."""
     reasons = []
     if tp != L.TP:
         reasons.append(f"TP {tp}")
@@ -250,7 +250,7 @@ def cache_reasons(model, tp: int) -> list[str]:
 
 class FailStop:
     """Stops every TP rank at the same step once any of them gave up an in-kernel
-    wait (its health word FAILED, ``wide.abi``). Each step queues a D2H copy of
+    wait (its health word FAILED, `wide.abi`). Each step queues a D2H copy of
     this rank's word and keeps the newest copy that has landed, without blocking;
     every CHECK_EVERY steps the ranks agree on those over the TP CPU group and all
     raise together. A rank that raised alone would leave the others in the next

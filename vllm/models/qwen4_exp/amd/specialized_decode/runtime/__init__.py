@@ -1,14 +1,14 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 """Qwen3.8-Flash-Next specialized decode on MI355X (TP2), enabled by
-``--monokernel`` (``KernelConfig.monokernel``).
+`--monokernel` (`KernelConfig.monokernel`).
 
-``specialized_decode_config`` runs in the model's ``__init__``, before the
+`specialized_decode_config` runs in the model's `__init__`, before the
 weights load. It returns None for the stock decode, and raises with every
-reason from ``unsupported`` when ``--monokernel`` is set for a deployment the
+reason from `unsupported` when `--monokernel` is set for a deployment the
 kernels cannot serve (default-deny). Checks that need the loaded model run when
-the executor is built (``decode.SpecializedDecode``), those that need the GDN
-states at every KV cache bind (``decode.SpecializedDecode.bind_caches``)."""
+the executor is built (`decode.SpecializedDecode`), those that need the GDN
+states at every KV cache bind (`decode.SpecializedDecode.bind_caches`)."""
 
 from dataclasses import dataclass
 
@@ -22,7 +22,7 @@ NAME = "Qwen3.8-Flash-Next specialized decode (--monokernel)"
 
 @dataclass(frozen=True)
 class DecodeConfig:
-    """``widths``: the step widths (rows) the wide kernels are built for, the
+    """`widths`: the step widths (rows) the wide kernels are built for, the
     deployment's CUDA graph capture sizes in [MIN_TOKENS, MAX_TOKENS]; a step
     of another width runs vLLM's decode."""
 
@@ -36,7 +36,7 @@ def decode_widths(vllm_config) -> tuple[int, ...]:
 
 def specialized_decode_config(vllm_config) -> DecodeConfig | None:
     """The deployment's specialized decode settings, None for the stock decode.
-    Raises when ``--monokernel`` is set for an unsupported deployment, listing
+    Raises when `--monokernel` is set for an unsupported deployment, listing
     every reason."""
     if not vllm_config.kernel_config.monokernel:
         return None

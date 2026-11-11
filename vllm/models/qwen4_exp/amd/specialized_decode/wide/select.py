@@ -1,22 +1,22 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 """The QSA indexer's top-k block selection of one decode row, by one CTA:
-the ``top`` largest of the row's ``visible`` scores (f32 >= 0), exact on the
+the `top` largest of the row's `visible` scores (f32 >= 0), exact on the
 f32 values, ties at the boundary to the lower block, as an ascending list of
-block indices (stock's ``top_k_per_row_decode`` picks the same set but for
+block indices (stock's `top_k_per_row_decode` picks the same set but for
 ties at the boundary, where its pick is not deterministic either). A row with
-at most ``top`` visible blocks selects them all (``identity``), as stock does.
+at most `top` visible blocks selects them all (`identity`), as stock does.
 
-``select`` is a radix select on the keys, the scores' bits as int32 (monotone
+`select` is a radix select on the keys, the scores' bits as int32 (monotone
 for scores >= 0; -0.0 reads as 0): up to three levels of an LDS histogram
 (key bits 30..19, then 18..7 and 6..0 of the keys still tied with the
 boundary so far, counted with LDS atomics), each followed by a CTA-wide scan
-of the bins from the top that finds the bin holding the ``top``-th key; a
+of the bins from the top that finds the bin holding the `top`-th key; a
 level whose bin holds exactly the keys still wanted ends the search (the
 bin is taken whole). A scan of each thread's strictly-greater and tied
 counts (on the key bits the search resolved) then gives every chosen block
 its slot. A thread owns a contiguous run of the row's keys; the keys are staged
-in LDS (as many as the launch's LDS allows, ``lds_keys``) or, past that,
+in LDS (as many as the launch's LDS allows, `lds_keys`) or, past that,
 re-read from global memory on every pass (correct at any context, slower).
 """
 
@@ -49,21 +49,21 @@ AUX = 2 * WAVES + 4  # the scans' wave totals, then the found (bin, above, count
 
 
 def lds_keys(free_bytes: int) -> int:
-    """Keys a row stages in LDS when ``free_bytes`` of LDS are left for
-    ``select``: whole 1024-key steps up to ``MAX_KEYS``."""
+    """Keys a row stages in LDS when `free_bytes` of LDS are left for
+    `select`: whole 1024-key steps up to `MAX_KEYS`."""
     keys = (free_bytes // 4 - BINS - AUX) // 1024 * 1024
     return max(0, min(MAX_KEYS, keys))
 
 
 def lds_words(keys: int) -> int:
-    """i32 words of LDS ``select`` needs with ``keys`` staged keys: the keys,
-    the histogram, ``AUX``."""
+    """i32 words of LDS `select` needs with `keys` staged keys: the keys,
+    the histogram, `AUX`."""
     return keys + BINS + AUX
 
 
 @traced
 def identity(sel, row, stride, visible, top: int, tid):
-    """A row within the budget: blocks ``0 .. visible`` in order, -1 after."""
+    """A row within the budget: blocks `0 .. visible` in order, -1 after."""
     for r in range_constexpr(-(-top // THREADS)):
         i = tid + i32(r * THREADS)
         if i < top:
@@ -77,8 +77,8 @@ def _key(word):
 
 @traced
 def _block_scan2(tid, aux, a, b):
-    """Exclusive prefix sums of ``a`` and ``b`` over the CTA's threads in
-    order, and ``a``'s total."""
+    """Exclusive prefix sums of `a` and `b` over the CTA's threads in
+    order, and `a`'s total."""
     lane, wave = tid % 64, tid // 64
     xa, xb = a, b
     for step in range_constexpr(6):
@@ -102,8 +102,8 @@ def _block_scan2(tid, aux, a, b):
 
 @traced
 def _count(hist, load4, lo, hi, prefix, shift: int, bits: int):
-    """The thread's keys whose bits above ``shift + bits`` are ``prefix``,
-    counted into ``hist`` by their next ``bits``."""
+    """The thread's keys whose bits above `shift + bits` are `prefix`,
+    counted into `hist` by their next `bits`."""
     mask = (1 << bits) - 1
     for j in range(lo, hi, i32(STEP)):
         k4 = load4(j)
@@ -117,10 +117,10 @@ def _count(hist, load4, lo, hi, prefix, shift: int, bits: int):
 
 @traced
 def _find(tid, hist, aux, bins: int, want, clear: bool):
-    """The bin holding the ``want``-th key from the top and the keys in the
-    bins above it, (bin, above), from every thread. Thread ``t`` scans bins
-    ``bins - (t + 1) * per .. bins - t * per`` (the top bins first);
-    ``clear`` (``bins >= THREADS * STEP``): it zeroes them once read, for the
+    """The bin holding the `want`-th key from the top and the keys in the
+    bins above it, (bin, above), from every thread. Thread `t` scans bins
+    `bins - (t + 1) * per .. bins - t * per` (the top bins first);
+    `clear` (`bins >= THREADS * STEP`): it zeroes them once read, for the
     next level."""
     per = max(1, bins // THREADS)
     first = i32(bins) - (tid + i32(1)) * i32(per)
@@ -161,7 +161,7 @@ def _find(tid, hist, aux, bins: int, want, clear: bool):
 
 @traced
 def _zero(tid, hist, bins: int):
-    """The thread's share of zeroing ``bins`` histogram bins (no barrier)."""
+    """The thread's share of zeroing `bins` histogram bins (no barrier)."""
     for r in range_constexpr(-(-bins // (THREADS * STEP))):
         at = (tid + i32(r * THREADS)) * i32(STEP)
         if at < i32(bins):
@@ -170,10 +170,10 @@ def _zero(tid, hist, bins: int):
 
 @traced
 def _boundary(tid, hist, aux, load4, lo, hi, top: int):
-    """(prefix, shift): the ``top``-th largest key's bits above ``shift``; the
-    keys whose bits above ``shift`` exceed ``prefix`` and those equal to it
-    taken in block order up to ``top`` are the top ``top``. ``hist``: a
-    zeroed histogram; each level's scan zeroes it for the next (``_find``)."""
+    """(prefix, shift): the `top`-th largest key's bits above `shift`; the
+    keys whose bits above `shift` exceed `prefix` and those equal to it
+    taken in block order up to `top` are the top `top`. `hist`: a
+    zeroed histogram; each level's scan zeroes it for the next (`_find`)."""
     prefix, want, shift_at, done = i32(0), i32(top), i32(31), i32(0)
     for level, (shift, bits) in enumerate(LEVELS):
         if done == i32(0):
@@ -191,9 +191,9 @@ def _boundary(tid, hist, aux, load4, lo, hi, top: int):
 
 @traced
 def _emit(tid, aux, load4, lo, hi, prefix, shift, sel, row, stride, top: int):
-    """Every key whose bits above ``shift`` exceed ``prefix`` and the first of
-    those equal to it up to ``top`` in all, as ascending block indices at
-    ``sel[row]``."""
+    """Every key whose bits above `shift` exceed `prefix` and the first of
+    those equal to it up to `top` in all, as ascending block indices at
+    `sel[row]`."""
     strict, ties = i32(0), i32(0)
     for j in range(lo, hi, i32(STEP)):
         k4 = [k >> shift for k in load4(j)]
@@ -220,7 +220,7 @@ def _emit(tid, aux, load4, lo, hi, prefix, shift, sel, row, stride, top: int):
 
 @traced
 def _stage(keys, from_global, lo, hi):
-    """The thread's keys into LDS, ``UNROLLED`` reads in flight at a time (no
+    """The thread's keys into LDS, `UNROLLED` reads in flight at a time (no
     barrier)."""
     for j in range(lo, hi, i32(UNROLLED * STEP)):
         loads = [from_global(j + i32(u * STEP)) for u in range(UNROLLED)]
@@ -234,10 +234,10 @@ def _stage(keys, from_global, lo, hi):
 def select(
     tid, keys, staged: int, logits, row, logits_stride, visible, sel, stride, top: int
 ):
-    """``sel[row]`` = the ``top`` best of ``logits[row, :visible]`` (``visible >
-    top``), ascending. ``keys``: ``lds_words(staged)`` i32 words of LDS, the
-    first ``staged`` for the row's keys. Reads the scores device-coherent
-    (``CM_DEV``): other CTAs of the launch wrote them."""
+    """`sel[row]` = the `top` best of `logits[row, :visible]` (`visible >
+    top`), ascending. `keys`: `lds_words(staged)` i32 words of LDS, the
+    first `staged` for the row's keys. Reads the scores device-coherent
+    (`CM_DEV`): other CTAs of the launch wrote them."""
     hist = keys + staged
     aux = hist + BINS
     # the thread's run: whole STEP-key reads, every thread's run contiguous
