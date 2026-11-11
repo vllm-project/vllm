@@ -212,7 +212,7 @@ def _make_mega_moe_experts(
 
 def _mega_moe_checkpoint(experts, num_logical_experts, seed):
     """A random checkpoint, stacked by logical expert, and its shards:
-    ``(param name, tensor, shard id, expert id)`` as model loaders pass them."""
+    `(param name, tensor, shard id, expert id)` as model loaders pass them."""
     hidden, inter = experts.hidden_size, experts.intermediate_size
     routed = experts.weight_format.routed
     group = routed.scale_group_k
@@ -248,7 +248,7 @@ def _mega_moe_checkpoint(experts, num_logical_experts, seed):
 
 
 def _load_mega_moe_checkpoint_shuffled(experts, num_logical_experts, seed):
-    """Load a random checkpoint, one shard per ``weight_loader`` call in a
+    """Load a random checkpoint, one shard per `weight_loader` call in a
     shuffled order, then run post-load processing."""
     ckpt, shards = _mega_moe_checkpoint(experts, num_logical_experts, seed)
     generator = torch.Generator().manual_seed(seed)
@@ -347,7 +347,7 @@ def test_deep_gemm_mega_moe_reload_overwrites_kernel_layout_in_place(weight_form
 
 class _MegaMoEModel(torch.nn.Module):
     """One MegaMoE layer with per-expert checkpoint names,
-    ``experts.{expert}.{shard}.{param}``, as model loaders map them."""
+    `experts.{expert}.{shard}.{param}`, as model loaders map them."""
 
     def __init__(self, weight_format):
         super().__init__()
@@ -371,7 +371,7 @@ def test_deep_gemm_mega_moe_load_plan_is_direct_and_matches_cold_start(
     monkeypatch, weight_format
 ):
     """Every routed-expert name is direct in a load plan, and updates through
-    the plan or through ``load_weights`` in another order end where a cold
+    the plan or through `load_weights` in another order end where a cold
     start on the new checkpoint does, at the same addresses."""
     from vllm.distributed.weight_transfer.base import ParamMeta
     from vllm.model_executor.model_loader.reload import (
@@ -436,7 +436,7 @@ def test_deep_gemm_mega_moe_layerwise_reload_processes_after_the_last_tensor(
 ):
     """Layerwise reload processes the layer when its last checkpoint tensor
     arrives: not earlier (an over-count, which drops the later loads) and not
-    only at finalize (a derived tensor such as ``_l2_alpha`` counted as
+    only at finalize (a derived tensor such as `_l2_alpha` counted as
     loadable)."""
     from vllm.model_executor.model_loader.reload import layerwise
 
