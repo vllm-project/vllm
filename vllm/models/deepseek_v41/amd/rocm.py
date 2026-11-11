@@ -552,6 +552,8 @@ class DeepseekV41ROCMAiterMLAAttention(DeepseekV4Attention):
 
     backend_cls = DeepseekV41ROCMAiterMLASparseBackend
     swa_backend_cls = DeepseekV41ROCMAiterSparseSWABackend
+    # Whether _forward_prefill stores bf16 rows already inverse-RoPE'd.
+    _prefill_rotates_bf16 = False
 
     def _indexer_cls(
         self, k_cache: DeepseekV4IndexerCache | None
@@ -984,23 +986,7 @@ class DeepseekV41ROCMAiterMLAAttention(DeepseekV4Attention):
         attn_metadata = forward_context.attn_metadata
 
         if attn_metadata is None:
-            # Warmup dummy run: no real metadata. Reserve the workspace
-            # _forward_prefill would; the dequantize / topk / sparse_fwd kernels
-            # are skipped this step. The aiter prefill reads the caches in place
-            # and needs none.
-            swa_only = self.compress_ratio == 0
-            N = (
-                0
-                if swa_only
-                else (self.max_model_len + self.compress_ratio - 1)
-                // self.compress_ratio
-            )
-            M = N + self.window_size + self.max_num_batched_tokens
-            if not self._use_aiter_sparse_mla:
-                shapes = self._prefill_workspace_shapes(
-                    M, self.max_num_batched_tokens, q
-                )
-                current_workspace_manager().get_simultaneous(*shapes)
+            self._reserve_prefill_workspace(q)
             if mxfp8_out is None:
                 output.zero_()
             else:
@@ -1016,10 +1002,8 @@ class DeepseekV41ROCMAiterMLAAttention(DeepseekV4Attention):
             else None,
         )
         swa_metadata = cast(
-            DeepseekV41ROCMAiterSparseSWAMetadata | None,
-            attn_metadata.get(self.swa_cache_layer.prefix),
+            DeepseekV41ROCMAiterSparseSWAMetadata, attn_metadata[self.swa_cache_layer.prefix]
         )
-        assert swa_metadata is not None
 
         swa_only = self.compress_ratio == 0
         self_kv_cache = None if swa_only else self._compressed_kv_cache()
@@ -1085,13 +1069,31 @@ class DeepseekV41ROCMAiterMLAAttention(DeepseekV4Attention):
         # standalone pass. Settle that here rather than in _o_proj: the split
         # is batch-dependent and _o_proj runs compiled, where such a value
         # freezes at its trace-time value.
-        end = num_decode_tokens if self._use_aiter_sparse_mla else output.shape[0]
+        end = (
+            num_decode_tokens
+            if self._use_aiter_sparse_mla or self._prefill_rotates_bf16
+            else output.shape[0]
+        )
         rocm_inverse_rope_rows_(
             output[rotated:end, : self.n_local_heads, :],
             positions[rotated:end],
             self.rotary_emb.cos_sin_cache,
             self.rope_head_dim,
         )
+
+    def _reserve_prefill_workspace(self, q: torch.Tensor) -> None:
+        # Warmup dummy run: no real metadata. Reserve the workspace
+        # _forward_prefill would; the dequantize / topk / sparse_fwd kernels
+        # are skipped this step. The aiter prefill reads the caches in place,
+        # so it asks only for the bf16 rows of the MXFP8 output.
+        swa_only = self.compress_ratio == 0
+        N = 0 if swa_only else -(-self.max_model_len // self.compress_ratio)
+        M = N + self.window_size + self.max_num_batched_tokens
+        if not self._use_aiter_sparse_mla:
+            shapes = self._prefill_workspace_shapes(
+                M, self.max_num_batched_tokens, q
+            )
+            current_workspace_manager().get_simultaneous(*shapes)
 
     def _decode_topk_ragged(
         self,

@@ -118,28 +118,7 @@ class DeepseekV4FlashMLAAttention(DeepseekV4Attention):
         attn_metadata = forward_context.attn_metadata
 
         if attn_metadata is None:
-            # Warmup dummy run: no real metadata. Reserve the same bf16
-            # gather workspace _forward_prefill would; the dequantize / topk
-            # / sparse_fwd kernels are skipped this step.
-            swa_only = self.compress_ratio == 0
-            N = (
-                0
-                if swa_only
-                else (self.max_model_len + self.compress_ratio - 1)
-                // self.compress_ratio
-            )
-            M = N + self.window_size + self.max_num_batched_tokens
-            if swa_only:
-                top_k = 0
-            else:
-                assert self.topk_indices_buffer is not None
-                top_k = self.topk_indices_buffer.shape[-1]
-            combined_topk = round_up(top_k + self.window_size, 128)
-            current_workspace_manager().get_simultaneous(
-                ((self.PREFILL_CHUNK_SIZE, M, q.shape[-1]), torch.bfloat16),
-                ((self.max_num_batched_tokens, combined_topk), torch.int32),
-                ((self.max_num_batched_tokens,), torch.int32),
-            )
+            self._reserve_prefill_workspace(q)
             output.zero_()
             return
 
@@ -153,10 +132,8 @@ class DeepseekV4FlashMLAAttention(DeepseekV4Attention):
             else None,
         )
         swa_metadata = cast(
-            "DeepseekSparseSWAMetadata | None",
-            attn_metadata.get(self.swa_cache_layer.prefix),
+            "DeepseekSparseSWAMetadata", attn_metadata[self.swa_cache_layer.prefix]
         )
-        assert swa_metadata is not None
 
         if self.use_pcp:
             num_tokens = (
@@ -196,6 +173,25 @@ class DeepseekV4FlashMLAAttention(DeepseekV4Attention):
                 swa_only=swa_only,
                 output=output[:num_decode_tokens],
             )
+
+    def _reserve_prefill_workspace(self, q: torch.Tensor) -> None:
+        # Warmup dummy run: no real metadata. Reserve the same bf16
+        # gather workspace _forward_prefill would; the dequantize / topk
+        # / sparse_fwd kernels are skipped this step.
+        swa_only = self.compress_ratio == 0
+        N = 0 if swa_only else -(-self.max_model_len // self.compress_ratio)
+        M = N + self.window_size + self.max_num_batched_tokens
+        if swa_only:
+            top_k = 0
+        else:
+            assert self.topk_indices_buffer is not None
+            top_k = self.topk_indices_buffer.shape[-1]
+        combined_topk = round_up(top_k + self.window_size, 128)
+        current_workspace_manager().get_simultaneous(
+            ((self.PREFILL_CHUNK_SIZE, M, q.shape[-1]), torch.bfloat16),
+            ((self.max_num_batched_tokens, combined_topk), torch.int32),
+            ((self.max_num_batched_tokens,), torch.int32),
+        )
 
     def _forward_decode(
         self,
