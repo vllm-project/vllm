@@ -2,6 +2,7 @@
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 """Unit tests for native offloading specs and their factory."""
 
+import logging
 import os
 import uuid
 from typing import Any
@@ -430,6 +431,53 @@ def test_tiering_spec_create_worker_uses_worker_rank_for_sharded_layout(monkeypa
     assert region_calls[0]["rank"] == 1
 
 
+@pytest.mark.parametrize(
+    "secondary_tiers,canonical_layout,is_parallelism_agnostic,replicated_layout,warns",
+    [
+        ([{"type": "example"}], False, True, False, True),
+        ([{"type": "example"}], False, False, False, True),
+        ([{"type": "example"}], True, False, False, True),
+        ([{"type": "example"}], True, True, False, False),
+        ([{"type": "example"}], False, False, True, False),
+        ([], False, False, False, False),
+    ],
+)
+def test_tiering_spec_warns_when_secondary_tiers_are_topology_bound(
+    caplog_vllm,
+    monkeypatch,
+    secondary_tiers,
+    canonical_layout,
+    is_parallelism_agnostic,
+    replicated_layout,
+    warns,
+):
+    """Direct-layout KV warns even when it is flagged parallelism-agnostic,
+    unless it is replicated MLA, which FileMapper shares across TP sizes."""
+    import vllm.v1.kv_offload.tiering.spec as tiering_spec_module
+
+    for name in ("SharedOffloadRegion", "CPUPrimaryTierOffloadingManager"):
+        monkeypatch.setattr(tiering_spec_module, name, MagicMock())
+    spec = _create_spec(
+        spec_name="TieringOffloadingSpec",
+        worker_kv_bytes_per_block=4096,
+        world_size=2 if replicated_layout else 1,
+        is_parallelism_agnostic=is_parallelism_agnostic,
+        replicated_layout=replicated_layout,
+        canonical_layout=canonical_layout,
+        extra_config={"secondary_tiers": secondary_tiers},
+    )
+
+    spec.get_manager().shutdown()
+
+    warnings = [
+        record
+        for record in caplog_vllm.records
+        if record.name == tiering_spec_module.__name__
+        and record.levelno == logging.WARNING
+    ]
+    assert len(warnings) == int(warns)
+
+
 @pytest.mark.parametrize("world_size", [2, 4, 8])
 def test_cpu_spec_replicated_sizing_on_shared_region(monkeypatch, world_size: int):
     # On CUDA the default spec honors
@@ -765,3 +813,64 @@ def test_build_metric_definitions_returns_counter_at_threshold():
     metrics = spec_cls.build_metric_definitions(extra_config)
 
     assert CPUOffloadingMetrics.STORES_SKIPPED in metrics
+
+
+@pytest.mark.parametrize(
+    ("secondary_tiers", "spanning_group", "rejected"),
+    [
+        ([], "tp", False),
+        ([{"type": "example"}], None, False),
+        ([{"type": "example"}], "tp", True),
+        ([{"type": "example"}], "pp", True),
+        ([{"type": "example"}], "pcp", True),
+    ],
+)
+def test_tiering_spec_rejects_secondary_tiers_across_nodes(
+    monkeypatch, secondary_tiers, spanning_group, rejected
+):
+    import vllm.distributed.parallel_state as parallel_state
+    import vllm.v1.kv_offload.tiering.spec as tiering_spec_module
+
+    spec = _create_spec(
+        spec_name="TieringOffloadingSpec",
+        worker_kv_bytes_per_block=4096,
+        rank=1,
+        world_size=4,
+        tp_size=2,
+        pp_size=2,
+        extra_config={"secondary_tiers": secondary_tiers},
+    )
+    assert isinstance(spec, TieringOffloadingSpec)
+
+    groups = {
+        name: MagicMock(world_size=2, cpu_group=name) for name in ("tp", "pp", "pcp")
+    }
+    monkeypatch.setattr(parallel_state, "get_tp_group", lambda: groups["tp"])
+    monkeypatch.setattr(parallel_state, "get_pp_group", lambda: groups["pp"])
+    monkeypatch.setattr(parallel_state, "get_pcp_group", lambda: groups["pcp"])
+    queried: list[str] = []
+
+    def same_node_as(group, source_rank):
+        queried.append(group)
+        return [True, group != spanning_group]
+
+    monkeypatch.setattr(parallel_state, "in_the_same_node_as", same_node_as)
+    region_ctor = MagicMock()
+    worker_ctor = MagicMock()
+    monkeypatch.setattr(tiering_spec_module, "SharedOffloadRegion", region_ctor)
+    monkeypatch.setattr(tiering_spec_module, "CPUOffloadingWorker", worker_ctor)
+
+    if rejected:
+        with pytest.raises(NotImplementedError, match="span several nodes"):
+            spec.create_worker(MagicMock())
+        # Rejected before any CPU memory is allocated.
+        region_ctor.assert_not_called()
+        worker_ctor.assert_not_called()
+    else:
+        spec.create_worker(MagicMock())
+        region_ctor.assert_called_once()
+        worker_ctor.assert_called_once()
+    # Without secondary tiers each node's region serves its own workers. With
+    # them every group is queried, even after one spans nodes, since each
+    # query is a collective that the group's other ranks also join.
+    assert sorted(queried) == (["pcp", "pp", "tp"] if secondary_tiers else [])

@@ -21,6 +21,7 @@ from vllm.model_executor.layers.fused_moe.modular_kernel import (
     FusedMoEPrepareAndFinalize,
 )
 from vllm.model_executor.layers.fused_moe.prepare_finalize import (
+    AllToAllBatchedPrepareAndFinalize,
     BatchedPrepareAndFinalize,
     make_moe_prepare_and_finalize_naive_dp_ep,
     make_moe_prepare_and_finalize_no_dp_ep,
@@ -119,6 +120,7 @@ if current_platform.is_cuda_alike():
         from .prepare_finalize.deepep_v2 import DeepEPV2PrepareAndFinalize
     if has_mori():
         from .prepare_finalize.mori import MoriPrepareAndFinalize
+        from .prepare_finalize.mori_epv2 import MoriEPv2PrepareAndFinalize
     if has_nixl_ep():
         from .prepare_finalize.nixl_ep import (
             NIXL_EP_QUANT_BLOCK_SHAPE,
@@ -334,7 +336,31 @@ def maybe_make_prepare_finalize(
             num_global_experts=moe.num_experts,
         )
 
-    elif moe.use_mori_kernels:
+    elif moe.use_mori_epv2_kernels:
+        num_local_experts = moe.num_experts // all2all_manager.world_size
+        # MORI EPv2 routes expert e to rank e // num_local_experts, so every rank
+        # must hold the same number of experts.
+        if num_local_experts * all2all_manager.world_size != moe.num_experts:
+            raise ValueError(
+                f"MORI EPv2 needs the {moe.num_experts} experts to split evenly "
+                f"over {all2all_manager.world_size} expert-parallel ranks"
+            )
+        all_to_all_args = dict(
+            hidden_dim=moe.hidden_dim,
+            max_num_inp_token_per_rank=moe.max_num_tokens,
+            num_experts_per_rank=num_local_experts,
+            num_experts_per_token=moe.experts_per_token,
+        )
+        handle = all2all_manager.get_handle(all_to_all_args)
+        prepare_finalize = MoriEPv2PrepareAndFinalize(
+            handle,
+            max_tokens_per_rank=moe.max_num_tokens,
+            num_dispatchers=all2all_manager.world_size,
+            num_local_experts=num_local_experts,
+            rank_expert_offset=all2all_manager.rank * num_local_experts,
+        )
+
+    elif moe.use_mori_epv1_kernels:
         assert quant_config is not None
 
         # MXFP4 activations are dispatched as packed FP4 with their e8m0
@@ -396,6 +422,12 @@ def maybe_make_prepare_finalize(
     elif moe.use_fi_nvl_two_sided_kernels:
         assert quant_config is not None
         prepare_finalize = FlashInferNVLinkTwoSidedPrepareAndFinalize(
+            max_num_tokens=(
+                get_current_vllm_config().scheduler_config.max_num_batched_tokens
+            ),
+            top_k=moe.experts_per_token,
+            num_experts=moe.num_experts,
+            hidden_size=moe.hidden_dim,
             num_dispatchers=all2all_manager.world_size,
         )
 
@@ -416,6 +448,23 @@ def maybe_make_prepare_finalize(
             dispatch_format=dispatch_layout.dispatch_format,
             extra_payload_bytes_per_token=dispatch_layout.extra_payload_bytes_per_token,
         )
+
+    elif moe.use_alltoall_batched_kernels and allow_new_interface:
+        if current_platform.is_xpu() and not use_monolithic:
+            prepare_finalize = AllToAllBatchedPrepareAndFinalize(
+                max_num_tokens=moe.max_num_tokens,
+                num_local_experts=moe.num_local_experts,
+                num_dispatchers=all2all_manager.world_size,
+                rank=moe.moe_parallel_config.ep_rank,
+                is_sequence_parallel=moe.moe_parallel_config.is_sequence_parallel,
+            )
+            logger.info_once("XPU MoE EP: using AllToAllBatchedPrepareAndFinalize.")
+        else:
+            prepare_finalize = make_moe_prepare_and_finalize_naive_dp_ep(
+                use_monolithic=use_monolithic,
+                is_sequence_parallel=moe.moe_parallel_config.is_sequence_parallel,
+                num_dispatchers=all2all_manager.world_size,
+            )
 
     elif moe.use_ag_rs_all2all_kernels and allow_new_interface:
         prepare_finalize = make_moe_prepare_and_finalize_naive_dp_ep(

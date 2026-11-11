@@ -10,18 +10,19 @@ from typing import Any
 import pytest
 
 from vllm.config import ParallelConfig
+from vllm.config.utils import hash_config
 from vllm.utils import numa_utils
 
 
 @pytest.fixture(autouse=True)
 def _disable_pct_by_default(monkeypatch):
-    """Force PCT detection OFF unless a test opts in via ``_patch_pct_gates``.
+    """Force PCT detection OFF unless a test opts in via `_patch_pct_gates`.
 
     The CI / dev machines themselves can be Xeon 6776P with PCT enabled, so a
-    plain ``cache_clear`` would let the gate auto-detect ``True`` from the
+    plain `cache_clear` would let the gate auto-detect `True` from the
     live filesystem and silently re-route "baseline" tests through the PCT
-    path. Stub ``/proc/cpuinfo`` and ``acpi_cppc/highest_perf`` to a state
-    that fails the gate; ``_patch_pct_gates`` re-stubs on top when needed.
+    path. Stub `/proc/cpuinfo` and `acpi_cppc/highest_perf` to a state
+    that fails the gate; `_patch_pct_gates` re-stubs on top when needed.
     """
     from io import StringIO
 
@@ -108,11 +109,11 @@ def _patch_pct_gates(
 ):
     """Force `_pct_sku_config` and node cpulist read to deterministic state.
 
-    ``cpulist`` is the default returned for any node not present in
-    ``cpulist_by_node``. ``cpulist_by_node`` lets a test return different
-    cpulists for different NUMA nodes (e.g. node 0 vs node 1). ``sku`` lets
+    `cpulist` is the default returned for any node not present in
+    `cpulist_by_node`. `cpulist_by_node` lets a test return different
+    cpulists for different NUMA nodes (e.g. node 0 vs node 1). `sku` lets
     the test pick which Granite Rapids SKU appears in the fake
-    ``/proc/cpuinfo`` ``model name`` (only used when ``model_match=True``).
+    `/proc/cpuinfo` `model name` (only used when `model_match=True`).
     """
     import pathlib
     from io import StringIO
@@ -178,8 +179,8 @@ def test_pct_binding_filters_cpus(monkeypatch):
     ],
 )
 def test_pct_binding_fires_on_every_capable_sku(monkeypatch, sku, expected_cpus):
-    """Each SKU in ``_PCT_CAPABLE_SKUS`` engages the gate at its own
-    expected ``highest_perf`` and uses its own priority-core stride."""
+    """Each SKU in `_PCT_CAPABLE_SKUS` engages the gate at its own
+    expected `highest_perf` and uses its own priority-core stride."""
     sku_config = numa_utils._PCT_CAPABLE_SKUS[sku]
     _patch_pct_gates(
         monkeypatch,
@@ -324,7 +325,7 @@ def test_get_numactl_args_engine_core_pct_external_launcher_spans_local_nodes(
 ):
     """external_launcher (or multi-node-within-DP, or Ray) hits the
     fallback branch. EngineCore must still span every local NUMA node
-    so it can mp-spawn its local workers without ``--physcpubind``
+    so it can mp-spawn its local workers without `--physcpubind`
     strict-validation failures."""
     _patch_pct_gates(
         monkeypatch,
@@ -349,7 +350,7 @@ def test_get_numactl_args_engine_core_pct_external_launcher_spans_local_nodes(
 
 def test_get_numactl_args_engine_core_baseline_multi_node_within_dp_spans_locals():
     """Multi-node-within-DP fallback: bind EngineCore to all local NUMA
-    nodes that the visible ``numa_bind_nodes`` reference."""
+    nodes that the visible `numa_bind_nodes` reference."""
     vllm_config = _make_config(
         numa_bind=True,
         numa_bind_nodes=[0, 0, 0, 0, 1, 1, 1, 1],
@@ -365,11 +366,11 @@ def test_get_numactl_args_engine_core_baseline_multi_node_within_dp_spans_locals
 
 
 def test_get_numactl_args_engine_core_skips_user_cpu_list(monkeypatch):
-    """EngineCore ignores ``--numa-bind-cpus``.
+    """EngineCore ignores `--numa-bind-cpus`.
 
     Those are per-worker lists; binding EngineCore to any of them would
-    shrink its ``cpus_allowed`` below the strict-superset workers'
-    ``--physcpubind`` spawns need. We fall back to ``--cpunodebind`` over
+    shrink its `cpus_allowed` below the strict-superset workers'
+    `--physcpubind` spawns need. We fall back to `--cpunodebind` over
     the shard's NUMA nodes instead. PCT auto-detect is also bypassed when
     the user is explicit (its priority-core union may not be a superset
     of the user's per-worker cores)."""
@@ -585,7 +586,7 @@ def test_parallel_config_rejects_invalid_numa_bind_cpus(cpuset):
 
 
 def _fake_numactl_run(rejected_args):
-    """Fake ``numactl`` that fails when any of ``rejected_args`` is present."""
+    """Fake `numactl` that fails when any of `rejected_args` is present."""
 
     def run(cmd, *args, **kwargs):
         arg_str = " ".join(cmd[1:-1])
@@ -684,7 +685,7 @@ def test_parallel_config_auto_policy_survives_copy_without_changing_hash():
     from vllm.config.utils import replace
 
     parallel_config = ParallelConfig()
-    original_hash = parallel_config.compute_hash()
+    original_hash = hash_config(parallel_config)
     parallel_config.numa_bind = True
     parallel_config.numa_bind_nodes = [0]
     parallel_config._numa_bind_auto = True
@@ -693,7 +694,7 @@ def test_parallel_config_auto_policy_survives_copy_without_changing_hash():
         deepcopy(parallel_config),
     ):
         assert copied._numa_bind_auto is True
-        assert copied.compute_hash() == original_hash
+        assert hash_config(copied) == original_hash
 
 
 @pytest.mark.parametrize("dp_local_rank", [0, 1])
