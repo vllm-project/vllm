@@ -62,6 +62,15 @@ and compares the disaggregated outputs against it. Set `MODEL` to use another mo
 or `MOONCAKE_EC_PROTOCOL=rdma` to use RDMA on supported hardware. See the script for
 additional configuration options.
 
+### Kimi-K3 image inputs
+
+Kimi-K3 and Kimi-K3.1 use the existing Python proxy's metadata-only image
+forwarding. The encoder publishes each image's original width and height and
+embedding token count; the consumer reconstructs the same resolution-aware
+prompt without preprocessing the image again. Embeddings are delivered through
+the configured EC connector. This uses the same producer/consumer configuration
+as the examples above and does not require additional proxy options.
+
 ### Audio inputs
 
 The Python EPD proxy also rewrites audio in `/v1/chat/completions` into

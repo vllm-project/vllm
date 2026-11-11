@@ -1,15 +1,26 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 
+import json
+
 import numpy as np
 import pytest
 import torch
 from PIL import Image
 from transformers import AutoImageProcessor
 
+from vllm.config import DeviceConfig, ECTransferConfig, ModelConfig, VllmConfig
+from vllm.distributed.ec_transfer.ec_connector.utils import (
+    PlaceholderMetadataResolver,
+    collect_ec_item_metadata,
+)
 from vllm.model_executor.layers.fusion.mm_input_norm import build_mm_input_norm
 from vllm.multimodal import MULTIMODAL_REGISTRY
+from vllm.multimodal.inputs import MultiModalFeatureSpec
+from vllm.multimodal.utils import encode_image_url
 from vllm.platforms import current_platform
+from vllm.renderers import ChatParams, renderer_from_config
+from vllm.renderers.chat_utils.item_tracker import _get_embeds_data
 from vllm.transformers_utils.processors.kimi_k25_vision_fused import (
     KimiK25FusedVisionProcessor,
 )
@@ -32,6 +43,98 @@ def image_processors():
 def _noise_image(width: int, height: int) -> Image.Image:
     rng = np.random.default_rng(0)
     return Image.fromarray(rng.integers(0, 256, (height, width, 3), dtype=np.uint8))
+
+
+def test_image_metadata_only_roundtrip():
+    """EC metadata preserves original dimensions and repeated-image placeholders."""
+    ctx = build_model_context(_MODEL_ID, limit_mm_per_prompt={"image": 4})
+    mm_config = ctx.model_config.multimodal_config
+    mm_config.enable_mm_embeds = True
+    mm_config.allow_missing_mm_embeddings = True
+    processor = MULTIMODAL_REGISTRY.create_processor(ctx.model_config)
+    images = [_noise_image(w, h) for w, h in [(310, 470), (7300, 30), (13, 9)]]
+    images.append(images[0])
+    prompt = processor.dummy_inputs.get_dummy_text({"image": len(images)})
+    raw = processor(prompt, mm_items=processor.info.parse_mm_data({"image": images}))
+    features = [
+        MultiModalFeatureSpec(
+            data=item,
+            modality="image",
+            identifier=str(index),
+            mm_position=position,
+        )
+        for index, (item, position) in enumerate(
+            zip(raw["mm_kwargs"]["image"], raw["mm_placeholders"]["image"])
+        )
+    ]
+    published = collect_ec_item_metadata(
+        features, PlaceholderMetadataResolver(ctx.model_config)
+    )
+    metadata = json.loads(
+        json.dumps([entry["metadata"] for entry in published.values()])
+    )
+    for image, item, position in zip(images, metadata, raw["mm_placeholders"]["image"]):
+        assert item["image_sizes"] == list(image.size)
+        assert item["image_num_tokens"] == [position.get_num_embeds()]
+
+    remote_data = _get_embeds_data("image", metadata, processor)
+    remote = processor(
+        prompt, mm_items=processor.info.parse_mm_data({"image": remote_data})
+    )
+    assert remote["prompt_token_ids"] == raw["prompt_token_ids"]
+    assert remote["mm_placeholders"] == raw["mm_placeholders"]
+    assert "pixel_values" not in remote["mm_kwargs"].get_data()
+
+    mm_config.allow_missing_mm_embeddings = False
+    ordinary_processor = MULTIMODAL_REGISTRY.create_processor(ctx.model_config)
+    with pytest.raises(ValueError, match="should contain the fields"):
+        ordinary_processor.info.parse_mm_data({"image": remote_data})
+
+
+def test_image_metadata_only_chat():
+    """image_embeds inputs preserve K3's native chat tokens and ranges."""
+    config = VllmConfig(
+        model_config=ModelConfig(
+            _MODEL_ID,
+            tokenizer_mode="kimi_k3",
+            trust_remote_code=True,
+            enable_mm_embeds=True,
+            limit_mm_per_prompt={"image": 3},
+            mm_processor_cache_gb=0,
+        ),
+        ec_transfer_config=ECTransferConfig(
+            ec_connector="ECExampleConnector", ec_role="ec_consumer"
+        ),
+        device_config=DeviceConfig(device="cpu"),
+    )
+    images = [_noise_image(31, 47), _noise_image(73, 30), _noise_image(31, 47)]
+    raw_parts = [
+        {"type": "image_url", "image_url": {"url": encode_image_url(image)}}
+        for image in images
+    ]
+    metadata_parts = [
+        {
+            "type": "image_embeds",
+            "image_embeds": {
+                "image_sizes": list(image.size),
+                "image_num_tokens": [count],
+            },
+        }
+        for image, count in zip(images, [4, 6, 4])
+    ]
+    renderer = renderer_from_config(config)
+    try:
+        results = []
+        for parts in (raw_parts, metadata_parts):
+            _, prompts = renderer.render_chat(
+                [[{"role": "user", "content": parts}]], ChatParams()
+            )
+            results.append(prompts[0])
+    finally:
+        renderer.shutdown()
+    raw, remote = results
+    assert remote["prompt_token_ids"] == raw["prompt_token_ids"]
+    assert remote["mm_placeholders"] == raw["mm_placeholders"]
 
 
 @pytest.mark.parametrize(

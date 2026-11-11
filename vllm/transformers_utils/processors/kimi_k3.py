@@ -1,5 +1,7 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
+from typing import Any
+
 from transformers import BaseImageProcessor, BatchFeature, TensorType
 from transformers.processing_utils import ProcessorMixin
 
@@ -42,13 +44,20 @@ class KimiK3Processor(ProcessorMixin):
         if images is not None:
             if not isinstance(images, list):
                 images = [images]
-            medias = [{"type": "image", "image": image} for image in images]
+            medias: list[dict[str, Any]] = [
+                {"type": "image", "image": image} for image in images
+            ]
             mm_inputs = self.image_processor.preprocess(
                 medias,
                 return_tensors=return_tensors,
                 do_rescale=do_rescale,
                 do_normalize=do_normalize,
             )
+            mm_inputs["image_sizes"] = [list(media["image"].size) for media in medias]
+            mm_inputs["image_num_tokens"] = [
+                [self.image_processor.media_tokens_calculator(media)]
+                for media in medias
+            ]
         else:
             mm_inputs = {}
 
