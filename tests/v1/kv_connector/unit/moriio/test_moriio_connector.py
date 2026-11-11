@@ -169,6 +169,7 @@ def _write_producer_scheduler(block_size: int = 1) -> Any:
     scheduler._group_block_sizes = [block_size]
     scheduler.transfer_id_to_request_id = {}
     scheduler._reqs_need_recv = {}
+    scheduler._reqs_need_abort = {}
     scheduler._reqs_need_save = {}
     scheduler._reqs_need_pending_save = {}
     scheduler._req_kv_params = {}
