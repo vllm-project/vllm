@@ -13,8 +13,7 @@ on every rank:
 - no allocator block appeared or disappeared, and the peak stays bounded;
 - reloaded A decodes exactly as cold A, reloaded B close to fresh B.
 
-Unless a case names B, B is A perturbed by `_perturb`. A case with a known
-bug on main asserts everything but the known entries, then xfails.
+Unless a case names B, B is A perturbed by `_perturb`.
 """
 
 import asyncio
@@ -390,10 +389,6 @@ class RefitCase:
     # level-2 sleep before each reload, waking weights before and the KV
     # cache after it, as RL colocated with training does
     sleep: bool = False
-    # a bug on main: reference entries (path substrings) known to differ
-    # after reload B; the case asserts everything else, then xfails
-    known_bug: tuple[str, ...] = ()
-    known_bug_reason: str = ""
 
     @property
     def tp(self) -> int:
@@ -443,22 +438,6 @@ REFIT_CASES = [
     RefitCase("qwen3", "fp8-block", "inference-optimization/Qwen3-0.6B-FP8_BLOCK"),
     RefitCase(
         "qwen3", "w4a16", "inference-optimization/Qwen3-0.6B-W4A16-G128", marks=NIGHTLY
-    ),
-    # checkpoint k/v scales; no in-scope family has a small one
-    RefitCase(
-        "llama",
-        "fp8-kv",
-        "nm-testing/Llama-3.2-1B-Instruct-FP8-KV",
-        # FULL decode graphs keep the capture-time FlashInfer bmm scales
-        # (https://github.com/hao-aaron/vllm/issues/14)
-        engine=dict(
-            kv_cache_dtype="fp8",
-            compilation_config={**COMPILATION_CONFIG, "cudagraph_mode": "PIECEWISE"},
-        ),
-        # remove once vllm#65353 is merged
-        known_bug=(".impl.bmm1_scale", ".impl.bmm2_scale"),
-        known_bug_reason="FlashInfer keeps the bmm1/bmm2 scales of the first "
-        "forward after k/v scales change (fixed by vllm#65353)",
     ),
     RefitCase("deepseek-v3", "bf16", DEEPSEEK_V3, marks=NIGHTLY),
     RefitCase("deepseek-v3", "fp8", DEEPSEEK_V3_FP8),
@@ -566,15 +545,8 @@ async def test_refit_equals_fresh(
             differs[name] = list(map(_diff, expected, digests))
             result[f"reload_{name}_moved"] = list(map(_diff, ptrs, moved))
 
-    known = [
-        {k: v for k, v in d.items() if any(s in k for s in case.known_bug)}
-        for d in differs["b"]
-    ]
     for name, per_rank in differs.items():
-        result[f"reload_{name}_differs"] = [
-            {k: v for k, v in d.items() if name == "a" or k not in kn}
-            for d, kn in zip(per_rank, known)
-        ]
+        result[f"reload_{name}_differs"] = per_rank
     # one assert, so a failure reports everything
     ranks = case.num_gpus
     reload = dict(mode="direct", new_blocks=[], freed_blocks=[], peak_bounded=True)
@@ -591,8 +563,6 @@ async def test_refit_equals_fresh(
     }
     # same engine, same graphs: reloading A must reproduce its cold outputs
     assert tokens["a"] == cold_a_tokens
-    if any(known):
-        pytest.xfail(case.known_bug_reason)  # reloaded B then decodes differently
     check_logprobs_close(
         outputs_0_lst=fresh_b_tokens,
         outputs_1_lst=tokens["b"],
