@@ -198,6 +198,35 @@ from vllm.v1.worker.workspace import lock_workspace, use_workspace_lane
 logger = init_logger(__name__)
 
 
+def _cap_allocator_headroom() -> None:
+    """VLLM_ROCM_MEM_HEADROOM_GIB=X: cap the torch caching allocator so torch +
+    the non-torch memory in use now leave >= X GiB of device memory free.
+    ROCr grows a queue's scratch (and RCCL its buffers) lazily; with the
+    caching allocator holding all but a few GiB, that growth fails (HIP 701,
+    HSA_STATUS_ERROR_OUT_OF_RESOURCES) or stalls. At the cap the allocator
+    frees cached blocks and retries instead."""
+    gib = envs.VLLM_ROCM_MEM_HEADROOM_GIB
+    if gib <= 0 or not current_platform.is_rocm():
+        return
+    torch.accelerator.synchronize()
+    free, total = torch.cuda.mem_get_info()
+    reserved = torch.cuda.memory_reserved()
+    nontorch = total - free - reserved
+    cap = total - nontorch - gib * (1 << 30)
+    frac = max(0.0, min(1.0, cap / total))
+    torch.cuda.set_per_process_memory_fraction(frac)
+    logger.info(
+        "Allocator headroom: torch capped at %.2f GiB (fraction %.4f); "
+        "reserved %.2f, non-torch %.2f, free %.2f GiB, headroom %.1f GiB",
+        cap / (1 << 30),
+        frac,
+        reserved / (1 << 30),
+        nontorch / (1 << 30),
+        free / (1 << 30),
+        gib,
+    )
+
+
 class GPUModelRunner(LoRAModelRunnerMixin):
     def __init__(self, vllm_config: VllmConfig, device: torch.device):
         self.vllm_config = vllm_config
@@ -1189,6 +1218,7 @@ class GPUModelRunner(LoRAModelRunnerMixin):
             # Lock workspace to prevent resizing during execution. A resize after
             # capture frees the static cuda graph buffer.
             lock_workspace()
+            _cap_allocator_headroom()
 
         end_time = time.perf_counter()
         elapsed_time = end_time - start_time
