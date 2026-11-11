@@ -14,13 +14,13 @@ remaining slots are filled with padding.
 
 The sparse-MLA decode kernels (FlashMLA on SM90/SM100, FlashInfer TRTLLM on
 SM100/SM120) are index-driven: each query attends over exactly the slots in its
-index list, with no causal mask (see ``flash_mla_with_kvcache(..., indices=...)``
-and ``_forward_decode``'s "attend only by generated indices"). The existing
-``test_sparse_mla_backends`` suite already validates arbitrary index lists, but
+index list, with no causal mask (see `flash_mla_with_kvcache(..., indices=...)`
+and `_forward_decode`'s "attend only by generated indices"). The existing
+`test_sparse_mla_backends` suite already validates arbitrary index lists, but
 only ones whose entries are <= the query's own position. This test suite specifically
 ensures correctness of the non-causal attention case.
 
-This reuses the harness/helpers of ``test_sparse_mla_backends.py`` (same model
+This reuses the harness/helpers of `test_sparse_mla_backends.py` (same model
 shapes, fp8_ds_mla round-trip, mock indexer, MockSparseMLAAttentionLayer); only
 the index construction differs.
 """
@@ -81,12 +81,12 @@ def _build_dspark_noncausal_indices(
 ) -> torch.Tensor:
     """Per-token sparse indices for the DSpark non-causal block.
 
-    For a request with context length ``ctx`` and a query block of ``q_len``
-    tokens (block positions ``ctx .. ctx+q_len-1``), EVERY block query attends to
-    the same set: the trailing ``window`` context positions plus all block
-    positions, i.e. the contiguous range ``[max(ctx-window,0) .. ctx+q_len-1]``.
+    For a request with context length `ctx` and a query block of `q_len`
+    tokens (block positions `ctx .. ctx+q_len-1`), EVERY block query attends to
+    the same set: the trailing `window` context positions plus all block
+    positions, i.e. the contiguous range `[max(ctx-window,0) .. ctx+q_len-1]`.
     This is non-causal: an early block query's list contains later block tokens
-    (future-pointing). The list is padded to ``topk_width`` with ``-1``.
+    (future-pointing). The list is padded to `topk_width` with `-1`.
     """
     total_query_tokens = sum(query_lens)
     sparse_indices = torch.full(
@@ -117,6 +117,7 @@ def _run_sparse_backend_vs_sdpa(
     block_size: int,
     num_heads: int,
     device: torch.device,
+    monkeypatch: pytest.MonkeyPatch,
     force_future_dominance: bool = False,
     qk_nope_head_dim: int = 128,
     v_head_dim: int = 128,
@@ -126,14 +127,14 @@ def _run_sparse_backend_vs_sdpa(
     """Run a sparse-MLA backend with the given per-token indices and compute a
     dense per-token SDPA reference over the SAME indices.
 
-    Mirrors ``test_sparse_mla_backends.test_sparse_backend_decode_correctness``
-    but with externally-supplied (non-causal) ``sparse_indices``.
+    Mirrors `test_sparse_mla_backends.test_sparse_backend_decode_correctness`
+    but with externally-supplied (non-causal) `sparse_indices`.
 
-    ``num_heads`` selects the kernel's B_TOPK (= padded q-head count): 128 -> 128,
+    `num_heads` selects the kernel's B_TOPK (= padded q-head count): 128 -> 128,
     64 -> 64. The aligned widths (128/256) are multiples of both, so num_heads=64
     exercises the head64 decode path that the SM100 alignment assert guards.
 
-    ``force_future_dominance`` scales the LAST block token's latent KV so it
+    `force_future_dominance` scales the LAST block token's latent KV so it
     dominates the softmax for every query that attends to it. With random data the
     few future block tokens carry negligible attention mass (especially with a wide
     window), so causal and non-causal outputs coincide; this knob makes the
@@ -178,14 +179,22 @@ def _run_sparse_backend_vs_sdpa(
     )
     del model_config.hf_config.index_topk  # Composite configs only nest this field.
     model_config.dtype = dtype
-    model_config.get_num_attention_heads = MethodType(
-        lambda self, parallel_config: num_heads, model_config
+    monkeypatch.setattr(
+        model_config,
+        "get_num_attention_heads",
+        MethodType(lambda self, parallel_config: num_heads, model_config),
     )
-    model_config.get_num_kv_heads = MethodType(
-        lambda self, parallel_config: 1, model_config
+    monkeypatch.setattr(
+        model_config,
+        "get_num_kv_heads",
+        MethodType(lambda self, parallel_config: 1, model_config),
     )
-    model_config.get_head_size = MethodType(lambda self: head_size, model_config)
-    model_config.get_sliding_window = MethodType(lambda self: None, model_config)
+    monkeypatch.setattr(
+        model_config, "get_head_size", MethodType(lambda self: head_size, model_config)
+    )
+    monkeypatch.setattr(
+        model_config, "get_sliding_window", MethodType(lambda self: None, model_config)
+    )
 
     kv_cache_spec = create_standard_kv_cache_spec(vllm_config)
 
@@ -425,7 +434,7 @@ def _skip_if_backend_unavailable(backend_cls, kv_cache_dtype: str, block_size: i
         and kv_cache_dtype != "fp8_ds_mla"
     ):
         pytest.skip("FlashMLA Sparse fp8 only supports fp8_ds_mla kv-cache dtype")
-    if block_size not in backend_cls.get_supported_kernel_block_sizes():
+    if not backend_cls.supports_block_size(block_size):
         pytest.skip(
             f"{backend_cls.get_name()} does not support block_size={block_size}"
         )
@@ -445,6 +454,7 @@ def test_flashinfer_sparse_mla_adaptive_varlen_graph_matches_sdpa(
     dist_init,
     workspace_init,
     query_lens,
+    monkeypatch,
 ):
     """Replay uses device boundaries, including empty padding, despite stale CPU."""
     backend_cls = FlashInferMLASparseTRTLLMBackend
@@ -469,6 +479,7 @@ def test_flashinfer_sparse_mla_adaptive_varlen_graph_matches_sdpa(
         64,
         16,
         device,
+        monkeypatch=monkeypatch,
         qk_nope_head_dim=192,
         v_head_dim=256,
         stale_cpu_query_lens=[4, 4, 4, 4],
@@ -507,6 +518,7 @@ def test_dspark_noncausal_sparse_mla_matches_sdpa(
     kv_cache_dtype,
     block_size,
     num_heads,
+    monkeypatch,
 ):
     """Non-causal (window ∪ block, future-pointing) per-token indices must match
     a dense SDPA reference over the same indices, for both sparse-MLA backends."""
@@ -541,6 +553,7 @@ def test_dspark_noncausal_sparse_mla_matches_sdpa(
         block_size,
         num_heads,
         device,
+        monkeypatch=monkeypatch,
     )
 
     assert backend_output.shape == sdpa_reference.shape
@@ -567,6 +580,7 @@ def test_dspark_noncausal_differs_from_causal(
     backend_cls,
     config_name,
     block_size,
+    monkeypatch,
 ):
     """Differentiation guard: prove the backend genuinely attends to the
     future-pointing indices (not silently applying a causal mask, and not merely
@@ -575,9 +589,9 @@ def test_dspark_noncausal_differs_from_causal(
     With random data the few future block tokens are a negligible fraction of the
     attended set (especially with a wide window), so causal and non-causal outputs
     are numerically indistinguishable -- that is correct physics, not a backend
-    bug. To make the check meaningful we use ``force_future_dominance`` so the last
+    bug. To make the check meaningful we use `force_future_dominance` so the last
     block token dominates the softmax: the backend must then match the non-causal
-    reference and diverge sharply from the causal one. bf16 (``auto``) suffices;
+    reference and diverge sharply from the causal one. bf16 (`auto`) suffices;
     the property is dtype-independent and fp8 correctness is covered above.
     """
     _skip_if_backend_unavailable(backend_cls, "auto", block_size)
@@ -600,6 +614,7 @@ def test_dspark_noncausal_differs_from_causal(
         block_size,
         128,
         device,
+        monkeypatch=monkeypatch,
         force_future_dominance=True,
     )
 

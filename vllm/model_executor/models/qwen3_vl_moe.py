@@ -56,6 +56,7 @@ from .qwen3_vl import (
     Qwen3VLForConditionalGeneration,
     Qwen3VLMultiModalProcessor,
     Qwen3VLProcessingInfo,
+    mrope_positions_factor,
 )
 from .utils import StageMissingLayer, maybe_prefix
 
@@ -73,6 +74,7 @@ class Qwen3VLMoeDecoderLayer(Qwen3MoeDecoderLayer):
             vllm_config=vllm_config,
             prefix=prefix,
             is_fused_checkpoint_transposed=True,
+            mrope_positions_factor=mrope_positions_factor(vllm_config),
         )
 
 
@@ -89,6 +91,8 @@ class Qwen3VLMoeDecoderLayer(Qwen3MoeDecoderLayer):
     }
 )
 class Qwen3MoeLLMModel(Qwen3MoeModel):
+    supports_aux_hidden_states_over_pp = True
+
     def __init__(
         self,
         *,
@@ -146,7 +150,11 @@ class Qwen3MoeLLMModel(Qwen3MoeModel):
 
         if not get_pp_group().is_last_rank:
             return IntermediateTensors(
-                {"hidden_states": hidden_states, "residual": residual}
+                {
+                    "hidden_states": hidden_states,
+                    "residual": residual,
+                    **self.pack_local_aux_hidden_states(aux_hidden_states),
+                }
             )
         hidden_states, _ = self.norm(hidden_states, residual)
 

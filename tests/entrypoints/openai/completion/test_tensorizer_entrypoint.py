@@ -98,6 +98,9 @@ async def test_single_completion(client: openai.AsyncOpenAI, model_name: str):
     assert len(completion.choices) == 1
     assert len(completion.choices[0].text) >= 5
     assert completion.choices[0].finish_reason == "length"
-    assert completion.usage == openai.types.CompletionUsage(
-        completion_tokens=5, prompt_tokens=6, total_tokens=11
-    )
+    # Compare the counts only: the Rust frontend also reports
+    # completion_tokens_details (reasoning_tokens=0), which Python omits.
+    assert completion.usage is not None
+    assert completion.usage.completion_tokens == 5
+    assert completion.usage.prompt_tokens == 6
+    assert completion.usage.total_tokens == 11

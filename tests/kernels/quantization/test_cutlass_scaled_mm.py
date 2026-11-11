@@ -586,6 +586,13 @@ def test_cutlass_subset():
     scale_a = torch.randn((1, 1), device="cuda", dtype=torch.float32) / 10
     scale_b = torch.randn((1, 1), device="cuda", dtype=torch.float32) / 10
 
+    if capability_int >= 90:
+        with pytest.raises(
+            RuntimeError, match="requires packed operands; A is not packed"
+        ):
+            ops.cutlass_scaled_mm(a, b, scale_a, scale_b, out_dtype=torch.bfloat16)
+        return
+
     out = ops.cutlass_scaled_mm(a, b, scale_a, scale_b, out_dtype=torch.bfloat16)
     baseline = baseline_scaled_mm(a, b, scale_a, scale_b, out_dtype=torch.bfloat16)
 

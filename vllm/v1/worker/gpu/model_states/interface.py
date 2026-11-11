@@ -139,16 +139,18 @@ class ModelState(ABC):
         block_tables: BlockTables,
         attn_groups: list[list[AttentionGroup]],
         kv_cache_config: KVCacheConfig,
+        stream: torch.cuda.Stream | None = None,
     ) -> None:
-        """Capture the CUDA graphs this state runs inside the model's forward."""
+        """Capture the CUDA graphs this state runs inside the model's forward,
+        on `stream`: the model graphs' capture stream."""
         return None
 
     def get_additional_cg_support(self) -> tuple[AttentionCGSupport, str | None]:
         """Cudagraph support of attention groups this ModelState builds outside
-        ``init_attn_backend`` (e.g. encoder-only layers).
+        `init_attn_backend` (e.g. encoder-only layers).
 
         Returns the minimum support level and its backend name. The default of
-        ``ALWAYS`` imposes no extra constraint on the runner's cudagraph mode.
+        `ALWAYS` imposes no extra constraint on the runner's cudagraph mode.
         """
         return AttentionCGSupport.ALWAYS, None
 
@@ -179,7 +181,7 @@ class ModelState(ABC):
         input_batch: InputBatch,
         req_states: RequestState,
     ) -> torch.Tensor | None:
-        """Prepare the ``inputs_embeds`` tensor for the current forward pass."""
+        """Prepare the `inputs_embeds` tensor for the current forward pass."""
         raise NotImplementedError
 
     def dummy_inputs_embeds(self, num_tokens: int) -> torch.Tensor | None:
@@ -246,10 +248,21 @@ class ModelState(ABC):
         """Wrap or replace the default sampler.
 
         Called after model loading with the already-constructed base
-        ``Sampler``.  Return ``None`` to keep the defaults, or
-        ``(sampler, rejection_sampler | None)`` to override.
+        `Sampler`.  Return `None` to keep the defaults, or
+        `(sampler, rejection_sampler | None)` to override.
         """
         return None
+
+    def compute_sample_logits(self, hidden_states: torch.Tensor) -> torch.Tensor:
+        """Project the sampled hidden states to the logits fed to the sampler."""
+        return cast(Any, self.model).compute_logits(hidden_states)
+
+    def dummy_sampler_run(self, sampler: Any, hidden_states: torch.Tensor) -> bool:
+        """Run a model-specific sampler profiling pass.
+
+        Return `True` to skip the default dummy sampler run.
+        """
+        return False
 
     num_new_sampled_tokens_per_step: int = 1
     """New tokens sampled on each decode step 

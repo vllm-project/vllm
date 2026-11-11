@@ -23,7 +23,6 @@ from xgrammar.structural_tag import (
     TagFormat,
 )
 
-from vllm.entrypoints.chat_utils import make_tool_call_id
 from vllm.entrypoints.generate.base.protocol import (
     DeltaFunctionCall,
     DeltaMessage,
@@ -43,6 +42,7 @@ from vllm.entrypoints.openai.responses.protocol import ResponsesRequest
 from vllm.logger import init_logger
 from vllm.parser.abstract_parser import DelegatingParser, structured_outputs_to_format
 from vllm.reasoning.gptoss_reasoning_parser import GptOssReasoningParser
+from vllm.renderers.chat_utils import make_tool_call_id
 from vllm.tool_parsers.gptoss_tool_parser import GptOssToolParser
 from vllm.tool_parsers.structural_tag_registry import (
     SimplifiedToolChoice,
@@ -185,7 +185,7 @@ class HarmonyParser(DelegatingParser):
     ) -> tuple[str | None, str | None, list[FunctionCall] | None]:
         """Parse Harmony output from token IDs.
 
-        Tool calls are always extracted regardless of ``enable_auto_tools``.
+        Tool calls are always extracted regardless of `enable_auto_tools`.
         Callers must decide whether to surface them.
         """
         result = self.process_chunk(model_output_token_ids)

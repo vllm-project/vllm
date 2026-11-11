@@ -431,6 +431,7 @@ to measure a concurrent serving-style workload.
 | --------- | ------------- | ------------- |
 | `vllm` / `openai` | `/v1/completions` | OpenAI-compatible completions (streaming) |
 | `openai-chat` | `/v1/chat/completions` | OpenAI-compatible chat completions (streaming, multimodal) |
+| `openai-responses` | `/v1/responses` | OpenAI Responses API (streaming; reasoning deltas count toward TTFT and ITL) |
 
 ### Embedding / Pooling
 
@@ -486,7 +487,7 @@ Run `vllm-bench --help` for the authoritative list. Grouped reference below.
 
 | Flag | Default | Description |
 | ------ | --------- | ------------- |
-| `--backend` | `openai` | Backend type (`vllm`, `openai`, `openai-chat`, `openai-embeddings`, `openai-embeddings-chat`, `vllm-pooling`, `vllm-rerank`) |
+| `--backend` | `openai` | Backend type (`vllm`, `openai`, `openai-chat`, `openai-responses`, `openai-embeddings`, `openai-embeddings-chat`, `vllm-pooling`, `vllm-rerank`) |
 | `--base-url` | — | Server base URL (overrides `--host`/`--port`) |
 | `--host` | `127.0.0.1` | Server host |
 | `--port` | `8000` | Server port |
@@ -515,7 +516,7 @@ Run `vllm-bench --help` for the authoritative list. Grouped reference below.
 | Flag | Default | Description |
 | ------ | --------- | ------------- |
 | `--dataset-name` | `random` | Dataset type (`random`, `random-mm`, `sharegpt`, `speed-bench`, `hf`) |
-| `--dataset-path` | — | Path to dataset file (`sharegpt` auto-downloads when omitted) |
+| `--dataset-path` | — | Path to dataset file, or HF dataset ID for `hf` (`sharegpt` auto-downloads when omitted; rejected with synthetic datasets such as `random`) |
 | `--num-prompts` | `1000` | Number of prompts to generate (conversations in multi-turn mode) |
 | `--max-model-len` | — | Filter out requests where `prompt_len + output_len` exceeds this context length |
 | `--input-len` | — | Override input length (general) |
@@ -576,7 +577,7 @@ Run `vllm-bench --help` for the authoritative list. Grouped reference below.
 | `--presence-penalty` | Presence penalty |
 | `--repetition-penalty` | Repetition penalty |
 
-Merged into the request body. Only effective with generation backends (`vllm`, `openai`, `openai-chat`); ignored by pooling/embedding backends.
+Merged into the request body. Only effective with generation backends (`vllm`, `openai`, `openai-chat`, `openai-responses`); ignored by pooling/embedding backends.
 
 </details>
 
@@ -797,6 +798,7 @@ src/
 │   ├── streaming.rs         # SSE stream parser with speculative JSON parse
 │   ├── openai_completions.rs # /v1/completions backend
 │   ├── openai_chat.rs       # /v1/chat/completions backend
+│   ├── openai_responses.rs  # /v1/responses backend
 │   └── pooling.rs           # Embedding/pooling/rerank backends (non-streaming)
 ├── datasets/
 │   ├── mod.rs               # SampleRequest, ConversationTurn, MultiTurnConversation types
@@ -828,7 +830,7 @@ src/
 - **Enum dispatch** — backend variants instead of trait objects (avoids async trait-object limitations)
 - **Typed SSE deserialization** — `CompletionChunk`/`ChatChunk` structs skip unused JSON fields (cheaper than `serde_json::Value`)
 - **Speculative JSON parse** — SSE handler uses `serde_json::value::RawValue` to detect complete JSON before `\n\n` arrives, improving TTFT/ITL accuracy when TCP segments split
-- **Connection error retry** — automatic retry with backoff on connection reset/timeout/refused (up to 3 attempts)
+- **Measured request semantics** — each workload request is attempted once, matching Python; connection failures are reported rather than retried
 - **Tokenizer verification cache** — server-side token-length verification is cached per model+server pair
 
 ### Behavioral parity with Python
