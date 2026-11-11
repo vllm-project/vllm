@@ -227,10 +227,16 @@ class DeepSeekV3ToolParser(ToolParser):
                         else None
                     )
                     if not matches:
+                        logger.debug("tool call end without parsable arguments")
                         return None
                     full_arguments = matches.group("function_arguments")
                     streamed = self.streamed_args_for_tool[self.current_tool_id]
                     if not full_arguments.startswith(streamed):
+                        logger.debug(
+                            "streamed arguments %s are not a prefix of %s",
+                            streamed,
+                            full_arguments,
+                        )
                         return None
                     diff = full_arguments[len(streamed) :]
                     if not diff:
