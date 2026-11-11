@@ -51,7 +51,7 @@ from vllm.model_executor.layers.quantization.utils.quant_utils import (
     kMxfp4Static,
     kMxfp8Static,
 )
-from vllm.model_executor.models.qwen2_moe import Qwen2MoeMLP
+from vllm.model_executor.models.qwen3_moe import Qwen3MoeMLP
 from vllm.platforms import current_platform
 from vllm.utils.deep_gemm import _import_deep_gemm
 from vllm.utils.multi_stream_utils import maybe_execute_in_parallel
@@ -362,7 +362,7 @@ class Qwen4ExpMegaMoeBlock(nn.Module):
             quant_config=None,
             prefix=f"{prefix}.shared_expert_gate",
         )
-        self.shared_expert = Qwen2MoeMLP(
+        self.shared_expert = Qwen3MoeMLP(
             hidden_size=config.hidden_size,
             intermediate_size=config.shared_expert_intermediate_size,
             hidden_act=config.hidden_act,
