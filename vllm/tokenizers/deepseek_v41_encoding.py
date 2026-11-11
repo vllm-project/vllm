@@ -502,7 +502,7 @@ def render_message(
                 tool_calls=tc_content,
             )
     else:
-        raise NotImplementedError(f"Unknown role: {role}")
+        raise ValueError(f"Invalid role: {role}")
 
     # Historical assistant separators are needed even without a generation prompt.
     if is_last and not add_generation_prompt:
