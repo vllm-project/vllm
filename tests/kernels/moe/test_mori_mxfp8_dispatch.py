@@ -160,7 +160,7 @@ DSV41_FLASH_QUANT_CONFIG = {
 
 def _dsv41_flash_experts_quant_config(monkeypatch, moe_activation):
     """The quant config DeepSeek-V4.1-Flash's routed experts build, with
-    quantization_config.moe.activation set to ``moe_activation`` (or unset)."""
+    quantization_config.moe.activation set to `moe_activation` (or unset)."""
     from vllm.config.quantization import QuantizationConfigArgs
     from vllm.model_executor.layers.fused_moe import RoutedExperts
     from vllm.model_executor.layers.fused_moe.experts.rocm_aiter_moe import (
