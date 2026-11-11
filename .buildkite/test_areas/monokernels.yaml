@@ -35,9 +35,13 @@ steps:
   - vllm/models/deepseek_v41/nvidia/model_state.py
   - tests/models/test_dsv41_mono_numerics.py
   - tests/models/test_dsv41_mono_layers.py
+  - tests/models/mono_reference.py
+  - tests/kernels/models/amd/test_mono_primitives.py
   commands:
   - pytest -v -s tests/models/test_dsv41_mono_numerics.py
   - pytest -v -s tests/models/test_dsv41_mono_layers.py
+  # The gfx950 arm of the device helpers. The gfx942 arm is on the MI300 step.
+  - pytest -v -s tests/kernels/models/amd/test_mono_primitives.py
 
 - label: ':amd: (MI355) DeepSeek-V4.1 Mono Decode Numerics TP8'
   key: dsv41-mono-decode-numerics-tp8-amd
@@ -105,6 +109,8 @@ steps:
   - tests/kernels/models/amd/test_dsv41_gfx942_fused_markov.py
   - tests/kernels/models/amd/test_dsv41_gfx942_draft_lm_head.py
   - tests/kernels/models/amd/test_dsv41_mono_gfx942.py
+  - tests/kernels/models/amd/test_mono_primitives.py
+  - tests/models/mono_reference.py
   commands:
   - >-
     pytest -v -s
@@ -115,6 +121,7 @@ steps:
     tests/kernels/models/amd/test_dsv41_gfx942_fused_markov.py
     tests/kernels/models/amd/test_dsv41_gfx942_draft_lm_head.py
     tests/kernels/models/amd/test_dsv41_mono_gfx942.py
+    tests/kernels/models/amd/test_mono_primitives.py
 
 - label: ':amd: (MI355) DeepSeek-V4-Pro Mono Decode Numerics'
   key: dsv4-mono-decode-numerics-amd
