@@ -62,7 +62,7 @@ def test_split_is_exact_across_normal_exponents():
 
 def test_split_rejects_non_finite():
     """ValueError rather than assert: the caller downgrades to the fp32 path
-    instead of failing model load, and this must survive ``python -O``."""
+    instead of failing model load, and this must survive `python -O`."""
     for bad in (float("inf"), float("-inf"), float("nan")):
         with pytest.raises(ValueError):
             rocm_bf16x3.split_bf16x3(torch.full((2, 4), bad, dtype=torch.float32))

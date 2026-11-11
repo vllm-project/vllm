@@ -58,6 +58,7 @@ from vllm.model_executor.layers.vocab_parallel_embedding import (
     ParallelLMHead,
     VocabParallelEmbedding,
 )
+from vllm.model_executor.model_loader.reload import weight_update_active
 from vllm.model_executor.models.interfaces import (
     MixtureOfExperts,
     SupportsLoRA,
@@ -69,7 +70,6 @@ from vllm.model_executor.models.utils import (
     WeightsMapper,
     extract_layer_index,
     is_pp_missing_parameter,
-    make_empty_intermediate_tensors_factory,
     make_layers,
     maybe_prefix,
     skip_spec_layers,
@@ -2089,8 +2089,18 @@ class Step5Model(nn.Module):
         else:
             self.norm = PPMissingLayer()
 
-        self.make_empty_intermediate_tensors = make_empty_intermediate_tensors_factory(
-            ["hidden_states"], config.hidden_size
+    def make_empty_intermediate_tensors(
+        self, batch_size: int, dtype: torch.dtype, device: torch.device
+    ) -> IntermediateTensors:
+        # The residual stream stays FP32 across pipeline stages.
+        if self.fp32_residual_connection:
+            dtype = torch.float32
+        return IntermediateTensors(
+            {
+                "hidden_states": torch.zeros(
+                    (batch_size, self.config.hidden_size), dtype=dtype, device=device
+                )
+            }
         )
 
     def embed_input_ids(self, input_ids: torch.Tensor) -> torch.Tensor:
@@ -2427,11 +2437,7 @@ class Step5ForCausalLM(nn.Module, SupportsPP, MixtureOfExperts, SupportsLoRA):
             moe.experts.update_expert_map()
 
     def load_weights(self, weights: Iterable[tuple[str, torch.Tensor]]) -> set[str]:
-        from vllm.model_executor.model_loader.mtp_validation import (
-            is_mtp_completeness_check_enabled,
-        )
-
-        validate_completeness = is_mtp_completeness_check_enabled()
+        validate_completeness = not weight_update_active()
         if validate_completeness:
             _reset_fused_qkv_indexer_load_state(self.model)
         skip_prefixes = ["vision_model."]

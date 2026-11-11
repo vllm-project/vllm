@@ -511,18 +511,21 @@ def test_mori_scheduler_routes_lookup_and_clear_to_all_ranks(socket_dir, close_r
         assert scheduler.lookup([keys[1], "legacy-key", keys[0]]) == [True] * 3
         if close_rank is not None:
             servers[close_rank].close()
-            assert scheduler.lookup(keys) == [rank != close_rank for rank in range(2)]
+            assert scheduler.lookup(keys) == [
+                None if rank == close_rank else True for rank in range(2)
+            ]
             assert scheduler.last_lookup_diagnostics["unavailable_ranks"] == (
                 topology.all_namespaces()[close_rank],
             )
-            assert scheduler.last_lookup_diagnostics["missing_keys"] == (
-                keys[close_rank],
-            )
+            assert scheduler.last_lookup_diagnostics["missing_keys"] == ()
         assert scheduler.clear() is (close_rank is None)
         for rank, client in enumerate(clients):
             if rank != close_rank:
                 assert not client.keys
-        assert scheduler.lookup(keys + ["legacy-key"]) == [False] * 3
+        assert scheduler.lookup(keys + ["legacy-key"]) == [
+            *(None if rank == close_rank else False for rank in range(2)),
+            False,
+        ]
     finally:
         for server in servers:
             server.close()
@@ -547,7 +550,7 @@ def test_single_rank_lookup_returns_fresh_results(socket_dir):
         resident.add(keys[-1])
         assert scheduler.lookup(keys) == [False, False, True]
         server.close()
-        assert scheduler.lookup(keys) == [False] * len(keys)
+        assert scheduler.lookup(keys) == [None] * len(keys)
         assert scheduler.last_lookup_diagnostics["unavailable_ranks"] == (
             topology.local_namespace,
         )
@@ -676,6 +679,40 @@ def test_timeout_does_not_count_time_waiting_for_a_worker(blocked_transfer):
     release.set()
     assert finished.wait(5)
     assert handle.poll(queued).status is TransferJobStatus.COMPLETED
+
+
+@pytest.mark.parametrize("has_close", [False, True])
+def test_worker_close_releases_mori(monkeypatch, socket_dir, has_close):
+    """MORI builds without close() only get a final flush."""
+    monkeypatch.setitem(
+        sys.modules,
+        "mori.cpp",
+        SimpleNamespace(MemoryLocationType=SimpleNamespace(CPU=0, GPU=1)),
+    )
+    calls: list[str] = []
+
+    def flush() -> bool:
+        calls.append("flush")
+        return True
+
+    client = SimpleNamespace(
+        register_memory=lambda *a: True,
+        deregister_memory=lambda ptr: calls.append("deregister_memory"),
+        batch_exists=lambda keys: [True] * len(keys),
+        flush=flush,
+    )
+    if has_close:
+        client.close = lambda: calls.append("close")
+    handle = _MoriWorkerHandle(client, "release", RankTopology(), socket_dir, 1, 5)
+    handle.register_buffers({"layer0": torch.zeros(16, dtype=torch.uint8)})
+    scheduler = _MoriSchedulerHandle("release", RankTopology(), socket_dir)
+    try:
+        assert scheduler.lookup(["k"]) == [True]
+        handle.close()
+        assert scheduler.lookup(["k"]) == [None]
+    finally:
+        scheduler.close()
+    assert calls == ["deregister_memory", "close" if has_close else "flush"]
 
 
 def test_lookup_server_close_does_not_unlink_a_replacement(socket_dir):
