@@ -3,18 +3,10 @@
 import numpy as np
 import torch
 
-from vllm.platforms import PlatformEnum
 from vllm.triton_utils import tl, triton
-from vllm.triton_utils.platform_config import select_platform_config
 from vllm.utils.math_utils import cdiv
 from vllm.utils.torch_utils import PIN_MEMORY, async_tensor_h2d
 from vllm.v1.worker.gpu.input_batch import InputBatch
-
-# Smaller Triton-CPU tiles avoid quadratic IR growth when unpacking the mask.
-GRAMMAR_BITMASK_BLOCK_SIZE = select_platform_config(
-    default=8192,
-    overrides={(PlatformEnum.CPU, None): 1024},
-)
 
 
 class StructuredOutputsWorker:
@@ -77,7 +69,7 @@ class StructuredOutputsWorker:
         num_masks = bitmask.shape[0]
         assert num_masks == len(mapping)
         vocab_size = logits.shape[-1]
-        grid = (num_masks, triton.cdiv(vocab_size, GRAMMAR_BITMASK_BLOCK_SIZE))
+        grid = lambda meta: (num_masks, triton.cdiv(vocab_size, meta["BLOCK_SIZE"]))
         _apply_grammar_bitmask_kernel[grid](
             logits,
             logits.stride(0),
@@ -87,7 +79,6 @@ class StructuredOutputsWorker:
             bitmask.stride(0),
             vocab_size,
             MASK_STRIDE=self.mask_stride,
-            BLOCK_SIZE=GRAMMAR_BITMASK_BLOCK_SIZE,
         )
 
         # Ensure the copy stream waits for the device tensors to finish being used
@@ -97,6 +88,7 @@ class StructuredOutputsWorker:
 
 # Adapted from
 # https://github.com/mlc-ai/xgrammar/blob/main/python/xgrammar/kernels/apply_token_bitmask_inplace_triton.py
+@triton.heuristics({"BLOCK_SIZE": lambda args: 8192})
 @triton.jit
 def _apply_grammar_bitmask_kernel(
     logits_ptr,

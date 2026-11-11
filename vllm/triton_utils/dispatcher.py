@@ -17,6 +17,18 @@ implementation that is itself a Triton kernel is swapped in directly, so
 outer kernels keep compiling and launchable kernels run natively. Only
 non-Triton implementations (plain callables, grid-remapping launchers)
 are wrapped in a launch adapter.
+
+A platform that runs a core kernel as is, but with other launch values
+(e.g. a smaller `BLOCK_SIZE`), overrides the values the kernel declares
+with `@triton.heuristics`:
+
+    from vllm.triton_utils.dispatcher import override_kernel_heuristics
+
+    override_kernel_heuristics({
+        "vllm.v1.worker.gpu.sample.penalties._penalties_kernel": {
+            "BLOCK_SIZE": 1024,
+        },
+    })
 """
 
 import importlib
@@ -265,3 +277,38 @@ def register_kernels(overrides: Mapping[str, Callable[..., Any]]) -> None:
     for name, host, attr, _, replacement in resolved:
         setattr(host, attr, replacement)
         logger.debug("Registered kernel override %s", name)
+
+
+def override_kernel_heuristics(overrides: Mapping[str, Mapping[str, Any]]) -> None:
+    """Override the `triton.heuristics` values of core Triton kernels.
+
+    Core kernels declare their tunable launch values, such as `BLOCK_SIZE`,
+    with `@triton.heuristics` and defaults chosen for CUDA. Platforms call
+    this from `Platform.register_triton_kernel_overrides` to launch the
+    same kernels with their own values.
+
+    Args:
+        overrides: Mapping from fully qualified kernel name (as in
+            `register_kernels`) to the heuristics to override. Each
+            heuristic maps to the value to launch with or, as in
+            `triton.heuristics`, to a function of the launch arguments.
+
+    Raises:
+        ValueError: If a kernel does not declare one of the heuristics.
+
+    """
+    for name, heuristics in overrides.items():
+        host, attr = _resolve_kernel(name)
+        for heuristic, value in heuristics.items():
+            # Stacked `@triton.heuristics` decorators nest one wrapper each.
+            layer = getattr(host, attr)
+            while heuristic not in getattr(layer, "values", {}):
+                layer = getattr(layer, "fn", None)
+                if layer is None:
+                    raise ValueError(
+                        f"Kernel {name!r} declares no heuristic {heuristic!r}"
+                    )
+            layer.values[heuristic] = (
+                value if callable(value) else lambda args, value=value: value
+            )
+        logger.debug("Overrode kernel heuristics %s", name)
