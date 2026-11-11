@@ -692,6 +692,20 @@ Some models are supported only via the [Transformers modeling backend](#transfor
     ships one MTP layer, enabled with
     `--speculative-config '{"method":"mtp","num_speculative_tokens":1}'`.
 
+!!! note "ERNIE 4.5 VL pipeline parallelism"
+    `baidu/ERNIE-4.5-VL-28B-A3B-PT` supports text, image, and video requests
+    with pipeline parallelism. To split the model across two GPUs in eager mode:
+
+    ```bash
+    vllm serve baidu/ERNIE-4.5-VL-28B-A3B-PT \
+        --revision refs/pr/17 --trust-remote-code \
+        --pipeline-parallel-size 2 --max-model-len 8192 --enforce-eager
+    ```
+
+    The default pipeline parallel size is 1. See
+    [parallelism and scaling](../serving/parallelism_scaling.md) for GPU allocation
+    and combining pipeline parallelism with tensor parallelism.
+
 !!! note
     `Gemma3nForConditionalGeneration` is only supported on V1 due to shared KV caching and it depends on `timm>=1.0.17` to make use of its
     MobileNet-v5 vision backbone.
