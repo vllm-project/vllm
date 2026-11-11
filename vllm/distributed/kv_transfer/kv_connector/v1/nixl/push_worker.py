@@ -77,6 +77,8 @@ logger = init_logger(__name__)
 # main thread (start_load_kv / get_finished). Smaller -> lower latency
 # while active, slightly more CPU.
 _PUSH_WRITER_POLL_INTERVAL_MS = 1.0
+# Bound on remembered released request ids, to drop their late registrations.
+_MAX_RELEASED_PUSH_IDS = 65536
 
 
 class NixlPushConnectorWorker(NixlBaseConnectorWorker):
@@ -115,6 +117,10 @@ class NixlPushConnectorWorker(NixlBaseConnectorWorker):
         # P-side: D registrations received via NIXL notification that have
         # not yet been matched with a finished P request.
         self._pending_d_registrations: dict[ReqId, dict[str, Any]] = {}
+        # Requests whose blocks were released, and requests being submitted
+        # (counted as in flight before their handles exist).
+        self._released_pushes: dict[ReqId, None] = {}
+        self._submitting_pushes: set[ReqId] = set()
 
         # Cross-thread channels.
         self._reg_send_inbox: queue.Queue[tuple[str, dict[str, Any]]] = queue.Queue()
@@ -240,12 +246,6 @@ class NixlPushConnectorWorker(NixlBaseConnectorWorker):
                 self._reg_send_inbox.put((req_id, reg_data))
             self._push_writer_wake.set()
 
-        # --- P-side: newly finished blocks awaiting a D registration match ---
-        if metadata.push_finished_blocks:
-            for req_id, block_ids in metadata.push_finished_blocks.items():
-                self._finished_blocks_inbox.put((req_id, block_ids))
-            self._push_writer_wake.set()
-
         # Batch + lease tracking (same as pull).
         for req_id in metadata.reqs_in_batch:
             self._reqs_to_process.add(req_id)
@@ -265,6 +265,13 @@ class NixlPushConnectorWorker(NixlBaseConnectorWorker):
 
         # Heartbeats still leave from the main thread (base worker behaviour).
         self._send_heartbeats(metadata)
+
+        # --- P-side: newly finished blocks awaiting a D registration match ---
+        # After lease tracking, so the writer can tell a released request.
+        if metadata.push_finished_blocks:
+            for req_id, block_ids in metadata.push_finished_blocks.items():
+                self._finished_blocks_inbox.put((req_id, block_ids))
+            self._push_writer_wake.set()
 
     # --- Writer thread ------------------------------------------------- #
 
@@ -312,6 +319,9 @@ class NixlPushConnectorWorker(NixlBaseConnectorWorker):
                         break
                     self._push_finished_blocks.pop(rid, None)
                     self._pending_d_registrations.pop(rid, None)
+                    self._released_pushes[rid] = None
+                    if len(self._released_pushes) > _MAX_RELEASED_PUSH_IDS:
+                        del self._released_pushes[next(iter(self._released_pushes))]
 
                 # 4. NIXL notifs: route PUSH_REG; forward the rest.
                 for notifs in self.nixl_wrapper.get_new_notifs().values():
@@ -467,7 +477,37 @@ class NixlPushConnectorWorker(NixlBaseConnectorWorker):
 
     # --- WRITE transfer logic (writer thread) ------------------------- #
 
+    def _reap_expired_send_leases(self, done_sending: set[str]) -> None:
+        with self._sending_transfers_lock:
+            super()._reap_expired_send_leases(done_sending)
+
+    def _has_inflight_send(self, req_id: str) -> bool:
+        # Called by the reaper above, under ``_sending_transfers_lock``.
+        return req_id in self._submitting_pushes or bool(
+            self._sending_transfers.get(req_id)
+        )
+
     def _do_start_push_kv(
+        self,
+        request_id: str,
+        local_block_ids: BlockIds,
+        registration_data: dict[str, Any],
+    ) -> None:
+        with self._sending_transfers_lock:
+            if request_id in self._released_pushes or (
+                request_id not in self._reqs_to_send
+                and request_id not in self._reqs_to_process
+            ):
+                logger.warning("Not pushing KV for %s: already released.", request_id)
+                return
+            self._submitting_pushes.add(request_id)
+        try:
+            self._start_push_kv(request_id, local_block_ids, registration_data)
+        finally:
+            with self._sending_transfers_lock:
+                self._submitting_pushes.discard(request_id)
+
+    def _start_push_kv(
         self,
         request_id: str,
         local_block_ids: BlockIds,

@@ -71,6 +71,7 @@ from vllm.distributed.nixl_utils import (
     NixlWrapper,
     check_nixl_version,
     nixl_agent_config,
+    nixl_thread_sync_t,
 )
 from vllm.distributed.parallel_state import (
     get_pcp_group,
@@ -786,16 +787,26 @@ class NixlBaseConnectorWorker:
         # initialization with "mlx5dv_devx_alloc_uar" errors.
         # Ref: https://network.nvidia.com/files/doc-2020/ethernet-adapters-programming-manual.pdf#page=63
         num_threads = vllm_config.kv_transfer_config.get_from_extra_config(
-            "num_threads", 4
+            "num_threads", 0 if self._TRANSFER_MODE == "push" else 4
+        )
+        # Push calls the agent from the writer, engine and handshake threads.
+        sync_params = (
+            {"sync_mode": nixl_thread_sync_t.NIXL_THREAD_SYNC_RW}
+            if self._TRANSFER_MODE == "push" and nixl_thread_sync_t is not None
+            else {}
         )
         if nixl_agent_config is None:
             config = None
         else:
             # Enable telemetry by default for NIXL 0.7.1 and above.
             config = (
-                nixl_agent_config(backends=self.nixl_backends, capture_telemetry=True)
+                nixl_agent_config(
+                    backends=self.nixl_backends, capture_telemetry=True, **sync_params
+                )
                 if len(non_ucx_backends) > 0
-                else nixl_agent_config(num_threads=num_threads, capture_telemetry=True)
+                else nixl_agent_config(
+                    num_threads=num_threads, capture_telemetry=True, **sync_params
+                )
             )
 
         # Extra UCX backend init params, e.g. {"ucx_error_handling_mode": "none"}.
@@ -807,7 +818,9 @@ class NixlBaseConnectorWorker:
             bool(ucx_backend_params) and "UCX" in self.nixl_backends
         )
         if sleep_mode or explicit_backends:
-            config = nixl_agent_config(backends=[], capture_telemetry=True)
+            config = nixl_agent_config(
+                backends=[], capture_telemetry=True, **sync_params
+            )
         self.nixl_wrapper = nixl_wrapper_cls(str(uuid.uuid4()), config)
         if sleep_mode:
             # Keep slept pages unpinned, for this agent only; UCX_* env vars win.
@@ -3417,8 +3430,11 @@ class NixlBaseConnectorWorker:
         if not self._reqs_to_send:
             return
         now = time.perf_counter()
+        # Blocks still being sent stay leased until their transfer ends.
         expired = [
-            req_id for req_id, expires in self._reqs_to_send.items() if now >= expires
+            req_id
+            for req_id, expires in self._reqs_to_send.items()
+            if now >= expires and not self._has_inflight_send(req_id)
         ]
         for req_id in expired:
             count = self.consumer_notification_counts_by_req.pop(req_id, 0)
@@ -3433,6 +3449,10 @@ class NixlBaseConnectorWorker:
             self._reqs_to_process.remove(req_id)
             del self._reqs_to_send[req_id]
             done_sending.add(req_id)
+
+    def _has_inflight_send(self, req_id: str) -> bool:
+        """Whether this worker is still sending the request's KV blocks."""
+        return False
 
     def _handle_heartbeat(self, payload: str) -> None:
         """Extend leases for requests referenced in a heartbeat.
@@ -4014,7 +4034,8 @@ class NixlBaseConnectorWorker:
         # of remote engines is registered all at once (adding a background cleanup
         # thread wouldnt help either).
         # If that scenario is plausible, we can follow up with an LRU eviction policy.
-        if self._engine_ttl <= 0:
+        # Push does not track its WRITEs per peer, so a peer is never idle here.
+        if self._engine_ttl <= 0 or self._TRANSFER_MODE == "push":
             return
 
         now = time.perf_counter()

@@ -399,6 +399,8 @@ class _StubWriterWorker(NixlPushConnectorWorker):
         w._engine_ttl = 0.0
         w._engine_last_active = {}
         w._engine_by_address = {}
+        w._released_pushes = {}
+        w._submitting_pushes = set()
 
         # Track _do_start_push_kv invocations.
         calls: list[tuple[str, Any, dict[str, Any]]] = []
@@ -676,7 +678,7 @@ class TestPushWriterStartLoadKv:
 # handshake resolves, then re-drives via ``_deferred_push_inbox``. These call
 # the *real* ``_do_start_push_kv`` (the stub overrides it for matching tests).
 def _real_do_start_push_kv(w, *args):
-    return NixlPushConnectorWorker._do_start_push_kv(w, *args)
+    return NixlPushConnectorWorker._start_push_kv(w, *args)
 
 
 def test_do_start_push_kv_defers_then_writes_when_handshake_ready():
@@ -818,10 +820,9 @@ def test_active_push_refreshes_engine_last_active():
     assert w.writes == ["req"]
 
 
-def test_stale_engine_evicted_on_push():
-    """A push drives `_ensure_handshake` -> `_evict_stale_engines`, so a D
-    engine silent past its TTL is reaped -- no _remote_agents / NIXL agent leak
-    across D scale up/down (S1)."""
+def test_push_does_not_evict_silent_engine():
+    """Push does not track its WRITEs per peer, so TTL eviction could remove a
+    D engine whose WRITEs are still in flight: a push keeps a silent engine."""
     w = _eviction_worker(engine_ttl=30.0)
     w._remote_agents["D-old"] = {(0, 0): "agent-D-old"}
     w._engine_last_active["D-old"] = time.perf_counter() - 10_000.0
@@ -830,9 +831,9 @@ def test_stale_engine_evicted_on_push():
 
     _real_do_start_push_kv(w, "req", ([1, 2, 3],), _registration_data("req"))
 
-    assert "D-old" not in w._remote_agents
-    assert "D-old" not in w._engine_last_active
-    w.nixl_wrapper.remove_remote_agent.assert_called_once_with("agent-D-old")
+    assert w.writes == ["req"]
+    assert "D-old" in w._remote_agents
+    w.nixl_wrapper.remove_remote_agent.assert_not_called()
 
 
 def test_cleanup_remote_engine_pops_under_handshake_lock():
@@ -1088,7 +1089,11 @@ class TestPushWriterNotifs:
 
     @pytest.mark.parametrize("first_state", ["ERR", "DONE"])
     def test_push_completion_after_expiry_is_not_reported_twice(self, first_state):
-        """A WRITE finishing after lease expiry must not complete the request again."""
+        """An expired lease waits for in-flight WRITEs, then completes once.
+
+        Releasing the blocks while a WRITE still reads them would let the
+        scheduler reuse memory that is on the wire.
+        """
         w = self._pollable_worker()
         request_id = self._make_sending_req(w)
         w.nixl_wrapper.check_xfer_state.side_effect = [
@@ -1101,13 +1106,64 @@ class TestPushWriterNotifs:
 
         w.expected_consumer_notifications_by_req = {}
         w._reqs_to_send[request_id] = time.perf_counter() - 1
-        assert w.get_transfer_results().finished_sending == {request_id}
+        # The second WRITE is still in flight: the lease does not expire yet.
+        assert w.get_transfer_results().finished_sending == set()
+        assert request_id in w._reqs_to_send
+        assert w._evict_finished_inbox.empty()
+
+        reported = w.get_transfer_results().finished_sending
+        if first_state == "ERR":
+            # A failed WRITE is not success; the expired lease reclaims it.
+            assert reported == set()
+            reported = w.get_transfer_results().finished_sending
+        assert reported == {request_id}
         assert w._evict_finished_inbox.get_nowait() == request_id
 
         assert w.get_transfer_results().finished_sending == set()
+        assert request_id not in w._reqs_to_send
         assert request_id not in w._sending_transfers
         assert request_id not in w._send_failures
         assert w._evict_finished_inbox.empty()
+
+    def test_expired_lease_waits_for_submission(self):
+        """A lease expiring while the request's WRITEs are being submitted
+        keeps its blocks until the submission ends."""
+        w = self._pollable_worker()
+        request_id = "req-submit"
+        w._reqs_to_send[request_id] = time.perf_counter() - 1
+        w._reqs_to_process.add(request_id)
+        w.expected_consumer_notifications_by_req = {}
+        during: list[set[str]] = []
+
+        def submit(*args):
+            during.append(w.get_transfer_results().finished_sending)
+
+        w._start_push_kv = submit
+        NixlPushConnectorWorker._do_start_push_kv(
+            w, request_id, ([1],), _registration_data(request_id)
+        )
+
+        assert during == [set()]
+        assert w.get_transfer_results().finished_sending == {request_id}
+
+    @pytest.mark.parametrize("released", ["lease_gone", "evicted"])
+    def test_released_request_is_not_pushed(self, released):
+        """A registration arriving after the request's blocks were released
+        must not WRITE from them."""
+        w = self._pollable_worker()
+        request_id = "req-late"
+        if released == "evicted":
+            w._reqs_to_send[request_id] = time.perf_counter() + 60
+            w._reqs_to_process.add(request_id)
+            w._released_pushes[request_id] = None
+        w._start_push_kv = MagicMock()
+
+        NixlPushConnectorWorker._do_start_push_kv(
+            w, request_id, ([1],), _registration_data(request_id)
+        )
+
+        w._start_push_kv.assert_not_called()
+        assert not w._submitting_pushes
 
 
 # ----------------------------------------------------------------- #
@@ -1724,7 +1780,7 @@ class TestPushPrefixCaching:
         w, _ = self._worker_driving_xfer()
         reg = _registration_data("req-pc", local_block_ids=([500, 501],))
 
-        NixlPushConnectorWorker._do_start_push_kv(
+        NixlPushConnectorWorker._start_push_kv(
             w, "req-pc", ([10, 11, 12, 13, 14],), reg
         )
 
@@ -1738,7 +1794,7 @@ class TestPushPrefixCaching:
         w, _ = self._worker_driving_xfer()
         reg = _registration_data("req-full", local_block_ids=([500, 501, 502],))
 
-        NixlPushConnectorWorker._do_start_push_kv(w, "req-full", ([10, 11, 12],), reg)
+        NixlPushConnectorWorker._start_push_kv(w, "req-full", ([10, 11, 12],), reg)
 
         local, remote = self._written_block_ids(w)
         assert local == [10, 11, 12]
@@ -1755,13 +1811,13 @@ class TestPushPrefixCaching:
 
         if not groups_match:
             with pytest.raises(NotImplementedError, match="cache-group layouts"):
-                NixlPushConnectorWorker._do_start_push_kv(
+                NixlPushConnectorWorker._start_push_kv(
                     w, "req-groups", ([10, 11],), reg
                 )
             w.nixl_wrapper.make_prepped_xfer.assert_not_called()
             return
 
-        NixlPushConnectorWorker._do_start_push_kv(w, "req-groups", ([10, 11],), reg)
+        NixlPushConnectorWorker._start_push_kv(w, "req-groups", ([10, 11],), reg)
 
         local, remote = self._written_block_ids(w)
         assert local == [10, 11]
