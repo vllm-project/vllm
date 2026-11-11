@@ -77,11 +77,12 @@ def _mxfp8(v: torch.Tensor) -> torch.Tensor:
 
 
 def _exact_moe(x, gate, bias, w13, s13, w2, s2, shared, act=None):
-    """`shared`: the shared expert's slot in the routed tensors, or its own
-    (gate_up, scale, down, scale) MXFP4 shards; `act`: how both expert GEMMs'
-    inputs are rounded (None: not at all)."""
-    """fp32 MoE on dequantized MXFP4 weights and unquantized inputs, vLLM's
-    routing (sigmoid + bias, top-8, renormalized, x2.5) and SwiGLU clamp."""
+    """fp32 MoE on dequantized MXFP4 weights and unquantized inputs, with vLLM's
+    routing and SwiGLU clamp: sigmoid scores, the bias only to pick the top 8,
+    their unbiased scores renormalized and x2.5 as weights, the shared expert at
+    weight 1. `shared`: the shared expert's slot in the routed tensors, or its
+    own (gate_up, scale, down, scale) MXFP4 shards; `act`: how both expert
+    GEMMs' inputs are rounded (None: not at all)."""
     from vllm.models.glm5next.amd.specialized_decode.mono.config import (
         ROUTE_SCALE,
         SWIGLU_LIMIT,
