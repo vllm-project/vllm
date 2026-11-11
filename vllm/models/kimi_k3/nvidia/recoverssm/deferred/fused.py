@@ -52,6 +52,7 @@ import cutlass
 import cutlass.cute as cute
 from cutlass import BFloat16, Float32, Int32, Int64, Uint32
 
+from . import MAX_WINDOW, MIN_WINDOW
 from .helpers import (
     div_full,
     load_activation_bf16x4,
@@ -104,7 +105,8 @@ class KdaFused:
     checkpoint)."""
 
     def __init__(self, heads, tokens, gate_mode, has_bias, split):
-        assert 2 <= tokens <= 8 and gate_mode in (0, 1) and split in (1, 2, 4, 8)
+        assert MIN_WINDOW <= tokens <= MAX_WINDOW
+        assert gate_mode in (0, 1) and split in (1, 2, 4, 8)
         self.heads, self.tokens, self.gate_mode = heads, tokens, gate_mode
         self.has_bias, self.split = has_bias, split
         self.rows = K // split  # state rows per CTA

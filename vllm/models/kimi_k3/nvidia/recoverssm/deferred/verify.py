@@ -48,18 +48,6 @@ def decode_conv_weight(weight: torch.Tensor) -> torch.Tensor:
     return weight.detach().view(3, -1, width).transpose(1, 2).contiguous()
 
 
-def tensor_cores_fit(heads, tokens, conv_dim_first, conv_size, max_requests, device):
-    """Whether KdaFusedTC runs a layer of `heads` x 128 at q `tokens` (conv
-    window q + 2 of `conv_size`-byte elements) for steps of up to
-    `max_requests` requests: its operands fit shared memory."""
-    sms = torch.cuda.get_device_properties(device).multi_processor_count
-    items = fused_tc.cta_items(heads, max_requests, sms)
-    smem = fused_tc.shared_bytes(
-        tokens, tokens, conv_dim_first, tokens + 2, conv_size, items
-    )
-    return tokens >= 3 and 2 * tokens <= fused_tc.PROBES and smem <= fused_tc.SMEM_LIMIT
-
-
 def _kernel(heads, max_requests, requests, tokens, conv_state, qkv):
     """KdaFusedTC where its operands stream in (16-byte aligned rows, a conv window
     of at least q + 2) and fit shared memory at `max_requests` requests (any
@@ -74,10 +62,13 @@ def _kernel(heads, max_requests, requests, tokens, conv_state, qkv):
         aligned = aligned and (stride[-1] * size) % 16 == 0
     streams = aligned and window >= tokens + 2 and tokens >= 3
     sms = torch.cuda.get_device_properties(qkv.device).multi_processor_count
+    tc_items = fused_tc.cta_items(heads, max_requests, sms)
+    tc_smem = fused_tc.shared_bytes(tokens, tokens, dim_first, window, size, tc_items)
     if (
         streams
         and window == tokens + 2
-        and tensor_cores_fit(heads, tokens, dim_first, size, max_requests, qkv.device)
+        and 2 * tokens <= fused_tc.PROBES
+        and tc_smem <= fused_tc.SMEM_LIMIT
     ):
         return KdaFusedTC(heads, tokens, 0, False, dim_first, window, sms, max_requests)
     ctas = -(-items // max(2, -(-items // sms)))

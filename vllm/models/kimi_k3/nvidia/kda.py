@@ -753,7 +753,6 @@ class KimiK3DeltaAttention(GatedDeltaNetAttention):
                 reason: str | None = "kda_decode_backend is triton"
             elif recurrent_state_dtype == torch.float32:
                 supported, reason = can_use_deferred_recoverssm(
-                    num_heads=self.local_num_heads,
                     window=self.spec_query_len,
                     head_dim=self.head_dim,
                     conv_width=self.conv_size,
@@ -762,9 +761,6 @@ class KimiK3DeltaAttention(GatedDeltaNetAttention):
                     conv_state_dtype=conv_state_dtype,
                     f_b_dtype=self.f_b_proj.weight.dtype,
                     lower_bound=self.gate_lower_bound,
-                    conv_dim_first=is_conv_state_dim_first(),
-                    max_requests=max_num_seqs,
-                    device=self.conv1d.weight.device,
                 )
                 if supported:
                     from vllm.models.kimi_k3.nvidia.recoverssm.deferred import (
