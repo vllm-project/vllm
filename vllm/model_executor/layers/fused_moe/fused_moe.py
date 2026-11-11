@@ -349,6 +349,7 @@ def fused_moe_kernel(
     use_int8_w8a8: tl.constexpr,
     use_int8_w8a16: tl.constexpr,
     per_channel_quant: tl.constexpr,
+    per_out_ch_quant: tl.constexpr,
     HAS_BIAS: tl.constexpr,
     SWAP_AB: tl.constexpr,
     # Tensor-descriptor path for the A gather and B load in the K-loop.
@@ -503,19 +504,23 @@ def fused_moe_kernel(
             b_scale_ptrs = (
                 b_scale_ptr + off_experts * stride_bse + offs_bsn * stride_bsn
             )
-        # channel-wise
-        elif per_channel_quant:
-            b_scale_ptrs = (
-                b_scale_ptr + off_experts * stride_bse + offs_bn[None, :] * stride_bsn
-            )
-            b_scale = tl.load(b_scale_ptrs)
-            # Load per-token scale for activations
-            a_scale_ptrs = a_scale_ptr + (offs_token // top_k) * stride_asm
-            a_scale = tl.load(a_scale_ptrs, mask=token_mask, other=0.0)[:, None]
-        # tensor-wise
+        # Weight-scale layout (per-channel vs per-expert tensor) is independent
+        # of activation-scale layout (per-token vs per-tensor).
         else:
-            a_scale = tl.load(a_scale_ptr)
-            b_scale = tl.load(b_scale_ptr + off_experts)
+            if per_out_ch_quant:
+                b_scale_ptrs = (
+                    b_scale_ptr
+                    + off_experts * stride_bse
+                    + offs_bn[None, :] * stride_bsn
+                )
+                b_scale = tl.load(b_scale_ptrs)
+            else:
+                b_scale = tl.load(b_scale_ptr + off_experts)
+            if per_channel_quant:
+                a_scale_ptrs = a_scale_ptr + (offs_token // top_k) * stride_asm
+                a_scale = tl.load(a_scale_ptrs, mask=token_mask, other=0.0)[:, None]
+            else:
+                a_scale = tl.load(a_scale_ptr)
     if HAS_BIAS:
         # bias shape: [num_experts, N]
         bias_ptrs = b_bias_ptr + off_experts * stride_bbe + offs_bn * stride_bbn
@@ -813,6 +818,7 @@ def invoke_fused_moe_triton_kernel(
     per_channel_quant: bool,
     block_shape: list[int] | None = None,
     B_bias: torch.Tensor | None = None,
+    per_out_ch_quant: bool | None = None,
     A_is_sorted: bool = False,
     C_is_sorted: bool = False,
 ):
@@ -821,6 +827,12 @@ def invoke_fused_moe_triton_kernel(
         raise ValueError("topk_weights must be contiguous")
     assert sorted_token_ids is None or sorted_token_ids.stride(0) == 1
     assert not (A_is_sorted or C_is_sorted) or sorted_token_ids is not None
+
+    # Callers that predate the split of the activation and weight scale layouts
+    # got per-channel weight scales whenever the activations were per-channel.
+    # Keep that behaviour unless the caller states the weight layout explicitly.
+    if per_out_ch_quant is None:
+        per_out_ch_quant = per_channel_quant
 
     if use_fp8_w8a8:
         SWAP_AB = enable_swap_ab(config["BLOCK_SIZE_M"], config["BLOCK_SIZE_N"])
@@ -886,7 +898,10 @@ def invoke_fused_moe_triton_kernel(
         and block_shape is not None
         and all(block_shape)
         and current_platform.is_cuda()
-        and current_platform.is_device_capability(90)
+        and (
+            current_platform.is_device_capability_family(90)
+            or current_platform.is_device_capability_family(100)
+        )
         and B.device.type == "cuda"
         and B.is_contiguous()
         and B.size(1) % config["BLOCK_SIZE_N"] == 0
@@ -976,6 +991,7 @@ def invoke_fused_moe_triton_kernel(
         use_int8_w8a8=use_int8_w8a8,
         use_int8_w8a16=use_int8_w8a16,
         per_channel_quant=per_channel_quant,
+        per_out_ch_quant=per_out_ch_quant,
         naive_block_assignment=(sorted_token_ids is None),
         HAS_BIAS=HAS_BIAS,
         BLOCK_SIZE_K=BLOCK_SIZE_K,
@@ -1010,11 +1026,15 @@ def dispatch_fused_moe_kernel(
     per_channel_quant: bool,
     block_shape: list[int] | None = None,
     B_bias: torch.Tensor | None = None,
+    per_out_ch_quant: bool | None = None,
 ) -> None:
     assert topk_weights is not None or not mul_routed_weight
     if topk_weights is not None and not topk_weights.is_contiguous():
         raise ValueError("topk_weights must be contiguous")
     assert sorted_token_ids is None or sorted_token_ids.stride(0) == 1
+
+    if per_out_ch_quant is None:
+        per_out_ch_quant = per_channel_quant
 
     M = A.size(0)
     num_tokens = M * top_k
@@ -1090,6 +1110,7 @@ def dispatch_fused_moe_kernel(
             per_channel_quant,
             block_shape,
             B_bias,
+            per_out_ch_quant,
         )
 
 
@@ -1590,6 +1611,7 @@ def fused_experts_op(
     block_shape: list[int] | None = None,
     w1_bias: torch.Tensor | None = None,
     w2_bias: torch.Tensor | None = None,
+    per_out_ch_quant: bool | None = None,
 ) -> torch.Tensor:
     return fused_experts_impl(
         hidden_states,
@@ -1616,6 +1638,7 @@ def fused_experts_op(
         block_shape,
         w1_bias,
         w2_bias,
+        per_out_ch_quant,
     )
 
 
@@ -1644,6 +1667,7 @@ def fused_experts_op_fake(
     block_shape: list[int] | None = None,
     w1_bias: torch.Tensor | None = None,
     w2_bias: torch.Tensor | None = None,
+    per_out_ch_quant: bool | None = None,
 ) -> torch.Tensor:
     return torch.empty_like(hidden_states)
 
@@ -1657,7 +1681,7 @@ direct_register_custom_op(
 
 def _weights_host_resident(*weights: torch.Tensor) -> bool:
     """True when any of the expert weights is read from host memory in place,
-    as UVA weight offloading (``--offload-backend uva``) leaves them."""
+    as UVA weight offloading (`--offload-backend uva`) leaves them."""
     return any(getattr(w, "_vllm_is_uva_offloaded", False) for w in weights)
 
 
@@ -1744,6 +1768,7 @@ def fused_experts(
         use_int4_w4a16=quant_config.use_int4_w4a16,
         ocp_mx_scheme=quant_config.ocp_mx_scheme,
         per_channel_quant=quant_config.per_act_token_quant,
+        per_out_ch_quant=quant_config.per_out_ch_quant,
         global_num_experts=global_num_experts,
         expert_map=expert_map,
         w1_scale=quant_config.w1_scale,
@@ -1801,12 +1826,18 @@ def fused_experts_impl(
     block_shape: list[int] | None = None,
     w1_bias: torch.Tensor | None = None,
     w2_bias: torch.Tensor | None = None,
+    per_out_ch_quant: bool | None = None,
 ) -> torch.Tensor:
     if ocp_mx_scheme is not None:
         raise NotImplementedError(
             f"Using ocp_mx_scheme={ocp_mx_scheme} in functional fused_experts call is "
             "deprecated. Please use OCP_MXQuantizationEmulationTritonExperts."
         )
+
+    if per_out_ch_quant is None:
+        # Legacy callers assumed per-channel weight scales when the activations
+        # were per-channel; keep that unless the weight layout is stated.
+        per_out_ch_quant = per_channel_quant
 
     # Convert string activation to enum for internal use
     activation_enum = MoEActivation.from_str(activation)
@@ -1934,6 +1965,7 @@ def fused_experts_impl(
         per_channel_quant=per_channel_quant,
         block_shape=block_shape,
         B_bias=w1_bias,
+        per_out_ch_quant=per_out_ch_quant,
     )
 
     apply_moe_activation(
@@ -1973,6 +2005,7 @@ def fused_experts_impl(
         per_channel_quant=per_channel_quant,
         block_shape=block_shape,
         B_bias=w2_bias,
+        per_out_ch_quant=per_out_ch_quant,
     )
 
     ops.moe_sum(

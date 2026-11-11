@@ -3,8 +3,8 @@
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 """Unit tests for GPUModelRunner (V2) CUDA graph memory profiling.
 
-These exercise the orchestration of ``profile_cudagraph_memory`` on CPU by
-building a runner via ``__new__`` and faking the GPU-only helpers, so the
+These exercise the orchestration of `profile_cudagraph_memory` on CPU by
+building a runner via `__new__` and faking the GPU-only helpers, so the
 control flow (bootstrap -> sample FULL graphs into a throwaway pool ->
 extrapolate -> teardown) is covered without a GPU.
 See https://github.com/vllm-project/vllm/issues/49224.
@@ -64,6 +64,7 @@ def _make_profiling_runner(
     runner.cudagraph_manager = _FakeCudaGraphManager(
         needs_capture, num_full_descs, piecewise_only
     )
+    runner.speculator = None
     runner.vllm_config = SimpleNamespace()
     runner.model_state = SimpleNamespace(
         supports_mm_inputs=encoder_only,
@@ -383,7 +384,9 @@ def test_profile_cudagraph_memory_swaps_and_drops_speculator_managers(monkeypatc
 
 
 @create_new_process_for_each_test("spawn")
-@pytest.mark.skipif(not cgu.current_platform.is_cuda(), reason="requires CUDA")
+@pytest.mark.skipif(
+    not cgu.current_platform.is_cuda_alike(), reason="requires CUDA or ROCm"
+)
 def test_profile_cudagraph_memory_frees_throwaway_pool(monkeypatch):
     """Profiling graph memory must be freed before teardown completes."""
 
@@ -447,12 +450,12 @@ def test_profile_cudagraph_memory_frees_throwaway_pool(monkeypatch):
 def test_teardown_profiling_state_clears_mamba_align_metadata(monkeypatch):
     """Profiling-cached Mamba align metadata must be invalidated at teardown.
 
-    ``MambaHybridModelState`` lazily caches ``_mamba_group_ids`` and
-    ``_mamba_spec`` from whichever KVCacheConfig it first sees. When the
+    `MambaHybridModelState` lazily caches `_mamba_group_ids` and
+    `_mamba_spec` from whichever KVCacheConfig it first sees. When the
     profiling config's group layout differs from the real (e.g. PP-projected)
     config, reusing the stale metadata mismatches the real block tables
     ("expected 3 block tables, got 4" at
-    ``MambaSpecDecodeGPUContext.initialize_from_forward_context``).
+    `MambaSpecDecodeGPUContext.initialize_from_forward_context`).
     """
     runner: Any = mrv2.GPUModelRunner.__new__(mrv2.GPUModelRunner)
     runner.compilation_config = SimpleNamespace(static_forward_context={})

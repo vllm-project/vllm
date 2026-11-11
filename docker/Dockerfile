@@ -22,7 +22,7 @@
 #   docker buildx bake -f docker/docker-bake.hcl -f docker/versions.json
 # =============================================================================
 
-ARG CUDA_VERSION=13.0.3
+ARG CUDA_VERSION=13.2.1
 ARG PYTHON_VERSION=3.12
 ARG UBUNTU_VERSION=24.04
 ARG INSTALL_RUBIN_PRERELEASE=false
@@ -33,16 +33,19 @@ ARG TRITON_INSTALL_FROM_SOURCE_REVISION=
 # runtime NCCL versions compatible.
 # DeepEPv2 GDA over EFA requires NCCL 2.31.x or later.
 ARG NCCL_VERSION=2.31.2
+# AWS EFA userspace (libfabric, aws-ofi-nccl), installed with the KV connectors.
+ARG EFA_INSTALLER_VERSION=1.51.0
+ARG EFA_INSTALLER_SHA256=83993044fa4df3dc2f8b5c2f7051d61b9689441be023a2c92ea51d3f53f2465c
 
 # By parameterizing the base images, we allow third-party to use their own
 # base images. One use case is hermetic builds with base images stored in
 # private registries that use a different repository naming conventions.
 #
 # Example:
-# docker build --build-arg BUILD_BASE_IMAGE=registry.acme.org/mirror/pytorch/manylinux2_28-builder:cuda13.0
+# docker build --build-arg BUILD_BASE_IMAGE=registry.acme.org/mirror/pytorch/manylinux2_28-builder:cuda13.2
 
 # Build wheels against the same glibc floor as PyTorch's published wheels.
-ARG BUILD_BASE_IMAGE=pytorch/manylinux2_28-builder:cuda13.0-78e737ad29420ffc4800e677c51e2a852caf8359
+ARG BUILD_BASE_IMAGE=pytorch/manylinux2_28-builder:cuda13.2-9f3983c9d680f3cc243dfa0524efcb881be7869e
 # Using cuda base image with minimal dependencies necessary for JIT compilation (FlashInfer, DeepGEMM, EP kernels)
 ARG FINAL_BASE_IMAGE=nvidia/cuda:${CUDA_VERSION}-base-ubuntu${UBUNTU_VERSION}
 
@@ -211,7 +214,7 @@ COPY requirements/cuda.txt requirements/cuda.txt
 COPY tools/use_existing_torch.py tools/use_existing_torch.py
 COPY pyproject.toml pyproject.toml
 RUN --mount=type=cache,target=/opt/uv/cache \
-    --mount=type=bind,source=requirements,target=/tmp/vllm-requirements,ro \
+    --mount=type=bind,source=requirements/rubin-prerelease.txt,target=/tmp/vllm-requirements/rubin-prerelease.txt,ro \
     if [ "${INSTALL_RUBIN_PRERELEASE}" = "true" ] && \
         [ ! -f /tmp/vllm-requirements/rubin-prerelease.txt ]; then \
         echo "INSTALL_RUBIN_PRERELEASE=true requires requirements/rubin-prerelease.txt" >&2; \
@@ -274,6 +277,33 @@ RUN --mount=type=cache,target=/opt/uv/cache \
 ARG torch_cuda_arch_list='7.5 8.0 8.6 8.9 9.0 10.0 11.0 12.0'
 ENV TORCH_CUDA_ARCH_LIST=${torch_cuda_arch_list}
 #################### BUILD BASE IMAGE ####################
+
+#################### HYBRID TEST WHEELS IMAGE ####################
+# mamba-ssm and causal-conv1d for the hybrid-model tests, built from pinned
+# commits against base's torch. It rebuilds with base, in parallel with the
+# longer csrc-build, so it adds no time to the image build. No arm64 or Rubin
+# job runs these tests, so those builds leave /wheels empty. A failed build
+# fails the image, except on torch nightly: its torch changes every run, so it
+# warns, and only the hybrid jobs fail (in check-hybrid-test-deps.py) instead
+# of the whole nightly run.
+FROM base AS hybrid-test-wheels
+ARG TARGETPLATFORM
+ARG INSTALL_RUBIN_PRERELEASE
+ARG PYTORCH_NIGHTLY
+ARG max_jobs=2
+WORKDIR /workspace
+COPY requirements/build/hybrid-test-deps.txt requirements/build/hybrid-test-deps.txt
+COPY tools/build_hybrid_test_wheels.sh tools/build_hybrid_test_wheels.sh
+RUN --mount=type=cache,target=/opt/uv/cache \
+    mkdir -p /wheels \
+    && if [ "$TARGETPLATFORM" = "linux/arm64" ] || [ "${INSTALL_RUBIN_PRERELEASE}" = "true" ]; then exit 0; fi \
+    && uv pip install --python /opt/venv/bin/python3 --require-hashes --reinstall \
+        -r requirements/build/hybrid-test-deps.txt \
+    && { MAX_JOBS=${max_jobs} bash tools/build_hybrid_test_wheels.sh /wheels \
+         || { [ "${PYTORCH_NIGHTLY}" = "1" ] \
+              && echo "WARNING: mamba-ssm/causal-conv1d failed to build against torch nightly" \
+              && rm -rf /wheels/*; }; }
+#################### HYBRID TEST WHEELS IMAGE ####################
 
 #################### RUST BUILD IMAGE ####################
 # Build the Rust frontend (`vllm-rs`) in a dedicated stage so the main wheel
@@ -905,7 +935,7 @@ ARG PYTORCH_CUDA_INDEX_BASE_URL
 COPY requirements/common.txt /tmp/common.txt
 COPY requirements/cuda.txt /tmp/requirements-cuda.txt
 RUN --mount=type=cache,target=/opt/uv/cache \
-    --mount=type=bind,source=requirements,target=/tmp/vllm-requirements,ro \
+    --mount=type=bind,source=requirements/rubin-prerelease.txt,target=/tmp/vllm-requirements/rubin-prerelease.txt,ro \
     if [ "${INSTALL_RUBIN_PRERELEASE}" = "true" ] && \
         [ ! -f /tmp/vllm-requirements/rubin-prerelease.txt ]; then \
         echo "INSTALL_RUBIN_PRERELEASE=true requires requirements/rubin-prerelease.txt" >&2; \
@@ -1101,11 +1131,43 @@ RUN --mount=type=cache,target=/opt/uv/cache \
         fi \
     fi
 
+# KV connectors for the P/D and connector suites, so CI jobs never install them
+# at runtime. Lock entries the image lacks are installed hash-verified, and the
+# install must not change any preinstalled package. The test stage checks the
+# finished environment against the lock. Targets the stable x86_64 CUDA 13 image.
+COPY requirements/test/kv_connectors_cuda.txt requirements/test/kv_connectors_cuda.txt
+COPY tools/kv_connector_lock.py tools/kv_connector_lock.py
+RUN --mount=type=cache,target=/opt/uv/cache \
+    if [ "${CUDA_VERSION%%.*}" = "13" ] && [ "${PYTORCH_NIGHTLY}" != "1" ] \
+        && [ "$TARGETPLATFORM" != "linux/arm64" ]; then \
+        uv pip freeze --system | sort > /tmp/kv-before.txt \
+        && python3 tools/kv_connector_lock.py plan \
+            requirements/test/kv_connectors_cuda.txt /tmp/kv-new.txt \
+        # The NCCL UV_OVERRIDE would enter --require-hashes as an unhashed requirement.
+        && env -u UV_OVERRIDE uv pip install --system --require-hashes --no-deps \
+            -r /tmp/kv-new.txt \
+        && uv pip freeze --system | sort > /tmp/kv-after.txt \
+        && if comm -23 /tmp/kv-before.txt /tmp/kv-after.txt | grep .; then \
+            echo "kv_connectors_cuda.txt changed the packages above; recompile it" >&2; \
+            exit 1; \
+        fi \
+        && rm -f /tmp/kv-before.txt /tmp/kv-after.txt /tmp/kv-new.txt; \
+    fi
+
+# Prebuilt hybrid-model test extensions. --no-deps --offline: their dependencies
+# come only from the hash-pinned test requirements installed above.
+RUN --mount=type=bind,from=hybrid-test-wheels,source=/wheels,target=/tmp/hybrid-test-wheels \
+    if ls /tmp/hybrid-test-wheels/*.whl >/dev/null 2>&1; then \
+        uv pip install --system --no-deps --offline /tmp/hybrid-test-wheels/*.whl \
+        && cp /tmp/hybrid-test-wheels/commits.txt /opt/hybrid-test-deps-commits.txt; \
+    fi
+
 # image to run unit testing suite
 # note that this uses vllm installed by `pip`
 FROM test-deps AS test
 
 ARG PYTHON_VERSION
+ARG TARGETPLATFORM
 
 ARG PIP_INDEX_URL UV_INDEX_URL
 ARG PIP_EXTRA_INDEX_URL UV_EXTRA_INDEX_URL
@@ -1156,6 +1218,12 @@ ADD . /vllm-workspace/
 RUN --mount=type=cache,target=/opt/uv/cache \
     uv pip install --system -e tests/vllm_test_utils
 
+# The installs above may move packages the KV connector layer relied on.
+RUN if [ "${CUDA_VERSION%%.*}" = "13" ] && [ "${PYTORCH_NIGHTLY}" != "1" ] \
+        && [ "$TARGETPLATFORM" != "linux/arm64" ]; then \
+        python3 tools/kv_connector_lock.py verify requirements/test/kv_connectors_cuda.txt; \
+    fi
+
 # enable fast downloads from hf (for testing)
 ENV HF_XET_HIGH_PERFORMANCE 1
 
@@ -1180,6 +1248,8 @@ RUN mv vllm src/vllm
 FROM vllm-base AS vllm-openai-base
 ARG TARGETPLATFORM
 ARG INSTALL_KV_CONNECTORS=false
+ARG EFA_INSTALLER_VERSION
+ARG EFA_INSTALLER_SHA256
 ARG INSTALL_RUBIN_PRERELEASE
 ARG TRITON_INSTALL_FROM_SOURCE_REPO
 ARG CUDA_VERSION
@@ -1200,7 +1270,8 @@ ENV UV_HTTP_TIMEOUT=500
 ARG torch_cuda_arch_list='7.5 8.0 8.6 8.9 9.0 10.0 11.0 12.0'
 ENV TORCH_CUDA_ARCH_LIST=${torch_cuda_arch_list}
 RUN --mount=type=cache,target=/opt/uv/cache \
-    --mount=type=bind,source=requirements,target=/tmp/vllm-requirements,ro \
+    --mount=type=bind,source=requirements/kv_connectors.txt,target=/tmp/vllm-requirements/kv_connectors.txt,ro \
+    --mount=type=bind,source=requirements/kv_connectors_cu12.txt,target=/tmp/vllm-requirements/kv_connectors_cu12.txt,ro \
     set -eu; \
     CUDA_MAJOR="${CUDA_VERSION%%.*}"; \
     CUDA_VERSION_DASH=$(echo $CUDA_VERSION | cut -d. -f1,2 | tr '.' '-'); \
@@ -1229,7 +1300,7 @@ RUN --mount=type=cache,target=/opt/uv/cache \
         ); \
         # The default mooncake wheel links libcudart.so.12, so on CUDA 13 swap in the
         # cuda13 variant. Uninstall first; both ship the `mooncake` package.
-        # Mirrors .buildkite/scripts/install-kv-connectors.sh.
+        # The CI image does the same via requirements/test/kv_connectors_cuda.in.
         MOONCAKE_VERSION=$(python3 -c "import importlib.metadata as m; print(m.version('mooncake-transfer-engine'))" 2>/dev/null || true) && \
         if [ "${CUDA_MAJOR}" = "13" ] && [ -n "${MOONCAKE_VERSION}" ]; then \
             uv pip uninstall --system mooncake-transfer-engine 2>/dev/null || true; \
@@ -1238,6 +1309,37 @@ RUN --mount=type=cache,target=/opt/uv/cache \
         rm -f /tmp/kv-installed.txt /tmp/kv-constraints.txt; \
     fi
 
+# Install the AWS EFA userspace with the KV connectors: NIXL's LIBFABRIC plugin
+# and Mooncake's EFA transport load libfabric at runtime.
+RUN if [ "$INSTALL_KV_CONNECTORS" = "true" ]; then \
+        set -eux; \
+        EFA_INSTALLER_ARCHIVE="/tmp/aws-efa-installer-${EFA_INSTALLER_VERSION}.tar.gz"; \
+        curl -fsSL --retry 3 --retry-all-errors \
+            "https://efa-installer.amazonaws.com/aws-efa-installer-${EFA_INSTALLER_VERSION}.tar.gz" \
+            -o "${EFA_INSTALLER_ARCHIVE}"; \
+        echo "${EFA_INSTALLER_SHA256}  ${EFA_INSTALLER_ARCHIVE}" | sha256sum -c -; \
+        tar -xzf "${EFA_INSTALLER_ARCHIVE}" -C /tmp; \
+        # The installer apt-installs dependencies; earlier layers purged the lists.
+        apt-get update -y; \
+        # Minimal install: libfabric, aws-ofi-nccl and hwloc only. --build-ngc
+        # implies --skip-kmod --skip-limit-conf --no-verify.
+        (cd /tmp/aws-efa-installer && \
+            ./efa_installer.sh --skip-mpi --skip-rdma-core --build-ngc); \
+        test -x /opt/amazon/efa/bin/fi_info; \
+        /opt/amazon/efa/bin/fi_info --version; \
+        # `-l` lists providers without EFA hardware, so this works in a build.
+        /opt/amazon/efa/bin/fi_info -l | grep -q '^efa:'; \
+        EFA_NIXL_PLUGIN=$(find /usr/local/lib -name libplugin_LIBFABRIC.so \
+            -print -quit); \
+        test -n "${EFA_NIXL_PLUGIN}"; \
+        ldd "${EFA_NIXL_PLUGIN}" | grep -q 'libfabric\.so\.1 => /opt/amazon/efa/lib/'; \
+        # Plugins that NCCL_NET_PLUGIN=ofi and NCCL_TUNER_PLUGIN=ofi resolve to.
+        ldconfig -p | grep -q '/opt/amazon/ofi-nccl/lib/libnccl-net-ofi\.so$'; \
+        ldconfig -p | grep -q '/opt/amazon/ofi-nccl/lib/libnccl-tuner-ofi\.so$'; \
+        apt-get clean; \
+        rm -rf "${EFA_INSTALLER_ARCHIVE}" /tmp/aws-efa-installer \
+            /var/lib/apt/lists/*; \
+    fi
 # Mooncake registers GPU memory for RDMA via nvidia-peermem by default. Hosts
 # without that module loaded (e.g. GB200) must pass WITH_NVIDIA_PEERMEM=0 at run
 # time; see docs/features/mooncake_connector_usage.md. Deliberately not an ENV
@@ -1246,7 +1348,7 @@ RUN --mount=type=cache,target=/opt/uv/cache \
 # Install Rubin prerelease dependencies when explicitly requested. Keep this
 # after the public vLLM and KV connector dependency pins installed above.
 RUN --mount=type=cache,target=/opt/uv/cache \
-    --mount=type=bind,source=requirements,target=/tmp/vllm-requirements,ro \
+    --mount=type=bind,source=requirements/rubin-prerelease.txt,target=/tmp/vllm-requirements/rubin-prerelease.txt,ro \
     if [ "${INSTALL_RUBIN_PRERELEASE}" = "true" ]; then \
         echo "Installing Rubin prerelease requirements..." \
         && uv pip install --system \
