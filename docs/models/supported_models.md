@@ -515,14 +515,6 @@ Some models are supported only via the [Transformers modeling backend](#transfor
 !!! note
     Currently, the ROCm version of vLLM supports Mistral and Mixtral only for context lengths up to 4096.
 
-!!! note "Ministral3 Llama 4 query scaling"
-    For Transformers-format Ministral3 configurations, vLLM reads
-    `llama_4_scaling_beta` and `original_max_position_embeddings` from
-    `rope_parameters` to apply Llama 4 query scaling. Both fields must be present;
-    no additional vLLM option is required. An existing top-level `llama_4_scaling`
-    mapping takes precedence over the nested fields. If neither that mapping nor
-    both nested fields are provided, query scaling is disabled.
-
 ## List of Multimodal Language Models
 
 The following modalities are supported depending on the model:
