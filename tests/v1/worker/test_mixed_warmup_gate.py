@@ -8,7 +8,11 @@ import pytest
 import torch
 
 from vllm.v1.core.sched.output import SchedulerOutput
-from vllm.v1.kv_cache_interface import FullAttentionSpec
+from vllm.v1.kv_cache_interface import (
+    FullAttentionSpec,
+    KVCacheConfig,
+    KVCacheGroupSpec,
+)
 from vllm.v1.worker.gpu import warmup
 from vllm.v1.worker.gpu.warmup import run_mixed_prefill_decode_warmup
 
@@ -51,9 +55,10 @@ def test_mixed_warmup_disables_watermarking():
         max_num_reqs=2,
         max_num_tokens=32,
         speculative_config=None,
-        kv_cache_config=SimpleNamespace(
-            kv_cache_groups=[SimpleNamespace(kv_cache_spec=_kv_cache_spec())],
+        kv_cache_config=KVCacheConfig(
             num_blocks=128,
+            kv_cache_tensors=[],
+            kv_cache_groups=[KVCacheGroupSpec(["layer"], _kv_cache_spec())],
         ),
         vllm_config=SimpleNamespace(
             num_lookahead_tokens=0,
@@ -93,9 +98,10 @@ def test_mixed_warmup_reserves_drafting_slots():
         max_num_reqs=2,
         max_num_tokens=32,
         speculative_config=SimpleNamespace(max_num_new_slots_for_drafting=1),
-        kv_cache_config=SimpleNamespace(
-            kv_cache_groups=[SimpleNamespace(kv_cache_spec=_kv_cache_spec())],
+        kv_cache_config=KVCacheConfig(
             num_blocks=128,
+            kv_cache_tensors=[],
+            kv_cache_groups=[KVCacheGroupSpec(["layer"], _kv_cache_spec())],
         ),
         vllm_config=SimpleNamespace(
             num_lookahead_tokens=0,

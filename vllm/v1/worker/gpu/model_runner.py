@@ -1989,7 +1989,7 @@ class GPUModelRunner(LoRAModelRunnerMixin):
                         input_batch,
                         self.block_tables,
                         context_len,
-                        num_blocks,
+                        self.kv_cache_config.num_blocks_per_group(num_blocks),
                         self.max_model_len,
                         input_block_tables=block_tables,
                     )

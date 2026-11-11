@@ -882,7 +882,7 @@ def set_dcp_capture_context(
         input_batch,
         block_tables,
         block_tables.cp_size * block_tables.cp_interleave,
-        kv_cache_config.num_blocks,
+        kv_cache_config.num_blocks_per_group(),
         model_state.max_model_len,
         input_block_tables=input_block_tables,
     )

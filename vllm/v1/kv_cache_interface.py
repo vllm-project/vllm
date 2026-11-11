@@ -1669,12 +1669,36 @@ class KVCacheConfig:
             if group.host_resident
         )
 
-    def num_blocks_of(self, tensor: KVCacheTensor) -> int:
-        """Number of blocks addressable by the pool backing `tensor`."""
-        if not tensor.host_resident:
+    @cached_property
+    def block_pool_ids(self) -> tuple[int, ...]:
+        """Block pool each cache group indexes; pool 0 holds `num_blocks`.
+
+        Block IDs are unique within a pool, not across pools.
+        """
+        return tuple(int(group.host_resident) for group in self.kv_cache_groups)
+
+    def pool_num_blocks(self, pool_id: int) -> int:
+        """Number of blocks in pool `pool_id`, null block included."""
+        if pool_id == 0:
             return self.num_blocks
         assert self.hisparse_host_num_blocks is not None
         return self.hisparse_host_num_blocks
+
+    def num_blocks_per_group(
+        self, pool0_num_blocks: int | None = None
+    ) -> tuple[int, ...]:
+        """Blocks addressable by each cache group: its pool's size, with pool 0
+        limited to `pool0_num_blocks` when given."""
+        return tuple(
+            pool0_num_blocks
+            if pool_id == 0 and pool0_num_blocks is not None
+            else self.pool_num_blocks(pool_id)
+            for pool_id in self.block_pool_ids
+        )
+
+    def num_blocks_of(self, tensor: KVCacheTensor) -> int:
+        """Number of blocks addressable by the pool backing `tensor`."""
+        return self.pool_num_blocks(int(tensor.host_resident))
 
     @property
     def has_mamba_layers(self) -> bool:

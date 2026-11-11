@@ -110,8 +110,8 @@ def _make_runner(
         model_config=SimpleNamespace(get_vocab_size=lambda: 64),
         model_state=SimpleNamespace(max_encoder_len=0),
         scheduler_config=SimpleNamespace(max_num_seqs=4, max_num_batched_tokens=2048),
-        kv_cache_config=SimpleNamespace(
-            kv_cache_groups=kv_cache_groups, num_blocks=1024
+        kv_cache_config=KVCacheConfig(
+            num_blocks=1024, kv_cache_tensors=[], kv_cache_groups=kv_cache_groups
         ),
         vllm_config=SimpleNamespace(
             num_lookahead_tokens=num_lookahead_tokens,
@@ -605,3 +605,60 @@ def test_sizing_warmup_requests_prompt_logprobs_on_its_prefill(max_logprobs):
         "prefill" if "_prefill_" in req_id else "decode": value
         for req_id, value in requested.items()
     } == {"prefill": expected, "decode": None}
+
+
+def _block_ids_per_group(outputs: list[SchedulerOutput], num_groups: int):
+    block_ids: list[list[int]] = [[] for _ in range(num_groups)]
+    for output in outputs:
+        new_block_ids = [req.block_ids for req in output.scheduled_new_reqs]
+        new_block_ids += [
+            ids for ids in output.scheduled_cached_reqs.new_block_ids if ids is not None
+        ]
+        for req_block_ids in new_block_ids:
+            for group_ids, ids in zip(block_ids, req_block_ids):
+                group_ids.extend(ids)
+    return block_ids
+
+
+@pytest.mark.parametrize(
+    ("entry_point", "num_pool1_blocks"),
+    [
+        (
+            lambda runner, execute: warmup._warmup_kernels(
+                runner, execute, lambda grammar_output: None
+            ),
+            8,
+        ),
+        (
+            lambda runner, execute: run_mixed_prefill_decode_warmup(
+                runner, execute, lambda grammar_output: None, num_tokens=128
+            ),
+            12,
+        ),
+        (
+            lambda runner, execute: run_context_prefill_warmup(
+                runner, execute, lambda grammar_output: None, 4 * MAX_MODEL_LEN
+            ),
+            200,
+        ),
+    ],
+    ids=["kernels", "mixed", "context"],
+)
+def test_warmup_block_ids_stay_in_their_pool(
+    entry_point, num_pool1_blocks, monkeypatch
+):
+    pool1_group = _attention_group()
+    pool1_group.layer_names = ["pool1_layer"]
+    pool1_group.host_resident = True
+    runner = _make_runner([_attention_group(), pool1_group], num_lookahead_tokens=0)
+    runner.kv_cache_config.hisparse_host_num_blocks = num_pool1_blocks
+    outputs: list[SchedulerOutput] = []
+    monkeypatch.setattr(torch.accelerator, "synchronize", lambda: None)
+
+    entry_point(runner, outputs.append)
+
+    pool0_ids, pool1_ids = _block_ids_per_group(outputs, num_groups=2)
+    assert pool1_ids, "warmup allocated no pool-1 blocks"
+    assert len(set(pool1_ids)) == len(pool1_ids)
+    assert min(pool1_ids) > 0 and max(pool1_ids) < num_pool1_blocks
+    assert len(set(pool0_ids)) == len(pool0_ids)
