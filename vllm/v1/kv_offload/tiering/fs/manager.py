@@ -63,20 +63,16 @@ logger = init_logger(__name__)
 
 
 class FsAsyncLookupManager(AsyncLookupManager):
-    """Async lookup manager for FileSystemTierManager."""
+    """Async existence checks for files named by a FileMapper."""
 
-    def __init__(
-        self,
-        tier: "FileSystemTierManager",
-        tier_type: str,
-    ) -> None:
+    def __init__(self, file_mapper: FileMapper, tier_type: str) -> None:
         super().__init__(tier_type=tier_type)
-        self._tier = tier
+        self._file_mapper = file_mapper
 
     def batch_lookup(
         self, keys: list[OffloadKey], req_context: ReqContext
     ) -> Iterable[bool]:
-        paths = [self._tier.file_mapper.get_file_name(k) for k in keys]
+        paths = [self._file_mapper.get_file_name(k) for k in keys]
         if _HAS_BATCH_LOOKUP_C:
             # C extension: GIL released for the entire faccessat() batch.
             return batch_lookup_C(paths)
@@ -208,7 +204,7 @@ class FileSystemTierManager(SecondaryTierManager):
             thread_name_prefix="vllm_kv_py_fs",
         )
 
-        self._lookup_manager = FsAsyncLookupManager(tier=self, tier_type=self.tier_type)
+        self._lookup_manager = FsAsyncLookupManager(self.file_mapper, self.tier_type)
 
     @override
     def on_new_request(self, req_context: ReqContext) -> RequestOffloadingContext:

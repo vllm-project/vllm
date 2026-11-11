@@ -7,12 +7,13 @@ This guide covers configuration of the [`OffloadingConnector`](disagg_prefill.md
 
 ## Overview
 
-Two specs are available, selected by the `spec_name` key in `kv_connector_extra_config`:
+Three specs are available, selected by the `spec_name` key in `kv_connector_extra_config`:
 
 - `CPUOffloadingSpec` (default): single CPU tier. Completed GPU blocks are copied into pinned host memory.
 - `TieringOffloadingSpec`: multi-tier. A CPU primary tier plus one or more secondary tiers.
+- `FSOffloadingSpec`: single file tier with direct GPU access. Blocks move between GPU memory and files without staging through host memory. See [Direct Storage Setup](#direct-storage-setup).
 
-Only the CPU primary tier has direct GPU access. Secondary tiers cannot read from or write to GPU memory; all GPU↔secondary transfers are staged through the CPU primary tier.
+Within `TieringOffloadingSpec`, only the CPU primary tier has direct GPU access. Secondary tiers cannot read from or write to GPU memory; all GPU↔secondary transfers are staged through the CPU primary tier.
 
 ```mermaid
 flowchart LR
@@ -97,12 +98,39 @@ vllm serve <model> \
 
 Secondary tiers are not supported yet on engines whose workers span several nodes; such an engine fails at startup.
 
+## Direct Storage Setup
+
+Set `spec_name` to `"FSOffloadingSpec"` to transfer blocks directly between GPU memory and files under `root_dir`. The worker backend is selected by `fs_backend`; the only backend is `gds`, which uses NVIDIA GPUDirect Storage (cuFile) and requires an NVIDIA GPU, `libcufile`, and a GDS-capable filesystem.
+
+```bash
+vllm serve <model> \
+  --kv-transfer-config '{
+    "kv_connector": "OffloadingConnector",
+    "kv_role": "kv_both",
+    "kv_connector_extra_config": {
+      "spec_name": "FSOffloadingSpec",
+      "fs_backend": "gds",
+      "root_dir": "/mnt/nvme/kv_cache",
+      "fs_bytes_to_use": 1000000000000,
+      "block_size": 64,
+      "read_only": true
+    }
+  }'
+```
+
+Files are named by block content hash, so blocks written by an earlier run or by another instance with the same model and parallel configuration are found by an asynchronous on-disk lookup. With `read_only` (the default), the instance only loads existing files and never writes. `fs_bytes_to_use` sizes the in-memory index of known files; evicting an entry from the index does not delete its file.
+
 ## `kv_connector_extra_config` Reference
 
 | Key | Required | Default | Scope | Notes |
 | --- | --- | --- | --- | --- |
-| `spec_name` | no | `CPUOffloadingSpec` | both | Set to `TieringOffloadingSpec` for multi-tier. |
-| `cpu_bytes_to_use` | yes | — | both | Total bytes of host memory reserved for the CPU tier across all workers (not per-worker). |
+| `spec_name` | no | `CPUOffloadingSpec` | both | Set to `TieringOffloadingSpec` for multi-tier, or `FSOffloadingSpec` for direct storage. |
+| `cpu_bytes_to_use` | yes | — | both | Total bytes of host memory reserved for the CPU tier across all workers (not per-worker). Not used by `FSOffloadingSpec`. |
+| `fs_bytes_to_use` | yes | — | direct storage | Byte budget that sizes the index of known files for `FSOffloadingSpec`. |
+| `root_dir` | yes | — | direct storage | Directory holding the block files for `FSOffloadingSpec`. |
+| `fs_backend` | no | `gds` | direct storage | Worker backend for `FSOffloadingSpec`. Only `gds` is available. |
+| `read_only` | no | `true` | direct storage | If `true`, `FSOffloadingSpec` only loads existing files and never stores. |
+| `gds_max_io_threads` | no | `32` | direct storage | Thread pool size for the `gds` backend's cuFile calls. |
 | `block_size` | no | GPU block size | both | Offloaded block size in tokens; must be a multiple of the GPU block size. Mutually exclusive with `blocks_per_chunk`. |
 | `blocks_per_chunk` | no | `1` | both | Offloaded chunk size in GPU blocks; must be > 0. Alternative to `block_size` for models whose KV cache groups have different block sizes. |
 | `eviction_policy` | no | `lru` | both | Primary tier policy: built-in `lru`/`arc`, or a custom `CachePolicy` name (see [Custom Eviction Policies](#custom-eviction-policies)). |

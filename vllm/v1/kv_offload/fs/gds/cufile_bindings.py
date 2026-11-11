@@ -1,6 +1,6 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
-"""ctypes bindings for NVIDIA cuFile (GDS) API."""
+"""ctypes bindings for the NVIDIA cuFile (GDS) synchronous API."""
 
 import ctypes
 import ctypes.util
@@ -17,28 +17,8 @@ from ctypes import (
 )
 from enum import IntEnum
 
-from vllm.logger import init_logger
-
-logger = init_logger(__name__)
-
-# --- Constants ---
-
 CU_FILE_HANDLE_TYPE_OPAQUE_FD = 1
 CU_FILE_SUCCESS = 0
-
-# Batch API constants
-CUFILE_BATCH = 1
-CUFILE_READ = 0
-CUFILE_WRITE = 1
-
-# Batch status flags
-CUFILE_WAITING = 0x01
-CUFILE_PENDING = 0x02
-CUFILE_INVALID = 0x04
-CUFILE_CANCELED = 0x08
-CUFILE_COMPLETE = 0x10
-CUFILE_TIMEOUT = 0x20
-CUFILE_FAILED = 0x40
 
 
 class CUfileOpError(IntEnum):
@@ -56,9 +36,6 @@ class CUfileOpError(IntEnum):
     CU_FILE_GETNEWFD_FAILED = 11
     CU_FILE_INVAL_FLAGS = 12
     CU_FILE_HANDLE_NOT_REGISTERED = 13
-
-
-# --- Structures ---
 
 
 class CUfileError_t(Structure):
@@ -83,50 +60,7 @@ class CUfileDescr_t(Structure):
     ]
 
 
-# Opaque handle type
 CUfileHandle_t = c_void_p
-
-# CUstream is an opaque pointer
-CUstream_t = c_void_p
-
-# Batch handle type
-CUfileBatchHandle_t = c_void_p
-
-
-class _BatchParams(Structure):
-    _fields_ = [
-        ("devPtr_base", c_void_p),
-        ("file_offset", c_ssize_t),  # off_t
-        ("devPtr_offset", c_ssize_t),  # off_t
-        ("size", c_size_t),
-    ]
-
-
-class _BatchUnion(Union):
-    _fields_ = [
-        ("batch", _BatchParams),
-    ]
-
-
-class CUfileIOParams_t(Structure):
-    _fields_ = [
-        ("mode", c_int),
-        ("u", _BatchUnion),
-        ("fh", CUfileHandle_t),
-        ("opcode", c_int),
-        ("cookie", c_void_p),
-    ]
-
-
-class CUfileIOEvents_t(Structure):
-    _fields_ = [
-        ("cookie", c_void_p),
-        ("status", c_int),
-        ("ret", c_ssize_t),
-    ]
-
-
-# --- Library loading ---
 
 _lib: ctypes.CDLL | None = None
 
@@ -163,9 +97,6 @@ def _check_error(err: CUfileError_t, func_name: str) -> None:
         )
 
 
-# --- Public API ---
-
-
 def cuFileDriverOpen() -> None:
     lib = _get_lib()
     lib.cuFileDriverOpen.restype = CUfileError_t
@@ -180,22 +111,6 @@ def cuFileDriverClose() -> None:
     lib.cuFileDriverClose.argtypes = []
     err = lib.cuFileDriverClose()
     _check_error(err, "cuFileDriverClose")
-
-
-def cuFileBufRegister(dev_ptr: int, size: int, flags: int = 0) -> None:
-    lib = _get_lib()
-    lib.cuFileBufRegister.restype = CUfileError_t
-    lib.cuFileBufRegister.argtypes = [c_void_p, c_size_t, c_int]
-    err = lib.cuFileBufRegister(c_void_p(dev_ptr), c_size_t(size), c_int(flags))
-    _check_error(err, "cuFileBufRegister")
-
-
-def cuFileBufDeregister(dev_ptr: int) -> None:
-    lib = _get_lib()
-    lib.cuFileBufDeregister.restype = CUfileError_t
-    lib.cuFileBufDeregister.argtypes = [c_void_p]
-    err = lib.cuFileBufDeregister(c_void_p(dev_ptr))
-    _check_error(err, "cuFileBufDeregister")
 
 
 def cuFileHandleRegister(fd: int) -> CUfileHandle_t:
@@ -225,90 +140,6 @@ def cuFileHandleDeregister(handle: CUfileHandle_t) -> None:
     lib.cuFileHandleDeregister(handle)
 
 
-def cuFileStreamRegister(stream_ptr: int, flags: int = 0) -> None:
-    """Register a CUDA stream for cuFile async operations."""
-    lib = _get_lib()
-    lib.cuFileStreamRegister.restype = CUfileError_t
-    lib.cuFileStreamRegister.argtypes = [CUstream_t, c_uint]
-    err = lib.cuFileStreamRegister(CUstream_t(stream_ptr), c_uint(flags))
-    _check_error(err, "cuFileStreamRegister")
-
-
-def cuFileStreamDeregister(stream_ptr: int) -> None:
-    """Deregister a CUDA stream from cuFile."""
-    lib = _get_lib()
-    lib.cuFileStreamDeregister.restype = CUfileError_t
-    lib.cuFileStreamDeregister.argtypes = [CUstream_t]
-    err = lib.cuFileStreamDeregister(CUstream_t(stream_ptr))
-    _check_error(err, "cuFileStreamDeregister")
-
-
-def cuFileReadAsync(
-    handle: CUfileHandle_t,
-    dev_ptr: int,
-    size_p: ctypes.Array,
-    file_offset_p: ctypes.Array,
-    buf_offset_p: ctypes.Array,
-    bytes_read_p: ctypes.Array,
-    stream_ptr: int,
-) -> None:
-    """Enqueue an async read from file to GPU memory on a CUDA stream."""
-    lib = _get_lib()
-    lib.cuFileReadAsync.restype = CUfileError_t
-    lib.cuFileReadAsync.argtypes = [
-        CUfileHandle_t,
-        c_void_p,
-        POINTER(c_size_t),
-        POINTER(c_ssize_t),
-        POINTER(c_ssize_t),
-        POINTER(c_ssize_t),
-        CUstream_t,
-    ]
-    err = lib.cuFileReadAsync(
-        handle,
-        c_void_p(dev_ptr),
-        size_p,
-        file_offset_p,
-        buf_offset_p,
-        bytes_read_p,
-        CUstream_t(stream_ptr),
-    )
-    _check_error(err, "cuFileReadAsync")
-
-
-def cuFileWriteAsync(
-    handle: CUfileHandle_t,
-    dev_ptr: int,
-    size_p: ctypes.Array,
-    file_offset_p: ctypes.Array,
-    buf_offset_p: ctypes.Array,
-    bytes_written_p: ctypes.Array,
-    stream_ptr: int,
-) -> None:
-    """Enqueue an async write from GPU memory to file on a CUDA stream."""
-    lib = _get_lib()
-    lib.cuFileWriteAsync.restype = CUfileError_t
-    lib.cuFileWriteAsync.argtypes = [
-        CUfileHandle_t,
-        c_void_p,
-        POINTER(c_size_t),
-        POINTER(c_ssize_t),
-        POINTER(c_ssize_t),
-        POINTER(c_ssize_t),
-        CUstream_t,
-    ]
-    err = lib.cuFileWriteAsync(
-        handle,
-        c_void_p(dev_ptr),
-        size_p,
-        file_offset_p,
-        buf_offset_p,
-        bytes_written_p,
-        CUstream_t(stream_ptr),
-    )
-    _check_error(err, "cuFileWriteAsync")
-
-
 def cuFileRead(
     handle: CUfileHandle_t,
     dev_ptr: int,
@@ -317,14 +148,6 @@ def cuFileRead(
     buf_offset: int = 0,
 ) -> int:
     """Synchronous read from file to GPU memory. Returns bytes read."""
-    # if size > 65536:
-    #    logger.info(
-    #        "cuFileRead: dev_ptr=0x%x size=%d file_offset=%d buf_offset=%d",
-    #        dev_ptr,
-    #        size,
-    #        file_offset,
-    #        buf_offset,
-    #    )
     lib = _get_lib()
     lib.cuFileRead.restype = c_ssize_t
     lib.cuFileRead.argtypes = [CUfileHandle_t, c_void_p, c_size_t, c_ssize_t, c_ssize_t]
@@ -367,71 +190,6 @@ def cuFileWrite(
     if ret < 0:
         raise RuntimeError(f"cuFileWrite failed: ret={ret}")
     return ret
-
-
-# --- Batch API ---
-
-
-def cuFileBatchIOSetUp(nr: int) -> CUfileBatchHandle_t:
-    """Initialize a batch I/O context for nr operations."""
-    lib = _get_lib()
-    lib.cuFileBatchIOSetUp.restype = CUfileError_t
-    lib.cuFileBatchIOSetUp.argtypes = [POINTER(CUfileBatchHandle_t), c_uint]
-    batch_id = CUfileBatchHandle_t()
-    err = lib.cuFileBatchIOSetUp(ctypes.byref(batch_id), c_uint(nr))
-    _check_error(err, "cuFileBatchIOSetUp")
-    return batch_id
-
-
-def cuFileBatchIOSubmit(
-    batch_id: CUfileBatchHandle_t,
-    nr: int,
-    params: ctypes.Array,
-    flags: int = 0,
-) -> None:
-    """Submit nr batch I/O operations."""
-    lib = _get_lib()
-    lib.cuFileBatchIOSubmit.restype = CUfileError_t
-    lib.cuFileBatchIOSubmit.argtypes = [
-        CUfileBatchHandle_t,
-        c_uint,
-        POINTER(CUfileIOParams_t),
-        c_uint,
-    ]
-    err = lib.cuFileBatchIOSubmit(batch_id, c_uint(nr), params, c_uint(flags))
-    _check_error(err, "cuFileBatchIOSubmit")
-
-
-def cuFileBatchIOGetStatus(
-    batch_id: CUfileBatchHandle_t,
-    min_nr: int,
-    max_nr: int,
-    events: ctypes.Array,
-) -> int:
-    """Poll for completed I/Os. Returns number of events retrieved."""
-    lib = _get_lib()
-    lib.cuFileBatchIOGetStatus.restype = CUfileError_t
-    lib.cuFileBatchIOGetStatus.argtypes = [
-        CUfileBatchHandle_t,
-        c_uint,
-        POINTER(c_uint),
-        POINTER(CUfileIOEvents_t),
-        c_void_p,
-    ]
-    nr = c_uint(max_nr)
-    err = lib.cuFileBatchIOGetStatus(
-        batch_id, c_uint(min_nr), ctypes.byref(nr), events, None
-    )
-    _check_error(err, "cuFileBatchIOGetStatus")
-    return nr.value
-
-
-def cuFileBatchIODestroy(batch_id: CUfileBatchHandle_t) -> None:
-    """Destroy a batch I/O context."""
-    lib = _get_lib()
-    lib.cuFileBatchIODestroy.restype = None
-    lib.cuFileBatchIODestroy.argtypes = [CUfileBatchHandle_t]
-    lib.cuFileBatchIODestroy(batch_id)
 
 
 def open_for_gds(path: str, flags: int) -> int:

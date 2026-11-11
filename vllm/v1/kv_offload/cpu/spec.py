@@ -1,6 +1,6 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
-from typing import Any
+from typing import Any, ClassVar
 
 from typing_extensions import override
 
@@ -45,6 +45,8 @@ def _all_workers_barrier() -> None:
 
 class CPUOffloadingSpec(OffloadingSpec):
     BLOCK_SIZE_ALIGNMENT = SharedOffloadRegion.BLOCK_SIZE_ALIGNMENT
+    # extra_config key holding the total byte budget that sizes num_chunks.
+    CAPACITY_KEY: ClassVar[str] = "cpu_bytes_to_use"
 
     @classmethod
     def build_metric_definitions(
@@ -96,10 +98,10 @@ class CPUOffloadingSpec(OffloadingSpec):
     def __init__(self, config: OffloadingConfig):
         super().__init__(config)
 
-        cpu_bytes_to_use = self.extra_config.get("cpu_bytes_to_use")
+        cpu_bytes_to_use = self.extra_config.get(self.CAPACITY_KEY)
         if not cpu_bytes_to_use:
             raise Exception(
-                "cpu_bytes_to_use must be specified in kv_connector_extra_config"
+                f"{self.CAPACITY_KEY} must be specified in kv_connector_extra_config"
             )
 
         world_size = config.parallel.world_size
@@ -136,7 +138,7 @@ class CPUOffloadingSpec(OffloadingSpec):
         self._manager: OffloadingManager | None = None
 
         # worker-side
-        self._worker: CPUOffloadingWorker | None = None
+        self._worker: OffloadingWorker | None = None
 
         self.eviction_policy: str = self.extra_config.get("eviction_policy", "lru")
         self.cache_policy_module_path: str | None = self.extra_config.get(
@@ -149,27 +151,27 @@ class CPUOffloadingSpec(OffloadingSpec):
         """Return the label names CPUOffloadingManager.config_info() fills."""
         return CPUOffloadingInfo.config_info_keys()
 
-    @override
-    def get_manager(self) -> OffloadingManager:
-        if not self._manager:
+    def _manager_kwargs(self) -> dict[str, Any]:
+        """Constructor arguments for CPUOffloadingManager and its subclasses."""
+        return dict(
+            num_chunks=self.num_chunks,
+            cache_policy=self.eviction_policy,
+            cache_policy_module_path=self.cache_policy_module_path,
+            enable_events=self.kv_events_config.enable_kv_cache_events,
             # store_threshold: how many times a chunk must be offered for
             # storage before it is eligible for CPU offloading.  Values < 2
             # disable filtering (a threshold of 1 equals no filter; 0 is the
             # default).
-            store_threshold = int(self.extra_config.get("store_threshold", 0))
-
+            store_threshold=int(self.extra_config.get("store_threshold", 0)),
             # Maximum entries in the internal tracker's LRU table.
-            max_tracker_size = int(self.extra_config.get("max_tracker_size", 64_000))
+            max_tracker_size=int(self.extra_config.get("max_tracker_size", 64_000)),
+            info=self.cpu_info,
+        )
 
-            self._manager = CPUOffloadingManager(
-                num_chunks=self.num_chunks,
-                cache_policy=self.eviction_policy,
-                cache_policy_module_path=self.cache_policy_module_path,
-                enable_events=self.kv_events_config.enable_kv_cache_events,
-                store_threshold=store_threshold,
-                max_tracker_size=max_tracker_size,
-                info=self.cpu_info,
-            )
+    @override
+    def get_manager(self) -> OffloadingManager:
+        if not self._manager:
+            self._manager = CPUOffloadingManager(**self._manager_kwargs())
         return self._manager
 
     def _uses_shared_region(self) -> bool:
@@ -179,7 +181,7 @@ class CPUOffloadingSpec(OffloadingSpec):
             current_platform.is_cuda_alike() and not current_platform.is_rocm()
         ) or current_platform.is_xpu()
 
-    def create_worker(self, kv_caches: CanonicalKVCaches) -> CPUOffloadingWorker:
+    def create_worker(self, kv_caches: CanonicalKVCaches) -> OffloadingWorker:
         mmap_region: SharedOffloadRegion | None = None
         # num_chunks == 0 would size the region to zero bytes, which cannot be
         # mmap'd; fall back to the tensor path (empty tensors) as before.

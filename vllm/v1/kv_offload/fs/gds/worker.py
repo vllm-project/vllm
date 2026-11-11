@@ -3,8 +3,12 @@
 """GDS offloading worker — direct GPU<->NVMe via cuFile sync API."""
 
 import os
+from typing import Any
+
+import torch
 
 from vllm.logger import init_logger
+from vllm.platforms import current_platform
 from vllm.v1.kv_offload.file_mapper import FileMapper
 from vllm.v1.kv_offload.fs.gds.cufile_bindings import (
     cuFileDriverClose,
@@ -15,11 +19,7 @@ from vllm.v1.kv_offload.fs.gds.cufile_bindings import (
     cuFileWrite,
     open_for_gds,
 )
-from vllm.v1.kv_offload.fs.worker import (
-    DEFAULT_MAX_THREADS,
-    FileOp,
-    ThreadPoolFSWorker,
-)
+from vllm.v1.kv_offload.fs.worker import FileOp, ThreadPoolFSWorker
 
 logger = init_logger(__name__)
 
@@ -38,14 +38,18 @@ class GDSOffloadingWorker(ThreadPoolFSWorker):
 
     def __init__(
         self,
-        block_size_factor: int,
         file_mapper: FileMapper,
-        max_io_threads: int = DEFAULT_MAX_THREADS,
+        block_size_factor: int,
+        device: torch.device,
+        extra_config: dict[str, Any],
     ):
+        if not current_platform.is_cuda():
+            raise RuntimeError("GDS offloading requires an NVIDIA CUDA GPU.")
         super().__init__(
             file_mapper=file_mapper,
             block_size_factor=block_size_factor,
-            max_io_threads=max_io_threads,
+            device=device,
+            max_io_threads=int(extra_config.get("gds_max_io_threads", 32)),
         )
 
         cuFileDriverOpen()
