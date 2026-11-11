@@ -56,6 +56,20 @@ llm = LLM(
 
 ## Backend Selection Behavior
 
+### ALiBi Models
+
+The vLLM `FLASHINFER` backend does not support ALiBi and rejects models that
+require it, such as BLOOM, during initialization. If FlashInfer is selected
+automatically, select a backend that supports ALiBi explicitly.
+
+For example, on Ampere, Ada, or Hopper GPUs, use FlashAttention 2:
+
+```bash
+vllm serve bigscience/bloom-560m \
+    --attention-backend FLASH_ATTN \
+    --attention-config.flash_attn_version=2
+```
+
 ### Triton/FlashAttention Composite
 
 On Hopper, `TRITON_FLASH_ATTN` is preferred for compatible multimodal-prefix

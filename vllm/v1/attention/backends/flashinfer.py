@@ -2061,8 +2061,7 @@ class FlashInferImpl(AttentionImpl):
         self.scale = float(scale)
         self.num_kv_heads = num_kv_heads
         if alibi_slopes is not None:
-            alibi_slopes = torch.tensor(alibi_slopes, dtype=torch.float32)
-        self.alibi_slopes = alibi_slopes
+            raise NotImplementedError("FLASHINFER does not support ALiBi.")
         if sliding_window is None:
             self.sliding_window = (-1, -1)
         else:
