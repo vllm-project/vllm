@@ -72,7 +72,7 @@ GLM5_GLOBAL_INTER = GLM5_CONFIG.inter * GLM5_REFERENCE_TP
 
 
 def glm5_tp_config(tp_size: int) -> LayerConfig:
-    """Return the one GLM-5 shard geometry for ``tp_size``."""
+    """Return the one GLM-5 shard geometry for `tp_size`."""
     if tp_size not in GLM5_TP_SIZES:
         raise ValueError(
             f"GLM-5 tensor parallel size must be one of {GLM5_TP_SIZES}, got {tp_size}"

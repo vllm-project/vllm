@@ -1,16 +1,16 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
-"""Run only the sparse-attention indexer of a ``DeepseekV32MLAAttention`` layer (ROCm).
+"""Run only the sparse-attention indexer of a `DeepseekV32MLAAttention` layer (ROCm).
 
-Mirrors ``DeepseekV32MLAAttention.forward`` / ``_fused_attention`` (amd/rocm.py) up to
-``_run_indexer``: it writes the index-K cache and the shared top-k buffer, but passes
-``mla_kv_cache=None`` to ``fused_norm_rope`` (the MonoKernel writes the MLA row) and
-skips q_b_proj / W_UK / sparse MQA / W_UV / o_proj (``fused_q`` gets zero MQA dummies
+Mirrors `DeepseekV32MLAAttention.forward` / `_fused_attention` (amd/rocm.py) up to
+`_run_indexer`: it writes the index-K cache and the shared top-k buffer, but passes
+`mla_kv_cache=None` to `fused_norm_rope` (the MonoKernel writes the MLA row) and
+skips q_b_proj / W_UK / sparse MQA / W_UV / o_proj (`fused_q` gets zero MQA dummies
 whose outputs are discarded).
 
-``trim=True`` (``DecodeConfig.indexer_trim``) drops discarded work without changing a
+`trim=True` (`DecodeConfig.indexer_trim`) drops discarded work without changing a
 value the indexer consumes: the MQA dummies become persistent zero buffers, and only the
-q_lora rows of ``fused_qkv_a_proj`` are computed (same linear method on a row-slice of
+q_lora rows of `fused_qkv_a_proj` are computed (same linear method on a row-slice of
 the weight, kept per layer and row count only after a one-time bitwise self-check
 against the full GEMM; kv_c / k_pe then come from persistent dummies)."""
 

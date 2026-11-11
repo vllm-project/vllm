@@ -120,6 +120,7 @@ def test_supported_config(make_vc, monkeypatch):
     assert dc.step_sync
     assert dc.max_model_len == 4096
     dc = R.specialized_decode_config(make_vc(graphs="full"))
+    assert dc is not None
     assert dc.step_sync is False
 
 
@@ -157,8 +158,10 @@ def test_moe_refusal():
     model = lambda m: NS(layers={L: NS(mlp=m) for L in range(3, 78)})
     cfg = DecodeConfig()
     assert D.moe_refusal(model(mlp()), cfg) is None
-    assert "AITER_MXFP4_BF16" in D.moe_refusal(model(mlp("AITER_MXFP4_BF16")), cfg)
-    assert "shared" in D.moe_refusal(model(mlp(sh=False)), cfg)
+    assert "AITER_MXFP4_BF16" in (
+        D.moe_refusal(model(mlp("AITER_MXFP4_BF16")), cfg) or ""
+    )
+    assert "shared" in (D.moe_refusal(model(mlp(sh=False)), cfg) or "")
     with pytest.raises(ValueError, match="shared-expert"):
         D.SpecializedDecode(model(mlp(sh=False)), cfg)
 
@@ -369,7 +372,7 @@ def test_model_state(monkeypatch):
 
 def _quark(attention):
     """A QuarkConfig like the GLM-5.2 MXFP4 checkpoints: MXFP4 global, attention
-    excluded ("bf16") or given ``attention`` (a weight / input spec pair)."""
+    excluded ("bf16") or given `attention` (a weight / input spec pair)."""
     from vllm.model_executor.layers.quantization.quark.quark import QuarkConfig
 
     mx = dict(
@@ -426,7 +429,7 @@ def test_attention_quant_selection(make_vc):
 
 
 def _quark_split(fp8):
-    """A QuarkConfig with Quark PTPC FP8 on the attention linears ``fp8`` gives as
+    """A QuarkConfig with Quark PTPC FP8 on the attention linears `fp8` gives as
     {layer: names} and BF16 (excluded) on all others."""
     from vllm.model_executor.layers.quantization.quark.quark import QuarkConfig
 

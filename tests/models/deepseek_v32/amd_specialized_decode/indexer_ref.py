@@ -3,7 +3,7 @@
 """CPU / torch golden model of vLLM's GLM-5.2 decode indexer path on ROCm gfx950.
 
 One decode step, T rows (one token per request), from the indexer layer's normed input
-``h`` to the CSR physical slot list the MonoKernel consumes. Each stage names the vLLM
+`h` to the CSR physical slot list the MonoKernel consumes. Each stage names the vLLM
 code it mirrors:
 
  1. q_c = bf16(rms_norm(bf16(h @ W_qa[:q_lora]^T), w_qa_norm, eps))
@@ -16,7 +16,7 @@ code it mirrors:
  4. w = float(kw[:, 128:]) * s_q * head_dim^-0.5 * n_head^-0.5
       same program ("index weights update")
  5. k = layer_norm(float(kw[:, :128]), w_k, b_k, 1e-6); rope_interleave(k[:64], pos);
-    (k_fp8, s_k) = ue8m0_fp8(k), written at ``slot`` into the uint8 [blocks, 16, 132]
+    (k_fp8, s_k) = ue8m0_fp8(k), written at `slot` into the uint8 [blocks, 16, 132]
     index cache in the SHUFFLE layout
       fused_norm_rope program 0 + _fp8_quant_and_cache_write;
       kw = bf16(h @ W_wk^T) = indexer.wk_weights_proj ([wk (128) | weights_proj (32)])
@@ -27,7 +27,7 @@ code it mirrors:
  7. top-k: torch.ops._C.top_k_per_row_decode (radix histogram select)
       seq_len <= 2048: indices 0..L-1 in order, then -1; else an exact top-2048 SET by
       value in a nondeterministic order, threshold ties taken in arrival order, values
-      compared by float bits (-0.0 < +0.0). ``topk_ref`` returns the canonical choice
+      compared by float bits (-0.0 < +0.0). `topk_ref` returns the canonical choice
       (lowest index among threshold ties) plus the tie set, so comparisons are
       set-equality modulo threshold ties.
  8. CSR: indptr = cumsum(min(seq_len, 2048)) (generate_sparse_seqlen_kernel);
@@ -251,7 +251,7 @@ def decode_step(
 ) -> dict:
     """W: w_qa [q_lora + ..., H] (only the first q_lora rows used), w_qa_norm [q_lora],
     w_qb [32*128, q_lora], w_wk [128 + 32, H], k_norm_w / k_norm_b [128]. h: [T, H] bf16
-    (the layer's normed input). ``cache`` is updated in place at ``slots`` (the current
+    (the layer's normed input). `cache` is updated in place at `slots` (the current
     tokens) before scoring, as in vLLM."""
     T = h.shape[0]
     q_lora = W["w_qa_norm"].shape[0]

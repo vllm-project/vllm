@@ -1,11 +1,11 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 """Build-time checks and the poll-error fail-stop of the GLM-5.2 specialized decode
-(the config-only checks are ``runtime.unsupported``, the KV-bind checks
-``MonoLayers.bind_caches``).
+(the config-only checks are `runtime.unsupported`, the KV-bind checks
+`MonoLayers.bind_caches`).
 
-Build (``SpecializedDecode.__init__``): vLLM's RoPE cache covers max_model_len. Per step
-(``PollErrorWatch``): a non-blocking, one-step-delayed fail-stop on expired kernel
+Build (`SpecializedDecode.__init__`): vLLM's RoPE cache covers max_model_len. Per step
+(`PollErrorWatch`): a non-blocking, one-step-delayed fail-stop on expired kernel
 polls, so the engine fails instead of serving wrong tokens."""
 
 from __future__ import annotations
@@ -21,7 +21,7 @@ logger = init_logger(__name__)
 
 def check_rope_table(backbone, cfg) -> None:
     """VLLM's cos_sin_cache covers the kernel's RoPE table (cfg.max_model_len >= vLLM's
-    max_model_len, see ``runtime.decode_config``)."""
+    max_model_len, see `runtime.decode_config`)."""
     rows = backbone.layers[cfg.layers[0]].self_attn.rotary_emb.cos_sin_cache.shape[0]
     if rows < cfg.max_model_len:
         raise RuntimeError(

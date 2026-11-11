@@ -2,14 +2,14 @@
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 """GLM-5.2 specialized decode: one FlyDSL MonoKernel per MoE decoder layer inside the
 stock layer loop (layer mode), enabled by
-``additional_config={"decode_backend": "latency_specialized"}``. Options (the
-``DecodeConfig`` fields) go under ``additional_config["specialized_decode"]``.
+`additional_config={"decode_backend": "latency_specialized"}`. Options (the
+`DecodeConfig` fields) go under `additional_config["specialized_decode"]`.
 
-``specialized_decode_config`` runs in the model's ``__init__``, before the weights
+`specialized_decode_config` runs in the model's `__init__`, before the weights
 load. It returns None for the stock decode, and raises with every reason from
-``unsupported`` when the specialized decode is requested for a deployment it cannot
+`unsupported` when the specialized decode is requested for a deployment it cannot
 serve. Checks that need the loaded weights run when the executor is built
-(``decode.SpecializedDecode``), those that need the KV cache in ``prepare_kv``."""
+(`decode.SpecializedDecode`), those that need the KV cache in `prepare_kv`."""
 
 from __future__ import annotations
 
@@ -37,8 +37,8 @@ MAX_BATCH_SIZE = 8
 
 @dataclass(frozen=True)
 class DecodeConfig:
-    """Step and kernel options. ``decode_config`` fills it from the defaults, the
-    ``additional_config["specialized_decode"]`` options and vLLM's max_model_len."""
+    """Step and kernel options. `decode_config` fills it from the defaults, the
+    `additional_config["specialized_decode"]` options and vLLM's max_model_len."""
 
     layers: tuple[int, ...] = tuple(range(3, 78))
     poll_limit: int = 20_000_000  # ~4 s per mailbox wait
@@ -113,7 +113,7 @@ def specialized_decode_config(vllm_config) -> DecodeConfig | None:
 
 
 def decode_config(vllm_config) -> DecodeConfig:
-    """The defaults, overridden by ``additional_config["specialized_decode"]``. The
+    """The defaults, overridden by `additional_config["specialized_decode"]`. The
     RoPE table covers vLLM's max_model_len; step_sync (a device sync and a CPU
     all-reduce per step) defaults off under FULL graphs."""
     over = dict(vllm_config.additional_config.get(OPTIONS) or {})
@@ -139,8 +139,8 @@ def unsupported(vllm_config) -> list[str]:
 
 
 def _reasons_and_config(vllm_config) -> tuple[list[str], DecodeConfig | None]:
-    """``unsupported``'s reasons and the ``DecodeConfig`` (None if the options are
-    invalid), so that ``decode_config`` runs once."""
+    """`unsupported`'s reasons and the `DecodeConfig` (None if the options are
+    invalid), so that `decode_config` runs once."""
     from vllm._aiter_ops import rocm_aiter_ops
     from vllm.config import CompilationMode
 
@@ -216,7 +216,7 @@ def attention_quant_reasons(vllm_config, layers) -> list[str]:
     """Why the mono layers' attention linears cannot be read as checkpointed: each must
     be BF16 (excluded from quantization) or Quark per-channel FP8 with per-token
     dynamic activations (PTPC), which the kernel reads with its per-row scales, and the
-    attention proper (all but ``indexer.wq_b``) one precision on every mono layer.
+    attention proper (all but `indexer.wq_b`) one precision on every mono layer.
     Block / per-tensor FP8 and non-Quark quantization (e.g. zai-org/GLM-5.2-FP8) are
     refused: the specialized decode never requantizes weights."""
     qc = getattr(vllm_config, "quant_config", None)

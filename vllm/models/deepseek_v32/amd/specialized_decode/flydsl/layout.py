@@ -36,10 +36,10 @@ POLL_MAX = 12
 
 
 def atom_mxfp4_scale_index(row, col, cols):
-    """Byte of E8M0 scale (row, 32-group col) in aiter's ``e8m0_shuffle`` layout.
+    """Byte of E8M0 scale (row, 32-group col) in aiter's `e8m0_shuffle` layout.
 
     The [rows, cols] scale matrix is
-    ``view(rows / 32, 2, 16, cols / 8, 2, 4).permute(0, 3, 5, 2, 4, 1)``.
+    `view(rows / 32, 2, 16, cols / 8, 2, 4).permute(0, 3, 5, 2, 4, 1)`.
     """
     r32, a, b = row // 32, (row // 16) % 2, row % 16
     c8, d, e = col // 8, (col // 4) % 2, col % 4

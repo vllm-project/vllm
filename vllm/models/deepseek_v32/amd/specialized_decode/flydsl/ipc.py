@@ -105,7 +105,7 @@ class HipRuntime:
         raise RuntimeError(f"{operation} failed: {message}")
 
     def get_allocation_base(self, device_pointer: int) -> int:
-        """Return the hipMalloc allocation base containing ``device_pointer``."""
+        """Return the hipMalloc allocation base containing `device_pointer`."""
         base = ctypes.c_void_p()
         error = self.library().hipPointerGetAttribute(
             ctypes.byref(base),
@@ -150,7 +150,7 @@ class HipRuntime:
         return int(mapped_base.value)
 
     def close_ipc_handle(self, mapped_base: int) -> None:
-        """Close a peer mapping returned by :meth:`open_ipc_handle`."""
+        """Close a peer mapping returned by `open_ipc_handle`."""
         error = self.library().hipIpcCloseMemHandle(ctypes.c_void_p(int(mapped_base)))
         self.check(error, operation="hipIpcCloseMemHandle")
 
@@ -159,12 +159,12 @@ _DEFAULT_RUNTIME = HipRuntime()
 
 
 def get_allocation_base(device_pointer: int) -> int:
-    """Return the base of the HIP allocation containing ``device_pointer``."""
+    """Return the base of the HIP allocation containing `device_pointer`."""
     return _DEFAULT_RUNTIME.get_allocation_base(device_pointer)
 
 
 def get_ipc_handle(allocation_base: int) -> bytes:
-    """Export an IPC handle for ``allocation_base``."""
+    """Export an IPC handle for `allocation_base`."""
     return _DEFAULT_RUNTIME.get_ipc_handle(allocation_base)
 
 
@@ -174,7 +174,7 @@ def open_ipc_handle(handle_bytes: bytes) -> int:
 
 
 def close_ipc_handle(mapped_base: int) -> None:
-    """Close a peer mapping returned by :func:`open_ipc_handle`."""
+    """Close a peer mapping returned by `open_ipc_handle`."""
     _DEFAULT_RUNTIME.close_ipc_handle(mapped_base)
 
 

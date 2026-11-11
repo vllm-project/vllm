@@ -19,7 +19,7 @@ import torch
 
 
 def pack_fp8(q: torch.Tensor) -> torch.Tensor:
-    """Pack FP8 ``[..., N, K]`` for the kernel's 16-row, 64-K MFMA tiles."""
+    """Pack FP8 `[..., N, K]` for the kernel's 16-row, 64-K MFMA tiles."""
     *lead, rows, k = q.shape
     if rows % 16 or k % 64:
         raise ValueError(

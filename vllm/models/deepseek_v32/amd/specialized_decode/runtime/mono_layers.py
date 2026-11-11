@@ -5,24 +5,24 @@
 On every pure-decode step of at most MAX_BATCH_SIZE requests, the kernel replaces vLLM's
 decoder layer for the mono layers (3..77); every other step (prefill, mixed, profiling /
 dummy runs, too many rows) runs vLLM's layers. The decision is taken once per step
-(``begin_step``, from ``SpecializedDecode.plan`` before the layer loop), from attention
+(`begin_step`, from `SpecializedDecode.plan` before the layer loop), from attention
 metadata identical on all TP ranks.
 
-Boundary: the first mono layer computes ``(normed, x) = fused_allreduce_rms_norm(
-h_partial, residual)``; each mono layer returns ``(zeros_L, x_out)`` and the next one
-checks that its input is that zeros view; vLLM's final norm of ``(zeros, x_out)`` is
-``norm(x_out)``. zeros_L is a view of a persistent per-layer zero buffer, so an output
+Boundary: the first mono layer computes `(normed, x) = fused_allreduce_rms_norm(
+h_partial, residual)`; each mono layer returns `(zeros_L, x_out)` and the next one
+checks that its input is that zeros view; vLLM's final norm of `(zeros, x_out)` is
+`norm(x_out)`. zeros_L is a view of a persistent per-layer zero buffer, so an output
 never aliases an input; only the last layer's buffer is re-zeroed per step (the fused
 final norm writes its residual into it).
 
-Attention precision follows the checkpoint (``attention_path``): BF16 attention, or a
+Attention precision follows the checkpoint (`attention_path`): BF16 attention, or a
 checkpoint's per-channel FP8 attention read with its own per-row scales (never
-requantized). With FP8 attention, an FP8 indexer ``wq_b``, max_model_len <= 4096 and a
+requantized). With FP8 attention, an FP8 indexer `wq_b`, max_model_len <= 4096 and a
 first mono layer that is not an indexer layer, the indexer layers run the fused indexer
 (in-kernel index-K cache write, scores and top-k select); otherwise non-fused indexer
 layers refresh vLLM's top-k buffer and index-K cache through vLLM's attention
-(``indexer_mode="attn"``, output discarded, its MLA row then overwritten by the kernel)
-or the indexer alone (``"indexer_only"``). vLLM's logical top-k becomes kernel CSR
+(`indexer_mode="attn"`, output discarded, its MLA row then overwritten by the kernel)
+or the indexer alone (`"indexer_only"`). vLLM's logical top-k becomes kernel CSR
 slots at the first mono layer and after every non-fused indexer layer. T is padded to
 the next built batch size with inactive rows (slot -1, empty sparse range, position 0,
 zero hidden)."""
@@ -69,7 +69,7 @@ def attention_path(
     """(FP8 attention, fused-indexer layers, why the fused indexer is off or '') from
     the loaded mono layers' weight dtypes: the checkpoint decides, nothing is
     requantized. Attention (qkv_a, q_b, kv_b, o) must be all BF16 or all FP8 on every
-    mono layer; the fused indexer needs FP8 attention, the layer's FP8 ``wq_b``,
+    mono layer; the fused indexer needs FP8 attention, the layer's FP8 `wq_b`,
     max_model_len <= 4096 and a first mono layer without an indexer (it converts
     vLLM's top-k). Raises RuntimeError on partial / mixed FP8 attention."""
     from .vllm_weights import is_fp8
@@ -154,7 +154,7 @@ def mla_cache(layer) -> torch.Tensor:
 
 def rope_tables(layer, max_len: int | None = None) -> tuple[torch.Tensor, torch.Tensor]:
     """Kernel RoPE ABI: contiguous BF16 [max_pos, 32] cos / sin (interleaved pairs) from
-    vLLM's ``rotary_emb.cos_sin_cache`` [max_pos, 64] = [cos | sin]."""
+    vLLM's `rotary_emb.cos_sin_cache` [max_pos, 64] = [cos | sin]."""
     c = layer.self_attn.rotary_emb.cos_sin_cache[:max_len]
     assert c.shape[1] == 2 * ROPE_HALF, c.shape
     return (
@@ -409,7 +409,7 @@ class MonoLayers:
     def bind_caches(self):
         """Resolve every mono layer's MLA cache and point the fused-indexer ops at the
         index caches (an H2D copy: never inside a capture). Run at every KV bind
-        (``SpecializedDecode.prepare_kv``): under FULL graphs vLLM's CUDA-graph memory
+        (`SpecializedDecode.prepare_kv`): under FULL graphs vLLM's CUDA-graph memory
         profiling binds minimal caches (one block per capture row), runs mono steps on
         them, frees them and allocates the real ones; a binding kept from that run would
         address the real slots in an 8-block buffer.
@@ -552,9 +552,9 @@ class MonoLayers:
         writes the padded per-step inputs and returns the padded batch size (else None).
 
         Metadata reasons need no vote (identical on every TP rank). Rank-local state
-        (``enabled``) enters only through a step_sync vote: the one taken at the end of
+        (`enabled`) enters only through a step_sync vote: the one taken at the end of
         the last check step, or one taken here while no "on" vote stands. Without
-        step_sync (FULL graphs) ``enabled`` is read directly."""
+        step_sync (FULL graphs) `enabled` is read directly."""
         self.active = False
         T = positions.shape[0]
         md, sm = layer_metadata(self.layers[self.first].self_attn.layer_name)
@@ -624,7 +624,7 @@ class MonoLayers:
     def run_layer(self, layer, positions, hidden_states, residual):
         """One mono layer of an active step -> (zeros_L, x_out[:T]), never aliasing the
         inputs; may mutate the first mono layer's hidden_states / residual in place (the
-        boundary norm). ``Step.layer`` hands it to the model's layer loop."""
+        boundary norm). `Step.layer` hands it to the model's layer loop."""
         L = layer.layer_idx
         if not self.active:
             raise RuntimeError(
@@ -692,7 +692,7 @@ class MonoLayers:
 
     def _end_step(self, out):
         """Eager health check (step_sync, every check_every kernel steps): expired
-        polls fail-stop unless ``failstop`` is "warn" / "off"; then, and for non-finite
+        polls fail-stop unless `failstop` is "warn" / "off"; then, and for non-finite
         output, the kernels are disabled from the next step through the rank-uniform
         vote. Under FULL graphs the executor's PollErrorWatch does the check."""
         if self.dev_nonfinite is not None:  # capture-safe, no host sync

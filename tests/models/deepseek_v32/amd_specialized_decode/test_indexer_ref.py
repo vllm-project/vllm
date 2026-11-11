@@ -445,7 +445,7 @@ def _lds_select(
     scores: torch.Tensor, barrier_after_digit: bool, order
 ) -> tuple[list, list]:
     """-> (CSR positions written in [0, topk) order, out-of-range offsets written).
-    ``order``: wave order within every barrier phase."""
+    `order`: wave order within every barrier phase."""
     L = scores.numel()
     key = R.order_key(scores).tolist() + [0] * (MAXS - L)
     thr_true = sorted(key[:L], reverse=True)[TOPK - 1]

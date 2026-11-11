@@ -1,7 +1,7 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 """Shared fixtures of the GLM-5.2 specialized decode (ROCm, specialized_decode/) CPU
-tests. MonoLayers and SpecializedDecode are built bare (``__new__``) around fake kernel
+tests. MonoLayers and SpecializedDecode are built bare (`__new__`) around fake kernel
 ops (no GPU, no FlyDSL)."""
 
 import importlib
@@ -47,7 +47,7 @@ def failstop_latch(monkeypatch):
 @pytest.fixture
 def make_vc():
     """A VllmConfig stand-in the specialized decode accepts (switch on); keyword args
-    override it. ``graphs``: None (no cudagraph mode), "full" or a CUDAGraphMode."""
+    override it. `graphs`: None (no cudagraph mode), "full" or a CUDAGraphMode."""
 
     def make(
         model_type="glm_moe_dsa",

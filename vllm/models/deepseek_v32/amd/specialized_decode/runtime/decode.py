@@ -3,12 +3,12 @@
 """The GLM-5.2 specialized decode executor (layer mode): one routing decision per step,
 then a MonoKernel per MoE decoder layer inside the stock layer loop.
 
-Built by the model state once the weights are loaded (``DeepseekV32ModelState``): reads
-vLLM's loaded weights in place (``vllm_weights``), builds the kernels of every batch
+Built by the model state once the weights are loaded (`DeepseekV32ModelState`): reads
+vLLM's loaded weights in place (`vllm_weights`), builds the kernels of every batch
 size, the buffers and the IPC peers, before memory profiling and graph capture.
-``prepare_kv`` binds it to every KV cache vLLM allocates (the CUDA-graph
-memory-profiling cache, then the real one). Each step ``plan`` returns a ``Step`` or
-None; ``Step.layer(i)`` is the kernel callable of mono layer i (None for vLLM's layers
+`prepare_kv` binds it to every KV cache vLLM allocates (the CUDA-graph
+memory-profiling cache, then the real one). Each step `plan` returns a `Step` or
+None; `Step.layer(i)` is the kernel callable of mono layer i (None for vLLM's layers
 0..2). Weight reloads are not supported."""
 
 from __future__ import annotations
@@ -53,7 +53,7 @@ class Step(NamedTuple):
 
 def moe_refusal(backbone, cfg: DecodeConfig) -> str | None:
     """None if every mono layer's MoE weights have the layout the kernel reads in
-    place (``vllm_weights.unsupported_moe``), else why not."""
+    place (`vllm_weights.unsupported_moe`), else why not."""
     from vllm.models.deepseek_v32.amd.specialized_decode.runtime.vllm_weights import (
         unsupported_moe,
     )
@@ -95,8 +95,8 @@ class SpecializedDecode:
         )
 
     def _poll_watch(self):
-        """Fail-stop on expired kernel polls, advanced by ``after_step``;
-        ``failstop="off"`` disables it, ``"warn"`` logs."""
+        """Fail-stop on expired kernel polls, advanced by `after_step`;
+        `failstop="off"` disables it, `"warn"` logs."""
         if self.cfg.failstop == "off":
             logger.warning("failstop=off: no poll-error fail-stop watch")
             return None
@@ -104,7 +104,7 @@ class SpecializedDecode:
 
     def prepare_kv(self) -> None:
         """Bind the kernels to the KV caches vLLM just bound (the CUDA-graph memory
-        profiling cache, then the real one), checking them (``bind_caches``)."""
+        profiling cache, then the real one), checking them (`bind_caches`)."""
         self._kv = None
         kv = mla_cache(self.mono.layers[self.mono.first])
         if kv is None or kv.numel() == 0:
@@ -120,7 +120,7 @@ class SpecializedDecode:
           (profiling, dummy runs);
         - PIECEWISE steps (captured without attention metadata);
         - steps with prefill rows, batches larger than MAX_BATCH_SIZE or top-k other
-          than 2048 (``mono_layers.step_reason``) and, eager, a rank-uniform no-go vote.
+          than 2048 (`mono_layers.step_reason`) and, eager, a rank-uniform no-go vote.
 
         Eager steps (enforce_eager, or batch sizes FULL graphs did not capture) run
         the kernels too. Every predicate is the same on all TP ranks: the kernels'

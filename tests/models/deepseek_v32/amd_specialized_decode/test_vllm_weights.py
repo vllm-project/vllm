@@ -257,7 +257,7 @@ def _fp8(g, *shape):
 
 def _fp8_linear(g, rows, k, kernel="AiterPreshuffledPerTokenFp8ScaledMMLinearKernel"):
     """A Quark PTPC FP8 linear as process_weights_after_loading leaves it under
-    ``kernel``; returns (module, checkpoint values [rows, k], scales [rows])."""
+    `kernel`; returns (module, checkpoint values [rows, k], scales [rows])."""
     from vllm.model_executor.layers.quantization.utils.quant_utils import (
         kFp8DynamicTokenSym,
         kFp8StaticChannelSym,
@@ -413,6 +413,7 @@ def test_index_weights_from_model():
         )
     )
     t = VW.index_weights_from_model(attn)
+    assert t is not None
     assert torch.equal(t["w_index_q"].view(torch.uint8), q.view(torch.uint8))
     assert torch.equal(t["s_index_q"], s)
     assert t["w_index_k"].data_ptr() == kw.data_ptr()

@@ -134,8 +134,8 @@ def layout(
     split_keys: int | None = None,
 ):
     """Return byte offsets for per-rank scratch and symmetric peer buffers.
-    ``split_keys``: keys per sparse-MLA split task (default ``sparse_keys_per_task``; 64
-    with ``split_keys64``).
+    `split_keys`: keys per sparse-MLA split task (default `sparse_keys_per_task`; 64
+    with `split_keys64`).
     """
     split_count = sparse_attention_topk // (
         split_keys or sparse_keys_per_task(samples, heads)
@@ -218,7 +218,7 @@ def stage_tasks(
     inter: int = INTER,
     split_keys: int | None = None,
 ):
-    """Return ``(stage name, task count)`` pairs in execution order."""
+    """Return `(stage name, task count)` pairs in execution order."""
     tasks = [
         ("qkv_a", N_QKV_A),
         ("q_norm", samples),

@@ -1,11 +1,11 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
-"""CPU tests of the mono layers' step logic (``runtime/mono_layers.MonoLayers``,
+"""CPU tests of the mono layers' step logic (`runtime/mono_layers.MonoLayers`,
 built bare around fake kernel ops) and the executor's plan (runtime/decode.py): the
 eager health check and its fail-stop, rank-uniform votes, the no-alias contract, the
 once-per-step plan and Step.layer, the padded step inputs, KV cache binding at every
 prepare_kv (CUDA-graph memory profiling, then the real cache), RoPE tables / metadata
-lookup, and ``Glm5MonoKernel.forward``'s launch caching (needs FlyDSL)."""
+lookup, and `Glm5MonoKernel.forward`'s launch caching (needs FlyDSL)."""
 
 from functools import partial
 from types import SimpleNamespace as NS
@@ -74,8 +74,8 @@ def bare_layers(step_sync=True, check_every=1, failstop="raise"):
     ml.ops = {(3, 1): ScratchOp()}
     ml._st = dict(T=1, S=1, md=None)
     ml._n_steps, ml._voted = 1, None
-    ml.votes = []
-    ml._go = lambda ok: (ml.votes.append(ok), ok)[1]  # single-rank CPU group
+    ml.votes = []  # type: ignore[attr-defined]
+    ml._go = lambda ok: (ml.votes.append(ok), ok)[1]  # type: ignore[attr-defined,method-assign]  # single-rank CPU group
     return ml
 
 
@@ -559,9 +559,9 @@ def test_op_launch_caching(monkeypatch, import_kernel):
 
 
 def _attn_layers(fp8=(), index_fp8=True, layers=(3, 4, 5, 6, 7, 8), indexer=(4, 6, 8)):
-    """Mono layers whose attention linears are FP8 for the kernel matrices in ``fp8``
+    """Mono layers whose attention linears are FP8 for the kernel matrices in `fp8`
     ({layer: names} or one tuple for all), the indexer layers' wq_b FP8 if
-    ``index_fp8``."""
+    `index_fp8`."""
 
     def w(is_fp8):
         return NS(weight=torch.zeros(2, dtype=torch.float8_e4m3fn if is_fp8 else bf))

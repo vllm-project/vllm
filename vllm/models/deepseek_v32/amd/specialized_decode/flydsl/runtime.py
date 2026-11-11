@@ -33,7 +33,7 @@ class SymmetricPeerBuffer:
     """Allocate one symmetric buffer and exchange its address with every rank.
 
     Remote HIP IPC mappings stay open for the life of the process. The local
-    allocation is owned by ``storage`` and stays alive for the wrapper's lifetime.
+    allocation is owned by `storage` and stays alive for the wrapper's lifetime.
     """
 
     def __init__(self, nbytes: int, rank: int = 0, npes: int = 1, group=None):

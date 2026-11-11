@@ -1,11 +1,11 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 """The MonoKernel's weights: views of one decoder layer's parameters as vLLM loaded
-them (TP8 rank, after ``process_weights_after_loading``). The kernel reads them in
+them (TP8 rank, after `process_weights_after_loading`). The kernel reads them in
 place: no checkpoint read, no copy of the experts or of the BF16 attention / router
 matrices.
 
-Kernel contract (``flydsl.weights.LayerWeights.t``; 8 local heads, expert
+Kernel contract (`flydsl.weights.LayerWeights.t`; 8 local heads, expert
 intermediate 256 of 2048):
 
   g_in, g_post   input_layernorm / post_attention_layernorm .weight, BF16 [6144]
@@ -30,22 +30,22 @@ intermediate 256 of 2048):
                  .weight_scale) under AiterMxfp4LinearKernel: row-major values with
                  scales transposed to [K / 32, rows] (Triton FP4 GEMM, the default),
                  or the experts' shuffles (VLLM_ROCM_USE_AITER_FP4_ASM_GEMM=1);
-                 ``shared_native`` says which
+                 `shared_native` says which
 
 MXFP4 is e2m1 low-nibble-first with an E8M0 scale per 32 along K.
 
-FP8 checkpoints (Quark ``QuarkW8A8Fp8`` per-channel weights, per-token dynamic
+FP8 checkpoints (Quark `QuarkW8A8Fp8` per-channel weights, per-token dynamic
 activations, e.g. amd/GLM-5.2-Quark-MXFP4-AttnFP8): each FP8 attention linear gives
-``w_<name>`` = the checkpoint's float8_e4m3fn values as [rows, K] row-major and
-``s_<name>`` = its F32 scale per output row, never requantized. vLLM's FP8 linear
-kernel decides the stored layout (notes in ``fp8_linear_rows``): a [K, N] / [N, K]
+`w_<name>` = the checkpoint's float8_e4m3fn values as [rows, K] row-major and
+`s_<name>` = its F32 scale per output row, never requantized. vLLM's FP8 linear
+kernel decides the stored layout (notes in `fp8_linear_rows`): a [K, N] / [N, K]
 view is read as is, aiter's (16, 16) preshuffle is un-shuffled (a byte permutation,
-copied). FP8 ``kv_b_proj`` gives w_uv / s_uv (rows of kv_b: a copy of those rows); its
-per-row scale runs along w_uk's K, so w_uk is then MLA's BF16 ``W_UK_T`` (vLLM's own
+copied). FP8 `kv_b_proj` gives w_uv / s_uv (rows of kv_b: a copy of those rows); its
+per-row scale runs along w_uk's K, so w_uk is then MLA's BF16 `W_UK_T` (vLLM's own
 dequantization, transposed into a copy). The kernel's FP8 matrices are the keys with an
-``s_<name>`` entry.
+`s_<name>` entry.
 
-Refused (``WeightViewError``): a shared expert fused into the routed tensors, any MoE
+Refused (`WeightViewError`): a shared expert fused into the routed tensors, any MoE
 backend other than AITER_MXFP4_MXFP4 (the expert layout is the backend's), attention
 linears quantized any other way (block / per-tensor FP8, FNUZ, unknown FP8 linear
 kernels), and every shape / dtype / contiguity mismatch: the kernel's buffer loads are
@@ -141,8 +141,9 @@ def _bf16(p, name: str, shape: tuple[int, ...]) -> torch.Tensor:
 
 
 def unshuffle_16x16(w: torch.Tensor) -> torch.Tensor:
-    """Inverse of aiter ``shuffle_weight(w, layout=(16, 16))`` for 1-byte elements
-    ([N/16][K/32][2][16 rows][16 B] -> row-major [N, K]): a byte permutation (copy)."""
+    """Inverse of aiter `shuffle_weight(w, layout=(16, 16))` for 1-byte elements
+    (`[N/16][K/32][2][16 rows][16 B]` -> row-major `[N, K]`): a byte permutation
+    (copy)."""
     n, k = w.shape
     _need(n % 16 == 0 and k % 32 == 0, f"preshuffled FP8 shape {(n, k)}")
     return w.view(n // 16, k // 32, 2, 16, 16).permute(0, 3, 1, 2, 4).reshape(n, k)
@@ -156,7 +157,7 @@ def fp8_linear_rows(mod, name: str, shape: tuple[int, int]):
     """(values float8_e4m3fn [rows, K] row-major, scales F32 [rows]) of a loaded Quark
     per-channel FP8 linear: the checkpoint's bytes and scales, never requantized.
 
-    QuarkW8A8Fp8.process_weights_after_loading stores ``weight.t()`` (a [K, N] view)
+    QuarkW8A8Fp8.process_weights_after_loading stores `weight.t()` (a [K, N] view)
     and the scale as [N, 1]; then the FP8 linear kernel may repack: aiter's
     preshuffled / hipBLASLt kernels shuffle_weight the [N, K] bytes (16, 16), the
     per-token CK kernel transposes back to [N, K] (kernels/linear/scaled_mm/aiter.py).
@@ -326,10 +327,10 @@ def weights_from_model(layer) -> tuple[dict[str, torch.Tensor], dict]:
 
 
 def index_weights_from_model(attn) -> dict[str, torch.Tensor] | None:
-    """The fused indexer's projections, or None when the checkpoint's ``wq_b`` is not
-    FP8 (the fused indexer then stays off): index Q = the FP8 ``wq_b`` [4096, 2048] +
+    """The fused indexer's projections, or None when the checkpoint's `wq_b` is not
+    FP8 (the fused indexer then stays off): index Q = the FP8 `wq_b` [4096, 2048] +
     per-row scales (as fp8_linear_rows), index K / head weights = row views of vLLM's
-    BF16 ``wk_weights_proj`` [128 | 32, 6144] (vLLM dequantizes an FP8 ``wk`` itself
+    BF16 `wk_weights_proj` [128 | 32, 6144] (vLLM dequantizes an FP8 `wk` itself
     at load, deepseek_v2._try_load_fp8_indexer_wk), k_norm F32 [128] weight / bias."""
     ind = attn.indexer
     if not is_fp8(ind.wq_b.weight):

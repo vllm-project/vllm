@@ -65,12 +65,12 @@ _INDEX_WEIGHTS = (
 
 
 def fp8_attention_of(t: dict) -> tuple[str, ...]:
-    """The attention matrices given as FP8 (those with an ``s_<name>`` row scale)."""
+    """The attention matrices given as FP8 (those with an `s_<name>` row scale)."""
     return tuple(name for name in FP8_ATTENTION if f"s_{name}" in t)
 
 
 def _fp8_rows(t: dict, name: str) -> tuple[torch.Tensor, torch.Tensor]:
-    """``pack_fp8`` tiles of FP8 [rows, K] ``w_<name>`` + its F32 [rows] scales."""
+    """`pack_fp8` tiles of FP8 [rows, K] `w_<name>` + its F32 [rows] scales."""
     w, s = t[f"w_{name}"], t[f"s_{name}"]
     _expect(w, f"w_{name}", tuple(w.shape), torch.float8_e4m3fn)
     _expect(s, f"s_{name}", (w.shape[0],), torch.float32)
@@ -110,7 +110,7 @@ def prepare_glm5_weights(W: LayerWeights) -> dict[str, torch.Tensor]:
     """The tensors the kernel reads, once for every graph bucket using them: vLLM's
     loaded tensors in place (BF16 attention and router row-major, routed experts in
     aiter's (16, 16) shuffle + e8m0_shuffle scales, the shared expert's own tensors);
-    a checkpoint's FP8 attention matrices (``s_<name>`` given) packed into 16 x 64
+    a checkpoint's FP8 attention matrices (`s_<name>` given) packed into 16 x 64
     tiles (a layout copy: the values and scales are the checkpoint's).
     """
     t, cfg = W.t, W.config
@@ -166,11 +166,11 @@ class Glm5MonoKernel:
 
     A single persistent launch covers the attention projections, the KV cache
     update, sparse MLA over the given top-k slots, routing, all expert compute, and
-    both TP reductions. ``group`` is a torch.distributed group (None for npes=1).
+    both TP reductions. `group` is a torch.distributed group (None for npes=1).
 
     The symmetric buffer uses PyTorch's caching allocator and CUDA/ROCm IPC
     storage sharing. Scratch and symmetric buffers may be shared by all layers
-    because every launch uses a fresh ``tag``.
+    because every launch uses a fresh `tag`.
     """
 
     def __init__(
@@ -342,9 +342,9 @@ class Glm5MonoKernel:
         slot_mapping=None,
         sparse_kv_indptr=None,
     ):
-        """One layer.  Mailbox epochs are ``step * launches_per_step + layer + 1``:
-        layers sharing this scratch within a decode step need distinct ``layer``; call
-        ``advance_step`` (or pass ``advance=True``) once per step.  Both are
+        """One layer.  Mailbox epochs are `step * launches_per_step + layer + 1`:
+        layers sharing this scratch within a decode step need distinct `layer`; call
+        `advance_step` (or pass `advance=True`) once per step.  Both are
         stream-ordered device ops, so the sequence can be captured in a HIP graph.
         """
         if not 0 <= layer < self.launches_per_step:

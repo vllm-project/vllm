@@ -1,6 +1,6 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
-"""Cross-rank poll-expiry flag (``poll_xrank``).
+"""Cross-rank poll-expiry flag (`poll_xrank`).
 
 A rank whose bounded wait expires sets its word in rank 0's symmetric buffer, so the
 output rank sees every rank's expiries.

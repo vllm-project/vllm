@@ -21,7 +21,7 @@
 
 """GLM-5 indexed decode MonoKernel: one persistent launch per TP rank.
 
-One launch of ``grid = 256 CTAs x 512 threads`` (one CTA per MI355X CU) runs the
+One launch of `grid = 256 CTAs x 512 threads` (one CTA per MI355X CU) runs the
 whole decoder-layer body for this rank's TP shard.  The indexed path adds the
 selection refresh to the same resident grid instead of consuming externally
 prepared sparse indices::
@@ -37,23 +37,23 @@ prepared sparse indices::
       -> mid FP8 quant -> expert down + route weighting
       -> MoE TP peer reduce + residual -> x_out                   (sym_ffn)
 
-Scheduling: every stage is a list of tasks; task ``t`` of a stage runs on CTA
-``(stage_base + t) % 256`` and every CTA walks the stages in order.  There is
+Scheduling: every stage is a list of tasks; task `t` of a stage runs on CTA
+`(stage_base + t) % 256` and every CTA walks the stages in order.  There is
 no grid-wide barrier: dependencies only point to earlier stages and all CTAs
 are co-resident, so every spin wait makes progress.
 
 Mailboxes are *tagged pairs*: every 32-bit value a task hands to another CTA
-(or GPU) is stored next to this launch's epoch tag, ``(value, tag)``, with
-device- (``sc1``) or system-coherent (``sc0 sc1``) 8 / 16-byte stores.  A
+(or GPU) is stored next to this launch's epoch tag, `(value, tag)`, with
+device- (`sc1`) or system-coherent (`sc0 sc1`) 8 / 16-byte stores.  A
 consumer polls the payload itself until the tags match, so a hand-off costs
 one memory round trip: no store drain, no separate flag, no second load.
 
 GEMVs run on the matrix cores, reading vLLM's loaded weights in place: BF16
-matrices row-major, the MXFP4 experts in aiter's (16, 16) shuffle (``unit_mxfp4``),
+matrices row-major, the MXFP4 experts in aiter's (16, 16) shuffle (`unit_mxfp4`),
 the shared expert from its own module; a checkpoint's FP8 attention / index-Q
-weights (per-output-row F32 scales) are host-repacked (``pack_fp8``, a layout copy)
+weights (per-output-row F32 scales) are host-repacked (`pack_fp8`, a layout copy)
 into contiguous 1 KB tiles. MXFP4 / FP8 are widened exactly to bf16 and fed to
-``mfma_f32_16x16x32_bf16`` with the samples as the N dimension; each MXFP4 chunk's
+`mfma_f32_16x16x32_bf16` with the samples as the N dimension; each MXFP4 chunk's
 partial is scaled by its activation scale / route weight into the accumulator, an FP8
 matrix's sum by its row scale (W8A16: exact per-channel FP8 weights on bf16
 activations).  Weight loads that do not depend on upstream results are issued before
@@ -177,10 +177,10 @@ _STREAM = fx.Stream(None)
 
 
 def _ue8m0_scale(amax):
-    """The exact scale of vLLM's ``_fp8_ue8m0_quantize`` and its reciprocal.
+    """The exact scale of vLLM's `_fp8_ue8m0_quantize` and its reciprocal.
 
     scale = 2^ceil(log2(div_rn(max(amax, 1e-4), 448))); both are powers of two, so
-    ``v * inv`` == the IEEE ``v / scale``. Exponent arithmetic on the bits instead of
+    `v * inv` == the IEEE `v / scale`. Exponent arithmetic on the bits instead of
     log2 / exp2 (x >= 1e-4 / 448 is a positive normal float). [vLLM uses tl.math.log2:
     identical unless its approximation rounds log2 of a value just above a power of two
     down to the integer -- not observed.]
@@ -216,32 +216,32 @@ def build_glm5_monokernel(
     index_proj_spread: bool = False,
     shared_native: bool = True,
 ):
-    """Return the ``@flyc.jit`` launcher for one rank's whole layer.
+    """Return the `@flyc.jit` launcher for one rank's whole layer.
 
     Defaults reproduce the vendored FlyDSL kernel; vLLM's tuned defaults are in
-    ``DecodeConfig`` (runtime/__init__.py).
+    `DecodeConfig` (runtime/__init__.py).
 
-    ``fp8_attention``: the attention matrices (of ``FP8_ATTENTION``) given as the
-    checkpoint's FP8 E4M3 values (host-packed by ``pack_fp8``) with one F32 scale per
-    output row at ``s_<name>``; the others are BF16 row-major (scale slot unused).
+    `fp8_attention`: the attention matrices (of `FP8_ATTENTION`) given as the
+    checkpoint's FP8 E4M3 values (host-packed by `pack_fp8`) with one F32 scale per
+    output row at `s_<name>`; the others are BF16 row-major (scale slot unused).
 
-    ``with_indexer``: the fused indexer on vLLM's paged FP8 index cache (all of
-    ``FP8_ATTENTION`` FP8). Index projections: Q from the checkpoint's FP8 ``wq_b``
-    (per-row scales), K / head weights from vLLM's BF16 ``wk_weights_proj``. Index-K
+    `with_indexer`: the fused indexer on vLLM's paged FP8 index cache (all of
+    `FP8_ATTENTION` FP8). Index projections: Q from the checkpoint's FP8 `wq_b`
+    (per-row scales), K / head weights from vLLM's BF16 `wk_weights_proj`. Index-K
     is ue8m0-FP8 quantized into the uint8 [blocks, 16, 132] SHUFFLE cache
     at the row's slot, scoring reads it through the decode block table, and the exact
-    top-2048 is written as the physical-slot CSR at ``sparse_kv_indptr`` offsets.
-    The index q is ue8m0 FP8 per head, as vLLM's ``fused_q``, and the exact top-k is
-    an 11/11/10-bit radix select. ``cache_hoist`` / ``split_keys64`` /
-    ``index_proj_spread``: hoisted cache-stage loads, 64-key split tasks, and the
+    top-2048 is written as the physical-slot CSR at `sparse_kv_indptr` offsets.
+    The index q is ue8m0 FP8 per head, as vLLM's `fused_q`, and the exact top-k is
+    an 11/11/10-bit radix select. `cache_hoist` / `split_keys64` /
+    `index_proj_spread`: hoisted cache-stage loads, 64-key split tasks, and the
     index-K/W projections on CTAs idle during qkv_a.
 
-    ``poll_limit`` (back-port of FlyDSL #1214) bounds the re-polls of every mailbox
-    wait.  An expired wait sets its stage's ``poll_err`` scratch word and continues, so
+    `poll_limit` (back-port of FlyDSL #1214) bounds the re-polls of every mailbox
+    wait.  An expired wait sets its stage's `poll_err` scratch word and continues, so
     a protocol defect finishes the launch with wrong values instead of hanging the GPU.
-    After the first expiry the rank's ``poll_abort`` word holds ``step + 1`` and every
+    After the first expiry the rank's `poll_abort` word holds `step + 1` and every
     later wait of that step returns at its first retry -- only with
-    ``poll_early_out=True`` (it adds one device-scope load per retry iteration; the
+    `poll_early_out=True` (it adds one device-scope load per retry iteration; the
     default generates exactly the bounded loop of before).
     """
     assert poll_limit is None or poll_limit > 0
@@ -506,7 +506,7 @@ def build_glm5_monokernel(
             return fx.Float32(fx.Float32(a).to(fx.BFloat16))
 
         def index_arg(i):
-            """Entry i of the fused indexer's parameter table (``index_params``)."""
+            """Entry i of the fused indexer's parameter table (`index_params`)."""
             return ld_u64(_rsrc(index_params), i)
 
         # ---- tagged-pair mailboxes
@@ -521,7 +521,7 @@ def build_glm5_monokernel(
             return scratch + fx.Int64(SC[name])
 
         def put(base_addr, i, v, cm=CM_DEV):
-            """Pair i := (v, tag); ``v`` f32 (or int32 bits)."""
+            """Pair i := (v, tag); `v` f32 (or int32 bits)."""
             bits = v.bitcast(fx.Int32) if isinstance(v, fx.Float32) else fx.Int32(v)
             bo.buffer_store(
                 fx.Vector.from_elements([bits, tag], fx.Int32),
@@ -565,7 +565,7 @@ def build_glm5_monokernel(
             )
 
         def poll(specs, scope="agent", batch=POLL_MAX):
-            """Batched poll of mailbox pairs: ``specs`` = [(base_addr, pair index,
+            """Batched poll of mailbox pairs: `specs` = [(base_addr, pair index,
             npairs in {1, 2})].
 
             All pairs are loaded together with plain 8 / 16-byte coherent buffer loads
@@ -745,10 +745,10 @@ def build_glm5_monokernel(
 
         # ------------------------------------------------ MFMA GEMV machinery
         def unit_fp8x2(w_rsrc, rg, kc, NKC, b_word):
-            """Both 64-k halves (64-k chunks kc, kc + 1) of row group ``rg`` of a
-            ``pack_fp8`` FP8 matrix; the bf16 activation chunk starts at LDS word
-            ``b_word``. Unscaled: the per-row scale is applied once to the sum
-            (``row_scaled``)."""
+            """Both 64-k halves (64-k chunks kc, kc + 1) of row group `rg` of a
+            `pack_fp8` FP8 matrix; the bf16 activation chunk starts at LDS word
+            `b_word`. Unscaled: the per-row scale is applied once to the sum
+            (`row_scaled`)."""
             wv = [
                 fx.Vector(
                     bo.buffer_load(
@@ -789,8 +789,8 @@ def build_glm5_monokernel(
             Lane group g4 = ln // 16 takes the 16 contiguous bytes of half g4 % 2 of
             block 2 kc + g4 // 2 (K 32 g4 .. + 32 of the tile: ONE E8M0 group); the MFMA
             K order is permuted to match (step sp, lane group g4 -> K 32 g4 + 8 sp ..)
-            and mma_units reads the activation in that order. ``sh`` (True / False / a
-            wave-uniform flag): the shared expert's tile, with ``shared_native`` read
+            and mma_units reads the activation in that order. `sh` (True / False / a
+            wave-uniform flag): the shared expert's tile, with `shared_native` read
             row-major with [K / 32, rows] scales (vLLM's AITER Triton FP4 linear
             layout).
             """
@@ -844,7 +844,7 @@ def build_glm5_monokernel(
             return ("bf16", wv, None, b_word + (lane // 16) * 4)
 
         def unit_attention(name, w_rsrc, rg, kc, NKC, b_word):
-            """A chunk unit of attention matrix ``name`` (FP8: 128 k, BF16: 64 k)."""
+            """A chunk unit of attention matrix `name` (FP8: 128 k, BF16: 64 k)."""
             if const_expr(name in fp8_attention):
                 return unit_fp8x2(w_rsrc, rg, kc, NKC, b_word)
             return unit_bf16(w_rsrc, rg, kc, NKC, b_word)
@@ -913,7 +913,7 @@ def build_glm5_monokernel(
 
         def run_units(make_unit, cpw, batch, pre=None):
             """Software pipelined: issue batch b+1's loads before computing batch b.
-            ``pre`` = the already-issued first batch (prefetched before a wait)."""
+            `pre` = the already-issued first batch (prefetched before a wait)."""
             acc = [fx.Float32(0.0) for _ in range(4)]
             starts = list(range(0, cpw, batch))
             cur = (
@@ -961,7 +961,7 @@ def build_glm5_monokernel(
         def stage_x_rmsnorm(ld4s, n, gamma, loaded=None, count=S):
             """LDS bf16 X[s][0:n] = bf16(rmsnorm(x_s) * gamma) for every sample s, where
             ld4s([(s, k)]) -> [(x_s[k], .., x_s[k+3])] (one batched load); returns the
-            rstds. ``loaded``: the (gamma, x) loads already issued by load_x_rmsnorm.
+            rstds. `loaded`: the (gamma, x) loads already issued by load_x_rmsnorm.
             """
             per = n // (4 * THREADS)
             ks = [(tid + i * THREADS) * 4 for i in range(per)]
@@ -1005,7 +1005,7 @@ def build_glm5_monokernel(
             return gs, ld4s([(s, k) for s in range(count) for k in ks])
 
         def stage_x_pairs(name, n_total, src_of):
-            """LDS bf16 X[k] = packed bf16 mailbox ``name`` element src_of(k) for k <
+            """LDS bf16 X[k] = packed bf16 mailbox `name` element src_of(k) for k <
             n_total (src_of contiguous over aligned groups of 4): one 16-byte poll per 4
             elements.
             """
@@ -1041,7 +1041,7 @@ def build_glm5_monokernel(
             return q0, q1, qs
 
         def stage_xq(samples):
-            """Poll the router's packed FP8 activation + block scales of ``samples``
+            """Poll the router's packed FP8 activation + block scales of `samples`
             (sample list, or one runtime sample) into LDS words s * HIDDEN / 4 (linear K
             order; slot 0 for a single runtime sample) and misc[8 + s * XQ_BLOCKS:].
             """
@@ -1097,7 +1097,7 @@ def build_glm5_monokernel(
             ID into the score's low byte can change GLM's top-k on real checkpoints.
             Candidate i of this lane is expert lane + 64 i.
             Returns (expert id, route weight = raw score / sum of
-            the 8 raw scores * ROUTE_SCALE) of pick ``lane`` in score order, valid in
+            the 8 raw scores * ROUTE_SCALE) of pick `lane` in score order, valid in
             lanes < TOP_K.
             """
             if const_expr(bs is None):
@@ -1224,7 +1224,7 @@ def build_glm5_monokernel(
 
         def stage_h(sample_base, group_count, prefetch_units):
             """The qkv_a stages' activation staging (RMSNorm of h rows sample_base ..)
-            into xs, with ``prefetch_units`` issued ahead of the norm when S fits one
+            into xs, with `prefetch_units` issued ahead of the norm when S fits one
             sample tile (as qkv_a does).
             """
 
@@ -1419,7 +1419,7 @@ def build_glm5_monokernel(
             put_bf(mb("q_an"), s_norm * Q_LORA + k, [a0, a1, a2, a3])
 
         # ================ 3. KV RMSNorm + k_pe RoPE -> cache (+ this launch's rows)
-        for t in range(start("cache"), 1, G):
+        for _t in range(start("cache"), 1, G):
             stage("cache")
             r_kv = _rsrc(kv_cache)
             r_pe = _rsrc(pe_cache)
@@ -1998,7 +1998,7 @@ def build_glm5_monokernel(
                 return words.bitcast(fx.BFloat16)
 
             def score_task_batched(s, tile0, bound):
-                """64-key tile ``tile0`` of row s with its memory round trips collapsed:
+                """64-key tile `tile0` of row s with its memory round trips collapsed:
                 (1) block-table entries + RoPE tables, (2) the keys' FP8 bytes + scales,
                 all issued before (3) ONE poll of this thread's 4 index-q pairs and a
                 head weight; (4) only the tile holding the row's current key polls that
@@ -2202,9 +2202,9 @@ def build_glm5_monokernel(
                             lds_st(hist, tid + j_ * THREADS, fx.Int32(0))
 
                     def select_bins(shift, nbits, prefix, remain, hist=hist):
-                        """Bins in descending digit order, ``per`` consecutive bins
+                        """Bins in descending digit order, `per` consecutive bins
                         per thread: the bin where the running count from the top
-                        reaches ``remain`` -> (prefix | digit << shift, remain -
+                        reaches `remain` -> (prefix | digit << shift, remain -
                         count above that bin).
                         """
                         nbins = 1 << nbits
