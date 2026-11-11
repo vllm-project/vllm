@@ -116,10 +116,12 @@ class SchedulerConfig:
     long_prefill_token_threshold is nonzero."""
 
     pp_microbatch_min_tokens: int = Field(default=4096, ge=0)
-    """Pipeline parallelism only. When a single prefill is outstanding, cap the
-    step's token budget at ceil(its uncached tokens / pp_size), but not below
-    this value, so its chunks fill every stage. With two or more prefills
-    outstanding the full budget is used. 0 disables."""
+    """Pipeline parallelism only. Cap the step's token budget at
+    ceil(outstanding uncached prefill tokens / pp_size), but not below this
+    value, plus running decode tokens and at most max_num_batched_tokens, so a
+    small backlog runs as chunks that fill every stage and a backlog of
+    pp_size x max_num_batched_tokens or more uses the full budget. Outstanding
+    excludes tokens already in flight. 0 disables."""
 
     max_num_queued_reqs: int | None = Field(default=None, ge=0)
     """Maximum number of requests that can be in-flight (waiting or running)

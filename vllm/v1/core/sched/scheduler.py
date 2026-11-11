@@ -712,30 +712,35 @@ class Scheduler(SchedulerInterface):
         return max(num_new_tokens, 0)
 
     def _pp_microbatch_cap(self, budget: int) -> int:
-        """Token budget for a lone prefill: ceil(its uncached tokens / pp_size),
-        at least `pp_microbatch_min_tokens`, plus the running decodes' tokens,
-        so its chunks fill every stage. With two or more prefills outstanding,
-        the full budget (unchanged behaviour under load)."""
-        prefill = decode = num_prefills = 0
+        """Token budget: ceil(outstanding uncached prefill tokens / pp_size), at
+        least `pp_microbatch_min_tokens`, plus the running decodes' tokens,
+        clamped to `budget`. A small backlog runs as small chunks that fill every
+        stage; a backlog of pp_size x budget or more gets the full budget."""
+        prefill = decode = 0
         for request in self.running:
             remaining = request.num_prompt_tokens - request.num_computed_tokens
-            if remaining > 0 or (remaining == 0 and request.num_in_flight_tokens > 0):
-                # Prompt not fully computed yet, including a last chunk in flight.
-                prefill += max(remaining, 0)
-                num_prefills += 1
+            if remaining > 0:
+                prefill += remaining
+            elif remaining == 0 and request.num_in_flight_tokens > 0:
+                pass  # last prompt chunk in flight
             elif not self._needs_no_more_steps(request):
                 decode += 1 + len(request.spec_token_ids)
-        for request in itertools.chain(
+        waiting = itertools.chain(
             self.kv_holding_waiting, self.waiting, self.async_kv_waiting
-        ):
-            num_prefills += 1
-            if num_prefills > 1:
-                break
-            prefill += request.num_prompt_tokens - (
+        )
+        for i, request in enumerate(waiting):
+            if prefill >= budget * self.pp_size:
+                break  # cap already at the full budget
+            # Prefix-cache lookup (walks the block hashes) only for the first
+            # pp_size requests; later ones count in full, which errs toward the
+            # full budget. num_tokens: a preempted request's hit can cover its
+            # generated tokens too.
+            hit = (
                 self.kv_cache_manager.get_num_local_computed_tokens(request)
+                if i < self.pp_size
+                else 0
             )
-        if num_prefills > 1:
-            return budget
+            prefill += max(0, request.num_tokens - hit)
         # At least num_prefill_lookahead, so the MTP lookahead reservation still
         # leaves a token to schedule.
         cap = max(

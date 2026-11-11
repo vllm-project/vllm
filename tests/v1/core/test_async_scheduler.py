@@ -867,10 +867,11 @@ def test_decode_awaiting_cadence(max_tokens: int):
 @pytest.mark.parametrize(
     "arrivals,expected",
     [
-        ([[400]], [100, 75, 64]),  # lone prefill: split over the 4 stages
-        ([[400, 400]], [512]),  # two prefills: full budget
+        ([[400]], [100, 75, 64]),  # 400-token backlog: split over the 4 stages
+        ([[400, 400]], [200, 150, 113]),  # 800: larger chunks
+        ([[400] * 8], [512]),  # backlog >= 4 x budget: full budget
         ([[40]], [40]),  # below the 64 floor: one step
-        ([[40], [400]], [40, 400]),  # 1st's last chunk still in flight: no split
+        ([[40], [400]], [40, 100]),  # 1st's last chunk in flight adds nothing
     ],
 )
 def test_pp_microbatch_cap(arrivals: list[list[int]], expected: list[int]):
@@ -886,6 +887,30 @@ def test_pp_microbatch_cap(arrivals: list[list[int]], expected: list[int]):
     while len(steps) < len(expected):
         steps.append(scheduler.schedule().total_num_scheduled_tokens)
     assert steps == expected
+
+
+def test_pp_microbatch_cap_cached_backlog(monkeypatch: pytest.MonkeyPatch):
+    """Waiting requests count their uncached tokens (never below 0); only the
+    first pp_size are looked up in the prefix cache, the rest count in full."""
+    scheduler = _create_async_pp_scheduler(num_spec=0, pp_size=4, num_blocks=1000)
+    scheduler.pp_microbatch_min_tokens = 16
+    ids = [f"r{i}" for i in range(6)]
+    for request in create_requests(6, 400, max_tokens=1, req_ids=ids):
+        scheduler.add_request(request)
+    # r1's hit exceeds its tokens, as for a preempted request with cached output.
+    hits = {"r0": 384, "r1": 1000, "r2": 384, "r3": 384}
+    looked_up: list[str] = []
+
+    def hit(request):
+        looked_up.append(request.request_id)
+        return hits[request.request_id]
+
+    monkeypatch.setattr(
+        scheduler.kv_cache_manager, "get_num_local_computed_tokens", hit
+    )
+    # 16 + 0 + 16 + 16 + 400 + 400 = 848 tokens -> ceil(848 / 4).
+    assert scheduler._pp_microbatch_cap(512) == 212
+    assert looked_up == ids[:4]
 
 
 def test_pp_microbatch_cap_default_on(monkeypatch: pytest.MonkeyPatch):
