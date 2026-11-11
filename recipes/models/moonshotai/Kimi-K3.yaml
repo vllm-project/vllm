@@ -4,7 +4,7 @@ meta:
   provider: "Moonshot AI"
   description: "Pre-release 2.8T-parameter native multimodal MoE with Kimi Delta Attention, Gated MLA, Attention Residuals, and a 1M-token context window"
   date_added: 2026-07-27
-  date_updated: 2026-10-29
+  date_updated: 2026-11-11
   tasks:
     - multimodal
     - text
@@ -19,6 +19,7 @@ meta:
     b300: verified
     gb200: verified
     gb300: verified
+    vr200: supported
     mi355x: verified
 
 model:
@@ -89,10 +90,11 @@ features:
         args:
           - "--speculative-config"
           - '{"model":"RedHatAI/Kimi-K3-speculator.dspark", "num_speculative_tokens":8, "method": "dspark", "attention_backend":"TOKENSPEED_MLA", "draft_sample_method": "probabilistic", "rejection_sample_method": "block"}'
-      gb300:
+      gb300: &k3_tokenspeed_draft
         args:
           - "--speculative-config"
           - '{"model":"RedHatAI/Kimi-K3-speculator.dspark", "num_speculative_tokens":8, "method": "dspark", "attention_backend":"TOKENSPEED_MLA", "draft_sample_method": "probabilistic", "rejection_sample_method": "block"}'
+      vr200: *k3_tokenspeed_draft
   text_only:
     description: "Skip the vision encoder for text-only workloads. Mutually exclusive with encoder_parallel."
     args:
@@ -108,7 +110,7 @@ variants:
     # Pre-release estimate: 2.8T params × 0.5 byte/param × 1.2 headroom.
     # Replace with the real safetensors footprint once weights are published.
     vram_minimum_gb: 1680
-    supported_hardware: [h100, h200, b200, b300, gb200, gb300, mi300x, mi325x, mi355x]
+    supported_hardware: [h100, h200, b200, b300, gb200, gb300, vr200, mi300x, mi325x, mi355x]
     description: "Quantization-aware-trained MXFP4 weights with MXFP8 activations; footprint is estimated until the checkpoint is published."
     hardware_overrides:
       # The MI355X path needs vllm-project/vllm#53940 (SiTUv2 a4w4 MoE routing)
@@ -118,7 +120,7 @@ variants:
   nvfp4:
     precision: nvfp4
     vram_minimum_gb: 1650
-    supported_hardware: [b200, b300, gb200, gb300]
+    supported_hardware: [b200, b300, gb200, gb300, vr200]
     model_id: "RedHatAI/Kimi-K3-NVFP4"
     description: "RedHatAI compressed-tensors NVFP4 quantization; MoE layers quantized to NVFP4, attention and embeddings at full precision"
 
@@ -195,7 +197,7 @@ hardware_overrides:
       VLLM_USE_V2_MODEL_RUNNER: "1"
       PYTORCH_CUDA_ALLOC_CONF: "expandable_segments:True"
       
-  blackwell:
+  blackwell: &k3_blackwell
     extra_args:
       - "--load-format"
       - "fastsafetensors"
@@ -221,6 +223,9 @@ hardware_overrides:
       VLLM_ALLREDUCE_USE_FLASHINFER: "1"
       VLLM_ENGINE_READY_TIMEOUT_S: "3600"
       VLLM_USE_V2_MODEL_RUNNER: "1"
+  # Rubin takes the Blackwell configuration: these kernels accept any 10.x device.
+  # Not tuned on Rubin yet.
+  rubin: *k3_blackwell
   amd:
     extra_env:
       VLLM_ROCM_USE_AITER: "1"
@@ -296,11 +301,12 @@ strategy_overrides:
       intra_node_data_parallel_size: 1
     env:
       VLLM_SSM_CONV_STATE_LAYOUT: "DS"
-    # Blackwell only (cuda_copy is CUDA-only); replaces the recipe-level nvidia block.
+    # Blackwell and Rubin only (cuda_copy is CUDA-only); replaces the recipe-level nvidia block.
     hardware_overrides:
-      blackwell:
+      blackwell: &k3_pd_ucx
         extra_env:
           UCX_TLS: "rc,cuda_copy"
+      rubin: *k3_pd_ucx
     prefill:
       parallelism: tep
       tp: 8
@@ -1877,6 +1883,7 @@ guide: |
   - **vLLM:** Use the vllm/vllm-openai:kimi-k3 docker
   - **CUDA:** The kimi-k3 image ships as a CUDA 13 (cu130) build only — there is no -cu129 tag, and the K3-enabled wheels are not on the cu129 nightly index. The host needs an r580+ NVIDIA driver; on a CUDA 12.9 (r575) host, upgrade the driver or build vLLM from the K3 branch against cu129 PyTorch yourself.
   - **Hardware:** At least 8x GB300. Multi-node for real production traffic.
+  - **Rubin (preview):** VR200 runs the rolling `vllm/vllm-openai:cu134-nightly` image (CUDA 13.4), with no pip path, and at least 8 GPUs (two trays). It uses the Blackwell flags and hasn't been tuned on Rubin; GB200/GB300's MegaMoE DEP path and the AgentX presets don't apply.
   - **ROCm:** At least 8x MI355X/MI350X. On MI355X the command builder uses the ROCm 10.0 nightly image `vllm/vllm-openai-rocm:nightly-rocm100`; the day-0 `vllm/vllm-openai-rocm:kimi-k3` image predates the DSpark and MoE fixes that path needs (see the [MI355X AgentX preset](#preset-mi355x_agentx)).
 
   ## Client Usage
