@@ -117,20 +117,26 @@ class RoutedExpertsBuffer:
         return completed
 
     def read(
-        self, request_id: Hashable, token_start: int, token_end: int
+        self,
+        request_id: Hashable,
+        token_start: int,
+        token_end: int,
+        pending_blocks: Sequence[tuple[int, np.ndarray]],
     ) -> np.ndarray:
+        """Copy rows from unkeyed full blocks and the incomplete tail."""
+        blocks = list(pending_blocks)
         tail = self._requests.get(request_id)
-        assert tail is not None, (
-            f"auxiliary output buffer is missing request {request_id}"
-        )
-        local_start = token_start - tail.block_start
-        local_end = token_end - tail.block_start
-        assert 0 <= local_start < local_end <= tail.length, (
+        if tail is not None:
+            blocks.append((tail.block_start, self._rows[tail.slot, : tail.length]))
+        first = blocks[0][0] if blocks else token_start
+        available = sum(len(block) for _, block in blocks)
+        assert first <= token_start and token_end <= first + available, (
             "auxiliary output range is unavailable: "
             f"request={request_id}, range=[{token_start}, {token_end}), "
-            f"available=[{tail.block_start}, {tail.block_start + tail.length})"
+            f"available={[(start, start + len(block)) for start, block in blocks]}"
         )
-        return self._rows[tail.slot, local_start:local_end].copy()
+        rows = np.concatenate([block for _, block in blocks])
+        return rows[token_start - first : token_end - first]
 
     def retain_block(self, rows: np.ndarray) -> np.ndarray:
         """Retain one unkeyed block after the current capture call."""

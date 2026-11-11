@@ -120,7 +120,9 @@ def _run_check(
     # Ensure we have the right number of placeholders per num_crops size
     image_token_id = tokenizer.convert_tokens_to_ids("<IMG_CONTEXT>")
     img_tok_count = processed_inputs["prompt_token_ids"].count(image_token_id)
-    pixel_shape = processed_inputs["mm_kwargs"].get_data()["pixel_values_flat"].shape
+    pixel_values = processed_inputs["mm_kwargs"].get_data()["pixel_values_flat"]
+    assert isinstance(pixel_values, torch.Tensor)
+    pixel_shape = pixel_values.shape
 
     assert img_tok_count == 256 * total_expected_num_patches
     assert pixel_shape[0] == total_expected_num_patches
@@ -204,6 +206,7 @@ def test_image_cache_identity_across_image_counts(
     )
     processor = MULTIMODAL_REGISTRY.create_processor(config)
     tokenizer = processor.info.get_tokenizer()
+    images: list[torch.Tensor] | list[Image.Image]
     if use_embeds:
         images = [torch.ones(8, config.get_hidden_size())] * 3
     else:

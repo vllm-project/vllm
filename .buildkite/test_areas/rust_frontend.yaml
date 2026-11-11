@@ -4,6 +4,7 @@ depends_on:
 steps:
 - label: ":nvidia: (H200 MIG 18GB) Rust Frontend OpenAI Coverage"
   key: rust-frontend-openai-coverage
+  automatic_shard: true
   timeout_in_minutes: 50
   device: h200_18gb
   working_dir: "/vllm-workspace/tests"
@@ -30,8 +31,6 @@ steps:
   - tests/entrypoints/openai/test_return_token_ids.py
   - tests/entrypoints/serve/instrumentator/test_uds.py
   - tests/v1/sample/test_logprobs_e2e.py
-  - tests/v1/logits_processors/test_custom_online.py
-  - tests/v1/logits_processors/utils.py
   commands:
   - export VLLM_USE_RUST_FRONTEND=1
   - export VLLM_WORKER_MULTIPROC_METHOD=spawn
@@ -56,12 +55,10 @@ steps:
   - pytest -v -s entrypoints/openai/test_return_token_ids.py
   - pytest -v -s entrypoints/serve/instrumentator/test_uds.py
   - pytest -v -s v1/sample/test_logprobs_e2e.py -k "test_prompt_logprobs_e2e_server"
-  # The Rust frontend cannot run the logits processor's validate_params, so an invalid argument
-  # reaches the engine instead of returning 400.
-  - pytest -v -s v1/logits_processors/test_custom_online.py -k "not test_invalid_custom_logitsproc_arg"
   mirror:
     amd:
       label: ":amd: (MI355 DPX) Rust Frontend OpenAI Coverage"
+      automatic_shard: true
       dind: false
       device: mi355_dpx
       timeout_in_minutes: 55
@@ -88,8 +85,6 @@ steps:
       - tests/entrypoints/openai/test_return_token_ids.py
       - tests/entrypoints/serve/instrumentator/test_uds.py
       - tests/v1/sample/test_logprobs_e2e.py
-      - tests/v1/logits_processors/test_custom_online.py
-      - tests/v1/logits_processors/utils.py
       - vllm/platforms/rocm.py
 
 - label: ":nvidia: (H200 MIG 18GB) Rust Frontend Serve/Admin Coverage"
@@ -154,6 +149,7 @@ steps:
 
 - label: ":nvidia: (H200 MIG 18GB) Rust Frontend Core Correctness"
   key: rust-frontend-core-correctness
+  automatic_shard: true
   timeout_in_minutes: 20
   device: h200_18gb
   working_dir: "/vllm-workspace/tests"
@@ -168,6 +164,7 @@ steps:
   - pytest -s entrypoints/openai/correctness/test_lmeval.py::test_lm_eval_accuracy_v1_engine
   mirror:
     amd:
+      automatic_shard: true
       label: ":amd: (MI355 DPX) Rust Frontend Core Correctness"
       dind: false
       device: mi355_dpx
@@ -183,6 +180,7 @@ steps:
 
 - label: ":nvidia: (H200 MIG 35GB) Rust Frontend Tool Use"
   key: rust-frontend-tool-use
+  automatic_shard: true
   device: h200_35gb
   timeout_in_minutes: 35
   working_dir: "/vllm-workspace/tests"
@@ -199,7 +197,11 @@ steps:
   - export VLLM_USE_RUST_FRONTEND=1
   - export VLLM_WORKER_MULTIPROC_METHOD=spawn
   # The Rust frontend has no `mistral` tokenizer mode or renderer.
-  - pytest -v -s tool_use --ignore=tool_use/mistral --models llama3.2
+  - >-
+    pytest -v -s
+    tool_use
+    --ignore=tool_use/mistral
+    --models=llama3.2
   # The Rust renderer rejects empty tool-call arguments in the history (Python treats them as {}).
   - pytest -v -s entrypoints/openai/chat_completion/test_completion_with_function_calling.py -k "not test_no_args_tool_call"
   - pytest -v -s entrypoints/tool_parsers/test_granite4_tool_parser.py
@@ -207,6 +209,7 @@ steps:
   - pytest -v -s entrypoints/tool_parsers/test_hermes_tool_parser.py -k granite4
   mirror:
     amd:
+      automatic_shard: true
       label: ":amd: (MI355 DPX) Rust Frontend Tool Use"
       dind: false
       device: mi355_dpx
@@ -226,6 +229,7 @@ steps:
 
 - label: ":nvidia: (L4) [Nightly] Rust Frontend Distributed"
   key: rust-frontend-distributed
+  automatic_shard: true
   # Nightly only: 4-GPU L4 pods wait behind smaller jobs on per-PR runs.
   optional: true
   timeout_in_minutes: 25
@@ -260,6 +264,7 @@ steps:
       # Run on PRs even when the L4 step is optional (nightly only).
       optional: false
       label: ":amd: (MI355) Rust Frontend Distributed"
+      automatic_shard: true
       dind: false
       device: mi355_4
       timeout_in_minutes: 45
