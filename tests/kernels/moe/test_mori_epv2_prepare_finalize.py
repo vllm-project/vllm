@@ -816,7 +816,8 @@ def test_segmented_receive_is_read_in_place(monkeypatch):
     for t, buf in ((a1, op.recv_a1), (ids, op.recv_ids), (weights, op.recv_weights)):
         assert t.data_ptr() == buf.data_ptr() and t.shape[0] == buf.shape[0]
     assert torch.isnan(a1).all() and (ids == 5).all()
-    assert int(meta.expert_num_tokens) == 128
+    # The count would only repeat the row count: the experts get none.
+    assert meta is None
 
 
 @pytest.mark.parametrize(

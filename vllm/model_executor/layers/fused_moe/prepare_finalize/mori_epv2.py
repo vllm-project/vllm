@@ -305,17 +305,10 @@ class MoriEPv2PrepareAndFinalize(mk.FusedMoEPrepareAndFinalizeModular):
         dispatch_recv_token_num: torch.Tensor,
     ) -> mk.PrepareResultType:
         # Every one of the world_size * stride rows is an input and the holes
-        # are already routed off this rank; dispatch_recv_token_num counts all.
-        return (
-            dispatch_a1,
-            dispatch_scale,
-            mk.ExpertTokensMetadata(
-                expert_num_tokens=dispatch_recv_token_num,
-                expert_num_tokens_cpu=None,
-            ),
-            dispatch_ids,
-            dispatch_weights,
-        )
+        # are already routed off this rank. The received-row count would only
+        # repeat the row count, and AITER's MXFP4 path faults on small batches
+        # given one, so the experts get none.
+        return dispatch_a1, dispatch_scale, None, dispatch_ids, dispatch_weights
 
     def _dispatch_args(
         self,
