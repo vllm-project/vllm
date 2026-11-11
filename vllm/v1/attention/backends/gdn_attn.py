@@ -301,7 +301,7 @@ class GDNAttentionMetadataBuilder(AttentionMetadataBuilder[GDNAttentionMetadata]
 
         They hold the largest batch the scheduler can form, so the metadata of
         any such batch is a prefix view at a fixed address, and a padded view
-        has valid pad rows (see ``MIXED_BATCH_PAD_VALUES``).
+        has valid pad rows (see `MIXED_BATCH_PAD_VALUES`).
         """
         from vllm.third_party.flash_linear_attention.ops.utils import FLA_CHUNK_SIZE
 
@@ -416,8 +416,8 @@ class GDNAttentionMetadataBuilder(AttentionMetadataBuilder[GDNAttentionMetadata]
         values: torch.Tensor,
         pad_value: int | tuple[int, ...],
     ) -> torch.Tensor:
-        """Copy CPU ``values`` and pads after them into ``buffer`` with one H2D
-        copy; return the view of ``values``."""
+        """Copy CPU `values` and pads after them into `buffer` with one H2D
+        copy; return the view of `values`."""
         padded = torch.empty(buffer.shape, dtype=values.dtype, pin_memory=PIN_MEMORY)
         padded[: len(values)] = values
         padded[len(values) :] = values.new_tensor(pad_value)
@@ -823,9 +823,9 @@ class GDNAttentionMetadataBuilder(AttentionMetadataBuilder[GDNAttentionMetadata]
         num_rows: int | None = None,
         pad_value: int | bool | torch.Tensor = 0,
     ) -> torch.Tensor:
-        """Copy ``values`` to the front of ``buffer``, fill the rows after
-        them up to ``num_rows`` (default: none) with ``pad_value`` and return
-        ``buffer[:num_rows]``."""
+        """Copy `values` to the front of `buffer`, fill the rows after
+        them up to `num_rows` (default: none) with `pad_value` and return
+        `buffer[:num_rows]`."""
         num_values = values.shape[0]
         num_rows = num_values if num_rows is None else num_rows
         buffer[:num_values].copy_(values, non_blocking=True)
@@ -837,11 +837,11 @@ class GDNAttentionMetadataBuilder(AttentionMetadataBuilder[GDNAttentionMetadata]
         metadata: GDNAttentionMetadata,
         fields: Iterable[str] = MIXED_BATCH_PAD_VALUES,
     ) -> GDNAttentionMetadata:
-        """Move the ``fields`` of a batch with prefills into persistent buffers.
+        """Move the `fields` of a batch with prefills into persistent buffers.
 
         Each field keeps its length, so the eager forward reads the same values
         and launches the same grids. The buffer rows after it hold the pad from
-        ``MIXED_BATCH_PAD_VALUES``, so a padded view of any length also has
+        `MIXED_BATCH_PAD_VALUES`, so a padded view of any length also has
         valid rows, as a CUDA graph with a static grid needs.
         """
         staged: dict[str, Any] = {}

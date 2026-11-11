@@ -3,7 +3,7 @@
 """Static (CUDA graph) grids of the GDN prefill kernels.
 
 A static grid covers the largest batch: padded tokens, zero-length padded
-sequences and ``[-1, 0]`` padded chunks for FLA, ``PAD_SLOT_ID`` programs for
+sequences and `[-1, 0]` padded chunks for FLA, `PAD_SLOT_ID` programs for
 causal_conv1d. On the real rows it must give the same bits as the batch-sized
 grid.
 """
