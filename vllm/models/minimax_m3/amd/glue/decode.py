@@ -1,8 +1,10 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
-"""Decode glue: one persistent FlyDSL launch (kernel.py) from the unreduced o_proj
-partial to the MoE inputs, then AITER's A16W4 gemm1 / gemm2 on its sort, the
-shared expert on its MXFP8 rows and the final TP all-reduce.
+"""Decode glue: one persistent launch from the unreduced o_proj partial to the MoE
+inputs, then AITER's A16W4 gemm1 / gemm2 on its sort, the shared expert on its
+MXFP8 rows and the final TP all-reduce. The launch is AITER's fused op
+(fused_all_reduce_rmsnorm_moe_route, Gluon) when the installed AITER has it, else
+the FlyDSL kernel in kernel.py.
 
 Replaces, per MoE layer of a pure-decode step: the post-attention all-reduce, the
 residual add, the Gemma RMSNorm (+ MXFP8 copy), the router, the top-k (x routed
@@ -31,11 +33,15 @@ from .shared import SharedWeights, shared_decode
 
 logger = init_logger(__name__)
 
-# Row counts of the compiled kernels (multiples of 4 in [17, 192]); a pure-decode
-# step of another width takes the stock path. Measured on MI355X (TP4): the glue
-# beats the stock all-reduce .. sort chain at 24-192 rows (DSpark 7: 3-24
-# requests).
+# Row counts of the compiled FlyDSL kernels (multiples of 4 in [17, 192]); a
+# pure-decode step of another width takes the stock path. Measured on MI355X (TP4):
+# the FlyDSL glue beats the stock all-reduce .. sort chain at 24-192 rows (DSpark
+# 7: 3-24 requests).
 WIDTHS = tuple(range(24, 193, 8))
+# AITER's fused op runs every pure-decode width from 1 row up to this many: measured
+# on MI355X (TP4) it beats the stock chain at every width in that range and the
+# FlyDSL kernel at every width of WIDTHS.
+AITER_MAX_ROWS = 256
 # The glue's cross-GPU transport: plain payloads into sentinel-armed inboxes.
 TRANSPORT = "lamport"
 
@@ -84,6 +90,8 @@ class _Width:
     moe_buf: torch.Tensor  # [S, H] bf16, zeroed by the kernel; gemm2 adds into it
     # [S, I/TP] bf16: the fused shared expert's stage-1 rows
     sh_inter: torch.Tensor | None = None
+    # the AITER op's outputs (views of the above), by its names
+    out: dict | None = None
 
 
 class DecodeGlue:
@@ -107,10 +115,141 @@ class DecodeGlue:
         # AITER's fused all-reduce + norm + MXFP8 buffers (setup_post_moe)
         self.post_ar: Any = None
         self._post_err: torch.Tensor | None = None
+        # AITER's fused all-reduce .. moe_sorting op (setup), when installed
+        self.fused: Any = None
 
     # ------------------------------------------------------------ setup
     def setup(self) -> None:
         """Collective (the peer-buffer handshake): every TP rank, same point."""
+        if self._setup_fused():
+            return
+        self._setup_flydsl()
+
+    def _setup_fused(self) -> bool:
+        """AITER's fused op for every width 1 .. AITER_MAX_ROWS, if every rank has
+        it; else False (the FlyDSL kernel runs)."""
+        from vllm.models.deepseek_v41.amd.mono.common.peer_memory import tp_agree
+
+        cpu = self.group.cpu_group
+        ok, err = True, None
+        try:
+            from aiter.ops.triton.comms.fused.all_reduce_rmsnorm_moe_route import (
+                AllReduceRmsnormMoeRoute,
+                fused_all_reduce_rmsnorm_moe_route,  # noqa: F401
+            )
+        except Exception as e:  # noqa: BLE001 - an AITER without the op
+            ok, err = False, e
+        if not tp_agree(ok, cpu):
+            logger.info(
+                "MiniMax-M3 decode glue: AITER fused op unavailable (%s); FlyDSL "
+                "kernel",
+                err or "refused on another rank",
+            )
+            return False
+        comm: Any = None
+        try:  # collective
+            comm = AllReduceRmsnormMoeRoute(
+                cpu, AITER_MAX_ROWS, K.HIDDEN, K.EXPERTS, K.TOPK, router_fp32=True
+            )
+        except Exception as e:  # noqa: BLE001
+            ok, err = False, e
+        if not tp_agree(ok, cpu):
+            logger.warning(
+                "MiniMax-M3 decode glue: AITER fused op setup failed on %s rank: %s",
+                "this" if err else "another",
+                err,
+            )
+            if comm is not None:
+                comm.close()
+            return False
+        self.fused = comm
+        self.widths = tuple(range(1, AITER_MAX_ROWS + 1))
+        full = self._alloc(AITER_MAX_ROWS)
+        for s in self.widths:
+            self.bufs[s] = self._view(full, s)
+        self.fault_word = _error_record_view(comm)
+        self._streams()
+        # compile every variant now, outside graph capture (collective launches)
+        dev = self.device
+        nw = torch.zeros(K.HIDDEN, dtype=torch.bfloat16, device=dev)
+        gw = torch.zeros(K.EXPERTS, K.HIDDEN, dtype=torch.float32, device=dev)
+        bias = torch.zeros(K.EXPERTS, dtype=torch.float32, device=dev)
+        for s in comm.warmup_tokens():
+            x = torch.zeros(s, K.HIDDEN, dtype=torch.bfloat16, device=dev)
+            self._fused_call(self.bufs[s], x, x, nw, gw, bias)
+        torch.accelerator.synchronize()
+        logger.info(
+            "MiniMax-M3 decode glue: AITER fused op, widths 1-%d", AITER_MAX_ROWS
+        )
+        return True
+
+    def _view(self, full: _Width, s: int) -> _Width:
+        """Width s on the first rows of the largest width's buffers (widths never
+        run at the same time; graphs keep the views' addresses)."""
+        mp = K.max_pad(s)
+        b = _Width(
+            s=s,
+            compiled=None,
+            scratch=full.scratch,
+            res_out=full.res_out[:s],
+            xn=full.xn[:s],
+            xq=full.xq[:s],
+            xsc=full.xsc[:s],
+            ids=full.ids[:s],
+            w=full.w[:s],
+            sids=full.sids[:mp],
+            sw=full.sw[:mp],
+            seids=full.seids[: mp // 16],
+            nv=full.nv,
+            moe_buf=full.moe_buf[:s],
+            sh_inter=full.sh_inter[:s] if full.sh_inter is not None else None,
+        )
+        b.out = {
+            "residual_out": b.res_out,
+            "normed": b.xn,
+            "x_q": b.xq,
+            "x_scale": b.xsc,
+            "topk_ids": b.ids,
+            "topk_weights": b.w,
+            "sorted_ids": b.sids,
+            "sorted_weights": b.sw,
+            "sorted_expert_ids": b.seids,
+            "num_valid_ids": b.nv,
+            "moe_buf": b.moe_buf,
+        }
+        return b
+
+    def _fused_call(self, b: _Width, part, residual, norm_w, router_w, bias) -> None:
+        from aiter.ops.triton.comms.fused.all_reduce_rmsnorm_moe_route import (
+            fused_all_reduce_rmsnorm_moe_route,
+        )
+
+        fused_all_reduce_rmsnorm_moe_route(
+            part,
+            residual,
+            norm_w,
+            K.EPS,
+            router_w,
+            self.fused,
+            correction_bias=bias,
+            scoring="sigmoid",
+            renormalize=True,
+            routed_scaling_factor=K.ROUTED_SCALE,
+            gemma=True,
+            quant=True,
+            block_size=K.SORT_BLOCK,
+            out=b.out,
+        )
+
+    def _streams(self) -> None:
+        self.stream = None
+        if not _side_stream_disabled():
+            from vllm.utils.torch_utils import aux_stream
+
+            self.stream = aux_stream()
+        self.ev_fork, self.ev_join = torch.cuda.Event(), torch.cuda.Event()
+
+    def _setup_flydsl(self) -> None:
         import flydsl.compiler as flyc
 
         from vllm.models.deepseek_v41.amd.mono.common.peer_memory import PeerBuffer
@@ -129,12 +268,7 @@ class DecodeGlue:
         self.fault_word = peer.bytes[:16].view(torch.int32)
         self.epoch = torch.zeros(K.EPOCH_WORDS, dtype=torch.int32, device=dev)
         self.tl = torch.zeros(K.BLOCKS * K.TL_POINTS, dtype=torch.int64, device=dev)
-        self.stream = None
-        if not _side_stream_disabled():
-            from vllm.utils.torch_utils import aux_stream
-
-            self.stream = aux_stream()
-        self.ev_fork, self.ev_join = torch.cuda.Event(), torch.cuda.Event()
+        self._streams()
         cus = current_platform.num_compute_units(dev.index)
         dummy_h = torch.zeros(1, K.HIDDEN, dtype=torch.bfloat16, device=dev)
         dummy_f = torch.zeros(K.EXPERTS, K.HIDDEN, dtype=torch.float32, device=dev)
@@ -240,6 +374,16 @@ class DecodeGlue:
         a replicated residual (mode 1)."""
         b = self.bufs[part.shape[0]]
         moe, norm = layer.block_sparse_moe, layer.post_attention_layernorm
+        if self.fused is not None:
+            self._fused_call(
+                b,
+                part.contiguous(),
+                residual.contiguous(),
+                norm.weight,
+                moe.gate.weight,
+                moe.e_score_correction_bias,
+            )
+            return b
         args = self._args(
             b,
             part.contiguous(),
@@ -384,7 +528,11 @@ class DecodeGlue:
     # ------------------------------------------------------------ epoch
     def reset(self) -> None:
         """No launch in flight on any rank: mailboxes, scratch and the epoch
-        cleared, the Lamport inboxes re-armed (the sticky error word is kept)."""
+        cleared, the Lamport inboxes re-armed (the sticky error word is kept;
+        AITER's fused op clears its error record too)."""
+        if self.fused is not None:
+            self.fused.reset()  # collective
+            return
         assert self.peer is not None
         self.peer.bytes[16:].zero_()
         K.arm_peer(self.peer.bytes)
@@ -409,6 +557,9 @@ class DecodeGlue:
             torch._assert_async(self._post_err[0] == 0, POST_FAULT_MESSAGE)
 
     def close(self) -> None:
+        if self.fused is not None:
+            self.fused.close()
+            self.fused = None
         if self.post_ar is not None:
             self.post_ar.close()
             self.post_ar = None

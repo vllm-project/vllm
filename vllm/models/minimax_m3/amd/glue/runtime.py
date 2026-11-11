@@ -229,10 +229,13 @@ class M3Glue:
             glue.close()
             return
         self.decode = glue
+        self.widths = glue.widths  # AITER's fused op: every width 1 .. AITER_MAX_ROWS
         glue.setup_post_moe()  # collective; agrees internally
         logger.info(
-            "MiniMax-M3 decode glue ready: widths %s, shared expert %s",
-            glue.widths,
+            "MiniMax-M3 decode glue ready: %s, widths %d-%d, shared expert %s",
+            "AITER fused op" if glue.fused is not None else "FlyDSL kernel",
+            min(glue.widths),
+            max(glue.widths),
             "fused into the a16w4 MoE launches (bf16)"
             if self.shared_fused
             else "separate (MXFP8 GEMMs)",
