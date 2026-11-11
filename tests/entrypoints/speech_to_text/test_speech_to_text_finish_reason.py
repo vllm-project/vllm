@@ -1,7 +1,8 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
-"""Engine requests that finish with `error` or `abort` must fail the
-transcription instead of returning truncated text as a success."""
+"""Engine requests that finish with `error`, `abort` or a server length limit
+must fail the transcription instead of returning truncated text as a success.
+Options a model rejects must fail before any engine request starts."""
 
 import asyncio
 import json
@@ -11,6 +12,7 @@ from types import SimpleNamespace
 from typing import Any
 from unittest.mock import AsyncMock, Mock
 
+import numpy as np
 import pytest
 from fastapi import FastAPI
 from fastapi.testclient import TestClient
@@ -24,7 +26,11 @@ from vllm.entrypoints.speech_to_text.transcription.protocol import (
 from vllm.entrypoints.speech_to_text.transcription.serving import (
     OpenAIServingTranscription,
 )
-from vllm.exceptions import GenerationError, RetryableRequestError
+from vllm.exceptions import (
+    GenerationError,
+    RetryableRequestError,
+    VLLMUnprocessableEntityError,
+)
 from vllm.model_executor.models.interfaces import StreamingTranscriptionPostProcessor
 from vllm.outputs import CompletionOutput, RequestOutput
 from vllm.utils.async_utils import collect_from_async_generator
@@ -46,8 +52,18 @@ class _StubTranscriptionModel:
     def get_num_audio_tokens(cls, *args) -> None:
         return None
 
+    @classmethod
+    def validate_language(cls, language: str | None) -> str | None:
+        return language
 
-def _output(text: str, finish_reason: str | None) -> RequestOutput:
+    @classmethod
+    def get_generation_prompt(cls, stt_params):
+        if stt_params.use_beam_search:
+            raise ValueError("This model does not support beam search")
+        return {"prompt": "chunk"}
+
+
+def _output(text: str, finish_reason: str | None, num_tokens: int = 1) -> RequestOutput:
     return RequestOutput(
         request_id="rid",
         prompt=None,
@@ -57,7 +73,7 @@ def _output(text: str, finish_reason: str | None) -> RequestOutput:
             CompletionOutput(
                 index=0,
                 text=text,
-                token_ids=(1,),
+                token_ids=(1,) * num_tokens,
                 cumulative_logprob=None,
                 logprobs=None,
                 finish_reason=finish_reason,
@@ -117,13 +133,18 @@ def _server(
     return server, started, abort
 
 
-def _request(stream: bool, use_beam_search: bool = False) -> TranscriptionRequest:
+def _request(
+    stream: bool,
+    use_beam_search: bool = False,
+    max_completion_tokens: int | None = None,
+) -> TranscriptionRequest:
     return TranscriptionRequest.model_construct(
         file=Mock(),
         model="audio",
         language="en",
         stream=stream,
         use_beam_search=use_beam_search,
+        max_completion_tokens=max_completion_tokens,
         response_format="json",
     )
 
@@ -134,34 +155,46 @@ def _raw_request() -> SimpleNamespace:
     )
 
 
-@pytest.mark.parametrize(
-    ("finish_reason", "status", "body"),
-    [
-        ("stop", HTTPStatus.OK, "hello"),
-        ("length", HTTPStatus.OK, "hello"),
-        ("error", HTTPStatus.INTERNAL_SERVER_ERROR, "InternalServerError"),
-        ("abort", HTTPStatus.SERVICE_UNAVAILABLE, "ServiceUnavailableError"),
-    ],
-)
-def test_http_non_streaming_status_follows_finish_reason(
-    finish_reason, status, body, monkeypatch
-):
-    server, _, _ = _server(
-        monkeypatch,
-        {REQUEST_ID: lambda: _yields(_output("hello", finish_reason))},
-    )
+def _post(server: OpenAIServingTranscription, **form: str):
     app = FastAPI()
     app.include_router(router)
     init_exception_handler(app)
     app.state.openai_serving_transcription = server
+    app.state.args = SimpleNamespace(log_error_stack=False)
 
     with TestClient(app) as client:
-        response = client.post(
+        return client.post(
             "/v1/audio/transcriptions",
             headers={"X-Request-Id": "outer-request"},
-            data={"model": "audio", "language": "en"},
+            data={"model": "audio", "language": "en", **form},
             files={"file": ("audio.wav", b"audio", "audio/wav")},
         )
+
+
+@pytest.mark.parametrize(
+    ("finish_reason", "client_limit", "status", "body"),
+    [
+        ("stop", None, HTTPStatus.OK, "hello"),
+        ("stop", 5, HTTPStatus.OK, "hello"),
+        # The client's own cap stopped the chunk: truncation was requested.
+        ("length", 2, HTTPStatus.OK, "hello"),
+        # A server cap stopped the chunk before any client cap.
+        ("length", None, HTTPStatus.UNPROCESSABLE_ENTITY, "UnprocessableEntityError"),
+        ("length", 5, HTTPStatus.UNPROCESSABLE_ENTITY, "UnprocessableEntityError"),
+        ("error", None, HTTPStatus.INTERNAL_SERVER_ERROR, "InternalServerError"),
+        ("abort", None, HTTPStatus.SERVICE_UNAVAILABLE, "ServiceUnavailableError"),
+    ],
+)
+def test_http_non_streaming_status_follows_finish_reason(
+    finish_reason, client_limit, status, body, monkeypatch
+):
+    server, _, _ = _server(
+        monkeypatch,
+        {REQUEST_ID: lambda: _yields(_output("hello", finish_reason, num_tokens=2))},
+    )
+    form = {} if client_limit is None else {"max_completion_tokens": str(client_limit)}
+
+    response = _post(server, **form)
 
     assert response.status_code == status
     if status == HTTPStatus.OK:
@@ -175,7 +208,11 @@ def test_http_non_streaming_status_follows_finish_reason(
 @pytest.mark.parametrize("use_beam_search", [False, True])
 @pytest.mark.parametrize(
     ("finish_reason", "exc_type"),
-    [("error", GenerationError), ("abort", RetryableRequestError)],
+    [
+        ("error", GenerationError),
+        ("abort", RetryableRequestError),
+        ("length", VLLMUnprocessableEntityError),
+    ],
 )
 async def test_non_streaming_failed_chunk_stops_live_sibling_chunk(
     finish_reason, exc_type, use_beam_search, monkeypatch
@@ -248,10 +285,12 @@ def _events(lines: list[str]) -> list[Any]:
     return events
 
 
-async def _stream(server: OpenAIServingTranscription) -> list[Any]:
+async def _stream(
+    server: OpenAIServingTranscription, max_completion_tokens: int | None = None
+) -> list[Any]:
     generator = await server._create_speech_to_text(
         audio_data=b"audio",
-        request=_request(stream=True),
+        request=_request(stream=True, max_completion_tokens=max_completion_tokens),
         raw_request=_raw_request(),
         response_class=Mock(),
         stream_generator_method=server.transcription_stream_generator,
@@ -297,3 +336,68 @@ async def test_streaming_aborted_chunk_skips_remaining_chunks(monkeypatch):
     assert events[2:] == ["[DONE]"]
     assert started == CHUNK_IDS[:1]
     abort.assert_not_awaited()
+
+
+@pytest.mark.asyncio
+async def test_streaming_server_length_limit_emits_error_event_and_stops(
+    monkeypatch,
+):
+    server, started, _ = _server(
+        monkeypatch,
+        {
+            CHUNK_IDS[0]: lambda: _yields(
+                _output("hel", None), _output("lo", "length")
+            ),
+            CHUNK_IDS[1]: lambda: _yields(_output("world", "stop")),
+        },
+    )
+
+    events = await _stream(server, max_completion_tokens=5)
+
+    assert events[0]["choices"][0]["delta"]["content"] == "hel"
+    assert events[1]["error"]["code"] == HTTPStatus.UNPROCESSABLE_ENTITY
+    assert events[1]["error"]["type"] == "UnprocessableEntityError"
+    assert events[2:] == ["[DONE]"]
+    assert started == CHUNK_IDS[:1]
+
+
+@pytest.mark.asyncio
+async def test_streaming_client_length_limit_finishes_normally(monkeypatch):
+    """The client cap counts tokens across all deltas of a chunk."""
+    server, started, _ = _server(
+        monkeypatch,
+        {
+            CHUNK_IDS[0]: lambda: _yields(
+                _output("hel", None), _output("lo", "length")
+            ),
+            CHUNK_IDS[1]: lambda: _yields(_output("world", "stop")),
+        },
+    )
+
+    events = await _stream(server, max_completion_tokens=2)
+
+    assert [e["choices"][0]["delta"]["content"] for e in events[:3]] == [
+        "hel",
+        "lo",
+        " world",
+    ]
+    assert events[1]["choices"][0]["finish_reason"] == "length"
+    assert events[3:] == ["[DONE]"]
+    assert started == CHUNK_IDS
+
+
+def test_http_model_rejected_option_returns_400_before_engine(monkeypatch):
+    server, started, _ = _server(
+        monkeypatch,
+        {REQUEST_ID: lambda: _yields(_output("hello", "stop"))},
+    )
+    monkeypatch.delattr(server, "_preprocess_speech_to_text")
+    server._decode_and_chunk_speech_async = AsyncMock(
+        return_value=([np.zeros(160, dtype=np.float32)], 0.01)
+    )
+
+    response = _post(server, use_beam_search="true")
+
+    assert response.status_code == HTTPStatus.BAD_REQUEST
+    assert "beam search" in response.json()["error"]["message"]
+    assert started == []

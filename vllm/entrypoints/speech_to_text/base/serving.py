@@ -26,7 +26,12 @@ from vllm.entrypoints.serve.engine.protocol import ErrorResponse, UsageInfo
 from vllm.entrypoints.serve.engine.typing import SpeechToTextRequest
 from vllm.entrypoints.serve.utils.api_utils import get_max_tokens
 from vllm.entrypoints.serve.utils.request_logger import RequestLogger
-from vllm.exceptions import GenerationError, RetryableRequestError, VLLMValidationError
+from vllm.exceptions import (
+    GenerationError,
+    RetryableRequestError,
+    VLLMUnprocessableEntityError,
+    VLLMValidationError,
+)
 from vllm.inputs import EncoderDecoderInput, EngineInput
 from vllm.logger import init_logger
 from vllm.logprobs import FlatLogprobs, Logprob
@@ -424,6 +429,41 @@ class SpeechToTextBaseServing(GenerateBaseServing):
                 avg_logprob += log_probs[idx - 1][token].logprob
         return segments
 
+    @staticmethod
+    def _raise_if_server_length_limit(
+        finish_reason: str | None,
+        num_output_tokens: int,
+        request: SpeechToTextRequest,
+        request_id: str,
+    ) -> None:
+        """Raise if a server limit, not the client, truncated a chunk's output.
+
+        A `length` finish counts as the client's own limit only when the
+        request set `max_completion_tokens` and the chunk generated at least
+        that many tokens. A shorter `length` finish means a server-side cap
+        stopped generation first: `max_model_len`, the model's default
+        `max_tokens`, or a platform output cap.
+
+        Raises:
+            VLLMUnprocessableEntityError: The output was truncated by a
+                server limit.
+
+        """
+        if finish_reason != "length":
+            return
+        client_limit = request.max_completion_tokens
+        if client_limit is not None and num_output_tokens >= client_limit:
+            return
+        logger.warning(
+            "Request %s reached the server output limit after %d tokens",
+            request_id,
+            num_output_tokens,
+        )
+        raise VLLMUnprocessableEntityError(
+            "The output reached the server's length limit and would be "
+            "truncated; send shorter audio"
+        )
+
     async def _create_speech_to_text(
         self,
         audio_data: bytes,
@@ -626,6 +666,12 @@ class SpeechToTextBaseServing(GenerateBaseServing):
                 if finish_reason == "abort":
                     logger.info("Request %s was aborted", engine_request_ids[idx])
                     raise RetryableRequestError("Request was aborted; please retry")
+                self._raise_if_server_length_limit(
+                    finish_reason,
+                    len(op.outputs[0].token_ids),
+                    request,
+                    engine_request_ids[idx],
+                )
                 start_time = chunk_start_offsets[idx]
                 if request.response_format == "verbose_json":
                     assert op.outputs[0].logprobs
@@ -718,7 +764,7 @@ class SpeechToTextBaseServing(GenerateBaseServing):
                         ),
                     )
             return final_response
-        except GenerationError:
+        except (GenerationError, VLLMUnprocessableEntityError):
             # Cancel pending pulls now; beam search sub-requests do not match
             # the chunk ids aborted below.
             await result_generator.aclose()
@@ -770,6 +816,7 @@ class SpeechToTextBaseServing(GenerateBaseServing):
             for result_generator in list_result_generator:
                 beginning_of_chunk = True
                 chunk_aborted = False
+                chunk_tokens = 0
                 post_processor = self.streaming_post_processor_cls()
                 async for res in result_generator:
                     # On first result.
@@ -788,6 +835,10 @@ class SpeechToTextBaseServing(GenerateBaseServing):
                     assert len(res.outputs) == 1
                     output = res.outputs[0]
                     self._raise_if_error(output.finish_reason, request_id)
+                    chunk_tokens += len(output.token_ids)
+                    self._raise_if_server_length_limit(
+                        output.finish_reason, chunk_tokens, request, request_id
+                    )
                     chunk_aborted = output.finish_reason == "abort"
 
                     output_text = post_processor.process_delta(
@@ -874,6 +925,8 @@ class SpeechToTextBaseServing(GenerateBaseServing):
 
         except GenerationError as e:
             yield f"data: {self._convert_generation_error_to_streaming_response(e)}\n\n"
+        except VLLMUnprocessableEntityError as e:
+            yield f"data: {self.create_streaming_error_response(e)}\n\n"
         except Exception as e:
             logger.exception("Error in %s stream generator.", self.task_type)
             data = self.create_streaming_error_response(e)

@@ -39,6 +39,16 @@ HTTP 200, so on an error it sends an error event with code 500 followed by
 has `finish_reason` `abort` (a usage chunk may follow); when long audio is split into chunks, the remaining
 chunks are not transcribed.
 
+A request that sets `max_completion_tokens` may end with `finish_reason` `length`
+and a truncated transcript; it still returns HTTP 200. When a server limit ends
+generation first, such as `--max-model-len` or the model's default output length,
+a non-streaming request returns HTTP 422 instead of a truncated transcript, and a
+streaming request sends an error event with code 422 followed by `data: [DONE]`.
+The limit applies to each chunk of long audio. Shorter audio avoids the error.
+
+A model may reject a request option it cannot honor, such as `use_beam_search`;
+the request then returns HTTP 400 before generation starts.
+
 ### Uploading Audio Files
 
 The Transcriptions API supports uploading audio files in various formats including FLAC, MP3, MP4, MPEG, MPGA, M4A, OGG, WAV, and WEBM.
