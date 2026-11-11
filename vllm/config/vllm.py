@@ -1205,6 +1205,47 @@ class VllmConfig:
                 "backend. Use VLLM_RELOAD_MODE=layerwise or another backend."
             )
 
+    def _verify_hybrid_kv_cache_manager(self) -> None:
+        model = self.model_config
+        if (
+            not self.scheduler_config.disable_hybrid_kv_cache_manager
+            or model is None
+            or model.runner_type != "generate"
+            or not model.is_hybrid
+            or model.has_noops
+            or model.supports_kv_cache_grouping
+        ):
+            return
+        if current_platform.get_kv_cache_config_builder_cls(self) != (
+            "vllm.v1.core.kv_cache_planning.DefaultKVCacheConfigBuilder"
+        ):
+            return
+
+        pp_size = self.parallel_config.pipeline_parallel_size
+        try:
+            # Count every stage: one stage alone may contain only one cache type.
+            attention_layers = sum(
+                model.get_num_layers_by_block_type(
+                    ParallelConfig(
+                        pipeline_parallel_size=pp_size,
+                        rank=rank,
+                        distributed_executor_backend="mp",
+                    ),
+                    "attention",
+                )
+                for rank in range(pp_size)
+            )
+        except ValueError:
+            # Leave models without supported composition metadata to their planner.
+            return
+        if 0 < attention_layers < model.get_total_num_hidden_layers():
+            raise ValueError(
+                "Mixed attention and recurrent layers require the hybrid KV cache "
+                "manager when using default cache grouping. Remove "
+                "--disable-hybrid-kv-cache-manager or use a platform and KV "
+                "connector configuration that supports the hybrid KV cache manager."
+            )
+
     def _verify_kv_transfer_compat(self) -> None:
         """Reject configurations that silently corrupt KV transfers."""
         if (
@@ -2226,6 +2267,8 @@ class VllmConfig:
         if self.scheduler_config.disable_hybrid_kv_cache_manager is None:
             # Default to enable HMA if not explicitly disabled by user or logic above.
             self.scheduler_config.disable_hybrid_kv_cache_manager = False
+
+        self._verify_hybrid_kv_cache_manager()
 
         if (
             self.attention_config.hisparse_config is not None

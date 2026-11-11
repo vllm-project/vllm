@@ -20,6 +20,14 @@ To serve these models efficiently, our [KVCacheManager][vllm.v1.core.kv_cache_ma
     - Full attention: a cache hit prefix requires **all** tokens remain in the KV cache.
     - Sliding window: a cache hit prefix only requires the last **`sliding_window_size`** tokens remain in the KV cache.
 
+## Disabling the hybrid KV cache manager
+
+`--disable-hybrid-kv-cache-manager` disables hybrid KV cache management. For supported attention-only combinations, such as full attention plus sliding-window attention, the default planner can use full-attention cache allocation while preserving sliding-window computation. This can increase memory use.
+
+The default planner cannot use that allocation fallback to unify mixed attention and recurrent (Mamba) cache specifications. For generation models whose configuration identifies both layer types and uses default cache grouping, disabling the manager is rejected during configuration validation, before engine initialization. Remove `--disable-hybrid-kv-cache-manager`; if the manager was disabled automatically, use a platform and KV connector configuration that supports it.
+
+This early check does not reject models or platforms that provide their own cache grouping, or models whose composition cannot be determined by the existing layer-counting API. Those configurations remain subject to their planner's validation. Attention-only and recurrent-only configurations are not rejected by this check.
+
 ## Definitions
 
 1. **kv hidden size**: The number of bytes to store one token's KV cache for a single layer.

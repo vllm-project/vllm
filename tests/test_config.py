@@ -7,6 +7,7 @@ import os
 import subprocess
 import sys
 import textwrap
+from contextlib import nullcontext
 from dataclasses import MISSING, Field, asdict, dataclass, field
 from datetime import timedelta
 from pathlib import Path
@@ -58,6 +59,7 @@ from vllm.transformers_utils.config import (
     get_pooling_config,
     try_get_dense_modules,
 )
+from vllm.transformers_utils.utils import maybe_model_redirect
 from vllm.v1.attention.backend import AttentionCGSupport
 from vllm.v1.worker.gpu.spec_decode.dflash2.config import DFlash2SpeculatorConfig
 from vllm.v1.worker.gpu.spec_decode.lilicorr.config import LiLiCorrSpeculatorConfig
@@ -651,6 +653,153 @@ def test_v2_frontend_config_can_be_created_without_triton():
         ],
         check=True,
     )
+
+
+@pytest.mark.parametrize(
+    ("layer_types", "disable_hma", "pp_size", "rank", "should_raise"),
+    [
+        (["full_attention"] * 8 + ["conv"] * 8, True, 1, 0, True),
+        (["full_attention"] * 8 + ["conv"] * 8, False, 1, 0, False),
+        (["full_attention"] * 16, True, 1, 0, False),
+        (["conv"] * 16, True, 1, 0, False),
+        (["full_attention"] * 8 + ["conv"] * 8, True, 2, 0, True),
+        (["full_attention"] * 8 + ["conv"] * 8, True, 2, 1, True),
+    ],
+    ids=[
+        "mixed-disabled",
+        "mixed-enabled",
+        "attention-only",
+        "recurrent-only",
+        "mixed-pp-first-stage",
+        "mixed-pp-last-stage",
+    ],
+)
+def test_default_grouping_rejects_disabled_hma_for_mixed_layers(
+    layer_types, disable_hma, pp_size, rank, should_raise
+):
+    """Reject the whole model's unsupported cache mix before engine startup."""
+    model = ModelConfig(
+        model=maybe_model_redirect("LiquidAI/LFM2-350M"),
+        dtype="float32",
+        max_model_len=128,
+        hf_overrides={"layer_types": layer_types},
+    )
+    expected = (
+        pytest.raises(ValueError, match="hybrid KV cache manager")
+        if should_raise
+        else nullcontext()
+    )
+    with expected:
+        config = VllmConfig(
+            model_config=model,
+            cache_config=CacheConfig(enable_prefix_caching=False),
+            parallel_config=ParallelConfig(
+                pipeline_parallel_size=pp_size,
+                rank=rank,
+                distributed_executor_backend="mp",
+            ),
+            scheduler_config=SchedulerConfig(
+                max_model_len=128,
+                is_encoder_decoder=False,
+                max_num_seqs=1,
+                max_num_batched_tokens=128,
+                disable_hybrid_kv_cache_manager=disable_hma,
+            ),
+            compilation_config=CompilationConfig(
+                mode=CompilationMode.NONE, cudagraph_mode=CUDAGraphMode.NONE
+            ),
+        )
+        assert config.scheduler_config.disable_hybrid_kv_cache_manager is disable_hma
+        assert config.model_config.hf_text_config.layer_types == layer_types
+
+
+def test_model_owned_grouping_preserves_disabled_hma():
+    from vllm.model_executor.models import ModelRegistry
+    from vllm.model_executor.models.lfm2 import Lfm2ForCausalLM
+    from vllm.v1.kv_cache_interface import KVCacheGroupSpec
+
+    class GroupedLfm2(Lfm2ForCausalLM):
+        @classmethod
+        def get_kv_cache_groups(cls, vllm_config, kv_cache_spec):
+            return [
+                KVCacheGroupSpec([name], spec) for name, spec in kv_cache_spec.items()
+            ]
+
+    architecture = "_TestGroupedLfm2ForCausalLM"
+    assert architecture not in ModelRegistry.models
+    ModelRegistry.register_model(architecture, GroupedLfm2)
+    try:
+        model = ModelConfig(
+            model=maybe_model_redirect("LiquidAI/LFM2-350M"),
+            dtype="float32",
+            max_model_len=128,
+            hf_overrides={"architectures": [architecture]},
+        )
+        config = VllmConfig(
+            model_config=model,
+            cache_config=CacheConfig(enable_prefix_caching=False),
+            scheduler_config=SchedulerConfig(
+                max_model_len=128,
+                is_encoder_decoder=False,
+                disable_hybrid_kv_cache_manager=True,
+            ),
+        )
+        assert config.model_config.is_hybrid
+        assert config.model_config.supports_kv_cache_grouping
+        assert config.scheduler_config.disable_hybrid_kv_cache_manager is True
+    finally:
+        ModelRegistry.models.pop(architecture)
+
+
+def test_platform_owned_grouping_preserves_disabled_hma(monkeypatch):
+    import vllm.platforms as platforms
+    from vllm.platforms.cpu import CpuPlatform
+
+    builder_path = "tests.v1.core.test_kv_cache_config_builder.CustomBuilder"
+
+    class GroupingPlatform(CpuPlatform):
+        @classmethod
+        def get_kv_cache_config_builder_cls(cls, vllm_config):
+            return builder_path
+
+    platform = GroupingPlatform()
+    monkeypatch.setattr(platforms, "current_platform", platform)
+    monkeypatch.setattr(vllm_config_module, "current_platform", platform)
+    config = VllmConfig(
+        model_config=ModelConfig(
+            model=maybe_model_redirect("LiquidAI/LFM2-350M"),
+            dtype="float32",
+            max_model_len=128,
+        ),
+        cache_config=CacheConfig(enable_prefix_caching=False),
+        scheduler_config=SchedulerConfig(
+            max_model_len=128,
+            is_encoder_decoder=False,
+            disable_hybrid_kv_cache_manager=True,
+        ),
+    )
+    assert config.model_config.is_hybrid
+    assert not config.model_config.supports_kv_cache_grouping
+    assert platform.get_kv_cache_config_builder_cls(config) == builder_path
+    assert config.scheduler_config.disable_hybrid_kv_cache_manager is True
+
+
+def test_llm_rejects_disabled_hma_during_configuration():
+    """The public LLM entry point rejects the mix before constructing EngineCore."""
+    from vllm import LLM
+
+    with pytest.raises(ValidationError, match="hybrid KV cache manager") as error:
+        LLM(
+            model=maybe_model_redirect("LiquidAI/LFM2-350M"),
+            dtype="float32",
+            max_model_len=128,
+            max_num_seqs=1,
+            max_num_batched_tokens=128,
+            enforce_eager=True,
+            enable_prefix_caching=False,
+            disable_hybrid_kv_cache_manager=True,
+        )
+    assert error.value.title == "VllmConfig"
 
 
 def test_hisparse_rejects_decode_context_parallelism(monkeypatch):
