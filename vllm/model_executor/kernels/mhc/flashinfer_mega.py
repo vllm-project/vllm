@@ -54,11 +54,22 @@ def _flashinfer_mega_mhc():
     """`(prepare_mega_mhc, host rules module)`, or None if FlashInfer lacks them."""
     try:
         from flashinfer.experimental.deepgemm_mega_mhc import mega_mhc as rules
+        from flashinfer.jit import env as jit_env
         from flashinfer.mega_mhc import prepare_mega_mhc
     except ImportError:
         return None
     if not hasattr(rules, "mhc_infer_num_splits"):
         # A FlashInfer whose mega mHC has no BF16-output (hidden 4096) program.
+        return None
+    # FlashInfer's PyPI release wheels leave out the experimental kernel
+    # sources (flashinfer-ai/flashinfer#7977); nightly and source installs
+    # have them. Without them the kernel can't be JIT-built.
+    sources = jit_env.FLASHINFER_CSRC_DIR / rules.GENERATED_ROOT.removeprefix("csrc/")
+    if not sources.is_dir():
+        logger.info(
+            "FlashInfer was installed without its experimental kernel sources; "
+            "mHC keeps TileLang."
+        )
         return None
     return prepare_mega_mhc, rules
 

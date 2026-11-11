@@ -32,12 +32,7 @@ def _mega_supported() -> bool:
     # share this process. The first call imports it; later calls are cached.
     saved = os.environ.get(_PTXAS_ENV)
     try:
-        from flashinfer.experimental.deepgemm_mega_mhc import mega_mhc as rules
-    except ImportError:
-        return False
-    else:
-        arch = rules.CAPABILITIES.get(current_platform.get_device_capability())
-        return arch is not None and rules.supported(arch, H, "bf16")
+        return fm.mega_mhc_supported(H, HC)
     finally:
         if saved is None:
             os.environ.pop(_PTXAS_ENV, None)
@@ -47,7 +42,7 @@ def _mega_supported() -> bool:
 
 requires_mega = pytest.mark.skipif(
     not _mega_supported(),
-    reason="FlashInfer mega mHC has no hidden-4096 program for this device",
+    reason="FlashInfer mega mHC (with its kernel sources) is unavailable here",
 )
 
 
