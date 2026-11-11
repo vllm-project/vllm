@@ -1,10 +1,14 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 """Real multi-node MoRI dispatch + AITER GEMM + MoRI combine regression test
-for the buffer-trim fix in rocm_aiter_moe.py / prepare_finalize/mori.py.
+for the receive-buffer trim in prepare_finalize/mori.py.
 
 Drives MoriPrepareAndFinalize.prepare()/.finalize() and AiterExperts.apply()
-directly, bypassing FusedMoEFactory (see test_moe_layer_multinode.py).
+directly, bypassing FusedMoEFactory.
+
+Not run in CI: it needs a full node (8 ranks) of MoRI EP under torchrun, more
+than the CI MoRI step provides. CI covers the trim itself in
+test_mori_prepare_finalize.py.
 
 Launch, single node (world_size == GPU_PER_NODE, no real multi-host needed):
 
