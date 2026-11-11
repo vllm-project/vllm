@@ -140,7 +140,7 @@ def reset_buffer_cache() -> None:
 @functools.cache
 def _supported_device() -> bool:
     """Tested on SM80, SM90, SM100, SM120, gfx942 (MI325X) and gfx950 (MI355X), and
-    needs cooperative launches."""
+    needs all programs of its grid resident at once."""
     if current_platform.is_rocm():
         from vllm.platforms.rocm import on_gfx942, on_gfx950
 
@@ -213,7 +213,12 @@ def run(launch: Launch, stream: int, per_call: tuple) -> None:
 
 
 LEVELS_OPTS = dict(num_warps=4)
-FILTER_OPTS = dict(num_warps=WARPS, launch_cooperative_grid=True)
+# ROCm puts a cooperative launch on a separate device queue, which slows every kernel
+# of the graph replays after it (about 10% per step), so it launches plainly. The grid
+# is sized by capacity() to fit the GPU at once, as cooperative launches check.
+FILTER_OPTS = dict(
+    num_warps=WARPS, launch_cooperative_grid=not current_platform.is_rocm()
+)
 WORKSPACE = [
     "row_stats",
     "state",
