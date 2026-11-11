@@ -1102,7 +1102,7 @@ class VllmConfig:
         # communication object, so it has to fit it and match the target.
         spec = self.speculative_config
         draft = spec.draft_model_config if spec is not None else None
-        if draft is not None and draft.is_moe:
+        if spec is not None and draft is not None and draft.is_moe:
             if spec.moe_backend not in (None, "auto"):
                 return f"draft moe_backend={spec.moe_backend!r}"
             if reason := _one_sided_model_unsupported_reason(draft):

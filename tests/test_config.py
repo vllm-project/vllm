@@ -1844,7 +1844,7 @@ def test_one_sided_all2all_default_follows_supported_top_k(hgx_host, top_k, expe
 def test_one_sided_all2all_default_follows_explicit_moe_backend(
     hgx_host, moe_backend, expected
 ):
-    """Experts picked with --moe-backend that reject one-sided keep AGRS."""
+    """Experts picked with --moe-backend that reject one-sided keep AG/RS."""
     config = _one_full_ep_node_config(
         kernel_config=KernelConfig(moe_backend=moe_backend)
     )
@@ -1853,7 +1853,7 @@ def test_one_sided_all2all_default_follows_explicit_moe_backend(
 
 def test_draft_parallel_config_inherits_target_all2all_backend(hgx_host):
     """The draft shares the target's EP communicator, so it must not resolve
-    "auto" on its own (here the target spans two nodes and uses AGRS)."""
+    "auto" on its own (here the target spans two nodes and uses AG/RS)."""
     target = _parallel_config(enable_expert_parallel=True, nnodes=2)
     assert target.all2all_backend == "allgather_reducescatter"
     draft = SpeculativeConfig.create_draft_parallel_config(target, 1)
