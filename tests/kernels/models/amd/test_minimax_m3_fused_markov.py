@@ -140,22 +140,25 @@ def _run(s, num_reqs):
 
 
 @pytest.mark.parametrize("temp", [0.0, 0.6, 1.0])
-@pytest.mark.parametrize("num_reqs", [1, 2, FUSED_ROWS])
+@pytest.mark.parametrize("num_reqs", [1, 2, 3, FUSED_ROWS])
 def test_fused_markov_matches_vllm_loop(num_reqs, temp):
     s = _speculator(temp, int(temp * 10) + num_reqs)
     _check(s, num_reqs, *_run(s, num_reqs))
 
 
-def test_fused_markov_falls_back_past_its_rows():
-    """A step of more requests than the launch is built for takes vLLM's loop:
-    the fused path returns False and leaves the drafts alone."""
+@pytest.mark.parametrize("num_reqs", [4, FUSED_ROWS + 1])
+def test_fused_markov_falls_back(num_reqs):
+    """A step of a request count the launch does not take (4, where vLLM's
+    loop is faster, or more than it is built for) runs vLLM's loop: the fused
+    path returns False and leaves the drafts alone."""
     from vllm.models.minimax_m3.amd.ops import fused_markov
 
     assert fused_markov.MAX_ROWS == FUSED_ROWS < MAX_REQS
+    assert num_reqs not in fused_markov.FUSED_ROWS
     s = _speculator(1.0, 0)
     s.draft_tokens.fill_(-1)
     hidden = torch.zeros(s.sample_indices.numel(), 8, device="cuda")
-    assert not fused_markov.sample_sequential(s, fused_markov.MAX_ROWS + 1, hidden)
+    assert not fused_markov.sample_sequential(s, num_reqs, hidden)
     assert bool((s.draft_tokens == -1).all())
 
 

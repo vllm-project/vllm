@@ -48,11 +48,14 @@ K_CHUNK = 64
 NUM_WARPS = 4
 # The step launch unrolls its loop over the rows (requests) of a step, so it
 # is built for at most this many. A larger step takes vLLM's loop. Each row
-# reads markov_w2 again, so the launch grows by about 15 us a row and step;
-# from 6 rows vLLM's loop is faster, its bias GEMV leaving wvSplitK for one
-# read of markov_w2 for all rows (MI355X, 7 steps: 1 row 179 vs 335 us,
-# 5 rows 610 vs 2162 us, 6 rows 716 vs 345 us).
+# reads markov_w2 again, so the launch grows by about 15 us a row and step.
 MAX_ROWS = 5
+# The request counts the launch takes; the others keep vLLM's loop, which adds
+# the bias inside its Gumbel sampler (#64476). MI355X, the 7 steps in a CUDA
+# graph, cold, fused vs loop: 1 row 178 vs 274 us, 2 288 vs 340, 3 397 vs
+# 422, 4 501 vs 454, 5 604 vs 1896 (the loop's bias GEMV at 5 rows), 6 707
+# vs 282 (from 6 rows the GEMV leaves wvSplitK: one read of markov_w2).
+FUSED_ROWS = (1, 2, 3, 5)
 
 
 @triton.jit
@@ -220,7 +223,7 @@ def _why_not(spec, num_reqs: int) -> str | None:
         return "the confidence head"
     if spec.acceptance_estimator is not None:
         return "the acceptance estimator"
-    if not 1 <= num_reqs <= MAX_ROWS:
+    if num_reqs not in FUSED_ROWS:
         return f"{num_reqs} requests"
     w1 = head.markov_w1.weight
     w2 = head.markov_w2.weight
