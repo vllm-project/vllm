@@ -4,8 +4,8 @@
 `KimiDecoderLayer.forward` does with AttnRes, `(prefix_sum, block_residual,
 prefix_delta)`.
 
-- `WholeLayer` (KDA layers): K1 (AttnRes, in_proj, f_b, spec conv, the KDA
-  recurrence, the gated norm) writes o_proj's input; K2 runs o_proj, its
+- `WholeLayer` (KDA layers): K1 (AttnRes, in_proj, f_b, causal convolution,
+  the KDA recurrence, the gated norm) writes o_proj's input; K2 runs o_proj, its
   all-reduce, the MLP AttnRes and the latent MoE.
 - `FfnLayer` (MLA layers): M1a (AttnRes, the query prologue, the KV write
   and, at DCP8, the query gather), AITER's decode, M1b (at DCP8 the LSE
@@ -25,6 +25,24 @@ from vllm.models.kimi_k3.amd.specialized_decode.runtime.runner import MonoRunner
 
 if TYPE_CHECKING:
     from vllm.models.kimi_k3.amd.specialized_decode.runtime.decode import Step
+
+
+def _k1_metadata(m: Any, runner: MonoRunner):
+    if m.num_spec_decodes:
+        return (
+            m.spec_state_indices_tensor.size(-1),
+            m.spec_state_indices_tensor,
+            m.num_accepted_tokens,
+        )
+    state_indices = m.non_spec_state_indices_tensor
+    if state_indices is None:
+        raise RuntimeError("regular decode requires KDA state indices")
+    state_indices = state_indices.unsqueeze(-1)
+    return (
+        1,
+        state_indices,
+        runner.regular_num_accepted[: state_indices.size(0)],
+    )
 
 
 def _k2_key(layer, runner: MonoRunner, tokens: int, reset: bool, m1b: bool = False):
@@ -57,9 +75,9 @@ def _k2_key(layer, runner: MonoRunner, tokens: int, reset: bool, m1b: bool = Fal
 
 def m1c_at(runner: MonoRunner, width: int) -> bool:
     """`runner.m1c` at this width: M1c's KV splits must share out evenly over
-    the requests (qlen 4 has 80: a 12-row width, 3 requests, can't). DCP1 runs
-    M1c only, so startup refuses a max_num_seqs with such a width
-    (`runtime.step_reasons`)."""
+    the requests (qlen 4 has 80: a 12-row width, 3 requests, can't).
+    Speculative DCP1 runs M1c only, so startup refuses a max_num_seqs with such
+    a width (`runtime.step_reasons`)."""
     from vllm.models.kimi_k3.amd.specialized_decode.mono.attention import (
         mla_attn_geom,
     )
@@ -222,11 +240,12 @@ class WholeLayer(_Layer):
         if self.first:
             runner.step_begin()
         conv_state, rstate = self.caches()
+        qlen, state_indices, num_accepted = _k1_metadata(m, runner)
         s = prefix_sum.size(0)
         core = prefix_sum.new_empty(s, kda.PROJ)
         kda.kda_pre(
             self._k1_key(
-                m.spec_state_indices_tensor.size(-1),
+                qlen,
                 conv_state.size(-1),
                 prefix_delta is not None,
             ),
@@ -244,8 +263,8 @@ class WholeLayer(_Layer):
             dt_bias=attn.dt_bias,
             on_w=attn.o_norm.weight,
             rstate=rstate,
-            st_idx=m.spec_state_indices_tensor,
-            num_acc=m.num_accepted_tokens,
+            st_idx=state_indices,
+            num_acc=num_accepted,
             core_out=core,
             layer=layer.layer_idx,
             **runner.launch_args(),
