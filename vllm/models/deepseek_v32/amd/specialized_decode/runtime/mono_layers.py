@@ -245,6 +245,8 @@ class MonoLayers:
         # mono steps since install; never reset, so check steps stay rank-aligned
         self._n_steps = 0
         self.active = False
+        # why the last begin_step ran vLLM's layers ("" after a kernel step)
+        self.skip_reason = ""
         self.ops: dict[tuple[int, int], Any] = {}
         self.packed: dict[int, dict] = {}
         self.weights: dict[int, Any] = {}
@@ -354,6 +356,15 @@ class MonoLayers:
             # fused-indexer block table at a stable address (param tables, graphs)
             nb = -(-int(self.cfg.max_model_len) // INDEX_BLOCK) + 1
             self.b_bt = torch.zeros(R, nb, dtype=torch.int32, device=dev)
+
+    def kernel_steps(self) -> dict[int, int]:
+        """Kernel steps run so far per built batch size, from the device step counter
+        each step advances (counted under graph replay too; reads the device)."""
+        return {
+            S: int(ops[0].step.item())
+            for S in self.batch_sizes
+            if (ops := self.runtime_ops(S))
+        }
 
     def runtime_ops(self, S: int) -> list:
         """The ops owning a runtime (scratch / step counter / peers) for batch size
@@ -560,9 +571,10 @@ class MonoLayers:
         md, sm = layer_metadata(self.layers[self.first].self_attn.layer_name)
         S = padded_batch_size(T, self.batch_sizes)
         if md is None or sm is None or not hasattr(md, "paged_kv_indptr"):
+            self.skip_reason = "no_metadata"
             return None
-        reason = step_reason(md, T, S is not None)
-        if (reason or self._state_reason()) != "":
+        self.skip_reason = step_reason(md, T, S is not None) or self._state_reason()
+        if self.skip_reason != "":
             return None
         assert S is not None
         if md.block_size != self.block_size:

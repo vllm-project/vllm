@@ -274,6 +274,7 @@ def test_plan(monkeypatch, forward_context):
         return 2 if go["v"] else None
 
     ml.begin_step = begin
+    D.counters.clear()
     step = obj.plan(torch.zeros(2), None)
     assert step is not None and (step.T, step.S) == (2, 2) and begins == [2]
     assert step.layer(2) is None and step.layer(78) is None
@@ -291,6 +292,14 @@ def test_plan(monkeypatch, forward_context):
     assert obj.plan(torch.zeros(2), None) is None
     monkeypatch.setattr(D, "is_forward_context_available", lambda: True)
     assert len(begins) == 3
+    # the engagement counter: every decision, by reason
+    assert D.counters == {
+        "mono_steps": 2,
+        "vllm_path:no_go": 1,
+        "vllm_path:pp_stage_input": 1,
+        "vllm_path:piecewise_graph": 1,
+        "vllm_path:no_forward_context": 1,
+    }, D.counters
     ml.active = True
     obj._kv = None  # no KV cache bound yet (profiling / dummy runs)
     assert obj.plan(torch.zeros(2), None) is None and not ml.active

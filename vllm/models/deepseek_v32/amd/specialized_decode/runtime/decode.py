@@ -13,6 +13,7 @@ None; `Step.layer(i)` is the kernel callable of mono layer i (None for vLLM's la
 
 from __future__ import annotations
 
+import collections
 from collections.abc import Callable
 from functools import partial
 from typing import NamedTuple
@@ -32,6 +33,11 @@ from vllm.models.deepseek_v32.amd.specialized_decode.runtime.mono_layers import 
 )
 
 logger = init_logger(__name__)
+
+# plan() decisions on this rank: "mono_steps", and "vllm_path:<reason>" for steps
+# that run vLLM's layers. Under FULL graphs plan() runs at capture only, so a replay
+# is counted by the device step counter instead (SpecializedDecode.kernel_steps).
+counters: collections.Counter[str] = collections.Counter()
 
 # (positions, hidden_states, residual) -> (hidden_states, residual)
 LayerKernel = Callable[
@@ -129,12 +135,14 @@ class SpecializedDecode:
         """
         mono = self.mono
         mono.active = False
-        if intermediate_tensors is not None or self._kv is None:
-            return None
+        if intermediate_tensors is not None:
+            return self._skip("pp_stage_input")
+        if self._kv is None:
+            return self._skip("no_kv_cache")
         if not is_forward_context_available():
-            return None
+            return self._skip("no_forward_context")
         if get_forward_context().cudagraph_runtime_mode == CUDAGraphMode.PIECEWISE:
-            return None
+            return self._skip("piecewise_graph")
         kv = mla_cache(mono.layers[mono.first])
         if (kv.data_ptr(), kv.numel()) != self._kv:
             # The extensible KV cache re-binds every view after warm-up, at the same
@@ -152,7 +160,23 @@ class SpecializedDecode:
                 kv.shape[0] * kv.shape[-2],
             )
         S = mono.begin_step(positions)
-        return None if S is None else Step(positions.shape[0], S, self.kernels)
+        if S is None:
+            return self._skip(getattr(mono, "skip_reason", "") or "no_go")
+        counters["mono_steps"] += 1
+        return Step(positions.shape[0], S, self.kernels)
+
+    @staticmethod
+    def _skip(reason: str) -> None:
+        key = f"vllm_path:{reason}"
+        if not counters[key]:
+            logger.debug("GLM-5.2 specialized decode: vLLM's layers for %s", reason)
+        counters[key] += 1
+        return None
+
+    def kernel_steps(self) -> dict[int, int]:
+        """Kernel steps run so far on this rank, per built batch size (graph replays
+        included). Reads the device: not for the step path."""
+        return self.mono.kernel_steps()
 
     def after_step(self) -> None:
         """Once per executed step, from compute_logits (runs eagerly on every rank, also
