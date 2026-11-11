@@ -20,6 +20,7 @@ from collections.abc import Hashable
 from typing import TYPE_CHECKING, Any
 
 import torch
+from torch import nn
 
 from vllm.models.deepseek_v4.common.vision import (
     build_packed_merge_metadata,
@@ -45,12 +46,24 @@ if TYPE_CHECKING:
     from vllm.transformers_utils.configs.deepseek_v41 import DeepseekV41Config
 
 
+class DeepseekV4ImageDelimiters(nn.Module):
+    """Keep the learned FP32 vectors under tower stubbing and offloading."""
+
+    def __init__(self, hidden_size: int):
+        super().__init__()
+        self.image_start = nn.Parameter(torch.empty(hidden_size, dtype=torch.float32))
+        self.image_newline = nn.Parameter(torch.empty(hidden_size, dtype=torch.float32))
+        self.image_end = nn.Parameter(torch.empty(hidden_size, dtype=torch.float32))
+
+    def forward(self) -> tuple[torch.Tensor, torch.Tensor, torch.Tensor]:
+        return self.image_start, self.image_newline, self.image_end
+
+
 class DeepseekV4VLEncoderCudaGraphMixin:
     """`SupportsEncoderCudaGraph` for `DeepseekV41ForCausalLM`.
 
     Expects `self.vision`/`self.aligner`/`self.config`/
-    `self.multimodal_config` and the `image_start`/`image_newline`/
-    `image_end` parameters from the host model.
+    `self.multimodal_config` and `self.image_delimiters` from the host model.
     """
 
     # Provided by the host model; declared here so mixin methods type-check.
@@ -58,9 +71,7 @@ class DeepseekV4VLEncoderCudaGraphMixin:
     aligner: "DeepseekV4Aligner"
     config: "DeepseekV41Config"
     multimodal_config: "MultiModalConfig | None"
-    image_start: torch.nn.Parameter
-    image_end: torch.nn.Parameter
-    image_newline: torch.nn.Parameter
+    image_delimiters: DeepseekV4ImageDelimiters
 
     # -- helpers shared with the eager multimodal path --
 
@@ -72,9 +83,10 @@ class DeepseekV4VLEncoderCudaGraphMixin:
         types = types.to(image_embeds.device)
         span = image_embeds.new_empty(types.numel(), image_embeds.shape[-1])
         dtype = image_embeds.dtype
-        span[types == IMAGE_START] = self.image_start.to(dtype)
-        span[types == IMAGE_END] = self.image_end.to(dtype)
-        span[types == IMAGE_NEW_LINE] = self.image_newline.to(dtype)
+        start, newline, end = self.image_delimiters()
+        span[types == IMAGE_START] = start.to(dtype)
+        span[types == IMAGE_END] = end.to(dtype)
+        span[types == IMAGE_NEW_LINE] = newline.to(dtype)
         span[types == IMAGE] = image_embeds
         return span
 
@@ -361,7 +373,7 @@ class DeepseekV4VLEncoderCudaGraphMixin:
             is_image.cumsum(0) - 1,
             n_rows + (types == IMAGE_NEW_LINE).long() + 2 * (types == IMAGE_END).long(),
         )
-        delims = torch.stack([self.image_start, self.image_newline, self.image_end])
+        delims = torch.stack(self.image_delimiters())
         src = torch.cat([aligner_out[:n_rows], delims.to(aligner_out.dtype)])
         span = src[async_tensor_h2d(src_idx, aligner_out.device)]
 

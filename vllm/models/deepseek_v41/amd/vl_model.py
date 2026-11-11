@@ -52,7 +52,10 @@ from ..common.mm_preprocess import (
     DeepseekV4VLProcessingInfo,
     num_image_tokens,
 )
-from ..common.vl_cudagraph import DeepseekV4VLEncoderCudaGraphMixin
+from ..common.vl_cudagraph import (
+    DeepseekV4ImageDelimiters,
+    DeepseekV4VLEncoderCudaGraphMixin,
+)
 from ..decoder_replay_layers import DecoderReplayLayers
 from .model import (
     DeepseekV41LLMForCausalLM,
@@ -88,6 +91,9 @@ _VL_PREFIX_MAPPING: dict[str, str | None] = {
     "norm.": "language_model.model.norm.",
     "hc_head": "language_model.model.hc_head",
     "mtp.": "language_model.model.mtp.",
+    "image_start": "image_delimiters.image_start",
+    "image_end": "image_delimiters.image_end",
+    "image_newline": "image_delimiters.image_newline",
 }
 
 
@@ -171,21 +177,12 @@ class DeepseekV41ForCausalLM(
         self.multimodal_config = model_config.multimodal_config
         assert self.multimodal_config is not None
 
-        # The tower is always built; _mark_tower_model stubs it out
-        # (StageMissingLayer, weights skipped) when the image limit is 0.
+        # Stub the tower when images are disabled or on later pipeline stages.
         with self._mark_tower_model(vllm_config, {"image"}):
             self.use_data_parallel = is_vit_use_data_parallel(config.vision_n_heads)
             self.vision = DeepseekV4ViT(config)
             self.aligner = DeepseekV4Aligner(config)
-            self.image_start = nn.Parameter(
-                torch.empty(config.hidden_size, dtype=torch.float32)
-            )
-            self.image_end = nn.Parameter(
-                torch.empty(config.hidden_size, dtype=torch.float32)
-            )
-            self.image_newline = nn.Parameter(
-                torch.empty(config.hidden_size, dtype=torch.float32)
-            )
+            self.image_delimiters = DeepseekV4ImageDelimiters(config.hidden_size)
             self.vision.to(dtype=model_config.dtype)
             self.aligner.to(dtype=model_config.dtype)
 
