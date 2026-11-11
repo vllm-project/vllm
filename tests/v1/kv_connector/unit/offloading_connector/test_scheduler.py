@@ -261,8 +261,11 @@ def test_swa_offload_window_covers_unaligned_hit(
     config = SimpleNamespace(
         num_hash_lookahead_tokens=0,
         speculative_config=None,
+        kv_transfer_config=None,
         cache_config=SimpleNamespace(
-            enable_prefix_caching=True, prefix_cache_retention_interval=None
+            enable_prefix_caching=True,
+            prefix_cache_retention_interval=None,
+            prefix_match_unit=None,
         ),
         parallel_config=SimpleNamespace(world_size=1, decode_context_parallel_size=1),
     )
