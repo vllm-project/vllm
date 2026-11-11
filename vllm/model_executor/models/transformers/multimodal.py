@@ -52,7 +52,6 @@ from vllm.multimodal.processing import (
     cached_encode,
 )
 from vllm.multimodal.processing.processor import HFMultiModalInputs
-from vllm.sequence import IntermediateTensors
 from vllm.utils.gpu_sync_debug import gpu_sync_allowed
 from vllm.utils.torch_utils import async_tensor_h2d, token_ids_to_tensor
 
@@ -1053,23 +1052,6 @@ class MultiModalMixin(SupportsMultiModal, SupportsMRoPE, Base):
                     enable_if=should_torch_compile_mm_encoder,
                     is_encoder=True,
                 )
-
-    def forward(
-        self,
-        input_ids: torch.Tensor | None,
-        positions: torch.Tensor,
-        intermediate_tensors: IntermediateTensors | None = None,
-        inputs_embeds: torch.Tensor | None = None,
-        **kwargs: object,
-    ) -> torch.Tensor | IntermediateTensors:
-        # Positions shape handling for MRoPE models
-        if self.model_config.uses_mrope:
-            # [3, seq_len] -> [3, 1, seq_len]
-            positions = positions[:, None].contiguous()
-        model_output = super().forward(
-            input_ids, positions, intermediate_tensors, inputs_embeds
-        )
-        return model_output
 
     def get_language_model(self) -> torch.nn.Module:
         """Transformers modeling backend multimodal classes do not contain a separate
