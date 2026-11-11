@@ -51,6 +51,21 @@ class PlaceholderMetadataResolver:
         self._cache[modality] = fields
         return fields
 
+    def has_encoder_input(self, feature: "MultiModalFeatureSpec") -> bool:
+        """Whether `feature` carries something the encoder can run on.
+
+        False for an item with only placeholder metadata (e.g. the grid of a
+        metadata-only `image_embeds` part): its embedding exists only in the
+        EC store, so encoding it locally has nothing to work with.
+        """
+        data = feature.data
+        if not data:
+            return False
+        metadata = self.fields_for(feature.modality)
+        return any(
+            value.data is not None for key, value in data.items() if key not in metadata
+        )
+
 
 def collect_ec_item_metadata(
     mm_features: "list[MultiModalFeatureSpec]",
