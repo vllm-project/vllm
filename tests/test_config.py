@@ -2237,17 +2237,13 @@ def test_draft_eplb_defaults_from_draft_expert_count(
 
 
 @pytest.mark.skip_global_cleanup
-@pytest.mark.parametrize("draft_redundant", [None, 1])
-def test_draft_eplb_defaults_to_minimum_for_unset_or_invalid_count(
-    tmp_path: Path,
-    monkeypatch: pytest.MonkeyPatch,
-    caplog: pytest.LogCaptureFixture,
-    draft_redundant: int | None,
+def test_draft_eplb_defaults_to_minimum_when_unset(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ):
     monkeypatch.setattr(current_platform, "is_cuda_alike", lambda: True)
     target_model_config = _write_deepseek_v2_config(tmp_path / "target", 4)
     draft_model_config = _write_deepseek_v2_config(tmp_path / "draft", 6)
-    target_parallel_config = _eplb_parallel_config(0, draft_redundant)
+    target_parallel_config = _eplb_parallel_config(0)
 
     speculative_config = SpeculativeConfig(
         method="eagle3",
@@ -2264,15 +2260,28 @@ def test_draft_eplb_defaults_to_minimum_for_unset_or_invalid_count(
     )
     draft_vllm_config = speculative_config.apply_draft_eplb_overrides(base_vllm_config)
     assert draft_vllm_config.parallel_config.eplb_config.num_redundant_experts == 2
-    if draft_redundant is not None:
-        warning = next(
-            record.getMessage()
-            for record in caplog.records
-            if record.levelname == "WARNING"
-            and "eplb_config.draft_num_redundant_experts" in record.getMessage()
+
+
+@pytest.mark.skip_global_cleanup
+def test_draft_eplb_rejects_invalid_explicit_count(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+):
+    monkeypatch.setattr(current_platform, "is_cuda_alike", lambda: True)
+    target_model_config = _write_deepseek_v2_config(tmp_path / "target", 4)
+    draft_model_config = _write_deepseek_v2_config(tmp_path / "draft", 6)
+    target_parallel_config = _eplb_parallel_config(0, 1)
+
+    with pytest.raises(
+        ValueError,
+        match=r"Set eplb_config\.draft_num_redundant_experts to 2",
+    ):
+        SpeculativeConfig(
+            method="eagle3",
+            model=draft_model_config.model,
+            num_speculative_tokens=1,
+            target_model_config=target_model_config,
+            target_parallel_config=target_parallel_config,
         )
-        assert "=1" in warning
-        assert "using 2" in warning
 
 
 @pytest.mark.skip_global_cleanup
@@ -2316,8 +2325,8 @@ def _write_deepseek_v41_config(path: Path) -> ModelConfig:
 @pytest.mark.skip_global_cleanup
 @pytest.mark.parametrize(
     ("draft_redundant", "expected_draft_redundant"),
-    [(None, 0), (0, 0), (1, 0)],
-    ids=["auto-count", "explicit-draft-count", "invalid-explicit-count"],
+    [(None, 0), (0, 0)],
+    ids=["auto-count", "explicit-draft-count"],
 )
 def test_dspark_draft_eplb_uses_draft_expert_count(
     tmp_path: Path,
@@ -2459,6 +2468,40 @@ def test_dspark_draft_eplb_can_be_disabled(
     assert draft_vllm_config.parallel_config.eplb_config.num_redundant_experts == 0
     assert target_parallel_config.enable_eplb
     assert target_parallel_config.eplb_config.num_redundant_experts == 4
+
+
+@pytest.mark.skip_global_cleanup
+def test_dspark_draft_eplb_rejects_elastic_ep_unless_disabled(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+):
+    monkeypatch.setattr(current_platform, "is_cuda_alike", lambda: True)
+    monkeypatch.setattr(current_platform, "is_rocm", lambda: False)
+    target_model_config = _write_deepseek_v41_config(tmp_path / "target")
+    target_parallel_config = _eplb_parallel_config(4)
+    target_parallel_config.enable_elastic_ep = True
+
+    with pytest.raises(
+        ValueError,
+        match=(
+            "EPLB for a DSpark draft is not supported with Elastic EP. "
+            "Set speculative_config.draft_enable_eplb=false to disable draft EPLB."
+        ),
+    ):
+        SpeculativeConfig(
+            method="dspark",
+            num_speculative_tokens=1,
+            target_model_config=target_model_config,
+            target_parallel_config=target_parallel_config,
+        )
+
+    speculative_config = SpeculativeConfig(
+        method="dspark",
+        num_speculative_tokens=1,
+        target_model_config=target_model_config,
+        target_parallel_config=target_parallel_config,
+        draft_enable_eplb=False,
+    )
+    assert not speculative_config.draft_enable_eplb
 
 
 @pytest.mark.skip_global_cleanup

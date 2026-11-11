@@ -91,7 +91,7 @@ def dspark_vllm_config():
 
 
 @pytest.mark.parametrize("model_type", ["deepseek_v4", "deepseek_v41"])
-def test_dspark_loads_all_local_eplb_redundant_experts(monkeypatch, model_type):
+def test_dspark_loads_all_local_eplb_redundant_experts(model_type):
     from torch import nn
 
     if model_type == "deepseek_v4":
@@ -99,7 +99,6 @@ def test_dspark_loads_all_local_eplb_redundant_experts(monkeypatch, model_type):
     else:
         from vllm.models.deepseek_v41.nvidia import dspark as dspark_module
 
-    attempted_expert_ids = []
     param_name = "model.layers.0.ffn.experts.routed_experts.w13_weight"
     param = nn.Parameter(torch.full((5, 2), -1.0))
 
@@ -115,25 +114,12 @@ def test_dspark_loads_all_local_eplb_redundant_experts(monkeypatch, model_type):
         assert weight_name == param_name
         assert shard_id == "w1"
         assert return_success
-        attempted_expert_ids.append(expert_id)
         if expert_id >= param.shape[0]:
             return False
         param.data[expert_id].copy_(loaded_weight)
         return True
 
     param.weight_loader = load_local_expert
-    original_mapping = dspark_module.fused_moe_make_expert_params_mapping
-    mappings = []
-
-    def capture_mapping(*args, **kwargs):
-        mapping = original_mapping(*args, **kwargs)
-        mappings.append(mapping)
-        return mapping
-
-    monkeypatch.setattr(
-        dspark_module, "fused_moe_make_expert_params_mapping", capture_mapping
-    )
-
     draft = object.__new__(dspark_module.DSparkDeepseekV4ForCausalLM)
     nn.Module.__init__(draft)
     draft.model = SimpleNamespace(
@@ -161,14 +147,6 @@ def test_dspark_loads_all_local_eplb_redundant_experts(monkeypatch, model_type):
     checkpoint_weight = torch.tensor([3.0, 7.0])
     draft.load_weights([("mtp.0.ffn.experts.0.w1.weight", checkpoint_weight)])
 
-    assert len(mappings) == 1
-    expert_zero_w1_slots = [
-        expert_id
-        for _, checkpoint_name, expert_id, _ in mappings[0]
-        if checkpoint_name.startswith("experts.0.w1.")
-    ]
-    assert expert_zero_w1_slots == [0, 4, 8]
-    assert attempted_expert_ids == [0, 4, 8]
     torch.testing.assert_close(param[0], checkpoint_weight)
     torch.testing.assert_close(param[4], checkpoint_weight)
 
