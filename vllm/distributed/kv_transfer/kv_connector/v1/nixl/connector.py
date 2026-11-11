@@ -17,6 +17,7 @@ from typing import TYPE_CHECKING, Any
 import torch
 
 from vllm.config import KVTransferConfig, VllmConfig
+from vllm.config.kv_transfer import KVCacheAccess
 from vllm.distributed.kv_transfer.kv_connector.utils import (
     EngineId,
 )
@@ -79,6 +80,14 @@ class NixlBaseConnector(KVConnectorBase_V1, SupportsHMA):
     """Base connector with common logic shared by pull and push modes."""
 
     _cache_hit_source = CacheHitSource.P2P
+
+    @classmethod
+    def kv_cache_access(cls, kv_transfer_config: KVTransferConfig) -> KVCacheAccess:
+        # With a CPU kv_buffer_device, NIXL registers host staging buffers.
+        if kv_transfer_config.kv_buffer_device == "cpu":
+            return KVCacheAccess.IN_PROCESS
+        # Peers within a host map it through UCX cuda_ipc.
+        return KVCacheAccess.REGISTERS | KVCacheAccess.EXPORTS_FABRIC
 
     @classmethod
     def supports_lookahead_block_hashes(
