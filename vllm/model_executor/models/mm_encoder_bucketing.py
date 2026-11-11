@@ -93,6 +93,10 @@ _VERIFIED_FOR_BUCKETING: dict[str, str] = {
     # softmax. WER impact measured at +3 words / 7083 (see
     # glmasr_validation.md).
     "glmasr": LOSSLESS_OUTPUT_LE_1FRAME,
+    # Same class as glmasr: token counts derive from the true lengths
+    # (strictly rung-independent) but the Shaw-relative block attention is
+    # mask-less over batch padding, so values drift.
+    "granite_speech": LOSSLESS_OUTPUT_LE_1FRAME,
 }
 
 
