@@ -789,51 +789,59 @@ class GDNAttentionMetadataBuilder(AttentionMetadataBuilder[GDNAttentionMetadata]
             num_prefills, num_decodes, num_spec_decodes, num_spec_decode_tokens
         ):
             assert spec_sequence_masks is not None
-            assert spec_state_indices_tensor is not None
-            assert spec_query_start_loc is not None
-            assert num_accepted_tokens is not None
+            self.spec_state_indices_tensor[:num_spec_decodes].copy_(
+                spec_state_indices_tensor, non_blocking=True
+            )
+            spec_state_indices_tensor = self.spec_state_indices_tensor[:batch_size]
+            spec_state_indices_tensor[num_spec_decodes:].fill_(NULL_BLOCK_ID)
+
+            self.spec_sequence_masks[:num_spec_decodes].copy_(
+                spec_sequence_masks[:num_spec_decodes], non_blocking=True
+            )
+            spec_sequence_masks = self.spec_sequence_masks[:batch_size]
+            spec_sequence_masks[num_spec_decodes:].fill_(False)
+
             assert non_spec_token_indx is not None and spec_token_indx is not None
-            spec_state_indices_tensor = self._stage(
-                self.spec_state_indices_tensor,
-                spec_state_indices_tensor,
-                batch_size,
-                NULL_BLOCK_ID,
+            self.non_spec_token_indx[: non_spec_token_indx.size(0)].copy_(
+                non_spec_token_indx, non_blocking=True
             )
-            spec_sequence_masks = self._stage(
-                self.spec_sequence_masks,
-                spec_sequence_masks[:num_spec_decodes],
-                batch_size,
-                False,
+            non_spec_token_indx = self.non_spec_token_indx[
+                : non_spec_token_indx.size(0)
+            ]
+
+            self.spec_token_indx[: spec_token_indx.size(0)].copy_(
+                spec_token_indx, non_blocking=True
             )
-            non_spec_token_indx = self._stage(
-                self.non_spec_token_indx, non_spec_token_indx
+            spec_token_indx = self.spec_token_indx[: spec_token_indx.size(0)]
+
+            self.spec_query_start_loc[: num_spec_decodes + 1].copy_(
+                spec_query_start_loc, non_blocking=True
             )
-            spec_token_indx = self._stage(self.spec_token_indx, spec_token_indx)
-            spec_query_start_loc = self._stage(
-                self.spec_query_start_loc,
-                spec_query_start_loc,
-                batch_size + 1,
-                spec_query_start_loc[-1],
+            spec_num_query_tokens = spec_query_start_loc[-1]  # type: ignore[index]
+            spec_query_start_loc = self.spec_query_start_loc[: batch_size + 1]
+            spec_query_start_loc[num_spec_decodes + 1 :].fill_(spec_num_query_tokens)
+
+            self.num_accepted_tokens[:num_spec_decodes].copy_(
+                num_accepted_tokens, non_blocking=True
             )
-            num_accepted_tokens = self._stage(
-                self.num_accepted_tokens, num_accepted_tokens, batch_size, 1
-            )
+            num_accepted_tokens = self.num_accepted_tokens[:batch_size]
+            num_accepted_tokens[num_spec_decodes:].fill_(1)
 
         if self._stage_decode(num_prefills, num_decodes, num_spec_decodes):
-            assert non_spec_state_indices_tensor is not None
-            assert non_spec_query_start_loc is not None
-            non_spec_state_indices_tensor = self._stage(
-                self.non_spec_state_indices_tensor,
-                non_spec_state_indices_tensor,
-                batch_size,
-                NULL_BLOCK_ID,
+            self.non_spec_state_indices_tensor[:num_decodes].copy_(
+                non_spec_state_indices_tensor, non_blocking=True
             )
-            non_spec_query_start_loc = self._stage(
-                self.non_spec_query_start_loc,
-                non_spec_query_start_loc,
-                batch_size + 1,
-                non_spec_query_start_loc[-1],
+            non_spec_state_indices_tensor = self.non_spec_state_indices_tensor[
+                :batch_size
+            ]
+            non_spec_state_indices_tensor[num_decodes:].fill_(NULL_BLOCK_ID)
+
+            self.non_spec_query_start_loc[: num_decodes + 1].copy_(
+                non_spec_query_start_loc, non_blocking=True
             )
+            non_spec_num_query_tokens = non_spec_query_start_loc[-1]  # type: ignore[index]
+            non_spec_query_start_loc = self.non_spec_query_start_loc[: batch_size + 1]
+            non_spec_query_start_loc[num_decodes + 1 :].fill_(non_spec_num_query_tokens)
 
         attn_metadata = GDNAttentionMetadata(
             num_prefills=num_prefills,
@@ -875,22 +883,6 @@ class GDNAttentionMetadataBuilder(AttentionMetadataBuilder[GDNAttentionMetadata]
             attn_metadata = self._stage_mixed_batch(attn_metadata)
         return attn_metadata
 
-    @staticmethod
-    def _stage(
-        buffer: torch.Tensor,
-        values: torch.Tensor,
-        num_rows: int | None = None,
-        pad_value: int | bool | torch.Tensor = 0,
-    ) -> torch.Tensor:
-        """Copy `values` to the front of `buffer`, fill the rows after
-        them up to `num_rows` (default: none) with `pad_value` and return
-        `buffer[:num_rows]`."""
-        num_values = values.shape[0]
-        num_rows = num_values if num_rows is None else num_rows
-        buffer[:num_values].copy_(values, non_blocking=True)
-        buffer[num_values:num_rows].fill_(pad_value)
-        return buffer[:num_rows]
-
     def _stage_mixed_batch(
         self,
         metadata: GDNAttentionMetadata,
@@ -910,12 +902,10 @@ class GDNAttentionMetadataBuilder(AttentionMetadataBuilder[GDNAttentionMetadata]
                 continue
             pad_value = MIXED_BATCH_PAD_VALUES[name]
             buffer = self.mixed_batch_buffers[name]
-            staged[name] = self._stage(
-                buffer,
-                values,
-                buffer.shape[0],
-                values[-1] if pad_value is None else pad_value,
-            )[: values.shape[0]]
+            num_values = values.shape[0]
+            buffer[:num_values].copy_(values, non_blocking=True)
+            buffer[num_values:].fill_(values[-1] if pad_value is None else pad_value)
+            staged[name] = buffer[:num_values]
         return replace(metadata, **staged)
 
     def _stage_capture_buffers(
@@ -1081,23 +1071,21 @@ class GDNAttentionMetadataBuilder(AttentionMetadataBuilder[GDNAttentionMetadata]
             m.num_prefills, m.num_decodes, m.num_spec_decodes, m.num_spec_decode_tokens
         ):
             assert m.spec_state_indices_tensor is not None
-            assert spec_indices is not None
-            spec_indices = self._stage(
-                self.spec_state_indices_tensor,
-                spec_indices,
-                m.spec_state_indices_tensor.shape[0],
-                NULL_BLOCK_ID,
+            batch_size = m.spec_state_indices_tensor.shape[0]
+            self.spec_state_indices_tensor[: m.num_spec_decodes].copy_(
+                spec_indices, non_blocking=True
             )
+            spec_indices = self.spec_state_indices_tensor[:batch_size]
+            spec_indices[m.num_spec_decodes :].fill_(NULL_BLOCK_ID)
 
         if self._stage_decode(m.num_prefills, m.num_decodes, m.num_spec_decodes):
             assert m.non_spec_state_indices_tensor is not None
-            assert non_spec_indices is not None
-            non_spec_indices = self._stage(
-                self.non_spec_state_indices_tensor,
-                non_spec_indices,
-                m.non_spec_state_indices_tensor.shape[0],
-                NULL_BLOCK_ID,
+            batch_size = m.non_spec_state_indices_tensor.shape[0]
+            self.non_spec_state_indices_tensor[: m.num_decodes].copy_(
+                non_spec_indices, non_blocking=True
             )
+            non_spec_indices = self.non_spec_state_indices_tensor[:batch_size]
+            non_spec_indices[m.num_decodes :].fill_(NULL_BLOCK_ID)
 
         metadata = replace(
             m,
