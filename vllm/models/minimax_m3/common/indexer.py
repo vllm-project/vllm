@@ -42,6 +42,11 @@ else:
         minimax_m3_index_topk,
     )
 
+from vllm.models.minimax_m3.common.varlen_decode import (
+    VarlenDecodeBuilderMixin,
+    build_decode_query_layout,
+    make_token_to_req_buffer,
+)
 from vllm.v1.attention.backend import (
     AttentionBackend,
     AttentionCGSupport,
@@ -89,6 +94,15 @@ class MiniMaxM3IndexerBackend(AttentionBackend):
     @classmethod
     def get_supported_head_sizes(cls) -> list[int]:
         return [128]
+
+    @classmethod
+    def supports_device_cpu_query_lens_mismatch(cls) -> bool:
+        # Only builders with ragged decode kernels read per-request query
+        # lengths from the device; the others assume uniform rows.
+        return (
+            super().supports_device_cpu_query_lens_mismatch()
+            and cls.get_builder_cls().supports_varlen_decode()
+        )
 
     @staticmethod
     def get_supported_kernel_block_sizes(kv_cache_spec=None) -> list[int | MultipleOf]:
@@ -183,13 +197,16 @@ class MiniMaxM3IndexerPrefillMetadata:
 @dataclass
 class MiniMaxM3IndexerDecodeMetadata:
     """Per-decode state (cudagraph-safe). `decode_query_len` is the uniform
-    per-request query length (1, or 1 + num_speculative_tokens)."""
+    per-request query length (1, or 1 + num_speculative_tokens); it is 0 for
+    a ragged batch, whose query lengths come from `query_start_loc`."""
 
     seq_lens: torch.Tensor  # [num_decodes] int32
     block_table: torch.Tensor
     max_seq_len: int
     decode_query_len: int
     max_decode_query_len: int
+    query_start_loc: torch.Tensor | None = None
+    token_to_req_indices: torch.Tensor | None = None
 
 
 @dataclass
@@ -213,7 +230,7 @@ class MiniMaxM3IndexerMetadata(AttentionMetadata):
 
 
 class MiniMaxM3IndexerMetadataBuilder(
-    AttentionMetadataBuilder[MiniMaxM3IndexerMetadata]
+    VarlenDecodeBuilderMixin, AttentionMetadataBuilder[MiniMaxM3IndexerMetadata]
 ):
     """Abstract base: shared setup only. The Triton and MSA builders are
     parallel subclasses that each own their full `build` (no shared code)."""
@@ -259,10 +276,18 @@ class MiniMaxM3IndexerMetadataBuilder(
             dtype=torch.int32,
             device=device,
         )
+        self.varlen_decode = self._use_varlen_decode(vllm_config)
+        self.token_to_req_buffer = make_token_to_req_buffer(
+            vllm_config, device, self.varlen_decode
+        )
 
 
 class MiniMaxM3IndexerTritonMetadataBuilder(MiniMaxM3IndexerMetadataBuilder):
     """Triton indexer metadata: no SM100 fmha_sm100 plan."""
+
+    @classmethod
+    def supports_varlen_decode(cls) -> bool:
+        return current_platform.is_rocm()
 
     def build(
         self,
@@ -280,7 +305,7 @@ class MiniMaxM3IndexerTritonMetadataBuilder(MiniMaxM3IndexerMetadataBuilder):
             split_decodes_and_prefills(
                 common_attn_metadata,
                 decode_threshold=self.reorder_batch_threshold,
-                require_uniform=True,
+                require_uniform=not self.varlen_decode,
             )
         )
         assert num_decodes + num_prefills == num_reqs
@@ -307,20 +332,22 @@ class MiniMaxM3IndexerTritonMetadataBuilder(MiniMaxM3IndexerMetadataBuilder):
 
         decode_metadata: MiniMaxM3IndexerDecodeMetadata | None = None
         if num_decodes > 0:
-            qsl_cpu = common_attn_metadata.query_start_loc_cpu
-            query_lens_cpu = qsl_cpu[1 : num_decodes + 1] - qsl_cpu[:num_decodes]
-            decode_query_len = int(query_lens_cpu[0].item())
-            assert decode_query_len > 0
-            assert torch.all(
-                (query_lens_cpu == decode_query_len) | (query_lens_cpu == 0)
+            decode_query_len, decode_qsl, token_to_req = build_decode_query_layout(
+                common_attn_metadata,
+                query_start_loc,
+                num_decodes,
+                num_decode_tokens,
+                self.token_to_req_buffer,
+                self.varlen_decode,
             )
-            assert num_decode_tokens == num_decodes * decode_query_len
             decode_metadata = MiniMaxM3IndexerDecodeMetadata(
                 seq_lens=seq_lens[:num_decodes],
                 block_table=block_table[:num_decodes],
                 max_seq_len=common_attn_metadata.max_seq_len,
                 decode_query_len=decode_query_len,
                 max_decode_query_len=self.max_decode_query_len,
+                query_start_loc=decode_qsl,
+                token_to_req_indices=token_to_req,
             )
 
         return MiniMaxM3IndexerMetadata(
@@ -478,6 +505,14 @@ class MiniMaxM3IndexerTritonImpl(MiniMaxM3IndexerImpl):
                 out=buf_htk,
                 **fused_sparse_kwargs,
                 **decode_backend_kwargs,
+                **(
+                    {}
+                    if d.query_start_loc is None
+                    else {
+                        "query_start_loc": d.query_start_loc,
+                        "token_to_req_indices": d.token_to_req_indices,
+                    }
+                ),
             )
         if index_md.num_prefills > 0:
             p = index_md.prefill
@@ -535,6 +570,15 @@ def select_indexer_impl_cls(
             raise ValueError(
                 "attention_config.minimax_m3_indexer_cp requires a bf16 index "
                 f"cache, got indexer_kv_dtype={indexer_kv_dtype!r}"
+            )
+        # The CP impl reuses the Triton builder, which emits ragged decode
+        # metadata under adaptive verification; CP decode scores uniform rows.
+        spec_config = get_current_vllm_config().speculative_config
+        if spec_config is not None and spec_config.enable_adaptive_verification:
+            raise ValueError(
+                "attention_config.minimax_m3_indexer_cp does not support adaptive "
+                "verification. Pass enable_adaptive_verification=false in the "
+                "speculative config, or disable minimax_m3_indexer_cp."
             )
         from vllm.models.minimax_m3.amd.indexer_context_parallel import (
             MiniMaxM3IndexerTritonCPImpl,
