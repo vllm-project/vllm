@@ -46,7 +46,7 @@ use vllm_engine_core::connectors::nixl::{
 };
 use vllm_engine_core::kv_cache::BlockId;
 use vllm_engine_core::sched::output::Opaque;
-use vllm_engine_core::sched::request::RequestStatus;
+use vllm_engine_core::sched::request::{Request, RequestStatus};
 
 pub fn register(m: &Bound<'_, PyModule>) -> PyResult<()> {
     m.add_class::<RustNixlConnectorScheduler>()?;
@@ -601,6 +601,25 @@ impl RustNixlConnectorScheduler {
     /// The connector for `Scheduler::new`.
     pub fn kv_connector(&self) -> NixlKvConnector {
         self.connector.clone()
+    }
+
+    /// [`Self::add_request`] for a request without a Python `Request`, with
+    /// the `kv_transfer_params` it carried on the wire
+    /// ([`NixlKvTransferParams::from_wire`]): the P-side truncation applies to
+    /// the Rust request.
+    pub fn add_native_request(
+        &self,
+        request: &mut Request,
+        params: Option<NixlKvTransferParams>,
+    ) -> PyResult<()> {
+        self.connector
+            .add_wire_request(
+                request,
+                params,
+                self.hash_block_size,
+                self.num_hash_lookahead_tokens,
+            )
+            .map_err(|e| PyValueError::new_err(e.to_report_string()))
     }
 }
 

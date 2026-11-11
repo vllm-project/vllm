@@ -5854,6 +5854,7 @@ dependencies = [
  "pyo3",
  "rustc-hash 1.1.0",
  "serde",
+ "serde_json",
  "thiserror-ext",
  "vllm-engine-core",
  "vllm-engine-core-client",

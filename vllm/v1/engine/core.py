@@ -1515,7 +1515,11 @@ class EngineCoreProc(EngineCore):
     def _use_native_input(self, vllm_config: VllmConfig) -> bool:
         from vllm.v1.engine.rust_core_io import native_input_unsupported_reason
 
-        reason = native_input_unsupported_reason(vllm_config, self.prefix_hash_config)
+        reason = native_input_unsupported_reason(
+            vllm_config,
+            self.prefix_hash_config,
+            getattr(self.scheduler, "kv_connector_impl", None),
+        )
         if reason is not None:
             logger.info("Not using the native input path: %s.", reason)
             return False
@@ -1553,6 +1557,10 @@ class EngineCoreProc(EngineCore):
             decode_sampling_params,
             lora_request_decoder.decode,
             self.prefix_hash_config,
+            # The native NIXL half reads them off the Rust request.
+            accept_kv_transfer_params=(
+                getattr(self.scheduler, "kv_connector_impl", None) == "nixl"
+            ),
         )
         logger.info("Using the native input path.")
         return reader

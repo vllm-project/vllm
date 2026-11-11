@@ -56,7 +56,14 @@ impl BlockHasher for NativeBlockHasher {
 
 /// Why a request takes the slow path, or `None` for the fast path: it needs
 /// a Python `Request` or Python preprocessing (`preprocess_add_request`).
-fn slow_path_reason(request: &EngineCoreRequest) -> Option<&'static str> {
+///
+/// `kv_transfer_params`, the only extra arg the fast path takes, are taken
+/// with `accept_kv_transfer_params`: when the engine's KV connector is a
+/// native one that reads them off the Rust request.
+fn slow_path_reason(
+    request: &EngineCoreRequest,
+    accept_kv_transfer_params: bool,
+) -> Option<&'static str> {
     let Some(sp) = &request.sampling_params else {
         return Some("pooling");
     };
@@ -65,8 +72,11 @@ fn slow_path_reason(request: &EngineCoreRequest) -> Option<&'static str> {
         // request.
         return Some("structured outputs");
     }
-    if sp.extra_args.as_ref().is_some_and(|args| !args.is_empty()) {
-        // KV and EC transfer params and the KV cache report mode.
+    if let Some(args) = &sp.extra_args
+        && args.keys().any(|key| !(accept_kv_transfer_params && key == KV_TRANSFER_PARAMS))
+    {
+        // EC transfer params, the KV cache report mode, and KV transfer
+        // params for a connector that reads them off the Python request.
         return Some("extra args");
     }
     if sp.prompt_logprob_token_ids.is_some() {
@@ -91,6 +101,8 @@ fn slow_path_reason(request: &EngineCoreRequest) -> Option<&'static str> {
     }
     None
 }
+
+const KV_TRANSFER_PARAMS: &str = "kv_transfer_params";
 
 static TOKEN_BUFFER: PyOnceLock<Py<PyAny>> = PyOnceLock::new();
 
@@ -120,6 +132,8 @@ pub struct NativeAddRequest {
     request_id: Py<PyString>,
     #[pyo3(get)]
     client_index: usize,
+    /// Set by the engine to abort a request it rejects while paused, so that
+    /// the KV connector frees what it holds for it.
     #[pyo3(get)]
     abort_immediately: bool,
     #[pyo3(get)]
@@ -128,11 +142,16 @@ pub struct NativeAddRequest {
     prompt_token_ids: Py<PyAny>,
     #[pyo3(get)]
     lora_request: Py<PyAny>,
+    /// `sampling_params.extra_args["kv_transfer_params"]`, as the Python
+    /// `Request` reads them.
+    #[pyo3(get)]
+    kv_transfer_params: Py<PyAny>,
     /// Set by `finish_requests`.
     #[pyo3(get, set)]
     status: Py<PyAny>,
-    /// Taken by the scheduler when it adds the request.
-    new_request: Mutex<Option<NewRequest>>,
+    /// Taken by the scheduler when it adds the request, with the
+    /// `kv_transfer_params` the native KV connector reads.
+    new_request: Mutex<Option<(NewRequest, Option<serde_json::Value>)>>,
 }
 
 #[pymethods]
@@ -142,9 +161,12 @@ impl NativeAddRequest {
         py.None()
     }
 
-    #[getter]
-    fn kv_transfer_params(&self, py: Python<'_>) -> Py<PyAny> {
-        py.None()
+    #[setter]
+    fn set_abort_immediately(&mut self, value: bool) {
+        self.abort_immediately = value;
+        if let Some((new, _)) = self.new_request.get_mut().unwrap() {
+            new.abort_immediately = value;
+        }
     }
 
     #[getter]
@@ -170,8 +192,14 @@ impl NativeAddRequest {
 
 impl NativeAddRequest {
     /// The Rust request's arguments; `None` once taken.
-    pub(super) fn take_new_request(&self) -> Option<NewRequest> {
+    pub(super) fn take_new_request(&self) -> Option<(NewRequest, Option<serde_json::Value>)> {
         self.new_request.lock().unwrap().take()
+    }
+
+    /// Replace the prompt token ids Python reads, once the Rust request's
+    /// were truncated.
+    pub(super) fn set_prompt_token_ids(&mut self, prompt_token_ids: Py<PyAny>) {
+        self.prompt_token_ids = prompt_token_ids;
     }
 
     /// Build the fast-path request of `request`, with the Python payloads
@@ -189,6 +217,17 @@ impl NativeAddRequest {
             raw.sampling_params.as_ref().expect("a fast-path request has sampling params"),
         )?;
         let sampling_params = sampling_params_of(&sp, false, KvCacheReportMode::Incremental)?;
+        // As `Request.__init__` reads them.
+        let extra_args = sp.getattr(intern!(py, "extra_args"))?;
+        let kv_transfer_params = if extra_args.is_none() {
+            py.None().into_bound(py)
+        } else {
+            extra_args.call_method1(intern!(py, "get"), (KV_TRANSFER_PARAMS,))?
+        };
+        let wire_kv_transfer_params = (request.sampling_params.as_ref())
+            .and_then(|sp| sp.extra_args.as_ref())
+            .and_then(|args| args.get(KV_TRANSFER_PARAMS))
+            .cloned();
         let prompt: Vec<i32> = (request.prompt_token_ids.as_ref())
             .and_then(|ids| ids.to_u32_vec())
             .ok_or_else(|| PyValueError::new_err("prompt token ids must be 32-bit integers"))?
@@ -250,8 +289,9 @@ impl NativeAddRequest {
             sampling_params: sp.unbind(),
             prompt_token_ids,
             lora_request: lora_request.unbind(),
+            kv_transfer_params: kv_transfer_params.unbind(),
             status: waiting,
-            new_request: Mutex::new(Some(new_request)),
+            new_request: Mutex::new(Some((new_request, wire_kv_transfer_params))),
         })
     }
 }
@@ -292,11 +332,14 @@ impl EngineInputReader {
     /// the Python `SamplingParams` (as `preprocess_add_request` leaves them)
     /// and `LoRARequest` of a fast-path request.
     /// `prefix_hash_config` is the engine's (`EngineCore.prefix_hash_config`),
-    /// with a `*_cbor` algorithm.
+    /// with a `*_cbor` algorithm. `accept_kv_transfer_params` when the
+    /// scheduler's KV connector is a native one, which reads them off the
+    /// Rust request.
     #[new]
     #[pyo3(signature = (
         engine, input_addresses, coordinator_address, identity, ready_payload, ready_event,
         decode_sampling_params, decode_lora_request, prefix_hash_config=None,
+        accept_kv_transfer_params=false,
     ))]
     #[allow(clippy::too_many_arguments)]
     fn new(
@@ -310,6 +353,7 @@ impl EngineInputReader {
         decode_sampling_params: Py<PyAny>,
         decode_lora_request: Py<PyAny>,
         prefix_hash_config: Option<Bound<'_, PyAny>>,
+        accept_kv_transfer_params: bool,
     ) -> PyResult<Self> {
         let decoders = PayloadDecoders {
             sampling_params: decode_sampling_params,
@@ -344,7 +388,9 @@ impl EngineInputReader {
                     Some((request, raw))
                 })
                 .flatten()
-                .filter(|(request, _)| slow_path_reason(request).is_none());
+                .filter(|(request, _)| {
+                    slow_path_reason(request, accept_kv_transfer_params).is_none()
+                });
             Python::attach(|py| {
                 let result = match fast {
                     Some((request, raw)) => {

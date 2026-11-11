@@ -23,14 +23,17 @@ _ENGINE_CORE_DEAD = b"ENGINE_CORE_DEAD"
 
 
 def native_input_unsupported_reason(
-    vllm_config: VllmConfig, prefix_hash_config: PrefixHashConfig | None
+    vllm_config: VllmConfig,
+    prefix_hash_config: PrefixHashConfig | None,
+    kv_connector_impl: str | None,
 ) -> str | None:
     """Why the engine core cannot use the native input path, which needs the
-    native output path too, if so."""
-    # The hooks of these connectors take Python requests, which the fast path
-    # does without.
-    if vllm_config.kv_transfer_config is not None:
-        return "it does not support KV connectors"
+    native output path too, if so. `kv_connector_impl` is the scheduler's
+    (`RustScheduler.kv_connector_impl`)."""
+    # The hooks of Python connectors take Python requests, which the fast path
+    # does without; the native ones read the Rust request.
+    if kv_connector_impl == "python":
+        return "it does not support Python KV connectors"
     if vllm_config.ec_transfer_config is not None:
         return "it does not support EC connectors"
     if vllm_config.aux_output_config.enabled:

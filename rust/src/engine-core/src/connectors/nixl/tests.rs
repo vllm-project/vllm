@@ -425,3 +425,108 @@ fn host_buffer_saves_until_prefill_is_scheduled() {
     assert!(s.build_connector_meta([chunk(16)]).reqs_to_save.contains_key("p"));
     assert!(s.build_connector_meta([chunk(16)]).reqs_to_save.is_empty());
 }
+
+#[test]
+fn wire_params_parse_as_the_python_dict() {
+    let wire = serde_json::json!({
+        "do_remote_decode": 1,
+        "do_remote_prefill": "",
+        "remote_block_ids": [[1, 2], [3]],
+        "remote_engine_id": "engine",
+        "remote_request_id": "req",
+        "remote_host": "host",
+        "remote_port": 5600,
+        "tp_size": 2,
+        "remote_blocks_expiry_time": 1.5,
+        "remote_num_tokens": null,
+        "unknown": {"ignored": true},
+    });
+    let params = NixlKvTransferParams::from_wire(&wire).unwrap().unwrap();
+    assert_eq!(
+        params,
+        NixlKvTransferParams {
+            do_remote_decode: true,
+            do_remote_prefill: false,
+            remote_block_ids: Some(Arc::new(RemoteBlockIds::Grouped(Seq::new(
+                SeqKind::List,
+                vec![
+                    Seq::new(SeqKind::List, vec![1, 2]),
+                    Seq::new(SeqKind::List, vec![3]),
+                ],
+            )))),
+            remote_engine_id: Some(Arc::from("engine")),
+            remote_request_id: Some("req".to_owned()),
+            remote_host: Some(Arc::from("host")),
+            remote_port: Some(5600),
+            tp_size: Some(2),
+            remote_blocks_expiry_time: Some(PyNumber::Float(1.5)),
+            ..Default::default()
+        }
+    );
+    let flat = serde_json::json!({"remote_block_ids": [4, 5], "remote_blocks_expiry_time": 7});
+    let params = NixlKvTransferParams::from_wire(&flat).unwrap().unwrap();
+    assert_eq!(
+        params.remote_block_ids.as_deref(),
+        Some(&RemoteBlockIds::Flat(Seq::new(SeqKind::List, vec![4, 5])))
+    );
+    assert_eq!(params.remote_blocks_expiry_time, Some(PyNumber::Int(7)));
+
+    // Absent or empty params are none; values Python's worker would choke on
+    // are rejected.
+    for none in [serde_json::Value::Null, serde_json::json!({})] {
+        assert_eq!(NixlKvTransferParams::from_wire(&none), Ok(None));
+    }
+    for invalid in [
+        serde_json::json!([]),
+        serde_json::json!({"remote_port": null}),
+        serde_json::json!({"remote_port": "5600"}),
+        serde_json::json!({"remote_block_ids": [1, "2"]}),
+        serde_json::json!({"remote_blocks_expiry_time": true}),
+    ] {
+        assert!(
+            NixlKvTransferParams::from_wire(&invalid).is_err(),
+            "{invalid}"
+        );
+    }
+}
+
+#[test]
+fn wire_request_truncates_the_p_side_prompt() {
+    // Mamba: the prefiller stops one token short.
+    let connector = NixlKvConnector::new(scheduler(hybrid_config(TransferMode::Pull)));
+    let params = || {
+        Some(NixlKvTransferParams {
+            do_remote_decode: true,
+            ..Default::default()
+        })
+    };
+    let mut request = Request::new(crate::sched::request::NewRequest::for_test(
+        "p",
+        (0..9).collect(),
+    ))
+    .unwrap();
+    connector.add_wire_request(&mut request, params(), 4, 0).unwrap();
+    assert_eq!(
+        request.prompt_token_ids.as_deref(),
+        Some(&(0..8).collect::<Vec<_>>()[..])
+    );
+    assert_eq!(request.all_token_ids(), (0..8).collect::<Vec<_>>());
+    assert_eq!((request.num_prompt_tokens, request.max_tokens), (8, 1));
+
+    // Without a resolved hash block size, as Python asserts.
+    let mut request = Request::new(crate::sched::request::NewRequest::for_test(
+        "q",
+        (0..9).collect(),
+    ))
+    .unwrap();
+    assert!(connector.add_wire_request(&mut request, params(), 0, 0).is_err());
+
+    // A decode-side request is left alone.
+    let mut request = Request::new(crate::sched::request::NewRequest::for_test(
+        "d",
+        (0..9).collect(),
+    ))
+    .unwrap();
+    connector.add_wire_request(&mut request, None, 4, 0).unwrap();
+    assert_eq!(request.num_prompt_tokens, 9);
+}

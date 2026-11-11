@@ -476,8 +476,10 @@ impl BindingContext for SchedulerContext {
         request: Option<&Request>,
     ) -> PyResult<Option<Bound<'py, PyAny>>> {
         let obj = match self.0.table.lock().unwrap().get(request_id) {
-            Some(entry) => entry.obj.clone_ref(py).into_bound(py),
-            None => return Ok(None),
+            // A native request has no Python request: the connector reads the
+            // Rust one.
+            Some(entry) if !entry.native => entry.obj.clone_ref(py).into_bound(py),
+            _ => return Ok(None),
         };
         if let Some(request) = request {
             sync_block_hashes(&obj, request)?;

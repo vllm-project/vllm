@@ -15,6 +15,7 @@ indexmap = { workspace = true }
 pyo3 = { workspace = true }
 rustc-hash = { workspace = true }
 serde = { workspace = true }
+serde_json = { workspace = true }
 thiserror-ext = { workspace = true }
 vllm-engine-core = { workspace = true }
 vllm-engine-core-client = { workspace = true }

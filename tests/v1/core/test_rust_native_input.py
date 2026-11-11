@@ -57,7 +57,12 @@ class _Frontend:
     """The frontend's end of an engine's input socket, and the engine's native
     input thread connected to it."""
 
-    def __init__(self, ipc_dir: str, prefix_hash_config: PrefixHashConfig | None):
+    def __init__(
+        self,
+        ipc_dir: str,
+        prefix_hash_config: PrefixHashConfig | None,
+        accept_kv_transfer_params: bool = False,
+    ):
         self.socket = zmq.Context.instance().socket(zmq.ROUTER)
         address = f"ipc://{ipc_dir}/input-{next(_ipc_ids)}"
         self.socket.bind(address)
@@ -73,6 +78,7 @@ class _Frontend:
             MsgpackDecoder(SamplingParams).decode,
             MsgpackDecoder(LoRARequest).decode,
             prefix_hash_config,
+            accept_kv_transfer_params,
         )
         assert self.socket.recv_multipart() == [_IDENTITY, b"ready-response"]
         assert ready.wait(10)
@@ -110,9 +116,12 @@ def _native(scheduler_cls: type[RustScheduler], ipc_dir: str, block_size: int):
             self.frontend = _Frontend(
                 ipc_dir,
                 PrefixHashConfig("sha256_cbor", block_size, kv_cache_utils.NONE_HASH),
+                # As `EngineCoreProc` sets it up.
+                accept_kv_transfer_params=self.kv_connector_impl == "nixl",
             )
             self.num_native = 0
             self.num_native_lora = 0
+            self.num_native_kv_transfer = 0
 
         def add_request(self, request):
             if not isinstance(request, Request) or request.resumable:
@@ -129,6 +138,8 @@ def _native(scheduler_cls: type[RustScheduler], ipc_dir: str, block_size: int):
             assert native.lora_request == request.lora_request
             self.num_native += 1
             self.num_native_lora += request.lora_request is not None
+            self.num_native_kv_transfer += bool(request.kv_transfer_params)
+            assert native.kv_transfer_params == request.kv_transfer_params
             super().add_request(native)
 
         def finish_requests(self, request_ids, finished_status):
@@ -148,7 +159,9 @@ def _native(scheduler_cls: type[RustScheduler], ipc_dir: str, block_size: int):
 
 
 @pytest.mark.parametrize("use_async", [False, True])
-@pytest.mark.parametrize("sample", ["base", "extended", "structured", "lora"])
+@pytest.mark.parametrize(
+    "sample", ["base", "extended", "structured", "lora", "nixl", "mooncake"]
+)
 @pytest.mark.parametrize("seed", range(3))
 def test_matches_python_scheduler(seed: int, sample: str, use_async: bool, tmp_path):
     """Fast-path requests run as the Python scheduler runs their Python
@@ -156,7 +169,8 @@ def test_matches_python_scheduler(seed: int, sample: str, use_async: bool, tmp_p
     cfg = getattr(FuzzConfig, f"sample_{sample}" if sample != "base" else "sample")(
         seed
     )
-    # The deployments of the native input path.
+    # The deployments of the native input path: no Python KV connector (the
+    # native NIXL and Mooncake store halves are not).
     cfg = dataclasses.replace(cfg, hash_fn="sha256_cbor", connector=None)
     ref_cls, test_cls = (
         (AsyncScheduler, RustAsyncScheduler)
@@ -184,6 +198,11 @@ def test_matches_python_scheduler(seed: int, sample: str, use_async: bool, tmp_p
     assert schedulers[1].num_native > 0
     if cfg.lora:
         assert schedulers[1].num_native_lora > 0
+    if cfg.nixl:
+        assert schedulers[1].kv_connector_impl == "nixl"
+        assert schedulers[1].num_native_kv_transfer > 0
+    if cfg.mooncake:
+        assert schedulers[1].kv_connector_impl == "mooncake_store"
 
 
 class _RequestsWithReference(dict):

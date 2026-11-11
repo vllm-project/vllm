@@ -37,7 +37,8 @@ use pyo3::types::{PyBytes, PyDict, PyList, PyModule, PyString};
 use rustc_hash::FxHashSet;
 use thiserror_ext::AsReport;
 use vllm_engine_core::connectors::mooncake_store_scheduler::SavePinPolicy;
-use vllm_engine_core::sched::request::{Request, RequestStatus};
+use vllm_engine_core::connectors::nixl::NixlKvTransferParams;
+use vllm_engine_core::sched::request::{NewRequest, Request, RequestStatus};
 use vllm_engine_core::sched::scheduler::{
     AuxOutputConnector, EcConnector, ErrorRequestIds, IdSetOrder, KvConnector, PauseState,
     Scheduler, SchedulerError, StructuredOutput, UpdateOutput, monotonic,
@@ -250,14 +251,24 @@ impl RustSchedulerCore {
         py: Python<'_>,
         native: &Bound<'_, native_input::NativeAddRequest>,
     ) -> PyResult<()> {
-        if self.connector.is_some() {
+        if self.connector.is_some() && matches!(self.connector_impl, ConnectorImpl::Python) {
             // Its hooks take Python requests; the native input path is off then.
             return Err(PyRuntimeError::new_err(
-                "a request without a Python Request needs a scheduler without a KV connector",
+                "a request without a Python Request needs a native KV connector, or none",
             ));
         }
-        let new = (native.borrow().take_new_request())
+        let (mut new, kv_transfer_params) = (native.borrow().take_new_request())
             .ok_or_else(|| PyValueError::new_err("the request was already added"))?;
+        let nixl_params = match &self.connector_impl {
+            ConnectorImpl::Nixl(_) => (kv_transfer_params.as_ref())
+                .map(NixlKvTransferParams::from_wire)
+                .transpose()
+                .map_err(PyValueError::new_err)?
+                .flatten(),
+            _ => None,
+        };
+        // As `new_request` reads it off a Python request.
+        new.do_remote_prefill = nixl_params.as_ref().is_some_and(|p| p.do_remote_prefill);
         let request_id = new.request_id.clone();
         if self.inner.has_request(&request_id) {
             return Err(PyValueError::new_err(format!(
@@ -274,10 +285,7 @@ impl RustSchedulerCore {
                 trace_headers: None,
             },
         );
-        let result = self
-            .run(|_| Request::new(new))
-            .and_then(|r| r.map_err(|e| PyValueError::new_err(e.to_report_string())))
-            .and_then(|rust_request| self.run(|s| s.add_request(rust_request)));
+        let result = self.admit_native_request(py, native, new, nixl_params);
         if result.is_err() && !self.inner.has_request(&request_id) {
             self.shared.table.lock().unwrap().shift_remove(&request_id);
         }
@@ -285,10 +293,30 @@ impl RustSchedulerCore {
         result
     }
 
-    /// Run `f` on the scheduler: the KV cache manager is unreachable from
-    /// Python meanwhile (except from the hooks that receive it), and a
-    /// Python exception raised by a hook, or a panic, becomes the call's
-    /// exception.
+    /// Build and add the Rust request of a native one, after the native NIXL
+    /// half's `on_new_request` work, which may truncate its prompt.
+    fn admit_native_request(
+        &mut self,
+        py: Python<'_>,
+        native: &Bound<'_, native_input::NativeAddRequest>,
+        new: NewRequest,
+        nixl_params: Option<NixlKvTransferParams>,
+    ) -> PyResult<()> {
+        let mut request = self
+            .run(|_| Request::new(new))?
+            .map_err(|e| PyValueError::new_err(e.to_report_string()))?;
+        if let ConnectorImpl::Nixl(nixl) = &self.connector_impl {
+            let num_prompt_tokens = request.num_prompt_tokens;
+            nixl.get().add_native_request(&mut request, nixl_params)?;
+            if request.num_prompt_tokens != num_prompt_tokens {
+                let prompt = request.prompt_token_ids.as_deref().unwrap_or_default();
+                let prompt = native_input::token_buffer(py, prompt)?.unbind();
+                native.borrow_mut().set_prompt_token_ids(prompt);
+            }
+        }
+        self.run(|s| s.add_request(request))
+    }
+
     /// `EngineCore._attach_iteration_details`: on the stats of the first
     /// client's outputs, made if there are none.
     fn attach_iteration_details(
@@ -320,6 +348,10 @@ impl RustSchedulerCore {
         Ok(())
     }
 
+    /// Run `f` on the scheduler: the KV cache manager is unreachable from
+    /// Python meanwhile (except from the hooks that receive it), and a
+    /// Python exception raised by a hook, or a panic, becomes the call's
+    /// exception.
     fn run<R>(&mut self, f: impl FnOnce(&mut Scheduler) -> R) -> PyResult<R> {
         self.shared.kv.set(std::ptr::null_mut());
         let result = catch_unwind(AssertUnwindSafe(|| f(&mut self.inner)));
@@ -692,6 +724,12 @@ impl RustSchedulerCore {
             self.connector_impl = ConnectorImpl::Python;
             self.inner.set_connector(None);
             return Ok(());
+        }
+        if self.shared.table.lock().unwrap().values().any(|r| r.native) {
+            // Python hooks would get requests without a Python `Request`.
+            return Err(PyRuntimeError::new_err(
+                "cannot set a Python KV connector with native requests in the scheduler",
+            ));
         }
         if let ConnectorImpl::Python = self.connector_impl {
             *current.lock().unwrap() = connector;

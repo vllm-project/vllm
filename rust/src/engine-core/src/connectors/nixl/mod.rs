@@ -113,6 +113,64 @@ impl NixlKvConnector {
     pub fn lock(&self) -> MutexGuard<'_, NixlConnectorScheduler> {
         self.inner.lock().unwrap()
     }
+
+    /// The `on_new_request` work that precedes scheduling, for a request
+    /// whose `kv_transfer_params` came off the wire rather than in a Python
+    /// request: truncate a P-side prompt in the Rust request, as
+    /// `_truncate_request_for_prefill` does, then register the params.
+    pub fn add_wire_request(
+        &self,
+        request: &mut Request,
+        mut params: Option<NixlKvTransferParams>,
+        hash_block_size: usize,
+        num_hash_lookahead_tokens: usize,
+    ) -> Result<(), NixlParamsError> {
+        let mut scheduler = self.lock();
+        let truncation = scheduler.prefill_truncation(
+            params.as_ref(),
+            request.num_prompt_tokens,
+            request.skip_reading_external_kv(),
+        );
+        if truncation.is_some() && hash_block_size == 0 {
+            return Err(NixlParamsError::Invalid(
+                "hash_block_size is not resolved".to_owned(),
+            ));
+        }
+        if let (Some(backoff), Some(params)) = (truncation, params.as_mut())
+            && truncate_request_for_prefill(
+                request,
+                backoff,
+                hash_block_size,
+                num_hash_lookahead_tokens,
+            )
+        {
+            params.p_side_truncated = true;
+        }
+        scheduler.add_request(&request.request_id, params)
+    }
+}
+
+/// `_truncate_request_for_prefill` on a Rust request: drop its trailing
+/// `backoff` prompt tokens, so that the prefiller stops short of what the
+/// decoder recomputes, and the block hashes that invalidates. `false` for a
+/// request without prompt token ids, which is left alone (the binding layer
+/// holds prompt embeddings).
+pub fn truncate_request_for_prefill(
+    request: &mut Request,
+    backoff: usize,
+    hash_block_size: usize,
+    num_hash_lookahead_tokens: usize,
+) -> bool {
+    let Some(prompt) = request.prompt_token_ids.as_mut() else {
+        return false;
+    };
+    prompt.truncate(prompt.len() - backoff);
+    let num_tokens = request.all_token_ids().len() - backoff;
+    request.truncate_all_token_ids(num_tokens);
+    request.num_prompt_tokens -= backoff;
+    request.max_tokens = 1;
+    request.truncate_block_hashes(hash_block_size, num_hash_lookahead_tokens);
+    true
 }
 
 impl KvConnector for NixlKvConnector {

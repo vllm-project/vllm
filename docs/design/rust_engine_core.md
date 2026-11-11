@@ -123,9 +123,12 @@ Python engine's.
   field is lost to the Rust types; structured outputs, extra
   args such as KV transfer params, multimodal inputs, sessions and every
   other message go to the Python preprocessing with their original frames.
-  The native input thread needs no KV, EC or aux output connector and a
-  `*_cbor` prefix-caching hash algorithm; otherwise the Python input thread
-  is used. It announces no `prefix_hash_config`, so the frontend does not
+  With the native NIXL scheduler half, `kv_transfer_params` stay on the fast
+  path: the half reads them off the wire and truncates a P-side prompt in the
+  Rust request; the native Mooncake store half reads the Rust request too.
+  The native input thread needs no Python KV connector, no EC or aux output
+  connector, and a `*_cbor` prefix-caching hash algorithm; otherwise the
+  Python input thread is used. It announces no `prefix_hash_config`, so the frontend does not
   hash prompt blocks the engine hashes itself.
 
 ## Fallback rules and unsupported configurations

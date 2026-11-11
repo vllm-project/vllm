@@ -10,6 +10,7 @@ easy-ext = { workspace = true }
 indexmap = { workspace = true }
 libc = { workspace = true }
 rustc-hash = { workspace = true }
+serde_json = { workspace = true }
 sha2 = { workspace = true }
 smallvec = { workspace = true }
 thiserror = { workspace = true }

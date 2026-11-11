@@ -551,6 +551,12 @@ class RustScheduler(SchedulerInterface):
     def get_kv_connector(self) -> KVConnectorBase_V1 | None:
         return self.connector
 
+    @property
+    def kv_connector_impl(self) -> str | None:
+        """The KV connector's scheduler half: None without a connector, else
+        `"python"`, or `"nixl"` / `"mooncake_store"` for a native one."""
+        return None if self.connector is None else self._core.connector_impl
+
     def get_ec_connector(self) -> ECConnectorBase | None:
         return self.ec_connector
 
