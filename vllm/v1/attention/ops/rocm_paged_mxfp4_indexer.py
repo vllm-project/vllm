@@ -305,12 +305,15 @@ def _topk(
 
     aiter's kernel is faster on the candidate top-k and from 128 rows on; below
     that, a wide decode step is faster on vLLM's. Shape alone decides, so a FULL
-    graph replays the same choice at every context length.
+    graph replays the same choice at every context length. `step_rows` is the
+    decode step's row count when `logits` holds a TP rank's slice of it, so the
+    slice runs the kernel the whole step would.
     """
     rows, width = logits.shape
     if rows == 0:
         return
-    if width >= k and not _vllm_topk(step_rows or rows, k):
+    kernel_rows = rows if step_rows is None else step_rows
+    if width >= k and not _vllm_topk(kernel_rows, k):
         _aiter_topk()(
             logits,
             1,
@@ -462,7 +465,7 @@ def _fill_topk_rows(layer: _Layer, num_tokens: int) -> None:
     lengths = layer.metadata.decode_row_lens
     start = 0
     if layer.metadata.decode is not None and lengths is not None:
-        rows = _decode_step_rows(layer.metadata) or lengths.shape[0]
+        rows = _decode_step_rows(layer.metadata, lengths.shape[0])
         if _vllm_topk(rows, layer.topk_tokens):
             start = rows
     if start < num_tokens:
@@ -570,7 +573,7 @@ def _dense_decode(layer: _Layer, logits_width: int, candidate_write: bool) -> No
         lengths,
         layer.topk_buffer[:rows, : layer.topk_tokens],
         layer.topk_tokens,
-        _decode_step_rows(metadata),
+        _decode_step_rows(metadata, rows),
     )
 
 
@@ -652,13 +655,13 @@ def _gather_decode(layer: _Layer, num_cols: int) -> None:
         candidates=gather,
     )
     out = layer.topk_buffer[:rows, : layer.topk_tokens]
-    _topk(compact, slot_ends, out, layer.topk_tokens, _decode_step_rows(metadata))
+    _topk(compact, slot_ends, out, layer.topk_tokens, _decode_step_rows(metadata, rows))
     _remap_compact_topk(out, gather["positions"], layer.block)
 
 
-def _decode_step_rows(metadata: "RocmMxfp4IndexerMetadata") -> int | None:
+def _decode_step_rows(metadata: "RocmMxfp4IndexerMetadata", rows: int) -> int:
     shard = metadata.decode_shard
-    return None if shard is None else shard.num_rows
+    return rows if shard is None else shard.num_rows
 
 
 def _decode_rank_rows(layer: _Layer) -> _Layer:
