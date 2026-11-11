@@ -5833,6 +5833,17 @@ dependencies = [
 ]
 
 [[package]]
+name = "vllm-engine-core-io"
+version = "0.1.0"
+dependencies = [
+ "bytes",
+ "tokio",
+ "vllm-engine-core",
+ "vllm-engine-core-client",
+ "zeromq",
+]
+
+[[package]]
 name = "vllm-engine-core-py"
 version = "0.1.0"
 dependencies = [
