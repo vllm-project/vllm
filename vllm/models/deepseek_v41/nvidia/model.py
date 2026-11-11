@@ -355,12 +355,17 @@ class DeepseekV4DecoderLayer(nn.Module):
             from vllm.triton_utils.tp_synced_autotune import install
 
             install()
+        pc = vllm_config.parallel_config
         if self.replicate_mixer and (
-            self.use_sequence_parallel or vllm_config.lora_config is not None
+            self.use_sequence_parallel
+            or vllm_config.lora_config is not None
+            or pc.enable_expert_parallel
+            or pc.decode_context_parallel_size > 1
+            or pc.prefill_context_parallel_size > 1
         ):
             raise NotImplementedError(
-                "VLLM_DSV41_REPLICATE_MIXER is not supported with sequence-parallel "
-                "MoE (MegaMoE / expert parallel) or LoRA."
+                "VLLM_DSV41_REPLICATE_MIXER is not supported with expert parallelism "
+                "(including MegaMoE), context parallelism or LoRA."
             )
 
         self.engram: Engram | None = None
