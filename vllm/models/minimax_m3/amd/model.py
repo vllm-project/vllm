@@ -105,6 +105,7 @@ from vllm.model_executor.models.utils import (
 )
 from vllm.model_executor.models.vision import run_dp_sharded_mrope_vision_model
 from vllm.models.minimax_m3.amd.glue import M3Glue
+from vllm.models.minimax_m3.amd.glue.carry import Mxfp8Carry
 from vllm.models.minimax_m3.amd.indexer_msa import (
     MiniMaxM3IndexerMSAImpl,
     MiniMaxM3MSAIndexer,
@@ -1706,7 +1707,19 @@ class MiniMaxM3DecoderLayer(nn.Module):
     ) -> tuple[torch.Tensor, torch.Tensor]:
         # Self Attention
         attn_input: torch.Tensor | QuantizedActivation
-        if residual is None:
+        if isinstance(hidden_states, Mxfp8Carry):
+            # the previous MoE layer already normed and quantized this layer's
+            # attention input (codes of every row); the residual it returned
+            # goes with it
+            attn_input = QuantizedActivation(
+                hidden_states.x_q,
+                hidden_states.x_s,
+                torch.bfloat16,
+                hidden_states.x_q.shape,
+                kMxfp8Dynamic,
+            )
+            residual = hidden_states.res_local
+        elif residual is None:
             residual = hidden_states
             attn_input = self.input_layernorm(hidden_states)
         elif self.fuse_input_norm_mxfp8:

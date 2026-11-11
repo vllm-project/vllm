@@ -26,6 +26,7 @@ import torch
 from vllm.logger import init_logger
 
 from . import kernel as K
+from .carry import Mxfp8Carry
 from .shared import SharedWeights, shared_decode
 
 logger = init_logger(__name__)
@@ -43,6 +44,14 @@ TRANSPORT = "lamport"
 # 15-17 us at 96-128 rows)
 SIDE_STREAM_MAX_ROWS = 64
 FAULT_MESSAGE = "MiniMax-M3 decode glue: error word set (a peer wait timed out)"
+POST_FAULT_MESSAGE = (
+    "MiniMax-M3 decode glue: the post-MoE all-reduce + norm error record is set (a "
+    "peer wait timed out)"
+)
+# The all-reduce after the MoE fused with the next layer's residual add, Gemma
+# RMSNorm and MXFP8 quant (AITER's fused_all_reduce_rmsnorm_mxfp8, one launch)
+# for decode steps of up to this many rows, the op's limit.
+POST_MOE_MAX_ROWS = 256
 
 
 def _writable_flydsl_cache() -> None:
@@ -95,6 +104,9 @@ class DecodeGlue:
         self.peer: Any = None  # PeerBuffer, once set up
         self.fault_word: torch.Tensor | None = None
         self.transport = TRANSPORT
+        # AITER's fused all-reduce + norm + MXFP8 buffers (setup_post_moe)
+        self.post_ar: Any = None
+        self._post_err: torch.Tensor | None = None
 
     # ------------------------------------------------------------ setup
     def setup(self) -> None:
@@ -249,9 +261,12 @@ class DecodeGlue:
         aiter_moe,
         md,
         q_dtype_a,
+        nxt_norm=None,
     ):
         """The layer's MoE half: (all-reduced MoE output, residual after
-        attention)."""
+        attention); with `nxt_norm` (the next layer's input norm) and the fused
+        post-MoE all-reduce set up: (Mxfp8Carry of the next layer's MXFP8
+        attention input and residual, that residual)."""
         from vllm.utils.torch_utils import current_stream
 
         b = self.launch(layer, part, residual)
@@ -267,7 +282,7 @@ class DecodeGlue:
                 b.w,
                 shared=(sw.gu_bf16, sw.dn_bf16, b.sh_inter),
             )
-            return _post_moe_all_reduce(out), b.res_out
+            return self._post_moe(out, b, nxt_norm)
         mlp = layer.block_sparse_moe.shared_experts
         side = self.stream is not None and b.s <= SIDE_STREAM_MAX_ROWS
         if side:
@@ -290,7 +305,81 @@ class DecodeGlue:
         )
         if side:
             self.ev_join.wait(main)
-        return _post_moe_all_reduce(routed + sh), b.res_out
+        return self._post_moe(routed + sh, b, nxt_norm)
+
+    # ------------------------------------------------------------ post-MoE
+    def setup_post_moe(self) -> None:
+        """Collective (every TP rank, after `setup`): AITER's fused all-reduce +
+        Gemma RMSNorm + MXFP8 quant (ROCm/aiter#7792) when the installed AITER
+        has it; else the post-MoE step stays the stock all-reduce."""
+        from vllm.models.deepseek_v41.amd.mono.common.peer_memory import tp_agree
+
+        cpu = self.group.cpu_group
+        rows = min(POST_MOE_MAX_ROWS, max(self.widths))
+        ok, err = True, None
+        try:
+            from aiter.ops.triton.comms.fused.all_reduce_rmsnorm_mxfp8 import (
+                AllReduceRmsnormMxfp8,
+                fused_all_reduce_rmsnorm_mxfp8,  # noqa: F401
+            )
+        except Exception as e:  # noqa: BLE001 - an AITER without the op
+            ok, err = False, e
+        if not tp_agree(ok, cpu):
+            logger.info(
+                "MiniMax-M3 decode glue: post-MoE all-reduce unfused (%s)",
+                err or "refused on another rank",
+            )
+            return
+        comm: Any = None
+        try:
+            comm = AllReduceRmsnormMxfp8(cpu, rows, K.HIDDEN)  # collective
+        except Exception as e:  # noqa: BLE001
+            ok, err = False, e
+        if not tp_agree(ok, cpu):
+            logger.warning(
+                "MiniMax-M3 decode glue: fused post-MoE all-reduce setup failed on "
+                "%s rank: %s",
+                "this" if err else "another",
+                err,
+            )
+            if comm is not None:
+                comm.close()
+            return
+        self.post_ar = comm
+        self._post_err = _error_record_view(comm)
+        if self.group.rank_in_group == 0:
+            logger.info(
+                "MiniMax-M3 decode glue: post-MoE all-reduce + next input norm + "
+                "MXFP8 quant fused (AITER) up to %d rows",
+                rows,
+            )
+
+    def _post_moe(self, moe_out: torch.Tensor, b: _Width, nxt_norm):
+        """The all-reduce after the MoE. With the next layer's input norm and
+        AITER's fused op: one launch to that layer's MXFP8 attention input and
+        residual (every row on every rank); else the stock all-reduce (the next
+        layer's input norm adds the residual and quantizes)."""
+        if (
+            nxt_norm is not None
+            and self.post_ar is not None
+            and b.s <= self.post_ar.max_tokens
+        ):
+            from aiter.ops.triton.comms.fused.all_reduce_rmsnorm_mxfp8 import (
+                fused_all_reduce_rmsnorm_mxfp8,
+            )
+
+            x_q, x_s, res = fused_all_reduce_rmsnorm_mxfp8(
+                moe_out.contiguous(),
+                b.res_out,
+                nxt_norm.weight,
+                nxt_norm.variance_epsilon,
+                self.post_ar,
+                gemma=True,
+            )
+            return Mxfp8Carry(x_q, x_s, res, b.s), res
+        from vllm.distributed import tensor_model_parallel_all_reduce
+
+        return tensor_model_parallel_all_reduce(moe_out), b.res_out
 
     # ------------------------------------------------------------ epoch
     def reset(self) -> None:
@@ -304,12 +393,26 @@ class DecodeGlue:
         self.epoch.zero_()
         torch.accelerator.synchronize()
 
+    def reset_post_moe(self) -> None:
+        """Collective, every TP rank with no launch in flight: empties the fused
+        post-MoE all-reduce's inboxes and clears its colours and error record."""
+        if self.post_ar is not None:
+            self.post_ar.reset()
+
     def assert_healthy(self) -> None:
-        """Device-side: traps the queue when any rank set the error word."""
+        """Device-side (no host sync, so also under graph capture): traps the
+        queue when any rank set the glue's error word or the fused post-MoE
+        all-reduce's error record (what `post_ar.error()` reads)."""
         assert self.fault_word is not None
         torch._assert_async(self.fault_word[0] == 0, FAULT_MESSAGE)
+        if self._post_err is not None:
+            torch._assert_async(self._post_err[0] == 0, POST_FAULT_MESSAGE)
 
     def close(self) -> None:
+        if self.post_ar is not None:
+            self.post_ar.close()
+            self.post_ar = None
+            self._post_err = None
         if self.peer is not None:
             self.peer.close()
             self.peer = None
@@ -321,13 +424,15 @@ def _side_stream_disabled() -> bool:
     return bool(envs.VLLM_DISABLE_SHARED_EXPERTS_STREAM)
 
 
-def _post_moe_all_reduce(moe_out: torch.Tensor) -> torch.Tensor:
-    """The all-reduce after the MoE (the next layer's input norm adds the
-    residual and quantizes).
+def _error_record_view(comm) -> torch.Tensor | None:
+    """The first words of the error record in `comm`'s own IPC buffer ([flag,
+    rank, colour, site], what its `error()` reads), as a device view for a check
+    without a host sync; None if the buffer is not where AITER documents it."""
+    from vllm.models.deepseek_v41.amd.mono.common.peer_memory import _DeviceBytes
 
-    TODO: call AITER's fused all-reduce + residual add + Gemma RMSNorm + MXFP8
-    quant here when the installed AITER has it (feature-detected), returning the
-    next layer's residual, MXFP8 codes and scales; it is being added to AITER."""
-    from vllm.distributed import tensor_model_parallel_all_reduce
-
-    return tensor_model_parallel_all_reduce(moe_out)
+    try:
+        base = int(comm.peers[0])
+    except (AttributeError, IndexError, TypeError, ValueError):
+        return None
+    view = torch.as_tensor(_DeviceBytes(base, 16), device=comm.device)
+    return view.view(torch.int32)
