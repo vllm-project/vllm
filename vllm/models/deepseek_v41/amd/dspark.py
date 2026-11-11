@@ -46,9 +46,9 @@ from vllm.models.common.ops.sequence_parallel import (
 from vllm.models.deepseek_v4.amd.mega_moe import finalize_mega_moe_weights
 
 from .model import (
-    DeepseekV41LLMForCausalLM,
     DeepseekV4DecoderLayer,
     DeepseekV4Model,
+    DeepseekV41LLMForCausalLM,
     _linear_scale_param_name,
     _use_sequence_parallel,
 )

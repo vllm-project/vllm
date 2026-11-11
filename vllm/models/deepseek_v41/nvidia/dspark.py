@@ -56,9 +56,9 @@ from vllm.models.deepseek_v4.nvidia.dspark import _duplicate_context_wkv_weights
 
 from ..common.mm_preprocess import IMAGE_SENTINEL_BASE_ID
 from .model import (
-    DeepseekV41LLMForCausalLM,
     DeepseekV4DecoderLayer,
     DeepseekV4Model,
+    DeepseekV41LLMForCausalLM,
     _linear_scale_param_name,
     _use_sequence_parallel,
     make_deepseek_v4_expert_params_mapping,
@@ -138,14 +138,17 @@ class DSparkDeepseekV4Model(nn.Module):
             ]
         )
         quant_config = vllm_config.quant_config
+        ignored_layers = getattr(quant_config, "ignored_layers", None)
         wkv_quant_config = (
             None
-            if getattr(quant_config, "ignored_layers", None)
+            if quant_config is not None
+            and ignored_layers
+            and hasattr(quant_config, "ignored_layers_match_mode")
             and is_layer_skipped(
                 prefix=maybe_prefix(
                     prefix, f"layers.{self.num_hidden_layers}.attn.wkv"
                 ),
-                ignored_layers=quant_config.ignored_layers,
+                ignored_layers=ignored_layers,
                 fused_mapping=quant_config.packed_modules_mapping,
                 match_mode=quant_config.ignored_layers_match_mode,
             )

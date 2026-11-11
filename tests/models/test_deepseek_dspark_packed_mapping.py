@@ -118,9 +118,7 @@ def test_nvidia_dspark_context_wkv_proj_respects_ignored_layers(
     monkeypatch.setattr(dspark_mod, "ReplicatedLinear", DummyModule)
     monkeypatch.setattr(dspark_mod, "RMSNorm", DummyModule)
     monkeypatch.setattr(dspark_mod, "DeepseekV4DecoderLayer", DummyModule)
-    monkeypatch.setattr(
-        dspark_mod, "MergedColumnParallelLinear", capture_merged_linear
-    )
+    monkeypatch.setattr(dspark_mod, "MergedColumnParallelLinear", capture_merged_linear)
     monkeypatch.setattr(dspark_mod, "DSparkMarkovHead", DummyModule)
     monkeypatch.setattr(dspark_mod, "DSparkConfidenceHead", DummyModule)
     monkeypatch.setattr(dspark_mod, "_use_sequence_parallel", lambda _: False)
