@@ -171,6 +171,12 @@ class Base(
                     "not support MXFP4 quantization yet."
                 )
 
+        if self.model_config.uses_mrope:
+            # CUDA graphs replay their capture-time input addresses, see `forward`
+            max_tokens = vllm_config.scheduler_config.max_num_batched_tokens
+            mrope_positions = torch.zeros(3 * max_tokens, dtype=torch.long)
+            self.register_buffer("mrope_positions", mrope_positions, persistent=False)
+
         self._patch_config()
         self._decorate_for_torch_compile()
         # Init on "meta" to delay allocating GPU tensors
@@ -810,6 +816,10 @@ class Base(
         if positions.ndim == 1:
             # [seq_len] -> [1, seq_len]
             positions = positions[None, ...]
+        elif self.model_config.uses_mrope:
+            # [3, seq_len] -> [3, 1, seq_len], contiguous and at a fixed address
+            mrope_positions = self.mrope_positions[: positions.numel()].view(3, 1, -1)
+            positions = mrope_positions.copy_(positions[:, None])
 
         # Transformers models expect either input_ids or inputs_embeds, but not both
         if input_ids is not None and inputs_embeds is not None:
