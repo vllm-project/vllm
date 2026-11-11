@@ -534,22 +534,29 @@ def test_sparse_kernels_recognize_fp8_dtypes(dtype: torch.dtype):
 
 
 # Index top-k kernels.
-def _reference_index_topk(
+def _reference_index_block_scores(
     idx_q: torch.Tensor,
     index_kv_cache: torch.Tensor,
     block_table: torch.Tensor,
     q_lens: torch.Tensor,
     seq_lens: torch.Tensor,
     prefix_lens: torch.Tensor,
-    topk: int,
     init_blocks: int,
     local_blocks: int,
     sm_scale: float = 1.0,
-) -> torch.Tensor:
+) -> tuple[torch.Tensor, list[int]]:
+    """Per-query block scores [num_idx_heads, total_q, max_blocks] (-inf past
+    each query's causal range; init/local blocks forced high) and the number of
+    causally visible blocks per query."""
     total_q, num_idx_heads, _ = idx_q.shape
-    out = torch.full(
-        (num_idx_heads, total_q, topk), -1, device=idx_q.device, dtype=torch.int32
+    max_blocks = (int(seq_lens.max()) + BLOCK_SIZE - 1) // BLOCK_SIZE
+    scores = torch.full(
+        (num_idx_heads, total_q, max_blocks),
+        -float("inf"),
+        device=idx_q.device,
+        dtype=torch.float32,
     )
+    num_valid: list[int] = []
 
     q_start = 0
     for req_id, (q_len, seq_len, prefix_len) in enumerate(
@@ -574,13 +581,79 @@ def _reference_index_topk(
             score_tensor[:, local_q, :end] = 1e30
             start = max(0, num_valid_blocks - local_blocks)
             score_tensor[:, local_q, start:num_valid_blocks] = 1e29
-
-            k = min(topk, num_valid_blocks)
-            topk_idx = score_tensor[:, local_q].topk(k, dim=1).indices
-            out[:, q_start + local_q, :k] = topk_idx
+            num_valid.append(num_valid_blocks)
+        scores[:, q_start:q_end, :num_blocks] = score_tensor
         q_start = q_end
 
+    return scores, num_valid
+
+
+def _reference_index_topk(
+    idx_q: torch.Tensor,
+    index_kv_cache: torch.Tensor,
+    block_table: torch.Tensor,
+    q_lens: torch.Tensor,
+    seq_lens: torch.Tensor,
+    prefix_lens: torch.Tensor,
+    topk: int,
+    init_blocks: int,
+    local_blocks: int,
+    sm_scale: float = 1.0,
+) -> torch.Tensor:
+    scores, num_valid = _reference_index_block_scores(
+        idx_q,
+        index_kv_cache,
+        block_table,
+        q_lens,
+        seq_lens,
+        prefix_lens,
+        init_blocks,
+        local_blocks,
+        sm_scale,
+    )
+    num_idx_heads, total_q, _ = scores.shape
+    out = torch.full(
+        (num_idx_heads, total_q, topk), -1, device=idx_q.device, dtype=torch.int32
+    )
+    for token, num_valid_blocks in enumerate(num_valid):
+        k = min(topk, num_valid_blocks)
+        out[:, token, :k] = scores[:, token].topk(k, dim=1).indices
     return out
+
+
+def _assert_topk_matches_reference_scores(
+    actual: torch.Tensor,
+    scores: torch.Tensor,
+    num_valid: list[int],
+    topk: int,
+    atol: float = 1e-2,
+    rtol: float = 1e-3,
+) -> None:
+    """Check each row selects a top-k of the reference block scores.
+
+    Blocks may differ from the reference selection only when their scores tie
+    the k-th best score within tolerance, since reduced-precision MFMA (e.g.
+    xf32 for fp32 inputs on gfx942) can reorder near-equal blocks.
+    """
+    actual = actual.cpu()
+    scores = scores.cpu()
+    for token, num_valid_blocks in enumerate(num_valid):
+        k = min(topk, num_valid_blocks)
+        for h in range(scores.shape[0]):
+            row = actual[h, token].tolist()
+            assert row[k:] == [-1] * (topk - k), (h, token, row)
+            selected = set(row[:k])
+            assert len(selected) == k, (h, token, row)
+            assert all(0 <= b < num_valid_blocks for b in selected), (h, token, row)
+            row_scores = scores[h, token, :num_valid_blocks]
+            kth = row_scores.topk(k).values[-1].item()
+            tol = atol + rtol * abs(kth)
+            for b in range(num_valid_blocks):
+                s = row_scores[b].item()
+                if b in selected:
+                    assert s >= kth - tol, (h, token, b, s, kth)
+                else:
+                    assert s <= kth + tol, (h, token, b, s, kth)
 
 
 def _assert_topk_indices_equal_unordered(
@@ -2117,19 +2190,21 @@ def test_decode_index_topk_varlen_with_padded_rows(
         query_start_loc=query_start_loc,
         token_to_req_indices=token_to_req,
     )
-    expected = torch.full_like(actual, -1)
-    expected[:, :num_active_tokens] = _reference_index_topk(
+    # Padding tokens select nothing.
+    assert torch.all(actual[:, num_active_tokens:] == -1)
+    scores, num_valid = _reference_index_block_scores(
         idx_q[:num_active_tokens],
         index_kv_cache,
         block_table[:num_active_reqs],
         active_q_lens,
         active_seq_lens,
         prefix_lens,
-        topk,
         init_blocks,
         local_blocks,
     )
-    _assert_topk_indices_equal_unordered(actual, expected)
+    _assert_topk_matches_reference_scores(
+        actual[:, :num_active_tokens], scores, num_valid, topk
+    )
 
 
 def _gfx942() -> bool:
