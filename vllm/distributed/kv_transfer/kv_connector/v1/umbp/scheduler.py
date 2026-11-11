@@ -237,6 +237,9 @@ class UMBPStoreConnectorScheduler:
             self.load_async = True
         self.enable_lookup = bool(extra.get("enable_lookup", True))
         self.lookup_async = bool(extra.get("lookup_async", False))
+        self.prefetch_waiting_requests = bool(
+            extra.get("prefetch_waiting_requests", False)
+        )
         self.save_decode_cache = bool(extra.get("save_decode_cache", False))
         # A kv_consumer only restores from the pool, as with other store
         # connectors; it never offloads its own KV.
@@ -332,6 +335,10 @@ class UMBPStoreConnectorScheduler:
             max_workers=int(extra.get("lookup_workers", 2)),
             thread_name_prefix="umbp-lookup",
         )
+        self._prefetch_executor = ThreadPoolExecutor(
+            max_workers=1,
+            thread_name_prefix="umbp-prefetch",
+        )
         self._requests: dict[str, Request] = {}
         self._request_trackers: dict[str, RequestTracker] = {}
         self._pending_finished_stores: dict[str, list[BlockTransferPlan]] = {}
@@ -370,6 +377,48 @@ class UMBPStoreConnectorScheduler:
     ) -> None:
         self.runtime = runtime
         self.codec = codec
+
+    def on_new_request(self, request: Request) -> None:
+        if (
+            not self.prefetch_waiting_requests
+            or not self.enable_lookup
+            or self.runtime is None
+            or self.codec is None
+            or request.resumable
+        ):
+            return
+        hashes = tuple(request.block_hashes)
+        align = (
+            self.hash_block_size if self.enable_partial_hash_hits else self.block_size
+        )
+        if not hashes or request.num_tokens < align:
+            return
+        context = self._build_lookup_context(request, 0, hashes)
+        if not context.keys:
+            return
+        self._prefetch_executor.submit(
+            self._prefetch,
+            request.request_id,
+            context.keys,
+        )
+
+    def _prefetch(self, request_id: str, keys: Sequence[str]) -> None:
+        assert self.runtime is not None
+        try:
+            admitted = self.runtime.prefetch(keys)
+        except Exception as exc:
+            logger.debug(
+                "UMBP prefetch submission failed request=%s: %s",
+                request_id,
+                exc,
+            )
+            return
+        logger.debug(
+            "UMBP prefetch submitted request=%s admitted=%d keys=%d",
+            request_id,
+            admitted,
+            len(keys),
+        )
 
     def get_num_new_matched_tokens(
         self, request: Request, num_computed_tokens: int
@@ -1457,6 +1506,7 @@ class UMBPStoreConnectorScheduler:
         return cleared
 
     def close(self) -> None:
+        self._prefetch_executor.shutdown(wait=True, cancel_futures=True)
         self._lookup_executor.shutdown(wait=True, cancel_futures=True)
         self._pending_lookups.clear()
         if self.runtime is not None:

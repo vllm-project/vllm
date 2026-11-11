@@ -128,6 +128,7 @@ Set these options in `kv_connector_extra_config`:
 | --- | --- | --- |
 | `load_async` | `true` | Load in the background while the request waits. Models with Mamba-style or sparse-attention indexer layers always load asynchronously, since those layers read restored state before a synchronous load could have landed. |
 | `lookup_async` | `false` | Look up the pool off the scheduler thread; the request waits until the lookup completes. |
+| `prefetch_waiting_requests` | `false` | Ask UMBP to prefetch a new request's external objects into its local DRAM tier while the request waits for admission, retaining their SSD copies. Requires a MORI build that provides `batch_prefetch`. Prefetch is best effort. Normal lookup and restore always run, regardless of whether the hint was accepted. |
 | `kv_event_max_objects` | `65536` | Maximum objects tracked for KV events. When full, new stored-object notifications are suppressed until tracked objects leave the pool. Storage and lookup continue normally. |
 | `enable_lookup` | `true` | Restore from the pool. With `false` the connector only stores. |
 | `save_decode_cache` | `false` | Also store blocks produced by decoding. |
