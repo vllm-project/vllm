@@ -31,6 +31,9 @@ from vllm.model_executor.layers.quantization.utils.nvfp4_emulation_utils import 
     FLOAT4_E2M1_MAX,
     ref_nvfp4_quant,
 )
+from vllm.model_executor.layers.quantization.utils.nvfp4_utils import (
+    cutlass_fp4_supported,
+)
 from vllm.model_executor.layers.quantization.utils.quant_utils import (
     QuantKey,
     amax_for_moe_weight_quant,
@@ -49,7 +52,9 @@ NVFP4_BLOCK_SIZE = 16
 def _quantize_nvfp4(
     weight: torch.Tensor, amax: torch.Tensor, chunk_rows: int = 8192
 ) -> tuple[torch.Tensor, torch.Tensor, torch.Tensor]:
-    """NVFP4-quantize the rows of `weight` without the SM100+ quant kernel.
+    """NVFP4-quantize the rows of `weight`, with the native quant kernel where
+    the GPU has one and a PyTorch reference elsewhere (the W4A16 kernels also
+    run on GPUs without it).
 
     `amax` sets the global scale. Returns packed E2M1 codes (low nibble first),
     E4M3 scales per 16 values and the fp32 dequantization global scale, in the
@@ -59,6 +64,11 @@ def _quantize_nvfp4(
         amax.float().reshape(()) / (FLOAT4_E2M1_MAX * FLOAT8_E4M3_MAX)
     ).clamp(min=1e-12)
     inv_global_scale = (1.0 / global_scale).reshape(())
+    if weight.dtype in (torch.float16, torch.bfloat16) and cutlass_fp4_supported():
+        packed, scales = scaled_fp4_quant(
+            weight.contiguous(), inv_global_scale, is_sf_swizzled_layout=False
+        )
+        return packed, scales, global_scale
     # E2M1 magnitudes 0, 0.5, ..., 6 doubled to integers, mapped to their codes.
     code_of = torch.zeros(13, dtype=torch.uint8, device=weight.device)
     code_of[torch.tensor([0, 1, 2, 3, 4, 6, 8, 12])] = torch.arange(
@@ -118,7 +128,7 @@ class Nvfp4WeightOnlyOnlineLinearMethod(OnlineLinearBase):
             **extra_weight_attrs,
         )
 
-        self.kernel = init_nvfp4_linear_kernel(use_a16=True)
+        self.kernel = init_nvfp4_linear_kernel(use_a16=True, act_dtype=params_dtype)
 
     def process_weights_after_loading(self, layer: Module) -> None:
         if getattr(layer, "_already_called_process_weights_after_loading", False):

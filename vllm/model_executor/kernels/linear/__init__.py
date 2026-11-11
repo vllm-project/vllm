@@ -1197,10 +1197,19 @@ def init_wfp8_a16_linear_kernel(
     )
 
 
-def init_nvfp4_linear_kernel(use_a16: bool = False) -> NvFp4LinearKernel:
+def init_nvfp4_linear_kernel(
+    use_a16: bool = False, act_dtype: torch.dtype | None = None
+) -> NvFp4LinearKernel:
     """Select and instantiate the best NVFP4 linear kernel for the
-    current platform."""
-    config = NvFp4LinearLayerConfig()
+    current platform.
+
+    Args:
+        use_a16: Weight-only (W4A16) instead of W4A4.
+        act_dtype: Activation dtype of a W4A16 layer, so that BF16-only
+            kernels are skipped for FP16 models. None if unknown.
+
+    """
+    config = NvFp4LinearLayerConfig(act_dtype=act_dtype)
     a16_kernels = (
         B12xNvFp4W4A16LinearKernel,
         FlashInferCuteDslNvFp4W4A16LinearKernel,
@@ -1244,6 +1253,10 @@ def init_nvfp4_linear_kernel(use_a16: bool = False) -> NvFp4LinearKernel:
         cutedsl_ok, _ = FlashInferCuteDslNvFp4W4A16LinearKernel.is_supported(
             compute_capability
         )
+        cutedsl_ok = (
+            cutedsl_ok
+            and FlashInferCuteDslNvFp4W4A16LinearKernel.can_implement(config)[0]
+        )
         if compute_capability in (100, 103) and cutedsl_ok:
             force_kernel = FlashInferCuteDslNvFp4W4A16LinearKernel
         elif not prefers_humming(compute_capability):
@@ -1253,6 +1266,8 @@ def init_nvfp4_linear_kernel(use_a16: bool = False) -> NvFp4LinearKernel:
         if use_a16 and force_kernel not in a16_kernels:
             raise ValueError(f"{force_kernel.__name__} does not support W4A16")
         is_supported, reason = force_kernel.is_supported()
+        if is_supported:
+            is_supported, reason = force_kernel.can_implement(config)
         if not is_supported:
             raise ValueError(
                 f"Forced NVFP4 kernel {force_kernel.__name__} is not "

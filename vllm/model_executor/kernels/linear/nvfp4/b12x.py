@@ -141,6 +141,13 @@ class B12xNvFp4LinearKernel(NvFp4LinearKernel):
 class B12xNvFp4W4A16LinearKernel(B12xNvFp4LinearKernel):
     """BF16 x NVFP4 GEMM without activation quantization."""
 
+    @classmethod
+    def can_implement(cls, config: NvFp4LinearLayerConfig) -> tuple[bool, str | None]:
+        act_dtype = config.act_dtype if config is not None else None
+        if act_dtype not in (None, torch.bfloat16):
+            return False, f"requires BF16 activations, got {act_dtype}"
+        return True, None
+
     def process_weights_after_loading(self, layer: torch.nn.Module) -> None:
         super().process_weights_after_loading(layer)
         blockscaled = _import_b12x_blockscaled()

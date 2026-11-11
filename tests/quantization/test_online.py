@@ -12,6 +12,7 @@ import pytest
 import torch
 from torch.distributed import ProcessGroup
 
+import vllm.model_executor.layers.quantization.online.nvfp4 as online_nvfp4
 from tests.quantization.utils import (
     _test_online_quant_peak_mem_impl,
     is_quant_method_supported,
@@ -124,6 +125,9 @@ from vllm.model_executor.layers.quantization.utils.mxfp8_utils import (
 from vllm.model_executor.layers.quantization.utils.nvfp4_emulation_utils import (
     dequantize_to_dtype,
     ref_nvfp4_quant,
+)
+from vllm.model_executor.layers.quantization.utils.nvfp4_utils import (
+    cutlass_fp4_supported,
 )
 from vllm.model_executor.layers.quantization.utils.quant_utils import (
     amax_for_moe_weight_quant,
@@ -2812,6 +2816,65 @@ def test_online_linear_tp_weight_quant_matches_unsharded(
         assert torch.equal(tp_scale, full_scale.narrow(0, 0, shard_size))
     else:
         assert torch.equal(tp_scale, full_scale)
+
+
+@pytest.mark.parametrize("shard_dim", [0, 1])
+def test_online_nvfp4_weight_only_tp_quant_matches_unsharded(
+    monkeypatch, shard_dim: int
+) -> None:
+    """A TP shard without the max packs like the same slice of the full weight."""
+    torch.manual_seed(0)
+    weight = torch.randn(32, 64, device=DEVICE, dtype=torch.bfloat16)
+    weight[-1, -1] = 64.0
+    full_amax = weight_amax(weight).reshape(1)
+    full_weight, full_scales, full_global = _quantize_nvfp4(weight, full_amax)
+
+    _patch_max_reduce(monkeypatch, full_amax)
+    shard_size = weight.shape[shard_dim] // 2
+    shard = weight.narrow(shard_dim, 0, shard_size).contiguous()
+    amax = amax_for_tp_weight_quant(weight_amax(shard).reshape(1), True)
+    tp_weight, tp_scales, tp_global = _quantize_nvfp4(shard, amax)
+
+    # Along the input dim, a byte packs 2 values and a scale covers 16.
+    packed_size, scale_size = (
+        (shard_size, shard_size)
+        if shard_dim == 0
+        else (shard_size // 2, shard_size // 16)
+    )
+    assert torch.equal(tp_global, full_global)
+    assert torch.equal(tp_weight, full_weight.narrow(shard_dim, 0, packed_size))
+    assert torch.equal(
+        tp_scales.view(torch.uint8),
+        full_scales.view(torch.uint8).narrow(shard_dim, 0, scale_size),
+    )
+
+
+@pytest.mark.skipif(not cutlass_fp4_supported(), reason="No native NVFP4 quant kernel.")
+@pytest.mark.parametrize("dtype", [torch.bfloat16, torch.float16])
+def test_online_nvfp4_native_quant_matches_reference(monkeypatch, dtype) -> None:
+    """The native packer and the PyTorch fallback dequantize to equally close
+    values: they may only differ on ties between two E2M1 values."""
+    torch.manual_seed(0)
+    weight = torch.randn(256, 512, device=DEVICE, dtype=dtype) * 0.02
+    weight[::7] = 0
+    weight.view(256, 32, 16)[:, ::5] = 0
+    amax = weight_amax(weight)
+    native = _quantize_nvfp4(weight, amax)
+    monkeypatch.setattr(online_nvfp4, "cutlass_fp4_supported", lambda: False)
+    reference = _quantize_nvfp4(weight, amax)
+
+    assert torch.equal(native[2], reference[2])
+    assert torch.equal(native[1].view(torch.uint8), reference[1].view(torch.uint8))
+    dequant_native, dequant_ref = (
+        dequantize_to_dtype(q, s, g, torch.float32, swizzle=False)
+        for q, s, g in (native, reference)
+    )
+    differ = dequant_native != dequant_ref
+    w = weight.float()
+    torch.testing.assert_close(
+        (dequant_native - w).abs()[differ], (dequant_ref - w).abs()[differ]
+    )
+    assert torch.all(dequant_native[weight == 0] == 0)
 
 
 @pytest.mark.skipif(
