@@ -28,8 +28,6 @@ from vllm.model_executor.layers.linear import (
     register_weight_loader_v2_supported_method,
 )
 from vllm.model_executor.layers.quantization.modelopt_block_quant_triton import (
-    DEQUANT_MAX_NUMEL,
-    dequantize_blocks,
     iq2_lut,
     repack_blocks,
 )
@@ -387,17 +385,6 @@ class ModelOptBlockQuantLinearMethod(LinearMethodBase):
                 iq2_lut(qweight.device) if self.codec == "iq2_xxs" else None,
                 persistent=False,
             )
-            cached_weight = None
-            if (
-                self.codec == "iq2_xxs"
-                and self.params_dtype == torch.bfloat16
-                and get_current_vllm_config().kernel_config.modelopt_iq2_dense_cache
-                and scales.numel() * self.block_size <= DEQUANT_MAX_NUMEL
-            ):
-                cached_weight = dequantize_blocks(
-                    qweight, scales, layer.iq2_lut, self.codec
-                )
-            layer.register_buffer("weight_bf16", cached_weight, persistent=False)
             return
 
         from b12x.sequence import embedding
@@ -509,7 +496,6 @@ class ModelOptBlockQuantLinearMethod(LinearMethodBase):
                 layer.weight_scale,
                 layer.iq2_lut,
                 self.codec,
-                layer.weight_bf16,
             )
             if bias is not None:
                 out.add_(bias)

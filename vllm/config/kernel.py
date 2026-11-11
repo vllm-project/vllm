@@ -339,12 +339,6 @@ class KernelConfig:
     enable_jit_warmup: bool = True
     """If True, run JIT compile warmup during kernel warmup."""
 
-    modelopt_iq2_dense_cache: bool = False
-    """Cache BF16 copies of eligible Triton IQ2_XXS dense weights to reuse
-    across calls that already dequantize to BF16. Small-token GEMV and routed
-    experts retain packed weights. Uses extra GPU memory; does not affect b12x.
-    """
-
     monokernel: bool = False
     """If True, run decode steps on the model's specialized decode (RFC #60904),
     e.g. a persistent kernel covering most or all of a decoder layer. Equivalent
