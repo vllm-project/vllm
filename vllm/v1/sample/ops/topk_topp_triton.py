@@ -103,6 +103,17 @@ def _update_min_larger_stats(data, above_mask, min_larger, num_min_larger, senti
     return min_larger, num_min_larger
 
 
+# Each program serially sweeps the vocab row in BLOCK_SIZE tiles, so per-tile
+# latency bounds kernel latency, and Triton's default of 4 warps leaves an
+# 8192-wide tile at 16 elements per lane. 8 warps is faster on every arch
+# measured (SM90, SM100, SM120, gfx950); 16 is not.
+@triton.heuristics(
+    {
+        "BLOCK_SIZE": lambda args: 8192,
+        "BLOCK_SIZE_TRUNC": lambda args: 4096,
+        "num_warps": lambda args: 8,
+    }
+)
 @triton.jit(do_not_specialize_on_alignment=["BATCH_SIZE"])
 def _topk_topp_kernel(
     LOGITS,
@@ -930,19 +941,6 @@ def _topk_topp(
     k_ptr = k if k is not None else logits
     p_ptr = p if p is not None else logits
     num_programs = min(num_sm, batch_size)
-    # Smaller tiles compile and run faster on CPU; GPU benefits from larger tiles.
-    # On XPU, large BLOCK_SIZE causes precision loss in the single-pass pivot
-    # approximation; use smaller tiles for accurate top-p results.
-    if logits.device.type == "cpu":
-        block_size, block_size_trunc, num_warps = 256, 128, 4
-    elif logits.device.type == "xpu":
-        block_size, block_size_trunc, num_warps = 4096, 2048, 4
-    else:
-        block_size, block_size_trunc, num_warps = 8192, 4096, 8
-        # Each program serially sweeps the vocab row in BLOCK_SIZE tiles, so
-        # per-tile latency bounds kernel latency, and Triton's default of 4
-        # warps leaves an 8192-wide tile at 16 elements per lane. 8 warps is
-        # faster on every arch measured (SM90, SM100, SM120, gfx950); 16 is not.
     split_covers_ponly = (
         current_platform.is_cuda_alike()
         and topp_enabled
@@ -953,12 +951,9 @@ def _topk_topp(
         P=p_ptr,
         BATCH_SIZE=batch_size,
         VOCAB_SIZE=vocab_size,
-        BLOCK_SIZE=block_size,
-        BLOCK_SIZE_TRUNC=block_size_trunc,
         TOPK_ENABLED=topk_enabled,
         TOPP_ENABLED=topp_enabled,
         SPLIT_COVERS_PONLY=split_covers_ponly,
-        num_warps=num_warps,
     )
 
 
