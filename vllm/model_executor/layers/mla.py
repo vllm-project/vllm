@@ -5,17 +5,102 @@ from typing import TYPE_CHECKING
 
 import torch
 
+from vllm import ir
 from vllm.config import CacheConfig
 from vllm.model_executor.custom_op import PluggableLayer
 from vllm.model_executor.layers.attention import MLAAttention
 from vllm.model_executor.layers.quantization import QuantizationConfig
 from vllm.models.common.ops import fused_q_kv_rmsnorm
 from vllm.platforms import current_platform
+from vllm.triton_utils import tl, triton
+from vllm.utils.torch_utils import direct_register_custom_op
 
 if TYPE_CHECKING:
     from vllm.v1.attention.backends.mla.index_group import (
         SparseMLAIndexGroupBuilder,
     )
+
+
+@triton.jit
+def _sigmoid_gate_kernel(
+    x_ptr,
+    gate_ptr,
+    out_ptr,
+    x_stride,
+    gate_stride,
+    out_stride,
+    N: tl.constexpr,
+    BLOCK_N: tl.constexpr,
+):
+    # One row per program. bf16(x * bf16(sigmoid(gate))) in fp32, the same
+    # roundings as the eager ``x * gate.sigmoid()``.
+    row = tl.program_id(0).to(tl.int64)
+    cols = tl.arange(0, BLOCK_N)
+    mask = cols < N
+    g = tl.load(gate_ptr + row * gate_stride + cols, mask=mask).to(tl.float32)
+    x = tl.load(x_ptr + row * x_stride + cols, mask=mask).to(tl.float32)
+    s = (1.0 / (1.0 + tl.exp(-g))).to(gate_ptr.dtype.element_ty).to(tl.float32)
+    tl.store(out_ptr + row * out_stride + cols, x * s, mask=mask)
+
+
+def mla_output_gate(
+    attn_out: torch.Tensor, gate: torch.Tensor, fused: bool = False
+) -> torch.Tensor:
+    """attn_out * sigmoid(gate); ``fused`` runs it as one Triton launch instead
+    of separate sigmoid and mul kernels."""
+    if not fused:
+        return attn_out * gate.sigmoid()
+    assert attn_out.ndim == 2 and attn_out.shape == gate.shape
+    assert attn_out.stride(-1) == 1 and gate.stride(-1) == 1
+    num_tokens, n = attn_out.shape
+    out = torch.empty_like(attn_out)
+    if num_tokens > 0:
+        _sigmoid_gate_kernel[(num_tokens,)](
+            attn_out,
+            gate,
+            out,
+            attn_out.stride(0),
+            gate.stride(0),
+            out.stride(0),
+            N=n,
+            BLOCK_N=triton.next_power_of_2(n),
+            num_warps=4,
+        )
+    return out
+
+
+def _bounded_q_kv_rmsnorm(
+    q_c: torch.Tensor,
+    kv_c: torch.Tensor,
+    q_weight: torch.Tensor,
+    kv_weight: torch.Tensor,
+    eps: float,
+    max_tokens: int,
+) -> tuple[torch.Tensor, torch.Tensor]:
+    # An op so the token-count dispatch runs at runtime, not at trace time.
+    if q_c.shape[0] <= max_tokens:
+        return fused_q_kv_rmsnorm(q_c, kv_c, q_weight, kv_weight, eps)
+    return ir.ops.rms_norm(q_c, q_weight, eps), ir.ops.rms_norm(kv_c, kv_weight, eps)
+
+
+def _bounded_q_kv_rmsnorm_fake(
+    q_c: torch.Tensor,
+    kv_c: torch.Tensor,
+    q_weight: torch.Tensor,
+    kv_weight: torch.Tensor,
+    eps: float,
+    max_tokens: int,
+) -> tuple[torch.Tensor, torch.Tensor]:
+    return torch.empty(q_c.shape, dtype=q_c.dtype, device=q_c.device), torch.empty(
+        kv_c.shape, dtype=kv_c.dtype, device=kv_c.device
+    )
+
+
+direct_register_custom_op(
+    op_name="mla_bounded_q_kv_rmsnorm",
+    op_func=_bounded_q_kv_rmsnorm,
+    fake_impl=_bounded_q_kv_rmsnorm_fake,
+)
 
 
 @dataclass
@@ -78,6 +163,8 @@ class MultiHeadLatentAttentionWrapper(PluggableLayer):
         non_causal_multi_token_decode: bool = False,
         allow_short_prefill_indexer_scoring_skip: bool = False,
         fuse_qkv_rmsnorm: bool = False,
+        fuse_output_gate: bool = False,
+        fuse_qkv_rmsnorm_max_tokens: int | None = None,
     ) -> None:
         super().__init__()
         self.hidden_size = hidden_size
@@ -110,6 +197,13 @@ class MultiHeadLatentAttentionWrapper(PluggableLayer):
         # When True, fuse the q_a and kv_a RMSNorms into a single kernel launch
         # (MLA layers with q-LoRA). Opt-in; default False preserves other models.
         self.fuse_qkv_rmsnorm = fuse_qkv_rmsnorm
+        # With fuse_qkv_rmsnorm, batches above this many tokens keep the two
+        # separate RMSNorms (None: always fused).
+        self.fuse_qkv_rmsnorm_max_tokens = fuse_qkv_rmsnorm_max_tokens
+        # When True, apply the g_proj output gate with one fused Triton
+        # sigmoid-multiply instead of separate sigmoid and mul launches.
+        # Opt-in; default False preserves other models.
+        self.fuse_output_gate = fuse_output_gate
         # qrep is active when the query projection is a DCP-group-sharded layer
         # that materializes the full group head set locally.
         q_proj_layer = self.q_b_proj if self.q_lora_rank is not None else self.q_proj
@@ -206,13 +300,23 @@ class MultiHeadLatentAttentionWrapper(PluggableLayer):
             # Fuse q_a + kv_a RMSNorm into one kernel launch (q_c is still the
             # pre-norm projection output here).
             assert self.q_a_layernorm is not None
-            q_proj_input, kv_c_normed = fused_q_kv_rmsnorm(
-                q_c,
-                kv_c,
-                self.q_a_layernorm.weight.data,
-                self.kv_a_layernorm.weight.data,
-                self.q_a_layernorm.variance_epsilon,
-            )
+            if self.fuse_qkv_rmsnorm_max_tokens is None:
+                q_proj_input, kv_c_normed = fused_q_kv_rmsnorm(
+                    q_c,
+                    kv_c,
+                    self.q_a_layernorm.weight.data,
+                    self.kv_a_layernorm.weight.data,
+                    self.q_a_layernorm.variance_epsilon,
+                )
+            else:
+                q_proj_input, kv_c_normed = torch.ops.vllm.mla_bounded_q_kv_rmsnorm(
+                    q_c,
+                    kv_c,
+                    self.q_a_layernorm.weight.data,
+                    self.kv_a_layernorm.weight.data,
+                    self.q_a_layernorm.variance_epsilon,
+                    self.fuse_qkv_rmsnorm_max_tokens,
+                )
             q_c = q_proj_input
         else:
             kv_c_normed = self.kv_a_layernorm(kv_c)
@@ -251,7 +355,9 @@ class MultiHeadLatentAttentionWrapper(PluggableLayer):
         )
 
         if self.g_proj is not None:
-            attn_out = attn_out * self.g_proj(hidden_states)[0].sigmoid()
+            attn_out = mla_output_gate(
+                attn_out, self.g_proj(hidden_states)[0], self.fuse_output_gate
+            )
 
         if skip_o_proj:
             return attn_out

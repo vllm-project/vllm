@@ -8,6 +8,7 @@ from einops import rearrange
 from torch import nn
 
 from vllm import _custom_ops as ops
+from vllm import envs
 from vllm._aiter_ops import rocm_aiter_ops
 from vllm.compilation.breakable_cudagraph import eager_break_during_capture
 from vllm.config import VllmConfig
@@ -21,6 +22,7 @@ from vllm.model_executor.layers.fusion.quant_activation import (
 from vllm.model_executor.layers.linear import (
     ColumnParallelLinear,
     RowParallelLinear,
+    UnquantizedLinearMethod,
 )
 from vllm.model_executor.layers.mamba.gdn.base import GatedDeltaNetAttention
 
@@ -64,6 +66,7 @@ from vllm.models.kimi_k3.amd.ops.third_party.kda import (
     fused_recurrent_kda,
     fused_recurrent_kda_packed_decode,
 )
+from vllm.platforms import current_platform
 from vllm.third_party.flash_linear_attention.ops.kda import FusedRMSNormGated
 from vllm.transformers_utils.configs.kimi_linear import KimiLinearConfig
 from vllm.v1.attention.backend import AttentionBackend
@@ -206,6 +209,18 @@ class KimiK3DeltaAttention(GatedDeltaNetAttention):
             quant_config=self.quant_config,
             prefix=f"{prefix}.f_b_proj",
         )
+        # f_a is a row-strided slice of the in_proj output. Read it in place
+        # with a strided Triton GEMM rather than the generic GEMM's copy.
+        self.use_strided_f_b = (
+            envs.VLLM_K3_KDA_FB_STRIDED
+            and not envs.VLLM_BATCH_INVARIANT
+            and current_platform.is_rocm()
+            and isinstance(self.f_b_proj.quant_method, UnquantizedLinearMethod)
+            and self.f_b_proj.bias is None
+        )
+        if self.use_strided_f_b:
+            # Registers the custom op.
+            import vllm.models.kimi_k3.amd.ops.kda_fb_gemm  # noqa: F401
         self.dt_bias = nn.Parameter(
             torch.empty(self.local_projection_size, dtype=torch.float32)
         )
@@ -392,7 +407,10 @@ class KimiK3DeltaAttention(GatedDeltaNetAttention):
         projected = projected_qkvgfab.split(split_sizes, dim=-1)
         mixed_qkv, g_proj_states, f_a, beta = projected[:4]
 
-        g1 = self.f_b_proj(f_a)[0]
+        if self.use_strided_f_b:
+            g1 = torch.ops.vllm.kimi_k3_kda_fb_proj(f_a, self.f_b_proj.weight)
+        else:
+            g1 = self.f_b_proj(f_a)[0]
         beta = beta.unsqueeze(0)
         g1 = rearrange(g1, "n (h d) -> 1 n h d", d=self.head_dim)
         g2 = rearrange(g_proj_states, "... (h d) -> ... h d", d=self.head_dim)

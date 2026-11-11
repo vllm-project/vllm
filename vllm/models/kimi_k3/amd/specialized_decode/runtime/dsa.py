@@ -12,6 +12,10 @@ indexer's logical top-k and the block table itself (no converter launch).
 bf16 query (``concat_mla_q``'s rows) and the gate's sigmoid instead;
 ``convert_indices`` is ``forward_mqa``'s top-k remap. Pure decode steps of one
 request only (the layer runs vLLM's ops otherwise).
+
+``VLLM_KIMI_SD_DSA_PROLOGUE``: the AttnRes seam and ``prologue``'s projections,
+norms and KV write run as one launch (D1a, ``dsa_pre``), then the indexer's
+scoring and top-k (``indexer_tail``, vLLM's op).
 """
 
 from typing import TYPE_CHECKING
@@ -286,6 +290,87 @@ def dsa_inputs(w, key, sd_q, kv_cache, md, idx):
     return dsa_in, po, torch.empty(sl, dtype=torch.float32, device=sd_q.device)
 
 
+def prologue_on() -> bool:
+    """``VLLM_KIMI_SD_DSA_PROLOGUE``: D1a in place of ``prologue``."""
+    import vllm.envs as envs
+
+    return envs.VLLM_KIMI_SD_DSA_PROLOGUE
+
+
+def pre_weights(w) -> dict:
+    """D1a's weights: views of the loaded parameters; the indexer key norm's
+    bf16 weight / bias (``KimiK3DSAIndexerKNorm``'s cached copies, or made)."""
+    from vllm.models.kimi_k3.amd.specialized_decode.runtime import mla
+
+    a, ind = w.mla_attn, w.indexer
+    w_qkv, w_g = mla.qkv_gate_weights(w)
+    kn = ind.k_index_norm
+    nw, nb = getattr(kn, "weight_bf16", None), getattr(kn, "bias_bf16", None)
+    if nw is None or nw.dtype != torch.bfloat16:
+        nw, nb = kn.weight.to(torch.bfloat16), kn.bias.to(torch.bfloat16)
+    return dict(
+        w_qkv=w_qkv,
+        w_g=w_g,
+        w_ik=ind.wk_index.weight,
+        w_iv=ind.wv_index.weight,
+        q_nw=w.q_a_layernorm.weight,
+        kv_nw=w.kv_a_layernorm.weight,
+        ik_nw=nw,
+        ik_nb=nb,
+        w_qb=w.q_b_proj.weight,
+        w_iq=ind.wq_index.weight,
+        w_uk=a.W_UK_T,
+    )
+
+
+def prologue_reasons(layer, kv_cache=None) -> list[str]:
+    """Why D1a cannot run this DSA layer's prologue (empty: it can)."""
+    from vllm.models.kimi_k3.amd.dsa import KimiK3DSAIndexerKNorm
+    from vllm.models.kimi_k3.amd.specialized_decode.mono.attention import dsa_pre
+
+    w = layer.self_attn.mla_attn
+    ind = w.indexer
+    why = []
+    if not getattr(ind, "use_fp4", False):
+        why.append("an FP8 indexer cache (MXFP4 only)")
+    if not isinstance(getattr(ind, "k_index_norm", None), KimiK3DSAIndexerKNorm):
+        why.append("an indexer key norm other than the LayerNorm")
+    if w.rotary_emb is not None or w.indexer_rope_emb is not None:
+        why.append("RoPE (NoPE only)")
+    if w.g_proj is None:
+        why.append("no output gate")
+    if why:
+        return why
+    t = pre_weights(w)
+    t.pop("q_nw"), t.pop("kv_nw")
+    if kv_cache is None:
+        kv_cache = torch.empty(1, 1, dsa_pre.REC, dtype=torch.uint8)
+    return dsa_pre.check_inputs(kv_cache=kv_cache, **t)
+
+
+def indexer_tail(w, iq, ik, iv) -> None:
+    """``KimiK3DSAIndexer.forward`` past its projections (D1a's ``iq``, ``ik``,
+    ``iv``): ``kimi_fp4_indexer`` (the key store, scoring, top-k)."""
+    from vllm.distributed import get_dcp_group
+
+    ind = w.indexer
+    dcp = get_dcp_group()
+    torch.ops.vllm.kimi_fp4_indexer(
+        iq.view(-1, ind.index_num_heads, ind.index_head_dim),
+        ik,
+        iv,
+        ind.k_cache.kv_cache,
+        ind.topk_indices_buffer,
+        ind.k_cache.prefix,
+        ind.max_model_len,
+        dcp.rank_in_group,
+        dcp.world_size,
+        ind.cp_interleave,
+        ind.indexer_weight_scale * ind.index_softmax_scale,
+        ind.dcp_scores,
+    )
+
+
 class DsaM1Layer(MlaOpsLayer):
     """A DSA layer: vLLM's query, KV and indexer ops (``prologue``), the top-k
     remap, ``dsa_attn``'s slices, then K2 (the slices merged, W_UV and the gate
@@ -296,10 +381,35 @@ class DsaM1Layer(MlaOpsLayer):
         self.wrapper = layer.self_attn.mla_attn
         self.key = dsa_key(runner, width)
         self._w_v: torch.Tensor | None = None
+        self.pre = prologue_on()
+        if self.pre:
+            why = prologue_reasons(layer)
+            if why:
+                raise ValueError(
+                    "Kimi-K3 specialized decode: VLLM_KIMI_SD_DSA_PROLOGUE=1 does "
+                    "not support: " + "; ".join(why)
+                )
+
+    def _pre_key(self, delta: bool):
+        from vllm.models.kimi_k3.amd.specialized_decode.mono.attention import dsa_pre
+
+        layer, w = self.layer, self.wrapper
+        return dsa_pre.DsaPreBuild(
+            tokens=self.width,
+            nblocks=layer.prev_valid_blocks,
+            delta=delta,
+            eps=layer.self_attention_res_norm.variance_epsilon,
+            out_eps=layer.input_layernorm.variance_epsilon,
+            q_eps=w.q_a_layernorm.variance_epsilon,
+            kv_eps=w.kv_a_layernorm.variance_epsilon,
+            k_eps=w.indexer.k_index_norm.eps,
+        )
 
     def builds(self) -> list:
         k2 = _k2_key(self.layer, self.runner, self.width, False, True, self.key)
-        return [k2] if not self.key.standalone else [self.key, k2]
+        out = [k2] if not self.key.standalone else [self.key, k2]
+        # a layer after another always has a pending delta
+        return [self._pre_key(True), *out] if self.pre else out
 
     def w_v(self) -> torch.Tensor:
         """W_UV as M1b's bf16 [12, 128 v, 512 k], k dense: a view of vLLM's
@@ -329,19 +439,24 @@ class DsaM1Layer(MlaOpsLayer):
             )
         if self.first:
             runner.step_begin()
-        hidden_states = _apply_attn_res(
-            prefix_sum,
-            block_residual,
-            layer.self_attention_res_proj,
-            layer.self_attention_res_norm,
-            layer.prev_valid_blocks,
-            delta=prefix_delta,
-            output_norm=layer.input_layernorm,
-            quant_key=layer.self_attn.get_input_quant_key(),
-        )
         sd_q = prefix_sum.new_empty(s, dsa_attn.NH, dsa_attn.ENTRY)
         gate = prefix_sum.new_empty(s, dsa_attn.NH * a.v_head_dim)
-        prologue(w, positions, hidden_states, sd_q, gate, md, kv_cache, slots)
+        hidden_states = None
+        if self.pre:
+            self.launch_pre(prefix_sum, block_residual, prefix_delta, sd_q, gate,
+                            md, kv_cache, slots)  # fmt: skip
+        else:
+            hidden_states = _apply_attn_res(
+                prefix_sum,
+                block_residual,
+                layer.self_attention_res_proj,
+                layer.self_attention_res_norm,
+                layer.prev_valid_blocks,
+                delta=prefix_delta,
+                output_norm=layer.input_layernorm,
+                quant_key=layer.self_attn.get_input_quant_key(),
+            )
+            prologue(w, positions, hidden_states, sd_q, gate, md, kv_cache, slots)
         idx = None if self.key.fold else convert_indices(a, md, kv_cache, s)
         dsa_in, po, pl = dsa_inputs(w, self.key, sd_q, kv_cache, md, idx)
         if self.key.standalone:
@@ -361,9 +476,53 @@ class DsaM1Layer(MlaOpsLayer):
             layer, runner, core, prefix_sum, block_residual, m1b_in=m1b_in,
             dsa=self.key, dsa_in=None if self.key.standalone else dsa_in,
         )  # fmt: skip
-        if verify_on() and not torch.cuda.is_current_stream_capturing():
+        if (
+            verify_on()
+            and hidden_states is not None
+            and not torch.cuda.is_current_stream_capturing()
+        ):
             self.verify(positions, hidden_states, sd_q, core, kv_cache, md, slots)
         return prefix_sum, block_residual, out
+
+    def launch_pre(self, prefix, blocks, delta, sd_q, gate, md, kv_cache, slots):
+        """D1a (``dsa_pre``): AttnRes, the projections, norms and the KV write,
+        writing ``sd_q`` and ``gate`` as ``prologue`` does; then the indexer's
+        scoring and top-k (vLLM's op) on its projections."""
+        from vllm.models.kimi_k3.amd.specialized_decode.mono.attention import dsa_pre
+        from vllm.models.kimi_k3.amd.specialized_decode.mono.attention.kda import (
+            HIDDEN,
+        )
+
+        layer, w, runner = self.layer, self.wrapper, self.runner
+        a = w.mla_attn
+        s = prefix.size(0)
+        assert a.hisparse_cache is None and not a.use_pcp and not w.dcp_q_replicate
+        iq = prefix.new_empty(s, dsa_pre.IQN)
+        ik = prefix.new_empty(s, dsa_pre.IKD)
+        iv = prefix.new_empty(s, dsa_pre.IVN)
+        dsa_pre.dsa_pre(
+            self._pre_key(delta is not None),
+            prefix=prefix,
+            delta=delta,
+            blocks=blocks,
+            ares_nw=layer.self_attention_res_norm.weight,
+            ares_qk=layer.self_attention_res_proj.weight.view(HIDDEN),
+            in_nw=layer.input_layernorm.weight,
+            **pre_weights(w),
+            kv_cache=kv_cache,
+            slots=slots[:s],
+            gate_out=gate,
+            q_out=sd_q,
+            iq_out=iq,
+            ik_out=ik,
+            iv_out=iv,
+            layer=layer.layer_idx,
+            **runner.launch_args(),
+        )
+        if not w.skip_topk:
+            indexer_tail(w, iq, ik, iv)
+        a.impl.record_logical_topk_ready()
+        a.prepare_kv_cache_update(md)
 
     def verify(self, positions, hidden, sd_q, core, kv_cache, md, slots) -> None:
         """Debug (``VLLM_KIMI_SD_DSA_VERIFY``, eager steps): reruns vLLM's ops on

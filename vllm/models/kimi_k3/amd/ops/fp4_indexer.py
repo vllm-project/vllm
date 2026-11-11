@@ -58,8 +58,9 @@ def decode_layout(
 
 
 @triton.jit
-def _quantize(values):
-    values = tl.reshape(values, (4, 32))
+def _quantize(values, GROUPS: tl.constexpr):
+    # GROUPS 32-element groups; heads are four consecutive groups.
+    values = tl.reshape(values, (GROUPS, 32))
     scale = tl.maximum(tl.max(tl.abs(values), 1) / 6.0, 1.0e-4)
     bits = scale.to(tl.int32, bitcast=True)
     exponent = tl.minimum(((bits >> 23) & 255) + ((bits & 0x7FFFFF) != 0), 254)
@@ -75,7 +76,7 @@ def _quantize(values):
     code += (a >= 3.5).to(tl.uint8)
     code += (a > 5.0).to(tl.uint8)
     code |= ((x < 0) & (code != 0)).to(tl.uint8) << 3
-    low, high = tl.split(tl.reshape(code, (64, 2)))
+    low, high = tl.split(tl.reshape(code, (GROUPS * 16, 2)))
     return low | (high << 4), exponent.to(tl.uint8)
 
 
@@ -88,11 +89,70 @@ def _quantize_query(
     scale_offsets = row * 256 + group * 64 + (head % 16) * 4 + head // 16
     if head < H:
         values = tl.load(Q + row * QS + head * QH + tl.arange(0, 128)).to(tl.float32)
-        packed, scales = _quantize(values)
+        packed, scales = _quantize(values, 4)
         tl.store(Payload + (row * H + head) * 64 + tl.arange(0, 64), packed)
         tl.store(Scales + scale_offsets, scales)
     else:
         tl.store(Scales + scale_offsets, tl.full((4,), 0, tl.uint8))
+
+
+@triton.jit
+def _quantize_query_weights(
+    Q,
+    Payload,
+    Scales,
+    Weights,
+    Scaled,
+    Starts,
+    RelStarts,
+    weight_scale,
+    num_rows,
+    num_starts,
+    offset,
+    limit,
+    QS: tl.constexpr,
+    QH: tl.constexpr,
+    WS: tl.constexpr,
+    H: tl.constexpr,
+    HB: tl.constexpr,
+):
+    # One program quantizes HB heads of a row (the per-head kernel's layout).
+    row, block = tl.program_id(0), tl.program_id(1)
+    if row < num_rows:
+        head = block * HB + tl.arange(0, HB)
+        valid = head < H
+        values = tl.load(
+            Q + row * QS + head[:, None] * QH + tl.arange(0, 128)[None, :],
+            valid[:, None],
+            0.0,
+        ).to(tl.float32)
+        packed, scales = _quantize(tl.reshape(values, (HB * 128,)), HB * 4)
+        byte = (row * H + block * HB) * 64 + tl.arange(0, HB * 64)
+        tl.store(Payload + byte, packed, tl.arange(0, HB * 64) < (H - block * HB) * 64)
+        group = tl.arange(0, 4)[None, :]
+        scale_offsets = row * 256 + group * 64 + (head[:, None] % 16) * 4
+        scale_offsets += head[:, None] // 16
+        scales = tl.where(valid[:, None], tl.reshape(scales, (HB, 4)), 0)
+        tl.store(Scales + scale_offsets, scales.to(tl.uint8))
+        # Same FP32 product as weights.float() * weight_scale.
+        weight = tl.load(Weights + row * WS + head, valid, 0.0).to(tl.float32)
+        tl.store(Scaled + row * H + head, weight * weight_scale, valid)
+    # Tile-relative request starts, clamped to the tile's rows.
+    index = row * tl.num_programs(1) + block
+    if index < num_starts:
+        start = tl.load(Starts + index) - offset
+        tl.store(RelStarts + index, tl.minimum(tl.maximum(start, 0), limit))
+
+
+@triton.jit
+def _store_key(values, Cache, slot, CS: tl.constexpr):
+    packed, scales = _quantize(values, 4)
+    page, offset = slot // 64, slot % 64
+    byte = tl.arange(0, 64)
+    tl.store(Cache + page * CS + (byte // 16) * 1024 + offset * 16 + byte % 16, packed)
+    # AITER's 64-slot scale axis is a transposed 16 x 4 tile.
+    shuffled = (offset % 16) * 4 + offset // 16
+    tl.store(Cache + page * CS + 4096 + tl.arange(0, 4) * 64 + shuffled, scales)
 
 
 @triton.jit
@@ -101,19 +161,55 @@ def _quantize_key(K, Cache, Slots, KS: tl.constexpr, CS: tl.constexpr):
     slot = tl.load(Slots + row).to(tl.int64)
     if slot >= 0:
         values = tl.load(K + row * KS + tl.arange(0, 128)).to(tl.float32)
-        packed, scales = _quantize(values)
-        page, offset = slot // 64, slot % 64
-        byte = tl.arange(0, 64)
+        _store_key(values, Cache, slot, CS)
+
+
+@triton.jit
+def _norm_quantize_key(
+    K,
+    Cache,
+    Slots,
+    Weight,
+    Bias,
+    Out,
+    eps,
+    num_keys,
+    num_out,
+    KS: tl.constexpr,
+    CS: tl.constexpr,
+    OS: tl.constexpr,
+    TOPK: tl.constexpr,
+    NORM: tl.constexpr,
+    BLOCK: tl.constexpr,
+):
+    row = tl.program_id(0)
+    if row < num_keys:
+        slot = tl.load(Slots + row).to(tl.int64)
+        if slot >= 0:
+            dim = tl.arange(0, 128)
+            values = tl.load(K + row * KS + dim).to(tl.float32)
+            if NORM:
+                # F.layer_norm on the activation dtype: FP32 statistics, weight
+                # and bias rounded to the activation dtype, rounded output.
+                dtype = K.dtype.element_ty
+                mean = tl.sum(values, 0) / 128
+                centered = values - mean
+                rstd = tl.math.rsqrt(tl.sum(centered * centered, 0) / 128 + eps)
+                weight = tl.load(Weight + dim).to(dtype).to(tl.float32)
+                bias = tl.load(Bias + dim).to(dtype).to(tl.float32)
+                values = (weight * (rstd * centered) + bias).to(dtype).to(tl.float32)
+            _store_key(values, Cache, slot, CS)
+    if row < num_out:
+        # Top-k rows start empty; selection overwrites the scored rows.
+        column = tl.arange(0, BLOCK)
         tl.store(
-            Cache + page * CS + (byte // 16) * 1024 + offset * 16 + byte % 16, packed
+            Out + row * OS + column,
+            tl.full((BLOCK,), -1, tl.int32),
+            column < TOPK,
         )
-        # AITER's 64-slot scale axis is a transposed 16 x 4 tile.
-        shuffled = (offset % 16) * 4 + offset // 16
-        tl.store(Cache + page * CS + 4096 + tl.arange(0, 4) * 64 + shuffled, scales)
 
 
-def quantize_queries(q: torch.Tensor) -> tuple[torch.Tensor, torch.Tensor]:
-    """Quantize [rows, heads, 128] without folding scales into head weights."""
+def _query_buffers(q: torch.Tensor) -> tuple[torch.Tensor, torch.Tensor]:
     if q.ndim != 3 or q.shape[2] != 128 or q.stride(2) != 1:
         raise ValueError("FP4 index queries require contiguous 128-element heads")
     rows, heads, _ = q.shape
@@ -121,6 +217,13 @@ def quantize_queries(q: torch.Tensor) -> tuple[torch.Tensor, torch.Tensor]:
         raise ValueError("FP4 row-group queries support 16, 32 or 64 heads")
     payload = torch.empty((rows, heads, 64), device=q.device, dtype=torch.uint8)
     scales = torch.empty((rows, 1, 4, 16, 4), device=q.device, dtype=torch.uint8)
+    return payload, scales
+
+
+def quantize_queries(q: torch.Tensor) -> tuple[torch.Tensor, torch.Tensor]:
+    """Quantize [rows, heads, 128] without folding scales into head weights."""
+    payload, scales = _query_buffers(q)
+    rows, heads, _ = q.shape
     if rows:
         _quantize_query[(rows, 64)](q, payload, scales, q.stride(0), q.stride(1), heads)
     return payload, scales
@@ -158,6 +261,104 @@ def store_keys(keys: torch.Tensor, cache: torch.Tensor, slots: torch.Tensor) -> 
         )
 
 
+def store_keys_and_reset(
+    keys: torch.Tensor,
+    cache: torch.Tensor,
+    slots: torch.Tensor,
+    out: torch.Tensor,
+    norm_weight: torch.Tensor | None = None,
+    norm_bias: torch.Tensor | None = None,
+    norm_eps: float = 0.0,
+) -> None:
+    """store_keys plus the optional key LayerNorm and out.fill_(-1), one launch.
+
+    With norm_weight, keys are the raw projection and get the LayerNorm of
+    KimiK3DSAIndexerKNorm before quantization.
+    """
+    cache_views(cache)
+    if keys.ndim != 2 or keys.shape[1] != 128 or keys.stride(1) != 1:
+        raise ValueError("FP4 index keys require contiguous 128-element rows")
+    if slots.ndim != 1 or slots.numel() != keys.shape[0] or slots.stride(0) != 1:
+        raise ValueError("Each key requires one contiguous slot entry")
+    if out.ndim != 2 or out.dtype != torch.int32 or out.stride(1) != 1:
+        raise ValueError("Top-k output requires contiguous int32 rows")
+    norm = norm_weight is not None
+    if norm and (
+        norm_bias is None
+        or norm_weight.shape != (128,)
+        or norm_bias.shape != (128,)
+        or not norm_weight.is_contiguous()
+        or not norm_bias.is_contiguous()
+    ):
+        raise ValueError("Key LayerNorm requires contiguous 128-element weight/bias")
+    grid = max(keys.shape[0], out.shape[0])
+    if grid:
+        _norm_quantize_key[(grid,)](
+            keys,
+            cache,
+            slots,
+            norm_weight if norm else keys,
+            norm_bias if norm else keys,
+            out,
+            norm_eps,
+            keys.shape[0],
+            out.shape[0],
+            keys.stride(0),
+            cache.stride(0),
+            out.stride(0),
+            out.shape[1],
+            norm,
+            triton.next_power_of_2(out.shape[1]),
+        )
+
+
+def quantize_queries_and_weights(
+    q: torch.Tensor,
+    weights: torch.Tensor,
+    weight_scale: float,
+    starts: torch.Tensor,
+    offset: int,
+    limit: int,
+    heads_per_program: int = 8,
+) -> tuple[torch.Tensor, torch.Tensor, torch.Tensor, torch.Tensor]:
+    """quantize_queries plus the decode tile's FP32 weights and starts, one launch.
+
+    Returns (payload, scales, weights.float() * weight_scale,
+    (starts - offset).clamp(0, limit)).
+    """
+    payload, scales = _query_buffers(q)
+    rows, heads, _ = q.shape
+    if weights.shape != (rows, heads) or weights.stride(1) != 1:
+        raise ValueError("Head weights require contiguous [rows, heads] entries")
+    if starts.ndim != 1 or starts.stride(0) != 1:
+        raise ValueError("Request starts must be one contiguous dimension")
+    scaled = torch.empty((rows, heads), device=q.device, dtype=torch.float32)
+    rel_starts = torch.empty_like(starts)
+    blocks = 64 // heads_per_program
+    grid = max(rows, triton.cdiv(starts.numel(), blocks))
+    if grid:
+        _quantize_query_weights[(grid, blocks)](
+            q,
+            payload,
+            scales,
+            weights,
+            scaled,
+            starts,
+            rel_starts,
+            weight_scale,
+            rows,
+            starts.numel(),
+            offset,
+            limit,
+            q.stride(0),
+            q.stride(1),
+            weights.stride(0),
+            heads,
+            heads_per_program,
+        )
+    return payload, scales, scaled, rel_starts
+
+
 def score_paged(
     query: torch.Tensor,
     cache: torch.Tensor,
@@ -166,11 +367,13 @@ def score_paged(
     query_starts: torch.Tensor,
     row_ends: torch.Tensor,
     max_query_len: int,
+    quantized: tuple[torch.Tensor, torch.Tensor] | None = None,
 ) -> torch.Tensor:
     """Score one bounded query tile using shared-key row-group FP4 MLA logits.
 
     Weights include the model's head/softmax factors, but not FP4 group scales.
     The AITER reader must support physical page strides for merged caches.
+    quantized optionally passes the query's (payload, scales) already computed.
     """
     from aiter.ops.flydsl.kernels.mqa_logits.pa_mqa_logits_fp4_rowgroup import (
         flydsl_pa_mqa_logits_fp4_rowgroup,
@@ -184,7 +387,9 @@ def score_paged(
     if not output.numel() or query_starts.numel() <= 1:
         return output
     payload, scales = cache_views(cache)
-    q_payload, q_scales = quantize_queries(query)
+    q_payload, q_scales = (
+        quantized if quantized is not None else quantize_queries(query)
+    )
     plan = make_fp4_mqa_plan(
         num_seqs=query_starts.numel() - 1,
         max_qlen=max_query_len,
