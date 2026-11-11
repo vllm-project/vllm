@@ -760,8 +760,8 @@ def test_moriio_handshake_returns_metadata(mock_parallel_groups):
 
 def test_moriio_handshake_listener_survives_bad_messages_and_stops():
     """A malformed or unknown message must not kill the P-side handshake
-    listener (it would accept no new handshakes until restart), and setting
-    the stop event must end the thread."""
+    listener (it would accept no new handshakes until restart), and
+    MoRIIOConnectorWorker.shutdown() must end the thread."""
     metadata = MoRIIOAgentMetadata(
         engine_id="engine-p",
         agent_metadata=b"agent",
@@ -773,31 +773,43 @@ def test_moriio_handshake_listener_survives_bad_messages_and_stops():
     layer_metadata = {"layer0": [b"meta0"]}
     port = _find_free_port()
     ready_event = threading.Event()
-    stop_event = threading.Event()
+    worker = MoRIIOConnectorWorker.__new__(MoRIIOConnectorWorker)
+    worker._stop_event = threading.Event()
     listener = threading.Thread(
         target=MoRIIOConnectorWorker._moriio_handshake_listener,
-        args=(metadata, ready_event, stop_event, port, 0, 0, layer_metadata),
+        args=(metadata, ready_event, worker._stop_event, port, 0, 0, layer_metadata),
         daemon=True,
     )
+    worker._moriio_handshake_listener_t = listener
     listener.start()
-    assert ready_event.wait(timeout=10)
+    try:
+        assert ready_event.wait(timeout=10)
 
-    path = make_zmq_path("tcp", "127.0.0.1", port)
-    with zmq_ctx(zmq.DEALER, path) as sock:
-        sock.setsockopt(zmq.RCVTIMEO, 10_000)
-        sock.send_multipart([b"too", b"many", b"frames"])
-        sock.send(b"not_a_handshake_msg")
-        sock.send(MoRIIOConstants.GET_META_MSG)
+        path = make_zmq_path("tcp", "127.0.0.1", port)
+        with zmq_ctx(zmq.DEALER, path) as sock:
+            sock.setsockopt(zmq.RCVTIMEO, 10_000)
+            sock.send_multipart([b"too", b"many", b"frames"])
+            sock.send(b"not_a_handshake_msg")
+            sock.send(MoRIIOConstants.GET_META_MSG)
 
-        _, engine_meta = sock.recv_multipart()
-        _, tensor_meta = sock.recv_multipart()
+            _, engine_meta = sock.recv_multipart()
+            _, tensor_meta = sock.recv_multipart()
 
-    assert msgspec.msgpack.decode(engine_meta, type=MoRIIOAgentMetadata) == metadata
-    assert msgpack.loads(tensor_meta) == layer_metadata
+        assert msgspec.msgpack.decode(engine_meta, type=MoRIIOAgentMetadata) == metadata
+        assert msgpack.loads(tensor_meta) == layer_metadata
 
-    stop_event.set()
-    listener.join(timeout=10)
-    assert not listener.is_alive()
+        # shutdown() joins without a timeout; run it on a helper thread so a
+        # listener that ignores the stop event fails the test instead of
+        # hanging the suite.
+        shutdown = threading.Thread(target=worker.shutdown, daemon=True)
+        shutdown.start()
+        shutdown.join(timeout=10)
+        assert not shutdown.is_alive(), "shutdown() did not return"
+        assert not listener.is_alive()
+        assert worker._moriio_handshake_listener_t is None
+    finally:
+        worker._stop_event.set()
+        listener.join(timeout=10)
 
 
 def test_resolve_host_ip_prefers_extra_config():
