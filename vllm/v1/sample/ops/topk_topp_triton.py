@@ -48,7 +48,7 @@ FILL_SPLITS = 8  # at least this many splits per row for the fill (balances cut 
 # ballots, whose cost grows with the bins, so it refines coarse bins, and its waves of
 # 64 have twice the threads.
 BINS, ROUNDS, WARPS = (128, 3, 8) if current_platform.is_rocm() else (8192, 2, 16)
-assert ROUNDS <= 5  # the barrier keeps two row counts per round
+assert 3 + 2 * ROUNDS <= 16  # sync slots: barrier, exit, queue, 2 row counts per round
 BIN_SCALE = BINS / 16.0  # bins per nat below the row max
 WINDOW = 4096  # logits gathered to resolve a histogram cut
 KEPT = 256  # kept logits stored per row by the tiers, also the largest tier
@@ -538,7 +538,7 @@ def _filter_kernel(
                     span_ptr + 4 * row,
                     above_ptr + 4 * row,
                     next_rows,
-                    sync_ptr + 8 + r,
+                    sync_ptr + 3 + ROUNDS + r,
                     k,
                     p,
                     tl.load(row_stats_ptr + 2 * row, volatile=True).to(tl.float32),
@@ -553,7 +553,7 @@ def _filter_kernel(
         syncs += 1
         _grid_sync(sync_ptr, syncs * programs)
         # Rows to gather or cut (else the round skips these phases), and for next round.
-        cut_rows = tl.load(sync_ptr + 8 + r, volatile=True)
+        cut_rows = tl.load(sync_ptr + 3 + ROUNDS + r, volatile=True)
         next_hist_rows = tl.load(next_rows, volatile=True)
         for item in range(pid, tl.where(cut_rows != 0, queued * hsplits, 0), programs):
             row = tl.load(queue_ptr + item // hsplits, volatile=True)
@@ -656,9 +656,10 @@ def _select_row(
 ):
     k, p = _row_params(k_ptr, p_ptr, row, vocab, has_k, has_p)
     no_k = k >= vocab
-    done = no_k & (p >= 1.0)
+    noop = no_k & (p >= 1.0)
+    resolved = noop
     kept = -1
-    if not done:
+    if not noop:
         row_max, row_sum = _row_stats(stats_ptr, row, splits, MAX_SPLITS)
         tl.store(row_stats_ptr + 2 * row, row_max.to(tl.float64))
         tl.store(row_stats_ptr + 2 * row + 1, row_sum)
@@ -679,14 +680,14 @@ def _select_row(
         # Top-p only rows try one tier: each tier's code is fetched cold, and a second
         # one costs about as much as the fallback saves.
         if k <= 32:
-            done, kept = _tier(*args, 32, SUPERGROUPS_P2)
-        if (not done) & (k <= 64):
-            done, kept = _tier(*args, 64, SUPERGROUPS_P2)
-        if (not done) & (no_k | (k <= 128)):
-            done, kept = _tier(*args, 128, SUPERGROUPS_P2)
-        if (not done) & (k <= 256):
-            done, kept = _tier(*args, 256, SUPERGROUPS_P2)
-        if not done:
+            resolved, kept = _tier(*args, 32, SUPERGROUPS_P2)
+        if (not resolved) & (k <= 64):
+            resolved, kept = _tier(*args, 64, SUPERGROUPS_P2)
+        if (not resolved) & (no_k | (k <= 128)):
+            resolved, kept = _tier(*args, 128, SUPERGROUPS_P2)
+        if (not resolved) & (k <= 256):
+            resolved, kept = _tier(*args, 256, SUPERGROUPS_P2)
+        if not resolved:
             _start_span(
                 hist_ptr + row.to(tl.int64) * BINS,
                 span_ptr + 4 * row,
@@ -699,10 +700,7 @@ def _select_row(
             )
             slot = tl.atomic_add(sync_ptr + 2, 1, sem="relaxed", scope="gpu")
             tl.store(queue_ptr + slot, row)
-    tl.store(
-        state_ptr + row,
-        tl.where(done, kept, tl.where(no_k & (p >= 1.0), NOOP_C, HIST_C)),
-    )
+    tl.store(state_ptr + row, tl.where(noop, NOOP_C, tl.where(resolved, kept, HIST_C)))
 
 
 @triton.jit
@@ -1047,8 +1045,8 @@ def _plan_row(
         after_hi = _above(hist_row, before, total, hi + 1, F, NC, BINS)
         n = after_hi - above_lo
     # The bins to narrow to: bin kb alone if it lies apart (its top-k is cut first).
-    first = tl.where(apart, kb, lo)
-    final = tl.where(apart, kb, hi)
+    first_bin = tl.where(apart, kb, lo)
+    last_bin = tl.where(apart, kb, hi)
     if n <= WINDOW:
         # Position of the k-th logit among the gathered ones, in key order.
         k_at = k - 1 - above_lo - between
@@ -1058,7 +1056,7 @@ def _plan_row(
         tl.atomic_add(cut_rows, 1, sem="relaxed", scope="gpu")
         if (flag == K_FIRST) & (p_row < 1.0) & (last == 0):  # its top-p: next round
             tl.atomic_add(next_rows, 1, sem="relaxed", scope="gpu")
-    elif last | ((final == BINS - 1) & (floor == -float("inf"))):
+    elif last | ((last_bin == BINS - 1) & (floor == -float("inf"))):
         tl.store(state_row, ALONE_C)  # last round, or the open last bin
         tl.atomic_add(cut_rows, 1, sem="relaxed", scope="gpu")
     elif apart & (in_kb <= WINDOW):
@@ -1070,8 +1068,8 @@ def _plan_row(
         tl.atomic_add(cut_rows, 1, sem="relaxed", scope="gpu")
         tl.atomic_add(next_rows, 1, sem="relaxed", scope="gpu")  # its top-p
     else:
-        new_top = top - (first - 0.5) / scale  # half a bin wider on each side
-        new_floor = top - (final + 1.5) / scale
+        new_top = top - (first_bin - 0.5) / scale  # half a bin wider on each side
+        new_floor = top - (last_bin + 1.5) / scale
         tl.atomic_add(next_rows, 1, sem="relaxed", scope="gpu")
         _start_span(
             hist_row,
