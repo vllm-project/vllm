@@ -1220,11 +1220,11 @@ class MLADualRMSPerTokenQuantPattern(
 
 
 class MLAQkvAProjDualRMSPerTokenQuantPattern(MLADualRMSPerTokenQuantPattern):
-    """Fuse the MLA input projection ``fused_qkv_a_proj`` GEMM,
+    """Fuse the MLA input projection `fused_qkv_a_proj` GEMM,
     q-latent RMSNorm + FP8 per-token quant and kv-latent RMSNorm into
-    ``fused_mla_qkv_a_proj_dual_rms_norm_per_token_quant``. Weight shapes
+    `fused_mla_qkv_a_proj_dual_rms_norm_per_token_quant`. Weight shapes
     without a tuned aiter Triton preshuffle GEMM config keep the GEMM and get
-    ``fused_mla_dual_rms_norm_per_token_quant``.
+    `fused_mla_dual_rms_norm_per_token_quant`.
     """
 
     GEMM_OP = torch.ops.vllm._rocm_aiter_preshuffled_per_token_w8a8_gemm.default
