@@ -107,6 +107,8 @@ Note that all the linear layers above take `linear_method` as an input. vLLM wil
 You now need to implement the `load_weights` method in your `*ForCausalLM` class.
 This method should load the weights from the HuggingFace's checkpoint file and assign them to the corresponding layers in your model. Specifically, for `MergedColumnParallelLinear` and `QKVParallelLinear` layers, if the original model has separated weight matrices, you need to load the different parts separately.
 
+Treat the checkpoint tensors passed to `load_weights` as read-only and create a new tensor instead of modifying one in place. On integrated GPUs (e.g. DGX Spark, Jetson) they are read-only views of the checkpoint file, and writing to one crashes the process.
+
 ## 5. Register your model
 
 See [this page](registration.md) for instructions on how to register your new model to be used by vLLM.
