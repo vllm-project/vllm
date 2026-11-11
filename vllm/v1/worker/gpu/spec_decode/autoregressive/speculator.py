@@ -42,7 +42,13 @@ class AutoRegressiveSpeculator(DraftModelSpeculator):
             else CUDAGraphMode.NONE
         )
         self.decode_cudagraph_manager = SpeculatorCudaGraphManager(
-            self.vllm_config, self.device, decode_mode, decode_query_len=1
+            self.vllm_config,
+            self.device,
+            decode_mode,
+            decode_query_lens={1: self.max_num_reqs},
+            decode_request_sizes=(
+                self.vllm_config.get_draft_decode_cudagraph_request_sizes()
+            ),
         )
 
     @abstractmethod
@@ -59,7 +65,7 @@ class AutoRegressiveSpeculator(DraftModelSpeculator):
         """Run the draft prefill and sample draft token zero."""
 
     @abstractmethod
-    def _generate_draft(
+    def _decode(
         self,
         num_reqs: int,
         num_tokens_padded: int,
@@ -139,9 +145,9 @@ class AutoRegressiveSpeculator(DraftModelSpeculator):
         assert self.decode_cudagraph_manager is not None
         self.on_multi_step_decode_begin(self.max_num_reqs)
         decode_fn = (
-            self._generate_fused_drafts
+            self._fused_multi_step_decode
             if self.supports_decode_metadata_update
-            else self._generate_draft
+            else self._decode
         )
         self.decode_cudagraph_manager.capture(
             decode_fn,
@@ -156,7 +162,7 @@ class AutoRegressiveSpeculator(DraftModelSpeculator):
         )
         self.on_multi_step_decode_end(self.max_num_reqs)
 
-    def _decode(
+    def _run_multi_step_decode(
         self,
         input_batch: InputBatch,
         num_rejected: torch.Tensor,
@@ -167,11 +173,13 @@ class AutoRegressiveSpeculator(DraftModelSpeculator):
         is_profile: bool,
         num_speculative_steps: int,
     ) -> None:
-        decode_batch_sync, num_batch_tokens = (
-            self._build_uniform_batch_dp_sync(dp_sync_state, num_reqs)
-            if dp_sync_state is not None
-            else (None, num_reqs)
-        )
+        decode_batch_sync, num_batch_tokens = None, num_reqs
+        if dp_sync_state is not None:
+            # Padded dummy batches can exceed the requests the DP sync covers.
+            num_reqs = min(num_reqs, dp_sync_state.num_reqs)
+            decode_batch_sync, num_batch_tokens = self._build_uniform_batch_dp_sync(
+                dp_sync_state, num_reqs
+            )
         decode_batch_desc, decode_batch_sync = dispatch_cg_and_sync_dp(
             self.decode_cudagraph_manager,
             num_reqs,
@@ -183,15 +191,15 @@ class AutoRegressiveSpeculator(DraftModelSpeculator):
             dp_sync_state=decode_batch_sync,
             parallel_config=self.vllm_config.parallel_config,
         )
+        if self.decode_cudagraph_manager is not None:
+            decode_batch_desc = self.decode_cudagraph_manager.specialize_spec_tokens(
+                decode_batch_desc, num_speculative_steps
+            )
 
         self._prepare_decode_inputs(
             input_batch, num_rejected, num_reqs, skip_attn, decode_batch_desc
         )
 
-        if self.decode_cudagraph_manager is not None:
-            decode_batch_desc = self.decode_cudagraph_manager.specialize_spec_tokens(
-                decode_batch_desc, num_speculative_steps
-            )
         num_tokens_across_dp = (
             decode_batch_sync.num_tokens_across_dp
             if decode_batch_sync is not None
@@ -199,12 +207,12 @@ class AutoRegressiveSpeculator(DraftModelSpeculator):
         )
 
         self.on_multi_step_decode_begin(num_reqs)
-        decode_fn = (
-            self._fused_multi_step_decode
+        multi_step_decode_fn = (
+            self._run_fused_multi_step_decode
             if self.supports_decode_metadata_update
             else self._multi_step_decode
         )
-        decode_fn(
+        multi_step_decode_fn(
             num_reqs,
             skip_attn,
             decode_batch_desc,
@@ -253,7 +261,7 @@ class AutoRegressiveSpeculator(DraftModelSpeculator):
                 assert self.decode_cudagraph_manager is not None
                 self.decode_cudagraph_manager.run_fullgraph(batch_desc)
             else:
-                self._generate_draft(
+                self._decode(
                     num_reqs,
                     batch_desc.num_tokens,
                     attn_metadata,
@@ -263,7 +271,7 @@ class AutoRegressiveSpeculator(DraftModelSpeculator):
                     num_speculative_steps,
                 )
 
-    def _fused_multi_step_decode(
+    def _run_fused_multi_step_decode(
         self,
         num_reqs: int,
         skip_attn: bool,
@@ -298,7 +306,7 @@ class AutoRegressiveSpeculator(DraftModelSpeculator):
                 step=1,
             )
 
-        self._generate_fused_drafts(
+        self._fused_multi_step_decode(
             num_reqs,
             batch_desc.num_tokens,
             attn_metadata,
@@ -308,19 +316,16 @@ class AutoRegressiveSpeculator(DraftModelSpeculator):
             num_speculative_steps,
         )
 
-    def _generate_fused_drafts(
+    def _fused_multi_step_decode(
         self,
         num_reqs: int,
         num_tokens_padded: int,
         attn_metadata: dict[str, Any] | None,
         slot_mappings: dict[str, torch.Tensor] | None,
         num_tokens_across_dp: torch.Tensor | None,
-        cudagraph_runtime_mode: CUDAGraphMode = CUDAGraphMode.NONE,
-        num_speculative_steps: int | None = None,
+        cudagraph_runtime_mode: CUDAGraphMode,
+        num_speculative_steps: int,
     ) -> None:
-        if num_speculative_steps is None:
-            num_speculative_steps = self.num_speculative_steps
-
         idx_mapping = self.idx_mapping[:num_reqs]
         positions = self.input_buffers.positions[:num_reqs]
         query_start_loc = self.input_buffers.query_start_loc[: num_reqs + 1]
@@ -338,7 +343,7 @@ class AutoRegressiveSpeculator(DraftModelSpeculator):
                 self._update_draft_decode_metadata(attn_metadata, num_reqs)
 
             self.current_draft_step.fill_(step)
-            self._generate_draft(
+            self._decode(
                 num_reqs,
                 num_tokens_padded,
                 attn_metadata,

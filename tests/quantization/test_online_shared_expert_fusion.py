@@ -24,6 +24,7 @@ from vllm.logger import _print_warning_once
 from vllm.model_executor.layers.fused_moe import FusedMoEFactory
 from vllm.model_executor.layers.fused_moe.experts import rocm_aiter_moe
 from vllm.model_executor.layers.fused_moe.oracle import nvfp4 as nvfp4_oracle
+from vllm.model_executor.layers.fused_moe.oracle.fp8 import Fp8MoeBackend
 from vllm.model_executor.layers.fused_moe.oracle.mxfp4 import Mxfp4MoeBackend
 from vllm.model_executor.layers.fused_moe.oracle.nvfp4 import NvFp4MoeBackend
 from vllm.model_executor.layers.quantization.compressed_tensors.compressed_tensors_moe.compressed_tensors_moe_w4a4_nvfp4 import (  # noqa: E501
@@ -241,7 +242,6 @@ def _write_minimal_moe_config(
             "swiglu_alpha": 1.702,
             "swiglu_limit": 7.0,
             "scoring_func": "sigmoid",
-            "use_routing_bias": True,
             "routed_scaling_factor": 2.0,
             "num_local_experts": 4,
             "moe_layer_freq": [1],
@@ -631,11 +631,13 @@ def test_online_quantization(
         "block_sparse_moe" if architecture == "MiniMaxM3SparseForCausalLM" else "mlp"
     )
     assert _online_quantization_logs(caplog_vllm) == [
-        "Quantizing 2 layers of types: "
-        f"{parent_name}.{shared_expert_name}.down_proj: 1 "
-        f"(from targets: {target_pattern}, mxfp4); "
-        f"{parent_name}.{shared_expert_name}.gate_up_proj: 1 "
-        f"(from targets: {target_pattern}, mxfp4)"
+        (
+            "Quantizing 2 layers of types: "
+            f"{parent_name}.{shared_expert_name}.down_proj: 1 "
+            f"(from targets: {target_pattern}, mxfp4); "
+            f"{parent_name}.{shared_expert_name}.gate_up_proj: 1 "
+            f"(from targets: {target_pattern}, mxfp4)"
+        )
     ]
 
 
@@ -939,8 +941,11 @@ def test_fse_online_quantization_routed_shared(
     num_slots = routed_experts.moe_config.num_logical_experts + num_fused_shared_experts
     assert routed_experts.w13_weight.shape[0] == num_slots
     assert routed_experts.w2_weight.shape[0] == num_slots
-    if routed_method_cls is Mxfp8OnlineMoEMethod:
-        # MXFP8 scales are stored flattened as [num_slots * rows, K // 32].
+    if (
+        getattr(routed_experts.quant_method, "fp8_backend", None)
+        == Fp8MoeBackend.AITER_MXFP8
+    ):
+        # AITER MXFP8 scales are shuffled flat as [num_slots * rows, K // 32].
         assert routed_experts.w13_weight_scale.shape[0] == (
             num_slots * routed_experts.w13_weight.shape[1]
         )
@@ -968,8 +973,10 @@ def test_fse_online_quantization_routed_shared(
     quantized = []
     if routed_target in targets:
         quantized += [
-            f"block_sparse_moe.experts: 1 "
-            f"(from targets: {routed_target}, {targets[routed_target]})"
+            (
+                f"block_sparse_moe.experts: 1 "
+                f"(from targets: {routed_target}, {targets[routed_target]})"
+            )
         ]
     if shared_target in targets:
         quantized += [
@@ -1207,9 +1214,11 @@ def test_online_gate_up_proj_target_disables_fse(
     assert not moe.is_fused_shared_expert_enabled
     assert moe.shared_experts is not None
     assert _online_quantization_logs(caplog_vllm) == [
-        "Quantizing 1 layers of types: "
-        "mlp.shared_experts.gate_up_proj: 1 "
-        f"(from targets: {target_pattern}, mxfp4)"
+        (
+            "Quantizing 1 layers of types: "
+            "mlp.shared_experts.gate_up_proj: 1 "
+            f"(from targets: {target_pattern}, mxfp4)"
+        )
     ]
     # The untargeted down_proj is unquantized: its keys do not match.
     [warning] = _fse_warnings(caplog_vllm)
