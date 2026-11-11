@@ -66,6 +66,11 @@ class MoriPrepareAndFinalize(mk.FusedMoEPrepareAndFinalizeModular):
         if not is_forward_context_available():
             return num_rows
         dp_metadata = get_forward_context().dp_metadata
+        # Without DP counts the other ranks' batch sizes are unknown: MoRI is
+        # only built with DP > 1, PCP > 1 or sequence-parallel MoE, so this is
+        # DP=1 with PCP > 1 (ranks can hold different counts) or a forward
+        # pass that set neither attn_metadata nor num_tokens. Bounding by this
+        # rank's own count could drop received rows, so keep the full buffer.
         if dp_metadata is None:
             return num_rows
         max_tokens = max(

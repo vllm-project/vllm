@@ -66,9 +66,12 @@ def _prepare_with_dp_counts(monkeypatch, num_dispatchers, dp_counts):
     hidden_states = torch.randn(2, 4)
     topk_ids = torch.tensor([[0, 1], [2, 3]], dtype=torch.int32)
     quant_config = SimpleNamespace(is_block_quantized=False, is_per_act_token=False)
-    forward_context = SimpleNamespace(
-        dp_metadata=SimpleNamespace(num_tokens_across_dp_cpu=torch.tensor(dp_counts))
+    dp_metadata = (
+        None
+        if dp_counts is None
+        else SimpleNamespace(num_tokens_across_dp_cpu=torch.tensor(dp_counts))
     )
+    forward_context = SimpleNamespace(dp_metadata=dp_metadata)
     with override_forward_context(forward_context):  # type: ignore[arg-type]
         return adapter.prepare(
             hidden_states,
@@ -99,6 +102,19 @@ def test_mori_dispatch_untrimmed_when_buffer_is_full(monkeypatch):
     )
     assert dispatch_a1.shape[0] == 32
     assert dispatch_ids.shape[0] == 32
+
+
+def test_mori_dispatch_untrimmed_without_dp_metadata(monkeypatch):
+    # Without DP counts (DP=1 with PCP > 1, or a pass with no attn_metadata
+    # and no num_tokens) the other ranks' batches are unknown. Bounding by
+    # this rank's 2 tokens would keep 4 * 2 = 8 of 32 rows and could drop
+    # received tokens, so the whole buffer must be kept.
+    dispatch_a1, _, _, dispatch_ids, dispatch_weights = _prepare_with_dp_counts(
+        monkeypatch, num_dispatchers=4, dp_counts=None
+    )
+    assert dispatch_a1.shape[0] == 32
+    assert dispatch_ids.shape[0] == 32
+    assert dispatch_weights.shape[0] == 32
 
 
 def test_mori_combine_uses_original_per_rank_topk_ids(monkeypatch):
