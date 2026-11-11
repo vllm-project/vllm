@@ -1194,7 +1194,7 @@ async def test_live_engine_drains_accepted_owner(shutdown_source: str):
         await _assert_children_cleaned_up(child_pids)
 
 
-def test_hung_plugin_stop_cannot_keep_render_server_alive():
+def test_repeated_sigterm_exits_render_server_with_hung_plugin_stop():
     """Through the real `vllm launch render` CLI: once shutdown has stopped
     HTTP and a plugin `stop` never returns, a repeated SIGTERM exits the
     process with `128 + SIGTERM` instead of leaving it running."""
