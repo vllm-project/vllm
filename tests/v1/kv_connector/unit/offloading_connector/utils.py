@@ -1,10 +1,9 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
-import os
 from collections.abc import Callable, Iterable
 from dataclasses import dataclass
 from typing import Any
-from unittest.mock import MagicMock, patch
+from unittest.mock import MagicMock
 
 import pytest
 import torch
@@ -298,7 +297,6 @@ class RequestRunner:
         worker_count: int = 1,
         retention_interval: int | None = None,
         speculative_config: Any | None = None,
-        use_v2_model_runner: bool = True,
     ):
         assert blocks_per_chunk == 1 or all(
             group.block_size == block_size for group in kv_cache_groups or ()
@@ -389,25 +387,19 @@ class RequestRunner:
             kv_cache_config, vllm_config
         )
 
-        # The V2 model runner property reads the environment, so select the
-        # runner for the lifetime of the connector construction.
-        with patch.dict(
-            os.environ,
-            {} if use_v2_model_runner else {"VLLM_USE_V2_MODEL_RUNNER": "0"},
-        ):
-            scheduler_cls = AsyncScheduler if async_scheduling else Scheduler
-            self.scheduler = scheduler_cls(
-                vllm_config=vllm_config,
-                kv_cache_config=kv_cache_config,
-                log_stats=True,
-                structured_output_manager=StructuredOutputManager(vllm_config),
-                block_size=scheduler_block_size,
-                hash_block_size=hash_block_size,
-            )
+        scheduler_cls = AsyncScheduler if async_scheduling else Scheduler
+        self.scheduler = scheduler_cls(
+            vllm_config=vllm_config,
+            kv_cache_config=kv_cache_config,
+            log_stats=True,
+            structured_output_manager=StructuredOutputManager(vllm_config),
+            block_size=scheduler_block_size,
+            hash_block_size=hash_block_size,
+        )
 
-            self.worker_connector = OffloadingConnector(
-                vllm_config, KVConnectorRole.WORKER, kv_cache_config
-            )
+        self.worker_connector = OffloadingConnector(
+            vllm_config, KVConnectorRole.WORKER, kv_cache_config
+        )
 
         # register worker kv_caches to enable OffloadingWorker creations
         kv_caches: dict[str, torch.Tensor] = {}
@@ -826,7 +818,6 @@ def request_runner():
         worker_count=1,
         retention_interval=None,
         speculative_config=None,
-        use_v2_model_runner=True,
     ):
         runner = RequestRunner(
             block_size=block_size,
@@ -838,7 +829,6 @@ def request_runner():
             worker_count=worker_count,
             retention_interval=retention_interval,
             speculative_config=speculative_config,
-            use_v2_model_runner=use_v2_model_runner,
         )
         runners.append(runner)
         return runner

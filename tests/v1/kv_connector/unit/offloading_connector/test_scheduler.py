@@ -3404,8 +3404,6 @@ def test_scheduler_makes_a_handler_per_manager_trigger(request_runner, store_tri
             "store_triggers": store_triggers,
             "self_describing_kv_events": False,
         },
-        # An ON_OVERWRITE handler needs the V1 runner.
-        use_v2_model_runner=False,
     )
     assert [
         trigger.name for trigger in runner.connector_scheduler._store_handlers
@@ -3425,7 +3423,6 @@ def _make_lazy_runner(request_runner, async_scheduling: bool, num_gpu_blocks: in
         num_gpu_blocks=num_gpu_blocks,
         async_scheduling=async_scheduling,
         extra_config_overrides=_LAZY_EXTRA_CONFIG,
-        use_v2_model_runner=False,
     )
     offers: list[tuple[list, ReqContext | None, StoreTrigger]] = []
 
@@ -3470,22 +3467,25 @@ def test_unsupported_store_triggers_raise(request_runner, extra_config):
 
 
 @pytest.mark.parametrize("case", ["uniform", "mixed_precision", "mamba"])
-def test_lazy_v2_needs_no_zeroing(case: str):
-    """V2 runs lazy mode only when it does not zero new blocks before the store
-    flush. Zeroing also covers the CoW copies: a partial-hit CoW needs a hit
-    inside an attention block, which needs a Mamba `align` group, and a Mamba
-    group sets needs_kv_cache_zeroing (see OnOverwriteStoreHandler.check_support).
+def test_lazy_needs_no_zeroing(case: str):
+    """The lazy mode runs only when the runner does not zero new blocks before
+    the store flush. Zeroing also covers the CoW copies: a partial-hit CoW
+    needs a hit inside an attention block, which needs a Mamba `align` group,
+    and a Mamba group sets needs_kv_cache_zeroing (see
+    OnOverwriteStoreHandler.check_support).
     """
     vllm_config = _make_vllm_config(extra_config=_LAZY_EXTRA_CONFIG)
     if case == "uniform":
         kv_cache_config = KVCacheConfig(
             num_blocks=4,
             kv_cache_tensors=[],
-            kv_cache_groups=[KVCacheGroupSpec(["full_layer"], _full_attention_spec())],
+            kv_cache_groups=[
+                make_kv_cache_group(["full_layer"], _full_attention_spec())
+            ],
         )
     elif case == "mixed_precision":
         kv_cache_config = _make_hybrid_kv_cache_config()
-        kv_cache_config.kv_cache_groups[1] = KVCacheGroupSpec(
+        kv_cache_config.kv_cache_groups[1] = make_kv_cache_group(
             ["mla_layer"], _mla_spec(dtype=torch.bfloat16)
         )
         # The flag is resolved in __post_init__, before the group above was
@@ -3503,30 +3503,29 @@ def test_lazy_v2_needs_no_zeroing(case: str):
         assert kv_cache_config.needs_kv_cache_zeroing
 
     spec = MockOffloadingSpec(build_offloading_config(vllm_config, kv_cache_config))
-    vllm_config.use_v2_model_runner = True
     if case == "uniform":
         scheduler = OffloadingConnectorScheduler(spec, vllm_config, kv_cache_config)
         assert _on_overwrite(scheduler)
     else:
-        with pytest.raises(ValueError, match="VLLM_USE_V2_MODEL_RUNNER=0"):
+        with pytest.raises(ValueError, match="ON_OVERWRITE stores are not supported"):
             OffloadingConnectorScheduler(spec, vllm_config, kv_cache_config)
 
 
-def test_lazy_v2_rejects_a_partial_hash_hit():
-    """The CoW gate refuses V2 even when the cache does not ask for zeroing.
+def test_lazy_rejects_a_partial_hash_hit():
+    """The CoW gate refuses even when the cache does not ask for zeroing.
 
-    A hit that ends inside a block makes V2 copy the block before it flushes
-    the store, so the store would read the copied data.
+    A hit that ends inside a block makes the runner copy the block before it
+    flushes the store, so the store would read the copied data.
     """
     vllm_config = _make_vllm_config(extra_config=_LAZY_EXTRA_CONFIG)
     kv_cache_config = KVCacheConfig(
         num_blocks=4,
         kv_cache_tensors=[],
         kv_cache_groups=[
-            KVCacheGroupSpec(["full_layer"], _full_attention_spec(block_size=16)),
-            KVCacheGroupSpec(
+            make_kv_cache_group(["full_layer"], _full_attention_spec(block_size=16)),
+            make_kv_cache_group(
                 ["mamba_layer"],
-                MambaSpec(
+                mamba_layer(
                     block_size=32,
                     shapes=((1, 1),),
                     dtypes=(torch.float32,),
@@ -3540,8 +3539,7 @@ def test_lazy_v2_rejects_a_partial_hash_hit():
     kv_cache_config.needs_kv_cache_zeroing = False
     spec = MockOffloadingSpec(build_offloading_config(vllm_config, kv_cache_config))
 
-    vllm_config.use_v2_model_runner = True
-    with pytest.raises(ValueError, match="VLLM_USE_V2_MODEL_RUNNER=0"):
+    with pytest.raises(ValueError, match="ON_OVERWRITE stores are not supported"):
         OffloadingConnectorScheduler(spec, vllm_config, kv_cache_config)
 
 
@@ -3756,7 +3754,6 @@ def test_overwrite_store_jobs_keep_null_placeholders(request_runner):
         async_scheduling=False,
         blocks_per_chunk=4,
         extra_config_overrides=_LAZY_EXTRA_CONFIG,
-        use_v2_model_runner=False,
     )
     runner.manager.prepare_store.side_effect = lambda keys, req_context, trigger: (
         generate_store_output(keys)
@@ -3819,7 +3816,6 @@ def test_overwrite_keeps_chunk_of_block_with_same_data(request_runner):
         async_scheduling=False,
         blocks_per_chunk=2,
         extra_config_overrides=_LAZY_EXTRA_CONFIG,
-        use_v2_model_runner=False,
     )
     overwrite_handler = _on_overwrite(runner.connector_scheduler)
     kept = GpuChunk("k1", 0, 0, (10, 11), ("b10", "b11"))
@@ -3840,7 +3836,6 @@ def test_overwrite_takes_all_chunks_of_a_shared_block(request_runner):
         async_scheduling=False,
         blocks_per_chunk=2,
         extra_config_overrides=_LAZY_EXTRA_CONFIG,
-        use_v2_model_runner=False,
     )
     overwrite_handler = _on_overwrite(runner.connector_scheduler)
     chunks = [
@@ -3860,7 +3855,6 @@ def test_overwrite_map_skips_a_chunk_with_no_block(request_runner):
         num_gpu_blocks=10,
         async_scheduling=False,
         extra_config_overrides=_LAZY_EXTRA_CONFIG,
-        use_v2_model_runner=False,
     )
     overwrite_handler = _on_overwrite(runner.connector_scheduler)
     overwrite_handler._overwrite_map.add([GpuChunk("k1", 0, 0, (), ())])
@@ -3876,7 +3870,6 @@ def test_overwrite_stores_one_copy_of_a_key(request_runner):
         async_scheduling=False,
         blocks_per_chunk=2,
         extra_config_overrides=_LAZY_EXTRA_CONFIG,
-        use_v2_model_runner=False,
     )
     runner.manager.prepare_store.side_effect = lambda keys, req_context, trigger: (
         generate_store_output(keys)
@@ -3906,7 +3899,6 @@ def test_allocated_blocks_of_other_groups_get_new_data(request_runner):
         num_gpu_blocks=10,
         async_scheduling=False,
         extra_config_overrides=_LAZY_EXTRA_CONFIG,
-        use_v2_model_runner=False,
     )
     scheduler = runner.connector_scheduler
     overwrite_handler = _on_overwrite(scheduler)
@@ -3928,7 +3920,6 @@ def test_copy_destination_keeps_the_block_key_of_its_owner(request_runner):
         num_gpu_blocks=10,
         async_scheduling=False,
         extra_config_overrides=_LAZY_EXTRA_CONFIG,
-        use_v2_model_runner=False,
     )
     scheduler = runner.connector_scheduler
     overwrite_handler = _on_overwrite(scheduler)
@@ -8062,13 +8053,11 @@ class TestMambaHybridOffloadServing:
         self,
         speculative_config,
         mamba_eagle=False,
-        v2_model_runner=True,
         **extra_config,
     ):
         vllm_config = _make_vllm_config(
             extra_config={"self_describing_kv_events": True, **extra_config}
         )
-        vllm_config.use_v2_model_runner = v2_model_runner
         vllm_config.cache_config.block_size = self.BLOCK
         vllm_config.cache_config.prefix_match_unit = self.BLOCK
         vllm_config.speculative_config = speculative_config
@@ -8184,76 +8173,13 @@ class TestMambaHybridOffloadServing:
         served = scheduler._lookup(rs2)
         return served if served is not None else 0
 
-    def test_lazy_mode_leaves_the_mamba_boundary_to_the_handoff_handler(self):
-        """The lazy mode needs no Mamba refusal: the layout adds the handoff
-        handler for a mamba-align group, and that handler stores the group."""
-        # A hybrid mamba layout needs zeroing, which the V2 runner cannot do
-        # before the ON_OVERWRITE store reads the block.
-        scheduler = self._make_scheduler(
-            None,
-            store_mode="lazy",
-            self_describing_kv_events=False,
-            v2_model_runner=False,
-        )
-        assert list(scheduler._store_handlers) == [
-            StoreTrigger.ON_HANDOFF,
-            StoreTrigger.ON_OVERWRITE,
-        ]
-        _as_mock(scheduler.manager.prepare_store).side_effect = (
-            lambda keys, ctx, trigger: (generate_store_output(list(keys)))
-        )
-
-        request = MagicMock()
-        request.request_id = "A"
-        request.kv_transfer_params = None
-        request.num_prompt_tokens = self.PROMPT_TOKENS
-        request.num_tokens = self.PROMPT_TOKENS
-        request.num_computed_tokens = 0
-        request.block_hashes = [
-            BlockHash(f"h{i}".encode()) for i in range(self.PROMPT_TOKENS // self.BLOCK)
-        ]
-        request.all_token_ids = list(range(self.PROMPT_TOKENS))
-        request.lora_request = None
-        request.is_finished.return_value = False
-        request.status = None
-        scheduler.on_new_request(request)
-        req_status = scheduler._req_status["A"]
-        req_status.num_locally_computed_tokens = 0
-        req_status.update_offload_keys()
-        req_status.group_states[0].block_ids[:] = list(
-            range(1, self.PROMPT_TOKENS // self.BLOCK + 1)
-        )
-        req_status.group_states[1].block_ids[:] = [101]
-
-        out = SimpleNamespace(
-            num_scheduled_tokens={"A": self.PROMPT_TOKENS},
-            finished_req_ids=set(),
-            kv_connector_block_state=KVConnectorBlockState(
-                req_ids=set(),
-                resolve_block_ids={}.__getitem__,
-                boundary_state_offloads={"A": [(1, 101, self.MAMBA_BLOCK)]},
-            ),
-        )
-        for handler in scheduler._store_handlers.values():
-            sink = scheduler_module._StoreJobSink(scheduler, handler.trigger)
-            handler.build_store_jobs(out, scheduler._req_status, sink)
-
-        offers = [
-            (call.args[0], call.kwargs["trigger"])
-            for call in _as_mock(scheduler.manager.prepare_store).call_args_list
-        ]
-        # The mamba group is stored, and only the handoff handler asks for it.
-        assert offers
-        assert {trigger for _, trigger in offers} == {StoreTrigger.ON_HANDOFF}
-        assert all(
-            get_offload_group_idx(key) == 1 for keys, _ in offers for key in keys
-        )
-        with pytest.raises(ValueError, match="VLLM_USE_V2_MODEL_RUNNER=0"):
+    def test_lazy_mode_refuses_a_mamba_hybrid(self):
+        """A mamba-align group needs zeroing, so the lazy mode refuses it."""
+        with pytest.raises(ValueError, match="ON_OVERWRITE stores are not supported"):
             self._make_scheduler(
                 None,
                 store_mode="lazy",
                 self_describing_kv_events=False,
-                v2_model_runner=True,
             )
 
     def test_shared_group_mtp_serves_like_non_speculative(self):
@@ -8479,6 +8405,7 @@ def test_reachable_store_mask_skips_eagle_peek_with_lookahead_hashes():
         tokens_per_block=16,
         tokens_per_chunk=16,
         hashes_per_chunk=1,
+        hashes_per_block=1,
         kv_event_group_spec=get_offloading_event_group_spec(swa_group),
         sliding_window_size_in_chunks=2,
         block_size=swa_group.block_size,
