@@ -277,6 +277,38 @@ def fused_topk_bias(
                 topk_weights *= routed_scaling_factor
             return topk_weights, topk_ids
 
+    if (
+        scoring_func in ("softmax", "sigmoid")
+        and hash_indices_table is None
+        and bias_vl is None
+    ):
+        # Biased softmax and the sigmoid shapes `biased_grouped_topk` cannot take.
+        M = gating_output.size(0)
+        topk_weights = torch.empty(
+            M, topk, dtype=torch.float32, device=gating_output.device
+        )
+        topk_ids = torch.empty(
+            M,
+            topk,
+            dtype=torch.int32 if indices_type is None else indices_type,
+            device=gating_output.device,
+        )
+        token_expert_indices = torch.empty(
+            M, topk, dtype=torch.int32, device=gating_output.device
+        )
+        # `topk_gating` applies `routed_scaling_factor` itself.
+        rocm_aiter_ops.topk_gating(
+            topk_weights,
+            topk_ids,
+            token_expert_indices,
+            gating_output,
+            renormalize,
+            score_func=scoring_func,
+            correction_bias=e_score_correction_bias,
+            routed_scaling_factor=routed_scaling_factor,
+        )
+        return topk_weights, topk_ids
+
     if scoring_func == "sqrtsoftplus":
         M = hidden_states.size(0)
         topk_weights = torch.empty(
