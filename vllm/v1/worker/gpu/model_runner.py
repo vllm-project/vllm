@@ -1180,6 +1180,13 @@ class GPUModelRunner(LoRAModelRunnerMixin):
                         torch.accelerator.empty_cache()
                     self.kv_connector.reset_capture_state()
 
+            # Capture dummy batches use zeroed block tables, so Mamba layers
+            # write recurrent/conv state into the null block. Under packed
+            # layouts those bytes overlap attention pages (e.g. the drafter's
+            # MLA KV), which then read garbage for null-block positions.
+            if self.kv_block_zeroer is not None:
+                self.kv_block_zeroer.zero_block_ids([0])
+
             # Warmup activations stay cached on the capture streams, which
             # nothing allocates from after capture; release them.
             torch.accelerator.empty_cache()
