@@ -83,7 +83,6 @@ def make_vc():
             kv_transfer_config=None,
             aux_output_config=NS(enable_return_routed_experts=False),
             additional_config={} if backend is None else {"decode_backend": backend},
-            use_v2_model_runner=True,
         )
         mode = NS(has_full_cudagraphs=lambda: True) if graphs == "full" else graphs
         vc.compilation_config = NS(mode=0, cudagraph_mode=mode)

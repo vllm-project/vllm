@@ -177,11 +177,6 @@ def _reasons_and_config(vllm_config) -> tuple[list[str], DecodeConfig | None]:
             kv_dtype not in ("auto", "bfloat16"),
             f"kv_cache_dtype {kv_dtype} (bfloat16 only)",
         ),
-        # the model state hooks build the executor and bind it to each KV cache
-        (
-            not vllm_config.use_v2_model_runner,
-            "the V1 model runner (set VLLM_USE_V2_MODEL_RUNNER=1)",
-        ),
         # plan() and the per-layer kernels run in forward; a compiled forward would
         # trace them (DeepseekV32Model has no @support_torch_compile)
         (

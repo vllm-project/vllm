@@ -56,7 +56,6 @@ REASONS = [
     ("aux_output_config.enable_return_routed_experts", True, "routed-expert capture"),
     ("model_config.dtype", torch.float16, "dtype torch.float16"),
     ("cache_config.cache_dtype", "fp8", "kv_cache_dtype fp8"),
-    ("use_v2_model_runner", False, "V1 model runner"),
     ("compilation_config.mode", CompilationMode.STOCK_TORCH_COMPILE, "torch.compile"),
 ]
 
@@ -103,10 +102,10 @@ def test_unsupported_platform_and_config(make_vc, monkeypatch):
 def test_all_reasons_reported(make_vc):
     """Startup lists every reason, not only the first."""
     vc = make_vc(tp=4, pp=2, kv="fp8")
-    _set(_set(vc, "lora_config", object()), "use_v2_model_runner", False)
+    _set(vc, "lora_config", object())
     with pytest.raises(ValueError) as e:
         R.specialized_decode_config(vc)
-    for frag in ("TP 4", "pipeline", "kv_cache_dtype", "LoRA", "V1 model runner"):
+    for frag in ("TP 4", "pipeline", "kv_cache_dtype", "LoRA"):
         assert frag in str(e.value), (frag, str(e.value))
     assert "gfx950" in str(e.value)  # the platform probe of the CPU host
 

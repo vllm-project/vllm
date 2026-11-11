@@ -8,7 +8,7 @@ interface is the `SpecializedDecode` shape of #61867.
 ## Enabling
 
 ```bash
-VLLM_USE_V2_MODEL_RUNNER=1 vllm serve <GLM-5.2 checkpoint> -tp 8 \
+vllm serve <GLM-5.2 checkpoint> -tp 8 \
   --additional-config '{"decode_backend": "latency_specialized"}' \
   --compilation-config '{"cudagraph_mode": "FULL_DECODE_ONLY"}'
 ```
@@ -46,8 +46,7 @@ per-tensor FP8, a non-Quark method, and FP8 on only some layers or matrices.
     - speculative decoding, LoRA, sleep mode, KV-transfer connectors, routed-expert
     capture;
     - AITER fused shared experts;
-    - `STOCK_TORCH_COMPILE`;
-    - MRV1.
+    - `STOCK_TORCH_COMPILE`.
 - **Checked when the executor is built:** the MoE layout and backend
   (`AITER_MXFP4_MXFP4`), the attention weights and the RoPE table.
 - **Checked at every KV bind:** the caches are bound and contiguous, use the MLA row
