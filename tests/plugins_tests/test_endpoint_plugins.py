@@ -16,6 +16,7 @@ import contextlib
 import inspect
 import os
 import signal
+import socket
 import subprocess
 import sys
 import time
@@ -29,6 +30,7 @@ from fastapi import APIRouter, FastAPI
 from starlette.datastructures import State
 from vllm_add_dummy_endpoint_plugin import DummyAdminEndpointPlugin
 
+from tests.utils import RemoteLaunchRenderServer
 from vllm.config import VllmConfig
 from vllm.entrypoints.common.cli_args import make_arg_parser
 from vllm.entrypoints.launchers.app import build_app
@@ -1083,8 +1085,6 @@ async def test_stop_interlock_defers_repeated_cancellation_until_owners_settle(
 
 @pytest.mark.asyncio
 async def test_real_render_server_drains_accepted_owner():
-    from tests.utils import RemoteLaunchRenderServer
-
     with RemoteLaunchRenderServer(
         "vllm-project/tiny-random-LlamaForCausalLM",
         ["--shutdown-timeout", "10"],
@@ -1192,3 +1192,33 @@ async def test_live_engine_drains_accepted_owner(shutdown_source: str):
             == 0
         )
         await _assert_children_cleaned_up(child_pids)
+
+
+def test_hung_plugin_stop_cannot_keep_render_server_alive():
+    """Through the real `vllm launch render` CLI: once shutdown has stopped
+    HTTP and a plugin `stop` never returns, a repeated SIGTERM exits the
+    process with `128 + SIGTERM` instead of leaving it running."""
+    with RemoteLaunchRenderServer(
+        "vllm-project/tiny-random-LlamaForCausalLM",
+        ["--shutdown-timeout", "10"],
+        env_dict={"VLLM_PLUGINS": "dummy_admin_endpoint_plugin"},
+    ) as server:
+        response = httpx.post(server.url_for("plugins/dummy/hang_stop"))
+        assert response.status_code == 200
+        port = server.port
+
+        server.proc.send_signal(signal.SIGTERM)
+        # The listener closes only after shutdown has begun, so a refused
+        # connection means the plugin's `stop` is the only thing left running.
+        deadline = time.monotonic() + _TIMEOUT_S
+        while True:
+            try:
+                socket.create_connection(("127.0.0.1", port), timeout=1).close()
+            except OSError:
+                break
+            assert time.monotonic() < deadline, "HTTP listener never closed"
+            time.sleep(0.05)
+        assert server.proc.poll() is None, "server exited without the hung stop"
+
+        server.proc.send_signal(signal.SIGTERM)
+        assert server.proc.wait(timeout=_TIMEOUT_S) == 128 + signal.SIGTERM

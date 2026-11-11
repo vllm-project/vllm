@@ -15,6 +15,9 @@ than reaching for a client that doesn't exist.
 It also implements the optional lifecycle capabilities. Its session routes
 hold one work owner until explicitly released, exercising admission and final
 engine work during drain. `events` records lifecycle and owner ordering.
+
+For shutdown tests, `POST /plugins/dummy/hang_stop` makes later `stop` calls
+record their event and then never return, like a plugin whose cleanup hangs.
 """
 
 import asyncio
@@ -32,8 +35,14 @@ class DummyAdminEndpointPlugin:
         self.owner: asyncio.Task | None = None
         self.finish = asyncio.Event()
         self.drain_entered = asyncio.Event()
+        self.hang_stop = False
 
     def attach_router(self, app: FastAPI) -> None:
+        @app.post("/plugins/dummy/hang_stop")
+        async def hang_stop():
+            self.hang_stop = True
+            return {"hang_stop": True}
+
         @app.get("/v1/admin/scheduler_config")
         async def scheduler_config(raw_request: Request):
             engine_client = raw_request.app.state.dummy_engine_client
@@ -142,3 +151,5 @@ class DummyAdminEndpointPlugin:
             self.owner.cancel()
             await asyncio.gather(self.owner, return_exceptions=True)
         self.events.append(f"stop:{self.name}")
+        if self.hang_stop:
+            await asyncio.Event().wait()
