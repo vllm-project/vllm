@@ -82,6 +82,9 @@ class FlashAttentionDiffKVImpl(FlashAttentionImpl):
 
     def __init__(self, *args, **kwargs) -> None:
         super().__init__(*args, **kwargs)
+        self._diffkv_view_cache: (
+            tuple[torch.Tensor, torch.Tensor, torch.Tensor, torch.Tensor] | None
+        ) = None
         # Re-derive the FA version with diff-kv context so that
         # get_flash_attn_version can apply the FA3 -> FA4 upgrade rule
         # for sinks + hdim != hdim_v.
@@ -105,6 +108,30 @@ class FlashAttentionDiffKVImpl(FlashAttentionImpl):
                 "Unsupported FP8 Diff-KV configuration; use an unquantized KV cache."
             )
 
+    def _get_diffkv_views(
+        self, kv_cache: torch.Tensor
+    ) -> tuple[torch.Tensor, torch.Tensor, torch.Tensor]:
+        # Bound cache tensors have a fixed layout; profiling replaces the tensor.
+        cache = self._diffkv_view_cache
+        if cache is None or cache[0] is not kv_cache:
+            packed_cache = kv_cache.transpose(1, 2)
+            key_cache, value_cache = packed_cache.split(self.head_size, dim=-1)
+            fixed_k = canonicalize_singleton_dim_strides(key_cache)
+            fixed_v = canonicalize_singleton_dim_strides(value_cache)
+            if fixed_k is not key_cache or fixed_v is not value_cache:
+                logger.debug(
+                    "Canonicalized degenerate KV cache strides (FlashAttentionDiffKV): "
+                    "shape=%s, key strides before=%s after=%s, "
+                    "value strides before=%s after=%s",
+                    key_cache.shape,
+                    key_cache.stride(),
+                    fixed_k.stride(),
+                    value_cache.stride(),
+                    fixed_v.stride(),
+                )
+            cache = self._diffkv_view_cache = (kv_cache, packed_cache, fixed_k, fixed_v)
+        return cache[1], cache[2], cache[3]
+
     def do_kv_cache_update(
         self,
         layer: torch.nn.Module,
@@ -122,10 +149,11 @@ class FlashAttentionDiffKVImpl(FlashAttentionImpl):
         #   kv_cache shape: [num_blocks, block_size, num_kv_heads,
         #                    head_size_k + head_size_v]
         # (B, H, N, C) -> (B, N, H, C) for kernel compatibility.
+        packed_cache, _, _ = self._get_diffkv_views(kv_cache)
         triton_reshape_and_cache_flash_diffkv(
             key,
             value,
-            kv_cache.transpose(1, 2),
+            packed_cache,
             slot_mapping,
             self.kv_cache_dtype,
             layer._k_scale,
@@ -206,25 +234,7 @@ class FlashAttentionDiffKVImpl(FlashAttentionImpl):
                 layer,
             )
 
-        # (B, H, N, 2*hs) -> ((B, N, H, hs), (B, N, H, hs))
-        key_cache, value_cache = kv_cache.transpose(1, 2).split(self.head_size, dim=-1)
-        # Fix degenerate strides on size-1 dims (e.g. num_kv_heads=1 with TP).
-        # FA3/4 on H100+ uses TMA, which requires ≥16-byte stride alignment.
-        # See vllm.utils.torch_utils.canonicalize_singleton_dim_strides.
-        fixed_k = canonicalize_singleton_dim_strides(key_cache)
-        fixed_v = canonicalize_singleton_dim_strides(value_cache)
-        if fixed_k is not key_cache or fixed_v is not value_cache:
-            logger.debug(
-                "Canonicalized degenerate KV cache strides (FlashAttentionDiffKV): "
-                "shape=%s, key strides before=%s after=%s, "
-                "value strides before=%s after=%s",
-                key_cache.shape,
-                key_cache.stride(),
-                fixed_k.stride(),
-                value_cache.stride(),
-                fixed_v.stride(),
-            )
-        key_cache, value_cache = fixed_k, fixed_v
+        _, key_cache, value_cache = self._get_diffkv_views(kv_cache)
 
         if is_quantized_kv_cache(self.kv_cache_dtype):
             # queries are quantized in the attention layer
