@@ -6,31 +6,28 @@ use std::sync::Arc;
 
 use axum::Json;
 use axum::extract::State;
-use serde::Serialize;
+use serde::{Deserialize, Serialize};
 
+use crate::error::ApiError;
 use crate::state::AppState;
+use crate::utils::utility_call_error;
 
 /// One data-parallel rank's KV compatibility identity.
-#[derive(Serialize)]
+#[derive(Serialize, Deserialize)]
 pub struct KvIdentity {
-    kv_identity: String,
+    kv_identity: Option<String>,
     components: Option<BTreeMap<String, String>>,
 }
 
-/// KV compatibility identity of each data-parallel rank, keyed by rank.
-pub async fn kv_identity(State(state): State<Arc<AppState>>) -> Json<BTreeMap<u32, KvIdentity>> {
-    Json(
-        state
-            .engine_core_client()
-            .ready_responses()
-            .into_iter()
-            .filter_map(|ready| {
-                let identity = KvIdentity {
-                    kv_identity: ready.kv_identity.clone()?,
-                    components: ready.kv_identity_components.clone(),
-                };
-                Some((ready.data_parallel_rank, identity))
-            })
-            .collect(),
-    )
+/// Current KV compatibility identity of each data-parallel rank, keyed by
+/// rank. Engines are asked on each call, as weight changes update it.
+pub async fn kv_identity(
+    State(state): State<Arc<AppState>>,
+) -> Result<Json<BTreeMap<u32, KvIdentity>>, ApiError> {
+    let identities: Vec<(u32, KvIdentity)> = state
+        .engine_core_client()
+        .call_utility("get_kv_identity", ())
+        .await
+        .map_err(|error| utility_call_error("get_kv_identity", error))?;
+    Ok(Json(identities.into_iter().collect()))
 }

@@ -68,4 +68,4 @@ async def kv_identity(raw_request: Request):
     """KV identity and its components per DP rank; empty on render-only
     servers."""
     client: EngineClient | None = raw_request.app.state.engine_client
-    return client.get_kv_identities() if client is not None else {}
+    return await client.get_kv_identities() if client is not None else {}
