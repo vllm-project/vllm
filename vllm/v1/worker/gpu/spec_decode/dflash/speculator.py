@@ -1,6 +1,7 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 import copy
+from collections.abc import Mapping
 from typing import Any
 
 import torch
@@ -182,7 +183,7 @@ class DFlashSpeculator(DraftModelSpeculator):
             self.attn_groups,
             self.kv_cache_config,
             self.max_model_len,
-            causal=self._group_causal,
+            causal=self._layer_causal,
             prepare_forward=self._prepare_graph_forward,
             progress_bar_desc=f"Capturing {self._speculator_name.lower()} CUDA graphs",
         )
@@ -250,13 +251,30 @@ class DFlashSpeculator(DraftModelSpeculator):
         block_tables: BlockTables,
         target_input_buffers: InputBuffers,
         target_attn_groups: list[list[AttentionGroup]],
+        layer_causal: Mapping[str, bool] | None = None,
     ) -> None:
+        self._layer_causal: dict[str, bool] | bool = not self.requires_non_causal
+        if layer_causal is not None:
+            self._layer_causal = dict(layer_causal)
+        elif hasattr(self.model, "get_draft_kv_cache_layer_names") and hasattr(
+            self.model, "get_draft_attn_causal"
+        ):
+            self._layer_causal = dict(
+                zip(
+                    self.model.get_draft_kv_cache_layer_names(),
+                    self.model.get_draft_attn_causal(),
+                    strict=True,
+                )
+            )
         super().set_attn(
             model_state,
             kv_cache_config,
             block_tables,
             target_input_buffers,
             target_attn_groups,
+            layer_causal=(
+                self._layer_causal if isinstance(self._layer_causal, dict) else None
+            ),
         )
 
         # FlashAttention's AOT split schedule is wrong for a windowed drafter,
@@ -290,8 +308,6 @@ class DFlashSpeculator(DraftModelSpeculator):
         # of the kv-cache group its cache belongs to. Models that share a single group
         # leave this as None and share one context slot mapping.
         self._layer_group_idx: list[int] | None = None
-        # Per-KV-group causal, falling back to whether the drafter is all-causal.
-        self._group_causal: dict[int, bool] | bool = not self.requires_non_causal
         if hasattr(self.model, "get_draft_kv_cache_layer_names"):
             layer_names = self.model.get_draft_kv_cache_layer_names()
             name_to_gid = {
@@ -303,13 +319,6 @@ class DFlashSpeculator(DraftModelSpeculator):
             self._layer_group_idx = [
                 gid_to_idx[name_to_gid[name]] for name in layer_names
             ]
-            if hasattr(self.model, "get_draft_attn_causal"):
-                self._group_causal = {
-                    name_to_gid[name]: layer_causal
-                    for name, layer_causal in zip(
-                        layer_names, self.model.get_draft_attn_causal()
-                    )
-                }
 
     @torch.inference_mode()
     def _run_model(
@@ -612,7 +621,7 @@ class DFlashSpeculator(DraftModelSpeculator):
                 num_query_per_req=self.num_query_per_req,
                 seq_lens_cpu_upper_bound=input_batch.seq_lens_cpu_upper_bound,
                 step=self.num_query_per_req,
-                causal=self._group_causal,
+                causal=self._layer_causal,
             )
         else:
             self._map_kernel_block_tables()
