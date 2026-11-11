@@ -460,12 +460,14 @@ class KimiMoE(nn.Module):
             # The sharded path adds an all_gather, so all ranks must take it or none.
             self.routed_expert_down_proj.enable_token_sharding()
         if self.padded_moe_intermediate_size != moe_intermediate_size:
-            w13_weight = getattr(self.experts, "w13_weight", None)
+            # The params live on the routed experts; the runner doesn't forward them.
+            routed = self.experts.routed_experts
+            w13_weight = getattr(routed, "w13_weight", None)
             if w13_weight is None:
-                w13_weight = self.experts.w13_weight_packed
-            w2_weight = getattr(self.experts, "w2_weight", None)
+                w13_weight = routed.w13_weight_packed
+            w2_weight = getattr(routed, "w2_weight", None)
             if w2_weight is None:
-                w2_weight = self.experts.w2_weight_packed
+                w2_weight = routed.w2_weight_packed
             w13_weight.data.zero_()
             w2_weight.data.zero_()
             self.experts.moe_config.intermediate_size_per_partition_unpadded = (
