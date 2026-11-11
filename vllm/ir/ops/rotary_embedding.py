@@ -2,7 +2,7 @@
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 """vLLM IR ops for rotary positional embedding (RoPE).
 
-The rotary dimension is the width of ``cos_sin_cache``, matching the vLLM C
+The rotary dimension is the width of `cos_sin_cache`, matching the vLLM C
 kernel. Keeping it out of the signature lets fusion patterns match partial
 rotary layers.
 """
@@ -57,7 +57,7 @@ def rotary_embedding(
     cos_sin_cache: Tensor,
     is_neox: bool,
 ) -> tuple[Tensor, Tensor]:
-    """Rotate the first ``cos_sin_cache.shape[-1]`` channels of each head."""
+    """Rotate the first `cos_sin_cache.shape[-1]` channels of each head."""
     cos, sin = _lookup_cos_sin(positions, cos_sin_cache)
     return (
         _apply_rope(query, cos, sin, head_size, is_neox),
