@@ -135,10 +135,21 @@ def test_mtp_correctness(
 )
 async def test_moe_mtp_dp_survives_idle_transitions(expert_parallel: bool):
     """An idle DP replica must preserve the target's MTP query-length agreement."""
-    model = os.environ.get("VLLM_TEST_MOE_MTP_MODEL", "Qwen/Qwen3.5-35B-A3B-FP8")
+    model = os.environ.get("VLLM_TEST_MOE_MTP_MODEL", "Qwen/Qwen3.6-35B-A3B-FP8")
     args = [
         "--served-model-name",
         "moe-mtp-dp",
+        "--load-format",
+        "dummy",
+        "--hf-overrides",
+        json.dumps(
+            {
+                "text_config": {
+                    "num_hidden_layers": 4,
+                    "layer_types": ["linear_attention"] * 3 + ["full_attention"],
+                }
+            }
+        ),
         "--data-parallel-size",
         "2",
         "--data-parallel-size-local",

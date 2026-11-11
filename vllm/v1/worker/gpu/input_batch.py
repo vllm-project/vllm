@@ -157,10 +157,9 @@ class InputBatch:
         expanded_idx_mapping = idx_mapping
         expanded_local_pos = torch.zeros(num_reqs, dtype=torch.int32, device=device)
 
-        # Distribute the remainder evenly so that no dummy request exceeds
-        # ceil(num_tokens / num_reqs) <= max_model_len tokens. Varlen graphs
-        # accept any split with non-empty slots, so this shape works for them
-        # too; attention metadata is built from the promised max_query_len.
+        # Active rows follow the uniform query length when specified. Otherwise,
+        # spread the tokens evenly across requests. Unused graph slots have
+        # zero query length.
         base_tokens = num_tokens // num_reqs
         num_extra = num_tokens % num_reqs
         assert max_query_len is None or base_tokens + (num_extra > 0) <= max_query_len
@@ -195,7 +194,6 @@ class InputBatch:
         positions = input_buffers.positions[:num_tokens_after_padding].zero_()
 
         input_buffers.is_padding[:num_tokens_after_padding].fill_(is_padding)
-        input_buffers.is_padding[num_tokens:num_tokens_after_padding] = True
         is_padding = input_buffers.is_padding[:num_tokens_after_padding]
 
         logits_indices = query_start_loc[1 : num_reqs + 1] - 1
