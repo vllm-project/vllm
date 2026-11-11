@@ -1538,6 +1538,7 @@ class EngineCoreProc(EngineCore):
         from vllm._rust_core import EngineInputReader
 
         sampling_params_decoder = MsgpackDecoder(SamplingParams)
+        lora_request_decoder = MsgpackDecoder(LoRARequest)
 
         def decode_sampling_params(data: bytes) -> SamplingParams:
             params = sampling_params_decoder.decode(data)
@@ -1556,6 +1557,7 @@ class EngineCoreProc(EngineCore):
             msgspec.msgpack.encode(ready_response),
             ready_event,
             decode_sampling_params,
+            lora_request_decoder.decode,
             self.prefix_hash_config,
         )
         logger.info("Using the native input path.")

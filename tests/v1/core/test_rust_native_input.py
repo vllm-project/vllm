@@ -17,6 +17,7 @@ import pytest
 import zmq
 
 from tests.v1.core.rust_core_diff import FuzzConfig, build_scheduler, run_one
+from vllm.lora.request import LoRARequest
 from vllm.sampling_params import SamplingParams
 from vllm.v1.core import kv_cache_utils
 from vllm.v1.core.sched.async_scheduler import AsyncScheduler
@@ -62,7 +63,6 @@ class _Frontend:
         self.socket.bind(address)
         self.engine = _FakeEngine()
         ready = threading.Event()
-        decoder = MsgpackDecoder(SamplingParams)
         self.reader = EngineInputReader(
             self.engine,
             [address],
@@ -70,7 +70,8 @@ class _Frontend:
             _IDENTITY,
             b"ready-response",
             ready,
-            decoder.decode,
+            MsgpackDecoder(SamplingParams).decode,
+            MsgpackDecoder(LoRARequest).decode,
             prefix_hash_config,
         )
         assert self.socket.recv_multipart() == [_IDENTITY, b"ready-response"]
@@ -93,7 +94,7 @@ def _engine_core_request(request: Request) -> EngineCoreRequest:
         sampling_params=request.sampling_params,
         pooling_params=None,
         arrival_time=request.arrival_time,
-        lora_request=None,
+        lora_request=request.lora_request,
         cache_salt=None,
         data_parallel_rank=None,
         priority=request.priority,
@@ -111,6 +112,7 @@ def _native(scheduler_cls: type[RustScheduler], ipc_dir: str, block_size: int):
                 PrefixHashConfig("sha256_cbor", block_size, kv_cache_utils.NONE_HASH),
             )
             self.num_native = 0
+            self.num_native_lora = 0
 
         def add_request(self, request):
             if not isinstance(request, Request) or request.resumable:
@@ -124,7 +126,9 @@ def _native(scheduler_cls: type[RustScheduler], ipc_dir: str, block_size: int):
                 return super().add_request(request)
             native, wave = item
             assert isinstance(native, NativeAddRequest) and wave == 0
+            assert native.lora_request == request.lora_request
             self.num_native += 1
+            self.num_native_lora += request.lora_request is not None
             super().add_request(native)
 
         def finish_requests(self, request_ids, finished_status):
@@ -144,7 +148,7 @@ def _native(scheduler_cls: type[RustScheduler], ipc_dir: str, block_size: int):
 
 
 @pytest.mark.parametrize("use_async", [False, True])
-@pytest.mark.parametrize("sample", ["base", "extended", "structured"])
+@pytest.mark.parametrize("sample", ["base", "extended", "structured", "lora"])
 @pytest.mark.parametrize("seed", range(3))
 def test_matches_python_scheduler(seed: int, sample: str, use_async: bool, tmp_path):
     """Fast-path requests run as the Python scheduler runs their Python
@@ -178,6 +182,8 @@ def test_matches_python_scheduler(seed: int, sample: str, use_async: bool, tmp_p
     ok, msg = run_one(cfg, make_ref, make_test, use_async=use_async)
     assert ok, msg
     assert schedulers[1].num_native > 0
+    if cfg.lora:
+        assert schedulers[1].num_native_lora > 0
 
 
 class _RequestsWithReference(dict):

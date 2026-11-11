@@ -41,12 +41,13 @@ import torch
 os.environ.setdefault("VLLM_ALLOW_LONG_MAX_MODEL_LEN", "1")
 
 from tests.v1.core.utils import create_scheduler  # noqa: E402
-from vllm.config import KVEventsConfig, KVTransferConfig  # noqa: E402
+from vllm.config import KVEventsConfig, KVTransferConfig, LoRAConfig  # noqa: E402
 from vllm.distributed.kv_transfer.kv_connector.v1.base import (  # noqa: E402
     KVConnectorBase_V1,
     KVConnectorMetadata,
     SupportsHMA,
 )
+from vllm.lora.request import LoRARequest  # noqa: E402
 from vllm.sampling_params import (  # noqa: E402
     SamplingParams,
     StructuredOutputsParams,
@@ -103,6 +104,8 @@ class FuzzConfig:
     reasoning_parser: str = ""
     # Streaming-input sessions (resumable requests and their next chunks).
     streaming: bool = False
+    # LoRA adapters on some requests, with `max_loras` bounding the batch.
+    lora: bool = False
 
     @classmethod
     def sample(cls, seed: int) -> "FuzzConfig":
@@ -167,6 +170,13 @@ class FuzzConfig:
         cfg = cls.sample_extended(seed)
         cfg.connector = None
         cfg.streaming = True
+        return cfg
+
+    @classmethod
+    def sample_lora(cls, seed: int) -> "FuzzConfig":
+        """`sample` with LoRA adapters on some requests."""
+        cfg = cls.sample(seed)
+        cfg.lora = True
         return cfg
 
     @classmethod
@@ -260,6 +270,8 @@ def build_scheduler(cfg: FuzzConfig, scheduler_cls: type[Scheduler]) -> Schedule
         )
     if cfg.reasoning_parser:
         vllm_config.structured_outputs_config.reasoning_parser = cfg.reasoning_parser
+    if cfg.lora:
+        vllm_config.lora_config = LoRAConfig(max_loras=2)
     if cfg.connector is not None:
         vllm_config.kv_transfer_config = KVTransferConfig(
             kv_connector=RustCoreDiffConnector.__name__,
@@ -500,10 +512,19 @@ class Workload:
                     kv_transfer_params=self.kv_transfer_params(len(prefix + suffix)),
                     structured_outputs=self.structured_outputs(),
                     resumable=self.resumable(),
+                    lora=self.lora(),
                 )
             )
             self.next_id += 1
         return specs
+
+    def lora(self) -> int | None:
+        """The LoRA adapter of a new request (of 4), from a separate stream so
+        the other fields stay unchanged."""
+        if not self.cfg.lora:
+            return None
+        rng = random.Random(self.cfg.seed * 59 + self.next_id)
+        return rng.choice([None, 0, 1, 2, 3])
 
     def resumable(self) -> bool:
         """Whether a new request opens a streaming-input session, from a
@@ -609,11 +630,17 @@ def make_request(spec: dict[str, Any], hasher: Callable) -> Request:
     if spec.get("kv_transfer_params") is not None:
         params = copy.deepcopy(spec["kv_transfer_params"])
         sp.extra_args = {"kv_transfer_params": params}
+    lora_request = None
+    if (adapter := spec.get("lora")) is not None:
+        lora_request = LoRARequest(
+            f"adapter-{adapter}", adapter + 1, f"/adapters/{adapter}"
+        )
     return Request(
         request_id=spec["request_id"],
         prompt_token_ids=list(spec["prompt_token_ids"]),
         sampling_params=sp,
         pooling_params=None,
+        lora_request=lora_request,
         arrival_time=spec["arrival_time"],
         priority=spec["priority"],
         block_hasher=hasher,

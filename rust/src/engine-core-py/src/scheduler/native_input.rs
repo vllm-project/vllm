@@ -79,10 +79,6 @@ fn slow_path_reason(request: &EngineCoreRequest) -> Option<&'static str> {
     if request.prompt_embeds.is_some() || request.prompt_is_token_ids.is_some() {
         return Some("prompt embeds");
     }
-    // TODO: a LoRA request needs only its `LoRARequest` payload.
-    if request.lora_request.is_some() {
-        return Some("LoRA");
-    }
     if request.resumable || request.session_id.is_some() {
         // Session updates go through the Python request.
         return Some("sessions");
@@ -130,6 +126,8 @@ pub struct NativeAddRequest {
     sampling_params: Py<PyAny>,
     #[pyo3(get)]
     prompt_token_ids: Py<PyAny>,
+    #[pyo3(get)]
+    lora_request: Py<PyAny>,
     /// Set by `finish_requests`.
     #[pyo3(get, set)]
     status: Py<PyAny>,
@@ -165,11 +163,6 @@ impl NativeAddRequest {
     }
 
     #[getter]
-    fn lora_request(&self, py: Python<'_>) -> Py<PyAny> {
-        py.None()
-    }
-
-    #[getter]
     fn mm_features<'py>(&self, py: Python<'py>) -> Bound<'py, PyList> {
         PyList::empty(py)
     }
@@ -187,11 +180,16 @@ impl NativeAddRequest {
         py: Python<'_>,
         request: EngineCoreRequest,
         hashing: Option<&PrefixHashing>,
-        decode_sampling_params: &Bound<'_, PyAny>,
+        decoders: &PayloadDecoders,
     ) -> PyResult<Self> {
-        let dto = request.sampling_params.expect("a fast-path request has sampling params");
-        let encoded = encode_msgpack(&dto).map_err(|e| PyValueError::new_err(e.to_string()))?;
-        let sp = decode_sampling_params.call1((PyBytes::new(py, &encoded),))?;
+        let sp = decoders.decode(
+            py,
+            &decoders.sampling_params,
+            request
+                .sampling_params
+                .as_ref()
+                .expect("a fast-path request has sampling params"),
+        )?;
         let sampling_params = sampling_params_of(&sp, false, KvCacheReportMode::Incremental)?;
         let prompt: Vec<i32> = (request.prompt_token_ids.as_ref())
             .and_then(|ids| ids.to_u32_vec())
@@ -199,12 +197,17 @@ impl NativeAddRequest {
             .into_iter()
             .map(|t| t as i32)
             .collect();
+        let lora_request = match &request.lora_request {
+            Some(lora) => decoders.decode(py, &decoders.lora_request, lora)?,
+            None => py.None().into_bound(py),
+        };
+        let lora = request.lora_request.as_ref();
         let cache_salt = request.cache_salt.filter(|salt| !salt.is_empty());
         let block_hasher = hashing.map(|hashing| -> Arc<dyn BlockHasher> {
             Arc::new(NativeBlockHasher {
                 hasher: hashing.hasher.clone(),
                 extra_keys: RequestExtraKeys {
-                    lora: None,
+                    lora: lora.map(|l| (Value::str(&l.lora_name), Value::str(&l.lora_path))),
                     cache_salt: cache_salt.clone().map(Value::str),
                 },
             })
@@ -220,8 +223,8 @@ impl NativeAddRequest {
             arrival_time: Some(request.arrival_time),
             prompt_is_token_ids: None,
             mm_features: Vec::new(),
-            lora_int_id: None,
-            lora_name: None,
+            lora_int_id: lora.map(|l| l.lora_int_id as i64),
+            lora_name: lora.map(|l| l.lora_name.clone()),
             cache_salt,
             priority: i64::from(request.priority),
             block_hasher,
@@ -248,9 +251,31 @@ impl NativeAddRequest {
             abort_immediately: request.abort_immediately,
             sampling_params: sp.unbind(),
             prompt_token_ids,
+            lora_request: lora_request.unbind(),
             status: waiting,
             new_request: Mutex::new(Some(new_request)),
         })
+    }
+}
+
+/// Build the Python payloads of a fast-path request from their decoded wire
+/// form: each decoder takes the msgpack bytes of a payload.
+struct PayloadDecoders {
+    /// `SamplingParams`, as `preprocess_add_request` leaves them.
+    sampling_params: Py<PyAny>,
+    /// `LoRARequest`.
+    lora_request: Py<PyAny>,
+}
+
+impl PayloadDecoders {
+    fn decode<'py>(
+        &self,
+        py: Python<'py>,
+        decoder: &Py<PyAny>,
+        payload: &(impl serde::Serialize + std::fmt::Debug),
+    ) -> PyResult<Bound<'py, PyAny>> {
+        let encoded = encode_msgpack(payload).map_err(|e| PyValueError::new_err(e.to_string()))?;
+        decoder.bind(py).call1((PyBytes::new(py, &encoded),))
     }
 }
 
@@ -266,14 +291,15 @@ impl EngineInputReader {
     /// coordinator if any, then call `ready_event.set()` and start handling
     /// messages.
     ///
-    /// `decode_sampling_params(bytes)` builds the Python `SamplingParams` of
-    /// a fast-path request as `preprocess_add_request` leaves it.
+    /// `decode_sampling_params(bytes)` and `decode_lora_request(bytes)` build
+    /// the Python `SamplingParams` (as `preprocess_add_request` leaves them)
+    /// and `LoRARequest` of a fast-path request.
     /// `prefix_hash_config` is the engine's (`EngineCore.prefix_hash_config`),
     /// with a `*_cbor` algorithm.
     #[new]
     #[pyo3(signature = (
         engine, input_addresses, coordinator_address, identity, ready_payload, ready_event,
-        decode_sampling_params, prefix_hash_config=None,
+        decode_sampling_params, decode_lora_request, prefix_hash_config=None,
     ))]
     #[allow(clippy::too_many_arguments)]
     fn new(
@@ -285,8 +311,13 @@ impl EngineInputReader {
         ready_payload: Vec<u8>,
         ready_event: Py<PyAny>,
         decode_sampling_params: Py<PyAny>,
+        decode_lora_request: Py<PyAny>,
         prefix_hash_config: Option<Bound<'_, PyAny>>,
     ) -> PyResult<Self> {
+        let decoders = PayloadDecoders {
+            sampling_params: decode_sampling_params,
+            lora_request: decode_lora_request,
+        };
         let hashing = prefix_hash_config.map(|c| prefix_hashing(&c)).transpose()?;
         let input_queue = engine.bind(py).getattr(intern!(py, "input_queue"))?.unbind();
         let add_type = py
@@ -317,23 +348,20 @@ impl EngineInputReader {
                 let result = match fast {
                     Some(request) => {
                         let wave = request.current_wave;
-                        NativeAddRequest::new(
-                            py,
-                            request,
-                            hashing.as_ref(),
-                            decode_sampling_params.bind(py),
-                        )
-                        .and_then(|request| Py::new(py, request))
-                        .and_then(|request| {
-                            let item = PyTuple::new(
-                                py,
-                                [
-                                    add_type.clone_ref(py).into_bound(py),
-                                    (request, wave).into_pyobject(py)?.into_any(),
-                                ],
-                            )?;
-                            input_queue.bind(py).call_method1(intern!(py, "put_nowait"), (item,))
-                        })
+                        NativeAddRequest::new(py, request, hashing.as_ref(), &decoders)
+                            .and_then(|request| Py::new(py, request))
+                            .and_then(|request| {
+                                let item = PyTuple::new(
+                                    py,
+                                    [
+                                        add_type.clone_ref(py).into_bound(py),
+                                        (request, wave).into_pyobject(py)?.into_any(),
+                                    ],
+                                )?;
+                                input_queue
+                                    .bind(py)
+                                    .call_method1(intern!(py, "put_nowait"), (item,))
+                            })
                     }
                     None => PyList::new(py, frames[1..].iter().map(|f| PyBytes::new(py, f)))
                         .and_then(|data| {
