@@ -140,13 +140,8 @@ def test_context_kv_matches_qkv_projection(bf16_on_device, mode, has_bias):
 
     torch.testing.assert_close(project(), expected, rtol=0.02, atol=0.02)
 
-    if current_platform.is_cuda():
-        graph = torch.cuda.CUDAGraph()
-        graph_context = torch.cuda.graph
-    else:
-        graph = torch.xpu.XPUGraph()
-        graph_context = torch.xpu.graph
-    with graph_context(graph):
+    graph = torch.accelerator.Graph()
+    with graph:
         captured = project()
     x.normal_()
     graph.replay()
