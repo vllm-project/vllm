@@ -337,16 +337,22 @@ class StandaloneCPUModelRunner(LoRAModelRunnerMixin):
         weights_iterator: Iterable[tuple[str, torch.Tensor]] | None = None,
         weights_path: str | None = None,
         is_checkpoint_format: bool = True,
-    ) -> None:
-        """Reload weights in place."""
+    ) -> set[str]:
+        """Reload weights in place.
+
+        Returns:
+            The names of the weights that were not reloaded.
+
+        """
         vllm_config = self.vllm_config
         model = self.get_model()
-        reload_weights(
+        weights_not_loaded = reload_weights(
             vllm_config, model, weights_iterator, weights_path, is_checkpoint_format
         )
         self.reset_lora_state()
         self.reset_encoder_cache()
         self.reset_mm_cache()
+        return weights_not_loaded
 
     def get_encoder_timing_stats(self) -> dict[str, dict[str, float | int]]:
         encoder_runner = getattr(self.model_state, "encoder_runner", None)

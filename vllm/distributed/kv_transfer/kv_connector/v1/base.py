@@ -315,6 +315,12 @@ class KVConnectorBase_V1(ABC):
         """Redo `unregister_kv_caches` after wake-up. Idempotent."""
         return
 
+    def update_kv_identity(self) -> None:
+        """Apply a change of `CacheConfig.kv_identity` after the weights
+        changed at runtime, with `enforce_kv_identity`. Called on the
+        scheduler and worker connectors, between steps."""
+        return
+
     def set_host_xfer_buffer_ops(self, copy_operation: CopyBlocksOp):
         """Set the xPU-specific ops for copying KV between host and device.
         Needed when host buffer is used for kv transfer (e.g., in NixlConnector)
