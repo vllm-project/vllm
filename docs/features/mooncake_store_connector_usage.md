@@ -228,6 +228,30 @@ Incremental offloads save intervals aligned across all participating cache
 groups. Partial-tail checkpoints use the core's state-block handoff and matching
 Attention KV. Store jobs hold their source blocks until all workers finish.
 
+### Mamba snapshot intervals
+
+To reduce Mamba state writes independently of GPU prefix-cache retention, set
+these options in MooncakeStoreConnector's `kv_connector_extra_config`:
+
+```json
+{
+    "mamba_snapshot_interval_blocks": 4,
+    "mamba_snapshot_keep_prompt_boundary": true
+}
+```
+
+The interval is measured in scheduler blocks, not batched tokens. The default
+`1` preserves the existing write behavior. Larger values keep the first exact
+state handed off after each interval crossing; they do not create checkpoints
+at missing positions. `mamba_snapshot_keep_prompt_boundary` (default `false`)
+also retains the prompt's reusable checkpoint, including speculative-hash
+alignment. Attention writes and lookup rules remain unchanged.
+
+Progress advances only after the selected keys already exist or every local
+shard is saved successfully. Failed writes remain eligible on retry. Sparser
+snapshots can reduce external-prefix hits or require more recomputation; measure
+write volume and hit rate together. This option does not change GPU retention.
+
 Lookup reports a reusable prefix only when every required cache group is
 present. For each Attention page, this includes every Store chunk covering its
 reusable tokens, across all Store shards.

@@ -70,6 +70,57 @@ def _make_vllm_config():
 
 
 @pytest.mark.parametrize(
+    "key,value",
+    [
+        ("mamba_snapshot_interval_blocks", value)
+        for value in [0, -1, True, 1.5, "4", None]
+    ]
+    + [
+        ("mamba_snapshot_keep_prompt_boundary", value) for value in [1, None, "invalid"]
+    ],
+)
+def test_mamba_snapshot_invalid_configuration_fails_before_store_setup(key, value):
+    config = create_vllm_config(
+        kv_connector="MooncakeStoreConnector",
+        kv_role="kv_both",
+        kv_connector_extra_config={key: value},
+    )
+    cache = KVCacheConfig(
+        num_blocks=4,
+        kv_cache_tensors=[],
+        kv_cache_groups=[
+            KVCacheGroupSpec(
+                ["full"],
+                FullAttentionSpec(
+                    block_size=16, num_kv_heads=1, head_size=64, dtype=torch.float16
+                ),
+            )
+        ],
+    )
+    with pytest.raises(ValueError, match=key):
+        mooncake_store_connector.MooncakeStoreConnector(
+            config, KVConnectorRole.SCHEDULER, cache
+        )
+
+
+@pytest.mark.parametrize("keep", [True, False, "true", "false", "on", "off"])
+def test_mamba_snapshot_configuration_defaults_and_token_units(keep):
+    from vllm.distributed.kv_transfer.kv_connector.v1.mooncake_store.mamba_snapshot import (  # noqa: E501
+        MambaSnapshotConfig,
+    )
+
+    assert MambaSnapshotConfig.from_extra_config({}).interval_tokens(2048) is None
+    config = MambaSnapshotConfig.from_extra_config(
+        {
+            "mamba_snapshot_interval_blocks": 4,
+            "mamba_snapshot_keep_prompt_boundary": keep,
+        }
+    )
+    assert config.interval_tokens(2048) == 8192
+    assert config.keep_prompt_boundary == (keep in [True, "true", "on"])
+
+
+@pytest.mark.parametrize(
     "extra_config",
     [
         {"store_tp_size": 4},

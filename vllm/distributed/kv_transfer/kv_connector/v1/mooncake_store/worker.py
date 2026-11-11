@@ -70,6 +70,9 @@ from vllm.distributed.kv_transfer.kv_connector.v1.mooncake_store.layout import (
     StoreShardId,
     TokenMajorStoreLayout,
 )
+from vllm.distributed.kv_transfer.kv_connector.v1.mooncake_store.mamba_snapshot import (  # noqa: E501
+    MambaSnapshotConfig,
+)
 from vllm.distributed.kv_transfer.kv_connector.v1.mooncake_store.protocol import (  # noqa: E501
     LOOKUP_MSG,
     RESET_MSG,
@@ -101,6 +104,7 @@ from vllm.v1.kv_cache_interface import (
     MLAAttentionSpec,
     SlidingWindowMLASpec,
     UniformTypeKVCacheSpecs,
+    get_mamba_prefill_checkpoint_position,
     group_kernel_blocks,
 )
 
@@ -543,6 +547,7 @@ class KVCacheStoreSendingThread(KVTransferThread):
         supports_group_ids: bool = False,
         record_operation: Callable[..., None] | None = None,
         group_participates: Sequence[bool] | None = None,
+        mamba_snapshot_config: MambaSnapshotConfig | None = None,
     ):
         super().__init__(
             store,
@@ -585,6 +590,12 @@ class KVCacheStoreSendingThread(KVTransferThread):
 
         # Per-request high-water mark of complete hybrid checkpoints.
         self._saved_offset: dict[str, int] = {}
+        mamba_snapshot_config = mamba_snapshot_config or MambaSnapshotConfig()
+        self._mamba_snapshot_interval = mamba_snapshot_config.interval_tokens(
+            block_size
+        )
+        self._keep_mamba_prompt_boundary = mamba_snapshot_config.keep_prompt_boundary
+        self._mamba_snapshot_boundaries: dict[str, dict[int, int]] = {}
         # Retained only after a failed store so retry events can recover the
         # token suffix without full snapshots on the normal path.
         self._retry_token_ids: dict[str, tuple[int, list[int]]] = {}
@@ -610,6 +621,7 @@ class KVCacheStoreSendingThread(KVTransferThread):
                 del self.stored_requests[req_id]
             self._skip_store_requests.discard(req_id)
             self._saved_offset.pop(req_id, None)
+            self._mamba_snapshot_boundaries.pop(req_id, None)
             self._retry_token_ids.pop(req_id, None)
 
     def finish_store_job(self, req_meta: ReqMeta) -> None:
@@ -701,13 +713,37 @@ class KVCacheStoreSendingThread(KVTransferThread):
 
     def _boundary_puts(
         self, req_meta: ReqMeta
-    ) -> list[tuple[str, list[int], list[int], KeyMetadata]]:
+    ) -> tuple[list[tuple[str, list[int], list[int], KeyMetadata]], dict[int, int]]:
         """Build Store chunks from scheduler-resolved, pinned blocks.
 
         Attention pages may contain several chunks. Mamba entries retain the
         exact handed-off state block under its checkpoint hash.
         """
         hash_block_size = self.coord.hash_block_size
+        interval = self._mamba_snapshot_interval
+        snapshots: dict[int, int] = {}
+        prompt_boundary = None
+        if interval is not None:
+            with self.done_task_lock:
+                if req_meta.store_job_id not in self.stored_requests.get(
+                    req_meta.req_id, ()
+                ):
+                    return [], snapshots
+                snapshots = self._mamba_snapshot_boundaries.get(
+                    req_meta.req_id, {}
+                ).copy()
+            if (
+                self._keep_mamba_prompt_boundary
+                and req_meta.num_prompt_tokens is not None
+            ):
+                prompt_boundary = get_mamba_prefill_checkpoint_position(
+                    req_meta.num_prompt_tokens,
+                    hash_block_size
+                    if self.coord.enable_partial_hash_hits
+                    else self.coord.lcm_block_size,
+                    self.coord.use_eagle,
+                    self.coord.num_hash_lookahead_tokens,
+                )
         puts: list[tuple[str, list[int], list[int], KeyMetadata]] = []
         for group_id, block_id, num_tokens in req_meta.boundary_puts or []:
             if (
@@ -723,6 +759,13 @@ class KVCacheStoreSendingThread(KVTransferThread):
             hash_idx = num_tokens // hash_block_size - 1
             if hash_idx >= len(req_meta.block_hashes):
                 continue
+            is_mamba = group_id in self.coord.mamba_group_ids
+            if interval is not None and is_mamba:
+                previous = snapshots.get(group_id, 0)
+                if num_tokens // interval <= previous // interval and (
+                    num_tokens != prompt_boundary
+                ):
+                    continue
             db = self.token_databases[group_id]
             # Distribute across ranks by the same rule as normal chunks.
             put_step = self.group_put_steps[group_id]
@@ -730,6 +773,7 @@ class KVCacheStoreSendingThread(KVTransferThread):
             shard_ids = db.store_layout.local_shard_ids
             block_size = db.store_layout.block_size
             block_start = (cdiv(num_tokens, block_size) - 1) * block_size
+            start_index = len(puts)
             for start in range(block_start, num_tokens, db.chunk_size):
                 if start // db.chunk_size % put_step != put_step_rank:
                     continue
@@ -749,7 +793,22 @@ class KVCacheStoreSendingThread(KVTransferThread):
                             db.metadata,
                         )
                     )
-        return puts
+            if interval is not None and is_mamba and len(puts) > start_index:
+                snapshots[group_id] = max(snapshots.get(group_id, 0), num_tokens)
+        return puts, snapshots
+
+    def _record_mamba_snapshots(
+        self, req_meta: ReqMeta, snapshots: dict[int, int]
+    ) -> None:
+        if not snapshots:
+            return
+        with self.done_task_lock:
+            if req_meta.store_job_id in self.stored_requests.get(req_meta.req_id, ()):
+                current = self._mamba_snapshot_boundaries.setdefault(
+                    req_meta.req_id, {}
+                )
+                for group_id, boundary in snapshots.items():
+                    current[group_id] = max(current.get(group_id, 0), boundary)
 
     def _maybe_offload_boundary_states(self, req_meta: ReqMeta) -> bool:
         """Persist this job's boundary puts, deduped against the store.
@@ -764,7 +823,7 @@ class KVCacheStoreSendingThread(KVTransferThread):
         """
         if not req_meta.boundary_puts or not req_meta.block_hashes:
             return True
-        puts = self._boundary_puts(req_meta)
+        puts, snapshots = self._boundary_puts(req_meta)
 
         if not puts:
             return True
@@ -799,6 +858,7 @@ class KVCacheStoreSendingThread(KVTransferThread):
         self._record_operation("save_exists", exists_start, len(keys))
         missing = [i for i, e in enumerate(exists) if e != 1]
         if not missing:
+            self._record_mamba_snapshots(req_meta, snapshots)
             return True
         keys = [keys[i] for i in missing]
         addrs = [addrs[i] for i in missing]
@@ -856,6 +916,8 @@ class KVCacheStoreSendingThread(KVTransferThread):
                 self._mark_request_skipped_for_pressure(req_meta)
             return False
 
+        # A snapshot advances only after all its local shards are durable.
+        self._record_mamba_snapshots(req_meta, snapshots)
         if self._clear_store_pressure():
             logger.info(
                 "Mooncake CPU/disk offloading pressure cleared after a "
@@ -1592,6 +1654,7 @@ class MooncakeStoreWorker:
         assert kv_role is not None
         self.kv_role = kv_role
         extra_config = vllm_config.kv_transfer_config.kv_connector_extra_config
+        self.mamba_snapshot_config = MambaSnapshotConfig.from_extra_config(extra_config)
         self.save_decode_cache = extra_config.get("save_decode_cache", False)
         self.can_put = (
             self.kv_role in ("kv_producer", "kv_both") or self.save_decode_cache
@@ -1744,6 +1807,14 @@ class MooncakeStoreWorker:
         self.coord = MooncakeStoreCoordinator.from_kv_cache_config(
             kv_cache_config, vllm_config, self.block_size, self.hash_block_size
         )
+        if self.mamba_snapshot_config.interval_blocks > 1:
+            logger.info(
+                "Mooncake Mamba snapshots: interval=%d tokens (%d scheduler blocks), "
+                "keep_prompt_boundary=%s",
+                self.mamba_snapshot_config.interval_tokens(self.block_size),
+                self.mamba_snapshot_config.interval_blocks,
+                self.mamba_snapshot_config.keep_prompt_boundary,
+            )
         self._kv_cache_groups = self.coord.kv_cache_groups
         self._group_tp_replication_factors = (
             self._compute_group_tp_replication_factors()
@@ -2294,6 +2365,7 @@ class MooncakeStoreWorker:
                     group.kv_cache_spec.prefix_cacheable
                     for group in self._kv_cache_groups
                 ],
+                mamba_snapshot_config=self.mamba_snapshot_config,
             )
             self.kv_send_thread.start()
 

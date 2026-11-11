@@ -52,6 +52,7 @@ from vllm.v1.outputs import KVConnectorOutput
 from vllm.v1.request import Request
 
 from .data import MooncakeStoreConnectorMetadata
+from .mamba_snapshot import MambaSnapshotConfig
 from .metrics import MooncakeStoreConnectorStats, MooncakeStorePromMetrics
 from .scheduler import MooncakeStoreScheduler
 from .worker import MooncakeStoreWorker
@@ -207,6 +208,7 @@ class MooncakeStoreConnector(KVConnectorBase_V1, SupportsHMA):
         assert kv_cache_config is not None, "kv_cache_config is required"
         self.kv_role = vllm_config.kv_transfer_config.kv_role
         extra_config = vllm_config.kv_transfer_config.kv_connector_extra_config
+        MambaSnapshotConfig.from_extra_config(extra_config)
         save_decode_cache = extra_config.get("save_decode_cache", False)
         # Capacity-only: contributes its segment to the store pool but transfers
         # no KV, so the KV-cache-shape invariants below cannot be reached.
