@@ -68,7 +68,5 @@ OffloadingSpecFactory.register_spec(
     "TieringOffloadingSpec",
 )
 OffloadingSpecFactory.register_spec(
-    "GDSOffloadingSpec",
-    "vllm.v1.kv_offload.fs.gds.spec",
-    "GDSOffloadingSpec",
+    "FSOffloadingSpec", "vllm.v1.kv_offload.fs.spec", "FSOffloadingSpec"
 )
