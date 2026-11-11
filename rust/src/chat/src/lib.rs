@@ -71,7 +71,7 @@ use vllm_engine_core_client::protocol::dtype::ModelDtype;
 use vllm_engine_core_client::protocol::request::ReasoningParserKwargs;
 use vllm_engine_core_client::protocol::structured_outputs::StructuredOutputBackend;
 use vllm_llm::Llm;
-use vllm_metrics::{METRICS, RenderRequestType};
+use vllm_metrics::METRICS;
 use vllm_text::{Prompt, TextLlm, TextRequest, TextRequestProcessor};
 
 /// Chat request preparation shared by inference and render-only frontends.
@@ -490,17 +490,7 @@ impl ChatLlm {
 
     /// Render, tokenize, and submit one chat request.
     pub async fn chat(&self, request: ChatRequest) -> Result<ChatEventStream> {
-        self.chat_as(request, RenderRequestType::Chat).await
-    }
-
-    /// Like [`Self::chat`], but records the render duration under
-    /// `request_type`.
-    pub async fn chat_as(
-        &self,
-        request: ChatRequest,
-        request_type: RenderRequestType,
-    ) -> Result<ChatEventStream> {
-        let mut streams = self.chat_n_as(request, NonZeroU32::MIN, request_type).await?;
+        let mut streams = self.chat_n(request, NonZeroU32::MIN).await?;
         Ok(streams.pop().expect("one event stream per sample"))
     }
 
@@ -511,18 +501,10 @@ impl ChatLlm {
         request: ChatRequest,
         n: NonZeroU32,
     ) -> Result<Vec<ChatEventStream>> {
-        self.chat_n_as(request, n, RenderRequestType::Chat).await
-    }
-
-    async fn chat_n_as(
-        &self,
-        request: ChatRequest,
-        n: NonZeroU32,
-        request_type: RenderRequestType,
-    ) -> Result<Vec<ChatEventStream>> {
         // Like Python's `render_chat`, record successful renders: templating,
         // multimodal preprocessing, and tokenization.
         let render_start = Instant::now();
+        let render_request_type = request.render_request_type;
         let PreparedChatRequest {
             text_request,
             output_processors,
@@ -530,7 +512,7 @@ impl ChatLlm {
         } = self.processor.prepare(request, n, self.text.request_processor()).await?;
         METRICS.renderer.observe_request_render_duration(
             self.served_model_name(),
-            request_type,
+            render_request_type,
             render_start.elapsed(),
         );
         let request_id = text_request.request_id.clone();

@@ -19,8 +19,9 @@ fn request_render_duration_histogram() -> Histogram {
 }
 
 /// The kind of request rendered, the `request_type` label.
-#[derive(Clone, Copy, Debug, Hash, PartialEq, Eq)]
+#[derive(Clone, Copy, Debug, Default, Hash, PartialEq, Eq)]
 pub enum RenderRequestType {
+    #[default]
     Chat,
     Completion,
     Responses,

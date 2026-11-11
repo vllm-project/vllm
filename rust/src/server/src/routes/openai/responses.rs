@@ -33,7 +33,6 @@ use tracing::{error, info, trace};
 use tracing_futures::Instrument as _;
 use vllm_chat::{ChatEvent, ChatEventStream, ChatEventStreamTrait, ChatTokenUsage, FinishReason};
 use vllm_llm::RequestTimestamps;
-use vllm_metrics::RenderRequestType;
 
 use self::convert::{build_response, build_usage, prepare_responses_request};
 use self::streaming::{OutputItemStreamer, ResponseStreamEvent, SequencedEvent};
@@ -73,17 +72,14 @@ pub async fn create_responses(
     let created_at = unix_timestamp();
     let api_server_options = state.api_server_options;
 
-    let chat_stream = match state
-        .chat
-        .chat_as(prepared.chat_request, RenderRequestType::Responses)
-        .instrument(request_span.clone())
-        .await
-    {
-        Ok(stream) => stream,
-        Err(error) => {
-            return chat_submit_error("failed to submit responses request", error).into_response();
-        }
-    };
+    let chat_stream =
+        match state.chat.chat(prepared.chat_request).instrument(request_span.clone()).await {
+            Ok(stream) => stream,
+            Err(error) => {
+                return chat_submit_error("failed to submit responses request", error)
+                    .into_response();
+            }
+        };
     // Echo the values the engine uses, as Python does, rather than the request's.
     let response = build_response(
         prepared.meta,

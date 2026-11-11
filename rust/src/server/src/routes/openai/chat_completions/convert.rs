@@ -9,6 +9,7 @@ use vllm_chat::{
     ChatMessage as VllmChatMessage, ChatOptions, ChatRequest, ChatTool, ChatToolChoice,
     GenerationPromptMode, ResolvedToolContext, SamplingParams,
 };
+use vllm_metrics::RenderRequestType;
 
 use super::types::ChatCompletionRequest;
 use super::validate;
@@ -230,6 +231,7 @@ pub(super) fn prepare_chat_request(
         session_id,
         lora_request: lora_resolution.lora_request.clone(),
         return_prompt_text: request.return_prompt_text.unwrap_or(false),
+        render_request_type: RenderRequestType::Chat,
     };
 
     Ok(PreparedRequest {
