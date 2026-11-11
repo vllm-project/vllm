@@ -132,20 +132,17 @@ class OnOverwriteStoreHandler(StoreTriggerHandler):
             raise ValueError(
                 "self_describing_kv_events is not supported with ON_OVERWRITE stores"
             )
-        if (
-            kv_cache_config.needs_kv_cache_zeroing
-            or config.partial_hash_hits_enabled
-        ):
-            # The scheduler writes to a reused block in update_requests,
+        if kv_cache_config.needs_kv_cache_zeroing or config.partial_hash_hits_enabled:
+            # The model runner writes to a reused block in update_requests,
             # before handle_preemptions flushes the ON_OVERWRITE jobs. A store
             # would then save the wrong data under a valid key. It writes in
             # two ways: it zeroes a new block when the KV cache needs zeroing,
             # and it applies a CoW copy when a prefix-cache hit ends inside a
             # block. Both are refused here.
             raise ValueError(
-                "ON_OVERWRITE stores are not supported for a KV cache that "
-                "the scheduler zeroes, or for a prefix-cache hit that the "
-                "scheduler copies, before it flushes the store."
+                "ON_OVERWRITE stores are not supported for a KV cache that the "
+                "model runner zeroes, or for a prefix-cache hit that it copies, "
+                "before it flushes the store."
             )
 
     def __init__(

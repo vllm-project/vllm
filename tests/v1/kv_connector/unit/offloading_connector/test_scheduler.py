@@ -3651,10 +3651,10 @@ def test_unsupported_store_triggers_raise(request_runner, extra_config):
 
 @pytest.mark.parametrize("case", ["uniform", "mixed_precision", "mamba"])
 def test_lazy_needs_no_zeroing(case: str):
-    """The lazy mode runs only when the scheduler does not write new blocks
-    before the store flush. Zeroing also covers the CoW copies: a partial-hit
-    CoW needs a hit inside an attention block, which needs a Mamba `align`
-    group, and a Mamba group sets needs_kv_cache_zeroing (see
+    """The lazy mode runs only when the runner does not zero new blocks before
+    the store flush. Zeroing also covers the CoW copies: a partial-hit CoW
+    needs a hit inside an attention block, which needs a Mamba `align` group,
+    and a Mamba group sets needs_kv_cache_zeroing (see
     OnOverwriteStoreHandler.check_support).
     """
     vllm_config = _make_vllm_config(extra_config=_LAZY_EXTRA_CONFIG)
@@ -3662,11 +3662,13 @@ def test_lazy_needs_no_zeroing(case: str):
         kv_cache_config = KVCacheConfig(
             num_blocks=4,
             kv_cache_tensors=[],
-            kv_cache_groups=[KVCacheGroupSpec(["full_layer"], _full_attention_spec())],
+            kv_cache_groups=[
+                make_kv_cache_group(["full_layer"], _full_attention_spec())
+            ],
         )
     elif case == "mixed_precision":
         kv_cache_config = _make_hybrid_kv_cache_config()
-        kv_cache_config.kv_cache_groups[1] = KVCacheGroupSpec(
+        kv_cache_config.kv_cache_groups[1] = make_kv_cache_group(
             ["mla_layer"], _mla_spec(dtype=torch.bfloat16)
         )
         # The flag is resolved in __post_init__, before the group above was
@@ -3688,25 +3690,25 @@ def test_lazy_needs_no_zeroing(case: str):
         scheduler = OffloadingConnectorScheduler(spec, vllm_config, kv_cache_config)
         assert _on_overwrite(scheduler)
     else:
-        with pytest.raises(ValueError, match="ON_OVERWRITE"):
+        with pytest.raises(ValueError, match="ON_OVERWRITE stores are not supported"):
             OffloadingConnectorScheduler(spec, vllm_config, kv_cache_config)
 
 
 def test_lazy_rejects_a_partial_hash_hit():
-    """The CoW gate refuses a config that does not ask for zeroing.
+    """The CoW gate refuses even when the cache does not ask for zeroing.
 
-    A hit that ends inside a block makes the scheduler copy the block before
-    it flushes the store, so the store would read the copied data.
+    A hit that ends inside a block makes the runner copy the block before it
+    flushes the store, so the store would read the copied data.
     """
     vllm_config = _make_vllm_config(extra_config=_LAZY_EXTRA_CONFIG)
     kv_cache_config = KVCacheConfig(
         num_blocks=4,
         kv_cache_tensors=[],
         kv_cache_groups=[
-            KVCacheGroupSpec(["full_layer"], _full_attention_spec(block_size=16)),
-            KVCacheGroupSpec(
+            make_kv_cache_group(["full_layer"], _full_attention_spec(block_size=16)),
+            make_kv_cache_group(
                 ["mamba_layer"],
-                MambaSpec(
+                mamba_layer(
                     block_size=32,
                     shapes=((1, 1),),
                     dtypes=(torch.float32,),
@@ -3720,7 +3722,7 @@ def test_lazy_rejects_a_partial_hash_hit():
     kv_cache_config.needs_kv_cache_zeroing = False
     spec = MockOffloadingSpec(build_offloading_config(vllm_config, kv_cache_config))
 
-    with pytest.raises(ValueError, match="ON_OVERWRITE"):
+    with pytest.raises(ValueError, match="ON_OVERWRITE stores are not supported"):
         OffloadingConnectorScheduler(spec, vllm_config, kv_cache_config)
 
 
@@ -7944,7 +7946,7 @@ class TestMambaHybridOffloadServing:
 
     def test_lazy_mode_is_refused_for_a_mamba_layout(self):
         """A mamba layout needs zeroing, which runs before the store reads."""
-        with pytest.raises(ValueError, match="needs zeroing"):
+        with pytest.raises(ValueError, match="ON_OVERWRITE stores are not supported"):
             self._make_scheduler(
                 store_mode="lazy", self_describing_kv_events=False
             )
