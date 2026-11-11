@@ -385,7 +385,7 @@ def test_inproc_sleep_finishes_queued_pooling_request(
     monkeypatch: pytest.MonkeyPatch,
 ):
     """In-process, a sleep that aborts a queued embedding request finishes it
-    as a pooling output on the next step."""
+    on the next step with a retryable error, not an empty vector."""
     monkeypatch.setenv("VLLM_ENABLE_V1_MULTIPROCESSING", "0")
     engine = LLMEngine.from_engine_args(
         EngineArgs(
@@ -406,4 +406,8 @@ def test_inproc_sleep_finishes_queued_pooling_request(
     assert [(output.request_id, output.finished) for output in outputs] == [
         ("e0", True)
     ]
+    [output] = outputs
+    assert output.error is not None
+    assert output.error.code == "request_aborted"
+    assert output.error.retryable
     assert not engine.has_unfinished_requests()

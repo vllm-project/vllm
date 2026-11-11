@@ -126,6 +126,27 @@ def _is_chunk_boundary(
     )
 
 
+def _pooling_end_error(output: EngineCoreOutput) -> RequestError:
+    """The error a pooling request finishes with when the engine ends it
+    without a pooler output."""
+    if output.error is not None:  # the engine's own, e.g. a paused engine
+        return output.error
+    if output.finish_reason == FinishReason.ABORT:  # a pause, sleep or shutdown
+        return RequestError(
+            code="request_aborted",
+            message="The engine aborted the request before it produced a result. "
+            "Please retry.",
+            retryable=True,
+        )
+    if output.mm_cache_miss_hashes and output.finish_reason == FinishReason.ERROR:
+        return RequestError(
+            code="multimodal_cache_miss",
+            message="Multi-modal processor cache miss.",
+            retryable=True,
+        )
+    return RequestError(code="internal_error", message="Internal server error")
+
+
 class StreamingInputOutputCollector(RequestOutputCollector):
     """Collector for streaming-input requests. Doesn't merge across input
     chunk boundaries (a finish_reason on a non-finished output)."""
@@ -811,19 +832,9 @@ class OutputProcessor:
                 and pooling_output is None
                 and finish_reason is not None
             ):
-                # A pooling request the engine ended without a pooler output
-                # (aborted, or failed before it ran) finishes as a pooling
-                # output, as frontend aborts do.
+                # No result: finish with an error, not an empty vector.
                 pooling_output = EMPTY_CPU_TENSOR
-                if (
-                    engine_core_output.mm_cache_miss_hashes
-                    and finish_reason == FinishReason.ERROR
-                ):
-                    request_error = RequestError(
-                        code="multimodal_cache_miss",
-                        message="Multi-modal processor cache miss.",
-                        retryable=True,
-                    )
+                request_error = _pooling_end_error(engine_core_output)
 
             if pooling_output is None:
                 assert req_state.detokenizer is not None

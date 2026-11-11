@@ -2002,14 +2002,8 @@ def test_pooling_cache_miss_is_a_request_error_and_batch_continues():
     assert torch.equal(succeeded.outputs.data, torch.tensor([1.0, 2.0]))
 
 
-@pytest.mark.parametrize("with_queue", [False, True])
-@pytest.mark.skip_global_cleanup
-def test_pooling_request_aborted_by_engine_finishes_as_pooling_output(with_queue):
-    """The engine aborts a queued pooling request (by a pause, sleep or
-    shutdown) with an output carrying no pooler output; the request still
-    finishes as a pooling output, for `AsyncLLM` (queue) and `LLMEngine`."""
-    output_processor = OutputProcessor(tokenizer=None, log_stats=False)
-    request = EngineCoreRequest(
+def _pooling_request() -> EngineCoreRequest:
+    return EngineCoreRequest(
         request_id="request-int",
         external_req_id="request",
         prompt_token_ids=[1, 2],
@@ -2021,6 +2015,26 @@ def test_pooling_request_aborted_by_engine_finishes_as_pooling_output(with_queue
         sampling_params=None,
         pooling_params=PoolingParams(task="embed"),
     )
+
+
+@pytest.mark.parametrize("with_queue", [False, True])
+@pytest.mark.parametrize(
+    ("finish_reason", "code", "retryable"),
+    [
+        (FinishReason.ABORT, "request_aborted", True),
+        (FinishReason.ERROR, "internal_error", False),
+    ],
+)
+@pytest.mark.skip_global_cleanup
+def test_pooling_request_ended_by_engine_finishes_with_error(
+    with_queue, finish_reason, code, retryable
+):
+    """The engine ends a pooling request without a pooler output: aborted (by a
+    pause, sleep or shutdown) or failed before it ran. The request finishes as a
+    pooling output that carries an error, not as an empty vector, for `AsyncLLM`
+    (queue) and `LLMEngine`."""
+    output_processor = OutputProcessor(tokenizer=None, log_stats=False)
+    request = _pooling_request()
     queue = (
         RequestOutputCollector(RequestOutputKind.FINAL_ONLY, request.request_id)
         if with_queue
@@ -2029,13 +2043,43 @@ def test_pooling_request_aborted_by_engine_finishes_as_pooling_output(with_queue
     output_processor.add_request(request, prompt=None, queue=queue)
 
     processed = output_processor.process_outputs(
-        [EngineCoreOutput(request.request_id, [], finish_reason=FinishReason.ABORT)]
+        [EngineCoreOutput(request.request_id, [], finish_reason=finish_reason)]
     )
 
     output = queue.get_nowait() if queue else processed.request_outputs[0]
     assert isinstance(output, PoolingRequestOutput)
     assert output.finished
-    assert output.outputs.data.numel() == 0
+    assert output.error is not None
+    assert output.error.code == code
+    assert output.error.retryable is retryable
+    assert not output_processor.has_unfinished_requests()
+
+
+@pytest.mark.skip_global_cleanup
+def test_pooling_request_rejected_by_engine_keeps_engine_error():
+    """Without an output queue (`LLMEngine`), a pooling request the engine
+    rejects with its own error finishes with that error."""
+    output_processor = OutputProcessor(tokenizer=None, log_stats=False)
+    request = _pooling_request()
+    output_processor.add_request(request, prompt=None)
+    error = RequestError(
+        code="engine_paused",
+        message="Generation is paused. Please retry after it resumes.",
+        retryable=True,
+    )
+
+    processed = output_processor.process_outputs(
+        [
+            EngineCoreOutput(
+                request.request_id, [], finish_reason=FinishReason.ERROR, error=error
+            )
+        ]
+    )
+
+    [output] = processed.request_outputs
+    assert isinstance(output, PoolingRequestOutput)
+    assert output.finished
+    assert output.error == error
     assert not output_processor.has_unfinished_requests()
 
 
