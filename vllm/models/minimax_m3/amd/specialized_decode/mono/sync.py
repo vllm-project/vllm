@@ -33,8 +33,7 @@ before the barrier (`cta_sync(drain=True)`). The step-end fault handshake
 uses plain system release / acquire once a step.
 
 A poll gives up after `ticks` of the 100 MHz clock or once any rank has set
-the error word; a timeout sets `[1, rank, epoch, site]` on every rank.
-"""
+the error word; a timeout sets `[1, rank, epoch, site]` on every rank."""
 
 import flydsl.expr as fx
 from flydsl._mlir import ir
@@ -223,18 +222,49 @@ def _spin(load_all, pending, err_base, ticks):
 
 
 @traced
+def _spin_lazy(load_all, pending, err_base, ticks):
+    """`_spin` that reads the (uncached, system-scope) error word and the
+    clock only after a first miss: a hand-off that already landed costs one
+    round trip."""
+    v = load_all()
+    late = fx.Int64(0)
+    err = fx.Int32(0)
+    if pending(v):
+        t0 = memrealtime()
+        err = error_word(err_base)
+        while pending(v) & (err == 0) & (late < ticks):
+            rocdl.s_sleep(1)
+            v = load_all()
+            err = error_word(err_base)
+            late = memrealtime() - t0
+    return v, pending(v) & (err == 0)
+
+
+@traced
 def _fail_if(timed_out, fail, site):
     if timed_out:
         fail(site)
 
 
 class Mailbox:
-    """Tagged pairs of one launch (`tag`), every address an `Addr`."""
+    """Tagged pairs of one launch (`tag`), every address an `Addr`.
+
+    `lazy_errors`: polls read the error word and the clock only after a first
+    miss (`_spin_lazy`)."""
 
     def __init__(
-        self, tag, err_base, peer_bases, rank, epoch, ticks=WAIT_TICKS, tag16=None
+        self,
+        tag,
+        err_base,
+        peer_bases,
+        rank,
+        epoch,
+        ticks=WAIT_TICKS,
+        tag16=None,
+        lazy_errors=False,
     ):
         self.tag = tag
+        self.lazy_errors = lazy_errors
         # a triple pair's 16-bit tag (``put_triple``), if the launch has one
         self.tag16 = tag16
         self.err_base = err_base
@@ -281,10 +311,12 @@ class Mailbox:
             store64(base, 1, hi, None)
             store64(base, 0, lo, None)
 
-    def put_triple(self, a, i, bits48):
-        """Pair i of `a` := (48 value bits | tag16 << 48), monotonic."""
+    def put_triple(self, a, i, bits48, plain=False):
+        """Pair i of `a` := (48 value bits | tag16 << 48), monotonic; `plain`:
+        without cache bits (wavefront scope), still one naturally aligned 64-bit
+        atomic."""
         word = (bits48 & ((1 << 48) - 1)) | (fx.Int64(self.tag16) << 48)
-        store64(a.value, i, word, _SCOPE[a.space])
+        store64(a.value, i, word, "wavefront" if plain else _SCOPE[a.space])
 
     def poll(self, specs, batch=POLL_MAX, site=0, triples=False):
         """Pairs `specs` = [(Addr, pair index, npairs in {1, 2})], all of one
@@ -321,7 +353,8 @@ class Mailbox:
                 bad = bad | (high_tag(v[e]) != tag)
             return bad
 
-        v, timed_out = _spin(load_all, pending, self.err_base, self.ticks)
+        spin = _spin_lazy if self.lazy_errors else _spin
+        v, timed_out = spin(load_all, pending, self.err_base, self.ticks)
         _fail_if(timed_out, self.fail, site)
         outs, e = [], 0
         for _, _, n in specs:

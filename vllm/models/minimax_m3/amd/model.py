@@ -104,6 +104,7 @@ from vllm.model_executor.models.utils import (
     spec_decode_needs_target_embed,
 )
 from vllm.model_executor.models.vision import run_dp_sharded_mrope_vision_model
+from vllm.models.minimax_m3.amd.glue import M3Glue
 from vllm.models.minimax_m3.amd.indexer_msa import (
     MiniMaxM3IndexerMSAImpl,
     MiniMaxM3MSAIndexer,
@@ -1603,6 +1604,9 @@ def _can_fuse_input_norm_mxfp8(qkv_proj: nn.Module) -> bool:
 
 
 class MiniMaxM3DecoderLayer(nn.Module):
+    # set on the backbone's MoE layers when a glue path is on (glue/runtime.py)
+    _m3_glue: M3Glue | None = None
+
     def __init__(
         self,
         config: PreTrainedConfig,
@@ -1721,6 +1725,13 @@ class MiniMaxM3DecoderLayer(nn.Module):
             positions=positions,
             hidden_states=attn_input,
         )
+
+        # the glue: the whole MoE half from the o_proj partial, when this
+        # forward's plan selected it (glue/runtime.py)
+        if self._m3_glue is not None:
+            glued = self._m3_glue.moe_half(self, hidden_states, residual)
+            if glued is not None:
+                return glued
 
         ffn = self.block_sparse_moe if self.is_moe_layer else self.mlp
         if self.fuse_post_norm_mxfp8:
@@ -1905,6 +1916,8 @@ class MiniMaxM3Model(nn.Module, EagleModelMixin):
             from vllm.models.minimax_m3.amd.mono.dispatch import MonoDecode
 
             self._mono = MonoDecode(self, vllm_config)
+        # MiniMax-M3.1 TP4 glue paths (glue/): None where they do not apply
+        self.m3_glue = M3Glue.create(self, vllm_config)
 
     def embed_input_ids(self, input_ids: torch.Tensor) -> torch.Tensor:
         return self.embed_tokens(input_ids)
@@ -1946,27 +1959,38 @@ class MiniMaxM3Model(nn.Module, EagleModelMixin):
                 aux_hidden_states, self.start_layer, hidden_states, residual
             )
         layers = self.layers[self.start_layer : self.end_layer]
-        if decode is None:
-            for idx, layer in enumerate(layers, start=self.start_layer):
-                hidden_states, residual = layer(positions, hidden_states, residual)
-                self._maybe_add_hidden_state(
-                    aux_hidden_states, idx + 1, hidden_states, residual
-                )
-        else:
-            step = decode.plan(positions, intermediate_tensors)
-            failure: Exception | None = None
-            try:
+        # one glue plan for the whole forward (the MoE layers read it)
+        glue = self.m3_glue
+        plan = (
+            glue.begin_forward(positions, intermediate_tensors)
+            if glue is not None
+            else None
+        )
+        try:
+            if decode is None:
                 for idx, layer in enumerate(layers, start=self.start_layer):
-                    kernel = step.layer(layer.layer_id) if step else None
-                    hidden_states, residual = (kernel or layer)(
-                        positions, hidden_states, residual
-                    )
+                    hidden_states, residual = layer(positions, hidden_states, residual)
                     self._maybe_add_hidden_state(
                         aux_hidden_states, idx + 1, hidden_states, residual
                     )
-            except Exception as err:
-                failure = err
-            decode.after_step(step, failure)
+            else:
+                step = decode.plan(positions, intermediate_tensors)
+                failure: Exception | None = None
+                try:
+                    for idx, layer in enumerate(layers, start=self.start_layer):
+                        kernel = step.layer(layer.layer_id) if step else None
+                        hidden_states, residual = (kernel or layer)(
+                            positions, hidden_states, residual
+                        )
+                        self._maybe_add_hidden_state(
+                            aux_hidden_states, idx + 1, hidden_states, residual
+                        )
+                except Exception as err:
+                    failure = err
+                decode.after_step(step, failure)
+        finally:
+            if glue is not None:
+                glue.end_forward(plan)
 
         if not get_pp_group().is_last_rank:
             return IntermediateTensors(
@@ -2081,7 +2105,10 @@ class MiniMaxM3SparseForCausalLM(nn.Module, SupportsPP, SupportsEagle3):
 
     def load_weights(self, weights: Iterable[tuple[str, torch.Tensor]]) -> set[str]:
         loader = AutoWeightsLoader(self)
-        return loader.load_weights(weights, mapper=self.hf_to_vllm_mapper)
+        loaded = loader.load_weights(weights, mapper=self.hf_to_vllm_mapper)
+        if self.model.m3_glue is not None:
+            self.model.m3_glue.after_load_weights()
+        return loaded
 
 
 # TODO(refactor): this VL wrapper is platform-agnostic and byte-identical to the
