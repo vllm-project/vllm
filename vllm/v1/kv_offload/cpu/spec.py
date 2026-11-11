@@ -198,19 +198,17 @@ class CPUOffloadingSpec(OffloadingSpec):
             # independent regions keyed by their logical rank.
             engine_id = self.config.engine_id
             row_bytes = self.kv_bytes_per_chunk
+            world_size = self.config.parallel.world_size
+            worker_index = self.config.parallel.rank
             if not self.replicated_layout:
-                rank = self.config.parallel.rank
-                engine_id += f"_{rank}"
+                engine_id += f"_{worker_index}"
                 row_bytes = round_up(
                     self.cpu_page_size_per_worker, self.BLOCK_SIZE_ALIGNMENT
                 )
-            world_size = self.config.parallel.world_size
-            worker_index = self.config.parallel.rank
-
-            def check_rank_regions_capacity(size: int) -> None:
+                # Every rank checks the aggregate before any of them pre-faults.
                 try:
                     check_shm_free_space(
-                        size * world_size,
+                        self.num_chunks * row_bytes * world_size,
                         allocation_name="CPU KV offload regions in /dev/shm",
                     )
                 finally:
@@ -222,13 +220,9 @@ class CPUOffloadingSpec(OffloadingSpec):
                 rank=0,
                 kv_bytes_per_chunk=row_bytes,
                 cpu_page_size=self.cpu_page_size_per_worker,
-                barrier=(
-                    _all_workers_barrier if self.replicated_layout else lambda: None
-                ),
+                barrier=_all_workers_barrier if self.replicated_layout else None,
                 num_segments=REGION_SEGMENTS,
-                creator_memory_check=(
-                    None if self.replicated_layout else check_rank_regions_capacity
-                ),
+                private=not self.replicated_layout,
                 populate_shard=(
                     (worker_index, world_size) if self.replicated_layout else None
                 ),

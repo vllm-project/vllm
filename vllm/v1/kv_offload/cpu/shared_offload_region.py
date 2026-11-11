@@ -103,6 +103,9 @@ class SharedOffloadRegion:
     share, for layouts where every worker maps the same bytes. The barrier
     also waits for all shards to finish pre-faulting before returning.
     `num_segments` splits backing files beneath the contiguous mapping.
+
+    `private=True` declares that no peer maps this file: it takes no barrier
+    and the path is unlinked as soon as this worker has mapped it.
     """
 
     BLOCK_SIZE_ALIGNMENT: int = mmap.PAGESIZE
@@ -119,7 +122,9 @@ class SharedOffloadRegion:
         creator_memory_check: Callable[[int], None] | None = None,
         populate_shard: tuple[int, int] | None = None,
         num_segments: int = 1,
+        private: bool = False,
     ) -> None:
+        assert not private or (barrier is None and populate_shard is None)
         self.page_size = mmap.PAGESIZE
         assert kv_bytes_per_chunk % self.page_size == 0
 
@@ -208,6 +213,9 @@ class SharedOffloadRegion:
                 finally:
                     os.close(reservation)
                 self._map_segments()
+            if private and self._creator:
+                self._unlink()
+                self._creator = False
             if barrier is not None:
                 barriers_remaining -= 1
                 barrier()

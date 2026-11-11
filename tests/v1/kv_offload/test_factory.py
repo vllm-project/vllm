@@ -594,6 +594,8 @@ def test_cpu_spec_create_worker_uses_mmap_on_cuda(monkeypatch):
     monkeypatch.setattr(cpu_spec_module.current_platform, "is_rocm", lambda: False)
     monkeypatch.setattr(cpu_spec_module, "SharedOffloadRegion", fake_region_ctor)
     monkeypatch.setattr(cpu_spec_module, "CPUOffloadingWorker", fake_worker_ctor)
+    monkeypatch.setattr(cpu_spec_module, "check_shm_free_space", MagicMock())
+    monkeypatch.setattr(cpu_spec_module, "_all_workers_barrier", MagicMock())
     monkeypatch.setattr(torch.accelerator, "current_device_index", lambda: 5)
 
     kv_caches = MagicMock()
@@ -722,11 +724,18 @@ def test_cpu_spec_create_worker_region_assignment(
 
     monkeypatch.setattr(cpu_spec_module, "SharedOffloadRegion", fake_region_ctor)
     monkeypatch.setattr(cpu_spec_module, "CPUOffloadingWorker", MagicMock())
-    monkeypatch.setattr(
-        cpu_spec_module, "check_shm_free_space", memory_check, raising=False
-    )
+    monkeypatch.setattr(cpu_spec_module, "check_shm_free_space", memory_check)
     monkeypatch.setattr(cpu_spec_module, "_all_workers_barrier", barrier)
     monkeypatch.setattr(torch.accelerator, "current_device_index", lambda: device_index)
+
+    if capacity_error:
+        memory_check.side_effect = RuntimeError("Insufficient space in /dev/shm")
+        with pytest.raises(RuntimeError, match="Insufficient space"):
+            spec.create_worker(MagicMock())
+        # Peers waiting at the barrier are released even when the check fails.
+        barrier.assert_called_once_with()
+        assert region_calls == []
+        return
 
     spec.create_worker(MagicMock())
 
@@ -735,20 +744,14 @@ def test_cpu_spec_create_worker_region_assignment(
     assert region_calls[0]["populate_shard"] == (
         (rank, world_size) if replicated_layout else None
     )
-    capacity_check = region_calls[0].get("creator_memory_check")
+    assert region_calls[0]["private"] is not replicated_layout
     if replicated_layout:
-        assert capacity_check is None
+        assert region_calls[0]["barrier"] is barrier
+        memory_check.assert_not_called()
+        barrier.assert_not_called()
     else:
-        assert capacity_check is not None
+        assert region_calls[0]["barrier"] is None
         region_bytes = spec.num_chunks * region_calls[0]["kv_bytes_per_chunk"]
-        if capacity_error:
-            error = RuntimeError("Insufficient space in /dev/shm")
-            memory_check.side_effect = error
-            with pytest.raises(RuntimeError) as raised:
-                capacity_check(region_bytes)
-            assert raised.value is error
-        else:
-            capacity_check(region_bytes)
         memory_check.assert_called_once_with(
             region_bytes * world_size,
             allocation_name="CPU KV offload regions in /dev/shm",
