@@ -23,10 +23,11 @@ from vllm.model_executor.models.nemotron_parse3_5_mtp import (
 
 
 def test_parse_mtp_config_routes_only_causal_prefix_architecture() -> None:
-    config = PreTrainedConfig(
-        architectures=["RadioMBartPrefixForCausalLM"],
-        decoder=PreTrainedConfig(causal_vision_prefix=True, vocab_size=8, d_model=4),
-    )
+    config = PreTrainedConfig(architectures=["RadioMBartPrefixForCausalLM"])
+    config.decoder = PreTrainedConfig()
+    config.decoder.causal_vision_prefix = True
+    config.decoder.vocab_size = 8
+    config.decoder.d_model = 4
 
     draft = SpeculativeConfig.hf_config_override(config)
 

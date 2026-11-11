@@ -20,6 +20,7 @@ from vllm.forward_context import (
     override_forward_context,
 )
 from vllm.logger import init_logger
+from vllm.platforms import current_platform
 from vllm.sequence import IntermediateTensors
 from vllm.utils.torch_utils import current_stream
 from vllm.v1.kv_cache_interface import KVCacheConfig
@@ -498,6 +499,7 @@ class UBatchRunner:
 
         outputs: dict[int, Any] = {}
         errors: dict[int, BaseException] = {}
+        dtype = self.vllm_config.model_config.dtype
 
         @torch.inference_mode()
         def run_ubatch(ubatch_context, inputs: dict[str, Any]) -> None:
@@ -509,6 +511,12 @@ class UBatchRunner:
                     for stream in (compute_stream, self.comm_stream):
                         with torch.cuda.stream(stream):
                             torch.cuda.current_blas_handle()
+                            if current_platform.is_rocm():
+                                # hipBLASLt handles are per thread and stream and
+                                # only a GEMM creates one; creating it in capture
+                                # fails.
+                                x = torch.zeros(1, 1, dtype=dtype, device=self.device)
+                                torch.mm(x, x)
                 with ubatch_context:
                     outputs[ubatch_context.id] = model(**inputs)
             except BaseException as e:  # noqa: BLE001
@@ -516,9 +524,8 @@ class UBatchRunner:
                 # Note the siblings are not told to unwind: microbatches hand
                 # control to each other, so one that dies mid-forward leaves
                 # the others parked on a handoff that never comes and the step
-                # hangs. The V1 runner behaves the same way; fixing it means
-                # changing the shared handoff protocol in ubatching.py, which
-                # is deliberately out of scope here.
+                # hangs. Fixing it means changing the handoff protocol in
+                # ubatching.py.
                 errors[ubatch_context.id] = e
 
         # Threads own the forward context; keep it cleared and SMs reserved
@@ -584,7 +591,7 @@ def maybe_build_ubatch_runner(
     """Build the microbatch runner, or None when DBO is not in use.
 
     Microbatching needs the DP handshake to agree on it, so it is only
-    available with more than one DP rank (as in the V1 runner).
+    available with more than one DP rank.
     """
     parallel_config = vllm_config.parallel_config
     if not parallel_config.use_ubatching or parallel_config.data_parallel_size <= 1:

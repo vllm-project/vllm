@@ -1,9 +1,9 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
-"""``get_top_tokens`` on the DeepSeek V4 MTP drafter.
+"""`get_top_tokens` on the DeepSeek V4 MTP drafter.
 
-The speculator opts into ``use_local_argmax_reduction`` by probing the draft
-model for ``get_top_tokens``, and expects it to select the same greedy draft
+The speculator opts into `use_local_argmax_reduction` by probing the draft
+model for `get_top_tokens`, and expects it to select the same greedy draft
 token the full-vocab argmax would. V4 reaches its LM head through hc_head and
 the shared head's RMSNorm, so both methods have to share that transform.
 """
@@ -120,8 +120,8 @@ def _assert_selects_max_logit(top: torch.Tensor, logits: torch.Tensor) -> None:
 def test_get_top_tokens_matches_full_argmax(default_vllm_config):
     """Same draft token as the path taken when the reduction is off.
 
-    ``get_top_tokens`` has to run the same pre-head transform as
-    ``compute_logits``: hc_head over the (T, hc_mult, D) residual, then the
+    `get_top_tokens` has to run the same pre-head transform as
+    `compute_logits`: hc_head over the (T, hc_mult, D) residual, then the
     shared head's RMSNorm. Dropping either one returns a different draft token
     instead of failing, which is what this comparison catches.
     """
@@ -138,7 +138,7 @@ def test_get_top_tokens_matches_full_argmax(default_vllm_config):
 
 
 def test_get_top_tokens_honors_padded_vocab(default_vllm_config):
-    """Padding entries above ``org_vocab_size`` must never win the argmax."""
+    """Padding entries above `org_vocab_size` must never win the argmax."""
     vocab_size = 500
     predictor = _make_predictor(vocab_size)
     head = predictor.layers[str(START_LAYER_IDX)].shared_head.head
@@ -153,7 +153,7 @@ def test_get_top_tokens_honors_padded_vocab(default_vllm_config):
 
 
 def test_wrapper_forwards_spec_step_idx():
-    """``DeepSeekV4MTP`` is what the speculator probes, so it needs the method."""
+    """`DeepSeekV4MTP` is what the speculator probes, so it needs the method."""
     assert hasattr(DeepSeekV4MTP, "get_top_tokens")
 
     hidden_states = torch.empty(0)
