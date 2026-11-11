@@ -24,6 +24,7 @@ from vllm.v1.kv_cache_interface import (
     MambaSpec,
     get_kv_cache_spec_kind,
     get_kv_cache_spec_sliding_window,
+    get_mamba_prefill_checkpoint_position,
 )
 from vllm.v1.metrics.stats import PrefixCacheStats
 from vllm.v1.request import Request, RequestStatus
@@ -892,6 +893,21 @@ class KVCacheManager:
         ]
         retained_blocks = [block for pair in pending_copies for block in pair]
         return copies, retained_blocks
+
+    def get_state_checkpoint_tokens(self, num_tokens: int) -> int:
+        """Prompt position whose Mamba "align" state a prefill of `num_tokens`
+        tokens leaves prefix-cached (the boundary a later request can hit),
+        or 0 if no group caches recurrent states at block boundaries. Accounts
+        for the hash lookahead and the EAGLE/MTP block drop."""
+        for mgr in self.coordinator.single_type_managers:
+            if isinstance(mgr, MambaManager) and mgr.mamba_cache_mode == "align":
+                return get_mamba_prefill_checkpoint_position(
+                    num_tokens,
+                    mgr.cache_hit_alignment_tokens,
+                    mgr.drop_eagle_checkpoint_block,
+                    num_hash_lookahead_tokens=self.block_pool.num_hash_lookahead_tokens,
+                )
+        return 0
 
     def take_boundary_state_offloads(
         self,

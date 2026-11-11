@@ -35,6 +35,7 @@ from vllm.v1.kv_cache_interface import (
     KVCacheTensor,
     MLAAttentionSpec,
     SlidingWindowMLASpec,
+    get_mamba_prefill_checkpoint_position,
 )
 
 from .utils import (
@@ -42,6 +43,7 @@ from .utils import (
     create_vllm_config,
     expand_strided_descs,
     make_kv_cache_config,
+    make_nixl_push_scheduler,
     make_nixl_scheduler,
     maybe_update_block_size,
     region_pairs_by_index,
@@ -1794,6 +1796,63 @@ def test_mamba_n1_p_side_truncation():
     logprobs_req.prefix_cache_hit_limit = 0
     swa_sched.on_new_request(logprobs_req)
     assert len(logprobs_req.prompt_token_ids) == 10
+
+
+def _bind_mamba_checkpoints(sched, drop_eagle_block: bool = False) -> None:
+    """Stand in for a bound KVCacheManager with a 16-token Mamba align group."""
+    sched._kv_cache_manager = SimpleNamespace(
+        get_state_checkpoint_tokens=lambda num_tokens: (
+            get_mamba_prefill_checkpoint_position(num_tokens, 16, drop_eagle_block)
+        )
+    )
+
+
+@pytest.mark.cpu_test
+@pytest.mark.parametrize("push", [False, True], ids=["pull", "push"])
+@pytest.mark.parametrize(
+    "num_tokens,drop_eagle_block,expected",
+    [
+        (50, False, 48),
+        (49, False, 48),
+        (10, False, 9),
+        (50, True, 32),
+    ],
+    ids=["cut_to_checkpoint", "n1_is_checkpoint", "no_checkpoint", "eagle_drop"],
+)
+def test_mamba_checkpoint_cut(num_tokens, drop_eagle_block, expected, push):
+    """P stops at the Mamba checkpoint a local prefill would cache, and D
+    loads up to it without P's `remote_num_tokens`, which push mode lacks."""
+    make = make_nixl_push_scheduler if push else make_nixl_scheduler
+    p_sched, d_sched = make(has_mamba=True), make(has_mamba=True)
+    _bind_mamba_checkpoints(p_sched, drop_eagle_block)
+    _bind_mamba_checkpoints(d_sched, drop_eagle_block)
+
+    p_req = create_request(num_tokens=num_tokens, do_remote_decode=True)
+    p_sched.on_new_request(p_req)
+    assert p_req.num_prompt_tokens == expected
+
+    d_req = create_request(num_tokens=num_tokens, do_remote_prefill=True)
+    assert d_sched.get_num_new_matched_tokens(d_req, 0) == (expected, True)
+
+
+@pytest.mark.cpu_test
+@pytest.mark.parametrize(
+    "remote_num_tokens,expected",
+    [(48, 48), (32, 32), (49, 49), (50, 0)],
+    ids=["agree", "p_cut_lower", "p_without_cut", "p_past_backoff"],
+)
+def test_mamba_checkpoint_cut_d_follows_prefiller(remote_num_tokens, expected):
+    """D loads exactly what P computed when the two cuts disagree (e.g. a P
+    that predates the cut stops at N-1), and recomputes locally when P's
+    recurrent state is past D's backoff."""
+    sched = make_nixl_scheduler(has_mamba=True)
+    _bind_mamba_checkpoints(sched)
+    req = create_request(num_tokens=50, do_remote_prefill=True)
+    assert req.kv_transfer_params is not None
+    req.kv_transfer_params["remote_num_tokens"] = remote_num_tokens
+
+    count, _ = sched.get_num_new_matched_tokens(req, num_computed_tokens=0)
+    assert count == expected
 
 
 @pytest.mark.cpu_test

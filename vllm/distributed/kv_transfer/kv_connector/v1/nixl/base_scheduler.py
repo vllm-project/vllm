@@ -41,7 +41,7 @@ from vllm.v1.kv_cache_interface import (
 
 if TYPE_CHECKING:
     from vllm.config import VllmConfig
-    from vllm.v1.core.kv_cache_manager import KVCacheBlocks
+    from vllm.v1.core.kv_cache_manager import KVCacheBlocks, KVCacheManager
     from vllm.v1.kv_cache_interface import KVCacheConfig
     from vllm.v1.outputs import KVConnectorOutput
     from vllm.v1.request import Request
@@ -105,6 +105,12 @@ class NixlBaseConnectorScheduler:
             g.kv_cache_spec.prefix_replay_tokens > 0
             for g in kv_cache_config.kv_cache_groups
         )
+
+        # Set from `bind_kv_cache_manager` when a Mamba group prefix-caches
+        # states at block boundaries. P/D loads then stop at a Mamba "align"
+        # checkpoint, so the decoder receives a state it can prefix-cache and
+        # recomputes the prompt tail itself.
+        self._kv_cache_manager: KVCacheManager | None = None
 
         logger.info("Initializing NIXL Scheduler %s", engine_id)
         if vllm_config.scheduler_config.disable_hybrid_kv_cache_manager:
@@ -399,31 +405,113 @@ class NixlBaseConnectorScheduler:
             self.vllm_config.num_prefill_lookahead_tokens - 1,
         )
 
-    def _get_remote_prefill_token_count(self, num_prompt_tokens: int) -> int:
-        """D-side only. The number of prompt tokens to load from the prefiller.
-        Stops short of the trailing `_prefill_backoff()` tokens that the decoder
-        will recompute locally."""
+    def bind_kv_cache_manager(self, kv_cache_manager: "KVCacheManager") -> None:
+        has_align_group = self.vllm_config.cache_config.enable_prefix_caching and any(
+            isinstance(g.kv_cache_spec, MambaSpec)
+            and g.kv_cache_spec.mamba_cache_mode == "align"
+            for g in self.kv_cache_config.kv_cache_groups
+        )
+        if has_align_group:
+            self._kv_cache_manager = kv_cache_manager
+            logger.info(
+                "P/D prefills stop at Mamba checkpoint boundaries; the "
+                "decoder recomputes the prompt tail."
+            )
+
+    def _ssm_checkpoint_cut(self, num_prompt_tokens: int) -> int:
+        """The Mamba checkpoint a local prefill of the full prompt would
+        cache (honouring the hash lookahead and the EAGLE/MTP block drop),
+        capped to leave `_prefill_backoff()` tokens to the decoder; 0 if
+        there is none."""
+        if self._kv_cache_manager is None:
+            return 0
+        # A prefill of n tokens checkpoints at or below n - 1; shift n so the
+        # cut also clears a wider backoff window (multi-module MTP).
+        return self._kv_cache_manager.get_state_checkpoint_tokens(
+            num_prompt_tokens - self._prefill_backoff() + 1
+        )
+
+    def _num_prefill_backoff_tokens(self, num_prompt_tokens: int) -> int:
+        """Trailing prompt tokens the prefiller skips and the decoder
+        recomputes: `_prefill_backoff()`, or for a prefix-cached Mamba
+        align model everything past `_ssm_checkpoint_cut()`, so the transferred
+        running state is one the decoder caches for later local turns."""
         backoff = self._prefill_backoff()
-        if backoff and num_prompt_tokens > backoff:
-            return num_prompt_tokens - backoff
-        return num_prompt_tokens
+        if backoff and num_prompt_tokens <= backoff:
+            return 0
+        checkpoint = self._ssm_checkpoint_cut(num_prompt_tokens)
+        if checkpoint > 0:
+            return num_prompt_tokens - checkpoint
+        return backoff
+
+    def _get_remote_prefill_token_count(self, request: "Request") -> int:
+        """D-side only. The number of prompt tokens to load from the prefiller:
+        the prompt minus `_num_prefill_backoff_tokens()`, mirroring P's cut.
+
+        In pull mode P also reports its count in `remote_num_tokens`, which
+        wins when the two sides disagree (e.g. a heterogeneous P that cuts at
+        a different Mamba checkpoint); that only costs a prefix-cache entry.
+        Push mode registers D's blocks before P finishes, so it relies on the
+        mirrored cut alone."""
+        num_prompt_tokens = len(request.prompt_token_ids or [])
+        backoff = self._prefill_backoff()
+        max_tokens = (
+            num_prompt_tokens - backoff
+            if backoff and num_prompt_tokens > backoff
+            else num_prompt_tokens
+        )
+        if request.skip_reading_external_kv:
+            # P doesn't truncate these, see `_truncate_request_for_prefill`.
+            return max_tokens
+        expected = num_prompt_tokens - self._num_prefill_backoff_tokens(
+            num_prompt_tokens
+        )
+        params = request.kv_transfer_params or {}
+        remote_num_tokens = params.get("remote_num_tokens")
+        if not remote_num_tokens or remote_num_tokens == expected:
+            return expected
+        if remote_num_tokens <= max_tokens or not self._has_mamba:
+            # Attention KV is valid for any prefix of what P computed, and a
+            # recurrent state is valid exactly at P's count.
+            logger.warning_once(
+                "Prefiller stopped at %d of %d prompt tokens, but this decoder "
+                "expected %d; outputs are correct but the transferred state may "
+                "not be prefix-cached. Check that P and D run the same vLLM "
+                "version, block size and speculative config.",
+                remote_num_tokens,
+                num_prompt_tokens,
+                expected,
+            )
+            return min(remote_num_tokens, max_tokens)
+        # The recurrent state sits past the tokens this decoder must recompute
+        # and can't be rewound.
+        logger.warning_once(
+            "Prefiller computed %d of %d prompt tokens, more than this decoder "
+            "can load (%d) for a recurrent model; recomputing the prompt "
+            "locally. Check that P and D agree on the speculative config.",
+            remote_num_tokens,
+            num_prompt_tokens,
+            max_tokens,
+        )
+        return 0
 
     def _truncate_request_for_prefill(self, request: "Request") -> None:
-        """P-side only: drop the trailing `_prefill_backoff()` prompt tokens
-        so the prefiller stops short of what the decoder recomputes locally.
-        For Mamba that is the single token needed to yield h(N-1); for
-        multi-module MTP it is the drafter's whole lookahead window.
+        """P-side only: drop the trailing `_num_prefill_backoff_tokens()`
+        prompt tokens so the prefiller stops short of what the decoder
+        recomputes locally. For Mamba that is the single token needed to yield
+        h(N-1) (or down to a checkpoint boundary, see
+        `_ssm_checkpoint_cut()`); for multi-module MTP it is the drafter's
+        whole lookahead window.
 
         Guarded by `_p_side_truncated` to avoid repeated truncation if the
         request is preempted and rescheduled."""
-        backoff = self._prefill_backoff()
+        backoff = self._num_prefill_backoff_tokens(request.num_prompt_tokens)
         params = request.kv_transfer_params
         if (
             backoff
             and params is not None
             # Guard against repeated truncation after preemption/reschedule.
             and not params.get("_p_side_truncated")
-            and request.num_prompt_tokens > backoff
             # A request that skips reading external KV (prompt logprobs)
             # loads nothing on the decoder, which recomputes past its local hit.
             and not request.skip_reading_external_kv
