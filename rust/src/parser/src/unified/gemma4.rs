@@ -10,9 +10,9 @@ use winnow::prelude::*;
 use winnow::stream::{Partial, Stream};
 use winnow::token::{literal, take_till, take_until};
 
-use super::{Result, UnifiedParser, UnifiedParserOutput, token_id};
+use super::{Result, UnifiedParser, UnifiedParserError, UnifiedParserOutput, token_id};
 use crate::reasoning::last_reasoning_boundary;
-use crate::tool::{Tool, ToolCallDelta};
+use crate::tool::{JsonStyle, Tool, ToolCallDelta};
 use crate::unified::parsing_failed;
 use crate::utils::recursion::ParserRecursionGuard;
 use crate::utils::{incomplete, parse_buffered_event, partial_prefix_len, safe_text_len_mul};
@@ -178,7 +178,9 @@ impl Gemma4UnifiedParser {
         args: &Map<String, Value>,
         output: &mut UnifiedParserOutput,
     ) -> Result<()> {
-        let arguments = serde_json::to_string(args)
+        // The template renders its own object literal, not JSON, so the no-JSON default applies.
+        let arguments = JsonStyle::Spaced
+            .to_string(args)
             .map_err(|error| parsing_failed!("failed to serialize arguments: {}", error))?;
 
         output.push_call(ToolCallDelta {
@@ -264,7 +266,7 @@ impl UnifiedParser for Gemma4UnifiedParser {
             Gemma4Mode::Text => output.push_text(self.buffer.take().text),
             Gemma4Mode::Reasoning => output.push_reasoning(self.buffer.take()),
             Gemma4Mode::Header | Gemma4Mode::ToolCall { .. } => {
-                return Err(parsing_failed!("incomplete Gemma4 tool call"));
+                return Err(UnifiedParserError::IncompleteToolCall { parser: "Gemma4" });
             }
         }
 

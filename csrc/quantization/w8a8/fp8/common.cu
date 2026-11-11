@@ -53,6 +53,30 @@ __device__ __forceinline__ float block_reduce_max(float v, float* warp_max) {
   return v;
 }
 
+// Scalar and 16-wide ops for vectorize_with_alignment.
+template <typename scalar_t, typename fp8_type, bool is_scale_inverted>
+struct ScaledFp8QuantOp {
+  float scale;
+
+  __device__ __forceinline__ void operator()(fp8_type& dst,
+                                             const scalar_t& src) const {
+    dst = scaled_fp8_conversion<is_scale_inverted, fp8_type>(
+        static_cast<float>(src), scale);
+  }
+
+  __device__ __forceinline__ void operator()(
+      fp8_quant_vec_t<fp8_type>& dst,
+      const fp8_quant_vec_t<scalar_t>& src) const {
+    float val[kFp8QuantVecSize];
+#pragma unroll
+    for (int i = 0; i < kFp8QuantVecSize; ++i) {
+      val[i] = static_cast<float>(src.val[i]);
+    }
+    scaled_fp8_conversion_vec<is_scale_inverted, fp8_type, kFp8QuantVecSize>(
+        dst.val, val, scale);
+  }
+};
+
 }  // namespace
 
 // STRIDE_I_ZERO: true if scale_stride_i == 0 (per-tensor or per-channel)
@@ -77,7 +101,7 @@ __global__ void scaled_fp8_quant_kernel_strided_group_shape(
                     : static_cast<int>(token_idx) / group_m * scale_stride_i;
 
   auto get_inv_scale = [&](int gj) {
-    return 1.0f / scale[scale_row_base + gj * scale_stride_j];
+    return fp8_reciprocal_scale(scale[scale_row_base + gj * scale_stride_j]);
   };
 
   int cached_gj = -1;
@@ -93,12 +117,8 @@ __global__ void scaled_fp8_quant_kernel_strided_group_shape(
   constexpr int VEC_SIZE = 16;  // FP8 so vectorize to 128 bits
   auto scaled_fp8_conversion_vectorized = [&](const scalar_t* in, fp8_type* out,
                                               int size, float inv_scale) {
-    vectorize_with_alignment<VEC_SIZE>(
-        in, out, size, tid, blockDim.x,
-        [=] __device__(fp8_type & dst, const scalar_t& src) {
-          dst = scaled_fp8_conversion<true, fp8_type>(static_cast<float>(src),
-                                                      inv_scale);
-        });
+    const ScaledFp8QuantOp<scalar_t, fp8_type, true> op{inv_scale};
+    vectorize_with_alignment<VEC_SIZE>(in, out, size, tid, blockDim.x, op, op);
   };
 
   if (STRIDE_J_ZERO && hidden_size % VEC_SIZE == 0) {
@@ -191,13 +211,10 @@ __global__ void scaled_fp8_quant_kernel_strided_dynamic(
   const scalar_t* token_in = input + token_idx * in_row_stride;
   fp8_type* token_out = out + token_idx * out_row_stride;
 
-  const float reciprocal_scale = 1.0f / (*scale);
-  vectorize_with_alignment<16>(
-      token_in, token_out, hidden_size, tid, blockDim.x,
-      [=] __device__(fp8_type & dst, const scalar_t& src) {
-        dst = scaled_fp8_conversion<true, fp8_type>(static_cast<float>(src),
-                                                    reciprocal_scale);
-      });
+  const ScaledFp8QuantOp<scalar_t, fp8_type, true> op{
+      fp8_reciprocal_scale(*scale)};
+  vectorize_with_alignment<kFp8QuantVecSize>(token_in, token_out, hidden_size,
+                                             tid, blockDim.x, op, op);
 }
 
 template <typename scalar_t, typename fp8_type>
@@ -236,12 +253,9 @@ __global__ void dynamic_per_token_scaled_fp8_quant_kernel_strided(
   __syncthreads();
 
   // 2) quantize
-  vectorize_with_alignment<16>(
-      token_in, token_out, hidden_size, tid, blockDim.x,
-      [=] __device__(fp8_type & dst, const scalar_t& src) {
-        dst = scaled_fp8_conversion<false, fp8_type>(static_cast<float>(src),
-                                                     token_scale);
-      });
+  const ScaledFp8QuantOp<scalar_t, fp8_type, false> op{token_scale};
+  vectorize_with_alignment<kFp8QuantVecSize>(token_in, token_out, hidden_size,
+                                             tid, blockDim.x, op, op);
 }
 
 }  // namespace vllm

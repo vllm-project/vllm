@@ -3,8 +3,17 @@
 from collections.abc import Callable
 
 import pytest
+import torch
+from torch.utils._python_dispatch import TorchDispatchMode
 
-from vllm.config import PassConfig
+from vllm import SamplingParams
+from vllm.config import (
+    CompilationConfig,
+    CompilationMode,
+    CUDAGraphMode,
+    PassConfig,
+    set_current_vllm_config,
+)
 from vllm.platforms import current_platform
 from vllm.utils.flashinfer import is_flashinfer_fp8_blockscale_gemm_supported
 
@@ -133,6 +142,13 @@ def test_tp1_fp8_fusions(
         # enabling AITER.
         matches_check.remove("norm_rope_fusion")
 
+    if current_platform.is_xpu():
+        # XPU defaults to the weight-only W8A16 FP8 path, which leaves no
+        # activation quant op for rms+quant fusion; opt into W8A8 instead.
+        model_kwargs["linear_backend"] = "xpu"
+        # Attention + quant fusion is not supported on XPU.
+        matches = matches._replace(attn_quant_fusion=0)
+
     run_e2e_fusion_test(
         model_name,
         matches,
@@ -205,6 +221,86 @@ def test_tp1_fp4_fusions(
     )
 
 
+def _check_mixed_precision_mlp_fusion(worker) -> list[str]:
+    from vllm.model_executor.layers.fusion.quant_activation import (
+        QuantizedActivation,
+        get_input_quant_key,
+    )
+    from vllm.model_executor.layers.quantization.utils.quant_utils import kNvfp4Dynamic
+    from vllm.model_executor.models.qwen2_moe import Qwen2MoeMLP
+
+    class CountNvfp4Fusion(TorchDispatchMode):
+        def __init__(self):
+            super().__init__()
+            self.count = 0
+
+        def __torch_dispatch__(self, func, types, args=(), kwargs=None):
+            if func == torch.ops._C.silu_and_mul_nvfp4_quant.default:
+                self.count += 1
+            return func(*args, **(kwargs or {}))
+
+    config = worker.vllm_config
+    assert config.model_config.quantization == "modelopt_mixed"
+    assert config.compilation_config.mode == CompilationMode.NONE
+    checked = []
+    generator = torch.Generator(device="cuda").manual_seed(0)
+    with set_current_vllm_config(config), torch.inference_mode():
+        for name, mlp in worker.get_model().named_modules():
+            if not isinstance(mlp, Qwen2MoeMLP):
+                continue
+            assert get_input_quant_key(mlp.down_proj) == kNvfp4Dynamic, name
+            for num_tokens in (1, 17):
+                captured: dict[str, torch.Tensor | QuantizedActivation] = {}
+
+                def capture_gate_up(module, args, output, captured=captured):
+                    captured["gate_up"] = output[0]
+
+                def capture_down_input(module, args, captured=captured):
+                    captured["quantized"] = args[0]
+
+                x = torch.randn(
+                    num_tokens,
+                    mlp.gate_up_proj.input_size_per_partition,
+                    dtype=config.model_config.dtype,
+                    device="cuda",
+                    generator=generator,
+                )
+                counter = CountNvfp4Fusion()
+                with (
+                    mlp.gate_up_proj.register_forward_hook(capture_gate_up),
+                    mlp.down_proj.register_forward_pre_hook(capture_down_input),
+                    counter,
+                ):
+                    actual = mlp(x)
+
+                assert counter.count == 1, (name, num_tokens, counter.count)
+                activation = captured["quantized"]
+                assert isinstance(activation, QuantizedActivation), name
+                assert activation.quant_key == kNvfp4Dynamic, name
+                assert activation.orig_dtype == x.dtype, name
+                assert activation.orig_shape == (
+                    num_tokens,
+                    mlp.down_proj.input_size_per_partition,
+                ), name
+                assert activation.data.dtype == torch.uint8, name
+                assert activation.data.shape == (
+                    num_tokens,
+                    mlp.down_proj.input_size_per_partition // 2,
+                ), name
+
+                expected, _ = mlp.down_proj(mlp.act_fn(captured["gate_up"]))
+                # Match the existing NVFP4 compiler-fusion correctness criterion:
+                # the unfused chain rounds the SiLU output before quantization.
+                torch.testing.assert_close(actual, expected, atol=1e-1, rtol=1e-1)
+            checked.append(name)
+    return checked
+
+
+class Nvfp4FusionTestWorkerExtension:
+    def check_mixed_precision_mlp_fusion(self) -> list[str]:
+        return _check_mixed_precision_mlp_fusion(self)
+
+
 @pytest.mark.parametrize(
     "model_name, matches_fn, model_kwargs, hf_overrides", [qwen3_8_27b_mixed_fp4]
 )
@@ -220,15 +316,27 @@ def test_tp1_fp4_mixed_precision_act_fusion(
     attn_backend: AttentionBackendCase,
     n_layers: int,
     inductor_graph_partition: bool,
-    run_e2e_fusion_test,
+    vllm_runner,
+    monkeypatch,
 ):
-    """Act+quant fusion matches on a MIXED_PRECISION NVFP4 checkpoint."""
-    model_kwargs["hf_overrides"] = hf_overrides(n_layers)
-    model_kwargs["load_format"] = "dummy"
-    model_kwargs["max_model_len"] = 1024
-    model_kwargs["enable_flashinfer_autotune"] = False
-
-    compilation_config = dict(
+    """Every mixed-precision Qwen MLP fuses NVFP4 activation quantization."""
+    monkeypatch.setenv("VLLM_WORKER_MULTIPROC_METHOD", "spawn")
+    monkeypatch.setenv("VLLM_USE_DEEP_GEMM", "0")
+    model_kwargs = {
+        **attn_backend.model_kwargs,
+        **model_kwargs,
+        "hf_overrides": hf_overrides(n_layers),
+        "load_format": "dummy",
+        "max_model_len": 1024,
+        "max_num_batched_tokens": 8192,
+        "enable_flashinfer_autotune": False,
+        "attention_config": {"backend": attn_backend.backend.name},
+        "worker_extension_cls": f"{__name__}.Nvfp4FusionTestWorkerExtension",
+    }
+    # NVIDIA Qwen uses explicit fusions, even when compilation is requested.
+    compilation_config = CompilationConfig(
+        mode=CompilationMode.VLLM_COMPILE,
+        cudagraph_mode=CUDAGraphMode.NONE,
         use_inductor_graph_partition=inductor_graph_partition,
         pass_config=PassConfig(
             fuse_norm_quant=False,
@@ -237,12 +345,25 @@ def test_tp1_fp4_mixed_precision_act_fusion(
             enable_qk_norm_rope_fusion=False,
         ),
     )
-
-    run_e2e_fusion_test(
+    with vllm_runner(
         model_name,
-        matches_fn(n_layers),
-        model_kwargs,
-        attn_backend,
-        compilation_config,
-        ["act_quant_fusion"],
-    )
+        compilation_config=compilation_config,
+        tensor_parallel_size=1,
+        disable_custom_all_reduce=True,
+        trust_remote_code=False,
+        enable_chunked_prefill=None,
+        block_size=None,
+        kernel_config={"enable_jit_warmup": True},
+        **model_kwargs,
+    ) as model:
+        model.llm.generate(
+            [
+                "Hello, my name is",
+                "The president of the United States is",
+                "The capital of France is",
+                "The future of AI is",
+            ],
+            SamplingParams(temperature=0),
+        )
+        (checked,) = model.collective_rpc("check_mixed_precision_mlp_fusion")
+    assert len(checked) == matches_fn(n_layers).act_quant_fusion, checked
