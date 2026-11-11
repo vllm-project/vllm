@@ -17,6 +17,7 @@
 
 mod config;
 mod hooks;
+mod native_output;
 mod output;
 mod request;
 mod types;
@@ -38,14 +39,14 @@ use vllm_engine_core::connectors::mooncake_store_scheduler::SavePinPolicy;
 use vllm_engine_core::sched::request::{Request, RequestStatus};
 use vllm_engine_core::sched::scheduler::{
     AuxOutputConnector, EcConnector, ErrorRequestIds, IdSetOrder, KvConnector, PauseState,
-    Scheduler, SchedulerError, StructuredOutput,
+    Scheduler, SchedulerError, StructuredOutput, UpdateOutput,
 };
 
 use self::hooks::{
     PyAuxOutputConnector, PyEcConnector, PyKvConnector, PyStructuredOutput, SchedulerContext,
 };
 use self::output::{
-    ExtraStats, counts_of, draft_token_ids_from_py, engine_core_outputs_to_py,
+    ExtraStats, ModelOutput, counts_of, draft_token_ids_from_py, engine_core_outputs_to_py,
     finish_scheduler_output, model_output_from_py, opaque_obj, scheduler_output_from_py,
     scheduler_output_to_py, scheduler_stats_to_py, write_back_drafts,
 };
@@ -58,6 +59,7 @@ use crate::nixl::RustNixlConnectorScheduler;
 
 pub fn register(m: &Bound<'_, PyModule>) -> PyResult<()> {
     m.add_class::<RustSchedulerCore>()?;
+    m.add_class::<native_output::EngineOutputWriter>()?;
     m.add_class::<SchedulerKvManagerView>()?;
     Ok(())
 }
@@ -133,9 +135,105 @@ pub struct RustSchedulerCore {
     /// The sessions with streaming-input updates queued: their Python
     /// requests' `streaming_queue` mirrors the Rust one.
     queued_sessions: FxHashSet<String>,
+    /// Where `update_from_output_native` sends the outputs.
+    output_writer: Option<Py<native_output::EngineOutputWriter>>,
 }
 
 impl RustSchedulerCore {
+    /// The part of `update_from_output` shared by both output paths: update
+    /// the scheduler, publish the KV cache events, and aggregate the
+    /// Python-side stats.
+    fn process_model_output<'py>(
+        &mut self,
+        py: Python<'py>,
+        scheduler_output: &Bound<'py, PyAny>,
+        model_runner_output: &Bound<'py, PyAny>,
+        perf_stats: Option<Bound<'py, PyAny>>,
+    ) -> PyResult<(UpdateOutput, ModelOutput<'py>, ExtraStats<'py>)> {
+        let so = match self.take_inflight(scheduler_output) {
+            Some(mut so) => {
+                // Set by `update_draft_token_ids_in_output`, or by a caller.
+                let invalid = scheduler_output.getattr(intern!(py, "num_invalid_spec_tokens"))?;
+                if !invalid.is_none() {
+                    so.num_invalid_spec_tokens = Some(counts_of(&invalid)?);
+                }
+                so
+            }
+            None => scheduler_output_from_py(scheduler_output)?,
+        };
+        let mo = model_output_from_py(model_runner_output)?;
+        let update = self.run(|s| s.update_from_output(&so, &mo.rust))?;
+        self.apply_session_updates(py)?;
+
+        // Worker-side KV connector stats, aggregated with the scheduler's.
+        let mut kv_connector_stats = None;
+        if !mo.kv_connector_output.is_none() {
+            let stats = mo.kv_connector_output.getattr(intern!(py, "kv_connector_stats"))?;
+            if !stats.is_none() {
+                kv_connector_stats = Some(stats);
+            }
+        }
+        if let Some(sched_stats) = &update.scheduler_kv_connector_stats {
+            let sched_stats = opaque_obj(py, sched_stats);
+            kv_connector_stats = Some(match kv_connector_stats {
+                Some(stats) => stats.call_method1(intern!(py, "aggregate"), (sched_stats,))?,
+                None => sched_stats,
+            });
+        }
+
+        // Publish the KV cache events of the manager and the connector.
+        let mut events = None;
+        if !update.kv_cache_events.is_empty() {
+            events = Some(crate::kv_cache::events::events_to_py(
+                py,
+                update.kv_cache_events.clone(),
+            )?);
+        }
+        if let Some(connector_events) = &update.connector_kv_cache_events {
+            let connector_events = opaque_obj(py, connector_events);
+            match &events {
+                Some(events) => {
+                    events.call_method1(intern!(py, "extend"), (connector_events,))?;
+                }
+                None => events = Some(connector_events.cast_into::<PyList>()?),
+            }
+        }
+        if let Some(events) = events.filter(|e| !e.is_empty()) {
+            let types = types(py)?;
+            let kwargs = PyDict::new(py);
+            kwargs.set_item("ts", types.time.bind(py).call_method0(intern!(py, "time"))?)?;
+            kwargs.set_item("events", events)?;
+            let batch = types.kv_event_batch.bind(py).call((), Some(&kwargs))?;
+            self.kv_event_publisher
+                .bind(py)
+                .call_method1(intern!(py, "publish"), (batch,))?;
+        }
+
+        // Worker-side EC connector stats, aggregated with the scheduler's.
+        let mut ec_connector_stats = None;
+        if mo.ec_connector_output.is_truthy()? {
+            let stats = mo.ec_connector_output.getattr(intern!(py, "ec_connector_stats"))?;
+            if !stats.is_none() {
+                ec_connector_stats = Some(stats);
+            }
+        }
+        if let Some(sched_stats) = &update.scheduler_ec_connector_stats {
+            let sched_stats = opaque_obj(py, sched_stats);
+            ec_connector_stats = Some(match ec_connector_stats {
+                Some(stats) => stats.call_method1(intern!(py, "aggregate"), (sched_stats,))?,
+                None => sched_stats,
+            });
+        }
+
+        let extra = ExtraStats {
+            kv_connector_stats,
+            cudagraph_stats: Some(mo.cudagraph_stats.clone()).filter(|s| !s.is_none()),
+            perf_stats: perf_stats.filter(|s| !s.is_none()),
+            ec_connector_stats,
+        };
+        Ok((update, mo, extra))
+    }
+
     /// Run `f` on the scheduler: the KV cache manager is unreachable from
     /// Python meanwhile (except from the hooks that receive it), and a
     /// Python exception raised by a hook, or a panic, becomes the call's
@@ -480,6 +578,7 @@ impl RustSchedulerCore {
             connector_impl,
             inflight: VecDeque::new(),
             queued_sessions: FxHashSet::default(),
+            output_writer: None,
         };
         let manager = this.inner.kv_cache_manager_mut() as *mut _;
         this.shared.kv.set(manager);
@@ -617,93 +716,53 @@ impl RustSchedulerCore {
         model_runner_output: &Bound<'py, PyAny>,
         perf_stats: Option<Bound<'py, PyAny>>,
     ) -> PyResult<Bound<'py, PyDict>> {
-        let so = match self.take_inflight(scheduler_output) {
-            Some(mut so) => {
-                // Set by `update_draft_token_ids_in_output`, or by a caller.
-                let invalid = scheduler_output.getattr(intern!(py, "num_invalid_spec_tokens"))?;
-                if !invalid.is_none() {
-                    so.num_invalid_spec_tokens = Some(counts_of(&invalid)?);
-                }
-                so
-            }
-            None => scheduler_output_from_py(scheduler_output)?,
-        };
-        let mo = model_output_from_py(model_runner_output)?;
-        let update = self.run(|s| s.update_from_output(&so, &mo.rust))?;
-        self.apply_session_updates(py)?;
-
-        // Worker-side KV connector stats, aggregated with the scheduler's.
-        let mut kv_connector_stats = None;
-        if !mo.kv_connector_output.is_none() {
-            let stats = mo.kv_connector_output.getattr(intern!(py, "kv_connector_stats"))?;
-            if !stats.is_none() {
-                kv_connector_stats = Some(stats);
-            }
-        }
-        if let Some(sched_stats) = &update.scheduler_kv_connector_stats {
-            let sched_stats = opaque_obj(py, sched_stats);
-            kv_connector_stats = Some(match kv_connector_stats {
-                Some(stats) => stats.call_method1(intern!(py, "aggregate"), (sched_stats,))?,
-                None => sched_stats,
-            });
-        }
-
-        // Publish the KV cache events of the manager and the connector.
-        let mut events = None;
-        if !update.kv_cache_events.is_empty() {
-            events = Some(crate::kv_cache::events::events_to_py(
-                py,
-                update.kv_cache_events.clone(),
-            )?);
-        }
-        if let Some(connector_events) = &update.connector_kv_cache_events {
-            let connector_events = opaque_obj(py, connector_events);
-            match &events {
-                Some(events) => {
-                    events.call_method1(intern!(py, "extend"), (connector_events,))?;
-                }
-                None => events = Some(connector_events.cast_into::<PyList>()?),
-            }
-        }
-        if let Some(events) = events.filter(|e| !e.is_empty()) {
-            let types = types(py)?;
-            let kwargs = PyDict::new(py);
-            kwargs.set_item("ts", types.time.bind(py).call_method0(intern!(py, "time"))?)?;
-            kwargs.set_item("events", events)?;
-            let batch = types.kv_event_batch.bind(py).call((), Some(&kwargs))?;
-            self.kv_event_publisher
-                .bind(py)
-                .call_method1(intern!(py, "publish"), (batch,))?;
-        }
-
-        // Worker-side EC connector stats, aggregated with the scheduler's.
-        let mut ec_connector_stats = None;
-        if mo.ec_connector_output.is_truthy()? {
-            let stats = mo.ec_connector_output.getattr(intern!(py, "ec_connector_stats"))?;
-            if !stats.is_none() {
-                ec_connector_stats = Some(stats);
-            }
-        }
-        if let Some(sched_stats) = &update.scheduler_ec_connector_stats {
-            let sched_stats = opaque_obj(py, sched_stats);
-            ec_connector_stats = Some(match ec_connector_stats {
-                Some(stats) => stats.call_method1(intern!(py, "aggregate"), (sched_stats,))?,
-                None => sched_stats,
-            });
-        }
-
-        let extra = ExtraStats {
-            kv_connector_stats,
-            cudagraph_stats: Some(mo.cudagraph_stats.clone()).filter(|s| !s.is_none()),
-            perf_stats: perf_stats.filter(|s| !s.is_none()),
-            ec_connector_stats,
-        };
+        let (update, mo, extra) =
+            self.process_model_output(py, scheduler_output, model_runner_output, perf_stats)?;
         let out = {
             let table = self.shared.table.lock().unwrap();
             engine_core_outputs_to_py(py, &update, &table, &mo, extra)?
         };
         self.drain_removed(py)?;
         Ok(out)
+    }
+
+    /// Send the outputs through the native output path (`EngineOutputWriter`)
+    /// instead of returning them.
+    fn set_output_writer(&mut self, writer: Py<native_output::EngineOutputWriter>) {
+        self.output_writer = Some(writer);
+    }
+
+    /// `update_from_output` on the native output path: the outputs, with
+    /// `weight_version` set, go to the output writer.
+    #[pyo3(signature = (scheduler_output, model_runner_output, perf_stats=None, weight_version=None))]
+    fn update_from_output_native<'py>(
+        &mut self,
+        py: Python<'py>,
+        scheduler_output: &Bound<'py, PyAny>,
+        model_runner_output: &Bound<'py, PyAny>,
+        perf_stats: Option<Bound<'py, PyAny>>,
+        weight_version: Option<String>,
+    ) -> PyResult<()> {
+        let writer = (self.output_writer.as_ref())
+            .ok_or_else(|| PyRuntimeError::new_err("no output writer is set"))?
+            .get()
+            .inner
+            .clone();
+        let (update, mo, extra) =
+            self.process_model_output(py, scheduler_output, model_runner_output, perf_stats)?;
+        {
+            let table = self.shared.table.lock().unwrap();
+            native_output::send_outputs(
+                py,
+                &writer,
+                &update,
+                &table,
+                &mo,
+                extra,
+                weight_version.as_deref(),
+            )?;
+        }
+        self.drain_removed(py)
     }
 
     fn get_grammar_bitmask<'py>(

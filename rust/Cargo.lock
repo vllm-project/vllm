@@ -5847,11 +5847,15 @@ dependencies = [
 name = "vllm-engine-core-py"
 version = "0.1.0"
 dependencies = [
+ "bytes",
  "indexmap 2.13.0",
  "pyo3",
  "rustc-hash 1.1.0",
+ "serde",
  "thiserror-ext",
  "vllm-engine-core",
+ "vllm-engine-core-client",
+ "vllm-engine-core-io",
 ]
 
 [[package]]

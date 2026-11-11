@@ -253,6 +253,9 @@ class EngineCore:
         self.step_fn = (
             self.step if self.batch_queue is None else self.step_with_batch_queue
         )
+        # Whether the scheduler sends the request outputs itself
+        # (`VLLM_RUST_CORE_NATIVE_IO`, set up by `EngineCoreProc`).
+        self.native_output = False
         scheduler_config = vllm_config.scheduler_config
         self.async_scheduling = scheduler_config.async_scheduling
         self.prefill_schedule_interval = scheduler_config.prefill_schedule_interval
@@ -709,6 +712,26 @@ class EngineCore:
         for eco in outputs.values():
             eco.weight_version = self._weight_version
 
+    def _update_from_output(
+        self,
+        scheduler_output: SchedulerOutput,
+        model_output: ModelRunnerOutput,
+        iteration_details: SchedulerIterationDetails | None,
+    ) -> dict[int, EngineCoreOutputs]:
+        if self.native_output:
+            # The scheduler sends the outputs. The Rust frontend, the only
+            # client of the native output path, reads no iteration details.
+            self.scheduler.update_from_output_native(  # type: ignore[attr-defined]
+                scheduler_output, model_output, self._weight_version
+            )
+            return {}
+        engine_core_outputs = self.scheduler.update_from_output(
+            scheduler_output, model_output
+        )
+        self._attach_iteration_details(engine_core_outputs, iteration_details)
+        self._attach_weight_version(engine_core_outputs)
+        return engine_core_outputs
+
     def _should_throttle_prefills(self) -> bool:
         """Whether to defer prefills this step, to run them every Nth step.
         Overridden by the DP engine core to align across ranks."""
@@ -741,11 +764,9 @@ class EngineCore:
         # Before processing the model output, process any aborts that happened
         # during the model execution.
         self._process_aborts_queue()
-        engine_core_outputs = self.scheduler.update_from_output(
-            scheduler_output, model_output
+        engine_core_outputs = self._update_from_output(
+            scheduler_output, model_output, iteration_details
         )
-        self._attach_iteration_details(engine_core_outputs, iteration_details)
-        self._attach_weight_version(engine_core_outputs)
 
         return engine_core_outputs, scheduler_output.total_num_scheduled_tokens > 0
 
@@ -855,11 +876,9 @@ class EngineCore:
         # Before processing the model output, process any aborts that happened
         # during the model execution.
         self._process_aborts_queue()
-        engine_core_outputs = self.scheduler.update_from_output(
-            scheduler_output, model_output
+        engine_core_outputs = self._update_from_output(
+            scheduler_output, model_output, iteration_details
         )
-        self._attach_iteration_details(engine_core_outputs, iteration_details)
-        self._attach_weight_version(engine_core_outputs)
 
         # NOTE(nick): We can either handle the deferred tasks here or save
         # in a field and do it immediately once step_with_batch_queue is
@@ -1447,16 +1466,19 @@ class EngineCoreProc(EngineCore):
             )
             input_thread.start()
 
-            self.output_thread = threading.Thread(
-                target=self.process_output_sockets,
-                args=(
-                    addresses.outputs,
-                    addresses.coordinator_output,
-                    self.engine_index,
-                ),
-                daemon=True,
-            )
-            self.output_thread.start()
+            if self._use_native_output(vllm_config):
+                self.output_thread = self._start_native_output(addresses)
+            else:
+                self.output_thread = threading.Thread(
+                    target=self.process_output_sockets,
+                    args=(
+                        addresses.outputs,
+                        addresses.coordinator_output,
+                        self.engine_index,
+                    ),
+                    daemon=True,
+                )
+                self.output_thread.start()
 
             # Don't complete handshake until DP coordinator ready message is
             # received.
@@ -1471,6 +1493,35 @@ class EngineCoreProc(EngineCore):
                 refusal := self.checkpoint_prepare()
             ):
                 raise RuntimeError(refusal)
+
+    def _use_native_output(self, vllm_config: VllmConfig) -> bool:
+        if not envs.VLLM_RUST_CORE_NATIVE_IO:
+            return False
+        from vllm.v1.engine.rust_core_io import native_output_unsupported_reason
+
+        reason = native_output_unsupported_reason(vllm_config, self.scheduler)
+        if reason is not None:
+            logger.info("Not using the native output path: %s.", reason)
+            return False
+        return True
+
+    def _start_native_output(self, addresses: EngineZmqAddresses) -> Any:
+        """Start the native output thread in place of `process_output_sockets`;
+        returns its handle, which `join`s like the thread."""
+        from vllm._rust_core import EngineOutputWriter
+        from vllm.v1.engine.rust_core_io import NativeOutputQueue
+
+        writer = EngineOutputWriter(
+            addresses.outputs,
+            addresses.coordinator_output,
+            self.engine_index,
+            envs.VLLM_MSGPACK_ZERO_COPY_THRESHOLD,
+        )
+        self.scheduler.set_output_writer(writer)  # type: ignore[attr-defined]
+        self.output_queue = NativeOutputQueue(writer, self.engine_index)  # type: ignore[assignment]
+        self.native_output = True
+        logger.info("Using the native output path.")
+        return writer
 
     @contextmanager
     def _perform_handshakes(

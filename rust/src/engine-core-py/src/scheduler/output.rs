@@ -402,11 +402,11 @@ fn kv_connector_output_from_py(output: &Bound<'_, PyAny>) -> PyResult<KvConnecto
 /// converted and the payloads the outputs are sliced from kept.
 pub struct ModelOutput<'py> {
     pub rust: ModelRunnerOutput,
-    logprobs: Bound<'py, PyAny>,
-    sampling_masks: Bound<'py, PyAny>,
+    pub logprobs: Bound<'py, PyAny>,
+    pub sampling_masks: Bound<'py, PyAny>,
     pooler_output: Bound<'py, PyAny>,
-    prompt_logprobs: Option<Bound<'py, PyDict>>,
-    prompt_token_id_logprobs: Option<Bound<'py, PyDict>>,
+    pub prompt_logprobs: Option<Bound<'py, PyDict>>,
+    pub prompt_token_id_logprobs: Option<Bound<'py, PyDict>>,
     pub kv_connector_output: Bound<'py, PyAny>,
     pub ec_connector_output: Bound<'py, PyAny>,
     pub cudagraph_stats: Bound<'py, PyAny>,
@@ -475,7 +475,7 @@ pub fn model_output_from_py<'py>(output: &Bound<'py, PyAny>) -> PyResult<ModelOu
     })
 }
 
-fn kv_transfer_params_to_py<'py>(
+pub(super) fn kv_transfer_params_to_py<'py>(
     py: Python<'py>,
     params: &KvTransferParams,
 ) -> PyResult<Bound<'py, PyAny>> {

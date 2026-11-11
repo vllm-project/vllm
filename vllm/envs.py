@@ -19,6 +19,7 @@ if TYPE_CHECKING:
     VLLM_USE_FASTOKENS: bool = False
     VLLM_USE_RUST_CORE: bool = False
     VLLM_RUST_CORE_NATIVE_HOOKS: bool = True
+    VLLM_RUST_CORE_NATIVE_IO: bool = False
     VLLM_RINGBUFFER_WARNING_INTERVAL: int = 60
     VLLM_NCCL_SO_PATH: str | None = None
     LD_LIBRARY_PATH: str | None = None
@@ -798,6 +799,12 @@ environment_variables: dict[str, Callable[[], Any]] = {
     # Python ones. Defaults to 1; 0 keeps the Python collaborators.
     "VLLM_RUST_CORE_NATIVE_HOOKS": lambda: bool(
         int(os.getenv("VLLM_RUST_CORE_NATIVE_HOOKS", "1"))
+    ),
+    # Experimental, for the Rust frontend only. With the Rust scheduler, the
+    # engine core encodes and sends its outputs in Rust, in the Rust
+    # frontend's wire types, instead of building Python `EngineCoreOutputs`.
+    "VLLM_RUST_CORE_NATIVE_IO": lambda: bool(
+        int(os.getenv("VLLM_RUST_CORE_NATIVE_IO", "0"))
     ),
     # Interval in seconds to log a warning message when the ring buffer is full
     "VLLM_RINGBUFFER_WARNING_INTERVAL": lambda: int(
@@ -2509,6 +2516,7 @@ def compile_factors() -> dict[str, object]:
         "VLLM_USE_MODELSCOPE",
         "VLLM_USE_RUST_CORE",
         "VLLM_RUST_CORE_NATIVE_HOOKS",
+        "VLLM_RUST_CORE_NATIVE_IO",
         "VLLM_RINGBUFFER_WARNING_INTERVAL",
         "VLLM_DEBUG_DUMP_PATH",
         "VLLM_PORT",

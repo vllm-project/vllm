@@ -10,8 +10,12 @@ name = "_rust_core"
 crate-type = ["cdylib"]
 
 [dependencies]
+bytes = { workspace = true }
 indexmap = { workspace = true }
 pyo3 = { workspace = true }
 rustc-hash = { workspace = true }
+serde = { workspace = true }
 thiserror-ext = { workspace = true }
 vllm-engine-core = { workspace = true }
+vllm-engine-core-client = { workspace = true }
+vllm-engine-core-io = { workspace = true }

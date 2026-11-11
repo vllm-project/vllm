@@ -455,6 +455,26 @@ class RustScheduler(SchedulerInterface):
             scheduler_output, model_runner_output, perf_stats
         )
 
+    def set_output_writer(self, writer: Any) -> None:
+        """Send the outputs through the native output path
+        (`VLLM_RUST_CORE_NATIVE_IO`): the `EngineOutputWriter` of the engine."""
+        self._core.set_output_writer(writer)
+
+    def update_from_output_native(
+        self,
+        scheduler_output: SchedulerOutput,
+        model_runner_output: ModelRunnerOutput,
+        weight_version: str,
+    ) -> None:
+        """`update_from_output`, sending the outputs through the output
+        writer, with `weight_version` set, instead of returning them."""
+        perf_stats = None
+        if self.perf_metrics and self.perf_metrics.is_enabled():
+            perf_stats = self.perf_metrics.get_step_perf_stats_per_gpu(scheduler_output)
+        self._core.update_from_output_native(
+            scheduler_output, model_runner_output, perf_stats, weight_version
+        )
+
     def update_draft_token_ids(self, draft_token_ids: DraftTokenIds) -> None:
         self._core.update_draft_token_ids(draft_token_ids)
 
