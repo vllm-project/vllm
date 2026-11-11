@@ -283,7 +283,7 @@ async def serve_http(
 
             # EngineCore aborts what is left at the drain deadline; give it time
             # to deliver those aborts and tear down before it is killed.
-            engine_timeout = timeout + _ENGINE_TEARDOWN_S if timeout > 0 else timeout
+            engine_timeout = (timeout + _ENGINE_TEARDOWN_S) if timeout > 0 else timeout
             await loop.run_in_executor(
                 None, partial(engine_client.shutdown, timeout=engine_timeout)
             )
