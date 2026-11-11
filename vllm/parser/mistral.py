@@ -4,6 +4,7 @@
 from __future__ import annotations
 
 import functools
+import inspect
 import json
 from collections.abc import Sequence
 from enum import Enum, auto
@@ -16,6 +17,18 @@ import regex as re
 from mistral_common.exceptions import InvalidRequestException
 from mistral_common.protocol.instruct.request import (
     ChatCompletionRequest as MistralChatCompletionRequest,
+)
+from mistral_common.protocol.instruct.tool_calls import (
+    NamedToolChoice as MistralNamedToolChoice,
+)
+from mistral_common.protocol.instruct.tool_calls import (
+    Tool as MistralTool,
+)
+from mistral_common.protocol.instruct.tool_calls import (
+    ToolChoice as MistralToolChoice,
+)
+from mistral_common.protocol.instruct.tool_calls import (
+    ToolChoiceEnum as MistralToolChoiceEnum,
 )
 from mistral_common.tokens.tokenizers.base import SpecialTokens
 from pydantic import Field, ValidationError
@@ -98,6 +111,116 @@ class MistralToolCall(ToolCall):
     @staticmethod
     def is_valid_id(id: str) -> bool:
         return id.isalnum() and len(id) == 9
+
+
+def _accepts_force_tool_names(get_lark_from_jinja: Any) -> bool:
+    """True when this mistral-common build requires `force_tool_names`.
+
+    Added as a required argument in mistral-common 1.13. `unittest.mock`
+    wrappers keep the real function on `_mock_wraps`; inspect that so tests
+    that wrap the method still see the installed signature.
+    """
+    target = getattr(get_lark_from_jinja, "_mock_wraps", None) or get_lark_from_jinja
+    fn = getattr(target, "__func__", target)
+    try:
+        parameters = inspect.signature(fn).parameters
+    except (TypeError, ValueError):
+        return False
+    return "force_tool_names" in parameters
+
+
+def _json_schema_from_response_format(
+    response_format: dict[str, Any],
+) -> dict[str, Any] | None:
+    """Schema passed to `get_lark_from_jinja` on mistral-common < 1.13."""
+    fmt_type = response_format.get("type")
+    if fmt_type in (None, "text"):
+        return None
+    if fmt_type == "json_object":
+        return {"anyOf": [{"type": "object"}, {"type": "array"}]}
+    if fmt_type != "json_schema":
+        return None
+    spec = response_format.get("json_schema") or {}
+    schema = spec.get("schema", spec.get("json_schema"))
+    if isinstance(schema, str):
+        schema = json.loads(schema)
+    return schema or {"anyOf": [{"type": "object"}, {"type": "array"}]}
+
+
+def _render_mistral_lark_grammar(
+    grammar_factory: Any,
+    *,
+    template: str,
+    mode: MistralToolChoice,
+    tools: list[MistralTool] | None,
+    json_schema: dict[str, Any] | None,
+    parallel_tool_calls: bool | None,
+    json_only: bool,
+) -> str:
+    """Render a Lark grammar with `get_lark_from_jinja` across 1.12 and 1.13.
+
+    1.13 requires `force_tool_names` and rejects `NamedToolChoice` as `mode`.
+    A named choice is the 1.12 behavior of pinning that one tool:
+    `mode=required` over the matching tool with `force_tool_names=True`.
+    """
+    kwargs: dict[str, Any] = {
+        "template": template,
+        "mode": mode,
+        "tools": tools,
+        "json_schema": json_schema,
+        "parallel_tool_calls": (
+            True if parallel_tool_calls is None else parallel_tool_calls
+        ),
+        "json_only": json_only,
+    }
+    if _accepts_force_tool_names(grammar_factory.get_lark_from_jinja):
+        force_tool_names = isinstance(mode, MistralNamedToolChoice)
+        if force_tool_names:
+            chosen = mode.function.name
+            selected = [tool for tool in (tools or []) if tool.function.name == chosen]
+            if not selected:
+                raise ValueError(
+                    f"Tool choice requires the {chosen} tool but no tools "
+                    "with this name has been passed."
+                )
+            kwargs["tools"] = selected
+            kwargs["mode"] = MistralToolChoiceEnum.required
+        kwargs["force_tool_names"] = force_tool_names
+    return grammar_factory.get_lark_from_jinja(**kwargs)
+
+
+def _lark_grammar_for_request(
+    grammar_factory: Any,
+    *,
+    template: str,
+    mistral_request: MistralChatCompletionRequest,
+    parallel_tool_calls: bool | None,
+    response_format: dict[str, Any],
+) -> str | None:
+    """Build the request grammar for the installed mistral-common.
+
+    1.13+ exposes `get_grammar_for_chat_request`, which passes
+    `force_tool_names` itself. Older builds only have `get_lark_from_jinja`.
+    """
+    get_for_request = getattr(grammar_factory, "get_grammar_for_chat_request", None)
+    if get_for_request is not None:
+        return get_for_request(request=mistral_request, template=template)
+
+    json_schema = _json_schema_from_response_format(response_format)
+    tool_choice = mistral_request.tool_choice
+    if tool_choice == MistralToolChoiceEnum.none and json_schema is not None:
+        return grammar_factory.get_lark_for_json_schema(
+            template=template, json_schema=json_schema
+        )
+    return _render_mistral_lark_grammar(
+        grammar_factory,
+        template=template,
+        mode=tool_choice,
+        tools=mistral_request.tools,
+        json_schema=json_schema,
+        parallel_tool_calls=parallel_tool_calls,
+        json_only=False,
+    )
 
 
 def _mistral_response_format(request: ChatCompletionRequest) -> dict[str, Any]:
@@ -447,8 +570,12 @@ class MistralParser(ParserEngine):
                 ),
                 response_format=response_format,
             )
-            lark_grammar = grammar_factory.get_grammar_for_chat_request(
-                request=mistral_request, template=template
+            lark_grammar = _lark_grammar_for_request(
+                grammar_factory,
+                template=template,
+                mistral_request=mistral_request,
+                parallel_tool_calls=request.parallel_tool_calls,
+                response_format=response_format,
             )
         except (ValidationError, InvalidRequestException) as e:
             raise VLLMValidationError(str(e)) from e

@@ -8,6 +8,8 @@ the request's grammar is never rewritten and frontends that skip Python
 request validation get the same behavior.
 """
 
+import inspect
+
 import pytest
 from mistral_common.protocol.instruct.tool_calls import Tool, ToolChoiceEnum
 from transformers import AutoTokenizer
@@ -88,15 +90,18 @@ def test_auto_backend_selects_guidance_for_mistral_lark(mode: ToolChoiceEnum):
             "parameters": {"type": "object", "properties": {}},
         },
     }
-    grammar = factory.get_lark_from_jinja(
-        template=factory.select_jinja_template(),
-        mode=mode,
-        tools=[Tool.from_openai(tool)],
-        json_schema=None,
-        parallel_tool_calls=True,
-        json_only=False,
-        force_tool_names=False,
-    )
+    lark_kwargs = {
+        "template": factory.select_jinja_template(),
+        "mode": mode,
+        "tools": [Tool.from_openai(tool)],
+        "json_schema": None,
+        "parallel_tool_calls": True,
+        "json_only": False,
+    }
+    # mistral-common >= 1.13 requires this argument and has no default.
+    if "force_tool_names" in inspect.signature(factory.get_lark_from_jinja).parameters:
+        lark_kwargs["force_tool_names"] = False
+    grammar = factory.get_lark_from_jinja(**lark_kwargs)
     assert _validate(grammar, "auto", tokenizer)._backend == "guidance"
 
 

@@ -1894,6 +1894,79 @@ def test_adjust_request_grammar_factory(
     assert len(result.structured_outputs.grammar) > 0
 
 
+def test_render_lark_grammar_passes_force_tool_names_on_mistral_common_113() -> None:
+    """mistral-common 1.13 requires force_tool_names and rejects NamedToolChoice."""
+    from mistral_common.protocol.instruct.tool_calls import Tool as MistralTool
+
+    from vllm.parser.mistral import _render_mistral_lark_grammar
+
+    class _Factory113:
+        def get_lark_from_jinja(
+            self,
+            template: str,
+            mode: MistralToolChoiceEnum,
+            tools: list[MistralTool] | None,
+            json_schema: dict | None,
+            parallel_tool_calls: bool,
+            json_only: bool,
+            force_tool_names: bool,
+        ) -> str:
+            self.kwargs = {
+                "mode": mode,
+                "tools": tools,
+                "force_tool_names": force_tool_names,
+            }
+            return "start: body"
+
+    tool = MistralTool.from_openai(
+        {
+            "type": "function",
+            "function": {
+                "name": "get_weather",
+                "parameters": {"type": "object", "properties": {}},
+            },
+        }
+    )
+    other = MistralTool.from_openai(
+        {
+            "type": "function",
+            "function": {
+                "name": "get_time",
+                "parameters": {"type": "object", "properties": {}},
+            },
+        }
+    )
+    factory = _Factory113()
+    named = MistralNamedToolChoice.model_validate(
+        {"type": "function", "function": {"name": "get_weather"}}
+    )
+    grammar = _render_mistral_lark_grammar(
+        factory,
+        template="unused",
+        mode=named,
+        tools=[tool, other],
+        json_schema=None,
+        parallel_tool_calls=True,
+        json_only=False,
+    )
+    assert grammar == "start: body"
+    assert factory.kwargs["mode"] == MistralToolChoiceEnum.required
+    assert factory.kwargs["force_tool_names"] is True
+    assert [item.function.name for item in factory.kwargs["tools"]] == ["get_weather"]
+
+    _render_mistral_lark_grammar(
+        factory,
+        template="unused",
+        mode=MistralToolChoiceEnum.auto,
+        tools=[tool, other],
+        json_schema=None,
+        parallel_tool_calls=False,
+        json_only=False,
+    )
+    assert factory.kwargs["mode"] == MistralToolChoiceEnum.auto
+    assert factory.kwargs["force_tool_names"] is False
+
+
 def test_adjust_request_unsupported_grammar_for_tokenizer(mistral_tokenizer) -> None:
     with patch.object(
         type(mistral_tokenizer),
