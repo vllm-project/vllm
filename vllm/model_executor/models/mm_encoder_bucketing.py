@@ -86,6 +86,13 @@ _VERIFIED_FOR_BUCKETING: dict[str, str] = {
     "fireredasr2": LOSSLESS_BIT_EXACT,
     "cohere_asr": LOSSLESS_BIT_EXACT,
     "funasr": LOSSLESS_APPROX,
+    # Mask-less attention encoder (output frame counts exact, values
+    # approximate): frame counts derive from the true lengths and are
+    # strictly rung-independent, but values drift (encoder-output cos ~0.98
+    # vs the full window) because unmasked padding still participates in
+    # softmax. WER impact measured at +3 words / 7083 (see
+    # glmasr_validation.md).
+    "glmasr": LOSSLESS_OUTPUT_LE_1FRAME,
 }
 
 
