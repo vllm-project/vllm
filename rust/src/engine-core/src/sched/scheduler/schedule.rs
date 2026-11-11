@@ -19,6 +19,7 @@ use crate::sched::output::{
     CachedRequestData, EncoderInputUpdate, IterationDetails, NewRequestData, SchedulerOutput,
 };
 use crate::sched::py_int_set::PyIntSet;
+use crate::sched::request::PrefillStatsExt;
 use crate::sched::request::{EngineCoreEventType, Request, RequestStatus};
 use crate::sched::request_queue::SchedulingPolicy;
 use crate::sched::stats::KvFetchStage;

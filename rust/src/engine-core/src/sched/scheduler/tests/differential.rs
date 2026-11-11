@@ -379,7 +379,7 @@ pub(super) fn eco_json(update: &UpdateOutput) -> Value {
                     let stop_reason = match &o.stop_reason {
                         None => Value::Null,
                         Some(StopReason::TokenId(t)) => json!(t),
-                        Some(StopReason::Str(s)) => json!(s),
+                        Some(StopReason::Text(s)) => json!(s),
                     };
                     json!([
                         o.request_id,
@@ -419,7 +419,6 @@ pub(super) fn eco_json(update: &UpdateOutput) -> Value {
                         d.num_draft_tokens,
                         d.num_accepted_tokens,
                         d.num_accepted_tokens_per_pos,
-                        d.num_draft_tokens_per_pos,
                     ])),
                 ])
             });

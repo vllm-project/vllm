@@ -151,7 +151,7 @@ pub struct SpecDecodingStats {
 ///
 /// Original Python definition:
 /// <https://github.com/vllm-project/vllm/blob/d3af8c18317c0dc008d42e4367fbb9045cfb7bf6/vllm/v1/metrics/stats.py#L242-L273>
-#[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Serialize, Deserialize)]
 pub struct PrefillStats {
     /// Total number of tokens to be prefilled.
     #[serde(default)]

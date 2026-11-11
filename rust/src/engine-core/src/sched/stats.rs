@@ -13,6 +13,10 @@
 
 use indexmap::IndexMap;
 
+// The wire types of the spec decoding stats the scheduler reports.
+pub use vllm_engine_core_client::protocol::output::RequestSpecDecodeMetrics;
+pub use vllm_engine_core_client::protocol::stats::SpecDecodingStats;
+
 use crate::kv_cache::{KvCacheEvictionEvent, PrefixCacheStats};
 
 /// Stage of a request's async KV load (`KV_FETCH_STAGES`).
@@ -105,43 +109,28 @@ impl ConnectorPrefixCacheStats {
     }
 }
 
-/// Per-step iteration decoding stats from scheduler.
-///
-/// Each scheduler step, statistics on spec decoding performance are
-/// aggregated across requests by the scheduler and returned to the
-/// frontend in EngineCoreOutputs->SchedulerStats.
-#[derive(Clone, Debug, PartialEq, Eq)]
-pub struct SpecDecodingStats {
-    pub num_spec_tokens: usize,
-    pub num_drafts: usize,
-    pub num_draft_tokens: usize,
-    pub num_accepted_tokens: usize,
-    pub num_accepted_tokens_per_pos: Vec<usize>,
-    pub num_draft_tokens_per_pos: Vec<usize>,
-}
-
-impl SpecDecodingStats {
-    pub fn new(num_spec_tokens: usize) -> Self {
+/// Accumulating a step's `SpecDecodingStats`: statistics on spec decoding
+/// performance aggregated across requests, returned to the frontend in
+/// `EngineCoreOutputs.scheduler_stats`.
+#[easy_ext::ext(SpecDecodingStatsExt)]
+pub impl SpecDecodingStats {
+    fn new(num_spec_tokens: usize) -> Self {
         Self {
-            num_spec_tokens,
+            num_spec_tokens: num_spec_tokens as u64,
             num_drafts: 0,
             num_draft_tokens: 0,
             num_accepted_tokens: 0,
             num_accepted_tokens_per_pos: vec![0; num_spec_tokens],
-            num_draft_tokens_per_pos: vec![0; num_spec_tokens],
         }
     }
 
-    pub fn observe_draft(&mut self, num_draft_tokens: usize, num_accepted_tokens: usize) {
+    fn observe_draft(&mut self, num_draft_tokens: usize, num_accepted_tokens: usize) {
         self.num_drafts += 1;
-        self.num_draft_tokens += num_draft_tokens;
-        self.num_accepted_tokens += num_accepted_tokens;
-        assert!(num_accepted_tokens <= self.num_spec_tokens);
+        self.num_draft_tokens += num_draft_tokens as u64;
+        self.num_accepted_tokens += num_accepted_tokens as u64;
+        assert!(num_accepted_tokens as u64 <= self.num_spec_tokens);
         for i in 0..num_accepted_tokens {
             self.num_accepted_tokens_per_pos[i] += 1;
-        }
-        for i in 0..num_draft_tokens {
-            self.num_draft_tokens_per_pos[i] += 1;
         }
     }
 }
@@ -155,35 +144,16 @@ pub enum SpecDecodeMetricsLevel {
     Detailed,
 }
 
-/// Per-output-sequence speculative-decoding statistics accumulator.
-///
-/// Accumulates, over one sequence's verify steps, a histogram of accepted
-/// draft-token counts (`j`, draft-only) and the total number of proposed
-/// draft tokens. When `detailed` is requested it also records the ordered
-/// per-step accepted/proposed sequences (`summary` omits them).
-#[derive(Clone, Debug, PartialEq, Eq)]
-pub struct RequestSpecDecodeMetrics {
-    /// Configured `num_speculative_tokens` (the max `k`); also the
-    /// histogram's upper bound.
-    pub num_spec_tokens: usize,
-    /// Dense counts indexed by accepted draft tokens `j` (length
-    /// `num_spec_tokens + 1`).
-    pub histogram: Vec<usize>,
-    /// Total proposed draft tokens, after the grammar-invalidated
-    /// (`num_invalid_spec_tokens`) adjustment.
-    pub num_draft_tokens: usize,
-    /// Ordered accepted-draft count per verify step (`detailed` only; empty
-    /// otherwise).
-    pub per_step_accepted: Vec<usize>,
-    /// Ordered proposed-draft count per verify step (`detailed` only; empty
-    /// otherwise).
-    pub per_step_drafted: Vec<usize>,
-}
-
-impl RequestSpecDecodeMetrics {
-    pub fn new(num_spec_tokens: usize) -> Self {
+/// Accumulating one output sequence's `RequestSpecDecodeMetrics`, over its
+/// verify steps: a histogram of accepted draft-token counts (`j`,
+/// draft-only) and the total number of proposed draft tokens. When `detailed`
+/// is requested it also records the ordered per-step accepted/proposed
+/// sequences (`summary` omits them).
+#[easy_ext::ext(RequestSpecDecodeMetricsExt)]
+pub impl RequestSpecDecodeMetrics {
+    fn new(num_spec_tokens: usize) -> Self {
         Self {
-            num_spec_tokens,
+            num_spec_tokens: num_spec_tokens as u64,
             histogram: vec![0; num_spec_tokens + 1],
             num_draft_tokens: 0,
             per_step_accepted: Vec::new(),
@@ -191,12 +161,12 @@ impl RequestSpecDecodeMetrics {
         }
     }
 
-    pub fn observe(&mut self, num_draft_tokens: usize, num_accepted: usize, detailed: bool) {
+    fn observe(&mut self, num_draft_tokens: usize, num_accepted: usize, detailed: bool) {
         self.histogram[num_accepted] += 1;
-        self.num_draft_tokens += num_draft_tokens;
+        self.num_draft_tokens += num_draft_tokens as u64;
         if detailed {
-            self.per_step_accepted.push(num_accepted);
-            self.per_step_drafted.push(num_draft_tokens);
+            self.per_step_accepted.push(num_accepted as u64);
+            self.per_step_drafted.push(num_draft_tokens as u64);
         }
     }
 }

@@ -5779,6 +5779,7 @@ dependencies = [
 name = "vllm-engine-core"
 version = "0.1.0"
 dependencies = [
+ "easy-ext",
  "expect-test",
  "indexmap 2.13.0",
  "libc",
@@ -5788,6 +5789,7 @@ dependencies = [
  "sha2",
  "smallvec",
  "thiserror 2.0.18",
+ "vllm-engine-core-client",
  "xxhash-rust",
 ]
 

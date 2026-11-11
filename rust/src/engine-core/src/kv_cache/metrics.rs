@@ -11,12 +11,8 @@ use rustc_hash::FxHashMap;
 use super::block::BlockId;
 
 /// A sampled block's residency when it was evicted (`KVCacheEvictionEvent`).
-#[derive(Clone, Debug, PartialEq)]
-pub struct KvCacheEvictionEvent {
-    pub lifetime_seconds: f64,
-    pub idle_seconds: f64,
-    pub reuse_gaps_seconds: Vec<f64>,
-}
+// The wire type of a sampled eviction, which the scheduler reports.
+pub use vllm_engine_core_client::protocol::stats::KvCacheEvictionEvent;
 
 /// Tracks lifecycle metrics for a single KV cache block.
 #[derive(Clone, Debug)]

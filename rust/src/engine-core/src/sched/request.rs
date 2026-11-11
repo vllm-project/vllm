@@ -17,50 +17,16 @@ use std::sync::Arc;
 use std::sync::atomic::{AtomicU64, Ordering};
 use std::time::{SystemTime, UNIX_EPOCH};
 
+// The wire types of what the scheduler reports per request.
+pub use vllm_engine_core_client::protocol::output::{
+    EngineCoreEvent, EngineCoreEventType, EngineCoreFinishReason as FinishReason, StopReason,
+};
+pub use vllm_engine_core_client::protocol::stats::PrefillStats;
+
 use super::multimodal::MultiModalFeatureSpec;
 use super::stats::RequestSpecDecodeMetrics;
 use crate::hash::BlockHash;
 use crate::kv_cache::{EventExtraKey, EventExtraKeys, KvRequest};
-
-/// Reason a request finished - stop, length, abort, error, or repetition.
-///
-/// Int rather than Str for more compact serialization.
-///
-/// - stop - a stop string was emitted
-/// - length - max_tokens was consumed, or max_model_len was reached
-/// - abort - aborted by client
-/// - error - retryable request-level internal error (e.g., KV load failure).
-///   Invariant: always converted to 500 Internal Server Error.
-/// - repetition - repetitive token pattern detected (hallucination)
-#[derive(Clone, Copy, Debug, PartialEq, Eq, PartialOrd, Ord, Hash)]
-#[repr(u8)]
-pub enum FinishReason {
-    Stop = 0,
-    Length = 1,
-    Abort = 2,
-    Error = 3,
-    Repetition = 4,
-}
-
-impl FinishReason {
-    /// These are possible values of `RequestOutput.finish_reason`,
-    /// so form part of the external API.
-    pub fn as_str(self) -> &'static str {
-        match self {
-            Self::Stop => "stop",
-            Self::Length => "length",
-            Self::Abort => "abort",
-            Self::Error => "error",
-            Self::Repetition => "repetition",
-        }
-    }
-}
-
-impl fmt::Display for FinishReason {
-    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
-        f.write_str(self.as_str())
-    }
-}
 
 /// Status of a request.
 ///
@@ -132,54 +98,10 @@ impl fmt::Display for RequestStatus {
     }
 }
 
-/// `Request.stop_reason` (`int | str | None` in Python).
-#[derive(Clone, Debug, PartialEq, Eq)]
-pub enum StopReason {
-    /// The stop token that finished the request.
-    TokenId(i32),
-    /// A stop string, or `"repetition_detected"`.
-    Str(String),
-}
-
-/// The type of engine core request event.
-#[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
-#[repr(u8)]
-pub enum EngineCoreEventType {
-    Queued = 1,
-    Scheduled = 2,
-    Preempted = 3,
-}
-
-/// A timestamped engine core event associated with a request.
-///
-/// The timestamp is a monotonic timestamp and is used by the engine
-/// frontend to calculate intervals between engine core events. These
-/// timestamps should not be compared with timestamps from other processes.
-#[derive(Clone, Copy, Debug, PartialEq)]
-pub struct EngineCoreEvent {
-    pub r#type: EngineCoreEventType,
-    pub timestamp: f64,
-}
-
-/// Breakdown of a scheduled prefill computation (`vllm.v1.metrics.stats`).
-#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
-pub struct PrefillStats {
-    /// Total number of tokens to be prefilled.
-    pub num_prompt_tokens: usize,
-    /// Tokens to be prefilled locally (actual compute work).
-    pub num_computed_tokens: usize,
-    /// Tokens to be prefilled without actual compute work.
-    pub num_cached_tokens: usize,
-    /// Tokens to be prefilled from local prefix cache.
-    pub num_local_cached_tokens: usize,
-    /// Tokens to be prefilled from external KV transfer.
-    pub num_external_cached_tokens: usize,
-    /// Tokens computed and written to the prefix cache.
-    pub num_cache_creation_tokens: usize,
-}
-
-impl PrefillStats {
-    pub fn set(
+/// What the scheduler records in a request's `PrefillStats`.
+#[easy_ext::ext(PrefillStatsExt)]
+pub impl PrefillStats {
+    fn set(
         &mut self,
         num_prompt_tokens: usize,
         num_local_cached_tokens: usize,
@@ -188,15 +110,15 @@ impl PrefillStats {
         let num_cached_tokens = num_local_cached_tokens + num_external_cached_tokens;
         assert!(num_cached_tokens <= num_prompt_tokens);
 
-        self.num_prompt_tokens = num_prompt_tokens;
-        self.num_computed_tokens = num_prompt_tokens - num_cached_tokens;
-        self.num_cached_tokens = num_cached_tokens;
-        self.num_local_cached_tokens = num_local_cached_tokens;
-        self.num_external_cached_tokens = num_external_cached_tokens;
+        self.num_prompt_tokens = num_prompt_tokens as u32;
+        self.num_computed_tokens = (num_prompt_tokens - num_cached_tokens) as u32;
+        self.num_cached_tokens = num_cached_tokens as u32;
+        self.num_local_cached_tokens = num_local_cached_tokens as u32;
+        self.num_external_cached_tokens = num_external_cached_tokens as u32;
     }
 
-    pub fn finalize(&mut self, num_cached_tokens: usize) {
-        self.num_cache_creation_tokens = num_cached_tokens
+    fn finalize(&mut self, num_cached_tokens: usize) {
+        self.num_cache_creation_tokens = (num_cached_tokens as u32)
             .min(self.num_prompt_tokens)
             .saturating_sub(self.num_cached_tokens);
     }
@@ -1043,7 +965,7 @@ mod tests {
                     s,
                     *s as u8,
                     s.is_finished(),
-                    s.get_finished_reason().map(|r| r.to_string())
+                    s.get_finished_reason()
                 )
             })
             .collect();
@@ -1052,15 +974,15 @@ mod tests {
                 "WAITING=1 finished=false reason=None",
                 "WAITING_FOR_STRUCTURED_OUTPUT_GRAMMAR=2 finished=false reason=None",
                 "WAITING_FOR_REMOTE_KVS=3 finished=false reason=None",
-                "WAITING_FOR_STREAMING_REQ=4 finished=false reason=Some(\"stop\")",
+                "WAITING_FOR_STREAMING_REQ=4 finished=false reason=Some(Stop)",
                 "RUNNING=5 finished=false reason=None",
                 "PREEMPTED=6 finished=false reason=None",
-                "FINISHED_STOPPED=7 finished=true reason=Some(\"stop\")",
-                "FINISHED_LENGTH_CAPPED=8 finished=true reason=Some(\"length\")",
-                "FINISHED_ABORTED=9 finished=true reason=Some(\"abort\")",
-                "FINISHED_IGNORED=10 finished=true reason=Some(\"length\")",
-                "FINISHED_ERROR=11 finished=true reason=Some(\"error\")",
-                "FINISHED_REPETITION=12 finished=true reason=Some(\"repetition\")",
+                "FINISHED_STOPPED=7 finished=true reason=Some(Stop)",
+                "FINISHED_LENGTH_CAPPED=8 finished=true reason=Some(Length)",
+                "FINISHED_ABORTED=9 finished=true reason=Some(Abort)",
+                "FINISHED_IGNORED=10 finished=true reason=Some(Length)",
+                "FINISHED_ERROR=11 finished=true reason=Some(Error)",
+                "FINISHED_REPETITION=12 finished=true reason=Some(Repetition)",
             ]
         "#]]
         .assert_debug_eq(&summary);

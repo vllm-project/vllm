@@ -101,7 +101,7 @@ pub fn check_stop(request: &mut Request, max_model_len: usize) -> bool {
 
     if sampling_params.stop_token_ids.contains(&last_token_id) {
         request.status = RequestStatus::FinishedStopped;
-        request.stop_reason = Some(StopReason::TokenId(last_token_id));
+        request.stop_reason = Some(StopReason::TokenId(last_token_id as u32));
         return true;
     }
 
@@ -123,7 +123,7 @@ pub fn check_stop(request: &mut Request, max_model_len: usize) -> bool {
         && check_sequence_repetition(request.output_token_ids(), repetition_detection)
     {
         request.status = RequestStatus::FinishedRepetition;
-        request.stop_reason = Some(StopReason::Str("repetition_detected".to_owned()));
+        request.stop_reason = Some(StopReason::Text("repetition_detected".to_owned()));
         return true;
     }
 
@@ -222,7 +222,7 @@ mod tests {
         assert_eq!(r.status, RequestStatus::FinishedRepetition);
         assert_eq!(
             r.stop_reason,
-            Some(StopReason::Str("repetition_detected".into()))
+            Some(StopReason::Text("repetition_detected".into()))
         );
 
         // test_detection_disabled_no_stop

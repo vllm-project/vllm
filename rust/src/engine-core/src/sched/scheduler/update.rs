@@ -12,6 +12,7 @@ use super::{ErrorRequestIds, FailedKvLoads, Scheduler};
 use crate::kv_cache::KvCacheEvent;
 use crate::sched::output::Opaque;
 use crate::sched::output::SchedulerOutput;
+use crate::sched::request::PrefillStatsExt;
 use crate::sched::request::{
     EngineCoreEvent, EngineCoreEventType, FinishReason, PrefillStats, RequestStatus, StopReason,
     StreamingUpdate,
@@ -19,6 +20,7 @@ use crate::sched::request::{
 use crate::sched::stats::{
     RequestSpecDecodeMetrics, SchedulerStats, SpecDecodeMetricsLevel, SpecDecodingStats,
 };
+use crate::sched::stats::{RequestSpecDecodeMetricsExt, SpecDecodingStatsExt};
 use crate::sched::utils::{check_stop, remove_all};
 
 /// `ModelRunnerOutput` as the scheduler reads it. Tensors stay with the
@@ -46,12 +48,8 @@ pub struct ModelRunnerOutput {
     pub aux_output_connector_output: Option<Opaque>,
 }
 
-/// `vllm.outputs.RequestError`.
-#[derive(Clone, Debug, PartialEq, Eq)]
-pub struct RequestError {
-    pub code: String,
-    pub message: String,
-}
+// The wire type of `vllm.outputs.RequestError`.
+pub use vllm_engine_core_client::protocol::output::RequestError;
 
 /// An output of one request in a step (`EngineCoreOutput`).
 ///
@@ -417,7 +415,8 @@ impl Scheduler {
                         // P-side cache hits, so D can report them in
                         // prompt_tokens_details instead of its own (~100%)
                         // hit rate from the KV transfer.
-                        params.remote_prefill_cached_tokens = Some(prefill_stats.num_cached_tokens);
+                        params.remote_prefill_cached_tokens =
+                            Some(prefill_stats.num_cached_tokens as usize);
                     }
                 } else {
                     continuing_reqs.push(h);

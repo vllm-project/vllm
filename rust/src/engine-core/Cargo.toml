@@ -6,12 +6,14 @@ license.workspace = true
 description = "Rust port of the vLLM v1 engine core (KV cache management, scheduling)."
 
 [dependencies]
+easy-ext = { workspace = true }
 indexmap = { workspace = true }
 libc = { workspace = true }
 rustc-hash = { workspace = true }
 sha2 = { workspace = true }
 smallvec = { workspace = true }
 thiserror = { workspace = true }
+vllm-engine-core-client = { workspace = true }
 xxhash-rust = { workspace = true }
 
 # Without `asm`, sha2 0.10 doesn't use the Armv8 SHA-2 instructions.

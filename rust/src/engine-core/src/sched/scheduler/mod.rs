@@ -62,6 +62,7 @@ use crate::kv_cache::{
     BlockId, KvCacheConfig, KvCacheManager, KvCacheManagerConfig, KvCacheMetricsCollector,
     MambaCacheMode, cdiv,
 };
+use crate::sched::stats::RequestSpecDecodeMetricsExt;
 
 /// Scheduler pause state.
 ///

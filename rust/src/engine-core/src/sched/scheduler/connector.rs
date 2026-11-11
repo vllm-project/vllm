@@ -415,6 +415,7 @@ impl Scheduler {
                             RequestError {
                                 code: "validation_error".to_owned(),
                                 message: format!("Invalid structured outputs: {message}"),
+                                retryable: false,
                             },
                         );
                         return false;

@@ -130,7 +130,6 @@ def eco_json(ecos):
                             spec.num_draft_tokens,
                             spec.num_accepted_tokens,
                             spec.num_accepted_tokens_per_pos,
-                            spec.num_draft_tokens_per_pos,
                         ],
                     ],
                 },

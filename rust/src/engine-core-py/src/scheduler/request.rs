@@ -435,7 +435,7 @@ pub fn sync_request(obj: &Bound<'_, PyAny>, request: &Request) -> PyResult<()> {
     let stop_reason = match &request.stop_reason {
         None => py.None().into_bound(py),
         Some(StopReason::TokenId(t)) => t.into_pyobject(py)?.into_any(),
-        Some(StopReason::Str(s)) => s.into_pyobject(py)?.into_any(),
+        Some(StopReason::Text(s)) => s.into_pyobject(py)?.into_any(),
     };
     set(intern!(py, "stop_reason"), stop_reason)?;
     let prefill_stats = match &request.prefill_stats {
