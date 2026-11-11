@@ -2513,6 +2513,8 @@ def test_deepep_v2_padded_scale_ignores_padding_tail():
     )
 
     prepare_finalize = object.__new__(DeepEPV2PrepareAndFinalize)
+    prepare_finalize.do_expand = False
+    prepare_finalize.do_cpu_sync = False
     prepare_finalize.defer_globalize = False
     prepare_finalize.rank_expert_offset = 0
     prepare_finalize.num_experts = 8
@@ -2525,13 +2527,16 @@ def test_deepep_v2_padded_scale_ignores_padding_tail():
     )
     # Per-rank prefix sums; the last entry is the received token count.
     psum_recv_per_rank = torch.tensor([3, m_valid], dtype=torch.int32, device="cuda")
+    handle = SimpleNamespace(
+        psum_num_recv_tokens_per_scaleup_rank=psum_recv_per_rank,
+    )
 
     x_q, scale, meta, topk_ids, _ = prepare_finalize._receiver(
         SimpleNamespace(event=None),
         expert_x,
         recv_topk_idx,
         recv_topk_weights,
-        psum_recv_per_rank,
+        handle,
         None,
         quant_config,
         False,
