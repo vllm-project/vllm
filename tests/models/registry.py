@@ -458,6 +458,9 @@ _TEXT_GENERATION_EXAMPLE_MODELS = {
     "MistralLarge3ForCausalLM": _HfExamplesInfo(
         "mistralai/Mistral-Large-3-675B-Instruct-2512-NVFP4"
     ),
+    "MistralLarge4ForCausalLM": _HfExamplesInfo(
+        "mistralai/Mistral-Large-4-1T-A52B", is_available_online=False
+    ),
     "MixtralForCausalLM": _HfExamplesInfo(
         "mistralai/Mixtral-8x7B-Instruct-v0.1",
         {
