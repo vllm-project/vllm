@@ -904,6 +904,14 @@ class Qwen4ExpPLESharedHostEmbedding(Qwen4ExpPLEPinnedHostEmbedding):
         if param.data_ptr() not in self._shared_ptrs:
             super().weight_loader(param, loaded_weight, checkpoint_start)
             return
+        if getattr(self._shared_group, "closed", False):
+            # The independent DP table group is closed after loading. Rewriting
+            # the table would race co-located replicas that still serve from it.
+            raise RuntimeError(
+                "Reloading a shared PLE table is not supported with "
+                "independent_data_parallel; the table is shared with co-located "
+                "replicas that may still be serving."
+            )
         if self._shared_group.rank_in_group == 0:
             super().weight_loader(param, loaded_weight, checkpoint_start)
         # Read order may differ across ranks. Equal load counts ensure all shared

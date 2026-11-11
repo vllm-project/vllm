@@ -1646,29 +1646,65 @@ class StatelessObjectGroup:
         self._timeout_s = timeout_s
         self.rank_in_group = group.rank
         self.world_size = group.world_size
+        self._closed = False
+
+    @property
+    def closed(self) -> bool:
+        return self._closed
+
+    def close(self) -> None:
+        """Refuse further collectives. Called once loading is done."""
+        self._closed = True
 
     def broadcast_object(self, obj: Any | None = None, src: int = 0) -> Any:
+        self._raise_if_closed()
         return self._group.broadcast_obj(obj, src=src)
 
     def all_gather_object(self, obj: Any) -> list[Any]:
+        self._raise_if_closed()
         return self._group.all_gather_obj(obj)
 
-    def barrier(self) -> None:
-        self._group.barrier(timeout=self._timeout_s)
+    def barrier(self, timeout_s: float | None = None) -> None:
+        self._raise_if_closed()
+        self._group.barrier(timeout=timeout_s or self._timeout_s)
 
     def destroy(self) -> None:
-        pass
+        self.close()
+
+    def _raise_if_closed(self) -> None:
+        if self._closed:
+            raise RuntimeError(
+                "The independent DP table-sharing group is closed: the shared "
+                "table is only written while the model loads."
+            )
 
 
 # Co-located independent DP ranks that load one shared host table.
 _INDEPENDENT_DP_TABLE: StatelessObjectGroup | None = None
 # The table leader loads it while the other ranks wait in a barrier.
-_INDEPENDENT_DP_TABLE_TIMEOUT_S = 3600
+_INDEPENDENT_DP_TABLE_LOAD_TIMEOUT_S = 3600
+# Forming the group fails fast instead: a co-located rank that never joins
+# means startup is broken, and waiting for the full load timeout hides that.
+_INDEPENDENT_DP_TABLE_FORM_TIMEOUT_S = 300
 
 
 def get_engram_table_share_group() -> GroupCoordinator | StatelessObjectGroup | None:
     """Return the co-located DP ranks that map one shared Engram host table."""
     return _ENGRAM_DP if _ENGRAM_DP is not None else _INDEPENDENT_DP_TABLE
+
+
+def release_independent_dp_table_group() -> None:
+    """Close the independent DP table-sharing group once loading is done.
+
+    The shared table is only written while the model loads; keeping the group
+    open afterwards serves no purpose, and a later weight reload would rewrite
+    the table under co-located replicas that may still be serving. Closing it
+    makes such a reload fail loudly instead.
+    """
+    global _INDEPENDENT_DP_TABLE
+    if _INDEPENDENT_DP_TABLE is not None:
+        _INDEPENDENT_DP_TABLE.close()
+        _INDEPENDENT_DP_TABLE = None
 
 
 _DCP: GroupCoordinator | None = None
@@ -2170,15 +2206,18 @@ def _init_independent_dp_table_group(
         listen_socket=listen_socket,
         is_master=is_master,
         wait_for_workers=False,
-        timeout=timedelta(seconds=_INDEPENDENT_DP_TABLE_TIMEOUT_S),
+        timeout=timedelta(seconds=_INDEPENDENT_DP_TABLE_LOAD_TIMEOUT_S),
     )
     group = StatelessProcessGroup(
         rank=dp_rank,
         world_size=size,
         store=PrefixStore(f"independent_dp_table/{worker_rank}", store),
     )
+    object_group = StatelessObjectGroup(group, _INDEPENDENT_DP_TABLE_LOAD_TIMEOUT_S)
+    # Confirm every co-located rank joined before loading starts.
+    object_group.barrier(_INDEPENDENT_DP_TABLE_FORM_TIMEOUT_S)
     logger.info_once("Independent DP table-sharing group size: %d", size)
-    return StatelessObjectGroup(group, _INDEPENDENT_DP_TABLE_TIMEOUT_S)
+    return object_group
 
 
 def initialize_model_parallel(
@@ -2644,6 +2683,8 @@ def destroy_model_parallel():
         _ENGRAM_DP.destroy()
     _ENGRAM_DP = None
     global _INDEPENDENT_DP_TABLE
+    if _INDEPENDENT_DP_TABLE is not None:
+        _INDEPENDENT_DP_TABLE.close()
     _INDEPENDENT_DP_TABLE = None
     if _DP:
         _DP.destroy()

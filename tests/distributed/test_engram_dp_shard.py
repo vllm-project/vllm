@@ -848,7 +848,7 @@ def _check_prefetch_replay(
 
 
 def _independent_dp_worker(
-    rank: int, world_ports: list[int], coord_store_port: int
+    rank: int, world_size: int, world_ports: list[int], coord_store_port: int
 ) -> None:
     """One independent DP rank: its own single-process world, no DP group."""
     torch.accelerator.set_device_index(rank)
@@ -863,8 +863,8 @@ def _independent_dp_worker(
     )
     vllm_config = VllmConfig(
         parallel_config=ParallelConfig(
-            data_parallel_size=WORLD_SIZE,
-            data_parallel_size_local=WORLD_SIZE,
+            data_parallel_size=world_size,
+            data_parallel_size_local=world_size,
             data_parallel_rank=rank,
             independent_data_parallel=True,
         ),
@@ -893,8 +893,14 @@ def _independent_dp_worker(
             initialize_model_parallel()
         assert get_engram_dp_group() is None
         group = get_engram_table_share_group()
-        assert (group.rank_in_group, group.world_size) == (rank, WORLD_SIZE)
+        assert (group.rank_in_group, group.world_size) == (rank, world_size)
         _check_ple_shared_table(shm_fits=True)
+        # As gpu_worker.load_model does once loading completes: the group is
+        # closed and a reload rewriting the shared table fails loudly.
+        parallel_state.release_independent_dp_table_group()
+        assert get_engram_table_share_group() is None
+        with pytest.raises(RuntimeError, match="group is closed"):
+            group.barrier()
     finally:
         cleanup_dist_env_and_memory()
 
@@ -902,17 +908,18 @@ def _independent_dp_worker(
 @pytest.mark.skipif(
     not current_platform.is_cuda_alike(), reason="CUDA or ROCm required"
 )
-def test_ple_table_shared_across_independent_dp_ranks():
+@pytest.mark.parametrize("world_size", [2, 4])
+def test_ple_table_shared_across_independent_dp_ranks(world_size: int):
     """Independent DP ranks share no process group, yet load one PLE table."""
-    if torch.accelerator.device_count() < WORLD_SIZE:
-        pytest.skip(f"Need {WORLD_SIZE} GPUs to run the test.")
+    if torch.accelerator.device_count() < world_size:
+        pytest.skip(f"Need {world_size} GPUs to run the test.")
     coord_store = create_tcp_store(
         "127.0.0.1", 0, is_master=True, world_size=-1, wait_for_workers=False
     )
     mp.spawn(
         _independent_dp_worker,
-        args=(get_open_ports_list(WORLD_SIZE), coord_store.port),
-        nprocs=WORLD_SIZE,
+        args=(world_size, get_open_ports_list(world_size), coord_store.port),
+        nprocs=world_size,
     )
 
 

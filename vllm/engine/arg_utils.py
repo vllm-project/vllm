@@ -2498,10 +2498,11 @@ class EngineArgs:
             and (not model_config.is_moe or self.independent_data_parallel)
         ):
             raise ValueError(
-                "Non-MoE models and independent data parallel do not support "
-                "external data parallel mode. "
-                "For external load balancing, launch independent vLLM "
-                "instances without --data-parallel-* arguments."
+                "External data parallel mode is not supported for non-MoE "
+                "models or with --independent-data-parallel. To pin requests "
+                "to a specific rank, route with the X-data-parallel-rank "
+                "header; otherwise launch separate vLLM instances without "
+                "--data-parallel-* arguments."
             )
         # Local DP rank = 1, use pure-external LB.
         if data_parallel_external_lb:

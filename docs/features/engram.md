@@ -175,7 +175,8 @@ IPC namespace across the co-located replicas.
 With `--independent-data-parallel`, Qwen4Exp replicas share no process group,
 so co-located replicas agree on the shared table through a node-local
 TCPStore while the model loads; replicas exchange nothing per step.
-`embedding_across_dp` is not supported in that mode.
+`embedding_across_dp` is not supported in that mode. The shared table is
+written once at load time; weight reloads (sleep level 2) are rejected.
 
 ## Limitations
 

@@ -56,6 +56,7 @@ from vllm.distributed.parallel_state import (
     get_pp_group,
     get_tp_group,
     get_world_group,
+    release_independent_dp_table_group,
     resume_device_comms,
     suspend_device_comms,
 )
@@ -603,6 +604,11 @@ class Worker(WorkerBase):
             self._external_weight_charges.track(),
         ):
             self.model_runner.load_model(load_dummy_weights=load_dummy_weights)
+
+        if not load_dummy_weights:
+            # A shared PLE table is only written while loading; a reload would
+            # rewrite it under co-located replicas that may still be serving.
+            release_independent_dp_table_group()
 
         if self._external_weight_charges.fallback_bytes:
             self.requested_memory = self._resolve_requested_memory()
