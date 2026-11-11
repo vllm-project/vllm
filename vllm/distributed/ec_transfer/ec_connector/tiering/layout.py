@@ -53,9 +53,11 @@ class ECCacheNamespace:
     hidden_dim: int
     encoder_output_widths: tuple[tuple[str, int], ...]
     element_size: int
+    encoder_config_hash: str
     model_revision: str | None = None
 
     def __post_init__(self) -> None:
+        _validate_digest(self.encoder_config_hash, "encoder_config_hash")
         for field_name in ("model_id", "dtype"):
             if not getattr(self, field_name):
                 raise ValueError(f"{field_name} must not be empty")

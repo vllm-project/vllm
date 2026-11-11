@@ -8,6 +8,7 @@ from __future__ import annotations
 from collections.abc import Collection
 from typing import TYPE_CHECKING
 
+from vllm.config.utils import hash_factors, normalize_value
 from vllm.distributed.ec_transfer.ec_connector.cpu.common import (
     ECCPUConnectorMetadata,
     ECCPUWorkerMetadata,
@@ -118,6 +119,9 @@ class ECTieringScheduler(ECCPUScheduler):
             hidden_dim=model_config.get_inputs_embeds_size(),
             encoder_output_widths=widths,
             element_size=model_config.dtype.itemsize,
+            encoder_config_hash=hash_factors(
+                {"hf_config": normalize_value(model_config.hf_config.to_dict())}
+            ),
         )
 
     def update_state_after_alloc(self, request: Request, index: int) -> None:

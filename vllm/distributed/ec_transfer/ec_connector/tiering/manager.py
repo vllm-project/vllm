@@ -139,6 +139,11 @@ class ECTieringManager:
                 shape,
                 element_size,
             )
+        self._hold_primary_entry(request_id, identifier)
+
+    def _hold_primary_entry(self, request_id: str, identifier: str) -> None:
+        """Retain a shared request hold until scheduling or cancellation."""
+        entry = self._primary.get(identifier)
         if entry is not None and entry.ready and identifier not in self._prefetch_holds:
             self._primary.pin(identifier)
             self._prefetch_holds.add(identifier)
@@ -248,9 +253,10 @@ class ECTieringManager:
         """Wait for submitted reads; allow recomputation when promotion cannot start."""
         entry = self._primary.get(identifier)
         if entry is not None and entry.ready:
+            self._hold_primary_entry(request_id, identifier)
             return True
         self.poll()
-        return self._ensure_primary_entry(
+        available = self._ensure_primary_entry(
             identifier,
             modality,
             num_tokens,
@@ -258,6 +264,8 @@ class ECTieringManager:
             element_size,
             request_id=request_id,
         )
+        self._hold_primary_entry(request_id, identifier)
+        return available
 
     def _ensure_primary_entry(
         self,

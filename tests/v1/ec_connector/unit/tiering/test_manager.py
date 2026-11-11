@@ -85,8 +85,11 @@ def test_write_through_releases_blocks_after_completion_or_skip(store_state) -> 
         secondary.write_completions.append(
             ECWriteResult(cache_key=cache_key, success=True, file_size_bytes=8)
         )
-        assert manager.ensure_primary_entry("item", "image", 2, (2, 1), 4)
+        assert manager.ensure_primary_entry(
+            "item", "image", 2, (2, 1), 4, request_id="consumer"
+        )
         assert primary.alloc("other", 2) is None
+        manager.request_finished("consumer")
     assert not manager.has_pending()
     assert primary.alloc("other", 2) is not None
 
@@ -213,18 +216,28 @@ def test_scheduler_admission_publishes_completion_and_preserves_h2d_pin(
     assert primary.alloc("other", 2) is not None
 
 
-def test_prefetch_deduplicates_waiters_and_holds_until_last_release():
+@pytest.mark.parametrize("source", ["arrival", "admission_pending", "admission_ready"])
+def test_prefetch_deduplicates_waiters_and_holds_until_last_release(source):
     primary, secondary, manager = _bounded_promotion_manager()
+    if source == "admission_ready":
+        primary.alloc("loaded", 2, (2, 1))
+        primary.mark_ready("loaded")
     for request_id in ("r1", "r1", "r2"):
-        manager.prefetch_entry(request_id, "loaded", "image", 2, (2, 1), 4)
-    assert len(secondary.read_submissions) == 1
-    _complete_promotion(secondary)
-    manager.poll()
+        if source == "arrival":
+            manager.prefetch_entry(request_id, "loaded", "image", 2, (2, 1), 4)
+        else:
+            manager.ensure_primary_entry(
+                "loaded", "image", 2, (2, 1), 4, request_id=request_id
+            )
+    assert len(secondary.read_submissions) == (source != "admission_ready")
+    if source != "admission_ready":
+        _complete_promotion(secondary)
+        manager.poll()
     assert primary.get("loaded").ready
     assert primary.alloc("other", 2) is None
-    manager.release_prefetch("r1")
+    manager.request_finished("r1")
     assert primary.alloc("other", 2) is None
-    manager.release_prefetch("r2")
+    manager.request_finished("r2")
     assert primary.alloc("other", 2) is not None
 
 
@@ -304,9 +317,12 @@ def test_shutdown_drains_prefetch_and_releases_ready_reservations():
 
 
 @pytest.fixture
-def indexed_scheduler(tmp_path, request):
-    """Real mmap, index, executor and scheduler; only reuse the config builder."""
-    from tests.v1.ec_connector.unit.utils import create_ec_vllm_config
+def indexed_scheduler(tmp_path, request, monkeypatch):
+    """Real local config, mmap, index, executor and scheduler."""
+    from transformers import LlamaConfig
+
+    from vllm.config import ModelConfig, VllmConfig
+    from vllm.config.ec_transfer import ECTransferConfig
     from vllm.distributed.ec_transfer.ec_connector.tiering.io import store_entry
     from vllm.distributed.ec_transfer.ec_connector.tiering.layout import (
         get_ec_entry_path,
@@ -316,18 +332,37 @@ def indexed_scheduler(tmp_path, request):
         ECTieringScheduler,
     )
 
-    config = create_ec_vllm_config(
-        encoder_output_widths=getattr(request, "param", None)
+    monkeypatch.setenv("VLLM_USE_V2_MODEL_RUNNER", "1")
+    model_path = tmp_path / "model"
+    LlamaConfig(
+        architectures=["LlamaForCausalLM"],
+        hidden_size=32,
+        num_attention_heads=4,
+        num_key_value_heads=4,
+    ).save_pretrained(model_path)
+    config = VllmConfig(
+        model_config=ModelConfig(
+            model=str(model_path),
+            dtype="float16",
+            skip_tokenizer_init=True,
+            enforce_eager=True,
+            max_model_len=128,
+        ),
+        ec_transfer_config=ECTransferConfig(
+            ec_connector="ECTieringConnector",
+            ec_role="ec_both",
+        ),
     )
-    config.model_config.model = "test-encoder"
-    config.model_config.revision = None
+    config.ec_transfer_config.mm_encoder_output_widths = getattr(
+        request, "param", None
+    ) or {"image": 32}
     config.ec_transfer_config.ec_connector_extra_config = {
         "ec_cpu_bytes": 1 << 20,
         "secondary_tiers": [
             {
                 "type": "fs",
                 "root_dir": str(tmp_path),
-                "capacity_bytes": 1 << 20,
+                "capacity_bytes": 2 << 20,
                 "n_read_threads": 1,
                 "n_write_threads": 1,
             }
@@ -506,6 +541,26 @@ def test_failed_arrival_prefetch_is_retried_on_gpu_miss(
         assert not scheduler.has_cache_item("A")
         assert not scheduler._tiering_manager._pending_reads
         assert primary.get("busy").evictable == (at_admission == "gpu_hit")
+
+
+@pytest.mark.parametrize("indexed_scheduler", [{"image": 196608}], indirect=True)
+def test_admission_retry_holds_one_image_and_recomputes_the_other(indexed_scheduler):
+    """Two images fit individually; failed arrival must not cause eviction loops."""
+    scheduler = indexed_scheduler
+    primary = scheduler._primary
+    # Each image occupies 768 KiB; together they exceed the 1 MiB CPU tier.
+    primary.alloc("busy", primary._region.num_blocks)
+    request = image_request("A", "B")
+    scheduler.on_new_request(request)
+    primary.discard("busy")
+    assert not scheduler.ensure_cache_available(request, 0, set())
+    scheduler._filesystem.drain()
+    assert scheduler.ensure_cache_available(request, 0, set())
+    assert scheduler.has_cache_item("A")
+    assert not scheduler.has_cache_item("B")
+    assert not scheduler._tiering_manager.has_pending()
+    scheduler.request_finished(request)
+    assert primary.alloc("pressure", primary._region.num_blocks) is not None
 
 
 def test_cpu_full_is_feature_miss_but_submitted_read_stays_pending(
