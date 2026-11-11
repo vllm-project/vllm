@@ -5,7 +5,7 @@ meta:
   provider: "Ricursive Intelligence"
   description: "Ricursive's Ripple-65B Preview, a dense 65B model for reasoning and agentic coding with hybrid sliding-window and NoPE full attention, tool calling, and a DFlash2 speculative drafter."
   date_added: 2026-11-04
-  date_updated: 2026-11-10
+  date_updated: 2026-11-11
   tasks:
     - text
   related_recipes: []
@@ -93,24 +93,25 @@ guide: |
   [Ripple-65B Preview](https://huggingface.co/ricursiveAI/Ripple-65B-Preview)
   is a dense 65B model from Ricursive Intelligence. Its 80 layers alternate four
   1024-token sliding-window layers with one NoPE full-attention layer, and it
-  supports a 2M-token context. The NVFP4 checkpoint fits on one B200/B300, and
-  the BF16 checkpoint fits on one MI350X/MI355X.
+  supports a 2M-token context. The NVFP4 checkpoint fits on one B200/B300.
 
   Ripple decides per turn whether to reason, so `reasoning_content` is empty
   when it answers directly.
 
-  ## AMD (1x MI355X, BF16)
+  ## AMD (1x MI350X/MI355X, BF16)
 
-  Use the BF16 checkpoint on one MI355X. 
-  
+  Use the BF16 checkpoint on one MI350X or MI355X.
+
   ```bash
   docker run --device=/dev/kfd --device=/dev/dri --group-add video \
     --ipc=host --shm-size 16g \
     -v ~/.cache/huggingface:/root/.cache/huggingface \
+    -e VLLM_ROCM_USE_AITER=1 \
     -p 8000:8000 \
     vllm/vllm-openai-rocm:nightly \
     ricursiveAI/Ripple-65B-Preview \
     --tensor-parallel-size 1 \
+    --attention-backend ROCM_AITER_UNIFIED_ATTN \
     --reasoning-parser ripple \
     --enable-auto-tool-choice --tool-call-parser ripple \
     --speculative-config '{"method":"dflash","model":"ricursiveAI/Ripple-65B-Preview-DFlash2","num_speculative_tokens":7}' \
