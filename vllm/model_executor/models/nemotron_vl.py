@@ -11,7 +11,6 @@ from vllm.model_executor.layers.fusion.mm_input_norm import (
     FusedMMInputNorm,
     IdentityInputNorm,
 )
-from vllm.model_executor.layers.linear import ReplicatedLinear
 from vllm.model_executor.layers.pooler import DispatchPooler
 from vllm.model_executor.layers.quantization import QuantizationConfig
 from vllm.model_executor.layers.quantization.auto_awq import AutoAWQConfig
@@ -137,12 +136,10 @@ class LlamaNemotronVLChatModel(nn.Module, SupportsMultiModal, SupportsPP, Suppor
             self.mlp1 = self._init_mlp1(config)
 
         with self._mark_language_model(vllm_config):
-            # Native Llama reads `is_causal` from the text config to be bidirectional
             self.language_model = init_vllm_registered_model(
                 vllm_config=vllm_config,
                 hf_config=config.get_text_config(),
                 prefix=maybe_prefix(prefix, "language_model"),
-                architectures=["LlamaForCausalLM"],
             )
 
         self.img_context_token_id: int | None = None
@@ -380,7 +377,7 @@ class LlamaNemotronVLChatModel(nn.Module, SupportsMultiModal, SupportsPP, Suppor
             forward_kwargs.update({"visual_token_mask": self.visual_token_mask})
             self.visual_token_mask = None
 
-        hidden_states = self.language_model.model(**forward_kwargs)
+        hidden_states = self.language_model(**forward_kwargs)
         return hidden_states
 
     def compute_logits(
@@ -572,28 +569,18 @@ class LlamaNemotronVLForSequenceClassification(
     """LlamaNemotronVL model variant for sequence classification / reranking."""
 
     # Reranker checkpoint places base model weights under `model.*`,
-    # while `score.*` remains at the top level.
-    hf_to_vllm_mapper = WeightsMapper(orig_to_new_prefix={"model.": ""}) | (
-        LlamaNemotronVLForEmbedding.hf_to_vllm_mapper
+    # while `score.*`, the language model's head, remains at the top level.
+    hf_to_vllm_mapper = (
+        WeightsMapper(
+            orig_to_new_prefix={"model.": "", "score.": "language_model.score."}
+        )
+        | LlamaNemotronVLForEmbedding.hf_to_vllm_mapper
     )
 
     def __init__(self, *, vllm_config: VllmConfig, prefix: str = "") -> None:
         super().__init__(vllm_config=vllm_config, prefix=prefix)
 
-        text_config = vllm_config.model_config.hf_config.get_text_config()
-        model_config = vllm_config.model_config
-        quant_config = vllm_config.quant_config
-
-        self.score = ReplicatedLinear(
-            model_config.get_hidden_size(),
-            text_config.num_labels,
-            bias=False,
-            params_dtype=model_config.head_dtype,
-            quant_config=quant_config,
-            return_bias=False,
-            prefix=maybe_prefix(prefix, "score"),
-        )
-
-        pooler_config = model_config.pooler_config
+        pooler_config = vllm_config.model_config.pooler_config
         assert pooler_config is not None
-        self.pooler = DispatchPooler.for_seq_cls(pooler_config, classifier=self.score)
+        classifier = self.language_model.classifier
+        self.pooler = DispatchPooler.for_seq_cls(pooler_config, classifier=classifier)

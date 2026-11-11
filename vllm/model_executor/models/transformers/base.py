@@ -36,7 +36,6 @@ from transformers.conversion_mapping import (
     get_checkpoint_conversion_mapping,
     get_model_conversion_mapping,
 )
-from transformers.models.auto.modeling_auto import MODEL_MAPPING
 
 from vllm.compilation.decorators import DynamicArgDims, support_torch_compile
 from vllm.config.utils import getattr_iter
@@ -72,6 +71,7 @@ from vllm.model_executor.models.transformers.utils import (
     get_feature_request_tip,
     init_on_device_without_buffers,
     log_replacement,
+    map_extended_config,
     maybe_disable_dynamic_rope_update,
     named_state,
     replace_conv_class,
@@ -226,17 +226,16 @@ class Base(
         `_create_attention_instances` are used
         - Sets the dtype to the default torch dtype set by vLLM because Transformers
         uses the config dtype when creating the model
+        - Points a sub-config of a remote model (e.g. a VLM's text config) at the
+        model's repo, where its remote code lives
         - Maps a remote config that only extends a Transformers config, and has no
         `AutoModel` of its own, to that config's model
         """
         self.text_config._attn_implementation = VLLM_ATTN_IMPL
         self.config.dtype = torch.get_default_dtype()
-        config_cls = type(self.config)
-        has_remote_model = "AutoModel" in getattr(self.config, "auto_map", {})
-        if not has_remote_model and config_cls not in MODEL_MAPPING:
-            parents = (cls for cls in config_cls.__mro__ if cls in MODEL_MAPPING)
-            if parent := next(parents, None):
-                MODEL_MAPPING.register(config_cls, MODEL_MAPPING[parent], exist_ok=True)
+        if not self.config._name_or_path:
+            self.config._name_or_path = self.model_config.model
+        map_extended_config(AutoModel, self.config)
 
     @contextmanager
     def _mark_model_components(self, vllm_config: "VllmConfig"):
@@ -743,9 +742,9 @@ class Base(
         has_encoder = lambda model: any(is_encoder(m) for m in model.modules())
         # Some checkpoints make a decoder bidirectional in the config (gte-Qwen2)
         is_bidirectional = getattr(self.text_config, "is_causal", True) is False
-        is_encoder_model = is_bidirectional or has_encoder(self.model)
         # A VLM's text model may be bidirectional over the multimodal prefix
-        if is_encoder_model and not self.model_config.is_multimodal_model:
+        is_prefix_lm = self.model_config.is_multimodal_model
+        if is_bidirectional or (has_encoder(self.model) and not is_prefix_lm):
             return EncoderOnlyAttention
         if self.model_config.use_mla:
             if any(

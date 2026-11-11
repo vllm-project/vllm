@@ -29,6 +29,7 @@ from vllm.model_executor.models.interfaces_base import VllmModelForPooling
 from vllm.model_executor.models.utils import WeightsMapper
 
 from .base import Base
+from .utils import map_extended_config
 
 if TYPE_CHECKING:
     from vllm.config import VllmConfig
@@ -76,6 +77,7 @@ class SequenceClassificationMixin(SupportsCrossEncoding, VllmModelForPooling, Ba
         # Certain information about the model and classifier can only be
         # inferred from the `ForSequenceClassification` class. Therefore, we
         # instantiate it on the "meta" device to avoid allocating GPU memory.
+        map_extended_config(AutoModelForSequenceClassification, self.config)
         with torch.device("meta"):
             seq_cls_model = AutoModelForSequenceClassification.from_config(
                 self.config,
