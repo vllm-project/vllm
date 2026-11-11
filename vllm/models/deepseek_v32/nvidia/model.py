@@ -30,6 +30,7 @@ from vllm.model_executor.models.deepseek_v2 import (
     _try_load_fp8_indexer_wk,
     get_spec_layer_idx_from_weight_name,
 )
+from vllm.model_executor.models.interfaces import EagleModelMixin
 from vllm.model_executor.models.utils import (
     PPMissingLayer,
     copy_pp_buffers,
@@ -38,6 +39,7 @@ from vllm.model_executor.models.utils import (
     make_empty_intermediate_tensors_factory,
     make_layers,
     pp_topk_buffers,
+    spec_decode_needs_target_embed,
 )
 from vllm.models.common.ops.fused_allreduce_rms_norm import fused_allreduce_rms_norm
 from vllm.models.common.ops.sequence_parallel import (
@@ -168,8 +170,9 @@ class DeepseekV32DecoderLayer(torch.nn.Module):
         return hidden_states, residual
 
 
-class DeepseekV32Model(torch.nn.Module):
+class DeepseekV32Model(torch.nn.Module, EagleModelMixin):
     fall_back_to_pt_during_load = False
+    supports_aux_hidden_states_over_pp = True
 
     def __init__(self, *, vllm_config: VllmConfig, prefix: str = ""):
         super().__init__()
@@ -202,7 +205,7 @@ class DeepseekV32Model(torch.nn.Module):
             get_sparse_mla_index_group_max_rows(vllm_config),
         )
 
-        if get_pp_group().is_first_rank:
+        if get_pp_group().is_first_rank or spec_decode_needs_target_embed(vllm_config):
             self.embed_tokens = make_input_embedding(
                 config.vocab_size,
                 config.hidden_size,
@@ -237,7 +240,6 @@ class DeepseekV32Model(torch.nn.Module):
             ["hidden_states"], config.hidden_size, self.pp_buffers
         )
 
-        self.aux_hidden_state_layers = tuple[int, ...]()
         self.num_redundant_experts = parallel_config.eplb_config.num_redundant_experts
 
     def embed_input_ids(self, input_ids: torch.Tensor) -> torch.Tensor:
@@ -287,16 +289,22 @@ class DeepseekV32Model(torch.nn.Module):
                 attn_in = sp_shard(attn_in)
 
         aux_hidden_states = []
+        if get_pp_group().is_first_rank:
+            self._maybe_add_hidden_state(aux_hidden_states, 0, hidden_states, residual)
         for idx, layer in enumerate(
             islice(self.layers, self.start_layer, self.end_layer),
             start=self.start_layer,
         ):
-            if idx in self.aux_hidden_state_layers:
-                aux_hidden_states.append(
-                    hidden_states if residual is None else hidden_states + residual
-                )
             hidden_states, residual = layer(positions, hidden_states, residual, attn_in)
             attn_in = None
+            if idx + 1 in self.aux_hidden_state_layers:
+                aux_hidden_state = hidden_states
+                if not self.use_sequence_parallel:
+                    # The next norm still needs the unreduced MLP output.
+                    aux_hidden_state = tensor_model_parallel_all_reduce(
+                        hidden_states.clone()
+                    )
+                aux_hidden_states.append(aux_hidden_state + residual)
 
         if not get_pp_group().is_last_rank:
             assert not self.use_sequence_parallel, (
@@ -308,6 +316,7 @@ class DeepseekV32Model(torch.nn.Module):
                 {
                     "hidden_states": hidden_states,
                     **{k: v[:full_num_tokens] for k, v in self.pp_buffers.items()},
+                    **self.pack_local_aux_hidden_states(aux_hidden_states),
                 }
             )
 
@@ -329,6 +338,10 @@ class DeepseekV32Model(torch.nn.Module):
             hidden_states, _ = fused_allreduce_rms_norm(
                 hidden_states, residual, self.norm
             )
+        aux_hidden_states = (
+            self.collect_remote_aux_hidden_states(intermediate_tensors)
+            + aux_hidden_states
+        )
         if len(aux_hidden_states) > 0:
             return hidden_states, aux_hidden_states
         return hidden_states

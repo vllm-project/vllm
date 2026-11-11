@@ -1595,6 +1595,10 @@ class DeepseekV2Model(nn.Module, EagleModelMixin):
             )
 
         hidden_states, _ = self.norm(hidden_states, residual)
+        aux_hidden_states = (
+            self.collect_remote_aux_hidden_states(intermediate_tensors)
+            + aux_hidden_states
+        )
         if len(aux_hidden_states) > 0:
             return hidden_states, aux_hidden_states
         return hidden_states
@@ -1961,7 +1965,10 @@ class DeepseekV2ForCausalLM(
         self.extract_moe_parameters(example_moe)
 
     def set_aux_hidden_state_layers(self, layers: tuple[int, ...]) -> None:
-        self.model._set_aux_hidden_state_layers(layers)
+        if isinstance(self.model, EagleModelMixin):
+            self.model._set_aux_hidden_state_layers(layers)
+        else:
+            self.model.aux_hidden_state_layers = layers
 
     def get_eagle3_aux_hidden_state_layers(self) -> tuple[int, ...]:
         num_layers = len(self.model.layers)

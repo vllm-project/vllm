@@ -555,8 +555,13 @@ def test_pp_tied_word_embeddings(
 
 
 @multi_gpu_only(num_gpus=2)
+@pytest.mark.parametrize(
+    "aux_layers", [(0, 2, 4), (0, 1, 2)], ids=["boundary-and-final", "all-upstream"]
+)
 @create_new_process_for_each_test()
-def test_pp_deepseek_dflash2_shared_embedding(vllm_runner, tmp_path, monkeypatch):
+def test_pp_deepseek_dflash2_shared_embedding(
+    vllm_runner, tmp_path, monkeypatch, aux_layers
+):
     """Load the shared embedding and relay draft inputs across a PP boundary."""
     import torch
     from transformers import DeepseekV2Config, DeepseekV2ForCausalLM, Qwen3Config
@@ -599,7 +604,7 @@ def test_pp_deepseek_dflash2_shared_embedding(vllm_runner, tmp_path, monkeypatch
         num_target_layers=4,
         block_size=3,
         dflash_config={
-            "target_layer_ids": [-1, 1, 3],
+            "target_layer_ids": [layer - 1 for layer in aux_layers],
             "mask_token_id": 127,
             "conv_kernel_size": 3,
             "conv_group_size": 16,
