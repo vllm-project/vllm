@@ -705,6 +705,8 @@ steps:
   - tests/test_attention_backend_registry.py
   - tests/test_audio_media_size_precheck.py
   - tests/test_cmake_utils.py
+  - docker/Dockerfile.cpu
+  - requirements/ci/cmake.txt
   - tests/test_connections.py
   - tests/test_embedded_commit.py
   - tests/test_envs.py
@@ -753,10 +755,8 @@ steps:
   - tests/transformers_utils
   - tests/config
   - tests/device_allocator
-  - requirements/ci/cmake.txt
   device: cpu-small
   commands:
-  - pip install --require-hashes -r /vllm-workspace/requirements/ci/cmake.txt  # test_cmake_utils.py shells out to cmake; the CPU image has none
   - python3 standalone_tests/lazy_imports.py
   - python3 standalone_tests/test_precompiled_wheel.py
   - pytest -v -s device_allocator

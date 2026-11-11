@@ -453,6 +453,10 @@ ADD ./requirements/cpu.txt ./requirements/cpu.txt
 # the (CPU) Params, Env, Tokenizers, Parser job installs cmake from a
 # hash-locked file; the wheel does not ship requirements/.
 ADD ./requirements/ci/ ./requirements/ci/
+
+RUN --mount=type=cache,target=/root/.cache/uv \
+    uv pip install --require-hashes -r requirements/ci/cmake.txt
+
 # tests/tools/test_dependency_pins.py runs the docs version loader against
 # the hashed CUDA test lock, and checks the hybrid test build tools are hashed.
 ADD ./docs/mkdocs/gen_files/generate_argparse.py \
