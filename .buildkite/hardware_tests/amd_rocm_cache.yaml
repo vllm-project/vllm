@@ -1,0 +1,24 @@
+group: Hardware - AMD ROCm Image Cache
+
+# /ci rocm cache starts a main build that runs only this step (VLLM_CI_ONLY_STEP_KEYS): build.sh promote
+# copies the ROCm images a PR's CI built into rocm/vllm-ci. Not in hardware_tests/amd.yaml, which
+# ci-infra's AMD CI pipeline also renders. Optional, so other builds skip it; nightlies run optional
+# steps, and without a request it does nothing.
+steps:
+  - label: ":docker: Cache a PR's ROCm images for main"
+    key: rocm-base-image-cache
+    depends_on: []
+    device: amd_cpu
+    no_plugin: true
+    optional: true
+    commands:
+      - bash .buildkite/scripts/rocm/build.sh rocm promote
+    timeout_in_minutes: 30
+    retry:
+      automatic:
+        - exit_status: 75  # Registry error (build.sh)
+          limit: 1
+        - exit_status: -1  # Agent was lost
+          limit: 1
+        - exit_status: -10  # Agent was lost
+          limit: 1

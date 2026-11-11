@@ -56,7 +56,7 @@ AMD_CI_COMMANDS = frozenset(
         *(command for command in RUN_CI_COMMAND_ENV if command.startswith("/amd-ci ")),
         COMMAND_RETRY_AMD_FAILED,
         COMMAND_CANCEL_AMD_CI,
-        *ROCM_CACHE_COMMANDS,  # they start AMD CI builds
+        *ROCM_CACHE_COMMANDS,  # searched in AMD CI too; the cache build runs in CI
     }
 )
 RETRY_COMMANDS = frozenset({COMMAND_RETRY_FAILED, COMMAND_RETRY_AMD_FAILED})
@@ -92,9 +92,18 @@ ROCM_CACHE_DONE = (
 )
 # build.sh promote copies only images built with main's versions of these.
 ROCM_RECIPE = (".buildkite/scripts/rocm/build.sh", "docker/docker-bake-rocm.hcl")
-# build.sh base mode records the stack pair under this key only when it pushed
-# them itself, not when it reused a tag another PR's CI could have pushed.
+# build.sh base mode records the images it pushed itself under these keys, not
+# ones it reused from a tag another PR's CI could have pushed, and a runtime or
+# test-deps only with the parent it was built on ("none" otherwise). Only a build
+# that pushed the stack is a source; build.sh promote copies the rest over it.
 ROCM_STACK_BUILT_KEY = "rocm-rocm-stack-built"
+ROCM_BUILT_KEYS = (
+    ROCM_STACK_BUILT_KEY,
+    "rocm-rocm-runtime-built",
+    "rocm-rocm-test-deps-built",
+)
+# The one step a cache build runs (.buildkite/hardware_tests/amd_rocm_cache.yaml).
+ROCM_CACHE_STEP_KEY = "rocm-base-image-cache"
 BUILDS_PER_PAGE = 100
 MAX_BUILD_PAGES = 100
 
@@ -1315,7 +1324,8 @@ def handle_rocm_cache(
             "its CI built the ROCm base image before main changed them. Use "
             f"`{COMMAND_ROCM_NOCACHE}`."
         )
-    build = buildkite.create_build(
+    meta_data = source["meta_data"]
+    build = ci_buildkite.create_build(
         {
             "commit": "HEAD",
             "branch": "main",
@@ -1323,13 +1333,18 @@ def handle_rocm_cache(
             "env": {
                 "ROCM_PROMOTE_PR": str(pr["number"]),
                 "ROCM_PROMOTE_SHA": sha,
-                "ROCM_PROMOTE_IMAGES": source["meta_data"][ROCM_STACK_BUILT_KEY],
+                "ROCM_PROMOTE_IMAGES": " ".join(
+                    meta_data[key]
+                    for key in ROCM_BUILT_KEYS
+                    if meta_data.get(key, "none") != "none"
+                ),
+                "VLLM_CI_ONLY_STEP_KEYS": json.dumps([ROCM_CACHE_STEP_KEY]),
             },
         }
     )
     return (
-        f"Caching the ROCm base image for main: [AMD CI #{build['number']}]"
-        f"({build['web_url']}) copies the image [this PR's CI]({source['web_url']}) "
+        f"Caching the ROCm base image for main: [CI #{build['number']}]"
+        f"({build['web_url']}) copies the images [this PR's CI]({source['web_url']}) "
         f"built at `{sha[:12]}`. {ROCM_CACHE_DONE}"
     )
 
