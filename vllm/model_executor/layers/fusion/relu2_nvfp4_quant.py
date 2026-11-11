@@ -3,16 +3,10 @@
 
 from __future__ import annotations
 
-from collections.abc import Iterator
-from itertools import product
-from typing import TYPE_CHECKING, Any
+from typing import TYPE_CHECKING
 
 import torch
 
-from vllm.model_executor.warmup.jit_warmup_triton_helper import (
-    TritonWarmupTensor,
-    triton_kernel_dispatcher_with_warmup,
-)
 from vllm.triton_utils import tl, triton
 from vllm.utils.math_utils import round_up
 from vllm.utils.torch_utils import direct_register_custom_op
@@ -22,65 +16,12 @@ if TYPE_CHECKING:
     from vllm.model_executor.layers.linear import LinearBase
 
 
-def _relu_squared_nvfp4_quant_launch(
-    m: int, k: int
-) -> tuple[tuple[int], dict[str, Any]]:
-    scale_cols = round_up(k // 16, 4)
-    scale_size = round_up(m, 128) * scale_cols
-    groups = m * (k // 16)
-    ctas = max(triton.cdiv(groups, 128), min(triton.cdiv(scale_size, 512), 128))
-    return (ctas,), dict(
-        M=m,
-        K=k,
-        NUM_GROUPS=groups,
-        PADDED_SCALE_COLS=scale_cols,
-        PADDED_SCALE_SIZE=scale_size,
-        GROUPS_PER_CTA=128,
-        PAD_PER_CTA=triton.next_power_of_2(triton.cdiv(scale_size, ctas)),
-        num_warps=4,
-        enable_fp_fusion=False,
-    )
-
-
 def _relu_squared_nvfp4_max_rows(k: int) -> int:
-    # Keep groups and padded scale size <= 2^30. The power-of-two padding
-    # tile then keeps every pid * PAD_PER_CTA offset within signed int32.
+    # Keep groups and padded scale size <= 2^30 so every pid * 128 group and
+    # pid * 512 padding offset stays within signed int32.
     groups_per_row = k // 16
     scale_cols = round_up(groups_per_row, 4)
     return min((1 << 30) // groups_per_row, (1 << 30) // scale_cols // 128 * 128)
-
-
-def _relu_squared_nvfp4_warmup_rows(k: int, max_tokens: int) -> range:
-    # All padding-tile buckets occur in the first 128 rows. For M > 128,
-    # CTAs = ceil(M * (K/16) / 128), so the padding/CTA ratio is between
-    # its M=128 and M=64 values. The row bound keeps all runtime scalars i32.
-    return range(1, min(128, max_tokens, _relu_squared_nvfp4_max_rows(k)) + 1)
-
-
-def _relu_squared_nvfp4_warmup_inputs(
-    module: torch.nn.Module, max_tokens: int
-) -> Iterator[dict[str, Any]]:
-    # Resolve after weight processing and LoRA replacement, not at construction.
-    from vllm.model_executor.layers.fusion.fused_act_quant import (
-        _relu_squared_nvfp4_warmup_width,
-    )
-
-    k = _relu_squared_nvfp4_warmup_width(module)
-    if k is None:
-        return
-    for m in _relu_squared_nvfp4_warmup_rows(k, max_tokens):
-        grid, kwargs = _relu_squared_nvfp4_quant_launch(m, k)
-        for input_aligned, scale_aligned in product((True, False), repeat=2):
-            yield dict(
-                grid=grid,
-                x_ptr=TritonWarmupTensor(torch.bfloat16, aligned=input_aligned),
-                global_scale_ptr=TritonWarmupTensor(
-                    torch.float32, aligned=scale_aligned
-                ),
-                output_ptr=TritonWarmupTensor(torch.uint8),
-                scale_ptr=TritonWarmupTensor(torch.float8_e4m3fn),
-                **kwargs,
-            )
 
 
 @triton.jit
@@ -114,7 +55,6 @@ def _e4m3_satfinite(x):
     return packed.to(tl.uint8).to(tl.float8e4nv, bitcast=True)
 
 
-@triton_kernel_dispatcher_with_warmup(warmup_inputs=_relu_squared_nvfp4_warmup_inputs)
 @triton.jit(do_not_specialize=["M", "NUM_GROUPS", "PADDED_SCALE_SIZE"])
 def _relu_squared_nvfp4_quant_kernel(
     x_ptr,
@@ -127,7 +67,6 @@ def _relu_squared_nvfp4_quant_kernel(
     PADDED_SCALE_COLS: tl.constexpr,
     PADDED_SCALE_SIZE,
     GROUPS_PER_CTA: tl.constexpr,
-    PAD_PER_CTA: tl.constexpr,
 ):
     pid = tl.program_id(0)
     groups = pid * GROUPS_PER_CTA + tl.arange(0, GROUPS_PER_CTA)
@@ -183,42 +122,16 @@ def _relu_squared_nvfp4_quant_kernel(
         tl.store(scale_ptr + scale_index, scale, groups < NUM_GROUPS)
 
     # Initialize only padding; these stores never overlap the live scale stores.
-    # Distribute padding across the same launch, including small-M cases.
-    offsets = pid * PAD_PER_CTA + tl.arange(0, PAD_PER_CTA)
-    tile = offsets // 512
-    padded_row = (
-        (tile // (PADDED_SCALE_COLS // 4)) * 128
-        + (offsets % 16 // 4) * 32
-        + offsets % 512 // 16
-    )
-    padded_col = (tile % (PADDED_SCALE_COLS // 4)) * 4 + offsets % 4
-    is_padding = (padded_row >= M) | (padded_col >= K // 16)
-    tl.store(scale_ptr + offsets, 0.0, (offsets < PADDED_SCALE_SIZE) & is_padding)
-
-
-def relu_squared_nvfp4_quant_out(
-    x: torch.Tensor,
-    global_scale: torch.Tensor,
-    output: torch.Tensor,
-    block_scale: torch.Tensor,
-) -> None:
-    """Write BF16 ReLU2 + NVFP4 into distinct, preallocated output buffers.
-
-    Requires M <= _relu_squared_nvfp4_max_rows(K).
-    """
-    m, k = x.shape
-    # vLLM can reuse compiled graphs without checking Dynamo's shape guards.
-    assert m <= _relu_squared_nvfp4_max_rows(k), "NVFP4 row limit exceeded"
-    if m == 0:
-        return
-    grid, kwargs = _relu_squared_nvfp4_quant_launch(m, k)
-    _relu_squared_nvfp4_quant_kernel[grid](
-        x,
-        global_scale,
-        output,
-        block_scale,
-        **kwargs,
-    )
+    if pid < PADDED_SCALE_SIZE // 512:
+        offsets = pid * 512 + tl.arange(0, 512)
+        padded_row = (
+            (pid // (PADDED_SCALE_COLS // 4)) * 128
+            + (offsets % 16 // 4) * 32
+            + offsets % 512 // 16
+        )
+        padded_col = (pid % (PADDED_SCALE_COLS // 4)) * 4 + offsets % 4
+        is_padding = (padded_row >= M) | (padded_col >= K // 16)
+        tl.store(scale_ptr + offsets, 0.0, is_padding)
 
 
 def _relu_squared_nvfp4_quant_fake(
@@ -237,8 +150,30 @@ def _relu_squared_nvfp4_quant_fake(
 def _relu_squared_nvfp4_quant(
     x: torch.Tensor, global_scale: torch.Tensor
 ) -> tuple[torch.Tensor, torch.Tensor]:
+    m, k = x.shape
+    # vLLM can reuse compiled graphs without checking Dynamo's shape guards.
+    assert m <= _relu_squared_nvfp4_max_rows(k), "NVFP4 row limit exceeded"
     output, block_scale = _relu_squared_nvfp4_quant_fake(x, global_scale)
-    relu_squared_nvfp4_quant_out(x, global_scale, output, block_scale)
+    if m == 0:
+        return output, block_scale
+    scale_cols, scale_size = block_scale.shape[1], block_scale.numel()
+    groups = m * (k // 16)
+    # Each CTA zeroes at most one 128x4 scale tile, so no constexpr depends on M.
+    grid = (max(triton.cdiv(groups, 128), scale_size // 512),)
+    _relu_squared_nvfp4_quant_kernel[grid](
+        x,
+        global_scale,
+        output,
+        block_scale,
+        M=m,
+        K=k,
+        NUM_GROUPS=groups,
+        PADDED_SCALE_COLS=scale_cols,
+        PADDED_SCALE_SIZE=scale_size,
+        GROUPS_PER_CTA=128,
+        num_warps=4,
+        enable_fp_fusion=False,
+    )
     return output, block_scale
 
 

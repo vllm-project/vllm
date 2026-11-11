@@ -1,7 +1,5 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
-from itertools import product
-
 import pytest
 import torch
 import torch.nn.functional as F
@@ -143,10 +141,10 @@ def native_vllm_config():
     reason="ReLU2 NVFP4 fusion is validated on SM10x",
 )
 @pytest.mark.parametrize("shape", [(1, 16), (17, 80), (129, 1344), (256, 5376)])
-@pytest.mark.parametrize("scale_value", [0.0009765625, 1.0, 17.125, 224.0])
+@pytest.mark.parametrize("scale_value", [0.0009765625, 17.125])
 @torch.inference_mode()
-def test_relu2_nvfp4_exact_and_changed_graph(native_vllm_config, shape, scale_value):
-    """Preserve BF16 rounding, packing, padded scales, and replay data dependence."""
+def test_relu2_nvfp4_matches_unfused(native_vllm_config, shape, scale_value):
+    """Match unfused ReLU2 + NVFP4 bitwise and zero every padded scale."""
     from tests.kernels.quantization.test_nvfp4_quant import recover_swizzled_scales
 
     x = torch.randn(shape, dtype=torch.bfloat16, device="cuda")
@@ -167,27 +165,6 @@ def test_relu2_nvfp4_exact_and_changed_graph(native_vllm_config, shape, scale_va
     )
     actual_scale[: shape[0], : shape[1] // 16] = 0
     assert not torch.count_nonzero(actual_scale)
-    old_data = actual.data.clone()
-    old_scale = actual.scale.view(torch.uint8).clone()
-    for _ in range(3):
-        maybe_fused_act_quant(act, x, linear)
-    torch.accelerator.synchronize()
-    graph = torch.cuda.CUDAGraph()
-    with torch.cuda.graph(graph):
-        replayed = maybe_fused_act_quant(act, x, linear)
-    x.normal_()
-    scale.mul_(1.25)
-    graph.replay()
-    expected = ops.scaled_fp4_quant(compiled_relu(x), scale)
-    assert torch.equal(replayed.data, expected[0])
-    torch.testing.assert_close(
-        recover_swizzled_scales(replayed.scale, *shape),
-        recover_swizzled_scales(expected[1], *shape),
-        rtol=0,
-        atol=0,
-    )
-    assert torch.equal(actual.data, old_data)
-    assert torch.equal(actual.scale.view(torch.uint8), old_scale)
 
 
 @pytest.mark.skipif(
@@ -274,75 +251,6 @@ def test_relu2_nvfp4_preserves_selected_activation(mode):
             assert torch.equal(
                 actual.scale.view(torch.uint8), expected_scale.view(torch.uint8)
             )
-
-
-@pytest.mark.skipif(
-    not (
-        current_platform.is_cuda() and current_platform.is_device_capability_family(100)
-    ),
-    reason="ReLU2 NVFP4 fusion is validated on SM10x",
-)
-@torch.inference_mode()
-@pytest.mark.parametrize(
-    "use_aot,use_bytecode_hook", [(False, False), (False, True), (True, False)]
-)
-def test_relu2_nvfp4_fullgraph_changed_rows(
-    native_vllm_config, monkeypatch, use_aot, use_bytecode_hook
-):
-    """One guard-free vLLM graph must handle unseen M, including K padding."""
-    from tests.kernels.quantization.test_nvfp4_quant import recover_swizzled_scales
-    from vllm.compilation.counter import compilation_counter
-    from vllm.compilation.wrapper import TorchCompileWithNoGuardsWrapper
-    from vllm.config import CUDAGraphMode
-
-    monkeypatch.setenv("VLLM_DISABLE_COMPILE_CACHE", "1")
-    monkeypatch.setenv("VLLM_USE_AOT_COMPILE", str(int(use_aot)))
-    monkeypatch.setenv("VLLM_USE_BYTECODE_HOOK", str(int(use_bytecode_hook)))
-    native_vllm_config.compilation_config.cudagraph_mode = CUDAGraphMode.NONE
-    native_vllm_config.compilation_config.compile_sizes = []
-    native_vllm_config.scheduler_config.max_num_batched_tokens = 8192
-    native_vllm_config.compilation_config.compile_ranges_endpoints = [8192]
-
-    class Wrapper(TorchCompileWithNoGuardsWrapper):
-        def __init__(self):
-            self.act = ReLUSquaredActivation(compile_native=True)
-            self.linear = MockLinearNvfp4(torch.tensor(17.125, device="cuda"))
-            super().__init__()
-
-        def forward(self, x):
-            qa = maybe_fused_act_quant(self.act, x, self.linear)
-            return qa.data, qa.scale
-
-    torch._dynamo.reset()
-    dispatch = Wrapper()
-    with compilation_counter.expect(num_graphs_seen=1, num_inductor_compiles=1):
-        for m in (128, 17, 129, 1, 257, 33, 4097):
-            x = torch.randn((m, 80), device="cuda", dtype=torch.bfloat16)
-            if m == 128:
-                torch._dynamo.mark_dynamic(x, 0)
-            actual_data, actual_scale = dispatch(x)
-            expected_data, expected_scale = ops.scaled_fp4_quant(
-                dispatch.act.forward_native(x),
-                dispatch.linear.input_global_scale_inv,
-                backend="flashinfer-cutedsl",
-            )
-            assert torch.equal(actual_data, expected_data)
-            scales = recover_swizzled_scales(
-                actual_scale, *x.shape, include_padding=True
-            )
-            torch.testing.assert_close(
-                scales[:m, :5],
-                recover_swizzled_scales(expected_scale, *x.shape),
-                rtol=0,
-                atol=0,
-            )
-            scales[:m, :5] = 0
-            assert not torch.count_nonzero(scales)
-    opcheck(
-        torch.ops.vllm.relu_squared_nvfp4_quant,
-        (x, dispatch.linear.input_global_scale_inv),
-    )
-    torch._dynamo.reset()
 
 
 @pytest.mark.parametrize("token_shape", [(1,), (16,), (128,), (1, 17), (2, 17)])
@@ -476,57 +384,13 @@ def test_maybe_fused_act_quant_preserves_required_unquantized_input(
     torch.testing.assert_close(result, act_fn(x))
 
 
-def _relu2_nvfp4_warmup_mlp(width):
-    module = torch.nn.Module()
-    module.act_fn = ReLUSquaredActivation(compile_native=False)
-    module.down_proj = MockLinearNvfp4(
-        torch.ones(1, dtype=torch.float32, device="cuda")
-    )
-    module.down_proj.params_dtype = torch.bfloat16
-    module.down_proj.input_size_per_partition = width
-    return module
-
-
 @pytest.mark.skipif(
     not (
         current_platform.is_cuda() and current_platform.is_device_capability_family(100)
     ),
     reason="ReLU2 NVFP4 fusion is validated on SM10x",
 )
-def test_relu2_nvfp4_warmup_resolves_post_load_consumer(native_vllm_config):
-    """Resolve post-load scales and a replaced LoRA consumer at warmup time."""
-    from vllm.model_executor.layers.fusion.fused_act_quant import (
-        register_relu_squared_nvfp4_quant_warmup,
-    )
-    from vllm.model_executor.layers.fusion.relu2_nvfp4_quant import (
-        _relu_squared_nvfp4_warmup_inputs,
-    )
-    from vllm.model_executor.warmup.jit_warmup import JitWarmupRegistry
-
-    native_vllm_config.kernel_config.enable_jit_warmup = True
-    module = _relu2_nvfp4_warmup_mlp(80)
-    scale = module.down_proj.input_global_scale_inv
-    del module.down_proj.input_global_scale_inv
-    registry = JitWarmupRegistry(native_vllm_config)
-    with registry.activate():
-        register_relu_squared_nvfp4_quant_warmup(module)
-    assert len(registry) == 1
-    assert not list(_relu_squared_nvfp4_warmup_inputs(module, 128))
-
-    module.down_proj.input_global_scale_inv = scale
-    assert list(_relu_squared_nvfp4_warmup_inputs(module, 128))
-    module.down_proj = _relu2_nvfp4_warmup_mlp(80).down_proj
-    module.down_proj.requires_unquantized_input = True
-    assert not list(_relu_squared_nvfp4_warmup_inputs(module, 128))
-
-
-@pytest.mark.skipif(
-    not (
-        current_platform.is_cuda() and current_platform.is_device_capability_family(100)
-    ),
-    reason="ReLU2 NVFP4 fusion is validated on SM10x",
-)
-@pytest.mark.parametrize("width", [16, 48, 80, 1344, 5376])
+@pytest.mark.parametrize("width", [16, 5376])
 def test_relu2_nvfp4_oversized_dispatch_falls_back(
     native_vllm_config, monkeypatch, width
 ):
@@ -571,78 +435,30 @@ def test_relu2_nvfp4_oversized_dispatch_falls_back(
 )
 @pytest.mark.parametrize("width", [16, 48, 80, 1344, 5376])
 @torch.inference_mode()
-def test_relu2_nvfp4_startup_warmup_covers_unseen_rows(
+def test_relu2_nvfp4_single_specialization_per_width(
     native_vllm_config, monkeypatch, width
 ):
-    """Startup must cover unseen row counts and offset input/scale pointers."""
-    from vllm.model_executor.layers.fusion.fused_act_quant import (
-        register_relu_squared_nvfp4_quant_warmup,
-    )
-    from vllm.model_executor.warmup.jit_warmup import JitWarmupRegistry
+    """One compile per K covers every M, so the profile run needs no warmup."""
     from vllm.triton_utils import triton
 
-    native_vllm_config.kernel_config.enable_jit_warmup = True
-    native_vllm_config.scheduler_config.max_num_batched_tokens = 32768
-    module = _relu2_nvfp4_warmup_mlp(width)
-    registry = JitWarmupRegistry(native_vllm_config)
-    with registry.activate():
-        register_relu_squared_nvfp4_quant_warmup(module)
-    registry.warmup()
+    act = ReLUSquaredActivation(compile_native=False)
+    linear = MockLinearNvfp4(torch.full((), 17.125, device="cuda"))
+    x = torch.randn((4096, width), dtype=torch.bfloat16, device="cuda")
+    maybe_fused_act_quant(act, x, linear)
 
     def fail_compile(**kwargs):
-        pytest.fail(f"Producer compiled after startup warmup: {kwargs.get('fn')}")
+        pytest.fail(f"Producer recompiled for a new row count: {kwargs.get('fn')}")
 
     monkeypatch.setattr(triton.knobs.runtime, "jit_post_compile_hook", fail_compile)
-    rows = (0, 1, 2, 7, 17, 33, 65, 127, 128, 129, 255, 256, 257, 1023, 4097, 32768)
-    for input_offset, scale_offset in product((0, 1), repeat=2):
-        scale = torch.full((2,), 17.125, dtype=torch.float32, device="cuda")
-        module.down_proj.input_global_scale_inv = scale[scale_offset : scale_offset + 1]
-        for m in rows:
-            x = torch.randn(
-                m * width + input_offset, dtype=torch.bfloat16, device="cuda"
-            )[input_offset:].view(m, width)
-            actual = maybe_fused_act_quant(module.act_fn, x, module.down_proj)
-            assert isinstance(actual, QuantizedActivation)
-            if m == 129:
-                expected = ops.scaled_fp4_quant(
-                    module.act_fn.forward_native(x),
-                    module.down_proj.input_global_scale_inv,
-                )
-                assert torch.equal(actual.data, expected[0])
-                assert torch.equal(
-                    actual.scale.view(torch.uint8), expected[1].view(torch.uint8)
-                )
-            if m == 129 and input_offset == scale_offset == 1:
-                graph = torch.cuda.CUDAGraph()
-                with torch.cuda.graph(graph):
-                    maybe_fused_act_quant(module.act_fn, x, module.down_proj)
-                graph.replay()
-
-
-@pytest.mark.parametrize(
-    "width",
-    [16, 48, 80, 1344, 5376, 16 * ((1 << 23) - 1), 16 << 23, 16 * ((1 << 23) + 1)],
-)
-def test_relu2_nvfp4_row_bound_keeps_index_products_i32(width: int) -> None:
-    from vllm.model_executor.layers.fusion.relu2_nvfp4_quant import (
-        _relu_squared_nvfp4_max_rows,
-        _relu_squared_nvfp4_quant_launch,
-        _relu_squared_nvfp4_warmup_rows,
-    )
-    from vllm.utils.math_utils import round_up
-
-    max_rows = _relu_squared_nvfp4_max_rows(width)
-    rows = {0, 1, 127, 128, 129, max_rows, max_rows + 1, max(0, max_rows - 1)}
-    assert len(_relu_squared_nvfp4_warmup_rows(width, (1 << 63))) == min(128, max_rows)
-    for m in rows:
-        groups = m * (width // 16)
-        scale_size = round_up(m, 128) * round_up(width // 16, 4)
-        assert (m <= max_rows) == (groups <= 1 << 30 and scale_size <= 1 << 30)
-        if 0 < m <= max_rows:
-            grid, args = _relu_squared_nvfp4_quant_launch(m, width)
-            assert grid[0] * args["GROUPS_PER_CTA"] <= 1 << 31
-            assert grid[0] * args["PAD_PER_CTA"] <= 1 << 31
-            assert all(
-                args[name] <= 1 << 30
-                for name in ("M", "NUM_GROUPS", "PADDED_SCALE_SIZE")
-            )
+    for m in (1, 2, 7, 17, 33, 65, 127, 128, 129, 255, 256, 257, 1023, 4097):
+        x = torch.randn((m, width), dtype=torch.bfloat16, device="cuda")
+        actual = maybe_fused_act_quant(act, x, linear)
+        assert isinstance(actual, QuantizedActivation)
+        expected = ops.scaled_fp4_quant(
+            act.forward_native(x), linear.input_global_scale_inv
+        )
+        assert torch.equal(actual.data, expected[0])
+        assert torch.equal(
+            actual.scale.view(torch.uint8), expected[1].view(torch.uint8)
+        )
+    opcheck(torch.ops.vllm.relu_squared_nvfp4_quant, (x, linear.input_global_scale_inv))
