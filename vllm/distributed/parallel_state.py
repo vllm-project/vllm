@@ -760,13 +760,15 @@ class GroupCoordinator:
         # DBO hand-off, on the comm stream. Under the vllm.all_reduce custom op,
         # so compiled graphs reach it too; no-ops outside a microbatch.
         from vllm.v1.worker.ubatching import (
-            dbo_switch_to_compute_sync,
-            dbo_yield_and_switch_from_compute_to_comm,
+            dbo_switch_to_comm_sync,
+            dbo_yield_and_switch_from_comm_to_compute,
         )
 
-        dbo_yield_and_switch_from_compute_to_comm()
+        # Launch before yielding: the comm stream then waits on a compute event
+        # recorded after every read of whichever freed block the output reuses.
+        dbo_switch_to_comm_sync()
         out = self.device_communicator.all_reduce(input_)
-        dbo_switch_to_compute_sync()
+        dbo_yield_and_switch_from_comm_to_compute()
         return out
 
     def all_gather(self, input_: torch.Tensor, dim: int = -1) -> torch.Tensor:
