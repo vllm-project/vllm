@@ -26,6 +26,10 @@ from vllm.platforms import current_platform
 from vllm.utils.extensible_tensor import ExtensibleTensor
 from vllm.utils.math_utils import round_up
 from vllm.utils.mem_utils import device_memory_info, format_gib
+from vllm.utils.vmm_driver import (
+    _MEM_HANDLE_TYPE_FABRIC,
+    _MEM_HANDLE_TYPE_POSIX_FILE_DESCRIPTOR,
+)
 from vllm.v1.hisparse.binding import rebind_hisparse_device_caches
 from vllm.v1.kv_cache_interface import (
     KVCacheConfig,
@@ -86,7 +90,7 @@ class ExtensibleKVCache:
         kv_cache_config: KVCacheConfig,
         device: torch.device,
         layout: KVCacheLayout,
-        exportable: bool = False,
+        export_handle_types: int = 0,
     ):
         tensors = [
             tensor
@@ -120,7 +124,7 @@ class ExtensibleKVCache:
                 end - start
                 for start, end in pairwise([*self.segment_offsets, self.size])
             ],
-            exportable=exportable,
+            export_handle_types=export_handle_types,
         )
 
     def _segments(
@@ -381,14 +385,19 @@ def registers_kv_cache_memory(vllm_config: "VllmConfig") -> bool:
     )
 
 
-def exports_kv_cache_memory(vllm_config: "VllmConfig") -> bool:
-    """Whether another process imports the KV cache through POSIX file
-    descriptors, which needs it created exportable."""
+def kv_cache_export_handle_types(vllm_config: "VllmConfig") -> int:
+    """Handle types other processes import the KV cache through, for
+    `VmmDriver.create`."""
     kv_transfer_config = vllm_config.kv_transfer_config
-    return (
-        kv_transfer_config is not None
-        and KVCacheAccess.EXPORTS_FD in kv_transfer_config.kv_cache_access()
-    )
+    if kv_transfer_config is None:
+        return 0
+    access = kv_transfer_config.kv_cache_access()
+    handle_types = 0
+    if KVCacheAccess.EXPORTS_FD in access:
+        handle_types |= _MEM_HANDLE_TYPE_POSIX_FILE_DESCRIPTOR
+    if KVCacheAccess.EXPORTS_FABRIC in access:
+        handle_types |= _MEM_HANDLE_TYPE_FABRIC
+    return handle_types
 
 
 def pad_kv_cache_segments(

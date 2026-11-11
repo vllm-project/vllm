@@ -39,12 +39,12 @@ class _VirtualBuffer:
     """
 
     def __init__(
-        self, max_bytes: int, device_index: int, exportable: bool = False
+        self, max_bytes: int, device_index: int, export_handle_types: int = 0
     ) -> None:
         self._driver = get_vmm_driver()
         self._driver.ensure_context(device_index)
         self.device_index = device_index
-        self.exportable = exportable
+        self.export_handle_types = export_handle_types
 
         self.granularity: int = granule_size(device_index)
         self.reserved_size: int = _round_up(max(max_bytes, 1), self.granularity)
@@ -116,12 +116,12 @@ class _VirtualBuffer:
         driver = self._driver
         driver.ensure_context(self.device_index)
         try:
-            handle = driver.create(size, self.device_index, self.exportable)
+            handle = driver.create(size, self.device_index, self.export_handle_types)
         except RuntimeError:
             # The VMM allocator cannot reuse memory idling in torch's
             # caching allocator; return it to the driver and retry once.
             torch.accelerator.empty_cache()
-            handle = driver.create(size, self.device_index, self.exportable)
+            handle = driver.create(size, self.device_index, self.export_handle_types)
 
         addr = self.base_ptr + offset
         try:
@@ -247,8 +247,8 @@ class ExtensibleTensor:
     The reservation is divided into contiguous segments whose committed bytes
     form a prefix of each; num_segments equal segments by default, or the
     explicit segment_capacities (in bytes, summing to max_num_bytes).
-    Exportable memory can be shared with another process as POSIX file
-    descriptors.
+    Other processes can import the memory through `export_handle_types` (see
+    `VmmDriver.create`).
     """
 
     def __init__(
@@ -257,7 +257,7 @@ class ExtensibleTensor:
         device: torch.device | str | int | None = None,
         num_segments: int = 1,
         segment_capacities: Sequence[int] | None = None,
-        exportable: bool = False,
+        export_handle_types: int = 0,
     ) -> None:
         if max_num_bytes < 0:
             raise ValueError("max_num_bytes must be non-negative.")
@@ -296,7 +296,7 @@ class ExtensibleTensor:
         )
         self._committed: list[int] = [0] * len(self._segment_capacities)
         self._buffer: _VirtualBuffer = _VirtualBuffer(
-            max_num_bytes, self._device_index, exportable
+            max_num_bytes, self._device_index, export_handle_types
         )
 
     def full_view(self) -> torch.Tensor:

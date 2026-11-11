@@ -231,19 +231,28 @@ def test_release_physical_keeps_addresses() -> None:
 
 
 @pytest.mark.skipif(torch.version.hip is not None, reason="CUDA driver export")
-@pytest.mark.parametrize("exportable", [False, True])
+@pytest.mark.parametrize("posix_fd_importer", [False, True])
 @create_new_process_for_each_test("spawn")
-def test_only_exportable_memory_exports_a_posix_fd(exportable: bool) -> None:
+def test_only_posix_fd_importers_get_a_posix_fd(posix_fd_importer: bool) -> None:
     """LMCache MP imports the committed memory through POSIX file descriptors;
-    every other extensible tensor keeps the driver's unexportable default."""
+    every other extensible tensor keeps the driver's default handle types."""
     _skip_unless_vmm()
     import ctypes
     import os
 
-    from vllm.utils.vmm_driver import get_vmm_driver
+    from vllm.utils.vmm_driver import (
+        _MEM_HANDLE_TYPE_POSIX_FILE_DESCRIPTOR,
+        get_vmm_driver,
+    )
 
     driver = get_vmm_driver()
-    et = ExtensibleTensor(4096, device="cuda", exportable=exportable)
+    et = ExtensibleTensor(
+        4096,
+        device="cuda",
+        export_handle_types=(
+            _MEM_HANDLE_TYPE_POSIX_FILE_DESCRIPTOR if posix_fd_importer else 0
+        ),
+    )
     try:
         et.resize_per_segment_(4096)
         handle = ctypes.c_ulonglong()
@@ -255,12 +264,15 @@ def test_only_exportable_memory_exports_a_posix_fd(exportable: bool) -> None:
         )
         fd = ctypes.c_int(-1)
         result = driver._lib.cuMemExportToShareableHandle(
-            ctypes.byref(fd), handle, ctypes.c_int(1), ctypes.c_ulonglong(0)
+            ctypes.byref(fd),
+            handle,
+            ctypes.c_int(_MEM_HANDLE_TYPE_POSIX_FILE_DESCRIPTOR),
+            ctypes.c_ulonglong(0),
         )
         driver.release(handle.value)
         if result == 0:
             os.close(fd.value)
-        assert (result == 0) is exportable
+        assert (result == 0) is posix_fd_importer
     finally:
         et.free()
 
@@ -281,11 +293,11 @@ class _FailingDriver:
     def __getattr__(self, name):
         return getattr(self._driver, name)
 
-    def create(self, size: int, device_index: int, exportable: bool = False) -> int:
+    def create(self, size: int, device_index: int, export_handle_types: int = 0) -> int:
         self.creates += 1
         if self.creates == self._fail_on_create:
             raise self.Failure("simulated allocation failure")
-        return self._driver.create(size, device_index, exportable)
+        return self._driver.create(size, device_index, export_handle_types)
 
     def set_access(self, ptr: int, size: int, device_index: int) -> None:
         self.access_grants.append((ptr, size))

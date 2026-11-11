@@ -113,6 +113,7 @@ from vllm.v1.outputs import (
 from vllm.v1.utils import report_usage_stats
 from vllm.v1.worker.extensible_kv_cache import (
     extend_kv_cache,
+    kv_cache_export_handle_types,
     kv_cache_lent_for_weight_update,
     measure_kv_cache_blocks,
     pad_kv_cache_segments,
@@ -991,7 +992,7 @@ class Worker(WorkerBase):
     def extensible_kv_cache_unsupported_reason(self) -> str | None:
         # Every rank must reach the same decision: one that keeps the feature
         # would wait in the block-count all-reduces for one that dropped it.
-        reason = vmm_unavailable_reason()
+        reason = vmm_unavailable_reason(kv_cache_export_handle_types(self.vllm_config))
         if all_reduce_int(
             get_world_group().cpu_group, int(reason is not None), ReduceOp.MAX
         ):

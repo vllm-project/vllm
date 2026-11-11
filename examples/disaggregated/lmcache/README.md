@@ -25,8 +25,17 @@ cache through the CUDA VMM API, which legacy CUDA IPC cannot share.
 extensible KV cache off. With `"lmcache.mp.use_vmm_api": true` in its
 `kv_connector_extra_config`, also as a `MultiConnector` child, it declares
 POSIX file descriptor export instead: vLLM allocates the KV cache exportable,
-and the LMCache server imports each layer through a file descriptor. This
-requires:
+and the LMCache server imports each layer through a file descriptor. vLLM
+refuses to start if the extensible KV cache is then off, e.g. with
+`kv_cache_memory_bytes`.
+
+Next to `NixlConnector` in a `MultiConnector`, on a host with an IMEX channel
+(e.g., GB200/GB300) the KV cache gets a FABRIC handle only, and the LMCache server imports it
+through FABRIC instead; this is not yet verified, and the server needs an IMEX
+channel too. Without an IMEX channel, NIXL's transfers within a host fall back
+to TCP.
+
+It requires:
 
 - an LMCache release that includes the file descriptor channel
   ([LMCache/LMCache#6266](https://github.com/LMCache/LMCache/pull/6266)) and

@@ -58,8 +58,9 @@ class KVCacheAccess(enum.IntFlag):
     """Registers it with UCX or RDMA: one physical allocation per segment."""
 
     EXPORTS_FD = enum.auto()
-    """Another process imports it through POSIX file descriptors: one physical
-    allocation per segment, exportable."""
+    """Another process imports it through POSIX file descriptors, or FABRIC
+    handles alongside `EXPORTS_FABRIC`: the extensible KV cache, exportable,
+    with one physical allocation per segment."""
 
     EXPORTS_FABRIC = enum.auto()
     """Another process on the host imports it through FABRIC handles (UCX
