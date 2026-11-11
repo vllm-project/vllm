@@ -24,6 +24,7 @@ from huggingface_hub.utils import httpx
 
 from vllm import envs
 from vllm.config import KVTransferConfig, VllmConfig
+from vllm.config.kv_transfer import KVCacheAccess
 from vllm.distributed.kv_transfer.kv_connector.utils import (
     EngineId,
     TransferTopology,
@@ -51,6 +52,10 @@ from vllm.distributed.kv_transfer.kv_connector.v1.mooncake.mooncake_utils import
 from vllm.distributed.kv_transfer.kv_connector.v1.mooncake.stats import (
     MooncakeKVConnectorStats,
     MooncakePromMetrics,
+)
+from vllm.distributed.kv_transfer.kv_connector.v1.mooncake.transfer_engine_registry import (  # noqa: E501
+    clear_shared_transfer_engine,
+    register_shared_transfer_engine,
 )
 from vllm.distributed.parallel_state import (
     get_pp_group,
@@ -773,6 +778,11 @@ class MooncakeConnector(KVConnectorBase_V1, SupportsHMA):
     _cache_hit_source = CacheHitSource.P2P
 
     @classmethod
+    def kv_cache_access(cls, kv_transfer_config: KVTransferConfig) -> KVCacheAccess:
+        # Registers the device KV cache with an RDMA engine.
+        return KVCacheAccess.REGISTERS
+
+    @classmethod
     def supports_lookahead_block_hashes(
         cls, kv_transfer_config: "KVTransferConfig"
     ) -> bool:
@@ -1418,6 +1428,12 @@ class MooncakeConnectorWorker:
             self.hostname,
             self.rpc_port,
         )
+        register_shared_transfer_engine(
+            engine=self.engine,
+            hostname=self.hostname,
+            rpc_port=self.rpc_port,
+            protocol=str(protocol),
+        )
 
         self._remote_agents: dict[EngineId, dict[int, dict[int, str]]] = {}
         self._pending_bootstrap_queries: dict[str, asyncio.Event] = {}
@@ -1591,6 +1607,8 @@ class MooncakeConnectorWorker:
 
     def shutdown(self):
         """Cleanup background threads on destruction."""
+        if hasattr(self, "engine"):
+            clear_shared_transfer_engine(self.engine)
         self.async_zmq_ctx.term()
         if not self.is_kv_consumer:
             self._sender_executor.shutdown(wait=False)
