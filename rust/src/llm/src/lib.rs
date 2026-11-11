@@ -16,21 +16,25 @@ use vllm_engine_core_client::protocol::dtype::ModelDtype;
 use vllm_engine_core_client::protocol::request::EngineCoreRequest;
 use vllm_metrics::METRICS;
 
+mod aux_output;
 mod error;
 mod inflight;
 mod log_stats;
 mod output;
 mod request;
 mod request_metrics;
+mod weight_versions;
 
+pub use aux_output::AuxOutputRows;
 pub use error::{Error, Result};
 pub use output::{
     CollectedGenerateOutput, FinishReason, GenerateOutput, GenerateOutputStream,
-    GenerateOutputStreamExt, GeneratePromptInfo, PromptCacheUsage, TokenUsage, WeightVersionSpan,
+    GenerateOutputStreamExt, GeneratePromptInfo, PromptCacheUsage, TokenUsage,
 };
 pub use request::GenerateRequest;
 pub use request_metrics::{RequestTimestamps, current_unix_timestamp_secs};
 pub use vllm_engine_core_client::protocol::logprobs::{Logprobs, PositionLogprobs, TokenLogprob};
+pub use weight_versions::{WeightVersionSpan, WeightVersions};
 
 use crate::inflight::InflightRequests;
 use crate::log_stats::StatsLogger;
@@ -296,6 +300,8 @@ impl EngineCoreLlm {
         let arrival_time = engine_request.arrival_time;
         let max_tokens_param = (engine_request.sampling_params.as_ref()).map(|p| p.max_tokens);
         let prompt_len = prompt_token_ids.len() as u32;
+        let watermark_requested =
+            (engine_request.sampling_params.as_ref()).is_some_and(|p| p.watermarking);
 
         let stream = self.client.call(engine_request).await?;
 
@@ -308,6 +314,7 @@ impl EngineCoreLlm {
             prompt_len,
             max_tokens_param,
             parallel_sampling,
+            watermark_requested,
         );
         let guard = self.inflight.track(external_request_id, internal_request_id);
 

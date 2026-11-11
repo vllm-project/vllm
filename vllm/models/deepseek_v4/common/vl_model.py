@@ -2,19 +2,19 @@
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 """DeepSeek-V4 vision variant (e.g. DeepSeek-V4-Flash-Vision-Exp).
 
-Thin multimodal wrapper around the text-only ``DeepseekV4ForCausalLM``:
+Thin multimodal wrapper around the text-only `DeepseekV4ForCausalLM`:
 
-- ``vision`` ViT + ``aligner`` produce per-image embeddings for the IMAGE
-  sentinel positions; four learned vectors (``image_start`` / ``image_pad`` /
-  ``image_newline`` / ``image_end``) fill the remaining sentinel positions.
-- Image placeholders (``<｜deepseek_image｜>``) are expanded by the processor
-  in ``common/mm_preprocess.py`` into sentinel blocks borrowing reserved
-  in-vocab tokens ``<|place_holder_mm_span_0431|>``..``_0435|>``
-  (see ``common/vision.py`` for the tower itself).
-- Merged embeddings enter the text model via ``inputs_embeds``, i.e. before
-  its hyper-connection stream expansion. Raw ``input_ids`` still flow into
-  the model so the MoE router can apply ``bias_vl`` to image tokens
-  (``requires_raw_input_tokens``).
+- `vision` ViT + `aligner` produce per-image embeddings for the IMAGE
+  sentinel positions; four learned vectors (`image_start` / `image_pad` /
+  `image_newline` / `image_end`) fill the remaining sentinel positions.
+- Image placeholders (`<｜deepseek_image｜>`) are expanded by the processor
+  in `common/mm_preprocess.py` into sentinel blocks borrowing reserved
+  in-vocab tokens `<|place_holder_mm_span_0431|>`..`_0435|>`
+  (see `common/vision.py` for the tower itself).
+- Merged embeddings enter the text model via `inputs_embeds`, i.e. before
+  its hyper-connection stream expansion. Raw `input_ids` still flow into
+  the model so the MoE router can apply `bias_vl` to image tokens
+  (`requires_raw_input_tokens`).
 """
 
 from collections.abc import Iterable
@@ -54,7 +54,7 @@ from .vision import DeepseekV4Aligner, DeepseekV4ViT, encode_images
 def _make_deepseek_v4_vl_weights_mapper(
     text_mapper: WeightsMapper, image_enabled: bool
 ) -> WeightsMapper:
-    """Text-checkpoint mapping rules re-rooted under ``language_model.``."""
+    """Text-checkpoint mapping rules re-rooted under `language_model.`."""
     orig_to_new_prefix = {
         src: None if dst is None else f"language_model.{dst}"
         for src, dst in text_mapper.orig_to_new_prefix.items()
@@ -89,8 +89,8 @@ class DeepseekV4ForConditionalGeneration(
 ):
     """Multimodal entry point for DeepSeek-V4 checkpoints with a vision tower.
 
-    ``SupportsEagle3`` (aux hidden-state plumbing for MTP/DSpark drafters)
-    delegates through ``language_model`` via the protocol defaults.
+    `SupportsEagle3` (aux hidden-state plumbing for MTP/DSpark drafters)
+    delegates through `language_model` via the protocol defaults.
     """
 
     packed_modules_mapping = {

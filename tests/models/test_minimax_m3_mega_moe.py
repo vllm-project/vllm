@@ -51,7 +51,7 @@ def test_mega_moe_is_gated_on_nvfp4_checkpoints(moe_backend, moe_quant_algo, exp
 
 
 def _load_checkpoint(moe, tensors: dict[str, torch.Tensor]) -> None:
-    """Load one MegaMoE block's tensors as ``MiniMaxM3SparseForCausalLM`` does."""
+    """Load one MegaMoE block's tensors as `MiniMaxM3SparseForCausalLM` does."""
     model = SimpleNamespace(layers=[SimpleNamespace(block_sparse_moe=moe)])
     weights = _redirect_fused_shared_experts(tensors.items(), model)
     prefix = "layers.0.block_sparse_moe.experts."
@@ -63,7 +63,7 @@ def _load_checkpoint(moe, tensors: dict[str, torch.Tensor]) -> None:
 def _fuse_experts(
     checkpoint: dict[str, torch.Tensor], prefix: str, num_experts: int
 ) -> dict[str, torch.Tensor]:
-    """The Transformers v5 layout: ``[E, ...]`` experts, gate rows before up.
+    """The Transformers v5 layout: `[E, ...]` experts, gate rows before up.
 
     Gate and up share one global scale per expert."""
 
@@ -103,14 +103,11 @@ def _mega_moe_block(num_experts=8, top_k=2, hidden_size=512, intermediate_size=2
         intermediate_size=intermediate_size,
         num_local_experts=num_experts,
         num_experts_per_tok=top_k,
-        n_shared_experts=1,
         scoring_func="sigmoid",
         routed_scaling_factor=2.0,
-        use_routing_bias=False,
         hidden_act="swigluoai",
         swiglu_limit=7.0,
         swiglu_alpha=1.702,
-        swiglu_beta=1.0,
     )
     quant_config = ModelOptMxFp8Config(
         is_checkpoint_mxfp8_serialized=True,
@@ -183,7 +180,7 @@ def test_mega_moe_block_matches_the_qat_reference(
     assert moe.experts.has_fused_shared_experts and moe.shared_experts is None
     num_experts, top_k = config.num_local_experts, config.num_experts_per_tok
     hidden_size, intermediate_size = config.hidden_size, config.intermediate_size
-    clamp, alpha, beta = config.swiglu_limit, config.swiglu_alpha, config.swiglu_beta
+    clamp, alpha, beta = config.swiglu_limit, config.swiglu_alpha, 1.0
 
     def nvfp4(n, k):
         weight = torch.randn(n, k, device="cuda") * k**-0.5
