@@ -12,7 +12,11 @@ from pydantic import Field, SkipValidation, field_validator, model_validator
 
 from vllm.config import LoadConfig
 from vllm.config.cache import CacheDType
-from vllm.config.kernel import MoEBackend
+from vllm.config.kernel import (
+    FLASHINFER_MOE_EP_BACKENDS,
+    PASSTHROUGH_ALL2ALL_BACKEND,
+    MoEBackend,
+)
 from vllm.config.model import HfOverrides, ModelConfig
 from vllm.config.parallel import ParallelConfig
 from vllm.config.utils import (
@@ -1715,13 +1719,38 @@ class SpeculativeConfig:
         """Overlay this config's kernel overrides onto a target VllmConfig.
 
         Only non-None fields override, so an unset field keeps whatever the
-        target resolved.
+        target resolved. All overrides are applied in one step: every rebuild
+        re-runs the platform defaults, so a partially overridden config is
+        resolved and validated against a binding the user never asked for.
         """
+        overrides: dict[str, Any] = {}
         for src, config_name, dst in _DRAFT_VLLM_CONFIG_OVERRIDES:
             if (value := getattr(self, src)) is not None:
-                sub_config = replace(getattr(vllm_config, config_name), **{dst: value})
-                vllm_config = replace(vllm_config, **{config_name: sub_config})
-        return vllm_config
+                overrides[config_name] = replace(
+                    getattr(vllm_config, config_name), **{dst: value}
+                )
+        if not overrides:
+            return vllm_config
+
+        # The target's all2all binding is process-wide: a target MoE backend
+        # that dispatches and combines by itself binds `passthrough`, and a
+        # draft that needs the framework all-to-all cannot override it away.
+        draft_kernel_config = overrides.get("kernel_config", vllm_config.kernel_config)
+        if (
+            vllm_config.parallel_config.all2all_backend == PASSTHROUGH_ALL2ALL_BACKEND
+            and draft_kernel_config.moe_backend not in FLASHINFER_MOE_EP_BACKENDS
+        ):
+            raise ValueError(
+                f"moe_backend={vllm_config.kernel_config.moe_backend!r} on the "
+                "target dispatches and combines its experts itself, so the target "
+                f"bound all2all_backend={PASSTHROUGH_ALL2ALL_BACKEND!r}. The draft "
+                f"overrides moe_backend to {draft_kernel_config.moe_backend!r}, "
+                "which relies on the framework all-to-all. Set the draft "
+                "moe_backend to one of "
+                f"{sorted(FLASHINFER_MOE_EP_BACKENDS)} or run the draft on a "
+                "target without a self-dispatching MoE backend."
+            )
+        return replace(vllm_config, **overrides)
 
     @field_validator("method")
     @classmethod

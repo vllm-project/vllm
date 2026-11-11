@@ -34,6 +34,11 @@ class _CacheConfig:
 
 
 @dataclass
+class _ParallelConfig:
+    all2all_backend: str = "allgather_reducescatter"
+
+
+@dataclass
 class _SpeculativeConfig:
     attention_backend: str | None = None
     moe_backend: str | None = None
@@ -51,6 +56,7 @@ class _VllmConfig:
     cache_config: _CacheConfig
     speculative_config: _SpeculativeConfig
     load_config: LoadConfig = field(default_factory=LoadConfig)
+    parallel_config: _ParallelConfig = field(default_factory=_ParallelConfig)
 
 
 def _config(target_backend: str, draft_backend: str | None) -> _VllmConfig:
