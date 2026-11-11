@@ -22,6 +22,7 @@ from vllm.model_executor.layers.linear import (
 from vllm.model_executor.layers.quantization import QuantizationConfig
 from vllm.model_executor.layers.rotary_embedding import get_rope
 from vllm.model_executor.layers.sparse_attn_indexer import (
+    DeepseekV32IndexerCache,
     SparseAttnIndexer,
     fuse_indexer_wk_weights_proj,
     init_indexer_wk_weights_proj,
@@ -29,7 +30,6 @@ from vllm.model_executor.layers.sparse_attn_indexer import (
 )
 from vllm.model_executor.models.deepseek_v2 import (
     DeepSeekV2FusedQkvAProjLinear,
-    DeepseekV32IndexerCache,
     yarn_get_mscale,
 )
 from vllm.model_executor.models.utils import (

@@ -77,6 +77,7 @@ from vllm.model_executor.models.transformers.utils import (
     init_on_device_without_buffers,
     log_replacement,
     maybe_disable_dynamic_rope_update,
+    module_fragments_pattern,
     named_state,
     replace_conv_class,
     replace_embedding_class,
@@ -804,8 +805,13 @@ class Base(
                 # LinearBase, so we set a default style which causes any
                 # unspecified layers to be replaced with ReplicatedLinear
                 style = tp_plan.get(pattern, "replicate")
+                quant_config = (
+                    None
+                    if keep_unquantized and keep_unquantized.search(qual_name)
+                    else self.quant_config
+                )
                 new_module = replace_linear_class(
-                    child_module, style, self.quant_config, prefix=qual_name
+                    child_module, style, quant_config, prefix=qual_name
                 )
             elif isinstance(child_module, (nn.Conv2d, nn.Conv3d)):
                 new_module = replace_conv_class(child_module)
@@ -830,6 +836,8 @@ class Base(
                 setattr(module, child_name, new_module)
                 log_replacement(qual_name, child_module, new_module)
 
+        # Transformers quantizers leave the modules kept in fp32 unquantized
+        keep_unquantized = module_fragments_pattern(self.model, "_keep_in_fp32_modules")
         _recursive_replace(self.model, prefix="model")
 
         self.hf_to_vllm_mapper |= WeightsMapper(orig_to_new_stacked=orig_to_new_stacked)
@@ -858,11 +866,41 @@ class Base(
                 if qk_head_dim := qk_nope_head_dim + qk_rope_head_dim:
                     self.model_config.model_arch_config.head_size = qk_head_dim
 
+        # index_topk indicates that this is a DeepSeek Sparse Attention (DSA) model
+        if (index_topk := getattr(text_config, "index_topk", None)) is not None:
+            from vllm.model_executor.models.transformers.dsa import (
+                TOPK_SELECTOR_ATTR,
+                TopkSelector,
+            )
+            from vllm.platforms import current_platform
+            from vllm.v1.attention.backends.mla.index_group import (
+                SparseMLAIndexGroupBuilder,
+                get_sparse_mla_index_group_max_rows,
+            )
+
+            if attn_cls is not MLAAttention:
+                raise ValueError(
+                    "DeepSeek Sparse Attention requires every attention layer to fuse "
+                    "as MLA, but `MLAFuser` did not."
+                )
+            # Written by each indexer and read by every sparse MLA layer after it
+            topk_indices_buffer = torch.empty(
+                self.vllm_config.scheduler_config.max_num_batched_tokens,
+                index_topk,
+                dtype=torch.int32,
+                device=current_platform.device_type,
+            )
+            index_group_builder = SparseMLAIndexGroupBuilder(
+                topk_indices_buffer,
+                get_sparse_mla_index_group_max_rows(self.vllm_config),
+            )
+
         logits_soft_cap = getattr(text_config, "attn_logit_softcapping", None)
         layer_types = getattr(text_config, "layer_types", None)
 
         start, end = self._pp_indices()
 
+        seen_indexer = False
         for i in range(start, end):
             if i not in self.attention_fusers:
                 layer = (
@@ -915,6 +953,40 @@ class Base(
                     kv_lora_rank=dims.kv_lora_rank,
                     kv_b_proj=attn_module.get_submodule(mla_fuser.kv_b_proj_name),
                 )
+                if index_topk is not None:
+                    # Layers without an indexer reuse the previous indexer's top-k
+                    indexer = None
+                    if (indexer_name := mla_fuser.indexer_name) is not None:
+                        hf_indexer = attn_module.get_submodule(indexer_name)
+                        if not hasattr(hf_indexer, TOPK_SELECTOR_ATTR):
+                            raise ValueError(
+                                f"{type(hf_indexer).__name__} has no "
+                                f"`{TOPK_SELECTOR_ATTR}` for vLLM to replace. It "
+                                "may need a newer version of Transformers."
+                            )
+                        selector_prefix = f"{attn_prefix}.{indexer_name}"
+                        selector_prefix += f".{TOPK_SELECTOR_ATTR}"
+                        topk_selector = TopkSelector(
+                            self.vllm_config,
+                            text_config,
+                            topk_indices_buffer,
+                            prefix=maybe_prefix(prefix, selector_prefix),
+                        )
+                        setattr(hf_indexer, TOPK_SELECTOR_ATTR, topk_selector)
+                        indexer = topk_selector.sparse_attn_indexer
+                        seen_indexer = True
+                    if not seen_indexer:
+                        raise ValueError(
+                            f"Layer {i} ({attn_prefix}) has no indexer before it to "
+                            "provide its top-k, but `index_topk` is set. The "
+                            "Transformers model may not implement DSA."
+                        )
+                    kwargs.update(
+                        use_sparse=True,
+                        indexer=indexer,
+                        topk_indices_buffer=topk_indices_buffer,
+                        index_group_builder=index_group_builder,
+                    )
             else:
                 kwargs.update(
                     head_size=head_size,
@@ -1006,10 +1078,9 @@ class Base(
         `self.model` is `prefix`."""
         if self.model_config.dtype not in (torch.float16, torch.bfloat16):
             return
-        fragments = getattr(self.model, "_keep_in_fp32_modules_strict", None)
-        if not fragments:
+        pattern = module_fragments_pattern(self.model, "_keep_in_fp32_modules_strict")
+        if pattern is None:
             return
-        pattern = re.compile("|".join(re.escape(f) for f in fragments))
         for name, tensor in named_state(module):
             name = maybe_prefix(prefix, name)
             if not hasattr(tensor, "weight_loader") and pattern.search(name):

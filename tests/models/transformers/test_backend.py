@@ -42,6 +42,7 @@ from vllm.model_executor.models.transformers.fusers.attention import VLLM_ATTN_I
 from vllm.model_executor.models.transformers.multimodal import MultiModalMixin
 from vllm.model_executor.models.transformers.utils import infer_dynamic_arg_dims
 from vllm.model_executor.models.utils import StageMissingLayer, WeightsMapper
+from vllm.platforms import current_platform
 
 from ...conftest import HfRunner, VllmRunner
 from ...utils import create_new_process_for_each_test, multi_gpu_test, prep_prompts
@@ -311,6 +312,90 @@ def test_mla(vllm_runner: type[VllmRunner], example_prompts: list[str]) -> None:
         outputs_test = model_test.generate_greedy_logprobs(*args)
 
     with vllm_runner(model, model_impl="auto") as model_ref:
+        outputs_ref = model_ref.generate_greedy_logprobs(*args)
+
+    check_logprobs_close(
+        outputs_0_lst=outputs_ref,
+        outputs_1_lst=outputs_test,
+        name_0="native",
+        name_1="transformers",
+    )
+
+
+@pytest.fixture(scope="module")
+def tiny_dsa_path(tmp_path_factory) -> str:
+    """A random GLM-MoE-DSA with GLM-5's attention geometry, which the sparse MLA
+    kernels need, and an `index_topk` small enough for prompts to exceed it."""
+    from transformers import AutoTokenizer, GlmMoeDsaConfig
+    from transformers.models.glm_moe_dsa import modeling_glm_moe_dsa
+
+    if not hasattr(modeling_glm_moe_dsa, "GlmMoeDsaIndexerTopkSelector"):
+        pytest.skip("Transformers has no DSA indexer `topk_selector`")
+
+    tokenizer = AutoTokenizer.from_pretrained("hf-internal-testing/llama-tokenizer")
+    config = GlmMoeDsaConfig(
+        vocab_size=tokenizer.vocab_size,
+        hidden_size=256,
+        intermediate_size=512,
+        moe_intermediate_size=128,
+        num_hidden_layers=4,
+        n_routed_experts=8,
+        num_experts_per_tok=2,
+        first_k_dense_replace=1,
+        q_lora_rank=256,
+        index_topk=128,
+        # HF always interleaves the indexer RoPE, native only if GLM-5 says so
+        indexer_rope_interleave=True,
+        # Native only creates `e_score_correction_bias` for `noaux_tc`, like GLM-5
+        topk_method="noaux_tc",
+        scoring_func="sigmoid",
+        # The second layer reuses the first's top-k
+        indexer_types=["full", "shared", "full", "shared"],
+        pad_token_id=tokenizer.pad_token_id,
+        bos_token_id=tokenizer.bos_token_id,
+        eos_token_id=tokenizer.eos_token_id,
+    )
+    torch.manual_seed(0)
+    model = AutoModelForCausalLM.from_config(config, dtype=torch.bfloat16)
+    path = tmp_path_factory.mktemp("tiny_dsa")
+    model.save_pretrained(path)
+    tokenizer.save_pretrained(path)
+    return str(path)
+
+
+@pytest.mark.skipif(
+    not current_platform.has_device_capability(90),
+    reason="Sparse MLA needs Hopper or newer",
+)
+def test_dsa(
+    vllm_runner: type[VllmRunner], example_prompts: list[str], tiny_dsa_path: str
+) -> None:
+    """The Transformers backend's DSA indexer selects the same keys as native."""
+    from vllm.model_executor.layers.attention import MLAAttention
+    from vllm.model_executor.models.transformers.dsa import TopkSelector
+
+    # About 1000 tokens, so the indexer keeps only one key in eight
+    rotations = [example_prompts[i:] + example_prompts[:i] for i in range(4)]
+    prompts = [" ".join(rotation * 6) for rotation in rotations]
+    args = (prompts, 32, 5)
+    # Sparse MLA backends only support 64-token blocks
+    kwargs: dict[str, Any] = {
+        "max_model_len": 2048,
+        "enforce_eager": True,
+        "block_size": 64,
+    }
+
+    with vllm_runner(tiny_dsa_path, model_impl="transformers", **kwargs) as model_test:
+        assert model_test.llm.llm_engine.model_config.using_transformers_backend()
+
+        def count_sparse(model) -> tuple[int, int]:
+            mla = [m for m in model.modules() if isinstance(m, MLAAttention)]
+            return sum(m.use_sparse for m in mla), count_modules(model, TopkSelector)
+
+        assert model_test.apply_model(count_sparse) == [(4, 2)]
+        outputs_test = model_test.generate_greedy_logprobs(*args)
+
+    with vllm_runner(tiny_dsa_path, model_impl="auto", **kwargs) as model_ref:
         outputs_ref = model_ref.generate_greedy_logprobs(*args)
 
     check_logprobs_close(

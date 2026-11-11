@@ -10,7 +10,7 @@ import torch
 
 from vllm.config import CacheConfig
 from vllm.model_executor.layers.attention.mla_attention import MLAAttention
-from vllm.model_executor.models.deepseek_v2 import DeepseekV32IndexerCache
+from vllm.model_executor.layers.sparse_attn_indexer import DeepseekV32IndexerCache
 from vllm.platforms import current_platform
 from vllm.v1.attention.backend import MultipleOf
 from vllm.v1.attention.backends.mla.indexer import DeepseekV32IndexerBackend

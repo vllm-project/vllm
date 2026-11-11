@@ -42,12 +42,12 @@ from vllm.model_executor.layers.quantization.utils.fp8_utils import (
 )
 from vllm.model_executor.layers.rotary_embedding import get_rope
 from vllm.model_executor.layers.sparse_attn_indexer import (
+    DeepseekV32IndexerCache,
     SparseAttnIndexer,
     fuse_indexer_wk_weights_proj,
     init_indexer_wk_weights_proj,
 )
 from vllm.model_executor.model_loader.weight_utils import make_attention_sink
-from vllm.model_executor.models.deepseek_v2 import DeepseekV32IndexerCache
 from vllm.model_executor.models.utils import compute_skip_topk_layers
 from vllm.models.hy_v4.common.mrope import (
     apply_mrope,

@@ -116,6 +116,9 @@ def vllm_mla_attention_forward(
     kv_c_normed = kv_c_normed.reshape(-1, kv_c_normed.shape[-1])
     # [batch=1, heads=1, num_tokens, qk_rope] -> [num_tokens, 1, qk_rope]
     k_pe = k_pe.reshape(-1, 1, k_pe.shape[-1])
+    if self_attn.use_sparse:
+        # This layer's indexer (if any) has written the top-k indices
+        self_attn.impl.record_logical_topk_ready()
     attn_output = self_attn.forward(
         query,
         kv_c_normed,

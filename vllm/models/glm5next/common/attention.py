@@ -30,12 +30,12 @@ from vllm.model_executor.layers.quantization.base_config import QuantizationConf
 from vllm.model_executor.layers.quantization.dequant_linear import bf16_linear
 from vllm.model_executor.layers.rotary_embedding import RotaryEmbedding, get_rope
 from vllm.model_executor.layers.sparse_attn_indexer import (
+    DeepseekV32IndexerCache,
     fuse_indexer_wk_weights_proj,
     init_indexer_wk_weights_proj,
 )
 from vllm.model_executor.models.deepseek_v2 import (
     DeepSeekV2FusedQkvAProjLinear,
-    DeepseekV32IndexerCache,
     yarn_get_mscale,
 )
 from vllm.model_executor.utils import maybe_disable_graph_partition, refill_derived

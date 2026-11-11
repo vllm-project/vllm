@@ -16,7 +16,9 @@ from vllm import _custom_ops as ops
 from vllm._aiter_ops import rocm_aiter_ops
 from vllm.compilation.breakable_cudagraph import eager_break_during_capture
 from vllm.config import (
+    CacheConfig,
     CUDAGraphMode,
+    VllmConfig,
     get_current_vllm_config,
     get_current_vllm_config_or_none,
 )
@@ -41,6 +43,7 @@ from vllm.model_executor.kernels.attention.dsa.fused_mqa_topk import (
     use_fused_mqa_topk,
 )
 from vllm.model_executor.layers.attention.mla_attention import MLACommonMetadata
+from vllm.model_executor.layers.attention_layer_base import AttentionLayerBase
 from vllm.model_executor.layers.indexer_topk import (
     RADIX_TOPK_WORKSPACE_SIZE,
     deep_select_topk,
@@ -78,7 +81,9 @@ from vllm.utils.torch_utils import (
     _resolve_layer_name,
     direct_register_custom_op,
 )
+from vllm.v1.attention.backend import AttentionBackend
 from vllm.v1.attention.backends.mla.indexer import (
+    DeepseekV32IndexerBackend,
     DeepSeekV32IndexerDecodeMetadata,
     DeepseekV32IndexerMetadata,
     dense_logits_rows,
@@ -86,6 +91,12 @@ from vllm.v1.attention.backends.mla.indexer import (
 from vllm.v1.attention.backends.mla.sparse_utils import SparseMLAPrefillRoute
 from vllm.v1.attention.ops.common import pack_seq_triton, unpack_seq_triton
 from vllm.v1.attention.ops.pcp import maybe_gather_indexer_k
+from vllm.v1.core.single_type_kv_cache_manager import FullAttentionManager
+from vllm.v1.kv_cache_interface import (
+    KVCacheLayerConfig,
+    MLAAttentionSpec,
+    SparseCacheRole,
+)
 from vllm.v1.worker.workspace import current_workspace_manager
 
 if TYPE_CHECKING:
@@ -1883,3 +1894,45 @@ def fuse_indexer_wk_weights_proj(indexer: nn.Module) -> None:
         row += part.shape[0]
         if part.data_ptr() != rows.data_ptr() or part.stride() != rows.stride():
             rows.copy_(part)
+
+
+class DeepseekV32IndexerCache(torch.nn.Module, AttentionLayerBase):
+    def __init__(
+        self, head_dim: int, dtype: torch.dtype, prefix: str, cache_config: CacheConfig
+    ):
+        super().__init__()
+        self.kv_cache = torch.tensor([])
+        self.head_dim = head_dim
+        self.prefix = prefix
+        self.cache_config = cache_config
+        self.dtype = dtype
+        compilation_config = get_current_vllm_config().compilation_config
+        if prefix in compilation_config.static_forward_context:
+            raise ValueError(f"Duplicate layer name: {prefix}")
+        compilation_config.static_forward_context[prefix] = self
+
+    def bind_kv_cache(self, kv_cache: torch.Tensor) -> None:
+        # [B, H=1, N, C] -> [B, N, C]: the indexer kernels and
+        # kv_cache_as_quant_view index a 3-D block-major cache.
+        self.kv_cache = kv_cache.squeeze(1)
+
+    def get_kv_cache_config(self, vllm_config: VllmConfig) -> KVCacheLayerConfig:
+        spec = MLAAttentionSpec(
+            block_size=self.cache_config.block_size,
+            num_kv_heads=1,
+            max_tp_shards=1,
+            head_size=self.head_dim,
+            dtype=self.dtype,
+            cache_role=SparseCacheRole.INDEXER,
+        )  # Only has one vector instead of K + V
+        return FullAttentionManager.layer_config(spec)
+
+    def forward(self): ...
+
+    @property
+    def uses_shuffled_layout(self) -> bool:
+        """Whether this cache's reader expects the shuffled value layout."""
+        return False
+
+    def get_attn_backend(self) -> type[AttentionBackend]:
+        return DeepseekV32IndexerBackend

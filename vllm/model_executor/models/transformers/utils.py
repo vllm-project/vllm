@@ -33,6 +33,7 @@ from typing import (
     get_origin,
 )
 
+import regex as re
 import torch
 from torch import nn
 from transformers import AutoModel
@@ -344,6 +345,15 @@ T = TypeVar("T")
 def maybe_per_layer(value: T | list[T], layer_idx: int) -> T:
     """Pick `layer_idx`'s entry from a config field that may be sized per layer."""
     return value[layer_idx] if isinstance(value, list) else value
+
+
+def module_fragments_pattern(module: nn.Module, attr: str) -> re.Pattern | None:
+    """Pattern matching names that contain a fragment listed in `module.<attr>`
+    (e.g. `_keep_in_fp32_modules`), or `None` if it lists none."""
+    fragments = getattr(module, attr, None)
+    if not fragments:
+        return None
+    return re.compile("|".join(re.escape(f) for f in fragments))
 
 
 def named_state(module: nn.Module) -> Iterator[tuple[str, torch.Tensor]]:

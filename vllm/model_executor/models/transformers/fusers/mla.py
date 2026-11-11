@@ -126,6 +126,8 @@ class MLAFuser(StackedFuser):
     kv_a_layernorm_name: str
     kv_b_proj_name: str
     o_proj_name: str | None
+    indexer_name: str | None = None
+    """The DSA indexer, whose top-k selection `_create_attention_instances` backs."""
     merged_name: ClassVar[str] = "fused_qkv_a_proj"
     merged_cls_name: ClassVar[str] = "MergedColumnParallelLinear"
 
@@ -135,6 +137,8 @@ class MLAFuser(StackedFuser):
         )
         if self.q_a_proj_name is not None:
             info_str += "; " + super().info(name).removeprefix("Fused: ")
+        if self.indexer_name is not None:
+            info_str += f"; {self.indexer_name} -> Indexer (DSA)"
         return info_str
 
     @property
@@ -180,7 +184,7 @@ class MLAFuser(StackedFuser):
 
         # Linear children claimed for a role so far; the rest resolve by elimination.
         claimed_linears = {kv_a_proj.target}
-        q_proj_name = q_a_proj = q_a_layernorm = q_b_proj = None
+        q_proj_name = q_a_proj = q_a_layernorm = q_b_proj = indexer = None
         if q_a_chains:
             # Find `q_b_proj(q_a_layernorm(q_a_proj(placeholder)))`.
             q_a_proj, q_a_layernorm = q_a_chains[0]
@@ -188,6 +192,15 @@ class MLAFuser(StackedFuser):
             if q_b_proj is None:
                 return None
             claimed_linears |= {q_a_proj.target, q_b_proj.target}
+            # A DSA indexer is the non-linear consumer of the query latent.
+            indexers = [
+                node
+                for node in q_a_layernorm.users
+                if node.op == "call_module" and not is_linear(node, module)
+            ]
+            if len(indexers) > 1:
+                return None
+            indexer = indexers[0] if indexers else None
         else:
             # Find `q_proj(placeholder)`.
             placeholder_linears = {
@@ -221,6 +234,7 @@ class MLAFuser(StackedFuser):
             kv_a_layernorm_name=kv_a_layernorm.target,
             kv_b_proj_name=kv_b_proj.target,
             o_proj_name=o_proj_name,
+            indexer_name=indexer.target if indexer else None,
         )
 
     def validate(self, module: nn.Module, vllm_config: "VllmConfig") -> bool:
