@@ -1316,9 +1316,10 @@ def resolve_mori_all2all(
     is unsupported, an explicit true keeps EPv2 regardless, and false selects
     EPv1. `lsa_spans_hosts` says whether a CCO-LSA team can span hosts (e.g.
     gfx1250's UALink vPOD). `sdma_moves_tokens` says whether `MORI_ENABLE_SDMA=1`
-    makes the all-to-all move tokens by SDMA: on EPv2's AsyncLL kernels where the
-    installed MoRI has them, on EPv1 otherwise. gfx1250 passes False and keeps
-    native EPv2. `validated_arch` says whether EPv2 is validated on this GPU.
+    makes the all-to-all move tokens by SDMA: on EPv1 by default, and on EPv2's
+    AsyncLL kernels with an explicit `VLLM_MORI_EP_V2=1` where the installed MoRI
+    has them. gfx1250 passes False and keeps native EPv2. `validated_arch` says
+    whether EPv2 is validated on this GPU.
     """
     if parallel_config.all2all_backend != "mori":
         return
@@ -1432,6 +1433,10 @@ def _mori_epv2_unsupported_reason(
         return (
             "MORI_ENABLE_SDMA=1 (this MoRI has no EPv2 AsyncLL to move tokens by SDMA)"
         )
+    if sdma_moves_tokens and _mori_sdma_enabled() and not envs.VLLM_MORI_EP_V2:
+        # EPv1 keeps serving MORI_ENABLE_SDMA=1 by default until EPv2's AsyncLL
+        # path runs every model EPv1 does (e.g. Quark MXFP4, #66733 and #66734).
+        return "MORI_ENABLE_SDMA=1 unless VLLM_MORI_EP_V2=1 opts in to AsyncLL"
     if moe_backend == "aiter_mega_moe":
         return "moe_backend=aiter_mega_moe (MegaMoE runs on MoRI EPv1 shmem)"
     if model_config is not None and model_config.dtype != torch.bfloat16:

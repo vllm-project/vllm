@@ -369,8 +369,24 @@ def _quark(qscheme):
         # The LSA team may span hosts (gfx1250); the manager checks it.
         ({"data_parallel_size": 16, "lsa_spans_hosts": True}, {}, "aiter", {}, True),
         ({}, {}, "aiter", {"MORI_ENABLE_SDMA": "1"}, False),
-        # A MoRI with EPv2 AsyncLL moves the tokens by SDMA itself.
-        ({"has_async_ll": True}, {}, "aiter", {"MORI_ENABLE_SDMA": "1"}, True),
+        # EPv2 AsyncLL moves the tokens by SDMA only when asked for: by default
+        # SDMA keeps EPv1, which also serves models AsyncLL does not run yet
+        # (e.g. Quark OCP MX).
+        ({"has_async_ll": True}, {}, "aiter", {"MORI_ENABLE_SDMA": "1"}, False),
+        (
+            {"has_async_ll": True},
+            _quark("per_group"),
+            "aiter",
+            {"MORI_ENABLE_SDMA": "1"},
+            False,
+        ),
+        (
+            {"has_async_ll": True},
+            {},
+            "aiter",
+            {"MORI_ENABLE_SDMA": "1", "VLLM_MORI_EP_V2": "1"},
+            True,
+        ),
         # gfx1250 keeps EPv2 under SDMA.
         ({"sdma_moves_tokens": False}, {}, "aiter", {"MORI_ENABLE_SDMA": "1"}, True),
         ({}, {}, "aiter_mega_moe", {}, False),
@@ -426,25 +442,29 @@ def test_mori_picks_epv2_where_supported(
 
 
 @pytest.mark.parametrize(
-    "ep_v2,sdma,has_async_ll,sdma_moves_tokens,async_ll",
+    "ep_v2_env,sdma,has_async_ll,sdma_moves_tokens,async_ll",
     [
-        (None, True, True, True, True),
-        (None, False, True, True, False),
-        # MoRI without AsyncLL: SDMA selects EPv1.
-        (None, True, False, True, False),
-        (False, True, True, True, False),
+        ("1", True, True, True, True),
+        # AsyncLL is opt-in: SDMA alone keeps EPv1.
+        (None, True, True, True, False),
+        ("1", False, True, True, False),
+        # MoRI without AsyncLL: forced EPv2 runs natively.
+        ("1", True, False, True, False),
+        ("0", True, True, True, False),
         # gfx1250 keeps native EPv2 under SDMA.
         (None, True, True, False, False),
     ],
 )
 def test_mori_epv2_runs_async_ll_under_sdma(
-    monkeypatch, ep_v2, sdma, has_async_ll, sdma_moves_tokens, async_ll
+    monkeypatch, ep_v2_env, sdma, has_async_ll, sdma_moves_tokens, async_ll
 ):
     monkeypatch.delenv("VLLM_MORI_EP_V2", raising=False)
+    if ep_v2_env is not None:
+        monkeypatch.setenv("VLLM_MORI_EP_V2", ep_v2_env)
     monkeypatch.setenv("MORI_ENABLE_SDMA", "1" if sdma else "0")
     monkeypatch.setattr(import_utils, "mori_epv2_unavailable_reason", lambda: None)
     monkeypatch.setattr(import_utils, "mori_epv2_has_async_ll", lambda: has_async_ll)
-    parallel_config = _parallel_config(mori_ep_v2=ep_v2)
+    parallel_config = _parallel_config()
     resolve_mori_all2all(
         parallel_config, _model_config(), "aiter", sdma_moves_tokens=sdma_moves_tokens
     )

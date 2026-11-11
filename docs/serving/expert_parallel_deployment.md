@@ -112,11 +112,11 @@ vllm serve deepseek-ai/DeepSeek-V4-Pro \
 
 | `VLLM_MORI_EP_V2` | Behavior |
 | ----------------- | -------- |
-| unset | EPv2, falling back to EPv1 with a warning when MoRI is older than 1.2.4, the GPU is not gfx950 or gfx1250, EP spans hosts (except on gfx1250, whose UALink team can span hosts), `MORI_ENABLE_SDMA=1` with a MoRI that has no EPv2 AsyncLL kernels, `--moe-backend aiter_mega_moe`, the model is not BF16, or MoE activations use per-tensor FP8 |
+| unset | EPv2, falling back to EPv1 with a warning when MoRI is older than 1.2.4, the GPU is not gfx950 or gfx1250, EP spans hosts (except on gfx1250, whose UALink team can span hosts), `MORI_ENABLE_SDMA=1` on gfx950 (EPv2's AsyncLL kernels are opt-in, see below), `--moe-backend aiter_mega_moe`, the model is not BF16, or MoE activations use per-tensor FP8 |
 | `1` | Always EPv2. The checks above only log a warning; startup fails if the EP ranks are not in one CCO-LSA team |
 | `0` | EPv1 |
 
-On gfx950, `MORI_ENABLE_SDMA=1` makes EPv2 run its AsyncLL kernels, which move tokens by SDMA, when the installed MoRI has them; gfx1250 keeps native EPv2.
+On gfx950, `MORI_ENABLE_SDMA=1` moves tokens by SDMA on EPv1 by default. With `VLLM_MORI_EP_V2=1` as well, EPv2 runs its AsyncLL kernels instead, which move tokens by SDMA, when the installed MoRI has them. gfx1250 keeps native EPv2.
 
 On EPv2, `mori` supports `--enable-dbo` with native and AsyncLL kernels. DBO speeds up prefill but slows decode here, so set a large `--dbo-decode-token-threshold` or enable DBO on prefill instances only.
 
