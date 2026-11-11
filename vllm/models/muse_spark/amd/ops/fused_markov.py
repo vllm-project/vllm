@@ -14,7 +14,7 @@ program gets the previous token of each row (the argmax over the previous
 round's block maxima), computes its block's bias for all rows with one read
 of markov_w2, and for each row adds the base logits, applies the transform,
 stores the round's logits into the draft logits cache and takes the
-Gumbel-max of its block with vLLM's own ``gumbel_noised_argmax``. One small
+Gumbel-max of its block with vLLM's own `gumbel_noised_argmax`. One small
 launch then writes the last round's tokens. The noise depends only on the
 request's seed, the round, the position and the token id, and both paths keep
 the first of equal maxima, so the sampled token does not depend on the block
@@ -26,7 +26,7 @@ bit. This changes only which tokens the draft proposes: the rejection sampler
 verifies every draft token against the target's distribution. The other steps
 are bitwise the same as vLLM's loop.
 
-MuseSparkDSparkForCausalLM sets this module's ``sample_sequential`` as its
+MuseSparkDSparkForCausalLM sets this module's `sample_sequential` as its
 own with --monokernel on ROCm. tests/kernels/models/amd/
 test_muse_spark_fused_markov.py compares it with vLLM's loop.
 """

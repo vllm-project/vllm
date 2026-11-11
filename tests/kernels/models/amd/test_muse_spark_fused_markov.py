@@ -117,7 +117,7 @@ def _speculator(temp, seed, greedy=False, fp64=False, exact=False):
     s.model = _Model(w1, w2, base.to(bf16))
     s.num_speculative_steps = N_SPEC
     s._draft_topk = None
-    s._fuse_markov_bias = False  # review: main (#64476) added this; Muse has an output transform, so False
+    s._fuse_markov_bias = False
     s.use_confidence_head = False
     s.acceptance_estimator = None
     s.draft_watermarker = None
