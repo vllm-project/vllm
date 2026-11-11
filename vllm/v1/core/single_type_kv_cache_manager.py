@@ -1567,16 +1567,17 @@ class MambaManager(SingleTypeKVCacheManager):
 
         `retention_interval`:
 
-          `None` -> dense (cache every block; default, unchanged behavior)
-          `0`    -> keep only the `reachable_boundaries` states
+          `None` -> dense (cache every block)
+          `0`    -> keep only the `reachable_boundaries` states (default)
           `> 0`  -> keep one state per `retention_interval`-sized segment
 
-        `reachable_boundaries` are proven reuse points (the replay boundary and
-        any cross-request shared-prefix junction, Marconi-style APC); their
-        boundary state is always kept so sparse retention does not defeat reuse.
+        `reachable_boundaries` are proven reuse points (the replay boundary,
+        any cross-request shared-prefix junction, Marconi-style APC, and the
+        boundaries crossed during decode); their boundary state is always kept
+        so sparse retention does not defeat reuse.
         """
         if retention_interval is None or alignment_tokens is None:
-            # Dense caching (default) or no alignment constraint imposed.
+            # Dense caching or no alignment constraint imposed.
             return None
         assert isinstance(kv_cache_spec, MambaSpec)
         block_size = kv_cache_spec.block_size
@@ -1989,6 +1990,21 @@ class MambaManager(SingleTypeKVCacheManager):
         replay_boundaries: Sequence[int],
     ) -> None:
         num_cached_blocks_before = self.num_cached_block.get(request.request_id, 0)
+        if self.mamba_cache_mode == "align" and retention_interval is not None:
+            # Decode writes the exact state at every block boundary it crosses,
+            # and a later turn replaying the output resumes at the last one.
+            # Keep them all: dense over the output, sparse over the prompt.
+            # Under EAGLE a hit at a boundary also matches the block above it,
+            # so the previous decode boundary serves that hit.
+            first_block = max(
+                num_cached_blocks_before, request.num_prompt_tokens // self.block_size
+            )
+            replay_boundaries = (
+                *replay_boundaries,
+                *range(
+                    (first_block + 1) * self.block_size, num_tokens + 1, self.block_size
+                ),
+            )
         super().cache_blocks(
             request,
             num_tokens,
