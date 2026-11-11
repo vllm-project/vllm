@@ -1336,16 +1336,8 @@ class MuseSparkAttention(nn.Module):
             q = (q * self._get_attn_temperature_scale(positions)).to(q.dtype)
 
         if self.rotary_emb is not None:
-            # In place, on the flat layout. Not the module's forward, which
-            # would replace the FP32 table with a copy in the q/k dtype.
-            ops.rotary_embedding(
-                positions,
-                q,
-                k,
-                self.head_dim,
-                self.rotary_emb.cos_sin_cache,
-                self.rotary_emb.is_neox_style,
-            )
+            # CustomOp dispatch costs more than the kernel does.
+            q, k = self.rotary_emb.forward_cuda(positions, q, k)
         return q, k, v, og
 
     def forward(

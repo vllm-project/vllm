@@ -323,3 +323,43 @@ def test_concat_and_cache_mla_rope_fused(
             atol=get_default_atol(query),
             rtol=get_default_rtol(query),
         )
+
+
+@pytest.mark.skipif(not current_platform.is_rocm(), reason="requires ROCm AITER")
+def test_aiter_rotary_embedding_fp32_cache_with_bf16_query(default_vllm_config):
+    """AITER Triton RoPE accepts FP32 tables with BF16 query and key."""
+    set_random_seed(0)
+    rope = RotaryEmbedding(64, 64, 128, 10000.0, False, torch.float32)
+    assert rope.use_aiter
+    table = torch.randn(128, 64, dtype=torch.float32, device="cuda")
+    rope.cos_sin_cache = table
+    saved_table = table.clone()
+    positions = torch.arange(17, device="cuda")
+    query = torch.randn(17, 128, dtype=torch.bfloat16, device="cuda")
+    key = torch.randn(17, 64, dtype=torch.bfloat16, device="cuda")
+
+    out_query, out_key = rope.forward_hip(positions, query.clone(), key.clone())
+    assert out_key is not None
+    ref_query, ref_key = query.clone(), key.clone()
+    ops.rotary_embedding(positions, ref_query, ref_key, 64, saved_table, False)
+    assert_rope_close_rocm(
+        out_query.view(17, 2, 64),
+        ref_query.view(17, 2, 64),
+        query.view(17, 2, 64),
+        saved_table,
+        positions,
+        False,
+    )
+    assert_rope_close_rocm(
+        out_key.view(17, 1, 64),
+        ref_key.view(17, 1, 64),
+        key.view(17, 1, 64),
+        saved_table,
+        positions,
+        False,
+    )
+    assert out_query.dtype == torch.bfloat16
+    assert out_key.dtype == torch.bfloat16
+    assert rope.cos_sin_cache is table
+    assert rope.cos_sin_cache.dtype == torch.float32
+    assert torch.equal(table, saved_table)

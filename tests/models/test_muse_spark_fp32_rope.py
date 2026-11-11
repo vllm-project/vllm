@@ -92,7 +92,7 @@ def drafter(tmp_path, dist_init):
             target_model_config=target_config,
             target_parallel_config=ParallelConfig(),
         ),
-        # Serving enables the RoPE custom op, whose eager forward casts the table.
+        # Exercise the serving RoPE CustomOp dispatch.
         compilation_config=CompilationConfig(custom_ops=["all"]),
         # Writes K/V in the backend, so attention takes the unfused RoPE path.
         attention_config=AttentionConfig(backend=AttentionBackendEnum.TRITON_ATTN),
