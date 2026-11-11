@@ -138,6 +138,26 @@ pub struct UmbpOperationLabels {
 /// operation's series appears once the connector first reports it.
 pub type UmbpOperationCounterFamily = Family<UmbpOperationLabels, U64Counter>;
 
+/// Labels for `vllm:simple_kv_offload_save_outcomes`.
+#[derive(Clone, Debug, Hash, PartialEq, Eq, EncodeLabelSet)]
+pub struct SimpleCpuOffloadOutcomeLabels {
+    pub model_name: String,
+    pub engine: u32,
+    pub outcome: String,
+}
+
+/// Labels for `vllm:simple_kv_offload_info`, whose label values are the
+/// connector's deployment facts.
+#[derive(Clone, Debug, Hash, PartialEq, Eq, EncodeLabelSet)]
+pub struct SimpleCpuOffloadInfoLabels {
+    pub model_name: String,
+    pub engine: u32,
+    pub backend: String,
+    pub page_cache: String,
+    pub lazy_offload: String,
+    pub capacity_blocks: String,
+}
+
 /// Adapter names encoded as a deterministic comma-joined Prometheus label value.
 #[derive(Clone, Debug, Hash, PartialEq, Eq)]
 pub struct LoraAdapterNames(pub BTreeSet<String>);
@@ -148,9 +168,12 @@ impl EncodeLabelValue for LoraAdapterNames {
     }
 }
 
-/// Labels for `vllm:lora_requests_info`.
+/// Labels for `vllm:lora_requests_info`. Field order is the exposition order,
+/// which matches Python's (sorted by name).
 #[derive(Clone, Debug, Hash, PartialEq, Eq, EncodeLabelSet)]
 pub struct LoraInfoLabels {
+    /// The engine's `max_loras`, constant for the server's lifetime.
+    pub max_lora: u32,
     pub running_lora_adapters: LoraAdapterNames,
     pub waiting_lora_adapters: LoraAdapterNames,
 }
@@ -256,6 +279,10 @@ pub struct SchedulerMetrics {
     /// seconds.
     pub lora_info: Family<LoraInfoLabels, F64Gauge>,
 
+    /// `vllm:cache_config_info`, one series per engine, always `1`. Labeled
+    /// with every `CacheConfig.metrics_info()` field plus `engine`.
+    pub cache_config_info: Family<Vec<(String, String)>, F64Gauge>,
+
     // Prefix-cache counters, including the connector-backed external cache path.
     pub prefix_cache_queries: Family<EngineLabels, U64Counter>,
     pub prefix_cache_hits: Family<EngineLabels, U64Counter>,
@@ -309,6 +336,13 @@ pub struct SchedulerMetrics {
     pub umbp_transfer_completed_total: UmbpOperationCounterFamily,
     pub umbp_transfer_failed_total: UmbpOperationCounterFamily,
     pub umbp_transfer_bytes_total: UmbpOperationCounterFamily,
+
+    // SimpleCPUOffload connector telemetry. Mirrors `SimpleCPUOffloadPromMetrics`.
+    pub simple_kv_offload_save_outcomes_total: Family<SimpleCpuOffloadOutcomeLabels, U64Counter>,
+    pub simple_kv_offload_load_blocks_total: Family<EngineLabels, U64Counter>,
+    pub simple_kv_offload_used_blocks: Family<EngineLabels, U64Gauge>,
+    pub simple_kv_offload_pending_store_blocks: Family<EngineLabels, U64Gauge>,
+    pub simple_kv_offload_info: Family<SimpleCpuOffloadInfoLabels, U64Gauge>,
 
     /// Non-Prometheus interval accumulators for periodic text-log helpers.
     pub log_stats: Family<EngineLabels, SchedulerLogStatsAccumulator>,
@@ -375,6 +409,13 @@ impl SchedulerMetrics {
             "vllm:lora_requests_info",
             "Running stats on lora requests.",
             lora_info.clone(),
+        );
+
+        let cache_config_info = Family::default();
+        registry.register(
+            "vllm:cache_config_info",
+            "Information of the LLMEngine CacheConfig",
+            cache_config_info.clone(),
         );
 
         // Prefix-cache counters, including the connector-backed external cache path.
@@ -680,6 +721,50 @@ impl SchedulerMetrics {
             umbp_transfer_bytes_total.clone(),
         );
 
+        // SimpleCPUOffload connector telemetry.
+        let simple_kv_offload_save_outcomes_total = Family::default();
+        registry.register(
+            "vllm:simple_kv_offload_save_outcomes",
+            "Store admission decisions in SimpleCPUOffloadConnector, by outcome. Outcomes \
+             classify eager-mode boundary hand-off stores; lazy-mode stores are not classified",
+            simple_kv_offload_save_outcomes_total.clone(),
+        );
+
+        let simple_kv_offload_load_blocks_total = Family::default();
+        registry.register(
+            "vllm:simple_kv_offload_load_blocks",
+            "KV blocks restored to GPU from the offload pool, counted when a load finishes. This \
+             is prefill work avoided through offload cache hits",
+            simple_kv_offload_load_blocks_total.clone(),
+        );
+
+        let simple_kv_offload_used_blocks = Family::default();
+        registry.register(
+            "vllm:simple_kv_offload_used_blocks",
+            "Offload-pool blocks currently pinned by in-flight transfers or cache hits (capacity \
+             minus free). Evictable cached blocks are not counted; capacity_blocks is on \
+             vllm:simple_kv_offload_info",
+            simple_kv_offload_used_blocks.clone(),
+        );
+
+        let simple_kv_offload_pending_store_blocks = Family::default();
+        registry.register(
+            "vllm:simple_kv_offload_pending_store_blocks",
+            "Offload blocks in pending stores: queued for dispatch, issued to workers, or \
+             awaiting release after a cache reset. A persistently growing value indicates a stuck \
+             transfer",
+            simple_kv_offload_pending_store_blocks.clone(),
+        );
+
+        let simple_kv_offload_info = Family::default();
+        registry.register(
+            "vllm:simple_kv_offload_info",
+            "SimpleCPUOffloadConnector deployment facts. Value is always 1. backend is cpu or \
+             disk; page_cache and lazy_offload are true/false; capacity_blocks is the offload \
+             pool size",
+            simple_kv_offload_info.clone(),
+        );
+
         Self {
             scheduler_running,
             scheduler_waiting,
@@ -688,6 +773,7 @@ impl SchedulerMetrics {
             kv_cache_usage,
             engine_sleep_state,
             lora_info,
+            cache_config_info,
             prefix_cache_queries,
             prefix_cache_hits,
             external_prefix_cache_queries,
@@ -726,6 +812,11 @@ impl SchedulerMetrics {
             umbp_transfer_completed_total,
             umbp_transfer_failed_total,
             umbp_transfer_bytes_total,
+            simple_kv_offload_save_outcomes_total,
+            simple_kv_offload_load_blocks_total,
+            simple_kv_offload_used_blocks,
+            simple_kv_offload_pending_store_blocks,
+            simple_kv_offload_info,
             log_stats: Family::default(),
         }
     }
