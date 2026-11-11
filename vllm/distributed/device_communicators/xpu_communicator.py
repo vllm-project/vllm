@@ -13,6 +13,9 @@ from .base_device_communicator import DeviceCommunicatorBase
 
 logger = init_logger(__name__)
 
+# All-to-all launch overhead dominates small messages on PCIe XPUs.
+_BATCH_INVARIANT_GATHER_MAX_BYTES = 8 * 1024 * 1024
+
 
 class XpuCommunicator(DeviceCommunicatorBase):
     def __init__(
@@ -52,23 +55,89 @@ class XpuCommunicator(DeviceCommunicatorBase):
                 self.all2all_manager = AgRsAll2AllManager(self.cpu_group)
                 logger.info("Using AgRs manager on XPU device.")
 
-    def _fixed_rank_sum(self, input_: torch.Tensor) -> torch.Tensor:
-        flat_input = input_.reshape(-1)
+    def _fixed_rank_reduce_scatter(
+        self, input_: torch.Tensor, sizes: list[int] | None = None
+    ) -> torch.Tensor:
+        if sizes is None:
+            assert input_.shape[0] % self.world_size == 0
+            sizes = [input_.shape[0] // self.world_size] * self.world_size
+        rows = sizes[self.rank_in_group]
+        if input_.numel() * input_.element_size() <= _BATCH_INVARIANT_GATHER_MAX_BYTES:
+            reduced = self._fixed_rank_sum(input_)
+            start = sum(sizes[: self.rank_in_group])
+            return reduced.narrow(0, start, rows).clone()
         gathered = torch.empty(
-            (self.world_size, flat_input.numel()),
+            (self.world_size * rows, *input_.shape[1:]),
             dtype=input_.dtype,
             device=input_.device,
         )
-        dist.all_gather_single(gathered.view(-1), flat_input, group=self.device_group)
+        # Exchange only the owned shard; XCCL must not choose the sum order.
+        dist.all_to_all_single(
+            gathered,
+            input_,
+            input_split_sizes=sizes,
+            output_split_sizes=[rows] * self.world_size,
+            group=self.device_group,
+        )
+        if input_.dtype in (torch.float16, torch.bfloat16, torch.float32):
+            from vllm.model_executor.determinism.batch_invariant import (
+                _fixed_order_sum_kernel,
+            )
+            from vllm.triton_utils import triton
+
+            output = input_.new_empty((rows, *input_.shape[1:]))
+            numel = output.numel()
+            if numel:
+                _fixed_order_sum_kernel[(triton.cdiv(numel, 1024),)](
+                    gathered,
+                    output,
+                    numel,
+                    numel,
+                    WORLD_SIZE=self.world_size,
+                    BLOCK_SIZE=1024,
+                    LARGE=gathered.numel() > 2**31,
+                )
+            return output
+        gathered = gathered.view(self.world_size, rows, *input_.shape[1:])
         output = gathered[0].clone()
         for rank in range(1, self.world_size):
             output.add_(gathered[rank])
-        return output.view(input_.shape)
+        return output
+
+    def _fixed_rank_sum(self, input_: torch.Tensor) -> torch.Tensor:
+        flat_input = input_.contiguous().view(-1)
+        numel = flat_input.numel()
+        if self.world_size == 1 or numel == 0:
+            return input_.clone()
+        if numel * input_.element_size() <= _BATCH_INVARIANT_GATHER_MAX_BYTES:
+            gathered = input_.new_empty((self.world_size, numel))
+            dist.all_gather_single(
+                gathered.view(-1), flat_input, group=self.device_group
+            )
+            acc_dtype = (
+                torch.float32
+                if input_.dtype in (torch.float16, torch.bfloat16)
+                else input_.dtype
+            )
+            output = torch.zeros(numel, dtype=acc_dtype, device=input_.device)
+            for rank in range(self.world_size):
+                output.add_(gathered[rank])
+            return output.to(input_.dtype).view(input_.shape)
+        chunk_size = (numel + self.world_size - 1) // self.world_size
+        padded_numel = chunk_size * self.world_size
+        if padded_numel != numel:
+            padded = flat_input.new_zeros(padded_numel)
+            padded[:numel].copy_(flat_input)
+            flat_input = padded
+        reduced = self._fixed_rank_reduce_scatter(flat_input)
+        output = flat_input.new_empty(padded_numel)
+        dist.all_gather_single(output, reduced, group=self.device_group)
+        return output[:numel].view(input_.shape)
 
     def all_reduce(self, input_: torch.Tensor) -> torch.Tensor:
         if envs.VLLM_BATCH_INVARIANT:
-            # XCCL changes its reduction order with message size. Gather first
-            # and accumulate in rank order, independent of the token batch.
+            # XCCL changes its reduction order with message size. Exchange
+            # shards and accumulate in rank order, independent of the batch.
             return self._fixed_rank_sum(input_)
 
         output = input_.clone()
@@ -90,15 +159,12 @@ class XpuCommunicator(DeviceCommunicatorBase):
         chunk_size = input_tensor.shape[0] // world_size
         output_shape = (chunk_size,) + input_tensor.shape[1:]
 
-        output = torch.empty(
-            output_shape, dtype=input_tensor.dtype, device=input_tensor.device
-        )
-
         if envs.VLLM_BATCH_INVARIANT:
-            reduced = self._fixed_rank_sum(input_tensor)
-            start = self.rank_in_group * chunk_size
-            output.copy_(reduced.narrow(0, start, chunk_size))
+            output = self._fixed_rank_reduce_scatter(input_tensor)
         else:
+            output = torch.empty(
+                output_shape, dtype=input_tensor.dtype, device=input_tensor.device
+            )
             dist.reduce_scatter_tensor(output, input_tensor, group=self.device_group)
 
         # Reshape before returning
@@ -124,20 +190,17 @@ class XpuCommunicator(DeviceCommunicatorBase):
         else:
             assert input_tensor.shape[0] % world_size == 0
             chunk_size = input_tensor.shape[0] // world_size
+
+        if envs.VLLM_BATCH_INVARIANT:
+            output = self._fixed_rank_reduce_scatter(input_tensor, sizes)
+            return output.movedim(0, dim).contiguous()
+
         output_shape = (chunk_size,) + input_tensor.shape[1:]
 
         output = torch.empty(
             output_shape, dtype=input_tensor.dtype, device=input_tensor.device
         )
-        if envs.VLLM_BATCH_INVARIANT:
-            reduced = self._fixed_rank_sum(input_tensor)
-            start = (
-                self.rank_in_group * chunk_size
-                if sizes is None
-                else sum(sizes[: self.rank_in_group])
-            )
-            output.copy_(reduced.narrow(0, start, chunk_size))
-        elif sizes is None or sizes.count(sizes[0]) == len(sizes):
+        if sizes is None or sizes.count(sizes[0]) == len(sizes):
             dist.reduce_scatter_tensor(output, input_tensor, group=self.device_group)
         elif torch.xpu.device_count() < self.world_size:
             # uneven reduce_scatter is not supported when the
