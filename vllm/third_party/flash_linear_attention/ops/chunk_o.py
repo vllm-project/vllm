@@ -15,11 +15,22 @@ import torch
 from vllm.triton_utils import tl, triton
 
 from .index import prepare_chunk_indices
-from .op import exp
-from .utils import FLA_CHUNK_SIZE, check_shared_mem, is_nvidia_hopper
+from .op import exp, store_2d_vec4_16bit
+from .utils import FLA_CHUNK_SIZE, check_shared_mem, is_nvidia_hopper, is_rdna
 
 BKV_LIST = [64, 128] if check_shared_mem() else [32, 64]
 NUM_WARPS = [2, 4] if is_nvidia_hopper else [2, 4, 8]
+O_CONFIGS = (
+    [triton.Config({"BK": 64, "BV": 128}, num_warps=4, num_stages=2)]
+    if is_rdna
+    else [
+        triton.Config({"BK": BK, "BV": BV}, num_warps=num_warps, num_stages=num_stages)
+        for BK in BKV_LIST
+        for BV in BKV_LIST
+        for num_warps in NUM_WARPS
+        for num_stages in [2, 3, 4]
+    ]
+)
 
 
 @triton.heuristics(
@@ -29,14 +40,8 @@ NUM_WARPS = [2, 4] if is_nvidia_hopper else [2, 4, 8]
     }
 )
 @triton.autotune(
-    configs=[
-        triton.Config({"BK": BK, "BV": BV}, num_warps=num_warps, num_stages=num_stages)
-        for BK in BKV_LIST
-        for BV in BKV_LIST
-        for num_warps in NUM_WARPS
-        for num_stages in [2, 3, 4]
-    ],
-    key=["H", "K", "V", "BT"],
+    configs=O_CONFIGS,
+    key=["H", "K", "V", "BT", "HEAD_FIRST", "VEC4_STORE"],
 )
 @triton.jit(do_not_specialize=["T"])
 def chunk_fwd_kernel_o(
@@ -59,12 +64,21 @@ def chunk_fwd_kernel_o(
     BV: tl.constexpr,
     USE_G: tl.constexpr,
     IS_VARLEN: tl.constexpr,
+    HEAD_FIRST: tl.constexpr,
+    VEC4_STORE: tl.constexpr,
 ):
-    i_v, i_t, i_bh = (
-        tl.program_id(0),
-        tl.program_id(1).to(tl.int64),
-        tl.program_id(2).to(tl.int64),
-    )
+    if HEAD_FIRST:
+        i_v, i_bh, i_t = (
+            tl.program_id(0),
+            tl.program_id(1).to(tl.int64),
+            tl.program_id(2).to(tl.int64),
+        )
+    else:
+        i_v, i_t, i_bh = (
+            tl.program_id(0),
+            tl.program_id(1).to(tl.int64),
+            tl.program_id(2).to(tl.int64),
+        )
     i_b, i_h = i_bh // H, i_bh % H
 
     if IS_VARLEN:
@@ -132,7 +146,14 @@ def chunk_fwd_kernel_o(
     # to fix mma -> mma layout conversion
     # already solved by triton v3.2 or higher
     b_o = b_o * scale + tl.dot(b_A.to(b_v.dtype), b_v) * scale
-    tl.store(p_o, b_o.to(p_o.dtype.element_ty), mask=m_t[:, None] & (o_v < V)[None, :])
+    if VEC4_STORE:
+        store_2d_vec4_16bit(
+            o, b_o, o_t, i_v * (BV // 4) + tl.arange(0, BV // 4), H * V, T, V, BT, BV
+        )
+    else:
+        tl.store(
+            p_o, b_o.to(p_o.dtype.element_ty), mask=m_t[:, None] & (o_v < V)[None, :]
+        )
 
 
 def chunk_fwd_o(
@@ -164,7 +185,16 @@ def chunk_fwd_o(
     else:
         o = torch.empty_like(v)
 
+    # Co-schedule all heads of a chunk; time-major order thrashes the RDNA
+    # Infinity Cache on long prefills.
+    head_first = is_rdna
+    vec4_store = (
+        is_rdna and V % 4 == 0 and o.element_size() == 2 and o.data_ptr() % 8 == 0
+    )
+
     def grid(meta):
+        if head_first:
+            return (triton.cdiv(V, meta["BV"]), B * H, NT)
         return (triton.cdiv(V, meta["BV"]), NT, B * H)
 
     chunk_fwd_kernel_o[grid](
@@ -183,5 +213,7 @@ def chunk_fwd_o(
         K=K,
         V=V,
         BT=BT,
+        HEAD_FIRST=head_first,
+        VEC4_STORE=vec4_store,
     )
     return o
