@@ -613,10 +613,8 @@ class Base(
             offloader.wrap_modules(build_layers())
 
         def _recursive_replace(module: nn.Module, prefix: str):
-            num_hidden_layers = self.text_config.num_hidden_layers
-            if isinstance(module, nn.ModuleList) and len(module) == num_hidden_layers:
-                self._register_decoder_layers(module, prefix)
             if module is decoder_layers:
+                self._register_decoder_layers(module, prefix)
                 _replace_decoder_layers(module, prefix)
                 return
             for child_name, child_module in module.named_children():
