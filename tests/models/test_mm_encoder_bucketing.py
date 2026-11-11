@@ -568,3 +568,24 @@ def test_bucket_mm_batch_distinguishes_wired_from_silently_dead():
         _FakeRunner(_ModelWithoutBucketing()), batch, 3
     )
     assert len(dead) == 1 and dead[0][0] == [0, 1, 2]  # single passthrough
+
+
+def test_cohere_spec_crop_list_branch_pads_up_in_crop():
+    from vllm.model_executor.models.cohere_asr import CohereASRBucketingSpec
+
+    # List-shaped input_features: per-item [mel, T_i] (time on dim 1). Crop must
+    # select the rows and zero-pad each up to the rung, then stack into a fixed
+    # [n, mel, rung] tensor (pad-up-in-crop), instead of indexing a tensor.
+    feats = [torch.randn(80, 500), torch.randn(80, 2000), torch.randn(80, 1200)]
+    length = torch.tensor([500, 2000, 1200])
+    batch = {"input_features": feats, "length": length}
+    spec = CohereASRBucketingSpec()
+
+    cropped = spec.crop(batch, [0, 2], 800)
+    feats_out = cropped["input_features"]
+    assert isinstance(feats_out, torch.Tensor)
+    assert feats_out.shape == (2, 80, 800)
+    # item 0 (500 < 800) is zero-padded to the rung, item 2 (1200) is cropped
+    assert torch.count_nonzero(feats_out[0][:, 500:]).item() == 0
+    assert torch.equal(feats_out[1], feats[2][:, :800])
+    assert cropped["length"].tolist() == [500, 1200]

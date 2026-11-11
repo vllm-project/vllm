@@ -69,8 +69,8 @@ from vllm.utils.tensor_schema import TensorSchema, TensorShape
 from .interfaces import MultiModalEmbeddings, SupportsMultiModal, SupportsPP
 from .mm_encoder_bucketing import (
     EncoderBucketingSpec,
-    _FORWARD_SHIMS,
     install_encoder_bucketing,
+    register_forward_shim,
 )
 from .utils import AutoWeightsLoader, init_vllm_registered_model, maybe_prefix
 
@@ -126,7 +126,7 @@ class Qwen2AudioBucketingSpec(EncoderBucketingSpec):
     """
 
     frames_per_second = 100  # mel frames per second (WhisperFeatureExtractor)
-    context_margin = 4
+    context_margin = 4  # conv receptive field (conv1 k3 s1 + conv2 k3 s2)
 
     def item_lengths(
         self, mm_kwargs_batch: Mapping[str, torch.Tensor]
@@ -206,7 +206,7 @@ def _qwen2audio_varlen_shim(
     return BaseModelOutput(last_hidden_state=x)
 
 
-_FORWARD_SHIMS["Qwen2AudioEncoder"] = _qwen2audio_varlen_shim
+register_forward_shim("Qwen2AudioEncoder", _qwen2audio_varlen_shim)
 
 
 # === Audio Encoder === #
