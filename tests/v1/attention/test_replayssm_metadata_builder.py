@@ -21,6 +21,7 @@ from tests.v1.attention.utils import (
 from vllm.config import SpeculativeConfig
 from vllm.config.compilation import CUDAGraphMode
 from vllm.config.mamba import MambaBackendEnum
+from vllm.model_executor.layers.mamba.mamba_utils import MambaStateShapeCalculator
 from vllm.v1.kv_cache_interface import MambaSpec
 
 BLOCK_SIZE = 16
@@ -40,20 +41,17 @@ def _make_mamba_spec(
     num_speculative_tokens: int = 0,
     mamba_cache_mode: str = "none",
 ) -> MambaSpec:
-    ring_buffer_len = buffer_len + (
-        1 + num_speculative_tokens
-        if mamba_backend == MambaBackendEnum.FLASHINFER
-        else 0
+    shapes = MambaStateShapeCalculator.append_replayssm_ring(
+        ((1, 1), (1, 1, 1)),
+        n_groups=1,
+        tp_world_size=1,
+        logical_window=buffer_len,
+        backend=mamba_backend,
+        num_speculative_tokens=num_speculative_tokens,
     )
-    replayssm_shapes = (
-        (1, ring_buffer_len, 1),
-        (1, ring_buffer_len),
-        (1, ring_buffer_len, 1),
-    )
-    base_shapes = ((1, 1), (1, 1, 1))
     return MambaSpec(
         block_size=BLOCK_SIZE,
-        shapes=(*base_shapes, *replayssm_shapes),
+        shapes=shapes,
         dtypes=(torch.float32,) * 5,
         mamba_cache_mode=mamba_cache_mode,
     )

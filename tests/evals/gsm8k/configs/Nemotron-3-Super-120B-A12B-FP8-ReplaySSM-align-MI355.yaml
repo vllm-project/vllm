@@ -3,8 +3,7 @@ accuracy_threshold: 0.93
 num_questions: 1319
 num_fewshot: 5
 startup_max_wait_seconds: 1200
-# Require draft steps and report natural acceptance without a performance bound.
-min_acceptance_length: 1.0
+min_acceptance_length: 2.0
 expect_prefix_cache_hits: true
 env:
   VLLM_ROCM_USE_AITER: "1"

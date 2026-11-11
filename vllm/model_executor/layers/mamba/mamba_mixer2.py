@@ -970,6 +970,12 @@ class MambaMixer2(MambaBase, PluggableLayer):
             )
             if self.use_replayssm:
                 assert self.replayssm_buffer_len is not None
+                if self.use_replayssm_trackers:
+                    # Both kernels replay a window of ring_len - (1 + num_spec).
+                    assert x_cache is not None
+                    assert (
+                        x_cache.size(2) == self.replayssm_buffer_len + 1 + self.num_spec
+                    )
                 if self.mamba_config.backend == MambaBackendEnum.FLASHINFER:
                     assert ring_start is not None
                     assert prev_num_accepted is not None

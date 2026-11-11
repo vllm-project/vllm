@@ -726,7 +726,7 @@ class MambaSpecDecodeGPUContext:
     fused postprocess path.
 
     Used for hybrid speculative state maintenance and for model-owned
-    FlashInfer ReplaySSM prefix-cache lifecycle maintenance.
+    ReplaySSM tracker prefix-cache lifecycle maintenance.
 
     Precomputes memory layout metadata (base addresses, strides, element sizes)
     so the GPU kernel can perform state copies without CPU-GPU sync.
@@ -773,7 +773,7 @@ class MambaSpecDecodeGPUContext:
     # Flag to track if metadata has been populated
     is_initialized: bool = False
     # Persistent all-layer ReplaySSM descriptors, populated with the cache
-    # addresses on first real forward. None for non-FlashInfer configurations.
+    # addresses on first real forward. None without ReplaySSM trackers.
     replayssm: ReplaySSMModelContext | None = None
 
     @classmethod
