@@ -11,9 +11,12 @@ BF16 once at load and served by a plain linear instead, since `can_implement`
 does not filter on K.
 """
 
+import functools
+
 import torch
 
 import vllm.envs as envs
+from vllm.logger import init_logger
 from vllm.model_executor.layers.fusion.quant_activation import (
     QuantizedActivation,
     as_quantized_activation,
@@ -40,8 +43,78 @@ from .rocm_block32_gemm import (
     rocm_mxfp8_block32_gemm_quant,
 )
 
+logger = init_logger(__name__)
+
 _FP8_MAX = float(torch.finfo(MXFP8_VALUE_DTYPE).max)
 _TINY = float(torch.finfo(torch.float32).tiny)
+
+# M ranges (inclusive) where AITER's FlyDSL gemm_a8w8_mxfp8_bpreshuffle beats
+# the Triton GEMM below by at least 3%, with the same output to 1e-2, per
+# weight shape (N, K). Measured on MI355X (gfx950) for the MiniMax-M3.1 TP4
+# linears with AITER's MiniMax-M3 tuned rows: qkv + indexer (2560, 6144),
+# o_proj (6144, 2048), dense FFN (6144, 6144) / (6144, 3072), shared expert
+# (1536, 6144) / (6144, 768). Other shapes and M keep the Triton GEMM.
+_AITER_M_RANGES: dict[tuple[int, int], tuple[tuple[int, int], ...]] = {
+    (2560, 6144): ((8, 1024), (2048, 32768)),
+    (6144, 2048): ((8, 32768),),
+    (6144, 6144): ((24, 32768),),
+    (6144, 3072): ((24, 48), (64, 1024), (1536, 32768)),
+    (1536, 6144): ((72, 96), (128, 176), (200, 224), (320, 2048), (3072, 16384)),
+    (6144, 768): ((24, 40), (56, 72), (144, 144), (176, 176), (256, 32768)),
+}
+
+
+@functools.cache
+def _aiter_tuned_shapes() -> frozenset[tuple[int, int]]:
+    """(N, K) with tuned FlyDSL rows for this gfx950 device in AITER's MXFP8
+    bpreshuffle table, or nothing without such an AITER: an untuned shape would
+    run AITER's heuristic tile, which the ranges above were not measured on."""
+    from vllm.platforms.rocm import on_gfx950
+
+    if not on_gfx950():
+        return frozenset()
+    try:
+        import aiter
+        import pandas as pd
+        from aiter.jit.core import AITER_CONFIGS
+        from aiter.jit.utils.chip_info import get_cu_num
+        from aiter.ops.shuffle import shuffle_weight  # noqa: F401
+
+        if not hasattr(aiter, "gemm_a8w8_mxfp8_bpreshuffle"):
+            return frozenset()
+        table = pd.read_csv(AITER_CONFIGS.AITER_CONFIG_GEMM_A8W8_MXFP8_BPRESHUFFLE_FILE)
+        table = table[
+            (table["gfx"] == "gfx950")
+            & (table["cu_num"] == get_cu_num())
+            & (table["libtype"] == "flydsl")
+        ]
+        return frozenset(zip(table["N"].astype(int), table["K"].astype(int)))
+    except Exception as e:  # any AITER without this kernel or table
+        logger.info_once("MXFP8 linear: no AITER gemm_a8w8_mxfp8_bpreshuffle (%s)", e)
+        return frozenset()
+
+
+def _aiter_serves(layer: torch.nn.Module, m: int) -> bool:
+    """Whether AITER's GEMM serves this layer at M rows. torch.compile'd
+    callers (the DSpark drafter) keep the Triton GEMM, so the M-dependent
+    choice never becomes a guard on a dynamic size."""
+    ranges = getattr(layer, "aiter_m_ranges", None)
+    if not ranges or torch.compiler.is_compiling():
+        return False
+    return any(lo <= m <= hi for lo, hi in ranges)
+
+
+def _aiter_gemm(x_q, x_scale, layer, out_dtype):
+    import aiter
+
+    e8 = aiter.dtypes.fp8_e8m0
+    return aiter.gemm_a8w8_mxfp8_bpreshuffle(
+        x_q,
+        layer.aiter_weight,
+        x_scale.view(e8),
+        layer.weight_scale.view(e8),
+        out_dtype,
+    )
 
 
 @triton.jit
@@ -482,6 +555,27 @@ class RocmDotScaledMxfp8LinearKernel(Mxfp8LinearKernel):
             weight = dequant_mxfp8_to_bf16(weight.contiguous(), weight_scale)
         replace_parameter(layer, "weight", weight.contiguous())
         replace_parameter(layer, "weight_scale", weight_scale)
+        ranges = _AITER_M_RANGES.get((N, K))
+        if (
+            ranges
+            and block_scale is None
+            and layer.weight.element_size() == 1
+            and K % _DOT_SCALED_K_ALIGN == 0
+            and (N, K) in _aiter_tuned_shapes()
+        ):
+            # AITER's GEMM reads a (16, 16)-preshuffled copy of the weight;
+            # scales and activations are shared with the Triton GEMM.
+            from aiter.ops.shuffle import shuffle_weight
+
+            layer.aiter_weight = shuffle_weight(layer.weight.data, layout=(16, 16))
+            layer.aiter_m_ranges = ranges
+            logger.info_once(
+                "MXFP8 linear (N=%d, K=%d): AITER gemm_a8w8_mxfp8_bpreshuffle "
+                "for M in %s",
+                N,
+                K,
+                ranges,
+            )
 
     def input_quant_key(self) -> QuantKey:
         # Row-major [M, K // 32] E8M0 scales, unlike FlashInfer's swizzled ones
@@ -540,13 +634,22 @@ class RocmDotScaledMxfp8LinearKernel(Mxfp8LinearKernel):
                     x2d, layer.weight, layer.weight_scale, out_dtype
                 )
         elif qa is not None:
-            out = _mxfp8_dot_scaled_gemm(
-                x_q, x_scale, layer.weight, layer.weight_scale, out_dtype
-            )
+            if _aiter_serves(layer, x_q.shape[0]):
+                out = _aiter_gemm(x_q, x_scale, layer, out_dtype)
+            else:
+                out = _mxfp8_dot_scaled_gemm(
+                    x_q, x_scale, layer.weight, layer.weight_scale, out_dtype
+                )
         elif layer.weight.element_size() >= 2:
             out = torch.nn.functional.linear(x2d, layer.weight.to(out_dtype))
         elif x2d.shape[-1] % _DOT_SCALED_K_ALIGN == 0:
-            out = _mxfp8_dot_scaled_linear(x2d, layer.weight, layer.weight_scale)
+            # Up to _FUSED_QUANT_MAX_M rows the quant is fused into the Triton
+            # GEMM: a single launch, kept.
+            if x2d.shape[0] > _FUSED_QUANT_MAX_M and _aiter_serves(layer, x2d.shape[0]):
+                x_q, x_scale = mxfp8_e4m3_quantize(x2d)
+                out = _aiter_gemm(x_q, x_scale, layer, out_dtype)
+            else:
+                out = _mxfp8_dot_scaled_linear(x2d, layer.weight, layer.weight_scale)
         else:
             # process_weights_after_loading dequantizes these weights once, so
             # this runs only if it did not; dot_scaled would be invalid here.
