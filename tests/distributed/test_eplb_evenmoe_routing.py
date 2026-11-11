@@ -382,6 +382,7 @@ def test_waterfill_is_rejected_unless_the_shared_expert_is_dispatched(monkeypatc
     """
     from vllm.distributed.eplb.evenmoe_runtime import l2_inapplicable_reason
 
+    monkeypatch.setenv("VLLM_EVENMOE_L1_ALGORITHM", "ultraep")
     monkeypatch.setenv("VLLM_FUSE_SHARED_EXPERTS", "0")
     import importlib
 
@@ -402,7 +403,7 @@ def test_waterfill_is_rejected_unless_the_shared_expert_is_dispatched(monkeypatc
         assert l2_inapplicable_reason(expr, num_redundant_experts=16) is None
 
 
-def test_layout_preconditions_are_checked_once_the_geometry_is_known():
+def test_layout_preconditions_are_checked_once_the_geometry_is_known(monkeypatch):
     """The rank-local redundancy of ultraep needs the EP group, the logical
     experts and the redundant experts to split evenly across ranks. The policy
     states the precondition in its own words; this side only supplies the
@@ -411,6 +412,7 @@ def test_layout_preconditions_are_checked_once_the_geometry_is_known():
     """
     from vllm.distributed.eplb.evenmoe_runtime import l2_inapplicable_reason
 
+    monkeypatch.setenv("VLLM_EVENMOE_L1_ALGORITHM", "ultraep")
     assert (
         l2_inapplicable_reason("ultraep", 16, ep_size=16, num_logical_experts=256)
         is None
@@ -430,13 +432,14 @@ def test_layout_preconditions_are_checked_once_the_geometry_is_known():
     )
 
 
-def test_config_supplies_its_own_geometry_to_the_layout_check():
+def test_config_supplies_its_own_geometry_to_the_layout_check(monkeypatch):
     """The EP group spans TP x PCP x DP, known from the configuration alone,
     so a redundancy that cannot split across the ranks is refused before any
     model exists; the logical expert count joins the check once the model
     supplies it through compute_eplb_num_redundant_experts."""
     from vllm.config.parallel import EPLBConfig, ParallelConfig
 
+    monkeypatch.setenv("VLLM_EVENMOE_L1_ALGORITHM", "ultraep")
     uneven = ParallelConfig(
         data_parallel_size=4,
         enable_expert_parallel=True,
@@ -467,6 +470,28 @@ def test_config_supplies_its_own_geometry_to_the_layout_check():
     assert deferred.eplb_config.l2_algorithm == ""
 
 
+def test_pipeline_that_requires_a_placement_policy_needs_it_selected(monkeypatch):
+    """The router of ultraep works from the quota its own planner publishes, so
+    the pipeline names the planner it requires. vLLM selects L1 separately, and
+    a mismatch is refused in the open rather than left to degrade silently into
+    the built-in replica choice. A pipeline that requires no particular planner
+    is indifferent to the selection."""
+    from vllm.distributed.eplb.evenmoe_runtime import l2_inapplicable_reason
+
+    monkeypatch.delenv("VLLM_EVENMOE_L1_ALGORITHM", raising=False)
+    reason = l2_inapplicable_reason("ultraep", 16)
+    assert reason is not None and "placement policy" in reason
+
+    monkeypatch.setenv("VLLM_EVENMOE_L1_ALGORITHM", "deepseek")
+    assert l2_inapplicable_reason("ultraep+waterfill", 16) is not None
+
+    monkeypatch.setenv("VLLM_EVENMOE_L1_ALGORITHM", "ultraep")
+    assert l2_inapplicable_reason("ultraep", 16) is None
+
+    monkeypatch.delenv("VLLM_EVENMOE_L1_ALGORITHM", raising=False)
+    assert l2_inapplicable_reason("lplb", 16) is None
+
+
 def test_l2_applicability_is_decided_on_the_config_the_run_uses(monkeypatch):
     """Only ParallelConfig may disable L2, because only it is certainly used.
 
@@ -479,6 +504,7 @@ def test_l2_applicability_is_decided_on_the_config_the_run_uses(monkeypatch):
     """
     from vllm.config.parallel import EPLBConfig, ParallelConfig
 
+    monkeypatch.setenv("VLLM_EVENMOE_L1_ALGORITHM", "ultraep")
     monkeypatch.setenv("VLLM_EVENMOE_L2_ALGORITHM", "ultraep")
 
     # The default instance takes the algorithm from the environment and leaves

@@ -262,7 +262,9 @@ Two stages are configurable:
   enabled on its own with `VLLM_FUSE_SHARED_EXPERTS=1`. L2 routing is skipped automatically when
   there are no redundant experts, where it could only reproduce the built-in choice, and when a
   policy's layout preconditions cannot hold on the configured EP group (`ultraep` needs the redundant
-  experts and the logical experts to split evenly across the EP ranks); the log states the reason.
+  experts and the logical experts to split evenly across the EP ranks), or when the expression requires
+  a particular placement policy that `VLLM_EVENMOE_L1_ALGORITHM` does not select (`ultraep` routes by
+  the quota its own planner publishes, so both stages must be `ultraep`); the log states the reason.
 
 ```bash
 # Placement fitted by the balancer, online UltraEP refresh, Waterfill for the shared expert

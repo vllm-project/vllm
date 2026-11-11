@@ -1988,6 +1988,23 @@ def l2_inapplicable_reason(
         pipeline = RoutingPipeline.from_value(algorithm)
     except Exception:
         return None
+    # A pipeline may require one particular L1 planner: ultraep's router works
+    # from the quota its own planner publishes with each placement, and no
+    # other planner publishes one. EvenMoE checks the pairing when a balancer
+    # is built with both policies named; vLLM selects L1 separately, through
+    # VLLM_EVENMOE_L1_ALGORITHM, so here is where both are known. Without the
+    # check the router would run without its quota and fall back to the
+    # built-in replica choice silently.
+    required = pipeline.placement_policy
+    if required is not None:
+        from vllm.distributed.eplb.policy.evenmoe import l1_algorithm
+
+        selected = l1_algorithm()
+        if selected != required:
+            return (
+                f"{algorithm!r} requires placement policy {required!r}, but "
+                f"VLLM_EVENMOE_L1_ALGORITHM selects {selected!r}"
+            )
     from vllm.model_executor.layers.fused_moe.shared_expert_fusion import (
         shared_expert_fusion_enabled,
     )
