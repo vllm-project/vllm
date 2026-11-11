@@ -190,6 +190,22 @@ def test_get_mm_max_tokens_per_item_respects_configured_video_num_frames(
 
 
 @pytest.mark.parametrize("model_id", [GEMMA4_MODEL_ID])
+def test_dummy_audio_reaches_audio_budget(model_id: str):
+    ctx = build_model_context(model_id, limit_mm_per_prompt={"audio": 1})
+    processor = MULTIMODAL_REGISTRY.create_processor(ctx.model_config)
+
+    tokens = processor.info.get_mm_max_tokens_per_item(
+        seq_len=ctx.model_config.max_model_len,
+        mm_counts={"audio": 1},
+    )
+    dummy = processor.get_dummy_mm_inputs({"audio": 1})
+    num_embeds = sum(p.get_num_embeds() for p in dummy["mm_placeholders"]["audio"])
+
+    assert tokens is not None
+    assert num_embeds == tokens["audio"]
+
+
+@pytest.mark.parametrize("model_id", [GEMMA4_MODEL_ID])
 def test_get_prompt_updates_respects_nested_max_soft_tokens(model_id: str):
     ctx = build_model_context(
         model_id,

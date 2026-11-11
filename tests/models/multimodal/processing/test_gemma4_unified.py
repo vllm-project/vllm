@@ -8,7 +8,6 @@ import numpy as np
 import pytest
 import torch
 from PIL import Image as PILImage
-from transformers.models.gemma4 import Gemma4AudioFeatureExtractor
 
 from vllm.exceptions import VLLMValidationError
 from vllm.model_executor.layers.fusion.mm_input_norm import (
@@ -283,22 +282,6 @@ def test_dummy_audio_length_falls_back_for_the_unified_extractor():
 
     # 3000 tokens * 40 ms = 120 s at 16 kHz
     assert _dummy_audio_num_samples(_UnifiedProcessor()) == 120 * 16000
-
-
-def test_dummy_audio_length_still_uses_fft_length_for_the_tower_extractor():
-    """The mel/tower extractor keeps its existing behaviour."""
-
-    class _TowerFeatureExtractor(Gemma4AudioFeatureExtractor):
-        def __init__(self):  # noqa: D107 - bypass the real feature-extractor init
-            self.fft_length = 512
-            self.sampling_rate = 16000
-
-    class _TowerProcessor:
-        feature_extractor = _TowerFeatureExtractor()
-        audio_seq_length = 750
-        audio_ms_per_token = 40
-
-    assert _dummy_audio_num_samples(_TowerProcessor()) == 512
 
 
 # ---------------------------------------------------------------------------
