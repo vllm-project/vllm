@@ -535,13 +535,24 @@ def test_streaming_bounds_prefetch_and_closes_on_early_exit(tmp_path, monkeypatc
         paths.append(path)
     opened = []
     handles = []
-    mapped_handles = []
+    mapped_paths = []
     ahead = threading.Event()
     release_ahead = threading.Event()
     real_open = open
-    real_safe_open_handle = wu._safe_open_handle
+    real_buffer_safe_tensors = wu.BufferSafeTensors
     real_pread = wu.os.pread
     monkeypatch.delattr(wu.os, "preadv", raising=False)
+
+    def data_start_of(path: str) -> int:
+        # The data section starts after the header, so a read at or past
+        # this offset is a data read.
+        import struct
+
+        with open(path, "rb") as f:
+            header_len = struct.unpack("<Q", f.read(8))[0]
+        return 8 + header_len
+
+    data_starts = {path: data_start_of(path) for path in paths}
 
     def track_open(path, *args, **kwargs):
         opened.append(path)
@@ -552,20 +563,26 @@ def test_streaming_bounds_prefetch_and_closes_on_early_exit(tmp_path, monkeypatc
         return handle
 
     def gated_pread(fd, count, offset):
-        # The shard that is read ahead must stay unmapped while its reads are
-        # still in flight, so hold its reads until the assertions have run.
-        if len(handles) > 1 and fd == handles[1].fileno():
+        # The shard that is read ahead must stay unmapped while its data
+        # reads are still in flight, so hold those reads until the
+        # assertions have run. The header read is not held: it is not
+        # part of the data.
+        if (
+            len(handles) > 1
+            and fd == handles[1].fileno()
+            and offset >= data_starts[handles[1].name]
+        ):
             assert release_ahead.wait(5), "Ahead shard read was never released"
         return real_pread(fd, count, offset)
 
     monkeypatch.setattr(wu, "open", track_open, raising=False)
     monkeypatch.setattr(wu.os, "pread", gated_pread)
 
-    def track_mapping(handle, *args, **kwargs):
-        mapped_handles.append(handle)
-        return real_safe_open_handle(handle, *args, **kwargs)
+    def track_mapping(path, *args, **kwargs):
+        mapped_paths.append(path)
+        return real_buffer_safe_tensors(path, *args, **kwargs)
 
-    monkeypatch.setattr(wu, "_safe_open_handle", track_mapping)
+    monkeypatch.setattr(wu, "BufferSafeTensors", track_mapping)
     iterator = wu.streaming_safetensors_weights_iterator(
         paths, False, prefetch_file_window=1
     )
@@ -575,7 +592,7 @@ def test_streaming_bounds_prefetch_and_closes_on_early_exit(tmp_path, monkeypatc
         # The first shard is held by the consumer, with only one shard ahead.
         assert len(opened) == 2
         # The shard that is read ahead is not mapped before its reads finish.
-        assert mapped_handles == handles[:1]
+        assert mapped_paths == paths[:1]
         assert all(not handle.closed for handle in handles)
     finally:
         release_ahead.set()
@@ -614,7 +631,7 @@ def test_streaming_read_failures_propagate_before_mapping(
             raise OSError("read failed")
 
         monkeypatch.setattr(wu.os, "pread", fail)
-    with patch.object(wu, "_safe_open_handle") as mapped:
+    with patch.object(wu, "BufferSafeTensors") as mapped:
         with pytest.raises(expected):
             if prefetch_only:
                 wu.prefetch_checkpoints([str(path)])
@@ -740,7 +757,7 @@ def test_checkpoint_reads_cover_every_byte_before_mapping(
     lock = threading.Lock()
     real_open = open
     real_pread = wu.os.pread
-    real_mapping = wu._safe_open_handle
+    real_mapping = wu.BufferSafeTensors
     monkeypatch.delattr(wu.os, "preadv", raising=False)
 
     def track_open(path, *args, **kwargs):
@@ -763,14 +780,14 @@ def test_checkpoint_reads_cover_every_byte_before_mapping(
             end += count
         assert end == Path(path).stat().st_size
 
-    def map_after_read(handle, *args, **kwargs):
+    def map_after_read(path, *args, **kwargs):
         assert not prefetch_only, "Prefetch-only must not parse or map tensors"
-        assert_fully_read(handle.name)
-        return real_mapping(handle, *args, **kwargs)
+        assert_fully_read(path)
+        return real_mapping(path, *args, **kwargs)
 
     monkeypatch.setattr(wu, "open", track_open, raising=False)
     monkeypatch.setattr(wu.os, "pread", short_read)
-    monkeypatch.setattr(wu, "_safe_open_handle", map_after_read)
+    monkeypatch.setattr(wu, "BufferSafeTensors", map_after_read)
     options = dict(prefetch_file_window=2, io_threads_per_file=3, block_size=19)
     if prefetch_only:
         assert wu.prefetch_checkpoints(paths, **options) == (2, 3)

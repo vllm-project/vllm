@@ -26,7 +26,6 @@ import huggingface_hub.constants
 import numpy as np
 import regex as re
 import torch
-from safetensors import _safe_open_handle
 from safetensors.torch import load, load_file, safe_open
 from tqdm.auto import tqdm
 from transformers.utils import SAFE_WEIGHTS_INDEX_NAME
@@ -53,7 +52,7 @@ from vllm.model_executor.layers.quantization import (
 from vllm.model_executor.model_loader.buffer_safe_tensors import (
     BufferSafeTensors,
     byte_memoryview,
-    safetensors_layout,
+    read_safetensors_header,
 )
 from vllm.model_executor.model_loader.ep_weight_filter import (
     should_skip_weight,
@@ -1251,14 +1250,11 @@ def _prefetched_checkpoint_files(
             result.size = size
             if size == 0:
                 raise EOFError(f"Checkpoint file is empty: {path}")
-            # The offsets of the tensors come from safetensors itself, so
-            # the file is not parsed here. The data section starts after
-            # the header and runs to the end of the file, so its position
-            # follows from the file size and the largest offset.
-            handle = result.contexts.enter_context(
-                _safe_open_handle(file, framework="pt")
-            )
-            data_start, headers = safetensors_layout(handle, size)
+            # The header gives each tensor's offset within the data
+            # section. It is read through the same descriptor the data
+            # is read from, so the file is opened once and its bytes are
+            # covered by that descriptor's reads.
+            header, data_start = read_safetensors_header(file.fileno(), size)
             data_len = size - data_start
             dest = _allocate_host_buffer(data_len)
             dest_mv = byte_memoryview(dest)
@@ -1286,7 +1282,7 @@ def _prefetched_checkpoint_files(
                 concurrent.futures.wait(reads)
             if map_after_prefetch and not stopped.is_set():
                 result.mapped = result.contexts.enter_context(
-                    BufferSafeTensors(path, dest, headers, data_start)
+                    BufferSafeTensors(path, dest, header, data_start)
                 )
             return result
         except BaseException:

@@ -27,15 +27,25 @@ views are backed by pinned pages and the host-to-device copy out of them
 runs at the pinned rate (55.95 GiB/s measured on B300, PCIe Gen6 x16)
 instead of the pageable rate (8.47 GiB/s).
 
-The offsets come from safetensors' own ``get_tensor_meta``, which needs
-safetensors >= 0.9. The offsets it reports are relative to the data
-section, and the data section runs to the end of the file, so its
-position in the file follows from the file size and the largest offset.
+Why the header is parsed here
+-----------------------------
+The safetensors container format is trivial and stable: an 8-byte
+little-endian header length, a JSON header, then the data section. Only
+the header is parsed, once per shard.
+
+safetensors 0.9 exposes the offsets through ``get_tensor_meta``, but
+that API does not exist in 0.8.x, which vLLM still supports
+(``safetensors >= 0.6.2``). Upstream also has no way to serve a view
+over a caller-provided buffer: its storage is always the file's own
+mapping.
 """
 
 from __future__ import annotations
 
 import ctypes
+import json
+import os
+import struct
 from typing import Any
 
 import torch
@@ -79,30 +89,34 @@ def byte_memoryview(tensor: torch.Tensor) -> memoryview:
     return memoryview(raw).cast("B")
 
 
-def safetensors_layout(handle: Any, size: int) -> tuple[int, dict[str, Any]]:
-    """Return the offset of the data section in the file, and the headers.
+def pread_exact(fd: int, nbytes: int, offset: int) -> bytes:
+    """Read exactly *nbytes* at *offset*, or raise EOFError."""
+    chunks: list[bytes] = []
+    got = 0
+    while got < nbytes:
+        chunk = os.pread(fd, nbytes - got, offset + got)
+        if not chunk:
+            raise EOFError("Checkpoint truncated during streaming prefetch")
+        chunks.append(chunk)
+        got += len(chunk)
+    return b"".join(chunks)
 
-    *handle* is an open safetensors handle (a ``_safe_open_handle`` or a
-    ``safe_open``); *size* is the size of the file.
 
-    The offsets safetensors reports are relative to the data section, and
-    the data section runs to the end of the file, so the position of the
-    data section follows from the size of the file and the largest
-    offset: ``size - max(end)``.
+def read_safetensors_header(fd: int, size: int) -> tuple[dict[str, Any], int]:
+    """Return the file's header and the offset at which its data starts.
 
-    Only the header is read; the data section is not touched.
+    The header is read through ``os.pread`` on the same descriptor the
+    data section is read from, so the file is opened once and every byte
+    of it is covered by that descriptor's read calls.
+
+    A file that is too short to hold a header fails in the read itself,
+    so a read error surfaces as itself rather than as a truncation.
     """
-    headers = {name: handle.get_tensor_meta(name) for name in handle.keys()}  # noqa: SIM118
-    if not headers:
-        raise ValueError("Checkpoint contains no tensors")
-    data_len = max(meta.data_offsets[1] for meta in headers.values())
-    data_start = size - data_len
-    if data_start <= 0:
-        raise ValueError(
-            f"Checkpoint has an inconsistent size: {size} bytes, but the "
-            f"data section is {data_len} bytes"
-        )
-    return data_start, headers
+    header_len = struct.unpack("<Q", pread_exact(fd, 8, 0))[0]
+    if header_len == 0 or 8 + header_len > size:
+        raise EOFError("Checkpoint is truncated: safetensors header is invalid")
+    header = json.loads(pread_exact(fd, header_len, 8))
+    return header, 8 + header_len
 
 
 class BufferSafeTensors:
@@ -121,31 +135,40 @@ class BufferSafeTensors:
         self,
         path: str,
         buffer: torch.Tensor,
-        headers: dict[str, Any],
+        header: dict[str, Any],
         data_start: int,
     ):
-        """*buffer* holds the file's data section; *headers* maps a tensor
-        name to its ``get_tensor_meta`` entry and *data_start* is the
-        offset of the data section within the file."""
+        """*buffer* holds the file's data section; *header* is the file's
+        parsed header and *data_start* is the offset of the data section
+        within the file."""
         self._path = path
         self._buffer = buffer
         self._data_start = data_start
         self._raw: torch.Tensor = buffer.view(torch.uint8)
-        self._headers = headers
+        self._specs = self._parse_header(header)
+
+    def _parse_header(
+        self, header: dict[str, Any]
+    ) -> dict[str, tuple[str, tuple[int, ...], int, int]]:
+        specs: dict[str, tuple[str, tuple[int, ...], int, int]] = {}
+        for name, spec in header.items():
+            if name == "__metadata__":
+                continue
+            start, end = spec["data_offsets"]
+            specs[name] = (spec["dtype"], tuple(spec["shape"]), start, end)
+        return specs
 
     def keys(self) -> list[str]:
-        return list(self._headers)
+        return list(self._specs)
 
     def get_tensor(self, name: str) -> torch.Tensor:
         """Return a view over the tensor's bytes. No copy is made."""
-        meta = self._headers[name]
-        torch_dtype = _SAFETENSORS_TO_TORCH_DTYPE.get(meta.dtype)
+        dtype, shape, start, end = self._specs[name]
+        torch_dtype = _SAFETENSORS_TO_TORCH_DTYPE.get(dtype)
         if torch_dtype is None:
             raise NotImplementedError(
-                f"unsupported safetensors dtype {meta.dtype!r} for tensor {name!r}"
+                f"unsupported safetensors dtype {dtype!r} for tensor {name!r}"
             )
-        start, end = meta.data_offsets
-        shape = tuple(meta.shape)
         nbytes = end - start
         itemsize = torch.empty(0, dtype=torch_dtype).element_size()
         if nbytes % itemsize:
@@ -190,7 +213,7 @@ class BufferSafeTensors:
     def close(self) -> None:
         # The buffer belongs to the caller; only drop our references.
         self._raw = None  # type: ignore[assignment]
-        self._headers = {}
+        self._specs = {}
 
     def __enter__(self) -> BufferSafeTensors:
         return self
