@@ -1163,7 +1163,9 @@ def _make_ple_from_checkpoint(
     group = SimpleNamespace(world_size=1)
     vllm_config = SimpleNamespace(
         load_config=SimpleNamespace(load_format="auto"),
-        engram_config=SimpleNamespace(disk_offload=disk_offload, cpu_offload=False),
+        engram_config=SimpleNamespace(
+            disk_offload=disk_offload, cpu_offload=False, dp_shared_memory=False
+        ),
     )
     for name, value in (
         ("get_current_vllm_config", vllm_config),
@@ -1814,11 +1816,11 @@ def _short_conv_dilated_spec_pytorch(
 
     Each spec request feeds multiple (draft + 1) query tokens. The conv
     outputs are computed causally after rolling back the previous draft
-    state by ``num_accepted_tokens - 1``. The current candidate inputs stay
+    state by `num_accepted_tokens - 1`. The current candidate inputs stay
     in the extended cache for the next forward, matching
-    ``causal_conv1d_update``.
+    `causal_conv1d_update`.
 
-    ``spec_query_len`` (== num_speculative_tokens + 1) is the maximum query
+    `spec_query_len` (== num_speculative_tokens + 1) is the maximum query
     length and is a Python int, so no host synchronization is needed; this
     keeps the path safe for full CUDA-graph capture/replay where the buffers
     are padded at the request level.
@@ -2691,7 +2693,7 @@ def test_amd_pinned_embedding_prefetch_machinery_is_lazy(
 
     Paths that never prefetch (AMD uses the synchronous pinned-lookup op)
     keep the stream/buffer unallocated for the process lifetime. NVIDIA's
-    first ``start_prefetch`` — the eager profile run, always before cudagraph
+    first `start_prefetch` — the eager profile run, always before cudagraph
     capture — allocates them lazily.
     """
     module, _ = _build_amd_ngram_embedding(
@@ -2710,9 +2712,9 @@ def test_amd_pinned_embedding_output_written_under_compile(
 ) -> None:
     """The AMD pinned lookup op must survive aot_autograd/Inductor.
 
-    The op writes via the declared-mutated ``output``. Without
-    ``mutates_args=["output"]`` the call is dead-code-eliminated, the UVA lookup
-    never runs, and the returned ``output`` stays untouched.
+    The op writes via the declared-mutated `output`. Without
+    `mutates_args=["output"]` the call is dead-code-eliminated, the UVA lookup
+    never runs, and the returned `output` stays untouched.
     """
     module, loaded_weight = _build_amd_ngram_embedding(
         monkeypatch, device="cuda:0", cpu_offload=True, fp8_checkpoint=fp8_checkpoint
@@ -2748,7 +2750,7 @@ def test_amd_pinned_embedding_output_written_under_cudagraph_capture(
     """The AMD pinned lookup op must be capture-safe.
 
     It launches a single kernel on the current stream, so a cudagraph capture
-    reproduces the lookup into ``output`` without cross-stream work.
+    reproduces the lookup into `output` without cross-stream work.
     """
     module, loaded_weight = _build_amd_ngram_embedding(
         monkeypatch, device="cuda:0", cpu_offload=True, fp8_checkpoint=fp8_checkpoint

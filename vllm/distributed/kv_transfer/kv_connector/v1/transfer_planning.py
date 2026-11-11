@@ -3,13 +3,17 @@
 
 from __future__ import annotations
 
+from collections.abc import Sequence
 from enum import Enum
 
 from vllm.v1.kv_cache_interface import (
     AttentionSpec,
+    KVCacheGroupSpec,
     KVCacheSpec,
     KVCacheSpecKind,
     MambaSpec,
+    MLAAttentionSpec,
+    SlidingWindowMLASpec,
     UniformTypeKVCacheSpecs,
     get_kv_cache_spec_kind_for_class,
     iter_layer_specs,
@@ -69,6 +73,31 @@ def get_representative_spec_type(spec: KVCacheSpec) -> type[KVCacheSpec]:
     group. Ask a per-layer question through ``iter_layer_specs`` instead.
     """
     return type(get_representative_spec(spec))
+
+
+def get_dcp_replicated_group_ids(groups: Sequence[KVCacheGroupSpec]) -> set[int]:
+    """Return the MLA groups held whole on every DCP rank.
+
+    A draft running at DCP=1 under a DCP target keeps its MLA cache unsharded,
+    so a peer holds it in full. Non-MLA replicated caches keep their split
+    transfer path.
+
+    Args:
+        groups: the transfer groups of the connector's KV cache config.
+
+    Returns:
+        The indices of the groups whose MLA spec is not DCP sharded.
+
+    """
+    return {
+        i
+        for i, group in enumerate(groups)
+        if issubclass(
+            get_representative_spec_type(group.kv_cache_spec),
+            (MLAAttentionSpec, SlidingWindowMLASpec),
+        )
+        and not group.kv_cache_spec.dcp_sharded
+    }
 
 
 def _spec_class(spec: type[KVCacheSpec] | KVCacheSpec) -> type[KVCacheSpec]:

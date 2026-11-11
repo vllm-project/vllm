@@ -1,11 +1,11 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
-"""HY V4 (``hy_v4``) model — hardware-isolated entry point.
+"""HY V4 (`hy_v4`) model — hardware-isolated entry point.
 
 HY V4 combines three architectural pieces:
 
 - **iHC** (independent Hyper-Connections): the single residual stream is
-  replaced by ``hc_mult`` parallel residual channels, gated per sub-block.
+  replaced by `hc_mult` parallel residual channels, gated per sub-block.
 - **MLA + lightning indexer**: multi-head latent attention with an optional
   DSA-style sparse top-k selection, plus an output gate and a learnable sink.
 - **MoE**: sigmoid-routed experts with a clamped SwiGLU and shared experts.
