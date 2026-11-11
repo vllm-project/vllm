@@ -2,7 +2,7 @@
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 """Dispatch DSV4.1 mHC operations and overlap coefficient generation."""
 
-from functools import partial
+from functools import cache, partial
 from typing import TYPE_CHECKING, cast
 
 import torch
@@ -22,6 +22,7 @@ from vllm.model_executor.layers.fused_moe.moe_output import (
 from vllm.platforms import current_platform
 from vllm.triton_utils import tl, triton
 from vllm.utils.deep_gemm import is_deep_gemm_supported
+from vllm.utils.import_utils import has_cutedsl
 
 from .mega_mhc import (
     can_use_mega_mhc,
@@ -211,6 +212,29 @@ def hc_stream_mean(streams: torch.Tensor) -> torch.Tensor:
     return (acc / streams.shape[1]).to(streams.dtype)
 
 
+def mhc_boundary_weight(
+    hidden_size: int, hc_mult: int, device: torch.device
+) -> torch.Tensor | None:
+    """An empty `prepare_boundary_weight` buffer, or None where the CuTe DSL mHC
+    boundary (`mhc_boundary.py`) cannot run."""
+    if not (current_platform.is_device_capability_family(100) and has_cutedsl()):
+        return None
+    from .mhc_boundary import MhcBoundaryKernel, boundary_weight_shape
+
+    if not MhcBoundaryKernel.supports(hidden_size, hc_mult):
+        return None
+    return torch.empty(
+        boundary_weight_shape(hidden_size), dtype=torch.int32, device=device
+    )
+
+
+@cache
+def _mhc_shifted_post_pre_boundary():
+    from .mhc_boundary import mhc_shifted_post_pre_boundary
+
+    return mhc_shifted_post_pre_boundary
+
+
 def mhc_shifted_post_pre(
     x: torch.Tensor | MoEOutput,
     residual: torch.Tensor,
@@ -231,10 +255,14 @@ def mhc_shifted_post_pre(
     *,
     stream: torch.cuda.Stream | None = None,
     reduce_results: bool = False,
+    boundary_weight: torch.Tensor | None = None,
 ) -> tuple[
     torch.Tensor, torch.Tensor, torch.Tensor, torch.Tensor, torch.Tensor, torch.Tensor
 ]:
     """Dispatch shifted post/pre to overlap, Mega-mHC, or fused TileLang.
+
+    `boundary_weight` (`fn` laid out by `prepare_boundary_weight`, see
+    `mhc_boundary_weight`) runs decode-size Mega-mHC batches on the CuTe DSL kernel.
 
     A MoE output left unfinalized is finalized inside the fused all-reduce.
     When stream is supplied, join it before consuming the returned coefficients.
@@ -306,7 +334,7 @@ def mhc_shifted_post_pre(
     assert isinstance(x, torch.Tensor)
     if can_use_mega_mhc(x, residual, pre_mix, norm_weight, capture_aux):
         assert pre_mix is not None and norm_weight is not None
-        outputs = mhc_shifted_post_pre_deep_gemm(
+        args = (
             x,
             residual,
             pre_mix,
@@ -323,6 +351,15 @@ def mhc_shifted_post_pre(
             norm_weight,
             norm_eps,
         )
+        outputs = None
+        if boundary_weight is not None and not envs.VLLM_BATCH_INVARIANT:
+            # Decode-size batches: one CuTe DSL kernel, the same TF32 products.
+            # Batch invariance keeps every M on Mega mHC's fixed split-K.
+            outputs = _mhc_shifted_post_pre_boundary()(
+                *args[:5], boundary_weight, *args[6:]
+            )
+        if outputs is None:
+            outputs = mhc_shifted_post_pre_deep_gemm(*args)
         aux = hc_stream_mean(outputs[0]) if capture_aux else x.new_empty(0, x.shape[1])
         return *outputs, aux
 
