@@ -12,6 +12,9 @@ from vllm.distributed import (
     get_tensor_model_parallel_world_size,
     tensor_model_parallel_all_reduce,
 )
+from vllm.distributed.kv_transfer.kv_connector.utils import (
+    kv_connector_may_load_foreign_kv,
+)
 from vllm.forward_context import get_forward_context
 from vllm.logger import init_logger
 from vllm.model_executor.layers.fusion.quant_activation import QuantizedActivation
@@ -72,28 +75,29 @@ logger = init_logger(__name__)
 
 def _trust_dsv4_extra_cache_nan_free(
     kv_cache_dtype: str,
-    has_kv_transfer: bool,
+    has_foreign_kv_writer: bool,
     has_extra_cache: bool,
 ) -> bool:
     return (
         _ON_GFX950
         and kv_cache_dtype == "fp8_ds_mla"
-        and not has_kv_transfer
+        and not has_foreign_kv_writer
         and has_extra_cache
     )
 
 
-def _aiter_sparse_mla_enabled(has_kv_transfer: bool) -> bool:
+def _aiter_sparse_mla_enabled(has_foreign_kv_writer: bool) -> bool:
     from vllm._aiter_ops import rocm_aiter_ops
 
     if not rocm_aiter_ops.is_triton_sparse_mla_enabled():
         return False
     # The aiter kernel does not scrub NaNs, so like the trust check above it
     # needs a cache only the canonical writer has touched.
-    if has_kv_transfer:
+    if has_foreign_kv_writer:
         logger.warning_once(
             "VLLM_ROCM_USE_AITER_TRITON_SPARSE_MLA is ignored with a KV "
-            "connector; DeepSeek V4 keeps the Triton sparse attention."
+            "connector that may load non-canonical KV; DeepSeek V4 keeps the "
+            "Triton sparse attention."
         )
         return False
     return True
@@ -370,7 +374,7 @@ class DeepseekV41ROCMAiterSparseSWAMetadataBuilder(DeepseekV41SparseSWAMetadataB
             device=self.device,
         )
         self._use_aiter_sparse_mla = _aiter_sparse_mla_enabled(
-            self.vllm_config.kv_transfer_config is not None
+            kv_connector_may_load_foreign_kv(self.vllm_config)
         )
 
     def build(
@@ -453,7 +457,7 @@ class DeepseekV41ROCMAiterSparseSWAMetadataBuilder(DeepseekV41SparseSWAMetadataB
 class DeepseekV41RocmMxfp4Indexer(DeepseekV4Indexer):
     """The indexer on aiter's paged MXFP4 cache: its K store and Q quant write
     in the order aiter's MQA-logits kernel reads, and its layers score with it.
-    ``_produce_k`` and ``forward_q`` mirror ``DeepseekV4Indexer``'s except for
+    `_produce_k` and `forward_q` mirror `DeepseekV4Indexer`'s except for
     those two calls."""
 
     mqa_cls = RocmSparseMQAIndexer
@@ -566,7 +570,9 @@ class DeepseekV41ROCMAiterMLAAttention(DeepseekV4Attention):
         # so retain the ordinary MXFP8 linear kernel for post-load processing
         # instead of asking for the CUDA-only BMM kernel.
         self.wo_a.is_bmm = False
-        self._has_kv_transfer = vllm_config.kv_transfer_config is not None
+        # Connectors that restore only whole canonical blocks (e.g. UMBP) keep
+        # the NaN-free and aiter sparse MLA fast paths on ROCm.
+        self._has_foreign_kv_writer = kv_connector_may_load_foreign_kv(vllm_config)
         # Block scale for the preshuffled weight; None = not preshuffled.
         self._wqa_wkv_scale: torch.Tensor | None = None
         self._wo_b_scale: torch.Tensor | None = None
@@ -593,7 +599,9 @@ class DeepseekV41ROCMAiterMLAAttention(DeepseekV4Attention):
                     "this rank; PP splits inside a v4.1 index-sharing group "
                     "are not supported."
                 )
-        self._use_aiter_sparse_mla = _aiter_sparse_mla_enabled(self._has_kv_transfer)
+        self._use_aiter_sparse_mla = _aiter_sparse_mla_enabled(
+            self._has_foreign_kv_writer
+        )
         if self.compressor is None and self.indexer is None:
             # Dense layers have nothing to overlap; keep the base serial path.
             self.aux_stream_list = None
@@ -685,16 +693,11 @@ class DeepseekV41ROCMAiterMLAAttention(DeepseekV4Attention):
         hidden_states: torch.Tensor,
         llama_4_scaling: torch.Tensor | None = None,
     ) -> torch.Tensor:
-        if (
-            self.indexer is None
-            or self._prepare_and_attn_fn == self._prepare_and_attn_eager
-            or not current_platform.enable_multi_stream_overlap(
-                self.aux_stream_list, get_forward_context().attn_metadata
-            )
+        if self.indexer is None or not current_platform.enable_multi_stream_overlap(
+            self.aux_stream_list, get_forward_context().attn_metadata
         ):
             # Sequential fallback: no forks outside the capture region, where
-            # HIP event sync is unreliable; MRV1 keeps the input prep in its
-            # wide eager region (#51430).
+            # HIP event sync is unreliable.
             aux_streams = self.aux_stream_list
             self.aux_stream_list = None
             try:
@@ -738,7 +741,7 @@ class DeepseekV41ROCMAiterMLAAttention(DeepseekV4Attention):
         base three-fork pipeline is expensive there; the compressor chain and
         the indexer weights projection run fully in parallel with the default
         chain. The indexer K write and q-side stay serial after the join:
-        ``wk`` consumes the aux-0 latent and the q-side's wq_b consumes the
+        `wk` consumes the aux-0 latent and the q-side's wq_b consumes the
         default-stream qr.
         """
         attn_metadata = get_forward_context().attn_metadata
@@ -1099,7 +1102,7 @@ class DeepseekV41ROCMAiterMLAAttention(DeepseekV4Attention):
     ) -> _TopkRagged:
         """Ragged form of the topk indices this layer's index source published.
 
-        The packing depends only on the shared ``topk_indices_buffer`` and
+        The packing depends only on the shared `topk_indices_buffer` and
         per-step metadata, apart from the layer's own compress ratio, so the
         source memoizes one result per ratio for all the layers below it.
         """
@@ -1198,7 +1201,7 @@ class DeepseekV41ROCMAiterMLAAttention(DeepseekV4Attention):
             inv_rope_cos_sin_cache=self.rotary_emb.cos_sin_cache,
             extra_cache_nan_free=_trust_dsv4_extra_cache_nan_free(
                 self.kv_cache_dtype,
-                self._has_kv_transfer,
+                self._has_foreign_kv_writer,
                 not swa_only and kv_cache is not None,
             ),
         )
@@ -1214,9 +1217,9 @@ class DeepseekV41ROCMAiterMLAAttention(DeepseekV4Attention):
         swa_metadata: DeepseekV41ROCMAiterSparseSWAMetadata,
         mxfp8_out: tuple[torch.Tensor, torch.Tensor] | None = None,
     ) -> None:
-        """Sparse prefill into bf16 ``output``, or into ``mxfp8_out``.
+        """Sparse prefill into bf16 `output`, or into `mxfp8_out`.
 
-        With ``mxfp8_out`` the rows go to a bf16 workspace first and are then
+        With `mxfp8_out` the rows go to a bf16 workspace first and are then
         inverse-RoPE'd and quantized into it in one pass.
         """
         if self._use_aiter_sparse_mla:
@@ -1359,7 +1362,7 @@ class DeepseekV41ROCMAiterMLAAttention(DeepseekV4Attention):
     ) -> list[tuple[tuple[int, ...], torch.dtype]]:
         """The prefill gather buffer, plus bf16 rows for the MXFP8 output.
 
-        One ``get_simultaneous`` call: separate calls alias the same memory.
+        One `get_simultaneous` call: separate calls alias the same memory.
         """
         shapes: list[tuple[tuple[int, ...], torch.dtype]] = [
             ((self.PREFILL_CHUNK_SIZE, M, q.shape[-1]), torch.bfloat16)
@@ -1379,7 +1382,7 @@ class DeepseekV41ROCMAiterMLAAttention(DeepseekV4Attention):
         attn_metadata: DeepseekV4FlashMLAMetadata,
         compressed_k_cache: torch.Tensor,
     ) -> tuple[torch.Tensor, torch.Tensor]:
-        """Prefill counterpart of ``_decode_topk_ragged``: layers that share an
+        """Prefill counterpart of `_decode_topk_ragged`: layers that share an
         index source and a compressed cache reuse one build per step."""
         assert swa_metadata.token_to_req_indices is not None
         assert swa_metadata.query_start_loc is not None
@@ -1430,7 +1433,7 @@ class DeepseekV41ROCMAiterMLAAttention(DeepseekV4Attention):
     ) -> None:
         """Prefill straight off the paged caches, with no bf16 gather.
 
-        The store applies the inverse RoPE, and quantizes into ``mxfp8_out``.
+        The store applies the inverse RoPE, and quantizes into `mxfp8_out`.
         """
         num_prefill_tokens = swa_metadata.num_prefill_tokens
         assert swa_metadata.prefill_swa_ragged_indices is not None
