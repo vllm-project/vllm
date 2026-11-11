@@ -7,6 +7,7 @@ prompt, so restored KV must reproduce the cold run's tokens and logprobs. Mamba
 hybrids have no batch-invariant kernels, so they compare with a GPU prefix hit.
 """
 
+import contextlib
 import time
 
 import pytest
@@ -14,7 +15,7 @@ import pytest
 import vllm.envs as envs
 from tests.utils import multi_gpu_marks
 from tests.v1.kv_connector.rocm_pd_accuracy_utils import _REVISIONS, QWEN_MODEL
-from tests.v1.kv_connector.umbp_test_utils import mori_has_umbp
+from tests.v1.kv_connector.umbp_test_utils import mori_has_umbp, standalone_server
 from vllm import SamplingParams, TokensPrompt
 from vllm.config import CUDAGraphMode, KVTransferConfig
 from vllm.platforms import current_platform
@@ -56,43 +57,66 @@ def umbp_llm(vllm_runner, socket_dir, monkeypatch, request):
         yield runner.llm
 
 
-@pytest.fixture(params=["eager", "full_graph"])
-def lazy_umbp_llm(request, vllm_runner, socket_dir, monkeypatch):
+@pytest.fixture(
+    params=[
+        pytest.param(("eager", "embedded"), id="eager-embedded"),
+        pytest.param(("full_graph", "embedded"), id="full_graph-embedded"),
+        pytest.param(("eager", "standalone"), id="eager-standalone"),
+        pytest.param(("full_graph", "standalone"), id="full_graph-standalone"),
+    ]
+)
+def lazy_umbp_llm(request, vllm_runner, socket_dir, tmp_path, monkeypatch):
     """`umbp_llm` with lazy offload and a GPU cache small enough to cycle.
 
-    `full_graph` decodes from the restored KV through FULL CUDA graphs.
+    `full_graph` decodes from the restored KV through FULL CUDA graphs, and
+    `standalone` stores through a node-local `umbp_standalone_server`.
     """
-    enforce_eager = request.param == "eager"
+    graphs, mode = request.param
+    enforce_eager = graphs == "eager"
     monkeypatch.setattr(envs, "VLLM_BATCH_INVARIANT", True)
     monkeypatch.setenv("VLLM_BATCH_INVARIANT", "1")
-    with vllm_runner(
-        QWEN_MODEL,
-        revision=_REVISIONS[QWEN_MODEL],
-        enforce_eager=enforce_eager,
-        compilation_config={
-            "cudagraph_mode": "NONE" if enforce_eager else "FULL_DECODE_ONLY",
-            "cudagraph_capture_sizes": [1, 2, 4],
-        },
-        block_size=BLOCK_SIZE,
-        # The default lazy scan covers 2 * 1024 / 16 = 128 free-queue blocks, so a
-        # finished prompt is stored only once the GPU is about to reuse its blocks.
-        max_num_batched_tokens=1024,
-        num_gpu_blocks_override=512,
-        enable_prefix_caching=True,
-        disable_log_stats=False,
-        kv_transfer_config=KVTransferConfig(
-            kv_connector="UMBPStoreConnector",
-            kv_role="kv_both",
-            kv_connector_extra_config={
+    # Holds every block the flush below can store, so only GPU memory evicts.
+    capacity_bytes = 2 << 30
+    with contextlib.ExitStack() as stack:
+        if mode == "standalone":
+            server = stack.enter_context(
+                standalone_server(tmp_path, socket_dir, capacity_bytes)
+            )
+            pool_config = {
+                "mode": "standalone",
+                "endpoint": server.address,
+                "startup_timeout_ms": 60000,
+            }
+        else:
+            pool_config = {
                 "mode": "embedded",
-                # Holds every block the flush below can store, so only GPU
-                # memory evicts.
-                "capacity_bytes": 2 << 30,
+                "capacity_bytes": capacity_bytes,
                 "lookup_dir": socket_dir,
-                "lazy_offload": True,
-            },
-        ),
-    ) as runner:
+            }
+        runner = stack.enter_context(
+            vllm_runner(
+                QWEN_MODEL,
+                revision=_REVISIONS[QWEN_MODEL],
+                enforce_eager=enforce_eager,
+                compilation_config={
+                    "cudagraph_mode": "NONE" if enforce_eager else "FULL_DECODE_ONLY",
+                    "cudagraph_capture_sizes": [1, 2, 4],
+                },
+                block_size=BLOCK_SIZE,
+                # The default lazy scan covers 2 * 1024 / 16 = 128 free-queue
+                # blocks, so a finished prompt is stored only once the GPU is
+                # about to reuse its blocks.
+                max_num_batched_tokens=1024,
+                num_gpu_blocks_override=512,
+                enable_prefix_caching=True,
+                disable_log_stats=False,
+                kv_transfer_config=KVTransferConfig(
+                    kv_connector="UMBPStoreConnector",
+                    kv_role="kv_both",
+                    kv_connector_extra_config={**pool_config, "lazy_offload": True},
+                ),
+            )
+        )
         if not enforce_eager:
             assert (
                 runner.llm.llm_engine.vllm_config.compilation_config.cudagraph_mode
