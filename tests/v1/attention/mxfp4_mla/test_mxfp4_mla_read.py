@@ -27,7 +27,7 @@ _E2M1_VALUES = torch.tensor([0.0, 0.5, 1.0, 1.5, 2.0, 3.0, 4.0, 6.0])
 
 
 def _dequantize(rows: torch.Tensor) -> torch.Tensor:
-    """Packed ``[n, ROW]`` uint8 rows -> fp32 ``[n, LATENT]``."""
+    """Packed `[n, ROW]` uint8 rows -> fp32 `[n, LATENT]`."""
     rows = rows.cpu()
     data = rows[:, : LATENT // 2]
     codes = torch.stack([data & 0x0F, data >> 4], dim=-1).reshape(len(rows), LATENT)

@@ -19,8 +19,8 @@ UNTOUCHED = 0xCD
 
 
 def test_store_matches_aiter():
-    """Bit-exact against ``per_1x32_f4_quant`` on the layout the backend hands
-    the kernel: blocks strided past ``block_size`` rows by other layers' pages,
+    """Bit-exact against `per_1x32_f4_quant` on the layout the backend hands
+    the kernel: blocks strided past `block_size` rows by other layers' pages,
     padded slots, and a latent that is a slice of a wider buffer."""
     pytest.importorskip("aiter")
     quant = pytest.importorskip("aiter.ops.quant")

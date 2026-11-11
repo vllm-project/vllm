@@ -2,9 +2,9 @@
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 """Triton store kernel for the mxfp4_mla KV cache.
 
-``concat_and_cache_mla`` takes a single per-tensor scale, so it cannot write
+`concat_and_cache_mla` takes a single per-tensor scale, so it cannot write
 MXFP4's per-group scales. A row is packed data then scales,
-``row_bytes(d) == d // 2 + d // 32``, addressed as ``slot * row_bytes``.
+`row_bytes(d) == d // 2 + d // 32`, addressed as `slot * row_bytes`.
 """
 
 from __future__ import annotations
@@ -29,15 +29,15 @@ _M0, _M1, _M2, _M3, _M4, _M5, _M6 = (
 
 @triton.jit
 def _ceil_pow2_exponent(v):
-    """Smallest integer ``e`` with ``2**e >= v``, for positive fp32 ``v``.
+    """Smallest integer `e` with `2**e >= v`, for positive fp32 `v`.
 
-    Done on the bit pattern rather than with ``log2``: fp32 ``log2`` is not
+    Done on the bit pattern rather than with `log2`: fp32 `log2` is not
     exactly representable at powers of two, and rounding one of those up would
     waste a whole exponent step and halve the usable E2M1 range for that group.
 
-    For ``v = m * 2**e`` with ``m`` in ``[1, 2)``, the biased exponent field is
-    ``e + 127`` and the mantissa field is zero exactly when ``v`` is a power of
-    two. So ``ceil(log2(v))`` is ``e`` when the mantissa is zero and ``e + 1``
+    For `v = m * 2**e` with `m` in `[1, 2)`, the biased exponent field is
+    `e + 127` and the mantissa field is zero exactly when `v` is a power of
+    two. So `ceil(log2(v))` is `e` when the mantissa is zero and `e + 1`
     otherwise.
     """
     bits = v.to(tl.int32, bitcast=True)
@@ -137,13 +137,13 @@ def store_mxfp4_mla(
     """Quantize the MLA latent to MXFP4 and write it into the paged cache.
 
     Args:
-        kv_c_normed: ``[num_tokens, latent]``, the post-RMSNorm latent.
-        slot_mapping: ``[num_tokens]`` global slot indices; negative entries
-            (``PAD_SLOT_ID``) are skipped.
-        cache: ``uint8``, either the paged ``[num_blocks, block_size,
-            row_bytes(latent)]`` layer view, whose block stride may exceed
-            ``block_size`` rows when other layers' pages sit between blocks, or
-            any contiguous tensor viewable as ``[num_slots, row_bytes(latent)]``.
+        kv_c_normed: `[num_tokens, latent]`, the post-RMSNorm latent.
+        slot_mapping: `[num_tokens]` global slot indices; negative entries
+            (`PAD_SLOT_ID`) are skipped.
+        cache: `uint8`, either the paged `[num_blocks, block_size,
+            row_bytes(latent)]` layer view, whose block stride may exceed
+            `block_size` rows when other layers' pages sit between blocks, or
+            any contiguous tensor viewable as `[num_slots, row_bytes(latent)]`.
         group: number of latent elements sharing one E8M0 scale.
 
     """

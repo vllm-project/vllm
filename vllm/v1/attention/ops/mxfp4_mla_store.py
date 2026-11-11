@@ -2,7 +2,7 @@
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 """Old import path, kept for PRs stacked on this one that still import it.
 
-Use :mod:`vllm.v1.attention.ops.mxfp4_mla.store`.
+Use `vllm.v1.attention.ops.mxfp4_mla.store`.
 """
 
 from vllm.v1.attention.ops.mxfp4_mla.store import store_mxfp4_mla

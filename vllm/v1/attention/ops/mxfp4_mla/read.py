@@ -2,9 +2,9 @@
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 """Triton read-side unpack for the mxfp4_mla KV cache.
 
-A row is packed data then scales, ``row_bytes(d) == d // 2 + d // 32``.
-Unpacks a gathered tile to bf16 once and hands it to the existing ``tl.dot``
-calls. On gfx950 ``tl.dot_scaled`` lowers to the same convert plus a bf16
+A row is packed data then scales, `row_bytes(d) == d // 2 + d // 32`.
+Unpacks a gathered tile to bf16 once and hands it to the existing `tl.dot`
+calls. On gfx950 `tl.dot_scaled` lowers to the same convert plus a bf16
 MFMA, so it would only convert twice.
 """
 
@@ -34,7 +34,7 @@ _F32_MANT_BITS = tl.constexpr(23)
 
 @triton.jit
 def _apply_e8m0_scale(values, encoded_scales):
-    """Multiply fp32 ``values`` by ``2**(X - 127)`` via an integer exponent add.
+    """Multiply fp32 `values` by `2**(X - 127)` via an integer exponent add.
 
     Exact, because scaling by a power of two only shifts the exponent. Zero must
     be special-cased: adding to a zero's exponent field manufactures a denormal
@@ -92,7 +92,7 @@ def unpack_mxfp4_tile_hw(
     """Packed MXFP4 -> bf16 [BLOCK_K, LATENT], using the hardware converter.
 
     Four instructions cover all eight nibbles of each int32 word, in natural
-    order: value ``j`` of word ``w`` is latent dim ``8w + j``.
+    order: value `j` of word `w` is latent dim `8w + j`.
     """
     v0, v1 = _split_pair(_cvt_pair(packed_i32, _ASM_P01))
     v2, v3 = _split_pair(_cvt_pair(packed_i32, _ASM_P23))
@@ -120,7 +120,7 @@ def unpack_mxfp4_tile(
     LATENT: tl.constexpr,
     GROUP: tl.constexpr,
 ):
-    """Packed MXFP4 tile -> bf16 ``[BLOCK_K, LATENT]`` in latent order.
+    """Packed MXFP4 tile -> bf16 `[BLOCK_K, LATENT]` in latent order.
 
     The low nibble holds the lower element index, so the two nibble streams are
     interleaved back into value order rather than concatenated.
@@ -160,16 +160,16 @@ def _load_mxfp4_rows(
 ):
     """Gather BLOCK_K packed rows as a bf16 [BLOCK_K, LATENT] tile.
 
-    ``cache_ptr`` is the uint8 cache, ``row_pitch`` its row size in bytes.
+    `cache_ptr` is the uint8 cache, `row_pitch` its row size in bytes.
     Invalid slots come back as zeros. Each row, with no padding::
 
         | packed E2M1 codes        | E8M0 scales        |
         |<----- LATENT // 2 ------>|<- LATENT // GROUP ->|
         |<------- row_pitch == row_bytes(LATENT) -------->|
 
-    Code byte ``b`` holds values ``2b`` (low nibble) and ``2b + 1`` (high
-    nibble); scale byte ``g`` covers values ``GROUP * g`` to
-    ``GROUP * g + GROUP - 1``.
+    Code byte `b` holds values `2b` (low nibble) and `2b + 1` (high
+    nibble); scale byte `g` covers values `GROUP * g` to
+    `GROUP * g + GROUP - 1`.
     """
     # The gfx950 path loads the codes as int32 words into one power-of-two tile.
     tl.static_assert(

@@ -4,7 +4,7 @@
 
 OCP MXFP4, group 32: E2M1 elements packed two per byte (the low nibble holds
 the lower index) and one E8M0 scale per group. A row is the packed data
-followed by its scales, ``row_bytes(d) == d // 2 + d // 32``.
+followed by its scales, `row_bytes(d) == d // 2 + d // 32`.
 """
 
 from vllm.model_executor.layers.quantization.utils.ocp_mx_utils import (
