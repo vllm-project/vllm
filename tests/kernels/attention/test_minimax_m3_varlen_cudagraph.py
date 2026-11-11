@@ -20,9 +20,9 @@ def _vllm_config(adaptive: bool):
         speculative_config=SimpleNamespace(
             enable_adaptive_verification=adaptive,
             num_speculative_tokens=NUM_SPEC_TOKENS,
-            parallel_drafting=False,
+            # DSpark drafts in a separate pass and adds no target-batch rows.
+            max_num_new_slots_for_drafting=0,
         ),
-        use_v2_model_runner=True,
     )
 
 
