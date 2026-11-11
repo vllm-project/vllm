@@ -3,10 +3,10 @@
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 """Kernel-selection / gating tests for the ROCm RDNA3 W4A16 GPTQ kernel.
 
-Verifies that ``choose_mp_linear_kernel`` resolves a supported W4A16 GPTQ
-config to ``RDNA3W4A16LinearKernel`` on gfx1100 (it is registered ahead of
-``TritonW4A16LinearKernel`` in the ROCm priority list), and that
-``RDNA3W4A16LinearKernel.can_implement`` rejects the configs it does not
+Verifies that `choose_mp_linear_kernel` resolves a supported W4A16 GPTQ
+config to `RDNA3W4A16LinearKernel` on gfx1100 (it is registered ahead of
+`TritonW4A16LinearKernel` in the ROCm priority list), and that
+`RDNA3W4A16LinearKernel.can_implement` rejects the configs it does not
 support so selection falls through to the next kernel.
 
 Run `pytest tests/kernels/quantization/test_rdna3_w4a16_selection.py`.

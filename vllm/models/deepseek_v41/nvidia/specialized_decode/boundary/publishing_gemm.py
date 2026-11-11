@@ -38,26 +38,26 @@
 
 """DSV4.1 attention output projection that publishes into the mHC all-reduce.
 
-At a low-batch attention boundary the output projection ``wo_b`` (FlashInfer's
-``cutedsl_low_latency`` MXFP8 GEMM) writes this rank's partial sum, then the
-publish kernel of ``BoundaryAllReduce`` reads it back and multicasts it into the
+At a low-batch attention boundary the output projection `wo_b` (FlashInfer's
+`cutedsl_low_latency` MXFP8 GEMM) writes this rank's partial sum, then the
+publish kernel of `BoundaryAllReduce` reads it back and multicasts it into the
 Lamport mailbox before the consumer can collect the peers' contributions.
 
-:class:`PublishingMxfp8Linear` runs the same GEMM, with the tactic FlashInfer's
+`PublishingMxfp8Linear` runs the same GEMM, with the tactic FlashInfer's
 autotuner selected for the plain call, but its epilogue also does the publish
 kernel's work: every output value goes, rounded to BF16 with negative zero
-cleared, into this rank's slot of the mailbox generation ``stage_state[0]`` on
-all ranks (``multimem.st``), and one thread sets ``stage_state[1]`` to that
-generation. The caller then calls the same ``BoundaryAllReduce`` instance with
+cleared, into this rank's slot of the mailbox generation `stage_state[0]` on
+all ranks (`multimem.st`), and one thread sets `stage_state[1]` to that
+generation. The caller then calls the same `BoundaryAllReduce` instance with
 the returned tensor, which launches only the consumer
-(``BoundaryAllReduce.mark_published``). The consumer is unchanged, so its
+(`BoundaryAllReduce.mark_published`). The consumer is unchanged, so its
 outputs are bit-identical to the unfused path's.
 
-GEMM structure. The kernel computes ``C[n, m] = sum_k W[n, k] x[m, k]`` with the
-weight as operand A (128 output columns per CTA, ``N / 128`` CTAs) and the at
-most 8 activation rows as operand B. With split-K ``S`` (the tactic's last
-field), the ``S`` CTAs of a cluster each multiply a K slice, exchange FP32
-partials through distributed shared memory and each reduce ``1 / S`` of the
+GEMM structure. The kernel computes `C[n, m] = sum_k W[n, k] x[m, k]` with the
+weight as operand A (128 output columns per CTA, `N / 128` CTAs) and the at
+most 8 activation rows as operand B. With split-K `S` (the tactic's last
+field), the `S` CTAs of a cluster each multiply a K slice, exchange FP32
+partials through distributed shared memory and each reduce `1 / S` of the
 register elements. The epilogue's TMEM load is 16x256b for this BF16 output
 (32x32b is also handled): for one register element, the eight consecutive
 output columns of one row sit in eight lanes four apart, all owned by the same
@@ -65,18 +65,18 @@ CTA. Warp shuffles pack them into one 16-byte multicast store issued by the lane
 whose column is a multiple of 8, so every store is aligned like the
 consumer's 16-byte mailbox fragments.
 
-Ordering. The epilogue reads ``stage_state[0]`` after its MMA completed, hence
+Ordering. The epilogue reads `stage_state[0]` after its MMA completed, hence
 after the GEMM's programmatic grid wait (the B loads follow it), exactly as the
 publish kernel reads it after its own grid wait; the previous consumer wrote it.
 The consumer, launched as the GEMM's programmatic dependent, reads
-``stage_state[1]`` only after its grid wait, that is, after the whole GEMM grid
+`stage_state[1]` only after its grid wait, that is, after the whole GEMM grid
 and its stores completed.
 
 Addresses. The mailbox multicast address, the stage-state address, the rank,
 the TP size, the mailbox capacity and the hidden size are compile-time
 constants of each compiled kernel: each publisher serves one
-``BoundaryAllReduce``, whose buffers live as long as it does. Kernels compile
-per tactic, before CUDA graph capture (:meth:`PublishingMxfp8Linear.precompile`).
+`BoundaryAllReduce`, whose buffers live as long as it does. Kernels compile
+per tactic, before CUDA graph capture (`PublishingMxfp8Linear.precompile`).
 """
 
 from __future__ import annotations
@@ -101,10 +101,7 @@ from vllm.model_executor.layers.fusion.quant_activation import (
     QuantizedActivation,
     as_quantized_activation,
 )
-from vllm.models.deepseek_v41.common.ops.query_quant import mxfp8_scale_bytes
-
-from ...ops.cute_dsl.all_reduce_mhc import ACTIVE_STAGE, NEXT_STAGE
-from ...ops.cute_dsl.primitives import (
+from vllm.models.common.ops.moe_tail_fusion.primitives import (
     VEC_BF16,
     _asm,
     current_cu_stream,
@@ -113,6 +110,9 @@ from ...ops.cute_dsl.primitives import (
     shuffle_sync_idx_u32,
     stmc_bf16x8,
 )
+from vllm.models.deepseek_v41.common.ops.query_quant import mxfp8_scale_bytes
+
+from ...ops.cute_dsl.all_reduce_mhc import ACTIVE_STAGE, NEXT_STAGE
 from .. import LOW_BATCH_MAX_ROWS
 from ..attention.mxfp8 import Tactic, mxfp8_eligible
 from .all_reduce import BoundaryAllReduce
@@ -149,7 +149,7 @@ def _store_u32_at(address: Int64, value: Uint32, *, loc=None, ip=None) -> None:
 class PublishingLowLatencyBlockscaledGemmKernel(LowLatencyBlockscaledGemmKernel):
     """FlashInfer's low-latency block-scaled GEMM whose epilogue publishes C.
 
-    Only ``epilog_warp`` differs from the base class (the publish is marked
+    Only `epilog_warp` differs from the base class (the publish is marked
     there); the main loop, the split-K reduction and C are unchanged.
     """
 
@@ -191,9 +191,9 @@ class PublishingLowLatencyBlockscaledGemmKernel(LowLatencyBlockscaledGemmKernel)
         holds the 8-aligned column.
 
         Every lane of the warp calls this for the same register element. The
-        lanes holding columns ``c .. c + 7`` of one token (``c % 8 == 0``) are
-        ``l, l + s, .., l + 7s`` for the TMEM load's lane stride ``s`` =
-        ``column_lanes``; the store address comes from the storing lane's own
+        lanes holding columns `c .. c + 7` of one token (`c % 8 == 0`) are
+        `l, l + s, .., l + 7s` for the TMEM load's lane stride `s` =
+        `column_lanes`; the store address comes from the storing lane's own
         column, so it is 16-byte aligned whatever the layout.
         """
         lane = cute.arch.lane_idx()
@@ -448,7 +448,7 @@ def _gmem_ptr(dtype, address: int, align: int):
 
 
 class PublishingMxfp8Linear:
-    """Run a low-latency MXFP8 linear whose output a ``BoundaryAllReduce``
+    """Run a low-latency MXFP8 linear whose output a `BoundaryAllReduce`
     reduces next, publishing the output from the GEMM epilogue.
 
     Call it in place of the linear; it falls back to the linear itself (and
@@ -460,18 +460,24 @@ class PublishingMxfp8Linear:
         self._compiled: dict[tuple[Tactic, int], object] = {}
 
     def supports(self, linear: torch.nn.Module, num_tokens: int) -> bool:
-        """Whether ``linear`` on ``num_tokens`` rows runs the publishing GEMM."""
+        """Whether `linear` on `num_tokens` rows runs the publishing GEMM.
+        It publishes into the LL mailbox, so it takes no call of the all-reduce's
+        BT sizes."""
+        all_reduce = self.all_reduce
+        max_rows = min(
+            LOW_BATCH_MAX_ROWS, all_reduce.capacity, all_reduce.bt_min_rows - 1
+        )
         return (
             mxfp8_eligible(linear)
-            and 0 < num_tokens <= min(LOW_BATCH_MAX_ROWS, self.all_reduce.capacity)
-            and linear.weight.shape[1] == self.all_reduce.hidden_size
+            and 0 < num_tokens <= max_rows
+            and linear.weight.shape[1] == all_reduce.hidden_size
             and getattr(linear, "bias", None) is None
         )
 
     def __call__(
         self, linear: torch.nn.Module, x: torch.Tensor | QuantizedActivation
     ) -> torch.Tensor:
-        """``linear(x)``, published into ``all_reduce``'s mailbox when ``x`` is
+        """`linear(x)`, published into `all_reduce`'s mailbox when `x` is
         an MXFP8 activation of the low-latency backend's layout."""
         qa = (
             as_quantized_activation(x, linear.quant_method.kernel.input_quant_key())
@@ -509,7 +515,7 @@ class PublishingMxfp8Linear:
         return out
 
     def precompile(self, linear: torch.nn.Module, num_tokens: int) -> None:
-        """Compile the kernel ``num_tokens`` rows select, launching nothing: a
+        """Compile the kernel `num_tokens` rows select, launching nothing: a
         publish without its consumer would desynchronize the mailbox."""
         if not self.supports(linear, num_tokens):
             return
@@ -524,7 +530,7 @@ class PublishingMxfp8Linear:
         self._compile(_selected_tactic(a, weight, a_scale, weight_scale, out), device)
 
     def _compile(self, tactic: Tactic, device: torch.device):
-        """The publishing kernel of ``tactic``, compiled once per device."""
+        """The publishing kernel of `tactic`, compiled once per device."""
         key = (tactic, device.index)
         compiled = self._compiled.get(key)
         if compiled is not None:
@@ -571,9 +577,9 @@ def _selected_tactic(
     weight_scale: torch.Tensor,
     out: torch.Tensor,
 ) -> Tactic:
-    """The tactic ``mm_mxfp8(backend="cutedsl_low_latency")`` runs for these
+    """The tactic `mm_mxfp8(backend="cutedsl_low_latency")` runs for these
     operands: the autotuner's cached choice, else the runner's default (the
-    first valid tactic), resolved as ``mm_mxfp8`` resolves it."""
+    first valid tactic), resolved as `mm_mxfp8` resolves it."""
     # mm_mxfp8's private runner, tuning config and workspace, so the lookup
     # hits the same autotuner cache entry.
     from flashinfer.autotuner import AutoTuner

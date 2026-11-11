@@ -4,6 +4,7 @@
 import json
 from argparse import ArgumentError
 from contextlib import AbstractContextManager, nullcontext
+from dataclasses import replace
 from typing import Annotated, Literal
 
 import pytest
@@ -59,8 +60,10 @@ def test_watermark_config_cli():
             "--model",
             "dummy",
             "--watermark-config",
-            '{"algorithm":"dual_key_gumbel","key":42,"prf":"philox","alpha":0.25,'
-            '"allow_target_only_watermarking":true}',
+            (
+                '{"algorithm":"dual_key_gumbel","key":42,"prf":"philox","alpha":0.25,'
+                '"allow_target_only_watermarking":true}'
+            ),
         ]
     )
 
@@ -81,8 +84,10 @@ def test_watermark_config_cli():
             "--model",
             "dummy",
             "--watermark-config",
-            '{"key":42,"deduplicate_contexts":"none",'
-            '"deduplicate_contexts_max_history":32}',
+            (
+                '{"key":42,"deduplicate_contexts":"none",'
+                '"deduplicate_contexts_max_history":32}'
+            ),
         ]
     )
     config = EngineArgs.from_cli_args(args).create_watermark_config()
@@ -90,6 +95,13 @@ def test_watermark_config_cli():
     assert config is not None
     assert config.deduplicate_contexts == "none"
     assert config.deduplicate_contexts_max_history == 32
+
+    args = parser.parse_args(
+        ["--model", "dummy", "--watermark-config", '{"key":42,"enforce":true}']
+    )
+    config = EngineArgs.from_cli_args(args).create_watermark_config()
+    assert config is not None
+    assert config.enforce is True
 
 
 @pytest.mark.parametrize(
@@ -484,9 +496,11 @@ def test_compilation_config():
     # set to string form of a dict
     args = parser.parse_args(
         [
-            "--compilation-config="
-            '{"mode": 3, "cudagraph_capture_sizes": [1, 2, 4, 8], '
-            '"backend": "inductor"}',
+            (
+                "--compilation-config="
+                '{"mode": 3, "cudagraph_capture_sizes": [1, 2, 4, 8], '
+                '"backend": "inductor"}'
+            ),
         ]
     )
     assert (
@@ -566,11 +580,13 @@ def test_attention_config():
     # set to string form of a dict with all fields
     args = parser.parse_args(
         [
-            "--attention-config="
-            '{"backend": "FLASHINFER", "flash_attn_version": 2, '
-            '"flash_attn_max_num_splits_for_cuda_graph": 8, '
-            '"use_trtllm_attention": false, '
-            '"disable_flashinfer_q_quantization": false}',
+            (
+                "--attention-config="
+                '{"backend": "FLASHINFER", "flash_attn_version": 2, '
+                '"flash_attn_max_num_splits_for_cuda_graph": 8, '
+                '"use_trtllm_attention": false, '
+                '"disable_flashinfer_q_quantization": false}'
+            ),
         ]
     )
     assert args is not None
@@ -627,15 +643,10 @@ def test_attention_config():
         engine_args.create_engine_config()
 
 
-def test_multi_node_world_size_includes_pcp(monkeypatch):
+def test_multi_node_world_size_includes_pcp():
     """PCP expands the process world size, so the --nnodes divisibility check
     must include it. Without this, TP=1/PCP=2 over 2 nodes computes a world
     size of 1 and the launch is rejected before the engine starts."""
-    import vllm.config.vllm
-
-    # PCP requires the V2 model runner, which is gated on Triton.
-    monkeypatch.setattr(vllm.config.vllm, "HAS_TRITON", True)
-
     engine_args = EngineArgs(
         model="facebook/opt-125m",
         tensor_parallel_size=1,
@@ -803,6 +814,11 @@ def test_numa_bind_args():
     assert engine_args.numa_bind_nodes == [0, 0, 1, 1]
     assert engine_args.numa_bind_cpus == ["0-3", "4-7", "8-11", "12-15"]
 
+    # Unset means auto; --no-numa-bind disables explicitly.
+    assert EngineArgs.from_cli_args(args=parser.parse_args([])).numa_bind is None
+    args = parser.parse_args(["--no-numa-bind"])
+    assert EngineArgs.from_cli_args(args=args).numa_bind is False
+
 
 def test_ir_op_priority():
     from vllm.config.kernel import IrOpPriorityConfig, KernelConfig
@@ -819,6 +835,27 @@ def test_ir_op_priority():
             ir_op_priority=ir_op_priority,
             kernel_config=KernelConfig(ir_op_priority=ir_op_priority),
         ).create_engine_config()
+
+
+def test_ir_op_priority_deprecation_warning(caplog_vllm, disable_log_dedup):
+    """Setting ir_op_priority warns users because vLLM IR is being removed."""
+    from vllm.config.kernel import IrOpPriorityConfig, KernelConfig
+
+    msg = "ir_op_priority (--ir-op-priority) is deprecated"
+
+    # Platform defaults fill ir_op_priority; copying the config must not warn.
+    cfg = EngineArgs().create_engine_config()
+    replace(cfg.kernel_config, moe_backend="triton")
+    assert msg not in caplog_vllm.text
+
+    ir_op_priority = IrOpPriorityConfig(rms_norm=["vllm_c"])
+    EngineArgs(ir_op_priority=ir_op_priority).create_engine_config()
+    assert msg in caplog_vllm.text
+
+    caplog_vllm.clear()
+    kernel_config = KernelConfig(ir_op_priority=ir_op_priority)
+    EngineArgs(kernel_config=kernel_config).create_engine_config()
+    assert msg in caplog_vllm.text
 
 
 @pytest.mark.parametrize(

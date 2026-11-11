@@ -52,7 +52,7 @@ th:not(:first-child) {
 | Dense Transformers | ✅ | ✅<sup>1</sup> | ✅ | ✅<sup>2</sup> | ✅ | ✅ | 🟠<sup>3</sup> |
 | MLA (e.g. DeepSeek-V2/V3) | ✅ | ✅<sup>1</sup> | 🟠<sup>4</sup> | ✅<sup>2</sup> | ✅ | ✅ | 🟠<sup>3</sup> |
 | Sparse MLA (e.g. DeepSeek-V3.2) | ✅ | ✅<sup>1</sup> | 🟠<sup>4</sup> | ✅<sup>2</sup> | ✅ | ✅ | 🟠<sup>3</sup> |
-| Hybrid SSM / Mamba | ✅ | ❔ | 🚧<sup>5</sup> | ❌ | ✅ | ✅ | ❌<sup>6</sup> |
+| Hybrid SSM / Mamba | ✅ | ❔ | 🟠<sup>5</sup> | ❌ | ✅ | ✅ | ❌<sup>6</sup> |
 | MoE | ✅ | ✅<sup>1</sup> | ✅ | ✅<sup>2</sup> | ✅ | ✅ | 🟠<sup>3</sup> |
 | Multimodal | ❔ | ❔ | ❔ | ❔ | ❔ | ❔ | ❔ |
 | Encoder-Decoder | ❌ | ❌ | ❌ | ❌ | ❌ | ❌ | ❌ |
@@ -63,11 +63,11 @@ what may differ.
 
 <sup>2</sup> Cross-layer contiguity is achieved by using a `BLHNC` layout (set via `VLLM_KV_CACHE_LAYOUT=BLHNC`).
 
-<sup>3</sup> Supported only when HMA is **not** required (i.e., non-hybrid models). Block IDs are remapped automatically. Only P block size < D block size is supported.
+<sup>3</sup> Supported only when HMA is **not** required (i.e., non-hybrid models). Block IDs are remapped automatically. Only P block size < D block size is supported with pull (`NixlPullConnector`); push (`NixlPushConnector`) requires identical P/D block sizes.
 
 <sup>4</sup> MLA KV cache is replicated across TP workers, so heterogeneous TP works but there is no head-splitting. When P TP > D TP, only a single read is executed (redundant ranks are skipped). D TP > P TP also works.
 
-<sup>5</sup> Hybrid SSM (Mamba) models require **homogeneous TP** (`P TP == D TP`). Heterogeneous TP is not yet supported for Mamba layers.
+<sup>5</sup> Hybrid SSM/Mamba models (including GDN) support heterogeneous TP in both directions, provided one TP size is an integer multiple of the other.
 
 <sup>6</sup> HMA (required by hybrid models) does not support different remote block sizes.
 
@@ -97,6 +97,11 @@ By default, a **compatibility hash** is checked during handshake. P and D instan
 - Draft-model `attention_backend` (each instance auto-selects independently; the
   resulting KV block layout is validated at handshake time rather than via the
   compatibility hash)
+- `prefill_context_kv_only` in the speculative config, set on the prefill instance
+  only (DFlash-based drafters such as DSpark, Model Runner V2): its drafter only
+  writes the context K/V the decode instance reads, so it drafts nothing,
+  reserves no lookahead KV slots and, for draft models that support it, frees
+  the draft weights only drafting reads
 
 ### KV cache layout
 
@@ -108,11 +113,10 @@ By default, a **compatibility hash** is checked during handshake. P and D instan
 
 The default (pull) NixlConnector does **not** support
 `pipeline-parallel-size > 1` together with a hybrid KV cache (HMA)
-layout: region indices are not a stable identity across the
-prefill/decode layer split, so the connector raises at startup. Use the
-push connector (`NixlPushConnector`) for pipeline parallelism with
-hybrid KV caches — it routes transfers by layer-name (member) identity,
-so a PP-sharded prefiller can write into a `PP=1` decoder. See
+layout and raises at startup. Use the push connector
+(`NixlPushConnector`) for pipeline parallelism with hybrid KV caches.
+Both connectors pair KV regions with a peer's by the layers each region
+holds, so a PP-sharded prefiller can write into a `PP=1` decoder. See
 [NIXL push-mode KV transfer](../design/nixl_kv_push_connector.md).
 
 Current push PP + HMA limitations:
@@ -120,7 +124,7 @@ Current push PP + HMA limitations:
 - Only the prefiller (producer) may be PP-sharded; decode-side PP is not supported.
 - Hybrid SSM/Mamba layouts are not supported under PP.
 - HMA requires the same block size on P and D.
-- Non-MLA attention-HMA layer routing requires decode TP to be no greater than prefill TP.
+- Non-MLA attention under HMA requires decode TP to be no greater than prefill TP.
 - Packed layouts under PP require MLA caches. Local and remote packed block strides may differ; layer pages must have equal sizes. MLA supports decode TP greater than prefill TP because its KV is replicated.
 
 ### Quantized KV cache

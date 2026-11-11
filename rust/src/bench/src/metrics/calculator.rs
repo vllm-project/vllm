@@ -3,8 +3,7 @@
 
 use crate::backends::RequestFuncOutput;
 use crate::config::GoodputConfig;
-use crate::datasets::SampleRequest;
-use crate::metrics::{BenchmarkMetrics, MultiTurnMetrics};
+use crate::metrics::{BenchmarkMetrics, LatencyStats, MultiTurnMetrics};
 use crate::multi_turn::ConversationOutput;
 
 fn log_failed_requests(outputs: &[RequestFuncOutput]) {
@@ -27,7 +26,6 @@ fn log_failed_requests(outputs: &[RequestFuncOutput]) {
 ///
 /// Mirrors Python's `calculate_metrics()` from serve.py:392-599.
 pub fn calculate_metrics(
-    input_requests: &[SampleRequest],
     outputs: &[RequestFuncOutput],
     dur_s: f64,
     selected_percentiles: &[f64],
@@ -44,7 +42,7 @@ pub fn calculate_metrics(
     let mut ttfts: Vec<f64> = Vec::new();
     let mut e2els: Vec<f64> = Vec::new();
 
-    for (i, output) in outputs.iter().enumerate() {
+    for output in outputs.iter() {
         if output.success {
             let output_len = if output.output_tokens > 0 {
                 output.output_tokens
@@ -57,7 +55,7 @@ pub fn calculate_metrics(
             };
 
             actual_output_lens.push(output_len);
-            total_input += input_requests[i].prompt_len;
+            total_input += output.prompt_len;
 
             if output_len > 1 {
                 let latency_minus_ttft = output.latency - output.ttft;
@@ -211,9 +209,43 @@ pub fn calculate_metrics(
         max_output_tokens_per_s,
         max_concurrent_requests,
         steady_state: None,
+        client_queue_time: None,
+        e2el_including_client_queue: None,
     };
 
     (metrics, actual_output_lens)
+}
+
+/// Attach Python's client-side queueing metrics, computed over successful
+/// requests: `client_queue_time` with `--max-concurrency`, and
+/// `e2el_including_client_queue` when the request rate is also finite.
+pub fn attach_client_queue_metrics(
+    metrics: &mut BenchmarkMetrics,
+    outputs: &[RequestFuncOutput],
+    max_concurrency: Option<usize>,
+    request_rate: f64,
+    selected_percentiles: &[f64],
+) {
+    if max_concurrency.is_none() {
+        return;
+    }
+    let successful = outputs.iter().filter(|o| o.success);
+    let queue_times: Vec<f64> = successful.clone().map(|o| o.client_queue_time).collect();
+    metrics.client_queue_time = Some(latency_stats(&queue_times, selected_percentiles));
+    if request_rate.is_finite() {
+        let e2els: Vec<f64> = successful.map(|o| o.latency + o.client_queue_time).collect();
+        metrics.e2el_including_client_queue = Some(latency_stats(&e2els, selected_percentiles));
+    }
+}
+
+fn latency_stats(values_s: &[f64], selected_percentiles: &[f64]) -> LatencyStats {
+    let sorted = sort_clone(values_s);
+    LatencyStats {
+        mean_ms: mean(values_s) * 1000.0,
+        median_ms: median_sorted(&sorted) * 1000.0,
+        std_ms: std_dev(values_s) * 1000.0,
+        percentiles_ms: percentiles_from_sorted(&sorted, selected_percentiles),
+    }
 }
 
 pub(crate) fn mean(data: &[f64]) -> f64 {
@@ -283,7 +315,6 @@ fn percentiles_from_sorted(sorted: &[f64], percentiles: &[f64]) -> Vec<(f64, f64
 ///
 /// Mirrors Python's `calculate_metrics_for_embeddings()` from serve.py.
 /// Key differences from `calculate_metrics()`:
-/// - Uses `output.prompt_len` (server-reported) instead of `input_requests[i].prompt_len`
 /// - Only computes E2EL (no TTFT/TPOT/ITL since pooling is non-streaming)
 /// - `total_output` is 0 (pooling produces no output tokens)
 /// - `total_token_throughput` = `total_input / dur_s` (input tokens only)
@@ -375,12 +406,14 @@ pub fn calculate_embedding_metrics(
         max_output_tokens_per_s: 0.0,
         max_concurrent_requests,
         steady_state: None,
+        client_queue_time: None,
+        e2el_including_client_queue: None,
     }
 }
 
 /// Calculate multi-turn benchmark metrics with per-turn breakdown.
 ///
-/// 1. Flatten all turns into SampleRequest/RequestFuncOutput pairs → overall metrics
+/// 1. Flatten all turns' outputs → overall metrics
 /// 2. Group by turn_index → per-turn metrics
 /// 3. Conversation-level stats
 pub fn calculate_multi_turn_metrics(
@@ -391,24 +424,15 @@ pub fn calculate_multi_turn_metrics(
     max_turn_count: usize,
 ) -> MultiTurnMetrics {
     // Flatten all turns for overall metrics
-    let mut all_requests: Vec<SampleRequest> = Vec::new();
     let mut all_outputs: Vec<RequestFuncOutput> = Vec::new();
 
     for conv in conversation_outputs {
         for turn in &conv.turns {
-            all_requests.push(SampleRequest {
-                prompt: std::sync::Arc::from(""),
-                prompt_len: turn.cumulative_input_tokens,
-                expected_output_len: turn.request_output.output_tokens,
-                request_id: None,
-                ..Default::default()
-            });
             all_outputs.push(turn.request_output.clone());
         }
     }
 
     let (overall, _) = calculate_metrics(
-        &all_requests,
         &all_outputs,
         dur_s,
         selected_percentiles,
@@ -419,25 +443,16 @@ pub fn calculate_multi_turn_metrics(
     // Per-turn breakdown
     let mut per_turn: Vec<BenchmarkMetrics> = Vec::new();
     for turn_idx in 0..max_turn_count {
-        let mut turn_requests: Vec<SampleRequest> = Vec::new();
         let mut turn_outputs: Vec<RequestFuncOutput> = Vec::new();
 
         for conv in conversation_outputs {
             if let Some(turn) = conv.turns.get(turn_idx) {
-                turn_requests.push(SampleRequest {
-                    prompt: std::sync::Arc::from(""),
-                    prompt_len: turn.cumulative_input_tokens,
-                    expected_output_len: turn.request_output.output_tokens,
-                    request_id: None,
-                    ..Default::default()
-                });
                 turn_outputs.push(turn.request_output.clone());
             }
         }
 
         if !turn_outputs.is_empty() {
             let (turn_metrics, _) = calculate_metrics(
-                &turn_requests,
                 &turn_outputs,
                 dur_s,
                 selected_percentiles,
@@ -480,6 +495,41 @@ pub fn calculate_multi_turn_metrics(
 mod tests {
     use super::*;
 
+    /// Python only reports client queueing with --max-concurrency, and the
+    /// queue-inclusive E2EL only for a finite request rate.
+    #[test]
+    fn test_client_queue_metrics_gating() {
+        let outputs: Vec<RequestFuncOutput> = [(true, 0.2), (true, 0.4), (false, 9.0)]
+            .into_iter()
+            .map(|(success, client_queue_time)| RequestFuncOutput {
+                success,
+                latency: 1.0,
+                client_queue_time,
+                ..Default::default()
+            })
+            .collect();
+        let metrics = |max_concurrency, rate| {
+            let mut m =
+                calculate_metrics(&outputs, 1.0, &[50.0], true, &GoodputConfig::default()).0;
+            attach_client_queue_metrics(&mut m, &outputs, max_concurrency, rate, &[50.0]);
+            m
+        };
+
+        let m = metrics(None, 10.0);
+        assert!(m.client_queue_time.is_none() && m.e2el_including_client_queue.is_none());
+
+        let m = metrics(Some(2), f64::INFINITY);
+        let queue = m.client_queue_time.unwrap();
+        assert!(
+            (queue.mean_ms - 300.0).abs() < 1e-9,
+            "failed requests are excluded"
+        );
+        assert!(m.e2el_including_client_queue.is_none());
+
+        let m = metrics(Some(2), 10.0);
+        assert!((m.e2el_including_client_queue.unwrap().mean_ms - 1300.0).abs() < 1e-9);
+    }
+
     #[test]
     fn test_mean_empty() {
         assert_eq!(mean(&[]), 0.0);
@@ -507,5 +557,62 @@ mod tests {
         let data: Vec<f64> = (0..100).map(|i| i as f64).collect();
         let p99 = percentile_sorted(&data, 99.0);
         assert!((p99 - 98.01).abs() < 0.1);
+    }
+
+    /// Input-token totals come from each output's `prompt_len` (server-reported
+    /// via `usage.prompt_tokens`), not the client-side request estimate.
+    /// Mirrors Python's `serve.py`.
+    #[test]
+    fn test_total_input_uses_output_prompt_len() {
+        let outputs = vec![
+            RequestFuncOutput {
+                success: true,
+                prompt_len: 128,
+                output_tokens: 3,
+                ..Default::default()
+            };
+            2
+        ];
+
+        let (metrics, _) = calculate_metrics(&outputs, 1.0, &[], false, &GoodputConfig::default());
+
+        assert_eq!(metrics.total_input, 256);
+    }
+
+    #[test]
+    fn test_multi_turn_metrics_use_request_prompt_lengths() {
+        let turn = |turn_index, prompt_len, output_tokens| crate::multi_turn::TurnOutput {
+            turn_index,
+            request_output: RequestFuncOutput {
+                success: true,
+                prompt_len,
+                output_tokens,
+                latency: 1.0,
+                ttft: 0.1,
+                ..Default::default()
+            },
+        };
+        let conversation_outputs = [ConversationOutput {
+            conversation_id: "conversation-0".to_string(),
+            turns: vec![turn(0, 500, 200), turn(1, 1200, 200)],
+            total_duration_ms: 2000.0,
+            all_success: true,
+        }];
+
+        let metrics = calculate_multi_turn_metrics(
+            &conversation_outputs,
+            2.0,
+            &[],
+            &GoodputConfig::default(),
+            2,
+        );
+
+        assert_eq!(metrics.overall.total_input, 1700);
+        assert_eq!(metrics.overall.total_output, 400);
+        assert_eq!(metrics.overall.input_throughput, 850.0);
+        assert_eq!(metrics.overall.total_token_throughput, 1050.0);
+        assert_eq!(metrics.per_turn.len(), 2);
+        assert_eq!(metrics.per_turn[0].total_input, 500);
+        assert_eq!(metrics.per_turn[1].total_input, 1200);
     }
 }
