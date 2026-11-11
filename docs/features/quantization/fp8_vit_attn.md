@@ -4,7 +4,8 @@ For visual understanding workloads with large images (e.g. QHD, 4K) and relative
 short text prompts/generation, the ViT encoder attention can become a significant
 bottleneck, especially when the text model is quantized (e.g. NVFP4). vLLM
 supports optional FP8 quantization for ViT encoder attention via FlashInfer
-cuDNN on NVIDIA GPUs and AITER on AMD GPUs. Q/K/V are quantized on-the-fly to
+cuDNN on data-center Blackwell (SM 10.x), FlashInfer's SM120 FP8 FMHA on
+RTX Blackwell (SM 12.0), and AITER on AMD GPUs. Q/K/V are quantized on-the-fly to
 FP8 before the attention call.
 
 !!! note
@@ -17,10 +18,17 @@ FP8 before the attention call.
     - FP8 tensor-core speedup is more pronounced on GB300 than GB200.
     - On ROCm, packed variable-length image and video batches are supported by
       AITER's native varlen FP8 attention.
+    - On SM 12.0, the kernel takes its scales as host values, so dynamic
+      scaling adds one GPU->CPU sync per layer and cannot be used with
+      `cudagraph_mm_encoder`; use static scales.
 
 ## Requirements
 
-- NVIDIA: FlashInfer cuDNN backend with cuDNN >= 9.17.1.
+- NVIDIA SM 10.x: FlashInfer cuDNN backend with cuDNN >= 9.17.1.
+- NVIDIA SM 12.0: FLASH_ATTN backend (the default there) and FlashInfer's
+  SM120 FP8 FMHA (`sm120_fmha_fp8_ragged_prefill`), which FlashInfer runs on
+  SM 12.0 only. Head dims other than 32/64/128/256 are zero-padded to the
+  next one (e.g. 72 to 128).
 - AMD: AITER with `flash_attn_varlen_fp8_pertensor_func` support on gfx942
   (MI300 series) or gfx950 (MI350 series).
 
@@ -32,6 +40,11 @@ the backend for the current platform:
 ```bash
 vllm serve $MODEL \
     --mm-encoder-attn-backend FLASHINFER \
+    --mm-encoder-attn-dtype fp8
+
+# NVIDIA SM 12.0 (RTX PRO 6000, RTX 50 series)
+vllm serve $MODEL \
+    --mm-encoder-attn-backend FLASH_ATTN \
     --mm-encoder-attn-dtype fp8
 
 # AMD ROCm

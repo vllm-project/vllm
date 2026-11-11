@@ -7,7 +7,7 @@ import json
 import numpy as np
 import torch
 
-from vllm.config import MultiModalConfig
+from vllm.config import MultiModalConfig, get_current_vllm_config_or_none
 from vllm.kernels.triton.qkv_padded_fp8_quant import (
     quantize_fp8_maybe_pad_head_dim,
 )
@@ -26,6 +26,7 @@ from vllm.model_executor.models.vision import (
 )
 from vllm.platforms import current_platform
 from vllm.utils.flashinfer import (
+    has_flashinfer_sm120_fp8_fmha,
     is_flashinfer_cudnn_fp8_prefill_attn_supported,
 )
 from vllm.utils.math_utils import round_up
@@ -35,6 +36,7 @@ from vllm.v1.attention.backends.registry import AttentionBackendEnum
 from vllm.v1.attention.ops.vit_attn_wrappers import (
     vit_aiter_fp8_attn_wrapper,
     vit_flash_attn_wrapper,
+    vit_flashinfer_sm120_fp8_attn_wrapper,
     vit_flashinfer_wrapper,
     vit_torch_sdpa_wrapper,
     vit_triton_attn_wrapper,
@@ -44,6 +46,8 @@ logger = init_logger(__name__)
 
 _, _FP8_MAX = get_fp8_min_max()
 _FP8_AMAX_HISTORY_LEN = 16
+# Head dims FlashInfer's SM120 FP8 FMHA supports; others are zero-padded up.
+_SM120_FP8_HEAD_DIMS = (32, 64, 128, 256)
 
 # Module-level state for auto-saving dynamic scales. The save is a one-shot
 # triggered by the first layer whose amax buffer wraps. Path and margin are
@@ -387,6 +391,10 @@ class MMEncoderAttention(CustomOp):
         self.skip_scale_q = False
         self.skip_scale_k = False
         self.skip_scale_v = False
+        # Head-dim multiple the FP8 Q/K/V are zero-padded to (16 for cuDNN).
+        self._fp8_pad_to = 16
+        # Static Q/K/V scales as floats, for kernels that take host values.
+        self._fp8_scale_floats: list[float] | None = None
 
         mm_cfg = get_multimodal_config()
         if mm_cfg is None or mm_cfg.mm_encoder_attn_dtype != "fp8":
@@ -419,11 +427,34 @@ class MMEncoderAttention(CustomOp):
                     "or newer. cuDNN's FP8 SDPA path with bf16/fp16 output is "
                     "not available on Hopper (H100/H200) or earlier."
                 )
+        elif (
+            self.attn_backend == AttentionBackendEnum.FLASH_ATTN
+            and has_flashinfer_sm120_fp8_fmha()
+        ):
+            pad_to = next((d for d in _SM120_FP8_HEAD_DIMS if d >= self.head_size), 0)
+            if not pad_to:
+                raise ValueError(
+                    "FlashInfer's SM120 FP8 FMHA supports head_size up to 256, "
+                    f"got {self.head_size}."
+                )
+            self._fp8_pad_to = pad_to
+            vllm_config = get_current_vllm_config_or_none()
+            if (
+                mm_cfg.mm_encoder_fp8_scale_path is None
+                and vllm_config is not None
+                and vllm_config.compilation_config.cudagraph_mm_encoder
+            ):
+                raise ValueError(
+                    "cudagraph_mm_encoder with FP8 ViT attention on SM 12.0 needs "
+                    "static scales (--mm-encoder-fp8-scale-path): FlashInfer's "
+                    "SM120 FP8 FMHA reads its scales on the host."
+                )
         else:
             raise ValueError(
-                "mm_encoder_attn_dtype='fp8' requires either the "
-                "ROCM_AITER_FA backend on ROCm or the FlashInfer cuDNN "
-                f"backend on CUDA, got {self.attn_backend}."
+                "mm_encoder_attn_dtype='fp8' requires one of: the "
+                "ROCM_AITER_FA backend on ROCm, the FlashInfer cuDNN backend "
+                "on SM 10.x, or the FLASH_ATTN backend on SM 12.0; got "
+                f"{self.attn_backend}."
             )
 
         self.fp8_enabled = True
@@ -487,6 +518,7 @@ class MMEncoderAttention(CustomOp):
             ("_fp8_v_scale", "v"),
         ):
             getattr(self, attr).fill_(layer_scales[key])
+        self._fp8_scale_floats = [float(layer_scales[key]) for key in ("q", "k", "v")]
         self.skip_scale_q = layer_scales["q"] == 1.0
         self.skip_scale_k = layer_scales["k"] == 1.0
         self.skip_scale_v = layer_scales["v"] == 1.0
@@ -572,17 +604,36 @@ class MMEncoderAttention(CustomOp):
 
         query, key, value = self.view_qkv_to_4d(query, key, value, bsz, q_len, kv_len)
 
-        output = vit_flash_attn_wrapper(
-            q=query,
-            k=key,
-            v=value,
-            batch_size=bsz,
-            is_rocm_aiter=(self.attn_backend == AttentionBackendEnum.ROCM_AITER_FA),
-            fa_version=self._fa_version,
-            scale=self.scale,
-            cu_seqlens=cu_seqlens,
-            max_seqlen=max_seqlen,
-        )
+        if self.fp8_enabled:
+            query, key, value = self._quantize_qkv_fp8(query, key, value)
+            output = vit_flashinfer_sm120_fp8_attn_wrapper(
+                q=query,
+                k=key,
+                v=value,
+                q_scale=self._fp8_q_scale,
+                k_scale=self._fp8_k_scale,
+                v_scale=self._fp8_v_scale,
+                host_scales=self._fp8_scale_floats,
+                batch_size=bsz,
+                output_dtype=self.dtype,
+                scale=self.scale,
+                cu_seqlens=cu_seqlens,
+                max_seqlen=max_seqlen,
+            )
+            if output.shape[-1] != self.head_size:
+                output = output[..., : self.head_size].contiguous()
+        else:
+            output = vit_flash_attn_wrapper(
+                q=query,
+                k=key,
+                v=value,
+                batch_size=bsz,
+                is_rocm_aiter=(self.attn_backend == AttentionBackendEnum.ROCM_AITER_FA),
+                fa_version=self._fa_version,
+                scale=self.scale,
+                cu_seqlens=cu_seqlens,
+                max_seqlen=max_seqlen,
+            )
         if is_reshaped:
             output = output.reshape(bsz, q_len, -1)
         return output
@@ -676,18 +727,21 @@ class MMEncoderAttention(CustomOp):
             self._fp8_q_scale,
             skip_scale=self.skip_scale_q,
             fp8_quant=self.fp8_quant,
+            pad_to=self._fp8_pad_to,
         )
         key = quantize_fp8_maybe_pad_head_dim(
             key,
             self._fp8_k_scale,
             skip_scale=self.skip_scale_k,
             fp8_quant=self.fp8_quant,
+            pad_to=self._fp8_pad_to,
         )
         value = quantize_fp8_maybe_pad_head_dim(
             value,
             self._fp8_v_scale,
             skip_scale=self.skip_scale_v,
             fp8_quant=self.fp8_quant,
+            pad_to=self._fp8_pad_to,
         )
         return query, key, value
 

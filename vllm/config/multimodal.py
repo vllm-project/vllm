@@ -400,7 +400,8 @@ class MultiModalConfig:
     `vllm.v1.attention.backends.registry.AttentionBackendEnum` (e.g. `FLASH_ATTN`)."""
     mm_encoder_attn_dtype: Literal["fp8"] | None = None
     """Optional dtype override for ViT encoder attention. Set to `"fp8"` to
-    enable FP8 quantization via the FlashInfer cuDNN backend. When set to
+    enable FP8 quantization (FlashInfer cuDNN on SM 10.x, FlashInfer's SM120
+    FP8 FMHA with the FLASH_ATTN backend on SM 12.0, AITER on ROCm). When set to
     `"fp8"` without a scale file, dynamic scaling is used automatically.
     See docs/features/quantization/fp8_vit_attn.md for details."""
     mm_encoder_fp8_scale_path: str | None = None

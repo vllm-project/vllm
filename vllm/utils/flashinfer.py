@@ -576,6 +576,17 @@ def has_flashinfer_cutedsl() -> bool:
 
 
 @functools.cache
+def has_flashinfer_sm120_fp8_fmha() -> bool:
+    """Return `True` if FlashInfer's SM120 FP8 ragged FMHA runs on this GPU.
+
+    FlashInfer gates the kernel to compute capability 12.0."""
+    if not current_platform.is_device_capability(120) or not has_flashinfer_cutedsl():
+        return False
+    mod = _get_submodule("flashinfer.attention.cute_dsl")
+    return hasattr(mod, "sm120_fmha_fp8_ragged_prefill")
+
+
+@functools.cache
 def has_flashinfer_bf16_fp4() -> bool:
     """Return `True` if FlashInfer's CuTe-DSL W4A16 GEMM is available."""
     if not has_flashinfer_cutedsl():
