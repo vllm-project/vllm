@@ -889,6 +889,15 @@ class CudaCommunicator(DeviceCommunicatorBase):
         self._dcp_ag_comm = comm
         return comm
 
+    def dcp_aiter_comm(self) -> AiterCustomAllreduce | None:
+        """The TP group's AITER comm that this DCP group borrows, if the DCP
+        AITER all-gather is enabled for it (VLLM_ROCM_DCP_AITER_ALLGATHER).
+        Used by the v_up-first DCP combine for its LSE all-gather and its
+        reduce-scatter. None when unavailable."""
+        if not self._dcp_ag_candidate:
+            return None
+        return self._resolve_dcp_ag_comm()
+
     def _dcp_aiter_all_gather(
         self, input_: torch.Tensor, dim: int
     ) -> torch.Tensor | None:

@@ -1016,6 +1016,238 @@ def dcp_a2a_lse_reduce(
     )
 
 
+# v_up-first DCP combine (ROCm, VLLM_ROCM_DCP_VUP_RS): every rank projects its
+# partial latent output of all H heads with the full W_UV, so the cross-rank
+# reduction runs on [T, H, V] (V=128) instead of the latent (L=512). Each rank
+# scales its partial by its softmax weight over ranks, exp(lse_r - lse_global),
+# and one IPC reduce-scatter along the head dim sums them and leaves this rank
+# its own H/N heads, already v-projected.
+
+
+@triton.jit(do_not_specialize=["num_rows", "num_seqs", "lse_stride_B", "lse_stride_H"])
+def _dcp_vup_rs_mask_lse_kernel(
+    lse_ptr,
+    out_ptr,
+    seq_lens_ptr,
+    query_start_loc_ptr,
+    num_rows,
+    num_seqs,
+    lse_stride_B,
+    lse_stride_H,
+    H: tl.constexpr,
+    H_POW2: tl.constexpr,
+    HAS_MASK: tl.constexpr,
+    NUM_SEQS_POW2: tl.constexpr,
+):
+    # out[t, h] = lse[t, h] as fp32, or -inf for rows of a request without a
+    # local KV shard and for rows past the end of the batch (graph padding).
+    # Same mask as _dcp_a2a_pack_send_kernel.
+    t = tl.program_id(0).to(tl.int64)
+    hs = tl.arange(0, H_POW2)
+    hm = hs < H
+    lse = tl.load(
+        lse_ptr + t * lse_stride_B + hs * lse_stride_H, mask=hm, other=0.0
+    ).to(tl.float32)
+    if HAS_MASK:
+        so = tl.arange(0, NUM_SEQS_POW2)
+        bounds = tl.load(
+            query_start_loc_ptr + 1 + so, mask=so < num_seqs, other=2**31 - 1
+        )
+        seq_idx = tl.sum((bounds <= t).to(tl.int32), axis=0)
+        seq_idx = tl.maximum(tl.minimum(seq_idx, num_seqs - 1), 0)
+        end_row = tl.load(query_start_loc_ptr + num_seqs)
+        seq_len = tl.load(seq_lens_ptr + seq_idx, mask=num_seqs > 0, other=0)
+        empty = (num_seqs == 0) | (t >= end_row) | (seq_len == 0)
+        lse = tl.where(empty, -float("inf"), lse)
+    lse = tl.where((lse != lse) | (lse == float("inf")), -float("inf"), lse)
+    tl.store(out_ptr + t * H + hs, lse, mask=hm)
+
+
+@triton.jit
+def _dcp_vup_rs_scale_kernel(
+    v_ptr,
+    lse_all_ptr,
+    y_ptr,
+    T,
+    rank,
+    N: tl.constexpr,
+    H: tl.constexpr,
+    HB: tl.constexpr,
+    V: tl.constexpr,
+    IS_BASE_E: tl.constexpr,
+):
+    # y[t, h, :] = v[t, h, :] * exp(lse_rank - logsumexp_r lse_r) over the
+    # gathered, already masked lse_all [N, T, H]. Empty shards (-inf) weigh 0,
+    # a row empty on every rank gives 0, NaN partials of empty shards are
+    # dropped.
+    t = tl.program_id(0).to(tl.int64)
+    hs = tl.program_id(1) * HB + tl.arange(0, HB)
+    hm = hs < H
+    d = tl.arange(0, V)
+    m = tl.full([HB], -float("inf"), tl.float32)
+    for r in tl.static_range(N):
+        ls = tl.load(lse_all_ptr + (r * T + t) * H + hs, mask=hm, other=-float("inf"))
+        m = tl.maximum(m, ls)
+    m = tl.where(m == -float("inf"), 0.0, m)
+    den = tl.zeros([HB], dtype=tl.float32)
+    for r in tl.static_range(N):
+        ls = tl.load(lse_all_ptr + (r * T + t) * H + hs, mask=hm, other=-float("inf"))
+        if IS_BASE_E:
+            den += tl.exp(ls - m)
+        else:
+            den += tl.exp2(ls - m)
+    lo = tl.load(lse_all_ptr + (rank * T + t) * H + hs, mask=hm, other=-float("inf"))
+    if IS_BASE_E:  # noqa: SIM108
+        w = tl.exp(lo - m) / den
+    else:
+        w = tl.exp2(lo - m) / den
+    w = tl.where(w != w, 0.0, w)
+    off = t * H * V + hs[:, None] * V + d[None, :]
+    x = tl.load(v_ptr + off, mask=hm[:, None], other=0.0).to(tl.float32)
+    x = tl.where(w[:, None] == 0.0, 0.0, x)
+    tl.store(y_ptr + off, (x * w[:, None]).to(y_ptr.dtype.element_ty), mask=hm[:, None])
+
+
+# aiter batched_gemm_bf16 tile for the [H, T, L] x [H, L, V] v_up. Its default
+# config is slower than torch.bmm here; bm64/bn64/bk128 was measured fastest
+# for T = 75..125 rows on MI355X (96 heads, L=512, V=128).
+_DCP_VUP_BGEMM_CONFIG = dict(
+    BLOCK_SIZE_M=64,
+    BLOCK_SIZE_N=64,
+    BLOCK_SIZE_K=128,
+    GROUP_SIZE_M=1,
+    num_warps=4,
+    num_stages=2,
+    waves_per_eu=2,
+    matrix_instr_nonkdim=16,
+    NUM_KSPLIT=1,
+    SPLITK_BLOCK_SIZE=512,
+    cache_modifier=None,
+)
+
+
+_VUP_RS_LOGGED = False
+
+
+@functools.cache
+def _aiter_batched_gemm_bf16() -> Callable[..., Any] | None:
+    try:
+        from aiter.ops.triton.gemm.batched.batched_gemm_bf16 import (
+            batched_gemm_bf16,
+        )
+    except Exception:  # noqa: BLE001
+        return None
+    return batched_gemm_bf16
+
+
+def dcp_vup_bmm(x: torch.Tensor, w_uv: torch.Tensor, out: torch.Tensor) -> None:
+    """out[t, h, :] = x[t, h, :] @ w_uv[h]; x [T, H, L], w_uv [H, L, V],
+    out [T, H, V] (any strides the GEMM takes)."""
+    bgemm = _aiter_batched_gemm_bf16()
+    if (
+        bgemm is not None
+        and x.dtype == torch.bfloat16
+        and w_uv.dtype == torch.bfloat16
+        and w_uv.shape[1] % _DCP_VUP_BGEMM_CONFIG["BLOCK_SIZE_K"] == 0
+    ):
+        cfg = dict(_DCP_VUP_BGEMM_CONFIG)
+        cfg["SPLITK_BLOCK_SIZE"] = w_uv.shape[1]
+        bgemm(
+            x.transpose(0, 1),
+            w_uv.transpose(1, 2),
+            YQ=out.transpose(0, 1),
+            config=cfg,
+        )
+    else:
+        torch.bmm(x.transpose(0, 1), w_uv, out=out.transpose(0, 1))
+
+
+def dcp_vup_rs_combine(
+    cp_attn_out: torch.Tensor,
+    cp_attn_lse: torch.Tensor,
+    w_uv_all: torch.Tensor,
+    out: torch.Tensor,
+    comm: Any,
+    rank: int,
+    world_size: int,
+    is_lse_base_on_e: bool = True,
+    seq_lens: torch.Tensor | None = None,
+    query_start_loc: torch.Tensor | None = None,
+) -> bool:
+    """v_up-first DCP combine over the AITER IPC comm.
+
+    Args:
+        cp_attn_out: [B, >=H, L] partial latent output of all H = N * H/N heads
+            (extra padded heads are ignored).
+        cp_attn_lse: [B, >=H] partial LSE (any strides).
+        w_uv_all: [H, L, V] W_UV of all heads, in DCP-rank-major head order.
+        out: [B, H/N, V] output of this rank's heads (written in place).
+        comm: AITER CustomAllreduce (custom_all_gather / custom_reduce_scatter).
+        rank: this rank's index in the DCP group.
+        world_size: DCP world size N.
+        is_lse_base_on_e: whether the LSEs are natural-log based (else base 2).
+        seq_lens: optional [num_seqs] local seq lens; requests with 0 are empty
+            shards whose LSE is masked to -inf.
+        query_start_loc: optional [num_seqs + 1] query offsets; rows past
+            query_start_loc[num_seqs] are graph padding and masked to -inf.
+
+    Returns False, having done no device work, when the comm cannot take the
+    shapes; the decision depends only on shapes, so every rank takes the same
+    path.
+
+    """
+    B = cp_attn_out.shape[0]
+    H, L, V = w_uv_all.shape
+    N = world_size
+    if B == 0 or H % N != 0 or out.shape != (B, H // N, V):
+        return False
+    y = torch.empty((B, H, V), device=cp_attn_out.device, dtype=out.dtype)
+    lse = torch.empty((B, H), device=cp_attn_out.device, dtype=torch.float32)
+    if not (comm.should_custom_rs(y, 1) and comm.should_custom_ag(lse)):
+        return False
+
+    has_mask = _validate_dcp_empty_shard_args(seq_lens, query_start_loc)
+    num_seqs = seq_lens.shape[0] if has_mask and seq_lens is not None else 0
+    lse_in = cp_attn_lse[:, :H]
+    _dcp_vup_rs_mask_lse_kernel[(B,)](
+        lse_in,
+        lse,
+        seq_lens if has_mask else lse,
+        query_start_loc if has_mask else lse,
+        B,
+        num_seqs,
+        lse_in.stride(0),
+        lse_in.stride(1),
+        H=H,
+        H_POW2=triton.next_power_of_2(H),
+        HAS_MASK=has_mask,
+        NUM_SEQS_POW2=triton.next_power_of_2(max(num_seqs, 1)),
+    )
+    lse_all = comm.custom_all_gather(lse, dim=0)  # [N * B, H]
+    v = torch.empty_like(y)
+    dcp_vup_bmm(cp_attn_out[:, :H], w_uv_all, v)
+    HB = 16
+    _dcp_vup_rs_scale_kernel[(B, triton.cdiv(H, HB))](
+        v,
+        lse_all,
+        y,
+        B,
+        rank,
+        N=N,
+        H=H,
+        HB=HB,
+        V=V,
+        IS_BASE_E=is_lse_base_on_e,
+    )
+    if out.is_contiguous():
+        comm.custom_reduce_scatter(y, out, dim=1)
+    else:
+        tmp = torch.empty(out.shape, device=out.device, dtype=out.dtype)
+        comm.custom_reduce_scatter(y, tmp, dim=1)
+        out.copy_(tmp)
+    return True
+
+
 def get_dcp_workspace_max_num_tokens(vllm_config: VllmConfig) -> int:
     scheduler_config = vllm_config.scheduler_config
     # num_speculative_tokens also counts a diffusion canvas.
@@ -1542,6 +1774,18 @@ class MLADCPManager:
             use_pcp,
             vllm_config.kernel_config.enable_jit_warmup,
         )
+        # v_up-first reduce-scatter combine (see dcp_vup_rs_combine); the
+        # layer opts in per call through vup_rs_combine().
+        self.use_vup_rs = (
+            envs.VLLM_ROCM_DCP_VUP_RS
+            and current_platform.is_rocm()
+            and self.use_a2a
+            and self.direct_a2a is None
+            and not use_pcp
+            and self.group.world_size > 1
+        )
+        self._vup_rs_comm: Any = None
+        self._vup_rs_resolved = False
         if vllm_config.kernel_config.enable_jit_warmup and not self.use_a2a:
             _CORRECT_ATTN_CP_OUT_KERNEL.register_warmup(
                 vllm_config,
@@ -1603,6 +1847,60 @@ class MLADCPManager:
             cp_group=self.group,
             is_lse_base_on_e=is_lse_base_on_e,
         )
+
+    def _resolve_vup_rs_comm(self) -> Any:
+        if not self._vup_rs_resolved:
+            self._vup_rs_resolved = True
+            communicator = self.group.device_communicator
+            get_comm = getattr(communicator, "dcp_aiter_comm", None)
+            self._vup_rs_comm = get_comm() if get_comm is not None else None
+            if self._vup_rs_comm is None:
+                logger.warning_once(
+                    "VLLM_ROCM_DCP_VUP_RS is set but the DCP group has no AITER "
+                    "comm (needs VLLM_ROCM_DCP_AITER_ALLGATHER=1 and DCP ranks "
+                    "== TP ranks); keeping the a2a combine."
+                )
+        return self._vup_rs_comm
+
+    def vup_rs_combine(
+        self,
+        partial_output: torch.Tensor,
+        partial_lse: torch.Tensor,
+        w_uv_all: torch.Tensor,
+        out: torch.Tensor,
+        *,
+        seq_lens: torch.Tensor | None,
+        query_start_loc: torch.Tensor | None,
+    ) -> bool:
+        """Combine + v_up in one: writes this rank's [B, H/N, V] heads into
+        ``out``. Returns False (no device work done) if the caller must run
+        ``combine`` + its own v_up instead."""
+        if not self.use_vup_rs:
+            return False
+        comm = self._resolve_vup_rs_comm()
+        if comm is None:
+            return False
+        done = dcp_vup_rs_combine(
+            partial_output,
+            partial_lse,
+            w_uv_all,
+            out,
+            comm,
+            self.group.rank_in_group,
+            self.group.world_size,
+            is_lse_base_on_e=self.is_lse_base_on_e,
+            seq_lens=seq_lens,
+            query_start_loc=query_start_loc,
+        )
+        global _VUP_RS_LOGGED
+        if done and not _VUP_RS_LOGGED:
+            _VUP_RS_LOGGED = True
+            logger.info_once(
+                "DCP combine: v_up-first + AITER LSE all-gather + AITER "
+                "reduce-scatter (VLLM_ROCM_DCP_VUP_RS=1).",
+                scope="local",
+            )
+        return done
 
     def _direct_workspace_combine(
         self,

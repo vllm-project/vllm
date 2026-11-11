@@ -29,7 +29,12 @@ import pickle
 import weakref
 from collections import deque, namedtuple
 from collections.abc import Callable
-from contextlib import AbstractContextManager, contextmanager, nullcontext
+from contextlib import (
+    AbstractContextManager,
+    ExitStack,
+    contextmanager,
+    nullcontext,
+)
 from dataclasses import dataclass
 from datetime import timedelta
 from math import gcd
@@ -1691,6 +1696,18 @@ def _aiter_registers_graph_buffers(group: GroupCoordinator) -> bool:
     return comm is not None and comm.registers_graph_buffers
 
 
+# Extra communicators (objects with a ``capture()`` context manager) that
+# must see every graph capture, e.g. the aux-stream DCP AITER comm of the
+# Kimi-K3.1 DSA multi-stream path. Empty unless a model registers one.
+_EXTRA_GRAPH_CAPTURE_COMMS: list[Any] = []
+
+
+def register_graph_capture_comm(comm: Any) -> None:
+    """Enter ``comm.capture()`` around every ``graph_capture()`` window."""
+    if all(c is not comm for c in _EXTRA_GRAPH_CAPTURE_COMMS):
+        _EXTRA_GRAPH_CAPTURE_COMMS.append(comm)
+
+
 @contextmanager
 def graph_capture(device: torch.device, stream: torch.cuda.Stream | None = None):
     """`graph_capture` is a context manager which should surround the code that
@@ -1725,7 +1742,13 @@ def graph_capture(device: torch.device, stream: torch.cuda.Stream | None = None)
         pp.graph_capture(context),
         dp.graph_capture(context),
     ):
-        yield context
+        if not _EXTRA_GRAPH_CAPTURE_COMMS:
+            yield context
+        else:
+            with ExitStack() as extra:
+                for comm in _EXTRA_GRAPH_CAPTURE_COMMS:
+                    extra.enter_context(comm.capture())
+                yield context
 
 
 logger = init_logger(__name__)
@@ -2503,6 +2526,12 @@ def destroy_model_parallel():
     if _TP:
         _TP.destroy()
     _TP = None
+
+    for comm in _EXTRA_GRAPH_CAPTURE_COMMS:
+        close = getattr(comm, "close", None)
+        if close is not None:
+            close()
+    _EXTRA_GRAPH_CAPTURE_COMMS.clear()
 
     global _DCP
     if _DCP:

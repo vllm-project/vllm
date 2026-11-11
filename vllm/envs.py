@@ -140,6 +140,8 @@ if TYPE_CHECKING:
     VLLM_ROCM_MUSE_MOE_REDUCE_DTYPE: str = "fp32"
     VLLM_ROCM_MUSE_MOE_ONLINE_QUANT: str = ""
     VLLM_ROCM_DCP_AITER_ALLGATHER: bool = False
+    VLLM_ROCM_DCP_VUP_RS: bool = False
+    VLLM_ROCM_DSA_MULTISTREAM: bool = False
     VLLM_ROCM_MEM_HEADROOM_GIB: float = 0.0
     VLLM_ROCM_USE_AITER_LINEAR: bool = True
     VLLM_ROCM_USE_AITER_LINEAR_HIPBMM: bool = False
@@ -1325,6 +1327,20 @@ environment_variables: dict[str, Callable[[], Any]] = {
     # inputs AITER cannot take (e.g. large prefill gathers).
     "VLLM_ROCM_DCP_AITER_ALLGATHER": lambda: (
         os.getenv("VLLM_ROCM_DCP_AITER_ALLGATHER", "0").lower() in ("true", "1")
+    ),
+    # MLA DCP decode combine on ROCm: v_up projection first on all heads, then an
+    # all-gather of the LSE and an AITER IPC reduce-scatter of the LSE-scaled
+    # [T, H, V] output instead of the latent a2a combine + local-head v_up.
+    # Needs VLLM_ROCM_DCP_AITER_ALLGATHER (it borrows the TP group's AITER comm).
+    "VLLM_ROCM_DCP_VUP_RS": lambda: (
+        os.getenv("VLLM_ROCM_DCP_VUP_RS", "0").lower() in ("true", "1")
+    ),
+    # Kimi-K3.1 DSA on ROCm with DCP and the MXFP4 indexer: run the indexer
+    # chain, the DCP score all-gather, the top-k merge and the output-gate
+    # projection on an aux stream in FULL-graph decode, overlapped with the
+    # MLA Q path. The all-gather uses a second DCP-group AITER comm.
+    "VLLM_ROCM_DSA_MULTISTREAM": lambda: (
+        os.getenv("VLLM_ROCM_DSA_MULTISTREAM", "0").lower() in ("true", "1")
     ),
     # After KV cache and CUDA graph allocation, cap the torch caching
     # allocator so >= this many GiB of device memory stay free for ROCr queue
