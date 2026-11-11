@@ -7,8 +7,8 @@ sparse-MLA kernel pads its few local heads. ShardQ gives each TP rank a slice of
 the query tokens instead: the indexer scores only the rank's tokens, an
 all-to-all moves Q from [T, H / tp, D] to [T_rank, H, D], attention runs with
 all heads over the replicated KV cache, and a second all-to-all restores
-[T, H / tp, D_v]. Tokens split zigzag: each request cuts into ``2 * tp``
-chunks and rank ``r`` owns chunks ``r`` and ``2 * tp - 1 - r``, which balances
+[T, H / tp, D_v]. Tokens split zigzag: each request cuts into `2 * tp`
+chunks and rank `r` owns chunks `r` and `2 * tp - 1 - r`, which balances
 the causal work.
 
 Both exchanges push tokens straight into peers' symmetric-memory buffers with
@@ -44,7 +44,7 @@ if TYPE_CHECKING:
 @dataclass
 class ShardQMetadata:
     """This step's ShardQ: which TP rank attends which of the tokens after
-    ``num_decode_tokens`` head-sharded decode tokens (ids relative to the first
+    `num_decode_tokens` head-sharded decode tokens (ids relative to the first
     of them), and the forward_mqa metadata of this rank's tokens.
     """
 
@@ -68,8 +68,8 @@ def zigzag_split(query_lens: np.ndarray, world: int) -> tuple[np.ndarray, np.nda
     """Token ids grouped by owning rank (ascending within a rank), and each
     rank's token count.
 
-    world=4 splits each request into eight chunks, chunk ``i`` spanning
-    ``[floor(i * len / 8), floor((i + 1) * len / 8))``, and each rank gets an
+    world=4 splits each request into eight chunks, chunk `i` spanning
+    `[floor(i * len / 8), floor((i + 1) * len / 8))`, and each rank gets an
     early and a late chunk:
 
         full:  | 0 | 1 | 2 | 3 | 4 | 5 | 6 | 7 |
@@ -89,7 +89,7 @@ def zigzag_split(query_lens: np.ndarray, world: int) -> tuple[np.ndarray, np.nda
 
 
 class ShardQSplit(NamedTuple):
-    """Which TP rank attends which of the tokens after ``num_decode_tokens``
+    """Which TP rank attends which of the tokens after `num_decode_tokens`
     head-sharded decode tokens (ids relative to the first of them)."""
 
     num_decode_tokens: int
@@ -108,7 +108,7 @@ class ShardQSplit(NamedTuple):
 def build_shardq_split(
     common_attn_metadata: "CommonAttentionMetadata", vllm_config: "VllmConfig"
 ) -> ShardQSplit | None:
-    """This step's ``zigzag_split`` over the TP group of the tokens after the
+    """This step's `zigzag_split` over the TP group of the tokens after the
     decodes (requests of at most 1 + num_speculative_tokens tokens). None when
     too few tokens follow the decodes, none of their requests is longer than
     the top-k, or a rank would own no tokens.
@@ -155,8 +155,8 @@ def _shard_q_kernel(
     width,
     BLOCK: tl.constexpr,
 ):
-    """Push the q of token ``token_ids[rank_offsets[peer] + i]`` to token
-    ``i`` of rank ``peer``, at column ``dst_col``."""
+    """Push the q of token `token_ids[rank_offsets[peer] + i]` to token
+    `i` of rank `peer`, at column `dst_col`."""
     i = tl.program_id(0).to(tl.int64)
     peer = tl.program_id(1)
     start = tl.load(rank_offsets + peer)
@@ -180,8 +180,8 @@ def _unshard_out_kernel(
     width,
     BLOCK: tl.constexpr,
 ):
-    """Push head block ``j`` of local token ``p`` to rank ``j``, at the
-    token's index after the ``num_decode_tokens`` decode tokens."""
+    """Push head block `j` of local token `p` to rank `j`, at the
+    token's index after the `num_decode_tokens` decode tokens."""
     pid = tl.program_id(0)
     p = (pid // world).to(tl.int64)
     j = pid % world
@@ -228,7 +228,7 @@ def allocate_shardq_buffers(
     output_dtype: torch.dtype,
 ) -> None:
     """Allocate the worst-case exchange buffers, if the TP group has symmetric
-    memory. ``num_heads`` are a TP rank's."""
+    memory. `num_heads` are a TP rank's."""
     logger.info_once(
         "Sharding sparse MLA prefill steps of >= %d tokens across TP ranks by "
         "token (sparse_mla_shard_q).",
@@ -326,7 +326,7 @@ def unshard_out(
     out: torch.Tensor, metadata: ShardQMetadata, decode_out: torch.Tensor | None
 ) -> torch.Tensor:
     """This rank's token shard of the attention output [T_rank, world * H, D]
-    -> [T, H, D] head shards, after the head-sharded ``decode_out``."""
+    -> [T, H, D] head shards, after the head-sharded `decode_out`."""
     assert out[0].is_contiguous()
     world = get_tp_group().world_size
     num_local, heads, dim = out.shape[0], out.shape[1] // world, out.shape[2]

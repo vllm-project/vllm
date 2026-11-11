@@ -76,9 +76,9 @@ class CompletionOutput:
         lora_request: The LoRA request that was used to generate the output.
         spec_decode_metrics: Per-sequence speculative-decoding acceptance metrics,
             populated on finish when speculative decoding ran and
-            ``--per-request-spec-decode-metrics`` is enabled; None otherwise.
-            Surfaced in the response as ``metrics.speculative_decoding`` for
-            single-sequence (``n == 1``) requests.
+            `--per-request-spec-decode-metrics` is enabled; None otherwise.
+            Surfaced in the response as `metrics.speculative_decoding` for
+            single-sequence (`n == 1`) requests.
         weight_versions: Contiguous weight version spans over output-token indexes.
             Set on the final output only.
 

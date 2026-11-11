@@ -542,9 +542,8 @@ class UBatchRunner:
                 # Note the siblings are not told to unwind: microbatches hand
                 # control to each other, so one that dies mid-forward leaves
                 # the others parked on a handoff that never comes and the step
-                # hangs. The V1 runner behaves the same way; fixing it means
-                # changing the shared handoff protocol in ubatching.py, which
-                # is deliberately out of scope here.
+                # hangs. Fixing it means changing the handoff protocol in
+                # ubatching.py.
                 errors[ubatch_context.id] = e
                 # The sibling may wait on a hand-off forever: log before the join.
                 logger.exception("Microbatch %d failed", ubatch_context.id)

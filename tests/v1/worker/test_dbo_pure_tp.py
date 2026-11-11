@@ -95,8 +95,7 @@ def _config(tp=4, dp=1, ep=False, spec=False, mm=False, enc_dec=False):
         (dict(enc_dec=True), "multimodal"),
     ],
 )
-def test_dbo_unsupported_features(monkeypatch, kwargs, rejected):
-    monkeypatch.setenv("VLLM_USE_V2_MODEL_RUNNER", "1")
+def test_dbo_unsupported_features(kwargs, rejected):
     unsupported = VllmConfig._get_dbo_unsupported_features(_config(**kwargs))
     if rejected is None:
         assert unsupported == []

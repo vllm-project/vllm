@@ -187,7 +187,7 @@ def epilogue_from_quant_config(
 ) -> FlashInferMoeEpEpilogue:
     """Per-expert epilogue constants from the canonical quant config.
 
-    The weight global scales (``g1_alphas``/``g2_alphas``) become the fc1/fc2
+    The weight global scales (`g1_alphas`/`g2_alphas`) become the fc1/fc2
     alphas. Activations are quantized dynamically inside the megakernel, so the
     checkpoint's input scales drop out. MXFP4 checkpoints carry no global scales
     and keep the default epilogue. The alphas alias the layer's parameters, so
