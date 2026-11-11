@@ -30,10 +30,10 @@ def hf3fs_stats():
     return HF3FSKVConnectorStats()
 
 
-def _make_cuda_event():
-    """Return a real CUDA event when available, otherwise a MagicMock."""
-    if torch.cuda.is_available():
-        return torch.cuda.Event()
+def _make_event():
+    """Return a real accelerator event when available, otherwise a MagicMock."""
+    if torch.accelerator.is_available():
+        return torch.Event()
     return MagicMock()
 
 
@@ -71,7 +71,7 @@ class TestHf3fsMockClient:
         elem_size = torch.tensor([], dtype=dtype).element_size()
         numel = bytes_per_page // elem_size
         tensor_write = torch.arange(numel, dtype=dtype)
-        event = _make_cuda_event()
+        event = _make_event()
 
         results = client.batch_write([0], [tensor_write], event)
         assert results == [bytes_per_page], f"Write should succeed, got {results}"
@@ -108,7 +108,7 @@ class TestHf3fsMockClient:
         )
         numel = bytes_per_page // 4
         tensor = torch.ones(numel, dtype=torch.float32)
-        event = _make_cuda_event()
+        event = _make_event()
         results = client.batch_write([size], [tensor], event)  # OOB offset
         assert results[0] == -1, "Out-of-bounds write should return -1"
         client.close()
@@ -129,7 +129,7 @@ class TestHf3fsMockClient:
             for i in range(n)
         ]
         offsets = [i * bytes_per_page for i in range(n)]
-        event = _make_cuda_event()
+        event = _make_event()
 
         results = client.batch_write(offsets, tensors_write, event)
         assert all(r == bytes_per_page for r in results)
