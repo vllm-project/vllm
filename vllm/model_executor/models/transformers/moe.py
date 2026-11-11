@@ -308,6 +308,9 @@ class MoEMixin(MixtureOfExperts, Base):
 
         # Recursively fuse MoE layers
         def _recursive_replace(module: nn.Module, prefix: str):
+            # Decoder layers are fused later, in `_pre_decoder_layer_replace`
+            if module is self._decoder_layers:
+                return
             for child_name, child_module in module.named_children():
                 qual_name = maybe_prefix(prefix, child_name)
                 # Naive implementations will have experts as ModuleList
@@ -467,9 +470,10 @@ class MoEMixin(MixtureOfExperts, Base):
                     _recursive_replace(child_module, prefix=qual_name)
 
         _recursive_replace(self.model, prefix="model")
-        self.num_moe_layers = len(self.moe_layers)
+        self._pre_decoder_layer_replace = _recursive_replace
         # Continue with the replacement of layers in Base
         super().recursive_replace()
+        self.num_moe_layers = len(self.moe_layers)
         # GLUFuser likely fused shared_experts. The down projection after the GLU
         # normally immediately reduces but we want FusedMoE to handle the reduction.
         for hf_shared, down_name in shared_down_projs:
