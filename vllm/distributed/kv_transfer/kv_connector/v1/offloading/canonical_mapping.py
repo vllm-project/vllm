@@ -321,9 +321,10 @@ def _attention_byte_regions(
         return _packed_kv_regions(kv_cache, spec, head_shard, num_head_shards, cp_size)
     if shape == (num_blocks, 2, bs, heads, head_size):
         return _split_kv_regions(kv_cache, spec, head_shard, num_head_shards, cp_size)
-    # Kernel-split packed layout, e.g. FlashInfer on a pre-Blackwell GPU
-    # with manager block_size 128: (num_blocks * ratio, heads, kernel_bs,
-    # 2 * head_size), where ratio * kernel_bs == block_size.
+    # Kernel-split packed layout, e.g. FlashInfer outside SM10x (pre-Blackwell
+    # or SM12x, kernel blocks of 16/32/64) with manager block_size 128:
+    # (num_blocks * ratio, heads, kernel_bs, 2 * head_size), where
+    # ratio * kernel_bs == block_size.
     if (
         len(shape) == 4
         and shape[0] > num_blocks

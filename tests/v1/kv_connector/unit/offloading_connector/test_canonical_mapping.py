@@ -538,7 +538,8 @@ def test_derive_refuses_foreign_worker_groups():
 
 def _kernel_split_packed_nhd_cache(spec, kernel_bs: int) -> torch.Tensor:
     """Logical (num_blocks * ratio, heads, kernel_bs, 2 * head_size) over NHD
-    kernel pages — the FlashInfer pre-Blackwell split of a larger manager block.
+    kernel pages: the FlashInfer split of a larger manager block outside SM10x
+    (pre-Blackwell or SM12x).
     """
     assert spec.block_size % kernel_bs == 0
     ratio = spec.block_size // kernel_bs
