@@ -4,7 +4,7 @@ import asyncio
 import time
 import weakref
 from abc import ABC, abstractmethod
-from collections.abc import Mapping, Sequence
+from collections.abc import Callable, Mapping, Sequence
 from concurrent.futures import Executor, Future, ThreadPoolExecutor
 from contextlib import ExitStack
 from dataclasses import replace
@@ -48,6 +48,10 @@ from vllm.multimodal.processing import BaseMultiModalProcessor
 from vllm.multimodal.processing import ProcessorInputs as MMProcessorInputs
 from vllm.multimodal.registry import MultiModalTimingRegistry
 from vllm.tokenizers import TokenizerLike
+from vllm.tokenizers.segment_cache import (
+    SegmentTokenizerCache,
+    cached_chat_token_ids,
+)
 from vllm.utils.async_utils import make_async
 from vllm.utils.counter import AtomicCounter
 from vllm.utils.torch_utils import set_default_torch_num_threads
@@ -116,6 +120,43 @@ class BaseRenderer(ABC, Generic[_T]):
         self._finalizer = weakref.finalize(self, self._resources.close)
 
         self.tokenizer = tokenizer
+        self._tokenizer_cache: SegmentTokenizerCache | None = None
+        capacity_gb = getattr(config.model_config, "tokenizer_cache_gb", 0)
+        if (
+            tokenizer is not None
+            and capacity_gb > 0
+            and not config.model_config.is_multimodal_model
+            and not config.model_config.enable_prompt_embeds
+        ):
+            from transformers import TokenizersBackend
+
+            if isinstance(tokenizer, TokenizersBackend) and all(
+                getattr(type(tokenizer), method, None)
+                is getattr(TokenizersBackend, method, None)
+                for method in (
+                    "__call__",
+                    "_call_one",
+                    "encode",
+                    "encode_plus",
+                    "batch_encode_plus",
+                    "_encode_plus",
+                    "_batch_encode_plus",
+                    "_convert_encoding",
+                    "_get_padding_truncation_strategies",
+                    "set_truncation_and_padding",
+                )
+            ):
+                self._tokenizer_cache = SegmentTokenizerCache(tokenizer, capacity_gb)
+            if self._tokenizer_cache and not self._tokenizer_cache.enabled:
+                logger.warning(
+                    "Segment tokenizer cache disabled: %s",
+                    self._tokenizer_cache.disabled_reason,
+                )
+            elif self._tokenizer_cache is not None:
+                logger.info(
+                    "Segment tokenizer cache enabled (%.2f GiB per renderer).",
+                    capacity_gb,
+                )
 
         # Background multimodal warmup task (a future returned by
         # _mm_executor) so it overlaps engine-core initialization while
@@ -672,6 +713,11 @@ class BaseRenderer(ABC, Generic[_T]):
         tokenizer = self.get_tokenizer()
         want_offsets = self._wants_offsets(prompt, params)
         kwargs = params.get_encode_kwargs()
+        cache = getattr(self, "_tokenizer_cache", None)
+        if cache is not None and not want_offsets:
+            ids = cache.encode(prompt["prompt"], **kwargs)
+            if ids is not None:
+                return self._build_tokens_prompt(ids, prompt)
         if want_offsets:
             kwargs = {**kwargs, "return_offsets_mapping": True}
         encoding = tokenizer(prompt["prompt"], **kwargs)
@@ -680,6 +726,20 @@ class BaseRenderer(ABC, Generic[_T]):
             prompt,
             offset_mapping=encoding["offset_mapping"] if want_offsets else None,
         )
+
+    def _cached_chat_token_ids(
+        self,
+        render: Callable[..., Any],
+        chat_kwargs: dict[str, Any],
+    ) -> list[int] | None:
+        """Token ids from the segment cache, or ``None`` to run the template.
+
+        ``render`` must re-enter this renderer's chat entry point with
+        ``tokenize`` forced. Renderers whose tokenizer overrides
+        ``apply_chat_template`` (DeepSeek V4 / V3.2) call this so that the
+        cache is verified against the tokenizer's own ids before reuse.
+        """
+        return cached_chat_token_ids(self._tokenizer_cache, render, chat_kwargs)
 
     def _detokenize_prompt(self, prompt: TokensPrompt) -> TokensPrompt:
         tokenizer = self.get_tokenizer()
