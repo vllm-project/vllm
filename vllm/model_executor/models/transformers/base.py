@@ -477,7 +477,7 @@ class Base(
         module_lists = [m for n in names if isinstance(m := get(n), nn.ModuleList)]
         if len(module_lists) != 1:
             return None
-        # e.g. LongCat-Flash has two attention layers per entry
+        # Some models have multiple attention layers per entry
         layers = module_lists[0]
         return layers if len(layers) == self.text_config.num_hidden_layers else None
 
