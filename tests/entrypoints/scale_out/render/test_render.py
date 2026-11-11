@@ -13,6 +13,11 @@ import orjson
 import pytest
 import pytest_asyncio
 from fastapi.responses import JSONResponse
+from openai.types.chat import ChatCompletionMessageFunctionToolCallParam
+from tokenizers import Tokenizer
+from tokenizers.models import WordLevel
+from tokenizers.pre_tokenizers import Whitespace
+from transformers import LlamaConfig, TokenizersBackend
 
 from tests.utils import RemoteLaunchRenderServer
 from vllm.entrypoints.anthropic.protocol import (
@@ -434,6 +439,110 @@ async def client(server):
         base_url=server.url_for(""), timeout=30.0
     ) as http_client:
         yield http_client
+
+
+@pytest.fixture(scope="module")
+def tool_order_server(tmp_path_factory):
+    model = tmp_path_factory.mktemp("tool-result-order")
+    LlamaConfig(
+        architectures=["LlamaForCausalLM"],
+        vocab_size=7,
+        max_position_embeddings=128,
+    ).save_pretrained(model)
+    tokenizer = Tokenizer(
+        WordLevel(
+            {"[UNK]": 0, "<s>": 1, "</s>": 2, "A": 3, "B": 4, "7c92e1": 5, "3f84d6": 6},
+            unk_token="[UNK]",
+        )
+    )
+    tokenizer.pre_tokenizer = Whitespace()
+    TokenizersBackend(
+        tokenizer_object=tokenizer,
+        unk_token="[UNK]",
+        bos_token="<s>",
+        eos_token="</s>",
+        chat_template=(
+            "{% for message in messages %}"
+            "{% if message.role == 'assistant' %}"
+            "{% for call in message.tool_calls %}"
+            "{{ call.function.arguments.text }} {% endfor %}"
+            "{% elif message.role == 'tool' %}{{ message.content }} "
+            "{% endif %}{% endfor %}"
+        ),
+    ).save_pretrained(model)
+    args = [
+        "--served-model-name",
+        "tool-result-order",
+        "--max-model-len",
+        "128",
+        "--chat-template-content-format",
+        "string",
+    ]
+    with RemoteLaunchRenderServer(str(model), args) as remote_server:
+        yield remote_server
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("endpoint", ["chat/completions", "responses"])
+async def test_render_tool_results_follow_call_order(tool_order_server, endpoint):
+    """Both APIs must render A/B and B/A result histories identically."""
+    calls: list[ChatCompletionMessageFunctionToolCallParam] = [
+        {
+            "id": f"call_{label}",
+            "type": "function",
+            "function": {
+                "name": "echo_payload",
+                "arguments": json.dumps({"text": label}),
+            },
+        }
+        for label in ("A", "B")
+    ]
+    results = [
+        {"role": "tool", "tool_call_id": "call_A", "content": "7c92e1"},
+        {"role": "tool", "tool_call_id": "call_B", "content": "3f84d6"},
+    ]
+    async with httpx.AsyncClient(
+        base_url=tool_order_server.url_for(""), timeout=30.0
+    ) as client:
+        for batch in (results, results[::-1]):
+            user = {"role": "user", "content": "Return the receipts."}
+            if endpoint == "chat/completions":
+                history = {
+                    "messages": [
+                        user,
+                        {"role": "assistant", "tool_calls": calls},
+                        *batch,
+                    ]
+                }
+            else:
+                history = {
+                    "input": [
+                        user,
+                        *(
+                            {
+                                "type": "function_call",
+                                "call_id": call["id"],
+                                "name": call["function"]["name"],
+                                "arguments": call["function"]["arguments"],
+                            }
+                            for call in calls
+                        ),
+                        *(
+                            {
+                                "type": "function_call_output",
+                                "call_id": result["tool_call_id"],
+                                "output": result["content"],
+                            }
+                            for result in batch
+                        ),
+                    ]
+                }
+            response = await client.post(
+                f"/v1/{endpoint}/render",
+                json={"model": "tool-result-order", **history},
+            )
+            assert response.status_code == 200, response.text
+            assert response.json()["token_ids"] == [3, 4, 5, 6]
 
 
 @pytest.mark.asyncio

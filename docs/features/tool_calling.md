@@ -83,6 +83,18 @@ Remember that it's the caller's responsibility to:
 
 For more advanced usage, including parallel tool calls and different model-specific parsers, see the sections below.
 
+## Tool Results in Conversation History
+
+Return each tool result as a `role="tool"` message whose `tool_call_id` matches
+the corresponding assistant `tool_calls` entry's `id`.
+
+When parsing chat history, vLLM orders a complete, adjacent batch of tool results
+to match the assistant's call order. This preserves the association for templates
+that omit tool-call IDs. Reordering requires non-empty, unique IDs on both sides
+and an exact match between the call and result ID sets. Incomplete or ambiguous
+batches keep their received order, and results never move across another message.
+Result content and IDs are preserved.
+
 ## Named Function Calling
 
 vLLM supports named function calling in the chat completion API when the server runs a tool parser. Start the server with both `--enable-auto-tool-choice` and `--tool-call-parser`. vLLM loads the parser named by `--tool-call-parser` only when `--enable-auto-tool-choice` is also set. Without a loaded parser, a request with a named `tool_choice` returns HTTP 400. Requests to models in the official Mistral format and to gpt-oss models are not rejected by this check.
