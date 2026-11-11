@@ -74,6 +74,7 @@ class Glm5NextMegaMoEExperts(DeepGemmMegaMoEExperts):
         """Stage the checkpoint's float32 block scales of `name`. The kernel's
         `{name}_weight_scale` is derived from them and never loaded."""
         *outer, n, k = shape
+        assert self.weight_block_size is not None
         block_m, block_k = self.weight_block_size
         scale = torch.zeros(*outer, n // block_m, k // block_k, dtype=torch.float32)
         self.register_parameter(
@@ -216,6 +217,7 @@ class Glm5NextMegaMoEExperts(DeepGemmMegaMoEExperts):
         )
         # Power-of-two block scales requantize exactly; any other is rounded.
         if not torch.equal(block_scale, block_scale.log2().round().exp2()):
+            assert self.weight_block_size is not None
             logger.warning_once(
                 "GLM-5.3-Flash on the deep_gemm_mega_moe backend: the checkpoint's "
                 "%dx%d block-FP8 MoE scales are not all powers of two, so "
