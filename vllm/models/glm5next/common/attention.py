@@ -592,7 +592,9 @@ class Glm5NextMLAAttention(nn.Module):
         self, hidden_states: torch.Tensor, positions: torch.Tensor
     ) -> torch.Tensor:
         if self.sequence_parallel_input:
-            return self.forward_sequence_parallel(hidden_states, positions)
+            if positions.shape[0] >= 512:
+                return self.forward_sequence_parallel(hidden_states, positions)
+            hidden_states = sp_all_gather(hidden_states)[: positions.shape[0]]
         # The wrapper also runs the sparse indexer before MLA attention.
         return self.mla_attn(positions, hidden_states)
 
