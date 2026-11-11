@@ -156,13 +156,15 @@ def _k2(
 
 def compile_build(key) -> None:
     """Compiles one launch's kernel (a ``K2Build``, ``KdaPreBuild``,
-    ``MlaPreBuild``, ``MlaPostBuild`` or ``DsaAttnBuild``) without running it:
+    ``MlaPreBuild``, ``MlaPostBuild``, ``DsaAttnBuild`` or ``DsaPreBuild``)
+    without running it:
     FlyDSL's compile-only mode returns before the launch."""
     import os
 
     from vllm.models.kimi_k3.amd.specialized_decode.mono import layer as k2
     from vllm.models.kimi_k3.amd.specialized_decode.mono.attention import (
         dsa_attn,
+        dsa_pre,
         kda,
         mla,
         mla_back,
@@ -170,6 +172,7 @@ def compile_build(key) -> None:
 
     mod = {
         dsa_attn.DsaAttnBuild: dsa_attn,
+        dsa_pre.DsaPreBuild: dsa_pre,
         kda.KdaPreBuild: kda,
         k2.K2Build: k2,
         mla.MlaPreBuild: mla,
