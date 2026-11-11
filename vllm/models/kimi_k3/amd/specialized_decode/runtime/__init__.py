@@ -49,6 +49,9 @@ class DecodeConfig:
     # the most requests a step has (spec verify: ``step_reasons`` caps its rows;
     # regular decode: unbounded, steps past MAX_ROWS run vLLM's decode)
     max_num_seqs: int = 1
+    # the widths a FULL decode graph is captured for (``served_widths``); None:
+    # every width is built
+    served: tuple[int, ...] | None = None
 
     @property
     def widths(self) -> tuple[int, ...]:
@@ -57,9 +60,14 @@ class DecodeConfig:
         (vLLM captures no uniform decode graph wider than max_num_seqs x q), so an
         eager step never pads; a FULL replay pads whole requests the way vLLM's
         stock decode does. A regular-decode step wider than
-        min(max_num_seqs, MAX_ROWS) is none of them and runs vLLM's decode."""
+        min(max_num_seqs, MAX_ROWS) is none of them and runs vLLM's decode. With
+        `served`, only the captured widths are built: the others would run only in
+        eager steps, which run vLLM's decode instead."""
         rows = min(MAX_ROWS, self.max_num_seqs * self.q)
-        return tuple(range(self.q, rows + 1, self.q))
+        widths = range(self.q, rows + 1, self.q)
+        if self.served is None:
+            return tuple(widths)
+        return tuple(w for w in widths if w in self.served)
 
 
 def decode_backend(vllm_config) -> str:
@@ -104,6 +112,7 @@ def specialized_decode_config(vllm_config) -> DecodeConfig | None:
         m1=not m1,
         interleave=vllm_config.parallel_config.cp_kv_cache_interleave_size,
         max_num_seqs=vllm_config.scheduler_config.max_num_seqs,
+        served=served_widths(vllm_config) if spec is None else None,
     )
 
 
@@ -196,6 +205,10 @@ def unsupported(vllm_config) -> list[str]:
             "CPU weight offload",
         ),
         (vllm_config.weight_transfer_config is not None, "weight updates"),
+        (
+            spec is None and served_widths(vllm_config) == (),
+            f"plain decode without a FULL decode graph of <= {MAX_ROWS} requests",
+        ),
         # the kernels serve pure, uniform regular-decode or spec-verify steps
         (
             spec is not None and spec.num_speculative_tokens + 1 > MAX_ROWS,
@@ -323,6 +336,21 @@ def piecewise_graphs_only(vllm_config) -> bool:
     if mode is None or mode == CUDAGraphMode.NONE:
         return False
     return mode.decode_mode() != CUDAGraphMode.FULL
+
+
+def served_widths(vllm_config) -> tuple[int, ...] | None:
+    """The regular-decode widths (up to MAX_ROWS) a FULL decode graph is captured
+    for; None when decode is not captured as FULL graphs (every width is built)."""
+    from vllm.config import CUDAGraphMode
+
+    cc = vllm_config.compilation_config
+    mode = cc.cudagraph_mode
+    sizes = cc.decode_cudagraph_capture_request_sizes
+    if mode is None or mode == CUDAGraphMode.NONE or sizes is None:
+        return None
+    if mode.decode_mode() != CUDAGraphMode.FULL:
+        return None
+    return tuple(sorted({s for s in sizes if 1 <= s <= MAX_ROWS}))
 
 
 def layer_kinds(config) -> dict[int, str]:
