@@ -250,6 +250,7 @@ class QkvAttention:
         reason = cute_ops.unsupported_attn2(attn) or cute_ops.unsupported_projection(
             attn
         )
+        reason = reason or cute_ops.unsupported_kv_cache(attn.attn)
         if reason is None and (
             attn.use_attn_temperature_tuning or not attn.fused_qk_norm_rope_kv_insert
         ):
@@ -257,7 +258,6 @@ class QkvAttention:
         if reason is not None:
             raise ValueError(f"layer {layer.layer_idx}: {reason}")
         n = attn.qkv_proj.weight.shape[0]
-        cute_ops.prepare_qkv_front(n, BATCHES)
         qkv = _scratch(ctx, "qkv", (PREPARED_MAX, n), torch.bfloat16)
         out = _scratch(
             ctx,
@@ -270,10 +270,11 @@ class QkvAttention:
         # deployment's, so the captured launch fits every step); the split
         # merge's workspace is shared by the layers, which run in order, sized
         # for the full-attention layers' splits (a window only lowers them)
-        # and zeroed once (every launch leaves its counters zero).
+        # and zeroed once (every launch leaves its counters zero). Both
+        # kernels compile once the cache is bound (prepare_kv): its page size
+        # is the KV cache manager's.
         window = cute_ops.attn2_window(attn.attn.sliding_window, ctx.max_context)
         num_splits = cute_ops.attn2_splits(ctx.max_context, window, attn.num_kv_heads)
-        cute_ops.prepare_attn2(ctx.max_context, window, attn.num_kv_heads, num_splits)
         workspace = None
         if cute_ops.attn2_split_kernel(ctx.max_context, window):
             size = cute_ops.attn2_workspace_bytes(
@@ -301,16 +302,26 @@ class QkvAttention:
     def prepare_kv(self) -> None:
         from . import cute_ops
 
-        kv_cache = self.attn.attn.kv_cache
+        attention = self.attn.attn
+        kv_cache = attention.kv_cache
         if not isinstance(kv_cache, torch.Tensor) or kv_cache.numel() == 0:
             return
-        if not cute_ops.kv_cache_layout_ok(kv_cache, self.num_kv_heads):
+        if not cute_ops.kv_cache_layout_ok(attention, kv_cache):
             raise ValueError(
-                f"{self.layer_name}: KV cache {tuple(kv_cache.shape)} "
-                f"{kv_cache.stride()} {kv_cache.dtype} is not the 16-byte aligned "
-                f"bf16 [pages, {self.num_kv_heads}, 16, 128] layout with dense "
-                "pages the decode kernels read"
+                f"{self.layer_name}: {attention.kv_cache_dtype} KV cache "
+                f"{tuple(kv_cache.shape)} {kv_cache.stride()} {kv_cache.dtype} is "
+                f"not a layout of {self.num_kv_heads} KV heads the decode kernels "
+                "read (16-byte aligned dense pages of 16 or 32 slots)"
             )
+        layout = cute_ops.kv_layout(attention, kv_cache)
+        cute_ops.prepare_qkv_front(self.weight.shape[0], BATCHES, layout)
+        cute_ops.prepare_attn2(
+            self.max_context,
+            self.window,
+            self.num_kv_heads,
+            self.num_splits,
+            fmt=layout,
+        )
 
     def front_call(
         self, step: Step, x: torch.Tensor
@@ -336,6 +347,7 @@ class QkvAttention:
             kv_cache,
             self.num_kv_heads,
             self.qkv[: x.shape[0]],
+            cute_ops.kv_quant(self.attn.attn),
         ):
             return None
         return kv_cache, slot_mapping
@@ -352,6 +364,8 @@ class QkvAttention:
                 f"{self.layer_name}: the QKV front cannot take this step"
             )
         kv_cache, slot_mapping = call
+        # Read at the call: the scales are loaded after the build.
+        kv_quant = cute_ops.kv_quant(self.attn.attn)
         qkv = self.qkv[:b]
         cute_ops.launch_qkv_front(
             x,
@@ -362,6 +376,7 @@ class QkvAttention:
             kv_cache,
             qkv,
             self.eps,
+            kv_quant,
         )
         q, gate = cute_ops.split_qkv(qkv, self.num_kv_heads)
         decode = metadata.decode
@@ -378,6 +393,7 @@ class QkvAttention:
             window=self.window,
             num_splits=self.num_splits,
             workspace=self.workspace,
+            kv_quant=kv_quant,
         )
         return self.oproj.run(out, self.partial[:b])
 
