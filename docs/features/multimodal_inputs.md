@@ -903,11 +903,23 @@ vllm serve Qwen/Qwen3-VL-30B-A3B-Instruct \
   Because vLLM reserves GPU memory for these slots at startup, this value cannot
   be overridden per request. Benchmark before increasing it because each
   additional slot increases the GPU memory reservation.
+- `keyframe_sampling`: Unset by default, which keeps uniform sampling. Set it
+  to `"nearest"` to replace each uniform frame position with the closest
+  keyframe, keeping distinct frames in chronological order; if a video has too
+  few keyframes, it falls back to uniform positions for that video.
 
 ```bash
 # Example: explicitly use the recommended 2 hardware decoders
 vllm serve Qwen/Qwen3-VL-30B-A3B-Instruct \
   --media-io-kwargs '{"video": {"backend": "pynvvideocodec", "hw_decoders": 2}}'
+```
+
+To sample the keyframes nearest to the uniform frame positions:
+
+```bash
+vllm serve Qwen/Qwen3-VL-8B-Instruct \
+  --media-io-kwargs '{"video": {"backend": "pynvvideocodec", "keyframe_sampling": "nearest"}}' \
+  --mm-ipc-gpu-memory-gb 1
 ```
 
 #### Video Frame Recovery
