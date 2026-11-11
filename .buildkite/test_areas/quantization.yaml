@@ -51,8 +51,7 @@ steps:
       commands:
       # torchao is installed off the default path (see docker/Dockerfile.rocm).
       - export PYTHONPATH=/opt/quantization-deps$${PYTHONPATH:+:$$PYTHONPATH}
-      # The routed_mxfp8 cases fail on gfx942; deselected until the test is fixed for it.
-      - VLLM_TEST_FORCE_LOAD_FORMAT=auto pytest -v -s quantization/ --ignore quantization/test_blackwell_moe.py --ignore quantization/test_rocm_moe.py --deselect='tests/quantization/test_online_shared_expert_fusion.py::test_fse_online_quantization_routed_shared[nvfp4_routed_mxfp8_shared-routed_mxfp8]' --deselect='tests/quantization/test_online_shared_expert_fusion.py::test_fse_online_quantization_routed_shared[quark_nvfp4_routed_bf16_shared-routed_mxfp8]' --deselect='tests/quantization/test_online_shared_expert_fusion.py::test_fse_online_quantization_routed_shared[quark_nvfp4_routed_nvfp4_shared-routed_mxfp8]'
+      - VLLM_TEST_FORCE_LOAD_FORMAT=auto pytest -v -s quantization/ --ignore quantization/test_blackwell_moe.py --ignore quantization/test_rocm_moe.py
       - pytest -v -s rocm/test_moe_weight_replay.py
       - VLLM_ROCM_USE_AITER=1 VLLM_ROCM_USE_AITER_MOE=1 pytest -v -s rocm/test_moe_padding.py
 
