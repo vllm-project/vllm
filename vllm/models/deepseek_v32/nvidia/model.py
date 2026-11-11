@@ -91,12 +91,13 @@ class DeepseekV32DecoderLayer(torch.nn.Module):
             install()
         if self.replicate_attn and (
             parallel_config.use_sequence_parallel_moe
+            or parallel_config.enable_expert_parallel
             or parallel_config.decode_context_parallel_size > 1
             or parallel_config.prefill_context_parallel_size > 1
         ):
             raise NotImplementedError(
-                "VLLM_DSA_REPLICATE_ATTN is not supported with sequence-parallel "
-                "MoE or decode/prefill context parallelism."
+                "VLLM_DSA_REPLICATE_ATTN is not supported with expert parallelism, "
+                "sequence-parallel MoE or decode/prefill context parallelism."
             )
 
         self.self_attn = DeepseekV32Attention(
