@@ -20,7 +20,11 @@ from vllm.model_executor.kernels.attention.dsa.fused_mqa_topk import (
     get_fused_mqa_topk_workspaces,
     use_fused_mqa_topk,
 )
-from vllm.model_executor.layers.indexer_topk import get_indexer_topk
+from vllm.model_executor.layers.canonical_topk import canonicalize_topk_
+from vllm.model_executor.layers.indexer_topk import (
+    deterministic_sparse_topk,
+    get_indexer_topk,
+)
 from vllm.model_executor.layers.sparse_attn_indexer import (
     _merge_dcp_topk_global,
     as_fp32_logits,
@@ -482,6 +486,8 @@ def sparse_attn_indexer_kpool(
                             logits.stride(1),
                             select_k,
                         )
+                        if deterministic_sparse_topk():
+                            canonicalize_topk_(logits, topk_dst[rows], row_ends)
             # Local pool ids -> request-relative global pool ids.
             _merge_dcp_topk_global(
                 logits,
