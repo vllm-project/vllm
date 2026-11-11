@@ -222,3 +222,40 @@ def test_cpu_conv_state_layout_selection(
 
     CpuPlatform.check_and_update_config(config)
     assert os.environ.get(layout_env) == expected_layout
+
+
+@pytest.mark.parametrize(
+    (
+        "env_value",
+        "kv_cache_memory_bytes",
+        "expected_bytes",
+    ),
+    [
+        pytest.param(None, None, None, id="env-unset"),
+        pytest.param("", None, None, id="env-empty"),
+        pytest.param("0", None, None, id="env-zero-no-override"),
+        pytest.param("-1", None, None, id="env-negative-ignored"),
+        pytest.param("4", None, 4 * 1024**3, id="env-positive-applied"),
+        pytest.param("4", 50_000_000, 50_000_000, id="env-loses-to-explicit-bytes"),
+    ],
+)
+def test_cpu_kv_cache_space_env_var(
+    monkeypatch: pytest.MonkeyPatch,
+    env_value: str | None,
+    kv_cache_memory_bytes: int | None,
+    expected_bytes: int | None,
+) -> None:
+    if env_value is None:
+        monkeypatch.delenv("VLLM_CPU_KVCACHE_SPACE", raising=False)
+    else:
+        monkeypatch.setenv("VLLM_CPU_KVCACHE_SPACE", env_value)
+
+    cache_config = CacheConfig(kv_cache_memory_bytes=kv_cache_memory_bytes)
+    config = _cpu_config(
+        cache_config,
+        model_type="qwen3_5",
+        resolved_dtype="float32",
+    )
+
+    CpuPlatform.check_and_update_config(config)
+    assert cache_config.kv_cache_memory_bytes == expected_bytes
