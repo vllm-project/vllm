@@ -108,6 +108,19 @@ Frontier checkpoints run with a KV connector whose `kv_role` is `"kv_both"` and 
 
 The scheduler shows a connector only the block-aligned part of a local hit that ends inside a block, and lets a longer external hit replace the rest. A frontier hit is such a hit. When the connector's hit is longer, the frontier's partial page, state and ring block are dropped from the request's hit. The request then resumes at the state the load ends with. This applies to the native CPU offloading connector (`--kv-offloading-size`) like any other connector.
 
+## KV cache events
+
+A frontier's key is not a hash of its token range, so a consumer that rebuilds the prefix tree from `BlockStored` events can't place it. Frontier checkpoints therefore refuse KV cache events unless `kv_events_config.recovery_unit_events` is also set. With it, the scheduler also publishes:
+
+- `RecoveryUnitStored` when a state becomes resumable in every Mamba group, with `unit_hash`, `num_tokens`, whether it is a `frontier`, and the request's `session_id`. A block-boundary unit's hash is the block hash that its Mamba groups' `BlockStored` events carry.
+- `RecoveryUnitRemoved` when it stops being resumable, with a `cause`, the leaf-last `tier` it was last ranked in, and `num_blocks`, the blocks freed with it, when it leaves in the eviction that chose it.
+- A `BlockStored` for each frontier key in each group, with `kv_cache_spec_kind="frontier"`, empty `token_ids`, the frontier's length in tokens as `block_size`, and the request's block hash at the last hash-unit boundary before the frontier as `parent_block_hash`. With a prefix-match unit equal to the block size that is the hash before the frontier's partial block; with a smaller one it can lie inside the partial block. Its `BlockRemoved` follows when the key goes.
+- A `cause` on every `BlockRemoved` from the GPU block pool, one of `REMOVAL_CAUSES` in `vllm/distributed/kv_events.py`: `evicted-dead`, `evicted-interior`, `evicted-leaf` or `evicted-unranked` (chosen by GreedyDual-Size, by tier), `orphan`, `superseded`, `frontier`, `replaced` or `allocation`. Events from KV connectors and CPU offloading have none.
+
+A cause names the operation a removal started from, so everything an eviction takes with it, a frontier that shared one of its blocks for example, carries the eviction's cause; only the unit the eviction chose has `num_blocks`, and only if it leaves then (it stays while another block holds its key). One exception: when an allocation takes one block of a frontier, its key goes in its other groups too, and those keys and its unit carry `frontier`. A prefix cache reset publishes `AllBlocksCleared` only. The scheduler logs which groups are full attention, Mamba and indexer rings, so a consumer can tell pages from states by `group_idx`.
+
+Events never feed back into scheduling: the same requests are scheduled, hit and evicted with the option on or off. Without frontier checkpoints it changes nothing. A `BlockRemoved` with no cause encodes as before, but a consumer has to know the two new event tags before the option is turned on.
+
 ## Metrics
 
 `vllm:prefix_cache_hits` includes the tokens a frontier serves. `vllm:prefix_cache_frontier_hits` is registered only when `mamba_frontier_checkpoint` is on. It counts the part of those hits that lies past the block-aligned hit, which is what frontier checkpoints save. Re-admissions of preempted requests are not counted.
@@ -122,7 +135,7 @@ The scheduler shows a connector only the block-aligned part of a local hit that 
 - KV cache groups of full attention, Mamba and indexer rings only, at least one full-attention and one Mamba group, and every ring declaring `resume_catchup` (a sliding-window group, for example, is refused);
 - a KV connector, if any, with `kv_role="kv_both"` and `kv_load_failure_policy="recompute"`.
 
-It is refused with speculative decoding, ReplaySSM, KV cache events, and decode or prefill context parallelism.
+It is refused with speculative decoding, ReplaySSM, and decode or prefill context parallelism, and with KV cache events unless `kv_events_config.recovery_unit_events` is set.
 
 `prefix_cache_eviction="gds"` requires `mamba_frontier_checkpoint` and `prefill_cost_coefficients` with `d > 0` and `e >= 0`. `prefix_cache_leaf_last` requires `prefix_cache_eviction="gds"`. `prefix_cache_leaf_idle_seconds` (positive) requires `prefix_cache_leaf_last`.
 
@@ -132,6 +145,7 @@ The tests in `tests/v1/core/hybrid_checkpoint/` run on CPU. All but the graph te
 
 - `test_checkpoint_graph.py`: a removed unit's children move to its parent, branch points, and frontier keys that separate tokens, lengths and extra keys.
 - `test_frontier_checkpoints.py`: resuming at a frontier, catch-up inside an indexer group, decode-boundary states, evicting one block of a frontier, aborted requests, leaf replacement, a prefix-match unit smaller than the block, a KV connector hit longer than the frontier, and refused configurations.
+- `test_recovery_unit_events.py`: with `recovery_unit_events`, replaying the events gives exactly the units and frontier keys the cache holds, every removal has a cause, the events change no scheduling decision, and without frontier checkpoints the events are unchanged.
 - `test_gds_eviction.py`: GreedyDual-Size against LRU under memory pressure, a frontier pinned by a waiting request, an exhausted pool giving up the pins of the waiting queue's back first, the pool's consistency after every step of a seeded multi-session run, leaf-last tiers and idle demotion, and refused configurations.
 
 Elsewhere, `tests/v1/core/test_prefix_caching.py` checks the block pool's key-removal listener and eviction-policy hooks, and `tests/v1/core/prefix_cache/test_partial_prefix_cache_hits.py` checks that a chunk running past a partially hit block does not cache that block.

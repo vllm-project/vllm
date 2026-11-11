@@ -74,6 +74,8 @@ _PIN_UNITS = 1 << 18
 _PIN_REFRESH_S = 0.5
 # Leaf-last tiers, lowest first.
 _DEAD, _INNER, _LEAF = 0, 1, 2
+# Their names in KV cache events.
+TIER_NAMES = {_DEAD: "dead", _INNER: "interior", _LEAF: "leaf"}
 
 # (score, sequence, unit key or orphan block); the score is (score,), or
 # (tier, score) with leaf-last tiers. A unit's entry is current while the
@@ -155,6 +157,9 @@ class GreedyDualSizeEviction:
         self._pinned_at = float("-inf")
         self.num_evicted_units = 0
         self.num_evicted_blocks = 0
+        # The unit an eviction is dropping now, and the blocks it frees.
+        self.evicting: BlockHash | None = None
+        self.evicting_blocks = 0
         graph.observer = self
 
     # Graph events.
@@ -672,7 +677,8 @@ class GreedyDualSizeEviction:
                 heapq.heappop(heap)
                 self._orphans.discard(ref.block_id)
                 if self._orphan(ref):
-                    self.pool._maybe_evict_cached_block(ref)
+                    with self.pool.removing("orphan"):
+                        self.pool._maybe_evict_cached_block(ref)
                     return [ref]
                 continue
             unit = self.units.get(ref)
@@ -708,12 +714,17 @@ class GreedyDualSizeEviction:
             if b.ref_cnt == 0 and b.block_id not in kept
         ]
         self._drop(unit, orphans=False)
-        for b in shared:
-            assert b.block_hash is not None
-            group_id = get_group_id(b.block_hash)
-            self.pool.uncache_key(b, make_block_hash_with_group_id(unit.key, group_id))
-        for b in blocks:
-            self.pool._maybe_evict_cached_block(b)
+        self.evicting, self.evicting_blocks = unit.key, len(blocks)
+        with self.pool.removing(f"evicted-{TIER_NAMES.get(unit.tier, 'unranked')}"):
+            for b in shared:
+                assert b.block_hash is not None
+                group_id = get_group_id(b.block_hash)
+                self.pool.uncache_key(
+                    b, make_block_hash_with_group_id(unit.key, group_id)
+                )
+            for b in blocks:
+                self.pool._maybe_evict_cached_block(b)
+        self.evicting = None
         return blocks
 
     def _to_front(self, blocks: list[KVCacheBlock]) -> None:

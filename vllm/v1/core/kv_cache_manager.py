@@ -746,7 +746,8 @@ class KVCacheManager:
         for event in events:
             if not isinstance(event, BlockStored):
                 continue
-            if event.group_idx is None:
+            # A kind the block pool set itself (a frontier key's) stays.
+            if event.group_idx is None or event.kv_cache_spec_kind is not None:
                 continue
             if event.group_idx < 0 or event.group_idx >= len(
                 self.kv_cache_event_metadata

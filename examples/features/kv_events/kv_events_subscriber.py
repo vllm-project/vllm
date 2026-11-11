@@ -54,14 +54,40 @@ class BlockRemoved(KVCacheEvent):
     medium: str | None
     group_idx: int | None = None
     locality: str | None = None
+    # Set with kv_events_config.recovery_unit_events.
+    cause: str | None = None
 
 
 class AllBlocksCleared(KVCacheEvent):
     pass
 
 
+# Published with kv_events_config.recovery_unit_events (hybrid models with
+# mamba_frontier_checkpoint).
+class RecoveryUnitStored(KVCacheEvent):
+    unit_hash: ExternalBlockHash
+    num_tokens: int
+    frontier: bool
+    session_id: str | None = None
+
+
+class RecoveryUnitRemoved(KVCacheEvent):
+    unit_hash: ExternalBlockHash
+    num_tokens: int
+    frontier: bool
+    cause: str
+    tier: str | None = None
+    num_blocks: int | None = None
+
+
 class KVEventBatch(EventBatch):
-    events: list[BlockStored | BlockRemoved | AllBlocksCleared]
+    events: list[
+        BlockStored
+        | BlockRemoved
+        | AllBlocksCleared
+        | RecoveryUnitStored
+        | RecoveryUnitRemoved
+    ]
 
 
 def process_event(event_batch):

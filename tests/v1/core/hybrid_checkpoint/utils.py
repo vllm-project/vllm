@@ -181,6 +181,7 @@ def make_request(
     request_id: str,
     tokens: list[int],
     max_tokens: int,
+    session_id: str | None = None,
 ) -> Request:
     params = SamplingParams(max_tokens=max_tokens, ignore_eos=True)
     params.update_from_generation_config({}, EOS)
@@ -190,6 +191,7 @@ def make_request(
         sampling_params=params,
         pooling_params=None,
         block_hasher=get_request_block_hasher(scheduler.hash_block_size, sha256),
+        session_id=session_id,
     )
 
 
@@ -198,8 +200,9 @@ def add_request(
     request_id: str,
     tokens: list[int],
     max_tokens: int,
+    session_id: str | None = None,
 ) -> Request:
-    request = make_request(scheduler, request_id, tokens, max_tokens)
+    request = make_request(scheduler, request_id, tokens, max_tokens, session_id)
     scheduler.add_request(request)
     return request
 

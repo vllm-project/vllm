@@ -494,10 +494,15 @@ class Scheduler(SchedulerInterface):
         # Resumable Mamba states beyond the block grid.
         self.mamba_checkpoints: HybridCheckpointManager | None = None
         if self.cache_config.mamba_frontier_checkpoint:
+            recovery_unit_events = (
+                self.kv_events_config is not None
+                and self.kv_events_config.recovery_unit_events
+            )
             check_frontier_checkpoint_config(
                 vllm_config,
                 block_size=self.block_size,
                 enable_kv_cache_events=self.enable_kv_cache_events,
+                recovery_unit_events=recovery_unit_events,
             )
             eviction_cost = None
             if self.cache_config.prefix_cache_eviction == "gds":
@@ -511,6 +516,7 @@ class Scheduler(SchedulerInterface):
                 eviction_cost=eviction_cost,
                 eviction_leaf_last=self.cache_config.prefix_cache_leaf_last,
                 eviction_leaf_idle_s=self.cache_config.prefix_cache_leaf_idle_seconds,
+                unit_events=recovery_unit_events,
             )
             self.kv_cache_manager.checkpoints = self.mamba_checkpoints
 

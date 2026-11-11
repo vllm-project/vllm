@@ -49,6 +49,14 @@ class KVEventsConfig:
     this topic to receive events.
     """
 
+    recovery_unit_events: bool = False
+    """With `mamba_frontier_checkpoint`: also publish the recovery units of
+    the hybrid checkpoint manager (`RecoveryUnitStored`, `RecoveryUnitRemoved`
+    with the eviction tier), frontier keys as `BlockStored`/`BlockRemoved`, and
+    the cause of every `BlockRemoved`. Frontier checkpoints refuse KV cache
+    events without it, since their keys are not hashes of their token ranges.
+    """
+
     def __post_init__(self):
         if self.publisher is None:
             self.publisher = "zmq" if self.enable_kv_cache_events else "null"

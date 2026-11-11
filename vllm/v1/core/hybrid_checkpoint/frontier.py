@@ -128,7 +128,11 @@ class FrontierIndex:
         anchor = request.block_hashes[h - 1] if h else None
         for group_id, block in blocks.items():
             self.pool.cache_block_under_key(
-                block, make_block_hash_with_group_id(key, group_id), num_tokens
+                block,
+                make_block_hash_with_group_id(key, group_id),
+                num_tokens,
+                request,
+                anchor,
             )
         start = max(h * self.hash_block_size, num_tokens - _SUFFIX)
         suffix = tuple(request.all_token_ids[start:num_tokens])
@@ -384,16 +388,17 @@ class FrontierIndex:
                 if not lengths:
                     del self._index[entry.anchor]
         cached = self.pool.cached_block_hash_to_block
-        for group_id, block in entry.blocks.items():
-            key = make_block_hash_with_group_id(entry.key, group_id)
-            if not cached.contain(key, block.block_id):
-                continue
-            if block.block_hash != key:
-                # A page that stays cached under the request's own key.
-                self.pool.uncache_key(block, key)
-            else:
-                self.pool._maybe_evict_cached_block(block)
-                self.to_front(block)
+        with self.pool.removing("frontier"):
+            for group_id, block in entry.blocks.items():
+                key = make_block_hash_with_group_id(entry.key, group_id)
+                if not cached.contain(key, block.block_id):
+                    continue
+                if block.block_hash != key:
+                    # A page that stays cached under the request's own key.
+                    self.pool.uncache_key(block, key)
+                else:
+                    self.pool._maybe_evict_cached_block(block)
+                    self.to_front(block)
         self.num_removed += 1
 
     def to_front(self, block: KVCacheBlock) -> None:

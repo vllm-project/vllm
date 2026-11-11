@@ -1,7 +1,8 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 import weakref
-from collections.abc import Callable, Iterable, Sequence
+from collections.abc import Callable, Iterable, Iterator, Sequence
+from contextlib import contextmanager
 from typing import Any, Protocol
 
 from vllm.distributed.kv_events import (
@@ -200,6 +201,23 @@ class BlockPool:
         ) = None
         # None keeps the free queue's LRU order.
         self.eviction_policy: CachedBlockEvictionPolicy | None = None
+        # With recovery_unit_events: frontier keys are published, and each
+        # BlockRemoved names the cause of the removal in progress
+        # ("allocation" when none is set).
+        self.removal_causes = False
+        self.removal_cause: str | None = None
+
+    @contextmanager
+    def removing(self, cause: str) -> Iterator[None]:
+        """Keys removed inside are removed for `cause`, unless an enclosing
+        removal set one first."""
+        outer = self.removal_cause
+        if outer is None:
+            self.removal_cause = cause
+        try:
+            yield
+        finally:
+            self.removal_cause = outer
 
     def get_cached_block(
         self, block_hash: BlockHash, kv_cache_group_ids: list[int]
@@ -298,7 +316,8 @@ class BlockPool:
                     and blk.block_hash_num_tokens < num_hash_tokens
                 )
                 removed_hashes = self._remove_cached_block_hashes(blk)
-                self._emit_block_removed_events(removed_hashes)
+                with self.removing("replaced"):
+                    self._emit_block_removed_events(removed_hashes)
                 promoted.extend(removed_hashes)
             self._insert_block_hash(
                 block_hash_with_group_id,
@@ -307,7 +326,9 @@ class BlockPool:
             )
             if new_hashes is not None:
                 new_hashes.append(maybe_convert_block_hash(block_hash))
-        self._notify_keys_removed(promoted)
+        if promoted:
+            with self.removing("replaced"):
+                self._notify_keys_removed(promoted)
 
         if self.enable_kv_cache_events:
             if num_cached_blocks == 0:
@@ -549,7 +570,8 @@ class BlockPool:
         removed_hashes: list[BlockHashWithGroupId] = []
         if replace_existing_hashes:
             removed_hashes = self._remove_cached_block_hashes(block)
-            self._emit_block_removed_events(removed_hashes)
+            with self.removing("replaced"):
+                self._emit_block_removed_events(removed_hashes)
             already_cached = False
         elif (
             not already_cached
@@ -558,13 +580,16 @@ class BlockPool:
             and block.block_hash_num_tokens < num_hash_blocks * self.hash_block_size
         ):
             removed_hashes = self._remove_cached_block_hashes(block)
-            self._emit_block_removed_events(removed_hashes)
+            with self.removing("replaced"):
+                self._emit_block_removed_events(removed_hashes)
         self._insert_block_hash(
             block_hash_with_group_id,
             block,
             num_tokens=num_hash_blocks * self.hash_block_size,
         )
-        self._notify_keys_removed(removed_hashes)
+        if removed_hashes:
+            with self.removing("replaced"):
+                self._notify_keys_removed(removed_hashes)
         if self.enable_kv_cache_events and not already_cached:
             parent_hash, block_start = self._get_partial_block_parent_hash_and_start(
                 request, num_tokens
@@ -616,12 +641,40 @@ class BlockPool:
         block: KVCacheBlock,
         block_hash_with_group_id: BlockHashWithGroupId,
         num_tokens: int,
+        request: Request | None = None,
+        parent_block_hash: BlockHash | None = None,
     ) -> None:
         """Make `block` reachable under a key that is not a hash of its own
-        token range (a Mamba frontier checkpoint's key). No KV cache event is
-        published: frontier checkpoints refuse KV cache events."""
+        token range (a Mamba frontier checkpoint's key).
+
+        With `removal_causes` (recovery_unit_events) the key is published as a
+        `BlockStored` of kind "frontier" with no token ids, the frontier's
+        length in tokens as its block size, linked to `parent_block_hash`.
+        Otherwise no event is published: frontier checkpoints refuse KV cache
+        events without recovery_unit_events."""
         assert not block.is_null
         self._insert_block_hash(block_hash_with_group_id, block, num_tokens=num_tokens)
+        if self.enable_kv_cache_events and self.removal_causes:
+            self.kv_event_queue.append(
+                BlockStored(
+                    block_hashes=[
+                        maybe_convert_block_hash(
+                            get_block_hash(block_hash_with_group_id)
+                        )
+                    ],
+                    parent_block_hash=maybe_convert_block_hash(parent_block_hash)
+                    if parent_block_hash is not None
+                    else None,
+                    token_ids=[],
+                    block_size=num_tokens,
+                    lora_id=None,
+                    medium=self.medium,
+                    lora_name=None,
+                    group_idx=get_group_id(block_hash_with_group_id),
+                    kv_cache_spec_kind="frontier",
+                    session_id=request.session_id if request is not None else None,
+                )
+            )
 
     def uncache_key(
         self,
@@ -635,6 +688,8 @@ class BlockPool:
         if not keys:
             del self.cached_block_hashes_by_block[block.block_id]
         self.cached_block_hash_to_block.pop(block_hash_with_group_id, block.block_id)
+        if self.removal_causes:
+            self._emit_block_removed_events([block_hash_with_group_id])
         self._notify_keys_removed([block_hash_with_group_id])
 
     def _get_partial_block_hash(
@@ -689,12 +744,14 @@ class BlockPool:
     ) -> None:
         if not self.enable_kv_cache_events:
             return
+        cause = (self.removal_cause or "allocation") if self.removal_causes else None
         for block_hash in block_hashes:
             self.kv_event_queue.append(
                 BlockRemoved(
                     block_hashes=[maybe_convert_block_hash(get_block_hash(block_hash))],
                     medium=self.medium,
                     group_idx=get_group_id(block_hash),
+                    cause=cause,
                 )
             )
 

@@ -23,8 +23,13 @@ import math
 from collections.abc import Callable, Iterable
 from typing import TYPE_CHECKING, Any
 
+from vllm.distributed.kv_events import RecoveryUnitRemoved, RecoveryUnitStored
+from vllm.logger import init_logger
 from vllm.v1.core.hybrid_checkpoint.cost import PrefillCostModel
-from vllm.v1.core.hybrid_checkpoint.eviction import GreedyDualSizeEviction
+from vllm.v1.core.hybrid_checkpoint.eviction import (
+    TIER_NAMES,
+    GreedyDualSizeEviction,
+)
 from vllm.v1.core.hybrid_checkpoint.frontier import FrontierIndex, HitBlocks
 from vllm.v1.core.hybrid_checkpoint.units import CheckpointGraph
 from vllm.v1.core.kv_cache_utils import (
@@ -34,6 +39,7 @@ from vllm.v1.core.kv_cache_utils import (
     get_block_hash,
     get_group_id,
     make_block_hash_with_group_id,
+    maybe_convert_block_hash,
 )
 from vllm.v1.kv_cache_interface import CircularBufferSpec
 
@@ -43,6 +49,8 @@ if TYPE_CHECKING:
     from vllm.v1.core.kv_cache_manager import KVCacheBlocks
     from vllm.v1.core.single_type_kv_cache_manager import MambaManager
     from vllm.v1.request import Request
+
+logger = init_logger(__name__)
 
 
 def layout_groups(
@@ -96,6 +104,7 @@ def check_frontier_checkpoint_config(
     *,
     block_size: int,
     enable_kv_cache_events: bool,
+    recovery_unit_events: bool = False,
 ) -> None:
     """Raise unless frontier checkpoints can run with this configuration."""
     cache = vllm_config.cache_config
@@ -126,8 +135,8 @@ def check_frontier_checkpoint_config(
             "a KV connector, if any, with kv_role 'kv_both' and "
             "kv_load_failure_policy 'recompute'"
         )
-    elif enable_kv_cache_events:
-        refusal = "no KV cache events (enable_kv_cache_events)"
+    elif enable_kv_cache_events and not recovery_unit_events:
+        refusal = "no KV cache events, or kv_events_config.recovery_unit_events"
     elif (
         parallel.decode_context_parallel_size != 1
         or parallel.prefill_context_parallel_size != 1
@@ -151,6 +160,10 @@ class HybridCheckpointManager:
         eviction_leaf_last: GreedyDual-Size evicts inner units before leaves.
         eviction_leaf_idle_s: With `eviction_leaf_last`, a leaf unused this
             long ranks as inner.
+        unit_events: With KV cache events on, publish recovery units
+            (`RecoveryUnitStored`, `RecoveryUnitRemoved`), frontier keys and
+            the cause of every `BlockRemoved`
+            (`kv_events_config.recovery_unit_events`).
 
     """
 
@@ -162,6 +175,7 @@ class HybridCheckpointManager:
         eviction_cost: PrefillCostModel | None,
         eviction_leaf_last: bool = False,
         eviction_leaf_idle_s: float | None = None,
+        unit_events: bool = False,
     ) -> None:
         pages, states, rings = layout_groups(coordinator)
         managers = coordinator.single_type_managers
@@ -205,6 +219,17 @@ class HybridCheckpointManager:
         self._catching_up: set[str] = set()
         self.num_scratch_skipped = 0
         self.num_scratch_dropped = 0
+        self.unit_events = unit_events and self.pool.enable_kv_cache_events
+        self.pool.removal_causes = self.unit_events
+        if self.unit_events:
+            # Consumers tell KV pages from states by group index.
+            logger.info(
+                "Recovery unit events on; KV cache groups: full attention %s, "
+                "Mamba %s, indexer rings %s",
+                pages,
+                states,
+                rings,
+            )
         self.pool.key_removal_listener = self.keys_removed
         self.pool.eviction_policy = self.eviction
         for manager in self.mamba_managers:
@@ -233,12 +258,29 @@ class HybridCheckpointManager:
         )
 
     def state_cached(
-        self, key: BlockHash, num_tokens: int, request: "Request | None"
+        self,
+        key: BlockHash,
+        num_tokens: int,
+        request: "Request | None",
+        session_id: str | None = None,
     ) -> None:
         """A Mamba group cached `key`; the graph takes it once every group
-        has."""
+        has. `session_id` names the session of the published unit when
+        `request` is None."""
         if self.complete(key):
+            new = self.unit_events and key not in self.graph.units
             self.graph.inserted(key, num_tokens)
+            if new and (unit := self.graph.units.get(key)) is not None:
+                if request is not None:
+                    session_id = request.session_id
+                self.pool.kv_event_queue.append(
+                    RecoveryUnitStored(
+                        unit_hash=maybe_convert_block_hash(key),
+                        num_tokens=num_tokens,
+                        frontier=unit.frontier,
+                        session_id=session_id,
+                    )
+                )
         if self.eviction is not None and request is not None:
             self.eviction.record(key, num_tokens, request)
 
@@ -252,9 +294,30 @@ class HybridCheckpointManager:
                 continue
             key = get_block_hash(grouped)
             if key in self.graph.units and cached.get_one_block(grouped) is None:
-                self.graph.removed(key)
+                self._remove_unit(key)
         if self.eviction is not None:
             self.eviction.keys_removed(keys)
+
+    def _remove_unit(self, key: BlockHash) -> None:
+        """The graph drops the unit `key`; with `unit_events` it is published
+        with the cause of the removal and the tier it was last ranked in."""
+        unit = self.graph.units.get(key)
+        self.graph.removed(key)
+        if not self.unit_events or unit is None:
+            return
+        num_blocks = None
+        if self.eviction is not None and self.eviction.evicting == key:
+            num_blocks = self.eviction.evicting_blocks
+        self.pool.kv_event_queue.append(
+            RecoveryUnitRemoved(
+                unit_hash=maybe_convert_block_hash(key),
+                num_tokens=unit.num_tokens,
+                frontier=unit.frontier,
+                cause=self.pool.removal_cause or "allocation",
+                tier=TIER_NAMES.get(unit.tier),
+                num_blocks=num_blocks,
+            )
+        )
 
     def release(self, key: BlockHash) -> None:
         """Release a unit by a persistence rule: its keys go in every group.
@@ -264,16 +327,17 @@ class HybridCheckpointManager:
         if self.eviction is not None and unit is not None and not unit.frontier:
             self.graph.leaves.discard(key)
             return
-        self.graph.removed(key)
-        if self.frontiers.drop(key):
-            return
-        cached = self.pool.cached_block_hash_to_block
-        for manager in self.mamba_managers:
-            grouped = make_block_hash_with_group_id(key, manager.kv_cache_group_id)
-            while (block := cached.get_one_block(grouped)) is not None:
-                if block.ref_cnt or not self.pool._maybe_evict_cached_block(block):
-                    break
-                self.frontiers.to_front(block)
+        with self.pool.removing("superseded"):
+            self._remove_unit(key)
+            if self.frontiers.drop(key):
+                return
+            cached = self.pool.cached_block_hash_to_block
+            for manager in self.mamba_managers:
+                grouped = make_block_hash_with_group_id(key, manager.kv_cache_group_id)
+                while (block := cached.get_one_block(grouped)) is not None:
+                    if block.ref_cnt or not self.pool._maybe_evict_cached_block(block):
+                        break
+                    self.frontiers.to_front(block)
 
     # Scheduler hooks.
     def begin_step(self) -> None:
@@ -530,7 +594,9 @@ class HybridCheckpointManager:
                     replace_existing_hashes=True,
                 )
                 if published is not None:
-                    self.state_cached(get_block_hash(published), boundary, None)
+                    self.state_cached(
+                        get_block_hash(published), boundary, None, request.session_id
+                    )
                     if leaf is None:
                         leaf = get_block_hash(published)
             entry = manager.decode_boundary_scratch.pop(request.request_id, None)

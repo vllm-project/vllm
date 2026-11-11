@@ -328,9 +328,9 @@ class CacheConfig:
     when any of its blocks is evicted. Requires prefix caching with Mamba
     "align" mode, Model Runner V2 and `prefix_cache_retention_interval` 0; a
     `prefix_match_unit` may be smaller than the block size. A KV connector
-    needs `kv_role` "kv_both" and `kv_load_failure_policy` "recompute". Not
-    supported with speculative decoding, KV cache events or context
-    parallelism."""
+    needs `kv_role` "kv_both" and `kv_load_failure_policy` "recompute". KV
+    cache events need `kv_events_config.recovery_unit_events`. Not supported
+    with speculative decoding or context parallelism."""
     prefix_cache_eviction: PrefixCacheEviction = "lru"
     """Which cached free blocks an allocation evicts first:
 

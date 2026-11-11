@@ -318,5 +318,8 @@ def test_speculative_decoding_is_refused():
 
 def test_kv_cache_events_are_refused():
     kv_events_config = KVEventsConfig(enable_kv_cache_events=True, publisher="null")
-    with pytest.raises(ValueError, match="needs no KV cache events"):
+    with pytest.raises(
+        ValueError,
+        match="needs no KV cache events, or kv_events_config.recovery_unit_events",
+    ):
         make_scheduler(kv_events_config=kv_events_config)

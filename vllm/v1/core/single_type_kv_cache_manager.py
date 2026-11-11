@@ -2077,7 +2077,8 @@ class MambaManager(SingleTypeKVCacheManager):
                 # end, which no step wrote into this column.
                 block = self.req_to_blocks[request.request_id][unwritten]
                 if not block.is_null and block.block_hash is not None:
-                    self.block_pool._maybe_evict_cached_block(block)
+                    with self.block_pool.removing("replaced"):
+                        self.block_pool._maybe_evict_cached_block(block)
             partial_hash = self._cache_partial_tail_block(
                 request, num_tokens, retention_interval=retention_interval
             )
@@ -2164,7 +2165,8 @@ class MambaManager(SingleTypeKVCacheManager):
             ):
                 # The transient state overwrites this slot, so neither it nor
                 # the full-block hash registered earlier this step is reusable.
-                self.block_pool._maybe_evict_cached_block(checkpoint_block)
+                with self.block_pool.removing("replaced"):
+                    self.block_pool._maybe_evict_cached_block(checkpoint_block)
                 return None
             if checkpoint_block.block_hash_num_tokens == checkpoint_position:
                 return None
