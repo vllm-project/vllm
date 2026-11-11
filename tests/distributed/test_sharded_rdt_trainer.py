@@ -15,10 +15,12 @@ test_sharded_rdt_producer.py.
 import itertools
 from dataclasses import asdict
 from functools import cached_property
+from types import SimpleNamespace
 
 import pytest
 import torch
 
+from tests.distributed.test_sharded_rdt_plan import consumer_engine
 from tests.distributed.test_weight_transfer import RecordingClient
 from vllm.distributed.weight_transfer import (
     ParamMeta,
@@ -26,6 +28,10 @@ from vllm.distributed.weight_transfer import (
     WeightTransferTrainerFactory,
 )
 from vllm.distributed.weight_transfer.base import layerwise_groups
+from vllm.distributed.weight_transfer.sharded_rdt_engine import (
+    ShardedRDTWeightTransferUpdateInfo,
+    _CallPlan,
+)
 from vllm.distributed.weight_transfer.sharded_rdt_trainer import (
     ShardedRDTTrainerInitInfo,
     ShardedRDTTrainerWeightTransferEngine,
@@ -71,10 +77,11 @@ class _FakeProducerServer:
     def inflight(self):
         return self._inflight_groups
 
-    def begin_sync(self, live_count, live_consumer_ids=None):
+    def begin_sync(self, live_count, live_consumer_ids=None, sync_idx=None):
         self.order.append("begin")
         self.live_count = max(1, int(live_count))
         self.live_ids = live_consumer_ids
+        self.sync_idx = sync_idx
 
     def publish_group(self, group_idx, entries):
         self.order.append("publish")
@@ -410,13 +417,12 @@ class TestLiveCountPlumbing:
 
     @staticmethod
     def _engine(num_consumers, world=2, rank=0):
-        engine = ShardedRDTTrainerWeightTransferEngine.__new__(
-            ShardedRDTTrainerWeightTransferEngine
+        engine = ShardedRDTTrainerWeightTransferEngine(
+            client=RecordingClient(),
+            source=object(),  # send_weights asserts a source is present
+            is_sender=rank == 0,
+            init_info=ShardedRDTTrainerInitInfo(rank=rank, num_consumers=num_consumers),
         )
-        engine._init_info = ShardedRDTTrainerInitInfo(
-            rank=rank, num_consumers=num_consumers
-        )
-        engine.source = object()  # send_weights asserts a source is present
         received: list = []
         engine._send_weights_inner = lambda count, ids: received.append((count, ids))
         return engine, received
@@ -455,6 +461,93 @@ class TestLiveCountPlumbing:
         engine.send_weights([6, 0, 2, 2])
         ((count, ids),) = got
         assert ids == [0, 2, 6] and count == len(ids)
+
+
+class TestSyncIndexPlumbing:
+    @staticmethod
+    def _worker(calls):
+        engine = consumer_engine()
+        engine._cached_plan = _CallPlan(chunks=[], pre_free=[0, 1])
+        engine._router = SimpleNamespace(
+            free_group=lambda group_idx, sync_idx: (
+                calls.append((group_idx, sync_idx)) or []
+            )
+        )
+        return engine
+
+    def test_worker_attaches_update_index_to_every_free_signal(self):
+        calls: list[tuple[int, int | None]] = []
+        self._worker(calls).receive_weights(
+            ShardedRDTWeightTransferUpdateInfo(sync_idx=4)
+        )
+        assert calls == [(0, 4), (1, 4)]
+
+    def test_default_update_sends_untagged_free_signals(self):
+        calls: list[tuple[int, int | None]] = []
+        self._worker(calls).receive_weights(ShardedRDTWeightTransferUpdateInfo())
+        assert calls == [(0, None), (1, None)]
+
+    @pytest.mark.parametrize("sync_idx", ["4", 4.0, True, None, -2])
+    def test_worker_rejects_a_malformed_update_index(self, sync_idx):
+        """A payload whose index is not an int at or above -1 fails the sync
+        with an error that names the field and the value, before any free
+        signal goes out; -1 is the untagged default, so it is not malformed."""
+        calls: list[tuple[int, int | None]] = []
+        with pytest.raises(ValueError) as excinfo:
+            self._worker(calls).receive_weights(
+                ShardedRDTWeightTransferUpdateInfo(sync_idx=sync_idx)
+            )
+        assert f"sync_idx={sync_idx!r}" in str(excinfo.value)
+        assert calls == []
+
+    @staticmethod
+    def _trainer(*, is_sender):
+        class _RecordingUpdates(RecordingClient):
+            def __init__(self):
+                super().__init__()
+                self.updates = []
+
+            def update_weights(self, update_info):
+                self.updates.append(update_info)
+                super().update_weights(update_info)
+
+        engine = ShardedRDTTrainerWeightTransferEngine(
+            client=_RecordingUpdates(),
+            source=SimpleNamespace(iter_full=lambda: iter(())),
+            is_sender=is_sender,
+            init_info=ShardedRDTTrainerInitInfo(
+                rank=0 if is_sender else 1, num_consumers=2
+            ),
+        )
+        producer_calls = []
+
+        def _rpc(method, *args):
+            producer_calls.append((method, args))
+            return [] if method == "end_sync" else None
+
+        engine._rpc = _rpc
+        return engine, producer_calls
+
+    def test_sender_uses_same_index_for_producers_and_workers(self):
+        engine, producer_calls = self._trainer(is_sender=True)
+        engine.send_weights()
+        engine.send_weights()
+
+        producer_indices = [
+            args[2] for method, args in producer_calls if method == "begin_sync"
+        ]
+        worker_indices = [update["sync_idx"] for update in engine.client.updates]
+        assert producer_indices == worker_indices == [0, 1]
+
+    def test_non_sender_increments_the_same_producer_sequence(self):
+        engine, producer_calls = self._trainer(is_sender=False)
+        engine.send_weights()
+        engine.send_weights()
+
+        assert [
+            args[2] for method, args in producer_calls if method == "begin_sync"
+        ] == [0, 1]
+        assert engine.client.updates == []
 
 
 def test_sharded_rdt_worker_init_info_carries_the_ownership_table(monkeypatch):
