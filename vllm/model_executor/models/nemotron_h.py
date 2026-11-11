@@ -602,6 +602,11 @@ class NemotronHModel(nn.Module, EagleModelMixin):
             from vllm.triton_utils.tp_synced_autotune import install
 
             install()
+            # Same for the kernels torch.compile generates: Inductor benchmarks
+            # configs that change numerics per process unless told not to.
+            import torch._inductor.config as inductor_config
+
+            inductor_config.deterministic = True
 
         self.vocab_size = config.vocab_size
 
