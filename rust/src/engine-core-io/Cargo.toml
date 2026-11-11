@@ -7,6 +7,7 @@ description = "The Rust engine core's side of the frontend protocol: converting 
 
 [dependencies]
 bytes = { workspace = true }
+futures = { workspace = true }
 tokio = { workspace = true }
 vllm-engine-core = { workspace = true }
 vllm-engine-core-client = { workspace = true }

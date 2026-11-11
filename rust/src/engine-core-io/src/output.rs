@@ -8,8 +8,8 @@
 //! messages, error outputs, ...) is encoded by Python and handed over as
 //! frames, through the same channel so that the order of messages is kept.
 
+use std::sync::Arc;
 use std::sync::mpsc as std_mpsc;
-use std::sync::{Arc, Condvar, Mutex};
 use std::thread;
 use std::time::Duration;
 
@@ -21,6 +21,8 @@ use vllm_engine_core_client::protocol::output::{
 };
 use zeromq::prelude::{Socket, SocketSend};
 use zeromq::{PushSocket, ZmqMessage};
+
+use crate::stopped::{Stopped, StoppedGuard};
 
 /// Where the engine core sends its output sockets.
 #[derive(Clone, Debug)]
@@ -65,23 +67,6 @@ pub struct OutputWriter {
     tx: mpsc::UnboundedSender<Message>,
     engine_index: u32,
     stopped: Arc<Stopped>,
-}
-
-/// Whether the thread stopped, set as it exits.
-#[derive(Default)]
-struct Stopped {
-    stopped: Mutex<bool>,
-    condvar: Condvar,
-}
-
-/// Sets [`Stopped`] when dropped, however the thread exits.
-struct StoppedGuard(Arc<Stopped>);
-
-impl Drop for StoppedGuard {
-    fn drop(&mut self) {
-        *self.0.stopped.lock().unwrap() = true;
-        self.0.condvar.notify_all();
-    }
 }
 
 impl OutputWriter {
@@ -160,18 +145,12 @@ impl OutputWriter {
     /// Wait for the thread to stop, for at most `timeout` if given; returns
     /// whether it stopped.
     pub fn join(&self, timeout: Option<Duration>) -> bool {
-        let stopped = self.stopped.stopped.lock().unwrap();
-        let condvar = &self.stopped.condvar;
-        let stopped = match timeout {
-            Some(timeout) => condvar.wait_timeout_while(stopped, timeout, |s| !*s).unwrap().0,
-            None => condvar.wait_while(stopped, |s| !*s).unwrap(),
-        };
-        *stopped
+        self.stopped.wait(timeout)
     }
 
     /// Whether the thread is still running.
     pub fn is_alive(&self) -> bool {
-        !*self.stopped.stopped.lock().unwrap()
+        !self.stopped.get()
     }
 }
 

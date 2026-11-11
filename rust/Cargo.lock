@@ -5837,6 +5837,7 @@ name = "vllm-engine-core-io"
 version = "0.1.0"
 dependencies = [
  "bytes",
+ "futures",
  "tokio",
  "vllm-engine-core",
  "vllm-engine-core-client",
