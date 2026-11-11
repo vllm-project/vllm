@@ -4,6 +4,7 @@ import copy
 import json
 
 import pytest
+import torch
 
 from vllm.parser.mistral import MistralToolCall
 from vllm.sampling_params import SamplingParams
@@ -178,6 +179,60 @@ def test_models(
         name_0="hf",
         name_1="vllm",
     )
+
+
+@pytest.mark.core_model
+def test_ministral3_nested_llama_4_scaling(vllm_runner):
+    """Nested scaling must match the authoritative top-level configuration."""
+    token_ids = None
+    prompt_logprobs = []
+    for top_level in (True, False):
+
+        def override_config(config, top_level=top_level):
+            text_config = config.get_text_config()
+            # Cross the scaling boundary with a short prompt to keep CI cheap.
+            text_config.rope_parameters = {
+                **(getattr(text_config, "rope_parameters", None) or {}),
+                "original_max_position_embeddings": 32,
+                "llama_4_scaling_beta": 0.2 if top_level else 0.1,
+            }
+            text_config.max_position_embeddings = int(
+                32 * text_config.rope_parameters.get("factor", 1)
+            )
+            text_config.llama_4_scaling = (
+                {"beta": 0.1, "original_max_position_embeddings": 32}
+                if top_level
+                else None
+            )
+            return config
+
+        with vllm_runner(
+            "mistralai/Ministral-3-3B-Instruct-2512-BF16",
+            dtype="bfloat16",
+            max_model_len=128,
+            enforce_eager=True,
+            enable_prefix_caching=False,
+            hf_overrides=override_config,
+            limit_mm_per_prompt={"image": 0},
+        ) as model:
+            if token_ids is None:
+                pattern = model.llm.get_tokenizer().encode(
+                    "The quick brown fox jumps over the lazy dog. "
+                )
+                token_ids = (pattern * 96)[:96]
+            output = model.llm.generate(
+                [{"prompt_token_ids": token_ids}],
+                SamplingParams(temperature=0.0, max_tokens=1, prompt_logprobs=0),
+            )[0]
+            assert output.prompt_logprobs is not None
+            assert len(output.prompt_logprobs) == len(token_ids)
+            scores = []
+            for token_id, logprobs in zip(token_ids[1:], output.prompt_logprobs[1:]):
+                assert logprobs is not None
+                scores.append(logprobs[token_id].logprob)
+            prompt_logprobs.append(torch.tensor(scores))
+
+    torch.testing.assert_close(prompt_logprobs[0], prompt_logprobs[1])
 
 
 @pytest.mark.parametrize("model", MISTRAL_FORMAT_MODELS)
