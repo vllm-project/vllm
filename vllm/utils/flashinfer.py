@@ -42,7 +42,7 @@ _bf16_gemm_tuning_buckets: tuple[int, ...] | None = None
 
 
 def init_flashinfer_bf16_tuning_buckets() -> None:
-    """Remember the CUDA graph capture sizes as bf16 GEMM tuning buckets.
+    """Remember capture sizes and max_num_batched_tokens as bf16 GEMM buckets.
 
     Called while the vLLM config is set (dispatch at model init), because the
     config is not guaranteed to be available when the GEMM runs.
@@ -56,7 +56,12 @@ def init_flashinfer_bf16_tuning_buckets() -> None:
         if vllm_config is not None
         else None
     )
-    _bf16_gemm_tuning_buckets = tuple(sorted(set(sizes))) if sizes else None
+    if not sizes:
+        _bf16_gemm_tuning_buckets = None
+        return
+    buckets = set(sizes)
+    buckets.add(vllm_config.scheduler_config.max_num_batched_tokens)
+    _bf16_gemm_tuning_buckets = tuple(sorted(buckets))
 
 
 def flashinfer_bf16_mm(
