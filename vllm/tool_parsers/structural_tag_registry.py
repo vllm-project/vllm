@@ -34,6 +34,7 @@ from xgrammar.structural_tag import (
     TriggeredTagsFormat,
 )
 
+from vllm import envs
 from vllm.entrypoints.openai.chat_completion.protocol import (
     ChatCompletionNamedToolChoiceParam,
     ChatCompletionToolsParam,
@@ -197,6 +198,37 @@ def resolve_tool_strictness(
     ]
 
 
+def _cap_tool_call_whitespace(tag: StructuralTag | None) -> StructuralTag | None:
+    """Cap consecutive whitespace at JSON value positions of a tool-call tag.
+
+    xgrammar's default (``max_whitespace_cnt=None``) admits an unbounded run
+    of whitespace at every JSON value position, so a grammar-masked token can
+    turn into generation that loops on whitespace until ``max_tokens``
+    (issue #67029). Applying the cap to the finished tag covers both builder
+    families with one hook: the vLLM-owned builders registered here and
+    xgrammar's builtin templates. A node that already sets a cap keeps it;
+    whitespace inside string values is not affected. The cap value is
+    ``VLLM_TOOL_CALL_MAX_WHITESPACE`` (``none`` restores the unbounded
+    default).
+    """
+    max_whitespace = envs.VLLM_TOOL_CALL_MAX_WHITESPACE
+    if tag is None or max_whitespace is None:
+        return tag
+
+    def visit(node: Any) -> None:
+        if isinstance(node, BaseModel):
+            if isinstance(node, JSONSchemaFormat) and node.max_whitespace_cnt is None:
+                node.max_whitespace_cnt = max_whitespace
+            for name in type(node).model_fields:
+                visit(getattr(node, name))
+        elif isinstance(node, (list, tuple)):
+            for item in node:
+                visit(item)
+
+    visit(tag.format)
+    return tag
+
+
 def get_model_structural_tag(
     model: str,
     tools: Sequence[ChatCompletionToolsParam | ResponsesTool] | None,
@@ -224,12 +256,14 @@ def get_model_structural_tag(
             dumped_tools,
             dumped_tool_choice,
         )
-        return _VLLM_STRUCTURAL_TAG_REGISTRY[model](
-            function_tools,
-            builtin_tools,
-            simplified_tool_choice,
-            reasoning,
-            token_suffix,
+        return _cap_tool_call_whitespace(
+            _VLLM_STRUCTURAL_TAG_REGISTRY[model](
+                function_tools,
+                builtin_tools,
+                simplified_tool_choice,
+                reasoning,
+                token_suffix,
+            )
         )
 
     if model not in XGRAMMAR_BUILTIN_STRUCTURAL_TAG_MODELS:
@@ -242,11 +276,13 @@ def get_model_structural_tag(
             f"tokens and cannot apply token_suffix={token_suffix!r}"
         )
 
-    return get_xgrammar_model_structural_tag(
-        model=model,
-        tools=dumped_tools,
-        tool_choice=dumped_tool_choice,
-        reasoning=reasoning,
+    return _cap_tool_call_whitespace(
+        get_xgrammar_model_structural_tag(
+            model=model,
+            tools=dumped_tools,
+            tool_choice=dumped_tool_choice,
+            reasoning=reasoning,
+        )
     )
 
 
