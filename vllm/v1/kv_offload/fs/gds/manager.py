@@ -19,7 +19,7 @@ from vllm.v1.kv_offload.base import (
 from vllm.v1.kv_offload.cpu.manager import CPUOffloadingManager
 from vllm.v1.kv_offload.cpu.policies.base import ChunkStatus
 from vllm.v1.kv_offload.file_mapper import FileMapper
-from vllm.v1.kv_offload.gds.common import GDSLoadStoreSpec
+from vllm.v1.kv_offload.fs.gds.common import GDSLoadStoreSpec
 
 logger = init_logger(__name__)
 

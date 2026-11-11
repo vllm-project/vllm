@@ -14,8 +14,8 @@ from vllm.v1.kv_offload.config import OffloadingConfig
 from vllm.v1.kv_offload.cpu.gpu_worker import CPUOffloadingWorker
 from vllm.v1.kv_offload.cpu.spec import CPUOffloadingSpec
 from vllm.v1.kv_offload.file_mapper import FileMapper
-from vllm.v1.kv_offload.gds.manager import GDSOffloadingManager
-from vllm.v1.kv_offload.gds.worker import GDSOffloadingWorker
+from vllm.v1.kv_offload.fs.gds.manager import GDSOffloadingManager
+from vllm.v1.kv_offload.fs.gds.worker import GDSOffloadingWorker
 
 
 class GDSOffloadingSpec(CPUOffloadingSpec):

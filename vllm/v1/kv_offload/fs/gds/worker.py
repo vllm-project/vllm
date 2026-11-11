@@ -6,12 +6,7 @@ import os
 
 from vllm.logger import init_logger
 from vllm.v1.kv_offload.file_mapper import FileMapper
-from vllm.v1.kv_offload.fs.worker import (
-    DEFAULT_MAX_THREADS,
-    FileOp,
-    ThreadPoolFSWorker,
-)
-from vllm.v1.kv_offload.gds.cufile_bindings import (
+from vllm.v1.kv_offload.fs.gds.cufile_bindings import (
     cuFileDriverClose,
     cuFileDriverOpen,
     cuFileHandleDeregister,
@@ -19,6 +14,11 @@ from vllm.v1.kv_offload.gds.cufile_bindings import (
     cuFileRead,
     cuFileWrite,
     open_for_gds,
+)
+from vllm.v1.kv_offload.fs.worker import (
+    DEFAULT_MAX_THREADS,
+    FileOp,
+    ThreadPoolFSWorker,
 )
 
 logger = init_logger(__name__)
