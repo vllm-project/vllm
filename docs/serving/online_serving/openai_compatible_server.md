@@ -122,10 +122,12 @@ The `X-Request-Id` HTTP request header can be enabled with
     ```
 
 The Completions, Chat Completions, and Responses APIs also support the
-`X-Vllm-Priority` request header, as does the scale-out
-[`/inference/v1/generate`](token_in_token_out.md) endpoint. Its value must be
-an integer and overrides the `priority` value in the JSON request body.
-Non-zero priorities require the server to use priority scheduling.
+`X-Vllm-Priority` request header. Its value must be an integer and overrides
+the `priority` value in the JSON request body. Non-zero priorities require the
+server to use priority scheduling. The scale-out
+[`/inference/v1/generate`](token_in_token_out.md) endpoint also reads the
+header in the Python frontend; in the Rust frontend it uses only the body
+`priority`.
 
 ```python
 completion = client.chat.completions.create(
