@@ -143,6 +143,8 @@ steps:
       - tests/models/test_utils.py
       - tests/models/hy_v4/test_triton_ihc.py
       - vllm/models/muse_spark/
+      - vllm/v1/worker/gpu/spec_decode/dspark/
+      - vllm/v1/worker/gpu/sample/gumbel.py
       - tests/models/test_muse_spark_logits_local.py
       - tests/models/test_muse_spark_rocm_shared_rope.py
       - tests/models/test_muse_spark_rocm_mono.py
