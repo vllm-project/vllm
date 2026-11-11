@@ -104,13 +104,6 @@ class GatedResidual(nn.Module):
                 return_bias=False,
                 disable_tp=True,
             )
-            # Checkpoints carry no padding rows and their output is discarded,
-            # so keep those rows deterministic instead of uninitialized.
-            if self.pad_size:
-                start = self.hc_lowrank + self.hc_count
-                self.input_mix_weight_down_block_inject.set_padding_rows(
-                    start, start + self.pad_size
-                )
         else:
             self.input_mix_weight_down = ReplicatedLinear(
                 self.hyper_hidden_size,

@@ -154,6 +154,7 @@ class LoggingStatLogger(StatLoggerBase):
         self.num_generation_tokens: int = 0
         self.num_corrupted_reqs: int = 0
         self.num_preemptions: int = 0
+        self.num_finished_reqs: int = 0
 
     def _enable_perf_stats(self) -> bool:
         return self.vllm_config.observability_config.enable_mfu_metrics
@@ -165,6 +166,7 @@ class LoggingStatLogger(StatLoggerBase):
         self.num_generation_tokens += iteration_stats.num_generation_tokens
         self.num_corrupted_reqs += iteration_stats.num_corrupted_reqs
         self.num_preemptions += iteration_stats.num_preempted_reqs
+        self.num_finished_reqs += len(iteration_stats.finished_requests)
 
     def _get_throughput(self, tracked_stats: int, now: float) -> float:
         # Compute summary metrics for tracked stats
@@ -252,12 +254,10 @@ class LoggingStatLogger(StatLoggerBase):
         if mm_cache_stats:
             self.mm_caching_metrics.observe(mm_cache_stats)
 
-    def _update_stats(self):
-        now = time.monotonic()
+    def _calc_throughput(self, now: float) -> None:
         prompt_throughput = self._get_throughput(self.num_prompt_tokens, now)
         generation_throughput = self._get_throughput(self.num_generation_tokens, now)
 
-        self._reset(now)
         self.engine_is_idle = not any(
             (
                 prompt_throughput,
@@ -266,15 +266,16 @@ class LoggingStatLogger(StatLoggerBase):
                 self.last_generation_throughput,
             )
         )
-        self.last_generation_throughput = generation_throughput
         self.last_prompt_throughput = prompt_throughput
+        self.last_generation_throughput = generation_throughput
 
     def aggregate_scheduler_stats(self):
         # noop for per engine loggers
         return
 
     def log(self):
-        self._update_stats()
+        now = time.monotonic()
+        self._calc_throughput(now)
         self.aggregate_scheduler_stats()
         # Avoid log noise on an idle production system
         log_fn = logger.debug if self.engine_is_idle else logger.info
@@ -299,6 +300,9 @@ class LoggingStatLogger(StatLoggerBase):
         if self.last_scheduler_stats.num_skipped_waiting_reqs > 0:
             log_parts.append("Deferred: %d reqs")
             log_args.append(self.last_scheduler_stats.num_skipped_waiting_reqs)
+
+        log_parts.append("Finished: %d reqs")
+        log_args.append(self.num_finished_reqs)
 
         kv_fetch = self.last_scheduler_stats.num_kv_fetch_reqs_by_stage
         if any(kv_fetch.values()):
@@ -344,6 +348,8 @@ class LoggingStatLogger(StatLoggerBase):
             self.cudagraph_logging.log(log_fn=log_fn)
         if self._enable_perf_stats():
             self.perf_metrics_logging.log(log_fn=log_fn, log_prefix=self.log_prefix)
+
+        self._reset(now)
 
     def log_engine_initialized(self):
         if self.vllm_config.cache_config.num_gpu_blocks:

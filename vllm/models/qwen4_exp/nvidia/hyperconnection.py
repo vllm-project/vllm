@@ -113,11 +113,6 @@ class GatedResidual(nn.Module):
             )
             # Checkpoints carry no padding rows, and their output is discarded.
             self.input_mix_weight_down_block_inject.shard_ids = (0, 1)
-            if self.pad_size:
-                start = self.hc_lowrank + self.hc_count
-                self.input_mix_weight_down_block_inject.set_padding_rows(
-                    start, start + self.pad_size
-                )
             weight = self.input_mix_weight_down_block_inject.weight
             self._use_hc_down_silu = (
                 weight.shape[1] % 8 == 0
