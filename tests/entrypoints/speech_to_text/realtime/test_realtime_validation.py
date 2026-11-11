@@ -3,6 +3,8 @@
 
 import asyncio
 import json
+import signal
+import threading
 import warnings
 from types import SimpleNamespace
 
@@ -10,11 +12,17 @@ import numpy as np
 import pybase64 as base64
 import pytest
 import websockets
+from fastapi import FastAPI
 
 from tests.utils import ROCM_EXTRA_ARGS, RemoteOpenAIServer
 from vllm.assets.audio import AudioAsset
+from vllm.entrypoints.launchers.launcher import create_server_socket, serve_http
+from vllm.entrypoints.speech_to_text.realtime.api_router import (
+    router as realtime_router,
+)
 from vllm.entrypoints.speech_to_text.realtime.connection import RealtimeConnection
 from vllm.multimodal.media.audio import load_audio
+from vllm.outputs import CompletionOutput, RequestOutput
 
 MISTRAL_FORMAT_ARGS = [
     "--tokenizer_mode",
@@ -346,3 +354,121 @@ async def test_commit_without_session_update_returns_error(model_name):
             event = await receive_event(ws, timeout=10.0)
             assert event["type"] == "error"
             assert "model_not_validated" in event.get("code", "")
+
+
+class _DrainingEngineClient:
+    """Engine stand-in whose drain lasts until the test releases it."""
+
+    def __init__(self):
+        self.vllm_config = SimpleNamespace(shutdown_timeout=30)
+        self.errored = False
+        self.is_running = True
+        self.should_keep_api_server_alive = False
+        self.drain_started = threading.Event()
+        self.drain_released = threading.Event()
+
+    def shutdown(self, timeout=None):
+        self.drain_started.set()
+        self.drain_released.wait(timeout=30)
+
+    def generate(self, prompt, sampling_params, request_id):
+        async def outputs():
+            async for _ in prompt:
+                completion = CompletionOutput(
+                    index=0,
+                    text=" lamb",
+                    token_ids=[7],
+                    cumulative_logprob=None,
+                    logprobs=None,
+                )
+                yield RequestOutput(
+                    request_id=request_id,
+                    prompt=None,
+                    prompt_token_ids=[1],
+                    prompt_logprobs=None,
+                    outputs=[completion],
+                    finished=False,
+                )
+
+        return outputs()
+
+    async def abort(self, request_id):
+        pass
+
+
+class _RealtimeServing:
+    def __init__(self, engine_client):
+        self.engine_client = engine_client
+        self.model_cls = SimpleNamespace(realtime_max_tokens=1)
+
+    def _is_model_supported(self, model):
+        return model == MODEL_NAME
+
+    async def transcribe_realtime(self, audio_stream, input_stream):
+        async for chunk in audio_stream:
+            yield chunk
+
+
+async def _wait_for(condition, timeout: float = 10.0) -> None:
+    async with asyncio.timeout(timeout):
+        while not condition():
+            await asyncio.sleep(0.01)
+
+
+@pytest.mark.asyncio
+@pytest.mark.skip_global_cleanup
+async def test_realtime_refuses_new_sessions_while_draining():
+    """After SIGTERM, a new session is closed with 1001 (Going Away) while a
+    session opened before the drain keeps transcribing until it finishes."""
+    engine_client = _DrainingEngineClient()
+    app = FastAPI()
+    app.include_router(realtime_router)
+    app.state.engine_client = engine_client
+    app.state.openai_serving_realtime = _RealtimeServing(engine_client)
+
+    sock = create_server_socket(("127.0.0.1", 0), reuse_port=False)
+    port = sock.getsockname()[1]
+    url = f"ws://127.0.0.1:{port}/v1/realtime"
+    audio = base64.b64encode(np.ones(160, dtype=np.int16).tobytes()).decode()
+
+    loop = asyncio.get_running_loop()
+    serve_task = asyncio.create_task(
+        serve_http(app, sock, host="127.0.0.1", port=port, log_level="warning")
+    )
+    try:
+        await _wait_for(lambda: getattr(app.state, "server", None) is not None)
+        await _wait_for(lambda: app.state.server.started)
+
+        async with websockets.connect(url) as open_ws:
+            assert (await receive_event(open_ws))["type"] == "session.created"
+            await send_event(open_ws, {"type": "session.update", "model": MODEL_NAME})
+            await send_event(open_ws, {"type": "input_audio_buffer.commit"})
+
+            signal.raise_signal(signal.SIGTERM)
+            await _wait_for(engine_client.drain_started.is_set)
+
+            async with websockets.connect(url) as new_ws:
+                with pytest.raises(websockets.ConnectionClosed):
+                    await receive_event(new_ws)
+                assert new_ws.close_code == 1001
+                assert new_ws.close_reason == "Server shutting down"
+
+            await send_event(
+                open_ws, {"type": "input_audio_buffer.append", "audio": audio}
+            )
+            await send_event(
+                open_ws, {"type": "input_audio_buffer.commit", "final": True}
+            )
+            delta = await receive_event(open_ws)
+            done = await receive_event(open_ws)
+            assert delta == {"type": "transcription.delta", "delta": " lamb"}
+            assert done["type"] == "transcription.done"
+            assert done["text"] == " lamb"
+
+        engine_client.drain_released.set()
+        await (await asyncio.wait_for(serve_task, timeout=10))
+    finally:
+        engine_client.drain_released.set()
+        serve_task.cancel()
+        loop.remove_signal_handler(signal.SIGTERM)
+        loop.remove_signal_handler(signal.SIGINT)
