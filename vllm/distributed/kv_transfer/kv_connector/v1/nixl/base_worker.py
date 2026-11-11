@@ -162,6 +162,10 @@ class NixlBaseConnectorWorker:
     # (WRITE) connector and a pull (READ) connector never handshake together.
     # Overridden by NixlPushConnectorWorker.
     _TRANSFER_MODE: str = "pull"
+    # Opt-in whole-row GQA regions (kv_connector_extra_config.whole_row_gqa);
+    # resolved against the KV cache layout in register_kv_caches.
+    _whole_row_gqa_requested: bool = False
+    _whole_row_gqa: bool = False
 
     # Only NixlPushConnector supports PP with HMA or packed KV caches.
     _supports_pp_hma = False
@@ -692,6 +696,13 @@ class NixlBaseConnectorWorker:
             vllm_config.kv_transfer_config.get_from_extra_config(
                 "bidirectional_kv_xfer", False
             )
+        )
+        # Opt-in: with a block-outermost layout, register a GQA cache's whole
+        # block row (all layers) as one region, so a block moves as one
+        # descriptor instead of one per layer. Peers whose rows differ (layout,
+        # block size, TP head count) are rejected at handshake.
+        self._whole_row_gqa_requested = bool(
+            vllm_config.kv_transfer_config.get_from_extra_config("whole_row_gqa", False)
         )
 
         self.kv_cache_config = kv_cache_config
@@ -1638,6 +1649,24 @@ class NixlBaseConnectorWorker:
         ):
             raise NotImplementedError("PP push with packed KV caches requires MLA")
 
+        # Whole-row GQA regions: every layer is plain full attention, all views
+        # share one storage and block stride, and nothing is host-staged.
+        self._whole_row_gqa = (
+            self._whole_row_gqa_requested
+            and self._has_packed_cache
+            and not self.use_mla
+            and not self._has_mamba
+            and not self._is_csa_linear
+            and not split_packed_rows
+            and not self.use_host_buffer
+            and _share_storage_and_block_stride(list(xfer_buffers.values()))
+            and all(
+                type(spec) is FullAttentionSpec for spec in self._layer_specs.values()
+            )
+        )
+        if self._whole_row_gqa_requested:
+            logger.info("NIXL whole-row GQA regions: %s", self._whole_row_gqa)
+
         region_layers: list[list[str]] = []
         packed_member_layouts: dict[str, tuple[int, int]] = {}
 
@@ -1793,6 +1822,19 @@ class NixlBaseConnectorWorker:
                     region_specs = [
                         (registration_base, storage_block_len, storage_block_len)
                     ]
+                elif (
+                    self._whole_row_gqa
+                    and storage_is_block_major
+                    and not is_host_resident
+                ):
+                    # The row holds every layer's page of this block, so all
+                    # layers map to this one region and dedup below folds them.
+                    # Advertise where this layer's page sits in the row, so a
+                    # per-layer peer can still address it (as for packed MLA).
+                    offset = cache.data_ptr() - registration_base
+                    assert offset >= 0 and offset + physical_page_size <= block_stride
+                    region_specs = [(registration_base, block_stride, block_stride)]
+                    packed_member_layouts[layer_name] = (offset, physical_page_size)
                 elif storage_is_block_major:
                     region_specs = [
                         (cache.data_ptr(), physical_page_size, block_stride)
@@ -2456,6 +2498,24 @@ class NixlBaseConnectorWorker:
         if meta.region_num_blocks is not None:
             meta.region_num_blocks = [n * split for n in meta.region_num_blocks]
 
+    def _whole_row_gqa_mismatch(self, meta: NixlAgentMetadata) -> str:
+        """Describe both sides of a rejected whole-row GQA handshake."""
+        local_page = next(iter(self._packed_member_layouts.values()))[1]
+        remote_layouts = meta.packed_member_layouts
+        if remote_layouts:
+            remote_page = next(iter(remote_layouts.values()))[1]
+        else:
+            remote_page = meta.block_lens[0] if meta.block_lens else 0
+        spec = next(iter(self._layer_specs.values()))
+        assert isinstance(spec, FullAttentionSpec)  # whole_row_gqa requires it
+        heads = spec.num_kv_heads
+        return (
+            f" whole_row_gqa: local=True, remote={bool(remote_layouts)}; "
+            f"KV heads per rank: local={heads}, "
+            f"remote={heads * remote_page // local_page}. Both sides need the "
+            "same whole_row_gqa setting and KV heads per rank (TP size)."
+        )
+
     def add_remote_agent(
         self,
         nixl_agent_meta: NixlAgentMetadata,
@@ -2534,10 +2594,13 @@ class NixlBaseConnectorWorker:
             and self._packed_member_layouts != nixl_agent_meta.packed_member_layouts
         ):
             # Whole rows transfer as one unit, so both sides must pack them alike.
-            raise RuntimeError(
+            msg = (
                 "Packed KV block rows differ between P and D. Use the same "
                 "VLLM_KV_CACHE_LAYOUT and block size on both sides."
             )
+            if self._whole_row_gqa:
+                msg += self._whole_row_gqa_mismatch(nixl_agent_meta)
+            raise RuntimeError(msg)
         pairs = self._pair_regions(nixl_agent_meta)
         if self._dst_pairs.setdefault(engine_id, pairs) != pairs:
             raise RuntimeError(
