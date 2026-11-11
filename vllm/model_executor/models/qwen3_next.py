@@ -28,6 +28,10 @@ from vllm.model_executor.layers.fused_moe.utils import (
     resolve_layer_fused_shared_expert,
 )
 from vllm.model_executor.layers.fused_qk_norm_rope import fused_qk_rmsnorm_rope_gate
+from vllm.model_executor.layers.fusion.quant_activation import (
+    QuantizedActivation,
+    get_input_quant_key,
+)
 from vllm.model_executor.layers.layernorm import (
     GemmaRMSNorm as Qwen3NextRMSNorm,
 )
@@ -50,12 +54,15 @@ from vllm.model_executor.layers.quantization import QuantizationConfig
 from vllm.model_executor.layers.quantization.utils.config_utils import (
     get_quark_ocp_mx_group_size,
 )
+from vllm.model_executor.layers.quantization.utils.quant_utils import (
+    kFp8StaticTensorSym,
+)
 from vllm.model_executor.layers.rotary_embedding import MRotaryEmbedding, get_rope
 from vllm.model_executor.layers.vocab_parallel_embedding import (
     ParallelLMHead,
     VocabParallelEmbedding,
 )
-from vllm.model_executor.models.qwen2_moe import Qwen2MoeMLP as Qwen3NextMLP
+from vllm.model_executor.models.qwen3_moe import Qwen3MoeMLP as Qwen3NextMLP
 from vllm.model_executor.models.utils import sequence_parallel_chunk
 from vllm.platforms import current_platform
 from vllm.sequence import IntermediateTensors
@@ -310,9 +317,6 @@ class Qwen3NextAttention(nn.Module):
         self.q_size = self.num_heads * self.head_dim
         self.kv_size = self.num_kv_heads * self.head_dim
         self.scaling = self.head_dim**-0.5
-        self.dual_chunk_attention_config = getattr(
-            config, "dual_chunk_attention_config", None
-        )
         self.attn_output_gate = getattr(config, "attn_output_gate", True)
 
         self.qkv_proj = QKVParallelLinear(
@@ -338,7 +342,6 @@ class Qwen3NextAttention(nn.Module):
             head_size=self.head_dim,
             max_position=config.max_position_embeddings,
             rope_parameters=config.rope_parameters,
-            dual_chunk_attention_config=self.dual_chunk_attention_config,
             mrope_positions_factor=mrope_positions_factor,
         )
 
@@ -360,12 +363,6 @@ class Qwen3NextAttention(nn.Module):
             quant_config=quant_config,
             prefix=f"{prefix}.attn",
             attn_type=attn_type,
-            **{
-                "layer_idx": extract_layer_index(prefix),
-                "dual_chunk_attention_config": self.dual_chunk_attention_config,
-            }
-            if self.dual_chunk_attention_config
-            else {},
         )
 
         self.q_norm = Qwen3NextRMSNorm(self.head_dim, eps=config.rms_norm_eps)
@@ -406,7 +403,7 @@ class Qwen3NextAttention(nn.Module):
         """Return post-norm, post-RoPE (q, k, v) and the pre-sigmoid gate.
 
         Dispatches between the fused Triton kernel and the eager
-        split + QK-RMSNorm + RoPE path. ``gate`` is ``None`` when output
+        split + QK-RMSNorm + RoPE path. `gate` is `None` when output
         gating is disabled.
         """
         if self.use_fused_qk_norm_rope_gate:
@@ -463,16 +460,26 @@ class Qwen3NextAttention(nn.Module):
     def forward(
         self,
         positions: torch.Tensor,
-        hidden_states: torch.Tensor,
+        hidden_states: torch.Tensor | QuantizedActivation,
     ) -> torch.Tensor:
         qkv, _ = self.qkv_proj(hidden_states)
         q, k, v, gate = self._project_qkv_gate(qkv, positions)
         attn_output = self.attn(q, k, v)
         if gate is not None:
-            if self.use_fused_output_gate:
-                attn_output = fused_sigmoid_gate_mul(attn_output, gate)
-            else:
+            if not self.use_fused_output_gate:
                 attn_output = attn_output * torch.sigmoid(gate)
+            elif get_input_quant_key(self.o_proj) == kFp8StaticTensorSym:
+                # Sigmoid gate, fused with o_proj's static FP8 input quant.
+                scale = self.o_proj.input_scale
+                attn_output = QuantizedActivation(
+                    data=fused_sigmoid_gate_mul(attn_output, gate, scale),
+                    scale=scale,
+                    orig_dtype=attn_output.dtype,
+                    orig_shape=attn_output.shape,
+                    quant_key=kFp8StaticTensorSym,
+                )
+            else:
+                attn_output = fused_sigmoid_gate_mul(attn_output, gate)
         output, _ = self.o_proj(attn_output)
         return output
 
