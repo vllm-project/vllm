@@ -406,6 +406,20 @@ def mfma_f4(a, b, acc, sa, sb, opsel_a=0):
     )
 
 
+def lds_barrier():
+    """A workgroup barrier ordering LDS only: ``fx.barrier``'s fences also
+    wait out every global load in flight (``vmcnt(0)``), draining a load
+    pipeline at each barrier. The memory clobber keeps the compiler from
+    moving LDS accesses across it."""
+    llvm.inline_asm(
+        res=None,
+        operands_=[],
+        asm_string="s_waitcnt lgkmcnt(0)\ns_barrier",
+        constraints="~{memory}",
+        has_side_effects=True,
+    )
+
+
 def sched_barrier():
     """Keep issued loads where they are (the scheduler would sink them to their
     use)."""

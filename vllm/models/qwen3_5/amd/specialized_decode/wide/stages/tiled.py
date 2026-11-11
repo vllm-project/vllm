@@ -45,9 +45,11 @@ from vllm.models.qwen3_5.amd.specialized_decode.wide.common.ops import (
     CM_NT,
     ld,
     ld_i32x4,
+    lds_barrier,
     lds_ld,
     lds_st,
     mfma_bf16,
+    sched_barrier,
     st,
     traced,
     zeros,
@@ -64,7 +66,7 @@ SLICES = 4  # MFMA K slices of a chunk
 CHUNK = 128  # K elements a staged step
 ROWS = WAVES * TILE  # weight rows a CTA covers per weight tile step
 XSTRIDE = CHUNK // 2 + 4  # LDS row stride in i32 words: 16 pad bytes stagger the banks
-DEPTH = 2  # chunks of loads in flight (2 beat 1 and 3 at 128 rows)
+DEPTH = 3  # chunks of loads in flight (3 beat 2 and 4 at 32-128 rows)
 UNROLL = 4  # K chunks up to which the chunk loop is unrolled
 RESIDENT_MAX = 16  # widths whose GEMM units stage their whole K slice once
 # widths past RESIDENT_MAX up to which a phase's weights are loaded in an
@@ -72,8 +74,6 @@ RESIDENT_MAX = 16  # widths whose GEMM units stage their whole K slice once
 # the loads at that phase's barrier cost more than the preload hides (measured
 # at 128 rows)
 PRELOAD_ROWS = 96
-
-
 def token_tiles(rows: int) -> int:
     return -(-rows // TILE)
 
@@ -304,7 +304,7 @@ class Gemm(TraceInvariant):
         rows: int,
         tid,
         k_total=None,
-        depth: int = DEPTH,
+        depth: int | None = None,
         chunks: int = 1,
     ):
         self.page = page
@@ -313,7 +313,7 @@ class Gemm(TraceInvariant):
         self.tid = i32(tid)
         self.lane = self.tid % i32(LANES)
         self.group = self.lane // i32(TILE)
-        self.depth = depth
+        self.depth = DEPTH if depth is None else depth
         self.k_total = k_total if k_total is not None and k_total % CHUNK else None
         self.resident = resident(rows)
         self.chunks = chunks
@@ -377,7 +377,7 @@ class Gemm(TraceInvariant):
         if loaded is None:
             loaded = issue_chunks(weights, [row], first + mine, per, self.group)
         self.put_resident(items, source, count)
-        fx.barrier()
+        lds_barrier()
         acc = [[zeros(4) for _ in range(self.tiles)]]
         for c in range(per):
             a = [weights.operands(w) for w in loaded[c]]
@@ -386,12 +386,12 @@ class Gemm(TraceInvariant):
                 a,
                 lambda t, c=c: self.operands_resident(mine + c, count, t, weights.koff),
             )
-        fx.barrier()
+        lds_barrier()
         # [wave][token tile][lane] 16-byte accumulators over the stage
         slot = lambda w, t: (i32(w * self.tiles + t) * i32(LANES) + self.lane) * i32(4)  # noqa: E731
         for t in range(self.tiles):
             lds_st(self.page + slot(wave, t), acc[0][t])
-        fx.barrier()
+        lds_barrier()
         out = []
         for t in range(self.tiles):
             parts = [
@@ -401,7 +401,7 @@ class Gemm(TraceInvariant):
             for w in range(1, WAVES):
                 total = [total[e] + parts[w][e] for e in range(4)]
             out.append(fx.Vector.from_elements(total, fx.Float32))
-        fx.barrier()
+        lds_barrier()
         return out
 
     def multiply(self, buf, a, acc, weights):
@@ -413,9 +413,10 @@ class Gemm(TraceInvariant):
         """The activation and weight loads of chunk ``first + min(i, count - 1)``;
         ``pre``: its weight loads, already issued (``preload``)."""
         chunk = first + (i < i32(count)).select(i, i32(count - 1))
+        xs = self.fill(source, chunk)
         if pre is None:
             pre = [weights.issue(r, chunk, self.group) for r in rows]
-        return self.fill(source, chunk), pre
+        return xs, pre
 
     def preload(self, weights, rows, first, count: int, mask=None):
         """The weight loads ``run`` stages outside its loop (every chunk when
@@ -461,7 +462,7 @@ class Gemm(TraceInvariant):
         else:
             loaded = list(pending[:win])
         self.put_resident(items, source, count)
-        fx.barrier()
+        lds_barrier()
         acc = [[zeros(4) for _ in range(self.tiles)] for _ in rows]
         for c in range(count):
             if c + win < count:
@@ -472,7 +473,7 @@ class Gemm(TraceInvariant):
             acc = self.mma_tiles(
                 acc, a, lambda t, c=c: self.operands_resident(c, count, t, weights.koff)
             )
-        fx.barrier()
+        lds_barrier()
         return acc
 
     def _resident_vectors(self, count: int):
@@ -553,7 +554,7 @@ class Gemm(TraceInvariant):
             for i in range(depth)
         ]
         self.put(i32(0), staged[0][0], source)
-        fx.barrier()
+        lds_barrier()
         for c in range(count):
             if c + depth < count:
                 nxt = c + depth
@@ -564,34 +565,47 @@ class Gemm(TraceInvariant):
             acc = self.multiply(i32(c % 2), a, acc, weights)
             if c + 1 < count:
                 self.put(i32(1 - c % 2), staged[c + 1][0], source)
-            fx.barrier()
+            lds_barrier()
         return acc
 
 
 @traced
 def _gemm_loop(gemm, source, weights, rows, first, count, pre):
-    """``Gemm.run`` for a long K: chunk ``c + depth`` issued while chunk ``c``
-    multiplies; the last ``depth`` iterations re-issue the last chunk."""
+    """``Gemm.run`` for a long K, unrolled by ``depth``: slot ``j`` holds the
+    loads of chunk ``c + j``; once chunk ``c`` has multiplied and chunk ``c +
+    1``'s activations are staged, its slot is re-issued with chunk ``c +
+    depth``, so a slot keeps its registers across iterations (a rotating ring
+    is copied at the back edge, and a copy waits out the loads in flight).
+    Chunks past ``count`` re-issue the last one."""
     depth = gemm.depth
+    if depth < 2:
+        raise ValueError("the K loop stages chunk c + 1 from the next slot")
     acc = [[zeros(4) for _ in range(gemm.tiles)] for _ in rows]
-    staged = [
+    slots = [
         gemm.stage(source, weights, rows, first, count, i32(i), pre[i])
         for i in range(depth)
     ]
-    a = staged[0][1]
-    gemm.put(i32(0), staged[0][0], source)
-    ring_xs = [s[0] for s in staged[1:]]
-    ring_a = [s[1] for s in staged[1:]]
-    fx.barrier()
-    for c in range(i32(0), i32(count), i32(1)):
-        new_xs, new_a = gemm.stage(source, weights, rows, first, count, c + i32(depth))
-        buf = c % i32(2)
-        acc = gemm.multiply(buf, [weights.operands(w) for w in a], acc, weights)
-        gemm.put(i32(1) - buf, (ring_xs + [new_xs])[0], source)
-        fx.barrier()
-        a = (ring_a + [new_a])[0]
-        ring_xs = (ring_xs + [new_xs])[1:]
-        ring_a = (ring_a + [new_a])[1:]
+    gemm.put(i32(0), slots[0][0], source)
+    lds_barrier()
+    for g in range(i32(0), i32(count // depth), i32(1)):
+        for j in range_constexpr(depth):
+            c = g * i32(depth) + i32(j)
+            buf = c % i32(2)
+            a = [weights.operands(w) for w in slots[j][1]]
+            acc = gemm.multiply(buf, a, acc, weights)
+            gemm.put(i32(1) - buf, slots[(j + 1) % depth][0], source)
+            sched_barrier()
+            new = gemm.stage(source, weights, rows, first, count, c + i32(depth))
+            slots = slots[:j] + [new] + slots[j + 1 :]
+            lds_barrier()
+    base = count // depth * depth
+    for j in range_constexpr(count % depth):
+        buf = i32((base + j) % 2)
+        a = [weights.operands(w) for w in slots[j][1]]
+        acc = gemm.multiply(buf, a, acc, weights)
+        if const_expr(j + 1 < count % depth):
+            gemm.put(i32(1) - buf, slots[j + 1][0], source)
+            lds_barrier()
     return acc
 
 
