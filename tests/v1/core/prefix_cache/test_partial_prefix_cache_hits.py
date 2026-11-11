@@ -682,6 +682,127 @@ def test_internal_checkpoint_uses_partial_hash_lifecycle():
     assert num_computed == 112
 
 
+def _resume_mid_block(retention_interval, prompt_len):
+    """A 100-token prompt caches state@96, mid Mamba block 1 (block 64); a
+    request extending it to `prompt_len` hits there."""
+    manager = make_full_mamba_manager(
+        dcp_world_size=1,
+        hash_block_size=16,
+        full_block_size=16,
+        mamba_block_size=64,
+        num_blocks=64,
+        num_prefill_checkpoint_blocks=1,
+    )
+    manager.coordinator.retention_interval = retention_interval
+    owner = make_request("owner", list(range(100)), 16, sha256)
+    assert manager.allocate_slots(owner, 100) is not None
+    manager.free(owner)
+    manager.new_step_starts()
+    request = make_request("resume", list(range(prompt_len)), 16, sha256)
+    computed_blocks, num_computed, _ = manager.get_computed_blocks(request)
+    assert num_computed == 96
+    return manager, request, computed_blocks
+
+
+def _mamba_split(request, num_new_tokens, num_local_computed_tokens):
+    scheduler = SimpleNamespace(
+        block_size=64,
+        cache_config=SimpleNamespace(block_size=64),
+        hash_block_size=16,
+        max_num_scheduled_tokens=8192,
+        scheduler_config=SimpleNamespace(long_prefill_token_threshold=0),
+        use_eagle_block_drop=False,
+        num_hash_lookahead_tokens=0,
+        mamba_partial_cache_hit=True,
+        mamba_shared_prefix_checkpoint=False,
+        mamba_has_prefill_checkpoint_blocks=True,
+        mamba_prefill_checkpoint_alignment=16,
+    )
+    return Scheduler._mamba_block_aligned_split(
+        scheduler, request, num_new_tokens, num_local_computed_tokens
+    )
+
+
+@pytest.mark.parametrize("retention_interval", [None, 0])
+def test_mid_block_resume_exports_checkpoint_into_resumed_block(retention_interval):
+    """Resuming at 96 and ending in the next block (150) runs in one step: the
+    checkpoint (144) goes into the resumed block, which the worker reads into
+    the running block before the forward, and is keyed at 144, never as the
+    block's end state (128)."""
+    manager, request, computed_blocks = _resume_mid_block(retention_interval, 150)
+    assert _mamba_split(request, 54, 96) == 54
+    assert manager.allocate_slots(request, 54, 96, computed_blocks) is not None
+
+    mamba_blocks = manager.get_blocks(request.request_id).blocks[1]
+    assert mamba_blocks[1].block_hash_num_tokens == 144
+    hit = manager.block_pool.get_cached_block(request.block_hashes[144 // 16 - 1], [1])
+    assert hit is not None and hit[0] is mamba_blocks[1]
+    assert manager.block_pool.get_cached_block(request.block_hashes[7], [1]) is None
+
+
+@pytest.mark.parametrize("retention_interval", [None, 0])
+def test_mid_block_resume_run_past_keeps_resumed_block_unkeyed(retention_interval):
+    """Resuming at 96 and ending two blocks later, the resumed block keeps
+    state@96: it must not get the full-block hash of state@128."""
+    manager, request, computed_blocks = _resume_mid_block(retention_interval, 230)
+    assert _mamba_split(request, 134, 96) == 134
+    assert manager.allocate_slots(request, 134, 96, computed_blocks) is not None
+
+    mamba_blocks = manager.get_blocks(request.request_id).blocks[1]
+    assert mamba_blocks[1].block_hash is None
+    assert manager.block_pool.get_cached_block(request.block_hashes[7], [1]) is None
+
+
+def test_running_request_resuming_mid_block_exports_into_resumed_block():
+    """A running request whose chunk stopped mid-block (96) exports its next
+    chunk's checkpoint into that block, its own previous running block."""
+    manager = make_full_mamba_manager(
+        dcp_world_size=1,
+        hash_block_size=16,
+        full_block_size=16,
+        mamba_block_size=64,
+        num_blocks=64,
+        num_prefill_checkpoint_blocks=1,
+    )
+    request = make_request("running", list(range(150)), 16, sha256)
+    assert manager.allocate_slots(request, 96) is not None
+    request.num_computed_tokens = 96
+    manager.new_step_starts()
+    assert manager.allocate_slots(request, 54) is not None
+
+    mamba_blocks = manager.get_blocks(request.request_id).blocks[1]
+    assert mamba_blocks[1].block_hash_num_tokens == 144
+    assert manager.block_pool.get_cached_block(request.block_hashes[7], [1]) is None
+
+
+@pytest.mark.parametrize(("num_new", "num_accepted"), [(17, 15), (40, 40)])
+def test_decode_step_resuming_mid_block_exports_no_checkpoint(num_new, num_accepted):
+    """A decode step with at least a hash block of drafts can pass the
+    checkpoint rule, but decode rows export none: the block gets only the
+    block-end state saved once 128 tokens are committed."""
+    manager = make_full_mamba_manager(
+        dcp_world_size=1,
+        hash_block_size=16,
+        full_block_size=16,
+        mamba_block_size=64,
+        num_blocks=64,
+        num_prefill_checkpoint_blocks=1,
+    )
+    request = make_request("decode", list(range(112)), 16, sha256)
+    assert manager.allocate_slots(request, 112) is not None
+    request.num_computed_tokens = 112
+    request.append_output_token_ids([1])
+    manager.new_step_starts()
+    assert manager.allocate_slots(request, num_new) is not None
+    request.append_output_token_ids(list(range(num_accepted)))
+    request.num_computed_tokens = 112 + num_accepted
+    manager.cache_blocks(request, request.num_computed_tokens)
+
+    block = manager.get_blocks(request.request_id).blocks[1][1]
+    expected = 128 if request.num_computed_tokens >= 128 else None
+    assert block.block_hash_num_tokens == expected
+
+
 @pytest.mark.parametrize("retention_interval", [None, 0, 32, 64, 256])
 @pytest.mark.parametrize("hash_block_size", [16, 32])
 @pytest.mark.parametrize("use_eagle", [False, True])

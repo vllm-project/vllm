@@ -534,6 +534,9 @@ class SingleTypeKVCacheManager(ABC):
             reachable_boundaries=reachable_boundaries,
             dcp_world_size=self.dcp_world_size,
         )
+        block_mask = self._refine_block_mask(
+            request, num_cached_blocks, num_full_blocks, block_mask
+        )
         self.block_pool.cache_full_blocks(
             request=request,
             blocks=self.req_to_blocks[request.request_id],
@@ -545,6 +548,18 @@ class SingleTypeKVCacheManager(ABC):
         )
 
         self.num_cached_block[request.request_id] = num_full_blocks
+
+    def _refine_block_mask(
+        self,
+        request: Request,
+        start_block: int,
+        end_block: int,
+        block_mask: list[bool] | None,
+    ) -> list[bool] | None:
+        """Refine `block_mask` for blocks `[start_block, end_block)`, which
+        get the full-block hash for their position, when a block may hold
+        another state."""
+        return block_mask
 
     @classmethod
     def reachable_block_mask(
@@ -1465,6 +1480,13 @@ class MambaManager(SingleTypeKVCacheManager):
             # checkpoint position and reserved block index for the current
             # allocation.
             self._checkpoints: dict[str, tuple[int, int]] = {}
+            # Token range [start, end) of each request's scheduled chunk,
+            # read by `cache_blocks` to record the chunk's mid-block states.
+            self._req_chunk_ranges: dict[str, tuple[int, int]] = {}
+            # Per request, indices of blocks holding a state that is not their
+            # block end, mapped to its token count. They never get the
+            # full-block hash.
+            self._mid_block_states: dict[str, dict[int, int]] = {}
             # Requests that registered their own last-prompt-boundary partial
             # tail (producers). A later CoW hands its private copy to the
             # connector; a request that finishes first hands off this table
@@ -1671,6 +1693,12 @@ class MambaManager(SingleTypeKVCacheManager):
     ) -> bool:
         assert isinstance(self.kv_cache_spec, MambaSpec)
         checkpoint_idx = cdiv(query_end, self.block_size) - 2
+        # Mid-block resume: the checkpoint goes in the resumed block, which is
+        # private to the request and read before the forward overwrites it.
+        reuses_resumed_block = (
+            query_start % self.block_size != 0
+            and checkpoint_idx == query_start // self.block_size
+        )
         blocks = self.req_to_blocks[request_id]
         return (
             self.has_prefill_checkpoint_blocks
@@ -1685,7 +1713,8 @@ class MambaManager(SingleTypeKVCacheManager):
             )
             and checkpoint_idx >= 0
             and (
-                checkpoint_idx >= len(blocks)
+                reuses_resumed_block
+                or checkpoint_idx >= len(blocks)
                 or blocks[checkpoint_idx].is_null
                 or (
                     request_id in self._allocated_block_reqs
@@ -1779,6 +1808,7 @@ class MambaManager(SingleTypeKVCacheManager):
                 checkpoint_position = 0
             checkpoint_block = int(checkpoint_position > 0)
             if not apply_admission_cap:
+                self._req_chunk_ranges[request_id] = (total_computed_tokens, num_tokens)
                 if checkpoint_position > 0:
                     checkpoint_idx = cdiv(num_tokens, self.block_size) - 2
                     self._checkpoints[request_id] = (
@@ -1960,6 +1990,8 @@ class MambaManager(SingleTypeKVCacheManager):
             self.last_state_block_idx.pop(request_id, None)
             self._num_retired_blocks.pop(request_id, None)
             self._checkpoints.pop(request_id, None)
+            self._req_chunk_ranges.pop(request_id, None)
+            self._mid_block_states.pop(request_id, None)
             self._producer_partial_tail_reqs.pop(request_id, None)
             # An offer is only guaranteed to hold committed bytes until the end
             # of the pass that made it. This request's blocks are going back to
@@ -1988,6 +2020,11 @@ class MambaManager(SingleTypeKVCacheManager):
         *,
         replay_boundaries: Sequence[int],
     ) -> None:
+        if self.mamba_cache_mode == "align":
+            chunk_range = self._req_chunk_ranges.pop(request.request_id, None)
+            if chunk_range is not None:
+                query_start, query_end = chunk_range
+                self._record_mid_block_states(request, query_start, query_end)
         num_cached_blocks_before = self.num_cached_block.get(request.request_id, 0)
         super().cache_blocks(
             request,
@@ -2138,6 +2175,62 @@ class MambaManager(SingleTypeKVCacheManager):
                 num_tokens,
             )
         return partial_hash
+
+    def _record_mid_block_states(
+        self, request: Request, query_start: int, query_end: int
+    ) -> None:
+        """Record the blocks this chunk leaves holding a state other than their
+        block end, so they never get the full-block hash.
+
+        Example (block_size 128), a chunk over tokens [192, 450):
+
+        - block 1 (ends at 256) keeps the resumed state at 192;
+        - block 2 (ends at 384) gets the checkpoint at 448.
+        """
+        prefill_end = max(request.num_prompt_tokens, request.num_tokens - 1)
+        if query_start + 1 >= prefill_end:
+            # A decode row (or a one-token prompt tail, padded as one) exports
+            # no checkpoint.
+            self._checkpoints.pop(request.request_id, None)
+            return
+        states = self._mid_block_states.setdefault(request.request_id, {})
+        start_idx = query_start // self.block_size
+        if (
+            query_start % self.block_size
+            and start_idx < cdiv(query_end, self.block_size) - 1
+        ):
+            # A mid-block start run past keeps the resumed state, unless the
+            # checkpoint below overwrites it.
+            states[start_idx] = query_start
+        checkpoint = self._checkpoints.get(request.request_id)
+        if checkpoint is not None:
+            checkpoint_position, checkpoint_idx = checkpoint
+            if checkpoint_position != (checkpoint_idx + 1) * self.block_size:
+                states[checkpoint_idx] = checkpoint_position
+            else:
+                states.pop(checkpoint_idx, None)
+
+    def _refine_block_mask(
+        self,
+        request: Request,
+        start_block: int,
+        end_block: int,
+        block_mask: list[bool] | None,
+    ) -> list[bool] | None:
+        """Exclude the blocks in `_mid_block_states` from the full-block hash:
+        they hold a state that is not their block end."""
+        states = self._mid_block_states.get(request.request_id)
+        if not states:
+            return block_mask
+        mask = (
+            [True] * (end_block - start_block)
+            if block_mask is None
+            else list(block_mask)
+        )
+        for block_idx in states:
+            if start_block <= block_idx < end_block:
+                mask[block_idx - start_block] = False
+        return mask
 
 
 class CrossAttentionManager(SingleTypeKVCacheManager):

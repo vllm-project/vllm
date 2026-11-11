@@ -890,3 +890,158 @@ def test_mamba_prefix_cache_mrv2_async_flashinfer(monkeypatch: pytest.MonkeyPatc
         async_scheduling=True,
         additional_config={"gdn_prefill_backend": "flashinfer"},
     )
+
+
+@pytest.mark.skipif(
+    not current_platform.is_cuda()
+    or not (
+        current_platform.is_device_capability(90)
+        or (
+            (
+                current_platform.is_device_capability_family(100)
+                or current_platform.is_device_capability_family(120)
+            )
+            and current_platform.get_cuda_runtime_major() >= 13
+        )
+    ),
+    reason="FlashInfer GDN prefill needs SM90, or SM100/SM120 with CUDA 13.",
+)
+@create_new_process_for_each_test()
+def test_mamba_mid_block_resume_exports_into_resumed_block(
+    monkeypatch: pytest.MonkeyPatch,
+):
+    """A partial hit resuming mid-block whose prompt ends in the next block
+    prefills in one step, exporting the checkpoint into the resumed block.
+
+    With B = 576 and hits every 64 tokens: a 776-token prompt caches its state
+    at 768 (block 1); a 1252-token prompt sharing it resumes at 768 and runs to
+    1252 at once, exporting its checkpoint (1216) into block 1. Block 1 must
+    then hold the state a fresh 1216-token prefill ends with, block 2 the one
+    a fresh 1252-token prefill ends with, and the next turn must hit at 1216.
+    """
+    monkeypatch.setenv("VLLM_ENABLE_V1_MULTIPROCESSING", "0")
+    envs.disable_envs_cache()
+
+    from vllm.v1.worker.gpu.model_runner import GPUModelRunner as MRV2GPUModelRunner
+    from vllm.v1.worker.gpu.model_states.mamba_hybrid import (
+        MambaHybridModelState,
+    )
+
+    B = BLOCK_SIZE
+    produced, resumed_at, checkpoint, prompt = B + 200, B + 192, 2 * B + 64, 2 * B + 100
+    # Distinct tokens make a shifted conv window visible.
+    tokens = [(i * 7919) % 30000 + 1 for i in range(prompt + 64)]
+    steps: list[tuple[int, int]] = []
+    captured: dict[str, Any] = {}
+    original_preprocess_state = MambaHybridModelState.preprocess_state
+    original_execute_model = MRV2GPUModelRunner.execute_model
+
+    def wrapped_preprocess_state(self, input_batch, block_tables, *args, **kwargs):
+        captured["block_tables"] = block_tables
+        captured["kv_cache_config"] = args[0] if args else kwargs["kv_cache_config"]
+        return original_preprocess_state(
+            self, input_batch, block_tables, *args, **kwargs
+        )
+
+    def block_states(runner: MRV2GPUModelRunner, col: int) -> list[torch.Tensor]:
+        # Every Mamba layer's (conv, temporal) states in block column col;
+        # reading block ids back is a deliberate D2H.
+        kv_cache_config = captured["kv_cache_config"]
+        forward_context = runner.vllm_config.compilation_config.static_forward_context
+        states: list[torch.Tensor] = []
+        with gpu_sync_allowed():
+            for group_ids in get_mamba_groups(kv_cache_config).values():
+                for group_id in group_ids:
+                    block_id = int(captured["block_tables"][group_id][0, col].item())
+                    for name in kv_cache_config.kv_cache_groups[group_id].layer_names:
+                        states.extend(
+                            s[block_id].clone() for s in forward_context[name].kv_cache
+                        )
+        return states
+
+    def wrapped_execute_model(self, scheduler_output: SchedulerOutput, *args, **kw):
+        # Skip profile/warmup runs and steps that schedule nothing.
+        if not (captured.get("generating") and scheduler_output.num_scheduled_tokens):
+            return original_execute_model(self, scheduler_output, *args, **kw)
+        new = scheduler_output.scheduled_new_reqs
+        start = (
+            new[0].num_computed_tokens
+            if new
+            else scheduler_output.scheduled_cached_reqs.num_computed_tokens[0]
+        )
+        num_scheduled = next(iter(scheduler_output.num_scheduled_tokens.values()))
+        steps.append((start, num_scheduled))
+        ret = original_execute_model(self, scheduler_output, *args, **kw)
+        end = start + num_scheduled
+        if end == captured.get("snapshot_end"):
+            captured["snapshot"] = {
+                col: block_states(self, col) for col in captured["snapshot_cols"]
+            }
+        return ret
+
+    monkeypatch.setattr(
+        MambaHybridModelState, "preprocess_state", wrapped_preprocess_state
+    )
+    monkeypatch.setattr(MRV2GPUModelRunner, "execute_model", wrapped_execute_model)
+
+    engine = LLM(
+        model=MODEL,
+        load_format="dummy",
+        enforce_eager=True,
+        skip_tokenizer_init=True,
+        enable_prefix_caching=True,
+        block_size=B,
+        prefix_match_unit=64,
+        additional_config={"gdn_prefill_backend": "flashinfer"},
+        max_num_batched_tokens=3072,
+        max_model_len=B * 4,
+        # Layer 3 is full attention: a single (GDN-only) KV cache group only
+        # hits on whole blocks, so prefix_match_unit needs a second group.
+        hf_overrides={"num_hidden_layers": 4},
+        seed=42,
+    )
+    params = SamplingParams(temperature=0.0, max_tokens=1, ignore_eos=True)
+    assert isinstance(engine.llm_engine.engine_core, InprocClient)
+    scheduler = engine.llm_engine.engine_core.engine_core.scheduler
+
+    def prefill(num_tokens: int, snapshot_cols: tuple[int, ...] = (), llm=engine):
+        steps.clear()
+        captured["snapshot_end"] = num_tokens if snapshot_cols else None
+        captured["snapshot_cols"] = snapshot_cols
+        captured["generating"] = True
+        try:
+            llm.generate([TokensPrompt(prompt_token_ids=tokens[:num_tokens])], params)
+        finally:
+            captured["generating"] = False
+        return [step for step in steps if step[0] < num_tokens]
+
+    try:
+        prefill(produced)
+        assert prefill(prompt, snapshot_cols=(1, 2)) == [
+            (resumed_at, prompt - resumed_at)
+        ]
+        resumed = captured.pop("snapshot")
+        # The next turn resumes at the checkpoint in block 1.
+        assert prefill(prompt + 64)[0][0] == checkpoint
+
+        references = {}
+        for num_tokens in (checkpoint, prompt):
+            assert scheduler.reset_prefix_cache()
+            prefill(num_tokens, snapshot_cols=(2,))
+            references[num_tokens] = captured.pop("snapshot")[2]
+
+        state_len = (
+            engine.llm_engine.model_config.hf_text_config.linear_conv_kernel_dim - 1
+        )
+        for col, num_tokens in ((1, checkpoint), (2, prompt)):
+            for i, (new, ref) in enumerate(zip(resumed[col], references[num_tokens])):
+                if i % 2 == 0:  # conv state: compare the window only
+                    if not is_conv_state_dim_first():
+                        new, ref = new.mT, ref.mT
+                    new, ref = new[..., :state_len], ref[..., :state_len]
+                rel_err = (new.float() - ref.float()).norm() / ref.float().norm()
+                assert rel_err < 1e-2, (col, num_tokens, i, rel_err)
+    finally:
+        del engine
+        torch.accelerator.empty_cache()
+        cleanup_dist_env_and_memory()
