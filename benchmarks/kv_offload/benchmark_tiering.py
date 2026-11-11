@@ -507,8 +507,10 @@ class BenchmarkSession:
             budget = spec.gpu_bytes + spec.cpu_bytes
             over = "OVER" if roofline > budget else "under"
             print(
-                f"  {spec.name}: roofline {roofline / 1024**3:.1f}G vs budget"
-                f" {budget / 1024**3:.0f}G ({over})"
+                f"  {spec.name}: roofline {roofline / 1024**3:.1f}G"
+                f" vs budget {budget / 1024**3:.0f}G"
+                f" (gpu {spec.gpu_bytes / 1024**3:.0f}G"
+                f" + cpu {spec.cpu_bytes / 1024**3:.0f}G) ({over})"
             )
 
         for i, spec in enumerate(self.specs, 1):
