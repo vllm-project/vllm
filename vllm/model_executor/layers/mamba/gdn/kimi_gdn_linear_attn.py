@@ -107,13 +107,12 @@ class _KimiGDNMergedColumnParallelLinear(MergedColumnParallelLinear):
         output_sizes: list[int],
         replicated_shard_id: int,
         tp_size: int,
-        padding_size: int = 0,
         **kwargs,
     ) -> None:
         self.replicated_shard_id = replicated_shard_id
         output_sizes = output_sizes.copy()
         output_sizes[replicated_shard_id] *= tp_size
-        super().__init__(input_size, output_sizes, padding_size=padding_size, **kwargs)
+        super().__init__(input_size, output_sizes, **kwargs)
 
     def weight_loader(
         self,

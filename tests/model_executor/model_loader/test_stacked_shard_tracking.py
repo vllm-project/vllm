@@ -139,11 +139,6 @@ def test_merged_checkpoint_bias_keeps_output_padding_zero(padding_size):
     assert layer.pop_missing_shards() == []
 
 
-def test_merged_rejects_negative_output_padding():
-    with pytest.raises(ValueError, match="padding_size must be nonnegative"):
-        MergedColumnParallelLinear(HIDDEN, [4, 4], padding_size=-1)
-
-
 def test_minimax_m3_qkv_with_indexer_loads_all_shards():
     layer = MinimaxM3QKVParallelLinearWithIndexer(
         HIDDEN,

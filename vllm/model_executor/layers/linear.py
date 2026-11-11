@@ -786,8 +786,6 @@ class MergedColumnParallelLinear(StackedColumnParallelLinear):
         disable_tp: bool = False,
         padding_size: int = 0,
     ):
-        if padding_size < 0:
-            raise ValueError("padding_size must be nonnegative")
         self.padding_size = padding_size
         self.tp_size = get_tensor_model_parallel_world_size() if not disable_tp else 1
         self.tp_rank = get_tensor_model_parallel_rank() if not disable_tp else 0
@@ -810,8 +808,6 @@ class MergedColumnParallelLinear(StackedColumnParallelLinear):
             disable_tp=disable_tp,
         )
         if padding_size:
-            if not isinstance(getattr(self, "weight", None), torch.Tensor):
-                raise NotImplementedError("Output padding requires a weight parameter")
             with torch.no_grad():
                 for name in self.padding_fill_params():
                     param = getattr(self, name)
