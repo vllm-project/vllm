@@ -26,17 +26,21 @@ def _is_supported_group_size(c: MPLinearLayerConfig) -> bool:
 
     The kernel flushes a group's scales at the end of every warp tile, so a
     group that ends inside a 128-row tile gets its partial sums scaled with the
-    next group's scales. Group sizes that divide 128, are multiples of 128, span
-    the whole K dimension, or are channelwise (-1) are exact.
+    next group's scales. Exact group sizes are 16, 32, 64 and multiples of 128;
+    channelwise (-1) is always exact. Smaller sizes are rejected too, because
+    the kernel requires at least 256 // activation_bits elements per group
+    (16 for 16-bit activations).
+
+    Note that a group spanning the whole K is *not* automatically exact: the
+    layer pads K to a multiple of 128, so with K not already a multiple of 128
+    the padded K spans two groups while the checkpoint carries one scale row.
+    Such sizes are already covered above when they are exact, and rejected
+    here when they are not.
     """
     group_size = c.group_size
     if group_size == -1:
         return True
-    return (
-        group_size in (16, 32, 64)
-        or group_size % 128 == 0
-        or group_size == c.partition_weight_shape[0]
-    )
+    return group_size in (16, 32, 64) or group_size % 128 == 0
 
 
 class HummingLinearKernel(MPLinearKernel):
@@ -55,7 +59,7 @@ class HummingLinearKernel(MPLinearKernel):
         if not _is_supported_group_size(c):
             return False, (
                 f"Group size ({c.group_size}) is not supported by Humming: "
-                "it does not tile the kernel's 128-row K blocks"
+                "it must be at least 16 and tile the kernel's 128-row K blocks"
             )
         return True, None
 

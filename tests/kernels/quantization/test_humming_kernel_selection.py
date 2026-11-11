@@ -52,9 +52,19 @@ def test_accepts_group_sizes_that_tile_the_k_blocks(group_size: int):
     assert can_implement, reason
 
 
-def test_accepts_a_single_group_spanning_k():
-    can_implement, reason = _can_implement(_config(96, k=96))
+def test_accepts_a_single_group_when_k_tiles_the_k_blocks():
+    # K=384 is a multiple of 128, so one group over K is also a multiple of 128.
+    can_implement, reason = _can_implement(_config(384, k=384))
     assert can_implement, reason
+
+
+def test_rejects_a_single_group_when_k_does_not_tile_the_k_blocks():
+    # K=96 and K=160 pad to 128 and 256, which turns one checkpoint group into
+    # two, so the kernel rejects the scale shape in apply_weights.
+    for k in (96, 160):
+        can_implement, reason = _can_implement(_config(k, k=k))
+        assert not can_implement, f"K={k} gs={k} must not be selectable"
+        assert reason is not None and str(k) in reason
 
 
 @pytest.mark.parametrize(
