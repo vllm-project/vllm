@@ -71,12 +71,19 @@ class _RankContext:
 
 @dataclass(frozen=True)
 class ByteRegion:
-    """A byte region within a page that repeats once per token."""
+    """A byte region within a page that repeats once per token.
+
+    ``num_tokens`` and ``first_token`` describe a sub-range of the page.
+    They are used when a manager block is split into kernel blocks whose
+    interiors are not a constant stride across the full block (HND).
+    """
 
     local_offset: int
     canonical_offset: int
     bytes_per_token: int
     canonical_token_stride: int
+    num_tokens: int | None = None
+    first_token: int = 0
 
 
 def _coalesce_runs(runs: list[CopyRun]) -> tuple[CopyRun, ...]:
@@ -124,27 +131,33 @@ def _interleave_cp_tokens(
     one run per chunk of interleaved tokens."""
     runs: list[CopyRun] = []
     for region in regions:
+        region_tokens = (
+            region.num_tokens if region.num_tokens is not None else num_tokens
+        )
         if ctx.cp_size == 1:
             runs.append(
                 CopyRun(
                     region.local_offset,
                     region.canonical_offset,
                     region.bytes_per_token,
-                    num_tokens,
+                    region_tokens,
                     region.bytes_per_token,
                     region.canonical_token_stride,
                 )
             )
             continue
-        for chunk_start in range(0, num_tokens, ctx.interleave):
-            canonical_token = _local_to_canonical_token(chunk_start, ctx)
+        for chunk_start in range(0, region_tokens, ctx.interleave):
+            canonical_token = _local_to_canonical_token(
+                region.first_token + chunk_start, ctx
+            )
+            n_frag = min(ctx.interleave, region_tokens - chunk_start)
             runs.append(
                 CopyRun(
                     region.local_offset + chunk_start * region.bytes_per_token,
                     region.canonical_offset
                     + canonical_token * region.canonical_token_stride,
                     region.bytes_per_token,
-                    ctx.interleave,
+                    n_frag,
                     region.bytes_per_token,
                     region.canonical_token_stride,
                 )
@@ -158,16 +171,35 @@ def _packed_kv_regions(
     head_shard: int,
     num_head_shards: int,
     cp_size: int,
+    num_blocks: int | None = None,
 ) -> list[ByteRegion] | None:
-    """K and V adjacent per (token, head), in NHD or HND stride order."""
+    """K and V adjacent per (token, head), in NHD or HND stride order.
+
+    Also accepts a kernel-split packed cache whose dim 0 is
+    ``num_blocks * (block_size // kernel_bs)`` and whose token dim is
+    the kernel block size. NHD kernel pages stay a constant stride
+    across the manager page. HND kernel pages do not, so they are
+    emitted as one region per (head, kernel block).
+    """
     bs, heads = spec.block_size, spec.num_kv_heads
     elem = kv_cache.element_size()
     head_elems = 2 * spec.head_size
     if heads * bs * head_elems * elem != spec.real_page_size_bytes:
         return None
+    if kv_cache.ndim != 4 or kv_cache.stride(-1) != 1:
+        return None
     _, head_stride, token_stride, inner_stride = kv_cache.stride()
     if inner_stride != 1:
         return None
+    kernel_bs = kv_cache.shape[2]
+    if kernel_bs <= 0 or bs % kernel_bs:
+        return None
+    ratio = bs // kernel_bs
+    if ratio > 1:
+        if num_blocks is None or kv_cache.shape[0] != num_blocks * ratio:
+            return None
+        if kv_cache.stride(0) != kernel_bs * heads * head_elems:
+            return None
     head_bytes = head_elems * elem
     token_row_bytes = heads * head_bytes
 
@@ -193,6 +225,31 @@ def _packed_kv_regions(
                 canonical_token_stride=head_bytes,
             )
             for head in range(heads)
+        ]
+
+    # Kernel-split HND: each kernel page is (heads, kernel_bs, 2*head_size)
+    # and manager-page tokens of one head are not a constant local stride.
+    if (
+        ratio > 1
+        and head_stride == kernel_bs * head_elems
+        and token_stride == head_elems
+    ):
+        kernel_page_bytes = kv_cache.stride(0) * elem
+        canonical_span = bs * cp_size
+        return [
+            ByteRegion(
+                local_offset=k * kernel_page_bytes + head * kernel_bs * head_bytes,
+                canonical_offset=(head_shard * heads + head)
+                * canonical_span
+                * head_bytes
+                + k * kernel_bs * head_bytes,
+                bytes_per_token=head_bytes,
+                canonical_token_stride=head_bytes,
+                num_tokens=kernel_bs,
+                first_token=k * kernel_bs,
+            )
+            for head in range(heads)
+            for k in range(ratio)
         ]
     return None
 
@@ -258,10 +315,33 @@ def _attention_byte_regions(
     """Byte regions of an attention page, given this rank's head shard.
     None when the physical layout is not recognized (fail closed)."""
     bs, heads, head_size = spec.block_size, spec.num_kv_heads, spec.head_size
-    if tuple(kv_cache.shape) == (num_blocks, heads, bs, 2 * head_size):
+    packed_last = 2 * head_size
+    shape = tuple(kv_cache.shape)
+    if shape == (num_blocks, heads, bs, packed_last):
         return _packed_kv_regions(kv_cache, spec, head_shard, num_head_shards, cp_size)
-    if tuple(kv_cache.shape) == (num_blocks, 2, bs, heads, head_size):
+    if shape == (num_blocks, 2, bs, heads, head_size):
         return _split_kv_regions(kv_cache, spec, head_shard, num_head_shards, cp_size)
+    # Kernel-split packed layout, e.g. FlashInfer on a pre-Blackwell GPU
+    # with manager block_size 128: (num_blocks * ratio, heads, kernel_bs,
+    # 2 * head_size), where ratio * kernel_bs == block_size.
+    if (
+        len(shape) == 4
+        and shape[0] > num_blocks
+        and shape[0] % num_blocks == 0
+        and shape[1] == heads
+        and shape[3] == packed_last
+        and shape[2] > 0
+        and bs % shape[2] == 0
+        and shape[0] // num_blocks == bs // shape[2]
+    ):
+        return _packed_kv_regions(
+            kv_cache,
+            spec,
+            head_shard,
+            num_head_shards,
+            cp_size,
+            num_blocks=num_blocks,
+        )
     return None
 
 

@@ -534,3 +534,123 @@ def test_derive_refuses_foreign_worker_groups():
         )
         == {}
     )
+
+
+def _kernel_split_packed_nhd_cache(spec, kernel_bs: int) -> torch.Tensor:
+    """Logical (num_blocks * ratio, heads, kernel_bs, 2 * head_size) over NHD
+    kernel pages — the FlashInfer pre-Blackwell split of a larger manager block.
+    """
+    assert spec.block_size % kernel_bs == 0
+    ratio = spec.block_size // kernel_bs
+    return torch.zeros(
+        NUM_BLOCKS * ratio,
+        kernel_bs,
+        spec.num_kv_heads,
+        2 * spec.head_size,
+        dtype=torch.int8,
+    ).permute(0, 2, 1, 3)
+
+
+def _kernel_split_packed_hnd_cache(spec, kernel_bs: int) -> torch.Tensor:
+    assert spec.block_size % kernel_bs == 0
+    ratio = spec.block_size // kernel_bs
+    return torch.zeros(
+        NUM_BLOCKS * ratio,
+        spec.num_kv_heads,
+        kernel_bs,
+        2 * spec.head_size,
+        dtype=torch.int8,
+    )
+
+
+def test_kernel_split_packed_nhd_matches_unsplit():
+    """A 2x kernel split of packed NHD must certify the same portable mapping
+    as the unsplit manager-block view (#67028)."""
+    spec = _full_spec()
+    assert spec.block_size == 4
+    unsplit = _mapping(spec, _packed_nhd_cache(spec), _ctx(0, tp=4))
+    split = _mapping(spec, _kernel_split_packed_nhd_cache(spec, 2), _ctx(0, tp=4))
+    assert split.parallelism_agnostic
+    assert split.canonical_page_size_bytes == unsplit.canonical_page_size_bytes
+    assert _triples(split.runs) == _triples(unsplit.runs)
+    mappings = [
+        _mapping(spec, _kernel_split_packed_nhd_cache(spec, 2), _ctx(r, tp=4))
+        for r in range(4)
+    ]
+    _verify_tiling("kernel-split-nhd", mappings)
+
+
+def test_kernel_split_packed_hnd_is_portable():
+    """HND kernel pages are not a constant stride across the manager block,
+    but they must still certify as parallelism-agnostic (#67028)."""
+    spec = _full_spec()
+    split = _kernel_split_packed_hnd_cache(spec, 2)
+    mapping = _mapping(spec, split, _ctx(0, tp=4))
+    assert mapping.parallelism_agnostic
+    mappings = [_mapping(spec, split, _ctx(r, tp=4)) for r in range(4)]
+    _verify_tiling("kernel-split-hnd", mappings)
+
+
+def test_kernel_split_flashinfer_block128_is_certified():
+    """The shape reported in #67028: FlashInfer kernel blocks of 64 tokens
+    under a manager block_size of 128, packed (2 * num_blocks, H, 64, C)."""
+    spec = TritonAttentionBackend.customize_spec(
+        FullAttentionSpec(
+            block_size=128,
+            num_kv_heads=2,
+            head_size=64,
+            dtype=torch.int8,
+        )
+    )
+    nhd = _kernel_split_packed_nhd_cache(spec, 64)
+    hnd = _kernel_split_packed_hnd_cache(spec, 64)
+    assert tuple(nhd.shape) == (NUM_BLOCKS * 2, 2, 64, 128)
+    assert tuple(hnd.shape) == (NUM_BLOCKS * 2, 2, 64, 128)
+    for cache in (nhd, hnd):
+        mapping = _mapping(spec, cache, _ctx(0, tp=2))
+        assert mapping.parallelism_agnostic
+        _verify_tiling(
+            "kernel-split-128",
+            [_mapping(spec, cache, _ctx(r, tp=2)) for r in range(2)],
+        )
+
+
+def test_derive_kernel_split_shape_is_not_opaque():
+    """derive_canonical_mappings must not fall back to an opaque,
+    non-portable mapping for a kernel-split packed cache."""
+    spec = TritonAttentionBackend.customize_spec(
+        FullAttentionSpec(
+            block_size=128,
+            num_kv_heads=2,
+            head_size=64,
+            dtype=torch.int8,
+        )
+    )
+    kv_cache_config = _kv_cache_config(
+        [KVCacheGroupSpec(layer_names=["attn"], kv_cache_spec=spec)]
+    )
+    for cache in (
+        _kernel_split_packed_nhd_cache(spec, 64),
+        _kernel_split_packed_hnd_cache(spec, 64),
+    ):
+        mappings = derive_canonical_mappings(
+            _vllm_config(tp=2, total_kv_heads=4), kv_cache_config, {"attn": cache}
+        )
+        assert "attn" in mappings
+        assert mappings["attn"].parallelism_agnostic
+        assert mappings["attn"].runs
+
+
+def test_kernel_split_rejects_inconsistent_ratio():
+    """Fail closed when the leading dimension is not num_blocks * ratio."""
+    spec = _full_spec()
+    # 3 kernel rows, which does not divide into NUM_BLOCKS manager blocks
+    # with kernel_bs that also divides block_size.
+    bad = torch.zeros(
+        5,
+        spec.num_kv_heads,
+        2,
+        2 * spec.head_size,
+        dtype=torch.int8,
+    )
+    assert _try_mapping(spec, bad, _ctx(0, tp=4)) is None
