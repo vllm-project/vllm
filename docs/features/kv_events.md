@@ -115,6 +115,12 @@ a device Clear; the consumer must also revoke on the live path. A cut that
 leaves out any live hash is not certified. These refusals do not disable
 ordinary inference or the best-effort snapshot endpoint.
 
+The complete cut teaches only currently resident blocks and the ancestors
+needed to reconstruct them. Unrelated dead descriptors are omitted, including
+after a Clear. A nonresident ancestor is structural, not cache residency; if
+its inputs cannot be established in this profile, the complete cut is refused.
+The original best-effort export still includes recently dead descriptors.
+
 The recorder keeps one record per block hash: parent, tokens and hash inputs,
 plus a reference count per scope (medium, KV cache group, locality,
 ownership). It keeps a record while the block is resident anywhere, while a

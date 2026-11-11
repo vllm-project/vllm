@@ -786,6 +786,65 @@ def test_complete_cut_rejects_unbuildable_and_ambiguous_history(publisher):
     assert int.from_bytes(request(ports)[0], "big", signed=True) >= w
 
 
+@pytest.mark.parametrize("publisher", [4], indirect=True)
+def test_complete_cut_teaches_only_ancestors_needed_for_live_blocks(publisher):
+    pub, ports, _ = publisher
+
+    def full(h, parent=None, **kw):
+        event = stored([h], parent, group=0, **kw)
+        event.kv_cache_spec_kind = "full_attention"
+        return event
+
+    def cut():
+        return request(ports, b"snapshot-full-attention-v1")
+
+    def exported(chunks):
+        return [
+            e
+            for c in chunks
+            for e in msgspec.msgpack.decode(c, type=KVEventBatch).events
+        ]
+
+    publish(pub, [full(1, extra_keys=[("salt",)])])
+    assert int.from_bytes(cut()[0], "big", signed=True) == -2
+    publish(pub, [AllBlocksCleared()])
+    empty = cut()
+    assert msgspec.json.decode(empty[2])["live_blocks"] == 0
+    assert exported(empty[3:]) == []
+    # Legacy consumers can still receive recently dead descriptors.
+    assert exported(request(ports)[2:])[0].extra_keys == [("salt",)]
+
+    publish(pub, [full(2), full(3, parent=2), BlockRemoved([2], "GPU", group_idx=0)])
+    reply = cut()
+    events = exported(reply[3:])
+    assert msgspec.json.decode(reply[2])["live_references"] == 1
+    assert counts(events) == {("GPU", 0, 3): 1}
+    assert [
+        h
+        for e in events
+        if isinstance(e, BlockStored) and e.token_ids
+        for h in e.block_hashes
+    ] == [2, 3]
+    publish(pub, [BlockRemoved([3], "GPU", group_idx=0)])
+    assert exported(cut()[3:]) == []
+    # The old descriptor is required again, but its salt is not representable.
+    publish(pub, [full(4, parent=1)])
+    assert int.from_bytes(cut()[0], "big", signed=True) == -2
+    # A later group announcement cannot attest an older untyped ancestor.
+    publish(
+        pub,
+        [
+            AllBlocksCleared(),
+            stored([5], group=0),
+            AllBlocksCleared(),
+            full(6, parent=5),
+        ],
+    )
+    assert int.from_bytes(cut()[0], "big", signed=True) == -2
+    publish(pub, [AllBlocksCleared(), full(5), full(6, parent=5)])
+    assert counts(exported(cut()[3:])) == {("GPU", 0, 5): 1, ("GPU", 0, 6): 1}
+
+
 def test_initial_live_message_obeys_bootstrap_buffer_limit(publisher, monkeypatch):
     _, endpoints, _ = publisher
     c = client(endpoints)

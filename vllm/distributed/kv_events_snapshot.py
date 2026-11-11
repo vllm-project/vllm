@@ -103,6 +103,9 @@ class _Record(msgspec.Struct, gc=False):  # type: ignore[call-arg]
     death: int = 0
     # The hash was restated with other inputs.
     conflict: bool = False
+    # A data-bearing Store taught these inputs within the strict profile.
+    # The latest group announcement alone cannot attest a retained ancestor.
+    plain_full_attention: bool = False
 
 
 class KVCacheSnapshot:
@@ -154,6 +157,7 @@ class KVCacheSnapshot:
             return
         self._batch += 1
         for event in events:
+            in_profile = False
             if self.certified_width is not None:
                 if isinstance(event, AllBlocksCleared):
                     # The legacy Clear below is device-only; it does not
@@ -161,10 +165,11 @@ class KVCacheSnapshot:
                     self._complete = all(
                         scope[0] in (MEDIUM_GPU, None) for scope, _ in self._live
                     )
-                elif self._complete:
-                    self._complete = self._incremental_local(event)
+                else:
+                    in_profile = self._incremental_local(event)
+                    self._complete = self._complete and in_profile
             if isinstance(event, BlockStored):
-                self._store(event)
+                self._store(event, in_profile)
             elif isinstance(event, BlockRemoved):
                 scope = self._scope(event)
                 for h in event.block_hashes:
@@ -228,7 +233,7 @@ class KVCacheSnapshot:
             and all((scope, h) not in self._live for h in hashes)
         )
 
-    def _store(self, event: BlockStored) -> None:
+    def _store(self, event: BlockStored, in_profile: bool) -> None:
         if not event.block_hashes:
             return
         if event.kv_cache_spec_kind is not None:
@@ -302,6 +307,8 @@ class KVCacheSnapshot:
                     record.extra_known = True
                 if ahead is not None and record.lookahead is None:
                     record.lookahead = ahead
+            if in_profile:
+                record.plain_full_attention = True
             self._add_live((scope, h))
             parent = h
 
@@ -408,11 +415,33 @@ class KVCacheSnapshot:
         like a live one is removed before the live residency is set. Blocks
         that cannot be rebuilt, and their descendants, are left out.
         """
+        required: set[ExternalBlockHash] | None = None
+        if complete:
+            if not self._complete or self.certified_width is None:
+                raise ValueError("Incomplete full-attention snapshot")
+            required = set()
+            for _, leaf in self._live:
+                h: ExternalBlockHash | None = leaf
+                while h is not None and h not in required:
+                    record = self._records.get(h)
+                    if (
+                        record is None
+                        or not record.plain_full_attention
+                        or record.conflict
+                        or record.extra_key is not None
+                        or record.lookahead is not None
+                        or record.group != 0
+                    ):
+                        raise ValueError("Incomplete full-attention ancestry")
+                    required.add(h)
+                    h = record.parent
         # Most blocks have one child, so only branch points allocate a list.
         first_child: dict[ExternalBlockHash, ExternalBlockHash] = {}
         more_children: dict[ExternalBlockHash, list[ExternalBlockHash]] = {}
         roots: list[ExternalBlockHash] = []
         for h, record in self._records.items():
+            if required is not None and h not in required:
+                continue
             if record.parent is None:
                 roots.append(h)
             elif record.parent not in first_child:
