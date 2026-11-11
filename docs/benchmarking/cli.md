@@ -75,6 +75,19 @@ Unspecified fields use the script's defaults. Set `fp8` to `false` for BF16 KV.
 The reported medians and ranges cover seven groups of graph replays, including
 metadata construction. These kernel measurements do not estimate serving TPOT.
 
+To compare Triton with the native windowed FlashMLA operator on supported
+SM100-family hardware while keeping the standard FP8 KV layout, run:
+
+```bash
+.venv/bin/python benchmarks/kernels/benchmark_windowed_flashmla.py \
+  --output windowed-flashmla.json
+```
+
+The candidate timing includes gathering and packing the visible KV window,
+building window indices, live planning, and attention. It does not require a
+packed persistent cache. The script uses the same `--cases` format and reports
+numerical error against Triton alongside timing distributions.
+
 ## Dataset Overview
 
 <style>

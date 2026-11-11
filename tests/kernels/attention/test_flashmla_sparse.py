@@ -3,6 +3,8 @@
 import pytest
 import torch
 
+from vllm.platforms import current_platform
+
 
 @pytest.mark.parametrize("sm120", [False, True])
 def test_deepseek_v4_c128a_adaptive_width_has_capture_stable_stride(
@@ -913,3 +915,227 @@ def test_flashinfer_dspark_noncausal_block_sees_future_tokens(context_len):
             attention[token].float(), weights @ keys, atol=0.05, rtol=0.05
         )
     _assert_projects_alike(z_unfused, z_fused)
+
+
+@pytest.mark.skipif(
+    not current_platform.is_device_capability_family(100),
+    reason="The windowed standard-FP8 route uses SM100 native sparse FlashMLA",
+)
+@pytest.mark.parametrize("heads,rope,scale", [(64, 64, 0.5), (128, 64, 2.0)])
+@pytest.mark.parametrize("window", [5, 2055])
+@pytest.mark.parametrize("causal", [False, True])
+def test_windowed_flashmla_reads_standard_fp8_with_live_ragged_metadata(
+    heads, rope, scale, window, causal
+):
+    """Gather gapped pages without changing KV values or reading padding rows."""
+    from vllm.v1.attention.ops.windowed_flashmla import windowed_flash_mla
+
+    torch.manual_seed(0)
+    device = "cuda"
+    page_size = 64
+    lengths = torch.tensor([2103, 73, 0], device=device, dtype=torch.int32)
+    starts = torch.tensor([0, 3, 11, 11], device=device, dtype=torch.int32)
+    table = torch.randperm(3 * 34 * 2, device=device)[: 3 * 34]
+    table = table.reshape(3, 34).to(torch.int32)
+    cache = torch.randn(
+        3 * 34 * 2, page_size + 3, 512 + rope, device=device, dtype=torch.bfloat16
+    ).to(torch.float8_e4m3fn)[:, :page_size]
+    q = torch.randn(12, heads, 512 + rope, device=device, dtype=torch.bfloat16) * 0.25
+    kv_scale = torch.tensor([scale], device=device, dtype=torch.float32)
+
+    def run():
+        return windowed_flash_mla(
+            q, cache, table, lengths, starts, window, 8, kv_scale, 0.0625, causal
+        )[0]
+
+    output = run()
+    for request, (first, stop) in enumerate([(0, 3), (3, 11)]):
+        for row in range(first, stop):
+            end = int(lengths[request])
+            if causal:
+                end -= stop - row - 1
+            positions = torch.arange(max(end - window, 0), end, device=device)
+            keys = (
+                cache[
+                    table[request, positions // page_size].long(), positions % page_size
+                ].float()
+                * scale
+            )
+            keys = keys.to(torch.bfloat16).float()
+            weights = (q[row].float() @ keys.T * 0.0625).softmax(-1)
+            reference = weights @ keys[:, :512]
+            torch.testing.assert_close(
+                output[row].float(), reference, atol=0.02, rtol=0.02
+            )
+    assert torch.count_nonzero(output[-1]).item() == 0
+    graph = torch.cuda.CUDAGraph()
+    with torch.cuda.graph(graph):
+        replayed = run()
+    lengths[:2].sub_(1)
+    table.copy_(table.roll(1, dims=1))
+    expected = run()
+    graph.replay()
+    torch.accelerator.synchronize()
+    assert torch.equal(expected, replayed)
+
+
+@pytest.mark.parametrize(
+    "latent,rope,heads,scale,cache_dtype",
+    [
+        (512, 64, 64, 1.0, "fp8"),
+        (512, 0, 64, 1.0, "fp8"),
+        (512, 64, 64, 0.7, "fp8"),
+        (432, 64, 32, 1.0, "fp8"),
+        (1024, 64, 16, 1.0, "bfloat16"),
+    ],
+)
+def test_windowed_flashmla_backend_preserves_non_native_configurations(
+    tmp_path, dist_init, workspace_init, latent, rope, heads, scale, cache_dtype
+):
+    """Exercise real backend selection and non-power-of-two scale fallback."""
+    import json
+
+    from vllm.config import (
+        CacheConfig,
+        ModelConfig,
+        ParallelConfig,
+        SchedulerConfig,
+        SpeculativeConfig,
+        VllmConfig,
+        set_current_vllm_config,
+    )
+    from vllm.model_executor.layers.attention.mla_attention import (
+        MLAAttention,
+        MLACommonDecodeMetadata,
+        MLACommonMetadata,
+    )
+    from vllm.model_executor.layers.linear import ColumnParallelLinear
+    from vllm.v1.attention.backends.mla.flashmla_swa import (
+        FlashMLASWABackend,
+        FlashMLASWAImpl,
+    )
+
+    # The NoPE case uses the common layer's supported GLM5Next prefill layout.
+    uncompressed_dim = 256 if rope == 0 else 128
+    (tmp_path / "config.json").write_text(
+        json.dumps(
+            dict(
+                model_type="deepseek_v2",
+                architectures=["DeepseekV2ForCausalLM"],
+                hidden_size=512,
+                intermediate_size=1024,
+                num_hidden_layers=2,
+                num_attention_heads=heads,
+                num_key_value_heads=heads,
+                vocab_size=256,
+                q_lora_rank=64,
+                kv_lora_rank=latent,
+                qk_nope_head_dim=uncompressed_dim,
+                qk_rope_head_dim=rope,
+                v_head_dim=uncompressed_dim,
+                max_position_embeddings=4096,
+                n_routed_experts=0,
+                n_shared_experts=0,
+                num_experts_per_tok=0,
+                torch_dtype="bfloat16",
+            )
+        )
+    )
+    cache_config = CacheConfig(cache_dtype=cache_dtype, block_size=64)
+    model_config = ModelConfig(
+        model=str(tmp_path), tokenizer_mode="skip", dtype="bfloat16"
+    )
+    parallel_config = ParallelConfig()
+    config = VllmConfig(
+        model_config=model_config,
+        cache_config=cache_config,
+        parallel_config=parallel_config,
+        scheduler_config=SchedulerConfig(
+            max_num_seqs=2,
+            max_num_batched_tokens=64,
+            max_model_len=4096,
+            is_encoder_decoder=False,
+            enable_chunked_prefill=True,
+        ),
+        speculative_config=SpeculativeConfig(
+            method="ngram",
+            num_speculative_tokens=1,
+            target_model_config=model_config,
+            target_parallel_config=parallel_config,
+        ),
+    )
+    with set_current_vllm_config(config), torch.device("cuda"):
+        projection = ColumnParallelLinear(
+            latent,
+            heads * uncompressed_dim * 2,
+            bias=False,
+            params_dtype=torch.bfloat16,
+        )
+        layer = MLAAttention(
+            num_heads=heads,
+            scale=0.0625,
+            qk_nope_head_dim=uncompressed_dim,
+            qk_rope_head_dim=rope,
+            v_head_dim=uncompressed_dim,
+            q_lora_rank=64,
+            kv_lora_rank=latent,
+            kv_b_proj=projection,
+            cache_config=cache_config,
+            sliding_window=8192,
+            attn_backend=FlashMLASWABackend,
+            prefix="windowed_test",
+        )
+        layer._k_scale.fill_(scale)
+        layer._k_scale_float = scale
+        lengths = torch.tensor([2071, 73], dtype=torch.int32)
+        starts = torch.tensor([0, 2, 4], dtype=torch.int32)
+        table = torch.randperm(132)[:66].reshape(2, 33).to(torch.int32)
+        cache = torch.randn(132, 64, latent + rope, dtype=torch.bfloat16)
+        if cache_dtype == "fp8":
+            cache = cache.to(torch.float8_e4m3fn)
+        q = torch.randn(4, heads, latent + rope, dtype=torch.bfloat16) * 0.25
+        metadata = MLACommonMetadata(
+            num_reqs=2,
+            max_query_len=2,
+            max_seq_len=2071,
+            num_actual_tokens=4,
+            query_start_loc=starts,
+            slot_mapping=torch.arange(4),
+            num_decodes=2,
+            num_decode_tokens=4,
+            num_prefills=0,
+            causal=True,
+            decode=MLACommonDecodeMetadata(table, lengths, None),
+        )
+        assert isinstance(layer.impl, FlashMLASWAImpl)
+        from vllm.v1.worker.workspace import lock_workspace
+
+        layer.impl.reserve_workspace()
+        lock_workspace()
+        with torch.profiler.profile(
+            activities=[torch.profiler.ProfilerActivity.CPU]
+        ) as profile:
+            output, _ = layer.impl.forward_mqa(q, cache, metadata, layer)
+        native_called = any(
+            "_flashmla_C::sparse_decode_fwd" in event.key
+            for event in profile.key_averages()
+        )
+        expect_native = (
+            current_platform.is_device_capability_family(100)
+            and latent == 512
+            and rope == 64
+            and cache_dtype == "fp8"
+            and scale == 1.0
+        )
+        assert native_called == expect_native
+        for row in range(4):
+            request = row // 2
+            end = int(lengths[request]) - 1 + row % 2
+            positions = torch.arange(max(0, end - 8192), end)
+            kv = cache[table[request, positions // 64].long(), positions % 64]
+            kv = (kv.float() * scale).to(torch.bfloat16).float()
+            weights = (q[row].float() @ kv.T * 0.0625).softmax(-1)
+            reference = weights @ kv[:, :latent]
+            torch.testing.assert_close(
+                output[row].float(), reference, atol=0.02, rtol=0.02
+            )

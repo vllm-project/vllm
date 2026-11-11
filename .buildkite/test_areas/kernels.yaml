@@ -841,6 +841,9 @@ steps:
   - vllm/v1/attention/backends/flashinfer.py
   - vllm/v1/attention/backends/mla/cutlass_mla.py
   - vllm/v1/attention/backends/mla/flashinfer_mla.py
+  - vllm/v1/attention/backends/mla/flashmla_swa.py
+  - vllm/v1/attention/ops/windowed_flashmla.py
+  - tests/kernels/attention/test_flashmla_sparse.py
   - vllm/v1/attention/selector.py
   - vllm/platforms/cuda.py
   - vllm/cute_utils/
@@ -893,6 +896,7 @@ steps:
     - pytest -v -s tests/models/quantization/test_nvfp4.py
     - pytest -v -s tests/kernels/attention/test_flashinfer.py -k 'not num_heads2'
     - pytest -v -s tests/kernels/attention/test_cutlass_mla_decode.py
+    - pytest -v -s tests/kernels/attention/test_flashmla_sparse.py -k windowed_flashmla
     - pytest -v -s tests/kernels/quantization/test_cutlass_scaled_mm.py -k 'fp8 or cutlass_subset'
     - pytest -v -s tests/kernels/quantization/test_block_fp8.py::test_w8a8_block_fp8_cutlass_matmul
     - pytest -v -s tests/kernels/quantization/test_nvfp4_quant.py
