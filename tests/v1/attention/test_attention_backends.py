@@ -2196,9 +2196,17 @@ def test_flashinfer_nvfp4_decode_correctness(
     max_pages = cdiv(max(seq_lens), bs)
     block_table = (starts[:, None] + torch.arange(max_pages)).int().to(device)
     full_dim = nvfp4_kv_cache_full_dim(d)
-    kv_cache = torch.zeros(
-        int(starts[-1]) + max_pages, bs, 8, full_dim, dtype=torch.uint8, device=device
-    ).transpose(1, 2)
+    kv_cache = {
+        name: torch.zeros(
+            int(starts[-1]) + max_pages,
+            bs,
+            4,
+            full_dim,
+            dtype=torch.uint8,
+            device=device,
+        ).transpose(1, 2)
+        for name in ("k", "v")
+    }
     q, k, v = (
         torch.randn(sum(seq_lens), h, d).bfloat16().to(device) for h in (24, 4, 4)
     )

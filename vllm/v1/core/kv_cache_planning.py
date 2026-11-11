@@ -1153,10 +1153,10 @@ def _check_exact_partition(
     """Ensure the groups partition every input layer exactly once."""
     grouped_layers: set[str] = set()
     for group in groups:
-        assert not set(group.layer_names) & grouped_layers, (
-            f"KV cache group overlaps: {set(group.layer_names) & grouped_layers}."
+        assert not set(group.kv_cache_specs) & grouped_layers, (
+            f"KV cache group overlaps: {set(group.kv_cache_specs) & grouped_layers}."
         )
-        grouped_layers |= set(group.layer_names)
+        grouped_layers |= set(group.kv_cache_specs)
     missing = set(layer_configs) - grouped_layers
     assert not missing, f"KV cache groups miss layers: {sorted(missing)}."
 
@@ -1415,9 +1415,11 @@ def _project_kv_cache_groups_to_worker(
     projected_groups: list[KVCacheGroup] = []
     for group in global_kv_cache_groups:
         worker_layer_names = [
-            layer_name for layer_name in group.layer_names if layer_name in worker_spec
+            layer_name
+            for layer_name in group.kv_cache_specs
+            if layer_name in worker_spec
         ]
-        if len(worker_layer_names) == len(group.layer_names):
+        if len(worker_layer_names) == len(group.kv_cache_specs):
             projected_groups.append(group)
             continue
         projected_groups.append(
@@ -1536,7 +1538,7 @@ def get_kv_cache_configs(
     for projected_groups, layer_configs_one_worker, available_memory_one_worker in zip(
         projected_groups_per_worker, layer_configs, available_memory
     ):
-        assert sum(len(group.layer_names) for group in projected_groups) == len(
+        assert sum(len(group.kv_cache_specs) for group in projected_groups) == len(
             layer_configs_one_worker
         ), "Some layers are not assigned to any group."
         bytes_per_block = _pool_bytes_per_block_from_builder(

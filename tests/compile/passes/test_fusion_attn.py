@@ -120,7 +120,7 @@ class AttentionQuantPatternModel(torch.nn.Module):
         max_blocks = (max(batch_spec.seq_lens) + self.block_size - 1) // self.block_size
         num_blocks = batch_size * max_blocks
 
-        spec = self.attn.attn_backend.customize_spec(
+        specs = self.attn.attn_backend.customize_spec(
             AttentionSpec(
                 block_size=self.block_size,
                 num_kv_heads=self.num_kv_heads,
@@ -129,24 +129,28 @@ class AttentionQuantPatternModel(torch.nn.Module):
                 kv_quant_mode=get_kv_quant_mode(self.attn.kv_cache_dtype),
             )
         )
+        if isinstance(specs, AttentionSpec):
+            specs = {"": specs}
+        # The caches of a layer share a page layout here.
+        spec = next(iter(specs.values()))
         supported = get_supported_kv_cache_layouts([self.attn.attn_backend])
         layout = resolve_kv_cache_layout(
             self.vllm_config, [[m.name for m in supported]]
         )
         raw_tensor = torch.zeros(
-            num_blocks * spec.page_size_bytes,
+            num_blocks * len(specs) * spec.page_size_bytes,
             dtype=torch.int8,
             device=self.device,
         )
-        kv_cache = dense_kv_cache_views(
+        views = dense_kv_cache_views(
             raw_tensor,
             spec,
             num_blocks,
-            num_layers=1,
+            num_layers=len(specs),
             layout=layout,
-        )[0]
+        )
 
-        self.attn.kv_cache = kv_cache
+        self.attn.kv_cache = views[0] if len(specs) == 1 else dict(zip(specs, views))
 
         # Build attn metadata
         self.attn_metadata = self.builder.build(
