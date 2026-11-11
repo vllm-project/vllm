@@ -961,6 +961,8 @@ def test_reoffload_preserves_secondary_residency(record_method, position):
     getattr(tracker, record_method)(req, group_config, position, key)
 
     assert not gc.is_tracked(tracker._pending_event_metadata[key])
+    # The re-offload allocated the key again, so this is the queued eviction
+    # of the looked-up allocation.
     list(tracker.take_events([_removed_event([key])]))
     assert key in tracker._pending_event_metadata
     [removed] = tracker.take_events(
@@ -969,6 +971,8 @@ def test_reoffload_preserves_secondary_residency(record_method, position):
 
     assert stored.token_ids == [1, 2, 3, 4]
     assert stored.ownership == removed.ownership == "custom"
+    assert key in tracker._pending_event_metadata
+    list(tracker.take_events([_removed_event([key])]))
     assert key not in tracker._pending_event_metadata
 
 
