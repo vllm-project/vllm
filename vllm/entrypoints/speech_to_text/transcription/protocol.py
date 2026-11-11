@@ -209,6 +209,8 @@ class TranscriptionRequest(OpenAIBaseModel):
             to_language=self.to_language,
             hotwords=self.hotwords,
             extra_args=self.vllm_xargs,
+            use_beam_search=self.use_beam_search,
+            max_completion_tokens=self.max_completion_tokens,
         )
 
     def to_beam_search_params(
