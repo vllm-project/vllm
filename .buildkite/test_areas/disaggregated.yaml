@@ -4,7 +4,6 @@ depends_on:
 steps:
 - label: ":nvidia: (L4) [Nightly] Distributed NixlConnector PD accuracy"
   key: distributed-nixlconnector-pd-accuracy-4-gpus
-  automatic_shard: true
   # Nightly only: 4-GPU L4 pods wait behind smaller jobs on per-PR runs.
   optional: true
   timeout_in_minutes: 55
@@ -23,7 +22,6 @@ steps:
       # Run on PRs even when the L4 step is optional (nightly only).
       optional: false
       label: ":amd: (MI355) Distributed NixlConnector PD accuracy"
-      automatic_shard: true
       dind: false
       device: mi355_4
       timeout_in_minutes: 60
@@ -39,7 +37,6 @@ steps:
 
 - label: ":nvidia: (L4) [Nightly] Distributed FlashInfer NixlConnector PD accuracy"
   key: distributed-flashinfer-nixlconnector-pd-accuracy-4-gpus
-  automatic_shard: true
   # Nightly only: 4-GPU L4 pods wait behind smaller jobs on per-PR runs.
   optional: true
   timeout_in_minutes: 55
@@ -58,7 +55,6 @@ steps:
       # Run on PRs even when the L4 step is optional (nightly only).
       optional: false
       label: ":amd: (MI355) Distributed AITER NixlConnector PD accuracy"
-      automatic_shard: true
       dind: false
       device: mi355_4
       num_devices: 4
@@ -81,7 +77,6 @@ steps:
 
 - label: ":nvidia: (L4) [Nightly] Push NixlConnector PP prefill PD accuracy"
   key: push-nixlconnector-pp-prefill-pd-accuracy-4-gpus
-  automatic_shard: true
   # Nightly only: 4-GPU L4 pods wait behind smaller jobs on per-PR runs.
   optional: true
   timeout_in_minutes: 30
@@ -101,7 +96,6 @@ steps:
       # Run on PRs even when the L4 step is optional (nightly only).
       optional: false
       label: ":amd: (MI300) Push NixlConnector PP prefill PD accuracy"
-      automatic_shard: true
       dind: false
       device: mi300_4
       timeout_in_minutes: 55
@@ -118,7 +112,6 @@ steps:
 
 - label: ":nvidia: (L4) [Nightly] DP EP Distributed NixlConnector PD accuracy"
   key: dp-ep-distributed-nixlconnector-pd-accuracy-tests-4-gpus
-  automatic_shard: true
   # Nightly only: 4-GPU L4 pods wait behind smaller jobs on per-PR runs.
   optional: true
   timeout_in_minutes: 30
@@ -137,7 +130,6 @@ steps:
       # Run on PRs even when the L4 step is optional (nightly only).
       optional: false
       label: ":amd: (MI355) DP EP Distributed NixlConnector PD accuracy"
-      automatic_shard: true
       dind: false
       device: mi355_4
       timeout_in_minutes: 40
@@ -153,7 +145,6 @@ steps:
 
 - label: ":nvidia: (L4) [Nightly] CrossLayer KV layout Distributed NixlConnector PD accuracy"
   key: crosslayer-kv-layout-distributed-nixlconnector-pd-accuracy-tests-4-gpus
-  automatic_shard: true
   # Nightly only: 4-GPU L4 pods wait behind smaller jobs on per-PR runs.
   optional: true
   timeout_in_minutes: 55
@@ -172,7 +163,6 @@ steps:
       # Run on PRs even when the L4 step is optional (nightly only).
       optional: false
       label: ":amd: (MI300) CrossLayer KV layout Distributed NixlConnector PD accuracy"
-      automatic_shard: true
       dind: false
       device: mi300_4
       timeout_in_minutes: 60
@@ -188,7 +178,6 @@ steps:
 
 - label: ":nvidia: (L4) [Nightly] Hybrid SSM NixlConnector PD accuracy"
   key: hybrid-ssm-nixlconnector-pd-accuracy-tests-4-gpus
-  automatic_shard: true
   # Nightly only: 4-GPU L4 pods wait behind smaller jobs on per-PR runs.
   optional: true
   timeout_in_minutes: 60
@@ -207,7 +196,6 @@ steps:
       # Run on PRs even when the L4 step is optional (nightly only).
       optional: false
       label: ":amd: (MI300) Hybrid SSM NixlConnector PD accuracy"
-      automatic_shard: true
       dind: false
       device: mi300_4
       timeout_in_minutes: 80
@@ -229,7 +217,6 @@ steps:
 # configs keep one dedicated GPU per side.
 - label: ":nvidia: (L4) NixlConnector PD accuracy core"
   key: nixlconnector-pd-accuracy-core-2-gpus
-  automatic_shard: true
   timeout_in_minutes: 90
   working_dir: "/vllm-workspace/tests"
   device: l4
@@ -249,7 +236,6 @@ steps:
 
 - label: ":nvidia: (L4) NixlConnector PD edge case"
   key: nixlconnector-pd-edge-cases-2-gpus
-  automatic_shard: true
   timeout_in_minutes: 40
   working_dir: "/vllm-workspace/tests"
   device: l4
@@ -267,7 +253,6 @@ steps:
   mirror:
     amd:
       label: ":amd: (MI300) NixlConnector PD edge case"
-      automatic_shard: true
       dind: false
       device: mi300_2
       timeout_in_minutes: 65
@@ -283,7 +268,6 @@ steps:
 
 - label: ":nvidia: (L4) Hybrid SSM NixlConnector PD prefix cache"
   key: hybrid-ssm-nixlconnector-pd-prefix-cache-2-gpus
-  automatic_shard: true
   timeout_in_minutes: 25
   working_dir: "/vllm-workspace/tests"
   device: l4
@@ -299,7 +283,6 @@ steps:
   mirror:
     amd:
       label: ":amd: (MI355) Hybrid SSM NixlConnector PD prefix cache"
-      automatic_shard: true
       dind: false
       device: mi355_2
       timeout_in_minutes: 25
@@ -316,7 +299,6 @@ steps:
 
 - label: ":nvidia: (L4) MultiConnector (Nixl+Offloading) PD accuracy"
   key: multiconnector-nixl-offloading-pd-accuracy-2-gpus
-  automatic_shard: true
   timeout_in_minutes: 40
   working_dir: "/vllm-workspace/tests"
   device: l4
@@ -333,7 +315,6 @@ steps:
   mirror:
     amd:
       label: ":amd: (MI355) MultiConnector (Nixl+Offloading) PD accuracy"
-      automatic_shard: true
       dind: false
       device: mi355_2
       timeout_in_minutes: 40
@@ -381,7 +362,6 @@ steps:
 
 - label: ":nvidia: (L4) MultiConnector (Nixl+Offloading) PD edge cases"
   key: multiconnector-nixl-offloading-pd-edge-cases-2-gpus
-  automatic_shard: true
   timeout_in_minutes: 25
   working_dir: "/vllm-workspace/tests"
   device: l4
@@ -398,7 +378,6 @@ steps:
   mirror:
     amd:
       label: ":amd: (MI355) MultiConnector (Nixl+Offloading) PD edge cases"
-      automatic_shard: true
       dind: false
       device: mi355_2
       timeout_in_minutes: 25
@@ -417,7 +396,6 @@ steps:
 # P TP 4 - D DPEP 4 test case for DSv4-Flash
 - label: ":nvidia: (H200) [Nightly] DSv4-Flash Disaggregated DP EP"
   key: dsv4-flash-disaggregated
-  automatic_shard: true
   timeout_in_minutes: 60
   device: h200
   optional: true
@@ -443,7 +421,6 @@ steps:
   mirror:
     amd:
       label: ":amd: (MI355) DSv4-Flash Disaggregated DP EP"
-      automatic_shard: true
       dind: false
       device: mi355_8
       timeout_in_minutes: 85
@@ -481,7 +458,6 @@ steps:
 
 - label: ":nvidia: (H200) [Nightly] Kimi-Linear-48B-A3B Disaggregated DP EP"
   key: kimi-linear-disaggregated
-  automatic_shard: true
   timeout_in_minutes: 60
   device: h200
   optional: true
@@ -505,7 +481,6 @@ steps:
   mirror:
     amd:
       label: ":amd: (MI355) Kimi-Linear-48B-A3B Disaggregated DP EP"
-      automatic_shard: true
       dind: false
       device: mi355_4
       num_devices: 4

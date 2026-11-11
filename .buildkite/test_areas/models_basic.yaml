@@ -4,7 +4,6 @@ depends_on:
 steps:
 - label: ":nvidia: (H200 MIG 18GB) Basic Models (Initialization)"
   key: basic-models-tests-initialization
-  automatic_shard: true
   timeout_in_minutes: 25
   device: h200_18gb
   source_file_dependencies:
@@ -24,7 +23,6 @@ steps:
     - pytest -v -s v1/spec_decode/test_dflash2.py -k "beam_conv_residual_norm or grouped_conv_triton_matches_reference or beam_fused_candidate_edges"
   mirror:
     amd:
-      automatic_shard: true
       label: ":amd: (MI355 DPX) Basic Models (Initialization)"
       dind: false
       device: mi355_dpx
@@ -35,7 +33,6 @@ steps:
 - label: ":nvidia: (H200 MIG 35GB) Basic Models (Extra Initialization)"
   device: h200_35gb
   key: basic-models-tests-extra-initialization
-  automatic_shard: true
   timeout_in_minutes: 30
   source_file_dependencies:
   - vllm/model_executor/models/
@@ -49,7 +46,6 @@ steps:
   mirror:
     amd:
       label: ":amd: (MI355 DPX) Basic Models (Extra Initialization)"
-      automatic_shard: true
       dind: false
       device: mi355_dpx
       timeout_in_minutes: 60
@@ -67,7 +63,6 @@ steps:
 - label: ":nvidia: (H200 MIG 35GB) Basic Models (Other)"
   device: h200_35gb
   key: basic-models-tests-other
-  automatic_shard: true
   timeout_in_minutes: 38
   source_file_dependencies:
   - vllm/
@@ -115,7 +110,6 @@ steps:
     amd:
       label: ":amd: (MI355) Basic Models (Other)"
       dind: false
-      automatic_shard: true
       device: mi355_1
       timeout_in_minutes: 65
       depends_on:
@@ -181,7 +175,6 @@ steps:
 
 - label: ":nvidia: (B200) Inkling"
   key: inkling-unit-tests-b200
-  automatic_shard: true
   timeout_in_minutes: 40
   device: b200-k8s
   source_file_dependencies:
@@ -194,7 +187,6 @@ steps:
     - pytest -v -s models/inkling
   mirror:
     amd:
-      automatic_shard: true
       label: ":amd: (MI355) Inkling"
       dind: false
       device: mi355_1
@@ -226,7 +218,6 @@ steps:
 
 - label: ":nvidia: (B200) Kimi K3"
   key: kimi-k3-unit-tests-b200
-  automatic_shard: true
   timeout_in_minutes: 40
   device: b200-k8s
   source_file_dependencies:
@@ -248,7 +239,6 @@ steps:
       kernels/attention/test_kimi_k3_mla_fused_epilogue.py
   mirror:
     amd:
-      automatic_shard: true
       label: ":amd: (MI355) Kimi K3"
       dind: false
       device: mi355_1
@@ -280,7 +270,6 @@ steps:
   key: kimi-k3-prefix-cache-4xb200
   # Nightly only: 4-GPU B200 pods wait hours behind smaller jobs on per-PR runs.
   optional: true
-  automatic_shard: true
   timeout_in_minutes: 75
   device: b200-k8s
   num_devices: 4
@@ -306,7 +295,6 @@ steps:
   mirror:
     amd:
       label: ":amd: (MI355) Kimi K3 Prefix Cache"
-      automatic_shard: true
       dind: false
       device: mi355_4
       timeout_in_minutes: 60
@@ -322,7 +310,6 @@ steps:
 
 - label: ":nvidia: (H200) Step5"
   key: step5-unit-tests
-  automatic_shard: true
   timeout_in_minutes: 20
   device: h200_35gb
   source_file_dependencies:
@@ -333,7 +320,6 @@ steps:
     - pytest -v -s models/step5
   mirror:
     amd:
-      automatic_shard: true
       label: ":amd: (MI355 DPX) Step5"
       dind: false
       device: mi355_dpx
@@ -363,7 +349,6 @@ steps:
 
 - label: ":nvidia: (H200) GLM5Next"
   key: glm5next-unit-tests
-  automatic_shard: true
   timeout_in_minutes: 20
   device: h200_35gb
   source_file_dependencies:
@@ -374,7 +359,6 @@ steps:
     - pytest -v -s models/glm5next
   mirror:
     amd:
-      automatic_shard: true
       label: ":amd: (MI355 DPX) GLM5Next"
       dind: false
       device: mi355_dpx
@@ -387,7 +371,6 @@ steps:
 
 - label: ":nvidia: (H200) Qwen4 Exp"
   key: qwen4-exp-unit-tests
-  automatic_shard: true
   timeout_in_minutes: 40
   device: h200_35gb
   source_file_dependencies:
@@ -405,7 +388,6 @@ steps:
     - pytest -v -s models/qwen4_exp/test_ple.py
   mirror:
     amd:
-      automatic_shard: true
       label: ":amd: (MI355 DPX) Qwen4 Exp"
       dind: false
       device: mi355_dpx
@@ -422,7 +404,6 @@ steps:
 
 - label: ":nvidia: (B200) Qwen4 Exp Kernels"
   key: qwen4-exp-kernels-b200
-  automatic_shard: true
   timeout_in_minutes: 20
   device: b200-k8s
   source_file_dependencies:
@@ -443,7 +424,6 @@ steps:
   mirror:
     amd:
       label: ":amd: (MI355) Qwen4 Exp HC Kernels"
-      automatic_shard: true
       dind: false
       device: mi355_1
       depends_on:
@@ -458,7 +438,6 @@ steps:
 
 - label: ":amd: (MI300) Qwen4 Exp"
   key: qwen4-exp-unit-tests-mi300
-  automatic_shard: true
   timeout_in_minutes: 40
   dind: false
   device: mi300_1
@@ -495,7 +474,6 @@ steps:
 
 - label: ":nvidia: (B200) Qwen3.5"
   key: qwen3-5-unit-tests-b200
-  automatic_shard: true
   timeout_in_minutes: 20
   device: b200-k8s
   # test_fused_allreduce_norm_quant runs TP2.
@@ -567,7 +545,6 @@ steps:
 
 - label: ":nvidia: (4xB200) DeepSeek-V4.1 NVIDIA Kernels"
   key: dsv41-nvidia-kernels-4xb200
-  automatic_shard: true
   # Nightly only: 4-GPU B200 pods wait hours behind smaller jobs on per-PR runs.
   optional: true
   timeout_in_minutes: 50
@@ -606,7 +583,6 @@ steps:
 
 - label: ":nvidia: (4xB200) GLM-5.3-Flash Specialized Decode"
   key: glm5next-nvidia-specialized-decode-4xb200
-  automatic_shard: true
   # Nightly only: 4-GPU B200 pods wait hours behind smaller jobs on per-PR runs.
   optional: true
   timeout_in_minutes: 40

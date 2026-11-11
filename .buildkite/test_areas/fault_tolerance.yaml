@@ -4,7 +4,6 @@ depends_on:
 steps:
 - label: ":nvidia: (H100) Fault Tolerance E2E"
   key: fault-tolerance-e2e-4xh100
-  automatic_shard: true
   timeout_in_minutes: 35
   device: h100
   num_devices: 4
@@ -31,7 +30,6 @@ steps:
   mirror:
     amd:
       label: ":amd: (MI355) MoRI EP Healthy Baseline"
-      automatic_shard: true
       dind: false
       device: mi355_2
       num_devices: 2

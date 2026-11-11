@@ -4,7 +4,6 @@ depends_on:
 steps:
 - label: ":nvidia: (L4) [Nightly] Qwen4 Exp SP"
   key: qwen4-exp-sp-tests-4-gpus
-  automatic_shard: true
   # Nightly only: 4-GPU L4 pods wait behind smaller jobs on per-PR runs.
   optional: true
   timeout_in_minutes: 30
@@ -23,7 +22,6 @@ steps:
   - pytest -v -s models/qwen4_exp/test_tpsp.py
   mirror:
     amd:
-      automatic_shard: true
       # Run on PRs even when the L4 step is optional (nightly only).
       optional: false
       label: ":amd: (MI355) Qwen4 Exp SP"
@@ -43,7 +41,6 @@ steps:
 
 - label: ":nvidia: (L4) Distributed Models"
   key: distributed-model-tests-2-gpus
-  automatic_shard: true
   timeout_in_minutes: 35
   working_dir: "/vllm-workspace/tests"
   device: l4
@@ -65,7 +62,6 @@ steps:
   - VLLM_TRITON_FORCE_FIRST_CONFIG=1 pytest -v -s models/test_pp_equivalence.py -m 'distributed(num_gpus=2)'
   mirror:
     amd:
-      automatic_shard: true
       label: ":amd: (MI300) Distributed Models"
       dind: false
       device: mi300_2
@@ -105,7 +101,6 @@ steps:
   # cases that run on PRs; 4-GPU L4 pods wait behind smaller jobs on PR runs.
   # automatic_shard needs timings from a passing run; until then this is one job.
   optional: true
-  automatic_shard: true
   timeout_in_minutes: 240
   working_dir: "/vllm-workspace/tests"
   device: l4

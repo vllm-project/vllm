@@ -4,7 +4,6 @@ depends_on:
 steps:
 - label: ":nvidia: (H200 MIG 18GB) Rust Frontend OpenAI Coverage"
   key: rust-frontend-openai-coverage
-  automatic_shard: true
   timeout_in_minutes: 50
   device: h200_18gb
   working_dir: "/vllm-workspace/tests"
@@ -65,7 +64,6 @@ steps:
   mirror:
     amd:
       label: ":amd: (MI355 DPX) Rust Frontend OpenAI Coverage"
-      automatic_shard: true
       dind: false
       device: mi355_dpx
       timeout_in_minutes: 55
@@ -179,7 +177,6 @@ steps:
 
 - label: ":nvidia: (H200 MIG 18GB) Rust Frontend Core Correctness"
   key: rust-frontend-core-correctness
-  automatic_shard: true
   timeout_in_minutes: 20
   device: h200_18gb
   working_dir: "/vllm-workspace/tests"
@@ -196,7 +193,6 @@ steps:
   - pytest -v -s v1/core/prefix_cache/test_hybrid_prefix_cache_hit_rate.py
   mirror:
     amd:
-      automatic_shard: true
       label: ":amd: (MI355 DPX) Rust Frontend Core Correctness"
       dind: false
       device: mi355_dpx
@@ -243,7 +239,6 @@ steps:
 
 - label: ":nvidia: (H200 MIG 35GB) Rust Frontend Tool Use"
   key: rust-frontend-tool-use
-  automatic_shard: true
   device: h200_35gb
   timeout_in_minutes: 35
   working_dir: "/vllm-workspace/tests"
@@ -270,7 +265,6 @@ steps:
   - pytest -v -s entrypoints/tool_parsers/test_hermes_tool_parser.py
   mirror:
     amd:
-      automatic_shard: true
       label: ":amd: (MI355 DPX) Rust Frontend Tool Use"
       dind: false
       device: mi355_dpx
@@ -290,7 +284,6 @@ steps:
 
 - label: ":nvidia: (H200 MIG 35GB) Rust Frontend Responses API"
   key: rust-frontend-responses-api
-  automatic_shard: true
   device: h200_35gb
   timeout_in_minutes: 35
   working_dir: "/vllm-workspace/tests"
@@ -314,7 +307,6 @@ steps:
   - pytest -v -s entrypoints/openai/responses/test_simple.py -k "not enable_response_messages and not streaming_logprobs"
   mirror:
     amd:
-      automatic_shard: true
       label: ":amd: (MI355 DPX) Rust Frontend Responses API"
       dind: false
       device: mi355_dpx
@@ -330,7 +322,6 @@ steps:
 
 - label: ":nvidia: (L4) [Nightly] Rust Frontend Distributed"
   key: rust-frontend-distributed
-  automatic_shard: true
   # Nightly only: 4-GPU L4 pods wait behind smaller jobs on per-PR runs.
   optional: true
   timeout_in_minutes: 25
@@ -365,7 +356,6 @@ steps:
       # Run on PRs even when the L4 step is optional (nightly only).
       optional: false
       label: ":amd: (MI355) Rust Frontend Distributed"
-      automatic_shard: true
       dind: false
       device: mi355_4
       timeout_in_minutes: 45

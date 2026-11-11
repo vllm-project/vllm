@@ -1,4 +1,7 @@
 name: vllm_ci
+# Every eligible step shards from main's timings (ci-infra runtime_shard.py);
+# `automatic_shard: false` on a step opts it out.
+automatic_shard_default: true
 job_dirs:
   - ".buildkite/image_build"
   - ".buildkite/test_areas"

@@ -4,7 +4,6 @@ depends_on:
 steps:
 - label: ":nvidia: (H200 MIG 18GB) Basic Correctness Models"
   key: basic-correctness
-  automatic_shard: true
   timeout_in_minutes: 68
   device: h200_18gb
   source_file_dependencies: &basic-correctness-deps
@@ -17,7 +16,6 @@ steps:
   mirror:
     amd:
       label: ":amd: (MI355 DPX) Basic Correctness Models"
-      automatic_shard: true
       dind: false
       device: mi355_dpx
       timeout_in_minutes: 60
@@ -26,7 +24,6 @@ steps:
 
 - label: ":nvidia: (H200 MIG 18GB) Basic Correctness CuMem"
   key: basic-correctness-cumem
-  automatic_shard: true
   timeout_in_minutes: 68
   device: h200_18gb
   source_file_dependencies: *basic-correctness-deps
@@ -35,7 +32,6 @@ steps:
   - pytest -v -s basic_correctness/memory/cumem
   mirror:
     amd:
-      automatic_shard: true
       label: ":amd: (MI355 DPX) Basic Correctness CuMem"
       dind: false
       device: mi355_dpx
@@ -54,7 +50,6 @@ steps:
 
 - label: ":nvidia: (H200 MIG 18GB) Basic Correctness Sleep Mode"
   key: basic-correctness-sleep-mode
-  automatic_shard: true
   timeout_in_minutes: 68
   device: h200_18gb
   source_file_dependencies: *basic-correctness-deps
@@ -63,7 +58,6 @@ steps:
   - pytest -v -s basic_correctness/memory/sleep_mode
   mirror:
     amd:
-      automatic_shard: true
       label: ":amd: (MI300 DPX) Basic Correctness Sleep Mode"
       dind: false
       device: mi300_dpx
@@ -73,7 +67,6 @@ steps:
 
 - label: ":nvidia: (H200 MIG 18GB) Basic Correctness CPU Offload"
   key: basic-correctness-cpu-offload
-  automatic_shard: true
   timeout_in_minutes: 68
   device: h200_18gb
   source_file_dependencies: *basic-correctness-deps
@@ -82,7 +75,6 @@ steps:
   - pytest -v -s basic_correctness/cpu_offload
   mirror:
     amd:
-      automatic_shard: true
       label: ":amd: (MI355 DPX) Basic Correctness CPU Offload"
       dind: false
       device: mi355_dpx
@@ -92,7 +84,6 @@ steps:
 
 - label: ":nvidia: (H200 MIG 18GB) Basic Correctness Prefetch Offload"
   key: basic-correctness-prefetch-offload
-  automatic_shard: true
   timeout_in_minutes: 68
   device: h200_18gb
   source_file_dependencies: *basic-correctness-deps
@@ -101,7 +92,6 @@ steps:
   - pytest -v -s basic_correctness/prefetch_offload
   mirror:
     amd:
-      automatic_shard: true
       label: ":amd: (MI355 DPX) Basic Correctness Prefetch Offload"
       dind: false
       device: mi355_dpx

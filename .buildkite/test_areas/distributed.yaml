@@ -4,7 +4,6 @@ depends_on:
 steps:
 - label: ":nvidia: (L4) Distributed Comm Ops"
   key: distributed-comm-ops
-  automatic_shard: true
   timeout_in_minutes: 25
   working_dir: "/vllm-workspace/tests"
   device: l4
@@ -24,7 +23,6 @@ steps:
   - pytest -v -s distributed/test_pipeline_partition.py
   mirror:
     amd:
-      automatic_shard: true
       label: ':amd: (MI300) Distributed Comm Ops'
       dind: false
       device: mi300_2
@@ -46,7 +44,6 @@ steps:
 
 - label: ":nvidia: (L4) Sharded RDT Weight Transfer"
   key: sharded-rdt-weight-transfer
-  automatic_shard: true
   device: l4
   timeout_in_minutes: 20
   working_dir: "/vllm-workspace/tests"
@@ -62,7 +59,6 @@ steps:
   - pytest -v -s distributed/test_sharded_rdt_trainer.py
   mirror:
     amd:
-      automatic_shard: true
       label: ":amd: (MI355 DPX) Sharded RDT Weight Transfer"
       dind: false
       device: mi355_dpx
@@ -87,7 +83,6 @@ steps:
 
 - label: ":nvidia: (L4) Distributed DP Basic"
   key: distributed-dp-tests-2-gpus
-  automatic_shard: true
   timeout_in_minutes: 45
   working_dir: "/vllm-workspace/tests"
   device: l4
@@ -119,7 +114,6 @@ steps:
     amd:
       label: ":amd: (MI355) Distributed DP Basic"
       dind: false
-      automatic_shard: true
       device: mi355_2
       timeout_in_minutes: 45
       depends_on:
@@ -138,7 +132,6 @@ steps:
 
 - label: ":nvidia: (L4) Distributed Compile + RPC"
   key: distributed-compile-rpc-tests-2-gpus
-  automatic_shard: true
   timeout_in_minutes: 65
   working_dir: "/vllm-workspace/tests"
   device: l4
@@ -163,7 +156,6 @@ steps:
   - pytest -v -s ./compile/test_aot_compile.py::test_load_on_another_device
   mirror:
     amd:
-      automatic_shard: true
       label: ":amd: (MI355) Distributed Compile + RPC"
       dind: false
       device: mi355_2
@@ -188,7 +180,6 @@ steps:
 
 - label: ":nvidia: (L4) Distributed Torchrun + Shutdown"
   key: distributed-torchrun-shutdown-tests-2-gpus
-  automatic_shard: true
   timeout_in_minutes: 30
   working_dir: "/vllm-workspace/tests"
   device: l4
@@ -213,7 +204,6 @@ steps:
   - pytest -v -s v1/worker/test_worker_memory_snapshot.py
   mirror:
     amd:
-      automatic_shard: true
       label: ':amd: (MI300) Distributed Torchrun + Shutdown'
       dind: false
       device: mi300_2
@@ -321,7 +311,6 @@ steps:
   key: distributed-dp-tests-4-gpus
   # Nightly only: 4-GPU L4 pods wait behind smaller jobs on per-PR runs.
   optional: true
-  automatic_shard: true
   timeout_in_minutes: 45
   working_dir: "/vllm-workspace/tests"
   device: l4
@@ -353,7 +342,6 @@ steps:
       optional: false
       label: ':amd: (MI355) Distributed DP Extended'
       dind: false
-      automatic_shard: true
       device: mi355_4
       timeout_in_minutes: 60
       working_dir: /vllm-workspace/tests
@@ -382,7 +370,6 @@ steps:
 
 - label: ":nvidia: (L4) [Nightly] Distributed Compile + Comm"
   key: distributed-compile-comm-4-gpus
-  automatic_shard: true
   # Nightly only: 4-GPU L4 pods wait behind smaller jobs on per-PR runs.
   optional: true
   timeout_in_minutes: 70
@@ -408,7 +395,6 @@ steps:
   - pytest -v -s distributed/test_multiproc_executor.py::test_multiproc_executor_multi_node
   mirror:
     amd:
-      automatic_shard: true
       # Run on PRs even when the L4 step is optional (nightly only).
       optional: false
       label: ':amd: (MI355) Distributed Compile + Comm'
@@ -433,7 +419,6 @@ steps:
 
 - label: ":nvidia: (H100) [Nightly] Distributed DP + EP"
   key: distributed-tests-8xh100
-  automatic_shard: true
   timeout_in_minutes: 20
   optional: true
   device: h100
@@ -459,7 +444,6 @@ steps:
   - pytest -v -s distributed/test_eplb_execute.py -k symm_mem
   mirror:
     amd:
-      automatic_shard: true
       label: ":amd: (MI355) Distributed DP + EP"
       dind: false
       device: mi355_8
@@ -579,7 +563,6 @@ steps:
 
 - label: ":nvidia: (H100) [Nightly] Distributed Features"
   key: distributed-tests-2xh100-2xmi300
-  automatic_shard: true
   timeout_in_minutes: 30
   device: h100
   optional: true
@@ -596,7 +579,6 @@ steps:
     - pytest -v -s tests/distributed/test_packed_tensor.py
   mirror:
     amd:
-      automatic_shard: true
       label: ':amd: (MI355) Distributed Features'
       dind: false
       device: mi355_2
@@ -649,7 +631,6 @@ steps:
 
 - label: ":nvidia: (B200) [Nightly] Distributed"
   key: distributed-tests-2xb200
-  automatic_shard: true
   device: b200-k8s
   optional: true
   working_dir: "/vllm-workspace/"
@@ -663,7 +644,6 @@ steps:
     - pytest -v -s tests/distributed/test_pp_cudagraph.py::test_pp_cudagraph_mode_differs_across_stages
   mirror:
     amd:
-      automatic_shard: true
       label: ":amd: (MI355) Distributed AgRs All2All"
       dind: false
       device: mi355_2
@@ -686,7 +666,6 @@ steps:
 
 - label: ":nvidia: (B200) GEMM-RS/AR"
   key: gemm-rs-ar-2xb200
-  automatic_shard: true
   timeout_in_minutes: 20
   device: b200-k8s
   working_dir: "/vllm-workspace/"
@@ -699,7 +678,6 @@ steps:
     - pytest -v -s tests/kernels/test_gemm_rs_ar.py
   mirror:
     amd:
-      automatic_shard: true
       label: ":amd: (MI355) GEMM-RS-AR"
       dind: false
       device: mi355_4
@@ -763,7 +741,6 @@ steps:
   key: pipeline-context-parallelism-4-gpus
   # Nightly only: 4-GPU L4 pods wait behind smaller jobs on per-PR runs.
   optional: true
-  automatic_shard: true
   timeout_in_minutes: 55
   working_dir: "/vllm-workspace/tests"
   device: l4
@@ -794,7 +771,6 @@ steps:
       optional: false
       label: ":amd: (MI250) Pipeline + Context Parallelism"
       dind: false
-      automatic_shard: true
       device: mi250_4
       timeout_in_minutes: 90
       depends_on:
@@ -819,7 +795,6 @@ steps:
   key: rayexecutorv2-4-gpus
   # Nightly only: 4-GPU L4 pods wait behind smaller jobs on per-PR runs.
   optional: true
-  automatic_shard: true
   timeout_in_minutes: 45
   working_dir: "/vllm-workspace/tests"
   device: l4
@@ -844,7 +819,6 @@ steps:
       optional: false
       label: ':amd: (MI355) RayExecutorV2'
       dind: false
-      automatic_shard: true
       device: mi355_4
       timeout_in_minutes: 75
       working_dir: /vllm-workspace/tests
@@ -867,7 +841,6 @@ steps:
 
 - label: ":nvidia: (L4) Distributed Preload"
   key: preload-2-gpus
-  automatic_shard: true
   timeout_in_minutes: 15
   working_dir: "/vllm-workspace/tests"
   device: l4
@@ -881,7 +854,6 @@ steps:
   - VLLM_TRITON_FORCE_FIRST_CONFIG=1 pytest -v -s model_executor/model_loader/test_weight_cache.py -m 'distributed(num_gpus=2)'
   mirror:
     amd:
-      automatic_shard: true
       label: ":amd: (MI355) Distributed Preload"
       dind: false
       device: mi355_2
@@ -898,7 +870,6 @@ steps:
 
 - label: ":nvidia: (B200) Distributed Preload with Mooncake Store"
   key: preload-mooncake-store-2xb200
-  automatic_shard: true
   timeout_in_minutes: 20
   working_dir: "/vllm-workspace/tests"
   device: b200-k8s

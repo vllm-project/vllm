@@ -56,7 +56,6 @@ steps:
 - label: ":nvidia: (H200 MIG 35GB) Quantized Fusions"
   device: h200_35gb
   key: quantized-fusions
-  automatic_shard: true
   timeout_in_minutes: 20
   source_file_dependencies:
   - tests/fusion
@@ -68,7 +67,6 @@ steps:
     - pytest -v -s fusion/
   mirror:
     amd:
-      automatic_shard: true
       label: ":amd: (MI300 DPX) Quantized Fusions"
       dind: false
       device: mi300_dpx
@@ -86,7 +84,6 @@ steps:
 
 - label: ":nvidia: (B200) Quantized MoE"
   key: quantized-moe-test-b200
-  automatic_shard: true
   timeout_in_minutes: 120
   working_dir: "/vllm-workspace/"
   device: b200-k8s
@@ -121,7 +118,6 @@ steps:
       tests/benchmarks/test_forward_cli.py::test_bench_forward_muse_synthetic_routing
   mirror:
     amd:
-      automatic_shard: true
       label: ":amd: (MI355) Quantized MoE"
       dind: false
       device: mi355_1
@@ -152,7 +148,6 @@ steps:
 - label: ":nvidia: (H200 MIG 35GB) Quantized Models"
   device: h200_35gb
   key: quantized-models-test
-  automatic_shard: true
   timeout_in_minutes: 65
   source_file_dependencies:
   - vllm/model_executor/layers/quantization
@@ -163,7 +158,6 @@ steps:
     amd:
       label: ":amd: (MI355 DPX) Quantized Models"
       dind: false
-      automatic_shard: true
       device: mi355_dpx
       timeout_in_minutes: 80
       working_dir: "/vllm-workspace/tests"

@@ -21,7 +21,6 @@ depends_on:
 steps:
 - label: ':amd: (MI355) DeepSeek-V4.1 Mono Decode Numerics'
   key: dsv41-mono-decode-numerics-amd
-  automatic_shard: true
   dind: false
   device: mi355_4
   num_devices: 4
@@ -41,7 +40,6 @@ steps:
 
 - label: ':amd: (MI355) DeepSeek-V4.1 Mono Decode Numerics TP8'
   key: dsv41-mono-decode-numerics-tp8-amd
-  automatic_shard: true
   dind: false
   device: mi355_8
   num_devices: 8
@@ -65,7 +63,6 @@ steps:
 
 - label: ':amd: (MI300) DeepSeek-V4.1 gfx942 Mono Decode Layers'
   key: dsv41-mono-decode-layers-gfx942-amd
-  automatic_shard: true
   dind: false
   device: mi300_4
   num_devices: 4
@@ -85,7 +82,6 @@ steps:
 
 - label: ":amd: (MI300) DeepSeek-V4.1 gfx942 Mono Decode Kernels"
   key: dsv41-mono-decode-gfx942-amd
-  automatic_shard: true
   dind: false
   device: mi300_1
   num_devices: 1
@@ -118,7 +114,6 @@ steps:
 
 - label: ':amd: (MI355) DeepSeek-V4-Pro Mono Decode Numerics'
   key: dsv4-mono-decode-numerics-amd
-  automatic_shard: true
   dind: false
   device: mi355_8
   num_devices: 8
@@ -137,7 +132,6 @@ steps:
 
 - label: ":amd: (MI355) MiniMax M3 MonoKernel"
   key: minimax-m3-monokernel-mi355
-  automatic_shard: true
   dind: false
   timeout_in_minutes: 45
   device: mi355_4
@@ -162,7 +156,6 @@ steps:
 
 - label: ':amd: (MI355) Kimi-K3 Specialized Decode'
   key: kimi-k3-specialized-decode-amd
-  automatic_shard: true
   dind: false
   device: mi355_8
   num_devices: 8

@@ -60,7 +60,6 @@ steps:
 - label: ':amd: (MI300) Model Executor'
   device: mi300_1
   key: amd-model-executor
-  automatic_shard: true
   timeout_in_minutes: 75
   source_file_dependencies:
   - vllm/engine/arg_utils.py
