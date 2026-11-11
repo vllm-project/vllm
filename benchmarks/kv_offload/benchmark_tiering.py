@@ -24,7 +24,6 @@ Compare two session dirs:
 import argparse
 import contextlib
 import csv
-import io
 import json
 import os
 import shutil
@@ -70,9 +69,10 @@ def gib(n: float) -> int:
     return int(n * 1024**3)
 
 
-def _fmt(v: object) -> str:
+def _cell(v: object) -> str:
+    """CSV cell: blank for missing, floats rounded to 2 decimals."""
     if v is None:
-        return "n/a"
+        return ""
     if isinstance(v, float):
         return f"{v:.2f}"
     return str(v)
@@ -544,29 +544,21 @@ class BenchmarkSession:
             self.results.append(result)
             self._checkpoint()
             print(f"{spec.name}: {result['status']}")
-            self._print_csv_rows([result])
+            for m in METRICS:
+                print(f"  {m}: {result.get(m, 'n/a')}")
         self._write_table()
         print(f"\nAll runs complete. Results in {self.session_dir}/")
         return self.results
 
-    def _print_csv_rows(self, results: list[dict]) -> None:
-        buf = io.StringIO()
-        writer = csv.writer(buf, lineterminator="\n")
-        writer.writerow(["scenario"] + METRICS)
-        for r in results:
-            writer.writerow([r["name"]] + [r.get(m, "") for m in METRICS])
-        print(buf.getvalue())
-
     def _write_table(self) -> None:
-        """Scenarios as rows, metrics as columns; printed and saved as CSV."""
+        """Save scenarios x metrics as CSV."""
         csv_path = self.session_dir / "results.csv"
         with csv_path.open("w", newline="") as f:
             writer = csv.writer(f)
             writer.writerow(["scenario"] + METRICS)
             for r in self.results:
-                writer.writerow([r["name"]] + [r.get(m, "") for m in METRICS])
-        self._print_csv_rows(self.results)
-        print(f"Table saved to {csv_path}")
+                writer.writerow([r["name"]] + [_cell(r.get(m)) for m in METRICS])
+        print(f"Results table saved to {csv_path}")
 
     def _checkpoint(self) -> None:
         (self.session_dir / "results.json").write_text(
