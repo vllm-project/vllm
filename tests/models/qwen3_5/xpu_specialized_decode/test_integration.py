@@ -222,15 +222,32 @@ def test_xpu_qwen3_5_moe_reload_graph_tp2(vllm_runner, enable_pickle):
 
 
 def _check_xpu_moe_a8_shared_expert(worker):
-    from tests.kernels.moe.test_moe import _check_xpu_qwen3_5_decode
+    from vllm.forward_context import set_forward_context
+    from vllm.model_executor.models.qwen3_next import Qwen3NextSparseMoeBlock
     from vllm.models.qwen3_5.xpu.model import Qwen3_5SparseMoeBlock
 
     model = worker.model_runner.get_model()
     block = next(m for m in model.modules() if isinstance(m, Qwen3_5SparseMoeBlock))
+    config = worker.vllm_config
     for num_tokens in (1, 8):
-        _check_xpu_qwen3_5_decode(
-            (block, worker.vllm_config, True), num_tokens, should_fuse=False
+        torch.manual_seed(17)
+        x = torch.randn(
+            num_tokens,
+            block.gate.input_size,
+            dtype=config.model_config.dtype,
+            device=worker.device,
         )
+        with set_forward_context(None, config), torch.inference_mode():
+            expected = Qwen3NextSparseMoeBlock.forward(block, x)
+            with torch.profiler.profile(
+                activities=[torch.profiler.ProfilerActivity.CPU]
+            ) as profiler:
+                actual = block(x)
+        assert not any(
+            event.key == "_xpu_C::moe_shared_fused_decode_interface"
+            for event in profiler.key_averages()
+        )
+        torch.testing.assert_close(actual, expected, rtol=0, atol=0)
     return block.tp_size
 
 
