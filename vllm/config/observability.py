@@ -41,13 +41,10 @@ class ObservabilityConfig:
     """Target URL to which OpenTelemetry traces will be sent."""
 
     collect_detailed_traces: list[DetailedTraceModules] | None = None
-    """It makes sense to set this only if `--otlp-traces-endpoint` is set. If
-    set, it will collect detailed traces for the specified modules. This
-    involves use of possibly costly and or blocking operations and hence might
-    have a performance impact.
-
-    Note that collecting detailed timing information for each request can be
-    expensive."""
+    """Deprecated: the per-module timings this selected were only produced by the
+    removed Model Runner V1, so this no longer changes what is traced. It will be
+    removed in a future release. Request spans still carry the prefill, decode and
+    inference timings, which need no opt-in."""
 
     per_request_spec_decode_metrics: Literal["none", "summary", "detailed"] = "none"
     """Include per-request speculative-decoding acceptance metrics in the
@@ -110,22 +107,6 @@ class ObservabilityConfig:
     jit_monitor_verbose: bool = False
     """Log every monitored JIT compile with runtime details. This can emit many
     logs and add overhead, so it is intended for debugging."""
-
-    @cached_property
-    def collect_model_forward_time(self) -> bool:
-        """Whether to collect model forward time for the request."""
-        return self.collect_detailed_traces is not None and (
-            "model" in self.collect_detailed_traces
-            or "all" in self.collect_detailed_traces
-        )
-
-    @cached_property
-    def collect_model_execute_time(self) -> bool:
-        """Whether to collect model execute time for the request."""
-        return self.collect_detailed_traces is not None and (
-            "worker" in self.collect_detailed_traces
-            or "all" in self.collect_detailed_traces
-        )
 
     def compile_factors(self) -> CompileFactors:
         """This config does not affect the compiled graph.
@@ -209,9 +190,12 @@ class ObservabilityConfig:
 
     @model_validator(mode="after")
     def _validate_tracing_config(self):
-        if self.collect_detailed_traces and not self.otlp_traces_endpoint:
-            raise ValueError(
-                "collect_detailed_traces requires `--otlp-traces-endpoint` to be set."
+        if self.collect_detailed_traces:
+            logger.warning_once(
+                "collect_detailed_traces is deprecated and no longer changes what "
+                "is traced; the per-module timings it selected were only produced "
+                "by the removed Model Runner V1. It will be removed in a future "
+                "release."
             )
         if self.enable_layerwise_nvtx_tracing:
             logger.warning_once(
