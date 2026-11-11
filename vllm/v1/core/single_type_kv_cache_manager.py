@@ -1455,6 +1455,8 @@ class MambaManager(SingleTypeKVCacheManager):
         # Mamba checkpoints follow Eagle's global replay boundary.
         self.drop_eagle_checkpoint_block = False
         self.cached_blocks_this_step: set[BlockHashWithGroupId] = set()
+        # See ``reserve_external_boundary_block``.
+        self._external_boundary_reqs: set[str] = set()
         if self.mamba_cache_mode == "align":
             # Mapping from request ID to the index of the block
             # allocated in the previous step
@@ -1470,8 +1472,6 @@ class MambaManager(SingleTypeKVCacheManager):
             # connector; a request that finishes first hands off this table
             # source directly.
             self._producer_partial_tail_reqs: dict[str, tuple[KVCacheBlock, int]] = {}
-            # See ``reserve_external_boundary_block``.
-            self._external_boundary_reqs: set[str] = set()
 
     @classmethod
     def find_longest_cache_hit(

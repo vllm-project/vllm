@@ -304,7 +304,7 @@ class NixlBaseConnectorScheduler:
 
         Use this at every block-id exchange point. Pass `clip_ssm=False`
         for per-step partial lists (host-buffer save), where the SSM strip
-        does not apply. ``keep_ssm_boundary`` also keeps a reserved boundary
+        does not apply. `keep_ssm_boundary` also keeps a reserved boundary
         state just before the running state in align-mode SSM groups.
         """
         if len(block_ids) == 0:

@@ -1,6 +1,6 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
-"""NIXL P/D for Mamba hybrids in align mode with ``ssm_boundary_state_xfer``:
+"""NIXL P/D for Mamba hybrids in align mode with `ssm_boundary_state_xfer`:
 the decode pod caches the prompt's last block-boundary state, so a later turn
 sent to it alone gets a prefix hit. Drives real P and D schedulers."""
 
@@ -55,6 +55,7 @@ def _make_scheduler(
         mamba_cache_mode="align",
         num_blocks=200,
     )
+    kv_cache_config.hash_block_size = BLOCK_SIZE
     mamba_group = kv_cache_config.kv_cache_groups[MAMBA_GROUP]
     for i in range(1, num_mamba_groups):
         kv_cache_config.kv_cache_groups.append(
@@ -83,7 +84,7 @@ def _make_request(request_id: str, prompt: list[int], max_tokens: int) -> Reques
 def _run_prefill(
     prefiller, prompt: list[int], request_id: str = "p-1"
 ) -> tuple[Request, dict]:
-    """Prefill ``prompt`` on the producer until it finishes; return the
+    """Prefill `prompt` on the producer until it finishes; return the
     request and the kv_transfer_params handed to the decoder."""
     request = _make_request(request_id, prompt, max_tokens=1)
     request.kv_transfer_params = dict(do_remote_prefill=False, do_remote_decode=True)
@@ -95,7 +96,6 @@ def _run_prefill(
         else:
             model_output = ModelRunnerOutput(
                 req_ids=[request.request_id],
-                req_id_to_index={request.request_id: 0},
                 sampled_token_ids=[[]],
             )
         engine_outputs = prefiller.update_from_output(scheduler_output, model_output)
@@ -111,7 +111,7 @@ def _run_decode(
     num_output: int,
     request_id: str = "d-1",
 ):
-    """Receive ``prompt`` from the prefiller, decode ``num_output`` tokens and
+    """Receive `prompt` from the prefiller, decode `num_output` tokens and
     finish. Returns the local SSM block ids the decoder asked to receive into
     and the generated tokens."""
     request = _make_request(request_id, prompt, max_tokens=num_output)
@@ -177,17 +177,28 @@ def test_decode_pod_hits_prompt_boundary_after_nixl_receive():
 )
 def test_boundary_state_needs_flag_on_both_sides(p_xfer, d_xfer):
     """Off by default; with the flag on only one side, the decode pod receives
-    only the running state as today and caches no boundary state."""
+    only the running state as today and caches no boundary state. P still
+    frees every block, including a boundary pin D never reads, once D is done."""
     prefiller = _make_scheduler("kv_producer", ssm_boundary_state_xfer=p_xfer)
     decoder = _make_scheduler("kv_consumer", ssm_boundary_state_xfer=d_xfer)
+    pool = prefiller.kv_cache_manager.block_pool
+    num_free = pool.get_num_free_blocks()
     prompt = _turn1_prompt(58)
 
-    _, params = _run_prefill(prefiller, prompt)
+    request, params = _run_prefill(prefiller, prompt)
     local_ssm_block_ids, output_tokens = _run_decode(
         decoder, prompt, params, num_output=2
     )
     assert len(local_ssm_block_ids) == 1
     assert _decode_pod_hit(decoder, prompt, output_tokens) == 0
+
+    scheduler_output = prefiller.schedule()
+    prefiller.update_from_output(
+        scheduler_output,
+        create_model_runner_output([], finished_sending={request.request_id}),
+    )
+    prefiller.schedule()
+    assert pool.get_num_free_blocks() == num_free
 
 
 def test_prompt_ending_on_boundary_sends_running_state_only():
@@ -236,7 +247,6 @@ def test_aborted_prefill_releases_boundary_pin():
         scheduler_output,
         ModelRunnerOutput(
             req_ids=[request.request_id],
-            req_id_to_index={request.request_id: 0},
             sampled_token_ids=[[]],
         ),
     )

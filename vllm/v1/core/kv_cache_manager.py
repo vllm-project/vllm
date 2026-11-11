@@ -894,7 +894,7 @@ class KVCacheManager:
         return copies, retained_blocks
 
     def reserve_external_boundary_blocks(self, request_id: str) -> None:
-        """See ``MambaManager.reserve_external_boundary_block``."""
+        """See `MambaManager.reserve_external_boundary_block`."""
         for mgr in self.coordinator.single_type_managers:
             if isinstance(mgr, MambaManager):
                 mgr.reserve_external_boundary_block(request_id)
