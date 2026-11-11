@@ -1,8 +1,6 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 
-import threading
-
 import pytest
 import torch
 from transformers import LlamaConfig
@@ -220,12 +218,17 @@ class _State(EplbState):
     def create_policy(self):
         return self.selected_policy
 
-    def on_layer_committed(self, model_state, layer_idx):
+    def _commit_rebalance(self, model_state, target, layer_idx=None):
+        super()._commit_rebalance(model_state, target, layer_idx)
         if model_state.pending_result is not None:
-            assert not model_state.pending_result.consumed_event.wait(timeout=0)
+            assert not model_state.pending_result.consumed_event._recorded.is_set()
         if self.fail_commit:
             raise RuntimeError("device commit failed")
-        self.committed_layers.append(layer_idx)
+        self.committed_layers.extend(
+            range(model_state.model.num_moe_layers)
+            if layer_idx is None
+            else [layer_idx]
+        )
         self.committed_maps.append(model_state.physical_to_logical_map.clone())
 
 
@@ -296,16 +299,6 @@ def test_policy_target_requires_cpu_integer(model_state, dtype):
         )
 
 
-def test_aggregate_allreduce_keeps_original_payload_shape(model_state):
-    state = _State()
-    first = torch.arange(8).reshape(2, 4)
-    second = torch.arange(12).reshape(3, 4)
-    reduced = state._allreduce_list([first, second])
-    assert [tensor.shape for tensor in reduced] == [(2, 4), (3, 4)]
-    torch.testing.assert_close(reduced[0], first, rtol=0, atol=0)
-    torch.testing.assert_close(reduced[1], second, rtol=0, atol=0)
-
-
 @pytest.mark.parametrize("fail_commit", [False, True])
 def test_async_commit_updates_maps_before_buffer_acknowledgement(
     model_state, fail_commit
@@ -336,15 +329,15 @@ def test_async_commit_updates_maps_before_buffer_acknowledgement(
     if fail_commit:
         assert state.committed_layers == []
         assert model_state.pending_result is result
-        assert not result.consumed_event.wait(timeout=0)
+        assert not result.consumed_event._recorded.is_set()
     else:
         assert state.committed_layers == [0]
         torch.testing.assert_close(state.committed_maps[0], target)
         assert model_state.pending_result is None
-        assert result.consumed_event.wait(timeout=0)
+        assert result.consumed_event._recorded.is_set()
 
 
-def test_sync_commit_updates_maps_before_callback(model_state):
+def test_sync_commit_updates_maps_before_device_work(model_state):
     state = _State()
     target = torch.tensor([[1, 0, 3, 2]])
     state._commit_rebalance(model_state, target)
@@ -353,68 +346,3 @@ def test_sync_commit_updates_maps_before_callback(model_state):
     torch.testing.assert_close(
         model_state.logical_to_physical_map[0, :, 0], torch.tensor([1, 0, 3, 2])
     )
-
-
-def test_idle_wait_can_stop_without_fabricating_device_event():
-    state = _State()
-    entered = threading.Event()
-    stopped = threading.Event()
-
-    def wait():
-        entered.set()
-        assert not state.wait_for_rearrangement(None)
-        stopped.set()
-
-    state.async_worker = threading.Thread(target=wait, daemon=True)
-    state.async_worker.start()
-    assert entered.wait(timeout=5)
-    state.stop_async_loop(timeout=5)
-    assert stopped.is_set()
-    assert state.async_worker is None
-    assert not state.rearrange_event.wait(timeout=0)
-    state.stop_async_loop()
-
-
-def test_stop_rejects_unconsumed_transfers(model_state):
-    state = _State()
-    entered = threading.Event()
-
-    def wait():
-        entered.set()
-        state.wait_for_rearrangement(None)
-
-    state.async_worker = threading.Thread(target=wait, daemon=True)
-    state.model_states["model"] = model_state
-    model_state.rebalanced = True
-    state.async_worker.start()
-    assert entered.wait(timeout=5)
-    try:
-        with pytest.raises(RuntimeError, match="Drain outstanding"):
-            state.stop_async_loop()
-        assert state.async_worker.is_alive()
-    finally:
-        model_state.rebalanced = False
-        state.stop_async_loop(timeout=5)
-
-
-def test_stop_timeout_keeps_worker_until_it_exits():
-    state = _State()
-    entered = threading.Event()
-    release = threading.Event()
-
-    def blocked_worker():
-        entered.set()
-        release.wait()
-
-    worker = threading.Thread(target=blocked_worker, daemon=True)
-    state.async_worker = worker
-    worker.start()
-    assert entered.wait(timeout=5)
-    try:
-        with pytest.raises(TimeoutError, match="did not stop"):
-            state.stop_async_loop(timeout=0)
-        assert state.async_worker is worker
-    finally:
-        release.set()
-        state.stop_async_loop(timeout=5)
-    assert state.async_worker is None

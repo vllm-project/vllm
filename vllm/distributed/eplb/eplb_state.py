@@ -40,6 +40,7 @@ from vllm.distributed.parallel_state import (
     GroupCoordinator,
     get_ep_group,
     get_eplb_group,
+    get_node_count,
     in_the_same_node_as,
 )
 from vllm.distributed.stateless_coordinator import StatelessGroupCoordinator
@@ -310,7 +311,6 @@ class EplbState:
         """
         Background thread handling async transfers.
         """
-        self._stop_async = threading.Event()
         self.async_worker_error: Exception | None = None
         """
         Exception that stopped the async worker thread, if any.
@@ -320,7 +320,7 @@ class EplbState:
         """
         Device index for the async EPLB worker thread.
         """
-        if self.device.type != "cpu":
+        if self.device.type in ("cuda", "xpu"):
             self.device_index = self.device.index
             if self.device_index is None and torch.accelerator.is_available():
                 self.device_index = torch.accelerator.current_device_index()
@@ -389,10 +389,10 @@ class EplbState:
             group_coordinator, backend, model.expert_weights, expert_buffer
         )
 
-    def create_policy(self) -> AbstractEplbPolicy:
+    def create_policy(self) -> type[AbstractEplbPolicy] | AbstractEplbPolicy:
         """Create the policy shared by every model in this EPLB state."""
         policy = self.parallel_config.eplb_config.policy
-        return EPLB_POLICIES["default" if policy is None else policy]()
+        return EPLB_POLICIES["default" if policy is None else policy]
 
     def rebalance_experts(
         self,
@@ -424,20 +424,18 @@ class EplbState:
         new_physical_to_logical_map: torch.Tensor,
         layer_idx: int | None = None,
     ) -> None:
-        committed_layers: Sequence[int]
+        """Install maps before the async receive buffer is acknowledged.
+
+        Overrides must finish device-specific commit work before returning.
+        """
         if layer_idx is None:
             _commit_eplb_maps(model_state, new_physical_to_logical_map)
-            committed_layers = range(model_state.model.num_moe_layers)
         else:
             _commit_eplb_maps_for_layer(
                 model_state,
                 new_physical_to_logical_map,
                 layer_idx,
             )
-            committed_layers = (layer_idx,)
-
-        for committed_layer in committed_layers:
-            self.on_layer_committed(model_state, committed_layer)
 
     def add_model(
         self,
@@ -834,8 +832,6 @@ class EplbState:
                 (progress == slowest).nonzero().flatten().tolist(),
                 stage,
             )
-    def on_layer_committed(self, model_state: EplbModelState, layer_idx: int) -> None:
-        """Run device-specific work after the maps and weights are committed."""
 
     def _maybe_log_balancedness(self) -> None:
         pending = self._pending_balancedness
@@ -970,7 +966,7 @@ class EplbState:
             physical_to_logical = eplb_model_state.physical_to_logical_map
             invalid_idx = eplb_model_state.model.num_logical_experts
             logical_expert_load_window = torch.zeros(
-                expert_load_window.shape[0],
+                self.expert_load_window_size,
                 eplb_model_state.model.num_moe_layers,
                 invalid_idx + 1,
                 dtype=eplb_model_state.expert_load_window.dtype,
@@ -1011,11 +1007,16 @@ class EplbState:
                 num_replicas // ep_group.size() * num_gpus
             )  # handle num replicas change
         else:
-            num_nodes = _node_count_with_rank_mapping(
-                get_eplb_group().cpu_group,
-                {rank: rank for rank in range(ep_group.size())},
-            )
+            num_nodes = get_node_count()
             num_gpus = ep_group.size()
+
+        if num_gpus % num_nodes != 0:
+            num_nodes = 1
+            logger.warning_once(
+                f"num_gpus % num_nodes != 0, "
+                "not using hierarchical rearrangement algorithm.\n"
+                f"{num_gpus=}, {num_nodes=}"
+            )
 
         # Get new expert mappings
         for eplb_model_state, global_expert_load_window in zip(
@@ -1144,32 +1145,6 @@ class EplbState:
             self.rearrange_event.record()
         return None
 
-    def wait_for_rearrangement(self, stream: torch.Stream | None) -> bool:
-        """Wait for a cycle while allowing an idle worker to stop."""
-        while not self._stop_async.is_set():
-            if self.rearrange_event.wait(stream=stream, timeout=0.1):
-                return True
-        return False
-
-    def stop_async_loop(self, timeout: float = 30.0) -> None:
-        """Stop after all ranks have drained their outstanding transfers.
-
-        Communicator resources must remain alive until this method succeeds.
-        """
-        worker = self.async_worker
-        if worker is None:
-            return
-        if any(
-            model_state.rebalanced or model_state.pending_result is not None
-            for model_state in self.model_states.values()
-        ):
-            raise RuntimeError("Drain outstanding EPLB transfers before stopping.")
-        self._stop_async.set()
-        worker.join(timeout=timeout)
-        if worker.is_alive():
-            raise TimeoutError("EPLB background worker did not stop.")
-        self.async_worker = None
-
     def start_async_loop(
         self,
         rank_mapping: dict[int, int] | None = None,
@@ -1178,7 +1153,6 @@ class EplbState:
         if not self.is_async:
             return
         if self.async_worker is None:
-            self._stop_async.clear()
             self.async_worker = start_async_worker(
                 self,
                 is_profile=is_profile,
@@ -1414,7 +1388,6 @@ def _node_count_with_rank_mapping(
     pg: ProcessGroup | StatelessProcessGroup,
     rank_mapping: dict[int, int],
 ) -> int:
-    """Return count for equal contiguous node blocks in new-rank order; else one."""
     if isinstance(pg, ProcessGroup):
         world_size = torch.distributed.get_world_size(group=pg)
     else:
@@ -1445,18 +1418,7 @@ def _node_count_with_rank_mapping(
             if is_same_node and node_assignment[other_rank] == 0:
                 node_assignment[other_rank] = next_node_id
 
-    node_ids_by_new_rank = [
-        node_assignment[old_rank]
-        for old_rank, new_rank in sorted(rank_mapping.items(), key=lambda item: item[1])
-        if new_rank >= 0
-    ]
-    assert next_node_id, "rank mapping must retain at least one rank"
-    ranks_per_node, remainder = divmod(len(node_ids_by_new_rank), next_node_id)
-    has_uniform_contiguous_blocks = all(
-        len(set(node_ids_by_new_rank[start : start + ranks_per_node])) == 1
-        for start in range(0, len(node_ids_by_new_rank), ranks_per_node)
-    )
-    return next_node_id if not remainder and has_uniform_contiguous_blocks else 1
+    return next_node_id
 
 
 def compute_logical_maps(

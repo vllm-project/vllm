@@ -39,7 +39,6 @@ def start_async_worker(
                 stream=stream,
                 is_profile=is_profile,
             )
-            stream.synchronize()
         except Exception as exc:
             state.async_worker_error = exc
             logger.exception("async loop error (Rank %d): %s", rank, str(exc))
@@ -78,8 +77,7 @@ def transfer_run_periodically(
     rank = get_eplb_group().device_group.rank()
     while True:
         try:
-            if not state.wait_for_rearrangement(stream):
-                return
+            state.rearrange_event.wait(stream=stream)
             _transfer_cycle(state, stream, is_profile)
         except Exception:
             if not state.parallel_config.enable_fault_tolerance:
