@@ -122,7 +122,7 @@ class MonoBuild:
         from vllm.platforms.rocm import get_cdna_version
 
         return self.tuned or (
-            get_cdna_version() == 4 and not self.generic and self.tp == 4
+            get_cdna_version() == 4 and not self.generic and self.tp in (4, 8)
         )
 
 
