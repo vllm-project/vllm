@@ -10,15 +10,8 @@ use pyo3::types::PyModule;
 pub struct PyTypes {
     /// `RequestStatus` members by value.
     pub request_status: Vec<Option<Py<PyAny>>>,
-    /// `FinishReason` members by value.
-    pub finish_reason: Vec<Py<PyAny>>,
-    /// `EngineCoreEventType` members by value.
-    pub event_type: Vec<Option<Py<PyAny>>>,
     /// `PauseState` members by value.
     pub pause_state: Vec<Py<PyAny>>,
-    pub engine_core_event: Py<PyAny>,
-    pub engine_core_output: Py<PyAny>,
-    pub engine_core_outputs: Py<PyAny>,
     pub scheduler_output: Py<PyAny>,
     pub new_request_data: Py<PyAny>,
     pub cached_request_data: Py<PyAny>,
@@ -32,7 +25,6 @@ pub struct PyTypes {
     pub spec_decoding_stats: Py<PyAny>,
     pub request_spec_decode_metrics: Py<PyAny>,
     pub kv_cache_eviction_event: Py<PyAny>,
-    pub request_error: Py<PyAny>,
     pub cache_hit_source: Py<PyAny>,
     pub kv_event_batch: Py<PyAny>,
     pub strip_covered_mm_data: Py<PyAny>,
@@ -67,7 +59,6 @@ pub fn types(py: Python<'_>) -> PyResult<&'static PyTypes> {
         let attr = |module: &str, name: &str| -> PyResult<Py<PyAny>> {
             Ok(PyModule::import(py, module)?.getattr(name)?.unbind())
         };
-        let engine = "vllm.v1.engine";
         let output = "vllm.v1.core.sched.output";
         let stats = "vllm.v1.metrics.stats";
         let request_status = members(
@@ -87,26 +78,13 @@ pub fn types(py: Python<'_>) -> PyResult<&'static PyTypes> {
                 "FINISHED_REPETITION",
             ],
         )?;
-        let finish_reason = dense(members(
-            attr(engine, "FinishReason")?.bind(py),
-            &["STOP", "LENGTH", "ABORT", "ERROR", "REPETITION"],
-        )?);
-        let event_type = members(
-            attr(engine, "EngineCoreEventType")?.bind(py),
-            &["QUEUED", "SCHEDULED", "PREEMPTED"],
-        )?;
         let pause_state = dense(members(
             attr("vllm.v1.core.sched.interface", "PauseState")?.bind(py),
             &["UNPAUSED", "PAUSED_NEW", "PAUSED_ALL"],
         )?);
         Ok(PyTypes {
             request_status,
-            finish_reason,
-            event_type,
             pause_state,
-            engine_core_event: attr(engine, "EngineCoreEvent")?,
-            engine_core_output: attr(engine, "EngineCoreOutput")?,
-            engine_core_outputs: attr(engine, "EngineCoreOutputs")?,
             scheduler_output: attr(output, "SchedulerOutput")?,
             new_request_data: attr(output, "NewRequestData")?,
             cached_request_data: attr(output, "CachedRequestData")?,
@@ -120,7 +98,6 @@ pub fn types(py: Python<'_>) -> PyResult<&'static PyTypes> {
             spec_decoding_stats: attr("vllm.v1.spec_decode.metrics", "SpecDecodingStats")?,
             request_spec_decode_metrics: attr(stats, "RequestSpecDecodeMetrics")?,
             kv_cache_eviction_event: attr(stats, "KVCacheEvictionEvent")?,
-            request_error: attr("vllm.outputs", "RequestError")?,
             cache_hit_source: attr("vllm.v1.metrics.cache_hit_source", "CacheHitSource")?,
             kv_event_batch: attr("vllm.distributed.kv_events", "KVEventBatch")?,
             strip_covered_mm_data: attr("vllm.multimodal.utils", "strip_covered_mm_data")?,

@@ -127,6 +127,9 @@ _R = TypeVar("_R")  # Return type for collective_rpc
 
 
 class EngineCore:
+    # Whether the frontend is the Rust frontend, which `EngineCoreProc` learns
+    # in the startup handshake.
+    rust_frontend = False
     """Inner loop of vLLM's Engine."""
 
     def __init__(
@@ -179,6 +182,10 @@ class EngineCore:
 
         # Setup scheduler.
         Scheduler = vllm_config.scheduler_config.get_scheduler_cls()
+        if "rust_scheduler" in Scheduler.__module__:
+            from vllm.v1.core.sched.rust_scheduler import scheduler_cls_for_frontend
+
+            Scheduler = scheduler_cls_for_frontend(Scheduler, self.rust_frontend)
 
         if len(kv_cache_config.kv_cache_groups) == 0:  # noqa: SIM102
             # Encoder models without KV cache don't support
@@ -254,8 +261,8 @@ class EngineCore:
         self.step_fn = (
             self.step if self.batch_queue is None else self.step_with_batch_queue
         )
-        # Whether the scheduler sends the request outputs itself
-        # (`VLLM_RUST_CORE_NATIVE_IO`, set up by `EngineCoreProc`).
+        # Whether the scheduler sends the request outputs itself: the Rust
+        # scheduler, set up by `EngineCoreProc`.
         self.native_output = False
         scheduler_config = vllm_config.scheduler_config
         self.async_scheduling = scheduler_config.async_scheduling
@@ -722,7 +729,7 @@ class EngineCore:
         if self.native_output:
             # The scheduler sends the outputs. The Rust frontend, the only
             # client of the native output path, reads no iteration details.
-            self.scheduler.update_from_output_native(  # type: ignore[attr-defined]
+            self.scheduler.update_from_output(  # type: ignore[call-arg]
                 scheduler_output, model_output, self._weight_version
             )
             return {}
@@ -1459,7 +1466,11 @@ class EngineCoreProc(EngineCore):
             # and to overlap some serialization/deserialization with the
             # model forward pass.
             # Threads handle Socket <-> Queues and core_busy_loop uses Queue.
-            native_output = self._use_native_output(vllm_config)
+            from vllm.v1.core.sched.rust_scheduler import RustScheduler
+
+            # The Rust scheduler, which serves the Rust frontend only, sends
+            # the outputs itself.
+            native_output = isinstance(self.scheduler, RustScheduler)
             ready_event = threading.Event()
             input_thread: Any
             if native_output and self._use_native_input(vllm_config):
@@ -1506,17 +1517,6 @@ class EngineCoreProc(EngineCore):
                 refusal := self.checkpoint_prepare()
             ):
                 raise RuntimeError(refusal)
-
-    def _use_native_output(self, vllm_config: VllmConfig) -> bool:
-        if not envs.VLLM_RUST_CORE_NATIVE_IO:
-            return False
-        from vllm.v1.engine.rust_core_io import native_output_unsupported_reason
-
-        reason = native_output_unsupported_reason(vllm_config, self.scheduler)
-        if reason is not None:
-            logger.info("Not using the native output path: %s.", reason)
-            return False
-        return True
 
     def _use_native_input(self, vllm_config: VllmConfig) -> bool:
         from vllm.v1.engine.rust_core_io import native_input_unsupported_reason
@@ -1625,21 +1625,26 @@ class EngineCoreProc(EngineCore):
         )
         if client_handshake_address is None:
             # We only need to handshake with one party.
-            with handshake as addresses:
-                yield addresses
+            with handshake as init_message:
+                self.rust_frontend = init_message.rust_frontend
+                yield init_message.addresses
         else:
             # We need to handshake with rank 0 front-end and our colocated frontend.
             assert local_client
             local_handshake = self._perform_handshake(
                 input_ctx, client_handshake_address, identity, True, False, vllm_config
             )
-            with handshake as addresses, local_handshake as client_addresses:
+            with handshake as init_message, local_handshake as client_init_message:
                 # 1. Obtain DP Coordinator zmq address and DP process group address
                 #    (addresses).
                 # 2. Add front-end input/output addresses from colocated front-end
                 #    (client_addresses).
+                addresses = init_message.addresses
+                client_addresses = client_init_message.addresses
                 addresses.inputs = client_addresses.inputs
                 addresses.outputs = client_addresses.outputs
+                # The colocated front-end owns the input and output sockets.
+                self.rust_frontend = client_init_message.rust_frontend
                 yield addresses
 
         # Update config which may have changed from the handshake
@@ -1655,7 +1660,7 @@ class EngineCoreProc(EngineCore):
         headless: bool,
         vllm_config: VllmConfig,
         parallel_config_to_update: ParallelConfig | None = None,
-    ) -> Generator[EngineZmqAddresses, None, None]:
+    ) -> Generator[EngineHandshakeMetadata, None, None]:
         with make_zmq_socket(
             ctx,
             handshake_address,
@@ -1665,10 +1670,9 @@ class EngineCoreProc(EngineCore):
             bind=False,
         ) as handshake_socket:
             # Register engine with front-end.
-            addresses = self.startup_handshake(
+            yield self.startup_handshake(
                 handshake_socket, local_client, headless, parallel_config_to_update
             )
-            yield addresses
 
             # Send ready message.
             ready_msg = {
@@ -1700,7 +1704,7 @@ class EngineCoreProc(EngineCore):
         local_client: bool,
         headless: bool,
         parallel_config: ParallelConfig | None = None,
-    ) -> EngineZmqAddresses:
+    ) -> EngineHandshakeMetadata:
         # Send registration message.
         handshake_socket.send(
             msgspec.msgpack.encode(
@@ -1753,7 +1757,7 @@ class EngineCoreProc(EngineCore):
                     num_redundant_experts
                 )
 
-        return init_message.addresses
+        return init_message
 
     @staticmethod
     def run_engine_core(*args, dp_rank: int = 0, local_dp_rank: int = 0, **kwargs):

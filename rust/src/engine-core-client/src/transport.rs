@@ -598,6 +598,7 @@ async fn send_init_message(
             frontend_stats_publish_address: coordinator.map(|c| c.frontend_publish_address.clone()),
         },
         parallel_config: parallel_config.clone(),
+        rust_frontend: true,
     };
     let payload = encode_msgpack(&init_message)?;
     let message = ZmqMessage::try_from(vec![engine_id.to_frame(), Bytes::from(payload)])

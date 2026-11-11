@@ -1,6 +1,6 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
-"""The native input path (`VLLM_RUST_CORE_NATIVE_IO`): `EngineInputReader`
+"""The Rust engine core's native input path: `EngineInputReader`
 admits the add requests that meet no Python collaborator as
 `NativeAddRequest`s, without a Python `Request`, and the Rust scheduler runs
 them as it runs the Python ones; every other message goes to the engine's

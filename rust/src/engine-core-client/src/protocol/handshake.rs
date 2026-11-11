@@ -170,6 +170,11 @@ pub struct HandshakeAddresses {
 pub struct HandshakeInitMessage {
     pub addresses: HandshakeAddresses,
     pub parallel_config: HandshakeParallelConfig,
+    /// Set by this frontend: the engine may then speak this crate's wire types,
+    /// which the Rust engine core's native I/O does, and which cover only what
+    /// this frontend reads. Python frontends omit it.
+    #[serde(default)]
+    pub rust_frontend: bool,
 }
 
 /// `ParallelConfig` fields that the engine overwrites from INIT, encoded as a

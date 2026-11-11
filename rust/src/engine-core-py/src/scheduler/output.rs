@@ -12,10 +12,9 @@ use pyo3::types::{PyDict, PyList, PySet, PyString, PyTuple};
 use rustc_hash::FxHashMap;
 use vllm_engine_core::kv_cache::PrefixCacheStats;
 use vllm_engine_core::sched::output::{EncoderInputUpdate, Opaque, SchedulerOutput};
-use vllm_engine_core::sched::request::{PrefillStats, Request, StopReason};
+use vllm_engine_core::sched::request::{PrefillStats, Request};
 use vllm_engine_core::sched::scheduler::{
-    DraftTokenIds, EngineCoreOutput, KvConnectorOutput, KvTransferParams, ModelRunnerOutput,
-    UpdateOutput,
+    DraftTokenIds, KvConnectorOutput, KvTransferParams, ModelRunnerOutput,
 };
 use vllm_engine_core::sched::stats::{
     ConnectorPrefixCacheStats, RequestSpecDecodeMetrics, SchedulerStats, SpecDecodingStats,
@@ -406,7 +405,6 @@ pub struct ModelOutput<'py> {
     pub rust: ModelRunnerOutput,
     pub logprobs: Bound<'py, PyAny>,
     pub sampling_masks: Bound<'py, PyAny>,
-    pooler_output: Bound<'py, PyAny>,
     pub prompt_logprobs: Option<Bound<'py, PyDict>>,
     pub prompt_token_id_logprobs: Option<Bound<'py, PyDict>>,
     pub kv_connector_output: Bound<'py, PyAny>,
@@ -465,7 +463,6 @@ pub fn model_output_from_py<'py>(output: &Bound<'py, PyAny>) -> PyResult<ModelOu
         },
         logprobs,
         sampling_masks,
-        pooler_output,
         prompt_logprobs: non_empty_dict(get(intern!(py, "prompt_logprobs_dict"))?)?,
         prompt_token_id_logprobs: non_empty_dict(get(intern!(
             py,
@@ -515,130 +512,6 @@ pub(super) fn spec_decode_metrics_to_py<'py>(
         PyList::new(py, &m.per_step_accepted)?,
         PyList::new(py, &m.per_step_drafted)?,
     ))
-}
-
-/// Position of `EngineCoreOutput` fields, for positional construction.
-mod field {
-    pub const NEW_LOGPROBS: usize = 2;
-    pub const NEW_PROMPT_LOGPROBS_TENSORS: usize = 3;
-    pub const POOLING_OUTPUT: usize = 4;
-    pub const FINISH_REASON: usize = 5;
-    pub const STOP_REASON: usize = 6;
-    pub const EVENTS: usize = 7;
-    pub const KV_TRANSFER_PARAMS: usize = 8;
-    pub const EC_TRANSFER_PARAMS: usize = 9;
-    pub const TRACE_HEADERS: usize = 10;
-    pub const PREFILL_STATS: usize = 11;
-    pub const ROUTED_EXPERTS: usize = 12;
-    pub const NUM_NANS_IN_LOGITS: usize = 13;
-    pub const NEW_SAMPLING_MASK: usize = 15;
-    pub const SPEC_DECODE_METRICS: usize = 16;
-    pub const PROMPT_TOKEN_ID_LOGPROBS: usize = 17;
-    pub const ERROR: usize = 18;
-    pub const WATERMARKING: usize = 19;
-    pub const COUNT: usize = 20;
-}
-
-fn engine_core_output_to_py<'py>(
-    py: Python<'py>,
-    types: &PyTypes,
-    table: &RequestTable,
-    mo: &ModelOutput<'py>,
-    o: &EngineCoreOutput,
-) -> PyResult<Bound<'py, PyAny>> {
-    let entry = table.get(o.request_id.as_str());
-    let request_id = match entry {
-        Some(e) => e.id.bind(py).clone(),
-        None => PyString::new(py, &o.request_id),
-    };
-    let new_token_ids = PyList::new(py, &o.new_token_ids)?;
-    let mut args: [Option<Bound<'py, PyAny>>; field::COUNT] = Default::default();
-    args[0] = Some(request_id.into_any());
-    args[1] = Some(new_token_ids.into_any());
-    let n = o.new_token_ids.len();
-    if let Some(i) = o.req_index {
-        if o.new_logprobs {
-            args[field::NEW_LOGPROBS] =
-                Some(mo.logprobs.call_method1(intern!(py, "slice_request"), (i, n))?);
-        }
-        if let Some(dict) = &mo.prompt_logprobs {
-            args[field::NEW_PROMPT_LOGPROBS_TENSORS] =
-                dict.get_item(&o.request_id)?.filter(|t| !t.is_none());
-        }
-        if let Some(dict) = &mo.prompt_token_id_logprobs {
-            args[field::PROMPT_TOKEN_ID_LOGPROBS] = dict.get_item(&o.request_id)?;
-        }
-        if o.pooling_output {
-            args[field::POOLING_OUTPUT] = Some(mo.pooler_output.get_item(i)?);
-        }
-        if o.new_sampling_mask {
-            args[field::NEW_SAMPLING_MASK] =
-                Some(mo.sampling_masks.call_method1(intern!(py, "slice_request"), (i, n))?);
-        }
-    }
-    if let Some(reason) = o.finish_reason {
-        args[field::FINISH_REASON] = Some(types.finish_reason[reason as usize].bind(py).clone());
-    }
-    args[field::STOP_REASON] = match &o.stop_reason {
-        None => None,
-        Some(StopReason::TokenId(t)) => Some(t.into_pyobject(py)?.into_any()),
-        Some(StopReason::Str(s)) => Some(s.into_pyobject(py)?.into_any()),
-    };
-    if let Some(events) = &o.events {
-        let cls = types.engine_core_event.bind(py);
-        let events = events
-            .iter()
-            .map(|e| {
-                let event_type =
-                    types.event_type[e.r#type as usize].as_ref().expect("known event type");
-                cls.call1((event_type.bind(py), e.timestamp))
-            })
-            .collect::<PyResult<Vec<_>>>()?;
-        args[field::EVENTS] = Some(PyList::new(py, events)?.into_any());
-    }
-    if let Some(params) = &o.kv_transfer_params {
-        args[field::KV_TRANSFER_PARAMS] = Some(kv_transfer_params_to_py(py, params)?);
-    }
-    if let Some(params) = &o.ec_transfer_params {
-        args[field::EC_TRANSFER_PARAMS] = Some(opaque_obj(py, params));
-    }
-    if let Some(rows) = &o.routed_experts {
-        args[field::ROUTED_EXPERTS] = Some(opaque_obj(py, rows));
-    }
-    args[field::TRACE_HEADERS] =
-        entry.and_then(|e| e.trace_headers.as_ref()).map(|h| h.bind(py).clone());
-    if let Some(stats) = &o.prefill_stats {
-        args[field::PREFILL_STATS] = Some(prefill_stats_to_py(py, types, stats)?);
-    }
-    if o.num_nans_in_logits != 0 {
-        args[field::NUM_NANS_IN_LOGITS] = Some(o.num_nans_in_logits.into_pyobject(py)?.into_any());
-    }
-    if let Some(metrics) = &o.spec_decode_metrics {
-        args[field::SPEC_DECODE_METRICS] = Some(spec_decode_metrics_to_py(py, types, metrics)?);
-    }
-    if let Some(error) = &o.error {
-        let kwargs = PyDict::new(py);
-        kwargs.set_item(intern!(py, "code"), &error.code)?;
-        kwargs.set_item(intern!(py, "message"), &error.message)?;
-        args[field::ERROR] = Some(types.request_error.bind(py).call((), Some(&kwargs))?);
-    }
-    if let Some(watermarking) = o.watermarking {
-        args[field::WATERMARKING] =
-            Some(pyo3::types::PyBool::new(py, watermarking).to_owned().into_any());
-    }
-    // Pass the fields up to the last one set; the rest keep their defaults.
-    let len = args.iter().rposition(Option::is_some).map_or(0, |i| i + 1);
-    let none = py.None().into_bound(py);
-    let zero = 0i64.into_pyobject(py)?.into_any();
-    let args = PyTuple::new(
-        py,
-        args[..len].iter().enumerate().map(|(i, a)| match a {
-            Some(a) => a,
-            None if i == field::NUM_NANS_IN_LOGITS => &zero,
-            None => &none,
-        }),
-    )?;
-    types.engine_core_output.bind(py).call1(args)
 }
 
 fn prefix_cache_stats_to_py<'py>(
@@ -765,41 +638,4 @@ pub fn scheduler_stats_to_py<'py>(
     };
     kwargs.set_item(intern!(py, "ec_connector_stats"), ec_connector_stats)?;
     types.scheduler_stats.bind(py).call((), Some(&kwargs))
-}
-
-/// Build `dict[int, EngineCoreOutputs]` from the scheduler's update.
-pub fn engine_core_outputs_to_py<'py>(
-    py: Python<'py>,
-    update: &UpdateOutput,
-    table: &RequestTable,
-    mo: &ModelOutput<'py>,
-    mut extra: ExtraStats<'py>,
-) -> PyResult<Bound<'py, PyDict>> {
-    let types = types(py)?;
-    let out = PyDict::new(py);
-    for (&client_index, eco) in &update.engine_core_outputs {
-        let outputs = PyList::new(
-            py,
-            eco.outputs
-                .iter()
-                .map(|o| engine_core_output_to_py(py, types, table, mo, o))
-                .collect::<PyResult<Vec<_>>>()?,
-        )?;
-        let kwargs = PyDict::new(py);
-        kwargs.set_item(intern!(py, "outputs"), outputs)?;
-        if let Some(finished) = &eco.finished_requests {
-            kwargs.set_item(intern!(py, "finished_requests"), str_set(py, finished)?)?;
-        }
-        if let Some(stats) = &eco.scheduler_stats {
-            kwargs.set_item(
-                intern!(py, "scheduler_stats"),
-                scheduler_stats_to_py(py, stats, std::mem::take(&mut extra))?,
-            )?;
-        }
-        out.set_item(
-            client_index,
-            types.engine_core_outputs.bind(py).call((), Some(&kwargs))?,
-        )?;
-    }
-    Ok(out)
 }

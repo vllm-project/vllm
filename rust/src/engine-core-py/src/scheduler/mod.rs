@@ -33,7 +33,7 @@ use pyo3::exceptions::{
 };
 use pyo3::intern;
 use pyo3::prelude::*;
-use pyo3::types::{PyDict, PyList, PyModule, PyString};
+use pyo3::types::{PyBytes, PyDict, PyList, PyModule, PyString};
 use rustc_hash::FxHashSet;
 use thiserror_ext::AsReport;
 use vllm_engine_core::connectors::mooncake_store_scheduler::SavePinPolicy;
@@ -42,14 +42,15 @@ use vllm_engine_core::sched::scheduler::{
     AuxOutputConnector, EcConnector, ErrorRequestIds, IdSetOrder, KvConnector, PauseState,
     Scheduler, SchedulerError, StructuredOutput, UpdateOutput,
 };
+use vllm_engine_core_client::protocol::output::{EngineCoreOutputs, encode_engine_core_outputs};
 
 use self::hooks::{
     PyAuxOutputConnector, PyEcConnector, PyKvConnector, PyStructuredOutput, SchedulerContext,
 };
 use self::output::{
-    ExtraStats, ModelOutput, counts_of, draft_token_ids_from_py, engine_core_outputs_to_py,
-    finish_scheduler_output, model_output_from_py, opaque_obj, scheduler_output_from_py,
-    scheduler_output_to_py, scheduler_stats_to_py, write_back_drafts,
+    ExtraStats, ModelOutput, counts_of, draft_token_ids_from_py, finish_scheduler_output,
+    model_output_from_py, opaque_obj, scheduler_output_from_py, scheduler_output_to_py,
+    scheduler_stats_to_py, write_back_drafts,
 };
 use self::request::{HookError, PyReq, Shared, new_request, sync_request};
 use self::types::types;
@@ -66,6 +67,9 @@ pub fn register(m: &Bound<'_, PyModule>) -> PyResult<()> {
     m.add_class::<SchedulerKvManagerView>()?;
     Ok(())
 }
+
+/// `VLLM_MSGPACK_ZERO_COPY_THRESHOLD`'s default, for outputs returned encoded.
+const DEFAULT_AUX_FRAME_THRESHOLD: usize = 256;
 
 /// Scheduler outputs kept for `update_from_output` beyond this many are
 /// dropped: the engine processes outputs in order and keeps at most
@@ -138,7 +142,7 @@ pub struct RustSchedulerCore {
     /// The sessions with streaming-input updates queued: their Python
     /// requests' `streaming_queue` mirrors the Rust one.
     queued_sessions: FxHashSet<String>,
-    /// Where `update_from_output_native` sends the outputs.
+    /// Where `update_from_output` sends the outputs, in the engine.
     output_writer: Option<Py<native_output::EngineOutputWriter>>,
 }
 
@@ -758,61 +762,58 @@ impl RustSchedulerCore {
         Ok(py_so)
     }
 
-    #[pyo3(signature = (scheduler_output, model_runner_output, perf_stats=None))]
+    /// Send the outputs through the engine's native output path instead of
+    /// returning them (see `update_from_output`).
+    fn set_output_writer(&mut self, writer: Py<native_output::EngineOutputWriter>) {
+        self.output_writer = Some(writer);
+    }
+
+    /// Update the scheduler with a step's model output. The outputs, in the
+    /// Rust frontend's wire types with `weight_version` set, go to the output
+    /// writer if one is set; else they are returned encoded, as
+    /// `[(client_index, frames)]`, for the caller to decode as the frontend
+    /// would.
+    #[pyo3(signature = (scheduler_output, model_runner_output, perf_stats=None, weight_version=None))]
     fn update_from_output<'py>(
         &mut self,
         py: Python<'py>,
         scheduler_output: &Bound<'py, PyAny>,
         model_runner_output: &Bound<'py, PyAny>,
         perf_stats: Option<Bound<'py, PyAny>>,
-    ) -> PyResult<Bound<'py, PyDict>> {
-        let (update, mo, extra) =
-            self.process_model_output(py, scheduler_output, model_runner_output, perf_stats)?;
-        let out = {
-            let table = self.shared.table.lock().unwrap();
-            engine_core_outputs_to_py(py, &update, &table, &mo, extra)?
-        };
-        self.drain_removed(py)?;
-        Ok(out)
-    }
-
-    /// Send the outputs through the native output path (`EngineOutputWriter`)
-    /// instead of returning them.
-    fn set_output_writer(&mut self, writer: Py<native_output::EngineOutputWriter>) {
-        self.output_writer = Some(writer);
-    }
-
-    /// `update_from_output` on the native output path: the outputs, with
-    /// `weight_version` set, go to the output writer.
-    #[pyo3(signature = (scheduler_output, model_runner_output, perf_stats=None, weight_version=None))]
-    fn update_from_output_native<'py>(
-        &mut self,
-        py: Python<'py>,
-        scheduler_output: &Bound<'py, PyAny>,
-        model_runner_output: &Bound<'py, PyAny>,
-        perf_stats: Option<Bound<'py, PyAny>>,
         weight_version: Option<String>,
-    ) -> PyResult<()> {
-        let writer = (self.output_writer.as_ref())
-            .ok_or_else(|| PyRuntimeError::new_err("no output writer is set"))?
-            .get()
-            .inner
-            .clone();
+    ) -> PyResult<Option<Bound<'py, PyList>>> {
         let (update, mo, extra) =
             self.process_model_output(py, scheduler_output, model_runner_output, perf_stats)?;
-        {
+        let batches = {
             let table = self.shared.table.lock().unwrap();
-            native_output::send_outputs(
+            native_output::native_outputs(
                 py,
-                &writer,
                 &update,
                 &table,
                 &mo,
                 extra,
                 weight_version.as_deref(),
-            )?;
+            )?
+        };
+        self.drain_removed(py)?;
+        if let Some(writer) = &self.output_writer {
+            let writer = &writer.get().inner;
+            for (client_index, batch) in batches {
+                writer.send_batch(client_index, batch);
+            }
+            return Ok(None);
         }
-        self.drain_removed(py)
+        let encoded = PyList::empty(py);
+        for (client_index, batch) in batches {
+            let frames = encode_engine_core_outputs(
+                EngineCoreOutputs::RequestBatch(batch),
+                DEFAULT_AUX_FRAME_THRESHOLD,
+            )
+            .map_err(|e| PyValueError::new_err(e.to_string()))?;
+            let frames = PyList::new(py, frames.iter().map(|f| PyBytes::new(py, f)))?;
+            encoded.append((client_index, frames))?;
+        }
+        Ok(Some(encoded))
     }
 
     fn get_grammar_bitmask<'py>(

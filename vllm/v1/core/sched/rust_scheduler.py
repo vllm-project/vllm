@@ -50,6 +50,7 @@ from vllm.v1.metrics.perf import ModelMetrics
 from vllm.v1.metrics.stats import SchedulerStats
 from vllm.v1.outputs import DraftTokenIds, ModelRunnerOutput
 from vllm.v1.request import Request, RequestStatus
+from vllm.v1.serial_utils import MsgpackDecoder
 from vllm.v1.spec_decode.dynamic.utils import build_dynamic_sd_schedule_lookup
 from vllm.v1.structured_output import StructuredOutputManager
 
@@ -68,6 +69,10 @@ def unsupported_reason(
         return "vllm._rust_core is not built"
     if vllm_config.ec_manager_config.get_encoder_cache_manager_obj() is not None:
         return "custom encoder cache managers"
+    # TODO(rust-engine-core): pooling outputs, which the Rust frontend does not
+    # request yet.
+    if vllm_config.model_config.runner_type == "pooling":
+        return "pooling models"
     for group in kv_cache_config.kv_cache_groups:
         manager_cls = KVCacheSpecRegistry.get_manager_class(
             group.kv_cache_spec, group.role
@@ -397,6 +402,7 @@ class RustScheduler(SchedulerInterface):
                 self.kv_cache_manager, self.connector
             )
         self.requests = _RequestsView(self._core)
+        self._outputs_decoder = MsgpackDecoder(EngineCoreOutputs)
 
     def _decode_stagger(self) -> int | None:
         """`AsyncScheduler.decode_stagger`; None for `Scheduler`."""
@@ -447,33 +453,28 @@ class RustScheduler(SchedulerInterface):
         self,
         scheduler_output: SchedulerOutput,
         model_runner_output: ModelRunnerOutput,
+        weight_version: str | None = None,
     ) -> dict[int, EngineCoreOutputs]:
+        """With the engine's output writer (`set_output_writer`), sends the
+        outputs, in the Rust frontend's wire types with `weight_version` set,
+        and returns none. Without (tests), returns them as the Rust frontend's
+        wire carries them, decoded by the Python decoder."""
         perf_stats = None
         if self.perf_metrics and self.perf_metrics.is_enabled():
             perf_stats = self.perf_metrics.get_step_perf_stats_per_gpu(scheduler_output)
-        return self._core.update_from_output(
-            scheduler_output, model_runner_output, perf_stats
-        )
-
-    def set_output_writer(self, writer: Any) -> None:
-        """Send the outputs through the native output path
-        (`VLLM_RUST_CORE_NATIVE_IO`): the `EngineOutputWriter` of the engine."""
-        self._core.set_output_writer(writer)
-
-    def update_from_output_native(
-        self,
-        scheduler_output: SchedulerOutput,
-        model_runner_output: ModelRunnerOutput,
-        weight_version: str,
-    ) -> None:
-        """`update_from_output`, sending the outputs through the output
-        writer, with `weight_version` set, instead of returning them."""
-        perf_stats = None
-        if self.perf_metrics and self.perf_metrics.is_enabled():
-            perf_stats = self.perf_metrics.get_step_perf_stats_per_gpu(scheduler_output)
-        self._core.update_from_output_native(
+        encoded = self._core.update_from_output(
             scheduler_output, model_runner_output, perf_stats, weight_version
         )
+        if encoded is None:
+            return {}
+        return {
+            client_index: self._outputs_decoder.decode(frames)
+            for client_index, frames in encoded
+        }
+
+    def set_output_writer(self, writer: Any) -> None:
+        """Send the outputs through the engine's `EngineOutputWriter`."""
+        self._core.set_output_writer(writer)
 
     def update_draft_token_ids(self, draft_token_ids: DraftTokenIds) -> None:
         self._core.update_draft_token_ids(draft_token_ids)
@@ -579,7 +580,28 @@ def _python_fallback(rust_cls: type[RustScheduler], python_cls: type[Scheduler])
             return super().__new__(cls)
 
     WithFallback.__name__ = WithFallback.__qualname__ = rust_cls.__name__
+    WithFallback.python_fallback = python_cls  # type: ignore[attr-defined]
     return WithFallback
+
+
+def scheduler_cls_for_frontend(
+    scheduler_cls: type[SchedulerInterface], rust_frontend: bool
+) -> type[SchedulerInterface]:
+    """The scheduler class to construct for the engine's frontend.
+
+    The Rust scheduler sends its outputs in the Rust frontend's wire types,
+    which cover only what that frontend reads, so it serves the Rust frontend
+    only: otherwise `VLLM_USE_RUST_CORE` falls back to the Python scheduler,
+    and an explicit `--scheduler-cls` fails."""
+    if not issubclass(scheduler_cls, RustScheduler) or rust_frontend:
+        return scheduler_cls
+    python_cls = getattr(scheduler_cls, "python_fallback", None)
+    if python_cls is None:
+        raise NotImplementedError("The Rust scheduler serves the Rust frontend only")
+    logger.info(
+        "Using the Python scheduler: the Rust one serves the Rust frontend only."
+    )
+    return python_cls
 
 
 def rust_scheduler_cls(async_scheduling: bool) -> type[SchedulerInterface]:

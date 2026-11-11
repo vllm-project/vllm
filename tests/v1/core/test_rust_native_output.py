@@ -1,9 +1,12 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
-"""The native output path (`VLLM_RUST_CORE_NATIVE_IO`): the Rust scheduler
-sends the outputs of each step through `EngineOutputWriter`, encoded in the
-Rust frontend's wire types, with the content of the Python scheduler's
-`EngineCoreOutputs`."""
+"""The Rust scheduler's output path in the engine: it sends the outputs of
+each step through `EngineOutputWriter`, encoded in the Rust frontend's wire
+types, with the content of the Python scheduler's `EngineCoreOutputs`.
+
+`test_rust_scheduler.py` covers the conversion itself, through the encoded
+outputs the scheduler returns without a writer; these tests add the output
+thread and its socket."""
 
 import itertools
 from typing import Any
@@ -72,7 +75,7 @@ def _native(scheduler_cls: type[RustScheduler], ipc_dir: str):
             self.decoder = MsgpackDecoder(EngineCoreOutputs)
 
         def update_from_output(self, scheduler_output, model_runner_output):
-            self.update_from_output_native(scheduler_output, model_runner_output, None)
+            assert not super().update_from_output(scheduler_output, model_runner_output)
             outputs = {}
             for frames in self.frontend.recv_step():
                 assert 0 not in outputs, "one batch per client and step"
@@ -83,8 +86,8 @@ def _native(scheduler_cls: type[RustScheduler], ipc_dir: str):
 
 
 @pytest.mark.parametrize("use_async", [False, True])
-@pytest.mark.parametrize("sample", ["base", "extended", "nixl", "structured"])
-@pytest.mark.parametrize("seed", range(2))
+@pytest.mark.parametrize("sample", ["base", "nixl"])
+@pytest.mark.parametrize("seed", range(1))
 def test_matches_python_scheduler(seed: int, sample: str, use_async: bool, tmp_path):
     """Every step's outputs, decoded by the Python frontend's decoder, match
     the Python scheduler's (`run_one` compares them as the scheduler tests
@@ -175,7 +178,7 @@ def test_logprobs_payloads(tmp_path):
     )
 
     expected = schedulers["ref"].update_from_output(so_ref, output)[0].outputs
-    schedulers["test"].update_from_output_native(so_test, output, "v1")
+    assert not schedulers["test"].update_from_output(so_test, output, "v1")
     [frames] = frontend.recv_step()
     assert len(frames) > 1, "large arrays go in auxiliary frames"
     batch = msgspec.msgpack.decode(frames[0])

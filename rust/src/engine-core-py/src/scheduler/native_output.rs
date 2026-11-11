@@ -389,16 +389,17 @@ impl<'py> StepPayloads<'_, 'py> {
     }
 }
 
-/// Convert the scheduler's update of a step and send it, a batch per client.
-pub(super) fn send_outputs(
+/// The scheduler's update of a step in the Rust frontend's wire types, a
+/// batch per client index.
+pub(super) fn native_outputs(
     py: Python<'_>,
-    writer: &OutputWriter,
     update: &UpdateOutput,
     table: &RequestTable,
     mo: &ModelOutput<'_>,
     mut extra: ExtraStats<'_>,
     weight_version: Option<&str>,
-) -> PyResult<()> {
+) -> PyResult<Vec<(usize, RequestBatchOutputs)>> {
+    let mut batches = Vec::with_capacity(update.engine_core_outputs.len());
     let mut payloads = StepPayloads {
         mo,
         logprobs: None,
@@ -430,7 +431,7 @@ pub(super) fn send_outputs(
         };
         let finished_requests = (eco.finished_requests.as_ref())
             .map(|ids| ids.iter().cloned().collect::<BTreeSet<_>>());
-        writer.send_batch(
+        batches.push((
             client_index,
             RequestBatchOutputs {
                 engine_index: 0,
@@ -440,7 +441,7 @@ pub(super) fn send_outputs(
                 finished_requests,
                 weight_version: weight_version.clone(),
             },
-        );
+        ));
     }
-    Ok(())
+    Ok(batches)
 }

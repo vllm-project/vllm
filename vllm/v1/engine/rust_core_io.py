@@ -1,6 +1,6 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
-"""The native output path of the Rust engine core (`VLLM_RUST_CORE_NATIVE_IO`).
+"""The native I/O of the Rust engine core, which serves the Rust frontend.
 
 The Rust scheduler sends the request outputs of each step itself: the output
 thread of `vllm._rust_core` encodes them in the Rust frontend's wire types,
@@ -14,26 +14,11 @@ import threading
 from typing import Any
 
 from vllm.config import VllmConfig
-from vllm.v1.core.sched.interface import SchedulerInterface
 from vllm.v1.engine import EngineCoreOutputs, PrefixHashConfig
 from vllm.v1.serial_utils import MsgpackEncoder
 
 # `EngineCoreProc.ENGINE_CORE_DEAD`.
 _ENGINE_CORE_DEAD = b"ENGINE_CORE_DEAD"
-
-
-def native_output_unsupported_reason(
-    vllm_config: VllmConfig, scheduler: SchedulerInterface
-) -> str | None:
-    """Why the engine core cannot use the native output path, if so."""
-    from vllm.v1.core.sched.rust_scheduler import RustScheduler
-
-    if not isinstance(scheduler, RustScheduler):
-        return "it needs the Rust scheduler"
-    # TODO: pooling outputs, which the Rust frontend does not request yet.
-    if vllm_config.model_config.runner_type == "pooling":
-        return "it does not support pooling models"
-    return None
 
 
 def native_input_unsupported_reason(
