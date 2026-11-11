@@ -73,6 +73,7 @@ def create_long_gop_video(
     fps: int = 30,
     width: int = 64,
     height: int = 64,
+    gop_size: int | None = None,
 ) -> bytes:
     """Encode an H.264 clip with one keyframe and green-channel = frame index.
 
@@ -81,16 +82,17 @@ def create_long_gop_video(
     """
     import av
 
+    gop_size = gop_size or num_frames
     buf = io.BytesIO()
     with av.open(buf, mode="w", format="mp4") as container:
         stream = container.add_stream("h264", rate=fps)
         stream.width = width
         stream.height = height
         stream.pix_fmt = "yuv420p"
-        stream.codec_context.gop_size = num_frames
+        stream.codec_context.gop_size = gop_size
         stream.codec_context.max_b_frames = 0
         stream.codec_context.options = {
-            "x264-params": (f"scenecut=0:keyint={num_frames}:min-keyint={num_frames}")
+            "x264-params": (f"scenecut=0:keyint={gop_size}:min-keyint={gop_size}")
         }
         for i in range(num_frames):
             img = np.zeros((height, width, 3), dtype=np.uint8)
@@ -111,7 +113,7 @@ def create_live_webm_video(
 ) -> bytes:
     """Encode a WebM stream without container duration or frame-count metadata.
 
-    The ``live`` muxing option mimics writing to a pipe: the Segment size is
+    The `live` muxing option mimics writing to a pipe: the Segment size is
     unknown and no Duration or Cues elements are written, so decoder backends
     cannot learn the frame count from the header.
     """
@@ -168,11 +170,11 @@ def create_edit_list_trimmed_video(
     """Stream-copy-cut a long-GOP clip so an mp4 edit list hides the lead-in.
 
     Remuxes the tail of a single-keyframe clip without re-encoding, rebasing
-    timestamps at ``trim_start_frame``: the lead-in packets are still needed
+    timestamps at `trim_start_frame`: the lead-in packets are still needed
     to decode, so they stay in the file at negative pts and the muxer records
-    an edit list. The header sample count stays ``num_frames`` while only the
+    an edit list. The header sample count stays `num_frames` while only the
     trailing frames are presentable — the shape produced by lossless trims
-    (e.g. ``ffmpeg -ss ... -c copy``). Returns (video_bytes, visible_frames).
+    (e.g. `ffmpeg -ss ... -c copy`). Returns (video_bytes, visible_frames).
     """
     import av
 
