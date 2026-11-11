@@ -510,6 +510,10 @@ class MultiConnector(KVConnectorBase_V1, SupportsHMA):
                 to_return = (toks, load_async)
         return to_return
 
+    def get_known_num_matched_tokens(self, request: "Request") -> int | None:
+        known = [c.get_known_num_matched_tokens(request) for c in self._connectors]
+        return max((k for k in known if k is not None), default=None)
+
     def get_external_cache_hit_sources(
         self,
         request: "Request",

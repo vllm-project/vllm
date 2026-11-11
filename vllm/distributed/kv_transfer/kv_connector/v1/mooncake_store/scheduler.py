@@ -279,6 +279,14 @@ class MooncakeStoreScheduler:
 
         return need_to_allocate, self.load_async
 
+    def get_known_num_matched_tokens(self, request: Request) -> int | None:
+        """The hit of a lookup that already finished, without starting one."""
+        if not self.enable_lookup:
+            return None
+        return self.client.peek(
+            request.request_id, request.num_tokens, request.block_hashes
+        )
+
     def update_state_after_alloc(
         self,
         request: Request,

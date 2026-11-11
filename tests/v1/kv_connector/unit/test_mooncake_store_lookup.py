@@ -232,3 +232,44 @@ def test_cached_hit_does_not_reset_newer_failures(
     finally:
         server.join(10)
     assert not server.is_alive()
+
+
+def test_peek_reads_finished_lookup_without_side_effects(
+    lookup_service: tuple[worker.LookupKeyClient, zmq.Socket],
+) -> None:
+    """`peek` serves admission ordering on many waiting requests per step: it
+    reads a finished lookup but never submits, consumes or expires one."""
+    client, peer = lookup_service
+    reply = threading.Event()
+
+    def serve() -> None:
+        peer.recv_multipart()
+        assert reply.wait(10)
+        peer.send(encode_lookup_response(MooncakeLookupResult(96)))
+
+    server = threading.Thread(target=serve)
+    server.start()
+    try:
+        # No lookup yet: unknown, and nothing is sent to the store.
+        assert client.peek("req", 128, []) is None
+        assert "req" not in client._lookups
+
+        assert client.lookup("req", 128, [], non_block=True) is None
+        assert client.peek("req", 128, []) is None  # still in flight
+        reply.set()
+        deadline = time.monotonic() + 5
+        while client.peek("req", 128, []) is None:
+            assert time.monotonic() < deadline
+            threading.Event().wait(0.001)
+        assert client.peek("req", 128, []) == 96
+        # Other tokens than the lookup's: unknown.
+        assert client.peek("req", 256, []) is None
+
+        # Past the TTL it is still an estimate, and peek does not expire it.
+        client._lookup_ttl_s = 0.0
+        assert client.peek("req", 128, []) == 96
+        assert "req" in client._lookups
+    finally:
+        reply.set()
+        server.join(10)
+    assert not server.is_alive()

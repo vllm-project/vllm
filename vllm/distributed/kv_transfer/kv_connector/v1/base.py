@@ -575,6 +575,15 @@ class KVConnectorBase_V1(ABC):
         """
         pass
 
+    def get_known_num_matched_tokens(self, request: "Request") -> int | None:
+        """Prompt tokens the external cache is already known to hold for
+        `request`, as a prefix length, or None if not known.
+
+        A hint for admission ordering, which may call it on many waiting
+        requests every step: it must not start a lookup or change any state.
+        """
+        return None
+
     def get_external_cache_hit_sources(
         self,
         request: "Request",

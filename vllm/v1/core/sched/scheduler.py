@@ -408,7 +408,7 @@ class Scheduler(SchedulerInterface):
             self.scheduler_config.cache_aware_admission_threshold
         )
         self.shortest_prefill_first = (
-            ShortestPrefillFirstAdmission(self.kv_cache_manager)
+            ShortestPrefillFirstAdmission(self.kv_cache_manager, self.connector)
             if self.policy == SchedulingPolicy.SHORTEST_PREFILL_FIRST
             else None
         )

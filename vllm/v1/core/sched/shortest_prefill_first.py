@@ -26,6 +26,7 @@ from vllm.v1.core.sched.request_queue import FCFSRequestQueue
 from vllm.v1.request import Request
 
 if TYPE_CHECKING:
+    from vllm.distributed.kv_transfer.kv_connector.v1 import KVConnectorBase_V1
     from vllm.v1.core.kv_cache_manager import KVCacheManager
 
 logger = init_logger(__name__)
@@ -43,8 +44,13 @@ class ShortestPrefillFirstAdmission:
     #: Lookahead window of ready requests to evaluate for cached prefix length.
     WINDOW = 64
 
-    def __init__(self, kv_cache_manager: "KVCacheManager") -> None:
+    def __init__(
+        self,
+        kv_cache_manager: "KVCacheManager",
+        connector: "KVConnectorBase_V1 | None" = None,
+    ) -> None:
         self.kv_cache_manager = kv_cache_manager
+        self.connector = connector
         self._n = 0
         self._cold_tokens = 0
         self._prompt_tokens = 0
@@ -53,17 +59,18 @@ class ShortestPrefillFirstAdmission:
         logger.info("Shortest-prefill-first admission ACTIVE (window=%d)", self.WINDOW)
 
     def _prefix_warmth(self, request: Request) -> int:
-        """Prompt tokens of ``request`` resident in the KV cache."""
+        """Prompt tokens of `request` in the local KV cache or known to be in
+        the external one."""
         kvm = self.kv_cache_manager
         if not kvm.enable_caching or request.get_prefix_cache_hit_limit() == 0:
             return 0
         if request.num_computed_tokens > 0:
             return request.num_computed_tokens
+        max_hit = max(request.num_tokens - 1, 0)
         try:
-            result = kvm.coordinator.find_longest_cache_hit(
-                request.block_hashes, max(request.num_tokens - 1, 0)
+            local = int(
+                kvm.coordinator.find_longest_cache_hit(request.block_hashes, max_hit)[1]
             )
-            return int(result[1])
         except Exception:
             if not self._scoring_broken:
                 self._scoring_broken = True
@@ -72,6 +79,10 @@ class ShortestPrefillFirstAdmission:
                     "falling back to FCFS."
                 )
             return 0
+        external = None
+        if self.connector is not None and not request.skip_reading_external_kv:
+            external = self.connector.get_known_num_matched_tokens(request)
+        return max(local, min(external or 0, max_hit))
 
     def _rank_and_warmth(
         self, request: Request

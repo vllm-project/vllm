@@ -2987,6 +2987,24 @@ class LookupKeyClient:
             self.discard(req_id)
         return result
 
+    def peek(
+        self, req_id: str, num_tokens: int, block_hashes: list[BlockHash]
+    ) -> int | None:
+        """Hit length of a finished lookup for the request's current tokens, or
+        None. Never submits, consumes or expires a lookup and never updates the
+        breaker; an expired result still serves as an estimate."""
+        state = self._lookups.get(req_id)
+        if state is None or state.signature != _lookup_signature(
+            num_tokens, block_hashes
+        ):
+            return None
+        if state.result is not None:
+            return state.result.hit_length
+        future = state.future
+        if not future.done() or future.cancelled() or future.exception() is not None:
+            return None
+        return future.result().hit_length
+
     def prefetch(
         self, req_id: str, num_tokens: int, block_hashes: list[BlockHash]
     ) -> bool:

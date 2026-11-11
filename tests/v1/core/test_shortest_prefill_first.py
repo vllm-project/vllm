@@ -18,6 +18,7 @@ def _make_request(
     num_preemptions: int = 0,
     num_computed_tokens: int = 0,
     skip_reading_prefix_cache: bool = False,
+    skip_reading_external_kv: bool = False,
 ) -> SimpleNamespace:
     hit_limit = 0 if skip_reading_prefix_cache else None
     return SimpleNamespace(
@@ -27,6 +28,7 @@ def _make_request(
         num_preemptions=num_preemptions,
         num_computed_tokens=num_computed_tokens,
         get_prefix_cache_hit_limit=lambda: hit_limit,
+        skip_reading_external_kv=skip_reading_external_kv,
         block_hashes=[object()],
     )
 
@@ -37,6 +39,7 @@ def _make_admission(
     window: int = 64,
     enable_caching: bool = True,
     raise_on_lookup: bool = False,
+    external_hits: dict[str, int | None] | None = None,
 ) -> tuple[ShortestPrefillFirstAdmission, FCFSRequestQueue]:
     queue = FCFSRequestQueue()
     for r in requests:
@@ -54,7 +57,13 @@ def _make_admission(
     kvm.enable_caching = enable_caching
     kvm.coordinator.find_longest_cache_hit.side_effect = find_hit
 
-    admission = ShortestPrefillFirstAdmission(kvm)
+    connector = None
+    if external_hits is not None:
+        connector = MagicMock()
+        connector.get_known_num_matched_tokens.side_effect = lambda r: (
+            external_hits.get(r.request_id)
+        )
+    admission = ShortestPrefillFirstAdmission(kvm, connector)
     admission.WINDOW = window
     return admission, queue
 
@@ -164,3 +173,32 @@ def test_coordinator_failure_falls_back_to_fcfs():
     )
     assert _promoted_order(admission, queue) == ["r1", "r2"]
     assert admission._scoring_broken is True
+
+
+def test_ranks_by_tokens_not_in_local_or_known_external_cache():
+    now = time.time()
+    # "local" has 600 tokens in the GPU cache, "external" 900 in the external
+    # cache only: fewer tokens are left to prefill for "external".
+    r_local = _make_request("local", num_tokens=1000, arrival_time=now - 10)
+    r_external = _make_request("external", num_tokens=1000, arrival_time=now - 5)
+    admission, queue = _make_admission(
+        [r_local, r_external],
+        {"local": 600, "external": 0},
+        external_hits={"local": None, "external": 900},
+    )
+    assert _promoted_order(admission, queue) == ["external", "local"]
+
+
+def test_unknown_or_skipped_external_hit_counts_local_only():
+    now = time.time()
+    r_local = _make_request("local", num_tokens=1000, arrival_time=now - 10)
+    r_unknown = _make_request("unknown", num_tokens=1000, arrival_time=now - 5)
+    r_skip = _make_request(
+        "skip", num_tokens=1000, arrival_time=now - 1, skip_reading_external_kv=True
+    )
+    admission, queue = _make_admission(
+        [r_local, r_unknown, r_skip],
+        {"local": 600, "unknown": 300, "skip": 0},
+        external_hits={"local": None, "unknown": None, "skip": 950},
+    )
+    assert _promoted_order(admission, queue) == ["local", "unknown", "skip"]
