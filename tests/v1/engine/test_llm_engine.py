@@ -25,6 +25,7 @@ DTYPE = "half"
 def test_step_invalidates_mm_processor_cache_misses():
     engine = object.__new__(LLMEngine)
     engine.should_execute_dummy_batch = False
+    engine.dp_group = None
     engine.log_stats = False
     engine.logger_manager = None
 
@@ -51,6 +52,37 @@ def test_step_invalidates_mm_processor_cache_misses():
         call("missing-hash-1"),
         call("missing-hash-2"),
     ]
+
+
+@pytest.mark.skip_global_cleanup
+@pytest.mark.parametrize("model_executed", [True, False])
+def test_dp_step_runs_dummy_batch_when_no_forward(model_executed: bool):
+    """Each DP rank must join one forward per step (in-process DP / external
+    launcher). A step whose engine-core step ran no forward (e.g. async
+    scheduling skips requests that already reached max_tokens) must run a
+    dummy batch, or the other ranks hang in their forward's DP sync."""
+    engine = object.__new__(LLMEngine)
+    engine.should_execute_dummy_batch = False
+    engine.dp_group = MagicMock()
+    engine.external_launcher_dp = True
+    engine.log_stats = False
+    engine.logger_manager = None
+    engine.renderer = MagicMock(mm_processor_cache=None)
+    engine.engine_core = MagicMock()
+    engine.engine_core.get_output.return_value = MagicMock(
+        outputs=[], timestamp=0.0, scheduler_stats=None
+    )
+    engine.engine_core.last_step_model_executed = model_executed
+    engine.output_processor = MagicMock()
+    engine.output_processor.process_outputs.return_value = MagicMock(
+        reqs_to_abort=[], request_outputs=[]
+    )
+
+    engine.step()
+
+    assert engine.engine_core.execute_dummy_batch.call_count == (
+        0 if model_executed else 1
+    )
 
 
 def test_duplicate_profile_start_rejected_before_engine_core_dispatch():

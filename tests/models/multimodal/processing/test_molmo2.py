@@ -71,7 +71,7 @@ def test_build_flat_image_bool_length_respects_disabled_col_tokens():
 def test_dummy_video_num_frames_override_honors_min_of_two(
     num_frames_override, expected_frames
 ):
-    """A ``num_frames`` override below 2 must be ignored (the model needs at
+    """A `num_frames` override below 2 must be ignored (the model needs at
     least 2 frames), matching the "cannot be less than 2, will be ignored"
     warning."""
     builder = object.__new__(Molmo2DummyInputsBuilder)
@@ -91,7 +91,9 @@ def test_dummy_video_num_frames_override_honors_min_of_two(
         ),
     )
 
-    video, _metadata = data["video"][0]
+    videos = data["video"]
+    assert isinstance(videos, list)
+    video, _metadata = videos[0]
     assert video.shape[0] == expected_frames
 
 
