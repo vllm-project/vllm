@@ -64,7 +64,7 @@ def lease_verification_enabled(vllm_config: "VllmConfig") -> bool:
 class LeaseSlotAllocator:
     """Scheduler-side lease slots of a producer engine.
 
-    A slot is freed once workers zeroed it (``finished_sending``) or with a
+    A slot is freed once workers zeroed it (`finished_sending`) or with a
     clear that workers apply before the arms of the same step.
     """
 
@@ -81,7 +81,7 @@ class LeaseSlotAllocator:
         return self._leases.get(req_id)
 
     def acquire(self, req_id: ReqId) -> tuple[int, int] | None:
-        """Return the (slot, nonce) lease of ``req_id``, allocating it once."""
+        """Return the (slot, nonce) lease of `req_id`, allocating it once."""
         if (lease := self._leases.get(req_id)) is not None:
             return lease
         if not self._free:
@@ -100,7 +100,7 @@ class LeaseSlotAllocator:
         return lease
 
     def release(self, req_id: ReqId, *, clear: bool) -> None:
-        """Free the lease of ``req_id``.
+        """Free the lease of `req_id`.
 
         Args:
             req_id: The request whose lease ends.
@@ -123,7 +123,7 @@ class LeaseSlotAllocator:
 
 
 def lease_slot_descs(base_addr: int, num_slots: int) -> np.ndarray:
-    """NIXL ``(addr, len, device_id)`` descriptors, one per DRAM slot."""
+    """NIXL `(addr, len, device_id)` descriptors, one per DRAM slot."""
     descs = np.zeros((num_slots, 3), dtype=np.uint64)
     descs[:, 0] = np.uint64(base_addr) + np.uint64(LEASE_SLOT_BYTES) * np.arange(
         num_slots, dtype=np.uint64
@@ -162,7 +162,7 @@ class ProducerLeaseSlots:
             self._dirty = True
 
     def clear(self, req_id: ReqId) -> None:
-        """Zero the slot of ``req_id``; must precede releasing its blocks."""
+        """Zero the slot of `req_id`; must precede releasing its blocks."""
         if (lease := self._leases.pop(req_id, None)) is not None:
             self._slots[lease[0]] = 0
             self._dirty = True

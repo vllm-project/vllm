@@ -138,6 +138,7 @@ class KVCacheManager:
         max_in_flight_tokens: int | None = None,
         enable_caching: bool = True,
         use_eagle: bool = False,
+        num_hash_lookahead_tokens: int = 0,
         num_prefill_lookahead: int = 0,
         log_stats: bool = False,
         enable_kv_cache_events: bool = False,
@@ -169,6 +170,7 @@ class KVCacheManager:
             max_model_len=self.max_model_len,
             max_in_flight_tokens=max_in_flight_tokens,
             use_eagle=self.use_eagle,
+            num_hash_lookahead_tokens=num_hash_lookahead_tokens,
             enable_caching=self.enable_caching,
             enable_kv_cache_events=enable_kv_cache_events,
             dcp_world_size=dcp_world_size,
@@ -248,7 +250,29 @@ class KVCacheManager:
 
     def prefix_cache_lookup_enabled(self, request: Request) -> bool:
         """Whether a local prefix cache lookup may be run for this request."""
-        return self.enable_caching and not request.skip_reading_prefix_cache
+        return self.enable_caching and request.prefix_cache_hit_limit != 0
+
+    def get_num_cached_tokens(self, request: Request) -> int:
+        """How many of a request's tokens are already in the prefix cache.
+
+        Unlike `get_computed_blocks`, this only probes the cache: it takes no
+        references, allocates no blocks and emits no events, so it is safe to
+        call for a request that may not be scheduled.
+
+        Args:
+            request: The request to probe.
+
+        Returns:
+            The number of cached tokens, or 0 if lookup is disabled.
+
+        """
+        if not self.prefix_cache_lookup_enabled(request):
+            return 0
+        # Mirrors `get_computed_blocks`: the last token is always recomputed.
+        _, num_computed_tokens, _ = self.coordinator.find_longest_cache_hit(
+            request.block_hashes, request.num_tokens - 1
+        )
+        return num_computed_tokens
 
     def record_prefix_cache_stats(self, request: Request, num_hits: int) -> None:
         # Don't count a request that skipped the cache lookup.
@@ -261,18 +285,23 @@ class KVCacheManager:
             preempted=request.num_preemptions > 0,
         )
 
-    def get_computed_blocks(self, request: Request) -> tuple[KVCacheBlocks, int, int]:
+    def get_computed_blocks(
+        self, request: Request, max_cache_hit_length: int | None = None
+    ) -> tuple[KVCacheBlocks, int, int]:
         """Get the computed (cached) blocks for the request.
         Note that the computed blocks must be full.
 
         Args:
             request: The request to get the computed blocks.
+            max_cache_hit_length: Upper bound on the hit length. Defaults to
+                `request.get_max_cache_hit_length()`; explicit bounds can only
+                reduce the request's cache hit limit.
 
         Returns:
             A tuple containing:
                 - A list of blocks that are computed for the request.
                 - The number of computed tokens.
-                - ``shared_prefix_boundary``: the block-aligned token position of
+                - `shared_prefix_boundary`: the block-aligned token position of
                   a shared prefix that a sparse-retention group (Mamba / sliding
                   window) has not cached yet (Marconi-style APC), or 0 if none.
                   Pinned so sparse prefix-cache retention does not drop
@@ -292,7 +321,7 @@ class KVCacheManager:
         # the single last token, because allocate_slots() requires
         # num_computed_tokens to be block-size aligned. Removing this limitation
         # could slightly improve performance in the future.
-        max_cache_hit_length = request.num_tokens - 1
+        max_cache_hit_length = request.get_max_cache_hit_length(max_cache_hit_length)
         computed_blocks, num_new_computed_tokens, num_uncached = (
             self.coordinator.find_longest_cache_hit(
                 request.block_hashes, max_cache_hit_length
@@ -321,7 +350,7 @@ class KVCacheManager:
         return blocks, num_new_computed_tokens, shared_prefix_boundary
 
     def get_computed_blocks_for_connector(
-        self, request: Request
+        self, request: Request, max_cache_hit_length: int | None = None
     ) -> tuple[KVCacheBlocks, int, int, bool]:
         """Local prefix-cache lookup for a request scheduled with a KV connector.
 
@@ -330,16 +359,16 @@ class KVCacheManager:
         while a deeper Mamba state survives, or vice versa. Report the
         full-attention hit as the local prefix - the connector transfers the
         remaining suffix and the Mamba state is transferred unconditionally by
-        nixl's ``_apply_prefix_caching`` - and flag when that hit ran deeper
+        nixl's `_apply_prefix_caching` - and flag when that hit ran deeper
         than a lagging group. Such a hit only has a valid Mamba state at its
         boundary if the connector supplies it, so the caller must fall back to
-        ``get_computed_blocks`` to reconcile when no external tokens are found.
+        `get_computed_blocks` to reconcile when no external tokens are found.
 
-        Non-hybrid models and already-convergent hits use ``get_computed_blocks``.
+        Non-hybrid models and already-convergent hits use `get_computed_blocks`.
 
         Returns:
-            The ``get_computed_blocks`` triple (blocks, number of local computed
-            tokens, shared-prefix boundary) plus ``hit_diverged``.
+            The `get_computed_blocks` triple (blocks, number of local computed
+            tokens, shared-prefix boundary) plus `hit_diverged`.
 
         """
         coordinator = self.coordinator
@@ -348,20 +377,21 @@ class KVCacheManager:
             and isinstance(coordinator, HybridKVCacheCoordinator)
             and coordinator.full_attention_group_id is not None
         ):
-            return *self.get_computed_blocks(request), False
+            return *self.get_computed_blocks(request, max_cache_hit_length), False
 
         if not self.prefix_cache_lookup_enabled(request):
             return self.empty_kv_cache_blocks, 0, 0, False
 
+        max_cache_hit_length = request.get_max_cache_hit_length(max_cache_hit_length)
         fa_group_id = coordinator.full_attention_group_id
         computed, per_group_hits = coordinator.find_longest_cache_hit_per_group(
-            request.block_hashes, request.num_tokens - 1
+            request.block_hashes, max_cache_hit_length
         )
         if any(hit > per_group_hits[fa_group_id] for hit in per_group_hits):
             # A lagging group hit deeper than full attention means its
             # full-attention blocks were evicted; use the reconciled boundary
             # that every group agrees on.
-            return *self.get_computed_blocks(request), False
+            return *self.get_computed_blocks(request, max_cache_hit_length), False
 
         num_local = per_group_hits[fa_group_id]
         blocks = self.create_kv_cache_blocks(computed)
@@ -688,11 +718,6 @@ class KVCacheManager:
             self.prefix_cache_stats.reset = True
         return True
 
-    def get_num_common_prefix_blocks(self, running_request_id: str) -> list[int]:
-        """Deprecated: cascade attention has been removed. Always returns 0
-        for each KV cache group. Kept for out-of-tree schedulers."""
-        return [0] * self.num_kv_cache_groups
-
     def take_events(self) -> list[KVCacheEvent]:
         """Take the KV cache events from the block pool.
 
@@ -764,12 +789,12 @@ class KVCacheManager:
                 # Cross-attention and encoder-only groups are not prefix cached.
                 continue
 
+            # Coverage grows along the block table: the last hashed block has the most.
             group_cached_tokens = 0
-            for block in blocks:
-                group_cached_tokens = max(
-                    group_cached_tokens,
-                    block.block_hash_num_tokens or 0,
-                )
+            for block in reversed(blocks):
+                if block.block_hash_num_tokens:
+                    group_cached_tokens = block.block_hash_num_tokens
+                    break
 
             cached_tokens = (
                 group_cached_tokens
@@ -804,7 +829,7 @@ class KVCacheManager:
 
         An external hit can supply the final Mamba state even when the local
         Mamba group ends before this endpoint. Other groups must cover it.
-        Pure slicing: refcounts are untouched and ``blocks`` is not mutated.
+        Pure slicing: refcounts are untouched and `blocks` is not mutated.
         """
         truncated: list[list[KVCacheBlock]] = []
         for group_blocks, manager, group in zip(
@@ -873,7 +898,7 @@ class KVCacheManager:
     ) -> dict[str, list[tuple[int, int, int]]]:
         """Drain this step's boundary-state hand-offs for a KV connector.
 
-        Returns ``{request_id: [(group_id, block_id, boundary_tokens), ...]}``
+        Returns `{request_id: [(group_id, block_id, boundary_tokens), ...]}`
         for mamba "align" boundary states: the
         request's committed boundary-state snapshots and, on a sub-block partial
         hit, the CoW copy of its last-prompt-boundary state. Only mamba "align"

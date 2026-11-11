@@ -192,9 +192,12 @@ class NixlPullConnectorScheduler(NixlBaseConnectorScheduler):
                     # Each count fixes where that group's DCP slice starts, which the
                     # worker needs to line up with the remote's slice.
                     local_num_computed_blocks = tuple(
-                        sum(
-                            block.block_hash is not None and not block.is_null
-                            for block in group
+                        len(
+                            [
+                                block
+                                for block in group
+                                if block.block_hash is not None and not block.is_null
+                            ]
                         )
                         for group in blocks.blocks
                     )
@@ -328,6 +331,7 @@ class NixlPullConnectorScheduler(NixlBaseConnectorScheduler):
             pp_size=self.vllm_config.parallel_config.pipeline_parallel_size,
             remote_num_tokens=remote_num_tokens,
             remote_blocks_expiry_time=blocks_expiry_time,
+            remote_registration_generation=self._registration_generation,
             remote_lease_slot=lease[0] if lease else None,
             remote_lease_nonce=lease[1] if lease else None,
             transfer_mode=self._TRANSFER_MODE,

@@ -20,6 +20,7 @@ from vllm.v1.attention.backend import (
     AttentionCGSupport,
     AttentionMetadataBuilder,
     CommonAttentionMetadata,
+    max_decode_query_len,
 )
 from vllm.v1.attention.backends.utils import (
     NULL_BLOCK_ID,
@@ -27,7 +28,7 @@ from vllm.v1.attention.backends.utils import (
     mamba_get_block_table_tensor,
     split_decodes_and_prefills,
 )
-from vllm.v1.kv_cache_interface import MambaSpec
+from vllm.v1.kv_cache_interface import KVCacheSpec, MambaSpec
 
 # FlashInfer's GDN prefill emits states every N tokens, N a multiple of its
 # 64-token chunk, so checkpoint offsets must be multiples of 64.
@@ -41,11 +42,11 @@ def plan_flashinfer_checkpoints(
 
     Args:
         offsets: Checkpoint offset into each checkpoint row's query, 0 for
-            none. The last ``len(query_lens)`` rows are the prefill kernel's.
+            none. The last `len(query_lens)` rows are the prefill kernel's.
         query_lens: Query length of each sequence the prefill kernel runs.
 
     Returns:
-        ``(every_n_tokens, cu_starts, rows)``: the stride shared by every
+        `(every_n_tokens, cu_starts, rows)`: the stride shared by every
         checkpoint in the batch, cumulative per-sequence checkpoint counts,
         and the index of each checkpoint row's state among the emitted ones.
 
@@ -82,6 +83,10 @@ class GDNAttentionBackend(AttentionBackend):
 
     @classmethod
     def is_ssm(cls) -> bool:
+        return True
+
+    @classmethod
+    def supports_device_cpu_query_lens_mismatch(cls) -> bool:
         return True
 
 
@@ -135,6 +140,15 @@ class GDNAttentionMetadataBuilder(AttentionMetadataBuilder[GDNAttentionMetadata]
     kv_cache_spec: MambaSpec
     _cudagraph_support = AttentionCGSupport.UNIFORM_BATCH
 
+    @classmethod
+    def get_varlen_cudagraph_max_query_len(
+        cls,
+        vllm_config: VllmConfig,
+        kv_cache_spec: KVCacheSpec,
+    ) -> int | None:
+        del kv_cache_spec
+        return max_decode_query_len(vllm_config)
+
     reorder_batch_threshold: int = 1
 
     def __init__(
@@ -147,6 +161,10 @@ class GDNAttentionMetadataBuilder(AttentionMetadataBuilder[GDNAttentionMetadata]
         super().__init__(kv_cache_spec, layer_names, vllm_config, device)
         self.compilation_config = vllm_config.compilation_config
         self.speculative_config = vllm_config.speculative_config
+        self._adaptive_verification = bool(
+            self.speculative_config
+            and self.speculative_config.enable_adaptive_verification
+        )
         self.checkpoint_builder = MambaPrefillCheckpointBuilder(
             vllm_config, kv_cache_spec
         )
@@ -155,7 +173,7 @@ class GDNAttentionMetadataBuilder(AttentionMetadataBuilder[GDNAttentionMetadata]
         )
 
         self.gdn_prefill_backend: Literal[
-            "triton", "flashinfer", "cutedsl", "aiter_flydsl"
+            "triton", "flashinfer", "cutedsl", "aiter_flydsl", "sycl", "hip"
         ]
         _, self.gdn_prefill_backend = _resolve_gdn_prefill_backend(vllm_config)
         self._check_chunk_metadata_override(type(self), self.gdn_prefill_backend)
@@ -180,16 +198,14 @@ class GDNAttentionMetadataBuilder(AttentionMetadataBuilder[GDNAttentionMetadata]
             self.compilation_config.cudagraph_mode.has_full_cudagraphs()
         )
         # update_block_table() keeps the source group's batch-level FULL graph
-        # buffers, so only MRV2, which also reuses metadata at capture, may use
-        # it.
+        # buffers, which is safe because the runner reuses metadata at capture.
         self.supports_update_block_table = (
-            vllm_config.use_v2_model_runner
-            and device.type == "cuda"
+            device.type in ("cuda", "xpu")
             # Not isinstance: KDA's RecoverSSM/checkpoint metadata is per group.
             and type(self) is GDNAttentionMetadataBuilder
         )
         if self.supports_update_block_table:
-            # Opts into MRV2's CUDA-only aligned-index precompute.
+            # Opts into MRV2's aligned-index precompute.
             self.mamba_aligned_state_indices: torch.Tensor | None = None
 
         self.decode_cudagraph_max_bs: int = (
@@ -249,9 +265,9 @@ class GDNAttentionMetadataBuilder(AttentionMetadataBuilder[GDNAttentionMetadata]
         """Reject a subclass whose chunk metadata the AITER path would skip.
 
         AITER brings its own varlen prefill metadata and never calls
-        ``_build_chunk_metadata``, so a builder that overrides it would lose
+        `_build_chunk_metadata`, so a builder that overrides it would lose
         that override without a word. No in-tree subclass can get here --
-        ``_resolve_gdn_prefill_backend`` only selects this backend for models
+        `_resolve_gdn_prefill_backend` only selects this backend for models
         with 128-dim GDN key and value heads, which the KDA builders are not --
         but a future one should be told rather than quietly ignored.
         """
@@ -398,7 +414,7 @@ class GDNAttentionMetadataBuilder(AttentionMetadataBuilder[GDNAttentionMetadata]
             non_spec_sequence_masks_cpu = ~spec_sequence_masks_cpu
             query_lens_cpu = query_start_loc_cpu[1:] - query_start_loc_cpu[:-1]
             spec_query_lens_cpu = query_lens_cpu[spec_sequence_masks_cpu]
-            if spec_query_lens_cpu.numel() > 0:
+            if spec_query_lens_cpu.numel() > 0 and not self._adaptive_verification:
                 first_spec_sequence_length = int(spec_query_lens_cpu[0])
                 if first_spec_sequence_length > 0 and bool(
                     torch.all(spec_query_lens_cpu == first_spec_sequence_length)
@@ -737,7 +753,7 @@ class GDNAttentionMetadataBuilder(AttentionMetadataBuilder[GDNAttentionMetadata]
         slot_mapping: torch.Tensor,
     ) -> GDNAttentionMetadata:
         """Re-gather this group's state indices. The other fields are
-        batch-level and stay shared with ``metadata``."""
+        batch-level and stay shared with `metadata`."""
         m = metadata
         checkpoint = (
             m.checkpoint.regather_state_indices(blk_table)

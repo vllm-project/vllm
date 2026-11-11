@@ -26,7 +26,7 @@
 //! - `allOf` with more than one schema accepts any value.
 
 use serde_json::{Value, json};
-use xgrammar_structural_tag::format::{Format, JsonSchemaFormat};
+use xgrammar_structural_tag::format::{EndBoundary, Format, JsonSchemaFormat, TokenFormat};
 
 pub use crate::schema::JsonType;
 use crate::schema::{self, OptionSource, SchemaOption, SchemaRoot};
@@ -60,7 +60,13 @@ impl ParameterKey<'_> {
 
     /// `prefix KEY suffix content end`: a tag for a declared key, or a
     /// sequence matching [`Self::FREE_PATTERN`] for a free key.
-    pub fn tag(&self, prefix: &str, suffix: &str, content: Format, end: &str) -> Format {
+    pub fn tag(
+        &self,
+        prefix: &str,
+        suffix: &str,
+        content: Format,
+        end: impl Into<EndBoundary>,
+    ) -> Format {
         match self {
             Self::Declared(key) => Format::tag(format!("{prefix}{key}{suffix}"), content, end),
             Self::Free => Format::sequence(vec![
@@ -68,7 +74,13 @@ impl ParameterKey<'_> {
                 Format::regex(Self::FREE_PATTERN),
                 Format::const_string(suffix),
                 content,
-                Format::const_string(end),
+                match end.into() {
+                    EndBoundary::Text(end) => Format::const_string(end),
+                    EndBoundary::Texts(ends) => {
+                        one_of(ends.into_iter().map(Format::const_string).collect())
+                    }
+                    EndBoundary::Token(end) => Format::Token(TokenFormat { token: end.token }),
+                },
             ]),
         }
     }
@@ -183,6 +195,36 @@ impl ArgumentContext<'_> {
 /// Build the grammar of one call's arguments under `schema`, the tool's
 /// parameters schema, rendering each parameter with `syntax`.
 pub fn arguments(schema: &Value, syntax: &dyn ArgumentSyntax, options: &ArgumentOptions) -> Format {
+    parameter_list(
+        options,
+        syntax.separator(),
+        parameters(schema, syntax, options),
+    )
+}
+
+/// The parameters of one call, each rendered by an [`ArgumentSyntax`], for a
+/// syntax that lists them itself rather than through [`arguments`].
+pub struct Parameters {
+    /// The declared parameters, in declared order.
+    pub declared: Vec<Parameter>,
+    /// Any one additional parameter, if the schema allows them.
+    pub additional: Option<Format>,
+}
+
+/// One declared parameter.
+pub struct Parameter {
+    pub key: String,
+    pub format: Format,
+    pub required: bool,
+}
+
+/// The parameters of one call under `schema`, the tool's parameters schema,
+/// rendering each parameter with `syntax`.
+pub fn parameters(
+    schema: &Value,
+    syntax: &dyn ArgumentSyntax,
+    options: &ArgumentOptions,
+) -> Parameters {
     let cx = ArgumentContext {
         options,
         root: SchemaRoot::new(schema),
@@ -190,8 +232,7 @@ pub fn arguments(schema: &Value, syntax: &dyn ArgumentSyntax, options: &Argument
     let parameter =
         |key: ParameterKey<'_>, schema: &Value| syntax.parameter(key, &cx.value_options(schema));
 
-    let schema = cx.root.resolved();
-    let (properties, additional) = match schema {
+    match cx.root.resolved() {
         Value::Object(schema) => {
             let additional = match schema.get("additionalProperties") {
                 Some(Value::Bool(false)) => None,
@@ -206,22 +247,33 @@ pub fn arguments(schema: &Value, syntax: &dyn ArgumentSyntax, options: &Argument
                 .and_then(Value::as_array)
                 .map(|required| required.iter().filter_map(Value::as_str).collect::<Vec<_>>())
                 .unwrap_or_default();
-            let properties = schema
+            let declared = schema
                 .get("properties")
                 .and_then(Value::as_object)
                 .into_iter()
                 .flatten()
                 .filter_map(|(key, schema)| {
-                    let parameter = parameter(ParameterKey::Declared(key), schema)?;
-                    Some((parameter, required.contains(&key.as_str())))
+                    Some(Parameter {
+                        key: key.clone(),
+                        format: parameter(ParameterKey::Declared(key), schema)?,
+                        required: required.contains(&key.as_str()),
+                    })
                 })
                 .collect();
-            (properties, additional)
+            Parameters {
+                declared,
+                additional,
+            }
         }
-        Value::Bool(false) => (vec![], None),
-        _ => (vec![], parameter(ParameterKey::Free, &ANY_SCHEMA)),
-    };
-    parameter_list(options, syntax.separator(), properties, additional)
+        Value::Bool(false) => Parameters {
+            declared: vec![],
+            additional: None,
+        },
+        _ => Parameters {
+            declared: vec![],
+            additional: parameter(ParameterKey::Free, &ANY_SCHEMA),
+        },
+    }
 }
 
 /// Parameters in declared order, required ones mandatory, followed by any
@@ -230,8 +282,10 @@ pub fn arguments(schema: &Value, syntax: &dyn ArgumentSyntax, options: &Argument
 fn parameter_list(
     options: &ArgumentOptions,
     separator: Option<Format>,
-    properties: Vec<(Format, bool)>,
-    additional: Option<Format>,
+    Parameters {
+        declared,
+        additional,
+    }: Parameters,
 ) -> Format {
     let separated = |parameter: Format| match &separator {
         Some(separator) => Format::sequence(vec![parameter, separator.clone()]),
@@ -239,10 +293,10 @@ fn parameter_list(
     };
     let mut elements = Vec::from_iter(separator.clone());
     if options.any_order {
-        let any_required = properties.iter().any(|(_, required)| *required);
-        let parameters = properties
+        let any_required = declared.iter().any(|parameter| parameter.required);
+        let parameters = declared
             .into_iter()
-            .map(|(parameter, _)| parameter)
+            .map(|parameter| parameter.format)
             .chain(additional)
             .collect::<Vec<_>>();
         if !parameters.is_empty() {
@@ -254,8 +308,11 @@ fn parameter_list(
             });
         }
     } else {
-        for (parameter, required) in properties {
-            let parameter = separated(parameter);
+        for Parameter {
+            format, required, ..
+        } in declared
+        {
+            let parameter = separated(format);
             elements.push(if required {
                 parameter
             } else {

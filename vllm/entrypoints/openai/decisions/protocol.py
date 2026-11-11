@@ -97,6 +97,9 @@ class DecisionRequest(DecisionModel):
     input: InputText | Annotated[list[DecisionInputMessage], Field(max_length=131072)]
     questions: list[DecisionQuestion] = Field(min_length=1, max_length=200)
     safety_identifier: Annotated[StrictStr, Field(max_length=128)] | None = None
+    joint: StrictBool = Field(
+        default=False, description="vLLM extension: joint reads, diffusion models only."
+    )
     cache_salt: str | None = Field(
         default=None,
         min_length=1,

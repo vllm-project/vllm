@@ -7,6 +7,7 @@ import sys
 import uuid
 import weakref
 from abc import ABC, abstractmethod
+from array import array
 from collections import Counter, defaultdict
 from collections.abc import Awaitable, Callable, Sequence
 from concurrent.futures import Future
@@ -17,6 +18,7 @@ from typing import Any, TypeAlias, TypeVar
 
 import msgspec
 import msgspec.msgpack
+import numpy as np
 import zmq
 import zmq.asyncio
 
@@ -41,6 +43,7 @@ from vllm.utils.network_utils import (
 from vllm.v1.engine import (
     EEP_NOTIFICATION_CALL_ID,
     FT_STATUS_CALL_ID,
+    CheckpointState,
     EEPNotificationType,
     EngineCoreOutputs,
     EngineCoreReadyResponse,
@@ -78,6 +81,16 @@ AnyFuture: TypeAlias = asyncio.Future[Any] | Future[Any]
 _R = TypeVar("_R")  # Return type for collective_rpc
 
 EngineIdentity = bytes
+
+
+def _with_packed_prompt(request: EngineCoreRequest) -> EngineCoreRequest:
+    """Copy of request with its prompt token ids as an int32 ndarray, which is
+    sent out of band when long and decoded by the engine without a Python int
+    per token. The frontend keeps the original."""
+    if not isinstance(request.prompt_token_ids, list):
+        return request
+    packed = np.frombuffer(array("i", request.prompt_token_ids), dtype=np.int32)
+    return msgspec.structs.replace(request, prompt_token_ids=packed)
 
 
 class EngineCoreClient(ABC):
@@ -190,6 +203,7 @@ class EngineCoreClient(ABC):
         profile_prefix: str | None = None,
         delay_iterations: int | None = None,
         max_iterations: int | None = None,
+        profiler_kwargs: dict | None = None,
     ) -> None:
         raise NotImplementedError
 
@@ -204,10 +218,12 @@ class EngineCoreClient(ABC):
     def reset_encoder_cache(self) -> None:
         raise NotImplementedError
 
-    def sleep(self, level: int = 1, mode: PauseMode = "abort") -> None:
+    def sleep(
+        self, level: int = 1, mode: PauseMode = "abort", reset_connector: bool = True
+    ) -> None:
         raise NotImplementedError
 
-    def release_kv_cache_memory(self) -> None:
+    def release_kv_cache_memory(self, reset_connector: bool = True) -> None:
         raise NotImplementedError
 
     def wake_up(self, tags: list[str] | None = None) -> bool:
@@ -297,6 +313,7 @@ class EngineCoreClient(ABC):
         profile_prefix: str | None = None,
         delay_iterations: int | None = None,
         max_iterations: int | None = None,
+        profiler_kwargs: dict | None = None,
     ) -> None:
         raise NotImplementedError
 
@@ -311,16 +328,27 @@ class EngineCoreClient(ABC):
     async def reset_encoder_cache_async(self) -> None:
         raise NotImplementedError
 
-    async def sleep_async(self, level: int = 1, mode: PauseMode = "abort") -> None:
+    async def sleep_async(
+        self, level: int = 1, mode: PauseMode = "abort", reset_connector: bool = True
+    ) -> None:
         raise NotImplementedError
 
-    async def release_kv_cache_memory_async(self) -> None:
+    async def release_kv_cache_memory_async(self, reset_connector: bool = True) -> None:
         raise NotImplementedError
 
     async def wake_up_async(self, tags: list[str] | None = None) -> bool:
         raise NotImplementedError
 
     async def is_sleeping_async(self) -> bool:
+        raise NotImplementedError
+
+    async def checkpoint_prepare_async(self, mode: PauseMode) -> str | None:
+        raise NotImplementedError
+
+    async def checkpoint_restore_async(self) -> None:
+        raise NotImplementedError
+
+    async def checkpoint_state_async(self) -> tuple[CheckpointState, str | None]:
         raise NotImplementedError
 
     async def abort_requests_async(self, request_ids: list[str]) -> None:
@@ -396,6 +424,8 @@ class InprocClient(EngineCoreClient):
     def get_output(self) -> EngineCoreOutputs:
         outputs, model_executed = self.engine_core.step_fn()
         self.engine_core.post_step(model_executed=model_executed)
+        # Read by LLMEngine.step() to keep the DP ranks' collectives aligned.
+        self.last_step_model_executed = model_executed
         return outputs and outputs.get(0) or EngineCoreOutputs()
 
     def get_supported_tasks(self) -> tuple[SupportedTask, ...]:
@@ -419,12 +449,14 @@ class InprocClient(EngineCoreClient):
         profile_prefix: str | None = None,
         delay_iterations: int | None = None,
         max_iterations: int | None = None,
+        profiler_kwargs: dict | None = None,
     ) -> None:
         self.engine_core.profile(
             is_start,
             profile_prefix,
             delay_iterations=delay_iterations,
             max_iterations=max_iterations,
+            profiler_kwargs=profiler_kwargs,
         )
 
     def reset_mm_cache(self) -> None:
@@ -440,14 +472,16 @@ class InprocClient(EngineCoreClient):
     def reset_encoder_cache(self) -> None:
         self.engine_core.reset_encoder_cache()
 
-    def sleep(self, level: int = 1, mode: PauseMode = "abort") -> None:
+    def sleep(
+        self, level: int = 1, mode: PauseMode = "abort", reset_connector: bool = True
+    ) -> None:
         if mode == "wait":
             raise ValueError("'wait' pause mode is not supported in inproc-engine mode")
-        result = self.engine_core.sleep(level, mode)
+        result = self.engine_core.sleep(level, mode, reset_connector)
         assert result is None
 
-    def release_kv_cache_memory(self) -> None:
-        self.engine_core.release_kv_cache_memory()
+    def release_kv_cache_memory(self, reset_connector: bool = True) -> None:
+        self.engine_core.release_kv_cache_memory(reset_connector)
 
     def wake_up(self, tags: list[str] | None = None) -> bool:
         return self.engine_core.wake_up(tags)
@@ -506,8 +540,8 @@ class BackgroundResources:
     coordinator: DPCoordinator | None = None
     output_socket: zmq.Socket | zmq.asyncio.Socket | None = None
     input_socket: zmq.Socket | zmq.asyncio.Socket | None = None
-    first_req_send_socket: zmq.asyncio.Socket | None = None
-    first_req_rcv_socket: zmq.asyncio.Socket | None = None
+    scale_send_socket: zmq.asyncio.Socket | None = None
+    scale_rcv_socket: zmq.asyncio.Socket | None = None
     stats_update_socket: zmq.asyncio.Socket | None = None
     output_queue_task: asyncio.Task | None = None
     stats_update_task: asyncio.Task | None = None
@@ -516,6 +550,8 @@ class BackgroundResources:
     # Set if any of the engines are dead. Here so that the output
     # processing threads can access it without holding a ref to the client.
     engine_dead: bool = False
+    # Set when shutdown() was requested, rather than following an engine death.
+    stop_requested: bool = False
 
     def __call__(self):
         """Clean up background resources."""
@@ -535,8 +571,8 @@ class BackgroundResources:
             sockets = (
                 self.output_socket,
                 self.input_socket,
-                self.first_req_send_socket,
-                self.first_req_rcv_socket,
+                self.scale_send_socket,
+                self.scale_rcv_socket,
                 self.stats_update_socket,
             )
 
@@ -784,6 +820,7 @@ class MPClient(EngineCoreClient):
     def shutdown(self, timeout: float | None = None) -> None:
         """Shutdown engine manager under timeout and clean up resources."""
         if self._finalizer.detach() is not None:
+            self.resources.stop_requested = not self.resources.engine_dead
             timeout_str = "default" if timeout is None else f"{timeout}s"
             logger.info("[shutdown] MPClient: start timeout=%s", timeout_str)
             if self.resources.engine_manager is not None:
@@ -1058,7 +1095,7 @@ class SyncMPClient(MPClient):
     def add_request(self, request: EngineCoreRequest) -> None:
         if self.is_dp:
             self.engines_running = True
-        self._send_input(EngineCoreRequestType.ADD, request)
+        self._send_input(EngineCoreRequestType.ADD, _with_packed_prompt(request))
 
     def abort_requests(self, request_ids: list[str]) -> None:
         if request_ids and not self.resources.engine_dead:
@@ -1070,6 +1107,7 @@ class SyncMPClient(MPClient):
         profile_prefix: str | None = None,
         delay_iterations: int | None = None,
         max_iterations: int | None = None,
+        profiler_kwargs: dict | None = None,
     ) -> None:
         self.call_utility(
             "profile",
@@ -1077,6 +1115,7 @@ class SyncMPClient(MPClient):
             profile_prefix,
             delay_iterations,
             max_iterations,
+            profiler_kwargs,
         )
 
     def reset_mm_cache(self) -> None:
@@ -1104,11 +1143,13 @@ class SyncMPClient(MPClient):
     def pin_lora(self, lora_id: int) -> bool:
         return self.call_utility("pin_lora", lora_id)
 
-    def sleep(self, level: int = 1, mode: PauseMode = "abort") -> None:
-        self.call_utility("sleep", level, mode)
+    def sleep(
+        self, level: int = 1, mode: PauseMode = "abort", reset_connector: bool = True
+    ) -> None:
+        self.call_utility("sleep", level, mode, reset_connector)
 
-    def release_kv_cache_memory(self) -> None:
-        self.call_utility("release_kv_cache_memory")
+    def release_kv_cache_memory(self, reset_connector: bool = True) -> None:
+        self.call_utility("release_kv_cache_memory", reset_connector)
 
     def wake_up(self, tags: list[str] | None = None) -> bool:
         return self.call_utility("wake_up", tags)
@@ -1332,7 +1373,7 @@ class AsyncMPClient(MPClient):
 
     async def add_request_async(self, request: EngineCoreRequest) -> None:
         request.client_index = self.client_index
-        await self._send_input(EngineCoreRequestType.ADD, request)
+        await self._send_input(EngineCoreRequestType.ADD, _with_packed_prompt(request))
         self._ensure_output_queue_task()
 
     async def abort_requests_async(self, request_ids: list[str]) -> None:
@@ -1343,6 +1384,11 @@ class AsyncMPClient(MPClient):
         self, mode: PauseMode = "abort", clear_cache: bool = True
     ) -> None:
         await self.call_utility_async("pause_scheduler", mode, clear_cache)
+
+    async def pause_generation_async(
+        self, mode: PauseMode = "abort", clear_cache: bool = True
+    ) -> None:
+        await self.call_utility_async("pause_generation", mode, clear_cache)
 
     async def resume_scheduler_async(self) -> None:
         await self.call_utility_async("resume_scheduler")
@@ -1356,6 +1402,7 @@ class AsyncMPClient(MPClient):
         profile_prefix: str | None = None,
         delay_iterations: int | None = None,
         max_iterations: int | None = None,
+        profiler_kwargs: dict | None = None,
     ) -> None:
         await self.call_utility_async(
             "profile",
@@ -1363,6 +1410,7 @@ class AsyncMPClient(MPClient):
             profile_prefix,
             delay_iterations,
             max_iterations,
+            profiler_kwargs,
         )
 
     async def reset_mm_cache_async(self) -> None:
@@ -1380,17 +1428,29 @@ class AsyncMPClient(MPClient):
     async def reset_encoder_cache_async(self) -> None:
         await self.call_utility_async("reset_encoder_cache")
 
-    async def sleep_async(self, level: int = 1, mode: PauseMode = "abort") -> None:
-        await self.call_utility_async("sleep", level, mode)
+    async def sleep_async(
+        self, level: int = 1, mode: PauseMode = "abort", reset_connector: bool = True
+    ) -> None:
+        await self.call_utility_async("sleep", level, mode, reset_connector)
 
-    async def release_kv_cache_memory_async(self) -> None:
-        await self.call_utility_async("release_kv_cache_memory")
+    async def release_kv_cache_memory_async(self, reset_connector: bool = True) -> None:
+        await self.call_utility_async("release_kv_cache_memory", reset_connector)
 
     async def wake_up_async(self, tags: list[str] | None = None) -> bool:
         return all(await self.call_utility_all_async("wake_up", tags))
 
     async def is_sleeping_async(self) -> bool:
         return await self.call_utility_consensus_async("is_sleeping")
+
+    async def checkpoint_prepare_async(self, mode: PauseMode) -> str | None:
+        return await self.call_utility_async("checkpoint_prepare", mode)
+
+    async def checkpoint_restore_async(self) -> None:
+        await self.call_utility_async("checkpoint_restore")
+
+    async def checkpoint_state_async(self) -> tuple[CheckpointState, str | None]:
+        state, error = await self.call_utility_async("checkpoint_state")
+        return CheckpointState(state), error
 
     async def execute_dummy_batch_async(self) -> None:
         await self.call_utility_async("execute_dummy_batch")
@@ -1436,14 +1496,39 @@ class AsyncMPClient(MPClient):
     async def handle_fault(
         self, ft_request: FaultToleranceRequest
     ) -> FaultToleranceResult:
-        res = await self.call_utility_async(FT_UTILITY_METHOD, ft_request)
-        result = msgspec.convert(res, FaultToleranceResult)
+        status = self._engine_status[self.engine_ranks_managed[0]]
+
+        # Reject a second recovery while one is in flight
+        if status.get("ft_state") == "recovering":
+            return FaultToleranceResult(
+                request_id=ft_request.request_id,
+                success=False,
+                reason="another recovery is in progress",
+            )
+
+        status["ft_state"] = "recovering"
+        status["last_ft_request_id"] = ft_request.request_id
+        status.pop("ft_error", None)
+
+        try:
+            res = await self.call_utility_async(FT_UTILITY_METHOD, ft_request)
+            result = msgspec.convert(res, FaultToleranceResult)
+        except Exception as e:
+            result = FaultToleranceResult(ft_request.request_id, False, str(e))
+
         if not result.success:
-            status = self._engine_status.get(self.engine_ranks_managed[0])
-            if status is not None:
-                status["last_ft_request_id"] = result.request_id
-                status["ft_error"] = result.reason
+            # Status pushes replace the cached entry; re-read before recording.
+            status = self._engine_status[self.engine_ranks_managed[0]]
+            status["ft_state"] = "failed"
+            status["last_ft_request_id"] = result.request_id
+            status["ft_error"] = result.reason
+
         return result
+
+    @property
+    def engine_status(self) -> dict:
+        """Cached FT status entry of the managed engine."""
+        return self._engine_status.get(self.engine_ranks_managed[0], {})
 
     async def get_status(self):
         return {
@@ -1493,9 +1578,9 @@ class DPAsyncMPClient(AsyncMPClient):
 
         self.eep_scaling_cache: ElasticScalingCache | None = None
 
-        self.first_req_sock_addr = get_open_zmq_inproc_path()
-        self.first_req_send_socket = self.resources.first_req_send_socket = (
-            make_zmq_socket(self.ctx, self.first_req_sock_addr, zmq.PAIR, bind=True)
+        self.scale_sock_addr = get_open_zmq_inproc_path()
+        self.scale_send_socket = self.resources.scale_send_socket = make_zmq_socket(
+            self.ctx, self.scale_sock_addr, zmq.PAIR, bind=True
         )
         try:
             # If we are running in an asyncio event loop, start the stats task.
@@ -1518,75 +1603,48 @@ class DPAsyncMPClient(AsyncMPClient):
             with (
                 make_zmq_socket(self.ctx, stats_addr, zmq.XSUB, linger=0) as socket,
                 make_zmq_socket(
-                    self.ctx, self.first_req_sock_addr, zmq.PAIR, bind=False, linger=0
-                ) as first_req_rcv_socket,
+                    self.ctx, self.scale_sock_addr, zmq.PAIR, bind=False, linger=0
+                ) as scale_rcv_socket,
             ):
                 assert isinstance(socket, zmq.asyncio.Socket)
-                assert isinstance(first_req_rcv_socket, zmq.asyncio.Socket)
+                assert isinstance(scale_rcv_socket, zmq.asyncio.Socket)
                 self.resources.stats_update_socket = socket
-                self.resources.first_req_rcv_socket = first_req_rcv_socket
+                self.resources.scale_rcv_socket = scale_rcv_socket
                 # Send subscription message.
                 await socket.send(b"\x01")
 
                 poller = zmq.asyncio.Poller()
                 poller.register(socket, zmq.POLLIN)
-                poller.register(first_req_rcv_socket, zmq.POLLIN)
+                poller.register(scale_rcv_socket, zmq.POLLIN)
 
                 while True:
-                    events = await poller.poll()
-                    if (
-                        not self.engines_running
-                        and len(events) == 2
-                        or (events[0][0] == first_req_rcv_socket)
-                    ):
-                        # Check if this is a regular request notification or
-                        # scale up notification
-                        buf = first_req_rcv_socket.recv(flags=zmq.NOBLOCK).result()
-
-                        decoded = msgspec.msgpack.decode(buf)
-                        if (
-                            isinstance(decoded, (list, tuple))
-                            and len(decoded) == 2
-                            and decoded[0] == "SCALE_ELASTIC_EP"
-                        ):
-                            # Extract new engine count from the decoded message
-                            new_engine_count = decoded[1]
-                            # Update engine_ranks_managed and count_slice
-                            parallel_config = self.vllm_config.parallel_config
-                            dp_size = parallel_config.data_parallel_size
-                            dp_rank = parallel_config.data_parallel_rank
-                            assert dp_rank == 0
-                            assert dp_size == new_engine_count
-                            assert not parallel_config.data_parallel_hybrid_lb
-                            # External LB clients continue to manage only local ranks.
-                            if not parallel_config.data_parallel_external_lb:
-                                self.engine_ranks_managed = list(range(dp_size))
-                                if len(self.lb_engines) < new_engine_count:
-                                    self.lb_engines += [
-                                        [0, 0, 0.0]
-                                        for _ in range(
-                                            new_engine_count - len(self.lb_engines)
-                                        )
-                                    ]
-                                else:
-                                    self.lb_engines = self.lb_engines[:new_engine_count]
-                            # Send scale up notification to coordinator
-                            scale_msg = msgspec.msgpack.encode(
-                                ("SCALE_ELASTIC_EP", new_engine_count)
-                            )
-                            await socket.send(scale_msg)
-                            continue
-
-                        # we're sending a request while the engines are
-                        # paused, so that it can wake the others up
-                        # (to run dummy EP loop).
-                        assert decoded[0] == "FIRST_REQ"
-                        target_eng_index = decoded[1]
-                        self.engines_running = True
-                        msg = msgspec.msgpack.encode(
-                            (target_eng_index, self.current_wave)
-                        )
-                        await socket.send(msg)
+                    events = dict(await poller.poll())
+                    if scale_rcv_socket in events:
+                        buf = scale_rcv_socket.recv(flags=zmq.NOBLOCK).result()
+                        msg_type, new_engine_count = msgspec.msgpack.decode(buf)
+                        assert msg_type == "SCALE_ELASTIC_EP"
+                        # Update engine_ranks_managed and count_slice
+                        parallel_config = self.vllm_config.parallel_config
+                        dp_size = parallel_config.data_parallel_size
+                        dp_rank = parallel_config.data_parallel_rank
+                        assert dp_rank == 0
+                        assert dp_size == new_engine_count
+                        assert not parallel_config.data_parallel_hybrid_lb
+                        # External LB clients continue to manage only local ranks.
+                        if not parallel_config.data_parallel_external_lb:
+                            self.engine_ranks_managed = list(range(dp_size))
+                            if len(self.lb_engines) < new_engine_count:
+                                self.lb_engines += [
+                                    [0, 0, 0.0]
+                                    for _ in range(
+                                        new_engine_count - len(self.lb_engines)
+                                    )
+                                ]
+                            else:
+                                self.lb_engines = self.lb_engines[:new_engine_count]
+                        # Forward the scale notification to the coordinator.
+                        await socket.send(buf)
+                        continue
 
                     buf = None
                     while True:
@@ -1624,14 +1682,10 @@ class DPAsyncMPClient(AsyncMPClient):
         request.current_wave = self.current_wave
         request.client_index = self.client_index
 
+        # The engine that receives it wakes the other ranks if they are idle.
         chosen_engine = self.get_core_engine_for_request(request)
-        to_await = self._send_input(EngineCoreRequestType.ADD, request, chosen_engine)
-        if not self.engines_running:
-            # Notify coordinator that we're sending a request
-            req_msg = msgspec.msgpack.encode(("FIRST_REQ", chosen_engine))
-            await self.first_req_send_socket.send(req_msg)
-
-        await to_await
+        request = _with_packed_prompt(request)
+        await self._send_input(EngineCoreRequestType.ADD, request, chosen_engine)
 
         self._ensure_output_queue_task()
 
@@ -1643,12 +1697,9 @@ class DPAsyncMPClient(AsyncMPClient):
             can_reuse_fused_moe_kernel,
         )
 
-        # MRV2 re-warms through the request pool, so running requests must
+        # The runner re-warms through the request pool, so running requests must
         # finish first while new ones stay queued in the scheduler.
-        parallel_config = self.vllm_config.parallel_config
-        if self.vllm_config.use_v2_model_runner and not can_reuse_fused_moe_kernel(
-            parallel_config
-        ):
+        if not can_reuse_fused_moe_kernel(self.vllm_config.parallel_config):
             return "wait"
         return "keep"
 
@@ -1833,6 +1884,21 @@ class DPLBAsyncMPClient(DPAsyncMPClient):
     async def call_utility_async(self, method: str, *args) -> Any:
         # Only the result from the first engine is returned.
         return (await self.call_utility_all_async(method, *args))[0]
+
+    async def checkpoint_state_async(self) -> tuple[CheckpointState, str | None]:
+        # Engines move independently: failed if any failed, otherwise a state
+        # all share or the transition in progress. A failure reports the first
+        # failed engine's error.
+        states: dict[CheckpointState, str | None] = {}
+        for state, error in await self.call_utility_all_async("checkpoint_state"):
+            states.setdefault(CheckpointState(state), error)
+        if CheckpointState.FAILED in states:
+            return CheckpointState.FAILED, states[CheckpointState.FAILED]
+        if len(states) == 1:
+            return next(iter(states)), None
+        if CheckpointState.PREPARING in states:
+            return CheckpointState.PREPARING, None
+        return CheckpointState.RESTORING, None
 
     @staticmethod
     async def process_engine_outputs(
@@ -2100,7 +2166,7 @@ class DPLBAsyncMPClient(DPAsyncMPClient):
         scale_up_marker = msgspec.msgpack.encode(
             ("SCALE_ELASTIC_EP", new_data_parallel_size)
         )
-        await self.first_req_send_socket.send(scale_up_marker)
+        await self.scale_send_socket.send(scale_up_marker)
 
         logger.info(
             "[Elastic EP] Scale up completed, new data parallel size: %s",
@@ -2176,7 +2242,7 @@ class DPLBAsyncMPClient(DPAsyncMPClient):
             scale_down_marker = msgspec.msgpack.encode(
                 ("SCALE_ELASTIC_EP", new_data_parallel_size)
             )
-            await self.first_req_send_socket.send(scale_down_marker)
+            await self.scale_send_socket.send(scale_down_marker)
             await wait_future
             await self.resume_scheduler_async()
         except Exception:

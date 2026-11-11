@@ -220,7 +220,6 @@ def _make_dplb_client(num_engines: int = 3, client_count: int = 1) -> DPLBAsyncM
     client.eng_start_index = 0
     client._kv_event_sources = {}
     client.vllm_config = SimpleNamespace(
-        use_v2_model_runner=True,
         parallel_config=SimpleNamespace(all2all_backend="allgather_reducescatter"),
     )
     return client
@@ -314,7 +313,7 @@ async def test_dplb_scale_down_routes_after_stale_stats_snapshot():
     client.current_wave = 0
     client.resources = SimpleNamespace(stats_update_task=None)
     client.stats_update_address = "inproc://scale-down-stats"
-    client.first_req_sock_addr = "inproc://scale-down-first-request"
+    client.scale_sock_addr = "inproc://scale-down-notify"
     pause_started = asyncio.Event()
 
     async def pause_scheduler(*args, **kwargs):
@@ -326,11 +325,11 @@ async def test_dplb_scale_down_routes_after_stale_stats_snapshot():
     with (
         zmq.asyncio.Context() as ctx,
         ctx.socket(zmq.XPUB) as coordinator,
-        ctx.socket(zmq.PAIR) as first_req_socket,
+        ctx.socket(zmq.PAIR) as scale_socket,
     ):
         client.ctx = ctx
         coordinator.bind(client.stats_update_address)
-        first_req_socket.bind(client.first_req_sock_addr)
+        scale_socket.bind(client.scale_sock_addr)
         client._ensure_stats_update_task()
         scale_task = None
         try:
@@ -1162,7 +1161,7 @@ async def test_engine_core_client_util_method_nested_structures(
             )
             assert isinstance(result, dict) and len(result) == 2
             assert "list1" in result and "list2" in result
-            for key, lst in result.items():
+            for lst in result.values():
                 assert isinstance(lst, list) and len(lst) == 2
                 for item in lst:
                     assert isinstance(item, TestMessage) and item.message == "nested2"
@@ -1394,7 +1393,7 @@ async def test_kv_cache_events_dp(
 
         # Create and add 25 requests
         # NOTE: attempts to force routing to both dp groups but can be flaky
-        for i in range(25):
+        for _ in range(25):
             await asyncio.sleep(0.01)
             request = make_request(sampling_params, custom_tokens)
             await client.add_request_async(request)
