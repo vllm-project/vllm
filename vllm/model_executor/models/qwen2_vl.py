@@ -983,7 +983,7 @@ class Qwen2VLProcessingInfo(BaseProcessingInfo):
         seq_len: int,
         mm_counts: Mapping[str, int],
     ) -> Mapping[str, int]:
-        max_image_tokens = self.get_max_image_tokens()
+        max_image_tokens = self.get_max_image_tokens(seq_len)
         max_video_tokens = self.get_max_video_tokens(seq_len, mm_counts)
         return {"image": max_image_tokens, "video": max_video_tokens}
 
@@ -1078,7 +1078,7 @@ class Qwen2VLProcessingInfo(BaseProcessingInfo):
         return num_video_tokens
 
     def get_image_size_with_most_features(
-        self, max_pixels: int | None = None
+        self, max_pixels: int | None = None, seq_len: int | None = None
     ) -> ImageSize:
         # NOTE: Simply processing a huge size with _get_vision_info might not give a
         # size that maximizes the number of features, i.e., the number of (merged)
@@ -1112,6 +1112,8 @@ class Qwen2VLProcessingInfo(BaseProcessingInfo):
 
         unit = patch_size * merge_size
         max_seq_len = max_pixels // (unit * unit)
+        if seq_len is not None:
+            max_seq_len = min(max_seq_len, seq_len)
 
         def closest_factor_pair(n: int) -> tuple[int, int]:
             # left <= right
@@ -1128,9 +1130,11 @@ class Qwen2VLProcessingInfo(BaseProcessingInfo):
 
         return ImageSize(width=unit * width_factor, height=unit * height_factor)
 
-    def get_max_image_tokens(self) -> int:
+    def get_max_image_tokens(self, seq_len: int | None = None) -> int:
         image_processor = self.get_image_processor()
-        target_width, target_height = self.get_image_size_with_most_features()
+        target_width, target_height = self.get_image_size_with_most_features(
+            seq_len=seq_len
+        )
 
         return self.get_num_image_tokens(
             image_width=target_width,
@@ -1264,7 +1268,9 @@ class Qwen2VLDummyInputsBuilder(BaseDummyInputsBuilder[Qwen2VLProcessingInfo]):
         mm_counts: Mapping[str, int],
         mm_options: MultiModalDummyOptions,
     ) -> MultiModalDataDict:
-        target_width, target_height = self.info.get_image_size_with_most_features()
+        target_width, target_height = self.info.get_image_size_with_most_features(
+            seq_len=seq_len
+        )
         video_size, target_num_frames = (
             self.info.get_video_size_and_frames_with_most_features(seq_len, mm_counts)
         )

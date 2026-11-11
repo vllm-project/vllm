@@ -88,7 +88,7 @@ class ColQwen3ProcessingInfo(Qwen3VLProcessingInfo):
         seq_len: int,
         mm_counts: Mapping[str, int],
     ) -> Mapping[str, int]:
-        max_image_tokens = self.get_max_image_tokens()
+        max_image_tokens = self.get_max_image_tokens(seq_len)
         result: dict[str, int] = {"image": max_image_tokens}
         if self._supports_video:
             max_video_tokens = self.get_max_video_tokens(seq_len, mm_counts)

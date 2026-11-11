@@ -528,6 +528,46 @@ def test_max_video_tokens_matches_dummy_video(
     )
 
 
+@pytest.mark.parametrize(
+    ("model_id", "modality", "max_model_len", "expected_tokens"),
+    [
+        ("Qwen/Qwen2.5-VL-3B-Instruct", "image", 4096, 4096),
+        ("Qwen/Qwen2.5-VL-3B-Instruct", "image", 40000, 16384),
+        ("Qwen/Qwen3-VL-4B-Instruct", "image", 8192, 8192),
+        ("Qwen/Qwen3-VL-4B-Instruct", "image", 40000, 16384),
+        ("Qwen/Qwen3-VL-4B-Instruct", "video", 8192, 8192),
+        ("Qwen/Qwen3-VL-4B-Instruct", "video", 40000, 12288),
+    ],
+)
+def test_max_mm_tokens_capped_by_max_model_len(
+    model_id: str,
+    modality: str,
+    max_model_len: int,
+    expected_tokens: int,
+) -> None:
+    """An item larger than `max_model_len` is rejected, so encoder profiling
+    must not reserve memory for one."""
+    ctx = build_model_context(
+        model_id,
+        model_config_kwargs={"max_model_len": max_model_len},
+        limit_mm_per_prompt={"image": 0, "video": 0, modality: 1},
+    )
+    processor = MULTIMODAL_REGISTRY.create_processor(ctx.model_config)
+    assert isinstance(processor.info, Qwen2VLProcessingInfo)
+
+    max_tokens = processor.info.get_mm_max_tokens_per_item(
+        max_model_len, {modality: 1}
+    )[modality]
+    dummy_inputs = processor.get_dummy_mm_inputs({modality: 1})
+    dummy_tokens = sum(
+        placeholder.get_num_embeds()
+        for placeholder in dummy_inputs["mm_placeholders"][modality]
+    )
+
+    assert max_tokens == expected_tokens
+    assert dummy_tokens == max_tokens
+
+
 def test_max_video_tokens_with_pruning_keeps_full_size_frames() -> None:
     max_model_len = 40000
     ctx = build_model_context(

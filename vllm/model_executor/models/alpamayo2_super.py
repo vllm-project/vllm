@@ -41,7 +41,7 @@ class Alpamayo2SuperProcessingInfo(Qwen3VLProcessingInfo):
         seq_len: int,
         mm_counts: Mapping[str, int],
     ) -> Mapping[str, int]:
-        return {"image": self.get_max_image_tokens()}
+        return {"image": self.get_max_image_tokens(seq_len)}
 
     def get_supported_mm_processor_kwargs(self) -> dict[str, set[str]]:
         # Skip Qwen3-VL's override, which adds video-only kwargs.

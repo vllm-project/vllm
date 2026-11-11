@@ -1056,7 +1056,7 @@ class Qwen3VLProcessingInfo(Qwen2VLProcessingInfo):
         # so we divide by 2 to get the maximum number of image pixels.
         video_max_pixels = video_size["longest_edge"]
         target_width, target_height = self.get_image_size_with_most_features(
-            max_pixels=video_max_pixels // temporal_patch_size
+            max_pixels=video_max_pixels // temporal_patch_size, seq_len=seq_len
         )
         num_video_soft_tokens = self.get_num_video_tokens(
             image_width=target_width,
@@ -1152,7 +1152,7 @@ class Qwen3VLDummyInputsBuilder(BaseDummyInputsBuilder[Qwen3VLProcessingInfo]):
         video_overrides = mm_options.get("video")
 
         target_image_width, target_image_height = (
-            self.info.get_image_size_with_most_features()
+            self.info.get_image_size_with_most_features(seq_len=seq_len)
         )
 
         # treat videos as special images
@@ -1215,7 +1215,7 @@ class Qwen3VLDummyInputsBuilder(BaseDummyInputsBuilder[Qwen3VLProcessingInfo]):
 
         target_video_width, target_video_height = (
             self.info.get_image_size_with_most_features(
-                max_pixels=video_max_pixels // temporal_patch_size
+                max_pixels=video_max_pixels // temporal_patch_size, seq_len=seq_len
             )
         )
         target_video_size, _ = self.info._get_vision_info(
