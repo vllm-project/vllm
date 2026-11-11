@@ -70,12 +70,15 @@ vllm run-batch \
 
 You should now have your results at `results.jsonl`. You can check your results by running `cat results.jsonl`
 
-Responses are written in input order as the batch runs. The output file is
-truncated when the run starts; if the run fails partway, it holds the responses
-for the first lines of the input, so check the exit code before treating it as
-complete. To resume, rerun the input lines past the last one written; if the
-process was killed, drop a final line that is incomplete first. An output URL is
-uploaded only when the run succeeds.
+Responses are written in input order as the batch runs. By default, the output
+file is truncated when the run starts; if the run fails partway, it holds the
+responses for the first lines of the input, so check the exit code before
+treating it as complete. To resume a local output file, rerun the same command
+with `--resume`. Successful requests are skipped, failed or missing requests are
+retried, and an incomplete final output line is discarded. See
+[Resume an interrupted batch](../../../docs/cli/README.md#resume-an-interrupted-batch)
+for requirements and output ordering. An output URL is uploaded only when the
+run succeeds and does not support `--resume`.
 
 ```bash
 cat results.jsonl
