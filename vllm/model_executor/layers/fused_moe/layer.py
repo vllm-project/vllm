@@ -97,6 +97,7 @@ def FusedMoEFactory(
     hidden_size: int,
     intermediate_size: int,
     intermediate_pad: int | None = None,
+    intermediate_size_unpadded: int | None = None,
     params_dtype: torch.dtype | None = None,
     renormalize: bool = True,
     use_grouped_topk: bool = False,
@@ -172,6 +173,8 @@ def FusedMoEFactory(
         top_k: Number of experts selected for each token
         hidden_size: Input hidden state size of the transformer
         intermediate_size: Intermediate size of the experts
+        intermediate_size_unpadded: Global intermediate size the checkpoint
+            holds, when `intermediate_size` is padded (None = not padded)
         params_dtype: Data type for the parameters
         renormalize: Whether to renormalize the logits in the router
         use_grouped_topk: Whether to use grouped top-k routing
@@ -369,6 +372,7 @@ def FusedMoEFactory(
         hidden_dim=hidden_size,
         intermediate_size=intermediate_size,
         intermediate_pad=intermediate_pad,
+        intermediate_size_unpadded=intermediate_size_unpadded,
         num_local_experts=expert_map_manager.local_num_experts,
         num_logical_experts=logical_num_experts,
         moe_parallel_config=moe_parallel_config,
