@@ -11,6 +11,7 @@ include the future query tokens in the top-k indices for each query token.
 """
 
 from collections.abc import Iterable
+from typing import TYPE_CHECKING
 
 import regex as re
 import torch
@@ -36,6 +37,7 @@ from vllm.model_executor.layers.linear import (
 from vllm.model_executor.layers.logits_processor import LogitsProcessor
 from vllm.model_executor.layers.vocab_parallel_embedding import (
     ParallelLMHead,
+    UnquantizedEmbeddingMethod,
     VocabParallelEmbedding,
 )
 from vllm.model_executor.model_loader.weight_utils import default_weight_loader
@@ -62,6 +64,12 @@ from .model import (
     prepare_mega_gate_routing_metadata,
 )
 from .ops.fused_markov import FusedMarkovSampler
+from .specialized_decode import decode_backend, register_draft
+
+if TYPE_CHECKING:
+    from .specialized_decode.runtime.decode import DecodeStep, SpecializedDecode
+    from .specialized_decode.runtime.draft import DraftDecode
+    from .specialized_decode.sampling.sharded_markov import ShardedMarkovSampling
 
 logger = init_logger(__name__)
 
@@ -214,6 +222,7 @@ class DSparkDeepseekV4Model(nn.Module):
         input_ids: torch.Tensor,
         positions: torch.Tensor,
         inputs_embeds: torch.Tensor | None = None,
+        decode_step: "DecodeStep | None" = None,
     ) -> torch.Tensor:
         if inputs_embeds is None:
             inputs_embeds = self.embed_input_ids(input_ids)
@@ -237,6 +246,10 @@ class DSparkDeepseekV4Model(nn.Module):
             )
         # Expand to hc_mult copies for hyper-connections ([T, H] -> [T, hc, H]).
         hidden_states = inputs_embeds.unsqueeze(-2).repeat(1, self.hc_mult, 1)
+        if decode_step is not None:
+            hidden_states = decode_step.run(hidden_states, positions, input_ids)
+            assert isinstance(hidden_states, torch.Tensor)
+            return hidden_states
 
         residual = post_mix = res_mix = pre_mix = None
         for layer in self.layers:
@@ -318,25 +331,59 @@ class DSparkDeepseekV4ForCausalLM(nn.Module):
             prefix=maybe_prefix(prefix, "lm_head"),
         )
         self.logits_processor = LogitsProcessor(self.config.vocab_size)
-        # additional_config={"dspark_fused_markov": true} replaces the speculator's loop
-        # when it would sample a full draft-logits cache with plain Gumbel noise.
+        # decode_backend=latency_specialized: a decode executor over self.model, built
+        # by the target model's state on the target's executor.
+        specialized_decode_requested = (
+            decode_backend(vllm_config) == "latency_specialized"
+        )
+        self.specialized_decode: DraftDecode | None = None
+        if specialized_decode_requested:
+            register_draft(self)
+        # additional_config={"dspark_fused_markov": true}, implied by the
+        # specialized decode, replaces the speculator's loop when it would
+        # sample a full draft-logits cache with plain Gumbel noise.
         spec_config = vllm_config.speculative_config
         extra = vllm_config.additional_config
         if (
-            isinstance(extra, dict)
-            and extra.get("dspark_fused_markov", False)
+            (
+                specialized_decode_requested
+                or (isinstance(extra, dict) and extra.get("dspark_fused_markov", False))
+            )
             and spec_config.draft_sample_method == "probabilistic"
             and not spec_config.enable_adaptive_verification
             and not vllm_config.model_config.use_fp64_gumbel
             and getattr(vllm_config, "watermark_config", None) is None
             and not vllm_config.parallel_config.enable_batch_sharded_sampling
         ):
+            self.sample_sequential: FusedMarkovSampler | ShardedMarkovSampling
             self.sample_sequential = FusedMarkovSampler(
                 vllm_config.scheduler_config.max_num_seqs,
                 self.config.vocab_size,
                 self.config.dspark_markov_rank,
                 self.draft_model_config.dtype,
             )
+            # The sharded chain's settings, for build_specialized_decode.
+            self.markov_cache_dtype = vllm_config.model_config.head_dtype
+            self.max_num_reqs = vllm_config.scheduler_config.max_num_seqs
+            self.num_speculative_steps = spec_config.num_speculative_tokens
+
+    def build_specialized_decode(self, target: "SpecializedDecode") -> "DraftDecode":
+        """Build this model's decode executor on `target`, the target
+        model's, compute logits with the low-batch LM head and, at small
+        batches, sample on the vocabulary-sharded Markov chain. Every TP rank
+        calls it, in the same order: the chain's set-up is collective."""
+        from .specialized_decode.logits.logits import SpecializedDecodeLogitsProcessor
+
+        self.specialized_decode = target.for_draft(self.model)
+        self.logits_processor = SpecializedDecodeLogitsProcessor(self.config.vocab_size)
+        fused = getattr(self, "sample_sequential", None)
+        if isinstance(fused, FusedMarkovSampler):
+            from .specialized_decode.sampling.sharded_markov import (
+                build_sharded_markov_sampling,
+            )
+
+            self.sample_sequential = build_sharded_markov_sampling(self, fused)
+        return self.specialized_decode
 
     # --- Hooks used by the speculator -------------------------------------
 
@@ -368,7 +415,9 @@ class DSparkDeepseekV4ForCausalLM(nn.Module):
         inputs_embeds: torch.Tensor | None = None,
     ) -> torch.Tensor:
         # Returns the pre-norm collapsed head hidden ([T, hidden_size]).
-        return self.model(input_ids, positions, inputs_embeds)
+        decode = self.specialized_decode
+        step = None if decode is None else decode.plan(positions)
+        return self.model(input_ids, positions, inputs_embeds, decode_step=step)
 
     def compute_logits(self, hidden_states: torch.Tensor) -> torch.Tensor:
         """Base logits U_k = lm_head(norm(head_hidden))."""
@@ -384,6 +433,23 @@ class DSparkDeepseekV4ForCausalLM(nn.Module):
             self.lm_head, self.model.norm(hidden_states), skip_gather=True
         )
 
+    def draft_logits_shard(self) -> tuple[int, int] | None:
+        """`(first column, width)` of `compute_draft_logits_local` within
+        the full draft logits, or None when it is not a plain slice of them
+        (vocabulary padding or added vocabulary in the shard)."""
+        head = self.lm_head
+        shard = head.shard_indices
+        width = shard.num_org_elements
+        if (
+            self.logits_processor.logits_as_input
+            or self.logits_processor.org_vocab_size != self.config.vocab_size
+            or shard.num_elements_padded != width
+            or head.num_embeddings_per_partition != width
+            or shard.org_vocab_start_index != head.tp_rank * width
+        ):
+            return None
+        return shard.org_vocab_start_index, width
+
     def map_draft_to_target(self, draft_ids: torch.Tensor) -> torch.Tensor:
         return draft_ids  # full-vocab: draft ids are target ids
 
@@ -392,6 +458,23 @@ class DSparkDeepseekV4ForCausalLM(nn.Module):
 
     def markov_bias(self, markov_embed: torch.Tensor) -> torch.Tensor:
         return self.model.markov_head.bias(markov_embed, self.logits_processor)
+
+    def markov_bias_weight(self) -> torch.Tensor | None:
+        """The `[vocab, rank]` matrix `markov_bias` multiplies by, for the
+        vocabulary-sharded Markov chain, when `markov_bias` is a plain BF16
+        product with it (else None)."""
+        head = self.model.markov_head.markov_w2
+        processor = self.logits_processor
+        if (
+            not isinstance(head.quant_method, UnquantizedEmbeddingMethod)
+            or head.weight.dtype != torch.bfloat16
+            or processor.scale != 1.0
+            or processor.soft_cap is not None
+            or processor.logits_as_input
+            or processor.head_dtype not in (None, torch.bfloat16)
+        ):
+            return None
+        return head.weight
 
     def compute_confidence(
         self, head_hidden: torch.Tensor, markov_embed: torch.Tensor
