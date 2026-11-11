@@ -32,6 +32,7 @@ from torch import nn
 from transformers import AutoModel, PreTrainedConfig
 from transformers.conversion_mapping import (
     WeightRenaming,
+    WeightTransform,
     get_checkpoint_conversion_mapping,
     get_model_conversion_mapping,
 )
@@ -50,6 +51,7 @@ from vllm.model_executor.layers.attention.mla_attention import get_mla_dims
 from vllm.model_executor.layers.attention_layer_base import AttentionLayerBase
 from vllm.model_executor.layers.fused_moe import MoERunner
 from vllm.model_executor.models.interfaces import (
+    EagleModelMixin,
     SupportsEagle,
     SupportsEagle3,
     SupportsLoRA,
@@ -66,10 +68,10 @@ from vllm.model_executor.models.transformers.fusers.attention import (
 from vllm.model_executor.models.transformers.utils import (
     attrsetter,
     can_enable_torch_compile,
-    disable_noop_dynamic_rope,
     get_feature_request_tip,
     init_on_device_without_buffers,
     log_replacement,
+    maybe_disable_dynamic_rope_update,
     named_state,
     replace_conv_class,
     replace_embedding_class,
@@ -83,6 +85,7 @@ from vllm.model_executor.models.utils import (
     WeightsMapper,
     make_empty_intermediate_tensors_factory,
     maybe_prefix,
+    spec_decode_needs_target_embed,
 )
 from vllm.sequence import IntermediateTensors
 
@@ -113,11 +116,10 @@ class Base(
     SupportsPP,
     SupportsEagle,
     SupportsEagle3,
+    EagleModelMixin,
 ):
     hf_to_vllm_mapper: WeightsMapper
-
-    # TODO transformers will have a util to get these
-    embedding_modules = {"embed_tokens": "input_embeddings"}
+    supports_aux_hidden_states_over_pp = True
 
     def __init__(self, *, vllm_config: "VllmConfig", prefix: str = ""):
         nn.Module.__init__(self)
@@ -169,6 +171,12 @@ class Base(
                     "not support MXFP4 quantization yet."
                 )
 
+        if self.model_config.uses_mrope:
+            # CUDA graphs replay their capture-time input addresses, see `forward`
+            max_tokens = vllm_config.scheduler_config.max_num_batched_tokens
+            mrope_positions = torch.zeros(3 * max_tokens, dtype=torch.long)
+            self.register_buffer("mrope_positions", mrope_positions, persistent=False)
+
         self._patch_config()
         self._decorate_for_torch_compile()
         # Init on "meta" to delay allocating GPU tensors
@@ -176,15 +184,24 @@ class Base(
             self._mark_model_components(vllm_config),
             init_on_device_without_buffers("meta"),
         ):
-            from_config_kwargs = self._from_config_kwargs
-            self.model: PreTrainedModel = AutoModel.from_config(**from_config_kwargs)
+            self.model: PreTrainedModel = self._create_model()
+
+        # LoRA matches embeddings by the last part of their name, which varies by model
+        input_embeddings = set(self.model.get_input_embeddings().modules())
+        embedding_modules = {
+            name.rpartition(".")[2]: "input_embeddings"
+            for name, module in self.model.named_modules()
+            if module in input_embeddings and isinstance(module, nn.Embedding)
+        }
+        self.embedding_modules = self.embedding_modules | embedding_modules
 
         # Create weight name to module qualname mapper
         self._create_hf_to_vllm_mapper()
         # Remove layers not on this pipeline parallel rank
+        self.start_layer, self.end_layer = self._pp_indices()
         self.pipeline_parallel()
-        # Skip the device sync of dynamic rope where it can never rescale
-        disable_noop_dynamic_rope(self.model.get_decoder(), vllm_config)
+        # Skip the device sync of rope updates where `inv_freq` can be fixed
+        maybe_disable_dynamic_rope_update(self.model.get_decoder(), vllm_config)
         # Substitute remaining layers with vLLM's layers as needed
         self.recursive_replace()
         # Create attention instances for KV cache allocation
@@ -227,6 +244,10 @@ class Base(
             dtype=self.model_config.dtype,
             trust_remote_code=self.model_config.trust_remote_code,
         )
+
+    def _create_model(self) -> "PreTrainedModel":
+        """Create the Transformers model that `self.model` wraps."""
+        return AutoModel.from_config(**self._from_config_kwargs)
 
     def _find_encoder_classes(
         self, model: "PreTrainedModel"
@@ -316,14 +337,7 @@ class Base(
         orig_to_new_renaming: list[WeightRenaming] = []
         orig_to_new_regex: dict[re.Pattern, str | None] = {}
 
-        mappings = get_model_conversion_mapping(self.model)
-        # Ensure layers that are part of the model, but not AutoModel, get their mapping
-        instantiated = {type(m).__name__ for m in self.model.modules()}
-        for arch in self.config.architectures or []:
-            if arch not in instantiated:
-                mappings.extend(get_checkpoint_conversion_mapping(arch) or [])
-
-        for mapping in mappings:
+        for mapping in self._weight_conversions():
             # Handle weights which have been renamed in Transformers
             if isinstance(mapping, WeightRenaming):
                 orig_to_new_renaming.append(mapping)
@@ -364,6 +378,20 @@ class Base(
 
         # Apply mapping to quantization config if needed
         self._maybe_apply_model_mapping()
+
+    def _weight_conversions(self) -> list[WeightTransform]:
+        """The Transformers weight conversions that apply to `self.model`."""
+        mappings = get_model_conversion_mapping(self.model)
+        # Ensure layers that are part of the model, but not AutoModel, get their mapping
+        instantiated = {type(m).__name__ for m in self.model.modules()}
+        for arch in self.config.architectures or []:
+            if arch not in instantiated:
+                mappings.extend(get_checkpoint_conversion_mapping(arch) or [])
+        return mappings
+
+    def _tp_plan(self) -> dict:
+        """The tensor parallel plan of `self.model`, relative to `self.model`."""
+        return self.model.tp_plan or {}
 
     def _get_tie_word_embeddings(self):
         """Check if the model has tied word embeddings."""
@@ -415,19 +443,17 @@ class Base(
 
         # Layers before module list
         for name in names[:module_list_idx]:
-            if self.pp_group.is_first_rank or (
-                self._get_tie_word_embeddings() and self.pp_group.is_last_rank
+            if (
+                self.pp_group.is_first_rank
+                or (self._get_tie_word_embeddings() and self.pp_group.is_last_rank)
+                or spec_decode_needs_target_embed(self.vllm_config)
             ):
                 continue
             # attrsetter in case the module is nested (e.g. "text_model.embed_tokens")
             attrsetter(name)(module, PPMissingLayer())
 
         # Module list
-        start_layer, end_layer = get_pp_indices(
-            self.text_config.num_hidden_layers,
-            self.pp_group.rank_in_group,
-            self.pp_group.world_size,
-        )
+        start_layer, end_layer = self._pp_indices()
         layers_name = names[module_list_idx]
         # attrgetter in case the module is nested (e.g. "text_model.layers")
         layers = attrgetter(layers_name)(module)
@@ -481,7 +507,7 @@ class Base(
         - RMSNorm (detected from their dataflow) with vLLM's `RMSNorm`or `GemmaRMSNorm`
         - `nn.LayerNorm` with vLLM's `LayerNorm`
         """
-        tp_plan = self.model.tp_plan or {}
+        tp_plan = self._tp_plan()
 
         if not tp_plan and self.tp_group.world_size > 1:
             tip = get_feature_request_tip(
@@ -538,7 +564,8 @@ class Base(
                     and len(module) == self.text_config.num_hidden_layers
                 ):
                     # Populate Eagle3 attrs
-                    self._target_class = type(child_module)
+                    if not isinstance(child_module, PPMissingLayer):
+                        self._target_class = type(child_module)
                     layer_name = qual_name.removeprefix("model.")
                     self._layer_names[int(child_name)] = layer_name
                     # MTP weights should not be loaded into the base model
@@ -591,6 +618,14 @@ class Base(
 
         self.hf_to_vllm_mapper |= WeightsMapper(orig_to_new_stacked=orig_to_new_stacked)
 
+    def _pp_indices(self) -> tuple[int, int]:
+        """The range of decoder layers on this pipeline parallel rank."""
+        return get_pp_indices(
+            self.text_config.num_hidden_layers,
+            self.pp_group.rank_in_group,
+            self.pp_group.world_size,
+        )
+
     def _create_attention_instances(self, prefix: str = ""):
         """Create `Attention` instances to inform KV cache allocation."""
         text_config = self.text_config
@@ -610,9 +645,7 @@ class Base(
         logits_soft_cap = getattr(text_config, "attn_logit_softcapping", None)
         layer_types = getattr(text_config, "layer_types", None)
 
-        pp_rank = self.pp_group.rank_in_group
-        pp_size = self.pp_group.world_size
-        start, end = get_pp_indices(text_config.num_hidden_layers, pp_rank, pp_size)
+        start, end = self._pp_indices()
 
         for i in range(start, end):
             if i not in self.attention_fusers:
@@ -699,10 +732,8 @@ class Base(
         # In encoder models, the attention layers will have `is_causal=False`
         is_encoder = lambda module: not getattr(module, "is_causal", True)
         has_encoder = lambda model: any(is_encoder(m) for m in model.modules())
-        is_multimodal = lambda config: config != config.get_text_config()
-        # vLLM does not support encoder-decoder models, so if any encoder layer is
-        # found in a text only model, we assume the whole model is an encoder model
-        if has_encoder(self.model) and not is_multimodal(self.config):
+        # A VLM's text model may be bidirectional over the multimodal prefix
+        if has_encoder(self.model) and not self.model_config.is_multimodal_model:
             return EncoderOnlyAttention
         if self.model_config.use_mla:
             if any(
@@ -773,6 +804,7 @@ class Base(
             assert intermediate_tensors is not None
             input_ids = None
             inputs_embeds = intermediate_tensors["hidden_states"]
+        remote_aux = self.collect_remote_aux_hidden_states(intermediate_tensors)
 
         # Add batch dimension before entering Transformers model
         if input_ids is not None and input_ids.ndim == 1:
@@ -784,6 +816,10 @@ class Base(
         if positions.ndim == 1:
             # [seq_len] -> [1, seq_len]
             positions = positions[None, ...]
+        elif self.model_config.uses_mrope:
+            # [3, seq_len] -> [3, 1, seq_len], contiguous and at a fixed address
+            mrope_positions = self.mrope_positions[: positions.numel()].view(3, 1, -1)
+            positions = mrope_positions.copy_(positions[:, None])
 
         # Transformers models expect either input_ids or inputs_embeds, but not both
         if input_ids is not None and inputs_embeds is not None:
@@ -801,13 +837,24 @@ class Base(
 
         # Remove batch dimension after exiting Transformers model
         hidden_states = outputs[0][0, ...]
+        aux_hidden_states = []
         if self._output_aux_hidden_states_kwargs:
-            aux_hidden_states = [x[0][0, ...] for x in outputs[1:]]
+            # Layers on other PP ranks capture nothing
+            aux_hidden_states = [x[0][0, ...] for x in outputs[1:] if x]
+        # The input embedding isn't called when the caller passes `inputs_embeds`
+        caller_embeds = inputs_embeds if self.pp_group.is_first_rank else None
+        if 0 in self.aux_hidden_state_layers and caller_embeds is not None:
+            aux_hidden_states.insert(0, caller_embeds[0, ...])
 
         if not self.pp_group.is_last_rank:
-            return IntermediateTensors({"hidden_states": hidden_states})
+            return IntermediateTensors(
+                {
+                    "hidden_states": hidden_states,
+                    **self.pack_local_aux_hidden_states(aux_hidden_states),
+                }
+            )
 
-        if self._output_aux_hidden_states_kwargs and len(aux_hidden_states) > 0:
+        if aux_hidden_states := remote_aux + aux_hidden_states:
             return hidden_states, aux_hidden_states
         return hidden_states
 
@@ -839,10 +886,17 @@ class Base(
         if self.model._can_record_outputs is None:
             self.model._can_record_outputs = {}
 
-        target_class = self._target_class
-        for layer in layers:
-            # layer - 1 because we want the input to the layer
-            layer_name = self._layer_names[layer - 1]
+        self._set_aux_hidden_state_layers(layers)
+        for layer in self.aux_hidden_state_layers:
+            # The input to a layer is the output of the module before it
+            if layer == 0:
+                embeddings = self.model.get_input_embeddings()
+                target_class = type(embeddings)
+                modules = self.model.named_modules()
+                layer_name = next(n for n, m in modules if m is embeddings)
+            else:
+                target_class = self._target_class
+                layer_name = self._layer_names[layer - 1]
             layer_key = f"aux_hidden_state_{layer}"
             aux_hidden_state_i = OutputRecorder(target_class, layer_name=layer_name)
             self.model._can_record_outputs[layer_key] = aux_hidden_state_i
