@@ -1132,8 +1132,16 @@ class MoriEPv2All2AllManager(All2AllManagerBase):
             device_comm.close()
             if lsa_size != self.world_size:
                 # EP spans hosts: MORI's internode path reaches ranks in the
-                # same LSA team over LSA and the others over GDA RDMA. It needs
-                # equal LSA teams that tile the EP group.
+                # same LSA team over LSA and the others over GDA RDMA. It is
+                # opt-in in every launch mode, whatever the guess before
+                # startup said, and needs equal LSA teams that tile the EP group.
+                if not envs.VLLM_MORI_EP_V2:
+                    raise ValueError(
+                        f"MORI EPv2 got LSA size {lsa_size} for {self.world_size} "
+                        "expert-parallel ranks, so EP spans hosts; its internode "
+                        "path is opt-in: set VLLM_MORI_EP_V2=1 to run it, or "
+                        "VLLM_MORI_EP_V2=0 for MORI EPv1"
+                    )
                 if lsa_size <= 0 or self.world_size % lsa_size:
                     raise ValueError(
                         "MORI EPv2 needs the expert-parallel ranks in one LSA "

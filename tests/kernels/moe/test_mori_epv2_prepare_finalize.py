@@ -145,15 +145,17 @@ def test_padding_tokens_are_routed_to_local_experts(monkeypatch):
 
 
 @pytest.mark.parametrize(
-    "world_size,lsa_size,gpu_per_node",
+    "world_size,lsa_size,opt_in,gpu_per_node",
     [
-        (8, 8, None),
-        # EP over two hosts: internode, with equal LSA teams.
-        (16, 8, 8),
-        (8, 3, "error"),
+        (8, 8, False, None),
+        # EP over two hosts: internode, with equal LSA teams, when opted in.
+        (16, 8, True, 8),
+        # Not opted in: fails as on main, whatever the guess before startup.
+        (16, 8, False, "opt-in"),
+        (8, 3, True, "error"),
     ],
 )
-def test_manager_lsa_teams(monkeypatch, world_size, lsa_size, gpu_per_node):
+def test_manager_lsa_teams(monkeypatch, world_size, lsa_size, opt_in, gpu_per_node):
     from vllm.distributed.device_communicators import all2all
     from vllm.distributed.device_communicators.base_device_communicator import (
         All2AllManagerBase,
@@ -186,7 +188,13 @@ def test_manager_lsa_teams(monkeypatch, world_size, lsa_size, gpu_per_node):
             GDA_CONNECTION_NONE=0,
         ),
     )
-    if gpu_per_node == "error":
+    monkeypatch.delenv("VLLM_MORI_EP_V2", raising=False)
+    if opt_in:
+        monkeypatch.setenv("VLLM_MORI_EP_V2", "1")
+    if gpu_per_node == "opt-in":
+        with pytest.raises(ValueError, match="opt-in: set VLLM_MORI_EP_V2=1"):
+            all2all.MoriEPv2All2AllManager(object())
+    elif gpu_per_node == "error":
         with pytest.raises(ValueError, match="equal LSA teams"):
             all2all.MoriEPv2All2AllManager(object())
     else:
@@ -240,7 +248,8 @@ def test_manager_lsa_teams(monkeypatch, world_size, lsa_size, gpu_per_node):
 
 
 def _internode_manager(monkeypatch, order, regions):
-    """A 16-rank MoriEPv2All2AllManager over two LSA teams of 8, MORI faked."""
+    """A 16-rank MoriEPv2All2AllManager over two LSA teams of 8, MORI faked,
+    with the internode path opted in."""
     from vllm.distributed.device_communicators import all2all
     from vllm.distributed.device_communicators.base_device_communicator import (
         All2AllManagerBase,
@@ -303,6 +312,7 @@ def _internode_manager(monkeypatch, order, regions):
     monkeypatch.setitem(
         sys.modules, "mori.ops.dispatch_combine_v2.internode_regions", regions
     )
+    monkeypatch.setenv("VLLM_MORI_EP_V2", "1")
     return all2all.MoriEPv2All2AllManager(object()), configs
 
 
@@ -480,13 +490,6 @@ def _quark(qscheme):
         # internode path is opt-in.
         ({"data_parallel_size": 16}, {}, "aiter", {}, False),
         ({"data_parallel_size": 16}, {}, "aiter", {"VLLM_MORI_EP_V2": "1"}, True),
-        (
-            {"data_parallel_size": 16, "internode_reason": "no internode path"},
-            {},
-            "aiter",
-            {},
-            False,
-        ),
         ({"data_parallel_size_local": 4}, {}, "aiter", {}, False),
         # A DP replica (TP/PP) spanning nodes.
         ({"nnodes_within_dp": 2}, {}, "aiter", {}, False),
@@ -532,14 +535,8 @@ def test_mori_picks_epv2_where_supported(
     sdma_picks_epv1 = parallel.pop("sdma_picks_epv1", True)
     validated_arch = parallel.pop("validated_arch", True)
     mori_reason = parallel.pop("mori_reason", None)
-    internode_reason = parallel.pop("internode_reason", None)
     monkeypatch.setattr(
         import_utils, "mori_epv2_unavailable_reason", lambda: mori_reason
-    )
-    monkeypatch.setattr(
-        import_utils,
-        "mori_epv2_internode_unavailable_reason",
-        lambda: internode_reason,
     )
     parallel_config = _parallel_config(**parallel)
     model_config = _model_config(**model)
