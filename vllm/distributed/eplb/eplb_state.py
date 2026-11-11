@@ -57,6 +57,7 @@ from .eplb_utils import CpuGpuEvent
 from .policy import EPLB_POLICIES, AbstractEplbPolicy, DefaultEplbPolicy
 from .rebalance_execute import (
     AsyncEplbLayerResult,
+    copy_rows,
     move_from_buffer,
     rearrange_expert_weights_inplace,
 )
@@ -527,6 +528,8 @@ class EplbState:
         )
         expert_buffer = communicator.owned_expert_buffer or expert_buffer
         assert expert_buffer is not None
+        # Compile the copy-back kernels now rather than mid-serving (no-op copy).
+        copy_rows(model.expert_weights[0], [0], model.expert_weights[0], [0])
 
         model_state = EplbModelState(
             physical_to_logical_map=physical_to_logical_map,
@@ -917,23 +920,27 @@ class EplbState:
                 # Get new expert mappings for the model. The policy runs on the
                 # host, so the load window and current map have to come back.
                 with gpu_sync_allowed():
-                    new_physical_to_logical_map = self.policy.rebalance_experts(
-                        global_expert_load_window.cpu(),
-                        num_replicas,
-                        num_groups,
-                        num_nodes,
-                        num_gpus,
-                        eplb_model_state.physical_to_logical_map.cpu(),
+                    load_window_cpu = global_expert_load_window.cpu()
+                    old_physical_to_logical_map = (
+                        eplb_model_state.physical_to_logical_map.cpu()
                     )
+                new_physical_to_logical_map = self.policy.rebalance_experts(
+                    load_window_cpu,
+                    num_replicas,
+                    num_groups,
+                    num_nodes,
+                    num_gpus,
+                    old_physical_to_logical_map,
+                )
 
                 skip_rearrange = False
                 if (
                     current_platform.is_rocm()
                     and not is_profile
                     and rank_mapping is None
-                    and bool((eplb_model_state.physical_to_logical_map >= 0).all())
+                    and bool((old_physical_to_logical_map >= 0).all())
                 ):
-                    logical_loads = global_expert_load_window.float()
+                    logical_loads = load_window_cpu.float()
                     ep_size = ep_group.size()
 
                     def rank_load_imbalance(
@@ -964,9 +971,7 @@ class EplbState:
                             return 1.0
                         return (loads_per_rank.max() / mean_load).item()
 
-                    current_imbalance = rank_load_imbalance(
-                        eplb_model_state.physical_to_logical_map
-                    )
+                    current_imbalance = rank_load_imbalance(old_physical_to_logical_map)
                     proposed_imbalance = rank_load_imbalance(
                         new_physical_to_logical_map
                     )
