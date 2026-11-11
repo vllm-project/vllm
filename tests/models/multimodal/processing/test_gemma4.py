@@ -550,18 +550,26 @@ def test_encoder_cudagraph_config_respects_max_soft_tokens(mm_processor_kwargs):
     "model_cls", [Gemma4ForConditionalGeneration, Gemma3nForConditionalGeneration]
 )
 def test_ple_cache_follows_inputs_device(model_cls):
-    """A model built on meta (or moved after init) must not read a stale cache."""
+    """A model built on meta (or moved after init) gets one zeroed cache on the
+    inputs' device, which later steps reuse."""
     model = object.__new__(model_cls)  # type: ignore[type-abstract]
     torch.nn.Module.__init__(model)
     model.per_layer_embeddings = torch.zeros(8, 2, 4, device="meta")
     model._full_attn_layer_idxs = ()
-    seen = {}
+    seen = []
 
     def backbone(*args, per_layer_inputs, **kwargs):
-        seen["ple"] = per_layer_inputs
+        seen.append(per_layer_inputs)
 
     model.language_model = SimpleNamespace(model=backbone)
-    model(None, None, inputs_embeds=torch.zeros(3, 1))
+    inputs_embeds = torch.zeros(3, 1)
+    model(None, None, inputs_embeds=inputs_embeds)
+    first = seen[0]
+    assert first.device.type == "cpu"
+    assert first.shape == (3, 2, 4)
+    assert not first.any()
 
-    assert seen["ple"].device.type == "cpu"
-    assert seen["ple"].shape == (3, 2, 4)
+    model.per_layer_embeddings[:3] = 1.0
+    model(None, None, inputs_embeds=inputs_embeds)
+    assert seen[1].data_ptr() == first.data_ptr()
+    assert bool((seen[1] == 1).all())
