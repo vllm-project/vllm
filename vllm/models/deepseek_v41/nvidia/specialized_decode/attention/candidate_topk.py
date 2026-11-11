@@ -1,18 +1,18 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
-"""Candidate-block selection with ``cooperative_topk`` for decode rows.
+"""Candidate-block selection with `cooperative_topk` for decode rows.
 
 `select_candidate_blocks` scores every block of the padded logits row and
-runs ``torch.topk`` over all of them. At long context most of a decode row is
+runs `torch.topk` over all of them. At long context most of a decode row is
 padding, so here the score kernel also writes each row's valid block count and
-``cooperative_topk`` scans only that prefix.
+`cooperative_topk` scans only that prefix.
 
 The selected set of non-negative ids matches `select_candidate_blocks` except
 for which blocks whose fp32 scores tie exactly at the selection boundary are
-kept. ``cooperative_topk`` keeps at most ``k`` (rows of up to 16384 blocks) or
+kept. `cooperative_topk` keeps at most `k` (rows of up to 16384 blocks) or
 1024 per cluster CTA (longer rows) candidates of its fp16 boundary bin, so a
 more crowded boundary bin is selected approximately. The pinned newest block is
-kept unless at least ``k`` blocks of the row score NaN or overflow fp16. Rows
+kept unless at least `k` blocks of the row score NaN or overflow fp16. Rows
 are not sorted and -1 padding may sit anywhere; every consumer of the candidate
 buffer treats a row as a set.
 """
@@ -98,8 +98,8 @@ def _finalize_candidates_kernel(
 
 
 def supports_cooperative_candidates(num_rows: int, num_blocks: int, k: int) -> bool:
-    """Whether `select_candidate_blocks_cooperative` takes ``num_rows`` rows of
-    ``num_blocks`` blocks and ``k`` candidates."""
+    """Whether `select_candidate_blocks_cooperative` takes `num_rows` rows of
+    `num_blocks` blocks and `k` candidates."""
     return (
         0 < num_rows <= AUTO_COOPERATIVE_MAX_ROWS
         and k in (512, 1024, 2048)
@@ -114,11 +114,11 @@ def select_candidate_blocks_cooperative(
     block_size: int,
     out: torch.Tensor,
 ) -> None:
-    """`select_candidate_blocks` for decode rows, on ``cooperative_topk``.
+    """`select_candidate_blocks` for decode rows, on `cooperative_topk`.
 
     Args:
-        logits: [rows, width] fp32 logits; row ``i`` is valid below
-            ``row_ends[i]``.
+        logits: [rows, width] fp32 logits; row `i` is valid below
+            `row_ends[i]`.
         row_ends: Contiguous [rows] int32 row lengths in logits columns.
         block_size: Columns per candidate block.
         out: Contiguous [rows, k] int32 candidate block ids, -1 padded; see

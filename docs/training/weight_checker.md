@@ -4,6 +4,9 @@ The Weight Checker verifies that an RL weight update landed on every rank. It
 hashes each model parameter with SHA-256, so a caller can save the original
 digests, reset the weights, transfer them back, and confirm they match.
 
+To also check generated outputs before and after an update, see
+[Verifying a New Model Without a Trainer](weight_transfer/README.md#verifying-a-new-model-without-a-trainer).
+
 Enable it with `VLLM_SERVER_DEV_MODE=1`. All operations use
 `POST /weight_checker`:
 

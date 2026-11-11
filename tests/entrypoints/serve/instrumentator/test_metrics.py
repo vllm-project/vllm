@@ -438,7 +438,7 @@ def _get_running_metrics_from_api(server: RemoteOpenAIServer):
 
 
 def test_metrics_exist_run_batch():
-    input_batch = """{"custom_id": "request-0", "method": "POST", "url": "/v1/embeddings", "body": {"model": "intfloat/multilingual-e5-small", "input": "You are a helpful assistant."}}"""  # noqa: E501
+    input_batch = """{"custom_id": "request-0", "method": "POST", "url": "/v1/embeddings", "body": {"model": "vllm-project/multilingual-e5-small", "input": "You are a helpful assistant."}}"""  # noqa: E501
 
     base_url = "0.0.0.0"
     port = str(get_open_port())
@@ -460,7 +460,7 @@ def test_metrics_exist_run_batch():
                 "-o",
                 output_file.name,
                 "--model",
-                "intfloat/multilingual-e5-small",
+                "vllm-project/multilingual-e5-small",
                 "--enable-metrics",
                 "--host",
                 base_url,

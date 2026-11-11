@@ -42,6 +42,11 @@ class TransferEngineBackend(TransferBackend):
     def rpc_port(self) -> int:
         return self._rpc_port
 
+    @property
+    def engine(self) -> Any:
+        """The `mooncake.engine.TransferEngine` this backend drives."""
+        return self._engine
+
     def register_regions(self, regions: Sequence[MemoryRegion]) -> None:
         if not regions:
             return

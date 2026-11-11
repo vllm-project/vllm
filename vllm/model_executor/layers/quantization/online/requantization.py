@@ -8,6 +8,7 @@ from contextvars import ContextVar
 import torch
 
 from vllm.model_executor.layers.quantization.base_config import QuantizeMethodBase
+from vllm.model_executor.layers.quantization.utils.quant_utils import QuantKey
 
 _requantization_source: ContextVar[bool] = ContextVar(
     "requantization_source", default=False
@@ -33,6 +34,30 @@ def is_requantization_source() -> bool:
 
 class OnlineRequantizationMixin:
     """Shared lifecycle for converting serialized weights before quantization."""
+
+    # Only the MXFP4 online methods honor an activation override for now.
+    accepts_activation_override: bool = False
+
+    @classmethod
+    def resolve_activation_quant_key(
+        cls, activation_quant_key: QuantKey | None, explicit: bool
+    ) -> QuantKey | None:
+        """Final activation key for a requested (or default) key."""
+        # TODO: this should be removed and handled by oracles once oracles are
+        # refactored.
+        if explicit and not cls.accepts_activation_override:
+            raise NotImplementedError(
+                f"activation override is not supported for online {cls.__name__}"
+            )
+        if activation_quant_key is not None and activation_quant_key.scale.static:
+            # Online quantization has no calibrated static activation scales.
+            raise NotImplementedError(
+                f"online {cls.__name__} cannot honour "
+                f"activation={activation_quant_key}: static activation scales are "
+                "not supported. Use a dynamic activation key, or 'activation: null'."
+            )
+
+        return activation_quant_key
 
     def __init__(self, *args, **kwargs) -> None:
         super().__init__(*args, **kwargs)
