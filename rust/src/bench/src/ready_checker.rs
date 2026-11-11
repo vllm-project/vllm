@@ -96,8 +96,8 @@ pub(crate) async fn get_first_model(
 /// Sends test requests with retry until success or timeout.
 /// Mirrors Python's `wait_for_endpoint` in ready_checker.py.
 ///
-/// If the server answers `test_input` with a failure, `fallback_input`, when
-/// given, is sent right after in the same attempt.
+/// If the server rejects `test_input` as invalid (HTTP 400 or 422),
+/// `fallback_input`, when given, is sent right after in the same attempt.
 pub async fn wait_for_endpoint(
     backend: BackendKind,
     client: &reqwest::Client,
@@ -137,7 +137,7 @@ pub async fn wait_for_endpoint(
         // Ping the endpoint
         let mut result = backend.send_request(test_input, client).await;
         if let (Ok(output), Some(fallback)) = (&result, fallback_input)
-            && !output.success
+            && output.is_rejected()
         {
             let fallback_result = backend.send_request(fallback, client).await;
             if matches!(&fallback_result, Ok(output) if output.success) {

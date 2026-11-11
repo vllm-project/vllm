@@ -153,6 +153,9 @@ pub struct RequestFuncOutput {
     pub tpot: f64,
     pub prompt_len: usize,
     pub error: String,
+    /// HTTP status of a non-success response; `None` for success or a transport error.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub status_code: Option<u16>,
     pub start_time: f64,
     pub server_queue_time: Option<f64>,
     pub server_ttft: Option<f64>,
@@ -171,11 +174,21 @@ impl Default for RequestFuncOutput {
             tpot: 0.0,
             prompt_len: 0,
             error: String::new(),
+            status_code: None,
             start_time: 0.0,
             server_queue_time: None,
             server_ttft: None,
             num_input_sequences: 1,
         }
+    }
+}
+
+impl RequestFuncOutput {
+    /// Whether the server refused the request as invalid (HTTP 400 or 422), as a
+    /// server that does not accept a parameter such as `cache_salt` does, rather
+    /// than failing in a way that can be transient.
+    pub fn is_rejected(&self) -> bool {
+        matches!(self.status_code, Some(400 | 422))
     }
 }
 
