@@ -41,7 +41,8 @@ class MambaConfig:
     """Mamba SSU backend to use."""
 
     enable_stochastic_rounding: bool = False
-    """Enable stochastic rounding when writing SSM state to fp16 cache.
+    """Enable stochastic rounding when writing SSM state to FP16 cache or
+    shared FP8/INT8 ReplaySSM checkpoints.
     Uses random bits to unbias the rounding error, which can improve
     numerical stability for long sequences. The Triton backend requires
     compute capability 10.0 on CUDA or gfx950 on ROCm."""

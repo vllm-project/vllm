@@ -699,6 +699,25 @@ def validate_mamba_state_copy_funcs(
         )
 
 
+def _validate_replayssm_read_state_spec(spec: MambaSpec) -> None:
+    """Require each shared quantized payload to have its FP32 scale page."""
+    if len(spec.shapes) not in (5, 6) or len(spec.dtypes) != len(spec.shapes):
+        raise ValueError("Invalid quantized ReplaySSM cache specification")
+    if len(spec.shapes) == 5:
+        if spec.dtypes[1] in (torch.float8_e4m3fn, torch.int8):
+            raise ValueError("Quantized ReplaySSM requires an FP32 scale page")
+        return
+    heads, dim, size = spec.shapes[1]
+    if (
+        (dim, size) != (64, 128)
+        or spec.dtypes[1] not in (torch.float8_e4m3fn, torch.int8)
+        or spec.dtypes[2:]
+        != (torch.bfloat16, torch.float32, torch.bfloat16, torch.float32)
+        or spec.shapes[5] != (heads, dim)
+    ):
+        raise ValueError("Invalid quantized ReplaySSM cache specification")
+
+
 def _get_mamba_gpu_state_copy_funcs(
     spec: MambaSpec,
     layer: Any,
@@ -708,15 +727,16 @@ def _get_mamba_gpu_state_copy_funcs(
     if isinstance(layer, MambaBase) and layer.use_flashinfer_replayssm:
         if (
             spec.mamba_type != MambaAttentionBackendEnum.MAMBA2
-            or len(spec.shapes) != 5
-            or len(spec.dtypes) != 5
+            or len(spec.shapes) not in (5, 6)
+            or len(spec.dtypes) != len(spec.shapes)
             or state_copy_funcs != (get_conv_copy_spec, get_temporal_copy_spec)
         ):
             raise ValueError(
                 "FlashInfer ReplaySSM requires two canonical Mamba2 "
-                "states and three ring states"
+                "states, three ring states, and an optional scale page"
             )
-        state_copy_funcs += (get_temporal_copy_spec,) * 3
+        _validate_replayssm_read_state_spec(spec)
+        state_copy_funcs += (get_temporal_copy_spec,) * (len(spec.shapes) - 2)
     return state_copy_funcs
 
 
@@ -953,7 +973,8 @@ class MambaSpecDecodeGPUContext:
                 if is_flashinfer_replayssm:
                     if len(kv_caches) != len(state_copy_funcs):
                         raise ValueError(
-                            "FlashInfer ReplaySSM requires five bound Mamba2 states"
+                            "FlashInfer ReplaySSM requires all bound "
+                            "Mamba2 cache states"
                         )
                     mixers.append(attention)
                 if len(kv_caches) < len(state_copy_funcs):
