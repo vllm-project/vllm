@@ -1292,6 +1292,22 @@ class SimpleStreamingEventProcessor:
         self.tool_call_name_map = build_responses_tool_call_name_map(tools)
         self.custom_tool_names = custom_tool_names(tools)
         self.output_items: list[ResponseOutputItem] = []
+        self.pending_logprobs: list[response_output_text.Logprob] = []
+
+    def defer_logprobs(
+        self,
+        output: CompletionOutput,
+        get_logprobs: Callable[[CompletionOutput], list[response_output_text.Logprob]],
+    ) -> None:
+        """Hold the logprobs of a step that produced no content text.
+
+        Tokens with empty text (e.g. a partial UTF-8 byte sequence) yield no
+        content delta, so their logprobs are attached to the next content
+        delta instead of being dropped.
+        """
+        if self.state.current_state not in (_StateType.NONE, _StateType.CONTENT):
+            return
+        self.pending_logprobs.extend(get_logprobs(output))
 
     def resolve_target_state(
         self, delta_message: DeltaMessage
@@ -1339,6 +1355,9 @@ class SimpleStreamingEventProcessor:
         handlers = self._STATE_HANDLERS.get(self.state.current_state)
         if handlers is None:
             return []
+        if self.state.current_state == _StateType.CONTENT and self.pending_logprobs:
+            self.state.accumulated_logprobs.extend(self.pending_logprobs)
+            self.pending_logprobs = []
         events = handlers.done_fn(self.state, status)
         self.output_items.extend(
             event.item
@@ -1393,5 +1412,7 @@ class SimpleStreamingEventProcessor:
         elif self.state.current_state == _StateType.CONTENT:
             assert delta_message.content is not None
             logprobs = get_logprobs(output) if get_logprobs else []
+            logprobs = [*self.pending_logprobs, *logprobs]
+            self.pending_logprobs = []
             return handlers.delta_fn(self.state, delta_message.content, logprobs)
         return []
