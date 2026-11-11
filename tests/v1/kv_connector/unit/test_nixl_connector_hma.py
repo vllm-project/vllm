@@ -34,6 +34,7 @@ from vllm.v1.kv_cache_interface import (
     KVCacheGroupSpec,
     KVCacheTensor,
     MLAAttentionSpec,
+    SlidingWindowMLASpec,
 )
 
 from .utils import (
@@ -83,6 +84,7 @@ def region_pull_worker():
         ],
     )
     worker._group_spec_types = (MLAAttentionSpec, MLAAttentionSpec)
+    worker._dcp_replicated_groups = set()
     worker.region_group_ids = [0, 1]
     worker.dst_region_group_ids = {"P": [0, 0]}
     worker._dst_pairs = {
@@ -259,6 +261,89 @@ def test_dcp_region_pull(region_pull_worker, num_pages, region_groups):
         if num_pages
         else None
     )
+
+
+@pytest.mark.cpu_test
+def test_dcp_replicated_groups_follow_the_spec_not_its_type():
+    """Replicated MLA draft caches are found by `dcp_sharded`, whether or not
+    the draft layers are windowed."""
+    from vllm.distributed.kv_transfer.kv_connector.v1.nixl.utils import (
+        get_dcp_replicated_group_ids,
+    )
+    from vllm.v1.kv_cache_interface import CircularBufferSpec
+
+    common = dict(block_size=64, num_kv_heads=1, head_size=8, dtype=torch.bfloat16)
+    specs = [
+        MLAAttentionSpec(**common),
+        SlidingWindowMLASpec(**common, sliding_window=128),
+        MLAAttentionSpec(**common, dcp_sharded=False),
+        SlidingWindowMLASpec(**common, sliding_window=128, dcp_sharded=False),
+        # Non-MLA replicated caches keep their existing transfer path.
+        FullAttentionSpec(**common, dcp_sharded=False),
+        CircularBufferSpec(**common, dcp_sharded=False),
+    ]
+    groups = [KVCacheGroupSpec([f"layer.{i}"], spec) for i, spec in enumerate(specs)]
+    assert get_dcp_replicated_group_ids(groups) == {2, 3}
+
+
+@pytest.mark.cpu_test
+@pytest.mark.parametrize("tp_rank", [0, 3])
+@pytest.mark.parametrize("short_remote_draft", [False, True])
+def test_dcp_pull_reads_replicated_draft_group_from_one_rank(
+    region_pull_worker, tp_rank, short_remote_draft
+):
+    """A DCP prefill keeps its sliding-window MLA draft whole on every rank:
+    read each target page from its DCP rank and the draft group from one rank."""
+    from vllm.distributed.kv_transfer.kv_connector.v1.nixl.metadata import (
+        RemoteMeta,
+        ReqMeta,
+    )
+    from vllm.distributed.kv_transfer.kv_connector.v1.nixl.tp_mapping import TPMapping
+
+    worker = region_pull_worker
+    worker.tp_rank = tp_rank
+    worker._group_spec_types = (MLAAttentionSpec, SlidingWindowMLASpec)
+    worker._dcp_replicated_groups = {1}
+    worker.dst_region_group_ids = {"P": [0, 1]}
+    worker._dst_pairs = {"P": region_pairs_by_index(2, groups=[0, 1])}
+    remote = worker.transfer_topo.get_engine_info.return_value
+    remote.remote_tp_size = remote.remote_dcp_size = 4
+    remote.remote_physical_blocks_per_logical = 1
+    ranks = tuple(range(4))
+    worker.tp_mappings["P"] = TPMapping((ranks, ranks), ranks, {r: r for r in ranks}, 0)
+    worker.dst_xfer_side_handles = {"P": {r: 1000 + r for r in ranks}}
+    worker._remote_agents = {"P": {(0, r): f"P-rank{r}" for r in ranks}}
+    # 8 pages: target pages are interleaved over the 4 remote DCP ranks (2 remote
+    # blocks each), the draft window keeps the last 3 pages on every rank.
+    local = [list(range(30, 38)), [45, 46, 47]]
+    remote_draft = [22, 23] if short_remote_draft else [20, 21, 22, 23]
+    meta = ReqMeta(
+        local,
+        local,
+        tp_size=4,
+        local_num_computed_blocks=(0, 0),
+        remote=RemoteMeta([[10, 11], remote_draft], "localhost", 1, "P", "P-req"),
+    )
+    if short_remote_draft:
+        # D cannot be missing draft pages that P never sent.
+        with pytest.raises(AssertionError, match="decode needs 3 blocks"):
+            worker._read_blocks_for_req("request", meta)
+        return
+    worker._read_blocks_for_req("request", meta)
+    reads = {
+        call.kwargs["remote_xfer_side_handle"] - 1000: list(
+            zip(
+                call.kwargs["local_block_descs_ids"],
+                call.kwargs["remote_block_descs_ids"],
+            )
+        )
+        for call in worker._read_blocks_mixed.call_args_list
+    }
+    for rank in ranks:
+        expected = [(30 + rank + 4 * i, 10 + i) for i in range(2)]
+        if rank == tp_rank:
+            expected += [(100 + 45 + i, 100 + 21 + i) for i in range(3)]
+        assert reads[rank] == expected
 
 
 @pytest.mark.cpu_test

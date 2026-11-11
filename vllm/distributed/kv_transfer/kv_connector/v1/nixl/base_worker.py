@@ -60,6 +60,7 @@ from vllm.distributed.kv_transfer.kv_connector.v1.nixl.tp_mapping import (
 )
 from vllm.distributed.kv_transfer.kv_connector.v1.nixl.utils import (
     _NIXL_SUPPORTED_DEVICE,
+    get_dcp_replicated_group_ids,
     get_representative_spec_type,
     zmq_ctx,
 )
@@ -1065,6 +1066,11 @@ class NixlBaseConnectorWorker:
         self._group_spec_types = tuple(
             get_representative_spec_type(g.kv_cache_spec)
             for g in self.kv_cache_config.transfer_groups
+        )
+        # MLA drafts running at DCP=1 under a DCP target: a DCP peer holds
+        # them in full on every rank.
+        self._dcp_replicated_groups = get_dcp_replicated_group_ids(
+            self.kv_cache_config.transfer_groups
         )
         # Per-region MLA flag, 1:1 with block_len_per_layer. True -> REPLICATE
         # (MLA), False -> SPLIT (head-sharded full-attn). Mixed only for models
@@ -2758,6 +2764,15 @@ class NixlBaseConnectorWorker:
             raise RuntimeError(
                 "Hybrid MLA+Mamba NIXL transfers require matching DCP sizes, "
                 f"got local={self.dcp_size}, remote={remote_dcp_size}."
+            )
+        if self._dcp_replicated_groups and (
+            self.dcp_size > 1 or (remote_dcp_size > 1 and self._TRANSFER_MODE != "pull")
+        ):
+            raise NotImplementedError(
+                "NIXL with a DCP-replicated MLA draft cache only supports "
+                "pulling from a DCP prefill into a non-DCP decode: "
+                f"local DCP={self.dcp_size}, remote DCP={remote_dcp_size}, "
+                f"transfer_mode={self._TRANSFER_MODE}."
             )
 
         tp_ratio = self.transfer_topo.tp_ratio(remote_tp_size)

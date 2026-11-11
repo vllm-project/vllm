@@ -1509,6 +1509,36 @@ def test_mla_draft_prefers_standard_layout_when_pages_can_be_unified():
     )
 
 
+@pytest.mark.parametrize("draft_dcp_sharded", [True, False])
+def test_windowed_dspark_draft_keeps_its_dcp_layout(draft_dcp_sharded):
+    """A windowed DSpark draft next to a sparse MLA target gets its own group,
+    replicated when the draft runs at DCP=1."""
+    target = new_mla_spec(cache_dtype_str="fp8_ds_mla", block_size=64)
+    draft = replace(
+        new_swa_mla_spec(sliding_window=36),
+        block_size=64,
+        dtype=torch.bfloat16,
+        non_causal_multi_token_decode=True,
+        dcp_sharded=draft_dcp_sharded,
+    )
+    specs = {
+        "target.0.attn": target,
+        "target.0.indexer.k_cache": new_indexer_mla_spec(block_size=64),
+        "target.1.attn": target,
+        "draft.2.attn": draft,
+        "draft.3.attn": draft,
+    }
+    config = _grouping_config()
+    # The DSA indexer backend only supports BLHNC.
+    config.cache_config.kv_cache_layout = "BLHNC"
+    groups = get_kv_cache_groups(config, specs)
+    assert [g.layer_names for g in groups] == [
+        ["target.0.attn", "target.0.indexer.k_cache", "target.1.attn"],
+        ["draft.2.attn", "draft.3.attn"],
+    ]
+    assert [g.kv_cache_spec.dcp_sharded for g in groups] == [True, draft_dcp_sharded]
+
+
 @pytest.mark.parametrize(
     ("draft", "promoted_cls"),
     [

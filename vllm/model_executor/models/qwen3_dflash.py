@@ -105,6 +105,16 @@ def dflash_has_any_non_causal(config: Qwen3Config) -> bool:
     )
 
 
+def dflash_has_any_sliding(config: Qwen3Config) -> bool:
+    """Whether any draft layer uses sliding-window attention, resolved from config
+    (config mirror of `_resolve_layer_attention`, usable pre-build)."""
+    dflash_config = getattr(config, "dflash_config", None) or {}
+    layer_types = getattr(config, "layer_types", None) or ()
+    return bool(dflash_config.get("use_swa", False)) or (
+        _SLIDING_ATTENTION in layer_types
+    )
+
+
 def _reads_raw_weights(projs: list[nn.Module]) -> bool:
     """Whether post-load `.weight` is plain (not quantized, not CPU-repacked)."""
     return not current_platform.is_cpu() and all(

@@ -2441,6 +2441,7 @@ class MLACommonMetadataBuilder(AttentionMetadataBuilder[M]):
             speculative_config is None
             or getattr(speculative_config, "method", None) != "dspark"
             or parallel_config.decode_context_parallel_size <= 1
+            or not self.kv_cache_spec.dcp_sharded
         ):
             return
 
@@ -2579,7 +2580,10 @@ class MLACommonMetadataBuilder(AttentionMetadataBuilder[M]):
         attention_layer = self.compilation_config.static_forward_context[layer_names[0]]
 
         try:
-            self.dcp_world_size = get_dcp_group().world_size
+            # A replicated cache (e.g. a DCP=1 draft under a DCP target) sees no DCP.
+            self.dcp_world_size = (
+                get_dcp_group().world_size if kv_cache_spec.dcp_sharded else 1
+            )
         except AssertionError:
             # DCP might not be initialized in testing
             self.dcp_world_size = 1
