@@ -1478,14 +1478,19 @@ def _auto_fit_max_model_len(
             left,
         )
         return
+    hint = (
+        "Increase `gpu_memory_utilization` or set --max-model-len explicitly."
+        if vllm_config.cache_config.resolved_gpu_memory_utilization < 1.0
+        else "Use more GPUs or set --max-model-len explicitly."
+    )
     logger.warning(
         "--max-model-len auto reduced max_model_len from %d to %d (%s). "
-        "Requests longer than %d tokens will be rejected. Increase "
-        "`gpu_memory_utilization` or set --max-model-len explicitly.",
+        "Requests longer than %d tokens will be rejected. %s",
         original_max,
         auto_fit_max,
         left,
         auto_fit_max,
+        hint,
     )
 
 
