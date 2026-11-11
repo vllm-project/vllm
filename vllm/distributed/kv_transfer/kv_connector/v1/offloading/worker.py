@@ -65,10 +65,17 @@ class OffloadingConnectorWorker:
             tuple[int, GPULoadStoreSpec, LoadStoreSpec]
         ] = []
         self._connector_worker_meta = OffloadingWorkerMetadata()
+        # Compute-stream events around a flush, read once forward N is queued.
+        self._flush_events: tuple[torch.Event, torch.Event] | None = None
+        self._flush_pending = False
 
     def _init_worker(self, kv_caches: CanonicalKVCaches) -> None:
         self._kv_caches = kv_caches
         self.worker = self.spec.get_worker(kv_caches)
+        self._flush_events = (
+            torch.Event(enable_timing=True),
+            torch.Event(enable_timing=True),
+        )
 
     def register_kv_caches(self, kv_caches: dict[str, torch.Tensor]):
         kv_cache_config = self.kv_cache_config
@@ -212,6 +219,12 @@ class OffloadingConnectorWorker:
 
     def handle_preemptions(self, kv_connector_metadata: OffloadingConnectorMetadata):
         assert self.worker is not None
+        jobs_to_flush = kv_connector_metadata.jobs_to_flush
+        flush_events = self._flush_events if self._is_store_writer else None
+        if jobs_to_flush and flush_events is not None:
+            # The previous window must be read before its events are reused.
+            self._collect_flush_time(block=True)
+            flush_events[0].record()
 
         # Pop jobs_to_flush from store_jobs into _unsubmitted_store_jobs
         # so the existing submission loop below submits them before wait().
@@ -235,8 +248,11 @@ class OffloadingConnectorWorker:
             assert success
         self._unsubmitted_store_jobs.clear()
 
-        if kv_connector_metadata.jobs_to_flush:
-            self.worker.wait(kv_connector_metadata.jobs_to_flush)
+        if jobs_to_flush:
+            self.worker.wait(jobs_to_flush)
+            if flush_events is not None:
+                flush_events[1].record()
+                self._flush_pending = True
 
     def start_kv_transfers(self, metadata: OffloadingConnectorMetadata):
         assert self.worker is not None
@@ -290,6 +306,7 @@ class OffloadingConnectorWorker:
 
         """
         assert self.worker is not None
+        self._collect_flush_time(block=False)
         finished_recving: set[str] = set()
         for transfer_result in self.worker.get_finished():
             job_id = transfer_result.job_id
@@ -324,6 +341,22 @@ class OffloadingConnectorWorker:
                 finished_recving.add(req_id)
 
         return set(), finished_recving
+
+    def _collect_flush_time(self, block: bool) -> None:
+        """Record the last flush window once the GPU has passed its end."""
+        if not self._flush_pending:
+            return
+        assert self._flush_events is not None
+        start, end = self._flush_events
+        if block:
+            end.synchronize()
+        elif not end.query():
+            return
+        self._flush_pending = False
+        # elapsed_time is in milliseconds
+        self._connector_worker_meta.transfer_stats.flush_times.append(
+            start.elapsed_time(end) * 1e-3
+        )
 
     def take_failed_recving(self) -> set[ReqId]:
         """Drain the requests whose load failed since the last call."""

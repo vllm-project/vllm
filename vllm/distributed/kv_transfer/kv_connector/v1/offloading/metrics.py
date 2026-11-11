@@ -45,6 +45,7 @@ class _TransferMetricName:
     STORE_BYTES = "vllm:kv_offload_store_bytes"
     STORE_TIME = "vllm:kv_offload_store_time"
     STORE_SIZE = "vllm:kv_offload_store_size"
+    FLUSH_TIME = "vllm:kv_offload_flush_time_seconds"
 
 
 class _ConnectorMetricName:
@@ -98,6 +99,13 @@ def get_connector_metric_definitions() -> dict[str, OffloadingMetricMetadata]:
         _TransferMetricName.STORE_SIZE: OffloadingHistogramMetadata(
             documentation="Histogram of KV offload store operation size, in bytes.",
             buckets=TRANSFER_SIZE_BUCKETS,
+        ),
+        _TransferMetricName.FLUSH_TIME: OffloadingHistogramMetadata(
+            documentation=(
+                "Histogram of the compute-stream time of each store flush before "
+                "a block reuse, per worker, in seconds."
+            ),
+            buckets=(0.0001, 0.00025, 0.0005, 0.001, 0.002, 0.004, 0.008, 0.016),
         ),
         _ConnectorMetricName.LOOKUP_SYNC_DELAY: OffloadingHistogramMetadata(
             documentation=(

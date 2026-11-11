@@ -189,6 +189,16 @@ The spec declares the label names in the API server process, and the manager fil
 
 A manager adds a label with `config_info_keys()` of its spec and `config_info()` of its own class. A name that a manager fills and the spec does not declare is dropped, and the engine log then holds one warning line.
 
+## Flush Time Metric
+
+A flush is a store that must finish before the GPU writes its source blocks again. The next forward waits for the flush. With `store_mode: lazy`, every store is a flush.
+
+The histogram `vllm:kv_offload_flush_time_seconds` records the time of each flush. CUDA events on the compute stream measure it, from before the copy launch to after the wait. The value includes the host launch and the wake-up after the wait, which `vllm:kv_offload_store_time` does not include.
+
+Each worker that writes stores records its own window. One flush therefore gives one sample for each writing worker. With tensor parallelism and KV heads split across ranks, every rank writes. When the KV cache is replicated across ranks and `canonical_layout` is off, only rank 0 writes.
+
+The rate of `vllm:kv_offload_flush_time_seconds_sum` gives seconds of flush per second, summed over the writing workers. The workers wait at the same time, so divide the rate by the number of writing workers to get the share of wall time. When the GPU is still busy with the previous forward, the window starts only after that forward ends. To confirm the cost, compare the time per output token with an `eager` run at the same load.
+
 ## Custom Eviction Policies
 
 `eviction_policy` resolves through `CachePolicyFactory` (`vllm/v1/kv_offload/cpu/policies/factory.py`), which pre-registers the built-in `lru` and `arc` policies.

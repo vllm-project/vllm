@@ -1527,6 +1527,10 @@ class OffloadingConnectorScheduler:
                     transfer_stats.observe_histogram(
                         _TransferMetricName.STORE_SIZE, size
                     )
+            for flush_time in meta.transfer_stats.flush_times:
+                transfer_stats.observe_histogram(
+                    _TransferMetricName.FLUSH_TIME, flush_time
+                )
             self._connector_stats.aggregate(transfer_stats)
 
         for job_id, count in meta.completed_jobs.items():

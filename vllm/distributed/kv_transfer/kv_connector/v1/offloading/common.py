@@ -39,15 +39,18 @@ class DirectionalTransferStats:
 class TransferStats:
     load: DirectionalTransferStats = field(default_factory=DirectionalTransferStats)
     store: DirectionalTransferStats = field(default_factory=DirectionalTransferStats)
+    # Compute-stream time of each flush, from before its submit to after wait().
+    flush_times: list[float] = field(default_factory=list)
 
     def aggregate(self, other: "TransferStats") -> "TransferStats":
         return TransferStats(
             load=self.load.aggregate(other.load),
             store=self.store.aggregate(other.store),
+            flush_times=[*self.flush_times, *other.flush_times],
         )
 
     def is_empty(self) -> bool:
-        return self.load.is_empty() and self.store.is_empty()
+        return self.load.is_empty() and self.store.is_empty() and not self.flush_times
 
 
 @dataclass
