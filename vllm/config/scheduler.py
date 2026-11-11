@@ -234,6 +234,14 @@ class SchedulerConfig:
     already-admitted prompt, so a long prompt can take up to N times as many
     steps to finish prefilling."""
 
+    prefill_schedule_backlog_interval: int = Field(default=1, ge=1)
+    """While a backlog lifts `prefill_schedule_interval` (a prefill step left
+    requests waiting), admit prefill once every N engine steps until it drains.
+    1 (the default) admits prefill on every step, so a burst of long prompts
+    runs back to back and stalls decode; a larger N keeps decode-only steps
+    between them, bounding inter-token latency at some cost in time to first
+    token. Has no effect unless `prefill_schedule_interval` > 1."""
+
     cache_aware_admission_window: int = Field(default=0, ge=0)
     """Look-ahead window for cache-aware admission. Within the first N waiting
     requests, those whose prefix is already in the KV cache are admitted ahead
@@ -339,6 +347,7 @@ class SchedulerConfig:
             "scheduler_reserve_full_isl",
             "watermark",
             "prefill_schedule_interval",
+            "prefill_schedule_backlog_interval",
             "async_scheduling",
             "stream_interval",
         }

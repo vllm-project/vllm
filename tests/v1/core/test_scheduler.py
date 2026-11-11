@@ -1569,6 +1569,72 @@ def test_throttle_capacity_bound_guard_admits():
     assert "b" in output.num_scheduled_tokens
 
 
+@pytest.mark.parametrize(
+    "backlog_interval,expected",
+    [
+        (1, [True] * 6),
+        (3, [False, False, True, False, False, True]),
+    ],
+)
+def test_throttle_capacity_bound_backlog_interval(
+    backlog_interval: int, expected: list[bool]
+):
+    """`prefill_schedule_backlog_interval`: while a capacity-bound backlog lifts
+    the cadence, prefill runs on every Nth throttled step rather than on every
+    step, and the steps in between decode only."""
+    scheduler = create_scheduler(
+        max_num_seqs=16,
+        max_num_batched_tokens=200,
+        enable_chunked_prefill=True,
+        prefill_schedule_backlog_interval=backlog_interval,
+    )
+
+    def advance(output):
+        req_ids = list(output.num_scheduled_tokens)
+        requests = [scheduler.requests[req_id] for req_id in req_ids]
+        scheduler.update_from_output(
+            output,
+            ModelRunnerOutput(
+                req_ids=req_ids,
+                # A request emits a token once its prompt is fully computed.
+                sampled_token_ids=[
+                    [0] if r.num_computed_tokens >= r.num_prompt_tokens else []
+                    for r in requests
+                ],
+                logprobs=None,
+                prompt_logprobs_dict={},
+                pooler_output=[],
+            ),
+        )
+
+    # A decoding request to protect.
+    (running_req,) = create_requests(num_requests=1, num_tokens=8, req_ids=["run0"])
+    scheduler.add_request(running_req)
+    advance(scheduler.schedule())
+
+    # A backlog: eight prompts that each need the whole token budget.
+    for request in create_requests(
+        num_requests=8, num_tokens=200, req_ids=[f"p{i}" for i in range(8)]
+    ):
+        scheduler.add_request(request)
+    output = scheduler.schedule()  # cadence-aligned release step
+    assert scheduler.prefill_capacity_bound
+    advance(output)
+
+    prefilled = []
+    for _ in range(len(expected)):
+        prefilling = {
+            req_id
+            for req_id, r in scheduler.requests.items()
+            if r.num_computed_tokens < r.num_prompt_tokens
+        }
+        output = scheduler.schedule(throttle_prefills=True)
+        assert "run0" in output.num_scheduled_tokens
+        prefilled.append(any(r in prefilling for r in output.num_scheduled_tokens))
+        advance(output)
+    assert prefilled == expected
+
+
 def test_same_step_duplicate_encoder_input_stays_cached():
     scheduler = create_scheduler(
         model="llava-hf/llava-1.5-7b-hf",
