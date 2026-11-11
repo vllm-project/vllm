@@ -13,6 +13,7 @@ import torch
 from vllm.config import (
     CacheConfig,
     ECTransferConfig,
+    KVEventsConfig,
     KVTransferConfig,
     LoRAConfig,
     ModelConfig,
@@ -27,6 +28,7 @@ from vllm.distributed.aux_output_connector.connector import (
     AuxRequestOutput,
 )
 from vllm.distributed.ec_transfer.ec_connector.metrics import ECConnectorStats
+from vllm.distributed.kv_events import AllBlocksCleared
 from vllm.distributed.kv_transfer.kv_connector.v1.hisparse.connector import (
     HiSparseConnector,
     HiSparseConnectorScheduler,
@@ -2675,6 +2677,52 @@ def test_scheduler_reset_prefix_cache():
 
     for i, request in enumerate(requests):
         assert scheduler.waiting[i] == request
+
+
+def test_reset_prefix_cache_publishes_pending_events():
+    scheduler = create_scheduler(
+        enable_prefix_caching=True,
+        kv_events_config=KVEventsConfig(enable_kv_cache_events=True, publisher="null"),
+    )
+    publisher = Mock()
+    scheduler.kv_event_publisher = publisher
+    scheduler.kv_cache_manager.take_events = Mock(return_value=[AllBlocksCleared()])
+
+    assert scheduler.reset_prefix_cache()
+    publisher.publish.assert_called_once()
+    batch = publisher.publish.call_args.args[0]
+    assert batch.events == [AllBlocksCleared()]
+
+
+def test_failed_reset_prefix_cache_does_not_publish():
+    scheduler = create_scheduler(
+        enable_prefix_caching=True,
+        kv_events_config=KVEventsConfig(enable_kv_cache_events=True, publisher="null"),
+    )
+    publisher = Mock()
+    scheduler.kv_event_publisher = publisher
+    scheduler.kv_cache_manager.reset_prefix_cache = Mock(return_value=False)
+    scheduler.kv_cache_manager.take_events = Mock(return_value=[AllBlocksCleared()])
+
+    assert not scheduler.reset_prefix_cache()
+    publisher.publish.assert_not_called()
+
+
+def test_local_reset_still_publishes_when_connector_reset_fails():
+    scheduler = create_scheduler(
+        enable_prefix_caching=True,
+        kv_events_config=KVEventsConfig(enable_kv_cache_events=True, publisher="null"),
+    )
+    publisher = Mock()
+    scheduler.kv_event_publisher = publisher
+    scheduler.connector = Mock()
+    scheduler.connector.reset_cache.return_value = False
+    scheduler.connector.take_events.return_value = []
+    scheduler.kv_cache_manager.reset_prefix_cache = Mock(return_value=True)
+    scheduler.kv_cache_manager.take_events = Mock(return_value=[AllBlocksCleared()])
+
+    assert scheduler.reset_prefix_cache(reset_connector=True) is False
+    publisher.publish.assert_called_once()
 
 
 @pytest.mark.parametrize("reset_successful", [False, True])

@@ -295,7 +295,7 @@ class Scheduler(SchedulerInterface):
         speculative_config = vllm_config.speculative_config
         self.use_eagle = False
         self.use_eagle_block_drop = False
-        self.num_spec_tokens = vllm_config.num_scheduled_spec_tokens
+        self.num_spec_tokens = vllm_config.num_speculative_tokens
         self.num_lookahead_tokens = vllm_config.num_lookahead_tokens
         # DSV41 SWA bounded replay: groups that declare a replay window are rebuilt
         # after a prefix hit by recomputing its trailing tokens. One window
@@ -2630,22 +2630,7 @@ class Scheduler(SchedulerInterface):
                     else scheduler_ec_connector_stats
                 )
 
-        # collect KV cache events from KV cache manager
-        events = self.kv_cache_manager.take_events()
-
-        # collect KV cache events from connector
-        if self.connector is not None:
-            connector_events = self.connector.take_events()
-            if connector_events:
-                if events is None:
-                    events = list(connector_events)
-                else:
-                    events.extend(connector_events)
-
-        # publish collected KV cache events
-        if events:
-            batch = KVEventBatch(ts=time.time(), events=events)
-            self.kv_event_publisher.publish(batch)
+        self._publish_kv_cache_events()
 
         # Create EngineCoreOutputs for all clients that have requests with
         # outputs in this step.
@@ -3268,6 +3253,22 @@ class Scheduler(SchedulerInterface):
             )
         )
 
+    def _publish_kv_cache_events(self) -> None:
+        """Publish events collected by the cache manager and connector."""
+        if self.kv_event_publisher is None:
+            return
+        events = self.kv_cache_manager.take_events()
+        if self.connector is not None:
+            connector_events = self.connector.take_events()
+            if connector_events:
+                if events is None:
+                    events = list(connector_events)
+                else:
+                    events.extend(connector_events)
+        if events:
+            batch = KVEventBatch(ts=time.time(), events=events)
+            self.kv_event_publisher.publish(batch)
+
     def reset_prefix_cache(
         self, reset_running_requests: bool = False, reset_connector: bool = False
     ) -> bool:
@@ -3290,7 +3291,8 @@ class Scheduler(SchedulerInterface):
                 request = self.running.pop()
                 self._preempt_request(request, timestamp, drop_stale_output=True)
 
-        reset_successful = self.kv_cache_manager.reset_prefix_cache()
+        local_reset_successful = self.kv_cache_manager.reset_prefix_cache()
+        reset_successful = local_reset_successful
         if reset_running_requests and not reset_successful:
             raise RuntimeError(
                 "Failed to reset KV cache even when all the running requests are "
@@ -3304,6 +3306,9 @@ class Scheduler(SchedulerInterface):
 
         if reset_successful and self.aux_output_connector is not None:
             self.aux_output_connector.reset()
+
+        if local_reset_successful:
+            self._publish_kv_cache_events()
 
         return reset_successful
 

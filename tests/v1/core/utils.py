@@ -8,6 +8,7 @@ from vllm.config import (
     CacheConfig,
     DiffusionConfig,
     ECTransferConfig,
+    KVEventsConfig,
     KVTransferConfig,
     LoRAConfig,
     ModelConfig,
@@ -91,6 +92,7 @@ def create_scheduler(
     scheduler_cls: type[Scheduler] | None = None,
     lora_config: LoRAConfig | None = None,
     speculative_config: SpeculativeConfig | None = None,
+    kv_events_config: KVEventsConfig | None = None,
 ) -> Scheduler | AsyncScheduler:
     """Create scheduler under test.
 
@@ -222,6 +224,7 @@ def create_scheduler(
         observability_config=ObservabilityConfig(
             per_request_spec_decode_metrics=per_request_spec_decode_metrics,
         ),
+        kv_events_config=kv_events_config,
     )
     if kv_cache_spec is None:
         kv_cache_spec = FullAttentionSpec(
