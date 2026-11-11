@@ -82,6 +82,9 @@ hardware_overrides:
     extra_args:
       - "--attention-backend"
       - "ROCM_AITER_UNIFIED_ATTN"
+      # The 2M context's KV cache does not fit on one MI350X.
+      - "--max-model-len"
+      - "1048576"
     extra_env:
       VLLM_ROCM_USE_AITER: "1"
 
@@ -118,9 +121,9 @@ guide: |
     --max-model-len 1048576
   ```
 
-  Without DFlash2 the full 2,097,152-token context fits; with it, cap
-  `--max-model-len` at 1048576 on one GPU. In client requests, set `"model"`
-  to `ricursiveAI/Ripple-65B-Preview`.
+  Cap `--max-model-len` at 1048576 on one GPU, with or without DFlash2: the
+  KV cache for the full 2,097,152-token context does not fit on one MI350X.
+  In client requests, set `"model"` to `ricursiveAI/Ripple-65B-Preview`.
 
   ## Client usage
 
