@@ -471,7 +471,7 @@ class Qwen4ExpMTP(nn.Module, SupportsHCSP, SupportsPP, Qwen4ExpMixtureOfExperts)
         self, hidden_states: torch.Tensor, spec_step_idx: int = 0
     ) -> torch.Tensor:
         """Greedy draft tokens via vocab-parallel local argmax, skipping the
-        full-vocab logits all-gather (``use_local_argmax_reduction``)."""
+        full-vocab logits all-gather (`use_local_argmax_reduction`)."""
         return self.logits_processor.get_top_tokens(self.lm_head, hidden_states)
 
     def load_weights(self, weights: Iterable[tuple[str, torch.Tensor]]) -> set[str]:
