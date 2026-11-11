@@ -381,6 +381,11 @@ def test_cpu_manager_reports_cache_write_and_read_usage_gauges():
     manager.complete_load(to_keys([1]), _EMPTY_REQ_CTX)
     check_split_usage_stats(manager, write=0.0, read=0.0, total=0.0)
 
+    # A failed load releases its pin too (through complete_load by default).
+    manager.prepare_load(to_keys([1]), _EMPTY_REQ_CTX)
+    manager.complete_failed_load(to_keys([1]), _EMPTY_REQ_CTX)
+    check_split_usage_stats(manager, write=0.0, read=0.0, total=0.0)
+
     # Concurrent write + read pins are both reflected and additive.
     manager.prepare_store(to_keys([3, 4]), _EMPTY_REQ_CTX)
     manager.prepare_load(to_keys([2]), _EMPTY_REQ_CTX)

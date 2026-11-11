@@ -268,6 +268,57 @@ class TieringOffloadingSpec(CPUOffloadingSpec):
                 buckets=(0.01, 0.05, 0.1, 0.5, 1, 2.5, 5, 10, 20, 30, 60, 120),
             )
         )
+        metrics[TieringOffloadingMetrics.PROMOTED_CHUNK_OUTCOMES] = (
+            OffloadingCounterMetadata(
+                documentation=(
+                    "Number of chunks a promotion landed in the primary tier, "
+                    "by the first of these to happen to each, labeled by source "
+                    "tier and outcome: loaded (a GPU load of it completed on "
+                    "every worker), served_peer (a secondary tier finished "
+                    "sending it to a peer), evicted_unloaded (evicted before any "
+                    "read) or reset (dropped by a cache reset before any read)."
+                ),
+                labelnames=(TIER_LABEL, "outcome"),
+            )
+        )
+        metrics[TieringOffloadingMetrics.PROMOTED_CHUNK_TIME_TO_OUTCOME] = (
+            OffloadingHistogramMetadata(
+                documentation=(
+                    "Histogram of time from a promoted chunk landing in the "
+                    "primary tier to its outcome, labeled by source tier and "
+                    "outcome, in seconds. For loaded and served_peer this ends "
+                    "when the first successful read completes, and the chunk "
+                    "usually stays in the primary tier afterwards."
+                ),
+                labelnames=(TIER_LABEL, "outcome"),
+                buckets=(0.01, 0.05, 0.1, 0.5, 1, 5, 10, 30, 60, 300, 1800),
+            )
+        )
+        metrics[TieringOffloadingMetrics.PROMOTED_CHUNKS_PENDING] = (
+            OffloadingGaugeMetadata(
+                documentation=(
+                    "Current number of promoted chunks in the primary tier "
+                    "without an outcome yet, labeled by source tier and state: "
+                    "unread (evictable) or reading (a GPU load or peer transfer "
+                    "is in flight)."
+                ),
+                labelnames=(TIER_LABEL, "state"),
+            )
+        )
+        metrics[TieringOffloadingMetrics.CHUNK_REPROMOTIONS] = (
+            OffloadingCounterMetadata(
+                documentation=(
+                    "Number of promotions started for chunks whose previous "
+                    "promotion was evicted before any read, labeled by source "
+                    "tier. Counted when primary tier space is allocated for the "
+                    "new promotion, before the tier reads the chunk, so it "
+                    "includes promotions that later fail. Remembers up to as "
+                    "many evicted chunks as the primary tier holds, until a "
+                    "cache reset."
+                ),
+                labelnames=(TIER_LABEL,),
+            )
+        )
         metrics[TieringOffloadingMetrics.PROMOTION_LATENCY] = (
             OffloadingHistogramMetadata(
                 documentation=(

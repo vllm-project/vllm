@@ -252,7 +252,7 @@ class _SecondaryTierFacingParent(ParentManager):
     def create_store_job(
         self, keys: Collection[OffloadKey], req_context: ReqContext
     ) -> TransferJob:
-        return self._m.create_store_job(keys, req_context, self._origin_idx)
+        return self._m._create_peer_store_job(keys, req_context, self._origin_idx)
 
     def on_request_finished(self, req_context: ReqContext) -> None:
         return self._m.on_request_finished(
@@ -570,6 +570,7 @@ class TieringOffloadingManager(OffloadingManager):
                 transfer_job.req_context,
                 True,
             )
+            self._metrics.on_promotion_landed(job_metadata.tier_idx, successful_keys)
         if not failed_keys:
             assert completed_job.deferred_release is None
         elif completed_job.deferred_release is not None:
@@ -827,6 +828,10 @@ class TieringOffloadingManager(OffloadingManager):
             self._metrics.on_promotion_allocation_failure()
             return False
 
+        self._metrics.on_primary_evicted(primary_write_result.evicted_keys)
+        self._metrics.on_promotion_slots_allocated(
+            tier_idx, primary_write_result.keys_to_store
+        )
         store_spec = primary_write_result.store_spec
         assert isinstance(store_spec, CPULoadStoreSpec)
         load_sources = self._request_load_sources.setdefault(req_context.req_id, {})
@@ -891,7 +896,9 @@ class TieringOffloadingManager(OffloadingManager):
             LoadStoreSpec for reading from primary tier.
 
         """
-        return self.primary_tier.prepare_load(keys, req_context)
+        load_spec = self.primary_tier.prepare_load(keys, req_context)
+        self._metrics.on_promoted_reads_started(keys)
+        return load_spec
 
     @override
     def complete_load(self, keys: Collection[OffloadKey], req_context: ReqContext):
@@ -906,6 +913,14 @@ class TieringOffloadingManager(OffloadingManager):
 
         """
         self.primary_tier.complete_load(keys, req_context)
+        self._metrics.on_promoted_reads_done(keys, success=True, by_gpu_load=True)
+
+    @override
+    def complete_failed_load(
+        self, keys: Collection[OffloadKey], req_context: ReqContext
+    ):
+        self.primary_tier.complete_failed_load(keys, req_context)
+        self._metrics.on_promoted_reads_done(keys, success=False, by_gpu_load=True)
 
     @override
     def prepare_store(
@@ -954,6 +969,7 @@ class TieringOffloadingManager(OffloadingManager):
 
         if primary_result is None:
             return None
+        self._metrics.on_primary_evicted(primary_result.evicted_keys)
 
         if primary_result.keys_to_store:
             state = self._req_state[req_context.req_id]
@@ -1104,6 +1120,21 @@ class TieringOffloadingManager(OffloadingManager):
             req_context=req_context,
         )
         self._register_job(job_metadata, tier_idx)
+        return job_metadata
+
+    def _create_peer_store_job(
+        self,
+        keys: Collection[OffloadKey],
+        req_context: ReqContext,
+        tier_idx: int,
+    ) -> TransferJob:
+        """create_store_job() for a secondary tier serving a peer.
+
+        The job reads the chunks out to another engine, so it counts as a read
+        of any promoted chunk among them.
+        """
+        job_metadata = self.create_store_job(keys, req_context, tier_idx)
+        self._metrics.on_peer_read_job(job_metadata.job_id, keys)
         return job_metadata
 
     @override
@@ -1296,6 +1327,7 @@ class TieringOffloadingManager(OffloadingManager):
             finished_req_ids.append(req_id)
 
         self.primary_tier.reset_cache()
+        self._metrics.on_primary_reset()
 
         for req_id in finished_req_ids:
             del self._req_state[req_id]

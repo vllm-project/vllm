@@ -4376,6 +4376,9 @@ def test_failed_load_ends_or_reruns_its_request(
     )
     handler.fail_loads = True
     runner.run(decoded_tokens=[], expected_loaded=expected_loaded)
+    # The manager learns the load failed, so it does not count it as loaded.
+    runner.manager.complete_failed_load.assert_called_once()
+    runner.manager.complete_load.assert_not_called()
 
     if not recompute:
         assert request.status == RequestStatus.FINISHED_ERROR

@@ -174,6 +174,19 @@ The spec declares the label names in the API server process, and the manager fil
 
 A manager adds a label with `config_info_keys()` of its spec and `config_info()` of its own class. A name that a manager fills and the spec does not declare is dropped, and the engine log then holds one warning line.
 
+## Promotion Outcome Metrics
+
+With `TieringOffloadingSpec`, a chunk found in a secondary tier is first promoted (copied) into the CPU primary tier, and only then loaded into the GPU. Whether those copies are used shows in four metrics, each labeled by the source `tier` (e.g. `1:fs`):
+
+| Metric | Type | Meaning |
+| --- | --- | --- |
+| `vllm:kv_offload_tiering_promoted_chunk_outcomes` | Counter | Promoted chunks by `outcome`: `loaded` (a GPU load of the chunk completed on every worker), `served_peer` (a P2P or KVCR tier finished sending it to another engine), `evicted_unloaded` (evicted from the CPU tier before any read) or `reset` (dropped by a cache reset). Each promoted chunk is counted once, when the first of these happens. |
+| `vllm:kv_offload_tiering_promoted_chunk_time_to_outcome_seconds` | Histogram | Time from the chunk landing in the CPU tier to its outcome, by `outcome`. For `loaded` and `served_peer` it ends when the first successful read completes, including the transfer; the chunk usually stays in the CPU tier afterwards, so this is not how long it stays there. |
+| `vllm:kv_offload_tiering_promoted_chunks_pending` | Gauge | Promoted chunks without an outcome yet, by `state`: `unread`, or `reading` (a GPU load or peer transfer is in flight). |
+| `vllm:kv_offload_tiering_chunk_repromotions` | Counter | Promotions started for chunks whose previous promotion was evicted unread. Counted when CPU tier space is allocated for the new promotion, before the secondary tier reads the chunk, so a re-promotion that then fails is included. Remembers up to as many evicted chunks as the CPU tier holds. |
+
+Promoted chunks that land in the CPU tier add up per tier: `vllm:kv_offload_tiering_read_bytes` divided by the chunk size (`cpu_kv_cache_size_bytes / cpu_num_chunks` of `vllm:kv_offload_config_info`) equals the sum of the outcomes plus the pending chunks. A rising `evicted_unloaded` share, often with `chunk_repromotions`, means promotions compete for CPU tier space and evict each other before they are loaded; a larger `cpu_bytes_to_use` or fewer concurrent loads reduces it.
+
 ## Custom Eviction Policies
 
 `eviction_policy` resolves through `CachePolicyFactory` (`vllm/v1/kv_offload/cpu/policies/factory.py`), which pre-registers the built-in `lru` and `arc` policies.

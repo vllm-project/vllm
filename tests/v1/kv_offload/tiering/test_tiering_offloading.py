@@ -44,6 +44,7 @@ from vllm.v1.kv_offload.base import (
 from vllm.v1.kv_offload.cpu.common import CPULoadStoreSpec, CPUOffloadingInfo
 from vllm.v1.kv_offload.tiering.base import (
     JobResult,
+    ParentManager,
     SecondaryTierManager,
     TieringOffloadingMetrics,
     TransferJob,
@@ -302,6 +303,24 @@ def test_every_lookup_result_has_a_declared_cascade_behavior():
     assert set(_CASCADE_SUPPLY_BEHAVIOR) == set(LookupResult)
 
 
+class PeerServingSecondaryTierManager(ExampleSecondaryTierManager):
+    """Example tier that sends queued chunks to a peer through its parent,
+    as a P2P or KVCR tier does."""
+
+    def __init__(self, *args, **kwargs):
+        super().__init__(*args, **kwargs)
+        self.peer_requests: list[list[OffloadKey]] = []
+
+    def serve_external_requests(self, parent: ParentManager) -> None:
+        for keys in self.peer_requests:
+            ctx = ReqContext(req_id="peer")
+            parent.on_new_request(ctx)
+            assert all(parent.lookup(key, ctx) is LookupResult.HIT for key in keys)
+            self.submit_store(parent.create_store_job(keys, ctx))
+            parent.on_request_finished(ctx)
+        self.peer_requests.clear()
+
+
 class TestTieringOffloadingManager:
     """Tests for TieringOffloadingManager."""
 
@@ -321,7 +340,7 @@ class TestTieringOffloadingManager:
             primary_kv_view=mock_view,
             tier_type="example",
         )
-        self.secondary_tier2 = ExampleSecondaryTierManager(
+        self.secondary_tier2 = PeerServingSecondaryTierManager(
             offloading_spec=_MOCK_OFFLOADING_SPEC,
             primary_kv_view=mock_view,
             tier_type="example",
@@ -969,6 +988,157 @@ class TestTieringOffloadingManager:
         assert result is not None
         assert len(result.evicted_keys) == 2
         assert len(result.keys_to_store) == 2
+
+    def _promote(self, keys: list[OffloadKey], req_context: ReqContext = _CTX):
+        """Look keys up in tier 1 until their promotion lands in the primary."""
+        for key in keys:
+            self.secondary_tier1.chunks[key] = True
+        self._start_request(req_context)
+        for key in keys:
+            assert self.manager.lookup(key, req_context) is LookupResult.HIT_PENDING
+        self._simulate_on_schedule_end()  # submit_load()
+        self._simulate_on_schedule_end()  # the promotion lands
+
+    def _promotion_values(self) -> dict:
+        stats = self.manager.get_stats()
+        assert stats is not None
+        return stats.data["data"]
+
+    @staticmethod
+    def _outcomes(values: dict) -> dict[str, int]:
+        return {
+            labels[1]: count
+            for labels, count in values.get(
+                TieringOffloadingMetrics.PROMOTED_CHUNK_OUTCOMES, {}
+            ).items()
+            if labels[0] == "1:example"
+        }
+
+    @staticmethod
+    def _pending(values: dict) -> dict[str, int]:
+        return {
+            labels[1]: count
+            for labels, count in values[
+                TieringOffloadingMetrics.PROMOTED_CHUNKS_PENDING
+            ].items()
+            if labels[0] == "1:example"
+        }
+
+    def test_promoted_chunk_outcomes_track_loads_and_unread_evictions(
+        self, manager_setup
+    ):
+        """Promote 3 chunks, load 1, evict the other 2 unread, promote 1 again."""
+        promoted = to_keys(range(3))
+        self._promote(promoted)
+
+        self.manager.prepare_load(promoted[:1], _CTX)
+        values = self._promotion_values()
+        # Submitting a load is not a load: no outcome until it completes.
+        assert self._outcomes(values) == {}
+        assert self._pending(values) == {"unread": 2, "reading": 1}
+
+        # Storing 4 new chunks into the 5-chunk primary evicts the 2 unread
+        # chunks; the one being loaded is pinned.
+        fresh = to_keys(range(10, 14))
+        result = self.manager.prepare_store(fresh, _CTX)
+        assert result is not None
+        assert set(result.evicted_keys) == set(promoted[1:])
+        self.manager.complete_store(fresh, _CTX, success=True)
+        self.manager.complete_load(promoted[:1], _CTX)
+        self._simulate_on_schedule_end()
+        values = self._promotion_values()
+        assert self._outcomes(values) == {"loaded": 1, "evicted_unloaded": 2}
+        assert self._pending(values) == {"unread": 0, "reading": 0}
+
+        # The request comes back for an evicted chunk: a second promotion.
+        assert self.manager.lookup(promoted[1], _CTX) is LookupResult.HIT_PENDING
+        values = self._promotion_values()
+        assert values[TieringOffloadingMetrics.CHUNK_REPROMOTIONS][("1:example",)] == 1
+
+        # The re-promotion lands and a reset drops it unread.
+        self._simulate_on_schedule_end()
+        self._simulate_on_schedule_end()
+        self.manager.reset_cache()
+        assert self._outcomes(self._promotion_values()) == {"reset": 1}
+
+    def test_promotion_evicting_unread_promotion_is_recorded(self, manager_setup):
+        """Promotions that evict each other before any load (#49902)."""
+        self._promote(to_keys(range(5)))  # fills the 5-chunk primary
+        self._promote(to_keys([5]))
+        values = self._promotion_values()
+        assert self._outcomes(values) == {"evicted_unloaded": 1}
+        assert self._pending(values) == {"unread": 5, "reading": 0}
+
+    def test_promoted_chunk_shared_by_concurrent_requests_counts_once(
+        self, manager_setup
+    ):
+        other = ReqContext(req_id="other")
+        keys = to_keys(range(3))
+        self._promote(keys)
+        # A second request finds the same chunks while they are in the primary.
+        self._start_request(other)
+        assert all(self.manager.lookup(key, other) is LookupResult.HIT for key in keys)
+        self.manager.prepare_load(keys, _CTX)
+        self.manager.prepare_load(keys, other)
+        self.manager.complete_load(keys, other)
+        self.manager.complete_load(keys, _CTX)
+        values = self._promotion_values()
+        assert self._outcomes(values) == {"loaded": 3}
+        times = values[TieringOffloadingMetrics.PROMOTED_CHUNK_TIME_TO_OUTCOME]
+        assert len(times[("1:example", "loaded")]) == 3
+
+    def test_failed_load_of_promoted_chunk_is_not_loaded(self, manager_setup):
+        (key,) = to_keys([1])
+        self._promote([key])
+        self.manager.prepare_load([key], _CTX)
+        self.manager.complete_failed_load([key], _CTX)
+        values = self._promotion_values()
+        assert self._outcomes(values) == {}
+        assert self._pending(values) == {"unread": 1, "reading": 0}
+        # Another request loads it successfully afterwards.
+        other = ReqContext(req_id="other")
+        self._start_request(other)
+        self.manager.prepare_load([key], other)
+        self.manager.complete_load([key], other)
+        assert self._outcomes(self._promotion_values()) == {"loaded": 1}
+
+    def test_peer_serving_records_served_peer(self, manager_setup):
+        keys = to_keys(range(2))
+        self._promote(keys)
+        self.secondary_tier2.peer_requests.append(keys)
+        self._simulate_on_schedule_end()  # the tier sends the chunks to a peer
+        values = self._promotion_values()
+        assert self._outcomes(values) == {}
+        assert self._pending(values) == {"unread": 0, "reading": 2}
+        self._simulate_on_schedule_end()  # the transfer is reported finished
+        values = self._promotion_values()
+        assert self._outcomes(values) == {"served_peer": 2}
+        assert self._pending(values) == {"unread": 0, "reading": 0}
+
+    def test_local_cascade_of_promoted_chunk_is_not_a_read(self, manager_setup):
+        (key,) = to_keys([1])
+        self._promote([key])
+        job = self.manager.create_store_job([key], _CTX, 1)
+        self.secondary_tier2.submit_store(job)
+        self._simulate_on_schedule_end()
+        values = self._promotion_values()
+        assert self._outcomes(values) == {}
+        assert self._pending(values) == {"unread": 1, "reading": 0}
+
+    def test_reset_with_promotion_and_load_in_flight(self, manager_setup):
+        """A reset drains promotions first, then closes every pending chunk."""
+        loading, landing = to_keys(range(2))
+        self._promote([loading])
+        self.manager.prepare_load([loading], _CTX)
+        # A promotion submitted but not yet finished when the reset starts.
+        self.secondary_tier1.chunks[landing] = True
+        assert self.manager.lookup(landing, _CTX) is LookupResult.HIT_PENDING
+        self._simulate_on_schedule_end()
+
+        self.manager.reset_cache()
+        values = self._promotion_values()
+        assert self._outcomes(values) == {"reset": 2}
+        assert self._pending(values) == {"unread": 0, "reading": 0}
 
     def test_request_order_survives_late_cascade_completion(self, manager_setup):
         """Cascade completion must not replace request order with I/O order."""

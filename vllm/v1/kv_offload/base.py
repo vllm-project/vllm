@@ -392,6 +392,22 @@ class OffloadingManager(ABC):
         """
         return
 
+    def complete_failed_load(
+        self, keys: Collection[OffloadKey], req_context: ReqContext
+    ):
+        """Called instead of complete_load when the load failed on a worker.
+
+        The destination GPU blocks are undefined; the offloaded blocks are
+        unaffected. The default calls complete_load, so a manager overrides
+        this only to tell failed loads apart.
+
+        Args:
+            keys: the keys identifying the blocks.
+            req_context: per-request context (e.g. kv_transfer_params).
+
+        """
+        self.complete_load(keys, req_context)
+
     @abstractmethod
     def prepare_store(
         self,
