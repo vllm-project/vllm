@@ -7,16 +7,15 @@ Currently only the FS secondary tier is supported.
 Starts a vLLM server with a TieringOffloadingSpec config,
 drives it with `guidellm`, and records per-run metrics.
 
-Quick sweep (~1 hour):
-    python benchmarks/kv_offload/benchmark_tiering.py bench <fs-dir> --quick
+Run all scenarios:
+    python benchmarks/kv_offload/benchmark_tiering.py bench-scenario <fs-dir>
 
-Full sweep:
-    python benchmarks/kv_offload/benchmark_tiering.py bench <fs-dir>
+Run selected scenarios:
+    python benchmarks/kv_offload/benchmark_tiering.py bench-scenario <fs-dir> \
+        --scenario fit-c16 overflow-c64
 
-Single run:
-    python benchmarks/kv_offload/benchmark_tiering.py run <fs-dir> \
-        <concurrency> <small|large> [<prefill|decode|prefill-decode>] \
-        [--files small|large] [--prefix-tokens 5k|20k|100k]
+List scenarios with their estimated KV footprint:
+    python benchmarks/kv_offload/benchmark_tiering.py list
 
 Compare two session dirs:
     python benchmarks/kv_offload/benchmark_tiering.py compare main_dir pr_dir
@@ -40,22 +39,17 @@ from urllib.request import urlopen
 MODEL = "openai/gpt-oss-120b"
 TP_SIZE = 2
 PORT = 8000
+# Measured KV bytes for one 64-token block of gpt-oss-120b (TP2) on H100.
+BYTES_PER_BLOCK_64 = 2.3 * 1024**2
+TOKENS_PER_BLOCK = 64
 
 BENCH_MAX_SECONDS = 420  # 7 minutes per guidellm run
 BENCH_RANDOM_SEED = 889
 BENCH_TURNS = 5
 BENCH_PROMPT_TOKENS = 4096
 
-# FS-file granularity: KV block_size 64 -> small files, 1024 -> large files.
-FILE_SIZES = {"block64": 64, "block1024": 1024}
-# Shared prefix length (tokens) driven into the FS tier.
-PROMPT_SIZES = {"5k": 5_000, "20k": 20_000, "100k": 100_000}
-# CPU tier budget in bytes.
-CPU_SIZES = {"24g": 24 * 1024**3, "200g": 200 * 1024**3}
-CONCURRENCY_SWEEP = (16, 32, 64)
-
 # Phase tag -> guidellm output_tokens per turn.
-PHASES = {"prefill": 1, "decode": 512, "prefill-decode": 256}
+PHASES = {"prefill": 1, "mixed": 256}
 
 METRICS = [
     "request_throughput",
@@ -70,49 +64,183 @@ METRICS = [
 ]
 
 
+def gib(n: float) -> int:
+    return int(n * 1024**3)
+
+
 @dataclass
-class RunSpec:
-    phase: str  # PHASES key
-    files: str  # FILE_SIZES key
-    prompt: str  # PROMPT_SIZES key
+class Scenario:
+    """One benchmark configuration; add entries to SCENARIOS to extend."""
+
+    name: str
+    desc: str
     concurrency: int
-    cpu_size: str  # CPU_SIZES key
+    offload_block_size: int  # KV block_size (tokens) written to the FS tier
+    prefix_tokens: int  # shared prefix length (tokens) driven into the FS tier
+    cpu_bytes: int
+    gpu_bytes: int
+    isl_tokens: int = BENCH_PROMPT_TOKENS  # per-turn prompt tokens
+    phase: str = "prefill"  # PHASES key
 
     @property
-    def name(self) -> str:
-        return (
-            f"{self.phase}_files-{self.files}_prompt-{self.prompt}"
-            f"_c{self.concurrency}_cpu-{self.cpu_size}"
+    def per_request_bytes(self) -> float:
+        """Last-turn KV footprint of a single request."""
+        osl = PHASES[self.phase]
+        turns = BENCH_TURNS - 1
+        tokens = self.prefix_tokens + turns * self.isl_tokens + turns * osl
+        return tokens / TOKENS_PER_BLOCK * BYTES_PER_BLOCK_64
+
+    def kv_size_roofline(self) -> int:
+        """Worst-case KV bytes: last-turn footprint per request x concurrency."""
+        return int(self.concurrency * self.per_request_bytes)
+
+    def requests_fitting(self, budget_bytes: int) -> int:
+        """How many concurrent requests fit in the given byte budget."""
+        return int(budget_bytes // self.per_request_bytes)
+
+    def describe(self) -> None:
+        budget = self.gpu_bytes + self.cpu_bytes
+        roofline = self.kv_size_roofline()
+        over = "OVER" if roofline > budget else "under"
+        print(f"{self.name}: {self.desc}")
+        print(
+            f"  concurrency={self.concurrency} phase={self.phase} "
+            f"offload_block_size={self.offload_block_size}"
+        )
+        print(f"  prefix_tokens={self.prefix_tokens} isl_tokens={self.isl_tokens}")
+        print(
+            f"  gpu={self.gpu_bytes / 1024**3:.0f}G"
+            f" cpu={self.cpu_bytes / 1024**3:.0f}G"
+            f" budget={budget / 1024**3:.0f}G"
+        )
+        gpu_fit = self.requests_fitting(self.gpu_bytes)
+        total_fit = self.requests_fitting(budget)
+        print(
+            f"  kv roofline={roofline} bytes ({over} budget) "
+            f"requests_fit: gpu={gpu_fit} gpu+cpu={total_fit}"
         )
 
 
-def build_sweeps(mode: str) -> list[RunSpec]:
-    if mode == "quick":
-        # ~1 hour: 8 runs x ~7.5 min (bench + startup + teardown).
-        return [
-            RunSpec(p, f, "20k", 64, cpu)
-            for cpu in CPU_SIZES
-            for p in ("prefill", "decode")
-            for f in FILE_SIZES
-        ]
-    # full: everything except prefill-decode (run that phase on request).
-    return [
-        RunSpec(p, f, s, c, cpu)
-        for p in ("prefill", "decode")
-        for f in FILE_SIZES
-        for s in PROMPT_SIZES
-        for c in CONCURRENCY_SWEEP
-        for cpu in CPU_SIZES
-    ]
+QUICK = [
+    Scenario(
+        "fit-c16",
+        "cpu kv cache barely used: fits in gpu+cpu",
+        concurrency=16,
+        offload_block_size=64,
+        prefix_tokens=20_000,
+        cpu_bytes=gib(50),
+        gpu_bytes=gib(22),
+    ),
+    Scenario(
+        "tight-c32",
+        "cpu kv cache heavily used, never overflows",
+        concurrency=32,
+        offload_block_size=64,
+        prefix_tokens=20_000,
+        cpu_bytes=gib(50),
+        gpu_bytes=gib(22),
+    ),
+    Scenario(
+        "overflow-c64",
+        "cpu kv cache overflows, triggering promotion allocation errors",
+        concurrency=64,
+        offload_block_size=64,
+        prefix_tokens=20_000,
+        cpu_bytes=gib(50),
+        gpu_bytes=gib(22),
+    ),
+    Scenario(
+        "overflow-c64-mixed",
+        "cpu kv cache overflows, triggering promotion allocation errors;"
+        " prefill + decode",
+        concurrency=64,
+        offload_block_size=64,
+        prefix_tokens=20_000,
+        cpu_bytes=gib(50),
+        gpu_bytes=gib(22),
+        phase="mixed",
+    ),
+]
+
+SCENARIOS = QUICK + [
+    Scenario(
+        "overflow-c64-large-files",
+        "effect of promoting/storing large (1024-token) vs small blocks",
+        concurrency=64,
+        offload_block_size=1024,
+        prefix_tokens=20_000,
+        cpu_bytes=gib(50),
+        gpu_bytes=gib(22),
+    ),
+    Scenario(
+        "staging-cpu",
+        "cpu cache is just a staging area (small cpu, big gpu)",
+        concurrency=64,
+        offload_block_size=64,
+        prefix_tokens=20_000,
+        cpu_bytes=gib(20),
+        gpu_bytes=gib(40),
+    ),
+    Scenario(
+        "buffered-cpu",
+        "cpu cache has slack beyond stores and promotions",
+        concurrency=64,
+        offload_block_size=64,
+        prefix_tokens=20_000,
+        cpu_bytes=gib(100),
+        gpu_bytes=gib(40),
+    ),
+    Scenario(
+        "large-ctx-large-cpu",
+        "100k context with a 200g cpu tier",
+        concurrency=64,
+        offload_block_size=64,
+        prefix_tokens=100_000,
+        cpu_bytes=gib(200),
+        gpu_bytes=gib(20),
+    ),
+    Scenario(
+        "large-ctx-small-cpu",
+        "100k context with a 40g cpu tier",
+        concurrency=64,
+        offload_block_size=64,
+        prefix_tokens=100_000,
+        cpu_bytes=gib(40),
+        gpu_bytes=gib(20),
+    ),
+    Scenario(
+        "small-ctx-large-cpu",
+        "5k context, 1k subsequent ISL, big cpu tier",
+        concurrency=64,
+        offload_block_size=64,
+        prefix_tokens=5_000,
+        cpu_bytes=gib(50),
+        gpu_bytes=gib(10),
+        isl_tokens=1024,
+    ),
+    Scenario(
+        "small-ctx-small-cpu",
+        "5k context, 1k subsequent ISL, tiny cpu tier",
+        concurrency=64,
+        offload_block_size=64,
+        prefix_tokens=5_000,
+        cpu_bytes=gib(10),
+        gpu_bytes=gib(10),
+        isl_tokens=1024,
+    ),
+]
 
 
 class VLLMServer:
     """Lifecycle of a single `vllm serve` process."""
 
-    def __init__(self, config_path: Path, log_path: Path, port: int) -> None:
+    def __init__(
+        self, config_path: Path, log_path: Path, port: int, kv_cache_bytes: int
+    ) -> None:
         self.config_path = config_path
         self.log_path = log_path
         self.port = port
+        self.kv_cache_bytes = kv_cache_bytes
         self.proc: subprocess.Popen | None = None
 
     def start(self) -> None:
@@ -123,6 +251,8 @@ class VLLMServer:
             MODEL,
             "--tensor-parallel-size",
             str(TP_SIZE),
+            "--kv-cache-memory",
+            str(self.kv_cache_bytes),
             "--kv-transfer-config",
             self.config_path.read_text(),
             "--enable-prefix-caching",
@@ -205,18 +335,18 @@ class GuideLLM:
         self.port = port
         self.max_seconds = max_seconds
 
-    def run(self, spec: RunSpec, log_path: Path) -> dict:
+    def run(self, spec: Scenario, log_path: Path) -> dict:
         prefix_count = max(4 * spec.concurrency, 256)
         data = {
             "kind": "synthetic_text",
-            "prompt_tokens": BENCH_PROMPT_TOKENS,
+            "prompt_tokens": spec.isl_tokens,
             "output_tokens": PHASES[spec.phase],
             "turns": BENCH_TURNS,
             "prefix_buckets": [
                 {
                     "bucket_weight": 100,
                     "prefix_count": prefix_count,
-                    "prefix_tokens": PROMPT_SIZES[spec.prompt],
+                    "prefix_tokens": spec.prefix_tokens,
                 }
             ],
         }
@@ -283,7 +413,7 @@ class BenchmarkRun:
 
     def __init__(
         self,
-        spec: RunSpec,
+        spec: Scenario,
         fs_dir: Path,
         session_dir: Path,
         port: int,
@@ -309,7 +439,9 @@ class BenchmarkRun:
         config_path = self.run_dir / "kv_transfer_config.json"
         self._write_config(config_path)
         print("  [3/5] Starting vLLM server...")
-        with VLLMServer(config_path, self.run_dir / "vllm.log", self.port):
+        with VLLMServer(
+            config_path, self.run_dir / "vllm.log", self.port, self.spec.gpu_bytes
+        ):
             print("  [4/5] Running guidellm benchmark...")
             result = {
                 "name": self.spec.name,
@@ -336,7 +468,7 @@ class BenchmarkRun:
             "kv_role": "kv_both",
             "kv_connector_extra_config": {
                 "spec_name": "TieringOffloadingSpec",
-                "cpu_bytes_to_use": CPU_SIZES[self.spec.cpu_size],
+                "cpu_bytes_to_use": self.spec.cpu_bytes,
                 "eviction_policy": "lru",
                 "secondary_tiers": [
                     {
@@ -344,7 +476,7 @@ class BenchmarkRun:
                         "root_dir": str(self.fs_dir) + "/",
                     }
                 ],
-                "block_size": FILE_SIZES[self.spec.files],
+                "block_size": self.spec.offload_block_size,
             },
         }
         path.write_text(json.dumps(config, indent=2))
@@ -354,7 +486,7 @@ class BenchmarkSession:
     """Runs a list of specs and checkpoints results into a session dir."""
 
     def __init__(
-        self, fs_dir: Path, specs: list[RunSpec], port: int, max_seconds: int
+        self, fs_dir: Path, specs: list[Scenario], port: int, max_seconds: int
     ) -> None:
         self.fs_dir = fs_dir
         self.specs = specs
@@ -371,7 +503,13 @@ class BenchmarkSession:
             f"(~{len(self.specs) * (self.max_seconds + 120) // 60} min total):"
         )
         for spec in self.specs:
-            print(f"  {spec.name}")
+            roofline = spec.kv_size_roofline()
+            budget = spec.gpu_bytes + spec.cpu_bytes
+            over = "OVER" if roofline > budget else "under"
+            print(
+                f"  {spec.name}: roofline {roofline / 1024**3:.1f}G vs budget"
+                f" {budget / 1024**3:.0f}G ({over})"
+            )
 
         for i, spec in enumerate(self.specs, 1):
             print(f"\n[{i}/{len(self.specs)}]")
@@ -395,7 +533,7 @@ class BenchmarkSession:
 def compare(session_a: Path, session_b: Path) -> None:
     def load(d: Path) -> dict:
         results = json.loads((d / "results.json").read_text())
-        return {r.get("name") or RunSpec(**r["spec"]).name: r for r in results}
+        return {r.get("name") or Scenario(**r["spec"]).name: r for r in results}
 
     a, b = load(session_a), load(session_b)
     print(f"{'run':<60} {'metric':<30} {session_a.name:>12} {session_b.name:>12}")
@@ -465,7 +603,7 @@ def build_parser() -> argparse.ArgumentParser:
     subparsers = parser.add_subparsers(dest="command", required=True)
 
     bench = subparsers.add_parser(
-        "bench", help="run the sweep matrix against a vLLM server"
+        "bench", help="run all scenarios, or just the QUICK set with --quick"
     )
     bench.add_argument(
         "fs_dir",
@@ -475,36 +613,56 @@ def build_parser() -> argparse.ArgumentParser:
     bench.add_argument(
         "--quick",
         action="store_true",
-        help="pre-selected sweep, completes in about an hour",
+        help="run only the QUICK scenarios",
     )
 
-    run = subparsers.add_parser("run", help="run a single benchmark configuration")
+    bench_scenario = subparsers.add_parser(
+        "bench-scenario", help="run named scenarios against a vLLM server"
+    )
+    bench_scenario.add_argument(
+        "fs_dir",
+        type=Path,
+        help="folder backing the tier store (wiped between runs)",
+    )
+    bench_scenario.add_argument(
+        "--scenario",
+        nargs="+",
+        required=True,
+        metavar="NAME",
+        help="scenarios to run (see `list`)",
+        choices=[sc.name for sc in SCENARIOS],
+    )
+
+    run = subparsers.add_parser("run", help="run one scenario built from explicit args")
     run.add_argument(
         "fs_dir",
         type=Path,
         help="folder backing the tier store (wiped between runs)",
     )
-    run.add_argument("concurrency", type=int)
-    run.add_argument("cpu_size", choices=sorted(CPU_SIZES))
     run.add_argument(
-        "config_tag",
-        nargs="?",
-        choices=sorted(PHASES),
-        default="prefill",
-        help="phase tag: prefill, decode, or prefill-decode (default: prefill)",
+        "--concurrency", type=int, required=True, help="concurrent requests"
     )
     run.add_argument(
-        "--files",
-        choices=sorted(FILE_SIZES),
-        default="block1024",
-        help="file granularity (block_size 16 vs 1024)",
+        "--offload-block-size",
+        type=int,
+        required=True,
+        help="KV block_size (tokens) written to the FS tier",
     )
     run.add_argument(
-        "--prefix-tokens",
-        choices=sorted(PROMPT_SIZES),
-        default="20k",
-        help="turn-0 prompt length (shared prefix driven into the FS tier)",
+        "--prefix-tokens", type=int, required=True, help="shared prefix length"
     )
+    run.add_argument(
+        "--cpu-gib", type=float, required=True, help="CPU tier budget in GiB"
+    )
+    run.add_argument(
+        "--gpu-gib", type=float, required=True, help="GPU KV cache size in GiB"
+    )
+    run.add_argument("--isl-tokens", type=int, help="per-turn prompt tokens")
+    run.add_argument(
+        "--phase", choices=sorted(PHASES), help="prefill or mixed (default: prefill)"
+    )
+
+    subparsers.add_parser("list", help="list scenarios and estimated footprints")
 
     compare_parser = subparsers.add_parser("compare", help="compare two session dirs")
     compare_parser.add_argument("session_a", type=Path, metavar="MAIN_DIR")
@@ -518,18 +676,33 @@ def _main() -> None:
     if args.command == "compare":
         compare(args.session_a, args.session_b)
         return
+
+    by_name = {sc.name: sc for sc in SCENARIOS}
+    if args.command == "list":
+        for sc in SCENARIOS:
+            sc.describe()
+        return
+
     if args.command == "run":
         specs = [
-            RunSpec(
-                args.config_tag,
-                args.files,
-                args.prefix_tokens,
-                args.concurrency,
-                args.cpu_size,
+            Scenario(
+                "adhoc",
+                "ad-hoc scenario",
+                concurrency=args.concurrency,
+                offload_block_size=args.offload_block_size,
+                prefix_tokens=args.prefix_tokens,
+                cpu_bytes=gib(args.cpu_gib),
+                gpu_bytes=gib(args.gpu_gib),
+                isl_tokens=args.isl_tokens or BENCH_PROMPT_TOKENS,
+                phase=args.phase or "prefill",
             )
         ]
+        specs[0].describe()
+    elif args.command == "bench":
+        specs = QUICK if args.quick else SCENARIOS
     else:
-        specs = build_sweeps("quick" if args.quick else "full")
+        assert args.command == "bench-scenario"
+        specs = [by_name[n] for n in args.scenario]
 
     try:
         preflight(args.fs_dir, args.port)
