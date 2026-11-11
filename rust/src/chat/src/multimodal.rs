@@ -721,8 +721,8 @@ fn extract_media_parts(
     };
     parts
         .map(|part| match part? {
-            ChatContentPart::Text { .. } => {
-                bail_multimodal!("renderer reported a text part as multimodal content")
+            ChatContentPart::Text { .. } | ChatContentPart::ToolReference { .. } => {
+                bail_multimodal!("renderer reported a non-media part as multimodal content")
             }
             ChatContentPart::ImageUrl {
                 image_url,
@@ -975,12 +975,17 @@ impl MultimodalModelInfo {
     )]
     async fn fetch_media(&self, media_parts: Vec<MediaContentPart>) -> Result<FetchedMedia> {
         let mut tracker = AsyncMultiModalTracker::new(Arc::clone(&self.media_connector));
-        if let Some((sampling, default_fps)) = self.video_sampling_policy() {
+        let video_sampling_policy = self.video_sampling_policy();
+        if let Some((sampling, default_fps)) = video_sampling_policy {
             tracker = tracker
                 .with_video_frame_sampling(sampling)
                 .with_default_video_sample_fps(default_fps);
         }
-        for part in media_parts {
+        for mut part in media_parts {
+            apply_video_fps(
+                &mut part,
+                video_sampling_policy.map(|(sampling, _)| sampling),
+            )?;
             tracker.push_part(part)?;
         }
 
@@ -1037,6 +1042,29 @@ impl MultimodalModelInfo {
             audio_uuids,
         })
     }
+}
+
+/// Check a video part's requested sampling rate against the model's frame
+/// sampling, and scope a client uuid by the rate: as in Python, the uuid alone
+/// does not identify frames sampled at a per-request rate.
+fn apply_video_fps(part: &mut MediaContentPart, sampling: Option<FrameSampling>) -> Result<()> {
+    let MediaContentPart::VideoUrl {
+        uuid,
+        fps: Some(fps),
+        ..
+    } = part
+    else {
+        return Ok(());
+    };
+    if let Some(FrameSampling::UpTo { .. }) = sampling {
+        return Err(Error::UnsupportedMultimodalContent(
+            "video fps for a model that samples a fixed number of frames",
+        ));
+    }
+    if let Some(uuid) = uuid {
+        *uuid = format!("{uuid}@fps={fps}");
+    }
+    Ok(())
 }
 
 /// Adapter from the frontend tokenizer trait to `llm-multimodal`.
@@ -1214,6 +1242,58 @@ mod tests {
         )
         .unwrap()
         .expect("GLM-5.3-Flash multimodal support")
+    }
+
+    #[test]
+    fn request_video_fps_scopes_the_uuid_and_needs_a_rate_based_sampling() {
+        let part = |fps| MediaContentPart::VideoUrl {
+            url: "https://example.com/clip.mp4".to_owned(),
+            uuid: Some("clip".to_owned()),
+            fps,
+            max_long_side_pixel: None,
+        };
+        let results = [
+            (part(None), Some(FrameSampling::EvenRounded)),
+            (part(Some(1.0)), Some(FrameSampling::EvenRounded)),
+            (
+                part(Some(1.0)),
+                Some(FrameSampling::UpTo { max_frames: 32 }),
+            ),
+        ]
+        .map(|(mut part, sampling)| {
+            apply_video_fps(&mut part, sampling)
+                .map(|()| part)
+                .map_err(|error| error.to_report_string())
+        });
+        expect_test::expect![[r#"
+            [
+                Ok(
+                    VideoUrl {
+                        url: "https://example.com/clip.mp4",
+                        uuid: Some(
+                            "clip",
+                        ),
+                        fps: None,
+                        max_long_side_pixel: None,
+                    },
+                ),
+                Ok(
+                    VideoUrl {
+                        url: "https://example.com/clip.mp4",
+                        uuid: Some(
+                            "clip@fps=1",
+                        ),
+                        fps: Some(
+                            1.0,
+                        ),
+                        max_long_side_pixel: None,
+                    },
+                ),
+                Err(
+                    "unsupported multimodal content: video fps for a model that samples a fixed number of frames",
+                ),
+            ]
+        "#]].assert_debug_eq(&results);
     }
 
     #[test]
@@ -1700,6 +1780,25 @@ mod tests {
             .with_regular_token("<｜deepseek_image｜>", DEEPSEEK_V41_IMAGE_ID)
             .with_regular_token("<|place_holder_mm_span_0436|>", DEEPSEEK_V41_IMAGE_PAD_ID);
         test_info("deepseek_v41", config, tokenizer)
+    }
+
+    #[test]
+    fn kimi_k31_resolves_kimi_k3_image_support_by_model_type() {
+        const KIMI_MEDIA_PAD_ID: u32 = 163605;
+        let config = serde_json::json!({
+            "model_type": "kimi_k31",
+            "media_placeholder_token_id": KIMI_MEDIA_PAD_ID,
+        });
+        let tokenizer = TestTokenizer::new().with_regular_token("<|media_pad|>", KIMI_MEDIA_PAD_ID);
+        // The test model ID (`kimi_k31-test`) does not contain `kimi-k3`, so
+        // only the model type can select the K3 spec.
+        let info = test_info("kimi_k31", config, tokenizer);
+
+        assert_eq!(
+            info.placeholder_token(Modality::Image),
+            Some("<|media_pad|>")
+        );
+        assert_eq!(info.placeholder_token(Modality::Video), None);
     }
 
     #[test]
