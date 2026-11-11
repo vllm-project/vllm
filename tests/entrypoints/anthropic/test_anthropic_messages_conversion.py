@@ -5,11 +5,11 @@
 Tests the image source handling and tool_result content parsing in
 AnthropicServingMessages.to_chat_completion_request().
 
-Also covers extended-thinking edge cases such as ``redacted_thinking``
+Also covers extended-thinking edge cases such as `redacted_thinking`
 blocks echoed back by Anthropic clients, and streaming conversion in
-``message_stream_converter``.
+`message_stream_converter`.
 
-Also covers cache usage computation in ``_build_anthropic_usage``.
+Also covers cache usage computation in `_build_anthropic_usage`.
 """
 
 import json
@@ -27,8 +27,12 @@ from pydantic import BaseModel, Field, ValidationError
 
 from vllm.entrypoints.anthropic.api_router import attach_router
 from vllm.entrypoints.anthropic.protocol import (
+    AnthropicContentBlock,
     AnthropicCountTokensRequest,
+    AnthropicCountTokensResponse,
     AnthropicMessagesRequest,
+    AnthropicMessagesResponse,
+    AnthropicUsage,
 )
 from vllm.entrypoints.anthropic.serving import (
     AnthropicServingMessages,
@@ -405,6 +409,37 @@ class TestToolResultContent:
             "https://example.com/img2.jpg",
         ]
 
+    def test_tool_result_with_tool_references(self):
+        """A tool_result with tool_reference items stays one tool message, with
+        the references first, so templates pair one result with one call."""
+        request = self._make_tool_result_request(
+            [
+                {"type": "text", "text": "2 tools found"},
+                {"type": "tool_reference", "tool_name": "get_weather"},
+                {"type": "tool_reference", "tool_name": "get_time"},
+                {
+                    "type": "image",
+                    "source": {
+                        "type": "base64",
+                        "media_type": "image/png",
+                        "data": "AAAA",
+                    },
+                },
+            ]
+        )
+        result = _convert(request)
+
+        assert [m["role"] for m in result.messages] == ["assistant", "tool", "user"]
+        assert result.messages[1] == {
+            "role": "tool",
+            "tool_call_id": "call_001",
+            "content": [
+                {"type": "tool_reference", "name": "get_weather"},
+                {"type": "tool_reference", "name": "get_time"},
+                {"type": "text", "text": "2 tools found"},
+            ],
+        }
+
     def test_tool_result_none_content(self):
         request = self._make_tool_result_request(None)
         result = _convert(request)
@@ -486,7 +521,7 @@ class TestAttributionHeaderStripping:
 
 class TestThinkingBlockConversion:
     """Verify that thinking blocks in assistant messages are correctly
-    moved to the ``reasoning`` field and stripped from ``content`` during
+    moved to the `reasoning` field and stripped from `content` during
     the Anthropic→OpenAI conversion.
 
     This is the Anthropic-endpoint path: the client echoes back the full
@@ -804,7 +839,7 @@ class TestBuildAnthropicUsage:
 
 
 class TestInlineSystemMessageInMessagesArray:
-    """Verify that ``role: system`` messages embedded inside the ``messages``
+    """Verify that `role: system` messages embedded inside the `messages`
     array are preserved in their original position.
 
     Unlike the previous approach that merged all system messages into a single
@@ -1245,9 +1280,9 @@ class TestMessageStreamConverterToolUseContentBuffering:
 class TestMessageStartIncludesTypeAndRole:
     """Regression test for issue #45367: the streaming message_start event is
     serialized with exclude_unset=True, which silently dropped the
-    default-valued ``type``/``role`` fields of the nested message object.
+    default-valued `type`/`role` fields of the nested message object.
     Strict Anthropic SDK clients (e.g. Claude Code) validate
-    ``message_start.message.type``/``role`` and reject the whole stream when
+    `message_start.message.type`/`role` and reject the whole stream when
     they are missing.
     """
 
@@ -1281,12 +1316,12 @@ class TestStreamingCacheUsageSemantics:
     """Locks in the documented streaming behavior of cache usage fields.
 
     vLLM's OpenAI chat completion streaming only attaches
-    ``prompt_tokens_details`` to the terminal usage chunk. The Anthropic layer
-    mirrors that contract: cache fields are omitted on ``message_start`` (key
-    absence signals "unknown") and populated on ``message_delta`` (the final
+    `prompt_tokens_details` to the terminal usage chunk. The Anthropic layer
+    mirrors that contract: cache fields are omitted on `message_start` (key
+    absence signals "unknown") and populated on `message_delta` (the final
     cumulative count). This is intentionally consistent with vLLM's OpenAI
     behavior, even though Anthropic's upstream API populates cache fields on
-    ``message_start``; closing that gap requires plumbing cache info into the
+    `message_start`; closing that gap requires plumbing cache info into the
     first chunk at the OpenAI layer, which is out of scope here.
     """
 
@@ -1455,7 +1490,7 @@ class TestDetectMergeInlineSystem:
         assert AnthropicServingMessages._detect_merge_inline_system(None) is True
 
     def test_tools_none_check_template_merges(self):
-        """OLMo 3-style ``tools | tojson`` on undefined tools falls back to merge."""
+        """OLMo 3-style `tools | tojson` on undefined tools falls back to merge."""
         template = (
             "{% if tools is none %}{% else %}{{ tools | tojson }}{% endif %}"
             "{% for m in messages %}{{ m.content }}{% endfor %}"
@@ -1463,7 +1498,7 @@ class TestDetectMergeInlineSystem:
         assert AnthropicServingMessages._detect_merge_inline_system(template) is True
 
     def test_tools_loop_template_no_merge(self):
-        """Hermes-style ``for tool in tools`` must not raise in the probe."""
+        """Hermes-style `for tool in tools` must not raise in the probe."""
         template = (
             "{% for tool in tools %}{{ tool | tojson }}{% endfor %}"
             "{% for m in messages %}{{ m.content }}{% endfor %}"
@@ -1506,6 +1541,73 @@ class TestDetectMergeInlineSystem:
             is expected
         )
         assert mock_logger.warning_once.called is expected
+
+    @pytest.mark.parametrize(
+        ("model", "expected"),
+        [
+            # Renders inline system messages as system turns; merging them
+            # would break prefix caching for Claude Code's per-turn reminders.
+            ("deepseek-ai/DeepSeek-V4.1-Flash", False),
+            # Appends inline system text to the preceding user turn (#46710).
+            ("deepseek-ai/DeepSeek-V4-Flash", True),
+            # Puts a trailing system message after the generation prompt.
+            ("deepseek-ai/DeepSeek-V3.2-Exp", True),
+        ],
+    )
+    def test_probes_non_jinja_renderer(self, model, expected):
+        """Encoder-based renderers are probed by rendering, not registered."""
+        from vllm.config import ModelConfig, VllmConfig
+        from vllm.renderers import renderer_from_config
+        from vllm.renderers.online_renderer import OnlineRenderer
+
+        model_config = ModelConfig(model=model)
+        online_renderer = OnlineRenderer(
+            model_config=model_config,
+            renderer=renderer_from_config(VllmConfig(model_config=model_config)),
+            request_logger=None,
+            chat_template=None,
+            chat_template_content_format="auto",
+        )
+        assert (
+            AnthropicServingMessages._should_merge_inline_system(online_renderer)
+            is expected
+        )
+
+    def test_non_jinja_probe_uses_server_chat_template(self):
+        """Renderers that honor --chat-template (e.g. Cohere) probe with it."""
+        renderer = MagicMock()
+        renderer.render_messages.side_effect = ValueError
+        online_renderer = SimpleNamespace(
+            renderer=renderer,
+            chat_template="custom",
+            chat_template_content_format="string",
+            default_chat_template_kwargs={"thinking": False},
+        )
+        AnthropicServingMessages._should_merge_inline_system(online_renderer)
+        params = renderer.render_messages.call_args.args[1]
+        assert params.chat_template == "custom"
+        assert params.chat_template_content_format == "string"
+        assert params.chat_template_kwargs == {
+            "thinking": False,
+            "add_generation_prompt": True,
+        }
+
+    def test_non_jinja_merge_warning_omits_chat_template_hint(self, monkeypatch):
+        """--chat-template may not apply to non-jinja renderers (e.g. V4)."""
+        import vllm.entrypoints.anthropic.serving as serving_mod
+
+        mock_logger = MagicMock()
+        monkeypatch.setattr(serving_mod, "logger", mock_logger)
+        renderer = MagicMock()
+        renderer.render_messages.side_effect = ValueError
+        online_renderer = SimpleNamespace(
+            renderer=renderer,
+            chat_template=None,
+            chat_template_content_format="auto",
+            default_chat_template_kwargs={},
+        )
+        assert AnthropicServingMessages._should_merge_inline_system(online_renderer)
+        assert "--chat-template" not in mock_logger.warning_once.call_args.args[0]
 
 
 # ======================================================================
@@ -1610,11 +1712,11 @@ class TestCacheSalt:
 
 class TestStopSequenceReason:
     """When generation stops because a configured stop string matched, the
-    Anthropic Messages API must report ``stop_reason="stop_sequence"`` and echo
-    the matched string in ``stop_sequence``. vLLM surfaces the matched string in
-    the OpenAI choice's ``stop_reason`` field (a str) while ``finish_reason``
-    stays ``"stop"``. A natural EOS (stop_reason None) or a stop token id (int)
-    must still map to ``end_turn``.
+    Anthropic Messages API must report `stop_reason="stop_sequence"` and echo
+    the matched string in `stop_sequence`. vLLM surfaces the matched string in
+    the OpenAI choice's `stop_reason` field (a str) while `finish_reason`
+    stays `"stop"`. A natural EOS (stop_reason None) or a stop token id (int)
+    must still map to `end_turn`.
     """
 
     def test_non_streaming_stop_string_maps_to_stop_sequence(self):
@@ -1730,8 +1832,8 @@ class TestStopSequenceReason:
 
 
 class TestToolUseStopReason:
-    """A response carrying a tool_use block reports ``stop_reason="tool_use"``
-    even when the chat layer says ``finish_reason="stop"``, as it does for a
+    """A response carrying a tool_use block reports `stop_reason="tool_use"`
+    even when the chat layer says `finish_reason="stop"`, as it does for a
     forced (named) tool. A call cut short by max_tokens or a stop string does not.
     """
 
@@ -1893,6 +1995,44 @@ class TestClientErrorResponses:
 
 
 # ======================================================================
+# tool definitions
+# ======================================================================
+
+
+class TestToolDefinitions:
+    @pytest.mark.parametrize(
+        "tool",
+        [
+            {"type": "web_search_20250305", "name": "web_search", "max_uses": 8},
+            {"type": "bash_20250124", "name": "bash"},
+        ],
+    )
+    def test_anthropic_defined_tool_is_rejected_by_type(self, tool):
+        with pytest.raises(ValidationError) as exc_info:
+            _make_request([{"role": "user", "content": "Hi"}], tools=[tool])
+
+        errors = exc_info.value.errors()
+        assert len(errors) == 1
+        assert f"{tool['type']!r} is not supported" in errors[0]["msg"]
+
+    @pytest.mark.parametrize("extra", [{}, {"type": "custom"}])
+    def test_custom_tool_is_accepted(self, extra):
+        request = _make_request(
+            [{"role": "user", "content": "Hi"}],
+            tools=[{"name": "get_weather", "input_schema": {}, **extra}],
+        )
+        assert request.tools is not None
+        assert request.tools[0].input_schema == {"type": "object"}
+
+    def test_custom_tool_still_requires_input_schema(self):
+        with pytest.raises(ValidationError, match="input_schema"):
+            _make_request(
+                [{"role": "user", "content": "Hi"}],
+                tools=[{"type": "custom", "name": "get_weather"}],
+            )
+
+
+# ======================================================================
 # thinking configuration pass-through
 # ======================================================================
 
@@ -2001,6 +2141,30 @@ class TestThinkingConfig:
         assert result.reasoning_effort == "low"
         assert result.thinking_token_budget is None
 
+    def test_between_tools_disables_upfront_thinking(self):
+        """`between_tools` disables upfront thinking even with an effort cap."""
+        request = _make_request(
+            [{"role": "user", "content": "Hello"}],
+            output_config={"effort": "low"},
+            thinking={"type": "between_tools"},
+        )
+
+        result = _convert(request, disabled_thinking_effort="none")
+        assert result.reasoning_effort == "none"
+        assert result.thinking_token_budget is None
+        assert result.include_reasoning is True
+
+    def test_between_tools_uses_disabled_effort_fallback(self):
+        """Models that cannot honor `none` use the configured fallback effort."""
+        request = _make_request(
+            [{"role": "user", "content": "Hello"}],
+            thinking={"type": "between_tools"},
+        )
+
+        result = _convert(request, disabled_thinking_effort="low")
+        assert result.reasoning_effort == "low"
+        assert result.thinking_token_budget is None
+
     def test_disabled_uses_configured_effort(self):
         """Models that always think (GLM-5.3) or reject "none" (Harmony) are
         served with a low effort instead."""
@@ -2047,6 +2211,10 @@ class TestThinkingConfig:
                 {"thinking": {"type": "enabled", "budget_tokens": 2048}},
                 id="enabled",
             ),
+            pytest.param(
+                {"thinking": {"type": "between_tools"}},
+                id="between_tools",
+            ),
         ],
     )
     def test_count_tokens_matches_messages(self, config):
@@ -2064,9 +2232,154 @@ class TestThinkingConfig:
         assert result.reasoning_effort == expected.reasoning_effort
         assert result.thinking_token_budget == expected.thinking_token_budget
 
+    def test_between_tools_tool_round_trip_keeps_history_and_settings(self):
+        """Echoed thinking + tool_use and the tool_result must survive conversion
+        while between_tools disables upfront thinking."""
+        request = _make_request(
+            [
+                {"role": "user", "content": "What is the weather in Paris?"},
+                {
+                    "role": "assistant",
+                    "content": [
+                        {
+                            "type": "thinking",
+                            "thinking": "I should call get_weather.",
+                            "signature": "sig_1",
+                        },
+                        {
+                            "type": "tool_use",
+                            "id": "call_1",
+                            "name": "get_weather",
+                            "input": {"city": "Paris"},
+                        },
+                    ],
+                },
+                {
+                    "role": "user",
+                    "content": [
+                        {
+                            "type": "tool_result",
+                            "tool_use_id": "call_1",
+                            "content": "18C and cloudy",
+                        }
+                    ],
+                },
+            ],
+            output_config={"effort": "low"},
+            thinking={"type": "between_tools"},
+            tools=[
+                {
+                    "name": "get_weather",
+                    "description": "Get the weather.",
+                    "input_schema": {
+                        "type": "object",
+                        "properties": {"city": {"type": "string"}},
+                    },
+                }
+            ],
+        )
+
+        result = _convert(request)
+
+        assert result.reasoning_effort == "none"
+        assert result.thinking_token_budget is None
+        asst = [m for m in result.messages if m.get("role") == "assistant"]
+        assert len(asst) == 1
+        assert asst[0].get("reasoning") == "I should call get_weather."
+        tool_calls = asst[0].get("tool_calls")
+        assert isinstance(tool_calls, list)
+        assert tool_calls[0]["function"]["name"] == "get_weather"
+        tool_msgs = [m for m in result.messages if m.get("role") == "tool"]
+        assert tool_msgs and "18C and cloudy" in tool_msgs[0]["content"]
+
+    def test_between_tools_streaming_matches_non_streaming_settings(self):
+        """Streaming preserves the disabled-thinking mapping."""
+        messages = [{"role": "user", "content": "Hello"}]
+        streaming = _convert(
+            _make_request(
+                messages,
+                output_config={"effort": "high"},
+                thinking={"type": "between_tools"},
+                stream=True,
+            )
+        )
+        non_streaming = _convert(
+            _make_request(
+                messages,
+                output_config={"effort": "high"},
+                thinking={"type": "between_tools"},
+            )
+        )
+
+        assert streaming.stream is True
+        assert streaming.reasoning_effort == non_streaming.reasoning_effort == "none"
+        assert streaming.thinking_token_budget is None
+        assert non_streaming.thinking_token_budget is None
+
+
+class TestBetweenToolsEntryPoint:
+    """`thinking.type=between_tools` must be accepted by the native Messages
+    routes instead of failing the request model's union with 400."""
+
+    @staticmethod
+    def _response() -> AnthropicMessagesResponse:
+        return AnthropicMessagesResponse(
+            id="msg_between_tools",
+            content=[AnthropicContentBlock(type="text", text="ok")],
+            model="test-model",
+            stop_reason="end_turn",
+            usage=AnthropicUsage(input_tokens=5, output_tokens=1),
+        )
+
+    def test_messages_accepts_between_tools(self):
+        handler = MagicMock(spec=AnthropicServingMessages)
+
+        async def create_messages(request, raw_request):
+            converted = _convert(request)
+            assert converted.reasoning_effort == "none"
+            return self._response()
+
+        handler.create_messages.side_effect = create_messages
+
+        app = TestClientErrorResponses._make_api_app(handler)
+        with TestClient(app, raise_server_exceptions=False) as client:
+            response = client.post(
+                "/v1/messages",
+                json={
+                    "model": "test-model",
+                    "max_tokens": 256,
+                    "messages": [{"role": "user", "content": "Reply with ok."}],
+                    "output_config": {"effort": "high"},
+                    "thinking": {"type": "between_tools"},
+                },
+            )
+
+        assert response.status_code == HTTPStatus.OK, response.text
+        handler.create_messages.assert_awaited_once()
+        sent = handler.create_messages.await_args.args[0]
+        assert sent.thinking.type == "between_tools"
+
+    def test_count_tokens_accepts_between_tools(self):
+        handler = MagicMock(spec=AnthropicServingMessages)
+        handler.count_tokens.return_value = AnthropicCountTokensResponse(input_tokens=5)
+
+        app = TestClientErrorResponses._make_api_app(handler)
+        with TestClient(app, raise_server_exceptions=False) as client:
+            response = client.post(
+                "/v1/messages/count_tokens",
+                json={
+                    "model": "test-model",
+                    "messages": [{"role": "user", "content": "Reply with ok."}],
+                    "thinking": {"type": "between_tools"},
+                },
+            )
+
+        assert response.status_code == HTTPStatus.OK, response.text
+        handler.count_tokens.assert_awaited_once()
+
 
 class TestProbeDisabledThinkingEffort:
-    """``auto`` falls back to ``low`` when ``none`` cannot turn thinking off."""
+    """`auto` falls back to `low` when `none` cannot turn thinking off."""
 
     @staticmethod
     async def _probe(render):
@@ -2113,6 +2426,25 @@ class TestProbeDisabledThinkingEffort:
         assert calls[0] == calls[1] > 0
 
     @pytest.mark.asyncio
+    async def test_between_tools_uses_disabled_effort_resolution(self):
+        renderer = MagicMock()
+
+        def render(request):
+            if request.reasoning_effort == "none":
+                raise ValueError("unsupported none")
+            return [], [{"prompt_token_ids": [1]}]
+
+        renderer.render_chat = AsyncMock(side_effect=render)
+        resolver = DisabledThinkingEffortResolver(renderer)
+        request = _make_request(
+            [{"role": "user", "content": "Hello"}],
+            thinking={"type": "between_tools"},
+        )
+
+        assert await resolver.resolve_for(request) == "low"
+        renderer.render_chat.assert_awaited()
+
+    @pytest.mark.asyncio
     @pytest.mark.parametrize("effort", ["none", "low", "medium", "high", "max"])
     async def test_explicit_effort_skips_probe(self, effort):
         renderer = MagicMock()
@@ -2149,7 +2481,7 @@ class TestProbeDisabledThinkingEffort:
 
     @staticmethod
     def _reject_none(effort):
-        """Harmony (gpt-oss) raises on ``none``."""
+        """Harmony (gpt-oss) raises on `none`."""
         if effort == "none":
             raise ValueError(f"unsupported {effort=}")
         return [1]
@@ -2177,7 +2509,7 @@ class TestProbeDisabledThinkingEffort:
 
 
 class TestMidConversationToolChanges:
-    """``tool_addition``/``tool_removal`` blocks decide which tools the chat
+    """`tool_addition`/`tool_removal` blocks decide which tools the chat
     template is given, since it has no other way to see them."""
 
     @staticmethod
