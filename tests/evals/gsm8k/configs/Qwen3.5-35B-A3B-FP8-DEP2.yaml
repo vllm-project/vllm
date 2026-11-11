@@ -8,3 +8,4 @@ server_args: >-
   --data-parallel-size 2
   --enable-expert-parallel
   --kv-cache-dtype fp8
+  --hf-overrides '{"head_dtype": "float32"}'
