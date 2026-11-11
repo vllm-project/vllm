@@ -61,6 +61,8 @@ GATHER_C = tl.constexpr(-5)  # row's cut bins are gathered by every program
 ALONE_C = tl.constexpr(-6)  # row is cut by one program
 # ROCm serializes atomics to one address: the gather takes one slot range per block.
 GATHER_SCAN = tl.constexpr(current_platform.is_rocm())
+# ROCm: each acquire poll invalidates caches that the programs still working rely on.
+RELAXED_POLL = tl.constexpr(current_platform.is_rocm())
 # Span flags: the row's top-k is cut first (its p waits), then its top-p alone.
 K_FIRST = tl.constexpr(1)
 P_AFTER_K = tl.constexpr(2)
@@ -1588,8 +1590,13 @@ def _grid_sync(sync_ptr, target):
     """Wait until target arrivals (every program, once per barrier so far)."""
     tl.debug_barrier()
     tl.atomic_add(sync_ptr, 1, sem="release", scope="gpu")
-    while tl.atomic_add(sync_ptr, 0, sem="acquire", scope="gpu") < target:
-        pass
+    if RELAXED_POLL:
+        while tl.atomic_add(sync_ptr, 0, sem="relaxed", scope="gpu") < target:
+            pass
+        tl.atomic_add(sync_ptr, 0, sem="acquire", scope="gpu")
+    else:
+        while tl.atomic_add(sync_ptr, 0, sem="acquire", scope="gpu") < target:
+            pass
     tl.debug_barrier()
 
 
