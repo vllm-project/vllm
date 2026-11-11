@@ -8,12 +8,12 @@ interface is the `SpecializedDecode` shape of #61867.
 ## Enabling
 
 ```bash
-vllm serve <GLM-5.2 checkpoint> -tp 8 \
-  --additional-config '{"decode_backend": "latency_specialized"}' \
+vllm serve <GLM-5.2 checkpoint> -tp 8 --monokernel \
   --compilation-config '{"cudagraph_mode": "FULL_DECODE_ONLY"}'
 ```
 
-`decode_backend` is `"auto"` (off) by default. If a deployment isn't supported,
+`--monokernel` and `--additional-config '{"decode_backend": "latency_specialized"}'`
+select the same decode; both are off by default. If a deployment isn't supported,
 startup fails with one error that lists every reason.
 
 ## Supported checkpoints

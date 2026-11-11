@@ -80,9 +80,15 @@ class DecodeConfig:
 
 
 def decode_backend(vllm_config) -> str:
-    """The requested decode backend: the one place that reads the switch."""
+    """The requested decode backend: the one place that reads the switch.
+    `--monokernel` (`KernelConfig.monokernel`) asks for the specialized decode as
+    `additional_config={"decode_backend": "latency_specialized"}` does."""
     extra = vllm_config.additional_config
-    return extra.get("decode_backend", AUTO) if isinstance(extra, dict) else AUTO
+    backend = extra.get("decode_backend", AUTO) if isinstance(extra, dict) else AUTO
+    kernel_config = getattr(vllm_config, "kernel_config", None)
+    if backend == AUTO and getattr(kernel_config, "monokernel", False):
+        return SPECIALIZED
+    return backend
 
 
 def specialized_decode_config(vllm_config) -> DecodeConfig | None:

@@ -418,7 +418,7 @@ class DeepseekV32ForCausalLM(DeepseekV2ForCausalLM):
     model_cls = DeepseekV32Model
 
     def __init__(self, *, vllm_config: VllmConfig, prefix: str = ""):
-        # decode_backend=latency_specialized: a specialized decode executor over
+        # --monokernel / decode_backend=latency_specialized: a specialized decode over
         # self.model, built by the model state once the weights are loaded. The config
         # check raises before the modules allocate their weights.
         decode_config = specialized_decode_config(vllm_config)

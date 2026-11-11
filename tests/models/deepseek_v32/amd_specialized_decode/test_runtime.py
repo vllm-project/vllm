@@ -136,6 +136,24 @@ def test_switch_off_runs_no_checks(make_vc, monkeypatch, backend):
     assert R.decode_backend(vc) == "auto"
 
 
+@pytest.mark.usefixtures("gfx950")
+def test_monokernel_flag_selects_the_specialized_decode(make_vc):
+    """`--monokernel` (KernelConfig.monokernel) asks for the same decode as
+    decode_backend=latency_specialized, with the same refusals; without either
+    switch nothing changes."""
+    vc = make_vc(backend=None)
+    assert R.specialized_decode_config(vc) is None
+    vc.kernel_config = NS(monokernel=True)
+    assert R.decode_backend(vc) == "latency_specialized"
+    assert isinstance(R.specialized_decode_config(vc), R.DecodeConfig)
+    vc = make_vc(backend=None, tp=4)
+    vc.kernel_config = NS(monokernel=True)
+    with pytest.raises(ValueError, match="TP 4"):
+        R.specialized_decode_config(vc)
+    vc.kernel_config = NS(monokernel=False)
+    assert R.specialized_decode_config(vc) is None
+
+
 def test_bad_backend(make_vc):
     with pytest.raises(ValueError, match="'auto' or 'latency_specialized'"):
         R.specialized_decode_config(make_vc(backend="fast"))
