@@ -378,7 +378,7 @@ def test_inc_get_quant_method_unquantized_unknown_layer_returns_none() -> None:
 def test_inc_get_quant_method_unquantized_layer_with_model_prefix(
     layer_factory,
 ) -> None:
-    """``model.``-prefixed extra_config entries trigger early exit for both
+    """`model.`-prefixed extra_config entries trigger early exit for both
     LinearBase and ParallelLMHead layers."""
     config = make_config(extra_config={"model.layer": {"bits": 16}})
     layer = layer_factory()
@@ -391,7 +391,7 @@ def test_inc_get_quant_method_unquantized_layer_with_model_prefix(
 def test_inc_get_quant_method_unquantized_routed_experts_with_model_prefix(
     monkeypatch,
 ) -> None:
-    """``model.``-prefixed extra_config entries trigger early exit for
+    """`model.`-prefixed extra_config entries trigger early exit for
     RoutedExperts layers, returning UnquantizedFusedMoEMethod."""
 
     class DummyUnquantizedFusedMoEMethod:
@@ -414,7 +414,7 @@ def test_inc_get_quant_method_unquantized_routed_experts_with_model_prefix(
 
 
 def test_inc_get_quant_method_unknown_layer_with_model_prefix_returns_none() -> None:
-    """``model.``-prefixed extra_config entries return None for unhandled
+    """`model.`-prefixed extra_config entries return None for unhandled
     layer types (non-Linear, non-MoE)."""
     config = make_config(extra_config={"model.unknown": {"bits": 16}})
 
@@ -2166,9 +2166,9 @@ E2E_MODELS = [
 
 
 def _has_xpu_ops() -> bool:
-    """True when ``vllm._xpu_ops`` is importable.
+    """True when `vllm._xpu_ops` is importable.
 
-    ``apply_weights`` imports it for the activation quantizer, and the stubs
+    `apply_weights` imports it for the activation quantizer, and the stubs
     below patch through it, so tests that exercise that path cannot even be set
     up on a build without vllm-xpu-kernels installed.
     """
@@ -2184,8 +2184,8 @@ def _has_xpu_ops() -> bool:
 def _has_w4a8_kernel() -> bool:
     """True when this build can actually run the w4a8 GEMM.
 
-    The op is registered as a side effect of importing ``vllm._xpu_ops``, so it
-    is not visible on ``torch.ops._xpu_C`` until that import happens.
+    The op is registered as a side effect of importing `vllm._xpu_ops`, so it
+    is not visible on `torch.ops._xpu_C` until that import happens.
     """
     return _has_xpu_ops() and hasattr(torch.ops._xpu_C, "int4_gemm_w4a8")
 
@@ -2485,7 +2485,7 @@ def test_keeps_fp16_scales(w4a8_layer) -> None:
     """The kernel reads scales as fp16 regardless of activation dtype.
 
     Passing bf16 scales does not raise — it silently returns wrong results — so
-    an fp16 copy must exist, while the bf16 ``scales`` survive for the
+    an fp16 copy must exist, while the bf16 `scales` survive for the
     small-batch w4a16 fallback.
     """
     method, layer = w4a8_layer

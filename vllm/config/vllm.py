@@ -45,7 +45,7 @@ from .ec_transfer import ECTransferConfig
 from .engram import EngramConfig, model_has_engram_layers
 from .kernel import KernelConfig
 from .kv_events import KVEventsConfig
-from .kv_transfer import KVTransferConfig, hisparse_host_pool_gib
+from .kv_transfer import KVCacheAccess, KVTransferConfig, hisparse_host_pool_gib
 from .load import LoadConfig
 from .logging import LoggingConfig
 from .lora import LoRAConfig
@@ -122,7 +122,7 @@ DEFAULT_BREAKABLE_CUDAGRAPH_ARCHITECTURES = frozenset(
         "KimiLinearForCausalLM",
         "MiniMaxM3SparseForCausalLM",
         "MiniMaxM3SparseForConditionalGeneration",
-        "MuseSpark1xForCausalLM",
+        "MuseSparkForCausalLM",
         "MuseSparkForConditionalGeneration",
         "Qwen4ExpForCausalLM",
         "Qwen4ExpForConditionalGeneration",
@@ -595,6 +595,14 @@ class VllmConfig:
         ):
             return self.diffusion_config.canvas_length
         return 0
+
+    @property
+    def num_scheduled_spec_tokens(self) -> int:
+        """See `SpeculatorConfig.num_scheduled_spec_tokens`."""
+        speculative_config = self.speculative_config
+        if speculative_config is None:
+            return self.num_speculative_tokens
+        return speculative_config.speculator_config.num_scheduled_spec_tokens
 
     @property
     def num_lookahead_tokens(self) -> int:
@@ -2135,6 +2143,15 @@ class VllmConfig:
                 "and host_pool_gib; to combine it with another connector, nest "
                 "both in MultiConnector instead of using --kv-offloading-size."
             )
+        if (
+            self.speculative_config is not None
+            and self.speculative_config.prefill_context_kv_only
+            and not (self.kv_transfer_config and self.kv_transfer_config.is_kv_producer)
+        ):
+            raise ValueError(
+                "prefill_context_kv_only is for a P/D prefill instance: it needs a "
+                "kv_transfer_config that produces KV (kv_producer or kv_both)."
+            )
         self._verify_aux_output_compatibility()
 
         # Hybrid KV cache manager (HMA) runtime rules:
@@ -3181,12 +3198,18 @@ class VllmConfig:
         may pick a different runner, and must not revisit the decision.
         """
         from vllm.platforms import current_platform
+        from vllm.utils.vmm_driver import imex_channel_available
 
         cache_config = self.cache_config
         if cache_config._extensible_kv_cache_resolved:
             return
         cache_config._extensible_kv_cache_resolved = True
         requested = cache_config.enable_extensible_kv_cache
+        kv_cache_access = (
+            KVCacheAccess.IN_PROCESS
+            if self.kv_transfer_config is None
+            else self.kv_transfer_config.kv_cache_access()
+        )
         unsupported = None
         if not current_platform.is_cuda_alike():
             unsupported = "it is only supported on CUDA and ROCm"
@@ -3205,13 +3228,10 @@ class VllmConfig:
                 "elastic EP scale-up skips warmup and reuses the profiled KV "
                 "cache size, so no measurement would size the cache"
             )
-        elif (
-            self.kv_transfer_config is not None
-            and self.kv_transfer_config.has_connector("LMCacheMPConnector")
-        ):
+        elif KVCacheAccess.LEGACY_IPC in kv_cache_access:
             unsupported = (
-                "LMCacheMPConnector shares the KV cache through legacy CUDA IPC, "
-                "which cannot export driver-mapped memory"
+                "a KV connector (e.g. LMCacheMPConnector) shares the KV cache "
+                "through legacy CUDA IPC, which cannot export driver-mapped memory"
             )
         elif (
             self.kv_transfer_config is not None
@@ -3221,21 +3241,38 @@ class VllmConfig:
                 "custom_mem_pool allocates the KV cache from a connector's "
                 "memory pool, which a driver-mapped cache cannot use"
             )
-        elif (
-            self.kv_transfer_config is not None
-            and current_platform.is_rocm()
-            and self.kv_transfer_config.registers_kv_cache_memory()
-        ):
+        elif current_platform.is_rocm() and kv_cache_access.needs_single_chunk():
             # TODO: drop once UCX handles HSA_EXT_POINTER_TYPE_HSA_VMEM and
             # hsa_amd_portable_export_dmabuf accepts VMM ranges.
             unsupported = (
                 "on ROCm, UCX and RDMA cannot yet register driver-mapped memory, "
-                "which the NIXL, Mooncake, MoRIIO and UMBP connectors require"
+                "which connectors that register the KV cache (e.g. NIXL, Mooncake, "
+                "MoRIIO, UMBP) require"
             )
+        # FABRIC handles to driver-mapped memory need an IMEX channel.
+        fabric_unavailable = (
+            KVCacheAccess.EXPORTS_FABRIC in kv_cache_access
+            and not imex_channel_available()
+        )
         if requested is None:
-            cache_config.enable_extensible_kv_cache = unsupported is None
+            cache_config.enable_extensible_kv_cache = (
+                unsupported is None and not fabric_unavailable
+            )
+            if unsupported is None and fabric_unavailable:
+                logger.info(
+                    "Extensible KV cache off: without an IMEX channel, KV transfers "
+                    "within a host (e.g. NIXL) would lose NVLink and fall back to "
+                    "RDMA or TCP. If transfers only cross hosts, pass "
+                    "--enable-extensible-kv-cache."
+                )
         elif requested and unsupported is not None:
             raise ValueError(f"enable_extensible_kv_cache: {unsupported}.")
+        elif requested and fabric_unavailable:
+            logger.warning(
+                "No IMEX channel: with the extensible KV cache, KV transfers within "
+                "a host (e.g. NIXL) fall back to TCP. Transfers across hosts use "
+                "RDMA."
+            )
 
     def _validate_adaptive_verification(self) -> None:
         spec_config = self.speculative_config
@@ -3443,7 +3480,7 @@ class VllmConfig:
         """Resolve the NIXL P/D DCP interleave from the global KV cache groups.
 
         Called once by the engine core before profiling; workers only assign the
-        result via ``set_kv_cache_layout``.
+        result via `set_kv_cache_layout`.
         """
         if (
             not kv_cache_groups

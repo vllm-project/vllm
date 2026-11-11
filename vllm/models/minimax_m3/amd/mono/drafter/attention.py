@@ -114,8 +114,8 @@ def kv_load(cache, block_table, bt_width, r, blk, lo, hi, tid):
 
 
 def kv_store(lds, tk, tv, kw, vw, tid):
-    """The thread's K words -> tile ``tk`` (row-major); its V words, transposed in
-    registers, -> tile ``tv``."""
+    """The thread's K words -> tile `tk` (row-major); its V words, transposed in
+    registers, -> tile `tv`."""
     km = tid // 4
     kq = tid % 4
     for h in range_constexpr(2):
@@ -168,7 +168,7 @@ def _dims(tid):
 
 
 def qkv_pre(r, qn, kn, cos_sin, positions, slots, tid):
-    """The loads of ``qkv_rows`` that do not depend on this layer's QKV."""
+    """The loads of `qkv_rows` that do not depend on this layer's QKV."""
     li, rope, dA, dB = _dims(tid)
     grp = tid // 16
     ib = rope.select(4 * li, I32(0))
@@ -238,15 +238,15 @@ def _lds8c(lds, t, r, w0):
 
 
 def q_operand(lds, wave, l16, g4):
-    """Wave ``wave``'s Q^T operand (query row ``wave``, head ``l16``)."""
+    """Wave `wave`'s Q^T operand (query row `wave`, head `l16`)."""
     return _lds8w(lds, TQ, wave * 16 + l16, g4 * 4)
 
 
 def block_math(lds, qb, tk, tv, blk, j, p0, lo, hi, l16, g4, mask):
-    """One 128-key block for query row ``j`` (this wave), head ``l16``.
+    """One 128-key block for query row `j` (this wave), head `l16`.
 
     Returns (m in score units, l, o: 32 f32 of dims 16 n + 4 g + e); l and o are
-    scaled by 256. ``mask`` (static): the block is at the window's edge.
+    scaled by 256. `mask` (static): the block is at the window's edge.
     """
     s = []
     for i in range_constexpr(8):
@@ -289,8 +289,8 @@ def block_math(lds, qb, tk, tv, blk, j, p0, lo, hi, l16, g4, mask):
 
 
 def store_partial(ap, wave, l16, g4, m, ls, o):
-    """(m, l, o) of query rows 16 wave + l16 (< 112) -> the partial at ``ap``:
-    ``m[128]`` f32 at 0, l at 512 B, ``o[112][128]`` at 1 KB."""
+    """(m, l, o) of query rows 16 wave + l16 (< 112) -> the partial at `ap`:
+    `m[128]` f32 at 0, l at 512 B, `o[112][128]` at 1 KB."""
     mr = wave * 16 + l16
     if g4 == 0:
         dev.st(ap, mr, m, CM_DEV)
@@ -309,11 +309,11 @@ store_partial = traced(store_partial)
 
 # ---------------------------------------------------------------- merge
 def merge_task(t, hq, na, ap0, a8, as8, ml, tid, lane, maxp):
-    """Merge row ``t``, heads 4 hq .. 4 hq + 3 (a thread a head and dim).
+    """Merge row `t`, heads 4 hq .. 4 hq + 3 (a thread a head and dim).
 
-    The request's partials 0..na-1 at ``ap0`` are merged in order, rounded to bf16
+    The request's partials 0..na-1 at `ap0` are merged in order, rounded to bf16
     and quantized to MXFP8 into a8 / as8. The partials' (m, l) of the 4 heads are
-    staged through LDS ``ml`` (512 floats). ``maxp``: static bound of ``na``.
+    staged through LDS `ml` (512 floats). `maxp`: static bound of `na`.
     """
     j = t % layout.QPR
     c_ = tid // 8
@@ -427,8 +427,8 @@ def block_acc(lds, qb, tk, tv, blk, j, p0, lo, hi, l16, g4, m_run, l_run, o_run,
 
 def qkv_rows(r, bA, bB, nfirst, pre, qkv, cache, lds, tid):
     """Request r's q (7 rows x 16 heads: head norm, RoPE, FP8) -> TQ, and its new
-    K / V rows -> the cache and, where they fall in the CTA's first blocks ``bA``
-    (K0 / V0, nfirst >= 1) or ``bB`` (K1 / V1, nfirst >= 2), the tiles."""
+    K / V rows -> the cache and, where they fall in the CTA's first blocks `bA`
+    (K0 / V0, nfirst >= 1) or `bB` (K1 / V1, nfirst >= 2), the tiles."""
     cache, nblk = cache
     gq, gk, css, sls, poss = pre
     li, rope, dA, dB = _dims(tid)

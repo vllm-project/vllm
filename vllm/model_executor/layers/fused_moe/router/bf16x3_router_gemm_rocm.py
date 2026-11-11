@@ -3,15 +3,15 @@
 """ROCm BF16x3 MoE router GEMM for fp32 gate weights.
 
 Gates whose weights ship in fp32 (MiniMax-M2/M3, HunYuan-V3) otherwise land in
-the ``F.linear`` fallback, which casts the bf16 activations up to fp32 and runs
+the `F.linear` fallback, which casts the bf16 activations up to fp32 and runs
 the GEMM on the fp32 MFMA pipe. Splitting the weight into three bf16 terms
 whose sum reproduces it exactly moves the GEMM onto the bf16 pipe and is more
 accurate than the path it replaces, which rounds the activations on the way to
 fp32 while this one leaves them untouched.
 
-The terms are stacked along the expert dimension into one ``(TERMS * E, K)``
+The terms are stacked along the expert dimension into one `(TERMS * E, K)`
 weight, so the router costs a single hipBLASLt GEMM plus a reduction over the
-``TERMS`` column blocks of its output.
+`TERMS` column blocks of its output.
 """
 
 import torch
@@ -42,12 +42,12 @@ _MAX_INT32 = (1 << 31) - 1
 def split_bf16x3(weight: torch.Tensor) -> torch.Tensor:
     """Split an fp32 weight into bf16 terms whose sum reproduces it exactly.
 
-    Returns a contiguous ``(BF16X3_TERMS, E, K)`` tensor. Three
+    Returns a contiguous `(BF16X3_TERMS, E, K)` tensor. Three
     round-to-nearest bf16 terms carry 24 mantissa bits, matching fp32's 24, so
-    the reconstruction is bit-exact for finite normals down to ``2**-108``.
+    the reconstruction is bit-exact for finite normals down to `2**-108`.
 
-    Raises ValueError on non-finite input: ``inf`` rounds to bf16 ``inf`` and
-    ``inf - inf`` is NaN, which would poison every logit rather than just the
+    Raises ValueError on non-finite input: `inf` rounds to bf16 `inf` and
+    `inf - inf` is NaN, which would poison every logit rather than just the
     affected experts.
     """
     if weight.dtype != torch.float32:
@@ -76,7 +76,7 @@ def platform_supported() -> bool:
 
 
 def is_supported(x: torch.Tensor, weight: torch.Tensor) -> bool:
-    """Whether this path can serve ``x @ weight.T`` -> fp32 profitably."""
+    """Whether this path can serve `x @ weight.T` -> fp32 profitably."""
     if x.dim() != 2 or weight.dim() != 2:
         return False
     n, k = weight.shape
