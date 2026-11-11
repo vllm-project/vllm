@@ -420,7 +420,7 @@ def test_fuse_mla_dual_rms_norm_fp8_group(
 
 class MLAQkvAProjFp8PerTokenTestModel(MLADualRMSNormFp8PerTokenTestModel):
     """Minimal model reproducing the FP8 MLA attention path with *per-token* quant
-    and the preshuffled FP8 ``fused_qkv_a_proj`` GEMM:
+    and the preshuffled FP8 `fused_qkv_a_proj` GEMM:
 
     _rocm_aiter_preshuffled_per_token_w8a8_gemm -> split([q_dim, kv_dim])
         +-- q_c (getitem 0) -> rocm_aiter_rmsnorm_fused_dynamic_quant
