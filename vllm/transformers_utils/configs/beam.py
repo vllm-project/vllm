@@ -9,8 +9,8 @@ class BeamConfig(PreTrainedConfig):
     """Configuration for the Beam decoder-only MoE causal LM.
 
     Full-attention layers are NoPE with SSMax query scaling; sliding-window
-    layers use RoPE. ``mlp_layer_types`` marks each layer's feed-forward as
-    ``dense`` or ``sparse`` (grouped sigmoid ``noaux_tc`` MoE).
+    layers use RoPE. `mlp_layer_types` marks each layer's feed-forward as
+    `dense` or `sparse` (grouped sigmoid `noaux_tc` MoE).
     """
 
     model_type = "beam"

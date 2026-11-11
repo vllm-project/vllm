@@ -54,7 +54,6 @@ BLOCK_SIZE = 64
 
 class _StubSpeculativeConfig:
     method = "dspark"
-    parallel_drafting = False
     max_num_new_slots_for_drafting = 0
     enable_adaptive_verification = False
     speculator_config = SimpleNamespace(speculator_class="DSparkSpeculator")

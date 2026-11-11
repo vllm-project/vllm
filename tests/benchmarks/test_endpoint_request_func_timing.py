@@ -76,15 +76,20 @@ def _token_chunk(index: int, *, chat: bool) -> bytes:
     return _sse({"id": "cmpl-test", "object": "x", "choices": [choice]})
 
 
-def _usage_chunk(n_tokens: int, *, metrics: dict[str, Any] | None = None) -> bytes:
+def _usage_chunk(
+    n_tokens: int,
+    *,
+    prompt_tokens: int = 7,
+    metrics: dict[str, Any] | None = None,
+) -> bytes:
     payload = {
         "id": "cmpl-test",
         "object": "x",
         "choices": [],
         "usage": {
-            "prompt_tokens": 7,
+            "prompt_tokens": prompt_tokens,
             "completion_tokens": n_tokens,
-            "total_tokens": 7 + n_tokens,
+            "total_tokens": prompt_tokens + n_tokens,
         },
     }
     if metrics is not None:
@@ -115,9 +120,9 @@ def _build_stream(
     usage_delay: float = 0.0,
     metrics: dict[str, Any] | None = None,
 ) -> list[tuple[float, bytes]]:
-    """Build ``(delay_before_chunk, payload)`` pairs for one streamed response.
+    """Build `(delay_before_chunk, payload)` pairs for one streamed response.
 
-    ``vllm bench serve`` always requests ``stream_options.include_usage``, so a
+    `vllm bench serve` always requests `stream_options.include_usage`, so a
     choice-less usage chunk always trails the final token.
     """
     chunks = [
@@ -181,9 +186,9 @@ _STREAM_ERROR_MESSAGE = "internal server error during generation"
 def _error_chunk(message: str = _STREAM_ERROR_MESSAGE) -> bytes:
     """The error envelope the server sends inside an HTTP 200 stream.
 
-    The stream generators dump an ``ErrorResponse`` through
-    ``create_streaming_error_response``, so the event carries an ``error``
-    object and no ``choices``. A dead engine, a failed tool parser and a
+    The stream generators dump an `ErrorResponse` through
+    `create_streaming_error_response`, so the event carries an `error`
+    object and no `choices`. A dead engine, a failed tool parser and a
     generation error all arrive this way, so the message itself is arbitrary.
     """
     return _sse(
@@ -408,6 +413,30 @@ def test_trailing_usage_chunk_does_not_extend_latency(
     STREAMING_ENDPOINTS,
     ids=[e[0] for e in STREAMING_ENDPOINTS],
 )
+def test_prompt_len_comes_from_server_usage(
+    endpoint_id: str,
+    request_func,
+    api_url: str,
+    chat: bool,
+) -> None:
+    """Input tokens are what the server reports, not the dataset's estimate.
+
+    For audio the dataset counts a text prompt the request never sends, while
+    the server counts the encoded audio: 1504 tokens for a 15 s Whisper clip.
+    """
+    n_tokens = 3
+    chunks = _build_stream(n_tokens, chat=chat)
+    chunks[-2] = (0.0, _usage_chunk(n_tokens, prompt_tokens=1504))
+    output = _run(request_func, api_url, endpoint_id, chunks, n_tokens)
+
+    assert output.prompt_len == 1504
+
+
+@pytest.mark.parametrize(
+    "endpoint_id,request_func,api_url,chat",
+    STREAMING_ENDPOINTS,
+    ids=[e[0] for e in STREAMING_ENDPOINTS],
+)
 def test_decode_span_identity_holds_with_real_clock(
     endpoint_id: str,
     request_func,
@@ -519,7 +548,7 @@ def test_error_event_stream_is_not_reported_as_success(
 
     Generation that fails after the response has started cannot change the
     HTTP 200 already sent, so the server reports the failure as an error event
-    before ``[DONE]``. Counting that request as complete hides the failure and
+    before `[DONE]`. Counting that request as complete hides the failure and
     feeds its truncated token count and short latency into the aggregates.
     """
     n_tokens = 2
@@ -862,8 +891,8 @@ def test_chat_reasoning_chunk_is_streamed_output(
 ) -> None:
     """Reasoning deltas count toward TTFT under either field name.
 
-    vLLM streams ``reasoning``; SGLang streams ``reasoning_content`` and omits
-    ``content`` from reasoning deltas.
+    vLLM streams `reasoning`; SGLang streams `reasoning_content` and omits
+    `content` from reasoning deltas.
     """
     tick = 1.0
     clock = _ScriptedClock(tick=tick)

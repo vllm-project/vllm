@@ -141,6 +141,9 @@ Parameters shared with the target are excluded from the draft selection, so
 target updates remain authoritative. An empty `draft.*` selection is valid.
 The Engram and draft patterns can be supplied together.
 
+Without a draft pattern, level-2 sleep discards draft weights, and speculative
+decoding accepts no tokens after `reload_weights`; vLLM logs a warning.
+
 #### Release only KV cache memory
 
 `LLM.release_kv_cache_memory()` discards KV cache physical memory while keeping model weights resident. It requires a completed pause and all executor memory to be resident: full sleep, partial wake-up, and repeated release without restoring memory are rejected. Requests retained with `mode="keep"` are recomputed after wake-up.
@@ -152,6 +155,17 @@ llm.sleep(level=0, mode="keep")  # Wait for the pause to complete.
 llm.release_kv_cache_memory()
 llm.wake_up(tags=["kv_cache"])  # Reallocate KV cache and resume scheduling.
 ```
+
+#### Keep the KV connector cache
+
+Discarding the KV cache, by a sleep at level 1 or 2 or by `release_kv_cache_memory()`, also resets a configured KV connector's cache, such as blocks offloaded to CPU or kept in an external store. Pass `reset_connector=False` to keep it, so that requests after the wake-up load those blocks instead of recomputing them:
+
+```python
+llm.sleep(level=1, reset_connector=False)
+llm.wake_up()
+```
+
+Block hashes do not cover the weights. If the weights may change before the wake-up, keep the default, or give requests a `cache_salt` per weight version so that blocks computed with older weights are never matched.
 
 #### Offloading CUDA graph memory
 
@@ -249,8 +263,8 @@ curl -X POST 'http://localhost:8000/wake_up?tags=kv_cache'
 
 #### HTTP endpoints
 
-- `POST /sleep?level=1` — Put the model to sleep (`level=1`).
-- `POST /release_kv_cache_memory` — Discard KV cache memory after a completed pause, while all executor memory is resident.
+- `POST /sleep?level=1` — Put the model to sleep (`level=1`). `reset_connector=false` keeps the KV connector's cache.
+- `POST /release_kv_cache_memory` — Discard KV cache memory after a completed pause, while all executor memory is resident. `reset_connector=false` keeps the KV connector's cache.
 - `POST /wake_up` — Wake up the model. Supports optional `tags` query parameters for partial wake-up (e.g., `?tags=weights`).
 - `POST /collective_rpc` — Perform a collective remote procedure call (RPC).
 - `GET /is_sleeping` — Check if the model is sleeping.
@@ -271,7 +285,7 @@ the remaining CUDA state, including captured graph executable objects, without
 recapturing graphs. Ordinary level-1 semantics still apply: KV cache contents are
 discarded. This is not a durable application checkpoint or model switching API.
 
-Set `VLLM_USE_V2_MODEL_RUNNER=1` before starting the engine:
+For example:
 
 ```python
 from vllm import LLM
@@ -302,9 +316,8 @@ for versioned test results and communication performance comparisons. Support
 for other GPU, driver, and communication-library combinations is not established.
 
 Only single-node tensor parallelism is accepted. Tensor parallel sizes 1, 2,
-and 4 have been GPU-tested; other sizes remain unvalidated. Use
-`VLLM_USE_V2_MODEL_RUNNER=1`, the standard GPU worker and the `cumem` sleep
-backend. Pipeline, data, context and expert parallelism, external cache or
+and 4 have been GPU-tested; other sizes remain unvalidated. Use the standard
+GPU worker and the `cumem` sleep backend. Pipeline, data, context and expert parallelism, external cache or
 weight transfer, custom worker classes, and sleep level 2 are rejected before
 worker startup (sleep level 2 is rejected when requested). Worker extensions
 that allocate additional CUDA IPC resources are outside the validated scope.

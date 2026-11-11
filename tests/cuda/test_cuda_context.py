@@ -29,8 +29,10 @@ def run_cuda_test_in_thread(device_input, expected_device_id):
         if valid_before:
             return (
                 False,
-                "CUDA context should not exist in new thread, "
-                f"got device {device_before}",
+                (
+                    "CUDA context should not exist in new thread, "
+                    f"got device {device_before}"
+                ),
             )
 
         # Test setting CUDA context
