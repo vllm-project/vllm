@@ -448,6 +448,7 @@ def _gated_norm_strided_z(
     if (
         not current_platform.is_rocm()
         or z is None
+        or not norm_before_gate
         or x.dim() != 3
         or z.shape != x.shape
         or not x.is_contiguous()
@@ -458,11 +459,8 @@ def _gated_norm_strided_z(
         or activation not in ("swish", "silu", "sigmoid")
     ):
         return None
-    from vllm.models.qwen3_5.nvidia.ops.fused_gdn_gated_norm import (
+    from vllm.models.qwen3_5.amd.ops.fused_gdn_gated_norm import (
         fused_gdn_gated_rms_norm,
-    )
-    from vllm.third_party.flash_linear_attention.ops.layernorm_guard import (
-        calc_rows_per_block,
     )
 
     num_tokens, num_heads, head_dim = x.shape
@@ -475,10 +473,7 @@ def _gated_norm_strided_z(
         eps=eps,
         num_v_heads=num_heads,
         head_v_dim=head_dim,
-        norm_before_gate=norm_before_gate,
         activation=activation,
-        # Match rmsnorm_fn's tile for (token, head) rows so outputs are bit-identical.
-        rows_per_block=calc_rows_per_block(num_tokens * num_heads, x.device),
     )
     return out
 
