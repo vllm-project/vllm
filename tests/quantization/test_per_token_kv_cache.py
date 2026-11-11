@@ -834,9 +834,7 @@ def test_int4_attention_matches_fp64_reference_at_long_context(
     v_deq = dequantize(value_cache, v_scale_cache)
     q_rot = single_rht(query.float()).double()
     positions = kv_len - query_len + torch.arange(query_len)
-    reference = torch.empty(
-        query_len, num_query_heads, head_size, dtype=torch.float64
-    )
+    reference = torch.empty(query_len, num_query_heads, head_size, dtype=torch.float64)
     group = num_query_heads // num_kv_heads
     for h in range(num_query_heads):
         scores = q_rot[:, h] @ k_deq[:, h // group].T * (scale / head_size)
