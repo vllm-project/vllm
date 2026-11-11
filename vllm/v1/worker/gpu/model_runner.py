@@ -1963,30 +1963,13 @@ class GPUModelRunner(LoRAModelRunnerMixin):
                 self._set_active_loras(*lora_inputs)
         else:
             # No actual tokens to run. A dummy run for DP or memory profiling.
-            # Every DP rank must run the agreed batch_desc.num_tokens (MoE
-            # collectives, graph shape), so an idle rank padded to its peers'
-            # count cannot drop tokens. Spread them so no dummy request exceeds
-            # max_model_len, the most a block-table row backs.
-            dummy_num_reqs = max(
+            # DP padding can exceed max_model_len; split so each dummy request
+            # fits a block-table row (bounded by max_num_reqs).
+            needed_num_reqs = max(
                 batch_desc.num_reqs or num_reqs,
                 cdiv(batch_desc.num_tokens, self.max_model_len),
             )
-            if dummy_num_reqs > self.max_num_reqs:
-                # Only when max_num_batched_tokens > max_num_seqs *
-                # max_model_len, which SchedulerConfig allows with a warning.
-                # The profile run reaches here with max_num_batched_tokens, so
-                # raising would fail startup; stay within the request buffers.
-                logger.warning_once(
-                    "A dummy batch of %d tokens needs %d requests to keep each "
-                    "within max_model_len (%d), but max_num_seqs is %d; dummy "
-                    "requests will exceed max_model_len. Set "
-                    "max_num_batched_tokens <= max_num_seqs * max_model_len.",
-                    batch_desc.num_tokens,
-                    dummy_num_reqs,
-                    self.max_model_len,
-                    self.max_num_reqs,
-                )
-                dummy_num_reqs = self.max_num_reqs
+            dummy_num_reqs = min(needed_num_reqs, self.max_num_reqs)
             input_batch = InputBatch.make_dummy(
                 dummy_num_reqs,
                 batch_desc.num_tokens,
