@@ -1244,7 +1244,7 @@ class GPUModelRunner(LoRAModelRunnerMixin):
             for batch in self.adaptive_verification.batches_to_profile(
                 self.cudagraph_manager.captured_token_counts()
             ):
-                self._dummy_run(**batch)
+                self._dummy_run(**batch, skip_eplb=True)
         self.adaptive_verification.set_initial_cost_curves(timings)
 
     def _remove_request(self, req_id: str) -> bool:
