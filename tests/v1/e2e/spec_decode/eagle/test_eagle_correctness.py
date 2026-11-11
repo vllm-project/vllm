@@ -90,10 +90,9 @@ def test_eagle_correctness_light(
             False,
             "transformers",
             0.8,
-            # TODO(hmellor): figure out why memory usage is so high
             marks=pytest.mark.skipif(
-                not current_platform.is_rocm(),
-                reason="Feature is experimental and uses too much memory in CUDA CI",
+                not current_platform.is_cuda_alike(),
+                reason="Validated on CUDA and ROCm only",
             ),
         ),
         (
