@@ -141,3 +141,98 @@ def test_tower_weight_offloading(vllm_runner, monkeypatch, disable_uva):
     finally:
         set_offloader(original_offloader)
         envs.disable_envs_cache()
+
+
+@pytest.mark.parametrize("disable_uva", [False, True])
+def test_per_layer_embedding_offloading(vllm_runner, monkeypatch, disable_uva):
+    """`cpu_offload_params` segments must reach Gemma 4's per-layer embeddings.
+
+    Regression test: the PLE table is built outside `make_layers`, so it never
+    reached the offloader and `embed_tokens_per_layer` silently matched nothing.
+    """
+    monkeypatch.setenv("VLLM_ENABLE_V1_MULTIPROCESSING", "0")
+    if disable_uva:
+        monkeypatch.setenv("VLLM_WEIGHT_OFFLOADING_DISABLE_UVA", "1")
+    envs.disable_envs_cache()
+    original_offloader = get_offloader()
+
+    try:
+        with vllm_runner(
+            "google/gemma-4-E2B-it",
+            load_format="dummy",
+            enforce_eager=True,
+            gpu_memory_utilization=0.5,
+            max_model_len=128,
+            max_num_seqs=1,
+            enable_prefix_caching=False,
+            cpu_offload_gb=6,
+            cpu_offload_params={"embed_tokens_per_layer"},
+        ) as vllm_model:
+            engine_core = vllm_model.llm.llm_engine.engine_core.engine_core
+            model_runner = engine_core.model_executor.driver_worker.worker.model_runner
+
+            offloader = get_offloader()
+            assert isinstance(offloader, UVAOffloader)
+            assert offloader.cpu_offload_bytes > 0
+
+            model = model_runner.get_model()
+            ple = [
+                (name, module)
+                for name, module in model.named_modules()
+                if name.endswith("embed_tokens_per_layer")
+            ]
+            assert len(ple) == 1
+            _, ple_module = ple[0]
+            assert all(_is_offloaded(p) for p in ple_module.parameters())
+            if disable_uva:
+                # non-UVA fallback: weights live on CPU and are moved
+                # back on first forward
+                assert "forward" in vars(ple_module)
+
+            # Everything else must stay resident.
+            assert not any(
+                _is_offloaded(p)
+                for name, p in model.named_parameters()
+                if "embed_tokens_per_layer" not in name
+            )
+    finally:
+        set_offloader(original_offloader)
+        envs.disable_envs_cache()
+
+
+def test_per_layer_embedding_with_prefetch_offloading(vllm_runner, monkeypatch):
+    """The prefetch offloader allows a single `wrap_modules` call per model, so
+    Gemma 4's per-layer embeddings must not be routed through it."""
+    monkeypatch.setenv("VLLM_ENABLE_V1_MULTIPROCESSING", "0")
+    envs.disable_envs_cache()
+    original_offloader = get_offloader()
+
+    try:
+        with vllm_runner(
+            "google/gemma-4-E2B-it",
+            load_format="dummy",
+            enforce_eager=True,
+            gpu_memory_utilization=0.5,
+            max_model_len=128,
+            max_num_seqs=1,
+            enable_prefix_caching=False,
+            offload_group_size=1,
+            offload_num_in_group=1,
+            offload_prefetch_step=1,
+        ) as vllm_model:
+            engine_core = vllm_model.llm.llm_engine.engine_core.engine_core
+            model_runner = engine_core.model_executor.driver_worker.worker.model_runner
+
+            offloader = get_offloader()
+            assert isinstance(offloader, PrefetchOffloader)
+            assert offloader.total_offloaded_bytes > 0
+
+            model = model_runner.get_model()
+            assert not any(
+                _is_offloaded(p)
+                for name, p in model.named_parameters()
+                if "embed_tokens_per_layer" in name
+            )
+    finally:
+        set_offloader(original_offloader)
+        envs.disable_envs_cache()
