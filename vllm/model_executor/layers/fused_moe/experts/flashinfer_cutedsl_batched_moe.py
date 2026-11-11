@@ -40,9 +40,10 @@ logger = init_logger(__name__)
 class FlashInferCuteDSLBatchedExperts(mk.FusedMoEExpertsModular):
     """NVFP4 or MXFP8 (W8A8) experts on the batched activation format.
 
-    MXFP8 experts take the dispatched activations unquantized and quantize only
-    the valid rows of each expert; their weight scales must be swizzled at load
-    time with `swizzle_mxfp8_moe_weight_scales`.
+    MXFP8 experts take the dispatched activations either unquantized, quantizing
+    only the valid rows of each expert, or already quantized by the dispatch;
+    their weight scales must be swizzled at load time with
+    `swizzle_mxfp8_moe_weight_scales`.
     """
 
     def __init__(
@@ -150,6 +151,9 @@ class FlashInferCuteDSLBatchedExperts(mk.FusedMoEExpertsModular):
             )
         return True, None
 
+    def supports_mxfp8_quantized_activations(self) -> bool:
+        return self.quant_dtype == "mxfp8"
+
     def finalize_weight_and_reduce_impl(self) -> mk.TopKWeightAndReduce:
         # Let PrepareAndFinalize::finalize() decide the impl.
         return TopKWeightAndReduceDelegate()
@@ -220,9 +224,10 @@ class FlashInferCuteDSLBatchedExperts(mk.FusedMoEExpertsModular):
         assert self.w2_scale.ndim == 3
 
         if self.quant_dtype == "mxfp8":
-            assert a1q_scale is None, "Expected unquantized activations."
             flashinfer_cutedsl_mxfp8_moe_masked(
-                hidden_states=hidden_states,
+                hidden_states=(
+                    hidden_states if a1q_scale is None else (hidden_states, a1q_scale)
+                ),
                 w1=w1,
                 w1_blockscale=self.w1_scale,
                 w2=w2,
@@ -441,7 +446,7 @@ def swizzle_mxfp8_moe_weight_scales(scale: torch.Tensor) -> torch.Tensor:
 
 
 def flashinfer_cutedsl_mxfp8_moe_masked(
-    hidden_states: torch.Tensor,
+    hidden_states: torch.Tensor | tuple[torch.Tensor, torch.Tensor],
     w1: torch.Tensor,
     w1_blockscale: torch.Tensor,
     w2: torch.Tensor,
@@ -453,7 +458,11 @@ def flashinfer_cutedsl_mxfp8_moe_masked(
     """Masked MXFP8 Mixture-of-Experts with FlashInfer's CuteDSL kernels.
 
     Args:
-        hidden_states (torch.Tensor): [num_experts, m, k], bf16/fp16
+        hidden_states: Either of the following case
+            * torch.Tensor: [num_experts, m, k], bf16/fp16
+            * tuple[torch.Tensor, torch.Tensor]: [num_experts, m, k],
+                  float8_e4m3fn, and its swizzled UE8M0 scales,
+                  [32, 4, ceil(m / 128), 4, k // 128, num_experts], uint8
         w1 (torch.Tensor): [num_experts, 2 * n, k], float8_e4m3fn
         w1_blockscale (torch.Tensor): swizzled UE8M0 scales of w1, see
             `swizzle_mxfp8_moe_weight_scales`
@@ -465,25 +474,31 @@ def flashinfer_cutedsl_mxfp8_moe_masked(
             masked_m[i] are not written
 
     """
-    num_experts, m, k = hidden_states.shape
+    num_experts, m, k = out.shape
     n = w2.shape[-1]
     assert w1.dtype == torch.float8_e4m3fn and w2.dtype == torch.float8_e4m3fn
     assert w1.shape == (num_experts, 2 * n, k), f"w1 shape mismatch: {w1.shape}"
     assert w2.shape == (num_experts, k, n), f"w2 shape mismatch: {w2.shape}"
     assert workspace.shape == (num_experts, m, 2 * n)
-    assert out.shape == (num_experts, m, k)
 
     gemm_kwargs = dict(
         ab_dtype="float8_e4m3fn",
         sf_dtype="float8_e8m0fnu",
-        c_dtype=get_cute_dtype(hidden_states),
+        c_dtype=get_cute_dtype(out),
         sf_vec_size=32,
     )
     e8m0 = torch.float8_e8m0fnu
 
-    # The CUDA backend spreads the valid rows of all experts over the whole
-    # grid, so a skewed masked_m still keeps every SM busy.
-    aq, aq_sf = mxfp8_grouped_quantize(hidden_states, masked_m, backend="cuda")
+    if isinstance(hidden_states, tuple):
+        aq, aq_sf = hidden_states
+        assert aq.dtype == torch.float8_e4m3fn, f"expected e4m3, got {aq.dtype}"
+        assert aq.shape == (num_experts, m, k)
+        aq = aq.permute(1, 2, 0)  # requirement of kernel
+    else:
+        assert hidden_states.shape == (num_experts, m, k)
+        # The CUDA backend spreads the valid rows of all experts over the whole
+        # grid, so a skewed masked_m still keeps every SM busy.
+        aq, aq_sf = mxfp8_grouped_quantize(hidden_states, masked_m, backend="cuda")
     flashinfer_cutedsl_grouped_gemm_nt_masked(
         (aq, aq_sf.view(e8m0)),
         (w1.permute(1, 2, 0), w1_blockscale.view(e8m0)),

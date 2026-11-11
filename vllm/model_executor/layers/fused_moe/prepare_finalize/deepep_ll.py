@@ -1,5 +1,6 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
+import inspect
 from collections.abc import Callable
 
 import deep_ep
@@ -115,8 +116,36 @@ class DeepEPLLPrepareAndFinalize(mk.FusedMoEPrepareAndFinalizeModular):
         # activation scales in a packed ue8m0 format during object construction
         # time. This setting is handled by post_init_setup.
         self.use_ue8m0_dispatch = False
+        # Whether the dispatch kernels quantize the activations to MXFP8. This
+        # depends on the experts too, so it is also handled by post_init_setup.
+        self.use_mxfp8_dispatch = False
+
+    def _setup_mxfp8_dispatch(self, fused_experts: mk.FusedMoEExperts) -> None:
+        if not fused_experts.supports_mxfp8_quantized_activations():
+            logger.warning_once(
+                "Ignoring VLLM_DEEPEPLL_MXFP8_DISPATCH=1 since "
+                f"{fused_experts.__class__.__name__} does not take activations "
+                "that the dispatch quantized to MXFP8."
+            )
+            return
+
+        dispatch_params = inspect.signature(self.buffer.low_latency_dispatch).parameters
+        if "use_mxfp8" not in dispatch_params:
+            raise RuntimeError(
+                "VLLM_DEEPEPLL_MXFP8_DISPATCH=1 requires a DeepEP build with "
+                "MXFP8 low-latency dispatch "
+                "(https://github.com/deepseek-ai/DeepEP/pull/823)."
+            )
+        logger.info_once(
+            "Quantization is fused with DeepEP mxfp8 dispatch as "
+            "VLLM_DEEPEPLL_MXFP8_DISPATCH==1"
+        )
+        self.use_mxfp8_dispatch = True
 
     def post_init_setup(self, fused_experts: mk.FusedMoEExperts):
+        if envs.VLLM_DEEPEPLL_MXFP8_DISPATCH:
+            self._setup_mxfp8_dispatch(fused_experts)
+
         if not fused_experts.supports_packed_ue8m0_act_scales():
             # Early exit.
             return
@@ -161,6 +190,11 @@ class DeepEPLLPrepareAndFinalize(mk.FusedMoEPrepareAndFinalizeModular):
         quant_config: FusedMoEQuantConfig,
         expert_num_tokens: torch.Tensor,
     ) -> tuple[torch.Tensor, torch.Tensor | None]:
+        if self.use_mxfp8_dispatch:
+            # DeepEP kernels did the quantization for us.
+            x, x_scales = x
+            return x, x_scales
+
         if self.use_fp8_dispatch:
             block_k = (
                 quant_config.block_shape[1]
@@ -317,6 +351,7 @@ class DeepEPLLPrepareAndFinalize(mk.FusedMoEPrepareAndFinalizeModular):
             round_scale=self.use_ue8m0_dispatch,
             use_ue8m0=self.use_ue8m0_dispatch,
             **(dict(use_nvfp4=True) if use_nvfp4 else dict()),
+            **(dict(use_mxfp8=True) if self.use_mxfp8_dispatch else dict()),
             **(
                 dict(x_global_scale=qc_a1_gscale_or_scale)
                 if qc_a1_gscale_or_scale is not None and nvfp4_dispatch
