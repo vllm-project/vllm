@@ -10,6 +10,9 @@ from vllm.entrypoints.generate.base.protocol import DeltaMessage
 from vllm.entrypoints.openai.chat_completion.protocol import (
     ChatCompletionRequest,
 )
+from vllm.entrypoints.openai.chat_completion.stream_processor import (
+    ChatStreamProcessor,
+)
 from vllm.entrypoints.openai.responses.protocol import ResponsesRequest
 from vllm.entrypoints.openai.responses.utils import build_response_output_items
 from vllm.exceptions import VLLMValidationError
@@ -127,6 +130,38 @@ def _response(content: str) -> str:
 
 def _tools(*calls: str) -> str:
     return f"{OPEN}tools{SEP}{''.join(calls)}{CLOSE}tools{SEP}"
+
+
+def _stream(parser: KimiK3ToolParser, output: str, chunk_size: int):
+    request = _request()
+    previous_text = ""
+    messages: list[DeltaMessage] = []
+    for chunk_start in range(0, len(output), chunk_size):
+        delta_text = output[chunk_start : chunk_start + chunk_size]
+        current_text = previous_text + delta_text
+        message = parser.extract_tool_calls_streaming(
+            previous_text, current_text, delta_text, [], [], [], request
+        )
+        if message is not None:
+            messages.append(message)
+        previous_text = current_text
+    return messages
+
+
+def _streamed_functions(messages: list[DeltaMessage]) -> list[dict[str, str]]:
+    functions: list[dict[str, str]] = []
+    for message in messages:
+        for call in message.tool_calls or []:
+            assert call.function is not None
+            if call.index == len(functions):
+                assert call.id is not None
+                assert call.function.name is not None
+                functions.append({"name": call.function.name, "arguments": ""})
+            else:
+                assert call.index == len(functions) - 1
+                assert call.function.name is None
+            functions[call.index]["arguments"] += call.function.arguments or ""
+    return functions
 
 
 def test_extract_tool_calls_with_response_and_typed_arguments():
@@ -367,10 +402,16 @@ def test_streaming_split_markers_do_not_leak():
     assert content == "Hi"
     assert OPEN not in content
     assert SEP not in content
-    assert len(tool_deltas) == 1
+    assert len(tool_deltas) == 3
     assert tool_deltas[0].function is not None
     assert tool_deltas[0].function.name == "calc"
-    assert json.loads(tool_deltas[0].function.arguments) == {"x": 1}
+    assert json.loads(
+        "".join(
+            delta.function.arguments or ""
+            for delta in tool_deltas
+            if delta.function is not None
+        )
+    ) == {"x": 1}
 
 
 @pytest.mark.parametrize("chunk_size", [1, 3, 7, 16, 31, 128, 4096])
@@ -379,15 +420,29 @@ def test_streaming_split_markers_do_not_leak():
     [
         _response("answer"),
         "answer" + RESPONSE_CLOSE,
-        _response("answer") + f'{OPEN}tools{SEP}{OPEN}call tool="calc"{SEP}partial',
         _response("answer")
         + _tools(
-            _call("calc", 1, _arg("text", "string", "long value")),
-            _call("calc", 2, _arg("x", "number", "2")),
+            _call(
+                "calc",
+                1,
+                _arg("text", "string", 'quote " slash \\ newline\n'),
+                _arg("bad", "object", "{"),
+            ),
+            _call("calc", 2, _arg("x", "number", "2"), _arg("y", "array", "[1]")),
         ),
         _response("answer") + f"{OPEN}{' ' * 32}tools{SEP}" + _call("calc", 1),
         _response("answer")
         + _tools(_call("calc", 1).replace(f"{CLOSE}call", f"{CLOSE}{' ' * 32}call")),
+        _response("answer")
+        + _tools(
+            _call(
+                "calc",
+                1,
+                _arg("text", "string", "value").replace(
+                    f"{CLOSE}argument", f"{CLOSE}{' ' * 32}argument"
+                ),
+            )
+        ),
         _response("answer") + _tools(f"{OPEN}call!" + _call("calc", 1)),
         _response("answer")
         + _tools(
@@ -400,10 +455,10 @@ def test_streaming_split_markers_do_not_leak():
     ids=[
         "response-only",
         "consumed-response-prefix",
-        "truncated-call",
         "parallel",
         "spaced-tools",
         "spaced-close",
+        "spaced-argument-close",
         "invalid-opener",
         "close-in-attributes",
         "missing-name",
@@ -411,65 +466,100 @@ def test_streaming_split_markers_do_not_leak():
 )
 def test_streaming_call_boundaries(output, chunk_size):
     request = _request()
-    parser = KimiK3ToolParser(_dummy_tokenizer())
     expected = KimiK3ToolParser(_dummy_tokenizer()).extract_tool_calls(output, request)
-    previous_text = ""
-    content = []
-    calls = []
-    for chunk_start in range(0, len(output), chunk_size):
-        delta_text = output[chunk_start : chunk_start + chunk_size]
-        current_text = previous_text + delta_text
-        message = parser.extract_tool_calls_streaming(
-            previous_text, current_text, delta_text, [], [], [], request
-        )
-        if message is not None:
-            content.append(message.content or "")
-            calls.extend(message.tool_calls or [])
-        previous_text = current_text
+    messages = _stream(KimiK3ToolParser(_dummy_tokenizer()), output, chunk_size)
 
-    assert "".join(content) == "answer"
-    assert [call.index for call in calls] == list(range(len(expected.tool_calls)))
-    functions = []
-    for call in calls:
-        assert call.function is not None
-        functions.append(call.function.model_dump())
-    assert functions == [
+    assert "".join(message.content or "" for message in messages) == "answer"
+    assert _streamed_functions(messages) == [
         {"name": call.function.name, "arguments": call.function.arguments}
         for call in expected.tool_calls
     ]
 
 
-def test_streaming_does_not_redecode_completed_calls(monkeypatch):
+def test_streaming_string_arguments_before_call_closes():
+    value = "x" * 4096
+    output = (
+        f'{OPEN}tools{SEP}{OPEN}call tool="calc" index="1"{SEP}'
+        f'{OPEN}argument key="text" type="string"{SEP}{value}'
+    )
+
+    messages = _stream(KimiK3ToolParser(_dummy_tokenizer()), output, 11)
+
+    assert _streamed_functions(messages) == [
+        {"name": "calc", "arguments": '{"text": "' + value}
+    ]
+
+
+def test_streaming_does_not_emit_partial_typed_arguments():
     request = _request()
-    call = _call("calc", 1, _arg("text", "string", "x" * 4096))
-    output = _tools(call) + "trailing output"
     parser = KimiK3ToolParser(_dummy_tokenizer())
-    decode_count = 0
-    original_decode_call = parser._decode_call
-
-    def counted_decode_call(attrs: str, body: str):
-        nonlocal decode_count
-        decode_count += 1
-        return original_decode_call(attrs, body)
-
-    monkeypatch.setattr(parser, "_decode_call", counted_decode_call)
-
     previous_text = ""
-    for chunk_start in range(0, len(output), 11):
-        delta_text = output[chunk_start : chunk_start + 11]
+    chunks = [
+        f'{OPEN}tools{SEP}{OPEN}call tool="calc" index="1"{SEP}',
+        f'{OPEN}argument key="opts" type="object"{SEP}{{"a":',
+        f"1}}{CLOSE}argument{SEP}",
+    ]
+    messages = []
+    for delta_text in chunks:
         current_text = previous_text + delta_text
-        parser.extract_tool_calls_streaming(
-            previous_text=previous_text,
-            current_text=current_text,
-            delta_text=delta_text,
-            previous_token_ids=[],
-            current_token_ids=[],
-            delta_token_ids=[],
-            request=request,
+        messages.append(
+            parser.extract_tool_calls_streaming(
+                previous_text, current_text, delta_text, [], [], [], request
+            )
         )
         previous_text = current_text
 
-    assert decode_count == 1
+    arguments = []
+    for message in messages[1:]:
+        assert message is not None
+        function = message.tool_calls[0].function
+        assert function is not None
+        arguments.append(function.arguments)
+    assert arguments == ['"opts": ', '{"a": 1}']
+
+
+def test_chat_stream_processor_streams_kimi_k3_tool_arguments():
+    request = _request().model_copy(
+        update={"chat_template_kwargs": {"thinking": False}}
+    )
+    parser = KimiK3DelegatingParser(
+        _dummy_tokenizer(), chat_template_kwargs={"thinking": False}
+    )
+    processor = ChatStreamProcessor(
+        request,
+        parser,
+        enable_auto_tools=True,
+        parser_cls=KimiK3DelegatingParser,
+    )
+    chunks = [
+        RESPONSE_CLOSE,
+        f'{OPEN}tools{SEP}{OPEN}call tool="calc" index="1"{SEP}',
+        f'{OPEN}argument key="code" type="string"{SEP}print(',
+        '"hi")',
+        f"{CLOSE}argument{SEP}{CLOSE}call{SEP}{CLOSE}tools{SEP}",
+    ]
+    messages = []
+    finish_reason = None
+    for index, chunk in enumerate(chunks, start=1):
+        delta, finish_reason = processor.step(
+            chunk,
+            [index],
+            "stop" if index == len(chunks) else None,
+            [0],
+        )
+        if delta is not None:
+            messages.append(delta)
+
+    assert [
+        call.function.arguments
+        for message in messages
+        for call in message.tool_calls or []
+        if call.function is not None
+    ] == ["{", '"code": "print(', '\\"hi\\")', '"}']
+    assert json.loads(_streamed_functions(messages)[0]["arguments"]) == {
+        "code": 'print("hi")'
+    }
+    assert finish_reason == "tool_calls"
 
 
 def test_tool_call_ids_are_unique_across_messages():
