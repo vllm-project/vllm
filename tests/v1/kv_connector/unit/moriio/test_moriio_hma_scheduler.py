@@ -30,7 +30,6 @@ from vllm.v1.kv_cache_interface import (
     CircularBufferSpec,
     FullAttentionSpec,
     KVCacheConfig,
-    KVCacheGroupSpec,
     KVCacheSpec,
     MLAAttentionSpec,
     UniformTypeKVCacheSpecs,
@@ -187,29 +186,6 @@ def _gate_vllm_config(
 # --------------------------------------------------------------------------
 # split_block_groups
 # --------------------------------------------------------------------------
-@pytest.mark.parametrize("wrapped", [False, True])
-def test_group_classification_preserves_packed_kda_groups(wrapped):
-    attention = FullAttentionSpec(
-        block_size=16, num_kv_heads=1, head_size=8, dtype=torch.float32
-    )
-    mamba = _mamba_spec()
-    groups = []
-    for i, spec in enumerate([mamba, mamba, mamba, attention]):
-        names = [f"layer{i}a", f"layer{i}b"]
-        if wrapped:
-            spec = UniformTypeKVCacheSpecs.from_specs(dict.fromkeys(names, spec))
-            assert spec is not None
-        groups.append(KVCacheGroupSpec(layer_names=names, kv_cache_spec=spec))
-    groups.insert(
-        1,
-        KVCacheGroupSpec(
-            layer_names=["replica"], kv_cache_spec=attention, enable_kv_transfer=False
-        ),
-    )
-    config = KVCacheConfig(num_blocks=16, kv_cache_tensors=[], kv_cache_groups=groups)
-    assert moriio_connector._split_kv_cache_group_kinds(config) == ([3], [0, 1, 2])
-
-
 def test_split_block_groups_separates_attention_and_mamba():
     sched = _FakeScheduler(_has_mamba=True, _attn_group_ids=[0], _mamba_group_ids=[1])
     block_ids = ([1, 2], [99])

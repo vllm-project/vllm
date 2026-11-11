@@ -670,10 +670,12 @@ class MoRIIOConnectorScheduler:
             if self._has_mamba and self.mode == MoRIIOMode.READ:
                 supported += (CircularBufferSpec,)
             unsupported = [
-                type(spec).__name__
+                type(g.kv_cache_spec).__name__
                 for g in kv_cache_config.transfer_groups
-                for spec in iter_layer_specs(g.kv_cache_spec)
-                if not isinstance(spec, supported)
+                if not all(
+                    isinstance(spec, supported)
+                    for spec in iter_layer_specs(g.kv_cache_spec)
+                )
             ]
             if unsupported:
                 raise NotImplementedError(

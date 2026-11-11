@@ -1,7 +1,6 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 
-import contextlib
 from dataclasses import dataclass
 from typing import TYPE_CHECKING, ClassVar, cast
 
@@ -21,7 +20,6 @@ from vllm.model_executor.layers.attention.sparse_mla_attention import (
 from vllm.platforms import current_platform
 from vllm.triton_utils import tl, triton
 from vllm.utils.gpu_sync_debug import gpu_sync_allowed
-from vllm.utils.math_utils import cdiv
 from vllm.utils.torch_utils import np_to_pinned_tensor
 from vllm.v1.attention.backend import (
     AttentionBackend,
@@ -38,91 +36,17 @@ from vllm.v1.attention.backends.mla.sparse_utils import (
     flat_kv_row_view,
     triton_filter_and_convert_dcp_index,
 )
-from vllm.v1.attention.backends.utils import (
-    dcp_global_to_local_index,
-    get_dcp_local_seq_lens,
-)
 from vllm.v1.attention.ops.rocm_aiter_mla_sparse import (
     rocm_sparse_attn_decode_bf16,
     rocm_sparse_attn_prefill,
     rocm_sparse_decode_bf16_num_splits,
 )
-from vllm.v1.kv_cache_interface import (
-    DS_MLA_STATE_CONTENT_BYTES,
-    AttentionSpec,
-    KVCacheLayout,
-)
+from vllm.v1.kv_cache_interface import AttentionSpec, KVCacheLayout
 from vllm.v1.worker.workspace import current_workspace_manager
 
 if TYPE_CHECKING:
     from vllm.model_executor.models.deepseek_v2 import Indexer
 logger = init_logger(__name__)
-
-
-# Cap on the per-step all-gathered prefill KV used by the KV-gather path.
-_DCP_PREFILL_KV_GATHER_MAX_BYTES = 4 << 30
-
-
-@contextlib.contextmanager
-def _prefill_sparse_mla_launch():
-    """Large-prefill launch config for AITER's Triton sparse MLA.
-
-    AITER's defaults (4 warps, 2 waves/EU) are tuned for decode. For
-    thousands of local-head query rows over the KV-gathered prefill rows,
-    2 warps at 1 wave/EU measured faster on gfx950. The KV-gather prefill
-    launch is eager, so overriding the config for this one call is safe.
-    Older AITER builds without these hooks keep their defaults.
-    """
-    try:
-        import aiter.ops.triton.attention.sparse_mla as sm
-    except ImportError:
-        yield
-        return
-    get_config = getattr(sm, "_get_config", None)
-    async_config = getattr(sm, "_async_launch_config", None)
-    if get_config is None or async_config is None:
-        yield
-        return
-
-    def _config(arch=None):
-        cfg = dict(get_config(arch))
-        cfg["num_warps"] = 2
-        return cfg
-
-    def _async(*args, **kwargs):
-        enabled, block_k, _ = async_config(*args, **kwargs)
-        return enabled, block_k, 1
-
-    sm._get_config, sm._async_launch_config = _config, _async
-    try:
-        yield
-    finally:
-        sm._get_config, sm._async_launch_config = get_config, async_config
-
-
-@triton.jit
-def _kvgather_rows_kernel(
-    Pos,
-    pos_stride,
-    Req,
-    Out,
-    d0,
-    rank_rows,
-    local_rows,
-    interleave,
-    world,
-    K: tl.constexpr,
-    B: tl.constexpr,
-):
-    """Global top-k position -> row of the DCP-gathered KV buffer (-1 kept)."""
-    t = tl.program_id(0)
-    j = tl.program_id(1) * B + tl.arange(0, B)
-    m = j < K
-    p = tl.load(Pos + t * pos_stride + j, mask=m, other=-1).to(tl.int64)
-    r = (tl.load(Req + t) - d0).to(tl.int64)
-    owner, local_pos = dcp_global_to_local_index(p, world, interleave)
-    row = owner * rank_rows + r * local_rows + local_pos
-    tl.store(Out + t * K + j, tl.where(p >= 0, row, -1).to(tl.int32), mask=m)
 
 
 @triton.jit
@@ -1466,111 +1390,6 @@ class ROCMAiterMLASparseImpl(SparseMLACommonImpl[ROCMAiterMLASparseMetadata]):
         )
         return output
 
-    def use_dcp_prefill_kvgather(
-        self, attn_metadata: ROCMAiterMLASparseMetadata, num_tokens: int
-    ) -> bool:
-        """Gather the prefill requests' KV instead of every rank's queries when
-        that moves fewer bytes (large prefill chunks)."""
-        md = attn_metadata
-        if self.dcp_world_size <= 1 or md.num_prefills == 0:
-            return False
-        if self.kv_cache_dtype != "fp8_ds_mla" or self.sinks is not None:
-            return False
-        rows = num_tokens - md.num_decode_tokens
-        if rows <= 0:
-            return False
-        w, il = self.dcp_world_size, md.cp_kv_cache_interleave_size
-        local_rows = cdiv(md.prefill_max_seq_len, il * w) * il
-        kv_bytes = (
-            w * md.num_prefills * local_rows * DS_MLA_STATE_CONTENT_BYTES["fp8_ds_mla"]
-        )
-        # The bf16 query all-gather and the all-heads output all-to-all.
-        q_bytes = (
-            rows
-            * self.num_heads
-            * w
-            * (2 * self.kv_lora_rank + self.qk_rope_head_dim)
-            * 2
-        )
-        return kv_bytes < q_bytes and kv_bytes <= _DCP_PREFILL_KV_GATHER_MAX_BYTES
-
-    def sparse_dcp_prefill_kvgather(
-        self,
-        q: torch.Tensor,  # [T, H_local, L + P] bf16, prefill rows only
-        kv_c_and_k_pe_cache: torch.Tensor,
-        attn_metadata: ROCMAiterMLASparseMetadata,
-        row0: int,
-    ) -> torch.Tensor:
-        """Sparse MLA for prefill rows under DCP without query gather or
-        output all-to-all: all-gather the prefill requests' fp8_ds_mla rows
-        (one collective), then attend with this rank's heads only."""
-        from vllm.distributed import get_dcp_group
-
-        md = attn_metadata
-        assert self.topk_indices_buffer is not None
-        w, me = self.dcp_world_size, self.dcp_rank
-        il, bs = md.cp_kv_cache_interleave_size, md.block_size
-        n_req, d0 = md.num_prefills, md.num_decodes
-        t = q.shape[0]
-        dev = q.device
-        rows_u8, stride_rows = flat_kv_row_view(kv_c_and_k_pe_cache, bs)
-        rows_u8 = rows_u8.view(torch.uint8)
-        local_rows = cdiv(md.prefill_max_seq_len, il * w) * il
-
-        # Cache slots of this rank's rows of each prefill request, padded to
-        # local_rows per request. Shared by the group's layers: built once per
-        # metadata object.
-        slots = getattr(md, "_dcp_kvgather_slots", None)
-        if slots is None:
-            seq = cast(torch.Tensor, md.seq_lens)[d0 : d0 + n_req]
-            local_len = get_dcp_local_seq_lens(seq, w, me, il)
-            lp = torch.arange(local_rows, device=dev, dtype=torch.int64)
-            bt = md.block_table[d0 : d0 + n_req]
-            blk = torch.gather(
-                bt, 1, (lp // bs).clamp(max=bt.shape[1] - 1).expand(n_req, -1)
-            ).to(torch.int64)
-            slots = blk * stride_rows + lp % bs
-            slots = torch.where(lp[None, :] < local_len[:, None], slots, 0).flatten()
-            md._dcp_kvgather_slots = slots  # type: ignore[attr-defined]
-        local = rows_u8.index_select(0, slots)
-        gathered = get_dcp_group().all_gather(local, dim=0)  # [w*n_req*local_rows, B]
-
-        # Global top-k positions -> rows of the gathered buffer.
-        pos = self.topk_indices_buffer[row0 : row0 + t, : md.topk_tokens]
-        idx = torch.empty((t, md.topk_tokens), dtype=torch.int32, device=dev)
-        if t:
-            _kvgather_rows_kernel[(t, triton.cdiv(md.topk_tokens, 512))](
-                pos,
-                pos.stride(0),
-                md.req_id_per_token[row0:],
-                idx,
-                d0,
-                n_req * local_rows,
-                local_rows,
-                il,
-                w,
-                md.topk_tokens,
-                512,
-            )
-        indptr = torch.arange(t + 1, dtype=torch.int32, device=dev) * md.topk_tokens
-
-        out = torch.empty(
-            (t, q.shape[1], self.kv_lora_rank), dtype=md.attn_out_dtype, device=dev
-        )
-        with _prefill_sparse_mla_launch():
-            rocm_aiter_ops.triton_sparse_mla_fwd(
-                q,
-                gathered.unsqueeze(1),
-                out,
-                self.scale,
-                indptr,
-                idx.flatten(),
-                kv_lora_rank=self.kv_lora_rank,
-                qk_rope_head_dim=self.qk_rope_head_dim,
-                has_invalid=True,
-            )
-        return out
-
     def forward_mqa(
         self,
         q: torch.Tensor | tuple[torch.Tensor, torch.Tensor],
@@ -1608,10 +1427,6 @@ class ROCMAiterMLASparseImpl(SparseMLACommonImpl[ROCMAiterMLASparseMetadata]):
         )
 
         if self.dcp_world_size > 1:
-            if not fp8_ds_mla_cache or self.sinks is not None:
-                raise NotImplementedError(
-                    "ROCm sparse DCP requires fp8_ds_mla without sinks"
-                )
             assert self.topk_indices_buffer is not None
             score_only = self.dcp_scores is not None and not attn_metadata.num_prefills
             if score_only:
@@ -1626,7 +1441,7 @@ class ROCMAiterMLASparseImpl(SparseMLACommonImpl[ROCMAiterMLASparseMetadata]):
                     )
                     .view(torch.float32)
                 )
-                token_pages = getattr(attn_metadata, "_dcp_token_pages", None)
+                token_pages = attn_metadata._dcp_token_pages
                 if token_pages is None or token_pages.shape[0] != num_actual_toks:
                     token_pages = attn_metadata.block_table[
                         attn_metadata.req_id_per_token[:num_actual_toks]

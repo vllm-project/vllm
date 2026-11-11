@@ -1389,11 +1389,6 @@ def rocm_aiter_sparse_attn_indexer(
         else max_model_len
     )
 
-    if dcp_world_size > 1:
-        raise NotImplementedError(
-            "The ROCm sparse attention indexer does not support DCP"
-        )
-
     # careful! this will be None in dummy run
     forward_context = get_forward_context()
     attn_metadata = forward_context.attn_metadata
@@ -1434,9 +1429,7 @@ def rocm_aiter_sparse_attn_indexer(
         # split_indexer_prefill_chunks; decode logits are smaller.
         max_logits_elems = envs.VLLM_SPARSE_INDEXER_MAX_LOGITS_MB * 1024 * 1024
         _ = torch.empty(
-            max_logits_elems,
-            dtype=torch.uint8,
-            device=hidden_states.device,
+            max_logits_elems, dtype=torch.uint8, device=hidden_states.device
         )
 
         return rocm_aiter_sparse_attn_indexer_fake(

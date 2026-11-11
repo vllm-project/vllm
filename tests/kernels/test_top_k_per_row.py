@@ -2757,7 +2757,7 @@ def test_persistent_topk_on_rocm_paged_mqa_logits(workspace_init) -> None:
 @pytest.mark.skipif(not current_platform.is_cuda(), reason="requires CUDA")
 @torch.inference_mode()
 def test_sparse_indexer_topk_backend_resolution() -> None:
-    """Auto chain and fail-fast validation of explicit backends."""
+    """Auto heuristic chain and fail-fast validation of explicit backends."""
     from vllm.config import VllmConfig, set_current_vllm_config
     from vllm.model_executor.layers.indexer_topk import SparseIndexerTopk
 
@@ -2860,7 +2860,7 @@ def test_sparse_indexer_topk_backend_resolution() -> None:
         assert resolve("cooperative") == "cooperative"
     if has_fi:
         assert resolve("flashinfer") == "flashinfer"
-    if is_sm100 and hasattr(torch.ops.deep_select, "get_alignment_requirement"):
+    if is_sm100:
         # Explicit deep_select has no row-count requirement.
         assert resolve("deep_select", num_rows=1) == "deep_select"
         with pytest.raises(RuntimeError, match="constraints"):

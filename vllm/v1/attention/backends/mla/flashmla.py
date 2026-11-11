@@ -51,7 +51,6 @@ class FlashMLABackend(MLACommonBackend):
         "bfloat16",
         "fp8",
         "fp8_e4m3",
-        "fp8_ds_mla",
     ]
 
     @staticmethod
@@ -308,21 +307,7 @@ class FlashMLAImpl(MLACommonImpl[FlashMLAMetadata]):
             scheduler_metadata.tile_scheduler_metadata = tile_scheduler_metadata
             scheduler_metadata.num_splits = num_splits
 
-        if self.kv_cache_dtype == "fp8_ds_mla":
-            # The 656 B fp8_ds_mla record carries its own scales: q stays in
-            # the model dtype and the kernel reads the record layout directly.
-            o, lse = flash_mla_with_kvcache(
-                q=q,
-                k_cache=kv_c_and_k_pe_cache.view(kv_c_and_k_pe_cache.shape[0], 1, -1),
-                block_table=attn_metadata.decode.block_table,
-                cache_seqlens=attn_metadata.decode.seq_lens,
-                head_dim_v=self.kv_lora_rank,
-                tile_scheduler_metadata=scheduler_metadata,
-                softmax_scale=self.scale,
-                causal=True,
-                is_fp8_kvcache=True,
-            )
-        elif is_quantized_kv_cache(self.kv_cache_dtype):
+        if is_quantized_kv_cache(self.kv_cache_dtype):
             o, lse = flash_mla_with_kvcache_fp8(
                 q=q,
                 k_cache=kv_c_and_k_pe_cache.unsqueeze(-2),  # Add head dim of 1

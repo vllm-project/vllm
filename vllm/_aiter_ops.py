@@ -3911,9 +3911,10 @@ class rocm_aiter_ops:
         supports() check reads host metadata only, so it is CUDA-graph safe.
         The kernel runs one workgroup per query row, so batches below
         VLLM_ROCM_AITER_FLYDSL_SPARSE_MLA_MIN_TOKENS (decode, small chunks)
-        stay on the Triton kernel, which splits the rows and is faster there. A config that never ran eagerly is not compiled
-        yet, so under graph capture it stays on the Triton kernel rather than
-        JIT-compiling and loading a module mid-capture. A row with no unmasked
+        stay on the Triton kernel, which splits the rows and is faster there.
+        A config that never ran eagerly is not compiled yet, so under graph
+        capture it stays on the Triton kernel rather than JIT-compiling and
+        loading a module mid-capture. A row with no unmasked
         key gives out 0 and lse -inf (the Triton kernel gives NaN).
         """
         if not cls._FLYDSL_SPARSE_MLA or not cls._AITER_ENABLED:
