@@ -2048,6 +2048,7 @@ def test_decode_index_topk_varlen_with_padded_rows(
         minimax_m3_index_decode as minimax_m3_index_decode_varlen,
     )
 
+    set_random_seed(0)
     topk = 6
     init_blocks = 0
     local_blocks = 1
@@ -3392,7 +3393,7 @@ def test_decode_sparse_attention_varlen_with_padded_rows(
     module = sys.modules[__name__]
     monkeypatch.setattr(module, "NUM_Q_HEADS", num_q_heads)
     monkeypatch.setattr(module, "NUM_KV_HEADS", num_kv_heads)
-    torch.manual_seed(0)
+    set_random_seed(0)
     q, block_table, seq_lens, topk_idx, num_pages = _build_decode_inputs(
         seq_lens_list, q_lens_list, num_padded_reqs=2
     )

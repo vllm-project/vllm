@@ -6,6 +6,7 @@ from types import SimpleNamespace
 
 import pytest
 
+from vllm.models.minimax_m3.amd import indexer_msa, sparse_attention_nvfp4
 from vllm.models.minimax_m3.common import indexer, sparse_attention
 from vllm.platforms import current_platform
 from vllm.v1.attention.backend import AttentionCGSupport
@@ -31,6 +32,20 @@ def _rocm_without_aiter_sparse_pa(monkeypatch):
     monkeypatch.setattr(
         sparse_attention, "_minimax_m3_aiter_sparse_pa_requested", lambda: False
     )
+
+
+@pytest.mark.parametrize(
+    "backend",
+    [indexer.MiniMaxM3IndexerBackend, sparse_attention.MiniMaxM3SparseBackend],
+)
+def test_backends_allow_query_lens_mismatch_only_with_varlen_builders(
+    backend, monkeypatch
+):
+    # The selector gates adaptive verification on this; only the ROCm Triton
+    # builders read per-request query lengths from the device.
+    assert backend.supports_device_cpu_query_lens_mismatch()
+    monkeypatch.setattr(current_platform, "is_rocm", lambda: False)
+    assert not backend.supports_device_cpu_query_lens_mismatch()
 
 
 @pytest.mark.parametrize(
@@ -66,17 +81,16 @@ def test_varlen_builders_pass_adaptive_gate(builder):
     assert builder.get_varlen_cudagraph_max_query_len(_vllm_config(False), None) is None
 
 
-def test_aiter_msa_indexer_builder_does_not_claim_varlen():
-    indexer_msa = pytest.importorskip("vllm.models.minimax_m3.amd.indexer_msa")
-    builder = indexer_msa.MiniMaxM3IndexerMSAMetadataBuilder
+@pytest.mark.parametrize(
+    "backend",
+    [
+        indexer_msa.MiniMaxM3IndexerMSABackend,
+        sparse_attention_nvfp4.MiniMaxM3SparseRocmNvfp4Backend,
+    ],
+)
+def test_uniform_only_rocm_builders_do_not_claim_varlen(backend):
+    # Their decode kernels score uniform per-request query rows.
+    builder = backend.get_builder_cls()
     assert not builder.supports_varlen_decode()
     assert builder.get_varlen_cudagraph_max_query_len(_vllm_config(True), None) is None
-
-
-def test_rocm_nvfp4_sparse_builder_does_not_claim_varlen():
-    sparse_nvfp4 = pytest.importorskip(
-        "vllm.models.minimax_m3.amd.sparse_attention_nvfp4"
-    )
-    builder = sparse_nvfp4.MiniMaxM3SparseRocmNvfp4MetadataBuilder
-    assert not builder.supports_varlen_decode()
-    assert builder.get_varlen_cudagraph_max_query_len(_vllm_config(True), None) is None
+    assert not backend.supports_device_cpu_query_lens_mismatch()

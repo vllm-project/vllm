@@ -45,6 +45,7 @@ else:
 from vllm.models.minimax_m3.common.varlen_decode import (
     VarlenDecodeBuilderMixin,
     build_decode_query_layout,
+    make_token_to_req_buffer,
 )
 from vllm.v1.attention.backend import (
     AttentionBackend,
@@ -96,7 +97,12 @@ class MiniMaxM3IndexerBackend(AttentionBackend):
 
     @classmethod
     def supports_device_cpu_query_lens_mismatch(cls) -> bool:
-        return cls.get_builder_cls().supports_varlen_decode()
+        # Only builders with ragged decode kernels read per-request query
+        # lengths from the device; the others assume uniform rows.
+        return (
+            super().supports_device_cpu_query_lens_mismatch()
+            and cls.get_builder_cls().supports_varlen_decode()
+        )
 
     @staticmethod
     def get_supported_kernel_block_sizes(kv_cache_spec=None) -> list[int | MultipleOf]:
@@ -272,10 +278,8 @@ class MiniMaxM3IndexerMetadataBuilder(
             device=device,
         )
         self.varlen_decode = self._use_varlen_decode(vllm_config)
-        self.token_to_req_buffer = torch.empty(
-            vllm_config.scheduler_config.max_num_batched_tokens,
-            dtype=torch.int32,
-            device=device,
+        self.token_to_req_buffer = make_token_to_req_buffer(
+            vllm_config, device, self.varlen_decode
         )
 
 
