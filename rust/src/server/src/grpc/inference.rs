@@ -163,13 +163,11 @@ impl InferenceServiceImpl {
                 })?);
             }
 
-            let ec_transfer_present = text_request
-                .sampling_params
-                .vllm_xargs
-                .as_ref()
-                .and_then(|args| args.get("ec_transfer_params"))
-                .is_some();
-            let media = super::media::from_proto(media, media_io.fps, ec_transfer_present)?;
+            let media = super::media::from_proto(
+                media,
+                media_io.fps,
+                self.state.llm().info().allow_missing_mm_embeddings,
+            )?;
             if !media.is_empty() {
                 let Prompt::TokenIds(mut token_ids) = text_request.prompt else {
                     return Err(Status::invalid_argument(

@@ -551,6 +551,7 @@ class EngineCoreReadyResponse:
     cache_config_info: dict[str, str] | None = None
     config_hash: str | None = None
     enable_expert_parallel: bool = False
+    allow_missing_mm_embeddings: bool = False
 
 
 ready_response = EngineCoreReadyResponse(
@@ -600,6 +601,7 @@ ready_response = EngineCoreReadyResponse(
     cache_config_info={"block_size": "16", "mamba_block_size": "None"},
     config_hash="0123456789",
     enable_expert_parallel=True,
+    allow_missing_mm_embeddings=True,
 )
 
 nixl_stats = {

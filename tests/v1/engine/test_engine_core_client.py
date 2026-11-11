@@ -1577,6 +1577,25 @@ def test_ready_response_queries_executor_with_weight_transfer():
     assert response.supports_draft_weight_updates is True
 
 
+@pytest.mark.parametrize("allow", [True, False])
+def test_ready_response_reports_metadata_only_role(allow):
+    """The Rust frontend accepts metadata-only multimodal items, as from an
+    EC or KV consumer, only when the engine reports it may."""
+    from vllm.v1.engine.core import EngineCoreProc
+
+    proc = MagicMock()
+    proc.vllm_config.weight_transfer_config = None
+    proc.vllm_config.model_config.multimodal_config.allow_missing_mm_embeddings = allow
+    assert (
+        EngineCoreProc._make_ready_response(proc).allow_missing_mm_embeddings is allow
+    )
+
+    proc.vllm_config.model_config.multimodal_config = None
+    assert (
+        EngineCoreProc._make_ready_response(proc).allow_missing_mm_embeddings is False
+    )
+
+
 def test_apply_ready_response_retains_kv_event_sources():
     """Each engine's resolved publisher config is kept by DP rank; engines
     without KV events contribute nothing."""

@@ -159,6 +159,10 @@ class EngineCoreReadyResponse:
     # hashing failed) and whether expert parallelism is enabled.
     config_hash: str | None = None
     enable_expert_parallel: bool = False
+    # `MultiModalConfig.allow_missing_mm_embeddings`: this engine is an EC or
+    # KV consumer and accepts multimodal items that carry placeholder metadata
+    # without pixels or embeddings, like the Python frontend does.
+    allow_missing_mm_embeddings: bool = False
 
 
 class EngineCoreRequest(

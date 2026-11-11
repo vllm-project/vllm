@@ -2113,6 +2113,7 @@ class EngineCoreProc(EngineCore):
     def _make_ready_response(self) -> EngineCoreReadyResponse:
         parallel_config = self.vllm_config.parallel_config
         scheduler_config = self.vllm_config.scheduler_config
+        mm_config = self.vllm_config.model_config.multimodal_config
         return EngineCoreReadyResponse(
             max_model_len=self.vllm_config.model_config.max_model_len,
             num_gpu_blocks=self.vllm_config.cache_config.num_gpu_blocks or 0,
@@ -2171,6 +2172,9 @@ class EngineCoreProc(EngineCore):
             cache_config_info=self.vllm_config.cache_config.metrics_info(),
             config_hash=self._config_hash(),
             enable_expert_parallel=parallel_config.enable_expert_parallel,
+            allow_missing_mm_embeddings=(
+                mm_config is not None and mm_config.allow_missing_mm_embeddings
+            ),
         )
 
     def process_input_sockets(

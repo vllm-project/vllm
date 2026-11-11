@@ -35,7 +35,7 @@ const MAX_MSGPACK_DEPTH: usize = 32;
 pub(super) fn from_proto(
     media: Vec<pb::MediaItem>,
     video_fps: Option<f64>,
-    ec_transfer_present: bool,
+    allow_metadata_only: bool,
 ) -> Result<MultimodalInput, Status> {
     let is_feature =
         |item: &pb::MediaItem| matches!(item.source, Some(pb::media_item::Source::Features(_)));
@@ -63,7 +63,7 @@ pub(super) fn from_proto(
     for (index, item) in media.into_iter().enumerate() {
         if is_feature(&item) {
             features.push(
-                feature_from_proto(item, ec_transfer_present).map_err(|error| {
+                feature_from_proto(item, allow_metadata_only).map_err(|error| {
                     Status::new(error.code(), format!("media[{index}]: {}", error.message()))
                 })?,
             );
@@ -100,7 +100,7 @@ pub(super) fn options_from_proto(
 
 fn feature_from_proto(
     item: pb::MediaItem,
-    ec_transfer_present: bool,
+    allow_metadata_only: bool,
 ) -> Result<MmFeatureSpec, Status> {
     let modality = match item.modality() {
         pb::Modality::Image => MmModality::Image,
@@ -116,9 +116,9 @@ fn feature_from_proto(
         Some(bytes) => (decode_inline_mm_kwargs(&bytes)?, feature.identifier),
         None => {
             let has_tensors = !feature.tensors.is_empty();
-            if !ec_transfer_present && !has_tensors {
+            if !allow_metadata_only && !has_tensors {
                 return Err(Status::invalid_argument(
-                    "metadata-only multimodal items require ec_transfer_params",
+                    "metadata-only multimodal items require an EC or KV consumer engine",
                 ));
             }
             let hash =
@@ -907,7 +907,7 @@ mod tests {
             ..Default::default()
         };
         let MultimodalInput::Preprocessed(features) =
-            from_proto(vec![item.clone()], true).expect("metadata-only feature")
+            from_proto(vec![item.clone()], None, true).expect("metadata-only feature")
         else {
             panic!("expected preprocessed features");
         };
@@ -917,8 +917,8 @@ mod tests {
         let data = features[0].data.as_ref().unwrap();
         assert!(data.contains_key("image_grid_thw"));
         assert!(!data.contains_key("pixel_values"));
-        let denied = from_proto(vec![item], false).unwrap_err();
-        assert!(denied.message().contains("require ec_transfer_params"));
+        let denied = from_proto(vec![item], None, false).unwrap_err();
+        assert!(denied.message().contains("EC or KV consumer"));
     }
 
     fn numbers(values: &[f64]) -> prost_types::Value {
@@ -981,7 +981,7 @@ mod tests {
             fps: Some(2.0),
             ..Default::default()
         };
-        let parts = raw_parts_from_proto(vec![image.clone(), video]).unwrap();
+        let parts = raw_parts_from_proto(vec![image.clone(), video], None).unwrap();
         assert!(matches!(
             &parts[0],
             MediaContentPart::ImageUrl {
@@ -997,7 +997,7 @@ mod tests {
             detail: Some("ultra".into()),
             ..image
         };
-        let error = raw_parts_from_proto(vec![bad]).unwrap_err();
+        let error = raw_parts_from_proto(vec![bad], None).unwrap_err();
         assert!(error.message().contains("auto, low or high"));
     }
 }

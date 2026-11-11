@@ -1115,6 +1115,107 @@ async fn generate_forwards_preprocessed_multimodal_features() {
     }
 }
 
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+#[serial]
+async fn metadata_only_features_follow_engine_consumer_role() {
+    for allow_missing_mm_embeddings in [true, false] {
+        let ready = EngineCoreReadyResponse {
+            allow_missing_mm_embeddings,
+            ..default_ready_response()
+        };
+        let (inference_service, control_service, engine_health, engine_task) =
+            setup_grpc_service_with_engine_script(
+                b"engine-grpc-metadata-only",
+                ready,
+                multimodal_backend(),
+                None,
+                move |dealer, push| {
+                    boxed_test_future(async move {
+                        if !allow_missing_mm_embeddings {
+                            return;
+                        }
+                        let add = recv_engine_message(dealer).await;
+                        let request = decode_add_request(&add);
+                        let feature = &request.mm_features.as_ref().expect("features")[0];
+                        let data = feature.data.as_ref().expect("feature data");
+                        assert!(data.contains_key("image_grid_thw"));
+                        assert!(!data.contains_key("pixel_values"));
+                        let xargs = request
+                            .sampling_params
+                            .as_ref()
+                            .and_then(|params| params.extra_args.as_ref())
+                            .expect("KV transfer args");
+                        assert!(xargs.contains_key("kv_transfer_params"));
+                        assert!(!xargs.contains_key("ec_transfer_params"));
+                        send_outputs(
+                            push,
+                            engine_outputs_for_request(
+                                &request.request_id,
+                                default_stream_output_specs(),
+                            ),
+                        )
+                        .await;
+                    })
+                },
+            )
+            .await;
+        let (channel, server_task) = start_grpc_test_server(
+            inference_service,
+            control_service,
+            engine_health,
+            tokio_util::sync::CancellationToken::new(),
+        )
+        .await;
+        let mut client = InferenceClient::new(channel);
+
+        let grid = prost_types::Value {
+            kind: Some(prost_types::value::Kind::ListValue(
+                prost_types::ListValue {
+                    values: [1.0, 2.0, 4.0]
+                        .into_iter()
+                        .map(|number| prost_types::Value {
+                            kind: Some(prost_types::value::Kind::NumberValue(number)),
+                        })
+                        .collect(),
+                },
+            )),
+        };
+        let mut request = preprocessed_grpc_request(vec![pb::MediaItem {
+            modality: pb::Modality::Image as i32,
+            source: Some(pb::media_item::Source::Features(
+                pb::PreprocessedMediaFeatures {
+                    kwargs: None,
+                    identifier: "image-hash-a".to_string(),
+                    offset: 1,
+                    length: 2,
+                    mm_hash: Some("image-hash-a".to_string()),
+                    is_embed: Vec::new(),
+                    metadata: Some(prost_types::Struct {
+                        fields: BTreeMap::from([("image_grid_thw".to_string(), grid)]),
+                    }),
+                    tensors: Default::default(),
+                },
+            )),
+            ..Default::default()
+        }]);
+        request.kv = Some(pb::KvCacheParameters {
+            kv_transfer_params: Some(decode_kv_proto_struct()),
+            ..Default::default()
+        });
+
+        let result = client.generate(request).await;
+        if allow_missing_mm_embeddings {
+            result.expect("KV consumer accepts metadata-only features");
+            engine_task.await.expect("mock engine task");
+        } else {
+            let status = result.expect_err("non-consumer engines reject metadata-only features");
+            assert_eq!(status.code(), tonic::Code::InvalidArgument);
+            assert!(status.message().contains("EC or KV consumer"));
+        }
+        server_task.abort();
+    }
+}
+
 fn preprocessed_grpc_media(
     modality: pb::Modality,
     identifier: &str,

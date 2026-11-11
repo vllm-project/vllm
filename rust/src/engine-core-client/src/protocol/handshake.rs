@@ -145,6 +145,10 @@ pub struct EngineCoreReadyResponse {
     /// Whether expert parallelism is enabled.
     #[serde(default)]
     pub enable_expert_parallel: bool,
+    /// The engine is an EC or KV consumer and accepts multimodal items that
+    /// carry placeholder metadata without pixels or embeddings.
+    #[serde(default)]
+    pub allow_missing_mm_embeddings: bool,
 }
 
 /// Frontend-owned ZMQ addresses that are sent to the engine during startup
