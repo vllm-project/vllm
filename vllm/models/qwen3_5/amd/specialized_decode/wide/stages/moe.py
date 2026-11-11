@@ -862,26 +862,32 @@ def down(g, s, lds, w, b, xch, local: bool):
             g.bid * OWN_TILES + i32(ps * s.pass_tiles + t) for t in range(s.pass_tiles)
         ]
         odd = [(ps * s.pass_tiles + t) % 2 for t in range(s.pass_tiles)]
-        ring = [_down_loads(g, s, lds, w, b, i32(i), tiles) for i in range(DOWN_AHEAD)]
-        for i in range(i32(0), per_wave, i32(1)):
-            cur = list(ring)
-            cur.append(_down_loads(g, s, lds, w, b, i + DOWN_AHEAD, tiles))
-            sched_barrier()
-            weights, code, xb, xc, a, count = cur[0]
-            for t in range_constexpr(s.pass_tiles):
-                sa = (code >> (odd[t] * 8)) & 0x00FF00FF
-                acc = zeros(4)
-                for k in range_constexpr(s.down_steps):
-                    acc = mfma_f4(
-                        weights[t][k], xb[k], acc, sa, xc[k], opsel_a=2 * (k % 2)
-                    )
-                if g.lane % TILE < count:
-                    lds_st(
-                        lds.contrib + a * (TILE * s.pass_tiles) + t * TILE
-                        + (g.lane // TILE) * 4,
-                        acc.bitcast(fx.Int32),
-                    )
-            ring = cur[1:]
+        # slot j holds unit i + j's operands, re-issued with unit i +
+        # DOWN_AHEAD once unit i is done: a rotating ring is copied at the back
+        # edge, and a copy waits out the loads in flight. Units past the count
+        # issue no request and store nothing.
+        slots = [_down_loads(g, s, lds, w, b, i32(i), tiles) for i in range(DOWN_AHEAD)]
+        rounds = (per_wave + i32(DOWN_AHEAD - 1)) // i32(DOWN_AHEAD)
+        for r in range(i32(0), rounds, i32(1)):
+            for j in range_constexpr(DOWN_AHEAD):
+                i = r * i32(DOWN_AHEAD) + i32(j)
+                weights, code, xb, xc, a, count = slots[j]
+                for t in range_constexpr(s.pass_tiles):
+                    sa = (code >> (odd[t] * 8)) & 0x00FF00FF
+                    acc = zeros(4)
+                    for k in range_constexpr(s.down_steps):
+                        acc = mfma_f4(
+                            weights[t][k], xb[k], acc, sa, xc[k], opsel_a=2 * (k % 2)
+                        )
+                    if g.lane % TILE < count:
+                        lds_st(
+                            lds.contrib + a * (TILE * s.pass_tiles) + t * TILE
+                            + (g.lane // TILE) * 4,
+                            acc.bitcast(fx.Int32),
+                        )
+                sched_barrier()
+                new = _down_loads(g, s, lds, w, b, i + DOWN_AHEAD, tiles)
+                slots = slots[:j] + [new] + slots[j + 1 :]
         fx.barrier()
         cols = TILE * s.pass_tiles
         for r in range_constexpr(-(-(rows * cols) // THREADS)):
