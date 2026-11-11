@@ -761,30 +761,25 @@ impl EngineCoreClient {
             rx,
         );
 
-        let result: Result<()> = async {
-            // The engine that receives it wakes the other ranks if they are idle.
-            if let Some(coordinator) = self.coordinator.as_ref() {
-                req.current_wave = coordinator.snapshot().current_wave;
-            }
-
-            debug!(
-                request_id = req.request_id,
-                ?engine_id,
-                "registered request to engine"
-            );
-
-            self.inner.send_request_to_engine(&engine_id, req).await?;
-            Ok(())
+        // The engine that receives it wakes the other ranks if they are idle.
+        if let Some(coordinator) = self.coordinator.as_ref() {
+            req.current_wave = coordinator.snapshot().current_wave;
         }
-        .await;
+
+        debug!(
+            request_id = req.request_id,
+            ?engine_id,
+            "registered request to engine"
+        );
+
+        let result = self.inner.send_request_to_engine(&engine_id, req, stream).await;
 
         // Failed to send the request to the engine, roll back the registration.
-        if let Err(error) = result {
+        if result.is_err() {
             self.inner.rollback_request(&request_id);
-            return Err(error);
         }
 
-        Ok(stream)
+        result
     }
 
     /// Abort currently in-flight requests by request ID.
@@ -1038,16 +1033,24 @@ impl EngineCoreClient {
     }
 
     /// Put the engine to sleep.
-    pub async fn sleep(&self, level: SleepLevel, mode: PauseMode) -> Result<()> {
+    pub async fn sleep(
+        &self,
+        level: SleepLevel,
+        mode: PauseMode,
+        reset_connector: bool,
+    ) -> Result<()> {
         let recheck = self.inner.readiness().withdraw_until_recheck();
-        self.inner.call_utility::<(), _>("sleep", (level, mode), Some(recheck)).await?;
+        self.inner
+            .call_utility::<(), _>("sleep", (level, mode, reset_connector), Some(recheck))
+            .await?;
         self.inner.record_sleep_state(EngineSleepState::Asleep(level));
         Ok(())
     }
 
     /// Release KV cache memory while keeping model weights resident.
-    pub async fn release_kv_cache_memory(&self) -> Result<()> {
-        self.call_utility::<(), _>("release_kv_cache_memory", ()).await?;
+    pub async fn release_kv_cache_memory(&self, reset_connector: bool) -> Result<()> {
+        self.call_utility::<(), _>("release_kv_cache_memory", (reset_connector,))
+            .await?;
         self.inner.record_sleep_state(EngineSleepState::KvCacheReleased);
         Ok(())
     }

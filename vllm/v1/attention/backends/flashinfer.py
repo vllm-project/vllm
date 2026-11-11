@@ -1126,6 +1126,13 @@ class FlashInferMetadataBuilder(AttentionMetadataBuilder[FlashInferMetadata]):
         self.paged_kv_last_page_len = CpuGpuBuffer(
             max_num_reqs, dtype=torch.int32, device=self.device, pin_memory=False
         )
+        # Rebased query offsets for TRTLLM prefill. Persistent because a FULL
+        # CUDA graph can capture this path (e.g. a draft-model prefill whose
+        # uniform query length exceeds reorder_batch_threshold) and keeps the
+        # address it saw at capture time.
+        self.qo_indptr_prefill = torch.zeros(
+            max_num_reqs + 1, dtype=torch.int32, device=self.device
+        )
 
     def _resolve_cache_dtype(self) -> str:
         cache_dtype = self.cache_config.cache_dtype
@@ -1768,8 +1775,13 @@ class FlashInferMetadataBuilder(AttentionMetadataBuilder[FlashInferMetadata]):
                 # use_trtllm_attention never selects it when DCP is enabled.
                 assert not self.use_dcp
                 # Create GPU versions
-                qo_indptr_prefill_gpu = (
-                    qo_indptr[prefill_start:] - qo_indptr[prefill_start]
+                qo_indptr_prefill_gpu = self.qo_indptr_prefill[
+                    : num_reqs + 1 - prefill_start
+                ]
+                torch.sub(
+                    qo_indptr[prefill_start : num_reqs + 1],
+                    qo_indptr[prefill_start],
+                    out=qo_indptr_prefill_gpu,
                 )
                 # Compute cum_seq_lens_kv on GPU to avoid CPU sync.
                 # This is the cumulative sum of the number of KV cache
