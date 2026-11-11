@@ -490,6 +490,25 @@ def kv_cache_as_quant_view(
     return kv_cache.unsqueeze(-2)
 
 
+def should_skip_indexer_scoring(
+    mla_metadata: object, cudagraph_runtime_mode: CUDAGraphMode
+) -> bool:
+    """Whether the indexer can skip scoring because the main MLA runs a pure
+    prefill on dense MHA, which does not read the top-k indices.
+
+    The indexer and main MLA may classify the same short extend differently
+    because they use independent decode thresholds, so this takes the main MLA
+    metadata. The indexer K cache must still be written.
+    """
+    prefill = getattr(mla_metadata, "prefill", None)
+    return (
+        cudagraph_runtime_mode != CUDAGraphMode.FULL
+        and getattr(prefill, "use_dense_mha", False)
+        and getattr(mla_metadata, "num_decode_tokens", -1) == 0
+        and not torch.cuda.is_current_stream_capturing()
+    )
+
+
 @eager_break_during_capture
 def sparse_attn_indexer(
     hidden_states: torch.Tensor,
@@ -695,23 +714,13 @@ def sparse_attn_indexer(
             quant_block_size,
             "mxfp8" if mqa_logits_use_mx_scales() else scale_fmt,
         )
-    # The indexer and main MLA may classify the same short extend differently
-    # because they use independent decode thresholds. Only the main MLA route
-    # can determine whether the top-k indices will be consumed.
-    if forward_context.cudagraph_runtime_mode != CUDAGraphMode.FULL:
-        dense_mha_layer = _resolve_layer_name(dense_mha_metadata_layer_name)
-        if dense_mha_layer:
-            mla_metadata = attn_metadata.get(dense_mha_layer)
-            prefill_metadata = getattr(mla_metadata, "prefill", None)
-            if (
-                getattr(prefill_metadata, "use_dense_mha", False)
-                and getattr(mla_metadata, "num_decode_tokens", -1) == 0
-                and not torch.cuda.is_current_stream_capturing()
-            ):
-                # Deliberately leave the buffer untouched. Dense MHA does not
-                # consume top-k indices for this batch; clearing it would be
-                # unnecessary work.
-                return topk_indices_buffer
+    dense_mha_layer = _resolve_layer_name(dense_mha_metadata_layer_name)
+    if dense_mha_layer and should_skip_indexer_scoring(
+        attn_metadata.get(dense_mha_layer), forward_context.cudagraph_runtime_mode
+    ):
+        # Deliberately leave the buffer untouched; clearing it would be
+        # unnecessary work.
+        return topk_indices_buffer
 
     # The buffer must be pre-filled with -1 (the "no token" sentinel) before the
     # top-k kernels scatter valid indices into it. On the fused deepseek_v32
@@ -759,10 +768,12 @@ def sparse_attn_indexer(
             scales_spec,
             *gather_specs,
         )
-        # Under ShardQ the chunks index the shardq_gather_indices tokens.
+        # Under ShardQ the chunks index the shardq_gather_indices tokens. The
+        # caller may have computed the query and weights of just those.
         prefill_q, prefill_q_scale, prefill_weights = q_quant, q_scale, weights
-        if (indices := prefill_metadata.shardq_gather_indices) is not None:
-            assert candidate_blocks is None
+        indices = prefill_metadata.shardq_gather_indices
+        assert indices is None or candidate_blocks is None
+        if indices is not None and q_quant.shape[0] != indices.shape[0]:
             prefill_q, prefill_weights = q_quant[indices], weights[indices]
             if q_scale is not None:
                 prefill_q_scale = q_scale[indices]
@@ -1247,6 +1258,7 @@ class SparseAttnIndexer(CustomOp):
         candidate_blocks: torch.Tensor | None = None,
         candidate_block_size: int = 0,
         candidate_write: bool = False,
+        cache_layout: str | None = None,
     ):
         super().__init__()
         self.k_cache = k_cache
@@ -1260,6 +1272,11 @@ class SparseAttnIndexer(CustomOp):
         self.skip_k_cache_insert = skip_k_cache_insert
         self.use_fp4_cache = use_fp4_cache
         self.compress_ratio = compress_ratio
+        # Physical layout override for the insert/gather kernels ("NORMAL" =
+        # block-flat), for caches whose layout cannot be inferred from the
+        # tensor alone, e.g. a strided section view of a larger allocation.
+        # None keeps the wrappers' block-size-based auto-selection.
+        self.cache_layout = cache_layout
         # v4.1 two-level selection: the candidate source indexer writes the
         # top candidate blocks here; later indexers mask their scores with it.
         self.candidate_blocks = candidate_blocks
@@ -1424,6 +1441,12 @@ class SparseAttnIndexer(CustomOp):
                 candidate_blocks=self.candidate_blocks,
                 candidate_block_size=self.candidate_block_size,
                 candidate_write=self.candidate_write,
+                use_pcp=self.use_pcp,
+                pcp_shard_decode_requests=self.pcp_shard_decode_requests,
+                cache_layout=self.cache_layout,
+                dcp_rank=self.dcp_rank,
+                dcp_world_size=self.dcp_world_size,
+                cp_interleave=self._parallel_config.cp_kv_cache_interleave_size,
             )
         raise RuntimeError(
             "Sparse attention indexer ROCm path requires AITER or a supported "

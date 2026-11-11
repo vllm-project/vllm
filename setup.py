@@ -605,7 +605,7 @@ class precompiled_wheel_utils:
     def detect_system_cuda_variant() -> str:
         """Auto-detect CUDA variant from torch, nvidia-smi, or env default."""
         # Map CUDA major version to hosted wheel variants on wheels.vllm.ai
-        supported = {12: "cu129", 13: "cu130"}
+        supported = {12: "cu129", 13: "cu132"}
 
         # Respect explicitly set VLLM_MAIN_CUDA_VERSION
         if envs.is_set("VLLM_MAIN_CUDA_VERSION"):
@@ -1718,7 +1718,7 @@ setup(
         # AMD Zen CPU optimizations via zentorch
         "zen": ["zentorch==2.14.0.2"],
         "bench": ["pandas", "matplotlib", "seaborn", "datasets", "scipy", "plotly"],
-        "tensorizer": ["tensorizer==2.10.1"],
+        "tensorizer": ["tensorizer==2.12.1"],
         "fastsafetensors": ["fastsafetensors >= 0.3.3"],
         "instanttensor": ["instanttensor >= 0.2.2"],
         "runai": ["runai-model-streamer[s3,gcs,azure] >= 0.17.1"],
