@@ -479,7 +479,7 @@ class Base(
         """The offloader for the decoder layers."""
         return get_offloader()
 
-    def _pre_replace(self, layer: nn.Module, prefix: str):
+    def _pre_decoder_layer_replace(self, layer: nn.Module, prefix: str):
         """Called on each decoder layer before `recursive_replace` replaces it."""
 
     def _vocab_embeddings(self) -> set[nn.Embedding]:
@@ -574,7 +574,7 @@ class Base(
                 "will not be applied to them.",
                 type(self.model).__name__,
             )
-        # Decoder layers are detected as they are built, after `_pre_replace`
+        # Decoder layers are detected as they are built, after their pre-replace hook
         fusers = Fusers(self.model, self.vllm_config, skip=decoder_layers)
 
         def _replace_decoder_layers(layers: nn.ModuleList, prefix: str):
@@ -600,7 +600,7 @@ class Base(
             def build_layers():
                 for i in range(*self._pp_indices()):
                     layer_prefix = f"{prefix}.{i}"
-                    self._pre_replace(layers[i], layer_prefix)
+                    self._pre_decoder_layer_replace(layers[i], layer_prefix)
                     fusers.add(layers[i])
                     _replace_child(layers, str(i), layers[i], prefix)
                     self.init_parameters(layers[i])

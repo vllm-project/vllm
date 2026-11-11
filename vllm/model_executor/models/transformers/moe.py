@@ -222,7 +222,7 @@ class MoEMixin(MixtureOfExperts, Base):
         # Skip MixtureOfExperts.__init__ and call the next class in MRO
         super(MixtureOfExperts, self).__init__(vllm_config=vllm_config, prefix=prefix)
 
-    def _pre_replace(self, layer: nn.Module, prefix: str):
+    def _pre_decoder_layer_replace(self, layer: nn.Module, prefix: str):
         self._fuse_experts(layer, prefix)
 
     def update_physical_experts_metadata(
@@ -314,7 +314,7 @@ class MoEMixin(MixtureOfExperts, Base):
 
         # Recursively fuse MoE layers
         def _recursive_replace(module: nn.Module, prefix: str):
-            # Decoder layers are fused as Base builds them, see `_pre_replace`
+            # Decoder layers are fused later, in `_pre_decoder_layer_replace`
             if module is self._decoder_layers:
                 return
             for child_name, child_module in module.named_children():
