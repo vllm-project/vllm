@@ -123,13 +123,12 @@ class LeaseSlotAllocator:
 
 
 def lease_slot_descs(base_addr: int, num_slots: int) -> np.ndarray:
-    """NIXL `(addr, len, device_id)` descriptors, one per DRAM slot."""
-    descs = np.zeros((num_slots, 3), dtype=np.uint64)
-    descs[:, 0] = np.uint64(base_addr) + np.uint64(LEASE_SLOT_BYTES) * np.arange(
-        num_slots, dtype=np.uint64
+    """A NIXL `(addr, len, device_id, stride, count)` descriptor whose blocks
+    are the DRAM slots, so desc ids are slot indices."""
+    return np.array(
+        [[base_addr, LEASE_SLOT_BYTES, 0, LEASE_SLOT_BYTES, num_slots]],
+        dtype=np.uint64,
     )
-    descs[:, 1] = LEASE_SLOT_BYTES
-    return descs
 
 
 def _alloc_slots(num_slots: int) -> torch.Tensor:

@@ -177,6 +177,9 @@ class NixlBaseConnectorWorker:
     # registered: exported to readers / used to verify reads.
     _lease_slots: ProducerLeaseSlots | None = None
     _lease_verifier: LeaseVerifier | None = None
+    # Not in _registered_descs: the slots stay registered across sleep, so
+    # the verifier's prepped local handle stays valid.
+    _lease_registered_descs: Any = None
     _lease_verification = True
 
     def _compute_desc_ids(
@@ -2050,7 +2053,7 @@ class NixlBaseConnectorWorker:
                 ) from e
             logger.exception("Cannot register NIXL KV lease slots in DRAM.")
             return
-        self._registered_descs.append(descs)
+        self._lease_registered_descs = descs
         verifier.local_handle = self.nixl_wrapper.prep_xfer_dlist(
             "NIXL_INIT_AGENT",
             lease_slot_descs(verifier.tensor.data_ptr(), verifier.tensor.numel()),
@@ -4318,8 +4321,11 @@ class NixlBaseConnectorWorker:
             if not self._kv_unregistered:
                 for desc in self._registered_descs:
                     self.nixl_wrapper.deregister_memory(desc)
+            if self._lease_registered_descs is not None:
+                self.nixl_wrapper.deregister_memory(self._lease_registered_descs)
         finally:
             self._registered_descs.clear()
+            self._lease_registered_descs = None
             # Drop cache references before their owners release registered
             # host memory; handshake futures may outlive model-runner shutdown.
             self.device_kv_caches = {}
