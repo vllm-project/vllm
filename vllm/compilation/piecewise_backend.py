@@ -41,20 +41,28 @@ def create_concrete_args(graph: fx.GraphModule, size: int) -> list[Any]:
     Used for single-size compilation where we need concrete-shaped inputs.
     The Dynamo-captured graph gives us example inputs with SymInts in them.
     Symbols that Dynamo created only for an input's stride or storage offset
-    keep their traced value. They are assumed not to change with the size
-    (e.g. the row pitch of a slice of a persistent buffer).
+    keep their traced value, unless a guard merged a size symbol into them.
+    They are assumed not to change with the size (e.g. the row pitch of a
+    slice of a persistent buffer).
     """
     from torch._dynamo.source import TensorProperty, TensorPropertySource
     from torch._prims_common import compute_required_storage_length
     from torch._subclasses.fake_tensor import FakeTensorMode
     from torch.fx.experimental.symbolic_shapes import ShapeEnv, is_symbolic
 
-    def is_layout_symbol(shape_env: ShapeEnv, s: Any) -> bool:
+    def has_layout_sources(shape_env: ShapeEnv, s: Any) -> bool:
         sources = shape_env.var_to_sources.get(s)
         return bool(sources) and all(
             isinstance(src, TensorPropertySource)
             and src.prop is not TensorProperty.SIZE
             for src in sources
+        )
+
+    def is_layout_symbol(shape_env: ShapeEnv, s: Any) -> bool:
+        return has_layout_sources(shape_env, s) and not any(
+            s in shape_env.replace(tgt).free_symbols
+            for var, tgt in shape_env.replacements.items()
+            if not has_layout_sources(shape_env, var)
         )
 
     def concretize(sym_val: Any) -> int:

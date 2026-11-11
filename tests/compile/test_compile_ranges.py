@@ -255,6 +255,48 @@ def test_compile_sizes_keep_input_strides(disable_vllm_compile_cache):
             )
 
 
+def scale_by_rows(x: torch.Tensor, q: torch.Tensor) -> torch.Tensor:
+    return x * q.sum(1, keepdim=True)
+
+
+@support_torch_compile(dynamic_arg_dims={"x": 0, "q": 0})
+class SizeEqualsStrideModel(nn.Module):
+    def __init__(self, *, vllm_config: VllmConfig, prefix: str = "", **kwargs) -> None:
+        super().__init__()
+
+    def forward(self, x: torch.Tensor, q: torch.Tensor) -> torch.Tensor:
+        torch._check(q.stride(0) == x.shape[0])
+        return scale_by_rows(x, q)
+
+
+def test_compile_sizes_size_merged_into_stride(disable_vllm_compile_cache):
+    """A stride symbol that a guard equates with a size must take the
+    compile size, even if Dynamo replaced the size symbol with it."""
+    torch.set_default_device("cuda")
+    vllm_config = VllmConfig(
+        scheduler_config=SchedulerConfig(
+            max_num_batched_tokens=8192,
+            max_model_len=8192,
+            is_encoder_decoder=False,
+        ),
+        compilation_config=CompilationConfig(
+            mode=CompilationMode.VLLM_COMPILE,
+            compile_sizes=[16],
+        ),
+    )
+
+    with (
+        set_current_vllm_config(vllm_config),
+        torch.inference_mode(),
+        set_forward_context({}, vllm_config=vllm_config),
+    ):
+        model = SizeEqualsStrideModel(vllm_config=vllm_config, prefix="").eval()
+        for num_tokens in [BATCH_SIZE, 16]:
+            x = torch.randn(num_tokens, MLP_SIZE)
+            q = torch.randn(num_tokens, num_tokens)[:, :4]
+            torch.testing.assert_close(model(x, q), scale_by_rows(x, q))
+
+
 def test_inductor_cache_compile_ranges(disable_vllm_compile_cache):
     # disable_vllm_compile_cache sets VLLM_DISABLE_COMPILE_CACHE=1 to force
     # multiple compilations by disabling vLLM's on-disk compile cache.
