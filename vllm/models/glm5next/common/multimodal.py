@@ -47,7 +47,6 @@ from vllm.model_executor.models.vision import (
 from vllm.models.common.ops import fused_q_kv_rmsnorm
 from vllm.multimodal.parse import ImageSize, MultiModalDataItems
 from vllm.utils.torch_utils import async_tensor_h2d
-from vllm.v1.attention.backends.registry import AttentionBackendEnum
 
 
 class Glm5NextVisionPatchEmbed(nn.Module):
@@ -491,19 +490,6 @@ class Glm5NextVisionTransformer(nn.Module):
         sin_combined = sin[pos_ids].flatten(1)
         return cos_combined, sin_combined, pos_ids
 
-    def compute_attn_mask_seqlen(
-        self,
-        cu_seqlens: torch.Tensor,
-    ) -> torch.Tensor | None:
-        max_seqlen = None
-        if self.attn_backend in {
-            AttentionBackendEnum.FLASH_ATTN,
-            AttentionBackendEnum.ROCM_AITER_FA,
-            AttentionBackendEnum.TRITON_ATTN,
-        }:
-            max_seqlen = (cu_seqlens[1:] - cu_seqlens[:-1]).max()
-        return max_seqlen
-
     def prepare_encoder_metadata(
         self,
         grid_thw_list: list[list[int]],
@@ -580,48 +566,21 @@ class Glm5NextVisionTransformer(nn.Module):
         x = self.input_norm(x.to(device=self.device), self.dtype)
         x = self.patch_embed(x)
 
-        if (
-            encoder_metadata is None
-            and self.attn_backend == AttentionBackendEnum.FLASHINFER
-        ):
-            # FlashInfer needs the backend-specific cu_seqlens and
-            # sequence_lengths.
+        if encoder_metadata is None:
             if not isinstance(grid_thw, list):
                 grid_thw = grid_thw.tolist()
             encoder_metadata = self.prepare_encoder_metadata(grid_thw)
-
-        sequence_lengths = None
-        if encoder_metadata is not None:
-            # Encoder CUDA-graph path (PR #49852): rotary/cu_seqlens/max_seqlen are
-            # precomputed by prepare_encoder_metadata (which uses rot_pos_emb exactly
-            # as the eager rebuild does), so reuse them and skip the per-call CPU
-            # rebuild (the low-GPU-util culprit on multimodal workloads).
-            rotary_pos_emb_cos = encoder_metadata["rotary_pos_emb_cos"]
-            rotary_pos_emb_sin = encoder_metadata["rotary_pos_emb_sin"]
-            cu_seqlens = encoder_metadata["cu_seqlens"]
-            max_seqlen = encoder_metadata["max_seqlen"]
-            sequence_lengths = encoder_metadata["sequence_lengths"]
-        else:
-            if isinstance(grid_thw, list):
-                grid_thw = torch.tensor(grid_thw, dtype=torch.int32)
-            rotary_pos_emb_cos, rotary_pos_emb_sin, _ = self.rot_pos_emb(grid_thw)
-            cu_seqlens = torch.repeat_interleave(
-                grid_thw[:, 1] * grid_thw[:, 2], grid_thw[:, 0]
-            ).cumsum(dim=0, dtype=torch.int32)
-            cu_seqlens = torch.cat([cu_seqlens.new_zeros(1), cu_seqlens])
-            cu_seqlens = async_tensor_h2d(cu_seqlens, device=self.device)
-            max_seqlen = self.compute_attn_mask_seqlen(cu_seqlens)
 
         # transformers
         x = x.unsqueeze(1)
         for blk in self.blocks:
             x = blk(
                 x,
-                cu_seqlens=cu_seqlens,
-                rotary_pos_emb_cos=rotary_pos_emb_cos,
-                rotary_pos_emb_sin=rotary_pos_emb_sin,
-                max_seqlen=max_seqlen,
-                sequence_lengths=sequence_lengths,
+                cu_seqlens=encoder_metadata["cu_seqlens"],
+                rotary_pos_emb_cos=encoder_metadata["rotary_pos_emb_cos"],
+                rotary_pos_emb_sin=encoder_metadata["rotary_pos_emb_sin"],
+                max_seqlen=encoder_metadata["max_seqlen"],
+                sequence_lengths=encoder_metadata["sequence_lengths"],
             )
 
         # adapter
