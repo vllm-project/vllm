@@ -22,7 +22,7 @@ use vllm_engine_core_client::protocol::logprobs::{Logprobs, PositionLogprobs};
 use vllm_engine_core_client::protocol::multimodal::MmFeatureSpec;
 use vllm_llm::{
     AuxOutputRows, CollectedGenerateOutput, FinishReason, GenerateOutput,
-    GenerateOutputStreamExt as _, TokenUsage,
+    GenerateOutputStreamExt as _, TokenUsage, WeightVersions,
 };
 
 use self::convert::{ResponseOptions, prepare_generate_request};
@@ -177,11 +177,13 @@ async fn generate_chunk_stream(
     let mut prompt_token_ids = None;
     let mut usage = TokenUsage::default();
     let mut spec_decode_metrics = None;
+    let mut weight_versions = WeightVersions::default();
     let mut routed_experts = AuxOutputRows::default();
 
     while let Some(next) = stream.next().await {
         match next {
             Ok(output) => {
+                weight_versions.append(output.weight_versions);
                 routed_experts.append(output.routed_experts);
                 if let Some(metrics) = output.spec_decode_metrics {
                     spec_decode_metrics = Some(SpeculativeDecodingMetrics::from(*metrics));
@@ -236,7 +238,11 @@ async fn generate_chunk_stream(
                     finish_reason.as_ref().and_then(|reason| reason.as_stop_reason().cloned());
                 // Like Python, the spans and the routed-expert rows cover the
                 // whole request on the final chunk only.
-                let weight_versions = output.weight_versions.filter(|_| finish_reason.is_some());
+                let weight_versions = if finish_reason.is_some() {
+                    std::mem::take(&mut weight_versions).spans()
+                } else {
+                    None
+                };
                 let routed_experts = if finish_reason.is_some() {
                     std::mem::take(&mut routed_experts)
                         .concat()
@@ -634,7 +640,7 @@ mod tests {
                 ec_transfer_params: None,
                 sampling_mask: None,
                 spec_decode_metrics: None,
-                weight_versions: None,
+                weight_versions: Default::default(),
                 routed_experts: Default::default(),
                 timestamps: Default::default(),
             }),
@@ -656,7 +662,7 @@ mod tests {
                 ec_transfer_params: None,
                 sampling_mask: None,
                 spec_decode_metrics: None,
-                weight_versions: None,
+                weight_versions: WeightVersions::new(None, 1),
                 routed_experts: Default::default(),
                 timestamps: Default::default(),
             }),
@@ -729,6 +735,7 @@ mod tests {
         token_ids: Vec<u32>,
         finish_reason: Option<FinishReason>,
     ) -> GenerateOutput {
+        let weight_versions = WeightVersions::new(None, token_ids.len());
         GenerateOutput {
             request_id: String::new(),
             prompt_info: prompt_token_ids.map(|ids| {
@@ -746,7 +753,7 @@ mod tests {
             ec_transfer_params: None,
             sampling_mask: None,
             spec_decode_metrics: None,
-            weight_versions: None,
+            weight_versions,
             routed_experts: Default::default(),
             timestamps: Default::default(),
         }
@@ -786,21 +793,24 @@ mod tests {
 
     #[tokio::test]
     async fn generate_chunk_stream_returns_weight_versions_on_final_chunk_only() {
-        let span = |end| WeightVersionSpan {
-            version: "v1".into(),
-            start: 0,
+        let span = |version: &str, start, end| WeightVersionSpan {
+            version: version.into(),
+            start,
             end,
         };
         let mut first = stream_output(Some(&[11]), vec![33], None);
-        first.weight_versions = Some(vec![span(1)]);
+        first.weight_versions = WeightVersions::new(Some("v1".into()), 1);
         let mut last = stream_output(None, vec![44], Some(FinishReason::Length));
-        last.weight_versions = Some(vec![span(2)]);
+        last.weight_versions = WeightVersions::new(Some("v2".into()), 1);
 
         let chunks = collect_chunks(vec![first, last], false, None).await;
 
         let weight_versions: Vec<_> =
             chunks.iter().map(|chunk| chunk.choices[0].weight_versions.clone()).collect();
-        assert_eq!(weight_versions, [None, Some(vec![span(2)])]);
+        assert_eq!(
+            weight_versions,
+            [None, Some(vec![span("v1", 0, 1), span("v2", 1, 2)])]
+        );
     }
 
     #[tokio::test]
