@@ -412,6 +412,9 @@ class HpcAttentionImpl(AttentionImpl[HpcAttnMetadata]):
         # The K/V views only depend on kv_cache's storage and layout, so build
         # them once instead of on every call. Keyed on identity because the
         # profiling KV cache gets replaced by the real one after startup.
+        # This assumes a live kv_cache tensor never has its storage swapped in
+        # place (e.g. set_()); every rebind today passes a new tensor or keeps
+        # the same address (sleep/wake).
         cache = self._kv_view_cache
         if cache is None or cache[0] is not kv_cache:
             # Logical (B, H, N, 2*head_size) -> (B, N, H, head_size) K/V views.
