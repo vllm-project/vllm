@@ -21,26 +21,26 @@ from vllm.third_party.flash_linear_attention.ops.chunk import chunk_gated_delta_
 from vllm.third_party.flash_linear_attention.ops.utils import is_cdna3
 from vllm.utils.torch_utils import set_random_seed
 
-# kernel label -> (autotuned kernel, gfx942 config list, stock config list)
+# kernel label -> (kernel, gfx942 configs, stock configs)
 KERNELS = {
     "chunk_o": (
         lambda: chunk_o.chunk_fwd_kernel_o,
-        lambda: chunk_o._FWD_O_CONFIGS,
+        lambda: list(chunk_o._FWD_O_CDNA3),
         lambda: chunk_o._FWD_O_STOCK,
     ),
     "chunk_delta_h": (
         lambda: chunk_delta_h.chunk_gated_delta_rule_fwd_kernel_h_blockdim64,
-        lambda: list(chunk_delta_h._FWD_H_CDNA3),
+        lambda: [chunk_delta_h._FWD_H_CDNA3],
         lambda: chunk_delta_h._FWD_H_STOCK,
     ),
     "chunk_scaled_dot_kkt": (
         lambda: chunk_scaled_dot_kkt.chunk_scaled_dot_kkt_fwd_kernel,
-        lambda: chunk_scaled_dot_kkt._KKT_CONFIGS,
+        lambda: list(chunk_scaled_dot_kkt._KKT_CDNA3),
         lambda: chunk_scaled_dot_kkt._KKT_STOCK,
     ),
     "wy_fast": (
         lambda: wy_fast.recompute_w_u_fwd_kernel,
-        lambda: wy_fast._WU_CONFIGS,
+        lambda: list(wy_fast._WU_CDNA3),
         lambda: wy_fast._WU_STOCK,
     ),
     "solve_tril_merge64": (
@@ -48,6 +48,13 @@ KERNELS = {
         lambda: solve_tril._MERGE_64_CONFIGS,
         lambda: solve_tril._MERGE_64_STOCK,
     ),
+}
+# Kernels that pick their gfx942 config at launch -> (module, picker).
+PICKERS = {
+    "chunk_o": (chunk_o, "_fwd_o_cdna3_config"),
+    "chunk_delta_h": (chunk_delta_h, "_fwd_h_cdna3_config"),
+    "chunk_scaled_dot_kkt": (chunk_scaled_dot_kkt, "_kkt_cdna3_config"),
+    "wy_fast": (wy_fast, "_wu_cdna3_config"),
 }
 
 # Ragged and not a multiple of the 64-token chunk, so masked tails run.
@@ -66,18 +73,19 @@ def _autotuner(kernel):
 
 
 @contextlib.contextmanager
-def _pinned(kernel, configs):
-    if kernel is chunk_delta_h.chunk_gated_delta_rule_fwd_kernel_h_blockdim64:
+def _pinned(name, configs):
+    if name in PICKERS:
         # Picked at launch on gfx942: pin one config, or keep the real choice.
-        pick = chunk_delta_h._fwd_h_cdna3_config
+        module, attr = PICKERS[name]
+        pick = getattr(module, attr)
         if len(configs) == 1:
-            chunk_delta_h._fwd_h_cdna3_config = lambda *_: configs[0]
+            setattr(module, attr, lambda *_: configs[0])
         try:
             yield
         finally:
-            chunk_delta_h._fwd_h_cdna3_config = pick
+            setattr(module, attr, pick)
         return
-    tuner = _autotuner(kernel)
+    tuner = _autotuner(KERNELS[name][0]())
     saved_configs, saved_cache = tuner.configs, dict(tuner.cache)
     tuner.configs = list(configs)
     tuner.cache.clear()
@@ -124,12 +132,27 @@ def _run(inputs, pins, op=chunk_gated_delta_rule):
     torch.use_deterministic_algorithms(True, warn_only=True)
     try:
         with contextlib.ExitStack() as stack:
-            for kernel, configs in pins:
-                stack.enter_context(_pinned(kernel, configs))
+            for name, configs in pins:
+                stack.enter_context(_pinned(name, configs))
             out, state = op(**inputs)
     finally:
         torch.use_deterministic_algorithms(was_on, warn_only=warn_only)
     return out.clone(), state.clone()
+
+
+def _stock_pins(names):
+    return [(n, KERNELS[n][2]()[:1]) for n in names]
+
+
+def _gfx_pin_sets(names, kernel_name):
+    """kernel_name's gfx942 configs one at a time, or for "all" every launch choice."""
+    if kernel_name == "all":
+        return [[(n, KERNELS[n][1]()) for n in names]]
+    stock = dict(_stock_pins(names))
+    return [
+        [(n, [cfg] if n == kernel_name else stock[n]) for n in names]
+        for cfg in KERNELS[kernel_name][1]()
+    ]
 
 
 @pytest.mark.skipif(not is_cdna3, reason="gfx942-specific configs")
@@ -137,22 +160,16 @@ def _run(inputs, pins, op=chunk_gated_delta_rule):
 @pytest.mark.parametrize("kernel_name", [*KERNELS, "all"])
 @torch.inference_mode()
 def test_gfx942_config_matches_stock(kernel_name, shape):
-    """Each gfx942 config, and all of them together, reproduce stock output."""
+    """Each gfx942 config, and every launch-time choice, reproduces stock output."""
     hg, h = SHAPES[shape]
     inputs = _inputs(hg, h)
-
-    names = list(KERNELS) if kernel_name == "all" else [kernel_name]
-    stock_pins, gfx_pins = [], []
-    for n in KERNELS:
-        kernel, gfx, stock = KERNELS[n]
-        stock_pins.append((kernel(), stock()[:1]))
-        gfx_pins.append((kernel(), gfx() if n in names else stock()[:1]))
-
-    ref_out, ref_state = _run(inputs, stock_pins)
-    out, state = _run(inputs, gfx_pins)
-
-    assert torch.equal(ref_out, out), f"{kernel_name}/{shape}: output changed"
-    assert torch.equal(ref_state, state), f"{kernel_name}/{shape}: final state changed"
+    ref_out, ref_state = _run(inputs, _stock_pins(KERNELS))
+    for i, pins in enumerate(_gfx_pin_sets(list(KERNELS), kernel_name)):
+        out, state = _run(inputs, pins)
+        assert torch.equal(ref_out, out), f"{kernel_name}[{i}]/{shape}: output changed"
+        assert torch.equal(ref_state, state), (
+            f"{kernel_name}[{i}]/{shape}: final state changed"
+        )
 
 
 _KDA_SHARED = ["chunk_delta_h", "solve_tril_merge64"]
@@ -191,15 +208,11 @@ def test_gfx942_config_matches_stock_on_kda(kernel_name, h):
     """The two configs shared with KDA reproduce stock output on its path too."""
     from vllm.third_party.flash_linear_attention.ops.kda import chunk_kda
 
-    stock_pins, gfx_pins = [], []
-    for n in _KDA_SHARED:
-        kernel, gfx, stock = KERNELS[n]
-        stock_pins.append((kernel(), stock()[:1]))
-        gfx_pins.append((kernel(), gfx() if kernel_name in (n, "all") else stock()[:1]))
-
     # chunk_kda consumes v in place, so every call needs fresh inputs.
-    ref_out, ref_state = _run(_kda_inputs(h), stock_pins, chunk_kda)
-    out, state = _run(_kda_inputs(h), gfx_pins, chunk_kda)
-
-    assert torch.equal(ref_out, out), f"kda/{kernel_name}/h{h}: output changed"
-    assert torch.equal(ref_state, state), f"kda/{kernel_name}/h{h}: final state changed"
+    ref_out, ref_state = _run(_kda_inputs(h), _stock_pins(_KDA_SHARED), chunk_kda)
+    for i, pins in enumerate(_gfx_pin_sets(_KDA_SHARED, kernel_name)):
+        out, state = _run(_kda_inputs(h), pins, chunk_kda)
+        assert torch.equal(ref_out, out), f"kda/{kernel_name}[{i}]/h{h}: output changed"
+        assert torch.equal(ref_state, state), (
+            f"kda/{kernel_name}[{i}]/h{h}: final state changed"
+        )

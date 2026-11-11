@@ -13,11 +13,13 @@
 import torch
 
 from vllm.triton_utils import tl, triton
+from vllm.utils.platform_utils import num_compute_units
 
 from .index import prepare_chunk_indices
 from .op import exp
 from .utils import (
     FLA_CHUNK_SIZE,
+    autotune_unless_cdna3,
     check_shared_mem,
     is_cdna3,
     is_nvidia_hopper,
@@ -34,18 +36,24 @@ _FWD_O_STOCK = [
     for num_stages in [2, 3, 4]
 ]
 
-if is_cdna3:
-    _FWD_O_CONFIGS = [
-        triton.Config(
-            {"BK": 64, "BV": 128, "matrix_instr_nonkdim": 16, "waves_per_eu": 2},
-            num_warps=2,
-            num_stages=1,
-        )
-    ]
-    _FWD_O_KEY: list[str] = []
-else:
-    _FWD_O_CONFIGS = _FWD_O_STOCK
-    _FWD_O_KEY = ["H", "K", "V", "BT"]
+_FWD_O_CDNA3 = (
+    triton.Config(
+        {"BK": 64, "BV": 64, "matrix_instr_nonkdim": 16, "waves_per_eu": 2},
+        num_warps=4,
+        num_stages=1,
+    ),
+    triton.Config(
+        {"BK": 64, "BV": 128, "matrix_instr_nonkdim": 16, "waves_per_eu": 2},
+        num_warps=4,
+        num_stages=1,
+    ),
+)
+
+
+def _fwd_o_cdna3_config(V: int, chunk_heads: int, device: int) -> triton.Config:
+    small, large = _FWD_O_CDNA3
+    programs = triton.cdiv(V, large.kwargs["BV"]) * chunk_heads
+    return small if programs < num_compute_units(device) else large
 
 
 @triton.heuristics(
@@ -54,10 +62,7 @@ else:
         "IS_VARLEN": lambda args: args["cu_seqlens"] is not None,
     }
 )
-@triton.autotune(
-    configs=_FWD_O_CONFIGS,
-    key=_FWD_O_KEY,
-)
+@autotune_unless_cdna3(configs=_FWD_O_STOCK, key=["H", "K", "V", "BT"])
 @triton.jit(do_not_specialize=["T"])
 def chunk_fwd_kernel_o(
     q,
@@ -187,6 +192,9 @@ def chunk_fwd_o(
     def grid(meta):
         return (triton.cdiv(V, meta["BV"]), NT, B * H)
 
+    launch = {}
+    if is_cdna3:
+        launch = _fwd_o_cdna3_config(V, NT * B * H, q.device.index).all_kwargs()
     chunk_fwd_kernel_o[grid](
         q,
         k,
@@ -203,5 +211,6 @@ def chunk_fwd_o(
         K=K,
         V=V,
         BT=BT,
+        **launch,
     )
     return o

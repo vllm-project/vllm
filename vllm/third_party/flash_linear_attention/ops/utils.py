@@ -169,6 +169,17 @@ is_tma_supported = (
 )
 
 
+def autotune_unless_cdna3(configs: list, key: list[str], **kwargs):
+    """triton.autotune, except on gfx942, where the caller passes a config at launch."""
+
+    def wrap(fn):
+        if is_cdna3:
+            return fn
+        return triton.autotune(configs=configs, key=key, **kwargs)(fn)
+
+    return wrap
+
+
 def get_all_max_shared_mem():
     try:
         return [
