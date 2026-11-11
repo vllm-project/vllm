@@ -188,10 +188,7 @@ impl KvConnector for PyKvConnector {
         let shared = &self.shared;
         self.shared.kv.scoped(kv_cache_manager, || {
             with_request(shared, request, |py, req| {
-                let blocks = KVCacheBlocksView::new(
-                    Some(Owner::Scheduler(shared.kv.clone())),
-                    blocks.clone(),
-                );
+                let blocks = KVCacheBlocksView::new(Some(Owner(shared.kv.clone())), blocks.clone());
                 self.obj(py).call_method1(
                     intern!(py, "update_state_after_alloc"),
                     (req, blocks, num_external_tokens),

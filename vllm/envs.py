@@ -787,7 +787,7 @@ environment_variables: dict[str, Callable[[], Any]] = {
     # Python package (>= 0.3.5) must be installed.
     "VLLM_USE_FASTOKENS": lambda: bool(int(os.getenv("VLLM_USE_FASTOKENS", "0"))),
     # Experimental. If set, the engine core uses the Rust implementations in
-    # `vllm._rust_core` (the scheduler, the KV cache manager, prefix-caching
+    # `vllm._rust_core` (the scheduler with its KV cache manager, prefix-caching
     # block hashing and the Mooncake store lookup paths). Each component falls
     # back to Python, with a log line, if the extension is not built or does
     # not support the configuration. See docs/design/rust_engine_core.md.

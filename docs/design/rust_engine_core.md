@@ -39,7 +39,7 @@ implementation of every component.
 
 | Setting | Default | Effect |
 | --- | --- | --- |
-| `VLLM_USE_RUST_CORE=1` | `0` | Use the Rust scheduler, KV cache manager, block hasher and Mooncake store lookup paths where supported, falling back to Python otherwise. |
+| `VLLM_USE_RUST_CORE=1` | `0` | Use the Rust scheduler (with its KV cache manager), block hasher and Mooncake store lookup paths where supported, falling back to Python otherwise. |
 | `--scheduler-cls vllm.v1.core.sched.rust_scheduler.RustScheduler` | unset | Select the Rust scheduler explicitly (`RustAsyncScheduler` for async scheduling). Fails at startup if the configuration is unsupported. |
 | `VLLM_RUST_CORE_NATIVE_HOOKS=0` | `1` | Keep the Python NIXL / Mooncake store scheduler halves, called from the Rust scheduler through hooks. |
 
@@ -152,8 +152,6 @@ used instead and the reason is logged once.
   With `--scheduler-cls ...RustScheduler`, these raise `NotImplementedError`
   at startup instead. Requests with prompt embeddings are rejected when KV
   cache events are enabled.
-- **KV cache manager** (when the Python scheduler is used): also falls back
-  when KV cache metrics collection is enabled.
 - **Block hasher**: unknown hash functions fall back to Python, and blocks
   with multimodal or prompt-embeds extra keys are hashed by the Python hasher.
 - **Native connector scheduler halves** (with `VLLM_RUST_CORE_NATIVE_HOOKS=1`):
@@ -216,7 +214,6 @@ CPU time of the ported paths, Python vs Rust (microbenchmarks, single process):
 | Same, `sha256_cbor` / `xxhash_cbor` | 45.9 / 42.4 ms | 1.4 / 0.6 ms |
 | Decode step, `schedule` + `update_from_output`, 256 / 1024 requests | 2.24 / 8.88 ms | 0.34 / 1.68 ms |
 | Same, 1024 requests, async scheduling | 10.18 ms | 1.90 ms |
-| Scheduler step with the KV cache manager only, DeepSeek-V4.1 layout, 8 × 128K prompts | 0.50 ms | 0.13 ms |
 | Mooncake store `build_connector_meta` per step, DeepSeek-V4.1, 16 × 128K | 366 µs | 31 µs |
 | Mooncake store worker lookup, 128K-token DeepSeek-V4.1 request | 3.3 ms | 0.26 ms |
 | NIXL scheduler half per step, 1000 tracked requests, 16 × 120K-token admissions | 4.7 ms | 0.7 ms |

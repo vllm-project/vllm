@@ -53,7 +53,6 @@ steps:
       tests/v1/kv_connector/unit/test_mooncake_store_rust_scheduler.py
       tests/v1/kv_connector/unit/test_nixl_rust_scheduler.py
     # Differential fuzzing smoke: Rust scheduler vs Python, per workload mode.
-    - python3 -m tests.v1.core.rust_core_diff --mode rust-kv --seeds 0-20
     - python3 -m tests.v1.core.rust_core_diff --mode rust-sched --seeds 0-20
     - python3 -m tests.v1.core.rust_core_diff --mode rust-sched --seeds 0-20 --async
     - python3 -m tests.v1.core.rust_core_diff --mode rust-sched --seeds 0-20 --extended

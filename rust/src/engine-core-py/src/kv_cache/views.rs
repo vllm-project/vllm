@@ -5,8 +5,8 @@
 //! the block pool / coordinator / single-type manager facades that the
 //! scheduler and KV connectors read.
 //!
-//! Views hold a reference to their KV cache manager ([`Owner`]) and read the
-//! live state on access, as the Python objects they stand in for do.
+//! Views hold a reference to the scheduler's KV cache manager ([`Owner`]) and
+//! read the live state on access, as the Python objects they stand in for do.
 
 use std::ptr;
 use std::sync::Arc;
@@ -15,13 +15,12 @@ use std::sync::atomic::{AtomicPtr, Ordering};
 use pyo3::exceptions::{PyIndexError, PyRuntimeError, PyTypeError};
 use pyo3::prelude::*;
 use pyo3::types::{PyBytes, PyDict, PyInt, PyList, PySet, PyTuple};
+use vllm_engine_core::hash::BlockHash;
 use vllm_engine_core::kv_cache::{
     BlockHashWithGroupId, BlockId, BlockPool, HOST_BLOCK_FLAG, KvCacheBlocks, KvCacheManager,
 };
 
 use super::events::events_to_py;
-use super::manager::KVCacheManager;
-use super::request::convert_block_hashes;
 
 /// The KV cache manager inside a Rust scheduler, as reachable from Python.
 ///
@@ -80,67 +79,54 @@ impl SchedulerKv {
     }
 }
 
-/// The KV cache manager a view reads.
-pub enum Owner {
-    /// A Python-facing [`KVCacheManager`].
-    Manager(Py<KVCacheManager>),
-    /// The manager inside a Rust scheduler.
-    Scheduler(Arc<SchedulerKv>),
-}
+/// The KV cache manager a view reads: the one inside a Rust scheduler.
+#[derive(Clone)]
+pub struct Owner(pub Arc<SchedulerKv>);
 
 impl Owner {
-    pub fn clone_ref(&self, py: Python<'_>) -> Self {
-        match self {
-            Self::Manager(m) => Self::Manager(m.clone_ref(py)),
-            Self::Scheduler(s) => Self::Scheduler(s.clone()),
-        }
-    }
-
     pub fn is(&self, other: &Self) -> bool {
-        match (self, other) {
-            (Self::Manager(a), Self::Manager(b)) => a.is(b),
-            (Self::Scheduler(a), Self::Scheduler(b)) => Arc::ptr_eq(a, b),
-            _ => false,
-        }
+        Arc::ptr_eq(&self.0, &other.0)
     }
 
-    /// Run `f` on the manager. `f` must not run Python code.
-    pub fn with<R>(&self, py: Python<'_>, f: impl FnOnce(&KvCacheManager) -> R) -> PyResult<R> {
-        match self {
-            Self::Manager(m) => Ok(f(&m.bind(py).try_borrow()?.inner)),
-            // SAFETY: see `SchedulerKv`: the manager is published only while
-            // nothing else uses it, and `f` runs no Python code that could
-            // reach it again.
-            Self::Scheduler(s) => Ok(f(unsafe { &*s.get()? })),
-        }
+    /// Run `f` on the manager. `f` must not run Python code. The GIL token
+    /// is what serializes the views' accesses.
+    pub fn with<R>(&self, _py: Python<'_>, f: impl FnOnce(&KvCacheManager) -> R) -> PyResult<R> {
+        // SAFETY: see `SchedulerKv`: the manager is published only while
+        // nothing else uses it, and `f` runs no Python code that could reach
+        // it again.
+        Ok(f(unsafe { &*self.0.get()? }))
     }
 
     /// Run `f` on the manager, mutably. `f` must not run Python code.
     pub fn with_mut<R>(
         &self,
-        py: Python<'_>,
+        _py: Python<'_>,
         f: impl FnOnce(&mut KvCacheManager) -> R,
     ) -> PyResult<R> {
-        match self {
-            Self::Manager(m) => Ok(f(&mut m.bind(py).try_borrow_mut()?.inner)),
-            // SAFETY: as in `with`.
-            Self::Scheduler(s) => Ok(f(unsafe { &mut *s.get()? })),
-        }
+        // SAFETY: as in `with`.
+        Ok(f(unsafe { &mut *self.0.get()? }))
     }
 
-    fn spec(&self, py: Python<'_>, group_id: usize) -> PyResult<Py<PyAny>> {
-        match self {
-            Self::Manager(m) => Ok(m.bind(py).try_borrow()?.specs[group_id].clone_ref(py)),
-            Self::Scheduler(s) => Ok(s.specs[group_id].clone_ref(py)),
-        }
+    fn spec(&self, py: Python<'_>, group_id: usize) -> Py<PyAny> {
+        self.0.specs[group_id].clone_ref(py)
     }
 
-    fn kv_cache_config(&self, py: Python<'_>) -> PyResult<Py<PyAny>> {
-        match self {
-            Self::Manager(m) => Ok(m.bind(py).try_borrow()?.kv_cache_config.clone_ref(py)),
-            Self::Scheduler(s) => Ok(s.kv_cache_config.clone_ref(py)),
-        }
+    fn kv_cache_config(&self, py: Python<'_>) -> Py<PyAny> {
+        self.0.kv_cache_config.clone_ref(py)
     }
+}
+
+/// The `BlockHash`es of a Python list of hash bytes.
+fn convert_block_hashes(block_hashes: &Bound<'_, PyAny>) -> PyResult<Vec<BlockHash>> {
+    block_hashes
+        .try_iter()?
+        .map(|item| {
+            let bytes = item?
+                .cast_into::<PyBytes>()
+                .map_err(|_| PyTypeError::new_err("block hashes must be bytes"))?;
+            Ok(BlockHash::from_slice(bytes.as_bytes()))
+        })
+        .collect()
 }
 
 /// The device pool, or the HiSparse host pool if `host`.
@@ -248,9 +234,9 @@ impl Block {
     }
 }
 
-fn block_view(owner: &Owner, py: Python<'_>, id: BlockId) -> Block {
+fn block_view(owner: &Owner, id: BlockId) -> Block {
     Block {
-        owner: owner.clone_ref(py),
+        owner: owner.clone(),
         block_id: id & !HOST_BLOCK_FLAG,
         host: id & HOST_BLOCK_FLAG != 0,
     }
@@ -264,7 +250,7 @@ pub fn block_list<'py>(
 ) -> PyResult<Bound<'py, PyList>> {
     let views = ids
         .iter()
-        .map(|&id| Bound::new(py, block_view(owner, py, id)))
+        .map(|&id| Bound::new(py, block_view(owner, id)))
         .collect::<PyResult<Vec<_>>>()?;
     PyList::new(py, views)
 }
@@ -419,10 +405,10 @@ impl KVCacheBlocksView {
         Self::new(None, self.blocks.new_empty())
     }
 
-    fn __add__(&self, py: Python<'_>, other: &Bound<'_, PyAny>) -> PyResult<Self> {
+    fn __add__(&self, other: &Bound<'_, PyAny>) -> PyResult<Self> {
         let owner = match (&self.owner, other.cast::<KVCacheBlocksView>()) {
-            (Some(owner), _) => Some(owner.clone_ref(py)),
-            (None, Ok(other)) => other.get().owner.as_ref().map(|o| o.clone_ref(py)),
+            (Some(owner), _) => Some(owner.clone()),
+            (None, Ok(other)) => other.get().owner.clone(),
             (None, Err(_)) => None,
         };
         let other = KvCacheBlocks::new(grouped_block_ids(other)?);
@@ -458,7 +444,7 @@ impl BlockList {
             return Err(PyIndexError::new_err("block index out of range"));
         }
         Ok(Block {
-            owner: self.owner.clone_ref(py),
+            owner: self.owner.clone(),
             block_id: idx as BlockId,
             host: self.host,
         })
@@ -563,16 +549,16 @@ impl BlockPoolView {
     fn null_block(&self, py: Python<'_>) -> PyResult<Block> {
         let block_id = self.with(py, |p| p.null_block)?;
         Ok(Block {
-            owner: self.owner.clone_ref(py),
+            owner: self.owner.clone(),
             block_id,
             host: self.host,
         })
     }
 
     #[getter]
-    fn blocks(&self, py: Python<'_>) -> BlockList {
+    fn blocks(&self) -> BlockList {
         BlockList {
-            owner: self.owner.clone_ref(py),
+            owner: self.owner.clone(),
             host: self.host,
         }
     }
@@ -608,9 +594,9 @@ impl BlockPoolView {
     }
 
     #[getter]
-    fn free_block_queue(&self, py: Python<'_>) -> FreeBlockQueue {
+    fn free_block_queue(&self) -> FreeBlockQueue {
         FreeBlockQueue {
-            owner: self.owner.clone_ref(py),
+            owner: self.owner.clone(),
             host: self.host,
         }
     }
@@ -756,7 +742,7 @@ impl SingleTypeManagerView {
 
     /// The Python spec of the group.
     #[getter]
-    fn kv_cache_spec(&self, py: Python<'_>) -> PyResult<Py<PyAny>> {
+    fn kv_cache_spec(&self, py: Python<'_>) -> Py<PyAny> {
         self.owner.spec(py, self.kv_cache_group_id)
     }
 
@@ -776,7 +762,7 @@ impl SingleTypeManagerView {
             m.coordinator.host_group_id() == Some(self.kv_cache_group_id)
         })?;
         Ok(BlockPoolView {
-            owner: self.owner.clone_ref(py),
+            owner: self.owner.clone(),
             host,
         })
     }
@@ -880,7 +866,7 @@ impl SingleTypeManagerView {
         block_idx: usize,
     ) -> PyResult<Option<Block>> {
         let block = self.with(py, |m| m.get_resident_page(request_id, block_idx))?;
-        Ok(block.map(|id| block_view(&self.owner, py, id)))
+        Ok(block.map(|id| block_view(&self.owner, id)))
     }
 
     /// `HiSparseResidentManager.get_residency_row`.
@@ -897,9 +883,9 @@ impl SingleTypeManagerView {
 
     /// `req_to_blocks`: a live read-only view of the block tables.
     #[getter]
-    fn req_to_blocks(&self, py: Python<'_>) -> ReqToBlocks {
+    fn req_to_blocks(&self) -> ReqToBlocks {
         ReqToBlocks {
-            owner: self.owner.clone_ref(py),
+            owner: self.owner.clone(),
             kv_cache_group_id: self.kv_cache_group_id,
         }
     }
@@ -963,19 +949,19 @@ impl CoordinatorView {
         let n = self.owner.with(py, |m| m.coordinator.single_type_managers.len())?;
         Ok((0..n)
             .map(|kv_cache_group_id| SingleTypeManagerView {
-                owner: self.owner.clone_ref(py),
+                owner: self.owner.clone(),
                 kv_cache_group_id,
             })
             .collect())
     }
 
     #[getter]
-    fn block_pool(&self, py: Python<'_>) -> BlockPoolView {
-        BlockPoolView::new(self.owner.clone_ref(py))
+    fn block_pool(&self) -> BlockPoolView {
+        BlockPoolView::new(self.owner.clone())
     }
 
     #[getter]
-    fn kv_cache_config(&self, py: Python<'_>) -> PyResult<Py<PyAny>> {
+    fn kv_cache_config(&self, py: Python<'_>) -> Py<PyAny> {
         self.owner.kv_cache_config(py)
     }
 
@@ -1181,7 +1167,7 @@ pub struct SchedulerKvManagerView {
 impl SchedulerKvManagerView {
     pub fn new(owner: Arc<SchedulerKv>) -> Self {
         Self {
-            owner: Owner::Scheduler(owner),
+            owner: Owner(owner),
         }
     }
 }
@@ -1189,17 +1175,17 @@ impl SchedulerKvManagerView {
 #[pymethods]
 impl SchedulerKvManagerView {
     #[getter]
-    fn block_pool(&self, py: Python<'_>) -> BlockPoolView {
-        BlockPoolView::new(self.owner.clone_ref(py))
+    fn block_pool(&self) -> BlockPoolView {
+        BlockPoolView::new(self.owner.clone())
     }
 
     #[getter]
-    fn coordinator(&self, py: Python<'_>) -> CoordinatorView {
-        CoordinatorView::new(self.owner.clone_ref(py))
+    fn coordinator(&self) -> CoordinatorView {
+        CoordinatorView::new(self.owner.clone())
     }
 
     #[getter]
-    fn kv_cache_config(&self, py: Python<'_>) -> PyResult<Py<PyAny>> {
+    fn kv_cache_config(&self, py: Python<'_>) -> Py<PyAny> {
         self.owner.kv_cache_config(py)
     }
 
@@ -1234,10 +1220,7 @@ impl SchedulerKvManagerView {
     /// Get the blocks of a request.
     fn get_blocks(&self, py: Python<'_>, request_id: &str) -> PyResult<KVCacheBlocksView> {
         let blocks = self.owner.with(py, |m| m.get_blocks(request_id))?;
-        Ok(KVCacheBlocksView::new(
-            Some(self.owner.clone_ref(py)),
-            blocks,
-        ))
+        Ok(KVCacheBlocksView::new(Some(self.owner.clone()), blocks))
     }
 
     /// Get the block ids of a request.
@@ -1275,10 +1258,6 @@ impl SchedulerKvManagerView {
         py: Python<'_>,
         import_step_tokens: Option<usize>,
     ) -> PyResult<super::hisparse::HiSparseCoordinatorView> {
-        super::hisparse::HiSparseCoordinatorView::bind(
-            py,
-            self.owner.clone_ref(py),
-            import_step_tokens,
-        )
+        super::hisparse::HiSparseCoordinatorView::bind(py, self.owner.clone(), import_step_tokens)
     }
 }

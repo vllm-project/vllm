@@ -896,8 +896,6 @@ def run_one(
     cfg: FuzzConfig,
     make_ref: Callable[[FuzzConfig], Scheduler],
     make_test: Callable[[FuzzConfig], Scheduler],
-    test_ctx: Callable[[], contextlib.AbstractContextManager] = contextlib.nullcontext,
-    expect_manager_module: str | None = None,
     use_async: bool = False,
 ) -> tuple[bool, str]:
     """Drive both schedulers in lockstep. Returns (ok, message).
@@ -916,9 +914,8 @@ def run_one(
     )
     with store:
         ref = make_ref(cfg)
-        with test_ctx():
-            test = make_test(cfg)
-            test_hasher = get_request_block_hasher(cfg.block_size, hash_fn)
+        test = make_test(cfg)
+        test_hasher = get_request_block_hasher(cfg.block_size, hash_fn)
     if (core := getattr(test, "_core", None)) is not None and _expect_native():
         # The native ports whenever they support the configuration.
         expected = "nixl" if cfg.nixl else "mooncake_store" if cfg.mooncake else None
@@ -926,10 +923,6 @@ def run_one(
             return False, f"connector_impl is {core.connector_impl}, not {expected}"
         if cfg.nixl is not None:
             core.native_nixl_connector.set_fixed_clock(NIXL_CLOCK)
-    if expect_manager_module is not None:
-        module = type(test.kv_cache_manager).__module__
-        if module != expect_manager_module:
-            return False, f"test scheduler uses a KV cache manager from {module}"
     events_ref: list[Any] = []
     events_test: list[Any] = []
     if cfg.kv_events:
@@ -943,8 +936,7 @@ def run_one(
     nixl_test: dict[str, set[str]] = {}
 
     def both(fn_name: str, *args_ref, args_test=None):
-        with test_ctx():
-            b = getattr(test, fn_name)(*(args_test if args_test else args_ref))
+        b = getattr(test, fn_name)(*(args_test if args_test else args_ref))
         a = getattr(ref, fn_name)(*args_ref)
         return a, b
 
@@ -955,19 +947,16 @@ def run_one(
             if req_ref.use_structured_output:
                 # As EngineCore does before adding the request.
                 ref.structured_output_manager.grammar_init(req_ref)
-                with test_ctx():
-                    test.structured_output_manager.grammar_init(req_test)
+                test.structured_output_manager.grammar_init(req_test)
             ref.add_request(req_ref)
-            with test_ctx():
-                test.add_request(req_test)
+            test.add_request(req_test)
             _wait_for_grammar(ref, req_ref)
             _wait_for_grammar(test, req_test)
         if cfg.streaming:
             sessions = [rid for rid, r in ref.requests.items() if r.resumable]
             for spec in wl.session_chunks(step, sessions):
                 ref.add_request(make_request(spec, ref_hasher))
-                with test_ctx():
-                    test.add_request(make_request(spec, test_hasher))
+                test.add_request(make_request(spec, test_hasher))
         if cfg.mooncake and step == 40:
             a, b = both("reset_prefix_cache")
             if a != b:
@@ -979,7 +968,7 @@ def run_one(
             a, b = both("finish_requests", aborts, RequestStatus.FINISHED_ABORTED)
             if d := first_diff(normalize(a), normalize(b), "finish_requests"):
                 return False, f"step {step}: {d}"
-        so_ref, so_test, raised = _call_both(ref.schedule, test.schedule, test_ctx)
+        so_ref, so_test, raised = _call_both(ref.schedule, test.schedule)
         if raised is not None:
             return raised[0], f"step {step}: schedule: {raised[1]}"
         if d := first_diff(normalize(so_ref), normalize(so_test), "SchedulerOutput"):
@@ -987,8 +976,7 @@ def run_one(
         go_ref = go_test = None
         if cfg.structured:
             go_ref = ref.get_grammar_bitmask(so_ref)
-            with test_ctx():
-                go_test = test.get_grammar_bitmask(so_test)
+            go_test = test.get_grammar_bitmask(so_test)
             if d := _compare_grammar_outputs(go_ref, go_test):
                 return False, f"step {step}: {d}"
         out, draft = fake_model_output(
@@ -1004,7 +992,6 @@ def run_one(
         eco_ref, eco_test, raised = _call_both(
             functools.partial(ref.update_from_output, so_ref, out),
             functools.partial(test.update_from_output, so_test, out_t),
-            test_ctx,
         )
         if raised is not None:
             return raised[0], f"step {step}: update_from_output: {raised[1]}"
@@ -1019,11 +1006,9 @@ def run_one(
             return False, f"step {step}: {d}"
         if draft is not None and not use_async:
             ref.update_draft_token_ids(draft)
-            with test_ctx():
-                test.update_draft_token_ids(draft_t)
+            test.update_draft_token_ids(draft_t)
         a = (ref.get_kv_cache_usage(), ref.get_request_counts())
-        with test_ctx():
-            b = (test.get_kv_cache_usage(), test.get_request_counts())
+        b = (test.get_kv_cache_usage(), test.get_request_counts())
         if a != b:
             return False, f"step {step}: usage/counts {a} != {b}"
     return True, "ok"
@@ -1035,7 +1020,6 @@ NIXL_CLOCK = 1000.0
 def _call_both(
     call_ref: Callable[[], Any],
     call_test: Callable[[], Any],
-    test_ctx: Callable[[], contextlib.AbstractContextManager],
 ) -> tuple[Any, Any, tuple[bool, str] | None]:
     """`(call_ref(), call_test(), None)`; if the reference raises, the test
     must raise the same exception type, which ends the run (ok or not)."""
@@ -1043,15 +1027,13 @@ def _call_both(
         a = call_ref()
     except Exception as e:
         try:
-            with test_ctx():
-                call_test()
+            call_test()
         except Exception as e2:
             if type(e2) is type(e):
                 return None, None, (True, f"both raised {type(e).__name__}")
             return None, None, (False, f"reference raised {e!r}, test {e2!r}")
         return None, None, (False, f"reference raised {e!r}, test did not")
-    with test_ctx():
-        b = call_test()
+    b = call_test()
     return a, b, None
 
 
@@ -1104,9 +1086,9 @@ def main() -> None:
     parser.add_argument(
         "--mode",
         default="py-py",
-        choices=["py-py", "rust-kv", "rust-sched"],
-        help="py-py validates the harness; rust-kv swaps in the Rust KV manager; "
-        "rust-sched tests the Rust scheduler (RustScheduler)",
+        choices=["py-py", "rust-sched"],
+        help="py-py validates the harness; rust-sched tests the Rust scheduler "
+        "(RustScheduler)",
     )
     parser.add_argument(
         "--extended",
@@ -1146,14 +1128,7 @@ def main() -> None:
     ref_cls = AsyncScheduler if args.use_async else Scheduler
     test_cls: type = ref_cls
     make_ref = lambda cfg: build_scheduler(cfg, ref_cls)  # noqa: E731
-    test_ctx: Callable[[], contextlib.AbstractContextManager] = contextlib.nullcontext
-    if args.mode == "rust-kv":
-        from unittest.mock import patch
-
-        test_ctx = lambda: patch.dict(  # noqa: E731
-            os.environ, {"VLLM_USE_RUST_CORE": "1"}
-        )
-    elif args.mode == "rust-sched":
+    if args.mode == "rust-sched":
         from vllm.v1.core.sched.rust_scheduler import (
             RustAsyncScheduler,
             RustScheduler,
@@ -1180,8 +1155,6 @@ def main() -> None:
             cfg,
             make_ref,
             make_test,
-            test_ctx,
-            expect_manager_module="vllm._rust_core" if args.mode == "rust-kv" else None,
             use_async=args.use_async,
         )
         note = "" if msg == "ok" else msg

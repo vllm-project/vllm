@@ -4,9 +4,8 @@
 import itertools
 from collections.abc import Sequence
 from dataclasses import dataclass
-from typing import Any, Literal, overload
+from typing import Literal, overload
 
-from vllm import envs
 from vllm.distributed.kv_events import BlockStored, KVCacheEvent
 from vllm.logger import init_logger
 from vllm.utils.math_utils import cdiv
@@ -26,7 +25,6 @@ from vllm.v1.kv_cache_interface import (
     get_kv_cache_spec_kind,
     get_kv_cache_spec_sliding_window,
 )
-from vllm.v1.kv_cache_spec_registry import KVCacheSpecRegistry
 from vllm.v1.metrics.stats import PrefixCacheStats
 from vllm.v1.request import Request, RequestStatus
 
@@ -947,50 +945,3 @@ class KVCacheManager:
     def new_step_starts(self) -> None:
         """Notify the coordinator that a new step is starting."""
         self.coordinator.new_step_starts()
-
-
-def make_kv_cache_manager(
-    kv_cache_config: KVCacheConfig, **kwargs: Any
-) -> KVCacheManager:
-    """Create the scheduler's KV cache manager: the Rust one (`vllm._rust_core`)
-    when `VLLM_USE_RUST_CORE` is set and it supports the configuration, else
-    the Python one. Both take the same arguments and behave identically."""
-    if envs.VLLM_USE_RUST_CORE:
-        manager = _make_rust_kv_cache_manager(kv_cache_config, **kwargs)
-        if manager is not None:
-            return manager
-    return KVCacheManager(kv_cache_config, **kwargs)
-
-
-def _make_rust_kv_cache_manager(
-    kv_cache_config: KVCacheConfig, **kwargs: Any
-) -> KVCacheManager | None:
-    try:
-        from vllm._rust_core import KVCacheManager as RustKVCacheManager
-    except ImportError:
-        logger.warning_once(
-            "VLLM_USE_RUST_CORE is set but vllm._rust_core is not built; "
-            "using the Python KV cache manager."
-        )
-        return None
-    # Custom managers registered by platforms are not ported.
-    for group in kv_cache_config.kv_cache_groups:
-        manager_cls = KVCacheSpecRegistry.get_manager_class(
-            group.kv_cache_spec, group.role
-        )
-        if getattr(manager_cls, "__module__", None) != MambaManager.__module__:
-            reason = f"custom KV cache manager {manager_cls}"
-            break
-    else:
-        try:
-            return RustKVCacheManager(kv_cache_config, **kwargs)
-        except NotImplementedError as e:
-            reason = str(e)
-        except Exception:
-            # Invalid configuration: let the Python manager raise its error.
-            return None
-    logger.info_once(
-        "Using the Python KV cache manager: the Rust one does not support %s.",
-        reason,
-    )
-    return None

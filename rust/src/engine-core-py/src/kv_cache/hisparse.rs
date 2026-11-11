@@ -92,10 +92,10 @@ impl HiSparseCoordinatorView {
         self.owner.with(py, f)
     }
 
-    fn group_views(&self, py: Python<'_>, group_ids: Vec<usize>) -> Vec<SingleTypeManagerView> {
+    fn group_views(&self, group_ids: Vec<usize>) -> Vec<SingleTypeManagerView> {
         group_ids
             .into_iter()
-            .map(|g| SingleTypeManagerView::new(self.owner.clone_ref(py), g))
+            .map(|g| SingleTypeManagerView::new(self.owner.clone(), g))
             .collect()
     }
 }
@@ -143,30 +143,30 @@ impl HiSparseCoordinatorView {
     #[getter]
     fn resident_managers(&self, py: Python<'_>) -> PyResult<Vec<SingleTypeManagerView>> {
         let ids = self.with(py, |h| h.coordinator().resident_group_ids.clone())?;
-        Ok(self.group_views(py, ids))
+        Ok(self.group_views(ids))
     }
 
     #[getter]
     fn hot_managers(&self, py: Python<'_>) -> PyResult<Vec<SingleTypeManagerView>> {
         let ids = self.with(py, |h| h.coordinator().hot_group_ids.clone())?;
-        Ok(self.group_views(py, ids))
+        Ok(self.group_views(ids))
     }
 
     #[getter]
     fn host_manager(&self, py: Python<'_>) -> PyResult<SingleTypeManagerView> {
         let id = self.with(py, |h| h.coordinator().host_group_id)?;
-        Ok(SingleTypeManagerView::new(self.owner.clone_ref(py), id))
+        Ok(SingleTypeManagerView::new(self.owner.clone(), id))
     }
 
     /// The shared GPU pool of the resident groups, if any.
     #[getter]
     fn gpu_pool(&self, py: Python<'_>) -> PyResult<Option<BlockPoolView>> {
         let has_residents = self.with(py, |h| !h.coordinator().resident_group_ids.is_empty())?;
-        Ok(has_residents.then(|| BlockPoolView::new(self.owner.clone_ref(py))))
+        Ok(has_residents.then(|| BlockPoolView::new(self.owner.clone())))
     }
 
-    fn get_host_block_pool(&self, py: Python<'_>) -> BlockPoolView {
-        BlockPoolView::host(self.owner.clone_ref(py))
+    fn get_host_block_pool(&self) -> BlockPoolView {
+        BlockPoolView::host(self.owner.clone())
     }
 
     /// `pending_spills`: the ids of the in-flight spills (values are not
@@ -211,9 +211,9 @@ impl HiSparseCoordinatorView {
     /// `request_states`: read-only snapshots of the per-request residency
     /// bookkeeping.
     #[getter]
-    fn request_states(&self, py: Python<'_>) -> RequestStates {
+    fn request_states(&self) -> RequestStates {
         RequestStates {
-            owner: self.owner.clone_ref(py),
+            owner: self.owner.clone(),
         }
     }
 
