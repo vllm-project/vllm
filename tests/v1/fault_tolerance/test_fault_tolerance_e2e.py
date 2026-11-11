@@ -53,6 +53,7 @@ _MODULE = "vllm.v1.worker.gpu.dp_utils"
 _ATTR = "sync_cudagraph_and_dp_padding"
 _WORKER_MODULE = "vllm.v1.worker.gpu_worker"
 _EPLB_MODULE = "vllm.distributed.eplb.async_worker"
+_EPLB_STATE_MODULE = "vllm.distributed.eplb.eplb_state"
 
 if _SPEC:
     _f = dict(kv.split("=", 1) for kv in _SPEC.split(","))
@@ -91,11 +92,19 @@ if _SPEC:
             if _TARGET == "async_eplb" and rank == _RANK and _ARMED[0]:
                 _ARMED[0] = False
                 raise RuntimeError("FT test fault injection (rank=%d)" % _RANK)
-            result = _orig(*args, **kwargs)
-            _REBALANCES[0] += 1
-            return result
+            return _orig(*args, **kwargs)
 
         m.run_rebalance_experts = _wrapped
+
+    def _patch_eplb_state(m):
+        _orig = m._move_to_workspace
+
+        def _wrapped(model_state, ep_rank):
+            _orig(model_state, ep_rank)
+            # `rebalanced` is cleared once the last layer is applied.
+            _REBALANCES[0] += not model_state.rebalanced
+
+        m._move_to_workspace = _wrapped
 
     _real_import = builtins.__import__
 
@@ -119,6 +128,14 @@ if _SPEC:
         ):
             e._ft_patched = True
             _patch_eplb(e)
+        s = sys.modules.get(_EPLB_STATE_MODULE)
+        if (
+            s is not None
+            and hasattr(s, "_move_to_workspace")
+            and not getattr(s, "_ft_patched", False)
+        ):
+            s._ft_patched = True
+            _patch_eplb_state(s)
         # Expose arming to /collective_rpc via a Worker method.
         w = sys.modules.get(_WORKER_MODULE)
         if (
@@ -295,7 +312,7 @@ def _arm_ft_injection(servers) -> None:
 
 
 def _completed_rebalances(servers) -> list[int]:
-    """Async EPLB rebalances completed so far, one count per worker."""
+    """Async EPLB rebalances fully applied so far, one count per worker."""
     counts: list[int] = []
     for server in servers:
         resp = requests.post(
@@ -419,7 +436,8 @@ def _drive_to_faulted(
 
 @pytest.mark.skipif(not has_nixl_ep(), reason="Requires nixl_ep all2all backend")
 @multi_gpu_test(num_gpus=2)
-def test_injected_fault_retry_recovers_all_ranks(monkeypatch, tmp_path):
+@pytest.mark.parametrize("target", ["dp_sync", "async_eplb"])
+def test_injected_fault_retry_recovers_all_ranks(monkeypatch, tmp_path, target):
     """An exception injected into the inference path drives full retry recovery.
 
     The fault is patched into `sync_cudagraph_and_dp_padding` on rank 1 via
@@ -430,11 +448,29 @@ def test_injected_fault_retry_recovers_all_ranks(monkeypatch, tmp_path):
     The injection is armed (via /collective_rpc) only after the baseline
     accuracy eval; accuracy is compared before and after recovery, mirroring
     test_elastic_ep.py.
+
+    With `target="async_eplb"` the fault is raised in rank 1's async EPLB
+    rebalance instead, so rank 0's worker is still blocked in that cycle's
+    first collective when retry arrives. Retry waits for it to time out, so
+    its late error cannot fault the recovered engine, and EPLB must resume.
     """
-    _install_fault_injection(monkeypatch, tmp_path, rank=1)
+    _install_fault_injection(monkeypatch, tmp_path, rank=1, target=target)
     dp_size = 2
     faulted_rank = 1
-    with _ft_manager(dp_size=dp_size) as servers:
+    extra_args = (
+        [
+            "--enable-eplb",
+            "--eplb-config.use_async",
+            "true",
+            "--eplb-config.step_interval",
+            "16",
+            "--eplb-config.window_size",
+            "16",
+        ]
+        if target == "async_eplb"
+        else None
+    )
+    with _ft_manager(extra_args, dp_size=dp_size) as servers:
         assert len(servers) == dp_size
         servers_by_rank = _servers_by_rank(servers, dp_size)
 
@@ -459,6 +495,18 @@ def test_injected_fault_retry_recovers_all_ranks(monkeypatch, tmp_path):
         # 5. Recovery completes: every engine returns to healthy and serves again.
         _assert_serving_and_healthy(list(servers_by_rank.values()))
 
+        if target == "async_eplb":
+            # EPLB resumes: every worker completes another rebalance.
+            all_servers = list(servers_by_rank.values())
+            before = _completed_rebalances(all_servers)
+            deadline = time.time() + FAULT_DETECTION_DEADLINE_S
+            with _driving(*all_servers):
+                while not all(
+                    n > n0 for n, n0 in zip(_completed_rebalances(all_servers), before)
+                ):
+                    assert time.time() < deadline, "async EPLB did not resume"
+                    time.sleep(1.0)
+
         # 6. Post-recovery accuracy vs the pre-fault baseline.
         recovered_accuracy = _run_gsm8k_eval(servers_by_rank[0], "After retry")
         assert recovered_accuracy >= initial_accuracy - ACCURACY_TOL, (
@@ -472,54 +520,6 @@ def test_injected_fault_retry_recovers_all_ranks(monkeypatch, tmp_path):
             f"(diff: {recovered_accuracy - initial_accuracy:+.3f})\n"
             f"  Tolerance:   {ACCURACY_TOL:.3f}"
         )
-
-
-@pytest.mark.skipif(not has_nixl_ep(), reason="Requires nixl_ep all2all backend")
-@multi_gpu_test(num_gpus=2)
-def test_async_eplb_worker_fault_retry_resumes_rebalancing(monkeypatch, tmp_path):
-    """An async EPLB worker failure on one rank faults every rank, and retry
-    resumes EPLB.
-
-    The rebalance raises on rank 1 only, so rank 0's worker is still blocked
-    in that cycle's first collective when retry arrives. Retry waits for it to
-    time out, so its late error cannot fault the recovered engine.
-    """
-    _install_fault_injection(monkeypatch, tmp_path, rank=1, target="async_eplb")
-    eplb_args = ["--enable-eplb", "--eplb-config.use_async", "true"]
-    eplb_args += [
-        "--eplb-config.step_interval",
-        "16",
-        "--eplb-config.window_size",
-        "16",
-    ]
-    dp_size = 2
-    with _ft_manager(eplb_args, dp_size=dp_size) as servers:
-        servers_by_rank = _servers_by_rank(servers, dp_size)
-        all_servers = list(servers_by_rank.values())
-        _assert_serving_and_healthy(all_servers)
-
-        # 1. Arm, then drive: rank 1's next rebalance fails and every engine
-        #    goes UNHEALTHY.
-        _arm_ft_injection(all_servers)
-        faulted = _drive_to_faulted(servers_by_rank, match_values={"unhealthy"})
-        for rank, engine_status in faulted.items():
-            assert engine_status.get("fault_info"), (rank, engine_status)
-
-        # 2. retry every engine; all return to healthy and serve again.
-        round_id = str(uuid.uuid4())
-        for server in all_servers:
-            _apply_ft(server, "retry", request_id=round_id)
-        _assert_serving_and_healthy(all_servers)
-
-        # 3. EPLB resumes: every worker completes another rebalance.
-        before = _completed_rebalances(all_servers)
-        deadline = time.time() + FAULT_DETECTION_DEADLINE_S
-        with _driving(*all_servers):
-            while not all(
-                n > n0 for n, n0 in zip(_completed_rebalances(all_servers), before)
-            ):
-                assert time.time() < deadline, "async EPLB did not resume"
-                time.sleep(1.0)
 
 
 @pytest.mark.skipif(not has_nixl_ep(), reason="Requires nixl_ep all2all backend")
