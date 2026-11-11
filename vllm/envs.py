@@ -198,6 +198,7 @@ if TYPE_CHECKING:
     VLLM_HUMMING_MOE_GEMM_TYPE: Literal["indexed", "grouped", "auto"] | None = None
     VLLM_B12X_MOE_FP4_FORCE_A16: bool = False
     VLLM_DEEPEPLL_NVFP4_DISPATCH: bool = False
+    VLLM_DEEPEPLL_MXFP8_DISPATCH: bool = False
     VLLM_V1_USE_OUTLINES_CACHE: bool = False
     VLLM_TPU_USING_PATHWAYS: bool = False
     VLLM_USE_DEEP_GEMM: bool = True
@@ -1647,6 +1648,13 @@ environment_variables: dict[str, Callable[[], Any]] = {
     # https://github.com/deepseek-ai/DeepEP/pull/341
     "VLLM_DEEPEPLL_NVFP4_DISPATCH": lambda: bool(
         int(os.getenv("VLLM_DEEPEPLL_NVFP4_DISPATCH", "0"))
+    ),
+    # Whether the DeepEPLL dispatch kernels quantize the activations to MXFP8
+    # instead of dispatching them in bfloat16, for MXFP8 experts that take
+    # quantized activations (FlashInfer CuteDSL). Only supported on Blackwell
+    # GPUs and with https://github.com/deepseek-ai/DeepEP/pull/823
+    "VLLM_DEEPEPLL_MXFP8_DISPATCH": lambda: bool(
+        int(os.getenv("VLLM_DEEPEPLL_MXFP8_DISPATCH", "0"))
     ),
     # Whether to turn on the outlines cache for V1
     # This cache is unbounded and on disk, so it's not safe to use in

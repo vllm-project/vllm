@@ -867,6 +867,15 @@ class FusedMoEExperts(ABC):
         """
         return False
 
+    def supports_mxfp8_quantized_activations(self) -> bool:
+        """A flag indicating whether or not this class can process activations
+        that the dispatch quantized to MXFP8: float8_e4m3fn values of shape
+        [num_experts, max_tokens, hidden] and one UE8M0 scale per 32 values,
+        in the swizzled layout of shape
+        [32, 4, ceil(max_tokens / 128), 4, hidden // 128, num_experts].
+        """
+        return False
+
 
 class FusedMoEExpertsModular(FusedMoEExperts):
     """An abstract base class for the [Permute-Experts-Unpermute] step described
