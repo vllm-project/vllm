@@ -3,11 +3,13 @@
 
 //! Shared tracing subscriber and log formatting for vLLM Rust binaries.
 
+mod json;
 pub mod timing;
 
 use std::str::FromStr;
 use std::{env, fmt, process};
 
+use serde::{Deserialize, Serialize};
 use serde_with::{DeserializeFromStr, SerializeDisplay};
 use time::UtcOffset;
 use time::macros::format_description;
@@ -23,6 +25,8 @@ use tracing_subscriber::registry::LookupSpan;
 use tracing_subscriber::util::SubscriberInitExt as _;
 use tracing_subscriber::{Layer, Registry};
 
+use crate::json::{JsonFields, VllmJsonEventFormatter};
+
 const CYAN: &str = "\x1b[0;36m";
 const GREY: &str = "\x1b[90m";
 const GREEN: &str = "\x1b[32m";
@@ -30,8 +34,12 @@ const YELLOW: &str = "\x1b[33m";
 const RED: &str = "\x1b[31m";
 const WHITE: &str = "\x1b[37m";
 const RESET: &str = "\x1b[0m";
-const VLLM_TIME_FORMAT: &[time::format_description::FormatItem<'static>] =
-    format_description!("[month]-[day] [hour]:[minute]:[second]");
+
+/// A compile-time `time` format description, as `format_description!` builds.
+pub(crate) type TimeFormat = &'static [time::format_description::FormatItem<'static>];
+
+/// Python vLLM's text `datefmt`, `%m-%d %H:%M:%S`.
+const VLLM_TIME_FORMAT: TimeFormat = format_description!("[month]-[day] [hour]:[minute]:[second]");
 
 /// Python's logging level names, as `--log-level`, `--logging-config` and
 /// `VLLM_LOGGING_LEVEL` spell them.
@@ -108,19 +116,29 @@ impl From<LogLevel> for LevelFilter {
     }
 }
 
+/// Python's `LoggingConfig.formatter`: vLLM's text lines, or one JSON object
+/// per line with the keys of Python's `pythonjsonlogger` formatter.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq, Deserialize, Serialize)]
+#[serde(rename_all = "lowercase")]
+pub enum LogFormatter {
+    #[default]
+    Text,
+    Json,
+}
+
 /// Install the process-wide vLLM-style tracing subscriber at `log_level`.
-pub fn init_tracing(process_label: &str, log_level: LogLevel) {
+pub fn init_tracing(process_label: &str, log_level: LogLevel, formatter: LogFormatter) {
     let _ = tracing_subscriber::registry()
-        .with(vllm_fmt_layer(process_label, log_level))
+        .with(vllm_fmt_layer(process_label, log_level, formatter))
         .try_init();
 }
 
 /// Install the vLLM-style tracing subscriber at `log_level` on the current
 /// thread until the guard drops, for events emitted before the process-wide
-/// level is known.
+/// level and formatter are known.
 pub fn set_default_tracing(process_label: &str, log_level: LogLevel) -> DefaultGuard {
     tracing_subscriber::registry()
-        .with(vllm_fmt_layer(process_label, log_level))
+        .with(vllm_fmt_layer(process_label, log_level, LogFormatter::Text))
         .set_default()
 }
 
@@ -132,7 +150,7 @@ where
 {
     let _ = tracing_subscriber::registry()
         .with(layer)
-        .with(vllm_fmt_layer(process_label, log_level))
+        .with(vllm_fmt_layer(process_label, log_level, LogFormatter::Text))
         .try_init();
 }
 
@@ -140,17 +158,26 @@ where
 fn vllm_fmt_layer<S>(
     process_label: &str,
     log_level: LogLevel,
-) -> impl Layer<S> + Send + Sync + 'static + use<S>
+    formatter: LogFormatter,
+) -> Box<dyn Layer<S> + Send + Sync + 'static>
 where
     S: Subscriber + for<'lookup> LookupSpan<'lookup>,
 {
     let filter = build_targets_filter(log_level, env::var("RUST_LOG").ok().as_deref());
-    let formatter = VllmEventFormatter::new(process_label);
+    let layer = tracing_subscriber::fmt::layer().with_writer(std::io::stderr);
 
-    tracing_subscriber::fmt::layer()
-        .event_format(formatter)
-        .with_writer(std::io::stderr)
-        .with_filter(filter)
+    match formatter {
+        LogFormatter::Text => layer
+            .event_format(VllmEventFormatter::new(process_label))
+            .with_filter(filter)
+            .boxed(),
+        LogFormatter::Json => layer
+            .with_ansi(false)
+            .fmt_fields(JsonFields)
+            .event_format(VllmJsonEventFormatter::new(process_label))
+            .with_filter(filter)
+            .boxed(),
+    }
 }
 
 /// Build the CLI log filter by merging the vLLM-style default level with
@@ -178,23 +205,39 @@ fn build_targets_filter(log_level: LogLevel, rust_log: Option<&str>) -> Targets 
     filter
 }
 
+/// Writes the current local time, as Python's `logging` does, in `format`.
 #[derive(Debug, Clone, Copy)]
-struct VllmLocalTimer {
+pub(crate) struct VllmLocalTimer {
     local_offset: UtcOffset,
+    format: TimeFormat,
 }
 
-impl Default for VllmLocalTimer {
-    fn default() -> Self {
+impl VllmLocalTimer {
+    pub(crate) fn new(format: TimeFormat) -> Self {
         let local_offset = UtcOffset::current_local_offset().unwrap_or(UtcOffset::UTC);
-        Self { local_offset }
+        Self {
+            local_offset,
+            format,
+        }
     }
 }
 
 impl FormatTime for VllmLocalTimer {
     fn format_time(&self, w: &mut Writer<'_>) -> fmt::Result {
         let now = time::OffsetDateTime::now_utc().to_offset(self.local_offset);
-        let formatted = now.format(VLLM_TIME_FORMAT).map_err(|_| fmt::Error)?;
+        let formatted = now.format(self.format).map_err(|_| fmt::Error)?;
         w.write_str(&formatted)
+    }
+}
+
+/// Python's name for `level`, as both formatters write it.
+pub(crate) fn level_name(level: &Level) -> &'static str {
+    match *level {
+        Level::TRACE => "TRACE",
+        Level::DEBUG => "DEBUG",
+        Level::INFO => "INFO",
+        Level::WARN => "WARNING",
+        Level::ERROR => "ERROR",
     }
 }
 
@@ -208,7 +251,7 @@ impl VllmEventFormatter {
     fn new(process_label: &str) -> Self {
         Self {
             prefix: format!("({process_label} pid={})", process::id()),
-            timer: VllmLocalTimer::default(),
+            timer: VllmLocalTimer::new(VLLM_TIME_FORMAT),
         }
     }
 
@@ -218,14 +261,13 @@ impl VllmEventFormatter {
     }
 
     fn write_level(&self, writer: &mut Writer<'_>, level: &Level, ansi: bool) -> fmt::Result {
-        let (text, color) = match *level {
-            Level::TRACE => ("TRACE", WHITE),
-            Level::DEBUG => ("DEBUG", WHITE),
-            Level::INFO => ("INFO", GREEN),
-            Level::WARN => ("WARNING", YELLOW),
-            Level::ERROR => ("ERROR", RED),
+        let color = match *level {
+            Level::TRACE | Level::DEBUG => WHITE,
+            Level::INFO => GREEN,
+            Level::WARN => YELLOW,
+            Level::ERROR => RED,
         };
-        write_colored(writer, ansi, Some(color), text)
+        write_colored(writer, ansi, Some(color), level_name(level))
     }
 
     fn write_timestamp(&self, writer: &mut Writer<'_>, ansi: bool) -> fmt::Result {
