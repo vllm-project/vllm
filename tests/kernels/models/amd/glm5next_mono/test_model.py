@@ -45,11 +45,10 @@ KERNEL_LAYERS = (3, 4)
 VOCAB = 4096
 STEPS = 8
 SEED = 0
-# Per decode token, kernels against vLLM's layers (eager), for the tokens whose
-# input to layer 3 is the same in both runs: layers 0-2 run vLLM's code on both
-# sides and gave identical outputs. The others are all of one request's tokens
-# in one run: its prefill ran otherwise there (requests reach the engine core
-# while it runs), which moves its KDA state and so every later token a little.
+# Per decode token, kernels against vLLM's layers (eager). Layers 0-2 run vLLM's
+# code on both sides and, with every request added before the first step (the
+# engine core runs in the test process), give identical outputs: each token's
+# input to layer 3 is the same in both runs, which the comparison asserts.
 # - residual stream after layers 3 and 4: 0.0044 seen at TP2, TP4 and TP8;
 RESIDUAL_BOUND = 0.01
 # - layer 5's output, vLLM's MoE on the kernels' streams: 0.0065 seen;
@@ -456,9 +455,9 @@ def _rel(a: torch.Tensor, b: torch.Tensor) -> float:
 
 def _assert_layers_close(got: str, want: str, tp: int) -> None:
     """Every decoder layer's outputs on every rank, token by token, kernels
-    (`got`) against vLLM's layers (`want`), for the decode tokens whose
-    input to layer 3 is the same in both runs (see RESIDUAL_BOUND), and both
-    kernel layers' MoE outputs against an fp32 MoE (see MOE_BOUND)."""
+    (`got`) against vLLM's layers (`want`), each token's input to layer 3 the
+    same in both runs (see RESIDUAL_BOUND), and both kernel layers' MoE outputs
+    against an fp32 MoE (see MOE_BOUND)."""
     batches = _batches(tp)
     # the fp32 MoE: every rank holds its intermediate shard's share
     exact = []
@@ -476,12 +475,11 @@ def _assert_layers_close(got: str, want: str, tp: int) -> None:
             tokens = sorted({k[1:] for k in g} & {k[1:] for k in w})
             for k in tokens:
                 assert all((i, *k) in g and (i, *k) in w for i in range(LAYERS)), k
-                if not all(
+                assert all(
                     torch.equal(x, y)
                     for i in range(KERNEL_LAYERS[0])
                     for x, y in zip(g[(i, *k)], w[(i, *k)])
-                ):
-                    continue
+                ), (rank, k, "input to layer 3 differs between the runs")
                 same += 1
                 requests.add((b, k[0]))
                 for i in KERNEL_LAYERS:
@@ -511,7 +509,7 @@ def _assert_layers_close(got: str, want: str, tp: int) -> None:
             f"MoE to fp32 (kernel max, vLLM min, worst ratio) {to_exact}, "
             f"near-tie flips {flipped}"
         )
-        # at least one equal-input token a request, and few flips
+        # every request's tokens compared, and few flips
         assert len(requests) == sum(batches), (rank, sorted(requests))
         assert len(flipped) <= same // 4, (rank, flipped)
 
