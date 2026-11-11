@@ -55,7 +55,7 @@ KV_LIMIT_BYTES = 1 << 32  # the kernel's 32-bit buffer offsets
 ROPE_HALF = 32  # cos / sin columns per position (rotary dim 64, interleaved pairs)
 # widest fused-indexer score span (its top-k selection is LDS-resident)
 FUSED_INDEX_MAX_SEQ = 4096
-INDEX_BLOCK = 16  # the fused indexer's KV / index-cache block (tokens)
+INDEX_BLOCK = 16  # the fused indexer's smallest KV / index-cache block (tokens)
 
 
 def index_max_seq(max_model_len: int) -> int:
@@ -212,6 +212,17 @@ class MonoLayers:
             self.layers, self.has_indexer, cfg.max_model_len, cfg.debug_no_fused_indexer
         )
         self.index_max_seq = index_max_seq(cfg.max_model_len)
+        # the fused indexer reads vLLM's index cache in its KV block (16-token SHUFFLE
+        # tiles): vLLM's block size, a multiple of 16
+        self.index_block = INDEX_BLOCK
+        if self.fused_layers:
+            kc = self.layers[min(self.fused_layers)].self_attn.indexer.k_cache
+            self.index_block = int(kc.cache_config.block_size)
+            if self.index_block % INDEX_BLOCK:
+                raise RuntimeError(
+                    "GLM-5.2 specialized decode: the fused indexer needs a KV block "
+                    f"of a multiple of {INDEX_BLOCK} tokens, got {self.index_block}"
+                )
         # vLLM's e4m3 MLA cache (kv_cache_dtype fp8): the kernels write and read it
         self.kv_fp8 = str(
             getattr(self.layers[self.first].self_attn, "kv_cache_dtype", "auto")
@@ -365,7 +376,7 @@ class MonoLayers:
         }
         if self.fused_layers:
             # fused-indexer block table at a stable address (param tables, graphs)
-            nb = -(-int(self.cfg.max_model_len) // INDEX_BLOCK) + 1
+            nb = -(-int(self.cfg.max_model_len) // self.index_block) + 1
             self.b_bt = torch.zeros(R, nb, dtype=torch.int32, device=dev)
 
     def kernel_steps(self) -> dict[int, int]:
@@ -397,8 +408,8 @@ class MonoLayers:
         return bool(flag.item())
 
     def _index_caches(self) -> dict | None:
-        """{layer: uint8 [blocks, 16, 132] index cache} of the fused layers, or None
-        while vLLM has not bound them."""
+        """{layer: uint8 [blocks, index_block, 132] index cache} of the fused layers,
+        or None while vLLM has not bound them."""
         out = {}
         for L in self.fused_layers:
             kc = self.layers[L].self_attn.indexer.k_cache
@@ -503,6 +514,7 @@ class MonoLayers:
         )
         fused: dict[str, Any] = dict(
             with_indexer=True,
+            index_block=self.index_block,
             index_max_seq=self.index_max_seq,
             index_proj_spread=S <= 8,
         )
@@ -530,7 +542,7 @@ class MonoLayers:
         if self.fused_layers:
             # inactive rows never touch it: a scratch index cache until the first step
             self._warm_index_cache = torch.zeros(
-                2, INDEX_BLOCK, 132, dtype=torch.uint8, device=self.dev
+                2, self.index_block, 132, dtype=torch.uint8, device=self.dev
             )
             for L in self.fused_layers:
                 self.ops[(L, S)].set_index_tables(self._warm_index_cache, self.b_bt)
@@ -622,11 +634,11 @@ class MonoLayers:
                 md.paged_kv_indptr[T : T + 1].expand(S - T)
             )
         if self.fused_layers:
-            # the kernel's index-cache block, CSR slot_of and score paging use 16
-            if md.block_size != INDEX_BLOCK:
+            # the kernel's index-cache block, CSR slot_of and score paging
+            if md.block_size != self.index_block:
                 raise RuntimeError(
-                    "GLM-5.2 specialized decode: the fused indexer needs a "
-                    f"{INDEX_BLOCK}-token KV block, got {md.block_size}"
+                    "GLM-5.2 specialized decode: the fused indexer was built for a "
+                    f"{self.index_block}-token KV block, got {md.block_size}"
                 )
             # vLLM's table may be wider than cdiv(max_model_len, 16): copy the prefix
             w = min(md.block_table.shape[1], self.b_bt.shape[1])

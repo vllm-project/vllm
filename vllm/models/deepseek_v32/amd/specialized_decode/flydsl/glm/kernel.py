@@ -214,6 +214,7 @@ def build_glm5_monokernel(
     fp8_attention: tuple[str, ...] = (),
     fp8_block: bool = False,
     kv_fp8: bool = False,
+    index_block: int = 16,
     inter: int = INTER,
     scale: float = SOFTMAX_SCALE,
     poll_limit: int | None = None,
@@ -241,6 +242,10 @@ def build_glm5_monokernel(
     same [slots, 576] rows, one byte a value): the cache task writes the new rows'
     latent / k_pe rounded to e4m3 (and passes those values on to this launch's
     attention), the split tasks widen the cached bytes to bf16.
+
+    `index_block`: the fused indexer's KV block (tokens; vLLM's block size, a
+    multiple of 16): an index-cache block is `index_block / 16` SHUFFLE tiles of 16
+    tokens x 128 bytes, then the `index_block` scales.
 
     `with_indexer`: the fused indexer on vLLM's paged FP8 index cache (all of
     `FP8_ATTENTION` FP8). Index projections: Q from the checkpoint's FP8 `wq_b`
@@ -280,6 +285,7 @@ def build_glm5_monokernel(
     assert not with_indexer or (
         topk == 2048 and index_max_seq % THREADS == 0 and S <= 2 * WAVES
     )
+    assert index_block % 16 == 0, index_block
     assert not with_indexer or set(fp8_attention) == set(FP8_ATTENTION), (
         "the fused indexer runs with FP8 attention only"
     )
@@ -799,6 +805,13 @@ def build_glm5_monokernel(
         def row_scaled(acc, sv):
             """acc[4] (rows 4 (lane // 16) + e) times their per-row scales."""
             return [acc[e] * sv[e] for e in range(4)]
+
+        def index_tile_byte(block_byte, off):
+            """Byte of token `off`'s first 16-byte value group in its index-cache
+            block: the block's 16-token SHUFFLE tile `off // 16`, row `off % 16`."""
+            if const_expr(index_block == 16):
+                return block_byte + off * 16
+            return block_byte + (off // 16) * (16 * INDEX_DIM) + (off % 16) * 16
 
         def expert_addr(base, shared_base, e, nbytes):
             """Expert e's tensor (the shared expert's is its own module's)."""
@@ -1613,12 +1626,11 @@ def build_glm5_monokernel(
                             [rp_q0, rp_q1],
                         )
                         rp_n0, rp_n1 = _xshfl(rp_q0, 1), _xshfl(rp_q1, 1)
-                        rp_blk = rp_slot // 16
-                        rp_off = rp_slot % 16
+                        rp_blk = rp_slot // index_block
+                        rp_off = rp_slot % index_block
                         if (rp_slot >= 0) & (lane % 2 == 0):
                             rp_byte = (
-                                rp_blk * iblk_stride
-                                + rp_off * 16
+                                index_tile_byte(rp_blk * iblk_stride, rp_off)
                                 + (rp_i0 // 16) * 256
                                 + rp_i0 % 16
                             )
@@ -1632,7 +1644,11 @@ def build_glm5_monokernel(
                             bo.buffer_store(
                                 rp_sc,
                                 r_icache,
-                                (rp_blk * iblk_stride + 16 * INDEX_DIM + rp_off * 4)
+                                (
+                                    rp_blk * iblk_stride
+                                    + index_block * INDEX_DIM
+                                    + rp_off * 4
+                                )
                                 // 4,
                                 cache_modifier=CM_DEV,
                             )
@@ -2125,7 +2141,10 @@ def build_glm5_monokernel(
                 safe_key = fx.min(key_pos, bound - 1)
                 k_blk = fx.Int32(
                     bo.buffer_load(
-                        r_ibt, s * ibt_stride + safe_key // 16, vec_width=1, dtype=T.i32
+                        r_ibt,
+                        s * ibt_stride + safe_key // index_block,
+                        vec_width=1,
+                        dtype=T.i32,
                     )
                 )
                 rcs, rsn = [], []
@@ -2134,7 +2153,7 @@ def build_glm5_monokernel(
                     kqc = fx.min(kq, PE_DIM - 2) // 2
                     rcs.append(ld_bf16(_rsrc(rope_cos), rp * (PE_DIM // 2) + kqc))
                     rsn.append(ld_bf16(_rsrc(rope_sin), rp * (PE_DIM // 2) + kqc))
-                k_base = k_blk * iblk_stride + (safe_key % 16) * 16
+                k_base = index_tile_byte(k_blk * iblk_stride, safe_key % index_block)
                 kw = []
                 for k32 in range_constexpr(INDEX_DIM // 32):
                     k = k32 * 32 + (lane // 16) * 8
@@ -2151,7 +2170,11 @@ def build_glm5_monokernel(
                 k_sc = fx.Float32(
                     bo.buffer_load(
                         r_index_cache,
-                        (k_blk * iblk_stride + 16 * INDEX_DIM + (safe_key % 16) * 4)
+                        (
+                            k_blk * iblk_stride
+                            + index_block * INDEX_DIM
+                            + (safe_key % index_block) * 4
+                        )
                         // 4,
                         vec_width=1,
                         dtype=T.f32,
@@ -2277,10 +2300,13 @@ def build_glm5_monokernel(
                 def slot_of(i, s=s):
                     blk = fx.Int32(
                         bo.buffer_load(
-                            r_ibt, s * ibt_stride + i // 16, vec_width=1, dtype=T.i32
+                            r_ibt,
+                            s * ibt_stride + i // index_block,
+                            vec_width=1,
+                            dtype=T.i32,
                         )
                     )
-                    return blk * 16 + i % 16
+                    return blk * index_block + i % index_block
 
                 # every global read of this stage is issued as one batch at clamped
                 # addresses (no branch between the loads), so each phase costs one

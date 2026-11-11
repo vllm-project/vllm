@@ -215,6 +215,7 @@ class Glm5MonoKernel:
         index_max_seq: int = 4096,
         index_proj_spread: bool = False,
         kv_fp8: bool = False,
+        index_block: int = 16,
     ):
         expected_config = glm5_tp_config(npes)
         if W.config != expected_config:
@@ -247,6 +248,7 @@ class Glm5MonoKernel:
         )
         self.with_indexer = with_indexer
         self.kv_fp8 = kv_fp8  # vLLM's e4m3 MLA cache (kv_cache_dtype=fp8, scale 1)
+        self.index_block = index_block  # the fused indexer's KV block (tokens)
         self.index_max_seq = index_max_seq
         # (index cache, block table) refs set by set_index_tables
         self._index_tables: tuple | None = None
@@ -342,6 +344,7 @@ class Glm5MonoKernel:
             index_proj_spread=index_proj_spread,
             shared_native=W.shared_native,
             kv_fp8=kv_fp8,
+            index_block=index_block,
         )
         self.poll_limit = poll_limit
 
@@ -561,19 +564,20 @@ class Glm5MonoKernel:
     def set_index_tables(
         self, index_cache: torch.Tensor, block_table: torch.Tensor
     ) -> None:
-        """Point the indexer parameter table at vLLM's uint8 [blocks, 16, 132] index
-        cache and a persistent int32 [rows, W] decode block table (stable addresses:
-        call once, before any capture).
+        """Point the indexer parameter table at vLLM's uint8 [blocks, index_block, 132]
+        index cache and a persistent int32 [rows, W] decode block table (stable
+        addresses: call once, before any capture).
         """
         if not self.with_indexer:
             raise ValueError("set_index_tables needs with_indexer=True")
         if (
             index_cache.dtype is not torch.uint8
             or index_cache.dim() != 3
-            or tuple(index_cache.shape[1:]) != (16, INDEX_DIM + 4)
+            or tuple(index_cache.shape[1:]) != (self.index_block, INDEX_DIM + 4)
         ):
             raise ValueError(
-                f"index cache must be uint8 [blocks, 16, {INDEX_DIM + 4}], got "
+                f"index cache must be uint8 [blocks, {self.index_block}, "
+                f"{INDEX_DIM + 4}], got "
                 f"{tuple(index_cache.shape)} {index_cache.dtype}"
             )
         if (
@@ -581,13 +585,13 @@ class Glm5MonoKernel:
             or index_cache.stride(1) != INDEX_DIM + 4
             or index_cache.stride(0) % 4
         ):
-            # the kernel addresses one block as 2112 contiguous bytes (dword stores) at
-            # a dword-aligned block stride
+            # the kernel addresses one block as index_block * 132 contiguous bytes
+            # (dword stores) at a dword-aligned block stride
             raise ValueError(
                 "index cache blocks must be contiguous with a dword block stride, "
                 f"got strides {index_cache.stride()}"
             )
-        if (index_cache.shape[0] - 1) * index_cache.stride(0) + 16 * (
+        if (index_cache.shape[0] - 1) * index_cache.stride(0) + self.index_block * (
             INDEX_DIM + 4
         ) >= 1 << 31:
             raise ValueError(

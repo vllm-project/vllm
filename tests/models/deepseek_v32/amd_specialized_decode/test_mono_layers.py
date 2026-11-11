@@ -544,6 +544,21 @@ def test_op_fp8_scale_formats(import_kernel):
         OP._fp8_rows(dict(t_blocks, s_uv=torch.ones(16, 4)), "uv")
 
 
+@pytest.mark.parametrize("block", [16, 64])
+def test_op_index_cache_block(import_kernel, block):
+    """set_index_tables takes vLLM's index cache in the block the op was built for."""
+    OP = import_kernel("glm.op")
+    op = OP.Glm5MonoKernel.__new__(OP.Glm5MonoKernel)
+    op.with_indexer, op.index_block = True, block
+    op.index_params = torch.zeros(12, dtype=torch.int64)
+    bt = torch.zeros(2, 8, dtype=torch.int32)
+    op.set_index_tables(torch.zeros(4, block, 132, dtype=torch.uint8), bt)
+    assert op._index_tables is not None and int(op.index_params[11]) == block * 132
+    other = 64 if block == 16 else 16
+    with pytest.raises(ValueError, match=f"uint8 \\[blocks, {block}, 132\\]"):
+        op.set_index_tables(torch.zeros(4, other, 132, dtype=torch.uint8), bt)
+
+
 def test_op_launch_caching(monkeypatch, import_kernel):
     """Glm5MonoKernel.forward validates once per input signature and builds the weight
     pointers once; the layer range is checked on every launch."""
@@ -706,11 +721,12 @@ def test_index_max_seq():
 
 def test_fused_indexer_step(monkeypatch, no_device_sync):
     """Fused-indexer layers: begin_step copies the decode block table prefix into the
-    persistent table (16-token blocks only); run_layer neither refreshes vLLM's indexer
-    nor converts its top-k on them (the kernel writes the CSR)."""
+    persistent table (blocks of the size the kernels were built for); run_layer neither
+    refreshes vLLM's indexer nor converts its top-k on them (the kernel writes the
+    CSR)."""
     ml = mono_layers(T=2, S=2)
     ml.cfg = DecodeConfig(step_sync=False, check_every=0)
-    ml.batch_sizes, ml.block_size = (2,), 16
+    ml.batch_sizes, ml.block_size, ml.index_block = (2,), 16, 16
     ml.has_indexer = {3: False, 4: True, 5: True}
     ml.fused_layers = frozenset({4})
     ml.indexer_refresh = {}
@@ -749,5 +765,7 @@ def test_fused_indexer_step(monkeypatch, no_device_sync):
         z, out = ml.run_layer(ml.layers[L], torch.zeros(2), z, out)
     assert calls == [("convert", 3), ("attn", 5), ("convert", 5)]
     md.block_size = ml.block_size = 64
-    with pytest.raises(RuntimeError, match="16-token KV block, got 64"):
+    with pytest.raises(RuntimeError, match="built for a 16-token KV block, got 64"):
         ml.begin_step(torch.zeros(2, dtype=torch.int64))
+    ml.index_block = 64  # main's default block size: kernels built for 64
+    assert ml.begin_step(torch.zeros(2, dtype=torch.int64)) == 2
