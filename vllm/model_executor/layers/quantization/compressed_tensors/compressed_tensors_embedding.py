@@ -35,9 +35,11 @@ def _dequant_gather_kernel(
     PACK_FACTOR: tl.constexpr,
     GROUP_SIZE: tl.constexpr,
     BLOCK: tl.constexpr,
+    UNPACKED_INT8: tl.constexpr = False,
 ):
     """Gather embedding rows by token id, unpack int32-packed INT weights, and
-    dequantize to `out` dtype in one pass (no int8 intermediate)."""
+    dequantize to `out` dtype in one pass (no int8 intermediate).
+    `UNPACKED_INT8` reads plain int8 weights instead (ModelOpt Q8_0)."""
     row = tl.program_id(0)
     col = tl.program_id(1) * BLOCK + tl.arange(0, BLOCK)
     col_mask = col < hidden
@@ -48,7 +50,10 @@ def _dequant_gather_kernel(
     packed = tl.load(
         packed_ptr + tid * packed_cols + packed_idx, mask=col_mask, other=0
     )
-    q = ((packed >> shift) & ((1 << NUM_BITS) - 1)) - (1 << (NUM_BITS - 1))
+    if UNPACKED_INT8:
+        q = packed
+    else:
+        q = ((packed >> shift) & ((1 << NUM_BITS) - 1)) - (1 << (NUM_BITS - 1))
 
     if GROUP_SIZE == 0:  # channel: one scale per row
         scale = tl.load(scale_ptr + tid)
@@ -58,7 +63,9 @@ def _dequant_gather_kernel(
 
     out = q.to(tl.float32) * scale.to(tl.float32)
     tl.store(
-        out_ptr + row * hidden + col, out.to(out_ptr.dtype.element_ty), mask=col_mask
+        out_ptr + row.to(tl.int64) * hidden + col,
+        out.to(out_ptr.dtype.element_ty),
+        mask=col_mask,
     )
 
 
