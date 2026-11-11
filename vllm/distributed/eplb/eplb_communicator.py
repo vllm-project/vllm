@@ -95,14 +95,11 @@ class EplbCommunicator(ABC):
 
         """
 
-    def release_departed_peers(  # noqa: B027
-        self, previous: "EplbCommunicator"
-    ) -> None:
-        """Drop connections to the ranks this reconfiguration removed.
+    def on_activated(self, previous: "EplbCommunicator") -> None:  # noqa: B027
+        """Called once this communicator has taken over from `previous`.
 
-        Called once this communicator has taken over from `previous`, so a
-        backend that holds per peer state can let go of the ranks that are
-        gone. Default is a no-op.
+        A backend that holds per peer state can use this to let go of the
+        ranks this reconfiguration removed. Default is a no-op.
         """
 
     @property
@@ -403,21 +400,22 @@ class NixlEplbCommunicator(EplbCommunicator):
         # Expert weights and expert_buffer keep their storage across elastic EP
         # reconfigurations, so the agent (and its registrations) is shared by
         # all communicators of this worker instead of registering the same
-        # memory again with a new agent. NIXL deregisters everything when the
-        # last communicator drops the agent.
+        # memory again with a new agent.
         if nixl_wrapper is None:
             # A replacement communicator adds its peers to an agent the outgoing
             # one may still be running transfers on, which the NIXL default of
             # NIXL_THREAD_SYNC_NONE leaves unguarded.
             nixl_agent_config = nixl_utils.nixl_agent_config
             sync_mode = nixl_utils.nixl_thread_sync_t
-            config = (
-                nixl_agent_config(
-                    capture_telemetry=False,
-                    sync_mode=sync_mode.NIXL_THREAD_SYNC_STRICT,
+            if nixl_agent_config is None or sync_mode is None:
+                raise RuntimeError(
+                    "Sharing one NIXL agent across EPLB communicators requires "
+                    "NIXL_THREAD_SYNC_STRICT, which the installed NIXL does not "
+                    "expose. Please upgrade NIXL."
                 )
-                if nixl_agent_config is not None and sync_mode is not None
-                else None
+            config = nixl_agent_config(
+                capture_telemetry=False,
+                sync_mode=sync_mode.NIXL_THREAD_SYNC_STRICT,
             )
             self._nixl_wrapper = nixl_wrapper_cls(self._make_agent_name(), config)
             self._init_step("buffers", self._init_registered_buffers)
@@ -696,7 +694,7 @@ class NixlEplbCommunicator(EplbCommunicator):
             self._expert_to_src_row = None
             self._layer_idx = None
 
-    def release_departed_peers(self, previous: EplbCommunicator) -> None:
+    def on_activated(self, previous: EplbCommunicator) -> None:
         if (
             not isinstance(previous, NixlEplbCommunicator)
             or previous._nixl_wrapper is not self._nixl_wrapper
@@ -704,8 +702,9 @@ class NixlEplbCommunicator(EplbCommunicator):
             # A separate agent holds those connections and drops them with
             # itself, so there is nothing for this one to release.
             return
-        # Compared by name rather than by rank, since scaling down renumbers
-        # the survivors while the shared agent keeps each worker's name.
+        assert isinstance(previous, NixlEplbCommunicator)
+        # Agent names are what `remove_remote_agent` takes, so the departed
+        # set is built from them rather than from the rank keys.
         departed = set(previous._remote_agents.values()) - set(
             self._remote_agents.values()
         )

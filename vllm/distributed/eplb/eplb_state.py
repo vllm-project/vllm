@@ -1235,7 +1235,7 @@ class EplbState:
         model_state = self.model_states[hash_config_cached(model_config)]
         previous = model_state.communicator
         model_state.communicator = communicator
-        communicator.release_departed_peers(previous)
+        communicator.on_activated(previous)
 
 
 @dataclass
