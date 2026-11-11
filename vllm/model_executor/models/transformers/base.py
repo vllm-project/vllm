@@ -475,24 +475,6 @@ class Base(
         module_lists = [m for n in names if isinstance(m := get(n), nn.ModuleList)]
         return module_lists[0] if len(module_lists) == 1 else None
 
-    def _register_decoder_layers(self, layers: nn.ModuleList, prefix: str):
-        """Record the decoder layers for Eagle3 and skip loading MTP weights."""
-        for name, layer in layers.named_children():
-            if not isinstance(layer, PPMissingLayer):
-                self._target_class = type(layer)
-            self._layer_names[int(name)] = f"{prefix}.{name}".removeprefix("model.")
-        num_hidden_layers = self.text_config.num_hidden_layers
-        names = (
-            "n_predict",  # Override from SpeculativeConfig
-            "num_nextn_predict_layers",  # Most models
-            "mtp_num_hidden_layers",  # Qwen 3.5
-        )
-        n_predict = getattr_iter(self.text_config, names, 0) or 0
-        for i in range(num_hidden_layers, num_hidden_layers + n_predict):
-            mtp_prefix = f"{prefix}.{i}."
-            if mtp_prefix not in self.ignore_unexpected_prefixes:
-                self.ignore_unexpected_prefixes.append(mtp_prefix)
-
     def _offloader(self) -> BaseOffloader:
         """The offloader for the decoder layers."""
         return get_offloader()
@@ -599,6 +581,22 @@ class Base(
         def _replace_decoder_layers(layers: nn.ModuleList, prefix: str):
             """Build this rank's decoder layers one at a time and offload each as
             soon as it is built, as `make_layers` does."""
+            # Record the layers for Eagle3
+            for name, layer in layers.named_children():
+                if not isinstance(layer, PPMissingLayer):
+                    self._target_class = type(layer)
+                self._layer_names[int(name)] = f"{prefix}.{name}".removeprefix("model.")
+            # MTP weights should not be loaded into the base model
+            num_layers = self.text_config.num_hidden_layers
+            names = (
+                "n_predict",  # Override from SpeculativeConfig
+                "num_nextn_predict_layers",  # Most models
+                "mtp_num_hidden_layers",  # Qwen 3.5
+            )
+            n_predict = getattr_iter(self.text_config, names, 0) or 0
+            self.ignore_unexpected_prefixes.extend(
+                f"{prefix}.{i}." for i in range(num_layers, num_layers + n_predict)
+            )
 
             def build_layers():
                 for i in range(*self._pp_indices()):
@@ -614,7 +612,6 @@ class Base(
 
         def _recursive_replace(module: nn.Module, prefix: str):
             if module is decoder_layers:
-                self._register_decoder_layers(module, prefix)
                 _replace_decoder_layers(module, prefix)
                 return
             for child_name, child_module in module.named_children():
