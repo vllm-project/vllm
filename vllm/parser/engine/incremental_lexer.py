@@ -136,10 +136,10 @@ class IncrementalLexer:
         self._token_counts.extend(char_token_counts)
         return self._drain()
 
-    def flush(self) -> list[LexToken]:
+    def flush(self, *, drop_held: bool = False) -> list[LexToken]:
         tokens: list[LexToken] = []
         if self.buffer:
-            tokens.extend(self._drain(final=True))
+            tokens.extend(self._drain(final=True, drop_held=drop_held))
         if self.buffer:
             tokens.append(
                 LexToken(self.content_terminal, self.buffer, sum(self._token_counts))
@@ -181,7 +181,7 @@ class IncrementalLexer:
         del self._token_counts[:length]
         return token_count
 
-    def _drain(self, *, final: bool = False) -> list[LexToken]:
+    def _drain(self, *, final: bool = False, drop_held: bool = False) -> list[LexToken]:
         tokens: list[LexToken] = []
         first_chars = self._literal_first_chars
         content_terminal = self.content_terminal
@@ -217,26 +217,36 @@ class IncrementalLexer:
             # of a longer literal, wait for the next chunk. For example,
             # "<invoke name=" should not be emitted before the next chunk
             # proves whether this is the quoted form '<invoke name="'.
-            if self.buffer in prefix_set and not final:
-                if best_match is not None:
-                    longer_match = False
-                    for lit, _ in literals_by_first.get(first, ()):
-                        if len(lit) > best_match[2] and lit.startswith(self.buffer):
-                            longer_match = True
-                            break
-                    if not longer_match:
-                        tokens.append(
-                            LexToken(
-                                best_match[0],
-                                best_match[1],
-                                self._pop_token_count(best_match[2]),
+            if self.buffer in prefix_set:
+                if final and drop_held and best_match is None:
+                    # End of stream: a held partial terminal can never
+                    # resolve into one. Mid-stream semantics withhold it,
+                    # so drop it instead of flushing it as content.
+                    self.buffer = ""
+                    self._token_counts.clear()
+                    break
+                if not final:
+                    if best_match is not None:
+                        longer_match = False
+                        for lit, _ in literals_by_first.get(first, ()):
+                            if len(lit) > best_match[2] and lit.startswith(
+                                self.buffer
+                            ):
+                                longer_match = True
+                                break
+                        if not longer_match:
+                            tokens.append(
+                                LexToken(
+                                    best_match[0],
+                                    best_match[1],
+                                    self._pop_token_count(best_match[2]),
+                                )
                             )
-                        )
-                        self.buffer = self.buffer[best_match[2] :]
-                        continue
-                    break
-                else:
-                    break
+                            self.buffer = self.buffer[best_match[2] :]
+                            continue
+                        break
+                    else:
+                        break
 
             if best_match is not None:
                 tokens.append(

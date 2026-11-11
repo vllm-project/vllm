@@ -10,6 +10,7 @@ import pytest
 from tests.parser.engine.conftest import make_mock_tokenizer
 from vllm.parser.engine.events import EventType, SemanticEvent
 from vllm.parser.engine.incremental_lexer import (
+    IncrementalLexer,
     LexerShape,
     TerminalDef,
     terminals_from_literals,
@@ -1013,3 +1014,176 @@ class TestTerminalAliases:
             EventType.ARG_VALUE_CHUNK,
             EventType.TOOL_CALL_END,
         ]
+
+
+class TestLexerFlushDropHeld:
+    """flush(drop_held=True) drops a held partial terminal at end of
+    stream instead of flushing it as content.
+
+    While streaming, a strict prefix of a terminal is withheld
+    (prefix-wait).  At end of stream it can never resolve into a
+    complete terminal, so a caller that has proven the argument region
+    completed may drop it; the no-drop default and mid-stream
+    withholding keep their current behavior.
+    """
+
+    @staticmethod
+    def _make_lexer() -> IncrementalLexer:
+        return IncrementalLexer(
+            terminals_from_literals(
+                {
+                    "TOOL_START": "[CALL_BEGIN]",
+                    "TOOL_END": "[CALL_END]",
+                    # ambiguous pair: the short literal is a complete
+                    # terminal AND a strict prefix of the longer one
+                    "INV_SHORT": "[invoke name=",
+                    "INV_QUOTED": "[invoke name=x",
+                }
+            )
+        )
+
+    def test_strict_prefix_dropped_at_eos(self):
+        lexer = self._make_lexer()
+        lexer.feed("[CALL_BE", token_count=5)
+
+        tokens = lexer.flush(drop_held=True)
+
+        assert tokens == []
+        assert lexer.buffer == ""
+        # token counts die with the dropped buffer
+        assert sum(lexer._token_counts) == 0
+
+    def test_ambiguous_complete_literal_kept(self):
+        lexer = self._make_lexer()
+        lexer.feed("[invoke name=")
+
+        tokens = lexer.flush(drop_held=True)
+
+        # narrowing: only a strict prefix (no complete match) is
+        # dropped; a complete terminal keeps its current behavior
+        assert [(t.terminal, t.value) for t in tokens] == [
+            ("INV_SHORT", "[invoke name=")
+        ]
+        assert lexer.buffer == ""
+
+    def test_default_flush_keeps_current_behavior(self):
+        lexer = self._make_lexer()
+        lexer.feed("[CALL_BE", token_count=5)
+
+        tokens = lexer.flush()
+
+        # no drop: the withheld prefix surfaces as one content token
+        # and carries its token count
+        assert [(t.terminal, t.value, t.token_count) for t in tokens] == [
+            (lexer.content_terminal, "[CALL_BE", 5)
+        ]
+        assert lexer.buffer == ""
+
+    def test_content_before_held_prefix_still_emitted(self):
+        lexer = self._make_lexer()
+        tokens = lexer.feed("Hello [CALL_BE")
+        tokens += lexer.flush(drop_held=True)
+
+        assert [(t.terminal, t.value) for t in tokens] == [
+            (lexer.content_terminal, "Hello ")
+        ]
+
+    def test_mid_stream_withholding_unchanged(self):
+        lexer = self._make_lexer()
+        lexer.feed("[CALL_BE")
+
+        # no finish yet: the partial terminal stays held, exactly as
+        # before the fix
+        assert lexer.buffer == "[CALL_BE"
+
+
+class TestFinishHeldPrefixByRegion:
+    """engine.finish() scopes the held-fragment drop by region (Fix A).
+
+    Inside a completed argument region the withheld fragment can only
+    be a truncated terminal tail, so finish() drops it and the complete
+    call stays clean.  In content state the withheld fragment may be
+    legitimate text -- including text a delegating router hands to a
+    downstream parser -- so it must survive as content.
+    """
+
+    def test_cut_inside_tool_start_marker_flushes_as_content(self):
+        cfg = _hermes_config()
+        engine = StreamingParserEngine(cfg, tokenizer=None)
+        events = engine.feed("Hello ", [])
+        fragment = cfg.terminals["TOOL_START"][:5]
+        events += engine.feed(fragment, [])
+        events += engine.finish()
+
+        # Protection for the region scoping: a content-state fragment
+        # must NOT be dropped -- it flushes as content, matching the
+        # upstream finish-flush semantics.
+        content = "".join(e.value for e in events if e.type == EventType.TEXT_CHUNK)
+        assert content == "Hello " + fragment
+        assert not any(e.type == EventType.TOOL_CALL_START for e in events)
+
+    def test_cut_inside_tool_end_marker_keeps_call(self):
+        cfg = _hermes_config()
+        open_marker = cfg.terminals["TOOL_START"]
+        close_marker = cfg.terminals["TOOL_END"]
+        args_text = '{"name": "f", "arguments": {"x": 1}}'
+        engine = StreamingParserEngine(cfg, tokenizer=None)
+        events = engine.feed(open_marker + args_text + close_marker[:6], [])
+        events += engine.finish()
+
+        # Fix A leg: on main the withheld closing fragment is flushed
+        # into the call's arguments (args == args_text + fragment), so
+        # this fails via the glued fragment -- NOT via a half call;
+        # that is Fix B's AB/header shape.  After the fix the fragment
+        # is dropped and the complete call stays.
+        assert any(e.type == EventType.TOOL_CALL_END for e in events)
+        args = "".join(e.value for e in events if e.type == EventType.ARG_VALUE_CHUNK)
+        assert args == args_text
+
+
+class TestFinishPreFlushReleasesDisprovedPrefix:
+    """A marker arriving as a token id disproves held text the lawful
+    way: finish()'s pre-flush releases it per state -- no drop on that
+    path (the id path keeps its current semantics).  Anchors the
+    regression guard: Fix A must not eat this release."""
+
+    def test_held_prefix_released_via_id_terminal(self):
+        cfg = _hermes_config()
+        open_marker = cfg.terminals["TOOL_START"]
+        close_marker = cfg.terminals["TOOL_END"]
+        args_text = '{"name": "f", "arguments": {"x": 1}}'
+        engine = StreamingParserEngine(cfg, _make_hermes_tokenizer())
+        engine.feed(open_marker + args_text, [])
+        # final delta: the complete tool-end token id with the text cut
+        # to a 6-char prefix -- the stop-string-inside-marker shape
+        events = engine.feed(close_marker[:6], [_TOOL_END_ID])
+        events.extend(engine.finish())
+
+        assert any(e.type == EventType.TOOL_CALL_END for e in events)
+        args = "".join(e.value for e in events if e.type == EventType.ARG_VALUE_CHUNK)
+        # the withheld closing brace plus the disproved prefix,
+        # released by the pre-flush: kept, not dropped
+        assert args == "}" + close_marker[:6]
+
+
+class TestArgChunkFlagResetsAcrossCalls:
+    """The emitted-args flag must reset when a new call starts, so a
+    truncated second call is not protected by the first call's args
+    (Fix B)."""
+
+    def test_flag_reset_between_two_calls(self):
+        cfg = _hermes_config()
+        open_marker = cfg.terminals["TOOL_START"]
+        close_marker = cfg.terminals["TOOL_END"]
+        engine = StreamingParserEngine(cfg, tokenizer=None)
+
+        first = open_marker + '{"x": 1}' + close_marker
+        engine.feed(first, [])
+        engine.finish()  # the flag is now set by the first call
+
+        # same engine instance, no reset in between: a second call
+        # opens and truncates before any argument character
+        engine.feed(open_marker, [])
+        finish_events = engine.finish()
+
+        assert not any(e.type == EventType.TOOL_CALL_END for e in finish_events)
