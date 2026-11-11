@@ -98,7 +98,6 @@ steps:
   - vllm/model_executor/layers/quantization/utils/mxfp4_utils.py
   - vllm/model_executor/models/gpt_oss.py
   - vllm/model_executor/model_loader/reload/
-  - vllm/model_executor/model_loader/mtp_validation.py
   - vllm/model_executor/model_loader/utils.py
   - vllm/model_executor/model_loader/weight_checksum.py
   - vllm/model_executor/model_loader/weight_utils.py
