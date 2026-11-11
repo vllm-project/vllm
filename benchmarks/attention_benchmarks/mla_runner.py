@@ -469,7 +469,7 @@ def _aiter_prefill_path(metadata) -> str | None:
     if metadata.prefill is None:
         return None
     if metadata.prefill.chunked_context is not None:
-        return "fused" if metadata.fused_prefill is not None else "unfused"
+        return "fused" if metadata.fused_prefill_cu_seqlens_k is not None else "unfused"
     return "fp8" if metadata.fp8_prefill_qo_indptr is not None else "bf16"
 
 

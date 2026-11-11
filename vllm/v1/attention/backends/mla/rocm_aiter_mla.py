@@ -917,24 +917,6 @@ class AiterMLADecodeMetadata(MLACommonDecodeMetadata):
 
 
 @dataclass
-class AiterMLAFusedPrefillMetadata:
-    """Every prefill's [context | new] KV rows, for one causal MLA.
-
-    Built only for batches that take that launch, so its presence on the
-    metadata is the routing decision.
-    """
-
-    # Cumulative context + new length per prefill, shape [num_prefills + 1].
-    cu_seq_lens: torch.Tensor
-    # Prefill index of each gathered row, shape [num_kv_tokens].
-    token_to_seq: torch.Tensor
-    # Gathered row holding each new token, shape [num_prefill_tokens].
-    new_token_rows: torch.Tensor
-    num_kv_tokens: int
-    max_seq_len: int
-
-
-@dataclass
 class AiterMLAMetadata(MLACommonMetadata[AiterMLADecodeMetadata]):
     dcp_context_row_indices: list[torch.Tensor] | None = None
     work_meta_data: torch.Tensor | None = None
@@ -962,8 +944,12 @@ class AiterMLAMetadata(MLACommonMetadata[AiterMLADecodeMetadata]):
     # Per-token flat KV indices for each chunked-context chunk
     context_chunk_kv_indices: list[torch.Tensor] | None = None
 
-    # Set exactly when a prefill batch with context takes one causal launch.
-    fused_prefill: AiterMLAFusedPrefillMetadata | None = None
+    # Fused prefill metadata
+    fused_prefill_cu_seqlens_k: torch.Tensor | None = None
+    fused_prefill_token_to_seq: torch.Tensor | None = None
+    fused_prefill_slot_mapping: torch.Tensor | None = None
+    fused_prefill_num_tokens: int | None = None
+    fused_prefill_max_seqlen_k: int | None = None
 
 
 # Tile size used by the mla_prefill_ps_asm_fwd assembly kernel.
@@ -1750,25 +1736,15 @@ class AiterMLAMetadataBuilder(MLACommonMetadataBuilder[AiterMLAMetadata]):
             return int(query_lens.min()) >= 4096
         return int(query_lens.min()) >= 8192
 
-    def _use_fused_prefill(
-        self, query_lens: torch.Tensor, context_lens: torch.Tensor
-    ) -> bool:
-        """Shape rule for prefills with context."""
-        if int(query_lens.min()) >= 8192:
-            return True
-        long_query = query_lens > 256
-        long_context = context_lens >= 8192
-        return not bool((long_query & long_context).any())
-
     def _build_fused_prefill_metadata(
         self,
         metadata: AiterMLAMetadata,
         common_attn_metadata: CommonAttentionMetadata,
-    ) -> AiterMLAFusedPrefillMetadata | None:
+    ) -> None:
         """Lay out every prefill's [context | new] rows for one causal launch.
 
-        Returns None to keep the two-pass path when the rows do not fit the
-        chunked-prefill workspace or _use_fused_prefill returns False.
+        Leaves the fields None to keep the two-pass path when the rows do not
+        fit the chunked-prefill workspace.
         """
         num_decodes = metadata.num_decodes
         num_reqs = common_attn_metadata.num_reqs
@@ -1782,27 +1758,39 @@ class AiterMLAMetadataBuilder(MLACommonMetadataBuilder[AiterMLAMetadata]):
         ).to(torch.int64)
         context_lens = seq_lens - query_lens
 
-        num_kv_tokens = int(seq_lens.sum())
-        if num_kv_tokens > self.chunked_prefill_workspace_size:
-            return None
-        if not self._use_fused_prefill(query_lens, context_lens):
-            return None
+        num_tokens = int(seq_lens.sum())
+        if num_tokens > self.chunked_prefill_workspace_size:
+            return
 
-        cu_seq_lens = torch.zeros(seq_lens.numel() + 1, dtype=torch.int32)
-        torch.cumsum(seq_lens, dim=0, dtype=torch.int32, out=cu_seq_lens[1:])
+        cu_seqlens_k = torch.zeros(seq_lens.numel() + 1, dtype=torch.int32)
+        torch.cumsum(seq_lens, dim=0, dtype=torch.int32, out=cu_seqlens_k[1:])
         token_to_seq = torch.arange(seq_lens.numel(), dtype=torch.int32)
         token_to_seq = token_to_seq.repeat_interleave(seq_lens)
         # New token t of prefill r lands after the context of prefills 0..r.
-        new_token_rows = torch.arange(int(query_lens.sum()), dtype=torch.int64)
-        new_token_rows += context_lens.cumsum(0).repeat_interleave(query_lens)
+        slot_mapping = torch.arange(int(query_lens.sum()), dtype=torch.int64)
+        slot_mapping += context_lens.cumsum(0).repeat_interleave(query_lens)
 
-        return AiterMLAFusedPrefillMetadata(
-            cu_seq_lens=cu_seq_lens.to(self.device, non_blocking=True),
-            token_to_seq=token_to_seq.to(self.device, non_blocking=True),
-            new_token_rows=new_token_rows.to(self.device, non_blocking=True),
-            num_kv_tokens=num_kv_tokens,
-            max_seq_len=int(seq_lens.max()),
+        metadata.fused_prefill_cu_seqlens_k = cu_seqlens_k.to(
+            self.device, non_blocking=True
         )
+        metadata.fused_prefill_token_to_seq = token_to_seq.to(
+            self.device, non_blocking=True
+        )
+        metadata.fused_prefill_slot_mapping = slot_mapping.to(
+            self.device, non_blocking=True
+        )
+        metadata.fused_prefill_num_tokens = num_tokens
+        metadata.fused_prefill_max_seqlen_k = int(seq_lens.max())
+
+    def _use_fused_prefill(
+        self, query_lens: torch.Tensor, context_lens: torch.Tensor
+    ) -> bool:
+        """Shape rule for prefills with context."""
+        if int(query_lens.min()) >= 8192:
+            return True
+        long_query = query_lens > 256
+        long_context = context_lens >= 8192
+        return not bool((long_query & long_context).any())
 
     def _build_dcp_verify_row_view(
         self,
@@ -2412,10 +2400,13 @@ class AiterMLAMetadataBuilder(MLACommonMetadataBuilder[AiterMLAMetadata]):
             self._fused_prefill_enabled
             and attn_metadata.prefill is not None
             and attn_metadata.prefill.chunked_context is not None
-        ):
-            attn_metadata.fused_prefill = self._build_fused_prefill_metadata(
-                attn_metadata, common_attn_metadata
+            and attn_metadata.prefill.query_lens_cpu is not None
+            and self._use_fused_prefill(
+                attn_metadata.prefill.query_lens_cpu,
+                torch.tensor(attn_metadata.prefill.chunked_context.context_lens_list),
             )
+        ):
+            self._build_fused_prefill_metadata(attn_metadata, common_attn_metadata)
         return attn_metadata
 
 
@@ -3264,10 +3255,12 @@ class AiterMLAImpl(MLACommonImpl[AiterMLAMetadata]):
             "Fused FP8 output is only wired for the non-chunked-context path"
         )
         prefill_metadata = attn_metadata.prefill
-        fused_prefill_metadata = attn_metadata.fused_prefill
         assert prefill_metadata is not None
         assert prefill_metadata.chunked_context is not None
-        assert fused_prefill_metadata is not None
+        assert attn_metadata.fused_prefill_cu_seqlens_k is not None
+        assert attn_metadata.fused_prefill_token_to_seq is not None
+        assert attn_metadata.fused_prefill_slot_mapping is not None
+        assert attn_metadata.fused_prefill_num_tokens is not None
 
         # The new tokens reached the cache before attention, so this gathers
         # each prefill's whole sequence as contiguous [context | new] rows.
@@ -3276,16 +3269,22 @@ class AiterMLAImpl(MLACommonImpl[AiterMLAMetadata]):
             src_cache=kv_c_and_k_pe_cache,
             dst=workspace,
             block_table=prefill_metadata.block_table,
-            cu_seq_lens=fused_prefill_metadata.cu_seq_lens,
-            token_to_seq=fused_prefill_metadata.token_to_seq,
-            num_tokens=fused_prefill_metadata.num_kv_tokens,
+            cu_seq_lens=attn_metadata.fused_prefill_cu_seqlens_k,
+            token_to_seq=attn_metadata.fused_prefill_token_to_seq,
+            num_tokens=attn_metadata.fused_prefill_num_tokens,
             kv_cache_dtype=self.kv_cache_dtype,
             scale=k_scale,
         )
-        kv = workspace[: fused_prefill_metadata.num_kv_tokens]
+        kv = workspace[: attn_metadata.fused_prefill_num_tokens]
         # Keep the new tokens' unquantized latent, as the two-pass path does.
-        kv[fused_prefill_metadata.new_token_rows, : self.kv_lora_rank] = kv_c_normed
-        kv[fused_prefill_metadata.new_token_rows, self.kv_lora_rank :] = k_pe.squeeze(1)
+        ops.concat_and_cache_mla(
+            kv_c_normed,
+            k_pe.squeeze(1),
+            kv.unsqueeze(1),
+            attn_metadata.fused_prefill_slot_mapping,
+            "auto",
+            k_scale,
+        )
 
         kv_c = kv[:, : self.kv_lora_rank]
         kv_b_proj_input_dtype = _get_kv_b_proj_input_dtype(self.kv_b_proj, False)
@@ -3297,7 +3296,7 @@ class AiterMLAImpl(MLACommonImpl[AiterMLAMetadata]):
         k_nope, v = kv_nope.split([self.qk_nope_head_dim, self.v_head_dim], dim=-1)
         k = self._concat_k_nope_k_pe(k_nope, kv[:, self.kv_lora_rank :].unsqueeze(1))
 
-        cu_seqlens_k = fused_prefill_metadata.cu_seq_lens
+        cu_seqlens_k = attn_metadata.fused_prefill_cu_seqlens_k
         cu_seqlens_q = prefill_metadata.query_start_loc[: cu_seqlens_k.numel()]
         self.flash_attn_varlen_func(
             q=q,
@@ -3306,7 +3305,7 @@ class AiterMLAImpl(MLACommonImpl[AiterMLAMetadata]):
             cu_seqlens_q=cu_seqlens_q,
             cu_seqlens_k=cu_seqlens_k,
             max_seqlen_q=prefill_metadata.max_query_len,
-            max_seqlen_k=fused_prefill_metadata.max_seq_len,
+            max_seqlen_k=attn_metadata.fused_prefill_max_seqlen_k,
             softmax_scale=self.scale,
             causal=True,
             out=output.view(-1, self.num_heads, self.v_head_dim),
@@ -3326,7 +3325,7 @@ class AiterMLAImpl(MLACommonImpl[AiterMLAMetadata]):
         """Dispatch prefill to the FP8 ASM kernel when available.
 
         Prefill with context takes one causal MHA launch when the builder
-        planned it (`fused_prefill`). Otherwise falls back to the parent
+        planned it (`fused_prefill_*`). Otherwise falls back to the parent
         (`flash_attn_varlen_func`) when FP8 MLA prefill is disabled, the
         selected prefill backend supersedes it, PS metadata is missing, or
         chunked context requires two-pass merge.
@@ -3339,7 +3338,7 @@ class AiterMLAImpl(MLACommonImpl[AiterMLAMetadata]):
         prefill_metadata = attn_metadata.prefill
         if (
             isinstance(attn_metadata, AiterMLAMetadata)
-            and attn_metadata.fused_prefill is not None
+            and attn_metadata.fused_prefill_cu_seqlens_k is not None
         ):
             return self._forward_mha_fused_prefill(
                 q,

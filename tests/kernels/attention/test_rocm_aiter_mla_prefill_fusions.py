@@ -330,7 +330,7 @@ def test_fused_prefill_matches_two_pass(kv_cache_dtype):
     metadata, num_blocks = _build_metadata(
         MIXED_BATCH_CONTEXTS, device, MIXED_BATCH_QUERY_LENS
     )
-    assert metadata.fused_prefill is not None
+    assert metadata.fused_prefill_cu_seqlens_k is not None
 
     impl = _make_impl(device)
     impl.kv_cache_dtype = kv_cache_dtype
@@ -355,7 +355,7 @@ def test_fused_prefill_matches_two_pass(kv_cache_dtype):
     # AITER's varlen attention takes its autograd path outside inference mode.
     with torch.inference_mode():
         impl.forward_mha(q, kv_c_normed, k_pe, kv_cache, metadata, k_scale, output)
-        metadata.fused_prefill = None
+        metadata.fused_prefill_cu_seqlens_k = None
         metadata.context_chunk_kv_indices = None
         MLACommonImpl.forward_mha(
             impl, q, kv_c_normed, k_pe, kv_cache, metadata, k_scale, expected
