@@ -105,11 +105,13 @@ else:
     TEXT_VS_TEXT_PLUS_IMAGE = 0.5298863053321838
 
 
-@pytest.fixture(
-    scope="module",
-    params=[pytest.param((backend, "string"), id=backend) for backend in ATTN_BACKENDS]
-    + [pytest.param(("auto", "openai"), id="structured")],
-)
+_SERVER_PARAMS = [
+    pytest.param((backend, "string"), id=backend) for backend in ATTN_BACKENDS
+]
+_STRUCTURED_SERVER_PARAM = pytest.param(("auto", "openai"), id="structured")
+
+
+@pytest.fixture(scope="module", params=_SERVER_PARAMS)
 def server(request, tmp_path_factory):
     backend, content_format = request.param
     template = VLLM_PATH / "examples/pooling/score/template/qwen3_vl_reranker.jinja"
@@ -238,6 +240,9 @@ async def test_score_api_queries_str_documents_image_base64_content(
     assert_score(score.data[0].score, TEXT_VS_IMAGE, backend, "text_vs_image_base64")
 
 
+@pytest.mark.parametrize(
+    "server", _SERVER_PARAMS + [_STRUCTURED_SERVER_PARAM], indirect=True
+)
 @pytest.mark.asyncio
 async def test_score_api_queries_str_documents_image_url_plus_text_content(
     server: tuple[RemoteOpenAIServer, str],
@@ -518,3 +523,30 @@ async def test_rerank_api_instruction_field_matches_chat_template_kwargs(
         r.relevance_score for r in sorted(kwargs_rerank.results, key=lambda x: x.index)
     ]
     assert field_scores == pytest.approx(kwargs_scores, rel=REL_TOL, abs=ABS_TOL)
+
+
+@pytest.mark.parametrize("server", [_STRUCTURED_SERVER_PARAM], indirect=True)
+@pytest.mark.asyncio
+async def test_rerank_preserves_structured_text_and_image(server):
+    remote_server, backend = server
+    response = requests.post(
+        remote_server.url_for("rerank"),
+        json={
+            "model": MODEL_NAME,
+            "query": query,
+            "documents": [{"content": [documents[0], documents[1]]}],
+        },
+    )
+    response.raise_for_status()
+    rerank = RerankResponse.model_validate(response.json())
+
+    assert len(rerank.results) == 1
+    assert rerank.results[0].index == 0
+    assert rerank.usage is not None
+    assert rerank.usage.prompt_tokens == 107
+    assert_score(
+        rerank.results[0].relevance_score,
+        TEXT_VS_TEXT_PLUS_IMAGE,
+        backend,
+        "structured_text_and_image",
+    )

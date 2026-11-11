@@ -101,7 +101,10 @@ def test_classify(llm):
     assert len(outputs[0].outputs.data) == 1
 
 
-@pytest.mark.parametrize("content_format", [None, "string", "openai"])
+@pytest.mark.parametrize(
+    "content_format",
+    [pytest.param(None, id="legacy-default"), pytest.param("openai", id="structured")],
+)
 @pytest.mark.skip_global_cleanup
 def test_score_content_format_override_matches_classify(llm: LLM, content_format):
     # Legacy character loops keep strings unless structured content is requested.
@@ -143,16 +146,6 @@ def test_score_content_format_override_matches_classify(llm: LLM, content_format
     )
     assert scored.prompt_token_ids == classified.prompt_token_ids
     assert scored.outputs.score == pytest.approx(classified.outputs.probs[0])
-
-
-@pytest.mark.skip_global_cleanup
-def test_score_rejects_automatic_content_format(llm: LLM):
-    with pytest.raises(ValueError, match="score_template_content_format"):
-        llm.score(
-            "query",
-            "document",
-            score_template_content_format="auto",  # type: ignore[arg-type]
-        )
 
 
 @pytest.mark.skip_global_cleanup

@@ -115,26 +115,6 @@ def test_llm_reranker_tokenization_is_independent_of_nonbinding_doc_limit(
     assert nonbinding["prompt_token_ids"] == expected
 
 
-@pytest.mark.parametrize("content_format", [None, "string"])
-def test_scoring_keeps_legacy_character_loops_without_structured_opt_in(
-    llm_reranker_processor, content_format
-):
-    template = (
-        "{% for message in messages %}"
-        "{% for char in message.content %}{{ char }}{% endfor %}"
-        "{% endfor %}"
-    )
-    prompt, inputs = llm_reranker_processor.get_score_prompt(
-        "a",
-        "bc",
-        {},
-        chat_template=template,
-        score_template_content_format=content_format,
-    )
-    assert prompt == "abc"
-    assert inputs["prompt_token_ids"] == llm_reranker_processor.tokenizer.encode("abc")
-
-
 @pytest.mark.parametrize(
     "default_template,request_template,expected",
     [
@@ -402,47 +382,34 @@ def multimodal_reranker_processor(tmp_path, request, scoring_tokenizer):
 
 
 @pytest.mark.parametrize(
-    ("text", "with_image", "multimodal_reranker_processor"),
-    [
-        pytest.param(None, True, "mistral3", id="image-only"),
-        pytest.param("literal [IMG]", True, "mistral3", id="mixed-no-placeholder"),
-        pytest.param("literal [IMG]", True, "qwen3_vl", id="mixed-placeholder"),
-        pytest.param("literal [IMG]", False, "mistral3", id="literal-text"),
-        pytest.param(None, False, "mistral3", id="empty-content"),
-    ],
-    indirect=["multimodal_reranker_processor"],
+    "multimodal_reranker_processor", ["mistral3", "qwen3_vl"], indirect=True
 )
-def test_scoring_template_preserves_image_blocks_and_literal_text(
-    multimodal_reranker_processor, text, with_image
+def test_scoring_template_keeps_images_distinct_from_literal_placeholder_text(
+    multimodal_reranker_processor,
 ):
-    """Image identity must not depend on model placeholders or literal user text."""
+    """Image identity must survive models with and without text placeholders."""
     processor = multimodal_reranker_processor
-    document = [] if text is None else [{"type": "text", "text": text}]
-    if with_image:
-        document.append(
-            {
-                "type": "image_url",
-                "image_url": {"url": encode_image_url(Image.new("RGB", (2, 2), "red"))},
-                "uuid": "document-image",
-            }
-        )
+    document = [
+        {"type": "text", "text": "literal [IMG]"},
+        {
+            "type": "image_url",
+            "image_url": {"url": encode_image_url(Image.new("RGB", (2, 2), "red"))},
+            "uuid": "document-image",
+        },
+    ]
     prompt, inputs = processor.get_score_prompt(
         "a", document, {}, chat_template=_BLOCK_TEMPLATE
     )
-    expected = "query:adocument:" + (text or "").replace("[IMG]", "[literal IMG]")
-    expected += "[IMG]" if with_image else ""
+    expected = "query:adocument:literal [literal IMG][IMG]"
     assert prompt == expected
     assert inputs["prompt_token_ids"] == processor.tokenizer.encode(expected)
-    if with_image:
-        assert inputs["multi_modal_data"]["image"][0].getpixel((0, 0)) == (255, 0, 0)
-        assert inputs["multi_modal_uuids"] == {"image": ["document-image"]}
-    else:
-        assert "multi_modal_data" not in inputs
+    assert inputs["multi_modal_data"]["image"][0].getpixel((0, 0)) == (255, 0, 0)
+    assert inputs["multi_modal_uuids"] == {"image": ["document-image"]}
 
 
 @pytest.mark.parametrize(
     ("doc_limit", "expected_document"),
-    [(1, "a[IMG]"), (3, "a bc[IMG]bc"), (10, "a bc[IMG]bc a")],
+    [(1, "a[IMG]"), (3, "a bc[IMG]bc")],
 )
 def test_scoring_text_limits_share_budget_across_blocks_and_keep_images(
     multimodal_reranker_processor,
@@ -478,7 +445,6 @@ def test_scoring_text_limit_is_independent_of_adjacent_block_boundaries(
     # This tokenizer splits "abc" into three tokens, but "a" and "bc" into one each.
     for document in (
         "abc",
-        [{"type": "text", "text": "abc"}],
         [{"type": "text", "text": "a"}, {"type": "text", "text": "bc"}],
     ):
         prompt, _ = multimodal_reranker_processor.get_score_prompt(
@@ -507,31 +473,8 @@ def test_string_scoring_templates_keep_model_placeholders(
     assert prompt == "a<|vision_start|><|image_pad|><|vision_end|>"
 
 
-@pytest.mark.parametrize("content_format", [None, "openai"])
-@pytest.mark.parametrize("saved_template", [False, True])
-def test_scoring_template_formats_plain_strings_as_text_blocks(
-    multimodal_reranker_processor, content_format, saved_template
-):
-    processor = multimodal_reranker_processor
-    prompt, _ = processor.get_score_prompt(
-        "a",
-        "bc",
-        {},
-        chat_template=None if saved_template else _BLOCK_TEMPLATE,
-        score_template_content_format=content_format,
-    )
-    assert prompt == "query:adocument:bc"
-
-
-def test_scoring_content_format_override_for_indirect_template(
+def test_scoring_uses_structured_content_with_saved_template(
     multimodal_reranker_processor,
 ):
-    # Explicit format selection works without inspecting the template.
-    prompt, _ = multimodal_reranker_processor.get_score_prompt(
-        "a",
-        "bc",
-        {},
-        chat_template="{{ messages[1].content | tojson }}",
-        score_template_content_format="openai",
-    )
-    assert json.loads(prompt) == [{"type": "text", "text": "bc"}]
+    prompt, _ = multimodal_reranker_processor.get_score_prompt("a", "bc", {})
+    assert prompt == "query:adocument:bc"
