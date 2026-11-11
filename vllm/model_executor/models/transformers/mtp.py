@@ -25,6 +25,7 @@ from transformers.conversion_mapping import WeightTransform
 
 from vllm.distributed import in_single_pp_stage
 from vllm.model_executor.models.transformers.causal import CausalMixin
+from vllm.model_executor.offloader import BaseOffloader, NoopOffloader
 from vllm.sequence import IntermediateTensors
 
 if TYPE_CHECKING:
@@ -79,6 +80,12 @@ class MTPMixin(CausalMixin):
             for k, v in tp_plan.items()
             if k.startswith("layers.*.")
         }
+
+    def _offloader(self) -> BaseOffloader:
+        """Drafts are not offloaded, as with native drafts.
+
+        `PrefetchOffloader.wrap_modules` may only be called once (for the target)."""
+        return NoopOffloader()
 
     def load_weights(self, weights: Iterable[tuple[str, torch.Tensor]]) -> set[str]:
         embed_prefix = None
