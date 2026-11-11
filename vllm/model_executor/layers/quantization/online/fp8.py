@@ -433,6 +433,7 @@ class Fp8PtpcOnlineLinearMethod(OnlineLinearBase):
     weight_quant_key = kFp8StaticChannelSym
     activation_quant_key: QuantKey | None = kFp8DynamicTokenSym
     accepts_activation_override = True
+    supports_lm_head = True
 
     def __init__(self, activation_quant_key: QuantKey | None = kFp8DynamicTokenSym):
         super().__init__()

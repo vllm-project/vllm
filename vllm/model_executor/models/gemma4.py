@@ -1373,7 +1373,7 @@ class Gemma4Model(nn.Module, EagleModelMixin, SupportsQuant):
         else:
             assert intermediate_tensors is not None
             hidden_states = intermediate_tensors["hidden_states"]
-            if per_layer_inputs is not None:
+            if "per_layer_inputs" in intermediate_tensors.tensors:
                 per_layer_inputs = intermediate_tensors["per_layer_inputs"]
         residual = None
         aux_hidden_states = self._maybe_add_hidden_state([], 0, hidden_states, residual)

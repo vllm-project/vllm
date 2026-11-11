@@ -200,7 +200,7 @@ not select it. For example:
 
 | Target value | Recipe | Notes |
 | ------------ | ------ | ----- |
-| `{"weight": "fp8_per_channel_static", "activation": null}` | fp8_e4m3 data, per-output-channel scale, BF16 activations | Any online linear spec is accepted, e.g. `"fp8_per_channel"` for W8A8. |
+| `{"weight": "fp8_per_channel_static", "activation": null}` | fp8_e4m3 data, per-output-channel scale, BF16 activations | `"fp8_per_channel"` (W8A8) is also accepted; other FP8 schemes are not. CUDA and XPU only, use `"fp8_per_channel"` on ROCm. |
 | `{"weight": "int4_per_group_32_asym"}` | uint4 data, one scale and zero point per 32 input channels, BF16 activations | lm_head only. Runs on the platform's mixed-precision (W4A16) linear kernel, e.g. `RDNAHybridW4A16LinearKernel` on gfx11/gfx12. |
 
 ```bash
@@ -328,9 +328,21 @@ vllm serve Qwen/Qwen3.5-35B-A3B \
     - A layer name may not match both `targets` and `ignore`, raising an error.
     - A layer may not match more than one `targets` pattern, raising an error.
     - The lm_head (`ParallelLMHead`) is neither a linear nor an MoE layer. It is
-      quantized only when a `targets` pattern contains its module name (`"re:.*"`
-      does not select it), for example weight-only FP8:
+      quantized only when the text of a `targets` pattern contains its module name
+      (`lm_head`), so `"re:.*"` and `"*"` do not select it, for example
+      weight-only FP8:
       `"re:.*lm_head$": {"weight": "fp8_per_channel_static", "activation": None}`.
       See [Quantizing the lm_head](#quantizing-the-lm_head).
+    - The lm_head supports per-channel FP8 and `int4_per_group_32_asym` only:
+      `fp8_per_channel` (W8A8), `fp8_per_channel_static` with
+      `"activation": None` (weight-only; CUDA and XPU only, use
+      `fp8_per_channel` on ROCm), or `int4_per_group_32_asym` (weight-only).
+      Other schemes, and a lm_head the checkpoint already quantizes, raise an
+      error; so does a tied lm_head, except with `int4_per_group_32_asym`. It
+      cannot be combined with `draft_lm_head_quantization` or with models that
+      read `lm_head.weight` directly (Gemma4 MTP, DiffusionGemma, K2Horizon).
+      Models converted to sequence classification raise an error.
+    - `"activation": None` on `fp8_per_channel_static` is valid for any linear
+      layer; MoE experts reject it.
     - fnmatch-style patterns are supported only by online quantization; they are
       not applied to Quark or compressed-tensors configurations.

@@ -233,7 +233,7 @@ class PostGradPassManager(CustomGraphPass):  # type: ignore[misc]
         """
         passes = []
 
-        state: dict[str, Any] = {"pass_config": self.pass_config.compute_hash()}
+        state: dict[str, Any] = {"pass_config": self.pass_config.compile_factors()}
         for pass_ in self.passes:
             passes.append(pass_.uuid())
 

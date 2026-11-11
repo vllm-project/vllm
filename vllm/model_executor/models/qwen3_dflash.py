@@ -36,7 +36,6 @@ from vllm.model_executor.layers.vocab_parallel_embedding import (
 from vllm.model_executor.model_loader.weight_utils import make_attention_sink
 from vllm.model_executor.utils import (
     refill_derived,
-    weights_already_processed,
 )
 from vllm.multimodal.inputs import NestedTensors
 from vllm.platforms import current_platform
@@ -777,14 +776,6 @@ class DFlashQwen3Model(nn.Module):
         When context_slot_mapping is None (e.g. during dummy_run) only
         the computation runs, and no K/V is written to cache.
         """
-        if not hasattr(self, "_num_attn_layers"):
-            logger.warning_once(
-                "DFlash buffer initialization was skipped. If dummy weights are not "
-                "in use, this may indicate an error in weight loading."
-            )
-            with weights_already_processed():
-                self._build_fused_kv_buffers()
-
         num_ctx = context_states.shape[0]
         L = self._num_attn_layers
         hd = self._head_dim

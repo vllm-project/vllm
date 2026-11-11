@@ -15,6 +15,7 @@ from vllm.config import VllmConfig
 from vllm.model_executor.layers.vocab_parallel_embedding import VocabParallelEmbedding
 from vllm.model_executor.model_loader.default_loader import DefaultModelLoader
 from vllm.multimodal import MULTIMODAL_REGISTRY
+from vllm.multimodal.parse import ImageSize
 
 from .clef_joint_schema import JOINT_HEAD_WEIGHTS, JointSchemaHead, JointSchemaPooler
 from .interfaces_base import default_pooling_type
@@ -58,6 +59,14 @@ def _cap_video(item: Any) -> Any:
     return cap_frame_pixels(item)
 
 
+class ClefOmniProcessingInfo(Qwen3OmniMoeThinkerProcessingInfo):
+    def get_video_size_with_most_features(self) -> ImageSize:
+        size = super().get_video_size_with_most_features()
+        if size.width * size.height <= MAX_FRAME_PIXELS:
+            return size
+        return self.get_image_size_with_most_features(max_pixels=MAX_FRAME_PIXELS)
+
+
 class ClefOmniMultiModalProcessor(Qwen3OmniMoeThinkerMultiModalProcessor):
     """Caps video frames at the reference's per-frame pixel count."""
 
@@ -75,7 +84,7 @@ class ClefOmniMultiModalProcessor(Qwen3OmniMoeThinkerMultiModalProcessor):
 @default_pooling_type(tok_pooling_type="ALL")
 @MULTIMODAL_REGISTRY.register_processor(
     ClefOmniMultiModalProcessor,
-    info=Qwen3OmniMoeThinkerProcessingInfo,
+    info=ClefOmniProcessingInfo,
     dummy_inputs=Qwen3OmniMoeThinkerDummyInputsBuilder,
 )
 class ClefOmniForJointSchema(Qwen3OmniMoeThinkerForConditionalGeneration):

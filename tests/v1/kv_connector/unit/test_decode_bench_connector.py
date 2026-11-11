@@ -385,10 +385,10 @@ def test_decode_bench_connector_selects_external_blocks_per_group():
                 # Full external blocks may already be hashed by allocate_slots().
                 KVCacheBlock(
                     block_id=2,
-                    _block_hash=make_block_hash_with_group_id(
+                    block_hash=make_block_hash_with_group_id(
                         BlockHash(b"external-full-block"), 0
                     ),
-                    _block_hash_num_tokens=48,
+                    block_hash_num_tokens=48,
                 ),
                 KVCacheBlock(block_id=3),
             ],

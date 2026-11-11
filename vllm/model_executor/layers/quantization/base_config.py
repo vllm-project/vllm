@@ -387,6 +387,15 @@ def resolve_quant_method(
                 "of the lm_head is not supported, remove it from "
                 "quantization_config.targets."
             )
+        from vllm.config import get_current_vllm_config
+
+        model_config = get_current_vllm_config().model_config
+        if getattr(model_config, "convert_type", None) == "classify":
+            # The seq-cls adapters read `lm_head.weight` rows by token id.
+            raise NotImplementedError(
+                f"{prefix}: online quantization of the lm_head is not "
+                "supported for models converted to sequence classification."
+            )
         return online_config.get_quant_method(layer, prefix)
 
     if checkpoint_is_quantized:

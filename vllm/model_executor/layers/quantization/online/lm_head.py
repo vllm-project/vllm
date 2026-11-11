@@ -52,6 +52,7 @@ class OnlineLMHeadMethodBase(OnlineLinearBase):
     weight, which stays unchanged: the quantized copy is added next to it.
     """
 
+    supports_lm_head = True
     scheme: ClassVar[str]
     """The weight name in ``QUANT_KEY_NAMES``, for logs and errors."""
     weight_type: ClassVar[ScalarType]

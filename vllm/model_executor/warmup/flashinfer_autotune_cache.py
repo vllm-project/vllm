@@ -2,7 +2,6 @@
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 """FlashInfer autotune cache helpers."""
 
-import hashlib
 import os
 import tempfile
 from contextlib import suppress
@@ -11,6 +10,7 @@ from typing import TYPE_CHECKING
 
 import vllm.envs as envs
 from vllm.config import CacheConfig, VllmConfig, replace
+from vllm.config.utils import hash_factors
 from vllm.logger import init_logger
 
 if TYPE_CHECKING:
@@ -34,8 +34,7 @@ def flashinfer_autotune_cache_hash(runner: "GPUModelRunner") -> str:
     cache_config = _normalize_cache_config_for_hash(vllm_config.cache_config)
     if cache_config is not vllm_config.cache_config:
         vllm_config = replace(vllm_config, cache_config=cache_config)
-    config_hash = vllm_config.compute_hash(include_version=False)
-    return hashlib.sha256(config_hash.encode()).hexdigest()
+    return hash_factors(vllm_config.compile_factors(include_version=False))
 
 
 def flashinfer_autotune_root() -> Path:
