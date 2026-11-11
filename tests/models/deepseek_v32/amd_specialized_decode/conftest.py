@@ -10,6 +10,8 @@ from types import SimpleNamespace as NS
 import pytest
 import torch
 
+from vllm.models.deepseek_v32.amd.specialized_decode.runtime import GEOMETRY
+
 
 @pytest.fixture
 def no_device_sync(monkeypatch):
@@ -63,7 +65,7 @@ def make_vc():
     ):
         vc = NS(
             model_config=NS(
-                hf_config=NS(model_type=model_type),
+                hf_config=NS(model_type=model_type, **GEOMETRY),
                 max_model_len=mml,
                 dtype=torch.bfloat16,
                 enable_sleep_mode=False,

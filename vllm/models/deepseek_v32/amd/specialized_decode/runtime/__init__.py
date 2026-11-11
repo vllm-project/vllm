@@ -191,6 +191,8 @@ def _reasons_and_config(vllm_config) -> tuple[list[str], DecodeConfig | None]:
         ),
     )
     reasons = [why for bad, why in checks if bad]
+    if model_type == "glm_moe_dsa":
+        reasons += geometry_reasons(mc.hf_config)
     why = _platform_reason()
     if why is not None:
         reasons.append(why)
@@ -216,6 +218,44 @@ ATTENTION_LINEARS = (
     "o_proj",
     "indexer.wq_b",
 )
+
+
+# The checkpoint geometry the kernels are compiled for (flydsl/config.py GLM5_CONFIG,
+# the 2048-key top-k, the 78-layer / 3-dense layer loop). glm_moe_dsa alone does not
+# pin these: another DSA checkpoint of the same model_type would start and then read
+# its weights with the wrong strides.
+GEOMETRY = {
+    "hidden_size": 6144,
+    "num_hidden_layers": 78,
+    "first_k_dense_replace": 3,
+    "num_attention_heads": 64,
+    "q_lora_rank": 2048,
+    "kv_lora_rank": 512,
+    "qk_rope_head_dim": 64,
+    "qk_nope_head_dim": 192,
+    "v_head_dim": 256,
+    "n_routed_experts": 256,
+    "num_experts_per_tok": 8,
+    "n_shared_experts": 1,
+    "moe_intermediate_size": 2048,
+    "routed_scaling_factor": 2.5,
+    "scoring_func": "sigmoid",
+    "n_group": 1,
+    "topk_group": 1,
+    "norm_topk_prob": True,
+    "index_topk": 2048,
+    "index_n_heads": 32,
+    "index_head_dim": 128,
+}
+
+
+def geometry_reasons(hf_config) -> list[str]:
+    """Every config value that differs from the geometry the kernels are built for."""
+    return [
+        f"{key} {getattr(hf_config, key, None)!r} (the kernels need {want!r})"
+        for key, want in GEOMETRY.items()
+        if getattr(hf_config, key, None) != want
+    ]
 
 
 def builds_indexer(hf_config, layer: int) -> bool:

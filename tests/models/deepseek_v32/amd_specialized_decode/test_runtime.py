@@ -154,6 +154,22 @@ def test_monokernel_flag_selects_the_specialized_decode(make_vc):
     assert R.specialized_decode_config(vc) is None
 
 
+@pytest.mark.usefixtures("gfx950")
+def test_geometry_refused_with_every_mismatch(make_vc):
+    """A glm_moe_dsa config with other shapes than the kernels are built for is
+    refused at startup, each mismatched key named (e.g. a DSA checkpoint with 128
+    heads); other model types get only the model_type reason."""
+    vc = make_vc()
+    vc.model_config.hf_config.num_attention_heads = 128
+    vc.model_config.hf_config.n_routed_experts = 160
+    reasons = R.unsupported(vc)
+    assert len(reasons) == 2, reasons
+    assert any("num_attention_heads 128" in r and "64" in r for r in reasons)
+    assert any("n_routed_experts 160" in r for r in reasons)
+    (why,) = R.unsupported(make_vc(model_type="deepseek_v32"))
+    assert "model_type deepseek_v32" in why
+
+
 def test_bad_backend(make_vc):
     with pytest.raises(ValueError, match="'auto' or 'latency_specialized'"):
         R.specialized_decode_config(make_vc(backend="fast"))
@@ -456,7 +472,12 @@ def test_attention_quant_skips_layers_without_an_indexer(make_vc):
     their absent prefix must not count as a refusal."""
     from vllm.model_executor.layers.quantization.quark.quark import QuarkConfig
 
-    hf = NS(model_type="glm_moe_dsa", index_topk_freq=4, index_skip_topk_offset=3)
+    hf = NS(
+        model_type="glm_moe_dsa",
+        index_topk_freq=4,
+        index_skip_topk_offset=3,
+        **R.GEOMETRY,
+    )
     with_indexer = [L for L in range(78) if R.builds_indexer(hf, L)]
     assert with_indexer[:6] == [0, 1, 2, 6, 10, 14] and len(with_indexer) == 21
     cfg = _quark("bf16").quant_config
@@ -470,7 +491,7 @@ def test_attention_quant_skips_layers_without_an_indexer(make_vc):
     assert R.unsupported(_set(vc, "model_config.hf_config", hf)) == []
     # without the IndexCache keys every layer has an indexer: layer 3's MXFP4 wq_b
     # is refused, as before
-    vc = _set(vc, "model_config.hf_config", NS(model_type="glm_moe_dsa"))
+    vc = _set(vc, "model_config.hf_config", NS(model_type="glm_moe_dsa", **R.GEOMETRY))
     (why,) = R.unsupported(vc)
     assert "indexer.wq_b quantized as" in why and "layers 3..77" in why
 
