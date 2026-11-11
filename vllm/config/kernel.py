@@ -257,6 +257,7 @@ LinearBackend = Literal[
     "humming",
     "triton",
     "deep_gemm",
+    "halops",
     "torch",
     "aiter",
     "machete",
@@ -407,6 +408,7 @@ class KernelConfig:
     - "marlin": Use Marlin kernels
     - "triton": Use Triton-based kernels
     - "deep_gemm": Use DeepGEMM kernels
+    - "halops": Use HALOps kernels (MXFP8 W8A8 dense GEMM)
     - "torch": Use PyTorch native scaled_mm kernels
     - "aiter": Use AMD AITer kernels (ROCm only)
     - "machete": Use Machete kernels (mixed-precision)

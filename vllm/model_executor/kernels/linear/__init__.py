@@ -126,6 +126,9 @@ from vllm.model_executor.kernels.linear.mxfp8.flashinfer import (
     FlashInferCutlassMxfp8LinearKernel,
     FlashInferTrtllmMxfp8LinearKernel,
 )
+from vllm.model_executor.kernels.linear.mxfp8.halops import (
+    HALOpsMxfp8LinearKernel,
+)
 from vllm.model_executor.kernels.linear.mxfp8.humming import (
     HummingMxfp8LinearKernel,
 )
@@ -349,6 +352,9 @@ _LINEAR_BACKEND_KERNEL_MAP: dict[str, set[type]] = {
     "deep_gemm": {
         DeepGemmFp8BlockScaledMMKernel,
         DeepGemmMxfp8BmmLinearKernel,
+    },
+    "halops": {
+        HALOpsMxfp8LinearKernel,
     },
     "torch": {
         PerTensorTorchFP8ScaledMMLinearKernel,
@@ -579,6 +585,7 @@ _POSSIBLE_MXFP8_KERNELS: dict[PlatformEnum, list[type[Mxfp8LinearKernel]]] = {
         HummingMxfp8LinearKernel,
         FlashInferTrtllmMxfp8LinearKernel,
         TorchMxFp8LinearKernel,
+        HALOpsMxfp8LinearKernel,
     ],
     PlatformEnum.ROCM: [
         # AITER's FlyDSL GEMM; can_implement() claims only the (N, K) shapes

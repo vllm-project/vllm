@@ -10,6 +10,7 @@ The following are the supported quantization formats for vLLM:
 - [AutoAWQ](auto_awq.md)
 - [BitsAndBytes](bnb.md)
 - [GPTQModel](gptqmodel.md)
+- [HALOps](halops.md)
 - [Intel Neural Compressor](inc.md)
 - [LLM Compressor](llm_compressor/README.md)
     - [FP8 W8A8](llm_compressor/fp8.md)
