@@ -1315,6 +1315,75 @@ def test_rocm_sparse_mla_dcp_shards_merge_to_full_attention(
 
 
 @pytest.mark.skipif(not current_platform.is_rocm(), reason="ROCm sparse MLA")
+@pytest.mark.parametrize(
+    "gfx942,num_heads,need_lse,dispatched_heads",
+    [
+        (True, 32, False, 32),
+        (True, 64, False, 128),
+        (True, 64, True, 128),
+        (False, 32, False, 32),
+        (False, 64, False, 64),
+        (False, 64, True, 64),
+    ],
+)
+@torch.inference_mode()
+def test_rocm_sparse_mla_dcp_bf16_head_bucket(
+    monkeypatch, gfx942, num_heads, need_lse, dispatched_heads
+):
+    """gfx942 has no BF16 64-head split-KV MLA kernel, so DCP pads 64 heads to
+    128 there; 32 heads and gfx950 run unpadded."""
+    from vllm.v1.attention.backends.mla import rocm_aiter_mla_sparse as backend
+
+    monkeypatch.setattr("vllm.platforms.rocm.on_gfx942", lambda: gfx942)
+    monkeypatch.setattr("vllm.platforms.rocm.on_mi3xx", lambda: True)
+    seen_heads = []
+
+    def mla_decode_fwd(q, kv, out, *args, **kwargs):
+        seen_heads.append(q.shape[1])
+
+    def mla_decode_fwd_lse(q, kv, out, *args, **kwargs):
+        seen_heads.append(q.shape[1])
+        return q.new_zeros(q.shape[:2], dtype=torch.float32)
+
+    monkeypatch.setattr(backend.rocm_aiter_ops, "mla_decode_fwd", mla_decode_fwd)
+    monkeypatch.setattr(
+        backend.rocm_aiter_ops, "mla_decode_fwd_lse", mla_decode_fwd_lse
+    )
+
+    n, d = 2, 576
+    impl = object.__new__(backend.ROCMAiterMLASparseImpl)
+    impl.num_heads = num_heads
+    impl.kv_lora_rank = 512
+    impl.kv_cache_dtype = "auto"
+    impl.scale = d**-0.5
+    impl.sinks = None
+    metadata = SimpleNamespace(
+        attn_out_dtype=torch.bfloat16,
+        num_prefills=0,
+        num_decodes=n,
+        num_decode_tokens=n,
+        max_query_len=1,
+        qo_indptr=torch.arange(n + 1, dtype=torch.int32, device="cuda"),
+        paged_kv_last_page_len=torch.ones(n, dtype=torch.int32, device="cuda"),
+        work_meta_data=None,
+    )
+    q = torch.zeros(n, num_heads, d, dtype=torch.bfloat16, device="cuda")
+    kv = torch.zeros(4, 1, d, dtype=torch.bfloat16, device="cuda")
+    out, _ = impl._forward_mla(
+        SimpleNamespace(_q_scale=None, _k_scale=None),
+        q,
+        kv,
+        metadata,
+        kv_indptr=torch.tensor([0, 1, 2], dtype=torch.int32, device="cuda"),
+        kv_indices=torch.tensor([0, 1], dtype=torch.int32, device="cuda"),
+        num_heads=num_heads,
+        need_lse=need_lse,
+    )
+    assert seen_heads == [dispatched_heads]
+    assert out.shape == (n, num_heads, impl.kv_lora_rank)
+
+
+@pytest.mark.skipif(not current_platform.is_rocm(), reason="ROCm sparse MLA")
 @pytest.mark.parametrize(("world", "interleave"), [(2, 16), (4, 1)])
 @torch.inference_mode()
 def test_rocm_sparse_mla_pcp_dcp_mixed_batch_matches_full_attention(

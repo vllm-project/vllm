@@ -1224,7 +1224,10 @@ class ROCMAiterMLASparseImpl(SparseMLACommonImpl[ROCMAiterMLASparseMetadata]):
                 q.dtype == torch.bfloat16
                 and kv_c_and_k_pe_cache.dtype == torch.bfloat16
             ):
-                supported_head_buckets = (16, 32, 64, 128)
+                # gfx942 has no BF16 64-head split-KV stage-1 kernel (lse:0).
+                supported_head_buckets = (
+                    (16, 32, 128) if on_gfx942() else (16, 32, 64, 128)
+                )
                 head_dtype_name = "BF16"
             elif (
                 q.dtype == current_platform.fp8_dtype()
