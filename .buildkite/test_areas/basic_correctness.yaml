@@ -50,6 +50,7 @@ steps:
 
 - label: ":nvidia: (H200 MIG 18GB) Basic Correctness Sleep Mode"
   key: basic-correctness-sleep-mode
+  automatic_shard: false  # staging: a step that opts out, and the mirror that follows it
   timeout_in_minutes: 68
   device: h200_18gb
   source_file_dependencies: *basic-correctness-deps

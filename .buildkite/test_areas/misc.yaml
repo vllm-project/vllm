@@ -107,6 +107,9 @@ steps:
   device: h200_18gb
   key: v1-executor-worker
   timeout_in_minutes: 45
+  env:
+    # staging: pytest-shard flags in the environment keep the job whole (one shard of one).
+    PYTEST_ADDOPTS: "--num-shards=1 --shard-id=0"
   source_file_dependencies: *v1-core-kv-metrics-deps
   commands:
     - export VLLM_WORKER_MULTIPROC_METHOD=spawn
@@ -622,6 +625,7 @@ steps:
   mirror:
     amd:
       label: ":amd: (MI355 DPX) Async Engine, Inputs, Utils, Worker"
+      automatic_shard: false  # staging: a mirror that opts out alone
       dind: false
       device: mi355_dpx
       timeout_in_minutes: 50
