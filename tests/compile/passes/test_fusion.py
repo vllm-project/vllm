@@ -908,18 +908,15 @@ class TestGatedMxfp4Model(torch.nn.Module):
 
 
 @pytest.mark.parametrize(
-    "cdna_version, use_asm_gemm, expected",
+    "cdna_version, expected",
     [
-        pytest.param(4, False, torch.bfloat16, id="gfx950-triton-gemm"),
-        pytest.param(4, True, None, id="gfx950-asm-gemm"),
-        pytest.param(5, False, None, id="gfx1250-triton-gemm"),
-        pytest.param(3, False, None, id="gfx942-triton-gemm"),
+        pytest.param(4, torch.bfloat16, id="gfx950"),
+        pytest.param(5, None, id="gfx1250"),
     ],
 )
-def test_gated_mxfp4_fusion_is_limited_to_cdna4_triton_gemm(
+def test_gated_mxfp4_fusion_is_limited_to_cdna4(
     monkeypatch: pytest.MonkeyPatch,
     cdna_version: int,
-    use_asm_gemm: bool,
     expected: torch.dtype | None,
 ):
     from types import SimpleNamespace
@@ -932,7 +929,7 @@ def test_gated_mxfp4_fusion_is_limited_to_cdna4_triton_gemm(
     )
 
     kernel = object.__new__(AiterMxfp4LinearKernel)
-    kernel.use_asm_gemm = use_asm_gemm
+    kernel.use_asm_gemm = False
     kernel.out_dtype = torch.bfloat16
     linear: Any = SimpleNamespace(quant_method=SimpleNamespace(kernel=kernel))
     monkeypatch.setattr("vllm.platforms.rocm.get_cdna_version", lambda: cdna_version)

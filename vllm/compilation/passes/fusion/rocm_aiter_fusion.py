@@ -700,8 +700,8 @@ class AiterFusedAddRMSNormStaticQuantPattern(AiterRMSNormQuantPattern):
 def _aiter_triton_mxfp4_out_dtype(
     linear: torch.nn.Module | None,
 ) -> torch.dtype | None:
-    """``out_dtype`` of ``linear`` if it runs AITER's Triton MXFP4 dynamic-quant
-    GEMM (the ``gemm_with_dynamic_quant`` call the gated-norm MXFP4 pattern
+    """`out_dtype` of `linear` if it runs AITER's Triton MXFP4 dynamic-quant
+    GEMM (the `gemm_with_dynamic_quant` call the gated-norm MXFP4 pattern
     matches), else None. The ASM GEMM takes a different scale layout and is
     not fused. The fused quant is validated on CDNA4 (gfx950) only; other
     archs that run the Triton GEMM, such as gfx1250, keep the unfused ops."""
@@ -728,7 +728,7 @@ def _aiter_triton_mxfp4_out_dtype(
 
 class AiterRMSNormGatedMxfp4GemmPattern(AiterRMSNormQuantPattern):
     """Matches RMSNormGated + reshape feeding an MXFP4 dynamic-quant linear
-    (``gemm_with_dynamic_quant`` on ``AiterMxfp4LinearKernel``, Triton GEMM),
+    (`gemm_with_dynamic_quant` on `AiterMxfp4LinearKernel`, Triton GEMM),
     the GDN out_proj with online MXFP4, and replaces it with
     rocm_aiter_fused_rms_gated_mxfp4_gemm, which quantizes inside the norm
     kernel.
@@ -853,6 +853,7 @@ class RocmAiterRMSNormQuantFusionPass(VllmPatternMatcherPass):
                 and norm is not None
                 and norm.norm_before_gate
                 and norm.group_size is None
+                and head_v_dim % 32 == 0
             ):
                 gated_norm_mxfp4_shapes.add(
                     (
@@ -950,9 +951,13 @@ class RocmAiterRMSNormQuantFusionPass(VllmPatternMatcherPass):
                     ).register(self.patterns)
 
         # Fuse RMSNormGated + the MXFP4 activation quant of the next linear
-        # (GDN out_proj with online MXFP4 on the Triton GEMM), once per epsilon
-        # the layers use.
-        self.fuse_mxfp4_gated_norm = False
+        # (GDN out_proj with MXFP4 on the Triton GEMM), once per GDN layer shape.
+        self.fuse_mxfp4_gated_norm = bool(gated_norm_mxfp4_shapes)
+        if self.fuse_mxfp4_gated_norm:
+            # Fail here, not in the first forward, if AITER lacks the kernel.
+            from aiter.ops.triton.quant import (  # noqa: F401
+                fused_rms_gated_mxfp4_quant,
+            )
         for (
             epsilon,
             num_heads,
@@ -960,15 +965,6 @@ class RocmAiterRMSNormQuantFusionPass(VllmPatternMatcherPass):
             activation,
             out_dtype,
         ) in gated_norm_mxfp4_shapes:
-            if head_dim % 32 != 0:
-                continue
-            if not self.fuse_mxfp4_gated_norm:
-                # Fail here, not in the first forward, if AITER lacks the kernel.
-                from aiter.ops.triton.quant import (  # noqa: F401
-                    fused_rms_gated_mxfp4_quant,
-                )
-
-                self.fuse_mxfp4_gated_norm = True
             AiterRMSNormGatedMxfp4GemmPattern(
                 epsilon,
                 num_heads=num_heads,

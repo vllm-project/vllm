@@ -1620,8 +1620,8 @@ def _rocm_aiter_fused_rms_gated_mxfp4_gemm_impl(
     out_dtype: torch.dtype,
 ) -> torch.Tensor:
     """RMSNormGated (norm before gate) with the MXFP4 quant fused in, then the
-    Triton ``gemm_with_dynamic_quant``. x and z are (M, K). The scales are
-    column-major, as ``dynamic_mxfp4_quant`` returns them."""
+    Triton `gemm_with_dynamic_quant`. x and z are (M, K). The scales are
+    column-major, as `dynamic_mxfp4_quant` returns them."""
     from aiter.ops.triton.quant import fused_rms_gated_mxfp4_quant
 
     x_q, x_s = fused_rms_gated_mxfp4_quant(

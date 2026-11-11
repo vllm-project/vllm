@@ -299,13 +299,13 @@ def remove_noop_reshapes(gm: fx.GraphModule) -> None:
 
 
 def reshape_symbolic_dim_to_minus_one(graph: fx.Graph) -> int:
-    """Rewrite ``reshape(x, [s, d1, ...])`` to ``reshape(x, [-1, d1, ...])``
-    when ``s`` is the only symbolic size and the rest are ints.
+    """Rewrite `reshape(x, [s, d1, ...])` to `reshape(x, [-1, d1, ...])`
+    when `s` is the only symbolic size and the rest are ints.
 
     Patterns are traced with concrete example inputs, so a pattern that
-    flattens with ``reshape(-1, hidden)`` records ``[-1, hidden]``. Model code
-    that flattens with ``x.flatten(-2)`` instead compiles under a dynamic
-    token count to ``reshape(x, [s, hidden])`` with ``s`` a graph input, which
+    flattens with `reshape(-1, hidden)` records `[-1, hidden]`. Model code
+    that flattens with `x.flatten(-2)` instead compiles under a dynamic
+    token count to `reshape(x, [s, hidden])` with `s` a graph input, which
     the pattern never matches. With one unknown size the two are the same op.
     Returns the number of rewritten nodes.
     """
@@ -318,7 +318,7 @@ def reshape_symbolic_dim_to_minus_one(graph: fx.Graph) -> int:
         if not isinstance(shape, (list, tuple)):
             continue
         symbolic = [i for i, s in enumerate(shape) if not isinstance(s, int)]
-        if len(symbolic) != 1 or -1 in shape:
+        if len(symbolic) != 1 or -1 in [s for s in shape if isinstance(s, int)]:
             continue
         new_shape = list(shape)
         new_shape[symbolic[0]] = -1
