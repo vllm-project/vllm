@@ -1,6 +1,6 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
-from typing import cast
+from typing import TYPE_CHECKING, cast
 
 import torch
 import torch.nn as nn
@@ -10,6 +10,65 @@ from vllm.model_executor.models.interfaces import SupportsMRoPE
 from vllm.triton_utils import tl, triton
 from vllm.v1.worker.gpu.buffer_utils import StagedWriteTensor, UvaBackedTensor
 
+
+if TYPE_CHECKING:
+    from vllm.v1.worker.gpu.input_batch import InputBatch
+
+@triton.jit
+def _prepare_pcp_mrope_positions_kernel(
+    positions_ptr,
+    positions_stride,
+    prefill_positions_ptr,
+    prefill_positions_req_stride,
+    prefill_positions_dim_stride,
+    prefill_delta_ptr,
+    input_positions_ptr,
+    idx_mapping_ptr,
+    query_start_loc_ptr,
+    prefill_len_ptr,
+    BLOCK_SIZE: tl.constexpr,
+    NUM_DIMS: tl.constexpr,
+):
+    row = tl.program_id(0)
+    req_idx = tl.load(idx_mapping_ptr + row)
+    query_start = tl.load(query_start_loc_ptr + row)
+    query_end = tl.load(query_start_loc_ptr + row + 1)
+    query_len = query_end - query_start
+
+    start = tl.load(input_positions_ptr + query_start).to(tl.int64)
+    prefill_len = tl.load(prefill_len_ptr + req_idx).to(tl.int64)
+    is_prefill = start < prefill_len
+    delta = tl.load(prefill_delta_ptr + req_idx).to(tl.int64)
+
+    for i in range(0, query_len, BLOCK_SIZE):
+        offsets = i + tl.arange(0, BLOCK_SIZE)
+        mask = offsets < query_len
+
+        if is_prefill:
+            for dim in tl.static_range(NUM_DIMS):
+                source = tl.load(
+                    prefill_positions_ptr
+                    + req_idx * prefill_positions_req_stride
+                    + dim * prefill_positions_dim_stride
+                    + start
+                    + offsets,
+                    mask=mask,
+                ).to(tl.int64)
+                tl.store(
+                    positions_ptr + dim * positions_stride + query_start + offsets,
+                    source,
+                    mask=mask,
+                )
+        else:
+            source = tl.load(
+                input_positions_ptr + query_start + offsets, mask=mask
+            ).to(tl.int64) + delta
+            for dim in tl.static_range(NUM_DIMS):
+                tl.store(
+                    positions_ptr + dim * positions_stride + query_start + offsets,
+                    source,
+                    mask=mask,
+                )
 
 class RopeState:
     """State for multi-dimensional (M-RoPE) positions.
@@ -95,6 +154,34 @@ class RopeState:
         )
         self.prefill_delta.np[req_idx] = delta
 
+    def prepare_positions_pcp(
+        self, input_batch: "InputBatch", prefill_lens: torch.Tensor
+    ) -> torch.Tensor:
+        """Return M-RoPE positions for a PCP-local batch.
+
+        PCP splits one request into rank-local fragments. Prefill positions
+        must be sliced from the request's global M-RoPE table; decode positions
+        continue from the 1D token positions plus the request's M-RoPE delta.
+        """
+        num_tokens = input_batch.num_tokens_after_padding
+        positions = self.positions[:, :num_tokens]
+        _prepare_pcp_mrope_positions_kernel[(input_batch.num_reqs,)](
+            positions,
+            positions.stride(0),
+            self.prefill_positions.gpu,
+            self.num_dims * self.prefill_positions.gpu.stride(0),
+            self.prefill_positions.gpu.stride(0),
+            self.prefill_delta.gpu,
+            input_batch.positions,
+            input_batch.idx_mapping[: input_batch.num_reqs],
+            input_batch.query_start_loc[: input_batch.num_reqs + 1],
+            prefill_lens,
+            BLOCK_SIZE=1024,
+            NUM_DIMS=self.num_dims,
+        )
+
+        return positions
+    
     def prepare_positions(
         self,
         idx_mapping: torch.Tensor,
@@ -117,7 +204,6 @@ class RopeState:
             BLOCK_SIZE=1024,
             NUM_DIMS=self.num_dims,
         )
-
 
 def get_rope_state(
     model_config: ModelConfig,
