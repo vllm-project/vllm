@@ -846,6 +846,7 @@ class EngineArgs:
     use_tqdm_on_load: bool = LoadConfig.use_tqdm_on_load
     pt_load_map_location: str | dict[str, str] = LoadConfig.pt_load_map_location
     shuffle_safetensors_files: bool = LoadConfig.shuffle_safetensors_files
+    strict_safetensors_layout: bool = LoadConfig.strict_safetensors_layout
 
     logits_processors: list[str | type[LogitsProcessor]] | None = (
         ModelConfig.logits_processors
@@ -1121,6 +1122,10 @@ class EngineArgs:
         load_group.add_argument(
             "--shuffle-safetensors-files",
             **load_kwargs["shuffle_safetensors_files"],
+        )
+        load_group.add_argument(
+            "--strict-safetensors-layout",
+            **load_kwargs["strict_safetensors_layout"],
         )
 
         # Attention arguments
@@ -2139,6 +2144,7 @@ class EngineArgs:
             use_tqdm_on_load=self.use_tqdm_on_load,
             pt_load_map_location=self.pt_load_map_location,
             shuffle_safetensors_files=self.shuffle_safetensors_files,
+            strict_safetensors_layout=self.strict_safetensors_layout,
         )
 
     def create_speculative_config(

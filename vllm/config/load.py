@@ -123,6 +123,25 @@ class LoadConfig:
     load different files in a randomized order.
     Set to True to enable shuffling. Default is False.
     """
+    strict_safetensors_layout: bool = False
+    """
+    When loading weights from a local directory, error if the layout is
+    ambiguous instead of only warning.
+
+    vLLM's resolution order is:
+
+    - If a safetensors index is present, only the files it names are loaded
+      (index-first). A co-located single-file checkpoint such as
+      ``model.safetensors`` is ignored. Transformers may prefer that
+      single-file checkpoint, so the two tools can load different weights
+      from the same directory.
+    - If no index is present, every matching ``*.safetensors`` file is
+      loaded. When the same tensor name appears in more than one file, the
+      value from the file chosen by the loader wins.
+
+    The default (False) logs a warning and continues. Set True to fail
+    the load so the directory can be cleaned up.
+    """
 
     def compile_factors(self) -> CompileFactors:
         """This config does not affect the compiled graph.

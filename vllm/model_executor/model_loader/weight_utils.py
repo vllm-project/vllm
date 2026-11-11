@@ -613,6 +613,101 @@ def filter_duplicate_safetensors_files(
     return hf_weights_files
 
 
+def _safetensors_tensor_names(path: str) -> list[str] | None:
+    """Return tensor names from a safetensors header, or None if unreadable."""
+    try:
+        with safe_open(path, framework="pt") as f:
+            return list(f.keys())
+    except (OSError, ValueError, RuntimeError, json.JSONDecodeError):
+        return None
+
+
+def check_local_safetensors_layout(
+    hf_folder: str,
+    hf_weights_files: list[str],
+    index_file: str,
+    *,
+    strict: bool = False,
+) -> None:
+    """Warn or raise when a local safetensors directory is ambiguous.
+
+    This is a layout check only; it does not change which files are loaded.
+    Callers should run it only for local directories (not Hugging Face
+    cache downloads).
+
+    Resolution order, for tooling that needs a contract:
+
+    - If a safetensors index is present, vLLM loads only the files it names
+      (index-first). Undeclared files such as a co-located
+      ``model.safetensors`` are ignored. Transformers may prefer that
+      single-file checkpoint when both are present.
+    - If no index is present, vLLM loads every matching ``*.safetensors``
+      file. When the same tensor name appears in more than one file, the
+      value from the file chosen by the loader wins and the others are
+      dropped.
+    """
+    messages: list[str] = []
+    safetensors_files = [f for f in hf_weights_files if f.endswith(".safetensors")]
+    index_path = os.path.join(hf_folder, index_file)
+    if os.path.isfile(index_path):
+        with open(index_path) as f:
+            weight_map = json.load(f).get("weight_map") or {}
+        indexed = {
+            os.path.normpath(os.path.join(hf_folder, rel))
+            for rel in weight_map.values()
+        }
+        undeclared = [
+            f for f in safetensors_files if os.path.normpath(f) not in indexed
+        ]
+        if undeclared:
+            names = ", ".join(sorted(os.path.basename(f) for f in undeclared))
+            messages.append(
+                f"Local checkpoint directory {hf_folder} contains both a "
+                f"safetensors index ({index_file}) and file(s) not listed in "
+                f"that index: {names}. vLLM follows the index and ignores "
+                "undeclared files. Transformers may prefer a single-file "
+                "model.safetensors when both are present, so the two tools "
+                "can load different weights from the same directory."
+            )
+
+    tensor_to_files: dict[str, list[str]] = {}
+    for path in safetensors_files:
+        names = _safetensors_tensor_names(path)
+        if names is None:
+            continue
+        normalized = os.path.normpath(path)
+        for name in names:
+            files = tensor_to_files.setdefault(name, [])
+            if normalized not in files:
+                files.append(normalized)
+    duplicates = {k: vs for k, vs in tensor_to_files.items() if len(vs) > 1}
+    if duplicates:
+        examples: list[str] = []
+        for name, files in list(duplicates.items())[:5]:
+            basenames = ", ".join(os.path.basename(f) for f in files)
+            examples.append(f"{name} in {basenames}")
+        extra = "" if len(duplicates) <= 5 else f" ({len(duplicates) - 5} more tensors)"
+        messages.append(
+            f"The same tensor name appears in more than one safetensors file "
+            f"under {hf_folder}: {'; '.join(examples)}{extra}. vLLM uses the "
+            "index when present, otherwise lexicographic file order; later or "
+            "index-selected values win and the others are dropped."
+        )
+
+    if not messages:
+        return
+    text = " ".join(messages)
+    if strict:
+        raise ValueError(
+            text + " Set strict_safetensors_layout=False to warn instead of failing."
+        )
+    logger.warning(
+        "%s Set load_config.strict_safetensors_layout=True (or "
+        "--strict-safetensors-layout) to treat this as an error.",
+        text,
+    )
+
+
 def filter_files_not_needed_for_inference(hf_weights_files: list[str]) -> list[str]:
     """Exclude files that are not needed for inference.
 

@@ -13,6 +13,7 @@ from safetensors.torch import save_file
 from vllm.config.load import LoadConfig
 from vllm.model_executor.model_loader import DefaultModelLoader
 from vllm.model_executor.model_loader.weight_utils import (
+    check_local_safetensors_layout,
     filter_duplicate_safetensors_files,
     filter_safetensors_files_by_weight_name,
 )
@@ -166,3 +167,128 @@ def test_secondary_source_with_explicit_patterns_skips_backbone_index(tmp_path):
     # The primary source still filters files the backbone index doesn't list.
     primary = DefaultModelLoader.Source(model_or_path=str(tmp_path), revision=None)
     assert [n for n, _ in loader._get_weights_iterator(primary)] == ["backbone.weight"]
+
+
+def _shard(path, names):
+    save_file({name: torch.zeros(1) for name in names}, path)
+
+
+def test_warns_when_index_coexists_with_undeclared_single_file(tmp_path, caplog):
+    _shard(tmp_path / "model-00001-of-00001.safetensors", ["layer.0.weight"])
+    _shard(tmp_path / "model.safetensors", ["layer.0.weight", "extra.weight"])
+    (tmp_path / "model.safetensors.index.json").write_text(
+        json.dumps(
+            {"weight_map": {"layer.0.weight": "model-00001-of-00001.safetensors"}}
+        )
+    )
+    files = sorted(str(f) for f in tmp_path.glob("*.safetensors"))
+
+    with caplog.at_level("WARNING"):
+        check_local_safetensors_layout(
+            str(tmp_path), files, "model.safetensors.index.json", strict=False
+        )
+
+    assert "model.safetensors" in caplog.text
+    assert "index" in caplog.text.lower()
+    # Loading still follows the index.
+    kept = filter_duplicate_safetensors_files(
+        files, str(tmp_path), "model.safetensors.index.json"
+    )
+    assert [os.path.basename(f) for f in kept] == ["model-00001-of-00001.safetensors"]
+
+
+def test_strict_layout_errors_on_undeclared_single_file(tmp_path):
+    _shard(tmp_path / "model-00001-of-00001.safetensors", ["layer.0.weight"])
+    _shard(tmp_path / "model.safetensors", ["layer.0.weight"])
+    (tmp_path / "model.safetensors.index.json").write_text(
+        json.dumps(
+            {"weight_map": {"layer.0.weight": "model-00001-of-00001.safetensors"}}
+        )
+    )
+    files = sorted(str(f) for f in tmp_path.glob("*.safetensors"))
+
+    with pytest.raises(ValueError, match="not listed in that index"):
+        check_local_safetensors_layout(
+            str(tmp_path), files, "model.safetensors.index.json", strict=True
+        )
+
+
+def test_warns_when_the_same_tensor_appears_in_two_shards(tmp_path, caplog):
+    _shard(tmp_path / "model-00001-of-00002.safetensors", ["shared.weight", "a.weight"])
+    _shard(tmp_path / "model-00002-of-00002.safetensors", ["shared.weight", "b.weight"])
+    files = sorted(str(f) for f in tmp_path.glob("*.safetensors"))
+
+    with caplog.at_level("WARNING"):
+        check_local_safetensors_layout(
+            str(tmp_path), files, "model.safetensors.index.json", strict=False
+        )
+
+    assert "shared.weight" in caplog.text
+    assert "more than one safetensors file" in caplog.text
+
+
+def test_strict_layout_errors_on_duplicate_tensor_names(tmp_path):
+    _shard(tmp_path / "model-00001-of-00002.safetensors", ["shared.weight"])
+    _shard(tmp_path / "model-00002-of-00002.safetensors", ["shared.weight"])
+    files = sorted(str(f) for f in tmp_path.glob("*.safetensors"))
+
+    with pytest.raises(ValueError, match="same tensor name"):
+        check_local_safetensors_layout(
+            str(tmp_path), files, "model.safetensors.index.json", strict=True
+        )
+
+
+def test_clean_indexed_layout_is_silent(tmp_path, caplog):
+    _shard(tmp_path / "model-00001-of-00002.safetensors", ["layer.0.weight"])
+    _shard(tmp_path / "model-00002-of-00002.safetensors", ["layer.1.weight"])
+    (tmp_path / "model.safetensors.index.json").write_text(
+        json.dumps(
+            {
+                "weight_map": {
+                    "layer.0.weight": "model-00001-of-00002.safetensors",
+                    "layer.1.weight": "model-00002-of-00002.safetensors",
+                }
+            }
+        )
+    )
+    files = sorted(str(f) for f in tmp_path.glob("*.safetensors"))
+
+    with caplog.at_level("WARNING"):
+        check_local_safetensors_layout(
+            str(tmp_path), files, "model.safetensors.index.json", strict=True
+        )
+
+    assert caplog.text == ""
+
+
+def test_loader_warns_on_ambiguous_local_directory(tmp_path, caplog):
+    _shard(tmp_path / "model-00001-of-00001.safetensors", ["backbone.weight"])
+    _shard(tmp_path / "model.safetensors", ["backbone.weight"])
+    (tmp_path / "model.safetensors.index.json").write_text(
+        json.dumps(
+            {"weight_map": {"backbone.weight": "model-00001-of-00001.safetensors"}}
+        )
+    )
+    loader = DefaultModelLoader(LoadConfig())
+    source = DefaultModelLoader.Source(model_or_path=str(tmp_path), revision=None)
+
+    with caplog.at_level("WARNING"):
+        names = [n for n, _ in loader._get_weights_iterator(source)]
+
+    assert names == ["backbone.weight"]
+    assert "model.safetensors" in caplog.text
+
+
+def test_loader_strict_layout_fails_on_ambiguous_local_directory(tmp_path):
+    _shard(tmp_path / "model-00001-of-00001.safetensors", ["backbone.weight"])
+    _shard(tmp_path / "model.safetensors", ["backbone.weight"])
+    (tmp_path / "model.safetensors.index.json").write_text(
+        json.dumps(
+            {"weight_map": {"backbone.weight": "model-00001-of-00001.safetensors"}}
+        )
+    )
+    loader = DefaultModelLoader(LoadConfig(strict_safetensors_layout=True))
+    source = DefaultModelLoader.Source(model_or_path=str(tmp_path), revision=None)
+
+    with pytest.raises(ValueError, match="not listed in that index"):
+        list(loader._get_weights_iterator(source))
