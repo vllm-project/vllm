@@ -1237,8 +1237,27 @@ class CompilationConfig:
                 f"got {self.encoder_cudagraph_token_budgets}"
             )
 
+        if self.mode in [
+            CompilationMode.STOCK_TORCH_COMPILE,
+            CompilationMode.DYNAMO_TRACE_ONCE,
+        ] and self.backend not in ["", *self._torch_compile_backends()]:
+            parts = self.backend.split(".")
+            if len(parts) < 2 or not all(part.isidentifier() for part in parts):
+                raise ValueError(
+                    f"Invalid compilation_config.backend {self.backend!r} for mode "
+                    f"{self.mode.name}. Use a registered torch.compile backend "
+                    f"({', '.join(self._torch_compile_backends())}) or a fully "
+                    f"qualified name such as 'my_package.my_module.my_backend'."
+                )
+
         if self.backend == "":
             self.backend = current_platform.get_compile_backend()
+
+    @staticmethod
+    def _torch_compile_backends() -> list[str]:
+        from torch._dynamo.backends.registry import list_backends
+
+        return list_backends(exclude_tags=tuple())
 
     def init_backend(
         self,
@@ -1269,16 +1288,21 @@ class CompilationConfig:
         if self.mode == CompilationMode.NONE:
             raise ValueError("No compilation mode is set.")
 
-        from torch._dynamo.backends.registry import list_backends
-
-        torch_backends = list_backends(exclude_tags=tuple())
         if self.mode in [
             CompilationMode.STOCK_TORCH_COMPILE,
             CompilationMode.DYNAMO_TRACE_ONCE,
         ]:
-            if self.backend in torch_backends:
+            if self.backend in self._torch_compile_backends():
                 return self.backend
-            return resolve_obj_by_qualname(self.backend)
+            try:
+                return resolve_obj_by_qualname(self.backend)
+            except (ImportError, AttributeError, ValueError) as e:
+                raise ValueError(
+                    f"compilation_config.backend {self.backend!r} could not be "
+                    f"imported: {e}. Expected a registered torch.compile backend "
+                    f"or a fully qualified name such as "
+                    f"'my_package.my_module.my_backend'."
+                ) from e
 
         assert self.mode == CompilationMode.VLLM_COMPILE
         if self.backend not in ["eager", "inductor"]:
