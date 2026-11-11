@@ -364,14 +364,14 @@ _TEXT_GENERATION_EXAMPLE_MODELS = {
         "internlm/internlm3-8b-instruct",
         min_transformers_version="5.23.0",
         transformers_version_reason={
-            "vllm": "Needs https://github.com/huggingface/transformers/pull/50477"
+            "vllm": "Needs https://github.com/huggingface/transformers/pull/50578"
         },
     ),
     "IQuestCoderForCausalLM": _HfExamplesInfo(
         "IQuestLab/IQuest-Coder-V1-40B-Instruct",
         min_transformers_version="5.23.0",
         transformers_version_reason={
-            "vllm": "Needs https://github.com/huggingface/transformers/pull/50477"
+            "vllm": "Needs https://github.com/huggingface/transformers/pull/50579"
         },
     ),
     "IQuestLoopCoderForCausalLM": _HfExamplesInfo(
@@ -599,25 +599,10 @@ _TEXT_GENERATION_EXAMPLE_MODELS = {
         "upstage/solar-pro-preview-instruct", trust_remote_code=True
     ),
     "TeleChat2ForCausalLM": _HfExamplesInfo(
-        "Tele-AI/TeleChat2-3B",
-        min_transformers_version="5.23.0",
-        transformers_version_reason={
-            "vllm": "Needs https://github.com/huggingface/transformers/pull/50477"
-        },
-    ),
-    "TelechatForCausalLM": _HfExamplesInfo(
-        "Tele-AI/telechat-7B",
-        min_transformers_version="5.23.0",
-        transformers_version_reason={
-            "vllm": "Needs https://github.com/huggingface/transformers/pull/50477"
-        },
+        "Tele-AI/TeleChat2-3B", trust_remote_code=True
     ),
     "TeleChat3ForCausalLM": _HfExamplesInfo(
-        "Tele-AI/TeleChat3-36B-Thinking",
-        min_transformers_version="5.23.0",
-        transformers_version_reason={
-            "vllm": "Needs https://github.com/huggingface/transformers/pull/50477"
-        },
+        "Tele-AI/TeleChat3-36B-Thinking", trust_remote_code=True
     ),
     "TeleFLMForCausalLM": _HfExamplesInfo(
         "CofeAI/FLM-2-52B-Instruct-2407", trust_remote_code=True
