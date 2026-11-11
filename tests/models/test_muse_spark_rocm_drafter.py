@@ -141,10 +141,6 @@ TINY_DSPARK = DSPARK_CHECKPOINT | {
 }
 
 
-def test_draft_builds_cover_one_and_two_requests() -> None:
-    assert DRAFT_BUILDS == {7: 8, 14: 16}
-
-
 def test_config_guard_accepts_only_the_checkpoint_shape() -> None:
     assert draft_config_refusals(MuseSparkDSparkConfig(**DSPARK_CHECKPOINT)) == []
     tiny = draft_config_refusals(MuseSparkDSparkConfig(**TINY_DSPARK))

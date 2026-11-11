@@ -493,6 +493,8 @@ def static_refusals(lm: nn.Module, tp_size: int) -> list[str]:
     cache = lm.vllm_config.cache_config
     if cache.cache_dtype not in ("auto", "bfloat16"):
         reasons.append(f"kv_cache_dtype={cache.cache_dtype} (kernel: bf16)")
+    if cache.block_size != 16:
+        reasons.append(f"kv_cache_block_size={cache.block_size} (kernel: 16)")
     reasons += draft_config_refusals(lm.config)
     return reasons or draft_layer_refusals(lm.model, draft_dims(lm.config, tp_size))
 
