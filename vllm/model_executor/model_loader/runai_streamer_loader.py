@@ -259,11 +259,12 @@ class RunaiModelStreamerLoader(BaseModelLoader):
                 selected_files = hf_weights_files
         vllm_config = get_current_vllm_config_or_none()
         engram_config = vllm_config.engram_config if vllm_config else None
+        load_engram_on_cpu = bool(engram_config and engram_config.cpu_offload)
         return runai_safetensors_weights_iterator(
             selected_files,
             self.load_config.use_tqdm_on_load,
             is_distributed,
-            load_engram_on_cpu=bool(engram_config and engram_config.cpu_offload),
+            load_engram_on_cpu,
         )
 
     def download_model(self, model_config: ModelConfig) -> None:
