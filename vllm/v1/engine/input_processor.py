@@ -30,6 +30,7 @@ from vllm.tokenizers import TokenizerLike
 from vllm.utils import length_from_prompt_token_ids_or_embeds, random_uuid
 from vllm.utils.async_utils import make_async
 from vllm.utils.diffusion import validate_diffusion_sampling_params
+from vllm.utils.hashing import sha256_cbor
 from vllm.utils.jsontree import json_iter_leaves
 from vllm.v1.engine import EngineCoreRequest
 from vllm.v1.kv_hints import KvHintsEnvelope
@@ -287,17 +288,25 @@ class InputProcessor:
         mm_hash: str,
         lora_request: LoRARequest | None,
     ) -> str:
-        """When enable_tower_connector_lora is True, multi-modal embeddings
-        vary depending on the LoRA request. Therefore, the mm_hash must be
-        generated based on the LoRA request to prevent incorrect cache hits.
+        """Return a domain-separated multimodal encoder-cache identifier.
+
+        When ``enable_tower_connector_lora`` is enabled, vision-tower outputs
+        depend on whether the request uses the base model or a LoRA adapter.
+        Tagging both the ``base:`` and ``lora:<digest>:`` domains prevents a
+        caller-supplied ``mm_hash`` (via ``multi_modal_uuids``) on a base-model
+        request from aliasing a vision-LoRA tenant entry, and hashing
+        ``(lora_name, lora_path)`` into a fixed-width digest prevents both
+        same-name in-place reload collisions (#44939) and colon-delimiter
+        ambiguity (#66885).
         """
-        if (
-            lora_request is None
-            or self.lora_config is None
-            or not self.lora_config.enable_tower_connector_lora
-        ):
+        lora_config = self.lora_config
+        if lora_config is None or not lora_config.enable_tower_connector_lora:
             return mm_hash
-        return f"{lora_request.lora_name}:{mm_hash}"
+        if lora_request is None:
+            return f"base:{mm_hash}"
+        lora_key = (lora_request.lora_name, lora_request.lora_path)
+        lora_digest = sha256_cbor(lora_key).hex()
+        return f"lora:{lora_digest}:{mm_hash}"
 
     def inject_into_mm_cache(
         self,
