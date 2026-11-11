@@ -237,7 +237,13 @@ def test_measured_sizing_caps_torch_memory(monkeypatch):
 
 @pytest.mark.parametrize(
     ("utilization", "init_free_gib", "warns"),
-    [(0.9, 80, True), (None, 80, False), (0.5, 80, False), (0.9, 50, False)],
+    [
+        (0.9, 80, True),
+        (0.75, 80, True),
+        (None, 80, False),
+        (0.5, 80, False),
+        (0.9, 50, False),
+    ],
 )
 def test_measured_sizing_warns_when_utilization_withholds_memory(
     monkeypatch, caplog_vllm, utilization, init_free_gib, warns

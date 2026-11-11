@@ -609,7 +609,7 @@ def measure_kv_cache_blocks(
     utilization = vllm_config.cache_config.gpu_memory_utilization
     # Explicit values just under 1.0 are mostly habits from estimate-based
     # sizing, which needed that headroom; this sizing measures it instead.
-    if utilization is not None and 0.8 < utilization < 1.0:
+    if utilization is not None and 0.7 < utilization < 1.0:
         # A budget of all memory free at startup is bound by the device alone.
         withheld = (
             measure_kv_cache_bytes(requested_memory=init_free_memory, **measured)
