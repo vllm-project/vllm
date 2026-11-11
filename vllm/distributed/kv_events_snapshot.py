@@ -66,6 +66,7 @@ from vllm.v1.core.kv_cache_utils import (
 
 logger = init_logger(__name__)
 SNAPSHOT_REQUEST = b"snapshot"
+COMPLETE_REQUEST = b"snapshot-full-attention-v1"
 SNAPSHOT_UNAVAILABLE_SEQ = -2
 # medium, group_idx, locality, ownership
 _Scope = tuple[str | None, int | None, str | None, str | None]
@@ -117,9 +118,13 @@ class KVCacheSnapshot:
     RING_BATCHES = 64
     MAX_RING_BLOCKS = 65_536
 
-    def __init__(self, max_blocks: int = 1_000_000) -> None:
+    def __init__(
+        self, max_blocks: int = 1_000_000, certified_width: int | None = None
+    ) -> None:
         # Limits block records and, separately, live residency references.
         self.max_blocks = max_blocks
+        self.certified_width = certified_width
+        self._complete = True
         self._live: dict[_BlockKey, int] = {}
         self._records: dict[ExternalBlockHash, _Record] = {}
         # group_idx -> (kv_cache_spec_kind, sliding window) as last announced.
@@ -149,6 +154,15 @@ class KVCacheSnapshot:
             return
         self._batch += 1
         for event in events:
+            if self.certified_width is not None:
+                if isinstance(event, AllBlocksCleared):
+                    # The legacy Clear below is device-only; it does not
+                    # replace an out-of-scope live non-device baseline.
+                    self._complete = all(
+                        scope[0] in (MEDIUM_GPU, None) for scope, _ in self._live
+                    )
+                elif self._complete:
+                    self._complete = self._incremental_local(event)
             if isinstance(event, BlockStored):
                 self._store(event)
             elif isinstance(event, BlockRemoved):
@@ -167,6 +181,52 @@ class KVCacheSnapshot:
     @staticmethod
     def _scope(event: BlockStored | BlockRemoved) -> _Scope:
         return (event.medium, event.group_idx, event.locality, event.ownership)
+
+    def _incremental_local(self, event: BlockStored | BlockRemoved) -> bool:
+        if (
+            not isinstance(event, (BlockStored, BlockRemoved))
+            or event.medium != MEDIUM_GPU
+            or event.group_idx != 0
+            or event.locality is not None
+            or event.ownership is not None
+            or not event.block_hashes
+        ):
+            return False
+        scope = self._scope(event)
+        hashes = [self._hash(h) for h in event.block_hashes]
+        if len(set(hashes)) != len(hashes):
+            return False
+        if isinstance(event, BlockRemoved):
+            return all((scope, h) in self._live for h in hashes)
+        if (
+            event.lora_id is not None
+            or event.lora_name is not None
+            or event.kv_cache_spec_sliding_window is not None
+            or event.lookahead_token_ids is not None
+            or (
+                event.extra_keys is not None
+                and (
+                    len(event.extra_keys) != len(hashes)
+                    or any(k is not None for k in event.extra_keys)
+                )
+            )
+        ):
+            return False
+        if not event.token_ids:
+            return (
+                event.block_size == 0
+                and event.parent_block_hash is None
+                and event.kv_cache_spec_kind in (None, "full_attention")
+                and all(h in self._records and self._records[h].tokens for h in hashes)
+            )
+        # A full-report cache hit has the same wire shape as a new physical
+        # copy. Never certify an ambiguous counter, even after a later Remove.
+        return (
+            event.kv_cache_spec_kind == "full_attention"
+            and event.block_size == self.certified_width
+            and len(event.token_ids) == len(hashes) * event.block_size
+            and all((scope, h) not in self._live for h in hashes)
+        )
 
     def _store(self, event: BlockStored) -> None:
         if not event.block_hashes:
@@ -334,7 +394,7 @@ class KVCacheSnapshot:
             record.children -= 1
 
     def export(
-        self, max_blocks_per_event: int = 1024
+        self, max_blocks_per_event: int = 1024, *, complete: bool = False
     ) -> Iterator[BlockStored | BlockRemoved]:
         """Teach every retained block, clear the dead, then set live residency.
 
@@ -479,6 +539,8 @@ class KVCacheSnapshot:
                 owed = [(h, count) for h, count in owed if count > round_]
 
         yield from removals(h for h in live_scope if h in included)
+        if complete and not included.issuperset(live_scope):
+            raise ValueError("Incomplete full-attention snapshot")
 
 
 class KVEventSnapshotRecorder:
@@ -504,6 +566,7 @@ class KVEventSnapshotRecorder:
         data_parallel_rank: int,
         max_blocks: int = 1_000_000,
         max_response_bytes: int = 256 * 1024 * 1024,
+        certified_width: int | None = None,
     ) -> None:
         self._dp_rank = data_parallel_rank
         self._max_response_bytes = max_response_bytes
@@ -512,7 +575,9 @@ class KVEventSnapshotRecorder:
             self.MAX_PENDING_BATCHES
         )
         # None once the recorder has stopped.
-        self._snapshot: KVCacheSnapshot | None = KVCacheSnapshot(max_blocks)
+        self._snapshot: KVCacheSnapshot | None = KVCacheSnapshot(
+            max_blocks, certified_width
+        )
         self._seq = -1
         self._failed = threading.Event()
         self._stop = threading.Event()
@@ -568,6 +633,8 @@ class KVEventSnapshotRecorder:
             if self._snapshot is None:
                 continue
             try:
+                if seq != self._seq + 1:
+                    self._snapshot._complete = False
                 self._snapshot.apply(batch.events)
             except Exception:
                 logger.exception(
@@ -585,7 +652,11 @@ class KVEventSnapshotRecorder:
         # A REQ request arrives on the ROUTER as [peer identity, empty
         # delimiter, request]; the reply goes back under the same two frames.
         frames = router.recv_multipart()
-        if len(frames) != 3 or frames[1] or frames[2] != SNAPSHOT_REQUEST:
+        if (
+            len(frames) != 3
+            or frames[1]
+            or frames[2] not in (SNAPSHOT_REQUEST, COMPLETE_REQUEST)
+        ):
             logger.warning(
                 "Ignoring a malformed KV snapshot request of %d frames", len(frames)
             )
@@ -594,16 +665,46 @@ class KVEventSnapshotRecorder:
             SNAPSHOT_UNAVAILABLE_SEQ.to_bytes(8, "big", signed=True),
             self.publisher_id,
         ]
-        if self._snapshot is not None:
+        complete = frames[2] == COMPLETE_REQUEST
+        snapshot = self._snapshot
+        if snapshot is not None and (
+            not complete
+            or (snapshot.certified_width is not None and snapshot._complete)
+        ):
             try:
                 chunks, size = [], 0
-                for chunk in self._encode_chunks(self._snapshot):
+                if complete:
+                    proof = msgspec.json.encode(
+                        dict(
+                            protocol="full-attention-v1",
+                            reporting="incremental",
+                            rank=self._dp_rank,
+                            block_size=snapshot.certified_width,
+                            complete=True,
+                            live_blocks=len(snapshot),
+                            live_references=snapshot._references,
+                        )
+                    )
+                    chunks.append(proof)
+                    size += len(proof)
+                    if size > self._max_response_bytes:
+                        raise ValueError("Snapshot response budget exceeded")
+                for chunk in self._encode_chunks(snapshot, complete=complete):
                     size += len(chunk)
                     if size > self._max_response_bytes:
                         raise ValueError("Snapshot response budget exceeded")
                     chunks.append(chunk)
                 reply[0] = self._seq.to_bytes(8, "big", signed=True)
                 reply.extend(chunks)
+            except ValueError:
+                # Refusing a stronger opt-in proof must not disable the
+                # unchanged best-effort snapshot endpoint.
+                if not complete:
+                    logger.exception(
+                        "KV snapshot export failed at sequence %d", self._seq
+                    )
+                    self._failed.set()
+                    self._snapshot = None
             except Exception:
                 logger.exception(
                     "KV snapshot export failed; snapshots are unavailable "
@@ -615,11 +716,13 @@ class KVEventSnapshotRecorder:
         with suppress(zmq.Again):
             router.send_multipart(frames[:2] + reply, flags=zmq.DONTWAIT, copy=False)
 
-    def _encode_chunks(self, snapshot: KVCacheSnapshot) -> Iterator[bytes]:
+    def _encode_chunks(
+        self, snapshot: KVCacheSnapshot, *, complete: bool = False
+    ) -> Iterator[bytes]:
         encoder = msgspec.msgpack.Encoder()
         ts = time.time()
         events: list[BlockStored | BlockRemoved] = []
-        for event in snapshot.export(self.BLOCKS_PER_EVENT):
+        for event in snapshot.export(self.BLOCKS_PER_EVENT, complete=complete):
             events.append(event)
             if len(events) == self.EVENTS_PER_CHUNK:
                 yield encoder.encode(self._chunk(ts, events))

@@ -57,6 +57,7 @@ from vllm.v1.core.sched.request_queue import (
 from vllm.v1.core.sched.utils import check_stop, remove_all
 from vllm.v1.engine import EngineCoreEventType, EngineCoreOutput, EngineCoreOutputs
 from vllm.v1.kv_cache_interface import (
+    FullAttentionSpec,
     KVCacheConfig,
     MambaSpec,
     get_mamba_prefill_checkpoint_position,
@@ -202,8 +203,37 @@ class Scheduler(SchedulerInterface):
 
             self.requires_kv_delivery = self.connector.requires_kv_delivery
 
+        publisher_config = self.kv_events_config
+        if (
+            publisher_config
+            and publisher_config.snapshot_full_attention_block_size is not None
+        ):
+            width = publisher_config.snapshot_full_attention_block_size
+            groups = kv_cache_config.kv_cache_groups
+            if not (
+                len(groups) == 1
+                and type(groups[0].kv_cache_spec) is FullAttentionSpec
+                and width > 0
+                and groups[0].kv_cache_spec.block_size == width == block_size
+                and (hash_block_size is None or hash_block_size == width)
+                and self.cache_config.enable_prefix_caching
+                and self.parallel_config.data_parallel_size == 1
+                and self.parallel_config.decode_context_parallel_size == 1
+                and self.parallel_config.prefill_context_parallel_size == 1
+                and not vllm_config.num_hash_lookahead_tokens
+                and not vllm_config.speculative_config
+                and not vllm_config.lora_config
+                and self.connector is None
+                and vllm_config.ec_transfer_config is None
+            ):
+                logger.warning(
+                    "Complete full-attention KV snapshots unavailable for this engine"
+                )
+                publisher_config = replace(
+                    publisher_config, snapshot_full_attention_block_size=None
+                )
         self.kv_event_publisher = EventPublisherFactory.create(
-            self.kv_events_config,
+            publisher_config,
             self.parallel_config.data_parallel_index,
         )
         self.ec_connector = None

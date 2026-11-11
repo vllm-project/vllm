@@ -692,7 +692,7 @@ def test_short_ring_leaves_out_what_it_cannot_rebuild(monkeypatch, seed):
 
 
 @pytest.fixture
-def publisher(monkeypatch):
+def publisher(monkeypatch, request):
     monkeypatch.setenv("VLLM_HOST_IP", "127.0.0.1")
     endpoints = None
 
@@ -703,6 +703,7 @@ def publisher(monkeypatch):
             if endpoints
             else "tcp://*:0",
             snapshot_endpoint=endpoints[1] if endpoints else "tcp://*:0",
+            snapshot_full_attention_block_size=getattr(request, "param", None),
         )
 
     pub = create()
@@ -716,11 +717,11 @@ def client(endpoints):
     return SnapshotClient(*endpoints)
 
 
-def request(endpoints):
+def request(endpoints, opcode=b"snapshot"):
     with zmq.Context.instance().socket(zmq.REQ) as sock:
         sock.setsockopt(zmq.LINGER, 0)
         sock.connect(endpoints[1])
-        sock.send(b"snapshot")
+        sock.send(opcode)
         assert sock.poll(5000)
         return sock.recv_multipart()
 
@@ -742,6 +743,47 @@ def test_empty_snapshot_and_idle_subscription(publisher):
         assert payloads == []
     finally:
         with_client.close()
+
+
+@pytest.mark.parametrize("publisher", [4], indirect=True)
+def test_complete_cut_rejects_unbuildable_and_ambiguous_history(publisher):
+    pub, ports, _ = publisher
+    strict = b"snapshot-full-attention-v1"
+
+    def full(h, parent=None):
+        event = stored([h], parent, group=0)
+        event.kv_cache_spec_kind = "full_attention"
+        return event
+
+    def cut():
+        reply = request(ports, strict)
+        return int.from_bytes(reply[0], "big", signed=True), reply
+
+    publish(pub, [full(2, parent=1)])
+    assert cut()[0] == -2  # An unreported ancestor cannot prove residency.
+    assert int.from_bytes(request(ports)[0], "big", signed=True) >= 0
+    publish(pub, [AllBlocksCleared(), full(1), full(2, parent=1)])
+    w, reply = cut()
+    assert w >= 0
+    proof = msgspec.json.decode(reply[2])
+    assert (
+        proof["rank"],
+        proof["block_size"],
+        proof["live_blocks"],
+        proof["live_references"],
+    ) == (0, 4, 2, 2)
+    legacy = request(ports)
+    assert legacy[1] == reply[1]
+    for chunks in (legacy[2:], reply[3:]):
+        exported = [
+            e
+            for chunk in chunks
+            for e in msgspec.msgpack.decode(chunk, type=KVEventBatch).events
+        ]
+        assert counts(exported) == {("GPU", 0, 1): 1, ("GPU", 0, 2): 1}
+    publish(pub, [full(1), BlockRemoved([1], "GPU", group_idx=0)])
+    assert cut()[0] == -2  # Full-report cache hits aren't additional copies.
+    assert int.from_bytes(request(ports)[0], "big", signed=True) >= w
 
 
 def test_initial_live_message_obeys_bootstrap_buffer_limit(publisher, monkeypatch):

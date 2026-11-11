@@ -90,6 +90,31 @@ caller decides when its own index is ready.
 
 ## How a snapshot is built
 
+### Experimental complete worker-local cut
+
+With snapshots enabled, `snapshot_full_attention_block_size` opts into a
+separate request, `snapshot-full-attention-v1`. The original `snapshot`
+request and live event framing are unchanged. A supported Scheduler must have
+one independently addressable engine, a single plain full-attention group,
+matching cache/hash block sizes, prefix caching, and no lookahead, adapters
+or transfer connectors. The new request does not add transport authentication:
+use trusted, explicitly enrolled local endpoints.
+
+A successful reply is the inclusive sequence W, the 16-byte publisher ID, a
+JSON proof (protocol, reporting, rank, block size, complete, live blocks and
+live references), then the original encoded snapshot chunks. Check all scope
+and multiplicity constraints; a structural Store or a teaching Remove alone
+does not prove residency. Subscribe before the cut and validate a continuous
+suffix and heartbeat under that same ID. A gap, timeout, producer change or
+unavailable reply (W = -2) means no credit until a new cut.
+
+Use incremental reporting. A repeated data-bearing Store for a live hash
+is indistinguishable from a per-request full-report cache hit. Rather than
+count a hit as a physical copy, the certified view refuses that history until
+a device Clear; the consumer must also revoke on the live path. A cut that
+leaves out any live hash is not certified. These refusals do not disable
+ordinary inference or the best-effort snapshot endpoint.
+
 The recorder keeps one record per block hash: parent, tokens and hash inputs,
 plus a reference count per scope (medium, KV cache group, locality,
 ownership). It keeps a record while the block is resident anywhere, while a

@@ -379,6 +379,7 @@ class ZmqEventPublisher(EventPublisher):
         snapshot_endpoint: str | None = None,
         snapshot_max_blocks: int = 1_000_000,
         snapshot_max_response_bytes: int = 256 * 1024 * 1024,
+        snapshot_full_attention_block_size: int | None = None,
     ) -> None:
         # Storage
         super().__init__(data_parallel_rank)
@@ -408,6 +409,7 @@ class ZmqEventPublisher(EventPublisher):
             endpoint=self._endpoint,
             replay_endpoint=self._replay_endpoint,
             snapshot_endpoint=snapshot_endpoint,
+            snapshot_full_attention_block_size=snapshot_full_attention_block_size,
             snapshot_max_blocks=snapshot_max_blocks,
             snapshot_max_response_bytes=snapshot_max_response_bytes,
             buffer_steps=buffer_steps,
@@ -427,6 +429,7 @@ class ZmqEventPublisher(EventPublisher):
                     self._dp_rank,
                     max_blocks=snapshot_max_blocks,
                     max_response_bytes=snapshot_max_response_bytes,
+                    certified_width=snapshot_full_attention_block_size,
                 )
             except Exception:
                 logger.error("Failed to start KV snapshots on %s", snapshot_endpoint)
@@ -688,6 +691,11 @@ class EventPublisherFactory:
 
         kind = config_dict.pop("publisher")
         config_dict.pop("enable_kv_cache_events")
+        if (
+            config_dict.get("snapshot_full_attention_block_size") is None
+            or kind != "zmq"
+        ):
+            config_dict.pop("snapshot_full_attention_block_size", None)
         try:
             constructor = cls._registry[kind]
         except KeyError as exc:
