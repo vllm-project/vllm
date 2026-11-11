@@ -2,7 +2,11 @@
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 """IPC-based weight transfer engine using CUDA IPC for communication."""
 
+import os
 import pickle
+import select
+import subprocess
+import sys
 from dataclasses import asdict, dataclass
 from typing import TYPE_CHECKING, Any, ClassVar, Self
 
@@ -12,6 +16,7 @@ from torch.multiprocessing.reductions import rebuild_cuda_tensor, reduce_tensor
 
 from vllm import envs
 from vllm.config.weight_transfer import WeightTransferConfig
+from vllm.device_allocator.alloc_conf import ALLOC_CONF_ENV_VARS
 from vllm.distributed.weight_transfer.base import (
     TrainerInitInfo,
     TrainerWeightTransferEngine,
@@ -30,6 +35,9 @@ from vllm.distributed.weight_transfer.packed_tensor import (
     packed_ipc_consumer,
     packed_ipc_producer,
 )
+from vllm.logger import init_logger
+
+logger = init_logger(__name__)
 
 
 @dataclass
@@ -237,6 +245,65 @@ class IPCWeightTransferEngine(
 
     def shutdown(self) -> None:
         self._packed_importer.close()
+
+
+_ROCM_IPC_EXPORTER = """
+import pickle
+import sys
+
+import pybase64 as base64
+import torch
+from torch.multiprocessing.reductions import reduce_tensor
+
+torch.accelerator.set_device_index(int(sys.argv[1]))
+buf = torch.ones(1 << 21, dtype=torch.uint8, device="cuda")
+torch.accelerator.synchronize()
+sys.stdout.buffer.write(base64.b64encode(pickle.dumps(reduce_tensor(buf)[1])) + b"\\n")
+sys.stdout.flush()
+sys.stdin.readline()
+"""
+_ROCM_IPC_WARM_UP_TIMEOUT_S = 60
+
+
+def warm_up_rocm_ipc_import(device: torch.device) -> None:
+    """Import one HIP IPC handle from a short-lived child process.
+
+    On ROCm, the first IPC import into a process that sees more than one GPU
+    can leave KFD evicting the queues of the importer and of the exporter until
+    the importer exits. Importing once before the worker allocates device
+    memory avoids this. Failures are logged, not raised.
+    """
+    if torch.accelerator.device_count() < 2:
+        return
+    timeout = _ROCM_IPC_WARM_UP_TIMEOUT_S
+    # Expandable segments export a different handle type, which fails to import.
+    env = {k: v for k, v in os.environ.items() if k not in ALLOC_CONF_ENV_VARS}
+    exporter = None
+    try:
+        exporter = subprocess.Popen(
+            [sys.executable, "-c", _ROCM_IPC_EXPORTER, str(device.index)],
+            stdin=subprocess.PIPE,
+            stdout=subprocess.PIPE,
+            env=env,
+        )
+        assert exporter.stdout is not None
+        if not select.select([exporter.stdout], [], [], timeout)[0]:
+            raise TimeoutError(f"no IPC handle from the exporter in {timeout} s")
+        args = list(pickle.loads(base64.b64decode(exporter.stdout.readline())))
+        args[6] = device.index
+        rebuild_cuda_tensor(*args)
+    except Exception:
+        logger.warning(
+            "ROCm IPC import warm-up failed; IPC weight updates may stall.",
+            exc_info=True,
+        )
+    finally:
+        if exporter is not None:
+            try:
+                exporter.communicate(b"\n", timeout=timeout)
+            except subprocess.TimeoutExpired:
+                exporter.kill()
+                exporter.wait()
 
 
 class IPCTrainerWeightTransferEngine(TrainerWeightTransferEngine[IPCTrainerInitInfo]):

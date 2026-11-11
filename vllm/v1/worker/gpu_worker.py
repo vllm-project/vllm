@@ -501,6 +501,19 @@ class Worker(WorkerBase):
 
             current_platform.check_if_supports_dtype(self.model_config.dtype)
 
+            # Must precede every device allocation of this worker.
+            weight_transfer_config = self.vllm_config.weight_transfer_config
+            if (
+                current_platform.is_rocm()
+                and weight_transfer_config is not None
+                and weight_transfer_config.backend == "ipc"
+            ):
+                from vllm.distributed.weight_transfer.ipc_engine import (
+                    warm_up_rocm_ipc_import,
+                )
+
+                warm_up_rocm_ipc_import(self.device)
+
             # Initialize the distributed environment BEFORE taking
             # memory snapshot
             # This ensures NCCL buffers are allocated before we measure
