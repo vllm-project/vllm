@@ -420,9 +420,7 @@ class Base(
             )
 
         if (layers := self._decoder_layers) is None:
-            raise ValueError(
-                f"Could not find exactly one `ModuleList` in {type(module)}"
-            )
+            raise ValueError(f"Could not identify the decoder layers of {type(module)}")
         # attrgetter in case the module is nested (e.g. "text_model.layers")
         module_list_idx = next(
             i for i, name in enumerate(names) if attrgetter(name)(module) is layers
@@ -465,7 +463,8 @@ class Base(
 
     @cached_property
     def _decoder_layers(self) -> nn.ModuleList | None:
-        """The decoder layers, i.e. the only `ModuleList` in `self._pp_split`."""
+        """The decoder layers, i.e. the only `ModuleList` in `self._pp_split`, if it
+        has `num_hidden_layers` entries."""
         module, names = self._pp_split
 
         def get(name: str) -> nn.Module | None:
@@ -476,7 +475,11 @@ class Base(
                 return None
 
         module_lists = [m for n in names if isinstance(m := get(n), nn.ModuleList)]
-        return module_lists[0] if len(module_lists) == 1 else None
+        if len(module_lists) != 1:
+            return None
+        # e.g. LongCat-Flash has two attention layers per entry
+        layers = module_lists[0]
+        return layers if len(layers) == self.text_config.num_hidden_layers else None
 
     def _offloader(self) -> BaseOffloader:
         """The offloader for the decoder layers."""
@@ -598,8 +601,8 @@ class Base(
             )
 
             def build_layers():
-                """Must mimic what `__init__` does for the whole model, because
-                each layer is offloaded as soon as it is yielded."""
+                """Must mimic what `__init__` does to the whole model's parameters,
+                because each layer is offloaded as soon as it is yielded."""
                 for i in range(*self._pp_indices()):
                     layer_prefix = f"{prefix}.{i}"
                     self._pre_decoder_layer_replace(layers[i], layer_prefix)

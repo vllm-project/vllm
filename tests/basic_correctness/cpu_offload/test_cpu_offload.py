@@ -212,10 +212,35 @@ def test_transformers_backend_weight_offloading(vllm_runner, monkeypatch, model)
     )
 
 
-def test_transformers_backend_cpu_offload_outputs():
+PREFETCH_ARGS = [
+    "--offload-group-size",
+    "1",
+    "--offload-num-in-group",
+    "1",
+    "--offload-prefetch-step",
+    "1",
+]
+
+
+@pytest.mark.parametrize(
+    ("offload_args", "env"),
+    [
+        pytest.param(["--cpu-offload-gb", "1"], None, id="uva"),
+        pytest.param(
+            # cuda graph only works with UVA offloading
+            ["--cpu-offload-gb", "1", "--enforce-eager"],
+            {"VLLM_WEIGHT_OFFLOADING_DISABLE_UVA": "1"},
+            id="no-uva",
+        ),
+        pytest.param(PREFETCH_ARGS, None, id="prefetch"),
+    ],
+)
+def test_transformers_backend_cpu_offload_outputs(offload_args, env):
     """The Transformers backend gives the same outputs with weights offloaded."""
     compare_two_settings(
         model="vllm-project/tiny-random-LlamaForCausalLM",
         arg1=["--model-impl", "transformers"],
-        arg2=["--model-impl", "transformers", "--cpu-offload-gb", "1"],
+        arg2=["--model-impl", "transformers", *offload_args],
+        env1=None,
+        env2=env,
     )
