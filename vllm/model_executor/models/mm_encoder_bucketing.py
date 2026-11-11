@@ -64,6 +64,7 @@ logger = init_logger(__name__)
 _CONFIG_KEY = "audio_bucket_seconds"
 _CONFIG_PATH = f"additional_config.{_CONFIG_KEY}"
 _CONFIG_KEY_MIN_SIZE = "audio_bucket_min_size"
+_CONFIG_PATH_MIN_SIZE = f"additional_config.{_CONFIG_KEY_MIN_SIZE}"
 
 # Losslessness levels a whitelisted model may guarantee for its crop (see the
 # module docstring): bit-exact for mask-aware encoders, output-lossless-within-
@@ -104,6 +105,17 @@ _VERIFIED_FOR_BUCKETING: dict[str, str] = {
 # verified variable-length recipe keep their original forward (which also serves
 # the fallback path).
 _FORWARD_SHIMS: dict[str, object] = {}
+
+
+def register_forward_shim(class_name: str, shim_fn: object) -> None:
+    """Register a variable-length forward recipe for a fixed-window encoder class.
+
+    Called at import time by an adapted model (see ``qwen2_audio.py``) to install
+    the model-specific shim that mirrors its encoder's ``forward`` minus the
+    fixed-length assumption. Keyed by the wrapped class's exact name -- no MRO
+    walk (see ``_FORWARD_SHIMS``).
+    """
+    _FORWARD_SHIMS[class_name] = shim_fn
 
 
 # ------------------------------------------------------------- length ladder
@@ -208,12 +220,12 @@ def _min_bucket_size(
         return None
     if isinstance(raw, bool) or not isinstance(raw, int):
         raise ValueError(
-            f"additional_config.{_CONFIG_KEY_MIN_SIZE} must be a positive int, "
+            f"{_CONFIG_PATH_MIN_SIZE} must be a positive int, "
             f"got {raw!r}"
         )
     if raw <= 0:
         raise ValueError(
-            f"additional_config.{_CONFIG_KEY_MIN_SIZE} must be > 0, got {raw!r}"
+            f"{_CONFIG_PATH_MIN_SIZE} must be > 0, got {raw!r}"
         )
     return raw
 
@@ -257,7 +269,7 @@ class EncoderBucketingSpec:
     and implement the three methods.
     """
 
-    frames_per_second: int
+    frames_per_second: int | None = None
     context_margin: int = 0
     align_to: int = 1
 
