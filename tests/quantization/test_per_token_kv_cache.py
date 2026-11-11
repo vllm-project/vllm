@@ -738,3 +738,113 @@ def test_triton_unified_attention_per_token_head_scale(
     )
 
     torch.testing.assert_close(output_q, output_ref, atol=5e-2, rtol=5e-2)
+
+
+# ===========================================================================
+# 7. INT4 read kernel: accuracy at long context
+# ===========================================================================
+@pytest.mark.parametrize("kv_len", [4096, 32768])
+@pytest.mark.parametrize("query_len", [1, 64])
+@torch.inference_mode()
+def test_int4_attention_matches_fp64_reference_at_long_context(
+    kv_len: int, query_len: int
+):
+    """The INT4 read kernel must stay close to an fp64 attention over the very
+    same cache however long the context is.
+
+    The value zero-point correction ``sum(P * v_scale * v_zp)`` has to be taken
+    on the P the tensor cores multiply: with fp32 operands the dot rounds P to
+    TF32 but the sum used the unrounded P, and since the rounding error is
+    multiplied by a zero point of ~8 it does not cancel (relative error of 4 %
+    at 4k tokens, 10 % at 32k, 28 % at 229k).
+    """
+    from vllm.v1.attention.ops.int4_per_token_head import reshape_and_cache_int4
+    from vllm.v1.attention.ops.triton_unified_attention import unified_attention
+
+    torch.set_default_device(DEVICE_TYPE)
+    set_random_seed(0)
+
+    num_query_heads, num_kv_heads, head_size, block_size = 8, 2, 128, 16
+    num_blocks = kv_len // block_size
+    scale = head_size**-0.5
+
+    key = torch.randn(kv_len, num_kv_heads, head_size, dtype=torch.bfloat16)
+    value = torch.randn_like(key)
+    query = torch.randn(query_len, num_query_heads, head_size, dtype=torch.bfloat16)
+
+    key_cache = torch.zeros(
+        num_blocks, block_size, num_kv_heads, head_size // 2, dtype=torch.uint8
+    )
+    value_cache = torch.zeros_like(key_cache)
+    k_scale_cache = torch.ones(num_blocks, block_size, num_kv_heads)
+    v_scale_cache = torch.ones_like(k_scale_cache)
+    reshape_and_cache_int4(
+        key,
+        value,
+        key_cache,
+        value_cache,
+        torch.arange(kv_len, dtype=torch.int64),
+        k_scale_cache=k_scale_cache,
+        v_scale_cache=v_scale_cache,
+    )
+
+    output = torch.empty_like(query)
+    num_par_softmax_segments = 16
+    unified_attention(
+        q=query,
+        k=key_cache,
+        v=value_cache,
+        out=output,
+        cu_seqlens_q=torch.tensor([0, query_len], dtype=torch.int32),
+        seqused_k=torch.tensor([kv_len], dtype=torch.int32),
+        max_seqlen_q=query_len,
+        max_seqlen_k=kv_len,
+        softmax_scale=scale,
+        causal=True,
+        window_size=(-1, -1),
+        block_table=torch.arange(num_blocks, dtype=torch.int32)[None],
+        softcap=0,
+        q_descale=None,
+        k_descale=None,
+        v_descale=None,
+        seq_threshold_3D=0,
+        num_par_softmax_segments=num_par_softmax_segments,
+        softmax_segm_output=torch.empty(
+            0, num_query_heads, num_par_softmax_segments, head_size
+        ),
+        softmax_segm_max=torch.empty(0, num_query_heads, num_par_softmax_segments),
+        softmax_segm_expsum=torch.empty(0, num_query_heads, num_par_softmax_segments),
+        kv_quant_mode=KVQuantMode.INT4_PER_TOKEN_HEAD,
+        k_scale_cache=k_scale_cache,
+        v_scale_cache=v_scale_cache,
+    )
+
+    def dequantize(cache: torch.Tensor, scales: torch.Tensor) -> torch.Tensor:
+        # (tokens, kv heads, head size) in fp64, in the RHT domain; the 4-bit
+        # zero point lives in the low mantissa bits of the fp32 scale.
+        packed = cache.reshape(kv_len, num_kv_heads, head_size // 2).to(torch.int16)
+        nibbles = torch.stack((packed & 0xF, packed >> 4), dim=-1)
+        nibbles = nibbles.reshape(kv_len, num_kv_heads, head_size).double()
+        bits = scales.reshape(kv_len, num_kv_heads).contiguous().view(torch.int32)
+        zero_point = (bits & 0xF).double()[..., None]
+        step = (bits & -16).view(torch.float32).double()[..., None]
+        return (nibbles - zero_point) * step
+
+    k_deq = dequantize(key_cache, k_scale_cache)
+    v_deq = dequantize(value_cache, v_scale_cache)
+    q_rot = single_rht(query.float()).double()
+    positions = kv_len - query_len + torch.arange(query_len)
+    reference = torch.empty(
+        query_len, num_query_heads, head_size, dtype=torch.float64
+    )
+    group = num_query_heads // num_kv_heads
+    for h in range(num_query_heads):
+        scores = q_rot[:, h] @ k_deq[:, h // group].T * (scale / head_size)
+        scores = scores.masked_fill(
+            torch.arange(kv_len)[None] > positions[:, None], float("-inf")
+        )
+        reference[:, h] = torch.softmax(scores, dim=-1) @ v_deq[:, h // group]
+    reference = single_rht(reference.float(), inverse=True).double() / head_size
+
+    relative_error = (output.double() - reference).norm() / reference.norm()
+    assert relative_error < 1e-2, f"relative error {relative_error:.3e}"

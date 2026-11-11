@@ -528,8 +528,8 @@ def _attn_packed(
         K_s0 = K_s0_u.to(tl.float32)
         K_s1 = K_s1_u.to(tl.float32)
         V_s0_u, V_s1_u = unpack_int4_nibbles(V_packed)
-        V_s0 = V_s0_u.to(tl.float32)
-        V_s1 = V_s1_u.to(tl.float32)
+        V_s0 = V_s0_u.to(query_ptr.dtype.element_ty)
+        V_s1 = V_s1_u.to(query_ptr.dtype.element_ty)
 
         ks_idx = (
             physical_block_idx * stride_ks_blk
@@ -603,8 +603,13 @@ def _attn_packed(
 
         # Fuse v per-(token, head) scale into P.  INT4 also subtracts
         # the v-zero-point contribution from each stream once.
-        P_v = (P * v_token_head_scales[None, :]).to(tl.float32)
-        Pv_zp_sum = tl.sum(P_v * v_zp[None, :], axis=1)
+        # P_v goes to the tensor cores in the query dtype (the nibbles 0..15 are
+        # exact in it), and the zero-point sum is taken on the same rounded P_v:
+        # with fp32 operands the dot rounds P_v to TF32 while the sum would use
+        # the unrounded one, and the difference (times a zero point of ~8) does
+        # not cancel.
+        P_v = (P * v_token_head_scales[None, :]).to(query_ptr.dtype.element_ty)
+        Pv_zp_sum = tl.sum(P_v.to(tl.float32) * v_zp[None, :], axis=1)
         acc_s0 += tl.dot(P_v, V_s0) - Pv_zp_sum[:, None]
         acc_s1 += tl.dot(P_v, V_s1) - Pv_zp_sum[:, None]
 
