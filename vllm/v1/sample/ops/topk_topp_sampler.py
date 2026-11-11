@@ -34,7 +34,7 @@ def register_top_k_top_p_warmups() -> None:
 
 
 def reserve_top_k_top_p_workspace(
-    vllm_config: "VllmConfig", logits: torch.Tensor
+    vllm_config: "VllmConfig", device: torch.device, vocab_size: int
 ) -> None:
     """Spec-decode verification filters 1 + K rows per request, more than the dummy
     sampler run does, so allocate the Triton filter's workspace for them while
@@ -45,7 +45,7 @@ def reserve_top_k_top_p_workspace(
     scheduler = vllm_config.scheduler_config
     rows_per_req = 1 + spec.num_speculative_tokens
     rows = min(scheduler.max_num_batched_tokens, scheduler.max_num_seqs * rows_per_req)
-    reserve_workspace(logits.device, rows, logits.shape[-1])
+    reserve_workspace(device, rows, vocab_size)
 
 
 def _flashinfer_jit_unsupported_reason(capability: DeviceCapability) -> str | None:

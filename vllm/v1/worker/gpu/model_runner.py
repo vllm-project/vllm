@@ -1057,7 +1057,7 @@ class GPUModelRunner(LoRAModelRunnerMixin):
             return
         num_reqs = hidden_states.shape[0]
         logits = self.model.compute_logits(hidden_states)
-        reserve_top_k_top_p_workspace(self.vllm_config, logits)
+        reserve_top_k_top_p_workspace(self.vllm_config, logits.device, logits.shape[-1])
         dummy_input_batch = InputBatch.make_dummy(
             num_reqs, num_reqs, self.input_buffers
         )
