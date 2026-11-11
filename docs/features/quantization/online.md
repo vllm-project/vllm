@@ -200,6 +200,17 @@ vllm serve ricursiveAI/Ripple-65B-Preview-NVFP4 \
     --quantization-config '{"targets":{"*mlp*":"mxfp4"}}'
 ```
 
+Note that NVFP4-to-MXFP4 conversion can reduce accuracy. Prefer MXFP8 for NVFP4 dense
+and attention linears, or validate MXFP4 per model. On supported ROCm hardware,
+enable AITER with `VLLM_ROCM_USE_AITER=1` for MXFP4 MoE experts:
+
+```bash
+VLLM_ROCM_USE_AITER=1 vllm serve nvidia/Qwen3-30B-A3B-NVFP4 \
+    --quantization-config '{"targets":{"*mlp.experts*":"mxfp4","*self_attn.qkv_proj":"mxfp8","*self_attn.o_proj":"mxfp8"}}'
+```
+
+This example uses Qwen3 layer names; adapt target patterns for other models.
+
 !!! info
 
     Re-quantization is available for both linear and MoE layers.
