@@ -80,7 +80,8 @@ its executor (`runtime/draft.py`) right after the target's, on the same fused
 kernel, mailbox and mHC side stream; the draft model's forward asks it for a
 step the same way. No capture size is required: a draft step without a FULL
 graph of at most 8 rows takes no low-batch GEMM, and the model state logs once
-when the capture sizes leave no one-request draft graph.
+when `decode_cudagraph_capture_request_sizes` leaves no one-request draft
+graph.
 
 | Package | Contents |
 | --- | --- |

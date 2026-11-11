@@ -70,24 +70,25 @@ logger = init_logger(__name__)
 
 def check_low_batch_graph(vllm_config: VllmConfig) -> None:
     """Log when no DSpark draft CUDA graph is small enough for the low-batch
-    GEMMs: the drafter rounds each capture size up to whole requests, so a
-    one-request graph needs a capture size of one request's draft rows."""
+    GEMMs: the drafter captures its FULL graphs per request count, `n` requests
+    of draft rows for each `n` in `decode_cudagraph_capture_request_sizes`, so a
+    one-request graph needs 1 in that list."""
     spec = vllm_config.speculative_config
-    sizes = vllm_config.compilation_config.cudagraph_capture_sizes
+    sizes = vllm_config.compilation_config.decode_cudagraph_capture_request_sizes
     if spec is None or not sizes:
         return
     sample_from_anchor = getattr(
         spec.draft_model_config.hf_config, "sample_from_anchor", True
     )
     rows = spec.num_speculative_tokens + (0 if sample_from_anchor else 1)
-    smallest = min(-(-size // rows) * rows for size in sizes)
+    smallest = min(sizes) * rows
     if smallest > LOW_BATCH_MAX_ROWS:
         logger.info_once(
             "The smallest DSpark draft CUDA graph has %d rows, so the draft "
-            "layers never take the low-batch GEMMs; add %d to "
-            "cudagraph_capture_sizes for a one-request draft graph.",
+            "layers never take the low-batch GEMMs; add 1 to "
+            "decode_cudagraph_capture_request_sizes for a one-request draft "
+            "graph.",
             smallest,
-            rows,
         )
 
 
