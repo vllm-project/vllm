@@ -608,7 +608,9 @@ def measure_kv_cache_blocks(
     available = measure_kv_cache_bytes(requested_memory=requested_memory, **measured)
     utilization = vllm_config.cache_config.gpu_memory_utilization
     # Explicit values just under 1.0 are mostly habits from estimate-based
-    # sizing, which needed that headroom; this sizing measures it instead.
+    # sizing, which needed that headroom; this sizing measures it instead. Some
+    # still leave room for memory this sizing cannot see, which the message
+    # lists so that those users can keep their setting.
     if utilization is not None and 0.7 < utilization < 1.0:
         # A budget of all memory free at startup is bound by the device alone.
         withheld = (
@@ -620,9 +622,13 @@ def measure_kv_cache_blocks(
                 "gpu_memory_utilization=%s caps this instance at %s GiB, keeping "
                 "%s GiB of free device memory out of the KV cache. The "
                 "extensible KV cache is sized from the memory measured after "
-                "warmup and CUDA graph capture, so it needs no headroom below "
-                "1.0: leave gpu_memory_utilization unset to use the device "
-                "unless other processes share it or allocate on it later.",
+                "warmup and CUDA graph capture, so vLLM's own use needs no "
+                "headroom below 1.0. Leave gpu_memory_utilization unset unless "
+                "it leaves room for memory vLLM does not measure: other "
+                "processes sharing the GPU (including ones that allocate on it "
+                "later), the CPU on a unified-memory device, weight transfer "
+                "buffers for weight updates, or a KV connector's own device "
+                "buffers.",
                 utilization,
                 format_gib(requested_memory),
                 format_gib(withheld),
