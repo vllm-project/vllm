@@ -2,24 +2,24 @@
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 """MFMA tile scorer for the Qwen4Exp QSA indexer's prefill chunks.
 
-``_qsa_mqa_paged_kernel`` (``qsa.py``) gives each query row its own programs
-and reduces every (row, column, head) dot product with ``tl.sum``. Prefill rows
+`_qsa_mqa_paged_kernel` (`qsa.py`) gives each query row its own programs
+and reduces every (row, column, head) dot product with `tl.sum`. Prefill rows
 of one request read the same compressed keys, so this kernel scores a
-``BLOCK_M x BLOCK_N`` tile per program with ``tl.dot`` (bf16/fp16 operands,
+`BLOCK_M x BLOCK_N` tile per program with `tl.dot` (bf16/fp16 operands,
 fp32 accumulation) and gathers each key tile once for all the tile's rows:
 
     score[r, c] = sum_h relu(q[r, h, :] . k[c, :]) / score_divisor
 
-It computes what ``_qsa_mqa_paged_kernel`` computes: ``visible`` per row, the
+It computes what `_qsa_mqa_paged_kernel` computes: `visible` per row, the
 same validity rules, the heads summed in order, and the columns past a row's
-``visible`` count left unwritten. Only the summation order of each dot product
+`visible` count left unwritten. Only the summation order of each dot product
 differs, so the scores are not bitwise equal: both kernels form the bf16 or
 fp16 products exactly in fp32 and differ only in the order of the fp32 sums.
 
 A tile whose rows belong to several requests scores them one request after
-another, so a tile of decode rows (one request each) costs up to ``BLOCK_M``
-passes; ``qsa_mqa_paged`` uses this kernel only for calls of at least
-``MFMA_SCORER_MIN_ROWS`` rows that its caller marks as prefill.
+another, so a tile of decode rows (one request each) costs up to `BLOCK_M`
+passes; `qsa_mqa_paged` uses this kernel only for calls of at least
+`MFMA_SCORER_MIN_ROWS` rows that its caller marks as prefill.
 """
 
 from __future__ import annotations
@@ -182,7 +182,7 @@ def _qsa_mqa_paged_mfma_kernel(
 
 
 def mfma_scorer_applies(q: torch.Tensor, k_cache: torch.Tensor) -> bool:
-    """Whether a prefill call of ``qsa_mqa_paged`` takes the MFMA kernel."""
+    """Whether a prefill call of `qsa_mqa_paged` takes the MFMA kernel."""
     return (
         q.shape[0] >= MFMA_SCORER_MIN_ROWS
         and q.dtype == k_cache.dtype
@@ -202,8 +202,8 @@ def launch_qsa_mqa_paged_mfma(
     visible_blocks: torch.Tensor,
     score_divisor: float,
 ) -> None:
-    """Fill ``logits`` [rows, columns] and ``visible_blocks`` [rows] from the
-    arguments ``qsa_mqa_paged`` has checked and allocated."""
+    """Fill `logits` [rows, columns] and `visible_blocks` [rows] from the
+    arguments `qsa_mqa_paged` has checked and allocated."""
     logger.info_once(
         "QSA indexer: prefill chunks of >= %d rows use the MFMA scorer",
         MFMA_SCORER_MIN_ROWS,
@@ -259,10 +259,10 @@ def warmup_qsa_mqa_paged_mfma(
     """Compile, without launching, the variants serving can reach and return
     the score widths compiled.
 
-    ``qsa_select_paged_tokens`` scores at a multiple of 64 columns, or at the
+    `qsa_select_paged_tokens` scores at a multiple of 64 columns, or at the
     page table's capacity under graph capture and for a context near the
     maximum. The width (also the logits row stride) is the only argument whose
-    specialization changes between steps; ``page_table`` and ``k_cache`` are
+    specialization changes between steps; `page_table` and `k_cache` are
     the serving tensors, so their strides and storage size match.
     """
     capacity = page_table.shape[1] * k_cache.shape[1]

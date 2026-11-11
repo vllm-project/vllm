@@ -22,9 +22,9 @@ class QSAPrefillLayout:
     """The trailing run of prefilling requests of a step, with the exact
     host lengths an op that plans on the host needs.
 
-    Requests ``first_req`` .. the last, rows ``first_row`` .. the last; the
+    Requests `first_req` .. the last, rows `first_row` .. the last; the
     requests before them (decodes, whose lengths the host only bounds) are
-    not described. ``prefix_lens`` count the tokens already in the cache.
+    not described. `prefix_lens` count the tokens already in the cache.
     """
 
     first_req: int
@@ -49,9 +49,9 @@ def host_prefill_layout(
     device read), or None when the step has none or the host cannot give
     their lengths exactly.
 
-    ``seq_lens_cpu_upper_bound`` is exact for prefilling rows (not for decode
+    `seq_lens_cpu_upper_bound` is exact for prefilling rows (not for decode
     rows under async spec decode), and the host query lengths of prefilling
-    rows are exact as well (``supports_device_cpu_query_lens_mismatch``), so
+    rows are exact as well (`supports_device_cpu_query_lens_mismatch`), so
     the run of prefilling requests at the end of the batch (decodes come
     first) is described exactly. A step whose rows run past its requests
     (padding) is not described.

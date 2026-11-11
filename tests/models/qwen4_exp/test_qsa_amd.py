@@ -482,9 +482,9 @@ _TOKEN_TOPK = 2048
 def _served_scoring_inputs(
     requests: list[tuple[int, int]], table_width: int, device: str = "cuda"
 ) -> SimpleNamespace:
-    """Scorer inputs in a served step's layout. ``requests`` lists (rows,
+    """Scorer inputs in a served step's layout. `requests` lists (rows,
     sequence length) in batch order, and a request's rows are its last
-    positions. Each request maps ``table_width`` shuffled pages except one
+    positions. Each request maps `table_width` shuffled pages except one
     (-1), the third, fourth or fifth by request; a padding row (request -1,
     position -1) ends the batch."""
     generator = torch.Generator(device=device).manual_seed(len(requests))
@@ -523,8 +523,8 @@ def _served_scoring_inputs(
 def _served_scores_fp64(
     inputs: SimpleNamespace, columns: int
 ) -> tuple[torch.Tensor, torch.Tensor, torch.Tensor]:
-    """``visible`` per row from its definition, the fp64 scores [rows,
-    columns] (-inf at unmapped pages, NaN past ``visible``), and the error
+    """`visible` per row from its definition, the fp64 scores [rows,
+    columns] (-inf at unmapped pages, NaN past `visible`), and the error
     bound of an fp32 kernel.
 
     A kernel that forms the bf16 products exactly in fp32 and sums each
@@ -590,7 +590,7 @@ def test_qsa_mfma_scorer_matches_fp64(
     table_width: int,
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    """Prefill calls of ``qsa_mqa_paged`` take the MFMA kernel, and its scores
+    """Prefill calls of `qsa_mqa_paged` take the MFMA kernel, and its scores
     and the per-row kernel's stay within the fp32 rounding bound of fp64 on
     every visible column. The top-512 block sets the MFMA scores select equal
     the fp64 sets on >= 99.9 % of the blocks, and every block they differ in
@@ -670,7 +670,7 @@ def test_mfma_scorer_gate() -> None:
 def test_qsa_selection_trims_width_and_splits_decode_rows(
     monkeypatch: pytest.MonkeyPatch, capturing: bool
 ) -> None:
-    """Eager steps score at the width ``max_seq_len`` bounds, captured ones at
+    """Eager steps score at the width `max_seq_len` bounds, captured ones at
     the page table's; decode rows and prefill rows never share a chunk, and
     only prefill chunks may take the MFMA kernel."""
     table_width, compress_ratio, token_topk = 168, 4, 2048
@@ -1037,8 +1037,8 @@ def _metadata(
 
 def _interleaved_cache(num_pages, heads=1, per_page=None, base_rows=0):
     """K and V as the QSA owner views its cache: the two halves of one K|V
-    record per token. With ``per_page`` the pages sit that many records apart,
-    ``base_rows`` records into a larger allocation (a layer's pages among every
+    record per token. With `per_page` the pages sit that many records apart,
+    `base_rows` records into a larger allocation (a layer's pages among every
     layer's)."""
     g = torch.Generator().manual_seed(0)
     if per_page is None:
@@ -1057,7 +1057,7 @@ def _interleaved_cache(num_pages, heads=1, per_page=None, base_rows=0):
 
 
 def _planes(num_pages, heads, per_page, base_rows=0):
-    """K and V in separate token pools viewed as pages ``per_page`` rows apart."""
+    """K and V in separate token pools viewed as pages `per_page` rows apart."""
     g = torch.Generator().manual_seed(0)
     shape = (num_pages, _PAGE, heads, _D)
     stride = (per_page * heads * _D, heads * _D, _D, 1)
@@ -1329,7 +1329,7 @@ def test_qsa_flydsl_slots_copy_the_lengths_once_per_step(
 
 
 def _paged(page_stride):
-    """K and V halves of 2 D records, pages ``page_stride`` elements apart."""
+    """K and V halves of 2 D records, pages `page_stride` elements apart."""
     storage = torch.zeros(41 * page_stride, dtype=torch.bfloat16)
     shape, stride = (40, _PAGE, 1, _D), (page_stride, 2 * _D, _D, 1)
     return storage.as_strided(shape, stride), storage.as_strided(shape, stride, _D)
