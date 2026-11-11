@@ -5,7 +5,8 @@ import os
 import tempfile
 import threading
 from contextlib import contextmanager, suppress
-from typing import ClassVar, NamedTuple
+from functools import lru_cache
+from typing import Any, ClassVar, NamedTuple
 
 import numpy as np
 import numpy.typing as npt
@@ -32,10 +33,13 @@ def decode_pynvvideocodec(
     hw_decoders: int = PYNVVIDEOCODEC_DEFAULT_HW_DECODERS,
     max_width: int | None = None,
     max_height: int | None = None,
+    keyframe_sampling: str | None = None,
 ) -> tuple[npt.NDArray, VideoSourceMetadata, list[int], list[int]]:
     max_width, max_height = validate_pynvvideocodec_max_dimensions(
         max_width, max_height
     )
+    if keyframe_sampling not in (None, "nearest"):
+        raise ValueError("keyframe_sampling must be None or 'nearest'")
     PyNvVideoCodecVideoBackendMixin._configure_decoder_slots(hw_decoders)
     return PyNvVideoCodecVideoBackendMixin.decode_frames_pynvvideocodec(
         loader_cls,
@@ -43,6 +47,7 @@ def decode_pynvvideocodec(
         target,
         max_width=max_width,
         max_height=max_height,
+        keyframe_sampling=keyframe_sampling,
         **sampling_kwargs,
     )
 
@@ -53,6 +58,7 @@ class PyNvVideoCodecSourceMetadata(NamedTuple):
     source: VideoSourceMetadata
     width: int
     height: int
+    key_frame_indices: tuple[int, ...] = ()
 
 
 # Per-decoder baseline reserved for persistent PyNvVideoCodec surfaces.
@@ -112,6 +118,70 @@ def _decoder_surface_bytes(width: int, height: int) -> int:
     return width * height * 3 * PYNVVIDEOCODEC_DECODER_CACHE_SIZE
 
 
+# Distinct (device, codec, chroma format, bit depth) combinations; real deployments
+# see a handful, so this bound only guards against unbounded growth.
+PYNVVIDEOCODEC_DECODER_CAPS_CACHE_SIZE = 64
+
+
+@lru_cache(maxsize=PYNVVIDEOCODEC_DECODER_CAPS_CACHE_SIZE)
+def _get_decoder_caps(
+    nvc, device_index: int, codec, chroma_format, bit_depth: int
+) -> dict[str, Any]:
+    """`nvc.GetDecoderCaps`, cached per device and stream format.
+
+    Each call takes ~180 ms and holds the GIL, which stalls every other request in
+    the API process; the result only depends on these arguments. Callers must not
+    mutate the returned dict.
+    """
+    return nvc.GetDecoderCaps(device_index, codec, chroma_format, bit_depth)
+
+
+def _sample_nearest_keyframes(
+    uniform_indices: list[int],
+    key_frame_indices: tuple[int, ...],
+    total_frames: int,
+) -> list[int]:
+    """Snap uniform sample indices to the nearest keyframes.
+
+    Keyframes decode without walking their GOP. The result stays distinct and
+    chronological; the uniform indices are returned unchanged when there are
+    fewer usable keyframes than targets.
+    """
+    keyframes = sorted(
+        {index for index in key_frame_indices if 0 <= index < total_frames}
+    )
+    count = len(uniform_indices)
+    if count == 0 or len(keyframes) < count:
+        return uniform_indices
+
+    costs: list[float] = [
+        (keyframe - uniform_indices[0]) ** 2 for keyframe in keyframes
+    ]
+    predecessors: list[list[int]] = []
+    for target in uniform_indices[1:]:
+        next_costs = [float("inf")] * len(keyframes)
+        previous = [-1] * len(keyframes)
+        best_cost = float("inf")
+        best_index = -1
+        for index, keyframe in enumerate(keyframes):
+            if index and costs[index - 1] < best_cost:
+                best_cost = costs[index - 1]
+                best_index = index - 1
+            if best_index >= 0:
+                next_costs[index] = best_cost + (keyframe - target) ** 2
+                previous[index] = best_index
+        costs = next_costs
+        predecessors.append(previous)
+
+    final_index = min(range(len(keyframes)), key=lambda index: costs[index])
+    sampled = [keyframes[final_index]]
+    for previous in reversed(predecessors):
+        final_index = previous[final_index]
+        sampled.append(keyframes[final_index])
+    sampled.reverse()
+    return sampled
+
+
 def _pynvvideocodec_exception_types(nvc) -> tuple[type[Exception], ...]:
     return tuple(
         exception_type
@@ -132,13 +202,13 @@ def _pynvvc_frames_to_nhwc(frames):
 class PyNvVideoCodecDecoderSlot:
     """A retained PyNv decoder slot and its CUDA stream.
 
-    The decoder is reused across requests: ``reconfigure_decoder`` repoints the
+    The decoder is reused across requests: `reconfigure_decoder` repoints the
     existing decoder at each new source instead of paying a fresh
-    ``SimpleDecoder`` construction per request. Construction (CUVID parser +
+    `SimpleDecoder` construction per request. Construction (CUVID parser +
     decoder + surface-pool allocation) is the dominant per-request cost, so
     reconfiguring is far cheaper. Decoder dimensions are bounded at construction
     so resolution changes do not replace its native frame pool. A single decoder
-    serves both metadata (``len``/``get_stream_metadata``) and frame decode -- no
+    serves both metadata (`len`/`get_stream_metadata`) and frame decode -- no
     separate metadata decoder.
     """
 
@@ -343,7 +413,8 @@ class PyNvVideoCodecVideoBackendMixin:
         demuxer = nvc.CreateDemuxer(file_path)
         width = demuxer.Width()
         height = demuxer.Height()
-        caps = nvc.GetDecoderCaps(
+        caps = _get_decoder_caps(
+            nvc,
             cls._DEVICE_INDEX,
             demuxer.GetNvCodecId(),
             demuxer.ChromaFormat(),
@@ -397,6 +468,8 @@ class PyNvVideoCodecVideoBackendMixin:
         nvc,
         max_width: int,
         max_height: int,
+        *,
+        include_keyframes: bool = False,
     ) -> PyNvVideoCodecSourceMetadata:
         with cls._borrow_decoder_slot() as decoder_slot:
             with cls._torch_stream_context(decoder_slot.stream):
@@ -407,9 +480,19 @@ class PyNvVideoCodecVideoBackendMixin:
                     max_width=max_width,
                     max_height=max_height,
                 )
+                key_frame_indices: tuple[int, ...] = ()
                 try:
                     metadata = decoder.get_stream_metadata()
                     total_frames_num = len(decoder)
+                    # Only scan the entire stream if finding keyframes.
+                    if include_keyframes:
+                        scanned = decoder.get_scanned_stream_metadata()
+                        key_frame_indices = tuple(
+                            int(index)
+                            for index in cls._metadata_value(
+                                scanned, "key_frame_indices", default=()
+                            )
+                        )
                 finally:
                     del decoder
             width = int(cls._metadata_value(metadata, "width", default=0))
@@ -436,6 +519,7 @@ class PyNvVideoCodecVideoBackendMixin:
                 source=VideoSourceMetadata(total_frames_num, original_fps, duration),
                 width=width,
                 height=height,
+                key_frame_indices=key_frame_indices,
             )
 
     @classmethod
@@ -537,6 +621,8 @@ class PyNvVideoCodecVideoBackendMixin:
         target: VideoTargetMetadata,
         max_width: int | None = None,
         max_height: int | None = None,
+        *,
+        keyframe_sampling: str | None = None,
         **kwargs,
     ) -> tuple[npt.NDArray, VideoSourceMetadata, list[int], list[int]]:
         import PyNvVideoCodec as nvc
@@ -565,7 +651,11 @@ class PyNvVideoCodecVideoBackendMixin:
 
             try:
                 gpu_source = cls._read_source_metadata(
-                    temp_path, nvc, decoder_max_width, decoder_max_height
+                    temp_path,
+                    nvc,
+                    decoder_max_width,
+                    decoder_max_height,
+                    include_keyframes=keyframe_sampling is not None,
                 )
             except Exception as exc:
                 if not isinstance(exc, _pynvvideocodec_exception_types(nvc)):
@@ -578,6 +668,12 @@ class PyNvVideoCodecVideoBackendMixin:
             frame_idx = loader_cls.compute_frames_index_to_sample(
                 source=source, target=target, **kwargs
             )
+            if keyframe_sampling is not None:
+                frame_idx = _sample_nearest_keyframes(
+                    frame_idx,
+                    gpu_source.key_frame_indices,
+                    source.total_frames_num,
+                )
             raw_frame_bytes = len(frame_idx) * gpu_source.height * gpu_source.width * 3
             pool = get_mm_gpu_ipc_pool()
             if pool is None or raw_frame_bytes == 0:

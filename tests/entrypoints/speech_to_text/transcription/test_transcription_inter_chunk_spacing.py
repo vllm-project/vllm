@@ -1,11 +1,11 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
-"""ASR inter-chunk spacing: ``asr_inter_chunk_separator`` and transcription
+"""ASR inter-chunk spacing: `asr_inter_chunk_separator` and transcription
 serving (mocked).
 
-Unit tests cover the helper and ``SupportsTranscription.no_space_languages``.
-Integration-style tests exercise ``OpenAIServingTranscription`` streaming and
-``create_transcription`` without loading a model.
+Unit tests cover the helper and `SupportsTranscription.no_space_languages`.
+Integration-style tests exercise `OpenAIServingTranscription` streaming and
+`create_transcription` without loading a model.
 """
 
 from __future__ import annotations
@@ -149,7 +149,7 @@ class _StubTranscriptionModel:
         )
 
     @classmethod
-    def post_process_output(cls, text: str) -> str:
+    def post_process_output(cls, text: str, model_config) -> str:
         return text
 
     @classmethod
@@ -180,7 +180,7 @@ def _request_output(text: str, finish_reason: str | None = "stop") -> RequestOut
 
 
 def _sse_delta_contents(sse_body: str) -> list[str]:
-    """Extract ``choices[0].delta.content`` from each ``data:`` line (streaming API)."""
+    """Extract `choices[0].delta.content` from each `data:` line (streaming API)."""
     contents: list[str] = []
     for line in sse_body.splitlines():
         if not line.startswith("data: "):
@@ -323,7 +323,7 @@ async def test_transcription_stream_generator_strips_qwen3_asr_prefix_per_chunk(
 
 @pytest.mark.asyncio
 async def test_create_transcription_non_streaming_joins_chunks_by_language():
-    """``create_transcription`` uses the same separator logic as the helper."""
+    """`create_transcription` uses the same separator logic as the helper."""
 
     async def gen_hello() -> AsyncGenerator[RequestOutput, None]:
         yield _request_output("hello")

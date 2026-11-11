@@ -21,9 +21,6 @@ from typing_extensions import ParamSpec
 
 # import custom ops, trigger op registration
 import vllm._C_stable_libtorch  # noqa
-
-with contextlib.suppress(ImportError):
-    import vllm._qutlass_C  # noqa
 import vllm.envs as envs
 from vllm.logger import init_logger
 from vllm.utils.import_utils import import_pynvml
@@ -208,6 +205,44 @@ def with_nvml_context(fn: Callable[_P, _R]) -> Callable[_P, _R]:
     return wrapper
 
 
+@with_nvml_context
+def _nvml_confidential_compute_enabled() -> bool:
+    state = pynvml.nvmlSystemGetConfComputeState()
+    # ccFeature != 0 means Confidential Computing is enabled (ON or devtools).
+    return int(getattr(state, "ccFeature", 0)) != 0
+
+
+@cache
+def _detect_confidential_compute() -> bool:
+    """Whether the GPU runs in NVIDIA Confidential Computing mode.
+
+    Overridable via `VLLM_CONFIDENTIAL_COMPUTE=1/0`; detected once via NVML
+    and cached. Returns False if CUDA is unavailable or NVML fails.
+    """
+    forced = envs.VLLM_CONFIDENTIAL_COMPUTE
+    if forced is not None:
+        enabled = forced == "1"
+        logger.info(
+            "NVIDIA Confidential Computing detection overridden by "
+            "VLLM_CONFIDENTIAL_COMPUTE=%r: %s",
+            forced,
+            "enabled" if enabled else "disabled",
+        )
+        return enabled
+    if not torch.cuda.is_available():
+        return False
+    try:
+        enabled = _nvml_confidential_compute_enabled()
+    except Exception as e:
+        logger.info("NVIDIA Confidential Computing not detected: NVML failed: %r", e)
+        return False
+    logger.info(
+        "NVIDIA Confidential Computing %s via NVML",
+        "detected" if enabled else "not detected",
+    )
+    return enabled
+
+
 @cache
 def _get_wsl_kernel_version() -> tuple[int, ...] | None:
     """Return the WSL2 kernel version as a tuple, or None on parse failure.
@@ -236,8 +271,16 @@ class CudaPlatformBase(Platform):
     ]
 
     @classmethod
+    def get_hisparse_backend_cls(cls) -> str | None:
+        return "vllm.v1.hisparse.backend.CUDAHiSparseBackend"
+
+    @classmethod
+    def is_confidential_compute(cls) -> bool:
+        return _detect_confidential_compute()
+
+    @classmethod
     def import_kernels(cls) -> None:
-        """Import CUDA kernel extensions (_C_stable_libtorch, optional _qutlass_C)."""
+        """Import CUDA kernel extensions (_C_stable_libtorch)."""
         try:
             import vllm._C_stable_libtorch  # noqa: F401
         except ImportError as e:
@@ -246,8 +289,6 @@ class CudaPlatformBase(Platform):
             )
         with contextlib.suppress(ImportError):
             import vllm._moe_C_stable_libtorch  # noqa: F401
-        with contextlib.suppress(ImportError):
-            import vllm._qutlass_C  # noqa: F401
 
     @classmethod
     def check_runner_kv_caches_multi_layer(cls) -> None:
@@ -284,7 +325,7 @@ class CudaPlatformBase(Platform):
 
     @classmethod
     def get_cuda_runtime_major(cls) -> int:
-        """Major ``torch.version.cuda`` version, or ``0`` if undetermined."""
+        """Major `torch.version.cuda` version, or `0` if undetermined."""
         major = (torch.version.cuda or "0").split(".", 1)[0]
         return int(major) if major.isdigit() else 0
 
@@ -697,7 +738,7 @@ class CudaPlatformBase(Platform):
         )
 
     @classmethod
-    def is_integrated_gpu(cls, device_id: int = 0) -> bool:
+    def is_integrated_gpu(cls, device_id: int | None = 0) -> bool:
         return bool(torch.cuda.get_device_properties(device_id).is_integrated)
 
     @classmethod

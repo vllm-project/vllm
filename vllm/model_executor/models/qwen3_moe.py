@@ -255,7 +255,6 @@ class Qwen3MoeAttention(nn.Module):
         cache_config: CacheConfig | None = None,
         quant_config: QuantizationConfig | None = None,
         prefix: str = "",
-        dual_chunk_attention_config: dict[str, Any] | None = None,
         mrope_positions_factor: int = 4,
     ) -> None:
         super().__init__()
@@ -279,7 +278,6 @@ class Qwen3MoeAttention(nn.Module):
         self.kv_size = self.num_kv_heads * self.head_dim
         self.scaling = self.head_dim**-0.5
         self.max_position_embeddings = max_position_embeddings
-        self.dual_chunk_attention_config = dual_chunk_attention_config
 
         self.qkv_proj = QKVParallelLinear(
             hidden_size,
@@ -303,15 +301,8 @@ class Qwen3MoeAttention(nn.Module):
             self.head_dim,
             max_position=max_position_embeddings,
             rope_parameters=rope_parameters,
-            dual_chunk_attention_config=dual_chunk_attention_config,
             mrope_positions_factor=mrope_positions_factor,
         )
-        attention_kwargs: dict[str, Any] = {}
-        if dual_chunk_attention_config:
-            attention_kwargs = {
-                "layer_idx": extract_layer_index(prefix),
-                "dual_chunk_attention_config": dual_chunk_attention_config,
-            }
         self.attn = Attention(
             self.num_heads,
             self.head_dim,
@@ -320,7 +311,6 @@ class Qwen3MoeAttention(nn.Module):
             cache_config=cache_config,
             quant_config=quant_config,
             prefix=f"{prefix}.attn",
-            **attention_kwargs,
         )
 
         self.q_norm = RMSNorm(self.head_dim, eps=rms_norm_eps)
@@ -363,9 +353,6 @@ class Qwen3MoeDecoderLayer(nn.Module):
 
         self.hidden_size = config.hidden_size
         max_position_embeddings = getattr(config, "max_position_embeddings", 8192)
-        dual_chunk_attention_config = getattr(
-            config, "dual_chunk_attention_config", None
-        )
         self.self_attn = Qwen3MoeAttention(
             hidden_size=self.hidden_size,
             num_heads=config.num_attention_heads,
@@ -378,7 +365,6 @@ class Qwen3MoeDecoderLayer(nn.Module):
             cache_config=cache_config,
             quant_config=quant_config,
             prefix=f"{prefix}.self_attn",
-            dual_chunk_attention_config=dual_chunk_attention_config,
             mrope_positions_factor=mrope_positions_factor,
         )
 

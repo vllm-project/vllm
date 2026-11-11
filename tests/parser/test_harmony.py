@@ -464,8 +464,11 @@ class TestParse:
                 "I'll search for that",
             ),
             (
-                "<|channel|>commentary<|message|>Let me look that up.<|end|>"
-                "<|start|>assistant<|channel|>final<|message|>The answer is 42.<|end|>",
+                (
+                    "<|channel|>commentary<|message|>Let me look that up.<|end|>"
+                    "<|start|>assistant<|channel|>final<|message|>"
+                    "The answer is 42.<|end|>"
+                ),
                 "Let me look that up.\nThe answer is 42.",
             ),
         ],

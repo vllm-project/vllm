@@ -25,6 +25,10 @@ class FallbackExperts(mk.FusedMoEExpertsModular, ABC):
         self.fallback_experts = fallback_experts
         self.experts = experts
 
+    def keep_constants(self, layer: torch.nn.Module, prefix: str = "_experts_") -> None:
+        self.experts.keep_constants(layer, prefix + "experts_")
+        self.fallback_experts.keep_constants(layer, prefix + "fallback_")
+
     @staticmethod
     def get_clses() -> tuple[
         type[mk.FusedMoEExpertsModular],
@@ -45,8 +49,17 @@ class FallbackExperts(mk.FusedMoEExpertsModular, ABC):
         cls: type["FallbackExperts"],
     ) -> mk.FusedMoEActivationFormat:
         experts_cls, fallback_cls = cls.get_clses()
-        assert experts_cls.activation_format() == fallback_cls.activation_format()
-        return experts_cls.activation_format()
+        experts_format = experts_cls.activation_format()
+        fallback_format = fallback_cls.activation_format()
+        # Either branch may be selected at runtime, so only claim a format both
+        # can consume. PaddedStandard is a superset of Standard, not vice versa.
+        if experts_format.is_superset(fallback_format):
+            return fallback_format
+        assert fallback_format.is_superset(experts_format), (
+            f"{experts_cls.__name__} and {fallback_cls.__name__} consume "
+            "incompatible activation formats"
+        )
+        return experts_format
 
     @classmethod
     def _supports_current_device(cls) -> bool:
