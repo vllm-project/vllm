@@ -526,6 +526,7 @@ def test_deepseek_v4_forward_mqa_matches_reference(
     attn._wo_a_fp8_weight = torch.empty(0) if wo_a_fp8 else None
     attn._use_aiter_sparse_mla_decode = rocm._aiter_sparse_mla_enabled(False)
     attn._use_aiter_sparse_mla_prefill = swa_builder._use_aiter_sparse_mla_prefill
+    attn._plain_fp8_kv = False
 
     output = torch.empty_like(q)
     attn.forward_mqa(q, None, positions, output)
@@ -559,6 +560,7 @@ def test_deepseek_v41_forward_mqa_mxfp8_matches_reference(
         compress_ratio=0,
     )
     attn._use_aiter_sparse_mla = swa_builder._use_aiter_sparse_mla
+    attn._plain_fp8_kv = False
 
     output = attn._alloc_attn_out(q.shape[0], q)
     attn.forward_mqa(q, None, positions, output)
