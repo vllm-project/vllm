@@ -1,23 +1,24 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
-# Ported from vllm-torchtpu's PrefixAwareScheduler
-# (src/vllm_torchtpu/core/prefix_aware_scheduler.py), Copyright 2026 Google LLC,
-# licensed under the Apache License, Version 2.0.
-"""Shortest-prefill-first admission for the "shortest_prefill_first" policy.
+"""Request ordering for the "shortest_prefill_first" scheduling policy.
 
-FCFS admission is oblivious to whether a request's prompt prefix is already
-cached. In multi-turn agentic workloads, admitting a long uncached prompt at
-the head of the queue blocks ready follow-up requests whose prefixes are
-already cached, and under high KV cache utilization can evict those cached
-prefixes before they are reused.
+Before each step, requests whose remaining prefill length is known are sorted
+by it, shortest first, within each queue:
 
-Before each scheduling step, this inspects the ready queue within a lookahead
-window and moves the request with the fewest uncached prompt tokens to the
-front. Preempted requests rank ahead of all others, and ties go to the earliest
-arrival. It modifies only the admission ordering; memory management, eviction
-and preemption are unchanged.
+- running: prefill chunks, by prompt tokens not yet computed.
+- kv_holding_waiting: by tokens not yet computed (their external hit is final).
+- waiting / async_kv_waiting: requests whose external (KV connector) lookup has
+  finished, by prompt tokens not in that hit. A hit of 0 is known.
+
+A request whose remaining length is unknown (no or unfinished external lookup,
+external reads skipped, or a decode) keeps its exact position: known requests
+are only permuted among the positions they already hold, and ties keep their
+current order. Only the order changes; budgets, chunking, lookups, loads,
+allocation and preemption follow the scheduler unchanged, so the preemption
+victim (the last running request) is now the one with the most prefill left.
 """
 
+from collections.abc import Callable, MutableSequence
 from itertools import islice
 from typing import TYPE_CHECKING
 
@@ -27,96 +28,87 @@ from vllm.v1.request import Request
 
 if TYPE_CHECKING:
     from vllm.distributed.kv_transfer.kv_connector.v1 import KVConnectorBase_V1
-    from vllm.v1.core.kv_cache_manager import KVCacheManager
 
 logger = init_logger(__name__)
 
-_LOG_EVERY = 1000
-
-# Priority tiers: lower values admit earlier.
-_TIER_PREEMPTED = 1
-_TIER_NORMAL = 2
+# Waiting-queue entries considered per step.
+WINDOW = 64
 
 
-class ShortestPrefillFirstAdmission:
-    """Admit ready requests prioritizing the fewest uncached prompt tokens."""
+def _sorted_slots(
+    requests: list[Request], key: Callable[[Request], int | None]
+) -> list[Request] | None:
+    """Return `requests` with the known-key ones sorted (stably, ascending)
+    among their own positions, or None if the order does not change."""
+    slots = []
+    keys = []
+    for i, request in enumerate(requests):
+        k = key(request)
+        if k is not None:
+            slots.append(i)
+            keys.append(k)
+    if len(slots) < 2:
+        return None
+    order = sorted(range(len(slots)), key=keys.__getitem__)
+    if order == list(range(len(slots))):
+        return None
+    reordered = list(requests)
+    for slot, src in zip(slots, order):
+        reordered[slot] = requests[slots[src]]
+    return reordered
 
-    #: Lookahead window of ready requests to evaluate for cached prefix length.
-    WINDOW = 64
 
-    def __init__(
-        self,
-        kv_cache_manager: "KVCacheManager",
-        connector: "KVConnectorBase_V1 | None" = None,
-    ) -> None:
-        self.kv_cache_manager = kv_cache_manager
+class ShortestPrefillFirstOrder:
+    """Sorts the scheduler's queues by known remaining prefill tokens."""
+
+    def __init__(self, connector: "KVConnectorBase_V1 | None" = None) -> None:
         self.connector = connector
-        self._n = 0
-        self._cold_tokens = 0
-        self._prompt_tokens = 0
-        self._scoring_broken = False
+        logger.info("Shortest-prefill-first ordering ACTIVE (window=%d)", WINDOW)
 
-        logger.info("Shortest-prefill-first admission ACTIVE (window=%d)", self.WINDOW)
+    @staticmethod
+    def _running_key(request: Request) -> int | None:
+        remaining = request.num_prompt_tokens - request.num_computed_tokens
+        return remaining if remaining > 0 else None
 
-    def _prefix_warmth(self, request: Request) -> int:
-        """Prompt tokens of `request` in the local KV cache or known to be in
-        the external one."""
-        kvm = self.kv_cache_manager
-        if not kvm.enable_caching or request.get_prefix_cache_hit_limit() == 0:
-            return 0
-        if request.num_computed_tokens > 0:
-            return request.num_computed_tokens
-        max_hit = max(request.num_tokens - 1, 0)
-        try:
-            local = int(
-                kvm.coordinator.find_longest_cache_hit(request.block_hashes, max_hit)[1]
-            )
-        except Exception:
-            if not self._scoring_broken:
-                self._scoring_broken = True
-                logger.exception(
-                    "Shortest-prefill-first: warmth scoring failed; "
-                    "falling back to FCFS."
-                )
-            return 0
-        external = None
-        if self.connector is not None and not request.skip_reading_external_kv:
-            external = self.connector.get_known_num_matched_tokens(request)
-        return max(local, min(external or 0, max_hit))
+    @staticmethod
+    def _holding_key(request: Request) -> int:
+        return request.num_tokens - request.num_computed_tokens
 
-    def _rank_and_warmth(
-        self, request: Request
-    ) -> tuple[tuple[int, float, float], int]:
-        """Return (sort_key, warmth). Lower sort_key is admitted first."""
-        warmth = self._prefix_warmth(request)
-        cold_tokens = float(request.num_tokens - warmth)
-        tier = _TIER_PREEMPTED if request.num_preemptions > 0 else _TIER_NORMAL
-        return (tier, cold_tokens, request.arrival_time), warmth
+    def _waiting_key(self, request: Request) -> int | None:
+        if self.connector is None or request.skip_reading_external_kv:
+            return None
+        if request.num_computed_tokens:
+            return request.num_tokens - request.num_computed_tokens
+        hit = self.connector.get_known_num_matched_tokens(request)
+        if hit is None:
+            return None
+        return request.num_tokens - min(hit, request.num_tokens - 1)
 
-    def promote(self, queue: FCFSRequestQueue) -> None:
-        """Promote the request with the fewest uncached tokens within WINDOW."""
-        if len(queue) < 2:
+    @staticmethod
+    def _sort_list(requests: MutableSequence[Request], key) -> None:
+        reordered = _sorted_slots(list(requests), key)
+        if reordered is not None:
+            requests[:] = reordered
+
+    @staticmethod
+    def _sort_queue(queue: FCFSRequestQueue, key, window: int | None) -> None:
+        head = list(queue if window is None else islice(queue, window))
+        reordered = _sorted_slots(head, key)
+        if reordered is None:
             return
+        # Drop the head in one pass and re-insert it in the new order.
+        queue.remove_requests(head)
+        queue.prepend_requests(reversed(reordered))
 
-        window = list(islice(queue, self.WINDOW))
-        head = window[0]
-        scored = [(self._rank_and_warmth(r), r) for r in window]
-        (best_rank, best_warmth), best = min(scored, key=lambda t: t[0][0])
-
-        if best is not head and best_rank < scored[0][0][0]:
-            queue.remove(best)
-            queue.prepend_request(best)
-
-        self._n += 1
-        self._cold_tokens += max(best.num_tokens - best_warmth, 0)
-        self._prompt_tokens += best.num_tokens
-
-        if self._n % _LOG_EVERY == 0:
-            logger.info(
-                "shortest-prefill-first: n=%d mean_cold_tokens=%.0f "
-                "cold_frac=%.3f queue_depth=%d",
-                self._n,
-                self._cold_tokens / self._n,
-                self._cold_tokens / max(self._prompt_tokens, 1),
-                len(queue),
-            )
+    def reorder(
+        self,
+        running: list[Request],
+        kv_holding_waiting: FCFSRequestQueue,
+        waiting_queues: tuple[FCFSRequestQueue, ...],
+    ) -> None:
+        self._sort_list(running, self._running_key)
+        if len(kv_holding_waiting) > 1:
+            self._sort_queue(kv_holding_waiting, self._holding_key, None)
+        for queue in waiting_queues:
+            if len(queue) > 1:
+                self._sort_queue(queue, self._waiting_key, WINDOW)

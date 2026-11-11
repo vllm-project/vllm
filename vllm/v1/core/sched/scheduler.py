@@ -55,7 +55,7 @@ from vllm.v1.core.sched.request_queue import (
     SchedulingPolicy,
     create_request_queue,
 )
-from vllm.v1.core.sched.shortest_prefill_first import ShortestPrefillFirstAdmission
+from vllm.v1.core.sched.shortest_prefill_first import ShortestPrefillFirstOrder
 from vllm.v1.core.sched.utils import check_stop, remove_all
 from vllm.v1.engine import EngineCoreEventType, EngineCoreOutput, EngineCoreOutputs
 from vllm.v1.kv_cache_interface import (
@@ -408,7 +408,7 @@ class Scheduler(SchedulerInterface):
             self.scheduler_config.cache_aware_admission_threshold
         )
         self.shortest_prefill_first = (
-            ShortestPrefillFirstAdmission(self.kv_cache_manager, self.connector)
+            ShortestPrefillFirstOrder(self.connector)
             if self.policy == SchedulingPolicy.SHORTEST_PREFILL_FIRST
             else None
         )
@@ -692,9 +692,14 @@ class Scheduler(SchedulerInterface):
     def schedule(self, throttle_prefills: bool = False) -> SchedulerOutput:
         self.current_step += 1
         if self.shortest_prefill_first is not None:
-            queue = self.kv_holding_waiting or self.waiting
-            assert isinstance(queue, FCFSRequestQueue)
-            self.shortest_prefill_first.promote(queue)
+            assert isinstance(self.waiting, FCFSRequestQueue)
+            assert isinstance(self.kv_holding_waiting, FCFSRequestQueue)
+            assert isinstance(self.async_kv_waiting, FCFSRequestQueue)
+            self.shortest_prefill_first.reorder(
+                self.running,
+                self.kv_holding_waiting,
+                (self.waiting, self.async_kv_waiting),
+            )
         # NOTE(woosuk) on the scheduling algorithm:
         # There's no "decoding phase" nor "prefill phase" in the scheduler.
         # Each request just has the num_computed_tokens and

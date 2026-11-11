@@ -1269,19 +1269,43 @@ def test_cache_aware_admission_prefers_cached_prefix():
     assert [r.req_id for r in output.scheduled_new_reqs] == ["warm", "cold"]
 
 
-def test_shortest_prefill_first_policy_admits_cached_request_first():
-    """Under the shortest_prefill_first policy, a later request whose prompt is
-    mostly cached is admitted ahead of an earlier one that must compute all of
-    its prompt."""
-    scheduler, warm, cold = _setup_cache_aware(
-        scheduling_policy="shortest_prefill_first"
+def _two_running_prefills(policy: str) -> dict[str, int]:
+    """Admit a long then a short prompt, both chunked by a 32-token cap, and
+    return the tokens each gets in the next step, when the 40-token budget
+    cannot cover both chunks."""
+    scheduler = create_scheduler(
+        max_num_batched_tokens=40,
+        long_prefill_token_threshold=32,
+        scheduling_policy=policy,
     )
-    assert scheduler.shortest_prefill_first is not None
-    scheduler.add_request(cold)
-    scheduler.add_request(warm)
+    long_req = create_requests(num_requests=1, num_tokens=200, req_ids=["long"])[0]
+    short_req = create_requests(num_requests=1, num_tokens=40, req_ids=["short"])[0]
+    scheduler.add_request(long_req)
+    scheduler.add_request(short_req)
 
     output = scheduler.schedule()
-    assert [r.req_id for r in output.scheduled_new_reqs] == ["warm", "cold"]
+    assert output.num_scheduled_tokens == {"long": 32, "short": 8}
+    scheduler.update_from_output(
+        output,
+        ModelRunnerOutput(
+            req_ids=["long", "short"],
+            sampled_token_ids=[[], []],
+            logprobs=None,
+            prompt_logprobs_dict={},
+            pooler_output=[],
+        ),
+    )
+    return scheduler.schedule().num_scheduled_tokens
+
+
+def test_shortest_prefill_first_policy_runs_shortest_prefill_first():
+    """Under shortest_prefill_first, the running prefill with fewer prompt
+    tokens left takes the budget first; fcfs keeps admission order."""
+    assert _two_running_prefills("fcfs") == {"long": 32, "short": 8}
+    assert _two_running_prefills("shortest_prefill_first") == {
+        "short": 32,
+        "long": 8,
+    }
 
 
 def test_fcfs_policy_admits_in_arrival_order():

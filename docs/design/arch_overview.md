@@ -152,11 +152,12 @@ Three policies are supported via `--scheduling-policy`:
 - **Priority**: requests carry an integer `priority` field. When the KV cache
     is exhausted, the running request with the lowest priority (highest
     `priority` value, then latest arrival time) is preempted.
-- **Shortest prefill first**: before each step, the waiting request with the
-    fewest prompt tokens not in the prefix cache, among the first 64, is
-    admitted first. Preempted requests go ahead of all others and arrival time
-    breaks ties; the rest of the queue keeps arrival order. Preemption is the
-    same as FCFS.
+- **Shortest prefill first**: before each step, requests whose remaining
+    prefill length is known are ordered shortest first within each queue:
+    running prefills, requests holding KV blocks (e.g. loaded from a KV
+    connector), and waiting requests whose KV connector lookup has finished.
+    Other requests keep their positions. Preemption takes the last running
+    request, as under FCFS, which is then the one with the most prefill left.
 
 ### Preemption
 

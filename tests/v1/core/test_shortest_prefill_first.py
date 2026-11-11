@@ -1,204 +1,132 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
-# Ported from vllm-torchtpu's tests/test_prefix_aware_scheduler.py,
-# Copyright 2026 Google LLC, licensed under the Apache License, Version 2.0.
 
-import time
-from types import SimpleNamespace
+from typing import Any
 from unittest.mock import MagicMock
 
+from vllm.v1.core.sched import shortest_prefill_first as spf
 from vllm.v1.core.sched.request_queue import FCFSRequestQueue
-from vllm.v1.core.sched.shortest_prefill_first import ShortestPrefillFirstAdmission
+from vllm.v1.core.sched.shortest_prefill_first import ShortestPrefillFirstOrder
 
 
-def _make_request(
+class _Req:
+    """Hashable stand-in for Request (queues keep requests in sets)."""
+
+    def __init__(self, **fields):
+        self.__dict__.update(fields)
+
+
+def _req(
     request_id: str,
     num_tokens: int = 1000,
-    arrival_time: float = 0.0,
-    num_preemptions: int = 0,
     num_computed_tokens: int = 0,
-    skip_reading_prefix_cache: bool = False,
+    num_prompt_tokens: int | None = None,
     skip_reading_external_kv: bool = False,
-) -> SimpleNamespace:
-    hit_limit = 0 if skip_reading_prefix_cache else None
-    return SimpleNamespace(
+) -> Any:
+    return _Req(
         request_id=request_id,
         num_tokens=num_tokens,
-        arrival_time=arrival_time,
-        num_preemptions=num_preemptions,
+        num_prompt_tokens=num_tokens
+        if num_prompt_tokens is None
+        else num_prompt_tokens,
         num_computed_tokens=num_computed_tokens,
-        get_prefix_cache_hit_limit=lambda: hit_limit,
         skip_reading_external_kv=skip_reading_external_kv,
-        block_hashes=[object()],
     )
 
 
-def _make_admission(
-    requests: list[SimpleNamespace],
-    warmth_map: dict[str, int],
-    window: int = 64,
-    enable_caching: bool = True,
-    raise_on_lookup: bool = False,
-    external_hits: dict[str, int | None] | None = None,
-) -> tuple[ShortestPrefillFirstAdmission, FCFSRequestQueue]:
-    queue = FCFSRequestQueue()
-    for r in requests:
-        queue.add_request(r)
-
-    def find_hit(block_hashes, max_len):
-        if raise_on_lookup:
-            raise RuntimeError("simulated coordinator failure")
-        for r in requests:
-            if r.block_hashes is block_hashes:
-                return ({}, warmth_map.get(r.request_id, 0), 0)
-        return ({}, 0, 0)
-
-    kvm = MagicMock()
-    kvm.enable_caching = enable_caching
-    kvm.coordinator.find_longest_cache_hit.side_effect = find_hit
-
+def _order(external_hits: dict[str, int | None] | None) -> ShortestPrefillFirstOrder:
     connector = None
     if external_hits is not None:
         connector = MagicMock()
         connector.get_known_num_matched_tokens.side_effect = lambda r: (
             external_hits.get(r.request_id)
         )
-    admission = ShortestPrefillFirstAdmission(kvm, connector)
-    admission.WINDOW = window
-    return admission, queue
+    return ShortestPrefillFirstOrder(connector)
 
 
-def _promoted_order(admission, queue) -> list[str]:
-    admission.promote(queue)
-    return [r.request_id for r in queue]
+def _queue(requests) -> FCFSRequestQueue:
+    queue = FCFSRequestQueue()
+    for r in requests:
+        queue.add_request(r)
+    return queue
 
 
-def test_default_knobs():
-    assert ShortestPrefillFirstAdmission.WINDOW == 64
+def _ids(requests) -> list[str]:
+    return [r.request_id for r in requests]
 
 
-def test_promotes_warmest_within_window():
-    now = time.time()
-    r_cold = _make_request("cold", num_tokens=1000, arrival_time=now - 10)
-    r_warm = _make_request("warm", num_tokens=1000, arrival_time=now - 5)
-    admission, queue = _make_admission([r_cold, r_warm], {"cold": 0, "warm": 800})
-    assert _promoted_order(admission, queue) == ["warm", "cold"]
+def _reorder(order, running=(), holding=(), waiting=()):
+    running = list(running)
+    holding_q, waiting_q, async_q = _queue(holding), _queue(waiting), _queue([])
+    order.reorder(running, holding_q, (waiting_q, async_q))
+    return _ids(running), _ids(holding_q), _ids(waiting_q)
 
 
-def test_ranks_by_uncached_tokens_not_hit_ratio():
-    now = time.time()
-    # 100k tokens, 90% cached -> 10k uncached tokens
-    r_long = _make_request("long", num_tokens=100_000, arrival_time=now - 10)
-    # 20k tokens, 80% cached -> 4k uncached tokens (fewer uncached tokens wins)
-    r_short = _make_request("short", num_tokens=20_000, arrival_time=now - 5)
-    admission, queue = _make_admission(
-        [r_long, r_short], {"long": 90_000, "short": 16_000}
-    )
-    assert _promoted_order(admission, queue) == ["short", "long"]
+def test_running_prefills_sorted_decodes_keep_positions():
+    running = [
+        _req("big", num_tokens=9000, num_computed_tokens=1000),  # 8000 left
+        _req("decode", num_tokens=501, num_computed_tokens=500, num_prompt_tokens=400),
+        _req("small", num_tokens=3000, num_computed_tokens=2500),  # 500 left
+        _req("mid", num_tokens=5000, num_computed_tokens=3000),  # 2000 left
+    ]
+    ids, _, _ = _reorder(_order(None), running=running)
+    assert ids == ["small", "decode", "mid", "big"]
 
 
-def test_fcfs_order_preserved_when_all_cold():
-    now = time.time()
-    r1 = _make_request("r1", num_tokens=1000, arrival_time=now - 10)
-    r2 = _make_request("r2", num_tokens=1000, arrival_time=now - 5)
-    admission, queue = _make_admission([r1, r2], {"r1": 0, "r2": 0})
-    assert _promoted_order(admission, queue) == ["r1", "r2"]
+def test_kv_holding_sorted_by_tokens_left_to_compute():
+    holding = [
+        _req("h1", num_tokens=100_000, num_computed_tokens=90_000),
+        _req("h2", num_tokens=100_000, num_computed_tokens=99_000),
+        _req("h3", num_tokens=50_000, num_computed_tokens=45_000),
+    ]
+    _, ids, _ = _reorder(_order({}), holding=holding)
+    assert ids == ["h2", "h3", "h1"]
 
 
-def test_preempted_tier_outranks_normal():
-    now = time.time()
-    r_preempted = _make_request(
-        "preempted", num_tokens=1000, arrival_time=now - 5, num_preemptions=1
-    )
-    r_warm = _make_request("warm", num_tokens=1000, arrival_time=now - 10)
-    admission, queue = _make_admission(
-        [r_preempted, r_warm], {"preempted": 0, "warm": 900}
-    )
-    assert _promoted_order(admission, queue) == ["preempted", "warm"]
+def test_waiting_known_hits_sorted_unknown_keep_positions():
+    waiting = [
+        _req("unknown_a", num_tokens=1000),
+        _req("cold", num_tokens=1000),  # known hit 0 -> 1000 to compute
+        _req("unknown_b", num_tokens=1000),
+        _req("warm", num_tokens=1000),  # 100 to compute
+        _req("skip", num_tokens=1000, skip_reading_external_kv=True),
+        _req("mid", num_tokens=1000),  # 400 to compute
+    ]
+    hits = {"cold": 0, "warm": 900, "mid": 600, "skip": 999}
+    _, _, ids = _reorder(_order(hits), waiting=waiting)
+    assert ids == ["unknown_a", "warm", "unknown_b", "mid", "skip", "cold"]
 
 
-def test_window_bounds_evaluation():
-    now = time.time()
-    r1 = _make_request("r1", num_tokens=1000, arrival_time=now - 15)
-    r2 = _make_request("r2", num_tokens=1000, arrival_time=now - 10)
-    r_outside = _make_request("outside", num_tokens=1000, arrival_time=now - 5)
-    # window = 2, so r_outside is beyond the inspection window
-    admission, queue = _make_admission(
-        [r1, r2, r_outside], {"r1": 100, "r2": 200, "outside": 999}, window=2
-    )
-    assert _promoted_order(admission, queue)[0] == "r2"
+def test_full_hit_still_computes_last_token():
+    waiting = [_req("full", num_tokens=1000), _req("near", num_tokens=1000)]
+    _, _, ids = _reorder(_order({"full": 1000, "near": 998}), waiting=waiting)
+    assert ids == ["full", "near"]  # 1 vs 2 tokens left
 
 
-def test_single_or_empty_queue_is_noop():
-    admission, queue = _make_admission([_make_request("single")], {"single": 500})
-    assert _promoted_order(admission, queue) == ["single"]
-
-    admission, queue = _make_admission([], {})
-    assert _promoted_order(admission, queue) == []
-
-
-def test_uses_num_computed_tokens_when_present():
-    now = time.time()
-    r1 = _make_request("r1", num_tokens=1000, arrival_time=now - 10)
-    r2 = _make_request(
-        "r2", num_tokens=1000, arrival_time=now - 5, num_computed_tokens=900
-    )
-    admission, queue = _make_admission([r1, r2], {"r1": 0, "r2": 0})
-    assert _promoted_order(admission, queue) == ["r2", "r1"]
+def test_ties_and_already_sorted_keep_order():
+    waiting = [_req("a"), _req("b"), _req("c")]
+    _, _, ids = _reorder(_order({"a": 500, "b": 500, "c": 900}), waiting=waiting)
+    assert ids == ["c", "a", "b"]
+    _, _, ids = _reorder(_order({"a": 900, "b": 500, "c": 500}), waiting=waiting)
+    assert ids == ["a", "b", "c"]
 
 
-def test_skip_reading_prefix_cache_or_caching_disabled():
-    now = time.time()
-    r1 = _make_request("r1", num_tokens=1000, arrival_time=now - 10)
-    r2 = _make_request(
-        "r2", num_tokens=1000, arrival_time=now - 5, skip_reading_prefix_cache=True
-    )
-    admission, queue = _make_admission([r1, r2], {"r1": 0, "r2": 900})
-    assert _promoted_order(admission, queue) == ["r1", "r2"]
-
-    admission, queue = _make_admission(
-        [r1, _make_request("r3", num_tokens=1000, arrival_time=now - 5)],
-        {"r1": 0, "r3": 900},
-        enable_caching=False,
-    )
-    assert _promoted_order(admission, queue) == ["r1", "r3"]
+def test_no_connector_leaves_waiting_untouched():
+    waiting = [_req("a"), _req("b", num_tokens=10)]
+    _, _, ids = _reorder(_order(None), waiting=waiting)
+    assert ids == ["a", "b"]
 
 
-def test_coordinator_failure_falls_back_to_fcfs():
-    now = time.time()
-    r1 = _make_request("r1", num_tokens=1000, arrival_time=now - 10)
-    r2 = _make_request("r2", num_tokens=1000, arrival_time=now - 5)
-    admission, queue = _make_admission(
-        [r1, r2], {"r1": 0, "r2": 500}, raise_on_lookup=True
-    )
-    assert _promoted_order(admission, queue) == ["r1", "r2"]
-    assert admission._scoring_broken is True
+def test_waiting_window_bounds_reordering(monkeypatch):
+    monkeypatch.setattr(spf, "WINDOW", 2)
+    waiting = [_req("a"), _req("b"), _req("c")]
+    _, _, ids = _reorder(_order({"a": 0, "b": 500, "c": 999}), waiting=waiting)
+    assert ids == ["b", "a", "c"]
 
 
-def test_ranks_by_tokens_not_in_local_or_known_external_cache():
-    now = time.time()
-    # "local" has 600 tokens in the GPU cache, "external" 900 in the external
-    # cache only: fewer tokens are left to prefill for "external".
-    r_local = _make_request("local", num_tokens=1000, arrival_time=now - 10)
-    r_external = _make_request("external", num_tokens=1000, arrival_time=now - 5)
-    admission, queue = _make_admission(
-        [r_local, r_external],
-        {"local": 600, "external": 0},
-        external_hits={"local": None, "external": 900},
-    )
-    assert _promoted_order(admission, queue) == ["external", "local"]
-
-
-def test_unknown_or_skipped_external_hit_counts_local_only():
-    now = time.time()
-    r_local = _make_request("local", num_tokens=1000, arrival_time=now - 10)
-    r_unknown = _make_request("unknown", num_tokens=1000, arrival_time=now - 5)
-    r_skip = _make_request(
-        "skip", num_tokens=1000, arrival_time=now - 1, skip_reading_external_kv=True
-    )
-    admission, queue = _make_admission(
-        [r_local, r_unknown, r_skip],
-        {"local": 600, "unknown": 300, "skip": 0},
-        external_hits={"local": None, "unknown": None, "skip": 950},
-    )
-    assert _promoted_order(admission, queue) == ["local", "unknown", "skip"]
+def test_queue_order_preserved_end_to_end():
+    """Unsorted tail beyond the window stays behind the reordered head."""
+    waiting = [_req(str(i)) for i in range(5)]
+    hits = {"0": 0, "1": 100, "2": 900}
+    _, _, ids = _reorder(_order(hits), waiting=waiting)
+    assert ids == ["2", "1", "0", "3", "4"]
