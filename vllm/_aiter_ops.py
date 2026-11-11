@@ -391,9 +391,10 @@ def _rocm_aiter_fused_moe_impl(
         )
     if q_dtype_a is not None:
         # DeepSeek V4.1 a4w4 override (use_mxfp4_w4a4_dsv4 in
-        # rocm_aiter_moe.py). rocm_aiter_ops.fused_moe_supports_quant_dtype_a()
-        # is checked at config time, so this is only reached on an AITER
-        # build new enough to accept it.
+        # rocm_aiter_moe.py) or an MXFP8 deferred_activation_key (Mxfp4MoEMethod).
+        # rocm_aiter_ops.fused_moe_supports_quant_dtype_a() is checked at config
+        # time for both, so this is only reached on an AITER build new enough to
+        # accept it.
         extra_kwargs["quant_dtype_a"] = q_dtype_a
 
     return fused_moe(

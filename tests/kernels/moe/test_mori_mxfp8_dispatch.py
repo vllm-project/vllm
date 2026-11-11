@@ -2,15 +2,15 @@
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 """MXFP8 activation dispatch for MoRI (ROCm).
 
-MXFP4 w4a16 experts declare BF16 activations, but AITER quantizes them to
-group-32 MXFP8 before stage 1 -- once on every rank a token was replicated to.
-Quantizing in prepare() instead moves that to the rank that owns the token and
-halves the dispatch payload.
+AITER's MXFP4 w4a16 experts take BF16 input and quantize it to group-32 MXFP8
+before stage 1 -- once on every rank a token was replicated to. Quantizing in
+prepare() instead moves that to the rank that owns the token and halves the
+dispatch payload.
 
-The pre-quantized operand is only safe where AITER would have produced MXFP8
-itself, so the gate asks AITER's own resolver. These tests pin the resolver's
-answers against the gate's, check that each guard independently fails closed,
-and cover the MoRI buffer sizing and the quant prepare() applies.
+Whether to comes from the MoE activation key: the model's default (MXFP8 for
+DeepSeek-V4.1-Flash) or the user's quantization_config.moe.activation, which
+takes precedence. These tests cover that choice, the MoRI buffer sizing, and
+the quant prepare() applies.
 """
 
 import dataclasses
@@ -29,21 +29,18 @@ if not current_platform.is_rocm():
 
 from tests.kernels.moe.utils import make_dummy_moe_config  # noqa: E402
 from vllm._aiter_ops import rocm_aiter_ops  # noqa: E402
-from vllm.model_executor.layers.fused_moe.activation import (  # noqa: E402
-    MoEActivation,
-)
 from vllm.model_executor.layers.fused_moe.all2all_utils import (  # noqa: E402
-    _AITER_MOE_ACTIVATION_NAMES,
     MXFP8_GROUP_SIZE,
     maybe_make_prepare_finalize,
-    mori_use_mxfp8_dispatch,
 )
 from vllm.model_executor.layers.fused_moe.config import (  # noqa: E402
     FusedMoEParallelConfig,
     FusedMoEQuantConfig,
-    fp8_w8a8_moe_quant_config,
-    mxfp4_moe_quant_config,
     mxfp4_w4a16_moe_quant_config,
+)
+from vllm.model_executor.layers.quantization.utils.quant_utils import (  # noqa: E402
+    kMxfp4Dynamic,
+    kMxfp8Dynamic,
 )
 from vllm.platforms.rocm import on_gfx950  # noqa: E402
 from vllm.utils.import_utils import has_mori  # noqa: E402
@@ -51,174 +48,56 @@ from vllm.utils.import_utils import has_mori  # noqa: E402
 HIDDEN_DIM = 2048
 
 
-def _aiter_moe_resolver_available() -> bool:
+def _aiter_available() -> bool:
     try:
-        from aiter import QuantType, dtypes  # noqa: F401
-        from aiter.fused_moe import resolve_activation_dtype  # noqa: F401
-        from aiter.ops.flydsl.moe_common import GateMode  # noqa: F401
+        import aiter  # noqa: F401
     except ImportError:
         return False
     return True
 
 
-# resolve_activation_dtype() only answers fp8 on gfx950; everywhere else the
-# MXFP4 path keeps BF16 activations and there is nothing to pre-quantize.
+# AITER's MXFP4 w4a16 experts, and so the MXFP8 they run, are gfx950 only.
 requires_aiter_on_gfx950 = pytest.mark.skipif(
-    not (on_gfx950() and _aiter_moe_resolver_available()),
-    reason="needs an AITER build with resolve_activation_dtype() on gfx950",
+    not (on_gfx950() and _aiter_available()),
+    reason="needs AITER on gfx950",
 )
 
 
 @pytest.fixture
 def aiter_moe_env(monkeypatch):
-    """Set AITER's MoE knobs, yielding a setter for the per-test ones.
+    """Enable AITER MoE, which MoRI EPv1 requires.
 
-    VLLM_ROCM_USE_AITER_MOE_SITUV2 is mirrored into the AITER_SITUV2_* env
-    AITER itself reads, and rocm_aiter_ops caches it on the class, so both have
-    to be re-derived on every change and once more after monkeypatch rolls the
-    environment back.
+    rocm_aiter_ops caches the env on the class, so it has to be re-derived
+    after the change and once more after monkeypatch rolls it back.
     """
-
-    def configure(**env: str):
-        for name, value in env.items():
-            monkeypatch.setenv(name, value)
-        rocm_aiter_ops.refresh_env_variables()
-
     monkeypatch.delenv("VLLM_ROCM_USE_AITER_MOE_A4W4_DSV4", raising=False)
-    monkeypatch.delenv("AITER_BF16_FP8_MOE_BOUND", raising=False)
-    configure(
-        VLLM_ROCM_USE_AITER="1",
-        VLLM_ROCM_USE_AITER_MOE="1",
-        VLLM_ROCM_USE_AITER_FUSION_SHARED_EXPERTS="0",
-    )
-    yield configure
+    monkeypatch.setenv("VLLM_ROCM_USE_AITER", "1")
+    monkeypatch.setenv("VLLM_ROCM_USE_AITER_MOE", "1")
+    monkeypatch.setenv("VLLM_ROCM_USE_AITER_FUSION_SHARED_EXPERTS", "0")
+    rocm_aiter_ops.refresh_env_variables()
+    yield
     monkeypatch.undo()
     rocm_aiter_ops.refresh_env_variables()
 
 
-def _w4a16_moe(activation=MoEActivation.SILU, hidden_dim=HIDDEN_DIM):
+def _w4a16_moe():
     """A w4a16 MoE config in the shape the DeepSeek-V4.1-Flash experts use."""
     return make_dummy_moe_config(
         num_experts=32,
         num_local_experts=16,
         experts_per_token=6,
-        hidden_dim=hidden_dim,
+        hidden_dim=HIDDEN_DIM,
         intermediate_size=512,
-        activation=activation,
     )
 
 
-def _w4a16_quant() -> FusedMoEQuantConfig:
+def _w4a16_quant(
+    deferred_activation_key=None,
+) -> FusedMoEQuantConfig:
     # Scales are never read here: nothing in this file runs an expert.
-    return mxfp4_w4a16_moe_quant_config(w1_scale=None, w2_scale=None)
-
-
-# Every expert configuration AiterExperts can reach from a w4a16 quant config,
-# against the dtype AITER resolves its activations to. Only fp8 may be
-# dispatched pre-quantized: a bf16 kernel would cast the payload back and never
-# apply the scales, and an fp4x2 one would hand it to an MXFP4 quant that takes
-# BF16/FP16 only. "bound" is AITER_BF16_FP8_MOE_BOUND, which decides the
-# Silu/Swiglu-on-INTERLEAVE branch and which vLLM pins to 0 for these models.
-_GATE_CASES = [
-    # (activation, SiTUv2 mode, bound, gate mode, dtype AITER resolves)
-    pytest.param(MoEActivation.SILU, None, "0", "INTERLEAVE", "fp8", id="silu"),
-    pytest.param(MoEActivation.GELU, None, "0", "INTERLEAVE", "fp8", id="gelu"),
-    pytest.param(MoEActivation.SWIGLUOAI, None, "0", "INTERLEAVE", "fp8", id="swiglu"),
-    # Unpinned, the branch depends on the token count, which does not exist
-    # when the dispatch buffers are sized: AITER declines to answer at all.
-    pytest.param(MoEActivation.SILU, None, None, "INTERLEAVE", None, id="unbounded"),
-    # SiTU reads AITER_SITUV2_* instead, and only a8w4 resolves to fp8. Asking
-    # about a stand-in activation here reads AITER_BF16_FP8_MOE_BOUND, which
-    # says nothing about these experts -- that is how a4w4 was let through.
-    pytest.param(MoEActivation.SITU, "a8w4", "0", "INTERLEAVE", "fp8", id="situ-a8w4"),
-    pytest.param(MoEActivation.SITU, "a4w4", "0", "SEPARATED", "fp4x2", id="situ-a4w4"),
-    pytest.param(
-        MoEActivation.SITU, "a16w4", "0", "SEPARATED", "bf16", id="situ-a16w4"
-    ),
-]
-
-
-@requires_aiter_on_gfx950
-@pytest.mark.parametrize("activation,situv2,bound,gate_mode,resolved", _GATE_CASES)
-def test_gate_follows_aiter_activation_dtype(
-    aiter_moe_env, activation, situv2, bound, gate_mode, resolved
-):
-    """The gate must turn on exactly where AITER resolves these experts to fp8.
-
-    Asserting AITER's answer as well as the gate's keeps the two failures
-    apart: AITER changing its mind about a configuration reads differently from
-    the gate drifting away from it.
-    """
-    env = {} if bound is None else {"AITER_BF16_FP8_MOE_BOUND": bound}
-    if situv2 is not None:
-        env["VLLM_ROCM_USE_AITER_MOE_SITUV2"] = situv2
-    aiter_moe_env(**env)
-
-    from aiter import QuantType, dtypes
-    from aiter.fused_moe import resolve_activation_dtype
-    from aiter.ops.flydsl.moe_common import GateMode
-
-    expected_dtype = None if resolved is None else getattr(dtypes, resolved)
-    assert expected_dtype == resolve_activation_dtype(
-        QuantType.per_1x32,
-        dtypes.fp4x2,
-        activation=rocm_aiter_ops.get_aiter_activation_type(
-            _AITER_MOE_ACTIVATION_NAMES[activation]
-        ),
-        gate_mode=getattr(GateMode, gate_mode),
-        M=None,
-    ), f"AITER no longer resolves this configuration's activations to {resolved}"
-
-    enabled = mori_use_mxfp8_dispatch(_w4a16_moe(activation=activation), _w4a16_quant())
-    assert enabled is (expected_dtype == dtypes.fp8), (
-        f"the dispatch must follow AITER, which quantizes {activation.value} "
-        f"activations to {resolved} here"
-    )
-
-
-@requires_aiter_on_gfx950
-@pytest.mark.parametrize(
-    "case",
-    ["w4a4", "fp8_block", "dsv4_a4w4", "ragged_hidden_dim", "foreign_activation"],
-)
-def test_gate_fails_closed(aiter_moe_env, case):
-    """Each guard alone must turn off a configuration that is otherwise on.
-
-    None of these resolve to fp8 through the query above, so dispatching a
-    pre-quantized payload would either lose the scales or hand an FP8 tensor
-    to a quant kernel that only accepts BF16/FP16.
-    """
-    aiter_moe_env(AITER_BF16_FP8_MOE_BOUND="0")
-
-    moe, quant = _w4a16_moe(), _w4a16_quant()
-    assert mori_use_mxfp8_dispatch(moe, quant), (
-        "the DeepSeek-V4.1-Flash shape (w4a16, silu, hidden 2048) with the "
-        "pinned FP8 bound is the configuration this dispatch exists for, so "
-        f"the {case} guard below has nothing to turn off"
-    )
-
-    if case == "w4a4":
-        # The experts already consume dispatched MXFP4; MXFP8 is not an option.
-        quant = mxfp4_moe_quant_config(w1_scale=None, w2_scale=None)
-    elif case == "fp8_block":
-        # Not an MXFP4 model at all -- the per-1x128 FP8 dispatch owns this.
-        quant = fp8_w8a8_moe_quant_config(
-            w1_scale=None, w2_scale=None, block_shape=[128, 128]
-        )
-    elif case == "dsv4_a4w4":
-        # This opt-in overrides q_dtype_a on the fused_moe() call itself, so no
-        # query of the resolver can see the decision.
-        moe = dataclasses.replace(moe, use_mxfp4_w4a4_dsv4=True)
-    elif case == "ragged_hidden_dim":
-        # E8M0 scales cover exactly 32 elements; a partial group has no scale.
-        moe = _w4a16_moe(hidden_dim=HIDDEN_DIM + 16)
-    elif case == "foreign_activation":
-        # AiterExperts rejects this activation, so nothing resolves a dtype.
-        moe = _w4a16_moe(activation=MoEActivation.SWIGLUSTEP)
-
-    assert not mori_use_mxfp8_dispatch(moe, quant), (
-        f"{case} must fall back to the BF16 dispatch: AITER would not have "
-        "produced MXFP8 activations for it"
+    return dataclasses.replace(
+        mxfp4_w4a16_moe_quant_config(w1_scale=None, w2_scale=None),
+        deferred_activation_key=deferred_activation_key,
     )
 
 
@@ -254,7 +133,7 @@ def _mori_moe():
 requires_mori = pytest.mark.skipif(not has_mori(), reason="mori is not installed")
 
 
-def _make_mori_dispatch():
+def _make_mori_dispatch(quant_config: FusedMoEQuantConfig):
     """Return the MoRI adapter and the buffer args MoRI would be built with."""
     from vllm.model_executor.layers.fused_moe.prepare_finalize.mori import (
         MoriPrepareAndFinalize,
@@ -262,11 +141,98 @@ def _make_mori_dispatch():
 
     manager = _RecordingAll2AllManager()
     prepare_finalize = maybe_make_prepare_finalize(
-        _mori_moe(), _w4a16_quant(), all2all_manager=manager
+        _mori_moe(), quant_config, all2all_manager=manager
     )
     assert isinstance(prepare_finalize, MoriPrepareAndFinalize)
     assert manager.all_to_all_args is not None
     return prepare_finalize, manager.all_to_all_args
+
+
+# quantization_config from DeepSeek-V4.1-Flash's config.json.
+DSV41_FLASH_QUANT_CONFIG = {
+    "quant_method": "fp8",
+    "activation_scheme": "dynamic",
+    "weight_block_size": [32, 32],
+    "scale_fmt": "ue8m0",
+    "expert_dtype": "fp4",
+}
+
+
+def _dsv41_flash_experts_quant_config(monkeypatch, moe_activation):
+    """The quant config DeepSeek-V4.1-Flash's routed experts build, with
+    quantization_config.moe.activation set to ``moe_activation`` (or unset)."""
+    from vllm.config.quantization import QuantizationConfigArgs
+    from vllm.model_executor.layers.fused_moe import RoutedExperts
+    from vllm.model_executor.layers.fused_moe.experts.rocm_aiter_moe import (
+        AiterMxfp4Experts,
+    )
+    from vllm.model_executor.layers.fused_moe.oracle import mxfp4 as mxfp4_oracle
+    from vllm.model_executor.layers.quantization import mxfp4 as mxfp4_quant
+    from vllm.models.deepseek_v41 import quant_config as dsv41_quant_config
+
+    user_args = (
+        None
+        if moe_activation is None
+        else QuantizationConfigArgs(moe={"activation": moe_activation})
+    )
+    vllm_config = SimpleNamespace(
+        model_config=SimpleNamespace(
+            hf_config=SimpleNamespace(
+                expert_dtype="fp4", quantization_config=DSV41_FLASH_QUANT_CONFIG
+            ),
+            quantization_config=user_args,
+        )
+    )
+    monkeypatch.setattr(
+        dsv41_quant_config, "get_current_vllm_config", lambda: vllm_config
+    )
+    monkeypatch.setattr(mxfp4_oracle, "get_current_vllm_config", lambda: vllm_config)
+    # What MI355X selects for these experts, without depending on the device
+    # or AITER build the test runs on.
+    monkeypatch.setattr(
+        mxfp4_quant,
+        "select_deepseek_v4_mxfp4_moe_backend",
+        lambda moe: (mxfp4_oracle.Mxfp4MoeBackend.AITER_MXFP4_BF16, AiterMxfp4Experts),
+    )
+    monkeypatch.setattr(
+        rocm_aiter_ops, "fused_moe_supports_quant_dtype_a", lambda: True
+    )
+
+    quant_config = dsv41_quant_config.DeepseekV4FP8Config.from_config(
+        dict(DSV41_FLASH_QUANT_CONFIG)
+    )
+    # get_quant_method() reads nothing from the layer but its moe_config.
+    layer = RoutedExperts.__new__(RoutedExperts)
+    layer.__dict__["moe_config"] = _mori_moe()
+    method = quant_config.get_quant_method(layer, prefix="model.layers.3.ffn.experts")
+    assert isinstance(method, mxfp4_quant.Mxfp4MoEMethod)
+    return method.get_fused_moe_quant_config(
+        SimpleNamespace(w13_weight_scale=None, w2_weight_scale=None)
+    )
+
+
+@requires_aiter_on_gfx950
+@requires_mori
+@pytest.mark.parametrize(
+    "moe_activation,dispatch_dtype",
+    [
+        # The checkpoint names no activation scheme for its experts, so this is
+        # the MXFP8 DeepseekV4FP8Config defaults to.
+        pytest.param(None, current_platform.fp8_dtype(), id="checkpoint-default"),
+        # These experts cannot run MXFP4 activations, so the override turns the
+        # MXFP8 default off rather than being outvoted by it.
+        pytest.param("mxfp4", torch.bfloat16, id="user-override"),
+    ],
+)
+def test_dsv41_flash_dispatch_dtype(
+    aiter_moe_env, monkeypatch, moe_activation, dispatch_dtype
+):
+    """The dispatch dtype follows the MoE activation key, user over model."""
+    quant_config = _dsv41_flash_experts_quant_config(monkeypatch, moe_activation)
+    prepare_finalize, args = _make_mori_dispatch(quant_config)
+
+    assert args["quant_dtype"] == dispatch_dtype
+    assert prepare_finalize.use_mxfp8_dispatch is (dispatch_dtype != torch.bfloat16)
 
 
 @requires_aiter_on_gfx950
@@ -277,8 +243,7 @@ def test_mori_buffers_carry_fp8_tokens_and_byte_scales(aiter_moe_env):
     E8M0 exponents are one byte each, not the fp32 the per-token and per-tensor
     FP8 dispatches transport, and there is one per 32-element group.
     """
-    aiter_moe_env(AITER_BF16_FP8_MOE_BOUND="0")
-    prepare_finalize, args = _make_mori_dispatch()
+    prepare_finalize, args = _make_mori_dispatch(_w4a16_quant(kMxfp8Dynamic))
 
     assert prepare_finalize.use_mxfp8_dispatch
     assert not prepare_finalize.use_fp8_dispatch
@@ -294,9 +259,12 @@ def test_mori_buffers_carry_fp8_tokens_and_byte_scales(aiter_moe_env):
 
 @requires_aiter_on_gfx950
 @requires_mori
-def test_mori_buffers_stay_bf16_when_the_gate_is_off(aiter_moe_env):
-    """With the gate off nothing is pre-quantized, so no scales are carried."""
-    prepare_finalize, args = _make_mori_dispatch()
+@pytest.mark.parametrize("deferred_activation_key", [None, kMxfp4Dynamic])
+def test_mori_buffers_stay_bf16_without_mxfp8_key(
+    aiter_moe_env, deferred_activation_key
+):
+    """Without MXFP8 experts nothing is pre-quantized, so no scales are carried."""
+    prepare_finalize, args = _make_mori_dispatch(_w4a16_quant(deferred_activation_key))
 
     assert not prepare_finalize.use_mxfp8_dispatch
     assert args["quant_dtype"] == torch.bfloat16

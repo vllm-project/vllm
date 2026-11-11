@@ -264,6 +264,11 @@ class FusedMoEQuantConfig:
 
     mx_alignment: int = 0
 
+    # Quantization the experts apply to their own unquantized (``_a1``) input,
+    # e.g. MXFP8 for AITER's MXFP4 w4a16 kernels. An all-to-all may apply it
+    # before dispatch instead, which the experts then consume as is.
+    deferred_activation_key: QuantKey | None = None
+
     def __post_init__(self):
         assert not self.per_act_token_quant or self.block_shape is None, (
             "illegal quantization"

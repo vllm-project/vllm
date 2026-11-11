@@ -29,6 +29,7 @@ from vllm.model_executor.layers.quantization.utils.quant_utils import (
     kInt4Static32,
     kMxfp4Dynamic,
     kMxfp4Static,
+    kMxfp8Dynamic,
 )
 
 if TYPE_CHECKING:
@@ -433,6 +434,11 @@ def rocm_aiter_fused_experts(
                 q_dtype_a = dtypes.fp4x2
             else:
                 gate_mode = GateMode.INTERLEAVE.value
+                if quant_config.deferred_activation_key == kMxfp8Dynamic:
+                    # Must match what a MoRI MXFP8 dispatch hands over.
+                    from aiter import dtypes
+
+                    q_dtype_a = dtypes.fp8
         elif activation_interleave is not None:
             gate_mode = (
                 GateMode.INTERLEAVE.value
