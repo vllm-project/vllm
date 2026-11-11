@@ -51,11 +51,10 @@ def init_flashinfer_bf16_tuning_buckets() -> None:
     from vllm.config import get_current_vllm_config_or_none
 
     vllm_config = get_current_vllm_config_or_none()
-    sizes = (
-        vllm_config.compilation_config.cudagraph_capture_sizes
-        if vllm_config is not None
-        else None
-    )
+    if vllm_config is None:
+        _bf16_gemm_tuning_buckets = None
+        return
+    sizes = vllm_config.compilation_config.cudagraph_capture_sizes
     if not sizes:
         _bf16_gemm_tuning_buckets = None
         return
