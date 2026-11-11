@@ -923,9 +923,8 @@ def test_captures_mixed_batches_unless_checkpoints_are_exported(
 ):
     """The GDN core is captured with prefix caching ("align" mode) too, unless
     the layer exports prefill checkpoints, which the captured core cannot."""
-    from unittest.mock import PropertyMock, patch
+    from unittest.mock import patch
 
-    from vllm.config import VllmConfig
     from vllm.v1.attention.backends import gdn_attn
 
     vllm_config = create_vllm_config(
@@ -940,13 +939,7 @@ def test_captures_mixed_batches_unless_checkpoints_are_exported(
         dtypes=(torch.float16,),
         num_prefill_checkpoint_blocks=num_prefill_checkpoint_blocks,
     )
-    with (
-        patch.object(gdn_attn.current_platform, "is_cuda", return_value=True),
-        patch.object(
-            VllmConfig, "use_v2_model_runner", new_callable=PropertyMock
-        ) as use_v2_model_runner,
-    ):
-        use_v2_model_runner.return_value = True
+    with patch.object(gdn_attn.current_platform, "is_cuda", return_value=True):
         builder = GDNAttentionMetadataBuilder(
             kv_cache_spec=mamba_spec,
             layer_names=["layer.0"],
