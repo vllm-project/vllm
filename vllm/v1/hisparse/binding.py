@@ -91,11 +91,9 @@ def resolve_hisparse_specs(
         for name, spec in mla_specs.items()
     }
     for name in indexer_names:
-        spec = mla_specs[name].copy_with_new_block_size(indexer_block_size)
-        alignment = attn_layers[name].get_attn_backend().get_kernel_block_alignment()
-        if alignment is not None:
-            spec = replace(spec, block_stride_alignment=alignment)
-        resized_specs[name] = spec
+        resized_specs[name] = mla_specs[name].copy_with_new_block_size(
+            indexer_block_size
+        )
     groups = get_hisparse_kv_cache_groups(vllm_config, resized_specs)
     assert groups is not None
     return fit_mamba_blocks_to_attention(

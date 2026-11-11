@@ -9,7 +9,6 @@ from vllm.config import VllmConfig
 from vllm.config.kv_transfer import hisparse_host_pool_gib
 from vllm.logger import init_logger
 from vllm.utils.math_utils import cdiv
-from vllm.v1.attention.backend import MultipleOf
 from vllm.v1.hisparse.runtime import (
     ResolvedHiSparseConfig,
     get_hisparse_host_block_stride,
@@ -146,7 +145,7 @@ def _lay_out_hisparse_groups(
     )
     indexer_group_spec = UniformTypeKVCacheSpecs.from_specs(
         {
-            name: _fill_indexer_block(spec, pages_per_block)
+            name: spec.copy_with_new_block_size(spec.block_size * pages_per_block)
             for name, spec in indexer_specs.items()
         }
     )
@@ -234,13 +233,6 @@ def _lay_out_hisparse_groups(
         *hot_groups,
         *regular_groups,
     ]
-
-
-def _fill_indexer_block(spec: MLAAttentionSpec, pages: int) -> MLAAttentionSpec:
-    # Kernels that need fixed pages whole pages apart keep one page per block.
-    if isinstance(spec.block_stride_alignment, MultipleOf):
-        return spec
-    return spec.copy_with_new_block_size(spec.block_size * pages)
 
 
 def _group_page_bytes(group: KVCacheGroupSpec) -> int:

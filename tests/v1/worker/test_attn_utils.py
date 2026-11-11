@@ -8,7 +8,6 @@ never addressed by the logical view.
 """
 
 import importlib
-from dataclasses import replace
 from types import SimpleNamespace
 from typing import Any
 from unittest.mock import MagicMock
@@ -94,7 +93,6 @@ def test_get_kv_cache_spec_resolves_hisparse_block_size(
             get_name=lambda name=name: name,
             customize_spec=AttentionBackend.customize_spec,
             get_supported_kernel_block_sizes=lambda _=None, sizes=sizes: sizes,
-            get_kernel_block_alignment=AttentionBackend.get_kernel_block_alignment,
         )
         layers[name] = SimpleNamespace(
             get_kv_cache_spec=lambda _, spec=specs[name]: spec,
@@ -900,11 +898,7 @@ _VLLM_CONFIG = SimpleNamespace(
 
 
 def _packed_group(
-    tokens_per_state,
-    row_bytes,
-    supported_sizes,
-    kernel_alignment=None,
-    writes_from_block_table=False,
+    tokens_per_state, row_bytes, supported_sizes, writes_from_block_table=False
 ):
     spec = MLAAttentionSpec(
         block_size=1024,
@@ -919,7 +913,6 @@ def _packed_group(
         get_supported_kernel_block_sizes=lambda _=None: supported_sizes,
         get_name=lambda: "FAKE",
         customize_spec=lambda spec: spec,
-        get_kernel_block_alignment=lambda: kernel_alignment,
         writes_kv_cache_from_block_table=lambda: writes_from_block_table,
     )
     return AttentionGroup(backend, ["layer.0"], spec, 0)
@@ -941,56 +934,6 @@ def test_packed_compressed_group_gets_kernel_block_table():
     table = group.build_metadata(metadata)
     assert table.tolist() == [[0, 1, 2, 3, 10, 11, 12, 13]]
     assert torch.equal(pages[table[0, 4:], 0].flatten(0, 1), manager[2, 0])
-
-
-def test_packed_group_kernel_blocks_with_unaligned_block_stride():
-    """Packed blocks whose backend declares a kernel block alignment need not be
-    whole kernel blocks apart: the view steps by the largest unit dividing both,
-    also in groups copied after binding."""
-    row, stride_rows = 132, 5 * 64 + 16
-    group = _packed_group(4, row, [128, 256], kernel_alignment=16)
-    group.create_metadata_builders(_VLLM_CONFIG, "cpu", kernel_block_size=1024)
-
-    backing = torch.arange(3 * stride_rows).repeat_interleave(row)
-    manager = backing.view(3, 1, stride_rows, row)[:, :, :256]
-    pages = map_kv_caches_to_kernel_blocks({"layer.0": manager}, [group])["layer.0"]
-    metadata = create_common_attn_metadata(BatchSpec([2048], [1]), 1024, "cpu")
-    metadata.block_table_tensor = torch.tensor([[0, 2]], dtype=torch.int32)
-    table = group.build_metadata(metadata)
-    assert table.tolist() == [[0, 4, 8, 12, 42, 46, 50, 54]]
-    assert torch.equal(pages[table[0, 4:], 0].flatten(0, 1), manager[2, 0])
-
-    copy = replace(group, metadata_builders=[])
-    copy.create_metadata_builders(_VLLM_CONFIG, "cpu", kernel_block_size=1024)
-    assert torch.equal(copy.build_metadata(metadata), table)
-
-
-@pytest.mark.parametrize("kernel_alignment", [None, 256])
-def test_packed_group_rejects_unaligned_block_stride(kernel_alignment):
-    """Blocks not whole kernel blocks apart are rejected unless the backend declares
-    a kernel block alignment that the view's page stride meets."""
-    row, stride_rows = 132, 5 * 64 + 16
-    group = _packed_group(4, row, [128, 256], kernel_alignment)
-    group.create_metadata_builders(_VLLM_CONFIG, "cpu", kernel_block_size=1024)
-    manager = torch.zeros(3, 1, stride_rows, row, dtype=torch.uint8)[:, :, :256]
-    with pytest.raises(ValueError, match="cannot be split"):
-        map_kv_caches_to_kernel_blocks({"layer.0": manager}, [group])
-
-
-def test_packed_group_rejects_kernel_blocks_past_int32():
-    """Kernel blocks of a large packed cache must fit the int32 block table."""
-    row, stride_rows = 132, 5 * 64 + 16
-    group = _packed_group(4, row, [128, 256], kernel_alignment=16)
-    group.create_metadata_builders(_VLLM_CONFIG, "cpu", kernel_block_size=1024)
-    num_blocks = 2**31 // 21 + 2
-    manager = torch.empty_strided(
-        (num_blocks, 1, 256, row),
-        (stride_rows * row, 256 * row, row, 1),
-        dtype=torch.uint8,
-        device="meta",
-    )
-    with pytest.raises(ValueError, match="int32"):
-        map_kv_caches_to_kernel_blocks({"layer.0": manager}, [group])
 
 
 def test_split_group_maps_manager_block_table():
@@ -1064,19 +1007,6 @@ def test_packed_token_cache_splits_with_mapped_slots():
     assert mapped[2] == -1
     for (block, offset), slot in zip([(0, 5), (2, 700)], mapped[:2].tolist()):
         assert torch.equal(pages[slot // 64, 0, slot % 64], manager[block, 0, offset])
-
-
-def test_packed_token_cache_with_mapped_slots_needs_whole_kernel_blocks():
-    """Mapped slots address whole kernel blocks, so a declared kernel block
-    alignment does not let a slot-mapped token cache split blocks that are not
-    whole kernel blocks apart."""
-    row, stride_rows = 8, 1280 + 16
-    group = _packed_group(1, row, [64], kernel_alignment=16)
-    group.maps_slot_mapping = True
-    group.create_metadata_builders(_VLLM_CONFIG, "cpu", kernel_block_size=1024)
-    manager = torch.zeros(3, 1, stride_rows, row, dtype=torch.uint8)[:, :, :1024]
-    with pytest.raises(ValueError, match="cannot be split"):
-        map_kv_caches_to_kernel_blocks({"layer.0": manager}, [group])
 
 
 @pytest.mark.skipif(not torch.cuda.is_available(), reason="needs CUDA")

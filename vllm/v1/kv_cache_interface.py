@@ -506,7 +506,10 @@ class HiSparseHotSpec(KVCacheSpec):
         return self.page_size
 
     def get_block_stride_alignment(self) -> int:
-        return math.lcm(self.page_size, super().get_block_stride_alignment())
+        # Sparse kernels address hot rows flat: whole rows apart is enough.
+        return math.lcm(
+            self.page_size // self.block_size, super().get_block_stride_alignment()
+        )
 
     @property
     def block_table_token_alignment(self) -> int | None:
