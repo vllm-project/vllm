@@ -1,6 +1,7 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 
+import importlib.util
 from argparse import ArgumentError
 from types import SimpleNamespace
 from unittest.mock import patch
@@ -495,13 +496,24 @@ def test_external_connector_kv_cache_access(connector, access, multi):
 _NIXL_ACCESS = KVCacheAccess.REGISTERS | KVCacheAccess.EXPORTS_FABRIC
 _LEGACY_IPC = KVCacheAccess.LEGACY_IPC
 
+# vLLM's LMCacheMPConnector imports the optional lmcache package, which is
+# only installed on some platforms (e.g. not on XPU).
+requires_lmcache = pytest.mark.skipif(
+    importlib.util.find_spec("lmcache") is None,
+    reason="lmcache is not installed",
+)
+
 
 @pytest.mark.parametrize(
     ("children", "access"),
     [
         (["OffloadingConnector"], KVCacheAccess.IN_PROCESS),
         (["OffloadingConnector", "NixlConnector"], _NIXL_ACCESS),
-        (["NixlConnector", "LMCacheMPConnector"], _NIXL_ACCESS | _LEGACY_IPC),
+        pytest.param(
+            ["NixlConnector", "LMCacheMPConnector"],
+            _NIXL_ACCESS | _LEGACY_IPC,
+            marks=requires_lmcache,
+        ),
     ],
 )
 def test_multi_connector_kv_cache_access(children, access):
@@ -615,6 +627,7 @@ def test_extensible_kv_cache_with_nixl_needs_an_imex_channel_by_default(
     assert ("--enable-extensible-kv-cache" in caplog_vllm.text) is (not enabled)
 
 
+@requires_lmcache
 @pytest.mark.parametrize("multi", [False, True])
 @pytest.mark.parametrize("requested", [None, True])
 def test_extensible_kv_cache_off_with_lmcache_mp(monkeypatch, multi, requested):
