@@ -32,13 +32,16 @@ from vllm.model_executor.models.deepseek_v2 import (
 )
 from vllm.model_executor.models.utils import (
     PPMissingLayer,
+    copy_pp_buffers,
     get_pp_missing_layer_names,
     is_pp_missing_parameter,
     make_empty_intermediate_tensors_factory,
     make_layers,
+    pp_topk_buffers,
 )
 from vllm.models.common.ops.fused_allreduce_rms_norm import fused_allreduce_rms_norm
 from vllm.models.common.ops.sequence_parallel import (
+    is_sequence_parallel_active,
     sp_all_gather,
     sp_padding_mask,
     sp_reduce_scatter,
@@ -127,6 +130,9 @@ class DeepseekV32DecoderLayer(torch.nn.Module):
         attn_in: torch.Tensor | None = None,
     ) -> tuple[torch.Tensor, torch.Tensor]:
         full_num_tokens = positions.shape[0]
+        use_sequence_parallel = (
+            self.use_sequence_parallel or hidden_states.shape[0] < full_num_tokens
+        )
 
         if residual is None:
             # First layer: hidden_states is the embedding (the residual).
@@ -136,7 +142,7 @@ class DeepseekV32DecoderLayer(torch.nn.Module):
             hidden_states = (
                 attn_in if attn_in is not None else self.input_layernorm(hidden_states)
             )
-        elif self.use_sequence_parallel:
+        elif use_sequence_parallel:
             hidden_states, residual = self.input_layernorm(hidden_states, residual)
         else:
             # The previous layer's MLP/MoE output is left un-reduced; fuse its
@@ -144,12 +150,9 @@ class DeepseekV32DecoderLayer(torch.nn.Module):
             hidden_states, residual = fused_allreduce_rms_norm(
                 hidden_states, residual, self.input_layernorm
             )
-        if self.use_sequence_parallel:
-            hidden_states = sp_all_gather(hidden_states)[:full_num_tokens]
-
         # self_attn's o_proj runs reduce_results=False; reduce before RMSNorm.
         hidden_states = self.self_attn(positions=positions, hidden_states=hidden_states)
-        if self.use_sequence_parallel:
+        if use_sequence_parallel:
             hidden_states = sp_reduce_scatter(hidden_states)
             hidden_states, residual = self.post_attention_layernorm(
                 hidden_states, residual
@@ -159,7 +162,12 @@ class DeepseekV32DecoderLayer(torch.nn.Module):
                 hidden_states, residual, self.post_attention_layernorm
             )
 
-        if self.use_sequence_parallel and isinstance(self.mlp, DeepseekV2MoE):
+        if use_sequence_parallel and not self.use_sequence_parallel:
+            # These MLP/expert weights retain their existing TP/EP layout.
+            hidden_states = sp_all_gather(hidden_states)[:full_num_tokens]
+            hidden_states = self.mlp(hidden_states)
+            hidden_states = sp_reduce_scatter(hidden_states)
+        elif self.use_sequence_parallel and isinstance(self.mlp, DeepseekV2MoE):
             hidden_states = self.mlp(hidden_states, already_sequence_parallel=True)
         else:
             hidden_states = self.mlp(hidden_states)
@@ -223,13 +231,31 @@ class DeepseekV32Model(torch.nn.Module):
             ),
             prefix=f"{prefix}.layers",
         )
+        speculative_config = vllm_config.speculative_config
+        # Preserve LoRA's global row mapping and auxiliary-state layouts.
+        self.shardq_sequence_parallel = (
+            parallel_config.pipeline_parallel_size == 1
+            and vllm_config.lora_config is None
+            and (
+                speculative_config is None
+                or not speculative_config.uses_aux_hidden_states
+            )
+            and not envs.VLLM_BATCH_INVARIANT
+            and all(layer.self_attn.use_shardq for layer in self.layers)
+        )
+        self.shardq_min_tokens = (
+            vllm_config.attention_config.sparse_mla_shard_q_min_tokens
+        )
 
         if get_pp_group().is_last_rank:
             self.norm = RMSNorm(config.hidden_size, eps=config.rms_norm_eps)
         else:
             self.norm = PPMissingLayer()
+        self.pp_buffers = pp_topk_buffers(
+            config, self.topk_indices_buffer, range(config.num_hidden_layers)
+        )
         self.make_empty_intermediate_tensors = make_empty_intermediate_tensors_factory(
-            ["hidden_states"], config.hidden_size
+            ["hidden_states"], config.hidden_size, self.pp_buffers
         )
 
         self.aux_hidden_state_layers = tuple[int, ...]()
@@ -245,6 +271,13 @@ class DeepseekV32Model(torch.nn.Module):
         intermediate_tensors: IntermediateTensors | None = None,
         inputs_embeds: torch.Tensor | None = None,
     ) -> torch.Tensor | IntermediateTensors:
+        full_num_tokens = positions.shape[0]
+        use_sequence_parallel = self.use_sequence_parallel or (
+            self.shardq_sequence_parallel
+            and is_sequence_parallel_active(
+                True, full_num_tokens, self.shardq_min_tokens
+            )
+        )
         attn_in = None
         if get_pp_group().is_first_rank:
             if inputs_embeds is not None:
@@ -266,12 +299,16 @@ class DeepseekV32Model(torch.nn.Module):
         else:
             assert intermediate_tensors is not None
             hidden_states = intermediate_tensors["hidden_states"]
+            copy_pp_buffers(intermediate_tensors, self.pp_buffers)
         # Later PP stages receive the TP-reduced residual stream, like an embedding.
         residual = None
 
-        full_num_tokens = positions.shape[0]
-        if self.use_sequence_parallel:
-            if envs.VLLM_MOE_SKIP_PADDING and is_forward_context_available():
+        if use_sequence_parallel:
+            if (
+                self.use_sequence_parallel
+                and envs.VLLM_MOE_SKIP_PADDING
+                and is_forward_context_available()
+            ):
                 forward_context = get_forward_context()
                 forward_context.is_padding = sp_padding_mask(
                     forward_context.is_padding, hidden_states
@@ -298,9 +335,14 @@ class DeepseekV32Model(torch.nn.Module):
             )
             # PP send/recv needs TP-replicated tensors; reduce the partial sum.
             hidden_states = residual + tensor_model_parallel_all_reduce(hidden_states)
-            return IntermediateTensors({"hidden_states": hidden_states})
+            return IntermediateTensors(
+                {
+                    "hidden_states": hidden_states,
+                    **{k: v[:full_num_tokens] for k, v in self.pp_buffers.items()},
+                }
+            )
 
-        if self.use_sequence_parallel:
+        if use_sequence_parallel:
             hidden_states, _ = self.norm(hidden_states, residual)
             if aux_hidden_states:
                 hidden_size = hidden_states.shape[-1]

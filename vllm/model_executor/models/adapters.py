@@ -29,6 +29,24 @@ _T = TypeVar("_T", bound=nn.Module)
 
 logger = init_logger(__name__)
 
+# Load formats whose weight iterators yield tensors that are never reused
+_OWNED_TENSOR_LOAD_FORMATS = frozenset(
+    {
+        "auto",
+        "hf",
+        "safetensors",
+        "mistral",
+        "pt",
+        "npcache",
+        "instanttensor",
+        "tensorizer",
+        "sharded_state",
+        "modelexpress",
+        "runai_streamer",
+        "runai_streamer_sharded",
+    }
+)
+
 _GENERATE_SUFFIXES = [
     "ForCausalLM",
     "ForConditionalGeneration",
@@ -190,9 +208,14 @@ def _create_pooling_model_cls(orig_cls: type[_T]) -> type[_T]:
             target_prefix = ""
 
             seen_weights = list[tuple[str, torch.Tensor]]()
+            owned = (
+                self.vllm_config.load_config.load_format in _OWNED_TENSOR_LOAD_FORMATS
+            )
             for name, loaded_weight in weights:
                 # Clone because the iterator may reuse the tensor buffer
-                seen_weights.append((name, loaded_weight.clone()))
+                seen_weights.append(
+                    (name, loaded_weight if owned else loaded_weight.clone())
+                )
 
                 lookup_name = name
                 if hf_to_vllm_mapper is not None:
@@ -226,8 +249,8 @@ def _create_pooling_model_cls(orig_cls: type[_T]) -> type[_T]:
                     self._get_name(),
                 )
 
-            # Lazy chain so buffer-reusing weight iterators (e.g.
-            # runai_streamer) are consumed one tensor at a time.
+            # Lazy chain so buffer-reusing weight iterators are consumed
+            # one tensor at a time.
             mapped_weights = (
                 (target_prefix + name, weight)
                 for name, weight in itertools.chain(seen_weights, weights)
@@ -284,15 +307,15 @@ def as_embedding_model(cls: type[_T]) -> type[_T]:
 def _resolve_num_labels(hf_config: Any, text_config: Any) -> int:
     """Resolve the label count for a sequence classification head.
 
-    ``PreTrainedConfig.num_labels`` is derived from ``id2label``, which always
+    `PreTrainedConfig.num_labels` is derived from `id2label`, which always
     carries a default of two entries. Composite configs (such as multimodal
     checkpoints) declare their label space on the top-level config, so reading
-    ``num_labels`` from ``get_text_config()`` silently returns that default and
+    `num_labels` from `get_text_config()` silently returns that default and
     builds a score head of the wrong size.
 
     Prefer the top-level config whenever it declares a label space of its own,
-    mirroring the ``classifier_from_token`` / ``method`` lookups in
-    ``as_seq_cls_model``.
+    mirroring the `classifier_from_token` / `method` lookups in
+    `as_seq_cls_model`.
     """
     if text_config is hf_config:
         return hf_config.num_labels
@@ -467,7 +490,7 @@ def _get_language_model_for_seq_cls(model: nn.Module) -> nn.Module:
             ):
                 return candidate
 
-    for name, child in model.named_children():
+    for _, child in model.named_children():
         child_name = type(child).__name__
         if ("ForCausalLM" in child_name or "LMHead" in child_name) and hasattr(
             child, "model"
