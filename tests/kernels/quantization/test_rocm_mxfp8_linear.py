@@ -1,18 +1,18 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
-"""Native CDNA4 MXFP8 linear (``RocmDotScaledMxfp8LinearKernel``).
+"""Native CDNA4 MXFP8 linear (`RocmDotScaledMxfp8LinearKernel`).
 
 DeepSeek V4.1 routes every attention linear through this kernel. It used to
-carry two BF16-dequantize workarounds on ROCm (one for all ``.attn.`` linears,
-one for the row-parallel ``wo_b``, whose comment blamed NaNs at small token
+carry two BF16-dequantize workarounds on ROCm (one for all `.attn.` linears,
+one for the row-parallel `wo_b`, whose comment blamed NaNs at small token
 counts). These tests pin the two properties those workarounds stood in for --
 finite output and MXFP8-level accuracy -- across the V4.1 attention shapes at
 TP=4 and the small token counts decode actually runs.
 
 They also cover the tiny-M fused quant+GEMM fastpath of
-``rocm_mxfp8_block32_gemm_quant`` (at M <= 8 the activation quant runs inside
+`rocm_mxfp8_block32_gemm_quant` (at M <= 8 the activation quant runs inside
 the packed GEMM's K loop): bit-exactness with the stock two-launch
-``mxfp8_e4m3_quantize`` + ``rocm_mxfp8_block32_gemm`` path at the serving
+`mxfp8_e4m3_quantize` + `rocm_mxfp8_block32_gemm` path at the serving
 shapes and under CUDA-graph capture/replay, agreement with a high-precision
 QDQ fp32 reference, and bit-identical fallbacks for ineligible inputs.
 """
@@ -253,7 +253,7 @@ def test_rocm_mxfp8_linear_handles_extreme_magnitudes():
 
     A degenerate block makes the dynamic activation quantizer pick an extreme
     E8M0 scale; a zero row makes it pick the tiny-clamped one. Both feed
-    ``tl.dot_scaled`` directly.
+    `tl.dot_scaled` directly.
     """
     from vllm.model_executor.kernels.linear.mxfp8.Mxfp8LinearKernel import (
         Mxfp8LinearLayerConfig,
@@ -430,7 +430,7 @@ FUSED_QUANT_CASES = [
 
 
 def _spy_launch(monkeypatch) -> list[bool]:
-    """Record, per ``_launch``, whether the activation quant ran in-kernel."""
+    """Record, per `_launch`, whether the activation quant ran in-kernel."""
     from vllm.model_executor.kernels.linear.mxfp8 import rocm_native
 
     fused: list[bool] = []
@@ -453,7 +453,7 @@ def _mxfp8_weight(n: int, k: int):
 @torch.inference_mode()
 def test_rocm_mxfp8_fused_act_quant_bitwise_eq_unfused(monkeypatch, n, k, num_tokens):
     """Small-M bf16 GEMMs quantize the activation in-kernel, bit-exact with
-    the unfused path: ``mxfp8_e4m3_quantize`` and the ``_select_cfg`` tile."""
+    the unfused path: `mxfp8_e4m3_quantize` and the `_select_cfg` tile."""
     from vllm.model_executor.kernels.linear.mxfp8 import rocm_native
 
     torch.manual_seed(num_tokens)

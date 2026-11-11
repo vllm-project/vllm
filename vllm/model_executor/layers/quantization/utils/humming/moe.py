@@ -151,7 +151,7 @@ def get_humming_moe_quant_config(
         and weight_schema.hadamard_block_size <= 1
         and input_schema.input_quant_mode in (None, "dynamic_group")
     ):
-        q_dtype = humming_schema._HUMMING_TO_QUANT_DTYPE.get(
+        q_dtype = humming_schema._humming_to_quant_dtype().get(
             input_schema.a_dtype, FP8_DTYPE
         )
         activation_group_shape = GroupShape(row=1, col=input_scale_group_size)
@@ -527,8 +527,8 @@ def stage_moe_weights_for_humming(
 ) -> str:
     """Install canonical weights and scales for Humming's layer-based converter.
 
-    Returns the scale parameter name used, ``weight_scale`` or
-    ``weight_scale_inv``.
+    Returns the scale parameter name used, `weight_scale` or
+    `weight_scale_inv`.
     """
     scale_name = (
         "weight_scale_inv" if hasattr(layer, "w13_weight_scale_inv") else "weight_scale"
