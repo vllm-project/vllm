@@ -432,6 +432,7 @@ class KimiMoE(nn.Module):
             top_k=num_experts_per_token,
             hidden_size=self.moe_hidden_size,
             intermediate_size=self.padded_moe_intermediate_size,
+            intermediate_size_unpadded=moe_intermediate_size,
             activation=config.hidden_act,
             activation_situ_beta=activation_situ_beta,
             activation_situ_linear_beta=activation_situ_linear_beta,
@@ -472,11 +473,6 @@ class KimiMoE(nn.Module):
                 w13_weight.data.zero_()
             if w2_weight is not None:
                 w2_weight.data.zero_()
-            self.experts.moe_config.intermediate_size_per_partition_unpadded = (
-                moe_intermediate_size // self.tp_size
-            )
-            # Construction saw no padding; flag it now, before post-load processing.
-            self.experts.routed_experts._flag_padding_for_reload()
 
     def forward(self, hidden_states: torch.Tensor) -> torch.Tensor:
         num_tokens, hidden_size = hidden_states.shape
