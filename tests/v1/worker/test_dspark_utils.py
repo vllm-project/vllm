@@ -10,9 +10,13 @@ import torch
 from vllm.config import ParallelConfig
 from vllm.v1.kv_cache_interface import FullAttentionSpec
 from vllm.v1.worker.gpu import model_runner
+from vllm.v1.worker.gpu.spec_decode.dflash.config import DFlashSpeculatorConfig
 from vllm.v1.worker.gpu.spec_decode.dflash.speculator import DFlashSpeculator
 from vllm.v1.worker.gpu.spec_decode.dspark.utils import _get_dspark_parallel_config
 from vllm.v1.worker.gpu.spec_decode.speculator import DraftModelSpeculator
+from vllm.v1.worker.gpu.spec_decode.speculator_config import (
+    DraftModelSpeculatorConfig,
+)
 
 
 @dataclass
@@ -105,7 +109,7 @@ def test_draft_context_parallelism_without_changing_target(
     target_config = SimpleNamespace(
         parallel_config=target_parallel,
         speculative_config=SimpleNamespace(
-            draft_model_config=SimpleNamespace(use_mla=use_mla)
+            draft_decode_context_parallel_size=dcp_size if use_mla else 1
         ),
     )
 
@@ -126,6 +130,59 @@ def test_draft_context_parallelism_without_changing_target(
     assert target_parallel.prefill_context_parallel_size == pcp_size
     assert target_parallel.decode_context_parallel_size == dcp_size
     assert target_parallel.cp_kv_cache_interleave_size == 16
+
+
+@pytest.mark.parametrize("dflash", [False, True])
+@pytest.mark.parametrize("use_mla", [False, True])
+@pytest.mark.parametrize(
+    "window_config",
+    [
+        {},
+        {"sliding_window": 2051},
+        # Windowed layers resolved from the DFlash config alone.
+        {"dflash_config": {"use_swa": True, "swa_window_size": 2051}},
+        {"layer_types": ["full_attention", "sliding_attention"]},
+    ],
+)
+def test_default_draft_decode_context_parallel_size(dflash, use_mla, window_config):
+    spec = SimpleNamespace(
+        target_parallel_config=SimpleNamespace(decode_context_parallel_size=4),
+        draft_model_config=SimpleNamespace(
+            use_mla=use_mla,
+            hf_config=SimpleNamespace(**window_config),
+            get_sliding_window=lambda: window_config.get("sliding_window"),
+        ),
+    )
+    config_cls = DFlashSpeculatorConfig if dflash else DraftModelSpeculatorConfig
+    # Only full-attention MLA DFlash drafts shard their cache with the target.
+    expected = 1 if dflash and (not use_mla or window_config) else 4
+    assert config_cls.default_draft_decode_context_parallel_size(spec) == expected
+
+
+@pytest.mark.parametrize("draft_dcp_size", [1, 4])
+def test_dflash_rejects_windowed_draft_layers_under_dcp(monkeypatch, draft_dcp_size):
+    from vllm.v1.worker.gpu.spec_decode.dflash import speculator as dflash_module
+
+    layers = {
+        "draft.0.attn": SimpleNamespace(sliding_window=None),
+        "draft.1.attn": SimpleNamespace(sliding_window=128),
+    }
+    monkeypatch.setattr(DraftModelSpeculator, "load_model", lambda self, _: None)
+    monkeypatch.setattr(
+        dflash_module,
+        "get_layers_from_vllm_config",
+        lambda _config, _type, names: {name: layers[name] for name in names},
+    )
+    speculator = object.__new__(DFlashSpeculator)
+    speculator.vllm_config = None
+    speculator.dcp_size = draft_dcp_size
+    speculator.draft_attn_layer_names = set(layers)
+
+    if draft_dcp_size == 1:
+        speculator.load_model(None)
+    else:
+        with pytest.raises(ValueError, match=r"\['draft.1.attn'\]"):
+            speculator.load_model(None)
 
 
 @pytest.mark.parametrize("configured_dcp", [1, 4])
