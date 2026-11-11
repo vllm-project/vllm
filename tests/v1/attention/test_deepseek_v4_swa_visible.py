@@ -3,12 +3,12 @@
 """Tests for DeepSeek-V4 in-image bidirectional SWA visibility (vision variant).
 
 The reference semantics are a torch port of the official
-``get_image_visible`` / ``get_window_topk_idxs_visible``: inside an image span
-[span_start, span_end] (inclusive), a token at ``pos`` sees
-``min(pos - span_start, max_image_tokens - 1)`` extra tokens to the left and
-``min(span_end - pos, max_image_tokens)`` to the right; the window then starts
-at ``max(pos - (window - 1) - max(left - (window - 1), 0), 0)`` and ends at
-``pos + right`` (inclusive).
+`get_image_visible` / `get_window_topk_idxs_visible`: inside an image span
+[span_start, span_end] (inclusive), a token at `pos` sees
+`min(pos - span_start, max_image_tokens - 1)` extra tokens to the left and
+`min(span_end - pos, max_image_tokens)` to the right; the window then starts
+at `max(pos - (window - 1) - max(left - (window - 1), 0), 0)` and ends at
+`pos + right` (inclusive).
 """
 
 import inspect
@@ -64,7 +64,7 @@ def ref_swa_bounds(
     pos: int, window: int, left: int, right: int, replay_start: int = 0
 ) -> tuple[int, int]:
     """Reference [start, end) window bounds for one query token. Under SWA
-    bounded replay no window KV exists below ``replay_start``."""
+    bounded replay no window KV exists below `replay_start`."""
     left_add = max(left - (window - 1), 0)
     start = max(pos - (window - 1) - left_add, 0, replay_start)
     return start, pos + right + 1
@@ -307,7 +307,7 @@ def combine_case(
 ):
     """Run combine_topk_swa_indices and return (indices, lens, expected).
 
-    ``in_range_topk`` draws top-k indices below N, for combiners that drop
+    `in_range_topk` draws top-k indices below N, for combiners that drop
     out-of-range ones.
     """
     device = torch.device("cuda")

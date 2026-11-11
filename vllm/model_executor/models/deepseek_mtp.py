@@ -184,7 +184,7 @@ class DeepSeekMultiTokenPredictor(nn.Module):
                         mla_attn.skip_topk = skip
 
     def compact_topk_indices(self, slot_ids: torch.Tensor):
-        """Gather the top-k index rows at ``slot_ids`` to the front of the buffer."""
+        """Gather the top-k index rows at `slot_ids` to the front of the buffer."""
         num_slots = slot_ids.numel()
         for layer in self.layers.values():
             mtp_block = getattr(layer, "mtp_block", None)

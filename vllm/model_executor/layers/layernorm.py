@@ -363,13 +363,13 @@ class RMSNormGated(CustomOp):
         """Pure-PyTorch RMS normalization with optional gating.
 
         This static method contains the full native logic so that both
-        ``forward_native`` and ``MatcherRMSNormGated`` (used by the
+        `forward_native` and `MatcherRMSNormGated` (used by the
         compilation pattern matcher) can share the same implementation.
 
         If *z* is not None and *norm_before_gate* is True:
-            ``out = rms_norm(x) * act(z)``
+            `out = rms_norm(x) * act(z)`
         If *z* is not None and *norm_before_gate* is False:
-            ``out = rms_norm(x * act(z))``
+            `out = rms_norm(x * act(z))`
         """
         x = x.float()
         weight = weight.float()

@@ -57,7 +57,7 @@ def _reinit_cpu_group(
     size: int,
     timeout: timedelta | None = None,
 ) -> None:
-    """Rebuild a group's Gloo cpu_group over a port coordinated via ``store``"""
+    """Rebuild a group's Gloo cpu_group over a port coordinated via `store`"""
     # Rendezvous recovery groups on their actual leader hosts: DP replicas and
     # pipeline stages can span nodes independently of the deployment master.
     if rank == 0:

@@ -1,9 +1,9 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
-"""DEP EP dispatch / combine (specialized_decode/cutedsl/moe/ep/comm.py) on real ranks.
+r"""DEP EP dispatch / combine (specialized_decode/cutedsl/moe/ep/comm.py) on real ranks.
 
 Dispatch: every received row (static slot source x T + token) is the source token's
-MXFP8 latent, bit-identical to ``flashinfer.mxfp8_quantize``, with its ids, weights and
+MXFP8 latent, bit-identical to `flashinfer.mxfp8_quantize`, with its ids, weights and
 source; exactly the tokens with a local expert arrive; empty rows stay non-local. A
 stand-in expert (a per-expert scale of the dequantized row, routing-weighted) fills the
 outputs; combine must return vLLM's RMSNorm of the rank-order FP32 sum of the BF16

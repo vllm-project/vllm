@@ -217,7 +217,7 @@ def _autotune_kimi_k3_kda_qkvg(model: torch.nn.Module) -> None:
 
 
 def _aiter_gemm_m_buckets(max_m: int) -> list[int]:
-    """One token count per AITER tuned-GEMM bucket up to ``max_m``.
+    """One token count per AITER tuned-GEMM bucket up to `max_m`.
 
     AITER pads M to 1, 2, 4 or 8 below 16, then to multiples of 16 / 32 / 64 /
     128 up to 256 / 1024 / 4096 / beyond, and builds each bucket's kernel on
@@ -474,7 +474,7 @@ def _autotune_cache_fingerprint(path: Path) -> tuple[str, int] | None:
 
 
 def _all_ranks_have_matching_cache(path: Path, group) -> bool:
-    """True iff every rank in ``group`` has its own, mutually consistent file."""
+    """True iff every rank in `group` has its own, mutually consistent file."""
     fingerprint = _autotune_cache_fingerprint(path)
     if group.world_size == 1:
         return fingerprint is not None
@@ -523,7 +523,7 @@ def flashinfer_autotune(runner: "GPUModelRunner", *, skip_attn: bool = False) ->
     averaged over the tuning group so all its ranks select the same tactic.
 
     Legacy results are persisted per rank: FlashInfer keys MoE entries by tp/ep rank
-    (``MoERunner.get_cache_key_extras``), so one rank's file only hits on that
+    (`MoERunner.get_cache_key_extras`), so one rank's file only hits on that
     rank. A rank with a cache hit skips the per-tactic reduce the others block
     in, so ranks keep loaded configs only if every rank in the tuning group
     has a matching file and successfully loads it.
