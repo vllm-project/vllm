@@ -1,14 +1,14 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
-"""The load plan's bake: run ``load_weights`` once over ``TraceTensor``s, on
-the model's real tensors as ``begin_direct_reload`` left them, and record each
-``copy_`` from a trace and every reason a name cannot be written directly.
+"""The load plan's bake: run `load_weights` once over `TraceTensor`s, on
+the model's real tensors as `begin_direct_reload` left them, and record each
+`copy_` from a trace and every reason a name cannot be written directly.
 
-A trace has no data, so nothing it feeds reaches memory: its ``copy_`` is
+A trace has no data, so nothing it feeds reaches memory: its `copy_` is
 recorded, and any other op on it runs on meta copies of its arguments. Ops on
-real tensors alone run for real: ``_TargetGuard`` makes a loader that reads a
-checkpoint tensor a fallback, and constant writes into one (``fill_``,
-``zero_``) happen, mid-update, and stay out of the plan (post-load processing
+real tensors alone run for real: `_TargetGuard` makes a loader that reads a
+checkpoint tensor a fallback, and constant writes into one (`fill_`,
+`zero_`) happen, mid-update, and stay out of the plan (post-load processing
 owns padding)."""
 
 from collections import defaultdict
@@ -47,9 +47,9 @@ class Target:
 
 
 class Targets:
-    """Every checkpoint tensor in the layout ``begin_direct_reload`` applied,
+    """Every checkpoint tensor in the layout `begin_direct_reload` applied,
     by storage and by name. Writes name their tensor, for readable plans and
-    tests; ``by_name`` looks it up."""
+    tests; `by_name` looks it up."""
 
     def __init__(self, model: torch.nn.Module):
         self.by_storage: dict[int, Target] = {}
@@ -72,7 +72,7 @@ def _storage_key(t: torch.Tensor) -> int | None:
 
 class _BakeStopped(Exception):
     """A loader needs a traced tensor's values, or an op on it fails on meta:
-    the loader cannot continue. ``name`` is the trace's name."""
+    the loader cannot continue. `name` is the trace's name."""
 
     def __init__(self, name: str):
         super().__init__(name)
@@ -88,7 +88,7 @@ _VALUE_READ = "its loader reads tensor values (.item(), bool(), ...)"
 
 @dataclass
 class Copy:
-    """One ``dest.copy_(src)`` from a trace."""
+    """One `dest.copy_(src)` from a trace."""
 
     src: TraceTensor
     storage: int  # destination storage key
@@ -100,9 +100,9 @@ class Copy:
 
 @dataclass
 class _PlanSink:
-    """One bake's record. Traces call ``accept_copy`` for a ``copy_`` from
-    them, ``unsupported`` for any other op outside ``VIEW_OPS`` and
-    ``value_read`` for ``.item()`` and the like; it turns these into copies,
+    """One bake's record. Traces call `accept_copy` for a `copy_` from
+    them, `unsupported` for any other op outside `VIEW_OPS` and
+    `value_read` for `.item()` and the like; it turns these into copies,
     fallbacks and bake stops."""
 
     targets: Targets
@@ -160,7 +160,7 @@ class _PlanSink:
     def unsupported(
         self, func: Callable, args: tuple, kwargs: dict, traces: list[TraceTensor]
     ) -> Any:
-        """Mark the names fallbacks and run ``func`` on meta copies of its
+        """Mark the names fallbacks and run `func` on meta copies of its
         arguments, so it writes no real tensor; tensor results become traces
         of the first name, with no geometry."""
         self._check_open(traces[0])
@@ -203,8 +203,8 @@ class _PlanSink:
 
 
 def _writes_a_real_tensor(func: Any, args: tuple, kwargs: dict) -> bool:
-    """Whether ``func`` writes an argument that is not a trace (in place or
-    through ``out=``)."""
+    """Whether `func` writes an argument that is not a trace (in place or
+    through `out=`)."""
     schema = getattr(func, "_schema", None)
     for i, arg in enumerate(getattr(schema, "arguments", ())):
         if arg.alias_info is None or not arg.alias_info.is_write:
@@ -245,10 +245,10 @@ class _TargetGuard(TorchDispatchMode):
     """Ops on real tensors alone run for real. One that reads a checkpoint
     tensor (not a view, not only its metadata) makes the last name written
     into that storage (or the name being loaded) a fallback: the direct path
-    would skip it. For example ``composed_weight_loader``'s
-    ``param.copy_(fn(param))``, a check such as ``torch.equal(param, x)``, or
-    a mirror copied from ``param``. Reads that bypass the dispatcher
-    (``tolist()`` or ``numpy()`` of a CPU tensor, a raw kernel launch) go
+    would skip it. For example `composed_weight_loader`'s
+    `param.copy_(fn(param))`, a check such as `torch.equal(param, x)`, or
+    a mirror copied from `param`. Reads that bypass the dispatcher
+    (`tolist()` or `numpy()` of a CPU tensor, a raw kernel launch) go
     unseen."""
 
     def __init__(self, sink: _PlanSink):
@@ -287,13 +287,13 @@ class _TargetGuard(TorchDispatchMode):
 def _bake(
     model: torch.nn.Module, metas: dict[str, "ParamMeta"], targets: Targets
 ) -> _PlanSink:
-    """Trace ``load_weights`` over every name, in one pass. A name that stops
+    """Trace `load_weights` over every name, in one pass. A name that stops
     the loader (a value read, an op that fails on meta) unwinds the model's
-    ``load_weights``; it falls back, and ``load_weights`` is called again
+    `load_weights`; it falls back, and `load_weights` is called again
     with the names after it, on the same sink. Loaders handle each name as it
     arrives, so nothing is replayed.
     Module state a loader sets stays: it is what that loader would leave on
-    the ``load_weights`` path."""
+    the `load_weights` path."""
     sink = _PlanSink(targets)
     names = list(metas)
 
@@ -337,7 +337,7 @@ class Traced:
 def trace_loads(
     model: torch.nn.Module, metas: dict[str, "ParamMeta"], targets: Targets
 ) -> Traced:
-    """Bake all names (see ``_bake``). A name that stopped the loader falls
+    """Bake all names (see `_bake`). A name that stopped the loader falls
     back; what it recorded before stopping is dropped."""
     try:
         sink = _bake(model, metas, targets)
