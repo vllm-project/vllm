@@ -577,12 +577,14 @@ class KimiMoE(nn.Module):
                 runner_cls=LatentMoERunner if self.use_latent_moe else None,
             )
         if self.padded_moe_intermediate_size != moe_intermediate_size:
-            w13_weight = getattr(self.experts, "w13_weight", None)
+            # The params live on the routed experts; the runner doesn't forward them.
+            routed = self.experts.routed_experts
+            w13_weight = getattr(routed, "w13_weight", None)
             if w13_weight is None:
-                w13_weight = getattr(self.experts, "w13_weight_packed", None)
-            w2_weight = getattr(self.experts, "w2_weight", None)
+                w13_weight = getattr(routed, "w13_weight_packed", None)
+            w2_weight = getattr(routed, "w2_weight", None)
             if w2_weight is None:
-                w2_weight = getattr(self.experts, "w2_weight_packed", None)
+                w2_weight = getattr(routed, "w2_weight_packed", None)
             if w13_weight is not None:
                 w13_weight.data.zero_()
             if w2_weight is not None:
