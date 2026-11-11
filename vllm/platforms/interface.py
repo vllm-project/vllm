@@ -1297,7 +1297,7 @@ class Platform:
         num_threads: int,
     ) -> None:
         """Set up per-stream library state before dual batch overlap runs its
-        microbatches on ``streams`` from ``num_threads`` new threads."""
+        microbatches on `streams` from `num_threads` new threads."""
         return
 
     @classmethod

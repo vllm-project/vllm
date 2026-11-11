@@ -275,7 +275,7 @@ class PyNcclCommunicator:
             self.disabled = True
 
     def bind_stream(self, stream: torch.cuda.Stream) -> None:
-        """Give the collectives issued on ``stream`` their own communicator, so
+        """Give the collectives issued on `stream` their own communicator, so
         they never share one with collectives on a concurrent stream. Collective."""
         if self.disabled or stream.cuda_stream in self._stream_comms:
             return
