@@ -405,8 +405,6 @@ def test_splitting_ops_kv_cache_update_fusion(flag, op):
     assert "vllm::unified_kv_cache_update" in config.splitting_ops
     assert "vllm::unified_mla_kv_cache_update" in config.splitting_ops
 
-    # PassConfig.__post_init__ rejects these flags off their platform, so set
-    # them afterwards to keep the test platform-independent.
     config = CompilationConfig(mode=CompilationMode.VLLM_COMPILE)
     setattr(config.pass_config, flag, True)
     config.set_splitting_ops_for_v1(all2all_backend="naive")

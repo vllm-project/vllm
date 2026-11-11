@@ -4393,29 +4393,25 @@ def _resolved(compilation_config: CompilationConfig) -> VllmConfig:
 def test_rope_kvcache_fusion_resolves_for_the_documented_opt_ins(
     aiter_enabled, compilation_kwargs
 ):
-    """`set_splitting_ops_for_v1` tells the user to enable graph partition or
-    empty `splitting_ops` to get the RoPE + KV-cache fusion. Both must work
-    through the optimization level, without also naming the pass flag."""
+    """Graph partition or empty `splitting_ops` enables the RoPE + KV-cache
+    fusion through the optimization level alone."""
     config = _resolved(CompilationConfig(**compilation_kwargs))
 
     pass_config = config.compilation_config.pass_config
     assert pass_config.fuse_rope_kvcache
     assert pass_config.fuse_qk_norm_rope_kvcache
-    # The pass matches the custom op, so it has to be requested for it.
     assert "+rotary_embedding" in config.compilation_config.custom_ops
 
 
 def test_rope_kvcache_fusion_stays_off_by_default(aiter_enabled):
-    """Without either opt-in the KV cache update is split out of the graph, so
-    the fusion cannot run -- and nothing should ask for the custom op either."""
+    """Without either opt-in the fusion stays off and the custom op is not
+    requested."""
     config = _resolved(CompilationConfig())
 
     pass_config = config.compilation_config.pass_config
     assert not pass_config.fuse_rope_kvcache
     assert not pass_config.fuse_qk_norm_rope_kvcache
     assert "+rotary_embedding" not in config.compilation_config.custom_ops
-    # Compile ranges are set before set_splitting_ops_for_v1 disables a fusion,
-    # so a flag that resolves True only to be turned off still splits them.
     assert (
         pass_config.rope_kvcache_fusion_max_token_num
         not in config.compilation_config.compile_ranges_endpoints

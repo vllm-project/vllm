@@ -232,12 +232,7 @@ def enable_allreduce_rms_fusion(cfg: "VllmConfig") -> bool:
 
 def enable_rope_kvcache_fusion(cfg: "VllmConfig") -> bool:
     """Enable if the KV cache update stays inside the compiled graph and the
-    rotary embedding custom op is not disabled.
-
-    Cannot require the custom op: ``CompilationConfig.__post_init__`` appends it
-    only when ``fuse_rope_kvcache`` is set, and runs before the optimization
-    level resolves that flag. The append is re-run once splitting ops settle.
-    """
+    rotary embedding custom op is not disabled."""
     from vllm._aiter_ops import rocm_aiter_ops
 
     return (
@@ -275,11 +270,7 @@ def enable_mla_dual_rms_norm_fusion(cfg: "VllmConfig") -> bool:
 
 
 def enable_qk_norm_rope_kvcache(cfg: "VllmConfig") -> bool:
-    """Enable fused QK-norm + RoPE/MRoPE + KV cache update with AITER.
-
-    Same conditions as :func:`enable_rope_kvcache_fusion`: it also replaces the
-    KV cache update, so it also needs that op kept inside the compiled graph.
-    """
+    """Enable fused QK-norm + RoPE/MRoPE + KV cache update with AITER."""
     return enable_rope_kvcache_fusion(cfg)
 
 
@@ -2077,9 +2068,7 @@ class VllmConfig:
             data_parallel_size=effective_dp_size,
         )
 
-        # `__post_init__` appends "+rotary_embedding" before the optimization
-        # level resolves these flags. Re-run it after set_splitting_ops_for_v1,
-        # which can still turn the fusions back off.
+        # __post_init__ ran before these flags resolved; re-append the custom op.
         # TODO(Rohan138): support rope native forward match and remove this.
         # Linked issue: https://github.com/vllm-project/vllm/issues/28042
         rope_pass_config = self.compilation_config.pass_config
@@ -2091,9 +2080,8 @@ class VllmConfig:
             self.compilation_config.custom_ops.append("+rotary_embedding")
 
         # Re-compute compile ranges after platform-specific config updates
-        # (e.g., XPU may lower max_num_batched_tokens when MLA is enabled), and
-        # after set_splitting_ops_for_v1, which decides whether the RoPE+KV
-        # cache fusions that add a compile range endpoint survive.
+        # (e.g., XPU may lower max_num_batched_tokens when MLA is enabled)
+        # and after set_splitting_ops_for_v1.
         self._set_compile_ranges()
 
         # final check of cudagraph mode after all possible updates

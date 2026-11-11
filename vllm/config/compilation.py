@@ -1410,11 +1410,7 @@ class CompilationConfig:
             self.cudagraph_mode = CUDAGraphMode.NONE
 
     def _keep_kv_cache_update_in_graph(self, requested: bool, name: str) -> bool:
-        """Whether a requested fusion can keep its kv cache update op in the graph.
-
-        Only free once `layer_name` is hoisted out of the graph; before that it
-        costs one compiled graph per attention layer.
-        """
+        """Whether a requested fusion can keep its kv cache update op in the graph."""
         if not requested:
             return False
         if not _USE_LAYERNAME:
