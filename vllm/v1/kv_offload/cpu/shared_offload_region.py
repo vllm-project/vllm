@@ -113,7 +113,7 @@ class SharedOffloadRegion:
     also waits for all shards to finish pre-faulting before returning.
     `num_segments` splits backing files beneath the contiguous mapping.
     `populate=False` skips pre-faulting, for a mapper whose peers pre-fault
-    every page.
+    every page or that calls prefault() later.
     """
 
     BLOCK_SIZE_ALIGNMENT: int = mmap.PAGESIZE
@@ -330,8 +330,6 @@ class SharedOffloadRegion:
 
     def prefault(self, offset: int, length: int) -> None:
         """Pre-fault a range without holding the GIL."""
-        if length <= 0:
-            return
         addr = self._base.data_ptr() + offset
         if _libc_madvise()(addr, length, _MADV_POPULATE_WRITE) == 0:
             return

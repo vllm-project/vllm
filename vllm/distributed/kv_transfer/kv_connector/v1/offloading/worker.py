@@ -348,7 +348,8 @@ class OffloadingConnectorWorker:
         return failed_recving
 
     def build_connector_worker_meta(self) -> OffloadingWorkerMetadata | None:
-        """Return completed transfer job IDs since the last call."""
+        """Return job completions, and readiness under async_init, since the
+        last call."""
         if self._report_ready and self.worker is not None and self.worker.is_ready():
             self._connector_worker_meta.ready_ranks = {self.spec.config.parallel.rank}
         if (

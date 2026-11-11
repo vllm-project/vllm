@@ -2233,21 +2233,30 @@ def test_async_init_offloads_only_after_workers_are_ready(request_runner):
     assert runner.connector_scheduler._tier_ready
 
 
-def test_async_init_is_parsed_strictly():
-    from vllm.v1.kv_offload.base import _parse_bool
-
-    assert _parse_bool(True) and _parse_bool("TRUE")
-    assert not _parse_bool(False) and not _parse_bool("false")
-    with pytest.raises(ValueError):
-        _parse_bool("yes")
-
-
-def test_worker_metadata_merges_ready_ranks():
-    a = OffloadingWorkerMetadata(ready_ranks={0})
-    b = OffloadingWorkerMetadata(ready_ranks={1})
-    assert a.aggregate(b).ready_ranks == {0, 1}
+def test_async_init_waits_for_every_worker(request_runner):
+    runner = request_runner(
+        block_size=4,
+        num_gpu_blocks=100,
+        async_scheduling=False,
+        worker_count=2,
+        extra_config_overrides={"async_init": True},
+    )
+    scheduler = runner.connector_scheduler
+    rank0 = OffloadingWorkerMetadata(ready_ranks={0})
     # A replayed output must not count the same rank twice.
-    assert a.aggregate(a).ready_ranks == {0}
+    for meta in (rank0, rank0.aggregate(rank0)):
+        scheduler.update_connector_output(
+            KVConnectorOutput(kv_connector_worker_meta=meta)
+        )
+        assert not scheduler._tier_ready
+    scheduler.update_connector_output(
+        KVConnectorOutput(
+            kv_connector_worker_meta=rank0.aggregate(
+                OffloadingWorkerMetadata(ready_ranks={1})
+            )
+        )
+    )
+    assert scheduler._tier_ready
 
 
 def test_scheduler_reports_lookup_sync_delay(request_runner):

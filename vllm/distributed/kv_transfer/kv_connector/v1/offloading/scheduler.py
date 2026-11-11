@@ -620,7 +620,8 @@ class OffloadingConnectorScheduler:
         # Under async_init the engine serves without offloading until every
         # worker reports its tier ready.
         self._tier_ready = getattr(spec, "async_init", False) is not True
-        self._tier_init_start = time.monotonic()
+        if not self._tier_ready:
+            logger.info("KV offloading is off until every worker is ready")
         self._connector_stats = OffloadingConnectorStats()
         self.use_lookahead_block_hashes = vllm_config.num_hash_lookahead_tokens > 0
 
@@ -1398,8 +1399,6 @@ class OffloadingConnectorScheduler:
             group_state.block_ids.clear()
             # Restarting at token 0: offer every chunk again.
             group_state.next_stored_chunk_idx = 0
-        if not self._tier_ready:
-            return 0, False
 
         if req_status.transfer_jobs:
             logger.debug(
@@ -1416,7 +1415,11 @@ class OffloadingConnectorScheduler:
         req_status.num_locally_computed_tokens = num_computed_tokens
 
         num_hit_tokens: int | None
-        if request.skip_reading_external_kv or req_status.load_failed:
+        if (
+            request.skip_reading_external_kv
+            or req_status.load_failed
+            or not self._tier_ready
+        ):
             num_hit_tokens = 0
         else:
             lookup_start = time.monotonic()
@@ -2421,10 +2424,7 @@ class OffloadingConnectorScheduler:
         if not self._tier_ready and len(meta.ready_ranks) >= self.config.num_workers:
             self._tier_ready = True
             logger.info(
-                "KV offloading enabled: all %d workers ready %.1f s after the "
-                "scheduler started",
-                self.config.num_workers,
-                time.monotonic() - self._tier_init_start,
+                "KV offloading enabled: all %d workers ready", self.config.num_workers
             )
         if not meta.transfer_stats.is_empty():
             transfer_stats = OffloadingConnectorStats()

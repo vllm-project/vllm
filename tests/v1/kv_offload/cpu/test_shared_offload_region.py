@@ -567,6 +567,7 @@ def test_populate_shard_prefaults_only_its_share(iid, monkeypatch, shard, expect
 
 def test_deferred_prefault_fills_worker_slots(iid):
     with _region(iid, num_chunks=3, num_workers=2, rank=1, populate=False) as r:
+        assert not any(_page_residency(r.mmap_obj, r.total_size_bytes))
         for offset, length in r.prefault_ranges():
             r.prefault(offset, length)
         resident = _page_residency(r.mmap_obj, r.total_size_bytes)
@@ -1118,6 +1119,47 @@ def test_pin_mmap_region_failure_leaves_region_pageable(iid, host_register, fail
     assert unregister.call_args_list == [
         call(address) for address in reversed(registered)
     ]
+
+
+def test_pin_mmap_region_stop_leaves_region_pageable(iid, host_register):
+    register, unregister = host_register
+    with _region(iid, num_chunks=5, cpu_page_size=3 * PAGE_SIZE) as region:
+        gpu_worker.pin_mmap_region(region, should_stop=lambda: register.call_count == 2)
+        base = region._base.data_ptr()
+        assert not region.is_pinned
+    assert register.call_count == 2
+    assert unregister.call_args_list == [call(base + 6 * PAGE_SIZE), call(base)]
+
+
+@pytest.mark.parametrize("case", ["ready", "pin_fails", "stopped"])
+def test_deferred_host_setup(iid, host_register, monkeypatch, case):
+    """The worker turns ready only after its region is pre-faulted and pinned."""
+    register, _ = host_register
+    register.return_value = case != "pin_fails"
+    monkeypatch.setattr(gpu_worker, "_relax_stream_capture", lambda: None)
+    monkeypatch.setattr(
+        gpu_worker.torch.accelerator, "set_device_index", lambda _: None
+    )
+    with _region(iid, num_chunks=3, num_workers=2, rank=1, populate=False) as region:
+        worker = gpu_worker.CPUOffloadingWorker.__new__(gpu_worker.CPUOffloadingWorker)
+        worker._mmap_region = region
+        worker._defer_host_setup = True
+        worker._device = 0
+        worker._prefault_shard = None
+        worker._pin_memory = True
+        worker._worker_slot_only = True
+        worker._pin_pace = 0.0
+        worker._setup_stop = threading.Event()
+        worker._ready = threading.Event()
+        if case == "stopped":
+            worker._setup_stop.set()
+
+        worker.start_background_setup()
+        assert worker._setup_thread is not None
+        worker._setup_thread.join()
+
+        assert worker.is_ready() == region.is_pinned == (case == "ready")
+        assert register.called == (case != "stopped")
 
 
 def test_pin_mmap_region_when_host_register_unsupported_stays_pageable(

@@ -267,25 +267,23 @@ def pin_mmap_region(
     addresses: list[int] = []
     registered_bytes = 0
     for offset, size in ranges:
-        if should_stop is not None and should_stop():
-            for registered in reversed(addresses):
-                host_unregister(registered)
-            return
         address = base_ptr + offset
         t0 = time.monotonic()
-        if host_register(address, size):
+        stopped = should_stop is not None and should_stop()
+        if not stopped and host_register(address, size):
             addresses.append(address)
             registered_bytes += size
             if pace > 0:
                 time.sleep((time.monotonic() - t0) * pace)
             continue
-        logger.warning(
-            "host_register failed for rank=%d at %.2f of %.2f GB; "
-            "the offload region stays pageable",
-            rank,
-            offset / 1e9,
-            total_size / 1e9,
-        )
+        if not stopped:
+            logger.warning(
+                "host_register failed for rank=%d at %.2f of %.2f GB; "
+                "the offload region stays pageable",
+                rank,
+                offset / 1e9,
+                total_size / 1e9,
+            )
         for registered in reversed(addresses):
             host_unregister(registered)
         return
@@ -792,8 +790,8 @@ class SingleDirectionOffloadingHandler:
 
 # Pre-fault step, so shutdown can stop a deferred setup between steps.
 _PREFAULT_STEP_BYTES = 1 << 30
-# Deferred pinning registers small chunks so no single call holds the CUDA
-# driver lock long enough to stall serving.
+# Deferred pinning registers small chunks (never less than one block row or
+# worker slot) to shorten each hold of the CUDA driver lock while serving.
 _DEFERRED_PIN_CHUNK_BYTES = 8 << 20
 
 
@@ -802,13 +800,12 @@ def _relax_stream_capture() -> None:
 
     A global-mode capture otherwise fails on such a call from any thread.
     """
-    if not current_platform.is_cuda():
-        return
     mode = ctypes.c_int(2)  # cudaStreamCaptureModeRelaxed
     lib = CudaRTLibrary().lib
-    if lib.cudaThreadExchangeStreamCaptureMode(ctypes.byref(mode)) != 0:
+    rc = lib.cudaThreadExchangeStreamCaptureMode(ctypes.byref(mode))
+    if rc != 0:
         lib.cudaGetLastError()
-        logger.warning("Could not relax stream capture mode for offload setup")
+        raise RuntimeError(f"cudaThreadExchangeStreamCaptureMode failed (code={rc})")
 
 
 class CPUOffloadingWorker(OffloadingWorker):
@@ -818,6 +815,8 @@ class CPUOffloadingWorker(OffloadingWorker):
     direction) and exposes them through the explicit submit_store /
     submit_load API.
     """
+
+    _setup_thread: threading.Thread | None = None
 
     def __init__(
         self,
@@ -844,7 +843,6 @@ class CPUOffloadingWorker(OffloadingWorker):
         self._defer_host_setup = defer_host_setup and mmap_region is not None
         self._prefault_shard = prefault_shard
         self._pin_pace = pin_pace
-        self._setup_thread: threading.Thread | None = None
         self._setup_stop = threading.Event()
         self._ready = threading.Event()
         if self._defer_host_setup:
@@ -990,10 +988,9 @@ class CPUOffloadingWorker(OffloadingWorker):
 
     def shutdown(self) -> None:
         # The region must outlive the setup thread that touches it.
-        setup_thread = getattr(self, "_setup_thread", None)
-        if setup_thread is not None:
+        if self._setup_thread is not None:
             self._setup_stop.set()
-            setup_thread.join()
+            self._setup_thread.join()
         handler_failed = False
         try:
             self._store_handler.shutdown()
