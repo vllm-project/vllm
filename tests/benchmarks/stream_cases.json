@@ -1231,5 +1231,151 @@
   "known_gap": {
    "python": "unfiled"
   }
+ },
+ {
+  "name": "vllm/chat_length",
+  "backend": "openai-chat",
+  "source": "vllm serve Qwen2.5-1.5B (vLLM 0.32.1rc1.dev121, RTX 3080), temperature 0, raw bytes as received, one chunk per SSE message",
+  "chunks": [
+   "data: {\"id\":\"chatcmpl-a70b34379c256991\",\"object\":\"chat.completion.chunk\",\"created\":1794377272,\"model\":\"m\",\"choices\":[{\"index\":0,\"delta\":{\"role\":\"assistant\",\"content\":\"\"},\"logprobs\":null,\"finish_reason\":null}],\"prompt_token_ids\":null,\"prompt_text\":null}\n\n",
+   "data: {\"id\":\"chatcmpl-a70b34379c256991\",\"object\":\"chat.completion.chunk\",\"created\":1794377272,\"model\":\"m\",\"choices\":[{\"index\":0,\"delta\":{\"content\":\"ostringstream\"},\"logprobs\":null,\"finish_reason\":null,\"token_ids\":null}],\"kv_transfer_params\":null}\n\n",
+   "data: {\"id\":\"chatcmpl-a70b34379c256991\",\"object\":\"chat.completion.chunk\",\"created\":1794377272,\"model\":\"m\",\"choices\":[{\"index\":0,\"delta\":{\"content\":\"\\n\"},\"logprobs\":null,\"finish_reason\":null,\"token_ids\":null}],\"kv_transfer_params\":null}\n\n",
+   "data: {\"id\":\"chatcmpl-a70b34379c256991\",\"object\":\"chat.completion.chunk\",\"created\":1794377272,\"model\":\"m\",\"choices\":[{\"index\":0,\"delta\":{\"content\":\"ostringstream\"},\"logprobs\":null,\"finish_reason\":null,\"token_ids\":null}],\"kv_transfer_params\":null}\n\n",
+   "data: {\"id\":\"chatcmpl-a70b34379c256991\",\"object\":\"chat.completion.chunk\",\"created\":1794377272,\"model\":\"m\",\"choices\":[{\"index\":0,\"delta\":{\"content\":\"\\n\"},\"logprobs\":null,\"finish_reason\":null,\"token_ids\":null}],\"kv_transfer_params\":null}\n\n",
+   "data: {\"id\":\"chatcmpl-a70b34379c256991\",\"object\":\"chat.completion.chunk\",\"created\":1794377272,\"model\":\"m\",\"choices\":[{\"index\":0,\"delta\":{\"content\":\"ostringstream\"},\"logprobs\":null,\"finish_reason\":null,\"token_ids\":null}],\"kv_transfer_params\":null}\n\n",
+   "data: {\"id\":\"chatcmpl-a70b34379c256991\",\"object\":\"chat.completion.chunk\",\"created\":1794377272,\"model\":\"m\",\"choices\":[{\"index\":0,\"delta\":{\"content\":\"\\n\"},\"logprobs\":null,\"finish_reason\":null,\"token_ids\":null}],\"kv_transfer_params\":null}\n\n",
+   "data: {\"id\":\"chatcmpl-a70b34379c256991\",\"object\":\"chat.completion.chunk\",\"created\":1794377272,\"model\":\"m\",\"choices\":[{\"index\":0,\"delta\":{\"content\":\"ostringstream\"},\"logprobs\":null,\"finish_reason\":null,\"token_ids\":null}],\"kv_transfer_params\":null}\n\n",
+   "data: {\"id\":\"chatcmpl-a70b34379c256991\",\"object\":\"chat.completion.chunk\",\"created\":1794377272,\"model\":\"m\",\"choices\":[{\"index\":0,\"delta\":{\"content\":\"\\n\"},\"logprobs\":null,\"finish_reason\":\"length\",\"stop_reason\":null,\"token_ids\":null,\"weight_versions\":null}],\"kv_transfer_params\":null}\n\n",
+   "data: {\"id\":\"chatcmpl-a70b34379c256991\",\"object\":\"chat.completion.chunk\",\"created\":1794377272,\"model\":\"m\",\"choices\":[],\"usage\":{\"prompt_tokens\":28,\"total_tokens\":36,\"completion_tokens\":8},\"system_fingerprint\":\"vllm-0.32.1rc1.dev121+gfce64bc5c.d20261020-1c2d3c0c\"}\n\n",
+   "data: [DONE]\n\n"
+  ],
+  "expect": {
+   "success": true,
+   "itl": 7,
+   "output_tokens": 8,
+   "prompt_len": 28
+  }
+ },
+ {
+  "name": "vllm/chat_continuous",
+  "backend": "openai-chat",
+  "source": "vllm serve Qwen2.5-1.5B (vLLM 0.32.1rc1.dev121, RTX 3080), temperature 0, raw bytes as received, one chunk per SSE message",
+  "chunks": [
+   "data: {\"id\":\"chatcmpl-a77c6c18bd3139d3\",\"object\":\"chat.completion.chunk\",\"created\":1794377274,\"model\":\"m\",\"choices\":[{\"index\":0,\"delta\":{\"role\":\"assistant\",\"content\":\"\"},\"logprobs\":null,\"finish_reason\":null}],\"usage\":{\"prompt_tokens\":28,\"total_tokens\":28,\"completion_tokens\":0,\"completion_tokens_details\":null},\"prompt_token_ids\":null,\"prompt_text\":null}\n\n",
+   "data: {\"id\":\"chatcmpl-a77c6c18bd3139d3\",\"object\":\"chat.completion.chunk\",\"created\":1794377274,\"model\":\"m\",\"choices\":[{\"index\":0,\"delta\":{\"content\":\"ostringstream\"},\"logprobs\":null,\"finish_reason\":null,\"token_ids\":null}],\"usage\":{\"prompt_tokens\":28,\"total_tokens\":29,\"completion_tokens\":1,\"completion_tokens_details\":null},\"kv_transfer_params\":null}\n\n",
+   "data: {\"id\":\"chatcmpl-a77c6c18bd3139d3\",\"object\":\"chat.completion.chunk\",\"created\":1794377274,\"model\":\"m\",\"choices\":[{\"index\":0,\"delta\":{\"content\":\"\\n\"},\"logprobs\":null,\"finish_reason\":null,\"token_ids\":null}],\"usage\":{\"prompt_tokens\":28,\"total_tokens\":30,\"completion_tokens\":2,\"completion_tokens_details\":null},\"kv_transfer_params\":null}\n\n",
+   "data: {\"id\":\"chatcmpl-a77c6c18bd3139d3\",\"object\":\"chat.completion.chunk\",\"created\":1794377274,\"model\":\"m\",\"choices\":[{\"index\":0,\"delta\":{\"content\":\"ostringstream\"},\"logprobs\":null,\"finish_reason\":null,\"token_ids\":null}],\"usage\":{\"prompt_tokens\":28,\"total_tokens\":31,\"completion_tokens\":3,\"completion_tokens_details\":null},\"kv_transfer_params\":null}\n\n",
+   "data: {\"id\":\"chatcmpl-a77c6c18bd3139d3\",\"object\":\"chat.completion.chunk\",\"created\":1794377274,\"model\":\"m\",\"choices\":[{\"index\":0,\"delta\":{\"content\":\"\\n\"},\"logprobs\":null,\"finish_reason\":null,\"token_ids\":null}],\"usage\":{\"prompt_tokens\":28,\"total_tokens\":32,\"completion_tokens\":4,\"completion_tokens_details\":null},\"kv_transfer_params\":null}\n\n",
+   "data: {\"id\":\"chatcmpl-a77c6c18bd3139d3\",\"object\":\"chat.completion.chunk\",\"created\":1794377274,\"model\":\"m\",\"choices\":[{\"index\":0,\"delta\":{\"content\":\"ostringstream\"},\"logprobs\":null,\"finish_reason\":null,\"token_ids\":null}],\"usage\":{\"prompt_tokens\":28,\"total_tokens\":33,\"completion_tokens\":5,\"completion_tokens_details\":null},\"kv_transfer_params\":null}\n\n",
+   "data: {\"id\":\"chatcmpl-a77c6c18bd3139d3\",\"object\":\"chat.completion.chunk\",\"created\":1794377274,\"model\":\"m\",\"choices\":[{\"index\":0,\"delta\":{\"content\":\"\\n\"},\"logprobs\":null,\"finish_reason\":null,\"token_ids\":null}],\"usage\":{\"prompt_tokens\":28,\"total_tokens\":34,\"completion_tokens\":6,\"completion_tokens_details\":null},\"kv_transfer_params\":null}\n\n",
+   "data: {\"id\":\"chatcmpl-a77c6c18bd3139d3\",\"object\":\"chat.completion.chunk\",\"created\":1794377274,\"model\":\"m\",\"choices\":[{\"index\":0,\"delta\":{\"content\":\"ostringstream\"},\"logprobs\":null,\"finish_reason\":null,\"token_ids\":null}],\"usage\":{\"prompt_tokens\":28,\"total_tokens\":35,\"completion_tokens\":7,\"completion_tokens_details\":null},\"kv_transfer_params\":null}\n\n",
+   "data: {\"id\":\"chatcmpl-a77c6c18bd3139d3\",\"object\":\"chat.completion.chunk\",\"created\":1794377274,\"model\":\"m\",\"choices\":[{\"index\":0,\"delta\":{\"content\":\"\\n\"},\"logprobs\":null,\"finish_reason\":\"length\",\"stop_reason\":null,\"token_ids\":null,\"weight_versions\":null}],\"usage\":{\"prompt_tokens\":28,\"total_tokens\":36,\"completion_tokens\":8,\"completion_tokens_details\":null},\"kv_transfer_params\":null}\n\n",
+   "data: {\"id\":\"chatcmpl-a77c6c18bd3139d3\",\"object\":\"chat.completion.chunk\",\"created\":1794377274,\"model\":\"m\",\"choices\":[],\"usage\":{\"prompt_tokens\":28,\"total_tokens\":36,\"completion_tokens\":8},\"system_fingerprint\":\"vllm-0.32.1rc1.dev121+gfce64bc5c.d20261020-1c2d3c0c\"}\n\n",
+   "data: [DONE]\n\n"
+  ],
+  "expect": {
+   "success": true,
+   "itl": 7,
+   "output_tokens": 8,
+   "prompt_len": 28
+  }
+ },
+ {
+  "name": "vllm/chat_no_usage",
+  "backend": "openai-chat",
+  "source": "vllm serve Qwen2.5-1.5B (vLLM 0.32.1rc1.dev121, RTX 3080), temperature 0, raw bytes as received, one chunk per SSE message",
+  "chunks": [
+   "data: {\"id\":\"chatcmpl-96e1801e585eb49e\",\"object\":\"chat.completion.chunk\",\"created\":1794377274,\"model\":\"m\",\"choices\":[{\"index\":0,\"delta\":{\"role\":\"assistant\",\"content\":\"\"},\"logprobs\":null,\"finish_reason\":null}],\"prompt_token_ids\":null,\"prompt_text\":null}\n\n",
+   "data: {\"id\":\"chatcmpl-96e1801e585eb49e\",\"object\":\"chat.completion.chunk\",\"created\":1794377274,\"model\":\"m\",\"choices\":[{\"index\":0,\"delta\":{\"content\":\"ostringstream\"},\"logprobs\":null,\"finish_reason\":null,\"token_ids\":null}],\"kv_transfer_params\":null}\n\n",
+   "data: {\"id\":\"chatcmpl-96e1801e585eb49e\",\"object\":\"chat.completion.chunk\",\"created\":1794377274,\"model\":\"m\",\"choices\":[{\"index\":0,\"delta\":{\"content\":\"\\n\"},\"logprobs\":null,\"finish_reason\":null,\"token_ids\":null}],\"kv_transfer_params\":null}\n\n",
+   "data: {\"id\":\"chatcmpl-96e1801e585eb49e\",\"object\":\"chat.completion.chunk\",\"created\":1794377274,\"model\":\"m\",\"choices\":[{\"index\":0,\"delta\":{\"content\":\"ostringstream\"},\"logprobs\":null,\"finish_reason\":null,\"token_ids\":null}],\"kv_transfer_params\":null}\n\n",
+   "data: {\"id\":\"chatcmpl-96e1801e585eb49e\",\"object\":\"chat.completion.chunk\",\"created\":1794377274,\"model\":\"m\",\"choices\":[{\"index\":0,\"delta\":{\"content\":\"\\n\"},\"logprobs\":null,\"finish_reason\":null,\"token_ids\":null}],\"kv_transfer_params\":null}\n\n",
+   "data: {\"id\":\"chatcmpl-96e1801e585eb49e\",\"object\":\"chat.completion.chunk\",\"created\":1794377274,\"model\":\"m\",\"choices\":[{\"index\":0,\"delta\":{\"content\":\"ostringstream\"},\"logprobs\":null,\"finish_reason\":null,\"token_ids\":null}],\"kv_transfer_params\":null}\n\n",
+   "data: {\"id\":\"chatcmpl-96e1801e585eb49e\",\"object\":\"chat.completion.chunk\",\"created\":1794377274,\"model\":\"m\",\"choices\":[{\"index\":0,\"delta\":{\"content\":\"\\n\"},\"logprobs\":null,\"finish_reason\":null,\"token_ids\":null}],\"kv_transfer_params\":null}\n\n",
+   "data: {\"id\":\"chatcmpl-96e1801e585eb49e\",\"object\":\"chat.completion.chunk\",\"created\":1794377274,\"model\":\"m\",\"choices\":[{\"index\":0,\"delta\":{\"content\":\"ostringstream\"},\"logprobs\":null,\"finish_reason\":null,\"token_ids\":null}],\"kv_transfer_params\":null}\n\n",
+   "data: {\"id\":\"chatcmpl-96e1801e585eb49e\",\"object\":\"chat.completion.chunk\",\"created\":1794377274,\"model\":\"m\",\"choices\":[{\"index\":0,\"delta\":{\"content\":\"\\n\"},\"logprobs\":null,\"finish_reason\":\"length\",\"stop_reason\":null,\"token_ids\":null,\"weight_versions\":null}],\"system_fingerprint\":\"vllm-0.32.1rc1.dev121+gfce64bc5c.d20261020-1c2d3c0c\",\"kv_transfer_params\":null}\n\n",
+   "data: [DONE]\n\n"
+  ],
+  "expect": {
+   "success": true,
+   "itl": 7,
+   "output_tokens": 0,
+   "prompt_len": 100
+  }
+ },
+ {
+  "name": "vllm/comp_length",
+  "backend": "openai",
+  "source": "vllm serve Qwen2.5-1.5B (vLLM 0.32.1rc1.dev121, RTX 3080), temperature 0, raw bytes as received, one chunk per SSE message",
+  "chunks": [
+   "data: {\"id\":\"cmpl-b844b564a31ae3ca\",\"object\":\"text_completion\",\"created\":1794377274,\"model\":\"m\",\"choices\":[{\"index\":0,\"text\":\" \",\"logprobs\":null,\"finish_reason\":null,\"stop_reason\":null,\"prompt_token_ids\":null,\"token_ids\":null,\"weight_versions\":null}],\"kv_transfer_params\":null}\n\n",
+   "data: {\"id\":\"cmpl-b844b564a31ae3ca\",\"object\":\"text_completion\",\"created\":1794377274,\"model\":\"m\",\"choices\":[{\"index\":0,\"text\":\"4\",\"logprobs\":null,\"finish_reason\":null,\"stop_reason\":null,\"prompt_token_ids\":null,\"token_ids\":null,\"weight_versions\":null}],\"kv_transfer_params\":null}\n\n",
+   "data: {\"id\":\"cmpl-b844b564a31ae3ca\",\"object\":\"text_completion\",\"created\":1794377274,\"model\":\"m\",\"choices\":[{\"index\":0,\"text\":\",\",\"logprobs\":null,\"finish_reason\":null,\"stop_reason\":null,\"prompt_token_ids\":null,\"token_ids\":null,\"weight_versions\":null}],\"kv_transfer_params\":null}\n\n",
+   "data: {\"id\":\"cmpl-b844b564a31ae3ca\",\"object\":\"text_completion\",\"created\":1794377274,\"model\":\"m\",\"choices\":[{\"index\":0,\"text\":\" \",\"logprobs\":null,\"finish_reason\":null,\"stop_reason\":null,\"prompt_token_ids\":null,\"token_ids\":null,\"weight_versions\":null}],\"kv_transfer_params\":null}\n\n",
+   "data: {\"id\":\"cmpl-b844b564a31ae3ca\",\"object\":\"text_completion\",\"created\":1794377274,\"model\":\"m\",\"choices\":[{\"index\":0,\"text\":\"5\",\"logprobs\":null,\"finish_reason\":null,\"stop_reason\":null,\"prompt_token_ids\":null,\"token_ids\":null,\"weight_versions\":null}],\"kv_transfer_params\":null}\n\n",
+   "data: {\"id\":\"cmpl-b844b564a31ae3ca\",\"object\":\"text_completion\",\"created\":1794377274,\"model\":\"m\",\"choices\":[{\"index\":0,\"text\":\",\",\"logprobs\":null,\"finish_reason\":null,\"stop_reason\":null,\"prompt_token_ids\":null,\"token_ids\":null,\"weight_versions\":null}],\"kv_transfer_params\":null}\n\n",
+   "data: {\"id\":\"cmpl-b844b564a31ae3ca\",\"object\":\"text_completion\",\"created\":1794377274,\"model\":\"m\",\"choices\":[{\"index\":0,\"text\":\" \",\"logprobs\":null,\"finish_reason\":null,\"stop_reason\":null,\"prompt_token_ids\":null,\"token_ids\":null,\"weight_versions\":null}],\"kv_transfer_params\":null}\n\n",
+   "data: {\"id\":\"cmpl-b844b564a31ae3ca\",\"object\":\"text_completion\",\"created\":1794377274,\"model\":\"m\",\"choices\":[{\"index\":0,\"text\":\"6\",\"logprobs\":null,\"finish_reason\":\"length\",\"stop_reason\":null,\"prompt_token_ids\":null,\"token_ids\":null,\"weight_versions\":null}],\"kv_transfer_params\":null}\n\n",
+   "data: {\"id\":\"cmpl-b844b564a31ae3ca\",\"object\":\"text_completion\",\"created\":1794377274,\"model\":\"m\",\"choices\":[],\"usage\":{\"prompt_tokens\":8,\"total_tokens\":16,\"completion_tokens\":8},\"system_fingerprint\":\"vllm-0.32.1rc1.dev121+gfce64bc5c.d20261020-1c2d3c0c\"}\n\n",
+   "data: [DONE]\n\n"
+  ],
+  "expect": {
+   "success": true,
+   "itl": 7,
+   "output_tokens": 8,
+   "prompt_len": 8
+  }
+ },
+ {
+  "name": "vllm/comp_continuous",
+  "backend": "openai",
+  "source": "vllm serve Qwen2.5-1.5B (vLLM 0.32.1rc1.dev121, RTX 3080), temperature 0, raw bytes as received, one chunk per SSE message",
+  "chunks": [
+   "data: {\"id\":\"cmpl-a1551608b0c3c6ed\",\"object\":\"text_completion\",\"created\":1794377275,\"model\":\"m\",\"choices\":[{\"index\":0,\"text\":\" \",\"logprobs\":null,\"finish_reason\":null,\"stop_reason\":null,\"prompt_token_ids\":null,\"token_ids\":null,\"weight_versions\":null}],\"usage\":{\"prompt_tokens\":8,\"total_tokens\":9,\"completion_tokens\":1},\"kv_transfer_params\":null}\n\n",
+   "data: {\"id\":\"cmpl-a1551608b0c3c6ed\",\"object\":\"text_completion\",\"created\":1794377275,\"model\":\"m\",\"choices\":[{\"index\":0,\"text\":\"4\",\"logprobs\":null,\"finish_reason\":null,\"stop_reason\":null,\"prompt_token_ids\":null,\"token_ids\":null,\"weight_versions\":null}],\"usage\":{\"prompt_tokens\":8,\"total_tokens\":10,\"completion_tokens\":2},\"kv_transfer_params\":null}\n\n",
+   "data: {\"id\":\"cmpl-a1551608b0c3c6ed\",\"object\":\"text_completion\",\"created\":1794377275,\"model\":\"m\",\"choices\":[{\"index\":0,\"text\":\",\",\"logprobs\":null,\"finish_reason\":null,\"stop_reason\":null,\"prompt_token_ids\":null,\"token_ids\":null,\"weight_versions\":null}],\"usage\":{\"prompt_tokens\":8,\"total_tokens\":11,\"completion_tokens\":3},\"kv_transfer_params\":null}\n\n",
+   "data: {\"id\":\"cmpl-a1551608b0c3c6ed\",\"object\":\"text_completion\",\"created\":1794377275,\"model\":\"m\",\"choices\":[{\"index\":0,\"text\":\" \",\"logprobs\":null,\"finish_reason\":null,\"stop_reason\":null,\"prompt_token_ids\":null,\"token_ids\":null,\"weight_versions\":null}],\"usage\":{\"prompt_tokens\":8,\"total_tokens\":12,\"completion_tokens\":4},\"kv_transfer_params\":null}\n\n",
+   "data: {\"id\":\"cmpl-a1551608b0c3c6ed\",\"object\":\"text_completion\",\"created\":1794377275,\"model\":\"m\",\"choices\":[{\"index\":0,\"text\":\"5\",\"logprobs\":null,\"finish_reason\":null,\"stop_reason\":null,\"prompt_token_ids\":null,\"token_ids\":null,\"weight_versions\":null}],\"usage\":{\"prompt_tokens\":8,\"total_tokens\":13,\"completion_tokens\":5},\"kv_transfer_params\":null}\n\n",
+   "data: {\"id\":\"cmpl-a1551608b0c3c6ed\",\"object\":\"text_completion\",\"created\":1794377275,\"model\":\"m\",\"choices\":[{\"index\":0,\"text\":\",\",\"logprobs\":null,\"finish_reason\":null,\"stop_reason\":null,\"prompt_token_ids\":null,\"token_ids\":null,\"weight_versions\":null}],\"usage\":{\"prompt_tokens\":8,\"total_tokens\":14,\"completion_tokens\":6},\"kv_transfer_params\":null}\n\n",
+   "data: {\"id\":\"cmpl-a1551608b0c3c6ed\",\"object\":\"text_completion\",\"created\":1794377275,\"model\":\"m\",\"choices\":[{\"index\":0,\"text\":\" \",\"logprobs\":null,\"finish_reason\":null,\"stop_reason\":null,\"prompt_token_ids\":null,\"token_ids\":null,\"weight_versions\":null}],\"usage\":{\"prompt_tokens\":8,\"total_tokens\":15,\"completion_tokens\":7},\"kv_transfer_params\":null}\n\n",
+   "data: {\"id\":\"cmpl-a1551608b0c3c6ed\",\"object\":\"text_completion\",\"created\":1794377275,\"model\":\"m\",\"choices\":[{\"index\":0,\"text\":\"6\",\"logprobs\":null,\"finish_reason\":\"length\",\"stop_reason\":null,\"prompt_token_ids\":null,\"token_ids\":null,\"weight_versions\":null}],\"usage\":{\"prompt_tokens\":8,\"total_tokens\":16,\"completion_tokens\":8},\"kv_transfer_params\":null}\n\n",
+   "data: {\"id\":\"cmpl-a1551608b0c3c6ed\",\"object\":\"text_completion\",\"created\":1794377275,\"model\":\"m\",\"choices\":[],\"usage\":{\"prompt_tokens\":8,\"total_tokens\":16,\"completion_tokens\":8},\"system_fingerprint\":\"vllm-0.32.1rc1.dev121+gfce64bc5c.d20261020-1c2d3c0c\"}\n\n",
+   "data: [DONE]\n\n"
+  ],
+  "expect": {
+   "success": true,
+   "itl": 7,
+   "output_tokens": 8,
+   "prompt_len": 8
+  }
+ },
+ {
+  "name": "vllm/resp_length",
+  "backend": "openai-responses",
+  "source": "vllm serve Qwen2.5-1.5B (vLLM 0.32.1rc1.dev121, RTX 3080), temperature 0, raw bytes as received, one chunk per SSE message",
+  "chunks": [
+   "event: response.created\ndata: {\"response\":{\"id\":\"resp_84e8f027f58aa812\",\"created_at\":1794377275,\"incomplete_details\":null,\"instructions\":null,\"metadata\":null,\"model\":\"m\",\"object\":\"response\",\"output\":[],\"parallel_tool_calls\":true,\"temperature\":0.0,\"tool_choice\":\"none\",\"tools\":[],\"top_p\":1.0,\"background\":false,\"max_output_tokens\":8,\"max_tool_calls\":null,\"previous_response_id\":null,\"prompt\":null,\"prompt_cache_options\":null,\"prompt_cache_key\":null,\"prompt_cache_retention\":null,\"reasoning\":null,\"safety_identifier\":null,\"service_tier\":\"auto\",\"status\":\"in_progress\",\"text\":null,\"top_logprobs\":null,\"truncation\":\"disabled\",\"usage\":null,\"user\":null,\"presence_penalty\":0.0,\"frequency_penalty\":0.0,\"kv_transfer_params\":null,\"ec_transfer_params\":null,\"input_messages\":null,\"output_messages\":null},\"sequence_number\":0,\"type\":\"response.created\"}\n\n",
+   "event: response.in_progress\ndata: {\"response\":{\"id\":\"resp_84e8f027f58aa812\",\"created_at\":1794377275,\"incomplete_details\":null,\"instructions\":null,\"metadata\":null,\"model\":\"m\",\"object\":\"response\",\"output\":[],\"parallel_tool_calls\":true,\"temperature\":0.0,\"tool_choice\":\"none\",\"tools\":[],\"top_p\":1.0,\"background\":false,\"max_output_tokens\":8,\"max_tool_calls\":null,\"previous_response_id\":null,\"prompt\":null,\"prompt_cache_options\":null,\"prompt_cache_key\":null,\"prompt_cache_retention\":null,\"reasoning\":null,\"safety_identifier\":null,\"service_tier\":\"auto\",\"status\":\"in_progress\",\"text\":null,\"top_logprobs\":null,\"truncation\":\"disabled\",\"usage\":null,\"user\":null,\"presence_penalty\":0.0,\"frequency_penalty\":0.0,\"kv_transfer_params\":null,\"ec_transfer_params\":null,\"input_messages\":null,\"output_messages\":null},\"sequence_number\":1,\"type\":\"response.in_progress\"}\n\n",
+   "event: response.output_item.added\ndata: {\"item\":{\"id\":\"msg_a344e6a22fcb8fcb\",\"content\":[],\"role\":\"assistant\",\"status\":\"in_progress\",\"type\":\"message\",\"phase\":null},\"output_index\":0,\"sequence_number\":2,\"type\":\"response.output_item.added\"}\n\n",
+   "event: response.content_part.added\ndata: {\"content_index\":0,\"item_id\":\"msg_a344e6a22fcb8fcb\",\"output_index\":0,\"part\":{\"annotations\":[],\"text\":\"\",\"type\":\"output_text\",\"logprobs\":[]},\"sequence_number\":3,\"type\":\"response.content_part.added\"}\n\n",
+   "event: response.output_text.delta\ndata: {\"content_index\":0,\"delta\":\"ostringstream\",\"item_id\":\"msg_a344e6a22fcb8fcb\",\"logprobs\":[],\"output_index\":0,\"sequence_number\":4,\"type\":\"response.output_text.delta\"}\n\n",
+   "event: response.output_text.delta\ndata: {\"content_index\":0,\"delta\":\"\\n\",\"item_id\":\"msg_a344e6a22fcb8fcb\",\"logprobs\":[],\"output_index\":0,\"sequence_number\":5,\"type\":\"response.output_text.delta\"}\n\n",
+   "event: response.output_text.delta\ndata: {\"content_index\":0,\"delta\":\"ostringstream\",\"item_id\":\"msg_a344e6a22fcb8fcb\",\"logprobs\":[],\"output_index\":0,\"sequence_number\":6,\"type\":\"response.output_text.delta\"}\n\n",
+   "event: response.output_text.delta\ndata: {\"content_index\":0,\"delta\":\"\\n\",\"item_id\":\"msg_a344e6a22fcb8fcb\",\"logprobs\":[],\"output_index\":0,\"sequence_number\":7,\"type\":\"response.output_text.delta\"}\n\n",
+   "event: response.output_text.delta\ndata: {\"content_index\":0,\"delta\":\"ostringstream\",\"item_id\":\"msg_a344e6a22fcb8fcb\",\"logprobs\":[],\"output_index\":0,\"sequence_number\":8,\"type\":\"response.output_text.delta\"}\n\n",
+   "event: response.output_text.delta\ndata: {\"content_index\":0,\"delta\":\"\\n\",\"item_id\":\"msg_a344e6a22fcb8fcb\",\"logprobs\":[],\"output_index\":0,\"sequence_number\":9,\"type\":\"response.output_text.delta\"}\n\n",
+   "event: response.output_text.delta\ndata: {\"content_index\":0,\"delta\":\"ostringstream\",\"item_id\":\"msg_a344e6a22fcb8fcb\",\"logprobs\":[],\"output_index\":0,\"sequence_number\":10,\"type\":\"response.output_text.delta\"}\n\n",
+   "event: response.output_text.delta\ndata: {\"content_index\":0,\"delta\":\"\\n\",\"item_id\":\"msg_a344e6a22fcb8fcb\",\"logprobs\":[],\"output_index\":0,\"sequence_number\":11,\"type\":\"response.output_text.delta\"}\n\n",
+   "event: response.output_text.done\ndata: {\"content_index\":0,\"item_id\":\"msg_a344e6a22fcb8fcb\",\"logprobs\":[],\"output_index\":0,\"sequence_number\":12,\"text\":\"ostringstream\\nostringstream\\nostringstream\\nostringstream\\n\",\"type\":\"response.output_text.done\"}\n\n",
+   "event: response.content_part.done\ndata: {\"content_index\":0,\"item_id\":\"msg_a344e6a22fcb8fcb\",\"output_index\":0,\"part\":{\"annotations\":[],\"text\":\"ostringstream\\nostringstream\\nostringstream\\nostringstream\\n\",\"type\":\"output_text\",\"logprobs\":null},\"sequence_number\":13,\"type\":\"response.content_part.done\"}\n\n",
+   "event: response.output_item.done\ndata: {\"item\":{\"id\":\"msg_a344e6a22fcb8fcb\",\"content\":[{\"annotations\":[],\"text\":\"ostringstream\\nostringstream\\nostringstream\\nostringstream\\n\",\"type\":\"output_text\",\"logprobs\":null}],\"role\":\"assistant\",\"status\":\"incomplete\",\"type\":\"message\",\"phase\":null},\"output_index\":0,\"sequence_number\":14,\"type\":\"response.output_item.done\"}\n\n",
+   "event: response.incomplete\ndata: {\"response\":{\"id\":\"resp_84e8f027f58aa812\",\"created_at\":1794377275,\"incomplete_details\":{\"reason\":\"max_output_tokens\"},\"instructions\":null,\"metadata\":null,\"model\":\"m\",\"object\":\"response\",\"output\":[{\"id\":\"msg_a344e6a22fcb8fcb\",\"content\":[{\"annotations\":[],\"text\":\"ostringstream\\nostringstream\\nostringstream\\nostringstream\\n\",\"type\":\"output_text\",\"logprobs\":null}],\"role\":\"assistant\",\"status\":\"incomplete\",\"type\":\"message\",\"phase\":null}],\"parallel_tool_calls\":true,\"temperature\":0.0,\"tool_choice\":\"none\",\"tools\":[],\"top_p\":1.0,\"background\":false,\"max_output_tokens\":8,\"max_tool_calls\":null,\"previous_response_id\":null,\"prompt\":null,\"prompt_cache_options\":null,\"prompt_cache_key\":null,\"prompt_cache_retention\":null,\"reasoning\":null,\"safety_identifier\":null,\"service_tier\":\"auto\",\"status\":\"incomplete\",\"text\":null,\"top_logprobs\":null,\"truncation\":\"disabled\",\"usage\":{\"input_tokens\":28,\"input_tokens_details\":{\"cached_tokens\":16,\"cache_write_tokens\":0,\"input_tokens_per_turn\":[],\"cached_tokens_per_turn\":[]},\"output_tokens\":8,\"output_tokens_details\":{\"reasoning_tokens\":0,\"tool_output_tokens\":0,\"output_tokens_per_turn\":[],\"tool_output_tokens_per_turn\":[]},\"total_tokens\":36},\"user\":null,\"presence_penalty\":0.0,\"frequency_penalty\":0.0,\"kv_transfer_params\":null,\"ec_transfer_params\":null,\"input_messages\":null,\"output_messages\":null},\"sequence_number\":15,\"type\":\"response.incomplete\"}\n\n"
+  ],
+  "expect": {
+   "success": true,
+   "itl": 7,
+   "output_tokens": 8,
+   "prompt_len": 28
+  }
  }
 ]
