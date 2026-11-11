@@ -228,6 +228,7 @@ if TYPE_CHECKING:
     VLLM_KIMI_SD_DSA_FOLD: bool = True
     VLLM_KIMI_SD_DSA_PART_FP32: bool = False
     VLLM_KIMI_SD_DSA_VERIFY: bool = False
+    VLLM_K3_KDA_FB_STRIDED: bool = True
     VLLM_KIMI_SD_DSA_PROLOGUE: bool = False
     VLLM_K3_DSA_FUSED_NORM_GATE: bool = True
     VLLM_ENABLE_GEMM_RS: bool = False
@@ -1772,6 +1773,12 @@ environment_variables: dict[str, Callable[[], Any]] = {
     # log how the query, KV write, top-k and o_proj input differ.
     "VLLM_KIMI_SD_DSA_VERIFY": lambda: bool(
         int(os.getenv("VLLM_KIMI_SD_DSA_VERIFY", "0"))
+    ),
+    # Kimi-K3 KDA on ROCm: run f_b_proj as a Triton GEMM that reads the
+    # row-strided f_a slice of the fused in_proj output in place, instead of
+    # the generic unquantized GEMM, which copies it to a contiguous buffer first.
+    "VLLM_K3_KDA_FB_STRIDED": lambda: bool(
+        int(os.getenv("VLLM_K3_KDA_FB_STRIDED", "1"))
     ),
     # The DSA layers' query, KV and indexer projections as one persistent
     # launch (D1a: AttnRes, qkv_a, wk / wv, g_proj, the norms, the fp8_ds_mla
