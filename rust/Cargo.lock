@@ -5662,6 +5662,7 @@ dependencies = [
  "uuid",
  "vllm-engine-core-client",
  "vllm-llm",
+ "vllm-metrics",
  "vllm-parser",
  "vllm-text",
  "vllm-tokenizer",
@@ -5683,6 +5684,7 @@ dependencies = [
  "native-tls",
  "serde",
  "serde_json",
+ "serde_path_to_error",
  "serde_with",
  "thiserror-ext",
  "tokio",
@@ -5860,6 +5862,7 @@ dependencies = [
  "base64 0.22.1",
  "bytes",
  "clap",
+ "easy-ext",
  "educe",
  "expect-test",
  "futures",
@@ -5936,6 +5939,7 @@ dependencies = [
  "trait-set",
  "vllm-engine-core-client",
  "vllm-llm",
+ "vllm-metrics",
  "vllm-tokenizer",
 ]
 
@@ -5967,6 +5971,7 @@ dependencies = [
 name = "vllm-tracing"
 version = "0.1.0"
 dependencies = [
+ "serde_with",
  "time",
  "tracing",
  "tracing-subscriber",
