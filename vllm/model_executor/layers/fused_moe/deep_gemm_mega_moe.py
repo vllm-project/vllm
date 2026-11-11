@@ -523,9 +523,15 @@ class DeepGemmMegaMoEExperts(nn.Module):
         is_global_scale = weight_name.endswith(("weight_scale_2", "input_scale"))
         is_scale = weight_name.endswith("weight_scale")
         if self.weight_format == MEGA_MOE_MXFP4_SM90 and not loaded_weight.is_meta:
-            loaded_weight = self._sm90_fp4_shard(
-                loaded_weight.to(param.device), is_scale
-            )
+            try:
+                loaded_weight = self._sm90_fp4_shard(
+                    loaded_weight.to(param.device), is_scale
+                )
+            except AssertionError as e:
+                raise ValueError(
+                    f"MegaMoE MXFP4 expert {expert_id} {shard_id} ({weight_name}) "
+                    f"cannot run on SM90: {e}"
+                ) from e
         for local_expert_id in local_expert_ids:
             if is_global_scale:
                 param.data[local_expert_id].copy_(loaded_weight.reshape(()))
@@ -641,6 +647,8 @@ class DeepGemmMegaMoEExperts(nn.Module):
         )
 
         if is_scale:
+            # The codes load in a separate call, so rows wider than the kernel
+            # range cannot be clamped here and fail the load.
             sf = src.view(torch.uint8).contiguous().view(torch.int32)
             return transform_fp4_sf_for_sm90_mega_moe(sf)
         return relayout_fp4_weights_for_sm90_mega_moe(src.view(torch.int8))

@@ -364,6 +364,32 @@ def test_deep_gemm_mega_moe_reload_overwrites_kernel_layout_in_place(weight_form
     _assert_mega_moe_layout(experts, _expected_mega_moe_layout(ckpt, 2, 2))
 
 
+@pytest.mark.skipif(not has_sm90_mega_moe, reason="SM90 repacks MXFP4 scales per row")
+def test_deep_gemm_mega_moe_sm90_rejects_scale_rows_beyond_kernel_range():
+    """A scale row wider than the SM90 kernel range fails the load, naming the
+    shard, and writes nothing."""
+    experts = _make_mega_moe_experts(1, 1)
+    scale = torch.full((384, 8), 120, dtype=torch.uint8)
+
+    def load():
+        experts.weight_loader(
+            experts.w13_weight_scale,
+            scale,
+            "experts.w13_weight_scale",
+            shard_id="w3",
+            expert_id=0,
+        )
+
+    # 11 below the row maximum is the widest row the kernel takes.
+    scale[5, 3] = 109
+    load()
+    loaded = experts.w13_weight_scale.clone()
+    scale[5, 3] = 108
+    with pytest.raises(ValueError, match=r"expert 0 w3 \(experts.w13_weight_scale\)"):
+        load()
+    assert torch.equal(experts.w13_weight_scale, loaded)
+
+
 def test_deep_gemm_mega_moe_nvfp4_l2_scale_covers_every_expert():
     """Every rank quantizes L2 inputs with the max input scale over all experts,
     including those it does not own, so EPLB can move experts between ranks."""
