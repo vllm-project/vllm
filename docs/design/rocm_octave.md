@@ -113,6 +113,16 @@ scores are those of the unrotated vectors.
 | Q/K/V chunk rotation for prefill | `octave_rotate` | `octave_attn.cu` |
 | Codebooks (`v_perm_b32` tables) and byte layout | — | `octave_format.cuh` |
 
+The public decode entries in `octave_attn.cu` own architecture selection,
+dispatch to the native implementations, and the portable dense fallback.
+`octave_decode.cuh` defines `octave::DecodeArgs`, `octave::SparseDecodeArgs`, and
+the architecture entry points. A native decode implementation returns the
+selected split count, or zero without launching if the request is ineligible;
+the caller decides whether to fall back or reject it. Eligible empty queries
+return the selected count without launching a kernel or writing partials.
+Architecture entry points do not repeat target selection. The existing cached
+decode target selection is unchanged.
+
 The public prefill entry in `octave_prefill.cu` owns input validation,
 architecture selection, the split policy, and process-lifetime workspace
 management for graph capture. `octave_prefill.cuh` defines `octave::PrefillArgs`
@@ -163,12 +173,17 @@ To add an architecture:
    attention and merge, rotated space in and out. Reuse the validation and
    workspace management in `octave_prefill.cu`; revisit the shared split policy
    if the new kernel uses a different prefix tile size.
-2. Add a decode tier, or validate the portable dot4 kernel there.
+2. Add a decode implementation through `octave_decode.cuh`, preserving the
+   split-count return value and supported dense/sparse input contracts, or
+   validate the portable dot4 kernel on the new target. Register native decode
+   and any specialized reduction in `octave_attn.cu`; keep kernels and helpers
+   local to the implementation files.
 3. Register the target in the common prefill dispatch in `octave_prefill.cu`.
    Add source files to CMake and device-code guards to the implementation.
-   Add the target to the CMake enablement guard, `_kernel_tier` and
-   `supports_compute_capability` in
-   `vllm/v1/attention/backends/rocm_octave_attn.py`, and to the test gate.
+   Scope compiler options to the implementation that needs them, as for the
+   CDNA3 decode MFMA option. Add the target to the CMake enablement guard,
+   `_kernel_tier` and `supports_compute_capability` in
+   `vllm/v1/attention/backends/rocm_octave_attn.py`, and the test gate.
 4. Run `tests/kernels/attention/test_rocm_octave.py`: every kernel is checked
    against the PyTorch reference, and `test_decode_matches_reference` runs
    both the fast and the portable decode tier.

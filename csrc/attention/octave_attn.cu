@@ -20,7 +20,6 @@
 // attention output is rotated back in the reduce kernel.
 
 #include <cstdint>
-#include <string>
 #include <torch/all.h>
 #include <c10/cuda/CUDAGuard.h>
 #include <ATen/cuda/CUDAContext.h>
@@ -31,9 +30,12 @@
   #include <hip/hip_fp16.h>
 
   #include "octave_arch.cuh"
+  #include "octave_decode.cuh"
   #include "octave_format.cuh"
+  #include "octave_target.h"
 
 namespace octave {
+namespace {
 
 constexpr int DPL = D / 32;  // dims per lane when a wave owns one slot
 
@@ -831,6 +833,7 @@ __global__ void __launch_bounds__(256) window_attn_kernel(
   }
 }
 
+}  // namespace
 }  // namespace octave
 
 // ---------------------------------------------------------------------------
@@ -903,11 +906,10 @@ void octave_cache_store(torch::Tensor key, torch::Tensor value,
 }
 
 template <int VB, bool KC, int G, int QG, typename QT>
-static void launch_decode(torch::Tensor& query, torch::Tensor& cache,
-                          torch::Tensor& block_table, torch::Tensor& q_to_req,
-                          torch::Tensor& q_to_klen, torch::Tensor& mid_o,
-                          torch::Tensor& k_signs, float sm_scale_log2, int ns,
-                          hipStream_t stream) {
+static void launch_portable_decode(
+    torch::Tensor& query, torch::Tensor& cache, torch::Tensor& block_table,
+    torch::Tensor& q_to_req, torch::Tensor& q_to_klen, torch::Tensor& mid_o,
+    torch::Tensor& k_signs, float sm_scale_log2, int ns, hipStream_t stream) {
   const int num_q = query.size(0);
   dim3 grid(num_q, cache.size(1), ns);
   decode_kernel<VB, KC, G, QG, QT><<<grid, 128, 0, stream>>>(
@@ -921,16 +923,16 @@ static void launch_decode(torch::Tensor& query, torch::Tensor& cache,
 }
 
 template <int VB, bool KC, typename QT>
-static void dispatch_decode(int g, int qg, torch::Tensor& query,
-                            torch::Tensor& cache, torch::Tensor& block_table,
-                            torch::Tensor& q_to_req, torch::Tensor& q_to_klen,
-                            torch::Tensor& mid_o, torch::Tensor& k_signs,
-                            float sl2, int ns, hipStream_t stream) {
+static void dispatch_portable_decode(
+    int g, int qg, torch::Tensor& query, torch::Tensor& cache,
+    torch::Tensor& block_table, torch::Tensor& q_to_req,
+    torch::Tensor& q_to_klen, torch::Tensor& mid_o, torch::Tensor& k_signs,
+    float sl2, int ns, hipStream_t stream) {
   #define SQ_DEC(GG, QQ)                                                     \
     if (g == GG && qg == QQ) {                                               \
-      launch_decode<VB, KC, GG, QQ, QT>(query, cache, block_table, q_to_req, \
-                                        q_to_klen, mid_o, k_signs, sl2, ns,  \
-                                        stream);                             \
+      launch_portable_decode<VB, KC, GG, QQ, QT>(query, cache, block_table,  \
+                                                 q_to_req, q_to_klen, mid_o, \
+                                                 k_signs, sl2, ns, stream);  \
       return;                                                                \
     }
   SQ_DEC(1, 1);
@@ -947,26 +949,28 @@ static void dispatch_decode(int g, int qg, torch::Tensor& query,
   TORCH_CHECK(false, "octave_decode: unsupported GQA group ", g);
 }
 
-int octave_decode_wmma(torch::Tensor query, torch::Tensor cache,
-                       torch::Tensor block_table, torch::Tensor q_to_req,
-                       torch::Tensor q_to_klen, torch::Tensor mid_o,
-                       torch::Tensor k_signs, double sm_scale,
-                       int64_t num_kv_splits, int64_t fmt,
-                       const std::optional<torch::Tensor>& indices,
-                       const int* qpos, const int* wtags, int wmask,
-                       const int* stags, int smask, int64_t query_group);
+// Preserve the first-call target cache. Return the native split count, or 0
+// for the public entry to choose a dense fallback or reject a sparse call.
+static int try_launch_fast_decode(const octave::DecodeArgs& args,
+                                  const octave::SparseDecodeArgs& sparse) {
+  static const auto target = octave::target_from_name(
+      at::cuda::getCurrentDeviceProperties()->gcnArchName);
+  if (target == octave::Target::GFX942)
+    return sparse.indices.has_value() ? 0 : octave_cdna::octave_decode(args);
+  if (target == octave::Target::GFX1100)
+    return octave_rdna::octave_decode(args, sparse);
+  return 0;
+}
 
-bool octave_reduce_mfma(torch::Tensor out, torch::Tensor mid_o,
-                        torch::Tensor v_signs, int num_splits,
-                        cudaStream_t stream);
-
+// Merge partials and undo V rotation. If the gfx942 specialization declines
+// the request, or the cached target is not gfx942, use the portable reducer.
 static void launch_reduce(torch::Tensor out, torch::Tensor mid_o,
                           torch::Tensor v_signs, int num_splits,
                           cudaStream_t stream) {
-  static const bool cdna3 =
-      std::string(at::cuda::getCurrentDeviceProperties()->gcnArchName)
-          .rfind("gfx942", 0) == 0;
-  if (cdna3 && octave_reduce_mfma(out, mid_o, v_signs, num_splits, stream))
+  static const auto target = octave::target_from_name(
+      at::cuda::getCurrentDeviceProperties()->gcnArchName);
+  if (target == octave::Target::GFX942 &&
+      octave_cdna::octave_reduce(out, mid_o, v_signs, num_splits, stream))
     return;
   dim3 grid(out.size(0), out.size(1));
   if (out.dtype() == at::kBFloat16)
@@ -981,6 +985,8 @@ static void launch_reduce(torch::Tensor out, torch::Tensor mid_o,
         out.stride(0), out.stride(1));
 }
 
+// Dense decode owns validation, device guarding, native/portable selection,
+// and reduction of the selected number of partials into unrotated output.
 void octave_decode(torch::Tensor out, torch::Tensor query, torch::Tensor cache,
                    torch::Tensor block_table, torch::Tensor q_to_req,
                    torch::Tensor q_to_klen, torch::Tensor mid_o,
@@ -1003,24 +1009,25 @@ void octave_decode(torch::Tensor out, torch::Tensor query, torch::Tensor cache,
   const at::cuda::OptionalCUDAGuard guard(device_of(query));
   auto stream = at::cuda::getCurrentCUDAStream().stream();
   const bool bf = query.dtype() == at::kBFloat16;
-  // Fast tier when the device and shapes allow it, else the portable kernel.
-  const int wmma_splits =
-      use_wmma ? octave_decode_wmma(query, cache, block_table, q_to_req,
-                                    q_to_klen, mid_o, k_signs, sm_scale,
-                                    num_kv_splits, fmt, std::nullopt, nullptr,
-                                    nullptr, 0, nullptr, 0, qg)
+  // use_wmma enables both WMMA and MFMA; zero returned splits select fallback.
+  const int fast_splits =
+      use_wmma ? try_launch_fast_decode(
+                     {query, cache, block_table, q_to_req, q_to_klen, mid_o,
+                      k_signs, sm_scale, num_kv_splits, fmt, qg},
+                     {})
                : 0;
-  if (wmma_splits > 0) {
-    ns = wmma_splits;
+  if (fast_splits > 0) {
+    ns = fast_splits;
   } else {
-  #define SQ_DISPATCH(B, KC)                                                   \
-    if (bf)                                                                    \
-      dispatch_decode<B, KC, __hip_bfloat16>(g, qg, query, cache, block_table, \
-                                             q_to_req, q_to_klen, mid_o,       \
-                                             k_signs, sl2, ns, stream);        \
-    else                                                                       \
-      dispatch_decode<B, KC, half>(g, qg, query, cache, block_table, q_to_req, \
-                                   q_to_klen, mid_o, k_signs, sl2, ns, stream)
+  #define SQ_DISPATCH(B, KC)                                                  \
+    if (bf)                                                                   \
+      dispatch_portable_decode<B, KC, __hip_bfloat16>(                        \
+          g, qg, query, cache, block_table, q_to_req, q_to_klen, mid_o,       \
+          k_signs, sl2, ns, stream);                                          \
+    else                                                                      \
+      dispatch_portable_decode<B, KC, half>(g, qg, query, cache, block_table, \
+                                            q_to_req, q_to_klen, mid_o,       \
+                                            k_signs, sl2, ns, stream)
     if (fmt == 4) {
       SQ_DISPATCH(4, false);
     } else if (fmt == 3) {
@@ -1033,8 +1040,9 @@ void octave_decode(torch::Tensor out, torch::Tensor query, torch::Tensor cache,
   launch_reduce(out, mid_o, v_signs, ns, stream);
 }
 
-// Sparse decode: query row i attends to the logical positions indices[i, :]
-// of request q_to_req[i] (negative entries are skipped). WMMA tier only.
+// Query row i attends to indices[i, :] of request q_to_req[i], skipping
+// negative entries. Requires gfx1100 WMMA; there is no portable fallback.
+// Exact-window attention, when enabled, contributes one additional split.
 void octave_decode_sparse(torch::Tensor out, torch::Tensor query,
                           torch::Tensor cache, torch::Tensor block_table,
                           torch::Tensor q_to_req, torch::Tensor indices,
@@ -1057,8 +1065,8 @@ void octave_decode_sparse(torch::Tensor out, torch::Tensor query,
   TORCH_CHECK(num_kv_splits <= 1024 && mid_o.stride(3) == 1);
   const at::cuda::OptionalCUDAGuard guard(device_of(query));
   auto stream = at::cuda::getCurrentCUDAStream().stream();
-  // With the exact window, the packed-cache splits leave the last split of
-  // mid_o to octave_window_attn.
+  // Reserve capacity for an exact-window split after the actual packed-cache
+  // splits returned by the native launcher.
   const bool win = positions.has_value();
   TORCH_CHECK(!win || (wtab && wtags && stab && stags && num_kv_splits >= 2));
   const int wmask = win ? (int)wtags->size(0) - 1 : 0;
@@ -1066,12 +1074,12 @@ void octave_decode_sparse(torch::Tensor out, torch::Tensor query,
   TORCH_CHECK(
       !win || (((wmask + 1) & wmask) == 0 && ((smask + 1) & smask) == 0),
       "octave_decode_sparse: shadow tables must be powers of two");
-  const int ns = octave_decode_wmma(
-      query, cache, block_table, q_to_req, q_to_req, mid_o, k_signs, sm_scale,
-      win ? num_kv_splits - 1 : num_kv_splits, fmt, indices,
-      win ? positions->data_ptr<int>() : nullptr,
-      win ? wtags->data_ptr<int>() : nullptr, wmask,
-      win ? stags->data_ptr<int>() : nullptr, smask, 4);
+  const int ns = try_launch_fast_decode(
+      {query, cache, block_table, q_to_req, q_to_req, mid_o, k_signs, sm_scale,
+       win ? num_kv_splits - 1 : num_kv_splits, fmt, 4},
+      {indices, win ? positions->data_ptr<int>() : nullptr,
+       win ? wtags->data_ptr<int>() : nullptr, wmask,
+       win ? stags->data_ptr<int>() : nullptr, smask});
   TORCH_CHECK(ns > 0,
               "octave_decode_sparse: needs the WMMA tier (gfx1100, head size "
               "256, GQA group <= 8)");
