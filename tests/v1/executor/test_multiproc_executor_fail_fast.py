@@ -480,7 +480,9 @@ def test_remote_failure_preserves_pending_replies(async_scheduling, monitor_thre
         worker.join(5)
         assert worker.exitcode == 1
         # Consume only after disconnect-driven shutdown has completed.
+        assert healthy.poll()
         assert healthy.result() == "healthy"
+        assert fatal.poll()
         with pytest.raises(RuntimeError, match="execute_model failed"):
             fatal.result()
     finally:

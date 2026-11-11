@@ -16,7 +16,7 @@ from vllm.v1.engine.async_llm import AsyncLLM
 from vllm.v1.engine.llm_engine import LLMEngine
 
 MODEL_PATH = "Qwen/Qwen3-0.6B"
-LORA_MODULE_PATH = "charent/self_cognition_Alice"
+LORA_MODULE_PATH = "vllm-project/self_cognition_Alice"
 LORA_RANK = 8
 
 
@@ -179,3 +179,39 @@ def test_invalid_lora_does_not_fail_engine(tmp_path):
     sampling_params = SamplingParams(temperature=0, max_tokens=16, ignore_eos=True)
     outputs = llm.generate(["Hello, my name is"] * 4, sampling_params)
     assert all(len(output.outputs[0].token_ids) == 16 for output in outputs)
+
+
+@pytest.mark.parametrize("enforce_eager", [True, False])
+def test_dummy_batch_keeps_loras(enforce_eager):
+    """Idle data parallel ranks run dummy batches between steps. Those must
+    not unload adapters, including ones whose ids match the dummy LoRA ids."""
+    engine_args = EngineArgs(
+        model=MODEL_PATH,
+        enable_lora=True,
+        max_loras=2,
+        max_cpu_loras=3,
+        max_lora_rank=LORA_RANK,
+        max_model_len=128,
+        max_num_seqs=8,
+        gpu_memory_utilization=0.8,
+        enforce_eager=enforce_eager,
+    )
+    llm = LLMEngine.from_engine_args(engine_args)
+
+    llm.add_lora(make_lora_request(1))
+    llm.add_lora(make_lora_request(3))
+    assert set(llm.list_loras()) == {1, 3}
+
+    for _ in range(3):
+        llm.engine_core.execute_dummy_batch()
+    assert set(llm.list_loras()) == {1, 3}
+
+    llm.add_request(
+        "req-1",
+        "Who are you?",
+        SamplingParams(max_tokens=4),
+        lora_request=make_lora_request(1),
+    )
+    while llm.has_unfinished_requests():
+        llm.step()
+    assert set(llm.list_loras()) == {1, 3}
