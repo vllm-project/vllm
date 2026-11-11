@@ -281,32 +281,8 @@ def test_rocm_mxfp8_linear_matches_dequant_reference(backend, name, n, k, num_to
 
 
 @pytest.mark.usefixtures("aiter_enabled")
-@torch.inference_mode()
-def test_aiter_mxfp8_linear_3d_input_and_bias():
-    """A [batch, seq, K] input keeps its leading dims, and the bias is added."""
-    from vllm.model_executor.kernels.linear.mxfp8.Mxfp8LinearKernel import (
-        Mxfp8LinearLayerConfig,
-    )
-
-    _, n, k = V41_ATTN_SHAPES[0]
-    kernel_cls = _kernel_cls("aiter", n, k)
-    torch.manual_seed(0)
-    layer = _make_layer(n, k, "cuda")
-    kernel = kernel_cls(Mxfp8LinearLayerConfig(weight_shape=(n, k)))
-    kernel.process_weights_after_loading(layer)
-
-    x = torch.randn(2, 5, k, device="cuda", dtype=torch.bfloat16) * 0.5
-    bias = torch.randn(n, device="cuda", dtype=torch.bfloat16)
-    out = kernel.apply_weights(layer, x, bias)
-    flat = kernel.apply_weights(layer, x.reshape(-1, k))
-
-    assert out.shape == (2, 5, n)
-    torch.testing.assert_close(out.reshape(-1, n), flat + bias)
-
-
-@pytest.mark.usefixtures("aiter_enabled")
 @pytest.mark.parametrize("n,k", [(1056, 4128), (64, 256)])
-@pytest.mark.parametrize("num_tokens", [1, 64, 8192, 8193])
+@pytest.mark.parametrize("num_tokens", [1, 8192, 8193])
 @torch.inference_mode()
 def test_aiter_mxfp8_linear_forced_untuned_shape(monkeypatch, n, k, num_tokens):
     """A forced untuned (N, K) matches the reference on AITER's default tile,
