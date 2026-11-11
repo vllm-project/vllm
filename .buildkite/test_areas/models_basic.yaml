@@ -478,13 +478,18 @@ steps:
   source_file_dependencies:
   - vllm/models/qwen4_exp/
   - vllm/config/compilation.py
+  - vllm/config/engram.py
   - vllm/v1/attention/backends/short_conv_attn.py
+  - csrc/fs_io.cpp
+  - csrc/fs_io_spans.cpp
+  - csrc/fs_io_spans.h
   - tests/models/qwen4_exp/
   commands:
     - >-
       pytest -v -s
       models/qwen4_exp/test_config.py
       models/qwen4_exp/test_ple.py
+      models/qwen4_exp/test_ple_disk_reader.py
 
 - label: ":nvidia: (B200) Qwen3.5"
   key: qwen3-5-unit-tests-b200
