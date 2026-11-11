@@ -316,10 +316,17 @@ UNSPACED_V4_NAMED_CALLS = CALLS.replace(
 @pytest.mark.parametrize("thinking", [False, True])
 @pytest.mark.parametrize("special_calls", [False, True])
 @pytest.mark.parametrize("chunk_size", [1, 7, 10000])
-def test_invoke_less_block_falls_back_to_content(thinking, special_calls, chunk_size):
+@pytest.mark.parametrize(
+    "block",
+    [INVOKE_LESS_BLOCK]
+    + ["<｜DSML｜ calls>abc" + tail for tail in ("<", "</", "</｜DSML｜ calls")],
+)
+def test_invoke_less_block_falls_back_to_content(
+    thinking, special_calls, chunk_size, block
+):
     """A tool block with no invoke is not a tool call: the block falls back
     to content verbatim instead of being dropped silently (#62051)."""
-    text = ("Plan.</think>" if thinking else "") + "Checking." + INVOKE_LESS_BLOCK
+    text = ("Plan.</think>" if thinking else "") + "Checking." + block
     tokenizer, tokens = tokenizer_for(text, special_calls)
     output = collect_output(
         replay_streaming(
@@ -338,7 +345,7 @@ def test_invoke_less_block_falls_back_to_content(thinking, special_calls, chunk_
         model_output_token_ids=[tid for tid, _ in tokens],
     )
     assert output.reasoning == (reasoning or "") == ("Plan." if thinking else "")
-    assert output.content == (content or "") == "Checking." + INVOKE_LESS_BLOCK
+    assert output.content == (content or "") == "Checking." + block
     assert output.tool_calls == []
     assert not calls
 
