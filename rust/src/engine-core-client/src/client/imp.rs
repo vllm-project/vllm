@@ -28,7 +28,7 @@ use crate::metrics::{
     EngineSleepState, IterationMetricHandles, LoraInfoExporter, SchedulerStatsRecorder,
 };
 use crate::protocol::encode_msgpack;
-use crate::protocol::output::{EngineCoreOutput, EngineCoreOutputs};
+use crate::protocol::output::{EngineCoreOutput, EngineCoreOutputs, PrefillProgress};
 use crate::protocol::request::{EngineCoreRequest, EngineCoreRequestType};
 use crate::protocol::stats::SchedulerStats;
 use crate::protocol::utility::{EngineCoreUtilityRequest, UtilityOutput};
@@ -201,6 +201,22 @@ impl ClientInner {
     ) -> Vec<EngineCoreStreamOutput> {
         let mut registry = self.request_reg.lock();
         outputs.into_iter().filter_map(|output| registry.send_output(output)).collect()
+    }
+
+    /// Route one batch of replaceable prefill progress to the request streams.
+    pub fn send_prefill_progress(
+        &self,
+        engine_index: u32,
+        timestamp: f64,
+        weight_version: Option<Arc<str>>,
+        updates: Vec<PrefillProgress>,
+    ) {
+        self.request_reg.lock().send_prefill_progress(
+            engine_index,
+            timestamp,
+            weight_version,
+            updates,
+        );
     }
 
     /// Remove a batch of requests that have finished or aborted, returning

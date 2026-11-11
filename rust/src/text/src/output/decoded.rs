@@ -8,7 +8,9 @@ use futures::{Stream, StreamExt};
 use serde::{Deserialize, Serialize};
 use tracing::{Level, debug, trace};
 use vllm_engine_core_client::AbortCause;
-use vllm_engine_core_client::protocol::output::{RequestSpecDecodeMetrics, StopReason};
+use vllm_engine_core_client::protocol::output::{
+    PrefillProgress, RequestSpecDecodeMetrics, StopReason,
+};
 use vllm_engine_core_client::protocol::sampling_mask::SamplingMask;
 use vllm_engine_core_client::protocol::tensor::WireNdArray;
 use vllm_llm::{
@@ -120,6 +122,8 @@ pub enum DecodedTextEvent {
         /// remaining prompt positions.
         prompt_logprobs: Option<DecodedPromptLogprobs>,
     },
+    /// Worker-reported progress for the request's prefill work.
+    PrefillProgress(Box<PrefillProgress>),
     /// Decoded text and sampled metadata observed during one output update.
     ///
     /// `decoded` follows the decoder clock. It may be empty while tokens remain
@@ -189,8 +193,19 @@ pub async fn decoded_text_event_stream(
     let text_tokenizer = decode_options.detokenize.then_some(tokenizer.as_ref());
 
     while let Some(next) = raw_stream.next().await {
-        let output = next?;
+        let mut output = next?;
         prompt_cache_usage.merge(output.prompt_cache_usage);
+
+        if let Some(mut progress) = output.prefill_progress.take() {
+            progress.request_id.clone_from(&request_id);
+            y.yield_ok(DecodedTextEvent::PrefillProgress(progress)).await;
+            if output.prompt_info.is_none()
+                && output.token_ids.is_empty()
+                && output.finish_reason.is_none()
+            {
+                continue;
+            }
+        }
 
         // If it's the first output, init states and yield `Start` event.
         if decoder.is_none() {
@@ -465,6 +480,36 @@ mod tests {
             .collect_output()
             .await
             .unwrap()
+    }
+
+    #[tokio::test]
+    async fn empty_ordinary_output_remains_a_stream_event() {
+        let first = GenerateOutput::for_test(Some(Arc::from([1, 2])), vec![], None);
+        let terminal =
+            GenerateOutput::for_test(None, ascii_tokens("a"), Some(FinishReason::Length));
+        let events = decoded_text_event_stream(
+            "request".into(),
+            Arc::new(TestTokenizer::new()),
+            stream::iter([Ok(first), Ok(terminal)]),
+            TextDecodeOptions::default(),
+            true,
+        )
+        .collect::<Vec<_>>()
+        .await
+        .into_iter()
+        .collect::<Result<Vec<_>, _>>()
+        .unwrap();
+        assert!(matches!(
+            events.as_slice(),
+            [
+                DecodedTextEvent::Start { .. },
+                DecodedTextEvent::TextDelta { finished: None, .. },
+                DecodedTextEvent::TextDelta {
+                    finished: Some(_),
+                    ..
+                }
+            ]
+        ));
     }
 
     /// Convert ASCII string to token IDs (one byte per token).

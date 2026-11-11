@@ -68,6 +68,9 @@ message GenerateRequest {
   // Media loading options keyed by modality, as in the HTTP `media_io_kwargs`
   // request field. Only `video.fps` (frames sampled per second) is supported.
   google.protobuf.Struct media_io_kwargs = 19;
+
+  // Stream request-scoped prefill work snapshots on GenerateStream.
+  bool include_prefill_progress = 20;
 }
 
 // Inputs to the engine's reasoning gate, which keeps a structured-output
@@ -190,6 +193,17 @@ message GenerateResponse {
   // Only present in first response
   optional PromptInfo prompt_info = 1;
   SequenceOutput outputs = 2;
+  PrefillProgress prefill_progress = 3;
+}
+
+message PrefillProgress {
+  string request_id = 1;
+  // Tokens still to compute for this request's prefill.
+  uint32 remaining_compute_tokens = 7;
+  reserved 2 to 6, 8 to 11;
+  reserved "phase", "prompt_tokens", "total_compute_tokens", "completed_compute_tokens",
+      "local_cached_tokens", "external_cached_tokens", "pending_kv_transfer_tokens",
+      "cache_accounting_final";
 }
 
 message SequenceOutput {

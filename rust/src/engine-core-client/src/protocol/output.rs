@@ -154,6 +154,14 @@ pub struct EngineCoreOutput {
     /// engine has a `watermark_config`.
     #[serde(default)]
     pub watermarking: Option<bool>,
+    #[serde(default)]
+    pub prefill_progress: Option<Box<PrefillProgress>>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Default, Serialize_tuple, Deserialize_tuple)]
+pub struct PrefillProgress {
+    pub request_id: String,
+    pub remaining_prefill_tokens: u64,
 }
 
 /// A request-level error that does not mark the engine as unhealthy.
@@ -536,6 +544,8 @@ mod tests {
         assert_eq!(decoded.as_request_batch().unwrap().outputs, vec![output; 2]);
     }
 
+
+
     #[test]
     fn engine_core_output_requires_valid_known_fields() {
         for fields in [
@@ -601,6 +611,7 @@ mod tests {
                             prompt_token_id_logprobs: None,
                             error: None,
                             watermarking: None,
+                            prefill_progress: None,
                         },
                     ],
                     scheduler_stats: None,

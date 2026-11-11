@@ -2,6 +2,7 @@
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 import dataclasses
 import random
+import time
 from concurrent.futures import Future
 from types import SimpleNamespace
 from unittest.mock import Mock, patch
@@ -1889,6 +1890,31 @@ def test_long_prefill_threshold_floored_by_fair_share():
     # 100 is below the fair share (1024 // 2 = 512), so the floor binds.
     assert output.num_scheduled_tokens[long_req.request_id] == 512
     assert output.num_scheduled_tokens[short_req.request_id] == 10
+
+
+def test_prefill_progress_reports_chunks_and_ends_with_zero():
+    """Report each scheduled chunk of prefill work, ending with a final zero."""
+    scheduler = create_scheduler(max_num_batched_tokens=16, max_model_len=256)
+    request = create_requests(num_requests=1, num_tokens=64, max_tokens=2)[0]
+    scheduler.add_request(request)
+
+    def step() -> list[tuple[str, int]]:
+        scheduler_output = scheduler.schedule()
+        outputs = scheduler.update_from_output(
+            scheduler_output,
+            ModelRunnerOutput(req_ids=[request.request_id], sampled_token_ids=[[]]),
+        )
+        return [
+            (progress.request_id, progress.remaining_prefill_tokens)
+            for outputs in outputs.values()
+            for progress in outputs.prefill_progress
+        ]
+
+    assert step() == [(request.request_id, 48)]
+    assert step() == [(request.request_id, 32)]
+    assert step() == [(request.request_id, 16)]
+    assert step() == [(request.request_id, 0)]
+    assert step() == []
 
 
 def test_update_from_output_routes_sampling_masks_by_request():

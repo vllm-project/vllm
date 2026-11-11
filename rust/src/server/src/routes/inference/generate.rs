@@ -636,6 +636,7 @@ mod tests {
                 spec_decode_metrics: None,
                 weight_versions: None,
                 routed_experts: Default::default(),
+                prefill_progress: None,
                 timestamps: Default::default(),
             }),
             Ok(GenerateOutput {
@@ -658,6 +659,7 @@ mod tests {
                 spec_decode_metrics: None,
                 weight_versions: None,
                 routed_experts: Default::default(),
+                prefill_progress: None,
                 timestamps: Default::default(),
             }),
         ]);
@@ -748,6 +750,7 @@ mod tests {
             spec_decode_metrics: None,
             weight_versions: None,
             routed_experts: Default::default(),
+            prefill_progress: None,
             timestamps: Default::default(),
         }
     }

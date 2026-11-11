@@ -3,6 +3,7 @@
 
 use std::collections::{BTreeMap, BTreeSet, HashMap};
 use std::num::NonZeroU32;
+use std::sync::Arc;
 use std::sync::atomic::{AtomicU64, Ordering};
 
 use tokio::sync::oneshot;
@@ -13,7 +14,9 @@ use crate::client::output_channel::output_channel;
 pub(crate) use crate::client::output_channel::{OutputReceiver, OutputSender};
 use crate::client::stream::EngineCoreStreamOutput;
 use crate::error::{Error, Result};
-use crate::protocol::output::{EngineCoreEventType, EngineCoreFinishReason, EngineCoreOutput};
+use crate::protocol::output::{
+    EngineCoreEventType, EngineCoreFinishReason, EngineCoreOutput, PrefillProgress,
+};
 use crate::protocol::stats::SchedulerStats;
 use crate::protocol::utility::UtilityOutput;
 use crate::transport::ConnectedEngine;
@@ -263,6 +266,31 @@ impl RequestRegistry {
         None
     }
 
+    /// Route prefill progress to the streams that own it; best effort.
+    pub fn send_prefill_progress(
+        &mut self,
+        engine_index: u32,
+        timestamp: f64,
+        weight_version: Option<Arc<str>>,
+        updates: Vec<PrefillProgress>,
+    ) {
+        for progress in updates {
+            let Some(tracked) = self.requests.get_mut(progress.request_id.as_str()) else {
+                continue;
+            };
+            tracked.sender.send(EngineCoreStreamOutput {
+                engine_index,
+                timestamp,
+                weight_version: weight_version.clone(),
+                output: EngineCoreOutput {
+                    request_id: progress.request_id.clone(),
+                    prefill_progress: Some(Box::new(progress)),
+                    ..Default::default()
+                },
+            });
+        }
+    }
+
     /// Advance the request's LoRA scheduling phase from the engine-core events
     /// attached to one output, mirroring the Python frontend's
     /// `LoRARequestStates.update_from_events`.
@@ -324,13 +352,14 @@ impl RequestRegistry {
     /// routing state. Returns `false` if the engine is unknown to the
     /// client.
     pub fn apply_scheduler_stats(&mut self, engine_index: u32, stats: &SchedulerStats) -> bool {
-        self.apply_scheduler_counts(
+        let applied = self.apply_scheduler_counts(
             engine_index,
             EngineLoadSnapshot {
                 waiting: stats.num_waiting_reqs as usize,
                 running: stats.num_running_reqs as usize,
             },
-        )
+        );
+        applied
     }
 
     /// Mark the registry as closed, detach and return all tracked senders.

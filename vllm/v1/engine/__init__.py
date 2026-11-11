@@ -225,6 +225,8 @@ class EngineCoreRequest(
     # PrefixHashConfig, including any extra keys (LoRA, multimodal, cache salt).
     block_hashes: list[bytes] | None = None
 
+    # Whether the requesting frontend streams per-request prefill progress.
+
     @property
     def params(self) -> SamplingParams | PoolingParams:
         """Return the processed params (sampling or pooling)."""
@@ -329,6 +331,19 @@ class UtilityOutput(
     result: UtilityResult | None = None
 
 
+class PrefillProgress(
+    msgspec.Struct,
+    array_like=True,  # type: ignore[call-arg]
+    omit_defaults=True,  # type: ignore[call-arg]
+    gc=False,
+):  # type: ignore[call-arg]
+    """Per-request prefill progress, so a router can price a request exactly."""
+
+    request_id: str
+    # Tokens still to compute for this request's prefill.
+    remaining_prefill_tokens: int
+
+
 class EngineCoreOutputs(
     msgspec.Struct,
     array_like=True,  # type: ignore[call-arg]
@@ -344,7 +359,6 @@ class EngineCoreOutputs(
     outputs: list[EngineCoreOutput] = []
     scheduler_stats: SchedulerStats | None = None
     timestamp: float = 0.0
-
     utility_output: UtilityOutput | None = None
     finished_requests: set[str] | None = None
 

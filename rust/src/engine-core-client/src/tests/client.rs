@@ -3850,7 +3850,7 @@ fn python_msgpack_fixtures_match_rust_encoding_and_record_nixl_metrics() {
 
     // Python sends prompt token ids as int32, the Rust frontend as uint32.
     let mut decoded_request: EngineCoreRequest = rmp_serde::from_slice(&request_bytes).unwrap();
-    let expected_request = sample_request();
+    let expected_request = EngineCoreRequest { ..sample_request() };
     assert_eq!(
         decode_prompt_token_ids(&decoded_request),
         Some(vec![11, 22])
@@ -3998,6 +3998,12 @@ fn python_msgpack_fixtures_match_rust_encoding_and_record_nixl_metrics() {
                         ),
                         watermarking: Some(
                             true,
+                        ),
+                        prefill_progress: Some(
+                            PrefillProgress {
+                                request_id: "req-1",
+                                remaining_prefill_tokens: 4,
+                            },
                         ),
                     },
                 ],

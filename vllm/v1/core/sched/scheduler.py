@@ -4,7 +4,7 @@ import itertools
 import time
 from collections import defaultdict, deque
 from collections.abc import Iterable
-from dataclasses import replace
+from dataclasses import dataclass, replace
 from typing import Any
 
 from vllm.compilation.cuda_graph import CUDAGraphStat
@@ -55,7 +55,12 @@ from vllm.v1.core.sched.request_queue import (
     create_request_queue,
 )
 from vllm.v1.core.sched.utils import check_stop, remove_all
-from vllm.v1.engine import EngineCoreEventType, EngineCoreOutput, EngineCoreOutputs
+from vllm.v1.engine import (
+    EngineCoreEventType,
+    EngineCoreOutput,
+    EngineCoreOutputs,
+    PrefillProgress,
+)
 from vllm.v1.kv_cache_interface import (
     KVCacheConfig,
     MambaSpec,
@@ -81,6 +86,18 @@ from vllm.v1.token_buffer import extend_from_slice
 from vllm.v1.utils import record_function_or_nullcontext
 
 logger = init_logger(__name__)
+
+# Cap on per-request prefill progress reports; the final zero is always sent.
+PREFILL_PROGRESS_MAX_UPDATES = 100
+
+
+@dataclass
+class _PrefillProgressState:
+    """Reporting state for one request that is still prefilling."""
+
+    client_index: int
+    # Remaining tokens at the last report; None reports on the first step.
+    last_remaining: int | None = None
 
 
 class Scheduler(SchedulerInterface):
@@ -239,6 +256,11 @@ class Scheduler(SchedulerInterface):
         # scan or enqueued in a blocked status.
         self.deferred_waiting: set[Request] = set()
         self.running: list[Request] = []
+        # Monotonic counter for the prefill-work sample published in
+        # SchedulerStats; consumers use it to detect stale samples.
+        self._prefill_sample_seq = 0
+        # Per-request prefill progress reporting state, keyed by request id.
+        self._prefill_progress: dict[str, _PrefillProgressState] = {}
 
         # The request IDs that are finished in between the previous and the
         # current steps. This is used to notify the workers about the finished
@@ -2242,6 +2264,58 @@ class Scheduler(SchedulerInterface):
         )
         return GrammarOutput(structured_output_request_ids, bitmask)
 
+    def _report_prefill_progress(
+        self,
+        request: Request,
+        pending: dict[int, list[PrefillProgress]],
+    ) -> None:
+        """Queue a progress update for one scheduled request.
+
+        A request that finishes prefill reports a final zero and stops being
+        tracked; while it is prefilling it reports after each quarter of its
+        remaining work, up to `PREFILL_PROGRESS_MAX_UPDATES`.
+        """
+        computed = max(0, request.num_computed_tokens - request.num_in_flight_tokens)
+        remaining = request.num_tokens - computed
+        state = self._prefill_progress.get(request.request_id)
+        if remaining <= 0:
+            if state is None:
+                return
+            del self._prefill_progress[request.request_id]
+            self._queue_prefill_progress(
+                pending,
+                state.client_index,
+                request.request_id,
+                remaining_prefill_tokens=0,
+            )
+            return
+        if state is None:
+            state = _PrefillProgressState(client_index=request.client_index)
+            self._prefill_progress[request.request_id] = state
+        if state.last_remaining is not None and remaining > state.last_remaining * 3 // 4:
+            return
+        state.last_remaining = remaining
+        self._queue_prefill_progress(
+            pending,
+            state.client_index,
+            request.request_id,
+            remaining_prefill_tokens=remaining,
+        )
+
+    @staticmethod
+    def _queue_prefill_progress(
+        pending: dict[int, list[PrefillProgress]],
+        client_index: int,
+        request_id: str,
+        remaining_prefill_tokens: int,
+    ) -> None:
+        pending.setdefault(client_index, []).append(
+            PrefillProgress(
+                request_id=request_id,
+                remaining_prefill_tokens=remaining_prefill_tokens,
+            )
+        )
+
     def update_from_output(
         self,
         scheduler_output: SchedulerOutput,
@@ -2272,6 +2346,7 @@ class Scheduler(SchedulerInterface):
             perf_stats = self.perf_metrics.get_step_perf_stats_per_gpu(scheduler_output)
 
         outputs: dict[int, list[EngineCoreOutput]] = defaultdict(list)
+        prefill_progress: dict[int, list[PrefillProgress]] = defaultdict(list)
         spec_decoding_stats: SpecDecodingStats | None = None
 
         failed_kv_load_req_ids: set[str] = set()
@@ -2327,6 +2402,8 @@ class Scheduler(SchedulerInterface):
             # Drop-mode stale output (same-step resume) is discarded entirely.
             if output_is_stale and request.drop_stale_output:
                 continue
+
+            self._report_prefill_progress(request, prefill_progress)
 
             req_index = req_indices[req_id]
             generated_token_ids = (
@@ -2560,6 +2637,22 @@ class Scheduler(SchedulerInterface):
         for request in continuing_reqs:
             self._enqueue_waiting_request(request)
 
+        # Requests that left the running batch without being scheduled this
+        # step (aborted, preempted, or finished) release their progress slot.
+        if self._prefill_progress:
+            running_req_ids = {request.request_id for request in self.running}
+            for request_id, state in list(self._prefill_progress.items()):
+                if request_id in running_req_ids:
+                    continue
+                del self._prefill_progress[request_id]
+                self._queue_prefill_progress(
+                    prefill_progress,
+                    state.client_index,
+                    request_id,
+                    remaining_prefill_tokens=0,
+                    sequence=state.sequence + 1,
+                )
+
         request_errors = self.grammar_compile_error_reqs
         self.grammar_compile_error_reqs = {}
         error_req_ids = set(request_errors)
@@ -2667,6 +2760,16 @@ class Scheduler(SchedulerInterface):
                         finished_requests=finished_set
                     )
             finished_req_ids.clear()
+
+        # Progress travels as an ordinary output so the frontend routes it per
+        # request, including on steps that produce no tokens.
+        for client_index, updates in prefill_progress.items():
+            if (eco := engine_core_outputs.get(client_index)) is None:
+                engine_core_outputs[client_index] = eco = EngineCoreOutputs()
+            eco.outputs.extend(
+                EngineCoreOutput(request_id=update.request_id, prefill_progress=update)
+                for update in updates
+            )
 
         if (
             stats := self.make_stats(
@@ -3367,11 +3470,22 @@ class Scheduler(SchedulerInterface):
         )
         num_running, num_waiting = self.get_request_counts()
         num_deferred = len(self.deferred_waiting)
+        # Remaining prefill work for routing consumers: confirmed compute for
+        # running requests, prompt length for queued ones. Dispatched but
+        # unconfirmed tokens are not counted as work already done.
+        remaining_running = sum(
+            max(0, r.num_tokens - max(0, r.num_computed_tokens - r.num_in_flight_tokens))
+            for r in self.running
+        )
+        remaining_waiting = sum(r.num_tokens for r in self.waiting)
+        self._prefill_sample_seq += 1
         return SchedulerStats(
             num_running_reqs=num_running,
             num_waiting_reqs=num_waiting - num_deferred,
             num_skipped_waiting_reqs=num_deferred,
             num_kv_fetch_reqs_by_stage=self._kv_fetch_counts.copy(),
+            remaining_prefill_tokens=remaining_running + remaining_waiting,
+            prefill_sample_seq=self._prefill_sample_seq,
             kv_cache_usage=self.kv_cache_manager.usage,
             prefix_cache_stats=prefix_cache_stats,
             connector_prefix_cache_stats=connector_prefix_cache_stats,
