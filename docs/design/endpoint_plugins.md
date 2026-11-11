@@ -150,7 +150,7 @@ The server runs eligible plugins' `drain(state, timeout)` hooks concurrently bef
 
 The engine receives the deadline's remaining allowance, which may be zero if plugin drains consume it. There is no reserved engine allowance. With `--shutdown-timeout 0` (the default), the server sets draining, skips drain hooks and proceeds with immediate engine shutdown and plugin cleanup. The CPU-only render server uses the same configured timeout for plugin drains.
 
-Before any `stop` hook, the server cancels and awaits a live shutdown task, including its drain cancellation cleanup. This also applies to watchdog exit and startup rollback. Cancellation of the lifespan task is deferred until plugin and native serving cleanup finish. Cancellation cleanup and `stop` remain cooperative and unbounded; the drain deadline is **not a hard process-exit bound**.
+Before any `stop` hook, the server cancels and awaits a live shutdown task, including its drain cancellation cleanup. This also applies to watchdog exit and startup rollback. Cancellation of the lifespan task is deferred until plugin and native serving cleanup finish. Cancellation cleanup and `stop` remain cooperative; the drain deadline is **not a hard process-exit bound**. A drain that ignores cancellation holds shutdown until a repeated SIGINT or SIGTERM after the deadline exits the process, as described for stop hooks above.
 
 ## Registering the entry point
 

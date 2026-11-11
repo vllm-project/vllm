@@ -275,16 +275,22 @@ async def serve_http(
 
     engine_client = app.state.engine_client
     engine_stopped = False
+    drain_deadline: float | None = None
 
     def handle_signal(signum: int) -> None:
-        cleanup_only = engine_stopped or (
-            shutdown_task is not None and shutdown_task.done()
+        drain_overdue = (
+            drain_deadline is not None and time.monotonic() >= drain_deadline
+        )
+        cleanup_only = (
+            engine_stopped
+            or drain_overdue
+            or (shutdown_task is not None and shutdown_task.done())
         )
         if not shutdown_event.is_set() or not cleanup_only:
             request_shutdown()
             return
-        # Only HTTP and plugin cleanup remain. A repeated signal must not wait
-        # for a hook that never returns. Exit directly: as a container's PID 1,
+        # After engine shutdown or the drain deadline, a repeated signal must
+        # not wait for a hook that never returns. Exit directly: as PID 1,
         # the process ignores a signal whose action is the default.
         logger.warning(
             "[shutdown] API server: received %s during cleanup; exiting",
@@ -314,7 +320,7 @@ async def serve_http(
         pass
 
     async def handle_shutdown() -> None:
-        nonlocal engine_stopped
+        nonlocal engine_stopped, drain_deadline
         await shutdown_event.wait()
 
         vllm_config = (
@@ -324,11 +330,13 @@ async def serve_http(
         )
         timeout = vllm_config.shutdown_timeout if vllm_config is not None else 0
         deadline = time.monotonic() + timeout
+        drain_deadline = deadline
         await drain_endpoint_plugins(app.state, deadline)
+        drain_deadline = None
 
         if engine_client is not None:
-            mode = "abort" if timeout == 0 else "drain"
             remaining = max(0.0, deadline - time.monotonic())
+            mode = "abort" if remaining == 0 else "drain"
 
             logger.info(
                 "[shutdown] API server: stopping engine client mode=%s timeout=%ss",
