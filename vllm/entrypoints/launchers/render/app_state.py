@@ -38,6 +38,7 @@ async def init_render_app_state(
             BaseModelPath(name=name, model_path=args.model)
             for name in served_model_names
         ],
+        lora_modules=args.lora_modules,
     )
 
     if args.enable_log_requests:

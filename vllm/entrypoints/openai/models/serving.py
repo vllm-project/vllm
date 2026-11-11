@@ -29,20 +29,37 @@ logger = init_logger(__name__)
 
 
 class OpenAIModelRegistry:
-    """Read-only view of the loaded base models with no engine dependency.
+    """Read-only view of the served model names with no engine dependency.
 
-    Suitable for CPU-only / render-only contexts that have no engine client
-    and no LoRA support.
+    Suitable for CPU-only / render-only contexts that have no engine client.
+    `lora_modules` are registered by name only: no adapter weights are loaded.
     """
 
     def __init__(
         self,
         model_config: ModelConfig,
         base_model_paths: list[BaseModelPath],
+        *,
+        lora_modules: list[LoRAModulePath] | None = None,
     ) -> None:
         self.model_config = model_config
         self.base_model_paths = base_model_paths
         self.lora_requests: dict[str, LoRARequest] = {}
+        for lora_int_id, lora in enumerate(lora_modules or [], start=1):
+            if lora.name in self.lora_requests:
+                raise ValueError(
+                    f"The lora adapter '{lora.name}' is given more than once."
+                )
+            lora_request = LoRARequest(
+                lora_name=lora.name,
+                lora_int_id=lora_int_id,
+                lora_path=lora.path,
+            )
+            if lora.base_model_name is not None and self.is_base_model(
+                lora.base_model_name
+            ):
+                lora_request.base_model_name = lora.base_model_name
+            self.lora_requests[lora.name] = lora_request
 
     def model_name(self, lora_request: LoRARequest | None = None) -> str:
         return self.base_model_paths[0].name
@@ -52,7 +69,11 @@ class OpenAIModelRegistry:
 
     async def check_model(self, model_name: str | None) -> ErrorResponse | None:
         """Return an ErrorResponse if model_name is not served, else None."""
-        if not model_name or self.is_base_model(model_name):
+        if (
+            not model_name
+            or self.is_base_model(model_name)
+            or model_name in self.lora_requests
+        ):
             return None
         return create_error_response(
             message=f"The model `{model_name}` does not exist.",
@@ -62,19 +83,27 @@ class OpenAIModelRegistry:
         )
 
     async def show_available_models(self) -> ModelList:
-        """Show available models (base models only)."""
+        """Show the base models and the registered `lora_modules` names."""
         max_model_len = self.model_config.max_model_len
-        return ModelList(
-            data=[
-                ModelCard(
-                    id=base_model.name,
-                    max_model_len=max_model_len,
-                    root=base_model.model_path,
-                    permission=[ModelPermission()],
-                )
-                for base_model in self.base_model_paths
-            ]
+        model_cards = [
+            ModelCard(
+                id=base_model.name,
+                max_model_len=max_model_len,
+                root=base_model.model_path,
+                permission=[ModelPermission()],
+            )
+            for base_model in self.base_model_paths
+        ]
+        model_cards.extend(
+            ModelCard(
+                id=lora.lora_name,
+                root=lora.path,
+                parent=lora.base_model_name or self.base_model_paths[0].name,
+                permission=[ModelPermission()],
+            )
+            for lora in self.lora_requests.values()
         )
+        return ModelList(data=model_cards)
 
     async def resolve_lora(self, lora_name: str):
         raise RuntimeError("The OpenAIModelRegistry has no LoRA support.")
