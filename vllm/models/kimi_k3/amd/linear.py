@@ -470,13 +470,11 @@ class KimiMoE(nn.Module):
                 w2_weight = routed.w2_weight_packed
             w13_weight.data.zero_()
             w2_weight.data.zero_()
-            # Sharded over the MoE TP group (TP x DP x PCP without EP), as the loader.
-            moe_config = routed.moe_config
-            moe_config.intermediate_size_per_partition_unpadded = (
-                moe_intermediate_size // moe_config.moe_parallel_config.tp_size
+            self.experts.moe_config.intermediate_size_per_partition_unpadded = (
+                moe_intermediate_size // self.tp_size
             )
             # Construction saw no padding; flag it now, before post-load processing.
-            routed._flag_padding_for_reload()
+            self.experts.routed_experts._flag_padding_for_reload()
 
     def forward(self, hidden_states: torch.Tensor) -> torch.Tensor:
         num_tokens, hidden_size = hidden_states.shape
