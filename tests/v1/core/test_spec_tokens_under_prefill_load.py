@@ -146,28 +146,6 @@ def test_full_drafts_resume_once_prefill_fits_next_to_short_drafts():
     assert len(out.scheduled_spec_decode_tokens["dec"]) == 16
 
 
-def test_no_reduction_on_steps_that_hold_prefill():
-    """With prefill_schedule_interval, only steps carrying prefill shorten."""
-    sched = _scheduler(
-        max_num_batched_tokens=512,
-        num_speculative_tokens=8,
-        num_speculative_tokens_under_prefill_load=2,
-        prefill_schedule_interval=4,
-    )
-    _add(sched, "dec", 4)
-    _step(sched)
-    _add(sched, "pre", 2000)
-
-    carried_prefill = []
-    for _ in range(8):
-        out = _step(sched)
-        has_prefill = "pre" in out.num_scheduled_tokens
-        carried_prefill.append(has_prefill)
-        expected = 2 if has_prefill else 8
-        assert len(out.scheduled_spec_decode_tokens["dec"]) == expected
-    assert any(carried_prefill) and not all(carried_prefill)
-
-
 def test_no_reduction_when_waiting_prefill_cannot_be_admitted():
     sched = _scheduler(max_num_batched_tokens=512, max_num_seqs=1)
     _add(sched, "dec", 4)
@@ -285,6 +263,7 @@ def _vllm_config(
     data_parallel_size: int = 1,
     num_speculative_tokens_under_prefill_load=2,
     enable_chunked_prefill: bool = True,
+    prefill_schedule_interval: int = 1,
 ) -> VllmConfig:
     model = ModelConfig(model="facebook/opt-125m", max_model_len=2048)
     spec = SpeculativeConfig(
@@ -301,7 +280,9 @@ def _vllm_config(
         speculative_config=spec,
         parallel_config=ParallelConfig(data_parallel_size=data_parallel_size),
         scheduler_config=SchedulerConfig.default_factory(
-            max_model_len=2048, enable_chunked_prefill=enable_chunked_prefill
+            max_model_len=2048,
+            enable_chunked_prefill=enable_chunked_prefill,
+            prefill_schedule_interval=prefill_schedule_interval,
         ),
     )
 
@@ -319,6 +300,14 @@ def test_requires_chunked_prefill():
     not run at all instead of being chunked."""
     with pytest.raises(ValueError, match="requires chunked prefill"):
         _vllm_config(enable_chunked_prefill=False)
+
+
+def test_rejects_prefill_schedule_interval():
+    """Drafts are sized a step ahead, but only the engine core knows which steps
+    hold prefill, so held steps would verify shortened drafts."""
+    _vllm_config(prefill_schedule_interval=1)
+    with pytest.raises(ValueError, match="prefill_schedule_interval > 1"):
+        _vllm_config(prefill_schedule_interval=4)
 
 
 @pytest.mark.parametrize(("num_reduced", "query_lens"), [(None, {9}), (2, {9, 3})])

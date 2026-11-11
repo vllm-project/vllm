@@ -28,7 +28,7 @@ MAX_TOKENS = 64
 MAX_ROWS = 16
 # the served max_num_seqs: a full step of each is one of the widths (MAX_ROWS)
 MAX_SEQS = (1, 2, 4, 8)
-# M1c's qlens: DCP1 runs only them (AITER's asm decode at DCP1 is not served)
+# M1c's speculative qlens: speculative DCP1 runs only them
 M1C_QLENS = (4, 8)
 # the KV cache dtypes M1 serves: M1a writes E4M3, M1c / AITER's decode read it
 FP8_KV = ("fp8", "fp8_e4m3")
@@ -40,21 +40,24 @@ K3_SHAPES = (7168, 896, 96, 128, 4)
 
 @dataclass(frozen=True)
 class DecodeConfig:
-    # rows a request verifies: num_speculative_tokens + 1
+    # rows per request: 1 for regular decode, or num_speculative_tokens + 1
     q: int
     # the MLA layers run M1 (else vLLM's attention ops, then K2; ``m1_reasons``)
     m1: bool = True
     # the DCP KV cache interleave (AITER's decode path, M1a's query pad)
     interleave: int = 1
-    # the most requests a step has (``step_reasons``: max_num_seqs x q <= MAX_ROWS)
+    # the most requests a step has (spec verify: ``step_reasons`` caps its rows;
+    # regular decode: unbounded, steps past MAX_ROWS run vLLM's decode)
     max_num_seqs: int = 1
 
     @property
     def widths(self) -> tuple[int, ...]:
-        """The rows a launch serves: whole requests, 1 .. max_num_seqs of them.
-        Every uniform verify step is one of them (vLLM captures no uniform decode
-        graph wider than max_num_seqs x q), so an eager step never pads; a FULL
-        replay pads whole requests the way vLLM's stock decode does."""
+        """The rows a launch serves: whole requests, up to MAX_ROWS rows and
+        max_num_seqs requests. Every uniform spec-verify step is one of them
+        (vLLM captures no uniform decode graph wider than max_num_seqs x q), so an
+        eager step never pads; a FULL replay pads whole requests the way vLLM's
+        stock decode does. A regular-decode step wider than
+        min(max_num_seqs, MAX_ROWS) is none of them and runs vLLM's decode."""
         rows = min(MAX_ROWS, self.max_num_seqs * self.q)
         return tuple(range(self.q, rows + 1, self.q))
 
@@ -97,7 +100,7 @@ def specialized_decode_config(vllm_config) -> DecodeConfig | None:
         )
     spec = vllm_config.speculative_config
     return DecodeConfig(
-        q=spec.num_speculative_tokens + 1,
+        q=spec.num_speculative_tokens + 1 if spec is not None else 1,
         m1=not m1,
         interleave=vllm_config.parallel_config.cp_kv_cache_interleave_size,
         max_num_seqs=vllm_config.scheduler_config.max_num_seqs,
@@ -105,8 +108,9 @@ def specialized_decode_config(vllm_config) -> DecodeConfig | None:
 
 
 def m1_reasons(vllm_config) -> list[str]:
-    """Why the MLA layers cannot run M1 (empty: they can). At DCP8 not a refusal:
-    those layers run vLLM's attention ops instead, then K2 (`step_reasons`)."""
+    """Why the MLA layers cannot run M1 (empty: they can). Not a refusal for
+    ordinary decode or at DCP8: those layers run vLLM's attention ops, then K2.
+    Speculative DCP1 requires M1 (`step_reasons`)."""
     import vllm.envs as envs
     from vllm.v1.attention.backends.registry import AttentionBackendEnum
 
@@ -192,8 +196,7 @@ def unsupported(vllm_config) -> list[str]:
             "CPU weight offload",
         ),
         (vllm_config.weight_transfer_config is not None, "weight updates"),
-        # the kernels serve spec-verify steps of whole uniform requests only
-        (spec is None, "decoding without speculative decoding"),
+        # the kernels serve pure, uniform regular-decode or spec-verify steps
         (
             spec is not None and spec.num_speculative_tokens + 1 > MAX_ROWS,
             f"more than {MAX_ROWS - 1} speculative tokens",
@@ -252,12 +255,15 @@ def m1c_serves(q: int, seqs: int) -> bool:
 
 
 def step_reasons(vllm_config, check_m1c: bool = True) -> list[str]:
-    """The (max_num_seqs, speculative tokens) pairs served: a full step fits one
-    launch, and at DCP1 every step runs M1c (`check_m1c`: M1c's geometry needs
-    the kernels' modules, so only on a supported platform)."""
-    k = vllm_config.speculative_config.num_speculative_tokens
+    """The speculative step configurations served: a full step fits one launch,
+    and at DCP1 every step runs M1c (`check_m1c`: M1c's geometry needs the
+    kernels' modules, so only on a supported platform)."""
+    spec = vllm_config.speculative_config
+    assert spec is not None
+    q = spec.num_speculative_tokens + 1
     seqs = vllm_config.scheduler_config.max_num_seqs
-    if seqs not in MAX_SEQS or seqs * (k + 1) > MAX_ROWS:
+    if seqs not in MAX_SEQS or seqs * q > MAX_ROWS:
+        k = q - 1
         return [
             (
                 f"max_num_seqs {seqs} at {k} speculative tokens (max_num_seqs 1, 2, 4 "
@@ -269,7 +275,8 @@ def step_reasons(vllm_config, check_m1c: bool = True) -> list[str]:
     m1 = m1_reasons(vllm_config)
     if m1:
         return ["DCP1 without M1 (" + "; ".join(m1) + ")"]
-    if check_m1c and not m1c_serves(k + 1, seqs):
+    if check_m1c and not m1c_serves(q, seqs):
+        k = q - 1
         return [
             (
                 f"DCP1 at {k} speculative tokens, max_num_seqs {seqs} (DCP1 runs M1c "
