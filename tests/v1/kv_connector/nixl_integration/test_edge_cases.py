@@ -104,8 +104,9 @@ def test_edge_cases():
         model=MODEL,
         prompt=LONG_PROMPT,
         n=4,
-        temperature=0,
-        extra_body={"kv_transfer_params": kv_transfer_params},
+        # n > 1 rejects greedy sampling; top_k=1 keeps the children identical.
+        temperature=1.0,
+        extra_body={"top_k": 1, "kv_transfer_params": kv_transfer_params},
     )
     texts = [choice.text for choice in completion.choices]
     print(f"PARALLEL SAMPLING: {texts=}")
