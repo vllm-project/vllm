@@ -338,8 +338,8 @@ def _insert_context_kv(
             slot_mapping,
             positions,
             cos_sin_cache,
-            attn._flashinfer_fp8_kv_scale,
-            attn._flashinfer_fp8_q_scale_inv,
+            attn._k_scale,
+            attn._q_scale_inv,
             attn.eps,
             block_size,
         )

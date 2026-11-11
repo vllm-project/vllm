@@ -800,8 +800,8 @@ class DeepseekV4Attention(nn.Module, AttentionLayerBase, ABC):
             swa_metadata.slot_mapping,
             positions,
             cos_sin_cache,
-            self._flashinfer_fp8_kv_scale,
-            self._flashinfer_fp8_q_scale_inv,
+            self._k_scale,
+            self._q_scale_inv,
             self.eps,
             block_size,
         )

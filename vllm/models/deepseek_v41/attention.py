@@ -796,9 +796,7 @@ class DeepseekV4Attention(nn.Module, AttentionLayerBase, ABC):
                 cache_positions,
                 self.rotary_emb.cos_sin_cache,
                 self.swa_cache_layer.block_size,
-                self._flashinfer_fp8_kv_scale
-                if cache.dtype == torch.float8_e4m3fn
-                else None,
+                self._k_scale if cache.dtype == torch.float8_e4m3fn else None,
                 self.kv_mxfp8,
             )
         if self.compressor is not None:
@@ -1153,9 +1151,7 @@ class DeepseekV4Attention(nn.Module, AttentionLayerBase, ABC):
                 swa_metadata.cache_positions,
                 cos_sin_cache,
                 swa_metadata.block_size,
-                self._flashinfer_fp8_kv_scale
-                if cache_dtype == torch.float8_e4m3fn
-                else None,
+                self._k_scale if cache_dtype == torch.float8_e4m3fn else None,
                 self.kv_mxfp8,
             )
             # The fused op now only prepares the rank-local queries.
@@ -1238,8 +1234,8 @@ class DeepseekV4Attention(nn.Module, AttentionLayerBase, ABC):
             slot_mapping,
             positions,
             cos_sin_cache,
-            self._flashinfer_fp8_kv_scale,
-            self._flashinfer_fp8_q_scale_inv,
+            self._k_scale,
+            self._q_scale_inv,
             self.eps,
             block_size,
             False,

@@ -85,7 +85,7 @@ def test_dspark_context_kv_matches_query_insert(
         swa_cache_layer=SimpleNamespace(kv_cache=cache, block_size=block_size),
         kv_mxfp8=kv_mxfp8,
         rotary_emb=SimpleNamespace(cos_sin_cache=cos_sin),
-        _flashinfer_fp8_kv_scale=scale,
+        _k_scale=scale,
     )
 
     def legacy_insert():
@@ -237,7 +237,7 @@ def test_v41_pcp_swa_cache_matches_non_pcp_writer(kv_mxfp8, monkeypatch):
             prefix="swa", kv_cache=cache, block_size=block_size
         ),
         rotary_emb=SimpleNamespace(cos_sin_cache=cos_sin),
-        _flashinfer_fp8_kv_scale=None,
+        _k_scale=None,
         kv_mxfp8=kv_mxfp8,
         accepts_unnormed_unroped_query=False,
         _pads_q_by_copy=False,

@@ -268,8 +268,8 @@ def _insert_context_kv(
             block_size,
         )
     else:  # per-tensor fp8 (torch.float8_e4m3fn)
-        # --kv-cache-dtype fp8_e4m3; the aiter layer registers the same
-        # ``_flashinfer_fp8_*`` scales as FlashInfer.
+        # --kv-cache-dtype fp8_e4m3; the aiter layer registers the per-tensor
+        # q / KV scales.
         swa_3d = swa_cache.view(-1, block_size, attn.head_dim)
         dummy_q_fp8 = torch.zeros_like(dummy_q, dtype=torch.float8_e4m3fn)
         torch.ops._C.fused_deepseek_v4_qnorm_rope_kv_rope_full_cache_fp8_insert(
@@ -280,8 +280,8 @@ def _insert_context_kv(
             slot_mapping,
             positions,
             cos_sin_cache,
-            attn._flashinfer_fp8_kv_scale,
-            attn._flashinfer_fp8_q_scale_inv,
+            attn._k_scale,
+            attn._q_scale_inv,
             attn.eps,
             block_size,
         )
