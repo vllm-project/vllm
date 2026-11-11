@@ -763,6 +763,10 @@ def test_capture_gets_the_memory_warmup_committed(vmm, vllm_runner, monkeypatch)
             "Qwen/Qwen3-0.6B",
             max_model_len=256,
             enable_extensible_kv_cache=extensible,
+            # The second engine starts in a process that still holds some of
+            # the first's memory: leave headroom on small (e.g. MIG) devices.
+            # TODO: drop once #67081 frees the first engine's compiled model.
+            gpu_memory_utilization=0.5,
         ) as runner:
             outputs[extensible] = runner.generate_greedy(prompts, max_tokens=16)
             num_blocks = runner.llm.llm_engine.vllm_config.cache_config.num_gpu_blocks
