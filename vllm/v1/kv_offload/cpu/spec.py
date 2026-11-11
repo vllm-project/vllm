@@ -21,11 +21,10 @@ from vllm.v1.kv_offload.config import OffloadingConfig
 from vllm.v1.kv_offload.cpu.common import CPUOffloadingInfo, CPUOffloadingMetrics
 from vllm.v1.kv_offload.cpu.gpu_worker import CPUOffloadingWorker
 from vllm.v1.kv_offload.cpu.manager import CPUOffloadingManager
-from vllm.v1.kv_offload.cpu.shared_offload_region import SharedOffloadRegion
-
-# Split the shared region into this many shm files so workers pre-fault them
-# in parallel (page-cache inserts are serialized per file).
-_REGION_SEGMENTS = 32
+from vllm.v1.kv_offload.cpu.shared_offload_region import (
+    REGION_SEGMENTS,
+    SharedOffloadRegion,
+)
 
 
 def _all_workers_barrier() -> None:
@@ -226,7 +225,7 @@ class CPUOffloadingSpec(OffloadingSpec):
                 barrier=(
                     _all_workers_barrier if self.replicated_layout else lambda: None
                 ),
-                num_segments=_REGION_SEGMENTS,
+                num_segments=REGION_SEGMENTS,
                 creator_memory_check=(
                     None if self.replicated_layout else check_rank_regions_capacity
                 ),

@@ -2,7 +2,7 @@
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 """Dispatch DSV4.1 mHC operations and overlap coefficient generation."""
 
-from functools import partial
+from functools import cache, partial
 from typing import TYPE_CHECKING, cast
 
 import torch
@@ -19,7 +19,9 @@ from vllm.model_executor.layers.fused_moe.moe_output import (
     UnfinalizedMoEOutput,
 )
 from vllm.platforms import current_platform
+from vllm.triton_utils import tl, triton
 from vllm.utils.deep_gemm import is_deep_gemm_supported
+from vllm.utils.import_utils import has_cutedsl
 
 from .mega_mhc import (
     can_use_mega_mhc,
@@ -76,7 +78,7 @@ def init_mhc_all_reduce(vllm_config: VllmConfig) -> None:
     """Build the fused all-reduce + mHC kernel the overlap path reduces with.
 
     Collective over the TP group, so every rank must call it, and only when
-    ``supports_mhc_all_reduce`` holds.
+    `supports_mhc_all_reduce` holds.
     """
     global _all_reduce_mhc
     from .cute_dsl import AllReduceMHC
@@ -188,6 +190,29 @@ def mhc_pre_delayed_overlap(
     return outputs
 
 
+def mhc_boundary_weight(
+    hidden_size: int, hc_mult: int, device: torch.device
+) -> torch.Tensor | None:
+    """An empty `prepare_boundary_weight` buffer, or None where the CuTe DSL mHC
+    boundary (`mhc_boundary.py`) cannot run."""
+    if not (current_platform.is_device_capability_family(100) and has_cutedsl()):
+        return None
+    from .mhc_boundary import MhcBoundaryKernel, boundary_weight_shape
+
+    if not MhcBoundaryKernel.supports(hidden_size, hc_mult):
+        return None
+    return torch.empty(
+        boundary_weight_shape(hidden_size), dtype=torch.int32, device=device
+    )
+
+
+@cache
+def _mhc_shifted_post_pre_boundary():
+    from .mhc_boundary import mhc_shifted_post_pre_boundary
+
+    return mhc_shifted_post_pre_boundary
+
+
 def mhc_shifted_post_pre(
     x: torch.Tensor | MoEOutput,
     residual: torch.Tensor,
@@ -208,10 +233,14 @@ def mhc_shifted_post_pre(
     *,
     stream: torch.cuda.Stream | None = None,
     reduce_results: bool = False,
+    boundary_weight: torch.Tensor | None = None,
 ) -> tuple[
     torch.Tensor, torch.Tensor, torch.Tensor, torch.Tensor, torch.Tensor, torch.Tensor
 ]:
     """Dispatch shifted post/pre to overlap, Mega-mHC, or fused TileLang.
+
+    `boundary_weight` (`fn` laid out by `prepare_boundary_weight`, see
+    `mhc_boundary_weight`) runs decode-size Mega-mHC batches on the CuTe DSL kernel.
 
     A MoE output left unfinalized is finalized inside the fused all-reduce.
     When stream is supplied, join it before consuming the returned coefficients.
@@ -283,7 +312,7 @@ def mhc_shifted_post_pre(
     assert isinstance(x, torch.Tensor)
     if can_use_mega_mhc(x, residual, pre_mix, norm_weight, capture_aux):
         assert pre_mix is not None and norm_weight is not None
-        outputs = mhc_shifted_post_pre_deep_gemm(
+        args = (
             x,
             residual,
             pre_mix,
@@ -300,6 +329,14 @@ def mhc_shifted_post_pre(
             norm_weight,
             norm_eps,
         )
+        outputs = None
+        if boundary_weight is not None:
+            # Decode-size batches: one CuTe DSL kernel, the same TF32 products.
+            outputs = _mhc_shifted_post_pre_boundary()(
+                *args[:5], boundary_weight, *args[6:]
+            )
+        if outputs is None:
+            outputs = mhc_shifted_post_pre_deep_gemm(*args)
         return *outputs, x.new_empty(0, x.shape[1])
 
     return mhc_fused_post_pre_delayed_tilelang(
@@ -320,3 +357,35 @@ def mhc_shifted_post_pre(
         norm_eps=norm_eps,
         capture_aux=capture_aux,
     )
+
+
+@triton.jit
+def _hc_expand_kernel(
+    x,
+    out,
+    numel,
+    H: tl.constexpr,
+    N: tl.constexpr,
+    STRIDE_M: tl.constexpr,
+    STRIDE_H: tl.constexpr,
+    BLOCK: tl.constexpr,
+):
+    index = tl.program_id(0).to(tl.int64) * BLOCK + tl.arange(0, BLOCK)
+    mask = index < numel
+    row = index // H
+    col = index % H
+    value = tl.load(x + row * STRIDE_M + col * STRIDE_H, mask=mask, other=0)
+    for stream in tl.static_range(N):
+        tl.store(out + (row * N + stream) * H + col, value, mask=mask)
+
+
+def hc_expand(x: torch.Tensor, hc_mult: int) -> torch.Tensor:
+    """`x.unsqueeze(1).expand(-1, hc_mult, -1).contiguous()`, reading
+    `x` once instead of once per copy."""
+    m, h = x.shape
+    out = x.new_empty(m, hc_mult, h)
+    if out.numel():
+        _hc_expand_kernel[(triton.cdiv(m * h, 1024),)](
+            x, out, m * h, h, hc_mult, *x.stride(), BLOCK=1024, num_warps=4
+        )
+    return out

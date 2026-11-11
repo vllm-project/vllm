@@ -61,6 +61,8 @@ fn finished() -> Finished {
         ec_transfer_params: None,
         sampling_mask: None,
         spec_decode_metrics: None,
+        weight_versions: None,
+        routed_experts: None,
         timestamps: Default::default(),
     }
 }
@@ -140,6 +142,8 @@ fn interrupted_final_message_is_preserved() {
             finish_reason: FinishReason::stop_eos(),
             kv_transfer_params: None,
             ec_transfer_params: None,
+            weight_versions: None,
+            routed_experts: None,
         })
     );
 }
@@ -196,6 +200,8 @@ fn interrupted_analysis_message_is_preserved() {
             finish_reason: FinishReason::stop_eos(),
             kv_transfer_params: None,
             ec_transfer_params: None,
+            weight_versions: None,
+            routed_experts: None,
         })
     );
 }

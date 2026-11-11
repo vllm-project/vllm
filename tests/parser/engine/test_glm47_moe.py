@@ -3,7 +3,7 @@
 """Reasoning-boundary tests for the GLM-4.7 parser.
 
 GLM can transition straight from reasoning into a tool call without ever
-emitting ``</think>``, so ``<tool_call>`` is an implicit reasoning
+emitting `</think>`, so `<tool_call>` is an implicit reasoning
 terminator. These cover that path plus the multi-turn prompts where an
 earlier turn's markers must not be read as the current turn's state. The
 streaming tests check that long tool arguments stream the same JSON as a
@@ -66,7 +66,7 @@ class TestIsReasoningEnd:
         assert parser.is_reasoning_end([THINK_S, TEXT, THINK_E, TEXT])
 
     def test_tool_call_without_think_end(self, parser):
-        """Reasoning -> tool call with no ``</think>`` still ends reasoning."""
+        """Reasoning -> tool call with no `</think>` still ends reasoning."""
         assert parser.is_reasoning_end([THINK_S, TEXT, TOOL_S, TEXT])
 
     def test_previous_turn_tool_call_ignored(self, parser):
@@ -88,7 +88,7 @@ class TestIsReasoningEnd:
 
 class TestExtractContentIds:
     def test_think_end_wins_over_later_tool_call(self, parser):
-        """Content between ``</think>`` and a tool call must survive."""
+        """Content between `</think>` and a tool call must survive."""
         ids = [THINK_S, TEXT, THINK_E, 20, 21, TOOL_S, 30, TOOL_E]
         assert parser.extract_content_ids(ids) == [20, 21, TOOL_S, 30, TOOL_E]
 
@@ -97,7 +97,7 @@ class TestExtractContentIds:
         assert parser.extract_content_ids(ids) == ids[1:]
 
     def test_falls_back_to_tool_call(self, parser):
-        """Without ``</think>``, content starts at the opener itself so the
+        """Without `</think>`, content starts at the opener itself so the
         tool parser still receives a well-formed call."""
         ids = [THINK_S, TEXT, TOOL_S, 30, TOOL_E]
         assert parser.extract_content_ids(ids) == [TOOL_S, 30, TOOL_E]
@@ -220,6 +220,40 @@ class TestStreamedToolArguments:
 
         assert streaming_conversions(lines=40) == streaming_conversions(lines=400)
 
+    def test_replaced_value_conversions_do_not_grow(self, mock_request):
+        """Once a repeated key's new value diverges from the streamed text,
+        deltas that only extend it skip the converter."""
+        mock_request.tools = [WRITE_TOOL]
+        head = CALL_HEAD + "x</arg_value><arg_key>content</arg_key><arg_value>"
+
+        def streaming_conversions(lines: int) -> int:
+            calls = 0
+            base = glm47_moe_config()
+            base_converter = base.arg_converter
+            assert base_converter is not None
+
+            def counting_converter(raw_args: str, partial: bool) -> str:
+                nonlocal calls
+                if partial:
+                    calls += 1
+                return base_converter(raw_args, partial)
+
+            parser = Glm47MoeParser(
+                make_mock_tokenizer(VOCAB),
+                parser_engine_config=dataclasses.replace(
+                    base, arg_converter=counting_converter
+                ),
+            )
+            chunks = [
+                *_pieces(head, 4),
+                *_pieces(CONTENT_LINE * lines, 4),
+                *_pieces(CALL_TAIL, 4),
+            ]
+            _stream_arguments(parser, mock_request, chunks)
+            return calls
+
+        assert streaming_conversions(lines=40) == streaming_conversions(lines=400)
+
     @pytest.mark.parametrize("size", [1, 7])
     def test_repeated_closed_args_stream_non_streaming_arguments(
         self, mock_request, size
@@ -284,9 +318,11 @@ class TestStreamedToolArguments:
         "raw_args",
         [
             "<arg_key>k</arg_key><arg_value>x</arg_value>",
-            "<arg_key>k</arg_key><arg_value>1</arg_value>"
-            "<arg_key>j</arg_key><arg_value>2</arg_value>"
-            "<arg_key>k</arg_key><arg_value>3",
+            (
+                "<arg_key>k</arg_key><arg_value>1</arg_value>"
+                "<arg_key>j</arg_key><arg_value>2</arg_value>"
+                "<arg_key>k</arg_key><arg_value>3"
+            ),
         ],
         ids=["closed_value", "repeated_key_not_last"],
     )
