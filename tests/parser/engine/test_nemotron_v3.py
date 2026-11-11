@@ -2,11 +2,11 @@
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 """Tests for the engine-based Nemotron V3 parser.
 
-Validates that ``NemotronV3Parser`` correctly handles:
-- ``<think>``/``</think>`` reasoning with ``<tool_call>`` XML tool calls
+Validates that `NemotronV3Parser` correctly handles:
+- `<think>`/`</think>` reasoning with `<tool_call>` XML tool calls
   (same format as Qwen3)
-- Nemotron-specific reasoning/content swap when ``enable_thinking=False``
-  or ``force_nonempty_content=True``
+- Nemotron-specific reasoning/content swap when `enable_thinking=False`
+  or `force_nonempty_content=True`
 """
 
 import json
