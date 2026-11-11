@@ -1,6 +1,6 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
-"""Tests for the triton_scaled_mm kernel
+"""Tests for the triton_scaled_mm kernel.
 
 Run `pytest tests/kernels/quantization/test_triton_scaled_mm.py`.
 """
@@ -13,7 +13,7 @@ import torch
 from vllm.platforms import current_platform
 from vllm.utils.torch_utils import set_random_seed
 
-device = "cuda"
+device = current_platform.device_type
 
 triton_scaled_mm_module = importlib.import_module(
     "vllm.model_executor.layers.quantization.compressed_tensors.triton_scaled_mm"
@@ -32,11 +32,9 @@ def torch_scaled_mm(
     out = torch.mm(a.to(torch.float32), b.to(torch.float32))
     out = scale_a * out
     out = scale_b.T * out
-    out = out.to(out_dtype)
     if bias is not None:
-        out = out + bias
-
-    return out
+        out = out + bias.float()
+    return out.to(out_dtype)
 
 
 def get_8bit_types():
@@ -123,3 +121,59 @@ def test_scaled_mm(
     c_actual = torch_scaled_mm(a, b, scale_a, scale_b, out_dtype, bias)
 
     torch.testing.assert_close(c_check, c_actual, rtol=1e-1, atol=1e-1)
+
+
+@pytest.mark.parametrize("in_dtype", get_8bit_types())
+@pytest.mark.parametrize("use_heuristic", [True, False])
+def test_scaled_mm_adds_bias_before_rounding(in_dtype, use_heuristic):
+    # The accumulator is 1 + 3 * 2**-10 and the bias 2**-8. Rounding to bf16
+    # first gives 1.0 (1 + 2**-8 is a tie, to even); adding first, 1 + 2**-7.
+    a = torch.ones((1, 32), device=device).to(in_dtype)
+    col = torch.tensor([64.0] * 16 + [2.0, 1.0] + [0.0] * 14, device=device)
+    b = col[:, None].expand(32, 16).to(in_dtype).contiguous()
+    scale_a = torch.ones((1, 1), device=device)
+    scale_b = torch.full((1, 1), 2**-10, device=device)
+    bias = torch.full((16,), 2**-8, device=device, dtype=torch.bfloat16)
+    args = (a, b, scale_a, scale_b, torch.bfloat16, bias)
+
+    out = triton_scaled_mm(*args, use_heuristic=use_heuristic)
+    expected = torch_scaled_mm(*args)
+    assert (expected == 1 + 2**-7).all()
+    torch.testing.assert_close(out, expected, rtol=0, atol=0)
+
+
+# TD operand loads must be bit-exact vs the plain masked-load path.
+@pytest.mark.skipif(
+    not (current_platform.is_cuda_alike() or current_platform.is_xpu()),
+    reason="Triton scaled_mm runs on CUDA-alike or XPU.",
+)
+@pytest.mark.parametrize(
+    "M,N,K", [(1, 4096, 4096), (64, 4096, 4096), (256, 2048, 4096)]
+)
+@pytest.mark.parametrize("in_dtype", get_8bit_types())
+@pytest.mark.parametrize("use_scalar_scale_a", [True, False])
+@pytest.mark.parametrize("use_bias", [True, False])
+def test_scaled_mm_td_matches_plain(M, N, K, in_dtype, use_scalar_scale_a, use_bias):
+    dev = current_platform.device_type
+    out_dtype = torch.bfloat16
+    set_random_seed(0)
+
+    is_fp = torch.tensor([1, 1], dtype=in_dtype).is_floating_point()
+    if is_fp:
+        a = (0.25 * torch.rand((M, K), dtype=torch.float32, device=dev)).to(in_dtype)
+        b = (0.25 * torch.rand((K, N), dtype=torch.float32, device=dev)).to(in_dtype)
+    else:
+        a = torch.randint(-32, 32, (M, K), dtype=in_dtype, device=dev)
+        b = torch.randint(-32, 32, (K, N), dtype=in_dtype, device=dev)
+
+    scale_a = (
+        torch.rand((1, 1), device=dev)
+        if use_scalar_scale_a
+        else 0.25 * torch.rand((M, 1), device=dev)
+    )
+    scale_b = 0.25 * torch.rand((N, 1), device=dev)
+    bias = torch.rand((N,), device=dev, dtype=out_dtype) if use_bias else None
+
+    out_plain = triton_scaled_mm(a, b, scale_a, scale_b, out_dtype, bias, use_td=False)
+    out_td = triton_scaled_mm(a, b, scale_a, scale_b, out_dtype, bias, use_td=True)
+    torch.testing.assert_close(out_td, out_plain, rtol=0, atol=0)

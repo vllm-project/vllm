@@ -117,7 +117,7 @@ echo "Building TorchCodec (MAX_JOBS=$MAX_JOBS)..."
 pip wheel . --no-build-isolation --no-deps -w "$BUILD_DIR/dist"
 
 # Install the built wheel
-BUILT_WHEEL=$(ls "$BUILD_DIR/dist"/torchcodec-*.whl 2>/dev/null | head -1)
+BUILT_WHEEL=$(find "$BUILD_DIR/dist" -maxdepth 1 -name 'torchcodec-*.whl' -print -quit)
 if [ -z "$BUILT_WHEEL" ]; then
     echo "Error: No wheel produced"
     exit 1

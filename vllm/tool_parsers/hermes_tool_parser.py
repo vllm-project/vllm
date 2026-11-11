@@ -6,11 +6,7 @@ from collections.abc import Sequence
 
 import regex as re
 
-from vllm.entrypoints.chat_utils import make_tool_call_id
-from vllm.entrypoints.openai.chat_completion.protocol import (
-    ChatCompletionRequest,
-)
-from vllm.entrypoints.openai.engine.protocol import (
+from vllm.entrypoints.generate.base.protocol import (
     DeltaFunctionCall,
     DeltaMessage,
     DeltaToolCall,
@@ -18,8 +14,12 @@ from vllm.entrypoints.openai.engine.protocol import (
     FunctionCall,
     ToolCall,
 )
+from vllm.entrypoints.openai.chat_completion.protocol import (
+    ChatCompletionRequest,
+)
 from vllm.entrypoints.openai.responses.protocol import ResponsesRequest
 from vllm.logger import init_logger
+from vllm.renderers.chat_utils import make_tool_call_id
 from vllm.tokenizers import TokenizerLike
 from vllm.tool_parsers.abstract_tool_parser import (
     Tool,
@@ -80,12 +80,7 @@ class Hermes2ProToolParser(ToolParser):
 
         else:
             try:
-                # Decode each tool call by JSON-parsing from just after the
-                # <tool_call> token instead of slicing to the first literal
-                # </tool_call>. JSONDecoder.raw_decode respects string escaping,
-                # so a literal </tool_call> inside a JSON string argument no
-                # longer truncates the call. The loop walks each <tool_call>
-                # block in turn.
+                # Closing tags inside JSON strings are argument data.
                 decoder = json.JSONDecoder()
                 raw_function_calls = []
                 search_idx = 0
@@ -95,20 +90,13 @@ class Hermes2ProToolParser(ToolParser):
                     json_start = start + len(self.tool_call_start_token)
                     while (
                         json_start < len(model_output)
-                        and model_output[json_start].isspace()
+                        and model_output[json_start] in " \t\r\n"
                     ):
                         json_start += 1
-                    # raw_decode raises on invalid/incomplete JSON; the outer
-                    # except then falls back to returning the raw text as
-                    # content, matching the previous behavior.
                     obj, end = decoder.raw_decode(model_output, json_start)
-                    # The object must be followed by the end tag or
-                    # end-of-string. Anything else (concatenated objects,
-                    # trailing junk, a missing end tag between calls) was also
-                    # rejected by the old json.loads, so raise to keep that
-                    # behavior.
+                    # Reject trailing data that json.loads would reject.
                     tail = end
-                    while tail < len(model_output) and model_output[tail].isspace():
+                    while tail < len(model_output) and model_output[tail] in " \t\r\n":
                         tail += 1
                     if not (
                         tail == len(model_output)
@@ -239,13 +227,13 @@ class Hermes2ProToolParser(ToolParser):
     ) -> DeltaMessage | None:
         """Incrementally stream tool call deltas from accumulated output.
 
-        On each invocation, re-parses the full ``current_text`` to find
-        ``<tool_call>`` regions, then diffs against previously sent state
+        On each invocation, re-parses the full `current_text` to find
+        `<tool_call>` regions, then diffs against previously sent state
         to emit only new content, tool names, or argument fragments.
 
-        Returns a ``DeltaMessage`` containing either plain content (for
-        text preceding any tool call) or one or more ``DeltaToolCall``
-        entries, or ``None`` if there is nothing new to send yet."""
+        Returns a `DeltaMessage` containing either plain content (for
+        text preceding any tool call) or one or more `DeltaToolCall`
+        entries, or `None` if there is nothing new to send yet."""
         try:
             # Extract any content before tool calls.
             content = self._extract_content(current_text)

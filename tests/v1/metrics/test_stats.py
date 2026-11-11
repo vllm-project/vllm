@@ -1,17 +1,142 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
-from vllm.v1.engine import FinishReason
+
+import pytest
+
+from vllm.v1.engine import EngineCoreOutput, EngineCoreOutputs, FinishReason
+from vllm.v1.metrics.cache_hit_source import CacheHitSource
 from vllm.v1.metrics.stats import (
     IterationStats,
+    LoRARequestStates,
     PrefillStats,
+    PrefixCacheStats,
     PromptTokenStats,
     RequestStateStats,
+    SchedulerIterationDetails,
+    SchedulerStats,
 )
+from vllm.v1.serial_utils import MsgpackDecoder, MsgpackEncoder
 
 
 def test_iteration_stats_repr():
     iteration_stats = IterationStats()
     assert repr(iteration_stats).startswith("IterationStats(")
+
+
+def test_scheduler_iteration_details_serialization():
+    iteration_details = SchedulerIterationDetails(
+        iteration_index=1,
+        num_ctx_requests=2,
+        num_ctx_tokens=3,
+        num_generation_requests=4,
+        num_generation_tokens=5,
+        elapsed_ms=6.7,
+        num_encoder_inputs=2,
+        num_encoder_output_tokens=392,
+    )
+    outputs = EngineCoreOutputs(
+        scheduler_stats=SchedulerStats(
+            kv_cache_usage=0.5,
+            iteration_details=iteration_details,
+        )
+    )
+
+    encoded = MsgpackEncoder().encode(outputs)
+    decoded = MsgpackDecoder(EngineCoreOutputs).decode(encoded)
+
+    assert decoded.scheduler_stats is not None
+    assert decoded.scheduler_stats.kv_cache_usage == 0.5
+    assert decoded.scheduler_stats.iteration_details == iteration_details
+
+
+def test_prefix_cache_stats_hits_by_source_accumulate():
+    stats = PrefixCacheStats()
+    stats.record(
+        num_tokens=8,
+        num_hits=5,
+        preempted=False,
+        hits_by_source={CacheHitSource.HOST: 3, CacheHitSource.DISK: 2},
+    )
+    stats.record(
+        num_tokens=8,
+        num_hits=6,
+        preempted=False,
+        hits_by_source={CacheHitSource.P2P: 5, CacheHitSource.HOST: 1},
+    )
+    # Zero counts never create an entry.
+    stats.record(
+        num_tokens=8,
+        num_hits=4,
+        preempted=False,
+        hits_by_source={CacheHitSource.DISK: 4, CacheHitSource.P2P: 0},
+    )
+
+    assert stats.hits_by_source == {
+        CacheHitSource.HOST: 4,
+        CacheHitSource.DISK: 6,
+        CacheHitSource.P2P: 5,
+    }
+    assert sum(stats.hits_by_source.values()) == stats.hits == 15
+
+
+def test_prefix_cache_stats_record_hits_by_source():
+    stats = PrefixCacheStats()
+    stats.record(num_tokens=32, num_hits=16, preempted=False)
+    stats.record(
+        num_tokens=32,
+        num_hits=24,
+        preempted=False,
+        hits_by_source={CacheHitSource.HOST: 16, CacheHitSource.DISK: 8},
+    )
+    # Preempted re-admissions never contribute to hits or the split.
+    stats.record(
+        num_tokens=32,
+        num_hits=32,
+        preempted=True,
+        hits_by_source={CacheHitSource.P2P: 32},
+    )
+    # A connector miscount is reported as unspecified, not dropped or raised.
+    stats.record(
+        num_tokens=8,
+        num_hits=8,
+        preempted=False,
+        hits_by_source={CacheHitSource.HOST: 4},
+    )
+
+    assert stats.requests == 3
+    assert stats.hits == 48
+    assert stats.preempted_hits == 32
+    assert stats.hits_by_source == {
+        CacheHitSource.HOST: 16,
+        CacheHitSource.DISK: 8,
+        CacheHitSource.EXTERNAL_UNSPECIFIED: 8,
+    }
+    assert sum(stats.hits_by_source.values()) == 48 - 16
+
+
+def test_prefix_cache_stats_hits_by_source_serialization():
+    connector_stats = PrefixCacheStats()
+    connector_stats.record(
+        num_tokens=16,
+        num_hits=8,
+        preempted=False,
+        hits_by_source={CacheHitSource.P2P: 4, CacheHitSource.HOST: 4},
+    )
+    outputs = EngineCoreOutputs(
+        scheduler_stats=SchedulerStats(
+            connector_prefix_cache_stats=connector_stats,
+        )
+    )
+
+    encoded = MsgpackEncoder().encode(outputs)
+    decoded = MsgpackDecoder(EngineCoreOutputs).decode(encoded)
+
+    assert decoded.scheduler_stats is not None
+    assert decoded.scheduler_stats.connector_prefix_cache_stats is not None
+    assert decoded.scheduler_stats.connector_prefix_cache_stats.hits_by_source == {
+        CacheHitSource.P2P: 4,
+        CacheHitSource.HOST: 4,
+    }
 
 
 def test_prefill_kv_computed_with_cache():
@@ -244,3 +369,19 @@ def test_prompt_token_stats_full_external_transfer_recompute():
     assert stats.external_kv_transfer == 999
     assert stats.cached_tokens == 999
     assert stats.total == 1000
+
+
+@pytest.mark.parametrize("reported", [None, True, False])
+@pytest.mark.parametrize("frontend", [True, False])
+def test_engine_core_watermarking_overrides_frontend_flag(frontend, reported):
+    """EngineCore's flag replaces the frontend's guess; None keeps it."""
+    req_stats = RequestStateStats(is_watermarked=frontend)
+    IterationStats().update_from_output(
+        EngineCoreOutput(request_id="r", new_token_ids=[1], watermarking=reported),
+        engine_core_timestamp=0.0,
+        is_prefilling=True,
+        req_stats=req_stats,
+        lora_states=LoRARequestStates(),
+        lora_name=None,
+    )
+    assert req_stats.is_watermarked == (frontend if reported is None else reported)

@@ -3,12 +3,11 @@
 # Adapted from Qwen3-ForcedAligner inference:
 # https://github.com/QwenLM/Qwen3-ASR
 
-"""
-Offline forced alignment example using Qwen3-ForcedAligner-0.6B.
+r"""Offline forced alignment example using Qwen3-ForcedAligner-0.6B.
 
 Forced alignment takes audio and reference text as input and produces
 word-level timestamps. The model predicts a time bin at each <timestamp>
-token position; multiplying by ``timestamp_segment_time`` gives milliseconds.
+token position; multiplying by `timestamp_segment_time` gives milliseconds.
 
 Usage::
 
@@ -31,7 +30,6 @@ def parse_args():
         model="Qwen/Qwen3-ForcedAligner-0.6B",
         runner="pooling",
         enforce_eager=True,
-        hf_overrides={"architectures": ["Qwen3ASRForcedAlignerForTokenClassification"]},
     )
     return parser.parse_args()
 

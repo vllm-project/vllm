@@ -14,7 +14,7 @@ from transformers import (
 )
 
 from vllm.config import ModelConfig, SpeechToTextConfig, VllmConfig
-from vllm.config.multimodal import BaseDummyOptions
+from vllm.config.multimodal import MultiModalDummyOptions
 from vllm.config.speech_to_text import SpeechToTextParams
 from vllm.distributed import get_tensor_model_parallel_world_size
 from vllm.inputs import MultiModalDataDict, PromptType
@@ -44,8 +44,14 @@ from vllm.multimodal.processing import (
     BaseDummyInputsBuilder,
     BaseMultiModalProcessor,
     BaseProcessingInfo,
+    ProcessorInputs,
     PromptReplacement,
     PromptUpdate,
+    TimingContext,
+)
+from vllm.multimodal.processing.processor import (
+    HFMultiModalInputs,
+    MultiModalProcessingResult,
 )
 from vllm.transformers_utils.processor import cached_processor_from_config
 from vllm.transformers_utils.processors.funasr import FunASRFeatureExtractor
@@ -258,8 +264,8 @@ class SinusoidalPositionEncoder(torch.nn.Module):
 
     def encode(
         self,
-        positions: torch.Tensor = None,
-        depth: int = None,
+        positions: torch.Tensor,
+        depth: int,
         dtype: torch.dtype = torch.float32,
     ):
         batch_size = positions.size(0)
@@ -388,11 +394,11 @@ class SenseVoiceEncoderSmall(nn.Module):
 
         xs_pad = self.embed(xs_pad)
 
-        for layer_idx, encoder_layer in enumerate(self.encoders0):
+        for encoder_layer in self.encoders0:
             encoder_outs = encoder_layer(xs_pad, masks)
             xs_pad, masks = encoder_outs[0], encoder_outs[1]
 
-        for layer_idx, encoder_layer in enumerate(self.encoders):
+        for encoder_layer in self.encoders:
             encoder_outs = encoder_layer(xs_pad, masks)
             xs_pad, masks = encoder_outs[0], encoder_outs[1]
 
@@ -400,7 +406,7 @@ class SenseVoiceEncoderSmall(nn.Module):
 
         olens = masks.squeeze(1).sum(1).int()
 
-        for layer_idx, encoder_layer in enumerate(self.tp_encoders):
+        for encoder_layer in self.tp_encoders:
             encoder_outs = encoder_layer(xs_pad, masks)
             xs_pad, masks = encoder_outs[0], encoder_outs[1]
 
@@ -570,8 +576,8 @@ class Transformer(nn.Module):
                 ]
             )
 
-    def forward(self, hidden_states: torch.Tensor, ilens: int = 0):
-        max_len = max(ilens)
+    def forward(self, hidden_states: torch.Tensor, ilens: torch.Tensor):
+        max_len = ilens.max()
         hidden_states = hidden_states[:, :max_len, :]
         batch_size, seq_len, dim = hidden_states.size()
         chunk_num = (seq_len - 1) // self.k + 1
@@ -589,17 +595,16 @@ class Transformer(nn.Module):
         olens = (ilens - 1) // self.k + 1
 
         if self.blocks is not None:
-            for layer, block in enumerate(self.blocks):
+            for block in self.blocks:
                 hidden_states = block(hidden_states)
         return hidden_states, olens
 
 
 class FunASRAudioInputs(TensorSchema):
-    """
-    Dimensions:
-        - b: Batch size
-        - nmb: Number of mel bins
-        - t: Time frames (M)
+    """Dimensions:
+    - b: Batch size
+    - nmb: Number of mel bins
+    - t: Time frames (M)
     """
 
     input_features: Annotated[
@@ -679,6 +684,8 @@ class FunASRModel(nn.Module):
         self.feat_permute = False
 
         if self.feat_permute:
+            if not isinstance(speech, torch.Tensor):
+                raise NotImplementedError("List audio inputs cannot be permuted")
             encoder_out, encoder_out_lens = self.encoder.audio_encoder(
                 speech.permute(0, 2, 1), speech_lengths
             )
@@ -727,49 +734,54 @@ class FunASRDummyInputsBuilder(BaseDummyInputsBuilder[FunASRProcessingInfo]):
         self,
         seq_len: int,
         mm_counts: Mapping[str, int],
-        mm_options: Mapping[str, BaseDummyOptions],
+        mm_options: MultiModalDummyOptions,
     ) -> MultiModalDataDict:
         feature_extractor = self.info.get_feature_extractor()
 
         sampling_rate = feature_extractor.sampling_rate
         audio_len = feature_extractor.chunk_length * sampling_rate
-        num_audios = mm_counts.get("audio", 0)
-
-        audio_overrides = mm_options.get("audio")
 
         return {
             "audio": self._get_dummy_audios(
                 length=audio_len,
-                num_audios=num_audios,
-                overrides=audio_overrides,
+                num_audios=mm_counts.get("audio", 0),
+                overrides=mm_options.get("audio"),
             ),
         }
 
 
 class FunASRMultiModalProcessor(BaseMultiModalProcessor[FunASRProcessingInfo]):
-    def _call_hf_processor(
+    def _get_hf_mm_text(self, mm_counts: Mapping[str, int]) -> str:
+        return self.dummy_inputs.get_dummy_text(mm_counts)
+
+    def _get_hf_mm_inputs(
         self,
-        prompt: str,
-        mm_data: Mapping[str, object],
-        mm_kwargs: Mapping[str, object],
-        tok_kwargs: Mapping[str, object],
-    ) -> BatchFeature:
-        if mm_data:
-            feature_extractor = self.info.get_feature_extractor(**mm_kwargs)
-            mm_data = dict(audio=mm_data.pop("audios"))
-            mm_kwargs = dict(
-                **mm_kwargs,
+        mm_items: MultiModalDataItems,
+        hf_kwargs: Mapping[str, object],
+    ) -> HFMultiModalInputs:
+        hf_inputs = super()._get_hf_mm_inputs(mm_items, hf_kwargs)
+
+        feature_extractor = self.info.get_feature_extractor(**hf_kwargs)
+        return hf_inputs._replace(
+            hf_kwargs=dict(
+                hf_inputs.hf_kwargs,
                 sampling_rate=feature_extractor.sampling_rate,
             )
-        processed_outputs = super()._call_hf_processor(
-            prompt=prompt,
-            mm_data=mm_data,
-            mm_kwargs=mm_kwargs,
-            tok_kwargs=tok_kwargs,
         )
-        if "labels" in processed_outputs:
-            processed_outputs["input_ids"] = processed_outputs.pop("labels")
-        return processed_outputs
+
+    def _cached_apply_hf_processor(
+        self,
+        inputs: ProcessorInputs,
+        timing_ctx: TimingContext,
+    ) -> MultiModalProcessingResult:
+        # Dithering injects noise into the extracted features, so the
+        # feature extractor is not a pure function of its input. Since the
+        # processing cache assumes that processor outputs are invariant
+        # across calls, bypass the cache when dithering is active.
+        if self.info.get_feature_extractor().dither > 0:
+            return self._apply_hf_processor(inputs, timing_ctx)
+
+        return super()._cached_apply_hf_processor(inputs, timing_ctx)
 
     def _get_mm_fields_config(
         self,
@@ -779,7 +791,7 @@ class FunASRMultiModalProcessor(BaseMultiModalProcessor[FunASRProcessingInfo]):
         return dict(
             input_features=MultiModalFieldConfig.batched("audio"),
             speech_lengths=MultiModalFieldConfig.batched("audio"),
-            fake_token_lengths=MultiModalFieldConfig.batched("audio"),
+            fake_token_lengths=MultiModalFieldConfig.batched("audio", keep_on_cpu=True),
         )
 
     def _get_prompt_updates(
@@ -858,6 +870,10 @@ class FunASRForConditionalGeneration(
         cls,
         stt_params: SpeechToTextParams,
     ) -> PromptType:
+        if stt_params.task_type != "transcribe":
+            raise ValueError(
+                f'FunASR only supports "transcribe", got {stt_params.task_type}'
+            )
         audio = stt_params.audio
         stt_config = stt_params.stt_config
         language = stt_params.language
@@ -869,9 +885,7 @@ class FunASRForConditionalGeneration(
             )
 
         if hotwords is not None:
-            funasr_prompt = "<|im_start|>system\nYou are a helpful assistant.<|im_end|>\n<|im_start|>user\n请结合上下文信息，更加准确地完成语音转写任务。如果没有相关信息，我们会留空。\n\n\n**上下文信息：**\n\n\n热词列表：[{}]\n语音转写：<|AUDIO|><|im_end|>\n<|im_start|>assistant\n".format(  # noqa: E501
-                hotwords
-            )
+            funasr_prompt = f"<|im_start|>system\nYou are a helpful assistant.<|im_end|>\n<|im_start|>user\n请结合上下文信息，更加准确地完成语音转写任务。如果没有相关信息，我们会留空。\n\n\n**上下文信息：**\n\n\n热词列表：[{hotwords}]\n语音转写：<|AUDIO|><|im_end|>\n<|im_start|>assistant\n"  # noqa: E501
         else:
             funasr_prompt = "<|im_start|>system\nYou are a helpful assistant.<|im_end|>\n<|im_start|>user\n语音转写：<|AUDIO|><|im_end|>\n<|im_start|>assistant\n"  # noqa: E501
 
@@ -919,15 +933,14 @@ class FunASRForConditionalGeneration(
         )
         logit_scale = getattr(config, "logit_scale", 1.0)
 
+        self.lm_head = ParallelLMHead(
+            config.vocab_size,
+            config.hidden_size,
+            quant_config=quant_config,
+            prefix=maybe_prefix(prefix, "lm_head"),
+        )
         if config.tie_word_embeddings:
-            self.lm_head = self.model.decoder.embed_tokens
-        else:
-            self.lm_head = ParallelLMHead(
-                config.vocab_size,
-                config.hidden_size,
-                quant_config=quant_config,
-                prefix=maybe_prefix(prefix, "lm_head"),
-            )
+            self.lm_head = self.lm_head.tie_weights(self.model.decoder.embed_tokens)
         self.logits_processor = LogitsProcessor(config.vocab_size, scale=logit_scale)
 
     def get_language_model(self) -> torch.nn.Module:

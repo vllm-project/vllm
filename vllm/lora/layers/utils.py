@@ -57,6 +57,9 @@ def _get_lora_device(base_layer: nn.Module) -> torch.device:
     # GPTQ/AWQ
     elif hasattr(base_layer, "qweight"):
         return base_layer.qweight.device
+    # INC WNA16 (AutoRound)
+    elif hasattr(base_layer, "ark_linear"):
+        return base_layer.ark_linear.qweight.device
     # MoE layer
     elif hasattr(base_layer, "w2_weight"):
         return base_layer.w2_weight.device
@@ -71,8 +74,7 @@ def _get_lora_device(base_layer: nn.Module) -> torch.device:
 
 
 def _not_fully_sharded_can_replace(can_replace):
-    """
-    decorator which adds the condition of not using fully sharded loras
+    """Decorator which adds the condition of not using fully sharded loras
     intended to wrap can_replace_layer()
     """
 
@@ -85,8 +87,7 @@ def _not_fully_sharded_can_replace(can_replace):
 
 
 def _fully_sharded_can_replace(can_replace):
-    """
-    decorator which adds the condition of fully sharded loras
+    """Decorator which adds the condition of fully sharded loras
     intended to wrap can_replace_layer()
     """
 

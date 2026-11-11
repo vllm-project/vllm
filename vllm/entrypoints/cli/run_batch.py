@@ -7,7 +7,7 @@ import importlib.metadata
 import typing
 
 from vllm.entrypoints.cli.types import CLISubcommand
-from vllm.entrypoints.serve.utils.api_utils import VLLM_SUBCMD_PARSER_EPILOG
+from vllm.entrypoints.common.startup import VLLM_SUBCMD_PARSER_EPILOG
 from vllm.logger import init_logger
 
 if typing.TYPE_CHECKING:
@@ -25,7 +25,7 @@ class RunBatchSubcommand(CLISubcommand):
 
     @staticmethod
     def cmd(args: argparse.Namespace) -> None:
-        from vllm.entrypoints.openai.run_batch import main as run_batch_main
+        from vllm.entrypoints.launchers.run_batch import main as run_batch_main
 
         logger.info(
             "vLLM batch processing API version %s", importlib.metadata.version("vllm")
@@ -39,7 +39,9 @@ class RunBatchSubcommand(CLISubcommand):
             from prometheus_client import start_http_server
 
             logger.info("Prometheus metrics enabled")
-            start_http_server(port=args.port, addr=args.url)
+            # --url is deprecated in favour of --host, so prefer --host and fall
+            # back to it only when --host was not given.
+            start_http_server(port=args.port, addr=args.host or args.url)
         else:
             logger.info("Prometheus metrics disabled")
 
@@ -48,7 +50,7 @@ class RunBatchSubcommand(CLISubcommand):
     def subparser_init(
         self, subparsers: argparse._SubParsersAction
     ) -> FlexibleArgumentParser:
-        from vllm.entrypoints.openai.run_batch import make_arg_parser
+        from vllm.entrypoints.launchers.run_batch import make_arg_parser
 
         run_batch_parser = subparsers.add_parser(
             self.name,

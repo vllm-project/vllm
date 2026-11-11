@@ -1,0 +1,19 @@
+model_name: "nvidia/GLM-5.2-NVFP4"
+accuracy_threshold: 0.90
+num_questions: 1319
+num_fewshot: 5
+max_concurrency: 100
+# The extensible KV cache keeps 1.75x the profiled activation peak free. At
+# 32,768 batched tokens that peak (26.8 GiB) leaves no KV cache on a B200.
+server_args: >-
+  --compilation-config '{"cudagraph_mode":"NONE"}'
+  --max-model-len 4096
+  --max-num-batched-tokens 16384
+  --safetensors-load-strategy prefetch
+  --moe-backend flashinfer_cutlass
+  --prefill-context-parallel-size 4
+  --enable-expert-parallel
+  --kv-cache-dtype fp8
+env:
+  PYTORCH_CUDA_ALLOC_CONF: "expandable_segments:True"
+  VLLM_LOGGING_LEVEL: "DEBUG"

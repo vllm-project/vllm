@@ -12,6 +12,17 @@ Speculators provides the following key features:
 - **Standardized, extensible format**: Provides a Hugging Face-compatible format for defining speculative models, with tools to convert from external research repositories into a standard speculators format for easy adoption.
 - **Seamless vLLM Integration**: Built for direct deployment into vLLM, enabling low-latency, production-grade inference with minimal overhead.
 
+## Verifier model references
+
+When serving a Speculators checkpoint directly, `speculators_config.verifier.name_or_path` must be a remote model repository ID. References to local files or directories, including local paths that look like repository IDs, are rejected.
+
+To use a local verifier, select it explicitly and configure the Speculators checkpoint as the draft model:
+
+```bash
+vllm serve /path/to/verifier --speculative-config \
+    '{"model": "/path/to/speculator", "method": "eagle3", "num_speculative_tokens": 1}'
+```
+
 ## Why use Speculators?
 
 Large language models generate text one token at a time, which creates a fundamental bottleneck: each token requires a full forward pass through the model, leaving GPU compute underutilized while waiting for memory-bound operations.

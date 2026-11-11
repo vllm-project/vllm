@@ -5,13 +5,14 @@ import json
 
 import pytest
 
+from tests.tool_parsers.utils import get_function_delta
 from vllm.entrypoints.openai.chat_completion.protocol import ChatCompletionRequest
 from vllm.tokenizers import TokenizerLike
 from vllm.tool_parsers.abstract_tool_parser import ToolParser
 from vllm.tool_parsers.granite4_tool_parser import Granite4ToolParser
 from vllm.tool_parsers.hermes_tool_parser import Hermes2ProToolParser
 
-CONFIGS = {
+CONFIGS: dict[str, dict[str, type[ToolParser]]] = {
     "llama": {
         "tool_parser": Hermes2ProToolParser,
     },
@@ -67,12 +68,15 @@ def test_hermes_parser_streaming_just_forward_text(
         previous_text = current_text
         delta_messages.append(delta)
 
+    contents: list[str] = []
     for delta in delta_messages:
         assert delta is not None
         assert not delta.tool_calls
+        assert delta.content is not None
+        contents.append(delta.content)
 
     print(delta_messages)
-    assert "".join([delta.content for delta in delta_messages]) == text
+    assert "".join(contents) == text
 
 
 def test_hermes_parser_streaming_failure_case_bug_19056(
@@ -102,9 +106,11 @@ def test_hermes_parser_streaming_failure_case_bug_19056(
         if delta is not None:
             delta_messages.append(delta)
 
+    assert delta_messages[0].tool_calls[0].function is not None
     assert delta_messages[0].tool_calls[0].function.name == "final_answer"
     tool_call_args = "".join(
-        delta.tool_calls[0].function.arguments or "" for delta in delta_messages
+        get_function_delta(delta.tool_calls[0]).arguments or ""
+        for delta in delta_messages
     )
     assert tool_call_args == '{"trigger": true}'
 
@@ -139,11 +145,13 @@ def test_hermes_parser_streaming(
         if delta is not None:
             delta_messages.append(delta)
     print(delta_messages)
+    assert delta_messages[0].tool_calls[0].function is not None
     assert delta_messages[0].tool_calls[0].function.name == "get_current_temperature"
     # load to normalize whitespace
     tool_call_args = json.loads(
         "".join(
-            delta.tool_calls[0].function.arguments or "" for delta in delta_messages
+            get_function_delta(delta.tool_calls[0]).arguments or ""
+            for delta in delta_messages
         )
     )
     assert tool_call_args == {
@@ -414,13 +422,10 @@ def test_hermes_streaming_content_and_tool_call_in_single_chunk(
     assert json.loads(args_str) == {"x": 1}
 
 
-@pytest.mark.skip_global_cleanup
 def test_hermes_parser_non_streaming_literal_end_tag_in_string(
     qwen_tokenizer: TokenizerLike,
     any_chat_request: ChatCompletionRequest,
 ) -> None:
-    # A literal </tool_call> inside a JSON string argument must not be treated
-    # as the end tag; otherwise the whole tool call is silently dropped.
     content = "예시 태그: </tool_call> 포함 한국어 본문"
     call = {"name": "edit_file", "arguments": {"content": content}}
     text = "<tool_call>\n" + json.dumps(call, ensure_ascii=False) + "\n</tool_call>"
@@ -432,21 +437,27 @@ def test_hermes_parser_non_streaming_literal_end_tag_in_string(
     )
 
     assert tool_call.tools_called
+    assert len(tool_call.tool_calls) == 1
     assert tool_call.tool_calls[0].function.name == "edit_file"
     assert json.loads(tool_call.tool_calls[0].function.arguments) == {
         "content": content
     }
 
 
-@pytest.mark.skip_global_cleanup
 @pytest.mark.parametrize(
     "text",
     [
         '<tool_call>{"name": "a", "arguments": {}} trailing prose',
-        '<tool_call>{"name": "a", "arguments": {}}'
-        '{"name": "b", "arguments": {}}</tool_call>',
-        '<tool_call>{"name": "a", "arguments": {}}'
-        '<tool_call>{"name": "b", "arguments": {}}</tool_call>',
+        (
+            '<tool_call>{"name": "a", "arguments": {}}'
+            '{"name": "b", "arguments": {}}</tool_call>'
+        ),
+        (
+            '<tool_call>{"name": "a", "arguments": {}}'
+            '<tool_call>{"name": "b", "arguments": {}}</tool_call>'
+        ),
+        '<tool_call>\u00a0{"name": "a", "arguments": {}}</tool_call>',
+        '<tool_call>{"name": "a", "arguments": {}}\u00a0</tool_call>',
     ],
 )
 def test_hermes_parser_non_streaming_trailing_data_falls_back_to_content(
@@ -454,10 +465,6 @@ def test_hermes_parser_non_streaming_trailing_data_falls_back_to_content(
     any_chat_request: ChatCompletionRequest,
     text: str,
 ) -> None:
-    # A valid JSON object followed by junk inside the block (trailing prose or a
-    # concatenated second object) is malformed and must fall back to content,
-    # the same as the original json.loads behavior -- not silently accept only
-    # the leading object.
     parser = Hermes2ProToolParser(qwen_tokenizer)
     tool_call = parser.extract_tool_calls(
         model_output=text,

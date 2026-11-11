@@ -3,12 +3,11 @@
 """Tests for fp32_router_gemm kernel: activation×weight→fp32.
 
 Supported (hidden_size, num_experts) pairs:
-  (3072, 256) -> MiniMax-M2/M2.5,  (6144, 128) -> MiniMax-M3,
-  (6144, 256) -> GLM-5.2
+  (3072, 256), (6144, 128), (5120, 256), (4096, 352), (8192, 256)
 
-Correctness baseline: F.linear in float32. Every M in [1, 32] is covered so
+Correctness baseline: F.linear in float32. Every supported M is covered so
 all tuned geometries (wide-block, experts-per-block, token-group; boundaries
-at M=4/5, odd/even, M=15/16) are exercised on Blackwell, and the legacy
+at M=4/5, M=9/10, M=12/13, odd/even, M=15/16) are exercised on Blackwell, and the legacy
 128/1 geometry everywhere else.
 """
 
@@ -16,18 +15,25 @@ import pytest
 import torch
 
 from vllm._custom_ops import fp32_router_gemm
+from vllm.platforms import current_platform
 
 # (hidden_size, num_experts)
-SHAPES = [(3072, 256), (6144, 128), (6144, 256)]
-ALL_M = list(range(1, 33))
+SHAPES = [(3072, 256), (6144, 128), (5120, 256), (4096, 352), (8192, 256)]
+CASES = [
+    (m, hidden, experts)
+    for hidden, experts in SHAPES
+    for m in range(1, 49 if hidden == 5120 else 33)
+]
 # Absolute tolerance for fp32 kernel vs float64 reference
 ATOL_FP32 = 2e-4
 ATOL_BF16 = 2e-2  # bf16 activation has lower precision
 
 
 def _requires_sm90():
-    if not torch.cuda.is_available():
-        pytest.skip("CUDA not available")
+    # ROCm reports a CUDA-like device capability (gfx950 -> (9, 5)), which would
+    # pass the SM90 check below for a kernel that is only built for CUDA.
+    if not current_platform.is_cuda():
+        pytest.skip("fp32_router_gemm is built for CUDA only")
     major, minor = torch.cuda.get_device_capability()
     if major * 10 + minor < 90:
         pytest.skip(f"fp32_router_gemm requires SM90+, got SM{major}{minor}")
@@ -38,8 +44,7 @@ def _ref(mat_a: torch.Tensor, mat_b: torch.Tensor) -> torch.Tensor:
     return torch.nn.functional.linear(mat_a.float(), mat_b.float())
 
 
-@pytest.mark.parametrize("hidden_dim,num_experts", SHAPES)
-@pytest.mark.parametrize("num_tokens", ALL_M)
+@pytest.mark.parametrize("num_tokens,hidden_dim,num_experts", CASES)
 def test_fp32_activation(num_tokens: int, hidden_dim: int, num_experts: int):
     """fp32 activation → fp32 output should match reference closely."""
     _requires_sm90()
@@ -56,8 +61,7 @@ def test_fp32_activation(num_tokens: int, hidden_dim: int, num_experts: int):
     torch.testing.assert_close(out, ref, atol=ATOL_FP32, rtol=0)
 
 
-@pytest.mark.parametrize("hidden_dim,num_experts", SHAPES)
-@pytest.mark.parametrize("num_tokens", ALL_M)
+@pytest.mark.parametrize("num_tokens,hidden_dim,num_experts", CASES)
 def test_bf16_activation(num_tokens: int, hidden_dim: int, num_experts: int):
     """bf16 activation → fp32 output should match reference within bf16 error."""
     _requires_sm90()
@@ -122,11 +126,11 @@ def test_topk_routing_consistency(num_tokens: int, hidden_dim: int, num_experts:
                 )
 
 
-def test_zero_tokens_returns_empty():
+@pytest.mark.parametrize("hidden_dim,num_experts", SHAPES)
+def test_zero_tokens_returns_empty(hidden_dim, num_experts):
     """M=0 is a graceful no-op returning an empty [0, E] tensor."""
     _requires_sm90()
     device = torch.device("cuda")
-    hidden_dim, num_experts = SHAPES[0]
     mat_a = torch.empty(0, hidden_dim, dtype=torch.float32, device=device)
     mat_b = torch.randn(num_experts, hidden_dim, dtype=torch.float32, device=device)
     out = fp32_router_gemm(mat_a, mat_b)
@@ -134,17 +138,19 @@ def test_zero_tokens_returns_empty():
     assert out.dtype == torch.float32
 
 
-def test_rejects_invalid_inputs():
+@pytest.mark.parametrize("hidden_dim,num_experts", SHAPES)
+def test_rejects_invalid_inputs(hidden_dim, num_experts):
     """The entry must fail loudly, never compute silently wrong results."""
     _requires_sm90()
     device = torch.device("cuda")
-    hidden_dim, num_experts = SHAPES[0]
     mat_b = torch.randn(num_experts, hidden_dim, dtype=torch.float32, device=device)
 
-    # num_tokens > 32 (beyond the instantiated range)
+    # Beyond the instantiated range for this shape.
+    invalid_tokens = 49 if hidden_dim == 5120 else 33
     with pytest.raises(Exception, match="num_tokens"):
         fp32_router_gemm(
-            torch.randn(33, hidden_dim, dtype=torch.float32, device=device), mat_b
+            torch.randn(invalid_tokens, hidden_dim, dtype=torch.float32, device=device),
+            mat_b,
         )
 
     # unsupported (hidden_dim, num_experts) pair
@@ -171,3 +177,41 @@ def test_rejects_invalid_inputs():
         fp32_router_gemm(
             torch.randn(4, hidden_dim, dtype=torch.float16, device=device), mat_b
         )
+
+
+@pytest.mark.skipif(not torch.cuda.is_available(), reason="CUDA required")
+@pytest.mark.parametrize(
+    "tokens", [*range(1, 17), 17, 24, 32, 33, 40, 48, 56, 64, 65, 128]
+)
+@pytest.mark.parametrize(
+    "hidden_dim,num_experts", [(5120, 256), (4096, 352), (8192, 256)]
+)
+@torch.inference_mode()
+def test_router_retains_fp32_weights_and_logits(
+    default_vllm_config, dist_init, tokens, hidden_dim, num_experts
+):
+    """Low-latency routing must retain FP32 weight precision and logits."""
+    from vllm.model_executor.layers.fused_moe.router.gate_linear import GateLinear
+    from vllm.platforms import current_platform
+
+    if not current_platform.is_device_capability_family(100):
+        pytest.skip("SM100 required")
+    torch.manual_seed(42)
+    router = GateLinear(
+        hidden_dim, num_experts, params_dtype=torch.float32, out_dtype=torch.float32
+    ).cuda()
+    router.weight.normal_(std=0.01)
+    x = torch.randn(tokens, hidden_dim, device="cuda", dtype=torch.bfloat16)
+    expected = (x.double() @ router.weight.double().T).float()
+    actual, bias = router(x)
+    assert bias is None and actual.dtype == torch.float32
+    torch.testing.assert_close(actual, expected, rtol=2e-5, atol=2e-5)
+    torch.testing.assert_close(actual.topk(8).indices, expected.topk(8).indices)
+    if tokens in (1, 16, 32, 33, 48, 56):
+        graph = torch.cuda.CUDAGraph()
+        with torch.cuda.graph(graph):
+            captured, _ = router(x)
+        x.normal_()
+        graph.replay()
+        expected = (x.double() @ router.weight.double().T).float()
+        torch.testing.assert_close(captured, expected, rtol=2e-5, atol=2e-5)

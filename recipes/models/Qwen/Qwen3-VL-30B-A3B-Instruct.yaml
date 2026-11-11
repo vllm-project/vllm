@@ -1,0 +1,138 @@
+meta:
+  title: "Qwen3-VL-30B-A3B-Instruct"
+  slug: "qwen3-vl-30b-a3b-instruct"
+  provider: "Qwen"
+  description: "Qwen3-VL MoE vision-language model with 30B total / 3B active parameters, supporting image, video, and text workloads."
+  date_added: 2026-08-17
+  date_updated: 2026-09-12
+  tasks:
+    - multimodal
+    - text
+  performance_headline: "Validated on Intel Xeon 6 CPU with BF16 serving"
+  related_recipes:
+    - "Qwen/Qwen3-VL-235B-A22B-Instruct"
+  hardware:
+    xeon6: verified
+
+model:
+  model_id: "Qwen/Qwen3-VL-30B-A3B-Instruct"
+  min_vllm_version: "0.11.0"
+  architecture: moe
+  parameter_count: "30B"
+  active_parameters: "3B"
+  context_length: 262144
+  base_args: []
+  base_env: {}
+
+dependencies:
+  - note: "Recommended for offline multimodal inference (image/video pre-processing helpers)"
+    command: "uv pip install qwen-vl-utils==0.0.14"
+    optional: true
+
+features:
+  text_only:
+    description: "Skip loading the vision encoder for text-only workloads — frees memory for KV cache."
+    args:
+      - "--language-model-only"
+  encoder_parallel:
+    description: "Run the vision encoder in data-parallel mode."
+    args:
+      - "--mm-encoder-tp-mode"
+      - "data"
+
+opt_in_features:
+  - text_only
+
+variants:
+  default:
+    precision: bf16
+    vram_minimum_gb: 72
+    description: "Full precision BF16"
+    supported_hardware:
+      - xeon6
+
+compatible_strategies:
+  - single_node_tp
+  - single_node_tep
+  - single_node_dep
+  - multi_node_tp
+  - multi_node_tp_pp
+  - multi_node_dep
+  - multi_node_tep
+
+kv_offload_support:
+  offloading_cpu: verified
+  offloading_fs: verified
+
+hardware_overrides: {}
+
+strategy_overrides: {}
+
+guide: |
+  ## Overview
+
+  Qwen3-VL-30B-A3B-Instruct is a multimodal Qwen3-VL MoE model. Intel Xeon 6
+  CPU serving was validated with BF16.
+
+  ## Prerequisites
+
+  - Hardware: Intel Xeon 6 CPUs
+  - vLLM >= 0.11.0
+
+  ### pip (Intel Xeon 6 CPUs)
+
+  For Intel and AMD x86 CPUs, follow the
+  [CPU pre-built wheels](https://docs.vllm.ai/en/latest/getting_started/installation/cpu/#pre-built-wheels)
+  installation instructions.
+
+  ### Docker (Intel Xeon 6 CPUs)
+
+  ```bash
+  docker pull vllm/vllm-openai-cpu:latest-x86_64
+  ```
+
+  ## Intel Xeon 6
+
+  ```bash
+  vllm serve Qwen/Qwen3-VL-30B-A3B-Instruct \
+    --tensor-parallel-size 1 \
+    --mm-encoder-tp-mode data
+  ```
+
+  Docker (the image entrypoint is `vllm serve`):
+
+  ```bash
+  docker run \
+    --privileged --ipc=host -p 8000:8000 \
+    -v ~/.cache/huggingface:/root/.cache/huggingface \
+    vllm/vllm-openai-cpu:latest-x86_64 Qwen/Qwen3-VL-30B-A3B-Instruct \
+    --tensor-parallel-size 1 \
+    --mm-encoder-tp-mode data
+  ```
+
+  The example uses TP=1. Adjust TP/DP based on system topology; NUMA binding is
+  intentionally not hard-coded in the recipe.
+
+  ## Configuration Notes
+
+  - TP/DP values and topology-specific CPU binding remain deployment choices.
+
+  ## Runtime and Platform Tuning
+
+  The following settings are intentionally not prescribed as portable CPU model
+  defaults because they depend on the workload, hardware, or runtime environment:
+
+  - `--max-num-batched-tokens`: scheduler/throughput tuning.
+  - `--max-num-seqs`: concurrency and scheduler-capacity tuning.
+  - `--gpu-memory-utilization`: platform memory-budget tuning.
+  - `--no-enable-prefix-caching`: workload/benchmark cache-policy tuning.
+  - `VLLM_ENGINE_ITERATION_TIMEOUT_S`: operational runtime timeout.
+
+  These settings may still appear in validated hardware-specific overrides. Tune
+  them at deployment time based on platform resources, workload shape, and
+  latency/throughput goals.
+
+  ## References
+
+  - [Model card](https://huggingface.co/Qwen/Qwen3-VL-30B-A3B-Instruct)
+  - [vLLM CPU installation](https://docs.vllm.ai/en/latest/getting_started/installation/cpu/)
