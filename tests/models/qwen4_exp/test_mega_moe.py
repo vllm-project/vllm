@@ -27,6 +27,7 @@ from vllm.model_executor.model_loader.reload import (
 )
 from vllm.models.qwen4_exp.nvidia.mega_moe import (
     Qwen4ExpMegaMoEExperts,
+    _checkpoint_shared_expert_format,
     mega_moe_expert_formats,
 )
 from vllm.utils.deep_gemm import is_deep_gemm_supported
@@ -78,7 +79,16 @@ def _names(checkpoint_format, ckpt, generator) -> list[tuple[str, torch.Tensor]]
     return [names[i] for i in torch.randperm(len(names), generator=generator)]
 
 
-def _experts(cls, fmt, num_local, start, num_logical, checkpoint_format=None):
+def _experts(
+    cls,
+    fmt,
+    num_local,
+    start,
+    num_logical,
+    checkpoint_format=None,
+    shared_size=0,
+    shared_checkpoint_format=None,
+):
     vllm_config = SimpleNamespace(
         scheduler_config=SimpleNamespace(max_num_batched_tokens=64),
         compilation_config=SimpleNamespace(static_forward_context={}),
@@ -97,8 +107,32 @@ def _experts(cls, fmt, num_local, start, num_logical, checkpoint_format=None):
         kwargs["activation"] = MegaMoEActivation()
     else:
         kwargs["checkpoint_format"] = checkpoint_format
+        kwargs["shared_expert_intermediate_size"] = shared_size
+        kwargs["shared_checkpoint_format"] = shared_checkpoint_format
     with torch.device("cuda"):
         return cls(vllm_config, **kwargs)
+
+
+def _cast(checkpoint_format, fmt_name, weight, scale):
+    """A checkpoint tensor requantized with DeepGEMM's own casts."""
+    if checkpoint_format == fmt_name:
+        return weight, scale
+    weight = weight.cuda()
+    if checkpoint_format == "bf16":
+        x = weight.float()
+    elif checkpoint_format == "fp8_block":
+        block = scale.cuda().repeat_interleave(128, 0).repeat_interleave(128, 1)
+        x = weight.float() * block
+    else:
+        sf = (scale.cuda().to(torch.int32) << 23).view(torch.float32)
+        cast_back = (
+            dg_math.cast_back_from_fp4
+            if checkpoint_format == "mxfp4"
+            else dg_math.cast_back_from_fp8
+        )
+        x = cast_back(weight, sf, gran_k=32)
+    weight, sf = CASTS[fmt_name](x, use_ue8m0=True, gran_k=32)
+    return weight, (sf.view(torch.int32) >> 23).to(torch.uint8)
 
 
 def _expected(checkpoint_format, fmt, ckpt, num_local, start, num_logical):
@@ -107,23 +141,7 @@ def _expected(checkpoint_format, fmt, ckpt, num_local, start, num_logical):
     expected = _experts(DeepGemmMegaMoEExperts, fmt, num_local, start, num_logical)
     shard_ids = {"gate_proj": "w1", "up_proj": "w3", "down_proj": "w2"}
     for (e, proj), (weight, scale) in ckpt.items():
-        if checkpoint_format != fmt.name:
-            weight = weight.cuda()
-            if checkpoint_format == "bf16":
-                x = weight.float()
-            elif checkpoint_format == "fp8_block":
-                block = scale.cuda().repeat_interleave(128, 0).repeat_interleave(128, 1)
-                x = weight.float() * block
-            else:
-                sf = (scale.cuda().to(torch.int32) << 23).view(torch.float32)
-                cast_back = (
-                    dg_math.cast_back_from_fp4
-                    if checkpoint_format == "mxfp4"
-                    else dg_math.cast_back_from_fp8
-                )
-                x = cast_back(weight, sf, gran_k=32)
-            weight, sf = CASTS[fmt.name](x, use_ue8m0=True, gran_k=32)
-            scale = (sf.view(torch.int32) >> 23).to(torch.uint8)
+        weight, scale = _cast(checkpoint_format, fmt.name, weight, scale)
         prefix = "w2" if proj == "down_proj" else "w13"
         for suffix, value in (("weight", weight), ("weight_scale", scale)):
             if value is not None:
@@ -275,3 +293,138 @@ def test_layerwise_reload_replaces_routed_experts(any_device_mega_moe):
     _assert_same_experts(experts, _expected(checkpoint_format, fmt, new, 2, 0, 2))
     # CUDA graphs keep pointing at the same storage.
     assert {n: p.data_ptr() for n, p in experts.named_parameters()} == pointers
+
+
+@pytest.mark.parametrize(
+    "checkpoint_format,shared_checkpoint_format,fmt",
+    [
+        # The official FP8 checkpoint keeps the shared expert in BF16.
+        ("fp8_block", "bf16", MEGA_MOE_MXFP8),
+        ("fp8_block", "fp8_block", MEGA_MOE_MXFP4),
+        ("mxfp8", "mxfp8", MEGA_MOE_MXFP4),
+        ("bf16", "bf16", MEGA_MOE_BF16),
+        ("bf16", "bf16", MEGA_MOE_MXFP4),
+    ],
+)
+def test_fused_shared_expert_loads_into_kernel_layout(
+    any_device_mega_moe, checkpoint_format, shared_checkpoint_format, fmt
+):
+    """The gated shared expert fuses at the precision of a routed slice (MXFP8
+    next to MX experts, else BF16), requantized from its own checkpoint format."""
+    generator = torch.Generator().manual_seed(7)
+    ckpt = _checkpoint(checkpoint_format, 2, generator)
+    shared_ckpt = _checkpoint(shared_checkpoint_format, 1, generator)
+    shared = {p: v for (_, p), v in shared_ckpt.items()}
+    names = _names(checkpoint_format, ckpt, generator)
+    names += [
+        (n.replace("0.", "shared.", 1), t)
+        for n, t in _names(shared_checkpoint_format, shared_ckpt, generator)
+    ]
+    names = [names[i] for i in torch.randperm(len(names), generator=generator)]
+    experts = _experts(
+        Qwen4ExpMegaMoEExperts,
+        fmt,
+        2,
+        0,
+        2,
+        checkpoint_format,
+        shared_size=INTER,
+        shared_checkpoint_format=shared_checkpoint_format,
+    )
+    assert experts.has_fused_shared_experts
+    loaded = experts.load_weights(names)
+    assert loaded == {n for n, _ in experts.named_parameters()}
+    experts.quant_method.process_weights_after_loading(experts)
+
+    expected = _expected(checkpoint_format, fmt, ckpt, 2, 0, 2)
+    for name, param in expected.named_parameters():
+        assert torch.equal(getattr(experts, name), param), name
+    # Expected shared parameters through the generic shared-expert loader.
+    shared_fmt = "bf16" if fmt is MEGA_MOE_BF16 else "mxfp8"
+    reference = _experts(
+        Qwen4ExpMegaMoEExperts,
+        fmt,
+        2,
+        0,
+        2,
+        checkpoint_format,
+        shared_size=INTER,
+        shared_checkpoint_format=shared_checkpoint_format,
+    )
+    shard_ids = {"gate_proj": "w1", "up_proj": "w3", "down_proj": "w2"}
+    for proj, (weight, scale) in shared.items():
+        weight, scale = _cast(shared_checkpoint_format, shared_fmt, weight, scale)
+        layer = "l2" if proj == "down_proj" else "l1"
+        for suffix, value in (("weight", weight), ("weight_scale", scale)):
+            if value is not None:
+                param = getattr(reference, f"shared_{layer}_{suffix}")
+                DeepGemmMegaMoEExperts.shared_weight_loader(
+                    reference,
+                    param,
+                    value.cuda(),
+                    f"shared_experts.{shard_ids[proj]}.{suffix}",
+                )
+    for name, param in reference.named_parameters():
+        if name.startswith("shared_"):
+            assert torch.equal(getattr(experts, name), param), name
+
+
+def test_shared_expert_format_follows_checkpoint():
+    """FP8 checkpoints may leave the shared expert unquantized."""
+    prefix = "model.layers.3.mlp.shared_expert"
+    fp8 = Fp8Config(weight_block_size=[128, 128])
+    assert _checkpoint_shared_expert_format(fp8, prefix) == "fp8_block"
+    # As the official FP8 checkpoint's `modules_to_not_convert` lists it.
+    ignored = [f"{prefix}.{p}" for p in ("gate_proj", "up_proj", "down_proj")]
+    fp8 = Fp8Config(weight_block_size=[128, 128], ignored_layers=ignored)
+    assert _checkpoint_shared_expert_format(fp8, prefix) == "bf16"
+    # Partly quantized: not read by the fused loader.
+    fp8 = Fp8Config(weight_block_size=[128, 128], ignored_layers=ignored[2:])
+    assert _checkpoint_shared_expert_format(fp8, prefix) is None
+    assert _checkpoint_shared_expert_format(None, prefix) == "bf16"
+    mxfp8 = ModelOptMxFp8Config(
+        is_checkpoint_mxfp8_serialized=True,
+        kv_cache_quant_algo=None,
+        exclude_modules=[],
+    )
+    # Not read by the fused loader: the shared expert stays unfused.
+    assert _checkpoint_shared_expert_format(mxfp8, prefix) is None
+
+
+def test_block_routes_stacked_shared_expert_names():
+    """The model's weights mapper stacks gate/up into `gate_up_proj` with a
+    `shard_id`; a fused block hands them to the experts per projection."""
+    block = SimpleNamespace(shared_expert=None)
+    seen: list[str] = []
+
+    class _Loader:
+        def __init__(self, module):
+            pass
+
+        def load_weights(self, weights):
+            seen.extend(name for name, _ in weights)
+            return set()
+
+    import vllm.models.qwen4_exp.nvidia.mega_moe as mega_moe
+
+    gate, up = torch.zeros(1), torch.zeros(1)
+    gate.shard_id, up.shard_id = 0, 1
+    with pytest.MonkeyPatch.context() as mp:
+        mp.setattr(mega_moe, "AutoWeightsLoader", _Loader)
+        mega_moe.Qwen4ExpMegaMoeBlock.load_weights(
+            block,
+            [
+                ("shared_expert.gate_up_proj.weight", gate),
+                ("shared_expert.gate_up_proj.weight_scale_inv", up),
+                ("shared_expert.down_proj.weight", torch.zeros(1)),
+                ("shared_expert_gate.weight", torch.zeros(1)),
+                ("experts.0.gate_proj.weight", torch.zeros(1)),
+            ],
+        )
+    assert seen == [
+        "experts.shared.gate_proj.weight",
+        "experts.shared.up_proj.weight_scale_inv",
+        "experts.shared.down_proj.weight",
+        "shared_expert_gate.weight",
+        "experts.0.gate_proj.weight",
+    ]
