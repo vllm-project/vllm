@@ -483,7 +483,7 @@ class GDNAttentionMetadataBuilder(AttentionMetadataBuilder[GDNAttentionMetadata]
         fast_build: bool = False,
         cudagraph_mode: CUDAGraphMode | None = None,
     ) -> GDNAttentionMetadata:
-        """``cudagraph_mode`` is the batch's runtime mode, if the caller knows
+        """`cudagraph_mode` is the batch's runtime mode, if the caller knows
         it. A FULL replay never reads the capture buffers, so a FULL batch
         skips staging them. PIECEWISE capture builds its metadata with mode
         NONE, so NONE still stages."""
@@ -929,7 +929,7 @@ class GDNAttentionMetadataBuilder(AttentionMetadataBuilder[GDNAttentionMetadata]
 
         A batch without prefills replays the same graph, so it also gets the
         prefill-side metadata: no FLA chunks, causal_conv1d programs and
-        ``has_initial_state`` for its non-spec decodes, if any.
+        `has_initial_state` for its non-spec decodes, if any.
         """
         # The captured forward exports no prefill checkpoint.
         assert metadata.checkpoint is None
@@ -976,7 +976,7 @@ class GDNAttentionMetadataBuilder(AttentionMetadataBuilder[GDNAttentionMetadata]
     def _capture_values(
         self, metadata: GDNAttentionMetadata
     ) -> dict[str, torch.Tensor | None]:
-        """The rows of each ``CAPTURE_PAD_VALUES`` field: the batch's own,
+        """The rows of each `CAPTURE_PAD_VALUES` field: the batch's own,
         except that the decode and prefill rows are split at the decodes that
         the forward peels off the non-spec rows (none with spec decodes)."""
         m = metadata
@@ -1004,9 +1004,9 @@ class GDNAttentionMetadataBuilder(AttentionMetadataBuilder[GDNAttentionMetadata]
         metadata: GDNAttentionMetadata,
         values: dict[str, torch.Tensor | None],
     ) -> GDNAttentionMetadata:
-        """Copy ``values`` into their capture buffers with pads after them
+        """Copy `values` into their capture buffers with pads after them
         (a missing part is all pads) and record the buffers in
-        ``capture_buffers``. The metadata fields keep their own tensors."""
+        `capture_buffers`. The metadata fields keep their own tensors."""
         buffers = self.mixed_batch_buffers
         capture_buffers = dict(metadata.capture_buffers or {})
         for name, rows in values.items():

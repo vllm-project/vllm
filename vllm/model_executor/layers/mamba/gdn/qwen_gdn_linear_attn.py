@@ -141,7 +141,7 @@ _STATIC_CORE_WARMED_UP: set[tuple[bool, torch.Size, torch.Size, torch.dtype]] = 
 def _captures_static_core(attn_metadata: GDNAttentionMetadata, num_tokens: int) -> bool:
     """Whether a GDN core runs its static form: inside a breakable PIECEWISE
     capture (and its uncaptured warm-up), when the builder staged capture
-    buffers that hold ``num_tokens`` tokens."""
+    buffers that hold `num_tokens` tokens."""
     capture_buffers = attn_metadata.capture_buffers
     return (
         capture_buffers is not None
@@ -2218,7 +2218,7 @@ class QwenGatedDeltaNetAttention(GatedDeltaNetAttention):
         mixed_qkv: torch.Tensor,
         with_output_norm: bool,
     ) -> None:
-        """Run ``forward``, a static core, inside a breakable capture.
+        """Run `forward`, a static core, inside a breakable capture.
 
         The first capture of each form and shape runs it once outside the
         capture first: its Triton kernels compile there (and autotune if no
@@ -2246,15 +2246,15 @@ class QwenGatedDeltaNetAttention(GatedDeltaNetAttention):
         core_attn_out: torch.Tensor,
         attn_metadata: GDNAttentionMetadata,
     ) -> None:
-        """Branch-free ``_forward_core`` for CUDA graph capture.
+        """Branch-free `_forward_core` for CUDA graph capture.
 
-        The graph captured for ``num_tokens`` tokens replays for every batch
-        padded to that size, so this reads only ``attn_metadata.capture_buffers``
-        at full length and sizes every grid by ``num_tokens`` and the buffer
-        capacity ``num_seqs``. It always runs the spec decodes, the decodes it
+        The graph captured for `num_tokens` tokens replays for every batch
+        padded to that size, so this reads only `attn_metadata.capture_buffers`
+        at full length and sizes every grid by `num_tokens` and the buffer
+        capacity `num_seqs`. It always runs the spec decodes, the decodes it
         peels off the non-spec rows, and the prefills; a part that the batch
         lacks has only zero-length sequences or pad programs, which exit. Each
-        part runs the kernels that ``_forward_core`` runs for a batch with
+        part runs the kernels that `_forward_core` runs for a batch with
         prefills, and pad rows write only the null state block and a scratch
         output row.
         """
@@ -2747,7 +2747,7 @@ class QwenGatedDeltaNetAttention(GatedDeltaNetAttention):
 
 def _gdn_core_is_capturable(layer_name: LayerNameType, num_tokens: int) -> bool:
     """Whether a GDN core op is captured in a breakable CUDA graph segment
-    instead of breaking it (see ``_captures_static_core``)."""
+    instead of breaking it (see `_captures_static_core`)."""
     attn_metadata = get_forward_context().attn_metadata
     if not isinstance(attn_metadata, dict):
         return False

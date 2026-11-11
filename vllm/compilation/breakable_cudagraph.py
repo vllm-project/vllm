@@ -115,11 +115,11 @@ def eager_break_during_capture(
         def unified_attention_with_output(...):
             ...
 
-    **Capturable calls.** ``capturable``, if given, is called with the op's
+    **Capturable calls.** `capturable`, if given, is called with the op's
     arguments inside a capture. When it returns True the op runs inline and
     is captured into the current segment, so it must then obey the CUDA graph
     contract: the same launches and tensor addresses for every batch that
-    replays the segment. Use as ``@eager_break_during_capture(capturable=...)``.
+    replays the segment. Use as `@eager_break_during_capture(capturable=...)`.
     """
     if fn is None:
         return functools.partial(eager_break_during_capture, capturable=capturable)
@@ -237,7 +237,7 @@ class BreakableCUDAGraphCapture:
         return result
 
     def run_uncaptured(self, fn: Callable[[], Any]) -> Any:
-        """End the current capture segment, run ``fn`` eagerly once without
+        """End the current capture segment, run `fn` eagerly once without
         recording it for replay, and start a new segment.
 
         For warm-ups that cannot run inside a capture, such as the Triton JIT

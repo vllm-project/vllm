@@ -288,7 +288,7 @@ def test_decorated_op_traces_without_graph_break(
 
 
 def test_capturable_call_runs_inline_inside_capture():
-    """Inside a capture, a call that ``capturable`` accepts runs inline (it is
+    """Inside a capture, a call that `capturable` accepts runs inline (it is
     captured into the current segment); any other call breaks the graph."""
     from vllm.compilation.breakable_cudagraph import (
         BreakableCUDAGraphCapture,

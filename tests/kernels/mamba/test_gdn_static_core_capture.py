@@ -5,7 +5,7 @@
 The breakable CUDA graph of a token count captures the GDN core when the
 metadata builder stages its capture buffers, and replays it for every batch
 padded to that count. One graph, captured once, must equal the eager
-``_forward_core`` bitwise for batches of every kind: the core output and every
+`_forward_core` bitwise for batches of every kind: the core output and every
 conv and SSM state block except the null block, which pad rows may write.
 With prefix caching (Mamba "align" mode) the state indices select each row's
 current block, and a prefill chunk ends at a block boundary, so its final state
@@ -161,8 +161,8 @@ def _build(
 def _build_layer(
     vllm_config, kv_cache, A_log, dt_bias, conv_weight, conv_bias, norm_weight
 ):
-    """A minimal object that runs the real ``_forward_core`` and
-    ``_forward_core_fused_norm`` bound to it."""
+    """A minimal object that runs the real `_forward_core` and
+    `_forward_core_fused_norm` bound to it."""
     layer = types.SimpleNamespace(
         prefix=PREFIX,
         enable_packed_recurrent_decode=False,
