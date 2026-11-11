@@ -771,7 +771,7 @@ def test_lookup_key_client_lookup_prepends_typed_tag():
         client = worker.LookupKeyClient(vllm_config)
 
     fake_socket = mock_make_socket.return_value
-    fake_socket.recv.return_value = (5).to_bytes(4, "big")
+    fake_socket.recv_multipart.return_value = [(5).to_bytes(4, "big")]
 
     # Blocking lookup (non_block defaults to False) runs on the executor and
     # returns the resolved hit length.
@@ -795,14 +795,19 @@ def test_lookup_key_client_reset_uses_typed_protocol():
         client = worker.LookupKeyClient(vllm_config)
 
     fake_socket = mock_make_socket.return_value
+    # Reset goes to rank 0's admin socket, not the lookup process.
+    assert [c.args[1] for c in mock_make_socket.call_args_list] == [
+        worker.get_zmq_rpc_path_lookup(vllm_config),
+        worker.get_zmq_rpc_path_admin(vllm_config),
+    ]
 
     # ACK path: server returns RESP_OK -> client returns True.
-    fake_socket.recv.return_value = protocol.RESP_OK
+    fake_socket.recv_multipart.return_value = [protocol.RESP_OK]
     assert client.reset() is True
     assert fake_socket.send_multipart.call_args[0][0] == (protocol.RESET_MSG,)
 
     # NACK path: server returns RESP_ERR -> client returns False.
-    fake_socket.recv.return_value = protocol.RESP_ERR
+    fake_socket.recv_multipart.return_value = [protocol.RESP_ERR]
     assert client.reset() is False
 
 
@@ -821,9 +826,9 @@ def _gated_recv(gate: threading.Event, value: int):
     """Mock recv side-effect that blocks until `gate` is set, so the
     executor's lookup can be held pending deterministically."""
 
-    def recv(flags: int = 0) -> bytes:
+    def recv(flags: int = 0) -> list[bytes]:
         gate.wait()
-        return value.to_bytes(4, "big")
+        return [value.to_bytes(4, "big")]
 
     return recv
 
@@ -852,7 +857,9 @@ def test_admission_lookup_retains_completed_result_until_scheduled():
         block_hashes=[b"h0", b"h1", b"h2"],
         skip_reading_external_kv=False,
     )
-    mock_make_socket.return_value.recv.return_value = (32).to_bytes(4, "big")
+    mock_make_socket.return_value.recv_multipart.return_value = [
+        (32).to_bytes(4, "big")
+    ]
     try:
         connector.on_new_request(request)
         sched = connector.connector_scheduler
@@ -894,7 +901,7 @@ def test_finished_request_cancels_queued_lookup_before_next_step(all_groups):
     sock = make_socket.return_value
     gate, started = threading.Event(), threading.Event()
     sock.send_multipart.side_effect = lambda *args, **kwargs: started.set()
-    sock.recv.side_effect = _gated_recv(gate, 32)
+    sock.recv_multipart.side_effect = _gated_recv(gate, 32)
     request = SimpleNamespace(request_id="dead")
     try:
         assert client.lookup("busy", 48, [], non_block=True) is None
@@ -937,7 +944,7 @@ def test_lookup_prefetch_cap_bounds_in_flight_prefetches(limit):
         {} if limit is None else {"lookup_prefetch_limit": limit}
     )
     gate = threading.Event()
-    sock.recv.side_effect = _gated_recv(gate, 32)
+    sock.recv_multipart.side_effect = _gated_recv(gate, 32)
     try:
         assert client.prefetch("first", 48, []) == bool(limit)
         assert client.prefetch("second", 48, []) is False
@@ -971,7 +978,7 @@ def _wait_completed(state: worker.LookupState) -> None:
 @pytest.mark.parametrize("change", ["tokens", "hash", "expired", "cached_expired"])
 def test_lookup_client_refreshes_changed_or_expired_query(monkeypatch, change):
     client, sock = _make_lookup_client({"lookup_prefetch_limit": 1})
-    sock.recv.return_value = (32).to_bytes(4, "big")
+    sock.recv_multipart.return_value = [(32).to_bytes(4, "big")]
     clock = [0.0]
     monkeypatch.setattr(worker.time, "monotonic", lambda: clock[0])
     num_tokens, hashes = 48, [b"h0", b"h1", b"h2"]
@@ -1012,7 +1019,7 @@ def test_pending_lookup_is_not_restarted_by_ttl(monkeypatch, prefetched):
         {"lookup_prefetch_limit": 1, "lookup_timeout_s": 5.0}
     )
     gate = threading.Event()
-    sock.recv.side_effect = _gated_recv(gate, 32)
+    sock.recv_multipart.side_effect = _gated_recv(gate, 32)
     clock = [0.0]
     monkeypatch.setattr(worker.time, "monotonic", lambda: clock[0])
     try:
@@ -1043,11 +1050,11 @@ def test_prefetch_after_close_starts_nothing():
 
 def test_reset_clears_cached_async_results():
     client, sock = _make_lookup_client()
-    sock.recv.return_value = (32).to_bytes(4, "big")
+    sock.recv_multipart.return_value = [(32).to_bytes(4, "big")]
     try:
         client.lookup("req", 48, [], non_block=True)
         assert client._lookups["req"].future.result(timeout=5).hit_length == 32
-        sock.recv.return_value = protocol.RESP_OK
+        sock.recv_multipart.return_value = [protocol.RESP_OK]
         assert client.reset() is True
         assert client._lookups == {}
     finally:
@@ -1068,7 +1075,7 @@ def test_lookup_key_client_non_block_lookup_async():
     fake_socket = mock_make_socket.return_value
     # Hold the executor's lookup pending until we release the gate.
     gate = threading.Event()
-    fake_socket.recv.side_effect = _gated_recv(gate, 7)
+    fake_socket.recv_multipart.side_effect = _gated_recv(gate, 7)
 
     # First query submits the lookup and returns None while it is in flight.
     assert client.lookup("req1", 128, [], non_block=True) is None
@@ -1093,7 +1100,7 @@ def test_lookup_key_client_discard_clears_state():
 
     fake_socket = mock_make_socket.return_value
     gate = threading.Event()
-    fake_socket.recv.side_effect = _gated_recv(gate, 9)
+    fake_socket.recv_multipart.side_effect = _gated_recv(gate, 9)
 
     # Submit while gated so the call returns None and the Future stays in
     # the client once it resolves.

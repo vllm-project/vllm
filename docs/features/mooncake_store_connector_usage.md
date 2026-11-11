@@ -337,6 +337,16 @@ Strict isolation requires a Mooncake master started with `--enable_multi_tenants
 - **kv_consumer**: For instances that load KV caches from the pool.
 - **kv_both**: The instance both stores and loads KV caches. Use this for single-node CPU offloading or prefiller instances.
 
+### Lookup process
+
+Prefix lookups are served on each engine's worker rank 0 by a separate,
+low-priority process with its own lookup-only Mooncake client (no segment,
+TCP). Long prompts build and probe many keys per lookup, and the Mooncake
+client holds the GIL while probing; running lookups out of the worker keeps
+them from delaying GPU kernel launches. The worker waits for this process
+before serving requests and restarts it if it exits; while it is down, lookups
+are cache misses.
+
 ### Lookup timeout and circuit breaker
 
 Prefix lookups (blocking, async, and arrival-time prefetch) wait at most
@@ -348,7 +358,7 @@ skipped for 30 seconds. After the cooldown, a single probe lookup either closes
 the breaker or reopens it.
 
 This bounds the scheduler's wait for prefix lookup. It does not cancel a master
-RPC already running inside the worker or apply to KV loads and saves. Store
+RPC already running in the lookup process or apply to KV loads and saves. Store
 reset waits at most 60 seconds.
 
 ### kv_connector_extra_config
