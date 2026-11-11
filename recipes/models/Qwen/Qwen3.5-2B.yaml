@@ -4,7 +4,7 @@ meta:
   provider: "Qwen"
   description: "Qwen3.5 mini dense multimodal model (2B) — edge / low-VRAM serving with 262K context"
   date_added: 2026-04-22
-  date_updated: 2026-09-14
+  date_updated: 2026-10-27
   tasks:
     - multimodal
     - text
@@ -70,6 +70,7 @@ hardware_overrides:
 
 strategy_overrides: {}
 
+
 guide: |
   ## Overview
 
@@ -83,51 +84,16 @@ guide: |
   - **vLLM version:** >= 0.17.0
   - **Hardware:** single 8 GB GPU or Intel Arc Pro B60/B70
 
-  ### Install vLLM
-
-  ```bash
-  uv venv
-  source .venv/bin/activate
-  uv pip install -U vllm --torch-backend=auto
-  ```
-
-  ### Docker
-  ```bash
-  docker pull vllm/vllm-openai-xpu:latest  # Intel XPU (B60 / B70)
-  ```
-
-  ## Launching the Server
-
-  ```bash
-  vllm serve Qwen/Qwen3.5-2B \
-    --max-model-len 262144 \
-    --reasoning-parser qwen3
-  ```
-
-  ### Docker (Intel XPU B60 / B70)
-
-  Validated on 1× Intel Arc Pro B60 / B70 (B60 24 GB, B70 32 GB per card) with the
-  official vLLM XPU image `vllm/vllm-openai-xpu:latest`.
-
-  ```bash
-  docker run --device /dev/dri \
-    -v /dev/dri/by-path:/dev/dri/by-path --shm-size=16g \
-    --privileged --ipc=host -p 8000:8000 \
-    -v ~/.cache/huggingface:/root/.cache/huggingface \
-    vllm/vllm-openai-xpu:latest \
-    Qwen/Qwen3.5-2B \
-    --reasoning-parser qwen3 \
-    --enforce-eager
-  ```
-
   ## Client Usage
 
   ```python
   from openai import OpenAI
 
   client = OpenAI(api_key="EMPTY", base_url="http://localhost:8000/v1")
+  # The server's model name is the checkpoint it runs: the selected variant's.
+  model = client.models.list().data[0].id
   resp = client.chat.completions.create(
-      model="Qwen/Qwen3.5-2B",
+      model=model,
       messages=[{"role": "user", "content": "Hi!"}],
       max_tokens=64,
   )
