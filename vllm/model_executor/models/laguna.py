@@ -248,10 +248,10 @@ class LagunaMoE(nn.Module):
 class LagunaAttention(nn.Module):
     """Laguna attention with optional softplus output gating.
 
-    Supports per-layer sliding window attention when ``config.layer_types``
-    is present.  Layers whose type is ``"sliding_attention"`` use
-    ``config.sliding_window``; all other layers (typically labelled
-    ``"full_attention"``) use full attention.  When ``layer_types`` is
+    Supports per-layer sliding window attention when `config.layer_types`
+    is present.  Layers whose type is `"sliding_attention"` use
+    `config.sliding_window`; all other layers (typically labelled
+    `"full_attention"`) use full attention.  When `layer_types` is
     absent every layer defaults to full attention for backwards
     compatibility.
     """

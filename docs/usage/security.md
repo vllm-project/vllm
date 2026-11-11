@@ -313,6 +313,10 @@ Only deployments whose API clients are trusted should start the server with
 `--trust-request-mm-kwargs` to restore per-request overrides. Do not enable
 this option on an endpoint exposed to untrusted clients.
 
+The Rust frontend's gRPC `GenerateRequest` accepts `media_io_kwargs` without
+this option, because the [gRPC interface](#grpc-interface) serves only trusted
+callers. It supports only `video.fps`, and the per-video frame cap still applies.
+
 ### P2P KV-Offload Peer Session Limits
 
 Deployments that enable the P2P secondary tier (`OffloadingConnector` with `TieringOffloadingSpec` and a `p2p` secondary tier) accept peer addresses from `kv_transfer_params` in API requests. Without limits, an attacker with API access could submit many unique non-listening peer addresses, each consuming ZeroMQ sockets until the context quota is exhausted, crashing the EngineCore.
@@ -495,7 +499,7 @@ driver-side credentials from worker-side processes within the same Ray
 cluster.
 
 This assumption is consistent with
-[Ray's own security model](https://docs.ray.io/en/latest/ray-core/security.html),
+[Ray's own security model](https://docs.ray.io/en/latest/ray-security/index.html),
 which states that any user who can connect to a Ray cluster can run arbitrary
 code on any node in that cluster. In other words, Ray cluster access already
 implies full code execution on worker nodes, so restricting environment
