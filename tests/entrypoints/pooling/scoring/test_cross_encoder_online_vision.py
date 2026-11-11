@@ -27,6 +27,24 @@ ROCM_ATTN_BACKENDS = [
 
 ATTN_BACKENDS = ROCM_ATTN_BACKENDS if current_platform.is_rocm() else ["auto"]
 
+
+# Match the legacy string parser: image placeholders first, then text.
+_STRUCTURED_CONTENT = """
+{%- macro render_content(parts) -%}
+  {%- for part in parts if part.type == 'image' -%}
+    {{- '<|vision_start|><|image_pad|><|vision_end|>' -}}
+  {%- endfor -%}
+  {{- parts | selectattr('type', 'eq', 'text') | map(attribute='text') | join('\\n') -}}
+{%- endmacro -%}
+{%- set ns = namespace(messages=[]) -%}
+{%- for message in messages -%}
+  {%- set ns.messages = ns.messages + [
+    dict(role=message.role, content=render_content(message.content))
+  ] -%}
+{%- endfor -%}
+{%- set messages = ns.messages -%}
+"""
+
 # The absolute floor matters only for the low ~0.10 text-vs-text score, where a
 # few thousandths of drift would otherwise exceed the relative bound.
 REL_TOL = 0.05
@@ -87,22 +105,33 @@ else:
     TEXT_VS_TEXT_PLUS_IMAGE = 0.5298863053321838
 
 
-@pytest.fixture(scope="module", params=ATTN_BACKENDS)
-def server(request):
-    backend = request.param
+@pytest.fixture(
+    scope="module",
+    params=[pytest.param((backend, "auto"), id=backend) for backend in ATTN_BACKENDS]
+    + [pytest.param(("auto", "openai"), id="structured")],
+)
+def server(request, tmp_path_factory):
+    backend, content_format = request.param
+    template = VLLM_PATH / "examples/pooling/score/template/qwen3_vl_reranker.jinja"
+    if content_format == "openai":
+        structured_template = tmp_path_factory.mktemp("scoring") / "structured.jinja"
+        structured_template.write_text(_STRUCTURED_CONTENT + template.read_text())
+        template = structured_template
     print(f"\n=== Starting server with attention backend: {backend} ===")
     args = [
         "--enforce-eager",
         "--max-model-len",
         "8192",
         "--chat-template",
-        str(VLLM_PATH / "examples/pooling/score/template/qwen3_vl_reranker.jinja"),
+        str(template),
+        "--chat-template-content-format",
+        content_format,
+        *ROCM_EXTRA_ARGS,
     ]
 
     env = dict()
     if backend != "auto":
         args += ["--attention-config", json.dumps({"backend": backend})]
-        args += ROCM_EXTRA_ARGS
 
         if backend != "ROCM_AITER_FA":
             env["VLLM_ROCM_USE_AITER"] = "0"

@@ -1,6 +1,7 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 
+import json
 import weakref
 
 import pytest
@@ -98,6 +99,46 @@ def test_classify(llm):
     outputs = llm.encode(PROMPT, pooling_task="classify", use_tqdm=False)
     assert len(outputs) == 1
     assert len(outputs[0].outputs.data) == 1
+
+
+@pytest.mark.parametrize("content_format", ["openai", "string"])
+@pytest.mark.skip_global_cleanup
+def test_score_content_format_override_matches_classify(llm: LLM, content_format):
+    # Auto detection cannot distinguish character loops from content-block loops,
+    # or infer the format expected by a filter-only template.
+    query, document = TEXTS_1[0], TEXTS_2[0]
+    expected_prompt = json.dumps(
+        [
+            {"role": "query", "content": [{"type": "text", "text": query}]},
+            {"role": "document", "content": [{"type": "text", "text": document}]},
+        ]
+    )
+    chat_template = "{{ messages | tojson }}"
+    if content_format == "string":
+        chat_template = (
+            "{% for message in messages %}"
+            "{% for char in message.content %}{{ char }}{% endfor %}"
+            "{% endfor %}"
+        )
+        expected_prompt = query + document
+    # Compare full-prefill executions; a prefix-cache hit changes the compute path.
+    llm.reset_prefix_cache()
+    (scored,) = llm.score(
+        query,
+        document,
+        chat_template=chat_template,
+        chat_template_content_format=content_format,
+        tokenization_kwargs={"add_special_tokens": False},
+        use_tqdm=False,
+    )
+    llm.reset_prefix_cache()
+    (classified,) = llm.classify(
+        expected_prompt,
+        tokenization_kwargs={"add_special_tokens": False},
+        use_tqdm=False,
+    )
+    assert scored.prompt_token_ids == classified.prompt_token_ids
+    assert scored.outputs.score == pytest.approx(classified.outputs.probs[0])
 
 
 @pytest.mark.skip_global_cleanup
