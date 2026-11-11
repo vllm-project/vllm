@@ -1831,6 +1831,58 @@ def test_one_sided_all2all_default_follows_supported_top_k(hgx_host, top_k, expe
     assert config.parallel_config.all2all_backend == expected
 
 
+@pytest.mark.parametrize(
+    ("moe_backend", "expected"),
+    [
+        ("auto", "flashinfer_nvlink_one_sided"),
+        ("triton", "allgather_reducescatter"),
+        ("deep_gemm", "allgather_reducescatter"),
+        ("cutlass", "allgather_reducescatter"),
+    ],
+)
+def test_one_sided_all2all_default_follows_explicit_moe_backend(
+    hgx_host, moe_backend, expected
+):
+    """Experts picked with --moe-backend that reject one-sided keep AGRS."""
+    config = _one_full_ep_node_config(
+        kernel_config=KernelConfig(moe_backend=moe_backend)
+    )
+    assert config.parallel_config.all2all_backend == expected
+
+
+def test_draft_parallel_config_inherits_target_all2all_backend(hgx_host):
+    """The draft shares the target's EP communicator, so it must not resolve
+    "auto" on its own (here the target spans two nodes and uses AGRS)."""
+    target = _parallel_config(enable_expert_parallel=True, nnodes=2)
+    assert target.all2all_backend == "allgather_reducescatter"
+    draft = SpeculativeConfig.create_draft_parallel_config(target, 1)
+    assert draft.all2all_backend == "allgather_reducescatter"
+
+
+@pytest.mark.parametrize(
+    ("draft_overrides", "expected"),
+    [
+        ({}, "flashinfer_nvlink_one_sided"),
+        ({"num_experts": 64}, "allgather_reducescatter"),
+        ({"num_experts_per_tok": 4}, "allgather_reducescatter"),
+        ({"num_experts_per_tok": 5}, "allgather_reducescatter"),
+    ],
+)
+def test_one_sided_all2all_default_follows_draft_model_experts(
+    hgx_host, draft_overrides, expected
+):
+    """The draft's MoE layers share the target's one-sided manager, which
+    needs the same num_experts and top_k on every layer."""
+    config = _one_full_ep_node_config()
+    assert config.parallel_config.all2all_backend == "flashinfer_nvlink_one_sided"
+    config.speculative_config = SimpleNamespace(
+        draft_model_config=ModelConfig(_MOE_MODEL, hf_overrides=draft_overrides)
+    )
+    config.parallel_config.all2all_backend = "flashinfer_nvlink_one_sided"
+    config._maybe_fall_back_from_auto_one_sided_all2all()
+    assert config.parallel_config.all2all_backend == expected
+
+
 def test_one_sided_all2all_default_skips_lora(hgx_host):
     """Fused MoE LoRA with EP only supports allgather_reducescatter."""
     config = _one_full_ep_node_config(lora_config=LoRAConfig())

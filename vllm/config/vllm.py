@@ -375,6 +375,13 @@ OPTIMIZATION_LEVEL_TO_CONFIG = {
 # top_k values the pinned FlashInfer NVLinkOneSidedAlltoAll accepts.
 _ONE_SIDED_SUPPORTED_TOP_K = frozenset({1, 2, 3, 4, 6, 8, 10, 12, 14, 16, 18, 22})
 
+# MoE backends whose experts reject the one-sided all2all (their
+# `_supports_parallel_config` excludes it), so an explicit choice of one of them
+# keeps the "auto" default on AGRS.
+_ONE_SIDED_INCOMPATIBLE_MOE_BACKENDS = frozenset(
+    {"triton", "deep_gemm", "cutlass", "aiter", "rdna3"}
+)
+
 
 def _has_heterogeneous_moe_layers(model_config: "ModelConfig") -> bool:
     """Whether MoE layers differ in num_experts or top_k (per-layer block_configs)."""
@@ -1061,8 +1068,12 @@ class VllmConfig:
 
         if self.lora_config is not None:
             return "LoRA"
-        if self.kernel_config.moe_backend in FLASHINFER_MOE_EP_BACKENDS:
-            return f"moe_backend={self.kernel_config.moe_backend!r}"
+        moe_backend = self.kernel_config.moe_backend
+        if (
+            moe_backend in FLASHINFER_MOE_EP_BACKENDS
+            or moe_backend in _ONE_SIDED_INCOMPATIBLE_MOE_BACKENDS
+        ):
+            return f"moe_backend={moe_backend!r}"
         model_config = self.model_config
         if model_config is None:
             return None
@@ -1074,6 +1085,21 @@ class VllmConfig:
         top_k = model_config.get_num_experts_per_tok()
         if top_k and top_k not in _ONE_SIDED_SUPPORTED_TOP_K:
             return f"top_k={top_k}"
+        # A separate MoE draft model builds its MoE layers on the same
+        # communication object, so it has to match the target as well.
+        spec = self.speculative_config
+        draft = spec.draft_model_config if spec is not None else None
+        if draft is not None and draft.is_moe:
+            if _has_heterogeneous_moe_layers(draft):
+                return "draft model MoE layers with different num_experts or top_k"
+            draft_top_k = draft.get_num_experts_per_tok()
+            if draft_top_k not in _ONE_SIDED_SUPPORTED_TOP_K:
+                return f"draft model top_k={draft_top_k}"
+            if model_config.is_moe and (
+                draft.get_num_experts(),
+                draft_top_k,
+            ) != (model_config.get_num_experts(), top_k):
+                return "a draft model with different num_experts or top_k"
         # One-sided dispatch carries BF16/FP16, NVFP4 or 128x128 block FP8.
         quantization = model_config.quantization
         if quantization is None:

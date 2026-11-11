@@ -1720,6 +1720,9 @@ class SpeculativeConfig:
             pipeline_parallel_size=1,
             tensor_parallel_size=speculative_draft_tensor_parallel_size,
             enable_expert_parallel=enable_ep,
+            # The EP communicator is shared with the target, so the draft must
+            # not re-resolve "auto" against its own (default) deployment.
+            all2all_backend=target_parallel_config.all2all_backend,
             distributed_executor_backend=target_parallel_config.distributed_executor_backend,
             max_parallel_loading_workers=target_parallel_config.max_parallel_loading_workers,
             disable_custom_all_reduce=target_parallel_config.disable_custom_all_reduce,
