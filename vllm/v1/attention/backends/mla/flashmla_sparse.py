@@ -262,8 +262,8 @@ def gathered_prefill_shards(
     request's slice of this rank's KV shard.
 
     PCP gives a rank two adjacent chunk rows of a split prefill; they share
-    one context, so the workspace holds it once. ``row_shard_rows`` is
-    ``CommonAttentionMetadata.dcp_local_seq_lens_cpu_upper_bound``: the
+    one context, so the workspace holds it once. `row_shard_rows` is
+    `CommonAttentionMetadata.dcp_local_seq_lens_cpu_upper_bound`: the
     largest DCP shard of the whole request on every row, identical on every
     PCP rank, so the all-gather is shaped the same everywhere.
 
@@ -702,11 +702,19 @@ class FlashMLASparseMetadataBuilder(
                 metadata.fp8_extra_metadata = self._build_fp8_separate_prefill_decode(
                     common_attn_metadata, metadata
                 )
+        if metadata.shardq is not None:
+            # ShardQ's tokens run in their own mixed-batch kernel call, with
+            # all heads, so they need their own lazily initialized scheduler.
+            shardq_metadata = metadata.shardq.attn_metadata
+            assert isinstance(shardq_metadata, FlashMLASparseMetadata)
+            shardq_metadata.fp8_use_mixed_batch = True
+            shardq_metadata.fp8_extra_metadata = self._build_fp8_mixed_decode_prefill()
 
         return metadata
 
 
 class FlashMLASparseImpl(SparseMLACommonImpl[FlashMLASparseMetadata]):
+    supports_shardq: ClassVar[bool] = True
     can_return_lse_for_decode: bool = True
     supports_dcp: bool = True
     supports_mtp_with_cp_non_trivial_interleave_size: bool = True
@@ -753,7 +761,6 @@ class FlashMLASparseImpl(SparseMLACommonImpl[FlashMLASparseMetadata]):
         # Keep padded workspaces for kernels without small-head support.
         self.prefill_padding = 64
         self._sm_count = num_compute_units(torch.accelerator.current_device_index())
-        self.fp8_decode_padded_heads = self._compute_fp8_decode_padded_heads(num_heads)
 
         # The kernels read queries as wide as the cache rows. A NoPE model on
         # fp8_ds_mla keeps the DeepSeek 576 layout: the cache writer zero-fills
@@ -764,6 +771,13 @@ class FlashMLASparseImpl(SparseMLACommonImpl[FlashMLASparseMetadata]):
             # Dense-MHA prefill would gather the cache into a
             # kv_lora_rank-wide workspace, too narrow for the 576 rows.
             self.supports_dense_mha_prefill = False
+
+        # ShardQ runs on the mixed-batch fp8 kernel.
+        self.use_shardq = (
+            self.use_shardq
+            and kv_cache_dtype in QUANTIZED_DS_MLA_CACHE_FORMATS
+            and num_heads < MIN_HEADS_FOR_BF16_PREFILL
+        )
 
         vllm_config = get_current_vllm_config()
         max_tokens = vllm_config.scheduler_config.max_num_batched_tokens
@@ -1305,7 +1319,7 @@ class FlashMLASparseImpl(SparseMLACommonImpl[FlashMLASparseMetadata]):
     ) -> tuple[torch.Tensor, torch.Tensor]:
         # q shape: (batch, seq_len, num_heads, head_dim)
         actual_num_heads = q.size(2)
-        padded_num_heads = self.fp8_decode_padded_heads
+        padded_num_heads = self._compute_fp8_decode_padded_heads(actual_num_heads)
 
         # Pad query if needed (kernel only supports h_q = 64 or 128)
         if actual_num_heads < padded_num_heads:
@@ -1471,7 +1485,10 @@ class FlashMLASparseImpl(SparseMLACommonImpl[FlashMLASparseMetadata]):
 
         # Get topk indices
         assert self.topk_indices_buffer is not None
-        topk_indices = self.topk_indices_buffer[:num_actual_toks]
+        topk_start = attn_metadata.topk_start
+        topk_indices = self.topk_indices_buffer[
+            topk_start : topk_start + num_actual_toks
+        ]
 
         use_fp8_cache = self.kv_cache_dtype in QUANTIZED_DS_MLA_CACHE_FORMATS
 

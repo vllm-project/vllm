@@ -35,6 +35,7 @@ from vllm.model_executor.layers.fused_moe.topk_weight_and_reduce import (
 )
 from vllm.model_executor.layers.fused_moe.utils import (
     _resize_cache,
+    masked_amax_scale,
     moe_kernel_quantize_input,
     swiglu_limit_func,
 )
@@ -141,7 +142,7 @@ class TritonExperts(LoRAExpertsMixin, mk.FusedMoEExpertsModular):
 
     @staticmethod
     def activation_format() -> mk.FusedMoEActivationFormat:
-        return mk.FusedMoEActivationFormat.Standard
+        return mk.FusedMoEActivationFormat.PaddedStandard
 
     @property
     def expects_unquantized_inputs(self) -> bool:
@@ -398,9 +399,10 @@ class TritonExperts(LoRAExpertsMixin, mk.FusedMoEExpertsModular):
         # time instead of launching `off_experts == -1` GEMM blocks that only
         # write zeros; the pad-aware `moe_sum` below skips the same slots.
         # Their rows in the workspace caches are then never written, so every
-        # consumer of those caches must be row-local: a dynamic per-tensor
-        # scale for the second GEMM's activation would take its amax over the
-        # untouched rows, and LoRA aligns the full `topk_ids` itself.
+        # consumer of those caches must be row-local: LoRA aligns the full
+        # `topk_ids` itself, and a dynamic per-tensor scale is masked to the
+        # routed rows below. Keeping every slot in the alignment is what makes
+        # the `off_experts == -1` blocks zero-fill the cache rows they own.
         a2_scale_is_global = (
             self.quant_dtype is not None
             and a2_scale is None
@@ -540,6 +542,7 @@ class TritonExperts(LoRAExpertsMixin, mk.FusedMoEExpertsModular):
                 use_int8_w8a16=self.quant_config.use_int8_w8a16,
                 use_int4_w4a16=self.quant_config.use_int4_w4a16,
                 per_channel_quant=self.per_act_token_quant,
+                per_out_ch_quant=self.per_out_ch_quant,
                 block_shape=self.block_shape,
                 B_bias=self.w1_bias,
                 C_is_sorted=use_sorted_a,
@@ -648,9 +651,19 @@ class TritonExperts(LoRAExpertsMixin, mk.FusedMoEExpertsModular):
                 activation, intermediate_cache2, intermediate_cache1.view(-1, N)
             )
 
+            # Row-local schemes quantize per row, but a per-tensor dynamic
+            # scale spans the whole activation. Restrict it to routed rows so
+            # the uninitialized `PaddedStandard` padding rows cannot poison it.
+            a2_quant_scale = a2_scale
+            if self.quant_config.act_scale_is_tensor_wide(a2_scale):
+                a2_quant_scale = masked_amax_scale(
+                    intermediate_cache2,
+                    self.quant_dtype,
+                    row_valid=topk_ids.view(-1) >= 0,
+                )
             qintermediate_cache2, a2q_scale = moe_kernel_quantize_input(
                 intermediate_cache2,
-                a2_scale,
+                a2_quant_scale,
                 self.quant_dtype,
                 self.per_act_token_quant,
                 self.block_shape,
@@ -691,6 +704,7 @@ class TritonExperts(LoRAExpertsMixin, mk.FusedMoEExpertsModular):
                 use_int8_w8a16=self.quant_config.use_int8_w8a16,
                 use_int4_w4a16=self.quant_config.use_int4_w4a16,
                 per_channel_quant=self.per_act_token_quant,
+                per_out_ch_quant=self.per_out_ch_quant,
                 block_shape=self.block_shape,
                 B_bias=self.w2_bias,
                 A_is_sorted=use_sorted_a,

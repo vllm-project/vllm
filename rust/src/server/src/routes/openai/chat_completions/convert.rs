@@ -186,7 +186,7 @@ pub(super) fn prepare_chat_request(
             logprob_token_ids,
             structured_outputs,
             skip_reading_prefix_cache: None,
-            routed_experts_prompt_start: None,
+            routed_experts_prompt_start: request.routed_experts_prompt_start,
             vllm_xargs: merge_kv_transfer_params(
                 merge_ec_transfer_params(request.vllm_xargs, request.ec_transfer_params.as_ref()),
                 request.kv_transfer_params.as_ref(),
@@ -277,7 +277,9 @@ fn extract_last_assistant_content(messages: &[ChatMessage]) -> Option<String> {
         MessageContent::Parts(parts) => parts
             .iter()
             .filter_map(|p| match p {
-                ContentPart::Text { text } => Some(text.as_str()),
+                ContentPart::Text { text } | ContentPart::Refusal { refusal: text } => {
+                    Some(text.as_str())
+                }
                 _ => None,
             })
             .collect::<Vec<_>>()
@@ -345,6 +347,9 @@ fn convert_content(content: MessageContent) -> Result<ChatContent, ApiError> {
             .into_iter()
             .map(|part| match part {
                 ContentPart::Text { text } => Ok(ChatContentPart::text(text)),
+                ContentPart::Refusal { .. } => bail_invalid_request!(
+                    "Only assistant messages can have a 'refusal' content type."
+                ),
                 ContentPart::ImageUrl { image_url, uuid } => Ok(ChatContentPart::ImageUrl {
                     image_url: image_url.url,
                     detail: image_url.detail,
@@ -363,6 +368,7 @@ fn convert_content(content: MessageContent) -> Result<ChatContent, ApiError> {
                     format: input_audio.format,
                     uuid,
                 }),
+                ContentPart::ToolReference { name } => Ok(ChatContentPart::ToolReference { name }),
             })
             .try_collect()
             .map(ChatContent::Parts),
@@ -379,7 +385,9 @@ fn convert_assistant_text_blocks(
         MessageContent::Parts(parts) => parts
             .into_iter()
             .map(|part| match part {
-                ContentPart::Text { text } => Ok(AssistantContentBlock::Text { text }),
+                ContentPart::Text { text } | ContentPart::Refusal { refusal: text } => {
+                    Ok(AssistantContentBlock::Text { text })
+                }
                 _ => bail_invalid_request!(
                     "Only text content parts are supported for assistant messages."
                 ),
@@ -468,7 +476,7 @@ mod tests {
     use vllm_chat::{
         AssistantContentBlock, AssistantToolCall, ChatContentPart, ChatMessage as VllmChatMessage,
         ChatRenderer, ChatTool as VllmChatTool, ChatToolChoice, GenerationPromptMode,
-        KimiK3ChatRenderer, SamplingParams as VllmSamplingParams,
+        KimiK3ChatRenderer, KimiK3Variant, SamplingParams as VllmSamplingParams,
     };
     use vllm_text::{
         Prompt, PromptTruncation, PromptTruncationLimit, TruncationSide, output::TextDecodeOptions,
@@ -896,10 +904,11 @@ mod tests {
         );
 
         let tokenizer = Arc::new(TestTokenizer::new());
-        let prompt = KimiK3ChatRenderer::new(tokenizer.clone(), Default::default())
-            .render(&prepared.chat_request)
-            .expect("Kimi K3 rendering succeeds")
-            .prompt;
+        let prompt =
+            KimiK3ChatRenderer::new(tokenizer.clone(), Default::default(), KimiK3Variant::K3)
+                .render(&prepared.chat_request)
+                .expect("Kimi K3 rendering succeeds")
+                .prompt;
         let Prompt::TokenIds(prompt_token_ids) = prompt else {
             panic!("Kimi K3 renders token IDs");
         };
@@ -1380,6 +1389,106 @@ mod tests {
     }
 
     #[test]
+    fn prepare_chat_request_replays_assistant_refusal_parts_as_text() {
+        let request: ChatCompletionRequest = serde_json::from_value(json!({
+            "model": "Qwen/Qwen1.5-0.5B-Chat",
+            "messages": [
+                {"role": "user", "content": "hello"},
+                {"role": "assistant", "content": [
+                    {"type": "refusal", "refusal": "I can't help with that."},
+                ]},
+            ],
+            "echo": true,
+        }))
+        .expect("refusal parts parse in assistant messages");
+
+        let prepared = prepare_chat_request(
+            request,
+            &served(&["Qwen/Qwen1.5-0.5B-Chat"]),
+            ResolvedRequestContext::default(),
+        )
+        .expect("request is valid");
+
+        assert_eq!(
+            prepared.chat_request.messages[1],
+            VllmChatMessage::assistant_blocks(vec![AssistantContentBlock::Text {
+                text: "I can't help with that.".to_string(),
+            }])
+        );
+        assert_eq!(
+            prepared.options.echo.as_deref(),
+            Some("I can't help with that.")
+        );
+    }
+
+    #[test]
+    fn prepare_chat_request_rejects_refusal_parts_outside_assistant_messages() {
+        let request: ChatCompletionRequest = serde_json::from_value(json!({
+            "model": "Qwen/Qwen1.5-0.5B-Chat",
+            "messages": [{"role": "user", "content": [
+                {"type": "refusal", "refusal": "no"},
+            ]}],
+        }))
+        .expect("refusal parts parse in any message");
+
+        let error = prepare_chat_request(
+            request,
+            &served(&["Qwen/Qwen1.5-0.5B-Chat"]),
+            ResolvedRequestContext::default(),
+        )
+        .unwrap_err();
+
+        expect!["Only assistant messages can have a 'refusal' content type."]
+            .assert_eq(&error.to_error_response().error.message);
+    }
+
+    #[test]
+    fn prepare_chat_request_maps_tool_reference_parts() {
+        let request = |reference: &str| -> ChatCompletionRequest {
+            serde_json::from_value(json!({
+                "model": "Qwen/Qwen1.5-0.5B-Chat",
+                "messages": [
+                    {"role": "user", "content": "find a weather tool"},
+                    {"role": "assistant", "tool_calls": [{
+                        "id": "call_1",
+                        "type": "function",
+                        "function": {"name": "tool_search", "arguments": "{}"},
+                    }]},
+                    {"role": "tool", "tool_call_id": "call_1", "content": [
+                        {"type": "tool_reference", "name": reference},
+                    ]},
+                ],
+                "tools": [
+                    {"type": "function", "function": {"name": "tool_search"}},
+                    {"type": "function", "function": {"name": "get_weather"}, "defer_loading": true},
+                ],
+            }))
+            .expect("tool_reference parts parse")
+        };
+        let prepare = |reference| {
+            prepare_chat_request(
+                request(reference),
+                &served(&["Qwen/Qwen1.5-0.5B-Chat"]),
+                ResolvedRequestContext::default(),
+            )
+        };
+
+        let prepared = prepare("get_weather").expect("request is valid");
+        assert_eq!(
+            prepared.chat_request.messages[2],
+            VllmChatMessage::tool_response(
+                vec![ChatContentPart::tool_reference("get_weather")],
+                "call_1",
+            )
+        );
+
+        let error = prepare("get_time").unwrap_err();
+        assert_eq!(error.status_code(), StatusCode::BAD_REQUEST);
+        expect!["tool_reference `get_time` was not found in the available tools"]
+            .assert_eq(&error.to_error_response().error.message);
+    }
+
+    #[test]
     fn prepare_chat_request_accepts_assistant_reasoning_history() {
         let message = ChatCompletionMessage {
             role: AssistantRole,
@@ -1606,6 +1715,83 @@ mod tests {
             &ChatToolChoice::Required
         );
         assert!(!prepared.options.is_named_tool_choice);
+    }
+
+    /// Tools declared in a developer message stay available under `tools: []`,
+    /// as they would with `tools` omitted.
+    #[test]
+    fn prepare_chat_request_keeps_developer_tools_with_empty_tools() {
+        for tool_choice in [ToolChoiceValue::Auto, ToolChoiceValue::Required] {
+            let request = ChatCompletionRequest {
+                messages: vec![
+                    ChatMessage::Developer {
+                        content: MessageContent::Text("Use tools.".to_string()),
+                        tools: Some(vec![Tool {
+                            tool_type: "function".to_string(),
+                            function: Function {
+                                name: "lookup".to_string(),
+                                description: None,
+                                parameters: json!({"type": "object"}),
+                                strict: None,
+                                defer_loading: None,
+                            },
+                            defer_loading: None,
+                        }]),
+                        name: None,
+                    },
+                    ChatMessage::User {
+                        content: MessageContent::Text("hello".to_string()),
+                        name: None,
+                    },
+                ],
+                tools: Some(Vec::new()),
+                tool_choice: Some(ToolChoice::Value(tool_choice)),
+                ..base_request()
+            };
+
+            let prepared = prepare_chat_request(
+                request,
+                &served(&["Qwen/Qwen1.5-0.5B-Chat"]),
+                ResolvedRequestContext::default(),
+            )
+            .unwrap_or_else(|error| panic!("{tool_choice:?}: {error:?}"));
+
+            let expected = match tool_choice {
+                ToolChoiceValue::Auto => ChatToolChoice::Auto,
+                _ => ChatToolChoice::Required,
+            };
+            assert_eq!(prepared.chat_request.tool_choice(), &expected);
+        }
+    }
+
+    /// A named tool choice with empty `tools` reports the missing function.
+    #[test]
+    fn prepare_chat_request_rejects_named_tool_choice_with_empty_tools() {
+        let request = ChatCompletionRequest {
+            tools: Some(Vec::new()),
+            tool_choice: Some(ToolChoice::Function {
+                tool_type: "function".to_string(),
+                function: crate::routes::openai::utils::types::FunctionChoice {
+                    name: "f".to_string(),
+                },
+            }),
+            ..base_request()
+        };
+
+        let error = prepare_chat_request(
+            request,
+            &served(&["Qwen/Qwen1.5-0.5B-Chat"]),
+            ResolvedRequestContext::default(),
+        )
+        .expect_err("no tool matches the named choice");
+
+        expect![[r#"
+            InvalidRequest {
+                message: "tool_choice function `f` was not found in the available tools",
+                param: None,
+            }
+        "#]]
+        .assert_debug_eq(&error);
     }
 
     #[test]
