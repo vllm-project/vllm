@@ -873,7 +873,8 @@ class KDARecoverSSMCommitContext:
         checkpoints = [layer.kv_cache[1] for layer in layers]
         correction_caches = [layer.recoverssm_records.correction for layer in layers]
         kg_caches = [layer.recoverssm_records.key_gate for layer in layers]
-        A_log = [layer.A_log for layer in layers]
+        # GLM-5.3-Flash stores A_log as [1, 1, H, 1].
+        A_log = [layer.A_log.view(-1) for layer in layers]
         dt_bias = [
             layer.dt_bias.view(layer.local_num_heads, layer.head_dim)
             for layer in layers

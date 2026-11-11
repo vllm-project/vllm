@@ -3,6 +3,7 @@
 """GLM-5.3-Flash KDA layer with separate convolutions and a bounded safe gate."""
 
 from dataclasses import replace
+from typing import TYPE_CHECKING
 
 import torch
 from torch import nn
@@ -12,6 +13,7 @@ from vllm.compilation.breakable_cudagraph import eager_break_during_capture
 from vllm.config import VllmConfig, get_current_vllm_config
 from vllm.distributed import divide
 from vllm.forward_context import get_forward_context
+from vllm.logger import init_logger
 from vllm.model_executor.layers.linear import (
     ColumnParallelLinear,
     MergedColumnParallelLinear,
@@ -44,11 +46,13 @@ from vllm.model_executor.layers.mamba.ops.scatter_states import scatter_states
 from vllm.model_executor.model_loader.weight_utils import sharded_weight_loader
 from vllm.model_executor.utils import (
     maybe_disable_graph_partition,
+    refill_derived,
     set_weight_attrs,
 )
 from vllm.platforms import current_platform
 from vllm.third_party.flash_linear_attention.ops.kda import FusedRMSNormGated
 from vllm.third_party.flash_linear_attention.ops.l2norm import l2norm_fwd_block
+from vllm.v1.attention.backend import AttentionBackend
 from vllm.v1.attention.backends.gdn_attn import GDNAttentionMetadata
 from vllm.v1.kv_cache_interface import MambaSpec
 from vllm.v1.worker.workspace import current_workspace_manager
@@ -63,6 +67,14 @@ else:
         chunk_kda_with_fused_gate,
         fused_recurrent_kda,
     )
+
+if TYPE_CHECKING:
+    from vllm.models.glm5next.nvidia.recoverssm.deferred.verify import (
+        KdaDeferredVerify,
+    )
+    from vllm.models.kimi_k3.nvidia.ops.recoverssm import KDARecoverSSMRecords
+
+logger = init_logger(__name__)
 
 
 class _Glm5NextMergedColumnParallelLinear(MergedColumnParallelLinear):
@@ -198,6 +210,15 @@ class Glm5NextLinearAttention(GatedDeltaNetAttention):
     head_dim: int
     num_heads: int
     conv_size: int
+
+    def get_attn_backend(self) -> type[AttentionBackend]:
+        if self.cache_config.use_kda_recoverssm:
+            from vllm.models.kimi_k3.nvidia.kda_metadata import (
+                KimiK3KDAAttentionBackend,
+            )
+
+            return KimiK3KDAAttentionBackend
+        return super().get_attn_backend()
 
     def get_kv_cache_spec(self, vllm_config: VllmConfig) -> MambaSpec:
         spec = super().get_kv_cache_spec(vllm_config)
@@ -350,6 +371,85 @@ class Glm5NextLinearAttention(GatedDeltaNetAttention):
         # every _forward call (it reads an env-derived flag each time).
         self._conv_state_dim_first = is_conv_state_dim_first()
 
+        # RecoverSSM keeps one state slot per request: the verify leaves the
+        # checkpoint unchanged and writes records, from which the commit after
+        # sampling folds in the accepted tokens (Kimi-K3's verify and commit).
+        self.use_recoverssm = self.cache_config.use_kda_recoverssm
+        if self.cache_config.use_replayssm and not self.use_recoverssm:
+            raise ValueError(
+                "GLM-5.3-Flash supports --use-replayssm only with speculative decoding"
+            )
+        self.recoverssm_records: KDARecoverSSMRecords | None = None
+        # Deferred RecoverSSM (FP32 state, SM10x): each verify replays the last
+        # step's accepted tokens itself and runs the conv, the F_B gate and the
+        # gated RMSNorm with it; the commit after sampling only records them
+        # (pending replays of Glm5NextModelState).
+        self.deferred_verify: KdaDeferredVerify | None = None
+        self.decode_conv1d_weight: torch.Tensor | None = None
+        self.decode_norm_weight: torch.Tensor | None = None
+        if self.use_recoverssm:
+            from vllm.models.kimi_k3.nvidia.ops import recoverssm as recoverssm_ops
+
+            # Read by Kimi-K3's RecoverSSM commit.
+            self.spec_query_len = 1 + self.num_spec
+            self.gate_lower_bound = self.kda_lower_bound
+            self.recoverssm_backend = "triton"
+            max_num_seqs = vllm_config.scheduler_config.max_num_seqs
+            additional_config = vllm_config.additional_config
+            decode_backend = (
+                additional_config.get("kda_decode_backend", "auto")
+                if isinstance(additional_config, dict)
+                else "auto"
+            )
+            conv_state_dtype, recurrent_state_dtype = self.get_state_dtype()
+            # An FP32 state takes the deferred verify where it can run, else (or
+            # with kda_decode_backend "triton") the Triton verify and commit.
+            if decode_backend == "triton":
+                reason: str | None = "kda_decode_backend is triton"
+            elif recurrent_state_dtype != torch.float32:
+                reason = "it needs an FP32 SSM state"
+            else:
+                from vllm.models.glm5next.nvidia.recoverssm.deferred import (
+                    can_use_deferred_recoverssm,
+                )
+
+                supported, reason = can_use_deferred_recoverssm(
+                    head_dim=self.head_dim,
+                    conv_width=self.conv_size,
+                    has_conv_bias=self.conv1d.bias is not None,
+                    activation_dtype=vllm_config.model_config.dtype,
+                    conv_state_dtype=conv_state_dtype,
+                    f_b_dtype=self.f_b_proj.weight.dtype,
+                    lower_bound=self.kda_lower_bound,
+                )
+                if supported:
+                    from vllm.models.glm5next.nvidia.recoverssm.deferred import (
+                        verify as deferred_recoverssm,
+                    )
+
+                    self.deferred_verify = deferred_recoverssm.KdaDeferredVerify(
+                        self.local_num_heads, self.spec_query_len, max_num_seqs
+                    )
+            # The deferred verify keeps each request's records in its request
+            # slot until the next verify replays them.
+            self.recoverssm_records = recoverssm_ops.KDARecoverSSMRecords.allocate(
+                max_num_seqs,
+                self.local_num_heads,
+                self.spec_query_len,
+                self.head_dim,
+                vllm_config.model_config.dtype,
+                self.conv1d.weight.device,
+                scratch_row=self.deferred_verify is not None,
+            )
+            if self.deferred_verify is not None:
+                logger.info_once("Using the deferred KDA RecoverSSM verify.")
+            else:
+                logger.info_once(
+                    "Using the Triton KDA RecoverSSM verify and commit: the "
+                    "deferred verify cannot run (%s).",
+                    reason,
+                )
+
         additional_config = vllm_config.additional_config
         self.kda_prefill_backend = _resolve_kda_prefill_backend(
             additional_config.get("kda_prefill_backend", "auto")
@@ -396,6 +496,83 @@ class Glm5NextLinearAttention(GatedDeltaNetAttention):
             self._checkpoint_exporter = FlashKDAPrefillCheckpointExporter(
                 state_len=self.conv_size - 1
             )
+
+    def process_weights_after_loading(self) -> None:
+        """The deferred verify's weight copies: the conv weight in its
+        `[3, width, H K]` layout and the norm weight in FP32; reloads refill them
+        in place."""
+        if self.deferred_verify is None:
+            return
+        from vllm.models.glm5next.nvidia.recoverssm.deferred.verify import (
+            decode_conv_weight,
+        )
+
+        refill_derived(
+            self, "decode_conv1d_weight", decode_conv_weight(self.conv1d.weight)
+        )
+        refill_derived(self, "decode_norm_weight", self.o_norm.weight.detach().float())
+
+    def _recoverssm_verify(
+        self,
+        m: GDNAttentionMetadata,
+        mixed_qkv: torch.Tensor,
+        raw_g: torch.Tensor,
+        raw_beta: torch.Tensor,
+        conv_weight: torch.Tensor,
+        query_start_loc: torch.Tensor,
+        out: torch.Tensor | None,
+    ) -> torch.Tensor:
+        """RecoverSSM verify of the speculative requests: the short convolution
+        and the KDA recurrence from each request's checkpoint, which is left
+        unchanged, writing the verify records."""
+        from vllm.models.kimi_k3.nvidia.ops.recoverssm import kda_recoverssm_verify
+
+        assert m.spec_state_indices_tensor is not None
+        assert m.num_accepted_tokens is not None
+        assert self.recoverssm_records is not None
+        state_indices = m.spec_state_indices_tensor[: m.num_spec_decodes, 0]
+        conv_state, state = self.kv_cache
+        record_indices = None
+        deferred = getattr(m, "recoverssm_deferred", None)
+        if deferred is not None:
+            # This verify does not replay the last step's accepted tokens: fold
+            # them into the checkpoints first (every layer, once per step).
+            deferred.flush()
+            record_indices = deferred.record_rows[: m.num_spec_decodes]
+        if not self._conv_state_dim_first:
+            conv_state = conv_state.transpose(-1, -2)
+        mixed_qkv = causal_conv1d_update(
+            mixed_qkv,
+            conv_state,
+            conv_weight,
+            self.conv1d.bias,
+            activation="silu",
+            conv_state_indices=state_indices,
+            num_accepted_tokens=m.num_accepted_tokens,
+            query_start_loc=query_start_loc,
+            max_query_len=self.spec_query_len,
+        )
+        q, k, v = (
+            x.reshape(1, -1, self.local_num_heads, self.head_dim)
+            for x in mixed_qkv.split(self.local_projection_size, dim=-1)
+        )
+        return kda_recoverssm_verify(
+            q=q,
+            k=k,
+            v=v,
+            raw_g=raw_g,
+            raw_beta=raw_beta,
+            A_log=self.A_log.view(-1),
+            dt_bias=self.dt_bias,
+            lower_bound=self.kda_lower_bound,
+            checkpoint_state=state,
+            records=self.recoverssm_records,
+            query_start_loc=query_start_loc,
+            state_indices=state_indices,
+            spec_query_len=self.spec_query_len,
+            out=out,
+            record_indices=record_indices,
+        )
 
     def _flashkda_prefill(
         self,
@@ -506,11 +683,12 @@ class Glm5NextLinearAttention(GatedDeltaNetAttention):
         # are not captured by PIECEWISE CUDA graphs.
         self._forward(
             qkv_proj_states=qkv,
+            f_a=f_a,
             g1=g1,
+            g2=g2,
             beta=beta,
             core_attn_out=core_attn_out,
         )
-        core_attn_out = self.o_norm(core_attn_out, g2)
         core_attn_out = core_attn_out.reshape(core_attn_out.size(1), -1)
         return self.o_proj(core_attn_out)[0]
 
@@ -518,7 +696,9 @@ class Glm5NextLinearAttention(GatedDeltaNetAttention):
     def _forward(
         self,
         qkv_proj_states: torch.Tensor,
+        f_a: torch.Tensor,
         g1: torch.Tensor,
+        g2: torch.Tensor,
         beta: torch.Tensor,
         core_attn_out: torch.Tensor,
     ) -> None:
@@ -541,20 +721,20 @@ class Glm5NextLinearAttention(GatedDeltaNetAttention):
         )  # noqa: E501
         num_actual_tokens = attn_metadata_narrowed.num_actual_tokens
         # Spec-decode metadata (all None when speculative decoding is disabled).
-        spec_sequence_masks = attn_metadata_narrowed.spec_sequence_masks
         spec_query_start_loc = attn_metadata_narrowed.spec_query_start_loc
         spec_state_indices_tensor = attn_metadata_narrowed.spec_state_indices_tensor
         spec_token_indx = attn_metadata_narrowed.spec_token_indx
         non_spec_token_indx = attn_metadata_narrowed.non_spec_token_indx
         num_accepted_tokens = attn_metadata_narrowed.num_accepted_tokens
         num_spec_decodes = attn_metadata_narrowed.num_spec_decodes
-        use_spec = spec_sequence_masks is not None and num_spec_decodes > 0
+        use_spec = num_spec_decodes > 0
         # Safe-gate checkpoints use the bounded sigmoid variant.
         safe_gate = self.kda_safe_gate
         lower_bound = self.kda_lower_bound
         constant_caches = self.kv_cache
 
         qkv_proj_states = qkv_proj_states[:num_actual_tokens]
+        f_a = f_a[:num_actual_tokens]
         g1 = g1[:, :num_actual_tokens]
         beta = beta[:, :num_actual_tokens]
 
@@ -606,7 +786,8 @@ class Glm5NextLinearAttention(GatedDeltaNetAttention):
             qkv_ns, g1_ns, beta_ns = qkv_proj_states, g1, beta
 
         # --- causal conv1d: spec (draft-verify) path ---
-        if use_spec:
+        # (RecoverSSM runs it in its verify.)
+        if use_spec and not self.use_recoverssm:
             assert spec_state_indices_tensor is not None
             assert num_accepted_tokens is not None
             conv_idx = spec_state_indices_tensor[:, 0][:num_spec_decodes]
@@ -670,7 +851,64 @@ class Glm5NextLinearAttention(GatedDeltaNetAttention):
             if non_spec_token_indx is None or non_spec_token_indx.numel() == 0
             else None
         )
-        if use_spec:
+        spec_normalized = False
+        deferred = getattr(attn_metadata_narrowed, "recoverssm_deferred", None)
+        if (
+            use_spec
+            and deferred is not None
+            # q tokens per request
+            and attn_metadata_narrowed.num_spec_decode_tokens
+            == num_spec_decodes * self.spec_query_len
+        ):
+            assert self.deferred_verify is not None
+            assert spec_state_indices_tensor is not None
+            assert num_accepted_tokens is not None
+            assert self.recoverssm_records is not None
+            assert self.decode_conv1d_weight is not None
+            assert self.decode_norm_weight is not None
+            if spec_out is None:
+                assert spec_token_indx is not None
+                f_a_spec = f_a.index_select(0, spec_token_indx)
+                g2_spec = g2.index_select(0, spec_token_indx)
+                spec_out = core_attn_out.new_empty((1, *g2_spec.shape))
+            else:
+                f_a_spec, g2_spec = f_a, g2[:num_actual_tokens]
+            self.deferred_verify(
+                qkv=qkv_spec,
+                gate=g2_spec.flatten(-2),
+                f_a=f_a_spec,
+                beta=beta_spec[0],
+                conv_weight=self.decode_conv1d_weight,
+                conv_state=conv_state,
+                A_log=self.A_log.view(-1),
+                dt_bias=self.dt_bias,
+                f_b_weight=self.f_b_proj.weight,
+                norm_weight=self.decode_norm_weight,
+                norm_eps=self.o_norm.eps,
+                lower_bound=lower_bound,
+                state=recurrent_state,
+                state_indices=spec_state_indices_tensor[:num_spec_decodes],
+                num_accepted_tokens=num_accepted_tokens,
+                correction=self.recoverssm_records.correction,
+                key_gate=self.recoverssm_records.key_gate,
+                record_rows=deferred.record_rows,
+                pending=deferred.pending,
+                out=spec_out[0].flatten(-2),
+            )
+            core_attn_out_spec = spec_out
+            spec_normalized = True
+        elif use_spec and self.use_recoverssm:
+            assert spec_query_start_loc is not None
+            core_attn_out_spec = self._recoverssm_verify(
+                attn_metadata_narrowed,
+                qkv_spec,
+                g1_spec,
+                beta_spec,
+                conv_weights,
+                spec_query_start_loc[: num_spec_decodes + 1],
+                spec_out,
+            )
+        elif use_spec:
             assert spec_state_indices_tensor is not None
             assert num_accepted_tokens is not None
             assert spec_query_start_loc is not None
@@ -799,3 +1037,16 @@ class Glm5NextLinearAttention(GatedDeltaNetAttention):
                 core_attn_out[0, :num_actual_tokens] = core_attn_out_non_spec[
                     0, :num_actual_tokens
                 ]
+
+        # Triton normalizes in place, so this is a self-copy with no device
+        # work. Keep it for the out-of-place native implementation.
+        if not spec_normalized:
+            core_attn_out.copy_(self.o_norm(core_attn_out, g2))
+        elif core_attn_out_non_spec is not None:
+            # The deferred verify wrote the speculative rows normalized.
+            assert non_spec_token_indx is not None
+            rows_out = core_attn_out.index_select(1, non_spec_token_indx)
+            gate_ns = g2.index_select(0, non_spec_token_indx)
+            core_attn_out.index_copy_(
+                1, non_spec_token_indx, self.o_norm(rows_out, gate_ns)
+            )
