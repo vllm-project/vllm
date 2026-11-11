@@ -1,7 +1,8 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 
-from collections.abc import Callable
+import sys
+from collections.abc import Callable, Sequence
 from contextlib import AbstractContextManager, nullcontext
 from typing import Any
 
@@ -22,6 +23,7 @@ from vllm.v1.core.sched.output import (
 from vllm.v1.kv_cache_interface import (
     CircularBufferSpec,
     CrossAttentionSpec,
+    KVCacheConfig,
     KVCacheSpec,
     MambaSpec,
     UniformTypeKVCacheSpecs,
@@ -125,6 +127,57 @@ def _cap_num_warmup_reqs(
     )
 
 
+def _blocks_per_pool(
+    model_runner: GPUModelRunner, block_counts: Sequence[int]
+) -> list[int]:
+    kv_cache_config = model_runner.kv_cache_config
+    per_pool = [0] * (max(kv_cache_config.block_pool_ids, default=0) + 1)
+    for pool_id, num_blocks in zip(kv_cache_config.block_pool_ids, block_counts):
+        per_pool[pool_id] += num_blocks
+    return per_pool
+
+
+def _num_reqs_fitting_kv_cache(
+    model_runner: GPUModelRunner, block_counts: Sequence[int]
+) -> int:
+    """Requests holding `block_counts` blocks that fit in every pool after its
+    null block."""
+    kv_cache_config = model_runner.kv_cache_config
+    fits = []
+    for pool_id, num_blocks in enumerate(_blocks_per_pool(model_runner, block_counts)):
+        if not num_blocks:
+            continue
+        if pool_id == 0:
+            pool_size = num_committable_kv_blocks(model_runner)
+        else:
+            pool_size = kv_cache_config.pool_num_blocks(pool_id)
+        fits.append((pool_size - 1) // num_blocks)
+    return min(fits, default=sys.maxsize)
+
+
+def _ensure_warmup_kv_cache_blocks(
+    model_runner: GPUModelRunner, num_reqs: int, block_counts: Sequence[int]
+) -> None:
+    num_pool0_blocks = _blocks_per_pool(model_runner, block_counts)[0]
+    ensure_kv_cache_blocks(model_runner, 1 + num_reqs * num_pool0_blocks)
+
+
+class _WarmupBlockIds:
+    """Distinct block IDs within each pool, from 1: block 0 is the null block."""
+
+    def __init__(self, kv_cache_config: KVCacheConfig) -> None:
+        self._pool_ids = kv_cache_config.block_pool_ids
+        self._next_ids = [1] * (max(self._pool_ids, default=0) + 1)
+
+    def alloc(self, block_counts: Sequence[int]) -> tuple[list[int], ...]:
+        block_ids = []
+        for pool_id, num_blocks in zip(self._pool_ids, block_counts):
+            start = self._next_ids[pool_id]
+            self._next_ids[pool_id] = start + num_blocks
+            block_ids.append(list(range(start, start + num_blocks)))
+        return tuple(block_ids)
+
+
 def run_mixed_prefill_decode_warmup(
     model_runner: GPUModelRunner,
     worker_execute_model: Callable[[SchedulerOutput], Any],
@@ -177,25 +230,19 @@ def run_mixed_prefill_decode_warmup(
         for decode, prefill in zip(decode_block_counts, decode_prefill_block_counts)
     ]
     prefill_block_counts = [block_count(prefill_len, s) for s in kv_cache_specs]
-    required_blocks = sum(decode_block_counts) + sum(prefill_block_counts)
-    num_blocks = num_committable_kv_blocks(model_runner)
-    if num_blocks <= required_blocks:
+    required_block_counts = [
+        decode + prefill
+        for decode, prefill in zip(decode_block_counts, prefill_block_counts)
+    ]
+    if _num_reqs_fitting_kv_cache(model_runner, required_block_counts) < 1:
         logger.warning(
-            "Skipping V2 mixed prefill+decode warmup because only %d KV blocks "
-            "are available for %d required warmup blocks.",
-            num_blocks,
-            required_blocks,
+            "Skipping V2 mixed prefill+decode warmup because the KV cache "
+            "cannot hold its %d required warmup blocks.",
+            sum(required_block_counts),
         )
         return False
-    ensure_kv_cache_blocks(model_runner, 1 + required_blocks)
-
-    next_block_id = 1
-
-    def _alloc_blocks(num_blocks: int) -> list[int]:
-        nonlocal next_block_id
-        block_ids = list(range(next_block_id, next_block_id + num_blocks))
-        next_block_id += num_blocks
-        return block_ids
+    _ensure_warmup_kv_cache_blocks(model_runner, 1, required_block_counts)
+    blocks = _WarmupBlockIds(model_runner.kv_cache_config)
 
     sampling_params = SamplingParams(
         max_tokens=2,
@@ -214,7 +261,7 @@ def run_mixed_prefill_decode_warmup(
             mm_features=[],
             sampling_params=sampling_params,
             pooling_params=None,
-            block_ids=tuple(_alloc_blocks(n) for n in decode_prefill_block_counts),
+            block_ids=blocks.alloc(decode_prefill_block_counts),
             num_computed_tokens=0,
             lora_request=None,
             prefill_token_ids=decode_token_ids,
@@ -225,7 +272,7 @@ def run_mixed_prefill_decode_warmup(
     }
     decode_prefill_output.total_num_scheduled_tokens = decode_prompt_len
 
-    decode_new_blocks = tuple(_alloc_blocks(n) for n in decode_block_deltas)
+    decode_new_blocks = blocks.alloc(decode_block_deltas)
     cached_decode_req = CachedRequestData.make_empty()
     cached_decode_req.req_ids = [decode_req_id]
     cached_decode_req.num_computed_tokens = [decode_prompt_len]
@@ -251,7 +298,7 @@ def run_mixed_prefill_decode_warmup(
                 prompt_logprobs=prompt_logprobs,
             ),
             pooling_params=None,
-            block_ids=tuple(_alloc_blocks(n) for n in prefill_block_counts),
+            block_ids=blocks.alloc(prefill_block_counts),
             num_computed_tokens=0,
             lora_request=None,
             prefill_token_ids=prefill_token_ids,
@@ -304,21 +351,15 @@ def run_context_prefill_warmup(
     ]
     block_count = _warmup_block_counter(model_runner)
     block_counts = [block_count(context_len + query_len, s) for s in kv_cache_specs]
-    blocks_per_req = max(sum(block_counts), 1)
     num_reqs = min(
         cdiv(num_context_tokens, context_len),
         _cap_num_warmup_reqs(model_runner, model_runner.max_num_reqs, query_len),
-        (num_committable_kv_blocks(model_runner) - 1) // blocks_per_req,
+        _num_reqs_fitting_kv_cache(model_runner, block_counts),
     )
     if num_reqs < 1:
         return False
-    ensure_kv_cache_blocks(model_runner, 1 + num_reqs * blocks_per_req)
-
-    next_block_id = 1
-
-    def _alloc_blocks(num_blocks: int) -> list[int]:
-        nonlocal next_block_id
-        return list(range(next_block_id, next_block_id := next_block_id + num_blocks))
+    _ensure_warmup_kv_cache_blocks(model_runner, num_reqs, block_counts)
+    blocks = _WarmupBlockIds(model_runner.kv_cache_config)
 
     req_ids = [f"_context_warmup_{i}_" for i in range(num_reqs)]
     token_ids = _warmup_token_ids(model_runner, context_len + query_len)
@@ -334,7 +375,7 @@ def run_context_prefill_warmup(
             mm_features=[],
             sampling_params=sampling_params,
             pooling_params=None,
-            block_ids=tuple(_alloc_blocks(n) for n in block_counts),
+            block_ids=blocks.alloc(block_counts),
             num_computed_tokens=context_len,
             lora_request=None,
             prefill_token_ids=token_ids,
@@ -504,9 +545,9 @@ def _warmup_kernels(
         # Encoder-only models allocate no KV blocks, so this cap doesn't apply.
         num_reqs = min(
             num_reqs,
-            max(1, (num_committable_kv_blocks(model_runner) - 1) // max_blocks_per_req),
+            max(1, _num_reqs_fitting_kv_cache(model_runner, decode_block_counts)),
         )
-        ensure_kv_cache_blocks(model_runner, 1 + num_reqs * max_blocks_per_req)
+        _ensure_warmup_kv_cache_blocks(model_runner, num_reqs, decode_block_counts)
 
     req_ids = [f"_warmup_{i}_" for i in range(num_reqs)]
 
@@ -526,12 +567,7 @@ def _warmup_kernels(
         )
         pooling_params = None
 
-    # Assign distinct block IDs per request per group. 0 null block, start from 1.
-    next_block_id = 1
-
-    def _alloc_blocks(num_blocks: int) -> list[int]:
-        nonlocal next_block_id
-        return list(range(next_block_id, next_block_id := next_block_id + num_blocks))
+    blocks = _WarmupBlockIds(model_runner.kv_cache_config)
 
     # The KV-block zeroing kernel is driven by the scheduler's
     # new_block_ids_to_zero, so none of the steps below reach it.
@@ -548,7 +584,7 @@ def _warmup_kernels(
                 pooling_params,
                 mm_features=warmup_mm_features,
             ),
-            block_ids=tuple(_alloc_blocks(n) for n in prefill_block_counts),
+            block_ids=blocks.alloc(prefill_block_counts),
             prefill_token_ids=prompt_token_ids,
         )
         for i in range(num_reqs)
@@ -606,7 +642,7 @@ def _warmup_kernels(
                     for spec, held in zip(kv_cache_specs, req_blocks[i])
                 ]
                 cached_req_data.new_block_ids.append(
-                    tuple(_alloc_blocks(n) for n in deltas) if any(deltas) else None
+                    blocks.alloc(deltas) if any(deltas) else None
                 )
                 req_blocks[i] = [
                     held + delta for held, delta in zip(req_blocks[i], deltas)
