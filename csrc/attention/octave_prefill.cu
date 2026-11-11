@@ -6,7 +6,6 @@
 #if defined(USE_ROCM)
   #include <algorithm>
   #include <mutex>
-  #include <string>
   #include <unordered_map>
   #include <vector>
 
@@ -14,6 +13,7 @@
   #include <ATen/cuda/CUDAContext.h>
 
   #include "octave_format.cuh"
+  #include "octave_target.h"
 
 namespace {
 
@@ -56,18 +56,28 @@ void octave_prefill(torch::Tensor out, torch::Tensor q, torch::Tensor k,
                   cache.stride(0) % align == 0,
               "octave_prefill: misaligned slots");
 
-  // 0: gfx1100 (WMMA), 1: gfx942 (MFMA, octave_prefill_cdna3.cu).
-  static const int arch = [] {
-    const std::string name =
-        at::cuda::getCurrentDeviceProperties()->gcnArchName;
-    if (name.rfind("gfx1100", 0) == 0) return 0;
-    if (name.rfind("gfx942", 0) == 0) return 1;
-    return -1;
-  }();
-  TORCH_CHECK(arch >= 0, "octave_prefill: gfx1100 or gfx942 only");
+  // TODO(correctness): Collect hardware regression evidence for per-call
+  // dispatch on q's device, including heterogeneous GPUs, mismatched
+  // current/query devices, and empty inputs.
+  const at::cuda::OptionalCUDAGuard guard(device_of(q));
+  const auto target = octave::target_from_name(
+      at::cuda::getCurrentDeviceProperties()->gcnArchName);
+  void (*prefill)(const octave::PrefillArgs&) = nullptr;
+  switch (target) {
+    case octave::Target::GFX942:
+      prefill = octave_cdna::octave_prefill;
+      break;
+    case octave::Target::GFX1100:
+      prefill = octave_rdna::octave_prefill;
+      break;
+    default:
+      TORCH_CHECK(false,
+                  "octave_prefill: unsupported GPU target; expected gfx1100 or "
+                  "gfx942");
+  }
+
   const int num_seqs = seq_lens.size(0);
   if (num_seqs == 0 || q.size(0) == 0) return;
-  const at::cuda::OptionalCUDAGuard guard(device_of(q));
   const int hq = q.size(1), hkv = cache.size(1);
   TORCH_CHECK(hq % hkv == 0);
   const int hpk = hq / hkv;
@@ -98,10 +108,7 @@ void octave_prefill(torch::Tensor out, torch::Tensor q, torch::Tensor k,
                                  fmt,
                                  ws,
                                  num_splits};
-  if (arch == 1)
-    octave_cdna::octave_prefill(args);
-  else
-    octave_rdna::octave_prefill(args);
+  prefill(args);
 }
 
 #else

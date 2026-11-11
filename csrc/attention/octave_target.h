@@ -9,10 +9,11 @@ namespace octave {
 
 enum class Target { Unsupported, GFX1100, GFX942 };
 
-// Preserve the prefix matching used by Octave dispatch.
+// Match the name before the first ':' exactly; other names are unsupported.
 constexpr Target target_from_name(std::string_view name) noexcept {
-  if (name.rfind("gfx1100", 0) == 0) return Target::GFX1100;
-  if (name.rfind("gfx942", 0) == 0) return Target::GFX942;
+  name = name.substr(0, name.find(':'));
+  if (name == "gfx1100") return Target::GFX1100;
+  if (name == "gfx942") return Target::GFX942;
   return Target::Unsupported;
 }
 
