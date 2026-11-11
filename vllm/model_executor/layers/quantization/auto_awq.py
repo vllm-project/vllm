@@ -176,7 +176,10 @@ def _convert_awq_to_standard_format(
 def _use_rocm_aiter_w4a16() -> bool:
     from vllm._aiter_ops import rocm_aiter_ops
 
-    return bool(rocm_aiter_ops.is_linear_w4a16_enabled())
+    # batch-invariant mode keeps AutoAWQLinearMethod's dequantize + matmul path
+    return not envs.VLLM_BATCH_INVARIANT and bool(
+        rocm_aiter_ops.is_linear_w4a16_enabled()
+    )
 
 
 class AutoAWQConfig(QuantizationConfig):

@@ -99,3 +99,41 @@ def test_kernel_config_hash_tracks_aiter_w4a16(monkeypatch):
         )
         hashes[enabled] = KernelConfig().compile_factors()
     assert hashes[True] != hashes[False]
+
+
+@pytest.mark.skipif(not current_platform.is_rocm(), reason="ROCm only")
+@pytest.mark.parametrize("aiter_w4a16_enabled", [True, False])
+@pytest.mark.parametrize("batch_invariant", [False, True])
+def test_auto_awq_rocm_routes_to_mp_linear_with_aiter_w4a16(
+    monkeypatch, aiter_w4a16_enabled, batch_invariant
+):
+    """On ROCm, AWQ linears use the MPLinearKernel path only when the AITER
+    W4A16 GEMM is enabled and batch invariance is off; otherwise they keep
+    AutoAWQLinearMethod (Triton AWQ GEMM, or dequantize + matmul)."""
+    from vllm.model_executor.layers.linear import ReplicatedLinear
+    from vllm.model_executor.layers.quantization import auto_awq
+
+    monkeypatch.setenv("VLLM_BATCH_INVARIANT", "1" if batch_invariant else "0")
+    monkeypatch.setattr(
+        rocm_aiter_ops,
+        "is_linear_w4a16_enabled",
+        classmethod(lambda cls: aiter_w4a16_enabled),
+    )
+    mp_route = aiter_w4a16_enabled and not batch_invariant
+    config = auto_awq.AutoAWQConfig(
+        weight_bits=4, group_size=128, zero_point=True, lm_head_quantized=False
+    )
+    layer = object.__new__(ReplicatedLinear)
+    method = config.get_quant_method(layer, "model.layers.0.mlp.down_proj")
+    expected = (
+        auto_awq.AutoAWQMarlinLinearMethod if mp_route else auto_awq.AutoAWQLinearMethod
+    )
+    assert type(method) is expected
+
+    # Marlin verification is skipped on ROCm only on the AITER W4A16 route.
+    verified = []
+    monkeypatch.setattr(
+        auto_awq, "verify_marlin_supported", lambda **kw: verified.append(kw)
+    )
+    auto_awq.AutoAWQMarlinLinearMethod(config)
+    assert bool(verified) is not mp_route

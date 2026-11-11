@@ -365,7 +365,6 @@ _LINEAR_BACKEND_KERNEL_MAP: dict[str, set[type]] = {
         AiterPerTokenFp8ScaledMMLinearKernel,
         AiterPreshuffledPerTokenFp8ScaledMMLinearKernel,
         AiterMxfp4LinearKernel,
-        AiterW4A16LinearKernel,
     },
     "machete": {
         MacheteLinearKernel,
