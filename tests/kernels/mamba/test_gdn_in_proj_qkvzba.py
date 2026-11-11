@@ -10,6 +10,7 @@ from vllm.model_executor.layers.mamba.gdn.qwen_gdn_linear_attn import (
     GDN_AITER_IN_PROJ_DUAL_SPLITK_AVAILABLE,
     GDN_IN_PROJ_BA_SPLITS,
     MAX_FUSED_IN_PROJ_QKVZBA_TOKENS,
+    _in_proj_outputs,
 )
 
 pytestmark = pytest.mark.skipif(
@@ -35,8 +36,9 @@ def test_in_proj_qkvzba_matches_dense_gemm(num_tokens: int) -> None:
         x, weight, ba_size
     )
     assert ba_partials.shape == (GDN_IN_PROJ_BA_SPLITS, num_tokens, ba_size)
+    qkvz, ba = _in_proj_outputs(qkvzba[:, :qkvz_size], ba_partials, qkvz, ba)
     if num_tokens <= MAX_FUSED_IN_PROJ_QKVZBA_TOKENS:
-        qkvz, ba = qkvzba[:, :qkvz_size], ba_partials.sum(0)
+        ba = ba.sum(0)
     ref = (x.float() @ weight.float().t()).to(x.dtype)
     torch.testing.assert_close(
         torch.cat([qkvz, ba.to(x.dtype)], dim=-1), ref, atol=0.5, rtol=1e-2
