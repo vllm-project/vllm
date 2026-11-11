@@ -207,7 +207,6 @@ class Base(
         self._create_attention_instances(prefix)
 
         # Initialize any parameters that have not had their modules replaced
-        # (`recursive_replace` has already done this for the decoder layers)
         self.init_parameters(self.model)
 
         # Upcast weights Transformers always keeps in fp32
@@ -599,6 +598,8 @@ class Base(
             )
 
             def build_layers():
+                """Must mimic what `__init__` does for the whole model, because
+                each layer is offloaded as soon as it is yielded."""
                 for i in range(*self._pp_indices()):
                     layer_prefix = f"{prefix}.{i}"
                     self._pre_decoder_layer_replace(layers[i], layer_prefix)
