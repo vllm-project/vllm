@@ -1,8 +1,7 @@
 #!/usr/bin/env bash
 set -euo pipefail
 
-# Sweep wrapper for spec decode acceptance tests, following the same pattern
-# as ../nixl_push_integration/config_sweep_accuracy_test.sh. Runs
+# Sweep wrapper for spec decode acceptance tests. Runs
 # spec_decode_acceptance_test.sh once per configuration.
 
 SCRIPT="v1/kv_connector/nixl_integration/spec_decode_acceptance_test.sh"
