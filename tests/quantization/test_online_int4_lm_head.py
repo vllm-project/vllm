@@ -110,7 +110,10 @@ def test_broad_targets_do_not_select_the_head():
     assert config.resolve_quant_method_cls(ParallelLMHead, "lm_head") is None
     # It composes with a pattern naming the head.
     args = QuantizationConfigArgs(
-        targets={"re:.*proj$": "fp8_per_tensor", r"re:.*lm_head$": {"weight": SCHEME}}
+        targets={
+            "re:.*proj$": "fp8_per_tensor",
+            r"re:.*lm_head$": QuantSpec(weight=SCHEME),
+        }
     )
     config = OnlineQuantizationConfig(args)
     resolved = config.resolve_quant_method_cls(ParallelLMHead, "lm_head")
@@ -130,7 +133,7 @@ def test_head_in_targets_and_ignore_is_rejected():
     "args",
     [
         QuantizationConfigArgs(linear=QuantSpec(weight=SCHEME)),
-        QuantizationConfigArgs(targets={"re:.*": {"weight": SCHEME}}),
+        QuantizationConfigArgs(targets={"re:.*": QuantSpec(weight=SCHEME)}),
     ],
     ids=["linear", "broad_target"],
 )
