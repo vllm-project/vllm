@@ -481,3 +481,57 @@ vllm serve model --enable-lora --lora-target-modules o_proj qkv_proj down_proj
 ```
 
 When `--lora-target-modules` is not specified, LoRA will be applied to all supported modules in the model. This parameter accepts module suffixes (the last component of the module name), such as `o_proj`, `qkv_proj`, `gate_proj`, etc.
+
+## Dynamic synchronized LoRA slots for DP/EP
+
+With a MoE model, enabling LoRA together with DP and EP automatically
+coordinates LoRA admission and resident slots across all DP ranks. There is no
+separate synchronization switch or independent per-rank eviction path in DEP.
+Register adapters at startup using the existing `--lora-modules` option.
+Runtime HTTP loading and unloading remain disabled by default and are enabled
+only by `VLLM_ALLOW_RUNTIME_LORA_UPDATING=1`. Both use the same coordinator;
+no additional fixed-path configuration is needed.
+`max_loras` limits the **global** resident working set: additional
+adapters wait for capacity rather than independently evicting another rank's
+active adapter. Base requests consume no LoRA slot and can share a batch with
+multiple adapters. Every rank retains the same adapter identity in each slot;
+EP workers load only their local expert shards.
+
+```bash
+vllm serve MODEL \
+  --enable-lora --max-loras 2 --api-server-count 1 \
+  --data-parallel-size 2 --enable-expert-parallel \
+  --all2all-backend allgather_reducescatter \
+  --no-async-scheduling
+```
+
+DEP LoRA supports `AsyncLLM` and the API server with internal DP load balancing.
+Use a single API server process (`--api-server-count 1`) so dynamic adapter
+names and IDs have one registry. For runtime HTTP updates, set
+`VLLM_ALLOW_RUNTIME_LORA_UPDATING=1` and use `/v1/load_lora_adapter` and
+`/v1/unload_lora_adapter`. Unloading synchronizes removal across workers before
+removing the API name; a busy adapter stays registered when removal is rejected.
+Adapters can be loaded on demand, or through `add_lora`. The engine coordinates
+`add_lora`, `remove_lora`, and `pin_lora` at execution boundaries. Preparation
+loads weights on every worker before committing any slot changes; a preparation
+failure leaves the resident layout unchanged. If activation fails after slot
+writes begin, every worker restores its previous layout and weights before
+execution resumes. In-place replacement and removal
+are rejected while any rank has an unfinished request for that ID, including
+queued requests. Generation requests use `load_inplace=False`; explicitly
+replace an idle adapter with `add_lora(LoRARequest(..., load_inplace=True))`.
+Pinned adapters retain capacity until removed. Adapter IDs and paths must agree
+across ranks, and files at each path must contain identical, immutable weights.
+
+The current DEP implementation uses synchronous scheduling, PP=1, 2D adapters, and
+linear expert placement, `allgather_reducescatter`, no sequence parallelism,
+and no fully sharded LoRA. Prefix caching keeps its existing behavior and cache
+keys based on adapter names and paths; changing a GPU slot does not invalidate
+KV blocks. As with other LoRA serving, replacing weights at the same path does
+not invalidate previous prefix-cache entries; use a new path for changed weights.
+Elastic EP, fault tolerance, external or hybrid
+DP load balancing, DBO, speculative decoding, and KV transfer are unsupported.
+Unused resident adapters are evicted in a deterministic global LRU order; this
+mode does not retain an additional CPU weight cache beyond the resident set.
+Coordination exchanges CPU metadata each execution step and loads adapters on
+the critical path, so it prioritizes consistency over asynchronous throughput.

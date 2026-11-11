@@ -4,12 +4,14 @@
 from contextlib import contextmanager
 from typing import Any, Literal
 
+import msgspec
 import torch
 
 from vllm.config import VllmConfig
 from vllm.config.lora import LoRAConfig
 from vllm.exceptions import LoRAAdapterNotFoundError
 from vllm.logger import init_logger
+from vllm.lora.dp_manager import LoRASlot, adapter_identity
 from vllm.lora.lora_model import LoRAModel
 from vllm.lora.model_manager import (
     LoRAModelManager,
@@ -51,6 +53,15 @@ class WorkerLoRAManager:
         if lora_config is None:
             raise ValueError("LoRA config must be set for WorkerLoRAManager.")
         self.lora_config: LoRAConfig = lora_config
+        self._dp_lora_warmup = False
+        self.is_dp_ep_lora = vllm_config.is_dp_ep_lora
+        self._dp_slots: list[LoRASlot | None] = [None] * lora_config.max_loras
+        self._dp_prepared: tuple[list[LoRASlot | None], dict[int, LoRAModel]] | None = (
+            None
+        )
+        self._dp_previous: tuple[list[LoRASlot | None], dict[int, LoRAModel]] | None = (
+            None
+        )
 
         # Use get_text_config() in case of multimodal models
         text_config = vllm_config.model_config.hf_config.get_text_config()
@@ -75,9 +86,23 @@ class WorkerLoRAManager:
     def dummy_lora_cache(self):
         """Use this context manager to reuse the dummy lora model
         to avoid creating it repeatedly."""
+        synchronized = self.is_dp_ep_lora
+        saved_slots = self._dp_slots
+        saved_models = self._adapter_manager.list_adapters() if synchronized else {}
+        if synchronized:
+            self._dp_lora_warmup = True
+            self._adapter_manager.remove_all_adapters()
         self._cached_dummy_lora = None
-        yield
-        self._cached_dummy_lora = False
+        try:
+            yield
+        finally:
+            self._cached_dummy_lora = False
+            if synchronized:
+                self._adapter_manager.remove_all_adapters()
+                self._dp_lora_warmup = False
+                self._dp_slots = [None] * self.lora_config.max_loras
+                self._dp_prepared = (saved_slots, saved_models)
+                self.commit_dp_loras()
 
     @property
     def is_enabled(self) -> bool:
@@ -102,6 +127,78 @@ class WorkerLoRAManager:
         )
         self._adapter_manager = lora_manager
         return lora_manager.model
+
+    def get_slot_ids(self) -> list[int | None]:
+        return list(self._adapter_manager.lora_index_to_id)
+
+    def prepare_dp_loras(self, payload: bytes) -> None:
+        if not self.is_dp_ep_lora:
+            raise ValueError("DP LoRA synchronization is not enabled")
+        slots = msgspec.msgpack.decode(payload, type=list[LoRASlot | None])
+        if len(slots) != len(self._dp_slots):
+            raise ValueError("Invalid synchronized LoRA layout")
+        self._dp_prepared = None
+        loaded = {}
+        for old, new in zip(self._dp_slots, slots):
+            if new is not None and (
+                old is None
+                or old.generation != new.generation
+                or adapter_identity(old.request) != adapter_identity(new.request)
+            ):
+                with gpu_sync_allowed():
+                    loaded[new.request.lora_int_id] = self._load_adapter(new.request)
+        self._dp_prepared = slots, loaded
+        self._dp_previous = (self._dp_slots, self._adapter_manager.list_adapters())
+
+    def abort_dp_loras(self) -> None:
+        self._dp_prepared = None
+        self._dp_previous = None
+
+    def finalize_dp_loras(self) -> None:
+        self._dp_previous = None
+
+    def rollback_dp_loras(self) -> None:
+        assert self._dp_previous is not None
+        previous_slots, previous_models = self._dp_previous
+        self._adapter_manager.remove_all_adapters()
+        self._dp_slots = [None] * self.lora_config.max_loras
+        self._dp_prepared = previous_slots, previous_models
+        self.commit_dp_loras()
+        self._dp_previous = None
+
+    def commit_dp_loras(self) -> None:
+        assert self._dp_prepared is not None
+        slots, loaded = self._dp_prepared
+        for old, new in zip(self._dp_slots, slots):
+            if old is not None and (
+                new is None
+                or old.generation != new.generation
+                or adapter_identity(old.request) != adapter_identity(new.request)
+            ):
+                self._adapter_manager.remove_adapter(old.request.lora_int_id)
+        with gpu_sync_allowed():
+            for index, new in enumerate(slots):
+                if new is not None and new.request.lora_int_id in loaded:
+                    adapter_id = new.request.lora_int_id
+                    self._adapter_manager.add_adapter(loaded[adapter_id])
+                    self._adapter_manager.activate_adapter(adapter_id, slot_index=index)
+        self._dp_slots = slots
+        self._dp_prepared = None
+
+    def _check_dp_request(self, request: LoRARequest) -> bool:
+        if not self.is_dp_ep_lora or self._dp_lora_warmup:
+            return False
+        if request.load_inplace or not any(
+            slot is not None
+            and adapter_identity(slot.request) == adapter_identity(request)
+            for slot in self._dp_slots
+        ):
+            raise ValueError("LoRA requests must use the globally admitted DP slots")
+        return True
+
+    def _check_dp_mutation(self) -> None:
+        if self.is_dp_ep_lora and not self._dp_lora_warmup:
+            raise ValueError("Cannot remove adapters with coordinated LoRA slots")
 
     def _load_adapter(self, lora_request: LoRARequest) -> LoRAModel:
         try:
@@ -193,7 +290,11 @@ class WorkerLoRAManager:
         return self._adapter_manager.pin_adapter(adapter_id)
 
     def set_active_adapters(self, requests: set[Any], mapping: Any | None) -> None:
-        self._apply_adapters(requests)
+        if self.is_dp_ep_lora and not self._dp_lora_warmup:
+            for request in requests:
+                self._check_dp_request(request)
+        else:
+            self._apply_adapters(requests)
         if mapping is not None:
             self._adapter_manager.set_adapter_mapping(mapping)
 
@@ -223,6 +324,8 @@ class WorkerLoRAManager:
             self.add_adapter(models_map[adapter_id])
 
     def add_adapter(self, adapter_request: Any) -> bool:
+        if self._check_dp_request(adapter_request):
+            return False
         if adapter_request.adapter_id in self.list_adapters():
             return False
         # One-time per adapter
@@ -233,9 +336,11 @@ class WorkerLoRAManager:
         return loaded
 
     def remove_adapter(self, adapter_id: int) -> bool:
+        self._check_dp_mutation()
         return self._adapter_manager.remove_adapter(adapter_id)
 
     def remove_all_adapters(self):
+        self._check_dp_mutation()
         self._adapter_manager.remove_all_adapters()
 
     def list_adapters(self) -> set[int]:
@@ -287,6 +392,8 @@ class LRUCacheWorkerLoRAManager(WorkerLoRAManager):
             self.add_adapter(lora)
 
     def add_adapter(self, lora_request: LoRARequest) -> bool:
+        if self._check_dp_request(lora_request):
+            return False
         # Note that this method is not thread-safe. It may be invoked multiple
         # times for the same adapter when using multiple API servers.
         # This is ok because it's currently only called from

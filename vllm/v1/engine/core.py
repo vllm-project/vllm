@@ -2619,6 +2619,19 @@ class DPEngineCoreProc(EngineCoreProc):
             tensor_queue=tensor_queue,
         )
 
+        self.dp_lora_coordinator = None
+        if vllm_config.is_dp_ep_lora:
+            from vllm.v1.engine.lora import DPLoRACoordinator
+
+            if self.batch_queue is not None:
+                raise ValueError("DP LoRA synchronization requires one in-flight batch")
+            self.dp_lora_coordinator = DPLoRACoordinator(self)
+
+    def update_dp_lora(self, operation_id: str, kind: str, payload: bytes) -> Future:
+        if self.dp_lora_coordinator is None:
+            raise ValueError("DP LoRA synchronization is not enabled")
+        return self.dp_lora_coordinator.update(operation_id, kind, payload)
+
     def _init_data_parallel(self, vllm_config: VllmConfig):
         # Configure GPUs and stateless process group for data parallel.
         parallel_config = vllm_config.parallel_config
@@ -2784,6 +2797,9 @@ class DPEngineCoreProc(EngineCoreProc):
                 elif not state.commit_requested and state.is_ready_for_switch():
                     self.process_input_queue_block = True
 
+            # Finished-request cleanup can run locally after peers become idle.
+            if self.dp_lora_coordinator is not None and self.engines_running:
+                self.dp_lora_coordinator.synchronize()
             executed = self._process_engine_step()
             self._maybe_publish_request_counts()
 

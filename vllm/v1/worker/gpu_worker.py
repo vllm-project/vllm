@@ -1594,6 +1594,24 @@ class Worker(WorkerBase):
             num_active_loras=0,
         )
 
+    def get_lora_slot_ids(self) -> list[int | None]:
+        return self.model_runner.lora_manager.get_slot_ids()
+
+    def prepare_dp_loras(self, payload: bytes) -> None:
+        self.model_runner.lora_manager.prepare_dp_loras(payload)
+
+    def commit_dp_loras(self) -> None:
+        self.model_runner.lora_manager.commit_dp_loras()
+
+    def finalize_dp_loras(self) -> None:
+        self.model_runner.lora_manager.finalize_dp_loras()
+
+    def rollback_dp_loras(self) -> None:
+        self.model_runner.lora_manager.rollback_dp_loras()
+
+    def abort_dp_loras(self) -> None:
+        self.model_runner.lora_manager.abort_dp_loras()
+
     def add_lora(self, lora_request: LoRARequest) -> bool:
         return self.model_runner.add_lora(lora_request)
 

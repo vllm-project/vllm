@@ -102,9 +102,9 @@ class LoRAModelRunnerMixin:
 
                 yield
 
-            # __exit__ code
-            if remove_lora:
-                self.lora_manager.remove_all_adapters()
+                # Clear warmup adapters before restoring coordinated slots.
+                if remove_lora:
+                    self.lora_manager.remove_all_adapters()
 
     @contextmanager
     def maybe_select_dummy_loras(
@@ -249,7 +249,8 @@ class LoRAModelRunnerMixin:
             yield
 
     def maybe_remove_all_loras(self, lora_config: LoRAConfig | None):
-        if lora_config is None:
+        # DEP adapters were restored when the dummy warmup context exited.
+        if lora_config is None or self.lora_manager.is_dp_ep_lora:
             return
         self.lora_manager.remove_all_adapters()
 

@@ -10,6 +10,17 @@ steps:
   source_file_dependencies:
   - vllm/lora
   - tests/lora
+  - vllm/config/lora.py
+  - vllm/engine/arg_utils.py
+  - vllm/engine/protocol.py
+  - vllm/v1/worker/lora_model_runner_mixin.py
+  - vllm/config/vllm.py
+  - vllm/v1/core/sched/
+  - vllm/v1/engine/core.py
+  - vllm/v1/engine/core_client.py
+  - vllm/v1/engine/lora.py
+  - vllm/v1/worker/gpu_worker.py
+  - vllm/entrypoints/openai/models/serving.py
   commands:
     # Which tests share a shard varies, and forking an engine is unsafe once an
     # earlier test initialized CUDA in a way vLLM's fork check misses.
@@ -17,6 +28,7 @@ steps:
     - >-
       pytest -v -s
       lora
+      --deselect=lora/test_moe_lora_ep_load.py::test_lora_slots_dp2_ep
       --ignore=lora/test_chatglm3_tp.py
       --ignore=lora/test_llama_tp.py
       --ignore=lora/test_qwen3_with_multi_loras.py
@@ -36,6 +48,17 @@ steps:
       source_file_dependencies:
       - vllm/lora
       - tests/lora
+      - vllm/config/lora.py
+      - vllm/engine/arg_utils.py
+      - vllm/engine/protocol.py
+      - vllm/v1/worker/lora_model_runner_mixin.py
+      - vllm/config/vllm.py
+      - vllm/v1/core/sched/
+      - vllm/v1/engine/core.py
+      - vllm/v1/engine/core_client.py
+      - vllm/v1/engine/lora.py
+      - vllm/v1/worker/gpu_worker.py
+      - vllm/entrypoints/openai/models/serving.py
       - vllm/platforms/rocm.py
       depends_on:
       - image-build-amd
@@ -54,6 +77,17 @@ steps:
   - vllm/model_executor/layers/fused_moe/
   - vllm/model_executor/models/transformers/moe.py
   - tests/lora
+  - vllm/config/lora.py
+  - vllm/engine/arg_utils.py
+  - vllm/engine/protocol.py
+  - vllm/v1/worker/lora_model_runner_mixin.py
+  - vllm/config/vllm.py
+  - vllm/v1/core/sched/
+  - vllm/v1/engine/core.py
+  - vllm/v1/engine/core_client.py
+  - vllm/v1/engine/lora.py
+  - vllm/v1/worker/gpu_worker.py
+  - vllm/entrypoints/openai/models/serving.py
   commands:
     # FIXIT: find out which code initialize cuda before running the test
     # before the fix, we need to use spawn to test it
@@ -66,6 +100,7 @@ steps:
     - pytest -v -s -x lora/test_llama_tp.py
     - pytest -v -s -x lora/test_qwen3_with_multi_loras.py
     - pytest -v -s -x lora/test_olmoe_tp.py
+    - pytest -v -s -x lora/test_moe_lora_ep_load.py::test_lora_slots_dp2_ep
     - pytest -v -s -x lora/test_gptoss_tp.py
     - pytest -v -s -x lora/test_qwen35_densemodel_lora.py
     - pytest -v -s -x lora/test_gemma4_tp.py
@@ -88,6 +123,17 @@ steps:
       - vllm/model_executor/models/transformers/moe.py
       - vllm/platforms/rocm.py
       - tests/lora
+      - vllm/config/lora.py
+      - vllm/engine/arg_utils.py
+      - vllm/engine/protocol.py
+      - vllm/v1/worker/lora_model_runner_mixin.py
+      - vllm/config/vllm.py
+      - vllm/v1/core/sched/
+      - vllm/v1/engine/core.py
+      - vllm/v1/engine/core_client.py
+      - vllm/v1/engine/lora.py
+      - vllm/v1/worker/gpu_worker.py
+      - vllm/entrypoints/openai/models/serving.py
       commands:
       - export VLLM_WORKER_MULTIPROC_METHOD=spawn
       # expandable_segments breaks custom all-reduce IPC on ROCm.
@@ -95,7 +141,29 @@ steps:
       - pytest -v -s -x lora/test_llama_tp.py
       - pytest -v -s -x lora/test_qwen3_with_multi_loras.py
       - pytest -v -s -x lora/test_olmoe_tp.py
+      - pytest -v -s -x lora/test_moe_lora_ep_load.py::test_lora_slots_dp2_ep
       - pytest -v -s -x lora/test_gptoss_tp.py
       - pytest -v -s -x lora/test_qwen35_densemodel_lora.py
       - pytest -v -s -x lora/test_gemma4_tp.py
       - pytest -v -s -x lora/test_sequence_classification.py::test_batched_loras_tp
+
+- label: ":nvidia: (H100) [Nightly] Online LoRA DP + EP"
+  key: lora-online-dep8
+  optional: true
+  timeout_in_minutes: 30
+  device: h100
+  num_devices: 8
+  working_dir: "/vllm-workspace/tests"
+  source_file_dependencies:
+  - vllm/lora/
+  - vllm/config/
+  - vllm/engine/arg_utils.py
+  - vllm/engine/protocol.py
+  - vllm/v1/engine/
+  - vllm/v1/core/sched/
+  - vllm/v1/worker/
+  - vllm/entrypoints/openai/models/serving.py
+  - tests/lora/test_olmoe_tp.py
+  commands:
+  - export VLLM_WORKER_MULTIPROC_METHOD=spawn
+  - pytest -v -s -x lora/test_olmoe_tp.py -k online

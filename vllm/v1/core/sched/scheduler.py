@@ -27,6 +27,7 @@ from vllm.distributed.kv_transfer.kv_connector.v1 import (
 from vllm.distributed.kv_transfer.kv_connector.v1.base import KVConnectorMetadata
 from vllm.distributed.kv_transfer.kv_connector.v1.metrics import KVConnectorStats
 from vllm.logger import init_logger
+from vllm.lora.dp_manager import LoRAUsage
 from vllm.multimodal import MULTIMODAL_REGISTRY, MultiModalRegistry
 from vllm.multimodal.encoder_budget import MultiModalBudget
 from vllm.multimodal.inputs import MultiModalKwargsItem
@@ -99,6 +100,7 @@ class Scheduler(SchedulerInterface):
         self.scheduler_config = vllm_config.scheduler_config
         self.cache_config = vllm_config.cache_config
         self.lora_config = vllm_config.lora_config
+        self.allowed_lora_ids: set[int] | None = None
         self.model_uses_mrope = vllm_config.model_config.uses_mrope
         self.kv_cache_config = kv_cache_config
         self.kv_events_config = vllm_config.kv_events_config
@@ -682,6 +684,24 @@ class Scheduler(SchedulerInterface):
             num_new_tokens -= self.num_prefill_lookahead - remaining
         return max(num_new_tokens, 0)
 
+    def get_lora_usage(self) -> list[LoRAUsage]:
+        return [
+            LoRAUsage(
+                request.lora_request,
+                request.status == RequestStatus.RUNNING,
+                request.status != RequestStatus.WAITING_FOR_STREAMING_REQ,
+                request.priority,
+                request.arrival_time,
+                request.request_id,
+                request.client_index,
+            )
+            for request in self.requests.values()
+            if request.lora_request is not None and not request.is_finished()
+        ]
+
+    def set_allowed_loras(self, adapter_ids: set[int]) -> None:
+        self.allowed_lora_ids = adapter_ids
+
     def schedule(self, throttle_prefills: bool = False) -> SchedulerOutput:
         self.current_step += 1
         # NOTE(woosuk) on the scheduling algorithm:
@@ -1076,6 +1096,14 @@ class Scheduler(SchedulerInterface):
                     # Deliverable stale output still in flight: resuming now
                     # could resample a position that output later delivers.
                     # It drains within the pipeline depth.
+                    skip_request(request_queue)
+                    continue
+
+                if (
+                    self.allowed_lora_ids is not None
+                    and request.lora_request is not None
+                    and request.lora_request.lora_int_id not in self.allowed_lora_ids
+                ):
                     skip_request(request_queue)
                     continue
 

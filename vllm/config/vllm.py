@@ -1442,6 +1442,13 @@ class VllmConfig:
             f'dtype="{model_dtype}". Please set `--kv-cache-dtype` to {allowed}.'
         )
 
+    @property
+    def is_dp_ep_lora(self) -> bool:
+        """Whether MoE LoRA requires coordinated residency across DP/EP ranks."""
+        return self.lora_config is not None and self.lora_config.is_dp_ep(
+            self.model_config, self.parallel_config
+        )
+
     def __post_init__(self):
         """Verify configs are valid & consistent with each other."""
         # To give each torch profile run a unique instance name.
@@ -1590,6 +1597,9 @@ class VllmConfig:
             and self.parallel_config.enable_dbo
             and self.parallel_config.all2all_backend == "deepep_high_throughput"
         )
+
+        if self.lora_config is not None:
+            self.lora_config.verify_with_vllm_config(self)
 
         if self.scheduler_config.async_scheduling:
             # Async scheduling explicitly enabled, hard fail any incompatibilities.
