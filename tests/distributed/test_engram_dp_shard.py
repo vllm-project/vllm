@@ -288,7 +288,7 @@ def _check_peer_group_table(store_path: str):
     # A dropped table unmaps its slices; once every GPU has, its HBM is freed.
     free, _ = torch.accelerator.get_memory_info()
     del table
-    group.all_gather("released", b"")
+    group.barrier()
     assert torch.accelerator.get_memory_info()[0] > free
 
 
@@ -301,7 +301,7 @@ def test_engram_peer_group_assigns_ranks_and_gathers(tmp_path):
         groups = list(pool.map(lambda _: EngramPeerGroup(4, path), range(4)))
         gathered = list(
             pool.map(
-                lambda group: group.all_gather("key", b"%d" % group.rank_in_group),
+                lambda group: group.all_gather(b"%d" % group.rank_in_group),
                 groups,
             )
         )
@@ -315,8 +315,20 @@ def test_engram_peer_group_names_missing_gpus(tmp_path, monkeypatch):
     """A peer that never arrives fails startup with its rank, not a bare timeout."""
     monkeypatch.setattr(EngramPeerGroup, "TIMEOUT", timedelta(milliseconds=200))
     group = EngramPeerGroup(2, str(tmp_path / "peers"))
-    with pytest.raises(TimeoutError, match=r"GPUs \[1\] did not reach 'loaded'"):
-        group.all_gather("loaded", b"")
+    with pytest.raises(TimeoutError, match=r"GPUs \[1\] did not reach startup step 1"):
+        group.barrier()
+
+
+def test_engram_peer_group_table_rejects_reload(tmp_path, monkeypatch):
+    """Other engines read a table's rows at any time, so it cannot reload."""
+    monkeypatch.setattr(torch.accelerator, "synchronize", lambda: None)
+    table = ParallelEngramEmbedding.__new__(ParallelEngramEmbedding)
+    torch.nn.Module.__init__(table)
+    table.peer_rows = 1
+    table._peer_group = EngramPeerGroup(1, str(tmp_path / "peers"))
+    table.process_weights_after_loading()
+    with pytest.raises(RuntimeError, match="cannot reload weights"):
+        table.process_weights_after_loading()
 
 
 def _check_fp8_batch(vllm_config):

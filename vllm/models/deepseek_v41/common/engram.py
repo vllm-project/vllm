@@ -578,7 +578,7 @@ def _engram_lookup_kernel(
         row_weight += local * DIM
         row_scales += local * (DIM // QUANT_BLOCK)
         if PACKED:
-            # Copy values then scales WORD at a time: one memory request a word.
+            # Copy values and scales WORD at a time: one memory request a word.
             word_bytes: tl.constexpr = WORD.primitive_bitwidth // 8
             value_words = tl.arange(0, DIM // word_bytes)
             scale_words = tl.arange(0, DIM // QUANT_BLOCK // word_bytes)
@@ -586,18 +586,19 @@ def _engram_lookup_kernel(
             dst = dst.to(tl.int64)
             dst = dst // LOCAL_HEADS * OUT_STRIDE + dst % LOCAL_HEADS * width
             out_row = (out + dst).to(tl.pointer_type(WORD))
+            # Load both first: a load after a store waits out its round trip.
             values = tl.load(
                 row_weight.to(tl.pointer_type(WORD))[:, None] + value_words[None, :],
                 mask=owned[:, None],
                 other=0,
             )
-            tl.store(
-                out_row[:, None] + value_words[None, :], values, mask=valid[:, None]
-            )
             scale = tl.load(
                 row_scales.to(tl.pointer_type(WORD))[:, None] + scale_words[None, :],
                 mask=owned[:, None],
                 other=0,
+            )
+            tl.store(
+                out_row[:, None] + value_words[None, :], values, mask=valid[:, None]
             )
             out_row += DIM // word_bytes
             tl.store(
@@ -683,8 +684,10 @@ def gather_errors(group: GroupCoordinator, error: str | None) -> str:
 class EngramPeerGroup:
     """GPUs of several engines that split each Engram table over their HBM.
 
-    They meet once, at startup, through a file store; lookups then read peers'
-    rows directly, so no engine's step ever waits on another's.
+    They meet only at startup, through a file store; lookups then read peers'
+    rows directly, so no engine's step ever waits on another's. Every GPU
+    builds and loads the same tables in the same order, so its n-th exchange
+    is every peer's n-th.
     """
 
     # Engines load their weights at their own pace before the group can serve.
@@ -702,16 +705,13 @@ class EngramPeerGroup:
                 f"More than {size} GPUs joined the Engram peer group at {path}; "
                 "check peer_group_size and use a fresh store path per launch"
             )
-        self._num_tables = 0
+        self._step = 0
 
-    def next_table_key(self) -> str:
-        """Engines allocate their tables in the same order, so counting names a
-        table alike on every GPU."""
-        self._num_tables += 1
-        return f"table{self._num_tables}"
-
-    def all_gather(self, key: str, value: bytes) -> list[bytes]:
-        """Every GPU's value for `key` in rank order, once all have set theirs."""
+    def all_gather(self, value: bytes) -> list[bytes]:
+        """Every GPU's value for the next exchange in rank order, once all have
+        set theirs."""
+        self._step += 1
+        key = f"step{self._step}"
         self.store.set(f"{key}/{self.rank_in_group}", value)
         keys = [f"{key}/{rank}" for rank in range(self.world_size)]
         try:
@@ -721,11 +721,14 @@ class EngramPeerGroup:
                 rank for rank, name in enumerate(keys) if not self.store.check([name])
             ]
             raise TimeoutError(
-                f"Engram peer GPUs {missing} did not reach {key!r} within "
-                f"{self.TIMEOUT}; every engine of the group must start, and none "
-                "may restart alone"
+                f"Engram peer GPUs {missing} did not reach startup step "
+                f"{self._step} within {self.TIMEOUT}; every engine of the group "
+                "must start, and none may restart alone"
             ) from exc
         return [self.store.get(name) for name in keys]
+
+    def barrier(self) -> None:
+        self.all_gather(b"")
 
 
 @cache
@@ -975,8 +978,7 @@ class ParallelEngramEmbedding(nn.Module):
     _weight_loader = staticmethod(_engram_head_shard_weight_loader)
     _shared_memory: DPSharedEngramStorage | None = None
     _packed: torch.Tensor | None = None
-    # Where this table's slice is published, if its rows span several engines.
-    _peer_key: str | None = None
+    _loaded = False
 
     def __init__(
         self,
@@ -1122,12 +1124,9 @@ class ParallelEngramEmbedding(nn.Module):
                     share_peer_table,
                 )
 
-                self._peer_key = peers.next_table_key()
                 # Held here like the symmetric handle, so lookups keep every
                 # slice mapped even if a loader replaces the parameters' data.
-                buffer, self._peer_mappings = share_peer_table(
-                    num_bytes, peers, self._peer_key
-                )
+                buffer, self._peer_mappings = share_peer_table(num_bytes, peers)
                 pointers = self._peer_mappings.addresses
             else:
                 import torch.distributed._symmetric_memory as symm_mem
@@ -1190,12 +1189,16 @@ class ParallelEngramEmbedding(nn.Module):
         of the group has finished loading its own."""
         if not self.peer_rows:
             return
+        assert self._peer_group is not None
+        if self._loaded and isinstance(self._peer_group, EngramPeerGroup):
+            # Other engines read these rows at any time, also while they reload.
+            raise RuntimeError(
+                "Engram tables split across engines (peer_group_size) cannot "
+                "reload weights; restart the peer group instead"
+            )
         torch.accelerator.synchronize()
-        if isinstance(self._peer_group, EngramPeerGroup):
-            self._peer_group.all_gather(f"{self._peer_key}/loaded", b"")
-        else:
-            assert self._peer_group is not None
-            self._peer_group.barrier()
+        self._peer_group.barrier()
+        self._loaded = True
 
     def collapse_huge_pages(self) -> None:
         """Best-effort MADV_COLLAPSE (Linux >= 6.1) of pages that faulted small."""
@@ -1267,11 +1270,10 @@ class ParallelEngramEmbedding(nn.Module):
         # 128-row tiles, each program keeps 8x the reads in flight.
         block_r = 128 if rows >= 128 * max_grid else 16
         packed = out.dtype == torch.uint8
-        # 128-row tiles copy packed rows 8 bytes per load where their values,
-        # scales and output rows are 8-byte aligned (16-row tiles: a byte).
+        # Copy packed rows 8 bytes per load where their values, scales and
+        # output rows are 8-byte aligned.
         wide = (
             packed
-            and block_r == 128
             and self.dim // self.block_size % 8 == 0
             and (out.stride(0) | out.data_ptr()) % 8 == 0
         )

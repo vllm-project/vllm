@@ -1582,25 +1582,46 @@ _PEER_GROUP = {
 
 @pytest.mark.skip_global_cleanup
 @pytest.mark.parametrize(
-    "options,tp_size,dp_size,error",
+    "options,parallel,error",
     [
-        ({"cpu_offload": False, "peer_group_size": 4}, 1, 2, "set together"),
-        ({"cpu_offload": False, "peer_group_store": "/p"}, 1, 2, "set together"),
-        (_PEER_GROUP | {"cpu_offload": True}, 1, 2, "requires cpu_offload=False"),
-        (_PEER_GROUP, 2, 2, "TP=1"),
-        (_PEER_GROUP, 1, 8, "cannot hold an engine of 8"),
-        (_PEER_GROUP, 1, 4, None),
+        ({"cpu_offload": False, "peer_group_size": 4}, {}, "set together"),
+        ({"cpu_offload": False, "peer_group_store": "/p"}, {}, "set together"),
+        (_PEER_GROUP | {"cpu_offload": True}, {}, "requires cpu_offload=False"),
+        (_PEER_GROUP, {"tensor_parallel_size": 2}, "TP=1"),
+        (_PEER_GROUP, {"pipeline_parallel_size": 2}, "PP=1"),
+        (_PEER_GROUP, {"data_parallel_size": 8}, "cannot hold an engine of 8"),
+        (_PEER_GROUP, {"data_parallel_size": 4}, None),
     ],
 )
-def test_engram_peer_group_validation(options, tp_size, dp_size, error, monkeypatch):
+def test_engram_peer_group_validation(options, parallel, error, monkeypatch):
     monkeypatch.setattr(current_platform, "is_cuda", lambda: True)
-    parallel = ParallelConfig(
-        tensor_parallel_size=tp_size,
-        data_parallel_size=dp_size,
-        distributed_executor_backend="mp",
+    config = ParallelConfig(
+        **({"data_parallel_size": 2} | parallel), distributed_executor_backend="mp"
     )
     with pytest.raises(ValueError, match=error) if error else nullcontext():
-        EngramConfig(**options).verify_parallel_config(parallel)
+        EngramConfig(**options).verify_parallel_config(config)
+
+
+@pytest.mark.skip_global_cleanup
+@pytest.mark.parametrize(
+    "architecture,layer_field,supported",
+    [
+        ("DeepseekV41ForCausalLM", "engram_layer_ids", True),
+        ("Qwen4ExpForCausalLM", "ple_layer_ids", False),
+    ],
+)
+def test_engram_peer_group_requires_deepseek_v41(architecture, layer_field, supported):
+    """Qwen4Exp's tables ignore peer groups, so they would not be split."""
+    model = cast(
+        ModelConfig,
+        SimpleNamespace(
+            architecture=architecture,
+            hf_text_config=SimpleNamespace(**{layer_field: [1]}),
+        ),
+    )
+    config = EngramConfig(**_PEER_GROUP)
+    with nullcontext() if supported else pytest.raises(ValueError, match="V4.1"):
+        config.verify_model_config(model)
 
 
 @pytest.mark.skip_global_cleanup

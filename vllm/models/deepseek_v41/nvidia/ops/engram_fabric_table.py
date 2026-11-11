@@ -234,7 +234,7 @@ class PeerTableMappings:
 
 
 def share_peer_table(
-    num_bytes: int, group: EngramPeerGroup, key: str
+    num_bytes: int, group: EngramPeerGroup
 ) -> tuple[torch.Tensor, PeerTableMappings]:
     """Allocate this GPU's slice of a table in its HBM and map every GPU's slice.
 
@@ -249,7 +249,7 @@ def share_peer_table(
     prop.requestedHandleTypes = FABRIC_HANDLE
     size = round_up(num_bytes, _allocation_granularity(prop))
     own = _call_driver(cu.cuMemCreate, size, prop, 0)
-    exported = group.all_gather(key, _export_fabric_handle(own))
+    exported = group.all_gather(_export_fabric_handle(own))
     access = _read_write_access(
         cu.CUmemLocationType.CU_MEM_LOCATION_TYPE_DEVICE, device
     )

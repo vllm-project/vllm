@@ -189,8 +189,9 @@ table and reads the other rows from their owner's HBM:
 `peer_group_size` is the sum of the engines' GPU counts. `peer_group_store` is
 a file the engines meet through once at startup: give every engine the same
 path, reachable by all of them (a shared filesystem across nodes) and fresh per
-launch. Requires CUDA FABRIC handles (an IMEX channel, as on NVL72), TP=1 and
-`cpu_offload` disabled; restarting one engine means restarting the group.
+launch. Requires CUDA FABRIC handles (an IMEX channel, as on NVL72), TP=1, PP=1
+and `cpu_offload` disabled. Weights cannot be reloaded, and restarting one
+engine means restarting the group.
 
 ## Limitations
 
