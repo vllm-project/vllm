@@ -176,7 +176,7 @@ QUICK = [
         "requests in GPU",
         concurrency=16,
         offload_block_size=64,
-        prefix_tokens=150_000,
+        prefix_tokens=100_000,
         cpu_bytes=gib(40),
         gpu_bytes=gib(20),
     ),
