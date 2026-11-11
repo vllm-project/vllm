@@ -19,7 +19,6 @@ from vllm.model_executor.layers.vocab_parallel_embedding import (
     ParallelLMHead,
     VocabParallelEmbedding,
 )
-from vllm.model_executor.model_loader.weight_utils import default_weight_loader
 from vllm.model_executor.utils import refill_derived
 
 from .gemma4_mtp import Gemma4MTPAttention, Gemma4MTPDecoderLayer
@@ -33,7 +32,7 @@ from .qwen3_dspark import (
     DSparkMarkovHead,
     Qwen3DSparkForCausalLM,
 )
-from .utils import extract_layer_index, maybe_prefix
+from .utils import AutoWeightsLoader, WeightsMapper, extract_layer_index, maybe_prefix
 
 
 class Gemma4DSparkAttention(Gemma4MTPAttention):
@@ -143,6 +142,15 @@ class Gemma4DSparkDecoderLayer(Gemma4MTPDecoderLayer):
 @support_torch_compile
 class Gemma4DSparkModel(DFlashQwen3Model):
     """Gemma4 DSpark draft backbone (Gemma4 layers + DSpark Markov head)."""
+
+    # Replaces the inherited DFlashQwen3Model mapper, which also fuses
+    # q/k/v into qkv_proj; Gemma4 DSpark attention keeps them separate.
+    hf_to_vllm_mapper = WeightsMapper(
+        orig_to_new_stacked={
+            ".gate_proj": (".gate_up_proj", 0),
+            ".up_proj": (".gate_up_proj", 1),
+        }
+    )
 
     def __init__(self, *, vllm_config: VllmConfig, prefix: str = "") -> None:
         nn.Module.__init__(self)
@@ -330,21 +338,24 @@ class Gemma4DSparkForCausalLM(Qwen3DSparkForCausalLM):
         self.draft_id_to_target_id = None
 
     def load_weights(self, weights: Iterable[tuple[str, torch.Tensor]]) -> set[str]:
-        stacked = [("gate_up_proj", "gate_proj", 0), ("gate_up_proj", "up_proj", 1)]
-        params = dict(self.named_parameters())
-        params.update(dict(self.named_buffers()))
-        loaded: set[str] = set()
-        for name, w in weights:
-            if "lm_head" not in name:
-                name = "model." + name
-            for pn, wn, shard in stacked:
-                if wn in name and (mapped := name.replace(wn, pn)) in params:
-                    params[mapped].weight_loader(params[mapped], w, shard)
-                    loaded.add(mapped)
-                    break
-            else:
-                if name in params:
-                    p = params[name]
-                    getattr(p, "weight_loader", default_weight_loader)(p, w)
-                    loaded.add(name)
-        return loaded
+        has_confidence_head = self.model.confidence_head is not None
+
+        def prefix_checkpoint_names(
+            weights: Iterable[tuple[str, torch.Tensor]],
+        ) -> Iterable[tuple[str, torch.Tensor]]:
+            # The checkpoint is flat: everything except `lm_head` lives under
+            # `self.model`.
+            for name, weight in weights:
+                if "confidence_head" in name and not has_confidence_head:
+                    # The config disabled the head, so these weights have no
+                    # parameter to load into.
+                    continue
+                if "lm_head" not in name:
+                    name = "model." + name
+                yield name, weight
+
+        # `model.*` weights are delegated to Gemma4DSparkModel.load_weights,
+        # which applies Gemma4DSparkModel.hf_to_vllm_mapper. The fused context
+        # K/V buffers are built afterwards by process_weights_after_loading.
+        loader = AutoWeightsLoader(self)
+        return loader.load_weights(prefix_checkpoint_names(weights))
