@@ -26,6 +26,7 @@ from vllm.config.utils import getattr_iter
 from vllm.model_executor.layers.pooler import DispatchPooler
 from vllm.model_executor.models.interfaces import SupportsCrossEncoding
 from vllm.model_executor.models.interfaces_base import VllmModelForPooling
+from vllm.model_executor.models.utils import WeightsMapper
 
 from .base import Base
 
@@ -97,6 +98,10 @@ class SequenceClassificationMixin(SupportsCrossEncoding, VllmModelForPooling, Ba
                 "`AutoModelForSequenceClassification` instance."
             )
         self.init_parameters(self.classifier, dtype=self.model_config.head_dtype)
+        # Load a head that Transformers calls `score` into `classifier`
+        if getattr(seq_cls_model, "classifier", None) is None:
+            score_mapper = WeightsMapper(orig_to_new_prefix={"score.": "classifier."})
+            self.hf_to_vllm_mapper = self.hf_to_vllm_mapper | score_mapper
 
         # Order `ClassifierWithReshape` ahead of the classifier's own class so that
         # its `super().forward(...)` reaches the original implementation.

@@ -231,7 +231,7 @@ _EMBEDDING_MODELS = {
     "GteNewModel": ("bert_with_rope", "GteNewModel"),
     "JinaEmbeddingsV5Model": ("jina", "JinaEmbeddingsV5Model"),
     "Lfm2BidirectionalModel": ("lfm2", "Lfm2BidirectionalModel"),
-    "LlamaBidirectionalModel": ("llama", "LlamaBidirectionalModel"),
+    "LlamaBidirectionalModel": ("transformers", "TransformersEmbeddingModel"),
     "LlamaModel": ("llama", "LlamaForCausalLM"),
     **{
         # Multiple models share the same architecture, so we include them all
@@ -329,8 +329,8 @@ _SEQUENCE_CLASSIFICATION_MODELS = {
     ),
     "JambaForSequenceClassification": ("jamba", "JambaForSequenceClassification"),
     "LlamaBidirectionalForSequenceClassification": (
-        "llama",
-        "LlamaBidirectionalForSequenceClassification",
+        "transformers",
+        "TransformersForSequenceClassification",
     ),
     "ModernBertForSequenceClassification": (
         "modernbert",

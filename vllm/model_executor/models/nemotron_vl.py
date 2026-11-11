@@ -1,6 +1,5 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
-import math
 from collections.abc import Iterable
 
 import torch
@@ -138,10 +137,12 @@ class LlamaNemotronVLChatModel(nn.Module, SupportsMultiModal, SupportsPP, Suppor
             self.mlp1 = self._init_mlp1(config)
 
         with self._mark_language_model(vllm_config):
+            # Native Llama reads `is_causal` from the text config to be bidirectional
             self.language_model = init_vllm_registered_model(
                 vllm_config=vllm_config,
                 hf_config=config.get_text_config(),
                 prefix=maybe_prefix(prefix, "language_model"),
+                architectures=["LlamaForCausalLM"],
             )
 
         self.img_context_token_id: int | None = None
@@ -596,24 +597,3 @@ class LlamaNemotronVLForSequenceClassification(
         pooler_config = model_config.pooler_config
         assert pooler_config is not None
         self.pooler = DispatchPooler.for_seq_cls(pooler_config, classifier=self.score)
-
-    def load_weights(self, weights: Iterable[tuple[str, torch.Tensor]]) -> set[str]:
-        loaded_weights = super().load_weights(weights)
-
-        # reranker checkpoint omits the inner LM seq-cls head
-        # (`language_model.score.*`). It is unused by this outer model, but
-        # the default loader expects all parameters to be initialized.
-        for name, param in self.named_parameters():
-            if not name.startswith("language_model.score.") or name in loaded_weights:
-                continue
-
-            if name.endswith(".weight"):
-                torch.nn.init.kaiming_uniform_(param, a=math.sqrt(5))
-            elif name.endswith(".bias"):
-                torch.nn.init.zeros_(param)
-            else:
-                torch.nn.init.normal_(param, mean=0.0, std=0.02)
-
-            loaded_weights.add(name)
-
-        return loaded_weights
