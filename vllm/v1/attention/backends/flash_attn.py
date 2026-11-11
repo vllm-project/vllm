@@ -1490,7 +1490,7 @@ class FlashAttentionImpl(AttentionImpl):
             (
                 dcp_context_out_tokens,
                 self.num_heads * self.dcp_world_size,
-                self.head_size,
+                output.shape[-1],
             ),
             self._dcp_dtype,
         )
