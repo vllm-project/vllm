@@ -1227,6 +1227,18 @@ class SamplingParams(
         structured_outputs_config: StructuredOutputsConfig | None,
         tokenizer: TokenizerLike | None,
     ) -> None:
+        # Reject wrong types before any attribute access below (e.g. `._backend`),
+        # so callers get a validation error instead of an AttributeError.
+        if self.structured_outputs is not None and not isinstance(
+            self.structured_outputs, StructuredOutputsParams
+        ):
+            raise VLLMValidationError(
+                "structured_outputs must be a StructuredOutputsParams instance "
+                f"or None; got {type(self.structured_outputs).__name__}.",
+                parameter="structured_outputs",
+                value=type(self.structured_outputs).__name__,
+            )
+
         if structured_outputs_config is None or self.structured_outputs is None:
             return
 

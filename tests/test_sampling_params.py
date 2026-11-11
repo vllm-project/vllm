@@ -7,7 +7,9 @@ import pytest
 
 from vllm import SamplingParams
 from vllm.config.diffusion import DiffusionConfig
+from vllm.config.structured_outputs import StructuredOutputsConfig
 from vllm.exceptions import VLLMValidationError
+from vllm.sampling_params import StructuredOutputsParams
 from vllm.utils.diffusion import validate_diffusion_sampling_params
 from vllm.v1.engine.input_processor import InputProcessor
 
@@ -280,3 +282,24 @@ def test_extra_args_preserves_custom_objects_and_shared_containers():
     params = SamplingParams(extra_args=extra_args)
     assert params.extra_args["first"][0] is custom
     assert params.extra_args["first"] is params.extra_args["second"]
+
+
+@pytest.mark.parametrize("value", ["json", 1, {"type": "object"}, ["json"]])
+def test_structured_outputs_rejects_non_structured_outputs_params(value):
+    params = SamplingParams(structured_outputs=value)
+    with pytest.raises(VLLMValidationError, match="must be a StructuredOutputsParams"):
+        params.verify(MockModelConfig(), None, StructuredOutputsConfig(), None)
+
+
+def test_structured_outputs_none_is_accepted():
+    SamplingParams().verify(MockModelConfig(), None, StructuredOutputsConfig(), None)
+
+
+def test_structured_outputs_params_instance_passes_type_check():
+    # With a valid instance the type guard passes and the next check (tokenizer
+    # required) is reached instead.
+    params = SamplingParams(
+        structured_outputs=StructuredOutputsParams(json={"type": "object"})
+    )
+    with pytest.raises(VLLMValidationError, match="requires a tokenizer"):
+        params.verify(MockModelConfig(), None, StructuredOutputsConfig(), None)
