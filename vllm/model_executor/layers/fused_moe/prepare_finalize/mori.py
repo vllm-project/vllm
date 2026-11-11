@@ -29,13 +29,14 @@ def _trim_dispatch_output(
     dispatch_weights: torch.Tensor,
     dispatch_recv_token_num: torch.Tensor,
     ep_size: int,
-    topk: int,
     input_num_tokens: int,
 ) -> tuple[torch.Tensor, torch.Tensor | None, torch.Tensor, torch.Tensor]:
     orig_rows = dispatch_a1.shape[0]
 
     if _is_stream_capturing():
-        valid_rows = input_num_tokens * topk * ep_size
+        # MoRI sends each source token to a given rank at most once, and every
+        # rank runs the same padded batch under capture.
+        valid_rows = input_num_tokens * ep_size
     elif dispatch_recv_token_num is not None and dispatch_recv_token_num.numel() > 0:
         valid_rows = int(dispatch_recv_token_num.reshape(-1)[0].item())
     else:
@@ -167,7 +168,6 @@ class MoriPrepareAndFinalize(mk.FusedMoEPrepareAndFinalizeModular):
                 dispatch_weights,
                 dispatch_recv_token_num,
                 ep_size=self.num_dispatchers_,
-                topk=topk_ids.shape[1],
                 input_num_tokens=a1.shape[0],
             )
         )
