@@ -2744,6 +2744,28 @@ def test_reset_prefix_cache_publishes_real_manager_event():
     publisher.publish.assert_called_once()
     batch = publisher.publish.call_args.args[0]
     assert any(isinstance(event, AllBlocksCleared) for event in batch.events)
+
+
+def test_reset_prefix_cache_merges_connector_events():
+    scheduler = create_scheduler(
+        enable_prefix_caching=True,
+        kv_events_config=KVEventsConfig(enable_kv_cache_events=True, publisher="null"),
+    )
+    publisher = Mock()
+    scheduler.kv_event_publisher = publisher
+    scheduler.log_stats = False
+    connector_event = Mock()
+    scheduler.connector = Mock()
+    scheduler.connector.reset_cache.return_value = True
+    scheduler.connector.take_events.return_value = [connector_event]
+    scheduler.kv_cache_manager.reset_prefix_cache = Mock(return_value=True)
+    scheduler.kv_cache_manager.take_events = Mock(return_value=[AllBlocksCleared()])
+
+    assert scheduler.reset_prefix_cache(reset_connector=True)
+    batch = publisher.publish.call_args.args[0]
+    assert batch.events == [AllBlocksCleared(), connector_event]
+
+
 @pytest.mark.parametrize("reset_successful", [False, True])
 def test_aux_output_reset_follows_kv_reset_result(reset_successful: bool):
     scheduler = create_scheduler(enable_prefix_caching=True)
