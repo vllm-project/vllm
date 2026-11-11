@@ -24,6 +24,7 @@ from transformers import (
 from vllm.config import (
     ModelConfig,
     ParallelConfig,
+    PoolerConfig,
     SpeculativeConfig,
     VllmConfig,
     set_current_vllm_config,
@@ -328,6 +329,31 @@ def test_embed_loading(vllm_runner, model):
     ) as model_test:
         model_config = model_test.llm.llm_engine.model_config
         assert model_config.using_transformers_backend()
+
+
+def test_embed_bidirectional_decoder(vllm_runner, example_prompts):
+    """`is_causal=False` on the config makes a decoder bidirectional, as natively,
+    even though Transformers' attention hardcodes `is_causal=True`."""
+    outputs = {}
+    for model_impl in ("vllm", "transformers"):
+        with vllm_runner(
+            "meta-llama/Llama-3.2-1B-Instruct",
+            runner="pooling",
+            model_impl=model_impl,
+            hf_overrides={"architectures": ["LlamaModel"], "is_causal": False},
+            pooler_config=PoolerConfig(seq_pooling_type="LAST"),
+            max_model_len=512,
+            enforce_eager=True,
+            gpu_memory_utilization=0.3,
+        ) as vllm_model:
+            outputs[model_impl] = vllm_model.embed(example_prompts)
+
+    check_embeddings_close(
+        embeddings_0_lst=outputs["vllm"],
+        embeddings_1_lst=outputs["transformers"],
+        name_0="vllm",
+        name_1="transformers",
+    )
 
 
 @pytest.mark.parametrize(
