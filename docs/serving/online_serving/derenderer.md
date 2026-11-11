@@ -54,6 +54,8 @@ Only `output_mode: "tokens"` responses are accepted which is the default. A resp
     --8<-- "vllm/entrypoints/scale_out/token_in_token_out/protocol.py:derender-chat-request"
     ```
 
+In the response, `usage.prompt_tokens_details` is copied from `generate_response.usage`. When a reasoning parser is configured, `usage.completion_tokens_details.reasoning_tokens` is the number of reasoning tokens summed over all choices, as on `/v1/chat/completions`.
+
 `/v1/completions/derender`:
 
 ??? code
@@ -88,8 +90,9 @@ Oversized payloads are rejected with a `400` before any `tokenizer.decode()` or 
 
 The derenderer builds its tool and reasoning parsers from its own server flags plus the `chat_request` sent with each call. It can't see how the request was rendered or served anywhere else, so for its output to match a `vllm serve` server:
 
-- Start the render server with the same `--tool-call-parser`, `--reasoning-parser`, `--enable-auto-tool-choice`, `--chat-template` and `--default-chat-template-kwargs` you'd give `vllm serve` for this model. If `/render` and `/derender` run on different servers, give both the same values.
+- Start the render server with the same `--tool-call-parser`, `--reasoning-parser`, `--enable-auto-tool-choice`, `--chat-template`, `--default-chat-template-kwargs` and `--response-role` you'd give `vllm serve` for this model. If `/render` and `/derender` run on different servers, give both the same values.
 - Send the full `chat_request` that went to `/render`, not just `messages` and `tools`. Fields like `chat_template_kwargs`, `reasoning_effort`, `tool_choice` and `include_reasoning` change how the output is parsed.
+- The message `role` is `--response-role`, or the last message's role when `add_generation_prompt` is `false`. With `echo: true`, the last message's content is prepended when its role matches, as on `/v1/chat/completions`. Streaming puts the echoed text at the start of the first chunk's `content` instead of in a chunk of its own.
 
 `/derender` decodes with the flags in `chat_request` which can differ from what the engine ran with. For parsers whose `adjust_request` changes decoding, use [`output_mode: "derender"`](token_in_token_out.md#derender) on `/inference/v1/generate`. It parses the engine's own text and matches coupled chat.
 
@@ -116,7 +119,7 @@ The server keeps no state between calls. Everything the next call needs is in `s
 - **Echo `stream_state` back.** Leave it out (or send `null`) on the first call, then send the `stream_state` from each response with the next request, unchanged. State that doesn't add up (e.g. `output_chunk_lens` that don't sum to the number of output tokens) is rejected with a `400`.
 - **One choice per chunk.** `/inference/v1/generate` sends one choice per SSE event and each derender call accepts at most one. More than one is rejected with a `400`.
 - **`n > 1` is N streams.** Generate interleaves chunks for different choices and tags each with its `index`. Keep one `stream_state` per index and send each chunk with the state for its index. Each index gets its own `role` delta on its first chunk.
-- **Send every chunk through, including the last ones.** The finish reason usually arrives with the final tokens. A chunk with a `finish_reason` and no tokens is accepted too and flushes any buffered tool call arguments. With `stream_options: {"include_usage": true}`, generate ends with a usage only chunk (`choices: []`). Send it through derender like any other chunk to get the usage chunk for the response. `usage.prompt_tokens` is the request's `prompt_tokens` if set, otherwise the generate chunk's.
+- **Send every chunk through, including the last ones.** The finish reason usually arrives with the final tokens. A chunk with a `finish_reason` and no tokens is accepted too and flushes any buffered tool call arguments. With `stream_options: {"include_usage": true}`, generate ends with a usage only chunk (`choices: []`). Send it through derender like any other chunk to get the usage chunk for the response. `usage.prompt_tokens` is the request's `prompt_tokens` if set, otherwise the generate chunk's. `usage.prompt_tokens_details` is the generate chunk's. `usage.completion_tokens_details.reasoning_tokens` is counted by the reasoning parser over the tokens in `stream_state` when one is configured, as on `/v1/chat/completions`. With `n > 1` it stays `null`: the usage chunk arrives with one index's `stream_state`, so the count can't cover every choice the way `completion_tokens` does.
 - **Send the same context on every call.** `chat_request` and `prompt_token_ids` aren't kept between calls, so they go with every chunk including the usage chunk. Both are required when a tool or reasoning parser is configured. `prompt_token_ids` is the `token_ids` of the `GenerateRequest` returned by `/render`.
 - **Send `prompt_token_ids` on the first chunk, even without a parser.** It seeds detokenization so the first token's leading space matches the coupled endpoint (see [Request format](#request-format)). Later chunks already carry that context in `stream_state`.
 - **Don't forward `[DONE]`.** It marks the end of the generate stream and isn't a chunk.

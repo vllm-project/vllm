@@ -38,8 +38,8 @@ class QuantizeMethodBase(ABC):
 
     supports_pre_processed_weights: bool = False
     """
-    Whether ``process_weights_after_loading`` supports running under
-    ``weights_already_processed``. Methods must skip tensor transforms in
+    Whether `process_weights_after_loading` supports running under
+    `weights_already_processed`. Methods must skip tensor transforms in
     that mode; the loader driver rejects methods that do not declare support.
     """
 
@@ -68,10 +68,10 @@ class QuantizeMethodBase(ABC):
 
     # Not required functions
     def tie_weights(self, layer: torch.nn.Module, embed_tokens: torch.nn.Module):
-        """Tie ``layer``'s weight to ``embed_tokens``' weight.
+        """Tie `layer`'s weight to `embed_tokens`' weight.
 
         The default shares the weight tensor, which is the standard behavior for
-        tied word embeddings and matches what ``ParallelLMHead.tie_weights`` did
+        tied word embeddings and matches what `ParallelLMHead.tie_weights` did
         directly before quantization methods became responsible for it.
         Quantization methods that need special weight handling (e.g. repacked
         weights) override this.
@@ -97,7 +97,7 @@ class QuantizeMethodBase(ABC):
 
         Returns:
             The dequantized weight for linear layers. For MoE layers, an
-            iterator of ``(experts, w13, w2)`` over groups of experts.
+            iterator of `(experts, w13, w2)` over groups of experts.
 
         """
         raise NotImplementedError(

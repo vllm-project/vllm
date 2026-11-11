@@ -22,6 +22,7 @@ from vllm.config import (
     SpeculativeConfig,
     VllmConfig,
 )
+from vllm.config.kv_transfer import KVCacheAccess
 from vllm.distributed.kv_transfer.kv_connector.factory import KVConnectorFactory
 from vllm.distributed.kv_transfer.kv_connector.v1.base import (
     KVConnectorBase_V1,
@@ -356,6 +357,22 @@ def create_model_runner_output(
     )
 
 
+class RegistersKVCacheTestConnector(ExampleConnector):
+    """External connector that registers the device KV cache for RDMA."""
+
+    @classmethod
+    def kv_cache_access(cls, kv_transfer_config: KVTransferConfig) -> KVCacheAccess:
+        return KVCacheAccess.REGISTERS
+
+
+class ExportsKVCacheTestConnector(ExampleConnector):
+    """External connector that exports the device KV cache to another process."""
+
+    @classmethod
+    def kv_cache_access(cls, kv_transfer_config: KVTransferConfig) -> KVCacheAccess:
+        return KVCacheAccess.EXPORTS_FD
+
+
 class TestExampleConnector(ExampleConnector):
     __test__ = False
 
@@ -627,9 +644,9 @@ def make_nixl_push_scheduler(
 ):
     """Create a NixlPushConnectorScheduler via __new__ (skipping __init__).
 
-    The push scheduler can't reuse :func:`make_nixl_scheduler` because it
-    is a different class (``NixlPushConnectorScheduler`` vs
-    ``NixlConnectorScheduler``) and carries push-specific state. Only the
+    The push scheduler can't reuse `make_nixl_scheduler` because it
+    is a different class (`NixlPushConnectorScheduler` vs
+    `NixlConnectorScheduler`) and carries push-specific state. Only the
     fields touched by the unit tests are populated.
     """
     from unittest.mock import MagicMock
@@ -696,7 +713,7 @@ def make_nixl_push_scheduler(
 def make_moriio_writer(fake_worker: Any) -> Any:
     """Build a MoRIIOWriter with internals stubbed for unit tests.
 
-    Bypasses ``__init__`` and wires only the write/finalize state the tests
+    Bypasses `__init__` and wires only the write/finalize state the tests
     touch, including the deferred-task fields used by the routing suite.
     """
     import threading
@@ -739,7 +756,7 @@ def region_pairs_by_index(
     groups: Sequence[int] | None = None,
     groups_match: bool = True,
 ) -> "_RegionPairs":
-    """NIXL region pairs where peer region ``i`` pairs with local region ``i``."""
+    """NIXL region pairs where peer region `i` pairs with local region `i`."""
     from vllm.distributed.kv_transfer.kv_connector.v1.nixl.base_worker import (
         _RegionPairs,
     )

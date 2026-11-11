@@ -78,13 +78,13 @@ def _wo_a_block_scale_to_e8m0(scale: torch.Tensor) -> torch.Tensor | None:
     """Normalize checkpoint WO_A scales to raw OCP MX E8M0 bytes.
 
     E8M0 is an unsigned exponent-only scale format with bias 127. A finite
-    encoded byte ``b`` in ``[0, 254]`` represents ``2 ** (b - 127)``;
-    ``0xFF`` is reserved for NaN. This is the vendor-neutral OCP encoding used
+    encoded byte `b` in `[0, 254]` represents `2 ** (b - 127)`;
+    `0xFF` is reserved for NaN. This is the vendor-neutral OCP encoding used
     by AMD AITER/OPUS, not an NVIDIA-specific convention. Reference: OCP
     Microscaling Formats (MX) Specification, section 5.4.1:
     https://www.opencompute.org/documents/ocp-microscaling-formats-mx-v1-0-spec-final-pdf
 
-    Loaders may preserve the encoded byte as ``float8_e8m0fnu``/``uint8``,
+    Loaders may preserve the encoded byte as `float8_e8m0fnu`/`uint8`,
     or decode it to a floating-point power of two. Floating-point inputs are
     accepted only when the original E8M0 byte can be recovered losslessly.
     This function does not quantize or round arbitrary scales.
@@ -542,8 +542,8 @@ def compress_pool(
     overlap: bool,
 ) -> DispatchSpec:
     """Pool each boundary token's compressor states into a bf16 row of
-    ``pooled_k``, one program per token. Tensor inputs bind to the kernel's
-    ``<name>_ptr`` arguments; the same launch spec drives the JIT warmup."""
+    `pooled_k`, one program per token. Tensor inputs bind to the kernel's
+    `<name>_ptr` arguments; the same launch spec drives the JIT warmup."""
     return (pooled_k.shape[0],), dict(
         state_cache_stride0=state_cache.stride(0),
         state_cache_stride1=state_cache.stride(1),

@@ -300,13 +300,13 @@ def _maybe_add_docs_url(cls: Any) -> str:
 def _expand_json_human_readable_numbers(val: str) -> str:
     """Expand human-readable number suffixes in a JSON string.
 
-    Based on :func:`human_readable_int` so that the ``k/m/g/t`` (decimal) and
-    ``K/M/G/T`` (binary) conventions work out the box.
+    Based on `human_readable_int` so that the `k/m/g/t` (decimal) and
+    `K/M/G/T` (binary) conventions work out the box.
     Also works inside JSON config arguments such
-    as ``--kv-transfer-config '{"cpu_bytes_to_use": 80m}'``.
+    as `--kv-transfer-config '{"cpu_bytes_to_use": 80m}'`.
 
     Only bare (unquoted) tokens are replaced so that JSON string values
-    like ``"model_name"`` are never modified.
+    like `"model_name"` are never modified.
     """
     # Split on quoted strings so we only touch non-string regions.
     parts = re.split(r'("(?:[^"\\]|\\.)*")', val)
@@ -477,7 +477,7 @@ _DISABLE_CASCADE_ATTN_DEPRECATION_MESSAGE = (
 
 
 class DeprecatedLogConfigFileAction(argparse.Action):
-    """Warn when the legacy ``--log-config-file`` option is used."""
+    """Warn when the legacy `--log-config-file` option is used."""
 
     def __call__(self, parser, namespace, values, option_string=None):
         warnings.warn(_LOG_CONFIG_FILE_DEPRECATION_MESSAGE, stacklevel=1)
@@ -622,6 +622,9 @@ class EngineArgs:
     max_num_seqs: int | None = None
     max_num_active_seqs: int | None = SchedulerConfig.max_num_active_seqs
     max_num_inflight_kv_loads: int | None = SchedulerConfig.max_num_inflight_kv_loads
+    max_async_kv_loads_per_step: int | None = (
+        SchedulerConfig.max_async_kv_loads_per_step
+    )
     max_num_queued_reqs: int | None = None
     max_num_queued_tokens: int | None = None
     max_logprobs: int = ModelConfig.max_logprobs
@@ -642,7 +645,7 @@ class EngineArgs:
     quantization_config: "dict[str, Any] | QuantizationConfigArgs | None" = None
     """User-facing quantization configuration. Carries per-layer-kind
     QuantSpecs (linear, moe) and ignore patterns; see
-    :class:`QuantizationConfigArgs`. Auto-populated from the matching online
+    `QuantizationConfigArgs`. Auto-populated from the matching online
     shorthand when `quantization` is one of the values in
     `ONLINE_QUANT_SHORTHAND_NAMES`."""
     allow_deprecated_quantization: bool = ModelConfig.allow_deprecated_quantization
@@ -832,6 +835,7 @@ class EngineArgs:
 
     mamba_backend: MambaBackendEnum = MambaBackendEnum.TRITON
     mamba_ssu_algorithm: MambaSSUAlgorithm | None = None
+    mamba_prefill_backend: MambaBackendEnum = MambaConfig.prefill_backend
     enable_mamba_cache_stochastic_rounding: bool = (
         MambaConfig.enable_stochastic_rounding
     )
@@ -1138,6 +1142,9 @@ class EngineArgs:
         mamba_group.add_argument("--mamba-backend", **mamba_kwargs["backend"])
         mamba_group.add_argument(
             "--mamba-ssu-algorithm", **mamba_kwargs["ssu_algorithm"]
+        )
+        mamba_group.add_argument(
+            "--mamba-prefill-backend", **mamba_kwargs["prefill_backend"]
         )
         mamba_group.add_argument(
             "--enable-mamba-cache-stochastic-rounding",
@@ -1783,6 +1790,10 @@ class EngineArgs:
         scheduler_group.add_argument(
             "--max-num-inflight-kv-loads",
             **scheduler_kwargs["max_num_inflight_kv_loads"],
+        )
+        scheduler_group.add_argument(
+            "--max-async-kv-loads-per-step",
+            **scheduler_kwargs["max_async_kv_loads_per_step"],
         )
         scheduler_group.add_argument(
             "--max-num-queued-reqs", **scheduler_kwargs["max_num_queued_reqs"]
@@ -2696,6 +2707,7 @@ class EngineArgs:
             max_num_seqs=self.max_num_seqs,
             max_num_active_seqs=self.max_num_active_seqs,
             max_num_inflight_kv_loads=self.max_num_inflight_kv_loads,
+            max_async_kv_loads_per_step=self.max_async_kv_loads_per_step,
             max_num_queued_reqs=self.max_num_queued_reqs,
             max_num_queued_tokens=self.max_num_queued_tokens,
             max_model_len=model_config.max_model_len,
@@ -2812,6 +2824,12 @@ class EngineArgs:
             mamba_config.backend = self.mamba_backend
         if self.mamba_ssu_algorithm is not None:
             mamba_config.ssu_algorithm = self.mamba_ssu_algorithm
+        if isinstance(self.mamba_prefill_backend, str):
+            mamba_config.prefill_backend = MambaBackendEnum[
+                self.mamba_prefill_backend.upper()
+            ]
+        else:
+            mamba_config.prefill_backend = self.mamba_prefill_backend
         if self.enable_mamba_cache_stochastic_rounding:
             mamba_config.enable_stochastic_rounding = (
                 self.enable_mamba_cache_stochastic_rounding
@@ -2820,7 +2838,7 @@ class EngineArgs:
             mamba_config.stochastic_rounding_philox_rounds = (
                 self.mamba_cache_philox_rounds
             )
-        mamba_config.validate_ssu_algorithm()
+        mamba_config.__post_init__()
 
         # Kernel config overrides
         kernel_config = copy.deepcopy(self.kernel_config)

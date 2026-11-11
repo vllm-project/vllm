@@ -1,13 +1,13 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 """Single-tile RMS norm of one row, bitwise equal to the stock Triton norm
-(``_rmsnorm_fwd_kernel``, single tile, 8 warps).
+(`_rmsnorm_fwd_kernel`, single tile, 8 warps).
 
-One CTA of ``THREADS`` threads per row, with the reference's thread mapping
-(thread t holds 8 consecutive columns every ``THREADS * 8``) and its summation
-order: per-thread tree (``thread_square_sum``), warp butterfly (``warp_sum``),
-then the 8 warp sums (``warps_sum``). Every FP32 op is explicit PTX with its
-rounding, so nothing contracts except where the reference does (``CONTRACTS``).
+One CTA of `THREADS` threads per row, with the reference's thread mapping
+(thread t holds 8 consecutive columns every `THREADS * 8`) and its summation
+order: per-thread tree (`thread_square_sum`), warp butterfly (`warp_sum`),
+then the 8 warp sums (`warps_sum`). Every FP32 op is explicit PTX with its
+rounding, so nothing contracts except where the reference does (`CONTRACTS`).
 Rows are 8192 wide by default; the pooler's 4096-wide rows use the same order.
 """
 
@@ -115,7 +115,7 @@ CONTRACTS: dict[tuple[str, str], bool] = {
 def weight_form(
     has_weight: bool, input_scale: bool, weight_fp32: bool, weight_fp16: bool = False
 ) -> str:
-    """A norm's entry in ``WEIGHT_FORMS`` (a BF16 weight unless FP32 or
+    """A norm's entry in `WEIGHT_FORMS` (a BF16 weight unless FP32 or
     FP16)."""
     if not has_weight:
         return "none"
@@ -130,21 +130,21 @@ def contracts(
     weight_fp32: bool,
     weight_fp16: bool = False,
 ) -> bool:
-    """``CONTRACTS`` of ``reference`` for a norm of this weight form: the
-    ``fused`` flag of ``thread_square_sum`` and ``chunk_pair``."""
+    """`CONTRACTS` of `reference` for a norm of this weight form: the
+    `fused` flag of `thread_square_sum` and `chunk_pair`."""
     form = weight_form(has_weight, input_scale, weight_fp32, weight_fp16)
     return CONTRACTS[reference, form]
 
 
 def _square_pair(a: Float32, b: Float32, fused: bool) -> Float32:
-    """``a * a + b * b``, as ``fma(a, a, b * b)`` when ``fused``."""
+    """`a * a + b * b`, as `fma(a, a, b * b)` when `fused`."""
     if fused:
         return fma_rn(a, a, mul_rn(b, b))
     return add_rn(mul_rn(a, a), mul_rn(b, b))
 
 
 def _tree(values: list) -> Float32:
-    """A balanced tree of add.rn over ``values`` (a power of two of them),
+    """A balanced tree of add.rn over `values` (a power of two of them),
     neighbours first."""
     while len(values) > 1:
         values = [
@@ -154,7 +154,7 @@ def _tree(values: list) -> Float32:
 
 
 def chunk_pair(v: list, fused: bool) -> tuple:
-    """The sum of squares of one 8-column fragment ``v`` as an (even, odd)
+    """The sum of squares of one 8-column fragment `v` as an (even, odd)
     pair, in the reference's order."""
     sums = [
         _square_pair(v[4 * half + lane], v[4 * half + 2 + lane], fused)
@@ -171,9 +171,9 @@ def thread_sum(pairs: list) -> Float32:
 
 
 def thread_square_sum(x: list, fused: bool) -> Float32:
-    """A thread's sum of the squares of its values ``x`` (FP32, register order,
-    whole fragments; traced inline): ``thread_sum`` of each fragment's
-    ``chunk_pair``."""
+    """A thread's sum of the squares of its values `x` (FP32, register order,
+    whole fragments; traced inline): `thread_sum` of each fragment's
+    `chunk_pair`."""
     lanes = [
         _tree(
             [
@@ -194,7 +194,7 @@ def warp_sum(total: Float32) -> Float32:
 
 
 def warps_sum(w: list) -> Float32:
-    """The row sum from the reference's ``WARPS`` warp sums, in its order."""
+    """The row sum from the reference's `WARPS` warp sums, in its order."""
     return add_rn(
         add_rn(add_rn(w[0], w[4]), add_rn(w[2], w[6])),
         add_rn(add_rn(w[1], w[5]), add_rn(w[3], w[7])),
@@ -203,8 +203,8 @@ def warps_sum(w: list) -> Float32:
 
 @cute.jit
 def row_sum(value: Float32, sums: cute.Pointer, warp: Int32, lane: Int32) -> Float32:
-    """The row's sum of the threads' ``value`` in the reference order; every
-    thread gets it. ``sums``: ``WARPS`` FP32 of shared memory, one buffer per
+    """The row's sum of the threads' `value` in the reference order; every
+    thread gets it. `sums`: `WARPS` FP32 of shared memory, one buffer per
     call (a second call on the same buffer would race the first's reads)."""
     value = warp_sum(value)
     if lane == Int32(0):
@@ -226,9 +226,9 @@ def rms_norm_row(
     lane: Int32,
     width: int = H,
 ) -> list:
-    """The RMS norm of one thread's values ``x`` (FP32, register order) before
-    the output rounding (traced inline). ``gamma`` is the weight plus its gain
-    center (None: no weight), applied before the norm with ``input_scale``,
+    """The RMS norm of one thread's values `x` (FP32, register order) before
+    the output rounding (traced inline). `gamma` is the weight plus its gain
+    center (None: no weight), applied before the norm with `input_scale`,
     else after it."""
     if gamma is not None and input_scale:
         x = [mul_rn(x[i], gamma[i]) for i in range(len(x))]
@@ -243,7 +243,7 @@ def rms_norm_row(
 def load_gamma(
     weight: cute.Tensor, column: Int64, center: float, fp32: bool, fp16: bool = False
 ) -> list:
-    """The gains of the 8 columns from ``column``: the weight (FP32, FP16,
+    """The gains of the 8 columns from `column`: the weight (FP32, FP16,
     else BF16) plus its gain center, added even when 0.0 as the reference does
     (traced inline)."""
     if fp32:
@@ -258,7 +258,7 @@ def load_gamma(
 def _row_gains(
     weight: cute.Tensor | None, columns: list, center: float | None, fp32: bool
 ) -> list | None:
-    """``load_gamma`` of each of a thread's fragments from ``columns``, in
+    """`load_gamma` of each of a thread's fragments from `columns`, in
     register order; None without a weight (traced inline)."""
     if weight is None or center is None:
         return None
@@ -292,9 +292,9 @@ class RowNormConstants(NamedTuple):
 
 
 def row_norm_constants(norm, *, width: int = H, enable_pdl: bool, **layout):
-    """The constants of the stock norm ``norm`` (a MuseSpark1xRMSNorm or its
+    """The constants of the stock norm `norm` (a MuseSparkRMSNorm or its
     input-scaled variant: the arguments its forward hands fused_rmsnorm_fwd)
-    over rows of ``width``, with the ``layout`` fields of RowNormConstants;
+    over rows of `width`, with the `layout` fields of RowNormConstants;
     ValueError where the kernel does not reproduce it or does not take its
     weight."""
     if (
@@ -413,7 +413,7 @@ class _RowNormKernel:
 def compile_row_norm(constants: RowNormConstants):
     """cute.compile one row norm; the row count is a runtime argument. Call:
     (x, weight, out, stream_out, aux_out, m, stream) with the rows dynamic
-    views (``host.rows_view``) and the weight an [width] view, None where the
+    views (`host.rows_view`) and the weight an [width] view, None where the
     constants have no weight, stream or aux. Call before CUDA graph
     capture."""
     assert_not_capturing("a row norm")
@@ -446,8 +446,8 @@ def compile_row_norm(constants: RowNormConstants):
 class RowNorm:
     """One row norm, compiled and its weight bound at construction (before
     CUDA graph capture; one compile per process and constant set):
-    ``launch(x, out, m, stream_out, aux_out)`` on rows views of at least
-    ``m`` rows. Graph-capturable; allocates nothing."""
+    `launch(x, out, m, stream_out, aux_out)` on rows views of at least
+    `m` rows. Graph-capturable; allocates nothing."""
 
     def __init__(
         self, constants: RowNormConstants, weight: torch.Tensor | None

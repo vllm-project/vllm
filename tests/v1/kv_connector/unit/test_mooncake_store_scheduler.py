@@ -7,10 +7,10 @@ from unittest.mock import patch
 import pytest
 import torch
 
-from vllm.distributed.kv_transfer.kv_connector.v1.mooncake.store.coordinator import (
+from vllm.distributed.kv_transfer.kv_connector.v1.mooncake_store.coordinator import (
     MooncakeStoreCoordinator,
 )
-from vllm.distributed.kv_transfer.kv_connector.v1.mooncake.store.data import (
+from vllm.distributed.kv_transfer.kv_connector.v1.mooncake_store.data import (
     BoundaryPut,
     LoadSpec,
     MooncakeLookupResult,
@@ -19,7 +19,7 @@ from vllm.distributed.kv_transfer.kv_connector.v1.mooncake.store.data import (
     ReqMeta,
     RequestTracker,
 )
-from vllm.distributed.kv_transfer.kv_connector.v1.mooncake.store.scheduler import (
+from vllm.distributed.kv_transfer.kv_connector.v1.mooncake_store.scheduler import (
     MooncakeStoreScheduler,
     _partial_tail_non_mamba_puts,
 )
@@ -331,7 +331,7 @@ def test_scheduler_projects_nonprefix_groups_and_mamba_ids():
     )
 
     with patch(
-        "vllm.distributed.kv_transfer.kv_connector.v1.mooncake.store."
+        "vllm.distributed.kv_transfer.kv_connector.v1.mooncake_store."
         "scheduler.LookupKeyClient"
     ):
         scheduler = MooncakeStoreScheduler(vllm_config, _make_qsa_hybrid_cache_config())
@@ -1528,7 +1528,7 @@ def test_partial_tail_follows_lookahead_checkpoint(
 def test_shared_prefix_junction_handoff_adds_no_attention_tail(
     completed, mamba_tails, publish, expected
 ):
-    """``--enable-mamba-shared-prefix-checkpoint`` also hands off a sub-block
+    """`--enable-mamba-shared-prefix-checkpoint` also hands off a sub-block
     Mamba state at the shared-prefix junction, below the prompt checkpoint."""
     groups = [
         KVCacheGroupSpec(
