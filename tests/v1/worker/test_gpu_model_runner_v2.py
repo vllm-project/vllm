@@ -22,6 +22,7 @@ from vllm.config import (
     ParallelConfig,
     SpeculativeConfig,
 )
+from vllm.config.compilation import CUDAGraphMode
 from vllm.model_executor.warmup.jit_warmup import JitWarmupRegistry
 from vllm.v1.attention.backends.registry import AttentionBackendEnum
 from vllm.v1.core.sched.output import SchedulerOutput
@@ -598,3 +599,95 @@ def test_standalone_draft_kv_dtype_override(
     )
     assert target.kernel_config.moe_backend == "flashinfer_cutlass"
     assert target.attention_config.backend == AttentionBackendEnum.FLASHINFER
+
+
+class _DummyInputsCaptured(Exception):
+    """Stop execute_model right after the dummy inputs_embeds are prepared."""
+
+
+@pytest.mark.parametrize("randomize_inputs", [True, False])
+def test_randomize_inputs_reaches_dummy_inputs_embeds(monkeypatch, randomize_inputs):
+    """A model on inputs_embeds must not profile with a constant buffer.
+
+    `randomize_inputs` otherwise only reaches `input_ids`, which such a model
+    never reads, so every dummy row would be ranked to the same experts.
+    """
+    num_tokens = 8
+    inputs_embeds = torch.zeros(num_tokens, 4)
+
+    class _FakeInputBatch:
+        def __init__(self):
+            self.input_ids = torch.zeros(num_tokens, dtype=torch.long)
+            self.positions = torch.zeros(num_tokens, dtype=torch.long)
+            self.num_tokens = num_tokens
+            self.num_tokens_after_padding = num_tokens
+            self.is_padding = None
+
+        @classmethod
+        def make_dummy(cls, num_reqs, num_tokens_, input_buffers, **kwargs):
+            return cls()
+
+    runner = GPUModelRunner.__new__(GPUModelRunner)
+    monkeypatch.setattr(
+        runner,
+        "gather_batch_req_state",
+        lambda *args, **kwargs: (
+            SimpleNamespace(num_tokens=num_tokens, decode_graph_eligible=True),
+            None,
+        ),
+    )
+    runner.cudagraph_manager = None
+    runner.parallel_config = SimpleNamespace(data_parallel_size=1, data_parallel_rank=0)
+    runner.decode_query_len = 1
+    runner.ubatch_runner = None
+    runner.lora_config = None
+    runner.is_encoder_decoder = False
+    runner.pcp_manager = None
+    runner.dcp_size = 1
+    runner.input_buffers = None
+    runner.vocab_size = 16
+    runner.uses_inputs_embeds = True
+    runner.is_first_pp_rank = True
+    runner.req_states = None
+    runner.model = Mock()
+    runner.model_state = SimpleNamespace(
+        dummy_inputs_embeds=lambda num_tokens_: inputs_embeds,
+        prepare_inputs=Mock(side_effect=_DummyInputsCaptured),
+    )
+
+    scheduler_output = SchedulerOutput.make_empty()
+    scheduler_output.num_scheduled_tokens = {"request": num_tokens}
+    scheduler_output.total_num_scheduled_tokens = num_tokens
+
+    monkeypatch.setattr(model_runner_module, "InputBatch", _FakeInputBatch)
+    monkeypatch.setattr(
+        model_runner_module, "requires_raw_input_tokens", lambda _: False
+    )
+    monkeypatch.setattr(
+        model_runner_module,
+        "dispatch_cg_and_sync_dp",
+        lambda *args, **kwargs: (
+            SimpleNamespace(
+                num_tokens=num_tokens,
+                num_reqs=1,
+                max_query_len=None,
+                cg_mode=CUDAGraphMode.NONE,
+                num_active_loras=0,
+                num_ubatches=1,
+            ),
+            None,
+        ),
+    )
+
+    with pytest.raises(_DummyInputsCaptured):
+        GPUModelRunner.execute_model(
+            runner,
+            scheduler_output,
+            dummy_run=True,
+            skip_attn_for_dummy_run=True,
+            is_profile=True,
+            randomize_inputs=randomize_inputs,
+        )
+
+    rows_are_identical = torch.equal(inputs_embeds[0], inputs_embeds[-1])
+    assert rows_are_identical is not randomize_inputs

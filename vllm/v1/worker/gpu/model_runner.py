@@ -2062,6 +2062,11 @@ class GPUModelRunner(LoRAModelRunnerMixin):
                 inputs_embeds = self.model_state.dummy_inputs_embeds(
                     input_batch.num_tokens_after_padding
                 )
+                if randomize_inputs and inputs_embeds is not None:
+                    # A model that runs on inputs_embeds never reads the
+                    # input_ids randomized above; a constant buffer would
+                    # route every token to the same experts.
+                    inputs_embeds.normal_()
             else:
                 scheduled_encoder_inputs = scheduler_output.scheduled_encoder_inputs
                 if self.supports_mm_inputs and self.lora_config is not None:
