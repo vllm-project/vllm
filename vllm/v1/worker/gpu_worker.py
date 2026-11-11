@@ -93,6 +93,7 @@ from vllm.utils.extensible_tensor import granule_size
 from vllm.utils.flashinfer import warn_if_flashinfer_kernels_missing
 from vllm.utils.gc_utils import freeze_gc_heap, maybe_attach_gc_debug_callback
 from vllm.utils.gpu_sync_debug import enable_gpu_sync_check, with_gpu_sync_check
+from vllm.utils.math_utils import cdiv
 from vllm.utils.mem_constants import GiB_bytes
 from vllm.utils.mem_utils import (
     MemoryProfilingResult,
@@ -103,6 +104,7 @@ from vllm.utils.mem_utils import (
 from vllm.utils.torch_utils import set_random_seed, set_torch_threads_for_runtime
 from vllm.utils.vmm_driver import vmm_unavailable_reason
 from vllm.v1.attention.backends.utils import record_kv_cache_layout
+from vllm.v1.core.kv_cache_planning import max_memory_usage_bytes
 from vllm.v1.core.sched.output import GrammarOutput, SchedulerOutput
 from vllm.v1.kv_cache_interface import KVCacheConfig, KVCacheSpec
 from vllm.v1.outputs import (
@@ -1099,6 +1101,29 @@ class Worker(WorkerBase):
                 stats.get("allocated_bytes.all.peak", 0)
                 - stats.get("allocated_bytes.all.current", 0),
             )
+            # Warmup's blocks hold dummy data, and CUDA graph capture addresses
+            # only the null block (DCP's FULL capture addresses more): give the
+            # graphs that memory. Keep one max_model_len request's worth, the
+            # least the engine starts with, so the graphs cannot take it; it
+            # also keeps adaptive verification's cost profiling in capture off
+            # cache-resident KV. extend_kv_cache commits the size measured
+            # after capture.
+            if (
+                current_platform.is_device_capability_family(100)
+                and self.parallel_config.decode_context_parallel_size == 1
+            ):
+                one_request = max_memory_usage_bytes(
+                    self.vllm_config, self.model_runner.get_kv_cache_spec().values()
+                )
+                num_blocks = 1 + cdiv(one_request, kv_cache.bytes_per_block)
+                if num_blocks < kv_cache.num_committed_blocks:
+                    logger.info(
+                        "Shrinking the KV cache from %d to %d blocks for CUDA graph "
+                        "capture.",
+                        kv_cache.num_committed_blocks,
+                        num_blocks,
+                    )
+                    kv_cache.commit(num_blocks, shrink=True)
 
         cuda_graph_memory_bytes = 0
         if not self.model_config.enforce_eager:
