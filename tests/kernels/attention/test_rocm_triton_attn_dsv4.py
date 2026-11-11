@@ -1594,24 +1594,28 @@ def test_sparse_attn_decode_mxfp8_output() -> None:
 
 @requires_gfx950
 @pytest.mark.parametrize(
-    "num_tokens, n_groups",
+    "num_tokens, n_groups, o_lora_rank",
     # One case per tile tier of _mxfp8_wo_a_bmm_config, with partial M tiles.
     [
-        (1, 4),
-        (20, 4),
-        (48, 4),
-        (77, 4),
-        (130, 4),
-        (300, 4),
-        (700, 4),
-        (1000, 4),
-        (1100, 8),
+        (1, 4, 128),
+        (20, 4, 128),
+        (48, 4, 128),
+        (77, 4, 128),
+        (130, 4, 128),
+        (300, 4, 128),
+        (700, 4, 128),
+        (1000, 4, 128),
+        (300, 8, 128),
+        (700, 8, 128),
+        (1100, 8, 128),
+        (1600, 8, 128),
+        (1600, 8, 256),
     ],
 )
 @pytest.mark.parametrize("block_scales", [False, True])
 @torch.inference_mode()
 def test_rocm_mxfp8_wo_a_bmm(
-    num_tokens: int, n_groups: int, block_scales: bool
+    num_tokens: int, n_groups: int, o_lora_rank: int, block_scales: bool
 ) -> None:
     from vllm.model_executor.kernels.linear.mxfp8.rocm_native import (
         _as_block32_scale,
@@ -1623,7 +1627,7 @@ def test_rocm_mxfp8_wo_a_bmm(
 
     device = torch.device("cuda")
     torch.manual_seed(3)
-    o_lora_rank, group_dim = 128, 2048
+    group_dim = 2048
     a, a_scale = _mxfp8_e4m3_quantize_torch(
         torch.randn(num_tokens, n_groups * group_dim, device=device)
     )
@@ -1647,6 +1651,264 @@ def test_rocm_mxfp8_wo_a_bmm(
         ).view(n_groups, o_lora_rank, group_dim),
     )
     torch.testing.assert_close(out.float(), expected.flatten(1), atol=5e-2, rtol=1e-2)
+
+
+@requires_gfx950
+@pytest.mark.parametrize(
+    "num_tokens, n_groups, o_lora_rank",
+    # A tile narrower than an MX block (separate quant), then each of the nine
+    # tiles with a fused epilogue: the work tiers at G = 4 and 8, the G = 8
+    # tiers past 256 tokens and the 256-wide G = 8 tile.
+    [
+        (1, 4, 128),
+        (77, 4, 128),
+        (600, 4, 128),
+        (900, 4, 128),
+        (24, 8, 128),
+        (100, 8, 128),
+        (224, 8, 128),
+        (300, 8, 128),
+        (800, 8, 128),
+        (1600, 8, 256),
+    ],
+)
+@pytest.mark.parametrize("block_scales", [False, True])
+@torch.inference_mode()
+def test_rocm_mxfp8_wo_a_bmm_mxfp8_matches_quantized_bmm(
+    num_tokens: int, n_groups: int, o_lora_rank: int, block_scales: bool
+) -> None:
+    """wo_b's MXFP8 input from the wo_a epilogue is bit-identical to quantizing
+    the bf16 wo_a output, so the fused o_proj path does not change results."""
+    from vllm.model_executor.kernels.linear.mxfp8.rocm_native import (
+        _as_block32_scale,
+    )
+    from vllm.model_executor.layers.quantization.utils.mxfp8_utils import (
+        _mxfp8_e4m3_quantize_torch,
+        mxfp8_e4m3_quantize,
+    )
+    from vllm.v1.attention.ops.rocm_aiter_mla_sparse import (
+        rocm_mxfp8_wo_a_bmm,
+        rocm_mxfp8_wo_a_bmm_mxfp8,
+    )
+
+    device = torch.device("cuda")
+    torch.manual_seed(5)
+    group_dim = 2048
+    a, a_scale = _mxfp8_e4m3_quantize_torch(
+        torch.randn(num_tokens, n_groups * group_dim, device=device)
+    )
+    w, w_scale = _mxfp8_e4m3_quantize_torch(
+        torch.randn(n_groups * o_lora_rank, group_dim, device=device)
+    )
+    if block_scales:
+        w_scale = _as_block32_scale(w_scale[::32].repeat_interleave(32, dim=0))
+        assert w_scale is not None
+    wo_a = SimpleNamespace(weight=w, weight_scale=w_scale)
+
+    q, q_scale = rocm_mxfp8_wo_a_bmm_mxfp8(a, a_scale, wo_a, n_groups, o_lora_rank)
+
+    ref_q, ref_scale = mxfp8_e4m3_quantize(
+        rocm_mxfp8_wo_a_bmm(a, a_scale, wo_a, n_groups, o_lora_rank)
+    )
+    assert torch.equal(q.view(torch.uint8), ref_q.view(torch.uint8))
+    assert torch.equal(q_scale, ref_scale)
+
+
+@requires_gfx950
+@pytest.mark.parametrize(
+    "num_tokens, n_groups",
+    # On both sides of the narrowest wo_a tile that quantizes in its epilogue
+    # (T * G > 128), and at the per-rank decode sizes of DP8 at conc 256.
+    [(1, 8), (8, 8), (16, 8), (17, 8), (224, 8), (300, 8), (8, 4), (32, 4), (33, 4)],
+)
+@pytest.mark.parametrize("use_aiter", [False, True], ids=["block32", "flydsl"])
+@torch.inference_mode()
+def test_rocm_mxfp8_wo_b_on_wo_a_mxfp8_matches_bf16_input(
+    num_tokens: int, n_groups: int, use_aiter: bool, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """wo_b's linear on wo_a's MXFP8 output, as _o_proj hands it over, is
+    bit-identical to wo_b's linear on the bf16 wo_a output: for the block32
+    GEMM and, with AITER, the FlyDSL GEMM on the preshuffled weight."""
+    from vllm._aiter_ops import rocm_aiter_ops
+    from vllm.model_executor.kernels.linear.mxfp8.Mxfp8LinearKernel import (
+        Mxfp8LinearLayerConfig,
+    )
+    from vllm.model_executor.kernels.linear.mxfp8.rocm_native import (
+        RocmDotScaledMxfp8LinearKernel,
+        _as_block32_scale,
+    )
+    from vllm.model_executor.layers.fusion.quant_activation import (
+        QuantizedActivation,
+    )
+    from vllm.model_executor.layers.quantization.utils.mxfp8_utils import (
+        _mxfp8_e4m3_quantize_torch,
+    )
+    from vllm.model_executor.layers.quantization.utils.quant_utils import (
+        kMxfp8Dynamic,
+    )
+    from vllm.utils.torch_utils import set_default_torch_dtype
+    from vllm.v1.attention.ops.rocm_aiter_mla_sparse import (
+        rocm_mxfp8_wo_a_bmm,
+        rocm_mxfp8_wo_a_bmm_mxfp8,
+    )
+
+    device = torch.device("cuda")
+    torch.manual_seed(7)
+    group_dim, o_lora_rank, n = 2048, 128, 512
+    k = n_groups * o_lora_rank
+
+    a, a_scale = _mxfp8_e4m3_quantize_torch(
+        torch.randn(num_tokens, n_groups * group_dim, device=device)
+    )
+    w, w_scale = _mxfp8_e4m3_quantize_torch(
+        torch.randn(n_groups * o_lora_rank, group_dim, device=device)
+    )
+    wo_a = SimpleNamespace(
+        weight=w, weight_scale=_as_block32_scale(w_scale[::32].repeat_interleave(32, 0))
+    )
+    w, w_scale = _mxfp8_e4m3_quantize_torch(torch.randn(n, k, device=device))
+    wo_b = torch.nn.Module()
+    wo_b.weight = torch.nn.Parameter(w, requires_grad=False)
+    # 32x32 block scales, expanded per row as loaded.
+    wo_b.weight_scale = torch.nn.Parameter(
+        w_scale[::32].repeat_interleave(32, dim=0), requires_grad=False
+    )
+
+    monkeypatch.setenv("VLLM_ROCM_USE_AITER", "1" if use_aiter else "0")
+    rocm_aiter_ops.refresh_env_variables()
+    try:
+        with set_default_torch_dtype(torch.bfloat16):
+            kernel = RocmDotScaledMxfp8LinearKernel(
+                Mxfp8LinearLayerConfig(weight_shape=(n, k))
+            )
+        if use_aiter and not kernel.flydsl_enabled:
+            pytest.skip("requires AITER on gfx950")
+        kernel.process_weights_after_loading(wo_b)
+        assert kernel._use_flydsl(wo_b) == use_aiter
+
+        q, q_scale = rocm_mxfp8_wo_a_bmm_mxfp8(a, a_scale, wo_a, n_groups, o_lora_rank)
+        out = kernel.apply_weights(
+            wo_b,
+            QuantizedActivation(q, q_scale, torch.bfloat16, q.shape, kMxfp8Dynamic),
+        )
+        z = rocm_mxfp8_wo_a_bmm(a, a_scale, wo_a, n_groups, o_lora_rank)
+        assert torch.equal(out, kernel.apply_weights(wo_b, z))
+    finally:
+        monkeypatch.undo()
+        rocm_aiter_ops.refresh_env_variables()
+
+
+@requires_gfx950
+@torch.inference_mode()
+def test_o_proj_hands_wo_b_the_wo_a_mxfp8_output() -> None:
+    """With the gate open, _o_proj gives wo_b the MXFP8 output of wo_a's
+    epilogue as a QuantizedActivation instead of the bf16 wo_a output."""
+    from vllm.model_executor.kernels.linear.mxfp8.rocm_native import (
+        _as_block32_scale,
+    )
+    from vllm.model_executor.layers.fusion.quant_activation import (
+        QuantizedActivation,
+    )
+    from vllm.model_executor.layers.quantization.utils.mxfp8_utils import (
+        _mxfp8_e4m3_quantize_torch,
+    )
+    from vllm.model_executor.layers.quantization.utils.quant_utils import (
+        kMxfp8Dynamic,
+    )
+    from vllm.models.deepseek_v41.amd.rocm import DeepseekV41ROCMAiterMLAAttention
+    from vllm.v1.attention.ops.rocm_aiter_mla_sparse import (
+        rocm_mxfp8_wo_a_bmm_mxfp8,
+    )
+
+    device = torch.device("cuda")
+    torch.manual_seed(9)
+    num_tokens, n_groups, group_dim, o_lora_rank = 224, 8, 2048, 128
+    a, a_scale = _mxfp8_e4m3_quantize_torch(
+        torch.randn(num_tokens, n_groups * group_dim, device=device)
+    )
+    w, w_scale = _mxfp8_e4m3_quantize_torch(
+        torch.randn(n_groups * o_lora_rank, group_dim, device=device)
+    )
+    wo_a = SimpleNamespace(
+        weight=w, weight_scale=_as_block32_scale(w_scale[::32].repeat_interleave(32, 0))
+    )
+    seen: list[QuantizedActivation] = []
+    attn = SimpleNamespace(
+        _wo_b_takes_wo_a_mxfp8=lambda: True,
+        wo_a=wo_a,
+        n_local_groups=n_groups,
+        o_lora_rank=o_lora_rank,
+        wo_b=lambda x: seen.append(x),
+    )
+    DeepseekV41ROCMAiterMLAAttention._o_proj(
+        attn,
+        QuantizedActivation(a, a_scale, torch.bfloat16, a.shape, kMxfp8Dynamic),
+        positions=None,
+    )
+
+    (x,) = seen
+    q, q_scale = rocm_mxfp8_wo_a_bmm_mxfp8(a, a_scale, wo_a, n_groups, o_lora_rank)
+    assert isinstance(x, QuantizedActivation)
+    assert torch.equal(x.data.view(torch.uint8), q.view(torch.uint8))
+    assert torch.equal(x.scale, q_scale)
+    assert x.orig_dtype == torch.bfloat16 and tuple(x.orig_shape) == tuple(q.shape)
+    assert x.quant_key == kMxfp8Dynamic
+
+
+@pytest.mark.parametrize(
+    "case, expected",
+    [
+        ("block32_gemm", True),
+        ("reduce_at_tp1", True),
+        ("other_mxfp8_kernel", False),
+        ("per_row_scale", False),
+        ("bf16_weight", False),
+        ("bias", False),
+        ("tp_reduce", False),
+        ("bpreshuffled_scale", False),
+    ],
+)
+def test_wo_b_takes_wo_a_mxfp8_gate(case: str, expected: bool) -> None:
+    """wo_a hands wo_b its MXFP8 output only when wo_b's linear is the native
+    MXFP8 kernel (block32 or FlyDSL GEMM) on a 32x32 block-scaled e4m3 weight,
+    without a bias or a tensor-parallel reduce. Another kernel that keeps the
+    same weight dtypes and shapes does not get the fused input."""
+    from vllm.model_executor.kernels.linear.mxfp8.rocm_native import (
+        RocmDotScaledMxfp8LinearKernel,
+    )
+    from vllm.models.deepseek_v41.amd.rocm import DeepseekV41ROCMAiterMLAAttention
+
+    class OtherMxfp8Kernel(RocmDotScaledMxfp8LinearKernel):
+        pass
+
+    n, k = 64, 128
+    wo_b = SimpleNamespace(
+        quant_method=SimpleNamespace(
+            kernel=object.__new__(RocmDotScaledMxfp8LinearKernel)
+        ),
+        weight=torch.zeros(n, k, dtype=torch.float8_e4m3fn),
+        weight_scale=torch.zeros(n // 32, k // 32, dtype=torch.uint8),
+        bias=None,
+        reduce_results=False,
+        tp_size=1,
+    )
+    attn = SimpleNamespace(_wo_b_scale=None, wo_b=wo_b)
+    if case == "reduce_at_tp1":
+        wo_b.reduce_results = True
+    elif case == "other_mxfp8_kernel":
+        wo_b.quant_method.kernel = object.__new__(OtherMxfp8Kernel)
+    elif case == "per_row_scale":
+        wo_b.weight_scale = torch.zeros(n, k // 32, dtype=torch.uint8)
+    elif case == "bf16_weight":
+        wo_b.weight = torch.zeros(n, k, dtype=torch.bfloat16)
+    elif case == "bias":
+        wo_b.bias = torch.zeros(n, dtype=torch.bfloat16)
+    elif case == "tp_reduce":
+        wo_b.reduce_results, wo_b.tp_size = True, 2
+    elif case == "bpreshuffled_scale":
+        attn._wo_b_scale = torch.ones(1)
+
+    assert DeepseekV41ROCMAiterMLAAttention._wo_b_takes_wo_a_mxfp8(attn) == expected
 
 
 @requires_gfx950

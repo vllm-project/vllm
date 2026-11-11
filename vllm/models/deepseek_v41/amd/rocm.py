@@ -60,6 +60,7 @@ from vllm.v1.attention.ops.rocm_aiter_mla_sparse import (
     rocm_inverse_rope_mxfp8_rows,
     rocm_inverse_rope_rows_,
     rocm_mxfp8_wo_a_bmm,
+    rocm_mxfp8_wo_a_bmm_mxfp8,
     rocm_sparse_attn_decode,
     rocm_sparse_attn_prefill,
 )
@@ -934,6 +935,19 @@ class DeepseekV41ROCMAiterMLAAttention(DeepseekV4Attention):
         self, attn_out: torch.Tensor | QuantizedActivation, positions: torch.Tensor
     ) -> torch.Tensor:
         if isinstance(attn_out, QuantizedActivation):
+            if self._wo_b_takes_wo_a_mxfp8():
+                q, q_scale = rocm_mxfp8_wo_a_bmm_mxfp8(
+                    attn_out.data,
+                    attn_out.scale,
+                    self.wo_a,
+                    self.n_local_groups,
+                    self.o_lora_rank,
+                )
+                return self.wo_b(
+                    QuantizedActivation(
+                        q, q_scale, attn_out.orig_dtype, q.shape, kMxfp8Dynamic
+                    )
+                )
             z = rocm_mxfp8_wo_a_bmm(
                 attn_out.data,
                 attn_out.scale,
@@ -955,6 +969,40 @@ class DeepseekV41ROCMAiterMLAAttention(DeepseekV4Attention):
             inverse_rope=False,
         )
         return self._wo_b_after_wo_a(z.flatten(1))
+
+    def _wo_b_takes_wo_a_mxfp8(self) -> bool:
+        """Whether wo_b's linear takes the MXFP8-quantized wo_a output as a
+        pre-quantized activation, so wo_a can write it from its epilogue: the
+        native MXFP8 kernel (block32 or FlyDSL GEMM) on a 32x32 block-scaled
+        e4m3 weight, no bias, no tensor-parallel reduce."""
+        if self._wo_b_scale is not None:
+            return False
+        from vllm.model_executor.kernels.linear.mxfp8.rocm_native import (
+            RocmDotScaledMxfp8LinearKernel,
+        )
+
+        # The kernel owns wo_b's weight layout and reads row-major E8M0
+        # activation scales: a kernel that relays out an e4m3 [N, K] weight
+        # with uint8 [N/32, K/32] scales passes every dtype and shape check
+        # below.
+        kernel = getattr(getattr(self.wo_b, "quant_method", None), "kernel", None)
+        w = getattr(self.wo_b, "weight", None)
+        ws = getattr(self.wo_b, "weight_scale", None)
+        return (
+            type(kernel) is RocmDotScaledMxfp8LinearKernel
+            and w is not None
+            and ws is not None
+            and w.dtype == torch.float8_e4m3fn
+            and ws.dtype == torch.uint8
+            and w.dim() == 2
+            and ws.dim() == 2
+            and ws.shape[0] != w.shape[0]
+            and getattr(self.wo_b, "bias", None) is None
+            and (
+                not getattr(self.wo_b, "reduce_results", False)
+                or getattr(self.wo_b, "tp_size", 1) == 1
+            )
+        )
 
     def _wo_b_after_wo_a(self, zf: torch.Tensor) -> torch.Tensor:
         if self._wo_b_scale is not None and zf.dim() == 2:
