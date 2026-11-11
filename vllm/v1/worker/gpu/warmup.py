@@ -439,6 +439,16 @@ def warmup_kernels(
     )
     if acceptance_estimator is not None:
         acceptance_estimator.warmup()
+    if not model_runner.is_encoder_decoder:
+        # A chunked-prefill continuation or prefix-cache hit attends over
+        # cached context, which can select attention kernels (e.g. AITER's
+        # causal+LSE varlen MHA) that the fresh prompts above never reach.
+        run_context_prefill_warmup(
+            model_runner,
+            worker_execute_model,
+            worker_sample_tokens,
+            model_runner.scheduler_config.max_num_batched_tokens,
+        )
 
 
 def _warmup_kernels(

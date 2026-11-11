@@ -197,6 +197,23 @@ def test_warmup_kernels_reserves_lookahead_blocks(num_spec_steps, extra_lookahea
     assert set(recorder.num_spec_tokens_to_schedule) == {num_spec_steps}
 
 
+def test_warmup_kernels_prefills_over_cached_context():
+    """Chunked-prefill continuations attend over cached context, which some
+    attention backends serve with kernels fresh prompts never select."""
+    recorder = _StepRecorder()
+
+    warmup_kernels(
+        _make_runner([_attention_group()], num_lookahead_tokens=0, num_spec_steps=0),
+        recorder.execute_model,
+        recorder.sample_tokens,
+    )
+
+    assert any(
+        num_computed > 0 and num_scheduled > 1
+        for _, num_computed, num_scheduled in recorder.steps
+    )
+
+
 def test_mixed_warmup_reserves_lookahead_blocks():
     num_lookahead_tokens = NUM_SPEC_STEPS + 1
     recorder = _StepRecorder()
