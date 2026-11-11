@@ -13,6 +13,7 @@ import torch.nn.functional as F
 import vllm.envs as envs
 from vllm.compilation.breakable_cudagraph import eager_break_during_capture
 from vllm.config import CUDAGraphMode, get_current_vllm_config
+from vllm.distributed.parallel_state import get_pcp_group
 from vllm.forward_context import get_forward_context
 from vllm.logger import init_logger
 from vllm.platforms import current_platform
@@ -20,6 +21,7 @@ from vllm.triton_utils import tl, triton
 from vllm.utils.torch_utils import LayerNameType, direct_register_custom_op
 from vllm.v1.attention.backends.mla.indexer import DeepseekV32IndexerMetadata
 from vllm.v1.attention.ops.common import pack_seq_triton, unpack_seq_triton
+from vllm.v1.attention.ops.pcp import maybe_gather_indexer_k
 from vllm.v1.worker.workspace import current_workspace_manager
 
 if current_platform.is_rocm():
@@ -43,6 +45,18 @@ else:
 logger = init_logger(__name__)
 
 FP8_DTYPE = current_platform.fp8_dtype()
+
+
+def _decode_logits_workspace(num_rows: int, max_model_len: int) -> torch.Tensor:
+    from vllm.model_executor.layers.indexer_topk import RADIX_TOPK_WORKSPACE_SIZE
+
+    # GLM-5-next's kpool indexer runs SparseIndexerTopk on these logits, which
+    # takes its top-k workspace from the start of the same buffer.
+    _, logits = current_workspace_manager().get_simultaneous(
+        ((RADIX_TOPK_WORKSPACE_SIZE,), torch.uint8),
+        ((num_rows, max_model_len), torch.float32),
+    )
+    return logits
 
 
 @functools.cache
@@ -212,6 +226,7 @@ def indexer_k_quant_and_cache_triton(
     scale_fmt,
     block_tile_size=16,
     head_tile_size=16,
+    cache_layout: str | None = None,
 ):
     num_blocks = kv_cache.shape[0]
     head_dim = k.shape[-1]
@@ -223,7 +238,10 @@ def indexer_k_quant_and_cache_triton(
     kv_cache_value = kv_cache[:, : block_size * head_dim].view(FP8_DTYPE)
     kv_cache_scale = kv_cache[:, block_size * head_dim :].view(torch.float32)
     head_tile_size = head_tile_size // kv_cache.element_size()
-    layout = "NORMAL" if block_size == 1 else "SHUFFLE"
+    if cache_layout is None:
+        layout = "NORMAL" if block_size == 1 else "SHUFFLE"
+    else:
+        layout = cache_layout
     grid = (num_tokens,)
     _indexer_k_quant_and_cache_kernel[grid](
         k,
@@ -678,9 +696,7 @@ def rocm_fp8_paged_mqa_logits_triton(
     ctx_per_row = not (next_n > 1 and cl.numel() == batch_size)
 
     max_blocks = block_tables.shape[1]
-    (out_logits,) = current_workspace_manager().get_simultaneous(
-        ((batch_size * next_n, max_model_len), torch.float32),
-    )
+    out_logits = _decode_logits_workspace(batch_size * next_n, max_model_len)
 
     # Memory-bound over the KV range: split each row's keys across programs so
     # few-row / long-context launches still fill the GPU. Cap splits at the
@@ -793,6 +809,7 @@ def rocm_fp8_paged_mqa_logits(
     max_model_len: int,
     *,
     compress_ratio: int = 1,
+    cache_layout: str | None = None,
 ) -> torch.Tensor:
     """Compute FP8 MQA logits using paged KV-cache.
 
@@ -810,6 +827,8 @@ def rocm_fp8_paged_mqa_logits(
             used to distribute work across SMs.
         max_model_len: Maximum sequence length used to size the logits output.
         compress_ratio: C4A (4) takes block-flat Triton; 1 and 2 stay on AITER.
+        cache_layout: Explicit cache layout override; "NORMAL" (block-flat)
+            also takes the Triton path.
 
     Returns:
         Logits tensor of shape [B * next_n, max_model_len], dtype
@@ -821,11 +840,12 @@ def rocm_fp8_paged_mqa_logits(
     batch_size, next_n = q_fp8.shape[:2]
     block_size = kv_cache_fp8.shape[1]
 
-    # C4A only: Flash/DSv3.2 also skip insert but still write SHUFFLE.
+    # Block-flat (NORMAL) caches take the Triton path: C4A by ratio, others
+    # by explicit cache_layout. Flash/DSv3.2 also skip insert but write SHUFFLE.
     if (
         (_ON_GFX950 or _ON_GFX942)
-        and _indexer_k_is_c4a_block_flat(compress_ratio)
         and block_size > 1
+        and (cache_layout == "NORMAL" or _indexer_k_is_c4a_block_flat(compress_ratio))
     ):
         if block_size % 64 == 0:
             return rocm_fp8_paged_mqa_logits_triton(
@@ -851,9 +871,7 @@ def rocm_fp8_paged_mqa_logits(
                 aiter_paged_mqa_logits_module.deepgemm_fp8_paged_mqa_logits
             )
             batch_size, next_n, heads, _ = q_fp8.shape
-            (out_logits,) = current_workspace_manager().get_simultaneous(
-                ((batch_size * next_n, max_model_len), torch.float32),
-            )
+            out_logits = _decode_logits_workspace(batch_size * next_n, max_model_len)
             deepgemm_fp8_paged_mqa_logits(
                 q_fp8,
                 kv_cache_fp8,
@@ -1318,6 +1336,12 @@ def rocm_aiter_sparse_attn_indexer_fake(
     candidate_blocks: torch.Tensor | None = None,
     candidate_block_size: int = 0,
     candidate_write: bool = False,
+    use_pcp: bool = False,
+    pcp_shard_decode_requests: bool = False,
+    cache_layout: str | None = None,
+    dcp_rank: int = 0,
+    dcp_world_size: int = 1,
+    cp_interleave: int = 1,
 ) -> torch.Tensor:
     return topk_indices_buffer
 
@@ -1342,8 +1366,19 @@ def rocm_aiter_sparse_attn_indexer(
     candidate_blocks: torch.Tensor | None = None,
     candidate_block_size: int = 0,
     candidate_write: bool = False,
+    use_pcp: bool = False,
+    pcp_shard_decode_requests: bool = False,
+    cache_layout: str | None = None,
+    dcp_rank: int = 0,
+    dcp_world_size: int = 1,
+    cp_interleave: int = 1,
 ) -> torch.Tensor:
     from vllm._aiter_ops import rocm_aiter_ops
+
+    if dcp_world_size > 1:
+        raise NotImplementedError(
+            "The ROCm sparse attention indexer does not support DCP"
+        )
 
     # careful! this will be None in dummy run
     forward_context = get_forward_context()
@@ -1370,9 +1405,7 @@ def rocm_aiter_sparse_attn_indexer(
         # Decode logits buffer, used by rocm_fp8_paged_mqa_logits.
         decode_rows = _max_decode_logits_rows(hidden_states.shape[0])
         if _ON_GFX942 or _ON_GFX950 or _ON_RDNA:
-            workspace_manager.get_simultaneous(
-                ((decode_rows, max_model_len), torch.float32),
-            )
+            _decode_logits_workspace(decode_rows, max_model_len)
         else:
             workspace_manager.get_simultaneous(
                 (
@@ -1409,6 +1442,9 @@ def rocm_aiter_sparse_attn_indexer(
             candidate_blocks,
             candidate_block_size,
             candidate_write,
+            use_pcp,
+            pcp_shard_decode_requests,
+            cache_layout=cache_layout,
         )
     layer_attn_metadata = attn_metadata[k_cache_prefix]
     assert isinstance(layer_attn_metadata, DeepseekV32IndexerMetadata)
@@ -1422,20 +1458,37 @@ def rocm_aiter_sparse_attn_indexer(
 
     # during speculative decoding, k may be padded to the CUDA graph batch
     # size while slot_mapping only covers actual tokens.
+    # Keep PCP padding so every rank contributes the same all-gather shape.
     num_tokens = slot_mapping.shape[0]
     if k is not None:
+        if use_pcp and num_tokens > k.shape[0]:
+            num_tokens //= get_pcp_group().world_size
         k = k[:num_tokens]
     elif not skip_k_cache_insert:
         raise ValueError("k must be provided when skip_k_cache_insert is False")
 
     if not skip_k_cache_insert:
+        k, slot_mapping = maybe_gather_indexer_k(
+            k,
+            slot_mapping,
+            num_decode_tokens,
+            use_pcp,
+            pcp_shard_decode_requests=pcp_shard_decode_requests,
+        )
         indexer_k_quant_and_cache_triton(
             k,
             kv_cache,
             slot_mapping,
             quant_block_size,
             scale_fmt,
+            cache_layout=cache_layout,
         )
+
+    # C4A caches are block-flat by ratio; other block-flat callers pass
+    # cache_layout="NORMAL" explicitly. The rest keep the auto-selected layout.
+    resolved_cache_layout = cache_layout
+    if resolved_cache_layout is None and _indexer_k_is_c4a_block_flat(compress_ratio):
+        resolved_cache_layout = "NORMAL"
 
     if has_prefill:
         prefill_metadata = layer_attn_metadata.prefill
@@ -1449,17 +1502,18 @@ def rocm_aiter_sparse_attn_indexer(
         for chunk in prefill_metadata.chunks:
             k_fp8 = k_fp8_full[: chunk.total_seq_lens]
             k_scale = k_scale_full[: chunk.total_seq_lens]
-            cp_gather_indexer_k_quant_cache_triton(
-                kv_cache,
-                k_fp8,
-                k_scale,
-                chunk.block_table,
-                chunk.cu_seq_lens,
-                token_to_seq=chunk.token_to_seq,
-                cache_layout=(
-                    "NORMAL" if _indexer_k_is_c4a_block_flat(compress_ratio) else None
-                ),
-            )
+            # Query-split sub-chunks of one request share the K workspace
+            # filled by the first sub-chunk.
+            if not chunk.skip_kv_gather:
+                cp_gather_indexer_k_quant_cache_triton(
+                    kv_cache,
+                    k_fp8,
+                    k_scale,
+                    chunk.block_table,
+                    chunk.cu_seq_lens,
+                    token_to_seq=chunk.token_to_seq,
+                    cache_layout=resolved_cache_layout,
+                )
             logits = rocm_fp8_mqa_logits(
                 q_fp8[chunk.token_start : chunk.token_end],
                 (k_fp8, k_scale.view(torch.float32)),
@@ -1557,6 +1611,7 @@ def rocm_aiter_sparse_attn_indexer(
             decode_metadata.schedule_metadata,
             max_model_len=max_model_len,
             compress_ratio=compress_ratio,
+            cache_layout=cache_layout,
         )
 
         if candidate_blocks is not None:
