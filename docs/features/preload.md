@@ -24,7 +24,8 @@ Key benefits:
 
 !!! note
     Weight preloading is only supported on CUDA and ROCm platforms. Tensor,
-    expert, pipeline and data parallelism are supported, including across nodes.
+    expert and data parallelism are supported, including across nodes;
+    pipeline parallelism is rejected when launching the daemon.
 
 ## Quick start
 
@@ -269,8 +270,8 @@ Socket paths are derived from the GPU UUID, so they are stable regardless of
   weight blocks and dynamic per-token group-128 activations support CUDA IPC
   when both processes select the CUTLASS block-FP8 backend on a supported GPU.
   Set `--kernel-config '{"linear_backend": "cutlass"}'` on the daemon and
-  engine. Attached weights retain their untransposed layout, and attention
-  scale metadata is rebuilt from cached buffers. Other compressed-tensors
+  engine. Attached weights retain their untransposed layout. Other
+  compressed-tensors
   schemes, block sizes, transform wrappers, linear backends and MoE are not
   enabled by this support.
   ModelOpt NVFP4 MoE supports the TRT-LLM and vLLM CUTLASS backends. With
