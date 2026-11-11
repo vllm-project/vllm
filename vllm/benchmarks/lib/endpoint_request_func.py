@@ -98,6 +98,8 @@ class RequestFuncOutput:
     tpot: float = 0.0  # avg next-token latencies
     prompt_len: int = 0
     error: str = ""
+    # HTTP status of a non-200 response; None for success or a transport error.
+    status_code: int | None = None
     start_time: float = 0.0
     # Time spent awaiting the benchmark client concurrency semaphore.
     client_queue_time: float = 0.0
@@ -197,6 +199,7 @@ async def async_request_profile(
             output.success = response.status == 200
             if not output.success:
                 output.error = response.reason or ""
+                output.status_code = response.status
     except Exception:
         exc_info = sys.exc_info()
         output.error = "".join(traceback.format_exception(*exc_info))
@@ -313,6 +316,7 @@ async def async_request_openai_completions(
                 output.latency = most_recent_timestamp - st
             else:
                 output.error = response.reason or ""
+                output.status_code = response.status
                 output.success = False
     except Exception:
         output.success = False
@@ -514,6 +518,7 @@ async def async_request_openai_chat_completions(
                 output.latency = most_recent_timestamp - st
             else:
                 output.error = response.reason or ""
+                output.status_code = response.status
                 output.success = False
     except Exception:
         output.success = False
@@ -692,6 +697,7 @@ async def async_request_openai_responses(
                     output.success = True
             else:
                 output.error = response.reason or ""
+                output.status_code = response.status
                 output.success = False
     except Exception:
         output.success = False
@@ -824,6 +830,7 @@ async def async_request_openai_audio(
                     output.latency = most_recent_timestamp - st
                 else:
                     output.error = response.reason or ""
+                    output.status_code = response.status
                     output.success = False
         except Exception:
             output.success = False
@@ -900,6 +907,7 @@ async def _run_pooling_request(
             else:
                 output.success = False
                 output.error = response.reason or ""
+                output.status_code = response.status
     except Exception as e:
         output.success = False
         output.error = str(e)

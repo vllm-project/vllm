@@ -85,6 +85,13 @@ def _with_unique_cache_salt(request_func_input: RequestFuncInput) -> RequestFunc
     )
 
 
+def _rejects_cache_salt(output: RequestFuncOutput) -> bool:
+    """Whether the server refused the request as invalid (HTTP 400 or 422), as a
+    server that does not accept `cache_salt` does. Other failures can be
+    transient, so they are retried with the salt."""
+    return output.status_code in (400, 422)
+
+
 TERM_PLOTLIB_AVAILABLE = (importlib.util.find_spec("termplotlib") is not None) and (
     shutil.which("gnuplot") is not None
 )
@@ -925,13 +932,13 @@ async def benchmark(
             pbar: tqdm | None = None,
         ) -> RequestFuncOutput:
             # Salted like the warmups so the check does not prime the prefix cache
-            # for request 0; unsalted if the server rejects cache_salt.
+            # for request 0; unsalted only if the server rejects cache_salt.
             output = await request_func(
                 request_func_input=_with_unique_cache_salt(request_func_input),
                 session=session,
                 pbar=pbar,
             )
-            if output.success:
+            if not _rejects_cache_salt(output):
                 return output
             output = await request_func(
                 request_func_input=request_func_input, session=session, pbar=pbar
@@ -981,10 +988,10 @@ async def benchmark(
         warmup_outputs = await asyncio.gather(
             *(warmup_limited_request_func(salted=True) for _ in range(num_warmups))
         )
-        if not any(output.success for output in warmup_outputs):
+        if all(_rejects_cache_salt(output) for output in warmup_outputs):
             print(
-                f"WARNING: all {num_warmups} warmup requests failed "
-                f"({warmup_outputs[0].error.strip()[-200:]}); "
+                f"WARNING: the server rejected all {num_warmups} warmup requests "
+                f"(HTTP {warmup_outputs[0].status_code}); "
                 "retrying without cache_salt."
             )
             if warmup_pbar is not None:
@@ -1832,7 +1839,8 @@ def add_cli_args(parser: FlexibleArgumentParser):
         default=0,
         help="Number of warmup requests. Each resends the first request with a "
         "unique cache_salt, so warmups do not prime the prefix cache for the "
-        "run; if all fail, they are retried without it.",
+        "run; if the server rejects all of them (HTTP 400 or 422), they are "
+        "retried without it.",
     )
     parser.add_argument(
         "--profile",
@@ -2043,7 +2051,8 @@ def add_cli_args(parser: FlexibleArgumentParser):
         help="Maximum time to wait for the endpoint to become ready "
         "in seconds. Ready check will be skipped by default. The check sends "
         "the first request with a unique cache_salt (unsalted if the server "
-        "rejects it), so it does not prime the prefix cache for the run.",
+        "rejects it with HTTP 400 or 422), so it does not prime the prefix "
+        "cache for the run.",
     )
 
     parser.add_argument(
