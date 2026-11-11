@@ -131,25 +131,68 @@ def test_waiting_request_keeps_the_state_it_resumes_at(waiting: bool):
     assert resumed == (204 if waiting else 192)
 
 
-@pytest.mark.parametrize("pinned", [False, True])
-def test_next_turn_keeps_a_frontier_a_waiting_hit_pins(
-    monkeypatch: pytest.MonkeyPatch, pinned: bool
-):
+def fill_running(scheduler: Scheduler, request: Request) -> None:
+    """Admit `request` with decodes that fill the remaining running slots, so
+    a request added after it waits without its lookup running and only a
+    GreedyDual-Size pin can hold what it would resume at."""
+    max_num_seqs = scheduler.scheduler_config.max_num_seqs
+    for i in range(max_num_seqs - 1):
+        add_request(scheduler, f"decode-{i}", prompt(20 + i, 30), max_tokens=50)
+    step(scheduler)
+    assert request.status == RequestStatus.RUNNING
+    assert len(scheduler.running) == max_num_seqs
+
+
+@pytest.mark.usefixtures("fast_clock")
+@pytest.mark.parametrize("waiting", [False, True])
+def test_next_turn_keeps_a_frontier_a_waiting_hit_pins(waiting: bool):
     """The session's next turn releases the frontier it resumed from, unless a
-    waiting request's hit pins it."""
-    scheduler = make_scheduler()
+    request waiting for a running slot would resume there too."""
+    scheduler = make_scheduler(num_blocks=200)
     checkpoints = scheduler.mamba_checkpoints
-    assert checkpoints is not None and checkpoints.eviction is not None
+    assert checkpoints is not None
     first = add_request(scheduler, "t0", prompt(1, 150), max_tokens=10)
     run(scheduler, first)
-    key = frontier_key(sha256, first, first.num_computed_tokens, BLOCK)
-    assert key in checkpoints.frontiers.entries
-    monkeypatch.setattr(
-        checkpoints.eviction, "pinned", lambda unit: pinned and unit.key == key
-    )
-    tokens = list(first.all_token_ids) + prompt(2, 20)
-    run(scheduler, add_request(scheduler, "t1", tokens, max_tokens=3))
-    assert (key in checkpoints.frontiers.entries) == pinned
+    frontier_tokens = first.num_computed_tokens
+    key = frontier_key(sha256, first, frontier_tokens, BLOCK)
+    tokens = list(first.all_token_ids)
+    second = add_request(scheduler, "t1", tokens + prompt(2, 20), max_tokens=3)
+    fill_running(scheduler, second)
+    if waiting:
+        other = add_request(scheduler, "w", tokens + prompt(5, 20), max_tokens=1)
+    run(scheduler, second)
+    assert (key in checkpoints.frontiers.entries) == waiting
+    if waiting:
+        assert admitted_at(scheduler, other) == frontier_tokens
+
+
+@pytest.mark.usefixtures("fast_clock")
+@pytest.mark.parametrize("waiting", [False, True])
+def test_a_superseded_frontier_is_released_unless_a_waiting_hit_pins_it(
+    waiting: bool,
+):
+    """The client replaced the turn's last token (an asynchronous stop, say):
+    the next turn's lookup finds the frontier equal to its tokens but for that
+    token, and its finish releases it unless a waiting request that extends
+    the frontier as it is would resume there."""
+    scheduler = make_scheduler(num_blocks=200)
+    checkpoints = scheduler.mamba_checkpoints
+    assert checkpoints is not None
+    first = add_request(scheduler, "t0", prompt(1, 150), max_tokens=10)
+    run(scheduler, first)
+    frontier_tokens = first.num_computed_tokens
+    key = frontier_key(sha256, first, frontier_tokens, BLOCK)
+    tokens = list(first.all_token_ids[:frontier_tokens])
+    replaced = tokens[:-1] + [tokens[-1] + 1]
+    second = add_request(scheduler, "t1", replaced + prompt(2, 20), max_tokens=3)
+    fill_running(scheduler, second)
+    assert checkpoints.frontiers.superseded["t1"] == (key,)
+    if waiting:
+        other = add_request(scheduler, "w", tokens + prompt(5, 20), max_tokens=1)
+    run(scheduler, second)
+    assert (key in checkpoints.frontiers.entries) == waiting
+    if waiting:
+        assert admitted_at(scheduler, other) == frontier_tokens
 
 
 @pytest.mark.usefixtures("fast_clock")
