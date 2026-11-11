@@ -2,7 +2,7 @@
 // SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 //
 // Octave decode on MFMA for CDNA3 (gfx942). Same scheme as the WMMA decode
-// (octave_decode_wmma_rdna3.cu): independent waves, one (split, 16-query row
+// (octave_decode_rdna3.cu): independent waves, one (split, 16-query row
 // tile) per wave, transposed orientation, codebook bytes fed to fp16 as
 // x + 1152 and debiased afterwards. With 16x16x16 MFMA on wave64 (lane l
 // holds column l % 16 and rows 4 (l / 16) .. + 3 of the result):

@@ -3,7 +3,7 @@
 //
 // Octave KV cache kernels, head_size 256 with 64 RoPE dims. Portable across
 // the AMD targets vLLM builds (octave_arch.cuh); the WMMA decode tier for
-// gfx11 lives in octave_decode_wmma_rdna3.cu.
+// gfx11 lives in octave_decode_rdna3.cu.
 // Format: vllm/v1/attention/ops/rocm_octave.py (the PyTorch reference there
 // is the source of truth for the byte layout).
 //

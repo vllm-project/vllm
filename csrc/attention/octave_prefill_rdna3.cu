@@ -740,7 +740,7 @@ void octave_prefill(torch::Tensor out, torch::Tensor q, torch::Tensor k,
   TORCH_CHECK(cache.stride(2) % align == 0 && cache.stride(1) % align == 0 &&
                   cache.stride(0) % align == 0,
               "octave_prefill: misaligned slots");
-  // 0: gfx1100 (WMMA), 1: gfx942 (MFMA, octave_prefill_cdna.cu).
+  // 0: gfx1100 (WMMA), 1: gfx942 (MFMA, octave_prefill_cdna3.cu).
   static const int arch = [] {
     const std::string name =
         at::cuda::getCurrentDeviceProperties()->gcnArchName;

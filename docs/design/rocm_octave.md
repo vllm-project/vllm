@@ -19,7 +19,7 @@ is bounded by compute. The existing options on ROCm were:
   fused multi-step MTP draft.
 
 Octave KV targets the same bit budget as TurboQuant with HIP kernels written for
-the AMD matrix instructions (WMMA on RDNA3, MFMA on CDNA as a contract slot),
+the AMD matrix instructions (WMMA on RDNA3, MFMA on CDNA3),
 reading the packed cache directly in both decode and prefill, and with
 multi-token verification (MTP / speculative decoding) as a first-class case.
 
@@ -107,9 +107,9 @@ scores are those of the unrotated vectors.
 | Step | Kernel | File |
 | --- | --- | --- |
 | Cache write | `octave_cache_store`: one wave per slot, rotate + quantize + pack | `csrc/attention/octave_attn.cu` |
-| Decode / MTP verify (≤128 query tokens per request) | `octave_decode`: split-KV; WMMA tier on gfx11, portable dot4 tier elsewhere; consecutive query tokens of a request share each K/V read | `octave_decode_wmma_rdna3.cu`, `octave_attn.cu` |
-| Split reduce + inverse V rotation | `reduce_kernel` | `octave_attn.cu` |
-| Prefill | `octave_prefill`: phase 1 reads the cached prefix from the packed cache (int8 WMMA for QK with per-segment scales, fp16 WMMA for PV), phase 2 attends to the chunk's own unquantized K/V and merges | `octave_prefill_rdna3.cu` |
+| Decode / MTP verify (≤128 query tokens per request) | `octave_decode`: split-KV; WMMA on gfx1100, MFMA on gfx942, portable dot4 reference tier; consecutive query tokens of a request share each K/V read | `octave_attn.cu`, `octave_decode_rdna3.cu`, `octave_decode_cdna3.cu` |
+| Split reduce + inverse V rotation | Portable reduction, or a specialized gfx942 reduction | `octave_attn.cu`, `octave_decode_cdna3.cu` |
+| Prefill | `octave_prefill`: phase 1 reads the packed prefix (int8 QK with per-segment scales, fp16 PV; WMMA on gfx1100, MFMA on gfx942); phase 2 attends to the chunk's unquantized K/V and merges | `octave_prefill_rdna3.cu`, `octave_prefill_cdna3.cu` |
 | Q/K/V chunk rotation for prefill | `octave_rotate` | `octave_attn.cu` |
 | Codebooks (`v_perm_b32` tables) and byte layout | — | `octave_format.cuh` |
 
@@ -121,11 +121,12 @@ padding queries a K length of 0.
 
 ## Architecture contract
 
-Kernels are native: HIP or FlyDSL, never Triton. There is no fallback: an
-architecture without a required kernel is rejected at startup with an error
-naming what is missing. The kernels in this tree are HIP; a FlyDSL kernel
-(for example a CDNA prefill) must keep the same signature and semantics, pass
-the same tests, and report a clear error when `flydsl` is not installed.
+Kernels are native: HIP or FlyDSL, never Triton. There is no fallback to
+another attention backend: an architecture without a required kernel is
+rejected at startup with an error naming what is missing. The kernels in this
+tree are HIP; a FlyDSL kernel must keep the same operator signature and
+semantics, pass the same tests, and report a clear error when `flydsl` is not
+installed.
 
 Octave is enabled only on RDNA3 and CDNA3, validated on gfx1100 and gfx942
 (MI300). The backend rejects any other family at selection

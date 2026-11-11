@@ -606,7 +606,7 @@ int octave_decode_wmma(torch::Tensor query, torch::Tensor cache,
                        const int* qpos, const int* wtags, int wmask,
                        const int* stags, int smask, int64_t query_group) {
   using namespace octave_wmma;
-  // 0: gfx1100 (this file), 1: gfx942 (octave_decode_mfma_cdna.cu, dense
+  // 0: gfx1100 (this file), 1: gfx942 (octave_decode_cdna3.cu, dense
   // only).
   static const int arch = [] {
     const std::string name =
