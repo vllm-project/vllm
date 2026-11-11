@@ -1,7 +1,7 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
-"""The refusals that need the loaded model (``weight_reasons``) or the bound KV
-caches (``cache_reasons``), and the fail-stop watch on the kernels' error words.
+"""The refusals that need the loaded model (`weight_reasons`) or the bound KV
+caches (`cache_reasons`), and the fail-stop watch on the kernels' error words.
 Each refusal reports every reason, not only the first."""
 
 from collections.abc import Mapping
@@ -13,6 +13,7 @@ from vllm.models.kimi_k3.amd.specialized_decode.runtime import (
     DCP,
     DCP_SIZES,
     FFN,
+    FP8_KV,
     layer_kinds,
 )
 
@@ -20,8 +21,8 @@ MLA_HEADS, MLA_Q, MLA_KV, MLA_NOPE, MLA_ROPE, MLA_V = 12, 1536, 512, 128, 64, 12
 
 
 def _need(reasons: list[str]):
-    """``need(name, t, shape, dtype)``: appends to ``reasons`` unless ``t`` is
-    a contiguous ``shape`` ``dtype`` tensor."""
+    """`need(name, t, shape, dtype)`: appends to `reasons` unless `t` is
+    a contiguous `shape` `dtype` tensor."""
 
     def need(name, t, shape, dtype):
         if t is None:
@@ -37,9 +38,9 @@ def _need(reasons: list[str]):
 
 
 def weight_reasons(model) -> list[str]:
-    """``model``: the loaded ``KimiLinearModel``; every kernel layer's weights as
+    """`model`: the loaded `KimiLinearModel`; every kernel layer's weights as
     K1 and K2 read them, and the MoE backend that lays them out. The MLA layers'
-    attention is ``mla_weight_reasons``'."""
+    attention is `mla_weight_reasons`'."""
     from vllm.model_executor.layers.fused_moe.oracle.mxfp4 import Mxfp4MoeBackend
     from vllm.models.kimi_k3.amd.specialized_decode.mono.attention import back, kda
     from vllm.models.kimi_k3.amd.specialized_decode.mono.stages import moe
@@ -121,8 +122,8 @@ def mla_weight_reasons(model) -> list[str]:
 
 
 def _mla_reasons(p: str, w, need) -> list[str]:
-    """An MLA layer as M1a / M1b (and ``runtime/mla.py``) run it: NoPE, gated,
-    DCP1 or DCP8, an fp8 cache, W_UK / W_UV as MXFP4 bmms."""
+    """An MLA layer as M1a / M1b (and `runtime/mla.py`) run it: AITER MLA's
+    metadata, NoPE, gated, DCP1 or DCP8, an fp8 cache, W_UK / W_UV as MXFP4 bmms."""
     from vllm.models.kimi_k3.amd.specialized_decode.mono.attention.kda import (
         HIDDEN as H,
     )
@@ -136,6 +137,9 @@ def _mla_reasons(p: str, w, need) -> list[str]:
             w.qk_rope_head_dim, w.v_head_dim)  # fmt: skip
     if dims != (MLA_HEADS, MLA_Q, MLA_KV, MLA_NOPE, MLA_ROPE, MLA_V):
         return [f"{p}: MLA heads/q_lora/kv_lora/nope/rope/v {dims}"]
+    # auto-selection can still pick another backend (``runtime.m1_reasons``)
+    if (backend := a.attn_backend.get_name()) != "ROCM_AITER_MLA":
+        reasons.append(f"{p}: MLA backend {backend}, needs ROCM_AITER_MLA")
     if w.rotary_emb is not None or w.indexer is not None or w.dcp_q_replicate:
         reasons.append(f"{p}: needs NoPE, dense, unreplicated-query MLA")
     w_qkv, w_g = qkv_gate_weights(w)
@@ -146,8 +150,8 @@ def _mla_reasons(p: str, w, need) -> list[str]:
         reasons.append(f"{p}: needs DCP1 or DCP{DCP}, no PCP / HiSparse")
     elif dcp > 1 and (a.dcp_manager is None or a.dcp_manager.query_gather is None):
         reasons.append(f"{p}: no DCP query gather")
-    if not a.kv_cache_dtype.startswith("fp8"):
-        reasons.append(f"{p}: KV cache {a.kv_cache_dtype}, needs fp8")
+    if a.kv_cache_dtype not in FP8_KV:
+        reasons.append(f"{p}: KV cache {a.kv_cache_dtype}, needs fp8 (E4M3)")
     if not a.is_aiter_triton_fp4_bmm_enabled:
         reasons.append(
             f"{p}: W_UK / W_UV must be AITER MXFP4 bmms (VLLM_ROCM_USE_AITER_FP4BMM=1)"
@@ -213,7 +217,7 @@ def cache_reasons(caches: Mapping[str, Any]) -> list[str]:
 
 class FailStop:
     """Stops every TP rank at the same step once any of them gave up an in-kernel
-    wait (its health word FAILED, ``mono.abi``). Each step queues a D2H copy of
+    wait (its health word FAILED, `mono.abi`). Each step queues a D2H copy of
     this rank's word and keeps the newest copy that has landed, without blocking;
     every CHECK_EVERY steps the ranks agree on those over the TP CPU group and all
     raise together. A rank that raised alone would leave the others in the next

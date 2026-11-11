@@ -18,8 +18,12 @@ from ..data import (
 
 
 class UMBPSchedulerHandle(Protocol):
-    def lookup(self, keys: Sequence[str]) -> Sequence[bool]:
-        """Return authoritative existence for each key."""
+    def lookup(self, keys: Sequence[str]) -> Sequence[bool | None]:
+        """Return one answer per key.
+
+        True is present and False is absent. None means the owning rank
+        could not be asked. None is not a miss.
+        """
 
     def clear(self) -> bool:
         """Clear all objects visible to this scheduler handle."""
@@ -70,6 +74,10 @@ class UMBPWorkerHandle(Protocol):
 
 
 class IUMBPRuntime(Protocol):
+    # True when every rank of an engine reads and writes one pool, so
+    # TP-replicated objects can be stored once instead of once per rank.
+    shares_pool_across_ranks: bool = False
+
     def create_scheduler_handle(
         self,
         namespace: str,
@@ -78,7 +86,7 @@ class IUMBPRuntime(Protocol):
     ) -> UMBPSchedulerHandle:
         """Create a scheduler-side handle.
 
-        ``layout`` carries no regions: the scheduler's KV cache config
+        `layout` carries no regions: the scheduler's KV cache config
         flattens per-layer specs, so only worker handles receive byte ranges.
         """
 
