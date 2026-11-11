@@ -72,7 +72,8 @@ fn connector_prefix_cache_stats(stats: &ConnectorPrefixCacheStats) -> wire_stats
 
 impl SchedulerStats {
     /// The scheduler's stats, without the ones Python objects hold
-    /// (`kv_connector_stats`, `cudagraph_stats`, `perf_stats`). `step_counter`
+    /// (`kv_connector_stats`, `ec_connector_stats`, `cudagraph_stats`,
+    /// `perf_stats`) or the engine adds (`iteration_details`). `step_counter`
     /// and `current_wave` are set only on the stats DP engines publish to the
     /// coordinator.
     pub fn to_wire(&self) -> wire_stats::SchedulerStats {
@@ -95,6 +96,8 @@ impl SchedulerStats {
             kv_cache_eviction_events: self.kv_cache_eviction_events.clone(),
             spec_decoding_stats: self.spec_decoding_stats.clone(),
             kv_connector_stats: None,
+            ec_connector_stats: None,
+            iteration_details: None,
             cudagraph_stats: None,
             perf_stats: None,
         }

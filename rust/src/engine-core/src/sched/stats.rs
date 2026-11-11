@@ -121,6 +121,7 @@ pub impl SpecDecodingStats {
             num_draft_tokens: 0,
             num_accepted_tokens: 0,
             num_accepted_tokens_per_pos: vec![0; num_spec_tokens],
+            num_draft_tokens_per_pos: vec![0; num_spec_tokens],
         }
     }
 
@@ -131,6 +132,9 @@ pub impl SpecDecodingStats {
         assert!(num_accepted_tokens as u64 <= self.num_spec_tokens);
         for i in 0..num_accepted_tokens {
             self.num_accepted_tokens_per_pos[i] += 1;
+        }
+        for i in 0..num_draft_tokens {
+            self.num_draft_tokens_per_pos[i] += 1;
         }
     }
 }

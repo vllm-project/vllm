@@ -5,6 +5,8 @@ use std::collections::BTreeMap;
 
 use serde::{Deserialize, Serialize};
 
+use super::OpaqueValue;
+
 /// Stores cache hit statistics.
 ///
 /// Original Python definition:
@@ -141,6 +143,9 @@ pub struct SpecDecodingStats {
     pub num_accepted_tokens: u64,
     /// Accepted drafted tokens counted by draft position.
     pub num_accepted_tokens_per_pos: Vec<u64>,
+    /// Drafted tokens counted by draft position.
+    #[serde(default)]
+    pub num_draft_tokens_per_pos: Vec<u64>,
 }
 
 /// Breakdown of a scheduled prefill computation.
@@ -489,6 +494,14 @@ pub struct SchedulerStats {
     pub spec_decoding_stats: Option<SpecDecodingStats>,
     /// Connector-specific KV transfer stats.
     pub kv_connector_stats: Option<KvConnectorStats>,
+    /// Connector-specific encoder cache transfer stats, passed through as the
+    /// engine's connector reports them.
+    #[serde(default)]
+    pub ec_connector_stats: Option<OpaqueValue>,
+    /// Scheduler-side details of the engine iteration, when iteration details
+    /// are logged (`SchedulerIterationDetails`), passed through.
+    #[serde(default)]
+    pub iteration_details: Option<OpaqueValue>,
     /// CUDA graph runtime stats when graph metrics are enabled.
     pub cudagraph_stats: Option<CudagraphStats>,
     /// Estimated MFU/performance stats, when enabled.

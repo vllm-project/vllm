@@ -217,6 +217,59 @@ pub fn decode_engine_core_request(frames: &[Bytes]) -> Result<EngineCoreRequest>
     Ok(request)
 }
 
+/// The msgpack bytes of the add request payloads an engine hands on to
+/// Python as they came, rather than re-encoded from this crate's types, which
+/// leave out what this frontend does not send.
+#[derive(Debug, Clone, Default, PartialEq)]
+pub struct RawRequestPayloads {
+    /// `sampling_params`, if set.
+    pub sampling_params: Option<Bytes>,
+    /// `lora_request`, if set.
+    pub lora_request: Option<Bytes>,
+}
+
+/// Find the [`RawRequestPayloads`] in the payload frame of an add request
+/// (the `EngineCoreRequest` array).
+pub fn raw_request_payloads(payload: &Bytes) -> Result<RawRequestPayloads> {
+    // Positions in `EngineCoreRequest`.
+    const SAMPLING_PARAMS: usize = 3;
+    const LORA_REQUEST: usize = 6;
+    const NIL: u8 = 0xc0;
+
+    let invalid = |message: &str| Error::Decode {
+        target_type: "EngineCoreRequest",
+        message: message.to_string(),
+    };
+    let (len, header) = match payload.first().copied() {
+        Some(b @ 0x90..=0x9f) => (usize::from(b & 0x0f), 1),
+        Some(0xdc) if payload.len() >= 3 => {
+            (usize::from(u16::from_be_bytes([payload[1], payload[2]])), 3)
+        }
+        Some(0xdd) if payload.len() >= 5 => (
+            u32::from_be_bytes([payload[1], payload[2], payload[3], payload[4]]) as usize,
+            5,
+        ),
+        _ => return Err(invalid("not an array")),
+    };
+    if len <= LORA_REQUEST {
+        return Err(invalid("too few fields"));
+    }
+    let mut rest = &payload[header..];
+    let mut raw = RawRequestPayloads::default();
+    for index in 0..=LORA_REQUEST {
+        let start = payload.len() - rest.len();
+        rmpv::decode::read_value_ref(&mut rest)?;
+        let end = payload.len() - rest.len();
+        let field = (payload[start] != NIL).then(|| payload.slice(start..end));
+        match index {
+            SAMPLING_PARAMS => raw.sampling_params = field,
+            LORA_REQUEST => raw.lora_request = field,
+            _ => {}
+        }
+    }
+    Ok(raw)
+}
+
 #[cfg(test)]
 mod tests {
     use rmpv::Value;
@@ -297,7 +350,7 @@ mod tests {
         let Value::Array(wire) = &array[1] else {
             panic!("expected ndarray tuple");
         };
-        assert_eq!(wire[0], Value::from("=u4"));
+        assert_eq!(wire[0], Value::from("uint32"));
         assert_eq!(wire[1], Value::from(vec![Value::from(3)]));
         let decoded: EngineCoreRequest = rmp_serde::from_slice(&encoded).unwrap();
         assert_eq!(decoded, request);
@@ -444,5 +497,50 @@ mod tests {
             params.prompt_logprob_token_ids.unwrap().data,
             WireArrayData::AuxIndex(1)
         );
+    }
+
+    #[test]
+    fn raw_request_payloads_are_the_fields_as_sent() {
+        use crate::protocol::lora::LoraRequest;
+
+        let sampling_params = EngineCoreSamplingParams {
+            max_tokens: 7,
+            ..Default::default()
+        };
+        let lora_request = LoraRequest {
+            lora_name: "meow".to_string(),
+            lora_int_id: 1,
+            lora_path: "/meow".to_string(),
+            base_model_name: None,
+            load_inplace: false,
+            is_3d_lora_weight: false,
+        };
+        let request = EngineCoreRequest {
+            request_id: "req-1".to_string(),
+            sampling_params: Some(sampling_params.clone()),
+            lora_request: Some(lora_request.clone()),
+            ..EngineCoreRequest::default()
+        };
+        let payload = Bytes::from(encode_msgpack(&request).unwrap());
+        let raw = raw_request_payloads(&payload).unwrap();
+        assert_eq!(
+            raw.sampling_params.unwrap(),
+            encode_msgpack(&sampling_params).unwrap()
+        );
+        assert_eq!(
+            raw.lora_request.unwrap(),
+            encode_msgpack(&lora_request).unwrap()
+        );
+
+        let request = EngineCoreRequest {
+            request_id: "req-2".to_string(),
+            ..EngineCoreRequest::default()
+        };
+        let payload = Bytes::from(encode_msgpack(&request).unwrap());
+        assert_eq!(
+            raw_request_payloads(&payload).unwrap(),
+            RawRequestPayloads::default()
+        );
+        assert!(raw_request_payloads(&Bytes::from_static(&[0xc0])).is_err());
     }
 }

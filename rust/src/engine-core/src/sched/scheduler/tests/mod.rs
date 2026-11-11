@@ -664,6 +664,10 @@ fn spec_decode_schedules_drafts_and_rolls_back_rejections() {
                     1,
                     0,
                 ],
+                num_draft_tokens_per_pos: [
+                    1,
+                    1,
+                ],
             },
         )
     "#]]

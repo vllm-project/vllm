@@ -419,6 +419,7 @@ pub(super) fn eco_json(update: &UpdateOutput) -> Value {
                         d.num_draft_tokens,
                         d.num_accepted_tokens,
                         d.num_accepted_tokens_per_pos,
+                        d.num_draft_tokens_per_pos,
                     ])),
                 ])
             });
