@@ -183,7 +183,7 @@ def test_models(
 
 @pytest.mark.core_model
 def test_ministral3_nested_llama_4_scaling(vllm_runner):
-    """Nested scaling must match the authoritative top-level configuration."""
+    """Nested scaling must match top-level scaling, which takes precedence."""
     token_ids = None
     prompt_logprobs = []
     for top_level in (True, False):
