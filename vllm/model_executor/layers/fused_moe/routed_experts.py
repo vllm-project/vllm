@@ -239,10 +239,8 @@ class RoutedExperts(PluggableLayer):
         self._flag_padding_for_reload()
 
     def _flag_padding_for_reload(self) -> None:
-        """Flag the params a direct reload zero-fills whole at begin.
-
-        Must see pre-post-load-processing sizes; call again after overriding
-        the unpadded sizes post-construction."""
+        """Flag the params a direct reload zero-fills whole at begin; decided
+        from the sizes at construction, before post-load processing."""
         c = self.moe_config
         inter = c.intermediate_size_per_partition
         if not (
@@ -255,7 +253,6 @@ class RoutedExperts(PluggableLayer):
         # Per-expert scalars ((E,), (E, <=2)) aren't padded.
         for p in self._parameters.values():
             if p is not None and p.ndim > 1 and p.numel() > 2 * p.shape[0]:
-                # not `set_weight_attrs`: it refuses an attribute already set
                 p.fill_on_reload = True
 
     # TODO(bnell): Temporary hack. Get rid of this.
