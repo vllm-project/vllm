@@ -115,6 +115,12 @@ class SchedulerConfig:
     queued and running requests. Only applies when
     long_prefill_token_threshold is nonzero."""
 
+    pp_microbatch_min_tokens: int = Field(default=4096, ge=0)
+    """Pipeline parallelism only. When a single prefill is outstanding, cap the
+    step's token budget at ceil(its uncached tokens / pp_size), but not below
+    this value, so its chunks fill every stage. With two or more prefills
+    outstanding the full budget is used. 0 disables."""
+
     max_num_queued_reqs: int | None = Field(default=None, ge=0)
     """Maximum number of requests that can be in-flight (waiting or running)
     at the same time, or None for no limit. When the limit is reached, new
@@ -345,6 +351,7 @@ class SchedulerConfig:
             "max_num_inflight_kv_loads",
             "long_prefill_token_threshold",
             "long_prefill_token_threshold_adaptive",
+            "pp_microbatch_min_tokens",
             "max_num_queued_reqs",
             "max_num_queued_tokens",
             "enable_chunked_prefill",

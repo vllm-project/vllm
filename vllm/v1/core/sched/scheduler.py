@@ -400,7 +400,9 @@ class Scheduler(SchedulerInterface):
         if self.connector is not None:
             self.connector.bind_kv_cache_manager(self.kv_cache_manager)
 
-        self.use_pp = self.parallel_config.pipeline_parallel_size > 1
+        self.pp_size = self.parallel_config.pipeline_parallel_size
+        self.use_pp = self.pp_size > 1
+        self.pp_microbatch_min_tokens = self.scheduler_config.pp_microbatch_min_tokens
         self._pending_encoder_input_ids: dict[str, set[int]] = {}
         # Scheduler iteration counter. Drives the PP+async decode-throttle
         # cadence (`next_decode_eligible_step`).
@@ -709,6 +711,40 @@ class Scheduler(SchedulerInterface):
             num_new_tokens -= self.num_prefill_lookahead - remaining
         return max(num_new_tokens, 0)
 
+    def _pp_microbatch_cap(self, budget: int) -> int:
+        """Token budget for a lone prefill: ceil(its uncached tokens / pp_size),
+        at least `pp_microbatch_min_tokens`, plus the running decodes' tokens,
+        so its chunks fill every stage. With two or more prefills outstanding,
+        the full budget (unchanged behaviour under load)."""
+        prefill = decode = num_prefills = 0
+        for request in self.running:
+            remaining = request.num_prompt_tokens - request.num_computed_tokens
+            if remaining > 0 or (remaining == 0 and request.num_in_flight_tokens > 0):
+                # Prompt not fully computed yet, including a last chunk in flight.
+                prefill += max(remaining, 0)
+                num_prefills += 1
+            elif not self._needs_no_more_steps(request):
+                decode += 1 + len(request.spec_token_ids)
+        for request in itertools.chain(
+            self.kv_holding_waiting, self.waiting, self.async_kv_waiting
+        ):
+            num_prefills += 1
+            if num_prefills > 1:
+                break
+            prefill += request.num_prompt_tokens - (
+                self.kv_cache_manager.get_num_local_computed_tokens(request)
+            )
+        if num_prefills > 1:
+            return budget
+        # At least num_prefill_lookahead, so the MTP lookahead reservation still
+        # leaves a token to schedule.
+        cap = max(
+            self.pp_microbatch_min_tokens,
+            self.num_prefill_lookahead,
+            -(-prefill // self.pp_size),
+        )
+        return min(budget, cap + decode)
+
     def schedule(self, throttle_prefills: bool = False) -> SchedulerOutput:
         self.current_step += 1
         # NOTE(woosuk) on the scheduling algorithm:
@@ -742,6 +778,17 @@ class Scheduler(SchedulerInterface):
         if self._pause_state == PauseState.PAUSED_ALL:
             # Do not schedule any requests when paused.
             token_budget = 0
+        if (
+            self.use_pp
+            and self.pp_microbatch_min_tokens
+            and token_budget > 0
+            # Unchunked prefills or media, and Mamba-aligned prefills, need chunks
+            # the cap can't promise.
+            and self.scheduler_config.enable_chunked_prefill
+            and not self.scheduler_config.disable_chunked_mm_input
+            and not self.need_mamba_block_aligned_split
+        ):
+            token_budget = self._pp_microbatch_cap(token_budget)
 
         # Encoder-related.
         scheduled_encoder_inputs: dict[str, list[int]] = {}
@@ -792,16 +839,7 @@ class Scheduler(SchedulerInterface):
             if input_budget <= draft_slots:
                 break
 
-            if (
-                request.num_output_placeholders > 0
-                # Placeholders are included in num_computed_tokens; subtract them
-                # and add the tokens in-flight steps are sure to produce, so no
-                # further steps are needed even if all drafts are rejected.
-                and request.num_computed_tokens
-                + (1 + self._min_in_flight_output_tokens(request))
-                - request.num_output_placeholders
-                >= request.num_prompt_tokens + request.max_tokens
-            ):
+            if self._needs_no_more_steps(request):
                 # Async scheduling: Avoid scheduling an extra step when we are sure that
                 # the in-flight steps reach request.max_tokens. We don't schedule
                 # partial draft tokens since this prevents uniform decode optimizations.
@@ -3382,6 +3420,28 @@ class Scheduler(SchedulerInterface):
         # self.requests after they have been removed from scheduling queues.
         num_running, num_waiting = self.get_request_counts()
         return len(self.requests) > (num_running + num_waiting)
+
+    def _needs_no_more_steps(self, request: Request) -> bool:
+        return (
+            request.num_output_placeholders > 0
+            # Placeholders are included in num_computed_tokens; subtract them
+            # and add the tokens in-flight steps are sure to produce, so no
+            # further steps are needed even if all drafts are rejected.
+            and request.num_computed_tokens
+            + (1 + self._min_in_flight_output_tokens(request))
+            - request.num_output_placeholders
+            >= request.num_prompt_tokens + request.max_tokens
+        )
+
+    def has_decode_awaiting_cadence(self) -> bool:
+        """PP+async: whether a running request still needs a decode step but is
+        not yet eligible (`next_decode_eligible_step`). Only then do empty steps
+        help, by advancing `current_step`."""
+        return any(
+            self.current_step < r.next_decode_eligible_step
+            and not self._needs_no_more_steps(r)
+            for r in self.running
+        )
 
     def has_requests(self) -> bool:
         # Override the interface default to also keep the engine alive while a

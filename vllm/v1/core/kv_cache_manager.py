@@ -348,6 +348,16 @@ class KVCacheManager:
         blocks = self.create_kv_cache_blocks(computed_blocks)
         return blocks, num_new_computed_tokens, shared_prefix_boundary
 
+    def get_num_local_computed_tokens(self, request: Request) -> int:
+        """Prefix-cache hit length for a request, without the side effects of
+        `get_computed_blocks` (no events, stats or block allocation)."""
+        if not self.prefix_cache_lookup_enabled(request):
+            return 0
+        _, num_hit_tokens, _ = self.coordinator.find_longest_cache_hit(
+            request.block_hashes, request.num_tokens - 1
+        )
+        return num_hit_tokens
+
     def get_computed_blocks_for_connector(
         self, request: Request, max_cache_hit_length: int | None = None
     ) -> tuple[KVCacheBlocks, int, int, bool]:

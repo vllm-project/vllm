@@ -506,7 +506,7 @@ def _create_async_pp_scheduler(
     # Emulate PP at the scheduler level; constructing with
     # pipeline_parallel_size>1 requires that many visible GPUs. Drive with
     # queue_size=pp_size+1 (V2 async PP runs pp_size+1 concurrent batches).
-    scheduler.decode_stagger = pp_size
+    scheduler.decode_stagger = scheduler.pp_size = pp_size
     scheduler.use_pp = pp_size > 1
     return scheduler
 
@@ -836,3 +836,90 @@ def test_resumable_request_handoff():
 
     engine._process_oldest_step()
     assert len(request.output_token_ids) == 1
+
+
+@pytest.mark.parametrize("max_tokens", [1, 4])
+def test_decode_awaiting_cadence(max_tokens: int):
+    """PP+async: empty steps only help a request that still needs a decode step.
+
+    The engine stops scheduling empty steps when this is False, so they don't fill
+    the batch queue behind prefill-only requests (max_tokens=1) and block new
+    arrivals; a request that will decode keeps the empty steps that advance the
+    cadence.
+    """
+    scheduler = _create_async_pp_scheduler(num_spec=0, pp_size=4)
+    (request,) = create_requests(
+        num_requests=1, num_tokens=8, max_tokens=max_tokens, ignore_eos=True
+    )
+    scheduler.add_request(request)
+    assert not scheduler.has_decode_awaiting_cadence()
+
+    output = scheduler.schedule()
+    assert output.num_scheduled_tokens[request.request_id] == 8
+    # Prefill step in flight: only a request that will decode waits on the cadence.
+    assert scheduler.has_decode_awaiting_cadence() == (max_tokens > 1)
+
+    # Nothing is schedulable until the cadence elapses or the step returns.
+    assert scheduler.schedule().total_num_scheduled_tokens == 0
+    assert scheduler.has_decode_awaiting_cadence() == (max_tokens > 1)
+
+
+@pytest.mark.parametrize(
+    "arrivals,expected",
+    [
+        ([[400]], [100, 75, 64]),  # lone prefill: split over the 4 stages
+        ([[400, 400]], [512]),  # two prefills: full budget
+        ([[40]], [40]),  # below the 64 floor: one step
+        ([[40], [400]], [40, 400]),  # 1st's last chunk still in flight: no split
+    ],
+)
+def test_pp_microbatch_cap(arrivals: list[list[int]], expected: list[int]):
+    """Each inner list is a group of prompts arriving before one schedule()."""
+    scheduler = _create_async_pp_scheduler(num_spec=0, pp_size=4, num_blocks=1000)
+    scheduler.pp_microbatch_min_tokens = 64
+    steps = []
+    for i, lens in enumerate(arrivals):
+        for j, n in enumerate(lens):
+            (request,) = create_requests(1, n, max_tokens=1, req_ids=[f"{i}-{j}"])
+            scheduler.add_request(request)
+        steps.append(scheduler.schedule().total_num_scheduled_tokens)
+    while len(steps) < len(expected):
+        steps.append(scheduler.schedule().total_num_scheduled_tokens)
+    assert steps == expected
+
+
+def test_pp_microbatch_cap_default_on(monkeypatch: pytest.MonkeyPatch):
+    """On by default (4096 floor): a lone 18k prefill at budget 16k. The cap is
+    recomputed from the remaining prompt each step, hence the 1212-token tail."""
+    monkeypatch.setenv("VLLM_ALLOW_LONG_MAX_MODEL_LEN", "1")
+    scheduler = create_scheduler(
+        async_scheduling=True,
+        num_blocks=2000,
+        max_num_batched_tokens=16384,
+        max_model_len=32768,
+    )
+    scheduler.pp_size, scheduler.use_pp = 4, True
+    scheduler.add_request(create_requests(1, 18000, max_tokens=1)[0])
+    steps = [scheduler.schedule().total_num_scheduled_tokens for _ in range(5)]
+    assert steps == [4500, 4096, 4096, 4096, 1212]
+
+
+@pytest.mark.parametrize(
+    "unchunked", [None, "enable_chunked_prefill", "disable_chunked_mm_input"]
+)
+def test_pp_microbatch_cap_progress(unchunked: str | None):
+    """No zero-token steps: the cap stays at least the MTP prefill lookahead (which
+    trims chunks near the prompt end), and is skipped when prompts or media can't
+    be chunked (a media item larger than the cap would otherwise never fit)."""
+    scheduler = _create_async_pp_scheduler(num_spec=0, pp_size=4, num_blocks=1000)
+    scheduler.pp_microbatch_min_tokens = 1
+    scheduler.num_prefill_lookahead = 4
+    if unchunked:
+        flag = unchunked == "disable_chunked_mm_input"
+        setattr(scheduler.scheduler_config, unchunked, flag)
+    scheduler.add_request(create_requests(1, 400, max_tokens=1)[0])
+    steps: list[int] = []
+    while sum(steps) < 400 and 0 not in steps:
+        steps.append(scheduler.schedule().total_num_scheduled_tokens)
+    assert sum(steps) == 400 and 0 not in steps
+    assert not unchunked or steps == [400]

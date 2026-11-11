@@ -236,6 +236,17 @@ class EngineCore:
             self.batch_queue = deque(maxlen=self.batch_queue_size)
         # Step awaiting prior outputs before sampling (see step_with_batch_queue).
         self.deferred_step: tuple[SchedulerOutput, Future[Any]] | None = None
+        # An empty step is in flight that no request needs; see step_with_batch_queue.
+        self._idle_step_in_flight = False
+        # The admission changes in step_with_batch_queue apply only with PP and
+        # without DP (its busy loop runs a blocking dummy batch on every step that
+        # executes nothing); other batch-queue users keep the upstream loop.
+        parallel_config = vllm_config.parallel_config
+        self._pp_admission = (
+            self.batch_queue_size > 1
+            and parallel_config.pipeline_parallel_size > 1
+            and parallel_config.data_parallel_size == 1
+        )
 
         self.is_mm_encoder_only = vllm_config.is_mm_encoder_only
         self.is_pooling_model = vllm_config.model_config.runner_type == "pooling"
@@ -563,6 +574,7 @@ class EngineCore:
         `request_wave`: indicate which wave of requests this is expected to
         belong to in DP case
         """
+        self._idle_step_in_flight = False
         # Validate the request_id type.
         if not isinstance(request.request_id, str):
             raise TypeError(
@@ -741,6 +753,11 @@ class EngineCore:
         """Block until a step's model output is ready."""
         return future.result()
 
+    def _wait_for_new_request(self, future: Future[Any]) -> bool:
+        """Wait for a step's model output, but return early if a new request is
+        added meanwhile. Returns whether a request was added first."""
+        return False
+
     def post_step(self, model_executed: bool) -> None:
         # When using async scheduling we can't get draft token ids in advance,
         # so we update draft token ids in the worker process and don't
@@ -775,8 +792,18 @@ class EngineCore:
         assert len(batch_queue) < self.batch_queue_size
 
         model_executed = False
-        # Workers need a deferred step's sample_tokens() before the next step.
-        if self.deferred_step is None and self.scheduler.has_requests():
+        if self._idle_step_in_flight and not any(
+            so.total_num_scheduled_tokens == 0 for _, so, _ in batch_queue
+        ):
+            self._idle_step_in_flight = False
+        # While an idle empty step is in flight and nothing has changed (no new
+        # request, no batch completed), another schedule() can only produce one
+        # more empty step, which would hold a batch-queue slot for nothing.
+        if (
+            self.deferred_step is None
+            and self.scheduler.has_requests()
+            and not self._idle_step_in_flight
+        ):
             scheduler_output = self.scheduler.schedule(self._should_throttle_prefills())
             with self.log_error_detail(scheduler_output):
                 exec_future = self.model_executor.execute_model(
@@ -814,8 +841,18 @@ class EngineCore:
             if self.deferred_step is None:
                 # Add this step's future to the queue.
                 batch_queue.appendleft((future, scheduler_output, exec_future))
+                # Empty steps advance the PP+async decode cadence, but when no
+                # request is waiting on it (e.g. prefills whose last step is in
+                # flight) they only fill the queue, and a newly arrived request then
+                # waits a full PP pass before it can be scheduled.
+                self._idle_step_in_flight = (
+                    self._pp_admission
+                    and scheduler_output.total_num_scheduled_tokens == 0
+                    and not self.scheduler.has_decode_awaiting_cadence()
+                )
                 if len(batch_queue) < self.batch_queue_size and (
-                    model_executed or self.scheduler.has_requests()
+                    model_executed
+                    or (self.scheduler.has_requests() and not self._idle_step_in_flight)
                 ):
                     # Don't block on next worker response unless the queue is full
                     # or there are no more requests to schedule.
@@ -827,6 +864,16 @@ class EngineCore:
             # is non-empty.
             return None, False
 
+        if (
+            self._pp_admission
+            and self.deferred_step is None
+            and len(batch_queue) < self.batch_queue_size
+            and self._wait_for_new_request(batch_queue[-1][0])
+        ):
+            # A request arrived while waiting on the oldest batch (up to a full PP
+            # pass); return to schedule it into the free slot.
+            return None, model_executed
+
         # Block until the next result is available.
         future, scheduler_output, exec_model_fut = batch_queue.pop()
         with self.log_error_detail(scheduler_output):
@@ -837,6 +884,9 @@ class EngineCore:
                 exec_model_fut.result()
                 raise RuntimeError("unexpected error")
         iteration_details = self._untimed_iteration_details(scheduler_output)
+
+        if scheduler_output.total_num_scheduled_tokens > 0:
+            self._idle_step_in_flight = False
 
         # Before processing the model output, process any aborts that happened
         # during the model execution.
@@ -1949,31 +1999,45 @@ class EngineCoreProc(EngineCore):
     def _wait_for_output(self, future: Future[Any]) -> Any:
         """Wait for a step's model output, meanwhile handling new requests and
         aborts as they arrive."""
+        self._handle_inputs_while_waiting(future, stop_on_add=False)
+        return future.result()
+
+    def _wait_for_new_request(self, future: Future[Any]) -> bool:
+        return self._handle_inputs_while_waiting(future, stop_on_add=True)
+
+    def _handle_inputs_while_waiting(
+        self, future: Future[Any], stop_on_add: bool
+    ) -> bool:
+        """Handle new requests and aborts until the future's output is ready, or
+        the spin duration elapses. Returns True if `stop_on_add` and it stopped
+        early because a request was added."""
         poll: Callable[[], bool] | None = getattr(future, "poll", None)
         wait_briefly: Callable[[Sized, float], None] | None = getattr(
             future, "wait_briefly", None
         )
-        if poll is not None and wait_briefly is not None:
-            pending_inputs = self.input_queue.queue
-            spin_deadline = time.monotonic() + _INPUT_SPIN_DURATION_S
-            while not self._deferred_inputs and not poll():
-                if pending_inputs:
-                    req = self.input_queue.get_nowait()
-                    # Some kinds of request must wait until the step completes.
-                    if req[0] in _INPUTS_HANDLED_DURING_STEP:
-                        self._handle_client_request(*req)
-                    else:
-                        self._deferred_inputs.append(req)
-                elif time.monotonic() < spin_deadline:
-                    # Spin on something cheaper than poll(), to leave the GIL
-                    # free more of the time for the input and output threads.
-                    wait_briefly(pending_inputs, spin_deadline)
+        if poll is None or wait_briefly is None:
+            return False
+        pending_inputs = self.input_queue.queue
+        spin_deadline = time.monotonic() + _INPUT_SPIN_DURATION_S
+        while not self._deferred_inputs and not poll():
+            if pending_inputs:
+                req = self.input_queue.get_nowait()
+                # Some kinds of request must wait until the step completes.
+                if req[0] in _INPUTS_HANDLED_DURING_STEP:
+                    self._handle_client_request(*req)
+                    if stop_on_add and req[0] == EngineCoreRequestType.ADD:
+                        return True
                 else:
-                    # Long-running step: stop busy-looping and block until the
-                    # output arrives. Later inputs are handled after the step.
-                    break
-
-        return future.result()
+                    self._deferred_inputs.append(req)
+            elif time.monotonic() < spin_deadline:
+                # Spin on something cheaper than poll(), to leave the GIL
+                # free more of the time for the input and output threads.
+                wait_briefly(pending_inputs, spin_deadline)
+            else:
+                # Long-running step: stop busy-looping and block until the
+                # output arrives. Later inputs are handled after the step.
+                break
+        return False
 
     def _handle_client_request(
         self, request_type: EngineCoreRequestType, request: Any
