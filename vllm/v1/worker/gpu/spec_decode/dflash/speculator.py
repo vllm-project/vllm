@@ -6,10 +6,11 @@ from typing import Any
 import torch
 import torch.nn as nn
 
-from vllm.config import VllmConfig, replace
+from vllm.config import VllmConfig, get_layers_from_vllm_config, replace
 from vllm.config.compilation import CUDAGraphMode
 from vllm.forward_context import BatchDescriptor, set_forward_context
 from vllm.logger import init_logger
+from vllm.model_executor.layers.attention_layer_base import AttentionLayerBase
 from vllm.triton_utils import tl, triton
 from vllm.v1.attention.backend import AttentionCGSupport
 from vllm.v1.attention.backends.utils import PAD_SLOT_ID
@@ -37,6 +38,7 @@ logger = init_logger(__name__)
 
 class DFlashSpeculator(DraftModelSpeculator):
     _speculator_name = "DFlash"  # For logging, so we can share methods with subclasses
+    maps_slot_mapping = True
 
     def __init__(self, vllm_config: VllmConfig, device: torch.device):
         parallel_config = vllm_config.parallel_config
@@ -46,13 +48,14 @@ class DFlashSpeculator(DraftModelSpeculator):
         vllm_config.parallel_config = replace(
             parallel_config,
             prefill_context_parallel_size=1,
-            decode_context_parallel_size=(
-                parallel_config.decode_context_parallel_size
-                if speculative_config.draft_model_config.use_mla
-                else 1
-            ),
+            decode_context_parallel_size=speculative_config.draft_decode_context_parallel_size,
         )
         super().__init__(vllm_config, device)
+
+        # See SpeculativeConfig.prefill_context_kv_only.
+        self.context_kv_only = speculative_config.prefill_context_kv_only
+        if self.context_kv_only:
+            self.use_draft_logits = False
 
         self.hidden_states = torch.zeros(
             self.max_num_tokens, self.hidden_size, dtype=self.dtype, device=device
@@ -99,7 +102,11 @@ class DFlashSpeculator(DraftModelSpeculator):
         self._num_rejected: torch.Tensor | None = None
         aux_layers = get_eagle3_aux_layers_from_config(speculative_config)
         cudagraph_mode = vllm_config.compilation_config.cudagraph_mode
-        if aux_layers and cudagraph_mode.decode_mode() == CUDAGraphMode.FULL:
+        if (
+            aux_layers
+            and cudagraph_mode.decode_mode() == CUDAGraphMode.FULL
+            and not self.context_kv_only
+        ):
             self._aux_staging = torch.zeros(
                 self._num_graph_context_tokens(self.max_num_reqs),
                 len(aux_layers) * vllm_config.model_config.get_hidden_size(),
@@ -141,7 +148,10 @@ class DFlashSpeculator(DraftModelSpeculator):
         return config
 
     def init_cudagraph_manager(self, cudagraph_mode: CUDAGraphMode) -> None:
-        wants_full = cudagraph_mode.decode_mode() == CUDAGraphMode.FULL
+        wants_full = (
+            cudagraph_mode.decode_mode() == CUDAGraphMode.FULL
+            and not self.context_kv_only
+        )
         supports_full = (
             self.attn_cg_support.min_cg_support.value
             >= AttentionCGSupport.UNIFORM_BATCH.value
@@ -243,6 +253,49 @@ class DFlashSpeculator(DraftModelSpeculator):
     ) -> nn.Module:
         return load_dflash_model(target_model, self.vllm_config)
 
+    def free_unused_weights(self, target_model: nn.Module) -> None:
+        """With context_kv_only, keep only the weights of the modules that store
+        the context K/V and those shared with the target. A draft model without
+        `context_kv_modules` keeps all of its weights."""
+        if not self.context_kv_only or not hasattr(self.model, "context_kv_modules"):
+            return
+        keep = {id(p) for m in self.model.context_kv_modules() for p in m.parameters()}
+        keep.update(id(p) for p in target_model.parameters())
+        freed_bytes = 0
+        for param in self.model.parameters():
+            if id(param) not in keep:
+                freed_bytes += param.nbytes
+                param.data = param.data.new_empty(0)
+        logger.info(
+            "%s drafter only stores its context K/V (prefill_context_kv_only); "
+            "freed %.2f GiB of its weights.",
+            self._speculator_name,
+            freed_bytes / (1 << 30),
+        )
+
+    def load_model(self, target_model: nn.Module) -> None:
+        super().load_model(target_model)
+        if self.dcp_size == 1:
+            return
+        # The default draft DCP is resolved from config; catch drafts whose built
+        # layers disagree instead of failing inside the attention kernel.
+        draft_layers = get_layers_from_vllm_config(
+            self.vllm_config,
+            AttentionLayerBase,  # type: ignore[type-abstract]
+            self.draft_attn_layer_names,
+        )
+        windowed = sorted(
+            name
+            for name, layer in draft_layers.items()
+            if getattr(layer, "sliding_window", None) is not None
+        )
+        if windowed:
+            raise ValueError(
+                f"{self._speculator_name} draft layers {windowed} use sliding-window "
+                f"attention, which cannot run at decode_context_parallel_size="
+                f"{self.dcp_size}. Set draft_decode_context_parallel_size=1."
+            )
+
     def set_attn(
         self,
         model_state: ModelState,
@@ -284,6 +337,9 @@ class DFlashSpeculator(DraftModelSpeculator):
             self.max_num_tokens,
             dtype=torch.int64,
             device=self.device,
+        )
+        self._kernel_context_slot_mappings = torch.zeros_like(
+            self._context_slot_mappings
         )
 
         # Map each draft decoder layer to the index (within draft_kv_cache_group_ids)
@@ -383,16 +439,26 @@ class DFlashSpeculator(DraftModelSpeculator):
             context_slots: torch.Tensor | list[torch.Tensor | None] | None = None
         elif self._layer_group_idx is not None:
             context_slots = [
-                self._context_slot_mappings[gidx][start:end]
+                self._kernel_context_slots(gidx, start, end)
                 for gidx in self._layer_group_idx
             ]
         else:
-            context_slots = self._context_slot_mappings[0][start:end]
+            context_slots = self._kernel_context_slots(0, start, end)
         self.model.precompute_and_store_context_kv(
             self.hidden_states[start:end],
             self.context_positions[start:end],
             context_slots,
         )
+
+    def _kernel_context_slots(self, i: int, start: int, end: int) -> torch.Tensor:
+        """Context slots of draft group `i`, in kernel blocks when its cache is
+        a packed token cache split into them. Recorded in FULL graphs as well."""
+        slots = self._context_slot_mappings[i][start:end]
+        for group in self.attn_groups[self.draft_kv_cache_group_ids[i]]:
+            if group.kernel_slot_mapping is not None:
+                out = self._kernel_context_slot_mappings[i][start:end]
+                return group.map_to_kernel_slot_mapping(slots, out=out)
+        return slots
 
     def _store_hidden_states(
         self,
@@ -464,6 +530,8 @@ class DFlashSpeculator(DraftModelSpeculator):
         is_profile: bool = False,
         num_speculative_tokens: int | None = None,
     ) -> torch.Tensor:
+        if self.context_kv_only:
+            num_speculative_tokens = 0
         num_reqs = input_batch.num_reqs
         if dummy_run and dp_sync_state is not None:
             num_reqs = min(num_reqs, dp_sync_state.num_reqs)
@@ -492,6 +560,8 @@ class DFlashSpeculator(DraftModelSpeculator):
                 self.hidden_states[:num_target_tokens],
                 self.context_positions[:num_target_tokens],
             )
+            if num_speculative_tokens == 0:
+                return self.draft_tokens[:num_reqs]
             # DFlash processes all speculative tokens in one forward pass,
             # so the real token count is num_query_tokens.
             self._prepare_eplb_forward(num_query_tokens)
@@ -578,6 +648,13 @@ class DFlashSpeculator(DraftModelSpeculator):
             parallel_config=self.vllm_config.parallel_config,
         )
         num_tokens_padded = batch_desc.num_tokens
+        # Packed token caches split into kernel blocks: the query slots the FULL
+        # graph reads live in each group's persistent mapped buffer.
+        for gid in self.draft_kv_cache_group_ids:
+            for group in self.attn_groups[gid]:
+                group.map_to_kernel_slot_mapping(
+                    self.block_tables.slot_mappings[gid, :num_tokens_padded]
+                )
         num_tokens_across_dp = (
             batch_sync.num_tokens_across_dp if batch_sync is not None else None
         )
@@ -628,6 +705,7 @@ class DFlashSpeculator(DraftModelSpeculator):
             draft_slot_mappings_by_layer = build_slot_mappings_by_layer(
                 self.block_tables.slot_mappings[:, :num_tokens_padded],
                 self.kv_cache_config,
+                self.attn_groups,
             )
             self._generate_draft(
                 num_reqs,
