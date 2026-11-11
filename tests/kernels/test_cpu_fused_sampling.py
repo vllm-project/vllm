@@ -13,10 +13,6 @@ if not current_platform.is_cpu():
 
 current_platform.import_kernels()
 
-from vllm.utils.cpu_triton_utils import (  # noqa: E402
-    _rejection_random_sample_kernel_impl,
-)
-
 VOCAB_SIZES = [32000, 49152, 128256]
 BATCH_SIZES = [1, 4, 16]
 PLACEHOLDER = -1
@@ -277,7 +273,7 @@ def test_placeholder_draft_is_rejected(with_draft_probs: bool):
     cu = torch.tensor([2, 4])
     recovered = torch.tensor([5, vocab - 1, 3, 7])
     bonus = torch.tensor([[9], [11]])
-    uniform = torch.full((4,), 0.5, dtype=torch.float64)
+    uniform = torch.full((4,), 0.5, dtype=torch.float32)
     draft_probs = None
     if with_draft_probs:
         # Request 0's second row also gives the last vocab id draft mass, so
@@ -288,7 +284,7 @@ def test_placeholder_draft_is_rejected(with_draft_probs: bool):
         draft_probs[2:, 0] = 1.0
 
     out = torch.full((2, 3), PLACEHOLDER, dtype=torch.int64)
-    _rejection_random_sample_kernel_impl(
+    torch.ops._C.rejection_random_sample_kernel_impl(
         out,
         cu,
         draft_ids,
@@ -300,7 +296,7 @@ def test_placeholder_draft_is_rejected(with_draft_probs: bool):
         None,
         2,
         vocab,
-        NO_DRAFT_PROBS=draft_probs is None,
+        no_draft_probs=draft_probs is None,
     )
 
     assert out.tolist() == [[5, vocab - 1, PLACEHOLDER], [3, PLACEHOLDER, PLACEHOLDER]]
