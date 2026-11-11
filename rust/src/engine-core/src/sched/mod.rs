@@ -3,7 +3,8 @@
 
 //! The v1 scheduler (`vllm/v1/core/sched`): request state, request queues,
 //! stop checks, the encoder cache managers, the scheduler output and stats,
-//! and the [`scheduler::Scheduler`] itself.
+//! the [`scheduler::Scheduler`] itself, and its outputs in the frontend's
+//! wire types ([`wire`]).
 
 pub mod encoder_cache_manager;
 mod heapq;
@@ -15,3 +16,4 @@ pub mod request_queue;
 pub mod scheduler;
 pub mod stats;
 pub mod utils;
+pub mod wire;

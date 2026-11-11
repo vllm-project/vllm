@@ -81,8 +81,8 @@ The crates are:
 
 | Crate | Owns |
 | --- | --- |
-| `rust/src/engine-core` (`vllm-engine-core`) | Pure Rust, no PyO3: hashing (pickle protocol 5 and canonical CBOR serializers), KV cache manager, scheduler, connector scheduler halves |
-| `rust/src/engine-core-io` (`vllm-engine-core-io`) | The engine's ZMQ input and output threads, and the outputs in the Rust frontend's wire types (`vllm-engine-core-client`) |
+| `rust/src/engine-core` (`vllm-engine-core`) | Pure Rust, no PyO3: hashing (pickle protocol 5 and canonical CBOR serializers), KV cache manager, scheduler and its outputs in the Rust frontend's wire types (`vllm-engine-core-client`), connector scheduler halves |
+| `rust/src/engine-core-io` (`vllm-engine-core-io`) | The engine's ZMQ input and output threads |
 | `rust/src/engine-core-py` (`vllm-engine-core-py`) | PyO3 bindings (`vllm._rust_core`): config conversion, request bridging, hook adapters, the payloads Python objects hold |
 
 Python collaborators that are not ported are reached through traits

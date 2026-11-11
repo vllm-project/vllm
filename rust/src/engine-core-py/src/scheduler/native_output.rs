@@ -30,7 +30,6 @@ use vllm_engine_core_client::protocol::output::{self as wire, RequestBatchOutput
 use vllm_engine_core_client::protocol::sampling_mask::{MaybeWireSamplingMask, WireSamplingMask};
 use vllm_engine_core_client::protocol::tensor::WireNdArray;
 use vllm_engine_core_client::protocol::{decode_msgpack, decode_value};
-use vllm_engine_core_io::convert;
 use vllm_engine_core_io::output::{Destination, OutputConfig, OutputWriter};
 
 use super::output::{ExtraStats, ModelOutput, kv_transfer_params_to_py, opaque_obj};
@@ -338,7 +337,7 @@ impl<'py> StepPayloads<'_, 'py> {
         table: &RequestTable,
         output: &EngineCoreOutput,
     ) -> PyResult<wire::EngineCoreOutput> {
-        let mut converted = convert::engine_core_output(output);
+        let mut converted = output.to_wire();
         let num_positions = output.new_token_ids.len();
         if let Some(req_index) = output.req_index {
             if output.new_logprobs {
@@ -412,7 +411,7 @@ pub(super) fn native_outputs(
             .collect::<PyResult<Vec<_>>>()?;
         let scheduler_stats = match &eco.scheduler_stats {
             Some(stats) => {
-                let mut converted = convert::scheduler_stats(stats);
+                let mut converted = stats.to_wire();
                 let extra = std::mem::take(&mut extra);
                 if let Some(stats) = extra.kv_connector_stats {
                     let dict = stats.call_method0(intern!(py, "to_dict"))?;

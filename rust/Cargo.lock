@@ -5841,7 +5841,6 @@ dependencies = [
  "bytes",
  "futures",
  "tokio",
- "vllm-engine-core",
  "vllm-engine-core-client",
  "zeromq",
 ]
