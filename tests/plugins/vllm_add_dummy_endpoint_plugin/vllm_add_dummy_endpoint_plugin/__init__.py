@@ -14,7 +14,12 @@ than reaching for a client that doesn't exist.
 
 It also implements the optional `start`/`stop` capabilities and records each
 call in `events`, so tests can check their order.
+
+For shutdown tests, `POST /plugins/dummy/hang_stop` makes later `stop` calls
+record their event and then never return, like a plugin whose cleanup hangs.
 """
+
+import asyncio
 
 from fastapi import FastAPI, HTTPException, Request
 
@@ -25,8 +30,14 @@ class DummyAdminEndpointPlugin:
 
     def __init__(self, events: list[str] | None = None) -> None:
         self.events = [] if events is None else events
+        self.hang_stop = False
 
     def attach_router(self, app: FastAPI) -> None:
+        @app.post("/plugins/dummy/hang_stop")
+        async def hang_stop():
+            self.hang_stop = True
+            return {"hang_stop": True}
+
         @app.get("/v1/admin/scheduler_config")
         async def scheduler_config(raw_request: Request):
             engine_client = raw_request.app.state.dummy_engine_client
@@ -47,3 +58,5 @@ class DummyAdminEndpointPlugin:
 
     async def stop(self, state) -> None:
         self.events.append(f"stop:{self.name}")
+        if self.hang_stop:
+            await asyncio.Event().wait()
