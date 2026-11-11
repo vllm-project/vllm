@@ -373,6 +373,7 @@ pub fn to_prompt_info(
         logprobs,
         ranks,
         candidate_tokens,
+        mm_placeholders: Vec::new(),
     }
 }
 

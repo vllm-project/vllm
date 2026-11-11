@@ -60,6 +60,8 @@ pub enum Error {
         #[source]
         source: Box<Error>,
     },
+    #[error("invalid multimodal options: {0}")]
+    InvalidMediaOptions(#[message] String),
     #[error("multimodal preprocessing error: {0}")]
     Multimodal(#[message] String),
     #[error(transparent)]
@@ -167,6 +169,7 @@ impl Error {
             | Self::UnsupportedInputAudioFormat { .. }
             | Self::UnsupportedModality { .. }
             | Self::InvalidPreprocessedMultimodal { .. }
+            | Self::InvalidMediaOptions(_)
             | Self::MmLimitExceeded { .. } => true,
             // A media host that timed out or failed, and a decoder that failed
             // on this side, stay server errors, as in Python.
