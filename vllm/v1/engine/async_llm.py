@@ -1105,7 +1105,7 @@ class AsyncLLM(EngineClient):
         await self.check_health()
         engine_ranks = self.engine_core.get_engine_ranks()
         tasks = {rank: self._health_probe_task(rank) for rank in engine_ranks}
-        timeout = envs.VLLM_HEALTH_CHECK_GPU_TIMEOUT
+        timeout = envs.VLLM_HEALTH_GENERATE_TIMEOUT_S
         # asyncio.wait never cancels the probes, so a caller timing out or
         # disconnecting leaves them running for the next caller.
         await asyncio.wait(tasks.values(), timeout=timeout)
@@ -1118,7 +1118,7 @@ class AsyncLLM(EngineClient):
         if task is None or task.done():
             task = asyncio.create_task(
                 self.engine_core.check_health_gpu_async(
-                    engine_rank, envs.VLLM_READY_IDLE_PROBE_CACHE_TTL_S
+                    engine_rank, envs.VLLM_HEALTH_GENERATE_PROBE_CACHE_TTL_S
                 )
             )
             task.add_done_callback(

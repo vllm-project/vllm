@@ -122,7 +122,7 @@ def make_async_engine(*rank_results) -> AsyncLLM:
 async def test_check_health_gpu_aggregates_engine_ranks(
     monkeypatch: pytest.MonkeyPatch, rank_results, reason, engine_ranks
 ):
-    monkeypatch.setattr(envs, "VLLM_HEALTH_CHECK_GPU_TIMEOUT", 0.05)
+    monkeypatch.setattr(envs, "VLLM_HEALTH_GENERATE_TIMEOUT_S", 0.05)
     engine = make_async_engine(*rank_results)
 
     error = EngineSleepingError if reason == "sleeping" else EngineUnhealthyError
@@ -140,7 +140,7 @@ async def test_concurrent_health_checks_share_one_probe(
 ):
     """A probe outlives callers that time out, and later callers reuse it
     instead of queueing another one behind a blocked busy loop."""
-    monkeypatch.setattr(envs, "VLLM_HEALTH_CHECK_GPU_TIMEOUT", 0.05)
+    monkeypatch.setattr(envs, "VLLM_HEALTH_GENERATE_TIMEOUT_S", 0.05)
     finish = asyncio.Event()
 
     async def probe(*_args):

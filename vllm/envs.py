@@ -24,8 +24,8 @@ if TYPE_CHECKING:
     LOCAL_RANK: int = 0
     CUDA_VISIBLE_DEVICES: str | None = None
     VLLM_ENGINE_READY_TIMEOUT_S: int = 600
-    VLLM_HEALTH_CHECK_GPU_TIMEOUT: float = 20.0
-    VLLM_READY_IDLE_PROBE_CACHE_TTL_S: float = 10.0
+    VLLM_HEALTH_GENERATE_TIMEOUT_S: float = 20.0
+    VLLM_HEALTH_GENERATE_PROBE_CACHE_TTL_S: float = 10.0
     VLLM_CHAT_TEMPLATE_RENDER_TIMEOUT: float = 30.0
     VLLM_API_KEY: str | None = None
     VLLM_DEBUG_LOG_API_SERVER_RESPONSE: bool = False
@@ -809,14 +809,14 @@ environment_variables: dict[str, Callable[[], Any]] = {
     "VLLM_ENGINE_READY_TIMEOUT_S": lambda: int(
         os.environ.get("VLLM_ENGINE_READY_TIMEOUT_S", "600")
     ),
-    # Timeout for the idle GPU execution readiness probe.
-    "VLLM_HEALTH_CHECK_GPU_TIMEOUT": lambda: float(
-        os.environ.get("VLLM_HEALTH_CHECK_GPU_TIMEOUT", "20")
+    # How long /health_generate waits for each engine rank to answer.
+    "VLLM_HEALTH_GENERATE_TIMEOUT_S": lambda: float(
+        os.environ.get("VLLM_HEALTH_GENERATE_TIMEOUT_S", "20")
     ),
-    # Successful idle GPU probes are cached to avoid duplicate probe work.
+    # How long /health_generate reuses a passing idle GPU probe.
     # Set to 0 to disable the cache.
-    "VLLM_READY_IDLE_PROBE_CACHE_TTL_S": lambda: float(
-        os.environ.get("VLLM_READY_IDLE_PROBE_CACHE_TTL_S", "10")
+    "VLLM_HEALTH_GENERATE_PROBE_CACHE_TTL_S": lambda: float(
+        os.environ.get("VLLM_HEALTH_GENERATE_PROBE_CACHE_TTL_S", "10")
     ),
     # Maximum wall-clock seconds allowed for a single chat template render.
     # Set to 0 to disable the timeout.
@@ -2386,8 +2386,8 @@ def compile_factors() -> dict[str, object]:
         "VLLM_TUNED_CONFIG_FOLDER",
         "VLLM_FLASHINFER_AUTOTUNE_CACHE_DIR",
         "VLLM_FLASHINFER_AUTOTUNE_SKIP_OPS",
-        "VLLM_HEALTH_CHECK_GPU_TIMEOUT",
-        "VLLM_READY_IDLE_PROBE_CACHE_TTL_S",
+        "VLLM_HEALTH_GENERATE_TIMEOUT_S",
+        "VLLM_HEALTH_GENERATE_PROBE_CACHE_TTL_S",
         "VLLM_HTTP_TIMEOUT_KEEP_ALIVE",
         "VLLM_EXECUTE_MODEL_TIMEOUT_SECONDS",
         "VLLM_WORKER_SHUTDOWN_TIMEOUT_SECONDS",

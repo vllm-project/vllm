@@ -121,8 +121,8 @@ class ReadyProbeServer:
 def ready_probe_server(model: str, extra_args: list[str]):
     env = {
         "VLLM_SERVER_DEV_MODE": "1",
-        "VLLM_HEALTH_CHECK_GPU_TIMEOUT": str(PROBE_TIMEOUT_S),
-        "VLLM_READY_IDLE_PROBE_CACHE_TTL_S": "0",
+        "VLLM_HEALTH_GENERATE_TIMEOUT_S": str(PROBE_TIMEOUT_S),
+        "VLLM_HEALTH_GENERATE_PROBE_CACHE_TTL_S": "0",
         # The engine processes import the fault injection classes by name.
         "PYTHONPATH": os.pathsep.join(
             p for p in (str(REPO_ROOT), os.environ.get("PYTHONPATH")) if p
