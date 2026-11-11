@@ -138,7 +138,6 @@ def test_auto_gptq_normalizes_channelwise_activation_order():
 def test_auto_gptq_moe_creates_zero_initialized_expert_biases():
     method = object.__new__(AutoGPTQMoEMethod)
     method.quant_config = AutoGPTQConfig(4, 128, False, True, False, {}, {})
-    method.input_dtype = None
     method.experts_cls = None
     method.moe = SimpleNamespace(w13_num_shards=2)
     layer = torch.nn.Module()
@@ -162,12 +161,14 @@ def test_routed_experts_loads_per_expert_biases():
     class Loader:
         quant_config = None
         quant_method = object()
-        _fused_shared_expert_quantizer = None
+        shared_expert_online_loader = None
         moe_config = SimpleNamespace(
             is_act_and_mul=True,
             tp_rank=0,
+            num_experts=1,
             moe_parallel_config=SimpleNamespace(tp_size=1),
         )
+        expert_map_manager = SimpleNamespace(num_fused_shared_experts=0)
         _get_hidden_dim = staticmethod(RoutedExperts._get_hidden_dim)
         _narrow_expert_data_for_padding = staticmethod(
             RoutedExperts._narrow_expert_data_for_padding

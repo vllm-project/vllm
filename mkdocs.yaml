@@ -106,6 +106,7 @@ plugins:
         examples/features/pause_resume.md: examples/rl/pause_resume.md
         serving/online_serving/decisions.md: models/structured_decisions_models.md
         serving/online_serving/structured_decisions.md: models/structured_decisions_models.md
+        training/routed_experts_replay.md: training/routed_experts.md
 
 markdown_extensions:
   - attr_list

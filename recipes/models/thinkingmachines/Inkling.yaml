@@ -75,7 +75,7 @@ variants:
     vram_minimum_gb: 651
     description: "Weight-only NVFP4 (group size 16) on the routed MoE expert matmuls only; attention, norms, sconv, shared experts, routers, embeddings, and the layer 0-1 dense MLPs stay BF16. ~542 GB on disk. On Hopper, the MoE kernel dequantizes the NVFP4 expert weights to BF16 on the fly."
     extra_args:
-      - "--kernel-config.enable_flashinfer_autotune=False"
+      - "--disable-flashinfer-autotune"
     extra_env:
       FLASH_ATTENTION_CUTE_DSL_CACHE_ENABLED: "1"
   mxfp4:
@@ -143,7 +143,7 @@ variants:
     vram_minimum_gb: 2400
     description: "Full BF16 checkpoint (~1.8 TB on disk). Runs on Hopper and Blackwell."
     extra_args:
-      - "--kernel-config.enable_flashinfer_autotune=False"
+      - "--disable-flashinfer-autotune"
     extra_env:
       FLASH_ATTENTION_CUTE_DSL_CACHE_ENABLED: "1"
 
@@ -292,7 +292,7 @@ guide: |
     --tool-call-parser inkling \
     --enable-auto-tool-choice \
     --tensor-parallel-size 4 \
-    --kernel-config.enable_flashinfer_autotune=False \
+    --disable-flashinfer-autotune \
     --trust-remote-code
   ```
 

@@ -1,0 +1,2 @@
+<｜begin▁of▁sentence｜><｜System｜>该助手为DeepSeek-V3，由深度求索公司创造。
+今天是2025年10月17日，星期五。<｜latest_reminder｜>2024-11-15,上海市,App,中文<｜User｜>热海大滚锅是世界著名温泉吗<｜Assistant｜></think>热海大滚锅在中国乃至全球的地热奇观中占有重要地位，但“世界著名”的称号更侧重于它作为独特的地质现象和旅游景点。<｜end▁of▁sentence｜><｜User｜>世界著名温泉有哪些<｜Assistant｜></think><｜action｜>Search<｜end▁of▁sentence｜>

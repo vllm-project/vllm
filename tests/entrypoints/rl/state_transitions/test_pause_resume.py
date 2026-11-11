@@ -2,10 +2,8 @@
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 """End-to-end tests for the vLLM RL pause/resume lifecycle."""
 
-import os
 import threading
 from typing import Any
-from unittest.mock import patch
 
 import pytest
 import requests
@@ -24,26 +22,14 @@ from tests.entrypoints.rl.conftest import (
 )
 
 
-@pytest.fixture(scope="module", params=[False, True], ids=["MRV1", "MRV2"])
-def use_v2(request):
-    return request.param
-
-
 @pytest.fixture(scope="module")
-def server_url(use_v2):
-    env_vars = {
-        "VLLM_USE_V2_MODEL_RUNNER": "1" if use_v2 else "0",
-    }
-
-    with (
-        patch.dict(os.environ, env_vars),
-        server(
-            extra_args=[
-                "--enable-prefix-caching",
-                "--enable-prompt-tokens-details",
-            ]
-        ) as url,
-    ):
+def server_url():
+    with server(
+        extra_args=[
+            "--enable-prefix-caching",
+            "--enable-prompt-tokens-details",
+        ]
+    ) as url:
         yield url
 
 
@@ -127,9 +113,17 @@ class TestPauseResume:
                 )
 
             new_thread.start()
-            assert not new_done.wait(timeout=0.3), (
-                "new request completed while generation was paused"
-            )
+            if mode == "keep":
+                assert not new_done.wait(timeout=0.3), (
+                    "new request completed while generation was paused"
+                )
+            else:
+                assert new_done.wait(timeout=30), (
+                    "new request was not rejected while generation was paused"
+                )
+                error = new_result["response"]["error"]
+                assert error["code"] == 503
+                assert error["type"] == "ServiceUnavailableError"
         finally:
             assert resume(server_url) == 200
             inflight_thread.join(timeout=30)
@@ -140,7 +134,11 @@ class TestPauseResume:
         assert inflight.error is None
         assert inflight.finish_reason == inflight_finish_reason
         assert not new_thread.is_alive()
-        assert ok(new_result.get("response"))
+        if mode == "keep":
+            assert ok(new_result.get("response"))
+        else:
+            # Rejected while paused; a retry after resume succeeds.
+            assert ok(gen(server_url, max_tokens=4, timeout=60))
 
     def test_clear_cache_preserves_output_and_controls_prefix_cache(self, server_url):
         prompt = (

@@ -1,5 +1,10 @@
 # vLLM IR: Functional Intermediate Representation
 
+!!! warning "Deprecated"
+    vLLM IR is deprecated and is being removed. `--ir-op-priority`
+    (`KernelConfig.ir_op_priority`) still works but logs a warning, and it will be
+    removed in v0.34.0. Do not port new ops to vLLM IR.
+
 ## Motivation
 
 vLLM IR is a **functional intermediate representation (IR)** that fills the gap between

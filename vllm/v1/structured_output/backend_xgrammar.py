@@ -56,7 +56,7 @@ class XgrammarBackend(StructuredOutputBackend):
             self.vocab_size = len(self.tokenizer.vocab)
             tokenizer_info = xgr.TokenizerInfo(  # type: ignore
                 encoded_vocab=self.tokenizer.vocab,
-                # NOTE: https://github.com/mlc-ai/xgrammar/blob/5e141f6ff1ca02bc31f9e512e68b61f2a8ae88e5/tests/python/test_tokenizer_info.py#L43 # noqa: E501
+                # NOTE: https://github.com/mlc-ai/xgrammar/blob/5e141f6ff1ca02bc31f9e512e68b61f2a8ae88e5/tests/python/test_tokenizer_info.py#L43
                 vocab_type=xgr.VocabType.RAW
                 if self.tokenizer.is_tekken
                 else xgr.VocabType.BYTE_FALLBACK,
@@ -164,6 +164,12 @@ class XgrammarBackend(StructuredOutputBackend):
                 self.compiler.compile_regex,
                 grammar_spec,
             )
+        elif request_type == StructuredOutputOptions.CHOICE:
+            # xgrammar has no choice type. Python request validation rewrites
+            # `choice` into this grammar, but other frontends send it as is.
+            ctx = self.compiler.compile_grammar(
+                choice_as_grammar(json.loads(grammar_spec))
+            )
         elif request_type == StructuredOutputOptions.STRUCTURAL_TAG:
             s_tag = json.loads(grammar_spec)
             if "structures" in s_tag:
@@ -264,14 +270,12 @@ class XgrammarGrammar(StructuredOutputGrammar):
         """
         if self._is_terminated:
             return True
-        for token in tokens:
+        for num_accepted, token in enumerate(tokens):
             if not self.matcher.accept_token(token):
-                logger.error(
-                    "Failed to advance FSM for request %s "
-                    "for tokens %s. Please file an issue.",
-                    request_id,
-                    token,
-                )
+                if num_accepted:
+                    self.matcher.rollback(num_accepted)
+                    self.num_processed_tokens -= num_accepted
+                    self._is_terminated = self.matcher.is_terminated()
                 return False
             self.num_processed_tokens += 1
             self._is_terminated = self.matcher.is_terminated()

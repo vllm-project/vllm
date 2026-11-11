@@ -8,7 +8,7 @@ This directory contains a replacement for the lm-eval-harness GSM8K evaluation, 
 
 ```bash
 pytest -s -v tests/evals/gsm8k/test_gsm8k_correctness.py \
-    --config-list-file=configs/models-small.txt
+    --config-list-file=configs/models-small.yaml
 ```
 
 ### Run standalone evaluation script
