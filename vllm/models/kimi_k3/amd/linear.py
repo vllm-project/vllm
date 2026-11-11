@@ -464,12 +464,14 @@ class KimiMoE(nn.Module):
             routed = self.experts.routed_experts
             w13_weight = getattr(routed, "w13_weight", None)
             if w13_weight is None:
-                w13_weight = routed.w13_weight_packed
+                w13_weight = getattr(routed, "w13_weight_packed", None)
             w2_weight = getattr(routed, "w2_weight", None)
             if w2_weight is None:
-                w2_weight = routed.w2_weight_packed
-            w13_weight.data.zero_()
-            w2_weight.data.zero_()
+                w2_weight = getattr(routed, "w2_weight_packed", None)
+            if w13_weight is not None:
+                w13_weight.data.zero_()
+            if w2_weight is not None:
+                w2_weight.data.zero_()
             self.experts.moe_config.intermediate_size_per_partition_unpadded = (
                 moe_intermediate_size // self.tp_size
             )
