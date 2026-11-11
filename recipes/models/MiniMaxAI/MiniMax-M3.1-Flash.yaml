@@ -4,7 +4,7 @@ meta:
   provider: "MiniMax"
   description: "MiniMax M3.1-Flash vision-language MoE (~428B total / 23B active) with MSA sparse attention throughout and a built-in DSpark draft; quantization-aware trained, MXFP8 dense layers and NVFP4 experts. Served TP4 on NVIDIA Blackwell or AMD MI355X, prefill/decode disaggregated as TP4 + TP4 on MI355X or DEP2 + DEP4 on GB200/GB300, and TP8 on NVIDIA Hopper."
   date_added: 2026-10-23
-  date_updated: 2026-11-02
+  date_updated: 2026-11-11
   tasks:
     - text
     - multimodal
@@ -16,6 +16,7 @@ meta:
     b300: verified
     gb200: verified
     gb300: verified
+    vr200: supported
 
 model:
   model_id: "MiniMaxAI/MiniMax-M3.1-Flash"
@@ -98,6 +99,7 @@ features:
         hardware:
           hopper: unsupported
           blackwell: unsupported
+          rubin: unsupported
       dbo:
         label: "DBO"
         description: "DBO on prefill steps of 8192+ tokens, no SP."
@@ -112,6 +114,7 @@ features:
         hardware:
           hopper: unsupported
           blackwell: unsupported
+          rubin: unsupported
       sp:
         variants: [default]
         label: "SP"
@@ -122,6 +125,7 @@ features:
         hardware:
           hopper: unsupported
           blackwell: unsupported
+          rubin: unsupported
   parallel_topk:
     label: "Parallel index top-k"
     description: "AMD MI355X: parallel decode top-16 selection for the NVFP4 indexer. Disabled by default; requires an image containing VLLM_ROCM_PARALLEL_INDEX_TOPK. FP8 indexers, including mono decode, bypass this path. Benchmark/CI jobs must explicitly enable this feature or set the environment variable to 1."
@@ -135,6 +139,7 @@ features:
         hardware:
           hopper: unsupported
           blackwell: unsupported
+          rubin: unsupported
           mi300x: unsupported
           mi325x: unsupported
       none:
@@ -167,6 +172,7 @@ features:
         hardware:
           hopper: unsupported
           blackwell: unsupported
+          rubin: unsupported
           mi300x: unsupported
           mi325x: unsupported
           mi350x: unsupported
@@ -197,6 +203,7 @@ variants:
       - gb300
       - b200
       - b300
+      - vr200
     # NVFP4 experts as stored (Blackwell runs them natively): 413.1B x 0.53
     # bytes + 17.5 GB of other weights ≈ 237 GB, x 1.2 ≈ 285 GB.
     vram_minimum_gb: 285
@@ -206,6 +213,9 @@ variants:
       # + 17.5 GB ≈ 444 GB (measured 105.0 GiB per TP4 rank), x 1.2 ≈ 533 GB.
       mi355x:
         vram_minimum_gb: 533
+      # The CUDA 13.4 build of this model's image; the Rubin stack needs CUDA 13.4.
+      vr200:
+        docker_image: "vllm/vllm-openai:minimax-m31-flash-cu134"
       # Only this checkpoint stores NVFP4 experts; the Quark export below
       # already holds MXFP4 ones.
       amd:
@@ -266,7 +276,7 @@ compatible_strategies:
 
 
 hardware_overrides:
-  blackwell:
+  blackwell: &m31_blackwell
     extra_args:
       - "--kv-cache-dtype"
       - "nvfp4"
@@ -276,6 +286,9 @@ hardware_overrides:
       - '{"cudagraph_mode": "FULL_AND_PIECEWISE"}'
     extra_env:
       VLLM_FLOAT32_MATMUL_PRECISION: "high"
+  # Rubin takes the Blackwell configuration (same SM100-family kernels). Not
+  # tuned on Rubin yet.
+  rubin: *m31_blackwell
   amd:
     extra_args:
       - "--kv-cache-dtype"
@@ -288,9 +301,11 @@ hardware_overrides:
 
 strategy_overrides:
   # MI355X serves TP4 on half of an 8-GPU node; Hopper keeps the fp8 variant's TP8.
+  # VR200 serves TP4 on its tray.
   single_node_tp:
     tp:
       mi355x: 4
+      vr200: 4
   # MI355X 1P1D as in the guide's AMD PD section: one TP4 engine per role, on
   # GPUs 0-3 of its node. Exact-GPU role blocks layer after the `amd` baseline
   # and win the last-wins dedupe: the prefill node drops indexer_decode_cp (it
@@ -1750,6 +1765,10 @@ guide: |
   - **AMD:** MI355X (gfx950), ROCm 7.2+, TP4.
   - **NVIDIA Blackwell:** GB200, GB300, B200 or B300, TP4; NVFP4 MoE runs
     natively on the FP4 tensor cores.
+  - **NVIDIA Rubin (preview):** VR200, TP4, with the
+    `vllm/vllm-openai:minimax-m31-flash-cu134` image (CUDA 13.4) and no pip
+    path. It uses the Blackwell flags and hasn't been tuned on Rubin; the
+    GB200/GB300 PD and AgentX configurations don't apply.
   - **NVIDIA Hopper:** H100 or H200, TP8 on a full node, with the FP8
     variant: FP8 KV and indexer caches, NVFP4 MoE on Marlin.
   - **`--block-size 128` is mandatory** (MSA sparse/index cache).
