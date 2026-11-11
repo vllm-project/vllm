@@ -73,6 +73,30 @@ class BaseThinkingReasoningParser(ReasoningParser):
         i = rfind_tokens(input_ids, (self.start_token_id, self.end_token_id))
         return i >= 0 and input_ids[i] == self.end_token_id
 
+    def _split_at_end_token_id(
+        self, delta_token_ids: Sequence[int]
+    ) -> tuple[str | None, str | None]:
+        """Split a delta at the end marker's token position.
+
+        Used when the end marker id is present but its text was stripped
+        from the delta: decode both sides separately so text after the
+        marker stays in content instead of being conflated into reasoning.
+        Markers decode away with skip_special_tokens, mirroring how the
+        delta text itself was produced.
+        """
+        ids = list(delta_token_ids)
+        end_pos = ids.index(self.end_token_id)
+        markers = {self.start_token_id, self.end_token_id}
+        reasoning = self.model_tokenizer.decode(
+            [t for t in ids[:end_pos] if t not in markers],
+            skip_special_tokens=True,
+        )
+        content = self.model_tokenizer.decode(
+            [t for t in ids[end_pos + 1 :] if t not in markers],
+            skip_special_tokens=True,
+        )
+        return (reasoning or None, content or None)
+
     def is_reasoning_end_streaming(
         self, input_ids: Sequence[int], delta_ids: Iterable[int]
     ) -> bool:
@@ -114,11 +138,10 @@ class BaseThinkingReasoningParser(ReasoningParser):
                 end_index = delta_text.find(self.end_token)
                 if end_index == -1:
                     # End marker id present but its text is absent from the
-                    # delta: the split point is unrecoverable, so preserve
-                    # the visible text as reasoning rather than slicing.
-                    # A content tail after the marker is conflated here;
-                    # exact attribution would need token-to-char mapping.
-                    return DeltaMessage(reasoning=delta_text or None)
+                    # delta: split at the marker's token position so any
+                    # post-marker text stays in content.
+                    reasoning, content = self._split_at_end_token_id(delta_token_ids)
+                    return DeltaMessage(reasoning=reasoning, content=content)
                 reasoning = delta_text[:end_index]
                 content = delta_text[end_index + len(self.end_token) :]
                 return DeltaMessage(
@@ -139,15 +162,11 @@ class BaseThinkingReasoningParser(ReasoningParser):
                 start_index = delta_text.find(self.start_token)
                 end_index = delta_text.find(self.end_token)
                 if end_index == -1:
-                    # End marker id present but its text is absent: cannot
-                    # split, so preserve the visible text as reasoning,
-                    # minus the start marker when its text survived.
-                    reasoning = (
-                        delta_text[start_index + len(self.start_token) :]
-                        if start_index >= 0
-                        else delta_text
-                    )
-                    return DeltaMessage(reasoning=reasoning or None)
+                    # End marker id present but its text is absent: split at
+                    # the marker's token position; the start marker id
+                    # decodes away the same way it was stripped.
+                    reasoning, content = self._split_at_end_token_id(delta_token_ids)
+                    return DeltaMessage(reasoning=reasoning, content=content)
                 if start_index == -1:
                     # Start marker text absent: no visible prefix exists,
                     # so reasoning starts at 0 and the split below is exact.

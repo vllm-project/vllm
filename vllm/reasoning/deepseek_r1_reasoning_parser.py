@@ -52,9 +52,10 @@ class DeepSeekR1ReasoningParser(BaseThinkingReasoningParser):
                 end_index = delta_text.find(self.end_token)
                 if end_index == -1:
                     # End marker id present but its text is absent from
-                    # the delta: cannot split, so preserve the visible
-                    # text as reasoning rather than slicing with -1.
-                    return DeltaMessage(reasoning=delta_text or None)
+                    # the delta: split at the marker's token position so
+                    # post-marker text stays in content.
+                    reasoning, content = self._split_at_end_token_id(delta_token_ids)
+                    return DeltaMessage(reasoning=reasoning, content=content)
                 reasoning = delta_text[:end_index]
                 content = delta_text[end_index + len(self.end_token) :]
                 return DeltaMessage(

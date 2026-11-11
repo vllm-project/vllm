@@ -277,21 +277,25 @@ def test_constructor_falls_back_to_outer_reasoning_effort(hy_v3_tokenizer):
 def test_streaming_no_start_end_text_stripped(hy_v3_tokenizer):
     """No start marker anywhere, end marker text absent from the delta.
 
-    The no-start-token path must not slice with find() == -1; the
-    visible text is preserved as reasoning.
+    The no-start-token path must not slice with find() == -1; it
+    splits at the end marker's token position instead.
     """
     parser: ReasoningParser = ReasoningParserManager.get_reasoning_parser(parser_name)(
         hy_v3_tokenizer,
         chat_template_kwargs={"reasoning_effort": "high"},
     )
+    assert parser.end_token_id is not None
+    full = f"abc{parser.end_token}answer"
+    ids = hy_v3_tokenizer.encode(full, add_special_tokens=False)
+    assert parser.end_token_id in ids
     delta = parser.extract_reasoning_streaming(
         previous_text="",
-        current_text="abc",
-        delta_text="abc",
+        current_text="abcanswer",
+        delta_text="abcanswer",
         previous_token_ids=[],
-        current_token_ids=[1, parser.end_token_id, 2],
-        delta_token_ids=[1, parser.end_token_id, 2],
+        current_token_ids=ids,
+        delta_token_ids=ids,
     )
     assert delta is not None
     assert delta.reasoning == "abc"
-    assert delta.content is None
+    assert delta.content == "answer"
