@@ -22,8 +22,8 @@ from vllm.sampling_params import SamplingParams
 from vllm.transformers_utils.configs.muse_spark import MuseSparkVisionConfig
 from vllm.utils.torch_utils import set_default_torch_dtype
 
-from ..registry import HF_EXAMPLE_MODELS
-from ..utils import dummy_hf_overrides
+from ...registry import HF_EXAMPLE_MODELS
+from ...utils import dummy_hf_overrides
 
 GRIDS = [(2, 2), (16, 16), (32, 32), (34, 34), (64, 64), (74, 74), (22, 286), (96, 170)]
 
@@ -85,7 +85,6 @@ def _pixel_values(grid_thw: torch.Tensor, encoder: MuseGlimmerVisionEncoder):
     )
 
 
-@pytest.mark.core_model
 @pytest.mark.skipif(not current_platform.is_cuda(), reason="Requires CUDA")
 @pytest.mark.parametrize(("grid_height", "grid_width"), GRIDS)
 def test_glimmer_sparse_permutation_orders_tokens_by_window(
@@ -102,7 +101,6 @@ def test_glimmer_sparse_permutation_orders_tokens_by_window(
     assert seq_lens == _window_lengths(grid_height, grid_width)
 
 
-@pytest.mark.core_model
 @pytest.mark.skipif(not current_platform.is_cuda(), reason="Requires CUDA")
 @pytest.mark.parametrize(("grid_height", "grid_width"), GRIDS + [(128, 128)])
 def test_glimmer_pos_emb_layout_is_bilinear_interpolation(
@@ -128,7 +126,6 @@ def test_glimmer_pos_emb_layout_is_bilinear_interpolation(
     torch.testing.assert_close(actual, expected.T, rtol=0, atol=5e-5)
 
 
-@pytest.mark.core_model
 @pytest.mark.skipif(not current_platform.is_cuda(), reason="Requires CUDA")
 @pytest.mark.parametrize(("grid_height", "grid_width"), [(2, 2), (6, 10), (74, 74)])
 def test_glimmer_pixel_shuffle_order_groups_merge_blocks(
@@ -145,7 +142,6 @@ def test_glimmer_pixel_shuffle_order_groups_merge_blocks(
 
 
 @pytest.mark.cpu_test
-@pytest.mark.core_model
 @pytest.mark.parametrize(("grid_height", "grid_width"), GRIDS)
 def test_navit_sparse_permutation_orders_tokens_by_window(
     grid_height: int, grid_width: int
@@ -164,7 +160,6 @@ def test_navit_sparse_permutation_orders_tokens_by_window(
 
 
 @pytest.mark.cpu_test
-@pytest.mark.core_model
 def test_navit_cu_seqlens() -> None:
     cu_seqlens, max_seqlen = _seqlens_to_cu_seqlens([3, 1, 4], torch.device("cpu"))
 
@@ -173,7 +168,6 @@ def test_navit_cu_seqlens() -> None:
     assert max_seqlen.device.type == "cpu" and max_seqlen.item() == 4
 
 
-@pytest.mark.core_model
 @pytest.mark.skipif(not current_platform.is_cuda(), reason="Requires CUDA")
 @pytest.mark.parametrize(
     "layer_types",
@@ -198,7 +192,6 @@ def test_glimmer_vision_encoder_is_batch_invariant(
     torch.testing.assert_close(together, alone, rtol=1e-4, atol=1e-4)
 
 
-@pytest.mark.core_model
 @pytest.mark.skipif(not current_platform.is_cuda(), reason="Requires CUDA")
 def test_glimmer_vision_encoder_rejects_grid_not_divisible_by_merge_size(
     default_vllm_config, dist_init
@@ -210,7 +203,6 @@ def test_glimmer_vision_encoder_rejects_grid_not_divisible_by_merge_size(
         encoder(_pixel_values(grid_thw, encoder), grid_thw)
 
 
-@pytest.mark.core_model
 @pytest.mark.skipif(not current_platform.is_cuda(), reason="Requires CUDA")
 def test_glimmer_vision_encoder_projects_patches_per_group(
     default_vllm_config, dist_init
@@ -228,7 +220,6 @@ def test_glimmer_vision_encoder_projects_patches_per_group(
     assert num_patches == [60, 16, 16]
 
 
-@pytest.mark.core_model
 @pytest.mark.skipif(not current_platform.is_cuda(), reason="Requires CUDA")
 def test_glimmer_engine_has_no_gpu_sync(monkeypatch, vllm_runner) -> None:
     monkeypatch.setenv("VLLM_GPU_SYNC_CHECK", "error")
@@ -265,7 +256,6 @@ def test_glimmer_engine_has_no_gpu_sync(monkeypatch, vllm_runner) -> None:
     assert [len(output.outputs[0].token_ids) for output in outputs] == [4, 4]
 
 
-@pytest.mark.core_model
 @pytest.mark.skipif(not current_platform.is_cuda(), reason="Requires CUDA")
 def test_glimmer_vision_encoder_has_no_gpu_sync(
     monkeypatch, default_vllm_config, dist_init
@@ -282,7 +272,6 @@ def test_glimmer_vision_encoder_has_no_gpu_sync(
     assert features.shape == (60 // 4 + 2 * 16 // 4, 256)
 
 
-@pytest.mark.core_model
 @pytest.mark.skipif(not current_platform.is_cuda(), reason="Requires CUDA")
 def test_navit_has_no_gpu_sync(monkeypatch, default_vllm_config, dist_init) -> None:
     config = MuseSparkVisionConfig(
