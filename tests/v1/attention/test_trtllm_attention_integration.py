@@ -264,7 +264,7 @@ def _create_nvfp4_hnd_kv_cache(
             kv_scale_t,
         )
 
-    return nvfp4_cache
+    return {"k": k_cache, "v": v_cache}
 
 
 def _run_trtllm_integration(batch_spec, kv_cache_dtype="auto", model_name=MODEL):

@@ -731,8 +731,17 @@ class KVCacheGroup:
         )
 
     @property
+    def layer_specs(self) -> dict[str, KVCacheSpec]:
+        """Each layer's spec. A layer whose cache has several components, named
+        `"<layer name>:<component>"` in `kv_cache_specs`, has its first one's."""
+        layer_specs: dict[str, KVCacheSpec] = {}
+        for name, spec in self.kv_cache_specs.items():
+            layer_specs.setdefault(name.partition(":")[0], spec)
+        return layer_specs
+
+    @property
     def layer_names(self) -> list[str]:
-        return list(self.kv_cache_specs)
+        return list(self.layer_specs)
 
     @property
     def distinct_specs(self) -> tuple[KVCacheSpec, ...]:

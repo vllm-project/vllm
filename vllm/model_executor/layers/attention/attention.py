@@ -671,17 +671,15 @@ class Attention(nn.Module, AttentionLayerBase):
             # ``unify`` scales it up by an integer ratio.
             shared_page = vllm_config.cache_config.skip_page_size_padded
             # The backend owns its packing
-            kv_cache_spec = self.attn_backend.customize_spec(
-                AttentionSpec(
-                    block_size=1,
-                    num_kv_heads=self.num_kv_heads,
-                    head_size=self.head_size,
-                    head_size_v=self.head_size_v,
-                    dtype=self.kv_cache_torch_dtype,
-                    kv_quant_mode=quant_mode,
-                )
+            kv_cache_spec = AttentionSpec(
+                block_size=1,
+                num_kv_heads=self.num_kv_heads,
+                head_size=self.head_size,
+                head_size_v=self.head_size_v,
+                dtype=self.kv_cache_torch_dtype,
+                kv_quant_mode=quant_mode,
             )
-            sw_per_token = kv_cache_spec.real_page_size_bytes
+            sw_per_token = self.attn_backend.get_page_size_bytes(kv_cache_spec)
             page_budget = shared_page or sw_per_token * block_size
             # Without a shared page, prefer a block that divides the primary
             # block: ``unify`` pads any other block's page, and a padded page

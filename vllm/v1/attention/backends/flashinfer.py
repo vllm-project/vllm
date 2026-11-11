@@ -165,24 +165,18 @@ _KVPair = tuple[torch.Tensor, torch.Tensor]
 
 
 def _nvfp4_kv_views(
-    kv_cache: torch.Tensor, num_kv_heads: int
+    kv_cache: dict[str, torch.Tensor],
 ) -> tuple[_KVPair, _KVPair, str]:
-    """Views of NVFP4 pages laid out as [K data | K scale | V data | V scale]."""
-    num_blocks, num_slots, block_size, full_dim = kv_cache.shape
-    hnd = kv_cache.stride()[1:] == (block_size * full_dim, full_dim, 1)
-    if not hnd and kv_cache.stride()[1:] != (full_dim, num_slots * full_dim, 1):
-        raise ValueError(f"NVFP4 KV pages must be dense, got {kv_cache.stride()}")
-    dims = (num_kv_heads, block_size) if hnd else (block_size, num_kv_heads)
-    side_size = num_kv_heads * block_size * full_dim
+    """Data and block scale views of the NVFP4 K and V caches, in page order."""
+    k_cache = canonicalize_singleton_dim_strides(kv_cache["k"])
+    v_cache = canonicalize_singleton_dim_strides(kv_cache["v"])
+    _, num_kv_heads, block_size, full_dim = k_cache.shape
+    hnd = k_cache.stride()[1:] == (block_size * full_dim, full_dim, 1)
+    if not hnd and k_cache.stride()[1:] != (full_dim, num_kv_heads * full_dim, 1):
+        raise ValueError(f"NVFP4 KV pages must be dense, got {k_cache.stride()}")
     (k_data, k_scale), (v_data, v_scale) = (
-        nvfp4_split_data_scale(
-            kv_cache.as_strided(
-                (num_blocks, *dims, full_dim),
-                (kv_cache.stride(0), dims[1] * full_dim, full_dim, 1),
-                kv_cache.storage_offset() + side * side_size,
-            )
-        )
-        for side in range(2)
+        nvfp4_split_data_scale(cache if hnd else cache.transpose(1, 2))
+        for cache in (k_cache, v_cache)
     )
     return (k_data, v_data), (k_scale, v_scale), "HND" if hnd else "NHD"
 
@@ -596,19 +590,21 @@ class FlashInferBackend(AttentionBackend):
     supports_kv_cache_update_bypass: bool = True
 
     @classmethod
-    def customize_spec(cls, spec: "AttentionSpec") -> "AttentionSpec":
-        """NVFP4 stores K and V as separate per-head slots of packed fp4 data
-        plus fp8 block scales."""
+    def customize_spec(
+        cls, spec: "AttentionSpec"
+    ) -> "AttentionSpec | dict[str, AttentionSpec]":
+        """NVFP4 keeps K and V in separate caches of packed fp4 data plus fp8
+        block scales."""
         if spec.state_content_bytes is not None or not spec.kv_quant_mode.is_nvfp4:
             return spec
-        hs_k = nvfp4_kv_cache_full_dim(spec.head_size)
-        hs_v = nvfp4_kv_cache_full_dim(spec.head_size_v)
-        assert hs_k == hs_v, "nvfp4 with asymmetric K/V head sizes not yet supported"
-        return replace(
-            spec,
-            num_head_slots=2 * spec.num_kv_heads,
-            state_content_bytes=hs_k * get_dtype_size(spec.dtype),
-        )
+        return {
+            name: replace(
+                spec,
+                state_content_bytes=nvfp4_kv_cache_full_dim(head_size)
+                * get_dtype_size(spec.dtype),
+            )
+            for name, head_size in (("k", spec.head_size), ("v", spec.head_size_v))
+        }
 
     supported_dtypes: ClassVar[list[torch.dtype]] = [torch.float16, torch.bfloat16]
     supported_kv_cache_dtypes: ClassVar[list[CacheDType]] = [
@@ -2525,7 +2521,11 @@ class FlashInferImpl(AttentionImpl):
         num_prefill_tokens = attn_metadata.num_prefill_tokens
 
         stride_order = kv_cache_layout.layer_view_order
-        kv_cache_permute = kv_cache.permute(*stride_order)  # HND and contiguous
+        # NVFP4 keeps K and V as separate components; K stands in for the checks
+        # on the cache layout below.
+        kv_cache_permute = (
+            kv_cache["k"] if self.is_kvcache_nvfp4 else kv_cache
+        ).permute(*stride_order)  # HND and contiguous
         # Fix degenerate strides on any size-1 dimension (e.g. num_kv_heads=1
         # with TP=8).  PyTorch permits non-canonical strides on size-1 dims;
         # CUDA TMA requires ≥16-byte alignment on all non-outermost strides.
@@ -2542,20 +2542,18 @@ class FlashInferImpl(AttentionImpl):
             )
         kv_cache_permute = fixed
 
-        # Split K/V — zero-copy views. NVFP4 stores K/V as separate head
-        # groups; other dtypes pack K/V in the content dim.
+        # Split K/V — zero-copy views. NVFP4 stores K/V as separate
+        # components; other dtypes pack K/V in the content dim.
         hs = self.head_size
         nvfp4_kv_data = None
         nvfp4_kv_block_scales = None
         if self.is_kvcache_nvfp4:
-            k_cache, v_cache = kv_cache.split(self.num_kv_heads, dim=1)
+            k_cache, v_cache = kv_cache["k"], kv_cache["v"]
             kv_cache_tuple = (
                 canonicalize_singleton_dim_strides(k_cache.permute(*stride_order)),
                 canonicalize_singleton_dim_strides(v_cache.permute(*stride_order)),
             )
-            nvfp4_kv_data, nvfp4_kv_block_scales, _ = _nvfp4_kv_views(
-                kv_cache, self.num_kv_heads
-            )
+            nvfp4_kv_data, nvfp4_kv_block_scales, _ = _nvfp4_kv_views(kv_cache)
         else:
             kv_cache_tuple = kv_cache_permute.split(hs, dim=-1)
 
@@ -3080,7 +3078,7 @@ class FlashInferImpl(AttentionImpl):
             # op uses the slot_mapping's shape to determine the number of
             # actual tokens.
             if self.nvfp4_fa2:
-                data, scales, kv_layout = _nvfp4_kv_views(kv_cache, self.num_kv_heads)
+                data, scales, kv_layout = _nvfp4_kv_views(kv_cache)
                 nvfp4_quantize_append_paged_kv_cache_with_slot_mapping(
                     key,
                     value,
@@ -3093,12 +3091,9 @@ class FlashInferImpl(AttentionImpl):
                 )
                 return
             if self.is_kvcache_nvfp4:
-                # (B, 2*H, N, full_dim) -> ((B, N, H, full_dim),
-                #                            (B, N, H, full_dim));
-                # K heads first, then V heads.
-                k_cache, v_cache = kv_cache.transpose(1, 2).split(
-                    self.num_kv_heads, dim=-2
-                )
+                # (B, H, N, full_dim) -> (B, N, H, full_dim) for each of K and V
+                k_cache = kv_cache["k"].transpose(1, 2)
+                v_cache = kv_cache["v"].transpose(1, 2)
             else:
                 # (B, H, N, 2*hs) -> ((B, N, H, hs), (B, N, H, hs))
                 k_cache, v_cache = kv_cache.transpose(1, 2).split(

@@ -880,7 +880,7 @@ class Platform:
             )
             # The backend owns its packing
             with set_current_vllm_config(vllm_config):
-                return backend_cls.customize_spec(spec).page_size_bytes
+                return backend_cls.get_page_size_bytes(spec)
 
         primary_dtype = (
             STR_DTYPE_TO_TORCH_DTYPE[cache_config.cache_dtype]
@@ -1036,7 +1036,7 @@ class Platform:
                 dtype=kv_cache_dtype,
                 kv_quant_mode=kv_quant_mode,
             )
-            tq_page = _pack_backend.customize_spec(tq_spec).page_size_bytes
+            tq_page = _pack_backend.get_page_size_bytes(tq_spec)
             if cache_config.kv_cache_dtype_skip_layers:
                 skip_page = AttentionSpec(
                     block_size=1,
@@ -1060,9 +1060,7 @@ class Platform:
             )
             # customize_spec may read the model config (e.g. Octave's rotary dim).
             with set_current_vllm_config(vllm_config):
-                attn_page_size_1_token = backend_cls.customize_spec(
-                    attn_spec
-                ).page_size_bytes
+                attn_page_size_1_token = backend_cls.get_page_size_bytes(attn_spec)
 
         # Compute mamba page size
         model_cls, _ = ModelRegistry.resolve_model_cls(

@@ -145,7 +145,7 @@ def test_get_kv_cache_layer_configs_resolves_hisparse_block_size(
     )
     dense_backend = layers["dense"].get_attn_backend()
     assert resolved["dense"] == full_layer(
-        customize_attention_spec(dense_backend, specs["dense"])
+        customize_attention_spec(dense_backend, specs["dense"])[""]
     )
     assert all(spec.block_size == block_size for spec in specs.values())
 
@@ -1069,7 +1069,7 @@ def test_split_blocks_align_to_kernel_blocks(block_size, page_states):
     """Backends taking only fixed kernel blocks align packed blocks to the kernel
     block the final block size is split into, and not at all when unsplit."""
     group = _packed_group(4, 132, [128, 256])
-    spec = customize_attention_spec(group.backend, group.kv_cache_spec)
+    spec = customize_attention_spec(group.backend, group.kv_cache_spec)[""]
     spec = spec.copy_with_new_block_size(block_size)
     assert spec.get_block_stride_alignment() == max(page_states * 132, 1)
 
