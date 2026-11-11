@@ -175,7 +175,9 @@ def _qwen2audio_varlen_shim(
         module: The `Qwen2AudioEncoder` whose weights run the compute.
         input_features: Mel features, `[B][mel][T]` with `T` the rung window.
         attention_mask: Additive attention mask over the conv output length.
-        **kwargs: Ignored; absorbs forward extras (e.g. a `lengths` hint).
+        **kwargs: Forwarded to the encoder layers unchanged, exactly as the
+            original `forward` does (`TransformersKwargs` extras are never
+            silently dropped here).
 
     Returns:
         A `BaseModelOutput` whose `last_hidden_state` is the encoder output.
@@ -198,7 +200,7 @@ def _qwen2audio_varlen_shim(
     x = F.gelu(module.conv2(x)).permute(0, 2, 1)
     x = x + module.embed_positions.weight[: x.size(1)]
     for layer in module.layers:
-        x = layer(x, attention_mask)
+        x = layer(x, attention_mask, **kwargs)
     x = x.permute(0, 2, 1)
     x = module.avg_pooler(x)
     x = x.permute(0, 2, 1)

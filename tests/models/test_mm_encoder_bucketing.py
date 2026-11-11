@@ -122,6 +122,22 @@ def _gpu_worker():
         meb._gpu_execution_supported = original
 
 
+def _rungs_via_runner(model, batch, num_items):
+    """Split a batch through the runner's duck-typed hook.
+
+    This is the observable behavior of "bucketing engages" -- exactly what the
+    GPU encoder runner does at runtime -- so tests assert on it instead of the
+    bucketer's private state.
+    """
+    from vllm.v1.worker.gpu.mm.encoder_runner import EncoderRunner
+
+    class _StubRunner:
+        def __init__(self):
+            self.model = model
+
+    return EncoderRunner._bucket_mm_batch(_StubRunner(), batch, num_items)
+
+
 def test_rungs_from_seconds_scale_by_frame_rate():
     assert _rungs_from_seconds((2.0, 4.0), 10) == (20, 40)
     assert _rungs_from_seconds((0.05,), 10) == (1,)  # never a zero-width rung
@@ -145,7 +161,10 @@ def test_padded_length_picks_smallest_fitting_rung():
     ladder = LengthBucketingConfig(buckets=(200, 400, 3000))
     assert ladder.padded_length(150) == 200
     assert ladder.padded_length(400) == 400
-    assert ladder.padded_length(9999) == 3000  # fall back to the largest rung
+    assert ladder.padded_length(3000) == 3000  # the largest rung still fits
+    # Nothing fits: signal it instead of silently clamping to the largest rung
+    # (a clamp would truncate content; bucket() falls back to the full batch).
+    assert ladder.padded_length(9999) is None
 
 
 def test_bucket_groups_items_into_fixed_length_rungs():
@@ -228,16 +247,17 @@ def test_install_wires_shim_and_uninstall_restores_forward():
         tower = model.audio_tower
         original_forward = tower.forward
         with _gpu_worker():
-            labels = install_encoder_bucketing(
+            install_encoder_bucketing(
                 model,
                 {"audio": tower},
                 _Spec(),
                 model_type="qwen2_audio",
                 additional_config={"audio_bucket_seconds": [1, 2]},
             )
-        assert labels == ["audio"]
-        assert model._encoder_bucketing.active
         assert isinstance(tower.forward, functools.partial)  # variable-length shim
+        # Observable through the runner's duck-typed hook: the batch splits.
+        rungs = _rungs_via_runner(model, _batch([50, 200], 250), 2)
+        assert len(rungs) == 2  # bucketing engages
 
         restored = uninstall_encoder_bucketing(model)
         assert restored == ["Qwen2AudioEncoder"]
@@ -258,7 +278,9 @@ def test_install_disabled_keeps_original_forward():
         model_type="qwen2_audio",
         additional_config=None,
     )
-    assert not model._encoder_bucketing.active
+    batch = _batch([50, 200], 250)
+    rungs = _rungs_via_runner(model, batch, 2)
+    assert len(rungs) == 1 and rungs[0][1] is batch  # no bucketing engages
     assert tower.forward == original_forward  # no shim when the feature is off
 
 
@@ -276,7 +298,9 @@ def test_install_unverified_model_type_is_blocked():
             model_type="some_unadapted_model",
             additional_config={"audio_bucket_seconds": [1, 2]},
         )
-    assert not model._encoder_bucketing.active
+    batch = _batch([50, 200], 250)
+    rungs = _rungs_via_runner(model, batch, 2)
+    assert len(rungs) == 1 and rungs[0][1] is batch  # no bucketing engages
     assert tower.forward == original_forward  # no shim, no bucketing
 
 
@@ -303,7 +327,9 @@ def test_install_gpu_only_gate_blocks_non_gpu_worker():
     finally:
         meb._gpu_execution_supported = original
 
-    assert not model._encoder_bucketing.active
+    batch = _batch([50, 200], 250)
+    rungs = _rungs_via_runner(model, batch, 2)
+    assert len(rungs) == 1 and rungs[0][1] is batch  # no bucketing engages
     assert tower.forward == original_forward  # no shim outside GPU workers
 
 
@@ -492,6 +518,64 @@ def test_funasr_spec_buckets_tensor_features():
     assert got == {500: [0], 1000: [1], 800: [2]}
     for indices, kw in rungs:
         assert kw["speech_lengths"].shape == (len(indices),)
+
+
+def test_firered_spec_buckets_list_shaped_input_features():
+    from vllm.model_executor.models.fireredasr2 import FireRedASR2BucketingSpec
+
+    feats = [torch.randn(500, 80), torch.randn(2000, 80), torch.randn(1200, 80)]
+    speech_lengths = torch.tensor([500, 2000, 1200])
+    fake_token_lengths = torch.tensor([124, 499, 299])
+    batch = {
+        "input_features": feats,
+        "speech_lengths": speech_lengths,
+        "fake_token_lengths": fake_token_lengths,
+    }
+    bucketer = EncoderBucketing(
+        FireRedASR2BucketingSpec(), LengthBucketingConfig((800, 1600, 3000))
+    )
+    rungs = bucketer.bucket(batch, 3)
+
+    # list branch selects rows and truncates each to the rung; the length
+    # fields stay aligned with the selected rows
+    by_len = {}
+    for indices, kw in rungs:
+        assert isinstance(kw["input_features"], list)
+        assert len(indices) == 1
+        by_len[indices[0]] = kw["input_features"][0].shape[0]
+        assert kw["speech_lengths"].tolist() == [speech_lengths[indices[0]].item()]
+        assert kw["fake_token_lengths"].tolist() == [
+            fake_token_lengths[indices[0]].item()
+        ]
+    # windows (margin 7): 500->800 (keeps 500), 2000->3000 (keeps 2000),
+    # 1200->1600 (keeps 1200) -- rung >= true length, so nothing is clipped
+    assert by_len == {0: 500, 1: 2000, 2: 1200}
+
+
+def test_funasr_spec_buckets_list_shaped_input_features():
+    from vllm.model_executor.models.funasr import FunASRBucketingSpec
+
+    feats = [torch.randn(400, 560), torch.randn(900, 560), torch.randn(600, 560)]
+    speech_lengths = torch.tensor([400, 900, 600])
+    fake_token_lengths = torch.tensor([100, 225, 150])
+    batch = {
+        "input_features": feats,
+        "speech_lengths": speech_lengths,
+        "fake_token_lengths": fake_token_lengths,
+    }
+    bucketer = EncoderBucketing(
+        FunASRBucketingSpec(), LengthBucketingConfig((500, 800, 1000))
+    )
+    rungs = bucketer.bucket(batch, 3)
+
+    by_len = {}
+    for indices, kw in rungs:
+        assert isinstance(kw["input_features"], list)
+        assert len(indices) == 1
+        by_len[indices[0]] = kw["input_features"][0].shape[0]
+        assert kw["speech_lengths"].tolist() == [speech_lengths[indices[0]].item()]
+    # windows (margin 8): 400->500, 900->1000, 600->800 -- nothing clipped
+    assert by_len == {0: 400, 1: 900, 2: 600}
 
 
 def test_full_window_shim_is_byte_identical_to_original_forward():

@@ -144,19 +144,23 @@ class LengthBucketingConfig:
         """The largest rung: the window used when no rung fits."""
         return self.buckets[-1]
 
-    def padded_length(self, length: int) -> int:
-        """Return the smallest rung `>=` `length`, else the largest rung.
+    def padded_length(self, length: int) -> int | None:
+        """Return the smallest rung `>=` `length`, or `None` when none fits.
+
+        `None` means the item cannot be computed over a rung without truncating
+        content -- callers fall back to the untouched full batch instead
+        (see `EncoderBucketing.bucket`).
 
         Args:
             length: True length in feature frames.
 
         Returns:
-            The rung window this length should compute over.
+            The rung window this length should compute over, or `None`.
         """
         for rung in self.buckets:
             if rung >= length:
                 return rung
-        return self.max_length
+        return None
 
 
 def _ladder_seconds(
@@ -262,15 +266,16 @@ class EncoderBucketingSpec:
     rung) and frame-rate knobs next to the model code. The generic bucketer stays
     free of per-model field knowledge.
 
-    Subclasses set `frames_per_second` (mel frames per second of input audio),
-    `context_margin` (extra frames past the published length so a rung window
-    never clips anything the encoder reads), and `align_to` (align each rung up
-    to a multiple of this many frames, e.g. a conv/merge downsampling factor),
-    and implement the three methods.
+    Subclasses must declare `frames_per_second` (mel frames per second of input
+    audio) and `context_margin` (extra frames past the published length so a
+    rung window never clips anything the encoder reads; declare `0` explicitly
+    when the encoder reads nothing past the length), plus optionally `align_to`
+    (align each rung up to a multiple of this many frames, e.g. a conv/merge
+    downsampling factor), and implement the three methods.
     """
 
     frames_per_second: int | None = None
-    context_margin: int = 0
+    context_margin: int | None = None
     align_to: int = 1
 
     def item_lengths(
@@ -377,14 +382,14 @@ class EncoderBucketing:
         if time_extent <= 0:
             return full
         margin = self.spec.context_margin
-        # An item longer than the ladder has no safe rung; run the untouched
-        # forward rather than truncate content.
-        if max(lengths) + margin > self.ladder.max_length:
-            return full
-        windows = [
-            min(self.ladder.padded_length(length + margin), time_extent)
-            for length in lengths
-        ]
+        windows: list[int] = []
+        for length in lengths:
+            rung = self.ladder.padded_length(length + margin)
+            if rung is None:
+                # An item too long for the ladder has no safe rung; run the
+                # untouched forward rather than truncate content.
+                return full
+            windows.append(min(rung, time_extent))
         # Waste gate: only bucket when the capped windows strictly reduce the
         # total computed frames. Single, uniform, and no-shrink batches run the
         # untouched forward -- the feature is never slower than off.
@@ -452,7 +457,7 @@ def install_encoder_bucketing(
     *,
     model_type: str,
     additional_config: Mapping[str, object] | None = None,
-) -> list[str]:
+) -> None:
     """Install variable-length encoder shims and register the bucketer.
 
     The encoder-owning model passes its encoder(s) as a `label -> module` mapping
@@ -474,15 +479,13 @@ def install_encoder_bucketing(
         additional_config: The `VllmConfig.additional_config` mapping carrying
             the opt-in bucketing ladder.
 
-    Returns:
-        The declared encoder labels.
-
     Raises:
         ValueError: If `encoders` is empty or a declared encoder is not a module.
-        RuntimeError: If the spec does not set `frames_per_second` when enabled.
+        RuntimeError: If the spec does not set `frames_per_second` or
+            `context_margin` when enabled.
     """
-    if model is None or getattr(model, "_encoder_bucketing_installed", False):
-        return []
+    if model is None or getattr(model, "_encoder_bucketing", None) is not None:
+        return
     if not encoders:
         raise ValueError(
             "install_encoder_bucketing: declare at least one encoder (label -> module)"
@@ -522,6 +525,11 @@ def install_encoder_bucketing(
                 raise RuntimeError(
                     "EncoderBucketingSpec must set frames_per_second"
                 )
+            if not isinstance(spec.context_margin, int):
+                raise RuntimeError(
+                    "EncoderBucketingSpec must set context_margin "
+                    "(0 is a valid explicit margin)"
+                )
             ladder = LengthBucketingConfig(
                 _rungs_from_seconds(seconds, frames_per_second, spec.align_to)
             )
@@ -541,7 +549,6 @@ def install_encoder_bucketing(
 
     model._encoder_bucketing = EncoderBucketing(spec, ladder, min_bucket_size)
     model._encoder_bucketing_manifest = manifest
-    model._encoder_bucketing_installed = True
     if ladder is not None:
         logger.info(
             "Encoder length bucketing enabled over rungs %s for modules %s "
@@ -556,7 +563,6 @@ def install_encoder_bucketing(
             "(e.g. [2, 4, 8, 16, 30]).",
             _CONFIG_KEY,
         )
-    return list(encoders)
 
 
 def uninstall_encoder_bucketing(model: nn.Module) -> list[str]:
@@ -579,6 +585,4 @@ def uninstall_encoder_bucketing(model: nn.Module) -> list[str]:
         del model._encoder_bucketing_manifest
     if getattr(model, "_encoder_bucketing", None) is not None:
         del model._encoder_bucketing
-    if getattr(model, "_encoder_bucketing_installed", False):
-        del model._encoder_bucketing_installed
     return restored
