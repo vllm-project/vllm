@@ -525,7 +525,7 @@ class DeepGemmMegaMoEExperts(nn.Module):
             return False if return_success else None
         is_global_scale = weight_name.endswith(("weight_scale_2", "input_scale"))
         is_scale = weight_name.endswith("weight_scale")
-        if self.weight_format == MEGA_MOE_MXFP4_SM90 and not loaded_weight.is_meta:
+        if self.weight_format == MEGA_MOE_MXFP4_SM90 and not param.is_meta:
             try:
                 loaded_weight = self._sm90_fp4_shard(
                     loaded_weight.to(param.device), is_scale

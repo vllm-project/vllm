@@ -31,6 +31,11 @@ from vllm.model_executor.layers.quantization.utils.quant_utils import (
     kMxfp8Dynamic,
     kNvfp4DynamicToken,
 )
+from vllm.model_executor.model_loader.reload import (
+    finalize_layerwise_reload,
+    initialize_layerwise_reload,
+    record_metadata_for_reloading,
+)
 from vllm.model_executor.model_loader.weight_utils import finalize_model_weights
 from vllm.platforms import current_platform
 from vllm.utils.deep_gemm import _import_deep_gemm, is_deep_gemm_supported
@@ -274,8 +279,9 @@ def _load_mega_moe_checkpoint_shuffled(experts, num_logical_experts, seed):
         name, loaded_weight, shard_id, expert_id = shards[i]
         if name.endswith("weight_scale"):
             loaded_weight = loaded_weight.view(routed.scale_dtype)
-        assert experts.weight_loader(
-            getattr(experts, name),
+        param = getattr(experts, name)
+        assert param.weight_loader(
+            param,
             loaded_weight,
             f"experts.{name}",
             shard_id=shard_id,
@@ -362,6 +368,18 @@ def test_deep_gemm_mega_moe_reload_overwrites_kernel_layout_in_place(weight_form
     data_ptrs = [param.data_ptr() for param in experts.parameters()]
     ckpt = _load_mega_moe_checkpoint_shuffled(experts, 2, seed=1)
     assert [param.data_ptr() for param in experts.parameters()] == data_ptrs
+    _assert_mega_moe_layout(experts, _expected_mega_moe_layout(ckpt, 2, 2))
+
+
+@requires_sm90_mega_moe_on_sm90
+def test_deep_gemm_mega_moe_layerwise_reload():
+    """Layerwise reload first loads each real shard into a meta parameter."""
+    experts = _make_mega_moe_experts(2, 2)
+    _load_mega_moe_checkpoint_shuffled(experts, 2, seed=0)
+    record_metadata_for_reloading(experts)
+    initialize_layerwise_reload(experts)
+    ckpt = _load_mega_moe_checkpoint_shuffled(experts, 2, seed=1)
+    finalize_layerwise_reload(experts, model_config=None)
     _assert_mega_moe_layout(experts, _expected_mega_moe_layout(ckpt, 2, 2))
 
 
