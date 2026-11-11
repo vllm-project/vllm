@@ -1,6 +1,7 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 
+import enum
 import uuid
 from dataclasses import field
 from typing import TYPE_CHECKING, Any, Literal, get_args
@@ -49,39 +50,37 @@ def hisparse_host_pool_gib(
     return host_pool_gib
 
 
-# Connectors that register the device KV cache with an RDMA engine whatever
-# their buffer device; NIXL is checked separately as it can stage through host.
-_KV_CACHE_REGISTERING_CONNECTORS = frozenset(
-    {
-        "MooncakeConnector",
-        "MooncakeStoreConnector",
-        "MoRIIOConnector",
-        "UMBPStoreConnector",
-    }
-)
+class KVCacheAccess(enum.IntFlag):
+    """How a KV connector accesses the device KV cache, as flags of what it
+    requires from the allocation; MultiConnector combines its children's."""
 
+    IN_PROCESS = 0
+    """In-process only (torch ops, copy kernels): any allocation works."""
 
-def _offloading_mirrors_kv_cache(
-    extra_config: dict[str, Any], parallel_config: "ParallelConfig"
-) -> bool:
-    """Whether OffloadingConnector registers the device KV cache for RDMA: its
-    spec, resolved as the connector resolves it, says so when the engine's
-    workers span nodes (the tiering spec mirrors CPU region slots onto the head
-    node's region), and they may."""
-    from vllm.v1.kv_offload.config import (
-        places_workers_by_nnodes,
-        workers_may_span_nodes,
-    )
-    from vllm.v1.kv_offload.factory import OffloadingSpecFactory
+    REGISTERS = enum.auto()
+    """Registers it with UCX or RDMA: one physical allocation per segment."""
 
-    if not workers_may_span_nodes(
-        parallel_config.world_size,
-        parallel_config.local_world_size,
-        places_workers_by_nnodes(parallel_config.distributed_executor_backend),
-    ):
-        return False
-    spec_cls = OffloadingSpecFactory.get_spec_cls(extra_config)
-    return spec_cls.registers_kv_cache_across_nodes(extra_config)
+    EXPORTS_FD = enum.auto()
+    """Another process imports it through POSIX file descriptors: one physical
+    allocation per segment, exportable (not yet implemented)."""
+
+    EXPORTS_FABRIC = enum.auto()
+    """Another process on the host imports it through FABRIC handles (UCX
+    cuda_ipc): one physical allocation per segment, and an IMEX channel."""
+
+    LEGACY_IPC = enum.auto()
+    """Shares it through legacy CUDA IPC: the extensible KV cache is unsupported."""
+
+    REGISTERS_ACROSS_NODES = enum.auto()
+    """Registers it with UCX or RDMA only when the engine's workers span
+    nodes; `KVTransferConfig.kv_cache_access` resolves it for an engine."""
+
+    def needs_single_chunk(self) -> bool:
+        """Whether each segment must be backed by one physical allocation.
+        `REGISTERS_ACROSS_NODES` counts until it is resolved for an engine."""
+        registers = KVCacheAccess.REGISTERS | KVCacheAccess.REGISTERS_ACROSS_NODES
+        exports = KVCacheAccess.EXPORTS_FD | KVCacheAccess.EXPORTS_FABRIC
+        return bool(self & (registers | exports))
 
 
 def kv_buffer_device_default_factory() -> str:
@@ -194,37 +193,50 @@ class KVTransferConfig:
     def _connector_children(self) -> list[dict[str, Any]]:
         if self.kv_connector == "MultiConnector":
             return self.kv_connector_extra_config.get("connectors", [])
-        return [
-            {
-                "kv_connector": self.kv_connector,
-                "kv_connector_extra_config": self.kv_connector_extra_config,
-            }
-        ]
+        return [{"kv_connector": self.kv_connector}]
 
-    def uses_nixl_on_device_memory(self) -> bool:
-        """Whether NIXL transfers the device KV cache itself, directly or in
-        MultiConnector. With a CPU kv_buffer_device it uses host staging buffers."""
-        return any(
-            (child.get("kv_connector") or "").startswith("Nixl")
-            and child.get("kv_buffer_device", self.kv_buffer_device) != "cpu"
-            for child in self._connector_children()
+    def kv_cache_access(
+        self, parallel_config: "ParallelConfig | None" = None
+    ) -> KVCacheAccess:
+        """How the configured connectors reach the device KV cache, directly or
+        in MultiConnector. Imports the connector class to ask it, through
+        `KVConnectorBase_V1.kv_cache_access`. Given the engine's
+        parallel_config, `REGISTERS_ACROSS_NODES` becomes `REGISTERS` if its
+        workers may span nodes, and is dropped otherwise; without it, the
+        flag is returned as the connector reported it."""
+        if self.kv_connector is None:
+            return KVCacheAccess.IN_PROCESS
+        from vllm.distributed.kv_transfer.kv_connector.factory import (
+            KVConnectorFactory,
         )
 
-    def registers_kv_cache_memory(self, parallel_config: "ParallelConfig") -> bool:
-        """Whether a connector registers the device KV cache itself with UCX or
-        RDMA (NIXL, Mooncake, MoRIIO, UMBP), directly or in MultiConnector.
-        OffloadingConnector registers it when it mirrors CPU region slots across
-        the nodes of the engine described by parallel_config."""
-        return self.uses_nixl_on_device_memory() or any(
-            child.get("kv_connector") in _KV_CACHE_REGISTERING_CONNECTORS
-            or (
-                child.get("kv_connector") == "OffloadingConnector"
-                and _offloading_mirrors_kv_cache(
-                    child.get("kv_connector_extra_config") or {}, parallel_config
-                )
-            )
-            for child in self._connector_children()
+        access = KVConnectorFactory.kv_cache_access(self)
+        if parallel_config is None or (
+            KVCacheAccess.REGISTERS_ACROSS_NODES not in access
+        ):
+            return access
+        from vllm.v1.kv_offload.config import (
+            places_workers_by_nnodes,
+            workers_may_span_nodes,
         )
+
+        access &= ~KVCacheAccess.REGISTERS_ACROSS_NODES
+        if workers_may_span_nodes(
+            parallel_config.world_size,
+            parallel_config.local_world_size,
+            places_workers_by_nnodes(parallel_config.distributed_executor_backend),
+        ):
+            access |= KVCacheAccess.REGISTERS
+        return access
+
+    def registers_kv_cache_memory(
+        self, parallel_config: "ParallelConfig | None" = None
+    ) -> bool:
+        """Whether a connector registers the device KV cache with UCX or RDMA,
+        or another process imports it, directly or in MultiConnector: each
+        segment must then be backed by one physical allocation. parallel_config
+        is the engine's, as in `kv_cache_access`."""
+        return self.kv_cache_access(parallel_config).needs_single_chunk()
 
     def has_connector(self, connector_name: str) -> bool:
         """Whether `connector_name` is configured, directly or in MultiConnector."""

@@ -10,6 +10,7 @@ import torch
 
 from tests.v1.kv_connector.unit.offloading_connector.utils import MockOffloadingSpec
 from vllm.config import KVTransferConfig, ParallelConfig, VllmConfig
+from vllm.config.kv_transfer import KVCacheAccess
 from vllm.distributed.kv_transfer.kv_connector.v1.offloading.config import (
     build_offloading_config,
 )
@@ -1427,22 +1428,23 @@ def _parallel_config(**kwargs: Any) -> ParallelConfig:
 
 
 def _offloading_transfer_config(
-    extra_config: dict[str, Any], multi: bool = False
+    extra_config: dict[str, Any], multi_depth: int = 0
 ) -> KVTransferConfig:
-    offloading = {
+    """OffloadingConnector, inside multi_depth levels of MultiConnector."""
+    connector: dict[str, Any] = {
         "kv_connector": "OffloadingConnector",
         "kv_role": "kv_both",
         "kv_buffer_device": "cuda",
         "kv_connector_extra_config": extra_config,
     }
-    if not multi:
-        return KVTransferConfig(**offloading)
-    return KVTransferConfig(
-        kv_connector="MultiConnector",
-        kv_role="kv_both",
-        kv_buffer_device="cuda",
-        kv_connector_extra_config={"connectors": [offloading]},
-    )
+    for _ in range(multi_depth):
+        connector = {
+            "kv_connector": "MultiConnector",
+            "kv_role": "kv_both",
+            "kv_buffer_device": "cuda",
+            "kv_connector_extra_config": {"connectors": [connector]},
+        }
+    return KVTransferConfig(**connector)
 
 
 @pytest.mark.cpu_test
@@ -1491,22 +1493,37 @@ def _offloading_transfer_config(
         ),
     ],
 )
-@pytest.mark.parametrize("multi", [False, True])
+@pytest.mark.parametrize("multi_depth", [0, 1, 2])
 def test_offloading_mirror_registers_kv_cache_memory(
     monkeypatch,
     extra_config: dict[str, Any],
     parallel_kwargs: dict[str, Any],
     registers: bool,
-    multi: bool,
+    multi_depth: int,
 ) -> None:
     """The mirror registers the GPU KV cache of workers off the head node with
     NIXL, so the extensible KV cache must prepare it as for the NIXL
-    connector, also when OffloadingConnector is inside MultiConnector."""
+    connector, also when OffloadingConnector is inside MultiConnector, at any
+    depth."""
     # external_launcher turns off V1 multiprocessing through the environment.
     monkeypatch.setenv("VLLM_ENABLE_V1_MULTIPROCESSING", "1")
-    transfer = _offloading_transfer_config(extra_config, multi)
+    transfer = _offloading_transfer_config(extra_config, multi_depth)
     parallel_config = _parallel_config(**parallel_kwargs)
+    access = transfer.kv_cache_access(parallel_config)
+    expected = KVCacheAccess.REGISTERS if registers else KVCacheAccess.IN_PROCESS
+    assert access == expected
     assert transfer.registers_kv_cache_memory(parallel_config) is registers
+
+
+@pytest.mark.cpu_test
+def test_offloading_mirror_access_is_conditional_without_an_engine() -> None:
+    """Without the engine's parallel config, the connector reports that it
+    registers the KV cache only across nodes, which counts as registering."""
+    transfer = _offloading_transfer_config(_MIRRORING_OFFLOAD)
+    assert transfer.kv_cache_access() == KVCacheAccess.REGISTERS_ACROSS_NODES
+    assert transfer.registers_kv_cache_memory()
+    plain = _offloading_transfer_config({"spec_name": "TieringOffloadingSpec"})
+    assert plain.kv_cache_access() == KVCacheAccess.IN_PROCESS
 
 
 class _TieringSpecSubclass(TieringOffloadingSpec):
