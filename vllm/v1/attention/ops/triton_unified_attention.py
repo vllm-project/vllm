@@ -940,27 +940,6 @@ def _get_tile_size(
     return 16 if element_size >= 2 else 32
 
 
-def _select_query_block(
-    max_seqlen_q: int, num_queries_per_kv: int
-) -> tuple[int, int, bool]:
-    # The tuned block depends on the batch's longest query, so batch-invariant
-    # mode keeps the default.
-    tuned_long_prefill = (
-        is_gfx1151
-        and max_seqlen_q >= 512
-        and num_queries_per_kv <= 16
-        and not is_batch_invariant
-    )
-    if tuned_long_prefill:
-        block_m = 64
-        return block_m, block_m // num_queries_per_kv, True
-
-    block_m = (
-        16 if num_queries_per_kv <= 16 else triton.next_power_of_2(num_queries_per_kv)
-    )
-    return block_m, block_m // num_queries_per_kv, False
-
-
 def unified_attention(
     q,
     k,
@@ -1092,22 +1071,15 @@ def unified_attention(
     head_size = q.shape[2]
     head_size_padded = triton.next_power_of_2(head_size)
 
-    BLOCK_M, BLOCK_Q, tuned_long_prefill = _select_query_block(
-        max_seqlen_q, num_queries_per_kv
+    BLOCK_M = (
+        16 if num_queries_per_kv <= 16 else triton.next_power_of_2(num_queries_per_kv)
     )
+    BLOCK_Q = BLOCK_M // num_queries_per_kv
 
     # Tuned launch parameters; ``None`` lets Triton pick its defaults.
     launch_num_warps: int | None = None
     launch_num_stages: int | None = None
     tuned_prefill_tile: int | None = None
-
-    # Long prefill performs many KV-tile iterations per query block. On
-    # gfx1151, grouping more query rows amortizes that loop and reduces the
-    # launch grid without changing the kernel's math. Keep decode and short
-    # prefill on their smaller block, where the wider block is slower. gfx1100
-    # prefill takes its tuned RDNA config after the 2D/3D choice instead.
-    if tuned_long_prefill:
-        launch_num_warps = 4
 
     # Prefill-shaped head_size 256 batches (diffusion-gemma canvas, gemma-4
     # sliding layers) are under-tiled by the decode defaults. BLOCK_M=32 is
@@ -1283,7 +1255,7 @@ def unified_attention(
     # threshold). Only launch parameters change; sliding window, sinks, softcap and
     # ALiBi are applied per element inside each tile. Batch-invariant mode keeps the
     # default launch (vLLM then always runs 2D).
-    if (is_gfx1201 or is_gfx1100) and not is_batch_invariant:
+    if (is_gfx1201 or is_gfx1100 or is_gfx1151) and not is_batch_invariant:
         grid_fill = num_seqs * num_kv_heads
         # gfx1100 sliding-window decode: a split-KV batch runs as 2D from this
         # requests x KV heads, and then gets the 2D tuning below.
@@ -1391,6 +1363,15 @@ def unified_attention(
                 )
                 if config is not None:
                     TILE_SIZE_PREFILL, launch_num_warps, launch_num_stages = config
+            elif is_gfx1151 and max_seqlen_q >= 512 and num_queries_per_kv <= 16:
+                # Long prefill runs many KV-tile iterations per query block, so
+                # 64 query rows per program amortize that loop and shrink the
+                # grid. Decode and short prefill keep the default block, where
+                # the wider one is slower.
+                BLOCK_M = 64
+                BLOCK_Q = BLOCK_M // num_queries_per_kv
+                total_num_q_blocks = q.shape[0] // BLOCK_Q + num_seqs
+                launch_num_warps = 4
 
     # The kernel signature is the same for 2D and 3D — only the launch
     # grid + a handful of constexpr toggles differ.  Per-token-head scale
