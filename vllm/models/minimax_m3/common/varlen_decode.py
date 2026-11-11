@@ -3,7 +3,7 @@
 """Ragged decode metadata shared by the MiniMax M3 indexer and sparse builders.
 
 Under adaptive verification, each decode request verifies 1 to 1 + K tokens, so
-the builders pass ``query_start_loc`` and a token-to-request map to their
+the builders pass `query_start_loc` and a token-to-request map to their
 kernels instead of one uniform per-request query length.
 """
 
@@ -22,7 +22,7 @@ from vllm.v1.kv_cache_interface import KVCacheSpec
 
 class VarlenDecodeBuilderMixin:
     """Builder hooks for ragged decode; subclasses opt in via
-    ``supports_varlen_decode``."""
+    `supports_varlen_decode`."""
 
     if TYPE_CHECKING:
         # Provided by AttentionMetadataBuilder, which every user mixes in.
@@ -81,7 +81,7 @@ def build_decode_query_layout(
     token_to_req_buffer: torch.Tensor | None,
     varlen: bool,
 ) -> tuple[int, torch.Tensor | None, torch.Tensor | None]:
-    """Return ``(decode_query_len, query_start_loc, token_to_req_indices)``.
+    """Return `(decode_query_len, query_start_loc, token_to_req_indices)`.
 
     A ragged batch returns query length 0 plus the device layout; a uniform
     batch returns its query length and no layout tensors.

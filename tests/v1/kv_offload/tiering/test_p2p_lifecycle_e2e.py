@@ -184,6 +184,7 @@ def _p2p_inference_kwargs(port):
         model="HuggingFaceTB/SmolLM2-135M",
         skip_tokenizer_init=True,
         dtype="float16",
+        block_size=16,
         max_model_len=256,
         enforce_eager=True,
         gpu_memory_utilization=0.30,
