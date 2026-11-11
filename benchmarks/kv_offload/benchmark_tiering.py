@@ -23,6 +23,7 @@ Compare two session dirs:
 
 import argparse
 import contextlib
+import csv
 import json
 import os
 import shutil
@@ -66,6 +67,14 @@ METRICS = [
 
 def gib(n: float) -> int:
     return int(n * 1024**3)
+
+
+def _fmt(v: object) -> str:
+    if v is None:
+        return "n/a"
+    if isinstance(v, float):
+        return f"{v:.2f}"
+    return str(v)
 
 
 @dataclass
@@ -534,10 +543,29 @@ class BenchmarkSession:
             self.results.append(result)
             self._checkpoint()
             print(f"{spec.name}: {result['status']}")
-            for m in METRICS:
-                print(f"  {m}: {result.get(m, 'n/a')}")
+            self._print_csv_rows([result])
+        self._write_table()
         print(f"\nAll runs complete. Results in {self.session_dir}/")
         return self.results
+
+    def _write_table(self) -> None:
+        """Scenarios as rows, metrics as columns; printed and saved as CSV."""
+        csv_path = self.session_dir / "results.csv"
+        with csv_path.open("w", newline="") as f:
+            writer = csv.writer(f)
+            writer.writerow(["scenario"] + METRICS)
+            for r in self.results:
+                writer.writerow([r["name"]] + [r.get(m, "") for m in METRICS])
+
+        rows = [[r["name"]] + [_fmt(r.get(m)) for m in METRICS] for r in self.results]
+        header = ["scenario"] + METRICS
+        widths = [
+            max(len(row[i]) for row in rows + [header]) for i in range(len(header))
+        ]
+        print()
+        for row in [header] + rows:
+            print("  ".join(cell.ljust(w) for cell, w in zip(row, widths)))
+        print(f"\nTable saved to {csv_path}")
 
     def _checkpoint(self) -> None:
         (self.session_dir / "results.json").write_text(
