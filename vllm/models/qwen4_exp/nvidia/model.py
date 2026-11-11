@@ -220,10 +220,17 @@ class Qwen4ExpDecoderLayer(nn.Module):
             from vllm.triton_utils.tp_synced_autotune import install
 
             install()
-        if replicate and self.use_hc_sequence_parallel:
+        pc = vllm_config.parallel_config
+        if replicate and (
+            self.use_hc_sequence_parallel
+            or pc.enable_expert_parallel
+            or pc.decode_context_parallel_size > 1
+            or pc.prefill_context_parallel_size > 1
+        ):
+            # These turn the TP-synced autotune off: replicated mixers would drift.
             raise NotImplementedError(
-                "VLLM_QWEN4EXP_REPLICATE_MIXER is not supported with "
-                "sequence-parallel HC/MoE."
+                "VLLM_QWEN4EXP_REPLICATE_MIXER is not supported with expert "
+                "parallelism, sequence-parallel HC/MoE or context parallelism."
             )
         self.ple: Qwen4ExpPLELayer | None = None
         ple_layer_ids = config.ple_layer_ids
