@@ -2780,6 +2780,81 @@ class rocm_aiter_ops:
         )
 
     @classmethod
+    @if_aiter_supported
+    def is_hc_two_stage_enabled(cls) -> bool:
+        """Whether the FlyDSL two-stage HyperConnection kernels are used."""
+        from vllm.platforms.rocm import get_cdna_version
+
+        return cls._AITER_ENABLED and get_cdna_version() in (3, 4)
+
+    @staticmethod
+    def hc_two_stage_max_tokens(
+        hyper_hidden_size: int, down_rows: int, hc_count: int, hc_lowrank: int
+    ) -> int:
+        """Largest token count the two-stage skinny decode kernels take for
+        this shape, or 0 when they cannot be built for it. Above it, AITER
+        would switch to a tiled path that needs a 64-row merged weight."""
+        from aiter.ops.flydsl.kernels.hyper_connection_gated_residual.k1 import (
+            DECODE_MAX_M,
+            skinny_decode_supported,
+        )
+
+        if not skinny_decode_supported(
+            hyper_hidden_size, down_rows, hc_count, hc_lowrank
+        ):
+            return 0
+        return DECODE_MAX_M
+
+    @staticmethod
+    def hc_fold_norm_weight(
+        w_down_inject: torch.Tensor, norm_weight: torch.Tensor, hc_count: int
+    ) -> torch.Tensor:
+        """Bake the grouped GemmaRMSNorm `(1 + w)` into the merged down+inject
+        weight, which the two-stage skinny decode kernels require."""
+        from aiter.ops.flydsl.kernels.hyper_connection_gated_residual import (
+            fold_norm_weight,
+        )
+
+        return fold_norm_weight(
+            w_down_merged=w_down_inject, norm_weight=norm_weight, hc_count=hc_count
+        )
+
+    @staticmethod
+    def hc_two_stage_combine_and_mix(
+        residual: torch.Tensor,
+        block_output: torch.Tensor,
+        injection: torch.Tensor,
+        norm_weight: torch.Tensor,
+        w_down_inject_folded: torch.Tensor,
+        w_up: torch.Tensor,
+        hc_count: int,
+        hc_lowrank: int,
+        eps: float,
+    ) -> tuple[torch.Tensor, torch.Tensor, torch.Tensor]:
+        """Combine a pending block output into the HC streams, then mix them.
+
+        Returns `(residual, block_input, injection)`. The injection is a
+        column slice of a `[tokens, w_down_inject_folded.shape[0]]` buffer.
+        """
+        from aiter.ops.flydsl.kernels.hyper_connection_gated_residual import (
+            flydsl_gr_two_stage_combine_and_mix,
+        )
+
+        return flydsl_gr_two_stage_combine_and_mix(
+            residual=residual,
+            block_output=block_output,
+            injection=injection,
+            norm_weight=norm_weight,
+            w_down=w_down_inject_folded[:hc_lowrank],
+            w_up=w_up,
+            w_inject=w_down_inject_folded[hc_lowrank : hc_lowrank + hc_count],
+            hc_count=hc_count,
+            eps=eps,
+            w_down_merged=w_down_inject_folded,
+            fold_w=True,
+        )
+
+    @classmethod
     @functools.cache
     def is_gdn_flydsl_prefill_available(cls) -> bool:
         """Whether the AITER FlyDSL GDN prefill path can be used.
