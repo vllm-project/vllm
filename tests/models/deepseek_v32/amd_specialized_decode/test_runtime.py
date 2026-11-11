@@ -55,7 +55,8 @@ REASONS = [
     ("kv_transfer_config", object(), "KV transfer"),
     ("aux_output_config.enable_return_routed_experts", True, "routed-expert capture"),
     ("model_config.dtype", torch.float16, "dtype torch.float16"),
-    ("cache_config.cache_dtype", "fp8", "kv_cache_dtype fp8"),
+    ("cache_config.cache_dtype", "fp8_e5m2", "kv_cache_dtype fp8_e5m2"),
+    ("cache_config.cache_dtype", "fp8_ds_mla", "kv_cache_dtype fp8_ds_mla"),
     ("compilation_config.mode", CompilationMode.STOCK_TORCH_COMPILE, "torch.compile"),
 ]
 
@@ -103,7 +104,7 @@ def test_unsupported_platform_and_config(make_vc, monkeypatch):
 def test_all_reasons_reported(make_vc, monkeypatch):
     """Startup lists every reason, not only the first."""
     monkeypatch.setattr(R, "_platform_reason", lambda: "this GPU (gfx950 only)")
-    vc = make_vc(tp=4, pp=2, kv="fp8")
+    vc = make_vc(tp=4, pp=2, kv="fp8_ds_mla")
     _set(vc, "lora_config", object())
     with pytest.raises(ValueError) as e:
         R.specialized_decode_config(vc)
@@ -124,6 +125,17 @@ def test_supported_config(make_vc, monkeypatch):
     dc = R.specialized_decode_config(make_vc(graphs="full"))
     assert dc is not None
     assert dc.step_sync is False
+
+
+@pytest.mark.usefixtures("gfx950")
+def test_fp8_kv_cache(make_vc):
+    """VLLM's e4m3 MLA cache is served at scale 1; computed KV scales are refused."""
+    for kv in ("fp8", "fp8_e4m3"):
+        assert R.unsupported(make_vc(kv=kv)) == [], kv
+    vc = make_vc(kv="fp8")
+    vc.cache_config.calculate_kv_scales = True
+    (why,) = R.unsupported(vc)
+    assert "calculate_kv_scales" in why
 
 
 @pytest.mark.parametrize("backend", [None, "auto"])

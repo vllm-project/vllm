@@ -214,6 +214,7 @@ class Glm5MonoKernel:
         with_indexer: bool = False,
         index_max_seq: int = 4096,
         index_proj_spread: bool = False,
+        kv_fp8: bool = False,
     ):
         expected_config = glm5_tp_config(npes)
         if W.config != expected_config:
@@ -245,6 +246,7 @@ class Glm5MonoKernel:
             None  # forward(): the fixed weight pointers (built on the first launch)
         )
         self.with_indexer = with_indexer
+        self.kv_fp8 = kv_fp8  # vLLM's e4m3 MLA cache (kv_cache_dtype=fp8, scale 1)
         self.index_max_seq = index_max_seq
         # (index cache, block table) refs set by set_index_tables
         self._index_tables: tuple | None = None
@@ -339,6 +341,7 @@ class Glm5MonoKernel:
             split_keys64=split_keys64,
             index_proj_spread=index_proj_spread,
             shared_native=W.shared_native,
+            kv_fp8=kv_fp8,
         )
         self.poll_limit = poll_limit
 
@@ -484,8 +487,14 @@ class Glm5MonoKernel:
             # inactive rows pass a 1-element buffer)
             raise ValueError("with_indexer: indices must be the int32 CSR buffer")
         cache_width = KV_LORA + PE_DIM
-        if kv_cache.dtype is not torch.bfloat16 or not kv_cache.is_contiguous():
-            raise ValueError("the MLA KV cache must be contiguous bf16")
+        kv_dtypes = (
+            (torch.uint8, torch.float8_e4m3fn) if self.kv_fp8 else (torch.bfloat16,)
+        )
+        if kv_cache.dtype not in kv_dtypes or not kv_cache.is_contiguous():
+            raise ValueError(
+                f"the MLA KV cache must be contiguous {kv_dtypes[-1]}, got "
+                f"{kv_cache.dtype}"
+            )
         if kv_cache.shape[-1] != cache_width:
             raise ValueError(
                 f"MLA KV cache last dimension must be {cache_width}, "

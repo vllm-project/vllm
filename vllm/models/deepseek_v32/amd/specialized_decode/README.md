@@ -39,7 +39,8 @@ FP8 mixed in one model.
 ## Supported deployments
 
 - **Hardware:** gfx950 (MI350X / MI355X), TP = 8, Model Runner V2.
-- **Precision:** `dtype=bfloat16`; `kv_cache_dtype` auto or bfloat16.
+- **Precision:** `dtype=bfloat16`; `kv_cache_dtype` auto, bfloat16 or fp8 (e4m3 at
+  scale 1: no `calculate_kv_scales`).
 - **Graphs:** FULL decode CUDA graphs or eager mode. Any capture sizes and
   `max_num_seqs` work: captured sizes up to `MAX_BATCH_SIZE` run the kernels, larger
   ones capture vLLM's decode. PIECEWISE-only graphs run every decode step through

@@ -68,6 +68,7 @@ def bare_layers(step_sync=True, check_every=1, failstop="raise"):
         step_sync=step_sync, check_every=check_every, failstop=failstop
     )
     ml.rank, ml.enabled = 0, True
+    ml.kv_fp8 = False
     ml.fused_layers = frozenset()
     ml.dev_nonfinite = None
     ml.batch_sizes = (1,)
@@ -448,6 +449,24 @@ def test_bind_caches_checks_the_mla_layout():
                 ml.bind_caches()
 
 
+def test_bind_caches_fp8_kv():
+    """kv_cache_dtype fp8: e4m3 byte caches, each layer's k_scale 1."""
+    ml = bare_layers()
+    ml.first, ml.kv_fp8 = 3, True
+    good = {L: torch.zeros(4, 16, 576, dtype=torch.uint8) for L in (3, 4, 5)}
+    attn = lambda c, k=1.0: NS(kv_cache=[c], _k_scale_float=k)  # noqa: E731
+    ml.layers = {L: NS(self_attn=attn(c)) for L, c in good.items()}
+    ml.bind_caches()
+    assert ml._flat[5].shape == (64, 576) and ml._flat[5].dtype is torch.uint8
+    for frag, lay5 in {
+        "k_scale 0.5": attn(good[5], 0.5),
+        "dtype torch.bfloat16": attn(torch.zeros(4, 16, 576, dtype=torch.bfloat16)),
+    }.items():
+        ml.layers = {**ml.layers, 5: NS(self_attn=lay5)}
+        with pytest.raises(RuntimeError, match=f"layer 5 MLA cache: .*{frag}"):
+            ml.bind_caches()
+
+
 class FakeKV:
     def __init__(self, nbytes):
         self.n = nbytes // 2
@@ -552,6 +571,7 @@ def test_op_launch_caching(monkeypatch, import_kernel):
         _wptrs=None,
         _index_tables=None,
         with_indexer=False,
+        kv_fp8=False,
     ).items():
         setattr(op, k, v)
     counts = dict(val=0, wp=0)

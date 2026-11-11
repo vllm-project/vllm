@@ -180,8 +180,14 @@ def _reasons_and_config(vllm_config) -> tuple[list[str], DecodeConfig | None]:
         ),
         (mc.dtype != torch.bfloat16, f"dtype {mc.dtype} (bfloat16 only)"),
         (
-            kv_dtype not in ("auto", "bfloat16"),
-            f"kv_cache_dtype {kv_dtype} (bfloat16 only)",
+            kv_dtype not in ("auto", "bfloat16", "fp8", "fp8_e4m3"),
+            f"kv_cache_dtype {kv_dtype} (bfloat16 or fp8 e4m3)",
+        ),
+        # an fp8 cache is written and read with scale 1 (checked again at bind)
+        (
+            kv_dtype.startswith("fp8")
+            and bool(getattr(vllm_config.cache_config, "calculate_kv_scales", False)),
+            "calculate_kv_scales (the kernels use KV scale 1)",
         ),
         # plan() and the per-layer kernels run in forward; a compiled forward would
         # trace them (DeepseekV32Model has no @support_torch_compile)

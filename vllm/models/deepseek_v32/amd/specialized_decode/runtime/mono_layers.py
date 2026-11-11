@@ -212,6 +212,10 @@ class MonoLayers:
             self.layers, self.has_indexer, cfg.max_model_len, cfg.debug_no_fused_indexer
         )
         self.index_max_seq = index_max_seq(cfg.max_model_len)
+        # vLLM's e4m3 MLA cache (kv_cache_dtype fp8): the kernels write and read it
+        self.kv_fp8 = str(
+            getattr(self.layers[self.first].self_attn, "kv_cache_dtype", "auto")
+        ).startswith("fp8")
         if self.rank == 0:
             from .vllm_weights import is_fp8_block
 
@@ -433,8 +437,8 @@ class MonoLayers:
         address the real slots in an 8-block buffer.
 
         Raises unless every MLA cache is bound, < 4 GiB and its own contiguous bf16
-        [..., 576] tensor (the block dim is checked against the step metadata: vLLM may
-        split a KV block)."""
+        (kv_cache_dtype fp8: e4m3 bytes at k_scale 1) [..., 576] tensor (the block dim
+        is checked against the step metadata: vLLM may split a KV block)."""
         flat: dict[int, torch.Tensor] = {}
         owner: dict[int, int] = {}
         for L, lay in self.layers.items():
@@ -452,7 +456,15 @@ class MonoLayers:
                     "use decode_backend=auto."
                 )
             why = []
-            if kv.dtype is not torch.bfloat16:
+            if self.kv_fp8:
+                if kv.dtype not in (torch.uint8, torch.float8_e4m3fn):
+                    why.append(f"dtype {kv.dtype} (kv_cache_dtype fp8: e4m3 bytes)")
+                k_scale = getattr(lay.self_attn, "_k_scale_float", None)
+                if k_scale != 1.0:
+                    why.append(
+                        f"k_scale {k_scale} (the kernels write and read scale 1)"
+                    )
+            elif kv.dtype is not torch.bfloat16:
                 why.append(f"dtype {kv.dtype} (needs kv_cache_dtype=auto -> bf16)")
             if not kv.is_contiguous():
                 why.append("not contiguous")
@@ -509,6 +521,7 @@ class MonoLayers:
                 runtime=runtimes.get(is_fused),
                 launches_per_step=self.launches_per_step,
                 poll_early_out=cfg.poll_early_out,
+                kv_fp8=self.kv_fp8,
                 **(fused if is_fused else {}),
                 **{k: v for k, v in stage.items() if v},
             )
@@ -524,7 +537,12 @@ class MonoLayers:
         # JIT / code-object load between two barriers, so per-rank compile skew never
         # races the bounded polls: all rows inactive (slot -1, empty sparse range)
         dev = self.dev
-        wc = torch.zeros(64, MLA_ROW, dtype=torch.bfloat16, device=dev)
+        wc = torch.zeros(
+            64,
+            MLA_ROW,
+            dtype=torch.uint8 if self.kv_fp8 else torch.bfloat16,
+            device=dev,
+        )
         z = torch.zeros(S, dtype=torch.int64, device=dev)
         for runtime in runtimes.values():
             self._go(True)

@@ -57,6 +57,16 @@ def split_score_column(wave: int, lane: int):
     return wave + 16 * ((lane % 16) // 4)
 
 
+def fp8_kv_upper_pair_lane(lane):
+    """fp8 KV cache write: the lane holding latent bytes 2, 3 of a lane's word."""
+    return (lane & -4) + 2
+
+
+def fp8_pe_upper_pair_lane(lane):
+    """fp8 KV cache write: the lane holding k_pe bytes 2, 3 of a lane's 4-byte word."""
+    return (lane & -2) + 1
+
+
 N_QKV_A = QKV_A_ROWS // QKV_A_TILE
 N_ROW_TILES = HIDDEN // ROW_TILE
 N_ROUTER = N_EXPERTS // ROUTER_TILE

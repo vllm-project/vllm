@@ -115,6 +115,8 @@ from vllm.models.deepseek_v32.amd.specialized_decode.flydsl.glm.layout import (
     XQ_WAVES,
     dn_tile,
     down_x_words,
+    fp8_kv_upper_pair_lane,
+    fp8_pe_upper_pair_lane,
     layout,
     sample_wave_batches,
     sparse_keys_per_task,
@@ -211,6 +213,7 @@ def build_glm5_monokernel(
     index_max_seq: int = 4096,
     fp8_attention: tuple[str, ...] = (),
     fp8_block: bool = False,
+    kv_fp8: bool = False,
     inter: int = INTER,
     scale: float = SOFTMAX_SCALE,
     poll_limit: int | None = None,
@@ -233,6 +236,11 @@ def build_glm5_monokernel(
     with R = `FP8_BLOCK_ROWS` (64 for `uv`: its rows are kv_b's per-head value rows,
     64-aligned in kv_b's 128-row blocks): each 128-k unit's partial is scaled by its
     block's scale as it is accumulated, the row scale is not applied.
+
+    `kv_fp8`: the MLA cache is vLLM's e4m3 one (`kv_cache_dtype=fp8`, scale 1: the
+    same [slots, 576] rows, one byte a value): the cache task writes the new rows'
+    latent / k_pe rounded to e4m3 (and passes those values on to this launch's
+    attention), the split tasks widen the cached bytes to bf16.
 
     `with_indexer`: the fused indexer on vLLM's paged FP8 index cache (all of
     `FP8_ATTENTION` FP8). Index projections: Q from the checkpoint's FP8 `wq_b`
@@ -1503,18 +1511,49 @@ def build_glm5_monokernel(
                     slot = row_slot(s)
                     active = row_writes_cache(s)
                 kvn = bf16_round(vs[s] * _rsq(ssq[s] * (1.0 / KV_LORA) + EPS) * g)
-                if active:
-                    bo.buffer_store(kvn.to(fx.BFloat16), r_kv, slot * QK_DIM + tid)
+                if const_expr(kv_fp8):
+                    # bytes tid, tid + 1 packed by even lanes; every 4th lane stores 4
+                    kvn, _ = _fp8_roundtrip(kvn, kvn)
+                    if active:
+                        pair = fx.Int32(
+                            rocdl.cvt_pk_fp8_f32(
+                                T.i32, kvn, _xshfl(kvn, 1), fx.Int32(0), False
+                            )
+                        ) & fx.Int32(0xFFFF)
+                        upper = bpermute_i32(fp8_kv_upper_pair_lane(lane) * 4, pair)
+                        if lane % 4 == 0:
+                            bo.buffer_store(
+                                pair | (upper << 16),
+                                r_kv,
+                                slot * (QK_DIM // 4) + tid // 4,
+                            )
+                if const_expr(not kv_fp8):  # noqa: SIM102 (a build-time and a run-time test)
+                    if active:
+                        bo.buffer_store(kvn.to(fx.BFloat16), r_kv, slot * QK_DIM + tid)
                 put(mb("kvnew"), s * KV_LORA + tid, kvn)
                 if tid < PE_DIM // 2:
                     x0, x1 = pes[s]
                     c, sn = cs[s], sns[s]
                     p0, p1 = x0 * c - x1 * sn, x0 * sn + x1 * c
                     p0, p1 = bf16_round(p0), bf16_round(p1)
-                    if active:
-                        pe_offset = slot * QK_DIM + KV_LORA + tid * 2
-                        bo.buffer_store(p0.to(fx.BFloat16), r_pe, pe_offset)
-                        bo.buffer_store(p1.to(fx.BFloat16), r_pe, pe_offset + 1)
+                    if const_expr(kv_fp8):
+                        p0, p1 = _fp8_roundtrip(p0, p1)
+                        if active:
+                            pair = fx.Int32(
+                                rocdl.cvt_pk_fp8_f32(T.i32, p0, p1, fx.Int32(0), False)
+                            ) & fx.Int32(0xFFFF)
+                            upper = bpermute_i32(fp8_pe_upper_pair_lane(lane) * 4, pair)
+                            if lane % 2 == 0:
+                                bo.buffer_store(
+                                    pair | (upper << 16),
+                                    r_pe,
+                                    slot * (QK_DIM // 4) + KV_LORA // 4 + tid // 2,
+                                )
+                    if const_expr(not kv_fp8):  # noqa: SIM102 (build-time and run-time)
+                        if active:
+                            pe_offset = slot * QK_DIM + KV_LORA + tid * 2
+                            bo.buffer_store(p0.to(fx.BFloat16), r_pe, pe_offset)
+                            bo.buffer_store(p1.to(fx.BFloat16), r_pe, pe_offset + 1)
                     put2(mb("penew"), s * PE_DIM + tid * 2, p0, p1)
 
             if const_expr(with_indexer):
@@ -1845,6 +1884,34 @@ def build_glm5_monokernel(
                         pe_row = krows[jj] * (QK_DIM // 2) + KV_LORA // 2 + lane
                         lds_st(petile, j * PS + lane, ld_f32(r_pe, pe_row))
 
+            def gather_old_kv_fp8():
+                """gather_old_kv from vLLM's e4m3 cache (`kv_fp8`): 8 latent bytes a
+                lane, k_pe on lanes 0..7, widened to the same bf16 tiles."""
+                krows = [lds_ld(attn_keys, wave * KPW + jj) for jj in range(KPW)]
+                for jj in range_constexpr(KPW):
+                    j = wave * KPW + jj
+                    row = krows[jj] * (QK_DIM // 4)
+                    raw = fx.Vector(
+                        bo.buffer_load(r_kv, row + lane * 2, vec_width=2, dtype=T.i32)
+                    )
+                    fx.ptr_store(
+                        _fp8_to_bf16x8(raw[0], raw[1]).bitcast(fx.Float32),
+                        ktile + (j * KS + lane * 4),
+                    )
+                    if lane < PE_DIM // 8:
+                        pe_raw = fx.Vector(
+                            bo.buffer_load(
+                                r_pe,
+                                row + KV_LORA // 4 + lane * 2,
+                                vec_width=2,
+                                dtype=T.i32,
+                            )
+                        )
+                        fx.ptr_store(
+                            _fp8_to_bf16x8(pe_raw[0], pe_raw[1]).bitcast(fx.Float32),
+                            petile + (j * PS + lane * 4),
+                        )
+
             def patch_new_kv():
                 """Rows appended by this launch, from the cache task's kvnew / penew."""
                 new_active = [row_writes_cache(new_s) for new_s in range(S)]
@@ -1912,7 +1979,10 @@ def build_glm5_monokernel(
                 nkeys, sparse = split_keys(t, s)
                 gpu.barrier()
                 # before waiting for q: these rows are from earlier launches
-                gather_old_kv()
+                if const_expr(kv_fp8):
+                    gather_old_kv_fp8()
+                else:
+                    gather_old_kv()
                 stage_q()
                 patch_new_kv()
                 gpu.barrier()
