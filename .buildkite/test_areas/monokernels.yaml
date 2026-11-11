@@ -1,14 +1,20 @@
-# Every AMD monokernel step lives here, and nowhere else.
+# The AMD monokernel steps, collected.
 #
 # A monokernel is a fused persistent kernel that runs most of a decoder layer,
 # or a whole decode step, in one launch. The steps that exercise them are all
-# gfx950/gfx942 and all multi-GPU, so they were scattered across the areas
-# named after what they test (models, kernels) rather than what they need.
-# Collecting them makes the blocking cost of the group visible in one place.
+# gfx950/gfx942, so they ended up scattered across the areas named after what
+# they test (models, kernels) rather than what they need. Collecting them makes
+# the blocking cost of the group visible in one place.
+#
+# New monokernel steps belong here. Not everything is here yet: the generic AMD
+# models step still runs test_dsv41_mono_decode.py, test_dsv4_mono_decode.py and
+# test_muse_spark_rocm_mono.py, and test-amd.yaml carries its own nightly
+# MiniMax and DeepSeek-V4.1 mono steps. Each moves separately, with its own
+# before/after measurement.
 #
 # Name test files one by one. A directory selection silently adopts every new
-# file into a blocking multi-GPU step, and check_test_tethering.py counts it as
-# covered, so nothing warns.
+# file into a blocking step, and check_test_tethering.py counts it as covered,
+# so nothing warns.
 group: Monokernels
 depends_on:
   - image-build-amd
