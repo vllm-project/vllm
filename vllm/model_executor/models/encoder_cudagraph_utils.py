@@ -21,9 +21,10 @@ class GridThwEncoderCudaGraphMixin(SupportsEncoderCudaGraph):
     Inputs are concatenated patches (`pixel_values` or
     `pixel_values_videos`) with one `(t, h, w)` row per item in
     `image_grid_thw` or `video_grid_thw`. `self.visual` must provide
-    `spatial_merge_size`, `patch_embed`, `input_norm`,
-    `prepare_encoder_metadata()` and accept `encoder_metadata` in its
-    forward. Hosts still implement `get_encoder_cudagraph_config()`.
+    `spatial_merge_size`, `patch_embed`, `prepare_encoder_metadata()`
+    and accept `encoder_metadata` in its forward; the default dummy
+    `pixel_values` also read `input_norm`. Hosts still implement
+    `get_encoder_cudagraph_config()`.
 
     This class holds only the glue to the encoder CUDA graph manager;
     model-specific metadata belongs in the vision tower. Do not add
@@ -97,7 +98,7 @@ class GridThwEncoderCudaGraphMixin(SupportsEncoderCudaGraph):
         token_budget: int,
         max_batch_size: int,
     ) -> int:
-        """Return the output tokens of each dummy item in the capture grid."""
+        """Return each dummy item's output-token budget, before frame rounding."""
         # Ceil so one item using the full budget fits the captured buffers.
         return (token_budget + max_batch_size - 1) // max_batch_size
 
@@ -201,8 +202,6 @@ class GridThwEncoderCudaGraphMixin(SupportsEncoderCudaGraph):
         path: str = "default",
     ) -> EncoderCudaGraphReplayBuffers:
         grid_thw_list = self._get_grid_thw_by_modality(mm_kwargs)
-        # Metadata is sized to the actual batch; the manager pads it into the
-        # larger captured buffers.
         if self.get_input_modality(mm_kwargs) == "image":
             metadata = self.visual.prepare_encoder_metadata(
                 grid_thw_list,
