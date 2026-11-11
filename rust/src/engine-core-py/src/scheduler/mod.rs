@@ -41,11 +41,11 @@ use vllm_engine_core::sched::scheduler::{
     AuxOutputConnector, EcConnector, ErrorRequestIds, IdSetOrder, KvConnector, PauseState,
     Scheduler, SchedulerError, StructuredOutput, UpdateOutput, monotonic,
 };
-use vllm_engine_core_client::protocol::output::{
-    EngineCoreOutputs, RequestBatchOutputs, encode_engine_core_outputs,
-};
 use vllm_engine_core_connectors::mooncake_store_scheduler::SavePinPolicy;
 use vllm_engine_core_connectors::nixl::NixlKvTransferParams;
+use vllm_engine_core_protocol::output::{
+    EngineCoreOutputs, RequestBatchOutputs, encode_engine_core_outputs,
+};
 
 use self::hooks::{
     PyAuxOutputConnector, PyEcConnector, PyKvConnector, PyStructuredOutput, SchedulerContext,

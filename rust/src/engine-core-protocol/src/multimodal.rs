@@ -128,7 +128,7 @@ pub enum MmKwargValue {
 
 impl MmFeatureSpec {
     /// Extract large tensor buffers from this feature in serialized field order.
-    pub(crate) fn extract_aux_frames(&mut self, aux_frames: &mut Vec<Bytes>, threshold: usize) {
+    pub fn extract_aux_frames(&mut self, aux_frames: &mut Vec<Bytes>, threshold: usize) {
         if let Some(data) = &mut self.data {
             for elem in data.values_mut() {
                 elem.extract_aux_frames(aux_frames, threshold);

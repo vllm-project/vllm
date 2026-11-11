@@ -28,8 +28,10 @@ The component is organized as a Cargo workspace with several crates, layered bot
 │  vllm-llm                       │  Thin token-in/token-out facade over
 │                                 │  the engine client
 ├─────────────────────────────────┤
-│  vllm-engine-core-client        │  ZMQ transport + MessagePack protocol
-│                                 │  for the headless vLLM engine
+│  vllm-engine-core-client        │  ZMQ transport to the headless vLLM
+│                                 │  engine
+├─────────────────────────────────┤
+│  vllm-engine-core-protocol      │  MessagePack wire types
 └─────────────────────────────────┘
 ```
 

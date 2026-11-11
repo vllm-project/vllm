@@ -23,11 +23,11 @@ use pyo3::sync::PyOnceLock;
 use pyo3::types::{PyBytes, PyList, PyString, PyTuple};
 use vllm_engine_core::hash::{BlockHash, HashAlgo, RequestBlockHasher, RequestExtraKeys, Value};
 use vllm_engine_core::sched::request::{BlockHasher, KvCacheReportMode, NewRequest, Request};
-use vllm_engine_core_client::protocol::request::{
+use vllm_engine_core_io::input::{InputConfig, InputReader};
+use vllm_engine_core_protocol::request::{
     EngineCoreRequest, EngineCoreRequestType, RawRequestPayloads, decode_engine_core_request,
     raw_request_payloads,
 };
-use vllm_engine_core_io::input::{InputConfig, InputReader};
 
 use super::request::sampling_params_of;
 

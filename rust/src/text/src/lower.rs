@@ -188,7 +188,8 @@ pub fn lower_sampling_params(
     // grammar.
     let structured_outputs = structured_outputs
         .map(|params| EngineCoreStructuredOutputsParams::new(params, structured_outputs_backend))
-        .transpose()?;
+        .transpose()
+        .map_err(vllm_engine_core_client::Error::from)?;
 
     // Mirrors the model-generation-config inheritance used by vLLM's OpenAI chat
     // path: https://github.com/vllm-project/vllm/blob/bc2c0c86efb28e77677a3cfb8687e976914a313a/vllm/entrypoints/openai/chat_completion/protocol.py#L424-L450

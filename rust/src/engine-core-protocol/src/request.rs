@@ -9,12 +9,12 @@ use serde_default::DefaultFromSerde;
 use serde_tuple::{Deserialize_tuple, Serialize_tuple};
 use serde_with::serde_as;
 
-use crate::protocol::kv_hints::KvHintsEnvelope;
-use crate::protocol::multimodal::MmFeatures;
-use crate::protocol::sampling::EngineCoreSamplingParams;
-use crate::protocol::tensor::WireNdArray;
-use crate::protocol::{OpaqueValue, decode_msgpack, lora};
+use crate::kv_hints::KvHintsEnvelope;
+use crate::multimodal::MmFeatures;
+use crate::sampling::EngineCoreSamplingParams;
+use crate::tensor::WireNdArray;
 use crate::{Error, Result};
+use crate::{OpaqueValue, decode_msgpack, lora};
 
 /// Request types are encoded as single-byte protocol constants so they can be
 /// sent over the ZMQ socket without an extra encoding step.
@@ -136,7 +136,7 @@ pub struct EngineCoreRequest {
     #[serde(default)]
     pub kv_hints: Option<KvHintsEnvelope>,
     /// Hashes of the prompt's full blocks, computed with the engine's
-    /// [`PrefixHashConfig`](crate::protocol::handshake::PrefixHashConfig) so
+    /// [`PrefixHashConfig`](crate::handshake::PrefixHashConfig) so
     /// the engine doesn't hash the prompt itself. They must include any extra
     /// keys the engine would add (LoRA, multimodal, cache salt).
     #[serde(default)]
@@ -162,7 +162,7 @@ impl EngineCoreRequest {
     }
 
     /// Extract large request tensors into ordered auxiliary frames.
-    pub(crate) fn extract_aux_frames(&mut self, threshold: usize) -> Vec<Bytes> {
+    pub fn extract_aux_frames(&mut self, threshold: usize) -> Vec<Bytes> {
         let mut aux_frames = Vec::new();
         if let Some(ids) = &mut self.prompt_token_ids {
             ids.extract_aux_frame(&mut aux_frames, threshold);
@@ -275,16 +275,16 @@ mod tests {
     use rmpv::Value;
 
     use super::*;
-    use crate::protocol::dtype::TensorDtype;
-    use crate::protocol::kv_hints::{KvHintAction, KvHintsEnvelope};
-    use crate::protocol::multimodal::{
+    use crate::dtype::TensorDtype;
+    use crate::kv_hints::{KvHintAction, KvHintsEnvelope};
+    use crate::multimodal::{
         MmBatchedField, MmFeatureSpec, MmField, MmFieldElem, MmKwargValue, MmModality,
         PlaceholderRange,
     };
-    use crate::protocol::sampling::EngineCoreSamplingParams;
-    use crate::protocol::tensor::{WireArrayData, WireNdArray, WireTensor};
-    use crate::protocol::{decode_value, encode_msgpack};
-    use crate::test_utils::{decode_add_request, decode_prompt_token_ids};
+    use crate::sampling::EngineCoreSamplingParams;
+    use crate::tensor::{WireArrayData, WireNdArray, WireTensor};
+    use crate::test_util::{decode_add_request, decode_prompt_token_ids};
+    use crate::{decode_value, encode_msgpack};
 
     const AUX_FRAME_THRESHOLD: usize = 256;
 
@@ -501,7 +501,7 @@ mod tests {
 
     #[test]
     fn raw_request_payloads_are_the_fields_as_sent() {
-        use crate::protocol::lora::LoraRequest;
+        use crate::lora::LoraRequest;
 
         let sampling_params = EngineCoreSamplingParams {
             max_tokens: 7,

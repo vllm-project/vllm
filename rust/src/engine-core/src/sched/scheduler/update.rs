@@ -49,7 +49,7 @@ pub struct ModelRunnerOutput {
 }
 
 // The wire type of `vllm.outputs.RequestError`.
-pub use vllm_engine_core_client::protocol::output::RequestError;
+pub use vllm_engine_core_protocol::output::RequestError;
 
 /// An output of one request in a step (`EngineCoreOutput`).
 ///

@@ -5,8 +5,8 @@ use serde::ser::SerializeTuple;
 use serde::{Serialize, Serializer};
 use serde_tuple::Deserialize_tuple;
 
-use crate::protocol::OpaqueValue;
-use crate::protocol::tensor::WireNdArray;
+use crate::OpaqueValue;
+use crate::tensor::WireNdArray;
 
 /// Python wire representation of `LogprobsLists` / `LogprobsTensors` before
 /// aux-frame references and raw-view payloads are resolved.

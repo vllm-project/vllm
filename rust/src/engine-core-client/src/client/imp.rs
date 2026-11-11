@@ -33,6 +33,7 @@ use crate::protocol::request::{EngineCoreRequest, EngineCoreRequestType};
 use crate::protocol::stats::SchedulerStats;
 use crate::protocol::utility::{EngineCoreUtilityRequest, UtilityOutput};
 use crate::transport::{ConnectedEngine, EngineId};
+use crate::utility::UtilityOutputExt as _;
 use crate::{Error, Result, transport};
 
 const MSGPACK_ZERO_COPY_THRESHOLD_ENV: &str = "VLLM_MSGPACK_ZERO_COPY_THRESHOLD";

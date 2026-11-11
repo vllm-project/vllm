@@ -9,6 +9,7 @@ members = [
     "src/engine-core-client",
     "src/engine-core-connectors",
     "src/engine-core-io",
+    "src/engine-core-protocol",
     "src/engine-core-py",
     "src/llm",
     "src/managed-engine",
@@ -152,6 +153,7 @@ vllm-engine-core = { path = "src/engine-core" }
 vllm-engine-core-client = { path = "src/engine-core-client" }
 vllm-engine-core-connectors = { path = "src/engine-core-connectors" }
 vllm-engine-core-io = { path = "src/engine-core-io" }
+vllm-engine-core-protocol = { path = "src/engine-core-protocol" }
 vllm-llm = { path = "src/llm" }
 vllm-managed-engine = { path = "src/managed-engine" }
 vllm-metrics = { path = "src/metrics" }

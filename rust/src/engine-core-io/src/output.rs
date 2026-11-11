@@ -15,8 +15,8 @@ use std::time::Duration;
 
 use bytes::Bytes;
 use tokio::sync::mpsc;
-use vllm_engine_core_client::ENGINE_CORE_DEAD_SENTINEL;
-use vllm_engine_core_client::protocol::output::{
+use vllm_engine_core_protocol::ENGINE_CORE_DEAD_SENTINEL;
+use vllm_engine_core_protocol::output::{
     EngineCoreOutputs, RequestBatchOutputs, encode_engine_core_outputs,
 };
 use zeromq::prelude::{Socket, SocketSend};
@@ -260,8 +260,8 @@ async fn run(
 mod tests {
     use std::collections::BTreeSet;
 
-    use vllm_engine_core_client::protocol::output::{EngineCoreOutput, decode_engine_core_outputs};
     use vllm_engine_core_client::test_utils::IpcNamespace;
+    use vllm_engine_core_protocol::output::{EngineCoreOutput, decode_engine_core_outputs};
     use zeromq::prelude::SocketRecv;
     use zeromq::{PullSocket, Socket as _};
 

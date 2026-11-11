@@ -5,8 +5,8 @@ use std::collections::BTreeMap;
 
 use serde::{Deserialize, Serialize};
 
-use crate::protocol::dtype::ModelDtype;
-use crate::protocol::request::BlockHash;
+use crate::dtype::ModelDtype;
+use crate::request::BlockHash;
 
 /// Decoded engine startup-handshake payload sent on the handshake socket.
 ///
@@ -200,7 +200,7 @@ pub struct DataParallelRendezvous {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::protocol::{decode_value, encode_msgpack};
+    use crate::{decode_value, encode_msgpack};
 
     #[test]
     fn handshake_parallel_config_encodes_rendezvous_fields_or_empty_map() {

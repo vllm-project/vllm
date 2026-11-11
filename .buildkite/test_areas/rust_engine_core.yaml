@@ -15,9 +15,9 @@ steps:
     - rust/Cargo.toml
     - rust/Cargo.lock
     - rust/src/engine-core/
-    - rust/src/engine-core-client/
     - rust/src/engine-core-connectors/
     - rust/src/engine-core-io/
+    - rust/src/engine-core-protocol/
     - rust/src/engine-core-py/
     - rust-toolchain.toml
     - tools/build_rust.py

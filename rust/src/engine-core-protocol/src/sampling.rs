@@ -7,8 +7,8 @@ use std::num::NonZeroU32;
 use serde::{Deserialize, Serialize};
 use serde_default::DefaultFromSerde;
 
-use crate::protocol::structured_outputs::EngineCoreStructuredOutputsParams;
-use crate::protocol::tensor::WireNdArray;
+use crate::structured_outputs::EngineCoreStructuredOutputsParams;
+use crate::tensor::WireNdArray;
 
 fn default_top_p() -> f32 {
     1.0
@@ -210,8 +210,8 @@ impl EngineCoreSamplingParams {
 mod tests {
     use rmpv::Value;
 
-    use crate::protocol::decode_msgpack;
-    use crate::protocol::request::EngineCoreRequest;
+    use crate::decode_msgpack;
+    use crate::request::EngineCoreRequest;
 
     /// A real `sampling_params` is a sparse `omit_defaults` map; absent fields
     /// must fall back to defaults. `python_compat` can't catch this since Rust

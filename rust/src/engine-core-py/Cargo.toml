@@ -18,6 +18,6 @@ serde = { workspace = true }
 serde_json = { workspace = true }
 thiserror-ext = { workspace = true }
 vllm-engine-core = { workspace = true }
-vllm-engine-core-client = { workspace = true }
 vllm-engine-core-connectors = { workspace = true }
 vllm-engine-core-io = { workspace = true }
+vllm-engine-core-protocol = { workspace = true }

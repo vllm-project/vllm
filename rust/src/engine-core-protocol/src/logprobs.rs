@@ -13,9 +13,9 @@ use enum_as_inner::EnumAsInner;
 use serde::{Deserialize, Deserializer, Serialize};
 
 pub use self::wire::WireLogprobs;
+use crate::dtype::{NumpyDtype, TensorDtype};
 use crate::error::{Error, Result, bail_ext_value_decode};
-use crate::protocol::dtype::{NumpyDtype, TensorDtype};
-use crate::protocol::tensor::{WireArrayData, WireNdArray};
+use crate::tensor::{WireArrayData, WireNdArray};
 
 /// One token candidate and its logprob metadata for a single sequence position.
 ///

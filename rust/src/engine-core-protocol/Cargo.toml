@@ -1,0 +1,35 @@
+[package]
+name = "vllm-engine-core-protocol"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+description = "The wire types of vLLM's engine core protocol, shared by its frontends and the engine core."
+
+[features]
+# Test helpers for the crates that speak the protocol (`test_util`).
+test-util = []
+
+[dependencies]
+bytemuck.workspace = true
+byteorder.workspace = true
+bytes.workspace = true
+easy-ext.workspace = true
+enum-as-inner.workspace = true
+half.workspace = true
+itertools.workspace = true
+rmp-serde.workspace = true
+rmpv.workspace = true
+serde.workspace = true
+serde_default.workspace = true
+serde_json.workspace = true
+serde_repr.workspace = true
+serde_tuple.workspace = true
+serde_with.workspace = true
+thiserror.workspace = true
+thiserror-ext.workspace = true
+
+[dev-dependencies]
+expect-test.workspace = true
+
+[lints]
+workspace = true

@@ -15,11 +15,11 @@ use serde_with::serde_as;
 use super::serde_utils::AllowTrailingFields;
 use super::utility::UtilityOutput;
 use crate::error::{Error, Result, ext_value_decode};
-use crate::protocol::logprobs::MaybeWireLogprobs;
-use crate::protocol::sampling_mask::MaybeWireSamplingMask;
-use crate::protocol::stats::{PrefillStats, SchedulerStats};
-use crate::protocol::tensor::WireNdArray;
-use crate::protocol::{OpaqueValue, decode_msgpack, encode_msgpack};
+use crate::logprobs::MaybeWireLogprobs;
+use crate::sampling_mask::MaybeWireSamplingMask;
+use crate::stats::{PrefillStats, SchedulerStats};
+use crate::tensor::WireNdArray;
+use crate::{OpaqueValue, decode_msgpack, encode_msgpack};
 
 /// The stop reason associated with a finished output.
 ///
@@ -525,8 +525,8 @@ mod tests {
     use std::collections::BTreeSet;
 
     use super::*;
-    use crate::protocol::output::EngineCoreOutput;
-    use crate::protocol::{decode_msgpack, encode_msgpack};
+    use crate::output::EngineCoreOutput;
+    use crate::{decode_msgpack, encode_msgpack};
 
     #[test]
     fn engine_core_outputs_roundtrip_finished_fields() {
@@ -564,7 +564,7 @@ mod tests {
             finish_reason: Some(EngineCoreFinishReason::Length),
             ..Default::default()
         };
-        let mut fields = crate::protocol::decode_value(&encode_msgpack(&output).unwrap())
+        let mut fields = crate::decode_value(&encode_msgpack(&output).unwrap())
             .unwrap()
             .as_array()
             .unwrap()
@@ -717,8 +717,8 @@ mod tests {
 
     #[test]
     fn engine_core_outputs_encode_large_arrays_in_aux_frames() {
-        use crate::protocol::logprobs::{Logprobs, PositionLogprobs, TokenLogprob, WireLogprobs};
-        use crate::protocol::tensor::WireNdArray;
+        use crate::logprobs::{Logprobs, PositionLogprobs, TokenLogprob, WireLogprobs};
+        use crate::tensor::WireNdArray;
 
         const THRESHOLD: usize = 64;
         // One position with 16 candidates: 16 * 8 bytes of token ids go in an

@@ -7,9 +7,9 @@ use byteorder::{BigEndian, LittleEndian, NativeEndian, ReadBytesExt};
 use bytes::Bytes;
 use itertools::Itertools as _;
 
+use crate::dtype::{Endianness, TensorDtype};
 use crate::error::{Error, Result, ext_value_decode};
-use crate::protocol::dtype::{Endianness, TensorDtype};
-use crate::protocol::tensor::{ShapeExt as _, WireNdArray};
+use crate::tensor::{ShapeExt as _, WireNdArray};
 
 #[derive(Debug, Clone, PartialEq)]
 pub(super) struct DecodedArray2<T> {

@@ -1,6 +1,12 @@
 // SPDX-License-Identifier: Apache-2.0
 // SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 
+//! The wire types of the engine core protocol: what a frontend and an engine
+//! core send each other over ZMQ, in the msgpack layout of vLLM's Python
+//! `EngineCoreRequest` / `EngineCoreOutputs` and handshake types. Shared by
+//! the Rust frontend's client (`vllm-engine-core-client`) and the Rust engine
+//! core, with no transport.
+
 use std::any::type_name;
 use std::io::Cursor;
 
@@ -8,7 +14,9 @@ use rmpv::Value;
 use serde::{Deserialize, Serialize};
 use thiserror_ext::AsReport;
 
-use crate::error::{Error, Result};
+mod error;
+
+pub use error::{Error, Result};
 
 /// Dynamic msgpack value used for schema positions that are preserved but not
 /// yet strongly typed in the early-stage Rust client.
@@ -36,7 +44,13 @@ mod serde_utils;
 pub mod stats;
 pub mod structured_outputs;
 pub mod tensor;
+#[cfg(any(test, feature = "test-util"))]
+pub mod test_util;
 pub mod utility;
+
+/// Dedicated single-frame sentinel emitted by `EngineCoreProc` when the
+/// engine dies.
+pub const ENGINE_CORE_DEAD_SENTINEL: &[u8] = b"ENGINE_CORE_DEAD";
 
 /// Encode a Rust value into msgpack using the protocol crate's serde model.
 pub fn encode_msgpack<T>(value: &T) -> Result<Vec<u8>>

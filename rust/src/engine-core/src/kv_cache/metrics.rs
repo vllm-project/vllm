@@ -12,7 +12,7 @@ use super::block::BlockId;
 
 /// A sampled block's residency when it was evicted (`KVCacheEvictionEvent`).
 // The wire type of a sampled eviction, which the scheduler reports.
-pub use vllm_engine_core_client::protocol::stats::KvCacheEvictionEvent;
+pub use vllm_engine_core_protocol::stats::KvCacheEvictionEvent;
 
 /// Tracks lifecycle metrics for a single KV cache block.
 #[derive(Clone, Debug)]

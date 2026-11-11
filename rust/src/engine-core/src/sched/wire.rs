@@ -9,8 +9,8 @@
 //! layer (logprobs, sampling masks, prompt logprobs, routed experts, and the
 //! connectors' opaque params) are left unset for the binding to fill in.
 
-use vllm_engine_core_client::protocol::output as wire;
-use vllm_engine_core_client::protocol::stats as wire_stats;
+use vllm_engine_core_protocol::output as wire;
+use vllm_engine_core_protocol::stats as wire_stats;
 
 use super::scheduler::EngineCoreOutput;
 use super::stats::{ConnectorPrefixCacheStats, SchedulerStats};

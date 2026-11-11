@@ -18,7 +18,7 @@ serde_json = { workspace = true, optional = true }
 sha2 = { workspace = true }
 smallvec = { workspace = true }
 thiserror = { workspace = true }
-vllm-engine-core-client = { workspace = true }
+vllm-engine-core-protocol = { workspace = true }
 xxhash-rust = { workspace = true }
 
 # Without `asm`, sha2 0.10 doesn't use the Armv8 SHA-2 instructions.

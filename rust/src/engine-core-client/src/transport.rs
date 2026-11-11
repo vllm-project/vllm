@@ -21,17 +21,13 @@ use zeromq::{PullSocket, RouterSendHalf, RouterSocket, ZmqError, ZmqMessage};
 use crate::coordinator::CoordinatorBootstrap;
 use crate::error::{Error, Result, bail_unexpected_handshake_message};
 use crate::protocol::handshake::{
-    DataParallelRendezvous, EngineCoreReadyResponse, HandshakeAddresses, HandshakeInitMessage,
-    HandshakeParallelConfig, ReadyMessage,
+    EngineCoreReadyResponse, HandshakeAddresses, HandshakeInitMessage, HandshakeParallelConfig,
+    ReadyMessage,
 };
 use crate::protocol::output::{EngineCoreOutputs, decode_engine_core_outputs};
-use crate::protocol::{decode_msgpack, encode_msgpack};
+use crate::protocol::{ENGINE_CORE_DEAD_SENTINEL, decode_msgpack, encode_msgpack};
 
 mod dp_rendezvous;
-
-/// Dedicated single-frame sentinel emitted by Python `EngineCoreProc` when the
-/// engine dies.
-pub const ENGINE_CORE_DEAD_SENTINEL: &[u8] = b"ENGINE_CORE_DEAD";
 
 /// Opaque routing identity of one engine on the frontend transport.
 #[derive(Clone, PartialEq, Eq, PartialOrd, Ord, Hash)]
@@ -197,7 +193,7 @@ pub async fn connect_handshake(
     // rendezvous; the in-process coordinator runs exactly in that case.
     let parallel_config = HandshakeParallelConfig {
         data_parallel_rendezvous: enable_inproc_coordinator
-            .then(|| DataParallelRendezvous::allocate(local_host, data_parallel_size))
+            .then(|| dp_rendezvous::allocate(local_host, data_parallel_size))
             .transpose()?,
     };
 
@@ -737,7 +733,7 @@ pub async fn run_output_loop(
                 // the output loop running to continue processing future
                 // messages from the engine.
                 warn!(frame_len, error = %error.as_report(), "failed to decode output message");
-                Err(error)
+                Err(error.into())
             }
         };
 

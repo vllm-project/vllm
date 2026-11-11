@@ -234,7 +234,7 @@ pub mod kv_connector {
 
     use serde::{Deserialize, Serialize};
 
-    use crate::protocol::OpaqueValue;
+    use crate::OpaqueValue;
 
     /// NIXL connector transfer telemetry.
     #[derive(Debug, Clone, Default, PartialEq, Serialize, Deserialize)]
@@ -292,7 +292,7 @@ pub mod kv_connector {
     }
 
     impl MooncakeOperation {
-        pub(crate) const fn as_str(self) -> &'static str {
+        pub const fn as_str(self) -> &'static str {
             match self {
                 Self::SaveExists => "save_exists",
                 Self::SavePut => "save_put",
@@ -312,7 +312,7 @@ pub mod kv_connector {
     }
 
     impl MooncakeStatus {
-        pub(crate) const fn as_str(self) -> &'static str {
+        pub const fn as_str(self) -> &'static str {
             match self {
                 Self::Ok => "ok",
                 Self::Error => "error",
@@ -345,7 +345,7 @@ pub mod kv_connector {
     }
 
     impl UmbpOperation {
-        pub(crate) const fn as_str(self) -> &'static str {
+        pub const fn as_str(self) -> &'static str {
             match self {
                 Self::Load => "load",
                 Self::Store => "store",

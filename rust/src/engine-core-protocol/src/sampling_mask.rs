@@ -9,8 +9,8 @@ use serde::{Deserialize, Deserializer, Serialize};
 use serde_tuple::{Deserialize_tuple, Serialize_tuple};
 
 use crate::error::{Error, Result, bail_ext_value_decode};
-use crate::protocol::logprobs::array::decode_array1_u32;
-use crate::protocol::tensor::WireNdArray;
+use crate::logprobs::array::decode_array1_u32;
+use crate::tensor::WireNdArray;
 
 /// Decoded sampling-mask support sets, one row per generated token position.
 #[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
@@ -157,12 +157,10 @@ impl WireSamplingMask {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::protocol::dtype::{NumpyDtype, TensorDtype};
-    use crate::protocol::output::{
-        EngineCoreOutput, RequestBatchOutputs, decode_engine_core_outputs,
-    };
-    use crate::protocol::tensor::WireArrayData;
-    use crate::protocol::{decode_msgpack, encode_msgpack};
+    use crate::dtype::{NumpyDtype, TensorDtype};
+    use crate::output::{EngineCoreOutput, RequestBatchOutputs, decode_engine_core_outputs};
+    use crate::tensor::WireArrayData;
+    use crate::{decode_msgpack, encode_msgpack};
 
     #[test]
     fn decodes_single_position_without_offsets() {
@@ -224,7 +222,7 @@ mod tests {
             }))),
             ..Default::default()
         };
-        let primary = encode_msgpack(&crate::protocol::output::EngineCoreOutputs::from(
+        let primary = encode_msgpack(&crate::output::EngineCoreOutputs::from(
             RequestBatchOutputs {
                 outputs: vec![output],
                 ..Default::default()

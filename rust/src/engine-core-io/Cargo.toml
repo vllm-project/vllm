@@ -9,7 +9,7 @@ description = "The Rust engine core's side of the frontend transport: the ZMQ in
 bytes = { workspace = true }
 futures = { workspace = true }
 tokio = { workspace = true }
-vllm-engine-core-client = { workspace = true }
+vllm-engine-core-protocol = { workspace = true }
 zeromq = { workspace = true }
 
 [dev-dependencies]

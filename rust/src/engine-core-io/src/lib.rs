@@ -8,13 +8,9 @@
 //! The threads know nothing of the scheduler: they connect the sockets,
 //! take part in the startup and DP coordinator protocol, and move frames.
 //! Decoding requests is up to the caller; outputs come in the wire types of
-//! `vllm-engine-core-client`, which the scheduler fills
-//! (`vllm_engine_core::sched::wire`).
-//!
-//! TODO(rust-engine-core): the scheduler needs only the protocol types. Once
-//! those are a crate of their own, the scheduler stops depending on the
-//! client crate, and this crate is what keeps the transport (tokio, zeromq)
-//! out of it.
+//! `vllm-engine-core-protocol`, which the scheduler fills
+//! (`vllm_engine_core::sched::wire`). This crate is what keeps the transport
+//! (tokio, zeromq) out of the scheduler.
 
 pub mod input;
 pub mod output;

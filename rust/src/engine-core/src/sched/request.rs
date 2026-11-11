@@ -18,10 +18,10 @@ use std::sync::atomic::{AtomicU64, Ordering};
 use std::time::{SystemTime, UNIX_EPOCH};
 
 // The wire types of what the scheduler reports per request.
-pub use vllm_engine_core_client::protocol::output::{
+pub use vllm_engine_core_protocol::output::{
     EngineCoreEvent, EngineCoreEventType, EngineCoreFinishReason as FinishReason, StopReason,
 };
-pub use vllm_engine_core_client::protocol::stats::PrefillStats;
+pub use vllm_engine_core_protocol::stats::PrefillStats;
 
 use super::multimodal::MultiModalFeatureSpec;
 use super::stats::RequestSpecDecodeMetrics;

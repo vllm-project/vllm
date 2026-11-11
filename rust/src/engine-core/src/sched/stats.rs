@@ -14,8 +14,8 @@
 use indexmap::IndexMap;
 
 // The wire types of the spec decoding stats the scheduler reports.
-pub use vllm_engine_core_client::protocol::output::RequestSpecDecodeMetrics;
-pub use vllm_engine_core_client::protocol::stats::SpecDecodingStats;
+pub use vllm_engine_core_protocol::output::RequestSpecDecodeMetrics;
+pub use vllm_engine_core_protocol::stats::SpecDecodingStats;
 
 use crate::kv_cache::{KvCacheEvictionEvent, PrefixCacheStats};
 

@@ -80,9 +80,10 @@ The crates are:
 
 | Crate | Owns |
 | --- | --- |
-| `rust/src/engine-core` (`vllm-engine-core`) | Pure Rust, no PyO3: hashing (pickle protocol 5 and canonical CBOR serializers), KV cache manager, scheduler and its outputs in the frontend's wire types (`vllm-engine-core-client`), the `KvConnector` trait |
+| `rust/src/engine-core` (`vllm-engine-core`) | Pure Rust, no PyO3: hashing (pickle protocol 5 and canonical CBOR serializers), KV cache manager, scheduler and its outputs in the wire types (`vllm-engine-core-protocol`), the `KvConnector` trait |
 | `rust/src/engine-core-connectors` (`vllm-engine-core-connectors`) | Native KV connectors on the Rust request: the NIXL and Mooncake store scheduler halves, and Mooncake store's per-block hot paths |
 | `rust/src/engine-core-io` (`vllm-engine-core-io`) | The engine's ZMQ input and output threads |
+| `rust/src/engine-core-protocol` (`vllm-engine-core-protocol`) | The engine core protocol's MessagePack wire types, shared with the Rust frontend's client (`vllm-engine-core-client`) |
 | `rust/src/engine-core-py` (`vllm-engine-core-py`) | PyO3 bindings (`vllm._rust_core`): config conversion, request bridging, hook adapters, the payloads Python objects hold |
 
 Python collaborators that are not ported are reached through traits
@@ -104,8 +105,8 @@ exceptions.
 
 With the Rust scheduler, `EngineCoreProc` runs the input and output threads of
 `vllm-engine-core-io` in place of its Python ones. The wire types are those
-of the Rust frontend's client (`vllm-engine-core-client`), complete for what
-the engine sends, so the Python frontend decodes the outputs as it decodes the
+the Rust frontend's client speaks (`vllm-engine-core-protocol`), complete for
+what the engine sends, so the Python frontend decodes the outputs as it decodes the
 Python engine's.
 
 - **Output**: `update_from_output` converts the step's outputs to the wire

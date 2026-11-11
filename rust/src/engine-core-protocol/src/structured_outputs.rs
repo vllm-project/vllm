@@ -259,9 +259,9 @@ struct WireStructuredOutputsParams {
     choice: Option<Vec<String>>,
     grammar: Option<String>,
     json_object: Option<bool>,
-    #[serde(skip_serializing_if = "crate::protocol::is_false")]
+    #[serde(skip_serializing_if = "crate::is_false")]
     disable_any_whitespace: bool,
-    #[serde(skip_serializing_if = "crate::protocol::is_false")]
+    #[serde(skip_serializing_if = "crate::is_false")]
     disable_additional_properties: bool,
     whitespace_pattern: Option<String>,
     structural_tag: Option<String>,
