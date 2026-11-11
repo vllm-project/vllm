@@ -55,18 +55,24 @@ def run_rebalance_experts(
     stream: torch.Stream,
 ) -> torch.Tensor:
     assert model_state.eplb_stats is not None
-    stats = model_state.eplb_stats
+    eplb_stats = model_state.eplb_stats
+
+    # Move the global expert load window to CPU for computation.
     with device_stream(stream):
-        load_window_cpu = stats.global_expert_load_window.cpu()
-    return eplb_state.rebalance_experts(
+        global_expert_load_window = eplb_stats.global_expert_load_window.cpu()
+    # Compute new expert mappings for the model
+    new_physical_to_logical_map = eplb_state.rebalance_experts(
         model_state,
-        load_window_cpu,
-        stats.num_replicas,
-        stats.num_groups,
-        stats.num_nodes,
-        stats.num_gpus,
+        global_expert_load_window,
+        eplb_stats.num_replicas,
+        eplb_stats.num_groups,
+        eplb_stats.num_nodes,
+        eplb_stats.num_gpus,
         physical_to_logical_map_cpu,
     )
+    assert new_physical_to_logical_map.device == torch.device("cpu")
+
+    return new_physical_to_logical_map
 
 
 def transfer_run_periodically(

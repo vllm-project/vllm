@@ -1288,10 +1288,17 @@ class Platform:
         if eplb_config.policy not in EPLB_POLICIES:
             raise ValueError(f"Unknown EPLB policy: {eplb_config.policy}")
         if eplb_config.communicator is None:
-            # Preserve the existing NIXL preference and elastic/static fallbacks.
+            # Prefer NIXL when available: zero-copy RDMA reads, compatible
+            # with both async EPLB and elastic EP.
+            # Fallbacks: pynccl for elastic EP (stateless groups need it),
+            # torch_gloo for static EP.  torch_nccl is avoided because NCCL
+            # is incompatible with async EPLB (multi-stream conflicts) and
+            # batched isend/irecv hangs under high load.
+            # See https://github.com/pytorch/pytorch/issues/174288
             from vllm.distributed.nixl_utils import is_nixl_available
 
             if cls._enum == PlatformEnum.XPU:
+                # On XPU, use the device-native XCCL P2P backend.
                 eplb_config.communicator = "torch_xccl"
             elif is_nixl_available():
                 eplb_config.communicator = "nixl"

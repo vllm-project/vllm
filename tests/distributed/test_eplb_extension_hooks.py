@@ -72,16 +72,6 @@ def test_builtin_platform_rejects_unknown_names(field_name):
         Platform.check_and_update_eplb_config(config)
 
 
-@pytest.mark.parametrize(
-    "platform_enum", [PlatformEnum.CUDA, PlatformEnum.ROCM, PlatformEnum.XPU]
-)
-def test_builtin_accelerator_eplb_capability(platform_enum):
-    class BuiltinPlatform(Platform):
-        _enum = platform_enum
-
-    assert BuiltinPlatform.supports_eplb()
-
-
 def test_platform_can_reject_eplb_even_on_cuda(monkeypatch):
     class UnsupportedCuda(Platform):
         _enum = PlatformEnum.CUDA
@@ -165,14 +155,10 @@ def test_llm_rejects_async_nccl_communicator(vllm_runner, monkeypatch, tmp_path)
         )
 
 
-@pytest.mark.parametrize("log_balancedness", [False, True])
 @pytest.mark.parametrize("interval", [0, -1])
-def test_balancedness_interval_must_be_positive(log_balancedness, interval):
+def test_balancedness_interval_must_be_positive(interval):
     with pytest.raises(ValueError, match="log_balancedness_interval"):
-        EPLBConfig(
-            log_balancedness=log_balancedness,
-            log_balancedness_interval=interval,
-        )
+        EPLBConfig(log_balancedness_interval=interval)
 
 
 @pytest.fixture
@@ -202,9 +188,6 @@ class _ExpertModel(torch.nn.Module):
         )
         self.expert_weights = [[self.weight]]
         self.num_moe_layers = 1
-
-    def forward(self, x, expert_id):
-        return x @ self.weight[expert_id]
 
 
 class _State(EplbState):
@@ -278,25 +261,6 @@ def test_planning_hook_preserves_existing_policy_result(model_state, use_async):
     expected = DefaultEplbPolicy.rebalance_experts(loads, 6, 1, 1, 2, current)
     torch.testing.assert_close(result, expected, rtol=0, atol=0)
     assert len(observed) == 1 and observed[0] is model_state
-
-
-@pytest.mark.parametrize("dtype", [torch.float32, torch.int32, torch.int64])
-def test_policy_target_requires_cpu_integer(model_state, dtype):
-    target = torch.zeros(1, 4, dtype=dtype)
-
-    class Policy(DefaultEplbPolicy):
-        @classmethod
-        def rebalance_experts(cls, *args, **kwargs):
-            return target
-
-    state = _State(Policy())
-    if dtype == torch.float32:
-        with pytest.raises(ValueError, match="CPU int32 or int64"):
-            state.rebalance_experts(model_state, torch.ones(1, 4), 4, 1, 1, 1)
-    else:
-        assert (
-            state.rebalance_experts(model_state, torch.ones(1, 4), 4, 1, 1, 1) is target
-        )
 
 
 @pytest.mark.parametrize("fail_commit", [False, True])

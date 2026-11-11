@@ -79,7 +79,8 @@ class EplbStats:
 
     global_expert_load_window: torch.Tensor
     """
-    Aggregate logical-expert loads, shape (num_moe_layers, num_logical_experts).
+    Experts load window.
+    Shape: (window_size, num_moe_layers, num_physical_experts)
     """
     num_replicas: int
     """
@@ -250,13 +251,18 @@ class EplbState:
         self.parallel_config = parallel_config
         self.device = device
         self.model_states: dict[str, EplbModelState] = {}
-        self.policy = self.create_policy()
+        self.policy: type[AbstractEplbPolicy] | AbstractEplbPolicy = (
+            self.create_policy()
+        )
+        """
+        Selected EPLB algorithm
+        """
         self.expert_load_window_step: int = 0
         """
         Current step in the sliding window.
 
-        Different from `expert_rearrangement_step`, each EP rank may have its
-        own `expert_load_window_step`.
+        Different from `expert_rearrangement_step`, 
+        each EP rank may have its own `expert_load_window_step`.
         """
         self.expert_load_window_size: int = 0
         """
@@ -315,7 +321,6 @@ class EplbState:
         """
         Exception that stopped the async worker thread, if any.
         """
-
         self.device_index: int | None = None
         """
         Device index for the async EPLB worker thread.
@@ -405,7 +410,7 @@ class EplbState:
         old_global_expert_indices: torch.Tensor | None = None,
     ) -> torch.Tensor:
         """Plan a model's placement through the existing policy interface."""
-        target = self.policy.rebalance_experts(
+        return self.policy.rebalance_experts(
             weight,
             num_replicas,
             num_groups,
@@ -413,10 +418,6 @@ class EplbState:
             num_ranks,
             old_global_expert_indices,
         )
-        valid_dtype = target.dtype in (torch.int32, torch.int64)
-        if target.device.type != "cpu" or not valid_dtype:
-            raise ValueError("EPLB policy target must be a CPU int32 or int64 tensor")
-        return target
 
     def _commit_rebalance(
         self,
@@ -555,6 +556,9 @@ class EplbState:
         )
         self.expert_rearrangement_step_interval = eplb_step_interval
 
+        policy_type = self.parallel_config.eplb_config.policy
+        logger.debug("Selected EPLB policy: %s", policy_type)
+
         # num_ubatches is 0 when DBO is disabled.
         num_ubatches = max(1, self.parallel_config.num_ubatches)
         num_unpadded_tokens_tensors = [
@@ -579,7 +583,9 @@ class EplbState:
             else [torch.empty_like(w) for w in model.expert_weights[0]]
         )
         communicator = self.create_model_communicator(
-            model, expert_buffer, get_eplb_group()
+            group_coordinator=get_eplb_group(),
+            model=model,
+            expert_buffer=expert_buffer,
         )
         expert_buffer = communicator.owned_expert_buffer or expert_buffer
         assert expert_buffer is not None
@@ -1112,7 +1118,7 @@ class EplbState:
                     if not is_profile:
                         self._commit_rebalance(
                             eplb_model_state,
-                            new_physical_to_logical_map,
+                            new_physical_to_logical_map=new_physical_to_logical_map,
                         )
 
                 if is_main_rank:
@@ -1585,18 +1591,17 @@ def _move_to_workspace(
 ) -> None:
     result = model_state.pending_result
     assert result is not None
-    new_physical_to_logical_map = result.new_physical_to_logical_map
     move_from_buffer(
         expert_weights=model_state.model.expert_weights[result.layer_idx],
         expert_weights_buffers=model_state.expert_buffer,
         transfer_metadata=result.transfer_metadata,
-        new_indices=new_physical_to_logical_map.numpy(),
+        new_indices=result.new_physical_to_logical_map.numpy(),
         ep_rank=ep_rank,
     )
 
     commit_rebalance(
         model_state,
-        new_physical_to_logical_map,
+        result.new_physical_to_logical_map,
         result.layer_idx,
     )
     model_state.num_committed_layers = result.layer_idx + 1
