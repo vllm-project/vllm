@@ -58,8 +58,10 @@ Without `snapshot_endpoint`, nothing changes. With it:
   snapshot covers. `-1` means nothing has been recorded yet. `-2` means
   snapshots are unavailable, and the reply has no chunks. An empty cache can
   reply with a sequence of 0 or more and no chunks.
-- The whole snapshot comes back as one multipart reply. The publisher ignores
-  any request other than `snapshot`.
+- The whole snapshot comes back as one multipart reply. The publisher accepts
+  the legacy `snapshot` request and the experimental
+  [`snapshot-full-attention-v1` request](#experimental-complete-worker-local-cut).
+  It ignores unknown request opcodes.
 - Chunks use the live encoding and data-parallel rank. Their stores carry each
   block's tokens, extra keys, lookahead tokens, LoRA, group, locality and
   ownership, and no `session_id`.
@@ -99,6 +101,11 @@ one independently addressable engine, a single plain full-attention group,
 matching cache/hash block sizes, prefix caching, and no lookahead, adapters
 or transfer connectors. The new request does not add transport authentication:
 use trusted, explicitly enrolled local endpoints.
+
+A complete cut requires continuous recording from a known-empty cache or
+from a valid device Clear that establishes a new baseline. The publisher UUID
+identifies the event stream; it does not attest to cache contents that were
+already warm when recording began.
 
 A successful reply is the inclusive sequence W, the 16-byte publisher ID, a
 JSON proof (protocol, reporting, rank, block size, complete, live blocks and
