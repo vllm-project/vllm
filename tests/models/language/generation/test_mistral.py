@@ -182,57 +182,56 @@ def test_models(
 
 
 @pytest.mark.core_model
-def test_ministral3_nested_llama_4_scaling(vllm_runner):
-    """Nested scaling must match top-level scaling, which takes precedence."""
-    token_ids = None
-    prompt_logprobs = []
-    for top_level in (True, False):
+@pytest.mark.parametrize(
+    "top_level", [False, True], ids=["nested", "top-level-precedence"]
+)
+def test_ministral3_nested_llama_4_scaling(monkeypatch, dist_init, top_level):
+    """Nested fields scale queries; an explicit top-level mapping takes precedence."""
+    from transformers import Ministral3Config
 
-        def override_config(config, top_level=top_level):
-            text_config = config.get_text_config()
-            # Cross the scaling boundary with a short prompt to keep CI cheap.
-            text_config.rope_parameters = {
-                **(getattr(text_config, "rope_parameters", None) or {}),
-                "original_max_position_embeddings": 32,
-                "llama_4_scaling_beta": 0.2 if top_level else 0.1,
-            }
-            text_config.max_position_embeddings = int(
-                32 * text_config.rope_parameters.get("factor", 1)
-            )
-            text_config.llama_4_scaling = (
-                {"beta": 0.1, "original_max_position_embeddings": 32}
-                if top_level
-                else None
-            )
-            return config
+    from vllm.model_executor.models import llama
+    from vllm.model_executor.models.mistral import MistralAttention
+    from vllm.platforms import current_platform
 
-        with vllm_runner(
-            "mistralai/Ministral-3-3B-Instruct-2512-BF16",
-            dtype="bfloat16",
-            max_model_len=128,
-            enforce_eager=True,
-            enable_prefix_caching=False,
-            hf_overrides=override_config,
-            limit_mm_per_prompt={"image": 0},
-        ) as model:
-            if token_ids is None:
-                pattern = model.llm.get_tokenizer().encode(
-                    "The quick brown fox jumps over the lazy dog. "
-                )
-                token_ids = (pattern * 96)[:96]
-            output = model.llm.generate(
-                [{"prompt_token_ids": token_ids}],
-                SamplingParams(temperature=0.0, max_tokens=1, prompt_logprobs=0),
-            )[0]
-            assert output.prompt_logprobs is not None
-            assert len(output.prompt_logprobs) == len(token_ids)
-            scores = []
-            for token_id, logprobs in zip(token_ids[1:], output.prompt_logprobs[1:]):
-                assert logprobs is not None
-                scores.append(logprobs[token_id].logprob)
-            prompt_logprobs.append(torch.tensor(scores))
+    # Return queries so the output exposes scaling without an attention backend.
+    monkeypatch.setattr(llama, "Attention", lambda *args, **kwargs: lambda q, k, v: q)
+    config = Ministral3Config(
+        head_dim=64,
+        max_position_embeddings=128,
+        rope_parameters={
+            "rope_type": "yarn",
+            "rope_theta": 10000.0,
+            "factor": 4.0,
+            "original_max_position_embeddings": 32,
+            "mscale": 1.0,
+            "mscale_all_dim": 1.0,
+            "llama_4_scaling_beta": 0.2 if top_level else 0.1,
+        },
+    )
+    if top_level:
+        config.llama_4_scaling = {"beta": 0.1, "original_max_position_embeddings": 32}
 
-    torch.testing.assert_close(prompt_logprobs[0], prompt_logprobs[1])
+    with torch.device(current_platform.device_type):
+        layer = MistralAttention(
+            config,
+            hidden_size=64,
+            num_heads=1,
+            num_kv_heads=1,
+            max_position_embeddings=128,
+            prefix="model.layers.0.self_attn",
+        )
+        with torch.no_grad():
+            layer.qkv_proj.weight.copy_(torch.eye(64).repeat(3, 1))
+            layer.o_proj.weight.copy_(torch.eye(64))
+        positions = torch.tensor([31, 32, 64])
+        hidden_states = torch.ones(3, 64)
+        output = layer(positions, hidden_states)
+        expected_scale = 1 + 0.1 * torch.log(torch.tensor([1.0, 2.0, 3.0]))
+
+    # RoPE preserves the norm; identity projections leave only query scaling.
+    torch.testing.assert_close(
+        output.norm(dim=-1), hidden_states.norm(dim=-1) * expected_scale
+    )
 
 
 @pytest.mark.parametrize("model", MISTRAL_FORMAT_MODELS)
