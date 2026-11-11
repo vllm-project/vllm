@@ -168,7 +168,8 @@ def _register_plain_fp8_kv_scales(layer: torch.nn.Module, use_aiter: bool) -> No
     if not (use_aiter and _ON_GFX950):
         raise ValueError(
             "--kv-cache-dtype fp8_e4m3 needs gfx950 and the aiter sparse MLA "
-            "kernel (VLLM_ROCM_USE_AITER_TRITON_SPARSE_MLA=1)"
+            "kernel (VLLM_ROCM_USE_AITER_TRITON_SPARSE_MLA=1), which is off "
+            "with a KV connector"
         )
     for name in (
         "_flashinfer_fp8_q_scale",
