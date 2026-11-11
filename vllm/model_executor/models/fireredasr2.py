@@ -85,7 +85,7 @@ class FireRedASR2BucketingSpec(EncoderBucketingSpec):
             return None
         if isinstance(speech_lengths, torch.Tensor):
             return speech_lengths.tolist()
-        return [int(s.item()) for s in speech_lengths]
+        return torch.as_tensor(speech_lengths).tolist()
 
     def padded_time(self, mm_kwargs_batch: Mapping[str, object]) -> int:
         input_features = mm_kwargs_batch.get("input_features")
