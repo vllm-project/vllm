@@ -19,6 +19,7 @@ from typing import Any, TypeVar, cast, get_args
 
 import msgspec
 import pydantic
+import torch
 import zmq
 
 import vllm.envs as envs
@@ -92,6 +93,7 @@ from vllm.v1.engine import (
     UtilityOutput,
     UtilityResult,
 )
+from vllm.v1.engine.dp_prefill_hold import ROW_SIZE, PrefillHold
 from vllm.v1.engine.tensor_ipc import TensorIpcReceiver
 from vllm.v1.engine.utils import (
     EngineHandshakeMetadata,
@@ -2573,6 +2575,8 @@ class DPEngineCoreProc(EngineCoreProc):
     """ZMQ-wrapper for running EngineCore in background process
     in a data parallel context."""
 
+    prefill_hold: PrefillHold | None = None
+
     def __init__(
         self,
         vllm_config: VllmConfig,
@@ -2619,6 +2623,21 @@ class DPEngineCoreProc(EngineCoreProc):
             tensor_queue=tensor_queue,
         )
 
+        scheduler_config = vllm_config.scheduler_config
+        if scheduler_config.prefill_hold_ttft_target is not None:
+            from vllm.v1.core.sched.scheduler import Scheduler
+
+            if not isinstance(self.scheduler, Scheduler):
+                raise ValueError("prefill_hold_ttft_target needs the v1 Scheduler.")
+            self.prefill_hold = PrefillHold(
+                self.scheduler,
+                scheduler_config.prefill_hold_ttft_target,
+                scheduler_config.prefill_hold_alpha,
+                scheduler_config.max_num_batched_tokens,
+                lag_steps=int(self.batch_queue is not None),
+                log_stats=dp_rank == 0,
+            )
+
     def _init_data_parallel(self, vllm_config: VllmConfig):
         # Configure GPUs and stateless process group for data parallel.
         parallel_config = vllm_config.parallel_config
@@ -2660,6 +2679,8 @@ class DPEngineCoreProc(EngineCoreProc):
 
     def add_request(self, request: Request, request_wave: int = 0):
         super().add_request(request, request_wave)
+        if self.prefill_hold is not None:
+            self.prefill_hold.on_arrival(request)
         if self.has_coordinator:
             if request_wave > self.current_wave:
                 self.current_wave = request_wave
@@ -2746,6 +2767,8 @@ class DPEngineCoreProc(EngineCoreProc):
             self.output_queue.put_nowait((-1, EngineCoreOutputs(scheduler_stats=stats)))
 
     def _should_throttle_prefills(self) -> bool:
+        if self.prefill_hold is not None:
+            return self.prefill_hold.throttle()
         # Throttle new prefills to cadence-aligned steps for DP balancing.
         # step_counter is identical across DP ranks. On a fresh wave the
         # counter is 0, so prefills are admitted immediately after idle.
@@ -2847,15 +2870,32 @@ class DPEngineCoreProc(EngineCoreProc):
     def _has_global_unfinished_reqs(self, local_unfinished: bool) -> bool:
         # Sync step 1 too: an idle pause needs one dummy batch, not a full interval.
         self.step_counter += 1
-        if self.step_counter != 1 and self.step_counter % self.dp_sync_interval != 0:
+        hold = self.prefill_hold
+        if (
+            hold is None
+            and self.step_counter != 1
+            and self.step_counter % self.dp_sync_interval != 0
+        ):
             return True
 
+        gather = None
+        if hold is not None:
+            rows = [0.0] * (self.dp_group.size() * ROW_SIZE)
+            start = self.dp_group.rank() * ROW_SIZE
+            rows[start : start + ROW_SIZE] = hold.local_row()
+            gather = torch.tensor(rows, dtype=torch.float64).view(-1, ROW_SIZE)
         parallel_config = self.vllm_config.parallel_config
         has_unfinished, pause_consensus = parallel_config.sync_dp_state(
             self.dp_group,
             has_unfinished=local_unfinished,
             pending_pause=self.pending_pause,
+            gather=gather,
         )
+        if hold is not None:
+            assert gather is not None
+            hold.update(gather.tolist())
+            if not has_unfinished:
+                hold.reset()
 
         if pause_consensus:
             self.ignore_start_dp_wave = True

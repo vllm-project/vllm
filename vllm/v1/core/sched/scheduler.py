@@ -391,6 +391,9 @@ class Scheduler(SchedulerInterface):
         # prefill batch fully drained the waiting queue. Prefill throttling
         # is disabled in this case.
         self.prefill_capacity_bound = False
+        # `prefill_work` of the last finished step that scheduled tokens. Read
+        # and cleared by the DP prefill hold.
+        self.finished_step_prefill_work: tuple[int, float] | None = None
         self.scheduler_reserve_full_isl = (
             self.scheduler_config.scheduler_reserve_full_isl
         )
@@ -727,6 +730,9 @@ class Scheduler(SchedulerInterface):
         drafts_needed = not self.can_skip_drafts
         # Whether the running batch contains any prefill requests.
         prefill_scheduled = False
+        # Prefill tokens scheduled and their attention work.
+        prefill_tokens = 0
+        prefill_attn = 0.0
         # Whether any scheduled request has a synchronous connector KV load.
         has_sync_kv_loads = False
 
@@ -967,7 +973,12 @@ class Scheduler(SchedulerInterface):
 
             # Schedule the request.
             scheduled_running_reqs.append(request)
-            prefill_scheduled |= request.is_prefill_chunk
+            if request.is_prefill_chunk:
+                prefill_scheduled = True
+                prefill_tokens += num_new_tokens
+                prefill_attn += num_new_tokens * (
+                    request.num_computed_tokens + num_new_tokens / 2
+                )
             request_id = request.request_id
             req_to_new_blocks[request_id] = new_blocks
             num_scheduled_tokens[request_id] = num_new_tokens
@@ -1595,6 +1606,10 @@ class Scheduler(SchedulerInterface):
                     request_id
                 )
                 num_scheduled_tokens[request_id] = num_new_tokens
+                prefill_tokens += num_new_tokens
+                prefill_attn += num_new_tokens * (
+                    num_computed_tokens + num_new_tokens / 2
+                )
                 token_budget -= num_new_tokens
                 input_budget -= num_new_tokens + draft_slots
                 request.status = RequestStatus.RUNNING
@@ -1756,6 +1771,7 @@ class Scheduler(SchedulerInterface):
             kv_connector_block_state=kv_connector_block_state,
             num_spec_tokens_to_schedule=num_spec_tokens_to_schedule,
             skip_drafts=not drafts_needed,
+            prefill_work=(prefill_tokens, prefill_attn),
         )
 
         # NOTE(Kuntai): this function is designed for multiple purposes:
@@ -2259,6 +2275,9 @@ class Scheduler(SchedulerInterface):
         kv_connector_output = model_runner_output.kv_connector_output
         ec_connector_output = model_runner_output.ec_connector_output
         cudagraph_stats = model_runner_output.cudagraph_stats
+
+        if scheduler_output.total_num_scheduled_tokens > 0:
+            self.finished_step_prefill_work = scheduler_output.prefill_work
 
         # Every GPU write enqueued by this and earlier steps has completed, so it is
         # safe to return deferred-free blocks to the pool.

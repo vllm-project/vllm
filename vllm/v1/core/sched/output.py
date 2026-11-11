@@ -332,6 +332,10 @@ class SchedulerOutput:
     # drafter can skip proposing them.
     skip_drafts: bool = False
 
+    # Prefill tokens scheduled and their attention work, the sum over prefill
+    # chunks of `n * (ctx + n / 2)` for `n` new tokens after `ctx` computed ones.
+    prefill_work: tuple[int, float] = (0, 0.0)
+
     @classmethod
     def make_empty(cls) -> "SchedulerOutput":
         return cls(

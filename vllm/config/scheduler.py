@@ -234,6 +234,24 @@ class SchedulerConfig:
     already-admitted prompt, so a long prompt can take up to N times as many
     steps to finish prefilling."""
 
+    prefill_hold_ttft_target: float | None = Field(default=None, gt=0)
+    """Hold prefills across data parallel MoE ranks, with this TTFT target in
+    seconds (15 is a reasonable start). None (the default) disables it.
+
+    With DP attention + EP all ranks step in lockstep, so a prefill on any rank
+    slows the step for all of them. With this set, all ranks hold or release
+    prefills together each step. They hold while the decode time saved by
+    grouping prefills across ranks, predicted from the recent arrival rate and
+    an online fit of measured step times, outweighs the TTFT added. A request
+    is held only while it can still meet the target given the releases it
+    needs. Cannot be combined with `prefill_schedule_interval`; has no effect
+    without data parallelism on a MoE model."""
+
+    prefill_hold_alpha: float = Field(default=1.0, gt=0)
+    """Seconds of decode stall per running request that one second of TTFT per
+    waiting request is worth to `prefill_hold_ttft_target`. Higher values hold
+    less, favouring TTFT over ITL."""
+
     cache_aware_admission_window: int = Field(default=0, ge=0)
     """Look-ahead window for cache-aware admission. Within the first N waiting
     requests, those whose prefix is already in the KV cache are admitted ahead
@@ -339,6 +357,8 @@ class SchedulerConfig:
             "scheduler_reserve_full_isl",
             "watermark",
             "prefill_schedule_interval",
+            "prefill_hold_ttft_target",
+            "prefill_hold_alpha",
             "async_scheduling",
             "stream_interval",
         }
@@ -368,6 +388,15 @@ class SchedulerConfig:
             logger.info_once(
                 "Chunked prefill is enabled with max_num_batched_tokens=%d.",
                 self.max_num_batched_tokens,
+            )
+
+        if (
+            self.prefill_hold_ttft_target is not None
+            and self.prefill_schedule_interval > 1
+        ):
+            raise ValueError(
+                "prefill_hold_ttft_target cannot be combined with "
+                "prefill_schedule_interval > 1."
             )
 
         self.verify_max_model_len(max_model_len)

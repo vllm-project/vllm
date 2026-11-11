@@ -37,6 +37,7 @@ from vllm.v1.engine.core import (
     EngineCoreProc,
     EngineShutdownState,
 )
+from vllm.v1.engine.dp_prefill_hold import ROW_SIZE
 from vllm.v1.executor.abstract import Executor
 from vllm.v1.executor.uniproc_executor import UniProcExecutor
 from vllm.v1.kv_cache_interface import KVCacheConfig
@@ -692,7 +693,7 @@ def _cadenced_dp_engine_core(
     core.ignore_start_dp_wave = False
     synced: list[int] = []
 
-    def scripted_sync(dp_group, has_unfinished, pending_pause):
+    def scripted_sync(dp_group, has_unfinished, pending_pause, gather=None):
         synced.append(core.step_counter)
         return results.pop(0)
 
@@ -729,6 +730,31 @@ def test_dp_sync_interval_idle_pause_consensus_on_first_step(monkeypatch):
     assert synced == [1]
     assert core.ignore_start_dp_wave
     assert not core.pending_pause
+
+
+def test_dp_prefill_hold_gathers_rows_every_step(monkeypatch):
+    """The prefill hold needs every rank's row on every step, so the DP
+    all-reduce runs each step and carries them; the wave's end resets it."""
+    core, _ = _cadenced_dp_engine_core(monkeypatch, [], dp_sync_interval=32)
+    core.dp_group = MagicMock(**{"size.return_value": 2, "rank.return_value": 1})
+    core.scheduler = MagicMock()
+    core.prefill_hold = hold = MagicMock()
+    hold.local_row.return_value = [1.0] * ROW_SIZE
+    results = [True, True, False]
+
+    def scripted_sync(dp_group, has_unfinished, pending_pause, gather=None):
+        assert gather is not None
+        assert gather[1].tolist() == [1.0] * ROW_SIZE
+        assert not gather[0].any()
+        gather[0] = 2.0
+        return results.pop(0), False
+
+    monkeypatch.setattr(ParallelConfig, "sync_dp_state", staticmethod(scripted_sync))
+    for expected in (True, True, False):
+        assert DPEngineCoreProc._has_global_unfinished_reqs(core, True) is expected
+    assert hold.update.call_count == 3
+    assert hold.update.call_args.args[0] == [[2.0] * ROW_SIZE, [1.0] * ROW_SIZE]
+    hold.reset.assert_called_once()
 
 
 @pytest.mark.parametrize(

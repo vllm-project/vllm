@@ -964,7 +964,11 @@ class ParallelConfig:
         return aggregated_has_unfinished
 
     def sync_dp_state(
-        self, dp_group: ProcessGroup, has_unfinished: bool, pending_pause: bool
+        self,
+        dp_group: ProcessGroup,
+        has_unfinished: bool,
+        pending_pause: bool,
+        gather: torch.Tensor | None = None,
     ) -> tuple[bool, bool]:
         """Combined all-reduce for DP state synchronization.
 
@@ -977,16 +981,26 @@ class ParallelConfig:
         has_unfinished_global is true if any rank has unfinished work,
         or if some ranks are waiting for a pause consensus.
 
+        `gather`, if given, is a `[dp_size, n]` CPU tensor holding this rank's
+        row and zeros elsewhere; the same all-reduce fills in the other ranks'
+        rows in place.
+
         Returns:
             (has_unfinished_global, pause_consensus)
 
         """
         tensor = torch.tensor(
-            [int(has_unfinished), int(pending_pause)], dtype=torch.int32, device="cpu"
+            [int(has_unfinished), int(pending_pause)],
+            dtype=torch.int32 if gather is None else gather.dtype,
+            device="cpu",
         )
+        if gather is not None:
+            tensor = torch.cat((tensor, gather.view(-1)))
         cpu_all_reduce_(tensor, dp_group, timeout=self.cpu_distributed_timeout)
+        if gather is not None:
+            gather.view(-1).copy_(tensor[2:])
         dp_size = dp_group.size()
-        pause_count = tensor[1].item()
+        pause_count = int(tensor[1].item())
         has_unfinished_global = tensor[0].item() > 0 or pause_count % dp_size != 0
         return has_unfinished_global, pause_count == dp_size
 

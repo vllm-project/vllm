@@ -1544,6 +1544,51 @@ def test_throttle_defers_inflight_prefill_chunk():
     assert "chk0" in output.num_scheduled_tokens
 
 
+def test_prefill_work_counts_prefill_chunks_only():
+    """`prefill_work` sums each prefill chunk's tokens and attention work
+    `n * (ctx + n / 2)`, leaving decodes out. The DP prefill hold times steps
+    against it, so it is reported once the step's output is processed."""
+    scheduler = create_scheduler(
+        max_num_seqs=16, max_num_batched_tokens=50, enable_chunked_prefill=True
+    )
+    (dec,) = create_requests(num_requests=1, num_tokens=4, req_ids=["dec0"])
+    scheduler.add_request(dec)
+    output = scheduler.schedule()
+    assert output.prefill_work == (4, 4 * 2)
+    assert scheduler.finished_step_prefill_work is None
+    scheduler.update_from_output(
+        output,
+        ModelRunnerOutput(
+            req_ids=["dec0"],
+            sampled_token_ids=[[0]],
+            logprobs=None,
+            prompt_logprobs_dict={},
+            pooler_output=[],
+        ),
+    )
+    assert scheduler.finished_step_prefill_work == (4, 8.0)
+
+    (chunk,) = create_requests(num_requests=1, num_tokens=80, req_ids=["chk0"])
+    scheduler.add_request(chunk)
+    first = scheduler.schedule()
+    n = first.num_scheduled_tokens["chk0"]
+    assert first.prefill_work == (n, n * n / 2)
+    scheduler.update_from_output(
+        first,
+        ModelRunnerOutput(
+            req_ids=["dec0", "chk0"],
+            sampled_token_ids=[[0], []],
+            logprobs=None,
+            prompt_logprobs_dict={},
+            pooler_output=[],
+        ),
+    )
+    second = scheduler.schedule()
+    m = second.num_scheduled_tokens["chk0"]
+    assert "dec0" in second.num_scheduled_tokens
+    assert second.prefill_work == (m, m * (n + m / 2))
+
+
 def test_throttle_capacity_bound_guard_admits():
     """Saturation guard: if a cadence-aligned release step cannot drain the
     waiting prefill queue (it ran out of token budget), the throttle backs off on
