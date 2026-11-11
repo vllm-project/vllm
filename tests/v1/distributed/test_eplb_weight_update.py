@@ -45,10 +45,10 @@ def test_expert_parallel_without_eplb_accepts_weight_updates(vllm_runner, monkey
 
 def test_eplb_rejects_weight_updates(vllm_runner):
     with vllm_runner(
-        "luccafong/deepseek_mtp_main_random",
+        "vllm-project/deepseek_mtp_main_random",
         speculative_config={
             "method": "mtp",
-            "model": "luccafong/deepseek_mtp_draft_random",
+            "model": "vllm-project/deepseek_mtp_draft_random",
             "num_speculative_tokens": 1,
         },
         enable_eplb=True,

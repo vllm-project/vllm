@@ -11,10 +11,10 @@ from vllm.entrypoints.openai.models.serving import (
     OpenAIModelRegistry,
     OpenAIServingModels,
 )
-from vllm.entrypoints.pooling.typing import AnyPoolingRequest
+from vllm.entrypoints.pooling.types import AnyPoolingRequest
 from vllm.entrypoints.serve import create_error_response
 from vllm.entrypoints.serve.engine.protocol import ErrorResponse
-from vllm.entrypoints.serve.engine.typing import AnyRequest
+from vllm.entrypoints.serve.engine.types import AnyRequest
 from vllm.entrypoints.serve.utils.request_logger import RequestLogger
 from vllm.exceptions import VLLMNotFoundError
 from vllm.inputs import EngineInput
@@ -163,7 +163,11 @@ class BaseServing:
             ):
                 for content_dict in message["content"]:
                     if "type" in content_dict:
-                        message_types.add(content_dict["type"].split("_")[0])
+                        content_type = content_dict["type"]
+                        if content_type.startswith("input_"):
+                            message_types.add(content_type.removeprefix("input_"))
+                        else:
+                            message_types.add(content_type.split("_")[0])
         return message_types
 
     def _get_active_default_mm_loras(
