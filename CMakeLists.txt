@@ -376,6 +376,7 @@ if(VLLM_GPU_LANG STREQUAL "HIP")
     list(APPEND VLLM_EXT_SRC
       "csrc/attention/octave_torch_bindings.cpp"
       "csrc/attention/octave_attn.cu"
+      "csrc/attention/octave_prefill.cu"
       "csrc/attention/octave_prefill_rdna3.cu"
       "csrc/attention/octave_decode_rdna3.cu"
       "csrc/attention/octave_prefill_cdna3.cu"

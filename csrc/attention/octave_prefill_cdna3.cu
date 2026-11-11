@@ -1,9 +1,9 @@
 // SPDX-License-Identifier: Apache-2.0
 // SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 //
-// Octave prefill for CDNA3 (gfx942), head size 256, fp16. Same contract as
-// octave_prefill_rdna3.cu: reads the packed cache directly, everything in the
-// rotated space, phase 1 writes (O, m, l) partials over the cached prefix and
+// Octave prefill for CDNA3 (gfx942), head size 256, fp16. Implements the
+// launcher contract in octave_prefill.cuh: inputs and output stay rotated,
+// phase 1 writes (O, m, l) partials over the packed cached prefix and
 // phase 2 runs causal attention over the chunk and merges.
 //
 // Both phases compute transposed tiles so that every MFMA result is already in
@@ -21,7 +21,6 @@
 #include <algorithm>
 
 #include <torch/all.h>
-#include <c10/cuda/CUDAGuard.h>
 #include <ATen/cuda/CUDAContext.h>
 
 #if defined(USE_ROCM)
@@ -29,12 +28,14 @@
   #include <hip/hip_fp16.h>
 
   #include "octave_format.cuh"
+  #include "octave_prefill.cuh"
 
   #if defined(__HIP_DEVICE_COMPILE__) && !defined(__gfx942__)
     #define OCTAVE_CDNA_STUB
   #endif
 
 namespace octave_cdna {
+namespace {
 
 using octave::D;
 using octave::Format;
@@ -618,49 +619,44 @@ __global__ void __launch_bounds__(NT1)
   #endif  // OCTAVE_CDNA_STUB
 }
 
-}  // namespace octave_cdna
+}  // namespace
 
-// Called by octave_prefill (octave_prefill_rdna3.cu) on gfx942; same
-// arguments, already validated there.
-void octave_prefill_cdna(torch::Tensor out, torch::Tensor q, torch::Tensor k,
-                         torch::Tensor v, torch::Tensor cache,
-                         torch::Tensor block_table, torch::Tensor cu_seqlens_q,
-                         torch::Tensor seq_lens, int64_t max_query_len,
-                         double sm_scale, int64_t fmt, float* ws,
-                         int num_splits) {
-  using namespace octave_cdna;
+void octave_prefill(const octave::PrefillArgs& args) {
   auto stream = at::cuda::getCurrentCUDAStream().stream();
-  const int num_seqs = seq_lens.size(0);
-  const int hq = q.size(1), hkv = cache.size(1);
+  const int num_seqs = args.seq_lens.size(0);
+  const int hq = args.q.size(1), hkv = args.cache.size(1);
   const int hpk = hq / hkv;
-  const int block_size = cache.size(2);
-  const int max_blocks = block_table.size(1);
-  const int total_q = q.size(0);
-  const int rowtiles = (int)((max_query_len * hpk + QB1 - 1) / QB1);
+  const int block_size = args.cache.size(2);
+  const int max_blocks = args.block_table.size(1);
+  const int total_q = args.q.size(0);
+  const int rowtiles = (int)((args.max_query_len * hpk + QB1 - 1) / QB1);
 
-  dim3 grid1(num_seqs, hkv, rowtiles * num_splits);
-  #define PREFIX(B, KC)                                                     \
-    prefix_attn<B, KC><<<grid1, NT1, 0, stream>>>(                          \
-        (const __half*)q.data_ptr(), cache.data_ptr<uint8_t>(),             \
-        block_table.data_ptr<int>(), cu_seqlens_q.data_ptr<int>(),          \
-        seq_lens.data_ptr<int>(), ws, (float)sm_scale, hq, hkv, block_size, \
-        max_blocks, num_splits, total_q, q.stride(0), q.stride(1),          \
-        cache.stride(0), cache.stride(1), cache.stride(2))
-  if (fmt == 4)
+  dim3 grid1(num_seqs, hkv, rowtiles * args.num_splits);
+  #define PREFIX(B, KC)                                                        \
+    prefix_attn<B, KC><<<grid1, NT1, 0, stream>>>(                             \
+        (const __half*)args.q.data_ptr(), args.cache.data_ptr<uint8_t>(),      \
+        args.block_table.data_ptr<int>(), args.cu_seqlens_q.data_ptr<int>(),   \
+        args.seq_lens.data_ptr<int>(), args.ws, (float)args.sm_scale, hq, hkv, \
+        block_size, max_blocks, args.num_splits, total_q, args.q.stride(0),    \
+        args.q.stride(1), args.cache.stride(0), args.cache.stride(1),          \
+        args.cache.stride(2))
+  if (args.fmt == 4)
     PREFIX(4, false);
-  else if (fmt == 3)
+  else if (args.fmt == 3)
     PREFIX(3, false);
   else
     PREFIX(3, true);
   #undef PREFIX
   dim3 grid2(num_seqs, hkv, rowtiles);
   chunk_attn<<<grid2, NT1, 0, stream>>>(
-      (__half*)out.data_ptr(), ws, (const __half*)q.data_ptr(),
-      (const __half*)k.data_ptr(), (const __half*)v.data_ptr(),
-      cu_seqlens_q.data_ptr<int>(), seq_lens.data_ptr<int>(), hq, hkv,
-      max_blocks * block_size, (float)sm_scale, num_splits, total_q,
-      q.stride(0), q.stride(1), k.stride(0), k.stride(1), v.stride(0),
-      v.stride(1), out.stride(0), out.stride(1));
+      (__half*)args.out.data_ptr(), args.ws, (const __half*)args.q.data_ptr(),
+      (const __half*)args.k.data_ptr(), (const __half*)args.v.data_ptr(),
+      args.cu_seqlens_q.data_ptr<int>(), args.seq_lens.data_ptr<int>(), hq, hkv,
+      max_blocks * block_size, (float)args.sm_scale, args.num_splits, total_q,
+      args.q.stride(0), args.q.stride(1), args.k.stride(0), args.k.stride(1),
+      args.v.stride(0), args.v.stride(1), args.out.stride(0),
+      args.out.stride(1));
 }
 
+}  // namespace octave_cdna
 #endif  // USE_ROCM

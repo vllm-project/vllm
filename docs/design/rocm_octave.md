@@ -109,9 +109,16 @@ scores are those of the unrotated vectors.
 | Cache write | `octave_cache_store`: one wave per slot, rotate + quantize + pack | `csrc/attention/octave_attn.cu` |
 | Decode / MTP verify (≤128 query tokens per request) | `octave_decode`: split-KV; WMMA on gfx1100, MFMA on gfx942, portable dot4 reference tier; consecutive query tokens of a request share each K/V read | `octave_attn.cu`, `octave_decode_rdna3.cu`, `octave_decode_cdna3.cu` |
 | Split reduce + inverse V rotation | Portable reduction, or a specialized gfx942 reduction | `octave_attn.cu`, `octave_decode_cdna3.cu` |
-| Prefill | `octave_prefill`: phase 1 reads the packed prefix (int8 QK with per-segment scales, fp16 PV; WMMA on gfx1100, MFMA on gfx942); phase 2 attends to the chunk's unquantized K/V and merges | `octave_prefill_rdna3.cu`, `octave_prefill_cdna3.cu` |
+| Prefill | `octave_prefill`: phase 1 reads the packed prefix (int8 QK with per-segment scales, fp16 PV; WMMA on gfx1100, MFMA on gfx942); phase 2 attends to the chunk's unquantized K/V and merges | `octave_prefill.cu`, `octave_prefill_rdna3.cu`, `octave_prefill_cdna3.cu` |
 | Q/K/V chunk rotation for prefill | `octave_rotate` | `octave_attn.cu` |
 | Codebooks (`v_perm_b32` tables) and byte layout | — | `octave_format.cuh` |
+
+The public prefill entry in `octave_prefill.cu` owns input validation,
+architecture selection, the split policy, and process-lifetime workspace
+management for graph capture. `octave_prefill.cuh` defines `octave::PrefillArgs`
+and the `octave_rdna` / `octave_cdna` entry points, which receive validated
+arguments. Kernels, helpers, and constants stay local to each implementation.
+`octave_format.cuh` also declares the shared `octave_slot_bytes` helper.
 
 The metadata builder builds, on the device and without host syncs, the
 per-query request and causal-length maps the kernels index by. They are what
@@ -150,11 +157,16 @@ native tiers against.
 
 To add an architecture:
 
-1. Implement `octave_prefill` for it, in HIP or FlyDSL (same signature and semantics as
-   `octave_prefill_rdna3.cu`: phase-1 partials over the packed prefix, phase-2
-   chunk attention and merge, rotated space in and out).
+1. Add a prefill implementation using `octave::PrefillArgs` and declare its
+   entry point in `octave_prefill.cuh`. Preserve the public operator signature
+   and semantics: phase-1 partials over the packed prefix, phase-2 chunk
+   attention and merge, rotated space in and out. Reuse the validation and
+   workspace management in `octave_prefill.cu`; revisit the shared split policy
+   if the new kernel uses a different prefix tile size.
 2. Add a decode tier, or validate the portable dot4 kernel there.
-3. Add the architecture to the CMake guard, to `_kernel_tier` and
+3. Register the target in the common prefill dispatch in `octave_prefill.cu`.
+   Add source files to CMake and device-code guards to the implementation.
+   Add the target to the CMake enablement guard, `_kernel_tier` and
    `supports_compute_capability` in
    `vllm/v1/attention/backends/rocm_octave_attn.py`, and to the test gate.
 4. Run `tests/kernels/attention/test_rocm_octave.py`: every kernel is checked
