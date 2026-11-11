@@ -43,7 +43,7 @@ use vllm_server::{
     RendererSelection,
 };
 use vllm_text::backend::hf::{HfOverrides, ModelFileSources};
-use vllm_tracing::LogLevel;
+use vllm_tracing::{LogFormatter, LogLevel};
 
 use crate::cli::logging::LoggingConfig;
 use crate::cli::model::ModelArgs;
@@ -67,6 +67,12 @@ impl Cli {
     pub fn log_level(&self) -> LogLevel {
         self.runtime()
             .map_or_else(LogLevel::from_env, SharedRuntimeArgs::effective_log_level)
+    }
+
+    /// The formatter of the Rust frontend's own logs for this command.
+    pub fn log_formatter(&self) -> LogFormatter {
+        self.runtime()
+            .map_or_else(LogFormatter::default, SharedRuntimeArgs::log_formatter)
     }
 
     fn runtime(&self) -> Option<&SharedRuntimeArgs> {
@@ -726,9 +732,9 @@ pub struct SharedRuntimeArgs {
     pub log_level: Option<LogLevel>,
 
     /// vLLM logging configuration as a JSON object. The Rust frontend's own
-    /// logs honor `log_level` and the `text` formatter, and other formatters
-    /// fail startup; the remaining fields apply to Python logging only. The
-    /// Python supervisor sends the resolved `log_level` and `formatter`.
+    /// logs honor `log_level` and `formatter` (`text` or `json`); the
+    /// remaining fields apply to Python logging only. The Python supervisor
+    /// sends the resolved `log_level` and `formatter`.
     #[arg(long, value_parser = parse_json::<LoggingConfig>, value_name = "JSON")]
     #[serde(default)]
     pub logging_config: Option<LoggingConfig>,
@@ -809,6 +815,15 @@ impl SharedRuntimeArgs {
         self.log_level
             .or_else(|| self.logging_config.as_ref()?.log_level)
             .unwrap_or_else(LogLevel::from_env)
+    }
+
+    /// The formatter of the Rust frontend's own logs,
+    /// `--logging-config.formatter`, `text` by default.
+    pub fn log_formatter(&self) -> LogFormatter {
+        self.logging_config
+            .as_ref()
+            .and_then(|config| config.formatter)
+            .unwrap_or_default()
     }
 
     /// Return the logging config as JSON for managed Python engine forwarding,

@@ -135,6 +135,7 @@ tower = { version = "0.5.3", features = ["util"] }
 tower-http = { version = "0.6.8", features = ["cors", "trace"] }
 tracing = { version = "0.1.44", features = ["release_max_level_debug"] }
 tracing-futures = { version = "0.2.5", features = ["futures-03"] }
+tracing-log = "0.2.0"
 tracing-subscriber = { version = "0.3.20", features = ["env-filter", "fmt"] }
 trait-set = "0.3.0"
 url = "2.5.7"
