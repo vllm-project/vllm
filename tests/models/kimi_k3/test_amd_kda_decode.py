@@ -402,8 +402,10 @@ def test_decode_weights_staged_after_loading(
         return
     assert layer.decode_conv1d_weight is not None
     # The AITER Gluon decode path takes o_norm.weight directly, so only the HIP
-    # kernel gets an fp32 norm copy.
-    assert (layer.decode_norm_weight is None) == layer.use_aiter_decode
+    # kernel gets an fp32 norm copy. Without strided-state support, AITER decode
+    # falls back to the HIP kernel.
+    aiter_only = layer.use_aiter_decode and layer.aiter_supports_strided_state
+    assert (layer.decode_norm_weight is None) == aiter_only
     with torch.no_grad():
         for param in layer.parameters():
             param.normal_()

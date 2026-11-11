@@ -42,6 +42,7 @@ use vllm_engine_core_client::protocol::output::{
 };
 use vllm_engine_core_client::protocol::request::EngineCoreRequest;
 use vllm_engine_core_client::protocol::stats::PrefillStats;
+use vllm_engine_core_client::protocol::tensor::WireNdArray;
 use vllm_engine_core_client::protocol::utility::{UtilityOutput, UtilityResultEnvelope};
 use vllm_engine_core_client::test_utils::{
     IpcNamespace, decode_add_request, decode_prompt_token_ids, spawn_mock_engine_task,
@@ -613,7 +614,8 @@ fn render_fake_content(content: &ChatContent, placeholder: &str) -> vllm_chat::R
             let mut out = String::new();
             for part in parts {
                 match part {
-                    ChatContentPart::Text { text } => out.push_str(text),
+                    ChatContentPart::Text { text }
+                    | ChatContentPart::ToolReference { name: text } => out.push_str(text),
                     ChatContentPart::ImageUrl { .. }
                     | ChatContentPart::VideoUrl { .. }
                     | ChatContentPart::InputAudio { .. }
@@ -749,7 +751,8 @@ async fn test_models_with_engine_outputs_and_backend_inner(
     .expect("connect client");
 
     (
-        ChatLlm::from_shared_backend(test_llm(client), backend),
+        ChatLlm::from_shared_backend(test_llm(client), backend)
+            .with_served_model_name("test-model"),
         engine_task,
     )
 }
@@ -3379,13 +3382,19 @@ async fn request_metrics_use_served_model_name_label() {
         engine_id.clone(),
         |dealer, push| {
             boxed_test_future(async move {
-                let add = recv_engine_message(dealer).await;
-                let request = decode_add_request(&add);
-                send_outputs(
-                    push,
-                    engine_outputs_for_request(&request.request_id, default_stream_output_specs()),
-                )
-                .await;
+                // One chat, one completion and one Responses request.
+                for _ in 0..3 {
+                    let add = recv_engine_message(dealer).await;
+                    let request = decode_add_request(&add);
+                    send_outputs(
+                        push,
+                        engine_outputs_for_request(
+                            &request.request_id,
+                            default_stream_output_specs(),
+                        ),
+                    )
+                    .await;
+                }
             })
         },
     ));
@@ -3400,7 +3409,8 @@ async fn request_metrics_use_served_model_name_label() {
     )
     .await
     .expect("connect client");
-    let chat = ChatLlm::from_shared_backend(test_llm(client), Arc::new(FakeChatBackend::new()));
+    let chat = ChatLlm::from_shared_backend(test_llm(client), Arc::new(FakeChatBackend::new()))
+        .with_served_model_name("served-model-metrics");
     let mut app = build_router(Arc::new(AppState::new(
         vec![
             "served-model-metrics".to_string(),
@@ -3409,6 +3419,28 @@ async fn request_metrics_use_served_model_name_label() {
         chat,
     )));
     let before = METRICS.render().unwrap();
+
+    // A failed render is not recorded: the fake renderer cannot render a
+    // request chat template.
+    let response = app
+        .call(
+            Request::builder()
+                .method("POST")
+                .uri("/v1/chat/completions")
+                .header("content-type", "application/json")
+                .body(Body::from(
+                    json!({
+                        "model": "served-model-alias",
+                        "messages": [{"role": "user", "content": "hello"}],
+                        "chat_template": "{{ messages }}"
+                    })
+                    .to_string(),
+                ))
+                .expect("build request"),
+        )
+        .await
+        .expect("call app");
+    assert_eq!(response.status(), StatusCode::BAD_REQUEST);
 
     let response = app
         .call(
@@ -3432,6 +3464,49 @@ async fn request_metrics_use_served_model_name_label() {
     assert_eq!(response.status(), StatusCode::OK);
     let _ = to_bytes(response.into_body(), usize::MAX).await.unwrap();
 
+    let response = app
+        .call(
+            Request::builder()
+                .method("POST")
+                .uri("/v1/completions")
+                .header("content-type", "application/json")
+                .body(Body::from(
+                    json!({
+                        "model": "served-model-alias",
+                        "prompt": "hello"
+                    })
+                    .to_string(),
+                ))
+                .expect("build request"),
+        )
+        .await
+        .expect("call app");
+
+    assert_eq!(response.status(), StatusCode::OK);
+    let _ = to_bytes(response.into_body(), usize::MAX).await.unwrap();
+
+    // Responses renders through the chat renderer, so it counts as `chat`.
+    let response = app
+        .call(
+            Request::builder()
+                .method("POST")
+                .uri("/v1/responses")
+                .header("content-type", "application/json")
+                .body(Body::from(
+                    json!({
+                        "model": "served-model-alias",
+                        "input": "hello"
+                    })
+                    .to_string(),
+                ))
+                .expect("build request"),
+        )
+        .await
+        .expect("call app");
+
+    assert_eq!(response.status(), StatusCode::OK);
+    let _ = to_bytes(response.into_body(), usize::MAX).await.unwrap();
+
     let after = METRICS.render().unwrap();
     assert_eq!(
         metric_delta(
@@ -3440,8 +3515,22 @@ async fn request_metrics_use_served_model_name_label() {
             "vllm:request_success_total",
             Some("model_name=\"served-model-metrics\",engine=\"0\",finished_reason=\"stop\""),
         ),
-        1.0
+        3.0
     );
+    for (request_type, count) in [("chat", 2.0), ("completion", 1.0)] {
+        assert_eq!(
+            metric_delta(
+                &before,
+                &after,
+                "vllm:request_render_duration_seconds_count",
+                Some(&format!(
+                    "model_name=\"served-model-metrics\",request_type=\"{request_type}\""
+                )),
+            ),
+            count,
+            "{request_type}"
+        );
+    }
     engine_task.await.expect("mock engine task");
 }
 
@@ -4119,6 +4208,111 @@ async fn openai_return_weight_versions_reports_spans_on_final_choice() {
                 }
             }
         }
+    }
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+#[serial]
+async fn openai_non_stream_returns_routed_experts_cut_at_stop_string() {
+    use base64::Engine as _;
+
+    for endpoint in ["/v1/chat/completions", "/v1/completions"] {
+        let ipc = IpcNamespace::new().expect("create ipc namespace");
+        let handshake_address = ipc.handshake_endpoint();
+        let engine_task = MockEngineTask::new(spawn_mock_engine_task(
+            handshake_address.clone(),
+            b"engine-openai-routed-experts".to_vec(),
+            |dealer, push| {
+                boxed_test_future(async move {
+                    let add = recv_engine_message(dealer).await;
+                    let request: EngineCoreRequest =
+                        rmp_serde::from_slice(&add[1]).expect("decode request");
+                    let params = request.sampling_params.as_ref().expect("sampling params");
+                    assert_eq!(params.routed_experts_prompt_start, 1);
+                    // One `[layer, top_k] = [1, 2]` row per token, plus a
+                    // leading prompt row on the first output. The stop string
+                    // `!` ends the request locally inside the last output, so
+                    // the row of the trailing `x` is cut.
+                    for (token_ids, rows) in
+                        [(&b"h"[..], &[0, b'h'][..]), (b"i", b"i"), (b"!x", b"!x")]
+                    {
+                        let mut output = request_output(
+                            &request.request_id,
+                            token_ids.iter().map(|&token| token as u32).collect(),
+                            None,
+                        );
+                        output.routed_experts = Some(Box::new(WireNdArray::from_raw(
+                            TensorDtype::U8,
+                            vec![rows.len(), 1, 2],
+                            rows.iter().flat_map(|&row| [row, 7]).collect(),
+                        )));
+                        send_outputs(
+                            push,
+                            RequestBatchOutputs {
+                                outputs: vec![output],
+                                ..Default::default()
+                            }
+                            .into(),
+                        )
+                        .await;
+                    }
+                })
+            },
+        ));
+        let client = EngineCoreClient::connect(
+            EngineCoreClientConfig::new_single(handshake_address)
+                .with_model_name("test-model")
+                .with_local_input_output_addresses(
+                    Some(ipc.input_endpoint()),
+                    Some(ipc.output_endpoint()),
+                ),
+        )
+        .await
+        .expect("connect client");
+        let chat = ChatLlm::from_shared_backend(test_llm(client), Arc::new(FakeChatBackend::new()));
+        let mut app = build_router(Arc::new(AppState::new(
+            vec!["Qwen/Qwen1.5-0.5B-Chat".to_string()],
+            chat,
+        )));
+
+        let mut body = json!({
+            "max_tokens": 8,
+            "stop": ["!"],
+            "routed_experts_prompt_start": 1,
+        });
+        if endpoint == "/v1/chat/completions" {
+            body["messages"] = json!([{"role": "user", "content": "hi"}]);
+        } else {
+            body["prompt"] = json!("hi");
+        }
+        let response = app
+            .call(
+                Request::builder()
+                    .method("POST")
+                    .uri(endpoint)
+                    .header("content-type", "application/json")
+                    .body(Body::from(body.to_string()))
+                    .expect("build request"),
+            )
+            .await
+            .expect("call app");
+        assert_eq!(response.status(), StatusCode::OK, "{endpoint}");
+        let bytes = to_bytes(response.into_body(), usize::MAX).await.expect("read body");
+        engine_task.await.expect("mock engine task");
+        let json: serde_json::Value = serde_json::from_slice(&bytes).expect("json body");
+
+        let encoded = json["choices"][0]["routed_experts"].as_str().expect("routed_experts");
+        let npy = base64::engine::general_purpose::STANDARD.decode(encoded).expect("base64");
+        let header = String::from_utf8_lossy(&npy[10..npy.len() - 8]);
+        assert!(
+            header.contains("'shape': (4, 1, 2)"),
+            "{endpoint}: {header}"
+        );
+        assert_eq!(
+            &npy[npy.len() - 8..],
+            [0, 7, b'h', 7, b'i', 7, b'!', 7],
+            "{endpoint}"
+        );
     }
 }
 
@@ -8139,8 +8333,8 @@ async fn tool_call_sse_chunks_can_carry_logprobs() {
     assert!(text.contains("\"logprobs\":{\"content\":"), "{text}");
 }
 
-/// Like OpenAI and Python, `tools: []` renders like an omitted field, whatever
-/// `tool_choice` says; a named choice still reports the missing function.
+/// Like Python, omitted and empty `tools` render the same: `auto` falls back to
+/// `none`, while `required` and a named choice have no tool to call.
 #[tokio::test]
 async fn chat_render_treats_empty_tools_as_omitted() {
     let mut app = test_render_app();
@@ -8153,21 +8347,34 @@ async fn chat_render_treats_empty_tools_as_omitted() {
     assert_eq!(status, StatusCode::OK, "{without_tools}");
     without_tools["request_id"].take();
 
-    let cases = [
-        json!({}),
-        json!({"tool_choice": "none"}),
-        json!({"tool_choice": "auto"}),
-        json!({"tool_choice": "required"}),
-    ];
-    for extra in cases {
+    for tools in [json!(null), json!([])] {
+        for tool_choice in [json!(null), json!("none"), json!("auto")] {
+            let mut body = base.clone();
+            body["tools"] = tools.clone();
+            body["tool_choice"] = tool_choice;
+            let (status, mut rendered) =
+                post_json(&mut app, "/v1/chat/completions/render", body.clone()).await;
+            assert_eq!(status, StatusCode::OK, "{body}: {rendered}");
+            rendered["request_id"].take();
+            assert_eq!(rendered, without_tools, "{body}");
+        }
+
         let mut body = base.clone();
-        body["tools"] = json!([]);
-        body.as_object_mut().unwrap().extend(extra.as_object().unwrap().clone());
-        let (status, mut rendered) =
+        body["tools"] = tools;
+        body["tool_choice"] = json!("required");
+        let (status, error) =
             post_json(&mut app, "/v1/chat/completions/render", body.clone()).await;
-        assert_eq!(status, StatusCode::OK, "{body}: {rendered}");
-        rendered["request_id"].take();
-        assert_eq!(rendered, without_tools, "{body}");
+        assert_eq!(status, StatusCode::BAD_REQUEST, "{body}");
+        expect_test::expect![[r#"
+            {
+              "error": {
+                "message": "tool_choice requires at least one available tool",
+                "type": "BadRequestError",
+                "param": null,
+                "code": 400
+              }
+            }"#]]
+        .assert_eq(&serde_json::to_string_pretty(&error).unwrap());
     }
 
     let mut body = base;
@@ -8629,7 +8836,13 @@ async fn sleep_route_rejects_invalid_query_before_engine_dispatch() {
     let before = METRICS.render().expect("render metrics");
     let (app, engine_task) =
         test_admin_app_with_engine_script(|_dealer, _push| boxed_test_future(async move {})).await;
-    for query in ["level=invalid", "level=-1", "level=3", "mode=invalid"] {
+    for query in [
+        "level=invalid",
+        "level=-1",
+        "level=3",
+        "mode=invalid",
+        "reset_connector=maybe",
+    ] {
         let response = app
             .clone()
             .call(
@@ -8652,7 +8865,7 @@ async fn sleep_route_rejects_invalid_query_before_engine_dispatch() {
             "http_requests_total",
             Some("method=\"POST\",status=\"4xx\",handler=\"/sleep\""),
         ),
-        4.0
+        5.0
     );
     for metric in [
         "vllm:sleep_mode_operation_duration_seconds_count",
@@ -8705,7 +8918,7 @@ async fn assert_route_sends_utility_args(
 #[serial]
 async fn sleep_route_forwards_reset_connector_opt_out() {
     assert_route_sends_utility_args(
-        "/sleep?reset_connector=false",
+        "/sleep?reset_connector=False",
         "sleep",
         vec![Value::from(1_u64), Value::from("abort"), Value::from(false)],
     )
@@ -8716,7 +8929,7 @@ async fn sleep_route_forwards_reset_connector_opt_out() {
 #[serial]
 async fn release_kv_cache_memory_route_forwards_reset_connector_opt_out() {
     assert_route_sends_utility_args(
-        "/release_kv_cache_memory?reset_connector=false",
+        "/release_kv_cache_memory?reset_connector=0",
         "release_kv_cache_memory",
         vec![Value::from(false)],
     )
