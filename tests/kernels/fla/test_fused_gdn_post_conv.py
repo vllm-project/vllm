@@ -220,6 +220,27 @@ def test_fused_post_conv_l0():
     assert g.shape == (0, HV)
 
 
+def test_fused_post_conv_strided_qkvz_views():
+    """Match Qwen GDN prefill's non-contiguous mixed_qkvz and ba column slices."""
+    torch.manual_seed(7)
+    device = "cuda"
+    L, H, HV, K, V = 1025, 16, 32, 128, 128
+    qkv_dim = 2 * H * K + HV * V
+    mixed_qkvz = torch.randn(L, qkv_dim + HV * V, dtype=torch.bfloat16, device=device)
+    ba = torch.randn(L, 2 * HV, dtype=torch.bfloat16, device=device)
+    conv_output = mixed_qkvz[:, :qkv_dim]
+    b, a = ba.chunk(2, dim=-1)
+    assert not conv_output.is_contiguous() and not a.is_contiguous()
+
+    A_log = torch.randn(HV, dtype=torch.float32, device=device) - 2.0
+    dt_bias = torch.randn(HV, dtype=torch.float32, device=device) * 0.1
+
+    ref = reference_post_conv(conv_output, a, b, A_log, dt_bias, H, K, V)
+    got = fused_post_conv_prep(conv_output, a, b, A_log, dt_bias, H, K, V)
+    for g_t, r_t, tol in zip(got, ref, (1e-2, 1e-2, 1e-3, 1e-4, 1e-4)):
+        torch.testing.assert_close(g_t, r_t, atol=tol, rtol=tol)
+
+
 def test_fused_post_conv_int64_token_offset():
     """Rows past 2^31 // qkv_dim need int64 offsets."""
     device = "cuda"
