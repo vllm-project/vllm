@@ -22,6 +22,7 @@ from vllm.utils.import_utils import resolve_obj_by_qualname
 from vllm.v1.core.sched.output import GrammarOutput, SchedulerOutput
 from vllm.v1.engine import ReconfigureDistributedRequest
 from vllm.v1.kv_cache_interface import KVCacheConfig, KVCacheSpec
+from vllm.v1.metrics.stats import SchedulerIterationDetails
 from vllm.v1.outputs import DraftTokenIds, ModelRunnerOutput
 from vllm.v1.worker.worker_base import CompilationTimes, WorkerBase
 
@@ -316,16 +317,14 @@ class Executor(ABC):
         )
         return output[0]
 
-    def execute_dummy_batch(
-        self, iteration_metrics_id: int | None = None
-    ) -> tuple[tuple[int, float], ...] | None:
-        if iteration_metrics_id is None:
-            self.collective_rpc("execute_dummy_batch")
-            return None
-        outputs: list[tuple[tuple[int, float], ...]] = self.collective_rpc(
-            "execute_dummy_batch", args=(iteration_metrics_id,)
-        )
-        return tuple(sample for samples in outputs for sample in samples)
+    def execute_dummy_batch(self) -> list[SchedulerIterationDetails] | None:
+        """Returns the iteration records the output worker has completed."""
+        return self.collective_rpc("execute_dummy_batch")[0]
+
+    def flush_iteration_timings(self) -> list[SchedulerIterationDetails]:
+        """Waits for the iterations the output worker is still timing."""
+        output: list[ModelRunnerOutput] = self.collective_rpc("flush_iteration_timings")
+        return output[0].iteration_records
 
     def take_draft_token_ids(self) -> DraftTokenIds | None:
         output: list[DraftTokenIds] = self.collective_rpc("take_draft_token_ids")

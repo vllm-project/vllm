@@ -34,7 +34,6 @@ from vllm.distributed.aux_output_connector.worker import (
     AuxOutputWorkerConnector,
 )
 from vllm.v1.core.sched.output import CachedRequestData, SchedulerOutput
-from vllm.v1.metrics.iteration_timing import IterationTimer
 from vllm.v1.outputs import ModelRunnerOutput
 from vllm.v1.worker.gpu import async_utils
 from vllm.v1.worker.gpu.sample.output import SamplerOutput
@@ -267,8 +266,7 @@ def test_worker_skips_aux_outputs_for_internal_warmup_step():
     worker.close()
 
 
-@pytest.mark.parametrize("timed", [False, True])
-def test_next_step_does_not_consume_pending_output(monkeypatch, timed):
+def test_next_step_does_not_consume_pending_output(monkeypatch):
     """begin_step must not wait for or consume an unconsumed step output."""
     event = Mock()
     monkeypatch.setattr(torch.cuda, "Event", lambda **kwargs: event)
@@ -286,16 +284,6 @@ def test_next_step_does_not_consume_pending_output(monkeypatch, timed):
         _input_batch(["request"], np.array([0]), np.array([0, 1]))
     )
     assert pending is not None
-    timer = None
-    if timed:
-        timer = IterationTimer(
-            1,
-            event_factory=lambda: Mock(
-                query=Mock(return_value=True), elapsed_time=Mock(return_value=1.0)
-            ),
-        )
-        timer.start(7)
-        timer.finish()
     output = async_utils.AsyncOutput(
         ModelRunnerOutput(["request"]),
         SamplerOutput(
@@ -306,7 +294,6 @@ def test_next_step_does_not_consume_pending_output(monkeypatch, timed):
         Mock(),
         check_ep_fault=False,
         pending_aux_output=pending,
-        iteration_timer=timer,
     )
     event.record.assert_called_once()
     assert worker._pending_outputs == [pending]
@@ -318,7 +305,6 @@ def test_next_step_does_not_consume_pending_output(monkeypatch, timed):
     result = output.get_output()
 
     assert result.sampled_token_ids == [[7]]
-    assert result.iteration_timing_samples == (((7, 1.0),) if timed else ())
     np.testing.assert_array_equal(
         result.aux_output_connector_output["request"].rows, rows.numpy()
     )

@@ -1,17 +1,10 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 
-from types import SimpleNamespace
-
 import pytest
 
-from vllm.v1.core.sched.output import (
-    IterationDetails,
-    SchedulerOutput,
-)
 from vllm.v1.engine import EngineCoreOutput, EngineCoreOutputs, FinishReason
 from vllm.v1.metrics.cache_hit_source import CacheHitSource
-from vllm.v1.metrics.iteration import IterationMetricsCollector
 from vllm.v1.metrics.stats import (
     IterationStats,
     LoRARequestStates,
@@ -22,7 +15,6 @@ from vllm.v1.metrics.stats import (
     SchedulerIterationDetails,
     SchedulerStats,
 )
-from vllm.v1.outputs import ModelRunnerOutput
 from vllm.v1.serial_utils import MsgpackDecoder, MsgpackEncoder
 
 
@@ -57,137 +49,6 @@ def test_scheduler_iteration_details_serialization():
     assert decoded.scheduler_stats.kv_cache_usage == 0.5
     assert decoded.scheduler_stats.iteration_details == iteration_details
     assert decoded.scheduler_stats.iteration_records == [iteration_details]
-
-
-@pytest.mark.parametrize("timing_first", [False, True])
-def test_iteration_timing_keeps_original_batch_when_results_arrive_late(timing_first):
-    collector = IterationMetricsCollector()
-    output = SchedulerOutput.make_empty()
-    output.num_scheduled_tokens = {"prefill": 8, "decode": 1}
-    output.total_num_scheduled_tokens = 9
-    output.iteration_details = IterationDetails(
-        num_prefill_requests=1,
-        num_prefill_tokens=8,
-        num_decode_requests=1,
-        num_decode_tokens=1,
-        num_encoder_inputs=2,
-        num_encoder_output_tokens=392,
-    )
-    collector.begin_iteration(output)
-    index = output.iteration_metrics_id
-    assert index is not None
-
-    output.num_scheduled_tokens.update(prefill=99, decode=7)
-    output.iteration_details.num_prefill_tokens = 99
-    output.iteration_details.num_encoder_inputs = 9
-    output.iteration_details.num_encoder_output_tokens = 999
-    model_output = ModelRunnerOutput([])
-    samples = ((index, 12.0),)
-    if timing_first:
-        collector.complete_timing_samples(samples)
-    else:
-        collector.complete_iteration(output, model_output)
-    assert not collector.take_ready()
-    if timing_first:
-        collector.complete_iteration(output, model_output)
-    else:
-        collector.complete_timing_samples(samples)
-    (record,) = collector.take_ready()
-    assert record.num_ctx_requests == 1
-    assert record.num_ctx_tokens == 8
-    assert record.num_generation_requests == 1
-    assert record.num_generation_tokens == 1
-    assert record.num_encoder_inputs == 2
-    assert record.num_encoder_output_tokens == 392
-    assert record.elapsed_ms == 12
-    assert record.timing_scope == "model_step_cuda"
-
-
-def test_dummy_tail_timings_survive_more_than_batch_queue_depth():
-    collector = IterationMetricsCollector()
-    indices = [collector.begin_dummy_iteration() for _ in range(64)]
-    assert not collector.take_ready()
-    output = SchedulerOutput.make_empty()
-    collector.complete_iteration(
-        output,
-        ModelRunnerOutput(
-            [], iteration_timing_samples=tuple((index, 10.0) for index in indices)
-        ),
-    )
-    records = collector.take_ready()
-    assert [record.iteration_index for record in records] == indices
-    assert all(record.is_dummy and record.elapsed_ms == 10 for record in records)
-    assert all(
-        record.num_ctx_tokens == record.num_generation_tokens == 0 for record in records
-    )
-
-
-@pytest.mark.parametrize("dummy", [False, True])
-def test_idle_tail_is_discarded_without_losing_ready_or_resumed_records(dummy):
-    collector = IterationMetricsCollector()
-    old_ids = [collector.begin_dummy_iteration() for _ in range(3)]
-    collector.complete_timing_samples(((old_ids[0], 10.0),))
-    collector.discard_pending()
-    if dummy:
-        iteration_id = collector.begin_dummy_iteration()
-    else:
-        output = SchedulerOutput.make_empty()
-        output.num_scheduled_tokens = {"request": 1}
-        output.total_num_scheduled_tokens = 1
-        output.iteration_details = IterationDetails(
-            num_decode_requests=1, num_decode_tokens=1
-        )
-        collector.begin_iteration(output)
-        iteration_id = output.iteration_metrics_id
-        collector.complete_iteration(output, ModelRunnerOutput([]))
-    assert iteration_id is not None and iteration_id > old_ids[-1]
-    collector.complete_timing_samples(
-        tuple((old_id, 12.0) for old_id in old_ids[1:]) + ((iteration_id, 20.0),)
-    )
-    records = collector.take_ready()
-    assert [record.iteration_index for record in records] == [
-        old_ids[0],
-        iteration_id,
-    ]
-    assert [record.elapsed_ms for record in records] == [10, 20]
-
-
-@pytest.mark.parametrize("stats_owner", [None, 0, 3])
-def test_iteration_records_preserve_scheduler_stats_owner(stats_owner):
-    from vllm.v1.engine.core import EngineCore
-    from vllm.v1.engine.output_processor import OutputProcessor
-
-    collector = IterationMetricsCollector()
-    index = collector.begin_dummy_iteration()
-    collector.complete_timing_samples(((index, 10.0),))
-    stats = SchedulerStats(num_running_reqs=7, kv_cache_usage=0.5)
-    outputs = {}
-    if stats_owner is not None:
-        outputs[0] = EngineCoreOutputs()
-        outputs[stats_owner] = EngineCoreOutputs(scheduler_stats=stats)
-    core = SimpleNamespace(
-        iteration_metrics=collector,
-        scheduler=SimpleNamespace(make_stats=lambda: stats),
-    )
-    EngineCore._attach_iteration_records(core, outputs)
-    owner = 0 if stats_owner is None else stats_owner
-    assert outputs[owner].scheduler_stats is stats
-    assert sum(output.scheduler_stats is not None for output in outputs.values()) == 1
-    assert stats.num_running_reqs == 7
-    assert [record.iteration_index for record in stats.iteration_records] == [index]
-    EngineCore._attach_iteration_records(core, outputs)
-    assert len(stats.iteration_records) == 1
-
-    frontends = {
-        i: SimpleNamespace(lora_states=LoRARequestStates(log_stats=True))
-        for i in outputs
-    }
-    frontends[owner].lora_states.request_running("running", "adapter-A")
-    frontends[owner].lora_states.request_waiting("waiting", "adapter-B")
-    for i, output in outputs.items():
-        OutputProcessor.update_scheduler_stats(frontends[i], output.scheduler_stats)
-    assert stats.running_lora_adapters == {"adapter-A": 1, "adapter-B": 0}
-    assert stats.waiting_lora_adapters == {"adapter-A": 0, "adapter-B": 1}
 
 
 def test_prefix_cache_stats_hits_by_source_accumulate():

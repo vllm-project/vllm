@@ -32,6 +32,7 @@ from vllm.v1.metrics.stats import (
     IterationStats,
     MultiModalCacheStats,
     PromptTokenStats,
+    SchedulerIterationDetails,
     SchedulerStats,
 )
 from vllm.v1.metrics.utils import create_metric_per_engine
@@ -187,38 +188,41 @@ class LoggingStatLogger(StatLoggerBase):
     def _log_iteration_details(
         self, scheduler_stats: SchedulerStats, engine_idx: int
     ) -> None:
-        if not self.vllm_config.observability_config.enable_logging_iteration_details:
-            return
+        for record in scheduler_stats.iteration_records:
+            self._log_iteration(record, scheduler_stats, engine_idx)
+        if (details := scheduler_stats.iteration_details) is not None:
+            self._log_iteration(details, scheduler_stats, engine_idx)
 
-        records = scheduler_stats.iteration_records
-        if not records and scheduler_stats.iteration_details is not None:
-            records = [scheduler_stats.iteration_details]
-        for details in records:
-            encoder_msg = ""
-            if details.num_encoder_inputs:
-                encoder_msg = (
-                    f", encoder inputs: {details.num_encoder_inputs}, "
-                    f"encoder output embeddings: {details.num_encoder_output_tokens}"
-                )
-            elapsed_msg = (
-                f", iteration elapsed time: {details.elapsed_ms:.2f} ms"
-                if details.elapsed_ms is not None
-                else ""
+    def _log_iteration(
+        self,
+        details: SchedulerIterationDetails,
+        scheduler_stats: SchedulerStats,
+        engine_idx: int,
+    ) -> None:
+        encoder_msg = ""
+        if details.num_encoder_inputs:
+            encoder_msg = (
+                f", encoder inputs: {details.num_encoder_inputs}, "
+                f"encoder output embeddings: {details.num_encoder_output_tokens}"
             )
 
-            logger.info(
-                "%sIteration(%d): %d context requests, %d context tokens, "
-                "%d generation requests, %d generation tokens%s%s%s",
-                self._log_prefix_for_engine(engine_idx),
-                details.iteration_index,
-                details.num_ctx_requests,
-                details.num_ctx_tokens,
-                details.num_generation_requests,
-                details.num_generation_tokens,
-                elapsed_msg,
-                " (dummy)" if details.is_dummy else "",
-                encoder_msg,
-            )
+        logger.info(
+            "%sIteration(%d): %d context requests, %d context tokens, "
+            "%d generation requests, %d generation tokens, "
+            "iteration elapsed time: %.2f ms%s, "
+            "%s KV cache usage: %.1f%%%s",
+            self._log_prefix_for_engine(engine_idx),
+            details.iteration_index,
+            details.num_ctx_requests,
+            details.num_ctx_tokens,
+            details.num_generation_requests,
+            details.num_generation_tokens,
+            details.elapsed_ms,
+            " (dummy)" if details.is_dummy else "",
+            self.kv_cache_device,
+            scheduler_stats.kv_cache_usage * 100,
+            encoder_msg,
+        )
 
     def record(
         self,

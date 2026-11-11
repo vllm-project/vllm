@@ -6,91 +6,274 @@ from unittest.mock import Mock
 
 import pytest
 
+import vllm.v1.metrics.iteration_timing as iteration_timing
+from vllm.config import VllmConfig
+from vllm.v1.core.sched.output import IterationDetails
+from vllm.v1.executor.multiproc_executor import MultiprocExecutor
+from vllm.v1.executor.uniproc_executor import UniProcExecutor
+from vllm.v1.metrics import loggers
 from vllm.v1.metrics.iteration_timing import (
     IterationTimer,
+    finish_iteration_timing,
     make_iteration_timer,
+    start_iteration_timing,
+    time_dummy_batch,
 )
-from vllm.v1.outputs import EMPTY_MODEL_RUNNER_OUTPUT
+from vllm.v1.metrics.stats import SchedulerStats
+from vllm.v1.outputs import AsyncModelRunnerOutput, ModelRunnerOutput
 
-pytestmark = [pytest.mark.cpu_test, pytest.mark.skip_global_cleanup]
-
-
-def test_ready_events_are_reused_without_waiting_for_pending_or_contended_drains():
-    events = [Mock() for _ in range(4)]
-    events[0].elapsed_time.return_value = 7.0
-    events[1].query.return_value = False
-    events[2].elapsed_time.return_value = 8.0
-    events[3].query.return_value = True
-    timer = IterationTimer(2, event_factory=iter(events).__next__)
-    timer.start(4)
-    timer.finish()
-
-    assert timer.drain_samples() == ()
-    events[0].elapsed_time.assert_not_called()
-    events[1].query.return_value = True
-
-    def append_during_query():
-        assert timer.drain_samples() == ()
-        events[1].query.side_effect = None
-        timer.start(5)
-        timer.finish()
-        return True
-
-    events[1].query.side_effect = append_during_query
-    assert timer.drain_samples() == ((4, 7.0), (5, 8.0))
-
-    # The factory is exhausted; the next intervals must reuse the ready pairs.
-    timer.start(6)
-    timer.finish()
-    timer.start(7)
-    timer.finish()
-    assert timer.drain_samples() == ((6, 7.0), (7, 8.0))
-    for event in events:
-        assert event.record.call_count == 2
-        event.synchronize.assert_not_called()
+pytestmark = pytest.mark.cpu_test
 
 
-def test_empty_step_is_not_timed_and_shared_output_is_not_mutated():
-    events = [Mock(query=Mock(return_value=True)) for _ in range(2)]
-    events[0].elapsed_time.return_value = 1.0
-    timer = IterationTimer(1, event_factory=iter(events).__next__)
-    timer.start(None)
-    timer.finish()
-    assert timer.drain_into(EMPTY_MODEL_RUNNER_OUTPUT) is EMPTY_MODEL_RUNNER_OUTPUT
-    for event in events:
-        event.record.assert_not_called()
-    timer.start(9)
-    timer.finish()
-    output = timer.drain_into(EMPTY_MODEL_RUNNER_OUTPUT)
-    assert output is not EMPTY_MODEL_RUNNER_OUTPUT
-    assert output.iteration_timing_samples == ((9, 1.0),)
-    assert EMPTY_MODEL_RUNNER_OUTPUT.iteration_timing_samples == ()
+class FakeGpu:
+    """A CUDA stream whose progress the test controls."""
+
+    def __init__(self):
+        self.now_ms = 0.0
+        self.events: list[FakeEvent] = []
+        self.waits = 0
+
+    def run(self, ms: float = 1.0):
+        """Complete everything recorded so far, one event every `ms`."""
+        for event in self.events:
+            self.now_ms += ms
+            event.completed_ms = self.now_ms
+        self.events.clear()
 
 
-def test_disabled_timing_allocates_no_events(monkeypatch):
-    factory = Mock(side_effect=AssertionError("unexpected timing event allocation"))
-    monkeypatch.setattr(IterationTimer, "_make_event", factory)
-    config = SimpleNamespace(
-        observability_config=SimpleNamespace(iteration_timing_enabled=False)
+class FakeEvent:
+    gpu: FakeGpu
+
+    def __init__(self, enable_timing=False, blocking=False):
+        self.completed_ms = None
+
+    def record(self):
+        self.gpu.events.append(self)
+
+    def query(self):
+        return self.completed_ms is not None
+
+    def synchronize(self):
+        self.gpu.waits += 1
+        self.gpu.run()
+
+    def elapsed_time(self, end):
+        if self.completed_ms is None or end.completed_ms is None:
+            raise RuntimeError("Both events must be completed")
+        return end.completed_ms - self.completed_ms
+
+
+class FakeAsyncOutput(AsyncModelRunnerOutput):
+    def get_output(self):
+        return ModelRunnerOutput(req_ids=[])
+
+    def get_kv_connector_output(self):
+        return "kv output"
+
+
+class FakeWorker:
+    def __init__(self):
+        self.iteration_timer = IterationTimer()
+        self.fail_next_step = False
+
+    @start_iteration_timing
+    def execute_model(self, scheduler_output):
+        return None
+
+    @finish_iteration_timing
+    def sample_tokens(self):
+        if self.fail_next_step:
+            self.fail_next_step = False
+            return None  # as when execute_model failed
+        return FakeAsyncOutput()
+
+    @time_dummy_batch
+    def execute_dummy_batch(self):
+        pass
+
+    def step(self, num_tokens=1, timed=True):
+        """Run one iteration and return the records its output carries."""
+        details = IterationDetails(num_decode_tokens=num_tokens) if timed else None
+        self.execute_model(SimpleNamespace(iteration_details=details))
+        output = self.sample_tokens()
+        return output and output.get_output().iteration_records
+
+    def flush(self):
+        return self.iteration_timer.flush().get_output().iteration_records
+
+
+@pytest.fixture
+def gpu(monkeypatch):
+    gpu = FakeEvent.gpu = FakeGpu()
+    fake_torch = SimpleNamespace(Event=FakeEvent, cuda=SimpleNamespace(Event=FakeEvent))
+    monkeypatch.setattr(iteration_timing, "torch", fake_torch)
+    return gpu
+
+
+def test_record_rides_a_later_output_once_its_gpu_work_completes(gpu):
+    worker = FakeWorker()
+
+    # The step's own end event follows its output, so it is still pending.
+    assert worker.step(num_tokens=3) == []
+    assert worker.step(num_tokens=5) == []
+    gpu.run(ms=4.0)
+
+    first, second = worker.step()
+    assert (first.iteration_index, first.num_generation_tokens) == (0, 3)
+    assert (second.iteration_index, second.num_generation_tokens) == (1, 5)
+    assert first.elapsed_ms == 4.0 and not first.is_dummy
+    assert gpu.waits == 0
+
+
+def test_flush_waits_for_the_last_iteration_when_the_engine_goes_idle(gpu):
+    worker = FakeWorker()
+    assert worker.step(num_tokens=7) == []
+
+    (record,) = worker.flush()
+
+    assert record.num_generation_tokens == 7
+    assert gpu.waits == 1
+    assert worker.flush() == []
+
+
+def test_dummy_batches_return_earlier_records_and_flush_collects_the_tail(gpu):
+    worker = FakeWorker()
+
+    assert worker.execute_dummy_batch() == []
+    gpu.run()
+    assert [record.is_dummy for record in worker.execute_dummy_batch()] == [True]
+    assert worker.execute_dummy_batch() == []
+
+    assert [record.iteration_index for record in worker.flush()] == [1, 2]
+
+
+def test_only_iterations_that_finish_with_a_snapshot_are_timed(gpu):
+    worker = FakeWorker()
+
+    worker.fail_next_step = True
+    assert worker.step() is None  # execute_model failed
+    assert worker.step(timed=False) == []  # no scheduling snapshot
+    # A step that schedules no tokens has no sample_tokens call.
+    worker.execute_model(SimpleNamespace(iteration_details=IterationDetails()))
+    assert worker.flush() == []
+
+    # None of these stops later iterations from being timed.
+    worker.step(num_tokens=2)
+    assert [record.num_generation_tokens for record in worker.flush()] == [2]
+
+
+def test_failed_timing_read_drops_the_record_not_the_step(gpu, monkeypatch):
+    worker = FakeWorker()
+    worker.step()
+    gpu.run()
+
+    def broken_read(self, end):
+        raise RuntimeError("CUDA error")
+
+    with monkeypatch.context() as patch:
+        patch.setattr(FakeEvent, "elapsed_time", broken_read)
+        assert worker.step() == []
+
+    # Later records are unaffected.
+    assert [record.iteration_index for record in worker.flush()] == [1]
+
+
+def test_untimed_worker_is_untouched():
+    worker = FakeWorker()
+    worker.iteration_timer = None
+
+    assert isinstance(worker.sample_tokens(), FakeAsyncOutput)
+    assert worker.execute_dummy_batch() is None
+
+
+def test_output_carrying_records_keeps_its_kv_connector_output(gpu):
+    worker = FakeWorker()
+    worker.step()
+    gpu.run()
+    worker.execute_model(SimpleNamespace(iteration_details=IterationDetails()))
+
+    assert worker.sample_tokens().get_kv_connector_output() == "kv output"
+
+
+def test_executor_resolves_the_flush_into_records(gpu):
+    worker = FakeWorker()
+    worker.step(num_tokens=3)
+    executor = UniProcExecutor.__new__(UniProcExecutor)
+    executor.driver_worker = SimpleNamespace(
+        flush_iteration_timings=worker.iteration_timer.flush
     )
-    assert make_iteration_timer(config, rank=0) is None
-    factory.assert_not_called()
+
+    (record,) = executor.flush_iteration_timings()
+
+    assert record.num_generation_tokens == 3
 
 
-def test_only_one_worker_per_replica_allocates_timing_events(monkeypatch):
-    factory = Mock(return_value=Mock())
-    monkeypatch.setattr(IterationTimer, "_make_event", factory)
+def test_only_the_output_rank_times_iterations():
+    parallel_config = SimpleNamespace(
+        world_size=8, tensor_parallel_size=2, prefill_context_parallel_size=1
+    )
+    config = SimpleNamespace(gpu_iteration_timing=True, parallel_config=parallel_config)
+    executor = SimpleNamespace(world_size=8, parallel_config=parallel_config)
+    output_rank = MultiprocExecutor._get_output_rank(executor)
+
+    timed = [rank for rank in range(8) if make_iteration_timer(config, rank)]
+    assert timed == [output_rank]
+
+    config.gpu_iteration_timing = False
+    assert make_iteration_timer(config, output_rank) is None
+
+
+@pytest.mark.parametrize(
+    ("change", "expected"),
+    [
+        ({}, True),
+        ({"flag": False}, False),
+        ({"device_type": "cpu"}, False),
+        ({"runner_type": "pooling"}, False),
+        ({"is_mm_encoder_only": True}, False),
+        ({"multiprocessing": False}, False),  # the in-process engine never idles
+    ],
+)
+def test_gpu_iteration_timing_applies_to_cuda_generation(change, expected, monkeypatch):
+    case = {
+        "flag": True,
+        "device_type": "cuda",
+        "runner_type": "generate",
+        "is_mm_encoder_only": False,
+        "multiprocessing": True,
+    } | change
+    monkeypatch.setenv(
+        "VLLM_ENABLE_V1_MULTIPROCESSING", str(int(case["multiprocessing"]))
+    )
     config = SimpleNamespace(
-        observability_config=SimpleNamespace(iteration_timing_enabled=True),
-        max_concurrent_batches=2,
-        parallel_config=SimpleNamespace(
-            world_size=8,
-            tensor_parallel_size=2,
-            prefill_context_parallel_size=2,
+        observability_config=SimpleNamespace(
+            enable_logging_iteration_details=case["flag"]
         ),
+        device_config=SimpleNamespace(device_type=case["device_type"]),
+        model_config=SimpleNamespace(runner_type=case["runner_type"]),
+        is_mm_encoder_only=case["is_mm_encoder_only"],
     )
-    timers = [make_iteration_timer(config, rank) for rank in range(8)]
-    assert sum(timer is not None for timer in timers) == 1
-    assert timers[4] is not None
-    assert factory.call_count == 6
-    factory.return_value.record.assert_not_called()
+
+    assert VllmConfig.gpu_iteration_timing.fget(config) is expected  # type: ignore[attr-defined]  # property
+
+
+def test_logger_logs_every_iteration_record(gpu, monkeypatch):
+    worker = FakeWorker()
+    worker.step(num_tokens=3)
+    worker.step(num_tokens=5)
+    stats = SchedulerStats(iteration_records=worker.flush())
+    info = Mock()
+    monkeypatch.setattr(loggers.logger, "info", info)
+    stat_logger = SimpleNamespace(
+        kv_cache_device="GPU", _log_prefix_for_engine=lambda engine_idx: ""
+    )
+    stat_logger._log_iteration = lambda *args: loggers.LoggingStatLogger._log_iteration(
+        stat_logger, *args
+    )
+
+    loggers.LoggingStatLogger._log_iteration_details(stat_logger, stats, 0)
+
+    assert [call.args[2:7] for call in info.call_args_list] == [
+        (0, 0, 0, 0, 3),
+        (1, 0, 0, 0, 5),
+    ]

@@ -556,6 +556,20 @@ class VllmConfig:
         return bool(mm_config and mm_config.mm_encoder_only)
 
     @property
+    def gpu_iteration_timing(self) -> bool:
+        """Whether logged iteration details are timed by the output worker with
+        CUDA events instead of by EngineCore's wall clock."""
+        return (
+            self.observability_config.enable_logging_iteration_details
+            and self.device_config.device_type == "cuda"
+            and self.model_config is not None
+            and self.model_config.runner_type == "generate"
+            and not self.is_mm_encoder_only
+            # The in-process engine has no idle loop to collect the last records.
+            and envs.VLLM_ENABLE_V1_MULTIPROCESSING
+        )
+
+    @property
     def max_concurrent_batches(self) -> int:
         # PP requires PP-size concurrent batches to fill the pipeline.
         # Async scheduling requires 2 concurrent batches to overlap.
@@ -3412,31 +3426,6 @@ class VllmConfig:
             unsupported.append("dual batch overlap with encoder only models")
 
         return unsupported
-
-    def resolve_iteration_timing(
-        self, log_stats: bool, multiprocess_mode: bool
-    ) -> None:
-        observability = self.observability_config
-        observability.iteration_timing_enabled = False
-        if not log_stats or not observability.enable_logging_iteration_details:
-            return
-        reason = None
-        if not multiprocess_mode:
-            reason = "Iteration GPU timing requires an out-of-process EngineCore"
-        elif self.device_config.device_type != "cuda":
-            reason = "Iteration GPU timing requires a CUDA device"
-        elif self.model_config is None or self.model_config.runner_type != "generate":
-            reason = "Iteration GPU timing supports generative models only"
-        elif self.parallel_config.distributed_executor_backend not in (
-            None,
-            "uni",
-            "mp",
-        ):
-            reason = "Iteration GPU timing supports uni and mp executors only"
-        if reason is None:
-            observability.iteration_timing_enabled = True
-        else:
-            logger.warning("Logging iteration counts without GPU timing: %s", reason)
 
     def _validate_profiler_config(self) -> None:
         if self.profiler_config.profiler != "proton":

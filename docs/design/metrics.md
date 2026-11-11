@@ -306,25 +306,22 @@ every 5 seconds with some key metrics:
   seconds
 - The prefix cache hit rate over the most recent 1k kv-cache block queries
 
-`--enable-logging-iteration-details` additionally logs per-iteration request and
-token counts. With log statistics enabled, it automatically includes GPU timing
-for CUDA generation with a `uni` or `mp` executor and an out-of-process
-EngineCore; unsupported configurations log counts only. This logging option is
-disabled by default.
+`--enable-logging-iteration-details` additionally logs every engine iteration
+with its request and token counts and its elapsed time. For generative models
+on CUDA devices the elapsed time is measured on the GPU with CUDA events, from
+the start of model execution to the end of sampling and speculative drafting.
+It is the time the iteration occupied the output worker's stream, including
+host submission gaps, not kernel-busy time. With pipeline parallelism it is
+measured on the last stage and includes waiting for the earlier stages. Other
+configurations, including the in-process engine, report the wall-clock time
+EngineCore waited for the iteration.
 
-The `model_step_cuda` duration covers target-model execution, sampling and
-postprocessing, and drafting for the next iteration on the recorded CUDA stream,
-including CPU submission gaps. It excludes independent work on other streams and
-is not end-to-end request latency. With pipeline parallelism, only the output
-worker of the last stage is timed. Its interval may include waiting for input
-from earlier stages; it is not the duration of the whole pipeline.
-
-Timing collection is best-effort and never waits for the final GPU work before
-the engine becomes idle. Durations are returned with normal model outputs;
-records still missing a duration at idle are discarded. A short or isolated
-request can therefore have no timed record, and an attention-DP wave can lose
-multiple trailing dummy records. This does not change token delivery or imply
-that all GPU work has finished. Timings are not flushed during shutdown.
+GPU timing never waits for the GPU while requests are running. An iteration's
+timing usually completes after its own output is delivered, so its record is
+logged with a later output, and the engine waits for the last ones before it
+goes idle. The KV cache usage on a line is the usage when the line is logged.
+Dummy iterations of data-parallel ranks are timed and logged as well.
+Iterations still being timed when the engine shuts down are not logged.
 
 ### Metrics Publishing - Prometheus
 

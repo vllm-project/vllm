@@ -99,12 +99,11 @@ class ObservabilityConfig:
     argument."""
 
     enable_logging_iteration_details: bool = False
-    """Log iteration request/token counts and automatically collect GPU timing
-    where supported. Unsupported configurations log counts without durations.
-    Requires log statistics to be enabled."""
-
-    iteration_timing_enabled: bool = Field(default=False, init=False, repr=False)
-    """Internal state resolved at EngineCore startup; not a user option."""
+    """Enable detailed logging of iteration details.
+    If set, vllm EngineCore will log iteration details
+    This includes number of context/generation requests and tokens
+    and the elapsed time for the iteration: GPU time measured with CUDA
+    events for generative models on CUDA devices, otherwise the cpu time."""
 
     jit_monitor_mode: Literal["warn", "error"] = "warn"
     """How to handle post-warmup JIT compilation events."""

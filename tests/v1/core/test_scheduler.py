@@ -70,6 +70,7 @@ from vllm.v1.kv_cache_interface import (
     SlidingWindowSpec,
 )
 from vllm.v1.metrics.cache_hit_source import CacheHitSource
+from vllm.v1.metrics.stats import SchedulerIterationDetails
 from vllm.v1.outputs import (
     EMPTY_MODEL_RUNNER_OUTPUT,
     DraftTokenIds,
@@ -632,18 +633,23 @@ def test_scheduler_stats_route_to_existing_output_client():
     scheduler.add_request(request)
 
     scheduler_output = scheduler.schedule()
+    iteration_record = SchedulerIterationDetails(0, 1, 10, 0, 0, elapsed_ms=1.5)
     model_output = ModelRunnerOutput(
         req_ids=[request.request_id],
         sampled_token_ids=[[1000]],
         logprobs=None,
         prompt_logprobs_dict={},
         pooler_output=[],
+        iteration_records=[iteration_record],
     )
 
     engine_core_outputs = scheduler.update_from_output(scheduler_output, model_output)
 
     assert 0 not in engine_core_outputs
     assert engine_core_outputs[1].scheduler_stats is not None
+    assert engine_core_outputs[1].scheduler_stats.iteration_records == [
+        iteration_record
+    ]
     assert len(engine_core_outputs[1].outputs) == 1
 
 

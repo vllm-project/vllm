@@ -70,6 +70,7 @@ from vllm.utils.watch_dog import get_watch_dog, start_watch_dog
 from vllm.v1.core.sched.output import GrammarOutput, SchedulerOutput
 from vllm.v1.executor.abstract import Executor, FailureCallback
 from vllm.v1.executor.vllm_net_devices import set_worker_net_device
+from vllm.v1.metrics.stats import SchedulerIterationDetails
 from vllm.v1.outputs import (
     AsyncModelRunnerOutput,
     DraftTokenIds,
@@ -453,15 +454,20 @@ class MultiprocExecutor(Executor):
             ec_output_aggregator=self.ec_output_aggregator,
         )
 
-    def execute_dummy_batch(
-        self, iteration_metrics_id: int | None = None
-    ) -> tuple[tuple[int, float], ...] | None:
+    def execute_dummy_batch(self) -> list[SchedulerIterationDetails] | None:
         return self.collective_rpc(
             "execute_dummy_batch",
-            args=() if iteration_metrics_id is None else (iteration_metrics_id,),
             unique_reply_rank=self.output_rank,
             timeout=envs.VLLM_EXECUTE_MODEL_TIMEOUT_SECONDS,
         )
+
+    def flush_iteration_timings(self) -> list[SchedulerIterationDetails]:
+        output: ModelRunnerOutput = self.collective_rpc(
+            "flush_iteration_timings",
+            unique_reply_rank=self.output_rank,
+            timeout=envs.VLLM_EXECUTE_MODEL_TIMEOUT_SECONDS,
+        )
+        return output.iteration_records
 
     def take_draft_token_ids(self) -> DraftTokenIds | None:
         # OPTIMIZATION: Get output only from a single worker (output_rank)

@@ -203,12 +203,10 @@ class SchedulerIterationDetails:
     num_ctx_tokens: int
     num_generation_requests: int
     num_generation_tokens: int
-    elapsed_ms: float | None
+    elapsed_ms: float
     num_encoder_inputs: int = 0
     num_encoder_output_tokens: int = 0
     is_dummy: bool = False
-    # None when GPU timing is disabled; CPU result-wait time is not a substitute.
-    timing_scope: str | None = None
 
 
 KV_FETCH_WAITING_TO_START = "waiting_to_start"
@@ -239,7 +237,7 @@ class SchedulerStats:
 
     kv_cache_usage: float = 0.0
     iteration_details: SchedulerIterationDetails | None = None
-    # Completed GPU timings can lag request output delivery by multiple steps.
+    # Iterations timed on the GPU, which complete after their own output.
     iteration_records: list[SchedulerIterationDetails] = field(default_factory=list)
 
     prefix_cache_stats: PrefixCacheStats = field(default_factory=PrefixCacheStats)

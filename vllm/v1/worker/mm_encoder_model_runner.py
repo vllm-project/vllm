@@ -20,7 +20,6 @@ from vllm.logger import init_logger
 from vllm.sequence import IntermediateTensors
 from vllm.utils.gc_utils import freeze_gc_for_cudagraph_capture
 from vllm.v1.kv_cache_interface import KVCacheSpec
-from vllm.v1.metrics.iteration_timing import time_model_execution
 from vllm.v1.outputs import (
     ModelRunnerOutput,
     make_empty_encoder_model_runner_output,
@@ -120,7 +119,6 @@ class MMEncoderModelRunner(GPUModelRunner):
             scheduler_output, self.kv_connector.no_forward(scheduler_output)
         )
 
-    @time_model_execution
     @torch.inference_mode()
     def execute_model(
         self,

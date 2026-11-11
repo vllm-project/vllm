@@ -2682,6 +2682,7 @@ class Scheduler(SchedulerInterface):
                 # We must return the stats even if there are no request
                 # outputs this step.
                 engine_core_outputs[0] = eco = EngineCoreOutputs()
+            stats.iteration_records = model_runner_output.iteration_records
             eco.scheduler_stats = stats
 
         return engine_core_outputs
