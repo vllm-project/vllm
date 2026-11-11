@@ -5,6 +5,7 @@
 Run `pytest tests/kernels/quantization/test_mxfp4_kernel_selection.py`.
 """
 
+from contextlib import contextmanager
 from unittest.mock import MagicMock, patch
 
 import pytest
@@ -12,9 +13,11 @@ import torch
 
 import vllm.envs as envs
 from vllm.model_executor.kernels.linear import (
+    _POSSIBLE_MXFP4_KERNELS,
     AiterMxfp4LinearKernel,
     EmulationMxfp4LinearKernel,
     FlashInferMxFp4LinearKernel,
+    HummingMxFp4LinearKernel,
     MarlinMxFp4LinearKernel,
     MxFp4LinearKernel,
     MxFp4LinearLayerConfig,
@@ -320,3 +323,87 @@ def test_init_mxfp4_linear_kernel_raises_when_no_kernel_matches(platform_mock):
 
     with pytest.raises(ValueError, match="Failed to find a kernel"):
         init_mxfp4_linear_kernel()
+
+
+def test_only_row_independent_kernels_claim_batch_invariance():
+    """Marlin and FlashInfer pick their tiling from the token count, so a row's
+    output changes with the batch; they must not be selectable under
+    VLLM_BATCH_INVARIANT."""
+    claiming = {
+        kernel
+        for kernel in _POSSIBLE_MXFP4_KERNELS[PlatformEnum.CUDA]
+        if kernel.supports_batch_invariance()
+    }
+    assert claiming == {HummingMxFp4LinearKernel, EmulationMxfp4LinearKernel}
+
+
+@contextmanager
+def _patch_cuda_platform(capability: int = 89):
+    """Patch the platform so selection runs as on a CUDA GPU of the given
+    capability where both Marlin and Humming report as supported; FlashInfer
+    and B12x stay unsupported. The Humming-vs-Marlin priority reads the real
+    device's capability, so pin it to the mocked one."""
+    with (
+        patch("vllm.model_executor.kernels.linear.current_platform") as platform,
+        patch.object(
+            MarlinMxFp4LinearKernel, "is_supported", return_value=(True, None)
+        ),
+        patch.object(
+            HummingMxFp4LinearKernel, "is_supported", return_value=(True, None)
+        ),
+        patch(
+            "vllm.model_executor.layers.quantization.utils.humming.priority."
+            "prefers_humming",
+            side_effect=lambda compute_capability=None: capability == 90,
+        ),
+    ):
+        platform._enum = PlatformEnum.CUDA
+        platform.is_cuda.return_value = True
+        yield
+
+
+@pytest.mark.parametrize("activation_quant_key", [None, kMxfp4Dynamic])
+@pytest.mark.parametrize(
+    ("batch_invariant", "expected_kernel_cls"),
+    [(False, MarlinMxFp4LinearKernel), (True, HummingMxFp4LinearKernel)],
+)
+def test_batch_invariance_selects_humming_over_marlin(
+    monkeypatch, activation_quant_key, batch_invariant, expected_kernel_cls
+):
+    """Where Marlin wins the normal priority order (no FlashInfer, e.g.
+    Ampere and Ada), VLLM_BATCH_INVARIANT routes the layer to Humming."""
+    monkeypatch.setenv("VLLM_BATCH_INVARIANT", "1" if batch_invariant else "0")
+    with _patch_cuda_platform():
+        kernel = init_mxfp4_linear_kernel(activation_quant_key=activation_quant_key)
+
+    assert isinstance(kernel, expected_kernel_cls)
+
+
+@pytest.mark.parametrize(
+    ("linear_backend", "expected_kernel_cls"),
+    [
+        ("marlin", HummingMxFp4LinearKernel),
+        ("humming", HummingMxFp4LinearKernel),
+        ("emulation", EmulationMxfp4LinearKernel),
+    ],
+)
+def test_batch_invariance_overrides_non_invariant_linear_backend(
+    monkeypatch, linear_backend, expected_kernel_cls
+):
+    """--linear-backend is honored only when it names a batch-invariant
+    kernel; a request for Marlin is overridden."""
+    monkeypatch.setenv("VLLM_BATCH_INVARIANT", "1")
+    monkeypatch.setattr(
+        "vllm.model_executor.kernels.linear.mxfp4.emulation.has_quark",
+        lambda: True,
+    )
+    with (
+        _patch_cuda_platform(),
+        patch(
+            "vllm.model_executor.kernels.linear._get_linear_backend",
+            return_value=linear_backend,
+        ),
+    ):
+        kernel = init_mxfp4_linear_kernel(activation_quant_key=kMxfp4Dynamic)
+
+    assert isinstance(kernel, expected_kernel_cls)

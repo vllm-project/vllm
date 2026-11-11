@@ -283,6 +283,49 @@ def _batch_invariant_fp8_kernel(kernel, config, quantization: str):
     return kernel
 
 
+_MxKernelT = TypeVar("_MxKernelT", type[Mxfp8LinearKernel], type[MxFp4LinearKernel])
+
+
+def _use_batch_invariant_kernels() -> bool:
+    """Whether VLLM_BATCH_INVARIANT narrows MX linear kernel selection. Only
+    the CUDA lists rank kernels that tile by token count ahead of Humming;
+    ROCm and XPU selection is left as is."""
+    return envs.VLLM_BATCH_INVARIANT and current_platform.is_cuda()
+
+
+def _batch_invariant_kernels(
+    kernels: list[_MxKernelT], layer_desc: str, *, quantization: str
+) -> tuple[list[_MxKernelT], list[str]]:
+    """Keep the kernels whose output for a row does not depend on the other
+    rows, Humming first. ``--linear-backend`` is honored when it names such a
+    kernel and overridden with a warning otherwise. Returns the kernels and a
+    reason for each one left out."""
+    skipped = [
+        f"{kernel.__name__}: not batch invariant"
+        for kernel in kernels
+        if not kernel.supports_batch_invariance()
+    ]
+    capable = [kernel for kernel in kernels if kernel.supports_batch_invariance()]
+    humming = [kernel for kernel in capable if "humming" in kernel.__name__.lower()]
+    capable = humming + [kernel for kernel in capable if kernel not in humming]
+
+    linear_backend = _get_linear_backend(quantization=quantization)
+    if linear_backend != "auto":
+        backend_kernels = _LINEAR_BACKEND_KERNEL_MAP.get(linear_backend, set())
+        requested = [kernel for kernel in capable if kernel in backend_kernels]
+        if requested:
+            return requested, skipped
+        logger.warning_once(
+            "VLLM_BATCH_INVARIANT overrides --linear-backend=%s for %s layers; "
+            "no %s kernel is batch invariant.",
+            linear_backend,
+            layer_desc,
+            linear_backend,
+            scope="global",
+        )
+    return capable, skipped
+
+
 # Kernel classes covered by each --linear-backend value.
 _LINEAR_BACKEND_KERNEL_MAP: dict[str, set[type]] = {
     "b12x": {
@@ -980,14 +1023,19 @@ def init_mxfp8_linear_kernel(
     else:
         possible = list(_POSSIBLE_MXFP8_KERNELS.get(platform, []))
 
-    # Apply --linear-backend filtering when set.
-    possible = _resolve_backend_kernels(
-        possible,
-        "MXFP8",
-        quantization="mxfp8",
-    )
+    failure_reasons: list[str] = []
+    if bmm_batch_size is None and _use_batch_invariant_kernels():
+        possible, failure_reasons = _batch_invariant_kernels(
+            possible, "MXFP8", quantization="mxfp8"
+        )
+    else:
+        # Apply --linear-backend filtering when set.
+        possible = _resolve_backend_kernels(
+            possible,
+            "MXFP8",
+            quantization="mxfp8",
+        )
 
-    failure_reasons = []
     for kernel_cls in possible:
         if kernel_cls.__name__ in envs.VLLM_DISABLED_KERNELS:
             failure_reasons.append(
@@ -1065,14 +1113,19 @@ def init_mxfp4_linear_kernel(
     platform = current_platform._enum
     possible = list(_POSSIBLE_MXFP4_KERNELS.get(platform, []))
 
-    # Apply --linear-backend filtering when set.
-    possible = _resolve_backend_kernels(
-        possible,
-        "MXFP4",
-        quantization="mxfp4",
-    )
+    failure_reasons: list[str] = []
+    if _use_batch_invariant_kernels():
+        possible, failure_reasons = _batch_invariant_kernels(
+            possible, "MXFP4", quantization="mxfp4"
+        )
+    else:
+        # Apply --linear-backend filtering when set.
+        possible = _resolve_backend_kernels(
+            possible,
+            "MXFP4",
+            quantization="mxfp4",
+        )
 
-    failure_reasons = []
     for kernel_cls in possible:
         if kernel_cls.__name__ in envs.VLLM_DISABLED_KERNELS:
             failure_reasons.append(

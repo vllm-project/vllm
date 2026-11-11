@@ -28,6 +28,12 @@ class EmulationMxfp8LinearKernel(Mxfp8LinearKernel):
     def can_implement(cls, c: Mxfp8LinearLayerConfig) -> tuple[bool, str | None]:
         return True, None
 
+    @classmethod
+    def supports_batch_invariance(cls) -> bool:
+        # Dequantized weights go through F.linear, which batch-invariant mode
+        # overrides with its own fixed-order matmul.
+        return True
+
     def process_weights_after_loading(self, layer: torch.nn.Module) -> None:
         weight = layer.weight.data  # [N, K]
         N, K = weight.shape

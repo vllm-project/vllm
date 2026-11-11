@@ -61,6 +61,12 @@ class EmulationMxfp4LinearKernel(MxFp4LinearKernel):
         return True, None
 
     @classmethod
+    def supports_batch_invariance(cls) -> bool:
+        # Per-row-group activation quant-dequant, then F.linear on dequantized
+        # weights, which batch-invariant mode overrides with its own matmul.
+        return True
+
+    @classmethod
     def _supports_quant_scheme(
         cls,
         weight_key: QuantKey | None,

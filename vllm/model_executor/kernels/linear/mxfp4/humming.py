@@ -40,6 +40,12 @@ class HummingMxFp4LinearKernel(MxFp4LinearKernel):
         return True, None
 
     @classmethod
+    def supports_batch_invariance(cls) -> bool:
+        # Humming constrains its tuning (no Stream-K, fixed K tile) when the
+        # compute config carries VLLM_BATCH_INVARIANT.
+        return True
+
+    @classmethod
     def _supports_quant_scheme(
         cls,
         weight_key: QuantKey | None,
