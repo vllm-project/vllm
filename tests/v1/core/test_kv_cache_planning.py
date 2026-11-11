@@ -2270,3 +2270,204 @@ def test_shrink_kv_cache_configs_leaves_host_resident_tensors():
     assert config.num_blocks == 10
     assert config.kv_cache_tensors[0] == host_tensor
     assert config.kv_cache_tensors[1].size == 2 * spec.page_size_bytes * 10
+
+
+@pytest.mark.skipif(not current_platform.is_cuda(), reason="CUDA FP8 backend contract")
+@pytest.mark.parametrize("block_size", [1024, 1712, 2160])
+def test_issue62558_draft_page(block_size):
+    from vllm.v1.attention.backends.triton_attn import TritonAttentionBackend
+    from vllm.v1.attention.backends.turboquant_attn import TurboQuantAttentionBackend
+    from vllm.v1.kv_cache_interface import KVQuantMode
+
+    target = TurboQuantAttentionBackend.customize_spec(
+        FullAttentionSpec(
+            block_size=block_size,
+            num_kv_heads=4,
+            head_size=256,
+            dtype=torch.uint8,
+            kv_quant_mode=KVQuantMode.TURBOQUANT_4BIT_NC,
+        )
+    )
+    mamba = MambaSpec(
+        block_size=block_size,
+        shapes=((target.page_size_bytes,),),
+        dtypes=(torch.uint8,),
+        mamba_cache_mode="align",
+    )
+    draft = TritonAttentionBackend.customize_spec(
+        FullAttentionSpec(
+            block_size=block_size,
+            num_kv_heads=4,
+            head_size=256,
+            dtype=torch.float8_e4m3fn,
+            kv_quant_mode=KVQuantMode.FP8_PER_TENSOR,
+            is_draft=True,
+        )
+    )
+    specs = {"target": target, "mamba": mamba, "draft": draft}
+    result = kv_cache_planning.unify_kv_cache_spec_page_size(specs)
+    assert result["target"] == target
+    assert result["mamba"] == mamba
+    assert result["draft"].block_size == block_size // 2
+    assert result["draft"].page_size_bytes == target.page_size_bytes
+    assert specs["draft"] is draft
+    merged = FullAttentionSpec.merge([result["draft"]])
+    from vllm.v1.worker.utils import select_common_block_size
+
+    assert (
+        select_common_block_size(merged.block_size, [TritonAttentionBackend], [merged])
+        == merged.block_size
+    )
+
+
+@pytest.mark.parametrize(
+    "unsupported", ["backend", "not_draft", "no_mamba", "dense", "too_small"]
+)
+def test_issue62558_preserve_unsupported_layout(unsupported):
+    from vllm.v1.kv_cache_interface import KVQuantMode
+
+    target = FullAttentionSpec(
+        block_size=1712,
+        num_kv_heads=4,
+        head_size=256,
+        dtype=torch.uint8,
+        kv_quant_mode=KVQuantMode.TURBOQUANT_4BIT_NC,
+        state_content_bytes=262,
+    )
+    draft = FullAttentionSpec(
+        block_size=1712,
+        num_kv_heads=4,
+        head_size=256,
+        dtype=torch.float8_e4m3fn,
+        kv_quant_mode=KVQuantMode.FP8_PER_TENSOR,
+        is_draft=True,
+        block_size_multiple=8,
+    )
+    if unsupported == "backend":
+        draft = replace(draft, block_size_multiple=None)
+    elif unsupported == "not_draft":
+        draft = replace(draft, is_draft=False)
+    elif unsupported == "dense":
+        target = replace(target, kv_quant_mode=KVQuantMode.NONE)
+    elif unsupported == "too_small":
+        target = replace(target, block_size=8)
+    mamba = MambaSpec(
+        block_size=target.block_size,
+        shapes=((target.page_size_bytes,),),
+        dtypes=(torch.uint8,),
+        mamba_cache_mode="align",
+    )
+    specs = {"target": target, "draft": draft, "mamba": mamba}
+    if unsupported == "no_mamba":
+        del specs["mamba"]
+    assert kv_cache_planning._fit_draft_pages_to_target(specs) is specs
+
+
+@pytest.mark.skipif(not current_platform.is_cuda(), reason="CUDA FP8 backend contract")
+def test_issue62558_native_group_cache_views():
+    from vllm.v1.attention.backends.triton_attn import TritonAttentionBackend
+    from vllm.v1.attention.backends.turboquant_attn import TurboQuantAttentionBackend
+    from vllm.v1.kv_cache_interface import (
+        KVCacheLayout,
+        KVQuantMode,
+        create_kv_cache_views,
+    )
+    from vllm.v1.worker.utils import AttentionGroup, prepare_kernel_block_sizes
+
+    target = TurboQuantAttentionBackend.customize_spec(
+        FullAttentionSpec(
+            block_size=1712,
+            num_kv_heads=4,
+            head_size=256,
+            dtype=torch.uint8,
+            kv_quant_mode=KVQuantMode.TURBOQUANT_4BIT_NC,
+        )
+    )
+    mamba = MambaSpec(
+        block_size=1712,
+        shapes=((target.page_size_bytes,),),
+        dtypes=(torch.uint8,),
+        mamba_cache_mode="align",
+    )
+    draft = TritonAttentionBackend.customize_spec(
+        FullAttentionSpec(
+            block_size=1712,
+            num_kv_heads=4,
+            head_size=256,
+            dtype=torch.float8_e4m3fn,
+            kv_quant_mode=KVQuantMode.FP8_PER_TENSOR,
+            is_draft=True,
+        )
+    )
+    specs = {
+        **{f"target.{i}": target for i in range(16)},
+        **{f"mamba.{i}": mamba for i in range(48)},
+        "draft": draft,
+    }
+    config = VllmConfig()
+    config.cache_config.kv_cache_layout = "LBNHC"
+    groups = get_kv_cache_groups(config, specs)
+    cache_config = kv_cache_planning.get_kv_cache_config_from_groups(
+        config, groups, 64 * target.page_size_bytes
+    )
+    attention_groups = [
+        [
+            AttentionGroup(
+                TritonAttentionBackend
+                if "draft" in group.layer_names
+                else TurboQuantAttentionBackend,
+                group.layer_names,
+                group.kv_cache_spec,
+                idx,
+            )
+        ]
+        for idx, group in enumerate(groups)
+    ]
+    sizes = prepare_kernel_block_sizes(cache_config, attention_groups)
+    for name, expected_size in [("target.0", 16), ("draft", 856)]:
+        idx = next(i for i, group in enumerate(groups) if name in group.layer_names)
+        spec = groups[idx].kv_cache_spec
+        assert spec.page_size_bytes == target.page_size_bytes
+        assert sizes[idx] == expected_size
+        tensor = next(t for t in cache_config.kv_cache_tensors if name in t.layers)
+        raw = torch.empty(tensor.offset + tensor.size, dtype=torch.int8)
+        views = create_kv_cache_views(
+            raw,
+            spec,
+            cache_config.num_blocks,
+            KVCacheLayout.LBNHC,
+            tensor,
+            kernel_block_size=sizes[idx],
+        )
+        assert views
+
+
+def test_issue62558_tensor_descriptors_keep_original_contract(monkeypatch):
+    from vllm.v1.attention.backends.triton_attn import TritonAttentionBackend
+    from vllm.v1.kv_cache_interface import KVQuantMode
+
+    monkeypatch.setenv("VLLM_TRITON_USE_TD", "1")
+    spec = FullAttentionSpec(
+        block_size=1712,
+        num_kv_heads=4,
+        head_size=256,
+        dtype=torch.float8_e4m3fn,
+        kv_quant_mode=KVQuantMode.FP8_PER_TENSOR,
+        is_draft=True,
+    )
+    customized = TritonAttentionBackend.customize_spec(spec)
+    assert customized.block_size_multiple is None
+
+
+def test_draft_block_constraint_survives_rswa_merge():
+    from vllm.v1.kv_cache_interface import RSWASpec
+
+    spec = RSWASpec(
+        block_size=856,
+        num_kv_heads=4,
+        head_size=256,
+        dtype=torch.float8_e4m3fn,
+        block_size_multiple=8,
+        rswa_window=4096,
+    )
+    assert RSWASpec.merge([spec]).block_size_multiple == 8

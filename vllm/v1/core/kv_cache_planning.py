@@ -361,10 +361,62 @@ def _get_kv_cache_groups_uniform_type(
     return [KVCacheGroupSpec(list(spec.kv_cache_specs.keys()), spec)]
 
 
+def _fit_draft_pages_to_target(
+    specs: dict[str, KVCacheSpec],
+) -> dict[str, KVCacheSpec]:
+    """Keep an oversized draft from inflating aligned TurboQuant/Mamba pages."""
+    targets = [spec for spec in specs.values() if not spec.is_draft]
+    if not any(isinstance(spec, MambaSpec) for spec in targets):
+        return specs
+    if not any(
+        isinstance(spec, AttentionSpec) and spec.kv_quant_mode.is_turboquant
+        for spec in targets
+    ):
+        return specs
+    pages = {spec.page_size_bytes for spec in targets}
+    if len(pages) != 1:
+        return specs
+    target_page = pages.pop()
+    fitted = dict(specs)
+    for name, spec in specs.items():
+        if spec.page_size_bytes <= target_page:
+            continue
+        # All oversized layers must support fitting; otherwise retain the
+        # existing layout for the entire collection.
+        if (
+            not spec.is_draft
+            or not isinstance(spec, AttentionSpec)
+            or isinstance(spec, MLAAttentionSpec)
+            or spec.block_size_multiple is None
+            or spec.tokens_per_state != 1
+        ):
+            return specs
+        multiple = spec.block_size_multiple
+        if multiple <= 0 or spec.block_size % multiple:
+            return specs
+        bytes_per_token = spec.num_heads * spec.state_content_size_bytes
+        limit = target_page // bytes_per_token
+        # A divisor preserves compatibility with the scheduler's block grid.
+        candidates = (
+            size
+            for size in range(multiple, min(limit, spec.block_size) + 1, multiple)
+            if spec.block_size % size == 0
+        )
+        block_size = max(candidates, default=0)
+        if not block_size:
+            return specs
+        fitted[name] = replace(
+            spec, block_size=block_size, page_size_padded=target_page
+        )
+    return fitted
+
+
 def unify_kv_cache_spec_page_size(
     kv_cache_spec: dict[str, KVCacheSpec],
 ) -> dict[str, KVCacheSpec]:
-    """Unify the page size of the given KVCacheSpec. If the page size of all layers
+    """Unify the page size of the given KVCacheSpec. First fit backend-supported
+    draft blocks to already aligned TurboQuant/Mamba target pages.
+    If the page size of all layers
     are the same, return the original KVCacheSpec. If not same, unify the page
     size by increasing the block size of layers with smaller page size. Two
     cases cannot be unified by block size alone and pad their physical page to
@@ -385,6 +437,7 @@ def unify_kv_cache_spec_page_size(
         The updated KVCacheSpec with the same page_size_bytes.
 
     """
+    kv_cache_spec = _fit_draft_pages_to_target(kv_cache_spec)
     page_sizes = {layer.page_size_bytes for layer in kv_cache_spec.values()}
     if len(page_sizes) <= 1:
         # All layers have the same page size, no need to unify.
