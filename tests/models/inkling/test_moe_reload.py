@@ -90,7 +90,7 @@ def _cold_start(
 
 def _state(model: _Model) -> dict[str, torch.Tensor]:
     """The routed experts' state dict plus tensor attributes (such as the
-    ``_a1_gscale`` the kernels read, derived from the input scale)."""
+    `_a1_gscale` the kernels read, derived from the input scale)."""
     experts = model.mlp.experts.routed_experts
     tensors = dict(experts.state_dict(keep_vars=True))
     for module_name, module in experts.named_modules():
@@ -105,7 +105,7 @@ def _state(model: _Model) -> dict[str, torch.Tensor]:
     not current_platform.has_device_capability(100), reason="NVFP4 MoE needs SM100"
 )
 def test_planned_update_rederives_input_scales(dist_init, monkeypatch) -> None:
-    """``input_amax`` is copied as is, so the plan loads it directly, and
+    """`input_amax` is copied as is, so the plan loads it directly, and
     post-load processing rederives the input scales from it on every update,
     leaving the experts as the loader-derived scales did at cold start."""
     monkeypatch.setenv("VLLM_RELOAD_MODE", "direct")
@@ -149,7 +149,7 @@ def test_planned_update_rederives_input_scales(dist_init, monkeypatch) -> None:
 )
 def test_layerwise_reload_keeps_routed_experts(dist_init, monkeypatch) -> None:
     """Layerwise reload doesn't see the routed-expert loads (they write
-    ``.data``); the amax load must not make it reprocess the layer from
+    `.data`); the amax load must not make it reprocess the layer from
     uninitialized weights."""
     monkeypatch.setenv("VLLM_RELOAD_MODE", "layerwise")
     model_config = ModelConfig()
