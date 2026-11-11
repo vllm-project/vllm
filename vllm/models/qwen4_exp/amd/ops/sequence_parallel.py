@@ -6,7 +6,7 @@ import torch
 from vllm.distributed import get_tensor_model_parallel_world_size
 from vllm.models.common.ops import sequence_parallel as common_sp
 from vllm.utils.math_utils import cdiv
-from vllm.utils.torch_utils import direct_register_custom_op
+from vllm.utils.torch_utils import direct_register_custom_op, vllm_ops
 
 
 def _sp_shard_op(x: torch.Tensor) -> torch.Tensor:
@@ -37,11 +37,11 @@ direct_register_custom_op(
 
 def sp_reduce_scatter(x: torch.Tensor) -> torch.Tensor:
     if torch.compiler.is_compiling():
-        return torch.ops.vllm.sp_reduce_scatter(x)
+        return vllm_ops.sp_reduce_scatter(x)
     return common_sp.sp_reduce_scatter(x)
 
 
 def sp_shard(x: torch.Tensor) -> torch.Tensor:
     if torch.compiler.is_compiling():
-        return torch.ops.vllm.sp_shard(x)
+        return vllm_ops.sp_shard(x)
     return common_sp.sp_shard(x)

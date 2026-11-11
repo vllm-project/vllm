@@ -23,6 +23,7 @@ from vllm.model_executor.layers.mla import MultiHeadLatentAttentionWrapper
 from vllm.model_executor.layers.quantization.utils.quant_utils import QuantKey
 from vllm.model_executor.utils import refill_derived
 from vllm.platforms import current_platform
+from vllm.utils.torch_utils import vllm_ops
 
 _OPT_KV_LORA_RANK = 512
 _OPT_ROT_DIM = 64
@@ -119,7 +120,7 @@ class KimiK3MultiHeadLatentAttentionWrapper(MultiHeadLatentAttentionWrapper):
         kv_layernorm = cast(RMSNorm, self.kv_a_layernorm)
 
         if self._use_eager_qk_rmsnorm_fusion and not torch.compiler.is_compiling():
-            return torch.ops.vllm.fused_mla_dual_rms_norm(
+            return vllm_ops.fused_mla_dual_rms_norm(
                 q_c,
                 q_layernorm.weight,
                 kv_c,

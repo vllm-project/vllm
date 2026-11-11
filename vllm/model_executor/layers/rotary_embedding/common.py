@@ -10,7 +10,7 @@ import torch
 from vllm.logger import init_logger
 from vllm.model_executor.custom_op import CustomOp
 from vllm.platforms import current_platform
-from vllm.utils.torch_utils import direct_register_custom_op
+from vllm.utils.torch_utils import direct_register_custom_op, vllm_ops
 
 logger = init_logger(__name__)
 
@@ -246,7 +246,7 @@ class ApplyRotaryEmb(CustomOp):
         import vllm._xpu_ops  # noqa: F401 registers torch.ops.vllm.xpu_apply_rotary_emb
 
         x, cos, sin, origin_shape, origin_dtype = self._pre_process(x, cos, sin)
-        output = torch.ops.vllm.xpu_apply_rotary_emb(x, cos, sin, self.is_neox_style)
+        output = vllm_ops.xpu_apply_rotary_emb(x, cos, sin, self.is_neox_style)
         return self._post_process(output, origin_shape, origin_dtype)
 
     def forward_hip(

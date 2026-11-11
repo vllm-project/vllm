@@ -36,6 +36,7 @@ from vllm.utils.torch_utils import (
     LayerNameType,
     _encode_layer_name,
     _resolve_layer_name,
+    vllm_ops,
 )
 from vllm.v1.attention.backends.mla.indexer import (
     DeepseekV32IndexerMetadata,
@@ -799,7 +800,7 @@ class SparseAttnIndexerKpool(CustomOp):
                 "Please enable aiter with VLLM_ROCM_USE_AITER=1"
             )
         if index_kpool <= 1:
-            return torch.ops.vllm.rocm_aiter_sparse_attn_indexer(
+            return vllm_ops.rocm_aiter_sparse_attn_indexer(
                 hidden_states,
                 _encode_layer_name(self.k_cache.prefix),
                 self.k_cache.kv_cache,

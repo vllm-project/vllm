@@ -12,7 +12,10 @@ from typing import TYPE_CHECKING, Any, TypeVar
 import numpy as np
 import numpy.typing as npt
 import torch
+from torch._C import _len_torch_dispatch_stack
+from torch.compiler import is_compiling as _is_compiling
 from torch.library import Library, infer_schema
+from torch.overrides import has_torch_function
 
 import vllm.envs as envs
 from vllm.logger import init_logger
@@ -1006,7 +1009,7 @@ def direct_register_custom_op(
     target_lib: Library | None = None,
     dispatch_key: str | None = None,
     tags: tuple[torch.Tag, ...] = (),
-):
+) -> Callable:
     """`torch.library.custom_op` can have significant overhead because it
     needs to consider complicated dispatching logic. This function
     directly registers a custom op and dispatches it to the CUDA backend.
@@ -1020,6 +1023,10 @@ def direct_register_custom_op(
     IMPORTANT: the lifetime of the operator is tied to the lifetime of the
     library object. If you want to bind the operator to a different library,
     make sure the library object is alive when the operator is used.
+
+    Returns an `eager_bypass_custom_op` handle; ops in the vLLM library are
+    also exposed as `vllm_ops.<op_name>`. Call ops through these handles
+    rather than `torch.ops.vllm.<op_name>` so eager calls skip the dispatcher.
     """
     if mutates_args is None:
         mutates_args = []
@@ -1037,24 +1044,60 @@ def direct_register_custom_op(
     if fake_impl is not None:
         my_lib._register_fake(op_name, fake_impl)
 
+    handle = eager_bypass_custom_op(op_name, op_func, my_lib)
+    if my_lib.ns == vllm_lib.ns:
+        setattr(vllm_ops, op_name, handle)
+    return handle
+
+
+def is_eager_dispatch(args: tuple = (), kwargs: dict | None = None) -> bool:
+    """True when a custom op call with these arguments runs eagerly: not under
+    Dynamo, a dispatch-mode trace (`make_fx`, `FakeTensorMode`) or
+    `torch.fx.symbolic_trace` (Proxy arguments), where the op must stay
+    visible as a graph node."""
+    return not (
+        _is_compiling()
+        or _len_torch_dispatch_stack()
+        or has_torch_function(args)
+        or (kwargs and has_torch_function(tuple(kwargs.values())))
+    )
+
 
 def eager_bypass_custom_op(
     op_name: str,
     op_func: Callable,
     target_lib: Library | None = None,
 ) -> Callable:
-    """Wrap a registered custom op so that only Dynamo tracing goes through
-    the dispatcher, where the op is needed as a graph boundary; eager calls
-    go straight to `op_func`. Use it on host-bound hot paths such as
-    per-linear GEMM calls, where dispatch costs several µs per call."""
+    """Wrap a registered custom op so that only tracing goes through the
+    dispatcher, where the op is needed as a graph boundary; eager calls go
+    straight to `op_func`, saving several µs of dispatch per call."""
     op = getattr(getattr(torch.ops, (target_lib or vllm_lib).ns), op_name)
 
+    # is_eager_dispatch, inlined to save a Python call per op.
     def wrapper(*args, **kwargs):
-        if torch.compiler.is_compiling():
+        if (
+            _is_compiling()
+            or _len_torch_dispatch_stack()
+            or has_torch_function(args)
+            or (kwargs and has_torch_function(tuple(kwargs.values())))
+        ):
             return op(*args, **kwargs)
         return op_func(*args, **kwargs)
 
+    wrapper.__name__ = op_name
+    wrapper.__qualname__ = op_name
     return wrapper
+
+
+class _VllmOps:
+    """Namespace of `direct_register_custom_op` handles for the vLLM library.
+    Names registered some other way fall back to `torch.ops.vllm`."""
+
+    def __getattr__(self, name: str) -> Any:
+        return getattr(torch.ops.vllm, name)
+
+
+vllm_ops = _VllmOps()
 
 
 # Keep this at the end of the module: it resolves current_platform, which can

@@ -19,7 +19,7 @@ from vllm.model_executor.layers.lightning_attn import (
 from vllm.model_executor.layers.linear import ColumnParallelLinear, RowParallelLinear
 from vllm.model_executor.layers.mamba.linear.base import LinearAttention
 from vllm.model_executor.layers.minimax_rms_norm import MiniMaxText01RMSNormTP
-from vllm.utils.torch_utils import direct_register_custom_op
+from vllm.utils.torch_utils import direct_register_custom_op, vllm_ops
 from vllm.v1.attention.backend import AttentionMetadata
 from vllm.v1.attention.backends.linear_attn import LinearAttentionMetadata
 
@@ -268,7 +268,7 @@ class MiniMaxText01LinearAttention(LinearAttention):
     def forward(
         self, hidden_states: torch.Tensor, output: torch.Tensor, positions: torch.Tensor
     ) -> None:
-        torch.ops.vllm.linear_attention(
+        vllm_ops.linear_attention(
             hidden_states,
             output,
             positions,

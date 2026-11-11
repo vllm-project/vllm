@@ -52,7 +52,11 @@ from vllm.platforms.rocm import get_cdna_version, on_gfx1250
 from vllm.sequence import IntermediateTensors
 from vllm.transformers_utils.configs.step5 import Step5Config
 from vllm.utils.math_utils import cdiv, round_up
-from vllm.utils.torch_utils import _encode_layer_name, kv_cache_dtype_str_to_dtype
+from vllm.utils.torch_utils import (
+    _encode_layer_name,
+    kv_cache_dtype_str_to_dtype,
+    vllm_ops,
+)
 from vllm.v1.attention.backends.rocm_aiter_unified_attn import (
     RocmAiterUnifiedAttentionBackend,
 )
@@ -507,8 +511,8 @@ class Step5Attention(nn.Module):
         attn_name = _encode_layer_name(self.attn.layer_name)
         csa_name = _encode_layer_name(self.csa_layer_name)
         if current_platform.opaque_attention_op():
-            kv_dep = torch.ops.vllm.unified_kv_cache_update(k, v, attn_name)
-            torch.ops.vllm.step5_csa_attention(
+            kv_dep = vllm_ops.unified_kv_cache_update(k, v, attn_name)
+            vllm_ops.step5_csa_attention(
                 hidden_states, positions, query, out, csa_name, gate, kv_dep
             )
         else:

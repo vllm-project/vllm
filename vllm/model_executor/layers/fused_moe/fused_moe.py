@@ -36,7 +36,7 @@ from vllm.triton_utils import tl, triton
 from vllm.triton_utils.allocation import set_triton_allocator
 from vllm.utils.math_utils import next_power_of_2
 from vllm.utils.platform_utils import get_device_name_as_file_name
-from vllm.utils.torch_utils import direct_register_custom_op
+from vllm.utils.torch_utils import direct_register_custom_op, vllm_ops
 
 logger = init_logger(__name__)
 
@@ -1754,7 +1754,7 @@ def fused_experts(
     if quant_config is None:
         quant_config = FUSED_MOE_UNQUANTIZED_CONFIG
 
-    return torch.ops.vllm.fused_experts(
+    return vllm_ops.fused_experts(
         hidden_states=hidden_states,
         w1=w1,
         w2=w2,

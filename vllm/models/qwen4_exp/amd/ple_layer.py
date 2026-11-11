@@ -30,7 +30,7 @@ from vllm.models.common.ops.sequence_parallel import (
     sp_shard,
 )
 from vllm.utils.math_utils import round_up
-from vllm.utils.torch_utils import direct_register_custom_op
+from vllm.utils.torch_utils import direct_register_custom_op, vllm_ops
 from vllm.v1.attention.backends.registry import MambaAttentionBackendEnum
 from vllm.v1.attention.backends.short_conv_attn import (
     PleShortConvAttentionBackend,
@@ -315,7 +315,7 @@ class Qwen4ExpNGramEmbedding(nn.Module):
         ngram_ids = input_ids.new_empty(
             (input_ids.shape[0], self.ngram_heads), dtype=torch.int64
         )
-        torch.ops.vllm.qwen4_exp_amd_ple_ngram_ids(
+        vllm_ops.qwen4_exp_amd_ple_ngram_ids(
             input_ids,
             query_start_loc,
             ngram_context,
@@ -328,7 +328,7 @@ class Qwen4ExpNGramEmbedding(nn.Module):
                 (ngram_ids.shape[0], self.embedding_dim),
                 dtype=embedding.weight.dtype,
             )
-            torch.ops.vllm.qwen4_exp_amd_ple_ngram_embedding_pinned(
+            vllm_ops.qwen4_exp_amd_ple_ngram_embedding_pinned(
                 ngram_ids,
                 output,
                 self.layer_name,
@@ -338,7 +338,7 @@ class Qwen4ExpNGramEmbedding(nn.Module):
                 (ngram_ids.shape[0], self.embedding_dim),
                 dtype=embedding.params_dtype,
             )
-            torch.ops.vllm.qwen4_exp_amd_ple_ngram_embedding(
+            vllm_ops.qwen4_exp_amd_ple_ngram_embedding(
                 ngram_ids,
                 output,
                 self.layer_name,
@@ -745,7 +745,7 @@ class Qwen4ExpPLELayer(nn.Module, MambaBase):
         )
         kv, _ = self.kv_proj(embeddings)
         key, value = kv.split(self.kv_proj.output_sizes, dim=-1)
-        gated_output, conv_input = torch.ops.vllm.qwen4_exp_ple_gate(
+        gated_output, conv_input = vllm_ops.qwen4_exp_ple_gate(
             key,
             value,
             hidden_states,
@@ -762,13 +762,13 @@ class Qwen4ExpPLELayer(nn.Module, MambaBase):
             conv_input = sp_all_gather(conv_input)[: input_ids.shape[0]]
             # Metadata may omit padding tokens or all tokens during profiling.
             conv_output = torch.zeros_like(conv_input)
-            torch.ops.vllm.qwen4_exp_ple_short_conv(
+            vllm_ops.qwen4_exp_ple_short_conv(
                 conv_input, conv_output, None, self.prefix
             )
             gated_output.add_(sp_shard(conv_output))
             gated_output.add_(hidden_states)
         else:
-            torch.ops.vllm.qwen4_exp_ple_short_conv(
+            vllm_ops.qwen4_exp_ple_short_conv(
                 conv_input,
                 gated_output,
                 hidden_states,

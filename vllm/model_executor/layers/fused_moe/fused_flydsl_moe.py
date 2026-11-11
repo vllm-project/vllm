@@ -10,7 +10,7 @@ import torch
 
 from vllm.logger import init_logger
 from vllm.utils.platform_utils import get_device_name_as_file_name
-from vllm.utils.torch_utils import direct_register_custom_op
+from vllm.utils.torch_utils import direct_register_custom_op, vllm_ops
 
 logger = init_logger(__name__)
 
@@ -367,7 +367,7 @@ def fused_flydsl_moe(
         tile_k = config.get("tile_k")
         tile_n2 = config.get("tile_n2")
         tile_k2 = config.get("tile_k2")
-    return torch.ops.vllm.fused_flydsl_moe_impl(
+    return vllm_ops.fused_flydsl_moe_impl(
         hidden_states=hidden_states,
         w1=w1,
         w2=w2,

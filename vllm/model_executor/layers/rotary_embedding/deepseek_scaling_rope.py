@@ -7,6 +7,7 @@ import torch
 
 from vllm.platforms import current_platform
 from vllm.utils.flashinfer import has_flashinfer
+from vllm.utils.torch_utils import vllm_ops
 
 from .base import RotaryEmbeddingBase
 from .common import (
@@ -181,7 +182,7 @@ class DeepseekScalingRotaryEmbedding(RotaryEmbeddingBase):
         key: torch.Tensor | None = None,
         offsets: torch.Tensor | None = None,
     ) -> tuple[torch.Tensor, torch.Tensor | None]:
-        return torch.ops.vllm.xpu_ops_deepseek_scaling_rope(
+        return vllm_ops.xpu_ops_deepseek_scaling_rope(
             positions,
             query,
             key,
@@ -208,7 +209,7 @@ class DeepseekScalingRotaryEmbedding(RotaryEmbeddingBase):
         offsets: torch.Tensor | None = None,
     ) -> tuple[torch.Tensor, torch.Tensor | None]:
         if self.use_flashinfer:
-            torch.ops.vllm.flashinfer_rotary_embedding(
+            vllm_ops.flashinfer_rotary_embedding(
                 torch.add(positions, offsets) if offsets is not None else positions,
                 query,
                 key,

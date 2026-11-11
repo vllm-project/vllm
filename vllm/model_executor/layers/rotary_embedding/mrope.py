@@ -6,7 +6,7 @@ import torch
 
 from vllm.platforms import current_platform
 from vllm.triton_utils import tl, triton
-from vllm.utils.torch_utils import direct_register_custom_op
+from vllm.utils.torch_utils import direct_register_custom_op, vllm_ops
 
 from .base import RotaryEmbeddingBase
 from .yarn_scaling_rope import YaRNScalingRotaryEmbedding, yarn_get_mscale
@@ -516,7 +516,7 @@ class MRotaryEmbedding(RotaryEmbeddingBase):
             query_shape = query.shape
             key_shape = key.shape
             cos_sin_cache = self._match_cos_sin_cache_dtype(query)
-            torch.ops.vllm.mrope(
+            vllm_ops.mrope(
                 positions,
                 query,
                 key,

@@ -18,7 +18,7 @@ from typing import Any
 
 import torch
 
-from vllm.utils.torch_utils import _encode_layer_name
+from vllm.utils.torch_utils import _encode_layer_name, vllm_ops
 
 from .index import DIM, fp4_query_views, is_fp4_cache
 
@@ -66,7 +66,7 @@ class IndexerStage:
         indexer, batch = self.indexer, projected.shape[0]
         assert is_fp4_cache(indexer.k_cache.kv_cache) == self.fp4
         query, q_scale = self.query(q_fp8, batch)
-        return torch.ops.vllm.sparse_attn_indexer(
+        return vllm_ops.sparse_attn_indexer(
             projected,
             self.k_cache_name,
             indexer.k_cache.kv_cache,

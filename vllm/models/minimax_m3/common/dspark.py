@@ -45,6 +45,7 @@ from vllm.utils.torch_utils import (
     _encode_layer_name,
     _resolve_layer_name,
     direct_register_custom_op,
+    vllm_ops,
 )
 
 _CHECKPOINT_PREFIX = "language_model.model.dspark."
@@ -211,7 +212,7 @@ class MiniMaxM3DSparkAttention(DFlashQwen3Attention):
             else None
         )
         # Also stores the draft tokens' k/v, so the attention layer gets q alone.
-        torch.ops.vllm.minimax_m3_dspark_qknorm_rope_kv_insert(
+        vllm_ops.minimax_m3_dspark_qknorm_rope_kv_insert(
             qkv,
             self.q_norm.weight,
             self.k_norm.weight,

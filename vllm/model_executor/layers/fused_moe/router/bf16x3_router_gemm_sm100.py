@@ -26,7 +26,7 @@ from quack.compile_utils import make_fake_tensor
 from vllm.cute_utils import _tcgen05, simple_tma_copy
 from vllm.triton_utils import tl, triton
 from vllm.utils import math_utils
-from vllm.utils.torch_utils import direct_register_custom_op
+from vllm.utils.torch_utils import direct_register_custom_op, vllm_ops
 
 __all__ = ["bf16x3_router_gemm"]
 
@@ -642,4 +642,4 @@ direct_register_custom_op(
 
 
 def bf16x3_router_gemm(X: torch.Tensor, W: torch.Tensor) -> torch.Tensor:
-    return torch.ops.vllm.bf16x3_router_gemm(X, W)
+    return vllm_ops.bf16x3_router_gemm(X, W)

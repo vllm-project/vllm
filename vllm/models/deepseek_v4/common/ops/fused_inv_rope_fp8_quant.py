@@ -20,7 +20,7 @@ from vllm.model_executor.warmup.jit_warmup_triton_helper import (
 )
 from vllm.platforms import current_platform
 from vllm.triton_utils import tl, triton
-from vllm.utils.torch_utils import direct_register_custom_op
+from vllm.utils.torch_utils import direct_register_custom_op, vllm_ops
 
 
 def _heads_per_program(heads_per_group: int) -> int:
@@ -443,7 +443,7 @@ def fused_inv_rope_fp8_quant(
 
     # Run kernel through a custom op so inductor sees an opaque boundary.
     # It's a pytorch bug, see https://github.com/vllm-project/vllm/issues/41106
-    out_buf, scale_buf = torch.ops.vllm.fused_inv_rope_fp8_quant_kernel(
+    out_buf, scale_buf = vllm_ops.fused_inv_rope_fp8_quant_kernel(
         o,
         positions,
         cos_sin_cache,

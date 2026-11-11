@@ -48,6 +48,7 @@ from vllm.utils.torch_utils import (
     _encode_layer_name,
     _resolve_layer_name,
     direct_register_custom_op,
+    vllm_ops,
 )
 
 from .commandr import LayerNorm
@@ -564,16 +565,14 @@ class Cohere2MoeDecoderLayer(nn.Module):
 
         if self.dual_stream is not None:
             layer_name = _encode_layer_name(self.layer_name)
-            hidden_states_mlp = torch.ops.vllm.cohere2_mlp_fork(
-                hidden_states, layer_name
-            )
+            hidden_states_mlp = vllm_ops.cohere2_mlp_fork(hidden_states, layer_name)
             hidden_states_attention = self.self_attn(
                 positions=positions, hidden_states=hidden_states
             )
             # Only layers that reduce attention + MLP together keep a
             # dual_stream (see __init__), so the join can return the sum.
             parallel_block_output = tensor_model_parallel_all_reduce(
-                torch.ops.vllm.cohere2_mlp_join(
+                vllm_ops.cohere2_mlp_join(
                     hidden_states_attention, hidden_states_mlp, layer_name
                 )
             )

@@ -23,6 +23,7 @@ from vllm.model_executor.utils import replace_parameter
 from vllm.platforms import current_platform
 from vllm.scalar_type import scalar_types
 from vllm.utils.math_utils import round_up
+from vllm.utils.torch_utils import vllm_ops
 
 FP4_MARLIN_SUPPORTED_GROUP_SIZES = [16]
 
@@ -173,7 +174,7 @@ def apply_fp4_marlin_linear(
         dtype=input.dtype,
     )
 
-    output = torch.ops.vllm.marlin_gemm(
+    output = vllm_ops.marlin_gemm(
         a=reshaped_x,
         b_q_weight=weight,
         b_bias=bias,

@@ -35,7 +35,7 @@ from vllm.model_executor.warmup.jit_warmup_cutedsl_helper import (
     VllmCuTeDSLJitKernel,
 )
 from vllm.utils.platform_utils import num_compute_units
-from vllm.utils.torch_utils import direct_register_custom_op
+from vllm.utils.torch_utils import direct_register_custom_op, vllm_ops
 
 __all__ = ["bf16x3_router_gemm"]
 
@@ -632,4 +632,4 @@ direct_register_custom_op(
 
 def bf16x3_router_gemm(x: torch.Tensor, weight: torch.Tensor) -> torch.Tensor:
     """Return `x @ weight.T` in fp32 using the SM90 BF16x3 router GEMM."""
-    return torch.ops.vllm.sm90_bf16x3_router_gemm(x, weight)
+    return vllm_ops.sm90_bf16x3_router_gemm(x, weight)

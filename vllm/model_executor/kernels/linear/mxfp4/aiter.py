@@ -11,6 +11,7 @@ from vllm.model_executor.layers.quantization.utils.quant_utils import (
 )
 from vllm.model_executor.utils import replace_parameter
 from vllm.platforms import current_platform
+from vllm.utils.torch_utils import vllm_ops
 
 from .base import MxFp4LinearKernel, MxFp4LinearLayerConfig
 
@@ -244,7 +245,7 @@ class AiterMxfp4LinearKernel(MxFp4LinearKernel):
         x: torch.Tensor,
         bias: torch.Tensor | None = None,
     ) -> torch.Tensor:
-        y = torch.ops.vllm.gemm_with_dynamic_quant(
+        y = vllm_ops.gemm_with_dynamic_quant(
             x,
             layer.weight,
             layer.weight_scale,

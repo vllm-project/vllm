@@ -11,7 +11,7 @@ from vllm.platforms import current_platform
 from vllm.triton_utils import tl, triton
 from vllm.triton_utils.allocation import set_triton_allocator
 from vllm.utils.mem_utils import get_max_shared_memory_bytes
-from vllm.utils.torch_utils import async_tensor_h2d, direct_register_custom_op
+from vllm.utils.torch_utils import async_tensor_h2d, direct_register_custom_op, vllm_ops
 
 from .utils import FUSED_MOE_LORA_TWO_KERNEL_MAX_TOKENS, supports_pdl, supports_tma
 
@@ -1712,9 +1712,9 @@ try:
         mutates_args=["output"],
     )
 
-    fused_moe_lora = torch.ops.vllm.fused_moe_lora
-    fused_moe_lora_shrink = torch.ops.vllm.fused_moe_lora_shrink
-    fused_moe_lora_expand = torch.ops.vllm.fused_moe_lora_expand
+    fused_moe_lora = vllm_ops.fused_moe_lora
+    fused_moe_lora_shrink = vllm_ops.fused_moe_lora_shrink
+    fused_moe_lora_expand = vllm_ops.fused_moe_lora_expand
 
 except AttributeError:
     fused_moe_lora = _fused_moe_lora

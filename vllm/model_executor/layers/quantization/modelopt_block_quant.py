@@ -34,12 +34,10 @@ from vllm.utils.b12x import (
     get_b12x_blockscaled,
     reuse_packed_weight_storage,
 )
+from vllm.utils.torch_utils import direct_register_custom_op
 
 
-@torch.library.custom_op(
-    "vllm::modelopt_block_embedding_chunked", mutates_args=("out",)
-)
-def _modelopt_block_embedding_chunked(
+def _modelopt_block_embedding_chunked_impl(
     weight: torch.Tensor, ids: torch.Tensor, out: torch.Tensor, plan_handle: int
 ) -> None:
     from b12x.preparation.types import plan_from_handle
@@ -56,11 +54,18 @@ def _modelopt_block_embedding_chunked(
         )
 
 
-@_modelopt_block_embedding_chunked.register_fake
 def _modelopt_block_embedding_chunked_fake(
     weight: torch.Tensor, ids: torch.Tensor, out: torch.Tensor, plan_handle: int
 ) -> None:
     return None
+
+
+_modelopt_block_embedding_chunked = direct_register_custom_op(
+    op_name="modelopt_block_embedding_chunked",
+    op_func=_modelopt_block_embedding_chunked_impl,
+    mutates_args=["out"],
+    fake_impl=_modelopt_block_embedding_chunked_fake,
+)
 
 
 class ModelOptBlockQuantMoEMethod(FusedMoEMethodBase):

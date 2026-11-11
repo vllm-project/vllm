@@ -39,7 +39,7 @@ from vllm.model_executor.layers.mamba.mamba_utils import (  # noqa: E402
 from vllm.third_party.flash_linear_attention.ops.layernorm_guard import (  # noqa: E402
     rmsnorm_fn,
 )
-from vllm.utils.torch_utils import _encode_layer_name  # noqa: E402
+from vllm.utils.torch_utils import _encode_layer_name, vllm_ops  # noqa: E402
 from vllm.v1.attention.backends.gdn_attn import (  # noqa: E402
     GDNAttentionMetadata,
     GDNAttentionMetadataBuilder,
@@ -230,11 +230,11 @@ def test_fused_forward_uses_packed_entrypoint() -> None:
 
     with (
         patch.object(
-            torch.ops.vllm,
+            vllm_ops,
             "qwen_gdn_attention_core_fused_norm_packed",
             side_effect=packed_op,
         ) as packed_mock,
-        patch.object(torch.ops.vllm, "qwen_gdn_attention_core") as triton_mock,
+        patch.object(vllm_ops, "qwen_gdn_attention_core") as triton_mock,
     ):
         output = layer.forward_cuda(hidden_states)
 

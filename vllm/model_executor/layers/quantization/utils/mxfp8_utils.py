@@ -5,7 +5,7 @@ import functools
 
 import torch
 
-from vllm.utils.torch_utils import direct_register_custom_op
+from vllm.utils.torch_utils import direct_register_custom_op, vllm_ops
 
 # MXFP8 constants
 MXFP8_VALUE_DTYPE = torch.float8_e4m3fn
@@ -268,7 +268,7 @@ def mxfp8_e4m3_quantize(
     # The custom op is only needed as a Dynamo boundary.
     if not torch.compiler.is_compiling():
         return _mxfp8_e4m3_quantize_impl(x, is_sf_swizzled_layout, alignment)
-    return torch.ops.vllm.mxfp8_quantize(x, is_sf_swizzled_layout, alignment)
+    return vllm_ops.mxfp8_quantize(x, is_sf_swizzled_layout, alignment)
 
 
 def dequant_mxfp8_to_bf16(x: torch.Tensor, scales: torch.Tensor) -> torch.Tensor:
@@ -337,4 +337,4 @@ direct_register_custom_op(
 def xpu_mxfp8_quantize(
     x: torch.Tensor, dtype: torch.dtype | None = None
 ) -> tuple[torch.Tensor, torch.Tensor]:
-    return torch.ops.vllm.xpu_mxfp8_quantize(x, dtype)
+    return vllm_ops.xpu_mxfp8_quantize(x, dtype)

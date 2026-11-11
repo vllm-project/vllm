@@ -25,7 +25,7 @@ from vllm.model_executor.parameter import BasevLLMParameter, permute_param_layou
 from vllm.platforms import current_platform
 from vllm.scalar_type import scalar_types
 from vllm.triton_utils import tl, triton
-from vllm.utils.torch_utils import direct_register_custom_op
+from vllm.utils.torch_utils import direct_register_custom_op, vllm_ops
 
 from .MPLinearKernel import MPLinearKernel, MPLinearLayerConfig
 
@@ -297,7 +297,7 @@ def triton_w4a16_gemm(
     group_size: int,
     zp_bias: int = 8,
 ) -> torch.Tensor:
-    return torch.ops.vllm.triton_w4a16_gemm(a, b_q, scales, qzeros, group_size, zp_bias)
+    return vllm_ops.triton_w4a16_gemm(a, b_q, scales, qzeros, group_size, zp_bias)
 
 
 class TritonW4A16LinearKernel(MPLinearKernel):

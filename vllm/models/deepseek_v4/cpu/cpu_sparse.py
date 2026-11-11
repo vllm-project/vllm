@@ -34,6 +34,7 @@ from vllm.utils.torch_utils import (
     _encode_layer_name,
     _resolve_layer_name,
     direct_register_custom_op,
+    vllm_ops,
 )
 from vllm.v1.attention.backend import AttentionBackend, AttentionMetadata
 from vllm.v1.attention.backends.mla.sparse_swa import DeepseekSparseSWAMetadata
@@ -368,7 +369,7 @@ class DeepseekV4CPUAttention(DeepseekV4Attention):
 
         qr, qr_scale, kv = self._split_qkv_and_norm(qr_kv)
 
-        return torch.ops.vllm.deepseek_v4_cpu_prepare_and_attn(
+        return vllm_ops.deepseek_v4_cpu_prepare_and_attn(
             hidden_states,
             qr,
             kv,

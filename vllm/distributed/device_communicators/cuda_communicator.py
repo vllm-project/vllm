@@ -20,6 +20,7 @@ from vllm.distributed.device_communicators.pynccl_allocator import (
 )
 from vllm.logger import init_logger
 from vllm.platforms import current_platform
+from vllm.utils.torch_utils import vllm_ops
 
 from ..utils import StatelessProcessGroup
 from .aiter_custom_all_reduce import AiterCustomAllreduce
@@ -401,7 +402,7 @@ class CudaCommunicator(DeviceCommunicatorBase):
             and not use_fi_ar
             and should_nccl_symm_mem_allreduce(self.pynccl_comm.world_size, input_)
         ):
-            out = torch.ops.vllm.all_reduce_symmetric_with_copy(input_)
+            out = vllm_ops.all_reduce_symmetric_with_copy(input_)
             if out is not None:
                 return out
         qr_comm = self.qr_comm

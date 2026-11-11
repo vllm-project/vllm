@@ -21,7 +21,7 @@ import torch.nn as nn
 import vllm.model_executor.offloader.prefetch_ops  # noqa: F401
 from vllm.logger import init_logger
 from vllm.model_executor.offloader.base import BaseOffloader, should_pin_memory
-from vllm.utils.torch_utils import get_dtype_size
+from vllm.utils.torch_utils import get_dtype_size, vllm_ops
 
 logger = init_logger(__name__)
 
@@ -239,7 +239,7 @@ class PrefetchOffloader(BaseOffloader):
             # Wait for this layer's prefetch to complete
             # mutates_args on input_tensor creates data dependency for torch.compile
             input_tensor = args[0] if args else kwargs.get("hidden_states")
-            torch.ops.vllm.wait_prefetch(input_tensor, index)
+            vllm_ops.wait_prefetch(input_tensor, index)
 
             # No parameter swapping needed - parameters already point to
             # GPU static buffers (set in assign_static_buffer)
@@ -254,9 +254,9 @@ class PrefetchOffloader(BaseOffloader):
             )
             # Handle tuple output (e.g., (hidden_states, residual))
             if isinstance(output, tuple):
-                torch.ops.vllm.start_prefetch(output[0], next_index)
+                vllm_ops.start_prefetch(output[0], next_index)
             else:
-                torch.ops.vllm.start_prefetch(output, next_index)
+                vllm_ops.start_prefetch(output, next_index)
 
             # No explicit offload needed - static buffers are reused implicitly
 

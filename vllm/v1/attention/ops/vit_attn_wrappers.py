@@ -20,7 +20,7 @@ import torch.nn.functional as F
 from vllm._aiter_ops import rocm_aiter_ops
 from vllm.platforms import current_platform
 from vllm.utils.gpu_sync_debug import gpu_sync_allowed
-from vllm.utils.torch_utils import direct_register_custom_op
+from vllm.utils.torch_utils import direct_register_custom_op, vllm_ops
 
 
 def flash_attn_maxseqlen_wrapper(
@@ -118,7 +118,7 @@ def vit_flash_attn_wrapper(
     cu_seqlens: torch.Tensor | None = None,
     max_seqlen: torch.Tensor | None = None,
 ) -> torch.Tensor:
-    return torch.ops.vllm.flash_attn_maxseqlen_wrapper(
+    return vllm_ops.flash_attn_maxseqlen_wrapper(
         q,
         k,
         v,
@@ -230,7 +230,7 @@ def vit_triton_attn_wrapper(
     cu_seqlens: torch.Tensor | None = None,
     max_seqlen: torch.Tensor | None = None,
 ) -> torch.Tensor:
-    return torch.ops.vllm.triton_attn_wrapper(
+    return vllm_ops.triton_attn_wrapper(
         q,
         k,
         v,
@@ -328,7 +328,7 @@ def vit_torch_sdpa_wrapper(
     cu_seqlens: torch.Tensor | None = None,
     enable_gqa: bool = False,
 ) -> torch.Tensor:
-    return torch.ops.vllm.torch_sdpa_wrapper(
+    return vllm_ops.torch_sdpa_wrapper(
         q, k, v, scale, cu_seqlens, enable_gqa=enable_gqa
     )
 
@@ -448,7 +448,7 @@ def vit_flashinfer_wrapper(
     v_scale: torch.Tensor | None = None,
     o_data_type: torch.dtype | None = None,
 ) -> torch.Tensor:
-    return torch.ops.vllm.flashinfer_wrapper(
+    return vllm_ops.flashinfer_wrapper(
         q,
         k,
         v,

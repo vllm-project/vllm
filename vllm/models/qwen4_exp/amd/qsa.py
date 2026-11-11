@@ -33,6 +33,7 @@ from vllm.utils.torch_utils import (
     canonicalize_singleton_dim_strides,
     direct_register_custom_op,
     kv_cache_dtype_str_to_dtype,
+    vllm_ops,
 )
 from vllm.v1.attention.backend import (
     AttentionBackend,
@@ -634,7 +635,7 @@ class Qwen4ExpQSAAttention(Qwen3NextAttention, AttentionLayerBase):
             attn_output = qkv.new_empty(num_tokens, self.num_heads, self.head_dim)
             gate = torch.empty_like(attn_output)
             if current_platform.opaque_attention_op():
-                torch.ops.vllm.qwen4_exp_qsa_prepare_with_output(
+                vllm_ops.qwen4_exp_qsa_prepare_with_output(
                     hidden_states,
                     positions,
                     qkv,
@@ -662,7 +663,7 @@ class Qwen4ExpQSAAttention(Qwen3NextAttention, AttentionLayerBase):
         value = v.view(num_tokens, self.num_kv_heads, self.head_dim)
         attn_output = torch.empty_like(query)
         if current_platform.opaque_attention_op():
-            torch.ops.vllm.qwen4_exp_qsa_with_output(
+            vllm_ops.qwen4_exp_qsa_with_output(
                 hidden_states,
                 positions,
                 query,

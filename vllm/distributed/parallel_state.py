@@ -60,6 +60,7 @@ from vllm.utils.network_utils import get_distributed_init_method
 from vllm.utils.system_utils import suppress_stdout
 from vllm.utils.torch_utils import (
     direct_register_custom_op,
+    vllm_ops,
 )
 
 if TYPE_CHECKING:
@@ -746,7 +747,7 @@ class GroupCoordinator:
             return input_
 
         if self.use_custom_op_call:
-            return torch.ops.vllm.all_reduce(input_, group_name=self.unique_name)
+            return vllm_ops.all_reduce(input_, group_name=self.unique_name)
         else:
             return self._all_reduce_out_place(input_)
 
@@ -765,7 +766,7 @@ class GroupCoordinator:
         )
 
         if self.use_custom_op_call:
-            return torch.ops.vllm.all_gather(
+            return vllm_ops.all_gather(
                 input_, dim, world_size, group_name=self.unique_name
             )
         else:
@@ -796,7 +797,7 @@ class GroupCoordinator:
         )
 
         if self.use_custom_op_call:
-            return torch.ops.vllm.reduce_scatter(
+            return vllm_ops.reduce_scatter(
                 input_, dim, world_size, group_name=self.unique_name
             )
         else:

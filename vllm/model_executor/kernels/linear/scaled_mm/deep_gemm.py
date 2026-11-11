@@ -21,7 +21,7 @@ from vllm.utils.deep_gemm import (
     should_auto_disable_deep_gemm,
     should_use_deepgemm_for_fp8_linear,
 )
-from vllm.utils.torch_utils import direct_register_custom_op
+from vllm.utils.torch_utils import direct_register_custom_op, vllm_ops
 
 from .BlockScaledMMLinearKernel import (
     Fp8BlockScaledMMLinearKernel,
@@ -124,7 +124,7 @@ class DeepGemmFp8BlockScaledMMKernel(Fp8BlockScaledMMLinearKernel):
             dtype=out_dtype,
             device=A.device,
         )
-        torch.ops.vllm.fp8_gemm_nt_op(A, As, B, Bs, output, self.use_deep_gemm_e8m0)
+        vllm_ops.fp8_gemm_nt_op(A, As, B, Bs, output, self.use_deep_gemm_e8m0)
         return output
 
 

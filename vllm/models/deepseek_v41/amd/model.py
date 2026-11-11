@@ -79,6 +79,7 @@ from vllm.models.deepseek_v41.attention import DeepseekV4Attention
 from vllm.models.deepseek_v41.decoder_replay_layers import DecoderReplayLayers
 from vllm.sequence import IntermediateTensors
 from vllm.utils.math_utils import cdiv
+from vllm.utils.torch_utils import vllm_ops
 from vllm.v1.attention.backends.registry import AttentionBackendEnum
 from vllm.v1.worker.ubatching import dbo_current_ubatch_id
 
@@ -314,7 +315,7 @@ class DeepseekV4DecoderLayer(nn.Module):
     @staticmethod
     def _hc_collapse(x: torch.Tensor, pre_mix: torch.Tensor) -> torch.Tensor:
         """Hyper-connection collapse used by DSpark on ROCm."""
-        return torch.ops.vllm.hc_collapse_triton(x, pre_mix)
+        return vllm_ops.hc_collapse_triton(x, pre_mix)
 
     def forward(
         self,
@@ -891,7 +892,7 @@ class DeepseekV4Model(nn.Module, EagleModelMixin):
         # mixes — the mix the reference applies via
         # ``last_layer.hc_pre(h, pre_mix)`` (v4.1 has no learned hc_head).
         assert pre_mix is not None
-        hidden_states = torch.ops.vllm.hc_collapse_triton(hidden_states, pre_mix)
+        hidden_states = vllm_ops.hc_collapse_triton(hidden_states, pre_mix)
         hidden_states = self.norm(hidden_states)
         if len(aux_hidden_states) > 0:
             return hidden_states, aux_hidden_states

@@ -17,7 +17,7 @@ from vllm.lora.ops.triton_ops.utils import (
 )
 from vllm.platforms import current_platform
 from vllm.triton_utils import tl, triton
-from vllm.utils.torch_utils import direct_register_custom_op
+from vllm.utils.torch_utils import direct_register_custom_op, vllm_ops
 
 
 @triton.jit
@@ -293,7 +293,7 @@ try:
         op_func=_lora_expand,
         mutates_args=["output_tensor"],
     )
-    lora_expand = torch.ops.vllm.lora_expand
+    lora_expand = vllm_ops.lora_expand
 
 except AttributeError:
     lora_expand = _lora_expand

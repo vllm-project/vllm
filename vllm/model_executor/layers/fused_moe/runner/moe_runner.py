@@ -58,6 +58,7 @@ from vllm.utils.torch_utils import (
     _USE_LAYERNAME,
     LayerName,
     direct_register_custom_op,
+    vllm_ops,
 )
 
 logger = init_logger(__name__)
@@ -330,9 +331,9 @@ class MoERunner(MoERunnerInterface):
             return _moe_forward if self._shared_experts is None else _moe_forward_shared
 
         return (
-            torch.ops.vllm.moe_forward
+            vllm_ops.moe_forward
             if self._shared_experts is None
-            else torch.ops.vllm.moe_forward_shared
+            else vllm_ops.moe_forward_shared
         )
 
     @property

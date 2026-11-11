@@ -44,7 +44,7 @@ from vllm.model_executor.layers.sparse_attn_indexer import (
 from vllm.models.kimi_k3.common.dsa_cache import KimiK3IndexerCache
 from vllm.transformers_utils.configs.kimi_linear import KimiLinearConfig
 from vllm.triton_utils import tl, triton
-from vllm.utils.torch_utils import direct_register_custom_op
+from vllm.utils.torch_utils import direct_register_custom_op, vllm_ops
 from vllm.v1.attention.backends.mla import indexer as v32_indexer
 from vllm.v1.attention.backends.mla.indexer import DeepseekV32IndexerMetadata
 from vllm.v1.attention.ops.rocm_aiter_mla_sparse import (
@@ -557,7 +557,7 @@ class KimiK3DSAIndexer(nn.Module):
         index_v = self.wv_index(hidden_states)[0]
         if self.use_fp4:
             dcp = get_dcp_group()
-            torch.ops.vllm.kimi_fp4_indexer(
+            vllm_ops.kimi_fp4_indexer(
                 index_q,
                 index_k,
                 index_v,
@@ -578,7 +578,7 @@ class KimiK3DSAIndexer(nn.Module):
         indexer_op = self.indexer_op
         assert indexer_op is not None
         if self.dcp_scores is not None:
-            torch.ops.vllm.kimi_dcp_score_indexer(
+            vllm_ops.kimi_dcp_score_indexer(
                 hidden_states,
                 q_fp8,
                 index_k,

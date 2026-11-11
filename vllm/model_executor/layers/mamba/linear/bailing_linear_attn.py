@@ -34,6 +34,7 @@ from vllm.third_party.flash_linear_attention.ops.layernorm_guard import (
     layernorm_fn,
 )
 from vllm.triton_utils import tl, triton
+from vllm.utils.torch_utils import vllm_ops
 from vllm.v1.attention.backends.linear_attn import LinearAttentionMetadata
 
 
@@ -524,7 +525,7 @@ class BailingMoELinearAttention(LinearAttention):
         positions: torch.Tensor,
     ) -> None:
         """Forward method called by torch.ops.vllm.linear_attention."""
-        torch.ops.vllm.linear_attention(
+        vllm_ops.linear_attention(
             hidden_states,
             output,
             positions,

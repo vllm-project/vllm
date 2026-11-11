@@ -64,6 +64,7 @@ from vllm.utils.torch_utils import (
     _encode_layer_name,
     _resolve_layer_name,
     direct_register_custom_op,
+    vllm_ops,
 )
 from vllm.v1.attention.backends.mla.indexer import (
     DeepSeekV32IndexerDecodeMetadata,
@@ -870,7 +871,7 @@ def sparse_attn_indexer(
                             raise RuntimeError(
                                 "XPU fp8_mqa_logits does not support FP4 Q"
                             )
-                        logits = torch.ops.vllm.xpu_fp8_mqa_logits(
+                        logits = vllm_ops.xpu_fp8_mqa_logits(
                             q_slice_cast[rows],
                             k_quant_cast,
                             k_scale_cast,
@@ -1081,7 +1082,7 @@ def sparse_attn_indexer(
             seq_lens_xpu = (
                 seq_lens[:, -1].contiguous() if seq_lens.ndim == 2 else seq_lens
             )
-            logits = torch.ops.vllm.xpu_fp8_paged_mqa_logits(
+            logits = vllm_ops.xpu_fp8_paged_mqa_logits(
                 padded_q_quant_cast,
                 kv_cache,
                 weights[:num_padded_tokens],
@@ -1361,7 +1362,7 @@ class SparseAttnIndexer(CustomOp):
             q_values, q_scale = q_quant
         else:
             q_values, q_scale = q_quant, None
-        return torch.ops.vllm.sparse_attn_indexer(
+        return vllm_ops.sparse_attn_indexer(
             hidden_states,
             _encode_layer_name(self.k_cache.prefix),
             self.k_cache.kv_cache,
@@ -1422,7 +1423,7 @@ class SparseAttnIndexer(CustomOp):
             # by local Triton/C++ kernels and do not require the aiter package.
             or on_gfx950()
         ):
-            return torch.ops.vllm.rocm_aiter_sparse_attn_indexer(
+            return vllm_ops.rocm_aiter_sparse_attn_indexer(
                 hidden_states,
                 _encode_layer_name(self.k_cache.prefix),
                 self.k_cache.kv_cache,

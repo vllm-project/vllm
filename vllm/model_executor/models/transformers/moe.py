@@ -41,7 +41,11 @@ from vllm.model_executor.models.transformers.fusers.glu import GLUFuser
 from vllm.model_executor.models.transformers.fusers.moe import MoEBlockFuser
 from vllm.model_executor.models.utils import extract_layer_index, maybe_prefix
 from vllm.transformers_utils.config import CONFIG_FIELD_ALIASES
-from vllm.utils.torch_utils import STR_DTYPE_TO_TORCH_DTYPE, direct_register_custom_op
+from vllm.utils.torch_utils import (
+    STR_DTYPE_TO_TORCH_DTYPE,
+    direct_register_custom_op,
+    vllm_ops,
+)
 
 from .base import Base
 from .utils import log_replacement, maybe_per_layer
@@ -82,7 +86,7 @@ class TransformersMoERunner(MoERunner):
         We discard any extra kwargs because we cannot use them here."""
         # Note: we need to forward through a custom op so the topk_ids
         # can be transferred without interfering with cudagraphs.
-        return torch.ops.vllm.transformers_moe_forward(
+        return vllm_ops.transformers_moe_forward(
             hidden_states,
             topk_ids.to(torch.int32),
             topk_weights.to(torch.float32),

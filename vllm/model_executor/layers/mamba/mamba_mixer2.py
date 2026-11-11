@@ -69,6 +69,7 @@ from vllm.utils.torch_utils import (
     _encode_layer_name,
     _resolve_layer_name,
     direct_register_custom_op,
+    vllm_ops,
 )
 from vllm.v1.attention.backend import AttentionMetadata
 from vllm.v1.attention.backends.mamba2_attn import Mamba2AttentionMetadata
@@ -623,7 +624,7 @@ class MambaMixer2(MambaBase, PluggableLayer):
         # 3. conv + SSM
         # (split `projected_states` into hidden_states_B_C, dt in the custom op to
         # ensure it is not treated as an intermediate tensor by torch compile)
-        torch.ops.vllm.mamba_mixer2(
+        vllm_ops.mamba_mixer2(
             projected_states,
             ssm_output,
             _encode_layer_name(self.prefix),

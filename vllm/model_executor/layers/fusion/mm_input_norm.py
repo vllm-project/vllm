@@ -27,6 +27,7 @@ from vllm.config import ModelConfig
 from vllm.model_executor.custom_op import CustomOp
 from vllm.transformers_utils.processor import get_processor_config
 from vllm.triton_utils import tl, triton
+from vllm.utils.torch_utils import vllm_ops
 
 
 @triton.jit
@@ -380,7 +381,7 @@ class FusedMMInputNorm(CustomOp):
         # For uint8 input, falls to xpu_fused_input_norm from xpu kernels
         import vllm._xpu_ops  # noqa: F401
 
-        return torch.ops.vllm.xpu_fused_input_norm(
+        return vllm_ops.xpu_fused_input_norm(
             pixel_values, self.weight, self.bias, visual_dtype
         )
 

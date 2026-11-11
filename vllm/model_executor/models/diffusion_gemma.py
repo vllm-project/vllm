@@ -62,7 +62,7 @@ from vllm.multimodal import MULTIMODAL_REGISTRY
 from vllm.platforms import current_platform
 from vllm.sampling_params import MAX_LOGPROB_TOKEN_IDS
 from vllm.utils.gpu_sync_debug import gpu_sync_allowed
-from vllm.utils.torch_utils import async_tensor_h2d
+from vllm.utils.torch_utils import async_tensor_h2d, vllm_ops
 from vllm.v1.outputs import LogprobsTensors
 from vllm.v1.sample.ops.topk_topp_sampler import apply_top_k_top_p
 from vllm.v1.worker.gpu.attn_utils import build_attn_metadata
@@ -642,9 +642,7 @@ def _compiled_sample_step(
             local_probs, embed_weight[: sc_vocab_end - sc_vocab_start]
         )
         if tp_size > 1:
-            soft_embeds = torch.ops.vllm.all_reduce(
-                soft_embeds, group_name=tp_group_name
-            )
+            soft_embeds = vllm_ops.all_reduce(soft_embeds, group_name=tp_group_name)
         soft_embeds = soft_embeds * normalizer
         # A pinned position holds its seed token as input. Zero its soft embed
         # too, or the model's own prediction there reaches the next step

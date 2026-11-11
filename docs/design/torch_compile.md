@@ -178,6 +178,8 @@ Most of the inputs to the computation graph has static shape, since they are mod
 
 The attention operation is complicated, and it needs to interact with kv caches, with complicated shapes. Fortunately, the output of the attention operation just share the same shape as the input query of the attention operation. Therefore, we wrap the whole attention operation into a PyTorch custom op `torch.ops.vllm.unified_attention_with_output`, so that Dynamo will not try to inspect any of the internal operations. This way, although attention operation is complicated, we can still capture the model's computation graph as a full-graph, from Dynamo's perspective.
 
+Such ops are registered with `direct_register_custom_op` and called through the handle it returns, or `vllm_ops.<name>` from `vllm.utils.torch_utils`, rather than `torch.ops.vllm.<name>`. The handle emits the custom op only while tracing (Dynamo, `make_fx`, fake tensors) and otherwise calls the implementation directly, so eager execution does not pay the PyTorch dispatcher overhead. vLLM IR ops follow the same rule.
+
 The computation graph is further split into pieces, by the `splitting_ops` (usually this is the attention operation). Therefore, in the `~/.cache/vllm/torch_compile_cache/1517964802/rank_0_0/computation_graph.py` file, we can see lots of submodules, each submodule is a piece of graph after splitting:
 
 - Attention operation itself is a submodule.

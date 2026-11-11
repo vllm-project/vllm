@@ -13,7 +13,7 @@ from vllm.logger import init_logger
 from vllm.model_executor.custom_op import CustomOp
 from vllm.model_executor.determinism.batch_invariant import rms_norm_batch_invariant
 from vllm.model_executor.utils import set_weight_attrs
-from vllm.utils.torch_utils import direct_register_custom_op
+from vllm.utils.torch_utils import direct_register_custom_op, vllm_ops
 
 logger = init_logger(__name__)
 
@@ -204,16 +204,14 @@ class GemmaRMSNorm(CustomOp):
         # Pass the raw (bf16/fp16) weight; the +1 offset and the fp32 multiply
         # are folded into the kernel (matches forward_native numerics).
         if residual is not None:
-            torch.ops.vllm.xpu_fused_add_gemma_rms_norm(
+            vllm_ops.xpu_fused_add_gemma_rms_norm(
                 x, residual, self.weight.data, self.variance_epsilon
             )
             return x, residual
         # empty_like preserves x's strides, but the kernel requires a
         # contiguous out (unlike x, which it can handle non-contiguous).
         out = torch.empty(x.shape, device=x.device, dtype=x.dtype)
-        torch.ops.vllm.xpu_gemma_rms_norm(
-            out, x, self.weight.data, self.variance_epsilon
-        )
+        vllm_ops.xpu_gemma_rms_norm(out, x, self.weight.data, self.variance_epsilon)
         return out
 
 
@@ -285,7 +283,7 @@ class LayerNorm(CustomOp):
         # empty_like preserves x's strides, but the kernel requires a
         # contiguous out (unlike x, which it can handle non-contiguous).
         out = torch.empty(x.shape, device=x.device, dtype=x.dtype)
-        torch.ops.vllm.xpu_layer_norm(out, x, self.weight, self.bias, self.eps)
+        vllm_ops.xpu_layer_norm(out, x, self.weight, self.bias, self.eps)
         return out
 
     def extra_repr(self) -> str:
@@ -413,7 +411,7 @@ class RMSNormGated(CustomOp):
     def forward_cuda(
         self, x: torch.Tensor, z: torch.Tensor | None = None
     ) -> torch.Tensor:
-        return torch.ops.vllm.fla_rms_norm_gated(
+        return vllm_ops.fla_rms_norm_gated(
             x,
             z,
             self.weight,

@@ -18,7 +18,7 @@ from vllm.forward_context import get_forward_context
 from vllm.logger import init_logger
 from vllm.platforms import current_platform
 from vllm.triton_utils import tl, triton
-from vllm.utils.torch_utils import LayerNameType, direct_register_custom_op
+from vllm.utils.torch_utils import LayerNameType, direct_register_custom_op, vllm_ops
 from vllm.v1.attention.backends.mla.indexer import DeepseekV32IndexerMetadata
 from vllm.v1.attention.ops.common import pack_seq_triton, unpack_seq_triton
 from vllm.v1.attention.ops.pcp import maybe_gather_indexer_k
@@ -2183,7 +2183,7 @@ def rocm_mxfp8_wo_a_bmm(
     scales, so there is no dequantized copy to keep.
     Returns [T, G * R].
     """
-    return torch.ops.vllm.rocm_dsv41_mxfp8_wo_a_bmm(
+    return vllm_ops.rocm_dsv41_mxfp8_wo_a_bmm(
         a, a_scale, wo_a.weight, wo_a.weight_scale, n_groups, o_lora_rank
     )
 

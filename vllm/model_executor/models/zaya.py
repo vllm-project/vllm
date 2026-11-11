@@ -33,7 +33,7 @@ from vllm.model_executor.layers.vocab_parallel_embedding import (
 from vllm.model_executor.model_loader.weight_utils import default_weight_loader
 from vllm.model_executor.models.interfaces import HasInnerState, IsHybrid
 from vllm.model_executor.models.utils import maybe_prefix, sequence_parallel_chunk
-from vllm.utils.torch_utils import direct_register_custom_op
+from vllm.utils.torch_utils import direct_register_custom_op, vllm_ops
 from vllm.v1.attention.backends.registry import MambaAttentionBackendEnum
 from vllm.v1.attention.backends.short_conv_attn import ShortConvAttentionMetadata
 from vllm.v1.attention.backends.utils import NULL_BLOCK_ID
@@ -108,7 +108,7 @@ class ZayaCCA(MambaBase, nn.Module):
         self.kv_cache = (torch.tensor([]), torch.tensor([]))
 
     def forward(self, hidden_states: torch.Tensor, output: torch.Tensor) -> None:
-        torch.ops.vllm.zaya_cca(hidden_states, output, self.prefix)
+        vllm_ops.zaya_cca(hidden_states, output, self.prefix)
 
     def _conv(self, qk: torch.Tensor) -> torch.Tensor:
         return self.conv_qk_grouped(self.conv_qk_depthwise(qk))

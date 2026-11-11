@@ -55,7 +55,7 @@ from vllm.model_executor.layers.quantization.utils.mxfp8_utils import (
     mxfp8_e4m3_quantize,
 )
 from vllm.triton_utils import tl, triton
-from vllm.utils.torch_utils import direct_register_custom_op
+from vllm.utils.torch_utils import direct_register_custom_op, vllm_ops
 
 logger = init_logger(__name__)
 
@@ -928,9 +928,7 @@ def rocm_mxfp8_block32_gemm(
         The [M, N] product.
 
     """
-    return torch.ops.vllm.rocm_mxfp8_block32_gemm(
-        x, x_scale, weight, weight_scale, out_dtype
-    )
+    return vllm_ops.rocm_mxfp8_block32_gemm(x, x_scale, weight, weight_scale, out_dtype)
 
 
 # --- tiny-M fused quant+GEMM ------------------------------------------------
@@ -1038,6 +1036,4 @@ def rocm_mxfp8_block32_gemm_quant(
     [N / 32, K / 32]. Tiny-M batches quantize inside the packed GEMM (see
     `_rocm_mxfp8_block32_gemm_quant_impl`).
     """
-    return torch.ops.vllm.rocm_mxfp8_block32_gemm_quant(
-        x, weight, weight_scale, out_dtype
-    )
+    return vllm_ops.rocm_mxfp8_block32_gemm_quant(x, weight, weight_scale, out_dtype)

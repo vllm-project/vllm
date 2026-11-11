@@ -16,7 +16,7 @@ from vllm.distributed.parallel_state import (
 from vllm.logger import init_logger
 from vllm.model_executor.custom_op import CustomOp
 from vllm.triton_utils import HAS_TRITON, tl, triton
-from vllm.utils.torch_utils import direct_register_custom_op
+from vllm.utils.torch_utils import direct_register_custom_op, vllm_ops
 
 logger = init_logger(__name__)
 
@@ -406,7 +406,7 @@ class MiniMaxText01RMSNormTP(CustomOp):
             q, k = MiniMaxText01RMSNormTP.forward_qk(q_norm, k_norm, q, k)
             return q, k, v
         # Case : tp_size>1
-        q, k = torch.ops.vllm.minimax_qk_norm_fusion(
+        q, k = vllm_ops.minimax_qk_norm_fusion(
             qkv,
             q_norm.weight,
             k_norm.weight,

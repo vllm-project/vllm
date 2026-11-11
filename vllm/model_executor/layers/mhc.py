@@ -11,6 +11,7 @@ from vllm._aiter_ops import is_aiter_found_and_supported
 from vllm.model_executor.custom_op import CustomOp
 from vllm.platforms import current_platform
 from vllm.utils.import_utils import has_tilelang
+from vllm.utils.torch_utils import vllm_ops
 
 
 def _has_tilelang_mhc() -> bool:
@@ -134,7 +135,7 @@ class MHCPreOp(CustomOp):
         norm_weight: torch.Tensor | None = None,
         norm_eps: float = 0.0,
     ) -> tuple[torch.Tensor, torch.Tensor, torch.Tensor]:
-        return torch.ops.vllm.mhc_pre_tilelang(
+        return vllm_ops.mhc_pre_tilelang(
             residual,
             fn,
             hc_scale,
@@ -169,7 +170,7 @@ class MHCPreOp(CustomOp):
             norm_weight,
             supports_norm=HAS_AITER_MHC_PRE_NORM,
         ):
-            return torch.ops.vllm.mhc_pre_aiter(
+            return vllm_ops.mhc_pre_aiter(
                 residual,
                 fn,
                 hc_scale,
@@ -184,7 +185,7 @@ class MHCPreOp(CustomOp):
                 norm_eps,
             )
         elif HAS_TILELANG_MHC:
-            return torch.ops.vllm.mhc_pre_tilelang(
+            return vllm_ops.mhc_pre_tilelang(
                 residual,
                 fn,
                 hc_scale,
@@ -365,7 +366,7 @@ class MHCPreDelayedOp(CustomOp):
         residual = self._maybe_post(
             residual, sublayer_out, post_layer_mix, comb_res_mix
         )
-        return residual, *torch.ops.vllm.mhc_pre_delayed_tilelang(
+        return residual, *vllm_ops.mhc_pre_delayed_tilelang(
             residual,
             fn,
             hc_scale,
@@ -412,7 +413,7 @@ class MHCPreDelayedOp(CustomOp):
             residual_out = (
                 torch.empty_like(residual) if sublayer_out is not None else None
             )
-            rest = torch.ops.vllm.mhc_fused_post_pre_delayed_rms_norm_aiter(
+            rest = vllm_ops.mhc_fused_post_pre_delayed_rms_norm_aiter(
                 residual,
                 fn,
                 hc_scale,
@@ -460,7 +461,7 @@ class MHCPreDelayedOp(CustomOp):
             residual_out = (
                 torch.empty_like(residual) if sublayer_out is not None else None
             )
-            rest = torch.ops.vllm.mhc_pre_delayed_aiter(
+            rest = vllm_ops.mhc_pre_delayed_aiter(
                 residual,
                 fn,
                 hc_scale,
@@ -481,7 +482,7 @@ class MHCPreDelayedOp(CustomOp):
             residual, sublayer_out, post_layer_mix, comb_res_mix
         )
         if HAS_TILELANG_MHC:
-            return residual, *torch.ops.vllm.mhc_pre_delayed_tilelang(
+            return residual, *vllm_ops.mhc_pre_delayed_tilelang(
                 residual,
                 fn,
                 hc_scale,
@@ -581,9 +582,7 @@ class MHCPostOp(CustomOp):
         post_layer_mix: torch.Tensor,
         comb_res_mix: torch.Tensor,
     ) -> torch.Tensor:
-        return torch.ops.vllm.mhc_post_tilelang(
-            x, residual, post_layer_mix, comb_res_mix
-        )
+        return vllm_ops.mhc_post_tilelang(x, residual, post_layer_mix, comb_res_mix)
 
     def forward_hip(
         self,
@@ -593,16 +592,14 @@ class MHCPostOp(CustomOp):
         comb_res_mix: torch.Tensor,
     ) -> torch.Tensor:
         if _aiter_mhc_supported(residual, None, supports_norm=True):
-            return torch.ops.vllm.mhc_post_aiter(
+            return vllm_ops.mhc_post_aiter(
                 x,
                 residual,
                 post_layer_mix,
                 comb_res_mix,
             )
         if HAS_TILELANG_MHC:
-            return torch.ops.vllm.mhc_post_tilelang(
-                x, residual, post_layer_mix, comb_res_mix
-            )
+            return vllm_ops.mhc_post_tilelang(x, residual, post_layer_mix, comb_res_mix)
         else:
             return self.forward_native(x, residual, post_layer_mix, comb_res_mix)
 
@@ -671,7 +668,7 @@ class HCHeadOp(CustomOp):
         hc_mult, hidden_size = hidden_states.shape[-2:]
         outer_shape = hidden_states.shape[:-2]
         hs_flat = hidden_states.view(-1, hc_mult, hidden_size)
-        out = torch.ops.vllm.hc_head_fused_kernel_tilelang(
+        out = vllm_ops.hc_head_fused_kernel_tilelang(
             hs_flat,
             hc_fn,
             hc_scale,
@@ -695,7 +692,7 @@ class HCHeadOp(CustomOp):
         hs_flat = hidden_states.view(-1, hc_mult, hidden_size)
 
         if HAS_TILELANG_MHC:
-            out = torch.ops.vllm.hc_head_fused_kernel_tilelang(
+            out = vllm_ops.hc_head_fused_kernel_tilelang(
                 hs_flat,
                 hc_fn,
                 hc_scale,
@@ -711,7 +708,7 @@ class HCHeadOp(CustomOp):
                 dtype=torch.bfloat16,
                 device=hidden_states.device,
             )
-            torch.ops.vllm.hc_head_triton(
+            vllm_ops.hc_head_triton(
                 hs_flat,
                 hc_fn,
                 hc_scale,
@@ -798,7 +795,7 @@ class MHCFusedPostPreOp(CustomOp):
         norm_weight: torch.Tensor | None = None,
         norm_eps: float = 0.0,
     ) -> tuple[torch.Tensor, torch.Tensor, torch.Tensor, torch.Tensor]:
-        return torch.ops.vllm.mhc_fused_post_pre_tilelang(
+        return vllm_ops.mhc_fused_post_pre_tilelang(
             x,
             residual,
             post_layer_mix,
@@ -841,7 +838,7 @@ class MHCFusedPostPreOp(CustomOp):
             norm_weight,
             supports_norm=HAS_AITER_MHC_FUSED_NORM,
         ):
-            return torch.ops.vllm.mhc_fused_post_pre_aiter(
+            return vllm_ops.mhc_fused_post_pre_aiter(
                 x,
                 residual,
                 post_layer_mix,
@@ -860,7 +857,7 @@ class MHCFusedPostPreOp(CustomOp):
                 norm_eps,
             )
         if HAS_TILELANG_MHC:
-            return torch.ops.vllm.mhc_fused_post_pre_tilelang(
+            return vllm_ops.mhc_fused_post_pre_tilelang(
                 x,
                 residual,
                 post_layer_mix,

@@ -37,6 +37,7 @@ from vllm.utils.torch_utils import (
     _resolve_layer_name,
     direct_register_custom_op,
     kv_cache_dtype_str_to_dtype,
+    vllm_ops,
 )
 from vllm.v1.attention.backend import (
     AttentionBackend,
@@ -596,10 +597,10 @@ class Attention(nn.Module, AttentionLayerBase):
                 and key is not None
                 and value is not None
             ):
-                kv_cache_dummy_dep = torch.ops.vllm.unified_kv_cache_update(
+                kv_cache_dummy_dep = vllm_ops.unified_kv_cache_update(
                     key, value, encoded
                 )
-            torch.ops.vllm.unified_attention_with_output(
+            vllm_ops.unified_attention_with_output(
                 query,
                 key,
                 value,

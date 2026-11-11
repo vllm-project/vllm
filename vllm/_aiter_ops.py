@@ -16,7 +16,7 @@ import vllm.envs as envs
 from vllm import _custom_ops as ops
 from vllm.logger import init_logger
 from vllm.platforms import current_platform
-from vllm.utils.torch_utils import async_tensor_h2d, direct_register_custom_op
+from vllm.utils.torch_utils import async_tensor_h2d, direct_register_custom_op, vllm_ops
 from vllm.v1.attention.ops.rocm_aiter_mla_sparse import (
     rocm_aiter_sparse_attn_indexer,
     rocm_aiter_sparse_attn_indexer_fake,
@@ -2047,7 +2047,7 @@ def _mhc_delayed_pre_tail(
             sinkhorn_repeat,
         )
 
-    next_pre_mix = torch.ops.vllm.mhc_pre_mix_triton(
+    next_pre_mix = vllm_ops.mhc_pre_mix_triton(
         gemm_out,
         sqrsum,
         hc_scale,
@@ -2061,7 +2061,7 @@ def _mhc_delayed_pre_tail(
         # Model entry selects residual stream zero.
         layer_input = residual[:, 0]
     else:
-        layer_input = torch.ops.vllm.hc_collapse_triton(residual, pre_mix)
+        layer_input = vllm_ops.hc_collapse_triton(residual, pre_mix)
     return post_mix, comb_mix, layer_input, next_pre_mix
 
 
@@ -3483,7 +3483,7 @@ class rocm_aiter_ops:
         transpose_scale: bool = False,
     ) -> tuple[torch.Tensor, torch.Tensor, torch.Tensor]:
         """Fused q/kv RMSNorm + per-1x128 FP8 group quant on q via AITER."""
-        return torch.ops.vllm.fused_mla_dual_rms_norm_group_quant(
+        return vllm_ops.fused_mla_dual_rms_norm_group_quant(
             q,
             q_weight,
             kv,
@@ -3536,7 +3536,7 @@ class rocm_aiter_ops:
         bias: torch.Tensor | None = None,
         output_dtype: torch.dtype = torch.float16,
     ) -> torch.Tensor:
-        return torch.ops.vllm.rocm_aiter_w8a8_gemm(A, B, As, Bs, bias, output_dtype)
+        return vllm_ops.rocm_aiter_w8a8_gemm(A, B, As, Bs, bias, output_dtype)
 
     @staticmethod
     def preshuffled_per_token_w8a8_gemm(
@@ -3547,7 +3547,7 @@ class rocm_aiter_ops:
         bias: torch.Tensor | None = None,
         output_dtype: torch.dtype = torch.float16,
     ) -> torch.Tensor:
-        return torch.ops.vllm._rocm_aiter_preshuffled_per_token_w8a8_gemm(
+        return vllm_ops._rocm_aiter_preshuffled_per_token_w8a8_gemm(
             A, B, As, Bs, bias, output_dtype
         )
 
@@ -3560,7 +3560,7 @@ class rocm_aiter_ops:
         bias: torch.Tensor | None = None,
         output_dtype: torch.dtype = torch.bfloat16,
     ) -> torch.Tensor:
-        return torch.ops.vllm.rocm_aiter_hipb_mm_fp8(A, B, As, Bs, bias, output_dtype)
+        return vllm_ops.rocm_aiter_hipb_mm_fp8(A, B, As, Bs, bias, output_dtype)
 
     @staticmethod
     def triton_gemm_a8w8_blockscale(
@@ -3571,7 +3571,7 @@ class rocm_aiter_ops:
         block_size: list[int],
         output_dtype: torch.dtype = torch.float16,
     ) -> torch.Tensor:
-        return torch.ops.vllm.rocm_aiter_triton_gemm_a8w8_blockscale(
+        return vllm_ops.rocm_aiter_triton_gemm_a8w8_blockscale(
             A, B, As, Bs, output_dtype
         )
 
@@ -3584,7 +3584,7 @@ class rocm_aiter_ops:
         block_size: list[int],
         output_dtype: torch.dtype = torch.bfloat16,
     ) -> torch.Tensor:
-        return torch.ops.vllm.rocm_aiter_triton_gemm_a8w8_blockscale_preshuffle(
+        return vllm_ops.rocm_aiter_triton_gemm_a8w8_blockscale_preshuffle(
             A, B, As, Bs, output_dtype
         )
 
@@ -3597,9 +3597,7 @@ class rocm_aiter_ops:
         block_size: list[int],
         output_dtype: torch.dtype = torch.float16,
     ) -> torch.Tensor:
-        return torch.ops.vllm.rocm_aiter_gemm_a8w8_blockscale(
-            A, B, As, Bs, output_dtype
-        )
+        return vllm_ops.rocm_aiter_gemm_a8w8_blockscale(A, B, As, Bs, output_dtype)
 
     @staticmethod
     def gemm_a8w8_blockscale_bpreshuffle(
@@ -3609,7 +3607,7 @@ class rocm_aiter_ops:
         Bs: torch.Tensor,
         output_dtype: torch.dtype = torch.float16,
     ) -> torch.Tensor:
-        return torch.ops.vllm.rocm_aiter_gemm_a8w8_blockscale_bpreshuffle(
+        return vllm_ops.rocm_aiter_gemm_a8w8_blockscale_bpreshuffle(
             A, B, As, Bs, output_dtype
         )
 
@@ -3646,7 +3644,7 @@ class rocm_aiter_ops:
         shared_expert_id: int = -1,
         q_dtype_a: torch.dtype | None = None,
     ) -> torch.Tensor:
-        return torch.ops.vllm.rocm_aiter_fused_moe(
+        return vllm_ops.rocm_aiter_fused_moe(
             hidden_states,
             w1,
             w2,
@@ -3695,7 +3693,7 @@ class rocm_aiter_ops:
         expert_mask: torch.Tensor | None = None,
         activation_method: int = 0,
     ) -> torch.Tensor:
-        return torch.ops.vllm.rocm_aiter_asm_moe_tkw1(
+        return vllm_ops.rocm_aiter_asm_moe_tkw1(
             hidden_states,
             w1,
             w2,
@@ -3721,7 +3719,7 @@ class rocm_aiter_ops:
         num_shared_experts: int = 0,
         shared_expert_scoring_func: str = "",
     ) -> tuple[torch.Tensor, ...]:
-        torch.ops.vllm.rocm_aiter_topk_softmax(
+        vllm_ops.rocm_aiter_topk_softmax(
             topk_weights,
             topk_indices,
             token_expert_indices,
@@ -3743,7 +3741,7 @@ class rocm_aiter_ops:
         shared_expert_scoring_func: str = "",
         score_func: str = "softmax",
     ) -> tuple[torch.Tensor, ...]:
-        torch.ops.vllm.rocm_aiter_topk_gating(
+        vllm_ops.rocm_aiter_topk_gating(
             topk_weights,
             topk_indices,
             token_expert_indices,
@@ -3806,7 +3804,7 @@ class rocm_aiter_ops:
                 routed_scaling_factor,
             )
             return
-        torch.ops.vllm.rocm_aiter_biased_grouped_topk(
+        vllm_ops.rocm_aiter_biased_grouped_topk(
             gating_output,
             correction_bias,
             topk_weights,
@@ -3828,7 +3826,7 @@ class rocm_aiter_ops:
         scoring_func: str = "softmax",
         routed_scaling_factor: float = 1.0,
     ) -> None:
-        torch.ops.vllm.rocm_aiter_grouped_topk(
+        vllm_ops.rocm_aiter_grouped_topk(
             gating_output,
             topk_weights,
             topk_ids,
@@ -3846,7 +3844,7 @@ class rocm_aiter_ops:
         top_k: int,
         gate_up: bool,
     ) -> tuple[torch.Tensor, torch.Tensor]:
-        return torch.ops.vllm.rocm_aiter_fused_topk(x, router_logits, top_k, gate_up)
+        return vllm_ops.rocm_aiter_fused_topk(x, router_logits, top_k, gate_up)
 
     @staticmethod
     def triton_sparse_mla_fwd(
@@ -3919,7 +3917,7 @@ class rocm_aiter_ops:
         k: torch.Tensor,
         v: torch.Tensor,
     ) -> None:
-        torch.ops.vllm.rocm_aiter_gather_kv_b_proj(
+        vllm_ops.rocm_aiter_gather_kv_b_proj(
             kv_cache, kv_scale, kv_indptr, kv_indices, cu_seq_lens, weight, k, v
         )
 
@@ -3945,7 +3943,7 @@ class rocm_aiter_ops:
         reduce_partial_map: torch.Tensor | None = None,
         causal: bool = True,
     ):
-        torch.ops.vllm.rocm_aiter_mla_decode_fwd(
+        vllm_ops.rocm_aiter_mla_decode_fwd(
             q,
             kv_buffer.view(-1, 1, 1, q.shape[-1]),
             o,
@@ -3983,7 +3981,7 @@ class rocm_aiter_ops:
         kv_scale: torch.Tensor | None = None,
     ) -> torch.Tensor:
         """Run MLA decode without persistent metadata and return its LSE."""
-        return torch.ops.vllm.rocm_aiter_mla_decode_fwd_lse(
+        return vllm_ops.rocm_aiter_mla_decode_fwd_lse(
             q,
             kv_buffer.view(-1, 1, 1, q.shape[-1]),
             o,
@@ -4008,7 +4006,7 @@ class rocm_aiter_ops:
         is_dynamic = scale is None
         if is_dynamic:
             scale = torch.empty(1, dtype=torch.float32, device=x.device)
-        torch.ops.vllm.rocm_aiter_per_tensor_quant(out, x, scale, is_dynamic)
+        vllm_ops.rocm_aiter_per_tensor_quant(out, x, scale, is_dynamic)
         return out, scale
 
     @staticmethod
@@ -4017,7 +4015,7 @@ class rocm_aiter_ops:
         quant_dtype: torch.dtype,
         scale: torch.Tensor | None = None,
     ) -> tuple[torch.Tensor, torch.Tensor]:
-        return torch.ops.vllm.rocm_aiter_per_token_quant(x, quant_dtype, scale)
+        return vllm_ops.rocm_aiter_per_token_quant(x, quant_dtype, scale)
 
     @staticmethod
     def gemm_a8wfp4(
@@ -4027,9 +4025,7 @@ class rocm_aiter_ops:
         w_scales: torch.Tensor,
         out_dtype: torch.dtype,
     ) -> torch.Tensor:
-        return torch.ops.vllm.rocm_aiter_gemm_a8wfp4(
-            x, w, x_scales, w_scales, out_dtype
-        )
+        return vllm_ops.rocm_aiter_gemm_a8wfp4(x, w, x_scales, w_scales, out_dtype)
 
     @staticmethod
     def triton_fp4_gemm_dynamic_quant(
@@ -4484,7 +4480,7 @@ class rocm_aiter_ops:
         transpose_scale: bool = False,
     ) -> tuple[torch.Tensor, torch.Tensor]:
         assert group_size == 128, "Group size must be 128"
-        return torch.ops.vllm.rocm_aiter_group_fp8_quant(
+        return vllm_ops.rocm_aiter_group_fp8_quant(
             input_2d, group_size, transpose_scale
         )
 
@@ -4742,7 +4738,7 @@ class rocm_aiter_ops:
         cu_seqlens: torch.Tensor | None = None,
         max_seqlen: torch.Tensor | None = None,
     ) -> torch.Tensor:
-        return torch.ops.vllm.aiter_fp8_attn_wrapper(
+        return vllm_ops.aiter_fp8_attn_wrapper(
             q,
             k,
             v,

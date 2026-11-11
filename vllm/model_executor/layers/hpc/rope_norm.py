@@ -18,7 +18,7 @@ from vllm.forward_context import ForwardContext, get_forward_context
 from vllm.logger import init_logger
 from vllm.model_executor.custom_op import CustomOp
 from vllm.model_executor.layers.hpc.hpc_module import HpcModule
-from vllm.utils.torch_utils import direct_register_custom_op
+from vllm.utils.torch_utils import direct_register_custom_op, vllm_ops
 from vllm.v1.attention.backends.hpc_attn import HpcAttnMetadata
 from vllm.v1.attention.backends.registry import AttentionBackendEnum
 from vllm.v1.attention.backends.utils import NULL_BLOCK_ID
@@ -237,7 +237,7 @@ class HpcRopeNorm(CustomOp, HpcModule):
             device=qkv.device,
         )
 
-        torch.ops.vllm.hpc_rope_norm_forward(qkv, output, layer_name)
+        vllm_ops.hpc_rope_norm_forward(qkv, output, layer_name)
         return output
 
     def _kv_write_scratch(self, cache: torch.Tensor) -> torch.Tensor:

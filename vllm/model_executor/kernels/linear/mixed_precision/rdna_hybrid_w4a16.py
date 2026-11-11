@@ -35,7 +35,7 @@ from vllm.scalar_type import scalar_types
 from vllm.triton_utils import tl, triton
 from vllm.utils.mem_constants import GiB_bytes
 from vllm.utils.mem_utils import MemorySnapshot
-from vllm.utils.torch_utils import direct_register_custom_op
+from vllm.utils.torch_utils import direct_register_custom_op, vllm_ops
 
 from .MPLinearKernel import MPLinearKernel, MPLinearLayerConfig
 
@@ -876,7 +876,7 @@ class RDNAHybridW4A16LinearKernel(MPLinearKernel):
         out_shape = x.shape[:-1] + (N,)
 
         cu_count = num_compute_units()
-        output = torch.ops.vllm.rdna_hybrid_w4a16_apply(
+        output = vllm_ops.rdna_hybrid_w4a16_apply(
             x_2d,
             w_q,
             w_s,

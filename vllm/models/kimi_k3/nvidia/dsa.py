@@ -65,7 +65,7 @@ from vllm.models.kimi_k3.nvidia.ops.dsa_indexer_mxfp4 import (
 from vllm.platforms import current_platform
 from vllm.transformers_utils.configs.kimi_linear import KimiLinearConfig
 from vllm.utils.multi_stream_utils import maybe_execute_in_parallel
-from vllm.utils.torch_utils import _encode_layer_name
+from vllm.utils.torch_utils import _encode_layer_name, vllm_ops
 from vllm.v1.attention.backends.mla import indexer as v32_indexer
 from vllm.v1.attention.backends.mla.index_group import (
     SparseMLAIndexGroupBuilder,
@@ -385,7 +385,7 @@ class KimiK3DSAIndexer(nn.Module):
         # under a dummy run kv_cache is an empty placeholder and the op takes
         # the workspace-reservation path internally, so kv_cache[0] indexing
         # is not allowed here).
-        return torch.ops.vllm.sparse_attn_indexer(
+        return vllm_ops.sparse_attn_indexer(
             hidden_states,
             _encode_layer_name(self.k_cache.prefix),
             self.k_cache.kv_cache,
@@ -839,7 +839,7 @@ class KimiK3DSAAttention(nn.Module):
             dtype=hidden_states.dtype,
             device=hidden_states.device,
         )
-        torch.ops.vllm.unified_mla_attention_with_output(
+        vllm_ops.unified_mla_attention_with_output(
             q,
             kv_c_normed,
             k_pe.unsqueeze(1),

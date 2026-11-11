@@ -48,7 +48,7 @@ from vllm.models.deepseek_v41.nvidia.ops.mega_mhc import (
 )
 from vllm.models.deepseek_v41.nvidia.ops.mhc import hc_expand, mhc_boundary_weight
 from vllm.platforms import current_platform
-from vllm.utils.torch_utils import set_random_seed
+from vllm.utils.torch_utils import set_random_seed, vllm_ops
 
 DEVICE = current_platform.device_type
 
@@ -1762,7 +1762,7 @@ def test_mhc_pre_delayed_rocm_aiter_declines_unsupported(monkeypatch):
     args = (residual, fn, hc_scale, hc_base, 1e-6, 1e-6, 1e-6, 1.0, 20)
     op = object.__new__(MHCPreDelayedOp)
 
-    aiter_op = torch.ops.vllm.mhc_pre_delayed_aiter
+    aiter_op = vllm_ops.mhc_pre_delayed_aiter
     took_aiter = False
 
     def spy(*spy_args, **spy_kwargs):
@@ -1770,9 +1770,9 @@ def test_mhc_pre_delayed_rocm_aiter_declines_unsupported(monkeypatch):
         took_aiter = True
         return aiter_op(*spy_args, **spy_kwargs)
 
-    monkeypatch.setattr(torch.ops.vllm, "mhc_pre_delayed_aiter", spy)
+    monkeypatch.setattr(vllm_ops, "mhc_pre_delayed_aiter", spy)
 
-    fused_op = torch.ops.vllm.mhc_fused_post_pre_delayed_rms_norm_aiter
+    fused_op = vllm_ops.mhc_fused_post_pre_delayed_rms_norm_aiter
     took_fused = False
 
     def fused_spy(*spy_args, **spy_kwargs):
@@ -1781,7 +1781,7 @@ def test_mhc_pre_delayed_rocm_aiter_declines_unsupported(monkeypatch):
         return fused_op(*spy_args, **spy_kwargs)
 
     monkeypatch.setattr(
-        torch.ops.vllm, "mhc_fused_post_pre_delayed_rms_norm_aiter", fused_spy
+        vllm_ops, "mhc_fused_post_pre_delayed_rms_norm_aiter", fused_spy
     )
 
     x = residual[:, 0].contiguous()

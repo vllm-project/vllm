@@ -29,6 +29,7 @@ from vllm.sequence import IntermediateTensors
 from vllm.utils.math_utils import cdiv
 from vllm.utils.torch_utils import (
     direct_register_custom_op,
+    vllm_ops,
 )
 
 if TYPE_CHECKING:
@@ -1290,7 +1291,7 @@ def fast_topk(
 # The output tensor can have a sequence length 0 at small input sequence lengths
 # even though we explicitly pad to avoid this.
 def sequence_parallel_chunk(x: torch.Tensor) -> torch.Tensor:
-    return torch.ops.vllm.sequence_parallel_chunk_impl(x)
+    return vllm_ops.sequence_parallel_chunk_impl(x)
 
 
 def sequence_parallel_chunk_impl(x: torch.Tensor) -> torch.Tensor:

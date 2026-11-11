@@ -23,7 +23,7 @@ from vllm.model_executor.layers.linear import (
 )
 from vllm.platforms import current_platform
 from vllm.utils.multi_stream_utils import maybe_execute_in_parallel
-from vllm.utils.torch_utils import direct_register_custom_op
+from vllm.utils.torch_utils import direct_register_custom_op, vllm_ops
 
 from .base import BaseLayerWithLoRA
 from .utils import _get_lora_aux_cuda_stream, _get_lora_device
@@ -199,9 +199,7 @@ class BaseLinearLayerWithLoRA(BaseLayerWithLoRA):
         # is_forward_context_available for tower modules
         if self._enable_aux_cuda_stream and is_forward_context_available():
             output_size = sum(self.output_slices)
-            return torch.ops.vllm.lora_linear_async(
-                self.layer_name, output_size, x, bias
-            )
+            return vllm_ops.lora_linear_async(self.layer_name, output_size, x, bias)
         else:
             return self._apply_sync(x, bias)
 

@@ -302,6 +302,13 @@ repos:
     language: python
     types: [python]
     additional_dependencies: [regex]
+  - id: check-custom-op-calls
+    name: Call vLLM custom ops through their eager-bypass handles
+    entry: python tools/pre_commit/check_custom_op_calls.py
+    language: python
+    types: [python]
+    files: ^vllm/
+    additional_dependencies: [regex]
   - id: validate-config
     name: Validate configuration has default values and that each field has a docstring
     entry: python tools/pre_commit/validate_config.py

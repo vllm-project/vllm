@@ -12,7 +12,7 @@ from vllm.model_executor.layers.linear import ReplicatedLinear
 from vllm.model_executor.layers.logits_processor import LogitsProcessor
 from vllm.model_executor.layers.quantization.base_config import QuantizationConfig
 from vllm.triton_utils import tl, triton
-from vllm.utils.torch_utils import direct_register_custom_op
+from vllm.utils.torch_utils import direct_register_custom_op, vllm_ops
 from vllm.v1.worker.gpu.spec_decode.dflash2.config import DFlash2SpeculatorConfig
 
 from .qwen3_dflash import (
@@ -139,7 +139,7 @@ def dflash2_grouped_conv(
     block_size: int,
     group_size: int,
 ) -> torch.Tensor:
-    return torch.ops.vllm.dflash2_grouped_conv(x, delta, base, block_size, group_size)
+    return vllm_ops.dflash2_grouped_conv(x, delta, base, block_size, group_size)
 
 
 def _grouped_conv(
@@ -413,7 +413,7 @@ def _score_edges(
     top_k: int,
 ) -> torch.Tensor:
     if candidate_ids.is_cuda:
-        return torch.ops.vllm.dflash2_score_edges(
+        return vllm_ops.dflash2_score_edges(
             predecessor_table,
             successor_table,
             candidate_ids,

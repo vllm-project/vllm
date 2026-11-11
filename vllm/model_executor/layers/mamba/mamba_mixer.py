@@ -41,6 +41,7 @@ from vllm.utils.torch_utils import (
     _encode_layer_name,
     _resolve_layer_name,
     direct_register_custom_op,
+    vllm_ops,
 )
 from vllm.v1.attention.backend import AttentionMetadata
 from vllm.v1.attention.backends.mamba1_attn import Mamba1AttentionMetadata
@@ -240,7 +241,7 @@ class MambaMixer(MambaBase, PluggableLayer):
         return discrete_time_step.transpose(-2, -1), B, C
 
     def forward(self, hidden_states: torch.Tensor, output: torch.Tensor):
-        torch.ops.vllm.mamba_mixer(
+        vllm_ops.mamba_mixer(
             hidden_states,
             output,
             _encode_layer_name(self.prefix),

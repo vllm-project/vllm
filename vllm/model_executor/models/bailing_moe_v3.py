@@ -86,7 +86,7 @@ from vllm.third_party.flash_linear_attention.ops.kda import (
     fused_recurrent_kda,
     fused_recurrent_kda_fwd,
 )
-from vllm.utils.torch_utils import direct_register_custom_op
+from vllm.utils.torch_utils import direct_register_custom_op, vllm_ops
 from vllm.v1.attention.backends.gdn_attn import GDNAttentionMetadata
 from vllm.v1.attention.backends.registry import MambaAttentionBackendEnum
 
@@ -848,9 +848,7 @@ class BailingMoeV3KimiDeltaAttention(PluggableLayer, MambaBase):
             dtype=hidden_states.dtype,
             device=hidden_states.device,
         )
-        torch.ops.vllm.bailing_v3_kda_attention(
-            q, k, v, g1, beta, core_attn_out, self.prefix
-        )
+        vllm_ops.bailing_v3_kda_attention(q, k, v, g1, beta, core_attn_out, self.prefix)
         core_attn_out = self.o_norm(core_attn_out, g2)
         core_attn_out = rearrange(core_attn_out, "1 n h d -> n (h d)")
         output[:] = self.o_proj(core_attn_out)[0]

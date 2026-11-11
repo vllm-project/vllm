@@ -3,7 +3,7 @@
 import torch
 
 from vllm.model_executor.layers.quantization.utils.ocp_mx_utils import OCP_MX_BLOCK_SIZE
-from vllm.utils.torch_utils import direct_register_custom_op
+from vllm.utils.torch_utils import direct_register_custom_op, vllm_ops
 
 
 def _quant_dequant_mxfp6(
@@ -122,7 +122,7 @@ def quant_dequant_mxfp6(
     quant_dtype: str,
     scale_calculation_mode: str = "even",
 ) -> torch.Tensor:
-    return torch.ops.vllm.quant_dequant_mxfp6(x, quant_dtype, scale_calculation_mode)
+    return vllm_ops.quant_dequant_mxfp6(x, quant_dtype, scale_calculation_mode)
 
 
 try:
@@ -139,4 +139,4 @@ except AttributeError as error:
 def dequant_mxfp6(
     x: torch.Tensor, scale: torch.Tensor, float_dtype: torch.dtype, quant_dtype: str
 ) -> torch.Tensor:
-    return torch.ops.vllm.dequant_mxfp6(x, scale, float_dtype, quant_dtype)
+    return vllm_ops.dequant_mxfp6(x, scale, float_dtype, quant_dtype)

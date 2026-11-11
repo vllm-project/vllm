@@ -20,7 +20,11 @@ from vllm.utils.flashinfer import (
     is_flashinfer_cutedsl_bf16_gemm_supported,
 )
 from vllm.utils.platform_utils import num_compute_units
-from vllm.utils.torch_utils import direct_register_custom_op, eager_bypass_custom_op
+from vllm.utils.torch_utils import (
+    direct_register_custom_op,
+    eager_bypass_custom_op,
+    vllm_ops,
+)
 
 logger = init_logger(__name__)
 
@@ -593,7 +597,7 @@ def rocm_unquantized_gemm(
     # through the device-agnostic fallback instead of hard-crashing.
     if not x.is_cuda:
         return default_unquantized_gemm(layer, x, weight, bias)
-    return torch.ops.vllm.rocm_unquantized_gemm(x, weight, bias)
+    return vllm_ops.rocm_unquantized_gemm(x, weight, bias)
 
 
 direct_register_custom_op(
@@ -673,7 +677,7 @@ def cuda_unquantized_gemm(
         and x.is_cuda
         and x.dim() == 2
     ):
-        return torch.ops.vllm.cuda_skinny_unquantized_gemm(x, weight)
+        return vllm_ops.cuda_skinny_unquantized_gemm(x, weight)
     return torch.nn.functional.linear(x, weight, bias)
 
 
