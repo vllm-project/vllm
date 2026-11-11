@@ -1,14 +1,16 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 import asyncio
+import json
 import os
 
 import openai  # use the official client for correctness check
 import pytest
 import pytest_asyncio
+import requests
 
 from tests.utils import RemoteOpenAIServer
-from tests.v1.utils import check_request_balancing
+from tests.v1.utils import check_request_balancing, get_prometheus_metrics
 
 MODEL_NAME = "vllm-project/tiny-random-LlamaForCausalLM"
 
@@ -43,6 +45,41 @@ def server(default_server_args):
 async def client(server):
     async with server.get_async_client() as async_client:
         yield async_client
+
+
+@pytest.fixture(scope="module")
+def dynamic_sd_server(default_server_args):
+    # The schedule drafts no tokens at any batch size; the static K is 3.
+    speculative_config = {
+        "method": "draft_model",
+        "model": MODEL_NAME,
+        "num_speculative_tokens": 3,
+        "num_speculative_tokens_per_batch_size": [[1, 128, 0]],
+    }
+    args = [
+        *default_server_args,
+        "--speculative-config",
+        json.dumps(speculative_config),
+    ]
+    with RemoteOpenAIServer(MODEL_NAME, args) as remote_server:
+        yield remote_server
+
+
+def test_dynamic_sd_schedule_applies_with_data_parallel(
+    dynamic_sd_server: RemoteOpenAIServer,
+) -> None:
+    """The DP ranks of a dense model draft as their schedule says instead of
+    falling back to the static number of speculative tokens."""
+    for _ in range(4):
+        response = requests.post(
+            dynamic_sd_server.url_for("v1/completions"),
+            json={"model": MODEL_NAME, "prompt": "Hello", "max_tokens": 8},
+        )
+        response.raise_for_status()
+
+    metrics = get_prometheus_metrics(dynamic_sd_server)
+    draft_tokens = metrics["vllm:spec_decode_num_draft_tokens_total"]
+    assert sum(draft_tokens.values()) == 0, draft_tokens
 
 
 @pytest.mark.asyncio
