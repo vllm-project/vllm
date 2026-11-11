@@ -125,6 +125,14 @@ def prepare_mega_gate_routing_metadata(
     )
 
 
+def _use_mega_gate(vllm_config: VllmConfig) -> bool:
+    """Whether MegaMoE layers route with `bf16_mega_gate`, which is SM100-only."""
+    return (
+        vllm_config.kernel_config.moe_backend in NATIVE_MEGA_MOE_BACKENDS
+        and current_platform.is_device_capability_family(100)
+    )
+
+
 class DeepseekV4MLP(nn.Module):
     def __init__(
         self,
@@ -227,7 +235,7 @@ class DeepseekV4MoE(nn.Module):
         self.reduce_results = reduce_results
         moe_backend = vllm_config.kernel_config.moe_backend
         self.use_native_mega_moe = moe_backend in NATIVE_MEGA_MOE_BACKENDS
-        self.use_mega_gate = current_platform.is_device_capability_family(100)
+        self.use_mega_gate = _use_mega_gate(vllm_config)
         if (
             self.use_native_mega_moe
             and not vllm_config.parallel_config.enable_expert_parallel
@@ -468,7 +476,6 @@ class DeepseekV4MoE(nn.Module):
         org_shape = hidden_states.shape
         # Small local padded batches favor GateLinear; 128-expert gates cross earlier.
         gate_threshold = 1 if self.gate.weight.shape[0] == 128 else 16
-        # bf16_mega_gate is SM100-only.
         if not self.use_mega_gate or hidden_states.shape[0] <= gate_threshold:
             router_logits, _ = self.gate(hidden_states)
             topk_weights, topk_ids = fused_topk_bias(
@@ -837,7 +844,7 @@ class DeepseekV4Model(nn.Module, EagleModelMixin):
         self.use_native_mega_moe = (
             vllm_config.kernel_config.moe_backend in NATIVE_MEGA_MOE_BACKENDS
         )
-        self.use_mega_gate = current_platform.is_device_capability_family(100)
+        self.use_mega_gate = _use_mega_gate(vllm_config)
         self.use_sequence_parallel = _use_sequence_parallel(vllm_config)
         if (
             self.use_native_mega_moe
@@ -990,7 +997,7 @@ class DeepseekV4Model(nn.Module, EagleModelMixin):
             input_ids = sp_shard(input_ids)
 
         mega_gate_metadata = None
-        if self.use_native_mega_moe and self.use_mega_gate:
+        if self.use_mega_gate:
             mega_gate_metadata = prepare_mega_gate_routing_metadata(
                 input_ids,
                 has_hash_routing=self.has_local_hash_moe,
