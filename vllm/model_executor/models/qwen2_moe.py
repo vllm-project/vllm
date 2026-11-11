@@ -205,7 +205,6 @@ class Qwen2MoeAttention(nn.Module):
         cache_config: CacheConfig | None = None,
         quant_config: QuantizationConfig | None = None,
         prefix: str = "",
-        dual_chunk_attention_config: dict[str, Any] | None = None,
     ) -> None:
         super().__init__()
         self.hidden_size = hidden_size
@@ -228,7 +227,6 @@ class Qwen2MoeAttention(nn.Module):
         self.kv_size = self.num_kv_heads * self.head_dim
         self.scaling = self.head_dim**-0.5
         self.max_position_embeddings = max_position_embeddings
-        self.dual_chunk_attention_config = dual_chunk_attention_config
 
         self.qkv_proj = QKVParallelLinear(
             hidden_size,
@@ -252,14 +250,7 @@ class Qwen2MoeAttention(nn.Module):
             self.head_dim,
             max_position=max_position_embeddings,
             rope_parameters=rope_parameters,
-            dual_chunk_attention_config=dual_chunk_attention_config,
         )
-        attention_kwargs: dict[str, Any] = {}
-        if dual_chunk_attention_config:
-            attention_kwargs = {
-                "layer_idx": extract_layer_index(prefix),
-                "dual_chunk_attention_config": dual_chunk_attention_config,
-            }
         self.attn = Attention(
             self.num_heads,
             self.head_dim,
@@ -268,7 +259,6 @@ class Qwen2MoeAttention(nn.Module):
             cache_config=cache_config,
             quant_config=quant_config,
             prefix=f"{prefix}.attn",
-            **attention_kwargs,
         )
 
     def forward(
@@ -294,9 +284,6 @@ class Qwen2MoeDecoderLayer(nn.Module):
     ) -> None:
         super().__init__()
         self.hidden_size = config.hidden_size
-        dual_chunk_attention_config = getattr(
-            config, "dual_chunk_attention_config", None
-        )
         max_position_embeddings = getattr(config, "max_position_embeddings", 8192)
         self.self_attn = Qwen2MoeAttention(
             hidden_size=self.hidden_size,
@@ -307,7 +294,6 @@ class Qwen2MoeDecoderLayer(nn.Module):
             cache_config=cache_config,
             quant_config=quant_config,
             prefix=f"{prefix}.self_attn",
-            dual_chunk_attention_config=dual_chunk_attention_config,
         )
 
         # Note: Qwen/Qwen2-57B-A14B-Instruct does not have

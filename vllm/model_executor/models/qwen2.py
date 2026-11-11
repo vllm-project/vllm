@@ -70,7 +70,6 @@ from .utils import (
     AutoWeightsLoader,
     PPMissingLayer,
     WeightsMapper,
-    extract_layer_index,
     make_empty_intermediate_tensors_factory,
     make_layers,
     maybe_prefix,
@@ -127,7 +126,6 @@ class Qwen2Attention(nn.Module):
         quant_config: QuantizationConfig | None = None,
         prefix: str = "",
         attn_type: str = AttentionType.DECODER,
-        dual_chunk_attention_config: dict[str, Any] | None = None,
         qk_norm: bool = False,
         rms_norm_eps: float = 1e-6,
     ) -> None:
@@ -151,7 +149,6 @@ class Qwen2Attention(nn.Module):
         self.q_size = self.num_heads * self.head_dim
         self.kv_size = self.num_kv_heads * self.head_dim
         self.scaling = self.head_dim**-0.5
-        self.dual_chunk_attention_config = dual_chunk_attention_config
         self.qk_norm = qk_norm
 
         self.qkv_proj = QKVParallelLinear(
@@ -180,19 +177,12 @@ class Qwen2Attention(nn.Module):
             self.head_dim,
             max_position=max_position,
             rope_parameters=rope_parameters,
-            dual_chunk_attention_config=dual_chunk_attention_config,
         )
         attn_cls = (
             EncoderOnlyAttention
             if attn_type == AttentionType.ENCODER_ONLY
             else Attention
         )
-        attention_kwargs: dict[str, Any] = {}
-        if dual_chunk_attention_config:
-            attention_kwargs = {
-                "layer_idx": extract_layer_index(prefix),
-                "dual_chunk_attention_config": dual_chunk_attention_config,
-            }
         self.attn = attn_cls(
             self.num_heads,
             self.head_dim,
@@ -202,7 +192,6 @@ class Qwen2Attention(nn.Module):
             quant_config=quant_config,
             attn_type=attn_type,
             prefix=f"{prefix}.attn",
-            **attention_kwargs,
         )
 
     def forward(
@@ -255,9 +244,6 @@ class Qwen2DecoderLayer(nn.Module):
             )
         self.hidden_size = config.hidden_size
         set_default_rope_theta(config, default_theta=1000000)
-        dual_chunk_attention_config = getattr(
-            config, "dual_chunk_attention_config", None
-        )
 
         # By default, Qwen2 uses causal attention as it is a decoder-only model.
         # You can override the HF config with `is_causal=False` to enable
@@ -281,7 +267,6 @@ class Qwen2DecoderLayer(nn.Module):
             rope_parameters=config.rope_parameters,
             prefix=f"{prefix}.self_attn",
             attn_type=attn_type,
-            dual_chunk_attention_config=dual_chunk_attention_config,
             qk_norm=qk_norm,
             rms_norm_eps=config.rms_norm_eps,
         )
