@@ -80,6 +80,24 @@ including when a PCP rank owns no decode requests. On SM90, fixed DSpark with
 as 1 or 3 speculative tokens are rejected for graph execution. Use eager mode
 for those shapes.
 
+### DeepSeek-V4.1-Flash on ROCm
+
+ROCm supports eager prefill context parallelism for the text-only
+DeepSeek-V4.1-Flash model:
+
+```bash
+VLLM_ROCM_USE_AITER=1 vllm serve deepseek-ai/DeepSeek-V4.1-Flash \
+  --language-model-only \
+  --tensor-parallel-size 2 \
+  --prefill-context-parallel-size 2 \
+  --no-enable-prefix-caching \
+  --enforce-eager
+```
+
+This configuration requires PP=DP=DCP=1 and does not support microbatching,
+speculative decoding, KV transfer, prefix caching, MegaMoE, or the ROCm
+monokernel. TP and PCP multiply, so TP=2 with PCP=2 requires four GPUs.
+
 ## Decode Context Parallel
 
 Due to the auto-regressive nature of decoding, every decoding step needs to compute a small amount of query tokens w.r.t. a large number of key/value tokens stored in the paged KV cache. The core of decode context parallel is how to shard the KV cache across GPUs.

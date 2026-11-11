@@ -24,7 +24,7 @@ from vllm.models.kimi_k3.nvidia.kda_metadata import KimiK3KDAMetadataBuilder
 from vllm.utils.torch_utils import async_tensor_h2d
 from vllm.v1.kv_cache_interface import MambaSpec
 from vllm.v1.worker.gpu.model_states.recoverssm import RecoverSSMState
-from vllm.v1.worker.utils import AttentionGroup
+from vllm.v1.worker.utils import AttentionGroup, groups_with_metadata_builders
 
 from .context import (
     FP32_DEFERRED,
@@ -58,7 +58,7 @@ class DeferredRecoverSSMState(RecoverSSMState):
         dummy batches, whose rows own no request) and, once, the pending counts.
         Only ubatch 0's builders: the hybrid state does not support DBO."""
         for group_list in attn_groups:
-            for group in group_list:
+            for group in groups_with_metadata_builders(group_list):
                 builder = group.get_metadata_builder(0)
                 if not isinstance(builder, KimiK3KDAMetadataBuilder):
                     continue
@@ -253,7 +253,7 @@ def _build_deferred(
         rows[:live].copy_(slots[:live], non_blocking=True)
     rows[live : max(m.num_reqs, num_spec_decodes)].fill_(-1)
     eager = None
-    if builder.vllm_config.cache_config.mamba_cache_mode == "align":
+    if builder.vllm_config.cache_config.enable_prefix_caching:
         assert isinstance(builder.kv_cache_spec, MambaSpec)
         block = builder.kv_cache_spec.block_size
         margin = 2 * (builder.num_spec + 1)

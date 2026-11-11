@@ -158,6 +158,8 @@ class AsyncLLM(EngineClient):
 
         has_custom_loggers = bool(custom_stat_loggers)
         self.log_stats = log_stats or has_custom_loggers
+        # Tracing reads the collected stats without enabling stat logging.
+        self.collect_stats = self.log_stats or tracing_endpoint is not None
         if not log_stats and has_custom_loggers:
             logger.info(
                 "AsyncLLM created with log_stats=False, "
@@ -180,7 +182,7 @@ class AsyncLLM(EngineClient):
         # Converts EngineCoreOutputs --> RequestOutput.
         self.output_processor = OutputProcessor(
             renderer.tokenizer,
-            log_stats=self.log_stats,
+            collect_stats=self.collect_stats,
             stream_interval=self.vllm_config.scheduler_config.stream_interval,
             tracing_enabled=tracing_endpoint is not None,
             admission_stats=self.admission_stats,
@@ -194,7 +196,7 @@ class AsyncLLM(EngineClient):
         self.engine_core = EngineCoreClient.make_async_mp_client(
             vllm_config=vllm_config,
             executor_class=executor_class,
-            log_stats=self.log_stats,
+            collect_stats=self.collect_stats,
             client_addresses=client_addresses,
             client_count=client_count,
             client_index=client_index,
@@ -876,7 +878,7 @@ class AsyncLLM(EngineClient):
         # object, or else it won't be garbage collected and cleaned up properly.
         engine_core = self.engine_core
         output_processor = self.output_processor
-        log_stats = self.log_stats
+        collect_stats = self.collect_stats
         # We use a mutable list for logger_manager so that it can be updated
         # during elastic EP scaling (see scale_elastic_ep) without creating
         # a circular reference via self.
@@ -895,7 +897,7 @@ class AsyncLLM(EngineClient):
                     num_outputs = len(outputs.outputs)
 
                     iteration_stats = (
-                        IterationStats() if (log_stats and num_outputs) else None
+                        IterationStats() if (collect_stats and num_outputs) else None
                     )
 
                     # Split outputs into chunks of at most
@@ -1337,9 +1339,8 @@ class AsyncLLM(EngineClient):
             )
             return
 
-        await self.engine_core.prepare_elastic_ep(new_data_parallel_size)
-
-        # recreate stat loggers
+        # recreate stat loggers before the new engines start: they send
+        # scheduler stats as soon as they come up.
         if new_data_parallel_size > old_data_parallel_size and self.log_stats:
             # TODO(rob): fix this after talking with Ray team.
             # This resets all the prometheus metrics since we
@@ -1355,6 +1356,8 @@ class AsyncLLM(EngineClient):
             if hasattr(self, "_logger_ref"):
                 self._logger_ref[0] = self.logger_manager
             self.logger_manager.log_engine_initialized()
+
+        await self.engine_core.prepare_elastic_ep(new_data_parallel_size)
 
         set_scaling_elastic_ep(True)
         if envs.VLLM_ELASTIC_EP_DRAIN_REQUESTS:

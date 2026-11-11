@@ -106,9 +106,12 @@ IS_RMS_NORM = [True, False]
 SEEDS = [0, 42]
 
 
-@pytest.mark.parametrize("rows_per_token", [1, 2, 4, 8, 16])
+@pytest.mark.parametrize(
+    "rows_per_token,groups_per_row", [(1, 1), (2, 1), (4, 1), (8, 1), (16, 1), (1, 48)]
+)
 def test_layer_norm_fwd_warmup_keys_cover_qwen_gdn(
     rows_per_token: int,
+    groups_per_row: int,
 ) -> None:
     device = torch.device(DEVICE)
     group_size = 128
@@ -118,6 +121,7 @@ def test_layer_norm_fwd_warmup_keys_cover_qwen_gdn(
         kernel.get_warmup_keys(
             max_num_tokens=max_num_tokens,
             rows_per_token=rows_per_token,
+            groups_per_row=groups_per_row,
             group_size=group_size,
             x_dtype=torch.bfloat16,
             weight_dtype=torch.bfloat16,
@@ -145,13 +149,14 @@ def test_layer_norm_fwd_warmup_keys_cover_qwen_gdn(
             z_aligned=True,
             mean_aligned=True,
             rstd_aligned=True,
-            stride_x_row=group_size,
-            stride_y_row=group_size,
-            stride_z_row=group_size,
+            stride_x_row=group_size * groups_per_row,
+            stride_y_row=group_size * groups_per_row,
+            stride_z_row=group_size * groups_per_row,
+            stride_w_group=0 if groups_per_row > 1 else group_size,
             M=num_rows,
             N=group_size,
             BLOCK_N=triton.next_power_of_2(group_size),
-            ROWS_PER_BLOCK=calc_rows_per_block(num_rows, device),
+            ROWS_PER_BLOCK=calc_rows_per_block(num_rows * groups_per_row, device),
             norm_before_gate=True,
             is_rms_norm=True,
             activation="silu",
@@ -258,6 +263,7 @@ def test_layer_norm_fwd_with_gate(
 @pytest.mark.parametrize("group_size", [64, 128, 256])
 @pytest.mark.parametrize("dtype", [torch.float16, torch.bfloat16])
 @pytest.mark.parametrize("is_rms_norm", IS_RMS_NORM)
+@pytest.mark.parametrize("shared_weight", [False, True])
 @torch.inference_mode()
 def test_layer_norm_fwd_with_groups(
     num_tokens: int,
@@ -265,6 +271,7 @@ def test_layer_norm_fwd_with_groups(
     group_size: int,
     dtype: torch.dtype,
     is_rms_norm: bool,
+    shared_weight: bool,
 ) -> None:
     """Test layer norm forward pass with group normalization."""
     if hidden_size % group_size != 0:
@@ -282,6 +289,10 @@ def test_layer_norm_fwd_with_groups(
     eps = 1e-6
 
     ngroups = hidden_size // group_size
+    if shared_weight:
+        weight = weight[:group_size].expand(ngroups, group_size)
+        if bias is not None:
+            bias = bias[:group_size].expand(ngroups, group_size)
 
     # Run the triton kernel
     out, mean, rstd = layer_norm_fwd(
@@ -290,7 +301,13 @@ def test_layer_norm_fwd_with_groups(
 
     # Run reference implementation
     ref_out = layer_norm_ref(
-        x, weight, bias, z=None, eps=eps, group_size=group_size, is_rms_norm=is_rms_norm
+        x,
+        weight.reshape(-1),
+        None if bias is None else bias.reshape(-1),
+        z=None,
+        eps=eps,
+        group_size=group_size,
+        is_rms_norm=is_rms_norm,
     )
 
     # Check outputs

@@ -317,7 +317,6 @@ jobs:
                   { term: "guided_choice",          searchIn: "both"  },
                   { term: "guided_regex",           searchIn: "both"  },
                   { term: "structural_tag",         searchIn: "title" },
-                  { term: "lm-format-enforcer",     searchIn: "title" },
                   { term: "backend_xgrammar",       searchIn: "body"  },
                   { term: "apply_grammar_bitmask",  searchIn: "body"  },
                   { term: "grammar_bitmask",        searchIn: "body"  },

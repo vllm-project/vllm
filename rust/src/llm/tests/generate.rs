@@ -18,6 +18,7 @@ use vllm_engine_core_client::protocol::logprobs::{
     Logprobs, MaybeWireLogprobs, PositionLogprobs, TokenLogprob,
 };
 use vllm_engine_core_client::protocol::lora::LoraRequest;
+use vllm_engine_core_client::protocol::multimodal::{MmFeatureSpec, MmModality, PlaceholderRange};
 use vllm_engine_core_client::protocol::output::{
     EngineCoreEvent, EngineCoreEventType, EngineCoreFinishReason, EngineCoreOutput,
     EngineCoreOutputs, RequestBatchOutputs,
@@ -769,6 +770,175 @@ async fn generate_propagates_unexpected_close_errors() {
         }) if request_id == internal_id
     ));
     assert!(stream.next().await.is_none());
+
+    let _ = shutdown_tx.send(());
+    engine_task.await.unwrap();
+    llm.shutdown().await.unwrap();
+}
+
+/// When the engine reports a limit on the encoder cache tokens a request's
+/// multimodal items may need together, a request exceeding it fails before
+/// submission, counting a repeated item once; other requests reach the engine.
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn mm_items_exceeding_encoder_cache_rejected_before_submission() {
+    let ipc = IpcNamespace::new().unwrap();
+    let handshake_address = ipc.handshake_endpoint();
+
+    let (shutdown_tx, engine_task) = spawn_mock_engine_task_with_ready(
+        handshake_address.clone(),
+        b"engine-no-chunked-prefill".to_vec(),
+        EngineCoreReadyResponse {
+            max_mm_embeds_per_request: Some(1000),
+            ..default_ready_response()
+        },
+        |dealer, push| {
+            Box::pin(async move {
+                let add = recv_engine_message(dealer).await;
+                let request: EngineCoreRequest = rmp_serde::from_slice(&add[1]).unwrap();
+                assert_eq!(request.external_req_id.as_deref(), Some("req-repeated"));
+                send_outputs(
+                    push,
+                    RequestBatchOutputs {
+                        outputs: vec![request_output(
+                            &request.request_id,
+                            vec![1],
+                            Some(EngineCoreFinishReason::Length),
+                        )],
+                        finished_requests: Some(BTreeSet::from([request.request_id])),
+                        ..Default::default()
+                    }
+                    .into(),
+                )
+                .await;
+            })
+        },
+    );
+
+    let llm = connect_async_llm_with_ipc(handshake_address, 0, "test-model", &ipc).await;
+
+    let mm_request = |request_id: &str, identifiers: [&str; 2]| {
+        let mut request = sample_generate_request(request_id, 1);
+        request.prompt_token_ids = vec![11; 1300];
+        request.mm_features = Some(
+            identifiers
+                .iter()
+                .zip([0, 650])
+                .map(|(identifier, offset)| MmFeatureSpec {
+                    data: None,
+                    modality: MmModality::Image,
+                    identifier: identifier.to_string(),
+                    mm_position: PlaceholderRange {
+                        offset,
+                        length: 600,
+                        is_embed: None,
+                    },
+                    mm_hash: None,
+                })
+                .collect(),
+        );
+        request
+    };
+
+    let error = llm
+        .generate(mm_request("req-distinct", ["a", "b"]))
+        .await
+        .map(|_| ())
+        .unwrap_err();
+    assert!(
+        matches!(
+            error,
+            Error::MmEmbedsExceedEncoderCache {
+                num_embeds: 1200,
+                max_embeds: 1000
+            }
+        ),
+        "{error:?}"
+    );
+
+    let output = llm
+        .generate(mm_request("req-repeated", ["a", "a"]))
+        .await
+        .unwrap()
+        .next()
+        .await
+        .unwrap()
+        .unwrap();
+    assert_eq!(output.finish_reason, Some(FinishReason::Length));
+
+    let _ = shutdown_tx.send(());
+    engine_task.await.unwrap();
+    llm.shutdown().await.unwrap();
+}
+
+/// When the engine reports that it does not compute prompt logprobs (under
+/// `--kv-sharing-fast-prefill`), requests asking for them fail before
+/// submission, including `prompt_logprobs=0`; other requests still reach the
+/// engine.
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn prompt_logprobs_rejected_when_engine_lacks_them() {
+    let ipc = IpcNamespace::new().unwrap();
+    let handshake_address = ipc.handshake_endpoint();
+
+    let (shutdown_tx, engine_task) = spawn_mock_engine_task_with_ready(
+        handshake_address.clone(),
+        b"engine-fast-prefill".to_vec(),
+        EngineCoreReadyResponse {
+            supports_prompt_logprobs: false,
+            ..default_ready_response()
+        },
+        |dealer, push| {
+            Box::pin(async move {
+                let add = recv_engine_message(dealer).await;
+                let request: EngineCoreRequest = rmp_serde::from_slice(&add[1]).unwrap();
+                assert_eq!(request.external_req_id.as_deref(), Some("req-plain"));
+                send_outputs(
+                    push,
+                    RequestBatchOutputs {
+                        outputs: vec![request_output(
+                            &request.request_id,
+                            vec![1],
+                            Some(EngineCoreFinishReason::Length),
+                        )],
+                        finished_requests: Some(BTreeSet::from([request.request_id])),
+                        ..Default::default()
+                    }
+                    .into(),
+                )
+                .await;
+            })
+        },
+    );
+
+    let llm = connect_async_llm_with_ipc(handshake_address, 0, "test-model", &ipc).await;
+
+    let mut prompt_logprobs = sample_generate_request("req-prompt-logprobs", 1);
+    prompt_logprobs.sampling_params.prompt_logprobs = Some(0);
+    let mut prompt_logprob_token_ids = sample_generate_request("req-prompt-token-ids", 1);
+    prompt_logprob_token_ids.sampling_params.prompt_logprob_token_ids =
+        Some(WireNdArray::from_i32(vec![1, 1], vec![7]).unwrap());
+    for (request, expected) in [
+        (prompt_logprobs, "prompt_logprobs"),
+        (prompt_logprob_token_ids, "prompt_logprob_token_ids"),
+    ] {
+        let error = llm.generate(request).await.map(|_| ()).unwrap_err();
+        assert!(
+            matches!(
+                error,
+                Error::PromptLogprobsUnsupported { parameter } if parameter == expected
+            ),
+            "{error:?}"
+        );
+    }
+
+    let output = llm
+        .generate(sample_generate_request("req-plain", 1))
+        .await
+        .unwrap()
+        .next()
+        .await
+        .unwrap()
+        .unwrap();
+    assert_eq!(output.finish_reason, Some(FinishReason::Length));
 
     let _ = shutdown_tx.send(());
     engine_task.await.unwrap();

@@ -11,7 +11,7 @@ import numpy as np
 import regex as re
 
 
-@dataclass(frozen=True)
+@dataclass(frozen=True, slots=True)
 class BenchRequest:
     query_len: int
     # KV length after the step: the prefix already in the KV cache plus the
@@ -52,7 +52,7 @@ class BenchRequest:
         return self.prefix_len > 0 and not self.is_decode and not self.chunked
 
 
-@dataclass(frozen=True)
+@dataclass(frozen=True, slots=True)
 class BenchCase:
     name: str
     requests: tuple[BenchRequest, ...]

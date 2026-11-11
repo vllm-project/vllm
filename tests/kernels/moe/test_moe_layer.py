@@ -325,7 +325,7 @@ def tp_chunk_gate_up(
     return torch.cat([gate, up], dim=dim)
 
 
-@dataclass
+@dataclass(slots=True)
 class MoETestConfig:
     m: int
     n: int
@@ -708,7 +708,7 @@ def chunk_scales(
     return t
 
 
-@dataclass
+@dataclass(slots=True)
 class QuantizedWeights:
     w13_weight: torch.Tensor
     w2_weight: torch.Tensor
@@ -844,7 +844,7 @@ def make_quant_config(
     raise NotImplementedError(f"Unsupported quantization: {quantization}")
 
 
-@dataclass
+@dataclass(slots=True)
 class SharedExpertsConfig:
     w1: torch.Tensor
     w2: torch.Tensor
@@ -853,7 +853,7 @@ class SharedExpertsConfig:
     quant_dtype: torch.dtype | str | None = None
 
 
-@dataclass
+@dataclass(slots=True)
 class MoETestData:
     """Container for MOE test data and transforms."""
 
@@ -1157,7 +1157,7 @@ def make_fused_moe_layer(
                         unpadded.copy_(value)
                     continue
             layer.routed_experts.register_parameter(
-                name, torch.nn.Parameter(value, requires_grad=False)
+                name, torch.nn.Parameter(value.clone(), requires_grad=False)
             )
 
     layer._quant_method.process_weights_after_loading(layer.routed_experts)

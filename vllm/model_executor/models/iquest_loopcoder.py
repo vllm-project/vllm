@@ -18,7 +18,6 @@ from __future__ import annotations
 
 from collections.abc import Callable, Iterable
 from dataclasses import replace
-from typing import Any
 
 import torch
 from torch import nn
@@ -27,10 +26,13 @@ from transformers import PreTrainedConfig
 from vllm.compilation.decorators import support_torch_compile
 from vllm.config import CacheConfig, VllmConfig
 from vllm.distributed import get_tensor_model_parallel_world_size
+from vllm.model_executor.layers.activation import SiluAndMul
 from vllm.model_executor.layers.attention import Attention
+from vllm.model_executor.layers.fusion.fused_act_quant import maybe_fused_act_quant
 from vllm.model_executor.layers.layernorm import RMSNorm
 from vllm.model_executor.layers.linear import (
     ColumnParallelLinear,
+    MergedColumnParallelLinear,
     QKVParallelLinear,
     RowParallelLinear,
 )
@@ -45,7 +47,6 @@ from vllm.model_executor.model_loader.weight_utils import (
     default_weight_loader,
     maybe_remap_kv_scale_name,
 )
-from vllm.model_executor.models.llama import LlamaMLP
 from vllm.sequence import IntermediateTensors
 from vllm.v1.attention.backend import AttentionType
 
@@ -55,6 +56,43 @@ from .utils import (
     make_layers,
     maybe_prefix,
 )
+
+
+class IQuestLoopCoderMLP(nn.Module):
+    def __init__(
+        self,
+        hidden_size: int,
+        intermediate_size: int,
+        hidden_act: str,
+        quant_config: QuantizationConfig | None = None,
+        prefix: str = "",
+    ) -> None:
+        super().__init__()
+        self.gate_up_proj = MergedColumnParallelLinear(
+            input_size=hidden_size,
+            output_sizes=[intermediate_size] * 2,
+            bias=False,
+            quant_config=quant_config,
+            prefix=f"{prefix}.gate_up_proj",
+        )
+        self.down_proj = RowParallelLinear(
+            input_size=intermediate_size,
+            output_size=hidden_size,
+            bias=False,
+            quant_config=quant_config,
+            prefix=f"{prefix}.down_proj",
+        )
+        if hidden_act != "silu":
+            raise ValueError(
+                f"Unsupported activation: {hidden_act}. Only silu is supported for now."
+            )
+        self.act_fn = SiluAndMul()
+
+    def forward(self, x: torch.Tensor) -> torch.Tensor:
+        x, _ = self.gate_up_proj(x)
+        x = maybe_fused_act_quant(self.act_fn, x, self.down_proj)
+        x, _ = self.down_proj(x)
+        return x
 
 
 class LoopCoderAttention(nn.Module):
@@ -69,7 +107,6 @@ class LoopCoderAttention(nn.Module):
         quant_config: QuantizationConfig | None = None,
         prefix: str = "",
         attn_type: str = AttentionType.DECODER,
-        dual_chunk_attention_config: dict[str, Any] | None = None,
         layer_idx: int = 0,
     ) -> None:
         super().__init__()
@@ -93,7 +130,6 @@ class LoopCoderAttention(nn.Module):
         self.q_size = self.num_heads * self.head_dim
         self.kv_size = self.num_kv_heads * self.head_dim
         self.scaling = self.head_dim**-0.5
-        self.dual_chunk_attention_config = dual_chunk_attention_config
 
         # Get loop_num from config, default to 2 if not specified
         self.loop_num = getattr(config, "loop_num", 2)
@@ -124,7 +160,6 @@ class LoopCoderAttention(nn.Module):
             self.head_dim,
             max_position=max_position,
             rope_parameters=config.rope_parameters,
-            dual_chunk_attention_config=dual_chunk_attention_config,
         )
         self.attn = nn.ModuleList()
 
@@ -162,12 +197,6 @@ class LoopCoderAttention(nn.Module):
                     quant_config=quant_config,
                     attn_type=attn_type,
                     prefix=f"{unique_prefix}.attn",
-                    **{
-                        "layer_idx": unique_layer_idx,
-                        "dual_chunk_attention_config": dual_chunk_attention_config,
-                    }
-                    if dual_chunk_attention_config and loop_idx == 0
-                    else {},
                 )
             )
 
@@ -218,9 +247,6 @@ class LoopCoderDecoderLayer(nn.Module):
     ) -> None:
         super().__init__()
         self.hidden_size = config.hidden_size
-        dual_chunk_attention_config = getattr(
-            config, "dual_chunk_attention_config", None
-        )
         self.layer_idx = layer_idx
         if getattr(config, "is_causal", True):
             attn_type = AttentionType.DECODER
@@ -237,10 +263,9 @@ class LoopCoderDecoderLayer(nn.Module):
             quant_config=quant_config,
             prefix=f"{prefix}.self_attn",
             attn_type=attn_type,
-            dual_chunk_attention_config=dual_chunk_attention_config,
             layer_idx=self.layer_idx,
         )
-        self.mlp = LlamaMLP(
+        self.mlp = IQuestLoopCoderMLP(
             hidden_size=self.hidden_size,
             intermediate_size=config.intermediate_size,
             hidden_act=config.hidden_act,
