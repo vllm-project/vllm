@@ -581,19 +581,24 @@ def test_num_lookahead_tokens_without_speculation():
     assert config.num_lookahead_tokens == 0
 
 
+@pytest.mark.parametrize("max_num_reqs", [4, 2])
 @pytest.mark.parametrize("max_logprobs", [0, 5, -1])
-def test_sizing_warmup_requests_prompt_logprobs_on_its_prefill(max_logprobs):
+def test_sizing_warmup_requests_prompt_logprobs_on_its_prefill(
+    max_logprobs, max_num_reqs
+):
     """Prompt logprobs materialize full-vocab logits a chunk at a time, which
     no other step reaches. The sizing step requests them on its real prefill,
     so the runtime path computes them from the model's own hidden states.
 
     They are computed for every token of a step that requests them, so with a
     budget beyond max_model_len they are measured on a single-prompt step and
-    the full-budget step runs without them."""
+    the full-budget step runs without them. A runner without room for a second
+    prefill request runs one step."""
     runner = _make_runner([_attention_group()], num_lookahead_tokens=0)
     runner.model_config = SimpleNamespace(
         get_vocab_size=lambda: 64, max_logprobs=max_logprobs, use_mla=False
     )
+    runner.max_num_reqs = max_num_reqs
     recorder = _StepRecorder()
     # (scheduled tokens, prompt_logprobs of each prefill request) per step
     steps: list[tuple[int, list[int | None]]] = []
@@ -611,6 +616,9 @@ def test_sizing_warmup_requests_prompt_logprobs_on_its_prefill(max_logprobs):
     warmup.run_kv_cache_sizing_warmup(runner, execute_model, recorder.sample_tokens)
 
     expected = None if max_logprobs == 0 else max_logprobs
+    if max_num_reqs == 2:
+        assert steps == [(MAX_MODEL_LEN, [expected])]
+        return
     logprob_steps = [step for step in steps if step[1] != [None] * len(step[1])]
     if expected is None:
         assert logprob_steps == []
@@ -618,6 +626,24 @@ def test_sizing_warmup_requests_prompt_logprobs_on_its_prefill(max_logprobs):
         assert logprob_steps == [(MAX_MODEL_LEN, [expected])]
     budget = runner.scheduler_config.max_num_batched_tokens
     assert max(n for n, _ in steps) == budget
+
+
+def test_sizing_warmup_waits_for_each_step(monkeypatch):
+    """UvaBufferPool reuses a staging slot two writes later. Warmup discards
+    step outputs, so it must wait for each step before running the next."""
+    runner = _make_runner([_attention_group()], num_lookahead_tokens=0)
+    runner.model_config = SimpleNamespace(
+        get_vocab_size=lambda: 64, max_logprobs=0, use_mla=False
+    )
+    events: list[str] = []
+    monkeypatch.setattr(torch.accelerator, "synchronize", lambda: events.append("sync"))
+
+    warmup.run_kv_cache_sizing_warmup(
+        runner, lambda output: events.append("step"), lambda grammar_output: None
+    )
+
+    assert events
+    assert events == ["step", "sync"] * (len(events) // 2)
 
 
 @pytest.mark.parametrize(

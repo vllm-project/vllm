@@ -125,6 +125,23 @@ def _cap_num_warmup_reqs(
     )
 
 
+def _run_step(
+    worker_execute_model: Callable[[SchedulerOutput], Any],
+    worker_sample_tokens: Callable[[GrammarOutput | None], Any] | None,
+    scheduler_output: SchedulerOutput,
+) -> None:
+    """Run one synthetic step and wait for the GPU to finish it.
+
+    UvaBufferPool reuses a staging slot two writes later, which is safe in
+    serving because the engine waits on each step's output. Warmup discards
+    the outputs, so without this a slow GPU reads slots already overwritten.
+    """
+    worker_execute_model(scheduler_output)
+    if worker_sample_tokens is not None:
+        worker_sample_tokens(None)
+    torch.accelerator.synchronize()
+
+
 def run_mixed_prefill_decode_warmup(
     model_runner: GPUModelRunner,
     worker_execute_model: Callable[[SchedulerOutput], Any],
@@ -308,12 +325,10 @@ def run_mixed_prefill_decode_warmup(
     model_runner.kv_connector.set_disabled(True)
     try:
         if with_decode:
-            worker_execute_model(decode_prefill_output)
-            worker_sample_tokens(None)
+            _run_step(worker_execute_model, worker_sample_tokens, decode_prefill_output)
         with context:
-            worker_execute_model(mixed_output)
-            worker_sample_tokens(None)
-        worker_execute_model(cleanup_output)
+            _run_step(worker_execute_model, worker_sample_tokens, mixed_output)
+        _run_step(worker_execute_model, None, cleanup_output)
     finally:
         model_runner.kv_connector.set_disabled(False)
     return True
@@ -388,9 +403,8 @@ def run_context_prefill_warmup(
 
     model_runner.kv_connector.set_disabled(True)
     try:
-        worker_execute_model(prefill_output)
-        worker_sample_tokens(None)
-        worker_execute_model(cleanup_output)
+        _run_step(worker_execute_model, worker_sample_tokens, prefill_output)
+        _run_step(worker_execute_model, None, cleanup_output)
     finally:
         model_runner.kv_connector.set_disabled(False)
     return True
@@ -416,7 +430,12 @@ def run_kv_cache_sizing_warmup(
     # Prompt logprobs are computed for every token of a step that requests
     # them, so request them on a single-prompt step: on the full budget,
     # max_logprobs=-1 would reserve full-vocab logprobs for every token.
-    if prompt_logprobs is not None and max_prompt_len < max_num_tokens:
+    # Without room for a second prefill request the steps would be the same.
+    if (
+        prompt_logprobs is not None
+        and max_prompt_len < max_num_tokens
+        and model_runner.max_num_reqs > 2
+    ):
         run_mixed_prefill_decode_warmup(
             model_runner,
             worker_execute_model,
