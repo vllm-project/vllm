@@ -370,6 +370,7 @@ def test_tiering_spec_create_worker_uses_single_slot_for_replicated_layout(monke
         spec_name="TieringOffloadingSpec",
         cpu_bytes_to_use=worker_kv_bytes_per_block * 8,
         worker_kv_bytes_per_block=worker_kv_bytes_per_block,
+        rank=1,
         world_size=4,
         replicated_layout=True,
     )
@@ -395,6 +396,8 @@ def test_tiering_spec_create_worker_uses_single_slot_for_replicated_layout(monke
     spec.create_worker(kv_caches)
 
     assert region_calls[0]["rank"] == 0
+    # Workers share the slot, so each pre-faults only its share of the region.
+    assert region_calls[0]["populate_shard"] == (1, 4)
     assert region_calls[0]["kv_bytes_per_chunk"] == worker_kv_bytes_per_block
     assert worker_calls[0]["kv_caches"] is kv_caches
     assert worker_calls[0]["mmap_region"] is region
@@ -428,6 +431,7 @@ def test_tiering_spec_create_worker_uses_worker_rank_for_sharded_layout(monkeypa
     spec.create_worker(MagicMock())
 
     assert region_calls[0]["rank"] == 1
+    assert region_calls[0]["populate_shard"] is None
 
 
 @pytest.mark.parametrize("world_size", [2, 4, 8])
