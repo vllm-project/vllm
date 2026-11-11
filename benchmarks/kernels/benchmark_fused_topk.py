@@ -33,7 +33,7 @@ def torch_topk(
     return topk_weights, topk_ids
 
 
-def get_benchmark(scoring_func, dtype_name):
+def get_benchmark(scoring_func):
     @triton.testing.perf_report(
         triton.testing.Benchmark(
             x_names=["num_tokens", "num_experts", "topk"],
@@ -43,12 +43,12 @@ def get_benchmark(scoring_func, dtype_name):
             line_names=["Torch", "vLLM", "AITER topk_gating"],
             styles=[("blue", "-"), ("red", "-"), ("green", "-")],
             ylabel="us",
-            plot_name=f"fused-topk-perf-{scoring_func}-{dtype_name}",
+            plot_name=f"fused-topk-perf-{scoring_func}",
             args={},
         )
     )
     def benchmark(num_tokens, num_experts, topk, provider):
-        dtype = getattr(torch, dtype_name)
+        dtype = torch.bfloat16
         hidden_size = 1024
         renormalize = True
         hidden_states = torch.randn(
@@ -112,16 +112,10 @@ def get_benchmark(scoring_func, dtype_name):
 if __name__ == "__main__":
     parser = FlexibleArgumentParser(description="Benchmark the MoE topk kernel.")
     parser.add_argument("--scoring-func", type=str, default="softmax")
-    parser.add_argument(
-        "--dtype",
-        type=str,
-        default="bfloat16",
-        choices=["bfloat16", "float16", "float32"],
-    )
     parser.add_argument("--save-path", type=str, default="./configs/fused_topk/")
     args = parser.parse_args()
 
     # Get the benchmark function
-    benchmark = get_benchmark(args.scoring_func, args.dtype)
+    benchmark = get_benchmark(args.scoring_func)
     # Run performance benchmark
     benchmark.run(print_data=True, save_path=args.save_path)
