@@ -73,6 +73,15 @@ def _page_stride(buf, page_size):
 
 
 @triton.jit
+def _decode_row_extent(row, lengths, QUERY_LEN: tl.constexpr, CAUSAL: tl.constexpr):
+    request = row // QUERY_LEN
+    length = tl.load(lengths + request)
+    if CAUSAL and QUERY_LEN > 1:
+        length = tl.maximum(length - QUERY_LEN + 1 + row % QUERY_LEN, 0)
+    return request, length
+
+
+@triton.jit
 def _fwd_kernel_stage1(
     Q,
     K_Buffer,
@@ -105,6 +114,8 @@ def _fwd_kernel_stage1(
     Lk: tl.constexpr,
     Lv: tl.constexpr,
     SLIDING_WINDOW: tl.constexpr = 0,
+    QUERY_LEN: tl.constexpr = 1,
+    CAUSAL: tl.constexpr = False,
 ):
     cur_batch = tl.program_id(0)
     cur_head = tl.program_id(1)
@@ -116,8 +127,9 @@ def _fwd_kernel_stage1(
     offs_dv = tl.arange(0, BLOCK_DV)
     mask_d = offs_d < Lk
     mask_dv = offs_dv < Lv
-    cur_batch_seq_len = tl.load(B_Seqlen + cur_batch)
-    cur_batch_req_idx = cur_batch
+    cur_batch_req_idx, cur_batch_seq_len = _decode_row_extent(
+        cur_batch, B_Seqlen, QUERY_LEN, CAUSAL
+    )
 
     off_q = cur_batch * stride_qbs + cur_head * stride_qh + offs_d
     q = tl.load(Q + off_q, mask=mask_d, other=0.0)
@@ -233,6 +245,8 @@ def _decode_att_m_fwd(
     k_scale,
     v_scale,
     sliding_window=0,
+    query_len=1,
+    causal=False,
 ):
     BLOCK = 64 if not is_hip_ else 8
 
@@ -286,6 +300,8 @@ def _decode_att_m_fwd(
         Lk=Lk,
         Lv=Lv,
         SLIDING_WINDOW=sliding_window,
+        QUERY_LEN=query_len,
+        CAUSAL=causal,
     )
 
 
@@ -326,6 +342,8 @@ def _fwd_grouped_kernel_stage1(
     Lv: tl.constexpr,
     IS_MLA: tl.constexpr = False,
     SLIDING_WINDOW: tl.constexpr = 0,
+    QUERY_LEN: tl.constexpr = 1,
+    CAUSAL: tl.constexpr = False,
 ):
     cur_batch = tl.program_id(0)
     cur_head_id = tl.program_id(1)
@@ -341,8 +359,9 @@ def _fwd_grouped_kernel_stage1(
     offs_dv = tl.arange(0, BLOCK_DV)
     mask_d = offs_d < Lk
     mask_dv = offs_dv < Lv
-    cur_batch_seq_len = tl.load(B_Seqlen + cur_batch)
-    cur_batch_req_idx = cur_batch
+    cur_batch_req_idx, cur_batch_seq_len = _decode_row_extent(
+        cur_batch, B_Seqlen, QUERY_LEN, CAUSAL
+    )
 
     offs_q = cur_batch * stride_qbs + cur_head[:, None] * stride_qh + offs_d[None, :]
     q = tl.load(
@@ -498,6 +517,8 @@ def _decode_grouped_att_m_fwd_warmup_inputs(
     kv_token_stride: int,
     num_kv_splits: tuple[int, ...],
     sliding_window: int = 0,
+    query_len: int = 1,
+    causal: bool = False,
 ) -> dict[str, Any]:
     # TritonMLAImpl.forward_mqa: one latent KV head whose cache row holds the
     # latent (Lv = kv_lora_rank) then the RoPE part (Lk = head_size). K and V
@@ -508,7 +529,7 @@ def _decode_grouped_att_m_fwd_warmup_inputs(
     block_table_width: Any = WarmupChoices(2, 16)
     kv_strides = (kv_block_stride, kv_token_stride, head_size, 1)
     return dict(
-        q=TritonWarmupTensor(q_dtype, shape=(1, num_heads, head_size)),
+        q=TritonWarmupTensor(q_dtype, shape=(query_len, num_heads, head_size)),
         k_buffer=TritonWarmupTensor(
             kv_dtype, shape=(1, page_size, 1, head_size), strides=kv_strides
         ),
@@ -516,7 +537,7 @@ def _decode_grouped_att_m_fwd_warmup_inputs(
             kv_dtype, shape=(1, page_size, 1, kv_lora_rank), strides=kv_strides
         ),
         att_out=TritonWarmupTensor(
-            torch.float32, shape=(1, num_heads, splits, kv_lora_rank + 1)
+            torch.float32, shape=(query_len, num_heads, splits, kv_lora_rank + 1)
         ),
         Req_to_tokens=TritonWarmupTensor(torch.int32, shape=(1, block_table_width)),
         B_Seqlen=TritonWarmupTensor(torch.int32),
@@ -528,6 +549,8 @@ def _decode_grouped_att_m_fwd_warmup_inputs(
         v_scale=TritonWarmupTensor(torch.float32),
         is_mla=True,
         sliding_window=sliding_window,
+        query_len=query_len,
+        causal=causal,
     )
 
 
@@ -550,6 +573,8 @@ def _decode_grouped_att_m_fwd(
     v_scale,
     is_mla=False,
     sliding_window=0,
+    query_len=1,
+    causal=False,
 ) -> DispatchSpec:
     # with is_mla there is only a single c_kv in smem.
     # could increase BLOCK or num_stages.
@@ -639,6 +664,8 @@ def _decode_grouped_att_m_fwd(
         Lv=Lv,
         IS_MLA=is_mla,
         SLIDING_WINDOW=sliding_window,
+        QUERY_LEN=query_len,
+        CAUSAL=causal,
         **extra_kargs,
     )
 
@@ -660,11 +687,13 @@ def _fwd_kernel_stage2(
     Lv: tl.constexpr,
     OUTPUT_FP16: tl.constexpr = 0,
     SLIDING_WINDOW: tl.constexpr = 0,
+    QUERY_LEN: tl.constexpr = 1,
+    CAUSAL: tl.constexpr = False,
 ):
     cur_batch = tl.program_id(0)
     cur_head = tl.program_id(1)
 
-    cur_batch_seq_len = tl.load(B_Seqlen + cur_batch)
+    _, cur_batch_seq_len = _decode_row_extent(cur_batch, B_Seqlen, QUERY_LEN, CAUSAL)
 
     offs_d = tl.arange(0, BLOCK_DV)
     mask_d = offs_d < Lv
@@ -721,21 +750,25 @@ def _decode_softmax_reducev_fwd_warmup_inputs(
     kv_lora_rank: int,
     num_kv_splits: tuple[int, ...],
     sliding_window: int = 0,
+    query_len: int = 1,
+    causal: bool = False,
 ) -> dict[str, Any]:
     # TritonMLAImpl.forward_mqa: [B, H, num_kv_splits, Lv + 1] scratch, and a
     # [B, H, Lv] output and [B, H] LSE in the query dtype.
     splits: Any = WarmupChoices(*num_kv_splits)
     return dict(
         logits=TritonWarmupTensor(
-            torch.float32, shape=(1, num_heads, splits, kv_lora_rank + 1)
+            torch.float32, shape=(query_len, num_heads, splits, kv_lora_rank + 1)
         ),
-        q=TritonWarmupTensor(dtype, shape=(1, num_heads, 1)),
-        o=TritonWarmupTensor(dtype, shape=(1, num_heads, kv_lora_rank)),
-        lse=TritonWarmupTensor(dtype, shape=(1, num_heads)),
+        q=TritonWarmupTensor(dtype, shape=(query_len, num_heads, 1)),
+        o=TritonWarmupTensor(dtype, shape=(query_len, num_heads, kv_lora_rank)),
+        lse=TritonWarmupTensor(dtype, shape=(query_len, num_heads)),
         v_buffer=TritonWarmupTensor(dtype, shape=(1, 1, 1, kv_lora_rank)),
         b_seq_len=TritonWarmupTensor(torch.int32),
         num_kv_splits=splits,
         sliding_window=sliding_window,
+        query_len=query_len,
+        causal=causal,
     )
 
 
@@ -752,6 +785,8 @@ def _decode_softmax_reducev_fwd(
     b_seq_len,
     num_kv_splits,
     sliding_window=0,
+    query_len=1,
+    causal=False,
 ) -> DispatchSpec:
     batch, head_num = q.shape[0], q.shape[1]
     Lv = v_buffer.shape[-1]
@@ -781,6 +816,8 @@ def _decode_softmax_reducev_fwd(
         BLOCK_DV=BLOCK_DV,
         Lv=Lv,
         SLIDING_WINDOW=sliding_window,
+        QUERY_LEN=query_len,
+        CAUSAL=causal,
         num_warps=4,
         num_stages=2,
         **extra_kargs,
@@ -803,6 +840,8 @@ def decode_attention_fwd_normal(
     k_scale=None,
     v_scale=None,
     sliding_window=0,
+    query_len=1,
+    causal=False,
 ):
     _decode_att_m_fwd(
         q,
@@ -818,9 +857,20 @@ def decode_attention_fwd_normal(
         k_scale,
         v_scale,
         sliding_window=sliding_window,
+        query_len=query_len,
+        causal=causal,
     )
     _decode_softmax_reducev_fwd(
-        attn_logits, q, o, lse, v_buffer, b_seq_len, num_kv_splits, sliding_window
+        attn_logits,
+        q,
+        o,
+        lse,
+        v_buffer,
+        b_seq_len,
+        num_kv_splits,
+        sliding_window,
+        query_len,
+        causal,
     )
 
 
@@ -841,6 +891,8 @@ def decode_attention_fwd_grouped(
     v_scale=None,
     is_mla=False,
     sliding_window=0,
+    query_len=1,
+    causal=False,
 ):
     _decode_grouped_att_m_fwd(
         q,
@@ -857,9 +909,20 @@ def decode_attention_fwd_grouped(
         v_scale,
         is_mla=is_mla,
         sliding_window=sliding_window,
+        query_len=query_len,
+        causal=causal,
     )
     _decode_softmax_reducev_fwd(
-        attn_logits, q, o, lse, v_buffer, b_seq_len, num_kv_splits, sliding_window
+        attn_logits,
+        q,
+        o,
+        lse,
+        v_buffer,
+        b_seq_len,
+        num_kv_splits,
+        sliding_window,
+        query_len,
+        causal,
     )
 
 
@@ -880,9 +943,20 @@ def decode_attention_fwd(
     v_scale=None,
     is_mla=False,
     sliding_window: int | None = None,
+    query_len: int = 1,
+    causal: bool = False,
 ):
-    """`sliding_window` limits each row to its last `sliding_window` keys."""
+    """Decode uniform query blocks from per-request tables and sequence lengths.
+
+    With `query_len > 1`, consecutive query rows share request metadata. Causal
+    rows see the prefix plus their own block position; non-causal rows see the
+    whole block. `sliding_window` limits each row's resulting KV extent.
+    """
     assert num_kv_splits == attn_logits.shape[2]
+    assert query_len > 0
+    if query_len > 1:
+        assert q.shape[0] == b_seq_len.shape[0] * query_len
+        assert req_to_token.shape[0] >= b_seq_len.shape[0]
     sliding_window = sliding_window or 0
 
     if k_scale is None:
@@ -910,6 +984,8 @@ def decode_attention_fwd(
             k_scale,
             v_scale,
             sliding_window=sliding_window,
+            query_len=query_len,
+            causal=causal,
         )
     else:
         # GQA/MQA/MLA
@@ -930,6 +1006,8 @@ def decode_attention_fwd(
             v_scale,
             is_mla=is_mla,
             sliding_window=sliding_window,
+            query_len=query_len,
+            causal=causal,
         )
 
 

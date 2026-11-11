@@ -659,3 +659,111 @@ def test_decode_attention_sliding_window(H_Q, H_KV, D_QK, D_V, is_mla, sliding_w
         scores = torch.einsum("hd,thd->ht", q[b].float(), k) * sm_scale
         ref = torch.einsum("ht,thd->hd", scores.softmax(dim=-1), v)
         torch.testing.assert_close(o[b].float(), ref, atol=2e-2, rtol=2e-2)
+
+
+@pytest.mark.parametrize(
+    "latent,rope,heads",
+    [(256, 32, 1), (256, 32, 16), (432, 64, 32), (512, 64, 64), (1024, 64, 16)],
+)
+@pytest.mark.parametrize(
+    "query_len,causal", [(1, False), (3, True), (8, False), (8, True)]
+)
+@pytest.mark.parametrize("window", [5, 2055])
+def test_uniform_query_metadata_matches_expanded_rows(
+    latent, rope, heads, query_len, causal, window
+):
+    """Request metadata gives the same values, including after graph replay.
+
+    The expanded-row reference uses the existing single-query kernel contract.
+    Distinct pages and unequal lengths expose incorrect query/request indexing.
+    """
+    set_random_seed(0)
+    batch, page_size, splits = 4, 16, 4
+    lengths = torch.tensor(
+        [query_len + 1, 73, 2059, 0], device=DEVICE_TYPE, dtype=torch.int32
+    )
+    pages_per_request = cdiv(2075, page_size)
+    num_pages = 2 * batch * pages_per_request
+    table = (
+        torch.randperm(num_pages, device=DEVICE_TYPE)[: batch * pages_per_request]
+        .reshape(batch, pages_per_request)
+        .to(torch.int32)
+    )
+    # Leave a gap between physical pages, as in a cross-layer cache view.
+    cache = torch.randn(
+        num_pages,
+        page_size + 3,
+        1,
+        latent + rope,
+        device=DEVICE_TYPE,
+        dtype=torch.bfloat16,
+    )[:, :page_size]
+    q = torch.randn(
+        batch * query_len,
+        heads,
+        latent + rope,
+        device=DEVICE_TYPE,
+        dtype=torch.bfloat16,
+    )
+    scale = torch.ones(1, device=DEVICE_TYPE)
+    out = torch.empty(
+        batch * query_len, heads, latent, device=DEVICE_TYPE, dtype=q.dtype
+    )
+    reference = torch.empty_like(out)
+    lse = torch.empty(batch * query_len, heads, device=DEVICE_TYPE, dtype=q.dtype)
+    reference_lse = torch.empty_like(lse)
+    scratch = torch.empty(
+        batch * query_len,
+        heads,
+        splits,
+        latent + 1,
+        device=DEVICE_TYPE,
+        dtype=torch.float32,
+    )
+
+    def run(expanded):
+        active_table, active_lengths = table, lengths
+        kwargs = dict(query_len=query_len, causal=causal)
+        if expanded:
+            active_table = table.repeat_interleave(query_len, dim=0)
+            if causal:
+                offsets = torch.arange(
+                    1 - query_len, 1, device=DEVICE_TYPE, dtype=lengths.dtype
+                )
+                active_lengths = (lengths[:, None] + offsets).flatten().clamp(min=0)
+            else:
+                active_lengths = lengths.repeat_interleave(query_len)
+            kwargs = {}
+        decode_attention_fwd(
+            q,
+            cache,
+            cache[..., :latent],
+            reference if expanded else out,
+            reference_lse if expanded else lse,
+            active_table,
+            active_lengths,
+            scratch,
+            splits,
+            0.0625,
+            page_size,
+            k_scale=scale,
+            v_scale=scale,
+            is_mla=True,
+            sliding_window=window,
+            **kwargs,
+        )
+
+    run(True)
+    run(False)
+    # Empty padding rows retain the original kernel's NaN bit pattern.
+    assert torch.equal(out.view(torch.uint16), reference.view(torch.uint16))
+    assert torch.equal(lse.view(torch.uint16), reference_lse.view(torch.uint16))
+    graph = torch.cuda.CUDAGraph()
+    with torch.cuda.graph(graph):
+        run(False)
+    lengths.add_(torch.tensor([-1, 1, -17, 0], device=DEVICE_TYPE, dtype=lengths.dtype))
+    table.copy_(table.roll(1, dims=1))
+    run(True)
+    graph.replay()
+    assert torch.equal(out.view(torch.uint16), reference.view(torch.uint16))
+    assert torch.equal(lse.view(torch.uint16), reference_lse.view(torch.uint16))

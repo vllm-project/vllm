@@ -163,9 +163,7 @@ class TritonMLABackend(MLACommonBackend):
 
     @classmethod
     def supports_non_causal(cls) -> bool:
-        # DSpark non-causal blocks are flattened to single-token decode rows in
-        # TritonMLAImpl.forward_mqa (decode_attention_fwd has no causal flag /
-        # no intra-block masking). Enables the non-causal AMD MLA path.
+        # Uniform query blocks use one decode row per query position.
         return True
 
 
@@ -304,25 +302,36 @@ class TritonMLAImpl(MLACommonImpl[MLACommonMetadata]):
         num_heads = self.num_heads * self.dcp_world_size
         dtype = self._vllm_config.model_config.dtype
         sliding_window = self.decode_sliding_window or 0
-        _decode_grouped_att_m_fwd.register_warmup(
-            q_dtype=dtype,
-            kv_dtype=kv_cache.dtype,
-            num_heads=num_heads,
-            head_size=kv_cache.shape[-1],
-            kv_lora_rank=self.kv_lora_rank,
-            page_size=kv_cache.shape[1],
-            kv_block_stride=kv_cache.stride(0),
-            kv_token_stride=kv_cache.stride(1),
-            num_kv_splits=num_kv_splits,
-            sliding_window=sliding_window,
+        query_lens = (
+            range(1, max_decode_query_len(self._vllm_config) + 1)
+            if self.decode_sliding_window is not None
+            else (1,)
         )
-        _decode_softmax_reducev_fwd.register_warmup(
-            dtype=dtype,
-            num_heads=num_heads,
-            kv_lora_rank=self.kv_lora_rank,
-            num_kv_splits=num_kv_splits,
-            sliding_window=sliding_window,
-        )
+        for query_len in query_lens:
+            for causal in (False, True) if query_len > 1 else (False,):
+                _decode_grouped_att_m_fwd.register_warmup(
+                    q_dtype=dtype,
+                    kv_dtype=kv_cache.dtype,
+                    num_heads=num_heads,
+                    head_size=kv_cache.shape[-1],
+                    kv_lora_rank=self.kv_lora_rank,
+                    page_size=kv_cache.shape[1],
+                    kv_block_stride=kv_cache.stride(0),
+                    kv_token_stride=kv_cache.stride(1),
+                    num_kv_splits=num_kv_splits,
+                    sliding_window=sliding_window,
+                    query_len=query_len,
+                    causal=causal,
+                )
+                _decode_softmax_reducev_fwd.register_warmup(
+                    dtype=dtype,
+                    num_heads=num_heads,
+                    kv_lora_rank=self.kv_lora_rank,
+                    num_kv_splits=num_kv_splits,
+                    sliding_window=sliding_window,
+                    query_len=query_len,
+                    causal=causal,
+                )
 
     def forward_mqa(
         self,
@@ -377,33 +386,30 @@ class TritonMLAImpl(MLACommonImpl[MLACommonMetadata]):
 
         block_table = attn_metadata.decode.block_table
         seq_lens = attn_metadata.decode.seq_lens
-        # decode_attention_fwd has no causal flag: it launches one program per
-        # row of q and reads that row's KV extent from seq_lens, so intra-block
-        # causality is expressed as per-row extents. Deriving query_len from the
-        # tensors the kernel indexes keeps the three row counts in step.
+        # Windowed rows read per-request metadata directly. Full-attention
+        # decode keeps its existing expanded layout.
         num_decodes = seq_lens.shape[0]
         query_len, remainder = divmod(B, num_decodes) if num_decodes else (1, 0)
         assert remainder == 0, (
             f"non-uniform decode block: {B} query rows over {num_decodes} requests"
         )
+        if query_len > 1 and attn_metadata.causal:
+            assert self.dcp_world_size == 1, (
+                "causal multi-token decode is not supported with DCP"
+            )
+        kernel_query_len = 1
         if query_len > 1:
-            block_table = block_table.repeat_interleave(query_len, dim=0)
-            if attn_metadata.causal:
-                # Per-row extents are offsets off the global sequence length;
-                # under DCP seq_lens is this rank's local slice instead.
-                assert self.dcp_world_size == 1, (
-                    "causal multi-token decode is not supported with DCP"
-                )
-                # Row t attends the prefix plus block tokens 0..t. Clamp holds
-                # padding rows at extent 0; the kernel skips them either way
-                # (split_kv_end == split_kv_start).
-                offsets = torch.arange(
-                    1 - query_len, 1, device=seq_lens.device, dtype=seq_lens.dtype
-                )
-                seq_lens = (seq_lens.unsqueeze(1) + offsets).flatten().clamp(min=0)
+            if self.decode_sliding_window is not None:
+                kernel_query_len = query_len
             else:
-                # Non-causal draft block: every row sees the same prefix.
-                seq_lens = seq_lens.repeat_interleave(query_len)
+                block_table = block_table.repeat_interleave(query_len, dim=0)
+                if attn_metadata.causal:
+                    offsets = torch.arange(
+                        1 - query_len, 1, device=seq_lens.device, dtype=seq_lens.dtype
+                    )
+                    seq_lens = (seq_lens.unsqueeze(1) + offsets).flatten().clamp(min=0)
+                else:
+                    seq_lens = seq_lens.repeat_interleave(query_len)
 
         # Run MQA — always pass layer scales. When KV cache is
         # BF16 the kernel's `if dtype.is_fp8()` check is a no-op.
@@ -423,6 +429,8 @@ class TritonMLAImpl(MLACommonImpl[MLACommonMetadata]):
             v_scale=layer._k_scale,
             is_mla=True,
             sliding_window=self.decode_sliding_window,
+            query_len=kernel_query_len,
+            causal=attn_metadata.causal and kernel_query_len > 1,
         )
 
         return o, lse

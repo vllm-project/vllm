@@ -60,6 +60,21 @@ If any configuration fails, the benchmark exits with status `1` after reporting
 results and writing any requested CSV or JSON output. Successful runs exit with
 status `0`. Profiling runs also propagate failures, but do not save timing metrics.
 
+To isolate uniform multi-token MLA metadata costs, compare expanded query-row
+metadata with per-request metadata inside a CUDA graph:
+
+```bash
+.venv/bin/python benchmarks/kernels/benchmark_mla_query_metadata.py \
+  --output mla-metadata.json
+```
+
+The benchmark checks bitwise equality of attention outputs and LSE before timing.
+`--cases` accepts a JSON list of configurations, for example
+`[{"batch": 4, "query_len": 8, "window": 8192, "seq_len": 1048576}]`.
+Unspecified fields use the script's defaults. Set `fp8` to `false` for BF16 KV.
+The reported medians and ranges cover seven groups of graph replays, including
+metadata construction. These kernel measurements do not estimate serving TPOT.
+
 ## Dataset Overview
 
 <style>
