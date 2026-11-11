@@ -189,17 +189,6 @@ pub struct EngineUnsupportedArgs {
     #[arg(long)]
     pub allowed_media_domains: Option<Unsupported>,
 
-    /// Skip initialization of tokenizer and detokenizer. Expects valid
-    /// `prompt_token_ids` and `None` for prompt from the input. The generated
-    /// output will contain token ids.
-    #[arg(
-        long,
-        visible_alias = "no-skip-tokenizer-init",
-        default_missing_value = "true",
-        num_args = 0..=1
-    )]
-    pub skip_tokenizer_init: Option<Unsupported>,
-
     /// If `True`, enables passing text embeddings as inputs via the
     /// `prompt_embeds` key.
     ///
@@ -409,11 +398,6 @@ pub struct ServerUnsupportedArgs {
     #[arg(long, /* env = "VLLM_LOGGING_CONFIG_PATH" */)]
     pub log_config_file: Option<Unsupported>,
 
-    /// Max number of prompt characters or prompt ID numbers being printed in
-    /// log. The default of None means unlimited.
-    #[arg(long)]
-    pub max_log_len: Option<Unsupported>,
-
     /// If set to True, enable tracking server_load_metrics in the app state.
     #[arg(
         long,
@@ -422,25 +406,6 @@ pub struct ServerUnsupportedArgs {
         num_args = 0..=1
     )]
     pub enable_server_load_tracking: Option<Noop>,
-
-    /// If set to True, including usage on every request.
-    #[arg(
-        long,
-        visible_alias = "no-enable-force-include-usage",
-        default_missing_value = "true",
-        num_args = 0..=1
-    )]
-    pub enable_force_include_usage: Option<Unsupported>,
-
-    /// If set to True, log the stack trace of error responses
-    #[arg(
-        long,
-        // env = "VLLM_SERVER_DEV_MODE",
-        visible_alias = "no-log-error-stack",
-        default_missing_value = "true",
-        num_args = 0..=1
-    )]
-    pub log_error_stack: Option<Unsupported>,
 
     /// If set to True, only enable the Tokens In<>Out endpoint.
     /// This is intended for use in a Disaggregated Everything setup.
@@ -452,35 +417,9 @@ pub struct ServerUnsupportedArgs {
     )]
     pub tokens_only: Option<Unsupported>,
 
-    /// Controls the `system_fingerprint` field on responses: `full`, `hash`,
-    /// `custom`, or `none`.
-    #[arg(long)]
-    pub fingerprint_mode: Option<Unsupported>,
-
-    /// Literal fingerprint string used when `--fingerprint-mode=custom`.
-    #[arg(long)]
-    pub fingerprint_value: Option<Unsupported>,
-
     /// Log level for uvicorn.
     #[arg(long)]
     pub uvicorn_log_level: Option<Unsupported>,
-
-    /// Disable uvicorn access log.
-    #[arg(
-        long,
-        visible_alias = "no-disable-uvicorn-access-log",
-        default_missing_value = "true",
-        num_args = 0..=1
-    )]
-    pub disable_uvicorn_access_log: Option<Noop>,
-
-    /// Comma-separated list of endpoint paths to exclude from uvicorn access
-    /// logs. This is useful to reduce log noise from high-frequency endpoints
-    /// like health checks. Example: "/health,/metrics,/ping".
-    /// When set, access logs for requests to these paths will be suppressed
-    /// while keeping logs for other endpoints.
-    #[arg(long)]
-    pub disable_access_log_for_endpoints: Option<Noop>,
 
     /// Refresh SSL Context when SSL certificate files change
     #[arg(
@@ -490,10 +429,6 @@ pub struct ServerUnsupportedArgs {
         num_args = 0..=1
     )]
     pub enable_ssl_refresh: Option<Unsupported>,
-
-    /// FastAPI root_path when app is behind a path based routing proxy.
-    #[arg(long)]
-    pub root_path: Option<Unsupported>,
 
     /// Additional ASGI middleware to apply to the app. We accept multiple
     /// --middleware arguments. The value should be an import path. If a

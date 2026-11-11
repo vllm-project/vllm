@@ -84,7 +84,6 @@ def test_pd_role_commit_waits_for_queued_requests_and_kv_release():
         scheduler_output,
         ModelRunnerOutput(
             req_ids=[],
-            req_id_to_index={},
             kv_connector_output=KVConnectorOutput(
                 finished_sending={retained.request_id}
             ),
