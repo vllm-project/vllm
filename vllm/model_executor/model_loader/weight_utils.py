@@ -16,7 +16,7 @@ import tempfile
 import threading
 import time
 from collections.abc import Callable, Generator, Iterable
-from contextlib import contextmanager, suppress
+from contextlib import contextmanager, nullcontext, suppress
 from pathlib import Path
 from typing import IO, TYPE_CHECKING, Any
 
@@ -56,6 +56,7 @@ from vllm.tracing import instrument
 from vllm.transformers_utils.repo_utils import hf_api, hf_fs
 from vllm.utils.cpu_resource_utils import get_available_memory
 from vllm.utils.import_utils import PlaceholderModule
+from vllm.utils.system_utils import set_env_var
 
 try:
     from runai_model_streamer import SafetensorsStreamer
@@ -1276,8 +1277,14 @@ def runai_safetensors_weights_iterator(
     hf_weights_files: list[str],
     use_tqdm_on_load: bool,
     is_distributed: bool = False,
+    *,
+    load_engram_on_cpu: bool = False,
 ) -> Generator[tuple[str, torch.Tensor], None, None]:
-    """Iterate over the weights in the model safetensor files."""
+    """Iterate over the weights in the model safetensor files.
+
+    With `load_engram_on_cpu`, a device stream leaves Engram tables to a
+    separate CPU stream.
+    """
     with SafetensorsStreamer() as streamer:
         is_cuda_alike = current_platform.is_cuda_alike()
         device = (
@@ -1288,28 +1295,86 @@ def runai_safetensors_weights_iterator(
 
         # runai-model-streamer<0.17.0 has no `owned` and reuses its buffers
         owned = "owned" in inspect.signature(streamer.stream_files).parameters
-        streamer.stream_files(
+
+        def stream(
+            files: list[str],
+            device: str,
+            is_distributed: bool,
+            tensor_names: list[str] | None = None,
+            memory_limit: str | None = None,
+        ) -> Generator[tuple[str, torch.Tensor], None, None]:
+            kwargs: dict[str, Any] = {"owned": True} if owned else {}
+            if tensor_names is not None:
+                kwargs["tensor_names"] = tensor_names
+            with (
+                set_env_var("RUNAI_STREAMER_MEMORY_LIMIT", memory_limit)
+                if memory_limit is not None
+                else nullcontext()
+            ):
+                streamer.stream_files(
+                    files, device=device, is_distributed=is_distributed, **kwargs
+                )
+            total_tensors = sum(
+                len(tensors_meta)
+                for tensors_meta in streamer.files_to_tensors_metadata.values()
+            )
+
+            tensor_iter = tqdm(
+                streamer.get_tensors(),
+                total=total_tensors,
+                desc="Loading safetensors using Runai Model Streamer",
+                bar_format=_BAR_FORMAT,
+                disable=not enable_tqdm(use_tqdm_on_load),
+                mininterval=2,
+            )
+
+            for name, tensor in tensor_iter:
+                yield name, tensor if owned else tensor.clone()
+
+        if not load_engram_on_cpu or device == "cpu":
+            yield from stream(hf_weights_files, device, is_distributed)
+            return
+
+        from runai_model_streamer.safetensors_streamer.safetensors_pytorch import (
+            prepare_request,
+        )
+
+        # Discover ranks like the device stream: RunAI's first read fixes its
+        # queue depth.
+        headers = prepare_request(
+            streamer.file_streamer,
             hf_weights_files,
-            device=device,
-            is_distributed=is_distributed,
-            **({"owned": True} if owned else {}),
+            None,
+            discover_ranks=is_distributed,
         )
-        total_tensors = sum(
-            len(tensors_meta)
-            for tensors_meta in streamer.files_to_tensors_metadata.values()
-        )
+        device_weights: dict[str, list[str]] = {}
+        cpu_weights: dict[str, list[str]] = {}
+        for path, (_, tensors_meta, _) in zip(hf_weights_files, headers):
+            for tensor_meta in tensors_meta:
+                # Engram tables can exceed device memory before TP sharding.
+                is_table = _ENGRAM_WEIGHT_RE.search(tensor_meta.name) is not None
+                weights = cpu_weights if is_table else device_weights
+                weights.setdefault(path, []).append(tensor_meta.name)
+        if not cpu_weights:
+            yield from stream(hf_weights_files, device, is_distributed)
+            return
 
-        tensor_iter = tqdm(
-            streamer.get_tensors(),
-            total=total_tensors,
-            desc="Loading safetensors using Runai Model Streamer",
-            bar_format=_BAR_FORMAT,
-            disable=not enable_tqdm(use_tqdm_on_load),
-            mininterval=2,
+        if device_weights:
+            yield from stream(
+                list(device_weights),
+                device,
+                is_distributed,
+                [name for names in device_weights.values() for name in names],
+            )
+        # A table can exceed any host limit, which RunAI rejects. 0 sizes the
+        # buffer to the largest tensor.
+        yield from stream(
+            list(cpu_weights),
+            "cpu",
+            False,
+            [name for names in cpu_weights.values() for name in names],
+            memory_limit="0",
         )
-
-        for name, tensor in tensor_iter:
-            yield name, tensor if owned else tensor.clone()
 
 
 def fastsafetensors_weights_iterator(

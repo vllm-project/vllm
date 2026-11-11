@@ -12,7 +12,7 @@ import torch
 from torch import nn
 from transformers.utils import SAFE_WEIGHTS_INDEX_NAME
 
-from vllm.config import ModelConfig
+from vllm.config import ModelConfig, get_current_vllm_config_or_none
 from vllm.config.load import LoadConfig
 from vllm.distributed import get_world_group, in_single_pp_stage
 from vllm.logger import init_logger
@@ -257,8 +257,13 @@ class RunaiModelStreamerLoader(BaseModelLoader):
             else:
                 # Do not substitute another node's local checkpoint paths.
                 selected_files = hf_weights_files
+        vllm_config = get_current_vllm_config_or_none()
+        engram_config = vllm_config.engram_config if vllm_config else None
         return runai_safetensors_weights_iterator(
-            selected_files, self.load_config.use_tqdm_on_load, is_distributed
+            selected_files,
+            self.load_config.use_tqdm_on_load,
+            is_distributed,
+            load_engram_on_cpu=bool(engram_config and engram_config.cpu_offload),
         )
 
     def download_model(self, model_config: ModelConfig) -> None:

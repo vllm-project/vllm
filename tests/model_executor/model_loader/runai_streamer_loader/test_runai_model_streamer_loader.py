@@ -14,9 +14,11 @@ from safetensors.torch import load_file, save_file
 
 from tests.utils import create_new_process_for_each_test
 from vllm import SamplingParams
+from vllm.config import EngramConfig
 from vllm.config.load import LoadConfig
 from vllm.model_executor.model_loader import get_model_loader
 from vllm.model_executor.model_loader import runai_streamer_loader as rsl
+from vllm.platforms import current_platform
 from vllm.utils.mem_constants import GiB_bytes
 
 load_format = "runai_streamer"
@@ -605,6 +607,45 @@ def test_runai_header_reader_uses_actual_tensor_names(tmp_path):
     )
     (names,) = rsl._get_remote_checkpoint_keys([str(path)])
     assert set(names) == {"main.weight", "draft.unindexed_weight"}
+
+
+@pytest.mark.skipif(
+    not current_platform.is_cuda_alike(), reason="Distributed RunAI streams to GPU"
+)
+def test_runai_distributed_loads_engram_tables_on_cpu(
+    tmp_path, monkeypatch, default_vllm_config
+):
+    """Engram tables skip the GPU stream and load even above the host limit."""
+    monkeypatch.setenv("RUNAI_STREAMER_MEMORY_LIMIT", "1024")
+    table = torch.arange(64 * 32).remainder(256).to(torch.uint8).reshape(64, 32)
+    tables = {
+        "layers.1.engram.embed.weight": table.view(torch.float8_e4m3fn),
+        "layers.1.engram.embed.scale": table[:, :1].view(torch.float8_e8m0fnu),
+        "layers.14.engram.embed.weight": table.flip(0).view(torch.float8_e4m3fn),
+    }
+    weights = {
+        "layers.1.engram.wkv.weight": torch.ones(4, 4),
+        "embed_tokens.weight": torch.full((8,), 2.0),
+    }
+    layer_1 = {name: t for name, t in tables.items() if name.startswith("layers.1.")}
+    save_file(weights | layer_1, tmp_path / "model-00001-of-00002.safetensors")
+    save_file(
+        {"layers.14.engram.embed.weight": tables["layers.14.engram.embed.weight"]},
+        tmp_path / "model-00002-of-00002.safetensors",
+    )
+    default_vllm_config.engram_config = EngramConfig(cpu_offload=True)
+    config = types.SimpleNamespace(model=str(tmp_path), model_weights="", revision=None)
+
+    loaded = dict(
+        _runai_loader({"distributed": True}).get_all_weights(config, torch.nn.Module())
+    )
+
+    assert os.environ["RUNAI_STREAMER_MEMORY_LIMIT"] == "1024"
+    assert loaded.keys() == (tables | weights).keys()
+    for name, tensor in loaded.items():
+        expected = tables[name] if name in tables else weights[name]
+        assert tensor.device.type == ("cpu" if name in tables else "cuda")
+        assert torch.equal(tensor.cpu().view(torch.uint8), expected.view(torch.uint8))
 
 
 @pytest.mark.parametrize("stale", [False, True])
