@@ -24,6 +24,7 @@ Compare two session dirs:
 import argparse
 import contextlib
 import csv
+import io
 import json
 import os
 import shutil
@@ -171,11 +172,11 @@ QUICK = [
     ),
     Scenario(
         "large-ctx-c16",
-        "Large context prompts with barely enough space in GPU for a couple "
-        "of requests in GPU",
+        "Large context prompts with barely enough space in GPU for a few"
+        "requests in GPU",
         concurrency=16,
         offload_block_size=64,
-        prefix_tokens=300_000,
+        prefix_tokens=150_000,
         cpu_bytes=gib(40),
         gpu_bytes=gib(20),
     ),
@@ -548,6 +549,14 @@ class BenchmarkSession:
         print(f"\nAll runs complete. Results in {self.session_dir}/")
         return self.results
 
+    def _print_csv_rows(self, results: list[dict]) -> None:
+        buf = io.StringIO()
+        writer = csv.writer(buf, lineterminator="\n")
+        writer.writerow(["scenario"] + METRICS)
+        for r in results:
+            writer.writerow([r["name"]] + [r.get(m, "") for m in METRICS])
+        print(buf.getvalue())
+
     def _write_table(self) -> None:
         """Scenarios as rows, metrics as columns; printed and saved as CSV."""
         csv_path = self.session_dir / "results.csv"
@@ -556,16 +565,8 @@ class BenchmarkSession:
             writer.writerow(["scenario"] + METRICS)
             for r in self.results:
                 writer.writerow([r["name"]] + [r.get(m, "") for m in METRICS])
-
-        rows = [[r["name"]] + [_fmt(r.get(m)) for m in METRICS] for r in self.results]
-        header = ["scenario"] + METRICS
-        widths = [
-            max(len(row[i]) for row in rows + [header]) for i in range(len(header))
-        ]
-        print()
-        for row in [header] + rows:
-            print("  ".join(cell.ljust(w) for cell, w in zip(row, widths)))
-        print(f"\nTable saved to {csv_path}")
+        self._print_csv_rows(self.results)
+        print(f"Table saved to {csv_path}")
 
     def _checkpoint(self) -> None:
         (self.session_dir / "results.json").write_text(
