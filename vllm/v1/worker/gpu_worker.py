@@ -567,11 +567,9 @@ class Worker(WorkerBase):
     def _init_workspace_and_model_runner(self) -> None:
         """Set up the workspace manager, build the model runner, report usage."""
         # DSpark target and draft CUDA graphs retain workspace views concurrently.
-        num_ubatches = 2 if self.vllm_config.parallel_config.enable_dbo else 1
         pc = self.vllm_config.parallel_config
-        if pc.dbo_tp_only:
-            # Both microbatches compute on one stream: one workspace set.
-            num_ubatches = 1
+        # Pure-TP DBO runs both microbatches on one stream: one workspace set.
+        num_ubatches = 2 if pc.enable_dbo and not pc.dbo_tp_only else 1
         init_workspace_manager(
             self.device,
             num_ubatches,
