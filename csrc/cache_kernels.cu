@@ -262,7 +262,8 @@ struct CopyWithScaleOp {
   }
 };
 
-template <typename scalar_t, typename cache_t, Fp8KVCacheDataType kv_dt>
+template <typename scalar_t, typename cache_t, Fp8KVCacheDataType kv_dt,
+          bool kGrouped>
 __global__ void reshape_and_cache_kernel(
     const scalar_t* __restrict__ key,    // [num_tokens, num_heads, head_size]
     const scalar_t* __restrict__ value,  // [num_tokens, num_heads, head_size]
@@ -273,8 +274,30 @@ __global__ void reshape_and_cache_kernel(
     const int64_t* __restrict__ slot_mapping,  // [num_tokens]
     const int key_stride, const int value_stride, const int num_heads,
     const int head_size, const int block_size, const int x,
-    const float* k_scale, const float* v_scale, const bool interleaved_v) {
-  const int64_t token_idx = blockIdx.x;
+    const int num_tokens, const float* k_scale, const float* v_scale,
+    const bool interleaved_v) {
+  const int h_block_count = head_size / x;  // head_size//x
+  int64_t token_idx;
+  int h_block_idx;
+  if constexpr (kGrouped) {
+    // blockIdx.y is the head. Threads walk (token, h_block) with the token
+    // fastest, so the block_size tokens of a KV block, which share cache lines
+    // in both caches, are stored together by one block.
+    const int group_size = block_size * h_block_count;
+    const int idx = blockIdx.x * blockDim.x + threadIdx.x;
+    token_idx =
+        static_cast<int64_t>(idx / group_size) * block_size + idx % block_size;
+    h_block_idx = blockIdx.y * h_block_count + idx % group_size / block_size;
+    if (token_idx >= num_tokens) {
+      return;
+    }
+  } else {
+    token_idx = blockIdx.x;
+    h_block_idx = threadIdx.x;
+    if (h_block_idx >= num_heads * h_block_count) {
+      return;
+    }
+  }
   const int64_t slot_idx = slot_mapping[token_idx];
   if (slot_idx < 0) {
     return;
@@ -282,12 +305,6 @@ __global__ void reshape_and_cache_kernel(
 
   const int64_t block_idx = slot_idx / block_size;
   const int64_t block_offset = slot_idx % block_size;
-  const int h_block_count = head_size / x;  // head_size//x
-
-  const int h_block_idx = threadIdx.x;
-  if (h_block_idx >= num_heads * h_block_count) {
-    return;
-  }
 
   const int head_idx = h_block_idx / h_block_count;
   const int h_block = h_block_idx % h_block_count;
@@ -848,16 +865,19 @@ __global__ void cp_gather_indexer_k_quant_cache_kernel(
 // CACHE_T is the stored data type of kv-cache.
 // KV_DTYPE is the real data type of kv-cache.
 #define CALL_RESHAPE_AND_CACHE(KV_T, CACHE_T, KV_DTYPE)                     \
-  vllm::reshape_and_cache_kernel<KV_T, CACHE_T, KV_DTYPE>                   \
-      <<<grid, block, 0, stream>>>(                                         \
-          reinterpret_cast<KV_T*>(key.data_ptr()),                          \
-          reinterpret_cast<KV_T*>(value.data_ptr()),                        \
-          reinterpret_cast<CACHE_T*>(key_cache.data_ptr()),                 \
-          reinterpret_cast<CACHE_T*>(value_cache.data_ptr()),               \
-          slot_mapping.const_data_ptr<int64_t>(), key_stride, value_stride, \
-          num_heads, head_size, block_size, x,                              \
-          reinterpret_cast<const float*>(k_scale.data_ptr()),               \
-          reinterpret_cast<const float*>(v_scale.data_ptr()), interleaved_v);
+  auto kernel =                                                             \
+      grouped                                                               \
+          ? vllm::reshape_and_cache_kernel<KV_T, CACHE_T, KV_DTYPE, true>   \
+          : vllm::reshape_and_cache_kernel<KV_T, CACHE_T, KV_DTYPE, false>; \
+  kernel<<<grid, block, 0, stream>>>(                                       \
+      reinterpret_cast<KV_T*>(key.data_ptr()),                              \
+      reinterpret_cast<KV_T*>(value.data_ptr()),                            \
+      reinterpret_cast<CACHE_T*>(key_cache.data_ptr()),                     \
+      reinterpret_cast<CACHE_T*>(value_cache.data_ptr()),                   \
+      slot_mapping.const_data_ptr<int64_t>(), key_stride, value_stride,     \
+      num_heads, head_size, block_size, x, num_tokens,                      \
+      reinterpret_cast<const float*>(k_scale.data_ptr()),                   \
+      reinterpret_cast<const float*>(v_scale.data_ptr()), interleaved_v);
 
 void reshape_and_cache(
     torch::stable::Tensor& key,    // [num_tokens, num_heads, head_size]
@@ -881,11 +901,23 @@ void reshape_and_cache(
   int value_stride = value.stride(0);
   int head_div_x = head_size / x;
 
-  dim3 grid(num_tokens);
-  dim3 block(std::min(num_heads * head_div_x, 512));
   const torch::stable::accelerator::DeviceGuard device_guard(
       key.get_device_index());
   const cudaStream_t stream = get_current_cuda_stream();
+
+  // One token per block stores the block_size tokens that share each cache
+  // line from different blocks (on MI300-class GPUs, from XCDs with separate
+  // L2s), a piece at a time; grouped blocks store whole KV blocks. Small,
+  // scattered (decode) batches are still faster one token per block, so group
+  // only from two groups per CU, where that no longer holds.
+  const int num_groups = (num_tokens + block_size - 1) / block_size;
+  const bool grouped =
+      num_groups * num_heads >= 2 * get_device_prop()->multiProcessorCount;
+  const dim3 grid =
+      grouped
+          ? dim3((num_groups * block_size * head_div_x + 255) / 256, num_heads)
+          : dim3(num_tokens);
+  const dim3 block(grouped ? 256 : std::min(num_heads * head_div_x, 512));
 
   DISPATCH_BY_KV_CACHE_DTYPE(key.scalar_type(), kv_cache_dtype,
                              CALL_RESHAPE_AND_CACHE);
