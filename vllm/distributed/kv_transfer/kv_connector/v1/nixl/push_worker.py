@@ -66,6 +66,7 @@ from vllm.distributed.kv_transfer.kv_connector.v1.nixl.tp_mapping import (
 )
 from vllm.distributed.kv_transfer.kv_connector.v1.nixl.utils import get_base_request_id
 from vllm.logger import init_logger
+from vllm.v1.kv_cache_interface import is_full_attention_spec
 
 if TYPE_CHECKING:
     from vllm.config import VllmConfig
@@ -177,6 +178,10 @@ class NixlPushConnectorWorker(NixlBaseConnectorWorker):
         self._chunked_push = bool(
             extra_config.get("enable_chunked_push", False)
             and self.kv_transfer_config.kv_role == "kv_producer"
+        )
+        self._chunk_full_attention = tuple(
+            is_full_attention_spec(group.kv_cache_spec)
+            for group in self.kv_cache_config.transfer_groups
         )
         # The main thread hands jobs and retirements to the writer through
         # this queue; the chunk state below belongs to the writer.
@@ -480,7 +485,11 @@ class NixlPushConnectorWorker(NixlBaseConnectorWorker):
             )
             return False
         # The slices in _chunk_block_ranges need D's blocks to fit the prompt.
-        return job.total_blocks >= len(remote[0])
+        return all(
+            job.total_blocks >= len(ids)
+            for full_attention, ids in zip(self._chunk_full_attention, remote)
+            if full_attention
+        )
 
     def _drop_chunk_request(self, req_id: ReqId) -> None:
         """Drop the request's chunk state; its remaining jobs are skipped."""
@@ -595,28 +604,42 @@ class NixlPushConnectorWorker(NixlBaseConnectorWorker):
         *,
         notify: bool,
     ) -> list[TransferHandle]:
-        """WRITE the job's blocks that fall in D's uncached suffix, with the
-        request's completion notification if `notify`."""
+        """WRITE the job's full-attention blocks that fall in D's uncached
+        suffix and its state blocks, with the request's completion notification
+        if `notify`."""
         # Keep the engine alive while it receives pushes, as _do_start_push_kv
         # does.
         self._engine_last_active[reg_data["decode_engine_id"]] = time.perf_counter()
         remote_groups = self._as_grouped_block_ids(reg_data["local_block_ids"])
-        ranges = self._chunk_block_ranges(job, len(remote_groups[0]))
-        if ranges is None:
+        local: list[list[int]] = []
+        remote: list[list[int]] = []
+        for full_attention, local_ids, remote_ids in zip(
+            self._chunk_full_attention, job.block_ids, remote_groups
+        ):
+            if not full_attention:
+                # State blocks, in the last job only, are paired with D's as in
+                # a whole-request push.
+                local.append(local_ids)
+                remote.append(list(remote_ids) if local_ids else [])
+            elif (ranges := self._chunk_block_ranges(job, len(remote_ids))) is None:
+                local.append([])
+                remote.append([])
+            else:
+                local_range, remote_range = ranges
+                local.append(local_ids[local_range])
+                remote.append(list(remote_ids[remote_range]))
+        if not any(local):
             return []
-        local_range, remote_range = ranges
-        local = (job.block_ids[local_range],)
-        remote = (list(remote_groups[0][remote_range]),)
 
         physical_local = self._logical_to_kernel_block_ids(
-            local, self._physical_blocks_per_logical_kv_block
+            tuple(local), self._physical_blocks_per_logical_kv_block
         )
         push_meta = ReqMeta(
-            local_block_ids=local,
+            local_block_ids=tuple(local),
             local_physical_block_ids=physical_local,
             tp_size=self.world_size,
             remote=RemoteMeta(
-                block_ids=remote,
+                block_ids=tuple(remote),
                 host="",
                 port=0,
                 engine_id=reg_data["decode_engine_id"],
@@ -634,8 +657,8 @@ class NixlPushConnectorWorker(NixlBaseConnectorWorker):
     def _chunk_block_ranges(
         job: NixlPushChunkJob, num_remote_blocks: int
     ) -> tuple[slice, slice] | None:
-        """Map a job's range onto D's uncached suffix: slices of the job's
-        `block_ids` and of D's block list."""
+        """Map a job's range onto D's uncached suffix: slices of a
+        full-attention group's ids in the job and of D's ids for the group."""
         remote_start = job.total_blocks - num_remote_blocks
         start = max(job.start_block, remote_start)
         if start >= job.end_block:

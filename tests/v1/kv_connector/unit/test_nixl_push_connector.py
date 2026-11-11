@@ -336,43 +336,57 @@ class TestPushScheduler:
 
 class TestChunkedPushScheduler:
     @staticmethod
-    def _scheduler_with_request():
-        """A chunked-push scheduler and a 40-token request on blocks 1-3 of 16
-        tokens, with the scheduler output that resolves the request's blocks."""
+    def _scheduler_with_request(kv_cache_config=None, block_ids=([1, 2, 3],)):
+        """A chunked-push scheduler and a 40-token request on `block_ids`
+        (full-attention blocks 1-3 of 16 tokens by default), with the scheduler
+        output that resolves the request's blocks."""
         vllm_config = create_vllm_config(
             kv_connector="NixlPushConnector",
             kv_role="kv_producer",
             kv_connector_extra_config={"enable_chunked_push": True},
         )
-        kv_cache_config = make_kv_cache_config(block_size=16, num_blocks=8)
         sched = NixlPushConnectorScheduler(
-            vllm_config, "test-prefill-engine", kv_cache_config
+            vllm_config,
+            "test-prefill-engine",
+            kv_cache_config or make_kv_cache_config(block_size=16, num_blocks=8),
         )
         request = create_request(num_tokens=40, block_size=16, do_remote_decode=True)
-        sched.update_state_after_alloc(request, _BlocksMock(([1, 2, 3],)), 0)
+        sched.update_state_after_alloc(request, _BlocksMock(block_ids), 0)
 
         output = SchedulerOutput.make_empty()
         output.preempted_req_ids = set()
         output.kv_connector_block_state = KVConnectorBlockState(
             req_ids={request.request_id},
-            resolve_block_ids=lambda _: ([1, 2, 3],),
+            resolve_block_ids=lambda _: block_ids,
             boundary_state_offloads={},
         )
         return sched, request, output
 
+    @staticmethod
+    def _jobs(sched, output, request, num_computed, num_scheduled):
+        request.num_computed_tokens = num_computed
+        output.num_scheduled_tokens = {request.request_id: num_scheduled}
+        return [
+            (job.block_ids, job.start_block, job.end_block, job.total_blocks)
+            for job in sched.build_connector_meta(output).push_chunk_jobs
+        ]
+
     def test_chunk_jobs_cover_newly_computed_blocks(self):
         sched, request, output = self._scheduler_with_request()
-
-        output.num_scheduled_tokens = {request.request_id: 32}
-        (first,) = sched.build_connector_meta(output).push_chunk_jobs
-        assert (first.start_block, first.end_block, first.block_ids) == (0, 2, [1, 2])
-
-        request.num_computed_tokens = 32
-        output.num_scheduled_tokens = {request.request_id: 8}
-        (last,) = sched.build_connector_meta(output).push_chunk_jobs
+        assert self._jobs(sched, output, request, 0, 32) == [(([1, 2],), 0, 2, 3)]
         # The partial last block goes out once the prompt is complete.
-        assert (last.start_block, last.end_block, last.block_ids) == (2, 3, [3])
-        assert last.total_blocks == 3
+        assert self._jobs(sched, output, request, 32, 8) == [(([3],), 2, 3, 3)]
+        # Steps after the prompt add no jobs.
+        assert self._jobs(sched, output, request, 40, 1) == []
+
+    def test_mamba_state_rides_on_the_last_chunk_job(self):
+        sched, request, output = self._scheduler_with_request(
+            make_kv_cache_config(block_size=16, num_blocks=8, mamba_enabled=True),
+            block_ids=([1, 2, 3], [7]),
+        )
+        assert sched._chunked_push
+        assert self._jobs(sched, output, request, 0, 32) == [(([1, 2], []), 0, 2, 3)]
+        assert self._jobs(sched, output, request, 32, 8) == [(([3], [7]), 2, 3, 3)]
 
     def test_preempted_request_pushes_again_from_first_block(self):
         sched, request, output = self._scheduler_with_request()
@@ -390,7 +404,7 @@ class TestChunkedPushScheduler:
         output.preempted_req_ids = set()
         output.num_scheduled_tokens = {request.request_id: 32}
         (job,) = sched.build_connector_meta(output).push_chunk_jobs
-        assert (job.start_block, job.end_block) == (0, 2)
+        assert (job.block_ids, job.start_block, job.end_block) == (([1, 2],), 0, 2)
 
 
 # ----------------------------------------------------------------- #
@@ -519,7 +533,7 @@ def _registration_data(
 def _chunk_job(start_block: int, end_block: int) -> NixlPushChunkJob:
     return NixlPushChunkJob(
         request_id="req-p",
-        block_ids=[1, 2][start_block:end_block],
+        block_ids=([1, 2][start_block:end_block],),
         start_block=start_block,
         end_block=end_block,
         total_blocks=2,
@@ -538,6 +552,7 @@ def _chunk_worker() -> _StubWriterWorker:
     w._ensure_handshake = lambda *a, **k: None
     w._chunk_path_supported = lambda job, reg_data: True
     w._logical_to_kernel_block_ids = lambda blocks, ratio: blocks
+    w._chunk_full_attention = (True,)
     w.nixl_wrapper = MagicMock()
     w.xfer_stats = MagicMock()
     w._lease_extension = 20
@@ -576,6 +591,27 @@ def _run_writer_until_idle(w: _StubWriterWorker) -> None:
         w._push_writer_stop.set()
         w._push_writer_wake.set()
         t.join(timeout=2)
+
+
+def test_state_groups_are_written_with_the_last_job_only():
+    w = _chunk_worker()
+    w._chunk_full_attention = (True, False)
+    reg_data = _registration_data("req-d", local_block_ids=((100, 101), (200,)))
+
+    w._submit_chunk_job(
+        NixlPushChunkJob("req-p", ([1], []), 0, 1, 2),
+        reg_data,
+        notify=False,
+    )
+    w._submit_chunk_job(
+        NixlPushChunkJob("req-p", ([2], [7]), 1, 2, 2),
+        reg_data,
+        notify=True,
+    )
+    assert w.writes == [
+        (([1], []), ([100], []), b""),
+        (([2], [7]), ([101], [200]), None),
+    ]
 
 
 def test_last_chunk_waits_for_earlier_writes_and_carries_notification():

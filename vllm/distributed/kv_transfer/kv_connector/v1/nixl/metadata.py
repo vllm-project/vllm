@@ -275,13 +275,15 @@ class ReqMeta:
 @dataclass(frozen=True)
 class NixlPushChunkJob:
     """Prompt blocks `[start_block, end_block)` of a running request, with
-    their ids in its full-attention block table. The job that ends at
-    `total_blocks`, the prompt's block count, carries the request's
-    completion notification to D; the others carry none.
+    their ids per transfer group. The job that ends at `total_blocks`, the
+    prompt's block count, also carries the blocks of the groups other than
+    full attention, which hold state that only the last step completes, and
+    the request's completion notification to D. In the other jobs those
+    groups are empty and no notification is sent.
     """
 
     request_id: ReqId
-    block_ids: list[int]
+    block_ids: BlockIds
     start_block: int
     end_block: int
     total_blocks: int

@@ -34,9 +34,10 @@ instead of waiting for the request to finish. Enable it on the producer with:
 ```
 
 The option is off by default. Chunked push is used only in the configurations
-it is tested in: a device KV buffer, PP1, PCP1, DCP1, one transferable
-full-attention cache group, and P and D with the same TP. In other
-configurations a warning is logged and requests are pushed whole.
+it is tested in: a device KV buffer, PP1, PCP1, DCP1, full-attention transfer
+groups of one block size alongside only Mamba and DeepSeek-V4 sliding-window
+groups, and P and D with the same TP. In other configurations a warning is
+logged and requests are pushed whole.
 
 Chunked push changes only when blocks are written. Block lifetimes are those of
 whole-request push: a running request owns its blocks, preemption and abort
@@ -47,7 +48,10 @@ release them, and a finished request holds them under the KV lease
   to D once the step's event completes. D decodes once the normal
   completion notification arrives, so it must follow all of the request's
   data: it rides on the WRITE of the last prompt block, which is submitted only
-  after the request's earlier WRITEs have completed successfully.
+  after the request's earlier WRITEs have completed successfully. The other
+  groups (Mamba, and DeepSeek-V4 sliding-window and compressor state) hold
+  state that only the last prefill step completes, so their blocks ride on the
+  last WRITE, clipped and paired with D's blocks as in a whole-request push.
 - When the request finishes, the existing whole-request path reports it once
   its last chunk WRITE completed. If a chunk was not written (an incompatible
   peer or a failed WRITE), the whole request is written instead; if D has not
