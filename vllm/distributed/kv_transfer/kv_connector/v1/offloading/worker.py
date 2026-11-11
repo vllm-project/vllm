@@ -78,7 +78,12 @@ class OffloadingConnectorWorker:
             kv_cache_config.kv_cache_groups[group_id] for group_id in selected_group_ids
         )
         mappings = derive_canonical_mappings(
-            self.vllm_config, kv_cache_config, kv_caches
+            self.vllm_config,
+            kv_cache_config,
+            kv_caches,
+            allow_kernel_block_splitting=(
+                self.spec.config.parallel.is_parallelism_agnostic
+            ),
         )
 
         # layer_name -> (num_blocks, page_size_bytes) tensor

@@ -1,5 +1,6 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
+from dataclasses import replace
 from unittest.mock import MagicMock
 
 import pytest
@@ -18,6 +19,7 @@ from vllm.v1.kv_cache_interface import (
     KVCacheGroupSpec,
     KVCacheSpec,
     KVQuantMode,
+    MambaSpec,
     MLAAttentionSpec,
 )
 from vllm.v1.kv_offload.base import CanonicalPageMapping, CopyRun
@@ -131,6 +133,40 @@ def _triples(runs: tuple[CopyRun, ...]) -> list[tuple[int, int, int]]:
                 )
             )
     return out
+
+
+@pytest.mark.parametrize("form", CACHE_BUILDERS)
+@pytest.mark.parametrize("tp,total", [(1, 2), (4, 8), (4, 2)])
+def test_kernel_blocks_preserve_canonical_bytes(form, tp, total):
+    """Kernel splitting must preserve the manager page's portable byte format."""
+    spec = _full_spec(num_kv_heads=max(1, total // tp))
+    build = CACHE_BUILDERS[form]
+    full = build(spec)
+    full.copy_(torch.arange(full.numel()).reshape(full.shape).remainder(251))
+    kernel = build(replace(spec, block_size=2))
+    split = torch.empty_strided(
+        (NUM_BLOCKS * 2, *kernel.shape[1:]), kernel.stride(), dtype=kernel.dtype
+    )
+    for block in range(NUM_BLOCKS):
+        for part in range(2):
+            split[2 * block + part].copy_(full[block].narrow(1, 2 * part, 2))
+
+    def store(cache, mapping):
+        page = cache.as_strided((spec.page_size_bytes,), (1,))
+        canonical = torch.zeros(mapping.canonical_page_size_bytes, dtype=cache.dtype)
+        for src, dst, size in _triples(mapping.runs):
+            canonical[dst : dst + size] = page[src : src + size]
+        return canonical
+
+    mappings = []
+    for rank in range(tp):
+        ctx = _ctx(rank, tp=tp, total=total)
+        expected = _mapping(spec, full, ctx)
+        actual = _mapping(spec, split, ctx)
+        assert actual.parallelism_agnostic == expected.parallelism_agnostic
+        assert torch.equal(store(full, expected), store(split, actual))
+        mappings.append(actual)
+    _verify_tiling("attention", mappings)
 
 
 # ---------------------------------------------------------------------------
@@ -489,6 +525,32 @@ def _kv_cache_config(groups):
     config.kv_cache_groups = groups
     config.num_blocks = NUM_BLOCKS
     return config
+
+
+def test_split_hybrid_cache_keeps_opaque_bytes():
+    """Existing topology-specific files must retain their original encoding."""
+    spec = _full_spec()
+    kernel = _packed_hnd_cache(replace(spec, block_size=2))
+    cache = torch.zeros((2 * NUM_BLOCKS, *kernel.shape[1:]), dtype=kernel.dtype)
+    kv_cache_config = _kv_cache_config(
+        [
+            KVCacheGroupSpec(["attn"], spec),
+            KVCacheGroupSpec(
+                ["mamba"],
+                MambaSpec(
+                    block_size=4,
+                    shapes=((spec.page_size_bytes,),),
+                    dtypes=(torch.int8,),
+                    mamba_cache_mode="align",
+                ),
+            ),
+        ]
+    )
+    mappings = derive_canonical_mappings(
+        _vllm_config(), kv_cache_config, {"attn": cache}
+    )
+    assert mappings["attn"] == _opaque_fallback_mapping(spec.page_size_bytes, 1, 0)
+    assert mappings["mamba"] == mappings["attn"]
 
 
 def test_derive_mixed_model_with_dcp():

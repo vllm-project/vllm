@@ -119,6 +119,7 @@ def _interleave_cp_tokens(
     regions: list[ByteRegion],
     num_tokens: int,
     ctx: _RankContext,
+    token_offset: int = 0,
 ) -> tuple[CopyRun, ...]:
     """Place each region's num_tokens rows at their canonical token positions,
     one run per chunk of interleaved tokens."""
@@ -128,7 +129,8 @@ def _interleave_cp_tokens(
             runs.append(
                 CopyRun(
                     region.local_offset,
-                    region.canonical_offset,
+                    region.canonical_offset
+                    + token_offset * region.canonical_token_stride,
                     region.bytes_per_token,
                     num_tokens,
                     region.bytes_per_token,
@@ -137,7 +139,7 @@ def _interleave_cp_tokens(
             )
             continue
         for chunk_start in range(0, num_tokens, ctx.interleave):
-            canonical_token = _local_to_canonical_token(chunk_start, ctx)
+            canonical_token = _local_to_canonical_token(chunk_start + token_offset, ctx)
             runs.append(
                 CopyRun(
                     region.local_offset + chunk_start * region.bytes_per_token,
@@ -270,6 +272,8 @@ def _layer_mapping(
     kv_cache: torch.Tensor | list[torch.Tensor] | None,
     num_blocks: int,
     ctx: _RankContext,
+    *,
+    allow_kernel_block_splitting: bool = True,
 ) -> CanonicalPageMapping | None:
     """Certified mapping for one layer at one rank, or None (fail closed)."""
     if not isinstance(spec, AttentionSpec):
@@ -316,15 +320,45 @@ def _layer_mapping(
         return None
 
     head_shard = ctx.tp_rank // replication
-    regions = _attention_byte_regions(
-        kv_cache, spec, num_blocks, head_shard, num_head_shards, ctx.cp_size
-    )
-    if regions is None:
-        return None
+    kernel_blocks = kv_cache.shape[0] // num_blocks
+    if kernel_blocks > 1:
+        if not allow_kernel_block_splitting:
+            return None
+        if kv_cache.shape[0] != num_blocks * kernel_blocks or bs % kernel_blocks:
+            return None
+        kernel_bs = bs // kernel_blocks
+        if ctx.cp_size > 1 and kernel_bs % ctx.interleave:
+            return None
+        kernel_spec = replace(spec, block_size=kernel_bs)
+        regions = _attention_byte_regions(
+            kv_cache,
+            kernel_spec,
+            kv_cache.shape[0],
+            head_shard,
+            num_head_shards,
+            ctx.cp_size * kernel_blocks,
+        )
+        if regions is None:
+            return None
+        kernel_stride = kv_cache.stride(0) * kv_cache.element_size()
+        runs = _coalesce_runs(
+            [
+                replace(run, local_offset=run.local_offset + i * kernel_stride)
+                for i in range(kernel_blocks)
+                for run in _interleave_cp_tokens(regions, kernel_bs, ctx, i * kernel_bs)
+            ]
+        )
+    else:
+        regions = _attention_byte_regions(
+            kv_cache, spec, num_blocks, head_shard, num_head_shards, ctx.cp_size
+        )
+        if regions is None:
+            return None
+        runs = _interleave_cp_tokens(regions, bs, ctx)
     return CanonicalPageMapping(
         canonical_page_size_bytes=ctx.cp_size * num_head_shards * page,
         local_page_size_bytes=page,
-        runs=_interleave_cp_tokens(regions, bs, ctx),
+        runs=runs,
         num_writers=replication // ctx.dcp_size,
         writer_index=(ctx.tp_rank % replication) // ctx.dcp_size,
         parallelism_agnostic=ctx.cp_size == 1,
@@ -404,11 +438,16 @@ def derive_canonical_mappings(
     vllm_config: "VllmConfig",
     kv_cache_config: KVCacheConfig,
     kv_caches: dict[str, torch.Tensor | list[torch.Tensor]],
+    *,
+    allow_kernel_block_splitting: bool = False,
 ) -> dict[str, CanonicalPageMapping]:
     """Per-layer canonical page mappings for this worker.
 
     Empty when the worker group is not exactly the TP x PCP grid; layers
     absent from the result have no canonical representation.
+
+    Only opt into split mappings for a statically portable configuration;
+    otherwise existing topology-specific caches must keep their opaque bytes.
     """
     parallel_config = vllm_config.parallel_config
     tp_size = parallel_config.tensor_parallel_size
@@ -442,7 +481,11 @@ def derive_canonical_mappings(
             per_rank: list[CanonicalPageMapping] = []
             for rank in range(group_size):
                 mapping = _layer_mapping(
-                    spec, kv_caches.get(layer_name), num_blocks, ctx(rank)
+                    spec,
+                    kv_caches.get(layer_name),
+                    num_blocks,
+                    ctx(rank),
+                    allow_kernel_block_splitting=allow_kernel_block_splitting,
                 )
                 if mapping is None:
                     break
