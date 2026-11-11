@@ -18,8 +18,12 @@ from ..data import (
 
 
 class UMBPSchedulerHandle(Protocol):
-    def lookup(self, keys: Sequence[str]) -> Sequence[bool]:
-        """Return authoritative existence for each key."""
+    def lookup(self, keys: Sequence[str]) -> Sequence[bool | None]:
+        """Return one answer per key.
+
+        True is present and False is absent. None means the owning rank
+        could not be asked. None is not a miss.
+        """
 
     def clear(self) -> bool:
         """Clear all objects visible to this scheduler handle."""
