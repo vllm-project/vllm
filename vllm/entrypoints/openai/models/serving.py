@@ -106,7 +106,9 @@ class OpenAIModelRegistry:
         return ModelList(data=model_cards)
 
     async def resolve_lora(self, lora_name: str):
-        raise RuntimeError("The OpenAIModelRegistry has no LoRA support.")
+        raise RuntimeError(
+            "The OpenAIModelRegistry cannot resolve LoRA adapters at runtime."
+        )
 
 
 class OpenAIServingModels:
