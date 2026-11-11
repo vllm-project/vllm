@@ -287,6 +287,7 @@ def load_audio_torchcodec(
         sample rate in Hz.
 
     """
+    global AudioDecoder, _torchcodec_import_exc
     if AudioDecoder is None:
         # Unify "torchcodec not installed" and "system ffmpeg missing" into
         # ImportError so `load_audio(backend="auto")` falls back cleanly.
@@ -303,8 +304,12 @@ def load_audio_torchcodec(
     except RuntimeError as e:
         # torchcodec loads its ffmpeg-backed core lazily at construction, so
         # an ffmpeg-less (or ABI-incompatible) install can fail here rather
-        # than at import. Treat that as backend-unavailable, not bad input.
+        # than at import. Treat that as backend-unavailable, not bad input,
+        # and remember it: the missing libraries cannot appear without a
+        # restart, and retrying the load is costly on every call.
         if "Could not load libtorchcodec" in str(e):
+            AudioDecoder = None
+            _torchcodec_import_exc = e
             raise ImportError(_TORCHCODEC_UNAVAILABLE_MSG) from e
         raise ValueError(
             "Invalid or corrupted audio data. Ensure the input is a valid "
@@ -477,8 +482,8 @@ def load_audio(
         )
     except ImportError as exc:
         # Decode errors don't defer: FFmpeg-based PyAV would fail the same way.
-        logger.warning(
-            "torchcodec unavailable (%r); falling back to soundfile/PyAV.", exc
+        logger.warning_once(
+            "torchcodec unavailable (%s); falling back to soundfile/PyAV.", str(exc)
         )
 
     if isinstance(path, BytesIO):

@@ -32,7 +32,7 @@ from vllm.logger import init_logger
 from vllm.logprobs import FlatLogprobs, Logprob
 from vllm.model_executor.models import SupportsTranscription
 from vllm.multimodal.audio import AudioResampler, get_audio_duration, split_audio
-from vllm.multimodal.media.audio import load_audio
+from vllm.multimodal.media.audio import AUDIO_BACKENDS, load_audio
 from vllm.outputs import RequestOutput
 from vllm.renderers.inputs import DictPrompt, EncoderDecoderDictPrompt
 from vllm.renderers.inputs.preprocess import parse_enc_dec_prompt, parse_model_prompt
@@ -125,6 +125,18 @@ class SpeechToTextBaseServing(GenerateBaseServing):
 
         self.max_audio_decode_duration_s: int = envs.VLLM_MAX_AUDIO_DECODE_DURATION_S
         self.max_audio_decode_bytes: int = envs.VLLM_MAX_AUDIO_DECODE_BYTES
+        # Same `--media-io-kwargs '{"audio": {"audio_backend": ...}}'` setting
+        # that AudioMediaIO honours for audio in chat requests.
+        mm_config = self.model_config.multimodal_config
+        media_io_kwargs = mm_config.media_io_kwargs if mm_config else {}
+        self.audio_backend: str | None = media_io_kwargs.get("audio", {}).get(
+            "audio_backend"
+        )
+        if self.audio_backend is not None and self.audio_backend not in AUDIO_BACKENDS:
+            raise ValueError(
+                f"Unknown audio_backend {self.audio_backend!r}. "
+                f"Available backends: {list(AUDIO_BACKENDS)}"
+            )
         if self.model_cls.supports_segment_timestamp:
             self.tokenizer = cast(
                 PreTrainedTokenizerBase,
@@ -181,6 +193,7 @@ class SpeechToTextBaseServing(GenerateBaseServing):
                     mono=True,
                     max_duration_s=self.max_audio_decode_duration_s,
                     max_decode_bytes=self.max_audio_decode_bytes,
+                    backend=self.audio_backend,
                 )
             if resample_method:
                 y = AudioResampler(

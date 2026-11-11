@@ -1246,7 +1246,9 @@ vLLM decodes audio bytes into waveforms using a selectable decoding backend:
 | `pyav` | PyAV (FFmpeg) only, no fallback |
 | `torchcodec` | TorchCodec (PyTorch-native) only, no fallback |
 
-Select the backend per server via `--media-io-kwargs`:
+Select the backend per server via `--media-io-kwargs`. It applies to audio in
+chat requests and to the `/v1/audio/transcriptions` and
+`/v1/audio/translations` endpoints:
 
 ```bash
 vllm serve mistralai/Voxtral-Mini-3B-2507 \
