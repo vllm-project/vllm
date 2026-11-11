@@ -1838,6 +1838,7 @@ def test_one_sided_all2all_default_follows_supported_top_k(hgx_host, top_k, expe
         ("triton", "allgather_reducescatter"),
         ("deep_gemm", "allgather_reducescatter"),
         ("cutlass", "allgather_reducescatter"),
+        ("emulation", "allgather_reducescatter"),
     ],
 )
 def test_one_sided_all2all_default_follows_explicit_moe_backend(
@@ -1860,27 +1861,39 @@ def test_draft_parallel_config_inherits_target_all2all_backend(hgx_host):
 
 
 @pytest.mark.parametrize(
-    ("draft_overrides", "expected"),
+    ("draft_kwargs", "spec_moe_backend", "expected"),
     [
-        ({}, "flashinfer_nvlink_one_sided"),
-        ({"num_experts": 64}, "allgather_reducescatter"),
-        ({"num_experts_per_tok": 4}, "allgather_reducescatter"),
-        ({"num_experts_per_tok": 5}, "allgather_reducescatter"),
+        ({}, None, "flashinfer_nvlink_one_sided"),
+        ({"hf_overrides": {"num_experts": 64}}, None, "allgather_reducescatter"),
+        ({"hf_overrides": {"num_experts_per_tok": 4}}, None, "allgather_reducescatter"),
+        ({"hf_overrides": {"num_experts_per_tok": 5}}, None, "allgather_reducescatter"),
+        # Online FP8 is per-tensor, which one-sided cannot dispatch.
+        ({"quantization": "fp8"}, None, "allgather_reducescatter"),
+        ({}, "triton", "allgather_reducescatter"),
     ],
 )
-def test_one_sided_all2all_default_follows_draft_model_experts(
-    hgx_host, draft_overrides, expected
+def test_one_sided_all2all_default_follows_draft_model(
+    hgx_host, draft_kwargs, spec_moe_backend, expected
 ):
-    """The draft's MoE layers share the target's one-sided manager, which
-    needs the same num_experts and top_k on every layer."""
+    """The draft's MoE layers share the target's one-sided manager, so the
+    draft has to fit it too: same num_experts and top_k, a dispatchable
+    quantization and a MoE backend that takes one-sided."""
     config = _one_full_ep_node_config()
     assert config.parallel_config.all2all_backend == "flashinfer_nvlink_one_sided"
     config.speculative_config = SimpleNamespace(
-        draft_model_config=ModelConfig(_MOE_MODEL, hf_overrides=draft_overrides)
+        draft_model_config=ModelConfig(_MOE_MODEL, **draft_kwargs),
+        moe_backend=spec_moe_backend,
     )
     config.parallel_config.all2all_backend = "flashinfer_nvlink_one_sided"
     config._maybe_fall_back_from_auto_one_sided_all2all()
     assert config.parallel_config.all2all_backend == expected
+
+
+def test_one_sided_all2all_default_skips_batch_invariant(hgx_host, monkeypatch):
+    """No MoE kernel is both batch invariant and one-sided compatible."""
+    monkeypatch.setenv("VLLM_BATCH_INVARIANT", "1")
+    config = _one_full_ep_node_config()
+    assert config.parallel_config.all2all_backend == "allgather_reducescatter"
 
 
 def test_draft_all2all_backend_follows_target_after_fallback(hgx_host):
@@ -1895,6 +1908,7 @@ def test_draft_all2all_backend_follows_target_after_fallback(hgx_host):
         draft_model_config=ModelConfig(
             _MOE_MODEL, hf_overrides={"num_experts_per_tok": 4}
         ),
+        moe_backend=None,
         draft_parallel_config=draft_parallel,
     )
     config._maybe_fall_back_from_auto_one_sided_all2all()

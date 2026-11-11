@@ -375,13 +375,6 @@ OPTIMIZATION_LEVEL_TO_CONFIG = {
 # top_k values the pinned FlashInfer NVLinkOneSidedAlltoAll accepts.
 _ONE_SIDED_SUPPORTED_TOP_K = frozenset({1, 2, 3, 4, 6, 8, 10, 12, 14, 16, 18, 22})
 
-# MoE backends whose experts reject the one-sided all2all (their
-# `_supports_parallel_config` excludes it), so an explicit choice of one of them
-# keeps the "auto" default on AGRS.
-_ONE_SIDED_INCOMPATIBLE_MOE_BACKENDS = frozenset(
-    {"triton", "deep_gemm", "cutlass", "aiter", "rdna3"}
-)
-
 
 def _has_heterogeneous_moe_layers(model_config: "ModelConfig") -> bool:
     """Whether MoE layers differ in num_experts or top_k (per-layer block_configs)."""
@@ -400,6 +393,30 @@ def _has_heterogeneous_moe_layers(model_config: "ModelConfig") -> bool:
         if field(block, "block_type") == "moe"
     }
     return len(shapes) > 1
+
+
+def _one_sided_model_unsupported_reason(model_config: "ModelConfig") -> str | None:
+    """Why a model's MoE layers cannot use flashinfer_nvlink_one_sided."""
+    # One shared communication object serves every MoE layer, so all of them
+    # must have the same num_experts and top_k (e.g. Nemotron Puzzle varies them
+    # per layer).
+    if _has_heterogeneous_moe_layers(model_config):
+        return "MoE layers with different num_experts or top_k"
+    top_k = model_config.get_num_experts_per_tok()
+    if top_k and top_k not in _ONE_SIDED_SUPPORTED_TOP_K:
+        return f"top_k={top_k}"
+    # One-sided dispatch carries BF16/FP16, NVFP4 or 128x128 block FP8.
+    quantization = model_config.quantization
+    if quantization is None:
+        if model_config.dtype in (torch.bfloat16, torch.float16):
+            return None
+        return f"dtype={model_config.dtype}"
+    if quantization == "modelopt_fp4":
+        return None
+    quant_cfg = model_config.model_arch_config.quantization_config or {}
+    if quantization == "fp8" and quant_cfg.get("weight_block_size") == [128, 128]:
+        return None
+    return f"quantization={quantization!r}"
 
 
 @config(config=ConfigDict(arbitrary_types_allowed=True))
@@ -1063,55 +1080,42 @@ class VllmConfig:
         apply_recursive(self, defaults)
 
     def _one_sided_all2all_unsupported_reason(self) -> str | None:
-        """Why the model cannot use flashinfer_nvlink_one_sided, if it can't."""
-        from vllm.config.kernel import FLASHINFER_MOE_EP_BACKENDS
-
+        """Why the deployment cannot use flashinfer_nvlink_one_sided, if it can't."""
         if self.lora_config is not None:
             return "LoRA"
+        # Experts picked with --moe-backend decide on their own whether they
+        # take one-sided dispatch, and most (triton, deep_gemm, cutlass,
+        # emulation, ...) reject it, so any explicit choice keeps the old
+        # allgather_reducescatter default.
         moe_backend = self.kernel_config.moe_backend
-        if (
-            moe_backend in FLASHINFER_MOE_EP_BACKENDS
-            or moe_backend in _ONE_SIDED_INCOMPATIBLE_MOE_BACKENDS
-        ):
+        if moe_backend != "auto":
             return f"moe_backend={moe_backend!r}"
+        # No kernel is both batch invariant and one-sided compatible.
+        if envs.VLLM_BATCH_INVARIANT:
+            return "VLLM_BATCH_INVARIANT=1"
         model_config = self.model_config
         if model_config is None:
             return None
-        # One shared communication object serves every MoE layer, so all of
-        # them must have the same num_experts and top_k (e.g. Nemotron Puzzle
-        # varies them per layer).
-        if _has_heterogeneous_moe_layers(model_config):
-            return "MoE layers with different num_experts or top_k"
-        top_k = model_config.get_num_experts_per_tok()
-        if top_k and top_k not in _ONE_SIDED_SUPPORTED_TOP_K:
-            return f"top_k={top_k}"
+        if reason := _one_sided_model_unsupported_reason(model_config):
+            return reason
         # A separate MoE draft model builds its MoE layers on the same
-        # communication object, so it has to match the target as well.
+        # communication object, so it has to fit it and match the target.
         spec = self.speculative_config
         draft = spec.draft_model_config if spec is not None else None
         if draft is not None and draft.is_moe:
-            if _has_heterogeneous_moe_layers(draft):
-                return "draft model MoE layers with different num_experts or top_k"
-            draft_top_k = draft.get_num_experts_per_tok()
-            if draft_top_k not in _ONE_SIDED_SUPPORTED_TOP_K:
-                return f"draft model top_k={draft_top_k}"
+            if spec.moe_backend not in (None, "auto"):
+                return f"draft moe_backend={spec.moe_backend!r}"
+            if reason := _one_sided_model_unsupported_reason(draft):
+                return f"draft model {reason}"
             if model_config.is_moe and (
                 draft.get_num_experts(),
-                draft_top_k,
-            ) != (model_config.get_num_experts(), top_k):
+                draft.get_num_experts_per_tok(),
+            ) != (
+                model_config.get_num_experts(),
+                model_config.get_num_experts_per_tok(),
+            ):
                 return "a draft model with different num_experts or top_k"
-        # One-sided dispatch carries BF16/FP16, NVFP4 or 128x128 block FP8.
-        quantization = model_config.quantization
-        if quantization is None:
-            if model_config.dtype in (torch.bfloat16, torch.float16):
-                return None
-            return f"dtype={model_config.dtype}"
-        if quantization == "modelopt_fp4":
-            return None
-        quant_cfg = model_config.model_arch_config.quantization_config or {}
-        if quantization == "fp8" and quant_cfg.get("weight_block_size") == [128, 128]:
-            return None
-        return f"quantization={quantization!r}"
+        return None
 
     def _maybe_fall_back_from_auto_one_sided_all2all(self) -> None:
         """Keep the "auto" all2all default to models one-sided supports."""
