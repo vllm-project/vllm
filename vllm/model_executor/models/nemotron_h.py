@@ -586,13 +586,16 @@ class NemotronHModel(nn.Module, EagleModelMixin):
         parallel_config = vllm_config.parallel_config
 
         self.config = config
-        if (
-            envs.VLLM_NEMOTRON_H_REPLICATE_MIXER
-            and parallel_config.use_sequence_parallel_moe
+        if envs.VLLM_NEMOTRON_H_REPLICATE_MIXER and (
+            parallel_config.use_sequence_parallel_moe
+            or parallel_config.enable_expert_parallel
+            or parallel_config.decode_context_parallel_size > 1
+            or parallel_config.prefill_context_parallel_size > 1
         ):
+            # These turn the TP-synced autotune off: replicated mixers would drift.
             raise NotImplementedError(
-                "VLLM_NEMOTRON_H_REPLICATE_MIXER is not supported with "
-                "sequence-parallel MoE."
+                "VLLM_NEMOTRON_H_REPLICATE_MIXER is not supported with expert "
+                "parallelism, sequence-parallel MoE or context parallelism."
             )
         if envs.VLLM_NEMOTRON_H_REPLICATE_MIXER:
             # Nothing re-syncs ranks after a replicated block: autotune must agree.
