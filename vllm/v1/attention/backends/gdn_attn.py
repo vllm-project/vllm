@@ -1005,9 +1005,9 @@ class GDNAttentionMetadataBuilder(AttentionMetadataBuilder[GDNAttentionMetadata]
             pad_value: int | bool | torch.Tensor | None = CAPTURE_PAD_VALUES[name]
             if pad_value is None:
                 pad_value = rows[-1] if len(rows) > 0 else 0
-            capture_buffers[name] = self._stage(
-                buffer, rows, buffer.shape[0], pad_value
-            )
+            buffer[: len(rows)].copy_(rows, non_blocking=True)
+            buffer[len(rows) :].fill_(pad_value)
+            capture_buffers[name] = buffer
         return replace(metadata, capture_buffers=capture_buffers)
 
     def _stage_spec_decode(
