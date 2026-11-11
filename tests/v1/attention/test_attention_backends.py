@@ -5,6 +5,7 @@
 from dataclasses import replace
 from functools import partial
 from types import SimpleNamespace
+from weakref import ref
 
 import pytest
 import torch
@@ -791,6 +792,112 @@ def test_flashinfer_cross_layer_layout(
         kv_cache_dtype=kv_cache_dtype,
         layout=KVCacheLayout[layout],
     )
+
+
+@pytest.mark.skipif(
+    AttentionBackendEnum.FLASHINFER not in BACKENDS_TO_TEST,
+    reason="FlashInfer is not available.",
+)
+@pytest.mark.parametrize(
+    "dtype,kv_cache_dtype",
+    [
+        (torch.float16, "auto"),
+        (torch.bfloat16, "auto"),
+        (torch.bfloat16, "fp8"),
+        pytest.param(
+            torch.bfloat16,
+            "nvfp4",
+            marks=pytest.mark.skipif(
+                not current_platform.is_device_capability_family(100),
+                reason="The NVFP4 non-FA2 writer requires SM100-family hardware.",
+            ),
+        ),
+    ],
+)
+@torch.inference_mode()
+def test_flashinfer_kv_write_view_cache_lifecycle(
+    dist_init, default_vllm_config, dtype, kv_cache_dtype
+):
+    """Reuse write views, rebuild on rebinding, and release them on teardown."""
+    from torch.utils._python_dispatch import TorchDispatchMode
+
+    from vllm.config import CacheConfig
+    from vllm.model_executor.layers.attention import Attention
+    from vllm.utils.torch_utils import set_default_torch_dtype
+    from vllm.v1.attention.backends.flashinfer import FlashInferBackend, FlashInferImpl
+    from vllm.v1.worker.utils import clear_layer_kv_caches
+
+    with set_default_torch_dtype(dtype), torch.device(DEVICE_TYPE):
+        layer = Attention(
+            num_heads=4,
+            head_size=128,
+            scale=128**-0.5,
+            num_kv_heads=2,
+            cache_config=CacheConfig(block_size=16, cache_dtype=kv_cache_dtype),
+            attn_backend=FlashInferBackend,
+            prefix="test_view_cache",
+        )
+        is_nvfp4 = kv_cache_dtype == "nvfp4"
+        shape = (
+            (2, 4, 16, nvfp4_kv_cache_full_dim(128)) if is_nvfp4 else (2, 2, 16, 256)
+        )
+        storage_dtype = dtype if kv_cache_dtype == "auto" else torch.uint8
+        cache = torch.zeros(shape, dtype=storage_dtype)
+        key = torch.linspace(-1, 1, 2 * 2 * 128, dtype=dtype).reshape(2, 2, 128)
+        value = key.flip(-1).contiguous()
+        slots = torch.tensor([0, 18], dtype=torch.long)
+
+    cache_refs = []
+    written_views = []
+    assert isinstance(layer.impl, FlashInferImpl)
+
+    class RecordWriteViews(TorchDispatchMode):
+        def __torch_dispatch__(self, func, types, args=(), kwargs=None):
+            if func == torch.ops._C_cache_ops.reshape_and_cache_flash.default:
+                written_views.append((ref(args[2]), ref(args[3])))
+            return func(*args, **(kwargs or {}))
+
+    for replacement in ("initial", "same_storage", "new_storage"):
+        if replacement == "same_storage":
+            cache = cache.view_as(cache)
+        elif replacement == "new_storage":
+            cache = torch.zeros_like(cache)
+        layer.bind_kv_cache(cache)
+        cache_refs.append(ref(cache))
+        cache.zero_()
+        reference = torch.zeros_like(cache)
+        k_ref, v_ref = reference.transpose(1, 2).split(
+            2 if is_nvfp4 else 128, dim=-2 if is_nvfp4 else -1
+        )
+        # Compare against the uncached writer, including the second write's data.
+        torch.ops._C_cache_ops.reshape_and_cache_flash(
+            value,
+            key,
+            k_ref,
+            v_ref,
+            slots,
+            kv_cache_dtype,
+            layer._k_scale,
+            layer._v_scale,
+        )
+        # Observe the actual kernel arguments without replacing the CUDA call.
+        with RecordWriteViews():
+            layer.impl.do_kv_cache_update(layer, key, value, cache, slots)
+            layer.impl.do_kv_cache_update(layer, value, key, cache, slots)
+        torch.testing.assert_close(cache, reference, rtol=0, atol=0)
+        first, second = written_views[-2:]
+        assert all(a() is not None and a() is b() for a, b in zip(first, second)), (
+            "Repeated KV writes re-derived the same cache views"
+        )
+        if len(written_views) > 2:
+            assert all(a() is not b() for a, b in zip(written_views[-3], second)), (
+                "Rebinding the KV tensor must rebuild its views"
+            )
+
+    del cache
+    clear_layer_kv_caches([layer])
+    assert all(cache_ref() is None for cache_ref in cache_refs)
+    assert all(view_ref() is None for pair in written_views for view_ref in pair)
 
 
 @pytest.mark.parametrize("capability", [(8, 0), (9, 0), (10, 0), (12, 0)])
