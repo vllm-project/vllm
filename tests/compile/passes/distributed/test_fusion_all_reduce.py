@@ -416,9 +416,9 @@ class TestAiterAllReduceGemmaRMSNormGroupQuantFP8Model(
 class TestAiterAllReduceFusedAddRMSNormPerTokenQuantFP8Model(torch.nn.Module):
     """Exercises the ROCm AITER AR+RMS+per-token-FP8-quant pattern.
 
-    Two ``rms_norm`` sites, each
-    ``all_reduce -> fused_add_rms_norm -> per_token_fp8_quant``
-    -> ``AiterAllreduceFusedAddRMSNormPerTokenQuantFP8Pattern``.
+    Two `rms_norm` sites, each
+    `all_reduce -> fused_add_rms_norm -> per_token_fp8_quant`
+    -> `AiterAllreduceFusedAddRMSNormPerTokenQuantFP8Pattern`.
 
     Each site starts from the same bf16 activation and is returned separately.
     This avoids compounding two quantize/dequantize errors.
@@ -979,11 +979,11 @@ def test_rocm_aiter_all_reduce_rmsnorm_per_token_quant_fp8_fusion_pass_replace(
     test_model_cls: type[torch.nn.Module],
     monkeypatch: pytest.MonkeyPatch,
 ):
-    """Sibling of ``test_all_reduce_fusion_pass_replace`` for the
+    """Sibling of `test_all_reduce_fusion_pass_replace` for the
     ROCm AITER AR+RMS+per-token-FP8-quant fusion pattern.
 
-    Validates ``AiterAllreduceFusedAddRMSNormPerTokenQuantFP8Pattern``
-    (with-residual) added to ``RocmAiterAllReduceFusionPass``.
+    Validates `AiterAllreduceFusedAddRMSNormPerTokenQuantFP8Pattern`
+    (with-residual) added to `RocmAiterAllReduceFusionPass`.
     """
     with monkeypatch.context() as m:
         m.setenv("VLLM_ROCM_USE_AITER", "1")

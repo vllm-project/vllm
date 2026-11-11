@@ -1573,11 +1573,11 @@ class AiterAllreduceFusedAddRMSNormPerTokenQuantFP8Pattern(
     """Fuse AllReduce + RMSNorm (fused_add) + per-token FP8 quant into
     a single AITER custom op.
 
-    Targets ``all_reduce -> fused_add_rms_norm -> per_token_fp8_quant``: the
-    MoE/MLP output all-reduce feeding the next layer's ``input_layernorm`` when
+    Targets `all_reduce -> fused_add_rms_norm -> per_token_fp8_quant`: the
+    MoE/MLP output all-reduce feeding the next layer's `input_layernorm` when
     the attention projections use dynamic per-token FP8 activations.
 
-    Lowers to ``rocm_aiter_fused_allreduce_rmsnorm_quant_per_token``.
+    Lowers to `rocm_aiter_fused_allreduce_rmsnorm_quant_per_token`.
     """
 
     def __init__(
