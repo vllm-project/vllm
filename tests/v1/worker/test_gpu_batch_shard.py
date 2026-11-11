@@ -649,6 +649,11 @@ def test_gather_sampler_output_logprobs_and_nans(logprobs_dims: tuple[int, int])
     gathered_full.extend(
         torch.cat([recorded[r][i] for r in range(tp_size)]) for i in range(3)
     )
+    if logprobs_dims[1] > 0:
+        # With logprob_token_ids every column has a rank; a 1-D source rank is
+        # followed by topk positions.
+        topk_positions = torch.arange(1, num_cols).expand(num_logits, -1)
+        expected_ranks = torch.cat((expected_ranks[:, None], topk_positions), dim=1)
 
     for rank in range(tp_size):
         out = run(rank)

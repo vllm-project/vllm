@@ -428,7 +428,11 @@ def _masked_stash_write(
     pad = stash.logprobs.shape[-1] - new.logprobs.shape[1]
     ids = F.pad(new.logprob_token_ids.to(torch.int64), (0, pad))
     lps = F.pad(new.logprobs, (0, pad), value=float("-inf"))
-    ranks = new.selected_token_ranks.to(torch.int64).view(n, -1)
+    ranks = new.selected_token_ranks.to(torch.int64)
+    if ranks.dim() == 2:
+        # The stash holds the sampled token's rank, as stash_converged_logprobs.
+        ranks = ranks[:, 0]
+    ranks = ranks.view(n, -1)
     W = ranks.shape[1]
     for buf, rows in (
         (stash.logprob_token_ids, ids.view(n, W, -1)),

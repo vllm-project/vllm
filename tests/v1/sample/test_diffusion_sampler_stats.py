@@ -213,6 +213,10 @@ def test_stashed_logprobs_match_compute_topk_scores(
     )
 
     width = ref.logprobs.shape[1]
+    # The stash ranks only the sampled token.
+    ref_ranks = ref.selected_token_ranks
+    if ref_ranks.dim() == 2:
+        ref_ranks = ref_ranks[:, 0]
     for j, slot in enumerate(slots.tolist()):
         v = int(valid[j])
         rows = slice(j * W, j * W + v)
@@ -223,7 +227,7 @@ def test_stashed_logprobs_match_compute_topk_scores(
         # Both sides divide by the temperature with IEEE fp32 division, so
         # the argmax and rank match exactly; the logsumexp is a float reduction.
         torch.testing.assert_close(lps, ref.logprobs[rows], rtol=1.3e-6, atol=1e-5)
-        assert torch.equal(stash_ranks[slot, :v], ref.selected_token_ranks[rows])
+        assert torch.equal(stash_ranks[slot, :v], ref_ranks[rows])
         assert torch.equal(ids[:, 0], ref.logprob_token_ids[rows, 0])
         held, ref_ids = scaled[rows], ref.logprob_token_ids[rows]
         assert torch.equal(held.gather(1, ids), held.gather(1, ref_ids))
