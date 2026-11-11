@@ -519,7 +519,6 @@ class Base(
         - Vocab `nn.Embedding`s with vLLM's `VocabParallelEmbedding`
         - RMSNorm (detected from their dataflow) with vLLM's `RMSNorm`or `GemmaRMSNorm`
         - `nn.LayerNorm` with vLLM's `LayerNorm`
-
         """
         tp_plan = self._tp_plan()
 
