@@ -83,3 +83,10 @@ vllm serve XiaomiMiMo/MiMo-7B-Base \
   per lm_head weight, e.g. 0.6 or 0.35 GiB for a 248k x 2560 head; it is
   counted in the model weights, so with `--kv-cache-memory-bytes` leave room
   for it.
+- `"truncate_acceptance_at_stop": true` in `--speculative-config` stops
+  accepting drafts at a request's stop token or length limit (Model Runner
+  V2), so the request's state on the GPU ends at its last token; outputs are
+  unchanged. Mamba frontier checkpoints (`--mamba-frontier-checkpoint`) on
+  hybrid models need it, and with MTP also `"disable_eagle_block_drop": true`.
+  See
+  [Hybrid State Checkpoints](../../design/hybrid_state_checkpoints.md#speculative-decoding).

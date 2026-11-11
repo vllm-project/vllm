@@ -12,6 +12,11 @@ tokens resumes at `L`: upstream's partial-hit copy-on-write gives it private
 copies of the page and the state, and the ring is copied when it is claimed.
 The checkpoint is usable only while every one of its blocks is cached; when
 any of them is evicted the others lose the key too.
+
+Under speculative decoding the state's length and block come from the
+request's last steps (`speculative.ExactState`). A state in a later draft
+column is folded into the step's first column on the device before anything
+reads it; such gathers wait in `pending_gathers` for the next step.
 """
 
 import math
@@ -21,6 +26,7 @@ from typing import TYPE_CHECKING, Any
 
 from vllm.utils.math_utils import cdiv
 from vllm.v1.core.hybrid_checkpoint.keys import frontier_key
+from vllm.v1.core.hybrid_checkpoint.speculative import ExactState
 from vllm.v1.core.kv_cache_utils import (
     BlockHash,
     BlockHashWithGroupId,
@@ -41,6 +47,17 @@ if TYPE_CHECKING:
 _SUFFIX = 8
 
 HitBlocks = tuple[list[KVCacheBlock], ...]
+
+
+@dataclass(slots=True)
+class StateGather:
+    """Fold draft column `column` into the first column of a published
+    state: Mamba group id -> (first column's block, the column's block).
+    `key`: the frontier it completes."""
+
+    column: int
+    blocks: dict[int, tuple[KVCacheBlock, KVCacheBlock]]
+    key: BlockHash | None = None
 
 
 @dataclass(slots=True)
@@ -88,6 +105,8 @@ class FrontierIndex:
             group_sizes.append(ring.kv_cache_spec.group_size)
         # A frontier inside this many tokens' pool also keeps the ring.
         self.pool_size = math.lcm(1, *group_sizes)
+        # Gathers of published states, applied by the next step.
+        self.pending_gathers: list[StateGather] = []
         # Free blocks that lose their keys go to the front of the free queue.
         self.reclaim = False
         self.entries: dict[BlockHash, _Frontier] = {}
@@ -104,11 +123,14 @@ class FrontierIndex:
         self.num_hit_tokens = 0
         self.num_removed = 0
 
-    def publish(self, request: "Request") -> BlockHash | None:
+    def publish(
+        self, request: "Request", exact: ExactState | None = None
+    ) -> BlockHash | None:
         """Cache the freed request's state at its processed frontier in every
-        group, or in none. Returns the key."""
+        group, or in none. Under speculative decoding `exact` says where
+        that state is. Returns the key."""
         self._lookups.pop(request.request_id, None)
-        num_tokens = request.num_computed_tokens
+        num_tokens = request.num_computed_tokens if exact is None else exact.num_tokens
         if (
             num_tokens == 0
             or num_tokens % self.block_size == 0
@@ -118,12 +140,20 @@ class FrontierIndex:
             or request.num_tokens < num_tokens
         ):
             return None
-        blocks = self._frontier_blocks(request, num_tokens)
-        if blocks is None:
+        found = self._frontier_blocks(request, num_tokens, exact)
+        if found is None:
             return None
+        blocks, gather = found
         key = frontier_key(self.hash_fn, request, num_tokens, self.hash_block_size)
         if key in self.entries:
             return None
+        if gather is not None:
+            # Both ends stay referenced until the step that runs the gather.
+            for dst, src in gather.blocks.values():
+                dst.ref_cnt += 1
+                src.ref_cnt += 1
+            gather.key = key
+            self.pending_gathers.append(gather)
         h = num_tokens // self.hash_block_size
         anchor = request.block_hashes[h - 1] if h else None
         for group_id, block in blocks.items():
@@ -139,9 +169,10 @@ class FrontierIndex:
         return key
 
     def _frontier_blocks(
-        self, request: "Request", num_tokens: int
-    ) -> dict[int, KVCacheBlock] | None:
-        """The block to cache in every group."""
+        self, request: "Request", num_tokens: int, exact: ExactState | None
+    ) -> tuple[dict[int, KVCacheBlock], StateGather | None] | None:
+        """The block to cache in every group and, when the state is in a later
+        draft column, the gather that completes it."""
         request_id = request.request_id
         k = num_tokens // self.block_size
         blocks: dict[int, KVCacheBlock] = {}
@@ -151,12 +182,23 @@ class FrontierIndex:
                 return None
             blocks[group_id] = table[k]
         running = cdiv(num_tokens, self.block_size) - 1
+        gather = None
         for group_id in self.states:
             table = self.managers[group_id].req_to_blocks.get(request_id) or []
-            # Align mode keeps the running state in the last block.
-            if len(table) != running + 1:
+            if exact is None:
+                # Align mode keeps the running state in the last block.
+                if len(table) != running + 1:
+                    return None
+                blocks[group_id] = table[running]
+                continue
+            dst, src = exact.block_indices(self.block_size)
+            if src >= len(table) or table[src].is_null:
                 return None
-            blocks[group_id] = table[running]
+            blocks[group_id] = table[dst]
+            if src != dst:
+                if gather is None:
+                    gather = StateGather(exact.column, {})
+                gather.blocks[group_id] = (table[dst], table[src])
         if num_tokens % self.pool_size:
             for group_id in self.rings:
                 table = self.managers[group_id].req_to_blocks.get(request_id) or []
@@ -175,7 +217,7 @@ class FrontierIndex:
                 group_id not in self.pages or units_per_block == 1
             ):
                 return None
-        return blocks
+        return blocks, gather
 
     def extend(
         self,

@@ -511,6 +511,7 @@ class Scheduler(SchedulerInterface):
                 eviction_cost=eviction_cost,
                 eviction_leaf_last=self.cache_config.prefix_cache_leaf_last,
                 eviction_leaf_idle_s=self.cache_config.prefix_cache_leaf_idle_seconds,
+                speculative_decoding=vllm_config.speculative_config is not None,
             )
             self.kv_cache_manager.checkpoints = self.mamba_checkpoints
 
@@ -851,6 +852,7 @@ class Scheduler(SchedulerInterface):
                 num_new_tokens = long_prefill_token_threshold
             if (
                 self.mamba_checkpoints is not None
+                and self.mamba_checkpoints.speculative is None
                 and request.num_computed_tokens > request.num_prompt_tokens
                 and request.num_computed_tokens % self.cache_config.block_size == 0
             ):
@@ -1799,6 +1801,17 @@ class Scheduler(SchedulerInterface):
             # have run.
             self._free_cow_retained_blocks(cow_retained_blocks, self.sched_step_seq + 1)
         pending_kv_cache_block_copies = kv_cache_block_copies or None
+        mamba_state_gathers = None
+        if self.mamba_checkpoints is not None:
+            gathers, gather_retained_blocks = (
+                self.mamba_checkpoints.take_state_gathers()
+            )
+            if gathers:
+                # They run first in this step's execution, as the copies do.
+                self._free_cow_retained_blocks(
+                    gather_retained_blocks, self.sched_step_seq + 1
+                )
+                mamba_state_gathers = gathers
 
         # Dynamic speculative decoding: compute optimal K
         num_spec_tokens_to_schedule = self.num_spec_tokens
@@ -1828,6 +1841,7 @@ class Scheduler(SchedulerInterface):
             new_block_ids_to_zero=self._get_new_block_ids_to_zero(),
             has_sync_kv_loads=has_sync_kv_loads,
             kv_cache_block_copies=pending_kv_cache_block_copies,
+            mamba_state_gathers=mamba_state_gathers,
             kv_connector_block_state=kv_connector_block_state,
             num_spec_tokens_to_schedule=num_spec_tokens_to_schedule,
             skip_drafts=not drafts_needed,
@@ -2375,11 +2389,26 @@ class Scheduler(SchedulerInterface):
         req_indices = {
             req_id: i for i, req_id in enumerate(model_runner_output.req_ids)
         }
+        # Mamba frontier checkpoints under speculative decoding follow every
+        # completed step.
+        track_steps = (
+            self.mamba_checkpoints is not None
+            and self.mamba_checkpoints.speculative is not None
+        )
         for req_id, num_tokens_scheduled in num_scheduled_tokens.items():
             assert num_tokens_scheduled > 0
             request = self.requests.get(req_id)
             output_is_stale = False
+            step_start = 0
             if request is not None:
+                if track_steps:
+                    # The step's device start: the tokens computed before
+                    # every step of the request still in flight. A request's
+                    # steps complete in the order they were scheduled, so this
+                    # one is the oldest of them.
+                    step_start = (
+                        request.num_computed_tokens - request.num_in_flight_tokens
+                    )
                 request.num_in_flight_tokens -= num_tokens_scheduled
                 # Drain any stale share (see _preempt_request) in lockstep.
                 if request.num_stale_output_tokens > 0:
@@ -2467,9 +2496,20 @@ class Scheduler(SchedulerInterface):
             # Check for stop and update request status.
             if new_token_ids:
                 has_output_placeholders = request.num_output_placeholders > 0
+                num_sampled_tokens = len(new_token_ids)
                 new_token_ids, stopped = self._update_request_with_output(
                     request, new_token_ids, is_stale=output_is_stale
                 )
+                if track_steps and not output_is_stale:
+                    assert self.mamba_checkpoints is not None
+                    self.mamba_checkpoints.step_completed(
+                        request,
+                        step_start,
+                        num_tokens_scheduled,
+                        bool(scheduled_spec_token_ids),
+                        num_sampled_tokens,
+                        len(new_token_ids),
+                    )
                 if (
                     not output_is_stale
                     and status_before_stop == RequestStatus.RUNNING
@@ -3381,6 +3421,9 @@ class Scheduler(SchedulerInterface):
                 request = self.running.pop()
                 self._preempt_request(request, timestamp, drop_stale_output=True)
 
+        if self.mamba_checkpoints is not None:
+            # No step runs the pending state gathers before the reset.
+            self.mamba_checkpoints.drop_state_gathers()
         reset_successful = self.kv_cache_manager.reset_prefix_cache()
         if reset_successful and self.mamba_checkpoints is not None:
             self.mamba_checkpoints.reset()

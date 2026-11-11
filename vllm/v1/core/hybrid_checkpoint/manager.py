@@ -13,6 +13,10 @@ call. It keeps three kinds of recovery units resumable:
 - a frontier per finished request (`frontier.FrontierIndex`), at its exact
   end inside a block.
 
+Under speculative decoding `speculative.SpeculativeFrontiers` says where a
+finished request's exact state is, and decode-boundary states come from the
+block a verify step left the state at a crossed block boundary in.
+
 A request's finish also releases the session leaf it resumed from, unless
 another continuation needs it (`_replace_leaf`). With GreedyDual-Size
 eviction (`eviction.GreedyDualSizeEviction`), block-boundary states are
@@ -26,16 +30,22 @@ from typing import TYPE_CHECKING, Any
 from vllm.v1.core.hybrid_checkpoint.cost import PrefillCostModel
 from vllm.v1.core.hybrid_checkpoint.eviction import GreedyDualSizeEviction
 from vllm.v1.core.hybrid_checkpoint.frontier import FrontierIndex, HitBlocks
+from vllm.v1.core.hybrid_checkpoint.speculative import (
+    SpeculativeFrontiers,
+    check_speculative_config,
+)
 from vllm.v1.core.hybrid_checkpoint.units import CheckpointGraph
 from vllm.v1.core.kv_cache_utils import (
     BlockHash,
     BlockHashWithGroupId,
     KVCacheBlock,
+    MambaStateGather,
     get_block_hash,
     get_group_id,
     make_block_hash_with_group_id,
 )
 from vllm.v1.kv_cache_interface import CircularBufferSpec
+from vllm.v1.request import RequestStatus
 
 if TYPE_CHECKING:
     from vllm.config import VllmConfig
@@ -46,13 +56,14 @@ if TYPE_CHECKING:
 
 
 def layout_groups(
-    coordinator: "KVCacheCoordinator",
+    coordinator: "KVCacheCoordinator", speculative_decoding: bool = False
 ) -> tuple[list[int], list[int], list[int]]:
     """Full-attention, Mamba and indexer-ring group ids.
 
     Raises:
         ValueError: if a group has another type, a ring declares no way to
-            resume inside its open group, or a kind is missing.
+            resume inside its open group (under speculative decoding: no
+            decode-path catch-up), or a kind is missing.
 
     """
     from vllm.v1.core.single_type_kv_cache_manager import (
@@ -76,6 +87,14 @@ def layout_groups(
                 raise ValueError(
                     "mamba_frontier_checkpoint needs every indexer ring to "
                     f"declare resume_catchup; group {group_id} does not"
+                )
+            if speculative_decoding and spec.resume_catchup != "decode":
+                # The prefill path would read the open group from a ring that
+                # also holds draft rows.
+                raise ValueError(
+                    "mamba_frontier_checkpoint under speculative decoding needs "
+                    "indexer rings that only the decode path reads; group "
+                    f"{group_id} declares resume_catchup {spec.resume_catchup!r}"
                 )
             rings.append(group_id)
         else:
@@ -108,11 +127,15 @@ def check_frontier_checkpoint_config(
         refusal = "prefix_cache_retention_interval 0"
     elif 0 < threshold < block_size:
         refusal = f"no long_prefill_token_threshold below the block size ({block_size})"
-    elif (
-        vllm_config.speculative_config is not None
-        or vllm_config.num_speculative_tokens > 0
+    elif vllm_config.speculative_config is not None and (
+        speculative := check_speculative_config(vllm_config)
     ):
-        refusal = "no speculative decoding (num_speculative_tokens 0)"
+        refusal = speculative
+    elif (
+        vllm_config.speculative_config is None
+        and vllm_config.num_speculative_tokens > 0
+    ):
+        refusal = "no diffusion decoding (diffusion_config.canvas_length)"
     elif cache.use_replayssm:
         refusal = "no ReplaySSM"
     elif (transfer := vllm_config.kv_transfer_config) is not None and (
@@ -151,6 +174,7 @@ class HybridCheckpointManager:
         eviction_leaf_last: GreedyDual-Size evicts inner units before leaves.
         eviction_leaf_idle_s: With `eviction_leaf_last`, a leaf unused this
             long ranks as inner.
+        speculative_decoding: Whether requests verify draft tokens.
 
     """
 
@@ -162,8 +186,9 @@ class HybridCheckpointManager:
         eviction_cost: PrefillCostModel | None,
         eviction_leaf_last: bool = False,
         eviction_leaf_idle_s: float | None = None,
+        speculative_decoding: bool = False,
     ) -> None:
-        pages, states, rings = layout_groups(coordinator)
+        pages, states, rings = layout_groups(coordinator, speculative_decoding)
         managers = coordinator.single_type_managers
         self.pool = coordinator.block_pool
         self.block_size = coordinator.scheduler_block_size
@@ -183,6 +208,10 @@ class HybridCheckpointManager:
         self.catchup_pool_size = math.lcm(1, *decode_rings)
         self.graph = CheckpointGraph(self.block_size)
         self.frontiers = FrontierIndex(coordinator, hash_fn, pages, states, rings)
+        # Under speculative decoding: where a finished request's state is.
+        self.speculative: SpeculativeFrontiers | None = None
+        if speculative_decoding:
+            self.speculative = SpeculativeFrontiers()
         self.eviction: GreedyDualSizeEviction | None = None
         if eviction_cost is not None:
             self.eviction = GreedyDualSizeEviction(
@@ -280,6 +309,73 @@ class HybridCheckpointManager:
         if self.eviction is not None:
             self.eviction.new_step()
 
+    def step_completed(
+        self,
+        request: "Request",
+        start: int,
+        num_scheduled: int,
+        verified: bool,
+        num_sampled: int,
+        num_kept: int,
+    ) -> None:
+        """Under speculative decoding, a step of `request` completed: it
+        started at device position `start`, computed `num_scheduled`
+        tokens, verified drafts or not, and the device sampled
+        `num_sampled` tokens, of which the scheduler kept `num_kept`.
+        When the kept tokens crossed a block boundary past the prompt,
+        the state there, which the step left in the block before the
+        boundary, is snapshotted as the decode-boundary state."""
+        assert self.speculative is not None
+        self.speculative.step_completed(
+            request.request_id, start, num_scheduled, verified, num_sampled, num_kept
+        )
+        if not verified:
+            return
+        boundary = (start + num_kept) // self.block_size * self.block_size
+        if boundary <= start or boundary <= request.num_prompt_tokens:
+            return
+        index = boundary // self.block_size - 1
+        blocks = []
+        for manager in self.mamba_managers:
+            table = manager.req_to_blocks.get(request.request_id) or []
+            if index >= len(table) or table[index].is_null:
+                return
+            blocks.append(table[index])
+        self.snapshot_decode_boundary(request, blocks, boundary)
+
+    def take_state_gathers(
+        self,
+    ) -> tuple[list[MambaStateGather], list[KVCacheBlock]]:
+        """The gathers that complete states published since the last call,
+        and the blocks they hold until the step that runs them."""
+        gathers = []
+        retained: list[KVCacheBlock] = []
+        for gather in self.frontiers.pending_gathers:
+            group_ids = tuple(gather.blocks)
+            pairs = [gather.blocks[g] for g in group_ids]
+            gathers.append(
+                MambaStateGather(
+                    column=gather.column,
+                    group_ids=group_ids,
+                    dst_block_ids=tuple(dst.block_id for dst, _ in pairs),
+                    src_block_ids=tuple(src.block_id for _, src in pairs),
+                )
+            )
+            retained.extend(block for pair in pairs for block in pair)
+        self.frontiers.pending_gathers.clear()
+        return gathers, retained
+
+    def drop_state_gathers(self) -> None:
+        """No step runs the pending gathers (the prefix cache is reset first):
+        the frontiers they complete go, and the blocks they hold are freed."""
+        retained: list[KVCacheBlock] = []
+        for gather in self.frontiers.pending_gathers:
+            assert gather.key is not None
+            self.release(gather.key)
+            retained.extend(block for pair in gather.blocks.values() for block in pair)
+        self.frontiers.pending_gathers.clear()
+        self.pool.free_blocks(retained)
+
     def extend_hit(
         self,
         request: "Request",
@@ -360,6 +456,13 @@ class HybridCheckpointManager:
         """Publish the request's decode-boundary state and its frontier before
         its blocks return to the pool, and release what they replace."""
         request_id = request.request_id
+        exact = None
+        if self.speculative is not None:
+            if request.status == RequestStatus.FINISHED_ABORTED:
+                # An aborted request publishes no frontier.
+                self.speculative.forget(request_id)
+            else:
+                exact = self.speculative.resolve(request)
         leaf = self._publish_decode_boundary(request)
         self._resume.pop(request_id, None)
         self._touched.pop(request_id, None)
@@ -388,9 +491,14 @@ class HybridCheckpointManager:
                 self.eviction.record(leaf, graph.units[leaf].num_tokens, request)
         else:
             leaf = None
-        frontier = self.frontiers.publish(request)
+        frontier = None
+        if self.speculative is None or exact is not None:
+            frontier = self.frontiers.publish(request, exact)
         if frontier is not None:
-            self.state_cached(frontier, request.num_computed_tokens, request)
+            num_tokens = (
+                request.num_computed_tokens if exact is None else exact.num_tokens
+            )
+            self.state_cached(frontier, num_tokens, request)
             graph.link(request_id, frontier)
             if leaf is None:
                 self._replace_leaf(request_id, frontier)
@@ -473,11 +581,15 @@ class HybridCheckpointManager:
         return running
 
     def snapshot_decode_boundary(
-        self, request: "Request", running: list[KVCacheBlock]
+        self,
+        request: "Request",
+        running: list[KVCacheBlock],
+        position: int | None = None,
     ) -> None:
         """Copy the state at a block boundary (`running`, taken before this
         step's allocation) into the request's scratch block in every Mamba
-        group, or in none. A snapshot leaves a block free."""
+        group, or in none. `position`: the boundary (default the request's
+        computed tokens). A snapshot leaves a block free."""
         request_id = request.request_id
         managers = self.mamba_managers
         new = sum(request_id not in m.decode_boundary_scratch for m in managers)
@@ -490,7 +602,7 @@ class HybridCheckpointManager:
             manager.queue_block_copy(block, scratch)
             manager.decode_boundary_scratch[request_id] = (
                 scratch,
-                request.num_computed_tokens,
+                request.num_computed_tokens if position is None else position,
             )
 
     def drop_decode_boundary_scratch(self, request_id: str) -> bool:
@@ -511,7 +623,12 @@ class HybridCheckpointManager:
     def _publish_decode_boundary(self, request: "Request") -> BlockHash | None:
         """Cache the state at the last block boundary the output crossed in
         every Mamba group, or in none, and free the scratch blocks."""
-        sources = [_decode_boundary(m, request) for m in self.mamba_managers]
+        # Under speculative decoding the running block is not the state at
+        # the computed tokens; only snapshots are.
+        from_running = self.speculative is None
+        sources = [
+            _decode_boundary(m, request, from_running) for m in self.mamba_managers
+        ]
         complete = (
             bool(sources)
             and all(source is not None for source in sources)
@@ -548,18 +665,22 @@ def _running_block(manager: "MambaManager", request_id: str) -> KVCacheBlock | N
 
 
 def _decode_boundary(
-    manager: "MambaManager", request: "Request"
+    manager: "MambaManager", request: "Request", from_running: bool
 ) -> tuple[KVCacheBlock, int] | None:
     """The block holding the state at the last block boundary the output
-    crossed, and that boundary; None when there is none past the prompt. A
-    running state at a block boundary counts too."""
+    crossed, and that boundary; None when there is none past the prompt.
+    `from_running`: a running state at a block boundary counts too."""
     unit = manager.block_pool.hash_block_size
     block_size = manager.block_size
     num_computed = request.num_computed_tokens
     prompt_tail = request.num_prompt_tokens // unit * unit
     source = None
     boundary = 0
-    if num_computed % block_size == 0 and num_computed > request.num_prompt_tokens:
+    if (
+        from_running
+        and num_computed % block_size == 0
+        and num_computed > request.num_prompt_tokens
+    ):
         running = _running_block(manager, request.request_id)
         if running is not None:
             source, boundary = running, num_computed

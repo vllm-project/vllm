@@ -108,6 +108,19 @@ Frontier checkpoints run with a KV connector whose `kv_role` is `"kv_both"` and 
 
 The scheduler shows a connector only the block-aligned part of a local hit that ends inside a block, and lets a longer external hit replace the rest. A frontier hit is such a hit. When the connector's hit is longer, the frontier's partial page, state and ring block are dropped from the request's hit. The request then resumes at the state the load ends with. This applies to the native CPU offloading connector (`--kv-offloading-size`) like any other connector.
 
+## Speculative decoding
+
+Under speculative decoding a finished request's computed-token count does not say where its exact state is: a verify step writes one state column per draft position, and under asynchronous scheduling one more step of the request may be in flight when it finishes. `speculative.SpeculativeFrontiers` keeps each request's last completed step (its device start, its query length, whether it verified drafts, and the tokens the device sampled and the scheduler kept), which the scheduler records in `update_from_output`. When the request finishes, it resolves where the exact state is:
+
+- with a step in flight, the state after the request's last token, in that step's first column;
+- otherwise, the state after the kept tokens, in the column of the last accepted draft.
+
+A state in a later draft column is folded into the step's first column on the GPU before anything reads it. The scheduler sends a `MambaStateGather` in the next step's output (`SchedulerOutput.mamba_state_gathers`), and Model Runner V2 applies it with the `align`-mode pre-copy kernel before any other block operation of that step. Both blocks stay referenced until the step completes. When the scheduler kept fewer tokens than the device sampled, for example at a repetition-detection stop, the request publishes no frontier; `SpeculativeFrontiers.declined` counts the reasons. A stop string is caught by the frontend, which aborts the request, so it publishes nothing either.
+
+A decode-boundary state comes from the block in which a verify step leaves the state at a block boundary its accepted tokens crossed. It is snapshotted when the step's output is processed.
+
+`speculative_config.truncate_acceptance_at_stop` makes the rejection sampler stop accepting at the request's stop: the first sampled token that is its EOS token (unless `ignore_eos`) or one of its stop token ids, or that reaches its length limit. The output is unchanged, since the scheduler drops the tokens after a stop anyway, but the device's state then ends at the request's last token. Frontier checkpoints under speculative decoding require it.
+
 ## Metrics
 
 `vllm:prefix_cache_hits` includes the tokens a frontier serves. `vllm:prefix_cache_frontier_hits` is registered only when `mamba_frontier_checkpoint` is on. It counts the part of those hits that lies past the block-aligned hit, which is what frontier checkpoints save. Re-admissions of preempted requests are not counted.
@@ -122,7 +135,15 @@ The scheduler shows a connector only the block-aligned part of a local hit that 
 - KV cache groups of full attention, Mamba and indexer rings only, at least one full-attention and one Mamba group, and every ring declaring `resume_catchup` (a sliding-window group, for example, is refused);
 - a KV connector, if any, with `kv_role="kv_both"` and `kv_load_failure_policy="recompute"`.
 
-It is refused with speculative decoding, ReplaySSM, KV cache events, and decode or prefill context parallelism.
+With speculative decoding it also requires:
+
+- `speculative_config.truncate_acceptance_at_stop`;
+- no EAGLE block drop (`disable_eagle_block_drop` for drafters that need it, such as MTP and EAGLE);
+- pipeline parallel size 1;
+- no KV connector;
+- indexer rings that only the decode path reads (`resume_catchup="decode"`).
+
+It is refused with ReplaySSM, KV cache events, and decode or prefill context parallelism.
 
 `prefix_cache_eviction="gds"` requires `mamba_frontier_checkpoint` and `prefill_cost_coefficients` with `d > 0` and `e >= 0`. `prefix_cache_leaf_last` requires `prefix_cache_eviction="gds"`. `prefix_cache_leaf_idle_seconds` (positive) requires `prefix_cache_leaf_last`.
 
@@ -133,5 +154,6 @@ The tests in `tests/v1/core/hybrid_checkpoint/` run on CPU. All but the graph te
 - `test_checkpoint_graph.py`: a removed unit's children move to its parent, branch points, and frontier keys that separate tokens, lengths and extra keys.
 - `test_frontier_checkpoints.py`: resuming at a frontier, catch-up inside an indexer group, decode-boundary states, evicting one block of a frontier, aborted requests, leaf replacement, a prefix-match unit smaller than the block, a KV connector hit longer than the frontier, and refused configurations.
 - `test_gds_eviction.py`: GreedyDual-Size against LRU under memory pressure, a frontier pinned by a waiting request, an exhausted pool giving up the pins of the waiting queue's back first, the pool's consistency after every step of a seeded multi-session run, leaf-last tiers and idle demotion, and refused configurations.
+- `test_speculative_frontiers.py`: frontier checkpoints under speculative decoding with an n-gram drafter, under synchronous and asynchronous scheduling, with stops inside accepted drafts, pool pressure, aborts, a prefix-cache reset with a gather pending, and refused configurations. A device stand-in (`spec_device.py`) checks every state read and every cached state against its token position, and must catch injected faults.
 
-Elsewhere, `tests/v1/core/test_prefix_caching.py` checks the block pool's key-removal listener and eviction-policy hooks, and `tests/v1/core/prefix_cache/test_partial_prefix_cache_hits.py` checks that a chunk running past a partially hit block does not cache that block.
+Elsewhere, `tests/v1/worker/test_gpu_stop_truncation.py` checks the truncated acceptance against the scheduler's `check_stop` (GPU), `tests/v1/core/test_prefix_caching.py` checks the block pool's key-removal listener and eviction-policy hooks, and `tests/v1/core/prefix_cache/test_partial_prefix_cache_hits.py` checks that a chunk running past a partially hit block does not cache that block.

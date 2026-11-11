@@ -328,9 +328,10 @@ class CacheConfig:
     when any of its blocks is evicted. Requires prefix caching with Mamba
     "align" mode, Model Runner V2 and `prefix_cache_retention_interval` 0; a
     `prefix_match_unit` may be smaller than the block size. A KV connector
-    needs `kv_role` "kv_both" and `kv_load_failure_policy` "recompute". Not
-    supported with speculative decoding, KV cache events or context
-    parallelism."""
+    needs `kv_role` "kv_both" and `kv_load_failure_policy` "recompute".
+    Speculative decoding needs `speculative_config.truncate_acceptance_at_stop`,
+    no EAGLE block drop, pipeline parallel size 1 and no KV connector. Not
+    supported with ReplaySSM, KV cache events or context parallelism."""
     prefix_cache_eviction: PrefixCacheEviction = "lru"
     """Which cached free blocks an allocation evicts first:
 

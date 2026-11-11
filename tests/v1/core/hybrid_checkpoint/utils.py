@@ -83,11 +83,15 @@ def make_hybrid_scheduler(
     hash_block_size: int | None = None,
     kv_transfer_config: KVTransferConfig | None = None,
     speculative_config: SpeculativeConfig | None = None,
+    num_speculative_blocks: int = 0,
+    ring_compression_ratio: int | None = None,
     async_scheduling: bool = False,
     kv_events_config: KVEventsConfig | None = None,
     **cache_kwargs: Any,
 ) -> Scheduler:
-    """`cache_kwargs` are CacheConfig fields; `ring` 0 builds no ring."""
+    """`cache_kwargs` are CacheConfig fields; `ring` 0 builds no ring.
+    `num_speculative_blocks`: the Mamba groups' state columns per draft
+    position."""
     vllm_config = VllmConfig(
         kv_transfer_config=kv_transfer_config,
         kv_events_config=kv_events_config,
@@ -133,6 +137,7 @@ def make_hybrid_scheduler(
                     mamba_cache_mode="align",
                     num_prefill_checkpoint_blocks=int(checkpoint_alignment is not None),
                     prefill_checkpoint_alignment=checkpoint_alignment,
+                    num_speculative_blocks=num_speculative_blocks,
                 ),
             )
             for i in range(2)
@@ -150,6 +155,7 @@ def make_hybrid_scheduler(
                     dtype=torch.bfloat16,
                     dcp_sharded=False,
                     resume_catchup=resume_catchup,
+                    compression_ratio=ring_compression_ratio,
                 ),
             )
         )

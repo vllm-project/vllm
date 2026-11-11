@@ -579,6 +579,18 @@ class SpeculativeConfig:
     activation scales on the platform's FP8 linear kernel; "nvfp4" is
     weight-only on the platform's W4A16 kernel. The target verifies with its
     own head, so only the acceptance length can change."""
+    truncate_acceptance_at_stop: bool = False
+    """Stop accepting a request's tokens at its stop: the first sampled token
+    that is its EOS token (unless `ignore_eos`) or one of its stop token ids,
+    or that reaches its length limit. The scheduler drops the tokens after a
+    stop anyway, so the output is unchanged, and the device-side state then
+    ends exactly at the request's last token. A verify step whose first input
+    token already ended the request (a step scheduled before that was known)
+    accepts no draft. Stop strings and repetition detection are not mirrored.
+    Applied by Model Runner V2's rejection sampler; refused with adaptive
+    verification and by models that supply their own rejection sampler. Mamba
+    frontier checkpoints (`cache_config.mamba_frontier_checkpoint`) under
+    speculative decoding require it."""
     use_local_argmax_reduction: bool = False
     """Use vocab-parallel local argmax instead of all-gathering full logits
     for draft token generation. Reduces communication from O(vocab_size) to
@@ -771,6 +783,7 @@ class SpeculativeConfig:
             "disable_eagle_block_drop",
             "disable_lookahead_block_hashes",
             "draft_lm_head_quantization",
+            "truncate_acceptance_at_stop",
             "use_local_argmax_reduction",
             "prompt_lookup_max",
             "prompt_lookup_min",

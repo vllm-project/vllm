@@ -14,6 +14,7 @@ from vllm.model_executor.models.interfaces import (
 )
 from vllm.tasks import GenerationTask
 from vllm.v1.attention.backend import AttentionCGSupport
+from vllm.v1.core.kv_cache_utils import MambaStateGather
 from vllm.v1.core.sched.output import NewRequestData
 from vllm.v1.kv_cache_interface import KVCacheConfig
 from vllm.v1.worker.encoder_cudagraph import EncoderCudaGraphManager
@@ -173,6 +174,12 @@ class ModelState(ABC):
         num_computed_tokens: torch.Tensor | None = None,
     ) -> None:
         return None
+
+    def apply_mamba_state_gathers(self, gathers: list[MambaStateGather]) -> None:
+        """Fold draft columns into finished requests' published Mamba states
+        (`SchedulerOutput.mamba_state_gathers`). Only models with Mamba
+        state in align mode receive any."""
+        raise NotImplementedError
 
     @abstractmethod
     def prepare_inputs_embeds(

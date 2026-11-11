@@ -310,9 +310,13 @@ def test_unsupported_configurations_are_refused(kwargs, needs):
         make_scheduler(**kwargs)
 
 
-def test_speculative_decoding_is_refused():
+def test_speculative_decoding_needs_truncated_acceptance():
+    """A device that accepts drafts past a request's stop leaves no exact
+    state to cut a frontier at."""
     speculative_config = SpeculativeConfig(method="ngram_gpu", num_speculative_tokens=2)
-    with pytest.raises(ValueError, match="needs no speculative decoding"):
+    with pytest.raises(
+        ValueError, match="needs speculative_config.truncate_acceptance_at_stop"
+    ):
         make_scheduler(speculative_config=speculative_config)
 
 

@@ -1289,6 +1289,18 @@ class VllmConfig:
         if model_config is None or not model_config.enable_trace_replay:
             return
 
+    def _verify_truncate_acceptance_at_stop(self) -> None:
+        speculative_config = self.speculative_config
+        if (
+            speculative_config is not None
+            and speculative_config.truncate_acceptance_at_stop
+            and speculative_config.enable_adaptive_verification
+        ):
+            raise ValueError(
+                "speculative_config.truncate_acceptance_at_stop does not "
+                "support adaptive verification"
+            )
+
     def _check_supports_watermarking(
         self,
         config: "SamplingParams | BeamSearchParams | None" = None,
@@ -1511,6 +1523,7 @@ class VllmConfig:
 
         self._verify_sampling_replay_config()
         self._verify_trace_replay_config()
+        self._verify_truncate_acceptance_at_stop()
 
         # A NIXL side is either fully replicated or fully DCP-sharded; MLA only.
         if (
