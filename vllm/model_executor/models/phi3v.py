@@ -24,6 +24,7 @@ import torch.nn as nn
 from transformers import (
     BatchFeature,
     CLIPVisionConfig,
+    Phi3Config,
     PreTrainedConfig,
     ProcessorMixin,
 )
@@ -575,12 +576,14 @@ class Phi3VForCausalLM(nn.Module, SupportsMultiModal, SupportsPP, SupportsQuant)
             self.language_model = init_vllm_registered_model(
                 vllm_config=vllm_config,
                 # The prefix is empty intentionally because default prefix of
-                # LlamaForCausalLM is "model"
+                # Phi3ForCausalLM is "model"
                 prefix="",
-                # We don't directly initialize vLLM's LlamaForCausalLM so we
-                # can automatically apply embedding wrapper if this model is
+                # The remote config isn't a Transformers `Phi3Config`
+                hf_config=Phi3Config.from_dict(config.to_dict()),
+                # We don't directly initialize Phi3ForCausalLM so we can
+                # automatically apply embedding wrapper if this model is
                 # initialized as an embedding model
-                architectures=["LlamaForCausalLM"],
+                architectures=["Phi3ForCausalLM"],
             )
 
         self.make_empty_intermediate_tensors = (
@@ -669,7 +672,7 @@ class Phi3VForCausalLM(nn.Module, SupportsMultiModal, SupportsPP, SupportsQuant)
         if intermediate_tensors is not None:
             inputs_embeds = None
 
-        hidden_states = self.language_model.model(
+        hidden_states = self.language_model(
             input_ids, positions, intermediate_tensors, inputs_embeds=inputs_embeds
         )
 

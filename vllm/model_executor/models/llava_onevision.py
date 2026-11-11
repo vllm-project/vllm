@@ -512,7 +512,7 @@ class LlavaOnevisionForConditionalGeneration(nn.Module, SupportsMultiModal, Supp
             )
 
         self.make_empty_intermediate_tensors = (
-            self.language_model.model.make_empty_intermediate_tensors
+            self.language_model.make_empty_intermediate_tensors
         )
 
     def _parse_and_validate_image_input(
@@ -895,7 +895,7 @@ class LlavaOnevisionForConditionalGeneration(nn.Module, SupportsMultiModal, Supp
         if intermediate_tensors is not None:
             inputs_embeds = None
 
-        hidden_states = self.language_model.model(
+        hidden_states = self.language_model(
             input_ids, positions, intermediate_tensors, inputs_embeds=inputs_embeds
         )
 

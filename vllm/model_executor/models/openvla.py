@@ -472,7 +472,7 @@ class OpenVLAForActionPrediction(nn.Module, SupportsMultiModal, SupportsPP):
         if intermediate_tensors is not None:
             inputs_embeds = None
 
-        return self.language_model.model(
+        return self.language_model(
             input_ids,
             positions,
             intermediate_tensors,

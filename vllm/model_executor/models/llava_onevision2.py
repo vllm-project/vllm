@@ -2293,7 +2293,7 @@ class LlavaOnevision2ForConditionalGeneration(
         if intermediate_tensors is not None:
             inputs_embeds = None
 
-        return self.language_model.model(
+        return self.language_model(
             input_ids=input_ids,
             positions=positions,
             intermediate_tensors=intermediate_tensors,

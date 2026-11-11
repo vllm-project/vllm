@@ -21,6 +21,8 @@ from vllm.config import VllmConfig
 from vllm.config.multimodal import MultiModalDummyOptions
 from vllm.inputs import MultiModalDataDict
 from vllm.logger import init_logger
+from vllm.model_executor.layers.llama import LlamaForCausalLM
+from vllm.model_executor.model_loader.utils import initialize_model
 from vllm.multimodal import MULTIMODAL_REGISTRY
 from vllm.multimodal.inputs import (
     MultiModalFieldConfig,
@@ -42,7 +44,7 @@ from vllm.utils.torch_utils import async_tensor_h2d
 
 from .interfaces import MultiModalEmbeddings, SupportsMultiModal, SupportsPP
 from .qwen2_vl import Qwen2VisionTransformer
-from .utils import AutoWeightsLoader, init_vllm_registered_model, maybe_prefix
+from .utils import AutoWeightsLoader, maybe_prefix
 
 logger = init_logger(__name__)
 
@@ -604,11 +606,13 @@ class KananaVForConditionalGeneration(nn.Module, SupportsMultiModal, SupportsPP)
             )
 
         with self._mark_language_model(vllm_config):
-            self.language_model = init_vllm_registered_model(
-                vllm_config=vllm_config,
-                hf_config=config.text_config,
+            # The remote text config isn't a Transformers `LlamaConfig`
+            self.language_model = initialize_model(
+                vllm_config=vllm_config.with_hf_config(
+                    config.text_config, ["LlamaForCausalLM"]
+                ),
                 prefix=maybe_prefix(prefix, "model"),
-                architectures=["LlamaForCausalLM"],
+                model_class=LlamaForCausalLM,
             )
 
         self.make_empty_intermediate_tensors = (

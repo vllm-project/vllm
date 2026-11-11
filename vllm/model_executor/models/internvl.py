@@ -882,7 +882,7 @@ class InternVLChatModel(
             "inputs_embeds": inputs_embeds,
         }
 
-        hidden_states = self.language_model.model(**forward_kwargs)
+        hidden_states = self.language_model(**forward_kwargs)
         return hidden_states
 
     def compute_logits(
