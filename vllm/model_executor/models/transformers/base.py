@@ -494,8 +494,8 @@ class Base(
         )
         return embeddings
 
-    def recursive_replace(self):
-        """Recursively replace modules in the model as needed.
+    def recursive_replace(self, root: nn.Module | None = None, prefix: str = "model"):
+        """Recursively replace modules in `root` (default `self.model`) as needed.
 
         Currently, this replaces:
 
@@ -507,6 +507,7 @@ class Base(
         - RMSNorm (detected from their dataflow) with vLLM's `RMSNorm`or `GemmaRMSNorm`
         - `nn.LayerNorm` with vLLM's `LayerNorm`
         """
+        root = self.model if root is None else root
         tp_plan = self._tp_plan()
 
         if not tp_plan and self.tp_group.world_size > 1:
@@ -525,7 +526,7 @@ class Base(
         # Prefix the patterns because we always start from `self.model`
         tp_plan = {maybe_prefix("model", k): v for k, v in tp_plan.items()}
         # Detect fusable patterns once per module class (cached, so this is cheap)
-        fusers = Fusers(self.model, self.vllm_config)
+        fusers = Fusers(root, self.vllm_config)
 
         vocab_embeddings = self._vocab_embeddings()
 
@@ -614,7 +615,7 @@ class Base(
                     setattr(module, child_name, new_module)
                     log_replacement(qual_name, child_module, new_module)
 
-        _recursive_replace(self.model, prefix="model")
+        _recursive_replace(root, prefix=prefix)
 
         self.hf_to_vllm_mapper |= WeightsMapper(orig_to_new_stacked=orig_to_new_stacked)
 
