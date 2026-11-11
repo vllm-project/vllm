@@ -73,6 +73,50 @@ _NESTED_HF_CONFIG_KEYS = frozenset(
     }
 )
 
+
+def _maybe_override_dspine_config(config: PreTrainedConfig) -> None:
+    draft = getattr(config, "dflash_config", None) or {}
+    bridge = draft.get("selected_prefix_code_bridge")
+    if config.architectures != ["DFlashDraftModel"] or bridge is None:
+        return
+    expected = {
+        "draft_block_causal": True,
+        "selected_prefix_terminal": False,
+        "selected_prefix_feature_writes": True,
+        "selected_prefix_feature_write_mode": "independent",
+        "selected_prefix_feature_layers": list(range(1, config.num_hidden_layers + 1)),
+    }
+    if (
+        config.model_type != "qwen3"
+        or getattr(config, "is_causal", True) is False
+        or any(draft.get(key) != value for key, value in expected.items())
+        or draft.get("selected_prefix_feature_next_token_rows", False)
+        or draft.get("selected_prefix_feature_reliability") is not None
+    ):
+        raise ValueError("DSpine requires independent causal writes at every layer.")
+    second = getattr(config, "code_bridge_second_pass", {})
+    refine = draft.get("selected_prefix_last_write_refine", {})
+    if (
+        second.get("mode") != "serial_table"
+        or second.get("first_exact") != config.num_hidden_layers - 1
+        or refine.get("kind") != "exact_sender"
+        or second.get("head_topk") != refine.get("head_topk")
+    ):
+        raise ValueError(
+            "DSpine requires matching serial last-write refinement settings."
+        )
+    config.architectures = ["DSpineDraftModel"]
+    draft.update(
+        block_size=config.block_size,
+        transfer_dim=bridge["code_size"],
+        message_dim=bridge["rank"],
+        transition_top_k=second["head_topk"],
+        transfer_space_eps=bridge["eps"],
+        causal=True,
+        sample_from_anchor=False,
+    )
+
+
 MTPModelTypes = Literal[
     "deepseek_mtp",
     "dots3_note_mtp",
@@ -837,6 +881,7 @@ class SpeculativeConfig:
             # target's config, so it needs none of the rewrites below
             hf_config.update(transformers_mtp_overrides)
             return hf_config
+        _maybe_override_dspine_config(hf_config)
         initial_architecture = hf_config.architectures[0]
         if (
             initial_architecture == "DSparkDraftModel"
