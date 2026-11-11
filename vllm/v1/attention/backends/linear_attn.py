@@ -6,7 +6,6 @@ import torch
 
 from vllm.config import CompilationConfig, VllmConfig
 from vllm.model_executor.layers.mamba.abstract import (
-    get_kv_cache_checkpoint_alignment,
     get_mamba_num_speculative_blocks,
 )
 from vllm.v1.attention.backend import (
@@ -64,9 +63,6 @@ class LinearAttentionMetadataBuilder(AttentionMetadataBuilder[LinearAttentionMet
     ):
         super().__init__(kv_cache_spec, layer_names, vllm_config, device)
         self.num_speculative_blocks = get_mamba_num_speculative_blocks(vllm_config)
-        self.checkpoint_alignment = get_kv_cache_checkpoint_alignment(
-            vllm_config, layer_names
-        )
 
     def build(
         self,

@@ -783,15 +783,22 @@ def test_mamba_groups_support_different_state_specs():
         dtypes=(torch.float16,),
         mamba_type=MambaAttentionBackendEnum.SHORT_CONV,
     )
-    mamba_config = MambaManager.config(
+    # Groups may differ in prefill checkpointing.
+    gdn_config = MambaManager.config(
+        mamba_cache_mode="align",
+        num_speculative_blocks=3,
+        num_prefill_checkpoint_blocks=1,
+        prefill_checkpoint_alignment=16,
+    )
+    short_conv_config = MambaManager.config(
         mamba_cache_mode="align", num_speculative_blocks=3
     )
     kv_cache_config = KVCacheConfig(
         num_blocks=8,
         kv_cache_tensors=[],
         kv_cache_groups=[
-            new_kv_cache_group(["gdn.0", "gdn.1"], gdn_spec, mamba_config),
-            new_kv_cache_group(["ple.0"], short_conv_spec, mamba_config),
+            new_kv_cache_group(["gdn.0", "gdn.1"], gdn_spec, gdn_config),
+            new_kv_cache_group(["ple.0"], short_conv_spec, short_conv_config),
         ],
     )
 
@@ -799,10 +806,7 @@ def test_mamba_groups_support_different_state_specs():
     assert mamba_groups == {gdn_spec: [0], short_conv_spec: [1]}
 
     assert get_mamba_group_ids(mamba_groups) == [0, 1]
-    assert get_mamba_group_params(kv_cache_config, [0, 1]) == (
-        gdn_spec.block_size,
-        mamba_config.params,
-    )
+    assert get_mamba_group_params(kv_cache_config, [0, 1]) == (16, 3)
 
     cfg = _TestConfig()
     copy_bufs = _make_copy_bufs(cfg, kv_cache_config, torch.device("cpu"))

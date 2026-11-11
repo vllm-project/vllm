@@ -2502,28 +2502,6 @@ class CrossAttentionManager(SingleTypeKVCacheManager):
         raise NotImplementedError("CrossAttentionManager does not support caching")
 
 
-class EncoderOnlyAttentionManager(SingleTypeKVCacheManager):
-    """Policy for encoder-only attention layers, which hold no KV cache.
-
-    Their groups only exist on the worker to build attention metadata; the
-    scheduler never instantiates this manager.
-    """
-
-    @classmethod
-    def max_allocated_blocks_per_request(
-        cls,
-        config: ManagerConfig,
-        block_size: int,
-        dcp_sharded: bool,
-        vllm_config: "VllmConfig",
-    ) -> int:
-        return 0
-
-    @classmethod
-    def find_longest_cache_hit(cls, *args, **kwargs):
-        raise NotImplementedError("Encoder-only attention has no KV cache.")
-
-
 class SinkFullAttentionManager(FullAttentionManager):
     @dataclass(frozen=True, kw_only=True)
     class Params(SingleTypeKVCacheManager.Params):
@@ -3030,7 +3008,6 @@ _MANAGER_KINDS: list[tuple[type[SingleTypeKVCacheManager], KVCacheSpecKind]] = [
     (ChunkedLocalAttentionManager, KVCacheSpecKind.CHUNKED_LOCAL_ATTENTION),
     (MambaManager, KVCacheSpecKind.MAMBA),
     (CrossAttentionManager, KVCacheSpecKind.CROSS_ATTENTION),
-    (EncoderOnlyAttentionManager, KVCacheSpecKind.ENCODER_ONLY_ATTENTION),
 ]
 _MLA_KINDS = {
     KVCacheSpecKind.FULL_ATTENTION: KVCacheSpecKind.MLA_ATTENTION,
@@ -3048,7 +3025,8 @@ def get_kv_cache_kind(
         (k for cls, k in _MANAGER_KINDS if issubclass(manager_config.manager_cls, cls)),
         KVCacheSpecKind.UNKNOWN,
     )
-    if all(isinstance(spec, MLAAttentionSpec) for spec in specs):
+    specs = tuple(specs)
+    if specs and all(isinstance(spec, MLAAttentionSpec) for spec in specs):
         return _MLA_KINDS.get(kind, kind)
     return kind
 

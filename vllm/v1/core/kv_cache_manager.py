@@ -17,7 +17,6 @@ from vllm.v1.core.kv_cache_metrics import KVCacheMetricsCollector
 from vllm.v1.core.kv_cache_utils import KVCacheBlock, KVCacheBlockCopy, trim_null_head
 from vllm.v1.core.single_type_kv_cache_manager import (
     CrossAttentionManager,
-    EncoderOnlyAttentionManager,
     MambaManager,
     get_kv_cache_kind,
 )
@@ -768,9 +767,7 @@ class KVCacheManager:
                 isinstance(spec, AttentionSpec)
                 for spec in group.kv_cache_specs.values()
             )
-            if not is_attention or issubclass(
-                group.manager_cls, (CrossAttentionManager, EncoderOnlyAttentionManager)
-            ):
+            if not is_attention or issubclass(group.manager_cls, CrossAttentionManager):
                 clipped_block_ids.append(ids)
                 continue
 
@@ -787,10 +784,8 @@ class KVCacheManager:
         ):
             if not group.prefix_cacheable:
                 continue
-            if issubclass(
-                group.manager_cls, (CrossAttentionManager, EncoderOnlyAttentionManager)
-            ):
-                # Cross-attention and encoder-only groups are not prefix cached.
+            if issubclass(group.manager_cls, CrossAttentionManager):
+                # Cross-attention groups are not prefix cached.
                 continue
 
             # Coverage grows along the block table: the last hashed block has the most.

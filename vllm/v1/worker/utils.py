@@ -28,9 +28,6 @@ from vllm.v1.attention.backend import (
     MultipleOf,
 )
 from vllm.v1.core.kv_cache_utils import KVCacheBlockCopy
-from vllm.v1.core.single_type_kv_cache_manager import (
-    EncoderOnlyAttentionManager,
-)
 from vllm.v1.kv_cache_interface import (
     AttentionSpec,
     KVCacheConfig,
@@ -684,8 +681,6 @@ def prepare_kernel_block_sizes(
     """
     kernel_block_sizes = []
     for kv_cache_gid, kv_cache_group in enumerate(kv_cache_config.kv_cache_groups):
-        if issubclass(kv_cache_group.manager_cls, EncoderOnlyAttentionManager):
-            continue
         if not kv_cache_group.kv_cache_specs:
             # A PP stage holding none of the group's layers splits no blocks.
             kernel_block_sizes.append(kv_cache_group.block_size)

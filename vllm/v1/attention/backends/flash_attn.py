@@ -153,7 +153,6 @@ class FA4DenseAttentionKernel(VllmJitKernel["FA4DenseAttentionKernel.CompileKey"
             or vllm_config.model_config.rswa_window is not None
             or kv_cache_spec.kv_quant_mode != KVQuantMode.NONE
             or kv_cache_spec.dtype not in FA4_DENSE_FLOAT_DTYPES
-            or not isinstance(kv_cache_spec, AttentionSpec)
         ):
             return []
         head_dim = kv_cache_spec.head_size

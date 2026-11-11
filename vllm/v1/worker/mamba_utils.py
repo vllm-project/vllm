@@ -1,7 +1,7 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 import dataclasses
-from typing import Any
+from typing import Any, cast
 
 import torch
 
@@ -668,14 +668,16 @@ def get_mamba_group_ids(mamba_groups: dict[MambaSpec, list[int]]) -> list[int]:
 
 def get_mamba_group_params(
     kv_cache_config: KVCacheConfig, mamba_group_ids: list[int]
-) -> tuple[int, MambaManager.Params]:
-    """Return the block size and manager params shared by the mamba groups."""
-    groups = kv_cache_config.kv_cache_groups
-    shared = {(groups[i].block_size, groups[i].manager_config) for i in mamba_group_ids}
-    assert len(shared) == 1, "all mamba groups must share cache scheduling parameters"
-    ((block_size, config),) = shared
-    assert isinstance(config.params, MambaManager.Params)
-    return block_size, config.params
+) -> tuple[int, int]:
+    """Return the block size and speculative block count shared by the mamba
+    groups."""
+    groups = [kv_cache_config.kv_cache_groups[i] for i in mamba_group_ids]
+    params = [cast(MambaManager.Params, g.manager_config.params) for g in groups]
+    assert (
+        len({g.block_size for g in groups}) == 1
+        and len({(p.num_speculative_blocks, p.mamba_cache_mode) for p in params}) == 1
+    ), "all mamba groups must share cache scheduling parameters"
+    return groups[0].block_size, params[0].num_speculative_blocks
 
 
 def get_mamba_groups(kv_cache_config: KVCacheConfig) -> dict[MambaSpec, list[int]]:
@@ -796,7 +798,7 @@ class MambaSpecDecodeGPUContext:
         """Create context with allocated buffers (metadata populated later)."""
         mamba_groups = get_mamba_groups(kv_cache_config)
         mamba_group_ids = get_mamba_group_ids(mamba_groups)
-        block_size, mamba_params = get_mamba_group_params(
+        block_size, num_speculative_blocks = get_mamba_group_params(
             kv_cache_config, mamba_group_ids
         )
         # Count physical state tensors across all Mamba groups. Different
@@ -857,7 +859,7 @@ class MambaSpecDecodeGPUContext:
                 (
                     len(mamba_group_ids),
                     max_num_reqs,
-                    1 + mamba_params.num_speculative_blocks,
+                    1 + num_speculative_blocks,
                 ),
                 dtype=torch.int32,
                 device=device,
