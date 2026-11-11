@@ -130,11 +130,11 @@ def quantize_and_insert_k_cache(
 ):
     """Quantize K tensor and insert into paged K cache.
 
-    ``bytes_per_token`` picks the record (see the module header): the V4 one,
+    `bytes_per_token` picks the record (see the module header): the V4 one,
     or V4.1's all-dims MXFP8 one.
 
-    ``use_fnuz=True`` selects FNUZ E4M3 cache encoding and is only valid on
-    platforms whose FP8 format is FNUZ. ``use_fnuz=False`` selects OCP E4M3,
+    `use_fnuz=True` selects FNUZ E4M3 cache encoding and is only valid on
+    platforms whose FP8 format is FNUZ. `use_fnuz=False` selects OCP E4M3,
     which is used by OCP-encoded caches even on gfx942.
     """
     assert k.dim() == 2 and k.shape[1] == 512, (
@@ -339,7 +339,7 @@ def _dequantize_and_gather_k_one_pass_kernel(
     n_quant_blocks: tl.constexpr,  # 7 real blocks; the per-block form only
     use_fnuz: tl.constexpr = False,
 ):
-    """``_dequantize_and_gather_k_kernel`` with the token read in one tile.
+    """`_dequantize_and_gather_k_kernel` with the token read in one tile.
 
     The seven quantization blocks tile the fp8 region exactly, so the per-block
     form's bounds never bite and its twenty-two memory operations per token
@@ -557,7 +557,7 @@ _NVFP4_GATHER_TILE = 8
 
 
 def gather_num_workers(max_gather_len: int | None) -> int:
-    """Grid width for a gather of at most ``max_gather_len`` tokens."""
+    """Grid width for a gather of at most `max_gather_len` tokens."""
     if max_gather_len is None:
         return _GATHER_MIN_WORKERS
     workers = cdiv(max_gather_len, _GATHER_STEPS_PER_WORKER)
@@ -684,13 +684,13 @@ def dequantize_and_gather_k_cache(
 ) -> None:
     """Dequantize and gather a paged DSv4 K cache.
 
-    The record is read off ``k_cache.shape[-1]``; see the module header. Only
+    The record is read off `k_cache.shape[-1]`; see the module header. Only
     the fp8 records have a CuteDSL gather, so NVFP4 always takes the Triton
     path.
 
-    ``use_fnuz`` MUST match the encoder of the specific cache being read:
-    ``False`` for ``compressed_k_cache`` (Triton encoder is OCP everywhere),
-    ``current_platform.is_fp8_fnuz()`` for ``swa_k_cache`` (C++ encoder
+    `use_fnuz` MUST match the encoder of the specific cache being read:
+    `False` for `compressed_k_cache` (Triton encoder is OCP everywhere),
+    `current_platform.is_fp8_fnuz()` for `swa_k_cache` (C++ encoder
     writes FNUZ on gfx942 and OCP on gfx950).
     """
     if has_cutedsl() and k_cache.shape[-1] != V41_NVFP4_BYTES_PER_TOKEN:
@@ -872,35 +872,19 @@ def combine_topk_swa_indices(
 _COMBINE_TOPK_SWA_NUM_WORKERS = 256
 
 
-# Representative pointer alignment variants for Triton pointer specialization.
+# Representative topk_indices alignment variants for Triton specialization.
 _COMBINE_TOPK_SWA_POINTER_INPUTS = zip_inputs(
-    dict(
-        topk_indices=True,
-        query_start_loc=True,
-        seq_lens=True,
-        gather_lens=True,
-    ),
-    dict(
-        topk_indices=True,
-        query_start_loc=False,
-        seq_lens=False,
-        gather_lens=True,
-    ),
-    dict(
-        topk_indices=False,
-        query_start_loc=False,
-        seq_lens=False,
-        gather_lens=False,
-    ),
+    dict(topk_indices=True),
+    dict(topk_indices=False),
 )
 
 
 def _combine_topk_swa_warmup_inputs(vllm_config: Any) -> _WarmupInputRows:
     """One warmup row per v4.1 layer type (compress ratio) in the model.
 
-    Every layer slices the shared ``index_topk``-wide indices buffer, so the
+    Every layer slices the shared `index_topk`-wide indices buffer, so the
     padded width is the same for all rows; SWA-only layers (ratio 0) pass
-    ``TOP_K=0``.
+    `TOP_K=0`.
     """
     hf_config = vllm_config.model_config.hf_config
     compress_ratios = get_compress_ratios(hf_config) or [0]
@@ -926,9 +910,15 @@ class CombineTopkSwaIndicesKernel(
 
     @staticmethod
     @triton.jit(
+        # Each program reads one value from the per-request tensors, so their
+        # alignment buys nothing, while the chunked prefill passes them at any
+        # num_decodes / chunk_start offset.
         do_not_specialize=[
             "combined_indices_stride",
             "topk_indices_stride",
+            "query_start_loc_ptr",
+            "seq_lens_ptr",
+            "gather_lens_ptr",
             "M",
             "N",
         ]
@@ -1024,9 +1014,6 @@ class CombineTopkSwaIndicesKernel(
         *,
         topk_width: int,
         topk_indices: bool,
-        query_start_loc: bool,
-        seq_lens: bool,
-        gather_lens: bool,
         topk: int,
         compress_ratio: int,
         WINDOW_SIZE: int,
@@ -1034,9 +1021,6 @@ class CombineTopkSwaIndicesKernel(
         padded_topk = next_power_of_2(topk_width)
         input_variant = TritonPointerInputVariant.from_alignment(
             topk_indices=topk_indices,
-            query_start_loc=query_start_loc,
-            seq_lens=seq_lens,
-            gather_lens=gather_lens,
         )
         return self.CompileKey(
             TOP_K=topk,
@@ -1065,9 +1049,9 @@ class CombineTopkSwaIndicesKernel(
             int32_ptr,
             input_variant.pointer("topk_indices", torch.int32),
             1,  # do not specialize topk_indices_stride
-            input_variant.pointer("query_start_loc", torch.int32),
-            input_variant.pointer("seq_lens", torch.int32),
-            input_variant.pointer("gather_lens", torch.int32),
+            int32_ptr,  # do not specialize query_start_loc
+            int32_ptr,  # do not specialize seq_lens
+            int32_ptr,  # do not specialize gather_lens
             1,  # do not specialize M
             1,  # do not specialize N
             TOP_K=compile_key.TOP_K,
@@ -1138,14 +1122,14 @@ def build_flashinfer_mixed_sparse_indices(
 ) -> tuple[torch.Tensor, torch.Tensor]:
     """Build the FlashInfer DSV4 sparse-index matrix for decode-first batches.
 
-    Produces ``sparse_indices`` of shape ``[num_tokens, swa_total_width +
-    padded_topk]`` (the first ``swa_total_width`` columns are SWA slot ids, the
-    rest are compressed/top-k slot ids) and ``sparse_topk_lens`` (active length
+    Produces `sparse_indices` of shape `[num_tokens, swa_total_width +
+    padded_topk]` (the first `swa_total_width` columns are SWA slot ids, the
+    rest are compressed/top-k slot ids) and `sparse_topk_lens` (active length
     per token). Decode tokens read precomputed SWA/compressed indices; prefill
     tokens derive their SWA window from the position and translate local
     compressed indices to global slots via the block tables.
 
-    ``replay_start`` ([num_reqs], SWA bounded replay) lower-bounds every
+    `replay_start` ([num_reqs], SWA bounded replay) lower-bounds every
     prefill token's window: positions below it hold no window KV.
     """
     assert decode_swa_indices.dtype == torch.int32

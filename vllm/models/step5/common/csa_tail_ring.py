@@ -30,7 +30,7 @@ _TAIL_RING_BLOCK_SIZES = (32, 64, 128)
 def _minimum_tail_ring_block_size(
     bytes_per_token: int, block_size: int, required_rows: int
 ) -> int | None:
-    """Kernel block the tail ring needs, or None when ``block_size`` fits."""
+    """Kernel block the tail ring needs, or None when `block_size` fits."""
     for candidate in (block_size, *_TAIL_RING_BLOCK_SIZES):
         page = candidate * bytes_per_token
         if page % _ROW_BYTES == 0 and page // _ROW_BYTES >= required_rows:
@@ -151,16 +151,16 @@ class Step5CSATailRingBackend(AttentionBackend):
 
 
 class Step5CSATailRing(nn.Module, AttentionLayerBase):
-    """Raw ``[index_k | index_z]`` rows of each request's open CSA region.
+    """Raw `[index_k | index_z]` rows of each request's open CSA region.
 
     A region summary is a fixed-order online softmax over its eight rows, so
     the rows are the whole state: the row that closes a region replays the
     other seven from here, and a rejected draft is undone by the next step
     overwriting its row.
 
-    One verify step stores up to ``k + 1`` rows while the next step may still
+    One verify step stores up to `k + 1` rows while the next step may still
     replay up to seven earlier rows of the same region, so the ring needs
-    ``7 + k`` rows. It is sized to one main KV page so that it shares the
+    `7 + k` rows. It is sized to one main KV page so that it shares the
     page size of the other KV cache groups.
     """
 

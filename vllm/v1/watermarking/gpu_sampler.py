@@ -150,9 +150,9 @@ class GPUWatermarkSampler(Sampler):
     ) -> torch.Tensor:
         """Build contexts for flattened verification rows.
 
-        With committed tokens ``[10, 11]``, drafts ``[20, 21]``, and width 2,
-        local positions ``[0, 1, 2]`` use contexts ``[10, 11]``, ``[11, 20]``,
-        and ``[20, 21]``. The first verification row precedes the first draft.
+        With committed tokens `[10, 11]`, drafts `[20, 21]`, and width 2,
+        local positions `[0, 1, 2]` use contexts `[10, 11]`, `[11, 20]`,
+        and `[20, 21]`. The first verification row precedes the first draft.
         """
         context_width = self.watermarker.context_width
         req_indices = expanded_idx_mapping.to(torch.int64)

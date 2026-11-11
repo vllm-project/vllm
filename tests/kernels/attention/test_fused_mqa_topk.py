@@ -87,7 +87,7 @@ def _logits(q, k, scales, weights, starts, ends):
 def _check(rel, q, k, scales, weights, starts, ends, scores=True):
     """Indices relative to the row start: count, bounds, uniqueness, scores.
 
-    ``scores`` compares the selected scores with the exact fp32 top-k; the
+    `scores` compares the selected scores with the exact fp32 top-k; the
     SM100 dense path rounds its logits to bf16, so it is checked without.
     """
     topk = rel.shape[1]
@@ -346,7 +346,7 @@ KPOOL = 4
 
 def _kpool_inputs(pool_lens=(20000, 70000), q_rows=96, tail=2, seed=919):
     """Two packed GLM-5.3-Flash-style requests: K holds 4-token pools; the
-    last ``q_rows`` tokens of each request score the pools they can see."""
+    last `q_rows` tokens of each request score the pools they can see."""
     q, k, _, weights = _inputs(q_rows * len(pool_lens), sum(pool_lens), seed)
     starts, ends, positions, base = [], [], [], 0
     for n in pool_lens:

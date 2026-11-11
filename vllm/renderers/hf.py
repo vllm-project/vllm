@@ -49,7 +49,10 @@ from vllm.renderers.chat_utils.content_parser import (
     PROMPT_EMBEDS_PLACEHOLDER_ID_PREFIX,
 )
 from vllm.tokenizers.hf import HfTokenizer, maybe_make_thread_pool
-from vllm.transformers_utils.chat_templates import get_chat_template_fallback_path
+from vllm.transformers_utils.chat_templates import (
+    get_chat_template_fallback_path,
+    get_chat_template_override_path,
+)
 from vllm.transformers_utils.processor import cached_get_processor
 from vllm.utils.async_utils import make_async
 from vllm.utils.func_utils import supports_kw
@@ -323,6 +326,14 @@ def resolve_chat_template(
         # so that downstream kwargs detection can parse template variables.
         return tokenizer.get_chat_template(chat_template, tools=tools)
 
+    # Predefined templates that replace the ones shipped on HF Hub
+    path = get_chat_template_override_path(
+        model_type=model_config.hf_config.model_type,
+        tokenizer_name_or_path=tokenizer.name_or_path,
+    )
+    if path is not None:
+        return load_chat_template(path)
+
     # 2nd priority: AutoProcessor chat template, unless tool calling is enabled
     if tools is None:
         chat_template = _try_get_processor_chat_template(
@@ -415,7 +426,7 @@ def _is_var_or_elems_access(
 
 
 def _attr_dotted_name(node: jinja2.nodes.Node) -> str | None:
-    """Render an attribute-assignment target like ``ns.rest`` as a dotted name."""
+    """Render an attribute-assignment target like `ns.rest` as a dotted name."""
     if isinstance(node, jinja2.nodes.NSRef):
         return f"{node.name}.{node.attr}"
     parts = []
@@ -1071,7 +1082,7 @@ class HfRenderer(BaseRenderer[HfTokenizer]):
 
         Called after a render timeout so that the stuck thread (which CPython
         cannot interrupt) does not permanently block all subsequent renders.
-        The executor *object* is kept so ``make_async`` wrappers bound at
+        The executor *object* is kept so `make_async` wrappers bound at
         init (tokenize, decode, pooling, derender) keep submitting work.
         The old inner pool is abandoned with wait=False — its thread will
         eventually finish or be reaped on process exit.
