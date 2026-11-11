@@ -2,6 +2,7 @@
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 """Attention layer with PagedAttention and Triton prefix prefill."""
 
+import functools
 from typing import ClassVar
 
 import torch
@@ -38,6 +39,18 @@ from vllm.v1.kv_cache_interface import (
 )
 
 logger = init_logger(__name__)
+
+
+@functools.cache
+def _aiter_supports_non_causal() -> bool:
+    """True if the installed aiter runs causal=False in unified_attention."""
+    try:
+        from aiter.ops.triton.attention.unified_attention import (
+            unified_attention_supports_non_causal,
+        )
+    except ImportError:
+        return False
+    return unified_attention_supports_non_causal()
 
 
 def _kv_connector_enabled() -> bool:
@@ -111,7 +124,9 @@ class RocmAiterUnifiedAttentionBackend(RocmAttentionBackend):
 
     @classmethod
     def supports_non_causal(cls) -> bool:
-        return False
+        # aiter runs non-causal attention where it can (gfx950 Gluon); other
+        # cases fall back to the vLLM Triton unified attention kernel.
+        return True
 
     @classmethod
     def supports_kv_connector(cls) -> bool:
@@ -214,6 +229,19 @@ class RocmAiterUnifiedAttentionImpl(RocmAttentionImpl):
         self._use_shuffle_kv = (
             self._shuffle_kv_layout and self.attn_type != AttentionType.ENCODER_DECODER
         )
+        # Non-causal decoder attention (e.g. DFlash/DSpark draft blocks) runs on
+        # aiter when aiter supports it for this layer; the query and KV dtypes
+        # are checked per call.
+        self._aiter_non_causal = (
+            _aiter_supports_non_causal()
+            and self.attn_type == AttentionType.DECODER
+            and self.sliding_window == (-1, -1)
+            and self.alibi_slopes is None
+            and not self.logits_soft_cap
+            and self.head_size <= 256
+            and self.head_size & (self.head_size - 1) == 0
+            and not self._use_shuffle_kv
+        )
 
     def _split_kv_cache(
         self, kv_cache: torch.Tensor
@@ -314,7 +342,12 @@ class RocmAiterUnifiedAttentionImpl(RocmAttentionImpl):
         max_seqlen_k = attn_metadata.max_seq_len
         block_table = attn_metadata.block_table
 
-        if attn_metadata.causal:
+        aiter_non_causal = (
+            not attn_metadata.causal
+            and self._aiter_non_causal
+            and query.dtype == key_cache.dtype
+        )
+        if attn_metadata.causal or aiter_non_causal:
             self.unified_attention(
                 q=query[:num_actual_tokens],
                 k=key_cache,
@@ -325,7 +358,7 @@ class RocmAiterUnifiedAttentionImpl(RocmAttentionImpl):
                 seqused_k=seqused_k,
                 max_seqlen_k=max_seqlen_k,
                 softmax_scale=softmax_scale,
-                causal=True,
+                causal=attn_metadata.causal,
                 alibi_slopes=self.alibi_slopes,
                 window_size=self.sliding_window,
                 block_table=block_table,
@@ -338,9 +371,10 @@ class RocmAiterUnifiedAttentionImpl(RocmAttentionImpl):
                 shuffled_kv_cache=self._use_shuffle_kv,
             )
         else:
-            # The aiter kernel is causal-only. Non-causal cross-attention
-            # (ENCODER_DECODER, e.g. Whisper) falls back to the vLLM Triton
-            # unified kernel, which shares this layout and honors the flag.
+            # Non-causal attention that aiter does not run (e.g. Whisper
+            # cross-attention, or an aiter without non-causal support) falls
+            # back to the vLLM Triton unified kernel, which shares this layout
+            # and honors the flag.
             from vllm.v1.attention.ops.triton_unified_attention import (
                 unified_attention as triton_unified_attention,
             )

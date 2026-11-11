@@ -2246,6 +2246,8 @@ if current_platform.is_rocm():
         for x in NON_CAUSAL_BACKENDS_TO_TEST
         if x is not AttentionBackendEnum.FLASH_ATTN
     ]
+    if AttentionBackendEnum.ROCM_AITER_UNIFIED_ATTN in BACKENDS_TO_TEST:
+        NON_CAUSAL_BACKENDS_TO_TEST.append(AttentionBackendEnum.ROCM_AITER_UNIFIED_ATTN)
 
 
 @pytest.mark.parametrize(
