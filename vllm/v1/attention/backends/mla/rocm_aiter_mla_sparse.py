@@ -1601,7 +1601,18 @@ class ROCMAiterMLASparseImpl(SparseMLACommonImpl[ROCMAiterMLASparseMetadata]):
                 )
             assert self.topk_indices_buffer is not None
             score_only = self.dcp_scores is not None and not attn_metadata.num_prefills
-            if score_only:
+            # VLLM_ROCM_DSA_MULTISTREAM: the aux stream already gathered and
+            # merged the scores; wait for it and take its CSR slots.
+            ms_state = getattr(self, "_dsa_ms_state", None)
+            ms_merged = (
+                ms_state.take_pending(num_actual_toks)
+                if ms_state is not None and score_only
+                else None
+            )
+            if ms_merged is not None:
+                packed, indptr = ms_merged
+                compact = True
+            elif score_only:
                 from vllm.distributed import get_dcp_group
 
                 assert self.dcp_scores is not None

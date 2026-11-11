@@ -458,6 +458,20 @@ class MultiHeadLatentAttention(nn.Module, AttentionLayerBase):
             replace_parameter(self, "W_UV", W_UV.transpose(0, 1))
             # (L, N, P) -> (N, P, L)
             replace_parameter(self, "W_UK_T", W_UK.permute(1, 2, 0))
+        if (
+            self.dcp_manager is not None
+            and self.dcp_manager.use_vup_rs
+            and self.W_UV.dtype == torch.bfloat16
+        ):
+            from vllm.distributed import get_dcp_group
+
+            # W_UV of every DCP rank's heads, (N_dcp * N, L, V), for the
+            # v_up-first combine (VLLM_ROCM_DCP_VUP_RS).
+            replace_parameter(
+                self,
+                "W_UV_dcp",
+                get_dcp_group().all_gather(self.W_UV.contiguous(), dim=0),
+            )
 
         quant_method = (
             resolve_quant_method(self.quant_config, self, prefix=self.layer_name)
@@ -712,19 +726,46 @@ class MultiHeadLatentAttention(nn.Module, AttentionLayerBase):
             latent_out, lse = self.impl.forward_mqa(  # type: ignore[attr-defined]
                 mqa_q, self._attn_read_kv_cache(), attn_metadata, self
             )
+            vup_done = False
             if self.dcp_world_size > 1:
                 assert lse is not None
                 assert self.dcp_manager is not None
                 assert attn_metadata.decode is not None
-                latent_out = self.dcp_manager.combine(
-                    latent_out,
-                    lse,
-                    seq_lens=attn_metadata.decode.seq_lens,
-                    query_start_loc=attn_metadata.query_start_loc[
-                        : attn_metadata.num_decodes + 1
-                    ],
+                dcp_seq_lens = attn_metadata.decode.seq_lens
+                dcp_query_start_loc = attn_metadata.query_start_loc[
+                    : attn_metadata.num_decodes + 1
+                ]
+                # Decode-only steps may combine v_up-first (one reduce-scatter
+                # of [B, H, V] instead of the latent a2a + v_up).
+                vup_done = (
+                    getattr(self, "W_UV_dcp", None) is not None
+                    and num_mha_tokens == 0
+                    and self.dcp_manager.vup_rs_combine(
+                        latent_out,
+                        lse,
+                        self.W_UV_dcp,
+                        attn_out[:num_mqa_tokens].view(
+                            -1, self.num_local_heads, self.v_head_dim
+                        ),
+                        seq_lens=dcp_seq_lens,
+                        query_start_loc=dcp_query_start_loc,
+                    )
                 )
-            self._v_up_proj(latent_out, out=attn_out[:num_mqa_tokens])
+                if getattr(self, "W_UV_dcp", None) is not None:
+                    logger.info_once(
+                        "DCP v_up-first combine site=drafter(kimi_k3 mla) used=%s",
+                        bool(vup_done),
+                        scope="local",
+                    )
+                if not vup_done:
+                    latent_out = self.dcp_manager.combine(
+                        latent_out,
+                        lse,
+                        seq_lens=dcp_seq_lens,
+                        query_start_loc=dcp_query_start_loc,
+                    )
+            if not vup_done:
+                self._v_up_proj(latent_out, out=attn_out[:num_mqa_tokens])
 
     def _decode_concat_cache(
         self,

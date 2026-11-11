@@ -16,12 +16,14 @@ import torch
 import torch.nn.functional as F
 from torch import nn
 
+import vllm.envs as envs
 from vllm._aiter_ops import rocm_aiter_ops
 from vllm.compilation.breakable_cudagraph import eager_break_during_capture
 from vllm.config import CacheConfig, VllmConfig, get_current_vllm_config
 from vllm.distributed import get_dcp_group, get_tensor_model_parallel_world_size
 from vllm.forward_context import get_forward_context
 from vllm.logger import init_logger
+from vllm.model_executor.layers.attention.attention import get_attention_context
 from vllm.model_executor.layers.layernorm import RMSNorm
 from vllm.model_executor.layers.linear import (
     ColumnParallelLinear,
@@ -47,6 +49,7 @@ from vllm.triton_utils import tl, triton
 from vllm.utils.torch_utils import direct_register_custom_op
 from vllm.v1.attention.backends.mla import indexer as v32_indexer
 from vllm.v1.attention.backends.mla.indexer import DeepseekV32IndexerMetadata
+from vllm.v1.attention.backends.mla.sparse_utils import flat_kv_row_view
 from vllm.v1.attention.ops.rocm_aiter_mla_sparse import (
     indexer_k_quant_and_cache_triton,
     rocm_aiter_sparse_attn_indexer,
@@ -597,6 +600,386 @@ class KimiK3DSAIndexer(nn.Module):
         return indexer_op.forward_hip(hidden_states, q_fp8, index_k, weights)
 
 
+# ---------------------------------------------------------------------------
+# Multi-stream DSA decode (VLLM_ROCM_DSA_MULTISTREAM=1).
+#
+# Layout per DSA layer (FULL-graph / eager decode only, DCP > 1, MXFP4):
+#   main: [fork] fused_qkv_a -> q_a/kv_a norms -> [ev_q] q_b -> Q all-gather
+#         -> [wait ev_merge] sparse MLA -> LSE combine -> [wait ev_done] gate*o
+#   aux : wk+LN, wv | wait ev_q: wq -> FP4 indexer -> score AG (own comm)
+#         -> top-k merge -> [ev_merge] g_proj -> [ev_done]
+# One fork and one join per layer, on the shared vLLM aux stream.
+# ---------------------------------------------------------------------------
+
+_MS_LAYERS: dict[str, "KimiK3DSAMultiStreamMLAWrapper"] = {}
+# None: not created yet; False: unavailable; else the aux AITER comm.
+_MS_COMM: object = None
+
+
+def _dsa_ms_comm(rows: int, topk: int):
+    """One process-wide DCP-group AITER comm for the aux-stream score gather.
+
+    It has its own IPC buffers and signals, so it can run concurrently with
+    the main stream's DCP/TP collectives on the TP group's comm. It joins every
+    ``graph_capture()`` window to register its captured buffers.
+    """
+    global _MS_COMM
+    if _MS_COMM is not None:
+        return _MS_COMM or None
+    from vllm.distributed.parallel_state import register_graph_capture_comm
+    from vllm.platforms import current_platform
+
+    dcp = get_dcp_group()
+    comm = None
+    if current_platform.is_rocm() and dcp.world_size > 1:
+        from vllm.distributed.device_communicators.aiter_custom_all_reduce import (
+            AiterCustomAllreduce,
+        )
+
+        config = get_current_vllm_config()
+        # Size for decode batches only (larger ones fall back to the serial
+        # path via should_custom_ag): dcp_scores is sized by the max capture
+        # size, which can be the max batched tokens.
+        spec = config.speculative_config
+        rows = min(
+            rows,
+            config.scheduler_config.max_num_seqs
+            * (1 + (spec.num_speculative_tokens if spec else 0)),
+        )
+        # all_gather per-rank input must fit max_size / (2 * world).
+        need = 2 * dcp.world_size * rows * topk * 4
+        mib = 1 << 20
+        max_size = max(16 * mib, -(-need // mib) * mib)
+        comm = AiterCustomAllreduce(
+            dcp.cpu_group,
+            dcp.device,
+            max_size=max_size,
+            register_graph_buffers=not config.use_cumem_cudagraph_pool,
+        )
+        if comm.disabled:
+            comm = None
+    if comm is None:
+        logger.warning(
+            "VLLM_ROCM_DSA_MULTISTREAM: no DCP AITER comm available; the DSA "
+            "layers keep the serial indexer path."
+        )
+        _MS_COMM = False
+        return None
+    register_graph_capture_comm(comm)
+    logger.info(
+        "VLLM_ROCM_DSA_MULTISTREAM: created the aux-stream DCP AITER comm "
+        "(max_size=%d MiB).",
+        max_size >> 20,
+    )
+    _MS_COMM = comm
+    return comm
+
+
+class _MSState:
+    """Per-layer fork/join bookkeeping between the three custom ops."""
+
+    def __init__(self) -> None:
+        self.ev_fork = torch.cuda.Event()
+        self.ev_q = torch.cuda.Event()
+        self.ev_merge = torch.cuda.Event()
+        self.ev_done = torch.cuda.Event()
+        # 0: idle, 1: forked (indexer op pending), 2: merged (attn pending).
+        self.stage = 0
+        self.rows = 0
+        self.kv: tuple[torch.Tensor, torch.Tensor] | None = None
+        self.pending: tuple[torch.Tensor, torch.Tensor, int] | None = None
+        self.joined = True
+
+    def take_pending(self, rows: int) -> tuple[torch.Tensor, torch.Tensor] | None:
+        """Called by the sparse MLA backend: hand over the merged CSR slots.
+
+        Makes the current stream wait for the aux merge. ``None`` means the
+        caller runs its serial score gather + merge (the scores are final).
+        """
+        if self.stage == 1:
+            raise RuntimeError(
+                "DSA multi-stream: attention ran before the indexer op; "
+                "the op order was changed."
+            )
+        pending = self.pending
+        if pending is None:
+            return None
+        self.pending = None
+        self.stage = 0
+        torch.cuda.current_stream().wait_event(self.ev_merge)
+        packed, indptr, n = pending
+        if n != rows:
+            return None
+        return packed, indptr
+
+
+def _ms_active(layer: "KimiK3DSAMultiStreamMLAWrapper") -> bool:
+    """Shape/mode-only decision: identical on every DCP rank."""
+    from vllm.compilation.breakable_cudagraph import BreakableCUDAGraphCapture
+    from vllm.config import CUDAGraphMode
+    from vllm.forward_context import is_forward_context_available
+
+    comm = layer.ms_comm
+    ind = layer.indexer
+    if comm is None or BreakableCUDAGraphCapture.is_active():
+        return False
+    if not is_forward_context_available():
+        return False
+    ctx = get_forward_context()
+    if ctx.cudagraph_runtime_mode == CUDAGraphMode.PIECEWISE:
+        return False
+    md = ctx.attn_metadata
+    if not isinstance(md, dict):
+        return False
+    im = md.get(ind.k_cache.prefix)
+    mm = md.get(layer.mla_attn.layer_name)
+    if im is None or mm is None:
+        return False
+    if im.num_prefills or not im.num_decodes:
+        return False
+    if mm.num_prefills or not mm.num_decode_tokens:
+        return False
+    rows = int(mm.num_decode_tokens)
+    if rows > ind.dcp_scores.shape[0] or rows > im.num_decode_tokens:
+        return False
+    if not comm.should_custom_ag(ind.dcp_scores[:rows].view(torch.int32)):
+        return False
+    layer.ms_state.rows = rows
+    return True
+
+
+def _ms_fork(x: torch.Tensor, layer_name: str) -> torch.Tensor:
+    layer = _MS_LAYERS[layer_name]
+    st = layer.ms_state
+    st.stage = 0
+    st.pending = None
+    st.kv = None
+    if _ms_active(layer):
+        ind = layer.indexer
+        aux = layer.aux_stream
+        st.ev_fork.record()
+        with torch.cuda.stream(aux):
+            aux.wait_event(st.ev_fork)
+            ik = ind.k_index_norm(ind.wk_index(x)[0])
+            iv = ind.wv_index(x)[0]
+        st.kv = (ik, iv)
+        st.stage = 1
+    return x.new_empty(0)
+
+
+def _ms_fork_fake(x: torch.Tensor, layer_name: str) -> torch.Tensor:
+    return x.new_empty(0)
+
+
+def _ms_indexer(
+    x: torch.Tensor, q_c: torch.Tensor, token: torch.Tensor, layer_name: str
+) -> torch.Tensor:
+    layer = _MS_LAYERS[layer_name]
+    st = layer.ms_state
+    ind = layer.indexer
+    if st.stage != 1:
+        # Serial reference path (prefill, mixed, PIECEWISE, profile runs).
+        ind(x, q_c)
+        st.joined = True
+        return layer.g_proj(x)[0]
+    from vllm.v1.attention.backends.mla import rocm_aiter_mla_sparse as be
+
+    assert st.kv is not None
+    ik, iv = st.kv
+    st.kv = None
+    rows = st.rows
+    dcp = get_dcp_group()
+    topk = ind.topk_indices_buffer
+    scores = ind.dcp_scores
+    _, mla_layer, kv_cache, _ = get_attention_context(layer.mla_attn.layer_name)
+    mm = get_forward_context().attn_metadata[layer.mla_attn.layer_name]
+    _, block_stride_rows = flat_kv_row_view(kv_cache, mm.block_size)
+    width = dcp.world_size * topk.shape[1]
+    ends = be._score_widths.get((scores.device, width))
+    if ends is None or ends.numel() < rows:
+        # Created on main before the fork so both streams see it filled.
+        be._score_widths[(scores.device, width)] = torch.full(
+            (max(rows, 1024),), width, dtype=torch.int32, device=scores.device
+        )
+    token_pages = getattr(mm, "_dcp_token_pages", None)
+    if token_pages is None or token_pages.shape[0] != rows:
+        token_pages = mm.block_table[mm.req_id_per_token[:rows]]
+        mm._dcp_token_pages = token_pages
+    aux = layer.aux_stream
+    st.ev_q.record()
+    with torch.cuda.stream(aux):
+        aux.wait_event(st.ev_q)
+        index_q = ind.wq_index(q_c)[0].view(-1, ind.index_num_heads, ind.index_head_dim)
+        _fp4_indexer(
+            index_q,
+            ik,
+            iv,
+            ind.k_cache.kv_cache,
+            topk,
+            ind.k_cache.prefix,
+            ind.max_model_len,
+            dcp.rank_in_group,
+            dcp.world_size,
+            ind.cp_interleave,
+            ind.indexer_weight_scale * ind.index_softmax_scale,
+            scores,
+        )
+        gathered = layer.ms_comm.custom_all_gather(
+            scores[:rows].view(torch.int32), dim=1
+        ).view(torch.float32)
+        packed, indptr = be.merge_dcp_scores(
+            gathered,
+            topk[:rows],
+            token_pages,
+            dcp.rank_in_group,
+            dcp.world_size,
+            mm.block_size,
+            block_stride_rows,
+        )
+        st.ev_merge.record()
+        gate = layer.g_proj(x)[0]
+        st.ev_done.record()
+    st.pending = (packed, indptr, rows)
+    st.stage = 2
+    st.joined = False
+    logger.info_once(
+        "VLLM_ROCM_DSA_MULTISTREAM: DSA indexer + DCP score all-gather/merge "
+        "+ gate run on the aux stream (decode, %d rows).",
+        rows,
+    )
+    return gate
+
+
+def _ms_indexer_fake(
+    x: torch.Tensor, q_c: torch.Tensor, token: torch.Tensor, layer_name: str
+) -> torch.Tensor:
+    g_proj = _MS_LAYERS[layer_name].g_proj
+    return x.new_empty((x.shape[0], g_proj.output_size_per_partition))
+
+
+@triton.jit
+def _gate_mul_kernel(a_ptr, g_ptr, out_ptr, n, BLOCK: tl.constexpr):
+    offs = tl.program_id(0) * BLOCK + tl.arange(0, BLOCK)
+    mask = offs < n
+    a = tl.load(a_ptr + offs, mask, other=0).to(tl.float32)
+    g = tl.load(g_ptr + offs, mask, other=0).to(tl.float32)
+    out = a * tl.sigmoid(g)
+    tl.store(out_ptr + offs, out.to(out_ptr.dtype.element_ty), mask)
+
+
+def _ms_join(
+    attn_out: torch.Tensor,
+    gate: torch.Tensor,
+    x: torch.Tensor,
+    q_c: torch.Tensor,
+    layer_name: str,
+) -> torch.Tensor:
+    # x and q_c are inputs only to keep their main-stream buffers alive (and
+    # unreused) until the aux reads of them are joined here.
+    st = _MS_LAYERS[layer_name].ms_state
+    if not st.joined:
+        torch.cuda.current_stream().wait_event(st.ev_done)
+        st.joined = True
+        if st.stage == 2:
+            # Attention did not consume the merge (no DCP decode rows).
+            st.pending = None
+            st.stage = 0
+    out = torch.empty_like(attn_out)
+    n = attn_out.numel()
+    if n:
+        if attn_out.is_contiguous() and gate.is_contiguous():
+            _gate_mul_kernel[(triton.cdiv(n, 1024),)](
+                attn_out, gate, out, n, BLOCK=1024
+            )
+        else:
+            out.copy_((attn_out.float() * gate.float().sigmoid()).to(out.dtype))
+    return out
+
+
+def _ms_join_fake(
+    attn_out: torch.Tensor,
+    gate: torch.Tensor,
+    x: torch.Tensor,
+    q_c: torch.Tensor,
+    layer_name: str,
+) -> torch.Tensor:
+    return torch.empty_like(attn_out)
+
+
+direct_register_custom_op(
+    op_name="kimi_dsa_ms_fork", op_func=_ms_fork, fake_impl=_ms_fork_fake
+)
+direct_register_custom_op(
+    op_name="kimi_dsa_ms_indexer", op_func=_ms_indexer, fake_impl=_ms_indexer_fake
+)
+direct_register_custom_op(
+    op_name="kimi_dsa_ms_join", op_func=_ms_join, fake_impl=_ms_join_fake
+)
+
+
+class KimiK3DSAMultiStreamMLAWrapper(MultiHeadLatentAttentionWrapper):
+    """MLA wrapper whose decode runs the DSA indexer chain on the aux stream.
+
+    Same modules and weights as the plain wrapper. Outside multi-stream decode
+    the indexer op runs the serial chain; only the gate multiply differs (one
+    fused fp32 kernel, as Inductor emits it).
+    """
+
+    def __init__(self, *args, ms_comm=None, **kwargs) -> None:
+        super().__init__(*args, **kwargs)
+        assert self.q_lora_rank is not None and self.g_proj is not None
+        assert self.rotary_emb is None and not self.dcp_q_replicate
+        assert not self.fuse_qkv_rmsnorm and not self.skip_topk
+        self.ms_comm = ms_comm
+        self.ms_state = _MSState()
+        self._aux_stream = None
+        name = self.mla_attn.layer_name
+        _MS_LAYERS[name] = self
+        self.ms_name = name
+
+    @property
+    def aux_stream(self) -> torch.cuda.Stream:
+        if self._aux_stream is None:
+            from vllm.utils.torch_utils import aux_stream
+
+            self._aux_stream = aux_stream()
+        return self._aux_stream
+
+    def forward(
+        self,
+        positions: torch.Tensor,
+        hidden_states: torch.Tensor,
+        llama_4_scaling: torch.Tensor | None = None,
+        skip_o_proj: bool = False,
+    ) -> torch.Tensor:
+        assert llama_4_scaling is None
+        name = self.ms_name
+        token = torch.ops.vllm.kimi_dsa_ms_fork(hidden_states, name)
+        qkv_lora = self.fused_qkv_a_proj(hidden_states)[0]
+        q_c, kv_lora = qkv_lora.split(
+            [self.q_lora_rank, self.kv_lora_rank + self.qk_rope_head_dim], dim=-1
+        )
+        q_c = self.q_a_layernorm(q_c)
+        kv_c, k_pe = kv_lora.split([self.kv_lora_rank, self.qk_rope_head_dim], dim=-1)
+        kv_c_normed = self.kv_a_layernorm(kv_c)
+        k_pe = k_pe.unsqueeze(1)
+        gate = torch.ops.vllm.kimi_dsa_ms_indexer(hidden_states, q_c, token, name)
+        self.mla_attn.impl.record_logical_topk_ready()  # type: ignore[attr-defined]
+        q = self.q_b_proj(q_c)[0].view(-1, self.num_heads, self.qk_head_dim)
+        attn_out = self.mla_attn(
+            q,
+            kv_c_normed,
+            k_pe,
+            output_shape=(hidden_states.shape[0], self.num_heads * self.v_head_dim),
+        )
+        attn_out = torch.ops.vllm.kimi_dsa_ms_join(
+            attn_out, gate, hidden_states, q_c, name
+        )
+        if skip_o_proj:
+            return attn_out
+        return self.o_proj(attn_out)[0]
+
+
 class KimiK3DSAAttention(nn.Module):
     """Kimi K3.1 DSA (DeepSeek Sparse Attention) inference path on ROCm.
 
@@ -805,7 +1188,22 @@ class KimiK3DSAAttention(nn.Module):
         # The plain wrapper, not the AMD KimiK3MultiHeadLatentAttentionWrapper:
         # its fused decode Q-prep path writes dense 576-wide rows, which the
         # 656-byte fp8_ds_mla records cannot take.
-        self.mla_attn = MultiHeadLatentAttentionWrapper(
+        wrapper_cls: type[MultiHeadLatentAttentionWrapper] = (
+            MultiHeadLatentAttentionWrapper
+        )
+        wrapper_kwargs: dict = {}
+        if (
+            envs.VLLM_ROCM_DSA_MULTISTREAM
+            and self.dsa_indexer.use_fp4
+            and self.dsa_indexer.dcp_scores is not None
+            and self.q_lora_rank is not None
+            and hasattr(self, "g_proj")
+        ):
+            ms_comm = _dsa_ms_comm(*self.dsa_indexer.dcp_scores.shape)
+            if ms_comm is not None:
+                wrapper_cls = KimiK3DSAMultiStreamMLAWrapper
+                wrapper_kwargs["ms_comm"] = ms_comm
+        self.mla_attn = wrapper_cls(
             self.hidden_size,
             self.num_local_heads,
             self.scaling,
@@ -818,7 +1216,11 @@ class KimiK3DSAAttention(nn.Module):
             cache_config,
             quant_config,
             prefix,
+            **wrapper_kwargs,
         )
+        if isinstance(self.mla_attn, KimiK3DSAMultiStreamMLAWrapper):
+            # The sparse MLA backend takes the aux-stream merge from here.
+            self.mla_attn.mla_attn.impl._dsa_ms_state = self.mla_attn.ms_state
 
     def get_input_quant_key(self) -> None:
         # The generic MLA wrapper also feeds these activations to the gate.

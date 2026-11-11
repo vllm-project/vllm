@@ -1279,17 +1279,43 @@ class MLAAttention(nn.Module, AttentionLayerBase):
                         query_start_loc = attn_metadata.query_start_loc[
                             : attn_metadata.num_decodes + 1
                         ]
-                    attn_out = self.dcp_manager.combine(
-                        attn_out,
-                        lse,
-                        seq_lens=seq_lens,
-                        query_start_loc=query_start_loc,
+                    # Decode-only steps may combine v_up-first (one reduce-
+                    # scatter of [B, H, V] instead of the latent a2a + v_up).
+                    vup_done = (
+                        getattr(self, "W_UV_dcp", None) is not None
+                        and attn_metadata.num_prefills == 0
+                        and not kvgather_rows
+                        and shardq is None
+                        and self.dcp_manager.vup_rs_combine(
+                            attn_out,
+                            lse,
+                            self.W_UV_dcp,
+                            mqa_output_slice.view(-1, self.num_heads, self.v_head_dim),
+                            seq_lens=seq_lens,
+                            query_start_loc=query_start_loc,
+                        )
                     )
-                    if self.use_pcp:
-                        attn_out = finalize_mla_pcp_decode(attn_out, self.num_heads)
+                    if getattr(self, "W_UV_dcp", None) is not None:
+                        logger.info_once(
+                            "DCP v_up-first combine site=target(mla_attention) used=%s",
+                            bool(vup_done),
+                            scope="local",
+                        )
+                    if not vup_done:
+                        attn_out = self.dcp_manager.combine(
+                            attn_out,
+                            lse,
+                            seq_lens=seq_lens,
+                            query_start_loc=query_start_loc,
+                        )
+                        if self.use_pcp:
+                            attn_out = finalize_mla_pcp_decode(attn_out, self.num_heads)
+                else:
+                    vup_done = False
 
                 # v_up projection
-                self._v_up_proj(attn_out, out=mqa_output_slice)
+                if not vup_done:
+                    self._v_up_proj(attn_out, out=mqa_output_slice)
 
         if quant_key is not None:
             quant_idx = num_mqa_tokens if mha_use_quant_output else num_actual_toks
@@ -1549,6 +1575,14 @@ class MLAAttention(nn.Module, AttentionLayerBase):
                     self,
                     "W_UK_T_dcp_qrep",
                     get_dcp_group().all_gather(self.W_UK_T.contiguous(), dim=0),
+                )
+            if self.dcp_manager is not None and self.dcp_manager.use_vup_rs:
+                # W_UV of every DCP rank's heads, (N_dcp * N, L, V), for the
+                # v_up-first combine (VLLM_ROCM_DCP_VUP_RS).
+                replace_parameter(
+                    self,
+                    "W_UV_dcp",
+                    get_dcp_group().all_gather(self.W_UV.contiguous(), dim=0),
                 )
 
         # If we should not load quant weights, we initialize the scales to 1.0
