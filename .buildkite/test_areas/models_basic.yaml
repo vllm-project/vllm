@@ -244,6 +244,10 @@ steps:
   - csrc/kimi_k3/
   - tests/models/kimi_k3/
   - tests/kernels/attention/test_kimi_k3_mla_fused_epilogue.py
+  - vllm/model_executor/layers/mamba/gdn/kimi_gdn_linear_attn.py
+  - vllm/model_executor/layers/mamba/mamba_utils.py
+  - vllm/model_executor/models/alice_ai.py
+  - vllm/model_executor/models/bailing_moe_v3.py
   commands:
     # The native NVIDIA Kimi K3 kernels require the SM100 family.
     - >-
@@ -266,6 +270,10 @@ steps:
       - vllm/models/kimi_k3/
       - tests/models/kimi_k3/
       - vllm/platforms/rocm.py
+      - vllm/model_executor/layers/mamba/gdn/kimi_gdn_linear_attn.py
+      - vllm/model_executor/layers/mamba/mamba_utils.py
+      - vllm/model_executor/models/alice_ai.py
+      - vllm/model_executor/models/bailing_moe_v3.py
       commands:
       # The ROCm KDA/AttnRes kernels are gated on gfx950, so this has to be MI355.
       # The kernels/ file the NVIDIA job adds is CUDA-only (it imports

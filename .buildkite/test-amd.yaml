@@ -1392,6 +1392,10 @@ steps:
   - csrc/kimi_k3/
   - tests/models/kimi_k3/
   - vllm/platforms/rocm.py
+  - vllm/model_executor/layers/mamba/gdn/kimi_gdn_linear_attn.py
+  - vllm/model_executor/layers/mamba/mamba_utils.py
+  - vllm/model_executor/models/alice_ai.py
+  - vllm/model_executor/models/bailing_moe_v3.py
   commands:
   # Mirrors the ":amd: (MI355) Kimi K3" step generated from
   # .buildkite/test_areas/models_basic.yaml. The ROCm KDA/AttnRes kernels are
