@@ -165,7 +165,7 @@ QUICK = [
         "Large context prompts with barely enough space in GPU for a couple "
         "of requests in GPU",
         concurrency=16,
-        offload_block_size=16,
+        offload_block_size=64,
         prefix_tokens=300_000,
         cpu_bytes=gib(40),
         gpu_bytes=gib(20),
