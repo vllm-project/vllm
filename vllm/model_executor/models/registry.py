@@ -713,7 +713,7 @@ _SPECULATIVE_DECODING_MODELS = {
         "K3DSparkForCausalLM",
     ),
     "MuseSparkDSparkModel": (
-        "vllm.models.muse_spark.common.dspark",
+        "vllm.models.muse_spark",
         "MuseSparkDSparkForCausalLM",
     ),
     "DFlashLagunaForCausalLM": ("laguna_dflash", "DFlashLagunaForCausalLM"),
