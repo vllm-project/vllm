@@ -457,11 +457,9 @@ Some scoring models require a specific prompt format to work correctly. You can 
 
 For offline scoring, pass `chat_template` to the `LLM` constructor to use it for every `LLM.score` call. A `chat_template` passed to `LLM.score` overrides the constructor's template for that call.
 
-By default, vLLM detects whether the score template expects string content or structured content blocks. To override detection, use `--chat-template-content-format string` or `--chat-template-content-format openai` when serving, or pass `chat_template_content_format="string"` or `chat_template_content_format="openai"` to `LLM.score()`.
+Scoring passes string content to templates by default, preserving existing template behavior. To opt into structured text/image blocks, set `--chat-template-content-format openai` when serving or pass `chat_template_content_format="openai"` to `LLM.score()`.
 
-The `openai` format preserves text and image blocks for the template to render. Use it for templates that iterate over content blocks, including templates whose structure cannot be detected automatically. The `string` format retains model-specific image placeholders in the text.
-
-Previously, scoring always passed string content to templates. Auto detection is a heuristic: a template that loops over characters in `message.content` can be mistaken for a content-block template. For legacy templates that require strings, set `--chat-template-content-format string` when serving or `chat_template_content_format="string"` in `LLM.score()` to preserve the previous behavior.
+For scoring, both `auto` and `string` keep string content with model-specific image placeholders. Scoring does not infer the content format from the template. Templates that expect content blocks must explicitly opt into `openai`, including templates saved with a checkpoint.
 
 Like chat templates, the score template receives a `messages` list. For scoring, each message has a `role` attribute—either `"query"` or `"document"`. For the usual kind of point-wise cross-encoder, you can expect exactly two messages: one query and one document. To access the query and document content, use Jinja's `selectattr` filter:
 
@@ -490,7 +488,7 @@ vLLM does not apply a checkpoint's chat template by default, since many reranker
 
 - The default chat template is used, unless `processing_kwargs.chat_template.chat_template` names another template saved with the tokenizer (e.g. `additional_chat_templates/score.jinja` for `"score"`).
 - The other `processing_kwargs.chat_template` settings, such as `add_generation_prompt`, are passed to the template; the request's `chat_template_kwargs` override them.
-- The content format is detected from the saved template and can be overridden as described above.
+- Message contents are strings by default; opt into structured blocks as described above.
 - vLLM does not restore the template suffix after truncation (`restore_suffix`). Use `max_tokens_per_doc` rather than `truncate_prompt_tokens` to truncate long documents.
 - `--chat-template` (or the `chat_template` argument of `LLM.score`) takes precedence over the saved template and its settings.
 - Models with a built-in score template keep using it.

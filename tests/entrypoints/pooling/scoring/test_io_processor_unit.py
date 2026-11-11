@@ -115,6 +115,26 @@ def test_llm_reranker_tokenization_is_independent_of_nonbinding_doc_limit(
     assert nonbinding["prompt_token_ids"] == expected
 
 
+@pytest.mark.parametrize("content_format", [None, "auto", "string"])
+def test_scoring_keeps_legacy_character_loops_without_structured_opt_in(
+    llm_reranker_processor, content_format
+):
+    template = (
+        "{% for message in messages %}"
+        "{% for char in message.content %}{{ char }}{% endfor %}"
+        "{% endfor %}"
+    )
+    prompt, inputs = llm_reranker_processor.get_score_prompt(
+        "a",
+        "bc",
+        {},
+        chat_template=template,
+        chat_template_content_format=content_format,
+    )
+    assert prompt == "abc"
+    assert inputs["prompt_token_ids"] == llm_reranker_processor.tokenizer.encode("abc")
+
+
 @pytest.mark.parametrize(
     "default_template,request_template,expected",
     [
@@ -372,7 +392,11 @@ def multimodal_reranker_processor(tmp_path, request, scoring_tokenizer):
     )
     renderer = HfRenderer(config, TokenizersBackend.from_pretrained(tmp_path))
     try:
-        yield CrossEncoderIOProcessor(config, renderer, ChatTemplateConfig())
+        yield CrossEncoderIOProcessor(
+            config,
+            renderer,
+            ChatTemplateConfig(chat_template_content_format="openai"),
+        )
     finally:
         renderer.shutdown()
 
@@ -484,7 +508,7 @@ def test_string_scoring_templates_keep_model_placeholders(
     assert prompt == "a<|vision_start|><|image_pad|><|vision_end|>"
 
 
-@pytest.mark.parametrize("content_format", ["auto", "openai"])
+@pytest.mark.parametrize("content_format", [None, "openai"])
 @pytest.mark.parametrize("saved_template", [False, True])
 def test_scoring_template_formats_plain_strings_as_text_blocks(
     multimodal_reranker_processor, content_format, saved_template
@@ -503,7 +527,7 @@ def test_scoring_template_formats_plain_strings_as_text_blocks(
 def test_scoring_content_format_override_for_indirect_template(
     multimodal_reranker_processor,
 ):
-    # The detector cannot infer structured content from a filter alone.
+    # Explicit format selection works without inspecting the template.
     prompt, _ = multimodal_reranker_processor.get_score_prompt(
         "a",
         "bc",

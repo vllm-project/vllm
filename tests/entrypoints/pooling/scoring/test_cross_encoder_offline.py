@@ -101,11 +101,10 @@ def test_classify(llm):
     assert len(outputs[0].outputs.data) == 1
 
 
-@pytest.mark.parametrize("content_format", ["openai", "string"])
+@pytest.mark.parametrize("content_format", [None, "auto", "string", "openai"])
 @pytest.mark.skip_global_cleanup
 def test_score_content_format_override_matches_classify(llm: LLM, content_format):
-    # Auto detection cannot distinguish character loops from content-block loops,
-    # or infer the format expected by a filter-only template.
+    # Legacy character loops keep strings unless structured content is requested.
     query, document = TEXTS_1[0], TEXTS_2[0]
     expected_prompt = json.dumps(
         [
@@ -114,7 +113,7 @@ def test_score_content_format_override_matches_classify(llm: LLM, content_format
         ]
     )
     chat_template = "{{ messages | tojson }}"
-    if content_format == "string":
+    if content_format != "openai":
         chat_template = (
             "{% for message in messages %}"
             "{% for char in message.content %}{{ char }}{% endfor %}"
@@ -123,11 +122,16 @@ def test_score_content_format_override_matches_classify(llm: LLM, content_format
         expected_prompt = query + document
     # Compare full-prefill executions; a prefix-cache hit changes the compute path.
     llm.reset_prefix_cache()
+    format_kwargs = (
+        {}
+        if content_format is None
+        else {"chat_template_content_format": content_format}
+    )
     (scored,) = llm.score(
         query,
         document,
         chat_template=chat_template,
-        chat_template_content_format=content_format,
+        **format_kwargs,
         tokenization_kwargs={"add_special_tokens": False},
         use_tqdm=False,
     )

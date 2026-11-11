@@ -17,7 +17,6 @@ from vllm.renderers.chat_utils import (
 )
 from vllm.renderers.hf import (
     resolve_chat_template,
-    resolve_chat_template_content_format,
     safe_apply_chat_template,
 )
 from vllm.renderers.inputs.preprocess import (
@@ -736,17 +735,10 @@ class CrossEncoderIOProcessor(ScoringIOProcessor):
                 self.saved_chat_template_kwargs, chat_template_kwargs
             )
 
+        given_format = chat_template_content_format or self.chat_template_content_format
         content_format: ChatTemplateContentFormat = "string"
-        if chat_template is not None:
-            content_format = resolve_chat_template_content_format(
-                chat_template,
-                tools=None,
-                given_format=(
-                    chat_template_content_format or self.chat_template_content_format
-                ),
-                tokenizer=tokenizer,
-                model_config=model_config,
-            )
+        if chat_template is not None and given_format == "openai":
+            content_format = "openai"
 
         conversation, mm_data, mm_uuids = parse_score_messages(
             data_1, data_2, model_config, content_format

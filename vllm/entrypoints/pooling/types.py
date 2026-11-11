@@ -155,7 +155,7 @@ class OfflineScoringInputsContext(OfflineInputsContext):
     scoring_data: ScoringData
     chat_template: str | None
     pooling_params: PoolingParams
-    chat_template_content_format: ChatTemplateContentFormatOption = "auto"
+    chat_template_content_format: ChatTemplateContentFormatOption = "string"
 
 
 @dataclass
