@@ -6,6 +6,7 @@ import inspect
 from functools import lru_cache
 from typing import TYPE_CHECKING, Any, cast, get_args, get_type_hints
 
+import transformers
 from transformers import (
     AutoFeatureExtractor,
     AutoImageProcessor,
@@ -15,6 +16,7 @@ from transformers import (
 )
 from transformers.feature_extraction_utils import FeatureExtractionMixin
 from transformers.image_processing_utils import BaseImageProcessor
+from transformers.models.auto.processing_auto import PROCESSOR_MAPPING_NAMES
 from transformers.models.auto.video_processing_auto import VIDEO_PROCESSOR_MAPPING_NAMES
 from transformers.processing_utils import ProcessorMixin
 from transformers.video_processing_utils import BaseVideoProcessor
@@ -286,6 +288,33 @@ def get_processor(
 
 
 cached_get_processor = lru_cache(get_processor)
+
+
+def processor_has_attr(
+    processor_name: str,
+    model_type: str,
+    attr: str,
+    *,
+    revision: str | None = None,
+    trust_remote_code: bool = False,
+) -> bool:
+    """Remote code processors can only be checked by loading them."""
+    if name := PROCESSOR_MAPPING_NAMES.get(model_type):
+        return hasattr(getattr(transformers, name, None), attr)
+    if not trust_remote_code:
+        return False
+    try:
+        # Same key as the bare load in `cached_get_processor_without_dynamic_kwargs`
+        processor = cached_get_processor(
+            processor_name,
+            revision=revision,
+            trust_remote_code=trust_remote_code,
+            processor_cls=ProcessorMixin,
+        )
+    # Remote code can raise anything, and this runs for native models too
+    except Exception:
+        return False
+    return hasattr(processor, attr)
 
 
 @lru_cache

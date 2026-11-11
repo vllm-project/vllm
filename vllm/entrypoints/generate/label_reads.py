@@ -18,8 +18,8 @@ from vllm.utils.async_utils import merge_async_iterators
 class LabelRead:
     result: RequestOutput
     logprobs: list[float]
-    """Full-vocabulary logprob of each label token, in ``logprob_token_ids``
-    order, or slot after slot with ``slots``."""
+    """Full-vocabulary logprob of each label token, in `logprob_token_ids`
+    order, or slot after slot with `slots`."""
 
 
 async def next_token_label_reads(
@@ -33,10 +33,10 @@ async def next_token_label_reads(
     priority: int = 0,
     slots: Sequence[Sequence[tuple[int, Sequence[int]]]] | None = None,
 ) -> list[LabelRead]:
-    """Runs one read per input at once, as request ``{request_id}-{i}``. Each
-    read's params set ``max_tokens=1`` and the label tokens as
-    ``logprob_token_ids``. With ``slots``, read ``i`` takes the logprobs of each
-    (position, label ids) in ``slots[i]`` instead. Raises GenerationError naming
+    """Runs one read per input at once, as request `{request_id}-{i}`. Each
+    read's params set `max_tokens=1` and the label tokens as
+    `logprob_token_ids`. With `slots`, read `i` takes the logprobs of each
+    (position, label ids) in `slots[i]` instead. Raises GenerationError naming
     the item when a read has no output or lacks a label's logprob."""
     generators: list[AsyncGenerator[RequestOutput, None]] = [
         engine_client.generate(
