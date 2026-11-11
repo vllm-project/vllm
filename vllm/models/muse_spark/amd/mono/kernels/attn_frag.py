@@ -491,7 +491,7 @@ def make(NR, swa, maxk=VLLM_MAX_KEYS, nq=NQ, qcm=0, kvcm=None):
         return a.bitcast(fx.Float32), b.bitcast(fx.Float32)
 
     def store_row(d, tag, req, tok, head, dq, w2):
-        """Merged output row (req, tok), head ``head``, d-quad dq: attn_o and the tagged pairs."""
+        """Merged output row (req, tok), head `head`, d-quad dq: attn_o and the tagged pairs."""
         bo.buffer_store(
             w2,
             rsrc(d.out),

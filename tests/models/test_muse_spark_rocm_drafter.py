@@ -1,6 +1,6 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
-"""Host side of the Muse Spark DSpark draft-layer kernels (``--monokernel``).
+"""Host side of the Muse Spark DSpark draft-layer kernels (`--monokernel`).
 
 The guards run on the DSpark checkpoint config. The FlyDSL build (kernels/draft.py)
 exists only for the TP8 checkpoint shape, so the step tests run a tiny real
@@ -30,7 +30,6 @@ from tests.models.test_muse_spark_rocm_mono import (
 from vllm.config import CUDAGraphMode, set_current_vllm_config
 from vllm.model_executor.layers.attention.attention import get_attention_context
 from vllm.models.muse_spark.amd.mono.drafter import (
-    DRAFT_BUILDS,
     DSparkDrafter,
     draft_config_refusals,
     draft_dims,
@@ -231,7 +230,7 @@ def tiny_draft(tmp_path_factory):
                 lm = MuseSparkDSparkForCausalLM(vllm_config=vllm_config)
             generator = torch.Generator(device=device).manual_seed(0)
             with torch.no_grad():
-                for name, p in lm.named_parameters():
+                for _name, p in lm.named_parameters():
                     if p.dtype.is_floating_point:
                         scale = 0.5 if p.dim() == 1 else 0.04
                         p.copy_(
@@ -259,7 +258,7 @@ def test_layer_guards_accept_the_tiny_draft(tiny_draft) -> None:
 
 class DraftStep:
     """One draft step: real attention metadata of the draft layers' KV cache
-    groups (``groups``: the layers split in that many groups, each with its own
+    groups (`groups`: the layers split in that many groups, each with its own
     block table and slot mapping, as vLLM's hybrid allocator can place them), KV
     caches with random context keys, and the query rows of DSpark (7 a request)."""
 

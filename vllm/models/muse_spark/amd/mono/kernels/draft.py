@@ -265,7 +265,7 @@ def build(key: Build):
         return (fx.Int64(hi) << fx.Int64(32)) | (fx.Int64(lo) & fx.Int64(0xFFFFFFFF))
 
     def tab_ptrs(wtab, row, first, n):
-        """Words first .. first + n (n even) of launch-table row ``row`` (wave-uniform)."""
+        """Words first .. first + n (n even) of launch-table row `row` (wave-uniform)."""
         words = []
         for i in range_constexpr(n // 2):
             v = ld_vec(wtab, row * (2 * TAB_WORDS) + 2 * first + 4 * i, 4)
@@ -369,9 +369,9 @@ def build(key: Build):
         poll_ok=None,
         final=False,
     ):
-        """CTA b's hidden columns 32 b ..: the block owner sums the W partials (``src``) in rank
-        order (fp32 -> bf16: the all-reduce output y) and all-gathers y (``rr``) and its norm
-        partials (``p4``); every CTA: the post-norm (ffn: rms(w_post y), eps 1e-8; else rms(y)),
+        """CTA b's hidden columns 32 b ..: the block owner sums the W partials (`src`) in rank
+        order (fp32 -> bf16: the all-reduce output y) and all-gathers y (`rr`) and its norm
+        partials (`p4`); every CTA: the post-norm (ffn: rms(w_post y), eps 1e-8; else rms(y)),
         the gated residual on the fp32 stream (st_in -> st_out), the next norm of the bf16 stream
         (w_next, eps 1e-5) -> x_out (bf16; final: vLLM's output rows < R, else scratch + flag)."""
         tid = fresh(tid)
@@ -708,7 +708,7 @@ def build(key: Build):
 
     @traced
     def wait_all(scratch, region, tag, health, tid):
-        """Every CTA's flag in ``region`` (a grid-wide wait)."""
+        """Every CTA's flag in `region` (a grid-wide wait)."""
         tid = fresh(tid)
         if tid < BLOCKS:
             mb_poll(tag, health, [(reg(scratch, region), tid, 1)], REGION_IDS[region])
@@ -729,7 +729,7 @@ def build(key: Build):
     def stage_o(
         o_ops, ao, attn_g, pl, tag, health, tid, bid, lane, wave, rank, yl, red
     ):
-        """k3 stage_o on the fragment's merged rows (tagged pairs at ``ao``); padding rows take
+        """k3 stage_o on the fragment's merged rows (tagged pairs at `ao`); padding rows take
         row R - 1."""
         tid = fresh(tid)
         lane = fresh(lane)
@@ -779,7 +779,7 @@ def build(key: Build):
     @traced
     def push_rows(pl, region, tag, par, tid, bid, rank, red):
         """The CTA's 32 rows x S tokens (red: [wave][2 tiles][64 lanes][4]) summed over the waves,
-        bf16 pairs into slot [par][rank] of the block owner's ``region``."""
+        bf16 pairs into slot [par][rank] of the block owner's `region`."""
         if tid < 16 * S:
             pp = tid % 16  # row pair of the CTA's 32 rows
             tt = tid // 16
@@ -1000,7 +1000,7 @@ def build(key: Build):
 
     @traced
     def layer_step(layer, A):
-        """Layer ``layer``: the boundary into it (the FFN boundary of layer - 1, or the
+        """Layer `layer`: the boundary into it (the FFN boundary of layer - 1, or the
         embeddings), QKV, attention, O, AB, GU, DN (its partials pushed)."""
         wtab, health, rank, rsl = A["wtab"], A["health"], A["rank"], A["rsl"]
         scratch = sfresh64(A["scratch"])

@@ -1,16 +1,16 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
-"""Muse Spark's DSpark draft layers as one FlyDSL launch a step (``--monokernel``).
+"""Muse Spark's DSpark draft layers as one FlyDSL launch a step (`--monokernel`).
 
 A draft step of 1 or 2 requests (7 query rows each) runs the 5 layers and the final
-norm of ``MuseSparkDSparkModel`` as one launch of ``kernels/draft.py`` (builds
+norm of `MuseSparkDSparkModel` as one launch of `kernels/draft.py` (builds
 S = 8 / 16); any other step runs the stock layers. The contract is the target
 monokernel's (README.md): the weights are read in place (fp32 copies of the norm
 multipliers only), one IPC peer buffer a rank and build allocated at load time, fixed
 launch arguments (FULL CUDA graphs capture the launch), the draft KV cache group's
-``block_table`` / ``seq_lens`` / ``slot_mapping`` and the layers' bf16 LBHNC caches
+`block_table` / `seq_lens` / `slot_mapping` and the layers' bf16 LBHNC caches
 through one descriptor table a step shape (keyed by its contents), and health words
-that the target's ``compute_logits`` checks. Every rank takes the same path: the
+that the target's `compute_logits` checks. Every rank takes the same path: the
 decision reads only the static deployment and the step's shape and attention metadata
 counts.
 """
@@ -106,7 +106,7 @@ def draft_config_refusals(config: Any) -> list[str]:
 
 
 def effective_norm_weight_fp32(norm: nn.Module) -> torch.Tensor:
-    """The fp32 multiplier of a norm: ``weight (+ gain_center)``, as the stock norms."""
+    """The fp32 multiplier of a norm: `weight (+ gain_center)`, as the stock norms."""
     weight = norm.weight.detach().float()
     if norm.zero_centered_gamma:
         weight = weight + norm.gain_center
@@ -119,7 +119,7 @@ def _check(bad: list[str], i: int, name: str, w: torch.Tensor, shape: tuple) -> 
 
 
 def draft_layer_refusals(model: nn.Module, dims: MonoDims) -> list[str]:
-    """Module and tensor guards of the draft layers (``MuseSparkDSparkModel``)."""
+    """Module and tensor guards of the draft layers (`MuseSparkDSparkModel`)."""
     bad: list[str] = []
     layers = model.layers
     if len(layers) != DRAFT_LAYERS:
@@ -500,7 +500,7 @@ def static_refusals(lm: nn.Module, tp_size: int) -> list[str]:
 
 
 def maybe_attach_drafter(lm: nn.Module) -> None:
-    """Attach the draft kernels to ``lm`` (MuseSparkDSparkForCausalLM) after loading.
+    """Attach the draft kernels to `lm` (MuseSparkDSparkForCausalLM) after loading.
 
     Collective over the TP group: every rank calls it. A deployment that any rank
     cannot run keeps the stock draft layers on every rank (logged).
