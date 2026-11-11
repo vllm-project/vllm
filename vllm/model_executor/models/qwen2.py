@@ -233,6 +233,15 @@ class Qwen2DecoderLayer(nn.Module):
         prefix: str = "",
     ) -> None:
         super().__init__()
+        # Every layer gets the global sliding window, so it can't be per layer
+        if len(set(getattr(config, "layer_types", []))) > 1:
+            assert config.max_window_layers == config.num_hidden_layers, (
+                "Sliding window for some but all layers is not supported. "
+                "This model uses sliding window but `max_window_layers` = "
+                f"{config.max_window_layers} is less than `num_hidden_layers` = "
+                f"{config.num_hidden_layers}. Please open an issue "
+                "to discuss this feature."
+            )
         self.hidden_size = config.hidden_size
         set_default_rope_theta(config, default_theta=1000000)
 
@@ -331,16 +340,6 @@ class Qwen2Model(nn.Module, EagleModelMixin):
         config = vllm_config.model_config.hf_config.get_text_config()
         cache_config = vllm_config.cache_config
         quant_config = vllm_config.quant_config
-
-        # TODO (@robertgshaw2): see if this can be moved out
-        if len(set(getattr(config, "layer_types", []))) > 1:
-            assert config.max_window_layers == config.num_hidden_layers, (
-                "Sliding window for some but all layers is not supported. "
-                "This model uses sliding window but `max_window_layers` = "
-                f"{config.max_window_layers} is less than `num_hidden_layers` = "
-                f"{config.num_hidden_layers}. Please open an issue "
-                "to discuss this feature."
-            )
 
         self.config = config
         self.quant_config = quant_config
