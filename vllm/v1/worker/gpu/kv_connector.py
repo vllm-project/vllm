@@ -41,8 +41,13 @@ class KVConnector:
     def finish_forward(self) -> None:
         pass
 
-    def post_forward(self, finished_req_ids: set[str]) -> KVConnectorOutput | None:
+    def post_forward(
+        self, finished_req_ids: set[str], defer_finalize: bool = False
+    ) -> KVConnectorOutput | None:
         return None
+
+    def finalize_step(self) -> None:
+        pass
 
     def no_forward(self, scheduler_output: "SchedulerOutput") -> ModelRunnerOutput:
         return EMPTY_MODEL_RUNNER_OUTPUT
@@ -128,7 +133,9 @@ class ActiveKVConnector(KVConnector):
     def reset_capture_state(self) -> None:
         self.kv_connector.reset_capture_state()
 
-    def post_forward(self, finished_req_ids: set[str]) -> KVConnectorOutput | None:
+    def post_forward(
+        self, finished_req_ids: set[str], defer_finalize: bool = False
+    ) -> KVConnectorOutput | None:
         if self._disabled:
             return None
 
@@ -136,7 +143,8 @@ class ActiveKVConnector(KVConnector):
             self._start_load_kv()
 
         output = KVConnectorOutput()
-        self.kv_connector.wait_for_save()
+        if not defer_finalize:
+            self.kv_connector.wait_for_save()
         transfer_results = self.kv_connector.get_transfer_results(finished_req_ids)
         output.finished_sending = transfer_results.finished_sending or None
         output.finished_recving = transfer_results.finished_recving or None
@@ -147,8 +155,15 @@ class ActiveKVConnector(KVConnector):
         output.kv_connector_worker_meta = (
             self.kv_connector.build_connector_worker_meta()
         )
-        self.kv_connector.clear_connector_metadata()
+        if not defer_finalize:
+            self.kv_connector.clear_connector_metadata()
         return output
+
+    def finalize_step(self) -> None:
+        if self._disabled:
+            return
+        self.kv_connector.wait_for_save()
+        self.kv_connector.clear_connector_metadata()
 
     def no_forward(self, scheduler_output: "SchedulerOutput") -> ModelRunnerOutput:
         if self._disabled:

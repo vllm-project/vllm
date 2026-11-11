@@ -14,6 +14,7 @@ from vllm.entrypoints.anthropic.protocol import (
     AnthropicErrorResponse,
     AnthropicMessagesRequest,
     AnthropicMessagesResponse,
+    translate_error_type,
 )
 from vllm.entrypoints.anthropic.serving import AnthropicServingMessages
 from vllm.entrypoints.serve.engine.protocol import ErrorResponse
@@ -39,7 +40,7 @@ def messages(request: Request) -> AnthropicServingMessages:
 def translate_error_response(response: ErrorResponse) -> JSONResponse:
     anthropic_error = AnthropicErrorResponse(
         error=AnthropicError(
-            type=response.error.type,
+            type=translate_error_type(response.error.code),
             message=response.error.message,
         )
     )

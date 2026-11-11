@@ -9,6 +9,12 @@ import torch
 from vllm.config import VllmConfig
 from vllm.config.cache import CacheDType
 from vllm.forward_context import get_forward_context
+from vllm.models.deepseek_v4.nvidia.flashinfer_sparse import (
+    get_flashinfer_dsv4_workspace,
+    packed_block_span,
+    pad_to_supported_q_heads,
+    required_sm120_sparse_topk,
+)
 from vllm.models.deepseek_v4.nvidia.ops.o_proj import compute_fp8_einsum_recipe
 from vllm.models.deepseek_v41.attention import DeepseekV4Attention
 from vllm.models.deepseek_v41.common.ops import (
@@ -25,83 +31,26 @@ from vllm.models.deepseek_v41.sparse_mla import (
     DeepseekV4SparseMLAMetadataBuilder,
     DeepseekV41SparseSWAMetadataBuilder,
 )
+from vllm.platforms import current_platform
 from vllm.platforms.interface import DeviceCapability
 from vllm.utils.flashinfer import flashinfer_trtllm_batch_decode_sparse_mla_dsv4
 from vllm.v1.attention.backend import (
     AttentionCGSupport,
     CommonAttentionMetadata,
     MultipleOf,
-)
-from vllm.v1.attention.backends.mla.compressor_utils import (
-    get_dspark_swa_index_width,
+    max_decode_query_len,
 )
 from vllm.v1.attention.backends.mla.sparse_swa import DeepseekSparseSWABackend
+from vllm.v1.kv_cache_interface import KVCacheSpec
 
 if TYPE_CHECKING:
     from vllm.v1.attention.backends.mla.sparse_swa import DeepseekSparseSWAMetadata
-
-_FLASHINFER_DSV4_WORKSPACE_BUFFER_SIZE = 128 * 1024 * 1024
-_flashinfer_dsv4_workspace_by_device: dict[torch.device, torch.Tensor] = {}
-
-
-def _get_flashinfer_dsv4_workspace(device: torch.device) -> torch.Tensor:
-    workspace = _flashinfer_dsv4_workspace_by_device.get(device)
-    if workspace is None:
-        workspace = torch.zeros(
-            _FLASHINFER_DSV4_WORKSPACE_BUFFER_SIZE,
-            dtype=torch.uint8,
-            device=device,
-        )
-        _flashinfer_dsv4_workspace_by_device[device] = workspace
-    return workspace
-
-
-def _packed_block_span(pool: torch.Tensor) -> int:
-    """Per-block stride of ``pool`` in tokens (``stride(0)//stride(-2)``): ==
-    block_size for unpacked KV, larger when packed (#44577). Raises if not
-    token-aligned."""
-    block_stride = pool.stride(0)
-    token_stride = pool.stride(-2)
-    if block_stride % token_stride != 0:
-        raise NotImplementedError(
-            "FLASHINFER_MLA_SPARSE_DSV4 packed KV requires the per-block stride "
-            f"({block_stride}) to be a multiple of the per-token stride "
-            f"({token_stride}); this layout is not supported yet."
-        )
-    return block_stride // token_stride
-
-
-# Sparse MLA h_q counts accepted natively (flashinfer>=0.6.14, #3545).
-_SPARSE_MLA_SUPPORTED_Q_HEADS = (8, 16, 32, 64, 128)
-
-
-def _pad_to_supported_q_heads(num_heads: int) -> int:
-    for supported in _SPARSE_MLA_SUPPORTED_Q_HEADS:
-        if num_heads <= supported:
-            return supported
-    raise ValueError(
-        f"DeepseekV4 FlashInfer MLA Sparse does not support {num_heads} heads "
-        "(sparse MLA kernel requires h_q in {8, 16, 32, 64, 128})."
-    )
-
-
-def _required_sm120_sparse_topk(vllm_config: VllmConfig, window_size: int) -> int:
-    """Return the SM120 DSV4 SWA specialization needed by this model."""
-    if not vllm_config.attention_config.use_non_causal:
-        return window_size
-    speculative_config = vllm_config.speculative_config
-    if speculative_config is None:
-        return window_size
-    return get_dspark_swa_index_width(
-        window_size,
-        speculative_config.num_speculative_tokens,
-    )
 
 
 class DeepseekV4FlashInferMLASparseBackend(DeepseekV4SparseMLABackend):
     """FlashInfer backend using the DSv4 sparse metadata/cache layout.
 
-    Inherits the base and backend reuses its``DeepseekV4SparseMLAMetadataBuilder``
+    Inherits the base and backend reuses its`DeepseekV4SparseMLAMetadataBuilder`
     """
 
     supported_dtypes: ClassVar[list[torch.dtype]] = [torch.bfloat16]
@@ -115,6 +64,10 @@ class DeepseekV4FlashInferMLASparseBackend(DeepseekV4SparseMLABackend):
 
     @staticmethod
     def get_supported_kernel_block_sizes(kv_cache_spec=None) -> list[int | MultipleOf]:
+        # SM12x kernels only instantiate 64-token sparse-MLA blocks (128
+        # trips the block_kv assert, #59203).
+        if current_platform.is_device_capability_family(120):
+            return [64]
         return [128]
 
     @staticmethod
@@ -178,15 +131,35 @@ class DeepseekV4FlashInferMLASparseBackend(DeepseekV4SparseMLABackend):
 
 
 class DeepseekV4FlashInferSparseMLAMetadataBuilder(DeepseekV4SparseMLAMetadataBuilder):
-    """Varlen-capable metadata builder for the FlashInfer sparse MLA backend."""
+    """Varlen-decode-capable metadata builder for the FlashInfer sparse MLA backend."""
 
-    _cudagraph_support: ClassVar[AttentionCGSupport] = AttentionCGSupport.ALWAYS
+    _cudagraph_support: ClassVar[AttentionCGSupport] = AttentionCGSupport.UNIFORM_BATCH
+
+    @classmethod
+    def get_varlen_cudagraph_max_query_len(
+        cls,
+        vllm_config: VllmConfig,
+        kv_cache_spec: KVCacheSpec,
+    ) -> int | None:
+        # Decode replays use device request boundaries; prefill metadata is
+        # not graph-safe.
+        return max_decode_query_len(vllm_config)
 
 
 class DeepseekSparseSWAFlashInferMetadataBuilder(DeepseekV41SparseSWAMetadataBuilder):
     """SWA metadata for the FlashInfer sparse decode path (varlen decode)."""
 
-    _cudagraph_support: ClassVar[AttentionCGSupport] = AttentionCGSupport.ALWAYS
+    _cudagraph_support: ClassVar[AttentionCGSupport] = AttentionCGSupport.UNIFORM_BATCH
+
+    @classmethod
+    def get_varlen_cudagraph_max_query_len(
+        cls,
+        vllm_config: VllmConfig,
+        kv_cache_spec: KVCacheSpec,
+    ) -> int | None:
+        # Decode replays use device request boundaries; prefill metadata is
+        # not graph-safe.
+        return max_decode_query_len(vllm_config)
 
     def __init__(self, *args, **kwargs):
         super().__init__(*args, **kwargs)
@@ -206,23 +179,35 @@ class DeepseekSparseSWAFlashInferMetadataBuilder(DeepseekV41SparseSWAMetadataBui
         metadata = super().build(
             common_prefix_len, common_attn_metadata, fast_build, replay_start
         )
-        num_tokens = metadata.num_decode_tokens
-        if not common_attn_metadata.causal and num_tokens > 0:
-            assert metadata.decode_swa_lens is not None
-            assert metadata.seq_lens is not None
-            assert metadata.token_to_req_indices is not None
-            topk_lens = self._decode_topk_lens[:num_tokens]
-            seq_lens = self._decode_seq_lens[:num_tokens]
-            torch.clamp(metadata.decode_swa_lens, min=self.window_size, out=topk_lens)
-            torch.index_select(
-                metadata.seq_lens,
-                0,
-                metadata.token_to_req_indices[:num_tokens],
-                out=seq_lens,
-            )
-            metadata.flashinfer_decode_topk_lens = topk_lens
-            metadata.flashinfer_decode_seq_lens = seq_lens
+        if not common_attn_metadata.causal and metadata.num_decode_tokens > 0:
+            self._fill_noncausal_decode_lens(metadata)
         return metadata
+
+    def update_draft_decode_metadata(
+        self, metadata: "DeepseekSparseSWAMetadata"
+    ) -> None:
+        super().update_draft_decode_metadata(metadata)
+        if metadata.flashinfer_decode_topk_lens is not None:
+            self._fill_noncausal_decode_lens(metadata)
+
+    def _fill_noncausal_decode_lens(
+        self, metadata: "DeepseekSparseSWAMetadata"
+    ) -> None:
+        num_tokens = metadata.num_decode_tokens
+        assert metadata.decode_swa_lens is not None
+        assert metadata.seq_lens is not None
+        assert metadata.token_to_req_indices is not None
+        topk_lens = self._decode_topk_lens[:num_tokens]
+        seq_lens = self._decode_seq_lens[:num_tokens]
+        torch.clamp(metadata.decode_swa_lens, min=self.window_size, out=topk_lens)
+        torch.index_select(
+            metadata.seq_lens,
+            0,
+            metadata.token_to_req_indices[:num_tokens],
+            out=seq_lens,
+        )
+        metadata.flashinfer_decode_topk_lens = topk_lens
+        metadata.flashinfer_decode_seq_lens = seq_lens
 
 
 class DeepseekSparseSWAFlashInferBackend(DeepseekSparseSWABackend):
@@ -240,7 +225,7 @@ class DeepseekV4FlashInferMLAAttention(DeepseekV4Attention):
 
     @classmethod
     def get_padded_num_q_heads(cls, num_heads: int) -> int:
-        return _pad_to_supported_q_heads(num_heads)
+        return pad_to_supported_q_heads(num_heads)
 
     def _o_proj(self, attn_out: torch.Tensor, positions: torch.Tensor) -> torch.Tensor:
         return dsv41_o_proj(self, attn_out, positions)
@@ -351,8 +336,8 @@ class DeepseekV4FlashInferMLAAttention(DeepseekV4Attention):
     ) -> tuple[torch.Tensor, torch.Tensor, torch.Tensor, torch.Tensor]:
         """Build the combined sparse-index tensors for the mixed batch.
 
-        Returns ``(compressed_kv_cache, seq_lens, sparse_indices,
-        sparse_topk_lens)``.
+        Returns `(compressed_kv_cache, seq_lens, sparse_indices,
+        sparse_topk_lens)`.
         """
         num_decodes = swa_metadata.num_decodes
         num_prefills = swa_metadata.num_prefills
@@ -425,8 +410,8 @@ class DeepseekV4FlashInferMLAAttention(DeepseekV4Attention):
             else None
         )
         if cached_sparse is None:
-            swa_block_span = _packed_block_span(swa_k_cache)
-            compressed_block_span = _packed_block_span(compressed_kv_cache)
+            swa_block_span = packed_block_span(swa_k_cache)
+            compressed_block_span = packed_block_span(compressed_kv_cache)
             sparse_indices, sparse_topk_lens = build_flashinfer_mixed_sparse_indices(
                 decode_swa_indices,
                 decode_compressed_indices,
@@ -515,7 +500,7 @@ class DeepseekV4FlashInferMLAAttention(DeepseekV4Attention):
             padded_query[:, : query.shape[1], :] = query
             query = padded_query
 
-        workspace = _get_flashinfer_dsv4_workspace(q.device)
+        workspace = get_flashinfer_dsv4_workspace(q.device)
         query_start_loc = swa_metadata.query_start_loc
         query_start_loc_cpu = swa_metadata.query_start_loc_cpu
         assert query_start_loc is not None and query_start_loc_cpu is not None
@@ -596,7 +581,7 @@ class DeepseekV4FlashInferSM120Attention(DeepseekV4Attention):
 
     @staticmethod
     def _get_workspace(device: torch.device) -> torch.Tensor:
-        return _get_flashinfer_dsv4_workspace(device)
+        return get_flashinfer_dsv4_workspace(device)
 
     @staticmethod
     def _as_sparse_cache(kv_cache: torch.Tensor) -> torch.Tensor:
@@ -608,7 +593,7 @@ class DeepseekV4FlashInferSM120Attention(DeepseekV4Attention):
 
     @classmethod
     def get_padded_num_q_heads(cls, num_heads: int) -> int:
-        return _pad_to_supported_q_heads(num_heads)
+        return pad_to_supported_q_heads(num_heads)
 
     def _o_proj(self, attn_out: torch.Tensor, positions: torch.Tensor) -> torch.Tensor:
         return dsv41_o_proj(self, attn_out, positions)
@@ -617,7 +602,7 @@ class DeepseekV4FlashInferSM120Attention(DeepseekV4Attention):
         super().__init__(vllm_config, *args, **kwargs)
         from vllm.utils.flashinfer import has_flashinfer_sparse_mla_sm120_config
 
-        required_topk = _required_sm120_sparse_topk(vllm_config, self.window_size)
+        required_topk = required_sm120_sparse_topk(vllm_config, self.window_size)
         if not has_flashinfer_sparse_mla_sm120_config(self.padded_heads, required_topk):
             raise RuntimeError(
                 "FLASHINFER_MLA_SPARSE_DSV4 on SM120 requires a FlashInfer "

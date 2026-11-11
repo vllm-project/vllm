@@ -34,6 +34,7 @@ from vllm.model_executor.warmup.jit_warmup_triton_helper import (
     triton_scalar_specialization_rep,
 )
 from vllm.platforms import current_platform
+from vllm.transformers_utils.deepseek_v4_utils import get_compress_ratios
 from vllm.triton_utils import tl, triton
 from vllm.utils.import_utils import has_cutedsl
 from vllm.utils.math_utils import next_power_of_2
@@ -69,8 +70,8 @@ def quantize_and_insert_k_kernel(
 
     One program per token.
 
-    ``use_fnuz=True`` selects FNUZ (``tl.float8e4b8``); default OCP
-    (``tl.float8e4nv``) matches every production caller.
+    `use_fnuz=True` selects FNUZ (`tl.float8e4b8`); default OCP
+    (`tl.float8e4nv`) matches every production caller.
     """
     pid = tl.program_id(0)
 
@@ -181,8 +182,8 @@ def quantize_and_insert_k_cache(
       - Each token: 8 bytes (uint8 scales, 7 real + 1 padding)
     - Padded to multiple of 576
 
-    ``use_fnuz=True`` selects FNUZ E4M3 cache encoding and is only valid on
-    platforms whose FP8 format is FNUZ. ``use_fnuz=False`` selects OCP E4M3,
+    `use_fnuz=True` selects FNUZ E4M3 cache encoding and is only valid on
+    platforms whose FP8 format is FNUZ. `use_fnuz=False` selects OCP E4M3,
     which is used by OCP-encoded caches even on gfx942.
     """
     assert k.dim() == 2 and k.shape[1] == 512, (
@@ -393,7 +394,9 @@ class DequantizeAndGatherKCacheKernel(
 
         compress_ratios = frozenset(
             max(1, int(compress_ratio))
-            for compress_ratio in vllm_config.model_config.hf_config.compress_ratios
+            for compress_ratio in get_compress_ratios(
+                vllm_config.model_config.hf_config
+            )
         )
         return self._trace_dispatch(self.dispatch)(
             zip_inputs(
@@ -510,9 +513,9 @@ def dequantize_and_gather_k_cache(
 ) -> None:
     """Dequantize and gather a paged DSv4 K cache.
 
-    ``use_fnuz`` MUST match the encoder of the specific cache being read:
-    ``False`` for ``compressed_k_cache`` (Triton encoder is OCP everywhere),
-    ``current_platform.is_fp8_fnuz()`` for ``swa_k_cache`` (C++ encoder
+    `use_fnuz` MUST match the encoder of the specific cache being read:
+    `False` for `compressed_k_cache` (Triton encoder is OCP everywhere),
+    `current_platform.is_fp8_fnuz()` for `swa_k_cache` (C++ encoder
     writes FNUZ on gfx942 and OCP on gfx950).
     """
     if has_cutedsl():
@@ -658,7 +661,7 @@ class ComputeGlobalTopkIndicesAndLensKernel(
 
     def get_warmup_keys(self, vllm_config: Any) -> list[CompileKey]:
         index_topk = vllm_config.model_config.hf_config.index_topk
-        compress_ratios = vllm_config.model_config.hf_config.compress_ratios
+        compress_ratios = get_compress_ratios(vllm_config.model_config.hf_config)
         cache_block_size = vllm_config.cache_config.block_size
         if index_topk <= 0 or cache_block_size <= 0:
             return []
@@ -801,17 +804,6 @@ def combine_topk_swa_indices(
         max_image_tokens=max_image_tokens,
     )
     return combined_indices, combined_lens
-
-
-def _hf_config_int(vllm_config: Any, name: str, default: int) -> int:
-    model_config = getattr(vllm_config, "model_config", None)
-    hf_config = getattr(model_config, "hf_config", None)
-    return int(getattr(hf_config, name, default) or default)
-
-
-def _scheduler_config_int(vllm_config: Any, name: str, default: int) -> int:
-    scheduler_config = getattr(vllm_config, "scheduler_config", None)
-    return int(getattr(scheduler_config, name, default) or default)
 
 
 class CombineTopkSwaIndicesKernel(
@@ -957,14 +949,11 @@ class CombineTopkSwaIndicesKernel(
         )
 
     def get_warmup_keys(self, vllm_config: Any) -> list[CompileKey]:
-        if _scheduler_config_int(vllm_config, "max_num_batched_tokens", 0) <= 0:
-            return []
-
-        window_size = _hf_config_int(vllm_config, "sliding_window", 128)
         hf_config = vllm_config.model_config.hf_config
-        index_topk = int(getattr(hf_config, "index_topk", 0) or 0)
+        window_size = hf_config.sliding_window
+        index_topk = hf_config.index_topk
         compress_ratios = tuple(
-            sorted({max(1, int(ratio)) for ratio in hf_config.compress_ratios})
+            sorted({max(1, int(ratio)) for ratio in get_compress_ratios(hf_config)})
         )
         max_c128a_topk = (
             ((vllm_config.model_config.max_model_len + 127) // 128 + 127) // 128 * 128
@@ -979,8 +968,8 @@ class CombineTopkSwaIndicesKernel(
             ),
         )
         image_width = (
-            _hf_config_int(vllm_config, "vision_max_n_token", 0)
-            if _hf_config_int(vllm_config, "vision_n_layers", 0) > 0
+            getattr(hf_config, "vision_max_n_token", 0)
+            if getattr(hf_config, "vision_n_layers", 0) > 0
             else 0
         )
         # Warm both the plain-window variant (batches without image spans)
@@ -1103,18 +1092,18 @@ def build_flashinfer_mixed_sparse_indices(
 ) -> tuple[torch.Tensor, torch.Tensor]:
     """Build the FlashInfer DSV4 sparse-index matrix for decode-first batches.
 
-    Produces ``sparse_indices`` of shape ``[num_tokens, swa_total_width +
-    padded_topk]`` (the first ``swa_total_width`` columns are SWA slot ids, the
-    rest are compressed/top-k slot ids) and ``sparse_topk_lens`` (active length
+    Produces `sparse_indices` of shape `[num_tokens, swa_total_width +
+    padded_topk]` (the first `swa_total_width` columns are SWA slot ids, the
+    rest are compressed/top-k slot ids) and `sparse_topk_lens` (active length
     per token). Decode tokens read precomputed SWA/compressed indices; prefill
     tokens derive their SWA window from the position and translate local
     compressed indices to global slots via the block tables.
 
-    ``num_rows`` (>= ``num_tokens``) sizes both outputs for a kernel call that
-    spans a CUDA-graph-padded batch; the rows past ``num_tokens`` stay unset.
+    `num_rows` (>= `num_tokens`) sizes both outputs for a kernel call that
+    spans a CUDA-graph-padded batch; the rows past `num_tokens` stay unset.
 
-    When ``prefill_left_visible``/``prefill_right_visible`` are given (vision
-    variant), the SWA column region widens by ``max_image_tokens`` and prefill
+    When `prefill_left_visible`/`prefill_right_visible` are given (vision
+    variant), the SWA column region widens by `max_image_tokens` and prefill
     tokens inside an image span get a bidirectionally widened window; decode
     rows are padded with -1 across the extra columns.
     """
@@ -1238,7 +1227,7 @@ def build_flashinfer_mixed_sparse_indices(
 
 
 @triton.jit
-def _remap_flashinfer_index(values, block_size, block_span):
+def remap_flashinfer_index(values, block_size, block_span):
     # FlashInfer's DSv4 kernel indexes sparse KV by physical token stride, so
     # packed pages (#44577) need block*block_size+off -> block*block_span+off.
     # The launcher declares these indices with sparse_indices_are_storage_offsets=True.
@@ -1377,7 +1366,7 @@ class BuildFlashinferMixedSparseIndicesKernel(
                     mask=src_mask,
                     other=-1,
                 )
-                values = _remap_flashinfer_index(values, swa_block_size, swa_block_span)
+                values = remap_flashinfer_index(values, swa_block_size, swa_block_span)
                 tl.store(
                     sparse_indices_ptr + token_idx * sparse_indices_stride + offset,
                     values,
@@ -1413,7 +1402,7 @@ class BuildFlashinferMixedSparseIndicesKernel(
                     compressed_len += tl.sum(
                         (is_valid & token_valid).to(tl.int32), axis=0
                     )
-                values = _remap_flashinfer_index(
+                values = remap_flashinfer_index(
                     values, compressed_block_size, compressed_block_span
                 )
                 tl.store(
@@ -1490,7 +1479,7 @@ class BuildFlashinferMixedSparseIndicesKernel(
             block_offsets = pos_offset % swa_block_size
             slot_ids = block_numbers * swa_block_size + block_offsets
             slot_ids = tl.where(offset < swa_len, slot_ids, -1)
-            slot_ids = _remap_flashinfer_index(slot_ids, swa_block_size, swa_block_span)
+            slot_ids = remap_flashinfer_index(slot_ids, swa_block_size, swa_block_span)
             tl.store(
                 sparse_indices_ptr + token_idx * sparse_indices_stride + offset,
                 slot_ids,
@@ -1517,7 +1506,7 @@ class BuildFlashinferMixedSparseIndicesKernel(
             block_offsets = local_idx % compressed_block_size
             slot_ids = block_numbers * compressed_block_size + block_offsets
             slot_ids = tl.where((offset < topk_len) & is_valid, slot_ids, -1)
-            slot_ids = _remap_flashinfer_index(
+            slot_ids = remap_flashinfer_index(
                 slot_ids, compressed_block_size, compressed_block_span
             )
             tl.store(
@@ -1592,7 +1581,7 @@ class BuildFlashinferMixedSparseIndicesKernel(
         image_widths = (0, max_image_tokens) if max_image_tokens > 0 else 0
         index_topk = int(getattr(hf_config, "index_topk", 0) or 0)
         compress_ratios = tuple(
-            sorted({max(1, int(ratio)) for ratio in hf_config.compress_ratios})
+            sorted({max(1, int(ratio)) for ratio in get_compress_ratios(hf_config)})
         )
         max_c128a_topk = (
             ((vllm_config.model_config.max_model_len + 127) // 128 + 127) // 128 * 128

@@ -23,7 +23,7 @@ from vllm.utils.sparse_utils import (
     safe_to_dense,
 )
 
-from .base import MediaIO
+from .base import MediaDecodedBudget, MediaIO
 
 logger = init_logger(__name__)
 
@@ -39,8 +39,10 @@ except ImportError:
 
 try:
     from torchcodec.decoders import AudioDecoder
-except (ImportError, RuntimeError) as exc:
-    # RuntimeError: torchcodec is installed but the system ffmpeg is missing.
+except (ImportError, RuntimeError, OSError) as exc:
+    # torchcodec may fail to import when it is not installed (ImportError),
+    # the system ffmpeg is missing (RuntimeError), or its native library
+    # cannot be loaded (OSError).
     AudioDecoder = None  # type: ignore[assignment]
     _torchcodec_import_exc: BaseException | None = exc
 else:
@@ -91,11 +93,11 @@ def load_audio_pyav(
 
     Decodes the audio stream at its native sample rate. Channel reduction to
     mono is performed by averaging across channels.  Resampling to a
-    model-specific rate is left to the downstream :class:`AudioResampler`.
+    model-specific rate is left to the downstream `AudioResampler`.
 
     Args:
-        path: A :class:`~io.BytesIO` buffer, a filesystem
-            :class:`~pathlib.Path`, or a string path.
+        path: A `BytesIO` buffer, a filesystem
+            `Path`, or a string path.
         sr: Target sample rate, or None to keep the native rate.
         mono: Whether to average the channels down to mono.
         max_decode_bytes: If set, abort decoding once this many bytes have
@@ -106,7 +108,7 @@ def load_audio_pyav(
             expands into gigabytes of PCM.
 
     Returns:
-        ``(waveform, sample_rate)`` where *waveform* is a 1-D float32
+        `(waveform, sample_rate)` where *waveform* is a 1-D float32
         NumPy array and *sample_rate* is the native sample rate in Hz.
 
     """
@@ -262,15 +264,15 @@ def load_audio_torchcodec(
 ) -> tuple[npt.NDArray, float]:
     """Load an audio file using torchcodec, returning a float32 waveform.
 
-    Unlike :func:`load_audio_pyav`, which drives FFmpeg through a per-frame
+    Unlike `load_audio_pyav`, which drives FFmpeg through a per-frame
     Python generator, torchcodec decodes inside a single call that releases
-    the GIL. Resampling also happens in C++ (``sample_rate=sr``), so this
+    the GIL. Resampling also happens in C++ (`sample_rate=sr`), so this
     backend never falls back to PyAV or libsndfile.
 
     Args:
-        path: A :class:`~io.BytesIO` buffer, a filesystem
-            :class:`~pathlib.Path`, or a string path.
-        sr: Output sample rate; ``None`` keeps the native rate. Must be an
+        path: A `BytesIO` buffer, a filesystem
+            `Path`, or a string path.
+        sr: Output sample rate; `None` keeps the native rate. Must be an
             integer when set.
         mono: Average channels down to a single channel.
         max_duration_s: Reject audio longer than this many seconds.
@@ -280,8 +282,8 @@ def load_audio_torchcodec(
             bytes.
 
     Returns:
-        ``(waveform, sample_rate)`` where *waveform* is a float32 NumPy
-        array (1-D when ``mono=True``) and *sample_rate* is the output
+        `(waveform, sample_rate)` where *waveform* is a float32 NumPy
+        array (1-D when `mono=True`) and *sample_rate* is the output
         sample rate in Hz.
 
     """
@@ -438,8 +440,8 @@ def load_audio(
         max_duration_s: Reject audio longer than this many seconds.
         max_decode_bytes: Reject audio that would decode to more than this
             many bytes.
-        backend: One of ``AUDIO_BACKENDS``. ``None`` (default) selects
-            ``"auto"``, which tries torchcodec, then falls back to the
+        backend: One of `AUDIO_BACKENDS`. `None` (default) selects
+            `"auto"`, which tries torchcodec, then falls back to the
             soundfile → PyAV chain; the other values select a single
             backend with no fallback.
 
@@ -527,8 +529,11 @@ class AudioMediaIO(MediaIO[tuple[npt.NDArray, float]]):
     error handling.
     """
 
-    def __init__(self, **kwargs) -> None:
+    def __init__(
+        self, *, decoded_budget: MediaDecodedBudget | None = None, **kwargs
+    ) -> None:
         super().__init__()
+        self.decoded_budget = decoded_budget
 
         # Allow per-server override of the audio decoding backend, e.g.:
         #   --media-io-kwargs '{"audio": {"audio_backend": "torchcodec"}}'
@@ -564,13 +569,44 @@ class AudioMediaIO(MediaIO[tuple[npt.NDArray, float]]):
 
     def load_bytes(self, data: bytes) -> tuple[npt.NDArray, float]:
         self._validate_encoded_size(len(data))
-        return load_audio(
-            BytesIO(data),
-            sr=None,
-            max_duration_s=envs.VLLM_MAX_AUDIO_DECODE_DURATION_S,
-            max_decode_bytes=envs.VLLM_MAX_AUDIO_DECODE_BYTES,
-            backend=self.audio_backend,
-        )
+        return self._load_with_budget(BytesIO(data))
+
+    def _load_with_budget(self, source: BytesIO | Path) -> tuple[npt.NDArray, float]:
+        budget = self.decoded_budget
+        if budget is None:
+            return load_audio(
+                source,
+                sr=None,
+                max_duration_s=envs.VLLM_MAX_AUDIO_DECODE_DURATION_S,
+                max_decode_bytes=envs.VLLM_MAX_AUDIO_DECODE_BYTES,
+                backend=self.audio_backend,
+            )
+
+        max_decode_bytes = envs.VLLM_MAX_AUDIO_DECODE_BYTES
+        reserved = budget.reserve(max_decode_bytes)
+        decoded_bytes = 0
+        try:
+            try:
+                audio = load_audio(
+                    source,
+                    sr=None,
+                    max_duration_s=envs.VLLM_MAX_AUDIO_DECODE_DURATION_S,
+                    max_decode_bytes=reserved,
+                    backend=self.audio_backend,
+                )
+            except ValueError as exc:
+                if reserved < max_decode_bytes and "VLLM_MAX_AUDIO_DECODE_BYTES" in str(
+                    exc
+                ):
+                    raise ValueError(
+                        "Request decoded media exceeds "
+                        "VLLM_MAX_MEDIA_REQUEST_DECODE_BYTES."
+                    ) from exc
+                raise
+            decoded_bytes = audio[0].nbytes
+            return audio
+        finally:
+            budget.settle(reserved, decoded_bytes)
 
     def load_base64(
         self,
@@ -588,13 +624,7 @@ class AudioMediaIO(MediaIO[tuple[npt.NDArray, float]]):
 
     def load_file(self, filepath: Path) -> tuple[npt.NDArray, float]:
         self._validate_encoded_size(filepath.stat().st_size)
-        return load_audio(
-            filepath,
-            sr=None,
-            max_duration_s=envs.VLLM_MAX_AUDIO_DECODE_DURATION_S,
-            max_decode_bytes=envs.VLLM_MAX_AUDIO_DECODE_BYTES,
-            backend=self.audio_backend,
-        )
+        return self._load_with_budget(filepath)
 
     def encode_base64(
         self,
