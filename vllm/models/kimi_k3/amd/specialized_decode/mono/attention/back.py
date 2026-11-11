@@ -1,10 +1,10 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
-"""K2a ``attn_post``: one Kimi-K3 KDA layer from the gated core output to the
+"""K2a `attn_post`: one Kimi-K3 KDA layer from the gated core output to the
 MoE's input row -- o_proj, its TP all-reduce inside the kernel, and the MLP
 AttnRes seam.
 
-One launch a layer and rank, ``BLOCKS`` x ``THREADS``:
+One launch a layer and rank, `BLOCKS` x `THREADS`:
 
     gemv CTAs 56 ..   o_proj (448 x 16 rows, K = 1536 local): bf16 GEMV of the
                       core rows (plain loads: the previous launch wrote them) ->
@@ -75,7 +75,7 @@ def two_shot(s):
 
 
 def peer_at(peers, p):
-    """``peers[p]`` (an Addr a rank) for a traced rank ``p``."""
+    """`peers[p]` (an Addr a rank) for a traced rank `p`."""
     v = peers[0].value
     for q in range(1, TP):
         v = (p == q).select(peers[q].value, v)
@@ -94,30 +94,30 @@ _STREAM = fx.Stream(None)
 
 
 def sent_on(c, which="ar"):
-    """(OPT_SENTS) This build's all-reduce ``which`` ("ar": o_proj's,
-    "latr", "final") goes through its sentinel region (``layer.k2_sent``; a
-    plain call: a method call on ``c`` inside a traced branch would make FlyDSL
-    carry ``c`` as branch state)."""
+    """(OPT_SENTS) This build's all-reduce `which` ("ar": o_proj's,
+    "latr", "final") goes through its sentinel region (`layer.k2_sent`; a
+    plain call: a method call on `c` inside a traced branch would make FlyDSL
+    carry `c` as branch state)."""
     return c.get("sent_" + which, False)
 
 
 def sent_ix(src, col, t, s, width):
-    """(OPT_SENT) Word index of (src rank, pair at ``col``, token t), blocked
-    [src][16-col group][token][8 pairs]; shared by push and reduce."""
+    """(OPT_SENT) Word index of (src rank, pair at `col`, token t), blocked
+    `[src][16-col group][token][8 pairs]`; shared by push and reduce."""
     return ((src * (width // 16) + col // 16) * s + t) * 8 + (col % 16) // 2
 
 
 def sent_item(idx, s):
     """(OPT_SENT) A reduce item's (token, column pair), so consecutive items
-    read consecutive ``sent_ix`` words."""
+    read consecutive `sent_ix` words."""
     g = idx // (8 * s)
     r = idx % (8 * s)
     return r // 8, g * 8 + r % 8
 
 
 def sent_sum(c, own, col, t, width, rearm=True):
-    """The ``TP`` ranks' sentinel words of (col pair, t) in ``own`` summed in
-    fp32 in rank order (as ``sum_partials``), re-armed unless ``rearm`` is
+    """The `TP` ranks' sentinel words of (col pair, t) in `own` summed in
+    fp32 in rank order (as `sum_partials`), re-armed unless `rearm` is
     off (the caller re-arms them later)."""
     s = c["S"]
     ws = poll_sent(
@@ -132,7 +132,7 @@ def sent_sum(c, own, col, t, width, rearm=True):
 
 
 def ar_half_pairs(s):
-    """One parity's AR region: ``[src rank][token][column pair]``."""
+    """One parity's AR region: `[src rank][token][column pair]`."""
     return TP * s * HIDDEN // 2
 
 
@@ -177,7 +177,7 @@ def o_loads(c, rg):
 
 @traced
 def load_core(c, t0, n, cm=0):
-    """Core rows t0 .. t0 + n (of S x 1536 bf16) -> LDS, rows padded; ``cm``
+    """Core rows t0 .. t0 + n (of S x 1536 bf16) -> LDS, rows padded; `cm`
     CM_DEV when this launch's own CTAs wrote them (K2's fused M1b)."""
     tid = c["tid"]
     words = n * OK // 8
@@ -288,7 +288,7 @@ def stage_reduce(c, task):
 
 @traced
 def reduce_two_shot(c, task, t, col):
-    """The owner of ``col`` sums the 8 scattered partials (rank order, as the
+    """The owner of `col` sums the 8 scattered partials (rank order, as the
     one-shot) and puts the bf16 sum to the other ranks' slot [owner]; they
     poll it there (a slot the scatter leaves free off the owner)."""
     s = c["S"]
@@ -333,7 +333,7 @@ def reduce_two_shot(c, task, t, col):
 
 
 def _raw4(ptr, i):
-    """bf16 elements i .. i + 4 as two raw words (``kda.ld_bf4``'s load)."""
+    """bf16 elements i .. i + 4 as two raw words (`kda.ld_bf4`'s load)."""
     return fx.Vector(bo.buffer_load(rsrc(ptr), i // 2, vec_width=2, dtype=T.i32))
 
 
@@ -342,7 +342,7 @@ def _f4(w):
 
 
 def slice_loads(c, task):
-    """``stage_slice``'s loads of slice ``task`` that need no hand-off: each
+    """`stage_slice`'s loads of slice `task` that need no hand-off: each
     round's block and prefix words, then the round-invariant ares_nw / ares_qk
     words (a live thread's columns are the same every round: THREADS % QC == 0)."""
     s, ns, nb, tid = c["S"], c["NS"], c["NB"], c["tid"]
@@ -374,8 +374,8 @@ def slice_loads(c, task):
 
 @traced
 def stage_slice_pre(c, task, ld):
-    """``kda.stage_slice`` for K2 (delta in LDS, no block write) on the
-    preloaded words ``ld`` (``slice_loads``)."""
+    """`kda.stage_slice` for K2 (delta in LDS, no block write) on the
+    preloaded words `ld` (`slice_loads`)."""
     s, ns, nb, tid, lane = c["S"], c["NS"], c["NB"], c["tid"], c["lane"]
     a = c["args"]
     assert c["delta"] and c.get("delta_lds") is not None
@@ -434,7 +434,7 @@ def stage_slice_pre(c, task, ld):
 
 @traced
 def rearm_ar(c, task):
-    """(OPT_SENT) Re-arm the words ``stage_reduce`` read for ``task``,
+    """(OPT_SENT) Re-arm the words `stage_reduce` read for `task`,
     after the mix (off the critical path)."""
     s, tid = c["S"], c["tid"]
     n = s * (COLS // 2)

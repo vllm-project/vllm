@@ -72,23 +72,23 @@ def get_attn_spec_kind(
 ) -> "KVCacheSpecKind":
     """Derive the KV-cache group kind a layer belongs to from its signals.
 
-    Mirrors ``get_kv_cache_spec_kind`` (which derives the kind from the
-    produced ``KVCacheSpec``) so users can target groups by kind when
-    setting ``AttentionConfig.backend_per_kind``.
+    Mirrors `get_kv_cache_spec_kind` (which derives the kind from the
+    produced `KVCacheSpec`) so users can target groups by kind when
+    setting `AttentionConfig.backend_per_kind`.
 
-    ``SINK_FULL_ATTENTION`` is intentionally not derived here: it is produced
-    only by the ``StaticSinkAttention`` layer, whereas a plain ``Attention``
+    `SINK_FULL_ATTENTION` is intentionally not derived here: it is produced
+    only by the `StaticSinkAttention` layer, whereas a plain `Attention`
     layer with attention sinks (e.g. gpt-oss) still yields a
-    ``FullAttentionSpec``/``SlidingWindowSpec``. Sinks therefore do not change
+    `FullAttentionSpec`/`SlidingWindowSpec`. Sinks therefore do not change
     the kind.
 
     Args:
         use_mla: Whether the layer uses multi-head latent attention.
         has_sliding_window: Whether the layer applies a sliding window.
-        attn_type: The layer's ``AttentionType``.
+        attn_type: The layer's `AttentionType`.
 
     Returns:
-        The ``KVCacheSpecKind`` the layer maps to.
+        The `KVCacheSpecKind` the layer maps to.
 
     """
     from vllm.v1.kv_cache_interface import KVCacheSpecKind

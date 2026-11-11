@@ -18,7 +18,7 @@ from vllm.v1.metrics.reader import Counter, Gauge, Metric
 
 
 def _skip_if_insufficient_gpus_for_tp(tp_size: int):
-    """Skip if fewer than ``tp_size`` accelerators are available."""
+    """Skip if fewer than `tp_size` accelerators are available."""
     available_gpus = torch.accelerator.device_count()
     if available_gpus < tp_size:
         pytest.skip(
