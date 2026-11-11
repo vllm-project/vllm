@@ -208,8 +208,6 @@ _TEXT_GENERATION_MODELS = {
     "Step3p5ForCausalLM": ("step3p5", "Step3p5ForCausalLM"),
     "Step5ForCausalLM": ("vllm.models.step5", "Step5ForCausalLM"),
     "SolarForCausalLM": ("solar", "SolarForCausalLM"),
-    "TeleChat2ForCausalLM": ("telechat2", "TeleChat2ForCausalLM"),
-    "TeleChat3ForCausalLM": ("llama", "LlamaForCausalLM"),
     "TeleFLMForCausalLM": ("teleflm", "TeleFLMForCausalLM"),
     "UnlimitedOCR2TextForCausalLM": ("unlimited_ocr", "UnlimitedOCR2TextForCausalLM"),
     "Zamba2ForCausalLM": ("zamba2", "Zamba2ForCausalLM"),
@@ -245,7 +243,6 @@ _EMBEDDING_MODELS = {
     "Qwen2ForCausalLM": ("qwen2", "Qwen2ForCausalLM"),
     "RobertaForMaskedLM": ("roberta", "RobertaEmbeddingModel"),
     "RobertaModel": ("roberta", "RobertaEmbeddingModel"),
-    "TeleChat2ForCausalLM": ("telechat2", "TeleChat2ForCausalLM"),
     "VoyageQwen3BidirectionalEmbedModel": (
         "voyage",
         "VoyageQwen3BidirectionalEmbedModel",
@@ -931,6 +928,8 @@ _PREVIOUSLY_SUPPORTED_MODELS = {
     "PrithviGeoSpatialMAE": "0.28.0",
     "KeyeForConditionalGeneration": "0.33.0",
     "KeyeVL1_5ForConditionalGeneration": "0.33.0",
+    "TeleChat2ForCausalLM": "0.34.0",
+    "TeleChat3ForCausalLM": "0.34.0",
 }
 
 _OOT_SUPPORTED_MODELS = {
