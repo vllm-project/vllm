@@ -15,10 +15,14 @@ steps:
     - rust/Cargo.toml
     - rust/Cargo.lock
     - rust/src/engine-core/
+    - rust/src/engine-core-client/
+    - rust/src/engine-core-io/
     - rust/src/engine-core-py/
     - rust-toolchain.toml
     - tools/build_rust.py
     - vllm/envs.py
+    - vllm/v1/engine/core.py
+    - vllm/v1/engine/rust_core_io.py
     - vllm/config/scheduler.py
     - vllm/v1/core/
     - vllm/v1/hisparse/
@@ -28,6 +32,8 @@ steps:
     - tests/v1/core/rust_core_diff.py
     - tests/v1/core/rust_scheduler_plugin.py
     - tests/v1/core/test_rust_core_hash.py
+    - tests/v1/core/test_rust_native_input.py
+    - tests/v1/core/test_rust_native_output.py
     - tests/v1/core/test_rust_scheduler.py
     - tests/v1/kv_connector/unit/nixl_rust_diff.py
     - tests/v1/kv_connector/unit/test_mooncake_store_rust.py
@@ -37,7 +43,9 @@ steps:
   commands:
     # The image builds `vllm._rust_core` with the wheel; fail rather than skip.
     - python3 -c "import vllm._rust_core"
-    - pytest -v -s tests/v1/core/test_rust_core_hash.py tests/v1/core/test_rust_scheduler.py
+    - >-
+      pytest -v -s tests/v1/core/test_rust_core_hash.py tests/v1/core/test_rust_scheduler.py
+      tests/v1/core/test_rust_native_output.py tests/v1/core/test_rust_native_input.py
     - >-
       pytest -v -s
       tests/v1/kv_connector/unit/test_mooncake_store_rust.py
