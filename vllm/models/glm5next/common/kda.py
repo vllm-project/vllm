@@ -414,6 +414,7 @@ class Glm5NextLinearAttention(GatedDeltaNetAttention):
                 )
 
                 supported, reason = can_use_deferred_recoverssm(
+                    window=self.spec_query_len,
                     head_dim=self.head_dim,
                     conv_width=self.conv_size,
                     has_conv_bias=self.conv1d.bias is not None,
