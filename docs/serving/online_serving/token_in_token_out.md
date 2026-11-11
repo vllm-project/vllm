@@ -31,6 +31,13 @@ A full client is in [examples/scale_out/token_generation_client.py](../../../exa
 | `features` / `content_parts` | Multimodal input, mutually exclusive. |
 | `request_id`, `model`, `cache_salt`, `priority`, `kv_transfer_params`, `ec_transfer_params` | Optional. |
 
+For native Pixtral models, inline `features` image tensors must have shape
+`(3, H, W)`. Both dimensions must be positive multiples of the vision patch
+size and fit within the model's configured image size. Invalid geometry returns
+HTTP 400 before engine submission, including for streaming requests. Forward
+renderer-produced tensors unchanged; use `content_parts` for images that need
+preprocessing and resizing.
+
 ## Response fields
 
 | `choices[i]` field | Notes |
