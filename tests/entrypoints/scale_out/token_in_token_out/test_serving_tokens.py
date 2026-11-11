@@ -188,12 +188,12 @@ async def test_generate_sampling_mask(client):
 
 @pytest.mark.asyncio
 async def test_generate_defaults_max_tokens_when_omitted(client):
-    """Regression: omitting ``max_tokens`` must not silently cap at 16.
+    """Regression: omitting `max_tokens` must not silently cap at 16.
 
-    ``SamplingParams.max_tokens`` defaults to 16. Before the server-side
-    defaulting was wired up, every request that didn't set ``max_tokens``
+    `SamplingParams.max_tokens` defaults to 16. Before the server-side
+    defaulting was wired up, every request that didn't set `max_tokens`
     truncated mid-generation. The server should now fill it in from
-    ``max_model_len - prompt_len`` (matching ``/v1/chat/completions``).
+    `max_model_len - prompt_len` (matching `/v1/chat/completions`).
     """
     payload = {
         "model": MODEL_NAME,
@@ -222,10 +222,10 @@ async def test_generate_defaults_max_tokens_when_omitted(client):
     reason="parallel sampling (n > 1) is not supported by the Rust frontend",
 )
 async def test_generate_returns_all_choices_when_n_greater_than_one(client):
-    """Regression: ``n > 1`` must return ``n`` choices.
+    """Regression: `n > 1` must return `n` choices.
 
-    Non-streaming requests kept ``SamplingParams``' default output kind,
-    ``CUMULATIVE``, so only the sequences updated during the last engine step
+    Non-streaming requests kept `SamplingParams`' default output kind,
+    `CUMULATIVE`, so only the sequences updated during the last engine step
     reached the response and the others were silently dropped.
     """
     payload = {

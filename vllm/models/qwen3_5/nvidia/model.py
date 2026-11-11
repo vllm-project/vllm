@@ -122,18 +122,24 @@ from vllm.model_executor.models.utils import (
 from vllm.model_executor.utils import set_weight_attrs
 from vllm.multimodal import MULTIMODAL_REGISTRY
 from vllm.multimodal.inputs import MultiModalFeatureSpec
+from vllm.platforms import current_platform
 from vllm.sequence import IntermediateTensors
 from vllm.tokenizers.registry import cached_tokenizer_from_config
+from vllm.utils.flashinfer import has_flashinfer
 
 from .ops.fused_allreduce_norm_quant import fused_allreduce_gemma_rms_norm_quant
 from .ops.fused_gdn_gated_norm import fused_gdn_gated_rms_norm
-from .ops.fused_norm_quant import FP8_DTYPE, gemma_add_rms_norm_quant
+from .ops.fused_norm_quant import (
+    FP8_DTYPE,
+    gemma_add_rms_norm,
+    gemma_add_rms_norm_quant,
+)
 
 logger = init_logger(__name__)
 
 
 def _norm_quant_key(linear: nn.Module) -> QuantKey | None:
-    """The input quant key of ``linear`` that the fused norms can produce.
+    """The input quant key of `linear` that the fused norms can produce.
 
     Checked per call: keys are exposed after weight loading, and LoRA hides
     them (requires_unquantized_input).
@@ -176,14 +182,16 @@ def _fused_gdn_gated_rms_norm_quant(
 
 
 class Qwen3_5RMSNorm(nn.Module):
-    """Gemma-style RMS normalization backed by flashinfer kernels.
+    """Gemma-style RMSNorm: flashinfer kernels, or the Triton
+    `gemma_add_rms_norm` below SM80 / without FlashInfer (whose norm
+    module cannot JIT-build there).
 
-    When ``residual`` is given, the fused add + norm runs in place and the
-    updated ``(x, residual)`` pair is returned.
+    With `residual`, both paths update it in place; the flashinfer path
+    also updates `x` in place. Use the returned tensors.
 
-    ``reduce_inputs``: in ``forward_fused``, an ``x`` that comes with a
+    `reduce_inputs`: in `forward_fused`, an `x` that comes with a
     residual is the un-reduced TP partial of a row-parallel linear, and the
-    norm absorbs its all-reduce. An ``x`` without a residual (first decoder
+    norm absorbs its all-reduce. An `x` without a residual (first decoder
     layer, MTP layer) is always complete.
     """
 
@@ -195,18 +203,24 @@ class Qwen3_5RMSNorm(nn.Module):
         set_weight_attrs(self.weight, {"dummy_weight_value": 0.0})
         self.variance_epsilon = eps
         self.reduce_inputs = reduce_inputs
+        self.use_flashinfer = (
+            current_platform.has_device_capability(80) and has_flashinfer()
+        )
 
     def forward(
         self,
         x: torch.Tensor,
         residual: torch.Tensor | None = None,
     ) -> torch.Tensor | tuple[torch.Tensor, torch.Tensor]:
+        if not self.use_flashinfer:
+            y = gemma_add_rms_norm(x, residual, self.weight, self.variance_epsilon)
+            return (y, residual) if residual is not None else y
+
         from flashinfer.norm import gemma_fused_add_rmsnorm, gemma_rmsnorm
 
         if residual is None:
             return gemma_rmsnorm(x, self.weight, self.variance_epsilon)
 
-        # gemma_fused_add_rmsnorm mutates x and residual in place.
         gemma_fused_add_rmsnorm(x, residual, self.weight, self.variance_epsilon)
         return x, residual
 
@@ -218,15 +232,15 @@ class Qwen3_5RMSNorm(nn.Module):
         *,
         write_y: bool = False,
     ) -> tuple[QuantizedActivation | None, torch.Tensor | None, torch.Tensor]:
-        """``forward`` with the preceding TP all-reduce (``reduce_inputs``)
-        and the consumer ``linear``'s input quantization fused in.
+        """`forward` with the preceding TP all-reduce (`reduce_inputs`)
+        and the consumer `linear`'s input quantization fused in.
 
-        When ``linear``'s input quant key is supported, the normed activation
+        When `linear`'s input quant key is supported, the normed activation
         is quantized for it; x is then not modified.
 
         Returns the quantized normed activation (or None), the normed
         activation in x's dtype (when the quantized one is None, or when
-        ``write_y``; else None) and the residual (x when ``residual`` is None).
+        `write_y`; else None) and the residual (x when `residual` is None).
         """
         allreduce = self.reduce_inputs and residual is not None
         key = None if linear is None else _norm_quant_key(linear)
@@ -897,7 +911,7 @@ class Qwen3_5ForConditionalGeneration(Qwen3VLForConditionalGeneration, IsHybrid)
     ) -> torch.Tensor | IntermediateTensors:
         """Run forward pass for Qwen3.5.
 
-        With mrope enabled (default for Qwen3VL-class models), ``positions``
+        With mrope enabled (default for Qwen3VL-class models), `positions`
         has shape `(3, seq_len)`, otherwise `(seq_len,)`.
         """
         if intermediate_tensors is not None:
