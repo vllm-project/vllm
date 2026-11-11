@@ -255,10 +255,23 @@ class GatedResidual(HyperConnectionBase):
 
 
 class PaddedMergedColumnParallelLinear(MergedColumnParallelLinear):
-    """Initialize checkpoint padding consistently across loads."""
+    """Merged linear with `padding_size` alignment rows after `output_sizes`.
 
-    def __init__(self, *args: Any, **kwargs: Any) -> None:
-        super().__init__(*args, **kwargs)
+    Checkpoints carry no padding, so it is not a shard; it starts zero and a
+    direct reload zero-fills the whole weight before the real shards land.
+    """
+
+    def __init__(
+        self,
+        input_size: int,
+        output_sizes: list[int],
+        *,
+        padding_size: int,
+        **kwargs: Any,
+    ) -> None:
+        padding = [padding_size] if padding_size else []
+        super().__init__(input_size, output_sizes + padding, **kwargs)
+        self.shard_ids = tuple(range(len(output_sizes)))
         with torch.no_grad():
             self.weight.zero_()
 
