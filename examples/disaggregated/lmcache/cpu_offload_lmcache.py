@@ -13,17 +13,15 @@ https://docs.lmcache.ai/getting_started/installation.html
 import contextlib
 import os
 import time
-from dataclasses import asdict
 
-from lmcache.integration.vllm.utils import ENGINE_NAME
-from lmcache.v1.cache_engine import LMCacheEngineBuilder
+from lmcache.inprocess.integration.vllm.vllm_service_factory import VllmServiceFactory
 
 from vllm import LLM, SamplingParams
 from vllm.config import KVTransferConfig
-from vllm.engine.arg_utils import EngineArgs
 
 
 def setup_environment_variables():
+    os.environ["VLLM_ENABLE_V1_MULTIPROCESSING"] = "0"
     # LMCache-related environment variables
     # LMCache is set to use 256 tokens per chunk
     os.environ["LMCACHE_CHUNK_SIZE"] = "256"
@@ -36,25 +34,37 @@ def setup_environment_variables():
 @contextlib.contextmanager
 def build_llm_with_lmcache(model: str):
     ktc = KVTransferConfig(
-        kv_connector="LMCacheConnectorV1",
+        kv_connector="LMCacheConnectorV1Dynamic",
         kv_role="kv_both",
+        kv_connector_module_path=(
+            "lmcache.inprocess.integration.vllm.lmcache_connector_v1"
+        ),
     )
     # Set GPU memory utilization to 0.8 for an A40 GPU with 40GB
     # memory. Reduce the value if your GPU has less memory.
     # Note: LMCache supports chunked prefill (see vLLM#14505, LMCache#392).
-    llm_args = EngineArgs(
-        model=model,
-        kv_transfer_config=ktc,
-        max_model_len=8000,
-        gpu_memory_utilization=0.8,
-    )
+    # This single-process example stores KV directly, without the offload RPC
+    # server whose cross-thread socket close can abort LMCache 0.5.7 shutdown.
+    create_offload_server = VllmServiceFactory.maybe_create_offload_server
+    try:
+        VllmServiceFactory.maybe_create_offload_server = lambda self: None
+        llm = LLM(
+            model=model,
+            kv_transfer_config=ktc,
+            max_model_len=8000,
+            gpu_memory_utilization=0.8,
+            enforce_eager=True,
+            enable_prefix_caching=False,
+            disable_hybrid_kv_cache_manager=True,
+        )
+    finally:
+        VllmServiceFactory.maybe_create_offload_server = create_offload_server
 
-    llm = LLM(**asdict(llm_args))
     try:
         yield llm
     finally:
         # Clean up lmcache backend
-        LMCacheEngineBuilder.destroy(ENGINE_NAME)
+        llm.llm_engine.engine_core.shutdown()
 
 
 def print_output(
