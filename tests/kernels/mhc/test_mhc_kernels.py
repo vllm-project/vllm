@@ -1134,10 +1134,11 @@ def test_mhc_post_tilelang(num_tokens, hidden_size, hc_mult):
     not HAS_TILELANG_MHC,
     reason="TileLang MHC support required",
 )
-@pytest.mark.parametrize("num_tokens", [1, 4, 8, 128])
+@pytest.mark.parametrize("num_tokens", [1, 2, 3, 4, 8, 128])
 @pytest.mark.parametrize("hidden_size", [4096, 7168])
 @pytest.mark.parametrize("hc_mult", [4])
-def test_mhc_fused_post_pre(num_tokens, hidden_size, hc_mult):
+@pytest.mark.parametrize("fused_norm", [False, True])
+def test_mhc_fused_post_pre(num_tokens, hidden_size, hc_mult, fused_norm):
     torch.set_default_device(DEVICE)
     set_random_seed(0)
 
@@ -1176,6 +1177,13 @@ def test_mhc_fused_post_pre(num_tokens, hidden_size, hc_mult):
         return residual_ref, post_mix_ref, res_mix_ref, layer_input_ref
 
     residual_ref, post_mix_ref, res_mix_ref, layer_input_ref = run_ref()
+    norm_kwargs = {}
+    if fused_norm:
+        norm_weight = torch.randn(hidden_size, dtype=torch.bfloat16)
+        norm_kwargs = dict(norm_weight=norm_weight, norm_eps=rms_eps)
+        layer_input_ref = F.rms_norm(
+            layer_input_ref, (hidden_size,), norm_weight, rms_eps
+        )
 
     residual, post_mix, res_mix, x = torch.ops.vllm.mhc_fused_post_pre_tilelang(
         x,
@@ -1190,6 +1198,7 @@ def test_mhc_fused_post_pre(num_tokens, hidden_size, hc_mult):
         hc_sinkhorn_eps,
         hc_post_alpha,
         sinkhorn_repeat,
+        **norm_kwargs,
     )
 
     torch.testing.assert_close(residual, residual_ref, atol=1e-2, rtol=1e-2)

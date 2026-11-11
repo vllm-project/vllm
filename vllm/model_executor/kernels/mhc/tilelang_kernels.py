@@ -76,6 +76,14 @@ def _fused_post_pre_single_pass_supported() -> bool:
     return current_platform.is_cuda() and current_platform.has_device_capability(100)
 
 
+@cache
+def _fused_post_pre_h20_supported() -> bool:
+    return (
+        current_platform.is_cuda()
+        and current_platform.get_device_name() == "NVIDIA H20-3e"
+    )
+
+
 def mhc_fused_post_pre_split_config(
     num_tokens: int, hidden_size: int, hc_mult: int
 ) -> tuple[int, int, int] | None:
@@ -88,6 +96,14 @@ def mhc_fused_post_pre_split_config(
     """
     if num_tokens > _FUSED_POST_PRE_MAX_TOKENS:
         return None
+    if hidden_size == 4096 and hc_mult == 4 and _fused_post_pre_h20_supported():
+        # H20 has 78 SMs: four projection tiles over 16 single-pass slices
+        # cover small decode batches without repeatedly loading the residual.
+        # From eight tokens, fewer slices avoid oversubscribing the grid.
+        if num_tokens <= 3:
+            return 6, 16, 256
+        if num_tokens >= 8:
+            return 6, 8, 128
     tile_n, n_splits, n_thr = _FUSED_POST_PRE_SINGLE_PASS
     if (
         num_tokens <= _FUSED_POST_PRE_SINGLE_PASS_MAX_TOKENS

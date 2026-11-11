@@ -385,6 +385,7 @@ def _silu_mul_per_token_group_quant_fp8_colmajor(
     BLOCK_M: tl.constexpr,
     BLOCK_N: tl.constexpr,
     EXPERT_ALIGNMENT: tl.constexpr,
+    MATCH_CUDA_QUANTIZATION: tl.constexpr,
 ):
     """Each thread block (BLOCK_N) computes [BLOCK_M, GROUP_SIZE] act-mul outputs. Then
     the thread block quantizes the [BLOCK_M, GROUP_SIZE] block of values and fills
@@ -443,10 +444,20 @@ def _silu_mul_per_token_group_quant_fp8_colmajor(
 
         # quant
         _absmax = tl.maximum(tl.max(tl.abs(y), axis=1), eps)
-        scale_raw = _absmax * (1.0 / fp8_max)
-        y_s = tl.math.exp2(tl.ceil(tl.log2(scale_raw))) if use_ue8m0 else scale_raw
-        y_s = tl.reshape(y_s, (BLOCK_M, 1))
-        y_q = tl.clamp(y / y_s, fp8_min, fp8_max).to(y_q_ptr.dtype.element_ty)
+        if MATCH_CUDA_QUANTIZATION:
+            # Match per_token_group_fp8_quant's division and reciprocal order.
+            y_s = tl.div_rn(_absmax, fp8_max)
+            if use_ue8m0:
+                bits = tl.maximum(y_s, 1e-10).to(tl.uint32, bitcast=True)
+                exponent = (bits >> 23) + ((bits & 0x7FFFFF) != 0).to(tl.uint32)
+                y_s = (exponent << 23).to(tl.float32, bitcast=True)
+            inv_scale = tl.reshape(tl.div_rn(1.0, y_s), (BLOCK_M, 1))
+            scaled = y * inv_scale
+        else:
+            scale_raw = _absmax * (1.0 / fp8_max)
+            y_s = tl.math.exp2(tl.ceil(tl.log2(scale_raw))) if use_ue8m0 else scale_raw
+            scaled = y / tl.reshape(y_s, (BLOCK_M, 1))
+        y_q = tl.clamp(scaled, fp8_min, fp8_max).to(y_q_ptr.dtype.element_ty)
 
         # store y_q
         base_y_q_ptr = y_q_ptr + m_offset * N_2 + n_offset
@@ -481,18 +492,19 @@ def silu_mul_per_token_group_quant_fp8_colmajor(
     *,
     expert_ends: torch.Tensor | None = None,
     expert_alignment: int = 0,
+    match_cuda_quantization: bool = False,
 ):
     """Gated activation + block-fp8 quant. `alpha`/`beta` select the gate
     (silu: alpha=1, beta=0; swigluoai: alpha, beta from config).
 
     Optional expert endpoints follow DeepGEMM's prefix-sum layout. Padding
     values and scales are left unwritten and must not be consumed as live rows.
+    `match_cuda_quantization` preserves the separate CUDA quantizer's rounding.
     """
     GROUP_SIZE = group_size
     assert input.ndim == 2
     if output is not None:
         assert output.ndim == 2
-    assert input.size(0) % GROUP_SIZE == 0
     assert input.size(1) % (GROUP_SIZE * 2) == 0
 
     if use_ue8m0 is None:
@@ -509,7 +521,12 @@ def silu_mul_per_token_group_quant_fp8_colmajor(
         ((N_2 // GROUP_SIZE), M), dtype=torch.float32, device=input.device
     ).transpose(0, 1)
 
-    BLOCK_M = 8
+    if M >= 128 and M % 8 == 0:
+        BLOCK_M = 8
+    elif M >= 32 and M % 4 == 0:
+        BLOCK_M = 4
+    else:
+        BLOCK_M = 1
     BLOCK_N = GROUP_SIZE
     assert M % BLOCK_M == 0
     assert N_2 % BLOCK_N == 0
@@ -560,6 +577,7 @@ def silu_mul_per_token_group_quant_fp8_colmajor(
         BLOCK_M,
         BLOCK_N,
         expert_alignment,
+        match_cuda_quantization,
     )
 
     return output, output_scales

@@ -44,6 +44,7 @@ from vllm.model_executor.layers.fused_moe.utils import (
 )
 from vllm.model_executor.layers.quantization.utils.fp8_utils import (
     is_deep_gemm_e8m0_used,
+    silu_mul_per_token_group_quant_fp8_colmajor,
 )
 from vllm.model_executor.layers.quantization.utils.quant_utils import (
     FP8_DTYPE,
@@ -614,8 +615,6 @@ class TritonExperts(LoRAExpertsMixin, mk.FusedMoEExpertsModular):
         # Fuse SiLU+Mul + FP8 block quantize into a single kernel
         # when conditions permit (gated SiLU, fp8 block quant with
         # group_size=128, no LoRA requiring the BF16 intermediate).
-        # The fused kernel has no clamp parameter, so a configured
-        # SwiGLU clamp limit falls through to the unfused path.
         if use_sorted_a:
             qintermediate_cache2 = intermediate_cache1.new_empty(
                 (num_sorted_rows, cache2_dim),
@@ -635,6 +634,26 @@ class TritonExperts(LoRAExpertsMixin, mk.FusedMoEExpertsModular):
                 cache2_dim,
                 BLOCK_M=16,
                 GROUP_K=128,
+            )
+        elif (
+            activation == MoEActivation.SILU
+            and self.activation_config.clamp_limit == 10.0
+            and N == 1024
+            and self.quant_config.use_fp8_w8a8
+            and self.block_shape == [128, 128]
+            and lora_context is None
+            and not self.quantization_emulation
+            and num_tokens <= 32
+            and intermediate_cache1.dtype == torch.bfloat16
+            and current_platform.is_cuda()
+            and current_platform.get_device_name() == "NVIDIA H20-3e"
+        ):
+            qintermediate_cache2, a2q_scale = (
+                silu_mul_per_token_group_quant_fp8_colmajor(
+                    intermediate_cache1.view(-1, N),
+                    clamp_limit=self.activation_config.clamp_limit,
+                    match_cuda_quantization=True,
+                )
             )
         elif (
             activation == MoEActivation.SILU

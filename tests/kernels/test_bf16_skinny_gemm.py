@@ -19,6 +19,7 @@ from vllm.model_executor.kernels.linear.cute_dsl.skinny_gemm import (
 )
 from vllm.model_executor.layers.utils import maybe_use_skinny_gemm
 from vllm.models.deepseek_v32.nvidia import glm52_low_latency_gemm as glm52_gemm
+from vllm.models.glm5next.nvidia import low_latency_gemm as glm53_gemm
 from vllm.models.kimi_k3.nvidia import low_latency_gemm as k3_gemm
 from vllm.models.kimi_k3.nvidia.low_latency_gemm import KIMI_K3_PROJECTIONS
 from vllm.models.qwen4_exp.nvidia import low_latency_gemm as qwen4_exp_gemm
@@ -955,6 +956,38 @@ def _glm52_device_plan(
     plan = glm52_gemm.build_glm52_plan(weight, torch.bfloat16)
     assert plan is not None and plan[num_tokens][0] == backend
     return plan
+
+
+@pytest.mark.parametrize("n,k", glm53_gemm._H20_PROJECTIONS)
+@pytest.mark.parametrize("num_tokens", [1, 2, 3])
+def test_glm53_h20_projection_replays_with_updated_inputs(n, k, num_tokens, dist_init):
+    """Selected decode rows and the cuBLAS fallback read current graph inputs."""
+    if not current_platform.is_cuda() or not current_platform.has_device_capability(90):
+        pytest.skip("CuTe DSL projection requires SM90 or newer")
+    if not glm53_gemm.shape_dynamic_skinny_gemm.is_available():
+        pytest.skip("CuTe DSL is not available")
+    from vllm.config import VllmConfig, set_current_vllm_config
+    from vllm.model_executor.layers.linear import ReplicatedLinear
+
+    torch.manual_seed(42)
+    with set_current_vllm_config(VllmConfig()), torch.device("cuda"):
+        layer = ReplicatedLinear(k, n, bias=False, params_dtype=torch.bfloat16)
+        layer.weight.data.normal_(std=0.1)
+        method = glm53_gemm.Glm5NextLowLatencyLinearMethod(
+            glm53_gemm._H20_PROJECTIONS[(n, k)]
+        )
+        method.process_weights_after_loading(layer)
+        x = torch.randn(num_tokens, k, dtype=torch.bfloat16)
+        method.apply(layer, x)
+        torch.accelerator.synchronize()
+        graph = torch.cuda.CUDAGraph()
+        with torch.cuda.graph(graph):
+            output = method.apply(layer, x)
+        x.normal_()
+        graph.replay()
+        torch.accelerator.synchronize()
+        reference = x.float() @ layer.weight.float().t()
+        torch.testing.assert_close(output.float(), reference, rtol=2e-2, atol=2e-2)
 
 
 @pytest.mark.parametrize("capability,n,k,num_tokens", GLM_CUTE_CASES)

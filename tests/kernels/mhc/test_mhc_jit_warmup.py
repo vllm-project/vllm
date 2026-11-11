@@ -115,18 +115,24 @@ def test_mhc_pre_big_fuse_dispatch_matches_legacy_runtime_config(
 
 
 SM100_PLUS = current_platform.is_cuda() and current_platform.has_device_capability(100)
+H20 = (
+    current_platform.is_cuda() and current_platform.get_device_name() == "NVIDIA H20-3e"
+)
 
 
 @pytest.mark.parametrize(
-    ("num_tokens", "hidden_size", "expected", "expected_sm100_plus"),
+    ("num_tokens", "hidden_size", "expected", "expected_sm100_plus", "expected_h20"),
     [
-        (1, 4096, (2, 8), (2, 16)),
-        (4, 4096, (2, 8), (2, 16)),
-        (5, 4096, (2, 8), (2, 8)),
-        (4, 8192, (2, 8), (2, 8)),
-        (8, 5120, (2, 8), (2, 8)),
-        (16, 5120, (6, 8), (6, 8)),
-        (32, 7168, (6, 8), (6, 8)),
+        (1, 4096, (2, 8), (2, 16), (6, 16)),
+        (2, 4096, (2, 8), (2, 16), (6, 16)),
+        (3, 4096, (2, 8), (2, 16), (6, 16)),
+        (4, 4096, (2, 8), (2, 16), (2, 8)),
+        (5, 4096, (2, 8), (2, 8), (2, 8)),
+        (8, 4096, (2, 8), (2, 8), (6, 8)),
+        (4, 8192, (2, 8), (2, 8), (2, 8)),
+        (8, 5120, (2, 8), (2, 8), (2, 8)),
+        (16, 5120, (6, 8), (6, 8), (6, 8)),
+        (32, 7168, (6, 8), (6, 8), (6, 8)),
     ],
 )
 def test_mhc_fused_dispatch_matches_the_launch_config(
@@ -134,6 +140,7 @@ def test_mhc_fused_dispatch_matches_the_launch_config(
     hidden_size: int,
     expected: tuple[int, int],
     expected_sm100_plus: tuple[int, int],
+    expected_h20: tuple[int, int],
 ) -> None:
     """The compile key must be the config the launch will actually use.
 
@@ -145,7 +152,11 @@ def test_mhc_fused_dispatch_matches_the_launch_config(
         num_tokens, hidden_size, hc_mult=4
     )
 
-    assert (tile_n, n_splits) == (expected_sm100_plus if SM100_PLUS else expected)
+    if H20:
+        expected = expected_h20
+    elif SM100_PLUS:
+        expected = expected_sm100_plus
+    assert (tile_n, n_splits) == expected
     assert kernel.dispatch(
         num_tokens=num_tokens,
         hidden_size=hidden_size,
