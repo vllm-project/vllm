@@ -11,6 +11,7 @@ import torch
 import torch.nn as nn
 
 from vllm.config import VllmConfig, get_layers_from_vllm_config
+from vllm.config import replace as replace_config
 from vllm.config.compilation import CUDAGraphMode
 from vllm.config.speculative import _DRAFT_VLLM_CONFIG_OVERRIDES
 from vllm.distributed.eplb.eplb_state import EplbState
@@ -157,6 +158,14 @@ class DraftModelSpeculator(BaseSpeculator):
     can_reuse_target_attn_metadata: bool = True
 
     def __init__(self, vllm_config: VllmConfig, device: torch.device):
+        assert vllm_config.speculative_config is not None
+        parallel_config = vllm_config.parallel_config
+        dcp = vllm_config.speculative_config.draft_decode_context_parallel_size
+        if dcp and dcp != parallel_config.decode_context_parallel_size:
+            vllm_config = copy.copy(vllm_config)
+            vllm_config.parallel_config = replace_config(
+                parallel_config, decode_context_parallel_size=dcp
+            )
         self.vllm_config = vllm_config
         self.device = device
 
@@ -323,6 +332,11 @@ class DraftModelSpeculator(BaseSpeculator):
                 self.num_speculative_steps,
                 self.device,
             )
+
+    def free_unused_weights(self, target_model: nn.Module) -> None:
+        """Free the draft weights this instance never reads. The model runner
+        calls this after `load_model` (and its overrides) and EPLB setup."""
+        return
 
     def supports_batch_sharded_draft_logits(self) -> bool:
         """Whether every draft logits write on this speculator's path honors
