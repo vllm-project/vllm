@@ -478,31 +478,6 @@ def early_compute(c, kind, i, q, ops):
         early_out(c, kind, i, q, red, t0, n)
 
 
-@traced
-def stage_early(c, bid):
-    """K2b alone: CTA bid's early task (router parts, latent parts, sgu)."""
-    lb = bid - R_TASKS
-    gb = bid - R_TASKS - L_TASKS
-    if bid < R_TASKS:
-        early_compute(
-            c,
-            0,
-            bid // R_PARTS,
-            bid % R_PARTS,
-            early_loads(c, 0, bid // R_PARTS, bid % R_PARTS),
-        )
-    if (bid >= R_TASKS) & (bid < R_TASKS + L_TASKS):
-        early_compute(
-            c,
-            1,
-            lb // L_PARTS,
-            lb % L_PARTS,
-            early_loads(c, 1, lb // L_PARTS, lb % L_PARTS),
-        )
-    if bid >= R_TASKS + L_TASKS:
-        early_compute(c, 2, gb, 0, early_loads(c, 2, gb, 0))
-
-
 # ---------------------------------------------------------------- route
 def _okey(v):
     """An order-preserving uint32 key of an f32 (larger float, larger key)."""
