@@ -1466,6 +1466,13 @@ class EngineCoreProc(EngineCore):
                 assert addresses.coordinator_input is not None
                 logger.info("Waiting for READY message from DP Coordinator...")
 
+            # Send initial scheduler stats so that the scheduler-state gauges
+            # are exported before the first request.
+            if (stats := self.scheduler.make_stats()) is not None:
+                self.output_queue.put_nowait(
+                    (0, EngineCoreOutputs(scheduler_stats=stats))
+                )
+
             # Completes once the drain does, which for DP happens in the busy loop.
             if vllm_config.model_config.checkpoint_prepare_on_startup and (
                 refusal := self.checkpoint_prepare()
