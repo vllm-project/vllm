@@ -305,13 +305,10 @@ class StreamingParserEngine:
 
     def finish(self) -> list[SemanticEvent]:
         events = self._process_scanner_items(self._scanner.flush_pending())
+        events.extend(self._process_lex_tokens(self._lexer.flush()))
 
         if self.state == ParserState.TOOL_PREAMBLE and self._preamble_buffer:
-            # An invoke-less block never left the preamble: fall the buffered
-            # text (including the opener spelling) back to content instead of
-            # dropping it silently. Runs before the lexer flush so an invoke
-            # truncated mid-name and still held by the lexer stays dropped
-            # rather than surfacing as partial content.
+            # Flush the lexer first so fallback includes any partial tag suffix.
             events.append(
                 SemanticEvent(
                     EventType.TEXT_CHUNK,
@@ -321,8 +318,6 @@ class StreamingParserEngine:
             )
             self._preamble_buffer = ""
             self._preamble_token_count = 0
-
-        events.extend(self._process_lex_tokens(self._lexer.flush()))
 
         if self._args_buffer:
             events.append(
