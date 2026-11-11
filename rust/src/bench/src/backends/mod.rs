@@ -361,4 +361,120 @@ mod tests {
         assert_eq!(output.server_queue_time, None);
         assert_eq!(output.server_ttft, Some(0.5));
     }
+
+    /// Stream cases shared with the Python client, which runs the same file in
+    /// `tests/benchmarks/test_stream_conformance.py`.
+    const STREAM_CASES: &str = include_str!("../../../../../tests/benchmarks/stream_cases.json");
+
+    /// Serve the chunks over a raw socket, one write each, then close.
+    fn spawn_case_server(chunks: Vec<Vec<u8>>) -> std::net::SocketAddr {
+        use std::io::{BufRead, BufReader, Read, Write};
+
+        let listener = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
+        let addr = listener.local_addr().unwrap();
+        std::thread::spawn(move || {
+            let (mut stream, _) = listener.accept().unwrap();
+            let mut reader = BufReader::new(stream.try_clone().unwrap());
+            let mut content_length = 0;
+            loop {
+                let mut line = String::new();
+                reader.read_line(&mut line).unwrap();
+                if let Some(v) = line.to_ascii_lowercase().strip_prefix("content-length:") {
+                    content_length = v.trim().parse().unwrap();
+                }
+                if line == "\r\n" {
+                    break;
+                }
+            }
+            reader.read_exact(&mut vec![0; content_length]).unwrap();
+            let head = "HTTP/1.1 200 OK\r\ncontent-type: text/event-stream\r\n\
+                        connection: close\r\n\r\n";
+            stream.write_all(head.as_bytes()).unwrap();
+            for chunk in chunks {
+                stream.write_all(&chunk).unwrap();
+                stream.flush().unwrap();
+                // Keep each chunk a separate read on the client.
+                std::thread::sleep(std::time::Duration::from_millis(5));
+            }
+        });
+        addr
+    }
+
+    fn case_chunks(case: &serde_json::Value) -> Vec<Vec<u8>> {
+        let strings = |key: &str| -> Vec<&str> {
+            case[key].as_array().unwrap().iter().map(|c| c.as_str().unwrap()).collect()
+        };
+        if case.get("chunks_hex").is_some() {
+            let byte = |h: &str, i: usize| u8::from_str_radix(&h[i..i + 2], 16).unwrap();
+            strings("chunks_hex")
+                .into_iter()
+                .map(|h| (0..h.len()).step_by(2).map(|i| byte(h, i)).collect())
+                .collect()
+        } else {
+            strings("chunks").into_iter().map(|c| c.as_bytes().to_vec()).collect()
+        }
+    }
+
+    fn case_mismatches(expect: &serde_json::Value, output: &RequestFuncOutput) -> Vec<String> {
+        let got = serde_json::json!({
+            "success": output.success,
+            "itl": output.itl.len(),
+            "text": output.generated_text,
+            "output_tokens": output.output_tokens,
+            "prompt_len": output.prompt_len,
+        });
+        let mut bad = Vec::new();
+        for (key, want) in expect.as_object().unwrap() {
+            if key == "error_contains" {
+                if !output.error.contains(want.as_str().unwrap()) {
+                    bad.push(format!("error {:?} lacks {want}", output.error));
+                }
+            } else if key != "success" && expect["success"] == false {
+                continue;
+            } else if &got[key] != want {
+                bad.push(format!("{key}: got {}, want {want}", got[key]));
+            }
+        }
+        bad
+    }
+
+    #[tokio::test]
+    async fn test_stream_cases() {
+        let cases: Vec<serde_json::Value> = serde_json::from_str(STREAM_CASES).unwrap();
+        let client = reqwest::Client::builder().no_proxy().build().unwrap();
+        let mut failures = Vec::new();
+
+        for case in &cases {
+            let name = case["name"].as_str().unwrap();
+            let (kind, path) = match case["backend"].as_str().unwrap() {
+                "openai" => (BackendKind::Openai, "/v1/completions"),
+                "openai-chat" => (BackendKind::OpenaiChat, "/v1/chat/completions"),
+                "openai-responses" => (BackendKind::OpenaiResponses, "/v1/responses"),
+                other => panic!("{name}: unknown backend {other}"),
+            };
+            let input = RequestFuncInput {
+                prompt: Arc::from("hello"),
+                api_url: format!("http://{}{path}", spawn_case_server(case_chunks(case))),
+                model: "test-model".to_string(),
+                // The client-side estimate; a case expects another value only
+                // when the stream reports usage.
+                prompt_len: 100,
+                output_len: 3,
+                ..Default::default()
+            };
+            let output = get_backend(kind).unwrap().send_request(&input, &client).await.unwrap();
+            let bad = case_mismatches(&case["expect"], &output);
+
+            match case["known_gap"].get("rust").and_then(|g| g.as_str()) {
+                // Strict: closing the gap must also remove it from the case file.
+                Some(gap) if bad.is_empty() => failures.push(format!(
+                    "{name}: rust now meets this case; drop its known_gap ({gap})"
+                )),
+                Some(_) => {}
+                None if !bad.is_empty() => failures.push(format!("{name}: {}", bad.join("; "))),
+                None => {}
+            }
+        }
+        assert!(failures.is_empty(), "\n{}", failures.join("\n"));
+    }
 }

@@ -1,0 +1,1235 @@
+[
+ {
+  "name": "openai/complete",
+  "backend": "openai",
+  "chunks": [
+   "data: {\"choices\":[{\"text\":\"a\"}]}\n\n",
+   "data: {\"choices\":[{\"text\":\"a\"}]}\n\n",
+   "data: {\"choices\":[{\"text\":\"a\"}]}\n\n",
+   "data: {\"choices\":[],\"usage\":{\"prompt_tokens\":7,\"completion_tokens\":3}}\n\n",
+   "data: [DONE]\n\n"
+  ],
+  "expect": {
+   "success": true,
+   "itl": 2,
+   "text": "aaa",
+   "output_tokens": 3,
+   "prompt_len": 7
+  }
+ },
+ {
+  "name": "openai/no_done",
+  "backend": "openai",
+  "chunks": [
+   "data: {\"choices\":[{\"text\":\"a\"}]}\n\n",
+   "data: {\"choices\":[{\"text\":\"a\"}]}\n\n",
+   "data: {\"choices\":[{\"text\":\"a\"}]}\n\n",
+   "data: {\"choices\":[],\"usage\":{\"prompt_tokens\":7,\"completion_tokens\":3}}\n\n"
+  ],
+  "expect": {
+   "success": false,
+   "error_contains": "[DONE]"
+  },
+  "known_gap": {
+   "python": "#64703",
+   "rust": "#65301"
+  }
+ },
+ {
+  "name": "openai/no_done_no_usage",
+  "backend": "openai",
+  "chunks": [
+   "data: {\"choices\":[{\"text\":\"a\"}]}\n\n"
+  ],
+  "expect": {
+   "success": false,
+   "error_contains": "[DONE]"
+  },
+  "known_gap": {
+   "python": "#64703",
+   "rust": "#65301"
+  }
+ },
+ {
+  "name": "openai/error_nested",
+  "backend": "openai",
+  "chunks": [
+   "data: {\"choices\":[{\"text\":\"a\"}]}\n\n",
+   "data: {\"error\":{\"message\":\"generation failed\",\"type\":\"server_error\"}}\n\n",
+   "data: [DONE]\n\n"
+  ],
+  "expect": {
+   "success": false,
+   "error_contains": "generation failed"
+  },
+  "known_gap": {
+   "rust": "#65301"
+  }
+ },
+ {
+  "name": "openai/error_flat",
+  "backend": "openai",
+  "chunks": [
+   "data: {\"choices\":[{\"text\":\"a\"}]}\n\n",
+   "data: {\"object\":\"error\",\"message\":\"generation failed\",\"type\":\"server_error\"}\n\n",
+   "data: [DONE]\n\n"
+  ],
+  "expect": {
+   "success": false,
+   "error_contains": "generation failed"
+  },
+  "known_gap": {
+   "python": "#64703",
+   "rust": "#65301"
+  }
+ },
+ {
+  "name": "openai/error_before_output",
+  "backend": "openai",
+  "chunks": [
+   "data: {\"error\":{\"message\":\"generation failed\",\"type\":\"server_error\"}}\n\n",
+   "data: [DONE]\n\n"
+  ],
+  "expect": {
+   "success": false,
+   "error_contains": "generation failed"
+  },
+  "known_gap": {
+   "rust": "#65301"
+  }
+ },
+ {
+  "name": "openai/done_only",
+  "backend": "openai",
+  "chunks": [
+   "data: [DONE]\n\n"
+  ],
+  "expect": {
+   "success": false
+  }
+ },
+ {
+  "name": "openai/usage_only",
+  "backend": "openai",
+  "chunks": [
+   "data: {\"choices\":[],\"usage\":{\"prompt_tokens\":7,\"completion_tokens\":0}}\n\n",
+   "data: [DONE]\n\n"
+  ],
+  "expect": {
+   "success": false
+  }
+ },
+ {
+  "name": "openai/event_field",
+  "backend": "openai",
+  "chunks": [
+   "event: message\ndata: {\"choices\":[{\"text\":\"a\"}]}\n\n",
+   "event: message\ndata: {\"choices\":[{\"text\":\"a\"}]}\n\n",
+   "data: {\"choices\":[],\"usage\":{\"prompt_tokens\":7,\"completion_tokens\":2}}\n\n",
+   "data: [DONE]\n\n"
+  ],
+  "expect": {
+   "success": true,
+   "itl": 1,
+   "text": "aa",
+   "output_tokens": 2
+  },
+  "known_gap": {
+   "python": "#64143"
+  }
+ },
+ {
+  "name": "openai/id_and_retry_fields",
+  "backend": "openai",
+  "chunks": [
+   "id: 1\nretry: 100\ndata: {\"choices\":[{\"text\":\"a\"}]}\n\n",
+   "id: 2\ndata: {\"choices\":[{\"text\":\"a\"}]}\n\n",
+   "data: {\"choices\":[],\"usage\":{\"prompt_tokens\":7,\"completion_tokens\":2}}\n\n",
+   "data: [DONE]\n\n"
+  ],
+  "expect": {
+   "success": true,
+   "itl": 1,
+   "text": "aa",
+   "output_tokens": 2
+  },
+  "known_gap": {
+   "python": "#64143"
+  }
+ },
+ {
+  "name": "openai/crlf",
+  "backend": "openai",
+  "chunks": [
+   "data: {\"choices\":[{\"text\":\"a\"}]}\r\n\r\n",
+   "data: {\"choices\":[{\"text\":\"a\"}]}\r\n\r\n",
+   "data: {\"choices\":[],\"usage\":{\"prompt_tokens\":7,\"completion_tokens\":2}}\r\n\r\n",
+   "data: [DONE]\r\n\r\n"
+  ],
+  "expect": {
+   "success": true,
+   "itl": 1,
+   "text": "aa",
+   "output_tokens": 2
+  }
+ },
+ {
+  "name": "openai/cr_only",
+  "backend": "openai",
+  "chunks": [
+   "data: {\"choices\":[{\"text\":\"a\"}]}\r\r",
+   "data: {\"choices\":[{\"text\":\"a\"}]}\r\r",
+   "data: {\"choices\":[],\"usage\":{\"prompt_tokens\":7,\"completion_tokens\":2}}\r\r",
+   "data: [DONE]\r\r"
+  ],
+  "expect": {
+   "success": true,
+   "itl": 1,
+   "text": "aa",
+   "output_tokens": 2
+  }
+ },
+ {
+  "name": "openai/split_mid_json",
+  "backend": "openai",
+  "chunks": [
+   "data: {\"choices\":",
+   "[{\"text\":\"a\"}]}\n\n",
+   "data: {\"choices\":[{\"text\":\"a\"}]}\n\n",
+   "data: {\"choices\":[],\"usage\":{\"prompt_tokens\":7,\"completion_tokens\":2}}\n\n",
+   "data: [DONE]\n\n"
+  ],
+  "expect": {
+   "success": true,
+   "itl": 1,
+   "text": "aa",
+   "output_tokens": 2
+  }
+ },
+ {
+  "name": "openai/split_separator",
+  "backend": "openai",
+  "chunks": [
+   "data: {\"choices\":[{\"text\":\"a\"}]}\n",
+   "\ndata: {\"choices\":[{\"text\":\"a\"}]}\n\n",
+   "data: {\"choices\":[],\"usage\":{\"prompt_tokens\":7,\"completion_tokens\":2}}\n\n",
+   "data: [DONE]\n\n"
+  ],
+  "expect": {
+   "success": true,
+   "itl": 1,
+   "text": "aa",
+   "output_tokens": 2
+  }
+ },
+ {
+  "name": "openai/coalesced",
+  "backend": "openai",
+  "chunks": [
+   "data: {\"choices\":[{\"text\":\"a\"}]}\n\ndata: {\"choices\":[{\"text\":\"a\"}]}\n\ndata: {\"choices\":[{\"text\":\"a\"}]}\n\ndata: {\"choices\":[],\"usage\":{\"prompt_tokens\":7,\"completion_tokens\":3}}\n\ndata: [DONE]\n\n"
+  ],
+  "expect": {
+   "success": true,
+   "itl": 2,
+   "text": "aaa",
+   "output_tokens": 3
+  }
+ },
+ {
+  "name": "openai/comment_keepalive",
+  "backend": "openai",
+  "chunks": [
+   "data: {\"choices\":[{\"text\":\"a\"}]}\n\n",
+   ": ping\n\n",
+   "data: {\"choices\":[{\"text\":\"a\"}]}\n\n",
+   "data: {\"choices\":[],\"usage\":{\"prompt_tokens\":7,\"completion_tokens\":2}}\n\n",
+   "data: [DONE]\n\n"
+  ],
+  "expect": {
+   "success": true,
+   "itl": 1,
+   "text": "aa",
+   "output_tokens": 2
+  }
+ },
+ {
+  "name": "openai/data_without_space",
+  "backend": "openai",
+  "chunks": [
+   "data:{\"choices\":[{\"text\":\"a\"}]}\n\n",
+   "data:{\"choices\":[{\"text\":\"a\"}]}\n\n",
+   "data:{\"choices\":[],\"usage\":{\"prompt_tokens\":7,\"completion_tokens\":2}}\n\n",
+   "data:[DONE]\n\n"
+  ],
+  "expect": {
+   "success": true,
+   "itl": 1,
+   "text": "aa",
+   "output_tokens": 2
+  },
+  "known_gap": {
+   "python": "#64143",
+   "rust": "unfiled"
+  }
+ },
+ {
+  "name": "openai/usage_with_last_token",
+  "backend": "openai",
+  "chunks": [
+   "data: {\"choices\":[{\"text\":\"a\"}]}\n\n",
+   "data: {\"choices\":[{\"text\":\"a\"}],\"usage\":{\"prompt_tokens\":7,\"completion_tokens\":2}}\n\n",
+   "data: [DONE]\n\n"
+  ],
+  "expect": {
+   "success": true,
+   "itl": 1,
+   "text": "aa",
+   "output_tokens": 2,
+   "prompt_len": 7
+  },
+  "known_gap": {
+   "python": "unfiled"
+  }
+ },
+ {
+  "name": "openai/zero_prompt_tokens",
+  "backend": "openai",
+  "chunks": [
+   "data: {\"choices\":[{\"text\":\"a\"}]}\n\n",
+   "data: {\"choices\":[{\"text\":\"a\"}]}\n\n",
+   "data: {\"choices\":[],\"usage\":{\"prompt_tokens\":0,\"completion_tokens\":2}}\n\n",
+   "data: [DONE]\n\n"
+  ],
+  "expect": {
+   "success": true,
+   "itl": 1,
+   "output_tokens": 2,
+   "prompt_len": 100
+  },
+  "known_gap": {
+   "python": "unfiled"
+  }
+ },
+ {
+  "name": "openai/no_usage",
+  "backend": "openai",
+  "chunks": [
+   "data: {\"choices\":[{\"text\":\"a\"}]}\n\n",
+   "data: {\"choices\":[{\"text\":\"a\"}]}\n\n",
+   "data: [DONE]\n\n"
+  ],
+  "expect": {
+   "success": true,
+   "itl": 1,
+   "text": "aa",
+   "prompt_len": 100
+  }
+ },
+ {
+  "name": "openai/whitespace_token",
+  "backend": "openai",
+  "chunks": [
+   "data: {\"choices\":[{\"text\":\" \"}]}\n\n",
+   "data: {\"choices\":[{\"text\":\"\\n\"}]}\n\n",
+   "data: {\"choices\":[{\"text\":\"x\"}]}\n\n",
+   "data: {\"choices\":[],\"usage\":{\"prompt_tokens\":7,\"completion_tokens\":3}}\n\n",
+   "data: [DONE]\n\n"
+  ],
+  "expect": {
+   "success": true,
+   "itl": 2,
+   "text": " \nx",
+   "output_tokens": 3
+  }
+ },
+ {
+  "name": "openai/unicode_split",
+  "backend": "openai",
+  "expect": {
+   "success": true,
+   "itl": 1,
+   "text": "\u4e16\u754c",
+   "output_tokens": 2
+  },
+  "chunks_hex": [
+   "646174613a207b2263686f69636573223a5b7b2274657874223a22e4",
+   "b896227d5d7d0a0a646174613a207b2263686f69636573223a5b7b2274657874223a22e7958c227d5d7d0a0a646174613a207b2263686f69636573223a5b5d2c227573616765223a7b2270726f6d70745f746f6b656e73223a372c22636f6d706c6574696f6e5f746f6b656e73223a327d7d0a0a646174613a205b444f4e455d0a0a"
+  ]
+ },
+ {
+  "name": "openai/null_usage",
+  "backend": "openai",
+  "chunks": [
+   "data: {\"choices\":[{\"text\":\"a\"}]}\n\n",
+   "data: {\"choices\":[{\"text\":\"a\"}],\"usage\":null}\n\n",
+   "data: {\"choices\":[],\"usage\":{\"prompt_tokens\":7,\"completion_tokens\":2}}\n\n",
+   "data: [DONE]\n\n"
+  ],
+  "expect": {
+   "success": true,
+   "itl": 1,
+   "text": "aa",
+   "output_tokens": 2
+  }
+ },
+ {
+  "name": "openai-chat/complete",
+  "backend": "openai-chat",
+  "chunks": [
+   "data: {\"choices\":[{\"delta\":{\"content\":\"a\"}}]}\n\n",
+   "data: {\"choices\":[{\"delta\":{\"content\":\"a\"}}]}\n\n",
+   "data: {\"choices\":[{\"delta\":{\"content\":\"a\"}}]}\n\n",
+   "data: {\"choices\":[],\"usage\":{\"prompt_tokens\":7,\"completion_tokens\":3}}\n\n",
+   "data: [DONE]\n\n"
+  ],
+  "expect": {
+   "success": true,
+   "itl": 2,
+   "text": "aaa",
+   "output_tokens": 3,
+   "prompt_len": 7
+  }
+ },
+ {
+  "name": "openai-chat/no_done",
+  "backend": "openai-chat",
+  "chunks": [
+   "data: {\"choices\":[{\"delta\":{\"content\":\"a\"}}]}\n\n",
+   "data: {\"choices\":[{\"delta\":{\"content\":\"a\"}}]}\n\n",
+   "data: {\"choices\":[{\"delta\":{\"content\":\"a\"}}]}\n\n",
+   "data: {\"choices\":[],\"usage\":{\"prompt_tokens\":7,\"completion_tokens\":3}}\n\n"
+  ],
+  "expect": {
+   "success": false,
+   "error_contains": "[DONE]"
+  },
+  "known_gap": {
+   "python": "#64703",
+   "rust": "#65301"
+  }
+ },
+ {
+  "name": "openai-chat/no_done_no_usage",
+  "backend": "openai-chat",
+  "chunks": [
+   "data: {\"choices\":[{\"delta\":{\"content\":\"a\"}}]}\n\n"
+  ],
+  "expect": {
+   "success": false,
+   "error_contains": "[DONE]"
+  },
+  "known_gap": {
+   "python": "#64703",
+   "rust": "#65301"
+  }
+ },
+ {
+  "name": "openai-chat/error_nested",
+  "backend": "openai-chat",
+  "chunks": [
+   "data: {\"choices\":[{\"delta\":{\"content\":\"a\"}}]}\n\n",
+   "data: {\"error\":{\"message\":\"generation failed\",\"type\":\"server_error\"}}\n\n",
+   "data: [DONE]\n\n"
+  ],
+  "expect": {
+   "success": false,
+   "error_contains": "generation failed"
+  },
+  "known_gap": {
+   "rust": "#65301"
+  }
+ },
+ {
+  "name": "openai-chat/error_flat",
+  "backend": "openai-chat",
+  "chunks": [
+   "data: {\"choices\":[{\"delta\":{\"content\":\"a\"}}]}\n\n",
+   "data: {\"object\":\"error\",\"message\":\"generation failed\",\"type\":\"server_error\"}\n\n",
+   "data: [DONE]\n\n"
+  ],
+  "expect": {
+   "success": false,
+   "error_contains": "generation failed"
+  },
+  "known_gap": {
+   "python": "#64703",
+   "rust": "#65301"
+  }
+ },
+ {
+  "name": "openai-chat/error_before_output",
+  "backend": "openai-chat",
+  "chunks": [
+   "data: {\"error\":{\"message\":\"generation failed\",\"type\":\"server_error\"}}\n\n",
+   "data: [DONE]\n\n"
+  ],
+  "expect": {
+   "success": false,
+   "error_contains": "generation failed"
+  },
+  "known_gap": {
+   "rust": "#65301"
+  }
+ },
+ {
+  "name": "openai-chat/done_only",
+  "backend": "openai-chat",
+  "chunks": [
+   "data: [DONE]\n\n"
+  ],
+  "expect": {
+   "success": false
+  }
+ },
+ {
+  "name": "openai-chat/usage_only",
+  "backend": "openai-chat",
+  "chunks": [
+   "data: {\"choices\":[],\"usage\":{\"prompt_tokens\":7,\"completion_tokens\":0}}\n\n",
+   "data: [DONE]\n\n"
+  ],
+  "expect": {
+   "success": false
+  }
+ },
+ {
+  "name": "openai-chat/event_field",
+  "backend": "openai-chat",
+  "chunks": [
+   "event: message\ndata: {\"choices\":[{\"delta\":{\"content\":\"a\"}}]}\n\n",
+   "event: message\ndata: {\"choices\":[{\"delta\":{\"content\":\"a\"}}]}\n\n",
+   "data: {\"choices\":[],\"usage\":{\"prompt_tokens\":7,\"completion_tokens\":2}}\n\n",
+   "data: [DONE]\n\n"
+  ],
+  "expect": {
+   "success": true,
+   "itl": 1,
+   "text": "aa",
+   "output_tokens": 2
+  },
+  "known_gap": {
+   "python": "#64143"
+  }
+ },
+ {
+  "name": "openai-chat/id_and_retry_fields",
+  "backend": "openai-chat",
+  "chunks": [
+   "id: 1\nretry: 100\ndata: {\"choices\":[{\"delta\":{\"content\":\"a\"}}]}\n\n",
+   "id: 2\ndata: {\"choices\":[{\"delta\":{\"content\":\"a\"}}]}\n\n",
+   "data: {\"choices\":[],\"usage\":{\"prompt_tokens\":7,\"completion_tokens\":2}}\n\n",
+   "data: [DONE]\n\n"
+  ],
+  "expect": {
+   "success": true,
+   "itl": 1,
+   "text": "aa",
+   "output_tokens": 2
+  },
+  "known_gap": {
+   "python": "#64143"
+  }
+ },
+ {
+  "name": "openai-chat/crlf",
+  "backend": "openai-chat",
+  "chunks": [
+   "data: {\"choices\":[{\"delta\":{\"content\":\"a\"}}]}\r\n\r\n",
+   "data: {\"choices\":[{\"delta\":{\"content\":\"a\"}}]}\r\n\r\n",
+   "data: {\"choices\":[],\"usage\":{\"prompt_tokens\":7,\"completion_tokens\":2}}\r\n\r\n",
+   "data: [DONE]\r\n\r\n"
+  ],
+  "expect": {
+   "success": true,
+   "itl": 1,
+   "text": "aa",
+   "output_tokens": 2
+  }
+ },
+ {
+  "name": "openai-chat/cr_only",
+  "backend": "openai-chat",
+  "chunks": [
+   "data: {\"choices\":[{\"delta\":{\"content\":\"a\"}}]}\r\r",
+   "data: {\"choices\":[{\"delta\":{\"content\":\"a\"}}]}\r\r",
+   "data: {\"choices\":[],\"usage\":{\"prompt_tokens\":7,\"completion_tokens\":2}}\r\r",
+   "data: [DONE]\r\r"
+  ],
+  "expect": {
+   "success": true,
+   "itl": 1,
+   "text": "aa",
+   "output_tokens": 2
+  }
+ },
+ {
+  "name": "openai-chat/split_mid_json",
+  "backend": "openai-chat",
+  "chunks": [
+   "data: {\"choices\":[{\"del",
+   "ta\":{\"content\":\"a\"}}]}\n\n",
+   "data: {\"choices\":[{\"delta\":{\"content\":\"a\"}}]}\n\n",
+   "data: {\"choices\":[],\"usage\":{\"prompt_tokens\":7,\"completion_tokens\":2}}\n\n",
+   "data: [DONE]\n\n"
+  ],
+  "expect": {
+   "success": true,
+   "itl": 1,
+   "text": "aa",
+   "output_tokens": 2
+  }
+ },
+ {
+  "name": "openai-chat/split_separator",
+  "backend": "openai-chat",
+  "chunks": [
+   "data: {\"choices\":[{\"delta\":{\"content\":\"a\"}}]}\n",
+   "\ndata: {\"choices\":[{\"delta\":{\"content\":\"a\"}}]}\n\n",
+   "data: {\"choices\":[],\"usage\":{\"prompt_tokens\":7,\"completion_tokens\":2}}\n\n",
+   "data: [DONE]\n\n"
+  ],
+  "expect": {
+   "success": true,
+   "itl": 1,
+   "text": "aa",
+   "output_tokens": 2
+  }
+ },
+ {
+  "name": "openai-chat/coalesced",
+  "backend": "openai-chat",
+  "chunks": [
+   "data: {\"choices\":[{\"delta\":{\"content\":\"a\"}}]}\n\ndata: {\"choices\":[{\"delta\":{\"content\":\"a\"}}]}\n\ndata: {\"choices\":[{\"delta\":{\"content\":\"a\"}}]}\n\ndata: {\"choices\":[],\"usage\":{\"prompt_tokens\":7,\"completion_tokens\":3}}\n\ndata: [DONE]\n\n"
+  ],
+  "expect": {
+   "success": true,
+   "itl": 2,
+   "text": "aaa",
+   "output_tokens": 3
+  }
+ },
+ {
+  "name": "openai-chat/comment_keepalive",
+  "backend": "openai-chat",
+  "chunks": [
+   "data: {\"choices\":[{\"delta\":{\"content\":\"a\"}}]}\n\n",
+   ": ping\n\n",
+   "data: {\"choices\":[{\"delta\":{\"content\":\"a\"}}]}\n\n",
+   "data: {\"choices\":[],\"usage\":{\"prompt_tokens\":7,\"completion_tokens\":2}}\n\n",
+   "data: [DONE]\n\n"
+  ],
+  "expect": {
+   "success": true,
+   "itl": 1,
+   "text": "aa",
+   "output_tokens": 2
+  }
+ },
+ {
+  "name": "openai-chat/data_without_space",
+  "backend": "openai-chat",
+  "chunks": [
+   "data:{\"choices\":[{\"delta\":{\"content\":\"a\"}}]}\n\n",
+   "data:{\"choices\":[{\"delta\":{\"content\":\"a\"}}]}\n\n",
+   "data:{\"choices\":[],\"usage\":{\"prompt_tokens\":7,\"completion_tokens\":2}}\n\n",
+   "data:[DONE]\n\n"
+  ],
+  "expect": {
+   "success": true,
+   "itl": 1,
+   "text": "aa",
+   "output_tokens": 2
+  },
+  "known_gap": {
+   "python": "#64143",
+   "rust": "unfiled"
+  }
+ },
+ {
+  "name": "openai-chat/usage_with_last_token",
+  "backend": "openai-chat",
+  "chunks": [
+   "data: {\"choices\":[{\"delta\":{\"content\":\"a\"}}]}\n\n",
+   "data: {\"choices\":[{\"delta\":{\"content\":\"a\"}}],\"usage\":{\"prompt_tokens\":7,\"completion_tokens\":2}}\n\n",
+   "data: [DONE]\n\n"
+  ],
+  "expect": {
+   "success": true,
+   "itl": 1,
+   "text": "aa",
+   "output_tokens": 2,
+   "prompt_len": 7
+  },
+  "known_gap": {
+   "python": "unfiled"
+  }
+ },
+ {
+  "name": "openai-chat/zero_prompt_tokens",
+  "backend": "openai-chat",
+  "chunks": [
+   "data: {\"choices\":[{\"delta\":{\"content\":\"a\"}}]}\n\n",
+   "data: {\"choices\":[{\"delta\":{\"content\":\"a\"}}]}\n\n",
+   "data: {\"choices\":[],\"usage\":{\"prompt_tokens\":0,\"completion_tokens\":2}}\n\n",
+   "data: [DONE]\n\n"
+  ],
+  "expect": {
+   "success": true,
+   "itl": 1,
+   "output_tokens": 2,
+   "prompt_len": 100
+  },
+  "known_gap": {
+   "python": "unfiled"
+  }
+ },
+ {
+  "name": "openai-chat/no_usage",
+  "backend": "openai-chat",
+  "chunks": [
+   "data: {\"choices\":[{\"delta\":{\"content\":\"a\"}}]}\n\n",
+   "data: {\"choices\":[{\"delta\":{\"content\":\"a\"}}]}\n\n",
+   "data: [DONE]\n\n"
+  ],
+  "expect": {
+   "success": true,
+   "itl": 1,
+   "text": "aa",
+   "prompt_len": 100
+  }
+ },
+ {
+  "name": "openai-chat/whitespace_token",
+  "backend": "openai-chat",
+  "chunks": [
+   "data: {\"choices\":[{\"delta\":{\"content\":\" \"}}]}\n\n",
+   "data: {\"choices\":[{\"delta\":{\"content\":\"\\n\"}}]}\n\n",
+   "data: {\"choices\":[{\"delta\":{\"content\":\"x\"}}]}\n\n",
+   "data: {\"choices\":[],\"usage\":{\"prompt_tokens\":7,\"completion_tokens\":3}}\n\n",
+   "data: [DONE]\n\n"
+  ],
+  "expect": {
+   "success": true,
+   "itl": 2,
+   "text": " \nx",
+   "output_tokens": 3
+  }
+ },
+ {
+  "name": "openai-chat/unicode_split",
+  "backend": "openai-chat",
+  "expect": {
+   "success": true,
+   "itl": 1,
+   "text": "\u4e16\u754c",
+   "output_tokens": 2
+  },
+  "chunks_hex": [
+   "646174613a207b2263686f69636573223a5b7b2264656c7461223a7b22636f6e74656e74223a22e4",
+   "b896227d7d5d7d0a0a646174613a207b2263686f69636573223a5b7b2264656c7461223a7b22636f6e74656e74223a22e7958c227d7d5d7d0a0a646174613a207b2263686f69636573223a5b5d2c227573616765223a7b2270726f6d70745f746f6b656e73223a372c22636f6d706c6574696f6e5f746f6b656e73223a327d7d0a0a646174613a205b444f4e455d0a0a"
+  ]
+ },
+ {
+  "name": "openai-chat/null_usage",
+  "backend": "openai-chat",
+  "chunks": [
+   "data: {\"choices\":[{\"delta\":{\"content\":\"a\"}}]}\n\n",
+   "data: {\"choices\":[{\"delta\":{\"content\":\"a\"}}],\"usage\":null}\n\n",
+   "data: {\"choices\":[],\"usage\":{\"prompt_tokens\":7,\"completion_tokens\":2}}\n\n",
+   "data: [DONE]\n\n"
+  ],
+  "expect": {
+   "success": true,
+   "itl": 1,
+   "text": "aa",
+   "output_tokens": 2
+  }
+ },
+ {
+  "name": "openai/empty_text_token",
+  "backend": "openai",
+  "chunks": [
+   "data: {\"choices\":[{\"text\":\"a\"}]}\n\n",
+   "data: {\"choices\":[{\"text\":\"\"}]}\n\n",
+   "data: {\"choices\":[{\"text\":\"a\"}]}\n\n",
+   "data: {\"choices\":[],\"usage\":{\"prompt_tokens\":7,\"completion_tokens\":3}}\n\n",
+   "data: [DONE]\n\n"
+  ],
+  "expect": {
+   "success": true,
+   "itl": 2,
+   "text": "aa",
+   "output_tokens": 3
+  }
+ },
+ {
+  "name": "openai/choices_missing",
+  "backend": "openai",
+  "chunks": [
+   "data: {\"choices\":[{\"text\":\"a\"}]}\n\n",
+   "data: {\"id\":\"x\"}\n\n",
+   "data: {\"choices\":[{\"text\":\"a\"}]}\n\n",
+   "data: {\"choices\":[],\"usage\":{\"prompt_tokens\":7,\"completion_tokens\":2}}\n\n",
+   "data: [DONE]\n\n"
+  ],
+  "expect": {
+   "success": true,
+   "itl": 1,
+   "text": "aa"
+  }
+ },
+ {
+  "name": "openai-chat/role_chunk",
+  "backend": "openai-chat",
+  "chunks": [
+   "data: {\"choices\":[{\"delta\":{\"role\":\"assistant\",\"content\":\"\"}}]}\n\n",
+   "data: {\"choices\":[{\"delta\":{\"content\":\"a\"}}]}\n\n",
+   "data: {\"choices\":[{\"delta\":{\"content\":\"a\"}}]}\n\n",
+   "data: {\"choices\":[{\"delta\":{\"content\":\"a\"}}]}\n\n",
+   "data: {\"choices\":[],\"usage\":{\"prompt_tokens\":7,\"completion_tokens\":3}}\n\n",
+   "data: [DONE]\n\n"
+  ],
+  "expect": {
+   "success": true,
+   "itl": 2,
+   "text": "aaa"
+  }
+ },
+ {
+  "name": "openai-chat/role_only",
+  "backend": "openai-chat",
+  "chunks": [
+   "data: {\"choices\":[{\"delta\":{\"role\":\"assistant\",\"content\":\"\"}}]}\n\n",
+   "data: {\"choices\":[],\"usage\":{\"prompt_tokens\":7,\"completion_tokens\":0}}\n\n",
+   "data: [DONE]\n\n"
+  ],
+  "expect": {
+   "success": false
+  }
+ },
+ {
+  "name": "openai-chat/empty_delta",
+  "backend": "openai-chat",
+  "chunks": [
+   "data: {\"choices\":[{\"delta\":{\"content\":\"a\"}}]}\n\n",
+   "data: {\"choices\":[{\"delta\":{}}]}\n\n",
+   "data: {\"choices\":[{\"delta\":{\"content\":\"a\"}}]}\n\n",
+   "data: {\"choices\":[{\"delta\":{\"content\":\"a\"}}]}\n\n",
+   "data: {\"choices\":[],\"usage\":{\"prompt_tokens\":7,\"completion_tokens\":3}}\n\n",
+   "data: [DONE]\n\n"
+  ],
+  "expect": {
+   "success": true,
+   "itl": 2,
+   "text": "aaa"
+  }
+ },
+ {
+  "name": "openai-chat/empty_string_token",
+  "backend": "openai-chat",
+  "chunks": [
+   "data: {\"choices\":[{\"delta\":{\"role\":\"assistant\",\"content\":\"\"}}]}\n\n",
+   "data: {\"choices\":[{\"delta\":{\"content\":\"a\"}}]}\n\n",
+   "data: {\"choices\":[{\"delta\":{\"content\":\"\"}}]}\n\n",
+   "data: {\"choices\":[{\"delta\":{\"content\":\"a\"}}]}\n\n",
+   "data: {\"choices\":[],\"usage\":{\"prompt_tokens\":7,\"completion_tokens\":3}}\n\n",
+   "data: [DONE]\n\n"
+  ],
+  "expect": {
+   "success": true,
+   "itl": 2,
+   "text": "aa"
+  }
+ },
+ {
+  "name": "openai-chat/null_content",
+  "backend": "openai-chat",
+  "chunks": [
+   "data: {\"choices\":[{\"delta\":{\"role\":\"assistant\",\"content\":\"\"}}]}\n\n",
+   "data: {\"choices\":[{\"delta\":{\"content\":\"a\"}}]}\n\n",
+   "data: {\"choices\":[{\"delta\":{\"content\":null}}]}\n\n",
+   "data: {\"choices\":[{\"delta\":{\"content\":\"a\"}}]}\n\n",
+   "data: {\"choices\":[],\"usage\":{\"prompt_tokens\":7,\"completion_tokens\":2}}\n\n",
+   "data: [DONE]\n\n"
+  ],
+  "expect": {
+   "success": true,
+   "itl": 1,
+   "text": "aa"
+  }
+ },
+ {
+  "name": "openai-chat/finish_chunk",
+  "backend": "openai-chat",
+  "chunks": [
+   "data: {\"choices\":[{\"delta\":{\"role\":\"assistant\",\"content\":\"\"}}]}\n\n",
+   "data: {\"choices\":[{\"delta\":{\"content\":\"a\"}}]}\n\n",
+   "data: {\"choices\":[{\"delta\":{\"content\":\"a\"}}]}\n\n",
+   "data: {\"choices\":[{\"delta\":{},\"finish_reason\":\"stop\"}]}\n\n",
+   "data: {\"choices\":[],\"usage\":{\"prompt_tokens\":7,\"completion_tokens\":2}}\n\n",
+   "data: [DONE]\n\n"
+  ],
+  "expect": {
+   "success": true,
+   "itl": 1,
+   "text": "aa"
+  }
+ },
+ {
+  "name": "openai-chat/reasoning",
+  "backend": "openai-chat",
+  "chunks": [
+   "data: {\"choices\":[{\"delta\":{\"role\":\"assistant\",\"content\":\"\"}}]}\n\n",
+   "data: {\"choices\":[{\"delta\":{\"reasoning\":\"hmm\"}}]}\n\n",
+   "data: {\"choices\":[{\"delta\":{\"reasoning\":\"hmm\"}}]}\n\n",
+   "data: {\"choices\":[{\"delta\":{\"content\":\"a\"}}]}\n\n",
+   "data: {\"choices\":[],\"usage\":{\"prompt_tokens\":7,\"completion_tokens\":3}}\n\n",
+   "data: [DONE]\n\n"
+  ],
+  "expect": {
+   "success": true,
+   "itl": 2,
+   "text": "a"
+  }
+ },
+ {
+  "name": "openai-chat/reasoning_only",
+  "backend": "openai-chat",
+  "chunks": [
+   "data: {\"choices\":[{\"delta\":{\"role\":\"assistant\",\"content\":\"\"}}]}\n\n",
+   "data: {\"choices\":[{\"delta\":{\"reasoning\":\"hmm\"}}]}\n\n",
+   "data: {\"choices\":[{\"delta\":{\"reasoning\":\"hmm\"}}]}\n\n",
+   "data: {\"choices\":[],\"usage\":{\"prompt_tokens\":7,\"completion_tokens\":2}}\n\n",
+   "data: [DONE]\n\n"
+  ],
+  "expect": {
+   "success": true,
+   "itl": 1,
+   "text": ""
+  }
+ },
+ {
+  "name": "openai-chat/reasoning_content",
+  "backend": "openai-chat",
+  "chunks": [
+   "data: {\"choices\":[{\"delta\":{\"role\":\"assistant\",\"content\":\"\"}}]}\n\n",
+   "data: {\"choices\":[{\"delta\":{\"reasoning_content\":\"hmm\"}}]}\n\n",
+   "data: {\"choices\":[{\"delta\":{\"reasoning_content\":\"hmm\"}}]}\n\n",
+   "data: {\"choices\":[{\"delta\":{\"content\":\"a\"}}]}\n\n",
+   "data: {\"choices\":[],\"usage\":{\"prompt_tokens\":7,\"completion_tokens\":3}}\n\n",
+   "data: [DONE]\n\n"
+  ],
+  "expect": {
+   "success": true,
+   "itl": 2,
+   "text": "a"
+  }
+ },
+ {
+  "name": "openai-chat/reasoning_content_only",
+  "backend": "openai-chat",
+  "chunks": [
+   "data: {\"choices\":[{\"delta\":{\"role\":\"assistant\",\"content\":\"\"}}]}\n\n",
+   "data: {\"choices\":[{\"delta\":{\"reasoning_content\":\"hmm\"}}]}\n\n",
+   "data: {\"choices\":[{\"delta\":{\"reasoning_content\":\"hmm\"}}]}\n\n",
+   "data: {\"choices\":[],\"usage\":{\"prompt_tokens\":7,\"completion_tokens\":2}}\n\n",
+   "data: [DONE]\n\n"
+  ],
+  "expect": {
+   "success": true,
+   "itl": 1,
+   "text": ""
+  }
+ },
+ {
+  "name": "openai-chat/tool_call_only",
+  "backend": "openai-chat",
+  "chunks": [
+   "data: {\"choices\":[{\"delta\":{\"role\":\"assistant\",\"content\":\"\"}}]}\n\n",
+   "data: {\"choices\":[{\"delta\":{\"tool_calls\":[{\"index\":0,\"id\":\"c\",\"type\":\"function\",\"function\":{\"name\":\"f\",\"arguments\":\"{}\"}}]}}]}\n\n",
+   "data: {\"choices\":[],\"usage\":{\"prompt_tokens\":7,\"completion_tokens\":1}}\n\n",
+   "data: [DONE]\n\n"
+  ],
+  "expect": {
+   "success": true,
+   "itl": 0,
+   "text": ""
+  }
+ },
+ {
+  "name": "openai-chat/tool_call_deltas",
+  "backend": "openai-chat",
+  "chunks": [
+   "data: {\"choices\":[{\"delta\":{\"role\":\"assistant\",\"content\":\"\"}}]}\n\n",
+   "data: {\"choices\":[{\"delta\":{\"tool_calls\":[{\"index\":0,\"id\":\"c\",\"type\":\"function\",\"function\":{\"name\":\"f\",\"arguments\":\"{}\"}}]}}]}\n\n",
+   "data: {\"choices\":[{\"delta\":{\"tool_calls\":[{\"index\":0,\"id\":\"c\",\"type\":\"function\",\"function\":{\"name\":\"f\",\"arguments\":\"{}\"}}]}}]}\n\n",
+   "data: {\"choices\":[{\"delta\":{\"tool_calls\":[{\"index\":0,\"id\":\"c\",\"type\":\"function\",\"function\":{\"name\":\"f\",\"arguments\":\"{}\"}}]}}]}\n\n",
+   "data: {\"choices\":[],\"usage\":{\"prompt_tokens\":7,\"completion_tokens\":3}}\n\n",
+   "data: [DONE]\n\n"
+  ],
+  "expect": {
+   "success": true,
+   "itl": 2,
+   "text": ""
+  }
+ },
+ {
+  "name": "openai-chat/empty_tool_calls",
+  "backend": "openai-chat",
+  "chunks": [
+   "data: {\"choices\":[{\"delta\":{\"role\":\"assistant\",\"content\":\"\"}}]}\n\n",
+   "data: {\"choices\":[{\"delta\":{\"tool_calls\":[]}}]}\n\n",
+   "data: {\"choices\":[{\"delta\":{\"content\":\"a\"}}]}\n\n",
+   "data: {\"choices\":[{\"delta\":{\"content\":\"a\"}}]}\n\n",
+   "data: {\"choices\":[],\"usage\":{\"prompt_tokens\":7,\"completion_tokens\":2}}\n\n",
+   "data: [DONE]\n\n"
+  ],
+  "expect": {
+   "success": true,
+   "itl": 1,
+   "text": "aa"
+  }
+ },
+ {
+  "name": "openai-chat/function_call",
+  "backend": "openai-chat",
+  "chunks": [
+   "data: {\"choices\":[{\"delta\":{\"role\":\"assistant\",\"content\":\"\"}}]}\n\n",
+   "data: {\"choices\":[{\"delta\":{\"function_call\":{\"name\":\"f\",\"arguments\":\"{}\"}}}]}\n\n",
+   "data: {\"choices\":[],\"usage\":{\"prompt_tokens\":7,\"completion_tokens\":1}}\n\n",
+   "data: [DONE]\n\n"
+  ],
+  "expect": {
+   "success": true,
+   "itl": 0,
+   "text": ""
+  }
+ },
+ {
+  "name": "openai-chat/delta_missing",
+  "backend": "openai-chat",
+  "chunks": [
+   "data: {\"choices\":[{\"delta\":{\"content\":\"a\"}}]}\n\n",
+   "data: {\"choices\":[{\"index\":0}]}\n\n",
+   "data: {\"choices\":[{\"delta\":{\"content\":\"a\"}}]}\n\n",
+   "data: {\"choices\":[],\"usage\":{\"prompt_tokens\":7,\"completion_tokens\":2}}\n\n",
+   "data: [DONE]\n\n"
+  ],
+  "expect": {
+   "success": true,
+   "itl": 1,
+   "text": "aa"
+  }
+ },
+ {
+  "name": "openai-chat/role_with_content",
+  "backend": "openai-chat",
+  "chunks": [
+   "data: {\"choices\":[{\"delta\":{\"role\":\"assistant\",\"content\":\"a\"}}]}\n\n",
+   "data: {\"choices\":[{\"delta\":{\"content\":\"a\"}}]}\n\n",
+   "data: {\"choices\":[],\"usage\":{\"prompt_tokens\":7,\"completion_tokens\":2}}\n\n",
+   "data: [DONE]\n\n"
+  ],
+  "expect": {
+   "success": true,
+   "itl": 1,
+   "text": "aa"
+  }
+ },
+ {
+  "name": "openai-responses/complete",
+  "backend": "openai-responses",
+  "chunks": [
+   "event: response.created\ndata: {\"type\":\"response.created\",\"response\":{\"status\":\"in_progress\"}}\n\n",
+   "event: response.output_text.delta\ndata: {\"type\":\"response.output_text.delta\",\"delta\":\"a\"}\n\n",
+   "event: response.output_text.delta\ndata: {\"type\":\"response.output_text.delta\",\"delta\":\"a\"}\n\n",
+   "event: response.output_text.delta\ndata: {\"type\":\"response.output_text.delta\",\"delta\":\"a\"}\n\n",
+   "event: response.completed\ndata: {\"type\":\"response.completed\",\"response\":{\"status\":\"completed\",\"usage\":{\"input_tokens\":7,\"output_tokens\":3}}}\n\n"
+  ],
+  "expect": {
+   "success": true,
+   "itl": 2,
+   "text": "aaa",
+   "output_tokens": 3,
+   "prompt_len": 7
+  }
+ },
+ {
+  "name": "openai-responses/no_terminal_event",
+  "backend": "openai-responses",
+  "chunks": [
+   "event: response.created\ndata: {\"type\":\"response.created\",\"response\":{\"status\":\"in_progress\"}}\n\n",
+   "event: response.output_text.delta\ndata: {\"type\":\"response.output_text.delta\",\"delta\":\"a\"}\n\n",
+   "event: response.output_text.delta\ndata: {\"type\":\"response.output_text.delta\",\"delta\":\"a\"}\n\n"
+  ],
+  "expect": {
+   "success": false
+  }
+ },
+ {
+  "name": "openai-responses/no_token",
+  "backend": "openai-responses",
+  "chunks": [
+   "event: response.created\ndata: {\"type\":\"response.created\",\"response\":{\"status\":\"in_progress\"}}\n\n",
+   "event: response.completed\ndata: {\"type\":\"response.completed\",\"response\":{\"status\":\"completed\",\"usage\":{\"input_tokens\":7,\"output_tokens\":3}}}\n\n"
+  ],
+  "expect": {
+   "success": false
+  }
+ },
+ {
+  "name": "openai-responses/reasoning",
+  "backend": "openai-responses",
+  "chunks": [
+   "event: response.created\ndata: {\"type\":\"response.created\",\"response\":{\"status\":\"in_progress\"}}\n\n",
+   "event: response.reasoning_text.delta\ndata: {\"type\":\"response.reasoning_text.delta\",\"delta\":\"hmm\"}\n\n",
+   "event: response.output_text.delta\ndata: {\"type\":\"response.output_text.delta\",\"delta\":\"a\"}\n\n",
+   "event: response.output_text.delta\ndata: {\"type\":\"response.output_text.delta\",\"delta\":\"a\"}\n\n",
+   "event: response.completed\ndata: {\"type\":\"response.completed\",\"response\":{\"status\":\"completed\",\"usage\":{\"input_tokens\":7,\"output_tokens\":3}}}\n\n"
+  ],
+  "expect": {
+   "success": true,
+   "itl": 2,
+   "text": "aa"
+  }
+ },
+ {
+  "name": "openai-responses/tool_call_only",
+  "backend": "openai-responses",
+  "chunks": [
+   "event: response.created\ndata: {\"type\":\"response.created\",\"response\":{\"status\":\"in_progress\"}}\n\n",
+   "event: response.function_call_arguments.delta\ndata: {\"type\":\"response.function_call_arguments.delta\",\"delta\":\"{\"}\n\n",
+   "event: response.function_call_arguments.delta\ndata: {\"type\":\"response.function_call_arguments.delta\",\"delta\":\"}\"}\n\n",
+   "event: response.completed\ndata: {\"type\":\"response.completed\",\"response\":{\"status\":\"completed\",\"usage\":{\"input_tokens\":7,\"output_tokens\":3}}}\n\n"
+  ],
+  "expect": {
+   "success": true,
+   "itl": 1,
+   "text": ""
+  }
+ },
+ {
+  "name": "openai-responses/error_event",
+  "backend": "openai-responses",
+  "chunks": [
+   "event: response.created\ndata: {\"type\":\"response.created\",\"response\":{\"status\":\"in_progress\"}}\n\n",
+   "event: response.output_text.delta\ndata: {\"type\":\"response.output_text.delta\",\"delta\":\"a\"}\n\n",
+   "event: error\ndata: {\"type\":\"error\",\"message\":\"generation failed\",\"code\":\"server_error\"}\n\n"
+  ],
+  "expect": {
+   "success": false,
+   "error_contains": "generation failed"
+  }
+ },
+ {
+  "name": "openai-responses/failed_event",
+  "backend": "openai-responses",
+  "chunks": [
+   "event: response.created\ndata: {\"type\":\"response.created\",\"response\":{\"status\":\"in_progress\"}}\n\n",
+   "event: response.output_text.delta\ndata: {\"type\":\"response.output_text.delta\",\"delta\":\"a\"}\n\n",
+   "event: response.failed\ndata: {\"type\":\"response.failed\",\"response\":{\"status\":\"failed\",\"error\":{\"message\":\"generation failed\"}}}\n\n"
+  ],
+  "expect": {
+   "success": false
+  }
+ },
+ {
+  "name": "openai-responses/incomplete",
+  "backend": "openai-responses",
+  "chunks": [
+   "event: response.created\ndata: {\"type\":\"response.created\",\"response\":{\"status\":\"in_progress\"}}\n\n",
+   "event: response.output_text.delta\ndata: {\"type\":\"response.output_text.delta\",\"delta\":\"a\"}\n\n",
+   "event: response.output_text.delta\ndata: {\"type\":\"response.output_text.delta\",\"delta\":\"a\"}\n\n",
+   "event: response.incomplete\ndata: {\"type\":\"response.incomplete\",\"response\":{\"status\":\"incomplete\",\"usage\":{\"input_tokens\":7,\"output_tokens\":2}}}\n\n"
+  ],
+  "expect": {
+   "success": true,
+   "itl": 1,
+   "text": "aa",
+   "output_tokens": 2
+  }
+ },
+ {
+  "name": "openai-responses/done_sentinel_after_completed",
+  "backend": "openai-responses",
+  "chunks": [
+   "event: response.created\ndata: {\"type\":\"response.created\",\"response\":{\"status\":\"in_progress\"}}\n\n",
+   "event: response.output_text.delta\ndata: {\"type\":\"response.output_text.delta\",\"delta\":\"a\"}\n\n",
+   "event: response.output_text.delta\ndata: {\"type\":\"response.output_text.delta\",\"delta\":\"a\"}\n\n",
+   "event: response.completed\ndata: {\"type\":\"response.completed\",\"response\":{\"status\":\"completed\",\"usage\":{\"input_tokens\":7,\"output_tokens\":3}}}\n\n",
+   "data: [DONE]\n\n"
+  ],
+  "expect": {
+   "success": true,
+   "itl": 1,
+   "text": "aa"
+  }
+ },
+ {
+  "name": "openai-responses/no_event_line",
+  "backend": "openai-responses",
+  "chunks": [
+   "data: {\"type\":\"response.output_text.delta\",\"delta\":\"a\"}\n\n",
+   "data: {\"type\":\"response.output_text.delta\",\"delta\":\"a\"}\n\n",
+   "data: {\"type\":\"response.completed\",\"response\":{\"usage\":{\"input_tokens\":7,\"output_tokens\":2}}}\n\n"
+  ],
+  "expect": {
+   "success": true,
+   "itl": 1,
+   "text": "aa",
+   "output_tokens": 2
+  }
+ },
+ {
+  "name": "openai-responses/crlf",
+  "backend": "openai-responses",
+  "chunks": [
+   "event: response.created\r\ndata: {\"type\":\"response.created\",\"response\":{\"status\":\"in_progress\"}}\r\n\r\n",
+   "event: response.output_text.delta\r\ndata: {\"type\":\"response.output_text.delta\",\"delta\":\"a\"}\r\n\r\n",
+   "event: response.output_text.delta\r\ndata: {\"type\":\"response.output_text.delta\",\"delta\":\"a\"}\r\n\r\n",
+   "event: response.completed\r\ndata: {\"type\":\"response.completed\",\"response\":{\"status\":\"completed\",\"usage\":{\"input_tokens\":7,\"output_tokens\":3}}}\r\n\r\n"
+  ],
+  "expect": {
+   "success": true,
+   "itl": 1,
+   "text": "aa"
+  },
+  "known_gap": {
+   "python": "#61534"
+  }
+ },
+ {
+  "name": "openai-responses/split_event_and_data",
+  "backend": "openai-responses",
+  "chunks": [
+   "event: response.created\ndata: {\"type\":\"response.created\",\"response\":{\"status\":\"in_progress\"}}\n\n",
+   "event: response.output_text.delta\n",
+   "data: {\"type\":\"response.output_text.delta\",\"delta\":\"a\"}\n\n",
+   "event: response.output_text.delta\ndata: {\"type\":\"response.output_text.delta\",\"delta\":\"a\"}\n\n",
+   "event: response.completed\ndata: {\"type\":\"response.completed\",\"response\":{\"status\":\"completed\",\"usage\":{\"input_tokens\":7,\"output_tokens\":3}}}\n\n"
+  ],
+  "expect": {
+   "success": true,
+   "itl": 1,
+   "text": "aa"
+  }
+ },
+ {
+  "name": "openai-responses/zero_input_tokens",
+  "backend": "openai-responses",
+  "chunks": [
+   "event: response.created\ndata: {\"type\":\"response.created\",\"response\":{\"status\":\"in_progress\"}}\n\n",
+   "event: response.output_text.delta\ndata: {\"type\":\"response.output_text.delta\",\"delta\":\"a\"}\n\n",
+   "event: response.output_text.delta\ndata: {\"type\":\"response.output_text.delta\",\"delta\":\"a\"}\n\n",
+   "event: response.completed\ndata: {\"type\":\"response.completed\",\"response\":{\"usage\":{\"input_tokens\":0,\"output_tokens\":2}}}\n\n"
+  ],
+  "expect": {
+   "success": true,
+   "itl": 1,
+   "prompt_len": 100
+  },
+  "known_gap": {
+   "python": "unfiled"
+  }
+ }
+]
