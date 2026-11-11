@@ -86,8 +86,8 @@ class MTPMixin(CausalMixin):
     def _pp_indices(self) -> tuple[int, int]:
         return 0, self.text_config.num_hidden_layers
 
-    # Like native drafts, and `PrefetchOffloader` can only wrap the target
     def _offloader(self) -> BaseOffloader:
+        """Like native drafts, and `PrefetchOffloader` can only wrap the target."""
         return NoopOffloader()
 
     def load_weights(self, weights: Iterable[tuple[str, torch.Tensor]]) -> set[str]:
