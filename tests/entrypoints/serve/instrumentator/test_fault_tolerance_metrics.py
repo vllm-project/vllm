@@ -80,8 +80,10 @@ def test_ft_metrics_are_local_with_shared_multiprocess_metrics(
         [
             sys.executable,
             "-c",
-            "from prometheus_client import Gauge; "
-            "Gauge('existing_metric', 'Existing metric').set(7)",
+            (
+                "from prometheus_client import Gauge; "
+                "Gauge('existing_metric', 'Existing metric').set(7)"
+            ),
         ],
         check=True,
     )
