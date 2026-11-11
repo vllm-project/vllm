@@ -661,7 +661,7 @@ class MiniCPMWhisperEncoder(WhisperEncoder):
 
         encoder_states: tuple[torch.Tensor, ...] = ()
 
-        for idx, encoder_layer in enumerate(self.layers):
+        for encoder_layer in self.layers:
             encoder_states = encoder_states + (hidden_states,)
             to_drop = False
             if self.training:

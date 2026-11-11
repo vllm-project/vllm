@@ -7,13 +7,13 @@ then the top-k blocks (plus forced init/local blocks) are selected per query
 token. Adapted to vLLM's paged KV cache: the KV page size is forced to equal the
 sparse block size (128), so one sparse block maps to exactly one page.
 
-Index-K cache layout (vLLM): ``(num_blocks, 128, idx_head_dim)`` (one shared
+Index-K cache layout (vLLM): `(num_blocks, 128, idx_head_dim)` (one shared
 key vector per token).
 
 Only the paths MiniMax M3 uses are implemented: score_type="max", index value
 disabled (score-only indexer), and shared index keys. Each local index-query
 head selects its own block ids for the block-sparse attention kernels in
-``sparse_attn``.
+`sparse_attn`.
 """
 
 import torch
@@ -1254,8 +1254,8 @@ def minimax_m3_index_topk(
 ) -> torch.Tensor:
     """Select index top-k from a precomputed score tensor.
 
-    When ``out`` is provided (a ``[num_idx_heads, >=total_q, topk]`` buffer), the
-    result is written into ``out[:, :total_q, :]`` instead of a fresh tensor --
+    When `out` is provided (a `[num_idx_heads, >=total_q, topk]` buffer), the
+    result is written into `out[:, :total_q, :]` instead of a fresh tensor --
     used to keep the top-k output at a stable address for cudagraph capture.
     """
     num_idx_heads = score.shape[0]
@@ -1318,10 +1318,10 @@ def minimax_m3_index_decode(
     """Decode index block-score followed by fused adaptive top-k selection.
 
     Returns topk_idx [num_kv_heads, total_q, topk] (0-indexed block ids, -1 pad).
-    When ``out`` ([num_kv_heads, >=total_q, topk]) is given, writes into
-    ``out[:, :total_q, :]`` (stable address for cudagraph) instead of allocating.
+    When `out` ([num_kv_heads, >=total_q, topk]) is given, writes into
+    `out[:, :total_q, :]` (stable address for cudagraph) instead of allocating.
     The optional sparse-table arguments fuse current-layer table construction
-    into the selector. They must be provided together. ``completion_counter``
+    into the selector. They must be provided together. `completion_counter`
     provides stable per-query synchronization storage for CUDA graphs. It must
     be zero before its first launch and must not be shared by overlapping
     selector invocations; every completed launch resets its active entries.

@@ -4,6 +4,7 @@ from abc import ABC, abstractmethod
 from collections.abc import Sequence
 from dataclasses import dataclass
 from enum import Enum
+from typing import Any
 
 # Bumped whenever the peer payload changes shape. Peers refuse to transfer
 # across a mismatch instead of failing somewhere inside the engine.
@@ -77,6 +78,17 @@ class TransferBackend(ABC):
     @abstractmethod
     def rpc_port(self) -> int:
         """Port peers use to reach this worker's engine."""
+
+    @property
+    def engine(self) -> Any | None:
+        """The engine another connector can attach to, if this backend has one.
+
+        A Mooncake store connector in the same worker process can reuse the PD
+        connector's Transfer Engine instead of initializing a second one, which
+        requires the engine object itself. Backends that cannot share an engine
+        return None.
+        """
+        return None
 
     @abstractmethod
     def register_regions(self, regions: Sequence[MemoryRegion]) -> None:

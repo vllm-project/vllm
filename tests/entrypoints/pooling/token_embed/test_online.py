@@ -14,7 +14,7 @@ from tests.utils import RemoteOpenAIServer
 from vllm.entrypoints.pooling.pooling.protocol import PoolingResponse
 from vllm.entrypoints.pooling.token_embed.protocol import TokenEmbeddingResponse
 
-MODEL_NAME = "intfloat/multilingual-e5-small"
+MODEL_NAME = "vllm-project/multilingual-e5-small"
 DTYPE = "bfloat16"
 input_text = "The best thing about vLLM is that it supports many different models"
 input_tokens = [
