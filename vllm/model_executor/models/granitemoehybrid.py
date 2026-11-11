@@ -442,23 +442,18 @@ class GraniteMoeHybridModel(nn.Module):
         expert_params_mapping = self.get_expert_mapping()
 
         def _load(n, p):
-            # Skip layers on other devices.
-            if is_pp_missing_parameter(n, self):
-                return
             param = params_dict[n]
             weight_loader = getattr(param, "weight_loader", default_weight_loader)
             weight_loader(param, p)
             loaded_params.add(n)
 
         def _load_shard(n, p, shard_id):
-            # Skip layers on other devices.
-            if not is_pp_missing_parameter(n, self):
-                param = params_dict[n]
-                weight_loader = getattr(param, "weight_loader", None)
-                if not callable(weight_loader):
-                    raise TypeError(f"{n} requires a shard-aware weight loader")
-                weight_loader(param, p, shard_id)
-                loaded_params.add(n)
+            param = params_dict[n]
+            weight_loader = getattr(param, "weight_loader", None)
+            if not callable(weight_loader):
+                raise TypeError(f"{n} requires a shard-aware weight loader")
+            weight_loader(param, p, shard_id)
+            loaded_params.add(n)
 
         def _load_expert(n, p, name, shard_id, expert_id):
             if n not in params_dict:
@@ -482,10 +477,6 @@ class GraniteMoeHybridModel(nn.Module):
                     name_mapped, params_dict
                 )
 
-                # Skip layers on other devices.
-                if is_pp_missing_parameter(name_mapped, self):
-                    continue
-
                 param = params_dict[name_mapped]
                 weight_loader = param.weight_loader
                 success = False
@@ -505,6 +496,10 @@ class GraniteMoeHybridModel(nn.Module):
             return None
 
         for n, p in weights:
+            # Renames below keep the `layers.N.` prefix, so one check covers them.
+            if is_pp_missing_parameter(n, self):
+                continue
+
             if "A_log" in n:
                 n = n.replace("A_log", "A")
 
