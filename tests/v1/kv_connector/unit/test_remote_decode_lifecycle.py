@@ -8,9 +8,13 @@ import torch
 from vllm.v1.core.kv_cache_utils import generate_scheduler_kv_cache_config
 from vllm.v1.kv_cache_interface import (
     ChunkedLocalAttentionSpec,
+    CircularBufferSpec,
+    CrossAttentionSpec,
     FullAttentionSpec,
     KVCacheConfig,
     KVCacheGroupSpec,
+    MambaSpec,
+    SlidingWindowSpec,
     UniformTypeKVCacheSpecs,
 )
 from vllm.v1.outputs import EMPTY_MODEL_RUNNER_OUTPUT, KVConnectorOutput
@@ -325,7 +329,6 @@ def test_host_buffer_save_resaves_block_straddling_chunk_boundary(
     assert saved2[0] == straddling
     assert saved2 == table[first : -(-num_tokens // block_size)]
     assert req_id not in connector_scheduler._reqs_need_save
-    assert req_id not in connector_scheduler._reqs_save_state
 
 
 def test_host_buffer_save_includes_prefix_cache_hit_blocks():
@@ -378,7 +381,7 @@ def test_host_buffer_save_includes_prefix_cache_hit_blocks():
     (saved2,) = out2.kv_connector_metadata.reqs_to_save[req_id].local_block_ids
     (table,) = scheduler.kv_cache_manager.get_block_ids(req_id)
     assert saved2 == table[96 // block_size : -(-110 // block_size)]
-    assert req_id not in connector_scheduler._reqs_save_state
+    assert req_id not in connector_scheduler._reqs_need_save
 
 
 def test_host_buffer_save_restarts_after_preemption():
@@ -415,7 +418,7 @@ def test_host_buffer_save_restarts_after_preemption():
     (saved2,) = out2.kv_connector_metadata.reqs_to_save[req_id].local_block_ids
     (table,) = scheduler.kv_cache_manager.get_block_ids(req_id)
     assert saved2 == table[: -(-40 // block_size)]
-    assert req_id not in connector_scheduler._reqs_save_state
+    assert req_id not in connector_scheduler._reqs_need_save
 
 
 def test_host_buffer_save_hybrid_attention_and_mamba():
@@ -453,9 +456,10 @@ def test_host_buffer_save_hybrid_attention_and_mamba():
     scheduler.add_request(request)
 
     out1 = scheduler.schedule()
-    attn1, _ = out1.kv_connector_metadata.reqs_to_save[req_id].local_block_ids
+    attn1, ssm1 = out1.kv_connector_metadata.reqs_to_save[req_id].local_block_ids
     attn_table, ssm_table = scheduler.kv_cache_manager.get_block_ids(req_id)
     assert attn1 == attn_table[: -(-token_budget // block_size)]
+    assert ssm1 == []
     assert len(ssm_table) == 1
     model_output = create_model_runner_output([request])
     model_output.sampled_token_ids = [[]]
@@ -468,7 +472,58 @@ def test_host_buffer_save_hybrid_attention_and_mamba():
         attn2 == attn_table[token_budget // block_size : -(-num_tokens // block_size)]
     )
     assert ssm2 == ssm_table
-    assert req_id not in connector_scheduler._reqs_save_state
+    assert req_id not in connector_scheduler._reqs_need_save
+
+
+def test_host_buffer_save_hybrid_mamba_align_copies_new_blocks():
+    """With mamba_cache_mode="align" the SSM state moves to the blocks each
+    chunk allocates (the previous slot is nulled), so each chunk copies the SSM
+    blocks allocated for it, as on main. The attention group is still saved by
+    token position."""
+    block_size, num_tokens = 16, 40
+    vllm_config = create_vllm_config(
+        block_size=block_size,
+        max_num_batched_tokens=24,
+        kv_role="kv_producer",
+    )
+    vllm_config.scheduler_config.disable_hybrid_kv_cache_manager = False
+    vllm_config.cache_config.mamba_cache_mode = "align"
+    kv_cache_config = make_kv_cache_config(
+        block_size, mamba_enabled=True, mamba_cache_mode="align"
+    )
+    kv_cache_config.hash_block_size = block_size
+    scheduler = create_scheduler(vllm_config, kv_cache_config=kv_cache_config)
+    connector_scheduler = scheduler.get_kv_connector().connector_scheduler
+    connector_scheduler.use_host_buffer = True
+    request = create_request(
+        request_id=1,
+        num_tokens=num_tokens,
+        block_size=block_size,
+        do_remote_decode=True,
+    )
+    req_id = request.request_id
+    scheduler.add_request(request)
+
+    ssm_saved: list[int] = []
+    while req_id in connector_scheduler._reqs_need_save or not ssm_saved:
+        start = request.num_computed_tokens
+        out = scheduler.schedule()
+        attn, ssm = out.kv_connector_metadata.reqs_to_save[req_id].local_block_ids
+        if out.scheduled_new_reqs:
+            new_blocks = out.scheduled_new_reqs[0].block_ids
+        else:
+            (new_blocks,) = out.scheduled_cached_reqs.new_block_ids
+        attn_table, ssm_table = scheduler.kv_cache_manager.get_block_ids(req_id)
+        end = request.num_computed_tokens
+        assert attn == attn_table[start // block_size : -(-end // block_size)]
+        assert ssm == new_blocks[1] and ssm == ssm_table[-1:]
+        ssm_saved += ssm
+        model_output = create_model_runner_output([request])
+        if end < request.num_prompt_tokens:
+            model_output.sampled_token_ids = [[]]
+        scheduler.update_from_output(out, model_output)
+    # One state slot per chunk, each copied once.
+    assert len(ssm_saved) == len(set(ssm_saved)) > 1
 
 
 @pytest.mark.parametrize("group_kind", ["uniform_type", "chunked_local"])
@@ -528,3 +583,40 @@ def test_host_buffer_save_resaves_straddling_block_of_other_attention_groups(
     (saved2,) = out2.kv_connector_metadata.reqs_to_save[req_id].local_block_ids
     (table,) = scheduler.kv_cache_manager.get_block_ids(req_id)
     assert saved2 == table[token_budget // block_size : -(-num_tokens // block_size)]
+
+
+_ATTN = dict(block_size=16, num_kv_heads=1, head_size=8, dtype=torch.float16)
+_MAMBA = dict(block_size=16, shapes=((16,),), dtypes=(torch.float16,))
+
+
+@pytest.mark.parametrize(
+    ("spec", "rule"),
+    [
+        (FullAttentionSpec(**_ATTN), ("position", 32)),
+        (FullAttentionSpec(**_ATTN, dcp_sharded=False), ("position", 16)),
+        (SlidingWindowSpec(**_ATTN, sliding_window=64), ("position", 32)),
+        (ChunkedLocalAttentionSpec(**_ATTN, attention_chunk_size=64), ("position", 32)),
+        (MambaSpec(**_MAMBA, num_speculative_blocks=2), ("ssm_state", 2)),
+        (MambaSpec(**_MAMBA, mamba_cache_mode="align"), ("allocated", 0)),
+    ],
+)
+def test_host_buffer_save_rule(spec, rule):
+    from vllm.distributed.kv_transfer.kv_connector.v1.nixl.base_scheduler import (
+        host_buffer_save_rule,
+    )
+
+    assert host_buffer_save_rule(spec, dcp_size=2) == rule
+
+
+@pytest.mark.parametrize(
+    "spec", [CircularBufferSpec(**_ATTN), CrossAttentionSpec(**_ATTN)]
+)
+def test_host_buffer_save_rule_rejects_unknown_spec(spec):
+    """A KV cache group with no host-buffer save rule fails loudly instead of
+    falling back to copying whatever blocks were allocated."""
+    from vllm.distributed.kv_transfer.kv_connector.v1.nixl.base_scheduler import (
+        host_buffer_save_rule,
+    )
+
+    with pytest.raises(NotImplementedError, match=type(spec).__name__):
+        host_buffer_save_rule(spec, dcp_size=1)
