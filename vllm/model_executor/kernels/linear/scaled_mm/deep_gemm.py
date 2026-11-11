@@ -63,8 +63,10 @@ class DeepGemmFp8BlockScaledMMKernel(Fp8BlockScaledMMLinearKernel):
         if act_quant_desc.group_shape != GroupShape(1, 128):
             return (
                 False,
-                "Supports only dynamic per token group activation "
-                "quantization with group_shape=(1,128).",
+                (
+                    "Supports only dynamic per token group activation "
+                    "quantization with group_shape=(1,128)."
+                ),
             )
         model_config = get_current_vllm_config().model_config
 

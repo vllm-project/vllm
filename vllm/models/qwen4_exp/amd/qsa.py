@@ -118,7 +118,7 @@ _QSA_CACHE_DTYPES: tuple[CacheDType, ...] = (
 class Qwen4ExpQSABackend(AttentionBackend):
     """FullAttentionSpec backend used by the merged QSA owner.
 
-    With an Octave ``kv_cache_dtype`` the main K/V cache holds one packed
+    With an Octave `kv_cache_dtype` the main K/V cache holds one packed
     Octave slot per (token, KV head) and sparse attention runs the Octave
     sparse decode kernel over the selected positions.
     """
@@ -436,11 +436,6 @@ class Qwen4ExpQSAAttention(Qwen3NextAttention, AttentionLayerBase):
         self.q_size = self.num_heads * self.head_dim
         self.kv_size = self.num_kv_heads * self.head_dim
         self.scaling = self.head_dim**-0.5
-        self.dual_chunk_attention_config = getattr(
-            config, "dual_chunk_attention_config", None
-        )
-        if self.dual_chunk_attention_config is not None:
-            raise NotImplementedError("Qwen4Exp QSA does not support dual-chunk RoPE")
         # Qwen4Exp full-attention checkpoints always pack a sigmoid output
         # gate next to Q, even when an inherited config default says otherwise.
         self.attn_output_gate = True
@@ -536,6 +531,10 @@ class Qwen4ExpQSAAttention(Qwen3NextAttention, AttentionLayerBase):
         if self.layer_name in static_context:
             raise ValueError(f"Duplicate layer name: {self.layer_name}")
         static_context[self.layer_name] = self
+
+    def process_weights_after_loading(self) -> None:
+        self._k_scale_float = self._k_scale.item()
+        self._v_scale_float = self._v_scale.item()
 
     def get_attn_backend(self) -> type[AttentionBackend]:
         return self.attn_backend

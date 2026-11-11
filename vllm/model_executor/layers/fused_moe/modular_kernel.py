@@ -95,6 +95,49 @@ class FusedMoEActivationFormat(Enum):
     The batched experts format (num experts, max tokens per expert, hidden dim)
     """
     BatchedExperts = ("batched_experts",)
+    """
+    Like 'Standard' (num_tokens, hidden dim), but the row count is an upper
+    bound rather than the exact token count, so some rows are inactive padding.
+
+    Produced by all2all backends (DeepEP v2) that cannot report the received
+    token count on the host without a device sync. Padding comes from the
+    worst-case recv allocation (decode/cudagraph mode, where the tail rows are
+    left uninitialized) and from per-expert block alignment (prefill mode,
+    where the gaps are zeroed).
+
+    Inactive rows are marked by setting all of their `topk_ids` slots to -1;
+    when available, `ExpertTokensMetadata.psum_recv_per_rank` carries the
+    real/padding boundary on device. Consuming kernels must therefore either
+    skip such rows or produce results for them that are safe to discard --
+    padding rows may hold uninitialized garbage, so an expert that derives
+    routing by scanning every row will corrupt real tokens if it ignores the
+    -1 markers. Only experts declaring this format are paired with such a
+    prepare/finalize step; see `is_superset`.
+    """
+    PaddedStandard = ("padded_standard",)
+
+    def is_superset(self, pf_format: "FusedMoEActivationFormat") -> bool:
+        """Whether this (experts) format is a superset of `pf_format`, i.e.
+        an experts kernel declaring `self` can consume activations produced
+        by a prepare/finalize step in `pf_format`.
+
+        The relation is directional: `self` is the experts format and
+        `pf_format` is the prepare/finalize format. `PaddedStandard` is a
+        superset of `Standard` (a padding-aware kernel treats unpadded input
+        as the zero-padding case), but not vice versa. All other formats are
+        only supersets of themselves.
+        """
+        if self == pf_format:
+            return True
+        return (
+            self == FusedMoEActivationFormat.PaddedStandard
+            and pf_format == FusedMoEActivationFormat.Standard
+        )
+
+    @property
+    def is_batched(self) -> bool:
+        """Whether this is the disjoint `BatchedExperts` format."""
+        return self == FusedMoEActivationFormat.BatchedExperts
 
 
 @dataclass
@@ -269,9 +312,9 @@ class FusedMoEPrepareAndFinalize(ABC):
         return self.supports_async()
 
     def supports_deferred_moe_finalize(self) -> bool:
-        """Whether ``finalize`` can be skipped for a deferring consumer.
+        """Whether `finalize` can be skipped for a deferring consumer.
 
-        An implementation opts in only if everything it does in ``finalize``
+        An implementation opts in only if everything it does in `finalize`
         -- the top-k reduction, and any combine or reduce-scatter -- is work
         the consumer takes over.
         """
@@ -466,6 +509,25 @@ class FusedMoEPrepareAndFinalizeMonolithic(FusedMoEPrepareAndFinalize):
         """
         raise NotImplementedError
 
+    def supports_precomputed_routing(self) -> bool:
+        """Whether `prepare_routed` is implemented."""
+        return False
+
+    def prepare_routed(
+        self,
+        a1: torch.Tensor,
+        topk_weights: torch.Tensor,
+        topk_ids: torch.Tensor,
+        quant_config: FusedMoEQuantConfig,
+        defer_input_quant: bool = False,
+    ) -> tuple[torch.Tensor, torch.Tensor | None, torch.Tensor, torch.Tensor]:
+        """Like `prepare`, but dispatch vLLM's routing instead of logits.
+
+        Returns the quantized and dispatched (a1q, a1q_scale, topk_weights,
+        topk_ids).
+        """
+        raise NotImplementedError
+
     @abstractmethod
     def finalize(self, fused_expert_output: torch.Tensor) -> torch.Tensor:
         """Optional method for subclasses compatible with monolithic
@@ -506,16 +568,15 @@ class FusedMoEExperts(ABC):
         """moe_config: MoE layer configuration.
         quant_config: Quantization parameters for this experts instance.
         """
-        if self.activation_format() == FusedMoEActivationFormat.Standard and (
+        is_batched = self.activation_format().is_batched
+        if not is_batched and (
             max_num_tokens is not None or num_dispatchers is not None
         ):
             raise ValueError(
                 "max_num_tokens and num_dispatchers should only be set for "
                 "BatchedExperts activation format."
             )
-        elif self.activation_format() == FusedMoEActivationFormat.BatchedExperts and (
-            max_num_tokens is None or num_dispatchers is None
-        ):
+        elif is_batched and (max_num_tokens is None or num_dispatchers is None):
             raise ValueError(
                 "max_num_tokens and num_dispatchers must be set for "
                 "BatchedExperts activation format."
@@ -536,8 +597,8 @@ class FusedMoEExperts(ABC):
     kept_constants: tuple[str, ...] = ()
 
     def keep_constants(self, layer: torch.nn.Module, prefix: str = "_experts_") -> None:
-        """Point ``kept_constants`` at tensors kept on ``layer`` (as ``prefix +
-        name.lstrip("_")``), refilled in place: every post-load rerun builds a
+        """Point `kept_constants` at tensors kept on `layer` (as `prefix +
+        name.lstrip("_")`), refilled in place: every post-load rerun builds a
         new experts object, and captured CUDA graphs read the first one's."""
         for name in self.kept_constants:
             value = getattr(self, name, None)
@@ -581,8 +642,9 @@ class FusedMoEExperts(ABC):
     @staticmethod
     @abstractmethod
     def activation_format() -> FusedMoEActivationFormat:
-        """A property which is a tuple of the input and output activation formats
-        for the 'apply' method.
+        """The activation format this experts kernel consumes. A kernel declaring
+        `PaddedStandard` also accepts `Standard` input (see
+        `FusedMoEActivationFormat.is_superset`).
         """
         raise NotImplementedError
 
@@ -639,7 +701,7 @@ class FusedMoEExperts(ABC):
             return False, _make_reason(
                 f"{moe_config.hidden_dim} hidden dim is not supported"
             )
-        elif activation_format != cls.activation_format():
+        elif not cls.activation_format().is_superset(activation_format):
             return False, _make_reason(f"{activation_format.value} activation format")
         elif envs.VLLM_BATCH_INVARIANT and not cls._supports_batch_invariance():
             return False, _make_reason("batch invariance")
@@ -1069,9 +1131,30 @@ class FusedMoEExpertsMonolithic(FusedMoEExperts):
         """Whether this expert supports routing replay capture.
 
         Subclasses backed by a kernel that exposes routed expert IDs
-        (e.g. FlashInfer's ``routing_replay_out``) should override.
+        (e.g. FlashInfer's `routing_replay_out`) should override.
         """
         return False
+
+    def supports_precomputed_routing(self) -> bool:
+        """Whether `apply_precomputed_routing` is implemented."""
+        return False
+
+    def apply_precomputed_routing(
+        self,
+        hidden_states: torch.Tensor,
+        w1: torch.Tensor,
+        w2: torch.Tensor,
+        topk_weights: torch.Tensor,
+        topk_ids: torch.Tensor,
+        activation: MoEActivation,
+        global_num_experts: int,
+        a1q_scale: torch.Tensor | None,
+    ) -> torch.Tensor | UnfinalizedMoEOutput:
+        """Same as `apply`, but with routing computed by vLLM's router.
+
+        Tokens whose `topk_ids` are -1 (padding) must not reach any expert.
+        """
+        raise NotImplementedError
 
     def apply(
         self,
@@ -1091,12 +1174,12 @@ class FusedMoEExpertsMonolithic(FusedMoEExperts):
         topk_group: int | None = None,
         routing_replay_out: torch.Tensor | None = None,
     ) -> torch.Tensor | UnfinalizedMoEOutput:
-        """Same as ``FusedMoEExperts.apply``, except uses router_logits as opposed
+        """Same as `FusedMoEExperts.apply`, except uses router_logits as opposed
         to the topk_ids and topk_weights. This is useful for kernels
         with fused router and fused_experts (e.g. FLASHINFER_TRTLLM).
 
-        Kernels that ``supports_routing_replay_capture`` write each token's
-        routed expert ids into the leading rows of ``routing_replay_out``.
+        Kernels that `supports_routing_replay_capture` write each token's
+        routed expert ids into the leading rows of `routing_replay_out`.
         """
         raise NotImplementedError
 
@@ -1695,7 +1778,51 @@ class FusedMoEKernelMonolithicImpl:
         )
         if routing_sink is not None:
             routing_sink.capture_fn(routing_replay_out)
+        return self._finalize(fused_out)
 
+    def supports_precomputed_routing(self) -> bool:
+        return (
+            self.fused_experts.supports_precomputed_routing()
+            and self.prepare_finalize.supports_precomputed_routing()
+        )
+
+    def apply_routed(
+        self,
+        hidden_states: torch.Tensor,
+        w1: torch.Tensor,
+        w2: torch.Tensor,
+        topk_weights: torch.Tensor,
+        topk_ids: torch.Tensor,
+        activation: MoEActivation,
+        global_num_experts: int,
+        *,
+        routing_sink: RoutedExpertsSink | None,
+    ) -> torch.Tensor | UnfinalizedMoEOutput:
+        """Like `apply`, but with routing from vLLM's top-k."""
+        a1q, a1q_scale, topk_weights, topk_ids = self.prepare_finalize.prepare_routed(
+            hidden_states,
+            topk_weights,
+            topk_ids,
+            quant_config=self.fused_experts.quant_config,
+            defer_input_quant=self.fused_experts.expects_unquantized_inputs,
+        )
+        fused_out = self.fused_experts.apply_precomputed_routing(
+            hidden_states=a1q,
+            w1=w1,
+            w2=w2,
+            topk_weights=topk_weights,
+            topk_ids=topk_ids,
+            activation=activation,
+            global_num_experts=global_num_experts,
+            a1q_scale=a1q_scale,
+        )
+        if routing_sink is not None:
+            routing_sink.capture_fn(topk_ids)
+        return self._finalize(fused_out)
+
+    def _finalize(
+        self, fused_out: torch.Tensor | UnfinalizedMoEOutput
+    ) -> torch.Tensor | UnfinalizedMoEOutput:
         if isinstance(fused_out, UnfinalizedMoEOutput):
             if not self.prepare_finalize.supports_deferred_moe_finalize():
                 raise RuntimeError(
@@ -1773,9 +1900,8 @@ class FusedMoEKernel:
         and self.fused_experts here.
         """
         self.prepare_finalize.post_init_setup(self.impl.fused_experts)
-        assert (
+        assert self.fused_experts.activation_format().is_superset(
             self.prepare_finalize.activation_format
-            == self.fused_experts.activation_format()
         )
 
     def output_is_reduced(self) -> bool:
@@ -1824,6 +1950,37 @@ class FusedMoEKernel:
             routing_sink=routing_sink,
             input_ids=input_ids,
             hash_indices_table=hash_indices_table,
+        )
+
+    def supports_precomputed_routing(self) -> bool:
+        """Whether `apply_monolithic_routed` can replace `apply_monolithic`."""
+        return (
+            isinstance(self.impl, FusedMoEKernelMonolithicImpl)
+            and self.impl.supports_precomputed_routing()
+        )
+
+    def apply_monolithic_routed(
+        self,
+        hidden_states: torch.Tensor,
+        w1: torch.Tensor,
+        w2: torch.Tensor,
+        topk_weights: torch.Tensor,
+        topk_ids: torch.Tensor,
+        activation: MoEActivation,
+        global_num_experts: int,
+        *,
+        routing_sink: RoutedExpertsSink | None,
+    ) -> torch.Tensor | UnfinalizedMoEOutput:
+        assert isinstance(self.impl, FusedMoEKernelMonolithicImpl)
+        return self.impl.apply_routed(
+            hidden_states=hidden_states,
+            w1=w1,
+            w2=w2,
+            topk_weights=topk_weights,
+            topk_ids=topk_ids,
+            activation=activation,
+            global_num_experts=global_num_experts,
+            routing_sink=routing_sink,
         )
 
     def apply(
