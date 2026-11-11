@@ -12,7 +12,7 @@ use vllm_server::{
     OutputLogConfig, OutputLogging, ParserSelection, ReasoningEffort, RendererSelection,
 };
 use vllm_text::backend::hf::ModelSource;
-use vllm_tracing::LogLevel;
+use vllm_tracing::{LogFormatter, LogLevel};
 
 use super::{BenchCommand, Cli, Command, LogStatsInterval, SharedRuntimeArgs, parse_int_flag};
 
@@ -713,30 +713,45 @@ fn serve_forwards_logging_config_to_managed_engine() {
     .assert_debug_eq(&config.python_args);
 }
 
-/// The JSON formatter is not implemented and fails startup, also in its
-/// dotted form, instead of reaching only the managed engine.
+/// The JSON formatter drives the frontend's own logs and reaches the managed
+/// engine; a formatter Python does not have fails startup.
 #[test]
-fn serve_rejects_unimplemented_logging_config() {
-    let error = Cli::try_parse_from([
+fn serve_logging_config_formatter() {
+    let cli = Cli::try_parse_from([
         "vllm-rs",
         "serve",
         "Qwen/Qwen3-0.6B",
-        "--logging-config",
-        r#"{"formatter":"json"}"#,
+        "--log-level",
+        "ERROR",
+        "--logging-config.formatter",
+        "json",
     ])
-    .unwrap_err();
-    assert_eq!(error.kind(), clap::error::ErrorKind::ValueValidation);
+    .unwrap();
+    assert_eq!(cli.log_formatter(), LogFormatter::Json);
+    let Command::Serve(args) = cli.command else {
+        panic!("expected serve args");
+    };
+    let config = args.to_managed_engine_config(5555, &topology(&args), None);
+    expect![[r#"
+        [
+            "--logging-config",
+            "{\"log_level\":\"ERROR\",\"formatter\":\"json\"}",
+            "--reasoning-parser",
+            "qwen3",
+        ]
+    "#]]
+    .assert_debug_eq(&config.python_args);
 
     let error = Cli::try_parse_from([
         "vllm-rs",
         "serve",
         "Qwen/Qwen3-0.6B",
         "--logging-config.formatter",
-        "json",
+        "xml",
     ])
     .unwrap_err();
     expect![[r#"
-        error: invalid value '{"formatter":"json"}' for '--logging-config <JSON>': invalid JSON object: formatter: unknown variant `json`, expected `text` at line 1 column 19
+        error: invalid value '{"formatter":"xml"}' for '--logging-config <JSON>': invalid JSON object: formatter: unknown variant `xml`, expected `text` or `json` at line 1 column 18
 
         For more information, try '--help'.
     "#]].assert_eq(&error.to_string());
@@ -773,12 +788,18 @@ fn frontend_args_json_resolves_logging_config() {
     )
     .unwrap();
 
-    let error = parse(
+    let cli = parse(
         r#"{"model_tag":"Qwen/Qwen3-0.6B","logging_config":{"log_level":"DEBUG","formatter":"json"}}"#,
+    )
+    .unwrap();
+    assert_eq!(cli.log_formatter(), LogFormatter::Json);
+
+    let error = parse(
+        r#"{"model_tag":"Qwen/Qwen3-0.6B","logging_config":{"log_level":"DEBUG","formatter":"xml"}}"#,
     )
     .unwrap_err();
     expect![[r#"
-        error: invalid value '{"model_tag":"Qwen/Qwen3-0.6B","logging_config":{"log_level":"DEBUG","formatter":"json"}}' for '--args-json <JSON>': invalid JSON arguments: logging_config.formatter: unknown variant `json`, expected `text` at line 1 column 87
+        error: invalid value '{"model_tag":"Qwen/Qwen3-0.6B","logging_config":{"log_level":"DEBUG","formatter":"xml"}}' for '--args-json <JSON>': invalid JSON arguments: logging_config.formatter: unknown variant `xml`, expected `text` or `json` at line 1 column 86
 
         For more information, try '--help'.
     "#]].assert_eq(&error.to_string());
