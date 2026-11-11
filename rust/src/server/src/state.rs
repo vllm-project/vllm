@@ -276,11 +276,6 @@ impl AppState {
         (self.engine_core_llm().expect("the server runs an `EngineCoreLlm`")).engine_core_client()
     }
 
-    /// Remaining prefill work reported by the engine, for `/load`.
-    pub(crate) fn prefill_load(&self) -> Option<vllm_engine_core_client::PrefillLoad> {
-        self.engine_core_client().prefill_load()
-    }
-
     /// Runtime used by middleware to isolate heavyweight request handlers from
     /// the HTTP reactor.
     pub(crate) fn request_runtime(&self) -> &Runtime {

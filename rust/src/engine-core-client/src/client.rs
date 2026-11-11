@@ -35,7 +35,6 @@ mod state;
 mod stream;
 
 pub use stream::{EngineCoreOutputStream, EngineCoreStreamDelivery, EngineCoreStreamOutput};
-pub use state::PrefillLoad;
 
 /// How the frontend acquires its request/response transport with Python
 /// `EngineCoreProc`s.
@@ -337,11 +336,6 @@ pub struct EngineCoreClient {
 }
 
 impl EngineCoreClient {
-    /// Latest remaining prefill work reported by the engines, when available.
-    pub fn prefill_load(&self) -> Option<PrefillLoad> {
-        self.inner.prefill_load()
-    }
-
     /// Connect to Python `EngineCoreProc`s using the configured
     /// transport/coordinator modes.
     ///

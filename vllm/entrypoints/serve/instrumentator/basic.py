@@ -47,21 +47,7 @@ async def get_server_load_metrics(request: Request):
     # - /rerank
     # - /v1/rerank
     # - /v2/rerank
-    content: dict[str, object] = {
-        "server_load": request.app.state.server_load_metrics
-    }
-    # Remaining prefill work, for routers that price a worker from its own
-    # accounting. Absent on engines that do not publish it.
-    client = getattr(request.app.state, "engine_client", None)
-    stats = (
-        client.last_scheduler_stats()
-        if client is not None and hasattr(client, "last_scheduler_stats")
-        else None
-    )
-    if stats is not None:
-        content["prefill_tokens_remaining"] = stats.remaining_prefill_tokens
-        content["sample_seq"] = stats.prefill_sample_seq
-    return JSONResponse(content=content)
+    return JSONResponse(content={"server_load": request.app.state.server_load_metrics})
 
 
 @router.get("/version")

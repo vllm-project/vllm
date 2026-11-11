@@ -19,7 +19,7 @@ use zeromq::RouterSendHalf;
 
 use crate::client::readiness::{Readiness, RecheckGuard};
 use crate::client::state::{
-    OutputReceiver, OutputSender, PrefillLoad, RequestRegistry, UtilityReceiver, UtilityRegistry,
+    OutputReceiver, OutputSender, RequestRegistry, UtilityReceiver, UtilityRegistry,
 };
 use crate::client::stream::{EngineCoreOutputStream, EngineCoreStreamOutput};
 use crate::client::{AbortCause, AbortRequest};
@@ -231,11 +231,6 @@ impl ClientInner {
     /// client.
     pub fn apply_scheduler_stats(&self, engine_index: u32, stats: &SchedulerStats) -> bool {
         self.request_reg.lock().apply_scheduler_stats(engine_index, stats)
-    }
-
-    /// Latest remaining prefill work reported by the engines, if any.
-    pub fn prefill_load(&self) -> Option<PrefillLoad> {
-        self.request_reg.lock().prefill_load()
     }
 
     /// Snapshot the adapter names of tracked LoRA requests as

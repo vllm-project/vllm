@@ -231,14 +231,6 @@ class SchedulerStats:
 
     num_kv_fetch_reqs_by_stage: dict[str, int] = field(default_factory=dict)
 
-    # Remaining prefill work in tokens across all requests the engine knows
-    # about: confirmed compute for running requests, prompt length for waiting
-    # ones (an upper bound, since their cache reuse is not confirmed yet).
-    # Routers price a worker from this instead of an admission-time estimate.
-    remaining_prefill_tokens: int = 0
-    # Monotonic sample counter, so a consumer can tell "unchanged" from "stale".
-    prefill_sample_seq: int = 0
-
     # These are used for internal DP load-balancing.
     step_counter: int = 0
     current_wave: int = 0

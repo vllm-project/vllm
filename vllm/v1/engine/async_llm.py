@@ -152,9 +152,6 @@ class AsyncLLM(EngineClient):
             init_tracer("vllm.llm_engine", tracing_endpoint)
 
         self.log_requests = log_requests
-        # Latest scheduler snapshot, served by `/load` so a router can price the
-        # worker without scraping Prometheus text.
-        self._last_scheduler_stats: Any = None
 
         custom_stat_loggers = list(stat_loggers or [])
         custom_stat_loggers.extend(load_stat_logger_plugin_factories())
@@ -939,8 +936,6 @@ class AsyncLLM(EngineClient):
                             )
 
                     output_processor.update_scheduler_stats(outputs.scheduler_stats)
-                    if outputs.scheduler_stats is not None:
-                        self._last_scheduler_stats = outputs.scheduler_stats
 
                     # 4) Logging.
                     # TODO(rob): make into a coroutine and launch it in
@@ -1478,7 +1473,3 @@ class AsyncLLM(EngineClient):
 
     def get_kv_event_sources(self) -> dict[int, KVEventsConfig]:
         return self.engine_core.get_kv_event_sources()
-
-    def last_scheduler_stats(self) -> Any:
-        """Latest scheduler snapshot, or None before the first engine output."""
-        return self._last_scheduler_stats

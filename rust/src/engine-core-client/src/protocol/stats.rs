@@ -483,13 +483,6 @@ pub struct SchedulerStats {
     pub cudagraph_stats: Option<CudagraphStats>,
     /// Estimated MFU/performance stats, when enabled.
     pub perf_stats: Option<PerfStats>,
-    /// Remaining prefill work, in tokens, across all requests the engine knows
-    /// about. Queued requests count as their prompt length.
-    #[serde(default)]
-    pub remaining_prefill_tokens: u64,
-    /// Monotonic sample counter for the counter above.
-    #[serde(default)]
-    pub prefill_sample_seq: u64,
 }
 
 #[cfg(test)]
