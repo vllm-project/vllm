@@ -9,7 +9,7 @@ scales each token by its own FP32 scale.
 """
 
 import math
-from collections.abc import Callable
+from collections.abc import Callable, Iterable
 from dataclasses import dataclass
 from inspect import signature
 from typing import Any, ClassVar, Literal
@@ -253,6 +253,9 @@ class DeepGemmMegaMoEExperts(nn.Module):
             symmetric buffer is sized for it. Defaults to
             `max_num_batched_tokens`. A caller that hands this layer only its
             sequence-parallel shard of the batch can pass the shard size.
+        l2_input_scale: Fixed `w2` `input_scale` that replaces the
+            checkpoint's, for QAT recipes that quantize the L2 input with a
+            constant scale.
 
     """
 
@@ -275,6 +278,7 @@ class DeepGemmMegaMoEExperts(nn.Module):
         num_logical_experts: int | None = None,
         fast_math: bool = True,
         max_num_tokens: int | None = None,
+        l2_input_scale: float | None = None,
         prefix: str = "",
     ):
         super().__init__()
@@ -310,6 +314,7 @@ class DeepGemmMegaMoEExperts(nn.Module):
         self.weight_format = weight_format
         self.activation = activation
         self.fast_math = fast_math
+        self.l2_input_scale = l2_input_scale
         self._kernel_kwargs = activation.kernel_kwargs()
         self.eplb_state = EplbLayerState()
         # L2 input scale of every logical expert; the NVFP4 kernel takes the max.
@@ -524,6 +529,77 @@ class DeepGemmMegaMoEExperts(nn.Module):
                     f"{prev[1]} != {shard_id} weight_scale_2 {value}; the kernel "
                     "takes one L1 scale per expert."
                 )
+
+    # Fused checkpoint tensors, [num_experts, ...] with gate rows before up rows.
+    _FUSED_EXPERT_SHARDS: ClassVar[dict[str, tuple[str, ...]]] = {
+        "gate_up_proj": ("w1", "w3"),
+        "w13": ("w1", "w3"),
+        "down_proj": ("w2",),
+        "w2": ("w2",),
+    }
+
+    def load_weights(
+        self, weights: Iterable[tuple[str, torch.Tensor]]
+    ) -> Iterable[str]:
+        """Load per-expert `{e}.{w1,w2,w3}.*`, fused `gate_up_proj`/`down_proj`
+        (or `w13`/`w2`) and `shared_experts.*` tensors."""
+        for name, weight in weights:
+            if name.startswith("shared_experts."):
+                yield from self._load_shared_expert_weights(name, weight)
+                continue
+            for expert_id, shard_id, suffix, shard in self._expert_shards(name, weight):
+                suffix, shard = self._checkpoint_tensor(suffix, shard_id, shard)
+                param_name = f"{'w2' if shard_id == 'w2' else 'w13'}_{suffix}"
+                if (param := getattr(self, param_name, None)) is None:
+                    continue
+                param.weight_loader(
+                    param, shard, param_name, shard_id=shard_id, expert_id=expert_id
+                )
+                yield param_name
+
+    def _expert_shards(
+        self, name: str, weight: torch.Tensor
+    ) -> Iterable[tuple[int, str, str, torch.Tensor]]:
+        """`(expert_id, shard_id, param suffix, tensor)` per shard in `weight`."""
+        head, _, rest = name.partition(".")
+        if head.isdigit():
+            shard_id, _, suffix = rest.partition(".")
+            yield int(head), shard_id, suffix, weight
+            return
+        if (shard_ids := self._FUSED_EXPERT_SHARDS.get(head)) is None:
+            raise ValueError(f"Unexpected MegaMoE expert tensor: {name}")
+        n = len(shard_ids)
+        for expert_id, tensor in enumerate(weight):
+            # Gate and up share a scalar global scale.
+            shards = (tensor,) * n if tensor.numel() == 1 else tensor.chunk(n)
+            for shard_id, shard in zip(shard_ids, shards):
+                yield expert_id, shard_id, rest or "weight", shard
+
+    def _checkpoint_tensor(
+        self, suffix: str, shard_id: str, tensor: torch.Tensor
+    ) -> tuple[str, torch.Tensor]:
+        """Map compressed-tensors suffixes and quantization scales to the
+        ModelOpt names and dequantization scales the parameters hold."""
+        if suffix == "weight_packed":
+            return "weight", tensor
+        if suffix == "weight_global_scale":
+            return "weight_scale_2", 1.0 / tensor.float()
+        if suffix == "input_global_scale":
+            suffix, tensor = "input_scale", 1.0 / tensor.float()
+        fixed = self.l2_input_scale
+        if suffix == "input_scale" and shard_id == "w2" and fixed is not None:
+            tensor = torch.full_like(tensor, fixed, dtype=torch.float32)
+        return suffix, tensor
+
+    def _load_shared_expert_weights(
+        self, name: str, weight: torch.Tensor
+    ) -> Iterable[str]:
+        if ".gate_up_proj." not in name:
+            yield self.load_shared_expert_weight(name, weight).removeprefix("experts.")
+            return
+        for shard_id, shard in zip(("w1", "w3"), weight.chunk(2)):
+            shard_name = name.replace(".gate_up_proj.", f".{shard_id}.")
+            yield from self._load_shared_expert_weights(shard_name, shard)
 
     def load_shared_expert_weight(self, name: str, loaded_weight: torch.Tensor) -> str:
         """Load one shared-expert checkpoint tensor; return the parameter name."""
