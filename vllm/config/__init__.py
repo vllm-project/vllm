@@ -12,12 +12,13 @@ from vllm.config.compilation import (
 )
 from vllm.config.device import DeviceConfig
 from vllm.config.diffusion import DiffusionConfig
+from vllm.config.ec_events import ECEventsConfig
 from vllm.config.ec_manager_config import EncoderCacheManagerConfig
 from vllm.config.ec_transfer import ECTransferConfig
 from vllm.config.engram import EngramConfig
 from vllm.config.fault_tolerance import FaultToleranceConfig
 from vllm.config.kernel import KernelConfig
-from vllm.config.kv_events import KVEventsConfig
+from vllm.config.kv_events import KVEventsConfig, PublisherConfig
 from vllm.config.kv_transfer import KVTransferConfig
 from vllm.config.load import LoadConfig
 from vllm.config.logging import LoggingConfig
@@ -85,6 +86,8 @@ __all__ = [
     "DeviceConfig",
     # From vllm.config.diffusion
     "DiffusionConfig",
+    # From vllm.config.ec_events
+    "ECEventsConfig",
     # From vllm.config.ec_manager_config
     "EncoderCacheManagerConfig",
     # From vllm.config.ec_transfer
@@ -95,6 +98,7 @@ __all__ = [
     "KernelConfig",
     # From vllm.config.kv_events
     "KVEventsConfig",
+    "PublisherConfig",
     # From vllm.config.kv_transfer
     "KVTransferConfig",
     # From vllm.config.load

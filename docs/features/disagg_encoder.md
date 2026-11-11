@@ -95,7 +95,34 @@ see [Cross-encoder output reuse](cross_encoder_cache.md).
 
 Please refer to the directories `tests/v1/ec_connector`
 
-## 4  Development
+## 4  Encoder cache events
+
+Encoder cache (EC) events mirror [KV cache events](kv_offloading_usage.md) so a
+router or cache-aware orchestrator can tell which instances already hold the
+encoder output for a given multimodal input. Events are keyed by the multimodal
+hash (`mm_hash`) and use the same ZMQ publisher and replay buffer as KV events.
+
+Enable them on the scheduler with `--ec-events-config`:
+
+```bash
+vllm serve <model> \
+  --ec-events-config '{"enable_ec_cache_events": true, "publisher": "zmq", "endpoint": "tcp://*:5658", "topic": "ec-events"}'
+```
+
+The event types are `ECStored(mm_hashes, medium)`, `ECRemoved(mm_hashes,
+medium)` and `AllECCleared()`, delivered in an `ECEventBatch`. The GPUs of the
+scheduler's own encoder cache report `medium="GPU"`; a connector that offloads
+encoder outputs adds its own events through `ECConnectorBase.take_events()`.
+An empty publisher list means EC events do not need an EC connector: local GPU
+stores and evictions are still published.
+
+Events are off by default and use the `null` publisher when disabled. Subscribe
+the same way as for KV events, decoding `ECEventBatch` from
+`vllm.distributed.ec_transfer.ec_events`; see
+[kv_events_subscriber.py](../../examples/features/kv_events/kv_events_subscriber.py)
+for the ZMQ client loop.
+
+## 5  Development
 
 Disaggregated encoding is implemented by running two parts:
 

@@ -40,6 +40,7 @@ from .compilation import (
 )
 from .device import DeviceConfig
 from .diffusion import DiffusionConfig
+from .ec_events import ECEventsConfig
 from .ec_manager_config import EncoderCacheManagerConfig
 from .ec_transfer import ECTransferConfig
 from .engram import EngramConfig, model_has_engram_layers
@@ -444,6 +445,8 @@ class VllmConfig:
     """The configurations for distributed KV cache transfer."""
     kv_events_config: KVEventsConfig | None = None
     """The configurations for event publishing."""
+    ec_events_config: ECEventsConfig | None = None
+    """The configurations for encoder cache event publishing."""
     ec_transfer_config: ECTransferConfig | None = None
     """The configurations for distributed EC cache transfer."""
     ec_manager_config: EncoderCacheManagerConfig = Field(
@@ -1977,6 +1980,17 @@ class VllmConfig:
                 "KV cache events are disabled, "
                 "but the scheduler is configured to publish them. "
                 "Modify KVEventsConfig.enable_kv_cache_events "
+                "to True to enable."
+            )
+        if (
+            self.ec_events_config is not None
+            and self.ec_events_config.publisher != "null"
+            and not self.ec_events_config.enable_ec_cache_events
+        ):
+            logger.warning_once(
+                "Encoder cache events are disabled, "
+                "but the scheduler is configured to publish them. "
+                "Modify ECEventsConfig.enable_ec_cache_events "
                 "to True to enable."
             )
         current_platform.check_and_update_config(self)

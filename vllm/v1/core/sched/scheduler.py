@@ -17,6 +17,7 @@ from vllm.distributed.ec_transfer.ec_connector.base import (
 )
 from vllm.distributed.ec_transfer.ec_connector.factory import ECConnectorFactory
 from vllm.distributed.ec_transfer.ec_connector.metrics import ECConnectorStats
+from vllm.distributed.ec_transfer.ec_events import ECEventBatch
 from vllm.distributed.kv_events import EventPublisherFactory, KVEventBatch
 from vllm.distributed.kv_transfer.kv_connector.factory import KVConnectorFactory
 from vllm.distributed.kv_transfer.kv_connector.v1 import (
@@ -102,6 +103,7 @@ class Scheduler(SchedulerInterface):
         self.model_uses_mrope = vllm_config.model_config.uses_mrope
         self.kv_cache_config = kv_cache_config
         self.kv_events_config = vllm_config.kv_events_config
+        self.ec_events_config = vllm_config.ec_events_config
         self.parallel_config = vllm_config.parallel_config
         self.log_stats = log_stats
         self.observability_config = vllm_config.observability_config
@@ -202,6 +204,10 @@ class Scheduler(SchedulerInterface):
 
         self.kv_event_publisher = EventPublisherFactory.create(
             self.kv_events_config,
+            self.parallel_config.data_parallel_index,
+        )
+        self.ec_event_publisher = EventPublisherFactory.create(
+            self.ec_events_config,
             self.parallel_config.data_parallel_index,
         )
         self.ec_connector = None
@@ -2647,6 +2653,16 @@ class Scheduler(SchedulerInterface):
             batch = KVEventBatch(ts=time.time(), events=events)
             self.kv_event_publisher.publish(batch)
 
+        # collect encoder cache events from cache manager and connector
+        ec_events = self.encoder_cache_manager.take_events()
+        if self.ec_connector is not None:
+            ec_events.extend(self.ec_connector.take_events())
+
+        # publish collected encoder cache events
+        if ec_events:
+            batch = ECEventBatch(ts=time.time(), events=ec_events)
+            self.ec_event_publisher.publish(batch)
+
         # Create EngineCoreOutputs for all clients that have requests with
         # outputs in this step.
         engine_core_outputs = {
@@ -3406,6 +3422,8 @@ class Scheduler(SchedulerInterface):
         logger.debug_once("[shutdown] Scheduler: start")
         if self.kv_event_publisher:
             self.kv_event_publisher.shutdown()
+        if self.ec_event_publisher:
+            self.ec_event_publisher.shutdown()
         if self.connector is not None:
             self.connector.shutdown()
 
@@ -3425,7 +3443,9 @@ class Scheduler(SchedulerInterface):
         return self.ec_connector
 
     def get_kv_event_publisher_config(self) -> KVEventsConfig | None:
-        return self.kv_event_publisher.get_publisher_config()
+        config = self.kv_event_publisher.get_publisher_config()
+        assert config is None or isinstance(config, KVEventsConfig)
+        return config
 
     def _connector_finished(
         self, request: Request
