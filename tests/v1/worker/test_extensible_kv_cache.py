@@ -773,6 +773,41 @@ def test_capture_gets_the_memory_warmup_committed(vmm, vllm_runner, monkeypatch)
 
 
 @requires_cuda
+def test_adaptive_verification_profiles_against_the_final_cache(
+    vmm, vllm_runner, monkeypatch
+):
+    """Capture releases warmup's KV blocks, so the step costs profiled there
+    read a block or two from L2; the cost curves kept for serving are profiled
+    again once the cache has its final size."""
+    from vllm.v1.worker.gpu.model_runner import GPUModelRunner
+
+    monkeypatch.setenv("VLLM_ENABLE_V1_MULTIPROCESSING", "0")
+    committed_when_profiled = []
+    profile = GPUModelRunner.profile_adaptive_verification
+
+    def recording_profile(self):
+        committed_when_profiled.append(self.extensible_kv_cache.num_committed_blocks)
+        return profile(self)
+
+    monkeypatch.setattr(
+        GPUModelRunner, "profile_adaptive_verification", recording_profile
+    )
+    with vllm_runner(
+        "Qwen/Qwen3.5-0.8B",
+        max_model_len=1024,
+        enable_chunked_prefill=True,
+        enable_extensible_kv_cache=True,
+        speculative_config={
+            "method": "mtp",
+            "num_speculative_tokens": 3,
+            "enable_adaptive_verification": True,
+        },
+    ) as runner:
+        num_blocks = runner.llm.llm_engine.vllm_config.cache_config.num_gpu_blocks
+    assert committed_when_profiled == [1, num_blocks]
+
+
+@requires_cuda
 def test_drafter_capture_writes_kv_only_to_the_null_block(
     vmm, vllm_runner, monkeypatch
 ):
