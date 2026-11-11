@@ -51,6 +51,26 @@ def test_cors_origins_require_explicit_opt_in(serve_parser):
     ).allowed_origins == ["http://trusted.example"]
 
 
+@pytest.mark.parametrize("source", ["cli", "yaml"])
+def test_explicit_auto_is_distinguishable_from_endpoint_defaults(
+    serve_parser, tmp_path, source
+):
+    """Scoring must preserve its string default unless auto was requested."""
+    default_args = serve_parser.parse_args([])
+    if source == "yaml":
+        config = tmp_path / "format.yaml"
+        config.write_text("chat-template-content-format: auto\n")
+        options = ["--config", str(config)]
+    else:
+        options = ["--chat-template-content-format", "auto"]
+    explicit_args = serve_parser.parse_args(options)
+
+    assert default_args.chat_template_content_format == "auto"
+    assert explicit_args.chat_template_content_format == "auto"
+    assert not getattr(default_args, "_chat_template_content_format_explicit", False)
+    assert explicit_args._chat_template_content_format_explicit
+
+
 ### Test config parsing
 def test_config_arg_parsing(serve_parser, cli_config_file):
     args = serve_parser.parse_args([])

@@ -457,9 +457,11 @@ Some scoring models require a specific prompt format to work correctly. You can 
 
 For offline scoring, pass `chat_template` to the `LLM` constructor to use it for every `LLM.score` call. A `chat_template` passed to `LLM.score` overrides the constructor's template for that call.
 
-Scoring passes string content to templates by default, preserving existing template behavior. To opt into structured text/image blocks, set `--score-template-content-format openai` when serving or pass `score_template_content_format="openai"` to `LLM.score()`.
+Scoring passes string content to templates by default, preserving existing template behavior. To opt into structured text/image blocks, set `--chat-template-content-format openai` when serving or pass `chat_template_content_format="openai"` to `LLM.score()`.
 
-The scoring format accepts `string` and `openai`; it is independent of `--chat-template-content-format`. The default `string` format keeps model-specific image placeholders. Templates that expect content blocks must explicitly opt into `openai`, including templates saved with a checkpoint.
+When the server option is omitted, scoring keeps string content with model-specific image placeholders; chat and message-based embeddings keep their existing automatic detection. An explicit `--chat-template-content-format auto` also enables detection for scoring. Explicit `string` and `openai` apply to chat, message-embedding, and scoring templates. These rules also apply when the setting is supplied through a YAML config file.
+
+`LLM.score()` defaults to `chat_template_content_format="string"`; pass `"auto"` for detection or `"openai"` for structured blocks. Templates that expect content blocks, including saved templates, must opt in through explicit `auto` or `openai`. Detection is heuristic; use `string` for ambiguous legacy templates such as character loops.
 
 Like chat templates, the score template receives a `messages` list. For scoring, each message has a `role` attribute—either `"query"` or `"document"`. For the usual kind of point-wise cross-encoder, you can expect exactly two messages: one query and one document. To access the query and document content, use Jinja's `selectattr` filter:
 

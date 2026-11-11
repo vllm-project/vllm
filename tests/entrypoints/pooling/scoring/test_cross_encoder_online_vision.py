@@ -28,6 +28,19 @@ ROCM_ATTN_BACKENDS = [
 ATTN_BACKENDS = ROCM_ATTN_BACKENDS if current_platform.is_rocm() else ["auto"]
 
 
+# This legacy character loop is ambiguous to the automatic format detector.
+_STRING_CONTENT = """
+{%- set ns = namespace(messages=[]) -%}
+{%- for message in messages -%}
+  {%- set text -%}
+    {%- for char in message.content -%}{{- char -}}{%- endfor -%}
+  {%- endset -%}
+  {%- set ns.messages = ns.messages + [dict(role=message.role, content=text)] -%}
+{%- endfor -%}
+{%- set messages = ns.messages -%}
+"""
+
+
 # Match the legacy string parser: image placeholders first, then text.
 _STRUCTURED_CONTENT = """
 {%- macro render_content(parts) -%}
@@ -109,16 +122,18 @@ _SERVER_PARAMS = [
     pytest.param((backend, "string"), id=backend) for backend in ATTN_BACKENDS
 ]
 _STRUCTURED_SERVER_PARAM = pytest.param(("auto", "openai"), id="structured")
+_AUTO_SERVER_PARAM = pytest.param(("auto", "auto"), id="structured-auto")
 
 
 @pytest.fixture(scope="module", params=_SERVER_PARAMS)
 def server(request, tmp_path_factory):
     backend, content_format = request.param
-    template = VLLM_PATH / "examples/pooling/score/template/qwen3_vl_reranker.jinja"
-    if content_format == "openai":
-        structured_template = tmp_path_factory.mktemp("scoring") / "structured.jinja"
-        structured_template.write_text(_STRUCTURED_CONTENT + template.read_text())
-        template = structured_template
+    source_template = (
+        VLLM_PATH / "examples/pooling/score/template/qwen3_vl_reranker.jinja"
+    )
+    template = tmp_path_factory.mktemp("scoring") / "score.jinja"
+    wrapper = _STRING_CONTENT if content_format == "string" else _STRUCTURED_CONTENT
+    template.write_text(wrapper + source_template.read_text())
     print(f"\n=== Starting server with attention backend: {backend} ===")
     args = [
         "--enforce-eager",
@@ -126,13 +141,11 @@ def server(request, tmp_path_factory):
         "8192",
         "--chat-template",
         str(template),
-        "--chat-template-content-format",
-        "string" if content_format == "openai" else "openai",
         *ROCM_EXTRA_ARGS,
     ]
 
-    if content_format == "openai":
-        args += ["--score-template-content-format", "openai"]
+    if content_format != "string":
+        args += ["--chat-template-content-format", content_format]
 
     env = dict()
     if backend != "auto":
@@ -240,9 +253,7 @@ async def test_score_api_queries_str_documents_image_base64_content(
     assert_score(score.data[0].score, TEXT_VS_IMAGE, backend, "text_vs_image_base64")
 
 
-@pytest.mark.parametrize(
-    "server", _SERVER_PARAMS + [_STRUCTURED_SERVER_PARAM], indirect=True
-)
+@pytest.mark.parametrize("server", _SERVER_PARAMS + [_AUTO_SERVER_PARAM], indirect=True)
 @pytest.mark.asyncio
 async def test_score_api_queries_str_documents_image_url_plus_text_content(
     server: tuple[RemoteOpenAIServer, str],

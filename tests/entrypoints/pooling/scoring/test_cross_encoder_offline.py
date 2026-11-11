@@ -103,7 +103,11 @@ def test_classify(llm):
 
 @pytest.mark.parametrize(
     "content_format",
-    [pytest.param(None, id="legacy-default"), pytest.param("openai", id="structured")],
+    [
+        pytest.param(None, id="legacy-default"),
+        pytest.param("openai", id="structured"),
+        pytest.param("auto", id="detected-structured"),
+    ],
 )
 @pytest.mark.skip_global_cleanup
 def test_score_content_format_override_matches_classify(llm: LLM, content_format):
@@ -116,7 +120,14 @@ def test_score_content_format_override_matches_classify(llm: LLM, content_format
         ]
     )
     chat_template = "{{ messages | tojson }}"
-    if content_format != "openai":
+    if content_format == "auto":
+        chat_template = (
+            "{% for message in messages %}"
+            "{% for part in message.content %}{{ part.text }}{% endfor %}"
+            "{% endfor %}"
+        )
+        expected_prompt = query + document
+    elif content_format is None:
         chat_template = (
             "{% for message in messages %}"
             "{% for char in message.content %}{{ char }}{% endfor %}"
@@ -128,7 +139,7 @@ def test_score_content_format_override_matches_classify(llm: LLM, content_format
     format_kwargs = (
         {}
         if content_format is None
-        else {"score_template_content_format": content_format}
+        else {"chat_template_content_format": content_format}
     )
     (scored,) = llm.score(
         query,

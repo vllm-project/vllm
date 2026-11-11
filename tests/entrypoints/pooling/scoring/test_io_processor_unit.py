@@ -179,7 +179,7 @@ def test_truncation_keeps_jinavl_score_token(
             data_1="a",
             data_2="bc bc bc bc",
             chat_template=None,
-            score_template_content_format="string",
+            chat_template_content_format="string",
             max_tokens_per_query=0,
             max_tokens_per_doc=0,
             tok_params=TokenizeParams(
@@ -468,7 +468,7 @@ def test_string_scoring_templates_keep_model_placeholders(
         ],
         {},
         chat_template="{{ messages[0].content + messages[1].content }}",
-        score_template_content_format="string",
+        chat_template_content_format="string",
     )
     assert prompt == "a<|vision_start|><|image_pad|><|vision_end|>"
 

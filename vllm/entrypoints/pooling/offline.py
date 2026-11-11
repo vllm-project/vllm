@@ -19,7 +19,7 @@ from vllm.outputs import (
 from vllm.pooling_params import PoolingParams
 from vllm.renderers.chat_utils import (
     ChatTemplateConfig,
-    ChatTemplateContentFormat,
+    ChatTemplateContentFormatOption,
 )
 from vllm.tasks import SCORE_TYPE_MAP, PoolingTask, SupportedTask
 
@@ -303,7 +303,7 @@ class PoolingOfflineMixin(OfflineInferenceMixin):
         lora_request: list[LoRARequest] | LoRARequest | None = None,
         tokenization_kwargs: dict[str, Any] | None = None,
         chat_template: str | None = None,
-        score_template_content_format: ChatTemplateContentFormat = "string",
+        chat_template_content_format: ChatTemplateContentFormatOption = "string",
     ) -> list[ScoringRequestOutput]:
         """Generate similarity scores for all pairs `<text,text_pair>` or
           `<multi-modal data, multi-modal data pair>`.
@@ -338,9 +338,10 @@ class PoolingOfflineMixin(OfflineInferenceMixin):
             lora_request: LoRA request to use for generation, if any.
             chat_template: The chat template to use for scoring. If None, use
                 the chat template passed to the LLM constructor.
-            score_template_content_format: The format of message content passed
+            chat_template_content_format: The format of message content passed
                 to the scoring template: "string" for plain text, "openai" for
-                structured content blocks. Defaults to "string".
+                structured content blocks, or "auto" to detect from the
+                template. Defaults to "string" for compatibility.
             tokenization_kwargs: Overrides for `tokenizer.encode`.
 
         Returns:
@@ -355,9 +356,9 @@ class PoolingOfflineMixin(OfflineInferenceMixin):
                 "pooling model."
             )
 
-        if score_template_content_format not in ("string", "openai"):
+        if chat_template_content_format not in ("auto", "string", "openai"):
             raise ValueError(
-                "score_template_content_format must be 'string' or 'openai'."
+                "chat_template_content_format must be 'auto', 'string', or 'openai'."
             )
 
         score_type: str | None = SCORE_TYPE_MAP.get(self.pooling_task, None)  # type: ignore[arg-type]
@@ -398,7 +399,7 @@ class PoolingOfflineMixin(OfflineInferenceMixin):
             tokenization_kwargs=tokenization_kwargs,
             lora_request=lora_request,
             chat_template=chat_template,
-            score_template_content_format=score_template_content_format,
+            chat_template_content_format=chat_template_content_format,
             priorities=None,
         )
 

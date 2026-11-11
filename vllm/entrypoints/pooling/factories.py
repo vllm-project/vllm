@@ -218,6 +218,12 @@ def init_pooling_state(
         if pooling_task == "classify"
         else None
     )
+    score_content_format = args.chat_template_content_format
+    if score_content_format == "auto" and not getattr(
+        args, "_chat_template_content_format_explicit", False
+    ):
+        score_content_format = "string"
+
     state.serving_scores = (
         ServingScores(
             engine_client,
@@ -226,7 +232,7 @@ def init_pooling_state(
             request_logger=request_logger,
             chat_template_config=replace(
                 chat_template_config,
-                chat_template_content_format=args.score_template_content_format,
+                chat_template_content_format=score_content_format,
             ),
             enable_flash_late_interaction=getattr(
                 args, "enable_flash_late_interaction", True

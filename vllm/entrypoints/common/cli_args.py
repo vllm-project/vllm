@@ -25,7 +25,6 @@ from vllm.entrypoints.openai.models.protocol import LoRAModulePath
 from vllm.logger import init_logger
 from vllm.renderers import ReasoningEffort
 from vllm.renderers.chat_utils import (
-    ChatTemplateContentFormat,
     ChatTemplateContentFormatOption,
     validate_chat_template,
 )
@@ -70,6 +69,20 @@ class LoRAParserAction(argparse.Action):
         setattr(namespace, self.dest, lora_list)
 
 
+class ChatTemplateContentFormatAction(argparse.Action):
+    """Distinguish explicit format selection from endpoint-specific defaults."""
+
+    def __call__(
+        self,
+        parser: argparse.ArgumentParser,
+        namespace: argparse.Namespace,
+        values: str | Sequence[str] | None,
+        option_string: str | None = None,
+    ):
+        setattr(namespace, self.dest, values)
+        namespace._chat_template_content_format_explicit = True
+
+
 @config
 class BaseFrontendArgs:
     """Base arguments for the OpenAI-compatible frontend server.
@@ -90,14 +103,13 @@ class BaseFrontendArgs:
     chat_template_content_format: ChatTemplateContentFormatOption = "auto"
     """The format to render message content within a chat template.
 
+    When omitted, chat/message-embedding templates use automatic detection,
+    while score templates keep string content for compatibility. Explicit
+    "auto" detects the format for both paths.
+
     * "string" will render the content as a string. Example: `"Hello World"`
     * "openai" will render the content as a list of dictionaries, similar to
       OpenAI schema. Example: `[{"type": "text", "text": "Hello world!"}]`"""
-    score_template_content_format: ChatTemplateContentFormat = "string"
-    """Content format supplied to cross-encoder templates for `/score` and
-    `/rerank`: `string` preserves plain text and model-specific image
-    placeholders; `openai` supplies structured text/image blocks.
-    Independent of `--chat-template-content-format`."""
     trust_request_chat_template: bool = False
     """Whether to trust the chat template provided in the request. If False,
     the server will always use the chat template specified by `--chat-template`
@@ -251,6 +263,10 @@ class BaseFrontendArgs:
         Subclasses should override this and call
         `super()._customize_cli_kwargs(frontend_kwargs)` first.
         """
+        frontend_kwargs["chat_template_content_format"]["action"] = (
+            ChatTemplateContentFormatAction
+        )
+
         # Special case: default_chat_template_kwargs needs json.loads type
         frontend_kwargs["default_chat_template_kwargs"]["type"] = json.loads
         frontend_kwargs["reasoning_effort_map"]["type"] = json.loads

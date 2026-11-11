@@ -13,9 +13,11 @@ from vllm.logger import init_logger
 from vllm.renderers import TokenizeParams, merge_kwargs
 from vllm.renderers.chat_utils import (
     ChatTemplateContentFormat,
+    ChatTemplateContentFormatOption,
 )
 from vllm.renderers.hf import (
     resolve_chat_template,
+    resolve_chat_template_content_format,
     safe_apply_chat_template,
 )
 from vllm.renderers.inputs.preprocess import (
@@ -563,11 +565,7 @@ class CrossEncoderIOProcessor(ScoringIOProcessor):
                 data_1=data_1[i],
                 data_2=data_2[i],
                 chat_template=self.chat_template,
-                score_template_content_format=(
-                    "openai"
-                    if self.chat_template_content_format == "openai"
-                    else "string"
-                ),
+                chat_template_content_format=self.chat_template_content_format,
                 max_tokens_per_query=max_tokens_per_query,
                 max_tokens_per_doc=max_tokens_per_doc,
                 tok_params=tok_params,
@@ -618,7 +616,7 @@ class CrossEncoderIOProcessor(ScoringIOProcessor):
                         if ctx.chat_template is None
                         else ctx.chat_template
                     ),
-                    score_template_content_format=ctx.score_template_content_format,
+                    chat_template_content_format=ctx.chat_template_content_format,
                     max_tokens_per_query=max_tokens_per_query,
                     max_tokens_per_doc=max_tokens_per_doc,
                     tok_params=tok_params,
@@ -670,9 +668,7 @@ class CrossEncoderIOProcessor(ScoringIOProcessor):
             data_2=render_params["data_2"],
             encode_kwargs=tok_params.get_encode_kwargs(),
             chat_template=render_params["chat_template"],
-            score_template_content_format=render_params[
-                "score_template_content_format"
-            ],
+            chat_template_content_format=render_params["chat_template_content_format"],
             max_tokens_per_query=render_params["max_tokens_per_query"],
             max_tokens_per_doc=render_params["max_tokens_per_doc"],
             chat_template_kwargs=prompt_extras.get("chat_template_kwargs")
@@ -729,7 +725,7 @@ class CrossEncoderIOProcessor(ScoringIOProcessor):
         max_tokens_per_query: int = 0,
         max_tokens_per_doc: int = 0,
         chat_template_kwargs: dict[str, Any] | None = None,
-        score_template_content_format: ChatTemplateContentFormat | None = None,
+        chat_template_content_format: ChatTemplateContentFormatOption | None = None,
     ):
         model_config = self.model_config
         tokenizer = self.tokenizer
@@ -740,12 +736,20 @@ class CrossEncoderIOProcessor(ScoringIOProcessor):
                 self.saved_chat_template_kwargs, chat_template_kwargs
             )
 
-        given_format = (
-            score_template_content_format or self.chat_template_content_format
-        )
+        given_format = chat_template_content_format or self.chat_template_content_format
         content_format: ChatTemplateContentFormat = "string"
-        if chat_template is not None and given_format == "openai":
-            content_format = "openai"
+        if chat_template is not None:
+            content_format = (
+                resolve_chat_template_content_format(
+                    chat_template,
+                    tools=None,
+                    given_format=given_format,
+                    tokenizer=tokenizer,
+                    model_config=model_config,
+                )
+                if given_format == "auto"
+                else given_format
+            )
 
         conversation, mm_data, mm_uuids = parse_score_messages(
             data_1, data_2, model_config, content_format
