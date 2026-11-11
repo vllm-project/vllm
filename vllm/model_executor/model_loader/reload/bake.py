@@ -9,10 +9,11 @@ recorded, and any other op on it runs on meta copies of its arguments. Ops on
 real tensors alone run for real: `_TargetGuard` makes a loader that reads a
 checkpoint tensor a fallback, and constant writes into one (`fill_`,
 `zero_`) happen, mid-update, and stay out of the plan: replays don't redo
-them. `begin` zero-fills only params flagged `fill_on_reload` (padded
-`RoutedExperts` params); other padding a loader fills, such as block scales
-set to 1 or vocab and KDA rows, keeps its bytes on replays (outputs are
-unaffected: the padded weights are 0)."""
+them. `begin` zero-fills params flagged `fill_on_reload` (padded
+`RoutedExperts` params), so padding a loader fills in those stays 0 on
+replays, e.g. block scales under `tp_shard_with_padding` (1 at cold start).
+Padding a loader fills in unflagged params, such as vocab and KDA rows,
+keeps its bytes. Outputs are unaffected: the padded weights are 0."""
 
 from collections import defaultdict
 from collections.abc import Callable, Iterator
