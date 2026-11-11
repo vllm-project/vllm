@@ -24,7 +24,7 @@ from vllm.model_executor.warmup.jit_warmup_cutedsl_helper import (
 
 
 class CandidatePagePlanKernel(VllmCuTeDSLJitKernel[tuple[int, int]]):
-    """Cache ``(physical_page << 32) | token_offset`` for all consumer layers."""
+    """Cache `(physical_page << 32) | token_offset` for all consumer layers."""
 
     @staticmethod
     def kernel(key: tuple[int, int]) -> Any:
