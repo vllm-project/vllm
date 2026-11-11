@@ -78,6 +78,9 @@ logger = init_logger(__name__)
 
 if TYPE_CHECKING:
     from vllm.entrypoints.mcp.tool_server import ToolServer
+    from vllm.entrypoints.scale_out.token_in_token_out.protocol import (
+        MultiModalFeatures,
+    )
 
 
 ResponsesPreviousMessages: TypeAlias = (
@@ -111,44 +114,78 @@ def _extract_allowed_tools_from_mcp_requests(
 
 
 def _reused_prompt_token_ids(
-    request: Any, renderer: BaseRenderer, messages: list[Any] | None = None
-) -> list[int] | None:
-    """Pop prompt token ids forwarded for decode-side reuse, if any.
+    request: Any,
+    renderer: BaseRenderer,
+    messages: list[Any] | None = None,
+    *,
+    allow_reuse: bool = True,
+) -> "tuple[list[int] | None, MultiModalFeatures | None]":
+    """Pop forwarded prompt token ids and multimodal features, if any.
 
     Disaggregated serving carries the prefill stage's ids in
-    `kv_transfer_params` so the decode stage can skip re-tokenizing. Removing
-    the key keeps the id list out of the engine's sampling metadata.
+    ``kv_transfer_params`` so the decode stage can skip re-tokenizing. A
+    router that already rendered the prompt -- including multimodal
+    preprocessing -- may also forward ``prompt_features``, letting the engine
+    skip templating, tokenization and multimodal preprocessing for media
+    requests too. Removing both keys keeps them out of the engine's sampling
+    metadata.
 
-    Returns None when token ids alone are not enough. For example, the
-    user may want the rendered prompt back, or may have sent media for
-    the model to see. In those cases, conversation is re-rendered instead.
-    Otherwise raises VLLMValidationError if the ids are malformed or out of
-    vocabulary.
+    Returns ``(ids, features)``. Without ``prompt_features`` the ids are
+    dropped (None) when ``echo`` or ``return_prompt_text`` is set or
+    ``messages`` has non-text content, since all need ``messages`` to be
+    rendered. Raises VLLMValidationError if the ids or features are malformed
+    or out of vocabulary.
+
+    ``allow_reuse`` is the trust gate: it is True when the server runs with
+    ``--trust-forwarded-prompt-token-ids`` or is a KV-transfer consumer (a
+    disaggregated decode worker, which has reused forwarded ids without a
+    flag since #48145). When False the caller's ids and features are left
+    untouched in ``kv_transfer_params`` (the engine discards them when no
+    connector is configured) and the engine renders ``messages`` itself, so
+    a plain ``vllm serve`` never serves caller-controlled tokens or tensors
+    (#62333, #62307).
     """
     kv = getattr(request, "kv_transfer_params", None)
     if not isinstance(kv, dict):
-        return None
+        return None, None
+    if not allow_reuse:
+        logger.debug(
+            "Ignoring kv_transfer_params['prompt_token_ids'/'prompt_features']: "
+            "the server is neither a KV-transfer consumer nor started with "
+            "--trust-forwarded-prompt-token-ids."
+        )
+        return None, None
     ids = kv.pop("prompt_token_ids", None)
+    features_raw = kv.pop("prompt_features", None)
     if ids is None:
-        return None
+        if features_raw is not None:
+            # A router forwarding features without ids is buggy: the
+            # features alone cannot rebuild the prompt. Surface it instead
+            # of silently discarding the payload.
+            logger.warning(
+                "Ignoring kv_transfer_params['prompt_features']: "
+                "prompt_token_ids is absent, so the features cannot be "
+                "used. The caller should forward both or neither."
+            )
+        return None, None
     if getattr(request, "echo", False):
         logger.debug(
             "Ignoring kv_transfer_params['prompt_token_ids']: "
             "echo is set, so messages are rendered instead."
         )
-        return None
+        return None, None
     if getattr(request, "return_prompt_text", False):
         logger.debug(
             "Ignoring kv_transfer_params['prompt_token_ids']: "
             "return_prompt_text is set, so messages are rendered instead."
         )
-        return None
-    if has_non_text_content(messages):
+        return None, None
+    if has_non_text_content(messages) and features_raw is None:
         logger.debug(
             "Ignoring kv_transfer_params['prompt_token_ids']: "
             "messages have non-text content and are rendered instead."
         )
-        return None
+        return None, None
     # bool is an int subclass, hence the exact type check.
     if (
         not isinstance(ids, list)
@@ -162,7 +199,23 @@ def _reused_prompt_token_ids(
         )
     # The engine checks this too, but only after a streamed response starts.
     renderer.validate_token_ids(ids, parameter="kv_transfer_params.prompt_token_ids")
-    return ids
+    features: MultiModalFeatures | None = None
+    if features_raw is not None:
+        # Lazy import: the token-in/token-out protocol sits above the
+        # renderers in the entrypoints layer. Aliased so the local binding
+        # does not shadow the TYPE_CHECKING name in annotations (F823).
+        from vllm.entrypoints.scale_out.token_in_token_out.protocol import (
+            MultiModalFeatures as _MultiModalFeatures,
+        )
+
+        try:
+            features = _MultiModalFeatures.model_validate(features_raw)
+        except Exception as e:
+            raise VLLMValidationError(
+                f"`kv_transfer_params['prompt_features']` is invalid: {e}",
+                parameter="kv_transfer_params.prompt_features",
+            ) from e
+    return ids, features
 
 
 class OnlineRenderer:
@@ -176,6 +229,8 @@ class OnlineRenderer:
         chat_template_content_format: ChatTemplateContentFormatOption,
         trust_request_chat_template: bool = False,
         trust_request_mm_kwargs: bool = False,
+        trust_forwarded_prompt_token_ids: bool = False,
+        kv_transfer_consumer: bool = False,
         enable_auto_tools: bool = False,
         exclude_tools_when_tool_choice_none: bool = False,
         tool_parser: str | None = None,
@@ -188,6 +243,14 @@ class OnlineRenderer:
         self.model_config = model_config
         self.renderer = renderer
         self.request_logger = request_logger
+
+        # Trust gate for forwarded prompt token ids and multimodal
+        # features: explicit opt-in, or a disaggregated decode worker
+        # (a KV-transfer consumer), which has reused forwarded ids since
+        # #48145. Everything else renders `messages` itself.
+        self._allow_forwarded_reuse = (
+            trust_forwarded_prompt_token_ids or kv_transfer_consumer
+        )
 
         self.enable_auto_tools = enable_auto_tools
         self.exclude_tools_when_tool_choice_none = exclude_tools_when_tool_choice_none
@@ -564,8 +627,14 @@ class OnlineRenderer:
         should_include_tools: bool = True,
     ):
         """Build Harmony (GPT-OSS) messages and engine prompt from a chat request."""
-        reuse_ids = _reused_prompt_token_ids(request, self.renderer)
-        if reuse_ids:
+        # Harmony is not a vision path: forwarded multimodal features are
+        # not supported here. When they are present the ids are dropped too
+        # and messages are re-rendered, matching the pre-feature behavior
+        # (placeholder-bearing ids without mm_kwargs would be invalid).
+        reuse_ids, reuse_features = _reused_prompt_token_ids(
+            request, self.renderer, allow_reuse=self._allow_forwarded_reuse
+        )
+        if reuse_ids and reuse_features is None:
             # Decode-side token reuse: feed the forwarded ids straight to the
             # engine. Harmony has no adjust_request hook to preserve.
             engine_input = tokens_input(reuse_ids, cache_salt=request.cache_salt)
@@ -827,13 +896,48 @@ class OnlineRenderer:
             default_mm_processor_kwargs=getattr(request, "mm_processor_kwargs", None),
         )
 
-        reuse_ids = _reused_prompt_token_ids(request, renderer, messages)
-        if reuse_ids:
+        reuse_ids, reuse_features = _reused_prompt_token_ids(
+            request,
+            renderer,
+            messages,
+            allow_reuse=self._allow_forwarded_reuse,
+        )
+        conversation: list[ConversationMessage] = []
+        engine_input: EngineInput
+        if reuse_ids and reuse_features is not None:
+            # Forwarded render result with multimodal features: build the
+            # engine input with the generate path's shared builder (and its
+            # validations), skipping templating, tokenization and multimodal
+            # preprocessing. Lazy import keeps the entrypoints layering
+            # acyclic.
+            from vllm.entrypoints.scale_out.token_in_token_out.mm_features import (
+                engine_input_from_features,
+            )
+
+            try:
+                engine_input = engine_input_from_features(
+                    reuse_ids,
+                    reuse_features,
+                    cache_salt=getattr(request, "cache_salt", None),
+                    mm_cache=renderer.mm_processor_cache,
+                    ec_transfer_params=getattr(request, "ec_transfer_params", None),
+                )
+            except ValueError as e:
+                raise VLLMValidationError(
+                    f"`kv_transfer_params['prompt_features']` is invalid: {e}",
+                    parameter="kv_transfer_params.prompt_features",
+                ) from e
+            logger.debug(
+                "Reusing forwarded prompt token ids (%d tokens) with "
+                "multimodal features: %s",
+                len(reuse_ids),
+                {m: len(h) for m, h in reuse_features.mm_hashes.items()},
+            )
+        elif reuse_ids:
             # Decode-side token reuse: feed the forwarded ids straight to the
             # engine, skipping templating and tokenization. ``messages`` are not
             # tokenized, so conversation is empty. The adjust_request tail below
             # still runs.
-            conversation: list[ConversationMessage] = []
             engine_input = tokens_input(
                 reuse_ids, cache_salt=getattr(request, "cache_salt", None)
             )
