@@ -88,11 +88,12 @@ class CausalMixin(VllmModelForTextGeneration, Base):
 
     def compute_logits_local(self, hidden_states: "torch.Tensor") -> "torch.Tensor":
         """Logits for this TP rank's vocab shard, for batch-sharded sampling."""
-        bias = self.lm_head.bias
+        bias = getattr(self.lm_head, "bias", None)
         return self.logits_processor(
             self.lm_head, hidden_states, bias, skip_gather=True
         )
 
     def compute_logits(self, hidden_states: "torch.Tensor") -> "torch.Tensor | None":
-        logits = self.logits_processor(self.lm_head, hidden_states, self.lm_head.bias)
-        return logits
+        # Quantization can tie `lm_head` to the input embedding, which has no bias
+        bias = getattr(self.lm_head, "bias", None)
+        return self.logits_processor(self.lm_head, hidden_states, bias)
