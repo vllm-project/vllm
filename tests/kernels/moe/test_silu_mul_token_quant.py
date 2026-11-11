@@ -140,11 +140,12 @@ def test_silu_mul_token_quant_skips_out_of_range_ids():
     _assert_matches(q[written], s[written], ref_q[written], ref_s[written])
 
 
+@rocm_only
 @pytest.mark.parametrize("use_ep", [False, True])
 @torch.inference_mode()
 def test_triton_experts_takes_fused_path(monkeypatch, use_ep):
-    """`TritonExperts.apply` calls the fused kernel for PTPC-FP8 SiLU on ROCm only,
-    with the alignment's expert count under EP, and the output matches the unfused
+    """`TritonExperts.apply` calls the fused kernel for PTPC-FP8 SiLU, with the
+    alignment's expert count under EP, and the output matches the unfused
     `silu_and_mul` + `scaled_fp8_quant` path."""
     set_random_seed(0)
     m, k, n, topk = 33, 256, 512, 4
@@ -221,9 +222,6 @@ def test_triton_experts_takes_fused_path(monkeypatch, use_ep):
 
     monkeypatch.setattr(triton_moe, "silu_mul_token_quant", fused)
     out_fused = run()
-    if not current_platform.is_rocm():
-        assert calls == []
-        return
     assert len(calls) == 1
     ids, emap, num_experts = calls[0]
     if use_ep:

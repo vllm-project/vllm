@@ -52,7 +52,10 @@ def _silu_mul_token_quant_kernel(
     gate = tl.load(x_row + offs, mask=m, other=0.0).to(tl.float32)
     up = tl.load(x_row + H + offs, mask=m, other=0.0).to(tl.float32)
     # Round where `silu_and_mul` does, after the SiLU and after the product, so the
-    # scales and FP8 values match the unfused path bit for bit.
+    # scales and FP8 values match the unfused path bit for bit in bf16. In fp16 an
+    # FP8 value can differ by one step (`tl.sigmoid` takes a reciprocal where
+    # `silu_and_mul` divides), and a product past the fp16 range saturates instead
+    # of becoming inf.
     dt = x_ptr.dtype.element_ty
     silu = (gate * tl.sigmoid(gate)).to(dt).to(tl.float32)
     act = (silu * up).to(dt).to(tl.float32)
