@@ -19,7 +19,9 @@ from tests.parser.engine.streaming_helpers import (
     collect_tool_arguments,
     simulate_tool_streaming,
 )
+from vllm.parser.engine.adapters import ParserEngineReasoningAdapter
 from vllm.parser.engine.parser_engine import ParserEngine
+from vllm.parser.engine.registered_adapters import Qwen3ParserReasoningAdapter
 from vllm.parser.qwen3 import (
     TOOL_CALL_END,
     TOOL_CALL_START,
@@ -1931,3 +1933,36 @@ class TestQuotedToolCallsInReasoning:
         assert calls[0].name == "get_weather"
         args = json.loads(calls[0].arguments)
         assert args == {"city": "Tokyo"}
+
+    def test_thinking_config_includes_tool_call_as_reasoning_end(self, thinking_parser):
+        """Thinking Qwen3 still lists <tool_call> as an implicit reasoning end."""
+        assert thinking_parser.thinking_enabled
+        tool_call_id = thinking_parser.vocab[TOOL_CALL_START]
+        assert tool_call_id in thinking_parser.reasoning_end_token_ids
+        assert tool_call_id in thinking_parser.implicit_reasoning_end_token_ids
+
+    def test_quoted_tool_call_in_open_think_is_not_implicit_end(self, thinking_parser):
+        """A quoted <tool_call> is not an implicit end while think deferral applies.
+
+        Prompt ids end in an open <think>. find_reasoning_end must not treat
+        the quoted opener as an implicit reasoning end.
+        """
+        think_id = thinking_parser.vocab["<think>"]
+        tool_call_id = thinking_parser.vocab[TOOL_CALL_START]
+        adapter = Qwen3ParserReasoningAdapter(
+            thinking_parser.model_tokenizer,
+            tools=thinking_parser._tools,
+        )
+        assert isinstance(thinking_parser, Qwen3Parser)
+        assert isinstance(adapter, ParserEngineReasoningAdapter)
+        assert isinstance(adapter._parser_engine, Qwen3Parser)
+
+        prompt_ids = self._encode_chunk("Answer the user.<think>")
+        assert prompt_ids[-1] == think_id
+        adapter.adjust_initial_state_from_prompt(prompt_ids)
+        assert adapter._parser_engine._engine.defer_reasoning_tool_start
+
+        generated = self._encode_chunk("quoting <tool_call> inside the think block")
+        tool_at = generated.index(tool_call_id)
+        end = adapter.find_reasoning_end(generated)
+        assert end is None or end.offset != tool_at or not end.implicit

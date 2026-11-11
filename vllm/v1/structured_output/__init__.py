@@ -129,6 +129,15 @@ class StructuredOutputManager:
                 tokenizer=self.tokenizer,
                 **parser_kwargs,
             )
+            # Give the request-local reasoner the same prompt-derived state
+            # the serving parser gets (e.g. Qwen3 reasoning deferral), so the
+            # grammar gate matches serving behavior for this request. Guarded:
+            # reasoners without the hook (test doubles) must not break.
+            adjust = getattr(
+                structured_req.reasoner, "adjust_initial_state_from_prompt", None
+            )
+            if callable(adjust):
+                adjust(request.prompt_token_ids or [])
         return structured_req.reasoner
 
     def grammar_init(self, request: "Request") -> None:

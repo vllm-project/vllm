@@ -1,6 +1,7 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 
+import json
 import time
 from concurrent.futures import Future, ThreadPoolExecutor
 from dataclasses import dataclass
@@ -19,15 +20,21 @@ from vllm.config import (
 from vllm.config.model import ModelConfig
 from vllm.config.speculative import SpeculativeConfig
 from vllm.config.structured_outputs import StructuredOutputsBackend
+from vllm.entrypoints.openai.chat_completion.protocol import (
+    ChatCompletionToolsParam,
+)
 from vllm.parser.engine.adapters import ParserEngineReasoningAdapter
 from vllm.parser.engine.parser_engine import ReasoningEnd
+from vllm.parser.engine.registered_adapters import Qwen3ParserReasoningAdapter
 from vllm.reasoning import ReasoningParser
 from vllm.sampling_params import SamplingParams, StructuredOutputsParams
+from vllm.tool_parsers.structural_tag_registry import get_model_structural_tag
 from vllm.v1.request import Request
 from vllm.v1.structured_output import StructuredOutputManager
 from vllm.v1.structured_output.backend_outlines import OutlinesBackend, OutlinesGrammar
 from vllm.v1.structured_output.backend_xgrammar import XgrammarBackend
 from vllm.v1.structured_output.request import get_structured_output_key
+from vllm.v1.structured_output.utils import strip_speculative_padding
 
 TOKENIZER = "gpt2"
 THINK_END = "\n"  # reasoning-end marker (single GPT-2 token)
@@ -82,6 +89,10 @@ class MockEngineReasoner(ParserEngineReasoningAdapter):
     def __init__(self, tokenizer, marker: int, end_marker: int | None = None):
         self.marker = marker
         self.end_marker = end_marker
+
+    def adjust_initial_state_from_prompt(self, prompt_token_ids):
+        """This double has no parser engine for the inherited hook to read."""
+        return
 
     @property
     def reasoning_end_token_ids(self):
@@ -793,3 +804,164 @@ def test_clear_backend_without_grammar(skip_tokenizer_init, max_num_seqs):
     for executor in executors:
         with pytest.raises(RuntimeError, match="cannot schedule new futures"):
             executor.submit(int, 0)
+
+
+QWEN_TOKENIZER = "Qwen/Qwen3-0.6B"
+_QWEN_QUOTE = "example <tool_call> not a call"
+_QWEN_REAL_CALL = (
+    "<tool_call>\n<function=get_weather>\n"
+    "<parameter=city>Tokyo</parameter>\n</function>\n</tool_call>"
+)
+
+
+def _qwen_weather_tool() -> ChatCompletionToolsParam:
+    return ChatCompletionToolsParam(
+        type="function",
+        function={
+            "name": "get_weather",
+            "parameters": {
+                "type": "object",
+                "properties": {"city": {"type": "string"}},
+                "required": ["city"],
+            },
+        },
+    )
+
+
+def _commit_spec(manager, request, spec: list[int]):
+    """Validate, mask, and accept one supplied draft. Does not sample."""
+    _wait_for_grammar(request)
+    # Mirror the removed StructuredOutputManager.validate_tokens prefix
+    # semantics: trim_spec_tokens now keeps the first grammar-invalid token
+    # for rejection sampling, so recompute the validated prefix directly.
+    spec = strip_speculative_padding(list(spec))
+    grammar_start, _ = manager._get_constraint_bounds(request, spec)
+    structured_req = request.structured_output_request
+    assert structured_req is not None and structured_req.grammar is not None
+    if grammar_start >= len(spec):
+        validated = spec
+    else:
+        validated = spec[:grammar_start] + structured_req.grammar.validate_tokens(
+            spec[grammar_start:]
+        )
+    padded = validated + [-1] * (len(spec) - len(validated))
+    bitmask = manager.grammar_bitmask(
+        requests={request.request_id: request},
+        structured_output_request_ids=[request.request_id],
+        scheduled_spec_decode_tokens={request.request_id: padded},
+    )
+    assert bitmask is not None
+    request.append_output_token_ids(list(validated))
+    assert manager.accept_tokens(request, list(validated))
+    structured = request.structured_output_request
+    assert structured is not None and structured.reasoner is not None
+    return validated, _row_pattern(bitmask[: len(padded) + 1]), structured
+
+
+def test_qwen3_open_think_defers_required_tool_grammar():
+    """Required qwen_3_coder grammar while a Qwen3 think block is open.
+
+    Checks StructuredOutputManager only. The spec lists are supplied drafts,
+    not tokens sampled from a model. An open think lets a quoted `<tool_call>`
+    and a genuine implicit call through unconstrained. `</think>` still
+    starts the grammar on the real call. A closed think prompt does not defer.
+    """
+    tokenizer = AutoTokenizer.from_pretrained(QWEN_TOKENIZER)
+    tag = get_model_structural_tag(
+        model="qwen_3_coder",
+        tools=[_qwen_weather_tool()],
+        tool_choice="required",
+        reasoning=False,
+    )
+    assert tag is not None
+    vllm_config = VllmConfig(
+        model_config=ModelConfig(tokenizer=QWEN_TOKENIZER),
+        device_config=DeviceConfig(device="cpu"),
+        structured_outputs_config=StructuredOutputsConfig(backend="xgrammar"),
+        speculative_config=SpeculativeConfig(
+            model="[ngram]",
+            num_speculative_tokens=32,
+        ),
+    )
+    assert "gpt2" not in vllm_config.model_config.tokenizer
+    assert "Qwen3-0.6B" in vllm_config.model_config.tokenizer
+    manager = StructuredOutputManager(vllm_config)
+    manager.reasoner_cls = Qwen3ParserReasoningAdapter
+
+    def one_id(text: str) -> int:
+        ids = tokenizer.encode(text, add_special_tokens=False)
+        assert ids == [ids[0]], (text, ids)
+        return ids[0]
+
+    think_id = one_id("<think>")
+    think_end_id = one_id("</think>")
+    tool_id = one_id("<tool_call>")
+    hello_id = tokenizer.encode("Hello", add_special_tokens=False)[0]
+    open_prompt = [hello_id, think_id]
+    closed_prompt = [hello_id, think_id, think_end_id]
+
+    def encode(text: str) -> list[int]:
+        return tokenizer.encode(text, add_special_tokens=False)
+
+    def request_for(request_id: str, prompt: list[int]):
+        params = SamplingParams(
+            structured_outputs=StructuredOutputsParams(
+                structural_tag=json.dumps(tag.model_dump())
+            )
+        )
+        params.structured_outputs._backend = "xgrammar"  # type: ignore[union-attr]
+        params.update_from_generation_config({}, tokenizer.eos_token_id)
+        request = Request(
+            request_id=request_id,
+            prompt_token_ids=prompt,
+            sampling_params=params,
+            pooling_params=None,
+            reasoning_ended=None,
+        )
+        manager.grammar_init(request)
+        return request
+
+    quote = encode(_QWEN_QUOTE)
+    explicit = encode(_QWEN_QUOTE + "</think>" + _QWEN_REAL_CALL)
+    implicit = encode("Reasoning " + _QWEN_REAL_CALL)
+    assert tool_id in quote
+    assert think_end_id in explicit
+    assert think_end_id not in implicit
+
+    validated, rows, structured = _commit_spec(
+        manager, request_for("qwen-quote", open_prompt), quote
+    )
+    reasoner = structured.reasoner
+    assert reasoner._parser_engine._engine.defer_reasoning_tool_start
+    assert tool_id in reasoner.reasoning_end_token_ids
+    assert reasoner.implicit_reasoning_end_token_ids == frozenset()
+    assert reasoner.is_reasoning_end(open_prompt) is False
+    assert validated == quote
+    assert rows == "U" * (len(quote) + 1)
+    assert structured.reasoning_ended is False
+
+    validated, rows, structured = _commit_spec(
+        manager, request_for("qwen-explicit", open_prompt), explicit
+    )
+    think_at = explicit.index(think_end_id)
+    assert validated == explicit
+    assert rows.startswith("U" * (think_at + 1))
+    assert set(rows[think_at + 1 :]) == {"C"}
+    assert structured.reasoning_ended is True
+
+    validated, rows, structured = _commit_spec(
+        manager, request_for("qwen-implicit", open_prompt), implicit
+    )
+    assert validated == implicit
+    assert rows == "U" * (len(implicit) + 1)
+    assert structured.reasoning_ended is False
+
+    validated, rows, structured = _commit_spec(
+        manager, request_for("qwen-closed", closed_prompt), quote
+    )
+    reasoner = structured.reasoner
+    assert reasoner._parser_engine._engine.defer_reasoning_tool_start is False
+    assert tool_id in reasoner.implicit_reasoning_end_token_ids
+    assert reasoner.is_reasoning_end(closed_prompt) is True
+    assert validated != quote
+    assert rows.startswith("C")

@@ -727,11 +727,25 @@ class ParserEngine(Parser):
     @property
     def implicit_reasoning_end_token_ids(self) -> frozenset[int]:
         """Reasoning-end tokens that are also content, e.g. a tool-call start."""
+        if self._engine.defer_reasoning_tool_start:
+            # While a tool start is deferred inside open reasoning, no
+            # reasoning-end token doubles as content.
+            return frozenset()
         return self._reasoning_end_token_ids - {self._reasoning_end_token_id}
 
     def find_reasoning_end(self, token_ids: Sequence[int]) -> ReasoningEnd | None:
         """First reasoning end in `token_ids`, and if its token is content."""
         end_ids = self._reasoning_end_token_ids
+        if self._engine.defer_reasoning_tool_start:
+            # While deferral is active, only the explicit reasoning end
+            # (e.g. </think>) closes reasoning; an implicit end such as a
+            # quoted <tool_call> must not. Without an explicit end token the
+            # effective set is empty and no reasoning end is reported.
+            end_ids = (
+                frozenset({self._reasoning_end_token_id})
+                if self._reasoning_end_token_id is not None
+                else frozenset()
+            )
         if not end_ids:
             return None
         for offset, token_id in enumerate(token_ids):
