@@ -650,7 +650,8 @@ class SpeculativeConfig:
 
     enable_adaptive_verification: bool = False
     """Whether to adaptively size the draft-verification budget from per-request
-    confidence. Currently only supported for method="dspark"."""
+    confidence. Supported for model-based drafters (EAGLE, MTP, DFlash, DSpark)
+    and suffix decoding."""
 
     @staticmethod
     def _acceptance_length_to_rates(length: float, n: int) -> list[float]:
