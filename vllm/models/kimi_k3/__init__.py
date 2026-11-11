@@ -2,11 +2,11 @@
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 """Kimi K3 model — hardware-isolated entry point.
 
-The implementation lives under ``nvidia/`` and ``amd/``; this module picks the
+The implementation lives under `nvidia/` and `amd/`; this module picks the
 right one for the current platform and re-exports the public classes used by
-the model registry. (Mirrors ``vllm.models.minimax_m3``.)
+the model registry. (Mirrors `vllm.models.minimax_m3`.)
 
-On XPU, Kimi-Linear uses the reference KDA/MLA path in ``amd/linear.py``
+On XPU, Kimi-Linear uses the reference KDA/MLA path in `amd/linear.py`
 instead of the NVIDIA-specific fused attention kernels.
 """
 
