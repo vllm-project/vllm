@@ -17,7 +17,7 @@ from vllm.config import (
     VllmConfig,
     set_current_vllm_config,
 )
-from vllm.models.muse_spark.common.dspark import MuseSparkDSparkForCausalLM
+from vllm.models.muse_spark import MuseSparkDSparkForCausalLM
 from vllm.transformers_utils.config import get_config
 from vllm.transformers_utils.configs.muse_spark import (
     GatedDeltaNetArgs,
