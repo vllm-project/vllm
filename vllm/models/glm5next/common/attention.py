@@ -73,6 +73,14 @@ def _fused_indexer_k_norm(
     return F.layer_norm(x.float(), (dim,), weight, bias, eps).type_as(x)
 
 
+def _eager_indexer_k_norm(
+    x: torch.Tensor, weight: torch.Tensor, bias: torch.Tensor, dim: int, eps: float
+) -> torch.Tensor:
+    # Replicated layers: no per-process Inductor tuning, so every TP rank writes
+    # the same indexer K (nothing re-syncs them afterwards).
+    return F.layer_norm(x.float(), (dim,), weight, bias, eps).type_as(x)
+
+
 @torch.compile(**_INDEXER_COMPILE)
 def _fused_indexer_weight_scale(
     weights: torch.Tensor, q_scale: torch.Tensor, scale: float
@@ -238,6 +246,8 @@ class Indexer(nn.Module):
     ):
         super().__init__()
         self.vllm_config = vllm_config
+        # Set by a replicated attention layer (see _eager_indexer_k_norm).
+        self.eager_k_norm = False
         self.config = config
         self.quant_config = quant_config
         # self.indexer_cfg = config.attn_module_list_cfg[0]["attn_index"]
@@ -345,7 +355,8 @@ class Indexer(nn.Module):
 
         k, weights = self.wk_weights_proj(hidden_states)
 
-        k = _fused_indexer_k_norm(
+        k_norm = _eager_indexer_k_norm if self.eager_k_norm else _fused_indexer_k_norm
+        k = k_norm(
             k, self.k_norm.weight, self.k_norm.bias, self.head_dim, self.k_norm.eps
         )
 
@@ -625,6 +636,8 @@ class Glm5NextMLAAttention(nn.Module):
         )
         # Replicated layers have no all-reduce to resync ranks: fix the top-k order.
         self.mla_attn.canonical_topk_order = replicate and self.indexer is not None
+        if replicate and self.indexer is not None:
+            self.indexer.eager_k_norm = True
 
     def forward(
         self, hidden_states: torch.Tensor, positions: torch.Tensor
