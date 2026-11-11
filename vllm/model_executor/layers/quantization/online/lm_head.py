@@ -1,9 +1,9 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 """Online lm_head quantization: weight-only methods for the model's own
-lm_head, selected by a ``quantization_config.targets`` pattern naming it, and
+lm_head, selected by a `quantization_config.targets` pattern naming it, and
 private quantized copies of an already-loaded lm_head for speculative-decoding
-drafters (``draft_lm_head_quantization``)."""
+drafters (`draft_lm_head_quantization`)."""
 
 from abc import abstractmethod
 from itertools import chain
@@ -54,7 +54,7 @@ class OnlineLMHeadMethodBase(OnlineLinearBase):
 
     supports_lm_head = True
     scheme: ClassVar[str]
-    """The weight name in ``QUANT_KEY_NAMES``, for logs and errors."""
+    """The weight name in `QUANT_KEY_NAMES`, for logs and errors."""
     weight_type: ClassVar[ScalarType]
     group_size: ClassVar[int]
     """Input channels per scale; -1 for one scale per output channel."""
@@ -68,7 +68,7 @@ class OnlineLMHeadMethodBase(OnlineLinearBase):
     def quantize(
         self, weight: torch.Tensor
     ) -> tuple[torch.Tensor, torch.Tensor, torch.Tensor | None]:
-        """Quantize ``weight`` [N, K] into the `MPLinearKernel` layout.
+        """Quantize `weight` [N, K] into the `MPLinearKernel` layout.
 
         Returns the weight packed along K, the scales [N, K // group_size]
         ([N, 1] per channel) and the zero points packed along N, or None

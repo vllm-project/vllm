@@ -2,9 +2,9 @@
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 """Online int4 weight-only quantization.
 
-``Int4PerGroup32AsymLMHeadMethod`` quantizes an fp16/bf16 lm_head at load time
-(a ``quantization_config.targets`` pattern naming the lm_head, with
-``{"weight": "int4_per_group_32_asym"}``). Decode reads the
+`Int4PerGroup32AsymLMHeadMethod` quantizes an fp16/bf16 lm_head at load time
+(a `quantization_config.targets` pattern naming the lm_head, with
+`{"weight": "int4_per_group_32_asym"}`). Decode reads the
 whole lm_head every step, so on bandwidth-bound GPUs a full-precision head is
 one of the largest per-token costs even when the checkpoint quantizes every
 other linear layer.
@@ -29,11 +29,11 @@ _PACK_FACTOR = 8
 def quantize_int4_per_group_asym(
     weight: torch.Tensor, group_size: int
 ) -> tuple[torch.Tensor, torch.Tensor, torch.Tensor]:
-    """Asymmetric uint4 quantization of the rows of ``weight`` [N, K].
+    """Asymmetric uint4 quantization of the rows of `weight` [N, K].
 
     Returns the codes [N, K] uint8, the scales [N, K // group_size] in the
     weight dtype and the zero points [N, K // group_size] uint8, such that
-    ``(codes - zero_point) * scale`` approximates ``weight``. Each group's
+    `(codes - zero_point) * scale` approximates `weight`. Each group's
     range is widened to include 0, so the zero point always fits in uint4.
     """
     n, k = weight.shape
@@ -59,7 +59,7 @@ def quantize_int4_per_group_asym(
 def quantize_int4_to_mp_layout(
     weight: torch.Tensor, group_size: int, chunk_rows: int = 8192
 ) -> tuple[torch.Tensor, torch.Tensor, torch.Tensor]:
-    """Quantize ``weight`` [N, K] into the `MPLinearKernel` uint4 layout.
+    """Quantize `weight` [N, K] into the `MPLinearKernel` uint4 layout.
 
     Returns the codes packed along K (int32 [N, K // 8]), the scales
     [N, K // group_size] and the zero points packed along N
