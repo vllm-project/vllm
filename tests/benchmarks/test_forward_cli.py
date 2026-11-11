@@ -19,6 +19,7 @@ from vllm.benchmarks.forward.profile import summarize
 from vllm.benchmarks.forward.routing import RoutingFixture, zipf_topk_ids
 from vllm.benchmarks.forward.shapes import jitter_kv_lens, parse_case
 from vllm.platforms import current_platform
+from vllm.sampling_params import SamplingParams
 from vllm.v1.attention.backends.mla.cpu_mla import CPUMLABackend
 from vllm.v1.attention.backends.registry import MambaAttentionBackendEnum
 from vllm.v1.kv_cache_interface import KVCacheGroupSpec, MambaSpec, MLAAttentionSpec
@@ -280,7 +281,9 @@ def test_bench_forward_hybrid_verify(tmp_path, routing):
         (rank,) = row["ranks"]
         assert rank["routing"] == ("zipf" if routing == "auto" else routing)
         assert rank["finite"] and rank["graph_deterministic"]
-        assert rank["timing_scope"] == "target_only"
+        assert rank["timing_scope"] == "target_and_sampler"
+        assert rank["sampler"]["valid_token_ids"]
+        assert rank["sampler"]["graph_deterministic"]
         assert row["median_us"] > 0
 
 
@@ -305,7 +308,8 @@ def test_zipf_expert_selection():
 )
 @pytest.mark.parametrize("method", ["mtp", "eagle3", "dspark", "dflash"])
 def test_bench_forward_drafter(tmp_path, method):
-    """The CLI captures real proposals, with full acceptance, unless excluded."""
+    """The CLI captures rejection sampling and real proposals, with full
+    acceptance, unless excluded."""
     config = dict(
         architectures=["Qwen3ForCausalLM"],
         model_type="qwen3",
@@ -393,7 +397,7 @@ def test_bench_forward_drafter(tmp_path, method):
         output = tmp_path / f"{exclude}.json"
         args = command + ["--output-json", str(output)]
         if exclude:
-            args.append("--exclude-drafter")
+            args += ["--exclude-drafter", "--exclude-sampler"]
         result = subprocess.run(args, capture_output=True, text=True, timeout=600)
         assert result.returncode == 0, result.stdout + result.stderr
         for row in json.loads(output.read_text()):
@@ -403,9 +407,11 @@ def test_bench_forward_drafter(tmp_path, method):
             assert rank["graph_vs_eager"]["relative_rms"] == 0
             if exclude:
                 assert rank["timing_scope"] == "target_only"
-                assert "drafter" not in rank
+                assert "drafter" not in rank and "sampler" not in rank
             else:
-                assert rank["timing_scope"] == "target_and_drafter"
+                assert rank["timing_scope"] == "target_sampler_and_drafter"
+                assert rank["sampler"]["valid_token_ids"]
+                assert rank["sampler"]["graph_deterministic"]
                 assert rank["drafter"]["acceptance"] == "all"
                 assert rank["drafter"]["num_draft_tokens"] == 3
                 assert rank["drafter"]["graph_matches_eager"]
@@ -455,6 +461,8 @@ def test_bench_forward_pipeline(tmp_path):
     assert [r["pp_rank"] for r in row["ranks"]] == [0, 1]
     for rank in row["ranks"]:
         assert rank["finite"]
+        # Only the last stage samples.
+        assert ("sampler" in rank) == (rank["pp_rank"] == 1)
         summary = json.loads(Path(rank["profile"]["summary"]).read_text())
         assert Path(summary["trace"]).exists()
         assert any("nccl" in k["name"].lower() for k in summary["kernels"])
@@ -645,7 +653,7 @@ def test_bench_forward_rejects_oversized_verify(capacity):
         ValueError,
         match=rf"Case 'verify' needs 3 draft tokens.*supports {capacity}",
     ):
-        run_case(runner, case, SimpleNamespace())
+        run_case(runner, case, SimpleNamespace(), SamplingParams())
 
 
 def test_profile_summary():
@@ -724,6 +732,8 @@ def test_bench_forward(tmp_path):
         rank0 = row["ranks"][0]
         assert len(rank0["batch_order"]) == len(row["requests"])
         assert rank0["finite"] and rank0["graph_deterministic"]
+        assert rank0["timing_scope"] == "target_and_sampler"
+        assert rank0["sampler"]["valid_token_ids"]
         assert row["median_us"] > 0
         profile = rank0["profile"]
         assert profile["top_kernels"] and profile["span_us"] > 0
