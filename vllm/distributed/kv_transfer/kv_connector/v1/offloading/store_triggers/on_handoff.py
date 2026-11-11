@@ -172,6 +172,11 @@ class OnHandoffStoreHandler(StoreTriggerHandler):
             assert boundary > 0
             assert boundary % self._config.tokens_per_hash == 0
             assert boundary <= max_boundary
+            # Under lookahead the prompt can be longer than the hashed
+            # prefix, so this is the only range guard before
+            # register_boundary_key reads the hashes.
+            if boundary > len(req.block_hashes) * self._config.tokens_per_hash:
+                continue
 
             cow_blocks = {group_idx: block_id for group_idx, block_id, _ in entries}
             assert self._cow_source_groups.issubset(cow_blocks)
