@@ -1,5 +1,7 @@
-# SPDX-License-Identifier: MIT
-# Copyright (C) 2026, Advanced Micro Devices, Inc. All rights reserved.
+# SPDX-License-Identifier: Apache-2.0
+# SPDX-FileCopyrightText: Copyright contributors to the vLLM project
+# Adapted from ROCm/ATOM (https://github.com/ROCm/ATOM), MIT License,
+# Copyright (C) 2026, Advanced Micro Devices, Inc.
 """A kernel build's parameters, all of them in FlyDSL's JIT cache key.
 
 FlyDSL keys a compiled kernel by the scalar values (int, float, bool, str, enum,

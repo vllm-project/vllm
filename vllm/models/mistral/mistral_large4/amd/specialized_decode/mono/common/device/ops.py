@@ -1,5 +1,7 @@
-# SPDX-License-Identifier: MIT
-# Copyright (C) 2026, Advanced Micro Devices, Inc. All rights reserved.
+# SPDX-License-Identifier: Apache-2.0
+# SPDX-FileCopyrightText: Copyright contributors to the vLLM project
+# Adapted from ROCm/ATOM (https://github.com/ROCm/ATOM), MIT License,
+# Copyright (C) 2026, Advanced Micro Devices, Inc.
 """Device-side primitives of the mono kernels: wave reductions and shuffles, the
 approximate hardware math, bf16 / fp8 packing, buffer resources, the
 execution-model constants and the kernel symbol naming.
@@ -22,10 +24,9 @@ transposes, fp8 packing, MXFP4 scales); the LLVM intrinsics here (`expect`,
 
 from __future__ import annotations
 
-import re
-
 import flydsl.compiler as flyc
 import flydsl.expr as fx
+import regex as re
 from aiter.ops.flydsl.kernels import buffer_ops as bo
 from aiter.ops.flydsl.kernels.dpp_utils import update_dpp_i32
 from aiter.ops.flydsl.kernels.kernels_common import kernel_signature

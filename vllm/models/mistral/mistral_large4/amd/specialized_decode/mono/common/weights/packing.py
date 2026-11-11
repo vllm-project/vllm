@@ -1,4 +1,5 @@
 # SPDX-License-Identifier: Apache-2.0
+# SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 # Copyright (c) 2025 FlyDSL Project Contributors
 
 """Host-side weight packing for fused model-layer launch wrappers."""

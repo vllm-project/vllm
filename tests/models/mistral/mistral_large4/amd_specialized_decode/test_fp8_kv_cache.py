@@ -185,7 +185,7 @@ def run_layer(kind, kv_cache_dtype, kv, index_cache, step, W=None):
             positions=step["positions"], slot_mapping=step["slots"],
             sparse_kv_indptr=step["indptr"],
         )[: S - 1]  # fmt: skip
-        torch.cuda.synchronize()
+        torch.accelerator.synchronize()
         assert torch.isfinite(out).all()
         return out.clone()
     finally:

@@ -1,4 +1,5 @@
 # SPDX-License-Identifier: Apache-2.0
+# SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 # Copyright (c) 2026 FlyDSL Project Contributors
 
 """Shared host-side weight container for model-specific MonoKernels."""
@@ -131,7 +132,7 @@ def linear_ptpc_fp8(
         and scale.numel() == weight.shape[0],
         f"{name} per-output-channel scale",
     )
-    return weight.data, scale.data.view(-1)
+    return weight.data, scale.data.view(-1)  # type: ignore[union-attr]
 
 
 def linear_bf16(
@@ -217,12 +218,12 @@ def linear_bf16(
         scale = getattr(linear, "weight_scale", None)
         _need(scale is not None, f"{name} per_Token weight_scale is missing")
         _need(
-            scale.shape == (storage_rows, 1),
-            f"{name} weight_scale shape {tuple(scale.shape)}, expected {(storage_rows, 1)}",
+            scale.shape == (storage_rows, 1),  # type: ignore[union-attr]
+            f"{name} weight_scale shape {tuple(scale.shape)}, expected {(storage_rows, 1)}",  # type: ignore[union-attr]
         )
         _need(
-            scale.dtype == torch.float32,
-            f"{name} weight_scale must be FP32, got {scale.dtype}",
+            scale.dtype == torch.float32,  # type: ignore[union-attr]
+            f"{name} weight_scale must be FP32, got {scale.dtype}",  # type: ignore[union-attr]
         )
         if shuffled:
             _need(
@@ -231,7 +232,7 @@ def linear_bf16(
             )
             weight = _unshuffle_linear_weight(weight)
         weight = weight.narrow(0, row_start, row_count)
-        scale = scale.narrow(0, row_start, row_count)
+        scale = scale.narrow(0, row_start, row_count)  # type: ignore[union-attr]
         return (weight.float() * scale.float()).to(torch.bfloat16).contiguous()
 
     fp4_dtype = getattr(torch, "float4_e2m1fn_x2", None)
@@ -263,11 +264,12 @@ def linear_bf16(
     expected_scale_shape = (padded_rows, padded_groups)
     _need(scale is not None, f"{name} per_1x32 weight_scale is missing")
     _need(
-        scale.element_size() == 1, f"{name} weight_scale must use one-byte E8M0 values"
+        scale.element_size() == 1,  # type: ignore[union-attr]
+        f"{name} weight_scale must use one-byte E8M0 values",
     )
     _need(
-        scale.shape == expected_scale_shape,
-        f"{name} weight_scale shape {tuple(scale.shape)}, expected {expected_scale_shape}",
+        scale.shape == expected_scale_shape,  # type: ignore[union-attr]
+        f"{name} weight_scale shape {tuple(scale.shape)}, expected {expected_scale_shape}",  # type: ignore[union-attr]
     )
     packed = _unshuffle_linear_weight(weight).narrow(0, row_start, row_count)
     native_scale = _unshuffle_linear_scale(

@@ -1,5 +1,7 @@
-# SPDX-License-Identifier: MIT
-# Copyright (C) 2026, Advanced Micro Devices, Inc. All rights reserved.
+# SPDX-License-Identifier: Apache-2.0
+# SPDX-FileCopyrightText: Copyright contributors to the vLLM project
+# Adapted from ROCm/ATOM (https://github.com/ROCm/ATOM), MIT License,
+# Copyright (C) 2026, Advanced Micro Devices, Inc.
 """Mono decode: a model's decode step as one persistent kernel per layer, with the
 tensor-parallel reductions inside the kernel.
 

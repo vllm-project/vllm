@@ -1,4 +1,5 @@
 # SPDX-License-Identifier: Apache-2.0
+# SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 # Copyright (c) 2026 FlyDSL Project Contributors
 
 """ATOM's MXFP4 expert-storage index arithmetic, and the size of a symmetric

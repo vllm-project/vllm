@@ -1,4 +1,5 @@
 # SPDX-License-Identifier: Apache-2.0
+# SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 # Copyright (c) 2025 FlyDSL Project Contributors
 
 """Small ctypes wrapper for HIP allocation and IPC memory operations."""
@@ -34,7 +35,7 @@ class HipRuntime:
                 "libamdhip64.so.6",
                 "libamdhip64.so.5",
             )
-            candidates = []
+            candidates = []  # type: ignore[var-annotated]
             rocm_path = os.environ.get("ROCM_PATH")
             if rocm_path:
                 candidates.extend(

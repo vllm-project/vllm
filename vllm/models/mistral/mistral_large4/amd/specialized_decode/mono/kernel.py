@@ -2358,13 +2358,13 @@ def build_ml4_monokernel(
             r_pe = _rsrc(pe_cache)
             # gamma and the RoPE factors are issued ahead of the wait
             g = ld_bf16(_rsrc(g_kv), tid)
-            tpe = tid % (PE_DIM // 2)
+            t_pe = tid % (PE_DIM // 2)
             cs = [
-                ld_rope(_rsrc(rope_cos), row_position(s) * (PE_DIM // 2) + tpe)
+                ld_rope(_rsrc(rope_cos), row_position(s) * (PE_DIM // 2) + t_pe)
                 for s in range(S)
             ]
             sns = [
-                ld_rope(_rsrc(rope_sin), row_position(s) * (PE_DIM // 2) + tpe)
+                ld_rope(_rsrc(rope_sin), row_position(s) * (PE_DIM // 2) + t_pe)
                 for s in range(S)
             ]
             hint_wait(
@@ -4041,7 +4041,7 @@ def build_ml4_monokernel(
             # twice the q words it used, in every one of the S * 2 * N_SPLIT
             # tasks. Bit-identical -- the skipped LDS rows are never read.
             NQ = SPLIT_QH * KV_LORA // 4 // THREADS
-            tpe = fx.min(tid, SPLIT_QH * PE_DIM // 4 - 1)
+            t_pe = fx.min(tid, SPLIT_QH * PE_DIM // 4 - 1)
             qh0 = hg0 * SPLIT_QH if const_expr(SPLIT_QH != H) else fx.Int32(0)
             qv = poll(
                 [
@@ -4052,7 +4052,7 @@ def build_ml4_monokernel(
                     )
                     for i in range(NQ)
                 ]
-                + [(mb("q_pe"), ((s * H + qh0) * PE_DIM + tpe * 4) // 2, 2)]
+                + [(mb("q_pe"), ((s * H + qh0) * PE_DIM + t_pe * 4) // 2, 2)]
             )
             for i in range_constexpr(NQ):
                 w4 = tid + i * THREADS
@@ -4899,7 +4899,7 @@ def build_ml4_monokernel(
                                 pair_word = fx.Int32(
                                     bo.buffer_load(rs, word, vec_width=1, dtype=T.i32)
                                 )
-                            ug_scale = pair_word.shrui(
+                            ug_scale = pair_word.shrui(  # type: ignore[union-attr]
                                 (pair_byte + (cc % 2) * 2) * 8
                             ) & fx.Int32(0xFF)
                         if const_expr(expert_mxfp4):
@@ -5042,7 +5042,7 @@ def build_ml4_monokernel(
                             _uniform(lds_ld(grp, GRP_EXP + group)), None, live
                         )
                     else:
-                        cur = ug_ahead  # noqa: F821  (bound by the previous unrolled round)
+                        cur = ug_ahead  # type: ignore[has-type]  # noqa: F821  (bound by the previous unrolled round)
                     if const_expr(task_round + 1 < UG_ROUNDS):
                         ahead = group + G // UG_C
                         ug_ahead = ug8_units(  # noqa: F841
@@ -5352,8 +5352,8 @@ def build_ml4_monokernel(
 
                     if const_expr(native_fp4_mfma):
                         return unit_native_mxfp4(
-                            dn_sh_wb,
-                            dn_sh_sb,
+                            dn_sh_wb,  # type: ignore[has-type]
+                            dn_sh_sb,  # type: ignore[has-type]
                             dn_rg + gu,
                             cc,
                             expert_inter,
@@ -5363,8 +5363,8 @@ def build_ml4_monokernel(
                             dn_ln,
                         )
                     return unit_mxfp4_bf16(
-                        dn_sh_wb,
-                        dn_sh_sb,
+                        dn_sh_wb,  # type: ignore[has-type]
+                        dn_sh_sb,  # type: ignore[has-type]
                         dn_rg + gu,
                         cc,
                         expert_inter,
@@ -5373,8 +5373,8 @@ def build_ml4_monokernel(
                         dn_ln,
                     )
                 return unit_f8f8(
-                    dn_sh_wb,
-                    dn_sh_sb,
+                    dn_sh_wb,  # type: ignore[has-type]
+                    dn_sh_sb,  # type: ignore[has-type]
                     dn_rg + gu,
                     kc,
                     DN_NKC,

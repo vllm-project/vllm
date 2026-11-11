@@ -1,5 +1,7 @@
-# SPDX-License-Identifier: MIT
-# Copyright (C) 2026, Advanced Micro Devices, Inc. All rights reserved.
+# SPDX-License-Identifier: Apache-2.0
+# SPDX-FileCopyrightText: Copyright contributors to the vLLM project
+# Adapted from ROCm/ATOM (https://github.com/ROCm/ATOM), MIT License,
+# Copyright (C) 2026, Advanced Micro Devices, Inc.
 """Symmetric peer memory for in-kernel TP reductions."""
 
 from __future__ import annotations
@@ -158,7 +160,7 @@ class SymmetricPeerBuffer:
         self._safety_barrier_complete = False
 
         if npes == 1:
-            device = torch.device("cuda", torch.cuda.current_device())
+            device = torch.device("cuda", torch.accelerator.current_device_index())
             self.storage = torch.zeros(nbytes, dtype=torch.uint8, device=device)
             self.local_address = self.storage.data_ptr()
             addresses = [self.local_address]
@@ -168,7 +170,7 @@ class SymmetricPeerBuffer:
             local_error = None
             mine = None
             try:
-                device = torch.device("cuda", torch.cuda.current_device())
+                device = torch.device("cuda", torch.accelerator.current_device_index())
                 self.storage = torch.zeros(nbytes, dtype=torch.uint8, device=device)
                 self.local_address = self.storage.data_ptr()
                 base = get_allocation_base(self.local_address)
@@ -179,9 +181,9 @@ class SymmetricPeerBuffer:
             readiness = [None] * npes
             dist.all_gather_object(readiness, (local_error, mine), group=group)
             failed = [
-                (peer, status[0])
+                (peer, status[0])  # type: ignore[index]
                 for peer, status in enumerate(readiness)
-                if status[0] is not None
+                if status[0] is not None  # type: ignore[index]
             ]
             if failed:
                 detail = "; ".join(f"rank {peer}: {error}" for peer, error in failed)
@@ -196,8 +198,8 @@ class SymmetricPeerBuffer:
 
             addresses = []
             open_error = None
-            for peer_rank, (_, peer) in enumerate(readiness):
-                handle, offset = peer
+            for peer_rank, (_, peer) in enumerate(readiness):  # type: ignore[misc]
+                handle, offset = peer  # type: ignore[has-type]
                 if peer_rank == rank:
                     addresses.append(self.local_address)
                     continue
@@ -236,7 +238,7 @@ class SymmetricPeerBuffer:
         Repeated calls are safe. Failed closes remain tracked for a retry.
         """
         if not self._safety_barrier_complete:
-            torch.cuda.synchronize(self.storage.device)
+            torch.accelerator.synchronize(self.storage.device)
             if self.npes > 1:
                 import torch.distributed as dist
 

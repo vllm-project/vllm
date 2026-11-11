@@ -1,4 +1,5 @@
 # SPDX-License-Identifier: Apache-2.0
+# SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 # Copyright (c) 2025 FlyDSL Project Contributors
 
 """Compile-time storage layout and CTA schedule for the ML4 MonoKernel."""
@@ -123,7 +124,7 @@ def paged_row_contract(
         "active": active,
         "context": end - start,
         "index_base": start if active else 0,
-        "safe_row": rows[0] if active else 0,
+        "safe_row": rows[0] if active else 0,  # type: ignore[misc]
         "write_cache": active if slot_mapping is None else slot_owned,
     }
 
@@ -538,7 +539,7 @@ def stage_tasks(
     `split_head_merge` folds the two head groups of an (sample, key-chunk)
     cell into one task, halving `split`. It must be given the same value the
     kernel was built with: these counts set the CTA placement rotation and the
-    timeline's per-stage offsets, so a disagreement silently mis-seats both.
+    timeline's per-stage offsets, so a disagreement silently misplaces both.
     """
     index_ranks = index_cp_world(npes, samples, index_max_seq) if indexer_cp else 1
     tasks = [

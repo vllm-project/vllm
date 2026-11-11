@@ -1,5 +1,7 @@
-# SPDX-License-Identifier: MIT
-# Copyright (C) 2026, Advanced Micro Devices, Inc. All rights reserved.
+# SPDX-License-Identifier: Apache-2.0
+# SPDX-FileCopyrightText: Copyright contributors to the vLLM project
+# Adapted from ROCm/ATOM (https://github.com/ROCm/ATOM), MIT License,
+# Copyright (C) 2026, Advanced Micro Devices, Inc.
 """A kernel's mailbox accesses, recorded while FlyDSL traces it.
 
 Tracing runs the kernel body's Python once, so every mailbox put / poll executes
@@ -58,7 +60,7 @@ def enter_stage(name: str) -> None:
 
 
 def _stage() -> str:
-    return _record.stages[-1] if _record.stages else "<before any stage>"
+    return _record.stages[-1] if _record.stages else "<before any stage>"  # type: ignore[union-attr]
 
 
 def note(region: str, space: Space, kind: str) -> None:

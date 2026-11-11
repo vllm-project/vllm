@@ -298,7 +298,7 @@ class MonoRunner:
             hidden = tensor_model_parallel_all_reduce(hidden)
         torch.add(hidden, residual, out=self.x[0][:rows])
         fwd = get_forward_context()
-        block_table = fwd.attn_metadata[self.layer_name].block_table
+        block_table = fwd.attn_metadata[self.layer_name].block_table  # type: ignore[union-attr]
         slots = fwd.slot_mapping[self.layer_name]
         # keys per row (cumulative): the whole context up to top-k, none for a
         # padded row

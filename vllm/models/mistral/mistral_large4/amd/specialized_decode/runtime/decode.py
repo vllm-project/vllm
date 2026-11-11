@@ -137,7 +137,7 @@ class SpecializedDecode:
             return None
         if not self.runner.bound:
             self._bind(context)
-        stride = context.attn_metadata[self.layer_name].block_table.stride(0)
+        stride = context.attn_metadata[self.layer_name].block_table.stride(0)  # type: ignore[union-attr]
         if stride != self.runner.block_table_stride:
             raise RuntimeError(
                 f"block table width {stride} != bound {self.runner.block_table_stride}"

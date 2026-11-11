@@ -1,7 +1,7 @@
 # Mistral Large 4 specialized decode (MI350X / MI355X)
 
-An opt-in decode path for Mistral Large 4 at TP4 on gfx950, following RFC
-#60904. A pure decode step of 1, 2 or 4 requests (one token each) runs
+An opt-in decode path for Mistral Large 4 at TP4 on gfx950, following
+RFC #60904. A pure decode step of 1, 2 or 4 requests (one token each) runs
 every MoE decoder layer (1-71) as one persistent FlyDSL MonoKernel launch (256
 CTAs, all resident), in "step mode": the specialized decode runs the whole
 forward. Each launch covers the input

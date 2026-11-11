@@ -1,4 +1,5 @@
 # SPDX-License-Identifier: Apache-2.0
+# SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 # Copyright (c) 2025 FlyDSL Project Contributors
 
 """Host wrapper for the ML4 indexed decode MonoKernel."""
@@ -356,7 +357,7 @@ class Ml4MonoKernel:
             dcp_size=dcp_size,
             native_fp4_mfma=native_fp4_mfma,
         )
-        dev = torch.device("cuda", torch.cuda.current_device())
+        dev = torch.device("cuda", torch.accelerator.current_device_index())
         self.identity_block_tables = (
             torch.arange(
                 self.index_block_table_stride, dtype=torch.int32, device=dev
@@ -417,7 +418,7 @@ class Ml4MonoKernel:
                 reports = [None] * npes
                 dist.all_gather_object(reports, local_error, group=group)
             else:
-                reports = [local_error]
+                reports = [local_error]  # type: ignore[list-item]
             failed = [
                 (peer, why) for peer, why in enumerate(reports) if why is not None
             ]
