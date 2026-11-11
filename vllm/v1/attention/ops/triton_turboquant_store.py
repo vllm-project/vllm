@@ -23,6 +23,27 @@ from vllm.v1.attention.ops.triton_turboquant_decode import _use_fp8_e4b15
 
 
 @triton.jit
+def _e4m3_encode(x):
+    """float32 -> uint8 E4M3 bytes, round to nearest even, saturating at +-448.
+
+    Triton has no fp8e4nv type before sm_89, and fp8e4b15 only reaches +-1.875.
+    This builds the same bytes as fp8e4nv with integer operations.
+    """
+    a = tl.minimum(tl.abs(x), 448.0)
+    bits = a.to(tl.int32, bitcast=True)
+    r = bits + 524287 + ((bits >> 20) & 1)
+    normal = (r >> 20) - 960
+    t = a * 512.0
+    f = tl.floor(t)
+    d = t - f
+    fi = f.to(tl.int32)
+    sub = fi + tl.where((d > 0.5) | ((d == 0.5) & ((fi & 1) == 1)), 1, 0)
+    mag = tl.where(a < 0.015625, sub, normal)
+    sign = (x.to(tl.int32, bitcast=True) >> 24) & 128
+    return (mag | sign).to(tl.uint8)
+
+
+@triton.jit
 def _store_quantized_value(
     Value_ptr,
     KV_cache_ptr,
@@ -189,8 +210,10 @@ def _tq_fused_store_fp8(
     d_offs = tl.arange(0, BLOCK_D)
     d_mask = d_offs < D
     k_vals = tl.load(Key_ptr + base + d_offs, mask=d_mask, other=0.0).to(tl.float32)
-    k_fp8 = k_vals.to(tl.float8e4b15) if FP8_E4B15 else k_vals.to(tl.float8e4nv)
-    k_bytes = k_fp8.to(tl.uint8, bitcast=True)
+    if FP8_E4B15:
+        k_bytes = _e4m3_encode(k_vals)
+    else:
+        k_bytes = k_vals.to(tl.float8e4nv).to(tl.uint8, bitcast=True)
     tl.store(KV_cache_ptr + slot_base + d_offs, k_bytes, mask=d_mask)
 
     # ── VALUE QUANTIZE + PACK ───────────────────────────────────────

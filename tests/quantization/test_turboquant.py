@@ -780,3 +780,64 @@ class TestStoreDecodeRoundTrip:
             assert cos_sim > threshold, (
                 f"Preset {preset} head {h}: cosine_sim={cos_sim:.4f} < {threshold}"
             )
+
+    def test_fp8_keys_larger_than_e4b15_range(self):
+        """Keys beyond +-1.875 must survive the store (fp8e4b15 clips them)."""
+        from vllm.v1.attention.ops.triton_turboquant_decode import (
+            triton_turboquant_decode_attention,
+        )
+        from vllm.v1.attention.ops.triton_turboquant_store import (
+            triton_turboquant_store,
+        )
+
+        cfg = TurboQuantConfig.from_cache_dtype("turboquant_k8v4", head_dim=128)
+        D, Hk, N, block_size = 128, 4, 64, 16
+        device = torch.device(DEVICE_TYPE)
+        H = _build_hadamard(D, DEVICE_TYPE)
+        centroids = torch.zeros(1, device=device)
+
+        torch.manual_seed(0)
+        key = 4 * torch.randn(N, Hk, D, device=device, dtype=torch.float16)
+        value = torch.randn(N, Hk, D, device=device, dtype=torch.float16)
+        query = torch.randn(1, Hk, D, device=device, dtype=torch.float16)
+        kv_cache = torch.zeros(
+            N // block_size,
+            block_size,
+            Hk,
+            cfg.slot_size_aligned,
+            device=device,
+            dtype=torch.uint8,
+        )
+        triton_turboquant_store(
+            key,
+            value,
+            kv_cache,
+            torch.arange(N, device=device, dtype=torch.int32),
+            H,
+            centroids,
+            mse_bits=cfg.key_mse_bits,
+            key_packed_size=cfg.key_packed_size,
+            value_quant_bits=cfg.effective_value_quant_bits,
+            key_fp8=True,
+        )
+        out = triton_turboquant_decode_attention(
+            query=query,
+            kv_cache=kv_cache,
+            block_table=torch.arange(N // block_size, device=device)[None].int(),
+            seq_lens=torch.tensor([N], device=device, dtype=torch.int32),
+            Pi=H,
+            centroids=centroids,
+            scale=1.0 / math.sqrt(D),
+            mse_bits=cfg.key_mse_bits,
+            key_packed_size=cfg.key_packed_size,
+            value_quant_bits=cfg.effective_value_quant_bits,
+            key_fp8=True,
+            norm_correction=cfg.norm_correction,
+            PiT=H,
+            max_num_kv_splits=4,
+        )
+
+        scores = torch.einsum("hd,nhd->hn", query[0].float(), key.float()) / D**0.5
+        ref = torch.einsum("hn,nhd->hd", scores.softmax(-1), value.float())
+        cos = torch.nn.functional.cosine_similarity(out[0].float(), ref, dim=-1)
+        assert cos.min() > 0.98, f"cosine similarity {cos.tolist()}"
