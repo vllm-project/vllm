@@ -244,6 +244,15 @@ class Qwen2DecoderLayer(nn.Module):
         prefix: str = "",
     ) -> None:
         super().__init__()
+        # Every layer gets the global sliding window, so it can't be per layer
+        if len(set(getattr(config, "layer_types", []))) > 1:
+            assert config.max_window_layers == config.num_hidden_layers, (
+                "Sliding window for some but all layers is not supported. "
+                "This model uses sliding window but `max_window_layers` = "
+                f"{config.max_window_layers} is less than `num_hidden_layers` = "
+                f"{config.num_hidden_layers}. Please open an issue "
+                "to discuss this feature."
+            )
         self.hidden_size = config.hidden_size
         set_default_rope_theta(config, default_theta=1000000)
         dual_chunk_attention_config = getattr(
@@ -347,16 +356,6 @@ class Qwen2Model(nn.Module, EagleModelMixin):
         cache_config = vllm_config.cache_config
         quant_config = vllm_config.quant_config
 
-        # TODO (@robertgshaw2): see if this can be moved out
-        if len(set(getattr(config, "layer_types", []))) > 1:
-            assert config.max_window_layers == config.num_hidden_layers, (
-                "Sliding window for some but all layers is not supported. "
-                "This model uses sliding window but `max_window_layers` = "
-                f"{config.max_window_layers} is less than `num_hidden_layers` = "
-                f"{config.num_hidden_layers}. Please open an issue "
-                "to discuss this feature."
-            )
-
         self.config = config
         self.quant_config = quant_config
         self.vocab_size = config.vocab_size
@@ -415,8 +414,6 @@ class Qwen2Model(nn.Module, EagleModelMixin):
             hidden_states = intermediate_tensors["hidden_states"]
             residual = intermediate_tensors["residual"]
 
-        remote_aux = self.collect_remote_aux_hidden_states(intermediate_tensors)
-
         aux_hidden_states: list[torch.Tensor] = []
         if get_pp_group().is_first_rank:
             self._maybe_add_hidden_state(
@@ -442,7 +439,6 @@ class Qwen2Model(nn.Module, EagleModelMixin):
 
         hidden_states, _ = self.norm(hidden_states, residual)
 
-        aux_hidden_states = remote_aux + aux_hidden_states
         if len(aux_hidden_states) > 0:
             return hidden_states, aux_hidden_states
 
