@@ -41,7 +41,6 @@ def _cpu_config(
     layer_types: tuple[str, ...] = ("linear_attention",),
 ) -> SimpleNamespace:
     model_config = SimpleNamespace(
-        disable_cascade_attn=False,
         architecture=architecture or model_type,
         has_inner_state=True,
         use_mla=False,

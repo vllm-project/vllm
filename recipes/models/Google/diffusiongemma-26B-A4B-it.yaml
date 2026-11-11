@@ -1,0 +1,358 @@
+meta:
+  title: "DiffusionGemma 26B-A4B IT"
+  slug: "diffusiongemma-26b-a4b-it"
+  provider: "Google"
+  description: "Google's DiffusionGemma — a block-diffusion language model built on Gemma 4's MoE backbone (26B total / 4B active). Generates tokens via iterative denoising over a fixed-length canvas rather than left-to-right autoregressive decoding, enabling higher throughput with parallel block generation."
+  date_added: 2026-06-11
+  date_updated: 2026-09-23
+  tasks:
+    - multimodal
+    - text
+  performance_headline: "Block-diffusion MoE — 26B total / 4B active, canvas-based parallel generation with ~1.9x throughput vs autoregressive baseline"
+  related_recipes:
+    - google/gemma-4-26B-A4B-it
+    - google/gemma-4-31B-it
+  hardware:
+    h100: verified
+    h200: verified
+    dgx_spark_gb10: verified
+    xeon6: verified
+    arc_pro_b60: verified
+    arc_pro_b70: verified
+
+model:
+  model_id: "google/diffusiongemma-26B-A4B-it"
+  min_vllm_version: "0.24.0"
+  docker_image: "vllm/vllm-openai:gemma"
+  architecture: moe
+  parameter_count: "26B"
+  active_parameters: "4B"
+  context_length: 262144
+  base_args:
+    - "--max-num-seqs"
+    - "4"
+  base_env: {}
+
+dependencies: []
+
+features:
+  tool_calling:
+    description: "Enable automatic tool choice with Gemma 4 parser and chat template"
+    args:
+      - "--enable-auto-tool-choice"
+      - "--tool-call-parser"
+      - "gemma4"
+      - "--chat-template"
+      - "examples/tool_chat_template_gemma4.jinja"
+  reasoning:
+    description: "Enable structured thinking/reasoning output"
+    args:
+      - "--reasoning-parser"
+      - "gemma4"
+
+opt_in_features: []
+
+variants:
+  default:
+    precision: bf16
+    vram_minimum_gb: 64
+    description: "Full BF16 — single 80 GB NVIDIA GPU (H100/H200). Requires --max-num-seqs 4 to avoid OOM from diffusion state buffers."
+    supported_hardware: [h100, h200, dgx_spark_gb10, xeon6]
+  fp8:
+    model_id: "RedHatAI/diffusiongemma-26B-A4B-it-FP8-dynamic"
+    precision: fp8
+    vram_minimum_gb: 32
+    description: "FP8 (E4M3) weights with dynamic per-token activation quantization"
+    supported_hardware: [h100, h200, dgx_spark_gb10]
+  nvfp4:
+    model_id: "RedHatAI/diffusiongemma-26B-A4B-it-NVFP4"
+    precision: nvfp4
+    label: "NVFP4 - RedHatAI"
+    vram_minimum_gb: 24
+    description: "NVFP4 (4-bit) quantized weights"
+    supported_hardware: [dgx_spark_gb10]
+  nvidia_nvfp4:
+    model_id: "nvidia/diffusiongemma-26B-A4B-it-NVFP4"
+    precision: nvfp4
+    label: "NVFP4 - NVIDIA"
+    vram_minimum_gb: 24
+    description: "NVIDIA NVFP4 (4-bit) quantized weights"
+    supported_hardware: [dgx_spark_gb10]
+    hardware_overrides:
+      dgx_spark_gb10:
+        extra_args:
+        - "--gpu-memory-utilization"
+        - "0.8"
+        - "--max-num-seqs"
+        - "8"
+        - "--enable-auto-tool-choice"
+        - "--tool-call-parser"
+        - "gemma4"
+        - "--load-format"
+        - "fastsafetensors"
+        - "--attention-backend"
+        - "TRITON_ATTN"
+        - "--enable-prefix-caching"
+        - "--diffusion-config"
+        - '{"canvas_length":256}'
+        - "--override-generation-config"
+        - '{"max_new_tokens": null}'
+        - "--reasoning-parser"
+        - "gemma4"
+        - "--default-chat-template-kwargs"
+        - '{"enable_thinking": true}'
+
+compatible_strategies:
+  - single_node_tp
+
+hardware_overrides:
+  cpu: {}
+  xpu:
+    extra_args:
+      - "--enforce-eager"
+      - "--attention-backend"
+      - "TRITON_ATTN"
+      - "--tensor-parallel-size"
+      - "4"
+
+strategy_overrides:
+  single_node_tp:
+    tp: 1
+
+guide: |
+  ## Overview
+
+  [DiffusionGemma 26B-A4B](https://huggingface.co/google/diffusiongemma-26B-A4B-it) is a block-diffusion language model built on Gemma 4's MoE backbone. Instead of generating tokens one at a time (autoregressive), it generates blocks of 256 tokens simultaneously via iterative denoising over a fixed canvas — trading higher time-to-first-token for significantly higher per-request generation throughput.
+
+  ### Key Architecture Features
+  - **Block Diffusion**: Generates tokens in 256-token canvas blocks via iterative denoising (up to 48 steps per block).
+  - **MoE Backbone**: Same Gemma 4 architecture — 128 fine-grained experts with top-8 routing, 26B total / 4B active parameters.
+  - **Entropy-Bound Sampling**: Uses an entropy-based sampler (`diffusion_sampler: entropy_bound`, `entropy_bound: 0.1`) for the denoising process.
+  - **Multimodal**: Supports text + images via the Gemma 4 vision encoder.
+  - **Thinking Mode**: Supports structured reasoning via `<|channel>thought\n...<channel|>` delimiters.
+  - **Function Calling**: Supports Gemma 4's tool-call protocol (works best in thinking mode).
+
+  ### Important Deployment Notes
+
+  DiffusionGemma requires several specific flags that differ from standard Gemma 4:
+
+  | Flag | Why |
+  |------|-----|
+  | `--max-num-seqs 4` | The diffusion state buffers (`self_conditioning_probs`) pre-allocate `max_seqs × canvas_length × vocab_size` tensors. With Gemma's 262K vocab and canvas_length=256, higher values cause OOM. |
+  | `--generation-config vllm` | The checkpoint's `generation_config.json` sets `max_tokens: 256`, which would override per-request limits. This flag ignores it. |
+  | `--gpu-memory-utilization 0.85` | Leaves headroom for activation memory during denoising. |
+  | `--hf-overrides '{"diffusion_sampler":"entropy_bound","diffusion_entropy_bound":0.1}'` | Configures the entropy-bound denoising sampler. |
+  | `--diffusion-config '{"canvas_length": 256}'` | Sets the canvas block size for generation. |
+
+  ## Prerequisites
+
+  DiffusionGemma requires a vLLM build with diffusion model support, available in the
+  Gemma docker image:
+
+  ```bash
+  docker pull vllm/vllm-openai:gemma
+  ```
+
+  ## Deployment
+
+  ### Single GPU (H100/H200, BF16)
+
+  ```bash
+  docker run -itd --name diffusiongemma \
+      --ipc=host --network host --gpus all \
+      -v ~/.cache/huggingface:/root/.cache/huggingface \
+      vllm/vllm-openai:gemma \
+          --model google/diffusiongemma-26B-A4B-it \
+          --max-model-len 262144 \
+          --max-num-seqs 4 \
+          --gpu-memory-utilization 0.85 \
+          --host 0.0.0.0 --port 8000
+  ```
+
+  ### Intel Xeon 6 (CPU, BF16)
+
+  DiffusionGemma runs on Intel Xeon 6 CPUs using vLLM's CPU backend with AMX BF16 acceleration.
+  The generated example uses TP=1. Adjust `--tensor-parallel-size` based on the
+  detected NUMA topology and deployment requirements.
+
+  ```bash
+  docker run \
+    --privileged --ipc=host -p 8000:8000 \
+    -v ~/.cache/huggingface:/root/.cache/huggingface \
+    vllm/vllm-openai-cpu:latest-x86_64 google/diffusiongemma-26B-A4B-it \
+    --max-num-seqs 4 \
+    --tensor-parallel-size 1 \
+    --enable-auto-tool-choice \
+    --tool-call-parser gemma4 \
+    --chat-template examples/tool_chat_template_gemma4.jinja \
+    --reasoning-parser gemma4
+  ```
+
+
+  ### Intel XPU (B60 / B70, BF16)
+
+  Validated on 4x Intel Arc Pro B60 / B70 (B60 24 GB, B70 32 GB per card)
+  with the official vLLM XPU image `vllm/vllm-openai-xpu:latest`. `--enforce-eager`
+  and `--attention-backend TRITON_ATTN` are required on this backend. Select Arc Pro
+  B60/B70 in the hardware picker above for the exact command.
+
+  ### Full-Featured Server (text + image + thinking + tools)
+
+  ```bash
+  docker run -itd --name diffusiongemma \
+      --ipc=host --network host --gpus all \
+      -v ~/.cache/huggingface:/root/.cache/huggingface \
+      vllm/vllm-openai:gemma \
+          --model google/diffusiongemma-26B-A4B-it \
+          --max-model-len 262144 \
+          --max-num-seqs 4 \
+          --gpu-memory-utilization 0.85 \
+          --mm-processor-kwargs '{"max_soft_tokens": 1120}' \
+          --limit-mm-per-prompt '{"image": 7}' \
+          --enable-auto-tool-choice \
+          --tool-call-parser gemma4 \
+          --reasoning-parser gemma4 \
+          --host 0.0.0.0 --port 8000
+  ```
+
+  ### Jev-Style Structured Decisions (Nightly)
+
+  vLLM's structured-read support for DiffusionGemma can answer yes/no, multiple-choice,
+  and scored questions with a confidence value. The example server seeds a canvas with
+  the response template, leaves only the answer slots noisy, and reads a probability
+  distribution from every slot after one denoising step. It exposes the Jev-compatible
+  `/v1/systemone` endpoint; this is an example server rather than a standard vLLM endpoint.
+
+  Use the pinned nightly image that contains the merged structured-read support:
+
+  ```bash
+  docker run -d --name dgemma \
+      --gpus '"device=0"' \
+      --ipc=host \
+      -p 8000:8000 \
+      -p 8011:8011 \
+      -v "$HOME/.cache/huggingface:/root/.cache/huggingface" \
+      vllm/vllm-openai:nightly-e9757321527ca1ecd514c07c1418dd2c53da3d19 \
+      google/diffusiongemma-26B-A4B-it \
+      --served-model-name dgemma \
+      --diffusion-config '{"canvas_length":64}' \
+      --max-logprobs 32 \
+      --enable-prefix-caching
+  ```
+
+  Wait for the vLLM server to become healthy, then start the example server in the same
+  container:
+
+  ```bash
+  until curl -fsS localhost:8000/health >/dev/null; do sleep 2; done
+
+  docker exec -d dgemma \
+      python /vllm-workspace/examples/features/structured_diffusion/structured_server.py \
+      --upstream http://127.0.0.1:8000 \
+      --tokenizer google/diffusiongemma-26B-A4B-it \
+      --canvas 64
+  ```
+
+  After the example server becomes healthy, send a Jev-style decision request:
+
+  ```bash
+  until curl -fsS localhost:8011/health >/dev/null; do sleep 2; done
+
+  curl -sS localhost:8011/v1/systemone \
+      -H 'content-type: application/json' \
+      -d '{
+        "model": "jev-latest",
+        "state": {"ticket": "Everything is down, demo at noon."},
+        "questions": {
+          "urgent": {
+            "type": "noul",
+            "instructions": "Needs a reply within the hour?"
+          }
+        }
+      }'
+  ```
+
+  ## Client Usage
+
+  ### Text Generation
+
+  ```python
+  from openai import OpenAI
+
+  client = OpenAI(base_url="http://localhost:8000/v1", api_key="EMPTY")
+  response = client.chat.completions.create(
+      model="google/diffusiongemma-26B-A4B-it",
+      messages=[{"role": "user", "content": "Write a poem about the ocean."}],
+      max_tokens=512,
+      temperature=0.7,
+  )
+  print(response.choices[0].message.content)
+  ```
+
+  ### Offline Inference
+
+  ```python
+  from vllm import LLM, SamplingParams
+  from transformers import AutoTokenizer
+
+  model_path = "google/diffusiongemma-26B-A4B-it"
+  tokenizer = AutoTokenizer.from_pretrained(model_path)
+
+  llm = LLM(
+      model=model_path,
+      max_num_seqs=4,
+      gpu_memory_utilization=0.85,
+      hf_overrides={
+          "diffusion_sampler": "entropy_bound",
+          "diffusion_entropy_bound": 0.1,
+      },
+      diffusion_config={"canvas_length": 256},
+  )
+
+  messages = [{"role": "user", "content": "Explain quantum computing in simple terms."}]
+  prompt = tokenizer.apply_chat_template(messages, tokenize=False, add_generation_prompt=True)
+  outputs = llm.generate(prompt, SamplingParams(temperature=0.0, max_tokens=1024))
+
+  print(outputs[0].outputs[0].text)
+  ```
+
+  ### Thinking Mode
+
+  Launch the server with `--reasoning-parser gemma4`, then enable per-request:
+
+  ```python
+  response = client.chat.completions.create(
+      model="google/diffusiongemma-26B-A4B-it",
+      messages=[{"role": "user", "content": "What is the derivative of x^3 * ln(x)?"}],
+      max_tokens=32768,
+      extra_body={"chat_template_kwargs": {"enable_thinking": True}},
+  )
+  ```
+
+  ## Performance Characteristics
+
+  Compared to the autoregressive Gemma 4 26B-A4B baseline (single H100, concurrency=1, SPEED-Bench):
+
+  | Metric | Gemma 4 26B-A4B (baseline) | DiffusionGemma 26B-A4B |
+  |--------|---------------------------|------------------------|
+  | Output TPS | 199 tok/s | 375 tok/s (**1.9×**) |
+  | E2E Request Time (mean) | 2.87s | 0.88s (**3.3× faster**) |
+  | TTFT (mean) | 53ms | 489ms (higher due to canvas denoising setup) |
+  | Per-request Gen TPS (mean) | 205 tok/s | 1,282 tok/s (**6.2×**) |
+
+  The diffusion model trades higher time-to-first-token for significantly higher generation throughput. It generates fewer total tokens per prompt on average (shorter outputs) but completes requests much faster.
+
+  ## Known Limitations
+
+  - **TTFT**: ~10× higher than autoregressive baseline — the model must denoise an entire canvas block before emitting the first token.
+  - **`--max-num-seqs`**: Must be kept low (≤4) due to the large diffusion state tensors. Higher values cause CUDA OOM.
+  - **Audio**: Not supported — the diffusion checkpoints do not include an audio encoder.
+  - **Function Calling**: Works best in thinking mode. Non-thinking mode may answer directly instead of emitting tool calls.
+
+  ## References
+
+  - [Model card](https://huggingface.co/google/diffusiongemma-26B-A4B-it)
+  - [vLLM structured-read support for DiffusionGemma](https://github.com/vllm-project/vllm/pull/57250)
+  - [djev-run Cloud Run deployment](https://github.com/taeold/djev-run)
+  - [Gemma 4 26B-A4B (autoregressive baseline)](https://huggingface.co/google/gemma-4-26B-A4B-it)
+  - [Gemma docs](https://ai.google.dev/gemma/docs)

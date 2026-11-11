@@ -357,13 +357,69 @@ def get_feature_request_tip(
     return f"{prefix}{tip}"
 
 
+def dynamic_rope_update_is_noop(vllm_config: "VllmConfig") -> bool:
+    """Whether `max_model_len` keeps Transformers' dynamic rope from ever rescaling.
+
+    `@dynamic_rope_update` only recomputes `inv_freq` once positions grow past
+    `max_position_embeddings`, which vLLM never feeds beyond `max_model_len`.
+    """
+    text_config = vllm_config.model_config.hf_config.get_text_config()
+    max_position_embeddings = getattr(text_config, "max_position_embeddings", None)
+    if max_position_embeddings is None:
+        return False
+    return vllm_config.model_config.max_model_len <= max_position_embeddings
+
+
 def can_enable_torch_compile(vllm_config: "VllmConfig") -> bool:
     """Callable to be passed to `@support_torch_compile`'s `enable_if` argument.
 
     Defaults to `True` but is disabled in the following situations:
 
-    - The model uses dynamic rope scaling.
+    - The model uses dynamic rope scaling that can still rescale within
+      `max_model_len` (otherwise `maybe_disable_dynamic_rope_update` removes it).
     """
     text_config = vllm_config.model_config.hf_config.get_text_config()
-    # Dynamic rope scaling is not compatible with torch.compile
-    return all(rp["rope_type"] != "dynamic" for rp in iter_rope_parameters(text_config))
+    rope_types = {rp["rope_type"] for rp in iter_rope_parameters(text_config)}
+    return "dynamic" not in rope_types or dynamic_rope_update_is_noop(vllm_config)
+
+
+def maybe_disable_dynamic_rope_update(
+    model: nn.Module, vllm_config: "VllmConfig"
+) -> None:
+    """Skip `@dynamic_rope_update` in rotary modules where `inv_freq` can be fixed.
+
+    The update syncs on `torch.max(position_ids)` every forward, which breaks
+    torch.compile and CUDA graph capture. Relabelling the module's `rope_type` as
+    "default" skips it:
+
+    - dynamic: where it can never rescale, keeping the `inv_freq` from init
+    - longrope: always, picking the long factors iff `max_model_len` exceeds
+      `original_max_position_embeddings` like native vLLM, since switching per
+      forward would read KV cached under one set with the other
+    """
+    from transformers.modeling_rope_utils import ROPE_INIT_FUNCTIONS
+
+    max_model_len = vllm_config.model_config.max_model_len
+    dynamic_is_noop = dynamic_rope_update_is_noop(vllm_config)
+    for module in model.modules():
+        rope_type = getattr(module, "rope_type", None)
+        if not hasattr(module, "max_seq_len_cached") or rope_type is None:
+            continue
+        per_layer = isinstance(rope_type, dict)
+        rope_types = dict(rope_type) if per_layer else {None: rope_type}
+        for layer_type, value in rope_types.items():
+            if value == "dynamic" and dynamic_is_noop:
+                rope_types[layer_type] = "default"
+            elif value == "longrope":
+                rope_parameters = module.config.rope_parameters
+                if per_layer:
+                    rope_parameters = rope_parameters[layer_type]
+                original = rope_parameters["original_max_position_embeddings"]
+                if max_model_len > original:
+                    inv_freq, _ = ROPE_INIT_FUNCTIONS["longrope"](
+                        module.config, None, seq_len=original + 1, layer_type=layer_type
+                    )
+                    prefix = f"{layer_type}_" if per_layer else ""
+                    getattr(module, f"{prefix}inv_freq").copy_(inv_freq)
+                rope_types[layer_type] = "default"
+        module.rope_type = rope_types if per_layer else rope_types[None]

@@ -15,7 +15,6 @@ class SparseKVPageTransfer:
     transfer_id: int
     host_block_id: int
     resident_block_ids: tuple[int, ...]
-    after_forward: bool
     restore: bool = False
 
 
@@ -26,6 +25,15 @@ class SparseKVRowMirror:
     source_starts: tuple[int, ...]
     destination_start: int
     num_rows: int
+
+
+@dataclass(frozen=True)
+class SparseKVResidencyUpdate:
+    """GPU block ids of some of a request's resident pages, per resident group.
+    A null block id means the page is read from the host."""
+
+    pages: list[int]
+    block_ids: tuple[list[int], ...]
 
 
 @dataclass

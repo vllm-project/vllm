@@ -5,6 +5,7 @@ mod structural_tag;
 
 use std::sync::Arc;
 
+use vllm_tokenizer::{DecodedText, DynTokenizer};
 use winnow::ascii::multispace0 as ws0;
 use winnow::combinator::{alt, delimited, eof, repeat, seq, terminated};
 use winnow::prelude::*;
@@ -14,7 +15,7 @@ use winnow::token::{literal, rest, take_until};
 use self::structural_tag::HyStructuralTagBuilder;
 use super::parameters::ToolSchemas;
 use super::utils::{MarkerScanState, parse_buffered_event, safe_text_len, take_until_marker};
-use super::{Result, ToolCallDelta, ToolParser, ToolParserError, ToolParserOutput};
+use super::{JsonStyle, Result, ToolCallDelta, ToolParser, ToolParserError, ToolParserOutput};
 use crate::tool::{StructuralTagBuilder, Tool};
 
 /// Wire-level HY tool-call dialect.
@@ -161,7 +162,9 @@ impl HyToolParser {
             }
             HyEvent::ToolCall { name, raw_params } => {
                 let arguments = self.tool_parameters.convert_params_with_schema(&name, raw_params);
-                let arguments = serde_json::to_string(&arguments)
+                // The template renders JSON values with Python separators.
+                let arguments = JsonStyle::Spaced
+                    .to_string(&arguments)
                     .map_err(|error| parsing_failed!("failed to serialize arguments: {}", error))?;
 
                 output.push_call(ToolCallDelta {
@@ -181,7 +184,7 @@ impl HyToolParser {
 impl ToolParser for HyToolParser {
     // Suffix discovery belongs to the unified HY parser so its reasoning and
     // tool delimiters always use the same tokenizer-derived value.
-    fn create(_tools: &[Tool]) -> Result<Box<dyn ToolParser>>
+    fn create(_tools: &[Tool], _tokenizer: DynTokenizer) -> Result<Box<dyn ToolParser>>
     where
         Self: Sized + 'static,
     {
@@ -194,8 +197,8 @@ impl ToolParser for HyToolParser {
         Some(&self.structural_tag_builder)
     }
 
-    fn parse_into(&mut self, chunk: &str, output: &mut ToolParserOutput) -> Result<()> {
-        self.buffer.push_str(chunk);
+    fn parse_into(&mut self, chunk: DecodedText, output: &mut ToolParserOutput) -> Result<()> {
+        self.buffer.push_str(&chunk.text);
 
         while let Some((event, consumed_len)) = parse_buffered_event(&self.buffer, |input| {
             parse_next_hy_event(input, &mut self.mode, &self.markers, self.dialect)
@@ -212,10 +215,9 @@ impl ToolParser for HyToolParser {
         match self.mode {
             HyMode::Text => output.push_text(&self.buffer),
             HyMode::ToolBlock { .. } => {
-                return Err(parsing_failed!(
-                    "incomplete {} tool call",
-                    self.dialect.label()
-                ));
+                return Err(ToolParserError::IncompleteToolCall {
+                    parser: self.dialect.label(),
+                });
             }
             HyMode::Done => {}
         }
@@ -375,7 +377,8 @@ fn parameter(input: &mut &str, markers: &HyToolMarkers) -> ModalResult<(String, 
     )
     .parse_next(input)?;
 
-    Ok((name.trim().to_string(), value.to_string()))
+    // Argument names are exact schema keys, including surrounding whitespace.
+    Ok((name.to_string(), value.to_string()))
 }
 
 /// Parse ignored rest after the HY tool block ends.
@@ -388,10 +391,11 @@ mod tests {
     use expect_test::expect;
     use serde_json::{Value, json};
     use thiserror_ext::AsReport;
+    use vllm_tokenizer::DecodedText;
 
     use super::{HyDialect, HyToolParser, ToolParser};
     use crate::tool::test_utils::{collect_stream, split_by_chars, test_tools};
-    use crate::tool::{ToolParserOutput, ToolParserTestExt as _};
+    use crate::tool::{Tool, ToolParserOutput, ToolParserTestExt as _};
 
     fn build_tool_call(function_name: &str, params: &[(&str, &str)]) -> String {
         let params = params
@@ -524,7 +528,7 @@ mod tests {
                             name: Some(
                                 "get_weather",
                             ),
-                            arguments: "{\"city\":\"Beijing\",\"date\":\"2026-03-30\"}",
+                            arguments: "{\"city\": \"Beijing\", \"date\": \"2026-03-30\"}",
                         },
                     ),
                     ToolCall(
@@ -533,7 +537,7 @@ mod tests {
                             name: Some(
                                 "get_weather",
                             ),
-                            arguments: "{\"city\":\"Hangzhou\",\"date\":\"2026-03-30\"}",
+                            arguments: "{\"city\": \"Hangzhou\", \"date\": \"2026-03-30\"}",
                         },
                     ),
                 ],
@@ -691,7 +695,9 @@ mod tests {
 
         parser
             .parse_into(
-                "<tool_calls><tool_call>get_weather<tool_sep><arg_key>city</arg_key><arg_value>Bei",
+                DecodedText::unattributed(
+                    "<tool_calls><tool_call>get_weather<tool_sep><arg_key>city</arg_key><arg_value>Bei",
+                ),
                 &mut output,
             )
             .unwrap();
@@ -707,8 +713,7 @@ mod tests {
 
         let error = parser.finish().unwrap_err();
 
-        expect!["tool parser parsing failed: incomplete HY3 tool call"]
-            .assert_eq(&error.to_report_string());
+        expect!["incomplete HY3 tool call"].assert_eq(&error.to_report_string());
     }
 
     #[test]
@@ -741,7 +746,7 @@ mod tests {
                             name: Some(
                                 "get_weather",
                             ),
-                            arguments: "{\"city\":\"Beijing\",\"date\":\"2026-03-30\"}",
+                            arguments: "{\"city\": \"Beijing\", \"date\": \"2026-03-30\"}",
                         },
                     ),
                     ToolCall(
@@ -781,8 +786,7 @@ mod tests {
 
         let error = parser.finish().unwrap_err();
 
-        expect!["tool parser parsing failed: incomplete HY4 tool call"]
-            .assert_eq(&error.to_report_string());
+        expect!["incomplete HY4 tool call"].assert_eq(&error.to_report_string());
     }
 
     #[test]
@@ -795,5 +799,51 @@ mod tests {
             .unwrap_err();
 
         assert!(error.to_report_string().starts_with("tool parser parsing failed:"));
+    }
+
+    #[test]
+    fn whitespace_distinguishes_argument_names() {
+        let tools = [Tool {
+            name: "record".to_string(),
+            description: None,
+            parameters: json!({
+                "type": "object",
+                "properties": {
+                    "count": { "type": "string" },
+                    " count ": { "type": "integer" }
+                }
+            }),
+            strict: None,
+            defer_loading: None,
+        }];
+        let cases = [
+            (
+                HyDialect::V3,
+                "<tool_calls>\n<tool_call>record<tool_sep>\n<arg_key>count</arg_key><arg_value>2</arg_value>\n<arg_key> count </arg_key><arg_value>7</arg_value>\n</tool_call>\n</tool_calls>",
+            ),
+            (
+                HyDialect::V4,
+                "<tool_calls><tool_call>record<arg_key>count</arg_key><arg_value>2</arg_value><arg_key> count </arg_key><arg_value>7</arg_value></tool_call></tool_calls>",
+            ),
+        ];
+
+        for (dialect, input) in cases {
+            let expected = json!({ "count": "2", " count ": 7 });
+
+            let output = HyToolParser::new(&tools, "", dialect).parse_complete(input).unwrap();
+            assert_eq!(
+                parsed_arguments(&output, 0),
+                expected,
+                "{dialect:?} complete"
+            );
+
+            let mut parser = HyToolParser::new(&tools, "", dialect);
+            let output = collect_stream(&mut parser, &split_by_chars(input, 1));
+            assert_eq!(
+                parsed_arguments(&output, 0),
+                expected,
+                "{dialect:?} streaming"
+            );
+        }
     }
 }

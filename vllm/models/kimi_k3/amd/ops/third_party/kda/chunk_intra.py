@@ -349,7 +349,7 @@ def chunk_kda_fwd_kernel_inter_solve_fused(
         for num_warps in [1, 2, 4, 8]
         for num_stages in [2, 3, 4]
     ],
-    key=["BK", "NC", "BT", "HV"],
+    key=["BK", "BT", "HV"],
 )
 @triton.jit(do_not_specialize=["B", "T"])
 def chunk_kda_fwd_kernel_intra_sub_chunk(

@@ -568,6 +568,7 @@ class InternS1ProForConditionalGeneration(
         multimodal_config = vllm_config.model_config.get_multimodal_config()
 
         self.config = config
+        self.model_config = vllm_config.model_config
         self.multimodal_config = multimodal_config
         self.use_data_parallel = multimodal_config.mm_encoder_tp_mode == "data"
         self._init_video_pruning(multimodal_config)
@@ -610,7 +611,7 @@ class InternS1ProForConditionalGeneration(
 
     def get_frope_params_map(self) -> dict[str, str]:
         mapper: dict[str, str] = {}
-        for name, params in self.language_model.model.named_parameters():
+        for name, _ in self.language_model.model.named_parameters():
             if "rotary_emb.sin_coef" in name:
                 mapper["language_model.model.rotary_emb.sin_coef"] = (
                     f"language_model.model.{name}"

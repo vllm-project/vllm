@@ -184,6 +184,8 @@ class NCCLLibrary:
     exported_functions = [
         # const char* ncclGetErrorString(ncclResult_t result)
         Function("ncclGetErrorString", ctypes.c_char_p, [ncclResult_t]),
+        # const char* ncclGetLastError(ncclComm_t comm)
+        Function("ncclGetLastError", ctypes.c_char_p, [ncclComm_t]),
         # ncclResult_t  ncclGetVersion(int *version);
         Function("ncclGetVersion", ncclResult_t, [ctypes.POINTER(ctypes.c_int)]),
         # ncclResult_t ncclGetUniqueId(ncclUniqueId* uniqueId);
@@ -424,6 +426,9 @@ class NCCLLibrary:
                     elif func.name == "ncclCommQueryProperties":
                         # Optional on NCCL versions older than 2.29.
                         continue
+                    elif func.name == "ncclGetLastError":
+                        # Only used to enrich error messages.
+                        continue
                     elif func.name in ("ncclCommSuspend", "ncclCommResume"):
                         # RCCL doesn't export these; NCCL >= 2.29.7 does, and
                         # vLLM's CUDA path already requires that version.
@@ -442,9 +447,20 @@ class NCCLLibrary:
     def ncclGetErrorString(self, result: ncclResult_t) -> str:
         return self._funcs["ncclGetErrorString"](result).decode("utf-8")
 
+    def ncclGetLastError(self) -> str | None:
+        # NCCL does not clear this after later successful calls, so only read it
+        # right after a call has failed.
+        if "ncclGetLastError" not in self._funcs:
+            return None
+        message = self._funcs["ncclGetLastError"](None)
+        return message.decode("utf-8", errors="replace") if message else None
+
     def NCCL_CHECK(self, result: ncclResult_t) -> None:
         if result != 0:
             error_str = self.ncclGetErrorString(result)
+            last_error = self.ncclGetLastError()
+            if last_error:
+                error_str += f"\nLast error:\n{last_error}"
             raise RuntimeError(f"NCCL error: {error_str}")
 
     def ncclGetRawVersion(self) -> int:
