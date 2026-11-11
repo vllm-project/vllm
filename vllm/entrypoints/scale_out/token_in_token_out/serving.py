@@ -47,6 +47,7 @@ from vllm.exceptions import GenerationError, VLLMValidationError
 from vllm.inputs import EngineInput, TokensPrompt, mm_input
 from vllm.logger import init_logger
 from vllm.logprobs import Logprob
+from vllm.multimodal.cache import ShmObjectStoreSenderCache
 from vllm.multimodal.inputs import (
     MultiModalKwargsItem,
     MultiModalKwargsItems,
@@ -64,6 +65,7 @@ from .mm_features import (
     mm_kwargs_from_features,
     placeholder_ranges_from_engine_input,
     rebuild_mm_placeholders,
+    validate_pixtral_image_features,
 )
 from .protocol import (
     GenerateDerenderChoice,
@@ -340,6 +342,18 @@ class ServingTokens(GenerateBaseServing):
             mm_kwargs = mm_kwargs_from_features(features)
             if error := self._validate_mm_cache_handles(mm_kwargs, features.mm_hashes):
                 return error
+
+            try:
+                validate_pixtral_image_features(
+                    mm_kwargs.get("image", []),
+                    self.model_config.hf_config,
+                    allow_shm_handles=isinstance(
+                        self.online_renderer.renderer.mm_processor_cache,
+                        ShmObjectStoreSenderCache,
+                    ),
+                )
+            except ValueError as exc:
+                return self.create_error_response(exc, param="features")
 
             engine_input = mm_input(
                 prompt_token_ids=request.token_ids,

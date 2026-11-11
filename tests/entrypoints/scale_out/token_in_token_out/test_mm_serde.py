@@ -7,6 +7,7 @@ token_in_token_out generate endpoint.
 import pytest
 import torch
 from pydantic import ValidationError
+from transformers import PreTrainedConfig
 
 from vllm.entrypoints.anthropic.protocol import AnthropicMessagesRequest
 from vllm.entrypoints.openai.chat_completion.protocol import ChatCompletionRequest
@@ -17,6 +18,7 @@ from vllm.entrypoints.scale_out.token_in_token_out.mm_features import (
     merge_mm_kwargs_items,
     mm_kwargs_from_features,
     rebuild_mm_placeholders,
+    validate_pixtral_image_features,
 )
 from vllm.entrypoints.scale_out.token_in_token_out.mm_serde import (
     decode_mm_kwargs_item,
@@ -37,6 +39,66 @@ from vllm.multimodal.inputs import (
     MultiModalSharedField,
     PlaceholderRange,
 )
+
+
+@pytest.mark.parametrize("metadata_override", [False, True])
+@pytest.mark.parametrize(
+    "shape",
+    [
+        (3, 1024, 1024),
+        (3, 16, 1024),
+        (3, 1040, 1040),
+        (3, 1040, 16),
+        (3, 16, 1040),
+        (3, 0, 16),
+        (3, 17, 16),
+        (1, 16, 16),
+        (3, 16),
+    ],
+)
+def test_pixtral_feature_geometry_rejected_before_engine_admission(
+    shape, metadata_override
+):
+    """Matching placeholders cannot make oversized Pixtral tensors valid."""
+    config = PreTrainedConfig(
+        model_type="pixtral",
+        vision_config=PreTrainedConfig(image_size=1024, patch_size=16),
+    )
+    image = MultiModalKwargsItem(
+        {"images": MultiModalFieldElem(torch.zeros(shape), MultiModalBatchedField())}
+    )
+    features = MultiModalFeatures(
+        mm_hashes={"image": ["image"]},
+        mm_placeholders={
+            "image": [
+                PlaceholderRangeInfo(
+                    offset=0, length=max(1, shape[-2] // 16 * (shape[-1] // 16))
+                )
+            ]
+        },
+        kwargs_data={"image": [encode_mm_kwargs_item(image)]},
+    )
+    if metadata_override:
+        features.mm_metadata = features.kwargs_data
+        features.kwargs_data = {
+            "image": [
+                encode_mm_kwargs_item(
+                    MultiModalKwargsItem(
+                        {
+                            "images": MultiModalFieldElem(
+                                torch.zeros(3, 16, 16), MultiModalBatchedField()
+                            )
+                        }
+                    )
+                )
+            ]
+        }
+    items = mm_kwargs_from_features(features)["image"]
+    if shape in ((3, 1024, 1024), (3, 16, 1024)):
+        validate_pixtral_image_features(items, config, allow_shm_handles=False)
+    else:
+        with pytest.raises(ValueError, match="Pixtral"):
+            validate_pixtral_image_features(items, config, allow_shm_handles=False)
 
 
 def test_mm_kwargs_item_roundtrip():
