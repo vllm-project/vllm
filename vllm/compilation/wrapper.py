@@ -1,6 +1,8 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 
+import dis
+import itertools
 import os
 import sys
 from abc import abstractmethod
@@ -268,9 +270,11 @@ class TorchCompileWithNoGuardsWrapper:
                 except Exception:
                     pass
 
+        # Dynamo emits `<module>._buffers.update` for buffers assigned during forward
+        pairs = itertools.pairwise(dis.get_instructions(new_code))
         if (
             self.vllm_config.compilation_config.cudagraph_mode != CUDAGraphMode.NONE
-            and "update" in new_code.co_names
+            and any(a.argval == "_buffers" and b.argval == "update" for a, b in pairs)
         ):
             import depyf
 
