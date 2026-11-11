@@ -6,7 +6,11 @@ from types import SimpleNamespace
 import pytest
 import torch
 
-from tests.v1.attention.utils import create_vllm_config
+from tests.v1.attention.utils import (
+    BatchSpec,
+    create_common_attn_metadata,
+    create_vllm_config,
+)
 from vllm.config import SpeculativeConfig
 from vllm.model_executor.layers.attention.sparse_mla_attention import (
     SparseMLACommonMetadataBuilder,
@@ -37,8 +41,8 @@ from vllm.v1.attention.backends.mla.sparse_utils import (
 from vllm.v1.kv_cache_interface import (
     MLAAttentionSpec,
     compute_layer_kv_cache_shape_bytes,
+    get_block_table_width,
 )
-from vllm.v1.worker.block_table import get_block_table_width
 from vllm.v1.worker.utils import select_common_block_size
 
 
@@ -56,7 +60,7 @@ def test_adaptive_indexer_uses_configured_max_decode_len():
         dtype=torch.bfloat16,
     )
     vllm_config = create_vllm_config(
-        model_name="hmellor/tiny-random-LlamaForCausalLM",
+        model_name="vllm-project/tiny-random-LlamaForCausalLM",
         max_model_len=1024,
     )
     vllm_config.speculative_config = SpeculativeConfig(
@@ -387,6 +391,7 @@ def test_indexer_preserves_deepseek_v41_mla_block_size():
 
 def test_indexer_warmup_normalizes_zero_compress_ratios():
     config = SimpleNamespace(
+        attention_config=SimpleNamespace(sparse_mla_shard_q=False),
         scheduler_config=SimpleNamespace(max_num_batched_tokens=8),
         model_config=SimpleNamespace(
             hf_text_config=SimpleNamespace(
@@ -416,6 +421,7 @@ def test_indexer_warmup_includes_pcp_normalized_dcp_key(monkeypatch):
         lambda: SimpleNamespace(rank_in_group=2),
     )
     config = SimpleNamespace(
+        attention_config=SimpleNamespace(sparse_mla_shard_q=False),
         scheduler_config=SimpleNamespace(max_num_batched_tokens=8),
         model_config=SimpleNamespace(
             hf_text_config=SimpleNamespace(compress_ratios=[32], index_kpool=32)
@@ -759,3 +765,43 @@ def test_indexer_expanded_block_table_sized_by_decode_tokens():
     )
 
     assert builder.expanded_block_table_buffer.shape == (8, block_table_width)
+
+
+@pytest.mark.skipif(not torch.cuda.is_available(), reason="requires CUDA")
+def test_indexer_pcp_replay_capture_fits_local_request_segments(dist_init):
+    """PCP replay capture can present two short segments per scheduled request."""
+    device = torch.device("cuda")
+    config = create_vllm_config(
+        max_model_len=1024, max_num_seqs=8, max_num_batched_tokens=8192
+    )
+    config.parallel_config.prefill_context_parallel_size = 2
+    config.speculative_config = SpeculativeConfig(
+        method="ngram", num_speculative_tokens=5
+    )
+    # Uncompressed metadata does not communicate, so one real process group
+    # suffices to exercise the rank-local capture allocation and build.
+    spec = MLAAttentionSpec(
+        block_size=64, num_kv_heads=1, head_size=128, dtype=torch.bfloat16
+    )
+    common = create_common_attn_metadata(
+        BatchSpec(seq_lens=[104] * 16, query_lens=[4] * 16),
+        block_size=64,
+        device=device,
+        arange_block_indices=True,
+    )
+    common.is_prefilling = torch.zeros(16, dtype=torch.bool)
+    builder = DeepseekV32IndexerMetadataBuilder(
+        kv_cache_spec=spec,
+        layer_names=["dummy"],
+        vllm_config=config,
+        device=device,
+        block_table_width=common.block_table_tensor.shape[1],
+    )
+
+    metadata = builder.build(0, common)
+
+    assert metadata.num_decodes == 16
+    assert metadata.num_decode_tokens == 64
+    assert metadata.num_prefills == 0
+    assert metadata.decode is not None
+    assert builder.expanded_block_table_buffer.shape == (96, 2)
