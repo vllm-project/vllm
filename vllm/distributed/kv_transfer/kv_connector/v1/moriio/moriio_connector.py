@@ -1064,6 +1064,11 @@ class MoRIIOConnectorScheduler:
         that lets the producer RDMA-Write its KV into the freshly allocated
         decode blocks.
 
+        In hybrid READ mode `blocks` must be the request's complete block
+        table (`KVCacheManager.get_blocks`), locally cached prefix included,
+        not only the external suffix: full-attention groups are sliced by
+        token range, and a table not covering it raises `MoRIIOError`.
+
         DP-rank routing contract (router-authoritative)
         ------------------------------------------------
         Both legs of a disagg pair must agree on a single prefill DP rank,
