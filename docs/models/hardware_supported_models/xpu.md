@@ -64,73 +64,8 @@ Note: Online FP8 = [Online Quantization](https://docs.vllm.ai/en/latest/features
 | THUDM/GLM-4v-9B               | GLM4vForConditionalGeneration        | BF16/Online FP8 |
 | openbmb/MiniCPM-V-4           | MiniCPMVForConditionalGeneration     | BF16/Online FP8 |
 
-### Qwen3.5 eager execution and MoE decode fusion
-
-Qwen3.5 dense, MoE and MTP models on XPU use the dedicated eager implementation.
-Breakable graphs are enabled by default for these architectures, and model-level
-`torch.compile` is disabled. No environment variable is required to select this
-execution path. ROCm and other fallback platforms retain their existing model
-implementations.
-
-Routed/shared expert decode fusion is **opt-in**. The default
-`--additional-config '{"decode_backend":"auto"}'` uses stock MoE without
-initializing a specialized executor, allocating its scratch or importing the
-optional shared-expert provider. Dense and MTP models keep the default path.
-
-The initial qualified deployment is two Arc Pro B70 GPUs (`device_id=0xE223`)
-with FP16/block-2D capabilities, Qwen3.5-family MoE dimensions H=2048, routed and
-shared I=512, E=256 and top-k=8, 40 layers, single-host mp, TP2/PP1/DP1/EP1, FP16 activations and online
-`fp8_per_tensor` quantization. Routed/shared FP8-e4m3 weights use FP32 scales;
-shared projections must use `XPUW8A16FP8LinearKernel`. Tested software includes
-driver `1.15.39122+11`, Level-Zero V2 runtime `20.2.0`, PyTorch `2.14.0+xpu`,
-and a companion build exposing `XpuFusedMoeWithSharedExpert`, whose tested
-grouped-GEMM binary records oneAPI DPC++/C++ `2026.1.1` and GCC `13.3.1`.
-
-Explicit opt-in fails startup with collected TP-rank reasons for an unsupported
-deployment. Initially unqualified combinations include multimodal inputs,
-speculative decoding, LoRA, prefix caching, sleep/wake, external KV/weight
-transfer, prompt embeddings, alternate KV/SSM paths, offload, DBO, EPLB, nontrivial context/expert/sequence parallelism,
-W8A8 shared projections and configured context lengths above 40960.
-Default XPU functionality remains independent of this optional specialization.
-
-For a qualified checkpoint and companion provider:
-
-```bash
-vllm serve Qwen/Qwen3.5-35B-A3B \
-  --tensor-parallel-size 2 --dtype float16 --quantization fp8_per_tensor \
-  --language-model-only --no-enable-prefix-caching --max-model-len 40960 \
-  --additional-config '{"decode_backend":"latency_specialized"}' \
-  --compilation-config '{"mode":0,"cudagraph_mode":"FULL_DECODE_ONLY","cudagraph_capture_sizes":[1,2,4,8]}'
-```
-
-Graph-off execution uses
-`--compilation-config '{"mode":0,"cudagraph_mode":"NONE"}'`.
-Both modes use Model Runner V2 through `XPUModelRunner` and the standard hybrid
-KV/SSM state. The model's optional ModelState plans MoE from CPU batch metadata.
-Only ordinary decode with one query token per request qualifies:
-`1 <= B = T_actual <= T_padded <= 8`, where T_padded includes graph padding.
-Prefill, chunked prefill, mixed batches and larger decode batches select stock
-before execution. One-token prompt tails cannot replay specialized decode
-graphs. Runtime errors propagate without retrying through stock.
-
-Both paths read the same canonical parameters and KV/SSM state; switching
-paths requires no weight or state conversion. All row workspaces are prepared
-during post-load before memory profiling and KV-cache sizing. Supported
-in-place kernel-format reloads reuse executor/storage/workspaces; changes to
-storage/layout or eligibility are rejected. Broader rebinding is unqualified.
-
-Runtime diagnostics distinguish eligible planning, skip reasons, initialization
-scratch and weight-storage sharing. Python launch counts include capture and
-do not count native graph replay. Validation observes actual graph replay calls
-and eligible batch plans, checks native capture launches, and observes bound
-provider CPU operator events. Separate lightweight processes provide eager GPU
-kernel traces. Enabling PTI GPU tracing in a model worker can time out later
-whole-model graph replays on the tested driver, including on the default path,
-even after stopping the GPU profiler; whole-model device tracing remains a gap.
-Fused/stock accumulation and rounding may differ. Report numerical/model
-quality, transition correctness, same-source serving performance and memory
-costs for each claimed configuration; do not infer benefit for unmeasured
-hardware or checkpoints.
+Qwen3.5 models on XPU use eager execution. MoE decode fusion is opt-in; see the
+[configuration and supported deployments](https://github.com/vllm-project/vllm/blob/main/vllm/models/qwen3_5/xpu/specialized_decode/README.md).
 
 ### Embedding and Reranker Language Models
 

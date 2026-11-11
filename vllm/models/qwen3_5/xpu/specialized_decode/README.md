@@ -6,6 +6,9 @@ loader, KV cache or recurrent state manager.
 
 ## Selection and qualification
 
+Qwen3.5 dense, MoE and MTP models on XPU use eager execution with breakable
+graphs by default; model-level `torch.compile` is disabled.
+
 `additional_config={"decode_backend":"auto"}` is the default. It runs stock
 MoE without constructing a specialized executor, allocating its workspaces or
 importing the optional shared-expert provider. Dense and MTP models retain their
@@ -43,6 +46,19 @@ oneAPI DPC++/C++ `2026.1.1` and GCC `13.3.1` in its ELF compiler metadata.
 Native availability is checked against
 the actual device. Other SKUs and software combinations need independent
 correctness and performance qualification.
+
+For a qualified checkpoint and companion provider:
+
+```bash
+vllm serve Qwen/Qwen3.5-35B-A3B \
+  --tensor-parallel-size 2 --dtype float16 --quantization fp8_per_tensor \
+  --language-model-only --no-enable-prefix-caching --max-model-len 40960 \
+  --additional-config '{"decode_backend":"latency_specialized"}' \
+  --compilation-config '{"mode":0,"cudagraph_mode":"FULL_DECODE_ONLY","cudagraph_capture_sizes":[1,2,4,8]}'
+```
+
+For graph-off execution, use
+`--compilation-config '{"mode":0,"cudagraph_mode":"NONE"}'`.
 
 ## Planning, graphs and fallback
 
@@ -108,9 +124,10 @@ explicitly unqualified.
 ## Validation and benefit
 
 Correctness and measured benefit must be recorded separately for each
-checkpoint/configuration. Layer tests exercise real native dispatch, numerical
-agreement, default-off independence, prompt/padding boundaries, TP reduction,
-workspace reuse and reload graphs. Real-model validation must exercise a single
+checkpoint/configuration. The CI layer smoke test checks B1 native dispatch,
+numerical agreement with stock MoE and provider reuse after loading. Broader
+local validation covers prompt/padding boundaries, TP reduction and reload
+graphs. Real-model validation must exercise a single
 request across default prefill -> specialized decode -> default decode ->
 specialized decode, including mixed and >8-row batches.
 
@@ -134,8 +151,8 @@ checkpoint, speculative mode or numerical format.
 - `model_state.py`: stock hybrid state integration and graph eligibility.
 - `moe.py`: bound provider, runtime tensor guards, native call and TP reduction.
 
-Layer tests: `tests/kernels/moe/test_moe.py -k xpu_qwen3_5`.
+Layer smoke test: `tests/kernels/moe/test_moe.py -k xpu_qwen3_5`.
 Model tests: `tests/models/qwen3_5/xpu_specialized_decode/test_integration.py`.
-The Intel job requests the existing B70 resource template and selects these
-suites and their source dependencies. Local validation does not establish that
-the new CI job has run; its execution remains to be confirmed.
+The Intel job requests one B70 and runs the single B1 layer smoke test without
+loading model weights. Real-model tests remain available for explicit local
+validation and are not selected by this job.

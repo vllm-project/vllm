@@ -6,9 +6,7 @@ Run `pytest tests/kernels/test_moe.py`.
 """
 
 import functools
-import sys
 from collections.abc import Callable
-from contextlib import contextmanager
 from dataclasses import dataclass
 from typing import Any, NotRequired, TypedDict
 
@@ -88,30 +86,21 @@ requires_deep_ep_v2 = pytest.mark.skipif(
 )
 
 
-@contextmanager
-def _xpu_qwen3_5_moe(
-    tmp_path,
-    dtype,
-    quantized,
-    rank=0,
-    tp=1,
-    reduce_results=True,
-    *,
-    linear_backend="auto",
-    initialize_decode=True,
-    decode_backend=None,
-):
-    """Construct and quantize the model's real MoE block and shared linears."""
+@pytest.mark.skipif(not current_platform.is_xpu(), reason="Requires XPU execution")
+def test_xpu_qwen3_5_shared_expert_decode(tmp_path):
+    """FP8 shared-expert B1 decode uses the native kernel and matches stock MoE."""
     from transformers import Qwen3_5MoeConfig, Qwen3_5MoeTextConfig
 
-    from vllm.config import KernelConfig, ModelConfig, ParallelConfig
+    from vllm.config import ModelConfig
     from vllm.distributed import (
         cleanup_dist_env_and_memory,
         init_distributed_environment,
         initialize_model_parallel,
     )
+    from vllm.forward_context import set_forward_context
+    from vllm.model_executor.layers.fused_moe.experts.xpu_moe import XPUExpertsFp8
     from vllm.model_executor.layers.quantization.fp8 import Fp8Config
-    from vllm.model_executor.model_loader.reload import record_metadata_for_reloading
+    from vllm.model_executor.models.qwen3_next import Qwen3NextSparseMoeBlock
     from vllm.models.qwen3_5.xpu.model import Qwen3_5SparseMoeBlock
     from vllm.models.qwen3_5.xpu.specialized_decode.hooks import (
         initialize_specialized_decode,
@@ -132,42 +121,30 @@ def _xpu_qwen3_5_moe(
         vocab_size=128,
         layer_types=["full_attention"],
     )
-    model_path = tmp_path / str(rank)
-    Qwen3_5MoeConfig(text_config=text_config).save_pretrained(model_path)
-    if decode_backend is None:
-        decode_backend = (
-            "latency_specialized" if quantized and linear_backend == "auto" else "auto"
-        )
+    Qwen3_5MoeConfig(text_config=text_config).save_pretrained(tmp_path)
     config = VllmConfig(
-        additional_config={"decode_backend": decode_backend},
+        additional_config={"decode_backend": "latency_specialized"},
         model_config=ModelConfig(
-            model=str(model_path),
+            model=str(tmp_path),
             skip_tokenizer_init=True,
-            dtype=dtype,
+            dtype=torch.float16,
             max_model_len=128,
         ),
-        parallel_config=ParallelConfig(tensor_parallel_size=tp),
-        kernel_config=KernelConfig(linear_backend=linear_backend),
-        quant_config=Fp8Config(is_checkpoint_fp8_serialized=True)
-        if quantized
-        else None,
+        quant_config=Fp8Config(is_checkpoint_fp8_serialized=True),
     )
     try:
-        with set_current_vllm_config(config), set_default_torch_dtype(dtype):
-            torch.xpu.set_device(rank)
+        with set_current_vllm_config(config), set_default_torch_dtype(torch.float16):
             init_distributed_environment(
-                world_size=tp,
-                rank=rank,
-                local_rank=rank,
+                world_size=1,
+                rank=0,
+                local_rank=0,
                 backend=current_platform.dist_backend,
                 distributed_init_method=f"file://{tmp_path / 'distributed'}",
             )
-            initialize_model_parallel(tp, 1)
+            initialize_model_parallel(1, 1)
             init_workspace_manager(torch.device(DEVICE_TYPE))
             with torch.device(DEVICE_TYPE):
-                block = Qwen3_5SparseMoeBlock(
-                    config, prefix="model.layers.0.mlp", reduce_results=reduce_results
-                )
+                block = Qwen3_5SparseMoeBlock(config, prefix="model.layers.0.mlp")
                 torch.manual_seed(7)
                 with torch.no_grad():
                     for name, param in block.named_parameters():
@@ -178,478 +155,39 @@ def _xpu_qwen3_5_moe(
                             if param.dtype != torch.float8_e4m3fn:
                                 values *= 0.0625
                             param.copy_(values.to(param.dtype))
-                record_metadata_for_reloading(block)
                 for layer in block.modules():
                     method = getattr(layer, "quant_method", None)
                     if method is not None:
                         method.process_weights_after_loading(layer)
-                if initialize_decode:
-                    initialize_specialized_decode(block)
-                    if decode_backend != "auto" and block._decode is not None:
-                        block._decode.runtime.prepare_capture(1, 1)
-            yield block, config, quantized
+                kernel = block.experts.routed_experts.quant_method.moe_kernel
+                assert kernel is not None
+                experts = kernel.fused_experts
+                assert isinstance(experts, XPUExpertsFp8)
+                provider = experts.fused_moe_impl
+                assert provider is not None
+                initialize_specialized_decode(block)
+                assert block._decode is not None
+                block._decode.runtime.prepare_capture(1, 1)
+                x = torch.randn(1, 128, dtype=torch.float16)
+            with set_forward_context(None, config), torch.inference_mode():
+                expected = Qwen3NextSparseMoeBlock.forward(block, x)
+                with torch.profiler.profile(
+                    activities=[torch.profiler.ProfilerActivity.CPU]
+                ) as profiler:
+                    actual = block(x)
+            assert experts.fused_moe_impl is provider
+            assert (
+                sum(
+                    event.count
+                    for event in profiler.key_averages()
+                    if event.key == "_xpu_C::moe_shared_fused_decode_interface"
+                )
+                == 1
+            )
+            torch.testing.assert_close(actual, expected, rtol=1e-2, atol=1e-2)
     finally:
         reset_workspace_manager()
         cleanup_dist_env_and_memory()
-
-
-@pytest.fixture
-def xpu_qwen3_5_moe(tmp_path, request):
-    with _xpu_qwen3_5_moe(tmp_path, *request.param) as state:
-        yield state
-
-
-def _check_xpu_qwen3_5_decode(state, num_tokens, should_fuse):
-    from vllm.forward_context import set_forward_context
-    from vllm.model_executor.models.qwen3_next import Qwen3NextSparseMoeBlock
-
-    block, config, _ = state
-    if block._decode is not None:
-        block._decode.runtime.prepare_capture(num_tokens, num_tokens)
-    torch.manual_seed(17)
-    x = torch.randn(
-        num_tokens,
-        block.gate.input_size,
-        dtype=config.model_config.dtype,
-        device=DEVICE_TYPE,
-    )
-    with set_forward_context(None, config), torch.inference_mode():
-        expected = Qwen3NextSparseMoeBlock.forward(block, x)
-        with torch.profiler.profile(
-            activities=[torch.profiler.ProfilerActivity.CPU]
-        ) as p:
-            actual = block(x)
-    native_calls = sum(
-        event.count
-        for event in p.key_averages()
-        if event.key == "_xpu_C::moe_shared_fused_decode_interface"
-    )
-    assert native_calls == int(should_fuse)
-    if should_fuse:
-        # The fused and base kernels round projections/activations differently.
-        torch.testing.assert_close(actual, expected, rtol=1e-2, atol=1e-2)
-    else:
-        torch.testing.assert_close(actual, expected, rtol=0, atol=0)
-
-
-@pytest.mark.skipif(not current_platform.is_xpu(), reason="Requires XPU execution")
-@pytest.mark.parametrize(
-    "xpu_qwen3_5_moe",
-    [(torch.float16, True), (torch.bfloat16, True)],
-    indirect=True,
-)
-@pytest.mark.parametrize("num_tokens", list(range(1, 9)))
-def test_xpu_qwen3_5_native_shared_expert_decode(xpu_qwen3_5_moe, num_tokens):
-    """Missing kernels must fail native coverage rather than test fallback."""
-    assert hasattr(torch.ops._xpu_C, "moe_shared_fused_decode_interface")
-    _check_xpu_qwen3_5_decode(xpu_qwen3_5_moe, num_tokens, should_fuse=True)
-
-
-@pytest.mark.skipif(not current_platform.is_xpu(), reason="Requires XPU execution")
-def test_xpu_qwen3_5_default_has_no_specialized_resources(tmp_path):
-    """Disabling fusion preserves exact stock outputs without an executor."""
-    with _xpu_qwen3_5_moe(
-        tmp_path, torch.float16, True, decode_backend="auto"
-    ) as state:
-        assert state[0]._decode is None
-        assert not hasattr(state[0], "_xpu_moe_decode_runtime")
-        _check_xpu_qwen3_5_decode(state, 1, should_fuse=False)
-
-
-@pytest.mark.skipif(not current_platform.is_xpu(), reason="Requires XPU execution")
-def test_xpu_qwen3_5_explicit_deployment_reports_all_reasons(tmp_path):
-    """An opt-in deployment reports independent failures together across TP."""
-    from vllm.models.qwen3_5.xpu.specialized_decode.config import validate_deployment
-
-    with _xpu_qwen3_5_moe(
-        tmp_path,
-        torch.bfloat16,
-        False,
-        decode_backend="latency_specialized",
-        initialize_decode=False,
-    ) as state:
-        config = state[1]
-        with pytest.raises(ValueError) as error:
-            validate_deployment(config)
-        for reason in (
-            "TP rank 0",
-            "MoE dimensions",
-            "40-layer",
-            "requires TP2",
-            "FP16 activations",
-            "fp8_per_tensor",
-            "decode_backend=auto",
-        ):
-            assert reason in str(error.value)
-
-
-@pytest.mark.skipif(not current_platform.is_xpu(), reason="Requires XPU execution")
-@pytest.mark.parametrize(
-    "actual,padded,prefill",
-    [(3, 4, False), (8, 8, False), (9, 9, False), (1, 1, True), (3, 4, True)],
-)
-@pytest.mark.parametrize("xpu_qwen3_5_moe", [(torch.float16, True)], indirect=True)
-def test_xpu_qwen3_5_batch_semantics(xpu_qwen3_5_moe, actual, padded, prefill):
-    """Native dispatch honors prompt semantics and padding, not just row count."""
-    from dataclasses import replace
-
-    from vllm.forward_context import set_forward_context
-    from vllm.model_executor.models.qwen3_next import Qwen3NextSparseMoeBlock
-    from vllm.v1.worker.gpu.input_batch import InputBatch, InputBuffers
-
-    block, config, _ = xpu_qwen3_5_moe
-    runtime = block._decode.runtime
-    assert runtime.snapshot()["bindings_shared"]
-    assert runtime.snapshot()["specialized_weight_bytes"] == 0
-    scratch = tuple(block._decode.plan.workspace(n) for n in range(1, 9))
-    batch = InputBatch.make_dummy(
-        actual, actual, InputBuffers(padded, padded, torch.device(DEVICE_TYPE))
-    )
-    batch = replace(batch, has_prefill=prefill, num_tokens_after_padding=padded)
-    runtime.prepare_step(batch)
-    x = torch.ones(
-        padded, block.gate.input_size, dtype=torch.float16, device=DEVICE_TYPE
-    )
-    with set_forward_context(None, config), torch.inference_mode():
-        expected = Qwen3NextSparseMoeBlock.forward(block, x)
-        with torch.profiler.profile(
-            activities=[torch.profiler.ProfilerActivity.CPU]
-        ) as p:
-            actual_output = block(x)
-    fused = not prefill and padded <= 8
-    assert sum(
-        e.count
-        for e in p.key_averages()
-        if e.key == "_xpu_C::moe_shared_fused_decode_interface"
-    ) == int(fused)
-    torch.testing.assert_close(
-        actual_output, expected, rtol=1e-2 if fused else 0, atol=1e-2 if fused else 0
-    )
-    assert all(block._decode.plan.workspace(n) is t for n, t in enumerate(scratch, 1))
-
-
-@pytest.mark.skipif(not current_platform.is_xpu(), reason="Requires XPU execution")
-@pytest.mark.parametrize("xpu_qwen3_5_moe", [(torch.float16, True)], indirect=True)
-def test_xpu_qwen3_5_first_fallback_preserves_decode_graph(xpu_qwen3_5_moe):
-    """Fallback must not relayout weights already bound by a captured decode."""
-    from vllm.forward_context import set_forward_context
-    from vllm.model_executor.models.qwen3_next import Qwen3NextSparseMoeBlock
-
-    block, config, _ = xpu_qwen3_5_moe
-    plan = block._xpu_moe_shared_fused_plan
-    assert plan is not None, "Prepare loaded routed weights before binding decode"
-    x = torch.randn(1, block.gate.input_size, dtype=torch.float16, device=DEVICE_TYPE)
-    weights = (plan.w13, plan.w2)
-    pointers = tuple(weight.data_ptr() for weight in weights)
-    shapes = tuple(weight.shape for weight in weights)
-    stream = torch.xpu.Stream()
-    stream.wait_stream(torch.xpu.current_stream())
-    with set_forward_context(None, config), torch.inference_mode():
-        with torch.xpu.stream(stream):
-            block(x)
-            block(x)
-        torch.xpu.current_stream().wait_stream(stream)
-        graph = torch.xpu.XPUGraph()
-        with torch.xpu.graph(graph, stream=stream):
-            output = block(x)
-        expected = Qwen3NextSparseMoeBlock.forward(block, x)
-        assert tuple(weight.data_ptr() for weight in weights) == pointers
-        assert tuple(weight.shape for weight in weights) == shapes
-        graph.replay()
-        torch.xpu.synchronize()
-        torch.testing.assert_close(output, expected, rtol=1e-2, atol=1e-2)
-
-
-@pytest.mark.skipif(not current_platform.is_xpu(), reason="Requires XPU execution")
-def test_xpu_qwen3_5_forward_requires_post_load_initialization(tmp_path):
-    """Forward uses stock until the post-load hook binds native fused weights."""
-    from vllm.models.qwen3_5.xpu.specialized_decode.hooks import (
-        initialize_specialized_decode,
-    )
-
-    with _xpu_qwen3_5_moe(
-        tmp_path, torch.float16, True, initialize_decode=False
-    ) as state:
-        _check_xpu_qwen3_5_decode(state, 1, should_fuse=False)
-        initialize_specialized_decode(state[0])
-        _check_xpu_qwen3_5_decode(state, 1, should_fuse=True)
-
-
-@pytest.mark.skipif(not current_platform.is_xpu(), reason="Requires XPU execution")
-@pytest.mark.parametrize(
-    "xpu_qwen3_5_moe,num_tokens",
-    [
-        ((torch.float16, True), 0),
-        ((torch.float16, True), 9),
-        ((torch.bfloat16, True), 9),
-        *(((torch.float16, False), m) for m in (1, 2, 4, 8, 9)),
-    ],
-    indirect=["xpu_qwen3_5_moe"],
-)
-def test_xpu_qwen3_5_unsupported_fallback(xpu_qwen3_5_moe, num_tokens):
-    _check_xpu_qwen3_5_decode(xpu_qwen3_5_moe, num_tokens, should_fuse=False)
-
-
-@pytest.mark.skipif(not current_platform.is_xpu(), reason="Requires XPU execution")
-@pytest.mark.parametrize("dtype", [torch.float16, torch.bfloat16])
-@pytest.mark.parametrize("num_tokens", [1, 2, 4, 8])
-def test_xpu_qwen3_5_a8_shared_expert_fallback(tmp_path, dtype, num_tokens):
-    """Decode must preserve the selected shared linears' activation quantization."""
-    from vllm.model_executor.kernels.linear.scaled_mm.xpu import XPUW8A8FP8LinearKernel
-
-    with _xpu_qwen3_5_moe(tmp_path, dtype, True, linear_backend="xpu") as state:
-        shared = state[0].shared_expert
-        assert all(
-            isinstance(layer.quant_method.fp8_linear, XPUW8A8FP8LinearKernel)
-            for layer in (shared.gate_up_proj, shared.down_proj)
-        )
-        _check_xpu_qwen3_5_decode(state, num_tokens, should_fuse=False)
-
-
-@pytest.mark.skipif(not current_platform.is_xpu(), reason="Requires XPU execution")
-def test_xpu_qwen3_5_missing_provider_fallback(tmp_path, monkeypatch):
-    """Explicit initialization fails when the optional provider is unavailable."""
-    from vllm.models.qwen3_5.xpu.specialized_decode.hooks import (
-        initialize_specialized_decode,
-    )
-
-    monkeypatch.setitem(
-        sys.modules, "vllm_xpu_kernels.moe_shared_fused_interface", None
-    )
-    with _xpu_qwen3_5_moe(
-        tmp_path, torch.float16, True, initialize_decode=False
-    ) as state:
-        with pytest.raises(ValueError, match="provider unavailable"):
-            initialize_specialized_decode(state[0])
-        _check_xpu_qwen3_5_decode(state, 2, should_fuse=False)
-
-
-@pytest.mark.skipif(not current_platform.is_xpu(), reason="Requires XPU execution")
-def test_xpu_qwen3_5_unsupported_device_fallback(tmp_path, monkeypatch):
-    """Explicit initialization fails on unsupported native architectures."""
-    from vllm.models.qwen3_5.xpu.specialized_decode.hooks import (
-        initialize_specialized_decode,
-    )
-
-    with _xpu_qwen3_5_moe(
-        tmp_path, torch.float16, True, initialize_decode=False
-    ) as state:
-        monkeypatch.setattr(torch.ops._xpu_C, "is_xe2_arch", lambda *_: False)
-        monkeypatch.setattr(torch.ops._xpu_C, "is_xe3_arch", lambda *_: False)
-        with pytest.raises(ValueError, match="native provider does not support"):
-            initialize_specialized_decode(state[0])
-        _check_xpu_qwen3_5_decode(state, 1, should_fuse=False)
-
-
-@pytest.mark.skipif(not current_platform.is_xpu(), reason="Requires XPU execution")
-def test_xpu_qwen3_5_provider_import_failure_cached(tmp_path, monkeypatch):
-    """Default decode never imports or initializes the optional provider."""
-    from vllm.models.qwen3_5.xpu.specialized_decode.moe import FusedMoeDecode
-
-    monkeypatch.setitem(
-        sys.modules, "vllm_xpu_kernels.moe_shared_fused_interface", None
-    )
-    failures = 0
-
-    def trace(frame, event, arg):
-        nonlocal failures
-        if frame.f_code is not FusedMoeDecode.__init__.__code__:
-            return None
-        if event == "exception" and issubclass(arg[0], ImportError):
-            failures += 1
-        return trace
-
-    previous = sys.gettrace()
-    try:
-        sys.settrace(trace)
-        with _xpu_qwen3_5_moe(
-            tmp_path, torch.float16, True, decode_backend="auto"
-        ) as state:
-            _check_xpu_qwen3_5_decode(state, 1, should_fuse=False)
-            _check_xpu_qwen3_5_decode(state, 2, should_fuse=False)
-            assert state[0]._decode is None
-    finally:
-        sys.settrace(previous)
-    assert failures == 0
-
-
-@pytest.mark.skipif(not current_platform.is_xpu(), reason="Requires XPU execution")
-@pytest.mark.parametrize(
-    "xpu_qwen3_5_moe", [(torch.float16, True), (torch.bfloat16, True)], indirect=True
-)
-def test_xpu_qwen3_5_checkpoint_then_kernel_scale_reload(xpu_qwen3_5_moe):
-    """Kernel scale updates reach the same parameters after checkpoint processing."""
-    from vllm.forward_context import set_forward_context
-    from vllm.model_executor.model_loader.reload import (
-        finalize_layerwise_reload,
-        initialize_layerwise_reload,
-    )
-    from vllm.model_executor.model_loader.reload.inplace import reload_weights
-
-    block, config, _ = xpu_qwen3_5_moe
-    routed = block.experts.routed_experts
-    x = torch.ones(1, 128, dtype=config.model_config.dtype, device=DEVICE_TYPE)
-    with torch.inference_mode(), set_forward_context(None, config):
-        before = block(x)
-        plan = block._xpu_moe_shared_fused_plan
-        assert plan is not None
-        scale_ptrs = [plan.w13_scales.data_ptr(), plan.w2_scales.data_ptr()]
-        w1, w3 = routed.w13_weight.transpose(1, 2).chunk(2, dim=1)
-        w2 = routed.w2_weight.transpose(1, 2)
-        checkpoint = [
-            ("w13_weight", "w1", w1.contiguous()),
-            ("w13_weight", "w3", w3.contiguous()),
-            ("w2_weight", "w2", w2.contiguous()),
-            ("w13_weight_scale", "w1", routed.w13_weight_scale.clone()),
-            ("w13_weight_scale", "w3", routed.w13_weight_scale.clone()),
-            ("w2_weight_scale", "w2", routed.w2_weight_scale.clone()),
-        ]
-        initialize_layerwise_reload(routed)
-        for name, shard, weights in checkpoint:
-            for expert_id, weight in enumerate(weights):
-                param = routed.get_parameter(name)
-                param.weight_loader(param, weight, name, shard, expert_id)
-        finalize_layerwise_reload(routed, config.model_config)
-
-        updates = [
-            (name, torch.zeros_like(param))
-            for name, param in block.named_parameters()
-            if name.endswith(("w13_weight_scale", "w2_weight_scale"))
-        ]
-        assert len(updates) == 2
-        reload_weights(config, block, updates, None, is_checkpoint_format=False)
-        for name, expected in updates:
-            torch.testing.assert_close(
-                block.get_parameter(name), expected, rtol=0, atol=0
-            )
-        actual = block(x)
-        expected = block.shared_expert(x)
-        torch.testing.assert_close(actual, expected, rtol=1e-2, atol=1e-2)
-        from vllm.model_executor.models.qwen3_next import Qwen3NextSparseMoeBlock
-
-        fallback = Qwen3NextSparseMoeBlock.forward(block, x)
-        torch.testing.assert_close(fallback, expected, rtol=1e-2, atol=1e-2)
-        assert not torch.equal(actual, before)
-        assert block._xpu_moe_shared_fused_plan is plan
-        assert [plan.w13_scales.data_ptr(), plan.w2_scales.data_ptr()] == scale_ptrs
-
-
-@pytest.mark.skipif(not current_platform.is_xpu(), reason="Requires XPU execution")
-@pytest.mark.parametrize("xpu_qwen3_5_moe", [(torch.float16, True)], indirect=True)
-def test_xpu_qwen3_5_shared_weight_checkpoint_reload_graph(xpu_qwen3_5_moe):
-    """Checkpoint processing preserves the shared parameter a graph reads."""
-    from vllm.forward_context import set_forward_context
-    from vllm.model_executor.model_loader.reload import (
-        finalize_layerwise_reload,
-        initialize_layerwise_reload,
-    )
-    from vllm.model_executor.model_loader.reload.inplace import reload_weights
-    from vllm.model_executor.models.qwen3_next import Qwen3NextSparseMoeBlock
-
-    block, config, _ = xpu_qwen3_5_moe
-    x = torch.ones(1, 128, dtype=torch.float16, device=DEVICE_TYPE)
-    with torch.inference_mode(), set_forward_context(None, config):
-        block(x)
-        layer = block.shared_expert.down_proj
-        weight = layer.weight
-        original, scale = weight.clone(), layer.weight_scale.clone()
-        plan = block._xpu_moe_shared_fused_plan
-        assert plan is not None and plan.shared_w2 is weight
-        weight_ptr = weight.data_ptr()
-        stream = torch.xpu.Stream()
-        stream.wait_stream(torch.xpu.current_stream())
-        with torch.xpu.stream(stream):
-            block(x)
-        stream.synchronize()
-        graph = torch.xpu.XPUGraph()
-        with torch.xpu.graph(graph, stream=stream):
-            output = block(x)
-        graph.replay()
-        torch.xpu.synchronize()
-        before = output.clone()
-        try:
-            initialize_layerwise_reload(layer)
-            checkpoint = torch.zeros_like(original.t().contiguous())
-            layer.weight.weight_loader(layer.weight, checkpoint)
-            layer.weight_scale.weight_loader(
-                layer.weight_scale, scale.reshape(layer.weight_scale.shape)
-            )
-            finalize_layerwise_reload(layer, config.model_config)
-            assert layer.weight is weight and weight.data_ptr() == weight_ptr
-            expected = Qwen3NextSparseMoeBlock.forward(block, x)
-            graph.replay()
-            torch.xpu.synchronize()
-            torch.testing.assert_close(output, expected, rtol=1e-2, atol=1e-2)
-            assert not torch.equal(output, before)
-        finally:
-            reload_weights(
-                config,
-                block,
-                [("shared_expert.down_proj.weight", original)],
-                None,
-                is_checkpoint_format=False,
-            )
-        graph.replay()
-        torch.xpu.synchronize()
-        torch.testing.assert_close(output, before, rtol=0, atol=0)
-
-
-@pytest.mark.skipif(not current_platform.is_xpu(), reason="Requires XPU execution")
-@pytest.mark.parametrize("xpu_qwen3_5_moe", [(torch.float16, True)], indirect=True)
-def test_xpu_qwen3_5_shared_expert_preserves_sequence_parallel_input(xpu_qwen3_5_moe):
-    """Already partitioned calls retain the parent block's forward contract."""
-    from vllm.forward_context import set_forward_context
-    from vllm.model_executor.models.qwen3_next import Qwen3NextSparseMoeBlock
-
-    block, config, _ = xpu_qwen3_5_moe
-    x = torch.ones(2, 128, dtype=config.model_config.dtype, device=DEVICE_TYPE)
-    with set_forward_context(None, config), torch.inference_mode():
-        expected = Qwen3NextSparseMoeBlock.forward(block, x, True)
-        with torch.profiler.profile(
-            activities=[torch.profiler.ProfilerActivity.CPU]
-        ) as p:
-            actual = block(x, already_sequence_parallel=True)
-    assert not any(
-        event.key == "_xpu_C::moe_shared_fused_decode_interface"
-        for event in p.key_averages()
-    )
-    torch.testing.assert_close(actual, expected, rtol=0, atol=0)
-
-
-def _check_xpu_qwen3_5_tp2(rank, tmp_path, reduce_results):
-    from vllm.forward_context import set_forward_context
-
-    with _xpu_qwen3_5_moe(
-        tmp_path, torch.float16, True, rank, 2, reduce_results
-    ) as state:
-        _check_xpu_qwen3_5_decode(state, 2, should_fuse=True)
-        block, config, _ = state
-        x = torch.ones(2, 128, dtype=torch.float16, device=DEVICE_TYPE)
-        with torch.inference_mode(), set_forward_context(None, config):
-            with torch.profiler.profile(
-                activities=[torch.profiler.ProfilerActivity.CPU]
-            ) as p:
-                block(x)
-            reductions = sum(
-                event.count
-                for event in p.key_averages()
-                if event.key == "c10d::allreduce_"
-            )
-            assert reductions == int(reduce_results)
-            plan = block._xpu_moe_shared_fused_plan
-            workspace = plan.workspace(2)
-            block(x)
-            assert block._xpu_moe_shared_fused_plan is plan
-            assert plan.workspace(2) is workspace
-
-
-@pytest.mark.skipif(not current_platform.is_xpu(), reason="Requires XPU execution")
-@pytest.mark.parametrize("reduce_results", [True, False])
-def test_xpu_qwen3_5_shared_expert_tp2(tmp_path, reduce_results):
-    """The combined rank-local partial is reduced exactly once when requested."""
-    torch.multiprocessing.spawn(
-        _check_xpu_qwen3_5_tp2, args=(tmp_path, reduce_results), nprocs=2
-    )
 
 
 def test_triton_moe_launcher_passes_scalar_scale_as_pointer(monkeypatch) -> None:

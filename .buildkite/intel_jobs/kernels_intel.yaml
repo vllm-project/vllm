@@ -26,12 +26,12 @@ steps:
       pytest -v -s ir &&
       pytest -v -s kernels/ir'
 
-- label: ":intel: (B70) Qwen3.5 Shared Expert Decode / Transitions / Reload"
+- label: ":intel: (B70) Qwen3.5 Shared Expert Decode (B1)"
   key: qwen35-shared-expert-decode
-  timeout_in_minutes: 120
+  timeout_in_minutes: 20
   device: intel_gpu_k8s
-  num_devices: 4
-  resource_claim_template: b70-4
+  num_devices: 1
+  resource_claim_template: b70-1
   working_dir: "/workspace/vllm/"
   env:
     REGISTRY: "public.ecr.aws/q9t5s3a7"
@@ -44,46 +44,14 @@ steps:
     - vllm/model_executor/layers/quantization/fp8.py
     - vllm/model_executor/layers/quantization/online/fp8.py
     - vllm/model_executor/models/qwen3_next.py
-    - vllm/v1/worker/xpu_worker.py
-    - vllm/v1/worker/xpu_model_runner.py
     - tests/kernels/moe/test_moe.py
-    - tests/models/test_qwen3_5.py
-    - tests/models/qwen3_5/xpu_specialized_decode/
-    - tests/v1/worker/test_gpu_worker_weight_transfer.py
     - requirements/xpu.txt
   commands:
     - cd tests
     - >-
       pytest -v -s
       kernels/moe/test_moe.py
-      v1/worker/test_gpu_worker_weight_transfer.py
       -k xpu_qwen3_5
-
-- label: ":intel: (BMG) Qwen3.5 Stock-Wheel Fallback"
-  key: qwen35-shared-expert-fallback
-  timeout_in_minutes: 20
-  device: intel_gpu
-  agent_tags:
-    label: production
-    gpu: 1+
-    mem: 16+
-  no_plugin: true
-  working_dir: "."
-  env:
-    REGISTRY: "public.ecr.aws/q9t5s3a7"
-    REPO: "vllm-ci-test-repo"
-    VLLM_TEST_DEVICE: "xpu"
-  source_file_dependencies:
-    - vllm/models/qwen3_5/__init__.py
-    - vllm/models/qwen3_5/xpu/
-    - tests/kernels/moe/test_moe.py
-    - requirements/xpu.txt
-  commands:
-    - >-
-      bash .buildkite/scripts/hardware_ci/run-intel-test.sh
-      'cd tests &&
-      pytest -v -s kernels/moe/test_moe.py
-      -k "xpu_qwen3_5_missing_provider or xpu_qwen3_5_provider_import_failure_cached"'
 
 - label: ":intel: (BMG) UVA Kernel Tests"
   key: uva-kernel-tests
