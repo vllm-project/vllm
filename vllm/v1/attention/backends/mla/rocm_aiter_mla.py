@@ -96,6 +96,13 @@ def _flat_mla_index_steps(cache: torch.Tensor) -> tuple[int, int]:
     return page_stride // unit, row_stride // unit
 
 
+def _flat_mla_kv_view_bytes(cache: torch.Tensor) -> int:
+    """Bytes from the base of `_flat_mla_kv_view` to the end of its last row."""
+    page_stride, row_stride, _ = cache.stride()
+    last_row = (cache.shape[0] - 1) * page_stride + (cache.shape[1] - 1) * row_stride
+    return (last_row + cache.shape[-1]) * cache.element_size()
+
+
 def _supports_fused_dcp_prefill_config(
     kv_cache_dtype: str | None,
     query_dtype: torch.dtype,
@@ -525,6 +532,29 @@ def _asm_causal_verify_unsupported(
     if is_quantized_kv_cache(kv_cache_dtype):
         return AiterMLAHelper.get_actual_mla_num_heads(decode_num_heads) != 128
     return True
+
+
+# CDNA3's FP8 asm decode addresses KV with 32-bit byte offsets from the base of
+# the flat view.
+_CDNA3_FP8_ASM_DECODE_MAX_KV_BYTES: Final = 1 << 32
+
+
+def _asm_decode_wraps_kv(
+    kv_cache_dtype: str, kv_view_bytes: int, dcp_world_size: int
+) -> bool:
+    """Whether CDNA3's FP8 asm decode would wrap its KV offsets on this view.
+
+    The flat view spans the whole allocation when pages sit inside a wider
+    block row, so it can pass 4 GiB while one layer's pages do not. bf16 decode
+    does not wrap, and DCP keeps its own routes.
+    """
+    if dcp_world_size > 1 or not is_quantized_kv_cache(kv_cache_dtype):
+        return False
+    from vllm.platforms.rocm import get_cdna_version
+
+    if get_cdna_version() != 3:
+        return False
+    return kv_view_bytes > _CDNA3_FP8_ASM_DECODE_MAX_KV_BYTES
 
 
 def _triton_verify_num_kv_splits(
@@ -1452,6 +1482,10 @@ class AiterMLAMetadataBuilder(MLACommonMetadataBuilder[AiterMLAMetadata]):
         # Split cap bound; must be static for full CUDA graphs.
         self._triton_verify_max_seq_len = vllm_config.model_config.max_model_len
         self._sm_count = current_platform.num_compute_units()
+        # Causal batches from this query length up take the Triton kernel.
+        self._triton_verify_min_qlen = AiterMLAHelper._ASM_PADDED_MAX_PS_QLEN + 1
+        # Whether the bound KV cache was checked against the asm offset range.
+        self._kv_view_checked = False
         self._triton_verify_qlens: tuple[int, ...] = ()
         if self._use_triton_verify:
             self._triton_verify_qlens = tuple(
@@ -1855,6 +1889,36 @@ class AiterMLAMetadataBuilder(MLACommonMetadataBuilder[AiterMLAMetadata]):
             per_req_page_table.unsqueeze(1)
         )
 
+    def _route_wide_kv_to_triton_verify(self) -> None:
+        """Send every causal decode batch to the Triton verify kernel when the
+        asm decode would wrap its KV offsets on the bound cache.
+
+        The KV cache is bound only after the builder is made, so this runs on
+        the first build after binding, ahead of graph capture.
+        """
+        if self._kv_view_checked:
+            return
+        cache = self.compilation_config.static_forward_context[
+            self._flat_index_layer
+        ].kv_cache
+        if not isinstance(cache, torch.Tensor) or cache.dim() != 3:
+            return
+        self._kv_view_checked = True
+        view_bytes = _flat_mla_kv_view_bytes(cache)
+        if not _asm_decode_wraps_kv(
+            self._kv_cache_dtype_str, view_bytes, self.dcp_world_size
+        ):
+            return
+        self._use_triton_verify = True
+        self._triton_verify_min_qlen = 1
+        self._triton_verify_qlens = tuple(range(1, self._mtp_decode_qlen + 1))
+        logger.warning_once(
+            "ROCM_AITER_MLA: the KV cache view spans %.1f GiB, past the 4 GiB "
+            "the CDNA3 FP8 asm decode can address, so causal decode uses the "
+            "Triton verify kernel.",
+            view_bytes / 2**30,
+        )
+
     def _flat_page_index_steps(self) -> tuple[int, int]:
         """Page and row steps for this layer's expanded page indices.
 
@@ -1881,6 +1945,7 @@ class AiterMLAMetadataBuilder(MLACommonMetadataBuilder[AiterMLAMetadata]):
         max_query_len: int,
         dcp_tot_seq_lens_device: torch.Tensor | None,
     ) -> AiterMLADecodeMetadata:
+        self._route_wide_kv_to_triton_verify()
         causal = self._decode_causal
         device = self.device
         num_reqs = seq_lens_device.size(0)
@@ -1986,7 +2051,7 @@ class AiterMLAMetadataBuilder(MLACommonMetadataBuilder[AiterMLAMetadata]):
             self._use_triton_verify
             and causal
             and not use_gluon_verify
-            and max_qo_len > AiterMLAHelper._ASM_PADDED_MAX_PS_QLEN
+            and max_qo_len >= self._triton_verify_min_qlen
         )
         triton_verify_num_kv_splits = 0
         if use_triton_verify:
