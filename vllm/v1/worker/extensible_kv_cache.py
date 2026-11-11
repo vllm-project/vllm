@@ -27,8 +27,8 @@ from vllm.utils.extensible_tensor import ExtensibleTensor
 from vllm.utils.math_utils import round_up
 from vllm.utils.mem_utils import device_memory_info, format_gib
 from vllm.utils.vmm_driver import (
-    _MEM_HANDLE_TYPE_FABRIC,
-    _MEM_HANDLE_TYPE_POSIX_FILE_DESCRIPTOR,
+    MEM_HANDLE_TYPE_FABRIC,
+    MEM_HANDLE_TYPE_POSIX_FILE_DESCRIPTOR,
 )
 from vllm.v1.hisparse.binding import rebind_hisparse_device_caches
 from vllm.v1.kv_cache_interface import (
@@ -394,9 +394,9 @@ def kv_cache_export_handle_types(vllm_config: "VllmConfig") -> int:
     access = kv_transfer_config.kv_cache_access()
     handle_types = 0
     if KVCacheAccess.EXPORTS_FD in access:
-        handle_types |= _MEM_HANDLE_TYPE_POSIX_FILE_DESCRIPTOR
+        handle_types |= MEM_HANDLE_TYPE_POSIX_FILE_DESCRIPTOR
     if KVCacheAccess.EXPORTS_FABRIC in access:
-        handle_types |= _MEM_HANDLE_TYPE_FABRIC
+        handle_types |= MEM_HANDLE_TYPE_FABRIC
     return handle_types
 
 

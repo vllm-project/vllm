@@ -241,7 +241,7 @@ def test_only_posix_fd_importers_get_a_posix_fd(posix_fd_importer: bool) -> None
     import os
 
     from vllm.utils.vmm_driver import (
-        _MEM_HANDLE_TYPE_POSIX_FILE_DESCRIPTOR,
+        MEM_HANDLE_TYPE_POSIX_FILE_DESCRIPTOR,
         get_vmm_driver,
     )
 
@@ -250,7 +250,7 @@ def test_only_posix_fd_importers_get_a_posix_fd(posix_fd_importer: bool) -> None
         4096,
         device="cuda",
         export_handle_types=(
-            _MEM_HANDLE_TYPE_POSIX_FILE_DESCRIPTOR if posix_fd_importer else 0
+            MEM_HANDLE_TYPE_POSIX_FILE_DESCRIPTOR if posix_fd_importer else 0
         ),
     )
     try:
@@ -266,7 +266,7 @@ def test_only_posix_fd_importers_get_a_posix_fd(posix_fd_importer: bool) -> None
         result = driver._lib.cuMemExportToShareableHandle(
             ctypes.byref(fd),
             handle,
-            ctypes.c_int(_MEM_HANDLE_TYPE_POSIX_FILE_DESCRIPTOR),
+            ctypes.c_int(MEM_HANDLE_TYPE_POSIX_FILE_DESCRIPTOR),
             ctypes.c_ulonglong(0),
         )
         driver.release(handle.value)

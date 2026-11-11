@@ -3258,8 +3258,10 @@ class VllmConfig:
                 f"{unsupported or 'it is disabled'}."
             )
         # FABRIC handles to driver-mapped memory need an IMEX channel.
-        exports_fabric = KVCacheAccess.EXPORTS_FABRIC in kv_cache_access
-        fabric_unavailable = exports_fabric and not imex_channel_available()
+        fabric_unavailable = (
+            KVCacheAccess.EXPORTS_FABRIC in kv_cache_access
+            and not imex_channel_available()
+        )
         if requested is None:
             enabled = unsupported is None and (exports_fd or not fabric_unavailable)
             cache_config.enable_extensible_kv_cache = enabled
@@ -3277,15 +3279,6 @@ class VllmConfig:
                 "No IMEX channel: with the extensible KV cache, KV transfers within "
                 "a host (e.g. NIXL) fall back to TCP. Transfers across hosts use "
                 "RDMA."
-            )
-        elif exports_fd and exports_fabric:
-            logger.warning(
-                "KV connectors import the KV cache through both POSIX file "
-                "descriptors (e.g. LMCacheMPConnector with lmcache.mp.use_vmm_api) "
-                "and FABRIC handles (e.g. NIXL). Both on one allocation is not "
-                "verified, so it gets a FABRIC handle only, which the LMCache "
-                "server then imports instead: not verified yet either, and it "
-                "needs an IMEX channel in the server's process."
             )
 
     def _validate_adaptive_verification(self) -> None:

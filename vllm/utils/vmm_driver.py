@@ -26,10 +26,10 @@ _MEM_LOCATION_TYPE_DEVICE = 1
 _MEM_ALLOC_GRANULARITY_MINIMUM = 0
 _MEM_ACCESS_FLAGS_PROT_READWRITE = 3
 _MEM_ALLOCATION_COMP_NONE = 0
-_MEM_HANDLE_TYPE_POSIX_FILE_DESCRIPTOR = 1
+MEM_HANDLE_TYPE_POSIX_FILE_DESCRIPTOR = 1
 _DEVICE_ATTRIBUTE_GPU_DIRECT_RDMA_WITH_CUDA_VMM_SUPPORTED = 110
 _DEVICE_ATTRIBUTE_HANDLE_TYPE_FABRIC_SUPPORTED = 128
-_MEM_HANDLE_TYPE_FABRIC = 0x8
+MEM_HANDLE_TYPE_FABRIC = 0x8
 _IMEX_CHANNELS = "/dev/nvidia-caps-imex-channels/channel*"
 
 DevicePtr = ctypes.c_ulonglong
@@ -199,7 +199,7 @@ class VmmDriver:
         prop.location.id = device_index
         prop.allocFlags.compressionType = _MEM_ALLOCATION_COMP_NONE
         prop.requestedHandleTypes = (
-            export_handle_types & _MEM_HANDLE_TYPE_POSIX_FILE_DESCRIPTOR
+            export_handle_types & MEM_HANDLE_TYPE_POSIX_FILE_DESCRIPTOR
         )
         return prop
 
@@ -335,8 +335,17 @@ class CudaVmmDriver(VmmDriver):
             self._fabric_capable[device_index] = fabric
         # POSIX file descriptors with FABRIC are unverified, so they are only
         # requested alone: importers that take fds (LMCache) also take FABRIC.
-        if fabric and export_handle_types != _MEM_HANDLE_TYPE_POSIX_FILE_DESCRIPTOR:
-            prop.requestedHandleTypes = _MEM_HANDLE_TYPE_FABRIC
+        if fabric and export_handle_types != MEM_HANDLE_TYPE_POSIX_FILE_DESCRIPTOR:
+            if export_handle_types & MEM_HANDLE_TYPE_POSIX_FILE_DESCRIPTOR:
+                logger.warning_once(
+                    "KV connectors import the KV cache through both POSIX file "
+                    "descriptors (e.g. LMCacheMPConnector with "
+                    "lmcache.mp.use_vmm_api) and FABRIC handles (e.g. NIXL). It "
+                    "gets a FABRIC handle only, which the LMCache server then "
+                    "imports instead: not verified yet, and it needs an IMEX "
+                    "channel in the server's process."
+                )
+            prop.requestedHandleTypes = MEM_HANDLE_TYPE_FABRIC
         return prop
 
     def create(self, size: int, device_index: int, export_handle_types: int = 0) -> int:
@@ -344,7 +353,7 @@ class CudaVmmDriver(VmmDriver):
         handle = MemHandle()
         result = self._fns["create"](ctypes.byref(handle), size, ctypes.byref(prop), 0)
         # Device support and an open channel do not guarantee a FABRIC allocation.
-        if prop.requestedHandleTypes == _MEM_HANDLE_TYPE_FABRIC and result in (
+        if prop.requestedHandleTypes == MEM_HANDLE_TYPE_FABRIC and result in (
             _ERROR_NOT_PERMITTED,
             _ERROR_NOT_SUPPORTED,
         ):
