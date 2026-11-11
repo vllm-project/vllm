@@ -1250,21 +1250,34 @@ class TestGridThwEncoderCudaGraphMixin:
         assert empty["video_grid_thw"] == []
         assert empty["pixel_values_videos"].shape == (0, 1)
 
-    def test_capture_buffers_cover_budget_with_video_layout(self):
+    @pytest.mark.parametrize(
+        ("token_budget", "max_batch_size", "max_frames_per_batch", "grid_row"),
+        [
+            # ceil(10 / 2) = 5 tokens per item, spread over 3 frames of 2 tokens.
+            (10, 2, 6, [3, 2, 4]),
+            # Image layout; 324 / 8 does not divide, so items round up to 41.
+            (324, 8, 0, [1, 2, 82]),
+        ],
+    )
+    def test_capture_buffers_cover_budget(
+        self, token_budget, max_batch_size, max_frames_per_batch, grid_row
+    ):
         host = _GridThwHost()
         values = host.prepare_encoder_cudagraph_capture_inputs(
-            token_budget=10,
-            max_batch_size=2,
-            max_frames_per_batch=6,
+            token_budget=token_budget,
+            max_batch_size=max_batch_size,
+            max_frames_per_batch=max_frames_per_batch,
             device=torch.device("cpu"),
             dtype=torch.float32,
         ).values
 
         ((grid, kwargs),) = host.visual.metadata_calls
-        # ceil(10 / 2) = 5 tokens per item, spread over 3 frames of 2 tokens.
-        assert grid == [[3, 2, 4], [3, 2, 4]]
-        assert kwargs["max_seqlen_override"] == 40
-        assert values["pixel_values"].shape == (48, 12)
+        assert grid == [grid_row] * max_batch_size
+        t, h, w = grid_row
+        # The captured buffers must fit one item that uses the full budget.
+        assert t * (h // 2) * (w // 2) * max_batch_size >= token_budget
+        assert kwargs["max_seqlen_override"] == token_budget * 4
+        assert values["pixel_values"].shape == (max_batch_size * t * h * w, 12)
         assert list(values) == ["cu_seqlens", "pixel_values"]
 
 

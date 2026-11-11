@@ -132,7 +132,7 @@ Following <https://github.com/vllm-project/vllm/pull/35963> (ViT full CUDA graph
 Models opt-in to encoder CUDA Graphs by implementing the [SupportsEncoderCudaGraph][vllm.model_executor.models.interfaces.SupportsEncoderCudaGraph] protocol. This protocol encapsulates all model-specific logic so that the manager remains model-agnostic. The protocol defines the following methods:
 
 * `get_encoder_cudagraph_config()` — returns static configuration (supported modalities, buffer keys, output hidden size, padding logics, max frames per video).
-* `get_encoder_cudagraph_budget_range(vllm_config)` — returns `(min_budget, max_budget)` for auto-inference of token budgets.
+* `get_encoder_cudagraph_budget_range(vllm_config)` — returns `(min_budget, max_budget)` for auto-inference of token budgets. The default is `(64, min(max_num_batched_tokens, max_model_len))`.
 * `get_encoder_cudagraph_item_specs(mm_kwargs)` — returns `list[EncoderItemSpec]` describing each item with its input size, total output token count (`output_tokens`), and per-path token counts (`path_output_tokens`) for multi-path models.
 * `select_encoder_cudagraph_items(mm_kwargs, indices)` — extracts a sub-batch of items by index, used during dispatch and DP sharding.
 * `prepare_encoder_cudagraph_capture_inputs(..., path="default")` — creates dummy inputs for graph capture. The `path` parameter (`"global"` or `"local"`) tells the model which path to generate dummy inputs for. Returns `EncoderCudaGraphCaptureInputs` with a single `values: dict[str, torch.Tensor]` that contains all buffers to be recorded into the graph.
@@ -143,6 +143,8 @@ Models opt-in to encoder CUDA Graphs by implementing the [SupportsEncoderCudaGra
 
 !!! note
     The `SupportsEncoderCudaGraph` protocol is designed to be model-agnostic. New vision encoder models can opt-in by implementing the protocol methods without modifying the manager.
+
+    Vision towers that take `pixel_values` with `image_grid_thw` / `video_grid_thw` (Qwen2-VL style) can inherit `GridThwEncoderCudaGraphMixin` from `vllm/model_executor/models/encoder_cudagraph_utils.py`, which implements the protocol; the model then provides `get_encoder_cudagraph_config()` and overrides a hook only where it differs.
 
 ## Configuration
 
