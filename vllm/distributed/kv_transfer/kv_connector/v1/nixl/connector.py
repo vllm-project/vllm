@@ -333,6 +333,12 @@ class NixlBaseConnector(KVConnectorBase_V1, SupportsHMA):
         if self.connector_scheduler is not None:
             self.connector_scheduler.shutdown()
 
+    def update_kv_identity(self) -> None:
+        # The scheduler side serves the handshake metadata the engine collects
+        # again from the workers.
+        if self.connector_worker is not None:
+            self.connector_worker.update_kv_identity()
+
     def get_handshake_metadata(self) -> KVConnectorHandshakeMetadata | None:
         """Get the KVConnector handshake metadata for this connector.
         This metadata is used for out-of-band connector handshake

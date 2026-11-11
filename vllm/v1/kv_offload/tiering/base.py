@@ -370,6 +370,11 @@ class SecondaryTierManager(ABC):
         """
         return
 
+    def set_kv_identity(self, kv_identity: str) -> None:
+        """Move what this tier shares with other engines to a changed KV
+        identity, when they enforce it. Called after drain_jobs()."""
+        return
+
     @abstractmethod
     def drain_jobs(self) -> None:
         """Block until every submitted load/store job has completed or failed.

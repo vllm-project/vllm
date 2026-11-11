@@ -75,7 +75,14 @@ class FileMapper:
         # Only written when set so existing deployments' paths are unchanged.
         if kv_identity is not None:
             self.fields["kv_identity"] = kv_identity
+        self._root_dir = root_dir
         self.base_path: str = self._compute_base_path(root_dir, self.fields)
+
+    def set_kv_identity(self, kv_identity: str) -> None:
+        """Move the namespace to a changed KV identity. Files stored under the
+        previous one stay for the engines that still have it."""
+        self.fields["kv_identity"] = kv_identity
+        self.base_path = self._compute_base_path(self._root_dir, self.fields)
 
     @classmethod
     def from_offloading_spec(

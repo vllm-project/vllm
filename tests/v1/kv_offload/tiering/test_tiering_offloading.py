@@ -25,6 +25,7 @@ from vllm.distributed.kv_transfer.kv_connector.v1.offloading.metrics import (
 from vllm.distributed.kv_transfer.kv_connector.v1.offloading.scheduler import (
     _parse_tier_filter,
 )
+from vllm.v1.kv_identity import UNKNOWN_KV_IDENTITY_PREFIX
 from vllm.v1.kv_offload.base import (
     Locality,
     LookupResult,
@@ -1038,6 +1039,26 @@ class TestTieringOffloadingManager:
         # submit_store was never called on either secondary tier
         tier1_submit_store.assert_not_called()
         tier2_submit_store.assert_not_called()
+
+    def test_unknown_kv_identity_shares_no_secondary_tier(self, manager_setup):
+        """Secondary tiers may be shared with other engines, so while the KV
+        identity is unknown nothing is read from or stored to them."""
+        shared = to_keys(range(2))
+        for key in shared:
+            self.secondary_tier1.chunks[key] = True
+
+        self.manager.set_kv_identity(UNKNOWN_KV_IDENTITY_PREFIX + "0")
+        assert [self.manager.lookup(key, _CTX) for key in shared] == [
+            LookupResult.MISS
+        ] * 2
+        computed = to_keys(range(2, 4))
+        self._start_request()
+        self.manager.prepare_store(computed, _CTX)
+        self.manager.complete_store(computed, _CTX, success=True)
+        assert self.secondary_tier2.get_num_chunks() == 0
+
+        self.manager.set_kv_identity("known")
+        assert self.manager.lookup(shared[0], _CTX) is LookupResult.HIT_PENDING
 
     def test_held_promotions_keep_primary_hits(self, manager_setup):
         chunks = to_keys(range(2))

@@ -3,11 +3,10 @@
 """Pull-specific (READ) worker-side logic for the NIXL connector."""
 
 import time
-from typing import TYPE_CHECKING
 
 import numpy as np
 
-from vllm.distributed.kv_transfer.kv_connector.utils import BlockIds, EngineId
+from vllm.distributed.kv_transfer.kv_connector.utils import BlockIds
 from vllm.distributed.kv_transfer.kv_connector.v1.nixl.base_worker import (
     NixlBaseConnectorWorker,
 )
@@ -22,10 +21,6 @@ from vllm.distributed.kv_transfer.kv_connector.v1.nixl.tp_mapping import (
 from vllm.logger import init_logger
 from vllm.utils.math_utils import cdiv
 
-if TYPE_CHECKING:
-    from vllm.config import VllmConfig
-    from vllm.v1.kv_cache_interface import KVCacheConfig
-
 logger = init_logger(__name__)
 
 # Slack (seconds) subtracted from D's exported block-expiry deadline on the turn-2
@@ -35,16 +30,6 @@ _KV_BLOCKS_EXPIRY_SAFETY_MARGIN = 5.0
 
 class NixlPullConnectorWorker(NixlBaseConnectorWorker):
     """Pull-specific (READ) worker logic."""
-
-    def __init__(
-        self,
-        vllm_config: "VllmConfig",
-        engine_id: str,
-        kv_cache_config: "KVCacheConfig",
-    ):
-        super().__init__(vllm_config, engine_id, kv_cache_config)
-        # Registration generation of each remote engine's loaded agent.
-        self._remote_registration_generations: dict[EngineId, int] = {}
 
     def start_load_kv(self, metadata: NixlConnectorMetadata):
         """Start loading by triggering non-blocking nixl_xfer.
@@ -143,12 +128,9 @@ class NixlPullConnectorWorker(NixlBaseConnectorWorker):
                 req_id, None, self._recv_failures, record_failed_transfer=False
             )
             return
-        generation = meta.remote.registration_generation
-        if self._remote_registration_generations.get(engine_id, 0) < generation:
-            # The remote registered its KV cache again, eg after a sleep.
-            if engine_id in self._remote_agents:
-                self._cleanup_remote_engine(engine_id, log_eviction=False)
-            self._remote_registration_generations[engine_id] = generation
+        self._drop_outdated_remote_engine(
+            engine_id, meta.remote.registration_generation
+        )
         if engine_id not in self._remote_agents:
             # Also re-handshakes queued requests that outlived invalid-peer cleanup.
             self._background_nixl_handshake(req_id, engine_id, meta)

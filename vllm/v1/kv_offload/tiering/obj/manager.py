@@ -316,6 +316,9 @@ class ObjectStoreSecondaryTierManager(SecondaryTierManager):
     def on_new_request(self, req_context: ReqContext) -> RequestOffloadingContext:
         return RequestOffloadingContext()
 
+    def set_kv_identity(self, kv_identity: str) -> None:
+        self._file_mapper.set_kv_identity(kv_identity)
+
     def _poll_active_transfers(self) -> None:
         """Poll all in-flight transfers once; move newly-completed (success or
         failure) into ``_pending_results`` and release their NIXL handles."""

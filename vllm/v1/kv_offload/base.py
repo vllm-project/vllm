@@ -509,6 +509,11 @@ class OffloadingManager(ABC):
         reset_cache(); blocks it freed are no longer written by them."""
         return
 
+    def set_kv_identity(self, kv_identity: str) -> None:
+        """Move tiers shared with other engines to a changed KV identity,
+        after reset_cache(). An unknown identity shares nothing."""
+        return
+
     def get_stats(self) -> "OffloadingConnectorStats | None":
         """Return collected metrics since last call, or None if disabled."""
         return None

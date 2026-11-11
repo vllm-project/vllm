@@ -362,6 +362,10 @@ class NixlPushConnectorWorker(NixlBaseConnectorWorker):
         and the request is re-queued onto ``_reg_send_inbox`` once it
         completes (at which point ``_ensure_handshake`` returns ``None`` and we
         send directly)."""
+        self._drop_outdated_remote_engine(
+            reg_data["remote_engine_id"],
+            reg_data.get("remote_registration_generation", 0),
+        )
         remote_pp_size = reg_data.get("remote_pp_size", 1)
         fut = self._ensure_handshake(
             reg_data["remote_engine_id"],
@@ -401,6 +405,9 @@ class NixlPushConnectorWorker(NixlBaseConnectorWorker):
 
     def _do_send_reg_notif(self, req_id: str, reg_data: dict[str, Any]) -> None:
         engine_id = reg_data["remote_engine_id"]
+        # P checks it before each write, as D's KV identity may have changed
+        # since their handshake.
+        reg_data = {**reg_data, "compatibility_hash": self.compat_hash}
         notif_msg = PUSH_REG_NOTIF_PREFIX + msgspec.msgpack.encode(reg_data)
         # _remote_agents is mutated on other threads; snapshot under the lock.
         with self._handshake_lock:
@@ -483,6 +490,21 @@ class NixlPushConnectorWorker(NixlBaseConnectorWorker):
         """
         if not local_block_ids:
             logger.warning("No local blocks to push for request %s", request_id)
+            return
+        decode_compat_hash = registration_data.get("compatibility_hash")
+        if (
+            decode_compat_hash is not None
+            and self.enforce_compat_hash
+            and decode_compat_hash != self.compat_hash
+        ):
+            # The engine reclaims the blocks via the TTL so we dont free here
+            self._log_failure(
+                failure_type="push_compat_mismatch",
+                req_id=request_id,
+                msg="Decode instance's compatibility hash changed since the "
+                "handshake, eg with its KV identity. Compare `GET /kv_identity` "
+                "on both instances.",
+            )
             return
 
         # ``local_block_ids`` are P's logical block IDs; ``remote_block_ids``

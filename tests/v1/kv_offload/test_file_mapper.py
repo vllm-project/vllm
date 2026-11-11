@@ -339,3 +339,15 @@ def test_kv_identity_namespaces_files():
     assert "kv_identity" not in plain.get_run_config()
     assert first.get_run_config()["kv_identity"] == "a"
     assert len({plain.base_path, first.base_path, second.base_path}) == 3
+
+
+def test_kv_identity_change_moves_namespace():
+    """After a weight change, files go where engines with the new identity
+    look, and the previous identity's files stay where they were."""
+    mapper = make_mapper_from_offloading_spec(root_dir="/tmp/kv", kv_identity="a")
+    before = mapper.base_path
+
+    mapper.set_kv_identity("b")
+    fresh = make_mapper_from_offloading_spec(root_dir="/tmp/kv", kv_identity="b")
+    assert mapper.base_path == fresh.base_path != before
+    assert mapper.get_run_config() == fresh.get_run_config()

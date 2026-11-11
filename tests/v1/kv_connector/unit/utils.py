@@ -647,6 +647,7 @@ def make_nixl_push_scheduler(
     sched._reqs_not_processed = set()
     sched._reqs_need_save = {}
     sched._kv_lease_duration = 30
+    sched._registration_generation = 0
     sched.decoder_kv_blocks_ttl = decoder_kv_blocks_ttl
     sched.use_host_buffer = False
     sched.engine_id = "decode-engine"

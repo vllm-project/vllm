@@ -30,6 +30,7 @@ except ImportError:
 from typing_extensions import override
 
 from vllm.logger import init_logger
+from vllm.v1.kv_identity import is_known_kv_identity
 from vllm.v1.kv_offload.base import (
     Locality,
     LookupResult,
@@ -179,14 +180,7 @@ class FileSystemTierManager(SecondaryTierManager):
             parallel_agnostic=True,
         )
 
-        # Write config file
-        config_path = self.file_mapper.get_config_file_path()
-        os.makedirs(os.path.dirname(config_path), exist_ok=True)
-        if not os.path.exists(config_path):
-            with open(config_path, "w") as f:
-                json.dump(
-                    self.file_mapper.get_run_config(), f, indent=2, sort_keys=True
-                )
+        config_path = self._write_run_config()
 
         # Prefer O_DIRECT to bypass the page cache, but fall back to buffered
         # I/O on filesystems that reject it (e.g. overlayfs, some NFS mounts)
@@ -207,6 +201,23 @@ class FileSystemTierManager(SecondaryTierManager):
         )
 
         self._lookup_manager = FsAsyncLookupManager(tier=self, tier_type=self.tier_type)
+
+    def _write_run_config(self) -> str:
+        config_path = self.file_mapper.get_config_file_path()
+        os.makedirs(os.path.dirname(config_path), exist_ok=True)
+        if not os.path.exists(config_path):
+            with open(config_path, "w") as f:
+                json.dump(
+                    self.file_mapper.get_run_config(), f, indent=2, sort_keys=True
+                )
+        return config_path
+
+    @override
+    def set_kv_identity(self, kv_identity: str) -> None:
+        self.file_mapper.set_kv_identity(kv_identity)
+        # Nothing is stored under an unknown identity.
+        if is_known_kv_identity(kv_identity):
+            self._write_run_config()
 
     @override
     def on_new_request(self, req_context: ReqContext) -> RequestOffloadingContext:

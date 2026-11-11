@@ -835,6 +835,10 @@ class NixlBaseConnectorWorker:
         # Failed reads need a local metadata probe; invalid peers wait for drain.
         self._failed_remote_engines: set[EngineId] = set()
         self._invalid_remote_engines: set[EngineId] = set()
+        # Peers handshaked against a KV identity this engine no longer has.
+        self._stale_remote_engines: set[EngineId] = set()
+        # Registration generation of each remote engine's loaded agent.
+        self._remote_registration_generations: dict[EngineId, int] = {}
         # Invalid engine -> (backoff, earliest release time). Kept across release
         # so that repeat invalidations back off.
         self._invalid_engine_backoff: dict[EngineId, tuple[float, float]] = {}
@@ -1584,6 +1588,7 @@ class NixlBaseConnectorWorker:
             backend_name = ",".join(
                 sorted({backend.get_name() for backend in self.attn_backends})
             )
+        self._compat_backend_name = backend_name
         self.compat_hash = compute_nixl_compatibility_hash(
             self.vllm_config,
             backend_name,
@@ -2029,6 +2034,40 @@ class NixlBaseConnectorWorker:
         for descs in self._registered_descs:
             self.nixl_wrapper.deregister_memory(descs)
         self._kv_unregistered = True
+
+    def update_kv_identity(self) -> None:
+        """Advertise the changed KV identity in the compatibility hash, and
+        handshake again with the peers checked against the previous one."""
+        payload = self.xfer_handshake_metadata
+        if payload is None:
+            return
+        self.compat_hash = compute_nixl_compatibility_hash(
+            self.vllm_config,
+            self._compat_backend_name,
+            transfer_mode=self._TRANSFER_MODE,
+        )
+        payload.compatibility_hash = self.compat_hash
+        with self._handshake_lock:
+            self._stale_remote_engines.update(self._remote_agents)
+
+    def _drop_outdated_remote_engine(
+        self, engine_id: EngineId, generation: int
+    ) -> None:
+        """Forget a peer that registered its KV cache again, eg after a sleep,
+        or that was checked against this engine's previous KV identity, so the
+        next transfer handshakes with it and checks compatibility again."""
+        known_generation = self._remote_registration_generations.get(engine_id, 0)
+        if (
+            known_generation >= generation
+            and engine_id not in self._stale_remote_engines
+        ):
+            return
+        self._stale_remote_engines.discard(engine_id)
+        if engine_id in self._remote_agents:
+            self._cleanup_remote_engine(engine_id, log_eviction=False)
+        self._remote_registration_generations[engine_id] = max(
+            known_generation, generation
+        )
 
     def restore_kv_caches(self) -> None:
         if not self._kv_unregistered:

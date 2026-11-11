@@ -2606,6 +2606,10 @@ class OffloadingConnectorScheduler:
         # seeing a non-empty object the way they do today.
         yield from self._events_tracker.take_events(manager_events)
 
+    def set_kv_identity(self, kv_identity: str) -> None:
+        with self._manager_locked():
+            self.manager.set_kv_identity(kv_identity)
+
     def reset_cache(self) -> None:
         """Reset the offloading manager cache, evicting all stored chunks."""
         # reset_cache cannot be called in the middle of a schedule step.

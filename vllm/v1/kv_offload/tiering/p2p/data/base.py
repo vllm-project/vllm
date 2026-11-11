@@ -179,6 +179,10 @@ class DataTransport(ABC):
         """
         return self._config_fingerprint
 
+    def set_config_fields(self, config_fields: dict) -> None:
+        """Change the fingerprint new peers are checked against."""
+        self._config_fingerprint = self._compute_fingerprint(config_fields)
+
     @staticmethod
     def _compute_fingerprint(config_fields: dict | None) -> str:
         if not config_fields:
