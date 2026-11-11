@@ -25,10 +25,10 @@ if TYPE_CHECKING:
 
 
 class DeepseekV4GroupedWoAWithLoRA(ColumnParallelLinearWithLoRA):
-    """Adds each head group's adapter delta to the grouped ``wo_a`` projection.
+    """Adds each head group's adapter delta to the grouped `wo_a` projection.
 
-    All groups share LoRA-A; group ``g`` uses LoRA-B rows
-    ``g * o_lora_rank : (g + 1) * o_lora_rank``, stored as its own buffer so
+    All groups share LoRA-A; group `g` uses LoRA-B rows
+    `g * o_lora_rank : (g + 1) * o_lora_rank`, stored as its own buffer so
     the kernels get a contiguous LoRA-B at a fixed address.
     """
 
@@ -146,7 +146,7 @@ class DeepseekV4GroupedWoAWithLoRA(ColumnParallelLinearWithLoRA):
 
 
 class DeepseekV4CompressorKVScoreWithLoRA(MergedColumnParallelLinearWithLoRA):
-    """Adds the adapter delta to the compressor's FP32 ``wkv``/``wgate`` output."""
+    """Adds the adapter delta to the compressor's FP32 `wkv`/`wgate` output."""
 
     def apply(self, x: torch.Tensor, bias: torch.Tensor | None = None) -> torch.Tensor:
         output = self.base_layer(x)
