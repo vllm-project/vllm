@@ -269,28 +269,31 @@ def enable_dbo_tp_overlap(
     if not parallel_config.dbo_tp_only:
         return
     tp = parallel_state.get_tp_group()
+    tp.dbo_overlap = True
+    if envs.VLLM_DBO_TP_DMA_AR and _enable_dma_all_reduce(tp, vllm_config):
+        # The SDMA path carries the microbatch all-reduces. Giving the comm
+        # stream its own RCCL communicator as well cost the whole DBO gain on
+        # MI355X (TP2), so leave PyNccl unbound.
+        return
     pynccl_comm = tp.device_communicator.pynccl_comm
     if pynccl_comm is not None:
         pynccl_comm.bind_stream(comm_stream)
-    tp.dbo_overlap = True
-    if envs.VLLM_DBO_TP_DMA_AR:
-        _enable_dma_all_reduce(tp, vllm_config)
 
 
-def _enable_dma_all_reduce(tp, vllm_config) -> None:
+def _enable_dma_all_reduce(tp, vllm_config) -> bool:
     from vllm.platforms import current_platform
 
     if not current_platform.is_rocm():
         logger.warning("DBO: VLLM_DBO_TP_DMA_AR=1 is ROCm only; ignored")
-        return
+        return False
     if tp.world_size != 2:
         logger.warning(
             "DBO: VLLM_DBO_TP_DMA_AR=1 needs TP 2, got %d; ignored", tp.world_size
         )
-        return
+        return False
     if vllm_config is None:
         logger.warning("DBO: VLLM_DBO_TP_DMA_AR=1 needs the model config; ignored")
-        return
+        return False
     from vllm.distributed.device_communicators.dma_all_reduce import DmaAllReduce
 
     # Largest all-reduce: one full batch of hidden states, 2 bytes per value.
@@ -306,6 +309,7 @@ def _enable_dma_all_reduce(tp, vllm_config) -> None:
         "DBO: microbatch all-reduces up to %d MiB run as one-shot INT4 over SDMA",
         max_elems * 2 >> 20,
     )
+    return True
 
 
 def dbo_comm_stream_priority() -> int:
