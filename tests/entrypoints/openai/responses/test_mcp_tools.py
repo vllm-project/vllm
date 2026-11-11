@@ -189,7 +189,9 @@ class TestMCPEnabled:
             "VLLM_GPT_OSS_HARMONY_SYSTEM_INSTRUCTIONS": "1",
         }
         with RemoteOpenAIServer(
-            MODEL_NAME, list(_BASE_SERVER_ARGS), env_dict=env_dict
+            MODEL_NAME,
+            [*_BASE_SERVER_ARGS, "--scheduling-policy", "priority"],
+            env_dict=env_dict,
         ) as remote_server:
             yield remote_server
 
@@ -227,6 +229,7 @@ class TestMCPEnabled:
             tools=self._mcp_tools_payload(),
             temperature=0.0,
             extra_body={"enable_response_messages": True},
+            extra_headers={"X-Priority": str(-(2**63))},
         )
 
         assert response.status == "completed"

@@ -73,6 +73,7 @@ from vllm.entrypoints.openai.responses.utils import (
 from vllm.entrypoints.serve.engine.protocol import ErrorResponse
 from vllm.entrypoints.serve.utils.api_utils import get_max_tokens
 from vllm.entrypoints.serve.utils.request_logger import RequestLogger
+from vllm.entrypoints.serve.utils.request_priority import MIN_REQUEST_PRIORITY
 from vllm.entrypoints.serve.utils.tool_calls_utils import (
     maybe_filter_parallel_tool_calls,
 )
@@ -747,8 +748,8 @@ class OpenAIServingResponses(GenerateBaseServing):
                     ),
                 )
 
-            # OPTIMIZATION
-            priority = orig_priority - 1
+            # Boost continuations without exceeding the engine's signed wire range.
+            priority = max(MIN_REQUEST_PRIORITY, orig_priority - 1)
             sub_request += 1
 
     async def _initialize_tool_sessions(

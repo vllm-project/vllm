@@ -8,6 +8,8 @@ import regex as re
 from fastapi import Request
 from lark import Lark, Token, Tree, UnexpectedInput
 
+MIN_REQUEST_PRIORITY = -(1 << 63)
+
 # RFC 8941 Dictionary syntax, including unknown members and item parameters.
 # Use the existing Lark dependency rather than matching only a substring `u=`.
 _DICTIONARY_GRAMMAR = r"""
@@ -88,7 +90,7 @@ def get_header_priority(raw_request: Request) -> int | None:
         if re.fullmatch(r"[+-]?[0-9]+", priority):
             try:
                 number = int(priority)
-                if -(1 << 63) <= number < (1 << 63):
+                if MIN_REQUEST_PRIORITY <= number < (1 << 63):
                     return number
             except ValueError:
                 pass

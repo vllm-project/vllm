@@ -80,6 +80,7 @@ from vllm.renderers.online_renderer import (
 )
 from vllm.sampling_params import SamplingParams
 from vllm.v1.metrics.stats import RequestStateStats
+from vllm.v1.serial_utils import MsgpackEncoder
 
 pytestmark = pytest.mark.skip_global_cleanup
 
@@ -1145,11 +1146,14 @@ class TestInitializeToolSessions:
         assert max_tokens_per_turn == [10, 10]
 
     @pytest.mark.asyncio
-    @pytest.mark.parametrize("max_tool_calls", [0, 2])
+    @pytest.mark.parametrize(
+        "max_tool_calls,priority,follow_up_priority",
+        [(0, 0, -1), (2, 0, -1), (2, -(2**63), -(2**63))],
+    )
     async def test_builtin_tool_loop_honors_max_tool_calls(
-        self, serving_responses_instance, max_tool_calls
+        self, serving_responses_instance, max_tool_calls, priority, follow_up_priority
     ):
-        """Built-in tool calls past max_tool_calls are ignored, per the spec."""
+        """Tool continuations stay serializable and honor the tool call budget."""
 
         class AlwaysToolCallingHarmonyContext(HarmonyContext):
             def __init__(self):
@@ -1172,7 +1176,12 @@ class TestInitializeToolSessions:
             def append_tool_output(self, output) -> None:
                 pass
 
-        async def generate_output(*args, **kwargs):
+        priorities = []
+        encoder = MsgpackEncoder()
+
+        async def generate_output(*args, priority, **kwargs):
+            encoder.encode(priority)
+            priorities.append(priority)
             yield MagicMock()
 
         serving_responses_instance.engine_client.generate.side_effect = generate_output
@@ -1186,15 +1195,13 @@ class TestInitializeToolSessions:
             engine_input=tokens_input([1]),
             sampling_params=SamplingParams(max_tokens=10),
             context=context,
+            priority=priority,
             max_tool_calls=max_tool_calls,
         ):
             pass
 
         assert context.num_tool_calls == max_tool_calls
-        assert (
-            serving_responses_instance.engine_client.generate.call_count
-            == max_tool_calls + 1
-        )
+        assert priorities == [priority, *([follow_up_priority] * max_tool_calls)]
 
     @pytest.mark.asyncio
     async def test_initialize_tool_sessions(
