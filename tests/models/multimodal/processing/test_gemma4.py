@@ -9,6 +9,7 @@ import pytest
 import torch
 from PIL import Image as PILImage
 
+from vllm.config import ModelConfig
 from vllm.exceptions import VLLMValidationError
 from vllm.model_executor.layers.fusion.mm_input_norm import (
     FusedMMInputNorm,
@@ -419,6 +420,28 @@ def test_limit_mm_per_prompt(
             mm_items=processor.info.parse_mm_data(mm_data),
             hf_processor_mm_kwargs={},
         )
+
+
+@pytest.mark.parametrize(
+    ("architectures", "error"),
+    [
+        (None, "Gemma4ForCausalLM"),
+        (["Gemma4ForCausalLM"], None),
+    ],
+)
+def test_checkpoint_without_vision_config(architectures, error):
+    """A text-only checkpoint (`vision_config: null`) fails at config time with
+    a pointer to the text-only architecture, and loads once overridden to it."""
+    hf_overrides = {"vision_config": None}
+    if architectures is not None:
+        hf_overrides["architectures"] = architectures
+
+    if error is not None:
+        with pytest.raises(ValueError, match=error):
+            ModelConfig(GEMMA4_MODEL_ID, hf_overrides=hf_overrides)
+    else:
+        model_config = ModelConfig(GEMMA4_MODEL_ID, hf_overrides=hf_overrides)
+        assert model_config.architecture == "Gemma4ForCausalLM"
 
 
 # Regression guard for PR #43169 follow-up: the batched Gemma4 vision encoder

@@ -557,6 +557,18 @@ class Gemma4Config(VerifyAndUpdateConfig):
             )
 
 
+class Gemma4ForConditionalGenerationConfig(Gemma4Config):
+    @staticmethod
+    def verify_and_update_model_config(model_config: "ModelConfig") -> None:
+        if getattr(model_config.hf_config, "vision_config", None) is None:
+            raise ValueError(
+                f"The Gemma 4 checkpoint {model_config.model!r} has no vision tower "
+                "(`vision_config` is null), so it cannot be loaded as "
+                "Gemma4ForConditionalGeneration. To load its text-only model, pass "
+                """`--hf-overrides '{"architectures": ["Gemma4ForCausalLM"]}'`."""
+            )
+
+
 class EmbeddingGemma2ModelConfig(Gemma4Config):
     @staticmethod
     def verify_and_update_model_config(model_config: "ModelConfig") -> None:
@@ -1546,7 +1558,7 @@ MODELS_CONFIG_MAP: dict[str, type[VerifyAndUpdateConfig]] = {
     "FalconMambaForCausalLM": MambaModelConfig,
     "Gemma3TextModel": Gemma3TextModelConfig,
     "Gemma4ForCausalLM": Gemma4Config,
-    "Gemma4ForConditionalGeneration": Gemma4Config,
+    "Gemma4ForConditionalGeneration": Gemma4ForConditionalGenerationConfig,
     "Gemma4UnifiedForConditionalGeneration": Gemma4Config,
     "Glm5NextForCausalLM": Glm5NextModelConfig,
     "Glm5NextForConditionalGeneration": Glm5NextModelConfig,

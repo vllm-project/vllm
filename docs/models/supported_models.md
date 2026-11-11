@@ -710,6 +710,9 @@ Some models are supported only via the [Transformers modeling backend](#transfor
     - Gemma 4 assistant checkpoints for speculative decoding use vLLM’s Gemma
       4 MTP path, not generic draft-model speculative decoding. See the
       [Gemma 4 assistant model MTP example](../features/speculative_decoding/mtp.md#gemma-4-assistant-models).
+    - Checkpoints without a vision tower (`vision_config: null`, e.g. text-only
+      fine-tunes) cannot be loaded with this architecture. Load their text model with
+      `--hf-overrides '{"architectures": ["Gemma4ForCausalLM"]}'`.
 
 !!! note
     For `Gemma4UnifiedForConditionalGeneration`:
