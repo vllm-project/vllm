@@ -80,7 +80,6 @@ from vllm.v1.attention.backend import AttentionBackend, AttentionMetadata
 from vllm.v1.attention.backends.mla.indexer import (
     DeepseekV41IndexerBackend,
     dsa_indexer_uses_fp4,
-    get_max_prefill_buffer_size,
 )
 from vllm.v1.attention.backends.mla.sparse_indexer import (
     DeepseekV41SparseIndexerBackend,
@@ -1459,8 +1458,11 @@ class DeepseekV4Indexer(nn.Module):
         )
         self.prefix = prefix
 
+        # Sized by the same builder that splits prefill into chunks.
         self.max_total_seq_len = (
-            get_max_prefill_buffer_size(vllm_config) // self.compress_ratio
+            k_cache.get_attn_backend()
+            .get_builder_cls()
+            .get_prefill_buffer_size(vllm_config, k_cache.compress_ratio)
         )
 
         assert cache_config is not None, "Deepseek V4 indexer requires cache_config"
