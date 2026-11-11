@@ -18,6 +18,7 @@ is covered directly; the variable-length shim is covered for install/uninstall.
 """
 
 import functools
+from contextlib import contextmanager
 
 import torch
 from torch import nn
@@ -102,6 +103,23 @@ def _batch(lengths, time_extent, mel=4):
     for i, length in enumerate(lengths):
         mask[i, :length] = 1
     return {"input_features": feats, "feature_attention_mask": mask}
+
+
+@contextmanager
+def _gpu_worker():
+    """Force the GPU-only install gate open so tests are host-independent.
+
+    Bucketing is GPU-only (the bucketer's sole consumer is the GPU encoder
+    runner); the gate is tested separately by `test_install_gpu_only_gate_blocks_non_gpu_worker`.
+    """
+    from vllm.model_executor.models import mm_encoder_bucketing as meb
+
+    original = meb._gpu_execution_supported
+    meb._gpu_execution_supported = lambda: True
+    try:
+        yield
+    finally:
+        meb._gpu_execution_supported = original
 
 
 def test_rungs_from_seconds_scale_by_frame_rate():
@@ -209,13 +227,14 @@ def test_install_wires_shim_and_uninstall_restores_forward():
         model = _Model()
         tower = model.audio_tower
         original_forward = tower.forward
-        labels = install_encoder_bucketing(
-            model,
-            {"audio": tower},
-            _Spec(),
-            model_type="qwen2_audio",
-            additional_config={"audio_bucket_seconds": [1, 2]},
-        )
+        with _gpu_worker():
+            labels = install_encoder_bucketing(
+                model,
+                {"audio": tower},
+                _Spec(),
+                model_type="qwen2_audio",
+                additional_config={"audio_bucket_seconds": [1, 2]},
+            )
         assert labels == ["audio"]
         assert model._encoder_bucketing.active
         assert isinstance(tower.forward, functools.partial)  # variable-length shim
@@ -249,15 +268,43 @@ def test_install_unverified_model_type_is_blocked():
     model = _Model()
     tower = model.audio_tower
     original_forward = tower.forward
-    install_encoder_bucketing(
-        model,
-        {"audio": tower},
-        _Spec(),
-        model_type="some_unadapted_model",
-        additional_config={"audio_bucket_seconds": [1, 2]},
-    )
+    with _gpu_worker():
+        install_encoder_bucketing(
+            model,
+            {"audio": tower},
+            _Spec(),
+            model_type="some_unadapted_model",
+            additional_config={"audio_bucket_seconds": [1, 2]},
+        )
     assert not model._encoder_bucketing.active
     assert tower.forward == original_forward  # no shim, no bucketing
+
+
+def test_install_gpu_only_gate_blocks_non_gpu_worker():
+    # GPU-only: the bucketer's sole consumer is the GPU encoder runner, so on
+    # any other execution path install must leave the model completely
+    # untouched -- no shim, no active bucketer -- instead of installing a shim
+    # nothing consumes.
+    from vllm.model_executor.models import mm_encoder_bucketing as meb
+
+    model = _Model()
+    tower = model.audio_tower
+    original_forward = tower.forward
+    original = meb._gpu_execution_supported
+    meb._gpu_execution_supported = lambda: False
+    try:
+        install_encoder_bucketing(
+            model,
+            {"audio": tower},
+            _Spec(),
+            model_type="qwen2_audio",
+            additional_config={"audio_bucket_seconds": [1, 2]},
+        )
+    finally:
+        meb._gpu_execution_supported = original
+
+    assert not model._encoder_bucketing.active
+    assert tower.forward == original_forward  # no shim outside GPU workers
 
 
 def test_qwen2_audio_inputs_schema_contract():
@@ -445,3 +492,79 @@ def test_funasr_spec_buckets_tensor_features():
     assert got == {500: [0], 1000: [1], 800: [2]}
     for indices, kw in rungs:
         assert kw["speech_lengths"].shape == (len(indices),)
+
+
+def test_full_window_shim_is_byte_identical_to_original_forward():
+    from transformers.models.qwen2_audio import (
+        Qwen2AudioEncoder,
+        Qwen2AudioEncoderConfig,
+    )
+
+    from vllm.model_executor.models.qwen2_audio import _qwen2audio_varlen_shim
+
+    # Small encoder whose full window is 8 positions * conv1.stride(1) *
+    # conv2.stride(2) = 16 mel frames, so a 16-frame input is exactly the
+    # fixed-length case the shim must match byte-for-byte.
+    config = Qwen2AudioEncoderConfig(
+        num_mel_bins=8,
+        encoder_layers=2,
+        encoder_attention_heads=2,
+        encoder_ffn_dim=64,
+        d_model=32,
+        dropout=0.0,
+        max_source_positions=8,
+    )
+    encoder = Qwen2AudioEncoder(config).eval()
+    torch.manual_seed(0)
+    input_features = torch.randn(2, 8, 16)
+    original = encoder(input_features)
+    shimmed = _qwen2audio_varlen_shim(encoder, input_features, None)
+    torch.testing.assert_close(
+        shimmed.last_hidden_state,
+        original.last_hidden_state,
+        rtol=0,
+        atol=0,
+    )
+
+
+def test_qwen2_audio_spec_is_instantiated_and_crops():
+    from vllm.model_executor.models.qwen2_audio import Qwen2AudioBucketingSpec
+
+    spec = Qwen2AudioBucketingSpec()
+    assert spec.frames_per_second == 100
+    assert spec.context_margin == 4
+
+    batch = _batch([5, 30, 12], time_extent=32)
+    cropped = spec.crop(batch, [0, 2], 16)
+    assert cropped["input_features"].shape == (2, 4, 16)
+    assert cropped["feature_attention_mask"].shape == (2, 16)
+
+
+def test_bucket_mm_batch_distinguishes_wired_from_silently_dead():
+    from vllm.v1.worker.gpu.mm.encoder_runner import EncoderRunner
+
+    batch = _batch([5, 30, 12], time_extent=32)
+
+    class _FakeRunner:
+        def __init__(self, model):
+            self.model = model
+
+    class _ModelWithBucketing(nn.Module):
+        def __init__(self):
+            super().__init__()
+            self._encoder_bucketing = EncoderBucketing(
+                _Spec(), LengthBucketingConfig((8, 16, 32))
+            )
+
+    class _ModelWithoutBucketing(nn.Module):
+        pass
+
+    wired = EncoderRunner._bucket_mm_batch(
+        _FakeRunner(_ModelWithBucketing()), batch, 3
+    )
+    assert len(wired) == 3  # feature engages: three rungs
+
+    dead = EncoderRunner._bucket_mm_batch(
+        _FakeRunner(_ModelWithoutBucketing()), batch, 3
+    )
+    assert len(dead) == 1 and dead[0][0] == [0, 1, 2]  # single passthrough
