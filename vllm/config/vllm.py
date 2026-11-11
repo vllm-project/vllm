@@ -559,12 +559,16 @@ class VllmConfig:
     def gpu_iteration_timing(self) -> bool:
         """Whether logged iteration details are timed by the output worker with
         CUDA events instead of by EngineCore's wall clock."""
+        parallel_config = self.parallel_config
         return (
             self.observability_config.enable_logging_iteration_details
             and self.device_config.device_type == "cuda"
             and self.model_config is not None
             and self.model_config.runner_type == "generate"
             and not self.is_mm_encoder_only
+            and parallel_config.distributed_executor_backend in ("uni", "mp")
+            # With more API servers the frontend does not log iteration details.
+            and parallel_config._api_process_count == 1
             # The in-process engine has no idle loop to collect the last records.
             and envs.VLLM_ENABLE_V1_MULTIPROCESSING
         )

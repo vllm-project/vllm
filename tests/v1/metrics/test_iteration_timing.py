@@ -178,6 +178,45 @@ def test_failed_timing_read_drops_the_record_not_the_step(gpu, monkeypatch):
     assert [record.iteration_index for record in worker.flush()] == [1]
 
 
+def broken_event_call(self):
+    raise RuntimeError("CUDA error")
+
+
+def test_failed_event_recording_drops_the_record_not_the_step(gpu, monkeypatch):
+    worker = FakeWorker()
+    warning = Mock()
+    monkeypatch.setattr(iteration_timing.logger, "warning_once", warning)
+    scheduler_output = SimpleNamespace(iteration_details=IterationDetails())
+
+    with monkeypatch.context() as patch:
+        patch.setattr(FakeEvent, "record", broken_event_call)
+        worker.execute_model(scheduler_output)  # no start event
+    assert isinstance(worker.sample_tokens(), FakeAsyncOutput)
+
+    worker.execute_model(scheduler_output)
+    with monkeypatch.context() as patch:
+        patch.setattr(FakeEvent, "record", broken_event_call)
+        assert isinstance(worker.sample_tokens(), FakeAsyncOutput)  # no end event
+        assert worker.execute_dummy_batch() == []  # neither event
+        assert worker.flush() == []
+
+    # Later iterations are timed again; the three dropped ones keep their index.
+    assert warning.called
+    worker.step(num_tokens=2)
+    (record,) = worker.flush()
+    assert (record.iteration_index, record.num_generation_tokens) == (3, 2)
+
+
+def test_failed_flush_wait_drops_the_tail_not_the_flush(gpu, monkeypatch):
+    worker = FakeWorker()
+    worker.step()
+
+    monkeypatch.setattr(FakeEvent, "record", broken_event_call)
+    monkeypatch.setattr(FakeEvent, "synchronize", broken_event_call)
+
+    assert worker.flush() == []
+
+
 def test_untimed_worker_is_untouched():
     worker = FakeWorker()
     worker.iteration_timer = None
@@ -231,15 +270,20 @@ def test_only_the_output_rank_times_iterations():
         ({"device_type": "cpu"}, False),
         ({"runner_type": "pooling"}, False),
         ({"is_mm_encoder_only": True}, False),
+        ({"backend": "uni"}, True),
+        ({"backend": "ray"}, False),
+        ({"api_servers": 2}, False),  # the frontend then logs no iteration details
         ({"multiprocessing": False}, False),  # the in-process engine never idles
     ],
 )
-def test_gpu_iteration_timing_applies_to_cuda_generation(change, expected, monkeypatch):
+def test_gpu_iteration_timing_conditions(change, expected, monkeypatch):
     case = {
         "flag": True,
         "device_type": "cuda",
         "runner_type": "generate",
         "is_mm_encoder_only": False,
+        "backend": "mp",
+        "api_servers": 1,
         "multiprocessing": True,
     } | change
     monkeypatch.setenv(
@@ -252,6 +296,10 @@ def test_gpu_iteration_timing_applies_to_cuda_generation(change, expected, monke
         device_config=SimpleNamespace(device_type=case["device_type"]),
         model_config=SimpleNamespace(runner_type=case["runner_type"]),
         is_mm_encoder_only=case["is_mm_encoder_only"],
+        parallel_config=SimpleNamespace(
+            distributed_executor_backend=case["backend"],
+            _api_process_count=case["api_servers"],
+        ),
     )
 
     assert VllmConfig.gpu_iteration_timing.fget(config) is expected  # type: ignore[attr-defined]  # property

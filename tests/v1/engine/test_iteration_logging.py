@@ -149,6 +149,17 @@ def test_going_idle_collects_the_last_gpu_timings_then_takes_new_work():
     assert not engine._iteration_timings_pending
 
 
+def test_dummy_batch_publishes_the_gpu_timings_it_returns():
+    record = make_iteration_details()
+    engine = make_idle_engine(timings_pending=False)
+    engine.model_executor.execute_dummy_batch.return_value = [record]
+
+    EngineCoreProc.execute_dummy_batch(engine)
+
+    _, outputs = engine.output_queue.get_nowait()
+    assert outputs.scheduler_stats.iteration_records == [record]
+
+
 def test_going_idle_without_pending_gpu_timings_sends_no_flush():
     engine = make_idle_engine(timings_pending=False)
     engine.input_queue.put(("add", "request"))

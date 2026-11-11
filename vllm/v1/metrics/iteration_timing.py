@@ -16,8 +16,8 @@ before going idle.
 from __future__ import annotations
 
 from collections import deque
-from collections.abc import Callable
-from contextlib import suppress
+from collections.abc import Callable, Iterator
+from contextlib import contextmanager
 from dataclasses import dataclass
 from functools import wraps
 from itertools import count
@@ -25,6 +25,7 @@ from typing import TYPE_CHECKING
 
 import torch
 
+from vllm.logger import init_logger
 from vllm.v1.core.sched.output import IterationDetails
 from vllm.v1.metrics.stats import SchedulerIterationDetails
 from vllm.v1.outputs import AsyncModelRunnerOutput, ModelRunnerOutput
@@ -34,11 +35,27 @@ if TYPE_CHECKING:
     from vllm.v1.core.sched.output import SchedulerOutput
     from vllm.v1.outputs import KVConnectorOutput
 
+logger = init_logger(__name__)
 
-def _record_event() -> torch.Event:
-    event = torch.Event(enable_timing=True)
-    event.record()
-    return event
+
+@contextmanager
+def _drop_on_cuda_error() -> Iterator[None]:
+    """Timing must never fail a step: a CUDA error drops the affected record."""
+    try:
+        yield
+    except RuntimeError as error:
+        # The timer lives on one worker per engine, whatever its local rank.
+        logger.warning_once(
+            "Dropping a GPU iteration timing: %s", str(error), scope="process"
+        )
+
+
+def _record_event() -> torch.Event | None:
+    with _drop_on_cuda_error():
+        event = torch.Event(enable_timing=True)
+        event.record()
+        return event
+    return None
 
 
 @dataclass
@@ -75,7 +92,7 @@ class IterationTimer:
 
     def __init__(self) -> None:
         self._indices = count()
-        self._started: tuple[IterationDetails, bool, torch.Event] | None = None
+        self._started: tuple[IterationDetails, bool, torch.Event | None] | None = None
         self._pending: deque[_TimedIteration] = deque()
 
     def start(self, details: IterationDetails | None, is_dummy: bool = False) -> None:
@@ -92,18 +109,16 @@ class IterationTimer:
             return
         details, is_dummy, start = self._started
         self._started = None
-        self._pending.append(
-            _TimedIteration(
-                next(self._indices), details, is_dummy, start, _record_event()
-            )
-        )
+        # An iteration whose timing failed keeps its index, so the gap shows.
+        index, end = next(self._indices), _record_event()
+        if start is not None and end is not None:
+            self._pending.append(_TimedIteration(index, details, is_dummy, start, end))
 
     def take_ready(self) -> list[SchedulerIterationDetails]:
         """Pop the oldest iterations whose GPU work has completed."""
         records: list[SchedulerIterationDetails] = []
         while self._pending:
-            # Timing must never fail a step: a failed read drops that record.
-            with suppress(RuntimeError):
+            with _drop_on_cuda_error():
                 if not self._pending[0].end.query():
                     break
                 records.append(self._pending[0].read())
@@ -111,7 +126,11 @@ class IterationTimer:
         return records
 
     def flush(self) -> IterationTimingFlush:
-        """Hand over every pending iteration, for the engine to wait on."""
+        """Hand over every pending iteration, for the engine to wait on.
+
+        That includes dummy batches, so that every data-parallel rank has
+        reported the same iterations when a wave ends.
+        """
         pending, self._pending = self._pending, deque()
         return IterationTimingFlush(pending)
 
@@ -128,13 +147,15 @@ class IterationTimingFlush(AsyncModelRunnerOutput):
         # Blocking (sleep) event, like AsyncOutput.copy_event. It is recorded
         # after every pending end event on the same stream, so it completes last.
         self._done = torch.cuda.Event(blocking=True)
-        self._done.record()
+        with _drop_on_cuda_error():
+            self._done.record()
 
     def get_output(self) -> ModelRunnerOutput:
-        self._done.synchronize()
+        with _drop_on_cuda_error():
+            self._done.synchronize()
         records: list[SchedulerIterationDetails] = []
         for timed in self._pending:
-            with suppress(RuntimeError):
+            with _drop_on_cuda_error():
                 records.append(timed.read())
         return ModelRunnerOutput(req_ids=[], iteration_records=records)
 

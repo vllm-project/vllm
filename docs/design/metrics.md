@@ -308,13 +308,14 @@ every 5 seconds with some key metrics:
 
 `--enable-logging-iteration-details` additionally logs every engine iteration
 with its request and token counts and its elapsed time. For generative models
-on CUDA devices the elapsed time is measured on the GPU with CUDA events, from
-the start of model execution to the end of sampling and speculative drafting.
-It is the time the iteration occupied the output worker's stream, including
-host submission gaps, not kernel-busy time. With pipeline parallelism it is
-measured on the last stage and includes waiting for the earlier stages. Other
-configurations, including the in-process engine, report the wall-clock time
-EngineCore waited for the iteration.
+on CUDA devices run by the built-in `uni` or `mp` executor, the elapsed time
+is measured on the GPU with CUDA events, from the start of model execution to
+the end of sampling and speculative drafting. It is the time the iteration
+occupied the output worker's stream, including host submission gaps, not
+kernel-busy time. With pipeline parallelism it is measured on the last stage
+and includes waiting for the earlier stages. Other configurations, including
+the in-process engine, report the wall-clock time EngineCore waited for the
+iteration.
 
 GPU timing never waits for the GPU while requests are running. An iteration's
 timing usually completes after its own output is delivered, so its record is

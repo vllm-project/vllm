@@ -1234,8 +1234,8 @@ class EngineCore:
             self.collective_rpc("has_incomplete_weight_update")
         )
 
-    def execute_dummy_batch(self) -> list[SchedulerIterationDetails] | None:
-        return self.model_executor.execute_dummy_batch()
+    def execute_dummy_batch(self):
+        self.model_executor.execute_dummy_batch()
 
     def compute_weight_checksums(self) -> list[dict[str, str]]:
         return self.collective_rpc("compute_weight_checksums")
@@ -1893,6 +1893,9 @@ class EngineCoreProc(EngineCore):
             self._publish_iteration_records(
                 self.model_executor.flush_iteration_timings()
             )
+
+    def execute_dummy_batch(self) -> None:
+        self._publish_iteration_records(self.model_executor.execute_dummy_batch())
 
     def _process_engine_step(self) -> bool:
         """Called only when there are unfinished local requests."""
@@ -2824,7 +2827,7 @@ class DPEngineCoreProc(EngineCoreProc):
                 # engine is sleeping.
                 elif not self.model_executor.is_sleeping:
                     with self.capture_iteration_details(None) as iteration_details:
-                        self._publish_iteration_records(self.execute_dummy_batch())
+                        self.execute_dummy_batch()
                     if iteration_details is not None and not self.has_coordinator:
                         stats = self._make_iteration_details_stats(iteration_details)
                         self.output_queue.put_nowait(
