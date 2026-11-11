@@ -394,10 +394,12 @@ steps:
   - tests/distributed/test_events
   - tests/distributed/test_symm_mem_allreduce.py
   - tests/distributed/test_multiproc_executor.py
+  - tests/distributed/test_pp_transport.py
   commands:
   # https://github.com/NVIDIA/nccl/issues/1838
   - export NCCL_CUMEM_HOST_ENABLE=0
   - pytest -v -s distributed/test_pynccl.py
+  - pytest -v -s distributed/test_pp_transport.py
   - pytest -v -s distributed/test_events.py
   - pytest -v -s distributed/test_symm_mem_allreduce.py
   # test multi-node TP with multiproc executor (simulated on single node)
@@ -893,6 +895,7 @@ steps:
 
 - label: ":nvidia: (B200) Distributed Preload with Mooncake Store"
   key: preload-mooncake-store-2xb200
+  automatic_shard: true
   timeout_in_minutes: 20
   working_dir: "/vllm-workspace/tests"
   device: b200-k8s

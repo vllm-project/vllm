@@ -409,6 +409,10 @@ class FusedTopKBiasRouter(BaseRouter):
         self.shared_expert_weight = shared_expert_weight
 
     @property
+    def masks_padding(self) -> bool:
+        return not rocm_aiter_ops.is_fused_moe_enabled()
+
+    @property
     def routing_method_type(self) -> RoutingMethodType:
         return get_routing_method_type(
             scoring_func=self.scoring_func,
