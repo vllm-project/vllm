@@ -471,6 +471,8 @@ class KimiMoE(nn.Module):
             self.experts.moe_config.intermediate_size_per_partition_unpadded = (
                 moe_intermediate_size // self.tp_size
             )
+            # Construction saw no padding; flag it now, before post-load processing.
+            self.experts.routed_experts._flag_padding_for_reload()
 
     def forward(self, hidden_states: torch.Tensor) -> torch.Tensor:
         num_tokens, hidden_size = hidden_states.shape

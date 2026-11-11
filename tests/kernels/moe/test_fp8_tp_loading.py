@@ -354,7 +354,7 @@ def test_direct_reload_after_dummy_start_resets_padding(monkeypatch, static):
             for p in layer.parameters():
                 p.data.fill_(7)
             record_checkpoint_layout(model)
-            # Post-load processing may rewrite moe_config; the record stands.
+            # Post-load processing may rewrite moe_config; the construction flag stands.
             layer.moe_config.intermediate_size_per_partition_unpadded = 384
             begin_direct_reload(model)
         else:
@@ -382,3 +382,53 @@ def test_direct_reload_after_dummy_start_resets_padding(monkeypatch, static):
             torch.testing.assert_close(
                 p.float(), getattr(expected, name).float(), rtol=0, atol=0
             )
+
+
+def _flagged(layer) -> set[str]:
+    return {
+        n for n, p in layer.named_parameters() if getattr(p, "fill_on_reload", False)
+    }
+
+
+def test_padded_experts_flagged_for_reload_fill(monkeypatch):
+    """Construction flags the padded expert tensors, not per-expert scalars."""
+    padded = _make_fp8_tp_experts(
+        monkeypatch,
+        1,
+        0,
+        intermediate_size=256,
+        quant_config=Fp8Config(
+            is_checkpoint_fp8_serialized=True, activation_scheme="static"
+        ),
+        config_overrides={"intermediate_size_per_partition": 384},
+    )
+    assert _flagged(padded) == {"w13_weight", "w2_weight"}  # scales are (E,), (E, 2)
+
+    block_tp = _make_fp8_tp_experts(monkeypatch, 2, 0, intermediate_size=640)
+    assert block_tp.moe_config.tp_shard_with_padding
+    assert _flagged(block_tp) == {
+        "w13_weight",
+        "w2_weight",
+        "w13_weight_scale_inv",
+        "w2_weight_scale_inv",
+    }
+
+    assert _flagged(_make_fp8_tp_experts(monkeypatch, 1, 0)) == set()
+
+
+def test_unpadded_size_set_after_construction_reflags(monkeypatch):
+    """Kimi-K3 sets the unpadded size after building the experts, then re-flags."""
+    layer = _make_fp8_tp_experts(
+        monkeypatch,
+        1,
+        0,
+        intermediate_size=384,
+        quant_config=Fp8Config(
+            is_checkpoint_fp8_serialized=True, activation_scheme="static"
+        ),
+    )
+    assert _flagged(layer) == set()
+    layer.moe_config.intermediate_size_per_partition_unpadded = 256
+    layer._flag_padding_for_reload()
+    layer._flag_padding_for_reload()  # idempotent: plain setattr, not set_weight_attrs
+    assert _flagged(layer) == {"w13_weight", "w2_weight"}
