@@ -4,6 +4,7 @@
 from operator import attrgetter
 
 import pytest
+import torch
 import torch.nn as nn
 
 import vllm.envs as envs
@@ -13,6 +14,8 @@ from vllm.model_executor.offloader import (
     get_offloader,
     set_offloader,
 )
+from vllm.platforms import current_platform
+from vllm.utils.platform_utils import is_pin_memory_available
 from vllm.v1.worker.gpu.model_runner import GPUModelRunner
 
 from ...utils import compare_two_settings
@@ -84,6 +87,43 @@ def test_mrv2_weight_offloading(
                 assert offloader.buffer_pool is not None
     finally:
         set_offloader(original_offloader)
+        envs.disable_envs_cache()
+
+
+@pytest.mark.skipif(
+    not current_platform.is_cuda_alike() or not is_pin_memory_available(),
+    reason="exact pinning is CUDA/ROCm only",
+)
+@pytest.mark.parametrize("disable_uva", [False, True])
+def test_uva_offload_pins_weights_at_their_exact_size(monkeypatch, disable_uva):
+    """Offloaded weights live as long as the model, so they must not go through
+    torch's caching host allocator, which would pin 64 MiB for this 33 MiB one.
+    """
+    monkeypatch.setenv("VLLM_WEIGHT_OFFLOADING_DISABLE_PIN_MEMORY", "0")
+    monkeypatch.setenv("VLLM_WEIGHT_OFFLOADING_DISABLE_UVA", str(int(disable_uva)))
+    envs.disable_envs_cache()
+    try:
+        device = current_platform.device_type
+        module = nn.Module()
+        module.weight = nn.Parameter(
+            torch.randn(33 << 19, dtype=torch.bfloat16, device=device),
+            requires_grad=False,
+        )
+        expected = module.weight.detach().clone()
+        before = torch.cuda.host_memory_stats().get("allocated_bytes.current", 0)
+
+        offloader = UVAOffloader(cpu_offload_max_bytes=1 << 30)
+        offloader.wrap_modules(iter([module]))
+        after = torch.cuda.host_memory_stats().get("allocated_bytes.current", 0)
+
+        assert after == before
+        assert offloader.cpu_offload_bytes == expected.nbytes
+        if disable_uva:
+            assert module.weight.data.is_pinned()
+        else:
+            assert module.weight._vllm_is_uva_offloaded
+        torch.testing.assert_close(module.weight.to(device), expected, rtol=0, atol=0)
+    finally:
         envs.disable_envs_cache()
 
 
