@@ -714,7 +714,7 @@ steps:
 
 - label: ":nvidia: (8xH100) DeepSeek-V4.1 SM80 and SM90 Decode"
   key: dsv41-nvidia-sm80-sm90-decode-8xh100
-  # Nightly only, like the 4xB200 step above.
+  # Nightly only
   optional: true
   timeout_in_minutes: 40
   device: h100
