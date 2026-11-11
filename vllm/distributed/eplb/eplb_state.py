@@ -46,6 +46,10 @@ from vllm.distributed.parallel_state import (
 from vllm.distributed.stateless_coordinator import StatelessGroupCoordinator
 from vllm.distributed.utils import StatelessProcessGroup
 from vllm.logger import init_logger
+from vllm.model_executor.model_loader.weight_cache.eplb import (
+    EplbPlacement,
+    WeightCacheEplbBinding,
+)
 from vllm.model_executor.models.interfaces import MixtureOfExperts
 from vllm.platforms import current_platform
 from vllm.utils.gpu_sync_debug import gpu_sync_allowed
@@ -214,6 +218,8 @@ class EplbModelState:
     """
     The communicator for expert weight transfers.
     """
+    weight_cache_binding: WeightCacheEplbBinding | None = None
+    """Synchronous writer used to publish placements to the weight cache."""
     pending_result: AsyncEplbLayerResult | None = None
     """
     Set by the async worker after all writes to expert_buffer are done. Consumed
@@ -543,6 +549,85 @@ class EplbState:
             num_unpadded_tokens_tensors=num_unpadded_tokens_tensors,
         )
         self.model_states[hash_config_cached(model_config)] = model_state
+
+    def recover_weight_cache_placement(
+        self,
+        model_config: ModelConfig,
+        binding: WeightCacheEplbBinding | None,
+    ) -> None:
+        """Restore a binding's placement without advancing its version."""
+        placement: EplbPlacement | None = None
+        model_state: EplbModelState | None = None
+        snapshot = None
+        local_error: str | None = None
+        try:
+            model_state = self.model_states[hash_config_cached(model_config)]
+            model = model_state.model
+            placement = binding.placement if binding is not None else None
+            if placement is not None:
+                rows = placement.physical_to_logical_map
+                snapshot = (placement.version, rows)
+                expected_shape = (model.num_moe_layers, model.num_physical_experts)
+                actual_shape = (len(rows), len(rows[0]) if rows else 0)
+                if actual_shape != expected_shape:
+                    local_error = (
+                        f"placement shape {actual_shape} does not match this PP rank's "
+                        f"MoE shape {expected_shape}"
+                    )
+                elif any(
+                    expert >= model.num_logical_experts
+                    for row in rows
+                    for expert in row
+                ):
+                    local_error = (
+                        "placement contains a logical expert ID outside "
+                        f"[0, {model.num_logical_experts})"
+                    )
+                elif any(
+                    set(row) != set(range(model.num_logical_experts)) for row in rows
+                ):
+                    local_error = "every logical expert must have a physical replica"
+                if local_error is None and (
+                    self.is_async or self.parallel_config.enable_elastic_ep
+                ):
+                    local_error = (
+                        "weight-cache EPLB requires synchronous, non-elastic EPLB"
+                    )
+        except Exception as exc:
+            local_error = f"{type(exc).__name__}: {exc}"
+        payloads: list[dict[str, object]] = [
+            {} for _ in range(get_ep_group().world_size)
+        ]
+        torch.distributed.all_gather_object(
+            payloads,
+            {"placement": snapshot, "error": local_error},
+            group=get_ep_group().cpu_group,
+        )
+        errors = [payload["error"] for payload in payloads if payload["error"]]
+        if errors:
+            raise RuntimeError(f"Invalid weight-cache EPLB placement: {errors[0]}")
+        snapshots = [payload["placement"] for payload in payloads]
+        if any(item is None for item in snapshots) and any(
+            item is not None for item in snapshots
+        ):
+            raise RuntimeError(
+                "Weight-cache EPLB binding presence differs across EP ranks"
+            )
+        if any(item != snapshots[0] for item in snapshots[1:]):
+            raise RuntimeError(
+                "Weight-cache EPLB placement or version differs across EP ranks"
+            )
+        if binding is None or placement is None:
+            return
+        assert model_state is not None
+
+        restored = torch.tensor(
+            placement.physical_to_logical_map,
+            dtype=model_state.physical_to_logical_map.dtype,
+            device="cpu",
+        )
+        self.update_mapping(model_config, restored)
+        model_state.weight_cache_binding = binding
 
     def prepare_forward(
         self,
@@ -974,23 +1059,44 @@ class EplbState:
                             proposed_imbalance,
                         )
 
+                publish_to_weight_cache = (
+                    eplb_model_state.weight_cache_binding is not None
+                    and not is_profile
+                    and rank_mapping is None
+                    and not self.parallel_config.enable_elastic_ep
+                    and not skip_rearrange
+                )
                 if not skip_rearrange:
-                    # Update expert weights
-                    rearrange_expert_weights_inplace(
-                        eplb_model_state.physical_to_logical_map,
-                        new_physical_to_logical_map,
-                        eplb_model_state.model.expert_weights,
-                        eplb_model_state.expert_buffer,
-                        ep_group,
-                        eplb_model_state.communicator,
-                        is_profile,
-                        rank_mapping,
-                    )
+                    if publish_to_weight_cache:
+                        self._begin_weight_cache_rearrangement(eplb_model_state)
 
-                    if not is_profile:
-                        _commit_eplb_maps(
+                    try:
+                        # Update expert weights
+                        rearrange_expert_weights_inplace(
+                            eplb_model_state.physical_to_logical_map,
+                            new_physical_to_logical_map,
+                            eplb_model_state.model.expert_weights,
+                            eplb_model_state.expert_buffer,
+                            ep_group,
+                            eplb_model_state.communicator,
+                            is_profile,
+                            rank_mapping,
+                        )
+
+                        if not is_profile:
+                            _commit_eplb_maps(
+                                eplb_model_state,
+                                new_physical_to_logical_map=new_physical_to_logical_map,
+                            )
+                    except Exception:
+                        if publish_to_weight_cache:
+                            self._abort_weight_cache_rearrangement(eplb_model_state)
+                        raise
+
+                    if not is_profile and publish_to_weight_cache:
+                        self._commit_weight_cache_rearrangement(
                             eplb_model_state,
-                            new_physical_to_logical_map=new_physical_to_logical_map,
+                            new_physical_to_logical_map,
                         )
 
                 if is_main_rank:
@@ -1020,6 +1126,90 @@ class EplbState:
         if self.is_async and (not is_profile):
             self.rearrange_event.record()
         return None
+
+    @staticmethod
+    def _check_weight_cache_action(
+        local_error: Exception | None,
+        failure_message: str,
+    ) -> None:
+        failures = torch.tensor(int(local_error is not None), dtype=torch.int32)
+        get_ep_group().cpu_all_reduce_(failures)
+        if not failures.item():
+            return
+        error = RuntimeError(f"{failure_message}; {failures.item()} EP rank(s) failed")
+        if local_error is not None:
+            raise error from local_error
+        raise error
+
+    def _begin_weight_cache_rearrangement(
+        self,
+        model_state: EplbModelState,
+    ) -> None:
+        binding = model_state.weight_cache_binding
+        assert binding is not None
+        local_error: Exception | None = None
+        try:
+            binding.begin(binding.version)
+        except Exception as exc:
+            local_error = exc
+        try:
+            self._check_weight_cache_action(
+                local_error,
+                "Weight-cache EPLB begin failed before any expert movement; "
+                "successful local writers are aborted and the engine must not continue",
+            )
+        except Exception:
+            if local_error is None:
+                self._abort_weight_cache_rearrangement(model_state)
+            raise
+
+    @staticmethod
+    def _abort_weight_cache_rearrangement(
+        model_state: EplbModelState,
+    ) -> None:
+        binding = model_state.weight_cache_binding
+        assert binding is not None
+        try:
+            binding.abort()
+        except Exception as exc:
+            logger.warning(
+                "Failed to abort weight-cache EPLB after a rearrangement "
+                "error; the daemon writer watcher must poison the dirty "
+                "session: %s",
+                exc,
+            )
+
+    def _commit_weight_cache_rearrangement(
+        self,
+        model_state: EplbModelState,
+        new_physical_to_logical_map: torch.Tensor,
+    ) -> None:
+        binding = model_state.weight_cache_binding
+        assert binding is not None
+        committed = False
+        local_error: Exception | None = None
+        try:
+            torch.accelerator.synchronize()
+            placement = EplbPlacement(
+                version=binding.version + 1,
+                physical_to_logical_map=tuple(
+                    tuple(row) for row in new_physical_to_logical_map.tolist()
+                ),
+            )
+            binding.commit(placement)
+            committed = True
+        except Exception as exc:
+            local_error = exc
+        try:
+            self._check_weight_cache_action(
+                local_error,
+                "Weight-cache EPLB commit failed after experts were moved; "
+                "placement versions may differ and cannot be rolled back",
+            )
+        except Exception:
+            if not committed:
+                self._abort_weight_cache_rearrangement(model_state)
+            raise
 
     def start_async_loop(
         self,

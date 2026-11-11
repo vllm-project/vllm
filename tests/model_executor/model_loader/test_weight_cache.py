@@ -22,6 +22,7 @@ import threading
 import time
 import urllib.error
 import urllib.request
+from concurrent.futures import ThreadPoolExecutor
 from dataclasses import dataclass, field, replace
 from pathlib import Path
 from typing import Any
@@ -1736,7 +1737,9 @@ def _exercise_lease_release(
     transport = SeedTransport(
         seed_config=SeedConfig(source=source_address, token=token)
     )
-    response = transport.request({"kind": "weights", "seed_backend": backend})
+    response = transport.request(
+        {"kind": "weights", "seed_backend": backend, "lease_protocol": 1}
+    )
     assert response is not None and response["status"] == "ok", response
     payload = response["payload"]
     manifest = payload["manifest"]
@@ -1765,7 +1768,7 @@ def _exercise_lease_release(
     )
     tensors = mover.fill(manifest, payload["seed"], device)
     assert len(tensors) == len(manifest["tensors"])
-    acknowledge_lease(transport)
+    acknowledge_lease(transport, payload["lease_id"])
     if shutdown:
         assert source.wait_for_exit(timeout_s=30) == 128 + signal.SIGTERM
     else:
@@ -1773,7 +1776,9 @@ def _exercise_lease_release(
         assert recv_msg(release_sock)["status"] == "ok"
         release_sock.close()
         source.wait_for_log("released cached weights")
-        response = transport.request({"kind": "weights", "seed_backend": backend})
+        response = transport.request(
+            {"kind": "weights", "seed_backend": backend, "lease_protocol": 1}
+        )
         assert response is not None and response["status"] == "error", response
         assert "Weights were released" in response["message"]
     return payload
@@ -2102,3 +2107,949 @@ def test_mooncake_store_cross_process_e2e(tmp_path, monkeypatch):
         peer_key = artifact_key("flashinfer_autotune", "8" * 64, filename)
         cluster.run_peer(peer_key, peer_bytes, "put")
         assert kind.resolve(_warmup_cache_request("8" * 64)) == {filename: peer_table}
+
+
+def _eplb_test_key(*, enable_eplb: bool = True, redundant: int = 1):
+    from types import SimpleNamespace
+
+    import torch
+
+    from vllm.config import CacheConfig
+    from vllm.model_executor.model_loader.weight_cache.protocol import WeightCacheKey
+
+    model_config = SimpleNamespace(
+        model="test-model",
+        dtype=torch.bfloat16,
+        quantization=None,
+        quantization_config=None,
+        revision=None,
+        hf_config=SimpleNamespace(architectures=["MoeForCausalLM"]),
+        hf_text_config=SimpleNamespace(),
+    )
+    return WeightCacheKey.from_model_config(
+        model_config,
+        tp_size=2,
+        tp_rank=0,
+        cache_config=CacheConfig(),
+        enable_expert_parallel=True,
+        enable_eplb=enable_eplb,
+        eplb_num_redundant_experts=redundant,
+    )
+
+
+def test_weight_cache_key_tracks_only_static_eplb_config():
+    from dataclasses import replace
+
+    key = _eplb_test_key(redundant=2)
+    assert key.enable_eplb
+    assert key.eplb_num_redundant_experts == 2
+    assert key.mismatched_fields(replace(key, enable_eplb=False)) == ["enable_eplb"]
+    assert key.mismatched_fields(replace(key, eplb_num_redundant_experts=1)) == [
+        "eplb_num_redundant_experts"
+    ]
+    non_eplb_key = _eplb_test_key(enable_eplb=False, redundant=2)
+    assert non_eplb_key.eplb_num_redundant_experts == 0
+
+
+def test_eplb_placement_json_and_validation():
+    import torch
+
+    from vllm.model_executor.model_loader.weight_cache.eplb import EplbPlacement
+
+    model = torch.nn.Module()
+    for name, value in {
+        "num_moe_layers": 2,
+        "num_expert_groups": 1,
+        "num_logical_experts": 2,
+        "num_physical_experts": 3,
+        "num_local_physical_experts": 3,
+        "num_routed_experts": 2,
+        "num_shared_experts": 0,
+        "num_redundant_experts": 1,
+        "expert_weights": [],
+        "moe_layers": [],
+    }.items():
+        setattr(model, name, value)
+    model.set_eplb_state = lambda *args: None
+    model.update_physical_experts_metadata = lambda *args: None
+    placement = EplbPlacement.initial(model)
+    assert placement.version == 0
+    assert placement.physical_to_logical_map == ((0, 1, 0), (0, 1, 0))
+    encoded = json.loads(json.dumps(placement.to_json_dict()))
+    assert EplbPlacement.from_json_dict(encoded) == placement
+
+    invalid = [
+        {"version": 0},
+        {"version": False, "physical_to_logical_map": [[0]]},
+        {"version": 0, "physical_to_logical_map": [[0], [1, 0]]},
+        {"version": 0, "physical_to_logical_map": [[-1]]},
+        {"version": 0, "physical_to_logical_map": [[True]]},
+    ]
+    for value in invalid:
+        with pytest.raises(ValueError):
+            EplbPlacement.from_json_dict(value)
+
+    missing_expert = EplbPlacement(1, ((0, 1, 0), (0, 0, 0)))
+    with pytest.raises(ValueError, match="every logical expert in every layer"):
+        placement.validate_successor(missing_expert)
+    empty = EplbPlacement.initial(torch.nn.Module())
+    assert empty.physical_to_logical_map == ()
+    assert EplbPlacement.from_json_dict(empty.to_json_dict()) == empty
+    with pytest.raises(ValueError, match="without MoE layers"):
+        empty.validate_successor(EplbPlacement(1, ()))
+
+
+def _eplb_test_daemon():
+    import torch
+
+    from vllm.model_executor.model_loader.weight_cache import daemon
+    from vllm.model_executor.model_loader.weight_cache.eplb import EplbPlacement
+    from vllm.model_executor.model_loader.weight_cache.weight_seed.seed import (
+        WeightShardSeed,
+    )
+
+    class CpuMover:
+        def prepare_seed(self, storages):
+            return {"backend": "rdma", "regions": len(storages)}
+
+        def release(self):
+            return None
+
+    server = object.__new__(daemon.WeightCacheDaemon)
+    server._state_lock = threading.RLock()
+    server.cache_key = _eplb_test_key()
+    server.model_config = type("ModelConfig", (), {"model": "test-model"})()
+    server.model = torch.nn.Module()
+    server.model.weight = torch.nn.Parameter(torch.ones(2))
+    server.role, server.global_rank, server.device_index = "target", 0, 0
+    server._eplb_placement = EplbPlacement(0, ((0, 1, 0),))
+    server._eplb_writer_token = None
+    server._eplb_writer_socket = None
+    server._eplb_writer_state = daemon.EplbWriterState.CLEAN
+    server._eplb_frozen = False
+    server.weight_seed = WeightShardSeed(server)
+    server.weight_seed._movers["rdma"] = CpuMover()
+    return server
+
+
+def _eplb_request(server, request, *, hold=False):
+    client, connection = socket.socketpair()
+    client.settimeout(5)
+
+    def serve():
+        with connection:
+            server._handle_connection(connection)
+
+    thread = threading.Thread(target=serve, daemon=True)
+    thread.start()
+    from vllm.model_executor.model_loader.weight_cache.protocol import (
+        recv_msg,
+        send_msg,
+    )
+
+    send_msg(client, request)
+    response = recv_msg(client)
+    thread.join(timeout=5)
+    assert not thread.is_alive()
+    if hold:
+        return response, client
+    client.close()
+    return response, None
+
+
+def _attach_eplb_binding(server):
+    response, held_socket = _eplb_request(
+        server,
+        {"cmd": "eplb_attach", "cache_key": server.cache_key},
+        hold=True,
+    )
+    assert response["status"] == "ok", response
+    from vllm.model_executor.model_loader.weight_cache.eplb import (
+        bind_weight_cache_eplb,
+        get_weight_cache_eplb_binding,
+    )
+
+    binding = bind_weight_cache_eplb(
+        server.model,
+        server.eplb_placement,
+        token=response["token"],
+        held_socket=held_socket,
+        request=lambda request: _eplb_request(server, request)[0],
+    )
+    assert get_weight_cache_eplb_binding(server.model) is binding
+    return binding, held_socket
+
+
+def _wait_for_eplb_writer(server, present: bool):
+    deadline = time.monotonic() + 5
+    while (server._eplb_writer_token is not None) != present:
+        assert time.monotonic() < deadline, "writer disconnect was not observed"
+        time.sleep(0.01)
+
+
+def test_eplb_writer_rejects_second_writer_and_stale_version():
+    server = _eplb_test_daemon()
+    binding, held_socket = _attach_eplb_binding(server)
+    second, second_socket = _eplb_request(
+        server,
+        {"cmd": "eplb_attach", "cache_key": server.cache_key},
+        hold=True,
+    )
+    assert second["status"] == "error"
+    assert "already attached" in second["message"]
+    second_socket.close()
+    with pytest.raises(RuntimeError, match="Stale EPLB version"):
+        binding.begin(1)
+    binding.begin(0)
+    with pytest.raises(RuntimeError, match="version must be 1"):
+        binding.commit(server.eplb_placement)
+    response, _ = _eplb_request(
+        server, {"cmd": "get_state", "cache_key": server.cache_key}
+    )
+    assert response["status"] == "error"
+    assert "dirty" in response["message"]
+    with pytest.raises(ValueError, match="dirty"):
+        server.weight_seed.resolve({"seed_backend": "rdma", "lease_protocol": 1})
+    binding.abort()
+    assert server.eplb_writer_state.value == "poisoned"
+    held_socket.close()
+    _wait_for_eplb_writer(server, present=False)
+
+
+def test_eplb_clean_and_dirty_disconnect():
+    clean_server = _eplb_test_daemon()
+    committed = clean_server.eplb_placement
+    _, held_socket = _attach_eplb_binding(clean_server)
+    held_socket.close()
+    _wait_for_eplb_writer(clean_server, present=False)
+    assert clean_server.eplb_writer_state.value == "clean"
+    assert clean_server.eplb_placement == committed
+    clean_lease = clean_server.weight_seed.resolve(
+        {"seed_backend": "rdma", "lease_protocol": 1}
+    )
+    clean_server.weight_seed.resolve(
+        {"acknowledge": True, "lease_id": clean_lease["lease_id"]}
+    )
+    binding, _ = _attach_eplb_binding(clean_server)
+    binding.detach()
+    replacement, _ = _attach_eplb_binding(clean_server)
+    replacement.detach()
+
+    dirty_server = _eplb_test_daemon()
+    binding, held_socket = _attach_eplb_binding(dirty_server)
+    binding.begin(0)
+    held_socket.close()
+    _wait_for_eplb_writer(dirty_server, present=False)
+    assert dirty_server.eplb_writer_state.value == "poisoned"
+    response, _ = _eplb_request(
+        dirty_server, {"cmd": "get_state", "cache_key": dirty_server.cache_key}
+    )
+    assert response["status"] == "error"
+    assert "poisoned" in response["message"]
+    with pytest.raises(ValueError, match="poisoned"):
+        dirty_server.weight_seed.resolve({"seed_backend": "rdma", "lease_protocol": 1})
+
+
+def test_eplb_d2d_requires_freeze_and_blocks_unfreeze_during_copy():
+    from vllm.model_executor.model_loader.weight_cache.eplb import EplbPlacement
+
+    server = _eplb_test_daemon()
+    binding, _ = _attach_eplb_binding(server)
+    next_placement = EplbPlacement(1, ((1, 0, 1),))
+    binding.begin(0)
+    binding.commit(next_placement)
+    assert binding.version == 1
+    assert server.eplb_placement == next_placement
+    with pytest.raises(ValueError, match="must be frozen"):
+        server.weight_seed.resolve({"seed_backend": "rdma", "lease_protocol": 1})
+    binding.freeze()
+    payload = server.weight_seed.resolve({"seed_backend": "rdma", "lease_protocol": 1})
+    assert payload["placement"] == next_placement.to_json_dict()
+    from vllm.model_executor.model_loader.weight_cache.weight_seed.utils import (
+        validate_weights_payload,
+    )
+
+    validated = validate_weights_payload(payload, server.cache_key, "test-model")
+    assert validated["placement"] == next_placement.to_json_dict()
+    assert server.weight_seed.active_copies == 1
+    assert not binding.can_unfreeze()
+    with pytest.raises(RuntimeError, match="active D2D copies"):
+        binding.unfreeze()
+    with pytest.raises(ValueError, match="active D2D copies"):
+        server.weight_seed.release()
+
+    binding.detach()
+    assert server._eplb_writer_token is None
+    response, second_socket = _eplb_request(
+        server,
+        {"cmd": "eplb_attach", "cache_key": server.cache_key},
+        hold=True,
+    )
+    assert response["status"] == "error"
+    assert "active D2D copies" in response["message"]
+    second_socket.close()
+    server.weight_seed.resolve({"acknowledge": True, "lease_id": payload["lease_id"]})
+    replacement, _ = _attach_eplb_binding(server)
+    assert replacement.can_unfreeze()
+    replacement.unfreeze()
+    replacement.begin(1)
+    replacement.commit(EplbPlacement(2, ((0, 1, 0),)))
+    replacement.detach()
+
+
+def test_eplb_release_requires_detached_writer():
+    server = _eplb_test_daemon()
+    binding, _ = _attach_eplb_binding(server)
+    response, _ = _eplb_request(server, {"cmd": "release"})
+    assert response["status"] == "error"
+    assert "active writer" in response["message"]
+    assert server.model is not None
+    assert not server.weight_seed.release_pending
+
+    binding.detach()
+    response, _ = _eplb_request(server, {"cmd": "release"})
+    assert response["status"] == "ok", response
+    assert server.model is None
+    response, held_socket = _eplb_request(
+        server,
+        {"cmd": "eplb_attach", "cache_key": server.cache_key},
+        hold=True,
+    )
+    assert response["status"] == "error"
+    assert "released" in response["message"]
+    held_socket.close()
+
+
+@pytest.mark.parametrize(
+    "extra,message",
+    [
+        ({"mode": "copy"}, "zero_copy"),
+        ({"fallback": True}, "fallback=False"),
+    ],
+)
+def test_eplb_ipc_config_fails_fast(extra, message):
+    from types import SimpleNamespace
+
+    from vllm.config import LoadConfig
+    from vllm.model_executor.model_loader.weight_cache.ipc_loader import IpcModelLoader
+
+    loader = IpcModelLoader(
+        LoadConfig(load_format="ipc_cache", model_loader_extra_config=extra)
+    )
+    config = SimpleNamespace(parallel_config=SimpleNamespace(enable_eplb=True))
+    with pytest.raises(ValueError, match=message):
+        loader._check_eplb_load_config(config)
+
+
+def test_eplb_runtime_config_fails_fast():
+    from types import SimpleNamespace
+
+    from vllm.model_executor.model_loader.weight_cache.protocol import (
+        check_weight_cache_eplb_support,
+    )
+
+    parallel = SimpleNamespace(
+        enable_eplb=True,
+        enable_elastic_ep=False,
+        eplb_config=SimpleNamespace(use_async=False),
+    )
+    config = SimpleNamespace(parallel_config=parallel, speculative_config=None)
+    parallel.eplb_config.use_async = True
+    with pytest.raises(ValueError, match="synchronous"):
+        check_weight_cache_eplb_support(config, is_draft=False)
+    parallel.eplb_config.use_async = False
+    parallel.enable_elastic_ep = True
+    with pytest.raises(ValueError, match="elastic"):
+        check_weight_cache_eplb_support(config, is_draft=False)
+    parallel.enable_elastic_ep = False
+    config.speculative_config = object()
+    with pytest.raises(ValueError, match="speculative"):
+        check_weight_cache_eplb_support(config, is_draft=False)
+    config.speculative_config = None
+    with pytest.raises(ValueError, match="speculative"):
+        check_weight_cache_eplb_support(config, is_draft=True)
+
+
+def test_eplb_standalone_load_weights_is_rejected(monkeypatch):
+    from types import SimpleNamespace
+
+    import torch
+
+    from vllm.config import LoadConfig
+    from vllm.model_executor.model_loader.weight_cache import ipc_loader
+
+    loader = ipc_loader.IpcModelLoader(LoadConfig(load_format="ipc_cache"))
+    config = SimpleNamespace(parallel_config=SimpleNamespace(enable_eplb=True))
+    monkeypatch.setattr(ipc_loader, "get_current_vllm_config", lambda: config)
+    with pytest.raises(NotImplementedError, match="Standalone load_weights.*EPLB"):
+        loader.load_weights(torch.nn.Module(), object())
+
+
+def test_ipc_loader_attaches_before_export_and_binds_model(monkeypatch):
+    from types import SimpleNamespace
+
+    import torch
+
+    from vllm.config import CacheConfig, KernelConfig, LoadConfig
+    from vllm.model_executor.model_loader.weight_cache import daemon, ipc_loader
+    from vllm.model_executor.model_loader.weight_cache.eplb import (
+        get_weight_cache_eplb_binding,
+    )
+
+    server = _eplb_test_daemon()
+    export_state = server._export_state
+
+    def checked_export():
+        assert server._eplb_writer_token is not None
+        return export_state()
+
+    server._export_state = checked_export
+    model_config = SimpleNamespace(
+        model="test-model",
+        dtype=torch.bfloat16,
+        quantization=None,
+        quantization_config=None,
+        revision=None,
+        hf_config=SimpleNamespace(architectures=["MoeForCausalLM"]),
+        hf_text_config=SimpleNamespace(),
+    )
+    parallel = SimpleNamespace(
+        enable_expert_parallel=True,
+        expert_placement_strategy="linear",
+        enable_eplb=True,
+        eplb_config=SimpleNamespace(num_redundant_experts=1),
+    )
+    config = SimpleNamespace(
+        model_config=model_config,
+        parallel_config=parallel,
+        cache_config=CacheConfig(),
+        kernel_config=KernelConfig(),
+    )
+    loader = ipc_loader.IpcModelLoader(
+        LoadConfig(
+            load_format="ipc_cache",
+            model_loader_extra_config={"fallback": False},
+        )
+    )
+    connect, server_threads = _serve_one(server._handle_connection)
+    monkeypatch.setattr(loader, "_connect", connect)
+    monkeypatch.setattr(loader, "_watch_daemon", lambda: None)
+    monkeypatch.setattr(
+        ipc_loader, "check_weight_cache_loader_support", lambda *args, **kwargs: None
+    )
+    monkeypatch.setattr(
+        ipc_loader, "_load_device", lambda *args: (torch.device("cpu"), 0)
+    )
+    monkeypatch.setattr(
+        ipc_loader,
+        "build_model_from_processed_weights",
+        lambda *args, **kwargs: torch.nn.Module(),
+    )
+    for name in ("get_dp_group", "get_pp_group"):
+        monkeypatch.setattr(
+            ipc_loader, name, lambda: SimpleNamespace(world_size=1, rank_in_group=0)
+        )
+    monkeypatch.setattr(ipc_loader, "get_tensor_model_parallel_world_size", lambda: 2)
+    monkeypatch.setattr(ipc_loader, "get_tensor_model_parallel_rank", lambda: 0)
+    for module in (daemon, ipc_loader):
+        monkeypatch.setattr(module, "get_current_device_uuid", lambda: "test-device")
+
+    model = loader.load_model(config, model_config)
+    binding = get_weight_cache_eplb_binding(model)
+    assert binding is not None
+    assert binding.placement == server.eplb_placement
+    with pytest.raises(NotImplementedError, match="Standalone load_weights.*EPLB"):
+        loader.load_weights(model, model_config)
+    binding.detach()
+    for thread in server_threads:
+        thread.join(timeout=5)
+        assert not thread.is_alive()
+
+
+def _loopback_weight_transport(server):
+    from vllm.model_executor.model_loader.weight_cache.transport import SeedTransport
+
+    transport = SeedTransport([server.weight_seed])
+
+    class Loopback:
+        def request(self, request):
+            return transport.handle_request(request)
+
+    return Loopback()
+
+
+def test_new_source_rejects_legacy_mirror_before_export():
+    from types import SimpleNamespace
+
+    from vllm.model_executor.model_loader.weight_cache.weight_seed.core import (
+        cancel_lease,
+    )
+
+    server = _eplb_test_daemon()
+
+    class SpyMover:
+        called = False
+
+        def prepare_seed(self, storages):
+            self.called = True
+            return {"backend": "rdma"}
+
+        def release(self):
+            return None
+
+    mover = SpyMover()
+    server.weight_seed._movers["rdma"] = mover
+    with pytest.raises(ValueError, match="lease_protocol=1"):
+        server.weight_seed.resolve({"seed_backend": "rdma"})
+    assert not mover.called
+    assert server.weight_seed.active_copies == 0
+
+    server.d2d = SimpleNamespace(source="source.sock")
+    assert server.weight_seed.request_params(None)["lease_protocol"] == 1
+    payload = server.weight_seed.resolve({"seed_backend": "rdma", "lease_protocol": 1})
+    assert payload["lease_id"]
+    cancel_lease(_loopback_weight_transport(server), payload["lease_id"])
+    assert server.weight_seed.active_copies == 0
+
+
+def test_new_mirror_uses_legacy_ack_and_cancel_for_old_source():
+    from vllm.model_executor.model_loader.weight_cache.weight_seed.core import (
+        acknowledge_lease,
+    )
+    from vllm.model_executor.model_loader.weight_cache.weight_seed.seed import (
+        WeightShardSeed,
+    )
+
+    class LegacyWeightShardSeed(WeightShardSeed):
+        def resolve(self, request):
+            if request.get("acknowledge") or request.get("cancel"):
+                with self._lease_condition:
+                    if not self._active_copy_leases:
+                        raise ValueError("Unexpected legacy lease completion")
+                    lease_id = next(iter(self._active_copy_leases))
+                if request.get("acknowledge"):
+                    return self._acknowledge(lease_id)
+                return self._cancel(lease_id)
+            payload = super().resolve({**request, "lease_protocol": 1})
+            payload.pop("lease_id")
+            return payload
+
+    server = _eplb_test_daemon()
+    movers = server.weight_seed._movers
+    server.weight_seed = LegacyWeightShardSeed(server)
+    server.weight_seed._movers = movers
+    server.d2d = _loopback_weight_transport(server)
+    acknowledged = server.weight_seed.resolve({"seed_backend": "rdma"})
+    assert "lease_id" not in acknowledged
+    validated = server.weight_seed.validate_payload(acknowledged)
+    acknowledge_lease(server.d2d, validated.get("lease_id"))
+    assert server.weight_seed.active_copies == 0
+
+    cancelled = server.weight_seed.resolve({"seed_backend": "rdma"})
+    cancelled["cache_config"] = {}
+    with pytest.raises(ValueError):
+        server.weight_seed.validate_payload(cancelled)
+    assert server.weight_seed.active_copies == 0
+
+
+@pytest.mark.parametrize("action", ["acknowledge", "cancel"])
+def test_d2d_lease_response_loss_and_retry_is_idempotent(action):
+    from vllm.model_executor.model_loader.weight_cache.weight_seed.core import (
+        acknowledge_lease,
+        cancel_lease,
+    )
+
+    server = _eplb_test_daemon()
+    payload = server.weight_seed.resolve({"seed_backend": "rdma", "lease_protocol": 1})
+    loopback = _loopback_weight_transport(server)
+
+    class DropResponse:
+        drop = True
+
+        def request(self, request):
+            response = loopback.request(request)
+            if self.drop and request.get(action):
+                self.drop = False
+                return None
+            return response
+
+    transport = DropResponse()
+    complete = acknowledge_lease if action == "acknowledge" else cancel_lease
+    with pytest.raises(RuntimeError, match="Could not"):
+        complete(transport, payload["lease_id"])
+    assert server.weight_seed.active_copies == 0
+    repeated = loopback.request(
+        {"kind": "weights", action: True, "lease_id": payload["lease_id"]}
+    )
+    assert repeated["payload"]["already_completed"]
+    complete(transport, payload["lease_id"])
+    with pytest.raises(ValueError, match="Unknown weight-cache lease ID"):
+        server.weight_seed.resolve({action: True, "lease_id": "unknown"})
+
+
+def test_d2d_send_failure_queries_and_cancels_uncertain_lease():
+    from vllm.model_executor.model_loader.weight_cache.weight_seed.core import (
+        cancel_lease,
+        get_active_lease_ids,
+    )
+
+    server = _eplb_test_daemon()
+    loopback = _loopback_weight_transport(server)
+
+    class SendFailure:
+        def request(self, request):
+            response = loopback.request(request)
+            if request.get("seed_backend"):
+                return None
+            return response
+
+    transport = SendFailure()
+    assert (
+        transport.request(
+            {"kind": "weights", "seed_backend": "rdma", "lease_protocol": 1}
+        )
+        is None
+    )
+    lease_ids = get_active_lease_ids(transport)
+    assert len(lease_ids) == 1
+    assert server.weight_seed.active_copies == 1
+    cancel_lease(transport, lease_ids[0])
+    assert server.weight_seed.active_copies == 0
+    assert get_active_lease_ids(transport) == []
+
+
+def test_non_eplb_d2d_lease_id_roundtrip():
+    from dataclasses import replace
+
+    from vllm.model_executor.model_loader.weight_cache.weight_seed.core import (
+        acknowledge_lease,
+        cancel_lease,
+    )
+    from vllm.model_executor.model_loader.weight_cache.weight_seed.utils import (
+        validate_weights_payload,
+    )
+
+    server = _eplb_test_daemon()
+    server.cache_key = replace(
+        server.cache_key, enable_eplb=False, eplb_num_redundant_experts=0
+    )
+    server._eplb_placement = None
+    transport = _loopback_weight_transport(server)
+    acknowledged = server.weight_seed.resolve(
+        {"seed_backend": "rdma", "lease_protocol": 1}
+    )
+    validated = validate_weights_payload(acknowledged, server.cache_key, "test-model")
+    assert validated["placement"] is None
+    acknowledge_lease(transport, acknowledged["lease_id"])
+    cancelled = server.weight_seed.resolve(
+        {"seed_backend": "rdma", "lease_protocol": 1}
+    )
+    cancel_lease(transport, cancelled["lease_id"])
+    assert server.weight_seed.active_copies == 0
+
+
+def test_d2d_lease_cancel_recovers_detached_frozen_writer():
+    from vllm.model_executor.model_loader.weight_cache.eplb import EplbPlacement
+    from vllm.model_executor.model_loader.weight_cache.weight_seed.core import (
+        acknowledge_lease,
+        cancel_lease,
+    )
+
+    server = _eplb_test_daemon()
+    binding, _ = _attach_eplb_binding(server)
+    binding.freeze()
+    first = server.weight_seed.resolve({"seed_backend": "rdma", "lease_protocol": 1})
+    second = server.weight_seed.resolve({"seed_backend": "rdma", "lease_protocol": 1})
+    assert first["lease_id"] != second["lease_id"]
+    transport = _loopback_weight_transport(server)
+    with pytest.raises(ValueError, match="Unknown weight-cache lease ID"):
+        server.weight_seed.resolve({"acknowledge": True, "lease_id": "unknown"})
+
+    binding.detach()
+    assert server.eplb_frozen
+    acknowledge_lease(transport, first["lease_id"])
+    assert server.weight_seed.active_copies == 1
+    assert server.eplb_frozen
+    duplicate = server.weight_seed.resolve(
+        {"acknowledge": True, "lease_id": first["lease_id"]}
+    )
+    assert duplicate["already_completed"]
+
+    # Explicit recovery after the mirror has confirmed its copy stopped.
+    cancel_lease(transport, second["lease_id"])
+    assert server.weight_seed.active_copies == 0
+    assert not server.eplb_frozen
+    late_ack = server.weight_seed.resolve(
+        {"acknowledge": True, "lease_id": second["lease_id"]}
+    )
+    assert late_ack["already_completed"]
+    late_cancel = server.weight_seed.resolve(
+        {"cancel": True, "lease_id": second["lease_id"]}
+    )
+    assert late_cancel["already_completed"]
+
+    replacement, _ = _attach_eplb_binding(server)
+    replacement.begin(0)
+    replacement.commit(EplbPlacement(1, ((1, 0, 1),)))
+    replacement.detach()
+
+
+def test_weight_payload_validation_failure_cancels_available_lease():
+    server = _eplb_test_daemon()
+    binding, _ = _attach_eplb_binding(server)
+    binding.freeze()
+    payload = server.weight_seed.resolve({"seed_backend": "rdma", "lease_protocol": 1})
+    server.d2d = _loopback_weight_transport(server)
+    payload["cache_config"] = {}
+    with pytest.raises(ValueError):
+        server.weight_seed.validate_payload(payload)
+    assert server.weight_seed.active_copies == 0
+    binding.detach()
+
+
+@pytest.mark.parametrize("failure_stage", ["fill", "install"])
+def test_peer_loader_cancels_lease_on_fill_or_install_failure(
+    monkeypatch, failure_stage
+):
+    from types import SimpleNamespace
+
+    import torch
+
+    from vllm.config import LoadConfig
+    from vllm.model_executor.model_loader.weight_cache.weight_seed import loader
+
+    server = _eplb_test_daemon()
+    binding, _ = _attach_eplb_binding(server)
+    binding.freeze()
+    payload = server.weight_seed.resolve({"seed_backend": "rdma", "lease_protocol": 1})
+    transport = _loopback_weight_transport(server)
+
+    class Mover:
+        def fill(self, manifest, seed, device):
+            if failure_stage == "fill":
+                raise RuntimeError("copy failed")
+            return {"weight": torch.ones(2)}
+
+    monkeypatch.setattr(loader, "get_mover", lambda backend: Mover())
+    monkeypatch.setattr(
+        loader, "check_weight_cache_loader_support", lambda *args, **kwargs: None
+    )
+    monkeypatch.setattr(torch.accelerator, "current_device_index", lambda: 0)
+    if failure_stage == "install":
+        monkeypatch.setattr(
+            loader,
+            "build_model_from_processed_weights",
+            lambda *args, **kwargs: (_ for _ in ()).throw(
+                RuntimeError("install failed")
+            ),
+        )
+    peer_loader = loader.PeerModelLoader(LoadConfig(load_format="peer_cache"))
+    config = SimpleNamespace(parallel_config=SimpleNamespace(enable_eplb=True))
+    with pytest.raises(RuntimeError, match="failed"):
+        peer_loader.load_model(config, object(), payload=payload, transport=transport)
+    assert server.weight_seed.active_copies == 0
+    binding.detach()
+
+
+EPLB_WEIGHT_CACHE_CONFIG = {
+    "num_redundant_experts": 2,
+    "window_size": 16,
+    "step_interval": 1_000_000,
+    "use_async": False,
+    "communicator": "torch_nccl",
+}
+EPLB_WEIGHT_CACHE_CASE = ModelCase(
+    model="vllm-project/tiny-random-DeepseekV2ForCausalLM",
+    prompts=["The capital of France is"],
+    llm_kwargs=dict(
+        tensor_parallel_size=2,
+        enable_expert_parallel=True,
+        enable_eplb=True,
+        eplb_config=EPLB_WEIGHT_CACHE_CONFIG,
+        worker_extension_cls="tests.evals.gsm8k.eplb_checks.EplbCheckExtension",
+        dtype="bfloat16",
+        gpu_memory_utilization=0.4,
+        enforce_eager=True,
+        max_model_len=2048,
+        enable_prefix_caching=False,
+        kernel_config={
+            "enable_flashinfer_autotune": False,
+            "enable_jit_warmup": False,
+        },
+    ),
+    daemon_args=[
+        "--enable-expert-parallel",
+        "--enable-eplb",
+        "--eplb-config",
+        json.dumps(EPLB_WEIGHT_CACHE_CONFIG),
+        "--dtype",
+        "bfloat16",
+        "--max-model-len",
+        "2048",
+        "--disable-flashinfer-autotune",
+    ],
+)
+
+
+def _open_eplb_runner(vllm_runner, socket_dir: str, gpu_ids: list[int]):
+    return vllm_runner(
+        EPLB_WEIGHT_CACHE_CASE.model,
+        load_format="ipc_cache",
+        model_loader_extra_config={"socket_dir": socket_dir, "fallback": False},
+        max_num_seqs=1,
+        device_ids=gpu_ids,
+        **EPLB_WEIGHT_CACHE_CASE.llm_kwargs,
+    )
+
+
+def _generate_eplb_outputs(llm, max_tokens: int = 16):
+    return llm.generate(
+        EPLB_WEIGHT_CACHE_CASE.prompts,
+        SamplingParams(temperature=0, max_tokens=max_tokens, ignore_eos=True),
+    )
+
+
+def _daemon_sockets_for_devices(
+    daemon: WeightCacheDaemon, device_indices: list[int]
+) -> list[str]:
+    from vllm.model_executor.model_loader.weight_cache.protocol import get_socket_path
+
+    paths = [
+        get_socket_path(
+            current_platform.get_device_uuid(device_index), daemon.socket_dir
+        )
+        for device_index in device_indices
+    ]
+    assert all(os.path.exists(path) for path in paths)
+    return paths
+
+
+def _assert_eplb_version(placements: list[dict], version: int) -> None:
+    assert len(placements) == 2
+    assert [placement["version"] for placement in placements] == [version, version]
+    assert placements[0] == placements[1]
+
+
+@pytest.mark.skipif(
+    not current_platform.is_cuda(),
+    reason="Exact EPLB output comparison requires CUDA batch invariance",
+)
+@create_new_process_for_each_test()
+@pytest.mark.distributed(num_gpus=2)
+def test_ipc_cache_eplb_rearrange_hot_restart_tp2(vllm_runner, monkeypatch):
+    """A committed rearrangement survives clean engine hot restarts."""
+    _set_visible_devices(monkeypatch, "0,1")
+    monkeypatch.setenv("VLLM_BATCH_INVARIANT", "1")
+    _wait_for_previous_engines()
+
+    with WeightCacheDaemon(
+        EPLB_WEIGHT_CACHE_CASE.model,
+        tp_size=2,
+        extra_args=EPLB_WEIGHT_CACHE_CASE.daemon_args,
+        env_extra=_visibility_env("0,1"),
+    ) as daemon:
+        daemon.wait_until_ready()
+        with _open_eplb_runner(vllm_runner, daemon.socket_dir, [0, 1]) as llm:
+            initial = llm.collective_rpc("get_weight_cache_eplb_placement")
+            _assert_eplb_version(initial, 0)
+            initial_outputs = _generate_eplb_outputs(llm)
+
+            rearranged = llm.collective_rpc("rearrange_eplb_deterministic")
+            _assert_eplb_version(rearranged, 1)
+            assert (
+                rearranged[0]["physical_to_logical_map"]
+                != initial[0]["physical_to_logical_map"]
+            )
+            assert llm.collective_rpc("check_eplb_replica_slots") == [None, None]
+            rearranged_outputs = _generate_eplb_outputs(llm)
+            assert rearranged_outputs == initial_outputs
+
+        with _open_eplb_runner(vllm_runner, daemon.socket_dir, [0, 1]) as restarted:
+            restored = restarted.collective_rpc("get_weight_cache_eplb_placement")
+            assert restored == rearranged
+            assert restarted.collective_rpc("check_eplb_replica_slots") == [None, None]
+            restart_outputs = _generate_eplb_outputs(restarted)
+
+    assert restart_outputs == rearranged_outputs
+
+
+@pytest.mark.skipif(
+    not current_platform.is_cuda(),
+    reason="Online peer_ipc EPLB seeding test requires CUDA batch invariance",
+)
+@create_new_process_for_each_test()
+@pytest.mark.distributed(num_gpus=4)
+def test_d2d_eplb_seed_while_source_serves_tp2(vllm_runner, monkeypatch):
+    """Mirror a live TP2 source without stopping its inference or EPLB writer."""
+    _set_visible_devices(monkeypatch, "0,1,2,3")
+    monkeypatch.setenv("VLLM_BATCH_INVARIANT", "1")
+    _wait_for_previous_engines()
+
+    with WeightCacheDaemon(
+        EPLB_WEIGHT_CACHE_CASE.model,
+        tp_size=2,
+        extra_args=EPLB_WEIGHT_CACHE_CASE.daemon_args,
+        env_extra=_visibility_env("0,1"),
+    ) as source:
+        source.wait_until_ready()
+        source_sockets = _daemon_sockets_for_devices(source, [0, 1])
+        with _open_eplb_runner(vllm_runner, source.socket_dir, [0, 1]) as source_llm:
+            initial = source_llm.collective_rpc("get_weight_cache_eplb_placement")
+            rearranged = source_llm.collective_rpc("rearrange_eplb_deterministic")
+            _assert_eplb_version(rearranged, 1)
+            assert (
+                rearranged[0]["physical_to_logical_map"]
+                != initial[0]["physical_to_logical_map"]
+            )
+            expected_outputs = _generate_eplb_outputs(source_llm)
+            source_llm.collective_rpc("pause_eplb_for_weight_seed")
+
+            generation_started = threading.Event()
+            with ThreadPoolExecutor(max_workers=1) as executor:
+
+                def generate_during_seed():
+                    generation_started.set()
+                    return _generate_eplb_outputs(source_llm, max_tokens=512)
+
+                generation = executor.submit(generate_during_seed)
+                assert generation_started.wait(timeout=30)
+                with WeightCacheDaemon(
+                    EPLB_WEIGHT_CACHE_CASE.model,
+                    tp_size=2,
+                    extra_args=[
+                        *EPLB_WEIGHT_CACHE_CASE.daemon_args,
+                        "--weight-cache-seed",
+                        ",".join(source_sockets),
+                    ],
+                    env_extra=_visibility_env("0,1,2,3"),
+                ) as mirror:
+                    mirror.wait_until_ready()
+                    transfers = re.findall(
+                        r"Mirrored .* in (\d+) storage\(s\) over peer_ipc",
+                        mirror.logs,
+                    )
+                    assert len(transfers) == 2, mirror.logs
+                    assert all(int(storages) > 1 for storages in transfers)
+                    online_outputs = generation.result()
+
+                    source_llm.collective_rpc("resume_eplb_for_weight_seed")
+                    assert (
+                        source_llm.collective_rpc("get_weight_cache_eplb_placement")
+                        == rearranged
+                    )
+                    assert all(text for _, texts in online_outputs for text in texts)
+
+                    _set_visible_devices(monkeypatch, "2,3")
+                    with _open_eplb_runner(
+                        vllm_runner, mirror.socket_dir, [0, 1]
+                    ) as mirror_llm:
+                        mirrored = mirror_llm.collective_rpc(
+                            "get_weight_cache_eplb_placement"
+                        )
+                        assert mirrored == rearranged
+                        assert mirror_llm.collective_rpc(
+                            "check_eplb_replica_slots"
+                        ) == [None, None]
+                        mirror_outputs = _generate_eplb_outputs(mirror_llm)
+
+    assert mirror_outputs == expected_outputs

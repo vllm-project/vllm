@@ -11,7 +11,13 @@ import torch.nn as nn
 
 from vllm.config import ModelConfig
 from vllm.distributed.eplb.eplb_state import EplbState
+from vllm.distributed.parallel_state import get_eplb_control_cpu_group
 from vllm.logger import init_logger
+from vllm.model_executor.model_loader.weight_cache.eplb import (
+    WEIGHT_CACHE_EPLB_BINDING_ATTR,
+    WeightCacheEplbBinding,
+    get_weight_cache_eplb_binding,
+)
 from vllm.model_executor.models.interfaces import (
     MixtureOfExperts,
     get_mixture_of_experts_model,
@@ -91,7 +97,9 @@ class EPLBController:
         self.device = device
         self.state: EplbState | None = None
         self.suppressed = False
+        self.paused = False
         self._has_registered_models = False
+        self._weight_cache_bindings: list[tuple[nn.Module, WeightCacheEplbBinding]] = []
 
     @contextmanager
     def suppress(self) -> Iterator[None]:
@@ -112,10 +120,33 @@ class EPLBController:
             self.suppressed = was_suppressed
 
     def prepare_load(self) -> None:
+        self.detach_weight_cache_bindings()
+        self.paused = False
         self.state = None
         self._has_registered_models = False
         if self.parallel_config.enable_eplb:
             self.state = EplbState(self.parallel_config, self.device)
+
+    def _track_weight_cache_binding(
+        self,
+        model: nn.Module,
+        binding: WeightCacheEplbBinding,
+    ) -> None:
+        for _, registered in self._weight_cache_bindings:
+            if binding is registered:
+                return
+        self._weight_cache_bindings.append((model, binding))
+
+    def _recover_weight_cache_binding(
+        self,
+        model: nn.Module,
+        model_config: ModelConfig,
+    ) -> None:
+        binding = get_weight_cache_eplb_binding(model)
+        if binding is not None:
+            self._track_weight_cache_binding(model, binding)
+        assert self.state is not None
+        self.state.recover_weight_cache_placement(model_config, binding)
 
     def maybe_register_speculator(
         self,
@@ -154,6 +185,7 @@ class EPLBController:
             draft_model_config,
             model_name=eplb_draft_model_name(draft_model_config),
         )
+        self._recover_weight_cache_binding(draft_model, draft_model_config)
         speculator.set_eplb_state(self.state)
         self._has_registered_models = True
         return True
@@ -164,6 +196,14 @@ class EPLBController:
 
         moe_model = get_mixture_of_experts_model(model)
         if moe_model is None:
+            binding = get_weight_cache_eplb_binding(model)
+            if binding is None:
+                return False
+            if binding.placement.physical_to_logical_map:
+                raise ValueError(
+                    "A PP shard without MoE layers requires an empty EPLB placement"
+                )
+            self._track_weight_cache_binding(model, binding)
             return False
 
         logger.info_once(
@@ -171,6 +211,7 @@ class EPLBController:
         )
         assert self.state is not None
         self.state.add_model(moe_model, model_config)
+        self._recover_weight_cache_binding(model, model_config)
         self._has_registered_models = True
         return True
 
@@ -188,6 +229,7 @@ class EPLBController:
         if (
             not self.parallel_config.enable_eplb
             or self.suppressed
+            or self.paused
             or self.state is None
             or not self._has_registered_models
         ):
@@ -195,6 +237,112 @@ class EPLBController:
 
         log_stats = self.parallel_config.eplb_config.log_balancedness
         self.state.step(is_dummy, is_profile, log_stats=log_stats)
+
+    def _require_weight_cache_bindings(self) -> list[WeightCacheEplbBinding]:
+        if self.state is None or not self._weight_cache_bindings:
+            raise RuntimeError("Weight-cache EPLB control requires a bound model")
+        if self.state.is_async or self.parallel_config.enable_elastic_ep:
+            raise RuntimeError(
+                "Weight-cache EPLB control only supports synchronous, non-elastic EPLB"
+            )
+        if self.parallel_config.data_parallel_size != 1:
+            raise RuntimeError(
+                "Online weight-cache D2D currently requires DP=1; "
+                "DP-wide EPLB pause requires scheduler-level coordination"
+            )
+        return [binding for _, binding in self._weight_cache_bindings]
+
+    @staticmethod
+    def _check_weight_cache_control(
+        local_error: Exception | None,
+        failure_message: str,
+    ) -> None:
+        failures = torch.tensor(int(local_error is not None), dtype=torch.int32)
+        torch.distributed.all_reduce(
+            failures,
+            group=get_eplb_control_cpu_group(),
+        )
+        if not failures.item():
+            return
+        error = RuntimeError(f"{failure_message}; {failures.item()} EP rank(s) failed")
+        if local_error is not None:
+            raise error from local_error
+        raise error
+
+    def pause_for_weight_seed(self) -> None:
+        bindings = self._require_weight_cache_bindings()
+        self.paused = True
+        torch.accelerator.synchronize()
+        torch.distributed.barrier(group=get_eplb_control_cpu_group())
+        local_error: Exception | None = None
+        for binding in bindings:
+            try:
+                binding.freeze()
+            except Exception as exc:
+                local_error = exc
+        self._check_weight_cache_control(
+            local_error,
+            "Failed to freeze weight-cache EPLB; all ranks remain paused",
+        )
+
+    def resume_for_weight_seed(self) -> None:
+        bindings = self._require_weight_cache_bindings()
+        if not self.paused:
+            raise RuntimeError("Weight-cache EPLB is not paused")
+        local_error: Exception | None = None
+        for binding in bindings:
+            try:
+                if not binding.can_unfreeze():
+                    raise RuntimeError("active D2D copies")
+            except Exception as exc:
+                local_error = exc
+        self._check_weight_cache_control(
+            local_error,
+            "Weight-cache EPLB cannot unfreeze; all ranks remain paused",
+        )
+
+        for binding in bindings:
+            try:
+                binding.unfreeze()
+            except Exception as exc:
+                local_error = exc
+        self._check_weight_cache_control(
+            local_error,
+            "Failed to unfreeze weight-cache EPLB; all ranks remain paused",
+        )
+        self.paused = False
+
+    def detach_weight_cache_bindings(self, model: nn.Module | None = None) -> None:
+        self.paused = True
+        bindings = self._weight_cache_bindings
+        self._weight_cache_bindings = []
+        if model is not None:
+            model_binding = get_weight_cache_eplb_binding(model)
+            if model_binding is not None and all(
+                model_binding is not registered for _, registered in bindings
+            ):
+                bindings.append((model, model_binding))
+        if self.state is not None:
+            for model_state in self.state.model_states.values():
+                model_state.weight_cache_binding = None
+
+        errors = []
+        for registered_model, registered_binding in bindings:
+            if (
+                getattr(registered_model, WEIGHT_CACHE_EPLB_BINDING_ATTR, None)
+                is registered_binding
+            ):
+                delattr(registered_model, WEIGHT_CACHE_EPLB_BINDING_ATTR)
+            try:
+                registered_binding.detach()
+            except Exception as exc:
+                errors.append(str(exc))
+        if errors:
+            logger.warning(
+                "Weight-cache EPLB detach was not clean; the daemon writer "
+                "watcher will release or poison the session as appropriate: %s",
+                "; ".join(errors),
+            )
 
     def prepare_forward(
         self,

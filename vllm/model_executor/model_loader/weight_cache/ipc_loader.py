@@ -10,7 +10,7 @@ import threading
 import time
 from collections.abc import Callable
 from copy import copy
-from typing import TypeVar
+from typing import Any, TypeVar
 
 import torch
 import torch.nn as nn
@@ -37,6 +37,10 @@ from vllm.model_executor.model_loader.utils import (
     _load_device,
     build_model_from_processed_weights,
     get_draft_load_config,
+)
+from vllm.model_executor.model_loader.weight_cache.eplb import (
+    EplbPlacement,
+    bind_weight_cache_eplb,
 )
 from vllm.model_executor.model_loader.weight_cache.protocol import (
     CacheConfigMismatchError,
@@ -134,11 +138,22 @@ class IpcModelLoader(BaseModelLoader):
         # Fingerprint computed by load_model, reused by standalone
         # load_weights so a reload keys on the same configuration.
         self._cache_key: WeightCacheKey | None = None
+        self._eplb_writer_token: str | None = None
+        self._eplb_writer_socket: socket.socket | None = None
+
+    def _check_eplb_load_config(self, vllm_config: VllmConfig) -> None:
+        if not vllm_config.parallel_config.enable_eplb:
+            return
+        if self.mode != "zero_copy" or self.fallback:
+            raise ValueError(
+                "Weight cache EPLB requires mode='zero_copy' and fallback=False"
+            )
 
     def get_external_weight_memory(self, vllm_config: VllmConfig) -> int:
         # Copy mode clones the weights into this process; nothing external.
         if self.mode != "zero_copy":
             return 0
+        self._check_eplb_load_config(vllm_config)
         total = self._daemon_memory()
         if is_draft_model_cacheable(vllm_config.speculative_config):
             # The draft group is queried with the same config the engine
@@ -193,12 +208,23 @@ class IpcModelLoader(BaseModelLoader):
 
         Copies daemon tensors into matching parameters/buffers. The model is
         expected to already be in the post-quantized layout (e.g. previously
-        loaded through this loader).
+        loaded through this loader). EPLB models must use their versioned
+        writer protocol instead of an unversioned whole-model refresh.
         """
-        device_index = torch.accelerator.current_device_index()
         cache_key = self._cache_key
+        if cache_key is not None and cache_key.enable_eplb:
+            raise NotImplementedError(
+                "Standalone load_weights is not supported with EPLB; "
+                "use the weight-cache writer protocol"
+            )
         if cache_key is None:
             vllm_config = get_current_vllm_config()
+            if vllm_config.parallel_config.enable_eplb:
+                raise NotImplementedError(
+                    "Standalone load_weights is not supported with EPLB; "
+                    "use the weight-cache writer protocol"
+                )
+            device_index = torch.accelerator.current_device_index()
             entries = self._fetch_entries(
                 model_config,
                 vllm_config.cache_config,
@@ -207,6 +233,7 @@ class IpcModelLoader(BaseModelLoader):
                 is_reload=True,
             ).entries
         else:
+            device_index = torch.accelerator.current_device_index()
             entries = self._state_for_key(cache_key, is_reload=True).entries
         params = dict(model.named_parameters())
         buffers = dict(model.named_buffers())
@@ -228,6 +255,7 @@ class IpcModelLoader(BaseModelLoader):
         check_weight_cache_loader_support(
             vllm_config, model_config, is_draft=self.is_draft
         )
+        self._check_eplb_load_config(vllm_config)
         state_fetched = False
         try:
             state = self._fetch_entries(
@@ -239,6 +267,7 @@ class IpcModelLoader(BaseModelLoader):
             state_fetched = True
             model = self._build_model(vllm_config, model_config, prefix, state)
         except (WeightCacheUnavailableError, CacheConfigMismatchError) as e:
+            self._abandon_eplb_writer()
             if not self.fallback:
                 raise
             logger.warning(
@@ -248,8 +277,10 @@ class IpcModelLoader(BaseModelLoader):
             # Unsupported quantization is a permanent misconfiguration rather
             # than a transient daemon outage, so it is raised even when
             # fallback is on.
+            self._abandon_eplb_writer()
             raise
         except Exception:
+            self._abandon_eplb_writer()
             if not self.fallback:
                 raise
             logger.exception(
@@ -296,6 +327,20 @@ class IpcModelLoader(BaseModelLoader):
             attrs=state.attrs,
             load_config=self.load_config,
         )
+        if vllm_config.parallel_config.enable_eplb:
+            if state.placement is None or self._eplb_writer_token is None:
+                raise WeightCacheUnavailableError(
+                    "EPLB daemon did not provide a placement and writer session"
+                )
+            bind_weight_cache_eplb(
+                model,
+                state.placement,
+                token=self._eplb_writer_token,
+                held_socket=self._eplb_writer_socket,
+                request=self._request_eplb_command,
+            )
+            self._eplb_writer_token = None
+            self._eplb_writer_socket = None
         return model
 
     def _apply_entries(
@@ -339,6 +384,10 @@ class IpcModelLoader(BaseModelLoader):
             is_draft=self.is_draft,
             enable_expert_parallel=parallel_config.enable_expert_parallel,
             expert_placement_strategy=parallel_config.expert_placement_strategy,
+            enable_eplb=parallel_config.enable_eplb,
+            eplb_num_redundant_experts=(
+                parallel_config.eplb_config.num_redundant_experts or 0
+            ),
             kernel_config=kernel_config,
         )
         # Recorded before model construction so that a later standalone
@@ -346,7 +395,57 @@ class IpcModelLoader(BaseModelLoader):
         # daemon fingerprinted, unaffected by any cache_config mutation
         # during model construction.
         self._cache_key = cache_key
+        if cache_key.enable_eplb and not is_reload:
+            self._attach_eplb_writer(cache_key)
         return self._state_for_key(cache_key, is_reload=is_reload)
+
+    def _attach_eplb_writer(self, cache_key: WeightCacheKey) -> None:
+        def attach() -> None:
+            conn = self._connect(self.connect_timeout_s)
+            try:
+                send_msg(conn, {"cmd": "eplb_attach", "cache_key": cache_key})
+                response = recv_msg(conn)
+            except Exception:
+                conn.close()
+                raise
+            if response.get("status") != "ok":
+                conn.close()
+                raise CacheConfigMismatchError(
+                    "Weight cache daemon refused EPLB writer attach: "
+                    f"{response.get('message', response)}"
+                )
+            token = response.get("token")
+            if not isinstance(token, str):
+                conn.close()
+                raise WeightCacheUnavailableError(
+                    "Weight cache daemon returned no EPLB writer token"
+                )
+            self._eplb_writer_token = token
+            self._eplb_writer_socket = conn
+
+        self._with_startup_wait(attach)
+
+    def _request_eplb_command(self, request: dict[str, Any]) -> dict[str, Any]:
+        with self._connect(self.connect_timeout_s) as conn:
+            conn.settimeout(self.state_timeout_s)
+            send_msg(conn, request)
+            response = recv_msg(conn)
+        if not isinstance(response, dict):
+            raise WeightCacheUnavailableError(
+                "Weight cache daemon returned a malformed EPLB response"
+            )
+        return response
+
+    def _abandon_eplb_writer(self) -> None:
+        if self._eplb_writer_token is not None:
+            with contextlib.suppress(Exception):
+                self._request_eplb_command(
+                    {"cmd": "eplb_detach", "token": self._eplb_writer_token}
+                )
+        if self._eplb_writer_socket is not None:
+            self._eplb_writer_socket.close()
+        self._eplb_writer_token = None
+        self._eplb_writer_socket = None
 
     def _state_for_key(
         self, cache_key: WeightCacheKey, *, is_reload: bool = False
@@ -409,10 +508,20 @@ class IpcModelLoader(BaseModelLoader):
                 f"Weight cache daemon error: {response.get('message')}"
             )
         self._check_gpu_uuid(response.get("gpu_uuid"))
+        placement = response.get("placement")
+        if cache_key.enable_eplb and not isinstance(placement, EplbPlacement):
+            raise WeightCacheUnavailableError(
+                "EPLB weight cache daemon returned an invalid placement"
+            )
+        if not cache_key.enable_eplb and placement is not None:
+            raise WeightCacheUnavailableError(
+                "Non-EPLB weight cache daemon returned an EPLB placement"
+            )
         return WeightCacheState(
             entries=response["entries"],
             aliases=response.get("aliases", {}),
             attrs=response.get("attrs", {}),
+            placement=placement,
         )
 
     def _connect(self, timeout: float) -> socket.socket:

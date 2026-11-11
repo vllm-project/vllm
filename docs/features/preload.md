@@ -219,6 +219,130 @@ Mooncake RDMA and requires `--seed-token`.
     handles and releasing weights remain local operations over the
     owner-verified Unix socket.
 
+## Fast start with synchronous EPLB
+
+EPLB rearranges expert weights in place, so a fast restart must recover both the
+current weights and their expert placement. With `ipc_cache`, the daemon keeps a
+versioned placement beside the weights. A replacement engine maps the current
+experts and restores the corresponding EPLB routing state instead of restarting
+from the initial placement.
+
+The daemon and every engine must use synchronous EPLB and the `zero_copy` loader
+with fallback disabled. For example, start a source daemon with:
+
+```bash
+vllm preload --model /path/to/moe-model --tensor-parallel-size 4 \
+    --enable-expert-parallel --enable-eplb \
+    --eplb-config '{"use_async":false,"num_redundant_experts":4}' \
+    --weight-cache-socket-dir /run/vllm-a
+```
+
+Then start its engine with the same model and parallel configuration:
+
+```bash
+vllm serve /path/to/moe-model --tensor-parallel-size 4 \
+    --enable-expert-parallel --enable-eplb \
+    --eplb-config '{"use_async":false,"num_redundant_experts":4}' \
+    --load-format ipc_cache \
+    --model-loader-extra-config '{"socket_dir":"/run/vllm-a","mode":"zero_copy","fallback":false}'
+```
+
+`use_async` defaults to `true`, and the loader's `fallback` defaults to `true`,
+so both overrides are required.
+
+### Placement versions and writer lifecycle
+
+Each rank's daemon accepts **one attached EPLB writer at a time**. The engine
+attaches its writer before loading the exported weights; a second writer is
+rejected. The writer protocol and the daemon's writer state provide the
+following guarantees:
+
+- The initial physical-to-logical expert map has version 0. Before any expert
+  movement, the writer marks the cache `dirty` at the current version. After
+  the rearrangement and device synchronization complete, it commits the complete
+  next-version map and returns the cache to `clean`. The daemon rejects stale
+  versions, shape changes, and unknown logical expert IDs.
+- `clean` means that the committed weights and placement form a readable
+  snapshot. D2D seeding additionally requires the attached writer to be frozen.
+- `dirty` means that a rearrangement has begun but has not committed. A new
+  writer cannot attach and D2D seeding is refused. An explicit abort, or a
+  writer disconnect while dirty, changes the state to `poisoned`.
+- `poisoned` means that the weights may contain an incomplete mixture of two
+  placements. The daemon refuses IPC loading and D2D seeding until the preload
+  group is restarted; it does not silently recover or fall back to disk.
+
+Normal engine teardown detaches the writer. A clean detach or disconnect leaves
+the last committed placement intact and lets a replacement engine attach. The
+replacement receives that placement and version, checks that all EP ranks agree,
+and restores its EPLB maps without incrementing the version. This preserves the
+current expert layout across hot engine restarts.
+
+### Online D2D seeding from a running EPLB engine
+
+Before seeding a mirror, pause EPLB on every source worker through
+`collective_rpc`. Given a source Python `LLM` object configured as above, the
+control sequence is:
+
+```python
+source_llm.collective_rpc("pause_eplb_for_weight_seed")
+
+# Launch the mirror preload command below and wait until it is ready.
+# The source engine can continue normal inference while EPLB is paused.
+
+source_llm.collective_rpc("resume_eplb_for_weight_seed")
+```
+
+For the same-host `peer_ipc` example, the mirror uses a separate socket directory
+and the rank-matched source sockets:
+
+```bash
+vllm preload --model /path/to/moe-model --tensor-parallel-size 4 \
+    --enable-expert-parallel --enable-eplb \
+    --eplb-config '{"use_async":false,"num_redundant_experts":4}' \
+    --weight-cache-socket-dir /run/vllm-b \
+    --weight-cache-seed /run/vllm-a/vllm_weight_cache_<hash0>.sock,/run/vllm-a/vllm_weight_cache_<hash1>.sock,/run/vllm-a/vllm_weight_cache_<hash2>.sock,/run/vllm-a/vllm_weight_cache_<hash3>.sock
+```
+
+The same pause/copy/resume sequence applies to the remote `rdma` form. Source and
+mirror must be homogeneous: use the same model, cache configuration, node count,
+parallel layout, rank placement, and redundant-expert configuration.
+
+Pausing synchronizes the device and workers, then freezes the daemon writers
+through a dedicated Gloo EPLB control group, separate from the EP and EPLB data
+communicators. It suppresses automatic expert rearrangement, **not request
+processing**, so the source can keep serving inference during the copy. The D2D
+payload includes the frozen placement and its version.
+
+Resume only after the mirror has completed and acknowledged its copies. Every
+source rank checks that no D2D copy lease remains before unfreezing. If freezing
+or unfreezing fails on any rank, the workers remain paused; do not resume while
+copies are still active. Orchestration should always attempt the resume call
+after a failed mirror launch as well.
+
+Each copy has a unique lease ID. If a mirror fails before acknowledging, use
+`get_active_lease_ids(transport)` on a transport connected to the source to find
+its outstanding leases. After confirming that the mirror and its copy have
+stopped, release each one with `cancel_lease(transport, lease_id)` before
+resuming EPLB. Acknowledgement and cancellation are idempotent for recently
+completed IDs, so a caller can retry after a lost response. Leases are not
+released automatically on a timeout, because the source cannot distinguish a
+slow copy from a stopped one.
+
+Call the pause methods through the top-level `LLM.collective_rpc` or
+`AsyncLLM.collective_rpc`, covering every worker in the TP/PP group. Online D2D
+currently requires DP=1: pausing an EP group that spans independent DP engines
+needs scheduler-level, step-aligned coordination and is rejected rather than
+risking a control/data-collective deadlock.
+
+The first weight-cache EPLB implementation has these limits:
+
+- Asynchronous EPLB and elastic EP are rejected.
+- Speculative decoding, including draft-model caches, is rejected.
+- `copy` mode and `fallback=true` are rejected; only `zero_copy` with
+  `fallback=false` is supported.
+- Heterogeneous D2D replicas are not supported.
+- Cross-node pipeline-parallel deployments have not been verified.
+
 ## Sharing warmup caches through Mooncake (optional)
 
 D2D seeding needs a live source daemon. As an alternative, the daemon can

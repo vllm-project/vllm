@@ -2,6 +2,7 @@
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 """Fill a daemon's model with a source replica's post-processed weights."""
 
+import contextlib
 from copy import copy
 
 import torch
@@ -14,6 +15,10 @@ from vllm.model_executor.model_loader.base_loader import BaseModelLoader
 from vllm.model_executor.model_loader.utils import (
     build_model_from_processed_weights,
 )
+from vllm.model_executor.model_loader.weight_cache.eplb import (
+    EplbPlacement,
+    bind_weight_cache_eplb,
+)
 from vllm.model_executor.model_loader.weight_cache.protocol import (
     TensorKind,
     check_weight_cache_loader_support,
@@ -21,6 +26,7 @@ from vllm.model_executor.model_loader.weight_cache.protocol import (
 from vllm.model_executor.model_loader.weight_cache.transport import SeedTransport
 from vllm.model_executor.model_loader.weight_cache.weight_seed.core import (
     acknowledge_lease,
+    cancel_lease,
     get_mover,
 )
 from vllm.model_executor.model_loader.weight_cache.weight_seed.utils import (
@@ -63,30 +69,39 @@ class PeerModelLoader(BaseModelLoader):
         payload: WeightsSeedPayload,
         transport: SeedTransport,
     ) -> nn.Module:
-        check_weight_cache_loader_support(
-            vllm_config, model_config, is_draft=self.is_draft
-        )
-        manifest = payload["manifest"]
-        mover = get_mover(payload["seed"]["backend"])
-        device = torch.device(
-            current_platform.device_type, torch.accelerator.current_device_index()
-        )
-        tensors = mover.fill(manifest, payload["seed"], device)
-        acknowledge_lease(transport)
-        kinds: dict[str, TensorKind] = {
-            name: "param" if view["is_param"] else "buffer"
-            for name, view in manifest["tensors"].items()
-        }
-        model = build_model_from_processed_weights(
-            vllm_config,
-            model_config,
-            prefix,
-            tensors,
-            kinds,
-            aliases=dict(payload["aliases"]),
-            attrs=dict(payload["attrs"]),
-            load_config=self.load_config,
-        )
+        lease_id = payload.get("lease_id")
+        try:
+            check_weight_cache_loader_support(
+                vllm_config, model_config, is_draft=self.is_draft
+            )
+            manifest = payload["manifest"]
+            mover = get_mover(payload["seed"]["backend"])
+            device = torch.device(
+                current_platform.device_type, torch.accelerator.current_device_index()
+            )
+            tensors = mover.fill(manifest, payload["seed"], device)
+            kinds: dict[str, TensorKind] = {
+                name: "param" if view["is_param"] else "buffer"
+                for name, view in manifest["tensors"].items()
+            }
+            model = build_model_from_processed_weights(
+                vllm_config,
+                model_config,
+                prefix,
+                tensors,
+                kinds,
+                aliases=dict(payload["aliases"]),
+                attrs=dict(payload["attrs"]),
+                load_config=self.load_config,
+            )
+            if vllm_config.parallel_config.enable_eplb:
+                placement = EplbPlacement.from_json_dict(payload["placement"])
+                bind_weight_cache_eplb(model, placement)
+            acknowledge_lease(transport, lease_id)
+        except Exception:
+            with contextlib.suppress(Exception):
+                cancel_lease(transport, lease_id)
+            raise
         logger.info(
             "Loaded %d tensors from a peer daemon over %s",
             len(tensors),

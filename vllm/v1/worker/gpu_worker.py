@@ -595,14 +595,18 @@ class Worker(WorkerBase):
     # FIXME(youkaichao & ywang96): Use TorchDispatchMode instead of memory pool
     # to hijack tensor allocation.
     def load_model(self, *, load_dummy_weights: bool = False) -> None:
-        with (
-            self._maybe_get_memory_pool_context(tag="weights"),
-            set_current_vllm_config(self.vllm_config),
-            # 20 MiB is the minimum PyTorch allows for max_split_size_mb.
-            self._scoped_allocator_max_split(max_split_size_mb=20),
-            self._external_weight_charges.track(),
-        ):
-            self.model_runner.load_model(load_dummy_weights=load_dummy_weights)
+        try:
+            with (
+                self._maybe_get_memory_pool_context(tag="weights"),
+                set_current_vllm_config(self.vllm_config),
+                # 20 MiB is the minimum PyTorch allows for max_split_size_mb.
+                self._scoped_allocator_max_split(max_split_size_mb=20),
+                self._external_weight_charges.track(),
+            ):
+                self.model_runner.load_model(load_dummy_weights=load_dummy_weights)
+        except BaseException:
+            self.model_runner.detach_weight_cache_eplb()
+            raise
 
         if self._external_weight_charges.fallback_bytes:
             self.requested_memory = self._resolve_requested_memory()
@@ -1780,6 +1784,14 @@ class Worker(WorkerBase):
         # Weight transfer bypasses GPUModelRunner.reload_weights().
         if not self._weight_update_is_draft:
             self.model_runner.on_target_weights_replaced()
+
+    def pause_eplb_for_weight_seed(self) -> None:
+        """Pause a DP=1 TP/PP group through top-level collective_rpc."""
+        self.model_runner.pause_eplb_for_weight_seed()
+
+    def resume_eplb_for_weight_seed(self) -> None:
+        """Resume a DP=1 TP/PP group through top-level collective_rpc."""
+        self.model_runner.resume_eplb_for_weight_seed()
 
     def shutdown(self) -> None:
         gc.unfreeze()

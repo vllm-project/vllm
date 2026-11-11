@@ -2451,6 +2451,7 @@ class GPUModelRunner(LoRAModelRunnerMixin):
         """Release GPU tensors (model weights, KV caches, workspace) so that
         memory is reclaimable when running in the same process."""
         torch.accelerator.synchronize()
+        self.detach_weight_cache_eplb()
         if current_platform.is_rocm():
             # RCCL's ncclCommAbort waits for live graphs that captured the comm:
             # https://github.com/ROCm/rocm-systems/issues/13018
@@ -2518,6 +2519,15 @@ class GPUModelRunner(LoRAModelRunnerMixin):
         self, expanded_physical_to_logical: torch.Tensor
     ) -> None:
         self.eplb.setup_from_mapping(self.model_config, expanded_physical_to_logical)
+
+    def pause_eplb_for_weight_seed(self) -> None:
+        self.eplb.pause_for_weight_seed()
+
+    def resume_eplb_for_weight_seed(self) -> None:
+        self.eplb.resume_for_weight_seed()
+
+    def detach_weight_cache_eplb(self) -> None:
+        self.eplb.detach_weight_cache_bindings(getattr(self, "model", None))
 
     ########### EPLB methods end ###########
 

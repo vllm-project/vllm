@@ -31,11 +31,17 @@ def parse_seed_backend(value: Any) -> SeedBackend:
     raise ValueError(f"Unknown weight-cache seed backend {value!r}")
 
 
-def acknowledge_lease(transport: Any) -> None:
-    """Tell the source that this operation no longer needs its weights."""
+def acknowledge_lease(transport: Any, lease_id: str | None = None) -> None:
+    """Tell the source that this lease completed successfully.
+
+    `lease_id=None` is the legacy command for an old source without ID leases.
+    """
     if transport is None:
         return
-    response = transport.request({"kind": "weights", "acknowledge": True})
+    request: dict[str, Any] = {"kind": "weights", "acknowledge": True}
+    if lease_id is not None:
+        request["lease_id"] = lease_id
+    response = transport.request(request)
     if response is None:
         raise RuntimeError("Could not acknowledge weight-cache copy")
     if response.get("status") != "ok":
@@ -43,6 +49,57 @@ def acknowledge_lease(transport: Any) -> None:
             f"Source daemon rejected weight-cache acknowledgement: "
             f"{response.get('message', response)}"
         )
+
+
+def cancel_lease(transport: Any, lease_id: str | None = None) -> None:
+    """Cancel a lease after confirming its mirror or copy has stopped.
+
+    This is also the explicit recovery operation after a mirror process crash.
+    Cancellation never happens automatically on a timeout; callers must ensure
+    the target can no longer read the source before releasing the source lease.
+    `lease_id=None` uses the acknowledgement understood by old sources.
+    """
+    if lease_id is None:
+        acknowledge_lease(transport)
+        return
+    if transport is None:
+        return
+    request: dict[str, Any] = {"kind": "weights", "cancel": True}
+    if lease_id is not None:
+        request["lease_id"] = lease_id
+    response = transport.request(request)
+    if response is None:
+        raise RuntimeError("Could not cancel weight-cache copy")
+    if response.get("status") != "ok":
+        raise RuntimeError(
+            f"Source daemon rejected weight-cache cancellation: "
+            f"{response.get('message', response)}"
+        )
+
+
+def get_active_lease_ids(transport: Any) -> list[str]:
+    """List source IDs available for explicit post-crash cancellation.
+
+    Orchestration should confirm the mirror has stopped, then pass each ID to
+    `cancel_lease`. A source send failure does not release its lease implicitly.
+    """
+    if transport is None:
+        raise RuntimeError("Could not query active weight-cache leases")
+    response = transport.request({"kind": "weights", "list_leases": True})
+    if response is None:
+        raise RuntimeError("Could not query active weight-cache leases")
+    if response.get("status") != "ok":
+        raise RuntimeError(
+            f"Source daemon rejected weight-cache lease query: "
+            f"{response.get('message', response)}"
+        )
+    payload = response.get("payload")
+    lease_ids = payload.get("lease_ids") if isinstance(payload, dict) else None
+    if not isinstance(lease_ids, list) or any(
+        not isinstance(lease_id, str) for lease_id in lease_ids
+    ):
+        raise RuntimeError("Source daemon returned malformed active lease IDs")
+    return lease_ids
 
 
 class WeightMover(ABC):

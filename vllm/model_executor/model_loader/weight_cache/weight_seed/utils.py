@@ -5,12 +5,13 @@
 import socket
 from collections.abc import Mapping
 from dataclasses import fields
-from typing import TYPE_CHECKING, Any, TypedDict, cast
+from typing import TYPE_CHECKING, Any, NotRequired, TypedDict, cast
 
 import torch
 from pydantic import TypeAdapter
 
 from vllm.config import replace
+from vllm.model_executor.model_loader.weight_cache.eplb import EplbPlacement
 from vllm.model_executor.model_loader.weight_cache.protocol import (
     TensorKind,
     WeightCacheKey,
@@ -30,6 +31,8 @@ _CONNECT_TIMEOUT_S = 5.0
 class WeightsSeedPayload(TypedDict):
     """What a source daemon's `weights` resolve sends to a peer loader."""
 
+    lease_id: NotRequired[str]
+    """Unique ID lease; absent only for a legacy source without lease_protocol."""
     cache_config: dict[str, Any]
     """`asdict(WeightCacheKey)` of the source's shard."""
     model: str
@@ -37,6 +40,8 @@ class WeightsSeedPayload(TypedDict):
     """Storage manifest, as `build_manifest` produces."""
     aliases: dict[str, str]
     attrs: dict[str, bool]
+    placement: dict[str, Any] | None
+    """Source EPLB version and full map, as `EplbPlacement.to_json_dict()`."""
     seed: dict[str, Any]
     """Mover-specific transfer seed; `seed["backend"]` picks the mover."""
 
@@ -235,6 +240,9 @@ def validate_weights_payload(
     """Structural checks plus the shard fingerprint against the expected key."""
     if not isinstance(payload, dict):
         raise ValueError("Seed daemon returned a malformed payload")
+    lease_id = payload.get("lease_id")
+    if lease_id is not None and (not isinstance(lease_id, str) or not lease_id):
+        raise ValueError("Seed daemon returned a malformed lease ID")
     source_model = payload.get("model")
     if source_model is not None and not isinstance(source_model, str):
         raise ValueError("Seed daemon returned a malformed model name")
@@ -270,4 +278,11 @@ def validate_weights_payload(
             f"Seed daemon cache differs on fields {mismatched}; refusing "
             f"to mirror a different weight shard{hint}"
         )
+    placement = payload.get("placement")
+    if expected_key.enable_eplb:
+        if placement is None:
+            raise ValueError("Seed daemon omitted the EPLB placement")
+        payload["placement"] = EplbPlacement.from_json_dict(placement).to_json_dict()
+    elif placement is not None:
+        raise ValueError("Non-EPLB seed daemon returned an EPLB placement")
     return cast(WeightsSeedPayload, payload)

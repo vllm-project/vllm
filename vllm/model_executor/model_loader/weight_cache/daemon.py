@@ -92,6 +92,7 @@ import signal
 import socket
 import threading
 from collections.abc import Callable, Iterable
+from enum import StrEnum
 
 import torch
 
@@ -114,12 +115,18 @@ from vllm.distributed.device_communicators.flashinfer_all_reduce import (
 from vllm.logger import configure_logging, init_logger
 from vllm.model_executor.model_loader import get_model_loader
 from vllm.model_executor.model_loader.utils import process_weights_after_loading
+from vllm.model_executor.model_loader.weight_cache.eplb import (
+    EplbPlacement,
+    get_weight_cache_eplb_binding,
+    new_writer_token,
+)
 from vllm.model_executor.model_loader.weight_cache.protocol import (
     TensorEntry,
     TensorKind,
     WeightCacheKey,
     WeightCacheUnavailableError,
     check_ipc_quant_support,
+    check_weight_cache_eplb_support,
     ensure_private_socket_dir,
     get_current_device_uuid,
     get_socket_path,
@@ -159,6 +166,12 @@ from vllm.v1.worker.workspace import init_workspace_manager
 logger = init_logger("vllm.model_executor.model_loader.weight_cache.daemon")
 
 
+class EplbWriterState(StrEnum):
+    CLEAN = "clean"
+    DIRTY = "dirty"
+    POISONED = "poisoned"
+
+
 class WeightCacheDaemon:
     """Per-GPU process that loads one TP/PP shard and serves CUDA IPC handles."""
 
@@ -177,8 +190,7 @@ class WeightCacheDaemon:
         warmup_cache_stores: Iterable[str] = (),
     ):
         parallel_config = vllm_config.parallel_config
-        if parallel_config.enable_eplb:
-            raise ValueError("The weight cache daemon does not support EPLB.")
+        check_weight_cache_eplb_support(vllm_config, is_draft=is_draft)
         # Seed peers are served on their own thread; this serializes their
         # reads of the state with the local socket's requests. Reentrant
         # because the local "seed" command re-enters it through
@@ -243,6 +255,11 @@ class WeightCacheDaemon:
         self.cache_key = build_weight_cache_key(
             vllm_config, self.model_config, is_draft=is_draft
         )
+        self._eplb_placement: EplbPlacement | None = None
+        self._eplb_writer_token: str | None = None
+        self._eplb_writer_socket: socket.socket | None = None
+        self._eplb_writer_state = EplbWriterState.CLEAN
+        self._eplb_frozen = False
 
     def warmup(self) -> None:
         """Run each warmup cache's pass (adopting remote caches via D2D)."""
@@ -264,6 +281,13 @@ class WeightCacheDaemon:
         with set_current_vllm_config(self.vllm_config):
             ensure_model_parallel_initialized(self.tp_size, self.pp_size)
             self.model = self.get_model()
+        if self.cache_key.enable_eplb:
+            binding = get_weight_cache_eplb_binding(self.model)
+            self._eplb_placement = (
+                binding.placement
+                if binding is not None
+                else EplbPlacement.initial(self.model)
+            )
         # In-place reloads use configs already normalized by model construction.
         self.loaded_rope_parameters_hash = hash_rope_parameters(self.model_config)
         # Loading and post-processing leave freed transients in the caching
@@ -460,6 +484,8 @@ class WeightCacheDaemon:
             server.close()
             for watcher in self._watchers:
                 watcher.close()
+            with self._state_lock:
+                self._clear_eplb_writer()
             self.d2d.close()
             if os.path.exists(socket_path):
                 os.unlink(socket_path)
@@ -510,6 +536,35 @@ class WeightCacheDaemon:
         tensors, kinds, aliases = collect_tensors(self.model)
         return tensors, kinds, aliases, export_model_attrs(self.model)
 
+    @property
+    def eplb_placement(self) -> EplbPlacement | None:
+        return getattr(self, "_eplb_placement", None)
+
+    @property
+    def eplb_writer_state(self) -> EplbWriterState:
+        return getattr(self, "_eplb_writer_state", EplbWriterState.CLEAN)
+
+    @property
+    def eplb_frozen(self) -> bool:
+        return getattr(self, "_eplb_frozen", False)
+
+    def _assert_eplb_readable(self) -> None:
+        if not self.cache_key.enable_eplb:
+            return
+        if self.eplb_writer_state == EplbWriterState.POISONED:
+            raise ValueError("EPLB weight cache is poisoned; restart the daemon")
+        if self.eplb_writer_state == EplbWriterState.DIRTY:
+            raise ValueError("EPLB weight cache is dirty")
+        if self.eplb_placement is None:
+            raise ValueError("EPLB weight cache has no committed placement")
+
+    def assert_eplb_seedable(self) -> None:
+        """Fail closed unless a seed can snapshot one quiescent placement."""
+        self._assert_eplb_readable()
+        has_writer = getattr(self, "_eplb_writer_token", None) is not None
+        if has_writer and not self.eplb_frozen:
+            raise ValueError("EPLB writer must be frozen before D2D seeding")
+
     def _handle_connection(self, conn: socket.socket) -> None:
         request = recv_msg(conn)
         cmd = request.get("cmd")
@@ -543,8 +598,147 @@ class WeightCacheDaemon:
         elif cmd == "watch":
             with self._state_lock:
                 self._handle_watch(conn)
+        elif isinstance(cmd, str) and cmd.startswith("eplb_"):
+            with self._state_lock:
+                self._handle_eplb_command(conn, request)
         else:
             send_msg(conn, {"status": "error", "message": f"Unknown command {cmd!r}"})
+
+    def _handle_eplb_command(self, conn: socket.socket, request: dict) -> None:
+        cmd = request["cmd"]
+        try:
+            if cmd == "eplb_attach":
+                self._handle_eplb_attach(conn, request)
+                return
+            self._check_eplb_writer_token(request.get("token"))
+            response: dict[str, object]
+            if cmd == "eplb_begin":
+                self._eplb_begin(request.get("version"))
+                response = {"status": "ok"}
+            elif cmd == "eplb_commit":
+                self._eplb_commit(request.get("placement"))
+                response = {"status": "ok"}
+            elif cmd == "eplb_abort":
+                self._require_eplb_writer_state(EplbWriterState.DIRTY)
+                self._eplb_writer_state = EplbWriterState.POISONED
+                response = {"status": "ok"}
+            elif cmd == "eplb_freeze":
+                self._require_eplb_writer_state(EplbWriterState.CLEAN)
+                self._eplb_frozen = True
+                response = {"status": "ok"}
+            elif cmd == "eplb_unfreeze":
+                self._require_eplb_writer_state(EplbWriterState.CLEAN)
+                if not self._eplb_can_unfreeze():
+                    raise ValueError("Cannot unfreeze with active D2D copies")
+                self._eplb_frozen = False
+                response = {"status": "ok"}
+            elif cmd == "eplb_can_unfreeze":
+                response = {
+                    "status": "ok",
+                    "can_unfreeze": self._eplb_can_unfreeze(),
+                }
+            elif cmd == "eplb_detach":
+                self._require_eplb_writer_state(EplbWriterState.CLEAN)
+                has_active_copies = self.weight_seed.active_copies > 0
+                self._clear_eplb_writer()
+                if not has_active_copies:
+                    self._eplb_frozen = False
+                response = {"status": "ok"}
+            else:
+                raise ValueError(f"Unknown command {cmd!r}")
+            send_msg(conn, response)
+        except (TypeError, ValueError) as e:
+            send_msg(conn, {"status": "error", "message": str(e)})
+
+    def _handle_eplb_attach(self, conn: socket.socket, request: dict) -> None:
+        if not self.cache_key.enable_eplb:
+            raise ValueError("EPLB is not enabled for this weight cache")
+        client_key = request.get("cache_key")
+        if not isinstance(client_key, WeightCacheKey):
+            raise ValueError("Missing cache_key")
+        if mismatched := self.cache_key.mismatched_fields(client_key):
+            raise ValueError(f"WeightCacheKey mismatch on fields: {mismatched}")
+        self._assert_eplb_readable()
+        self._require_eplb_writer_state(EplbWriterState.CLEAN)
+        if not self.has_weights or self.weight_seed.release_pending:
+            raise ValueError("Weights were released")
+        if getattr(self, "_eplb_writer_token", None) is not None:
+            raise ValueError("Another EPLB writer is already attached")
+        if self.weight_seed.active_copies:
+            raise ValueError("Cannot attach an EPLB writer with active D2D copies")
+        token = new_writer_token()
+        held_socket = conn.dup()
+        self._eplb_writer_token = token
+        self._eplb_writer_socket = held_socket
+        try:
+            send_msg(conn, {"status": "ok", "token": token})
+        except Exception:
+            self._clear_eplb_writer()
+            raise
+        threading.Thread(
+            target=self._watch_eplb_writer,
+            args=(held_socket, token),
+            name="vllm-weight-cache-eplb-writer",
+            daemon=True,
+        ).start()
+
+    def _check_eplb_writer_token(self, token: object) -> None:
+        expected = getattr(self, "_eplb_writer_token", None)
+        if expected is None or not isinstance(token, str) or token != expected:
+            raise ValueError("Invalid or detached EPLB writer token")
+        if self.eplb_writer_state == EplbWriterState.POISONED:
+            raise ValueError("EPLB weight cache is poisoned")
+
+    def _require_eplb_writer_state(self, expected: EplbWriterState) -> None:
+        if self.eplb_writer_state != expected:
+            raise ValueError(
+                f"EPLB writer state must be {expected.value}, "
+                f"not {self.eplb_writer_state.value}"
+            )
+
+    def _eplb_begin(self, version: object) -> None:
+        self._require_eplb_writer_state(EplbWriterState.CLEAN)
+        if self.eplb_frozen or self.weight_seed.active_copies:
+            raise ValueError("Cannot begin EPLB movement while frozen for D2D")
+        assert self.eplb_placement is not None
+        if type(version) is not int or version != self.eplb_placement.version:
+            raise ValueError(
+                f"Stale EPLB version {version!r}; "
+                f"current version is {self.eplb_placement.version}"
+            )
+        self._eplb_writer_state = EplbWriterState.DIRTY
+
+    def _eplb_commit(self, placement: object) -> None:
+        self._require_eplb_writer_state(EplbWriterState.DIRTY)
+        assert self.eplb_placement is not None
+        if not isinstance(placement, EplbPlacement):
+            raise ValueError("EPLB commit requires an EplbPlacement")
+        self.eplb_placement.validate_successor(placement)
+        self._eplb_placement = placement
+        self._eplb_writer_state = EplbWriterState.CLEAN
+
+    def _eplb_can_unfreeze(self) -> bool:
+        return self.weight_seed.active_copies == 0
+
+    def _clear_eplb_writer(self) -> None:
+        self._eplb_writer_token = None
+        held_socket = getattr(self, "_eplb_writer_socket", None)
+        self._eplb_writer_socket = None
+        if held_socket is not None:
+            held_socket.close()
+
+    def _watch_eplb_writer(self, conn: socket.socket, token: str) -> None:
+        with conn, contextlib.suppress(OSError):
+            while conn.recv(1):
+                pass
+        with self._state_lock:
+            if getattr(self, "_eplb_writer_token", None) != token:
+                return
+            if self.eplb_writer_state == EplbWriterState.DIRTY:
+                self._eplb_writer_state = EplbWriterState.POISONED
+            self._clear_eplb_writer()
+            if not self.weight_seed.active_copies:
+                self._eplb_frozen = False
 
     def _handle_get_state(self, conn: socket.socket, request: dict) -> None:
         client_key = request.get("cache_key")
@@ -562,6 +756,11 @@ class WeightCacheDaemon:
             logger.warning("WeightCacheKey mismatch on fields: %s", mismatched)
             send_msg(conn, {"status": "mismatch", "fields": mismatched})
             return
+        try:
+            self._assert_eplb_readable()
+        except ValueError as e:
+            send_msg(conn, {"status": "error", "message": str(e)})
+            return
         if not self.has_weights:
             send_msg(conn, {"status": "error", "message": "Weights were released"})
             return
@@ -573,6 +772,7 @@ class WeightCacheDaemon:
                 "entries": entries,
                 "aliases": aliases,
                 "attrs": attrs,
+                "placement": self.eplb_placement,
                 "gpu_uuid": get_current_device_uuid(),
             },
         )
@@ -612,7 +812,7 @@ class WeightCacheDaemon:
         with conn:
             try:
                 # Unregister from the NIC before the memory returns to the driver.
-                self.weight_seed.release()
+                self.weight_seed.release(require_eplb_writer_detached=True)
                 with self._state_lock:
                     self.model = None
                     torch.accelerator.empty_cache()

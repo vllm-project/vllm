@@ -850,7 +850,14 @@ steps:
   - vllm/entrypoints/cli/preload.py
   - vllm/model_executor/model_loader/weight_cache/
   - vllm/model_executor/layers/fused_moe/expert_map_manager.py
+  - vllm/distributed/eplb/
+  - vllm/distributed/parallel_state.py
+  - vllm/v1/worker/gpu/eplb_utils.py
+  - vllm/v1/worker/gpu/model_runner.py
+  - vllm/v1/worker/gpu_worker.py
   - tests/model_executor/model_loader/test_weight_cache.py
+  - tests/distributed/test_eplb_spec_decode.py
+  - tests/v1/worker/test_gpu_model_runner_v2_eplb.py
   commands:
   - pytest -v -s model_executor/model_loader/test_weight_cache.py -m 'distributed(num_gpus=2)'
   mirror:
@@ -867,8 +874,38 @@ steps:
       - vllm/entrypoints/cli/preload.py
       - vllm/model_executor/model_loader/weight_cache/
       - vllm/model_executor/layers/fused_moe/expert_map_manager.py
+      - vllm/distributed/eplb/
+      - vllm/distributed/parallel_state.py
+      - vllm/v1/worker/gpu/eplb_utils.py
+      - vllm/v1/worker/gpu/model_runner.py
+      - vllm/v1/worker/gpu_worker.py
       - tests/model_executor/model_loader/test_weight_cache.py
+      - tests/distributed/test_eplb_spec_decode.py
+      - tests/v1/worker/test_gpu_model_runner_v2_eplb.py
       - vllm/platforms/rocm.py
+
+- label: ":nvidia: (L4) [Nightly] Distributed Preload EPLB Mirror"
+  key: preload-eplb-mirror-4-gpus
+  # Nightly only: 4-GPU L4 pods wait behind smaller jobs on per-PR runs.
+  optional: true
+  timeout_in_minutes: 30
+  working_dir: "/vllm-workspace/tests"
+  device: l4
+  num_devices: 4
+  source_file_dependencies:
+  - vllm/entrypoints/cli/preload.py
+  - vllm/model_executor/model_loader/weight_cache/
+  - vllm/distributed/eplb/
+  - vllm/distributed/parallel_state.py
+  - vllm/v1/worker/gpu/eplb_utils.py
+  - vllm/v1/worker/gpu/model_runner.py
+  - vllm/v1/worker/gpu_worker.py
+  - tests/model_executor/model_loader/test_weight_cache.py
+  - tests/evals/gsm8k/eplb_checks.py
+  commands:
+  - >-
+    pytest -v -s
+    model_executor/model_loader/test_weight_cache.py::test_d2d_eplb_seed_while_source_serves_tp2
 
 - label: ":nvidia: (B200) Distributed Preload with Mooncake Store"
   key: preload-mooncake-store-2xb200

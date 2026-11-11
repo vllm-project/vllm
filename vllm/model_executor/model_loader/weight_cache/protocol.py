@@ -31,6 +31,7 @@ import vllm.version
 from vllm.config import CacheConfig, KernelConfig, ModelConfig, VllmConfig
 from vllm.config.utils import normalize_value
 from vllm.model_executor.layers.quantization.base_config import QuantizeMethodBase
+from vllm.model_executor.model_loader.weight_cache.eplb import EplbPlacement
 from vllm.model_executor.model_loader.weight_cache.utils import (
     format_socket_role_suffix,
 )
@@ -98,13 +99,25 @@ def check_ipc_platform_support() -> None:
     )
 
 
+def check_weight_cache_eplb_support(vllm_config: VllmConfig, *, is_draft: bool) -> None:
+    """Reject EPLB modes whose writer and placement cannot be kept consistent."""
+    parallel_config = vllm_config.parallel_config
+    if not parallel_config.enable_eplb:
+        return
+    if is_draft or vllm_config.speculative_config is not None:
+        raise ValueError("Weight cache EPLB does not support speculative models.")
+    if parallel_config.eplb_config.use_async:
+        raise ValueError("Weight cache EPLB only supports synchronous EPLB.")
+    if parallel_config.enable_elastic_ep:
+        raise ValueError("Weight cache EPLB does not support elastic EP.")
+
+
 def check_weight_cache_loader_support(
     vllm_config: VllmConfig, model_config: ModelConfig, *, is_draft: bool
 ) -> None:
     """Reject deployments a weight cache loader cannot serve (platform, EPLB, role)."""
     check_ipc_platform_support()
-    if vllm_config.parallel_config.enable_eplb:
-        raise ValueError("The weight cache loader does not support EPLB.")
+    check_weight_cache_eplb_support(vllm_config, is_draft=is_draft)
     spec = vllm_config.speculative_config
     inferred = spec is not None and model_config is spec.draft_model_config
     if inferred != is_draft:
@@ -354,6 +367,8 @@ class WeightCacheKey:
     dp_rank: int = 0
     enable_expert_parallel: bool = False
     expert_placement_strategy: str = "linear"
+    enable_eplb: bool = False
+    eplb_num_redundant_experts: int = 0
     moe_backend: str = "auto"
     """Kernel backends pick the processed weight layout (e.g. shuffled or
     repacked), so weights processed for one backend are wrong for another."""
@@ -375,6 +390,8 @@ class WeightCacheKey:
         dp_rank: int = 0,
         enable_expert_parallel: bool = False,
         expert_placement_strategy: str = "linear",
+        enable_eplb: bool = False,
+        eplb_num_redundant_experts: int = 0,
         kernel_config: KernelConfig | None = None,
     ) -> "WeightCacheKey":
         """Build the fingerprint for a model configuration.
@@ -396,6 +413,12 @@ class WeightCacheKey:
         linear_backend_per_quant = tuple(
             sorted((kernel_config.linear_backend_per_quant or {}).items())
         )
+        enable_eplb = bool(enable_eplb)
+        eplb_num_redundant_experts = (
+            int(eplb_num_redundant_experts or 0) if enable_eplb else 0
+        )
+        if eplb_num_redundant_experts < 0:
+            raise ValueError("eplb_num_redundant_experts must be non-negative")
         return cls(
             checkpoint=checkpoint,
             model_arch=arch,
@@ -421,6 +444,8 @@ class WeightCacheKey:
             dp_rank=dp_rank,
             enable_expert_parallel=enable_expert_parallel,
             expert_placement_strategy=expert_placement_strategy,
+            enable_eplb=enable_eplb,
+            eplb_num_redundant_experts=eplb_num_redundant_experts,
             moe_backend=kernel_config.moe_backend,
             linear_backend=kernel_config.linear_backend,
             linear_backend_per_quant=linear_backend_per_quant,
@@ -479,6 +504,8 @@ class WeightCacheState(NamedTuple):
     """Duplicate (tied) weight names aliased to their canonical entry."""
     attrs: dict[str, bool]
     """Python-side flags set by load_weights, e.g. EAGLE ownership flags."""
+    placement: EplbPlacement | None = None
+    """Committed EPLB map and version; None for non-EPLB daemons."""
 
 
 def parse_seed_address(address: str) -> str | tuple[str, int]:

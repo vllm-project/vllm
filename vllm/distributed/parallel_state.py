@@ -53,6 +53,7 @@ from vllm.distributed.utils import (
     cpu_all_reduce_,
     create_tcp_store,
     get_cached_tcp_store_client,
+    get_cpu_distributed_timeout_or_none,
 )
 from vllm.logger import init_logger
 from vllm.utils.import_utils import resolve_obj_by_qualname
@@ -1682,6 +1683,17 @@ def get_eplb_group() -> GroupCoordinator:
     return _EPLB
 
 
+_EPLB_CONTROL_CPU: ProcessGroup | None = None
+
+
+def get_eplb_control_cpu_group() -> ProcessGroup:
+    assert _EPLB_CONTROL_CPU is not None, (
+        "EPLB control group is not initialized. "
+        "It is only available for static EPLB groups."
+    )
+    return _EPLB_CONTROL_CPU
+
+
 _PCP: GroupCoordinator | None = None
 
 
@@ -2366,8 +2378,9 @@ def initialize_model_parallel(
         # This is a separate process group to isolate EPLB communications
         # from MoE forward pass collectives and prevent deadlocks when
         # using torch.distributed in execution with torch.distributed in EPLB.
-        global _EPLB
+        global _EPLB, _EPLB_CONTROL_CPU
         assert _EPLB is None, "EPLB group is already initialized"
+        assert _EPLB_CONTROL_CPU is None, "EPLB control group already exists"
         if config.parallel_config.enable_eplb:
             if enable_elastic_ep:
                 with _elastic_join_warmup_ctx():
@@ -2384,6 +2397,21 @@ def initialize_model_parallel(
                     get_world_group().local_rank,
                     backend,
                     group_name="eplb",
+                )
+                # Control RPCs may arrive on different steps across DP engines;
+                # keep their handshakes off the EP and EPLB data communicators.
+                for ranks in group_ranks:
+                    control_group = torch.distributed.new_group(
+                        ranks=ranks,
+                        backend="gloo",
+                        timeout=get_cpu_distributed_timeout_or_none(),
+                    )
+                    if ranks == get_ep_group().ranks:
+                        _EPLB_CONTROL_CPU = control_group
+                assert _EPLB_CONTROL_CPU is not None
+                assert (
+                    torch.distributed.get_process_group_ranks(_EPLB_CONTROL_CPU)
+                    == get_ep_group().ranks
                 )
     # If no EP group needed, _EP remains None
     # If no EPLB group needed, _EPLB remains None
@@ -2530,6 +2558,11 @@ def destroy_model_parallel():
     if _DP:
         _DP.destroy()
     _DP = None
+
+    global _EPLB_CONTROL_CPU
+    if _EPLB_CONTROL_CPU is not None:
+        torch.distributed.destroy_process_group(_EPLB_CONTROL_CPU)
+    _EPLB_CONTROL_CPU = None
 
     global _EP
     if _EP:

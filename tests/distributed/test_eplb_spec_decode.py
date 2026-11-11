@@ -77,6 +77,11 @@ class FakeEplbState:
     ) -> None:
         self.add_model_calls.append((model, model_config, model_name))
 
+    def recover_weight_cache_placement(
+        self, model_config: object, binding: object
+    ) -> None:
+        pass
+
 
 def _make_dsv4_dspark_hf_config() -> DeepseekV4Config:
     return DeepseekV4Config(
