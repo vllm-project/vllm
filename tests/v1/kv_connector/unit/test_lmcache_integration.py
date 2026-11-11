@@ -2,8 +2,8 @@
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 
 # NOTE: if your PR has broken one of the tests here (sorry),
-# kindly patch the corresponding integration in
-# /vllm/distributed/kv_transfer/kv_connector/v1/lmcache_integration/vllm_v1_adapter.py
+# kindly patch the corresponding integration in LMCache
+# (lmcache/integration/vllm/vllm_v1_adapter.py)
 # or reach out to @aposataC for assistance
 
 # Assumption vs. Correctness Tests:
