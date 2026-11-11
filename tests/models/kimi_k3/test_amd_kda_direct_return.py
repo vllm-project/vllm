@@ -62,6 +62,7 @@ def test_k3_kda_forward_returns_output_projection_storage() -> None:
         in_proj_padding=0,
         in_proj_qkvgfab=_TupleProjection(torch.randn(4, 20)),
         f_b_proj=_TupleProjection(torch.randn(4, 4)),
+        use_strided_f_b=False,
         o_proj=_TupleProjection(projected),
         _forward=fill_core_output,
     )

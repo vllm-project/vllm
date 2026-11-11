@@ -56,10 +56,21 @@ from vllm.v1.attention.ops.rocm_aiter_mla_sparse import (
     rocm_fp8_paged_mqa_logits,
 )
 
-from .ops.fp4_indexer import decode_layout, decode_tile_size, score_paged, store_keys
+from .ops.fp4_indexer import (
+    decode_layout,
+    decode_tile_size,
+    quantize_queries_and_weights,
+    score_paged,
+    store_keys,
+    store_keys_and_reset,
+)
 from .ops.fp4_indexer_prefill import prefill_chunks, prefill_workspace_bytes
 
 logger = init_logger(__name__)
+
+# Largest batch for the fused q_a/kv_a RMSNorm (MI355X crossover vs. AITER is
+# around 2K tokens).
+_FUSED_QKV_NORM_MAX_TOKENS = 1024
 
 
 @triton.jit
@@ -272,6 +283,10 @@ def _fp4_indexer(
     interleave: int = 1,
     weight_scale: float = 1.0,
     scores: torch.Tensor | None = None,
+    fused_prep: bool = False,
+    k_norm_weight: torch.Tensor | None = None,
+    k_norm_bias: torch.Tensor | None = None,
+    k_norm_eps: float = 0.0,
 ) -> None:
     metadata = get_forward_context().attn_metadata
     if not isinstance(metadata, dict):
@@ -294,8 +309,20 @@ def _fp4_indexer(
         return
     m = metadata[prefix]
     assert isinstance(m, DeepseekV32IndexerMetadata)
-    store_keys(k[: m.slot_mapping.numel()], cache, m.slot_mapping)
-    out[: q.shape[0]].fill_(-1)
+    if fused_prep:
+        # k is the raw projection when k_norm_weight is set.
+        store_keys_and_reset(
+            k[: m.slot_mapping.numel()],
+            cache,
+            m.slot_mapping,
+            out[: q.shape[0]],
+            k_norm_weight,
+            k_norm_bias,
+            k_norm_eps,
+        )
+    else:
+        store_keys(k[: m.slot_mapping.numel()], cache, m.slot_mapping)
+        out[: q.shape[0]].fill_(-1)
     if m.num_prefills:
         assert m.prefill is not None
         prefill_chunks(
@@ -336,15 +363,32 @@ def _fp4_indexer(
         for start in range(0, m.num_decode_tokens, tile_rows):
             end = min(start + tile_rows, m.num_decode_tokens)
             row_ends = ends[start:end]
-            rel_starts = starts if start == 0 else starts - start
+            quantized = None
+            if fused_prep:
+                q_payload, q_scales, tile_weights, rel_starts = (
+                    quantize_queries_and_weights(
+                        q[start:end],
+                        weights[start:end],
+                        weight_scale,
+                        starts,
+                        start,
+                        end - start,
+                    )
+                )
+                quantized = (q_payload, q_scales)
+            else:
+                tile_weights = weights[start:end].float() * weight_scale
+                rel_starts = starts if start == 0 else starts - start
+                rel_starts = rel_starts.clamp(0, end - start)
             logits = score_paged(
                 q[start:end],
                 cache,
-                weights[start:end].float() * weight_scale,
+                tile_weights,
                 block_table[: starts.numel() - 1],
-                rel_starts.clamp(0, end - start),
+                rel_starts,
                 row_ends,
                 min(end - start, decode.write_max_decode_len or end - start),
+                quantized,
             )
             selected = out[start:end]
             if score_rows is not None:
@@ -370,6 +414,10 @@ def _fp4_indexer_fake(
     interleave: int = 1,
     weight_scale: float = 1.0,
     scores: torch.Tensor | None = None,
+    fused_prep: bool = False,
+    k_norm_weight: torch.Tensor | None = None,
+    k_norm_bias: torch.Tensor | None = None,
+    k_norm_eps: float = 0.0,
 ) -> None:
     return
 
@@ -413,6 +461,8 @@ class KimiK3DSAIndexer(nn.Module):
         self.index_num_heads = index_num_heads
         self.indexer_weight_scale = self.index_num_heads**-0.5
         self.use_fp4 = v32_indexer.dsa_indexer_uses_fp4(vllm_config)
+        # MXFP4 decode prep in the indexer's Triton quantize launches.
+        self.fused_prep = self.use_fp4 and envs.VLLM_K3_FUSED_INDEXER_PREP
         if self.use_fp4 and (
             index_head_dim != 128 or index_num_heads not in (16, 32, 64)
         ):
@@ -556,9 +606,14 @@ class KimiK3DSAIndexer(nn.Module):
         index_q = self.wq_index(index_q_input)[0].view(
             -1, self.index_num_heads, self.index_head_dim
         )
-        index_k = self.k_index_norm(self.wk_index(hidden_states)[0])
+        index_k = self.wk_index(hidden_states)[0]
         index_v = self.wv_index(hidden_states)[0]
         if self.use_fp4:
+            # The fused key store applies the LayerNorm itself.
+            k_norm = self.k_index_norm
+            fuse_norm = self.fused_prep and isinstance(k_norm, KimiK3DSAIndexerKNorm)
+            if not fuse_norm:
+                index_k = k_norm(index_k)
             dcp = get_dcp_group()
             torch.ops.vllm.kimi_fp4_indexer(
                 index_q,
@@ -573,8 +628,13 @@ class KimiK3DSAIndexer(nn.Module):
                 self.cp_interleave,
                 self.indexer_weight_scale * self.index_softmax_scale,
                 self.dcp_scores,
+                self.fused_prep,
+                k_norm.weight if fuse_norm else None,
+                k_norm.bias if fuse_norm else None,
+                k_norm.eps if fuse_norm else 0.0,
             )
             return self.topk_indices_buffer
+        index_k = self.k_index_norm(index_k)
         q_fp8, weights = self._quantize_index_q_and_weights(index_q, index_v)
         # Under a dummy run kv_cache is an empty placeholder and the op takes
         # its workspace-reservation path.
@@ -1188,10 +1248,21 @@ class KimiK3DSAAttention(nn.Module):
         # The plain wrapper, not the AMD KimiK3MultiHeadLatentAttentionWrapper:
         # its fused decode Q-prep path writes dense 576-wide rows, which the
         # 656-byte fp8_ds_mla records cannot take.
+        # VLLM_K3_DSA_FUSED_NORM_GATE only fuses the q_a/kv_a RMSNorms into one
+        # launch and the output gate into one sigmoid-multiply; kv_c_normed and
+        # the KV cache write are unchanged. The fused norm (one row per program)
+        # loses to the AITER norms on large prefill chunks, so those keep them.
+        # The multi-stream wrapper has its own forward (and fused gate), so it
+        # takes neither.
+        fuse_norm_gate = envs.VLLM_K3_DSA_FUSED_NORM_GATE
         wrapper_cls: type[MultiHeadLatentAttentionWrapper] = (
             MultiHeadLatentAttentionWrapper
         )
-        wrapper_kwargs: dict = {}
+        wrapper_kwargs: dict = dict(
+            fuse_qkv_rmsnorm=fuse_norm_gate and self.q_lora_rank is not None,
+            fuse_output_gate=fuse_norm_gate,
+            fuse_qkv_rmsnorm_max_tokens=_FUSED_QKV_NORM_MAX_TOKENS,
+        )
         if (
             envs.VLLM_ROCM_DSA_MULTISTREAM
             and self.dsa_indexer.use_fp4
@@ -1202,7 +1273,7 @@ class KimiK3DSAAttention(nn.Module):
             ms_comm = _dsa_ms_comm(*self.dsa_indexer.dcp_scores.shape)
             if ms_comm is not None:
                 wrapper_cls = KimiK3DSAMultiStreamMLAWrapper
-                wrapper_kwargs["ms_comm"] = ms_comm
+                wrapper_kwargs = {"ms_comm": ms_comm}
         self.mla_attn = wrapper_cls(
             self.hidden_size,
             self.num_local_heads,

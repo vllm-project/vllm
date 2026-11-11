@@ -253,10 +253,14 @@ def k2_rlogp(key: K2Build) -> bool:
 
 def tag_layout() -> dict:
     """(OPT_TAG_X) The tagged rows' scratch region (name -> (byte offset,
-    bytes)), past every launch's layout at its largest (K1's, M1a's,
+    bytes)), past every launch's layout at its largest (K1's, M1a's, D1a's,
     K2's: as ``MonoRunner`` sizes the scratch), so no other launch's plain
     word sits where these keep tags."""
-    from vllm.models.kimi_k3.amd.specialized_decode.mono.attention import kda, mla
+    from vllm.models.kimi_k3.amd.specialized_decode.mono.attention import (
+        dsa_pre,
+        kda,
+        mla,
+    )
 
     S = k2b.MAX_S
     end = max(
@@ -265,6 +269,7 @@ def tag_layout() -> dict:
         ),
         scratch_bytes(K2Build(tokens=S, nblocks=8)),
         mla.scratch_bytes(mla.MlaPreBuild(tokens=S, nblocks=8, delta=True)),
+        dsa_pre.scratch_bytes(dsa_pre.max_build()),
     )
     # + 1 MiB: a fused K2's M1b flags (``crdy``) can outgrow the unfused key's
     off = -(-(end + (1 << 20)) // 4096) * 4096

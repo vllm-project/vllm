@@ -29,6 +29,7 @@ class MonoRunner:
         ``m1``: the MLA layers run M1 (else vLLM's attention ops)."""
         from vllm.models.kimi_k3.amd.specialized_decode.mono import layer
         from vllm.models.kimi_k3.amd.specialized_decode.mono.attention import (
+            dsa_pre,
             kda,
             mla,
             mla_back,
@@ -49,6 +50,7 @@ class MonoRunner:
                 mla.scratch_bytes(
                     mla.MlaPreBuild(tokens=MAX_TOKENS, nblocks=8, delta=True)
                 ),
+                dsa_pre.scratch_bytes(dsa_pre.max_build()),
                 # K2's tagged x rows (layer.OPT_TAG_X), past every layout
                 layer.tag_end(),
             ),
