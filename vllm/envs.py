@@ -295,6 +295,7 @@ if TYPE_CHECKING:
     VLLM_GPT_OSS_HARMONY_SYSTEM_INSTRUCTIONS: bool = False
     VLLM_SYSTEM_START_DATE: str | None = None
     VLLM_TOOL_JSON_ERROR_AUTOMATIC_RETRY: bool = False
+    VLLM_TOOL_CALL_MAX_WHITESPACE: int | None = 16
     VLLM_CUSTOM_SCOPES_FOR_PROFILING: bool = False
     VLLM_NVTX_SCOPES_FOR_PROFILING: bool = False
     VLLM_KV_EVENTS_USE_INT_BLOCK_HASHES: bool = True
@@ -355,6 +356,25 @@ if TYPE_CHECKING:
     VLLM_USE_SIMPLE_KV_OFFLOAD: bool = False
     VLLM_USE_SPINLOOP_EXT: bool = False
     VLLM_SKIP_VERSION_SUFFIX: bool = False
+
+
+def maybe_tool_call_max_whitespace() -> int | None:
+    """Cap on consecutive whitespace in grammar-constrained tool calls.
+
+    Positive integer: applied to every JSON-schema value position of the
+    tool-call grammar, bounding whitespace runs a model would otherwise emit
+    until max_tokens (issue #67029). "none"/"": the unbounded xgrammar default.
+    """
+    raw = os.getenv("VLLM_TOOL_CALL_MAX_WHITESPACE", "16")
+    if raw.strip().lower() in ("none", ""):
+        return None
+    value = int(raw)
+    if value <= 0:
+        raise ValueError(
+            "VLLM_TOOL_CALL_MAX_WHITESPACE must be a positive integer or "
+            f"'none', got {raw!r}"
+        )
+    return value
 
 
 def get_default_cache_root():
@@ -2115,6 +2135,11 @@ environment_variables: dict[str, Callable[[], Any]] = {
     "VLLM_TOOL_JSON_ERROR_AUTOMATIC_RETRY": lambda: bool(
         int(os.getenv("VLLM_TOOL_JSON_ERROR_AUTOMATIC_RETRY", "0"))
     ),
+    # Cap on consecutive whitespace characters at JSON value positions inside
+    # grammar-constrained tool calls (issue #67029). Bounds runaway whitespace
+    # generation the grammar would otherwise admit until max_tokens.
+    # "none" restores the unbounded xgrammar default.
+    "VLLM_TOOL_CALL_MAX_WHITESPACE": lambda: maybe_tool_call_max_whitespace(),
     # Add optional custom scopes for profiling, disable to avoid overheads
     "VLLM_CUSTOM_SCOPES_FOR_PROFILING": lambda: bool(
         int(os.getenv("VLLM_CUSTOM_SCOPES_FOR_PROFILING", "0"))
