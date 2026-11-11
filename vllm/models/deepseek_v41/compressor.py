@@ -429,7 +429,7 @@ class DeepseekCompressor(nn.Module):
         # Plain-row per-tensor fp8 caches (FlashInfer) carry the layer's scale;
         # fp8_ds_mla and bf16 rows need none.
         fp8_scale = (
-            getattr(k_cache_layer, "_k_scale", None)
+            getattr(k_cache_layer, "_flashinfer_fp8_kv_scale", None)
             if kv_cache.dtype == torch.float8_e4m3fn
             else None
         )

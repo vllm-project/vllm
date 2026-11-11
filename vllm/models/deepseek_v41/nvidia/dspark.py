@@ -283,7 +283,7 @@ def _insert_context_kv(
         positions,
         attn.rotary_emb.cos_sin_cache,
         attn.swa_cache_layer.block_size,
-        attn._k_scale if cache.dtype == torch.float8_e4m3fn else None,
+        attn._flashinfer_fp8_kv_scale if cache.dtype == torch.float8_e4m3fn else None,
         attn.kv_mxfp8,
     )
 

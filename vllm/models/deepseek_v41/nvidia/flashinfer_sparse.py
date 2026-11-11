@@ -243,17 +243,17 @@ class DeepseekV4FlashInferMLAAttention(DeepseekV4Attention):
         fp8_q_scale = 1.0
         fp8_kv_scale = 1.0
         self.register_buffer(
-            "_q_scale",
+            "_flashinfer_fp8_q_scale",
             torch.tensor([fp8_q_scale], dtype=torch.float32),
             persistent=False,
         )
         self.register_buffer(
-            "_q_scale_inv",
+            "_flashinfer_fp8_q_scale_inv",
             torch.tensor([1.0 / fp8_q_scale], dtype=torch.float32),
             persistent=False,
         )
         self.register_buffer(
-            "_k_scale",
+            "_flashinfer_fp8_kv_scale",
             torch.tensor([fp8_kv_scale], dtype=torch.float32),
             persistent=False,
         )
@@ -620,17 +620,17 @@ class DeepseekV4FlashInferSM120Attention(DeepseekV4Attention):
         fp8_q_scale = 1.0
         fp8_kv_scale = 1.0
         self.register_buffer(
-            "_q_scale",
+            "_flashinfer_fp8_q_scale",
             torch.tensor([fp8_q_scale], dtype=torch.float32),
             persistent=False,
         )
         self.register_buffer(
-            "_q_scale_inv",
+            "_flashinfer_fp8_q_scale_inv",
             torch.tensor([1.0 / fp8_q_scale], dtype=torch.float32),
             persistent=False,
         )
         self.register_buffer(
-            "_k_scale",
+            "_flashinfer_fp8_kv_scale",
             torch.tensor([fp8_kv_scale], dtype=torch.float32),
             persistent=False,
         )

@@ -163,17 +163,17 @@ def _aiter_sparse_mla_prefill_enabled(
 
 
 def _register_plain_fp8_kv_scales(layer: torch.nn.Module, use_aiter: bool) -> None:
-    """Unit q / KV scales for a per-tensor fp8 cache, under the names the
-    shared SWA insert, compressor and DSpark read."""
+    """Unit q / KV scales for a per-tensor fp8 cache. Same buffer names as
+    FlashInfer's, so the shared SWA insert, compressor and DSpark find them."""
     if not (use_aiter and _ON_GFX950):
         raise ValueError(
             "--kv-cache-dtype fp8_e4m3 needs gfx950 and the aiter sparse MLA "
             "kernel (VLLM_ROCM_USE_AITER_TRITON_SPARSE_MLA=1)"
         )
     for name in (
-        "_q_scale",
-        "_q_scale_inv",
-        "_k_scale",
+        "_flashinfer_fp8_q_scale",
+        "_flashinfer_fp8_q_scale_inv",
+        "_flashinfer_fp8_kv_scale",
     ):
         layer.register_buffer(
             name, torch.ones(1, dtype=torch.float32), persistent=False
@@ -208,8 +208,8 @@ def _plain_fp8_sparse_mla(
         swa_indices,
         kv_lora_rank=layer.head_dim,
         qk_rope_head_dim=0,
-        q_scale=layer._q_scale,
-        kv_scale=layer._k_scale,
+        q_scale=layer._flashinfer_fp8_q_scale,
+        kv_scale=layer._flashinfer_fp8_kv_scale,
         attn_sink=layer.attn_sink[: q.shape[1]],
         extra_kv_buffer=compressed_k_cache,
         extra_kv_indptr=topk_indptr,

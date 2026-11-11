@@ -475,7 +475,11 @@ class DeepseekCompressor(nn.Module):
         # fp8_ds_mla path uses the UE8M0 paged uint8 layout.
         store_full_kv = self.head_dim == 512 and kv_cache.dtype != torch.uint8
         store_full_fp8 = kv_cache.dtype == torch.float8_e4m3fn
-        fp8_scale = getattr(k_cache_layer, "_k_scale", None) if store_full_fp8 else None
+        fp8_scale = (
+            getattr(k_cache_layer, "_flashinfer_fp8_kv_scale", None)
+            if store_full_fp8
+            else None
+        )
 
         # cutedsl (head=512) accepts the full-cache flags; triton (indexer/AMD)
         # does not, so the two callables have different signatures.
