@@ -312,6 +312,9 @@ def get_lora_op_configs(
     return config_data
 
 
+FUSED_MOE_LORA_TWO_KERNEL_MAX_TOKENS = 64
+
+
 @lru_cache
 def supports_pdl(device: torch.device | None = None) -> bool:
     """Refer to: https://github.com/triton-lang/triton/blob/v3.5.0/python/tutorials/11-programmatic-dependent-launch.py."""

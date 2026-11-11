@@ -11,6 +11,7 @@ from transformers import Qwen4ExpConfig, Qwen4ExpTextConfig
 
 from vllm import envs
 from vllm.config import VllmConfig
+from vllm.config.kernel import NATIVE_MEGA_MOE_BACKENDS
 from vllm.distributed import get_pp_group
 from vllm.forward_context import get_forward_context, is_forward_context_available
 from vllm.model_executor.layers.fusion.mm_input_norm import build_mm_input_norm
@@ -84,6 +85,7 @@ from vllm.v1.kv_cache_interface import MambaSpec
 from ..common.hyperconnection import is_hc_sequence_parallel_enabled
 from .hyperconnection import GatedResidual, HyperConnectionConfig
 from .low_latency_gemm import enable_qwen4_exp_low_latency_gemm
+from .mega_moe import Qwen4ExpMegaMoeBlock
 from .ops.cute_dsl.hc_down_silu import request_hc_down_silu_warmup
 from .ple_layer import Qwen4ExpPLELayer
 from .qsa import Qwen4ExpQSAAttention
@@ -96,7 +98,7 @@ _QSA_LAYER_TYPES = ("qwen_sparse_attention", "indexed_attention")
 def without_modelopt_fp4(
     quant_config: QuantizationConfig | None,
 ) -> QuantizationConfig | None:
-    """Return ``None`` for weights excluded from Qwen4Exp ModelOpt-FP4."""
+    """Return `None` for weights excluded from Qwen4Exp ModelOpt-FP4."""
     if quant_config is not None and quant_config.get_name() == "modelopt_fp4":
         return None
     return quant_config
@@ -108,9 +110,9 @@ def _remap_qsa_cache_scale_name(
 ) -> str:
     """Map serialized main-cache scales onto the merged QSA owner.
 
-    Regular attention keeps cache scales below its ``attn`` child. QSA owns
+    Regular attention keeps cache scales below its `attn` child. QSA owns
     that cache directly, so only QSA layers need the final path component
-    moved to the owner's persistent ``_k_scale``/``_v_scale`` buffers.
+    moved to the owner's persistent `_k_scale`/`_v_scale` buffers.
     """
     scale_suffixes = {
         "k_proj.k_scale": "_k_scale",
@@ -187,12 +189,18 @@ class Qwen4ExpSparseMoeBlock(Qwen3NextSparseMoeBlock):
         self.n_shared_experts = int(config.shared_expert_intermediate_size > 0)
 
 
+def get_qsa_topk_buffer_width(config: Qwen4ExpTextConfig) -> int:
+    """Selected indices, including the open group's tail, plus a valid count."""
+    return config.indexer_budget + config.indexer_compress_ratio
+
+
 class Qwen4ExpDecoderLayer(nn.Module):
     def __init__(
         self,
         vllm_config: VllmConfig,
         layer_type: str,
         prefix: str = "",
+        topk_indices_buffer: torch.Tensor | None = None,
     ) -> None:
         super().__init__()
         config: Qwen4ExpTextConfig = vllm_config.model_config.hf_text_config
@@ -243,10 +251,13 @@ class Qwen4ExpDecoderLayer(nn.Module):
                     reduce_results=not self.use_hc_sequence_parallel,
                 )
             else:
+                if topk_indices_buffer is None:
+                    raise ValueError("QSA layers require a shared top-k buffer")
                 self.self_attn = Qwen4ExpQSAAttention(
                     vllm_config=vllm_config,
                     config=config,
                     layer_id=self.layer_idx,
+                    topk_indices_buffer=topk_indices_buffer,
                     quant_config=quant_config,
                     prefix=f"{prefix}.self_attn",
                     reduce_results=not self.use_hc_sequence_parallel,
@@ -254,11 +265,15 @@ class Qwen4ExpDecoderLayer(nn.Module):
         else:
             raise ValueError(f"Invalid layer_type {layer_type}")
 
-        self.mlp = Qwen4ExpSparseMoeBlock(
-            vllm_config=vllm_config,
-            prefix=f"{prefix}.mlp",
-            reduce_results=not self.use_hc_sequence_parallel,
-        )
+        self.mlp: Qwen4ExpSparseMoeBlock | Qwen4ExpMegaMoeBlock
+        if vllm_config.kernel_config.moe_backend in NATIVE_MEGA_MOE_BACKENDS:
+            self.mlp = Qwen4ExpMegaMoeBlock(vllm_config, prefix=f"{prefix}.mlp")
+        else:
+            self.mlp = Qwen4ExpSparseMoeBlock(
+                vllm_config=vllm_config,
+                prefix=f"{prefix}.mlp",
+                reduce_results=not self.use_hc_sequence_parallel,
+            )
 
         hc_config = HyperConnectionConfig(
             hc_count=config.hc_count,
@@ -362,7 +377,7 @@ class Qwen4ExpMixtureOfExperts(MixtureOfExperts):
         example_moe = None
         for layer in layers:
             if isinstance(layer, Qwen4ExpDecoderLayer) and isinstance(
-                layer.mlp, Qwen4ExpSparseMoeBlock
+                layer.mlp, (Qwen4ExpSparseMoeBlock, Qwen4ExpMegaMoeBlock)
             ):
                 example_moe = layer.mlp
                 self.moe_mlp_layers.append(layer.mlp)
@@ -425,6 +440,17 @@ class Qwen4ExpModel(nn.Module):
             if layer_type in _QSA_LAYER_TYPES
             and getattr(config, "indexer_n_heads", None) is not None
         )
+        # Reserved for all QSA layers to reuse; on the model, not a local, so
+        # the MTP proposer shares it with the draft.
+        self.topk_indices_buffer: torch.Tensor | None
+        if self._qsa_layer_ids:
+            self.topk_indices_buffer = torch.empty(
+                vllm_config.scheduler_config.max_num_batched_tokens,
+                get_qsa_topk_buffer_width(config),
+                dtype=torch.int32,
+            )
+        else:
+            self.topk_indices_buffer = None
         self.embed_tokens: VocabParallelEmbedding | PPMissingLayer
         if get_pp_group().is_first_rank:
             self.embed_tokens = VocabParallelEmbedding(
@@ -439,6 +465,7 @@ class Qwen4ExpModel(nn.Module):
                 vllm_config,
                 layer_type=config.layer_types[layer_idx],
                 prefix=prefix,
+                topk_indices_buffer=self.topk_indices_buffer,
             )
 
         self.start_layer, self.end_layer, self.layers = make_layers(
