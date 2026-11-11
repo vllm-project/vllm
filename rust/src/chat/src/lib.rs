@@ -192,6 +192,7 @@ impl ChatRequestProcessor {
     async fn prepare_media(
         &self,
         media: multimodal::MultimodalInput,
+        options: &multimodal::MediaOptions,
         token_ids: &mut Vec<u32>,
     ) -> Result<Option<MmFeatures>> {
         if media.is_empty() {
@@ -201,19 +202,50 @@ impl ChatRequestProcessor {
             .backend
             .multimodal_model_info()
             .ok_or(Error::UnsupportedMultimodalRenderer)?;
-        let multimodal::MultimodalInput { preprocessed, raw } = media;
-        let mut features = info.prepare_preprocessed(preprocessed, token_ids.len())?;
-        if !raw.is_empty() {
-            let model_dtype = self.model_dtype.ok_or(Error::UnsupportedMultimodalRenderer)?;
-            info.append_multimodal(
-                &mut features,
-                raw,
-                token_ids,
-                model_dtype,
-                self.max_model_len,
-            )
-            .await?;
-        }
+        let features = match media {
+            multimodal::MultimodalInput::Raw(parts) => {
+                let model_dtype = self.model_dtype.ok_or(Error::UnsupportedMultimodalRenderer)?;
+                info.prepare_multimodal_with(
+                    parts,
+                    token_ids,
+                    model_dtype,
+                    self.max_model_len,
+                    options,
+                )
+                .await?
+            }
+            multimodal::MultimodalInput::Preprocessed(features) => {
+                info.prepare_preprocessed(features, token_ids.len())?
+            }
+            multimodal::MultimodalInput::Mixed { raw, features } => {
+                let model_dtype = self.model_dtype.ok_or(Error::UnsupportedMultimodalRenderer)?;
+                info.prepare_mixed(
+                    raw,
+                    features,
+                    token_ids,
+                    model_dtype,
+                    self.max_model_len,
+                    options,
+                )
+                .await?
+            }
+            multimodal::MultimodalInput::Appended { features, raw } => {
+                let mut features = info.prepare_preprocessed(features, token_ids.len())?;
+                if !raw.is_empty() {
+                    let model_dtype =
+                        self.model_dtype.ok_or(Error::UnsupportedMultimodalRenderer)?;
+                    info.append_multimodal(
+                        &mut features,
+                        raw,
+                        token_ids,
+                        model_dtype,
+                        self.max_model_len,
+                    )
+                    .await?;
+                }
+                features
+            }
+        };
         Ok(Some(features))
     }
 
@@ -471,7 +503,19 @@ impl ChatLlm {
         media: impl Into<multimodal::MultimodalInput>,
         token_ids: &mut Vec<u32>,
     ) -> Result<Option<MmFeatures>> {
-        self.processor.prepare_media(media.into(), token_ids).await
+        self.prepare_media_with_options(media, &multimodal::MediaOptions::default(), token_ids)
+            .await
+    }
+
+    /// [`Self::prepare_media`] with per-request preprocessing options
+    /// (`mm_processor_kwargs`, `media_io_kwargs`).
+    pub async fn prepare_media_with_options(
+        &self,
+        media: impl Into<multimodal::MultimodalInput>,
+        options: &multimodal::MediaOptions,
+        token_ids: &mut Vec<u32>,
+    ) -> Result<Option<MmFeatures>> {
+        self.processor.prepare_media(media.into(), options, token_ids).await
     }
 
     /// Effective tool-call parser name for this model, if parsing is enabled.

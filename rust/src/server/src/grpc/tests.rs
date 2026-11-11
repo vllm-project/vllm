@@ -1021,6 +1021,7 @@ async fn unary_generate_prepares_multimodal_input_for_engine_core() {
                     )),
                     mime_type: String::new(),
                     uuid: uuid.to_string(),
+                    ..Default::default()
                 })
                 .collect(),
             kv: Some(pb::KvCacheParameters {
@@ -1109,10 +1110,13 @@ async fn generate_forwards_preprocessed_multimodal_features() {
                         length: 2,
                         mm_hash: Some("image-hash-a".to_string()),
                         is_embed: vec![true, false],
+                        metadata: None,
+                        tensors: Default::default(),
                     },
                 )),
                 mime_type: String::new(),
                 uuid: String::new(),
+                ..Default::default()
             }],
             stopping: Some(pb::StoppingCriteria {
                 max_new_tokens: 10,
@@ -1160,10 +1164,13 @@ fn preprocessed_grpc_media(
                 length,
                 mm_hash: Some(identifier.to_string()),
                 is_embed: Vec::new(),
+                metadata: None,
+                tensors: Default::default(),
             },
         )),
         mime_type: String::new(),
         uuid: String::new(),
+        ..Default::default()
     }
 }
 
@@ -1286,6 +1293,41 @@ async fn generate_validates_preprocessed_model_limits_and_prompt() {
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 #[serial]
+async fn generate_rejects_untrusted_mm_kwargs() {
+    let (mut client, server_task, _engine_task) =
+        grpc_test_server(b"engine-grpc-mm-kwargs", default_stream_output_specs()).await;
+
+    let kwargs = prost_types::Struct {
+        fields: [(
+            "max_pixels".to_string(),
+            prost_types::Value {
+                kind: Some(prost_types::value::Kind::NumberValue(4096.0)),
+            },
+        )]
+        .into(),
+    };
+    let num_frames =
+        super::convert::json_to_proto_struct(&serde_json::json!({"video": {"num_frames": 4}}));
+    for (processor, io) in [(Some(kwargs), None), (None, num_frames)] {
+        let status = client
+            .generate_stream(pb::GenerateRequest {
+                request_id: "test-mm-kwargs".to_string(),
+                model: "test-model".to_string(),
+                prompt: Some(pb::generate_request::Prompt::Text("hi".to_string())),
+                mm_processor_kwargs: processor,
+                media_io_kwargs: io,
+                ..Default::default()
+            })
+            .await
+            .expect_err("untrusted per-request mm kwargs must be rejected");
+        assert_eq!(status.code(), tonic::Code::InvalidArgument);
+        assert!(status.message().contains("--trust-request-mm-kwargs"));
+    }
+    server_task.abort();
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+#[serial]
 async fn streaming_generate_rejects_text_prompt_with_media() {
     let (mut client, server_task, _engine_task) = grpc_test_server(
         b"engine-grpc-stream-media-text",
@@ -1307,6 +1349,7 @@ async fn streaming_generate_rejects_text_prompt_with_media() {
                 )),
                 mime_type: String::new(),
                 uuid: "image-1".to_string(),
+                ..Default::default()
             }],
             ..Default::default()
         })
@@ -1339,6 +1382,7 @@ async fn unary_generate_accepts_request_larger_than_tonic_default() {
                 source: Some(pb::media_item::Source::RawBytes(vec![0; 5 * 1024 * 1024])),
                 mime_type: "image/png".to_string(),
                 uuid: "image-1".to_string(),
+                ..Default::default()
             }],
             ..Default::default()
         })
@@ -3522,12 +3566,12 @@ async fn render_chat_returns_preprocessed_media_for_generate() {
     assert!(features.mm_hash.is_some());
 
     // The media decodes the way Inference.Generate decodes it.
-    let decoded = super::media::from_proto(rendered.media, None).expect("decode media");
-    assert!(
-        !decoded.preprocessed.is_empty(),
-        "expected preprocessed media"
-    );
-    assert!(decoded.preprocessed[0].data.is_some());
+    let decoded = super::media::from_proto(rendered.media, None, false).expect("decode media");
+    let vllm_chat::multimodal::MultimodalInput::Preprocessed(features) = decoded else {
+        panic!("expected preprocessed media");
+    };
+    assert!(!features.is_empty(), "expected preprocessed media");
+    assert!(features[0].data.is_some());
 }
 
 #[tokio::test]

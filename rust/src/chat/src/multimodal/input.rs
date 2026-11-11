@@ -2,41 +2,75 @@
 // SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 
 use llm_multimodal::MediaContentPart;
+use serde_json::{Map, Value};
 use vllm_engine_core_client::protocol::multimodal::MmFeatures;
 
-/// Media supplied by a frontend handler for an already-tokenized prompt.
-#[derive(Debug, Default)]
-pub struct MultimodalInput {
-    /// Preprocessed features, whose placeholders are already expanded in the
-    /// prompt; validated against storage, batching, model, and prompt
-    /// constraints.
-    pub preprocessed: MmFeatures,
-    /// Raw media to fetch and preprocess. Their placeholders are expanded only
-    /// in the prompt tokens after the last preprocessed range, which are left
-    /// as they are.
-    pub raw: Vec<MediaContentPart>,
+/// Media preparation stage supplied by a frontend handler.
+#[derive(Debug)]
+pub enum MultimodalInput {
+    /// Raw media to fetch and preprocess, expanding prompt placeholders as needed.
+    Raw(Vec<MediaContentPart>),
+    /// Preprocessed features to validate against storage, batching, model, and prompt constraints.
+    Preprocessed(MmFeatures),
+    /// Features already placed in the prompt plus raw items still sitting at
+    /// their single placeholder marker. Raw items expand in place; feature
+    /// offsets after them shift by the growth.
+    Mixed {
+        raw: Vec<PlacedMedia>,
+        features: MmFeatures,
+    },
+    /// Features already expanded in the prompt, plus raw items whose
+    /// placeholders sit only after the last feature range. This is `/generate`
+    /// with both `features` and `content_parts`.
+    Appended {
+        features: MmFeatures,
+        raw: Vec<MediaContentPart>,
+    },
+}
+
+/// One raw media item whose placeholder marker is at `marker_offset`.
+#[derive(Debug, Clone)]
+pub struct PlacedMedia {
+    pub part: MediaContentPart,
+    pub marker_offset: usize,
 }
 
 impl MultimodalInput {
     pub fn is_empty(&self) -> bool {
-        self.preprocessed.is_empty() && self.raw.is_empty()
+        match self {
+            Self::Raw(parts) => parts.is_empty(),
+            Self::Preprocessed(features) => features.is_empty(),
+            Self::Mixed { raw, features } => raw.is_empty() && features.is_empty(),
+            Self::Appended { raw, features } => raw.is_empty() && features.is_empty(),
+        }
     }
 }
 
 impl From<Vec<MediaContentPart>> for MultimodalInput {
     fn from(raw: Vec<MediaContentPart>) -> Self {
-        Self {
-            raw,
-            ..Default::default()
-        }
+        Self::Raw(raw)
     }
 }
 
 impl From<MmFeatures> for MultimodalInput {
-    fn from(preprocessed: MmFeatures) -> Self {
-        Self {
-            preprocessed,
-            ..Default::default()
-        }
+    fn from(features: MmFeatures) -> Self {
+        Self::Preprocessed(features)
+    }
+}
+
+/// Per-request preprocessing options, as in the Python frontend.
+#[derive(Debug, Clone, Default, PartialEq)]
+pub struct MediaOptions {
+    /// Overrides merged into the image and video preprocessor configs.
+    pub processor_kwargs: Map<String, Value>,
+    /// `media_io_kwargs.video.num_frames`: the loader's frame budget, where `0`
+    /// keeps every frame as vLLM reads `-1`. The sampling rate travels on each
+    /// video part instead.
+    pub video_num_frames: Option<usize>,
+}
+
+impl MediaOptions {
+    pub fn is_empty(&self) -> bool {
+        self.processor_kwargs.is_empty() && self.video_num_frames.is_none()
     }
 }
