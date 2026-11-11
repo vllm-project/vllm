@@ -147,14 +147,12 @@ def _group_layer_specs(group: KVCacheGroupSpec) -> tuple[KVCacheSpec, ...]:
 def resolve_store_tp_size(extra_config: dict[str, Any]) -> int | None:
     """Resolve the common Store TP requested by connector config."""
     if extra_config.get("enable_store_tp_lcm") is True:
-        prefill_tp_sizes = extra_config.get("prefill_tp_sizes")
-        if not isinstance(prefill_tp_sizes, list) or not prefill_tp_sizes:
+        tp_sizes = extra_config.get("tp_sizes", extra_config.get("prefill_tp_sizes"))
+        if not isinstance(tp_sizes, list) or not tp_sizes:
             return None
-        if any(
-            type(tp_size) is not int or tp_size <= 0 for tp_size in prefill_tp_sizes
-        ):
+        if any(type(tp_size) is not int or tp_size <= 0 for tp_size in tp_sizes):
             return None
-        return math.lcm(*prefill_tp_sizes)
+        return math.lcm(*tp_sizes)
 
     store_tp_size = extra_config.get("store_tp_size")
     return store_tp_size if type(store_tp_size) is int and store_tp_size > 0 else None
@@ -1870,7 +1868,7 @@ class MooncakeStoreWorker:
             f"rank_local_tp{self.tp_size}_layout_{cache_layout.name}"
         )
         requested_topology = (
-            extra_config.get("prefill_tp_sizes")
+            extra_config.get("tp_sizes", extra_config.get("prefill_tp_sizes"))
             if lcm_store_tp_enabled
             else extra_config.get("store_tp_size")
         )
