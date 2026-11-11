@@ -417,6 +417,22 @@ class EncoderBucketing:
 # -------------------------------------------------------------- install
 
 
+def _gpu_execution_supported() -> bool:
+    """Whether the GPU encoder runner executes on this worker.
+
+    Bucketing engages in `EncoderRunner._bucket_mm_batch`, which only the GPU
+    worker (`vllm/v1/worker/gpu/mm/encoder_runner.py`) wires into
+    `execute_mm_encoder`. On other execution paths no consumer ever reads the
+    bucketer, so the feature must stay off entirely -- no shim, original
+    forward -- rather than install a shim nothing consumes. Checked with the
+    platform API (`current_platform.is_cuda_alike()`), the repo's standard way
+    to gate a GPU-only feature.
+    """
+    from vllm.platforms import current_platform
+
+    return current_platform.is_cuda_alike()
+
+
 def install_encoder_bucketing(
     model: nn.Module,
     encoders: Mapping[str, nn.Module],
@@ -429,8 +445,9 @@ def install_encoder_bucketing(
 
     The encoder-owning model passes its encoder(s) as a `label -> module` mapping
     and its `EncoderBucketingSpec` from its constructor. Bucketing engages only
-    when the model is in `_VERIFIED_FOR_BUCKETING` (the gate restricting the
-    feature to adapted models), the spec is declared, and
+    on GPU execution paths (GPU-only: the GPU encoder runner is the sole
+    consumer), when the model is in `_VERIFIED_FOR_BUCKETING` (the gate
+    restricting the feature to adapted models), the spec is declared, and
     `additional_config.audio_bucket_seconds` is set. When it engages, any encoder
     with a fixed-window recipe gets the variable-length shim so rung inputs are
     accepted, and the bucketer is registered on `model` for
@@ -469,6 +486,14 @@ def install_encoder_bucketing(
     lossless = None
     min_bucket_size = _min_bucket_size(additional_config)
     seconds = _ladder_seconds(additional_config)
+    if seconds is not None and not _gpu_execution_supported():
+        logger.warning(
+            "Encoder length bucketing is a GPU-only feature (only the GPU "
+            "encoder runner consumes the bucketer); this worker is not a GPU "
+            "execution path, so bucketing stays disabled and the original "
+            "encoder forward runs unchanged."
+        )
+        seconds = None
     if seconds is not None:
         lossless = _VERIFIED_FOR_BUCKETING.get(model_type)
         if lossless is None:

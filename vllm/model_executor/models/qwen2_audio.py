@@ -180,6 +180,20 @@ def _qwen2audio_varlen_shim(
     Returns:
         A `BaseModelOutput` whose `last_hidden_state` is the encoder output.
     """
+    # Mirrors ``Qwen2AudioEncoder.forward`` (transformers
+    # models/qwen2_audio/modeling_qwen2_audio.py) minus the fixed-length
+    # assumption; line refs are to transformers 5.20.2:
+    #   conv1 -> gelu -> conv2 -> gelu: forward L78-79 (conv1 kernel 3 stride 1,
+    #     conv2 kernel 3 stride 2);
+    #   permute + add embed_positions: forward L81-84, but sliced to
+    #     ``[:x.size(1)]`` so a rung shorter than the fixed window indexes only
+    #     the leading positions (identical to the full weight when the input is
+    #     full-length, i.e. x.size(1) == max_source_positions);
+    #   attention layers: forward L87-101 (the eval-identity dropout L85 and
+    #     layerdrop are omitted here);
+    #   permute + avg_pooler + permute + layer_norm: forward L104-108.
+    # The upstream dtype/device cast (forward L76) is omitted because the runner
+    # already hands the encoder a tensor on the module's device/dtype.
     x = F.gelu(module.conv1(input_features))
     x = F.gelu(module.conv2(x)).permute(0, 2, 1)
     x = x + module.embed_positions.weight[: x.size(1)]
