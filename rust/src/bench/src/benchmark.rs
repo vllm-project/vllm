@@ -13,7 +13,9 @@ use crate::backends::{RequestFuncInput, RequestFuncOutput, get_backend};
 use crate::cli::{BackendKind, DatasetName, LoraAssignment};
 use crate::config::BenchConfig;
 use crate::error::{BenchError, Result};
-use crate::metrics::calculator::{calculate_embedding_metrics, calculate_metrics};
+use crate::metrics::calculator::{
+    attach_client_queue_metrics, calculate_embedding_metrics, calculate_metrics,
+};
 use crate::metrics::steady_state;
 use crate::output::console::print_results;
 use crate::output::json::{append_result, build_result_json, compute_result_filename, save_result};
@@ -986,6 +988,8 @@ pub async fn run_benchmark(config: &BenchConfig) -> Result<serde_json::Value> {
                     tokio::time::sleep(target - now).await;
                 }
 
+                let arrival = Instant::now();
+
                 // Acquire semaphore permit
                 let _permit = if let Some(ref s) = sem {
                     Some(s.acquire().await.unwrap())
@@ -1022,7 +1026,7 @@ pub async fn run_benchmark(config: &BenchConfig) -> Result<serde_json::Value> {
                 // for both start_time and ttft/itl, keeping them on the
                 // same clock. We do the same with Instant.
                 let request_instant = Instant::now();
-                let output = match backend.send_request(&input, &client).await {
+                let mut output = match backend.send_request(&input, &client).await {
                     Ok(mut output) => {
                         // Override SystemTime-based start_time with monotonic offset
                         output.start_time =
@@ -1042,6 +1046,7 @@ pub async fn run_benchmark(config: &BenchConfig) -> Result<serde_json::Value> {
                     pb.inc(1);
                 }
 
+                output.client_queue_time = request_instant.duration_since(arrival).as_secs_f64();
                 output
             }),
         ));
@@ -1097,6 +1102,14 @@ pub async fn run_benchmark(config: &BenchConfig) -> Result<serde_json::Value> {
         )
     };
 
+    attach_client_queue_metrics(
+        &mut metrics,
+        &outputs,
+        config.max_concurrency,
+        config.request_rate,
+        &config.selected_percentiles,
+    );
+
     // Attach steady-state metrics when the closed-loop scope gate passes.
     // Trace replay is open-loop: an in-flight plateau there reflects a burst
     // in the trace, not a saturated server, so it is out of scope.
@@ -1149,15 +1162,15 @@ pub async fn run_benchmark(config: &BenchConfig) -> Result<serde_json::Value> {
     }
 
     // Build result JSON
-    let date_iso = chrono::Utc::now().format("%Y-%m-%dT%H:%M:%SZ").to_string();
-    let dt_filename = chrono::Local::now().format("%Y%m%d-%H%M%S").to_string();
+    let current_dt = chrono::Local::now().format("%Y%m%d-%H%M%S").to_string();
     let mut result_json = build_result_json(
         config,
+        &model_id,
         &metrics,
         &actual_output_lens,
         &outputs,
         benchmark_duration,
-        &date_iso,
+        &current_dt,
         spec_decode_stats.as_ref(),
     );
     if let Some(ramp_up) = &config.ramp_up {
@@ -1179,8 +1192,7 @@ pub async fn run_benchmark(config: &BenchConfig) -> Result<serde_json::Value> {
 
     // Save if requested
     if config.save_result || config.append_result {
-        let model_for_filename = config.model.as_deref().unwrap_or(&model_id);
-        let file_name = compute_result_filename(config, model_for_filename, &dt_filename);
+        let file_name = compute_result_filename(config, &model_id, &current_dt);
 
         // Create result directory if needed
         if let Some(ref dir) = config.result_dir {
