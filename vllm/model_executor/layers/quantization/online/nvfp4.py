@@ -17,7 +17,10 @@ from vllm.model_executor.layers.fused_moe.oracle.nvfp4 import (
     make_nvfp4_moe_quant_config,
     select_nvfp4_moe_backend,
 )
-from vllm.model_executor.layers.quantization.online.fp8 import OnlineLinearBase
+from vllm.model_executor.layers.quantization.online.fp8 import (
+    OnlineLinearBase,
+    _is_tp_sharded,
+)
 from vllm.model_executor.layers.quantization.online.moe_base import (
     OnlineMoEMethodBase,
 )
@@ -31,6 +34,7 @@ from vllm.model_executor.layers.quantization.utils.nvfp4_emulation_utils import 
 from vllm.model_executor.layers.quantization.utils.quant_utils import (
     QuantKey,
     amax_for_moe_weight_quant,
+    amax_for_tp_weight_quant,
     kNvfp4DynamicToken,
     kNvfp4Static,
     weight_amax,
@@ -43,15 +47,16 @@ NVFP4_BLOCK_SIZE = 16
 
 
 def _quantize_nvfp4(
-    weight: torch.Tensor, chunk_rows: int = 8192
+    weight: torch.Tensor, amax: torch.Tensor, chunk_rows: int = 8192
 ) -> tuple[torch.Tensor, torch.Tensor, torch.Tensor]:
     """NVFP4-quantize the rows of `weight` without the SM100+ quant kernel.
 
-    Returns packed E2M1 codes (low nibble first), E4M3 scales per 16 values and
-    the fp32 dequantization global scale, in the checkpoint layout.
+    `amax` sets the global scale. Returns packed E2M1 codes (low nibble first),
+    E4M3 scales per 16 values and the fp32 dequantization global scale, in the
+    checkpoint layout.
     """
     global_scale = (
-        weight_amax(weight).float() / (FLOAT4_E2M1_MAX * FLOAT8_E4M3_MAX)
+        amax.float().reshape(()) / (FLOAT4_E2M1_MAX * FLOAT8_E4M3_MAX)
     ).clamp(min=1e-12)
     inv_global_scale = (1.0 / global_scale).reshape(())
     # E2M1 magnitudes 0, 0.5, ..., 6 doubled to integers, mapped to their codes.
@@ -79,7 +84,8 @@ class Nvfp4WeightOnlyOnlineLinearMethod(OnlineLinearBase):
     """Online weight-only NVFP4 (W4A16) linear method.
 
     Quantizes fp16/bf16 weights to NVFP4 during loading, with one global scale
-    per weight shard, and runs them on the platform's W4A16 kernel.
+    per weight shared across TP ranks, and runs them on the platform's W4A16
+    kernel.
     Activations stay in the model dtype.
     """
 
@@ -119,7 +125,10 @@ class Nvfp4WeightOnlyOnlineLinearMethod(OnlineLinearBase):
             return
 
         weight = self.get_weight_for_quantization(layer)
-        packed, scales, global_scale = _quantize_nvfp4(weight)
+        amax = amax_for_tp_weight_quant(
+            weight_amax(weight).float().reshape(1), _is_tp_sharded(layer)
+        )
+        packed, scales, global_scale = _quantize_nvfp4(weight, amax)
 
         replace_parameter(layer, "weight", packed)
         replace_parameter(layer, "weight_scale", scales)

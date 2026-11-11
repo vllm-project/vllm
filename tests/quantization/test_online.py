@@ -354,7 +354,7 @@ def test_online_nvfp4_weight_only_linear_matches_dequantized_weight(
         )
     layer.weight.weight_loader(layer.weight, weight)
 
-    packed, scales, global_scale = _quantize_nvfp4(weight)
+    packed, scales, global_scale = _quantize_nvfp4(weight, weight_amax(weight))
     dequantized = dequantize_to_dtype(
         packed, scales, global_scale, torch.bfloat16, swizzle=False
     )
