@@ -68,7 +68,18 @@ class MultiModuleMTPSpeculator(DraftModelSpeculator):
             device=self.device,
         )
 
+        # Number of right-aligned valid entries in each request's cache window.
+        # Written by cache_inputs and read by the re-prefill kernels. Reset when
+        # a request slot is admitted, so a reused slot never exposes the
+        # previous occupant's tokens or hidden states.
+        self.cached_num_valid = torch.zeros(
+            self.max_num_reqs, dtype=torch.int32, device=self.device
+        )
+
         self.cudagraph_manager: SpeculatorCudaGraphManager | None = None
+
+    def add_request(self, req_index: int) -> None:
+        self.cached_num_valid[req_index] = 0
 
     def load_draft_model(
         self,
@@ -360,6 +371,7 @@ class MultiModuleMTPSpeculator(DraftModelSpeculator):
             self.last_token_indices,
             self.max_num_reqs,
             self.num_speculative_steps,
+            self.cached_num_valid,
         )
 
         # Compute the input embeddings with the MM embeddings merged in.
@@ -394,6 +406,7 @@ class MultiModuleMTPSpeculator(DraftModelSpeculator):
             self.input_buffers,
             num_rejected,
             self.num_speculative_steps,
+            self.cached_num_valid,
         )
 
     def _generate_drafts(
@@ -428,6 +441,7 @@ class MultiModuleMTPSpeculator(DraftModelSpeculator):
             num_reqs,
             self.num_speculative_steps,
             use_input_embeds=self.inputs_embeds is not None,
+            cached_num_valid=self.cached_num_valid,
         )
 
         for step in range(self.num_speculative_steps):
@@ -486,6 +500,7 @@ class MultiModuleMTPSpeculator(DraftModelSpeculator):
 
 @triton.jit
 def _prepare_input_buffers_kernel(
+    cached_num_valid_ptr,
     last_token_indices_ptr,
     draft_input_ids_ptr,
     draft_positions_ptr,
@@ -521,7 +536,10 @@ def _prepare_input_buffers_kernel(
     # the last decode step that need to be re-prefilled to update the stale
     # KV cache slots in later MTP modules.
     num_rejected = tl.load(num_rejected_ptr + req_idx)
-    num_reprefill_tokens = max(0, num_rejected - 1)
+    # Re-prefill only the entries the cache holds for this request. Stale
+    # entries from a previous occupant of the slot are never read.
+    num_cached = tl.load(cached_num_valid_ptr + req_state_idx)
+    num_reprefill_tokens = tl.minimum(max(0, num_rejected - 1), num_cached)
 
     # The rejected tokens are excluded as inputs to the draft model.
     num_input_tokens = query_len - num_rejected
@@ -641,8 +659,11 @@ def prepare_input_buffers(
     last_token_indices: torch.Tensor,
     max_num_reqs: int,
     num_speculative_steps: int,
+    # [max_num_reqs]
+    cached_num_valid: torch.Tensor,
 ) -> None:
     _prepare_input_buffers_kernel[(num_reqs,)](
+        cached_num_valid,
         last_token_indices,
         input_buffers.input_ids,
         input_buffers.positions,
@@ -669,6 +690,7 @@ def prepare_input_buffers(
 
 @triton.jit
 def _prepare_input_hidden_states_and_embeddings_kernel(
+    cached_num_valid_ptr,
     draft_input_hidden_states_ptr,
     draft_input_hidden_states_stride0,
     target_hidden_states_ptr,
@@ -705,7 +727,8 @@ def _prepare_input_hidden_states_and_embeddings_kernel(
     # the last decode step that need to be re-prefilled to update the stale
     # KV cache slots in later MTP modules.
     num_rejected = tl.load(num_rejected_ptr + req_idx)
-    num_reprefill_hidden_states = max(0, num_rejected - 1)
+    num_cached = tl.load(cached_num_valid_ptr + req_state_idx)
+    num_reprefill_hidden_states = tl.minimum(max(0, num_rejected - 1), num_cached)
 
     # The rejected tokens are excluded as inputs to the draft model.
     num_input_hidden_states = query_len - num_rejected
@@ -790,6 +813,8 @@ def prepare_input_hidden_states_and_embeddings(
     # [num_reqs]
     num_rejected: torch.Tensor,
     num_speculative_steps: int,
+    # [max_num_reqs]
+    cached_num_valid: torch.Tensor,
 ) -> None:
     use_input_embeds = input_embeds is not None
     hidden_size = target_hidden_states.shape[-1]
@@ -801,6 +826,7 @@ def prepare_input_hidden_states_and_embeddings(
         triton.cdiv(hidden_size, hidden_block_size),
     )
     _prepare_input_hidden_states_and_embeddings_kernel[grid](
+        cached_num_valid,
         hidden_states,
         hidden_states.stride(0),
         target_hidden_states,
@@ -877,6 +903,7 @@ def pad_trailing_draft_slots(
 
 @triton.jit
 def _cache_inputs_kernel(
+    cached_num_valid_ptr,
     draft_input_ids_ptr,
     draft_input_embeds_ptr,
     draft_input_embeds_stride0,
@@ -954,6 +981,12 @@ def _cache_inputs_kernel(
             mask=mask,
         )
 
+    if block_idx == 0:
+        # Entries written this step are right-aligned in the window. Older
+        # entries sit at shifted slots, so they are not counted as valid.
+        num_written = last_token_index + 1 - tl.maximum(window_start, query_start)
+        tl.store(cached_num_valid_ptr + req_state_idx, tl.maximum(num_written, 0))
+
 
 def cache_inputs(
     input_buffers: InputBuffers,
@@ -974,10 +1007,13 @@ def cache_inputs(
     num_reqs: int,
     num_speculative_steps: int,
     use_input_embeds: bool,
+    # [max_num_reqs]
+    cached_num_valid: torch.Tensor,
 ) -> None:
     hidden_size = draft_input_hidden_states.shape[-1]
     hidden_block_size = 1024
     _cache_inputs_kernel[(num_reqs, triton.cdiv(hidden_size, hidden_block_size))](
+        cached_num_valid,
         input_buffers.input_ids,
         draft_input_embeds,
         draft_input_embeds.stride(0) if draft_input_embeds is not None else 0,
