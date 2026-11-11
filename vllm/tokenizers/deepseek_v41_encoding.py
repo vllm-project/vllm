@@ -4,6 +4,11 @@
 
 """Text encoding adapted from the DeepSeek V4.1 reference encoder.
 
+Differences from the reference:
+- `developer` messages are supported and render as user turns.
+- Images arrive as placeholders; deepseek_v41.py flattens content first.
+- Tool namespaces (`ns::name`) are not supported.
+
 Message normalization and serving controls live in deepseek_v41.py.
 """
 
@@ -89,6 +94,7 @@ def merge_tool_messages(messages: List[Dict[str, Any]]) -> List[Dict[str, Any]]:
                 "type": "tool_result",
                 "tool_use_id": msg.get("tool_call_id", ""),
                 "content": msg.get("content", ""),
+                "_image_indices": msg.get("_image_indices", []),
             }
             # Merge into previous message if it's already a user (merged tool)
             if (
@@ -107,7 +113,13 @@ def merge_tool_messages(messages: List[Dict[str, Any]]) -> List[Dict[str, Any]]:
         elif role == "user":
             content_blocks = msg.get("content_blocks")
             if content_blocks is None:
-                content_blocks = [{"type": "text", "text": msg.get("content", "")}]
+                content_blocks = [
+                    {
+                        "type": "text",
+                        "text": msg.get("content", ""),
+                        "_image_indices": msg.get("_image_indices", []),
+                    }
+                ]
             if (
                 merged
                 and merged[-1].get("role") == "user"
@@ -181,8 +193,8 @@ REASONING_EFFORT_TEMPLATE = (
     "(range 1-100, the higher the value, the more thorough the reasoning)\n\n"
 )
 REASONING_EFFORT_MAPPINGS: Dict[str, int] = {
-    "low": 25,
-    "high": 50,
+    "low": 50,
+    "high": 75,
     "xhigh": 75,
     "max": 100,
 }
@@ -296,11 +308,18 @@ def find_last_user_index(messages: List[Dict[str, Any]]) -> int:
 
     V4.1 supports mid-conversation system messages, which count as user
     messages for the purposes of the assistant generation header.
+    User messages containing only tool results do not start a new turn.
     """
     last_user_index = -1
     for idx in range(len(messages) - 1, -1, -1):
         role = messages[idx].get("role")
         if role in ["user", "developer"] or (role == "system" and idx > 0):
+            content_blocks = messages[idx].get("content_blocks")
+            if content_blocks and not any(
+                block.get("type") in ("text", "image", "image_url")
+                for block in content_blocks
+            ):
+                continue
             last_user_index = idx
             break
     return last_user_index
@@ -312,6 +331,9 @@ def render_message(
     thinking_mode: str,
     drop_thinking: bool = True,
     reasoning_effort: Union[str, int, None] = None,
+    image_order: Optional[List[int]] = None,
+    add_generation_prompt: bool = True,
+    continue_final_message: bool = False,
 ) -> str:
     """
     Render a single message at the given index into its V4.1 encoded string form.
@@ -330,7 +352,17 @@ def render_message(
     response_format = msg.get("response_format")
     tool_calls = msg.get("tool_calls")
     reasoning_content = msg.get("reasoning_content")
-    wo_eos = msg.get("wo_eos", False)
+    is_last = index == len(messages) - 1
+    wo_eos = msg.get("wo_eos", False) or (is_last and continue_final_message)
+
+    # Collect source indices only from content that survives preprocessing.
+    if image_order is not None:
+        if role == "user" and msg.get("content_blocks"):
+            for block in msg["content_blocks"]:
+                if block.get("type") in ("text", "tool_result"):
+                    image_order.extend(block.get("_image_indices", []))
+        else:
+            image_order.extend(msg.get("_image_indices", []))
 
     if tools:
         tools = tools_from_openai_format(tools)
@@ -446,6 +478,14 @@ def render_message(
                 thinking_part = (
                     thinking_template.format(reasoning_content=rc) + thinking_end_token
                 )
+                if (
+                    is_last
+                    and continue_final_message
+                    and rc
+                    and not summary_content
+                    and not tc_content
+                ):
+                    thinking_part = rc
             else:
                 thinking_part = ""
 
@@ -463,6 +503,10 @@ def render_message(
             )
     else:
         raise NotImplementedError(f"Unknown role: {role}")
+
+    # Historical assistant separators are needed even without a generation prompt.
+    if is_last and not add_generation_prompt:
+        return prompt
 
     # Append transition tokens based on what follows
     if index + 1 < len(messages) and messages[index + 1].get("role") not in [
@@ -492,8 +536,11 @@ def render_message(
             )
             prompt += task_sp_token
 
-    elif messages[index].get("role") in ["user", "developer"] or (
-        messages[index].get("role") == "system" and index > 0
+    elif (
+        messages[index].get("role") in ["user", "developer"]
+        or (messages[index].get("role") == "system" and index > 0)
+        # A final assistant message left open by wo_eos is not followed by a turn.
+        or (is_last and role == "assistant" and not wo_eos)
     ):
         # Normal generation: append Assistant + thinking token
         # (mid-conversation system messages also trigger the assistant header)
@@ -537,8 +584,18 @@ def encode_messages(
     drop_thinking: bool = True,
     add_default_bos_token: bool = True,
     reasoning_effort: Union[str, int, None] = None,
+    image_order: Optional[List[int]] = None,
+    add_generation_prompt: bool = True,
+    continue_final_message: bool = False,
 ) -> str:
     """Encode preprocessed (text-only) messages into the V4.1 prompt format."""
+    if continue_final_message:
+        if not messages or messages[-1].get("role") != "assistant":
+            raise ValueError(
+                "continue_final_message requires a final assistant message"
+            )
+        add_generation_prompt = False
+
     context = context if context else []
 
     # Preprocess: merge tool messages and sort tool results
@@ -572,6 +629,9 @@ def encode_messages(
             thinking_mode=thinking_mode,
             drop_thinking=effective_drop_thinking,
             reasoning_effort=reasoning_effort,
+            image_order=image_order,
+            add_generation_prompt=add_generation_prompt,
+            continue_final_message=continue_final_message,
         )
 
     return prompt

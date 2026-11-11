@@ -13,7 +13,7 @@ from vllm.v1.request import RequestStatus
 from vllm.v1.structured_output import StructuredOutputGrammar
 from vllm.v1.utils import ConstantList
 
-from .utils import create_requests, create_scheduler, mock_kv
+from .utils import EOS_TOKEN_ID, create_requests, create_scheduler, mock_kv
 
 pytestmark = pytest.mark.cpu_test
 
@@ -24,7 +24,6 @@ def _make_model_runner_output(
     req_ids = list(scheduler_output.num_scheduled_tokens.keys())
     return ModelRunnerOutput(
         req_ids=req_ids,
-        req_id_to_index={req_id: i for i, req_id in enumerate(req_ids)},
         sampled_token_ids=[[i] for i in range(len(req_ids))],
         logprobs=None,
         prompt_logprobs_dict={},
@@ -169,42 +168,6 @@ def test_connector_metadata_precedes_async_placeholder_advance(monkeypatch):
     scheduler.schedule()
 
     assert observed_placeholders == [0, 1]
-
-
-def test_preempt():
-    scheduler = create_scheduler(async_scheduling=True)
-    requests = create_requests(num_requests=10, max_tokens=20)
-
-    for req in requests:
-        scheduler.add_request(req)
-
-    sched_outputs: deque[SchedulerOutput] = deque()
-    sched_outputs.append(scheduler.schedule())
-    sched_outputs.append(scheduler.schedule())
-
-    abort_order = [0, 8, 3, 1, 6, 4, 2, 5, 7, 9]
-    abort_order_copy = abort_order.copy()
-
-    def abort_request():
-        if not abort_order:
-            return
-        req = requests[abort_order.pop(0)]
-        scheduler.finish_requests(req.request_id, RequestStatus.FINISHED_ABORTED)
-
-    while sched_outputs:
-        # Abort a scheduled request.
-        abort_request()
-        sched_output = sched_outputs.popleft()
-        model_runner_output = _make_model_runner_output(sched_output)
-        scheduler.update_from_output(sched_output, model_runner_output)
-
-        sched_output = scheduler.schedule()
-        if sched_output.num_scheduled_tokens:
-            sched_outputs.append(sched_output)
-
-    for i, req in enumerate(requests):
-        assert req.status == RequestStatus.FINISHED_ABORTED
-        assert req.num_output_tokens == abort_order_copy.index(i)
 
 
 def test_prefix_caching_for_prefill_dedup():
@@ -352,12 +315,14 @@ def test_abort_request_when_structured_output_fsm_cannot_advance():
     scheduler.kv_event_publisher = Mock()
     scheduler.finished_req_ids = set()
     scheduler.finished_req_ids_dict = None
-    scheduler.grammar_compile_error_reqs = set()
+    scheduler.grammar_compile_error_reqs = {}
+    scheduler.encoder_cache_mismatch_reqs = set()
     scheduler.vllm_config = Mock()
     scheduler.aux_output_connector = None
     scheduler.return_sampling_mask = False
     scheduler.recompute_kv_load_failures = False
     scheduler.defer_block_free = False
+    scheduler.num_spec_tokens = 0
     scheduler.make_stats = Mock(return_value=None)
     scheduler.max_model_len = 128
 
@@ -375,13 +340,11 @@ def test_abort_request_when_structured_output_fsm_cannot_advance():
         total_num_scheduled_tokens=1,
         scheduled_encoder_inputs={},
         scheduled_spec_decode_tokens={},
-        num_common_prefix_blocks=[],
         finished_req_ids=set(),
         free_encoder_mm_hashes=[],
     )
     model_runner_output = ModelRunnerOutput(
         req_ids=[request.request_id],
-        req_id_to_index={request.request_id: 0},
         sampled_token_ids=[[123]],
         logprobs=None,
         prompt_logprobs_dict={},
@@ -498,7 +461,6 @@ class PipelinedEngine:
                 self.emitted_position[token] = view[0] - len(tokens) + offset
         model_runner_output = ModelRunnerOutput(
             req_ids=req_ids,
-            req_id_to_index={req_id: i for i, req_id in enumerate(req_ids)},
             sampled_token_ids=sampled_token_ids,
             logprobs=None,
             prompt_logprobs_dict={},
@@ -536,7 +498,6 @@ def _create_async_pp_scheduler(
         async_scheduling=True,
         num_speculative_tokens=num_spec or None,
         speculative_method="ngram_gpu" if num_spec else None,
-        use_v2_model_runner=True,
         num_blocks=num_blocks,
         block_size=16,
         max_num_batched_tokens=512,
@@ -544,7 +505,7 @@ def _create_async_pp_scheduler(
     # Emulate PP at the scheduler level; constructing with
     # pipeline_parallel_size>1 requires that many visible GPUs. Drive with
     # queue_size=pp_size+1 (V2 async PP runs pp_size+1 concurrent batches).
-    scheduler.pp_size = pp_size
+    scheduler.decode_stagger = pp_size
     scheduler.use_pp = pp_size > 1
     return scheduler
 
@@ -584,7 +545,7 @@ def test_kv_pressure_preemption_with_inflight_output(num_spec: int):
 
     Regression for the num_output_placeholders underflow EngineCore crash:
     with the fix reverted, the num_spec=3 variant fails with exactly
-    ``assert request.num_output_placeholders >= 0`` when a stale spec output
+    `assert request.num_output_placeholders >= 0` when a stale spec output
     returns after the preempted request was resumed and sampled.
     """
     max_tokens = 24
@@ -801,3 +762,45 @@ def test_kv_pressure_preempt_mid_handoff(kv_role: str, defer_free: bool):
     else:
         assert handoff.is_finished()
         assert handoff.num_output_tokens == 1
+
+
+def test_resumable_request_handoff():
+    """New streaming input resumes with the correct context and stale results
+    are ignored.
+    """
+    scheduler = create_scheduler(async_scheduling=True)
+    engine = PipelinedEngine(scheduler, queue_size=3)
+    engine._next_token = EOS_TOKEN_ID
+
+    old_prompt_len = 10
+    continuation_len = 12
+    request_id = "resumable-race"
+
+    request = create_requests(
+        1, num_tokens=old_prompt_len, max_tokens=4, req_ids=[request_id]
+    )[0]
+    request.resumable = True
+    continuation = create_requests(
+        1, num_tokens=continuation_len, max_tokens=4, req_ids=[request_id]
+    )[0]
+    continuation.resumable = True
+
+    scheduler.add_request(request)
+
+    for _ in range(3):
+        assert engine._schedule()
+
+    engine._process_oldest_step()
+    scheduler.add_request(continuation)
+    assert engine._schedule()
+    new_step, _ = engine.queue[0]
+    assert new_step.scheduled_new_reqs[0].num_computed_tokens == old_prompt_len
+
+    all_token_ids_before_stale = list(request.all_token_ids)
+    for _ in range(2):
+        engine._process_oldest_step()
+    assert list(request.output_token_ids) == []
+    assert list(request.all_token_ids) == all_token_ids_before_stale
+
+    engine._process_oldest_step()
+    assert len(request.output_token_ids) == 1

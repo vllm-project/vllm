@@ -1,4 +1,4 @@
-model_name: "mgoin/Kimi-K3-pruned75"
+model_name: "vllm-project/Kimi-K3-pruned75"
 accuracy_threshold: 0.33
 min_acceptance_length: 4.8
 num_questions: 1319
@@ -9,7 +9,7 @@ server_args: >-
   --gpu-memory-utilization 0.90
   --tensor-parallel-size 4
   --load-format fastsafetensors
-  --no-enable-flashinfer-autotune
+  --disable-flashinfer-autotune
   --max-model-len 1048576
   --max-num-batched-tokens 16384
   --max-num-seqs 128

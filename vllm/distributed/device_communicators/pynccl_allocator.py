@@ -2,6 +2,7 @@
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 import atexit
 import contextlib
+import logging
 import tempfile
 from typing import Any
 
@@ -83,7 +84,7 @@ def compile_nccl_allocator():
             cpp_sources=nccl_allocator_source,
             with_cuda=True,
             extra_ldflags=ldflags,
-            verbose=envs.VLLM_LOGGING_LEVEL == "DEBUG",
+            verbose=logger.isEnabledFor(logging.DEBUG),
             is_python_module=False,
             build_directory=out_dir,
             extra_include_paths=nccl_include_paths,

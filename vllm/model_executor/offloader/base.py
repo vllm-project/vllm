@@ -143,26 +143,22 @@ def set_offloader(
             selected despite a non-zero offload budget having been
             requested, which can only mean the offload configuration was
             lost or reset somewhere before this call.
+
     """
     global _instance
     _instance = NoopOffloader() if instance is None else instance
     if isinstance(_instance, NoopOffloader):
-        requested_cpu_offload_gb = (
-            offload_config.uva.cpu_offload_gb if offload_config is not None else 0
-        )
-        requested_group_size = (
-            offload_config.prefetch.offload_group_size
-            if offload_config is not None
-            else 0
-        )
-        if requested_cpu_offload_gb > 0 or requested_group_size > 0:
+        if offload_config is not None and (
+            offload_config.uva.cpu_offload_gb > 0
+            or offload_config.prefetch.offload_group_size > 0
+        ):
             logger.warning_once(
                 "Offloader set to NoopOffloader, but cpu_offload_gb=%s and "
                 "offload_group_size=%s were requested (offload_backend=%r). "
                 "No CPU offloading will occur. The offload configuration was "
                 "likely lost or reset before reaching create_offloader().",
-                requested_cpu_offload_gb,
-                requested_group_size,
+                offload_config.uva.cpu_offload_gb,
+                offload_config.prefetch.offload_group_size,
                 offload_config.offload_backend,
             )
         else:
@@ -174,9 +170,9 @@ def set_offloader(
 def create_offloader(offload_config: "OffloadConfig") -> BaseOffloader:
     """Create an offloader based on the offload configuration.
 
-    Uses the explicit ``offload_backend`` selector.  When set to ``"auto"``,
-    selects prefetch if ``offload_group_size > 0``, UVA if
-    ``cpu_offload_gb > 0``, otherwise noop.
+    Uses the explicit `offload_backend` selector.  When set to `"auto"`,
+    selects prefetch if `offload_group_size > 0`, UVA if
+    `cpu_offload_gb > 0`, otherwise noop.
     """
     from vllm.model_executor.offloader.prefetch import PrefetchOffloader
     from vllm.model_executor.offloader.uva import UVAOffloader

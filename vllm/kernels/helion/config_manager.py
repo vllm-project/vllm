@@ -18,8 +18,8 @@ Platform files store config entries as a JSON array::
         ...,
     ]
 
-Config keys are ``CaseKey`` instances mapping parameter names to
-values.  The default config uses ``CaseKey.default()``.
+Config keys are `CaseKey` instances mapping parameter names to
+values.  The default config uses `CaseKey.default()`.
 """
 
 from __future__ import annotations
@@ -46,8 +46,8 @@ logger = init_logger(__name__)
 class ConfigSet:
     """In-memory collection of Helion configs with lookup/query capabilities.
 
-    Configs are stored keyed by ``CaseKey``.  The default config
-    uses ``CaseKey.default()`` as its key.
+    Configs are stored keyed by `CaseKey`.  The default config
+    uses `CaseKey.default()` as its key.
     """
 
     _ConfigDict = dict[str, dict[CaseKey, "helion.Config"]]
@@ -74,7 +74,7 @@ class ConfigSet:
                 f"If your GPU is a variant of a supported platform, "
                 f"consider adding a mapping in _GPU_NAME_ALIASES in "
                 f"vllm/kernels/helion/utils.py, or run "
-                f"scripts/autotune_helion_kernels.py to generate configs "
+                f"tools/autotune_helion_kernels.py to generate configs "
                 f"for your platform."
             )
 

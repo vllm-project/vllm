@@ -1,8 +1,8 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 
-from contextlib import contextmanager
-from unittest.mock import MagicMock, patch
+from typing import Literal
+from unittest.mock import patch
 
 import pytest
 import torch
@@ -14,6 +14,7 @@ from vllm.config import (
     VllmConfig,
     set_current_vllm_config,
 )
+from vllm.config.cache import CacheDType
 from vllm.platforms import current_platform
 from vllm.platforms.cpu import CpuPlatform
 from vllm.platforms.interface import DeviceCapability
@@ -26,7 +27,7 @@ else:
 if current_platform.is_rocm():
     from vllm.platforms.rocm import RocmPlatform
 else:
-    RocmPlatform = None
+    RocmPlatform = None  # type: ignore[misc]  # Unavailable platform import.
 
 from vllm.v1.attention.backend import AttentionType
 from vllm.v1.attention.backends.registry import AttentionBackendEnum
@@ -341,61 +342,6 @@ def test_fp32_fallback(device: str):
                 get_attn_backend(16, torch.float32, None)
 
 
-def test_flash_attn(monkeypatch: pytest.MonkeyPatch):
-    """Test FlashAttn validation."""
-    pytest.skip(
-        "Skipping as current backend selector does not "
-        "handle fallbacks when a backend is explicitly set."
-    )
-
-    attention_config = AttentionConfig(backend=AttentionBackendEnum.FLASH_ATTN)
-    cache_config = CacheConfig(block_size=16)
-    vllm_config = VllmConfig(
-        attention_config=attention_config, cache_config=cache_config
-    )
-
-    with set_current_vllm_config(vllm_config):
-        # Unsupported CUDA arch
-        monkeypatch.setattr(torch.cuda, "get_device_capability", lambda _=None: (7, 5))
-        backend = get_attn_backend(16, torch.float16, None)
-        assert backend.get_name() != "FLASH_ATTN"
-
-        # Reset the monkeypatch for subsequent tests
-        monkeypatch.undo()
-
-        # Unsupported data type
-        backend = get_attn_backend(16, torch.float8_e4m3fn, None)
-        assert backend.get_name() != "FLASH_ATTN"
-
-        # Unsupported kv cache data type
-        backend = get_attn_backend(16, torch.float16, "fp8")
-        assert backend.get_name() != "FLASH_ATTN"
-
-        # Unsupported block size
-        vllm_config.cache_config.block_size = 8
-        backend = get_attn_backend(16, torch.float16, None)
-        assert backend.get_name() != "FLASH_ATTN"
-
-        # flash-attn is not installed
-        import sys
-
-        vllm_config.cache_config.block_size = 16
-        original_module = sys.modules.get("vllm_flash_attn")
-        monkeypatch.setitem(sys.modules, "vllm_flash_attn", None)
-        backend = get_attn_backend(16, torch.float16, None)
-        assert backend.get_name() != "FLASH_ATTN"
-
-        # Restore the original module if it existed
-        if original_module is not None:
-            monkeypatch.setitem(sys.modules, "vllm_flash_attn", original_module)
-        else:
-            monkeypatch.delitem(sys.modules, "vllm_flash_attn", raising=False)
-
-        # Unsupported head size
-        backend = get_attn_backend(17, torch.float16, None)
-        assert backend.get_name() != "FLASH_ATTN"
-
-
 def test_invalid_backend():
     """Test that invalid attention backend names raise ValueError."""
     with (
@@ -461,7 +407,7 @@ def test_auto_backend_selection_behavior():
     reason="Attention backend FA3 is not supported on ROCm. This test can't succeed.",
 )
 def test_per_head_quant_scales_backend_selection(
-    backend_name: str, flash_attn_version: int | None, should_succeed: bool
+    backend_name: str, flash_attn_version: Literal[2, 3, 4] | None, should_succeed: bool
 ):
     """Test backend selection when use_per_head_quant_scales=True."""
     # Clear cache to ensure fresh backend selection
@@ -508,6 +454,32 @@ def test_per_head_quant_scales_backend_selection(
             assert backend_name in str(exc_info.value)
 
 
+@pytest.mark.skipif(
+    CudaPlatform is None and RocmPlatform is None,
+    reason="CUDA or ROCm platform is required for this test",
+)
+@pytest.mark.parametrize("head_size", [64, 80, 96, 128, 192, 256])
+def test_int4_per_token_head_head_size_selection(head_size: int):
+    """INT4 per-token-head KV cache is selectable at any even head size.
+
+    The Hadamard rotation the INT4 write path applies is now defined for
+    non-power-of-two rows as well (it runs block-diagonally, see
+    `fast_hadamard_transform`), so a model such as Phi-3 (head_size=96) must
+    keep selecting TRITON_ATTN instead of being rejected.
+    """
+    vllm_config = VllmConfig(cache_config=CacheConfig(block_size=64))
+    with (
+        set_current_vllm_config(vllm_config),
+        patch("vllm.platforms.current_platform", (CudaPlatform or RocmPlatform)()),
+    ):
+        backend = get_attn_backend(
+            head_size=head_size,
+            dtype=torch.float16,
+            kv_cache_dtype="int4_per_token_head",
+        )
+        assert backend.get_name() == "TRITON_ATTN"
+
+
 @pytest.mark.parametrize(
     "backend_name,use_non_causal,should_succeed",
     [
@@ -528,7 +500,7 @@ def test_non_causal_backend_selection(
 ):
     """Test that use_non_causal on AttentionConfig controls backend filtering.
 
-    DFlashProposer sets use_non_causal=True on the draft model's
+    DFlash draft model configs set use_non_causal=True on the
     AttentionConfig so only non-causal-capable backends are selected.
     The target model keeps use_non_causal=False (default) and can use
     any backend.
@@ -588,11 +560,12 @@ def test_non_causal_autoselect_backend():
         attention_config=attention_config, cache_config=cache_config
     )
 
-    if CudaPlatform is None:
-        pytest.skip("CudaPlatform not available")
+    platform = CudaPlatform or RocmPlatform
+    if platform is None:
+        pytest.skip("CudaPlatform and RocmPlatform are not available")
     with (
         set_current_vllm_config(vllm_config),
-        patch("vllm.platforms.current_platform", CudaPlatform()),
+        patch("vllm.platforms.current_platform", platform()),
     ):
         backend = get_attn_backend(
             head_size=128,
@@ -614,7 +587,7 @@ def test_non_causal_autoselect_backend():
         "int8_per_token_head",
     ],
 )
-def test_flash_attn_rejects_unhandled_kv_cache_dtypes(kv_cache_dtype: str):
+def test_flash_attn_rejects_unhandled_kv_cache_dtypes(kv_cache_dtype: CacheDType):
     """FlashAttentionBackend must not claim support for kv_cache dtypes
     that it cannot handle."""
     from vllm.v1.attention.backends.flash_attn import FlashAttentionBackend
@@ -624,7 +597,7 @@ def test_flash_attn_rejects_unhandled_kv_cache_dtypes(kv_cache_dtype: str):
 
 @pytest.mark.parametrize("kv_cache_dtype", ["fp8", "fp8_e4m3"])
 def test_flash_attn_accepts_handled_fp8_variants(
-    kv_cache_dtype: str, monkeypatch: pytest.MonkeyPatch
+    kv_cache_dtype: CacheDType, monkeypatch: pytest.MonkeyPatch
 ):
     """FlashAttentionBackend must accept the two fp8 dtypes it can actually
     handle: 'fp8' (alias for fp8_e4m3fn) and 'fp8_e4m3'."""
@@ -641,173 +614,6 @@ def test_flash_attn_accepts_handled_fp8_variants(
 blackwell_only = pytest.mark.skipif(
     not current_platform.is_cuda(), reason="FA4 is CUDA-only"
 )
-
-
-@contextmanager
-def _blackwell(vllm_config=None):
-    platform = MagicMock()
-    platform.is_xpu.return_value = False
-    platform.is_rocm.return_value = False
-    platform.get_device_capability.return_value = DeviceCapability(10, 0)
-    with (
-        patch("vllm.v1.attention.backends.fa_utils.current_platform", platform),
-        patch(
-            "vllm.vllm_flash_attn.flash_attn_interface.is_fa_version_supported",
-            return_value=True,
-        ),
-        patch("vllm.config.get_current_vllm_config_or_none", return_value=vllm_config),
-        patch(
-            "vllm.v1.attention.backends.flash_attn.get_current_vllm_config_or_none",
-            return_value=vllm_config,
-        ),
-    ):
-        yield
-
-
-def _hd256_config(
-    *,
-    is_mm_prefix_lm=False,
-    rswa_window=None,
-    dcp_size=1,
-    softcap=None,
-    head_size=256,
-    cache_dtype="auto",
-):
-    vllm_config = MagicMock()
-    vllm_config.attention_config.flash_attn_version = None
-    vllm_config.model_config.is_mm_prefix_lm = is_mm_prefix_lm
-    vllm_config.model_config.rswa_window = rswa_window
-    vllm_config.model_config.hf_text_config.attn_logit_softcapping = softcap
-    vllm_config.model_config.get_head_size.return_value = head_size
-    vllm_config.cache_config.cache_dtype = cache_dtype
-    vllm_config.parallel_config.decode_context_parallel_size = dcp_size
-    return vllm_config
-
-
-@blackwell_only
-@pytest.mark.parametrize(
-    "kwargs,config_kwargs,expected",
-    [
-        ({}, {}, 4),
-        ({"supports_fa4_hd256": False}, {}, 2),
-        ({"has_sinks": True}, {}, 2),
-        ({"requires_softcap": True}, {}, 2),
-        # Larger block sizes normalize to 128.
-        ({"kv_cache_block_size": 16}, {}, 2),
-        ({"kv_cache_block_size": 64}, {}, 2),
-        ({"kv_cache_block_size": 256}, {}, 4),
-        ({}, {"is_mm_prefix_lm": True}, 2),
-        ({}, {"rswa_window": 512}, 2),
-        ({}, {"dcp_size": 2}, 2),
-        ({}, {"softcap": 50.0}, 2),
-        ({}, {"cache_dtype": "fp8"}, 2),
-        ({"head_size": 128, "kv_cache_block_size": 16}, {}, 4),
-        ({"head_size": 192, "head_size_v": 128, "kv_cache_block_size": 16}, {}, 4),
-        ({"head_size": 256, "head_size_v": 128, "kv_cache_block_size": 16}, {}, 2),
-        ({"head_size": 256, "head_size_v": 64}, {}, 2),
-    ],
-)
-def test_fa4_hd256_fallback_matrix(kwargs, config_kwargs, expected):
-    from vllm.v1.attention.backends.fa_utils import get_flash_attn_version
-
-    kwargs = {
-        "head_size": 256,
-        "kv_cache_block_size": 128,
-        "supports_fa4_hd256": True,
-        **kwargs,
-    }
-    with _blackwell(_hd256_config(head_size=kwargs["head_size"], **config_kwargs)):
-        assert get_flash_attn_version(**kwargs) == expected
-
-
-@blackwell_only
-@pytest.mark.parametrize(
-    "backend_name,config_kwargs,expected",
-    [
-        ("FLASH_ATTN", {}, 128),
-        ("FLASH_ATTN", {"softcap": 50.0}, 16),
-        ("FLASH_ATTN", {"head_size": 128}, 16),
-        ("FLASH_ATTN", {"cache_dtype": "fp8"}, 16),
-        ("FLASH_ATTN_DIFFKV", {}, 16),
-    ],
-)
-def test_fa4_hd256_block_size_advertisement(
-    backend_name: str, config_kwargs: dict, expected: int
-):
-    from vllm.v1.attention.backend import MultipleOf
-    from vllm.v1.attention.backends.flash_attn import FlashAttentionBackend
-    from vllm.v1.attention.backends.flash_attn_diffkv import (
-        FlashAttentionDiffKVBackend,
-    )
-
-    backend = {
-        "FLASH_ATTN": FlashAttentionBackend,
-        "FLASH_ATTN_DIFFKV": FlashAttentionDiffKVBackend,
-    }[backend_name]
-    vllm_config = _hd256_config(**config_kwargs)
-    with _blackwell(vllm_config):
-        (size,) = backend.get_supported_kernel_block_sizes()
-        preferred = backend.get_preferred_block_size(16)
-    assert preferred == expected
-    if expected == 128:
-        assert size == 128
-    else:
-        assert isinstance(size, MultipleOf) and size.base == expected
-
-
-@blackwell_only
-def test_fa4_hd256_mm_prefix_deselects_flash_attn():
-    from vllm.v1.attention.backends.flash_attn import FlashAttentionBackend
-
-    with _blackwell(_hd256_config(is_mm_prefix_lm=True)):
-        assert (
-            FlashAttentionBackend.supports_combination(
-                head_size=256,
-                dtype=torch.bfloat16,
-                kv_cache_dtype=None,
-                block_size=128,
-                use_mla=False,
-                has_sink=False,
-                use_sparse=False,
-                use_mm_prefix=True,
-                device_capability=DeviceCapability(10, 0),
-            )
-            is not None
-        )
-
-
-@pytest.mark.skipif(
-    not current_platform.is_cuda()
-    or not current_platform.is_device_capability_family(100),
-    reason="requires a Blackwell GPU",
-)
-@pytest.mark.parametrize(
-    "attn_type,sliding_window,expected",
-    [
-        (AttentionType.DECODER, None, 4),
-        (AttentionType.DECODER, 512, 4),
-        # Local encoder attention lacks the required seqused tensors.
-        (AttentionType.ENCODER_ONLY, None, 4),
-        (AttentionType.ENCODER_ONLY, 512, 2),
-    ],
-)
-def test_fa4_hd256_impl_selection(attn_type, sliding_window, expected):
-    from vllm.v1.attention.backends.flash_attn import FlashAttentionImpl
-
-    # Implementations are constructed before the platform updates the block size.
-    with set_current_vllm_config(VllmConfig()):
-        impl = FlashAttentionImpl(
-            num_heads=8,
-            head_size=256,
-            scale=0.0625,
-            num_kv_heads=8,
-            alibi_slopes=None,
-            sliding_window=sliding_window,
-            kv_cache_dtype="auto",
-            attn_type=attn_type,
-        )
-    assert impl.vllm_flash_attn_version == expected
-    assert impl.fa4_hd256 == (expected == 4)
 
 
 @pytest.fixture
@@ -848,7 +654,7 @@ def hopper_selection():
 def test_hopper_mm_prefix_selects_triton_flash_attn(
     use_mm_prefix, flash_attn_version, hopper_selection
 ):
-    """Hopper selects the composite only when its causal route resolves FA4."""
+    """Hopper selects the composite when its causal route resolves FA3 or FA4."""
     from vllm.engine.arg_utils import EngineArgs
 
     config = EngineArgs(
@@ -860,11 +666,7 @@ def test_hopper_mm_prefix_selects_triton_flash_attn(
         backend = get_attn_backend(
             256, torch.bfloat16, None, use_mm_prefix=use_mm_prefix
         )
-    fa4_resolved = config.attention_config.flash_attn_version == 4
-    if use_mm_prefix:
-        expected = "TRITON_FLASH_ATTN" if fa4_resolved else "TRITON_ATTN"
-    else:
-        expected = "FLASH_ATTN"
+    expected = "TRITON_FLASH_ATTN" if use_mm_prefix else "FLASH_ATTN"
     assert backend.get_name() == expected
 
 
@@ -935,7 +737,9 @@ def test_rswa_selection_does_not_reuse_causal_result(blackwell_selection):
     config = EngineArgs(
         model="google/gemma-4-31B-it",
         dtype="bfloat16",
-        attention_config={"backend": "TRITON_FLASHINFER"},
+        attention_config=AttentionConfig(
+            backend=AttentionBackendEnum.TRITON_FLASHINFER
+        ),
     ).create_engine_config()
     with set_current_vllm_config(config):
         assert (

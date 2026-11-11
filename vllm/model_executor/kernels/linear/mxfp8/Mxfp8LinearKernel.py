@@ -15,8 +15,13 @@ class Mxfp8LinearLayerConfig:
 
     All MXFP8 layers share the same structure: FP8-E4M3 weights with
     uint8 (E8M0) per-block scales at block size 32.
+
+    Attributes:
+        weight_shape: The layer's `(out_features, in_features)`, i.e. `(N, K)`.
+
     """
 
+    weight_shape: tuple[int, int]
     bmm_batch_size: int | None = None
 
 
@@ -28,7 +33,7 @@ class Mxfp8LinearKernel(ABC):
     """
 
     supports_pre_processed_weights: bool = False
-    """True if ``process_weights_after_loading`` only rewrites parameters, so
+    """True if `process_weights_after_loading` only rewrites parameters, so
     weights exported by the weight cache daemon can be used as-is."""
 
     def __init__(self, c: Mxfp8LinearLayerConfig) -> None:

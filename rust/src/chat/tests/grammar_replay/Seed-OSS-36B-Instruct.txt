@@ -1,0 +1,2 @@
+# none_schema, auto_schema_content (final_output_only)
+json({ answer: string })

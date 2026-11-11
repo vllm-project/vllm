@@ -22,7 +22,7 @@ from typing import Any
 
 import torch
 from torch import nn
-from transformers import PretrainedConfig
+from transformers import PreTrainedConfig
 
 from vllm.compilation.decorators import support_torch_compile
 from vllm.config import CacheConfig, VllmConfig
@@ -60,7 +60,7 @@ from .utils import (
 class LoopCoderAttention(nn.Module):
     def __init__(
         self,
-        config: PretrainedConfig,
+        config: PreTrainedConfig,
         hidden_size: int,
         num_heads: int,
         num_kv_heads: int,
@@ -210,7 +210,7 @@ class LoopCoderAttention(nn.Module):
 class LoopCoderDecoderLayer(nn.Module):
     def __init__(
         self,
-        config: PretrainedConfig,
+        config: PreTrainedConfig,
         cache_config: CacheConfig | None = None,
         quant_config: QuantizationConfig | None = None,
         prefix: str = "",
@@ -386,12 +386,10 @@ class IQuestLoopCoderModel(nn.Module):
         ):
             assert config.max_window_layers == config.num_hidden_layers, (
                 "Sliding window for some but all layers is not supported. "
-                "This model uses sliding window but `max_window_layers` = {} "
-                "is less than `num_hidden_layers` = {}. Please open an issue "
-                "to discuss this feature.".format(
-                    config.max_window_layers,
-                    config.num_hidden_layers,
-                )
+                "This model uses sliding window but `max_window_layers` = "
+                f"{config.max_window_layers} is less than `num_hidden_layers` = "
+                f"{config.num_hidden_layers}. Please open an issue "
+                "to discuss this feature."
             )
 
         self.config = config

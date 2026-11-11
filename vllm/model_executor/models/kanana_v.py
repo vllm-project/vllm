@@ -2,7 +2,7 @@
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 from collections.abc import Iterable, Mapping, Sequence
 from functools import partial
-from typing import Annotated, Literal, TypeAlias
+from typing import Annotated, Any, Literal, TypeAlias, cast
 
 import numpy as np
 import regex as re
@@ -288,7 +288,7 @@ class CustomQwen2VLVE(Qwen2VisionTransformer):
         """Drop-in replacement for the HF `_from_config` constructor."""
         return cls(config)
 
-    def forward(
+    def forward(  # type: ignore[override]
         self,
         pixel_values: torch.Tensor,
         grid_thw: torch.Tensor,
@@ -331,12 +331,12 @@ class CustomQwen2VLVE(Qwen2VisionTransformer):
         # Pre-compute seqlens for attention backend.
         max_seqlen = self.compute_attn_mask_seqlen(cu_seqlens)
 
-        encoder_states = () if output_hidden_states else None
+        encoder_states: tuple[torch.Tensor, ...] = ()
 
         for blk in self.blocks:
             if output_hidden_states:
                 # Store patch-level states (S, D).
-                encoder_states = encoder_states + (x.squeeze(1),)
+                encoder_states += (x.squeeze(1),)
 
             x = blk(
                 x,
@@ -348,14 +348,15 @@ class CustomQwen2VLVE(Qwen2VisionTransformer):
 
         # Final hidden state at patch level (S, D).
         hidden_states = x.squeeze(1)
+        all_hidden_states = None
         if output_hidden_states:
-            encoder_states = encoder_states + (hidden_states,)
+            all_hidden_states = encoder_states + (hidden_states,)
 
         if not return_dict:
-            return tuple(v for v in [hidden_states, encoder_states] if v is not None)
+            return tuple(v for v in [hidden_states, all_hidden_states] if v is not None)
         return BaseModelOutput(
             last_hidden_state=hidden_states,
-            hidden_states=encoder_states,
+            hidden_states=all_hidden_states,
         )
 
     def get_num_tokens(self) -> int:
@@ -479,7 +480,7 @@ class KananaVMultiModalProcessor(BaseMultiModalProcessor[KananaVProcessingInfo])
         assert isinstance(prompt_text, str)
 
         # Images
-        image_inputs = hf_data.get("images", [])
+        image_inputs = cast(list[Any], hf_data.get("images", []))
         pixel_sizes = []
         if not isinstance(image_inputs[0], Image.Image):
             image_inputs = [Image.fromarray(image) for image in image_inputs]
@@ -487,9 +488,9 @@ class KananaVMultiModalProcessor(BaseMultiModalProcessor[KananaVProcessingInfo])
         image_processor = self.info.get_hf_processor().image_processor
         processor_output = [image_processor(image) for image in image_inputs]
         pixel_values = [o["pixel_values"] for o in processor_output]
-        image_meta = [o["image_meta"] for o in processor_output]
+        image_meta_list = [o["image_meta"] for o in processor_output]
         # list of dict -> dict of list
-        image_meta = {k: [d[k] for d in image_meta] for k in image_meta[0]}
+        image_meta = {k: [d[k] for d in image_meta_list] for k in image_meta_list[0]}
 
         for pixel_value in pixel_values:
             pixel_sizes.append(pixel_value.shape[0])
@@ -545,7 +546,7 @@ class KananaVMultiModalProcessor(BaseMultiModalProcessor[KananaVProcessingInfo])
     ) -> Sequence[PromptUpdate]:
         tokenizer = self.info.get_tokenizer()
 
-        def get_replacement(idx: int) -> Sequence[int]:
+        def get_replacement(idx: int) -> list[int]:
             out_item = out_mm_kwargs["image"][idx]
             image_token_thw = out_item["image_token_thw"].data
             assert isinstance(image_token_thw, torch.Tensor)
@@ -683,7 +684,7 @@ class KananaVForConditionalGeneration(nn.Module, SupportsMultiModal, SupportsPP)
     def _get_visual_feature_at(
         self,
         v_output: Sequence[torch.Tensor],
-        layer_index: int | Sequence[int],
+        layer_index: int | list[int] | tuple[int, ...],
     ) -> torch.Tensor:
         if isinstance(layer_index, (list, tuple)):
             visual_features = torch.stack(v_output, dim=1)[
@@ -696,7 +697,7 @@ class KananaVForConditionalGeneration(nn.Module, SupportsMultiModal, SupportsPP)
     def forward_vision(
         self,
         pixel_values: torch.Tensor,
-        image_metas: dict | None = None,
+        image_metas: dict,
     ) -> torch.Tensor:
         vision_model_args = {
             "pixel_values": pixel_values,
@@ -714,7 +715,7 @@ class KananaVForConditionalGeneration(nn.Module, SupportsMultiModal, SupportsPP)
     def forward_projector(
         self,
         visual_features: torch.Tensor,
-        image_metas: dict | None = None,
+        image_metas: dict,
     ) -> torch.Tensor:
         visual_embeds = self.abstractor(
             visual_features,
@@ -725,7 +726,7 @@ class KananaVForConditionalGeneration(nn.Module, SupportsMultiModal, SupportsPP)
     def forward_and_project_vision(
         self,
         pixel_values: torch.Tensor,
-        image_metas: dict | None = None,
+        image_metas: dict,
     ) -> torch.Tensor:
         assert pixel_values is not None
         visual_features = self.forward_vision(pixel_values, image_metas=image_metas)
