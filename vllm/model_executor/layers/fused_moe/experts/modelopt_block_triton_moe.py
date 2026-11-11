@@ -12,8 +12,8 @@ from vllm.model_executor.layers.fused_moe.config import (
     FusedMoEQuantConfig,
 )
 from vllm.model_executor.layers.fused_moe.experts.triton_moe import TritonExperts
-from vllm.model_executor.layers.fused_moe.moe_align_block_size import (
-    moe_align_block_size,
+from vllm.model_executor.layers.fused_moe.fused_moe import (
+    _prepare_expert_assignment,
 )
 from vllm.model_executor.layers.fused_moe.utils import _resize_cache
 from vllm.model_executor.layers.quantization.modelopt_block_quant_triton import (
@@ -84,12 +84,13 @@ class ModelOptBlockTritonExperts(TritonExperts):
         )
         cache3 = _resize_cache(workspace2, (num_tokens, top_k, K))
         fused_relu2 = gemv is not None and activation == MoEActivation.RELU2_NO_MUL
-        if gemv and expert_map is None:
-            # Each GEMV CTA owns one routed row, so sorting cannot share work.
+        # No EP (see `_supports_parallel_config`), so `expert_map` is None.
+        if gemv:
+            # Each GEMV program owns one routed row, so sorting shares no work.
             routing = (None, topk_ids.contiguous(), None)
         else:
-            routing = moe_align_block_size(
-                topk_ids, 1 if gemv else config["BLOCK_SIZE_M"], E, expert_map
+            routing = _prepare_expert_assignment(
+                topk_ids, config, num_tokens, top_k, E, None
             )
 
         launch(
@@ -104,4 +105,4 @@ class ModelOptBlockTritonExperts(TritonExperts):
             cache2, w2, self.w2_scale, self.lut, cache3, topk_weights, *routing,
             not apply_router_weight_on_input, 1, config, self.codec,
         )  # fmt: skip
-        self.moe_sum(cache3, output)
+        self._finalize_expert_output(cache3, output, topk_ids, expert_map)

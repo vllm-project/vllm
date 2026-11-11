@@ -3,8 +3,8 @@
 """ModelOpt IQ2_XXS / Q8_0 Triton kernels on NVIDIA Nemotron Bolt shapes (TP=1).
 
 Dense layers are compared with bf16 cuBLAS on the dequantized weights, MoE
-layers with vLLM's bf16 Triton `fused_experts`. Timing: CUPTI, CUDA graph,
-cold L2, median.
+layers with vLLM's bf16 Triton `fused_experts`. Timing: CUDA graph, cold L2,
+median replay of the best of 3 captures.
 
     python benchmarks/kernels/benchmark_modelopt_block_triton.py
     python benchmarks/kernels/benchmark_modelopt_block_triton.py \
@@ -13,11 +13,9 @@ cold L2, median.
 
 import argparse
 import itertools
-import statistics
 from functools import partial
 
 import torch
-from flashinfer.testing import bench_gpu_time_with_cupti
 
 import vllm.model_executor.layers.fused_moe.experts.modelopt_block_triton_moe as moe
 from vllm.config import VllmConfig, set_current_vllm_config
@@ -54,11 +52,20 @@ MOE_M = [1, 2, 4, 8, 16, 64, 256, 1024, 4096]
 BLOCK = {"iq2_xxs": (256, 66), "q8_0": (32, 34)}
 
 
-def bench_us(fn):
-    for _ in range(25):
-        fn()
-    torch.accelerator.synchronize()
-    return statistics.median(bench_gpu_time_with_cupti(fn, use_cuda_graph=True)) * 1e3
+def bench_us(fn, captures=3):
+    """Time of one CUDA-graph replay; `do_bench` flushes L2 before each.
+
+    The best of a few captures' medians: separate captures of the same small
+    kernel can differ by 15-25% (seen on an RTX 5060 Ti).
+    """
+    fn()
+    times = []
+    for _ in range(captures):
+        graph = torch.cuda.CUDAGraph()
+        with torch.cuda.graph(graph):
+            fn()
+        times.append(triton.testing.do_bench(graph.replay, return_mode="median"))
+    return min(times) * 1e3
 
 
 def random_blocks(lead, k, codec):
@@ -126,7 +133,8 @@ def bench_dense(args, props, rows):
                     timed.append((us, c))
             us, cfg = min(timed, key=lambda r: r[0])
             cublas = bench_us(partial(torch.matmul, x, w.T))
-            nbytes = N * K * bpw + 2 * M * K + 2 * M * N
+            io = 2 * M * K + 2 * M * N
+            nbytes = (N * K * bpw + io, N * K * 2 + io)
             rows.append((name, M, us, cublas, nbytes, 2 * M * N * K, cfg))
 
 
@@ -183,8 +191,8 @@ def bench_moe(args, rows):
             candidates = [(None, gemv_cfg) if gemv_cfg else (dot_cfg, None)]
             if args.sweep:
                 candidates += [
-                    ({"BLOCK_SIZE_M": bm, "BN": bn, "BK": bk, "num_warps": wp,
-                      "num_stages": st}, None)
+                    ({"BLOCK_SIZE_M": bm, "BLOCK_SIZE_N": bn, "BLOCK_SIZE_K": bk,
+                      "num_warps": wp, "num_stages": st}, None)
                     for bm, bn, bk, wp, st in itertools.product(
                         (16, 32, 64, 128), (32, 64, 128), (64, 128, 256), (4, 8),
                         (1, 2, 3),
@@ -206,7 +214,8 @@ def bench_moe(args, rows):
             moe.moe_config = default_config
             moe.moe_gemv_config = default_gemv
             active = topk_ids.unique().numel()
-            nbytes = active * 2 * inter * 1024 * 66 / 256 + 4 * M * 1024
+            weights = active * 2 * inter * 1024
+            nbytes = (weights * 66 / 256 + 4 * M * 1024, weights * 2 + 4 * M * 1024)
             flops = 2 * M * 9 * 2 * inter * 1024
             us, cfg = min(timed, key=lambda r: r[0])
             rows.append((name, M, us, bench_us(bf16), nbytes, flops, cfg))
@@ -227,16 +236,20 @@ def main():
     copy_gbps = 2 * src.numel() / (bench_us(partial(torch.clone, src)) * 1e3)
     del src
     print(f"{props.name}, copy bandwidth {copy_gbps:.0f} GB/s")
-    print("layer M ours_us baseline_us ratio GB/s TFLOP/s config")
+    # bytes_ratio = bf16 bytes / our bytes: the speedup a memory-bound kernel
+    # could reach. GB/s and %copy are our packed bytes over our time.
+    print("layer M ours_us bf16_us speedup bytes_ratio GB/s %copy TFLOP/s config")
 
     rows = []
     with set_current_vllm_config(VllmConfig()):
         bench_dense(args, props, rows)
         bench_moe(args, rows)
-    for name, M, us, base, nbytes, flops, cfg in rows:
+    for name, M, us, base, (nbytes, base_bytes), flops, cfg in rows:
+        gbps = nbytes / us / 1e3
         print(
-            f"{name} {M} {us:.1f} {base:.1f} {us / base:.2f} "
-            f"{nbytes / us / 1e3:.0f} {flops / us / 1e6:.1f} {cfg}"
+            f"{name} {M} {us:.1f} {base:.1f} {base / us:.2f} "
+            f"{base_bytes / nbytes:.2f} {gbps:.0f} {100 * gbps / copy_gbps:.0f} "
+            f"{flops / us / 1e6:.1f} {cfg}"
         )
 
 

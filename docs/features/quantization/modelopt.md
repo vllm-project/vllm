@@ -63,6 +63,31 @@ other dispatch paths retain their backend-specific behavior.
 Set `VLLM_MOE_SKIP_PADDING=0` before starting the engine to disable this
 optimization for comparisons.
 
+## ModelOpt block codecs with Triton kernels (SM75+)
+
+`MIXED_PRECISION` checkpoints can store layers in the GGML block codecs
+IQ2_XS, IQ2_XXS, and Q8_0. See
+[ModelOpt block codecs](b12x.md#modelopt-block-codecs) for the checkpoint
+layout. On SM120 and SM121, vLLM runs them with [b12x](b12x.md), an optional
+kernel package for those GPUs.
+
+On other NVIDIA GPUs from SM75 on, such as T4, A100, L4, H100, and H200,
+IQ2_XXS and Q8_0 run through Triton kernels instead: dense layers, routed
+experts, and Q8_0 embeddings. The weights stay packed, so memory use matches
+the checkpoint. The startup log shows
+`Using Triton kernels for ModelOpt IQ2_XXS ...` for each codec and layer kind.
+
+- IQ2_XS has no Triton kernel and still requires b12x.
+- The Triton kernels run with BF16 or FP16 activations. b12x requires BF16, so
+  `--dtype half` uses Triton on every GPU. Turing (SM75) has no BF16 support
+  and runs FP16 only.
+- Q8_0 retains the checkpoint's FP16 block scales, including with BF16
+  activations, without rounding the scales to BF16 for an INT8 backend.
+- Force the Triton path with `--linear-backend triton --moe-backend triton`.
+  This also works on SM120 and SM121.
+- Routed experts support tensor parallelism only, not expert parallelism.
+- ROCm is not supported.
+
 ## Benchmarking with dummy weights
 
 For performance experiments with random weights, use `--load-format dummy`.
