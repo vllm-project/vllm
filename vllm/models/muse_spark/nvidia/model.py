@@ -419,6 +419,8 @@ def replicates_attention(vllm_config: VllmConfig) -> bool:
             pc.decode_context_parallel_size > 1 or pc.prefill_context_parallel_size > 1,
             "context parallel",
         ),
+        # Turns the TP-synced autotune off: replicated attention would drift.
+        (pc.enable_expert_parallel, "expert parallelism"),
         (bool(vllm_config.cache_config.kv_cache_dtype_skip_layers), "KV skip layers"),
         (vllm_config.kv_transfer_config is not None, "KV transfer connectors"),
     ):
