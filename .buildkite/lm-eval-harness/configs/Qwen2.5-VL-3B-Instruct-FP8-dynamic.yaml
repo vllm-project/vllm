@@ -5,7 +5,7 @@ required_gpu_arch:
   - gfx942
   - gfx950
 tasks:
-- name: "gsm8k"
+- name: "gsm8k_platinum"
   metrics:
   - name: "exact_match,strict-match"
     value: 0.47

@@ -1,6 +1,6 @@
 model_name: "nvidia/NVIDIA-Nemotron-3-Nano-30B-A3B-BF16"
 tasks:
-- name: "gsm8k"
+- name: "gsm8k_platinum"
   metrics:
   - name: "exact_match,strict-match"
     value: 0.695
