@@ -62,7 +62,6 @@ class DSparkSpeculatorConfig(DFlashSpeculatorConfig):
             ]
             draft.quantization = target.quantization
             spec.update_arch_()
-        spec.parallel_drafting = True
 
     @classmethod
     def resolve_num_speculative_tokens(cls, spec: "SpeculativeConfig") -> None:
@@ -123,7 +122,7 @@ class DSparkSpeculatorConfig(DFlashSpeculatorConfig):
             # Anchor-sampling DSpark drafts a block of num_speculative_tokens
             # query tokens in which the anchor itself is the first prediction
             # position (no separate bonus query).
-            return self.num_speculative_tokens
+            return self.num_scheduled_spec_tokens
         return super().num_lookahead_tokens
 
     def hash_factors(self) -> list[Any]:

@@ -583,8 +583,8 @@ class ChatCompletionRequest(OpenAIBaseModel):
         Performs two normalizations in a single pass:
         - Converts tool_calls generators/iterators to lists so one-shot
           generators are not consumed during union type matching.
-        - Renames the deprecated ``reasoning_content`` field to
-          ``reasoning`` so downstream code only needs to check one field.
+        - Renames the deprecated `reasoning_content` field to
+          `reasoning` so downstream code only needs to check one field.
         """
         if not isinstance(data, dict):
             return data
@@ -741,7 +741,7 @@ class ChatCompletionRequest(OpenAIBaseModel):
         )
 
     def extract_structured_outputs(self) -> StructuredOutputsParams | None:
-        """Normalize request constraints into ``StructuredOutputsParams``."""
+        """Normalize request constraints into `StructuredOutputsParams`."""
         return structured_outputs_from_response_format(
             self.structured_outputs,
             self.response_format,
@@ -979,83 +979,77 @@ class ChatCompletionRequest(OpenAIBaseModel):
         if not isinstance(data, dict):
             return data
 
-        # Reject empty tools array, matching OpenAI API behavior
-        if data.get("tools") == []:
-            raise VLLMValidationError(
-                "`tools` must not be an empty array. "
-                "Either provide at least one tool or omit the field entirely.",
-                parameter="tools",
-            )
+        tools = data.get("tools")
+        # normalize empty or omitted tools to None
+        if tools == []:
+            tools = None
+            data["tools"] = tools
 
-        # if "tool_choice" is not specified but tools are provided,
-        # default to "auto" tool_choice
-        if "tool_choice" not in data and data.get("tools"):
-            data["tool_choice"] = "auto"
+        tool_choice = data.get("tool_choice")
+        if tools is not None:
+            # omitted tool_choice defaults to auto if tools are provided
+            if tool_choice is None:
+                tool_choice = "auto"
+                data["tool_choice"] = tool_choice
+        else:
+            # omitted tool_choice defaults to none if tools are not provided
+            # auto tool_choice degrades to none if no tool is provided
+            if tool_choice is None or tool_choice == "auto":
+                tool_choice = "none"
+                data["tool_choice"] = tool_choice
 
-        # if "tool_choice" is "none" -- no validation is needed for tools
-        if "tool_choice" in data and data["tool_choice"] == "none":
+        # no validation needed
+        if tool_choice is None or tool_choice == "none":
             return data
 
-        # if "tool_choice" is specified -- validation
-        if "tool_choice" in data and data["tool_choice"] is not None:
-            # ensure that if "tool choice" is specified, tools are present
-            if "tools" not in data or data["tools"] is None:
-                raise VLLMValidationError(
-                    "When using `tool_choice`, `tools` must be set.",
-                    parameter="tool_choice",
-                )
-
-            # make sure that tool choice is either a named tool
-            # OR that it's set to "auto" or "required"
-            if data["tool_choice"] not in ["auto", "required"] and not isinstance(
-                data["tool_choice"], dict
-            ):
-                raise VLLMValidationError(
-                    f"Invalid value for `tool_choice`: {data['tool_choice']}! "
-                    'Only named tools, "none", "auto" or "required" '
-                    "are supported.",
-                    parameter="tool_choice",
-                )
-
-            # ensure that if "tool_choice" is specified as an object,
-            # it matches a valid tool
-            correct_usage_message = (
-                'Correct usage: `{"type": "function",'
-                ' "function": {"name": "my_function"}}`'
+        # any other tool_choice requires tools
+        if tools is None:
+            raise VLLMValidationError(
+                "When using `tool_choice`, `tools` must be set.",
+                parameter="tool_choice",
             )
-            if isinstance(data["tool_choice"], dict):
-                valid_tool = False
-                function = data["tool_choice"].get("function")
-                if not isinstance(function, dict):
-                    raise VLLMValidationError(
-                        f"Invalid value for `function`: `{function}` in "
-                        f"`tool_choice`! {correct_usage_message}",
-                        parameter="tool_choice.function",
-                    )
-                if "name" not in function:
-                    raise VLLMValidationError(
-                        f"Expected field `name` in `function` in "
-                        f"`tool_choice`! {correct_usage_message}",
-                        parameter="tool_choice.function.name",
-                    )
-                function_name = function["name"]
-                if not isinstance(function_name, str) or len(function_name) == 0:
-                    raise VLLMValidationError(
-                        f"Invalid `name` in `function`: `{function_name}`"
-                        f" in `tool_choice`! {correct_usage_message}",
-                        parameter="tool_choice.function.name",
-                    )
-                for tool in data["tools"]:
-                    if tool["function"]["name"] == function_name:
-                        valid_tool = True
-                        break
-                if not valid_tool:
-                    raise VLLMValidationError(
-                        "The tool specified in `tool_choice` does not match any"
-                        " of the specified `tools`",
-                        parameter="tool_choice",
-                    )
-        return data
+
+        if tool_choice in ("required", "auto"):
+            return data
+
+        if not isinstance(tool_choice, dict):
+            raise VLLMValidationError(
+                f"Invalid value for `tool_choice`: {tool_choice}! "
+                'Only named tools, "none", "auto" or "required" '
+                "are supported.",
+                parameter="tool_choice",
+            )
+
+        correct_usage_message = (
+            'Correct usage: `{"type": "function", "function": {"name": "my_function"}}`'
+        )
+        function = tool_choice.get("function")
+        if not isinstance(function, dict):
+            raise VLLMValidationError(
+                f"Invalid value for `function`: `{function}` in "
+                f"`tool_choice`! {correct_usage_message}",
+                parameter="tool_choice.function",
+            )
+        if "name" not in function:
+            raise VLLMValidationError(
+                f"Expected field `name` in `function` in "
+                f"`tool_choice`! {correct_usage_message}",
+                parameter="tool_choice.function.name",
+            )
+        function_name = function["name"]
+        if not isinstance(function_name, str) or len(function_name) == 0:
+            raise VLLMValidationError(
+                f"Invalid `name` in `function`: `{function_name}`"
+                f" in `tool_choice`! {correct_usage_message}",
+                parameter="tool_choice.function.name",
+            )
+        if any(tool["function"]["name"] == function_name for tool in tools):
+            return data
+        raise VLLMValidationError(
+            f"The tool `{function_name}` specified in `tool_choice` does not"
+            " match any of the specified `tools`",
+            parameter="tool_choice",
+        )
 
     @model_validator(mode="before")
     @classmethod
@@ -1142,17 +1136,17 @@ class ChatCompletionRequest(OpenAIBaseModel):
 class BatchChatCompletionRequest(OpenAIBaseModel):
     """Request model for the /v1/chat/completions/batch endpoint.
 
-    Accepts the same fields as ChatCompletionRequest except that ``messages``
+    Accepts the same fields as ChatCompletionRequest except that `messages`
     is a list of conversations (each conversation is a
-    ``list[ChatCompletionMessageParam]``).  Each conversation is processed
+    `list[ChatCompletionMessageParam]`).  Each conversation is processed
     independently and the response contains one choice per conversation,
     indexed 0, 1, ..., N-1.
 
     Current limitations compared to the single-conversation endpoint:
-    - Streaming is not supported (``stream`` must be False or omitted).
-    - Tool use is not supported (``tools`` must be omitted).
-    - Beam search is not supported (``use_beam_search`` must be False or omitted).
-    - The ``n`` parameter must be 1 (or omitted).
+    - Streaming is not supported (`stream` must be False or omitted).
+    - Tool use is not supported (`tools` must be omitted).
+    - Beam search is not supported (`use_beam_search` must be False or omitted).
+    - The `n` parameter must be 1 (or omitted).
     """
 
     messages: list[Annotated[list[ChatCompletionMessageParam], Field(min_length=1)]] = (

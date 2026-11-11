@@ -26,6 +26,9 @@ class UnlimitedOCRConfig(DeepseekVLV2Config):
         rswa_window: int = 128,
         **kwargs,
     ):
+        # Transformers 5 standardizes the top-level legacy YaRN fields before
+        # assigning unknown kwargs; it needs this attribute during that step.
+        self.max_position_embeddings = kwargs.get("max_position_embeddings", 131072)
         super().__init__(
             tile_tag=tile_tag,
             global_view_pos=global_view_pos,
