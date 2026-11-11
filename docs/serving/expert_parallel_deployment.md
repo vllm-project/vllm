@@ -249,13 +249,20 @@ Two stages are configurable:
   decided at every rearrangement. `auto` (default) selects the balancer's default algorithm for the
   model's expert-group layout; `ultraep` re-solves placement and per-replica quotas online every
   `EVENMOE_ULTRAEP_REFRESH_INTERVAL` representative batches and moves the affected expert weights itself.
+  What the planner needs from vLLM is read from its own declarations: a planner that solves from each
+  rank's counts (`ultraep`) gets the load windows gathered per rank instead of summed, and a planner
+  with a layout of its own (`ultraep`: each rank's block of master experts followed by its redundant
+  slots) has the loaded weights moved into it at start-up, so its first online solve only touches the
+  redundant slots. An `init_placement_path` checkpoint takes precedence over that layout.
 - **L2, replica routing** (`--eplb-config.l2_algorithm` or `VLLM_EVENMOE_L2_ALGORITHM`): which replica
   of a logical expert serves each token. Expressions combine a routed-expert policy (`static`,
   `lplb`, `ultraep`) with an optional shared-expert policy (`+waterfill`), e.g. `lplb+waterfill`.
   `waterfill` dispatches the shared expert through the expert-parallel all-to-all so that it can be
   assigned to the least-loaded rank; this widens the expert space by one slot per rank and can be
   enabled on its own with `VLLM_FUSE_SHARED_EXPERTS=1`. L2 routing is skipped automatically when
-  there are no redundant experts, where it could only reproduce the built-in choice.
+  there are no redundant experts, where it could only reproduce the built-in choice, and when a
+  policy's layout preconditions cannot hold on the configured EP group (`ultraep` needs the redundant
+  experts and the logical experts to split evenly across the EP ranks); the log states the reason.
 
 ```bash
 # Placement fitted by the balancer, online UltraEP refresh, Waterfill for the shared expert

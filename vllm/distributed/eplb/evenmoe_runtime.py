@@ -1949,7 +1949,13 @@ def l2_pipeline_capabilities(algorithm: str):
         return None
 
 
-def l2_inapplicable_reason(algorithm: str, num_redundant_experts: int) -> str | None:
+def l2_inapplicable_reason(
+    algorithm: str,
+    num_redundant_experts: int,
+    *,
+    ep_size: int | None = None,
+    num_logical_experts: int | None = None,
+) -> str | None:
     """Why the named policy cannot act on this deployment, or None.
 
     The reason is the policy's own words. What this side supplies is what only
@@ -1959,6 +1965,13 @@ def l2_inapplicable_reason(algorithm: str, num_redundant_experts: int) -> str | 
     VLLM_FUSE_SHARED_EXPERTS off it is a per-rank replicated MLP, so there is
     no rank for a shared-expert policy to choose and the policy says so
     itself.
+
+    ``ep_size`` and ``num_logical_experts`` are passed when the caller knows
+    them, so a policy with a layout precondition (ultraep's rank-local
+    redundancy needs the EP group, the logical experts and the redundant
+    experts to all split evenly across ranks) can state it before the server
+    starts. EvenMoE skips the checks that need a value left at None, so the
+    answer is never wrong for being asked early -- only less complete.
 
     Answered from the env switch rather than from a built layer because this
     runs during configuration validation, before any model exists. A layer
@@ -1984,8 +1997,58 @@ def l2_inapplicable_reason(algorithm: str, num_redundant_experts: int) -> str | 
             num_redundant_experts=num_redundant_experts,
             routes_shared_expert=shared_expert_fusion_enabled(),
             carries_placement_metadata=True,
+            ep_size=ep_size,
+            num_logical_experts=num_logical_experts,
         )
     )
+
+
+def requires_per_source_rank_statistics(algorithm: str) -> bool:
+    """Whether the named L1 planner solves from each source rank's own counts.
+
+    Read from the planner's declaration through the engine's balancer, which
+    is what ``EplbState.rearrange`` acts on when it chooses between a
+    sum-reducing all-reduce and an all-gather of the load windows.
+    """
+    balancer = get_evenmoe_integration().balancer()
+    return balancer.requires_per_source_rank_statistics(algorithm)
+
+
+def plan_initial_placement(
+    algorithm: str,
+    *,
+    num_moe_layers: int,
+    num_logical_experts: int,
+    num_physical_experts: int,
+    num_ranks: int,
+    num_groups: int,
+    num_nodes: int,
+):
+    """The named L1 planner's layout before any statistics, or None.
+
+    None means the planner has no layout of its own (every EPLB variant) and
+    vLLM keeps its trivial initial placement. The plan is uncommitted, exactly
+    like :func:`plan_placement`'s: the caller moves the loaded weights into it
+    and commits the maps. No quota is stashed for the router here -- the
+    initial plan publishes none, and the router keeps routing by the committed
+    maps until the first solve does.
+    """
+    from evenmoe import PlacementTopology
+    from evenmoe.adapters.vllm import to_vllm_physical_to_logical
+
+    balancer = get_evenmoe_integration().balancer()
+    plan = balancer.plan_initial_placement(
+        PlacementTopology(
+            num_physical_experts=num_physical_experts,
+            num_local_physical_experts=num_physical_experts // num_ranks,
+            num_groups=num_groups,
+            num_nodes=num_nodes,
+        ),
+        num_logical_experts=num_logical_experts,
+        num_layers=num_moe_layers,
+        placement_policy=algorithm,
+    )
+    return None if plan is None else to_vllm_physical_to_logical(plan)
 
 
 def plan_placement(request):

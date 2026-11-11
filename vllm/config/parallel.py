@@ -692,7 +692,7 @@ class ParallelConfig:
             # resolves the minimum valid value). A None here is "not decided
             # yet", not "zero", so the decision waits for that call.
             if self.eplb_config.num_redundant_experts is not None:
-                self._decide_l2_applicability()
+                self._decide_l2_applicability(num_logical_experts=None)
 
         tp = self.tensor_parallel_size
         pcp = self.prefill_context_parallel_size
@@ -711,13 +711,19 @@ class ParallelConfig:
 
         return self
 
-    def _decide_l2_applicability(self) -> None:
-        """Switch off an L2 routing expression the deployment cannot use."""
+    def _decide_l2_applicability(self, *, num_logical_experts: int | None) -> None:
+        """Switch off an L2 routing expression the deployment cannot use.
+
+        ``num_logical_experts`` is None while only the configuration is known;
+        the policy then skips the preconditions that need it.
+        """
         from vllm.distributed.eplb.evenmoe_runtime import l2_inapplicable_reason
 
         reason = l2_inapplicable_reason(
             self.eplb_config.l2_algorithm,
             self.eplb_config.num_redundant_experts,
+            ep_size=self._expert_parallel_size,
+            num_logical_experts=num_logical_experts,
         )
         if reason is not None:
             # The reason comes from the balancer: which deployments a
@@ -749,12 +755,7 @@ class ParallelConfig:
             return
 
         if self.enable_eplb:
-            # The EP group spans the TP x PCP x DP ranks.
-            ep_size = (
-                self.tensor_parallel_size
-                * self.prefill_context_parallel_size
-                * self.data_parallel_size
-            )
+            ep_size = self._expert_parallel_size
             # Ensure (num_logical_experts + num_redundant_experts) is
             # divisible by ep_size, supporting non-standard ep_size values
             min_redundant = (ep_size - num_logical_experts % ep_size) % ep_size
@@ -771,7 +772,16 @@ class ParallelConfig:
             # redundancy is known, a replica-routing expression with nothing
             # to choose between is switched off here instead.
             if self.eplb_config.l2_algorithm:
-                self._decide_l2_applicability()
+                self._decide_l2_applicability(num_logical_experts=num_logical_experts)
+
+    @property
+    def _expert_parallel_size(self) -> int:
+        """The EP group spans the TP x PCP x DP ranks."""
+        return (
+            self.tensor_parallel_size
+            * self.prefill_context_parallel_size
+            * self.data_parallel_size
+        )
 
     def set_dcp_defaults(
         self,

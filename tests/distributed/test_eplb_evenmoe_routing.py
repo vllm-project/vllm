@@ -402,6 +402,71 @@ def test_waterfill_is_rejected_unless_the_shared_expert_is_dispatched(monkeypatc
         assert l2_inapplicable_reason(expr, num_redundant_experts=16) is None
 
 
+def test_layout_preconditions_are_checked_once_the_geometry_is_known():
+    """The rank-local redundancy of ultraep needs the EP group, the logical
+    experts and the redundant experts to split evenly across ranks. The policy
+    states the precondition in its own words; this side only supplies the
+    geometry it knows, and a value it does not know yet (None) skips that check
+    rather than failing it, so an early answer is less complete but never wrong.
+    """
+    from vllm.distributed.eplb.evenmoe_runtime import l2_inapplicable_reason
+
+    assert (
+        l2_inapplicable_reason("ultraep", 16, ep_size=16, num_logical_experts=256)
+        is None
+    )
+    # Geometry unknown: not refused on its account.
+    assert l2_inapplicable_reason("ultraep", 16) is None
+
+    reason = l2_inapplicable_reason("ultraep", 5, ep_size=16)
+    assert reason is not None and "redundant experts" in reason
+    reason = l2_inapplicable_reason("ultraep", 16, ep_size=16, num_logical_experts=250)
+    assert reason is not None and "logical experts" in reason
+    assert l2_inapplicable_reason("ultraep", 16, ep_size=1) is not None
+
+    # A pipeline without a layout precondition is indifferent to the geometry.
+    assert (
+        l2_inapplicable_reason("lplb", 5, ep_size=16, num_logical_experts=250) is None
+    )
+
+
+def test_config_supplies_its_own_geometry_to_the_layout_check():
+    """The EP group spans TP x PCP x DP, known from the configuration alone,
+    so a redundancy that cannot split across the ranks is refused before any
+    model exists; the logical expert count joins the check once the model
+    supplies it through compute_eplb_num_redundant_experts."""
+    from vllm.config.parallel import EPLBConfig, ParallelConfig
+
+    uneven = ParallelConfig(
+        data_parallel_size=4,
+        enable_expert_parallel=True,
+        enable_eplb=True,
+        eplb_config=EPLBConfig(l2_algorithm="ultraep", num_redundant_experts=6),
+    )
+    assert uneven.eplb_config.l2_algorithm == ""
+
+    even = ParallelConfig(
+        data_parallel_size=4,
+        enable_expert_parallel=True,
+        enable_eplb=True,
+        eplb_config=EPLBConfig(l2_algorithm="ultraep", num_redundant_experts=8),
+    )
+    assert even.eplb_config.l2_algorithm == "ultraep"
+
+    # 258 logical experts on 4 ranks: the minimum redundancy that makes the
+    # physical count divisible is 2, which does not itself split across the
+    # ranks (nor does 258), so the deferred decision switches ultraep off.
+    deferred = ParallelConfig(
+        data_parallel_size=4,
+        enable_expert_parallel=True,
+        enable_eplb=True,
+        eplb_config=EPLBConfig(l2_algorithm="ultraep"),
+    )
+    deferred.compute_eplb_num_redundant_experts(num_logical_experts=258)
+    assert deferred.eplb_config.num_redundant_experts == 2
+    assert deferred.eplb_config.l2_algorithm == ""
+
+
 def test_l2_applicability_is_decided_on_the_config_the_run_uses(monkeypatch):
     """Only ParallelConfig may disable L2, because only it is certainly used.
 

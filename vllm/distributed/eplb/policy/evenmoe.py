@@ -17,15 +17,22 @@ Note that ``use_async`` must be disabled: vLLM's async rearrangement path is
 validated only against the built-in policy (see ``EPLBConfig``), and EvenMoE's
 planner runs synchronously on the caller's thread.
 
-``ultraep`` places redundant replicas by which *rank* is overloaded, not just
-which logical expert is hot, so it needs every rank's own count rather than
-the cross-rank sum every other algorithm here is happy with.
-:meth:`wants_per_rank_weight` tells ``EplbState.rearrange`` to gather instead
-of reduce and hand the per-rank breakdown back through ``per_rank_weight``.
-It also needs to know which rank *this call* is running on -- its placement
-kernel solves once per rank, not once globally, and validates ``rank`` is
-in range -- so ``EplbState.rearrange`` passes its own ``ep_rank`` alongside
-``per_rank_weight`` for the same policies.
+Two optional hooks let a placement policy ask ``EplbState`` for more than the
+built-in contract offers, and both are answered by EvenMoE's own declarations
+rather than by this module knowing which algorithm is which:
+
+* :meth:`wants_per_rank_weight` -- a planner that solves from each source
+  rank's own counts (``ultraep`` places redundant replicas by which *rank* is
+  overloaded, not just which logical expert is hot) makes ``rearrange`` gather
+  instead of reduce and hand the per-rank breakdown back through
+  ``per_rank_weight`` together with the caller's own ``ep_rank`` (its placement
+  kernel solves once per rank and validates ``rank`` is in range).
+* :meth:`initial_placement` -- a planner whose placement before any
+  statistics is its own layout (``ultraep``: each rank's block of master
+  experts followed by its redundant slots) supplies it, and ``EplbState``
+  moves the loaded weights into it at start-up the way it installs a
+  checkpoint, so the first traffic-driven solve only has to touch the
+  redundant slots.
 """
 
 from __future__ import annotations
@@ -52,7 +59,54 @@ class EvenMoeEplbPolicy(AbstractEplbPolicy):
 
     @classmethod
     def wants_per_rank_weight(cls) -> bool:
-        return _algorithm() == "ultraep"
+        """Whether the selected planner needs ``[ranks, layers, experts]`` counts.
+
+        Asked of the balancer, which reads the planner's own declaration
+        (``PlacementPlanner.requires_per_source_rank_statistics``): a name
+        comparison here would have to be kept in step with every planner that
+        makes the same choice, and would miss one spelled differently.
+        """
+        from vllm.distributed.eplb.evenmoe_runtime import (
+            requires_per_source_rank_statistics,
+        )
+
+        return requires_per_source_rank_statistics(_algorithm())
+
+    @classmethod
+    def initial_placement(
+        cls,
+        *,
+        num_moe_layers: int,
+        num_logical_experts: int,
+        num_physical_experts: int,
+        num_ranks: int,
+        num_groups: int,
+        num_nodes: int,
+    ) -> torch.Tensor | None:
+        """The selected planner's own start-up layout, or None to keep vLLM's.
+
+        Returns ``[num_moe_layers, num_physical_experts]`` on the CPU, the
+        shape ``EplbState`` installs a placement checkpoint from. Every rank
+        computes it from the geometry alone, so the result is identical EP-wide
+        without a collective.
+        """
+        from vllm.distributed.eplb.evenmoe_runtime import plan_initial_placement
+
+        phy2log = plan_initial_placement(
+            _algorithm(),
+            num_moe_layers=num_moe_layers,
+            num_logical_experts=num_logical_experts,
+            num_physical_experts=num_physical_experts,
+            num_ranks=num_ranks,
+            num_groups=num_groups or 1,
+            num_nodes=num_nodes,
+        )
+        if phy2log is None:
+            return None
+        logger.info_once(
+            "EPLB initial placement delegated to EvenMoE (algorithm=%s)", _algorithm()
+        )
+        return phy2log.cpu().to(torch.int64)
 
     @classmethod
     def rebalance_experts(

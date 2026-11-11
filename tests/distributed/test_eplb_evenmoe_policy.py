@@ -179,3 +179,59 @@ def test_ep_rank_reaches_the_placement_request(monkeypatch):
         weight, NUM_REPLICAS, NUM_GROUPS, 1, NUM_RANKS, ep_rank=5
     )
     assert captured["ep_rank"] == 5
+
+
+@pytest.mark.parametrize(
+    ("algorithm", "per_rank"),
+    [
+        ("auto", False),
+        ("deepseek", False),
+        ("deepseek_hierarchical", False),
+        ("ultraep", True),
+    ],
+)
+def test_per_rank_statistics_follow_the_planners_declaration(
+    monkeypatch, algorithm, per_rank
+):
+    """Whether `rearrange` gathers or sum-reduces the load windows is the
+    planner's own declaration (``requires_per_source_rank_statistics``), read
+    through the balancer -- not a name this module compares against, which
+    would have to be kept in step with every planner making the same choice."""
+    monkeypatch.setenv("VLLM_EVENMOE_L1_ALGORITHM", algorithm)
+    assert EvenMoeEplbPolicy.wants_per_rank_weight() is per_rank
+
+
+def test_initial_placement_is_the_planners_own_layout(monkeypatch):
+    """A planner whose placement before any statistics is its own layout
+    supplies it, and `EplbState` installs it as it installs a checkpoint. The
+    EPLB variants have no such layout and keep vLLM's trivial one (None)."""
+    geometry = dict(
+        num_moe_layers=3,
+        num_logical_experts=NUM_LOGICAL,
+        num_physical_experts=NUM_REPLICAS,
+        num_ranks=NUM_RANKS,
+        num_groups=NUM_GROUPS,
+        num_nodes=1,
+    )
+    monkeypatch.setenv("VLLM_EVENMOE_L1_ALGORITHM", "auto")
+    assert EvenMoeEplbPolicy.initial_placement(**geometry) is None
+
+    monkeypatch.setenv("VLLM_EVENMOE_L1_ALGORITHM", "ultraep")
+    phy2log = EvenMoeEplbPolicy.initial_placement(**geometry)
+    assert phy2log is not None
+    # The shape and placement a checkpoint is installed from.
+    assert phy2log.shape == (3, NUM_REPLICAS)
+    assert phy2log.dtype == torch.int64
+    assert phy2log.device.type == "cpu"
+    # ultraep's rank-local layout: every rank holds its block of master experts
+    # first, then redundant slots filled with its own masters, so the first
+    # traffic-driven solve only has to touch the redundant slots.
+    slots_per_rank = NUM_REPLICAS // NUM_RANKS
+    masters_per_rank = NUM_LOGICAL // NUM_RANKS
+    for layer in range(3):
+        for rank in range(NUM_RANKS):
+            slots = phy2log[layer, rank * slots_per_rank : (rank + 1) * slots_per_rank]
+            own = torch.arange(rank * masters_per_rank, (rank + 1) * masters_per_rank)
+            assert torch.equal(slots[:masters_per_rank], own)
+            assert set(slots[masters_per_rank:].tolist()) <= set(own.tolist())
+        assert len(torch.unique(phy2log[layer])) == NUM_LOGICAL

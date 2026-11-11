@@ -524,6 +524,44 @@ class EplbState:
         self.policy = EPLB_POLICIES[policy_type]
         logger.debug("Selected EPLB policy: %s", policy_type)
 
+        # A policy whose placement before any statistics is its own layout
+        # supplies it here, and it is installed exactly as a checkpoint is:
+        # by moving the loaded weights (see `_install_initial_placement`).
+        # A checkpoint takes precedence -- it is the placement the operator
+        # asked for. Optional hook, like `wants_per_rank_weight` below: the
+        # built-in policies have no layout of their own and keep the trivial one.
+        initial_placement = getattr(self.policy, "initial_placement", None)
+        if pending_init_p2l is None and initial_placement is not None:
+            ep_size = get_ep_group().world_size
+            num_nodes = get_node_count()
+            if ep_size % num_nodes != 0:
+                num_nodes = 1
+            pending_init_p2l = initial_placement(
+                num_moe_layers=model.num_moe_layers,
+                num_logical_experts=model.num_logical_experts,
+                num_physical_experts=model.num_physical_experts,
+                num_ranks=ep_size,
+                num_groups=model.num_expert_groups,
+                num_nodes=num_nodes,
+            )
+            if pending_init_p2l is not None:
+                assert pending_init_p2l.shape == (
+                    model.num_moe_layers,
+                    model.num_physical_experts,
+                ), (
+                    f"Initial placement shape {tuple(pending_init_p2l.shape)} "
+                    f"does not match model ({model.num_moe_layers}, "
+                    f"{model.num_physical_experts})"
+                )
+                logger.info(
+                    "EPLB: the %s policy supplies its own initial placement "
+                    "(layers=%d, num_physical=%d); experts will be rearranged "
+                    "to match it",
+                    policy_type,
+                    model.num_moe_layers,
+                    model.num_physical_experts,
+                )
+
         # num_ubatches is 0 when DBO is disabled.
         num_ubatches = max(1, self.parallel_config.num_ubatches)
         num_unpadded_tokens_tensors = [
@@ -582,9 +620,10 @@ class EplbState:
         )
         self.model_states[hash_config_cached(model_config)] = model_state
 
-        # Move the experts to where the checkpoint says they belong.  This has
-        # to happen before the routing policy is told about the placement, so
-        # that what it is told is what is actually on the device.
+        # Move the experts to where the checkpoint (or the policy's own initial
+        # layout) says they belong.  This has to happen before the routing
+        # policy is told about the placement, so that what it is told is what
+        # is actually on the device.
         if pending_init_p2l is not None:
             self._install_initial_placement(model_state, pending_init_p2l)
 
@@ -650,14 +689,16 @@ class EplbState:
         model_state: EplbModelState,
         target_physical_to_logical_map: torch.Tensor,
     ) -> None:
-        """Rearrange the freshly loaded weights into a checkpointed placement.
+        """Rearrange the freshly loaded weights into a chosen placement.
 
-        The weights sit in the trivial layout after loading, so a checkpoint can
-        only be honoured by physically moving them; writing its map into the
-        live state without the move makes every slot claim an expert it does not
-        hold. That is invisible to a throughput benchmark -- the run is exactly
-        as fast, only the text is wrong -- so it is done here rather than being
-        left to the periodic rearrangement, which `step_interval` may disable.
+        The target is a checkpoint (``init_placement_path``) or the layout the
+        placement policy asked for (``initial_placement``). The weights sit in
+        the trivial layout after loading, so either can only be honoured by
+        physically moving them; writing its map into the live state without the
+        move makes every slot claim an expert it does not hold. That is invisible
+        to a throughput benchmark -- the run is exactly as fast, only the text is
+        wrong -- so it is done here rather than being left to the periodic
+        rearrangement, which `step_interval` may disable.
 
         Args:
             model_state: The model whose experts should be moved.
@@ -681,7 +722,7 @@ class EplbState:
             new_physical_to_logical_map=target_physical_to_logical_map,
         )
         logger.info(
-            "EPLB: rearranged experts into the checkpointed placement (%d layers)",
+            "EPLB: rearranged experts into the requested initial placement (%d layers)",
             target_physical_to_logical_map.shape[0],
         )
 
