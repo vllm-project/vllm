@@ -75,6 +75,7 @@ from vllm.model_executor.layers.vocab_parallel_embedding import (
     VocabParallelEmbedding,
 )
 from vllm.platforms import current_platform
+from vllm.v1.kv_cache_interface import is_quantized_kv_cache
 
 if TYPE_CHECKING:
     from vllm.model_executor.models.utils import WeightsMapper
@@ -1264,10 +1265,19 @@ class CompressedTensorsKVCacheMethod(BaseKVCacheMethod):
         """Override the default vLLM placeholder scales with the llm-compressor loaded
         scales. Zero points are not used as only symmetric quantization is supported.
         """
+        # Checkpoint k/v scales only apply to a quantized KV cache. Layers kept
+        # unquantized (e.g. kv_cache_dtype_skip_layers) use unit scales, as
+        # BaseKVCacheMethod does.
+        k_scale = layer.k_scale.detach()
+        v_scale = layer.v_scale.detach()
+        if not is_quantized_kv_cache(layer.kv_cache_dtype):
+            k_scale = torch.ones_like(k_scale)
+            v_scale = torch.ones_like(v_scale)
+
         # Buffers, not Parameters: updates don't rewrite them, so level-2 sleep
         # must keep them. ATTN_HEAD changes shape.
-        layer.register_buffer("_k_scale", layer.k_scale.detach())
-        layer.register_buffer("_v_scale", layer.v_scale.detach())
+        layer.register_buffer("_k_scale", k_scale)
+        layer.register_buffer("_v_scale", v_scale)
         layer.register_buffer("_q_scale", layer.q_scale.detach())
 
         # Set the _float variants that the attention backend uses.
@@ -1277,8 +1287,8 @@ class CompressedTensorsKVCacheMethod(BaseKVCacheMethod):
                 return tensor.max().item()
             return tensor.item()
 
-        layer._k_scale_float = _to_scalar(layer.k_scale)
-        layer._v_scale_float = _to_scalar(layer.v_scale)
+        layer._k_scale_float = _to_scalar(k_scale)
+        layer._v_scale_float = _to_scalar(v_scale)
         layer._q_scale_float = _to_scalar(layer.q_scale)
 
         # Sync host (cpu) scale copies read by AITER fused kernels.
