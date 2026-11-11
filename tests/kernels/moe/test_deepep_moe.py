@@ -569,3 +569,28 @@ def test_low_latency_deep_ep_moe(
         use_fp8_dispatch,
         False,
     )
+
+
+@pytest.mark.parametrize("fault_tolerance", [False, True])
+@requires_deep_ep
+def test_low_latency_deep_ep_buffer_enable_shrink(fault_tolerance: bool):
+    """The low-latency buffer gets `enable_shrink` only with fault tolerance,
+    so that DeepEP builds without it work otherwise."""
+    from vllm.distributed.device_communicators.all2all import DeepEPLLAll2AllManager
+
+    manager = object.__new__(DeepEPLLAll2AllManager)
+    manager.cpu_group = None
+    manager.support_fault_tolerance = fault_tolerance
+
+    kwargs = manager._make_all2all_kwargs(
+        max_num_tokens_per_dp_rank=MAX_TOKENS_PER_RANK,
+        token_hidden_size=2048,
+        num_ep_ranks=2,
+        num_global_experts=32,
+        num_local_experts=16,
+    )
+
+    if fault_tolerance:
+        assert kwargs["enable_shrink"]
+    else:
+        assert "enable_shrink" not in kwargs
