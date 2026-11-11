@@ -176,6 +176,15 @@ class OnHandoffStoreHandler(StoreTriggerHandler):
             assert boundary > 0
             assert boundary % self._config.tokens_per_hash == 0
             assert boundary <= max_boundary
+            # The key of a partial tail is the hash at its last token, or at
+            # the proof position. Under lookahead the proof margin is 0 and
+            # the prompt can be longer than the hashed prefix, so this is the
+            # only range guard before register_boundary_key reads the hashes.
+            if (
+                boundary + max_eagle_proof_margin
+                > len(req.block_hashes) * self._config.tokens_per_hash
+            ):
+                continue
 
             if max_eagle_proof_margin:
                 # The CoW hand-off arrives on the step that computes the prompt

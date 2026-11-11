@@ -541,6 +541,38 @@ def test_partial_tail_store_uses_attention_and_recurrent_cow_sources():
     )
 
 
+def test_partial_tail_store_skips_a_boundary_past_the_hashes():
+    """A boundary whose key tokens are not hashed yet cannot be stored.
+
+    Under lookahead the prompt can be longer than the hashed prefix, and the
+    proof margin is 0. The hash range is then the only guard before
+    register_boundary_key indexes req.block_hashes.
+    """
+    scheduler = _make_partial_tail_scheduler()
+    request = _make_partial_tail_request(scheduler)
+    # Seven hashes cover 28 tokens, but the prompt holds 40.
+    request.num_tokens = 40
+    request.num_prompt_tokens = 40
+    request.all_token_ids = list(range(40))
+    req_status = scheduler._req_status["req"]
+    # The attention group holds the boundary block, so the hash check is the
+    # last guard left.
+    req_status.group_states[0].block_ids[:] = [11, 12, 13]
+    req_status.group_states[1].block_ids[:] = [0, 21]
+
+    output = SimpleNamespace(
+        kv_connector_block_state=KVConnectorBlockState(
+            req_ids=set(),
+            resolve_block_ids={}.__getitem__,
+            boundary_state_offloads={"req": [(1, 99, 36)]},
+        )
+    )
+    jobs = _partial_tail_store_jobs(scheduler, output)
+
+    assert jobs == {}
+    scheduler.manager.prepare_store.assert_not_called()
+
+
 def test_aligned_boundary_store_uses_exact_source_with_partial_tail():
     scheduler = _make_partial_tail_scheduler()
     _make_partial_tail_request(scheduler)
