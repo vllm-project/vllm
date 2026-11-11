@@ -88,7 +88,7 @@ Optional `start` and `stop` hooks must be async functions. The plugin loader rej
 
 On shutdown, the server awaits each eligible `stop(state)` once in reverse order before deleting app state. An exception or cancellation from a stop hook does not skip other plugins or native serving cleanup. Cancellation of the lifespan task is re-raised after cleanup. Stop hooks must settle their owned background work; cleanup is cooperative and has no hard deadline.
 
-A stop hook that never returns prevents earlier plugins and native serving handlers from cleaning up. Once the engine has stopped, a repeated SIGINT or SIGTERM terminates the process with the signal's default action and skips the remaining cleanup; a startup hook that ignores cancellation is handled the same way. Repeated `request_shutdown()` calls remain idempotent. Per-hook stop deadlines are a separate policy change.
+A stop hook that never returns prevents earlier plugins and native serving handlers from cleaning up. Once the engine has stopped, or the shutdown sequence has otherwise ended, a repeated SIGINT or SIGTERM exits the process immediately with status 128 plus the signal number and skips the remaining cleanup; a startup hook that ignores cancellation is handled the same way. Signals that arrive while the engine is still shutting down only request shutdown. Repeated `request_shutdown()` calls remain idempotent. Per-hook stop deadlines are a separate policy change.
 
 The server stops the engine before HTTP shutdown and plugin cleanup. **A stop hook cannot rely on a running engine.** Use the optional drain capability below to settle accepted plugin work before engine shutdown. The API server's `/health` behavior is unchanged.
 
