@@ -527,6 +527,78 @@ def test_replace_parameter_keeps_the_target_checkpoint_layout():
     assert model.proj.weight._ckpt == ckpt
 
 
+class _PaddedRows(torch.nn.Module):
+    """A weight with padding rows the loader skips, a sentinel buffer and a
+    per-row scale outside the checkpoint."""
+
+    def __init__(self, fn, flag: bool, dummy: bool = False):
+        super().__init__()
+        self.layer = _Layer(fn)
+        weight = torch.nn.Parameter(torch.zeros(6, 4), requires_grad=False)
+        weight.weight_loader = lambda param, w: param.data[:4].copy_(w)
+        if flag:
+            weight.fill_on_reload = True
+        if dummy:
+            weight.data.fill_(7)
+        self.layer.register_parameter("weight", weight)
+        self.layer.register_buffer("k_scale", torch.tensor(-1.0))
+        self.layer.register_parameter(
+            "scale", torch.nn.Parameter(torch.full((6,), 7.0), requires_grad=False)
+        )
+
+    def load_weights(self, weights):
+        for _, w in weights:
+            self.layer.weight.weight_loader(self.layer.weight, w)
+
+
+def _padded_rows(fn=_pack, flag=True, scale=1.0, dummy=False) -> _PaddedRows:
+    with _DEVICE:
+        model = _PaddedRows(fn, flag, dummy)
+    if not dummy:
+        model.load_weights(_rows_checkpoint(scale))
+    process_weights_after_loading(model, _MODEL_CONFIG, _DEVICE)
+    return model
+
+
+def _rows_checkpoint(scale: float) -> list[tuple[str, torch.Tensor]]:
+    return [("layer.weight", torch.arange(16.0).reshape(4, 4).add(1) * scale)]
+
+
+@pytest.mark.parametrize("dummy", [False, True], ids=["real", "dummy"])
+def test_flagged_padding_zeroed_at_begin(dummy):
+    # (e) at runtime: the padding rows of the checkpoint layout hold
+    # transposed bytes once viewed back, and the loader skips them
+    model = _padded_rows(dummy=dummy)
+    assert model.layer.weight.fill_on_reload  # survives `replace_parameter`
+    ptrs = _ptrs(_state(model))
+    begin_direct_reload(model)
+    model.load_weights(_rows_checkpoint(1.01))
+    finish_direct_reload(model, _MODEL_CONFIG, _DEVICE)
+    expected = _state(_padded_rows(scale=1.01))
+    _assert_same(_state(model), expected)  # sentinel and scale untouched
+    assert _ptrs(_state(model)) == ptrs
+
+
+def test_unflagged_padding_keeps_stale_bytes():
+    model = _padded_rows(flag=False)
+    _reload(model, dict(_rows_checkpoint(1.01)))
+    expected = _state(_padded_rows(flag=False, scale=1.01))
+    assert not torch.equal(
+        _state(model)["layer.weight"][1], expected["layer.weight"][1]
+    )
+
+
+def test_flagged_tensor_shared_from_another_model_not_zeroed():
+    # a draft sharing a target layer: the target owns its flagged weight
+    target = _padded_rows(fn=None)
+    draft = torch.nn.Module()
+    draft.layer = target.layer
+    process_weights_after_loading(draft, _MODEL_CONFIG, _DEVICE)
+    before = _state(target)
+    begin_direct_reload(draft)
+    _assert_same(_state(target), before, addresses=True)
+
+
 def _config(**overrides) -> SimpleNamespace:
     offload = SimpleNamespace(
         offload_backend="auto",
