@@ -1,8 +1,9 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 """The Rust scheduler's output path in the engine: it sends the outputs of
-each step through `EngineOutputWriter`, encoded in the Rust frontend's wire
-types, with the content of the Python scheduler's `EngineCoreOutputs`.
+each step through `EngineOutputWriter`, encoded in the frontend's wire types,
+with the content of the Python scheduler's `EngineCoreOutputs`, for the Rust
+and the Python frontend alike.
 
 `test_rust_scheduler.py` covers the conversion itself, through the encoded
 outputs the scheduler returns without a writer; these tests add the output
@@ -22,6 +23,8 @@ from tests.v1.core.utils import create_requests, create_scheduler
 from vllm.v1.core.sched.async_scheduler import AsyncScheduler
 from vllm.v1.core.sched.scheduler import Scheduler
 from vllm.v1.engine import EngineCoreOutputs
+from vllm.v1.engine.core import EngineCore
+from vllm.v1.metrics.stats import SchedulerIterationDetails
 from vllm.v1.outputs import LogprobsLists, LogprobsTensors, ModelRunnerOutput
 from vllm.v1.serial_utils import MsgpackDecoder
 
@@ -194,3 +197,62 @@ def test_logprobs_payloads(tmp_path):
         want_prompt = want.new_prompt_logprobs_tensors[:3]
         for g, w in zip(got_prompt, want_prompt):
             np.testing.assert_array_equal(g, w.numpy())
+
+    # The Python frontend's decoder reads them as it reads Python's: arrays as
+    # numpy arrays, and prompt logprobs as tensors.
+    decoded = MsgpackDecoder(EngineCoreOutputs).decode(frames)
+    for got, want in zip(decoded.outputs, expected):
+        for g, w in zip(got.new_logprobs[:3], want.new_logprobs[:3]):
+            np.testing.assert_array_equal(g, w)
+        got_prompt = got.new_prompt_logprobs_tensors
+        for g, w in zip(got_prompt[:3], want.new_prompt_logprobs_tensors[:3]):
+            assert isinstance(g, torch.Tensor) and g.dtype == w.dtype
+            assert torch.equal(g, w)
+
+
+class _Engine:
+    """What `EngineCore` adds to a step's outputs, run on a scheduler."""
+
+    _attach_iteration_details = EngineCore._attach_iteration_details
+    _make_iteration_details_stats = EngineCore._make_iteration_details_stats
+
+    def __init__(self, scheduler):
+        self.scheduler = scheduler
+
+
+@pytest.mark.parametrize("num_tokens", [8, 64])
+def test_iteration_details(num_tokens: int):
+    """The Rust scheduler sets `iteration_details` as `EngineCore` does: on
+    the stats of the first client's outputs, made if there are none, also in a
+    step without outputs (a partial prefill, with `num_tokens=64`)."""
+    outputs = {}
+    for name, cls in (("ref", Scheduler), ("test", RustScheduler)):
+        scheduler = create_scheduler(scheduler_cls=cls, max_num_batched_tokens=32)
+        for request in create_requests(num_requests=1, num_tokens=num_tokens):
+            scheduler.add_request(request)
+        so = scheduler.schedule()
+        req_ids = list(so.num_scheduled_tokens)
+        output = ModelRunnerOutput(
+            req_ids=req_ids, sampled_token_ids=[[1] for _ in req_ids]
+        )
+        details = SchedulerIterationDetails(
+            iteration_index=3,
+            num_ctx_requests=1,
+            num_ctx_tokens=num_tokens,
+            num_generation_requests=0,
+            num_generation_tokens=0,
+            elapsed_ms=1.5,
+        )
+        if name == "ref":
+            step = scheduler.update_from_output(so, output)
+            _Engine(scheduler)._attach_iteration_details(step, details)
+        else:
+            step = scheduler.update_from_output(so, output, iteration_details=details)
+        outputs[name] = step
+    ref, test = outputs["ref"], outputs["test"]
+    assert list(ref) == list(test) == [0]
+    assert test[0].scheduler_stats.iteration_details == details
+    assert test[0].scheduler_stats == ref[0].scheduler_stats
+    assert [o.request_id for o in test[0].outputs] == [
+        o.request_id for o in ref[0].outputs
+    ]

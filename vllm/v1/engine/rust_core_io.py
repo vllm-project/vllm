@@ -1,10 +1,11 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
-"""The native I/O of the Rust engine core, which serves the Rust frontend.
+"""The native I/O of the Rust engine core.
 
 The Rust scheduler sends the request outputs of each step itself: the output
-thread of `vllm._rust_core` encodes them in the Rust frontend's wire types,
-with no Python `EngineCoreOutputs` built. Everything else the engine sends
+thread of `vllm._rust_core` encodes them in the frontend's wire types (the Rust
+and the Python frontend decode them alike), with no Python `EngineCoreOutputs`
+built. Everything else the engine sends
 (utility results, DP coordinator messages, error outputs, ...) goes through
 `NativeOutputQueue`, which encodes it in Python as before and hands the frames
 to the same thread, so the order of messages is kept.

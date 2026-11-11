@@ -18,7 +18,7 @@ import zmq
 
 from tests.v1.core.rust_core_diff import FuzzConfig, build_scheduler, run_one
 from vllm.lora.request import LoRARequest
-from vllm.sampling_params import SamplingParams
+from vllm.sampling_params import RequestOutputKind, SamplingParams
 from vllm.v1.core import kv_cache_utils
 from vllm.v1.core.sched.async_scheduler import AsyncScheduler
 from vllm.v1.core.sched.scheduler import Scheduler
@@ -209,6 +209,40 @@ class _RequestsWithReference(dict):
 
     def items(self):
         return ((rid, self[rid]) for rid in self._requests)
+
+
+def test_fast_path_keeps_the_payloads_as_sent(tmp_path):
+    """A fast-path request's sampling params and LoRA request are decoded
+    from the bytes the frontend sent, so fields the Rust types leave out
+    (here the output options of a Python frontend) survive."""
+    frontend = _Frontend(str(tmp_path), None)
+    sampling_params = SamplingParams(
+        max_tokens=4,
+        n=1,
+        ignore_eos=True,
+        skip_special_tokens=False,
+        include_stop_str_in_output=True,
+        output_kind=RequestOutputKind.FINAL_ONLY,
+        trace_decode_token_ids=[7, 8],
+    )
+    lora_request = LoRARequest("meow", 1, "/meow", load_inplace=True)
+    request = EngineCoreRequest(
+        request_id="kept",
+        prompt_token_ids=np.arange(4, dtype=np.uint32),
+        mm_features=None,
+        sampling_params=sampling_params,
+        pooling_params=None,
+        arrival_time=0.0,
+        lora_request=lora_request,
+        cache_salt=None,
+        data_parallel_rank=None,
+    )
+    request_type, item = frontend.send(EngineCoreRequestType.ADD, request)
+    assert request_type == EngineCoreRequestType.ADD
+    native, _ = item
+    assert isinstance(native, NativeAddRequest)
+    assert native.sampling_params == sampling_params
+    assert native.lora_request == lora_request
 
 
 def test_other_messages_take_the_slow_path(tmp_path):

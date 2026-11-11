@@ -23,9 +23,9 @@ use pyo3::sync::PyOnceLock;
 use pyo3::types::{PyBytes, PyList, PyString, PyTuple};
 use vllm_engine_core::hash::{BlockHash, HashAlgo, RequestBlockHasher, RequestExtraKeys, Value};
 use vllm_engine_core::sched::request::{BlockHasher, KvCacheReportMode, NewRequest, Request};
-use vllm_engine_core_client::protocol::encode_msgpack;
 use vllm_engine_core_client::protocol::request::{
-    EngineCoreRequest, EngineCoreRequestType, decode_engine_core_request,
+    EngineCoreRequest, EngineCoreRequestType, RawRequestPayloads, decode_engine_core_request,
+    raw_request_payloads,
 };
 use vllm_engine_core_io::input::{InputConfig, InputReader};
 
@@ -179,16 +179,14 @@ impl NativeAddRequest {
     fn new(
         py: Python<'_>,
         request: EngineCoreRequest,
+        raw: RawRequestPayloads,
         hashing: Option<&PrefixHashing>,
         decoders: &PayloadDecoders,
     ) -> PyResult<Self> {
         let sp = decoders.decode(
             py,
             &decoders.sampling_params,
-            request
-                .sampling_params
-                .as_ref()
-                .expect("a fast-path request has sampling params"),
+            raw.sampling_params.as_ref().expect("a fast-path request has sampling params"),
         )?;
         let sampling_params = sampling_params_of(&sp, false, KvCacheReportMode::Incremental)?;
         let prompt: Vec<i32> = (request.prompt_token_ids.as_ref())
@@ -197,7 +195,7 @@ impl NativeAddRequest {
             .into_iter()
             .map(|t| t as i32)
             .collect();
-        let lora_request = match &request.lora_request {
+        let lora_request = match &raw.lora_request {
             Some(lora) => decoders.decode(py, &decoders.lora_request, lora)?,
             None => py.None().into_bound(py),
         };
@@ -258,8 +256,8 @@ impl NativeAddRequest {
     }
 }
 
-/// Build the Python payloads of a fast-path request from their decoded wire
-/// form: each decoder takes the msgpack bytes of a payload.
+/// Build the Python payloads of a fast-path request from their msgpack bytes
+/// as the frontend sent them, so that what the Rust types leave out survives.
 struct PayloadDecoders {
     /// `SamplingParams`, as `preprocess_add_request` leaves them.
     sampling_params: Py<PyAny>,
@@ -272,10 +270,9 @@ impl PayloadDecoders {
         &self,
         py: Python<'py>,
         decoder: &Py<PyAny>,
-        payload: &(impl serde::Serialize + std::fmt::Debug),
+        payload: &Bytes,
     ) -> PyResult<Bound<'py, PyAny>> {
-        let encoded = encode_msgpack(payload).map_err(|e| PyValueError::new_err(e.to_string()))?;
-        decoder.bind(py).call1((PyBytes::new(py, &encoded),))
+        decoder.bind(py).call1((PyBytes::new(py, payload),))
     }
 }
 
@@ -341,14 +338,18 @@ impl EngineInputReader {
         let on_message = Box::new(move |frames: Vec<Bytes>| -> Result<(), String> {
             // Decoded off the GIL.
             let fast = (frames[0].as_ref() == [EngineCoreRequestType::Add as u8])
-                .then(|| decode_engine_core_request(&frames[1..]).ok())
+                .then(|| {
+                    let request = decode_engine_core_request(&frames[1..]).ok()?;
+                    let raw = raw_request_payloads(&frames[1]).ok()?;
+                    Some((request, raw))
+                })
                 .flatten()
-                .filter(|request| slow_path_reason(request).is_none());
+                .filter(|(request, _)| slow_path_reason(request).is_none());
             Python::attach(|py| {
                 let result = match fast {
-                    Some(request) => {
+                    Some((request, raw)) => {
                         let wave = request.current_wave;
-                        NativeAddRequest::new(py, request, hashing.as_ref(), &decoders)
+                        NativeAddRequest::new(py, request, raw, hashing.as_ref(), &decoders)
                             .and_then(|request| Py::new(py, request))
                             .and_then(|request| {
                                 let item = PyTuple::new(

@@ -40,9 +40,11 @@ use vllm_engine_core::connectors::mooncake_store_scheduler::SavePinPolicy;
 use vllm_engine_core::sched::request::{Request, RequestStatus};
 use vllm_engine_core::sched::scheduler::{
     AuxOutputConnector, EcConnector, ErrorRequestIds, IdSetOrder, KvConnector, PauseState,
-    Scheduler, SchedulerError, StructuredOutput, UpdateOutput,
+    Scheduler, SchedulerError, StructuredOutput, UpdateOutput, monotonic,
 };
-use vllm_engine_core_client::protocol::output::{EngineCoreOutputs, encode_engine_core_outputs};
+use vllm_engine_core_client::protocol::output::{
+    EngineCoreOutputs, RequestBatchOutputs, encode_engine_core_outputs,
+};
 
 use self::hooks::{
     PyAuxOutputConnector, PyEcConnector, PyKvConnector, PyStructuredOutput, SchedulerContext,
@@ -287,6 +289,37 @@ impl RustSchedulerCore {
     /// Python meanwhile (except from the hooks that receive it), and a
     /// Python exception raised by a hook, or a panic, becomes the call's
     /// exception.
+    /// `EngineCore._attach_iteration_details`: on the stats of the first
+    /// client's outputs, made if there are none.
+    fn attach_iteration_details(
+        &mut self,
+        batches: &mut Vec<(usize, RequestBatchOutputs)>,
+        details: &Bound<'_, PyAny>,
+        weight_version: Option<&str>,
+    ) -> PyResult<()> {
+        let details = native_output::decode_py(details)?;
+        if batches.is_empty() {
+            batches.push((
+                0,
+                RequestBatchOutputs {
+                    engine_index: 0,
+                    outputs: Vec::new(),
+                    scheduler_stats: None,
+                    timestamp: monotonic(),
+                    finished_requests: None,
+                    weight_version: weight_version.map(Arc::from),
+                },
+            ));
+        }
+        let batch = &mut batches[0].1;
+        if batch.scheduler_stats.is_none() {
+            let stats = self.run(|s| s.make_stats(None))?;
+            batch.scheduler_stats = Some(Box::new(stats.map(|s| s.to_wire()).unwrap_or_default()));
+        }
+        batch.scheduler_stats.as_mut().unwrap().iteration_details = Some(details);
+        Ok(())
+    }
+
     fn run<R>(&mut self, f: impl FnOnce(&mut Scheduler) -> R) -> PyResult<R> {
         self.shared.kv.set(std::ptr::null_mut());
         let result = catch_unwind(AssertUnwindSafe(|| f(&mut self.inner)));
@@ -769,11 +802,18 @@ impl RustSchedulerCore {
     }
 
     /// Update the scheduler with a step's model output. The outputs, in the
-    /// Rust frontend's wire types with `weight_version` set, go to the output
-    /// writer if one is set; else they are returned encoded, as
+    /// frontend's wire types with `weight_version` and `iteration_details`
+    /// (`SchedulerIterationDetails`) set as `EngineCore` sets them, go to the
+    /// output writer if one is set; else they are returned encoded, as
     /// `[(client_index, frames)]`, for the caller to decode as the frontend
     /// would.
-    #[pyo3(signature = (scheduler_output, model_runner_output, perf_stats=None, weight_version=None))]
+    #[pyo3(signature = (
+        scheduler_output,
+        model_runner_output,
+        perf_stats=None,
+        weight_version=None,
+        iteration_details=None,
+    ))]
     fn update_from_output<'py>(
         &mut self,
         py: Python<'py>,
@@ -781,10 +821,11 @@ impl RustSchedulerCore {
         model_runner_output: &Bound<'py, PyAny>,
         perf_stats: Option<Bound<'py, PyAny>>,
         weight_version: Option<String>,
+        iteration_details: Option<Bound<'py, PyAny>>,
     ) -> PyResult<Option<Bound<'py, PyList>>> {
         let (update, mo, extra) =
             self.process_model_output(py, scheduler_output, model_runner_output, perf_stats)?;
-        let batches = {
+        let mut batches = {
             let table = self.shared.table.lock().unwrap();
             native_output::native_outputs(
                 py,
@@ -795,6 +836,9 @@ impl RustSchedulerCore {
                 weight_version.as_deref(),
             )?
         };
+        if let Some(details) = iteration_details {
+            self.attach_iteration_details(&mut batches, &details, weight_version.as_deref())?;
+        }
         self.drain_removed(py)?;
         if let Some(writer) = &self.output_writer {
             let writer = &writer.get().inner;

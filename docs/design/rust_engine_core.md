@@ -25,9 +25,8 @@ GPU workers, the model runner, the worker halves of KV connectors and the API
 frontend are not part of it. Structured output stays in Python: the Rust
 scheduler calls the Python `StructuredOutputManager` (every backend) through
 hooks. The Python `EngineCore` loop and the executor stay in Python. With the
-Rust scheduler, the engine's ZMQ I/O runs on Rust threads that speak the Rust
-frontend's wire types ([Native I/O](#native-io)), so the Rust scheduler serves
-the Rust frontend only.
+Rust scheduler, the engine's ZMQ I/O runs on Rust threads
+([Native I/O](#native-io)), for the Rust and the Python frontend alike.
 
 ## Enabling it
 
@@ -40,8 +39,8 @@ implementation of every component.
 
 | Setting | Default | Effect |
 | --- | --- | --- |
-| `VLLM_USE_RUST_CORE=1` | `0` | Use the Rust scheduler, KV cache manager, block hasher and Mooncake store lookup paths where supported, falling back to Python otherwise. The Rust scheduler needs the Rust frontend: with another frontend, or an engine in process, the Python scheduler is used. |
-| `--scheduler-cls vllm.v1.core.sched.rust_scheduler.RustScheduler` | unset | Select the Rust scheduler explicitly (`RustAsyncScheduler` for async scheduling). Fails at startup if the configuration is unsupported or the frontend is not the Rust frontend. |
+| `VLLM_USE_RUST_CORE=1` | `0` | Use the Rust scheduler, KV cache manager, block hasher and Mooncake store lookup paths where supported, falling back to Python otherwise. |
+| `--scheduler-cls vllm.v1.core.sched.rust_scheduler.RustScheduler` | unset | Select the Rust scheduler explicitly (`RustAsyncScheduler` for async scheduling). Fails at startup if the configuration is unsupported. |
 | `VLLM_RUST_CORE_NATIVE_HOOKS=0` | `1` | Keep the Python NIXL / Mooncake store scheduler halves, called from the Rust scheduler through hooks. |
 
 For example:
@@ -58,7 +57,7 @@ With `VLLM_USE_RUST_CORE=1` and no `--scheduler-cls`, the scheduler class is
 
 ```mermaid
 flowchart LR
-    FE[Rust frontend] -- ZMQ --> IO
+    FE[Frontend] -- ZMQ --> IO
     subgraph EC[EngineCore process]
         Loop[Python EngineCore loop<br/>executor]
         IO[Rust input and output<br/>threads]
@@ -81,7 +80,7 @@ The crates are:
 
 | Crate | Owns |
 | --- | --- |
-| `rust/src/engine-core` (`vllm-engine-core`) | Pure Rust, no PyO3: hashing (pickle protocol 5 and canonical CBOR serializers), KV cache manager, scheduler and its outputs in the Rust frontend's wire types (`vllm-engine-core-client`), connector scheduler halves |
+| `rust/src/engine-core` (`vllm-engine-core`) | Pure Rust, no PyO3: hashing (pickle protocol 5 and canonical CBOR serializers), KV cache manager, scheduler and its outputs in the frontend's wire types (`vllm-engine-core-client`), connector scheduler halves |
 | `rust/src/engine-core-io` (`vllm-engine-core-io`) | The engine's ZMQ input and output threads |
 | `rust/src/engine-core-py` (`vllm-engine-core-py`) | PyO3 bindings (`vllm._rust_core`): config conversion, request bridging, hook adapters, the payloads Python objects hold |
 
@@ -89,8 +88,8 @@ Python collaborators that are not ported are reached through traits
 (`KvConnector`, `StructuredOutput`, ...) that the binding crate implements over
 the Python objects. On the native path there are two Python-to-Rust crossings
 per engine step. The binding builds the regular Python `SchedulerOutput`, so
-the executor and workers are unchanged; the outputs go to the Rust frontend
-without Python objects ([Native I/O](#native-io)).
+the executor and workers are unchanged; the outputs go to the frontend without
+Python objects ([Native I/O](#native-io)).
 Connector metadata sent to workers is the same Python object type, so the
 connector worker halves are unchanged too.
 
@@ -103,9 +102,10 @@ exceptions.
 ## Native I/O
 
 With the Rust scheduler, `EngineCoreProc` runs the input and output threads of
-`vllm-engine-core-io` in place of its Python ones. The Rust frontend announces
-itself in the startup handshake (`EngineHandshakeMetadata.rust_frontend`); the
-wire types cover only what it reads.
+`vllm-engine-core-io` in place of its Python ones. The wire types are those
+of the Rust frontend's client (`vllm-engine-core-client`), complete for what
+the engine sends, so the Python frontend decodes the outputs as it decodes the
+Python engine's.
 
 - **Output**: `update_from_output` converts the step's outputs to the wire
   types, and the output thread encodes and sends them, off the GIL. The
@@ -113,11 +113,14 @@ wire types cover only what it reads.
   read once per step and sliced per request. Everything else the engine sends
   (utility results, DP coordinator messages, error outputs) is encoded in
   Python and sent by the same thread, so message order is kept. Without an
-  output writer (tests), `RustScheduler.update_from_output` returns the
-  outputs as the frontend decodes them.
+  output writer (an engine in process, and tests),
+  `RustScheduler.update_from_output` returns the outputs as the frontend
+  decodes them.
 - **Input**: the input thread decodes each add request off the GIL and
   classifies it once. A request that meets no Python collaborator is admitted
-  without a Python `Request` (`NativeAddRequest`); structured outputs, extra
+  without a Python `Request` (`NativeAddRequest`), its sampling parameters
+  and LoRA request decoded in Python from the bytes the frontend sent, so no
+  field is lost to the Rust types; structured outputs, extra
   args such as KV transfer params, multimodal inputs, sessions and every
   other message go to the Python preprocessing with their original frames.
   The native input thread needs no KV, EC or aux output connector and a
@@ -134,7 +137,6 @@ used instead and the reason is logged once.
 - **Extension missing**: all components use Python (a warning is logged).
 - **Scheduler** (`vllm/v1/core/sched/rust_scheduler.py`) falls back to
   `Scheduler` / `AsyncScheduler` for:
-    - frontends other than the Rust frontend, and engines in process;
     - pooling models;
     - custom encoder cache managers;
     - KV cache managers registered by platforms or plugins (any manager class

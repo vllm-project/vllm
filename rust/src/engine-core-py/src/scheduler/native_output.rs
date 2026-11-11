@@ -24,7 +24,7 @@ use pyo3::pybacked::PyBackedBytes;
 use pyo3::sync::PyOnceLock;
 use pyo3::types::PyBytes;
 use vllm_engine_core::sched::scheduler::{EngineCoreOutput, UpdateOutput, monotonic};
-use vllm_engine_core_client::protocol::dtype::{NumpyDtype, TensorDtype};
+use vllm_engine_core_client::protocol::dtype::{Endianness, NumpyDtype, TensorDtype};
 use vllm_engine_core_client::protocol::logprobs::{MaybeWireLogprobs, WireLogprobs};
 use vllm_engine_core_client::protocol::output::{self as wire, RequestBatchOutputs};
 use vllm_engine_core_client::protocol::sampling_mask::{MaybeWireSamplingMask, WireSamplingMask};
@@ -126,7 +126,9 @@ fn msgpack<'py>(obj: &Bound<'py, PyAny>) -> PyResult<Bound<'py, PyBytes>> {
 }
 
 /// A Python object as the wire type it encodes to.
-fn decode_py<T: for<'de> serde::Deserialize<'de>>(obj: &Bound<'_, PyAny>) -> PyResult<T> {
+pub(super) fn decode_py<T: for<'de> serde::Deserialize<'de>>(
+    obj: &Bound<'_, PyAny>,
+) -> PyResult<T> {
     decode_msgpack(msgpack(obj)?.as_bytes())
         .map_err(|error| PyValueError::new_err(error.to_string()))
 }
@@ -176,6 +178,28 @@ impl BatchArray {
 
     fn whole(&self) -> WireNdArray {
         WireNdArray::from_raw_bytes(self.dtype, self.shape.clone(), self.data.clone())
+    }
+
+    /// The whole array, for a field Python types as a tensor: its dtype in
+    /// native byte order, which the wire spells as Python's tensor decoder
+    /// needs (the Torch name).
+    fn whole_tensor(&self) -> PyResult<WireNdArray> {
+        let native = match self.dtype.endianness {
+            Endianness::Native => true,
+            Endianness::Little => cfg!(target_endian = "little"),
+            Endianness::Big => cfg!(target_endian = "big"),
+        };
+        if !native {
+            return Err(PyValueError::new_err(format!(
+                "a tensor in non-native byte order: {}",
+                self.dtype
+            )));
+        }
+        Ok(WireNdArray::from_raw_bytes(
+            NumpyDtype::native(self.dtype.scalar),
+            self.shape.clone(),
+            self.data.clone(),
+        ))
     }
 
     /// Rows `start..end`, without a copy.
@@ -240,7 +264,7 @@ impl BatchLogprobs {
 fn prompt_logprobs(tensors: &Bound<'_, PyAny>) -> PyResult<MaybeWireLogprobs> {
     let py = tensors.py();
     let array = |name| -> PyResult<WireNdArray> {
-        Ok(BatchArray::from_py(&tensors.getattr(name)?)?.whole())
+        BatchArray::from_py(&tensors.getattr(name)?)?.whole_tensor()
     };
     Ok(MaybeWireLogprobs::Wire(Box::new(WireLogprobs {
         logprob_token_ids: array(intern!(py, "logprob_token_ids"))?,
@@ -362,7 +386,7 @@ impl<'py> StepPayloads<'_, 'py> {
                 && let Some(tensor) = dict.get_item(&output.request_id)?.filter(|t| !t.is_none())
             {
                 converted.prompt_token_id_logprobs =
-                    Some(Box::new(BatchArray::from_py(&tensor)?.whole()));
+                    Some(Box::new(BatchArray::from_py(&tensor)?.whole_tensor()?));
             }
         }
         if let Some(rows) = &output.routed_experts {
@@ -388,8 +412,8 @@ impl<'py> StepPayloads<'_, 'py> {
     }
 }
 
-/// The scheduler's update of a step in the Rust frontend's wire types, a
-/// batch per client index.
+/// The scheduler's update of a step in the frontend's wire types, a batch per
+/// client index.
 pub(super) fn native_outputs(
     py: Python<'_>,
     update: &UpdateOutput,
@@ -423,7 +447,12 @@ pub(super) fn native_outputs(
                 if let Some(stats) = extra.perf_stats {
                     converted.perf_stats = Some(decode_py(&stats)?);
                 }
-                // The Rust frontend reads no `ec_connector_stats`.
+                if let Some(stats) = extra.ec_connector_stats
+                    && stats.is_truthy()?
+                {
+                    let data = stats.getattr(intern!(py, "data"))?;
+                    converted.ec_connector_stats = Some(decode_py(&data)?);
+                }
                 Some(Box::new(converted))
             }
             None => None,

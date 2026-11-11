@@ -144,9 +144,6 @@ class EngineHandshakeMetadata:
 
     addresses: EngineZmqAddresses
     parallel_config: dict[str, int | str | list[int]]
-    # Set by the Rust frontend: the engine may speak its wire types, as the Rust
-    # engine core's native I/O does.
-    rust_frontend: bool = False
 
 
 def _make_control_bundle(node_ip: str) -> dict[str, float]:

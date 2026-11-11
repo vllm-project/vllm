@@ -554,9 +554,8 @@ fn spec_decoding_stats_to_py<'py>(
         s.num_drafts,
         s.num_draft_tokens,
         s.num_accepted_tokens,
-        // `num_draft_tokens_per_pos` keeps its default: the Rust frontend
-        // reads none.
         PyList::new(py, &s.num_accepted_tokens_per_pos)?,
+        PyList::new(py, &s.num_draft_tokens_per_pos)?,
     ))
 }
 

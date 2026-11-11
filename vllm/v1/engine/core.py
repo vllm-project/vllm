@@ -127,9 +127,6 @@ _R = TypeVar("_R")  # Return type for collective_rpc
 
 
 class EngineCore:
-    # Whether the frontend is the Rust frontend, which `EngineCoreProc` learns
-    # in the startup handshake.
-    rust_frontend = False
     """Inner loop of vLLM's Engine."""
 
     def __init__(
@@ -182,10 +179,6 @@ class EngineCore:
 
         # Setup scheduler.
         Scheduler = vllm_config.scheduler_config.get_scheduler_cls()
-        if "rust_scheduler" in Scheduler.__module__:
-            from vllm.v1.core.sched.rust_scheduler import scheduler_cls_for_frontend
-
-            Scheduler = scheduler_cls_for_frontend(Scheduler, self.rust_frontend)
 
         if len(kv_cache_config.kv_cache_groups) == 0:  # noqa: SIM102
             # Encoder models without KV cache don't support
@@ -262,7 +255,7 @@ class EngineCore:
             self.step if self.batch_queue is None else self.step_with_batch_queue
         )
         # Whether the scheduler sends the request outputs itself: the Rust
-        # scheduler, set up by `EngineCoreProc`.
+        # scheduler, once `EngineCoreProc` gives it the output sockets.
         self.native_output = False
         scheduler_config = vllm_config.scheduler_config
         self.async_scheduling = scheduler_config.async_scheduling
@@ -727,10 +720,12 @@ class EngineCore:
         iteration_details: SchedulerIterationDetails | None,
     ) -> dict[int, EngineCoreOutputs]:
         if self.native_output:
-            # The scheduler sends the outputs. The Rust frontend, the only
-            # client of the native output path, reads no iteration details.
+            # The scheduler sends the outputs, with what `_attach_*` adds.
             self.scheduler.update_from_output(  # type: ignore[call-arg]
-                scheduler_output, model_output, self._weight_version
+                scheduler_output,
+                model_output,
+                weight_version=self._weight_version,
+                iteration_details=iteration_details,
             )
             return {}
         engine_core_outputs = self.scheduler.update_from_output(
@@ -1468,8 +1463,7 @@ class EngineCoreProc(EngineCore):
             # Threads handle Socket <-> Queues and core_busy_loop uses Queue.
             from vllm.v1.core.sched.rust_scheduler import RustScheduler
 
-            # The Rust scheduler, which serves the Rust frontend only, sends
-            # the outputs itself.
+            # The Rust scheduler sends the outputs itself.
             native_output = isinstance(self.scheduler, RustScheduler)
             ready_event = threading.Event()
             input_thread: Any
@@ -1546,8 +1540,8 @@ class EngineCoreProc(EngineCore):
             return params
 
         ready_response = self._make_ready_response()
-        # TODO: honor the prompt block hashes of the Rust frontend; until then
-        # it need not compute them.
+        # TODO: honor the frontend's prompt block hashes; until then it need not
+        # compute them.
         ready_response.prefix_hash_config = None
         reader = EngineInputReader(
             self,
@@ -1625,26 +1619,21 @@ class EngineCoreProc(EngineCore):
         )
         if client_handshake_address is None:
             # We only need to handshake with one party.
-            with handshake as init_message:
-                self.rust_frontend = init_message.rust_frontend
-                yield init_message.addresses
+            with handshake as addresses:
+                yield addresses
         else:
             # We need to handshake with rank 0 front-end and our colocated frontend.
             assert local_client
             local_handshake = self._perform_handshake(
                 input_ctx, client_handshake_address, identity, True, False, vllm_config
             )
-            with handshake as init_message, local_handshake as client_init_message:
+            with handshake as addresses, local_handshake as client_addresses:
                 # 1. Obtain DP Coordinator zmq address and DP process group address
                 #    (addresses).
                 # 2. Add front-end input/output addresses from colocated front-end
                 #    (client_addresses).
-                addresses = init_message.addresses
-                client_addresses = client_init_message.addresses
                 addresses.inputs = client_addresses.inputs
                 addresses.outputs = client_addresses.outputs
-                # The colocated front-end owns the input and output sockets.
-                self.rust_frontend = client_init_message.rust_frontend
                 yield addresses
 
         # Update config which may have changed from the handshake
@@ -1660,7 +1649,7 @@ class EngineCoreProc(EngineCore):
         headless: bool,
         vllm_config: VllmConfig,
         parallel_config_to_update: ParallelConfig | None = None,
-    ) -> Generator[EngineHandshakeMetadata, None, None]:
+    ) -> Generator[EngineZmqAddresses, None, None]:
         with make_zmq_socket(
             ctx,
             handshake_address,
@@ -1670,9 +1659,10 @@ class EngineCoreProc(EngineCore):
             bind=False,
         ) as handshake_socket:
             # Register engine with front-end.
-            yield self.startup_handshake(
+            addresses = self.startup_handshake(
                 handshake_socket, local_client, headless, parallel_config_to_update
             )
+            yield addresses
 
             # Send ready message.
             ready_msg = {
@@ -1704,7 +1694,7 @@ class EngineCoreProc(EngineCore):
         local_client: bool,
         headless: bool,
         parallel_config: ParallelConfig | None = None,
-    ) -> EngineHandshakeMetadata:
+    ) -> EngineZmqAddresses:
         # Send registration message.
         handshake_socket.send(
             msgspec.msgpack.encode(
@@ -1757,7 +1747,7 @@ class EngineCoreProc(EngineCore):
                     num_redundant_experts
                 )
 
-        return init_message
+        return init_message.addresses
 
     @staticmethod
     def run_engine_core(*args, dp_rank: int = 0, local_dp_rank: int = 0, **kwargs):
