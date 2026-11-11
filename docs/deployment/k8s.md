@@ -388,6 +388,28 @@ INFO:     Uvicorn running on http://0.0.0.0:8000 (Press CTRL+C to quit)
 
       If the service is correctly deployed, you should receive a response from the vLLM model.
 
+## Generation readiness probe
+
+`/health` only checks that the server processes are alive. To also take a pod out of the Service when its engine cannot run the model (e.g. a hung collective or a GPU fault), point the readiness probe at [`/health_generate`](../serving/online_serving/README.md#generation-readiness-check) and keep `/health` for the liveness probe:
+
+```yaml
+livenessProbe:
+  httpGet:
+    path: /health
+    port: 8000
+  initialDelaySeconds: 60
+  periodSeconds: 10
+readinessProbe:
+  httpGet:
+    path: /health_generate
+    port: 8000
+  initialDelaySeconds: 60
+  periodSeconds: 10
+  timeoutSeconds: 30
+```
+
+Set `timeoutSeconds` above `VLLM_HEALTH_GENERATE_TIMEOUT_S` (20 s by default); the Kubernetes default of 1 s can be shorter than an idle GPU probe. Don't use `/health_generate` for the liveness probe: it returns 503 while the engine sleeps, so the container would be restarted during a weight sync.
+
 ## Serving with gRPC
 
 vLLM can serve models over gRPC instead of HTTP by passing the `--grpc` flag. This requires the optional gRPC dependencies:

@@ -88,6 +88,31 @@ For further details on speech to text, please refer to [this page](speech_to_tex
 - `/load` - Server load metrics
 - `/v1/models` - List available models
 - `/health` - Health check
+- `/health_generate` - Generation readiness check, see [below](#generation-readiness-check)
+
+### Generation readiness check
+
+`/health` checks that the API server and engine processes are alive. `/health_generate` also checks that every engine rank can run the model right now. It returns 200 when the server can serve generation, and 503 with a JSON body otherwise:
+
+```json
+{"status": "not_ready", "reason": "probe_timeout", "message": "...", "engine_ranks": [1], "timeout_s": 20.0}
+```
+
+| Reason | Meaning |
+| :---- | :---- |
+| `engine_dead` | An engine process has died. |
+| `sleeping` | An engine rank is sleeping or paused, e.g. during a weight sync. |
+| `probe_timeout` | An engine rank did not answer in time. Its busy loop is blocked, e.g. in a hung collective, or a single step is taking longer than the timeout. |
+| `probe_failed` | The GPU probe on an idle engine rank raised an error. |
+
+A busy engine rank is reported ready without extra GPU work. An idle rank runs one dummy forward pass on every worker. For MoE models with data parallelism, idle ranks only check that the engine answers, because a dummy batch outside a DP wave could deadlock.
+
+| Env var | Default | Meaning |
+| :---- | :---- | :---- |
+| `VLLM_HEALTH_GENERATE_TIMEOUT_S` | 20 | How long to wait for each engine rank before reporting `probe_timeout`. |
+| `VLLM_HEALTH_GENERATE_PROBE_CACHE_TTL_S` | 10 | How long a passing idle probe is reused. `0` disables the cache. |
+
+Use `/health_generate` for readiness checks and keep `/health` for liveness checks, so that a sleeping or temporarily slow server is taken out of rotation instead of restarted. `/health_generate` is not authenticated with `--api-key`, like `/health`.
 
 ### Metrics APIs
 
