@@ -469,6 +469,17 @@ def bf16x3_router_gemm_module():
     return bf16x3_router_gemm_sm100
 
 
+@cache
+def _aiter_gemm_a16w32():
+    """AITER's gemm_a16w32, or None when the installed AITER does not have it."""
+    try:
+        from aiter.ops.triton.gemm.basic.gemm_a16w32 import gemm_a16w32
+    except ImportError:
+        return None
+    logger.info_once("ROCm router GEMM: AITER gemm_a16w32 below 2048 tokens.")
+    return gemm_a16w32
+
+
 def rocm_bf16x3_router_gemm_dispatch_impl(
     x: torch.Tensor,
     weight: torch.Tensor,
@@ -488,8 +499,19 @@ def rocm_bf16x3_router_gemm_dispatch_impl(
 
     if bf16x3_router_gemm_rocm.is_supported(x, weight):
         return bf16x3_router_gemm_rocm.bf16x3_router_gemm(x, weight_split)
-    # Below MIN_TOKENS, hand back to the low-M gfx950 kernel this tier is
-    # checked ahead of.
+    # Below MIN_TOKENS: AITER's gemm_a16w32 (fp32 FMA at small M, bf16x3 MFMA
+    # above), one launch for every M.
+    aiter_gemm = _aiter_gemm_a16w32()
+    if (
+        aiter_gemm is not None
+        and x.shape[0] > 0
+        and x.dtype == torch.bfloat16
+        and weight.dtype == torch.float32
+        and x.device == weight.device
+    ):
+        return aiter_gemm(x, weight, weight_split)
+    # Without AITER's kernel, hand back to the low-M gfx950 kernel this tier
+    # is checked ahead of.
     if x.shape[0] <= _FP32_ROUTER_GEMM_MAX_TOKENS:
         from vllm.model_executor.layers.fused_moe.router.rocm_fp32_router_gemm import (  # noqa: E501
             can_use_rocm_fp32_router_gemm,

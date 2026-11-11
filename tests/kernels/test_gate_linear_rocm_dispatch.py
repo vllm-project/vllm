@@ -267,3 +267,44 @@ def test_rocm_bf16x3_is_reachable_for_low_m_shapes(monkeypatch):
     assert source.index("allow_rocm_bf16x3_router_gemm") < source.index(
         "allow_fp32_router_gemm"
     )
+
+
+@pytest.mark.parametrize(
+    ("m", "has_aiter", "path"),
+    [
+        (1, True, "aiter"),
+        (32, True, "aiter"),
+        (2047, True, "aiter"),
+        (2048, True, "bf16x3"),
+        (0, True, "linear"),
+        (64, False, "linear"),
+        (2048, False, "bf16x3"),
+    ],
+)
+def test_rocm_bf16x3_dispatch_uses_aiter_below_min_tokens(
+    monkeypatch, m: int, has_aiter: bool, path: str
+) -> None:
+    """Below MIN_TOKENS the dispatch runs AITER's gemm_a16w32 when the
+    installed AITER has it; with no rows or without it, the previous path."""
+    from vllm.model_executor.layers.fused_moe.router import (
+        bf16x3_router_gemm_rocm as rocm_bf16x3,
+    )
+
+    calls: list[str] = []
+
+    def fake(name):
+        def run(x, *args):
+            calls.append(name)
+            return torch.zeros(x.shape[0], 128, dtype=torch.float32)
+
+        return run
+
+    aiter = fake("aiter") if has_aiter else None
+    monkeypatch.setattr(gate_linear_mod, "_aiter_gemm_a16w32", lambda: aiter)
+    monkeypatch.setattr(rocm_bf16x3, "bf16x3_router_gemm", fake("bf16x3"))
+    x = torch.randn(m, 256, dtype=torch.bfloat16)
+    w = torch.randn(128, 256, dtype=torch.float32)
+    split = torch.zeros(3, 128, 256, dtype=torch.bfloat16)
+    out = gate_linear_mod.rocm_bf16x3_router_gemm_dispatch_impl(x, w, split)
+    assert out.shape == (m, 128) and out.dtype == torch.float32
+    assert calls == ([] if path == "linear" else [path])
