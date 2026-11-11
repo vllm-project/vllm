@@ -2,6 +2,7 @@
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 import asyncio
 import contextlib
+import hashlib
 import queue
 import sys
 import uuid
@@ -1800,6 +1801,10 @@ class DPLBAsyncMPClient(DPAsyncMPClient):
 
         # Exact per-engine count of this client's unfinished requests.
         self.engine_inflight: Counter[EngineIdentity] = Counter()
+        # Waiting counts this client added to `lb_engines` since the last
+        # coordinator snapshot, which replaces the list.
+        self.lb_local_waiting: list[int] = []
+        self.lb_local_waiting_for: list[list[int | float]] | None = None
 
         super().__init__(
             vllm_config,
@@ -1838,8 +1843,17 @@ class DPLBAsyncMPClient(DPAsyncMPClient):
             current_counts = self.lb_engines
             # TODO use P2C alg for larger DP sizes
             num_engines = len(current_counts)
+            if (
+                self.lb_local_waiting_for is not current_counts
+                or len(self.lb_local_waiting) != num_engines
+            ):
+                self.lb_local_waiting_for = current_counts
+                self.lb_local_waiting = [0] * num_engines
             min_score: float = sys.maxsize
             eng_index = 0
+            # Load without this client's guesses for the requests it routed
+            # since the last snapshot.
+            known_loads: list[float] = [0.0] * num_engines
             for i in range(num_engines):
                 # Start from client_index to help with balancing when engines
                 # are empty.
@@ -1862,12 +1876,28 @@ class DPLBAsyncMPClient(DPAsyncMPClient):
                     # the penalty stays off, preserving exact round-robin.
                     # Ramps from 0 at <=50% usage to 3x waiting at 100%.
                     score += waiting * 6.0 * max(0.0, kv_cache_usage - 0.5)
+                known_loads[idx] = max(
+                    self.client_count * inflight,
+                    waiting - self.lb_local_waiting[idx] + running,
+                )
                 if score < min_score:
                     min_score = score
                     eng_index = idx
+            if request.session_id is not None:
+                # Keep a session on one engine so later turns reuse its prefix
+                # cache, unless that engine's known load is more than one
+                # request above the lowest. The engine is a hash of the
+                # session id, so every API server process picks the same one.
+                digest = hashlib.blake2b(
+                    request.session_id.encode(), digest_size=8
+                ).digest()
+                session_index = int.from_bytes(digest, "little") % num_engines
+                if known_loads[session_index] <= min(known_loads) + self.client_count:
+                    eng_index = session_index
             # Increment local waiting count for better balancing between stats
             # updates from the coordinator (which happen every 100ms).
             current_counts[eng_index][0] += self.client_count
+            self.lb_local_waiting[eng_index] += self.client_count
             # Rotate the scan start so that ties (equal scores, e.g. right
             # after a coordinator stats reset when engines look equally loaded)
             # don't systematically favor the same engine. This removes the
