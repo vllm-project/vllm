@@ -2,16 +2,16 @@
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 """Declarative configuration for model tool-call and reasoning formats.
 
-Each model format is described by a :class:`ParserEngineConfig` that specifies:
+Each model format is described by a `ParserEngineConfig` that specifies:
 
 * **terminals** – literal strings or regex patterns that delimit the format
-  (e.g. ``<tool_call>``, ``</think>``).
+  (e.g. `<tool_call>`, `</think>`).
 * **token_id_terminals** – terminals that should be matched by token ID
   rather than (or in addition to) text.
 * **transitions** – a state machine mapping
-  ``(state, terminal) → (new_state, events_to_emit)`` that drives semantic
+  `(state, terminal) → (new_state, events_to_emit)` that drives semantic
   event generation during streaming.
-* **content_events** – what :class:`EventType` to emit for plain content
+* **content_events** – what `EventType` to emit for plain content
   (non-terminal text) in each state.
 """
 
@@ -28,6 +28,11 @@ from vllm.parser.engine.events import EventType
 # value, or returns None when the delta may change anything else.
 ArgValueExtender = Callable[[str], str | None]
 
+# Validates a complete non-streaming output. True means a valid tool-call
+# candidate, False means a malformed candidate that must fall back to content,
+# and None means the output is not a tool-call candidate.
+CompleteToolCallValidator = Callable[[str], bool | None]
+
 
 class ParserState(Enum):
     CONTENT = auto()
@@ -37,6 +42,11 @@ class ParserState(Enum):
     TOOL_NAME = auto()
     TOOL_ARGS = auto()
     TOOL_BETWEEN = auto()
+
+
+class ToolCallBodyCollection(Enum):
+    JSON_ARRAY = auto()
+    SEMICOLON_SEQUENCE = auto()
 
 
 @dataclass(frozen=True, slots=True)
@@ -53,7 +63,7 @@ class ParserEngineConfig:
     The engine feeds terminals from the incremental lexer into the
     transition table and emits the corresponding semantic events.
     Content tokens (text between terminals) are classified by the
-    current state via ``content_events``.
+    current state via `content_events`.
     """
 
     name: str
@@ -82,15 +92,17 @@ class ParserEngineConfig:
 
     arg_converter: Callable[[str, bool], str] | None = None
 
+    complete_tool_call_validator: CompleteToolCallValidator | None = None
+
     stream_arg_deltas: bool = True
 
     tool_args_json: bool = True
 
-    # The tool region body is a single JSON array of ``{"name", "arguments"}``
-    # objects (one marker → N calls, no closing terminal). The engine splits
-    # the array into one tool call per element; the array's ``]`` ends the
-    # region and any trailing text becomes content. Used by Granite.
-    tool_call_body_array: bool = False
+    # Framing for a tool region containing multiple top-level JSON objects.
+    # The engine emits one tool call per object. JSON_ARRAY is used by Granite;
+    # SEMICOLON_SEQUENCE handles Llama's ``{...}; {...}`` format.
+    # ...
+    tool_call_body_collection: ToolCallBodyCollection | None = None
 
     arg_structural_chars: frozenset[str] | None = None
 
@@ -136,7 +148,7 @@ class ParserEngineConfig:
             )
 
     def terminal_literal(self, name: str) -> str | None:
-        """Canonical spelling of terminal *name*, or ``None`` if undeclared."""
+        """Canonical spelling of terminal *name*, or `None` if undeclared."""
         value = self.terminals.get(name)
         if isinstance(value, tuple):
             return value[0] if value else None

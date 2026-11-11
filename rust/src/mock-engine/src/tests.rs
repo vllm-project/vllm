@@ -21,7 +21,9 @@ fn client_config(handshake_address: String, engine_count: usize) -> EngineCoreCl
         transport_mode: TransportMode::HandshakeOwner {
             handshake_address,
             advertised_host: "127.0.0.1".to_string(),
+            engine_start_index: 0,
             engine_count,
+            data_parallel_size: engine_count,
             ready_timeout: Duration::from_secs(5),
             local_input_address: None,
             local_output_address: None,
@@ -69,7 +71,7 @@ async fn connect_with_mock(
 fn sample_request(request_id: &str, max_tokens: u32) -> EngineCoreRequest {
     EngineCoreRequest {
         request_id: request_id.to_string(),
-        prompt_token_ids: Some(vec![1, 2, 3]),
+        prompt_token_ids: Some(vec![1, 2, 3].into()),
         sampling_params: Some(EngineCoreSamplingParams {
             max_tokens,
             ..EngineCoreSamplingParams::for_test()

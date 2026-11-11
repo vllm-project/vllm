@@ -3,13 +3,16 @@
 
 """Tests for the /render endpoints that expose prompt preprocessing."""
 
+import json
 from http import HTTPStatus
 from types import SimpleNamespace
 from unittest.mock import AsyncMock, MagicMock
 
 import httpx
+import orjson
 import pytest
 import pytest_asyncio
+from fastapi.responses import JSONResponse
 
 from tests.utils import RemoteLaunchRenderServer
 from vllm.entrypoints.anthropic.protocol import (
@@ -25,11 +28,52 @@ from vllm.entrypoints.openai.completion.protocol import CompletionRequest
 from vllm.entrypoints.openai.responses.protocol import ResponsesRequest
 from vllm.entrypoints.scale_out.render.api_router import router
 from vllm.entrypoints.scale_out.render.serving import ServingRender
+from vllm.entrypoints.scale_out.token_in_token_out.protocol import (
+    GenerateRequest,
+    MultiModalFeatures,
+    PlaceholderRangeInfo,
+)
 from vllm.entrypoints.serve.engine.protocol import ErrorResponse
+from vllm.entrypoints.serve.utils.api_utils import create_json_response
 from vllm.renderers.online_renderer import OnlineRenderer
+from vllm.sampling_params import SamplingParams
 
-MODEL_NAME = "hmellor/tiny-random-LlamaForCausalLM"
+MODEL_NAME = "vllm-project/tiny-random-LlamaForCausalLM"
 GPT_OSS_MODEL_NAME = "openai/gpt-oss-20b"
+DEEPSEEK_V41_MODEL_NAME = "deepseek-ai/DeepSeek-V4.1-Flash"
+
+
+@pytest.mark.parametrize("multiple", [False, True])
+@pytest.mark.skip_global_cleanup
+def test_render_response_serializes_multimodal_data_with_orjson(monkeypatch, multiple):
+    request = GenerateRequest(
+        token_ids=[1, 2, 3],
+        token_offsets=[(0, 1), (1, 2), (2, 3)],
+        sampling_params=SamplingParams(max_tokens=1, logit_bias={1: -1.0}),
+        model="测试模型",
+        features=MultiModalFeatures(
+            mm_hashes={"image": ["hash"]},
+            mm_placeholders={"image": [PlaceholderRangeInfo(offset=1, length=1)]},
+            kwargs_data={"image": ["abc" * 10000]},
+        ),
+    )
+    result = [request, request] if multiple else request
+    content = (
+        [request.model_dump(), request.model_dump()]
+        if multiple
+        else request.model_dump()
+    )
+
+    expected = json.loads(JSONResponse(content=content).body)
+    encode_json = MagicMock(wraps=orjson.dumps)
+    monkeypatch.setattr(orjson, "dumps", encode_json)
+    response = create_json_response(result)
+
+    encode_json.assert_called_once()
+    assert response.status_code == 200
+    assert response.headers["content-type"] == "application/json"
+    assert int(response.headers["content-length"]) == len(response.body)
+    assert json.loads(response.body) == expected
 
 
 def _build_serving_render() -> ServingRender:
@@ -762,6 +806,23 @@ async def test_chat_completion_render_with_sampling_params(client):
 
 
 @pytest.mark.asyncio
+@pytest.mark.parametrize(
+    "max_tokens", [{"max_tokens": 16}, {}], ids=["sixteen", "omitted"]
+)
+async def test_completion_render_keeps_default_max_tokens(client, max_tokens):
+    """`max_tokens=16` (also the completions default) equals the
+    `SamplingParams` default; /render must still return it, or generate
+    treats it as unset."""
+    response = await client.post(
+        "/v1/completions/render",
+        json={"model": MODEL_NAME, "prompt": "Hello, world.", **max_tokens},
+    )
+
+    assert response.status_code == 200
+    assert response.json()[0]["sampling_params"].get("max_tokens") == 16
+
+
+@pytest.mark.asyncio
 async def test_completion_render_emits_token_offsets(client):
     """With return_token_offsets, /v1/completions/render returns per-token
     (start, end) char offsets aligned with token_ids."""
@@ -1038,3 +1099,104 @@ async def test_tokenize_matches_chat_render_for_gpt_oss(gpt_oss_server):
 
     assert render.status_code == tokenize.status_code == 200
     assert tokenize.json()["tokens"] == render.json()["token_ids"]
+
+
+@pytest.fixture(scope="module")
+def deepseek_v41_server():
+    args = [
+        "--tokenizer-mode",
+        "deepseek_v41",
+        "--tool-call-parser",
+        "deepseek_v41",
+        "--enable-auto-tool-choice",
+        "--language-model-only",
+    ]
+    with RemoteLaunchRenderServer(DEEPSEEK_V41_MODEL_NAME, args) as remote_server:
+        yield remote_server
+
+
+@pytest.mark.asyncio
+async def test_messages_render_tool_search_result_for_deepseek_v41(
+    deepseek_v41_server,
+):
+    """A tool search result renders as one result naming the tools it found."""
+    request = {
+        "model": DEEPSEEK_V41_MODEL_NAME,
+        "max_tokens": 16,
+        "tools": [
+            {"name": "tool_search", "input_schema": {"type": "object"}},
+            {"name": "read_file", "input_schema": {"type": "object"}},
+            {
+                "name": "get_weather",
+                "input_schema": {"type": "object"},
+                "defer_loading": True,
+            },
+        ],
+        "messages": [
+            {"role": "user", "content": "Read notes.txt and find a weather tool."},
+            {
+                "role": "assistant",
+                "content": [
+                    {
+                        "type": "tool_use",
+                        "id": "toolu_1",
+                        "name": "tool_search",
+                        "input": {"query": "weather"},
+                    },
+                    {
+                        "type": "tool_use",
+                        "id": "toolu_2",
+                        "name": "read_file",
+                        "input": {"path": "notes.txt"},
+                    },
+                ],
+            },
+            {
+                "role": "user",
+                "content": [
+                    {
+                        "type": "tool_result",
+                        "tool_use_id": "toolu_1",
+                        "content": [
+                            {"type": "tool_reference", "tool_name": "get_weather"}
+                        ],
+                    },
+                    {
+                        "type": "tool_result",
+                        "tool_use_id": "toolu_2",
+                        "content": "notes",
+                    },
+                ],
+            },
+        ],
+    }
+    async with httpx.AsyncClient(
+        base_url=deepseek_v41_server.url_for(""), timeout=30.0
+    ) as client:
+        render = await client.post("/v1/messages/render", json=request)
+        assert render.status_code == 200, render.text
+        detokenize = await client.post(
+            "/detokenize", json={"tokens": render.json()["token_ids"]}
+        )
+
+    assert detokenize.status_code == 200
+    assert (
+        "<｜User｜><tool_result>get_weather</tool_result>\n\n"
+        "<tool_result>notes</tool_result><｜Assistant｜>"
+    ) in detokenize.json()["prompt"]
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("override", ["omitted", None, False, True])
+async def test_render_omits_null_token_id_override(client, override):
+    """Default requests must not send a new field to older generate nodes."""
+    body = {"model": MODEL_NAME, "messages": [{"role": "user", "content": "Hi"}]}
+    if override != "omitted":
+        body["return_tokens_as_token_ids"] = override
+    response = await client.post("/v1/chat/completions/render", json=body)
+    response.raise_for_status()
+    context = response.json()["parse_context"]
+    if override is None or override == "omitted":
+        assert "return_tokens_as_token_ids" not in context
+    else:
+        assert context["return_tokens_as_token_ids"] is override

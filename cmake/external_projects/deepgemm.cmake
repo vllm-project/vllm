@@ -32,9 +32,14 @@ else()
   # plus the SM120 port, the SM90 paged-MQA kv_block=32/next_n=4 port,
   # configurable SwiGLU alpha/beta, SiTU for FP8/FP4 Mega MoE, and NVFP4
   # Mega MoE, plus swiglustep for BF16/FP8/NVFP4 Mega MoE and F8_128x4
-  # SFs for the FP8 einsum output (vllm-project/DeepGEMM#40).
-  # Uses the PyTorch 2.11 stable ABI and CPython 3.10 limited API.
-  set(_DEEPGEMM_UPSTREAM_TAG "727f847082d2e7946f70dc02b94949db206310d3")
+  # SFs for the FP8 einsum output (vllm-project/DeepGEMM#40), plus
+  # fp4_fp4_mega_moe and fused post-expert RMSNorm for Muse Spark Open
+  # (vllm-project/DeepGEMM#39), and the MX MegaMoE alignment fix
+  # (vllm-project/DeepGEMM#43), plus the restored FP32 MQA logits and their
+  # `logits_dtype` switch (vllm-project/DeepGEMM#46) and the mega_mhc
+  # CUDA-graph replay barrier fix (vllm-project/DeepGEMM#48).
+  # Targets the PyTorch 2.11 stable ABI (requires PyTorch 2.14+ headers at build time) and CPython 3.10 limited API.
+  set(_DEEPGEMM_UPSTREAM_TAG "82ca617e5879d0efb0aba5b91b1c81852588af6f")
 
   set(_deepgemm_fc_root "${FETCHCONTENT_BASE_DIR}")
   if(NOT _deepgemm_fc_root)

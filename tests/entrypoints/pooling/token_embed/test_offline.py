@@ -13,7 +13,7 @@ from vllm.outputs import PoolingOutput
 from vllm.pooling_params import LateChunkingParams
 from vllm.tasks import PoolingTask
 
-MODEL_NAME = "intfloat/multilingual-e5-small"
+MODEL_NAME = "vllm-project/multilingual-e5-small"
 
 prompt = "The chef prepared a delicious meal."
 prompt_token_ids = [0, 581, 21861, 133888, 10, 8, 150, 60744, 109911, 5, 2]
@@ -181,6 +181,19 @@ def test_nomic_late_chunking_without_special_tokens(vllm_runner):
 
 
 @pytest.mark.skip_global_cleanup
+def test_late_chunking_rejects_oversized_chunk_size(llm: LLM):
+    chunk_params = LateChunkingParams(1)
+    params = PoolingParams(late_chunking_params=chunk_params)
+    # Exercise request validation after a mutable parameter has changed.
+    chunk_params.chunk_size = 2**64
+    with pytest.raises(VLLMValidationError, match="positive integer"):
+        llm.encode(
+            prompt, pooling_task="token_embed", pooling_params=params, use_tqdm=False
+        )
+    assert not llm.llm_engine.has_unfinished_requests()
+
+
+@pytest.mark.skip_global_cleanup
 @pytest.mark.parametrize("normalize", [False, True])
 def test_e5_late_chunking_mixed_requests(llm: LLM, normalize: bool):
     texts = [prompt, "Short text.", "中文 😀 café"]
@@ -228,12 +241,8 @@ def test_e5_late_chunking_mixed_requests(llm: LLM, normalize: bool):
         )
 
 
-@pytest.mark.parametrize("use_v2_runner", [False, True])
-def test_late_chunking_recomputes_cached_prefix_with_chunked_prefill(
-    vllm_runner, monkeypatch, use_v2_runner
-):
+def test_late_chunking_recomputes_cached_prefix_with_chunked_prefill(vllm_runner):
     # Dummy weights suffice for testing scheduling and reduction of the same states.
-    monkeypatch.setenv("VLLM_USE_V2_MODEL_RUNNER", "1" if use_v2_runner else "0")
     with vllm_runner(
         "openai-community/gpt2",
         runner="pooling",
