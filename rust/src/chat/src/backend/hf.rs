@@ -446,6 +446,8 @@ mod tests {
 
     #[test]
     fn auto_tool_parser_unresolved_is_false_when_auto_finds_a_parser() {
+        // Tool parsers are resolved from the model id, and the `test-model` id
+        // that `backend_for_selection` uses has none, so use a model id that does.
         let backend = HfChatBackend::from_resolved_model_files(
             resolved_files(
                 r#"{"model_type":"qwen3"}"#,
@@ -461,7 +463,7 @@ mod tests {
     }
 
     #[test]
-    fn auto_tool_parser_unresolved_when_auto_finds_no_parser() {
+    fn auto_tool_parser_unresolved_is_true_when_auto_finds_no_parser() {
         let backend = backend_for_selection(
             RendererSelection::Auto,
             r#"{"model_type":"qwen2"}"#,
