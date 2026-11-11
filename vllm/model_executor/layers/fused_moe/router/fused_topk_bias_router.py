@@ -20,6 +20,9 @@ from vllm.model_executor.layers.fused_moe.router.dsv4_topk import (
     can_use_dsv4_topk,
     dsv4_topk,
 )
+from vllm.model_executor.layers.fused_moe.router.fused_topk_router import (
+    _aiter_topk_gating_supported,
+)
 
 # AITER instantiates biased_grouped_topk only for these NUM_GRP values, with at
 # most this many experts per group.
@@ -296,18 +299,24 @@ def fused_topk_bias(
         token_expert_indices = torch.empty(
             M, topk, dtype=torch.int32, device=gating_output.device
         )
-        # `topk_gating` applies `routed_scaling_factor` itself.
-        rocm_aiter_ops.topk_gating(
+        if rocm_aiter_ops.is_topk_gating_enabled() and _aiter_topk_gating_supported(
             topk_weights,
             topk_ids,
-            token_expert_indices,
             gating_output,
-            renormalize,
-            score_func=scoring_func,
-            correction_bias=e_score_correction_bias,
-            routed_scaling_factor=routed_scaling_factor,
-        )
-        return topk_weights, topk_ids
+            num_shared_experts=0,
+            shared_expert_scoring_func="",
+        ):
+            rocm_aiter_ops.topk_gating(
+                topk_weights,
+                topk_ids,
+                token_expert_indices,
+                gating_output,
+                renormalize,
+                score_func=scoring_func,
+                correction_bias=e_score_correction_bias,
+                routed_scaling_factor=routed_scaling_factor,
+            )
+            return topk_weights, topk_ids
 
     if scoring_func == "sqrtsoftplus":
         M = hidden_states.size(0)
