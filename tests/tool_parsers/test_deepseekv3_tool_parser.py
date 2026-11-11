@@ -9,7 +9,10 @@ from tests.tool_parsers.common_tests import (
     ToolParserTestConfig,
     ToolParserTests,
 )
-from tests.tool_parsers.utils import run_tool_extraction
+from tests.tool_parsers.utils import (
+    run_tool_extraction,
+    run_tool_extraction_streaming,
+)
 from vllm.tokenizers import TokenizerLike, get_tokenizer
 
 
@@ -146,3 +149,33 @@ class TestDeepSeekV3ToolParser(ToolParserTests):
         assert len(tool_calls) == 1
         assert tool_calls[0].function.name == "get_weather"
         assert tool_calls[0].function.arguments == '{"city": "Paris"}'
+
+    @pytest.mark.parametrize(
+        ("args_head", "args_tail"),
+        [
+            ('{"code": 1', "23}"),
+            ('{"a": {"b": "x', '"}}'),
+            ('{"city": "Tokyo"', "}"),
+            ('{"city": "Tok', 'yo"}'),
+        ],
+        ids=["number", "nested_object", "quote_apart_brace", "string"],
+    )
+    def test_streaming_args_tail_shares_delta_with_call_end(
+        self, tool_parser, args_head: str, args_tail: str
+    ) -> None:
+        """The argument tail that arrives in the same delta as the call end
+        token is streamed, whatever the arguments end with."""
+        deltas = [
+            (
+                "<｜tool▁calls▁begin｜><｜tool▁call▁begin｜>function<｜tool▁sep｜>"
+                "get_code\n```json\n"
+            ),
+            args_head,
+            f"{args_tail}\n```<｜tool▁call▁end｜><｜tool▁calls▁end｜>",
+        ]
+
+        tool_calls = run_tool_extraction_streaming(tool_parser, deltas).tool_calls
+
+        assert len(tool_calls) == 1
+        assert tool_calls[0].function.name == "get_code"
+        assert tool_calls[0].function.arguments == args_head + args_tail

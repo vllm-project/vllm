@@ -2776,6 +2776,56 @@ async def test_stream_parsed_matches_batch_tool_call(parser_client, parser_token
         assert arg_snapshots[-1] == streamed["tool_calls"][0]["arguments"]
 
 
+DEEPSEEK_V3_MODEL = "deepseek-ai/DeepSeek-V3"
+
+
+@pytest.fixture(scope="module")
+def deepseek_v3_server():
+    args = ["--enable-auto-tool-choice", "--tool-call-parser", "deepseek_v3"]
+    with RemoteLaunchRenderServer(DEEPSEEK_V3_MODEL, args) as remote_server:
+        yield remote_server
+
+
+@pytest.mark.asyncio
+async def test_stream_parsed_deepseek_v3_args_tail_with_call_end(deepseek_v3_server):
+    """Tool call arguments ending in a number are streamed whole when their
+    tail shares the last chunk with the tool call end token."""
+    tokenizer = get_tokenizer(DEEPSEEK_V3_MODEL)
+    head_ids = tokenizer.encode(
+        "<｜tool▁calls▁begin｜><｜tool▁call▁begin｜>function<｜tool▁sep｜>"
+        'get_weather\n```json\n{"city": "Paris", "days": 1',
+        add_special_tokens=False,
+    )
+    tail_ids = tokenizer.encode(
+        "4}\n```<｜tool▁call▁end｜><｜tool▁calls▁end｜>", add_special_tokens=False
+    )
+    chat_request = {
+        "model": DEEPSEEK_V3_MODEL,
+        "messages": [{"role": "user", "content": "Weather in Paris?"}],
+        "tools": _PARSER_TOOLS,
+        "tool_choice": "auto",
+    }
+
+    async with httpx.AsyncClient(
+        base_url=deepseek_v3_server.url_for(""), timeout=60.0
+    ) as client:
+        resp = await client.post("/v1/chat/completions/render", json=chat_request)
+        assert resp.status_code == 200, resp.text
+        prompt_token_ids = resp.json()["token_ids"]
+        streamed = await stream_chat_derender(
+            client,
+            head_ids + tail_ids,
+            [1] * len(head_ids) + [len(tail_ids)],
+            chat_request,
+            len(prompt_token_ids),
+            prompt_token_ids,
+        )
+
+    assert [(tc["name"], tc["arguments"]) for tc in streamed["tool_calls"]] == [
+        ("get_weather", '{"city": "Paris", "days": 14}')
+    ]
+
+
 @pytest.mark.asyncio
 async def test_stream_parsed_cjk_across_chunk_boundaries(
     parser_client, parser_tokenizer
