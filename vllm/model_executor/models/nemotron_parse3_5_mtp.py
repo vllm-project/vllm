@@ -4,6 +4,7 @@
 
 from collections.abc import Iterable
 
+import regex as re
 import torch
 import torch.nn as nn
 
@@ -32,11 +33,18 @@ class ParseAuxMTPModel(nn.Module):
     has_own_lm_head = False
 
     hf_to_vllm_mapper = WeightsMapper(
+        orig_to_new_regex={
+            re.compile(
+                r"^(?!decoder\.embed_tokens\.weight$"
+                r"|decoder\.extra_heads\.0\."
+                r"|decoder\.extra_proj\.0\.)"
+            ): None
+        },
         orig_to_new_prefix={
             "decoder.embed_tokens.": "model.embed_tokens.",
             "decoder.extra_heads.0.": "model.extra_head.",
             "decoder.extra_proj.0.": "model.extra_proj.",
-        }
+        },
     )
 
     def __init__(self, *, vllm_config: VllmConfig, prefix: str = ""):
@@ -70,12 +78,5 @@ class ParseAuxMTPModel(nn.Module):
         return self.model.embed_tokens(input_ids)
 
     def load_weights(self, weights: Iterable[tuple[str, torch.Tensor]]) -> set[str]:
-        def mtp_weights() -> Iterable[tuple[str, torch.Tensor]]:
-            for name, weight in weights:
-                if name == "decoder.embed_tokens.weight" or name.startswith(
-                    ("decoder.extra_heads.0.", "decoder.extra_proj.0.")
-                ):
-                    yield name, weight
-
         loader = AutoWeightsLoader(self)
-        return loader.load_weights(mtp_weights(), mapper=self.hf_to_vllm_mapper)
+        return loader.load_weights(weights, mapper=self.hf_to_vllm_mapper)
