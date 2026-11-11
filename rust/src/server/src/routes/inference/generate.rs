@@ -6,7 +6,6 @@ mod types;
 mod validate;
 
 use std::collections::HashMap;
-use std::convert::Infallible;
 use std::result::Result;
 use std::sync::Arc;
 
@@ -14,11 +13,10 @@ use asynk_strim_attr::{TryYielder, try_stream};
 use axum::Json;
 use axum::extract::State;
 use axum::http::HeaderMap;
-use axum::response::sse::Event;
 use axum::response::{IntoResponse, Response};
 use futures::{Stream, StreamExt as _, pin_mut};
 use thiserror_ext::AsReport as _;
-use tracing::{error, info, trace};
+use tracing::{error, info};
 use tracing_futures::Instrument as _;
 use vllm_engine_core_client::protocol::logprobs::{Logprobs, PositionLogprobs};
 use vllm_engine_core_client::protocol::multimodal::MmFeatureSpec;
@@ -46,7 +44,7 @@ use crate::routes::openai::utils::validated_json::ValidatedJson;
 use crate::routes::output_log::LoggedOutput;
 use crate::state::AppState;
 use crate::utils::npy_base64;
-use crate::utils::{resolve_request_context, sse_response, unix_timestamp};
+use crate::utils::{openai_sse_stream, resolve_request_context, sse_response, unix_timestamp};
 
 /// Validate one token-in/token-out request and proxy it into the shared
 /// `vllm-text` stack.
@@ -119,7 +117,7 @@ pub async fn generate(
             prepared.options,
             mm_placeholders,
         );
-        let sse_stream = generate_sse_stream(chunk_stream).instrument(request_span);
+        let sse_stream = openai_sse_stream(chunk_stream).instrument(request_span);
 
         return sse_response(sse_stream, api_server_options.sse_keep_alive_interval);
     }
@@ -424,6 +422,9 @@ fn extract_mm_placeholders(features: Option<&[MmFeatureSpec]>) -> Option<MultiMo
             PlaceholderRangeInfo {
                 offset: feature.mm_position.offset,
                 length: feature.mm_position.length,
+                is_embed: (feature.mm_position.is_embed.as_ref())
+                    .and_then(|mask| mask.data.as_raw_view())
+                    .map(|bytes| bytes.iter().map(|&b| b != 0).collect()),
             },
         );
     }
@@ -524,48 +525,6 @@ fn format_token_id(token_id: u32) -> String {
     format!("token_id:{token_id}")
 }
 
-/// Convert one raw-generate chunk stream into SSE events.
-#[try_stream]
-async fn generate_sse_stream(
-    stream: impl Stream<Item = Result<GenerateStreamResponse, ApiError>>,
-    mut y: TryYielder<Event, Infallible>,
-) -> Result<(), Infallible> {
-    pin_mut!(stream);
-
-    while let Some(next) = stream.next().await {
-        match next {
-            Ok(chunk) => y.yield_ok(to_sse_event(&chunk)).await,
-            Err(error) => {
-                y.yield_ok(to_error_sse_event(&error)).await;
-                break;
-            }
-        }
-    }
-
-    y.yield_ok(done_sse_event()).await;
-    Ok(())
-}
-
-fn to_sse_event(chunk: &GenerateStreamResponse) -> Event {
-    trace!(?chunk, "generate emitting chunk");
-    Event::default()
-        .json_data(chunk)
-        .expect("generate chunk must serialize to JSON")
-}
-
-fn to_error_sse_event(error: &ApiError) -> Event {
-    let response = error.to_error_response();
-    trace!(?response, "generate emitting error");
-    Event::default()
-        .json_data(response)
-        .expect("ErrorResponse must serialize to JSON")
-}
-
-fn done_sse_event() -> Event {
-    trace!("generate emitting done");
-    Event::default().data("[DONE]")
-}
-
 #[cfg(test)]
 mod tests {
     use std::sync::Arc;
@@ -575,7 +534,7 @@ mod tests {
     use vllm_engine_core_client::protocol::multimodal::{MmModality, PlaceholderRange};
     use vllm_engine_core_client::protocol::output::{RequestSpecDecodeMetrics, StopReason};
     use vllm_engine_core_client::protocol::sampling_mask::SamplingMask;
-    use vllm_engine_core_client::protocol::tensor::WireNdArray;
+    use vllm_engine_core_client::protocol::tensor::{WireNdArray, WireTensor};
     use vllm_llm::{GeneratePromptInfo, PromptCacheUsage, WeightVersionSpan};
 
     use super::*;
@@ -708,6 +667,7 @@ mod tests {
             vec![PlaceholderRangeInfo {
                 offset: 1,
                 length: 4,
+                is_embed: None,
             }],
         )]);
         let chunks: Vec<_> = generate_chunk_stream(
@@ -856,6 +816,7 @@ mod tests {
                 vec![PlaceholderRangeInfo {
                     offset: 1,
                     length: 4,
+                    is_embed: None,
                 }],
             )])),
         )
@@ -998,6 +959,7 @@ mod tests {
                 vec![PlaceholderRangeInfo {
                     offset: 0,
                     length: 1,
+                    is_embed: None,
                 }],
             )])),
         )
@@ -1115,10 +1077,12 @@ mod tests {
                 PlaceholderRangeInfo {
                     offset: 1,
                     length: 5,
+                    is_embed: None,
                 },
                 PlaceholderRangeInfo {
                     offset: 8,
                     length: 2,
+                    is_embed: None,
                 },
             ]
         );
@@ -1127,8 +1091,29 @@ mod tests {
             vec![PlaceholderRangeInfo {
                 offset: 4,
                 length: 3,
+                is_embed: None,
             }]
         );
+    }
+
+    #[test]
+    fn extract_mm_placeholders_keeps_is_embed() {
+        let mask = vec![false, true, true, false];
+        let features = vec![MmFeatureSpec {
+            data: None,
+            modality: MmModality::Image,
+            identifier: "image-0".to_string(),
+            mm_position: PlaceholderRange {
+                offset: 1,
+                length: 4,
+                is_embed: Some(WireTensor::from_bool(vec![4], mask.clone()).unwrap()),
+            },
+            mm_hash: None,
+        }];
+
+        let placeholders = extract_mm_placeholders(Some(&features)).expect("metadata");
+
+        assert_eq!(placeholders["image"][0].is_embed, Some(mask));
     }
 
     #[test]
