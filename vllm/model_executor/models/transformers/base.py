@@ -163,6 +163,10 @@ class Base(
         self._output_aux_hidden_states_kwargs: dict[str, bool] = {}
         """Kwargs to pass to model forward for Eagle3 aux hidden states."""
 
+        self._pre_decoder_layer_replace: Callable[[nn.Module, str], None]
+        """Called on each decoder layer before `recursive_replace` replaces it."""
+        self._pre_decoder_layer_replace = lambda layer, prefix: None
+
         if self.quant_config:
             quant_method_name = self.quant_config.get_name()
             # Check for unsupported quantization methods.
@@ -478,9 +482,6 @@ class Base(
     def _offloader(self) -> BaseOffloader:
         """The offloader for the decoder layers."""
         return get_offloader()
-
-    def _pre_decoder_layer_replace(self, layer: nn.Module, prefix: str):
-        """Called on each decoder layer before `recursive_replace` replaces it."""
 
     def _vocab_embeddings(self) -> set[nn.Embedding]:
         """The `nn.Embedding`s in `self.model` which hold a vocab table."""

@@ -16,7 +16,7 @@
 # limitations under the License.
 """Transformers modeling backend mixin for Mixture of Experts (MoE) models."""
 
-from collections.abc import Callable, Iterable
+from collections.abc import Iterable
 from dataclasses import dataclass
 from functools import partial
 from typing import TYPE_CHECKING, Any
@@ -213,17 +213,11 @@ class MoEMixin(MixtureOfExperts, Base):
     # Redeclared because `recursive_replace` assigns it below the first read
     num_local_physical_experts: int
 
-    _fuse_experts: Callable[[nn.Module, str], None]
-    """Fuses the experts in a module, set by `recursive_replace`."""
-
     def __init__(self, *, vllm_config: "VllmConfig", prefix: str = ""):
         if vllm_config.model_config.hf_config.model_type == "aria":
             self.check_version("5.18.0", "Aria")
         # Skip MixtureOfExperts.__init__ and call the next class in MRO
         super(MixtureOfExperts, self).__init__(vllm_config=vllm_config, prefix=prefix)
-
-    def _pre_decoder_layer_replace(self, layer: nn.Module, prefix: str):
-        self._fuse_experts(layer, prefix)
 
     def update_physical_experts_metadata(
         self,
@@ -476,7 +470,7 @@ class MoEMixin(MixtureOfExperts, Base):
                     _recursive_replace(child_module, prefix=qual_name)
 
         _recursive_replace(self.model, prefix="model")
-        self._fuse_experts = _recursive_replace
+        self._pre_decoder_layer_replace = _recursive_replace
         # Continue with the replacement of layers in Base
         super().recursive_replace()
         self.num_moe_layers = len(self.moe_layers)
