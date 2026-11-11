@@ -17,11 +17,16 @@ from vllm.platforms import current_platform
 if not current_platform.is_rocm():
     pytest.skip("ROCm-only", allow_module_level=True)
 
+from vllm.v1.attention.backends.mla import rocm_paged_mxfp4_indexer
 from vllm.v1.attention.backends.mla.indexer import (
+    DeepSeekV32IndexerDecodeMetadata,
+    DeepseekV32IndexerMetadata,
+    DeepseekV32IndexerMetadataBuilder,
     DeepseekV32IndexerPrefillChunkMetadata,
 )
 from vllm.v1.attention.backends.mla.rocm_paged_mxfp4_indexer import (
     DecodeRowShard,
+    RocmMxfp4IndexerMetadataBuilder,
     native_decode,
     plan_gather_launches,
     plan_prefill_chunks,
@@ -218,3 +223,70 @@ def test_decode_row_shard_gate_and_slices(world):
         assert span % unit == 0 and (span - unit) * world < rows
         assert covered == list(range(rows))
         assert DecodeRowShard.plan(rows, unit, world, 0, rows + span - 1) is None
+
+
+@pytest.mark.parametrize(
+    "max_query_len, is_prefilling, sharded",
+    [
+        (7, [False] * 128, True),
+        (7, [True] + [False] * 127, True),
+        (2048, [True] + [False] * 127, False),
+        (128, [False] * 128, True),
+        (2048, None, True),
+    ],
+    ids=["decode", "prompt-tail-as-decode", "replay-sub-batch", "dummy", "no-flags"],
+)
+def test_decode_row_shard_skips_steps_with_prefill(
+    monkeypatch, max_query_len, is_prefilling, sharded
+):
+    rows = 128
+    decode = DeepSeekV32IndexerDecodeMetadata(
+        block_table=torch.zeros(rows, 4, dtype=torch.int32),
+        seq_lens=torch.full((rows, 1), 64, dtype=torch.int32),
+        decode_lens=torch.ones(rows, dtype=torch.int32),
+        requires_padding=False,
+        schedule_metadata=torch.zeros(1),
+    )
+    base = DeepseekV32IndexerMetadata(
+        seq_lens=torch.zeros(rows),
+        max_seq_len=256,
+        slot_mapping=torch.zeros(rows),
+        num_decodes=rows,
+        num_decode_tokens=rows,
+        num_prefills=0,
+        num_prefill_tokens=0,
+        decode=decode,
+    )
+    monkeypatch.setattr(DeepseekV32IndexerMetadataBuilder, "build", lambda *a: base)
+    monkeypatch.setattr(
+        rocm_paged_mxfp4_indexer, "build_rocm_mxfp4_decode_schedule", lambda *a: None
+    )
+    builder = object.__new__(RocmMxfp4IndexerMetadataBuilder)
+    builder.__dict__.update(
+        compress_ratio=4,
+        context_lens_buffer=torch.zeros(rows, dtype=torch.int32),
+        decode_threshold=7,
+        native_next_n=1,
+        decode_shard_world=4,
+        decode_shard_rank=1,
+        candidate_block_size=0,
+        num_heads=64,
+        head_dim=128,
+        page_entries=64,
+        decode_schedule_buffer=None,
+        logits_width=1024,
+        vllm_config=types.SimpleNamespace(
+            scheduler_config=types.SimpleNamespace(max_num_batched_tokens=8192)
+        ),
+    )
+    cm = types.SimpleNamespace(
+        num_reqs=rows,
+        seq_lens=torch.full((rows,), 256, dtype=torch.int32),
+        query_start_loc_cpu=torch.arange(rows + 1, dtype=torch.int32),
+        max_query_len=max_query_len,
+        is_prefilling=None if is_prefilling is None else torch.tensor(is_prefilling),
+    )
+    metadata = builder.build(0, cm)
+    assert (metadata.decode_shard is not None) == sharded
+    assert metadata.decode_row_lens is not None
+    assert metadata.decode_row_lens.shape[0] == (rows // 4 if sharded else rows)

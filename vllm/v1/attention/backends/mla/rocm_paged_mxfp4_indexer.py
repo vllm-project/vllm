@@ -173,6 +173,14 @@ class DecodeRowShard:
         return row_lens[lo:hi], row_block_table[lo:hi], native
 
 
+def step_has_prefill(cm: CommonAttentionMetadata, decode_threshold: int) -> bool:
+    return (
+        cm.max_query_len > decode_threshold
+        and cm.is_prefilling is not None
+        and bool(cm.is_prefilling.any())
+    )
+
+
 @dataclass
 class RocmMxfp4IndexerMetadata(DeepseekV32IndexerMetadata):
     prefill_plans: list[RocmMxfp4PrefillPlan] = field(default_factory=list)
@@ -469,13 +477,15 @@ class RocmMxfp4IndexerMetadataBuilder(DeepseekV32IndexerMetadataBuilder):
                 self.native_next_n,
                 context_lens,
             )
-            decode_shard = DecodeRowShard.plan(
-                lengths.shape[0],
-                1 if native is None else native.next_n,
-                self.decode_shard_world,
-                self.decode_shard_rank,
-                self.vllm_config.scheduler_config.max_num_batched_tokens,
-            )
+            decode_shard = None
+            if not step_has_prefill(cm, self.decode_threshold):
+                decode_shard = DecodeRowShard.plan(
+                    lengths.shape[0],
+                    1 if native is None else native.next_n,
+                    self.decode_shard_world,
+                    self.decode_shard_rank,
+                    self.vllm_config.scheduler_config.max_num_batched_tokens,
+                )
             if decode_shard is not None:
                 lengths, block_table, native = decode_shard.narrow(
                     lengths, base.decode.block_table, native
