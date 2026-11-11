@@ -23,13 +23,12 @@ if TYPE_CHECKING:
     from vllm.model_executor.layers.quantization.utils.quant_utils import QuantKey
     from vllm.platforms.interface import DeviceCapability
     from vllm.v1.kv_cache_interface import (
-        AttentionSpec,
         KVCacheLayout,
         KVCacheSpec,
         KVQuantMode,
     )
 
-from vllm.v1.kv_cache_interface import KVCacheLayout, get_kv_quant_mode
+from vllm.v1.kv_cache_interface import AttentionSpec, KVCacheLayout, get_kv_quant_mode
 
 
 class AttentionType(StrEnum):
@@ -379,13 +378,6 @@ class AttentionBackend(ABC):
         return None
 
     @classmethod
-    def writes_kv_cache_from_block_table(cls) -> bool:
-        """Whether the layers write even a token (uncompressed) KV cache at
-        slots derived from their metadata's block table, as compressed caches
-        are written. A packed group can then split it into kernel blocks."""
-        return False
-
-    @classmethod
     def is_ssm(cls) -> bool:
         return False
 
@@ -682,7 +674,13 @@ class AttentionMetadataBuilder(ABC, Generic[M]):
             self.vllm_config.parallel_config.decode_context_parallel_size > 1
             and not supports_dcp_with_varlen
         ):
-            self.reorder_batch_threshold = 1
+            # Non-attention specs default to dcp_sharded=False, hence the type check.
+            is_dcp_replicated_cache = (
+                isinstance(self.kv_cache_spec, AttentionSpec)
+                and not self.kv_cache_spec.dcp_sharded
+            )
+            if not is_dcp_replicated_cache:
+                self.reorder_batch_threshold = 1
 
     @abstractmethod
     def build(
