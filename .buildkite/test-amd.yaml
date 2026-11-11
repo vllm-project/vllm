@@ -1436,6 +1436,7 @@ steps:
   - tests/models/minimax_m3/test_index_cache_overrides.py
   - tests/models/minimax_m3/test_dspark_drafter.py
   - tests/models/minimax_m3/test_xlayer_allreduce_fusion.py
+  - vllm/model_executor/layers/fused_allreduce_gemma_rms_norm.py
   - vllm/model_executor/models/config.py
   - vllm/platforms/rocm.py
   commands:

@@ -186,6 +186,7 @@ steps:
   - tests/models/minimax_m3/amd_specialized_decode/
   - tests/models/minimax_m3/test_dspark_drafter.py
   - tests/models/minimax_m3/test_xlayer_allreduce_fusion.py
+  - vllm/model_executor/layers/fused_allreduce_gemma_rms_norm.py
   commands:
   - pytest -v -s models/minimax_m3/amd_specialized_decode
   - pytest -v -s models/minimax_m3/test_dspark_drafter.py

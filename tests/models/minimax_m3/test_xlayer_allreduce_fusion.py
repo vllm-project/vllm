@@ -184,13 +184,21 @@ def _run_deferred_matches_reduced(
         )
         assert not reduced.fuse_final_norm_allreduce
         ref = run(reduced, reduced_config)
+        # Without AITER the deferred reduce is the same all-reduce, one call
+        # later, so the outputs match bitwise. AITER's fused kernels may sum
+        # in another order.
+        tol = (
+            {"rtol": 2e-2, "atol": 2e-2}
+            if os.environ["VLLM_ROCM_USE_AITER"] == "1"
+            else {"rtol": 0, "atol": 0}
+        )
         for a, b in zip(got, ref, strict=True):
-            torch.testing.assert_close(a, b, rtol=2e-2, atol=2e-2)
+            torch.testing.assert_close(a, b, **tol)
 
         # The specialized decode loop captures after each layer instead.
         reduced.specialized_decode = _UnspecializedDecode()
         for a, b in zip(run(reduced, reduced_config), ref, strict=True):
-            torch.testing.assert_close(a, b, rtol=2e-2, atol=2e-2)
+            torch.testing.assert_close(a, b, rtol=0, atol=0)
 
 
 @pytest.mark.parametrize("mxfp8", [False, True])
