@@ -27,8 +27,8 @@ from vllm.forward_context import get_forward_context, is_forward_context_availab
 from vllm.logger import init_logger
 from vllm.model_executor.layers.attention.attention import get_attention_context
 from vllm.models.muse_spark.common.layers import (
-    MuseSpark1xNormPreservingResidualConnection,
-    MuseSpark1xRMSNormWithInputScale,
+    MuseSparkNormPreservingResidualConnection,
+    MuseSparkRMSNormWithInputScale,
 )
 
 from .decoder import (
@@ -164,12 +164,12 @@ def draft_layer_refusals(model: nn.Module, dims: MonoDims) -> list[str]:
         for name in ("add_attn", "add_ffn"):
             conn = getattr(layer, name)
             if not isinstance(
-                conn, MuseSpark1xNormPreservingResidualConnection
+                conn, MuseSparkNormPreservingResidualConnection
             ) or not getattr(conn, "_coefficients_ready", False):
                 bad.append(f"draft layer {i}: {name} coefficients not materialized")
         if layer.post_attn_norm.has_weight:
             bad.append(f"draft layer {i}: post_attn_norm has a weight")
-        if not isinstance(layer.post_ffn_norm, MuseSpark1xRMSNormWithInputScale) or (
+        if not isinstance(layer.post_ffn_norm, MuseSparkRMSNormWithInputScale) or (
             not layer.post_ffn_norm.has_weight
         ):
             bad.append(f"draft layer {i}: post_ffn_norm type")

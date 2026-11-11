@@ -200,7 +200,7 @@ def tiny_draft(tmp_path_factory):
         ensure_model_parallel_initialized,
         init_distributed_environment,
     )
-    from vllm.models.muse_spark.common.dspark import MuseSparkDSparkForCausalLM
+    from vllm.models.muse_spark.amd.dspark import MuseSparkDSparkForCausalLM
     from vllm.utils.torch_utils import set_default_torch_dtype
     from vllm.v1.kv_cache_interface import SlidingWindowSpec
     from vllm.v1.worker.workspace import init_workspace_manager
