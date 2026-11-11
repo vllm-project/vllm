@@ -1563,37 +1563,36 @@ def test_mirror_registration_follows_the_resolved_spec(
 @pytest.mark.cpu_test
 @pytest.mark.parametrize("rocm", [False, True])
 @pytest.mark.parametrize("requested", [None, True])
+@pytest.mark.parametrize("two_nodes", [False, True])
 def test_extensible_kv_cache_follows_rocm_rules_with_the_mirror(
-    monkeypatch, rocm: bool, requested: bool | None
+    monkeypatch, rocm: bool, requested: bool | None, two_nodes: bool
 ) -> None:
     """On ROCm, RDMA cannot yet register driver-mapped memory: with the mirror
     the extensible KV cache stays off there by default, and an explicit request
-    is an error; CUDA keeps it."""
-    from types import SimpleNamespace
-
-    import vllm.platforms
+    is an error; CUDA keeps it. Workers on one node start no mirror, so ROCm
+    keeps it too."""
     from vllm.config import CacheConfig, DeviceConfig
 
-    monkeypatch.setenv("VLLM_USE_V2_MODEL_RUNNER", "1")
-    config = VllmConfig(
-        cache_config=CacheConfig(), device_config=DeviceConfig(device="cpu")
-    )
-    config.parallel_config = _parallel_config(
-        **_TWO_NODES, distributed_executor_backend="mp"
-    )
-    config.kv_transfer_config = _offloading_transfer_config(_MIRRORING_OFFLOAD)
-    # Construction resolved the setting for the CI host's platform. Resolve it
-    # again as on a GPU platform, the only hardware the resolution asks about.
-    config.cache_config._extensible_kv_cache_resolved = False
-    config.cache_config.enable_extensible_kv_cache = requested
-    monkeypatch.setattr(
-        vllm.platforms,
-        "current_platform",
-        SimpleNamespace(is_cuda_alike=lambda: True, is_rocm=lambda: rocm),
-    )
-    if rocm and requested:
+    # The CPU platform would otherwise size the KV cache from this variable,
+    # which rules the extensible KV cache out on its own.
+    monkeypatch.delenv("VLLM_CPU_KVCACHE_SPACE", raising=False)
+    # The resolution asks the platform whether it is a GPU platform and ROCm.
+    monkeypatch.setattr(current_platform, "is_cuda_alike", lambda: True)
+    monkeypatch.setattr(current_platform, "is_rocm", lambda: rocm)
+    placement = _TWO_NODES if two_nodes else {"tensor_parallel_size": 2}
+    configs: dict[str, Any] = {
+        "cache_config": CacheConfig(enable_extensible_kv_cache=requested),
+        # The CI host has no GPU to detect.
+        "device_config": DeviceConfig(device="cpu"),
+        "parallel_config": _parallel_config(
+            **placement, distributed_executor_backend="mp"
+        ),
+        "kv_transfer_config": _offloading_transfer_config(_MIRRORING_OFFLOAD),
+    }
+    unsupported = rocm and two_nodes
+    if unsupported and requested:
         with pytest.raises(ValueError, match="ROCm"):
-            config._resolve_extensible_kv_cache()
+            VllmConfig(**configs)
         return
-    config._resolve_extensible_kv_cache()
-    assert config.cache_config.enable_extensible_kv_cache is not rocm
+    config = VllmConfig(**configs)
+    assert config.cache_config.enable_extensible_kv_cache is not unsupported
