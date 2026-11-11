@@ -162,11 +162,37 @@ class KDARecoverSSMAlignMetadata:
 
 
 @dataclass
+class KDARecoverSSMDeferred:
+    """A step's deferred RecoverSSM: after sampling, each request's accepted count
+    becomes the pending replay of its record slot instead of a commit; the next
+    verify replays it."""
+
+    record_rows: torch.Tensor  # [>= spec rows] int32: record slot per row, -1: none
+    pending: torch.Tensor  # [max_num_reqs] int32, per record slot
+    # [spec rows] mask of the rows committed after sampling (align: near a block
+    # boundary), None: no row.
+    eager: torch.Tensor | None
+    context: "KDARecoverSSMCommitContext" = field(repr=False, compare=False)
+    state_indices: torch.Tensor = field(repr=False, compare=False)
+    flushed: bool = False
+
+    def flush(self) -> None:
+        """Fold the step's pending replays into the checkpoints (every KDA layer,
+        once per step) before a verify that does not replay them."""
+        if self.flushed:
+            return
+        self.flushed = True
+        rows = self.state_indices.shape[0]
+        self.context.flush(self.state_indices, self.record_rows[:rows], self.pending)
+
+
+@dataclass
 class KDARecoverSSMCommitMetadata:
     state_indices: torch.Tensor
     query_start_loc: torch.Tensor
     request_indices: torch.Tensor | None
     align: KDARecoverSSMAlignMetadata | None
+    deferred: KDARecoverSSMDeferred | None = None
 
 
 @dataclass
@@ -179,6 +205,9 @@ class KimiK3KDAMetadata(GDNAttentionMetadata, RecoverSSMMetadata):
     recoverssm_context: "KDARecoverSSMCommitContext | None" = field(
         default=None, repr=False, compare=False
     )
+    recoverssm_deferred: KDARecoverSSMDeferred | None = field(
+        default=None, repr=False, compare=False
+    )
 
     def commit_recoverssm_state(
         self, num_accepted_tokens: torch.Tensor
@@ -189,6 +218,18 @@ class KimiK3KDAMetadata(GDNAttentionMetadata, RecoverSSMMetadata):
         context = self.recoverssm_context
         assert context is not None
         align = commit.align
+        deferred = commit.deferred
+        # Only the stock path's deferred steps: the specialized decode's step
+        # context adds its own deferred operands.
+        deferred_operands = (
+            {}
+            if deferred is None
+            else {
+                "record_rows": deferred.record_rows,
+                "pending": deferred.pending,
+                "eager": deferred.eager,
+            }
+        )
         context.commit(
             num_accepted_tokens,
             commit.state_indices[: self.num_spec_decodes, 0],
@@ -199,6 +240,7 @@ class KimiK3KDAMetadata(GDNAttentionMetadata, RecoverSSMMetadata):
                 align.num_computed_tokens if align is not None else None
             ),
             mamba_block_size=align.block_size if align is not None else None,
+            **deferred_operands,
         )
         if align is None:
             return None
@@ -221,6 +263,10 @@ class KimiK3KDAMetadataBuilder(GDNAttentionMetadataBuilder):
     recoverssm_pending: torch.Tensor | None
     recoverssm_request_slots: torch.Tensor | None
     recoverssm_record_rows: torch.Tensor
+    # The stock path's deferred RecoverSSM (`bind_deferred_recoverssm`).
+    deferred_pending: torch.Tensor | None = None
+    deferred_request_slots: torch.Tensor | None = None
+    deferred_record_rows: torch.Tensor
 
     def __init__(
         self,
@@ -251,6 +297,71 @@ class KimiK3KDAMetadataBuilder(GDNAttentionMetadataBuilder):
                 dtype=torch.int32,
                 device=device,
             )
+
+    def bind_deferred_recoverssm(
+        self, pending: torch.Tensor, request_slots: torch.Tensor | None
+    ) -> None:
+        """Defer the RecoverSSM commit to the next verify (KDA layers with a
+        deferred verify; `KimiK3ModelState` binds before every build): `pending`
+        [max_num_reqs] holds each request slot's accepted tokens not yet in its
+        checkpoint, `request_slots` the step's slots (None: capture and dummy
+        batches, whose rows own no request)."""
+        if self.deferred_pending is None:
+            # Each speculative row's record slot, staged so FULL CUDA graphs read
+            # the step's values; -1 past the real rows.
+            self.deferred_record_rows = torch.full_like(pending, -1)
+        self.deferred_pending = pending
+        self.deferred_request_slots = request_slots
+
+    def _build_deferred(
+        self,
+        m: CommonAttentionMetadata,
+        num_spec_decodes: int,
+        spec_sequence_masks_cpu: torch.Tensor,
+        spec_request_indices: torch.Tensor | None,
+        state_indices: torch.Tensor,
+    ) -> KDARecoverSSMDeferred:
+        """Stage the speculative rows' record slots; with prefix caching (align),
+        mark the rows to commit after sampling: those whose window, up to the next
+        step's, may reach a mamba block boundary (the boundary state and the next
+        block's checkpoint must hold committed states), from the host's upper
+        bound of each sequence length with a margin for rejected drafts."""
+        assert self.deferred_pending is not None
+        rows = self.deferred_record_rows
+        slots = self.deferred_request_slots
+        live = 0
+        if slots is not None:
+            if spec_request_indices is not None:
+                slots = slots[spec_request_indices]
+            live = min(num_spec_decodes, slots.shape[0])
+            rows[:live].copy_(slots[:live], non_blocking=True)
+        rows[live : max(m.num_reqs, num_spec_decodes)].fill_(-1)
+        eager = None
+        if self.kv_cache_spec.mamba_cache_mode == "align":
+            assert isinstance(self.kv_cache_spec, MambaSpec)
+            block = self.kv_cache_spec.block_size
+            margin = 2 * (self.num_spec + 1)
+            upper = m.seq_lens_cpu_upper_bound
+            spec_rows = spec_sequence_masks_cpu.nonzero(as_tuple=True)[0]
+            if upper is None:
+                near = torch.ones(num_spec_decodes, dtype=torch.bool)
+            else:
+                end = upper[spec_rows].to(torch.int64)
+                query_lens = m.query_start_loc_cpu.diff()[spec_rows].to(torch.int64)
+                low = end - query_lens - margin
+                high = end + margin
+                near = (low < 0) | (low.clamp(min=0) // block != high // block)
+            if bool(near.any()):
+                eager = async_tensor_h2d(
+                    near.to(torch.int32), device=state_indices.device
+                )
+        return KDARecoverSSMDeferred(
+            record_rows=rows,
+            pending=self.deferred_pending,
+            eager=eager,
+            context=self._get_recoverssm_context(),
+            state_indices=state_indices[:num_spec_decodes],
+        )
 
     def _get_recoverssm_context(self) -> "KDARecoverSSMCommitContext":
         context = self.recoverssm_context
@@ -585,11 +696,22 @@ class KimiK3KDAMetadataBuilder(GDNAttentionMetadataBuilder):
                     num_computed_tokens=m.compute_num_computed_tokens(),
                     block_size=self.kv_cache_spec.block_size,
                 )
+            deferred = None
+            if self.deferred_pending is not None:
+                assert spec_sequence_masks_cpu is not None
+                deferred = self._build_deferred(
+                    m,
+                    num_spec_decodes,
+                    spec_sequence_masks_cpu,
+                    spec_request_indices,
+                    spec_state_indices_tensor[:, 0],
+                )
             recoverssm_commit = KDARecoverSSMCommitMetadata(
                 state_indices=spec_state_indices_tensor,
                 query_start_loc=spec_query_start_loc,
                 request_indices=spec_request_indices,
                 align=align,
+                deferred=deferred,
             )
 
         flashinfer_prefill_query_start_loc = None
@@ -639,6 +761,9 @@ class KimiK3KDAMetadataBuilder(GDNAttentionMetadataBuilder):
                 self._get_recoverssm_context()
                 if recoverssm_commit is not None
                 else None
+            ),
+            recoverssm_deferred=(
+                recoverssm_commit.deferred if recoverssm_commit is not None else None
             ),
             nums_dict=nums_dict,
             batch_ptr=batch_ptr,
