@@ -4,7 +4,7 @@
 DsaIndex in one cluster kernel, the indexer path's only step before the scoring when
 the MLA query is forked off it (overlap.py "front").
 
-A cluster of 4 CTAs owns one indexer head (128 wq_b rows); CTA ``part`` holds their
+A cluster of 4 CTAs owns one indexer head (128 wq_b rows); CTA `part` holds their
 K quarter (384 columns) in shared memory, bulk-loaded before the PDL wait. After it:
 
 - the batch's q_a quarter; each row's sum of squares of the quarter goes to every
@@ -62,8 +62,8 @@ CHUNKS = KQ // 8  # 16 B chunks per row quarter
 
 
 class IndexFront:
-    """``batch`` rows; ``key``/``weight``: the wk and wv column offsets in the
-    packed projection row; ``mx``: key scales as packed UE8M0 (MX) bytes."""
+    """`batch` rows; `key`/`weight`: the wk and wv column offsets in the
+    packed projection row; `mx`: key scales as packed UE8M0 (MX) bytes."""
 
     def __init__(self, batch: int, key: int, weight: int, mx: bool = False):
         self.batch, self.key, self.weight, self.mx = batch, key, weight, mx
