@@ -514,10 +514,17 @@ class Glm5NextDecoderLayer(nn.Module):
             from vllm.triton_utils.tp_synced_autotune import install
 
             install()
-        if replicate and self.is_sequence_parallel:
+        pc = get_current_vllm_config().parallel_config
+        if replicate and (
+            self.is_sequence_parallel
+            or pc.enable_expert_parallel
+            or pc.decode_context_parallel_size > 1
+            or pc.prefill_context_parallel_size > 1
+        ):
+            # These turn the TP-synced autotune off: replicated mixers would drift.
             raise NotImplementedError(
-                "VLLM_GLM5NEXT_REPLICATE_MIXER is not supported with "
-                "sequence-parallel MoE."
+                "VLLM_GLM5NEXT_REPLICATE_MIXER is not supported with expert "
+                "parallelism, sequence-parallel MoE or context parallelism."
             )
 
         if is_kda_layer:
