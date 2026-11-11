@@ -109,10 +109,8 @@ from vllm.model_executor.kernels.linear.mxfp8 import (
     Mxfp8LinearKernel,
     Mxfp8LinearLayerConfig,
 )
-from vllm.model_executor.kernels.linear.mxfp8.aiter_flydsl import (
+from vllm.model_executor.kernels.linear.mxfp8.aiter import (
     AiterFlyDSLMxfp8LinearKernel,
-)
-from vllm.model_executor.kernels.linear.mxfp8.aiter_triton import (
     AiterTritonMxfp8LinearKernel,
 )
 from vllm.model_executor.kernels.linear.mxfp8.b12x import (

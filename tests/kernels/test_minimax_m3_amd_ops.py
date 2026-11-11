@@ -901,7 +901,7 @@ def test_fused_mxfp8_inputs_on_aiter_flydsl_kernel(
     """With the AITER kernel selected, the producers still fuse the MXFP8
     quant and the linear on their output equals the unfused norm -> linear;
     swiglu fuses at every M, since AITER does not quantize in the GEMM."""
-    from vllm.model_executor.kernels.linear.mxfp8.aiter_flydsl import (
+    from vllm.model_executor.kernels.linear.mxfp8.aiter import (
         AiterFlyDSLMxfp8LinearKernel,
     )
     from vllm.model_executor.layers.fusion.quant_activation import (
@@ -945,7 +945,7 @@ def test_mono_weights_same_on_aiter_flydsl_kernel(dist_init, monkeypatch, n, k):
     the Triton kernel (row-major weight) or the AITER FlyDSL one (preshuffled)."""
     pytest.importorskip("aiter.ops.flydsl.batched_gemm_a8w8")
     from vllm._aiter_ops import rocm_aiter_ops
-    from vllm.model_executor.kernels.linear.mxfp8.aiter_flydsl import (
+    from vllm.model_executor.kernels.linear.mxfp8.aiter import (
         AiterFlyDSLMxfp8LinearKernel,
     )
     from vllm.model_executor.kernels.linear.mxfp8.rocm_native import (

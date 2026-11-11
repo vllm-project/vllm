@@ -38,7 +38,7 @@ from vllm.config import (
 from vllm.distributed import get_pp_group, get_tensor_model_parallel_world_size
 from vllm.forward_context import get_forward_context
 from vllm.logger import init_logger
-from vllm.model_executor.kernels.linear.mxfp8.aiter_flydsl import (
+from vllm.model_executor.kernels.linear.mxfp8.aiter import (
     AiterFlyDSLMxfp8LinearKernel,
 )
 from vllm.model_executor.kernels.linear.mxfp8.rocm_native import (

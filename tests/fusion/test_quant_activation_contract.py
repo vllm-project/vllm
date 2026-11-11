@@ -12,7 +12,7 @@ from vllm.model_executor.kernels.linear import (
     _POSSIBLE_MXFP8_KERNELS,
     _POSSIBLE_NVFP4_KERNELS,
 )
-from vllm.model_executor.kernels.linear.mxfp8.aiter_flydsl import (
+from vllm.model_executor.kernels.linear.mxfp8.aiter import (
     AiterFlyDSLMxfp8LinearKernel,
 )
 from vllm.model_executor.kernels.linear.mxfp8.flashinfer import (
