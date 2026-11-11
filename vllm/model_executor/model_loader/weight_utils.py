@@ -4,7 +4,6 @@
 
 import asyncio
 import concurrent.futures
-import ctypes
 import fnmatch
 import glob
 import hashlib
@@ -27,6 +26,7 @@ import huggingface_hub.constants
 import numpy as np
 import regex as re
 import torch
+from safetensors import _safe_open_handle
 from safetensors.torch import load, load_file, safe_open
 from tqdm.auto import tqdm
 from transformers.utils import SAFE_WEIGHTS_INDEX_NAME
@@ -52,7 +52,8 @@ from vllm.model_executor.layers.quantization import (
 )
 from vllm.model_executor.model_loader.buffer_safe_tensors import (
     BufferSafeTensors,
-    parse_safetensors_header,
+    byte_memoryview,
+    safetensors_layout,
 )
 from vllm.model_executor.model_loader.ep_weight_filter import (
     should_skip_weight,
@@ -1178,23 +1179,10 @@ def _allocate_host_buffer(nbytes: int) -> torch.Tensor:
     """
     try:
         return torch.empty(nbytes, dtype=torch.uint8, pin_memory=True)
-    except (RuntimeError, torch.cuda.Error):
-        # No CUDA context: a plain buffer still works, it is just slower
-        # to copy out of.
+    except RuntimeError:
+        # No pinned memory allocator on this host: a plain buffer still
+        # works, it is just slower to copy out of.
         return torch.empty(nbytes, dtype=torch.uint8)
-
-
-def _byte_memoryview(tensor: torch.Tensor) -> memoryview:
-    """A writable byte view over a tensor's memory.
-
-    ``tensor.numpy()`` cannot be used: a pinned tensor has no numpy
-    representation. Going through ctypes and the tensor's address works
-    for both pinned and pageable tensors, and lets ``os.preadv`` write
-    straight into the buffer.
-    """
-    nbytes = tensor.numel() * tensor.element_size()
-    raw = (ctypes.c_char * nbytes).from_address(tensor.data_ptr())
-    return memoryview(raw).cast("B")
 
 
 def _prefetched_checkpoint_files(
@@ -1219,9 +1207,13 @@ def _prefetched_checkpoint_files(
     completed: queue.SimpleQueue = queue.SimpleQueue()
 
     def read_blocks(
-        fd: int, size: int, start: int, dest: memoryview, dest_start: int
+        fd: int, size: int, start: int, dest: memoryview, data_start: int
     ) -> None:
-        """Read [start, size) of the file into dest[dest_start:].
+        """Read [start, size) of the file's data section into dest.
+
+        The file's data section starts at *data_start*, so file offset
+        ``data_start + offset`` lands at ``dest[offset]``: the
+        destination buffer holds the data section only.
 
         The read goes straight into the destination buffer, so the bytes
         are touched once. Pre-reading into the page cache and copying out
@@ -1233,17 +1225,15 @@ def _prefetched_checkpoint_files(
             while offset < end:
                 if stopped.is_set():
                     return
-                dest_offset = dest_start + offset
                 want = end - offset
+                file_offset = data_start + offset
                 if hasattr(os, "preadv"):
-                    count = os.preadv(
-                        fd, [dest[dest_offset : dest_offset + want]], offset
-                    )
+                    count = os.preadv(fd, [dest[offset : offset + want]], file_offset)
                 else:
-                    chunk = os.pread(fd, want, offset)
+                    chunk = os.pread(fd, want, file_offset)
                     count = len(chunk)
                     if count:
-                        dest[dest_offset : dest_offset + count] = chunk
+                        dest[offset : offset + count] = chunk
                 if count == 0:
                     raise EOFError("Checkpoint truncated during streaming prefetch")
                 offset += count
@@ -1261,12 +1251,17 @@ def _prefetched_checkpoint_files(
             result.size = size
             if size == 0:
                 raise EOFError(f"Checkpoint file is empty: {path}")
-            # Read the header first: the data section starts after it, and
-            # the destination buffer only holds the data section.
-            header, data_start = parse_safetensors_header(path)
+            # The offsets of the tensors come from safetensors itself, so
+            # the file is not parsed here. The data section starts after
+            # the header and runs to the end of the file, so its position
+            # follows from the file size and the largest offset.
+            handle = result.contexts.enter_context(
+                _safe_open_handle(file, framework="pt")
+            )
+            data_start, headers = safetensors_layout(handle, size)
             data_len = size - data_start
             dest = _allocate_host_buffer(data_len)
-            dest_mv = _byte_memoryview(dest)
+            dest_mv = byte_memoryview(dest)
             reads = []
             try:
                 for start in range(
@@ -1291,7 +1286,7 @@ def _prefetched_checkpoint_files(
                 concurrent.futures.wait(reads)
             if map_after_prefetch and not stopped.is_set():
                 result.mapped = result.contexts.enter_context(
-                    BufferSafeTensors(path, dest, header, data_start)
+                    BufferSafeTensors(path, dest, headers, data_start)
                 )
             return result
         except BaseException:
