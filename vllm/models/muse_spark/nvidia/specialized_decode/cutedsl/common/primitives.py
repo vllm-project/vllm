@@ -163,6 +163,27 @@ def load_global_u32x2(pointer: cute.Pointer, *, loc=None, ip=None):
 
 
 @dsl_user_op
+def load_global_bf16_as_f32(address: Int64, *, loc=None, ip=None) -> Float32:
+    return Float32(
+        _asm(
+            T.f32(),
+            [address.ir_value(loc=loc, ip=ip)],
+            (
+                "{\n\t"
+                ".reg .b16 bits;\n\t"
+                "ld.global.b16 bits, [$1];\n\t"
+                "cvt.f32.bf16 $0, bits;\n\t"
+                "}"
+            ),
+            "=f,l",
+            side_effects=False,
+            loc=loc,
+            ip=ip,
+        )
+    )
+
+
+@dsl_user_op
 def load_volatile_u32(pointer: cute.Pointer, *, loc=None, ip=None) -> Uint32:
     address = pointer.toint(loc=loc, ip=ip)
     return Uint32(
