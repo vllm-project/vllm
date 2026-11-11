@@ -4,6 +4,8 @@
 from typing import Any
 
 import pytest
+import transformers
+from packaging.version import Version
 from transformers import AutoModelForSeq2SeqLM
 
 from vllm.assets.audio import AudioAsset
@@ -135,10 +137,15 @@ def test_transformers_audio_generation(
     )
 
 
-def test_transformers_audio_mixed_lengths(vllm_runner: type[VllmRunner]):
+def test_transformers_audio_mixed_lengths(
+    vllm_runner: type[VllmRunner], monkeypatch: pytest.MonkeyPatch
+):
     """Audios of different lengths encoded in one batch are split into items, whose
     ragged fields must each stay a batch of one. One prompt holds both audios, as
     separate requests may not reach the encoder in the same step."""
+    # TODO: Remove once huggingface/transformers#50417 is released
+    if Version(transformers.__version__) < Version("5.23.0.dev0"):
+        monkeypatch.setenv("VLLM_GPU_SYNC_CHECK", "warn")
     model_id = "microsoft/VibeVoice-ASR-HF"
     settings = AUDIO_MODEL_SETTINGS[model_id]
     target_sr = settings["sampling_rate"]
