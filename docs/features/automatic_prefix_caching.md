@@ -57,7 +57,7 @@ vllm serve nvidia/NVIDIA-Nemotron-3.5-Lightning-30B-A3B-NVFP4 \
 
 `--enable-prefix-caching` selects Mamba cache mode `align`. To use ReplaySSM without prefix caching, replace this flag with `--no-enable-prefix-caching`. This selects mode `none`. To disable speculative decoding, remove `--speculative-config`.
 
-`--mamba-backend` sets both Mamba2 decode and prefill kernels. With `flashinfer`, prefill uses FlashInfer's SSD scan on SM10x and SM110 GPUs and falls back to Triton elsewhere. To choose them separately, use `--mamba-decode-backend`, which selects the ReplaySSM provider, and `--mamba-prefill-backend`.
+`--mamba-backend` sets both Mamba2 decode and prefill kernels. With `flashinfer`, prefill uses FlashInfer's SSD scan on SM10x GPUs and falls back to Triton elsewhere. To choose them separately, use `--mamba-decode-backend`, which selects the ReplaySSM provider, and `--mamba-prefill-backend`.
 
 FlashInfer ReplaySSM has these limits:
 
