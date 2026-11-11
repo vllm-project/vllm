@@ -62,6 +62,12 @@ class VLLMNotFoundError(VLLMClientError):
     pass
 
 
+class ChatTemplateResolutionError(VLLMClientError):
+    """Raised when chat template resolution fails."""
+
+    pass
+
+
 class LoRAAdapterNotFoundError(VLLMNotFoundError):
     """Exception raised when a LoRA adapter is not found.
 
@@ -130,6 +136,14 @@ class GenerationError(VLLMServerError):
         self.status_code = HTTPStatus.INTERNAL_SERVER_ERROR
 
 
+class RetryableRequestError(GenerationError):
+    """A transient request-level failure that is safe for clients to retry."""
+
+    def __init__(self, message: str = "Request failed; please retry"):
+        super().__init__(message)
+        self.status_code = HTTPStatus.SERVICE_UNAVAILABLE
+
+
 class GracefulHTTPError(VLLMError):
     """Exception that should be translated into an HTTP error response.
 
@@ -170,6 +184,32 @@ class MaxQueuedTokensError(GracefulHTTPError):
     def __init__(self):
         super().__init__(
             "The engine has reached its prefill token backlog limit. "
+            "Please try again later or on a different instance.",
+            HTTPStatus.SERVICE_UNAVAILABLE,
+        )
+
+
+class ProfilerAlreadyActiveError(GracefulHTTPError):
+    """Raised when a profiling session is already active."""
+
+    def __init__(self):
+        super().__init__(
+            "A profiling session is already active. Call /stop_profile before "
+            "starting another session.",
+            HTTPStatus.CONFLICT,
+        )
+
+
+class EngineFaultedError(GracefulHTTPError):
+    """Raised when the engine has faulted and is awaiting FT recovery.
+
+    Returns HTTP 503 (Service Unavailable) so that load balancers and
+    client SDKs retry the request on a different instance.
+    """
+
+    def __init__(self):
+        super().__init__(
+            "The engine has faulted and cannot accept new requests. "
             "Please try again later or on a different instance.",
             HTTPStatus.SERVICE_UNAVAILABLE,
         )

@@ -5,9 +5,9 @@
 
 The checkpoint layout is:
 
-* ``model.whisper_encoder.*``: Whisper-medium encoder weights.
-* ``model.vq_adaptor.*``: 4x time-merge projector.
-* ``model.language_model.*``: Qwen3-0.6B decoder weights.
+* `model.whisper_encoder.*`: Whisper-medium encoder weights.
+* `model.vq_adaptor.*`: 4x time-merge projector.
+* `model.language_model.*`: Qwen3-0.6B decoder weights.
 """
 
 import math
@@ -81,6 +81,8 @@ DEFAULT_MOSS_TRANSCRIBE_DIARIZE_PROMPT = (
     "（[S01]、[S02]、[S03]…）开头，正文为对应的语音内容，"
     "并在段末标注结束时间戳，以清晰标明该段语音范围。"
 )
+# Appended to the prompt to bias decoding, per the model card's hotword recipe.
+MOSS_HOTWORDS_HINT = "热词提示："
 
 _MOSS_DIARIZED_HEADER_RE = re.compile(
     r"\[(?P<start>[0-9.]{1,32})\]\s*\[(?P<speaker>S[0-9]{1,15})\]"
@@ -438,31 +440,38 @@ class MossTranscribeDiarizeDummyInputsBuilder(
             )
         }
 
-    def get_dummy_processor_inputs(
+
+class MossTranscribeDiarizeMultiModalProcessor(
+    BaseMultiModalProcessor[MossTranscribeDiarizeProcessingInfo]
+):
+    def get_dummy_inputs(
         self,
         seq_len: int,
         mm_counts: Mapping[str, int],
         mm_options: MultiModalDummyOptions,
     ) -> ProcessorInputs:
-        dummy_mm_data = self.get_dummy_mm_data(seq_len, mm_counts, mm_options)
-        dummy_mm_items = self.info.parse_mm_data(dummy_mm_data)
-        num_audios = mm_counts.get("audio", 0)
+        builder = self.dummy_inputs
         tokenizer = self.info.get_tokenizer()
-        prompt = cached_encode(
-            tokenizer,
-            AUDIO_PLACEHOLDER * num_audios,
-            add_special_tokens=False,
-        ) or cached_encode(
-            tokenizer,
-            "\n",
-            add_special_tokens=False,
-        )
+
+        dummy_mm_data = builder.get_dummy_mm_data(seq_len, mm_counts, mm_options)
+        dummy_mm_items = self.info.parse_mm_data(dummy_mm_data, validate=False)
+
+        num_audios = mm_counts.get("audio", 0)
+        if num_audios > 0:
+            prompt = cached_encode(
+                tokenizer,
+                AUDIO_PLACEHOLDER * num_audios,
+                add_special_tokens=False,
+            )
+        else:
+            prompt = cached_encode(
+                tokenizer,
+                "\n",
+                add_special_tokens=False,
+            )
+
         return ProcessorInputs(prompt=prompt, mm_data_items=dummy_mm_items)
 
-
-class MossTranscribeDiarizeMultiModalProcessor(
-    BaseMultiModalProcessor[MossTranscribeDiarizeProcessingInfo]
-):
     def _get_hf_mm_text(self, mm_counts: Mapping[str, int]) -> str:
         return self.dummy_inputs.get_dummy_text(mm_counts)
 
@@ -622,9 +631,16 @@ class MossTranscribeDiarizeForConditionalGeneration(
 
     @classmethod
     def get_generation_prompt(cls, stt_params: SpeechToTextParams) -> PromptType:
+        if stt_params.task_type != "transcribe":
+            raise ValueError(
+                f'MOSS-Transcribe-Diarize only supports "transcribe", '
+                f"got {stt_params.task_type}"
+            )
         stt_config = stt_params.stt_config
         question = stt_params.request_prompt or DEFAULT_MOSS_TRANSCRIBE_DIARIZE_PROMPT
         question = question.strip() or DEFAULT_MOSS_TRANSCRIBE_DIARIZE_PROMPT
+        if hotwords := (stt_params.hotwords or "").strip():
+            question += f"{MOSS_HOTWORDS_HINT}{hotwords}"
         prompt = (
             "<|im_start|>system\n"
             "You are a helpful assistant.<|im_end|>\n"
@@ -638,12 +654,14 @@ class MossTranscribeDiarizeForConditionalGeneration(
         )
 
     @classmethod
-    def post_process_output(cls, text: str) -> str:
+    def post_process_output(cls, text: str, model_config: ModelConfig) -> str:
         return text.strip()
 
     @classmethod
-    def parse_diarized_transcript(cls, text: str) -> list[DiarizedTranscriptionSegment]:
-        """Parse MOSS's canonical ``[start][Sxx]text[end]`` transcript."""
+    def parse_diarized_transcript(
+        cls, text: str, model_config: ModelConfig
+    ) -> list[DiarizedTranscriptionSegment]:
+        """Parse MOSS's canonical `[start][Sxx]text[end]` transcript."""
         headers: list[tuple[re.Match[str], float, str]] = []
         for match in _MOSS_DIARIZED_HEADER_RE.finditer(text):
             start = parse_diarized_timestamp(match["start"])

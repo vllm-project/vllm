@@ -110,7 +110,7 @@ class OvisProcessor(ProcessorMixin):
     ) -> BatchFeature:
         """Main method to prepare for the model one or several sequences(s) and image(s). This method forwards the `text`
         and `kwargs` arguments to Qwen2TokenizerFast's [`~Qwen2TokenizerFast.__call__`] if `text` is not `None` to encode
-        the text. To prepare the vision inputs, this method forwards the `vision_infos` and `kwrags` arguments to
+        the text. To prepare the vision inputs, this method forwards the `vision_infos` and `kwargs` arguments to
         Qwen2VLImageProcessor's [`~Qwen2VLImageProcessor.__call__`] if `vision_infos` is not `None`.
 
         Args:
@@ -197,7 +197,7 @@ class OvisProcessor(ProcessorMixin):
                         new_ids = []
 
                         # replace placeholders
-                        for i, token_id in enumerate(ids_list):
+                        for token_id in ids_list:
                             if token_id == image_token_id:
                                 placeholder_ids = image_features["image_placeholders"][
                                     idx

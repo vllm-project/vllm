@@ -8,7 +8,7 @@ from typing import Any, ClassVar
 import torch
 import torch.nn.functional as F
 from torch import nn
-from transformers import PretrainedConfig
+from transformers import PreTrainedConfig
 
 from vllm.compilation.decorators import support_torch_compile
 from vllm.config import CacheConfig, ModelConfig, SpeechToTextConfig, VllmConfig
@@ -492,7 +492,7 @@ class MaskedConvSequential(nn.Sequential):
         mask = self._create_mask(x, current_lengths.long())
 
         # Process through each layer with mask propagation
-        for i, layer in enumerate(self):
+        for layer in self:
             # Apply current mask before layer
             x = self.apply_channel_mask(x, mask)
 
@@ -606,7 +606,7 @@ class ConvSubsampling(nn.Module):
         in_channels = conv_channels
         layers.append(activation)
 
-        for i in range(self._sampling_num - 1):
+        for _ in range(self._sampling_num - 1):
             # [conv_channels, T//2^i, num_melspec//2^i] ->
             # [conv_channels, T//2^(i+1), num_melspec//2^(i+1)]
             # depthwise conv
@@ -670,7 +670,7 @@ class ConvSubsampling(nn.Module):
         through a convolution or max pooling layer"""
         add_pad: float = all_paddings - kernel_size
         one: float = 1.0
-        for i in range(repeat_num):
+        for _ in range(repeat_num):
             lengths = torch.div(lengths.to(dtype=torch.float) + add_pad, stride) + one
             lengths = torch.ceil(lengths) if ceil_mode else torch.floor(lengths)
         return lengths.to(dtype=torch.int)
@@ -1470,7 +1470,7 @@ class ConformerEncoder(nn.Module):
         )
 
         self.layers = nn.ModuleList()
-        for i in range(n_layers):
+        for _ in range(n_layers):
             layer = ConformerLayer(
                 d_model=d_model,
                 d_ff=d_ff,
@@ -1563,7 +1563,7 @@ class ConformerEncoder(nn.Module):
             device=audio_signal.device,
         )
 
-        for lth, layer in enumerate(self.layers):
+        for layer in self.layers:
             audio_signal = layer(
                 x=audio_signal,
                 att_mask=att_mask,
@@ -1845,23 +1845,13 @@ class CohereASRModel(nn.Module):
                 param = params_dict[name]
                 weight_loader = getattr(param, "weight_loader", default_weight_loader)
 
-                # Convert buffer dtype to match loaded weight for pos_bias tensors
-                if "pos_bias" in name and param.dtype != loaded_weight.dtype:
-                    logger.info(
-                        "Converting buffer %s dtype from %s to %s for loading.",
-                        name,
-                        param.dtype,
-                        loaded_weight.dtype,
-                    )
-                    param.data = param.data.to(loaded_weight.dtype)
-
                 weight_loader(param, loaded_weight)
             loaded_params.add(name)
         return loaded_params
 
 
 class CohereASRProcessingInfo(BaseProcessingInfo):
-    def get_hf_config(self) -> PretrainedConfig:
+    def get_hf_config(self) -> PreTrainedConfig:
         return self.ctx.get_hf_config()
 
     def get_default_tok_params(self) -> TokenizeParams:
@@ -2086,6 +2076,10 @@ class CohereAsrForConditionalGeneration(
 
     @classmethod
     def get_generation_prompt(cls, stt_params: SpeechToTextParams) -> PromptType:
+        if stt_params.task_type != "transcribe":
+            raise ValueError(
+                f'Cohere ASR only supports "transcribe", got {stt_params.task_type}'
+            )
         audio = stt_params.audio
         stt_config = stt_params.stt_config
         language = stt_params.language

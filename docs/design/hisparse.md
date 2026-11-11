@@ -37,6 +37,14 @@ memory consumption is therefore topology- and implementation-dependent. The
 realized capacity may be slightly smaller because the budget is rounded down
 to complete host blocks.
 
+Startup logs report two concurrency bounds at `max_model_len`. The generic
+`Maximum concurrency` line charges each request its full admission footprint,
+including the in-flight window of every resident group. The `HiSparse
+steady-state maximum concurrency` line charges running requests that read from
+host only their active tail pages, plus one request being admitted at its full
+footprint. Host-pool metrics are listed in
+[Metrics](../usage/metrics.md#hisparse-kv-connector-metrics).
+
 ## Ownership
 
 | Thing | Owner | What “owner” means |
@@ -130,10 +138,13 @@ path. The resolver consumes the existing graph-stable request mapping from
 attention metadata; neither the worker nor individual cache handles keep a
 duplicate mapping.
 
-Speculative decoding resolves and consumes each verification step in order.
-Each step receives distinct replayable plan rows while sharing the request's
-hot-cache state, so a later step cannot reuse a hot row before an earlier step
-has consumed it.
+Speculative decoding resolves all verification rows of a request in one pass:
+one block resolves the union of the rows' top-k against the request's hot-cache
+state, so rows that select the same host row share its hot row and no row
+evicts a hot row another row of the step still reads. Draft layers write their
+rows after the target forward, so their host mirror runs at the start of the
+next step, after the drafter, and the step's page transfers are submitted
+behind it.
 
 ## P/D import target
 
@@ -195,6 +206,36 @@ coordinates. Request identity and logical page state remain in the scheduler.
 
 ## Hot lookup and LRU
 
+### Speculative decode group prefetch
+
+HiSparse prefetches historical KV for layers sharing an indexer during pure
+decode batches, including multi-token verification with speculative decoding
+such as MTP. It uses the existing speculative-decoding configuration and swap
+capacity; no additional switch or backend capability flag is required.
+
+The index-producing layer resolves the current top-k once and queues each
+layer's missing rows on the group's copy stream. Each layer waits on its own
+completion event before consuming those rows, allowing later layers' copies to
+overlap earlier layers' computation. Prefill and mixed prefill/decode batches
+retain per-layer staging.
+
+This prefetch eligibility is separate from single-token resident-write and host
+mirror policy. Current verification tokens remain in resident KV, are excluded
+from the historical host-row swap plan, and are written by each layer before
+its attention runs. Prefetching does not publish rejected draft tokens as
+durable host KV. The benefit depends on host misses, shared-index group size,
+and how much copy work can overlap computation.
+
+The CUDA compact gather uses at most 64 thread blocks per launch. Workers loop
+over additional rows when verification expands the batch beyond that limit;
+the existing column parallelism is retained for smaller batches. This bounds
+copy-kernel occupancy while later layers are prefetched, without reading miss
+counts back to the CPU or launching a separate compaction kernel. Actual copy
+bandwidth and end-to-end latency must be measured together, since bounding the
+grid can trade peak copy throughput for compute overlap.
+
+### Row resolution
+
 The NVIDIA CUDA path keeps replacement entirely on the accelerator:
 
 ```text
@@ -210,9 +251,16 @@ hot row? ──────── yes ──► existing hot physical row + upda
 choose GPU LRU victim ──► copy pinned host row ──► hot physical row
 ```
 
-ROCm is not currently supported because the fused HiSparse cache operations are
-implemented only by CUDA kernels. A future platform-specific worker may provide
-the same command, output, and cache-resolution boundaries.
+Device operations are selected by `Platform.get_hisparse_backend_cls()`. The base
+platform returns `None`; CUDA selects `CUDAHiSparseBackend` in `platforms/cuda.py`.
+Hardware plugins can provide a `HiSparseBackend` for host registration, cache
+operations, IPC events, capture queries, and transfers while reusing the common
+runtime and connector. HiSparse validates availability and cache formats before
+allocation. Streams, ordinary events, current-stream queries, and synchronization
+use `torch.Stream`, `torch.Event`, and `torch.accelerator` directly. The backend
+provides IPC event creation/import/export only for shared host pools.
+Without HiSparse, sparse attention keeps its normal stream and event path.
+ROCm does not currently provide a HiSparse backend.
 
 ## Main classes
 
@@ -249,6 +297,5 @@ the same command, output, and cache-resolution boundaries.
 The command/result and attention-layer boundaries can be shared. The host
 allocator, copy implementation, hot layout, and replacement policy should stay
 platform-specific. NVIDIA uses the current accelerator LRU and fused host/hot
-kernel. ROCm is not currently supported; AMD or other accelerator backends can
-implement their own worker without forcing NVIDIA's policy into the shared
-boundary.
+kernel. Other accelerators can implement `HiSparseBackend` and return its class
+path from their platform override without changing the shared control flow.

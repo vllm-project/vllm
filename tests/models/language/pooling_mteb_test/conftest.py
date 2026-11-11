@@ -9,6 +9,7 @@ import torch
 
 from tests.utils import wait_for_memory_to_settle
 from vllm.logger import init_logger
+from vllm.platforms import current_platform
 
 logger = init_logger(__name__)
 
@@ -26,6 +27,8 @@ def release_gpu_memory_between_tests():
     gc.collect()
     if torch.accelerator.is_available():
         torch.accelerator.empty_cache()
+    if current_platform.is_rocm():
+        return
     try:
         wait_for_memory_to_settle()
     except ValueError as e:

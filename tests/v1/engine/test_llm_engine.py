@@ -2,11 +2,14 @@
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 import random
 from typing import TYPE_CHECKING
+from unittest.mock import MagicMock, call
 
 import pytest
 
 from vllm import LLM
+from vllm.exceptions import ProfilerAlreadyActiveError
 from vllm.sampling_params import SamplingParams, StructuredOutputsParams
+from vllm.v1.engine.llm_engine import LLMEngine
 from vllm.v1.metrics.reader import Counter, Gauge, Histogram, Metric, Vector
 
 if TYPE_CHECKING:
@@ -16,6 +19,115 @@ else:
 
 MODEL = "facebook/opt-125m"
 DTYPE = "half"
+
+
+@pytest.mark.skip_global_cleanup
+def test_step_invalidates_mm_processor_cache_misses():
+    engine = object.__new__(LLMEngine)
+    engine.should_execute_dummy_batch = False
+    engine.dp_group = None
+    engine.log_stats = False
+    engine.logger_manager = None
+
+    mm_processor_cache = MagicMock()
+    engine.renderer = MagicMock(mm_processor_cache=mm_processor_cache)
+
+    engine_core_output = MagicMock(
+        mm_cache_miss_hashes=["missing-hash-1", "missing-hash-2"]
+    )
+    outputs = MagicMock(
+        outputs=[engine_core_output],
+        timestamp=0.0,
+        scheduler_stats=None,
+    )
+    engine.engine_core = MagicMock()
+    engine.engine_core.get_output.return_value = outputs
+
+    processed_outputs = MagicMock(reqs_to_abort=[], request_outputs=[])
+    engine.output_processor = MagicMock()
+    engine.output_processor.process_outputs.return_value = processed_outputs
+
+    assert engine.step() == []
+    assert mm_processor_cache.invalidate.call_args_list == [
+        call("missing-hash-1"),
+        call("missing-hash-2"),
+    ]
+
+
+@pytest.mark.skip_global_cleanup
+@pytest.mark.parametrize("model_executed", [True, False])
+def test_dp_step_runs_dummy_batch_when_no_forward(model_executed: bool):
+    """Each DP rank must join one forward per step (in-process DP / external
+    launcher). A step whose engine-core step ran no forward (e.g. async
+    scheduling skips requests that already reached max_tokens) must run a
+    dummy batch, or the other ranks hang in their forward's DP sync."""
+    engine = object.__new__(LLMEngine)
+    engine.should_execute_dummy_batch = False
+    engine.dp_group = MagicMock()
+    engine.external_launcher_dp = True
+    engine.log_stats = False
+    engine.logger_manager = None
+    engine.renderer = MagicMock(mm_processor_cache=None)
+    engine.engine_core = MagicMock()
+    engine.engine_core.get_output.return_value = MagicMock(
+        outputs=[], timestamp=0.0, scheduler_stats=None
+    )
+    engine.engine_core.last_step_model_executed = model_executed
+    engine.output_processor = MagicMock()
+    engine.output_processor.process_outputs.return_value = MagicMock(
+        reqs_to_abort=[], request_outputs=[]
+    )
+
+    engine.step()
+
+    assert engine.engine_core.execute_dummy_batch.call_count == (
+        0 if model_executed else 1
+    )
+
+
+def test_duplicate_profile_start_rejected_before_engine_core_dispatch():
+    engine = object.__new__(LLMEngine)
+    engine.engine_core = MagicMock()
+    engine._profile_session_active = False
+
+    engine.start_profile("first")
+
+    with pytest.raises(ProfilerAlreadyActiveError):
+        engine.start_profile("duplicate")
+
+    engine.engine_core.profile.assert_called_once_with(
+        True, "first", None, None, profiler_kwargs=None
+    )
+
+
+def test_profiler_kwargs_passed_to_engine_core():
+    engine = object.__new__(LLMEngine)
+    engine.engine_core = MagicMock()
+    engine._profile_session_active = False
+
+    engine.start_profile("prefix", profiler_kwargs={"record_shapes": True})
+    engine.engine_core.profile.assert_called_once_with(
+        True, "prefix", None, None, profiler_kwargs={"record_shapes": True}
+    )
+
+
+@pytest.mark.parametrize(
+    "kwargs",
+    [
+        {"profile_prefix": "../trace"},
+        {"delay_iterations": -1},
+        {"max_iterations": -1},
+    ],
+)
+def test_invalid_profile_controls_rejected_before_engine_core_dispatch(kwargs):
+    engine = object.__new__(LLMEngine)
+    engine.engine_core = MagicMock()
+    engine._profile_session_active = False
+
+    with pytest.raises(ValueError):
+        engine.start_profile(**kwargs)
+
+    engine.engine_core.profile.assert_not_called()
 
 
 def _vllm_model(
@@ -46,13 +158,6 @@ def _vllm_model(
 def vllm_model(vllm_runner, request):
     """VllmRunner test fixture parameterized by APC True/False."""
     with _vllm_model(request.param, vllm_runner) as vllm_model:
-        yield vllm_model
-
-
-@pytest.fixture(scope="function")
-def vllm_model_apc(vllm_runner):
-    """VllmRunner test fixture with APC."""
-    with _vllm_model(True, vllm_runner) as vllm_model:
         yield vllm_model
 
 

@@ -3,7 +3,7 @@
 
 import torch
 import torch.nn as nn
-from transformers import PretrainedConfig
+from transformers import PreTrainedConfig
 
 from vllm.config.lora import LoRAConfig
 from vllm.distributed import (
@@ -85,7 +85,7 @@ class LogitsProcessorWithLoRA(BaseLayerWithLoRA):
         self,
         max_loras: int,
         lora_config: LoRAConfig,
-        model_config: PretrainedConfig | None = None,
+        model_config: PreTrainedConfig | None = None,
     ) -> None:
         # TODO: Verify if this condition can be further relaxed
         if self.base_layer.vocab_size > 258048:
@@ -117,18 +117,6 @@ class LogitsProcessorWithLoRA(BaseLayerWithLoRA):
             )
         else:
             self.sharded_to_full_mapping_gpu = None
-
-    def reset_sharded_to_full_mapping(self) -> None:
-        """Restore the TP logits mapping after its GPU memory is reused."""
-        mapping_gpu = self.sharded_to_full_mapping_gpu
-        if mapping_gpu is not None:
-            mapping_gpu.copy_(
-                torch.tensor(
-                    self.sharded_to_full_mapping,
-                    device=mapping_gpu.device,
-                    dtype=mapping_gpu.dtype,
-                )
-            )
 
     def reset_lora(self, index: int):
         self.lora_a_stacked[index] = 0
@@ -221,7 +209,7 @@ class LogitsProcessorWithLoRA(BaseLayerWithLoRA):
         source_layer: nn.Module,
         lora_config: LoRAConfig,
         packed_modules_list: list,
-        model_config: PretrainedConfig | None = None,
+        model_config: PreTrainedConfig | None = None,
     ) -> bool:
         # Special handling for the LogitsProcessor.
         return False
