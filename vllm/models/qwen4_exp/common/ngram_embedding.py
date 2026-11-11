@@ -18,7 +18,7 @@ from torch import nn
 from vllm.compilation.breakable_cudagraph import eager_break_during_capture
 from vllm.distributed import (
     get_dp_group,
-    get_engram_dp_group,
+    get_engram_table_share_group,
     get_etp_group,
     get_tp_group,
 )
@@ -868,8 +868,8 @@ class Qwen4ExpPLESharedHostEmbedding(Qwen4ExpPLEPinnedHostEmbedding):
     """
 
     def __init__(self, *args, **kwargs) -> None:
-        group = get_engram_dp_group()
-        assert group is not None, "dp_shared_memory requires the Engram DP group"
+        group = get_engram_table_share_group()
+        assert group is not None, "dp_shared_memory requires a table-sharing group"
         self._shared_group = group
         self._shared_ptrs: set[int] = set()
         super().__init__(*args, **kwargs)
@@ -908,4 +908,4 @@ class Qwen4ExpPLESharedHostEmbedding(Qwen4ExpPLEPinnedHostEmbedding):
             super().weight_loader(param, loaded_weight, checkpoint_start)
         # Read order may differ across ranks. Equal load counts ensure all shared
         # tables are ready after the last weight-loader call returns.
-        torch.distributed.barrier(group=self._shared_group.cpu_group)
+        self._shared_group.barrier()

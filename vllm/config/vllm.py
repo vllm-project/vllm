@@ -838,6 +838,17 @@ class VllmConfig:
         return enabled
 
     @property
+    def dp_ranks_in_lockstep(self) -> bool:
+        """Whether DP ranks must run their forward passes together.
+
+        True for MoE models, whose expert layers span the DP ranks, unless
+        `independent_data_parallel` makes every rank a full replica.
+        """
+        return (
+            self.model_config is None or self.model_config.is_moe
+        ) and not self.parallel_config.independent_data_parallel
+
+    @property
     def needs_dp_coordinator(self) -> bool:
         """Determine if the DPCoordinator process is needed.
 
@@ -851,11 +862,10 @@ class VllmConfig:
             True if DPCoordinator process is needed, False otherwise.
 
         """
-        # For non-MoE models, only need coordinator in internal/hybrid LB mode
-        # (for stats collection).
+        # For independent DP ranks, only need coordinator in internal/hybrid LB
+        # mode (for stats collection).
         return self.parallel_config.data_parallel_size > 1 and (
-            self.model_config is None
-            or self.model_config.is_moe
+            self.dp_ranks_in_lockstep
             or not self.parallel_config.data_parallel_external_lb
         )
 
@@ -1038,6 +1048,8 @@ class VllmConfig:
             speculative_config is None
             or not speculative_config.uses_dynamic_speculative_decoding()
             or self.parallel_config.data_parallel_size <= 1
+            # Independent ranks never synchronize, so counts may differ.
+            or self.parallel_config.independent_data_parallel
         ):
             return
 
@@ -1432,6 +1444,32 @@ class VllmConfig:
         self.engram_config.verify_parallel_config(self.parallel_config)
         logger.info_once("Resolved Engram configuration: %s", str(self.engram_config))
 
+    def _verify_independent_data_parallel(self) -> None:
+        """Reject features that still assume MoE DP ranks run in lockstep."""
+        parallel_config = self.parallel_config
+        if (
+            not parallel_config.independent_data_parallel
+            or parallel_config.num_dp_replicas <= 1
+        ):
+            return
+        if self.load_config.load_format == "ipc_cache":
+            raise ValueError(
+                "The IPC weight cache does not support independent_data_parallel "
+                "yet: its daemons build the lockstep MoE layout."
+            )
+        model_config = self.model_config
+        if (
+            model_config is not None
+            and model_config.architecture == "DeepseekV41ForCausalLM"
+            and self.engram_config is not None
+            and self.engram_config.cpu_offload
+        ):
+            logger.warning_once(
+                "DeepSeek V4.1 Engram tables are not shared between independent "
+                "DP ranks: each of the %d ranks pins its own host copy.",
+                parallel_config.num_dp_replicas,
+            )
+
     def _reject_mismatched_float_kv_cache(self) -> None:
         """Reject an explicit float16/bfloat16 KV dtype that differs from the model."""
         cache_dtype = self.cache_config.cache_dtype
@@ -1487,6 +1525,7 @@ class VllmConfig:
         self.try_verify_and_update_config()
         self._reject_mismatched_float_kv_cache()
         self._resolve_and_verify_engram_config()
+        self._verify_independent_data_parallel()
 
         self._check_supports_watermarking()
         # Models may have supplied their own DCP defaults above; anything still
@@ -1642,8 +1681,9 @@ class VllmConfig:
 
         if self.parallel_config.disable_nccl_for_dp_synchronization is None:
             if self.scheduler_config.async_scheduling:
-                if self.parallel_config.data_parallel_size > 1 and (
-                    self.model_config is None or self.model_config.is_moe
+                if (
+                    self.parallel_config.data_parallel_size > 1
+                    and self.dp_ranks_in_lockstep
                 ):
                     logger.info_once(
                         "Disabling NCCL for DP synchronization "
@@ -2068,9 +2108,7 @@ class VllmConfig:
 
         # Do this after all the updates to compilation_config.mode
         effective_dp_size = (
-            self.parallel_config.data_parallel_size
-            if self.model_config is None or self.model_config.is_moe
-            else 1
+            self.parallel_config.data_parallel_size if self.dp_ranks_in_lockstep else 1
         )
         self.compilation_config.set_splitting_ops_for_v1(
             all2all_backend=self.parallel_config.all2all_backend,

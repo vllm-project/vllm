@@ -146,7 +146,8 @@ Data parallelism replicates the entire model across multiple GPU sets and proces
 - In multi-user environments where isolation between request batches is beneficial
 
 Data parallelism can be combined with the other parallelism strategies and is set by `data_parallel_size=N`.
-Note that MoE layers will be sharded according to the product of the tensor parallel size and data parallel size.
+Note that by default MoE layers are not replicated: they are sharded according to the product of the tensor parallel size and data parallel size, and the DP ranks run in lockstep.
+Set `independent_data_parallel=True` to replicate them in every DP rank instead.
 
 ### NUMA Binding for Multi-Socket GPU Nodes
 

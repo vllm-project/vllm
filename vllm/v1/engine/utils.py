@@ -523,7 +523,7 @@ class CoreEngineActorManager:
         dp_size = vllm_config.parallel_config.data_parallel_size
         actor_class = (
             DPMoEEngineCoreActor
-            if dp_size > 1 and vllm_config.model_config.is_moe
+            if dp_size > 1 and vllm_config.dp_ranks_in_lockstep
             else EngineCoreActor
         )
 
@@ -955,7 +955,7 @@ class CoreEngineActorManager:
 
         actor_class = (
             DPMoEEngineCoreActor
-            if cur_vllm_config.model_config.is_moe
+            if cur_vllm_config.dp_ranks_in_lockstep
             else EngineCoreActor
         )
 
@@ -1265,7 +1265,7 @@ def launch_core_engines(
     if run_coordinator:
         coordinator = DPCoordinator(
             parallel_config,
-            enable_wave_coordination=vllm_config.model_config.is_moe,
+            enable_wave_coordination=vllm_config.dp_ranks_in_lockstep,
             logging_config=vllm_config.logging_config,
         )
 
@@ -1394,7 +1394,7 @@ def launch_core_engines(
             handshake_socket,
             engines_to_handshake,
             parallel_config,
-            dp_size > 1 and vllm_config.model_config.is_moe,
+            dp_size > 1 and vllm_config.dp_ranks_in_lockstep,
             vllm_config.cache_config,
             launch,
         )
