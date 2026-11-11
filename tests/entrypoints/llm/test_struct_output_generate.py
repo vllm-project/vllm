@@ -3,7 +3,7 @@
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 
 import json
-from enum import Enum
+from enum import StrEnum
 from typing import Any
 
 import jsonschema
@@ -192,7 +192,7 @@ if current_platform.is_rocm():
     platform_args["async_scheduling"] = False
 
 
-class CarType(str, Enum):
+class CarType(StrEnum):
     sedan = "sedan"
     suv = "SUV"
     truck = "Truck"
