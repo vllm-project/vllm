@@ -402,6 +402,7 @@ class DeepseekV4Attention(nn.Module, AttentionLayerBase, ABC):
 
         is_backbone = layer_id < config.num_hidden_layers
         self.is_kv_source = is_backbone and layer_id in self.kv_source_layers
+        self.always_gathers_compressed_kv = self.is_kv_source
         self.is_index_source = is_backbone and layer_id in self.index_source_layers
         if self.compress_ratio > 0:
             if not self.kv_source_layers or not self.index_source_layers:

@@ -916,6 +916,22 @@ class DeepseekV4Model(nn.Module, EagleModelMixin):
             self.pipeline_relay.configure(
                 self.layers[self.start_layer].attn, vllm_config
             )
+            replica = self.pipeline_relay.incoming.kv_source
+            if replica is not None:
+                # The replica is updated each step, so its first reader always gathers.
+                replica_prefix = f"{prefix}.layers.{replica}.attn"
+                first_reader = next(
+                    (
+                        layer.attn
+                        for layer in islice(
+                            self.layers, self.start_layer, self.end_layer
+                        )
+                        if layer.attn.compressed_cache_prefix == replica_prefix
+                    ),
+                    None,
+                )
+                if first_reader is not None:
+                    first_reader.always_gathers_compressed_kv = True
         self.engram_batch = EngramBatch.create(
             [
                 layer.engram
