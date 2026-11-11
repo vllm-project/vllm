@@ -2102,6 +2102,10 @@ class GPUModelRunner(LoRAModelRunnerMixin):
             assert intermediate_tensors is not None
             assert self.intermediate_tensors is not None
             if not dummy_run:
+                assert self.pp_handler is not None
+                self.pp_handler.check_received_tensors(
+                    intermediate_tensors.tensors, self.intermediate_tensors.tensors
+                )
                 num_tokens = input_batch.num_tokens
                 received = intermediate_tensors.tensors
                 for k, v in self.intermediate_tensors.tensors.items():
