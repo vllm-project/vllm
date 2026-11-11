@@ -1696,18 +1696,36 @@ class OffloadingConnectorScheduler:
         # ones are fresh allocations from this step.
         if self._sliding_window_groups and self._current_batch_allocated_block_ids:
             blocks_per_chunk = self.config.blocks_per_chunk
+            block_state = scheduler_output.kv_connector_block_state
             for req_id, req_status in self._req_status.items():
                 ends = new_block_ids_end.get(req_id)
+                current_groups = (
+                    # Connector state can outlive core's request table after
+                    # finish, preemption, or reset.
+                    block_state.resolve_block_ids(req_id)
+                    if block_state is not None
+                    else ()
+                )
                 for i, grp_idx in enumerate(self._sliding_window_groups):
                     group_state = req_status.group_states[grp_idx]
                     start = group_state.next_stored_chunk_idx * blocks_per_chunk
                     end = ends[i] if ends is not None else len(group_state.block_ids)
-                    for j in range(start, end):
-                        if (
-                            group_state.block_ids[j]
-                            in self._current_batch_allocated_block_ids
-                        ):
-                            group_state.block_ids[j] = 0
+                    config = self.config.kv_group_configs[grp_idx]
+                    current = (
+                        current_groups[config.group_idx]
+                        if config.group_idx < len(current_groups)
+                        # No live core table is available for this group.
+                        else ()
+                    )
+                    for pos in range(start, end):
+                        block_id = group_state.block_ids[pos]
+                        if block_id not in self._current_batch_allocated_block_ids:
+                            continue
+                        # The connector may retain positions that core has
+                        # already removed from the live table.
+                        if pos < len(current) and current[pos] == block_id:
+                            continue
+                        group_state.block_ids[pos] = 0
 
     def _build_aligned_boundary_store_jobs(
         self, handoffs: dict[str, list[tuple[int, int, int]]]

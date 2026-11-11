@@ -5046,6 +5046,87 @@ def test_request_level_supply_covers_consumer_demand(
 
 
 @pytest.mark.parametrize("async_scheduling", [True, False])
+@pytest.mark.parametrize("blocks_per_chunk", [1, 2])
+def test_shared_sliding_window_block_survives_delayed_store(
+    request_runner, async_scheduling: bool, blocks_per_chunk: int
+):
+    """A shared GPU hit must not invalidate another request's pending store."""
+    runner = request_runner(
+        block_size=4,
+        num_gpu_blocks=32,
+        async_scheduling=async_scheduling,
+        blocks_per_chunk=blocks_per_chunk,
+        kv_cache_groups=_full_and_swa_groups(4, 4, 8),
+    )
+    manager = CPUOffloadingManager(num_chunks=8)
+    runner.connector_scheduler.manager = manager
+    prompt_length = 12 if blocks_per_chunk == 1 else 16
+    runner.new_request(token_ids=list(range(prompt_length)))
+    state = runner.connector_scheduler._req_status["0"]
+    occupied = [make_offload_key(bytes([i]) * 32, 99) for i in range(8)]
+    stored = manager.prepare_store(occupied, state.req_context)
+    assert stored is not None
+    manager.complete_store(stored.keys_to_store, state.req_context)
+    manager.prepare_load(occupied, state.req_context)
+
+    output = runner.scheduler.schedule()
+    runner.scheduler.update_from_output(
+        output, create_model_runner_output(runner.scheduler.running)
+    )
+    runner.new_request(token_ids=list(range(prompt_length + 4)))
+    output = runner.scheduler.schedule()
+    blocks_a = runner.scheduler.kv_cache_manager.get_blocks("0").blocks[1]
+    blocks_b = runner.scheduler.kv_cache_manager.get_blocks("1").blocks[1]
+    shared = [
+        (i, block.block_id)
+        for i, block in enumerate(blocks_a)
+        if not block.is_null
+        and i < len(blocks_b)
+        and block.block_id == blocks_b[i].block_id
+    ]
+    assert shared
+    group_state = state.group_states[1]
+    assert all(group_state.block_ids[i] == bid for i, bid in shared)
+    target_keys = {group_state.offload_keys[i // blocks_per_chunk] for i, _ in shared}
+    assert all(
+        manager.lookup(key, state.req_context) is LookupResult.MISS
+        for key in target_keys
+    )
+
+    manager.complete_load(occupied, state.req_context)
+    runner.scheduler.update_from_output(
+        output, create_model_runner_output(runner.scheduler.running)
+    )
+    output = runner.scheduler.schedule()
+    metadata = output.kv_connector_metadata
+    assert isinstance(metadata, OffloadingConnectorMetadata)
+    assert metadata.store_jobs
+    a_stores = [job for job in metadata.store_jobs.values() if job.req_id == "0"]
+    assert a_stores
+    assert isinstance(a_stores[0].src_spec, GPULoadStoreSpec)
+    assert {bid for _, bid in shared}.issubset(a_stores[0].src_spec.block_ids.tolist())
+    runner.scheduler.update_from_output(
+        output,
+        create_model_runner_output(
+            runner.scheduler.running,
+            kv_connector_worker_meta=OffloadingWorkerMetadata(
+                completed_jobs={job_id: 1 for job_id in metadata.store_jobs}
+            ),
+        ),
+    )
+    assert all(
+        manager.lookup(key, state.req_context) is LookupResult.HIT
+        for key in target_keys
+    )
+    runner.new_request(token_ids=list(range(prompt_length + 4)))
+    request_c = runner.scheduler.requests["2"]
+    assert runner.scheduler_connector.get_num_new_matched_tokens(request_c, 0) == (
+        15 if blocks_per_chunk == 1 else 16,
+        True,
+    )
+
+
+@pytest.mark.parametrize("async_scheduling", [True, False])
 def test_stale_sliding_window_block_after_prepare_store_failure(
     request_runner, async_scheduling: bool
 ):
