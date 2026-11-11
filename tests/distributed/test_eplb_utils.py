@@ -13,9 +13,8 @@ import torch.multiprocessing as mp
 from vllm.config import ParallelConfig
 from vllm.distributed.eplb import eplb_state
 from vllm.distributed.eplb.eplb_state import (
+    EplbModelState,
     EplbState,
-    _commit_eplb_maps,
-    _commit_eplb_maps_for_layer,
 )
 from vllm.distributed.eplb.eplb_utils import CpuGpuEvent
 from vllm.distributed.eplb.rebalance_execute import (
@@ -32,16 +31,28 @@ def _make_model_state(
     log2phy: torch.Tensor,
     logcnt: torch.Tensor,
     phy2log_storage: torch.Tensor | None = None,
-) -> MagicMock:
-    """Build a minimal EplbModelState mock with its map tensors."""
-    state = MagicMock()
-    state.physical_to_logical_map = phy2log
-    state.physical_to_logical_map_buffer = (
-        phy2log if phy2log_storage is None else phy2log_storage
+) -> EplbModelState:
+    """Build a real EplbModelState for map-only tests."""
+    loads = torch.zeros_like(phy2log)
+    return EplbModelState(
+        physical_to_logical_map=phy2log,
+        physical_to_logical_map_buffer=phy2log
+        if phy2log_storage is None
+        else phy2log_storage,
+        logical_to_physical_map=log2phy,
+        logical_replica_count=logcnt,
+        expert_load_pass=loads,
+        expert_load_pass_buffer=loads,
+        expert_load_window=loads.unsqueeze(0),
+        last_expert_load=logcnt,
+        model_name="map-test",
+        model=torch.nn.Module(),
+        expert_buffer=[],
+        rebalanced=False,
+        eplb_stats=None,
+        device_index=None,
+        communicator=MagicMock(),
     )
-    state.logical_to_physical_map = log2phy
-    state.logical_replica_count = logcnt
-    return state
 
 
 def test_commit_eplb_maps_shape_change():
@@ -69,7 +80,7 @@ def test_commit_eplb_maps_shape_change():
         .unsqueeze(0)
         .expand(num_layers, -1)
     )
-    _commit_eplb_maps(model_state, new_phy2log_larger)
+    model_state._commit_eplb_maps(new_phy2log_larger)
 
     # Check that the number of physical experts has been updated and that the values
     # match
@@ -100,7 +111,7 @@ def test_commit_eplb_maps_for_layer_logical_padding():
         .contiguous()
     )
     layer = 0
-    _commit_eplb_maps_for_layer(model_state, new_phy2log[layer], layer)
+    model_state._commit_eplb_maps_for_layer(new_phy2log[layer], layer)
 
     assert torch.all(model_state.logical_to_physical_map[layer, :, 2] == -1)
 
@@ -116,7 +127,7 @@ def test_commit_eplb_maps_for_layer_shape_assert():
     )
     bad_phy2log = torch.zeros(num_layers, num_physical + 1, dtype=torch.long)
     with pytest.raises(AssertionError):
-        _commit_eplb_maps_for_layer(model_state, bad_phy2log, layer=0)
+        model_state._commit_eplb_maps_for_layer(bad_phy2log, layer=0)
 
 
 def test_commit_eplb_maps():
@@ -137,7 +148,7 @@ def test_commit_eplb_maps():
     )
     new_logcnt = torch.tensor([[2, 1, 1], [1, 2, 1]], dtype=torch.long)
 
-    _commit_eplb_maps(model_state, new_phy2log)
+    model_state._commit_eplb_maps(new_phy2log)
 
     assert torch.equal(model_state.physical_to_logical_map, new_phy2log)
     assert torch.equal(model_state.logical_to_physical_map, new_log2phy)
@@ -163,7 +174,7 @@ def test_commit_eplb_maps_for_layer():
     )
     new_logcnt = torch.tensor([[2, 1, 1], [1, 2, 1]], dtype=torch.long)
 
-    _commit_eplb_maps_for_layer(model_state, new_phy2log[0], layer=0)
+    model_state._commit_eplb_maps_for_layer(new_phy2log[0], layer=0)
 
     # Layer 0 updated
     assert torch.equal(model_state.physical_to_logical_map[0], new_phy2log[0])
@@ -308,6 +319,6 @@ def test_commit_eplb_maps_for_layer_does_not_sync_host():
     prev_mode = torch.cuda.get_sync_debug_mode()
     torch.cuda.set_sync_debug_mode("error")
     try:
-        _commit_eplb_maps_for_layer(model_state, new_phy2log, layer=0)
+        model_state._commit_eplb_maps_for_layer(new_phy2log, layer=0)
     finally:
         torch.cuda.set_sync_debug_mode(prev_mode)

@@ -19,7 +19,6 @@ from vllm.distributed.eplb.eplb_state import (
     EplbModelState,
     EplbState,
     EplbStats,
-    _move_to_workspace,
     compute_logical_maps,
 )
 from vllm.distributed.eplb.eplb_utils import CpuGpuEvent
@@ -190,29 +189,36 @@ class _ExpertModel(torch.nn.Module):
         self.num_moe_layers = 1
 
 
-class _State(EplbState):
-    def __init__(self, policy=None, fail_commit=False):
-        self.selected_policy = policy or DefaultEplbPolicy()
-        self.fail_commit = fail_commit
+class _ModelState(EplbModelState):
+    def __init__(self, *args, **kwargs):
+        super().__init__(*args, **kwargs)
+        self.fail_commit = False
         self.committed_layers = []
         self.committed_maps = []
+
+    def _commit_eplb_maps_for_layer(self, target, layer):
+        super()._commit_eplb_maps_for_layer(target, layer)
+        assert not self.pending_result.consumed_event._recorded.is_set()
+        if self.fail_commit:
+            raise RuntimeError("device commit failed")
+        self.committed_layers.append(layer)
+        self.committed_maps.append(self.physical_to_logical_map.clone())
+
+    def _commit_eplb_maps(self, target):
+        super()._commit_eplb_maps(target)
+        self.committed_layers.extend(range(self.model.num_moe_layers))
+        self.committed_maps.append(self.physical_to_logical_map.clone())
+
+
+class _State(EplbState):
+    model_state_cls = _ModelState
+
+    def __init__(self, policy=None):
+        self.selected_policy = policy or DefaultEplbPolicy()
         super().__init__(ParallelConfig(), torch.device("cpu"))
 
     def create_policy(self):
         return self.selected_policy
-
-    def _commit_rebalance(self, model_state, target, layer_idx=None):
-        super()._commit_rebalance(model_state, target, layer_idx)
-        if model_state.pending_result is not None:
-            assert not model_state.pending_result.consumed_event._recorded.is_set()
-        if self.fail_commit:
-            raise RuntimeError("device commit failed")
-        self.committed_layers.extend(
-            range(model_state.model.num_moe_layers)
-            if layer_idx is None
-            else [layer_idx]
-        )
-        self.committed_maps.append(model_state.physical_to_logical_map.clone())
 
 
 @pytest.fixture
@@ -221,7 +227,7 @@ def model_state(cpu_group):
     mapping = torch.arange(4).reshape(1, 4)
     logical, replicas = compute_logical_maps(mapping, 4)
     loads = torch.zeros(1, 4, dtype=torch.int64)
-    return EplbModelState(
+    return _State.model_state_cls(
         physical_to_logical_map=mapping,
         physical_to_logical_map_buffer=mapping,
         logical_to_physical_map=logical,
@@ -267,7 +273,7 @@ def test_planning_hook_preserves_existing_policy_result(model_state, use_async):
 def test_async_commit_updates_maps_before_buffer_acknowledgement(
     model_state, fail_commit
 ):
-    state = _State(fail_commit=fail_commit)
+    model_state.fail_commit = fail_commit
     target = torch.tensor([[1, 0, 3, 2]])
     original = model_state.model.weight.detach().clone()
     metadata = transfer_layer(
@@ -285,28 +291,27 @@ def test_async_commit_updates_maps_before_buffer_acknowledgement(
     model_state.rebalanced = True
     if fail_commit:
         with pytest.raises(RuntimeError, match="commit failed"):
-            _move_to_workspace(model_state, 0, state._commit_rebalance)
+            model_state._move_to_workspace(0)
     else:
-        _move_to_workspace(model_state, 0, state._commit_rebalance)
+        model_state._move_to_workspace(0)
     torch.testing.assert_close(model_state.model.weight, original[[1, 0, 3, 2]])
     torch.testing.assert_close(model_state.physical_to_logical_map, target)
     if fail_commit:
-        assert state.committed_layers == []
+        assert model_state.committed_layers == []
         assert model_state.pending_result is result
         assert not result.consumed_event._recorded.is_set()
     else:
-        assert state.committed_layers == [0]
-        torch.testing.assert_close(state.committed_maps[0], target)
+        assert model_state.committed_layers == [0]
+        torch.testing.assert_close(model_state.committed_maps[0], target)
         assert model_state.pending_result is None
         assert result.consumed_event._recorded.is_set()
 
 
 def test_sync_commit_updates_maps_before_device_work(model_state):
-    state = _State()
     target = torch.tensor([[1, 0, 3, 2]])
-    state._commit_rebalance(model_state, target)
-    assert state.committed_layers == [0]
-    torch.testing.assert_close(state.committed_maps[0], target)
+    model_state._commit_eplb_maps(target)
+    assert model_state.committed_layers == [0]
+    torch.testing.assert_close(model_state.committed_maps[0], target)
     torch.testing.assert_close(
         model_state.logical_to_physical_map[0, :, 0], torch.tensor([1, 0, 3, 2])
     )

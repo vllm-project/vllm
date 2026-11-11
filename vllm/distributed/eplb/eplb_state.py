@@ -28,7 +28,7 @@ physical experts.
 import threading
 import time
 from collections import deque
-from collections.abc import Callable, Sequence
+from collections.abc import Sequence
 from dataclasses import dataclass
 
 import torch
@@ -243,9 +243,112 @@ class EplbModelState:
     indexes this list with `dbo_current_ubatch_id()`.
     """
 
+    def _commit_eplb_maps_for_layer(
+        self,
+        new_physical_to_logical_map: torch.Tensor,
+        layer: int,
+    ) -> None:
+        """Per-layer version of _commit_eplb_maps used by the sync portion of
+        async EPLB. Copies all of the new_* maps into this model state. After
+        this function completes, the new mappings will become the current
+        mappings and will be visible to the model.
+        """
+        # Commit physical_to_logical_map
+        src = new_physical_to_logical_map
+        dst = self.physical_to_logical_map[layer]
+        assert src.shape == dst.shape, (
+            "The number of physical experts must stay the same while running "
+            "Async EPLB. "
+            f"Current number of physical experts: {dst.shape[0]}. New number of "
+            "physical "
+            f"experts {src.shape[0]}."
+        )
+        if PIN_MEMORY and src.is_cpu:
+            src = src.new_empty(src.shape, pin_memory=True).copy_(src)
+        dst.copy_(src, non_blocking=True)
+
+        num_logical_experts = self.logical_to_physical_map.shape[1]
+        new_logical, new_replica_count = compute_logical_maps(src, num_logical_experts)
+        # Commit logical_to_physical_map
+        _pad_out_tensor(src=new_logical, dst=self.logical_to_physical_map[layer])
+
+        # Commit logical_replica_count
+        src = new_replica_count
+        dst = self.logical_replica_count[layer]
+        assert src.shape == dst.shape
+        if PIN_MEMORY:
+            src = src.pin_memory()
+        dst.copy_(src, non_blocking=True)
+
+    def _commit_eplb_maps(
+        self,
+        new_physical_to_logical_map: torch.Tensor,
+    ) -> None:
+        """Copies all of the new_* maps into self. After this function completes,
+        the new mappings will become the current mappings and will be visible to the
+        model.
+        """
+        # Commit physical_to_logical_map
+        src = new_physical_to_logical_map
+        dst = self.physical_to_logical_map
+
+        if PIN_MEMORY and src.is_cpu:
+            src = src.new_empty(src.shape, pin_memory=True).copy_(src)
+        # When the number of physical experts changes, refresh the active map view to
+        # cover the new size before copying it.
+        if src.shape[1] != dst.shape[1]:
+            dst = self.physical_to_logical_map_buffer[:, : src.shape[1]]
+            assert dst.shape == src.shape
+            self.physical_to_logical_map = dst
+        dst.copy_(src, non_blocking=True)
+
+        num_logical_experts = self.logical_to_physical_map.shape[1]
+        new_logical, new_replica_count = compute_logical_maps(src, num_logical_experts)
+        # Commit logical_to_physical_map
+        _pad_out_tensor(
+            src=new_logical,
+            dst=self.logical_to_physical_map,
+        )
+
+        # Commit logical_replica_count
+        src = new_replica_count
+        dst = self.logical_replica_count
+        if PIN_MEMORY:
+            src = src.pin_memory()
+        dst.copy_(src, non_blocking=True)
+
+    def _move_to_workspace(
+        self,
+        ep_rank: int,
+    ) -> None:
+        result = self.pending_result
+        assert result is not None
+        move_from_buffer(
+            expert_weights=self.model.expert_weights[result.layer_idx],
+            expert_weights_buffers=self.expert_buffer,
+            transfer_metadata=result.transfer_metadata,
+            new_indices=result.new_physical_to_logical_map.numpy(),
+            ep_rank=ep_rank,
+        )
+
+        self._commit_eplb_maps_for_layer(
+            result.new_physical_to_logical_map,
+            result.layer_idx,
+        )
+        self.num_committed_layers = result.layer_idx + 1
+
+        if result.layer_idx == self.model.num_moe_layers - 1:
+            self.rebalanced = False
+
+        # Reset pending_result before unblocking the async worker
+        self.pending_result = None
+        result.consumed_event.record()
+
 
 class EplbState:
     """EplbState of each expert parallel model. Key is the model config hash."""
+
+    model_state_cls: type[EplbModelState] = EplbModelState
 
     def __init__(self, parallel_config: ParallelConfig, device: torch.device):
         self.parallel_config = parallel_config
@@ -419,25 +522,6 @@ class EplbState:
             old_global_expert_indices,
         )
 
-    def _commit_rebalance(
-        self,
-        model_state: EplbModelState,
-        new_physical_to_logical_map: torch.Tensor,
-        layer_idx: int | None = None,
-    ) -> None:
-        """Install maps before the async receive buffer is acknowledged.
-
-        Overrides must finish device-specific commit work before returning.
-        """
-        if layer_idx is None:
-            _commit_eplb_maps(model_state, new_physical_to_logical_map)
-        else:
-            _commit_eplb_maps_for_layer(
-                model_state,
-                new_physical_to_logical_map,
-                layer_idx,
-            )
-
     def add_model(
         self,
         model: MixtureOfExperts,
@@ -592,7 +676,7 @@ class EplbState:
         # Compile the copy-back kernels now rather than mid-serving (no-op copy).
         copy_rows(model.expert_weights[0], [0], model.expert_weights[0], [0])
 
-        model_state = EplbModelState(
+        model_state = self.model_state_cls(
             physical_to_logical_map=physical_to_logical_map,
             physical_to_logical_map_buffer=physical_to_logical_map_buffer,
             logical_to_physical_map=logical_to_physical_map,
@@ -776,11 +860,7 @@ class EplbState:
                 if eplb_model_state.rebalanced and self._all_ranks_result_ready(
                     eplb_model_state
                 ):
-                    _move_to_workspace(
-                        model_state=eplb_model_state,
-                        ep_rank=ep_group.rank(),
-                        commit_rebalance=self._commit_rebalance,
-                    )
+                    eplb_model_state._move_to_workspace(ep_rank=ep_group.rank())
                     if not self._async_rearrangement_in_progress():
                         # Start the next interval after the final commit, allowing
                         # the load window to fill under the new placement.
@@ -1116,8 +1196,7 @@ class EplbState:
                     )
 
                     if not is_profile:
-                        self._commit_rebalance(
-                            eplb_model_state,
+                        eplb_model_state._commit_eplb_maps(
                             new_physical_to_logical_map=new_physical_to_logical_map,
                         )
 
@@ -1508,107 +1587,3 @@ def _pad_out_tensor(src: torch.Tensor, dst: torch.Tensor) -> None:
     padded = torch.full(dst.shape, -1, dtype=dst.dtype, pin_memory=PIN_MEMORY)
     padded[..., : src.shape[-1]] = src
     dst.copy_(padded, non_blocking=True)
-
-
-def _commit_eplb_maps_for_layer(
-    model_state: EplbModelState,
-    new_physical_to_logical_map: torch.Tensor,
-    layer: int,
-) -> None:
-    """Per-layer version of _commit_eplb_maps that's used by the sync portion of EPLB
-    when running async EPLB. Copies all of the new_* maps into model_state. After this
-    function completes, the new mappings will become the current mappings and will be
-    visible to the model.
-    """
-    # Commit physical_to_logical_map
-    src = new_physical_to_logical_map
-    dst = model_state.physical_to_logical_map[layer]
-    assert src.shape == dst.shape, (
-        "The number of physical experts must stay the same while running Async EPLB. "
-        f"Current number of physical experts: {dst.shape[0]}. New number of physical "
-        f"experts {src.shape[0]}."
-    )
-    if PIN_MEMORY and src.is_cpu:
-        src = src.new_empty(src.shape, pin_memory=True).copy_(src)
-    dst.copy_(src, non_blocking=True)
-
-    num_logical_experts = model_state.logical_to_physical_map.shape[1]
-    new_logical, new_replica_count = compute_logical_maps(src, num_logical_experts)
-    # Commit logical_to_physical_map
-    _pad_out_tensor(src=new_logical, dst=model_state.logical_to_physical_map[layer])
-
-    # Commit logical_replica_count
-    src = new_replica_count
-    dst = model_state.logical_replica_count[layer]
-    assert src.shape == dst.shape
-    if PIN_MEMORY:
-        src = src.pin_memory()
-    dst.copy_(src, non_blocking=True)
-
-
-def _commit_eplb_maps(
-    model_state: EplbModelState,
-    new_physical_to_logical_map: torch.Tensor,
-) -> None:
-    """Copies all of the new_* maps into model_state. After this function completes,
-    the new mappings will become the current mappings and will be visible to the
-    model.
-    """
-    # Commit physical_to_logical_map
-    src = new_physical_to_logical_map
-    dst = model_state.physical_to_logical_map
-
-    if PIN_MEMORY and src.is_cpu:
-        src = src.new_empty(src.shape, pin_memory=True).copy_(src)
-    # When the number of physical experts changes, refresh the active map view to
-    # cover the new size before copying it.
-    if src.shape[1] != dst.shape[1]:
-        dst = model_state.physical_to_logical_map_buffer[:, : src.shape[1]]
-        assert dst.shape == src.shape
-        model_state.physical_to_logical_map = dst
-    dst.copy_(src, non_blocking=True)
-
-    num_logical_experts = model_state.logical_to_physical_map.shape[1]
-    new_logical, new_replica_count = compute_logical_maps(src, num_logical_experts)
-    # Commit logical_to_physical_map
-    _pad_out_tensor(
-        src=new_logical,
-        dst=model_state.logical_to_physical_map,
-    )
-
-    # Commit logical_replica_count
-    src = new_replica_count
-    dst = model_state.logical_replica_count
-    if PIN_MEMORY:
-        src = src.pin_memory()
-    dst.copy_(src, non_blocking=True)
-
-
-def _move_to_workspace(
-    model_state: EplbModelState,
-    ep_rank: int,
-    commit_rebalance: Callable[[EplbModelState, torch.Tensor, int | None], None],
-) -> None:
-    result = model_state.pending_result
-    assert result is not None
-    move_from_buffer(
-        expert_weights=model_state.model.expert_weights[result.layer_idx],
-        expert_weights_buffers=model_state.expert_buffer,
-        transfer_metadata=result.transfer_metadata,
-        new_indices=result.new_physical_to_logical_map.numpy(),
-        ep_rank=ep_rank,
-    )
-
-    commit_rebalance(
-        model_state,
-        result.new_physical_to_logical_map,
-        result.layer_idx,
-    )
-    model_state.num_committed_layers = result.layer_idx + 1
-
-    if result.layer_idx == model_state.model.num_moe_layers - 1:
-        model_state.rebalanced = False
-
-    # Reset pending_result before unblocking the async worker
-    model_state.pending_result = None
-    result.consumed_event.record()
