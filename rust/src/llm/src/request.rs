@@ -353,7 +353,9 @@ mod tests {
             (
                 "remote_prefill",
                 Some(json!({"do_remote_prefill": true, "remote_request_id": "p-1"})),
-                Some(json!({"do_remote_prefill": true, "remote_request_id": "p-1", "num_readers": 4})),
+                Some(
+                    json!({"do_remote_prefill": true, "remote_request_id": "p-1", "num_readers": 4}),
+                ),
             ),
             ("no_kv_transfer_params", None, None),
             ("empty", Some(json!({})), Some(json!({}))),
