@@ -37,13 +37,14 @@ float8_info = torch.finfo(current_platform.fp8_dtype())
 MAX_3D_QUERY_LEN = 8
 
 # RDNA launch tuning: TRITON_ATTN's launch configs for gfx1201 (RDNA4) and gfx1100
-# (RDNA3).
-is_gfx1201 = is_gfx1100 = False
+# (RDNA3), and the long-prefill query block for gfx1151.
+is_gfx1201 = is_gfx1100 = is_gfx1151 = False
 if current_platform.is_rocm():
-    from vllm.platforms.rocm import on_gfx1100, on_gfx1201
+    from vllm.platforms.rocm import on_gfx1100, on_gfx1151, on_gfx1201
 
     is_gfx1201 = on_gfx1201()
     is_gfx1100 = on_gfx1100()
+    is_gfx1151 = on_gfx1151()
 
 # The tables are keyed by the padded head size (next power of 2), which the kernel's
 # tiles use: head_size 96 runs as 128, 192 as 256.
@@ -939,29 +940,16 @@ def _get_tile_size(
     return 16 if element_size >= 2 else 32
 
 
-def _is_gfx1100() -> bool:
-    if not current_platform.is_rocm():
-        return False
-    from vllm.platforms.rocm import on_gfx1100
-
-    return on_gfx1100()
-
-
-def _is_gfx1151() -> bool:
-    if not current_platform.is_rocm():
-        return False
-    from vllm.platforms.rocm import on_gfx1151
-
-    return on_gfx1151()
-
-
 def _select_query_block(
     max_seqlen_q: int, num_queries_per_kv: int
 ) -> tuple[int, int, bool]:
+    # The tuned block depends on the batch's longest query, so batch-invariant
+    # mode keeps the default.
     tuned_long_prefill = (
-        max_seqlen_q >= 512
+        is_gfx1151
+        and max_seqlen_q >= 512
         and num_queries_per_kv <= 16
-        and (_is_gfx1100() or _is_gfx1151())
+        and not is_batch_invariant
     )
     if tuned_long_prefill:
         block_m = 64
@@ -1114,9 +1102,10 @@ def unified_attention(
     tuned_prefill_tile: int | None = None
 
     # Long prefill performs many KV-tile iterations per query block. On
-    # gfx1100 and gfx1151, grouping more query rows amortizes that loop and
-    # reduces the launch grid without changing the kernel's math. Keep decode
-    # and short prefill on their smaller block, where the wider block is slower.
+    # gfx1151, grouping more query rows amortizes that loop and reduces the
+    # launch grid without changing the kernel's math. Keep decode and short
+    # prefill on their smaller block, where the wider block is slower. gfx1100
+    # prefill takes its tuned RDNA config after the 2D/3D choice instead.
     if tuned_long_prefill:
         launch_num_warps = 4
 

@@ -299,44 +299,30 @@ def test_speculative_splitk_bf16_query_fp8_kv(monkeypatch):
 
 
 @pytest.mark.parametrize(
-    ("is_gfx1100", "max_seqlen_q", "nq_per_kv", "expected"),
+    ("is_gfx1151", "batch_invariant", "max_seqlen_q", "nq_per_kv", "expected"),
     [
-        (True, 512, 4, (64, 16, True)),
-        (True, 8192, 5, (64, 12, True)),
-        (True, 8192, 7, (64, 9, True)),
-        (True, 512, 16, (64, 4, True)),
-        (True, 511, 4, (16, 4, False)),
-        (True, 8192, 17, (32, 1, False)),
-        (False, 8192, 4, (16, 4, False)),
+        (True, False, 512, 4, (64, 16, True)),
+        (True, False, 8192, 5, (64, 12, True)),
+        (True, False, 8192, 6, (64, 10, True)),
+        (True, False, 8192, 7, (64, 9, True)),
+        (True, False, 512, 16, (64, 4, True)),
+        (True, False, 511, 4, (16, 4, False)),
+        (True, False, 511, 6, (16, 2, False)),
+        (True, False, 8192, 17, (32, 1, False)),
+        (True, True, 8192, 4, (16, 4, False)),
+        (False, False, 8192, 4, (16, 4, False)),
     ],
 )
 def test_select_query_block(
     monkeypatch: pytest.MonkeyPatch,
-    is_gfx1100: bool,
+    is_gfx1151: bool,
+    batch_invariant: bool,
     max_seqlen_q: int,
     nq_per_kv: int,
     expected: tuple[int, int, bool],
 ) -> None:
-    monkeypatch.setattr(attention, "_is_gfx1100", lambda: is_gfx1100)
-    monkeypatch.setattr(attention, "_is_gfx1151", lambda: False)
-    assert attention._select_query_block(max_seqlen_q, nq_per_kv) == expected
-
-
-@pytest.mark.parametrize(
-    ("max_seqlen_q", "nq_per_kv", "expected"),
-    [
-        (8192, 6, (64, 10, True)),
-        (511, 6, (16, 2, False)),
-    ],
-)
-def test_select_query_block_gfx1151(
-    monkeypatch: pytest.MonkeyPatch,
-    max_seqlen_q: int,
-    nq_per_kv: int,
-    expected: tuple[int, int, bool],
-) -> None:
-    monkeypatch.setattr(attention, "_is_gfx1100", lambda: False)
-    monkeypatch.setattr(attention, "_is_gfx1151", lambda: True)
+    monkeypatch.setattr(attention, "is_gfx1151", is_gfx1151)
+    monkeypatch.setattr(attention, "is_batch_invariant", batch_invariant)
     assert attention._select_query_block(max_seqlen_q, nq_per_kv) == expected
 
 
@@ -491,8 +477,8 @@ def test_tuned_long_prefill_matches_dense_reference(
     num_query_heads: int,
 ) -> None:
     torch.set_default_device(DEVICE_TYPE)
-    monkeypatch.setattr(attention, "_is_gfx1100", lambda: True)
-    monkeypatch.setattr(attention, "_is_gfx1151", lambda: False)
+    monkeypatch.setattr(attention, "is_gfx1151", True)
+    monkeypatch.setattr(attention, "is_batch_invariant", False)
 
     query_len, kv_len = 512, 1024
     num_kv_heads, head_size, block_size = 1, 128, 16
