@@ -226,6 +226,7 @@ def indexer_k_quant_and_cache_triton(
     scale_fmt,
     block_tile_size=16,
     head_tile_size=16,
+    cache_layout: str | None = None,
 ):
     num_blocks = kv_cache.shape[0]
     head_dim = k.shape[-1]
@@ -237,7 +238,10 @@ def indexer_k_quant_and_cache_triton(
     kv_cache_value = kv_cache[:, : block_size * head_dim].view(FP8_DTYPE)
     kv_cache_scale = kv_cache[:, block_size * head_dim :].view(torch.float32)
     head_tile_size = head_tile_size // kv_cache.element_size()
-    layout = "NORMAL" if block_size == 1 else "SHUFFLE"
+    if cache_layout is None:
+        layout = "NORMAL" if block_size == 1 else "SHUFFLE"
+    else:
+        layout = cache_layout
     grid = (num_tokens,)
     _indexer_k_quant_and_cache_kernel[grid](
         k,
@@ -805,6 +809,7 @@ def rocm_fp8_paged_mqa_logits(
     max_model_len: int,
     *,
     compress_ratio: int = 1,
+    cache_layout: str | None = None,
 ) -> torch.Tensor:
     """Compute FP8 MQA logits using paged KV-cache.
 
@@ -822,6 +827,8 @@ def rocm_fp8_paged_mqa_logits(
             used to distribute work across SMs.
         max_model_len: Maximum sequence length used to size the logits output.
         compress_ratio: C4A (4) takes block-flat Triton; 1 and 2 stay on AITER.
+        cache_layout: Explicit cache layout override; "NORMAL" (block-flat)
+            also takes the Triton path.
 
     Returns:
         Logits tensor of shape [B * next_n, max_model_len], dtype
@@ -833,11 +840,12 @@ def rocm_fp8_paged_mqa_logits(
     batch_size, next_n = q_fp8.shape[:2]
     block_size = kv_cache_fp8.shape[1]
 
-    # C4A only: Flash/DSv3.2 also skip insert but still write SHUFFLE.
+    # Block-flat (NORMAL) caches take the Triton path: C4A by ratio, others
+    # by explicit cache_layout. Flash/DSv3.2 also skip insert but write SHUFFLE.
     if (
         (_ON_GFX950 or _ON_GFX942)
-        and _indexer_k_is_c4a_block_flat(compress_ratio)
         and block_size > 1
+        and (cache_layout == "NORMAL" or _indexer_k_is_c4a_block_flat(compress_ratio))
     ):
         if block_size % 64 == 0:
             return rocm_fp8_paged_mqa_logits_triton(
@@ -1337,9 +1345,10 @@ def rocm_aiter_sparse_attn_indexer_fake(
     candidate_write: bool = False,
     use_pcp: bool = False,
     pcp_shard_decode_requests: bool = False,
+    cache_layout: str | None = None,
     dcp_rank: int = 0,
     dcp_world_size: int = 1,
-    cp_kv_cache_interleave_size: int = 1,
+    cp_interleave: int = 1,
 ) -> torch.Tensor:
     return topk_indices_buffer
 
@@ -1415,9 +1424,10 @@ def rocm_aiter_sparse_attn_indexer(
     candidate_write: bool = False,
     use_pcp: bool = False,
     pcp_shard_decode_requests: bool = False,
+    cache_layout: str | None = None,
     dcp_rank: int = 0,
     dcp_world_size: int = 1,
-    cp_kv_cache_interleave_size: int = 1,
+    cp_interleave: int = 1,
 ) -> torch.Tensor:
     from vllm._aiter_ops import rocm_aiter_ops
 
@@ -1475,7 +1485,7 @@ def rocm_aiter_sparse_attn_indexer(
                 topk_indices_buffer[:merge_rows, :topk_tokens].fill_(-1),
                 dcp_rank,
                 dcp_world_size,
-                cp_kv_cache_interleave_size,
+                cp_interleave,
                 row_starts=torch.zeros(
                     merge_rows, dtype=torch.int32, device=hidden_states.device
                 ),
@@ -1502,9 +1512,10 @@ def rocm_aiter_sparse_attn_indexer(
             candidate_write,
             use_pcp,
             pcp_shard_decode_requests,
-            dcp_rank,
-            dcp_world_size,
-            cp_kv_cache_interleave_size,
+            cache_layout=cache_layout,
+            dcp_rank=dcp_rank,
+            dcp_world_size=dcp_world_size,
+            cp_interleave=cp_interleave,
         )
     layer_attn_metadata = attn_metadata[k_cache_prefix]
     assert isinstance(layer_attn_metadata, DeepseekV32IndexerMetadata)
@@ -1541,7 +1552,14 @@ def rocm_aiter_sparse_attn_indexer(
             slot_mapping,
             quant_block_size,
             scale_fmt,
+            cache_layout=cache_layout,
         )
+
+    # C4A caches are block-flat by ratio; other block-flat callers pass
+    # cache_layout="NORMAL" explicitly. The rest keep the auto-selected layout.
+    resolved_cache_layout = cache_layout
+    if resolved_cache_layout is None and _indexer_k_is_c4a_block_flat(compress_ratio):
+        resolved_cache_layout = "NORMAL"
 
     if has_prefill:
         prefill_metadata = layer_attn_metadata.prefill
@@ -1595,9 +1613,7 @@ def rocm_aiter_sparse_attn_indexer(
                 chunk.block_table,
                 cu_seq_lens,
                 token_to_seq=token_to_seq,
-                cache_layout=(
-                    "NORMAL" if _indexer_k_is_c4a_block_flat(compress_ratio) else None
-                ),
+                cache_layout=resolved_cache_layout,
             )
             if deinterleave_idx is not None:
                 from vllm.model_executor.layers.sparse_attn_indexer import (
@@ -1679,7 +1695,7 @@ def rocm_aiter_sparse_attn_indexer(
                     topk_indices,
                     dcp_rank,
                     dcp_world_size,
-                    cp_kv_cache_interleave_size,
+                    cp_interleave,
                     row_starts=chunk.cu_seqlen_ks,
                 )
 
@@ -1717,6 +1733,7 @@ def rocm_aiter_sparse_attn_indexer(
             decode_metadata.schedule_metadata,
             max_model_len=max_model_len,
             compress_ratio=compress_ratio,
+            cache_layout=cache_layout,
         )
 
         if candidate_blocks is not None:
@@ -1797,7 +1814,7 @@ def rocm_aiter_sparse_attn_indexer(
                 topk_indices,
                 dcp_rank,
                 dcp_world_size,
-                cp_kv_cache_interleave_size,
+                cp_interleave,
             )
 
         if decode_metadata.requires_padding:

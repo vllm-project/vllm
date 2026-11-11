@@ -761,6 +761,25 @@ def test_sparse_mla_backend_pcp_dcp_requires_fp8_kv(kv_cache_dtype):
     )
 
 
+def test_sparse_mla_backend_rejects_dcp_with_fp8_ds_mla():
+    """The DCP path reads plain 576-wide KV rows, not packed fp8_ds_mla."""
+    from vllm.platforms.rocm import RocmPlatform
+
+    selector_config = AttentionSelectorConfig(
+        head_size=576,
+        dtype=torch.bfloat16,
+        kv_cache_dtype="fp8_ds_mla",
+        block_size=64,
+        use_mla=True,
+        use_sparse=True,
+        use_dcp=True,
+    )
+    with pytest.raises(ValueError, match="fp8_ds_mla"):
+        RocmPlatform.get_attn_backend_cls(
+            AttentionBackendEnum.ROCM_AITER_MLA_SPARSE, selector_config
+        )
+
+
 @pytest.mark.parametrize("use_dcp", [False, True])
 @pytest.mark.parametrize(
     "selected_backend, head_size, kv_cache_dtype",

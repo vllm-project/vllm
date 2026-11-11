@@ -432,9 +432,15 @@ class GPUModelRunner(LoRAModelRunnerMixin):
                     self.jit_warmup_registry.activate(),
                 ):
                     self.speculator.load_model(self.model)
-                    eplb_models_added = self.eplb.maybe_register_speculator(
-                        self.speculator, self.speculative_config, load_dummy_weights
-                    )
+                    assert self.speculative_config is not None
+                    # The drafter never runs its MoE layers in this mode.
+                    if not self.speculative_config.prefill_context_kv_only:
+                        eplb_models_added = self.eplb.maybe_register_speculator(
+                            self.speculator,
+                            self.speculative_config,
+                            load_dummy_weights,
+                        )
+                    self.speculator.free_unused_weights(self.model)
         time_after_load = time.perf_counter()
 
         self.model_memory_usage = m.consumed_memory
@@ -2095,10 +2101,12 @@ class GPUModelRunner(LoRAModelRunnerMixin):
             assert intermediate_tensors is not None
             assert self.intermediate_tensors is not None
             n = input_batch.num_tokens_after_padding
+            received = intermediate_tensors.tensors
             new_tensors = {
                 k: v[:n]
-                if dummy_run
-                else v[:n].copy_(intermediate_tensors.tensors[k][:n])
+                # Some PP transports receive into the persistent tensors.
+                if dummy_run or received[k].data_ptr() == v.data_ptr()
+                else v[:n].copy_(received[k][:n])
                 for k, v in self.intermediate_tensors.tensors.items()
             }
             model_inputs["intermediate_tensors"] = IntermediateTensors(new_tensors)
