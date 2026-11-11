@@ -6445,6 +6445,80 @@ def test_store_worker_close_releases_store():
     assert worker.store is None
 
 
+def test_store_worker_close_waits_for_active_transfer_threads(tmp_path, monkeypatch):
+    class CloseAwareStore:
+        def __init__(self, started, release):
+            self.started = started
+            self.release = release
+            self.closed = False
+            self.put_after_close = None
+
+        def setup(self, *args, **kwargs):
+            return 0
+
+        def register_buffer(self, addr, size):
+            return 0
+
+        def batch_is_exist(self, keys):
+            return [0] * len(keys)
+
+        def batch_put_from_multi_buffers(self, keys, addrs, sizes, config):
+            self.started.set()
+            if not self.release.wait(timeout=10):
+                raise TimeoutError("test transfer was not released")
+            self.put_after_close = self.closed
+            return [0] * len(keys)
+
+        def close(self):
+            self.closed = True
+
+    started = threading.Event()
+    release = threading.Event()
+    store = CloseAwareStore(started, release)
+    _install_fake_mooncake(monkeypatch, store)
+    _patch_worker_runtime(monkeypatch)
+    monkeypatch.setenv(
+        "MOONCAKE_CONFIG_PATH",
+        _write_mooncake_config(tmp_path, _p2p_store_config()),
+    )
+    store_worker = worker.MooncakeStoreWorker(
+        _make_vllm_config(kv_role="kv_producer"), _make_kv_cache_config()
+    )
+    store_worker.register_kv_caches(
+        {"layer0": torch.zeros(10, 8, 16, 64, dtype=torch.float16)}
+    )
+
+    req = _make_store_req("close-req", [b"h0", b"h1"])
+    req.store_job_id = 1
+    meta = mooncake_store_worker.MooncakeStoreConnectorMetadata(set(), set())
+    meta.add_request(req)
+    with patch.object(torch.cuda, "Event"):
+        store_worker.wait_for_save(meta)
+    assert started.wait(timeout=1)
+
+    closer = threading.Thread(target=store_worker.close)
+    closer.start()
+    try:
+        closer.join(timeout=6)
+        assert not closer.is_alive()
+        assert not store.closed, (
+            "close() released the store while a transfer was still blocked"
+        )
+        assert store_worker.store is store
+    finally:
+        release.set()
+        closer.join(timeout=2)
+
+    # A close that timed out is retryable once the native operation finishes.
+    store_worker.close()
+    assert store.closed
+    assert store_worker.store is None
+    assert store_worker.kv_send_thread is not None
+    assert not store_worker.kv_send_thread.is_alive()
+    assert all(not thread.is_alive() for thread in store_worker.kv_recv_threads)
+    assert store.put_after_close is False
+
+
 def test_store_worker_close_is_idempotent():
     worker = _make_bare_worker()
     store = worker.store

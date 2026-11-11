@@ -481,9 +481,8 @@ class KVTransferThread(threading.Thread):
             try:
                 request_data = self.request_queue.get()
                 if request_data is None:
-                    logger.warning("Received a None request!")
                     self.request_queue.task_done()
-                    continue
+                    break
                 self._handle_request(request_data)
             except Exception:
                 req_id = getattr(request_data, "req_id", "<unknown>")
@@ -1513,8 +1512,9 @@ def _reused_transfer_engine() -> SharedMooncakeTransferEngine:
 class MooncakeStoreWorker:
     """Worker-side component for MooncakeStoreConnector."""
 
-    # Bare workers built with __new__ in tests read this default.
+    # Bare workers built with __new__ in tests read these defaults.
     _reuse_pd_transfer_engine: bool = False
+    _close_initiated: bool = False
 
     @staticmethod
     def _create_mem_pool(
@@ -2709,32 +2709,43 @@ class MooncakeStoreWorker:
         return self._group_tp_replication_factors
 
     def close(self) -> None:
-        """Release the MooncakeDistributedStore handle on teardown.
+        """Stop transfer threads before releasing the store handle.
 
         Closing the store frees a TransferEngine it created, the RDMA buffers
         it registered, and the connection to the master server. An engine
-        borrowed from MooncakeConnector stays owned by that connector; closing
-        the store drops the store client's reference and unmounts the segments
-        the store itself mounted. Idempotent so it is safe to call from both
+        borrowed from MooncakeConnector stays owned by that connector. If a
+        native transfer does not finish before the deadline, the store remains
+        open and a later close() retries the join instead of leaving a live
+        thread with a closed handle. Idempotent so it is safe to call from both
         the explicit shutdown path and `__del__`.
         """
         store = getattr(self, "store", None)
         if store is None:
             return
-        self.store = None
+        threads = (self.kv_send_thread, *self.kv_recv_threads)
+        if not self._close_initiated:
+            self._close_initiated = True
+            for thread in threads:
+                if thread is not None:
+                    thread.request_queue.put(None)
+
         deadline = time.monotonic() + 5.0
-        for thread in (self.kv_send_thread, *self.kv_recv_threads):
-            if thread is None:
+        running_threads = []
+        for thread in threads:
+            if thread is None or not thread.is_alive():
                 continue
-            while thread.request_queue.unfinished_tasks and time.monotonic() < deadline:
-                time.sleep(0.05)
-            if thread.request_queue.unfinished_tasks:
-                logger.warning(
-                    "Mooncake store %s still has %d in-flight requests at "
-                    "close; closing anyway.",
-                    thread.name,
-                    thread.request_queue.unfinished_tasks,
-                )
+            thread.join(timeout=max(0.0, deadline - time.monotonic()))
+            if thread.is_alive():
+                running_threads.append(thread.name)
+        if running_threads:
+            logger.warning(
+                "Mooncake store threads %s are still transferring; "
+                "keeping the store open until close is retried.",
+                running_threads,
+            )
+            return
+
+        self.store = None
         try:
             store.close()
         except Exception as e:
