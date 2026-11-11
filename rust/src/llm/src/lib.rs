@@ -237,7 +237,10 @@ impl EngineCoreLlm {
         req.sampling_params.stream_interval =
             (stream_interval > NonZeroU32::MIN).then_some(stream_interval);
 
-        let prepared = req.prepare(self.randomize_request_id)?;
+        let mut prepared = req.prepare(self.randomize_request_id)?;
+        if n > NonZeroU32::MIN {
+            prepared.set_kv_transfer_num_readers(n);
+        }
         let remote_prefill_cached_tokens = prepared.remote_prefill_cached_tokens();
         let prompt_token_ids = prepared.prompt_token_ids;
         let engine_request = prepared.engine_request;

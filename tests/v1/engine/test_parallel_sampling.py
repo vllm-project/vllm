@@ -3,6 +3,8 @@
 
 from copy import copy
 
+import pytest
+
 from vllm import SamplingParams
 from vllm.outputs import CompletionOutput
 from vllm.sampling_params import RequestOutputKind
@@ -82,6 +84,27 @@ def test_parallel_sampling_child_requests_preserve_session_id() -> None:
         child_request.sampling_params = child_params
 
         assert child_request.session_id == "session-1"
+
+
+@pytest.mark.parametrize("seed", [None, 7])
+def test_parallel_sampling_children_count_as_kv_transfer_readers(seed) -> None:
+    """All children read the parent's remote KV, so each tells its producer to
+    wait for `n` readers."""
+    kv_transfer_params = {"do_remote_prefill": True, "remote_request_id": "p-1"}
+    parent_request = ParentRequest(
+        make_request(
+            SamplingParams(
+                n=3, seed=seed, extra_args={"kv_transfer_params": kv_transfer_params}
+            )
+        )
+    )
+
+    for idx in range(parent_request.n):
+        _, child_params = parent_request.get_child_info(idx)
+        assert child_params.extra_args == {
+            "kv_transfer_params": {**kv_transfer_params, "num_readers": 3}
+        }
+    assert "num_readers" not in kv_transfer_params
 
 
 def make_request(sampling_params: SamplingParams) -> EngineCoreRequest:

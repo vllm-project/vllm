@@ -2,6 +2,7 @@
 // SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 
 use std::collections::BTreeMap;
+use std::num::NonZeroU32;
 use std::sync::Arc;
 
 use serde::Deserialize;
@@ -163,11 +164,28 @@ impl PreparedGenerateRequest {
             None
         }
     }
+
+    /// Record in `kv_transfer_params` that `n` parallel samples read the same
+    /// remote KV, so the producer frees it only after all of them have.
+    ///
+    /// Original Python definition:
+    /// `ParentRequest._get_child_sampling_params` in `vllm/v1/engine/parallel_sampling.py`
+    pub fn set_kv_transfer_num_readers(&mut self, n: NonZeroU32) {
+        if let Some(serde_json::Value::Object(params)) = (self.engine_request.sampling_params)
+            .as_mut()
+            .and_then(|sampling_params| sampling_params.extra_args.as_mut())
+            .and_then(|extra_args| extra_args.get_mut("kv_transfer_params"))
+            && !params.is_empty()
+        {
+            params.insert("num_readers".to_string(), n.get().into());
+        }
+    }
 }
 
 #[cfg(test)]
 mod tests {
     use std::collections::BTreeMap;
+    use std::num::NonZeroU32;
 
     use serde_json::json;
     use vllm_engine_core_client::protocol::kv_hints::{KvHintAction, KvHintsEnvelope};
@@ -324,6 +342,31 @@ mod tests {
             request.sampling_params.extra_args = kv_transfer_params
                 .map(|params| [("kv_transfer_params".to_string(), params)].into());
             let actual = request.prepare(false).unwrap().remote_prefill_cached_tokens();
+            assert_eq!(actual, expected, "{name}");
+        }
+    }
+
+    #[test]
+    fn set_kv_transfer_num_readers_marks_only_kv_transfer_params() {
+        let n = NonZeroU32::new(4).unwrap();
+        let cases = [
+            (
+                "remote_prefill",
+                Some(json!({"do_remote_prefill": true, "remote_request_id": "p-1"})),
+                Some(json!({"do_remote_prefill": true, "remote_request_id": "p-1", "num_readers": 4})),
+            ),
+            ("no_kv_transfer_params", None, None),
+            ("empty", Some(json!({})), Some(json!({}))),
+            ("not_an_object", Some(json!(null)), Some(json!(null))),
+        ];
+        for (name, kv_transfer_params, expected) in cases {
+            let mut request = sample_request();
+            request.sampling_params.extra_args = kv_transfer_params
+                .map(|params| [("kv_transfer_params".to_string(), params)].into());
+            let mut prepared = request.prepare(false).unwrap();
+            prepared.set_kv_transfer_num_readers(n);
+            let actual = (prepared.engine_request.sampling_params.unwrap().extra_args)
+                .and_then(|mut extra_args| extra_args.remove("kv_transfer_params"));
             assert_eq!(actual, expected, "{name}");
         }
     }

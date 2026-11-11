@@ -3998,6 +3998,72 @@ def test_empty_recv_is_reported_only_when_awaited(
     assert (request_id in done_recving) is awaiting_kvs
 
 
+@patch(
+    "vllm.distributed.kv_transfer.kv_connector.v1.nixl.base_worker.NixlWrapper",
+    FakeNixlWrapper,
+)
+@pytest.mark.parametrize(
+    "local_block_ids", [([1, 2, 3],), ()], ids=["read", "local_prefix_hit"]
+)
+def test_producer_holds_blocks_until_every_parallel_sample_reads(
+    default_vllm_config, dist_init, local_block_ids
+):
+    """The `n` children of a parallel sampling request all read one remote
+    request. Their notifications must make the producer wait for every child,
+    or later children read blocks the producer has already reused."""
+    num_readers = 3
+    block_size = maybe_update_block_size(16)
+    vllm_config = create_vllm_config(block_size=block_size)
+    connector = NixlConnector(
+        vllm_config,
+        KVConnectorRole.WORKER,
+        make_kv_cache_config(block_size=block_size),
+    )
+    decode_worker = FakeNixlConnectorWorker(
+        vllm_config,
+        connector.engine_id,
+        hand_shake_latency=0.0,
+        kv_cache_config=connector._kv_cache_config,
+    )
+    transport = MagicMock(wraps=decode_worker.nixl_wrapper)
+    decode_worker.nixl_wrapper = transport
+    connector.connector_worker = decode_worker
+
+    metadata = NixlConnectorMetadata()
+    metadata.add_new_req_to_recv(
+        request_id="0_decode",
+        local_block_ids=local_block_ids,
+        kv_transfer_params={
+            "remote_block_ids": [[20, 21, 22]],
+            "remote_engine_id": FakeNixlConnectorWorker.REMOTE_ENGINE_ID,
+            "remote_request_id": "prefill",
+            "remote_host": "localhost",
+            "remote_port": 1234,
+            "remote_tp_size": 1,
+            "num_readers": num_readers,
+        },
+        awaiting_kvs=bool(local_block_ids),
+    )
+    connector.bind_connector_metadata(metadata)
+    dummy_ctx = ForwardContext(no_compile_layers={}, attn_metadata={}, slot_mapping={})
+    connector.start_load_kv(dummy_ctx)
+    connector.bind_connector_metadata(NixlConnectorMetadata())
+    time.sleep(0.1)
+    connector.start_load_kv(dummy_ctx)
+    (notif,) = [
+        call.kwargs["notif_msg"]
+        for call in transport.make_prepped_xfer.call_args_list
+        + transport.send_notif.call_args_list
+    ]
+
+    producer = FakeNixlConnectorWorker(vllm_config, "prefill", hand_shake_latency=0)
+    producer._reqs_to_process.add("prefill")
+    producer._reqs_to_send["prefill"] = time.perf_counter() + 10
+    producer.nixl_wrapper.get_new_notifs = MagicMock(return_value={"d": [notif]})
+    released = [producer._get_new_notifs() for _ in range(num_readers)]
+    assert released == [set()] * (num_readers - 1) + [{"prefill"}]
+
+
 @pytest.mark.parametrize("is_hma", [False, True])
 @pytest.mark.parametrize(
     "local_block_ids,awaiting_kvs",

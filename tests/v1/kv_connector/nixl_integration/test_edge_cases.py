@@ -2,6 +2,7 @@
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 import os
 
+import httpx
 import openai
 
 PREFILL_HOST = os.getenv("PREFILL_HOST", "localhost")
@@ -78,3 +79,46 @@ def test_edge_cases():
     prefill_response = completion.choices[0].text
     print(f"PARTIAL CACHE HIT: {proxy_response=}")
     assert proxy_response == prefill_response
+
+    # (4) Check that the children of an n > 1 decode request all read the
+    # prefill's KV before the prefill frees it. A child that reads after the
+    # free sends a notification the prefill no longer recognizes.
+    expired_before = notifications_after_expiry(prefill_client)
+    completion = prefill_client.completions.create(
+        model=MODEL,
+        prompt=LONG_PROMPT,
+        max_tokens=1,
+        extra_body={
+            "kv_transfer_params": {
+                "do_remote_decode": True,
+                "do_remote_prefill": False,
+                "remote_engine_id": None,
+                "remote_block_ids": None,
+                "remote_host": None,
+                "remote_port": None,
+            }
+        },
+    )
+    kv_transfer_params = completion.model_extra["kv_transfer_params"]
+    completion = decode_client.completions.create(
+        model=MODEL,
+        prompt=LONG_PROMPT,
+        n=4,
+        temperature=0,
+        extra_body={"kv_transfer_params": kv_transfer_params},
+    )
+    texts = [choice.text for choice in completion.choices]
+    print(f"PARALLEL SAMPLING: {texts=}")
+    assert texts == [texts[0]] * 4
+    # Let the prefill drain the notifications the decode children sent.
+    prefill_client.completions.create(model=MODEL, prompt=SHORT_PROMPT, max_tokens=1)
+    assert notifications_after_expiry(prefill_client) == expired_before
+
+
+def notifications_after_expiry(client: openai.OpenAI) -> float:
+    metrics = httpx.get(f"{str(client.base_url).removesuffix('/v1/')}/metrics").text
+    return sum(
+        float(line.rsplit(" ", 1)[1])
+        for line in metrics.splitlines()
+        if line.startswith("vllm:nixl_num_notifications_after_expiry_total")
+    )
