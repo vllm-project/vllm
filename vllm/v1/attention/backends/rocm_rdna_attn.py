@@ -1,6 +1,6 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
-"""Attention for gfx1150..gfx1153 and RDNA4 (opt-in).
+"""Attention for gfx1150..gfx1153, and RDNA4 (opt-in there).
 
 Decodes of up to MAX_M query tokens per sequence run
 csrc/rocm/rdna_decode_attn.cu, other batches

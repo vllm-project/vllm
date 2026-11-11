@@ -440,15 +440,19 @@ def test_non_decode_batches_fall_back_to_triton(nseq, tokens, max_q, reason):
     assert reason in impl._rejected
 
 
-@pytest.mark.parametrize("gfx1151", [True, False])
-def test_rdna_is_opt_in(gfx1151, monkeypatch):
-    """The backend is never selected automatically."""
+@pytest.mark.parametrize("arch", ["gfx1150", "gfx1151", "gfx1153", "gfx1201"])
+def test_rdna_first_only_on_gfx115x(arch, monkeypatch):
+    """First on gfx1150..gfx1153; opt-in on RDNA4."""
     import vllm.platforms.rocm as rocm
     from vllm.v1.attention.backends.registry import AttentionBackendEnum as B
 
-    monkeypatch.setattr(rocm, "on_gfx1151", lambda: gfx1151)
+    monkeypatch.setattr(rocm, "on_gfx115x", lambda: arch.startswith("gfx115"))
+    monkeypatch.setattr(rocm, "on_rdna4", lambda: arch == "gfx1201")
     order = rocm._get_backend_priorities(use_mla=False, use_sparse=False)
-    assert B.ROCM_RDNA_ATTN not in order
+    if arch.startswith("gfx115"):
+        assert order[0] == B.ROCM_RDNA_ATTN
+    else:
+        assert B.ROCM_RDNA_ATTN not in order
 
 
 def test_rdna_valid_for_any_batch():
