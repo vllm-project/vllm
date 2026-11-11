@@ -1751,16 +1751,16 @@ class AiterMLAMetadataBuilder(MLACommonMetadataBuilder[AiterMLAMetadata]):
         # Upper bound is exact for prefill rows (no D2H sync).
         seq_lens_cpu = common_attn_metadata.seq_lens_cpu_upper_bound
         assert seq_lens_cpu is not None
+        num_tokens = int(seq_lens_cpu[num_decodes:num_reqs].sum())
+        if num_tokens > self.chunked_prefill_workspace_size:
+            return
+
         qsl_cpu = common_attn_metadata.query_start_loc_cpu
         seq_lens = seq_lens_cpu[num_decodes:num_reqs].to(torch.int64)
         query_lens = (
             qsl_cpu[num_decodes + 1 : num_reqs + 1] - qsl_cpu[num_decodes:num_reqs]
         ).to(torch.int64)
         context_lens = seq_lens - query_lens
-
-        num_tokens = int(seq_lens.sum())
-        if num_tokens > self.chunked_prefill_workspace_size:
-            return
 
         cu_seqlens_k = torch.zeros(seq_lens.numel() + 1, dtype=torch.int32)
         torch.cumsum(seq_lens, dim=0, dtype=torch.int32, out=cu_seqlens_k[1:])
