@@ -214,7 +214,9 @@ def replace_parameter(
     new_tensor_attrs.pop("_weight_loader", None)
     # A checkpoint record belongs to the parameter it was recorded on (direct
     # reload); one on new_tensor (another checkpoint parameter) must not overwrite it.
+    # Likewise the reload zero-fill flag: it is declared per parameter.
     new_tensor_attrs.pop("_ckpt", None)
+    new_tensor_attrs.pop("fill_on_reload", None)
 
     if isinstance(new_tensor, torch.nn.Parameter):
         new_tensor = new_tensor.data

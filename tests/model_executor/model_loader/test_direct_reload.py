@@ -527,6 +527,16 @@ def test_replace_parameter_keeps_the_target_checkpoint_layout():
     assert model.proj.weight._ckpt == ckpt
 
 
+def test_replace_parameter_keeps_only_the_target_reload_fill_flag():
+    model = _cold_start(_checkpoint())
+    model.mimo.weight.fill_on_reload = True
+    replace_parameter(model.proj, "weight", model.mimo.weight)
+    assert not hasattr(model.proj.weight, "fill_on_reload")
+    weight = model.mimo.weight
+    replace_parameter(model.mimo, "weight", weight.data.t().contiguous())  # kept
+    assert model.mimo.weight is weight and weight.fill_on_reload
+
+
 class _PaddedRows(torch.nn.Module):
     """A weight with padding rows the loader skips, a sentinel buffer and a
     per-row scale outside the checkpoint."""
