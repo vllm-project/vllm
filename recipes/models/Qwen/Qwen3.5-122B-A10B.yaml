@@ -4,7 +4,7 @@ meta:
   provider: "Qwen"
   description: "Mid-size Qwen3.5 multimodal MoE (122B total / 10B active) with gated delta networks, 256 experts, and 262K context"
   date_added: 2026-04-22
-  date_updated: 2026-11-04
+  date_updated: 2026-11-11
   tasks:
     - multimodal
     - text
@@ -13,8 +13,8 @@ meta:
     - "Qwen/Qwen3.5-397B-A17B"
     - "Qwen/Qwen3.5-35B-A3B"
   hardware:
-    # FP8 validated 2026-11-03/04 on one MI325X and one MI350X (TP1) on
-    # vllm/vllm-openai-rocm:v0.33.0 (ROCm 10.0, AITER 0.1.26). MI355X: 2026-10-07 on v0.31.0.
+    # FP8 validated on vllm/vllm-openai-rocm:v0.33.0 (ROCm 10.0, AITER 0.1.26), TP1:
+    # one MI325X and one MI350X 2026-11-03/04, one MI355X 2026-11-09.
     mi325x: verified
     mi350x: verified
     mi355x: verified
@@ -24,7 +24,7 @@ model:
   min_vllm_version: "0.17.0"
   default_frontend: rust
   docker_image:
-    # Stable release the AMD numbers in the guide were measured on (2026-11-03/04).
+    # Stable release the AMD numbers in the guide were measured on (2026-11-03 to 11-09).
     amd: "vllm/vllm-openai-rocm:v0.33.0"
   architecture: moe
   parameter_count: "122B"
@@ -196,6 +196,9 @@ guide: |
   |---|---|---|
   | AITER + `ROCM_AITER_FA` | 145 / 145 / 144 / 144 | 144 / 144 / 144 / 144 |
   | + MTP | 232 / 209 / 209 / 208 | 238 / 219 / 224 / 214 |
+
+  An MI355X with the same settings and image decodes at 150 / 150 / 150 / 149 without MTP
+  (measured 2026-11-09).
 
   `ROCM_AITER_UNIFIED_ATTN` decodes at the same speed on v0.33.0 (145 / 145 / 143 / 142 on
   MI325X, 144 / 144 / 142 / 142 on MI350X). Avoid it on MI350X/MI355X with v0.31.0 and v0.32.0:
