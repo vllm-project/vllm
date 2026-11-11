@@ -312,6 +312,22 @@ def test_fp8_block_aligned_tp_flashinfer_matches_unsharded(
         assert relative_l2 < 0.01, relative_l2.item()
 
 
+def _static_fp8() -> Fp8Config:
+    return Fp8Config(is_checkpoint_fp8_serialized=True, activation_scheme="static")
+
+
+def _make_padded_experts(monkeypatch, quant_config=None):
+    """Intermediate rounded up from 256 to 384 per rank, as MXFP4/TRT-LLM do."""
+    return _make_fp8_tp_experts(
+        monkeypatch,
+        1,
+        0,
+        intermediate_size=256,
+        quant_config=quant_config,
+        config_overrides={"intermediate_size_per_partition": 384},
+    )
+
+
 @pytest.mark.parametrize("static", [False, True])
 def test_direct_reload_after_dummy_start_resets_padding(monkeypatch, static):
     """After a dummy start, begin zeroes the padding of a padded layer."""
@@ -320,11 +336,7 @@ def test_direct_reload_after_dummy_start_resets_padding(monkeypatch, static):
         record_checkpoint_layout,
     )
 
-    quant_config = (
-        Fp8Config(is_checkpoint_fp8_serialized=True, activation_scheme="static")
-        if static
-        else None
-    )
+    quant_config = _static_fp8() if static else None
     suffixes = ("weight",) if static else ("weight", "weight_scale_inv")
     generator = torch.Generator().manual_seed(0)
     checkpoint = {
@@ -336,15 +348,7 @@ def test_direct_reload_after_dummy_start_resets_padding(monkeypatch, static):
     }
 
     def make_and_load(dummy: bool):
-        # Intermediate rounded up from 256 to 384 per rank, as MXFP4/TRT-LLM do.
-        layer = _make_fp8_tp_experts(
-            monkeypatch,
-            1,
-            0,
-            intermediate_size=256,
-            quant_config=quant_config,
-            config_overrides={"intermediate_size_per_partition": 384},
-        )
+        layer = _make_padded_experts(monkeypatch, quant_config)
         model = torch.nn.Module()
         model.experts = layer
         if dummy:
@@ -392,16 +396,7 @@ def _flagged(layer) -> set[str]:
 
 def test_padded_experts_flagged_for_reload_fill(monkeypatch):
     """Construction flags the padded expert tensors, not per-expert scalars."""
-    padded = _make_fp8_tp_experts(
-        monkeypatch,
-        1,
-        0,
-        intermediate_size=256,
-        quant_config=Fp8Config(
-            is_checkpoint_fp8_serialized=True, activation_scheme="static"
-        ),
-        config_overrides={"intermediate_size_per_partition": 384},
-    )
+    padded = _make_padded_experts(monkeypatch, _static_fp8())
     assert _flagged(padded) == {"w13_weight", "w2_weight"}  # scales are (E,), (E, 2)
 
     block_tp = _make_fp8_tp_experts(monkeypatch, 2, 0, intermediate_size=640)
@@ -423,9 +418,7 @@ def test_unpadded_size_set_after_construction_reflags(monkeypatch):
         1,
         0,
         intermediate_size=384,
-        quant_config=Fp8Config(
-            is_checkpoint_fp8_serialized=True, activation_scheme="static"
-        ),
+        quant_config=_static_fp8(),
     )
     assert _flagged(layer) == set()
     layer.moe_config.intermediate_size_per_partition_unpadded = 256
