@@ -312,8 +312,8 @@ Sparse NCCL sends only `O(nnz)` indices and values. Checkpoint application still
 - Sparse NCCL's pipeline-parallel behavior is untested.
 - **Sparse updates need copy-based weight loaders.** Unchanged elements are
   staged as NaN and kept by the loader's final `Tensor.copy_`. If a model's
-  loader writes another way, the update raises instead of storing NaN; the
-  model must then be reloaded before serving.
+  loader writes another way, the NaN markers are stored and the update
+  raises, so the model must be reloaded before serving.
 
 ## Examples
 

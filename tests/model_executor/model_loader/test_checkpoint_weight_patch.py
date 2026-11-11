@@ -212,10 +212,6 @@ class _SliceAssignModel(torch.nn.Module):
 
 def test_sparse_patch_rejects_loader_that_bypasses_copy():
     model = _SliceAssignModel()
-    load_checkpoint_weight_patches(
-        model, [_make_patch("w", values=[1.0, 2.0, 3.0, 4.0])]
-    )
-
     with pytest.raises(RuntimeError, match="NaN markers.*weight"):
         load_checkpoint_weight_patches(
             model, [_make_patch("w", indices=[2], values=[30.0])]
@@ -313,11 +309,10 @@ class _ComposedLoaderModel(torch.nn.Module):
 def test_sparse_patch_through_composed_loader_transforms_once():
     v1 = [0.0, 0.5, 1.0, 1.5]
     v2 = [0.0, 0.5, -2.0, 1.5]
-    sparse_model, dense_model = _ComposedLoaderModel(), _ComposedLoaderModel()
-    load_checkpoint_weight_patches(sparse_model, [_make_patch("A_log", values=v1)])
-    load_checkpoint_weight_patches(dense_model, [_make_patch("A_log", values=v2)])
+    model = _ComposedLoaderModel()
+    load_checkpoint_weight_patches(model, [_make_patch("A_log", values=v1)])
 
     load_checkpoint_weight_patches(
-        sparse_model, [_make_patch("A_log", indices=[2], values=[-2.0])]
+        model, [_make_patch("A_log", indices=[2], values=[-2.0])]
     )
-    assert torch.equal(sparse_model.A, dense_model.A)
+    assert torch.equal(model.A, -torch.exp(torch.tensor(v2, dtype=torch.float32)))
