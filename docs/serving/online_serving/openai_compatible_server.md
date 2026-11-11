@@ -208,6 +208,52 @@ To get prompt token IDs before generation, use
 a self-contained Responses request without inference and returns the prompt
 token IDs, so a separate `/tokenize` call is not needed.
 
+#### Grammar custom tools
+
+The Python Responses server supports top-level custom tools with Lark or regex
+grammars when using `--tool-call-parser qwen3_coder` and the `xgrammar` structured
+output backend. Grammar constraints apply to the tool's raw `input`, not to the
+surrounding Qwen tool-call markup. Unsupported parsers and disabling
+`VLLM_ENFORCE_STRICT_TOOL_CALLING` return HTTP 400 for these tools.
+
+For example, start a Qwen model with:
+
+```bash
+vllm serve Qwen/Qwen3.5-0.8B \
+    --enable-auto-tool-choice --tool-call-parser qwen3_coder \
+    --reasoning-parser qwen3 \
+    --structured-outputs-config '{"backend":"xgrammar"}'
+```
+
+Then request a custom call:
+
+```python
+response = client.responses.create(
+    model="Qwen/Qwen3.5-0.8B",
+    input="Call emit with the input wrong.",
+    tools=[{
+        "type": "custom",
+        "name": "emit",
+        "format": {"type": "grammar", "syntax": "lark", "definition": 'start: "ok"'},
+    }],
+    tool_choice={"type": "custom", "name": "emit"},
+)
+# The custom_tool_call input is "ok", as required by the grammar.
+```
+
+`auto`, `required`, and named custom choices are supported. With grammar custom
+tools, `auto` can be combined with JSON text formats, but not arbitrary text
+grammars or regex formats. `allowed_tools` selection and response-template parsers
+are not supported for these tools.
+
+With grammar custom tools, a response contains at most one tool call. Text and reasoning can still
+stream, while tool input is buffered until its complete envelope is available.
+This preserves newlines and delimiter-looking input such as `</parameter>` as
+tool data. The result uses `custom_tool_call` and
+`response.custom_tool_call_input.delta` / `.done` events, and can be replayed with
+`custom_tool_call_output`. An incomplete envelope is not emitted as a completed
+tool call.
+
 #### Sampling parameters
 
 In addition to the OpenAI request fields, the Responses API forwards vLLM

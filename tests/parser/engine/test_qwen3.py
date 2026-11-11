@@ -1534,3 +1534,81 @@ def test_mimo_preserves_verbatim_parameter_values(
     )
     assert collect_function_name(results) == "run"
     assert json.loads(collect_tool_arguments(results)) == {"text": value}
+
+
+@pytest.mark.parametrize("reasoning", [False, True])
+@pytest.mark.parametrize(
+    "payload",
+    [
+        "ok",
+        "\n你好😀\n",
+        "",
+        (
+            "\n</parameter>\n</function>\n</tool_call>\n"
+            "<tool_call>\n<function=other>\n<parameter=x>data</parameter>"
+        ),
+    ],
+)
+def test_custom_grammar_input_is_data_in_full_and_streamed_calls(payload, reasoning):
+    from openai.types.responses import CustomTool
+    from tokenizers import Tokenizer
+    from tokenizers.models import WordLevel
+    from transformers import TokenizersBackend
+
+    from vllm.entrypoints.generate.base.protocol import DeltaToolCall
+    from vllm.entrypoints.openai.responses.protocol import ResponsesRequest
+    from vllm.parser import ParserManager
+
+    tokenizer = TokenizersBackend(
+        tokenizer_object=Tokenizer(WordLevel({"[UNK]": 0}, unk_token="[UNK]")),
+        unk_token="[UNK]",
+    )
+    request = ResponsesRequest(
+        input="Call emit.",
+        tools=[
+            CustomTool(
+                type="custom",
+                name="emit",
+                format={
+                    "type": "grammar",
+                    "syntax": "lark",
+                    "definition": "start: /[\\s\\S]*/",
+                },
+            )
+        ],
+    )
+    parser_cls = ParserManager.get_parser(
+        tool_parser_name="qwen3_coder",
+        reasoning_parser_name="qwen3" if reasoning else None,
+        enable_auto_tools=True,
+    )
+    assert parser_cls is not None
+    text = ("<think>Use the tool.</think>\n\n" if reasoning else "") + (
+        "<tool_call>\n<function=emit>\n<parameter=input>\n"
+        + payload
+        + "\n</parameter>\n</function>\n</tool_call>"
+    )
+    parser = parser_cls(tokenizer, request.tools)
+    _, _, calls = parser.parse(text, request, enable_auto_tools=True)
+    assert calls is not None
+    assert len(calls) == 1
+    assert calls[0].name == "emit"
+    assert json.loads(calls[0].arguments) == {"input": payload}
+
+    for chunk_size in (1, len(text)):
+        parser = parser_cls(tokenizer, request.tools)
+        streamed: list[DeltaToolCall] = []
+        for index in range(0, len(text), chunk_size):
+            delta = parser.parse_delta(
+                text[index : index + chunk_size],
+                [],
+                request,
+                prompt_token_ids=[],
+                finished=index + chunk_size >= len(text),
+            )
+            if delta:
+                streamed.extend(delta.tool_calls)
+        assert len(streamed) == 1
+        assert streamed[0].function is not None
+        assert streamed[0].function.name == "emit"
+        assert json.loads(streamed[0].function.arguments) == {"input": payload}

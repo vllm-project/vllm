@@ -6,11 +6,17 @@ from dataclasses import dataclass
 from http import HTTPStatus
 from typing import TYPE_CHECKING, Any, TypeAlias, cast
 
-from openai.types.responses import ResponseFunctionToolCall, ResponseOutputItem
+from openai.types.responses import (
+    ResponseFunctionToolCall,
+    ResponseOutputItem,
+    ToolChoiceCustom,
+    ToolChoiceFunction,
+)
 from openai.types.responses.tool import Mcp, Tool
 from openai_harmony import Message as OpenAIMessage
 from openai_harmony import ToolNamespaceConfig
 
+from vllm import envs
 from vllm.config import ModelConfig
 from vllm.entrypoints.generate.base.protocol import validate_request_mm_kwargs
 from vllm.entrypoints.openai.chat_completion.protocol import (
@@ -52,6 +58,7 @@ from vllm.inputs import (
 )
 from vllm.logger import init_logger
 from vllm.parser import Parser, ParserManager
+from vllm.parser.abstract_parser import DelegatingParser
 from vllm.renderers import (
     BaseRenderer,
     ChatParams,
@@ -71,6 +78,8 @@ from vllm.renderers.inputs.preprocess import (
     prompt_to_seq,
 )
 from vllm.renderers.metrics import observe_request_render_duration
+from vllm.tool_parsers.structural_tag_registry import CUSTOM_TOOL_GRAMMAR_MODELS
+from vllm.tool_parsers.utils import custom_tools_with_grammar
 from vllm.utils.mistral import is_mistral_tokenizer, is_mistral_tool_parser
 from vllm.utils.mistral import mt as _mt
 
@@ -350,6 +359,33 @@ class OnlineRenderer:
         skip_mm_cache: bool = False,
     ) -> ResponsesRenderResult | ErrorResponse:
         """Render a Responses request using only explicitly supplied history."""
+        if custom_tools_with_grammar(request.tools):
+            if request.tool_choice not in (
+                "auto",
+                "required",
+                "none",
+            ) and not isinstance(
+                request.tool_choice, (ToolChoiceCustom, ToolChoiceFunction)
+            ):
+                return self.create_error_response(
+                    "Custom tool grammars support auto, required, none or named "
+                    "tool_choice.",
+                    param="tool_choice",
+                )
+            tool_parser = self.parser.tool_parser_cls if self.parser else None
+            if (
+                self.use_harmony
+                or self.parser is None
+                or not issubclass(self.parser, DelegatingParser)
+                or tool_parser is None
+                or tool_parser.structural_tag_model not in CUSTOM_TOOL_GRAMMAR_MODELS
+                or not envs.VLLM_ENFORCE_STRICT_TOOL_CALLING
+            ):
+                return self.create_error_response(
+                    "Custom tool grammars require qwen3_coder with "
+                    "VLLM_ENFORCE_STRICT_TOOL_CALLING enabled.",
+                    param="tools",
+                )
         template_error = self.validate_chat_template(
             request_chat_template=None,
             chat_template_kwargs=request.chat_template_kwargs,

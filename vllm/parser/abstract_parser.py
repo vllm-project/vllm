@@ -60,6 +60,7 @@ from vllm.tool_parsers.structural_tag_registry import (
     resolve_tool_strictness,
 )
 from vllm.tool_parsers.tool_strict_level import ToolStrictLevel
+from vllm.tool_parsers.utils import custom_tools_with_grammar
 
 logger = init_logger(__name__)
 
@@ -558,7 +559,20 @@ class DelegatingParser(Parser):
 
         output_format = None
         if resolved_tools and is_auto and structured_outputs:
+            if custom_tools_with_grammar(request.tools) and not (
+                structured_outputs.json_object or structured_outputs.json is not None
+            ):
+                raise VLLMValidationError(
+                    "Custom tool grammars can only be combined with JSON text formats.",
+                    parameter="text",
+                )
             if not _xgrammar_supports(structured_outputs):
+                if custom_tools_with_grammar(request.tools):
+                    raise VLLMValidationError(
+                        "Custom tool grammars cannot be combined with this "
+                        "structured output constraint.",
+                        parameter="tools",
+                    )
                 logger.warning_once(
                     "Tool calls are not constrained for tool_choice=auto with "
                     "structured outputs because xgrammar does not support the "

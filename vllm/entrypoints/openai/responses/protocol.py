@@ -836,34 +836,6 @@ class ResponsesRequest(OpenAIBaseModel):
 
     @model_validator(mode="before")
     @classmethod
-    def check_custom_tool_format(cls, data):
-        if not isinstance(data, dict):
-            return data
-        tools = data.get("tools")
-        if not isinstance(tools, list):
-            return data
-        for tool in tools:
-            if isinstance(tool, dict):
-                tool_dict = tool
-            elif hasattr(tool, "model_dump"):
-                tool_dict = tool.model_dump()
-            else:
-                continue
-            tool_format = tool_dict.get("format")
-            if (
-                tool_dict.get("type") == "custom"
-                and isinstance(tool_format, dict)
-                and tool_format.get("type") == "grammar"
-            ):
-                raise VLLMValidationError(
-                    "Custom tools with a grammar format are not supported; "
-                    "only free-form text custom tools are accepted.",
-                    parameter="tools",
-                )
-        return data
-
-    @model_validator(mode="before")
-    @classmethod
     def check_tool_usage(cls, data):
         if not isinstance(data, dict):
             return data
