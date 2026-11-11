@@ -231,7 +231,6 @@ _EMBEDDING_MODELS = {
     "GteNewModel": ("bert_with_rope", "GteNewModel"),
     "JinaEmbeddingsV5Model": ("jina", "JinaEmbeddingsV5Model"),
     "Lfm2BidirectionalModel": ("lfm2", "Lfm2BidirectionalModel"),
-    "LlamaBidirectionalModel": ("llama", "LlamaBidirectionalModel"),
     "LlamaModel": ("llama", "LlamaForCausalLM"),
     **{
         # Multiple models share the same architecture, so we include them all
@@ -328,10 +327,6 @@ _SEQUENCE_CLASSIFICATION_MODELS = {
         "GteNewForSequenceClassification",
     ),
     "JambaForSequenceClassification": ("jamba", "JambaForSequenceClassification"),
-    "LlamaBidirectionalForSequenceClassification": (
-        "llama",
-        "LlamaBidirectionalForSequenceClassification",
-    ),
     "ModernBertForSequenceClassification": (
         "modernbert",
         "ModernBertForSequenceClassification",
@@ -795,6 +790,13 @@ _TRANSFORMERS_SUPPORTED_MODELS = {
     "StableLmForCausalLM": ("transformers", "TransformersForCausalLM"),
     "Starcoder2ForCausalLM": ("transformers", "TransformersForCausalLM"),
     "VaultGemmaForCausalLM": ("transformers", "TransformersForCausalLM"),
+    # Embedding models
+    "LlamaBidirectionalModel": ("transformers", "TransformersEmbeddingModel"),
+    # Sequence classification models
+    "LlamaBidirectionalForSequenceClassification": (
+        "transformers",
+        "TransformersForSequenceClassification",
+    ),
     # Multimodal models
     "AriaForConditionalGeneration": (
         "transformers",

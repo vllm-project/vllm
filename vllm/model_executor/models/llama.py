@@ -26,7 +26,6 @@
 
 from collections.abc import Iterable
 from itertools import islice
-from typing import TYPE_CHECKING
 
 import torch
 from torch import nn
@@ -57,7 +56,6 @@ from vllm.model_executor.layers.vocab_parallel_embedding import (
 from vllm.sequence import IntermediateTensors
 from vllm.v1.attention.backend import AttentionType
 
-from .adapters import as_embedding_model, as_seq_cls_model
 from .interfaces import (
     EagleModelMixin,
     LocalArgmaxMixin,
@@ -556,27 +554,3 @@ class LlamaForCausalLM(
     def load_weights(self, weights: Iterable[tuple[str, torch.Tensor]]) -> set[str]:
         loader = AutoWeightsLoader(self)
         return loader.load_weights(weights)
-
-
-if TYPE_CHECKING:
-    _LlamaBidirectionalForSequenceClassificationBase = LlamaForCausalLM
-    _LlamaBidirectionalModelBase = LlamaForCausalLM
-else:
-    _LlamaBidirectionalForSequenceClassificationBase = as_seq_cls_model(
-        LlamaForCausalLM
-    )
-    _LlamaBidirectionalModelBase = as_embedding_model(LlamaForCausalLM)
-
-
-class LlamaBidirectionalForSequenceClassification(
-    _LlamaBidirectionalForSequenceClassificationBase
-):
-    # This class sets the correct attention type and pooling type
-    # through LlamaBidirectionalConfig.
-    pass
-
-
-class LlamaBidirectionalModel(_LlamaBidirectionalModelBase):
-    # This class sets the correct attention type and pooling type
-    # through LlamaBidirectionalConfig.
-    pass
