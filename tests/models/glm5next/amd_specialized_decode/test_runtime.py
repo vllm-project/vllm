@@ -49,16 +49,20 @@ def test_refusals_read_a_real_vllm_config():
         device_config=DeviceConfig(device="cpu"),
         parallel_config=ParallelConfig(tensor_parallel_size=4),
         cache_config=CacheConfig(cache_dtype="fp8_e4m3"),
-        compilation_config=CompilationConfig(
-            cudagraph_mode=CUDAGraphMode.FULL_AND_PIECEWISE,
-            cudagraph_capture_sizes=[1, 2, 4, 8, 16, 32],
-        ),
+        compilation_config=CompilationConfig(),
     )
     model = kit.make_vllm_config().model_config
     fields = {f.name for f in dataclasses.fields(ModelConfig)}
     assert {"enable_sleep_mode", "enable_prompt_embeds", "hf_text_config"} <= fields
     object.__setattr__(cfg, "model_config", model)
+    # without a model or a GPU VllmConfig turns graphs off: set them back, so the
+    # graph checks read a real CompilationConfig in graph mode
+    cc = cfg.compilation_config
+    cc.cudagraph_mode = CUDAGraphMode.FULL_AND_PIECEWISE
+    cc.cudagraph_capture_sizes = [1, 2, 4, 8, 16, 32]
     assert _reasons(cfg) == []
+    cc.cudagraph_capture_sizes = [1, 3]
+    assert any("capture sizes [3]" in r for r in _reasons(cfg)), _reasons(cfg)
 
 
 def test_every_reason_is_reported_at_once():
