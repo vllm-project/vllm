@@ -11,8 +11,10 @@ no rollback, the next full update repairs it.
 
 Delivery contract (not checked here): an update delivers every checkpoint
 tensor of each module whose PWAL changes its layout or is not idempotent, and
-of every parameter flagged `fill_on_reload`, which `begin` zero-fills whole
-(padding the loaders skip).
+of every parameter flagged `fill_on_reload`. `begin` zero-fills each such
+tensor this model owns whole, as its checkpoint-layout view (padding the
+loaders skip); a tensor shared with another model (draft and target) is
+zeroed only by its owner's `begin`.
 """
 
 from collections.abc import Iterator
