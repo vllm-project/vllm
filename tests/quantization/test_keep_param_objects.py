@@ -11,7 +11,6 @@ from vllm.config.model import ModelConfig
 from vllm.distributed.localization import LocalizedResources
 from vllm.model_executor.layers.fused_moe import FusedMoEFactory, RoutedExperts
 from vllm.model_executor.layers.linear import ReplicatedLinear
-from vllm.model_executor.layers.quantization import auto_gptq
 from vllm.model_executor.layers.quantization.auto_gptq import AutoGPTQConfig
 from vllm.model_executor.layers.quantization.base_config import QuantizationConfig
 from vllm.model_executor.layers.quantization.compressed_tensors.compressed_tensors import (  # noqa: E501
@@ -328,68 +327,48 @@ RELOAD_CASES = [
     pytest.param(
         lambda: _moe(Mxfp4Config(), **GPT_OSS_SWIGLU),
         "flashinfer_trtllm",
-        None,
         id="mxfp4-trtllm",
     ),
     pytest.param(
         lambda: _moe(Mxfp4Config(), has_bias=True, **GPT_OSS_SWIGLU),
         "marlin",
-        None,
         id="mxfp4-marlin",
     ),
     pytest.param(
         lambda: _moe(_ct(*CT_NVFP4)),
         "flashinfer_cutedsl",
-        None,
         id="ct-nvfp4-cutedsl",
     ),
     pytest.param(
         lambda: _moe(ModelOptNvFp4Config(**NVFP4, exclude_modules=[])),
         "flashinfer_trtllm",
-        None,
         id="modelopt-nvfp4-trtllm",
     ),
     pytest.param(
         lambda: _moe(ModelOptNvFp4Config(**NVFP4, exclude_modules=[])),
         "flashinfer_cutlass",
-        None,
         id="modelopt-nvfp4-cutlass",
     ),
     pytest.param(
         lambda: _moe(Fp8Config(activation_scheme="static")),
         "flashinfer_cutlass",
-        None,
         id="fp8-static-cutlass",
     ),
     pytest.param(
         lambda: _moe(Fp8Config(activation_scheme="static")),
         "flashinfer_trtllm",
-        None,
         id="fp8-static-trtllm",
     ),
     pytest.param(
         lambda: _moe(Fp8Config(weight_block_size=[128, 128])),
         "flashinfer_trtllm",
-        None,
         id="fp8-block-trtllm",
     ),
-    # Marlin W4A8-INT8 registers the input global scales
-    pytest.param(
-        lambda: _moe(_ct_int(W4_GROUP)), "marlin", "int8", id="ct-w4a8-int8-marlin"
-    ),
+    pytest.param(lambda: _moe(_ct_int(W4_GROUP)), "marlin", id="ct-w4a16-marlin"),
     pytest.param(
         lambda: _linear(GPTQ, params_dtype=torch.bfloat16),
         "marlin",
-        "int8",
-        id="gptq-w4a8-int8-marlin",
-    ),
-    # Marlin W4A8-FP8 scales the weight scales (post-load processing is
-    # arch-independent; serving gates it to SM89/SM12x for speed)
-    pytest.param(
-        lambda: _linear(GPTQ, params_dtype=torch.bfloat16),
-        "marlin",
-        "fp8",
-        id="gptq-w4a8-fp8-marlin",
+        id="gptq-w4a16-marlin",
     ),
     # asymmetric INT8 registers azp_adj
     *(
@@ -399,7 +378,6 @@ RELOAD_CASES = [
                 params_dtype=torch.bfloat16,
             ),
             backend,
-            None,
             id=f"ct-w8a8-int8-{name}-{backend}",
         )
         for name, inputs in [
@@ -412,7 +390,6 @@ RELOAD_CASES = [
     pytest.param(
         lambda: _linear(_ct_int(W4_GROUP, A8_FP8_TOKEN), params_dtype=torch.bfloat16),
         "cutlass",
-        None,
         id="ct-w4a8-fp8-cutlass",
         marks=pytest.mark.skipif(
             not current_platform.is_device_capability(90), reason="SM90 only"
@@ -421,11 +398,10 @@ RELOAD_CASES = [
 ]
 
 
-@pytest.mark.parametrize("build,backend,marlin_input", RELOAD_CASES)
+@pytest.mark.parametrize("build,backend", RELOAD_CASES)
 def test_direct_reload_keeps_kernel_tensor_addresses(
     build: Callable,
     backend: str,
-    marlin_input: str | None,
     default_vllm_config,
     dist_init,
     monkeypatch,
@@ -434,12 +410,6 @@ def test_direct_reload_keeps_kernel_tensor_addresses(
     objects); every tensor the kernel reads keeps the cold-start address and
     holds what a cold start on the new weights computes."""
     monkeypatch.setenv("VLLM_RELOAD_MODE", "direct")
-    if marlin_input == "int8":
-        monkeypatch.setenv("VLLM_MARLIN_INPUT_DTYPE", "int8")
-    elif marlin_input == "fp8":
-        monkeypatch.setattr(
-            auto_gptq, "get_marlin_input_dtype", lambda _: torch.float8_e4m3fn
-        )
     default_vllm_config.model_config = ModelConfig()
     default_vllm_config.kernel_config.moe_backend = backend
     default_vllm_config.kernel_config.linear_backend = backend

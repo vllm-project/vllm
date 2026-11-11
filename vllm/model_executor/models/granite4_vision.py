@@ -283,10 +283,12 @@ class Granite4VisionLLMModel(GraniteModel):
 
         if not get_pp_group().is_last_rank:
             # Forward hidden_states and any deepstack features for later ranks.
+            # Copy the features: on the first rank they are views of buffers the
+            # outer model zeroes right after this forward, before the PP send.
             it = {"hidden_states": hidden_states}
             if deepstack_input_embeds is not None:
                 remaining = {
-                    k: v
+                    k: v.clone()
                     for k, v in deepstack_input_embeds.tensors.items()
                     if int(k.split("_")[1]) >= self.end_layer
                 }
@@ -331,9 +333,12 @@ class Granite4VisionLLMForCausalLM(GraniteForCausalLM):
         self, batch_size: int, dtype: torch.dtype, device: torch.device
     ) -> IntermediateTensors:
         tensors = super().make_empty_intermediate_tensors(batch_size, dtype, device)
-        # Include deepstack buffers so non-first PP ranks receive them.
+        # Include the deepstack buffers this PP rank receives: the previous rank
+        # forwards only the features of layers from this rank's first layer on.
         # _ds_layer_indices is set directly on this instance by the outer model.
         for llm_layer in getattr(self, "_ds_layer_indices", []):
+            if llm_layer < self.model.start_layer:
+                continue
             tensors.tensors[f"ds_{llm_layer}"] = torch.zeros(
                 (batch_size, self.config.hidden_size), dtype=dtype, device=device
             )
@@ -660,7 +665,7 @@ class Granite4VisionForConditionalGeneration(
 
     def _get_all_layer_features(
         self,
-        pixel_values: torch.Tensor,
+        pixel_values: torch.Tensor | list[torch.Tensor],
         image_sizes: torch.Tensor,
     ) -> tuple[list[int], list[torch.Tensor]]:
         """Extract deepstack + spatial features for all levels.
@@ -686,7 +691,8 @@ class Granite4VisionForConditionalGeneration(
             for imsize in image_sizes
         ]
 
-        if pixel_values.dim() == 5:
+        # Strip per-image padding tiles for both batched and list layouts.
+        if isinstance(pixel_values, list) or pixel_values.dim() == 5:
             pixel_values = torch.cat(
                 [pv[:np_] for pv, np_ in zip(pixel_values, image_num_patches)],
                 dim=0,
@@ -775,9 +781,6 @@ class Granite4VisionForConditionalGeneration(
         pixel_values = image_input["pixel_values"]
         image_sizes = image_input.get("image_sizes")
 
-        if isinstance(pixel_values, list):
-            pixel_values = torch.cat(pixel_values, dim=0)
-
         llm_layer_indices, per_image_packed = self._get_all_layer_features(
             pixel_values, image_sizes
         )
@@ -822,8 +825,11 @@ class Granite4VisionForConditionalGeneration(
         # 1. Text embeddings
         text_embeds = lm_inner.embed_input_ids(input_ids)
 
-        # 2. Zero image positions (matches HF masked_fill(vision_mask, 0.0))
-        text_embeds[is_multimodal] = 0.0
+        # 2. Zero image positions (matches HF masked_fill(vision_mask, 0.0)).
+        #    masked_fill_ with the mask on device avoids a GPU<->CPU sync.
+        assert is_multimodal is not None
+        mm_mask = is_multimodal.to(text_embeds.device, non_blocking=True)
+        text_embeds.masked_fill_(mm_mask.unsqueeze(-1), 0.0)
 
         # 3. Apply embedding_multiplier
         inputs_embeds = text_embeds * lm_inner.config.embedding_multiplier

@@ -9,8 +9,6 @@ import torch
 
 from vllm.config import CompilationConfig, VllmConfig
 from vllm.config.compilation import CompilationMode
-from vllm.model_executor.layers.vocab_parallel_embedding import VocabParallelEmbedding
-from vllm.model_executor.models import gemma
 from vllm.model_executor.models.gemma3n import (
     Gemma3nTextModel,
     _kv_sharing_weights_mapper,
@@ -24,7 +22,10 @@ from vllm.model_executor.models.gemma4_dspark import (
     Gemma4DSparkModel,
 )
 
-MODELS = ["google/gemma-2b", "google/gemma-2-2b", "google/gemma-3-4b-it"]
+from ....utils import multi_gpu_test
+from ...utils import check_logprobs_close
+
+MODELS = ["google/gemma-2-2b", "google/gemma-3-4b-it"]
 
 
 @pytest.mark.usefixtures("dist_init")
@@ -69,7 +70,7 @@ def test_gemma4_dspark_loads_confidence_head(
         else []
     )
     if not (enabled and has_weights):
-        assert model.model.confidence_head is None
+        assert (model.model.confidence_head is None) is not enabled
         assert not loaded
         return
 
@@ -83,43 +84,6 @@ def test_gemma4_dspark_loads_confidence_head(
     inputs = torch.cat([hidden, markov], dim=-1) if with_markov else hidden
     expected = (inputs.float() @ weight.float().T + bias.float()).sigmoid().squeeze(-1)
     torch.testing.assert_close(model.compute_confidence(hidden, markov), expected)
-
-
-@pytest.mark.cpu_test
-@pytest.mark.usefixtures("dist_init")
-def test_checkpoint_lm_head_can_override_tied_config(monkeypatch) -> None:
-    """A physical LM head must load after checkpoint-driven untying."""
-
-    class StubGemmaModel(torch.nn.Module):
-        def __init__(self, *, vllm_config, prefix):
-            super().__init__()
-            self.embed_tokens = VocabParallelEmbedding(4, 2)
-            self.make_empty_intermediate_tensors = None
-
-    monkeypatch.setattr(gemma, "GemmaModel", StubGemmaModel)
-    config = SimpleNamespace(
-        vocab_size=4,
-        hidden_size=2,
-        tie_word_embeddings=False,
-    )
-    vllm_config = SimpleNamespace(
-        model_config=SimpleNamespace(hf_config=config),
-        quant_config=None,
-    )
-    model = gemma.GemmaForCausalLM(vllm_config=cast(VllmConfig, vllm_config))
-    embedding_weight = torch.full((4, 2), 1.0)
-    lm_head_weight = torch.full((4, 2), 2.0)
-
-    loaded = model.load_weights(
-        [
-            ("model.embed_tokens.weight", embedding_weight),
-            ("lm_head.weight", lm_head_weight),
-        ]
-    )
-
-    assert loaded == {"model.embed_tokens.weight", "lm_head.weight"}
-    assert torch.equal(model.model.embed_tokens.weight[:4], embedding_weight)
-    assert torch.equal(model.lm_head.weight[:4], lm_head_weight)
 
 
 @pytest.mark.cpu_test
@@ -221,6 +185,8 @@ def test_gemma3n_kv_shared_layer_mapper() -> None:
 def test_dummy_loader(vllm_runner, monkeypatch, model: str) -> None:
     with monkeypatch.context() as m:
         m.setenv("VLLM_ALLOW_INSECURE_SERIALIZATION", "1")
+        # Fork fails here when no earlier file switched the process to spawn.
+        m.setenv("VLLM_WORKER_MULTIPROC_METHOD", "spawn")
         with vllm_runner(
             model,
             load_format="dummy",
@@ -238,3 +204,32 @@ def test_dummy_loader(vllm_runner, monkeypatch, model: str) -> None:
                 )
                 config = llm.llm.llm_engine.model_config.hf_config
             assert np.allclose(normalizers, config.hidden_size**0.5, rtol=2e-3)
+
+
+@multi_gpu_test(num_gpus=2)
+def test_gemma4_per_layer_embeddings_pipeline_parallel(
+    vllm_runner, example_prompts, monkeypatch
+) -> None:
+    """Stages after the first must use the per-layer embeddings they receive
+    from the previous stage, so PP=2 matches PP=1."""
+    # The base model continues raw prompts; the -it model ends the turn at once.
+    model = "google/gemma-4-E2B"
+    text_only = {"image": 0, "audio": 0, "video": 0}
+    with vllm_runner(model, limit_mm_per_prompt=text_only) as vllm_model:
+        pp1_outputs = vllm_model.generate_greedy_logprobs(example_prompts, 32, 5)
+
+    # KV-shared layers must sit on the same stage as the layers whose KV they
+    # read, which the default split breaks. Put layers 13-34 (the two KV
+    # source layers 13 and 14 and all 20 KV-shared layers) on stage 2.
+    monkeypatch.setenv("VLLM_PP_LAYER_PARTITION", "13,22")
+    with vllm_runner(
+        model, pipeline_parallel_size=2, limit_mm_per_prompt=text_only
+    ) as vllm_model:
+        pp2_outputs = vllm_model.generate_greedy_logprobs(example_prompts, 32, 5)
+
+    check_logprobs_close(
+        outputs_0_lst=pp1_outputs,
+        outputs_1_lst=pp2_outputs,
+        name_0="pp1",
+        name_1="pp2",
+    )

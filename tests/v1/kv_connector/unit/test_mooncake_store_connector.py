@@ -4,6 +4,7 @@
 import pickle
 import threading
 import time
+from types import SimpleNamespace
 from unittest.mock import MagicMock, patch
 
 import pytest
@@ -19,18 +20,18 @@ from vllm.distributed.kv_transfer.kv_connector.v1.base import (
     KVConnectorRole,
     KVConnectorTransferResults,
 )
-from vllm.distributed.kv_transfer.kv_connector.v1.mooncake.store import (
+from vllm.distributed.kv_transfer.kv_connector.v1.mooncake_store import (
     connector as mooncake_store_connector,
 )
-from vllm.distributed.kv_transfer.kv_connector.v1.mooncake.store import (
+from vllm.distributed.kv_transfer.kv_connector.v1.mooncake_store import (
     protocol,
     scheduler,
     worker,
 )
-from vllm.distributed.kv_transfer.kv_connector.v1.mooncake.store.coordinator import (
+from vllm.distributed.kv_transfer.kv_connector.v1.mooncake_store.coordinator import (
     ExternalCachedBlockPool,
 )
-from vllm.distributed.kv_transfer.kv_connector.v1.mooncake.store.data import (
+from vllm.distributed.kv_transfer.kv_connector.v1.mooncake_store.data import (
     BlockKey,
     MooncakeLookupResult,
     MooncakeStoreConnectorMetadata,
@@ -39,12 +40,12 @@ from vllm.distributed.kv_transfer.kv_connector.v1.mooncake.store.data import (
     TailKeyBoundary,
     store_block_key,
 )
-from vllm.distributed.kv_transfer.kv_connector.v1.mooncake.store.layout import (
+from vllm.distributed.kv_transfer.kv_connector.v1.mooncake_store.layout import (
     KeyMetadata,
     PoolKey,
     RankLocalStoreLayout,
 )
-from vllm.distributed.kv_transfer.kv_connector.v1.mooncake.store.metrics import (
+from vllm.distributed.kv_transfer.kv_connector.v1.mooncake_store.metrics import (
     MooncakeStoreConnectorStats,
 )
 from vllm.utils.hashing import sha256
@@ -240,7 +241,7 @@ def test_scheduler_requires_align_mode_for_mamba_kv_transfer(
 
     with (
         patch(
-            "vllm.distributed.kv_transfer.kv_connector.v1.mooncake.store."
+            "vllm.distributed.kv_transfer.kv_connector.v1.mooncake_store."
             "scheduler.LookupKeyClient"
         ),
         pytest.raises(AssertionError, match="requires mamba_cache_mode='align'"),
@@ -261,7 +262,7 @@ def test_capacity_only_scheduler_allows_mamba_none_mode(
     )
 
     with patch(
-        "vllm.distributed.kv_transfer.kv_connector.v1.mooncake.store."
+        "vllm.distributed.kv_transfer.kv_connector.v1.mooncake_store."
         "scheduler.LookupKeyClient"
     ) as mock_client:
         connector = KVConnectorFactory.create_connector(
@@ -299,11 +300,11 @@ def test_scheduler_role_initializes_store_scheduler_only():
     with (
         set_current_vllm_config(vllm_config),
         patch(
-            "vllm.distributed.kv_transfer.kv_connector.v1.mooncake.store."
+            "vllm.distributed.kv_transfer.kv_connector.v1.mooncake_store."
             "connector.MooncakeStoreScheduler"
         ) as mock_scheduler,
         patch(
-            "vllm.distributed.kv_transfer.kv_connector.v1.mooncake.store."
+            "vllm.distributed.kv_transfer.kv_connector.v1.mooncake_store."
             "connector.MooncakeStoreWorker"
         ) as mock_worker,
     ):
@@ -328,7 +329,7 @@ def test_scheduler_reports_mooncake_cache_source():
     with (
         set_current_vllm_config(vllm_config),
         patch(
-            "vllm.distributed.kv_transfer.kv_connector.v1.mooncake.store."
+            "vllm.distributed.kv_transfer.kv_connector.v1.mooncake_store."
             "connector.MooncakeStoreScheduler"
         ),
     ):
@@ -354,7 +355,7 @@ def test_worker_methods_delegate_to_store_worker():
     with (
         set_current_vllm_config(vllm_config),
         patch(
-            "vllm.distributed.kv_transfer.kv_connector.v1.mooncake.store."
+            "vllm.distributed.kv_transfer.kv_connector.v1.mooncake_store."
             "connector.MooncakeStoreWorker"
         ) as mock_worker_cls,
     ):
@@ -391,7 +392,7 @@ def test_binding_a_newer_residency_epoch_retires_what_the_wipe_missed():
     with (
         set_current_vllm_config(vllm_config),
         patch(
-            "vllm.distributed.kv_transfer.kv_connector.v1.mooncake.store."
+            "vllm.distributed.kv_transfer.kv_connector.v1.mooncake_store."
             "connector.MooncakeStoreWorker"
         ) as mock_worker_cls,
     ):
@@ -421,7 +422,7 @@ def test_get_transfer_results_delegates_to_store_worker():
     with (
         set_current_vllm_config(vllm_config),
         patch(
-            "vllm.distributed.kv_transfer.kv_connector.v1.mooncake.store."
+            "vllm.distributed.kv_transfer.kv_connector.v1.mooncake_store."
             "connector.MooncakeStoreWorker"
         ) as mock_worker_cls,
     ):
@@ -451,7 +452,7 @@ def test_get_kv_connector_kv_cache_events_returns_none_when_disabled():
     with (
         set_current_vllm_config(vllm_config),
         patch(
-            "vllm.distributed.kv_transfer.kv_connector.v1.mooncake.store."
+            "vllm.distributed.kv_transfer.kv_connector.v1.mooncake_store."
             "connector.MooncakeStoreWorker"
         ) as mock_worker_cls,
     ):
@@ -472,7 +473,7 @@ def test_get_kv_connector_stats_delegates_to_worker():
     with (
         set_current_vllm_config(vllm_config),
         patch(
-            "vllm.distributed.kv_transfer.kv_connector.v1.mooncake.store."
+            "vllm.distributed.kv_transfer.kv_connector.v1.mooncake_store."
             "connector.MooncakeStoreWorker"
         ) as mock_worker_cls,
     ):
@@ -511,7 +512,7 @@ def _make_scheduler_connector() -> mooncake_store_connector.MooncakeStoreConnect
     with (
         set_current_vllm_config(vllm_config),
         patch(
-            "vllm.distributed.kv_transfer.kv_connector.v1.mooncake.store."
+            "vllm.distributed.kv_transfer.kv_connector.v1.mooncake_store."
             "connector.MooncakeStoreScheduler"
         ),
     ):
@@ -580,9 +581,7 @@ def _step_output(
 ) -> ModelRunnerOutput:
     """One worker's step output; None is a worker that reported no output."""
     if container is None:
-        return ModelRunnerOutput(
-            req_ids=[], req_id_to_index={}, kv_connector_output=KVConnectorOutput()
-        )
+        return ModelRunnerOutput(req_ids=[], kv_connector_output=KVConnectorOutput())
     return ModelRunnerOutput.with_kv_conn_output_only(
         KVConnectorOutput(kv_cache_events=container)
     )
@@ -632,7 +631,7 @@ def test_get_kv_connector_kv_cache_events_wraps_worker_events():
     with (
         set_current_vllm_config(vllm_config),
         patch(
-            "vllm.distributed.kv_transfer.kv_connector.v1.mooncake.store."
+            "vllm.distributed.kv_transfer.kv_connector.v1.mooncake_store."
             "connector.MooncakeStoreWorker"
         ) as mock_worker_cls,
     ):
@@ -664,7 +663,7 @@ def test_get_kv_connector_kv_cache_events_checks_coverage_against_the_lookup_tab
     with (
         set_current_vllm_config(vllm_config),
         patch(
-            "vllm.distributed.kv_transfer.kv_connector.v1.mooncake.store."
+            "vllm.distributed.kv_transfer.kv_connector.v1.mooncake_store."
             "connector.MooncakeStoreWorker"
         ) as mock_worker_cls,
     ):
@@ -695,7 +694,7 @@ def test_get_kv_connector_kv_cache_events_returns_none_for_an_empty_poll():
     with (
         set_current_vllm_config(vllm_config),
         patch(
-            "vllm.distributed.kv_transfer.kv_connector.v1.mooncake.store."
+            "vllm.distributed.kv_transfer.kv_connector.v1.mooncake_store."
             "connector.MooncakeStoreWorker"
         ) as mock_worker_cls,
     ):
@@ -1136,7 +1135,7 @@ def test_reset_cache_scheduler_role_delegates_to_reset_store():
     with (
         set_current_vllm_config(vllm_config),
         patch(
-            "vllm.distributed.kv_transfer.kv_connector.v1.mooncake.store."
+            "vllm.distributed.kv_transfer.kv_connector.v1.mooncake_store."
             "connector.MooncakeStoreScheduler"
         ) as mock_scheduler_cls,
     ):
@@ -1157,7 +1156,7 @@ def test_reset_cache_scheduler_role_propagates_failure():
     with (
         set_current_vllm_config(vllm_config),
         patch(
-            "vllm.distributed.kv_transfer.kv_connector.v1.mooncake.store."
+            "vllm.distributed.kv_transfer.kv_connector.v1.mooncake_store."
             "connector.MooncakeStoreScheduler"
         ) as mock_scheduler_cls,
     ):
@@ -1177,7 +1176,7 @@ def test_reset_cache_worker_role_returns_none():
     with (
         set_current_vllm_config(vllm_config),
         patch(
-            "vllm.distributed.kv_transfer.kv_connector.v1.mooncake.store."
+            "vllm.distributed.kv_transfer.kv_connector.v1.mooncake_store."
             "connector.MooncakeStoreWorker"
         ),
     ):
@@ -1196,7 +1195,7 @@ def test_scheduler_reset_store_returns_client_reset_result():
     with (
         set_current_vllm_config(vllm_config),
         patch(
-            "vllm.distributed.kv_transfer.kv_connector.v1.mooncake.store."
+            "vllm.distributed.kv_transfer.kv_connector.v1.mooncake_store."
             "scheduler.LookupKeyClient"
         ) as mock_client_cls,
     ):
@@ -1215,7 +1214,7 @@ def test_scheduler_reset_store_handles_rpc_exception():
     with (
         set_current_vllm_config(vllm_config),
         patch(
-            "vllm.distributed.kv_transfer.kv_connector.v1.mooncake.store."
+            "vllm.distributed.kv_transfer.kv_connector.v1.mooncake_store."
             "scheduler.LookupKeyClient"
         ) as mock_client_cls,
     ):
@@ -1234,7 +1233,7 @@ def test_scheduler_metadata_carries_the_epoch_a_wipe_advanced():
     with (
         set_current_vllm_config(vllm_config),
         patch(
-            "vllm.distributed.kv_transfer.kv_connector.v1.mooncake.store."
+            "vllm.distributed.kv_transfer.kv_connector.v1.mooncake_store."
             "scheduler.LookupKeyClient"
         ) as mock_client_cls,
     ):
@@ -1256,7 +1255,7 @@ def test_lookup_key_client_lookup_prepends_typed_tag():
     vllm_config = _make_vllm_config()
 
     with patch(
-        "vllm.distributed.kv_transfer.kv_connector.v1.mooncake.store."
+        "vllm.distributed.kv_transfer.kv_connector.v1.mooncake_store."
         "worker.make_zmq_socket"
     ) as mock_make_socket:
         client = worker.LookupKeyClient(vllm_config)
@@ -1280,7 +1279,7 @@ def test_lookup_key_client_reset_uses_typed_protocol():
     vllm_config = _make_vllm_config()
 
     with patch(
-        "vllm.distributed.kv_transfer.kv_connector.v1.mooncake.store."
+        "vllm.distributed.kv_transfer.kv_connector.v1.mooncake_store."
         "worker.make_zmq_socket"
     ) as mock_make_socket:
         client = worker.LookupKeyClient(vllm_config)
@@ -1290,7 +1289,7 @@ def test_lookup_key_client_reset_uses_typed_protocol():
     # ACK path: server returns RESP_OK -> client returns True.
     fake_socket.recv.return_value = protocol.RESP_OK
     assert client.reset() is True
-    assert fake_socket.send.call_args[0][0] == protocol.RESET_MSG
+    assert fake_socket.send_multipart.call_args[0][0] == (protocol.RESET_MSG,)
 
     # NACK path: server returns RESP_ERR -> client returns False.
     fake_socket.recv.return_value = protocol.RESP_ERR
@@ -1309,14 +1308,240 @@ def _poll_lookup(client, req_id, num_tokens=128, block_hashes=(), timeout=5.0):
 
 
 def _gated_recv(gate: threading.Event, value: int):
-    """Mock recv side-effect that blocks until ``gate`` is set, so the
+    """Mock recv side-effect that blocks until `gate` is set, so the
     executor's lookup can be held pending deterministically."""
 
-    def recv():
+    def recv(flags: int = 0) -> bytes:
         gate.wait()
         return value.to_bytes(4, "big")
 
     return recv
+
+
+def test_admission_lookup_retains_completed_result_until_scheduled():
+    """A lookup started by on_new_request is reused, not consumed or
+    submitted again, by the scheduler's probes."""
+    vllm_config = create_vllm_config(
+        kv_connector="MooncakeStoreConnector",
+        kv_role="kv_both",
+        kv_connector_extra_config={"lookup_async": True, "lookup_prefetch_limit": 1},
+    )
+    with (
+        set_current_vllm_config(vllm_config),
+        patch(
+            "vllm.distributed.kv_transfer.kv_connector.v1.mooncake_store."
+            "worker.make_zmq_socket"
+        ) as mock_make_socket,
+    ):
+        connector = mooncake_store_connector.MooncakeStoreConnector(
+            vllm_config, KVConnectorRole.SCHEDULER, _make_kv_cache_config()
+        )
+    request = SimpleNamespace(
+        request_id="req1",
+        num_tokens=48,
+        block_hashes=[b"h0", b"h1", b"h2"],
+        skip_reading_external_kv=False,
+    )
+    mock_make_socket.return_value.recv.return_value = (32).to_bytes(4, "big")
+    try:
+        connector.on_new_request(request)
+        sched = connector.connector_scheduler
+        assert sched is not None
+        future = sched.client._lookups[request.request_id].future
+        assert future.result(timeout=5).hit_length == 32
+        assert sched.load_specs == {}
+        assert connector.get_num_new_matched_tokens(request, 16) == (16, True)
+        assert sched.client._lookups[request.request_id].future is future
+        assert mock_make_socket.return_value.send_multipart.call_count == 1
+        assert connector.get_num_new_matched_tokens(request, 16) == (16, True)
+        assert mock_make_socket.return_value.send_multipart.call_count == 1
+        # Once allocated, a reschedule (e.g. after a failed load) looks up anew.
+        connector.update_state_after_alloc(request, MagicMock(), 16)
+        assert request.request_id not in sched.client._lookups
+    finally:
+        connector.shutdown()
+
+
+@pytest.mark.parametrize("all_groups", [False, True])
+def test_finished_request_cancels_queued_lookup_before_next_step(all_groups):
+    """An aborted request's lookup queued behind a slow RPC must never run,
+    even if the executor frees up before the next build_connector_meta."""
+    vllm_config = create_vllm_config(
+        kv_connector="MooncakeStoreConnector",
+        kv_role="kv_both",
+        kv_connector_extra_config={"lookup_async": True},
+    )
+    with (
+        set_current_vllm_config(vllm_config),
+        patch.object(worker, "make_zmq_socket") as make_socket,
+    ):
+        connector = mooncake_store_connector.MooncakeStoreConnector(
+            vllm_config, KVConnectorRole.SCHEDULER, _make_kv_cache_config()
+        )
+    sched = connector.connector_scheduler
+    assert sched is not None
+    client = sched.client
+    sock = make_socket.return_value
+    gate, started = threading.Event(), threading.Event()
+    sock.send_multipart.side_effect = lambda *args, **kwargs: started.set()
+    sock.recv.side_effect = _gated_recv(gate, 32)
+    request = SimpleNamespace(request_id="dead")
+    try:
+        assert client.lookup("busy", 48, [], non_block=True) is None
+        assert started.wait(5)
+        assert client.lookup(request.request_id, 48, [], non_block=True) is None
+
+        if all_groups:
+            finished = connector.request_finished_all_groups(request, ([],))
+        else:
+            finished = connector.request_finished(request, [])
+        assert finished == (False, None)
+
+        gate.set()
+        assert client.lookup("busy", 48, []).hit_length == 32
+        client.executor.submit(lambda: None).result(timeout=5)
+        assert sock.send_multipart.call_count == 1
+        assert request.request_id not in client._lookups
+    finally:
+        gate.set()
+        connector.shutdown()
+
+
+def _make_lookup_client(extra_config=None):
+    vllm_config = create_vllm_config(
+        kv_connector="MooncakeStoreConnector",
+        kv_role="kv_both",
+        kv_connector_extra_config=extra_config,
+    )
+    with patch(
+        "vllm.distributed.kv_transfer.kv_connector.v1.mooncake_store."
+        "worker.make_zmq_socket"
+    ) as make_socket:
+        client = worker.LookupKeyClient(vllm_config)
+    return client, make_socket.return_value
+
+
+@pytest.mark.parametrize("limit", [None, 0, 1])
+def test_lookup_prefetch_cap_bounds_in_flight_prefetches(limit):
+    client, sock = _make_lookup_client(
+        {} if limit is None else {"lookup_prefetch_limit": limit}
+    )
+    gate = threading.Event()
+    sock.recv.side_effect = _gated_recv(gate, 32)
+    try:
+        assert client.prefetch("first", 48, []) == bool(limit)
+        assert client.prefetch("second", 48, []) is False
+        assert "second" not in client._lookups
+        # Scheduler probes bypass the cap.
+        assert client.lookup("next", 48, [], non_block=True) is None
+        assert "next" in client._lookups
+        if limit:
+            gate.set()
+            client._lookups["first"].future.result(timeout=5)
+            deadline = time.monotonic() + 5.0
+            while not client.prefetch("later", 48, []):
+                assert time.monotonic() < deadline
+                time.sleep(0.005)
+            client._lookups["later"].future.result(timeout=5)
+    finally:
+        gate.set()
+        client.close()
+
+
+def _wait_completed(state: worker.LookupState) -> None:
+    """result() returns before done callbacks run; wait for the TTL stamp."""
+    state.future.result(timeout=5)
+    for _ in range(1000):
+        if state.completed_at is not None:
+            return
+        time.sleep(0.005)
+    raise AssertionError("completion was never stamped")
+
+
+@pytest.mark.parametrize("change", ["tokens", "hash", "expired", "cached_expired"])
+def test_lookup_client_refreshes_changed_or_expired_query(monkeypatch, change):
+    client, sock = _make_lookup_client({"lookup_prefetch_limit": 1})
+    sock.recv.return_value = (32).to_bytes(4, "big")
+    clock = [0.0]
+    monkeypatch.setattr(worker.time, "monotonic", lambda: clock[0])
+    num_tokens, hashes = 48, [b"h0", b"h1", b"h2"]
+    try:
+        assert client.prefetch("req", num_tokens, hashes)
+        state = client._lookups["req"]
+        first = state.future
+        _wait_completed(state)
+        assert first.result().hit_length == 32
+        if change == "expired":
+            # Prefetched long before the scheduler's first probe.
+            clock[0] = 3.0
+        else:
+            assert client.lookup("req", num_tokens, hashes, non_block=True) is not None
+            if change == "tokens":
+                num_tokens += 1
+            elif change == "hash":
+                hashes[-1] = b"different-tail"
+            else:
+                clock[0] = 3.0
+
+        client.lookup("req", num_tokens, hashes, non_block=True)
+        refreshed = client._lookups["req"].future
+        assert refreshed is not first
+        assert refreshed.result(timeout=5).hit_length == 32
+        assert client.lookup("req", num_tokens, hashes, non_block=True).hit_length == 32
+        assert sock.send_multipart.call_count == 2
+    finally:
+        client.close()
+
+
+@pytest.mark.parametrize("prefetched", [False, True])
+def test_pending_lookup_is_not_restarted_by_ttl(monkeypatch, prefetched):
+    """A lookup still queued past the TTL is kept, not resubmitted behind
+    the backlog it is waiting on."""
+    # Keep the RPC deadline beyond the clock advance that expires the result TTL.
+    client, sock = _make_lookup_client(
+        {"lookup_prefetch_limit": 1, "lookup_timeout_s": 5.0}
+    )
+    gate = threading.Event()
+    sock.recv.side_effect = _gated_recv(gate, 32)
+    clock = [0.0]
+    monkeypatch.setattr(worker.time, "monotonic", lambda: clock[0])
+    try:
+        if prefetched:
+            assert client.prefetch("req", 48, [])
+        else:
+            assert client.lookup("req", 48, [], non_block=True) is None
+        first = client._lookups["req"].future
+        clock[0] = 3.0
+        assert client.lookup("req", 48, [], non_block=True) is None
+        assert client._lookups["req"].future is first
+        gate.set()
+        assert first.result(timeout=5).hit_length == 32
+        assert client.lookup("req", 48, [], non_block=True).hit_length == 32
+        assert sock.send_multipart.call_count == 1
+    finally:
+        gate.set()
+        client.close()
+
+
+def test_prefetch_after_close_starts_nothing():
+    client, _ = _make_lookup_client({"lookup_prefetch_limit": 1})
+    client.close()
+    assert client.prefetch("req", 48, []) is False
+    assert client._lookups == {}
+    assert client._prefetch_slots.acquire(blocking=False)
+
+
+def test_reset_clears_cached_async_results():
+    client, sock = _make_lookup_client()
+    sock.recv.return_value = (32).to_bytes(4, "big")
+    try:
+        client.lookup("req", 48, [], non_block=True)
+        assert client._lookups["req"].future.result(timeout=5).hit_length == 32
+        sock.recv.return_value = protocol.RESP_OK
+        assert client.reset() is True
+        assert client._lookups == {}
+    finally:
+        client.close()
 
 
 def test_lookup_key_client_non_block_lookup_async():
@@ -1325,7 +1550,7 @@ def test_lookup_key_client_non_block_lookup_async():
     vllm_config = _make_vllm_config()
 
     with patch(
-        "vllm.distributed.kv_transfer.kv_connector.v1.mooncake.store."
+        "vllm.distributed.kv_transfer.kv_connector.v1.mooncake_store."
         "worker.make_zmq_socket"
     ) as mock_make_socket:
         client = worker.LookupKeyClient(vllm_config)
@@ -1340,8 +1565,10 @@ def test_lookup_key_client_non_block_lookup_async():
     # Release the executor; a later poll returns the hit length.
     gate.set()
     assert _poll_lookup(client, "req1") == 7
-    # Future is consumed (popped) on read.
-    assert "req1" not in client.futures
+    # Repeated reads reuse the completed result until expiry or discard.
+    assert _poll_lookup(client, "req1") == 7
+    assert fake_socket.send_multipart.call_count == 1
+    client.close()
 
 
 def test_lookup_key_client_discard_clears_state():
@@ -1349,7 +1576,7 @@ def test_lookup_key_client_discard_clears_state():
     vllm_config = _make_vllm_config()
 
     with patch(
-        "vllm.distributed.kv_transfer.kv_connector.v1.mooncake.store."
+        "vllm.distributed.kv_transfer.kv_connector.v1.mooncake_store."
         "worker.make_zmq_socket"
     ) as mock_make_socket:
         client = worker.LookupKeyClient(vllm_config)
@@ -1359,17 +1586,17 @@ def test_lookup_key_client_discard_clears_state():
     fake_socket.recv.side_effect = _gated_recv(gate, 9)
 
     # Submit while gated so the call returns None and the Future stays in
-    # `futures` (unconsumed) once it resolves.
+    # the client once it resolves.
     assert client.lookup("req2", 128, [], non_block=True) is None
     gate.set()
     deadline = time.monotonic() + 5.0
     while time.monotonic() < deadline:
-        if client.futures["req2"].done():
+        if client._lookups["req2"].future.done():
             break
         time.sleep(0.005)
     # discard() drops the completed result before any lookup consumes it.
     client.discard("req2")
-    assert "req2" not in client.futures
+    assert "req2" not in client._lookups
     # A fresh query re-submits rather than returning a stale value: hold the
     # gate so the resubmitted lookup stays in flight.
     gate.clear()
@@ -1389,7 +1616,7 @@ def test_get_num_new_matched_tokens_async_defers_then_reports():
     with (
         set_current_vllm_config(vllm_config),
         patch(
-            "vllm.distributed.kv_transfer.kv_connector.v1.mooncake.store."
+            "vllm.distributed.kv_transfer.kv_connector.v1.mooncake_store."
             "scheduler.LookupKeyClient"
         ) as mock_client_cls,
     ):
@@ -1455,7 +1682,7 @@ def test_scheduler_reset_connector_cache_invokes_connector_reset():
     with (
         set_current_vllm_config(vllm_config),
         patch(
-            "vllm.distributed.kv_transfer.kv_connector.v1.mooncake.store."
+            "vllm.distributed.kv_transfer.kv_connector.v1.mooncake_store."
             "connector.MooncakeStoreScheduler"
         ) as mock_scheduler_cls,
     ):
@@ -1488,7 +1715,7 @@ def test_reset_cache_scheduler_role_clears_local_state():
     about to be remove_all'd, so reading them after reset would surface
     stale references to wiped keys.
     """
-    from vllm.distributed.kv_transfer.kv_connector.v1.mooncake.store.data import (  # noqa: E501
+    from vllm.distributed.kv_transfer.kv_connector.v1.mooncake_store.data import (  # noqa: E501
         LoadSpec,
     )
 
@@ -1498,7 +1725,7 @@ def test_reset_cache_scheduler_role_clears_local_state():
     with (
         set_current_vllm_config(vllm_config),
         patch(
-            "vllm.distributed.kv_transfer.kv_connector.v1.mooncake.store."
+            "vllm.distributed.kv_transfer.kv_connector.v1.mooncake_store."
             "connector.MooncakeStoreScheduler"
         ) as mock_scheduler_cls,
     ):
@@ -1621,7 +1848,7 @@ def test_shutdown_closes_worker_store():
     with (
         set_current_vllm_config(vllm_config),
         patch(
-            "vllm.distributed.kv_transfer.kv_connector.v1.mooncake.store."
+            "vllm.distributed.kv_transfer.kv_connector.v1.mooncake_store."
             "connector.MooncakeStoreWorker"
         ) as mock_worker_cls,
     ):
@@ -1642,7 +1869,7 @@ def test_del_invokes_shutdown_and_closes_store():
     with (
         set_current_vllm_config(vllm_config),
         patch(
-            "vllm.distributed.kv_transfer.kv_connector.v1.mooncake.store."
+            "vllm.distributed.kv_transfer.kv_connector.v1.mooncake_store."
             "connector.MooncakeStoreWorker"
         ) as mock_worker_cls,
     ):
@@ -1664,7 +1891,7 @@ def test_shutdown_scheduler_role_is_noop():
     with (
         set_current_vllm_config(vllm_config),
         patch(
-            "vllm.distributed.kv_transfer.kv_connector.v1.mooncake.store."
+            "vllm.distributed.kv_transfer.kv_connector.v1.mooncake_store."
             "connector.MooncakeStoreScheduler"
         ),
     ):
@@ -1711,7 +1938,9 @@ def test_finish_during_prefill_saves_only_completed_kv(
     )
     connector.update_state_after_alloc(request, KVCacheBlocks((owned,)), 0)
     out = SchedulerOutput.make_empty()
-    out.scheduled_new_reqs = [NewRequestData.from_request(request, block_ids)]
+    out.scheduled_new_reqs = [
+        NewRequestData.from_request(request, block_ids, request.prefill_token_ids)
+    ]
     out.num_scheduled_tokens = {request.request_id: 20}
     out.total_num_scheduled_tokens = 20
     out.kv_connector_block_state = KVConnectorBlockState(
@@ -1821,7 +2050,9 @@ def test_finish_preserves_both_store_jobs_and_releases_their_own_blocks(
         0,
     )
     out = SchedulerOutput.make_empty()
-    out.scheduled_new_reqs = [NewRequestData.from_request(request, block_ids)]
+    out.scheduled_new_reqs = [
+        NewRequestData.from_request(request, block_ids, request.prefill_token_ids)
+    ]
     out.num_scheduled_tokens = {request.request_id: 32}
     out.total_num_scheduled_tokens = 32
     out.kv_connector_block_state = KVConnectorBlockState(
@@ -1959,7 +2190,6 @@ def test_lookahead_hashed_prefix_is_retried_without_new_blocks():
         first,
         ModelRunnerOutput(
             req_ids=[request.request_id],
-            req_id_to_index={request.request_id: 0},
             sampled_token_ids=[[32]],
         ),
     )
