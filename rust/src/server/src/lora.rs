@@ -159,7 +159,7 @@ pub(crate) enum LoadLoraError {
     InvalidAdapter { message: String },
     #[error(transparent)]
     PathAccess(#[from] LoraPathAccessError),
-    #[error("LoRA adapter `{lora_name}` is already loaded")]
+    #[error("LoRA adapter `{lora_name}` has already been loaded")]
     AlreadyLoaded { lora_name: String },
     #[error("LoRA adapter `{lora_name}` conflicts with a served base model")]
     BaseModelName { lora_name: String },
