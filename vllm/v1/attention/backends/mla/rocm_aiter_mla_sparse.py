@@ -1007,6 +1007,9 @@ class ROCMAiterMLASparseImpl(SparseMLACommonImpl[ROCMAiterMLASparseMetadata]):
                 )
             if not sinks.is_contiguous():
                 raise ValueError("ROCm AITER MLA sinks must be contiguous")
+            # Each rank would add the sink mass before the DCP merge.
+            if self.dcp_world_size > 1:
+                raise ValueError("DCP not supported with attention sinks")
         self.sinks: torch.Tensor | None = sinks
         super().__init__(
             num_heads,
@@ -1191,10 +1194,11 @@ class ROCMAiterMLASparseImpl(SparseMLACommonImpl[ROCMAiterMLASparseMetadata]):
             output = AiterMLAHelper.get_mla_unpadded_o(self.num_heads, output)
             return output, None
 
-        # AITER's nonpersistent return-LSE dispatch has discrete head kernels.
+        # AITER's nonpersistent dispatch (LSE or DCP ragged rows) has discrete
+        # head kernels.
         supported_head_buckets: tuple[int, ...] | None = None
         head_dtype_name = ""
-        if need_lse:
+        if need_lse or kv_indptr is not None:
             if (
                 q.dtype == torch.bfloat16
                 and kv_c_and_k_pe_cache.dtype == torch.bfloat16
@@ -1205,7 +1209,10 @@ class ROCMAiterMLASparseImpl(SparseMLACommonImpl[ROCMAiterMLASparseMetadata]):
                 q.dtype == current_platform.fp8_dtype()
                 and kv_c_and_k_pe_cache.dtype == current_platform.fp8_dtype()
             ):
-                supported_head_buckets = (16, 128)
+                # Only gfx950 has the 64-head FP8 no-LSE kernel.
+                supported_head_buckets = (
+                    (16, 128) if need_lse or on_gfx942() else (16, 64, 128)
+                )
                 head_dtype_name = "FP8"
             else:
                 raise ValueError(

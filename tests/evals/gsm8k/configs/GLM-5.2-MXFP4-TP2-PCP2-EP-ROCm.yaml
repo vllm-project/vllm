@@ -1,5 +1,6 @@
 model_name: "amd/GLM-5.2-MXFP4"
-accuracy_threshold: 0.90
+accuracy_threshold: 0.92
+tolerance: 0.02
 num_questions: 1319
 num_fewshot: 5
 max_concurrency: 100

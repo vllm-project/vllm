@@ -1461,9 +1461,25 @@ def rocm_aiter_sparse_attn_indexer(
         # VLLM_SPARSE_INDEXER_MAX_LOGITS_MB via chunking in
         # split_indexer_prefill_chunks; decode logits are smaller.
         max_logits_elems = envs.VLLM_SPARSE_INDEXER_MAX_LOGITS_MB * 1024 * 1024
-        _ = torch.empty(
+        max_logits = torch.empty(
             max_logits_elems, dtype=torch.uint8, device=hidden_states.device
         )
+        # The DCP top-k merge allocates its candidates on top of the live
+        # logits: run it at the largest row count a step can merge.
+        merge_rows = decode_rows if use_pcp else hidden_states.shape[0]
+        if dcp_world_size > 1 and topk_indices_buffer is not None and merge_rows:
+            logits = max_logits.view(torch.float32)
+            logits = logits[: logits.numel() // merge_rows * merge_rows]
+            _merge_dcp_topk_global(
+                logits.view(merge_rows, -1),
+                topk_indices_buffer[:merge_rows, :topk_tokens].fill_(-1),
+                dcp_rank,
+                dcp_world_size,
+                cp_kv_cache_interleave_size,
+                row_starts=torch.zeros(
+                    merge_rows, dtype=torch.int32, device=hidden_states.device
+                ),
+            )
 
         return rocm_aiter_sparse_attn_indexer_fake(
             hidden_states,

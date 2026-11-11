@@ -818,7 +818,7 @@ def _rocm_aiter_mla_decode_fwd_lse_impl(
                 qo_indptr.shape[0], dtype=torch.int32, device=q.device
             )
 
-    if q.dtype == FP8_DTYPE:
+    if q.dtype == FP8_DTYPE or q.shape[1] in (64, 128):
         assert kv_indices is not None
         num_kv_splits, num_kv_splits_indptr = get_meta_param(
             None,
@@ -829,9 +829,10 @@ def _rocm_aiter_mla_decode_fwd_lse_impl(
             q.dtype,
         )
         if num_kv_splits == 1:
-            # gfx942's one-split FP8 asm writes the final output directly but
-            # does not write either LSE buffer. Force the normal split reducer,
-            # which produces both the same output and an accurate natural LSE.
+            # gfx942's one-split FP8 asm and the BF16 64/128-head one
+            # (ROCm/aiter#6971) write the final output directly but not the
+            # LSE. Force the normal split reducer, which produces both the
+            # same output and an accurate natural LSE.
             num_kv_splits = 2
             num_kv_splits_indptr = torch.arange(
                 0,

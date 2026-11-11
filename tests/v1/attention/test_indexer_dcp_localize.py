@@ -1,6 +1,8 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 
+from types import SimpleNamespace
+
 import numpy as np
 import pytest
 import torch
@@ -9,6 +11,7 @@ import vllm.model_executor.layers.sparse_attn_indexer as sparse_indexer
 from vllm.distributed.parallel_state import GroupCoordinator
 from vllm.platforms import current_platform
 from vllm.utils.import_utils import has_cutedsl
+from vllm.utils.torch_utils import set_random_seed
 from vllm.v1.attention.backends.mla.indexer import build_prefill_chunk_metadata
 from vllm.v1.attention.backends.mla.sparse_utils import (
     triton_filter_and_convert_dcp_index,
@@ -1119,3 +1122,336 @@ def test_pcp_plan_deinterleave_restores_global_order(
             restored[row_start[row] : row_start[row] + g, 0],
             torch.arange(starts[i], starts[i] + g, dtype=torch.float32),
         )
+
+
+def _stable_topk_ids(scores: torch.Tensor, topk: int) -> torch.Tensor:
+    """Highest score first; a tie keeps the lower position."""
+    n = scores.shape[0]
+    key = -scores.double() * (2 * n) + torch.arange(
+        n, device=scores.device, dtype=torch.float64
+    )
+    return key.argsort()[: min(topk, n)]
+
+
+def _merge_rocm_dcp_topk(monkeypatch, local_logits, local_topks, row_starts, world, il):
+    """Run every rank's ROCm `_merge_dcp_topk_global` against one all-gather.
+    A first pass records what each rank sends."""
+    from vllm.v1.attention.ops import rocm_aiter_mla_sparse as rocm_ops
+
+    sent: list[torch.Tensor] = []
+
+    class _RecordingGroup(_FakeDCPGroup):
+        def all_gather(self, input_: torch.Tensor, dim: int = -1) -> torch.Tensor:
+            sent.append(input_.clone())
+            return input_.repeat(world, 1)
+
+    def run(group: _FakeDCPGroup) -> list[torch.Tensor]:
+        monkeypatch.setattr(rocm_ops, "get_dcp_group", lambda: group)
+        merged = []
+        for rank in range(world):
+            indices = local_topks[rank].clone()
+            rocm_ops._merge_dcp_topk_global(
+                local_logits[rank], indices, rank, world, il, row_starts[rank]
+            )
+            merged.append(indices)
+        return merged
+
+    run(_RecordingGroup(torch.empty(0)))
+    return run(_FakeDCPGroup(torch.cat(sent)))
+
+
+@pytest.mark.skipif(not current_platform.is_rocm(), reason="ROCm indexer merge")
+@pytest.mark.parametrize("world", [2, 4])
+@pytest.mark.parametrize("interleave", [1, 16])
+@pytest.mark.parametrize("use_row_starts", [False, True])
+def test_rocm_dcp_topk_merge_matches_global_topk(
+    monkeypatch, world, interleave, use_row_starts
+):
+    """Every rank's merged top-k must be the global top-k, including ranks that
+    own none of a request's tokens."""
+    set_random_seed(0)
+    topk = 128
+    seq_lens = [3, 100, 3000]
+    num_rows = len(seq_lens)
+    # Integer scores make ties common, so the tie rule is tested too.
+    logits = torch.randint(-20, 20, (num_rows, max(seq_lens)), device="cuda").float()
+    shift = 5 if use_row_starts else 0
+
+    local_logits, local_topks, row_starts = [], [], []
+    for rank in range(world):
+        owned = [
+            [t for t in range(n) if (t // interleave) % world == rank] for n in seq_lens
+        ]
+        width = max(len(o) for o in owned)
+        # Row `r` reads its logits from column `r * shift`, like a prefill chunk.
+        rank_logits = torch.full(
+            (num_rows, width + shift * num_rows), 99.0, device="cuda"
+        )
+        rank_topk = torch.full((num_rows, topk), -1, dtype=torch.int32, device="cuda")
+        for row, tokens in enumerate(owned):
+            if tokens:
+                scores = logits[row, tokens]
+                rank_logits[row, row * shift : row * shift + len(tokens)] = scores
+                sel = _stable_topk_ids(scores, topk)
+                rank_topk[row, : sel.numel()] = sel.to(torch.int32)
+        local_logits.append(rank_logits)
+        local_topks.append(rank_topk)
+        row_starts.append(
+            torch.arange(num_rows, dtype=torch.int32, device="cuda") * shift
+            if use_row_starts
+            else None
+        )
+
+    merged = _merge_rocm_dcp_topk(
+        monkeypatch, local_logits, local_topks, row_starts, world, interleave
+    )
+    for row, n in enumerate(seq_lens):
+        expected = set(_stable_topk_ids(logits[row, :n], topk).tolist())
+        for rank_merged in merged:
+            got = rank_merged[row]
+            assert set(got[got >= 0].tolist()) == expected
+            assert int((got >= 0).sum()) == len(expected)
+
+
+@pytest.mark.skipif(not current_platform.is_rocm(), reason="ROCm sparse MLA")
+@pytest.mark.parametrize(
+    "kv_dtype,num_heads",
+    [("bf16", 16), ("bf16", 64), ("bf16", 128), ("fp8", 128)],
+)
+@pytest.mark.parametrize(("world", "interleave"), [(2, 16), (4, 1)])
+@torch.inference_mode()
+def test_rocm_sparse_mla_dcp_shards_merge_to_full_attention(
+    kv_dtype, num_heads, world, interleave
+):
+    """Each DCP rank attends its owned slots of the global top-k; the LSE merge
+    must equal attention over the whole selection. The 3-token request leaves
+    ranks with no keys."""
+    from vllm.v1.attention.backends.mla.rocm_aiter_mla_sparse import (
+        ROCMAiterMLASparseImpl,
+    )
+
+    set_random_seed(0)
+    nope, d = 512, 576
+    scale = d**-0.5
+    topk, block_size = 512, 64
+    seq_lens = [3, 67, 268, 1500]
+    n = len(seq_lens)
+    fp8 = kv_dtype == "fp8"
+    dtype = current_platform.fp8_dtype() if fp8 else torch.bfloat16
+
+    kv = [(torch.randn(s, d, device="cuda") * 0.5).to(dtype) for s in seq_lens]
+    q = (torch.randn(n, num_heads, d, device="cuda") * 0.5).to(dtype)
+    topk_buf = torch.full((n, topk), -1, dtype=torch.int32, device="cuda")
+    selected = []
+    for row, s in enumerate(seq_lens):
+        sel = torch.randperm(s, device="cuda")[: min(s, topk)]
+        topk_buf[row, : sel.numel()] = sel.to(torch.int32)
+        selected.append(sel)
+
+    max_blocks = -(-max(seq_lens) // block_size)
+    block_table = (
+        torch.randperm(n * max_blocks, device="cuda")
+        .to(torch.int32)
+        .view(n, max_blocks)
+    )
+    metadata = SimpleNamespace(
+        attn_out_dtype=torch.bfloat16,
+        num_prefills=0,
+        num_decodes=n,
+        num_decode_tokens=n,
+        max_query_len=1,
+        max_seq_len=max(seq_lens),
+        block_size=block_size,
+        topk_tokens=topk,
+        req_id_per_token=torch.arange(n, dtype=torch.int32, device="cuda"),
+        block_table=block_table,
+        cp_kv_cache_interleave_size=interleave,
+        qo_indptr=torch.arange(n + 1, dtype=torch.int32, device="cuda"),
+        paged_kv_last_page_len=torch.ones(n, dtype=torch.int32, device="cuda"),
+        pcp_dcp_prefill_chunks=None,
+    )
+    one = torch.ones((), device="cuda")
+    layer = SimpleNamespace(_q_scale=one, _k_scale=one)
+
+    impl = object.__new__(ROCMAiterMLASparseImpl)
+    impl.num_heads = num_heads // world
+    impl.kv_lora_rank = nope
+    impl.kv_cache_dtype = "fp8" if fp8 else "auto"
+    impl.scale = scale
+    impl.sinks = None
+    impl.topk_indices_buffer = topk_buf
+    impl.dcp_world_size = world
+    impl.pcp_dcp_kv_gather = False
+
+    outs, lses = [], []
+    for rank in range(world):
+        # FP8 values are exact in BF16.
+        cache = torch.zeros(
+            n * max_blocks, block_size, d, device="cuda", dtype=torch.bfloat16
+        )
+        for row, s in enumerate(seq_lens):
+            tokens = torch.arange(s, device="cuda")
+            tokens = tokens[(tokens // interleave) % world == rank]
+            local = (tokens // (world * interleave)) * interleave + tokens % interleave
+            blocks = block_table[row, local // block_size].long()
+            cache[blocks, local % block_size] = kv[row][tokens].to(cache.dtype)
+        impl.dcp_rank = rank
+        out, lse = impl.forward_mqa(q, cache.to(dtype), metadata, layer)
+        outs.append(out.float())
+        lses.append(lse)
+    merged_out, merged_lse = _dcp_lse_merge(outs, lses)
+
+    # The FP8 kernels round the probabilities to FP8.
+    tol = 5e-2 if fp8 else 2e-2
+    for row in range(n):
+        keys = kv[row][selected[row]].float()
+        scores = q[row].float() @ keys.T * scale
+        torch.testing.assert_close(
+            merged_lse[row], scores.logsumexp(-1), atol=2e-2, rtol=0
+        )
+        torch.testing.assert_close(
+            merged_out[row], scores.softmax(-1) @ keys[:, :nope], atol=tol, rtol=tol
+        )
+
+
+@pytest.mark.skipif(not current_platform.is_rocm(), reason="ROCm sparse MLA")
+@pytest.mark.parametrize(("world", "interleave"), [(2, 16), (4, 1)])
+@torch.inference_mode()
+def test_rocm_sparse_mla_pcp_dcp_mixed_batch_matches_full_attention(
+    monkeypatch, world, interleave
+):
+    """PCP+DCP mixed batch: decode rows merge the ranks' partials by LSE, and
+    prefill rows attend the all-gather of every rank's KV shard."""
+    from vllm.v1.attention.backends.mla import rocm_aiter_mla_sparse as backend
+    from vllm.v1.attention.backends.mla.rocm_aiter_mla_sparse import (
+        ROCMAiterMLASparseImpl,
+        ROCMAiterMLASparsePCPDCPPrefillChunk,
+    )
+
+    set_random_seed(0)
+    nope, d, num_heads = 512, 576, 32
+    scale = d**-0.5
+    topk, block_size = 512, 64
+    fp8 = current_platform.fp8_dtype()
+    # Two decode requests, then two prefill requests with 3 and 2 query rows.
+    seq_lens = [5, 900, 300, 1300]
+    req_of_row = [0, 1, 2, 2, 2, 3, 3]
+    pos_of_row = [4, 899, 297, 298, 299, 1298, 1299]
+    num_decodes, n = 2, len(req_of_row)
+
+    kv = [(torch.randn(s, d, device="cuda") * 0.5).to(fp8) for s in seq_lens]
+    q = (torch.randn(n, num_heads, d, device="cuda") * 0.5).to(fp8)
+    topk_buf = torch.full((n, topk), -1, dtype=torch.int32, device="cuda")
+    selected = []
+    for row, pos in enumerate(pos_of_row):
+        sel = torch.randperm(pos + 1, device="cuda")[: min(pos + 1, topk)]
+        topk_buf[row, : sel.numel()] = sel.to(torch.int32)
+        selected.append(sel)
+
+    max_blocks = -(-max(seq_lens) // block_size)
+    block_table = (
+        torch.randperm(len(seq_lens) * max_blocks, device="cuda")
+        .to(torch.int32)
+        .view(len(seq_lens), max_blocks)
+    )
+    shard_rows = [-(-s // (world * interleave)) * interleave for s in seq_lens[2:]]
+    chunk = ROCMAiterMLASparsePCPDCPPrefillChunk(
+        tokens=slice(num_decodes, n),
+        block_table=block_table[2:],
+        cu_shard_rows=torch.tensor(
+            [0, shard_rows[0], sum(shard_rows)], dtype=torch.int32, device="cuda"
+        ),
+        entry_ids=torch.tensor([0, 0, 0, 1, 1], dtype=torch.int32, device="cuda"),
+        shard_rows=sum(shard_rows),
+    )
+    metadata = SimpleNamespace(
+        attn_out_dtype=torch.bfloat16,
+        num_prefills=2,
+        num_decodes=num_decodes,
+        num_decode_tokens=num_decodes,
+        max_query_len=3,
+        max_seq_len=max(seq_lens),
+        block_size=block_size,
+        topk_tokens=topk,
+        req_id_per_token=torch.tensor(req_of_row, dtype=torch.int32, device="cuda"),
+        block_table=block_table,
+        cp_kv_cache_interleave_size=interleave,
+        qo_indptr=torch.arange(n + 1, dtype=torch.int32, device="cuda"),
+        paged_kv_last_page_len=torch.ones(n, dtype=torch.int32, device="cuda"),
+        work_meta_data=None,
+        pcp_dcp_prefill_chunks=[chunk],
+    )
+    one = torch.ones((), device="cuda")
+    layer = SimpleNamespace(_q_scale=one, _k_scale=one)
+
+    impl = object.__new__(ROCMAiterMLASparseImpl)
+    impl.num_heads = num_heads
+    impl.kv_lora_rank = nope
+    impl.kv_cache_dtype = "fp8"
+    impl.scale = scale
+    impl.sinks = None
+    impl.topk_indices_buffer = topk_buf
+    impl.dcp_world_size = world
+    impl.pcp_dcp_kv_gather = True
+    impl.pcp_dcp_workspace_specs = (
+        ((chunk.shard_rows, d), torch.uint8),
+        ((world * chunk.shard_rows, d), torch.uint8),
+    )
+
+    caches = []
+    for rank in range(world):
+        cache = torch.zeros(
+            block_table.numel(), block_size, d, device="cuda", dtype=torch.bfloat16
+        )
+        for req, s in enumerate(seq_lens):
+            tokens = torch.arange(s, device="cuda")
+            tokens = tokens[(tokens // interleave) % world == rank]
+            local = (tokens // (world * interleave)) * interleave + tokens % interleave
+            blocks = block_table[req, local // block_size].long()
+            cache[blocks, local % block_size] = kv[req][tokens].to(cache.dtype)
+        caches.append(cache.to(fp8))
+
+    # One process plays every rank: the first pass records each rank's KV
+    # shard, the second all-gathers them.
+    shards: list[torch.Tensor] = []
+
+    def all_gather_into_tensor(out, shard, group=None):
+        if len(shards) < world:
+            shards.append(shard.clone())
+        else:
+            out.copy_(torch.cat(shards))
+
+    monkeypatch.setattr(backend.dist, "all_gather_into_tensor", all_gather_into_tensor)
+    monkeypatch.setattr(
+        backend, "get_dcp_group", lambda: SimpleNamespace(device_group=None)
+    )
+    monkeypatch.setattr(
+        backend,
+        "current_workspace_manager",
+        lambda: SimpleNamespace(
+            get_simultaneous=lambda *specs: [
+                torch.empty(shape, dtype=dt, device="cuda") for shape, dt in specs
+            ]
+        ),
+    )
+    for rank in range(world):
+        impl.dcp_rank = rank
+        impl.forward_mqa(q, caches[rank], metadata, layer)
+
+    outs, lses = [], []
+    for rank in range(world):
+        impl.dcp_rank = rank
+        out, lse = impl.forward_mqa(q, caches[rank], metadata, layer)
+        # Only the decode rows carry an LSE for the merge.
+        assert lse is not None and lse.shape[0] == num_decodes
+        outs.append(out.float())
+        lses.append(lse)
+    decode_out, _ = _dcp_lse_merge([o[:num_decodes] for o in outs], lses)
+
+    for row in range(n):
+        keys = kv[req_of_row[row]][selected[row]].float()
+        expected = (q[row].float() @ keys.T * scale).softmax(-1) @ keys[:, :nope]
+        actual = [decode_out[row]] if row < num_decodes else [o[row] for o in outs]
+        for got in actual:
+            # The FP8 kernels round the probabilities to FP8.
+            torch.testing.assert_close(got, expected, atol=5e-2, rtol=5e-2)

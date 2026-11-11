@@ -284,6 +284,34 @@ def test_sparse_mla_sink_validation(sinks: torch.Tensor, match: str) -> None:
         )
 
 
+def test_sparse_mla_sink_rejects_dcp_on_direct_construction(monkeypatch) -> None:
+    """Models that pass the backend explicitly skip the selector's DCP check;
+    each rank would add the sink mass before the merge, counting it N times."""
+    from vllm.distributed import parallel_state
+    from vllm.v1.attention.backends.mla.rocm_aiter_mla_sparse import (
+        ROCMAiterMLASparseImpl,
+    )
+
+    monkeypatch.setattr(
+        parallel_state, "get_dcp_world_size_and_rank", lambda enabled=True: (2, 0)
+    )
+    with pytest.raises(ValueError, match="DCP not supported with attention sinks"):
+        ROCMAiterMLASparseImpl(
+            num_heads=4,
+            head_size=Q_HEAD_DIM,
+            scale=SM_SCALE,
+            num_kv_heads=1,
+            alibi_slopes=None,
+            sliding_window=None,
+            kv_cache_dtype="bfloat16",
+            logits_soft_cap=None,
+            attn_type="decoder",
+            kv_sharing_target_layer_name=None,
+            sinks=torch.zeros(4, dtype=torch.float32),
+            kv_lora_rank=V_HEAD_DIM,
+        )
+
+
 def test_sparse_mla_backend_reports_sink_support_for_current_hardware() -> None:
     from vllm.platforms.rocm import get_cdna_version
     from vllm.v1.attention.backends.mla.rocm_aiter_mla_sparse import (
