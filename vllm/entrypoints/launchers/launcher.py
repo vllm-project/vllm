@@ -3,9 +3,10 @@
 
 import asyncio
 import contextlib
+import os
 import signal
 import socket
-from collections.abc import Generator, MutableSequence
+from collections.abc import Callable, Generator, MutableSequence
 from functools import partial
 from typing import Any
 
@@ -69,6 +70,7 @@ class NoSignalServer(uvicorn.Server):
         self._accept_tasks: set[asyncio.Task] = set()
         self._connecting = 0
         self.startup_complete = asyncio.Event()
+        self.cancel_startup: Callable[[], None] = lambda: None
         self._exit_after_startup = False
 
     def request_exit(self) -> None:
@@ -77,8 +79,7 @@ class NoSignalServer(uvicorn.Server):
             self.should_exit = True
         else:
             self._exit_after_startup = True
-            if (state := getattr(self.config.app, "state", None)) is not None:
-                cancel_endpoint_plugin_startup(state)
+            self.cancel_startup()
 
     @contextlib.contextmanager
     def capture_signals(self) -> Generator[None, None, None]:
@@ -253,8 +254,8 @@ async def serve_http(
     config.h11_max_header_count = h11_max_header_count
     config.load()
     server = NoSignalServer(config, peer_loads=peer_loads)
+    server.cancel_startup = partial(cancel_endpoint_plugin_startup, app.state)
     app.state.server = server
-    app_state = app.state
 
     loop = asyncio.get_running_loop()
 
@@ -269,6 +270,21 @@ async def serve_http(
     app.state.request_shutdown = request_shutdown
 
     engine_client = app.state.engine_client
+    engine_stopped = False
+
+    def handle_signal(signum: int) -> None:
+        if not shutdown_event.is_set() or not engine_stopped:
+            request_shutdown()
+            return
+        # The engine has stopped, so only HTTP and plugin cleanup remain. A
+        # repeated signal must not wait for a hook that never returns.
+        logger.warning(
+            "[shutdown] API server: received %s during cleanup; exiting",
+            signal.Signals(signum).name,
+        )
+        signal.signal(signum, signal.SIG_DFL)
+        os.kill(os.getpid(), signum)
+
     watchdog_task = (
         loop.create_task(watchdog_loop(server, engine_client))
         if engine_client is not None
@@ -291,6 +307,7 @@ async def serve_http(
         pass
 
     async def handle_shutdown() -> None:
+        nonlocal engine_stopped
         await shutdown_event.wait()
 
         if engine_client is not None:
@@ -308,7 +325,8 @@ async def serve_http(
             )
             logger.info_once("[shutdown] API server: engine client stopped")
 
-        cancel_endpoint_plugin_startup(app_state)
+        engine_stopped = True
+        server.cancel_startup()
         # Finish binding before requesting exit: older Uvicorn otherwise skips
         # shutdown, and cancelling create_server can orphan its listener.
         await server.startup_complete.wait()
@@ -320,8 +338,8 @@ async def serve_http(
 
     shutdown_task = None
     try:
-        loop.add_signal_handler(signal.SIGINT, request_shutdown)
-        loop.add_signal_handler(signal.SIGTERM, request_shutdown)
+        loop.add_signal_handler(signal.SIGINT, handle_signal, signal.SIGINT)
+        loop.add_signal_handler(signal.SIGTERM, handle_signal, signal.SIGTERM)
         shutdown_task = loop.create_task(handle_shutdown())
 
         await server_task

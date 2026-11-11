@@ -14,7 +14,6 @@ steps:
   - tests/plugins_tests/test_endpoint_plugins.py
   - vllm/entrypoints/launchers/launcher.py
   - vllm/entrypoints/launchers/utils/server_utils.py
-  - docs/design/endpoint_plugins.md
   # Import-time platform resolution (see test_import_vllm_does_not_resolve_platform)
   - vllm/__init__.py
   - vllm/env_override.py
@@ -75,7 +74,6 @@ steps:
       - tests/plugins_tests/test_endpoint_plugins.py
       - vllm/entrypoints/launchers/launcher.py
       - vllm/entrypoints/launchers/utils/server_utils.py
-      - docs/design/endpoint_plugins.md
       - vllm/platforms/rocm.py
       - vllm/__init__.py
       - vllm/env_override.py
