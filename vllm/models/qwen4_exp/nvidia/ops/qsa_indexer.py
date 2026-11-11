@@ -5,6 +5,8 @@
 import torch
 
 import vllm.envs as envs
+from vllm.model_executor.layers.canonical_topk import canonicalize_topk_
+from vllm.model_executor.layers.indexer_topk import deterministic_sparse_topk
 from vllm.model_executor.warmup.jit_warmup_triton_helper import (
     TritonWarmupTensor,
 )
@@ -504,6 +506,8 @@ def _topk(
         block_topk,
         logits.shape[1],
     )
+    if deterministic_sparse_topk():
+        canonicalize_topk_(logits, block_indices, visible_blocks)
 
 
 def qsa_select_paged_decode(
