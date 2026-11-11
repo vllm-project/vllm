@@ -160,4 +160,6 @@ class IndexerRefresh:
             index_rope_interleave=attn._index_rope_interleave,
             quantize_mqa=attn._fp8_kv,
         )
-        attn._run_indexer(q_c, index_q_fp8, index_weights_out)
+        # index_k_out: only prefill context parallel (refused here) hands the indexer
+        # the index-K rows; otherwise it reads them from the cache written above
+        attn._run_indexer(q_c, index_q_fp8, None, index_weights_out)

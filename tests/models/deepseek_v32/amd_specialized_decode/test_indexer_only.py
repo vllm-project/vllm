@@ -101,8 +101,8 @@ def make_attn(noise=0.0, raises=False):
         num_local_heads=2,
         _q_scale=None,
         _fp8_kv=False,
-        _run_indexer=lambda q_c, iq, iw: CALLS.append(
-            ("run", q_c.clone(), iq.clone(), iw.clone())
+        _run_indexer=lambda q_c, iq, ik, iw: CALLS.append(
+            ("run", q_c.clone(), iq.clone(), iw.clone(), ik)
         ),
     )
 
@@ -127,8 +127,9 @@ def test_trim_keeps_indexer_inputs():
     # q_c into fused_norm_rope, index_k, index_q and the _run_indexer args are equal
     assert torch.equal(base[0][1], t1[0][1]) and torch.equal(base[0][2], t1[0][2])
     assert torch.equal(base[1][5], t1[1][5])
-    assert all(torch.equal(a, b) for a, b in zip(base[2][1:], t1[2][1:]))
+    assert all(torch.equal(a, b) for a, b in zip(base[2][1:4], t1[2][1:4]))
     assert base[0][5] is None and t1[0][5] is None  # the MLA write stays disabled
+    assert base[2][4] is None and t1[2][4] is None  # no PCP index-K rows
     # persistent dummies: the same zero-filled buffers on every call
     assert t1[1][1] == t2[1][1] and t1[1][2] == t2[1][2] and t1[1][3] and t1[1][4]
     assert trimmed.q_slice_ok == {4: True}
