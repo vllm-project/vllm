@@ -55,6 +55,34 @@ void paged_attention(
     torch::Tensor& v_scale, const std::optional<torch::Tensor>& fp8_out_scale,
     const std::string& mfma_type, bool use_interleaved_v_cache);
 
+void fused_norm_rope_attn_rope_cast_fwd_rocm(
+    const at::Tensor& q, const at::Tensor& kv, const at::Tensor& indices,
+    const std::optional<at::Tensor>& topk_length,
+    const std::optional<at::Tensor>& attn_sink, double sm_scale,
+    const at::Tensor& positions, const at::Tensor& cos_sin_cache,
+    bool enable_q_norm, double rms_norm_eps, bool apply_q_rope, at::Tensor& out,
+    at::Tensor& out_scale);
+
+void fused_norm_rope_attn_rope_cast_decode_rocm(
+    const at::Tensor& q, const at::Tensor& main_cache,
+    const at::Tensor& main_indices, const at::Tensor& main_indptr,
+    const std::optional<at::Tensor>& extra_cache,
+    const std::optional<at::Tensor>& extra_indices,
+    const std::optional<at::Tensor>& extra_indptr,
+    const std::optional<at::Tensor>& attn_sink, double sm_scale,
+    const at::Tensor& positions, const at::Tensor& cos_sin_cache,
+    bool main_use_fnuz, at::Tensor& out, at::Tensor& out_scale);
+
+void fused_norm_rope_attn_rope_cast_prefill_rocm(
+    const at::Tensor& q, const at::Tensor& main_cache,
+    const at::Tensor& main_table, const std::optional<at::Tensor>& extra_cache,
+    const std::optional<at::Tensor>& extra_table, const at::Tensor& topk,
+    const at::Tensor& query_start_loc, const at::Tensor& seq_lens,
+    const at::Tensor& gather_lens, int64_t window_size, int64_t compress_ratio,
+    const std::optional<at::Tensor>& attn_sink, double sm_scale,
+    const at::Tensor& positions, const at::Tensor& cos_sin_cache,
+    bool main_use_fnuz, at::Tensor& out, at::Tensor& out_scale);
+
 // RDNA3.5 only: Fused Gated Delta Net prefill kernel.
 // Mutates `out` and `final_state` in place.
 void rdna35_gdn_chunked(torch::Tensor& q, torch::Tensor& k, torch::Tensor& v,
