@@ -702,6 +702,7 @@ class RocmPlatform(Platform):
         "fp8_per_block",
         "fp8_per_channel",
         "mxfp4_hadamard32",
+        "lut_b_moe",
         "online",
         "gpt_oss_mxfp4",
     ]
