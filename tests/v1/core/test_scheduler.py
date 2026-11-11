@@ -2941,11 +2941,12 @@ def test_scheduled_k_absent_when_requests_are_held_but_not_scheduled():
 
 
 def test_scheduled_k_sizes_drafts_verified_in_the_next_step():
-    """The K a step selects is the draft length proposed in that step.
+    """Drafts proposed in a step are verified in the next step.
 
-    Those drafts are verified in the next step, so the spec decode stats for
-    them land one step later, whatever K that step selects. A step that selects
-    K=0 proposes no drafts, so the step after it verifies none.
+    Here each step proposes as many drafts per request as the K it selects, so
+    the spec decode stats for them land one step later, whatever K that step
+    selects. A step that selects K=0 proposes no drafts, so the step after it
+    verifies none.
     """
     scheduler = create_scheduler(
         num_speculative_tokens=3,
