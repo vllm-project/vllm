@@ -6479,6 +6479,42 @@ def test_swa_reachable_block_mask_pins_shared_prefix():
     assert retained(0, 0, block_size) == {14}
 
 
+def test_swa_extra_tail_blocks_adds_one_at_reachable_boundary():
+    """`extra_tail_blocks` must add exactly one block at a reachable boundary,
+    not stack with the EAGLE alignment-unit widening."""
+    from vllm.v1.core.single_type_kv_cache_manager import SlidingWindowManager
+
+    block_size = 16
+    spec = SlidingWindowSpec(
+        block_size=block_size,
+        num_kv_heads=1,
+        head_size=1,
+        dtype=torch.float32,
+        sliding_window=4 * block_size,
+    )
+    alignment_tokens = 2 * block_size
+    boundary_tokens = 8 * block_size
+
+    def retained(extra_tail_blocks: int) -> set[int]:
+        mask = SlidingWindowManager.reachable_block_mask(
+            start_block=0,
+            end_block=16,
+            alignment_tokens=alignment_tokens,
+            kv_cache_spec=spec,
+            use_eagle=True,
+            retention_interval=0,
+            reachable_boundaries=[boundary_tokens],
+            extra_tail_blocks=extra_tail_blocks,
+        )
+        assert mask is not None
+        return {i for i, value in enumerate(mask) if value}
+
+    base = retained(0)
+    extra = retained(1)
+    assert len(extra) == len(base) + 1
+    assert extra - base == {min(base) - 1}
+
+
 def test_swa_lookahead_tail_keeps_window_of_best_hit():
     """Lookahead block hashes make the last shared block request-specific: its hash
     covers the tokens past the shared prefix, so two siblings that diverge there
