@@ -377,6 +377,31 @@ def maybe_convert_int(value: str | None) -> int | None:
     return int(value)
 
 
+_TRUE_ENV_VALUES = frozenset({"1", "true", "yes", "on"})
+_FALSE_ENV_VALUES = frozenset({"0", "false", "no", "off"})
+
+
+def get_bool_env(name: str, default: bool) -> bool:
+    """Parse boolean environment variable ``name``.
+
+    Accepts 1/0, true/false, yes/no, on/off (case-insensitive, surrounding
+    whitespace ignored). Unset or empty returns ``default``. Any other value
+    raises ValueError naming the variable, instead of being silently misread.
+    """
+    raw = os.environ.get(name)
+    if raw is None or raw.strip() == "":
+        return default
+    value = raw.strip().lower()
+    if value in _TRUE_ENV_VALUES:
+        return True
+    if value in _FALSE_ENV_VALUES:
+        return False
+    raise ValueError(
+        f"Invalid boolean value {raw!r} for environment variable {name}. "
+        "Expected one of: 1, 0, true, false, yes, no, on, off."
+    )
+
+
 def maybe_convert_bool(value: str | None) -> bool | None:
     if value is None:
         return None
@@ -393,7 +418,7 @@ def maybe_convert_json_str_or_file(value: str | None) -> dict[str, Any] | None:
 
 
 def disable_compile_cache() -> bool:
-    return bool(int(os.getenv("VLLM_DISABLE_COMPILE_CACHE", "0")))
+    return get_bool_env("VLLM_DISABLE_COMPILE_CACHE", False)
 
 
 def use_aot_compile() -> bool:
@@ -620,8 +645,8 @@ def _resolve_rust_cli_path() -> str | None:
     When enabled, resolves VLLM_RUST_FRONTEND_PATH ("auto" by default)
     to the actual binary path.
     """
-    use_rust = bool(int(os.environ.get("VLLM_USE_RUST_FRONTEND", "0"))) or bool(
-        int(os.environ.get("VLLM_USE_RUST_BENCH", "0"))
+    use_rust = get_bool_env("VLLM_USE_RUST_FRONTEND", False) or get_bool_env(
+        "VLLM_USE_RUST_BENCH", False
     )
     raw = os.environ.get("VLLM_RUST_FRONTEND_PATH", "auto")
 
@@ -677,7 +702,7 @@ environment_variables: dict[str, Callable[[], Any]] = {
     ),
     # Enable batch-invariant mode: deterministic results regardless of
     # batch composition. Requires NVIDIA GPU with compute capability >= 9.0.
-    "VLLM_BATCH_INVARIANT": lambda: bool(int(os.getenv("VLLM_BATCH_INVARIANT", "0"))),
+    "VLLM_BATCH_INVARIANT": lambda: get_bool_env("VLLM_BATCH_INVARIANT", False),
     "VLLM_REPLICATE_EMBED": lambda: (
         os.getenv("VLLM_REPLICATE_EMBED", "0").strip().lower() in ("1", "true")
     ),
@@ -738,7 +763,7 @@ environment_variables: dict[str, Callable[[], Any]] = {
         "CMAKE_BUILD_TYPE", None, ["Debug", "Release", "RelWithDebInfo"]
     ),
     # If set, vllm will print verbose logs during installation
-    "VERBOSE": lambda: bool(int(os.getenv("VERBOSE", "0"))),
+    "VERBOSE": lambda: get_bool_env("VERBOSE", False),
     # Root directory for vLLM configuration files
     # Defaults to `~/.config/vllm` unless `XDG_CONFIG_HOME` is set
     # Note that this not only affects how vllm finds its configuration files
@@ -783,7 +808,7 @@ environment_variables: dict[str, Callable[[], Any]] = {
     # Applies to any tokenizer mode that loads an HF fast tokenizer
     # (`hf`, `deepseek_v32`, `deepseek_v4`, …). The `fastokens`
     # Python package (>= 0.3.5) must be installed.
-    "VLLM_USE_FASTOKENS": lambda: bool(int(os.getenv("VLLM_USE_FASTOKENS", "0"))),
+    "VLLM_USE_FASTOKENS": lambda: get_bool_env("VLLM_USE_FASTOKENS", False),
     # Interval in seconds to log a warning message when the ring buffer is full
     "VLLM_RINGBUFFER_WARNING_INTERVAL": lambda: int(
         os.environ.get("VLLM_RINGBUFFER_WARNING_INTERVAL", "60")
@@ -958,7 +983,7 @@ environment_variables: dict[str, Callable[[], Any]] = {
         else None
     ),
     # (CPU backend only) whether vLLM is running in a CI environment.
-    "VLLM_CPU_CI_ENV": lambda: bool(int(os.getenv("VLLM_CPU_CI_ENV", "0"))),
+    "VLLM_CPU_CI_ENV": lambda: get_bool_env("VLLM_CPU_CI_ENV", False),
     # (CPU backend only) whether to enable attention spilt KV.
     "VLLM_CPU_ATTN_SPLIT_KV": lambda: bool(
         int(os.getenv("VLLM_CPU_ATTN_SPLIT_KV", "1"))
@@ -970,7 +995,7 @@ environment_variables: dict[str, Callable[[], Any]] = {
     ),
     # (CPU backend only) whether to use SGLang INT4 W4A8 kernels for AWQ, and on
     # Zen CPUs zentorch DA8W4 kernels for int4, and DA8W8 for grouped int8 MoE.
-    "VLLM_CPU_INT4_W4A8": lambda: bool(int(os.getenv("VLLM_CPU_INT4_W4A8", "1"))),
+    "VLLM_CPU_INT4_W4A8": lambda: get_bool_env("VLLM_CPU_INT4_W4A8", True),
     # Using a flag to control microbatch on XPU device, users on XPU device can
     # decide to disable it when they needed.
     "VLLM_XPU_PP_MICROBATCH": lambda: bool(
@@ -1137,7 +1162,7 @@ environment_variables: dict[str, Callable[[], Any]] = {
         int(os.getenv("VLLM_XLA_CHECK_RECOMPILATION", "0"))
     ),
     # Enable SPMD mode for TPU backend.
-    "VLLM_XLA_USE_SPMD": lambda: bool(int(os.getenv("VLLM_XLA_USE_SPMD", "0"))),
+    "VLLM_XLA_USE_SPMD": lambda: get_bool_env("VLLM_XLA_USE_SPMD", False),
     # Use the single-launch fused FP8 MQA-logits + top-k kernel for the sparse
     # MLA indexer prefill chunks it supports on SM100-family GPUs (see
     # use_fused_mqa_topk / fused_mqa_topk_chunk); other chunks take the dense
@@ -1247,7 +1272,7 @@ environment_variables: dict[str, Callable[[], Any]] = {
         "VLLM_LORA_RESOLVER_HF_REPO_LIST", None
     ),
     # If set, vLLM will use Triton implementations of AWQ.
-    "VLLM_USE_TRITON_AWQ": lambda: bool(int(os.getenv("VLLM_USE_TRITON_AWQ", "0"))),
+    "VLLM_USE_TRITON_AWQ": lambda: get_bool_env("VLLM_USE_TRITON_AWQ", False),
     # If set, monkey-patch triton.runtime.autotuner.Autotuner.run to skip
     # benchmarking and select the first valid config (walking past invalid
     # ones). Used to eliminate autotuning variability when measuring kernel
@@ -1463,9 +1488,9 @@ environment_variables: dict[str, Callable[[], Any]] = {
         os.getenv("VLLM_ROCM_USE_SKINNY_GEMM", "True").lower() in ("true", "1")
     ),
     # Pad the fp8 weights to 256 bytes for ROCm
-    "VLLM_ROCM_FP8_PADDING": lambda: bool(int(os.getenv("VLLM_ROCM_FP8_PADDING", "1"))),
+    "VLLM_ROCM_FP8_PADDING": lambda: get_bool_env("VLLM_ROCM_FP8_PADDING", True),
     # Pad the weights for the moe kernel
-    "VLLM_ROCM_MOE_PADDING": lambda: bool(int(os.getenv("VLLM_ROCM_MOE_PADDING", "1"))),
+    "VLLM_ROCM_MOE_PADDING": lambda: get_bool_env("VLLM_ROCM_MOE_PADDING", True),
     # Whether to use the shuffled kv cache layout
     "VLLM_ROCM_SHUFFLE_KV_CACHE_LAYOUT": lambda: (
         os.getenv("VLLM_ROCM_SHUFFLE_KV_CACHE_LAYOUT", "False").lower() in ("true", "1")
@@ -1526,14 +1551,14 @@ environment_variables: dict[str, Callable[[], Any]] = {
     "VLLM_DISABLE_COMPILE_CACHE": disable_compile_cache,
     # If set to "0", disable LayerName opaque type for layer_name
     # parameters in custom ops.  Defaults to enabled on torch >= 2.11.
-    "VLLM_USE_LAYERNAME": lambda: bool(int(os.getenv("VLLM_USE_LAYERNAME", "1"))),
+    "VLLM_USE_LAYERNAME": lambda: get_bool_env("VLLM_USE_LAYERNAME", True),
     # If set, use the Rust frontend binary instead of the Python API server
     # process(es).
     "VLLM_USE_RUST_FRONTEND": lambda: bool(
         int(os.getenv("VLLM_USE_RUST_FRONTEND", "0"))
     ),
     # If set, use the packaged Rust client for `vllm bench serve`.
-    "VLLM_USE_RUST_BENCH": lambda: bool(int(os.getenv("VLLM_USE_RUST_BENCH", "0"))),
+    "VLLM_USE_RUST_BENCH": lambda: get_bool_env("VLLM_USE_RUST_BENCH", False),
     # Path to the vllm-rs binary. Defaults to "auto" which discovers the
     # binary installed with the vllm package. Used when VLLM_USE_RUST_FRONTEND=1
     # or VLLM_USE_RUST_BENCH=1.
@@ -1541,7 +1566,7 @@ environment_variables: dict[str, Callable[[], Any]] = {
     # If set, vllm will run in development mode, which will enable
     # some additional endpoints for developing and debugging,
     # e.g. `/reset_prefix_cache`, and default `--enable-scale-out` to on
-    "VLLM_SERVER_DEV_MODE": lambda: bool(int(os.getenv("VLLM_SERVER_DEV_MODE", "0"))),
+    "VLLM_SERVER_DEV_MODE": lambda: get_bool_env("VLLM_SERVER_DEV_MODE", False),
     # Controls the maximum number of requests to handle in a
     # single asyncio task when processing per-token outputs in the
     # V1 AsyncLLM interface. It is applicable when handling a high
@@ -1553,7 +1578,7 @@ environment_variables: dict[str, Callable[[], Any]] = {
         os.getenv("VLLM_V1_OUTPUT_PROC_CHUNK_SIZE", "128")
     ),
     # If set, vLLM will disable the MLA attention optimizations.
-    "VLLM_MLA_DISABLE": lambda: bool(int(os.getenv("VLLM_MLA_DISABLE", "0"))),
+    "VLLM_MLA_DISABLE": lambda: get_bool_env("VLLM_MLA_DISABLE", False),
     # Number of GPUs per worker in Ray, if it is set to be a fraction,
     # it allows ray to schedule multiple actors on a single GPU,
     # so that users can colocate other actors on the same GPUs as vLLM.
@@ -1668,7 +1693,7 @@ environment_variables: dict[str, Callable[[], Any]] = {
         "proxy" in os.getenv("JAX_PLATFORMS", "").lower()
     ),
     # Allow use of DeepGemm kernels for fused moe ops.
-    "VLLM_USE_DEEP_GEMM": lambda: bool(int(os.getenv("VLLM_USE_DEEP_GEMM", "1"))),
+    "VLLM_USE_DEEP_GEMM": lambda: get_bool_env("VLLM_USE_DEEP_GEMM", True),
     # Allow use of DeepGemm specifically for MoE fused ops (overrides only MoE).
     "VLLM_MOE_USE_DEEP_GEMM": lambda: bool(
         int(os.getenv("VLLM_MOE_USE_DEEP_GEMM", "1"))
@@ -1682,7 +1707,7 @@ environment_variables: dict[str, Callable[[], Any]] = {
         int(os.getenv("VLLM_USE_DEEP_GEMM_TMA_ALIGNED_SCALES", "1"))
     ),
     # Opt-in MLA DCP query replication: skip the decode query all-gather.
-    "VLLM_DCP_Q_REPLICATE": lambda: bool(int(os.getenv("VLLM_DCP_Q_REPLICATE", "0"))),
+    "VLLM_DCP_Q_REPLICATE": lambda: get_bool_env("VLLM_DCP_Q_REPLICATE", False),
     # DeepGemm JITs the kernels on-demand. The warmup attempts to make DeepGemm
     # JIT all the required kernels before model execution so there is no
     # JIT'ing in the hot-path. However, this warmup increases the engine
@@ -1713,7 +1738,7 @@ environment_variables: dict[str, Callable[[], Any]] = {
     # fuse this into routing; the existing backend opt-in is still required.
     # Under DP, TRT-LLM block-FP8/MXFP8 monolithic MoE then takes vLLM's
     # routing instead of routing from logits; 0 restores the kernel's routing.
-    "VLLM_MOE_SKIP_PADDING": lambda: bool(int(os.getenv("VLLM_MOE_SKIP_PADDING", "1"))),
+    "VLLM_MOE_SKIP_PADDING": lambda: get_bool_env("VLLM_MOE_SKIP_PADDING", True),
     # Step5 SP dense/shared MLPs: opt into TP-sharded weights with AG/RS
     # instead of replicated weights and local-token computation.
     "VLLM_STEP5_SHARD_SP_SHARED_EXPERT": lambda: bool(
@@ -1740,12 +1765,12 @@ environment_variables: dict[str, Callable[[], Any]] = {
     ),
     # Use the SM100 BF16 GEMM-AR kernel for eligible Kimi-K3 row-parallel
     # attention projections. All TP ranks must belong to one NVLink domain.
-    "VLLM_KIMI_K3_GEMM_AR": lambda: bool(int(os.getenv("VLLM_KIMI_K3_GEMM_AR", "1"))),
+    "VLLM_KIMI_K3_GEMM_AR": lambda: get_bool_env("VLLM_KIMI_K3_GEMM_AR", True),
     # Fuse eligible sequence-parallel row-parallel projections with their TP
     # reduce-scatter using the SM100 BF16/MXFP8 GEMM-RS kernel (Kimi-K3
     # attention/shared-expert projections, DeepSeek-V4.1 ``wo_b``). All TP
     # ranks must belong to one NVLink domain.
-    "VLLM_ENABLE_GEMM_RS": lambda: bool(int(os.getenv("VLLM_ENABLE_GEMM_RS", "0"))),
+    "VLLM_ENABLE_GEMM_RS": lambda: get_bool_env("VLLM_ENABLE_GEMM_RS", False),
     # Allow use of FlashInfer FP8 block-scale GEMM for linear layers.
     # This uses TensorRT-LLM kernels and requires SM90+ (Hopper).
     "VLLM_BLOCKSCALE_FP8_GEMM_FLASHINFER": lambda: bool(
@@ -2212,7 +2237,7 @@ environment_variables: dict[str, Callable[[], Any]] = {
     "VLLM_GC_DEBUG": lambda: os.getenv("VLLM_GC_DEBUG", ""),
     # Debug workspace allocations.
     # logging of workspace resize operations.
-    "VLLM_DEBUG_WORKSPACE": lambda: bool(int(os.getenv("VLLM_DEBUG_WORKSPACE", "0"))),
+    "VLLM_DEBUG_WORKSPACE": lambda: get_bool_env("VLLM_DEBUG_WORKSPACE", False),
     # Disables parallel execution of shared_experts via separate cuda stream
     "VLLM_DISABLE_SHARED_EXPERTS_STREAM": lambda: bool(
         int(os.getenv("VLLM_DISABLE_SHARED_EXPERTS_STREAM", "0"))
@@ -2312,10 +2337,10 @@ environment_variables: dict[str, Callable[[], Any]] = {
         int(os.getenv("VLLM_WSL2_ENABLE_PIN_MEMORY", "0"))
     ),
     # Disable logging of vLLM logo at server startup time.
-    "VLLM_DISABLE_LOG_LOGO": lambda: bool(int(os.getenv("VLLM_DISABLE_LOG_LOGO", "0"))),
+    "VLLM_DISABLE_LOG_LOGO": lambda: get_bool_env("VLLM_DISABLE_LOG_LOGO", False),
     # Disable PDL for LoRA, as enabling PDL with LoRA on SM100 causes
     # Triton compilation to fail.
-    "VLLM_LORA_DISABLE_PDL": lambda: bool(int(os.getenv("VLLM_LORA_DISABLE_PDL", "0"))),
+    "VLLM_LORA_DISABLE_PDL": lambda: get_bool_env("VLLM_LORA_DISABLE_PDL", False),
     # Enable CUDA compatibility mode for datacenter GPUs with older
     # driver versions than the CUDA toolkit major version of vLLM.
     "VLLM_ENABLE_CUDA_COMPATIBILITY": lambda: (
@@ -2390,7 +2415,7 @@ environment_variables: dict[str, Callable[[], Any]] = {
     ),
     # If set to 1, use Python spinloop extension to poll in a more efficient
     # way when using the mp backend.
-    "VLLM_USE_SPINLOOP_EXT": lambda: bool(int(os.getenv("VLLM_USE_SPINLOOP_EXT", "0"))),
+    "VLLM_USE_SPINLOOP_EXT": lambda: get_bool_env("VLLM_USE_SPINLOOP_EXT", False),
     # Comma-separated GPU_BDF=NIC_BDF pairs for RDMA NIC selection.
     # Must be set together with VLLM_NIC_SELECTION_VARS.
     "VLLM_GPU_NIC_PCIE_MAPPING": lambda: os.getenv("VLLM_GPU_NIC_PCIE_MAPPING", ""),
@@ -2406,7 +2431,7 @@ environment_variables: dict[str, Callable[[], Any]] = {
     #     fused into gated_mla_gemm; elementwise gating only.
     # Each op additionally checks its own shape / dtype constraints and falls
     # back to the eager path when they do not hold.
-    "VLLM_ENABLE_HPC_OPS": lambda: bool(int(os.getenv("VLLM_ENABLE_HPC_OPS", "0"))),
+    "VLLM_ENABLE_HPC_OPS": lambda: get_bool_env("VLLM_ENABLE_HPC_OPS", False),
     # Whether to skip version suffix when building package
     "VLLM_SKIP_VERSION_SUFFIX": lambda: bool(
         int(os.getenv("VLLM_SKIP_VERSION_SUFFIX", "0"))
