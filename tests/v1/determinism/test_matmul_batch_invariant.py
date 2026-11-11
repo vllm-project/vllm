@@ -136,6 +136,32 @@ def test_matmul_batch_invariance_across_tuned_m_buckets(m, transpose_b):
     assert torch.equal(single_output[0], batch_output[0])
 
 
+@skip_unsupported
+@pytest.mark.parametrize(
+    "n,k", [(1152, 896), (896, 896), (9728, 896), (896, 4864), (151936, 896)]
+)
+@pytest.mark.parametrize("transpose_b", [False, True])
+def test_qwen05_matmul_rows_are_invariant_at_bucket_boundaries(n, k, transpose_b):
+    """A row must retain its bits across tuned tiles, positions, and fallback M."""
+    torch.manual_seed(42)
+    device = torch.device(DEVICE_TYPE)
+    needle = torch.randn(1, k, device=device, dtype=torch.bfloat16)
+    if transpose_b:
+        b = torch.randn(n, k, device=device, dtype=torch.bfloat16).t() * 0.02
+    else:
+        b = torch.randn(k, n, device=device, dtype=torch.bfloat16) * 0.02
+    # Qwen2.5's fused QKV projection includes a bias.
+    bias = torch.randn(n, device=device, dtype=torch.bfloat16) if n == 1152 else None
+    expected = matmul_persistent(needle, b, bias)
+    for m in (2, 7, 8, 9, 31, 32, 33, 63, 64, 65, 255, 256, 257, 1024, 2049):
+        a = torch.randn(m, k, device=device, dtype=torch.bfloat16)
+        positions = sorted({0, m // 2, m - 1})
+        a[positions] = needle
+        actual = matmul_persistent(a, b, bias)
+        for position in positions:
+            assert torch.equal(actual[position], expected[0]), (m, position, n, k)
+
+
 @pytest.fixture
 def batch_invariant_mode():
     # The overrides are process-global: remove them so later tests compare

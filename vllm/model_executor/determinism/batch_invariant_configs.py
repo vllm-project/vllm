@@ -375,6 +375,57 @@ _BATCH_INVARIANT_MATMUL_TUNED_CONFIGS: dict[
         ),
     },
     "sm120": {
+        (1152, 896): _MatmulShapeConfig(  # Qwen2.5-0.5B qkv_proj
+            block_k=64,
+            m_buckets=(
+                (8, _MatmulMConfig(16, 64, 4, 4)),
+                (32, _MatmulMConfig(32, 32, 4, 4)),
+                (64, _MatmulMConfig(64, 32, 8, 4)),
+                (256, _MatmulMConfig(64, 64, 4, 4)),
+                (2048, _MatmulMConfig(128, 128, 8, 3)),
+            ),
+        ),
+        (896, 896): _MatmulShapeConfig(  # Qwen2.5-0.5B o_proj
+            block_k=64,
+            m_buckets=(
+                (1, _MatmulMConfig(16, 64, 4, 4)),
+                (8, _MatmulMConfig(16, 32, 4, 4)),
+                (32, _MatmulMConfig(32, 32, 4, 4)),
+                (64, _MatmulMConfig(64, 32, 8, 4)),
+                (256, _MatmulMConfig(64, 64, 4, 4)),
+                (2048, _MatmulMConfig(128, 128, 8, 3)),
+            ),
+        ),
+        (9728, 896): _MatmulShapeConfig(  # Qwen2.5-0.5B gate_up_proj
+            block_k=64,
+            m_buckets=(
+                (8, _MatmulMConfig(16, 128, 8, 4)),
+                (32, _MatmulMConfig(32, 128, 4, 4)),
+                (64, _MatmulMConfig(64, 128, 4, 3)),
+                (2048, _MatmulMConfig(128, 128, 8, 3)),
+            ),
+        ),
+        (896, 4864): _MatmulShapeConfig(  # Qwen2.5-0.5B down_proj
+            block_k=64,
+            m_buckets=(
+                (1, _MatmulMConfig(16, 64, 4, 4)),
+                (8, _MatmulMConfig(16, 32, 4, 4)),
+                (32, _MatmulMConfig(32, 32, 4, 4)),
+                (64, _MatmulMConfig(64, 32, 8, 4)),
+                (256, _MatmulMConfig(64, 64, 4, 3)),
+                (2048, _MatmulMConfig(128, 128, 8, 3)),
+            ),
+        ),
+        (151936, 896): _MatmulShapeConfig(  # Qwen2.5-0.5B lm_head
+            block_k=64,
+            m_buckets=(
+                (1, _MatmulMConfig(16, 64, 4, 4)),
+                (8, _MatmulMConfig(16, 128, 4, 3)),
+                (32, _MatmulMConfig(32, 128, 4, 4)),
+                (64, _MatmulMConfig(64, 128, 4, 3)),
+                (2048, _MatmulMConfig(128, 128, 8, 3)),
+            ),
+        ),
         (12288, 2048): _MatmulShapeConfig(  # Qwen3-1.7B gate_up_proj
             block_k=64,
             m_buckets=(
