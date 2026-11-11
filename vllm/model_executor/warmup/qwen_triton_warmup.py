@@ -174,6 +174,37 @@ def _warm_gated_rms_norm_kernel(
         is_rms_norm=True,
         activation=config.norm_activation,
     )
+    from vllm.models.qwen3_5.nvidia.ops.fused_gdn_gated_norm import (
+        calc_rows_per_block,
+        fused_gdn_gated_rms_norm,
+    )
+
+    seen_rows_per_block: set[tuple[int, int]] = set()
+    hv_dim = config.hv * config.v
+    total_qkvz_dim = config.conv_dim + hv_dim
+    weight = torch.ones((config.v,), dtype=config.norm_weight_dtype, device=device)
+    for num_tokens in range(1, max_num_tokens + 1):
+        sig = (
+            0 if num_tokens == 1 else (1 if num_tokens % 16 == 0 else 2),
+            calc_rows_per_block(num_tokens, device),
+        )
+        if sig in seen_rows_per_block:
+            continue
+        seen_rows_per_block.add(sig)
+        x = torch.empty((num_tokens, hv_dim), dtype=x_dtype, device=device)
+        qkvz = torch.empty((num_tokens, total_qkvz_dim), dtype=x_dtype, device=device)
+        z = qkvz[:, config.conv_dim :]
+        fused_gdn_gated_rms_norm(
+            x=x,
+            z=z,
+            weight=weight,
+            out=x,
+            eps=1e-6,
+            num_v_heads=config.hv,
+            head_v_dim=config.v,
+            norm_before_gate=config.norm_before_gate,
+            activation=config.norm_activation,
+        )
 
 
 def _warm_causal_conv1d_fwd_kernel(
