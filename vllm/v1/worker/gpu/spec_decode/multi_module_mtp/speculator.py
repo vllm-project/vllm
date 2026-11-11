@@ -53,6 +53,10 @@ class MultiModuleMTPSpeculator(DraftModelSpeculator):
         # Cached input ids, embeddings, and target hidden states from the last
         # decode step. Used to re-prefill tokens to update stale KV cache slots
         # in later MTP modules.
+        # Valid entries occupy the right-aligned tail of each cache row.
+        self.num_cached_tokens = torch.zeros(
+            self.max_num_reqs, dtype=torch.int32, device=self.device
+        )
         self.cached_draft_input_ids = torch.zeros(
             self.max_num_reqs,
             self.num_speculative_steps - 1,
@@ -69,6 +73,9 @@ class MultiModuleMTPSpeculator(DraftModelSpeculator):
         )
 
         self.cudagraph_manager: SpeculatorCudaGraphManager | None = None
+
+    def add_request(self, req_index: int) -> None:
+        self.num_cached_tokens[req_index] = 0
 
     def load_draft_model(
         self,
@@ -351,6 +358,7 @@ class MultiModuleMTPSpeculator(DraftModelSpeculator):
             num_reqs,
             input_batch,
             self.cached_draft_input_ids,
+            self.num_cached_tokens,
             num_sampled,
             num_rejected,
             last_sampled,
@@ -388,6 +396,7 @@ class MultiModuleMTPSpeculator(DraftModelSpeculator):
             self.hidden_states,
             target_hidden_states,
             self.cached_target_hidden_states,
+            self.num_cached_tokens,
             self.inputs_embeds,
             self.cached_draft_input_embeds,
             input_batch,
@@ -423,6 +432,7 @@ class MultiModuleMTPSpeculator(DraftModelSpeculator):
             self.cached_draft_input_ids,
             self.cached_draft_input_embeds,
             self.cached_target_hidden_states,
+            self.num_cached_tokens,
             last_token_indices,
             idx_mapping,
             num_reqs,
@@ -502,6 +512,7 @@ def _prepare_input_buffers_kernel(
     next_prefill_tokens_stride0,
     num_sampled_ptr,
     num_rejected_ptr,
+    num_cached_tokens_ptr,
     target_seq_lens_ptr,
     query_start_loc_ptr,
     max_num_reqs,
@@ -521,7 +532,8 @@ def _prepare_input_buffers_kernel(
     # the last decode step that need to be re-prefilled to update the stale
     # KV cache slots in later MTP modules.
     num_rejected = tl.load(num_rejected_ptr + req_idx)
-    num_reprefill_tokens = max(0, num_rejected - 1)
+    num_cached_tokens = tl.load(num_cached_tokens_ptr + req_state_idx)
+    num_reprefill_tokens = min(max(0, num_rejected - 1), num_cached_tokens)
 
     # The rejected tokens are excluded as inputs to the draft model.
     num_input_tokens = query_len - num_rejected
@@ -626,6 +638,8 @@ def prepare_input_buffers(
     input_batch: InputBatch,
     # [max_num_reqs, num_speculative_steps - 1]
     cached_draft_input_ids: torch.Tensor,
+    # [max_num_reqs]
+    num_cached_tokens: torch.Tensor,
     # [num_reqs]
     num_sampled: torch.Tensor,
     # [num_reqs]
@@ -659,6 +673,7 @@ def prepare_input_buffers(
         next_prefill_tokens.stride(0),
         num_sampled,
         num_rejected,
+        num_cached_tokens,
         input_batch.seq_lens,
         input_buffers.query_start_loc,
         max_num_reqs,
@@ -683,6 +698,7 @@ def _prepare_input_hidden_states_and_embeddings_kernel(
     cached_draft_input_embeds_stride1,
     idx_mapping_ptr,
     num_rejected_ptr,
+    num_cached_tokens_ptr,
     query_start_loc_ptr,
     num_speculative_steps,
     hidden_size,
@@ -705,7 +721,8 @@ def _prepare_input_hidden_states_and_embeddings_kernel(
     # the last decode step that need to be re-prefilled to update the stale
     # KV cache slots in later MTP modules.
     num_rejected = tl.load(num_rejected_ptr + req_idx)
-    num_reprefill_hidden_states = max(0, num_rejected - 1)
+    num_cached_tokens = tl.load(num_cached_tokens_ptr + req_state_idx)
+    num_reprefill_hidden_states = min(max(0, num_rejected - 1), num_cached_tokens)
 
     # The rejected tokens are excluded as inputs to the draft model.
     num_input_hidden_states = query_len - num_rejected
@@ -781,6 +798,8 @@ def prepare_input_hidden_states_and_embeddings(
     target_hidden_states: torch.Tensor,
     # [max_num_reqs, num_speculative_steps - 1, hidden_size]
     cached_target_hidden_states: torch.Tensor | None,
+    # [max_num_reqs]
+    num_cached_tokens: torch.Tensor,
     # [num_tokens, hidden_size]
     input_embeds: torch.Tensor | None,
     # [max_num_reqs, num_speculative_steps - 1, hidden_size]
@@ -823,6 +842,7 @@ def prepare_input_hidden_states_and_embeddings(
         else 0,
         input_batch.idx_mapping,
         num_rejected,
+        num_cached_tokens,
         input_buffers.query_start_loc,
         num_speculative_steps,
         hidden_size,
@@ -892,6 +912,7 @@ def _cache_inputs_kernel(
     cached_target_hidden_states_stride1,
     idx_mapping_ptr,
     last_token_indices_ptr,
+    num_cached_tokens_ptr,
     query_start_loc_ptr,
     num_speculative_steps,
     hidden_size,
@@ -916,6 +937,11 @@ def _cache_inputs_kernel(
     # may be needed to re-prefill the tokens during the next decode step.
     cache_window_size = num_speculative_steps - 1
     window_start = last_token_index - cache_window_size + 1
+    if block_idx == 0:
+        num_cached_tokens = min(
+            cache_window_size, max(0, last_token_index - query_start + 1)
+        )
+        tl.store(num_cached_tokens_ptr + req_state_idx, num_cached_tokens)
     for i in range(max(window_start, query_start), last_token_index + 1):
         cache_write_slot = i - window_start
         if block_idx == 0:
@@ -967,6 +993,8 @@ def cache_inputs(
     cached_draft_input_embeds: torch.Tensor | None,
     # [max_num_reqs, num_speculative_steps - 1, hidden_size]
     cached_target_hidden_states: torch.Tensor,
+    # [max_num_reqs]
+    num_cached_tokens: torch.Tensor,
     # [num_reqs]
     last_token_indices: torch.Tensor,
     # [num_reqs]
@@ -997,6 +1025,7 @@ def cache_inputs(
         cached_target_hidden_states.stride(1),
         idx_mapping,
         last_token_indices,
+        num_cached_tokens,
         input_buffers.query_start_loc,
         num_speculative_steps,
         hidden_size,

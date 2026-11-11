@@ -1,6 +1,7 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 
+import os
 from contextlib import nullcontext
 from types import SimpleNamespace
 from unittest.mock import Mock
@@ -22,10 +23,14 @@ from vllm.v1.attention.backends.flash_attn import FlashAttentionMetadata
 from vllm.v1.attention.backends.utils import split_decodes_and_prefills
 from vllm.v1.kv_cache_interface import MLAAttentionSpec
 from vllm.v1.worker.gpu.cudagraph_utils import BatchExecutionDescriptor
+from vllm.v1.worker.gpu.input_batch import InputBatch, InputBuffers
 from vllm.v1.worker.gpu.pcp_manager import PCPManager
 from vllm.v1.worker.gpu.spec_decode import speculator as base_spec_module
 from vllm.v1.worker.gpu.spec_decode.multi_module_mtp.speculator import (
     MultiModuleMTPSpeculator,
+    cache_inputs,
+    prepare_input_buffers,
+    prepare_input_hidden_states_and_embeddings,
 )
 from vllm.v1.worker.gpu.spec_decode.speculator import DraftModelSpeculator
 from vllm.v1.worker.gpu.spec_decode.target_dependent_ar import speculator as spec_module
@@ -338,6 +343,119 @@ def test_multi_module_mm_support_configured_after_model_load(monkeypatch):
     assert speculator.inputs_embeds.shape == (4, 3)
     assert speculator.cached_draft_input_embeds is not None
     assert speculator.cached_draft_input_embeds.shape == (2, 2, 3)
+
+
+@pytest.mark.parametrize("prompt_len", [1, 2, 4])
+@pytest.mark.parametrize("num_rejected", [0, 1, 2, 4])
+@pytest.mark.parametrize("use_input_embeds", [False, True])
+def test_multi_module_mtp_reprefill_uses_only_cached_request_history(
+    prompt_len, num_rejected, use_input_embeds
+):
+    """A short request reusing a slot must never re-prefill its old occupant."""
+    device = torch.device(
+        "cpu" if os.environ.get("TRITON_INTERPRET") == "1" else "cuda"
+    )
+    steps, hidden_size, max_reqs, max_tokens, slot = 4, 8, 2, 16, 1
+    buffers = InputBuffers(max_reqs, max_tokens, device)
+    hidden_states = torch.zeros(max_tokens, hidden_size, device=device)
+    embeds = torch.zeros_like(hidden_states) if use_input_embeds else None
+    cached_ids = torch.zeros(max_reqs, steps - 1, dtype=torch.int64, device=device)
+    cached_hidden = torch.zeros(max_reqs, steps - 1, hidden_size, device=device)
+    cached_embeds = torch.zeros_like(cached_hidden) if use_input_embeds else None
+    num_cached_tokens = torch.zeros(max_reqs, dtype=torch.int32, device=device)
+    last_indices = torch.zeros(max_reqs, dtype=torch.int64, device=device)
+    overrides = torch.full((max_reqs, steps - 1), -1, device=device)
+    next_prefill = torch.zeros(steps, max_reqs, dtype=torch.int32, device=device)
+
+    def run_step(ids, position, tag, rejected, last_sampled):
+        target_buffers = InputBuffers(max_reqs, max_tokens, device)
+        batch = InputBatch.make_dummy(1, len(ids), target_buffers, is_padding=False)
+        batch.idx_mapping.fill_(slot)
+        batch.idx_mapping_np.fill(slot)
+        batch.input_ids.copy_(torch.tensor(ids, device=device))
+        batch.positions.copy_(
+            torch.arange(position, position + len(ids), device=device)
+        )
+        batch.seq_lens.fill_(position + len(ids))
+        buffers.query_start_loc.copy_(target_buffers.query_start_loc)
+        rejected = torch.tensor([rejected], dtype=torch.int32, device=device)
+        sampled = torch.ones(1, dtype=torch.int32, device=device)
+        last_sampled = torch.full((max_reqs,), last_sampled, device=device)
+        prepare_input_buffers(
+            1,
+            batch,
+            cached_ids,
+            num_cached_tokens,
+            sampled,
+            rejected,
+            last_sampled,
+            next_prefill,
+            overrides,
+            buffers,
+            last_indices,
+            max_reqs,
+            steps,
+        )
+        if embeds is not None:
+            embeds.fill_(10 * tag)
+        prepare_input_hidden_states_and_embeddings(
+            1,
+            len(ids),
+            hidden_states,
+            torch.full((len(ids), hidden_size), tag, device=device),
+            cached_hidden,
+            num_cached_tokens,
+            embeds,
+            cached_embeds,
+            batch,
+            buffers,
+            rejected,
+            steps,
+        )
+        cache_inputs(
+            buffers,
+            embeds,
+            hidden_states,
+            cached_ids,
+            cached_embeds,
+            cached_hidden,
+            num_cached_tokens,
+            last_indices[:1],
+            batch.idx_mapping,
+            1,
+            steps,
+            use_input_embeds=use_input_embeds,
+        )
+
+    run_step([9001, 9002, 9003, 9004, 9005, 9006], 0, 7.0, 0, 9007)
+    num_cached_tokens[slot] = 0
+    prompt = list(range(5000, 5000 + prompt_len))
+    run_step(prompt, 0, 3.0, 0, 5100)
+    run_step([5100, 1, 2, 3, 4], prompt_len, 3.0, num_rejected, 5200)
+
+    num_reprefill = min(max(0, num_rejected - 1), prompt_len, steps - 1)
+    history = (prompt[1:] + [5100])[-num_reprefill:] if num_reprefill else []
+    accepted = [1, 2, 3, 4][: 4 - num_rejected]
+    expected_ids = history + accepted + [5200]
+    count = len(expected_ids)
+    assert buffers.input_ids[:count].tolist() == expected_ids
+    assert last_indices[0].item() + 1 == count
+    assert buffers.positions[:count].tolist() == list(
+        range(prompt_len - num_reprefill, prompt_len + 5 - num_rejected)
+    )
+    torch.testing.assert_close(
+        hidden_states[:count],
+        torch.full_like(hidden_states[:count], 3.0),
+        rtol=0,
+        atol=0,
+    )
+    if embeds is not None:
+        torch.testing.assert_close(
+            embeds[:count],
+            torch.full_like(embeds[:count], 30.0),
+            rtol=0,
+            atol=0,
+        )
 
 
 @pytest.mark.parametrize(
