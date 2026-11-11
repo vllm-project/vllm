@@ -40,12 +40,19 @@ if TYPE_CHECKING:
 else:
     VllmConfig = None
 
-# Triton-CPU lowers the bitmask unpack in these kernels to IR quadratic in the
-# block size: ~70 s per cold compile at 8192, ~2 s at 1024, at no runtime cost.
 _TRITON_CPU_KERNEL_HEURISTICS = {
+    # Triton-CPU lowers the bitmask unpack in these kernels to IR quadratic in
+    # the block size: ~70 s per cold compile at 8192, ~2 s at 1024, at no
+    # runtime cost.
     "vllm.v1.worker.gpu.sample.penalties._penalties_kernel": {"BLOCK_SIZE": 1024},
     "vllm.v1.worker.gpu.structured_outputs._apply_grammar_bitmask_kernel": {
         "BLOCK_SIZE": 1024
+    },
+    # Smaller tiles compile and run faster on CPU.
+    "vllm.v1.sample.ops.topk_topp_triton._topk_topp_kernel": {
+        "BLOCK_SIZE": 256,
+        "BLOCK_SIZE_TRUNC": 128,
+        "num_warps": 4,
     },
 }
 
