@@ -313,9 +313,11 @@ Only deployments whose API clients are trusted should start the server with
 `--trust-request-mm-kwargs` to restore per-request overrides. Do not enable
 this option on an endpoint exposed to untrusted clients.
 
-The Rust frontend's gRPC `GenerateRequest` accepts `media_io_kwargs` without
-this option, because the [gRPC interface](#grpc-interface) serves only trusted
-callers. It supports only `video.fps`, and the per-video frame cap still applies.
+The Rust frontend's gRPC `GenerateRequest` accepts `media_io_kwargs.video.fps`
+without this option, because the [gRPC interface](#grpc-interface) serves only
+trusted callers, and the per-video frame cap still applies. Its
+`mm_processor_kwargs` and `media_io_kwargs.video.num_frames`, which can lift
+that cap, still require `--trust-request-mm-kwargs`.
 
 ### P2P KV-Offload Peer Session Limits
 

@@ -3,17 +3,21 @@
 
 //! Protobuf media adaptation into the shared multimodal preparation boundary.
 
+use std::collections::BTreeMap;
 use std::io::Cursor;
 
+use llm_multimodal::ImageDetail;
 use llm_multimodal::tracker::{MAX_SAMPLE_FPS, MIN_SAMPLE_FPS};
 use serde::Deserialize;
 use thiserror_ext::AsReport as _;
 use tonic::Status;
 use url::Url;
 use vllm_chat::MediaContentPart;
-use vllm_chat::multimodal::MultimodalInput;
+use vllm_chat::multimodal::{MediaOptions, MultimodalInput, PlacedMedia};
+use vllm_engine_core_client::protocol::dtype::{Endianness, NumpyDtype, TensorDtype};
 use vllm_engine_core_client::protocol::multimodal::{
-    MmFeatureSpec, MmKwargsItem, MmModality, PlaceholderRange,
+    MmBatchedField, MmFeatureSpec, MmField, MmFieldElem, MmFlatField, MmKwargValue, MmKwargsItem,
+    MmModality, MmSlice, PlaceholderRange, SliceSpec,
 };
 use vllm_engine_core_client::protocol::tensor::WireTensor;
 
@@ -30,45 +34,74 @@ const MAX_MSGPACK_DEPTH: usize = 32;
 /// Shared media preparation validates features, model support, item limits, and prompt bounds.
 pub(super) fn from_proto(
     media: Vec<pb::MediaItem>,
-    media_io_kwargs: Option<&prost_types::Struct>,
+    video_fps: Option<f64>,
+    ec_transfer_present: bool,
 ) -> Result<MultimodalInput, Status> {
-    let video_fps = video_fps(media_io_kwargs)?;
-    if !media
-        .iter()
-        .any(|item| matches!(item.source, Some(pb::media_item::Source::Features(_))))
-    {
+    let is_feature =
+        |item: &pb::MediaItem| matches!(item.source, Some(pb::media_item::Source::Features(_)));
+    if !media.iter().any(is_feature) {
         return raw_parts_from_proto(media, video_fps).map(MultimodalInput::Raw);
-    }
-    if video_fps.is_some() {
-        return Err(Status::invalid_argument(
-            "media_io_kwargs cannot change preprocessed media features",
-        ));
     }
     let mut encoded_bytes = 0usize;
     for item in &media {
-        let Some(pb::media_item::Source::Features(feature)) = &item.source else {
-            return Err(mixed_media_error());
-        };
-        encoded_bytes = encoded_bytes.saturating_add(feature.kwargs.as_ref().map_or(0, Vec::len));
+        match &item.source {
+            Some(pb::media_item::Source::Features(feature)) => {
+                encoded_bytes =
+                    encoded_bytes.saturating_add(feature.kwargs.as_ref().map_or(0, Vec::len));
+            }
+            _ if item.marker_offset.is_none() => return Err(mixed_media_error()),
+            _ => {}
+        }
     }
     if encoded_bytes > MAX_INLINE_MM_BYTES {
         return Err(Status::resource_exhausted(format!(
             "inline multimodal payload exceeds {MAX_INLINE_MM_BYTES} bytes"
         )));
     }
-    let features = media
-        .into_iter()
-        .enumerate()
-        .map(|(index, item)| {
-            feature_from_proto(item).map_err(|error| {
-                Status::new(error.code(), format!("media[{index}]: {}", error.message()))
-            })
-        })
-        .collect::<Result<Vec<_>, _>>()?;
-    Ok(MultimodalInput::Preprocessed(features))
+    let mut features = Vec::new();
+    let mut raw = Vec::new();
+    for (index, item) in media.into_iter().enumerate() {
+        if is_feature(&item) {
+            features.push(
+                feature_from_proto(item, ec_transfer_present).map_err(|error| {
+                    Status::new(error.code(), format!("media[{index}]: {}", error.message()))
+                })?,
+            );
+        } else {
+            let marker_offset = usize::try_from(item.marker_offset.unwrap_or_default())
+                .map_err(|_| Status::invalid_argument("marker_offset exceeds platform limits"))?;
+            raw.push(PlacedMedia {
+                part: raw_part_from_proto(index, item, video_fps)?,
+                marker_offset,
+            });
+        }
+    }
+    if raw.is_empty() {
+        Ok(MultimodalInput::Preprocessed(features))
+    } else {
+        Ok(MultimodalInput::Mixed { raw, features })
+    }
 }
 
-fn feature_from_proto(item: pb::MediaItem) -> Result<MmFeatureSpec, Status> {
+/// Request-level preprocessing options; an absent struct means none.
+pub(super) fn options_from_proto(
+    processor_kwargs: Option<prost_types::Struct>,
+    media_io: &MediaIo,
+) -> MediaOptions {
+    let processor_kwargs = match processor_kwargs.as_ref().map(proto_struct_to_json) {
+        Some(serde_json::Value::Object(kwargs)) => kwargs,
+        _ => serde_json::Map::new(),
+    };
+    MediaOptions {
+        processor_kwargs,
+        video_num_frames: media_io.num_frames,
+    }
+}
+
+fn feature_from_proto(
+    item: pb::MediaItem,
+    ec_transfer_present: bool,
+) -> Result<MmFeatureSpec, Status> {
     let modality = match item.modality() {
         pb::Modality::Image => MmModality::Image,
         pb::Modality::Video => MmModality::Video,
@@ -78,9 +111,45 @@ fn feature_from_proto(item: pb::MediaItem) -> Result<MmFeatureSpec, Status> {
     let Some(pb::media_item::Source::Features(feature)) = item.source else {
         return Err(mixed_media_error());
     };
-    let bytes = feature.kwargs.ok_or_else(|| {
-        Status::invalid_argument("features.kwargs is required; cache-only features are unsupported")
-    })?;
+    let metadata = feature.metadata;
+    let (data, identifier) = match feature.kwargs {
+        Some(bytes) => (decode_inline_mm_kwargs(&bytes)?, feature.identifier),
+        None => {
+            let has_tensors = !feature.tensors.is_empty();
+            if !ec_transfer_present && !has_tensors {
+                return Err(Status::invalid_argument(
+                    "metadata-only multimodal items require ec_transfer_params",
+                ));
+            }
+            let hash =
+                feature.mm_hash.clone().filter(|hash| !hash.is_empty()).ok_or_else(|| {
+                    Status::invalid_argument("metadata-only features require mm_hash")
+                })?;
+            let identifier = if feature.identifier.is_empty() {
+                hash
+            } else {
+                feature.identifier
+            };
+            let mut kwargs = match metadata {
+                Some(metadata) if !(has_tensors && metadata.fields.is_empty()) => {
+                    kwargs_from_metadata(&metadata)?
+                }
+                _ if has_tensors => BTreeMap::new(),
+                _ => {
+                    return Err(Status::invalid_argument(
+                        "features.kwargs is required; cache-only features are unsupported",
+                    ));
+                }
+            };
+            for (key, bytes) in &feature.tensors {
+                let field = tensor_field(key, bytes).map_err(|error| {
+                    Status::invalid_argument(format!("features.tensors.{key}: {error}"))
+                })?;
+                kwargs.insert(key.clone(), field);
+            }
+            (kwargs, identifier)
+        }
+    };
     let offset = usize::try_from(feature.offset)
         .map_err(|_| Status::invalid_argument("features.offset exceeds platform limits"))?;
     let length = usize::try_from(feature.length)
@@ -95,8 +164,8 @@ fn feature_from_proto(item: pb::MediaItem) -> Result<MmFeatureSpec, Status> {
     };
     Ok(MmFeatureSpec {
         modality,
-        data: Some(decode_inline_mm_kwargs(&bytes)?),
-        identifier: feature.identifier,
+        data: Some(data),
+        identifier,
         mm_hash: feature.mm_hash,
         mm_position: PlaceholderRange {
             offset,
@@ -104,6 +173,166 @@ fn feature_from_proto(item: pb::MediaItem) -> Result<MmFeatureSpec, Status> {
             is_embed,
         },
     })
+}
+
+/// Turn HTTP-style placeholder metadata into the keep-on-CPU kwargs the engine
+/// already accepts. Pixel tensors stay out of this path.
+fn kwargs_from_metadata(metadata: &prost_types::Struct) -> Result<MmKwargsItem, Status> {
+    if metadata.fields.is_empty() {
+        return Err(Status::invalid_argument(
+            "features.metadata must contain at least one field",
+        ));
+    }
+    let mut kwargs = BTreeMap::new();
+    for (key, value) in &metadata.fields {
+        let mut numbers = Vec::new();
+        flatten_metadata_numbers(value, &mut numbers)?;
+        if numbers.is_empty() {
+            return Err(Status::invalid_argument(format!(
+                "features.metadata.{key} must contain numbers"
+            )));
+        }
+        // Qwen mRoPE reads one feature as a 1-D `[t, h, w]`. A leading
+        // batch axis (`[1, 3]`) makes `t, h, w = grid.tolist()` fail.
+        // Several rows stay `[n, 3]` for a single item that owns n grids.
+        let shape = if key.contains("grid_thw") && numbers.len() == 3 {
+            vec![3]
+        } else if key.contains("grid_thw") && numbers.len().is_multiple_of(3) {
+            vec![numbers.len() / 3, 3]
+        } else {
+            vec![numbers.len()]
+        };
+        // Timestamps stay float even when every stamp is whole.
+        let integral =
+            !key.contains("timestamp") && numbers.iter().all(|number| number.fract() == 0.0);
+        let data = if integral {
+            let ints = numbers.into_iter().map(|number| number as i64).collect();
+            MmKwargValue::Tensor(
+                WireTensor::from_i64(shape, ints).map_err(Status::invalid_argument)?,
+            )
+        } else {
+            MmKwargValue::Tensor(
+                WireTensor::from_f32(
+                    shape,
+                    numbers.into_iter().map(|number| number as f32).collect(),
+                )
+                .map_err(Status::invalid_argument)?,
+            )
+        };
+        kwargs.insert(
+            key.clone(),
+            MmFieldElem {
+                data: Some(data),
+                field: MmField::Batched(MmBatchedField { keep_on_cpu: true }),
+            },
+        );
+    }
+    Ok(kwargs)
+}
+
+/// One `.npy` tensor as a kwarg: embeddings are flat over the item (one row
+/// per placeholder token), grids follow the metadata shape rule.
+fn tensor_field(key: &str, bytes: &[u8]) -> Result<MmFieldElem, String> {
+    let (dtype, mut shape, data) = parse_npy(bytes)?;
+    let field = if key.ends_with("_embeds") {
+        let rows = *shape.first().ok_or("embeddings need at least one dimension")?;
+        MmField::Flat(MmFlatField {
+            slices: vec![MmSlice::Slice(SliceSpec {
+                start: Some(0),
+                stop: Some(isize::try_from(rows).map_err(|_| "too many rows")?),
+                step: None,
+            })],
+            dim: 0,
+            keep_on_cpu: false,
+        })
+    } else {
+        if key.contains("grid_thw") && shape == [1, 3] {
+            shape = vec![3];
+        }
+        MmField::Batched(MmBatchedField { keep_on_cpu: true })
+    };
+    Ok(MmFieldElem {
+        data: Some(MmKwargValue::Tensor(WireTensor::from_raw(
+            dtype, shape, data,
+        ))),
+        field,
+    })
+}
+
+/// Parse a C-order little-endian NumPy `.npy` buffer (format 1.0–3.0).
+fn parse_npy(bytes: &[u8]) -> Result<(TensorDtype, Vec<usize>, Vec<u8>), String> {
+    let rest = bytes
+        .strip_prefix(b"\x93NUMPY")
+        .ok_or("not a NumPy .npy buffer; torch.save payloads are unsupported on gRPC")?;
+    let (header_len, rest) = match rest {
+        [1, _, a, b, rest @ ..] => (usize::from(u16::from_le_bytes([*a, *b])), rest),
+        [2 | 3, _, a, b, c, d, rest @ ..] => (u32::from_le_bytes([*a, *b, *c, *d]) as usize, rest),
+        _ => return Err("unsupported .npy version".to_string()),
+    };
+    if rest.len() < header_len {
+        return Err("truncated .npy header".to_string());
+    }
+    let (header, data) = rest.split_at(header_len);
+    let header = std::str::from_utf8(header).map_err(|_| "non-UTF-8 .npy header")?;
+    let value_of = |key: &str| {
+        let start = header.find(&format!("'{key}'"))? + key.len() + 2;
+        let tail = header[start..].trim_start().strip_prefix(':')?.trim_start();
+        Some(tail)
+    };
+    let descr = value_of("descr")
+        .and_then(|tail| tail.strip_prefix('\'')?.split('\'').next())
+        .ok_or(".npy header has no descr")?;
+    let dtype: NumpyDtype = descr.parse()?;
+    if dtype.endianness == Endianness::Big {
+        return Err("big-endian .npy data is unsupported".to_string());
+    }
+    if value_of("fortran_order").is_none_or(|tail| !tail.starts_with("False")) {
+        return Err("only C-order .npy data is supported".to_string());
+    }
+    let shape = value_of("shape")
+        .and_then(|tail| tail.strip_prefix('(')?.split(')').next())
+        .ok_or(".npy header has no shape")?
+        .split(',')
+        .map(str::trim)
+        .filter(|dim| !dim.is_empty())
+        .map(|dim| dim.parse::<usize>().map_err(|_| format!("bad .npy dimension {dim:?}")))
+        .collect::<Result<Vec<_>, _>>()?;
+    let expected = shape
+        .iter()
+        .try_fold(dtype.scalar.element_size(), |size, dim| {
+            size.checked_mul(*dim)
+        })
+        .ok_or(".npy shape overflows")?;
+    if data.len() != expected {
+        return Err(format!(
+            ".npy holds {} data bytes, shape needs {expected}",
+            data.len()
+        ));
+    }
+    Ok((dtype.scalar, shape, data.to_vec()))
+}
+
+fn flatten_metadata_numbers(value: &prost_types::Value, out: &mut Vec<f64>) -> Result<(), Status> {
+    match value.kind.as_ref() {
+        Some(prost_types::value::Kind::NumberValue(number)) => {
+            if !number.is_finite() {
+                return Err(Status::invalid_argument(
+                    "features.metadata numbers must be finite",
+                ));
+            }
+            out.push(*number);
+            Ok(())
+        }
+        Some(prost_types::value::Kind::ListValue(list)) => {
+            for item in &list.values {
+                flatten_metadata_numbers(item, out)?;
+            }
+            Ok(())
+        }
+        _ => Err(Status::invalid_argument(
+            "features.metadata values must be numbers or arrays of numbers",
+        )),
+    }
 }
 
 /// Decode one inline item using the engine protocol's typed serde schema.
@@ -138,11 +367,22 @@ struct MediaIoKwargs {
 struct VideoIoKwargs {
     /// Frames sampled per second.
     fps: Option<f64>,
+    /// Frame budget; a negative value keeps every frame, as in vLLM.
+    num_frames: Option<i64>,
 }
 
-fn video_fps(media_io_kwargs: Option<&prost_types::Struct>) -> Result<Option<f64>, Status> {
+/// The applied `media_io_kwargs`: `fps` goes on each raw video part,
+/// `num_frames` bounds the loader.
+#[derive(Debug, Default, PartialEq)]
+pub(super) struct MediaIo {
+    pub fps: Option<f64>,
+    /// `0` keeps every frame.
+    pub num_frames: Option<usize>,
+}
+
+pub(super) fn media_io(media_io_kwargs: Option<&prost_types::Struct>) -> Result<MediaIo, Status> {
     let Some(kwargs) = media_io_kwargs else {
-        return Ok(None);
+        return Ok(MediaIo::default());
     };
     let kwargs = proto_struct_to_json(kwargs);
     // A derived struct also deserializes from a positional array, which would
@@ -154,7 +394,7 @@ fn video_fps(media_io_kwargs: Option<&prost_types::Struct>) -> Result<Option<f64
     }
     let kwargs = MediaIoKwargs::deserialize(kwargs).map_err(|error| {
         Status::invalid_argument(format!(
-            "invalid media_io_kwargs: {}; only video.fps is supported",
+            "invalid media_io_kwargs: {}; only video.fps and video.num_frames are supported",
             error.as_report()
         ))
     })?;
@@ -166,19 +406,34 @@ fn video_fps(media_io_kwargs: Option<&prost_types::Struct>) -> Result<Option<f64
             "invalid media_io_kwargs.video.fps: {fps} is outside [{MIN_SAMPLE_FPS}, {MAX_SAMPLE_FPS}]"
         )));
     }
-    Ok(fps)
+    let num_frames = kwargs.video.num_frames.map(|frames| usize::try_from(frames).unwrap_or(0));
+    Ok(MediaIo { fps, num_frames })
 }
 
 fn mixed_media_error() -> Status {
-    Status::invalid_argument("raw media and preprocessed media features cannot be mixed")
+    Status::invalid_argument(
+        "raw media mixed with preprocessed media features must set marker_offset",
+    )
 }
 
 fn raw_parts_from_proto(
     media: Vec<pb::MediaItem>,
     video_fps: Option<f64>,
 ) -> Result<Vec<MediaContentPart>, Status> {
-    let mut parts = Vec::with_capacity(media.len());
-    for (index, item) in media.into_iter().enumerate() {
+    media
+        .into_iter()
+        .enumerate()
+        .map(|(index, item)| raw_part_from_proto(index, item, video_fps))
+        .collect()
+}
+
+/// `video_fps` is the request-level rate; an item's own `fps` wins.
+fn raw_part_from_proto(
+    index: usize,
+    item: pb::MediaItem,
+    video_fps: Option<f64>,
+) -> Result<MediaContentPart, Status> {
+    {
         let modality = item.modality();
         if modality == pb::Modality::Unspecified {
             return Err(Status::invalid_argument(format!(
@@ -187,6 +442,20 @@ fn raw_parts_from_proto(
         }
         let uuid = (!item.uuid.is_empty()).then_some(item.uuid);
         let mime_type = (!item.mime_type.is_empty()).then_some(item.mime_type);
+        let detail = item
+            .detail
+            .as_deref()
+            .map(|detail| {
+                serde_json::from_value::<ImageDetail>(serde_json::Value::String(detail.to_owned()))
+                    .map_err(|_| {
+                        Status::invalid_argument(format!(
+                            "media[{index}].detail must be auto, low or high"
+                        ))
+                    })
+            })
+            .transpose()?;
+        let fps = item.fps.or(video_fps);
+        let max_long_side_pixel = item.max_long_side_pixel;
         let source = item.source.ok_or_else(|| {
             Status::invalid_argument(format!("media[{index}].source is required"))
         })?;
@@ -206,16 +475,16 @@ fn raw_parts_from_proto(
                 pb::media_item::Source::Url(url) | pb::media_item::Source::DataUri(url),
             ) => MediaContentPart::ImageUrl {
                 url,
-                detail: None,
+                detail,
                 uuid,
-                max_long_side_pixel: None,
+                max_long_side_pixel,
             },
             (pb::Modality::Image, pb::media_item::Source::RawBytes(data)) => {
                 MediaContentPart::ImageData {
                     data,
                     mime_type,
                     uuid,
-                    detail: None,
+                    detail,
                 }
             }
             (
@@ -224,8 +493,8 @@ fn raw_parts_from_proto(
             ) => MediaContentPart::VideoUrl {
                 url,
                 uuid,
-                fps: video_fps,
-                max_long_side_pixel: None,
+                fps,
+                max_long_side_pixel,
             },
             (pb::Modality::Video, pb::media_item::Source::RawBytes(_)) if video_fps.is_some() => {
                 return Err(Status::invalid_argument(format!(
@@ -253,9 +522,8 @@ fn raw_parts_from_proto(
             (_, pb::media_item::Source::Features(_)) => return Err(mixed_media_error()),
             (pb::Modality::Unspecified, _) => unreachable!("modality validated above"),
         };
-        parts.push(part);
+        Ok(part)
     }
-    Ok(parts)
 }
 
 fn validate_media_uri(
@@ -309,18 +577,114 @@ mod tests {
     }
 
     #[test]
-    fn mixed_media_is_rejected_in_both_orders() {
+    fn mixed_media_needs_marker_offsets_in_both_orders() {
         let raw = pb::MediaItem {
             modality: pb::Modality::Image as i32,
             source: Some(pb::media_item::Source::RawBytes(vec![1])),
             ..Default::default()
         };
-        for media in [vec![raw.clone(), preprocessed()], vec![preprocessed(), raw]] {
+        for media in [
+            vec![raw.clone(), preprocessed()],
+            vec![preprocessed(), raw.clone()],
+        ] {
             assert_eq!(
-                from_proto(media, None).unwrap_err().code(),
+                from_proto(media, None, false).unwrap_err().code(),
                 tonic::Code::InvalidArgument
             );
         }
+        let placed = pb::MediaItem {
+            marker_offset: Some(7),
+            ..raw
+        };
+        let MultimodalInput::Mixed { raw, features } =
+            from_proto(vec![preprocessed(), placed], None, false).unwrap()
+        else {
+            panic!("expected mixed input");
+        };
+        assert_eq!(raw.len(), 1);
+        assert_eq!(raw[0].marker_offset, 7);
+        assert_eq!(features.len(), 1);
+    }
+
+    fn npy(descr: &str, shape: &str, data: &[u8]) -> Vec<u8> {
+        let mut header =
+            format!("{{'descr': '{descr}', 'fortran_order': False, 'shape': {shape}, }}");
+        while (10 + header.len() + 1) % 64 != 0 {
+            header.push(' ');
+        }
+        header.push('\n');
+        let mut bytes = b"\x93NUMPY\x01\x00".to_vec();
+        bytes.extend((header.len() as u16).to_le_bytes());
+        bytes.extend(header.as_bytes());
+        bytes.extend(data);
+        bytes
+    }
+
+    #[test]
+    fn npy_tensors_become_flat_embeds_and_batched_grids() {
+        let embeds = npy("<f4", "(2, 2)", &[0; 16]);
+        let grid = npy(
+            "<i8",
+            "(1, 3)",
+            &[
+                1, 0, 0, 0, 0, 0, 0, 0, 2, 0, 0, 0, 0, 0, 0, 0, 4, 0, 0, 0, 0, 0, 0, 0,
+            ],
+        );
+        let mut item = preprocessed();
+        let Some(pb::media_item::Source::Features(feature)) = &mut item.source else {
+            unreachable!()
+        };
+        feature.kwargs = None;
+        feature.mm_hash = Some("cached".into());
+        feature.tensors = [
+            ("image_embeds".to_owned(), embeds),
+            ("image_grid_thw".to_owned(), grid),
+        ]
+        .into();
+        let MultimodalInput::Preprocessed(features) = from_proto(vec![item], None, false).unwrap()
+        else {
+            panic!("expected features");
+        };
+        let data = features[0].data.as_ref().unwrap();
+        assert!(matches!(&data["image_embeds"].field, MmField::Flat(flat)
+            if flat.slices == [MmSlice::Slice(SliceSpec { start: Some(0), stop: Some(2), step: None })]));
+        let Some(MmKwargValue::Tensor(grid)) = &data["image_grid_thw"].data else {
+            panic!("grid tensor");
+        };
+        assert_eq!(grid.shape, [3]);
+        assert!(parse_npy(&npy("<f4", "(3,)", &[0; 8])).is_err());
+        assert!(parse_npy(&npy(">f4", "(2,)", &[0; 8])).is_err());
+        assert!(parse_npy(b"PK\x03\x04torch").unwrap_err().contains("torch.save"));
+    }
+
+    #[test]
+    fn request_options_convert_struct_values_to_json() {
+        use prost_types::value::Kind;
+        let number = |value| prost_types::Value {
+            kind: Some(Kind::NumberValue(value)),
+        };
+        let processor = prost_types::Struct {
+            fields: BTreeMap::from([
+                ("min_pixels".to_owned(), number(1024.0)),
+                ("scale".to_owned(), number(0.5)),
+            ]),
+        };
+        let options = options_from_proto(Some(processor), &MediaIo::default());
+        assert_eq!(
+            options.processor_kwargs["min_pixels"],
+            serde_json::json!(1024)
+        );
+        assert_eq!(options.processor_kwargs["scale"], serde_json::json!(0.5));
+        assert_eq!(options.video_num_frames, None);
+        assert!(options_from_proto(None, &MediaIo::default()).is_empty());
+    }
+
+    /// Parse `media_io_kwargs` as the handler does, then the media.
+    fn parse(
+        media: Vec<pb::MediaItem>,
+        kwargs: Option<&prost_types::Struct>,
+    ) -> Result<MultimodalInput, Status> {
+        from_proto(media, media_io(kwargs)?.fps, false)
     }
 
     fn video(source: pb::media_item::Source) -> pb::MediaItem {
@@ -337,7 +701,7 @@ mod tests {
             "https://example.com/clip.mp4".to_owned(),
         ));
         let kwargs = json_to_proto_struct(&serde_json::json!({"video": {"fps": 1}}));
-        let MultimodalInput::Raw(parts) = from_proto(vec![url], kwargs.as_ref()).unwrap() else {
+        let MultimodalInput::Raw(parts) = parse(vec![url], kwargs.as_ref()).unwrap() else {
             unreachable!()
         };
         expect_test::expect![[r#"
@@ -361,7 +725,7 @@ mod tests {
             "https://example.com/clip.mp4".to_owned(),
         ));
         let cases = [
-            (url.clone(), serde_json::json!({"video": {"num_frames": 8}})),
+            (url.clone(), serde_json::json!({"video": {"frames": 8}})),
             (url.clone(), serde_json::json!({"image": {}})),
             (url.clone(), serde_json::json!({"video": {"fps": 30}})),
             (url.clone(), serde_json::json!({"video": {"fps": "1"}})),
@@ -370,28 +734,52 @@ mod tests {
                 video(pb::media_item::Source::RawBytes(vec![1])),
                 serde_json::json!({"video": {"fps": 1}}),
             ),
-            (preprocessed(), serde_json::json!({"video": {"fps": 1}})),
         ];
         let messages = cases
             .into_iter()
             .map(|(item, kwargs)| {
                 let kwargs = json_to_proto_struct(&kwargs);
-                let error = from_proto(vec![item], kwargs.as_ref()).unwrap_err();
+                let error = parse(vec![item], kwargs.as_ref()).unwrap_err();
                 assert_eq!(error.code(), tonic::Code::InvalidArgument);
                 error.message().to_owned()
             })
             .collect::<Vec<_>>();
         expect_test::expect![[r#"
             [
-                "invalid media_io_kwargs: unknown field `num_frames`, expected `fps`; only video.fps is supported",
-                "invalid media_io_kwargs: unknown field `image`, expected `video`; only video.fps is supported",
+                "invalid media_io_kwargs: unknown field `frames`, expected `fps` or `num_frames`; only video.fps and video.num_frames are supported",
+                "invalid media_io_kwargs: unknown field `image`, expected `video`; only video.fps and video.num_frames are supported",
                 "invalid media_io_kwargs.video.fps: 30 is outside [0.2, 5]",
-                "invalid media_io_kwargs: invalid type: string \"1\", expected f64; only video.fps is supported",
+                "invalid media_io_kwargs: invalid type: string \"1\", expected f64; only video.fps and video.num_frames are supported",
                 "invalid media_io_kwargs: video must be a map of options",
                 "media[0]: media_io_kwargs.video.fps requires a url or data_uri source",
-                "media_io_kwargs cannot change preprocessed media features",
             ]
         "#]].assert_debug_eq(&messages);
+    }
+
+    #[test]
+    fn media_io_kwargs_frame_budget_item_fps_and_features() {
+        let kwargs = |value| json_to_proto_struct(&value);
+        assert_eq!(
+            media_io(kwargs(serde_json::json!({"video": {"num_frames": -1, "fps": 2}})).as_ref())
+                .unwrap(),
+            MediaIo {
+                fps: Some(2.0),
+                num_frames: Some(0)
+            }
+        );
+        let mut url = video(pb::media_item::Source::Url(
+            "https://example.com/clip.mp4".to_owned(),
+        ));
+        url.fps = Some(4.0);
+        let MultimodalInput::Raw(parts) = from_proto(vec![url], Some(1.0), false).unwrap() else {
+            unreachable!()
+        };
+        assert!(matches!(
+            parts[0],
+            MediaContentPart::VideoUrl { fps: Some(4.0), .. }
+        ));
+        // An encoder already applied the options to features; they only reach raw media.
+        assert!(from_proto(vec![preprocessed()], Some(1.0), false).is_ok());
     }
 
     #[test]
@@ -409,7 +797,7 @@ mod tests {
         };
         feature.is_embed = vec![true, false];
         for media in [missing_modality, missing_kwargs, invalid_mask] {
-            let error = from_proto(vec![media], None).unwrap_err();
+            let error = from_proto(vec![media], None, false).unwrap_err();
             assert_eq!(error.code(), tonic::Code::InvalidArgument);
             assert!(error.message().starts_with("media[0]:"));
         }
@@ -422,7 +810,7 @@ mod tests {
             unreachable!()
         };
         feature.kwargs = Some(vec![0; MAX_INLINE_MM_BYTES / 2 + 1]);
-        let error = from_proto(vec![item.clone(), item], None).unwrap_err();
+        let error = from_proto(vec![item.clone(), item], None, false).unwrap_err();
         assert_eq!(error.code(), tonic::Code::ResourceExhausted);
     }
 
@@ -479,5 +867,137 @@ mod tests {
             }),
         };
         assert_eq!(kwargs["pixel_values"], expected);
+    }
+
+    #[test]
+    fn metadata_only_features_become_keep_on_cpu_kwargs() {
+        let item = pb::MediaItem {
+            modality: pb::Modality::Image as i32,
+            source: Some(pb::media_item::Source::Features(
+                pb::PreprocessedMediaFeatures {
+                    kwargs: None,
+                    identifier: String::new(),
+                    offset: 4,
+                    length: 8,
+                    mm_hash: Some("hash-a".to_owned()),
+                    is_embed: Vec::new(),
+                    metadata: Some(prost_types::Struct {
+                        fields: std::iter::once((
+                            "image_grid_thw".to_owned(),
+                            prost_types::Value {
+                                kind: Some(prost_types::value::Kind::ListValue(
+                                    prost_types::ListValue {
+                                        values: [1.0, 2.0, 2.0]
+                                            .into_iter()
+                                            .map(|number| prost_types::Value {
+                                                kind: Some(prost_types::value::Kind::NumberValue(
+                                                    number,
+                                                )),
+                                            })
+                                            .collect(),
+                                    },
+                                )),
+                            },
+                        ))
+                        .collect(),
+                    }),
+                    tensors: Default::default(),
+                },
+            )),
+            ..Default::default()
+        };
+        let MultimodalInput::Preprocessed(features) =
+            from_proto(vec![item.clone()], true).expect("metadata-only feature")
+        else {
+            panic!("expected preprocessed features");
+        };
+        assert_eq!(features[0].identifier, "hash-a");
+        assert_eq!(features[0].mm_position.offset, 4);
+        assert_eq!(features[0].mm_position.length, 8);
+        let data = features[0].data.as_ref().unwrap();
+        assert!(data.contains_key("image_grid_thw"));
+        assert!(!data.contains_key("pixel_values"));
+        let denied = from_proto(vec![item], false).unwrap_err();
+        assert!(denied.message().contains("require ec_transfer_params"));
+    }
+
+    fn numbers(values: &[f64]) -> prost_types::Value {
+        prost_types::Value {
+            kind: Some(prost_types::value::Kind::ListValue(
+                prost_types::ListValue {
+                    values: values
+                        .iter()
+                        .map(|number| prost_types::Value {
+                            kind: Some(prost_types::value::Kind::NumberValue(*number)),
+                        })
+                        .collect(),
+                },
+            )),
+        }
+    }
+
+    #[test]
+    fn video_metadata_keeps_one_grid_flat_and_timestamps_float() {
+        let metadata = prost_types::Struct {
+            fields: [
+                ("video_grid_thw".to_owned(), numbers(&[2.0, 4.0, 4.0])),
+                ("timestamps".to_owned(), numbers(&[0.0, 1.0])),
+                (
+                    "image_grid_thw".to_owned(),
+                    numbers(&[1.0, 2.0, 2.0, 1.0, 4.0, 4.0]),
+                ),
+            ]
+            .into_iter()
+            .collect(),
+        };
+        let kwargs = kwargs_from_metadata(&metadata).unwrap();
+        let tensor = |key: &str| match kwargs[key].data.as_ref() {
+            Some(MmKwargValue::Tensor(tensor)) => tensor.clone(),
+            other => panic!("{key}: {other:?}"),
+        };
+        assert_eq!(
+            tensor("video_grid_thw"),
+            WireTensor::from_i64(vec![3], vec![2, 4, 4]).unwrap()
+        );
+        assert_eq!(
+            tensor("timestamps"),
+            WireTensor::from_f32(vec![2], vec![0.0, 1.0]).unwrap()
+        );
+        assert_eq!(tensor("image_grid_thw").shape, vec![2, 3]);
+    }
+
+    #[test]
+    fn raw_items_carry_per_item_processing_options() {
+        let image = pb::MediaItem {
+            modality: pb::Modality::Image as i32,
+            source: Some(pb::media_item::Source::Url("https://x/a.png".into())),
+            detail: Some("low".into()),
+            max_long_side_pixel: Some(512),
+            ..Default::default()
+        };
+        let video = pb::MediaItem {
+            modality: pb::Modality::Video as i32,
+            source: Some(pb::media_item::Source::Url("https://x/v.mp4".into())),
+            fps: Some(2.0),
+            ..Default::default()
+        };
+        let parts = raw_parts_from_proto(vec![image.clone(), video]).unwrap();
+        assert!(matches!(
+            &parts[0],
+            MediaContentPart::ImageUrl {
+                detail: Some(ImageDetail::Low),
+                max_long_side_pixel: Some(512),
+                ..
+            }
+        ));
+        assert!(
+            matches!(&parts[1], MediaContentPart::VideoUrl { fps: Some(fps), .. } if *fps == 2.0)
+        );
+        let bad = pb::MediaItem {
+            detail: Some("ultra".into()),
+            ..image
+        };
+        let error = raw_parts_from_proto(vec![bad]).unwrap_err();
+        assert!(error.message().contains("auto, low or high"));
     }
 }
