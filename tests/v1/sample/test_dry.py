@@ -189,7 +189,7 @@ def test_validate_params_rejects_unknown_dry_keys():
 
 
 def test_validate_params_raises_plain_valueerror():
-    """validate_params raises ``ValueError``, as the V2 interface specifies."""
+    """validate_params raises `ValueError`, as the V2 interface specifies."""
     with pytest.raises(ValueError) as excinfo:
         DryState.validate_params(_params(dry_multiplier=-1.0))
     assert type(excinfo.value) is ValueError
@@ -197,7 +197,7 @@ def test_validate_params_raises_plain_valueerror():
 
 def _oracle(window, breakers, multiplier, base, allowed_length, max_exponent):
     """llama_sampler_dry_apply's steps, with a brute-force match scan in place of
-    the Z-algorithm that ``_dry_penalties`` ports."""
+    the Z-algorithm that `_dry_penalties` ports."""
     m = len(window)
     rep_limit = m
     for i in range(m):
@@ -351,10 +351,10 @@ def _make_v2_state(
 
 
 def _apply(state, logits, idx_mapping_np, seq_lens_np):
-    """Call ``DryState.apply`` with a LogitsContext built as the sampler builds it.
+    """Call `DryState.apply` with a LogitsContext built as the sampler builds it.
 
     Args:
-      state: the ``DryState`` under test.
+      state: the `DryState` under test.
       logits: [num_reqs, vocab] tensor, one row per request, modified in place.
       idx_mapping_np: [num_reqs] batch position -> request slot.
       seq_lens_np: [num_reqs] host-side context lengths.
@@ -450,7 +450,7 @@ def test_spec_decode_is_refused_at_construction():
 
 
 def test_v2_draft_expanded_logits_raise():
-    """``DryState.apply`` raises on more logits rows than requests.
+    """`DryState.apply` raises on more logits rows than requests.
 
     Only speculative decoding lays logits out that way, and construction refuses it.
     """
@@ -552,10 +552,10 @@ def test_v2_matches_reference_fuzz(chunk_budget, monkeypatch):
 def test_v2_batch_sharded_sampling_matches_unsharded(monkeypatch):
     """Each rank's DRY rows under batch-sharded sampling match the unsharded rows.
 
-    With ``--enable-batch-sharded-sampling``, ``BatchSharder`` gives every TP rank
+    With `--enable-batch-sharded-sampling`, `BatchSharder` gives every TP rank
     a local batch of the requests it owns and localizes the two fields DRY reads
-    from ``LogitsContext``: ``idx_mapping_np``, and ``seq_lens_cpu_upper_bound``,
-    which the sampler passes as ``seq_lens_upper_bound_np``. Its Triton plan kernel
+    from `LogitsContext`: `idx_mapping_np`, and `seq_lens_cpu_upper_bound`,
+    which the sampler passes as `seq_lens_upper_bound_np`. Its Triton plan kernel
     writes only device fields DRY does not read, so it is replaced here and the
     sharding runs on the host.
     """
@@ -931,7 +931,7 @@ def test_loads_through_the_loader_by_fqcn():
 def test_loader_import_does_not_initialize_cuda():
     """Importing dry.py must not initialize CUDA.
 
-    The frontend imports it under ``guard_cuda_initialization()`` to validate
+    The frontend imports it under `guard_cuda_initialization()` to validate
     params, and a device touched at import time fails the engine at startup.
     """
     code = (
@@ -950,9 +950,9 @@ def test_loader_import_does_not_initialize_cuda():
 def test_admission_validator_rejects_bad_extra_args():
     """The real frontend validator must turn a bad dry_* value into a 400.
 
-    ``build_custom_logits_processors_params_validator`` is what
-    ``InputProcessor`` calls per request; it wraps a processor's ``ValueError``
-    as ``VLLMValidationError``, which the entrypoints map to a client error.
+    `build_custom_logits_processors_params_validator` is what
+    `InputProcessor` calls per request; it wraps a processor's `ValueError`
+    as `VLLMValidationError`, which the entrypoints map to a client error.
     """
     loader._cached_load_v2_logitsprocs.cache_clear()
     validate = loader.build_custom_logits_processors_params_validator([DRY_FQCN])
@@ -966,7 +966,7 @@ def test_admission_validator_rejects_bad_extra_args():
 
 @pytest.mark.parametrize("field", ["dry_penalty_last_n", "dry_allowed_length"])
 def test_dry_int_params_upper_bound(field):
-    """Both integer fields are capped at INT32_MAX; see ``_DRY_INT_MAX``."""
+    """Both integer fields are capped at INT32_MAX; see `_DRY_INT_MAX`."""
     for bad in (2**63, 2**31):
         with pytest.raises(ValueError, match=field):
             DryState.validate_params(_params(dry_multiplier=0.8, **{field: bad}))

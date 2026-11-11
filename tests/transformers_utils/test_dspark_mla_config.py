@@ -147,7 +147,7 @@ def test_dspark_mla_speculative_config_preserves_architecture(tmp_path):
         target_parallel_config=ParallelConfig(),
     )
 
-    assert speculative_config.parallel_drafting
+    assert speculative_config.speculator_config.parallel_drafting
     assert speculative_config.draft_model_config.architectures == ["K3DSparkModel"]
     assert speculative_config.draft_model_config.hf_config.model_type == "k3_dspark"
     assert speculative_config.draft_model_config.use_mla

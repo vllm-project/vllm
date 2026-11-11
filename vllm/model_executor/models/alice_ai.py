@@ -143,7 +143,6 @@ def _make_alice_ai_full_attention_config(
     adapted = copy(config)
     adapted.attn_output_gate = True
     adapted.qkv_bias = False
-    adapted.dual_chunk_attention_config = None
     adapted.is_causal = True
     return cast(Qwen3NextConfig, adapted)
 
@@ -719,17 +718,4 @@ class AliceAIForCausalLM(
         loader = AutoWeightsLoader(self)
         loaded = loader.load_weights(weights=weights)
         loaded.update(manually_loaded)
-        expected_target_weights = {
-            name
-            for name, _ in self.named_parameters()
-            if ".attnres_final." in name
-            or ".attn_res_" in name
-            or ".mlp_res_" in name
-            or name.endswith(".e_score_correction_bias")
-        }
-        if missing := expected_target_weights - loaded:
-            raise ValueError(
-                "AliceAI checkpoint is missing target-specific weights: "
-                + ", ".join(sorted(missing))
-            )
         return loaded
