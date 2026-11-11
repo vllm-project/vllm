@@ -112,8 +112,8 @@ vllm-bench \
   --save-result \
   --max-concurrency 1400
 
-# Send token IDs instead of text (pure vLLM: skips server-side tokenization,
-# exact token counts, faster). Random dataset only.
+# Send token IDs instead of text (skips server-side tokenization and provides
+# exact token counts). This random-dataset example uses the completions backend.
 vllm-bench \
   --backend vllm \
   --base-url http://127.0.0.1:8000 \
@@ -529,7 +529,7 @@ Run `vllm-bench --help` for the authoritative list. Grouped reference below.
 | `--random-output-len` | `128` | Output token length |
 | `--random-prefix-len` | `0` | Shared prefix length |
 | `--random-range-ratio` | `0.0` | Length jitter `r`, range `[0, 1)`. Lengths sampled uniformly from `[len×(1−r), len×(1+r)]`; `0.0` = exact target lengths. Also accepts `'{"input": r1, "output": r2}'` for independent input/output jitter |
-| `--prompt-token-ids` | `false` | Send prompts as token-ID arrays (skips server-side tokenization, exact counts). Random dataset only |
+| `--prompt-token-ids` | `false` | Send prompts as token-ID arrays (skips server-side tokenization, exact counts). Supports the random dataset with `vllm`/`openai` completions, `openai-embeddings`, or `vllm-pooling` |
 | **Random multimodal** | | |
 | `--random-mm-base-items-per-request` | `1` | Base number of multimodal items (images) per request |
 | `--random-mm-num-mm-items-range-ratio` | `0.0` | Range ratio for varying item count per request |
@@ -758,7 +758,7 @@ Tokenizers are loaded with a three-tier fallback chain:
 2. **Tiktoken** — `.tiktoken` / `.model` format for Kimi, Qwen, etc. (auto-extracts `pat_str` from Python source)
 3. **Server-side** — falls back to vLLM's `/tokenize` + `/detokenize` endpoints
 
-For the `random` dataset, prompt token lengths are verified against the server on the first run and cached; subsequent runs with the same model+server skip verification. Verification is also skipped when `--prompt-token-ids` is set (token counts are exact by construction).
+For the `random` dataset, prompt token lengths are verified against the server on the first run and cached; subsequent runs with the same model+server skip verification. Verification is also skipped when `--prompt-token-ids` is set with a supported backend (`vllm`/`openai` completions, `openai-embeddings`, or `vllm-pooling`) because token counts are exact by construction.
 
 Models without `tokenizer.json` (e.g. `nvidia/Kimi-K2.5-NVFP4`) fall back to server-side tokenization automatically; you can also point `--tokenizer` at a model that ships `tokenizer.json`.
 

@@ -272,10 +272,9 @@ pub struct BenchServeArgs {
     #[arg(long, default_value_t = 0.0)]
     pub random_cache_ratio: f64,
 
-    /// Send prompt as token ID arrays instead of text strings.
-    /// By default, prompts are decoded to text for maximum
-    /// compatibility. Enable this for pure vLLM deployments to skip server-side
-    /// tokenization (faster, exact token counts).
+    /// Send random dataset prompts as token ID arrays instead of text strings.
+    /// Supported by vllm/openai completions, openai-embeddings, and vllm-pooling.
+    /// Skips server-side tokenization and token-length verification.
     #[arg(long, default_value_t = false)]
     pub prompt_token_ids: bool,
 
