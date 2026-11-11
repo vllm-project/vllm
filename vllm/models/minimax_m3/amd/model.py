@@ -18,6 +18,7 @@ The MiniMax-M3-preview config selects a single set of branches:
 """
 
 from collections.abc import Iterable
+from functools import partial
 from typing import TYPE_CHECKING
 
 import torch
@@ -37,6 +38,9 @@ from vllm.config import (
 from vllm.distributed import get_pp_group, get_tensor_model_parallel_world_size
 from vllm.forward_context import get_forward_context
 from vllm.logger import init_logger
+from vllm.model_executor.kernels.linear.mxfp8.aiter_flydsl import (
+    AiterFlyDSLMxfp8LinearKernel,
+)
 from vllm.model_executor.kernels.linear.mxfp8.rocm_native import (
     _FUSED_QUANT_MAX_M,
     RocmDotScaledMxfp8LinearKernel,
@@ -82,10 +86,6 @@ from vllm.model_executor.layers.vocab_parallel_embedding import (
     ParallelLMHead,
     VocabParallelEmbedding,
 )
-from vllm.model_executor.model_loader.weight_utils import (
-    default_weight_loader,
-    maybe_remap_kv_scale_name,
-)
 from vllm.model_executor.models.interfaces import (
     EagleModelMixin,
     MultiModalEmbeddings,
@@ -100,7 +100,6 @@ from vllm.model_executor.models.utils import (
     extract_layer_index,
     get_fused_shared_expert_layers,
     init_vllm_registered_model,
-    is_pp_missing_parameter,
     make_empty_intermediate_tensors_factory,
     make_layers,
     maybe_prefix,
@@ -346,6 +345,10 @@ class MiniMaxM3MLP(nn.Module):
     def _down_proj_quantizes_in_gemm(self, num_tokens: int) -> bool:
         """Whether down_proj's kernel quantizes its input inside the GEMM at
         this token count; that is already a single launch, so keep it."""
+        if not isinstance(
+            _mxfp8_linear_kernel(self.down_proj), RocmDotScaledMxfp8LinearKernel
+        ):
+            return False
         n, k = self.down_proj.weight.shape
         return (
             0 < num_tokens <= _FUSED_QUANT_MAX_M
@@ -415,6 +418,26 @@ def _aiter_moe_fused_shared_experts_enabled(
         and is_fused_shared_expert_enabled
         and rocm_aiter_ops.is_fusion_moe_shared_experts_enabled()
     )
+
+
+def _redirect_fused_shared_experts(
+    weights: Iterable[tuple[str, torch.Tensor]], model: nn.Module
+) -> Iterable[tuple[str, torch.Tensor]]:
+    """Load fused shared experts into the routed slot after the local experts."""
+    shared_id = model.config.num_local_experts
+    for name, weight in weights:
+        if (
+            ".shared_experts." in name
+            and extract_layer_index(name) in model.fused_shared_expert_layers
+        ):
+            name = name.replace(
+                ".shared_experts.gate_proj.", f".experts.{shared_id}.w1."
+            )
+            name = name.replace(".shared_experts.up_proj.", f".experts.{shared_id}.w3.")
+            name = name.replace(
+                ".shared_experts.down_proj.", f".experts.{shared_id}.w2."
+            )
+        yield name, weight
 
 
 class MiniMaxM3MoE(nn.Module):
@@ -543,6 +566,7 @@ class MiniMaxM3MoE(nn.Module):
             fuse_shared_experts=self.is_fused_shared_expert_enabled,
             shared_expert_prefix=f"{prefix}.shared_experts",
             quant_config=quant_config,
+            ckpt_names=("w1", "w2", "w3"),
             prefix=f"{prefix}.experts",
         )
 
@@ -1567,21 +1591,27 @@ class MiniMaxM3SparseAttention(nn.Module, AttentionLayerBase):
         return self.impl.forward(self, query, self.kv_cache, output)
 
 
+def _mxfp8_linear_kernel(linear: nn.Module):
+    """The MXFP8 kernel of `linear`, or None."""
+    # Quark keeps the kernel on the layer's scheme, ModelOpt on the method.
+    kernel = getattr(getattr(linear, "scheme", None), "ocp_mx_linear", None)
+    if kernel is None:
+        kernel = getattr(getattr(linear, "quant_method", None), "kernel", None)
+    return kernel
+
+
 def _can_fuse_input_norm_mxfp8(qkv_proj: nn.Module) -> bool:
     """Whether `input_layernorm` can hand `qkv_proj` an MXFP8 activation.
 
     The quant key does not encode the scale layout (FlashInfer wants swizzled
-    scales under the same key), so this also requires the ROCm `dot_scaled`
-    kernel, which reads the row-major scales the fused norm writes.
+    scales under the same key), so this also requires a ROCm kernel that
+    reads the row-major scales the fused norm writes.
     """
     if envs.VLLM_BATCH_INVARIANT or get_input_quant_key(qkv_proj) != kMxfp8Dynamic:
         return False
-    # Quark keeps the kernel on the layer's scheme, ModelOpt on the method.
-    kernel = getattr(getattr(qkv_proj, "scheme", None), "ocp_mx_linear", None)
-    if kernel is None:
-        kernel = getattr(getattr(qkv_proj, "quant_method", None), "kernel", None)
+    kernel = _mxfp8_linear_kernel(qkv_proj)
     return isinstance(
-        kernel, RocmDotScaledMxfp8LinearKernel
+        kernel, (RocmDotScaledMxfp8LinearKernel, AiterFlyDSLMxfp8LinearKernel)
     ) and kernel.supports_quantized_input(qkv_proj)
 
 
@@ -1981,119 +2011,6 @@ class MiniMaxM3Model(nn.Module, EagleModelMixin):
             num_experts=num_experts,
         )
 
-    def load_weights(self, weights: Iterable[tuple[str, torch.Tensor]]) -> set[str]:
-        # q/k/v_proj -> fused qkv_proj; gate_proj/up_proj -> fused gate_up_proj
-        # (dense MLP and shared expert). On sparse layers the indexer
-        # index_q/index_k_proj fold into the same fused qkv_proj
-        # (MinimaxM3QKVParallelLinearWithIndexer); these entries simply never match on
-        # dense layers, whose checkpoints have no index_*_proj weights. Leading
-        # dots keep `q_proj`/`k_proj` from matching `index_q_proj`/`index_k_proj`
-        # (preceded by `_`, not `.`).
-        stacked_params_mapping: list[tuple[str, str, int | str]] = [
-            # (param_name, shard_name, shard_id)
-            (".qkv_proj", ".q_proj", "q"),
-            (".qkv_proj", ".k_proj", "k"),
-            (".qkv_proj", ".v_proj", "v"),
-            (".qkv_proj", ".index_q_proj", "index_q"),
-            (".qkv_proj", ".index_k_proj", "index_k"),
-            (".gate_up_proj", ".gate_proj", 0),
-            (".gate_up_proj", ".up_proj", 1),
-        ]
-
-        # (param_name, weight_name, expert_id, shard_id)
-        expert_params_mapping = self.get_expert_mapping()
-
-        params_dict = dict(self.named_parameters())
-        loaded_params: set[str] = set()
-        for name, loaded_weight in weights:
-            # The MTP module is not modeled yet.
-            if "mtp." in name:
-                continue
-
-            # The checkpoint stores block scales as ``weight_scale_inv``; the
-            # ModelOpt MXFP8 layers expose them as ``weight_scale``.
-            if "weight_scale_inv" in name:
-                name = name.replace("weight_scale_inv", "weight_scale")
-
-            # Shared-expert fusion: redirect the checkpoint shared expert into
-            # routed-expert slot ``num_local_experts`` (gate->w1, up->w3,
-            # down->w2) so it loads via the routed expert loader. Runs before the
-            # stacked/dense mappings so shared_experts.gate_proj/up_proj are not
-            # captured by the dense gate_up_proj mapping.
-            # Only parse the layer index when FSE is enabled.
-            if (
-                ".shared_experts." in name
-                and bool(rocm_aiter_ops.is_fusion_moe_shared_experts_enabled())
-                and extract_layer_index(name) in self.fused_shared_expert_layers
-            ):
-                sid = self.config.num_local_experts
-                name = name.replace(".shared_experts.gate_proj.", f".experts.{sid}.w1.")
-                name = name.replace(".shared_experts.up_proj.", f".experts.{sid}.w3.")
-                name = name.replace(".shared_experts.down_proj.", f".experts.{sid}.w2.")
-
-            for param_name, weight_name, shard_id in stacked_params_mapping:
-                if weight_name not in name:
-                    continue
-                # Routed experts (w1/w2/w3) are handled below; don't let the
-                # stacked mapping rewrite them.
-                if ("block_sparse_moe.experts." in name) and name not in params_dict:
-                    continue
-                name = name.replace(weight_name, param_name)
-                if name.endswith(".bias") and name not in params_dict:
-                    continue
-                if is_pp_missing_parameter(name, self):
-                    continue
-                if name not in params_dict:
-                    continue
-                param = params_dict[name]
-                weight_loader = param.weight_loader
-                weight_loader(param, loaded_weight, shard_id)
-                break
-            else:
-                for (
-                    param_name,
-                    weight_name,
-                    expert_id,
-                    expert_shard_id,
-                ) in expert_params_mapping:
-                    if weight_name not in name:
-                        continue
-                    name = name.replace(weight_name, param_name)
-                    if is_pp_missing_parameter(name, self):
-                        continue
-                    if name not in params_dict:
-                        continue
-                    param = params_dict[name]
-                    weight_loader = param.weight_loader
-                    weight_loader(
-                        param,
-                        loaded_weight,
-                        name,
-                        shard_id=expert_shard_id,
-                        expert_id=expert_id,
-                    )
-                    break
-                else:
-                    if name.endswith(".bias") and name not in params_dict:
-                        continue
-                    remapped = maybe_remap_kv_scale_name(name, params_dict)
-                    if remapped is None:
-                        continue
-                    name = remapped
-                    if is_pp_missing_parameter(name, self):
-                        continue
-                    # Modules not modeled yet (e.g. attention) are skipped until
-                    # they are ported.
-                    if name not in params_dict:
-                        continue
-                    param = params_dict[name]
-                    weight_loader = getattr(
-                        param, "weight_loader", default_weight_loader
-                    )
-                    weight_loader(param, loaded_weight)
-            loaded_params.add(name)
-        return loaded_params
-
 
 class MiniMaxM3SparseForCausalLM(nn.Module, SupportsPP, SupportsEagle3):
     """MiniMax M3 (sparse/dense backbone) for causal language modeling."""
@@ -2102,6 +2019,23 @@ class MiniMaxM3SparseForCausalLM(nn.Module, SupportsPP, SupportsEagle3):
         "qkv_proj": ["q_proj", "k_proj", "v_proj"],
         "gate_up_proj": ["gate_proj", "up_proj"],
     }
+
+    hf_to_vllm_mapper = WeightsMapper(
+        orig_to_new_substr={
+            "mtp.": None,
+            # ModelOpt MXFP8 layers name the checkpoint's block scales this way.
+            "weight_scale_inv": "weight_scale",
+        },
+        orig_to_new_stacked={
+            ".q_proj": (".qkv_proj", "q"),
+            ".k_proj": (".qkv_proj", "k"),
+            ".v_proj": (".qkv_proj", "v"),
+            ".index_q_proj": (".qkv_proj", "index_q"),
+            ".index_k_proj": (".qkv_proj", "index_k"),
+            ".gate_proj": (".gate_up_proj", 0),
+            ".up_proj": (".gate_up_proj", 1),
+        },
+    )
 
     def __init__(self, *, vllm_config: VllmConfig, prefix: str = ""):
         super().__init__()
@@ -2121,6 +2055,13 @@ class MiniMaxM3SparseForCausalLM(nn.Module, SupportsPP, SupportsEagle3):
             )
         else:
             self.lm_head = PPMissingLayer()
+        if (
+            self.model.fused_shared_expert_layers
+            and rocm_aiter_ops.is_fusion_moe_shared_experts_enabled()
+        ):
+            redirect = partial(_redirect_fused_shared_experts, model=self.model)
+            transforms = WeightsMapper(weights_transforms=[redirect])
+            self.hf_to_vllm_mapper = self.hf_to_vllm_mapper | transforms
         self.logits_processor = LogitsProcessor(config.vocab_size)
         self.make_empty_intermediate_tensors = (  # type: ignore[method-assign]
             self.model.make_empty_intermediate_tensors
@@ -2153,7 +2094,7 @@ class MiniMaxM3SparseForCausalLM(nn.Module, SupportsPP, SupportsEagle3):
 
     def load_weights(self, weights: Iterable[tuple[str, torch.Tensor]]) -> set[str]:
         loader = AutoWeightsLoader(self)
-        return loader.load_weights(weights)
+        return loader.load_weights(weights, mapper=self.hf_to_vllm_mapper)
 
 
 # TODO(refactor): this VL wrapper is platform-agnostic and byte-identical to the
