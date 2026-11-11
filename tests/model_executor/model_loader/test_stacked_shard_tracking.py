@@ -98,6 +98,52 @@ def test_merged_column_tuple_shard_is_one_span():
     assert layer.pop_missing_shards() == []
 
 
+@pytest.mark.parametrize("loader_name", ["weight_loader", "weight_loader_v2"])
+@pytest.mark.parametrize("shard_id", [None, (0, 1)])
+def test_merged_fused_checkpoint_excludes_output_padding(loader_name, shard_id):
+    layer = MergedColumnParallelLinear(HIDDEN, [4, 4], bias=False, padding_size=3)
+    expected = torch.arange(8 * HIDDEN, dtype=layer.weight.dtype).reshape(8, HIDDEN)
+    with torch.no_grad():
+        layer.weight.fill_(float("nan"))
+
+    getattr(layer, loader_name)(layer.weight, expected, shard_id)
+
+    torch.testing.assert_close(layer.weight[:8], expected, rtol=0, atol=0)
+    assert not layer.weight[8:].any()
+    assert layer.pop_missing_shards() == []
+
+
+def test_merged_padding_does_not_hide_a_missing_checkpoint_shard():
+    layer = MergedColumnParallelLinear(HIDDEN, [4, 4], bias=False, padding_size=3)
+    load(layer, ("weight", shard((4, HIDDEN), 0)))
+    assert layer.pop_missing_shards() == ["weight.1"]
+    with pytest.raises(ValueError, match="should be one of"):
+        layer.validate_shard_id(2)
+
+
+@pytest.mark.parametrize("padding_size", [0, 3])
+def test_merged_checkpoint_bias_keeps_output_padding_zero(padding_size):
+    layer = MergedColumnParallelLinear(HIDDEN, [4, 4], padding_size=padding_size)
+    weight = torch.arange(8 * HIDDEN, dtype=layer.weight.dtype).reshape(8, HIDDEN)
+    bias = torch.arange(8, dtype=layer.bias.dtype)
+    with torch.no_grad():
+        layer.weight.fill_(float("nan"))
+        layer.bias.fill_(float("nan"))
+
+    load(layer, ("weight", weight), ("bias", bias))
+
+    torch.testing.assert_close(layer.weight[:8], weight, rtol=0, atol=0)
+    torch.testing.assert_close(layer.bias[:8], bias, rtol=0, atol=0)
+    assert not layer.weight[8:].any()
+    assert not layer.bias[8:].any()
+    assert layer.pop_missing_shards() == []
+
+
+def test_merged_rejects_negative_output_padding():
+    with pytest.raises(ValueError, match="padding_size must be nonnegative"):
+        MergedColumnParallelLinear(HIDDEN, [4, 4], padding_size=-1)
+
+
 def test_minimax_m3_qkv_with_indexer_loads_all_shards():
     layer = MinimaxM3QKVParallelLinearWithIndexer(
         HIDDEN,

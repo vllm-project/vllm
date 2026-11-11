@@ -27,6 +27,7 @@ from torch import nn
 
 import vllm.envs as envs
 from vllm.model_executor.layers.linear import (
+    MergedColumnParallelLinear,
     ReplicatedLinear,
 )
 from vllm.model_executor.models.utils import maybe_prefix
@@ -35,7 +36,6 @@ from vllm.platforms import current_platform
 from ..common.hyperconnection import (
     GroupedGemmaRMSNorm,
     HyperConnectionConfig,
-    PaddedMergedColumnParallelLinear,
 )
 from .ops.cute_dsl.hc_down_silu import MAX_FUSED_M, hc_down_silu
 from .ops.hc import (
@@ -100,7 +100,7 @@ class GatedResidual(nn.Module):
         # good alignment and performant implementation chosen by CuBLAS heuristics.
         self.pad_size = (-(self.hc_lowrank + self.hc_count)) % 16 if use_combine else 0
         if use_combine:
-            self.input_mix_weight_down_block_inject = PaddedMergedColumnParallelLinear(
+            self.input_mix_weight_down_block_inject = MergedColumnParallelLinear(
                 self.hyper_hidden_size,
                 [self.hc_lowrank, self.hc_count],
                 padding_size=self.pad_size,

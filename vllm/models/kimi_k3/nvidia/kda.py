@@ -125,17 +125,9 @@ class _KimiGDNMergedColumnParallelLinear(MergedColumnParallelLinear):
         **kwargs,
     ) -> None:
         self.replicated_shard_id = replicated_shard_id
-        self.padding_size = padding_size
         output_sizes = output_sizes.copy()
         output_sizes[replicated_shard_id] *= tp_size
-        super().__init__(input_size, output_sizes, **kwargs)
-        if padding_size:
-            # Exclude padding rows from the load-completion count.
-            set_weight_attrs(
-                self.weight,
-                {"weight_loader_numel": self.weight[:-padding_size].numel()},
-            )
-            self.weight.data[-padding_size:].zero_()
+        super().__init__(input_size, output_sizes, padding_size=padding_size, **kwargs)
 
     def weight_loader(
         self,
@@ -155,8 +147,6 @@ class _KimiGDNMergedColumnParallelLinear(MergedColumnParallelLinear):
                 param.tp_rank = 0
         try:
             super().weight_loader(param, loaded_weight, loaded_shard_id)
-            if self.padding_size and param is self.weight:
-                param.data[-self.padding_size :].zero_()
         finally:
             self.tp_rank = tp_rank
             if param_tp_rank is not None:
@@ -180,8 +170,6 @@ class _KimiGDNMergedColumnParallelLinear(MergedColumnParallelLinear):
                 param.tp_rank = 0
         try:
             super().weight_loader_v2(param, loaded_weight, loaded_shard_id)
-            if self.padding_size and param is self.weight:
-                param.data[-self.padding_size :].zero_()
         finally:
             self.tp_rank = tp_rank
             if param_tp_rank is not None:
@@ -655,8 +643,6 @@ class KimiK3DeltaAttention(GatedDeltaNetAttention):
             else 16
         )
         self.in_proj_padding = -local_output_size % alignment
-        if self.in_proj_padding:
-            in_proj_output_sizes.append(self.in_proj_padding * self.tp_size)
         self.in_proj_qkvgfab = _KimiGDNMergedColumnParallelLinear(
             self.hidden_size,
             in_proj_output_sizes,

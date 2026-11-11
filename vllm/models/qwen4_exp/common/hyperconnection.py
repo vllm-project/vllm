@@ -30,14 +30,12 @@ Typical usage inside a transformer decoder layer::
 """
 
 from dataclasses import dataclass
-from typing import Any
 
 import torch
 import torch.nn.functional as F
 from torch import nn
 
 from vllm.config import VllmConfig
-from vllm.model_executor.layers.linear import MergedColumnParallelLinear
 
 
 def is_hc_sequence_parallel_enabled(vllm_config: VllmConfig) -> bool:
@@ -254,35 +252,9 @@ class GatedResidual(HyperConnectionBase):
         return output.flatten(-2).to(hyper_input.dtype)
 
 
-class PaddedMergedColumnParallelLinear(MergedColumnParallelLinear):
-    """Merged linear with `padding_size` alignment rows after `output_sizes`.
-
-    Checkpoints carry no padding, so it is not a shard; it starts zero and a
-    direct reload zero-fills the whole weight before the real shards land.
-    """
-
-    def __init__(
-        self,
-        input_size: int,
-        output_sizes: list[int],
-        *,
-        padding_size: int,
-        **kwargs: Any,
-    ) -> None:
-        padding = [padding_size] if padding_size else []
-        super().__init__(input_size, output_sizes + padding, **kwargs)
-        self.shard_ids = tuple(range(len(output_sizes)))
-        with torch.no_grad():
-            self.weight.zero_()
-
-    def padding_fill_params(self) -> list[str]:
-        return ["weight"]
-
-
 __all__ = [
     "GatedResidual",
     "GroupedGemmaRMSNorm",
     "HyperConnectionBase",
     "HyperConnectionConfig",
-    "PaddedMergedColumnParallelLinear",
 ]

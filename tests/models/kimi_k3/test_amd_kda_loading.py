@@ -15,18 +15,32 @@ pytestmark = pytest.mark.skipif(
 @pytest.mark.parametrize("alignment", [16, 128])
 @pytest.mark.parametrize("reverse", [False, True])
 @pytest.mark.parametrize("online", [False, True])
+@pytest.mark.parametrize(
+    "implementation",
+    ["generic", "nvidia"] if current_platform.is_cuda() else ["generic"],
+)
 def test_padded_kda_load_completes_and_clears_padding(
-    default_vllm_config, dist_init, alignment, reverse, online
+    default_vllm_config, dist_init, alignment, reverse, online, implementation
 ):
     from vllm.config import ModelConfig
     from vllm.config.quantization import QuantizationConfigArgs
-    from vllm.model_executor.layers.mamba.gdn.kimi_gdn_linear_attn import (
-        _KimiGDNMergedColumnParallelLinear,
-    )
     from vllm.model_executor.layers.quantization.online.base import (
         OnlineQuantizationConfig,
     )
+    from vllm.model_executor.model_loader.reload.direct import (
+        begin_direct_reload,
+        record_checkpoint_layout,
+    )
     from vllm.model_executor.model_loader.reload.layerwise import get_layerwise_info
+
+    if implementation == "nvidia":
+        from vllm.models.kimi_k3.nvidia.kda import (
+            _KimiGDNMergedColumnParallelLinear as Projection,
+        )
+    else:
+        from vllm.model_executor.layers.mamba.gdn.kimi_gdn_linear_attn import (
+            _KimiGDNMergedColumnParallelLinear as Projection,
+        )
 
     default_vllm_config.model_config = ModelConfig(
         model="facebook/opt-125m", dtype="bfloat16"
@@ -40,9 +54,9 @@ def test_padded_kda_load_completes_and_clears_padding(
         else None
     )
     with torch.device("cuda"), torch.no_grad():
-        layer = _KimiGDNMergedColumnParallelLinear(
+        layer = Projection(
             256,
-            rows + [padding],
+            rows,
             replicated_shard_id=4,
             tp_size=1,
             padding_size=padding,
@@ -52,7 +66,10 @@ def test_padded_kda_load_completes_and_clears_padding(
             prefix="probe.in_proj_qkvgfab",
         )
         if not online:
+            record_checkpoint_layout(layer)
             layer.weight.fill_(float("nan"))
+            begin_direct_reload(layer)
+            assert not layer.weight[-padding:].any()
         param = layer.weight
         shards = [
             torch.full((n, 256), (i + 1) / 16, dtype=torch.bfloat16)
@@ -68,4 +85,4 @@ def test_padded_kda_load_completes_and_clears_padding(
                 shards + [torch.zeros(padding, 256, dtype=torch.bfloat16)]
             )
             torch.testing.assert_close(layer.weight, expected, atol=0, rtol=0)
-            assert layer.pop_missing_shards() == []
+        assert layer.pop_missing_shards() == []

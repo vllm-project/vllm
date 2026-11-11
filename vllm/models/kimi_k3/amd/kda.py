@@ -164,8 +164,6 @@ class KimiK3DeltaAttention(GatedDeltaNetAttention):
             4 * self.local_projection_size + self.head_dim + self.local_num_heads
         )
         self.in_proj_padding = -local_output_size % 16
-        if self.in_proj_padding:
-            in_proj_output_sizes.append(self.in_proj_padding * self.tp_size)
 
         self.in_proj_qkvgfab = _KimiGDNMergedColumnParallelLinear(
             self.hidden_size,

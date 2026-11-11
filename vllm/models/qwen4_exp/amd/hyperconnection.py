@@ -26,6 +26,7 @@ import torch
 from torch import nn
 
 from vllm.model_executor.layers.linear import (
+    MergedColumnParallelLinear,
     ReplicatedLinear,
 )
 from vllm.model_executor.models.utils import maybe_prefix
@@ -33,7 +34,6 @@ from vllm.model_executor.models.utils import maybe_prefix
 from ..common.hyperconnection import (
     GroupedGemmaRMSNorm,
     HyperConnectionConfig,
-    PaddedMergedColumnParallelLinear,
 )
 from .ops.hc import (
     grouped_gemma_rmsnorm,
@@ -93,7 +93,7 @@ class GatedResidual(nn.Module):
         # alignment and efficient backend dispatch.
         self.pad_size = (-(self.hc_lowrank + self.hc_count)) % 16 if use_combine else 0
         if use_combine:
-            self.input_mix_weight_down_block_inject = PaddedMergedColumnParallelLinear(
+            self.input_mix_weight_down_block_inject = MergedColumnParallelLinear(
                 self.hyper_hidden_size,
                 [self.hc_lowrank, self.hc_count],
                 padding_size=self.pad_size,
