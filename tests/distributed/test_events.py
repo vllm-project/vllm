@@ -9,6 +9,7 @@ import pytest
 from vllm.distributed.kv_events import (
     EventBatch,
     EventPublisherFactory,
+    KVEventBatch,
     NullEventPublisher,
     ZmqEventPublisher,
 )
@@ -374,6 +375,112 @@ def test_event_publisher_factory(random_port):
     publisher = EventPublisherFactory.create(config, DP_RANK)
     assert isinstance(publisher, ZmqEventPublisher)
     publisher.shutdown()
+
+
+def test_ec_event_publisher_factory(random_port):
+    """EC events use the same publisher plumbing as KV events."""
+    from vllm.config.ec_events import ECEventsConfig
+
+    # Disabled by default, even when a publisher is requested.
+    config = ECEventsConfig(publisher="zmq")
+    publisher = EventPublisherFactory.create(config, DP_RANK)
+    assert isinstance(publisher, NullEventPublisher)
+    publisher.shutdown()
+
+    # A default config also resolves to the null publisher.
+    publisher = EventPublisherFactory.create(ECEventsConfig(), DP_RANK)
+    assert isinstance(publisher, NullEventPublisher)
+    publisher.shutdown()
+
+    config = ECEventsConfig(
+        enable_ec_cache_events=True,
+        endpoint=f"tcp://*:{random_port}",
+        replay_endpoint=f"tcp://*:{random_port + 100}",
+    )
+    publisher = EventPublisherFactory.create(config, DP_RANK + 1)
+    assert isinstance(publisher, ZmqEventPublisher)
+    resolved_config = publisher.get_publisher_config()
+    assert isinstance(resolved_config, ECEventsConfig)
+    assert resolved_config.endpoint == f"tcp://*:{random_port + 1}"
+    assert resolved_config.replay_endpoint == f"tcp://*:{random_port + 101}"
+    assert config.endpoint == f"tcp://*:{random_port}"
+    publisher.shutdown()
+
+
+def test_ec_event_batch_roundtrip():
+    """EC events survive msgpack encode/decode like KV events do."""
+    from vllm.distributed.ec_transfer.ec_events import (
+        AllECCleared,
+        ECEventBatch,
+        ECRemoved,
+        ECStored,
+    )
+
+    events = [
+        ECStored(mm_hashes=["mm-a", "mm-b"], medium="GPU"),
+        ECRemoved(mm_hashes=["mm-c"], medium="CPU"),
+        AllECCleared(),
+    ]
+    batch = ECEventBatch(ts=123.0, events=events)
+
+    decoded = msgspec.msgpack.decode(msgspec.msgpack.encode(batch), type=ECEventBatch)
+
+    assert decoded.ts == 123.0
+    assert decoded.events == events
+
+
+def test_kv_and_ec_events_use_distinct_default_endpoints():
+    """Enabling both streams without endpoints must not bind the same port."""
+    from vllm.config.ec_events import ECEventsConfig
+    from vllm.config.kv_events import KVEventsConfig
+
+    kv_config = KVEventsConfig(enable_kv_cache_events=True)
+    ec_config = ECEventsConfig(enable_ec_cache_events=True)
+
+    assert kv_config.publisher == ec_config.publisher == "zmq"
+    assert kv_config.endpoint != ec_config.endpoint
+
+
+def test_kv_and_ec_event_streams_run_together(random_port):
+    """Both publishers serve their own subscribers at the same time."""
+    from vllm.config.ec_events import ECEventsConfig
+    from vllm.config.kv_events import KVEventsConfig
+    from vllm.distributed.ec_transfer.ec_events import AllECCleared, ECEventBatch
+
+    from .conftest import MockSubscriber
+
+    kv_config = KVEventsConfig(
+        enable_kv_cache_events=True,
+        endpoint=f"tcp://*:{random_port}",
+        replay_endpoint=None,
+        topic="kv",
+    )
+    ec_config = ECEventsConfig(
+        enable_ec_cache_events=True,
+        endpoint=f"tcp://*:{random_port + 1}",
+        replay_endpoint=None,
+        topic="ec",
+    )
+    kv_pub = EventPublisherFactory.create(kv_config, DP_RANK)
+    ec_pub = EventPublisherFactory.create(ec_config, DP_RANK)
+    kv_sub = MockSubscriber(f"tcp://127.0.0.1:{random_port}", None, "kv")
+    ec_sub = MockSubscriber(
+        f"tcp://127.0.0.1:{random_port + 1}", None, "ec", decode_type=ECEventBatch
+    )
+    try:
+        time.sleep(0.1)
+        kv_pub.publish(KVEventBatch(ts=1.0, events=[]))
+        ec_pub.publish(ECEventBatch(ts=2.0, events=[AllECCleared()]))
+
+        _, kv_batch = kv_sub.receive_one(timeout=1000)
+        _, ec_batch = ec_sub.receive_one(timeout=1000)
+        assert kv_batch.ts == 1.0
+        assert ec_batch.events == [AllECCleared()]
+    finally:
+        kv_pub.shutdown()
+        ec_pub.shutdown()
+        kv_sub.close()
+        ec_sub.close()
 
 
 @pytest.mark.parametrize(
