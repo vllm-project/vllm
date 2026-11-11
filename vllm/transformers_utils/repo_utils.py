@@ -328,6 +328,20 @@ def get_subfolder_path(
     return os.path.join(snapshot, subfolder)
 
 
+def get_bundled_checkpoint(
+    model: str,
+    subfolder: str,
+    revision: str | None = None,
+    cache_dir: str | None = None,
+) -> str | None:
+    """Return the local path of a checkpoint that `model` ships in `subfolder`
+    (its own `config.json`), or `None` if there is no such subfolder."""
+    path = get_subfolder_path(model, subfolder, revision=revision, cache_dir=cache_dir)
+    if os.path.isfile(os.path.join(path, "config.json")):
+        return path
+    return None
+
+
 _WEIGHT_FILE_PATTERNS = [
     "*.safetensors",
     "*.bin",

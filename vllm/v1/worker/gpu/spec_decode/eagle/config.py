@@ -3,9 +3,13 @@
 from vllm.config import SpeculativeConfig
 from vllm.transformers_utils.configs.eagle import EAGLEConfig
 from vllm.transformers_utils.configs.speculators import SpeculatorsConfig
+from vllm.transformers_utils.repo_utils import get_bundled_checkpoint
 from vllm.v1.worker.gpu.spec_decode.speculator_config import (
     DraftModelSpeculatorConfig,
 )
+
+EAGLE3_SUBFOLDER = "eagle3"
+"""Subfolder in which a target checkpoint can ship its EAGLE-3 draft."""
 
 
 def wrap_eagle_hf_config(spec: SpeculativeConfig, method: str) -> None:
@@ -64,6 +68,22 @@ class Eagle3SpeculatorConfig(EagleSpeculatorConfig):
     def matches(cls, spec: SpeculativeConfig) -> bool:
         # e.g. yuhuili/EAGLE3-LLaMA3.1-Instruct-8B, AngelSlim/Qwen3-8B_eagle3
         return "eagle3" in spec.draft_model_config.model.lower()
+
+    @classmethod
+    def default_model(cls, spec: SpeculativeConfig) -> str | None:
+        """A target checkpoint can ship its draft in an `eagle3/` subfolder."""
+        target = spec.target_model_config
+        if target is not None:
+            load_config = spec.draft_load_config
+            draft = get_bundled_checkpoint(
+                target.model,
+                EAGLE3_SUBFOLDER,
+                revision=target.revision,
+                cache_dir=load_config.download_dir if load_config else None,
+            )
+            if draft is not None:
+                return draft
+        return super().default_model(spec)
 
     @property
     def uses_aux_hidden_states(self) -> bool:

@@ -722,7 +722,10 @@ Some models are supported only via the [Transformers modeling backend](#transfor
     `GraniteDoclingForConditionalGeneration` tiles each page image with the Hugging Face processor's grid
     (512×512 tiles plus a thumbnail). Checkpoints with a fine connector path (`vision_config.use_fine_route`,
     e.g. the 500M variant) accept `fine_route=True` in `--mm-processor-kwargs` or per request, which yields
-    four times as many image tokens per tile; the default is `False`.
+    four times as many image tokens per tile; the default is `False`. The model supports EAGLE-3 speculative
+    decoding; a checkpoint that ships its draft in an `eagle3/` subfolder needs only
+    `--speculative-config '{"method": "eagle3", "num_speculative_tokens": 5}'`
+    (see [EAGLE draft models](../features/speculative_decoding/eagle.md)).
 
 !!! note
     For `InternVLChatModel`, only InternVL2.5 with Qwen2.5 text backbone (`OpenGVLab/InternVL2.5-1B` etc.), InternVL3 and InternVL3.5 have video inputs support currently.
