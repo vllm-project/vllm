@@ -273,17 +273,20 @@ async def serve_http(
     engine_stopped = False
 
     def handle_signal(signum: int) -> None:
-        if not shutdown_event.is_set() or not engine_stopped:
+        cleanup_only = engine_stopped or (
+            shutdown_task is not None and shutdown_task.done()
+        )
+        if not shutdown_event.is_set() or not cleanup_only:
             request_shutdown()
             return
-        # The engine has stopped, so only HTTP and plugin cleanup remain. A
-        # repeated signal must not wait for a hook that never returns.
+        # Only HTTP and plugin cleanup remain. A repeated signal must not wait
+        # for a hook that never returns. Exit directly: as a container's PID 1,
+        # the process ignores a signal whose action is the default.
         logger.warning(
             "[shutdown] API server: received %s during cleanup; exiting",
             signal.Signals(signum).name,
         )
-        signal.signal(signum, signal.SIG_DFL)
-        os.kill(os.getpid(), signum)
+        os._exit(128 + signum)
 
     watchdog_task = (
         loop.create_task(watchdog_loop(server, engine_client))

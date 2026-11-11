@@ -12,6 +12,9 @@ steps:
   source_file_dependencies:
   - vllm/plugins/
   - tests/plugins/
+  - tests/plugins_tests/test_endpoint_plugins.py
+  - vllm/entrypoints/launchers/launcher.py
+  - vllm/entrypoints/launchers/utils/server_utils.py
   commands:
   # These plugins act only when a test names them (io_processor and endpoint)
   # or add new model names (dummy_model), so they can all be installed at once.
@@ -38,6 +41,9 @@ steps:
       source_file_dependencies:
       - vllm/plugins/
       - tests/plugins/
+      - tests/plugins_tests/test_endpoint_plugins.py
+      - vllm/entrypoints/launchers/launcher.py
+      - vllm/entrypoints/launchers/utils/server_utils.py
       - vllm/platforms/rocm.py
 
 # The platform and stat logger plugins act on every vLLM process while
@@ -51,9 +57,6 @@ steps:
   source_file_dependencies:
   - vllm/plugins/
   - tests/plugins/
-  - tests/plugins_tests/test_endpoint_plugins.py
-  - vllm/entrypoints/launchers/launcher.py
-  - vllm/entrypoints/launchers/utils/server_utils.py
   # Import-time platform resolution (see test_import_vllm_does_not_resolve_platform)
   - vllm/__init__.py
   - vllm/env_override.py
@@ -78,9 +81,6 @@ steps:
       source_file_dependencies:
       - vllm/plugins/
       - tests/plugins/
-      - tests/plugins_tests/test_endpoint_plugins.py
-      - vllm/entrypoints/launchers/launcher.py
-      - vllm/entrypoints/launchers/utils/server_utils.py
       - vllm/platforms/rocm.py
       - vllm/__init__.py
       - vllm/env_override.py

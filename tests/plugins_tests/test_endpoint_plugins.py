@@ -636,7 +636,7 @@ async def _serve_in_child(case: str) -> None:
         async def stop(self, state: State) -> None:
             await super().stop(state)
             if case == "stop_ignores_signal":
-                os.kill(os.getpid(), signal.SIGTERM)
+                os.kill(os.getpid(), signal.SIGINT)
                 await asyncio.Event().wait()
 
     # The real launcher's engine context outlives `serve_http`, including when
@@ -695,12 +695,12 @@ _EXITED = ["engine_context_exit"]
         ("watchdog", (0, 3), [*_ROLLED_BACK, *_EXITED]),
         (
             "start_ignores_cancel",
-            (-signal.SIGTERM,),
+            (128 + signal.SIGTERM,),
             ["engine_shutdown", "cancel_ignored:B"],
         ),
         (
             "stop_ignores_signal",
-            (-signal.SIGTERM,),
+            (128 + signal.SIGINT,),
             ["start:C", "engine_shutdown", "stop:C", "stop:B"],
         ),
     ],
@@ -710,8 +710,8 @@ def test_shutdown_during_plugin_lifecycle(
 ):
     """Shutdown during a blocked `start` cancels it and rolls back the
     started plugins before the listener closes. When a hook ignores
-    cancellation or never returns, a repeated SIGTERM after engine shutdown
-    terminates the process instead of hanging."""
+    cancellation or never returns, a repeated SIGTERM or SIGINT after engine
+    shutdown exits the process instead of hanging."""
     code = (
         "import runpy, uvloop; "
         f"scope = runpy.run_path({__file__!r}); "
