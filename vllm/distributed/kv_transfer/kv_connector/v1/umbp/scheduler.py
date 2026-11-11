@@ -17,6 +17,7 @@ from vllm.config import VllmConfig
 from vllm.distributed.kv_events import BlockRemoved, BlockStored, KVCacheEvent
 from vllm.distributed.kv_transfer.kv_connector.v1.base import KVConnectorMetadata
 from vllm.logger import init_logger
+from vllm.utils.math_utils import cdiv
 from vllm.v1.attention.backends.utils import NULL_BLOCK_ID
 from vllm.v1.core.block_pool import BlockPool
 from vllm.v1.core.kv_cache_coordinator import (
@@ -26,8 +27,10 @@ from vllm.v1.core.kv_cache_coordinator import (
 from vllm.v1.core.kv_cache_manager import KVCacheBlocks
 from vllm.v1.core.kv_cache_utils import (
     BlockHash,
+    BlockHashWithGroupId,
     KVCacheBlock,
     get_block_hash,
+    get_group_id,
     make_block_hash_with_group_id,
     maybe_convert_block_hash,
     resolve_dcp_kv_block_size,
@@ -39,6 +42,7 @@ from vllm.v1.kv_cache_interface import (
     KVCacheConfig,
     KVCacheSpec,
     MambaSpec,
+    SlidingWindowSpec,
     SparseCacheRole,
     UniformTypeKVCacheSpecs,
     iter_layer_specs,
@@ -63,6 +67,10 @@ from .runtime import UMBPSchedulerHandle
 
 logger = init_logger(__name__)
 
+_LAZY_RETRY_INITIAL_S = 0.1
+_LAZY_RETRY_MAX_S = 5.0
+_LAZY_RECHECK_S = 1.0
+
 
 @lru_cache(maxsize=8192)
 def _rank_keys(
@@ -75,6 +83,36 @@ def _rank_keys(
     return codec.keys_for_topology(block_hash, topology, (group_id,))
 
 
+@lru_cache(maxsize=8192)
+def _decode_lazy_block_hash(
+    codec: BlockIdentityCodec, block_hash_with_group: BlockHashWithGroupId
+) -> tuple[int, bytes, str]:
+    """Decode an immutable block identity for lazy candidate selection."""
+    group_id = get_group_id(block_hash_with_group)
+    block_hash = get_block_hash(block_hash_with_group)
+    return group_id, block_hash, codec.key(block_hash, group_id)
+
+
+def _free_to_cached_front(pool: BlockPool, block_ids: Sequence[int]) -> None:
+    """Free blocks so they are the first cached blocks the pool evicts.
+
+    Core keeps uncached blocks at the front of the free queue, to be reused
+    first. `evict_first` alone would put these blocks ahead of them and drop a
+    prefix-cache hit while empty blocks are still free.
+    """
+    queue = pool.free_block_queue
+    uncached = 0
+    for block in queue.iter_blocks_after(None):
+        if block.block_hash is not None:
+            break
+        uncached += 1
+    front = queue.popleft_n(uncached)
+    pool.free_blocks(
+        (pool.blocks[block_id] for block_id in block_ids), evict_first=True
+    )
+    queue.prepend_n(front)
+
+
 def _unwrap_store_spec(spec: KVCacheSpec) -> KVCacheSpec:
     if isinstance(spec, UniformTypeKVCacheSpecs):
         return next(iter(spec.kv_cache_specs.values()))
@@ -85,6 +123,11 @@ def _unwrap_store_spec(spec: KVCacheSpec) -> KVCacheSpec:
 class _StoreEvent:
     plan_groups: tuple[Sequence[BlockTransferPlan], ...]
     result: StoreEventResult = field(default_factory=StoreEventResult)
+    # Free-queue blocks pinned by a lazy scan.
+    lazy_block_ids: tuple[int, ...] = ()
+    # Those the scan found in its window, in free-queue order. The others are
+    # prefix blocks pulled in from elsewhere in the queue.
+    lazy_window_block_ids: tuple[int, ...] = ()
 
     def iter_plans(self):
         for plans in self.plan_groups:
@@ -118,7 +161,7 @@ class _LookupContext:
 @dataclass(frozen=True)
 class _PendingLookup:
     context: _LookupContext
-    future: Future[Sequence[bool]]
+    future: Future[Sequence[bool | None]]
 
 
 @dataclass
@@ -131,7 +174,11 @@ class _EventObject:
 @dataclass(frozen=True)
 class _EventLookup:
     objects: tuple[tuple[tuple[int, bytes], int], ...]
-    future: Future[Sequence[bool]]
+    future: Future[Sequence[bool | None]]
+
+
+_LazyCandidate = tuple[KVCacheBlock, str, int, bytes]
+"""Block, key, group and hash of one lazy store candidate."""
 
 
 class _LookupBlockPool(BlockPool):
@@ -241,6 +288,9 @@ class UMBPStoreConnectorScheduler:
         # A kv_consumer only restores from the pool, as with other store
         # connectors; it never offloads its own KV.
         self.store_enabled = getattr(transfer_config, "kv_role", None) != "kv_consumer"
+        self.lazy_offload = self.store_enabled and bool(
+            extra.get("lazy_offload", False)
+        )
         self.enable_partial_hash_hits = bool(
             extra.get("enable_partial_hash_hits", False)
         )
@@ -349,7 +399,62 @@ class UMBPStoreConnectorScheduler:
         self._event_check_batch_size = 256
         self._event_publications_suppressed = 0
         self._num_workers = getattr(vllm_config.parallel_config, "world_size", 1)
+        self._lazy_scan_pending = False
+        self._lazy_lookup_failures = 0
+        self._lazy_retry_at = 0.0
+        self._lazy_store_failures = 0
+        self._lazy_store_retry_at = 0.0
+        self._lazy_recheck_at = 0.0
+        # Keys a lookup or a completed store showed resident, with the block
+        # and hash they were seen on.
+        self._lazy_confirmed: dict[str, tuple[int, bytes]] = {}
+        # Free-queue blocks whose keys and prefix chain are all confirmed, by
+        # the block hash they had then. A scan skips them until the recheck.
+        self._lazy_settled: dict[int, BlockHashWithGroupId] = {}
+        self._lazy_prefix_chains_by_block: dict[
+            int,
+            tuple[tuple[tuple[int, str, int, bytes], ...], int],
+        ] = {}
+        configured_lazy_target = extra.get("lazy_offload_max_blocks")
+        if configured_lazy_target is not None and (
+            type(configured_lazy_target) is not int or configured_lazy_target < 0
+        ):
+            raise ValueError("lazy_offload_max_blocks must be a non-negative integer")
+        self._lazy_target_blocks = (
+            configured_lazy_target
+            if configured_lazy_target is not None
+            else self._estimate_lazy_target_blocks(
+                kv_cache_config,
+                getattr(
+                    getattr(vllm_config, "scheduler_config", None),
+                    "max_num_batched_tokens",
+                    self.block_size,
+                ),
+                dcp_size,
+            )
+        )
         self._store_event_counter = 0
+
+    @staticmethod
+    def _estimate_lazy_target_blocks(
+        kv_cache_config: KVCacheConfig,
+        max_num_batched_tokens: int,
+        dcp_size: int,
+    ) -> int:
+        target = 0
+        prefix_group_ids = set(kv_cache_config.prefix_cacheable_group_ids)
+        for group_id, group in enumerate(kv_cache_config.kv_cache_groups):
+            if group_id not in prefix_group_ids:
+                continue
+            spec = group.kv_cache_spec
+            block_size = resolve_dcp_kv_block_size(spec, dcp_size)
+            if isinstance(spec, MambaSpec):
+                target += 2
+            elif isinstance(spec, SlidingWindowSpec):
+                target += cdiv(spec.sliding_window, block_size) + 1
+            else:
+                target += cdiv(max_num_batched_tokens, block_size)
+        return 2 * target
 
     def bind_gpu_block_pool(self, gpu_block_pool: BlockPool) -> None:
         self._gpu_block_pool = gpu_block_pool
@@ -423,11 +528,15 @@ class UMBPStoreConnectorScheduler:
         else:
             context = self._pending_lookups.pop(request.request_id).context
         try:
-            hits = list(
-                pending.future.result()
-                if pending is not None
-                else self.runtime.lookup(context.keys)
-            )
+            # An unavailable rank cannot serve a load, so it counts as a miss.
+            hits = [
+                bool(hit)
+                for hit in (
+                    pending.future.result()
+                    if pending is not None
+                    else self.runtime.lookup(context.keys)
+                )
+            ]
         except Exception as exc:
             logger.debug("UMBP lookup failed request=%s: %s", request.request_id, exc)
             return 0, False
@@ -666,7 +775,11 @@ class UMBPStoreConnectorScheduler:
                 )
                 store_plans = (
                     None
-                    if not self.store_enabled or tracked_request is None
+                    if (
+                        not self.store_enabled
+                        or self.lazy_offload
+                        or tracked_request is None
+                    )
                     else self._store_plans(
                         tracked_request,
                         tracker,
@@ -693,7 +806,7 @@ class UMBPStoreConnectorScheduler:
             self._load_specs.pop(request_id, None)
             if load_plans:
                 meta.load_requests[request_id] = load_plans
-            elif self.store_enabled:
+            elif self.store_enabled and not self.lazy_offload:
                 cached_request = self._requests.get(request_id)
                 cached_tracker = self._request_trackers.get(request_id)
                 if cached_request is not None and cached_tracker is not None:
@@ -779,12 +892,44 @@ class UMBPStoreConnectorScheduler:
         self._pending_finished_stores = {}
         for plans in finished_stores.values():
             meta.store_plans.extend(plans)
+        lazy_plans: list[BlockTransferPlan] = []
+        lazy_window: tuple[int, ...] = ()
+        if self.lazy_offload:
+            # Requests finishing (request_finished), admitted or preempted, or
+            # growing into new blocks are what move the eviction end of the
+            # free queue. Steps without them skip the scan.
+            if (
+                scheduler_output.scheduled_new_reqs
+                or scheduler_output.preempted_req_ids
+                or any(
+                    (block_ids := cached_reqs.new_block_ids[index]) is not None
+                    and any(block_ids)
+                    for index in range(len(cached_reqs.req_ids))
+                )
+            ):
+                self._lazy_scan_pending = True
+            now = time.monotonic()
+            if now >= self._lazy_retry_at and now >= self._lazy_store_retry_at:
+                lazy_plans, lazy_window, lookup_succeeded = (
+                    self._prepare_lazy_store_plans()
+                )
+                meta.store_plans.extend(lazy_plans)
+                self._record_lazy_lookup(lookup_succeeded)
+                if lazy_plans:
+                    # Pinning shifts later blocks into the window.
+                    self._lazy_scan_pending = True
         event_plan_groups = tuple(meta.store_plan_groups())
         if event_plan_groups:
             event = self._store_event_counter
             self._store_event_counter += 1
             meta.store_event = event
-            self._store_events[event] = _StoreEvent(event_plan_groups)
+            self._store_events[event] = _StoreEvent(
+                event_plan_groups,
+                lazy_block_ids=tuple(
+                    dict.fromkeys(plan.block_id for plan in lazy_plans)
+                ),
+                lazy_window_block_ids=lazy_window,
+            )
             if self._gpu_block_pool is not None:
                 self._gpu_block_pool.touch(
                     [
@@ -807,6 +952,292 @@ class UMBPStoreConnectorScheduler:
                         for block_id in dict.fromkeys(plan.block_id for plan in plans)
                     )
         return meta
+
+    def _prepare_lazy_store_plans(
+        self,
+    ) -> tuple[list[BlockTransferPlan], tuple[int, ...], bool]:
+        """Return plans, their blocks found in the window, and lookup success."""
+        pool = self._gpu_block_pool
+        if (
+            pool is None
+            or self.runtime is None
+            or self.codec is None
+            or self._lazy_target_blocks <= 0
+        ):
+            self._lazy_scan_pending = False
+            return [], (), True
+        now = time.monotonic()
+        if now < self._lazy_store_retry_at:
+            return [], (), True
+        recheck = now >= self._lazy_recheck_at
+        if not self._lazy_scan_pending and not recheck:
+            return [], (), True
+        self._lazy_scan_pending = False
+        candidates: list[_LazyCandidate] = []
+        seen_keys: set[str] = set()
+        observed_keys: set[str] = set()
+        expanded_chains: dict[int, int] = {}
+        visited_by_group: dict[int, int] = {}
+        unhashed = 0
+        walked: list[KVCacheBlock] = []
+        window_position: dict[int, int] = {}
+        in_flight_keys = {
+            key for event in self._store_events.values() for key in event.iter_keys()
+        }
+        aliases = getattr(pool, "cached_block_hashes_by_block", {})
+        prefix_groups = self.kv_cache_config.prefix_cacheable_group_ids
+        settled = self._lazy_settled
+        if recheck:
+            settled.clear()
+
+        def add_candidate(
+            block: KVCacheBlock,
+            key: str,
+            group_id: int,
+            block_hash: bytes,
+        ) -> None:
+            observed_keys.add(key)
+            if not recheck and self._lazy_confirmed.get(key) == (
+                block.block_id,
+                block_hash,
+            ):
+                return
+            if key in seen_keys or key in in_flight_keys:
+                return
+            seen_keys.add(key)
+            candidates.append((block, key, group_id, block_hash))
+
+        for covered, block in enumerate(pool.free_block_queue.iter_blocks_after(None)):
+            if covered >= self._lazy_target_blocks:
+                break
+            if block.is_null or block.block_hash is None:
+                unhashed += 1
+                continue
+            window_position[block.block_id] = covered
+            # Allocation moves this window nearly every step under load, so
+            # most blocks were already resolved by an earlier scan.
+            if settled.get(block.block_id) == block.block_hash:
+                continue
+            walked.append(block)
+            block_hashes = (
+                block.block_hash,
+                *aliases.get(block.block_id, ()),
+            )
+            for block_hash_with_group in block_hashes:
+                group_id, block_hash, key = _decode_lazy_block_hash(
+                    self.codec, block_hash_with_group
+                )
+                if group_id not in prefix_groups:
+                    continue
+                visited_by_group[group_id] = visited_by_group.get(group_id, 0) + 1
+                add_candidate(block, key, group_id, block_hash)
+
+            chain_entry = self._lazy_prefix_chains_by_block.get(block.block_id)
+            if chain_entry is None:
+                continue
+            chain, chain_index = chain_entry
+            _, _, tail_group_id, tail_hash = chain[chain_index]
+            expected_tail_hash = make_block_hash_with_group_id(
+                BlockHash(tail_hash), tail_group_id
+            )
+            if (
+                expected_tail_hash != block.block_hash
+                and expected_tail_hash not in aliases.get(block.block_id, ())
+            ):
+                # Block IDs are recycled. Do not expand a prefix chain whose
+                # tail identity no longer matches the free-queue block.
+                del self._lazy_prefix_chains_by_block[block.block_id]
+                continue
+            start = expanded_chains.get(id(chain), 0)
+            if chain_index < start:
+                continue
+            expanded_chains[id(chain)] = chain_index + 1
+            # Tail first, as core freed them, so completed stores return the
+            # chain to the free queue in its original eviction order.
+            for block_id, key, group_id, block_hash in reversed(
+                chain[start : chain_index + 1]
+            ):
+                if key in seen_keys or key in in_flight_keys:
+                    continue
+                prefix_block = pool.blocks[block_id]
+                expected_hash = make_block_hash_with_group_id(
+                    BlockHash(block_hash), group_id
+                )
+                if prefix_block.is_null or (
+                    expected_hash != prefix_block.block_hash
+                    and expected_hash not in aliases.get(block_id, ())
+                ):
+                    continue
+                add_candidate(prefix_block, key, group_id, block_hash)
+
+        logger.debug(
+            "UMBP lazy scan target=%d free=%d unhashed=%d walked=%d "
+            "keys_by_group=%s candidates=%d",
+            self._lazy_target_blocks,
+            getattr(pool.free_block_queue, "num_free_blocks", -1),
+            unhashed,
+            len(walked),
+            tuple(sorted(visited_by_group.items())),
+            len(candidates),
+        )
+        if recheck:
+            # Settled blocks skip the walk above, so only a full scan sees
+            # every key still in the window and can bound the cache.
+            self._lazy_confirmed = {
+                key: identity
+                for key, identity in self._lazy_confirmed.items()
+                if key in observed_keys or key in in_flight_keys
+            }
+            self._lazy_recheck_at = now + _LAZY_RECHECK_S
+        if not candidates:
+            self._settle_lazy_blocks(walked)
+            return [], (), True
+        keys = [
+            rank_key
+            for _, _, group_id, block_hash in candidates
+            for rank_key in _rank_keys(self.codec, self.topology, block_hash, group_id)
+        ]
+        # Synchronous on purpose: this step's pins move later blocks toward
+        # eviction, so a miss must be pinned now, and a lookup thread left to
+        # compete with the engine loop can stall into a false "unavailable".
+        # Confirmed keys make this lookup small except for the periodic
+        # recheck.
+        try:
+            hits = list(self.runtime.lookup(keys))
+        except Exception as exc:
+            logger.warning("UMBP lazy residency lookup failed: %s", exc)
+            return [], (), False
+        plans, ok = self._lazy_plans_for_hits(candidates, hits)
+        if ok:
+            self._settle_lazy_blocks(walked)
+        window = sorted(
+            {plan.block_id for plan in plans} & window_position.keys(),
+            key=window_position.__getitem__,
+        )
+        return plans, tuple(window), ok
+
+    def _settle_lazy_blocks(self, walked: Sequence[KVCacheBlock]) -> None:
+        """Mark walked blocks whose keys and prefix chain are all confirmed."""
+        assert self.codec is not None and self._gpu_block_pool is not None
+        pool = self._gpu_block_pool
+        aliases = getattr(pool, "cached_block_hashes_by_block", {})
+        prefix_groups = self.kv_cache_config.prefix_cacheable_group_ids
+        confirmed = self._lazy_confirmed
+        closed: dict[int, int] = {}
+        for block in walked:
+            block_hash = block.block_hash
+            # Aliases can gain keys while the block is reused, which its
+            # primary hash would not show.
+            if block_hash is None or block.block_id in aliases:
+                continue
+            group_id, raw_hash, key = _decode_lazy_block_hash(self.codec, block_hash)
+            if group_id in prefix_groups and confirmed.get(key) != (
+                block.block_id,
+                raw_hash,
+            ):
+                continue
+            chain_entry = self._lazy_prefix_chains_by_block.get(block.block_id)
+            if chain_entry is not None:
+                chain, chain_index = chain_entry
+                done = closed.get(id(chain))
+                if done is None:
+                    done = 0
+                    for block_id, chain_key, chain_group, chain_hash in chain:
+                        if confirmed.get(chain_key) != (block_id, chain_hash):
+                            # The walk skips a recycled prefix block, so
+                            # nothing is left to store for it.
+                            prefix_block = pool.blocks[block_id]
+                            expected = make_block_hash_with_group_id(
+                                BlockHash(chain_hash), chain_group
+                            )
+                            if not prefix_block.is_null and (
+                                expected == prefix_block.block_hash
+                                or expected in aliases.get(block_id, ())
+                            ):
+                                break
+                        done += 1
+                    closed[id(chain)] = done
+                if done <= chain_index:
+                    continue
+            self._lazy_settled[block.block_id] = block_hash
+
+    def _lazy_plans_for_hits(
+        self,
+        candidates: Sequence[_LazyCandidate],
+        hits: Sequence[bool | None],
+    ) -> tuple[list[BlockTransferPlan], bool]:
+        assert self.codec is not None
+        widths = [
+            self.codec.keys_per_object(self.topology, group_id)
+            for _, _, group_id, _ in candidates
+        ]
+        expected = sum(widths)
+        if len(hits) != expected or any(hit is None for hit in hits):
+            # Unreachable is not absent. Storing the window on it would
+            # resubmit every block each step while the pool is down.
+            logger.warning(
+                "UMBP lazy residency lookup unavailable (%d results for %d keys)",
+                len(hits),
+                expected,
+            )
+            return [], False
+        plans: list[BlockTransferPlan] = []
+        offset = 0
+        for (block, key, group_id, block_hash), width in zip(
+            candidates, widths, strict=True
+        ):
+            start = offset
+            offset += width
+            if all(hits[start : start + width]):
+                self._lazy_confirmed[key] = (block.block_id, block_hash)
+                continue
+            self._lazy_confirmed.pop(key, None)
+            plans.append(
+                BlockTransferPlan(
+                    key=key,
+                    block_id=block.block_id,
+                    group_id=group_id,
+                    block_hash=block_hash,
+                    block_size=self.group_block_sizes[group_id],
+                )
+            )
+        return plans, True
+
+    @staticmethod
+    def _lazy_backoff(failures: int) -> float:
+        return min(_LAZY_RETRY_MAX_S, _LAZY_RETRY_INITIAL_S * 2 ** min(failures, 16))
+
+    def _record_lazy_lookup(self, succeeded: bool) -> None:
+        if succeeded:
+            self._lazy_lookup_failures = 0
+            self._lazy_retry_at = 0.0
+            return
+        self._lazy_retry_at = time.monotonic() + self._lazy_backoff(
+            self._lazy_lookup_failures
+        )
+        self._lazy_lookup_failures += 1
+        self._lazy_scan_pending = True
+
+    def _record_lazy_store(self, event: _StoreEvent) -> None:
+        lazy_block_ids = set(event.lazy_block_ids)
+        failed = False
+        for plan in event.iter_plans():
+            if plan.block_id not in lazy_block_ids or plan.block_hash is None:
+                continue
+            if (plan.group_id, plan.block_hash) in event.result.failed_objects:
+                failed = True
+                self._lazy_confirmed.pop(plan.key, None)
+            else:
+                self._lazy_confirmed[plan.key] = (plan.block_id, plan.block_hash)
+        if not failed:
+            self._lazy_store_failures = 0
+            self._lazy_store_retry_at = 0.0
+            return
+        self._lazy_store_retry_at = time.monotonic() + self._lazy_backoff(
+            self._lazy_store_failures
+        )
+        self._lazy_store_failures += 1
+        self._lazy_scan_pending = True
 
     def _add_boundary_state_plans(
         self,
@@ -1160,7 +1591,49 @@ class UMBPStoreConnectorScheduler:
         pending = self._pending_lookups.pop(request.request_id, None)
         if pending is not None:
             pending.future.cancel()
+        if self.lazy_offload:
+            self._register_lazy_prefix_chains(request, block_ids)
+            self._request_trackers.pop(request.request_id, None)
+            self._lazy_scan_pending = True
         return False, None
+
+    def _register_lazy_prefix_chains(
+        self,
+        request: Request,
+        block_ids: tuple[list[int], ...],
+    ) -> None:
+        """Remember full-attention chains so an at-risk tail stores its prefix."""
+        if self.codec is None:
+            return
+        prompt_tokens = request.num_prompt_tokens
+        save_to = min(prompt_tokens, request.num_computed_tokens)
+        hashes = list(request.block_hashes)
+        if save_to <= 0 or not hashes:
+            return
+
+        for group_id in self.kv_cache_config.prefix_cacheable_group_ids:
+            spec = self.kv_cache_config.kv_cache_groups[group_id].kv_cache_spec
+            if not isinstance(spec, FullAttentionSpec) or group_id >= len(block_ids):
+                continue
+            group_block_size = self.group_block_sizes[group_id]
+            num_blocks = min(save_to // group_block_size, len(block_ids[group_id]))
+            chain: list[tuple[int, str, int, bytes]] = []
+            for index, block_id in enumerate(block_ids[group_id][:num_blocks]):
+                if block_id == NULL_BLOCK_ID:
+                    continue
+                token_end = (index + 1) * group_block_size
+                block_hash = self._object_hash_at_token_end(hashes, token_end)
+                chain.append(
+                    (
+                        block_id,
+                        self.codec.key(block_hash, group_id),
+                        group_id,
+                        block_hash,
+                    )
+                )
+            frozen_chain = tuple(chain)
+            for index, (block_id, _, _, _) in enumerate(frozen_chain):
+                self._lazy_prefix_chains_by_block[block_id] = (frozen_chain, index)
 
     def register_finished_partial_tail(
         self,
@@ -1253,11 +1726,29 @@ class UMBPStoreConnectorScheduler:
             if event.result.completed_workers < self._num_workers:
                 continue
             del self._store_events[event_id]
+            if event.lazy_block_ids:
+                self._record_lazy_store(event)
             if pool is not None:
-                block_ids = dict.fromkeys(event.block_ids())
+                lazy_block_ids = set(event.lazy_block_ids)
+                window = set(event.lazy_window_block_ids)
+                block_ids = [
+                    block_id
+                    for block_id in dict.fromkeys(event.block_ids())
+                    if block_id not in lazy_block_ids
+                ]
                 pool.free_blocks(
                     pool.blocks[block_id] for block_id in reversed(block_ids)
                 )
+                # Prefix blocks may come from the MRU end, so they are freed
+                # like a request's, tail first, not to the eviction end.
+                pool.free_blocks(
+                    pool.blocks[block_id]
+                    for block_id in event.lazy_block_ids
+                    if block_id not in window
+                )
+                if event.lazy_window_block_ids:
+                    # These were picked because they were next to be evicted.
+                    _free_to_cached_front(pool, event.lazy_window_block_ids)
             if self.enable_kv_cache_events:
                 self._queue_event_objects(event)
         self._reconcile_kv_events()
@@ -1340,7 +1831,14 @@ class UMBPStoreConnectorScheduler:
                     if record.published:
                         self._event_objects[identity] = record
                     continue
-                resident = all(hits[start : start + width])
+                rank_hits = hits[start : start + width]
+                if any(hit is None for hit in rank_hits):
+                    # Unreachable is not a removal; check again later.
+                    self._event_objects[identity] = record
+                    if not record.published:
+                        self._pending_event_objects[identity] = serial
+                    continue
+                resident = all(rank_hits)
                 if not resident:
                     if record.published:
                         group_id, block_hash = identity
@@ -1433,7 +1931,13 @@ class UMBPStoreConnectorScheduler:
 
     def has_pending_push_work(self) -> bool:
         return (
-            bool(self._pending_finished_stores)
+            # A failing pool must not keep an idle engine stepping.
+            (
+                self._lazy_scan_pending
+                and not self._lazy_lookup_failures
+                and time.monotonic() >= self._lazy_store_retry_at
+            )
+            or bool(self._pending_finished_stores)
             or bool(self._store_events)
             or self._event_lookup is not None
             or bool(self._pending_event_objects)
@@ -1447,6 +1951,15 @@ class UMBPStoreConnectorScheduler:
         self._pending_lookups.clear()
         self._load_specs.clear()
         self._pending_loads.clear()
+        self._lazy_scan_pending = False
+        self._lazy_lookup_failures = 0
+        self._lazy_retry_at = 0.0
+        self._lazy_store_failures = 0
+        self._lazy_store_retry_at = 0.0
+        self._lazy_recheck_at = 0.0
+        self._lazy_confirmed.clear()
+        self._lazy_settled.clear()
+        self._lazy_prefix_chains_by_block.clear()
         cleared = True if self.runtime is None else self.runtime.clear()
         if cleared:
             self._event_objects.clear()
