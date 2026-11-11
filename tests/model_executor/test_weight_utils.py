@@ -2,12 +2,14 @@
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 
 import tempfile
+from pathlib import Path
 from unittest.mock import Mock
 
 import huggingface_hub.constants
 import pytest
 import torch
 from huggingface_hub.utils import LocalEntryNotFoundError
+from safetensors.torch import safe_open, save_file
 
 import vllm.model_executor.model_loader.weight_utils as weight_utils
 from vllm.model_executor.model_loader.weight_utils import (
@@ -16,6 +18,7 @@ from vllm.model_executor.model_loader.weight_utils import (
     initialize_single_dummy_weight,
     load_attention_sink,
     maybe_remap_kv_scale_name,
+    safetensors_weights_iterator,
 )
 from vllm.platforms import current_platform
 
@@ -500,6 +503,101 @@ def test_dummy_norm_weights_are_neutral(default_vllm_config):
             param.data.uniform_(-5, 5)
             initialize_single_dummy_weight(param, name=name)
             assert torch.all(param == values[name]), (type(norm).__name__, name)
+
+
+def _mapping_of(tensor: torch.Tensor) -> tuple[str, str]:
+    """Permissions and file of the mapping that holds `tensor`'s data."""
+    ptr = tensor.data_ptr()
+    with open("/proc/self/maps") as maps:
+        for line in maps:
+            fields = line.split()
+            start, end = (int(bound, 16) for bound in fields[0].split("-"))
+            if start <= ptr < end:
+                return fields[1], fields[-1]
+    raise AssertionError("tensor data is not mapped")
+
+
+@pytest.mark.parametrize("integrated", [True, False])
+def test_safetensors_iterator_maps_read_only_on_integrated_gpu(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path, integrated: bool
+) -> None:
+    """A device copy from the private writable mapping safetensors creates
+    duplicates every source page on integrated GPUs, so tensors bound for one
+    come from a mapping without write permission. Elsewhere the mapping is
+    safetensors' own.
+    """
+    monkeypatch.setattr(torch.cuda, "is_initialized", lambda: integrated)
+    monkeypatch.setattr(current_platform, "is_integrated_gpu", lambda _: integrated)
+    path = str((tmp_path / "w.safetensors").resolve())
+    save_file({"w": torch.ones(1 << 16, device="cpu")}, path)
+
+    for _, tensor in safetensors_weights_iterator([path], False):
+        perms, mapped_file = _mapping_of(tensor)
+        assert mapped_file == path
+        assert perms == ("r--s" if integrated else "rw-p")
+
+
+def test_safetensors_iterator_read_only_mapping_matches_safetensors(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+) -> None:
+    """The read-only mapping must yield what `get_tensor` does, including
+    dtypes NumPy lacks and tensors without elements or dimensions.
+    """
+    monkeypatch.setattr(torch.cuda, "is_initialized", lambda: True)
+    monkeypatch.setattr(current_platform, "is_integrated_gpu", lambda _: True)
+    raw = torch.randint(0, 256, (48,), dtype=torch.uint8, device="cpu")
+    path = str(tmp_path / "w.safetensors")
+    save_file(
+        {
+            "float32": raw.clone().view(torch.float32).reshape(3, 4),
+            "bf16": raw.clone().view(torch.bfloat16).reshape(2, 3, 4),
+            "fp8": raw.clone().view(torch.float8_e4m3fn),
+            "uint8": raw[1:].reshape(47, 1).clone(),
+            "int64": raw.clone().view(torch.int64),
+            "bool": (raw > 127).reshape(6, 8),
+            "0d": torch.tensor(0.5, device="cpu"),
+            "empty": torch.empty(0, 8, dtype=torch.bfloat16, device="cpu"),
+        },
+        path,
+    )
+
+    yielded = dict(safetensors_weights_iterator([path], False))
+    with safe_open(path, framework="pt") as f:
+        assert yielded.keys() == set(f.keys())
+        for name, tensor in yielded.items():
+            expected = f.get_tensor(name)
+            assert (tensor.dtype, tensor.shape) == (expected.dtype, expected.shape)
+            assert torch.equal(
+                tensor.reshape(-1).view(torch.uint8),
+                expected.reshape(-1).view(torch.uint8),
+            ), name
+
+
+def test_integrated_gpu_copy_keeps_checkpoint_pages_shared(tmp_path: Path) -> None:
+    """Copying a yielded tensor to an integrated GPU must not duplicate its
+    pages into anonymous memory. CI has no integrated GPU, so this only runs
+    on machines such as DGX Spark or Jetson.
+    """
+    if not (torch.cuda.is_available() and current_platform.is_integrated_gpu(None)):
+        pytest.skip("requires an integrated GPU")
+
+    def rss_anon() -> int:
+        with open("/proc/self/status") as status:
+            for line in status:
+                if line.startswith("RssAnon:"):
+                    return int(line.split()[1]) * 1024
+        raise AssertionError("no RssAnon in /proc/self/status")
+
+    path = str(tmp_path / "w.safetensors")
+    save_file({"w": torch.ones(64 << 20, dtype=torch.uint8, device="cpu")}, path)
+    dst = torch.empty(64 << 20, dtype=torch.uint8, device="cuda")
+    torch.accelerator.synchronize()
+
+    for _, src in safetensors_weights_iterator([path], False):
+        before = rss_anon()
+        dst.copy_(src)
+        torch.accelerator.synchronize()
+        assert rss_anon() - before < src.nbytes // 2
 
 
 if __name__ == "__main__":

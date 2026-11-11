@@ -9,12 +9,14 @@ import glob
 import hashlib
 import inspect
 import json
+import mmap
 import os
 import random
 import sys
 import tempfile
 import threading
 import time
+import warnings
 from collections.abc import Callable, Generator, Iterable
 from contextlib import contextmanager, suppress
 from pathlib import Path
@@ -1088,6 +1090,56 @@ def _prefetch_all_checkpoints(
     threading.Thread(target=_run_prefetch, daemon=True).start()
 
 
+class _ReadOnlySafetensors:
+    """Tensors of a safetensors file on a read-only mapping of it.
+
+    On integrated GPUs a host-to-device copy from the private writable mapping
+    safetensors creates duplicates every source page in host memory. The
+    tensors keep this mapping alive, and writing to one in place is a
+    segmentation fault.
+    """
+
+    def __init__(self, st_file: str) -> None:
+        with open(st_file, "rb") as f:
+            self._mmap = mmap.mmap(f.fileno(), 0, access=mmap.ACCESS_READ)
+        data_start = 8 + int.from_bytes(self._mmap[:8], "little")
+        header = json.loads(self._mmap[8:data_start])
+        self._offsets = {
+            name: data_start + info["data_offsets"][0]
+            for name, info in header.items()
+            if name != "__metadata__"
+        }
+        # torch warns once per process that the buffer is not writable
+        with warnings.catch_warnings():
+            warnings.simplefilter("ignore", UserWarning)
+            torch.frombuffer(self._mmap, dtype=torch.uint8, count=1)
+
+    def view_like(self, name: str, tensor: torch.Tensor) -> torch.Tensor:
+        """Rebuild the safetensors tensor `name` on this mapping."""
+        if tensor.numel() == 0:
+            return tensor
+        view = torch.frombuffer(
+            self._mmap,
+            dtype=tensor.dtype,
+            count=tensor.numel(),
+            offset=self._offsets[name],
+        )
+        return view.reshape(tensor.shape)
+
+
+def _map_safetensors_read_only(st_file: str) -> _ReadOnlySafetensors | None:
+    try:
+        return _ReadOnlySafetensors(st_file)
+    except (OSError, ValueError) as e:
+        logger.warning_once(
+            "Could not map %s read-only (%s). Falling back to the safetensors "
+            "mapping, which makes weight loading slower on integrated GPUs.",
+            st_file,
+            e,
+        )
+        return None
+
+
 def safetensors_weights_iterator(
     hf_weights_files: list[str],
     use_tqdm_on_load: bool,
@@ -1177,6 +1229,9 @@ def safetensors_weights_iterator(
     if shuffle_safetensors_files:
         sorted_files = _shuffle_files(sorted_files)
 
+    # Querying the device would initialize CUDA in a process not loading onto it.
+    cuda_ready = torch.cuda.is_initialized()
+    integrated_gpu = cuda_ready and current_platform.is_integrated_gpu(None)
     leftover_state_dict: dict[str, torch.Tensor] = {}
     for st_file in tqdm(
         sorted_files,
@@ -1221,11 +1276,14 @@ def safetensors_weights_iterator(
                 )
             yield from unflattened_state_dict.items()
         else:
+            read_only = _map_safetensors_read_only(st_file) if integrated_gpu else None
             with safe_open(st_file, framework="pt") as f:
                 for name in f.keys():  # noqa: SIM118
                     if should_skip_weight(name, local_expert_ids):
                         continue
                     param = f.get_tensor(name)
+                    if read_only is not None:
+                        param = read_only.view_like(name, param)
                     yield name, param
 
 
