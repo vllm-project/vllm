@@ -185,7 +185,7 @@ def _prepare_rope_positions_kernel(
                     + j * prefill_positions_stride1
                     + orig_pos,
                     mask=mask,
-                )
+                ).to(tl.int64)
             else:
                 pos = orig_pos + delta
             tl.store(
