@@ -578,6 +578,9 @@ You can pass pre-computed audio embeddings similar to image embeddings:
 
 When using multi-modal inputs, vLLM normally hashes each media item by content to enable caching across requests. You can optionally pass `multi_modal_uuids` to provide your own stable IDs for each item so caching can reuse work across requests without rehashing the raw content.
 
+!!! warning
+    vLLM does not check a provided UUID against the media. Requests that use the same UUID share the cached processor and encoder outputs, even when they come from different callers. If untrusted callers can choose UUIDs, read [Multimodal Media UUID Security](../usage/security.md#multimodal-media-uuid-security) first.
+
 ??? code
 
     ```python
@@ -632,12 +635,15 @@ Using UUIDs, you can also skip sending media data entirely if you expect cache h
         print(o.outputs[0].text)
     ```
 
-!!! warning
-    If both multimodal processor caching and prefix caching are disabled, user-provided `multi_modal_uuids` are ignored.
+!!! note
+    If both multimodal processor caching and prefix caching are disabled, vLLM skips content hashing and gives each item without a UUID a request-local ID. User-provided `multi_modal_uuids` are still used as given.
 
 ## Online Serving
 
 Our OpenAI-compatible server accepts multi-modal data via the [Chat Completions API](https://platform.openai.com/docs/api-reference/chat). Media inputs also support optional UUIDs users can provide to uniquely identify each media, which is used to cache the media results across requests.
+
+!!! warning
+    The server uses a client's `uuid` as the cache identity of that media item and does not check it against the media. The examples below use the media URL as the UUID, which is fine when every client is trusted. If clients you do not trust share the server, follow [Multimodal Media UUID Security](../usage/security.md#multimodal-media-uuid-security).
 
 !!! important
     A chat template is **required** to use Chat Completions API.
