@@ -8,9 +8,9 @@ dependency with a lightweight sequential Markov head.
 
 The parallel backbone is a standard Qwen3 decoder stack reused from the
 DFlash Qwen3 draft (see qwen3_dflash.py). DSpark adds:
-  * ``markov_head``: low-rank V x r / r x V transition bias added to the base
+  * `markov_head`: low-rank V x r / r x V transition bias added to the base
     logits, sampled left-to-right by the speculator (the sequential stage).
-  * ``confidence_head``: per-position acceptance-probability estimate.
+  * `confidence_head`: per-position acceptance-probability estimate.
 
 DSparkMarkovHead and DSparkConfidenceHead are shared with the DSV4-style DSpark model.
 """
@@ -49,9 +49,9 @@ logger = init_logger(__name__)
 class DSparkMarkovHead(nn.Module):
     """Sequential transition-bias head (low-rank V x r, r x V).
 
-    ``markov_w1[token]`` embeds the previously sampled token (target vocab,
-    ``vocab_size``); ``markov_w2`` projects it to a draft-vocab bias
-    (``draft_vocab_size``) added to the base draft logits. The two sizes
+    `markov_w1[token]` embeds the previously sampled token (target vocab,
+    `vocab_size`); `markov_w2` projects it to a draft-vocab bias
+    (`draft_vocab_size`) added to the base draft logits. The two sizes
     coincide for full-vocab drafts.
 
     Both weights are replicated because the head runs sequentially for every
@@ -82,7 +82,7 @@ class DSparkMarkovHead(nn.Module):
         self.markov_w2.is_w4a16_nvfp4 = False
 
     def embed(self, token_ids: torch.Tensor) -> torch.Tensor:
-        """r-dim Markov embedding of ``token_ids`` ([B] -> [B, r])."""
+        """r-dim Markov embedding of `token_ids` ([B] -> [B, r])."""
         return self.markov_w1(token_ids)
 
     def bias(
@@ -101,9 +101,9 @@ class DSparkMarkovHead(nn.Module):
         index: torch.Tensor,
         scale: float = 1.0,
     ) -> torch.Tensor:
-        """Apply the Markov bias only to selected rows of ``logits``.
+        """Apply the Markov bias only to selected rows of `logits`.
 
-        The caller initializes ``logits`` to ``-inf`` once for all draft
+        The caller initializes `logits` to `-inf` once for all draft
         positions. This method scatters the corrected candidate values into
         that dense buffer so the normal sampler sees the truncated proposal.
         """
@@ -323,7 +323,6 @@ class Qwen3DSparkForCausalLM(DFlashQwen3ForCausalLM):
         includes_embed_tokens = False
         includes_lm_head = False
         includes_draft_id_mapping = False
-        includes_confidence_head = False
         for name, loaded_weight in weights:
             # t2d is training-only; the draft remaps via d2t at sampling time.
             if "t2d" in name:
@@ -337,8 +336,6 @@ class Qwen3DSparkForCausalLM(DFlashQwen3ForCausalLM):
                 includes_embed_tokens = True
             if "lm_head" in name:
                 includes_lm_head = True
-            if "confidence_head" in name:
-                includes_confidence_head = True
             model_weights[name] = loaded_weight
             # Sets has_own_embed_tokens / has_own_lm_head so load_dspark_model
             # knows whether to keep these or alias the target's.
@@ -347,23 +344,6 @@ class Qwen3DSparkForCausalLM(DFlashQwen3ForCausalLM):
         # mask_embedding is an unused placeholder param; DSpark masks via the vocab row.
         # embed_tokens / lm_head are optional; when omitted they are shared from
         # the target by load_dspark_model, so skip the unloaded params here.
-        uses_expanded_input_vocab = self.config.vocab_size > self.target_vocab_size
-        uses_reduced_vocab = self.config.draft_vocab_size < self.target_vocab_size
-        if uses_expanded_input_vocab and not includes_embed_tokens:
-            raise ValueError(
-                "Qwen3 DSpark checkpoints whose input vocab_size is larger than "
-                "the target vocabulary must include embed_tokens weights."
-            )
-        if uses_reduced_vocab and not includes_lm_head:
-            raise ValueError(
-                "Reduced-vocabulary Qwen3 DSpark checkpoints must include "
-                "lm_head weights; the full target lm_head cannot be shared."
-            )
-        if uses_reduced_vocab and not includes_draft_id_mapping:
-            raise ValueError(
-                "Reduced-vocabulary Qwen3 DSpark checkpoints must include a "
-                "d2t mapping so sampled draft ids can be converted to target ids."
-            )
 
         orig_to_new_substr = {"mask_embedding": None}
         if not includes_embed_tokens:
@@ -372,10 +352,8 @@ class Qwen3DSparkForCausalLM(DFlashQwen3ForCausalLM):
             orig_to_new_substr["lm_head"] = None
         if not includes_draft_id_mapping:
             orig_to_new_substr["draft_id_to_target_id"] = None
-        if self.model.confidence_head is None or not includes_confidence_head:
-            self.model.confidence_head = None
+        if self.model.confidence_head is None:
             orig_to_new_substr["confidence_head"] = None
         mapper = WeightsMapper(orig_to_new_substr=orig_to_new_substr)
         loader = AutoWeightsLoader(self)
         loader.load_weights(model_weights.items(), mapper=mapper)
-        self.model._build_fused_kv_buffers()

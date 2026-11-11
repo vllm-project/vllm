@@ -185,7 +185,7 @@ class DSparkDeepseekV4Model(nn.Module):
     def combine_hidden_states(self, aux_hidden_states: torch.Tensor) -> torch.Tensor:
         """main_x = main_norm(main_proj(concat of target aux hidden states)).
 
-        ``aux_hidden_states`` is [T, hidden_size * len(target_layer_ids)].
+        `aux_hidden_states` is [T, hidden_size * len(target_layer_ids)].
         """
         return self.main_norm(self.main_proj(aux_hidden_states))
 
@@ -199,13 +199,13 @@ class DSparkDeepseekV4Model(nn.Module):
         """Insert the sliding-window context KV for every draft layer.
 
         Mirrors the reference DSparkAttention: each layer derives its context KV
-        from the SAME projected target hidden ``main_x``, via that layer's own
-        ``wkv`` + ``kv_norm`` + RoPE + quant, then writes it at the
+        from the SAME projected target hidden `main_x`, via that layer's own
+        `wkv` + `kv_norm` + RoPE + quant, then writes it at the
         layer's context slots.
 
-        ``context_slot_mappings`` is a per-layer list (each entry is the context
+        `context_slot_mappings` is a per-layer list (each entry is the context
         slot mapping for that layer's kv-cache group, since the hybrid manager may
-        place draft layers in different groups). ``None`` (or a ``None`` entry)
+        place draft layers in different groups). `None` (or a `None` entry)
         runs the projection to reserve workspace but writes nothing (profiling).
         """
         all_kv = self.context_wkv_proj(main_x).view(
@@ -288,7 +288,7 @@ def _insert_context_kv(
 
     Reuses the DSV4 fused insert ops (which also process a query; we pass a dummy
     query and discard it, since context tokens have no query). Mirrors
-    ``DeepseekV4Attention._fused_qnorm_rope_kv_insert``.
+    `DeepseekV4Attention._fused_qnorm_rope_kv_insert`.
     """
     swa_cache = attn.swa_cache_layer.kv_cache
     block_size = attn.swa_cache_layer.block_size
@@ -448,10 +448,10 @@ class DSparkDeepseekV4ForCausalLM(nn.Module, DeepseekV4MixtureOfExperts):
     # --- Weight loading ----------------------------------------------------
 
     def load_weights(self, weights: Iterable[tuple[str, torch.Tensor]]) -> set[str]:
-        """Load the ``mtp.{0,1,2}.*`` draft weights from the target checkpoint.
+        """Load the `mtp.{0,1,2}.*` draft weights from the target checkpoint.
 
         Non-mtp weights (embed/head/main layers) belong to the target model and
-        are skipped here. ``embed_tokens``/``lm_head`` are aliased from the target.
+        are skipped here. `embed_tokens`/`lm_head` are aliased from the target.
         """
         first_layer = self.model.layers[0]
         use_native_mega_moe = first_layer.ffn.use_native_mega_moe
@@ -484,7 +484,6 @@ class DSparkDeepseekV4ForCausalLM(nn.Module, DeepseekV4MixtureOfExperts):
 
         params_dict = dict(self.named_parameters())
         loaded_params: set[str] = set()
-        loaded_confidence_head = False
 
         weights = _duplicate_context_wkv_weights(weights, len(self.model.layers))
         for name, loaded_weight in weights:
@@ -492,9 +491,6 @@ class DSparkDeepseekV4ForCausalLM(nn.Module, DeepseekV4MixtureOfExperts):
             if mapped is None:
                 continue
             name = mapped
-            if "confidence_head." in name:
-                loaded_confidence_head = True
-
             # ``.scale`` -> per-method scale suffix.
             if name.endswith(".scale"):
                 suffix = (
@@ -570,13 +566,11 @@ class DSparkDeepseekV4ForCausalLM(nn.Module, DeepseekV4MixtureOfExperts):
                 weight_loader(param, loaded_weight)
                 loaded_params.add(name)
 
-        if self.model.confidence_head is not None and not loaded_confidence_head:
-            self.model.confidence_head = None
         logger.info_once("DSpark draft model loaded: %d params", len(loaded_params))
         return loaded_params
 
     def _remap_dspark_name(self, name: str) -> str | None:
-        """Map a checkpoint ``mtp.{i}.*`` name to this model's parameter path.
+        """Map a checkpoint `mtp.{i}.*` name to this model's parameter path.
 
         Returns None for non-mtp weights (owned by the target model).
         """

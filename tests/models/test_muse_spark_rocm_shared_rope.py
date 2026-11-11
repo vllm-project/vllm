@@ -6,12 +6,14 @@ from types import SimpleNamespace
 import torch
 from torch import nn
 
+import vllm.model_executor.layers.rotary_embedding as rotary_embedding
 import vllm.models.muse_spark.amd.model as amd_model
 
 
 def test_target_layers_share_fp32_rope_cache(monkeypatch, default_vllm_config):
+    monkeypatch.setattr(rotary_embedding, "_ROPE_DICT", {})
     monkeypatch.setattr(amd_model, "get_tensor_model_parallel_world_size", lambda: 1)
-    for name in ("MuseSpark1xQKVOGateParallelLinear", "RowParallelLinear", "Attention"):
+    for name in ("MuseSparkQKVOGateParallelLinear", "RowParallelLinear", "Attention"):
         monkeypatch.setattr(amd_model, name, lambda *args, **kwargs: nn.Identity())
     monkeypatch.setattr(amd_model, "supports_fused_kv_insert", lambda attn: True)
     config = SimpleNamespace(
@@ -26,7 +28,7 @@ def test_target_layers_share_fp32_rope_cache(monkeypatch, default_vllm_config):
         qk_scale_factor=1.0,
     )
     first, second = (
-        amd_model.MuseSpark1xAttention(
+        amd_model.MuseSparkAttention(
             config=config,
             max_position_embeddings=4096,
             prefix=f"model.layers.{i}.self_attn",

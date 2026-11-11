@@ -166,6 +166,7 @@ def test_pp_stage_sends_tp_reduced_residual_stream(monkeypatch):
     model.start_layer, model.end_layer = 0, 1
     model.use_sequence_parallel = False
     model.aux_hidden_state_layers = ()
+    model.pp_buffers = {}
 
     pp_group = SimpleNamespace(is_first_rank=False, is_last_rank=False)
     monkeypatch.setattr(deepseek_v32_model, "get_pp_group", lambda: pp_group)

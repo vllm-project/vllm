@@ -1,6 +1,9 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 
+import json
+import random
+
 import pytest
 from openai.types.responses import (
     CustomTool,
@@ -16,6 +19,7 @@ from vllm.entrypoints.generate.base.protocol import (
     DeltaMessage,
     DeltaToolCall,
 )
+from vllm.entrypoints.openai.responses import utils as responses_utils
 from vllm.entrypoints.openai.responses.streaming_events import (
     SimpleStreamingEventProcessor,
     StreamingState,
@@ -25,7 +29,10 @@ from vllm.entrypoints.openai.responses.streaming_events import (
     emit_reasoning_done_events,
     split_delta,
 )
-from vllm.entrypoints.openai.responses.utils import decode_custom_tool_input
+from vllm.entrypoints.openai.responses.utils import (
+    decode_custom_tool_input,
+    decode_custom_tool_input_prefix,
+)
 
 
 def test_browser_find_uses_responses_action_type():
@@ -281,6 +288,62 @@ class TestCustomToolStreaming:
         assert done_input == "hello"
         assert item.input == "hello"
         assert decode_custom_tool_input('{"a": "xy", "input": "hello"}') == "hello"
+
+    @staticmethod
+    def _stream_custom_tool_input(arguments: list[str]):
+        processor = SimpleStreamingEventProcessor(
+            tools=[CustomTool(type="custom", name="emit_command")]
+        )
+        _run_through_processor(
+            processor,
+            DeltaMessage(tool_calls=[_make_tool_call(0, name="emit_command")]),
+        )
+        for chunk in arguments:
+            _run_through_processor(
+                processor,
+                DeltaMessage(tool_calls=[_make_tool_call(0, arguments=chunk)]),
+            )
+            yield processor.state
+
+    @pytest.mark.parametrize("ensure_ascii", [False, True])
+    def test_streamed_payload_matches_prefix_decode(self, ensure_ascii):
+        rng = random.Random(0)
+        alphabet = ["a", " ", '"', "\\", "/", "\n", "\t", "\x01", "\x1f", "\x85"]
+        alphabet += ["\u00e9", "\u3000", "\U0001f600"]
+        for _ in range(200):
+            payload = "".join(rng.choices(alphabet, k=rng.randint(0, 40)))
+            arguments = json.dumps({"input": payload}, ensure_ascii=ensure_ascii)
+            cuts = sorted(rng.sample(range(1, len(arguments)), k=len(arguments) // 3))
+            chunks = [arguments[i:j] for i, j in zip([0, *cuts], [*cuts, None])]
+            for state in self._stream_custom_tool_input(chunks):
+                assert state.tool_call_payload == decode_custom_tool_input_prefix(
+                    state.accumulated_text
+                )
+
+    def test_payload_deltas_do_not_reparse_the_input(self, monkeypatch):
+        """Streaming cost must not grow with the input already streamed."""
+        loads = responses_utils.partial_json_parser.loads
+        calls = 0
+
+        def counting_loads(*args, **kwargs):
+            nonlocal calls
+            calls += 1
+            return loads(*args, **kwargs)
+
+        monkeypatch.setattr(
+            responses_utils.partial_json_parser, "loads", counting_loads
+        )
+
+        def full_decodes(lines: int) -> int:
+            nonlocal calls
+            calls = 0
+            arguments = json.dumps({"input": 'echo "a > b"\n' * lines})
+            chunks = [arguments[i : i + 4] for i in range(0, len(arguments), 4)]
+            for _ in self._stream_custom_tool_input(chunks):
+                pass
+            return calls
+
+        assert full_decodes(lines=10) == full_decodes(lines=100)
 
     def test_done_reported_authoritative_payload_on_mismatch(self):
         """If the final decode is not an extension of what was streamed, the

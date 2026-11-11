@@ -18,6 +18,19 @@ def wrap_eagle_hf_config(spec: SpeculativeConfig, method: str) -> None:
     spec.update_arch_()
 
 
+def check_draft_lm_head_quantization(spec: SpeculativeConfig) -> None:
+    draft = spec.draft_model_config
+    if (
+        spec.draft_lm_head_quantization is not None
+        and draft is not None
+        and draft.head_dtype != draft.dtype
+    ):
+        raise ValueError(
+            "draft_lm_head_quantization needs the lm_head to run in the "
+            f"model dtype, got head_dtype={draft.head_dtype}."
+        )
+
+
 class EagleSpeculatorConfig(DraftModelSpeculatorConfig):
     base_method = "eagle"
     speculator_class = "vllm.v1.worker.gpu.spec_decode.eagle.speculator.EagleSpeculator"
@@ -37,28 +50,11 @@ class EagleSpeculatorConfig(DraftModelSpeculatorConfig):
 
     @classmethod
     def apply_options(cls, spec: SpeculativeConfig) -> None:
-        draft = spec.draft_model_config
-        if (
-            spec.draft_lm_head_quantization is not None
-            and draft is not None
-            and draft.head_dtype != draft.dtype
-        ):
-            raise ValueError(
-                "draft_lm_head_quantization needs the lm_head to run in the "
-                f"model dtype, got head_dtype={draft.head_dtype}."
-            )
+        check_draft_lm_head_quantization(spec)
 
     @property
     def num_lookahead_tokens(self) -> int:
         return self.num_speculative_tokens
-
-    @property
-    def max_num_new_slots_for_drafting(self) -> int:
-        if self.spec_config.parallel_drafting:
-            # P-EAGLE (V1 model runner only): the existing query is reused; only
-            # masked queries need new slots.
-            return self.num_speculative_tokens - 1
-        return 0
 
 
 class Eagle3SpeculatorConfig(EagleSpeculatorConfig):

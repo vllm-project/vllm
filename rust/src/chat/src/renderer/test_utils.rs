@@ -6,7 +6,7 @@ use std::fs;
 use std::path::Path;
 
 use serde::Deserialize;
-use serde_json::Value;
+use serde_json::{Value, json};
 
 use crate::EffortValue;
 use crate::event::{AssistantContentBlock, AssistantToolCall};
@@ -283,4 +283,68 @@ fn to_chat_tools(tools: &[FixtureTool]) -> Vec<ChatTool> {
             defer_loading: None,
         })
         .collect()
+}
+
+/// One tool with a description, optionally deferred.
+pub(crate) fn tool(
+    name: &str,
+    description: &str,
+    parameters: Value,
+    defer_loading: bool,
+) -> ChatTool {
+    ChatTool {
+        name: name.to_string(),
+        description: Some(description.to_string()),
+        parameters,
+        strict: None,
+        defer_loading: defer_loading.then_some(true),
+    }
+}
+
+/// A DeepSeek tool search turn with thinking off: `tool_search` and two
+/// deferred tools, and a search result referencing `references`, followed by
+/// user text. Matches the Messages request of the deepseek-recipe goldens.
+pub(crate) fn tool_search_request(references: &[&str]) -> ChatRequest {
+    let messages = vec![
+        ChatMessage::user("weather in Paris?"),
+        ChatMessage::assistant_blocks(vec![AssistantContentBlock::ToolCall(AssistantToolCall {
+            id: "call_1".to_string(),
+            name: "tool_search".to_string(),
+            arguments: r#"{"query": "weather"}"#.to_string(),
+        })]),
+        ChatMessage::tool_response(
+            references
+                .iter()
+                .map(|name| ChatContentPart::tool_reference(*name))
+                .collect::<Vec<_>>(),
+            "call_1",
+        ),
+        ChatMessage::user("go on"),
+    ];
+    let tools = vec![
+        tool(
+            "tool_search",
+            "Search tools",
+            json!({"type": "object", "properties": {"query": {"type": "string"}}}),
+            false,
+        ),
+        tool(
+            "get_weather",
+            "Weather",
+            json!({"type": "object", "properties": {"city": {"type": "string"}}}),
+            true,
+        ),
+        tool("get_time", "Time", json!({"type": "object"}), true),
+    ];
+    let tool_context = ResolvedToolContext::new(&messages, tools, None, true).unwrap();
+    let mut request = ChatRequest {
+        messages,
+        tool_context,
+        ..ChatRequest::for_test()
+    };
+    request
+        .chat_options
+        .template_kwargs
+        .insert("thinking".into(), Value::Bool(false));
+    request
 }

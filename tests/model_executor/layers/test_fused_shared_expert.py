@@ -12,11 +12,11 @@ from unittest.mock import patch
 import pytest
 import torch
 from torch import nn
-from transformers import Qwen3_5MoeTextConfig
+from transformers import MiniMaxM3VLTextConfig, Qwen3_5MoeTextConfig
 
 import vllm.config as vllm_config_module
 from vllm.config import ParallelConfig, VllmConfig, set_current_vllm_config
-from vllm.config.quantization import QuantizationConfigArgs
+from vllm.config.quantization import QuantizationConfigArgs, QuantSpec
 from vllm.logger import _print_warning_once
 from vllm.model_executor.layers.fused_moe import utils as fused_moe_utils
 from vllm.model_executor.layers.fused_moe.layer import determine_expert_counts
@@ -39,7 +39,6 @@ from vllm.model_executor.models.utils import (
 from vllm.models.deepseek_v4 import quant_config as deepseek_v4_quant_config
 from vllm.models.minimax_m3.amd import model as minimax_m3_model
 from vllm.platforms import current_platform
-from vllm.transformers_utils.configs.minimax_m3 import MiniMaxM3TextConfig
 
 pytestmark = pytest.mark.skipif(
     current_platform.is_xpu(),
@@ -162,7 +161,7 @@ def get_fse_test_model_config(
 ) -> tuple[Any, type[nn.Module]]:
     config: Any
     if model_type == "minimax_m3":
-        config = MiniMaxM3TextConfig(
+        config = MiniMaxM3VLTextConfig(
             hidden_size=128,
             intermediate_size=32,
             dense_intermediate_size=32,
@@ -172,9 +171,9 @@ def get_fse_test_model_config(
             head_dim=128,
             num_local_experts=2,
             num_experts_per_tok=1,
-            moe_layer_freq=[1, 1],
-            sparse_attention_config=None,
+            mlp_layer_types=["sparse", "sparse"],
             rotary_dim=64,
+            scoring_func="sigmoid",
             quantization_config=quantization_config,
         )
         return config, minimax_m3_model.MiniMaxM3Model
@@ -1093,8 +1092,8 @@ def _make_fake_moe_model(
 def test_fused_shared_expert_layers_matches_container_index_space() -> None:
     """The fused-layer set follows the module tree, not a hard-coded offset.
 
-    ``nn.ModuleList`` MTP layers (Qwen3 Next/3.5, Qwen4 Exp) are 0-based,
-    while ``nn.ModuleDict`` MTP layers (GLM4, DeepSeek) are keyed by absolute
+    `nn.ModuleList` MTP layers (Qwen3 Next/3.5, Qwen4 Exp) are 0-based,
+    while `nn.ModuleDict` MTP layers (GLM4, DeepSeek) are keyed by absolute
     layer index. Both must redirect without a per-loader offset.
     """
     list_model = _make_fake_moe_model(["0", "1"], [True, False], use_dict=False)
@@ -1139,11 +1138,11 @@ def test_mixed_fused_shared_experts_rejected_with_ep_or_nixl_ep(
 ) -> None:
     """Mixed FSE must be rejected with EP or a shared-workspace all2all backend.
 
-    With EP, per-layer geometry differences are not validated. ``nixl_ep``
+    With EP, per-layer geometry differences are not validated. `nixl_ep`
     additionally keeps a single process-wide buffer initialized from the first
-    MoE layer's ``num_experts_per_rank`` and ignores later geometries. A mixed
-    model has fused layers with ``n_routed + n_shared`` experts and non-fused
-    layers with ``n_routed``, so reusing that buffer would silently map experts
+    MoE layer's `num_experts_per_rank` and ignores later geometries. A mixed
+    model has fused layers with `n_routed + n_shared` experts and non-fused
+    layers with `n_routed`, so reusing that buffer would silently map experts
     to the wrong slots. Construction must fail cleanly instead of running the
     untested mixed path.
     """
@@ -1166,8 +1165,8 @@ def _assert_mtp_fused_shared_expert_redirect(
 ) -> None:
     """Load a fused MTP shared expert and verify it lands in the appended slot.
 
-    The MTP loaders see different name/index spaces (0-based ``ModuleList`` or
-    absolute ``ModuleDict``); using the live module map must redirect either.
+    The MTP loaders see different name/index spaces (0-based `ModuleList` or
+    absolute `ModuleDict`); using the live module map must redirect either.
     """
     packed_down = torch.full((128, 16), 3, dtype=torch.uint8)
     down_scale = torch.full((128, 1), 127, dtype=torch.uint8)
@@ -1189,7 +1188,7 @@ def _assert_mtp_shared_expert_not_fused(
     """Load an unfused MTP shared expert and verify no fused slot is appended.
 
     Without AITER the shared expert stays a separate MLP, so the routed tensor must
-    keep exactly ``n_routed_experts`` rows.
+    keep exactly `n_routed_experts` rows.
     """
     packed_down = torch.full((128, 16), 3, dtype=torch.uint8)
     down_scale = torch.full((128, 1), 127, dtype=torch.uint8)
@@ -1261,9 +1260,9 @@ def _build_mtp_model(
         "draft_model_config": SimpleNamespace(**draft_model_config),
         "method": "mtp",
         "speculator_config": SimpleNamespace(speculator_class="MTP"),
-        "parallel_drafting": False,
         "enable_adaptive_verification": False,
         "use_dspark": lambda: False,
+        "use_multi_module_mtp": lambda: False,
     }
     if with_target_model:
         speculative_config["target_model_config"] = vllm_config.model_config
@@ -1327,7 +1326,7 @@ def _build_mtp_for_model(
 
 # TODO: move to conftest.py.
 class _SingleRankGroup:
-    """No-op single-rank stand-in for a compiled ``GroupCoordinator``."""
+    """No-op single-rank stand-in for a compiled `GroupCoordinator`."""
 
     world_size = 1
     rank_in_group = 0
@@ -2051,32 +2050,54 @@ def test_online_fp8_shared_expert_rejects_quark_mxfp4_fse() -> None:
     assert f"at {shared_prefix} do not match the routed expert keys" in reason
 
 
-def test_online_mxfp4_shared_expert_rejects_quark_weight_only_mxfp4_fse() -> None:
-    """Weight-only routed experts keep BF16 activations, unlike an MXFP4 target."""
+@pytest.mark.parametrize("routed_weight_only", [False, True])
+@pytest.mark.parametrize(
+    "target",
+    [
+        "mxfp4",
+        {"weight": "mxfp4"},
+        {"weight": "mxfp4", "activation": "mxfp4"},
+        {"weight": "mxfp4", "activation": None},
+    ],
+)
+def test_online_mxfp4_shared_expert_fse_compares_resolved_keys(
+    routed_weight_only: bool, target: str | dict
+) -> None:
+    """FSE requires the shared expert's resolved (weight, activation) keys to
+    match the routed experts': an omitted activation resolves to the online
+    method default (MXFP4), `null` to BF16."""
     shared_prefix = "model.layers.0.mlp.shared_expert"
+    global_quant_config = dict(_QUARK_FSE_CONFIG["global_quant_config"])
+    if routed_weight_only:
+        global_quant_config["input_tensors"] = None
     quant_config = QuarkConfig(
         {
             **_QUARK_FSE_CONFIG,
             "exclude": [],
-            "global_quant_config": {
-                **_QUARK_FSE_CONFIG["global_quant_config"],
-                "input_tensors": None,
-            },
+            "global_quant_config": global_quant_config,
         }
     )
     quant_config.online_quantization_config = OnlineQuantizationConfig(
-        QuantizationConfigArgs(targets={f"{shared_prefix}*": "mxfp4"})
+        QuantizationConfigArgs(
+            targets={
+                f"{shared_prefix}*": target
+                if isinstance(target, str)
+                else QuantSpec(**target)
+            }
+        )
     )
+    shared_bf16_act = isinstance(target, dict) and target.get("activation", 0) is None
 
     compatible, reason = is_shared_expert_quant_fse_compatible(
         quant_config,
         "model.layers.0.mlp.experts",
         shared_prefix,
     )
-    assert not compatible
-    assert reason is not None
-    assert reason.startswith("shared expert (weight, activation) keys ")
-    assert f"at {shared_prefix} do not match the routed expert keys" in reason
+    assert compatible is (shared_bf16_act == routed_weight_only)
+    if not compatible:
+        assert reason is not None
+        assert reason.startswith("shared expert (weight, activation) keys ")
+        assert f"at {shared_prefix} do not match the routed expert keys" in reason
 
 
 @pytest.mark.parametrize(
@@ -2117,7 +2138,7 @@ def test_quark_shared_expert_fse_exclude_is_scoped_to_the_layer() -> None:
     """Excluding one layer's shared experts must not disable FSE elsewhere.
 
     amd/GLM-5.2-MXFP4 excludes its MTP layer (78) wholesale, including
-    ``model.layers.78.mlp.shared_experts.{gate,up,down}_proj``, while the 75
+    `model.layers.78.mlp.shared_experts.{gate,up,down}_proj`, while the 75
     target MoE layers keep MXFP4 shared experts.
     """
     quant_config = QuarkConfig(
@@ -2172,10 +2193,10 @@ def test_quark_shared_expert_fse_ignores_sibling_gate_exclusions() -> None:
 
     Qwen3.x MoE checkpoints (e.g. amd/Qwen3.5-397B-A17B-MoE-MXFP4) quantize the
     shared expert to MXFP4 but leave the tiny routing gates next to it in BF16:
-    ``model.language_model.layers.N.mlp.shared_expert_gate`` and
-    ``model.language_model.layers.N.mlp.gate``. Neither is a shared-expert
-    projection, so fusion must stay enabled. Matching ``shared_expert`` against
-    raw exclude entries also matches ``shared_expert_gate``, which silently
+    `model.language_model.layers.N.mlp.shared_expert_gate` and
+    `model.language_model.layers.N.mlp.gate`. Neither is a shared-expert
+    projection, so fusion must stay enabled. Matching `shared_expert` against
+    raw exclude entries also matches `shared_expert_gate`, which silently
     disables FSE on every such checkpoint.
     """
     expert_prefix = "model.language_model.layers.0.mlp.experts"
