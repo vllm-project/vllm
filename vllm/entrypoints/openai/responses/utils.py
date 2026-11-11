@@ -346,8 +346,29 @@ def construct_input_messages(
         messages.append({"role": "user", "content": request_input})
     else:
         input_messages = construct_chat_messages_with_tool_call(request_input)
+        if request_instructions and len(messages) == 1:
+            texts = [request_instructions]
+            while input_messages and (
+                (text := _system_message_text(input_messages[0])) is not None
+            ):
+                texts.append(text)
+                input_messages.pop(0)
+            messages[0]["content"] = "\n\n".join(texts)
         messages.extend(input_messages)
     return messages
+
+
+def _system_message_text(message: ChatCompletionMessageParam) -> str | None:
+    if message.get("role") != "system":
+        return None
+    content = message.get("content")
+    if isinstance(content, str):
+        return content
+    if isinstance(content, list) and all(
+        isinstance(part, dict) and isinstance(part.get("text"), str) for part in content
+    ):
+        return "\n".join(part["text"] for part in content)
+    return None
 
 
 def construct_chat_messages_with_tool_call(
