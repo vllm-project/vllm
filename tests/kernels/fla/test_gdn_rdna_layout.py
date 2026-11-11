@@ -39,7 +39,21 @@ def _inputs(T, dtype, cu_seqlens):
     return q, k, v, beta, g, A, h
 
 
+# Different num_warps/BK change the reduction order, so both runs must use the
+# same config for a bitwise comparison.
+PINNED = [
+    (wy_fast.recompute_w_u_fwd_kernel, triton.Config({}, num_warps=4, num_stages=1)),
+    (
+        chunk_o.chunk_fwd_kernel_o,
+        triton.Config({"BK": 64, "BV": 64}, num_warps=4, num_stages=2),
+    ),
+]
+
+
 def _run_both(monkeypatch, fn):
+    for kernel, cfg in PINNED:
+        monkeypatch.setattr(kernel.fn, "configs", [cfg])
+        monkeypatch.setattr(kernel.fn, "cache", {})
     outs = []
     for rdna in (False, True):
         monkeypatch.setattr(wy_fast, "is_rdna", rdna)
