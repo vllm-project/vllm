@@ -1,7 +1,7 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 
-from collections.abc import Callable, Collection, Iterable, Mapping, Sequence
+from collections.abc import Callable, Iterable, Mapping, Sequence
 from contextlib import AbstractContextManager, nullcontext
 from dataclasses import dataclass, replace
 from typing import TYPE_CHECKING, Any, cast
@@ -204,12 +204,7 @@ def init_attn_backend(
     device: torch.device,
     active_layer_names: set[str] | None = None,
     draft_layer_names: set[str] | None = None,
-    maps_slot_mapping: bool = False,
-    slot_mapped_layers: Collection[str] = (),
 ) -> tuple[list[list[AttentionGroup]], AttentionCGSupportInfo, list[int]]:
-    """`maps_slot_mapping`: the caller maps every slot mapping it builds to
-    kernel blocks (AttentionGroup.map_to_kernel_slot_mapping); or only for the
-    `slot_mapped_layers`, which another runner (a speculator) writes."""
     # Phase 1: discover attention groups for each kv cache group.
     attn_groups: list[list[AttentionGroup]] = []
 
@@ -237,10 +232,8 @@ def init_attn_backend(
         layer_type = cast(type[Any], AttentionLayerBase)
         attn_layers = get_layers_from_vllm_config(vllm_config, layer_type, layer_names)
 
-        group_map: dict[
-            tuple[tuple[str, str], KVCacheSpec, int, bool], AttentionGroup
-        ] = {}
-        group_order: list[tuple[tuple[str, str], KVCacheSpec, int, bool]] = []
+        group_map: dict[tuple[tuple[str, str], KVCacheSpec, int], AttentionGroup] = {}
+        group_order: list[tuple[tuple[str, str], KVCacheSpec, int]] = []
 
         for layer_name in layer_names:
             attn_backend = attn_layers[layer_name].get_attn_backend()
@@ -267,23 +260,12 @@ def init_attn_backend(
 
             # Split on per-rank num_heads_q so layers with different Q-head
             # counts (e.g. a spec-decode draft head and its target) get separate
-            # metadata builders, and on whether a speculator maps the layer's
-            # slot mappings.
+            # metadata builders.
             num_heads_q = getattr(attn_layers[layer_name], "num_heads", 0)
-            maps = maps_slot_mapping or layer_name in slot_mapped_layers
-            key = (
-                attn_backend.full_cls_name(),
-                layer_kv_cache_spec,
-                num_heads_q,
-                maps,
-            )
+            key = (attn_backend.full_cls_name(), layer_kv_cache_spec, num_heads_q)
             if key not in group_map:
                 group_map[key] = AttentionGroup(
-                    attn_backend,
-                    [layer_name],
-                    layer_kv_cache_spec,
-                    kv_cache_group_id,
-                    maps_slot_mapping=maps,
+                    attn_backend, [layer_name], layer_kv_cache_spec, kv_cache_group_id
                 )
                 group_order.append(key)
             else:
@@ -478,25 +460,13 @@ def bind_kv_caches(
 
 
 def build_slot_mappings_by_layer(
-    slot_mappings: torch.Tensor,
-    kv_cache_config: KVCacheConfig,
-    attn_groups: list[list[AttentionGroup]] | None = None,
-    ubatch_idx: int = 0,
+    slot_mappings: torch.Tensor, kv_cache_config: KVCacheConfig
 ) -> dict[str, torch.Tensor]:
     slot_mappings_by_layer: dict[str, torch.Tensor] = {}
     kv_cache_groups = kv_cache_config.kv_cache_groups
-    for i, (slot_mapping, kv_cache_group) in enumerate(
-        zip(slot_mappings, kv_cache_groups)
-    ):
+    for slot_mapping, kv_cache_group in zip(slot_mappings, kv_cache_groups):
         for layer_name in kv_cache_group.layer_names:
             slot_mappings_by_layer[layer_name] = slot_mapping
-        # Token caches split into the kernel blocks of a packed cache.
-        for attn_group in attn_groups[i] if attn_groups else ():
-            if attn_group.kernel_slot_mapping is None:
-                continue
-            mapped = attn_group.map_to_kernel_slot_mapping(slot_mapping, ubatch_idx)
-            for layer_name in attn_group.layer_names:
-                slot_mappings_by_layer[layer_name] = mapped
     return slot_mappings_by_layer
 
 
