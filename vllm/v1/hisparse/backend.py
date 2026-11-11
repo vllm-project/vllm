@@ -63,7 +63,7 @@ class HiSparseBackend:
     ) -> None:
         """Copy resident rows into staging without changing their payload format.
 
-        A 3D ``destination`` is a paged staging cache, filled in row order."""
+        A 3D `destination` is a paged staging cache, filled in row order."""
         rows = row_ids.to(torch.long).clamp_min(0)
         block_size = source.shape[1]
         payload = source[rows // block_size, rows % block_size]

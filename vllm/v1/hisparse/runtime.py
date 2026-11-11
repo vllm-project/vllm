@@ -112,7 +112,7 @@ def compress_slot_mapping(
 ) -> None:
     """Map token slots to the cache row their compressed state is written to:
     each block's rows hold its tokens' states in order, one per
-    ``tokens_per_row`` tokens, written at the last token of each state."""
+    `tokens_per_row` tokens, written at the last token of each state."""
     torch.floor_divide(token_slots, tokens_per_row, out=out)
     out.masked_fill_(token_slots % tokens_per_row != tokens_per_row - 1, -1)
 
@@ -145,7 +145,7 @@ class HiSparseRowSlotMappings:
 def split_row_planes(
     cache: torch.Tensor, row_value_bytes: int
 ) -> tuple[torch.Tensor, ...]:
-    """Views of a paged cache's row planes: ``[num_blocks, block_size, width]``
+    """Views of a paged cache's row planes: `[num_blocks, block_size, width]`
     for the value bytes, then the remaining bytes, of every row."""
     if not row_value_bytes:
         return (cache,)
