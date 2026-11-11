@@ -216,6 +216,7 @@ _TEXT_GENERATION_EXAMPLE_MODELS = {
             "vllm": "Needs https://github.com/huggingface/transformers/pull/50644"
         },
     ),
+    "AXK2ForCausalLM": _HfExamplesInfo("skt/A.X-K2", min_transformers_version="5.23.0"),
     "BailingMoeForCausalLM": _HfExamplesInfo(
         "inclusionAI/Ling-lite-1.5", trust_remote_code=True
     ),

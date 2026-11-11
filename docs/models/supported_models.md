@@ -476,6 +476,7 @@ Some models are supported only via the [Transformers modeling backend](#transfor
 | Architecture | Models | Example HF Models | [LoRA](../features/lora.md) | [PP](../serving/parallelism_scaling.md) |
 | ------------ | ------ | ----------------- | -------------------- | ------------------------- |
 | `AXK1ForCausalLM` | A.X-K1 | `skt/A.X-K1`, etc. | ✅︎ | ✅︎ |
+| `AXK2ForCausalLM` | A.X-K2 | `skt/A.X-K2`, etc. | | |
 | `ArceeForCausalLM` | Arcee (AFM) | `arcee-ai/AFM-4.5B-Base`, etc. | ✅︎ | ✅︎ |
 | `CwmForCausalLM` | CWM | `facebook/cwm`, etc. | ✅︎ | ✅︎ |
 | `Ernie4_5ForCausalLM` | Ernie4.5 | `baidu/ERNIE-4.5-0.3B-PT`, etc. | ✅︎ | ✅︎ |

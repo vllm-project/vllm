@@ -18,6 +18,7 @@
 
 from typing import TYPE_CHECKING
 
+import torch
 import torch.nn.functional as F
 from transformers.modeling_utils import ALL_ATTENTION_FUNCTIONS
 
@@ -42,8 +43,6 @@ from vllm.model_executor.models.transformers.transcription import (
 from vllm.multimodal import MULTIMODAL_REGISTRY
 
 if TYPE_CHECKING:
-    import torch
-
     from vllm.model_executor.layers.attention import Attention, MLAAttention
 
 
@@ -117,8 +116,10 @@ def vllm_mla_attention_forward(
     # [batch=1, heads=1, num_tokens, qk_rope] -> [num_tokens, 1, qk_rope]
     k_pe = k_pe.reshape(-1, 1, k_pe.shape[-1])
     if self_attn.use_sparse:
-        # This layer's indexer (if any) has written the top-k indices
-        self_attn.impl.record_logical_topk_ready()
+        topk_indices_buffer = self_attn.impl.topk_indices_buffer
+        torch.ops.vllm.transformers_record_topk_ready(
+            topk_indices_buffer, self_attn.layer_name
+        )
     attn_output = self_attn.forward(
         query,
         kv_c_normed,

@@ -7,6 +7,7 @@ from typing import TYPE_CHECKING
 import torch
 from torch import nn
 
+from vllm.forward_context import get_forward_context
 from vllm.model_executor.layers.quantization.utils.fp8_utils import (
     per_token_group_quant_fp8,
 )
@@ -14,6 +15,7 @@ from vllm.model_executor.layers.sparse_attn_indexer import (
     DeepseekV32IndexerCache,
     SparseAttnIndexer,
 )
+from vllm.utils.torch_utils import direct_register_custom_op
 from vllm.v1.attention.backends.mla.indexer import get_max_prefill_buffer_size
 
 if TYPE_CHECKING:
@@ -27,6 +29,21 @@ and selects the top-k, which is the only part of the indexer that uses its cache
 
 QUANT_BLOCK_SIZE = 128
 """Group size for quantizing indexer queries and keys to FP8."""
+
+
+def record_topk_ready(topk_indices_buffer: torch.Tensor, layer_name: str) -> None:
+    """Tell the sparse MLA layer `layer_name` that its top-k is in
+    `topk_indices_buffer`. An op, because Dynamo cannot replay the CUDA event."""
+    layer = get_forward_context().no_compile_layers[layer_name]
+    layer.impl.record_logical_topk_ready()
+
+
+direct_register_custom_op(
+    "transformers_record_topk_ready",
+    record_topk_ready,
+    mutates_args=["topk_indices_buffer"],
+    fake_impl=lambda topk_indices_buffer, layer_name: None,
+)
 
 
 class TopkSelector(nn.Module):

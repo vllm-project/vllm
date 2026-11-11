@@ -788,6 +788,7 @@ _SPECULATIVE_DECODING_MODELS = {
 _TRANSFORMERS_SUPPORTED_MODELS = {
     # Text generation models
     "AXK1ForCausalLM": ("transformers", "TransformersMoEForCausalLM"),
+    "AXK2ForCausalLM": ("transformers", "TransformersMoEForCausalLM"),
     "ArceeForCausalLM": ("transformers", "TransformersForCausalLM"),
     "CwmForCausalLM": ("transformers", "TransformersForCausalLM"),
     "Ernie4_5ForCausalLM": ("transformers", "TransformersForCausalLM"),

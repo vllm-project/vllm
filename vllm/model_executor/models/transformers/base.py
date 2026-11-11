@@ -52,6 +52,7 @@ from vllm.model_executor.layers.attention import (
 from vllm.model_executor.layers.attention.mla_attention import get_mla_dims
 from vllm.model_executor.layers.attention_layer_base import AttentionLayerBase
 from vllm.model_executor.layers.fused_moe import MoERunner
+from vllm.model_executor.layers.quantization.fp8 import Fp8Config
 from vllm.model_executor.models.interfaces import (
     EagleModelMixin,
     SupportsEagle,
@@ -514,6 +515,9 @@ class Base(
 
         # Apply mapping to quantization config if needed
         self._maybe_apply_model_mapping()
+        # Transformers matches `modules_to_not_convert` by suffix, e.g. `mlp.fc1`
+        if isinstance(self.quant_config, Fp8Config):
+            self.quant_config.ignored_layers_match_mode = "suffix"
 
     def _weight_conversions(self) -> list[WeightTransform]:
         """The Transformers weight conversions that apply to `self.model`."""
