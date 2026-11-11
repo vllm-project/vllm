@@ -988,6 +988,7 @@ def test_dsa_models_default_to_breakable_cudagraph(
         ("Qwen4ExpForConditionalGeneration", True, False),
         ("Qwen4ExpMTP", False, True),
         ("Qwen4ExpMTP", True, False),
+        ("Qwen3_5ForConditionalGeneration", True, True),
     ],
 )
 def test_breakable_cudagraph_platform_default(
@@ -1015,20 +1016,6 @@ def test_breakable_cudagraph_platform_default(
         assert "VLLM_USE_BREAKABLE_CUDAGRAPH" not in os.environ
     finally:
         default_breakable_cudagraph_architectures.cache_clear()
-
-
-@pytest.mark.parametrize(
-    "capability,breakable", [(95, True), (125, True), (94, False), (120, False)]
-)
-def test_qwen3_5_breakable_cudagraph_rocm_default(monkeypatch, capability, breakable):
-    from vllm.platforms import current_platform
-
-    monkeypatch.setattr(
-        current_platform, "is_device_capability", lambda cap: cap == capability
-    )
-    test_breakable_cudagraph_platform_default(
-        monkeypatch, "Qwen3_5ForConditionalGeneration", True, breakable
-    )
 
 
 @pytest.mark.parametrize(
