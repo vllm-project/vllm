@@ -12,7 +12,7 @@ no rollback, the next full update repairs it.
 Delivery contract (not checked here): an update delivers every checkpoint
 tensor of each module whose PWAL changes its layout or is not idempotent, and
 of every parameter flagged `fill_on_reload`, which `begin` zero-fills whole
-(padding the loaders skip), so an update must resend it whole.
+(padding the loaders skip).
 """
 
 from collections.abc import Iterator
@@ -218,9 +218,8 @@ def begin_direct_reload(model: torch.nn.Module) -> None:
         for k in _LOADER_ATTRS:
             t.__dict__.pop(k, None)
         t.__dict__.update(t._ckpt[2])
-    # Reset padding the loaders skip; erases the checkpoint region, so all is resent.
-    for _, t in loadable_tensors(model):
-        if getattr(t, "fill_on_reload", False) and _owned(model, t):
+        if getattr(t, "fill_on_reload", False):
+            # Reset padding the loaders skip; erases the checkpoint region too.
             t.data.zero_()
     logger.info(
         "direct reload: %d tensors viewed back to checkpoint layout", len(views)
