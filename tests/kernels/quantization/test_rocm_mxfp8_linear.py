@@ -216,7 +216,7 @@ def _kernel_cls(backend: str, n: int, k: int) -> type:
         return RocmDotScaledMxfp8LinearKernel
 
     from vllm._aiter_ops import is_aiter_found_and_supported, rocm_aiter_ops
-    from vllm.model_executor.kernels.linear.mxfp8.aiter import (
+    from vllm.model_executor.kernels.linear.mxfp8.aiter_triton import (
         AiterTritonMxfp8LinearKernel,
     )
 
@@ -312,18 +312,21 @@ def test_aiter_mxfp8_linear_forced_untuned_shape(monkeypatch, n, k, num_tokens):
     """A forced untuned (N, K) matches the reference on AITER's default tile,
     either side of its M <= 8192 bucket."""
     from vllm._aiter_ops import is_aiter_found_and_supported, rocm_aiter_ops
-    from vllm.model_executor.kernels.linear.mxfp8 import aiter
+    from vllm.model_executor.kernels.linear.mxfp8 import aiter_triton
+    from vllm.model_executor.kernels.linear.mxfp8.aiter_triton import (
+        AiterTritonMxfp8LinearKernel,
+    )
 
     if not is_aiter_found_and_supported():
         pytest.skip("AITER is not available")
     assert not rocm_aiter_ops.is_triton_gemm_afp8wfp8_tuned(n, k)
-    monkeypatch.setattr(aiter, "_aiter_backend_forced", lambda: True)
+    monkeypatch.setattr(aiter_triton, "_aiter_backend_forced", lambda: True)
     config = Mxfp8LinearLayerConfig(weight_shape=(n, k))
-    assert aiter.AiterTritonMxfp8LinearKernel.can_implement(config) == (True, None)
+    assert AiterTritonMxfp8LinearKernel.can_implement(config) == (True, None)
 
     torch.manual_seed(num_tokens)
     layer = _make_layer(n, k, "cuda")
-    kernel = aiter.AiterTritonMxfp8LinearKernel(config)
+    kernel = AiterTritonMxfp8LinearKernel(config)
     kernel.process_weights_after_loading(layer)
     x = torch.randn(num_tokens, k, device="cuda", dtype=torch.bfloat16) * 0.5
     out = kernel.apply_weights(layer, x)

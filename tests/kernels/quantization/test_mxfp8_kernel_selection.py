@@ -165,7 +165,7 @@ def _patch_rocm_platform(linear_backend: str = "auto"):
             RocmDotScaledMxfp8LinearKernel, "is_supported", return_value=(True, None)
         ),
         patch(
-            "vllm.model_executor.kernels.linear.mxfp8.aiter.rocm_aiter_ops."
+            "vllm.model_executor.kernels.linear.mxfp8.aiter_triton.rocm_aiter_ops."
             "is_triton_gemm_afp8wfp8_tuned",
             side_effect=lambda n, k: (n, k) == _AITER_TUNED_SHAPE,
         ),
@@ -218,8 +218,10 @@ def test_aiter_mxfp8_not_supported_when_batch_invariant():
     """The tuned decode configs split K, so batch-invariant runs must use a
     different kernel."""
     with (
-        patch("vllm.model_executor.kernels.linear.mxfp8.aiter.current_platform") as p,
-        patch("vllm.model_executor.kernels.linear.mxfp8.aiter.envs") as envs,
+        patch(
+            "vllm.model_executor.kernels.linear.mxfp8.aiter_triton.current_platform"
+        ) as p,
+        patch("vllm.model_executor.kernels.linear.mxfp8.aiter_triton.envs") as envs,
     ):
         p.is_rocm.return_value = True
         p.supports_mx.return_value = True
