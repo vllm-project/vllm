@@ -2067,9 +2067,11 @@ class GPUModelRunner(LoRAModelRunnerMixin):
             # Prepare inputs_embeds (MM encoder outputs and/or prompt_embeds
             # overlay). Only first PP rank prepares them.
             if dummy_run:
-                # Obtain embeddings of correct shape for compiled model.
+                # Obtain embeddings of correct shape for compiled model. The
+                # model reads these instead of input_ids, so embed the random ids.
                 inputs_embeds = self.model_state.dummy_inputs_embeds(
-                    input_batch.num_tokens_after_padding
+                    input_batch.num_tokens_after_padding,
+                    input_ids if randomize_inputs else None,
                 )
             else:
                 scheduled_encoder_inputs = scheduler_output.scheduled_encoder_inputs
@@ -2166,7 +2168,9 @@ class GPUModelRunner(LoRAModelRunnerMixin):
                 skip_compiled=skip_compiled,
                 is_padding=input_batch.is_padding,
             ):
-                self.kv_connector.pre_forward(scheduler_output, input_batch)
+                self.kv_connector.pre_forward(
+                    scheduler_output, input_batch, attn_metadata=attn_metadata
+                )
                 if ubatch_state is not None:
                     assert self.ubatch_runner is not None
                     model_output = self.ubatch_runner.run(
