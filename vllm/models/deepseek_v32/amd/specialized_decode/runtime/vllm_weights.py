@@ -71,13 +71,13 @@ from vllm.models.deepseek_v32.amd.specialized_decode.flydsl.config import (
     FP8_BLOCK_ROWS,
     GLM5_CONFIG,
     HIDDEN,
-    INTER,
     KV_LORA,
     N_EXPERTS,
     NOPE_DIM,
     PE_DIM,
     Q_LORA,
     V_DIM,
+    LayerConfig,
 )
 from vllm.models.deepseek_v32.amd.specialized_decode.flydsl.glm.layout import (
     INDEX_DIM,
@@ -279,8 +279,8 @@ def fp8_linear_blocks(mod, name: str, shape: tuple[int, int]):
     return w, s
 
 
-def uv_block_scales(s: torch.Tensor) -> torch.Tensor:
-    """kv_b_proj's [HEADS * 448 / 128, 4] block scales as w_uv's [HEADS * 256 / 64, 4]:
+def uv_block_scales(s: torch.Tensor, heads: int = HEADS) -> torch.Tensor:
+    """kv_b_proj's [heads * 448 / 128, 4] block scales as w_uv's [heads * 256 / 64, 4]:
     every 64 value rows lie in one of kv_b's 128-row blocks (the value rows of a head
     start at 448 h + 192, both multiples of 64)."""
     r = FP8_BLOCK_ROWS["uv"]
@@ -288,7 +288,7 @@ def uv_block_scales(s: torch.Tensor) -> torch.Tensor:
         NOPE_DIM % r == 0 and (NOPE_DIM + V_DIM) % r == 0 and FP8_BLOCK % r == 0,
         "uv value rows not aligned to its scale blocks",
     )
-    g = torch.arange(HEADS * V_DIM // r, device=s.device)
+    g = torch.arange(heads * V_DIM // r, device=s.device)
     kv_row = (
         (g // (V_DIM // r)) * (NOPE_DIM + V_DIM) + NOPE_DIM + (g % (V_DIM // r)) * r
     )
@@ -323,9 +323,14 @@ def unsupported_moe(mlp) -> str | None:
     return None
 
 
-def weights_from_model(layer) -> tuple[dict[str, torch.Tensor], dict]:
+def weights_from_model(
+    layer, cfg: LayerConfig = GLM5_CONFIG
+) -> tuple[dict[str, torch.Tensor], dict]:
     """(t, LayerWeights kwargs) of one loaded DeepseekV32DecoderLayer on this rank:
-    views of vLLM's tensors (only w_uk / w_uv are copied); never writes them."""
+    views of vLLM's tensors (only w_uk / w_uv are copied); never writes them. `cfg`:
+    the TP shard's geometry (`glm5_tp_config`: 8 local heads and expert intermediate
+    256 at TP8, 16 and 512 at TP4)."""
+    heads, inter = cfg.local_heads, cfg.inter
     a, mlp = layer.self_attn, layer.mlp
     why = unsupported_moe(mlp)
     _need(why is None, f"unsupported {why}")
@@ -340,8 +345,8 @@ def weights_from_model(layer) -> tuple[dict[str, torch.Tensor], dict]:
         t[key] = _bf16(mod.weight, key, (n,))
     for key, rows_k in (
         ("qkv_a", (Q_LORA + KV_LORA + PE_DIM, HIDDEN)),
-        ("q_b", (HEADS * (NOPE_DIM + PE_DIM), Q_LORA)),
-        ("o", (HIDDEN, HEADS * V_DIM)),
+        ("q_b", (heads * (NOPE_DIM + PE_DIM), Q_LORA)),
+        ("o", (HIDDEN, heads * V_DIM)),
     ):
         name = ATTENTION_MODULES[key]
         mod = getattr(a, name)
@@ -349,39 +354,39 @@ def weights_from_model(layer) -> tuple[dict[str, torch.Tensor], dict]:
             t[f"w_{key}"], t[f"s_{key}"] = fp8_linear(mod, name, rows_k)
         else:
             t[f"w_{key}"] = _bf16(mod.weight, name, rows_k)
-    kv_b_shape = (HEADS * (NOPE_DIM + V_DIM), KV_LORA)
+    kv_b_shape = (heads * (NOPE_DIM + V_DIM), KV_LORA)
     if is_fp8(a.kv_b_proj.weight):
         q, s = fp8_linear(a.kv_b_proj, "kv_b_proj", kv_b_shape)
-        t["w_uv"] = q.view(HEADS, -1, KV_LORA)[:, NOPE_DIM:].reshape(
-            HEADS * V_DIM, KV_LORA
+        t["w_uv"] = q.view(heads, -1, KV_LORA)[:, NOPE_DIM:].reshape(
+            heads * V_DIM, KV_LORA
         )
         t["s_uv"] = (
-            uv_block_scales(s)
+            uv_block_scales(s, heads)
             if is_fp8_block(a.kv_b_proj)
-            else s.view(HEADS, -1)[:, NOPE_DIM:].reshape(HEADS * V_DIM)
+            else s.view(heads, -1)[:, NOPE_DIM:].reshape(heads * V_DIM)
         )
         uk_t = getattr(a, "W_UK_T", None)
         _need(
             isinstance(uk_t, torch.Tensor)
             and _data(uk_t).dtype is torch.bfloat16
-            and tuple(uk_t.shape) == (HEADS, NOPE_DIM, KV_LORA),
+            and tuple(uk_t.shape) == (heads, NOPE_DIM, KV_LORA),
             "FP8 kv_b_proj needs MLA's BF16 W_UK_T [8, 192, 512] (absent or "
             "requantized under VLLM_ROCM_USE_AITER_FP8BMM / _FP4BMM: unset them)",
         )
         t["w_uk"] = (
-            _data(uk_t).transpose(1, 2).reshape(HEADS * KV_LORA, NOPE_DIM).contiguous()
+            _data(uk_t).transpose(1, 2).reshape(heads * KV_LORA, NOPE_DIM).contiguous()
         )
     else:
         by_head = _bf16(a.kv_b_proj.weight, "kv_b_proj", kv_b_shape).view(
-            HEADS, -1, KV_LORA
+            heads, -1, KV_LORA
         )
         t["w_uk"] = (
             by_head[:, :NOPE_DIM]
             .transpose(1, 2)
-            .reshape(HEADS * KV_LORA, NOPE_DIM)
+            .reshape(heads * KV_LORA, NOPE_DIM)
             .contiguous()
         )
-        t["w_uv"] = by_head[:, NOPE_DIM:].reshape(HEADS * V_DIM, KV_LORA).contiguous()
+        t["w_uv"] = by_head[:, NOPE_DIM:].reshape(heads * V_DIM, KV_LORA).contiguous()
     gw = _data(mlp.gate.weight)
     _need(
         tuple(gw.shape) == (N_EXPERTS, HIDDEN) and gw.is_contiguous(),
@@ -399,26 +404,26 @@ def weights_from_model(layer) -> tuple[dict[str, torch.Tensor], dict]:
         else bias.float().contiguous()
     )
     for key, p, shape in (
-        ("w_ug", ex.w13_weight, (N_EXPERTS, 2 * INTER, HIDDEN // 2)),
-        ("s_ug", ex.w13_weight_scale, (N_EXPERTS * 2 * INTER, HIDDEN // 32)),
-        ("w_dn", ex.w2_weight, (N_EXPERTS, HIDDEN, INTER // 2)),
-        ("s_dn", ex.w2_weight_scale, (N_EXPERTS * HIDDEN, INTER // 32)),
+        ("w_ug", ex.w13_weight, (N_EXPERTS, 2 * inter, HIDDEN // 2)),
+        ("s_ug", ex.w13_weight_scale, (N_EXPERTS * 2 * inter, HIDDEN // 32)),
+        ("w_dn", ex.w2_weight, (N_EXPERTS, HIDDEN, inter // 2)),
+        ("s_dn", ex.w2_weight_scale, (N_EXPERTS * HIDDEN, inter // 32)),
     ):
         t[key] = _u8(p, f"experts.{key}", shape)
     gu_s, dn_s = _data(sh.gate_up_proj.weight_scale), _data(sh.down_proj.weight_scale)
-    native = tuple(gu_s.shape) == (HIDDEN // 32, 2 * INTER)
+    native = tuple(gu_s.shape) == (HIDDEN // 32, 2 * inter)
     _need(
-        native or tuple(gu_s.shape) == (2 * INTER, HIDDEN // 32),
+        native or tuple(gu_s.shape) == (2 * inter, HIDDEN // 32),
         f"shared gate_up weight_scale {tuple(gu_s.shape)}: unknown layout",
     )
     t["w_ug_sh"] = _u8(
-        sh.gate_up_proj.weight, "shared gate_up", (2 * INTER, HIDDEN // 2)
+        sh.gate_up_proj.weight, "shared gate_up", (2 * inter, HIDDEN // 2)
     )
-    t["w_dn_sh"] = _u8(sh.down_proj.weight, "shared down", (HIDDEN, INTER // 2))
+    t["w_dn_sh"] = _u8(sh.down_proj.weight, "shared down", (HIDDEN, inter // 2))
     s_shapes = (
-        ((HIDDEN // 32, 2 * INTER), (INTER // 32, HIDDEN))
+        ((HIDDEN // 32, 2 * inter), (inter // 32, HIDDEN))
         if native
-        else ((2 * INTER, HIDDEN // 32), (HIDDEN, INTER // 32))
+        else ((2 * inter, HIDDEN // 32), (HIDDEN, inter // 32))
     )
     t["s_ug_sh"] = _u8(gu_s, "shared gate_up scale", s_shapes[0])
     t["s_dn_sh"] = _u8(dn_s, "shared down scale", s_shapes[1])

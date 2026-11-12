@@ -155,7 +155,10 @@ def _reasons_and_config(vllm_config) -> tuple[list[str], DecodeConfig | None]:
     kv_dtype = vllm_config.cache_config.cache_dtype
     checks = (
         (model_type != "glm_moe_dsa", f"model_type {model_type} (GLM-5.2 only)"),
-        (pc.tensor_parallel_size != 8, f"TP {pc.tensor_parallel_size} (TP8 only)"),
+        (
+            pc.tensor_parallel_size not in (4, 8),
+            f"TP {pc.tensor_parallel_size} (TP4 or TP8)",
+        ),
         (pc.pipeline_parallel_size != 1, "pipeline parallelism"),
         (pc.data_parallel_size != 1, "data parallelism"),
         (pc.enable_expert_parallel, "expert parallelism"),

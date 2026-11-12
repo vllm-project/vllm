@@ -688,6 +688,8 @@ ALL_FP8 = tuple(ML.ATTENTION_MODULES)
         (ALL_FP8, True, 4096, range(4, 9), {}, (True, set(), "first mono layer")),
         # debug switch: non-fused
         (ALL_FP8, True, 4096, range(3, 9), dict(no_fused=True), (True, set(), "debug")),
+        # TP4: vLLM's indexer (the index-query schedule is built for TP8)
+        (ALL_FP8, True, 4096, range(3, 9), dict(tp_size=4), (True, set(), "TP 4")),
     ],
 )
 def test_attention_path(fp8, index_fp8, mml, layers, kw, want):

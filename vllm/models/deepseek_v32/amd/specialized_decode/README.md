@@ -38,7 +38,9 @@ FP8 mixed in one model.
 
 ## Supported deployments
 
-- **Hardware:** gfx950 (MI350X / MI355X), TP = 8, Model Runner V2.
+- **Hardware:** gfx950 (MI350X / MI355X), TP = 8 or 4, Model Runner V2. At TP 4 the
+  kernels serve steps of up to 4 requests (larger builds spill registers) and the
+  indexer layers run vLLM's indexer.
 - **Precision:** `dtype=bfloat16`; `kv_cache_dtype` auto, bfloat16 or fp8 (e4m3 at
   scale 1: no `calculate_kv_scales`).
 - **Graphs:** FULL decode CUDA graphs or eager mode. Any capture sizes and

@@ -42,7 +42,7 @@ def _set(vc, path: str, value):
 # (VllmConfig field, unsupported value, reason fragment)
 REASONS = [
     ("model_config.hf_config.model_type", "deepseek_v32", "model_type deepseek_v32"),
-    ("parallel_config.tensor_parallel_size", 4, "TP 4"),
+    ("parallel_config.tensor_parallel_size", 2, "TP 2"),
     ("parallel_config.pipeline_parallel_size", 2, "pipeline parallelism"),
     ("parallel_config.data_parallel_size", 2, "data parallelism"),
     ("parallel_config.enable_expert_parallel", True, "expert parallelism"),
@@ -104,11 +104,11 @@ def test_unsupported_platform_and_config(make_vc, monkeypatch):
 def test_all_reasons_reported(make_vc, monkeypatch):
     """Startup lists every reason, not only the first."""
     monkeypatch.setattr(R, "_platform_reason", lambda: "this GPU (gfx950 only)")
-    vc = make_vc(tp=4, pp=2, kv="fp8_ds_mla")
+    vc = make_vc(tp=2, pp=2, kv="fp8_ds_mla")
     _set(vc, "lora_config", object())
     with pytest.raises(ValueError) as e:
         R.specialized_decode_config(vc)
-    for frag in ("TP 4", "pipeline", "kv_cache_dtype", "LoRA"):
+    for frag in ("TP 2", "pipeline", "kv_cache_dtype", "LoRA"):
         assert frag in str(e.value), (frag, str(e.value))
     assert "gfx950" in str(e.value)  # the platform probe
 
@@ -117,6 +117,7 @@ def test_all_reasons_reported(make_vc, monkeypatch):
 def test_supported_config(make_vc, monkeypatch):
     """No reason: a DecodeConfig for the graph mode."""
     assert R.unsupported(make_vc()) == []
+    assert R.unsupported(make_vc(tp=4)) == []
     dc = R.specialized_decode_config(make_vc())
     assert isinstance(dc, DecodeConfig)
     assert dc.batch_sizes == (1, 2, 4, 5, 6, 8)
@@ -158,9 +159,9 @@ def test_monokernel_flag_selects_the_specialized_decode(make_vc):
     vc.kernel_config = NS(monokernel=True)
     assert R.decode_backend(vc) == "latency_specialized"
     assert isinstance(R.specialized_decode_config(vc), R.DecodeConfig)
-    vc = make_vc(backend=None, tp=4)
+    vc = make_vc(backend=None, tp=2)
     vc.kernel_config = NS(monokernel=True)
-    with pytest.raises(ValueError, match="TP 4"):
+    with pytest.raises(ValueError, match="TP 2"):
         R.specialized_decode_config(vc)
     vc.kernel_config = NS(monokernel=False)
     assert R.specialized_decode_config(vc) is None

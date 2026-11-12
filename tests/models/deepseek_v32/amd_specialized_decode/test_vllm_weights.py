@@ -148,7 +148,10 @@ def _p(x):
     return torch.nn.Parameter(x, requires_grad=False)
 
 
-def _layer(g, shared_native=True, backend="AITER_MXFP4_MXFP4"):
+def _layer(g, shared_native=True, backend="AITER_MXFP4_MXFP4", heads=8, inter=INTER):
+    """A loaded DeepseekV32DecoderLayer stand-in at one TP rank (TP8: 8 local heads,
+    expert intermediate 256; TP4: 16 and 512)."""
+    INTER = inter  # noqa: N806
     bf = lambda *s: torch.randn(*s, generator=g).to(torch.bfloat16)
     m = lambda **kw: NS(**{k: _p(v) for k, v in kw.items()})
     fp4 = getattr(torch, "float4_e2m1fn_x2", torch.uint8)
@@ -180,9 +183,9 @@ def _layer(g, shared_native=True, backend="AITER_MXFP4_MXFP4"):
             q_a_layernorm=m(weight=bf(2048)),
             kv_a_layernorm=m(weight=bf(512)),
             fused_qkv_a_proj=m(weight=bf(2624, HIDDEN)),
-            q_b_proj=m(weight=bf(2048, 2048)),
-            o_proj=m(weight=bf(HIDDEN, 2048)),
-            kv_b_proj=m(weight=bf(8 * 448, 512)),
+            q_b_proj=m(weight=bf(heads * 256, 2048)),
+            o_proj=m(weight=bf(HIDDEN, heads * 256)),
+            kv_b_proj=m(weight=bf(heads * 448, 512)),
         ),
         mlp=NS(
             gate=NS(
@@ -222,6 +225,24 @@ def test_weights_from_model_views(native):
     assert t["s_ug_sh"].shape == (
         (HIDDEN // 32, 2 * INTER) if native else (2 * INTER, HIDDEN // 32)
     )
+
+
+def test_weights_from_model_tp4():
+    """A TP4 rank's shard (16 local heads, expert intermediate 512) through
+    glm5_tp_config(4); TP8 shapes are refused at TP4."""
+    from vllm.models.deepseek_v32.amd.specialized_decode.flydsl.config import (
+        glm5_tp_config,
+    )
+
+    cfg = glm5_tp_config(4)
+    lay = _layer(_g(4), heads=16, inter=512)
+    t, _ = VW.weights_from_model(lay, cfg)
+    kv_b = lay.self_attn.kv_b_proj.weight.data.view(16, 448, 512)
+    assert torch.equal(t["w_uk"].view(16, 512, 192), kv_b[:, :192].transpose(1, 2))
+    assert t["w_q_b"].shape == (4096, 2048) and t["w_o"].shape == (HIDDEN, 4096)
+    assert t["w_ug"].shape == (E, 1024, HIDDEN // 2)
+    with pytest.raises(VW.WeightViewError, match="q_b_proj"):
+        VW.weights_from_model(_layer(_g(4)), cfg)
 
 
 def test_weights_from_model_refusals():

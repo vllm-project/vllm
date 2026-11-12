@@ -48,6 +48,8 @@ from vllm.models.deepseek_v32.amd.specialized_decode.runtime.vllm_weights import
 
 logger = init_logger(__name__)
 
+# TP4 shards (16 local heads) build without register spills up to 4 rows a step
+TP4_MAX_BATCH_SIZE = 4
 # GLM-5.2 decode geometry the kernel is built for (flydsl/config.py GLM5_CONFIG)
 TOPK = 2048  # index_topk: sparse keys per query row
 MLA_ROW = KV_LORA + PE_DIM  # 576: one fused MLA cache row
@@ -65,14 +67,19 @@ def index_max_seq(max_model_len: int) -> int:
 
 
 def attention_path(
-    layers: dict, has_indexer: dict, max_model_len: int, no_fused: bool = False
+    layers: dict,
+    has_indexer: dict,
+    max_model_len: int,
+    no_fused: bool = False,
+    tp_size: int = 8,
 ) -> tuple[bool, frozenset[int], str]:
     """(FP8 attention, fused-indexer layers, why the fused indexer is off or '') from
     the loaded mono layers' weight dtypes: the checkpoint decides, nothing is
     requantized. Attention (qkv_a, q_b, kv_b, o) must be all BF16 or all FP8 on every
     mono layer; the fused indexer needs FP8 attention, the layer's FP8 `wq_b`,
-    max_model_len <= 4096 and a first mono layer without an indexer (it converts
-    vLLM's top-k). Raises RuntimeError on partial / mixed FP8 attention."""
+    max_model_len <= 4096, a first mono layer without an indexer (it converts
+    vLLM's top-k) and TP8 (its index-query tiles fill the CTAs q_b leaves idle at 8
+    local heads). Raises RuntimeError on partial / mixed FP8 attention."""
     from .vllm_weights import is_fp8
 
     fp8 = {
@@ -112,6 +119,8 @@ def attention_path(
         if not fp8_attention
         else "debug_no_fused_indexer"
         if no_fused
+        else f"TP {tp_size} (its index-query schedule is built for TP8)"
+        if tp_size != 8
         else "the indexer wq_b is not FP8"
         if not any(index_fp8.values())
         else f"max_model_len {max_model_len} > {FUSED_INDEX_MAX_SEQ} (LDS-resident "
@@ -187,10 +196,14 @@ class MonoLayers:
         self.tp = get_tp_group()
         self.rank = self.tp.rank_in_group
         self.npes = self.tp.world_size
-        assert self.npes == 8, "GLM MonoKernel geometry is TP8"
+        assert self.npes in (4, 8), "GLM MonoKernel geometry is TP4 or TP8"
         self.cpu_group = self.tp.cpu_group
         self.dev = torch.device("cuda", torch.accelerator.current_device_index())
         self.batch_sizes = cfg.batch_sizes
+        if self.npes == 4:
+            self.batch_sizes = tuple(
+                b for b in self.batch_sizes if b <= TP4_MAX_BATCH_SIZE
+            )
         self.max_rows = self.batch_sizes[-1]
         self.layers = {L: backbone.layers[L] for L in cfg.layers}
         for L, layer in self.layers.items():
@@ -209,7 +222,11 @@ class MonoLayers:
             for L, lay in self.layers.items()
         }
         self.fp8_attention, self.fused_layers, no_fused = attention_path(
-            self.layers, self.has_indexer, cfg.max_model_len, cfg.debug_no_fused_indexer
+            self.layers,
+            self.has_indexer,
+            cfg.max_model_len,
+            cfg.debug_no_fused_indexer,
+            self.npes,
         )
         self.index_max_seq = index_max_seq(cfg.max_model_len)
         # the fused indexer reads vLLM's index cache in its KV block (16-token SHUFFLE
@@ -331,13 +348,13 @@ class MonoLayers:
         for L in self.order:
             layer = self.layers[L]
             vllm_storages = {p.untyped_storage().data_ptr() for p in layer.parameters()}
-            t, kw = weights_from_model(layer)
+            t, kw = weights_from_model(layer, glm5_tp_config(self.npes))
             if L in self.fused_layers:
                 index_t = index_weights_from_model(layer.self_attn)
                 assert index_t is not None, L  # attention_path: FP8 wq_b
                 t.update(index_t)
             W = LayerWeights(
-                8,
+                glm5_tp_config(self.npes).local_heads,
                 t,
                 config=glm5_tp_config(self.npes),
                 rank=self.rank,
