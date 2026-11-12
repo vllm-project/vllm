@@ -2,6 +2,7 @@
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 import io
 import sys
+import tracemalloc
 from pathlib import Path
 from types import SimpleNamespace
 
@@ -60,6 +61,53 @@ def test_video_request_budget_counts_torch_frames(monkeypatch: pytest.MonkeyPatc
 
     with pytest.raises(ValueError, match="VLLM_MAX_MEDIA_REQUEST_DECODE_BYTES"):
         video_io.load_bytes(b"video")
+
+
+def _write_opencv_test_video(tmp_path: Path, side: int, num_frames: int) -> bytes:
+    image_path = f"{tmp_path}/budget_frame.png"
+    Image.new("RGB", (side, side), color=(0, 0, 0)).save(image_path)
+    video_path = f"{tmp_path}/budget_video.mp4"
+    create_video_from_image(image_path, video_path, num_frames=num_frames)
+    return Path(video_path).read_bytes()
+
+
+@pytest.mark.skip_global_cleanup
+def test_video_request_budget_rejects_before_decoding(
+    tmp_path, monkeypatch: pytest.MonkeyPatch
+):
+    """An oversized sample is rejected before its frames are allocated."""
+    data = _write_opencv_test_video(tmp_path, side=512, num_frames=8)
+    frame_bytes = 512 * 512 * 3
+    monkeypatch.setattr(envs, "VLLM_MAX_MEDIA_REQUEST_DECODE_BYTES", 4 * frame_bytes)
+    budget = MediaDecodedBudget()
+    video_io = VideoMediaIO(ImageMediaIO(decoded_budget=budget), num_frames=-1)
+
+    tracemalloc.start()
+    try:
+        with pytest.raises(ValueError, match="VLLM_MAX_MEDIA_REQUEST_DECODE_BYTES"):
+            video_io.load_bytes(data)
+        _, peak = tracemalloc.get_traced_memory()
+    finally:
+        tracemalloc.stop()
+
+    assert peak < 2 * frame_bytes
+    assert budget.used == 0
+
+
+@pytest.mark.skip_global_cleanup
+def test_video_request_budget_charges_decoded_frames_once(
+    tmp_path, monkeypatch: pytest.MonkeyPatch
+):
+    data = _write_opencv_test_video(tmp_path, side=32, num_frames=8)
+    frame_bytes = 32 * 32 * 3
+    monkeypatch.setattr(envs, "VLLM_MAX_MEDIA_REQUEST_DECODE_BYTES", 4 * frame_bytes)
+    budget = MediaDecodedBudget()
+    video_io = VideoMediaIO(ImageMediaIO(decoded_budget=budget), num_frames=4)
+
+    frames, _ = video_io.load_bytes(data).media
+
+    assert frames.shape == (4, 32, 32, 3)
+    assert budget.used == frames.nbytes
 
 
 def test_video_media_io_kwargs(monkeypatch: pytest.MonkeyPatch):
