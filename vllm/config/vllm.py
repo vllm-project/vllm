@@ -2644,7 +2644,12 @@ class VllmConfig:
                 max_num_tokens,
             )
         extend = extended_max_tokens > shared_max
-        if extend and compilation_config.max_decode_cudagraph_capture_tokens is None:
+        if (
+            extend
+            and compilation_config.max_decode_cudagraph_capture_tokens is None
+            and decode_sizes is None
+            and max_decode_requests is None
+        ):
             # One-token draft decodes keep their graphs up to max_num_seqs.
             compilation_config.max_decode_cudagraph_capture_tokens = max(
                 extended_max_tokens, min(max_num_seqs, max_num_tokens)

@@ -806,8 +806,9 @@ class CompilationConfig:
     requests at query length `q` only while `n * q` fits, and wider decode
     batches take the prefill graphs. It also bounds adaptive verification's
     token-keyed graphs. None (default): 8192 on SM100 GPUs; with speculative
-    decoding on breakable CUDA graphs on CDNA4 (gfx950), the prefill default
-    but at least `max_num_seqs`; otherwise no budget.
+    decoding on breakable CUDA graphs on CDNA4 (gfx950) and no decode request
+    sizes set, the prefill default but at least `max_num_seqs`; otherwise no
+    budget.
     Wider decode graphs take memory from the KV cache."""
     cudagraph_copy_inputs: bool = False
     """Whether to copy input tensors for

@@ -1026,7 +1026,7 @@ def _rocm_breakable_config(
         # CDNA3 (gfx942)
         ({"capability": 94}, (512, 83, None)),
         # A set kind keeps its setting; the deprecated fields keep both.
-        ({"max_decode_cudagraph_capture_requests": 64}, (4096, 64, 4096)),
+        ({"max_decode_cudagraph_capture_requests": 1024}, (4096, 1024, None)),
         ({"max_cudagraph_capture_size": 512}, (512, 83, None)),
     ],
 )
