@@ -218,11 +218,12 @@ class ExternalLBServerManager:
 
         env_dict = {
             "VLLM_SERVER_DEV_MODE": "1",
-            current_platform.device_control_env_var: ",".join(
+        }
+        if not current_platform.is_xpu():
+            env_dict[current_platform.device_control_env_var] = ",".join(
                 str(current_platform.device_id_to_physical_device_id(i))
                 for i in range(rank * self.tp_size, (rank + 1) * self.tp_size)
-            ),
-        }
+            )
         if elastic_ep_scale_up_launch:
             env_dict["VLLM_ELASTIC_EP_SCALE_UP_LAUNCH"] = "1"
 
@@ -510,7 +511,7 @@ async def test_external_lb_single_completion(
     num_requests_per_server = 25  # Total 50 requests across 2 servers
     all_tasks = []
 
-    for i, client in enumerate(clients):
+    for client in clients:
         tasks = [make_request(client) for _ in range(num_requests_per_server)]
         all_tasks.extend(tasks)
 
@@ -522,7 +523,7 @@ async def test_external_lb_single_completion(
 
     # Second burst of requests
     all_tasks = []
-    for i, client in enumerate(clients):
+    for client in clients:
         tasks = [make_request(client) for _ in range(num_requests_per_server)]
         all_tasks.extend(tasks)
 
@@ -601,7 +602,7 @@ async def test_external_lb_completion_streaming(
     num_requests_per_server = 25  # Total 50 requests across 2 servers
     all_tasks = []
 
-    for i, client in enumerate(clients):
+    for client in clients:
         tasks = [make_streaming_request(client) for _ in range(num_requests_per_server)]
         all_tasks.extend(tasks)
 
@@ -613,7 +614,7 @@ async def test_external_lb_completion_streaming(
 
     # Second burst of streaming requests
     all_tasks = []
-    for i, client in enumerate(clients):
+    for client in clients:
         tasks = [make_streaming_request(client) for _ in range(num_requests_per_server)]
         all_tasks.extend(tasks)
 

@@ -33,7 +33,7 @@ HF_IMAGE_PROMPTS = IMAGE_ASSETS.prompts(
     }
 )
 
-MODELS = ["MrLight/dse-qwen2-2b-mrl-v1"]
+MODELS = ["vllm-project/dse-qwen2-2b-mrl-v1"]
 
 
 def get_messages(image: Image.Image, text: str, embed_text: bool):
