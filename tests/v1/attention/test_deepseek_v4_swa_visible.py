@@ -1432,6 +1432,7 @@ def test_ds41_flashmla_swa_bi_builder_policy(monkeypatch, num_spec):
     if num_spec:
         config.speculative_config = SimpleNamespace(
             num_speculative_tokens=num_spec,
+            max_num_new_slots_for_drafting=0,
             parallel_drafting=False,
             use_dspark=lambda: False,
         )
@@ -2088,7 +2089,9 @@ def test_ds41_bi_indexer_decode_rows_match_prefill_rows(
             cp_kv_cache_interleave_size=1,
         ),
         attention_config=attention_config,
-        compilation_config=SimpleNamespace(cudagraph_mode=None),
+        compilation_config=SimpleNamespace(
+            cudagraph_mode=None, static_forward_context={}
+        ),
         speculative_config=None,
         num_speculative_tokens=0,
     )
