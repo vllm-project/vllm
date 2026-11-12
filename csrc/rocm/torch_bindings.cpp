@@ -141,6 +141,12 @@ TORCH_LIBRARY_EXPAND(TORCH_EXTENSION_NAME, rocm_ops) {
       "                bool use_interleaved_v_cache=False) -> ()");
   rocm_ops.impl("paged_attention", torch::kCUDA, &paged_attention);
 
+#ifdef VLLM_ROCM_GFX12X
+  rocm_ops.def(
+      "mxfp4_gemm_rdna4(Tensor a, Tensor b_q, Tensor b_scales) -> Tensor");
+  rocm_ops.impl("mxfp4_gemm_rdna4", torch::kCUDA, &mxfp4_gemm_rdna4);
+#endif
+
 #ifdef VLLM_ROCM_GFX115X
   rocm_ops.def(
       "rdna35_gdn_chunked(Tensor q, Tensor k, Tensor v, Tensor g, Tensor beta, "

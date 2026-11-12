@@ -38,6 +38,9 @@ torch::Tensor gptq_gemm_rdna3_wmma(torch::Tensor a, torch::Tensor b_q_weight,
 torch::Tensor mxfp4_gemm_rdna3(torch::Tensor a, torch::Tensor b_q_weight,
                                torch::Tensor b_scales_e8m0);
 
+torch::Tensor mxfp4_gemm_rdna4(torch::Tensor const& a, torch::Tensor const& b_q,
+                               torch::Tensor const& b_scales);
+
 void moe_gptq_gemm_rdna3(torch::Tensor a, torch::Tensor c,
                          torch::Tensor b_q_weight, torch::Tensor b_scales,
                          torch::Tensor b_qzeros, torch::Tensor topk_weights,
