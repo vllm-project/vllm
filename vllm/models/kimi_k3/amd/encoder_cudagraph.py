@@ -44,9 +44,8 @@ class KimiK3EncoderCudaGraphMixin(SupportsEncoderCudaGraph):
     hidden_size: int
 
     def get_encoder_cudagraph_config(self) -> "EncoderCudaGraphConfig":
-        from vllm.v1.worker.encoder_cudagraph_defs import EncoderCudaGraphConfig
-
         from vllm.v1.attention.backends.registry import AttentionBackendEnum
+        from vllm.v1.worker.encoder_cudagraph_defs import EncoderCudaGraphConfig
 
         mm_cfg = self.model_config.multimodal_config
         if (
