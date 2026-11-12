@@ -15,6 +15,7 @@ from vllm.v1.core.kv_cache_utils import (
 )
 from vllm.v1.core.single_type_kv_cache_manager import (
     CrossAttentionManager,
+    HiSparseHotManager,
     MambaManager,
     SingleTypeKVCacheManager,
     get_manager_for_kv_cache_spec,
@@ -180,6 +181,11 @@ class KVCacheCoordinator(ABC):
             )
             for i, kv_cache_group in enumerate(self.kv_cache_config.kv_cache_groups)
         )
+        self.hisparse_hot_managers = tuple(
+            manager
+            for manager in self.single_type_managers
+            if isinstance(manager, HiSparseHotManager)
+        )
         # Match Mamba checkpoints to Eagle's attention replay boundary.
         if use_eagle:
             for manager in self.single_type_managers:
@@ -266,6 +272,15 @@ class KVCacheCoordinator(ABC):
                     apply_admission_cap=apply_admission_cap,
                     prefill_end=prefill_end,
                 )
+        hot_managers = self.hisparse_hot_managers
+        if hot_managers and num_blocks_to_allocate <= self.block_pool.num_gpu_blocks:
+            coordinator = hot_managers[0].coordinator
+            assert coordinator is not None
+            num_blocks_to_allocate = max(
+                0,
+                num_blocks_to_allocate
+                - coordinator.get_transition_reclaimable_blocks(request_id),
+            )
         return num_blocks_to_allocate
 
     def allocate_new_computed_blocks(
@@ -342,15 +357,30 @@ class KVCacheCoordinator(ABC):
             The new allocated blocks.
 
         """
+        hot_blocks: dict[int, list[KVCacheBlock]] = {}
+        hot_managers = self.hisparse_hot_managers
+        if hot_managers:
+            coordinator = hot_managers[0].coordinator
+            assert coordinator is not None
+            if coordinator.get_transition_reclaimable_blocks(request_id):
+                # Acquire a readable host tier before releasing clean resident pages.
+                # The released pages then fund the next prefill chunk.
+                for manager in hot_managers:
+                    hot_blocks[manager.kv_cache_group_id] = manager.allocate_new_blocks(
+                        request_id, num_tokens, num_tokens_main_model
+                    )
+                coordinator.update_residency(request_id)
         return tuple(
-            manager.allocate_new_blocks(
+            hot_blocks[group_id]
+            if group_id in hot_blocks
+            else manager.allocate_new_blocks(
                 request_id,
                 num_encoder_tokens
                 if isinstance(manager, CrossAttentionManager)
                 else num_tokens,
                 num_tokens_main_model,
             )
-            for manager in self.single_type_managers
+            for group_id, manager in enumerate(self.single_type_managers)
         )
 
     def get_num_cacheable_tokens(

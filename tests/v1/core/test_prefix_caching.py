@@ -859,6 +859,83 @@ def test_hisparse_keeps_resident_pages_until_hot_buffer_is_allocated(enable_cach
     assert "first" in coordinator.take_residency_updates(["first"])
 
 
+@pytest.mark.parametrize("num_resident_groups", [1, 3])
+@pytest.mark.parametrize("writes_complete", [False, True])
+def test_hisparse_hot_transition_reclaims_pages_before_next_prefill_chunk(
+    num_resident_groups,
+    writes_complete,
+    monkeypatch,
+):
+    """A hot region fits even when hot plus the next chunk do not fit together."""
+    manager = make_hisparse_kv_cache_manager(
+        8 + 10 * num_resident_groups,
+        32,
+        max_model_len=256,
+        max_in_flight_tokens=8 * HISPARSE_BLOCK_SIZE,
+        num_resident_groups=num_resident_groups,
+    )
+    request = make_request(
+        "transition", list(range(8 * HISPARSE_BLOCK_SIZE)), HISPARSE_BLOCK_SIZE, sha256
+    )
+    assert (
+        _allocate_scheduled(
+            manager, request, 6 * HISPARSE_BLOCK_SIZE, full_sequence_must_fit=True
+        )
+        is not None
+    )
+    request.num_computed_tokens = 6 * HISPARSE_BLOCK_SIZE
+    if writes_complete:
+        _publish_hisparse_pages(manager)
+    coordinator = get_hisparse_coordinator(manager)
+    for hot in coordinator.hot_managers:
+        hot.require_hot(request.request_id)
+    free = manager.block_pool.get_num_free_blocks()
+    # Two new indexer blocks, plus two resident and two hot blocks per group.
+    gross_budget = 2 + 4 * num_resident_groups
+    assert 2 * num_resident_groups <= free < gross_budget
+
+    observed_budgets = []
+    observed_releases = []
+    get_budget = manager.coordinator.get_num_blocks_to_allocate
+    update_residency = coordinator.update_residency
+
+    def record_budget(*args, **kwargs) -> int:
+        budget = get_budget(*args, **kwargs)
+        observed_budgets.append(budget)
+        return budget
+
+    def record_released_blocks(request_id: str) -> None:
+        before = manager.block_pool.get_num_free_blocks()
+        update_residency(request_id)
+        observed_releases.append(manager.block_pool.get_num_free_blocks() - before)
+
+    monkeypatch.setattr(
+        manager.coordinator, "get_num_blocks_to_allocate", record_budget
+    )
+    monkeypatch.setattr(coordinator, "update_residency", record_released_blocks)
+    blocks = manager.allocate_slots(request, 2 * HISPARSE_BLOCK_SIZE)
+
+    if not writes_complete:
+        assert observed_budgets == [gross_budget]
+        assert not observed_releases
+        assert blocks is None
+        assert all(
+            not hot.has_hot(request.request_id) for hot in coordinator.hot_managers
+        )
+        return
+
+    (budget,) = observed_budgets
+    assert budget < gross_budget
+    assert observed_releases == [gross_budget - budget]
+    assert blocks is not None
+    assert all(hot.has_hot(request.request_id) for hot in coordinator.hot_managers)
+    assert all(
+        len(blocks.blocks[hot.kv_cache_group_id]) == 2
+        for hot in coordinator.hot_managers
+    )
+    assert coordinator.request_states[request.request_id].unpinned_pages
+
+
 def test_hisparse_full_pool_keeps_pages_pinned_until_preemption():
     """Without room for a hot buffer, admission must defer instead of losing KV."""
     manager = make_hisparse_kv_cache_manager(18, 18, max_model_len=160)
