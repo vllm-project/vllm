@@ -57,6 +57,7 @@ class Fp8MoeBackend(Enum):
     NONE = "NONE"
     FLASHINFER_TRTLLM = "FLASHINFER_TRTLLM"
     FLASHINFER_CUTLASS = "FLASHINFER_CUTLASS"
+    FLASHINFER_MOE_EP_CUTEDSL = "FLASHINFER_MOE_EP_CUTEDSL"
     DEEPGEMM = "DEEPGEMM"
     BATCHED_DEEPGEMM = "BATCHED_DEEPGEMM"
     MARLIN = "MARLIN"
@@ -168,6 +169,13 @@ def backend_to_kernel_cls(
         )
 
         return [FlashInferExperts]
+
+    elif backend == Fp8MoeBackend.FLASHINFER_MOE_EP_CUTEDSL:
+        from vllm.model_executor.layers.fused_moe.experts.flashinfer_moe_ep import (
+            FlashInferMoeEpExperts,
+        )
+
+        return [FlashInferMoeEpExperts]
 
     elif backend == Fp8MoeBackend.DEEPGEMM:
         from vllm.model_executor.layers.fused_moe.experts.triton_deep_gemm_moe import (
@@ -282,6 +290,7 @@ def map_fp8_backend(runner_backend: MoEBackend) -> Fp8MoeBackend:
         "cutlass": Fp8MoeBackend.VLLM_CUTLASS,
         "flashinfer_trtllm": Fp8MoeBackend.FLASHINFER_TRTLLM,
         "flashinfer_cutlass": Fp8MoeBackend.FLASHINFER_CUTLASS,
+        "flashinfer_moe_ep_cutedsl": Fp8MoeBackend.FLASHINFER_MOE_EP_CUTEDSL,
         "marlin": Fp8MoeBackend.MARLIN,
         "humming": Fp8MoeBackend.HUMMING,
         "aiter": Fp8MoeBackend.AITER,
@@ -487,7 +496,7 @@ def select_fp8_moe_backend(
         if skip_aiter_moe:
             if Fp8MoeBackend.AITER in AVAILABLE_BACKENDS:
                 AVAILABLE_BACKENDS.remove(Fp8MoeBackend.AITER)
-        else:
+        elif envs.is_set("VLLM_ROCM_USE_AITER_MOE"):
             backend = Fp8MoeBackend.AITER
             return oracle.return_or_raise(backend, AVAILABLE_BACKENDS)
 
@@ -570,6 +579,13 @@ def convert_to_fp8_moe_kernel_format(
             w2_scale,
             tuple(layer.weight_block_size),
         )
+    elif fp8_backend == Fp8MoeBackend.FLASHINFER_MOE_EP_CUTEDSL:
+        from vllm.model_executor.layers.fused_moe.flashinfer_moe_ep import (
+            sm90_fp8_block_moe_ep_weights,
+        )
+
+        assert block_quant
+        w13, w13_scale = sm90_fp8_block_moe_ep_weights(w13, w13_scale)
     elif fp8_backend == Fp8MoeBackend.AITER:
         w13, w2 = rocm_aiter_ops.shuffle_weights(w13, w2)
         w13.is_shuffled = True
@@ -640,14 +656,6 @@ def convert_to_fp8_moe_kernel_format(
             w2_scale=w2_scale,
             w2_input_scale=w2_input_scale,
             is_trtllm=(fp8_backend == Fp8MoeBackend.FLASHINFER_TRTLLM),
-        )
-    elif fp8_backend == Fp8MoeBackend.XPU:
-        from vllm.model_executor.layers.fused_moe.experts.xpu_moe import (
-            prepare_fp8_moe_layer_for_xpu,
-        )
-
-        w13, w13_scale, w2, w2_scale = prepare_fp8_moe_layer_for_xpu(
-            w13, w13_scale, w2, w2_scale
         )
     elif fp8_backend == Fp8MoeBackend.CPU:
         from vllm.model_executor.layers.fused_moe.experts.cpu_moe import (

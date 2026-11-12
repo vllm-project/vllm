@@ -307,15 +307,15 @@ def as_embedding_model(cls: type[_T]) -> type[_T]:
 def _resolve_num_labels(hf_config: Any, text_config: Any) -> int:
     """Resolve the label count for a sequence classification head.
 
-    ``PreTrainedConfig.num_labels`` is derived from ``id2label``, which always
+    `PreTrainedConfig.num_labels` is derived from `id2label`, which always
     carries a default of two entries. Composite configs (such as multimodal
     checkpoints) declare their label space on the top-level config, so reading
-    ``num_labels`` from ``get_text_config()`` silently returns that default and
+    `num_labels` from `get_text_config()` silently returns that default and
     builds a score head of the wrong size.
 
     Prefer the top-level config whenever it declares a label space of its own,
-    mirroring the ``classifier_from_token`` / ``method`` lookups in
-    ``as_seq_cls_model``.
+    mirroring the `classifier_from_token` / `method` lookups in
+    `as_seq_cls_model`.
     """
     if text_config is hf_config:
         return hf_config.num_labels

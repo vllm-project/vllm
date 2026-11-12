@@ -198,7 +198,7 @@ class CompressorStateCache(torch.nn.Module, AttentionLayerBase):
 
 
 class DeepseekV4CompressorKVScoreLinear(MergedColumnParallelLinear):
-    """Fused ``wkv``/``wgate`` projection with the FP32 output the compressor
+    """Fused `wkv`/`wgate` projection with the FP32 output the compressor
     state accumulates in."""
 
     def forward(self, input_: torch.Tensor) -> torch.Tensor:
@@ -211,7 +211,7 @@ class DeepseekCompressor(nn.Module):
     Owns the linear / norm / state-cache / ape state and the shared forward
     prologue (kv/score split, save_partial_states launch). The
     compress → norm → RoPE → store step is dispatched to a triton kernel
-    (``compress_norm_rope_store_triton``) by default, except for the NVIDIA
+    (`compress_norm_rope_store_triton`) by default, except for the NVIDIA
     head_dim=512 path which uses the CuTeDSL compressor kernels for better
     performance.
     """
@@ -506,11 +506,12 @@ class DeepseekCompressor(nn.Module):
             extra_kwargs = {
                 "num_decode_tokens": state_metadata.num_decode_tokens,
                 "compress_scratch": self._compress_scratch,
+                "fp8_scale": fp8_scale,
             }
         else:
             # Indexer path (head_dim == 128) or non-CUDA GPUs (AMD, XPU, etc.).
             compress_norm_rope_store_fn = compress_norm_rope_store_triton
-            extra_kwargs = {}
+            extra_kwargs = {"fp8_scale": fp8_scale}
 
         compress_norm_rope_store_fn(
             state_cache=state_cache,

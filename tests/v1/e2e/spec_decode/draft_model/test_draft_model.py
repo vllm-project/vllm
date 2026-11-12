@@ -43,7 +43,7 @@ class ArgsTest:
     draft_tensor_parallel_size: int = 1
     pipeline_parallel_size: int = 1
     max_model_len: int = 2048
-    gpu_memory_utilization: float = 0.5
+    gpu_memory_utilization: float | None = 0.5
     dataset: str = "test_prompts"
     # Doubling 100 to 200 reduces sampling standard error by about 29%.
     num_prompts: int = 200

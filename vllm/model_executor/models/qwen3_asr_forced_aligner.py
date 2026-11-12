@@ -34,7 +34,7 @@ class Qwen3ASRForcedAlignerForTokenClassification(
 
     This model shares the audio tower and language model backbone with
     Qwen3-ASR, but replaces the LM head with a classification head that
-    predicts time bins at ``<timestamp>`` token positions.
+    predicts time bins at `<timestamp>` token positions.
 
     Usage::
 
