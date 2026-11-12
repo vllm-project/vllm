@@ -161,6 +161,42 @@ def test_cuda_profiler_requests_reach_engine_core(monkeypatch: pytest.MonkeyPatc
     )
 
 
+@pytest.mark.asyncio
+@pytest.mark.parametrize("external_lb", [False, True])
+@pytest.mark.parametrize("failure_stage", ["prepare", "drain"])
+async def test_elastic_ep_releases_prepared_state_before_commit(
+    monkeypatch, external_lb, failure_stage
+):
+    config = _mock_vllm_config()
+    config.profiler_config.should_profile_frontend = False
+    config.parallel_config.data_parallel_size = 2
+    config.parallel_config.data_parallel_external_lb = external_lb
+    core = _mock_async_llm_dependencies(monkeypatch)
+    core.prepare_elastic_ep = AsyncMock()
+    core.abort_elastic_ep = AsyncMock()
+    core.abort_external_elastic_ep = AsyncMock()
+    core.commit_elastic_ep = AsyncMock()
+    monkeypatch.setattr(AsyncLLM, "_run_output_handler", lambda _self: None)
+    engine = AsyncLLM(config, MagicMock(), log_stats=False)
+    engine.wait_for_requests_to_drain = AsyncMock()
+    failing_call = (
+        core.prepare_elastic_ep
+        if failure_stage == "prepare"
+        else engine.wait_for_requests_to_drain
+    )
+    failing_call.side_effect = TimeoutError("scale timed out")
+    monkeypatch.setattr(async_llm_module.envs, "VLLM_ELASTIC_EP_DRAIN_REQUESTS", True)
+    monkeypatch.setattr(async_llm_module, "set_scaling_elastic_ep", lambda _value: None)
+
+    with pytest.raises(TimeoutError, match="scale timed out"):
+        await engine.scale_elastic_ep(3, drain_timeout=0)
+
+    core.abort_elastic_ep.assert_awaited_once_with()
+    core.commit_elastic_ep.assert_not_awaited()
+    if external_lb and failure_stage == "drain":
+        core.abort_external_elastic_ep.assert_awaited_once_with("scale timed out")
+
+
 def test_cuda_only_torch_profiler_skips_frontend_cpu_trace(
     monkeypatch: pytest.MonkeyPatch,
 ):
