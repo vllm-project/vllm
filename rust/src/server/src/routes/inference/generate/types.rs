@@ -182,9 +182,7 @@ pub struct PlaceholderRangeInfo {
     pub offset: usize,
     pub length: usize,
     /// Which placeholder positions receive embeddings, for models with sparse
-    /// masks such as Qwen-VL; omitted means all. A Rust frontend addition that
-    /// Python's generate ignores.
-    #[serde(default)]
+    /// masks such as Qwen-VL; omitted means all.
     pub is_embed: Option<Vec<bool>>,
 }
 
