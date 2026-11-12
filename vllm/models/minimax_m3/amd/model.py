@@ -1723,8 +1723,14 @@ class MiniMaxM3DecoderLayer(nn.Module):
         positions: torch.Tensor,
         hidden_states: torch.Tensor,
         residual: torch.Tensor | None,
+        aux_hidden_states: list[torch.Tensor] | None = None,
     ) -> tuple[torch.Tensor, torch.Tensor]:
+        """`aux_hidden_states`: append the residual stream entering this
+        layer (EAGLE3), read after the input norm has finished any deferred
+        all-reduce and cloned because the next norm updates it in place."""
         hidden_states, residual = self.forward_input_norm(hidden_states, residual)
+        if aux_hidden_states is not None:
+            aux_hidden_states.append(residual.clone())
         return self.forward_after_input_norm(positions, hidden_states, residual)
 
     def forward_input_norm(
@@ -1935,7 +1941,10 @@ class MiniMaxM3Model(nn.Module, EagleModelMixin):
 
         # Leave each FFN output un-reduced and fuse its all-reduce into the next
         # norm. PP ships hidden states across stages, and the mono and
-        # specialized decode kernels expect reduced layer outputs.
+        # specialized decode kernels expect reduced layer outputs. The kernels
+        # are picked after the layers exist, so deferral keys on the flags that
+        # request them, not on their pick; `_require_reduced_ffn_outputs`
+        # checks the result once they are set up.
         mono_decode = False
         if mono_envs.MONO_ENABLE:
             from vllm.models.minimax_m3.amd.mono.dispatch import deployment_refusal
@@ -1943,8 +1952,8 @@ class MiniMaxM3Model(nn.Module, EagleModelMixin):
             mono_decode = deployment_refusal(vllm_config) is None
         defer_ffn_all_reduce = (
             vllm_config.parallel_config.pipeline_parallel_size == 1
+            and not vllm_config.kernel_config.monokernel
             and not mono_decode
-            and self.specialized_decode_config is None
         )
         self.start_layer, self.end_layer, self.layers = make_layers(
             config.num_hidden_layers,
@@ -1984,6 +1993,22 @@ class MiniMaxM3Model(nn.Module, EagleModelMixin):
             from vllm.models.minimax_m3.amd.mono.dispatch import MonoDecode
 
             self._mono = MonoDecode(self, vllm_config)
+            if self._mono._enabled:
+                self._require_reduced_ffn_outputs("mono decode")
+
+    def _require_reduced_ffn_outputs(self, kernels: str) -> None:
+        """`kernels` read each layer's output as fully reduced; a deferred FFN
+        all-reduce would hand them per-rank partial sums."""
+        deferred = [
+            layer.layer_id
+            for layer in self.layers[self.start_layer : self.end_layer]
+            if layer.ffn_all_reduce_deferred
+        ]
+        if deferred:
+            raise RuntimeError(
+                f"MiniMax-M3 {kernels} needs reduced FFN outputs, but layers "
+                f"{deferred} defer their all-reduce into the next norm."
+            )
 
     def _configure_allreduce_fusion(self) -> None:
         """Fuse each deferred FFN all-reduce into the next layer's input norm,
@@ -2016,11 +2041,14 @@ class MiniMaxM3Model(nn.Module, EagleModelMixin):
         """Capture the residual stream entering `layer_idx`, read after a norm
         that has finished any deferred all-reduce. Cloned because the next
         norm updates `residual` in place."""
-        if (
+        if self._captures_aux(layer_idx):
+            aux_hidden_states.append(residual.clone())
+
+    def _captures_aux(self, layer_idx: int) -> bool:
+        return (
             layer_idx >= self._aux_first_local_layer
             and layer_idx in self.aux_hidden_state_layers
-        ):
-            aux_hidden_states.append(residual.clone())
+        )
 
     def embed_input_ids(self, input_ids: torch.Tensor) -> torch.Tensor:
         return self.embed_tokens(input_ids)
@@ -2029,6 +2057,7 @@ class MiniMaxM3Model(nn.Module, EagleModelMixin):
         from .specialized_decode.runtime.decode import SpecializedDecode
 
         assert self.specialized_decode_config is not None
+        self._require_reduced_ffn_outputs("specialized decode")
         self.specialized_decode = SpecializedDecode.build(
             self, self.specialized_decode_config
         )
@@ -2060,12 +2089,14 @@ class MiniMaxM3Model(nn.Module, EagleModelMixin):
         layers = self.layers[self.start_layer : self.end_layer]
         if decode is None:
             for idx, layer in enumerate(layers, start=self.start_layer):
-                hidden_states, residual = layer.forward_input_norm(
-                    hidden_states, residual
-                )
-                self._maybe_capture_aux(aux_hidden_states, idx, residual)
-                hidden_states, residual = layer.forward_after_input_norm(
-                    positions, hidden_states, residual
+                # Called as a module so that forward hooks on the layer fire.
+                hidden_states, residual = layer(
+                    positions,
+                    hidden_states,
+                    residual,
+                    aux_hidden_states=(
+                        aux_hidden_states if self._captures_aux(idx) else None
+                    ),
                 )
         else:
             if get_pp_group().is_first_rank:

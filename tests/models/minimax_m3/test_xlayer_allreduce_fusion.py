@@ -151,6 +151,46 @@ def _build_random_model(device, rank, pipeline_parallel_size=1):
     return model, vllm_config
 
 
+def _record_input_norms(model) -> None:
+    """Record every layer's `forward_input_norm` output on
+    `model.input_norm_outputs`."""
+    from vllm.model_executor.layers.fusion.quant_activation import (
+        QuantizedActivation,
+    )
+
+    for layer in model.layers:
+
+        def record(hidden_states, residual, norm=layer.forward_input_norm):
+            out, residual = norm(hidden_states, residual)
+            model.input_norm_outputs.append(
+                QuantizedActivation(
+                    out.data.clone(),
+                    out.scale.clone(),
+                    out.orig_dtype,
+                    out.orig_shape,
+                    out.quant_key,
+                )
+                if isinstance(out, QuantizedActivation)
+                else out.clone()
+            )
+            return out, residual
+
+        layer.forward_input_norm = record
+
+
+def _dequant(x) -> torch.Tensor:
+    from vllm.model_executor.layers.fusion.quant_activation import (
+        QuantizedActivation,
+    )
+    from vllm.model_executor.layers.quantization.utils.mxfp8_utils import (
+        dequant_mxfp8_to_bf16,
+    )
+
+    if isinstance(x, QuantizedActivation):
+        return dequant_mxfp8_to_bf16(x.data, x.scale)
+    return x
+
+
 @ray.remote(num_gpus=1, max_calls=1)
 def _run_deferred_matches_reduced(
     monkeypatch: pytest.MonkeyPatch, tp_size, pp_size, rank, distributed_init_port
@@ -165,13 +205,16 @@ def _run_deferred_matches_reduced(
         positions = torch.arange(37, device=device)
 
         def run(model, vllm_config):
+            model.input_norm_outputs = []
             with torch.inference_mode(), set_forward_context(None, vllm_config):
                 out, aux = model(input_ids, positions, None)
                 assert len(aux) == len(AUX_LAYERS)
                 torch.testing.assert_close(aux[0], model.embed_input_ids(input_ids))
+            assert len(model.input_norm_outputs) == LAYERS
             return [out, *aux]
 
         deferred, deferred_config = _build_random_model(device, rank)
+        _record_input_norms(deferred)
         assert deferred.fuse_final_norm_allreduce
         mxfp8 = os.environ[_MXFP8_ENV] == "1"
         assert all(layer.fuse_input_norm_mxfp8 is mxfp8 for layer in deferred.layers)
@@ -182,6 +225,7 @@ def _run_deferred_matches_reduced(
         reduced, reduced_config = _build_random_model(
             device, rank, pipeline_parallel_size=2
         )
+        _record_input_norms(reduced)
         assert not reduced.fuse_final_norm_allreduce
         ref = run(reduced, reduced_config)
         # Without AITER the deferred reduce is the same all-reduce, one call
@@ -194,6 +238,23 @@ def _run_deferred_matches_reduced(
         )
         for a, b in zip(got, ref, strict=True):
             torch.testing.assert_close(a, b, **tol)
+        # Attention sees no metadata and returns zeros, so the input norms'
+        # outputs (bf16, or MXFP8 for qkv_proj) reach nothing compared above:
+        # compare them directly. Without AITER the deferred reduce feeds the
+        # same norm kernel; AITER's fused all-reduce + norm has no MXFP8
+        # output, so there a bf16 result meets an MXFP8 one (one e4m3 step).
+        aiter = os.environ["VLLM_ROCM_USE_AITER"] == "1"
+        for a, b in zip(
+            deferred.input_norm_outputs, reduced.input_norm_outputs, strict=True
+        ):
+            if not aiter:
+                assert type(a) is type(b)
+            mixed = type(a) is not type(b)
+            torch.testing.assert_close(
+                _dequant(a),
+                _dequant(b),
+                **({"rtol": 0.1, "atol": 0.05} if mixed else tol),
+            )
 
         # The specialized decode loop captures after each layer instead.
         reduced.specialized_decode = _UnspecializedDecode()
@@ -305,3 +366,24 @@ def test_deferral_is_off_exactly_when_mono_decode_can_run(
         layer.ffn_all_reduce_deferred is not mono_runs for layer in model.layers[:DENSE]
     )
     assert model.layers[1].fuse_input_allreduce is not mono_runs
+
+
+def test_monokernel_turns_deferral_off(dist_init, checkpoint, monkeypatch):
+    """--monokernel picks its kernels only after the layers exist, so the flag
+    itself must keep every FFN all-reduce in its layer."""
+    pytest.importorskip("flydsl")
+    from vllm.config import ModelConfig, VllmConfig, set_current_vllm_config
+    from vllm.models.minimax_m3.amd import model as m3
+
+    # As if the specialized decode config were not known yet at layer build.
+    monkeypatch.setattr(m3, "specialized_decode_config", lambda _: None)
+    vllm_config = VllmConfig(model_config=ModelConfig(checkpoint, max_model_len=1024))
+    vllm_config.kernel_config.monokernel = True
+    with (
+        set_current_vllm_config(vllm_config),
+        set_default_torch_dtype(torch.bfloat16),
+        torch.device("cuda"),
+    ):
+        model = m3.MiniMaxM3Model(vllm_config=vllm_config, prefix="model")
+    assert not any(layer.ffn_all_reduce_deferred for layer in model.layers)
+    assert not model.fuse_final_norm_allreduce
