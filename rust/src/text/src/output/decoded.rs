@@ -10,9 +10,10 @@ use tracing::{Level, debug, trace};
 use vllm_engine_core_client::AbortCause;
 use vllm_engine_core_client::protocol::output::{RequestSpecDecodeMetrics, StopReason};
 use vllm_engine_core_client::protocol::sampling_mask::SamplingMask;
+use vllm_engine_core_client::protocol::tensor::WireNdArray;
 use vllm_llm::{
-    FinishReason, GenerateOutput, PromptCacheUsage, RequestTimestamps, TokenUsage,
-    WeightVersionSpan,
+    AuxOutputRows, FinishReason, GenerateOutput, PromptCacheUsage, RequestTimestamps, TokenUsage,
+    WeightVersionSpan, WeightVersions,
 };
 use vllm_tokenizer::{DecodedText, DynTokenizer, IncrementalDecoder};
 
@@ -84,6 +85,9 @@ pub struct Finished {
     pub spec_decode_metrics: Option<RequestSpecDecodeMetrics>,
     /// Weight-version spans over all generated token positions.
     pub weight_versions: Option<Vec<WeightVersionSpan>>,
+    /// Routed-expert rows for the whole request, without the rows of tokens
+    /// cut off by a stop string. Boxed like `kv_transfer_params`.
+    pub routed_experts: Option<Box<WireNdArray>>,
     pub timestamps: RequestTimestamps,
 }
 
@@ -181,6 +185,8 @@ pub async fn decoded_text_event_stream(
     let mut output_token_count: usize = 0;
     let mut sampled_logprobs: Option<DecodedLogprobs> = None;
     let mut sampling_mask: Option<SamplingMask> = None;
+    let mut weight_versions = WeightVersions::default();
+    let mut routed_experts = AuxOutputRows::default();
     let text_tokenizer = decode_options.detokenize.then_some(tokenizer.as_ref());
 
     while let Some(next) = raw_stream.next().await {
@@ -219,7 +225,6 @@ pub async fn decoded_text_event_stream(
         let kv_transfer_params = output.kv_transfer_params;
         let ec_transfer_params = output.ec_transfer_params;
         let spec_decode_metrics = output.spec_decode_metrics.map(|metrics| *metrics);
-        let mut weight_versions = output.weight_versions;
         let mut finish_reason = output.finish_reason;
         let mut stop_str_matched = false;
         let suppress_terminal_stop_token = finish_reason.as_ref().is_some_and(|r| r.is_stop())
@@ -265,9 +270,15 @@ pub async fn decoded_text_event_stream(
         let mut new_token_ids = output.token_ids;
         let mut new_logprobs = output.logprobs;
         let mut new_sampling_mask = output.sampling_mask;
+        let mut new_weight_versions = output.weight_versions;
+        let mut new_routed_experts = output.routed_experts;
 
         // Trim tokens and logprobs if we matched stop string.
         if let Some(num_tokens) = truncate_tokens_to {
+            // Like Python's `_trim_surplus_tokens`, drop the routed-expert
+            // rows of the cut tokens from the end of this output's rows.
+            new_routed_experts.drop_trailing(new_token_ids.len() - num_tokens)?;
+            new_weight_versions.drop_trailing(new_token_ids.len() - num_tokens);
             new_token_ids.truncate(num_tokens);
             if let Some(logprobs) = &mut new_logprobs {
                 logprobs.positions.truncate(num_tokens);
@@ -278,6 +289,8 @@ pub async fn decoded_text_event_stream(
         }
 
         output_token_count += new_token_ids.len();
+        weight_versions.append(new_weight_versions);
+        routed_experts.append(new_routed_experts);
         if let Some(mut mask) = new_sampling_mask {
             sampling_mask.get_or_insert_default().rows.append(&mut mask.rows);
         }
@@ -308,14 +321,8 @@ pub async fn decoded_text_event_stream(
                 }
                 .into());
             }
-            // The spans cover every token received; cut them at the stop-string
-            // truncated count, like Python's spans over its truncated output.
-            if let Some(spans) = weight_versions.as_mut() {
-                spans.retain(|span| span.start < output_token_count);
-                if let Some(last) = spans.last_mut() {
-                    last.end = last.end.min(output_token_count);
-                }
-            }
+            let weight_versions = std::mem::take(&mut weight_versions).spans();
+            let routed_experts = std::mem::take(&mut routed_experts).concat()?;
             // Flush any remaining buffered text.
             let (last_chunk, full_decoded) = decoder.flush(truncate_output_to)?;
             let text_len = full_decoded.text.len();
@@ -366,6 +373,7 @@ pub async fn decoded_text_event_stream(
                     sampling_mask,
                     spec_decode_metrics,
                     weight_versions,
+                    routed_experts: routed_experts.map(Box::new),
                     timestamps: output.timestamps,
                 })),
             })
@@ -647,6 +655,7 @@ mod tests {
                                 last_token_ts: 11.5,
                             },
                             weight_versions: None,
+                            routed_experts: None,
                         }),
                     ),
                 ],
@@ -681,6 +690,7 @@ mod tests {
                             sampling_mask: None,
                             spec_decode_metrics: None,
                             weight_versions: None,
+                            routed_experts: None,
                             timestamps: Default::default(),
                         }),
                     ),
@@ -1002,11 +1012,12 @@ mod tests {
             end,
         };
         let mut first = GenerateOutput::for_test(Some(Arc::from([])), ascii_tokens("ab"), None);
-        first.weight_versions = Some(vec![span("v1", 0, 2)]);
+        first.weight_versions = WeightVersions::new(Some("v1".into()), 2);
         // One merged output whose tokens span two more weight versions; the
         // stop string ends inside the `v2` span.
         let mut second = GenerateOutput::for_test(None, ascii_tokens("cxyz"), None);
-        second.weight_versions = Some(vec![span("v1", 0, 2), span("v2", 2, 5), span("v3", 5, 6)]);
+        second.weight_versions = WeightVersions::new(Some("v2".into()), 3);
+        second.weight_versions.append(WeightVersions::new(Some("v3".into()), 1));
         let tokenizer: DynTokenizer = Arc::new(TestTokenizer::new());
 
         let output = decoded_text_event_stream(
@@ -1025,6 +1036,30 @@ mod tests {
             output.weight_versions,
             Some(vec![span("v1", 0, 2), span("v2", 2, 4)])
         );
+    }
+
+    #[tokio::test]
+    async fn stream_stop_string_in_unlabelled_tokens_reports_no_spans() {
+        let first = GenerateOutput::for_test(Some(Arc::from([])), ascii_tokens("ab"), None);
+        // The label arrives after the stop string, so no kept token has one.
+        let mut second = GenerateOutput::for_test(None, ascii_tokens("cxyz"), None);
+        second.weight_versions = WeightVersions::new(None, 1);
+        second.weight_versions.append(WeightVersions::new(Some("v1".into()), 3));
+        let tokenizer: DynTokenizer = Arc::new(TestTokenizer::new());
+
+        let output = decoded_text_event_stream(
+            "test-weight-versions-unlabelled-stop".into(),
+            tokenizer,
+            stream::iter([Ok(first), Ok(second)]),
+            opts(&["bc"], 0),
+            false,
+        )
+        .collect_output()
+        .await
+        .unwrap();
+
+        assert_eq!(output.token_ids, ascii_tokens("abc"));
+        assert_eq!(output.weight_versions, None);
     }
 
     #[tokio::test]

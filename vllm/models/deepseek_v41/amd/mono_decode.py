@@ -81,7 +81,7 @@ def _mono_runner(device: torch.device, draft: "MonoDecodeLayer | None" = None):
     """The process's mono runner (one a TP rank, shared by every layer of the
     target; the DSpark draft's layers share one of their own, as its routing and
     SWA rows differ). Its peer-memory handshake is collective over the TP group:
-    every rank builds it at the same layer of the same step."""
+    every rank builds it at load, at the same layer (`build_runner`)."""
     global _runner, _draft_runner
     if draft is not None:
         if _draft_runner is None:
@@ -485,6 +485,11 @@ class MonoDecodeLayer:
             )
         logger.info_once("DSv4.1 mono decode: the whole standard backbone layers")
         return MonoDecodeLayer()
+
+    def build_runner(self, device: torch.device) -> None:
+        """Build the layer's runner after loading rather than at its first
+        decode step, which must not allocate, exchange handles or sync."""
+        _mono_runner(device, self if self.draft else None)
 
     def weights(self, layer: "DeepseekV4DecoderLayer"):
         if self._weights is not None:
