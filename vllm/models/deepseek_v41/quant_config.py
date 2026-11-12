@@ -39,19 +39,19 @@ class DeepseekV4FP8Config(Fp8Config):
 
     DeepSeek V4 checkpoints always use FP8 block quantization for
     linear/attention layers. The MoE expert weights vary by checkpoint:
-    - ``expert_dtype="fp4"`` (e.g. DeepSeek-V4-Flash): MXFP4 experts
+    - `expert_dtype="fp4"` (e.g. DeepSeek-V4-Flash): MXFP4 experts
       with ue8m0 (e8m0fnu) FP8 linear scales.
-    - ``expert_dtype="fp8"`` (e.g. DeepSeek-V4-Flash-Base): FP8 block
+    - `expert_dtype="fp8"` (e.g. DeepSeek-V4-Flash-Base): FP8 block
       experts with float32 FP8 linear scales.
 
     The dispatch and the linear scale dtype are both keyed off
-    ``expert_dtype`` from the model's hf_config; missing values default
-    to ``"fp4"`` so existing FP4 checkpoints stay unchanged.
+    `expert_dtype` from the model's hf_config; missing values default
+    to `"fp4"` so existing FP4 checkpoints stay unchanged.
 
-    NOTE: ``expert_dtype`` is resolved lazily because this config is
-    constructed during VllmConfig setup, before ``set_current_vllm_config``
-    is active. Reading hf_config eagerly in ``__init__`` would always see
-    the default ``"fp4"`` and silently misroute Flash-Base checkpoints.
+    NOTE: `expert_dtype` is resolved lazily because this config is
+    constructed during VllmConfig setup, before `set_current_vllm_config`
+    is active. Reading hf_config eagerly in `__init__` would always see
+    the default `"fp4"` and silently misroute Flash-Base checkpoints.
     """
 
     def __init__(self, *args, **kwargs):
@@ -258,7 +258,7 @@ class DeepseekV4FP8Config(Fp8Config):
                         quant_config=self._get_nvfp4_config(),
                         moe_config=layer.moe_config,
                     )
-                return Mxfp4MoEMethod(layer.moe_config)
+                return Mxfp4MoEMethod(layer.moe_config, activation_key=kMxfp8Dynamic)
             # expert_dtype == "fp8": fall through to Fp8Config which
             # returns Fp8MoEMethod with block-wise float32 scales.
         return super().get_quant_method(layer, prefix)
