@@ -333,20 +333,23 @@ class MiniMaxM3DSparkModel(Qwen3DSparkModel):
             )
 
             self._mono_drafter = DrafterDecode(self, vllm_config)
-            if self.use_aux_hidden_state:
-                # each rank multiplies a quarter of fc's input columns and the
-                # partials are all-reduced, instead of every rank reading the
-                # whole replicated weight
-                self.fc = RowParallelLinear(
-                    self.fc.input_size,
-                    self.fc.output_size,
-                    bias=False,
-                    input_is_parallel=False,
-                    params_dtype=self.fc.params_dtype,
-                    quant_config=self.quant_config,
-                    prefix=maybe_prefix(prefix, "fc"),
-                    return_bias=False,
-                )
+        if current_platform.is_rocm() and self.use_aux_hidden_state:
+            # On ROCm, on every step and whether or not the drafter kernels run
+            # (fc is applied before them): fc (the aux hidden states -> hidden)
+            # is row-parallel. Each rank multiplies its 1/TP of fc's input
+            # columns and the partials are all-reduced, instead of every rank
+            # reading the whole replicated weight (MI355X, TP4: -32 us a decode
+            # step at c=1).
+            self.fc = RowParallelLinear(
+                self.fc.input_size,
+                self.fc.output_size,
+                bias=False,
+                input_is_parallel=False,
+                params_dtype=self.fc.params_dtype,
+                quant_config=self.quant_config,
+                prefix=maybe_prefix(prefix, "fc"),
+                return_bias=False,
+            )
 
     def __call__(self, *args, **kwargs):
         # ahead of torch.compile's wrapper: the kernels launch outside the graph
