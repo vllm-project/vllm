@@ -39,7 +39,6 @@ steps:
   timeout_in_minutes: 120
   source_file_dependencies:
   - vllm/model_executor/layers/hierarchical_lm_head.py
-  - vllm/model_executor/models/gemma4_mtp.py
   - vllm/model_executor/models/nemotron_h_mtp.py
   - tests/kernels/test_hierarchical_lm_head.py
   - vllm/v1/worker/gpu/spec_decode/eagle/utils.py
