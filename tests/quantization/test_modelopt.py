@@ -441,9 +441,9 @@ def test_modelopt_int8_pb_wo_requires_group_size(mixed):
             ModelOptInt8Config.from_config({"quantization": layer})
 
 
-_SKIP_INT8_ON_ROCM = pytest.mark.skipif(
-    current_platform.is_rocm(),
-    reason="modelopt_int8 quantization is not supported on ROCm",
+_SKIP_INT8_UNSUPPORTED = pytest.mark.skipif(
+    not is_quant_method_supported("modelopt_int8"),
+    reason="modelopt_int8 quantization is not supported on this platform",
 )
 
 
@@ -454,7 +454,7 @@ _SKIP_INT8_ON_ROCM = pytest.mark.skipif(
             "config.json",
             {"quant_method": "modelopt", "quant_algo": "INT8_PB_WO", "group_size": 32},
             ModelOptInt8Config,
-            marks=_SKIP_INT8_ON_ROCM,
+            marks=_SKIP_INT8_UNSUPPORTED,
         ),
         pytest.param(
             "hf_quant_config.json",
@@ -463,7 +463,7 @@ _SKIP_INT8_ON_ROCM = pytest.mark.skipif(
                 "quantization": {"quant_algo": "INT8_PB_WO", "group_size": 32},
             },
             ModelOptInt8Config,
-            marks=_SKIP_INT8_ON_ROCM,
+            marks=_SKIP_INT8_UNSUPPORTED,
         ),
         (
             "config.json",
