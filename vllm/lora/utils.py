@@ -247,8 +247,14 @@ def is_base_embedding_weights(name: str) -> bool:
 
 def get_supported_lora_modules(model: nn.Module) -> list[str]:
     """In vLLM, all linear layers support LoRA."""
+    from vllm.model_executor.models.utils import StageMissingLayer
+
     supported_lora_modules: set[str] = set()
     for name, module in model.named_modules():
+        # A module this stage does not build, such as the classification head
+        # before the last PP stage, is still a module of the model.
+        if isinstance(module, StageMissingLayer) and module.module is not None:
+            module = module.module
         # get the embedding modules if the module's embedding_modules
         # is not empty.
         embedding_modules = getattr(module, "embedding_modules", None)

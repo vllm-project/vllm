@@ -485,6 +485,10 @@ class LoRAModelManager:
         # Layers that share a suffix with a LoRA layer but are not wrapped,
         # such as BERT's pooler.dense. Adapters with LoRA on them are refused.
         self.unsupported_lora_modules: set[str] = set()
+        # Placeholders for modules this stage does not build, such as the
+        # classification head before the last PP stage. Adapter weights for
+        # them do not apply here.
+        self.placeholder_modules: set[str] = set()
 
         named_modules = list(self.model.named_modules(remove_duplicate=False))
         runners = [f"{n}." for n, m in named_modules if isinstance(m, MoERunner)]
@@ -494,6 +498,7 @@ class LoRAModelManager:
 
         for module_name, module in named_modules:
             if isinstance(module, (PPMissingLayer, StageMissingLayer)):
+                self.placeholder_modules.add(module_name)
                 continue
 
             is_classifier_head = module_name in self.supported_modules_to_save
@@ -1349,6 +1354,8 @@ class LoRAModelManager:
             if not lora_model.modules_to_save:
                 return
             saved_module_name = next(iter(lora_model.modules_to_save))
+            if saved_module_name in self.placeholder_modules:
+                return
             raise ValueError(
                 f"Cannot load full module {saved_module_name!r}: the model does "
                 "not expose a unique classification head."

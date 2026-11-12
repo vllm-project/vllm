@@ -29,7 +29,7 @@ EXPECTED_OUT = {
 def _classify_logits(
     llm: LLM,
     prompts: list[str],
-    requests: LoRARequest | list[LoRARequest],
+    requests: LoRARequest | list[LoRARequest] | None,
 ) -> torch.Tensor:
     params = [PoolingParams(task="classify", use_activation=False) for _ in prompts]
     outputs = llm.classify(
@@ -157,6 +157,7 @@ def _test_batched_loras(
     qwen3_guard_star_trek_lora_files: str,
     qwen3_guard_new_zealand_lora_files: str,
     tp_size: int,
+    pp_size: int = 1,
 ) -> None:
     names = ["star_trek", "new_zealand"]
     prompts = [PROMPTS[name] for name in names]
@@ -184,6 +185,7 @@ def _test_batched_loras(
         max_model_len=512,
         gpu_memory_utilization=0.5,
         tensor_parallel_size=tp_size,
+        pipeline_parallel_size=pp_size,
     )
     actual = _classify_logits(llm, prompts, requests)
 
@@ -219,3 +221,69 @@ def test_batched_loras_tp(
         qwen3_guard_new_zealand_lora_files,
         tp_size=2,
     )
+
+
+@multi_gpu_test(num_gpus=2)
+def test_batched_loras_pp(
+    qwen3_guard_star_trek_lora_files: str,
+    qwen3_guard_new_zealand_lora_files: str,
+) -> None:
+    """Stages before the last do not build the classification head, so they
+    accept and ignore the full `score` module of an adapter."""
+    _test_batched_loras(
+        qwen3_guard_star_trek_lora_files,
+        qwen3_guard_new_zealand_lora_files,
+        tp_size=1,
+        pp_size=2,
+    )
+
+
+def _save_score_adapter(path, hidden_size: int, num_labels: int) -> str:
+    path.mkdir()
+    config = {"r": 8, "lora_alpha": 16, "target_modules": ["score"]}
+    (path / "adapter_config.json").write_text(json.dumps(config))
+    generator = torch.Generator().manual_seed(0)
+    tensors = {
+        "base_model.model.score.lora_A.weight": torch.randn(
+            8, hidden_size, generator=generator
+        )
+        / hidden_size**0.5,
+        "base_model.model.score.lora_B.weight": torch.randn(
+            num_labels, 8, generator=generator
+        ),
+    }
+    save_file(tensors, str(path / "adapter_model.safetensors"))
+    return str(path)
+
+
+@multi_gpu_test(num_gpus=2)
+def test_score_lora_pp(tmp_path) -> None:
+    """Stages before the last do not build the classification head, so they
+    accept and ignore LoRA weights on `score`."""
+    prompts = list(PROMPTS.values())
+    adapter = ""
+    logits: dict[str, torch.Tensor] = {}
+    for pp_size in (1, 2):
+        llm = LLM(
+            model=NATIVE_MODEL_NAME,
+            runner="pooling",
+            dtype="float16",
+            enable_lora=True,
+            max_lora_rank=8,
+            enforce_eager=True,
+            max_model_len=512,
+            max_num_seqs=1,
+            gpu_memory_utilization=0.5,
+            pipeline_parallel_size=pp_size,
+        )
+        if pp_size == 1:
+            hidden_size = llm.llm_engine.model_config.get_hidden_size()
+            adapter = _save_score_adapter(tmp_path / "score", hidden_size, 1)
+            logits["base"] = _classify_logits(llm, prompts, None)
+        request = LoRARequest("score", 1, adapter)
+        logits[f"pp{pp_size}"] = _classify_logits(llm, prompts, request)
+        del llm
+        cleanup_dist_env_and_memory()
+
+    assert not torch.allclose(logits["pp1"], logits["base"], atol=0.1)
+    torch.testing.assert_close(logits["pp2"], logits["pp1"], atol=2e-2, rtol=2e-2)

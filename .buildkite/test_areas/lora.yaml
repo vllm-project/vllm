@@ -70,6 +70,8 @@ steps:
     - pytest -v -s -x lora/test_qwen35_densemodel_lora.py
     - pytest -v -s -x lora/test_gemma4_tp.py
     - pytest -v -s -x lora/test_sequence_classification.py::test_batched_loras_tp
+    - pytest -v -s -x lora/test_sequence_classification.py::test_batched_loras_pp
+    - pytest -v -s -x lora/test_sequence_classification.py::test_score_lora_pp
   mirror:
     amd:
       # Run on PRs even when the L4 step is optional (nightly only).
@@ -99,3 +101,5 @@ steps:
       - pytest -v -s -x lora/test_qwen35_densemodel_lora.py
       - pytest -v -s -x lora/test_gemma4_tp.py
       - pytest -v -s -x lora/test_sequence_classification.py::test_batched_loras_tp
+      - pytest -v -s -x lora/test_sequence_classification.py::test_batched_loras_pp
+      - pytest -v -s -x lora/test_sequence_classification.py::test_score_lora_pp
