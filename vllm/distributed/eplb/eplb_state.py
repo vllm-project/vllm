@@ -1389,7 +1389,7 @@ def _prepare_eplb_maps(
     num_logical_experts: int,
     max_replicas: int,
 ) -> tuple[torch.Tensor, torch.Tensor, torch.Tensor]:
-    """Prepare CPU maps for a cycle before publishing its layer results."""
+    """Prepare CPU maps before publishing an async layer result."""
     logical_map, replica_count = compute_logical_maps(
         physical_to_logical_map, num_logical_experts
     )

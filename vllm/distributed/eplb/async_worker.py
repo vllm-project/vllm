@@ -126,16 +126,6 @@ def _transfer_cycle(
         new_physical_to_logical_map = run_rebalance_experts(
             model_state, state, physical_to_logical_map_cpu, stream
         )
-        (
-            new_physical_to_logical_map,
-            new_logical_to_physical_map,
-            new_logical_replica_count,
-        ) = _prepare_eplb_maps(
-            new_physical_to_logical_map,
-            model_state.logical_to_physical_map.shape[1],
-            model_state.logical_to_physical_map.shape[2],
-        )
-
         migration_batches_by_layer = None
         if state.parallel_config.eplb_config.migration_batching_enabled:
             profile_name = "eplb: schedule migration batches"
@@ -176,9 +166,14 @@ def _transfer_cycle(
                 model_state.rebalanced = False
                 break
 
+            new_physical, new_logical, new_replica_count = _prepare_eplb_maps(
+                new_physical_to_logical_map[layer_idx],
+                model_state.logical_to_physical_map.shape[1],
+                model_state.logical_to_physical_map.shape[2],
+            )
             transfer_metadata = transfer_layer(
                 old_layer_indices=physical_to_logical_map_cpu[layer_idx],
-                new_layer_indices=new_physical_to_logical_map[layer_idx],
+                new_layer_indices=new_physical,
                 expert_weights=model_state.model.expert_weights[layer_idx],
                 expert_weights_buffer=model_state.expert_buffer,
                 communicator=model_state.communicator,
@@ -209,9 +204,9 @@ def _transfer_cycle(
 
             model_state.pending_result = AsyncEplbLayerResult(
                 layer_idx=layer_idx,
-                new_physical_to_logical_map=new_physical_to_logical_map[layer_idx],
-                new_logical_to_physical_map=new_logical_to_physical_map[layer_idx],
-                new_logical_replica_count=new_logical_replica_count[layer_idx],
+                new_physical_to_logical_map=new_physical,
+                new_logical_to_physical_map=new_logical,
+                new_logical_replica_count=new_replica_count,
                 transfer_metadata=transfer_metadata,
                 consumed_event=consumed_event,
             )
