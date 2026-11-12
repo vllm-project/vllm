@@ -26,7 +26,7 @@ from vllm.model_executor.layers.mamba.mamba_utils import (
     MambaStateShapeCalculator,
     is_conv_state_dim_first,
 )
-from vllm.models.common.ops.sequence_parallel import sp_all_gather, sp_shard
+from vllm.models.common.ops.sequence_parallel import sp_all_gather
 from vllm.v1.attention.backends.registry import MambaAttentionBackendEnum
 from vllm.v1.attention.backends.short_conv_attn import (
     PleShortConvAttentionBackend,
@@ -472,13 +472,20 @@ class Qwen4ExpPLELayer(nn.Module, MambaBase):
             self.norm_key.eps,
         )
         if self.use_sequence_parallel:
-            # Only convolution needs full tokens. Add residuals on local shards.
-            conv_input = sp_all_gather(conv_input)[: input_ids.shape[0]]
+            gated_output.add_(hidden_states)
+            gated_output_size = gated_output.shape[-1]
+            gathered_ple = sp_all_gather(
+                torch.cat((gated_output, conv_input), dim=-1).contiguous()
+            )[: input_ids.shape[0]]
+            gated_output, conv_input = gathered_ple.split(
+                (gated_output_size, conv_input.shape[-1]), dim=-1
+            )
+            gated_output = gated_output.contiguous()
+            conv_input = conv_input.contiguous()
             # Metadata may omit padding tokens or all tokens during profiling.
             conv_output = torch.zeros_like(conv_input)
             self._short_conv(conv_input, conv_output, outer_residual=None)
-            gated_output.add_(sp_shard(conv_output))
-            gated_output.add_(hidden_states)
+            gated_output.add_(conv_output)
         else:
             self._short_conv(conv_input, gated_output, hidden_states)
         return gated_output

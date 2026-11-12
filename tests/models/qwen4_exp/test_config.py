@@ -58,8 +58,8 @@ def _text_config(**kwargs) -> Qwen4ExpTextConfig:
     return Qwen4ExpTextConfig(**values)
 
 
-def test_moe_sp_rejects_pipeline_parallel() -> None:
-    """Automatic MoE SP must validate HC topology even without --enable-hc-sp."""
+def test_moe_sp_allows_pipeline_parallel() -> None:
+    """Automatic MoE SP can be combined with PP for Qwen4Exp."""
     config = SimpleNamespace(
         model_config=SimpleNamespace(
             hf_text_config=_text_config(num_experts=4, ple_layer_ids=[]),
@@ -73,10 +73,7 @@ def test_moe_sp_rejects_pipeline_parallel() -> None:
             all2all_backend="allgather_reducescatter",
         ),
     )
-    with (
-        patch("vllm.platforms.current_platform.is_cuda_alike", return_value=True),
-        pytest.raises(ValueError, match="MoE SP requires PP=1"),
-    ):
+    with patch("vllm.platforms.current_platform.is_cuda_alike", return_value=True):
         Qwen4ExpForConditionalGenerationConfig.verify_and_update_config(config)
 
 
