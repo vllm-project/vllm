@@ -8,7 +8,7 @@ oracle rather than another kernel: the synthetic KV cache is built from
 known centroid indices, K-norms and V-scales/zeros, so we can dequantize
 the exact stored values and run fp32 softmax attention as ground truth.
 Both sides therefore see identical quantized values; the only difference
-is bf16-vs-fp32 accumulation, which is bounded by ``ATOL`` below.
+is bf16-vs-fp32 accumulation, which is bounded by `ATOL` below.
 
 Skipped unless running on ROCm/gfx950 with FlyDSL importable.
 """
@@ -66,11 +66,11 @@ def _build_cache(
 ):
     """Vectorized builder for a SoA-layout 4-bit KV cache + fp32 ground truth.
 
-    Returns ``(centroids, q_bf16, kv_cache_4d, block_table, seq_lens,
-    K_ref, V_ref)`` where ``K_ref``/``V_ref`` are the dequantized
+    Returns `(centroids, q_bf16, kv_cache_4d, block_table, seq_lens,
+    K_ref, V_ref)` where `K_ref`/`V_ref` are the dequantized
     full-precision keys/values used by the reference attention.
 
-    ``lead_blocks`` prepends that many unused blocks, which pushes the
+    `lead_blocks` prepends that many unused blocks, which pushes the
     referenced blocks to a high byte offset without growing the data.
     """
     g = torch.Generator(device=device).manual_seed(seed)
