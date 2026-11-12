@@ -5,6 +5,7 @@ from dataclasses import replace
 from types import SimpleNamespace
 
 import pytest
+import regex as re
 import torch
 
 from tests.kernels.moe.utils import make_dummy_moe_config
@@ -30,16 +31,20 @@ from vllm.model_executor.layers.fused_moe.config import (
     RoutingMethodType,
     nvfp4_moe_quant_config,
 )
+from vllm.model_executor.layers.fused_moe.experts import flashinfer_moe_ep as fi_experts
 from vllm.model_executor.layers.fused_moe.experts.flashinfer_moe_ep import (
     FlashInferMoeEpExperts,
     epilogue_from_quant_config,
+    sm107_nvfp4_epilogue,
 )
 from vllm.model_executor.layers.fused_moe.oracle.mxfp4 import (
     FLASHINFER_MOE_EP_MXFP4_BACKENDS,
     Mxfp4MoeBackend,
+    convert_weight_to_mxfp4_moe_kernel_format,
     make_mxfp4_moe_quant_config,
     map_mxfp4_backend,
     mxfp4_round_up_hidden_size_and_intermediate_size,
+    select_deepseek_v4_mxfp4_moe_backend,
 )
 from vllm.model_executor.layers.fused_moe.oracle.mxfp4 import (
     backend_to_kernel_cls as mxfp4_backend_to_kernel_cls,
@@ -63,6 +68,7 @@ from vllm.model_executor.layers.quantization.utils.quant_utils import (
     kNvfp4Dynamic,
     kNvfp4Static,
 )
+from vllm.platforms.interface import DeviceCapability
 from vllm.utils.argparse_utils import FlexibleArgumentParser
 
 
@@ -179,10 +185,30 @@ def megakernel_host(monkeypatch: pytest.MonkeyPatch) -> SimpleNamespace:
         parallel_config=SimpleNamespace(enable_dbo=False, enable_eplb=False),
     )
     monkeypatch.setattr(fi_ep, "get_current_vllm_config", lambda: config)
+    monkeypatch.setattr(fi_ep, "_current_capability", lambda: (10, 0))
     monkeypatch.setattr(
         FlashInferMoeEpExperts, "_supports_current_device", staticmethod(lambda: True)
     )
     return config
+
+
+@pytest.mark.parametrize(
+    "capability, supported, sm107",
+    [
+        (DeviceCapability(10, 0), True, False),
+        (DeviceCapability(10, 7), True, True),
+        (DeviceCapability(12, 0), False, False),
+        (None, False, False),
+    ],
+    ids=["sm100", "sm107", "sm120", "unknown"],
+)
+def test_device_gate_admits_sm107(monkeypatch, capability, supported, sm107):
+    monkeypatch.setattr(
+        fi_ep.current_platform, "get_device_capability", lambda: capability
+    )
+    assert fi_ep.supports_current_device() is supported
+    assert FlashInferMoeEpExperts._supports_current_device() is supported
+    assert fi_ep.is_sm107_device() is sm107
 
 
 def test_megakernel_requires_expert_parallel(megakernel_host):
@@ -213,6 +239,102 @@ def test_megakernel_reports_its_own_constraints(megakernel_host):
         _megakernel_moe(FLASHINFER_MOE_EP_DEEP_GEMM), kMxfp4Static, None
     )
     assert reason.endswith("EPLB")
+
+
+def test_sm107_admits_cutedsl_and_refuses_deep_gemm(monkeypatch, megakernel_host):
+    """SM107 runs the CuTeDSL megakernel for NVFP4 and MXFP4 checkpoints, and
+    MXFP4 layers select it; the DeepGEMM megakernel stays on SM100/SM103."""
+    monkeypatch.setattr(fi_ep, "_current_capability", lambda: (10, 7))
+
+    cutedsl = _megakernel_moe(
+        FLASHINFER_MOE_EP_CUTEDSL,
+        activation_format=mk.FusedMoEActivationFormat.Standard,
+    )
+    assert _is_supported(cutedsl, kNvfp4Static, kNvfp4Dynamic) == (True, "")
+    assert select_deepseek_v4_mxfp4_moe_backend(cutedsl) == (
+        Mxfp4MoeBackend.FLASHINFER_MOE_EP_CUTEDSL,
+        FlashInferMoeEpExperts,
+    )
+    deep_gemm = _megakernel_moe(FLASHINFER_MOE_EP_DEEP_GEMM)
+    supported, reason = _is_supported(deep_gemm, kMxfp4Static, None)
+    assert not supported and "MXFP4 weights on this GPU" in reason
+
+    monkeypatch.setattr(fi_ep, "_current_capability", lambda: (10, 0))
+    assert _is_supported(deep_gemm, kMxfp4Static, None) == (True, "")
+
+
+def test_sm107_refuses_eplb(monkeypatch, megakernel_host):
+    megakernel_host.parallel_config.enable_eplb = True
+    moe = _megakernel_moe(FLASHINFER_MOE_EP_CUTEDSL)
+
+    monkeypatch.setattr(fi_ep, "_current_capability", lambda: (10, 7))
+    _, reason = _is_supported(moe, kNvfp4Static, kNvfp4Dynamic)
+    assert reason.endswith("EPLB on SM107")
+    _, reason = _is_supported(moe, kMxfp4Static, None)
+    assert reason.endswith("EPLB on SM107")
+
+    monkeypatch.setattr(fi_ep, "_current_capability", lambda: (10, 0))
+    assert _is_supported(moe, kNvfp4Static, kNvfp4Dynamic) == (True, "")
+
+
+def test_sm107_epilogue_uses_checkpoint_activation_scales(monkeypatch):
+    """The layer maxima of the activation scales set the norm constants and
+    scale the alphas in place, so they keep aliasing the layer's tensors."""
+    monkeypatch.setattr(
+        fi_experts, "get_ep_group", lambda: SimpleNamespace(world_size=1)
+    )
+    g1 = torch.tensor([1e-4, 2e-4])
+    g2 = torch.tensor([3e-4, 4e-4])
+    g1_orig, g2_orig = g1.clone(), g2.clone()
+
+    epilogue = sm107_nvfp4_epilogue(
+        fi_ep.FlashInferMoeEpEpilogue(fc1_alpha=g1, fc2_alpha=g2),
+        torch.tensor([[1e-3, 1e-3], [4e-3, 4e-3]]),
+        torch.tensor([1e-4, 5e-4]),
+    )
+
+    assert epilogue.input_norm_const == pytest.approx(1 / 4e-3)
+    assert epilogue.fc1_alpha is not None and epilogue.fc2_alpha is not None
+    assert epilogue.fc1_alpha.data_ptr() == g1.data_ptr()
+    assert epilogue.fc2_alpha.data_ptr() == g2.data_ptr()
+    torch.testing.assert_close(epilogue.fc1_alpha, g1_orig * 4e-3, rtol=1e-6, atol=0)
+    torch.testing.assert_close(epilogue.fc2_alpha, g2_orig * 5e-4, rtol=1e-6, atol=0)
+    fc1_norm_const = epilogue.fc1_norm_const
+    assert fc1_norm_const is not None
+    assert fc1_norm_const.dtype == torch.float32 and fc1_norm_const.is_contiguous()
+    torch.testing.assert_close(fc1_norm_const, torch.full((2,), 1 / 5e-4))
+
+
+@pytest.mark.parametrize(
+    "w13_input_scale, w2_input_scale, match",
+    [
+        (
+            torch.tensor([[1e-3, float("nan")]]),
+            torch.tensor([1e-3]),
+            re.escape("got inf (w13) and 0.001"),
+        ),
+        (
+            torch.tensor([[1e-3, 1e-3]]),
+            torch.tensor([float("inf")]),
+            re.escape("and inf (w2)"),
+        ),
+        (torch.zeros(1, 2), torch.zeros(1), "activation input scales"),
+        (None, torch.tensor([1e-3]), "activation input scales"),
+    ],
+    ids=["nan", "inf", "all-zero", "missing"],
+)
+def test_sm107_epilogue_rejects_invalid_activation_scales(
+    monkeypatch, w13_input_scale, w2_input_scale, match
+):
+    monkeypatch.setattr(
+        fi_experts, "get_ep_group", lambda: SimpleNamespace(world_size=1)
+    )
+    epilogue = fi_ep.FlashInferMoeEpEpilogue(
+        fc1_alpha=torch.ones(1), fc2_alpha=torch.ones(1)
+    )
+    with pytest.raises(ValueError, match=match) as error:
+        sm107_nvfp4_epilogue(epilogue, w13_input_scale, w2_input_scale)
+    assert "activation input scales" in str(error.value)
 
 
 def test_megakernels_are_oracle_backends():
@@ -330,6 +452,34 @@ def test_nvfp4_kernel_format_passes_megakernel_weights_through():
         is_act_and_mul=True,
     )
     assert all(out is src for out, src in zip(converted, tensors))
+
+
+def test_mxfp4_kernel_format_passes_megakernel_weights_through_on_sm107(monkeypatch):
+    """SM107 takes MXFP4 experts as stored; SM100/SM103 still get bf16."""
+    w13 = torch.zeros(2, 64, 32, dtype=torch.uint8)
+    w2 = torch.zeros(2, 64, 16, dtype=torch.uint8)
+    w13_scale = torch.full((2, 64, 2), 127, dtype=torch.uint8)
+    w2_scale = torch.full((2, 64, 1), 127, dtype=torch.uint8)
+    # E2M1 1.0 in the low nibble of the first byte, at block scale 2**1.
+    w13[0, 0, 0] = 0x02
+    w13_scale[0, 0, 0] = 128
+    tensors = (w13, w2, w13_scale, w2_scale)
+
+    def convert():
+        return convert_weight_to_mxfp4_moe_kernel_format(
+            Mxfp4MoeBackend.FLASHINFER_MOE_EP_CUTEDSL, torch.nn.Module(), *tensors
+        )
+
+    monkeypatch.setattr(fi_ep, "_current_capability", lambda: (10, 7))
+    assert all(out is src for out, src in zip(convert(), tensors))
+
+    monkeypatch.setattr(fi_ep, "_current_capability", lambda: (10, 0))
+    w13_out, w2_out, w13_scale_out, w2_scale_out, _, _ = convert()
+    expected_w13 = torch.zeros(2, 64, 64, dtype=torch.bfloat16)
+    expected_w13[0, 0, 0] = 2.0
+    assert torch.equal(w13_out, expected_w13)
+    assert torch.equal(w2_out, torch.zeros(2, 64, 32, dtype=torch.bfloat16))
+    assert w13_scale_out is None and w2_scale_out is None
 
 
 def test_passthrough_all2all_backend_selects_the_pass_through_stages():
