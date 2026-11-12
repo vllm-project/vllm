@@ -31,6 +31,7 @@ use vllm_chat::GenerationConfigMode;
 use vllm_chat::ToolStrictLevel;
 use vllm_chat::multimodal::MmLimitPerPrompt;
 use vllm_engine_core_client::TransportMode;
+use vllm_engine_core_client::protocol::dtype::ModelDtype;
 use vllm_engine_core_client::protocol::structured_outputs::StructuredOutputBackend;
 use vllm_managed_engine::ManagedEngineConfig;
 use vllm_managed_engine::cli::{ManagedEngineArgs, repartition_managed_engine_args};
@@ -215,11 +216,38 @@ pub struct RenderArgs {
     chat_template_content_format: ChatTemplateContentFormatOption,
     /// Maximum model context length used for request validation. When not set,
     /// prompt-length validation is skipped and the engine enforces its own limit in later stage.
+    /// Set it to the engine's for multimodal models: some image processors size
+    /// images to fit it.
     #[arg(long)]
     max_model_len: Option<u32>,
     /// Maximum accepted logprobs count; -1 disables the cap.
     #[arg(long, value_parser = clap::value_parser!(i32).range(-1..), allow_negative_numbers = true)]
     max_logprobs: Option<i32>,
+    /// LoRA adapters whose names are accepted as the request model, each as
+    /// `name=path` or a JSON object: `{"name": "name", "path": "lora_path",
+    /// "base_model_name": "id"}`. Rendering does not load adapter weights.
+    #[arg(long, num_args = 1.., value_name = "MODULE")]
+    lora_modules: Vec<LoraModulePath>,
+    /// Disable multimodal preprocessing and treat the model as language-only.
+    #[arg(long)]
+    language_model_only: bool,
+    /// Dtype that multimodal inputs are preprocessed in; set it to the
+    /// engine's `--dtype`. `auto` follows the model config's dtype (or its
+    /// `text_config`'s), running float32 checkpoints in bfloat16 like vLLM; it
+    /// does not inspect weights or the GPU, so pass the engine's dtype when it
+    /// differs.
+    #[arg(long, value_enum, default_value_t)]
+    dtype: DtypeArg,
+    /// The maximum number of input items allowed per prompt for each
+    /// modality, as a JSON object (e.g. `{"image": 16, "video": 2}`); set it
+    /// to the engine's `--limit-mm-per-prompt`. Unspecified modalities are
+    /// unlimited.
+    ///
+    /// Also accepts the engine's configurable form
+    /// (e.g. `{"video": {"count": 1, "num_frames": 32}}`); only `count`
+    /// applies to rendering.
+    #[arg(long, value_parser = parse_json::<MmLimitPerPrompt>, value_name = "JSON", default_value = "{}")]
+    limit_mm_per_prompt: MmLimitPerPrompt,
     /// TLS options for HTTPS/mTLS.
     #[command(flatten)]
     ssl: SslArgs,
@@ -259,7 +287,37 @@ impl RenderArgs {
             chat_template_content_format: self.chat_template_content_format,
             max_model_len: self.max_model_len,
             max_logprobs: self.max_logprobs,
+            lora_modules: self.lora_modules,
+            language_model_only: self.language_model_only,
+            dtype: self.dtype.model_dtype(),
+            limit_mm_per_prompt: self.limit_mm_per_prompt,
             tls,
+        }
+    }
+}
+
+/// `vllm-rs render --dtype` values: vLLM's `--dtype` choices.
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq, clap::ValueEnum)]
+pub enum DtypeArg {
+    /// Follow the model config.
+    #[default]
+    Auto,
+    #[value(name = "float16", alias = "half")]
+    Float16,
+    #[value(name = "bfloat16")]
+    BFloat16,
+    #[value(name = "float32", alias = "float")]
+    Float32,
+}
+
+impl DtypeArg {
+    /// The fixed model dtype, or `None` for `auto`.
+    fn model_dtype(self) -> Option<ModelDtype> {
+        match self {
+            Self::Auto => None,
+            Self::Float16 => Some(ModelDtype::Float16),
+            Self::BFloat16 => Some(ModelDtype::BFloat16),
+            Self::Float32 => Some(ModelDtype::Float32),
         }
     }
 }
@@ -604,6 +662,20 @@ pub struct SharedRuntimeArgs {
     #[serde(skip)]
     pub disable_request_id_randomization: bool,
 
+    /// Keep the API server running after the engine becomes permanently
+    /// unhealthy. Like Python, it is set only through
+    /// `VLLM_KEEP_ALIVE_ON_ENGINE_DEATH`.
+    #[arg(
+        long,
+        hide = true,
+        env = "VLLM_KEEP_ALIVE_ON_ENGINE_DEATH",
+        action = ArgAction::Set,
+        value_parser = parse_int_flag,
+        default_value = "0"
+    )]
+    #[serde(skip)]
+    pub keep_alive_on_engine_death: bool,
+
     /// Maximum HTTP request body size in bytes (default 32 MiB); `0` removes
     /// the limit, like the Python frontend, which has none. It is set only
     /// through `VLLM_HTTP_MAX_REQUEST_BODY_SIZE`.
@@ -874,6 +946,10 @@ impl SharedRuntimeArgs {
                 format!("invalid VLLM_DISABLE_REQUEST_ID_RANDOMIZATION: {error}")
             })?;
         }
+        if let Some(value) = lookup("VLLM_KEEP_ALIVE_ON_ENGINE_DEATH") {
+            self.keep_alive_on_engine_death = parse_int_flag(&value)
+                .map_err(|error| format!("invalid VLLM_KEEP_ALIVE_ON_ENGINE_DEATH: {error}"))?;
+        }
         if let Some(value) = lookup("VLLM_HTTP_MAX_REQUEST_BODY_SIZE") {
             let size = parse_byte_count(&value)
                 .map_err(|error| format!("invalid VLLM_HTTP_MAX_REQUEST_BODY_SIZE: {error}"))?;
@@ -977,6 +1053,7 @@ impl SharedRuntimeArgs {
             custom_histogram_buckets: self.custom_histogram_buckets,
             log_stats_interval,
             disable_request_id_randomization: self.disable_request_id_randomization,
+            keep_alive_on_engine_death: self.keep_alive_on_engine_death,
             shutdown_timeout,
             // The engine is launched and supervised by another process.
             manages_engine: false,
@@ -1065,6 +1142,7 @@ impl SharedRuntimeArgs {
             custom_histogram_buckets: self.custom_histogram_buckets,
             log_stats_interval,
             disable_request_id_randomization: self.disable_request_id_randomization,
+            keep_alive_on_engine_death: self.keep_alive_on_engine_death,
             shutdown_timeout,
             manages_engine,
             keep_alive_timeout,
