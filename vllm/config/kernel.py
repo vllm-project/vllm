@@ -315,7 +315,11 @@ class KernelConfig:
     MI355X; Muse Spark MXFP4 on MI355X with tensor parallel size 8, expert
     parallelism and a 7-token DSpark draft, for speculative verify steps of 1-16
     requests, with bf16 MoE activations instead of the checkpoint's MXFP4). A
-    deployment that cannot run it is refused at startup."""
+    deployment that cannot run it is refused at startup.
+
+    Same switch as `--additional-config '{"decode_backend":
+    "latency_specialized"}'`, the specialized decode of RFC #60904: setting
+    either one enables the model's specialized decode, whichever it reads."""
 
     moe_backend: MoEBackend = "auto"
     """Backend for MoE expert computation kernels. Available options:

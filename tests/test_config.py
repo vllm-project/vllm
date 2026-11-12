@@ -671,6 +671,43 @@ def test_compile_config_repr_succeeds():
     assert "inductor_passes" in val
 
 
+@pytest.mark.parametrize(
+    "monokernel, extra",
+    [
+        (True, {}),
+        (False, {"decode_backend": "latency_specialized"}),
+        (True, {"decode_backend": "latency_specialized"}),
+    ],
+)
+def test_monokernel_and_decode_backend_are_one_switch(monokernel, extra):
+    """Models read either switch, so either spelling must turn on both and
+    hash the same."""
+    config = VllmConfig(
+        kernel_config=KernelConfig(monokernel=monokernel),
+        additional_config=dict(extra),
+    )
+    assert config.kernel_config.monokernel
+    assert config.additional_config["decode_backend"] == "latency_specialized"
+    assert (
+        config.compile_factors()
+        == VllmConfig(kernel_config=KernelConfig(monokernel=True)).compile_factors()
+    )
+
+
+def test_default_config_enables_neither_switch():
+    config = VllmConfig()
+    assert not config.kernel_config.monokernel
+    assert "decode_backend" not in config.additional_config
+
+
+def test_monokernel_rejects_conflicting_decode_backend():
+    with pytest.raises(ValueError, match="conflicts"):
+        VllmConfig(
+            kernel_config=KernelConfig(monokernel=True),
+            additional_config={"decode_backend": "auto"},
+        )
+
+
 def test_v2_frontend_config_can_be_created_without_triton():
     # Start fresh so config imports observe the frontend's Triton availability.
     subprocess.run(
