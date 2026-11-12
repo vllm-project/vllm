@@ -1,0 +1,7 @@
+# Build tools for the mamba-ssm and causal-conv1d wheels in docker/Dockerfile's
+# hybrid-test-wheels stage. Installed with --require-hashes from
+# hybrid-test-deps.txt; regenerate that file with the command in its header.
+ninja
+packaging>=24.2
+setuptools>=77.0.3,<81.0.0
+wheel
