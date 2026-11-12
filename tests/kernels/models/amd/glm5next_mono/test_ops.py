@@ -92,7 +92,7 @@ def test_kda_layer_matches_vllm_ops(
     saturate: bool,
     tpr: int,
 ):
-    """``tpr`` > 1: an MTP verify step, ``tpr`` tokens a request."""
+    """`tpr` > 1: an MTP verify step, `tpr` tokens a request."""
     _ready(tp)
     multi_process_parallel(
         monkeypatch, tp, 1, _ffn._worker(_kda._check, dim_first, saturate, tpr)
