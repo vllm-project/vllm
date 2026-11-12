@@ -1492,6 +1492,11 @@ def rocm_aiter_sparse_attn_indexer(
         resolved_cache_layout = "NORMAL"
 
     if has_prefill:
+        # AITER's gather takes the layout as `preshuffle`, which matches the Triton
+        # default (SHUFFLE when block_size > 1) but cannot express a block-flat
+        # (NORMAL) cache, so that case stays on Triton.
+        use_aiter_gather = _ON_GFX950 and resolved_cache_layout != "NORMAL"
+        preshuffle = kv_cache.shape[1] > 1
         prefill_metadata = layer_attn_metadata.prefill
         assert prefill_metadata is not None
 
@@ -1506,15 +1511,27 @@ def rocm_aiter_sparse_attn_indexer(
             # Query-split sub-chunks of one request share the K workspace
             # filled by the first sub-chunk.
             if not chunk.skip_kv_gather:
-                cp_gather_indexer_k_quant_cache_triton(
-                    kv_cache,
-                    k_fp8,
-                    k_scale,
-                    chunk.block_table,
-                    chunk.cu_seq_lens,
-                    token_to_seq=chunk.token_to_seq,
-                    cache_layout=resolved_cache_layout,
-                )
+                if use_aiter_gather:
+                    from aiter import cp_gather_indexer_k_quant_cache
+
+                    cp_gather_indexer_k_quant_cache(
+                        kv_cache,
+                        k_fp8,
+                        k_scale,
+                        chunk.block_table,
+                        chunk.cu_seq_lens,
+                        preshuffle=preshuffle,
+                    )
+                else:
+                    cp_gather_indexer_k_quant_cache_triton(
+                        kv_cache,
+                        k_fp8,
+                        k_scale,
+                        chunk.block_table,
+                        chunk.cu_seq_lens,
+                        token_to_seq=chunk.token_to_seq,
+                        cache_layout=resolved_cache_layout,
+                    )
             logits = rocm_fp8_mqa_logits(
                 q_fp8[chunk.token_start : chunk.token_end],
                 (k_fp8, k_scale.view(torch.float32)),
