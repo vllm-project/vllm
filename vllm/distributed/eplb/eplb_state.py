@@ -1384,6 +1384,29 @@ def compute_logical_maps(
     return logical_to_physical_map_out, logical_replica_count
 
 
+def _prepare_eplb_maps(
+    physical_to_logical_map: torch.Tensor,
+    num_logical_experts: int,
+    max_replicas: int,
+) -> tuple[torch.Tensor, torch.Tensor, torch.Tensor]:
+    """Prepare CPU maps for a cycle before publishing its layer results."""
+    logical_map, replica_count = compute_logical_maps(
+        physical_to_logical_map, num_logical_experts
+    )
+    padded = torch.full(
+        (*logical_map.shape[:-1], max_replicas),
+        -1,
+        dtype=logical_map.dtype,
+        device="cpu",
+        pin_memory=PIN_MEMORY,
+    )
+    padded[..., : logical_map.shape[-1]] = logical_map
+    if PIN_MEMORY:
+        physical_to_logical_map = physical_to_logical_map.pin_memory()
+        replica_count = replica_count.pin_memory()
+    return physical_to_logical_map, padded, replica_count
+
+
 def _pad_out_tensor(src: torch.Tensor, dst: torch.Tensor) -> None:
     padded = torch.full(dst.shape, -1, dtype=dst.dtype, pin_memory=PIN_MEMORY)
     padded[..., : src.shape[-1]] = src
@@ -1394,6 +1417,8 @@ def _commit_eplb_maps_for_layer(
     model_state: EplbModelState,
     new_physical_to_logical_map: torch.Tensor,
     layer: int,
+    new_logical_to_physical_map: torch.Tensor,
+    new_logical_replica_count: torch.Tensor,
 ) -> None:
     """Per-layer version of _commit_eplb_maps that's used by the sync portion of EPLB
     when running async EPLB. Copies all of the new_* maps into model_state. After this
@@ -1408,21 +1433,13 @@ def _commit_eplb_maps_for_layer(
         f"Current number of physical experts: {dst.shape[0]}. New number of physical "
         f"experts {src.shape[0]}."
     )
-    if PIN_MEMORY and src.is_cpu:
-        src = src.new_empty(src.shape, pin_memory=True).copy_(src)
     dst.copy_(src, non_blocking=True)
-
-    num_logical_experts = model_state.logical_to_physical_map.shape[1]
-    new_logical, new_replica_count = compute_logical_maps(src, num_logical_experts)
-    # Commit logical_to_physical_map
-    _pad_out_tensor(src=new_logical, dst=model_state.logical_to_physical_map[layer])
-
-    # Commit logical_replica_count
-    src = new_replica_count
+    model_state.logical_to_physical_map[layer].copy_(
+        new_logical_to_physical_map, non_blocking=True
+    )
+    src = new_logical_replica_count
     dst = model_state.logical_replica_count[layer]
     assert src.shape == dst.shape
-    if PIN_MEMORY:
-        src = src.pin_memory()
     dst.copy_(src, non_blocking=True)
 
 
@@ -1482,6 +1499,8 @@ def _move_to_workspace(
         model_state,
         new_physical_to_logical_map=result.new_physical_to_logical_map,
         layer=result.layer_idx,
+        new_logical_to_physical_map=result.new_logical_to_physical_map,
+        new_logical_replica_count=result.new_logical_replica_count,
     )
 
     if result.layer_idx == model_state.model.num_moe_layers - 1:

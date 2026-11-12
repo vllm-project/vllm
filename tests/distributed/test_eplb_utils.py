@@ -9,7 +9,32 @@ import torch
 from vllm.distributed.eplb.eplb_state import (
     _commit_eplb_maps,
     _commit_eplb_maps_for_layer,
+    _prepare_eplb_maps,
 )
+from vllm.utils.torch_utils import PIN_MEMORY
+
+
+@pytest.mark.parametrize("per_layer", [False, True])
+def test_prepare_eplb_maps_preserves_replica_order_and_padding(per_layer):
+    physical = torch.tensor([[0, 1, 2, 0, -1, -1], [2, 1, 0, 1, 2, -1]])
+    expected_logical = torch.tensor(
+        [[[0, 3, -1], [1, -1, -1], [2, -1, -1]], [[2, -1, -1], [1, 3, -1], [0, 4, -1]]]
+    )
+    expected_counts = torch.tensor([[2, 1, 1], [1, 2, 2]])
+    if per_layer:
+        physical = physical[1]
+        expected_logical = expected_logical[1]
+        expected_counts = expected_counts[1]
+
+    prepared_physical, logical, counts = _prepare_eplb_maps(physical, 3, 3)
+
+    assert torch.equal(prepared_physical, physical)
+    assert torch.equal(logical, expected_logical)
+    assert torch.equal(counts, expected_counts)
+    assert all(
+        t.is_cpu and t.is_pinned() == PIN_MEMORY
+        for t in (prepared_physical, logical, counts)
+    )
 
 
 def _make_model_state(
@@ -85,7 +110,10 @@ def test_commit_eplb_maps_for_layer_logical_padding():
         .contiguous()
     )
     layer = 0
-    _commit_eplb_maps_for_layer(model_state, new_phy2log[layer], layer)
+    physical, logical, counts = _prepare_eplb_maps(
+        new_phy2log[layer], num_logical, max_replicas
+    )
+    _commit_eplb_maps_for_layer(model_state, physical, layer, logical, counts)
 
     assert torch.all(model_state.logical_to_physical_map[layer, :, 2] == -1)
 
@@ -101,7 +129,9 @@ def test_commit_eplb_maps_for_layer_shape_assert():
     )
     bad_phy2log = torch.zeros(num_layers, num_physical + 1, dtype=torch.long)
     with pytest.raises(AssertionError):
-        _commit_eplb_maps_for_layer(model_state, bad_phy2log, layer=0)
+        _commit_eplb_maps_for_layer(
+            model_state, bad_phy2log, 0, torch.empty(0), torch.empty(0)
+        )
 
 
 def test_commit_eplb_maps():
@@ -148,7 +178,10 @@ def test_commit_eplb_maps_for_layer():
     )
     new_logcnt = torch.tensor([[2, 1, 1], [1, 2, 1]], dtype=torch.long)
 
-    _commit_eplb_maps_for_layer(model_state, new_phy2log[0], layer=0)
+    physical, logical, counts = _prepare_eplb_maps(
+        new_phy2log[0], num_logical, max_replicas
+    )
+    _commit_eplb_maps_for_layer(model_state, physical, 0, logical, counts)
 
     # Layer 0 updated
     assert torch.equal(model_state.physical_to_logical_map[0], new_phy2log[0])
@@ -175,10 +208,13 @@ def test_commit_eplb_maps_for_layer_does_not_sync_host():
         logcnt=torch.zeros(num_layers, num_logical, dtype=torch.long, device="cuda"),
     )
     new_phy2log = torch.tensor([0, 1, 2, 0], dtype=torch.long)
+    physical, logical, counts = _prepare_eplb_maps(
+        new_phy2log, num_logical, max_replicas
+    )
 
     prev_mode = torch.cuda.get_sync_debug_mode()
     torch.cuda.set_sync_debug_mode("error")
     try:
-        _commit_eplb_maps_for_layer(model_state, new_phy2log, layer=0)
+        _commit_eplb_maps_for_layer(model_state, physical, 0, logical, counts)
     finally:
         torch.cuda.set_sync_debug_mode(prev_mode)

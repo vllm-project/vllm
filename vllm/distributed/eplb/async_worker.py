@@ -100,6 +100,8 @@ def _transfer_cycle(
     is_profile: bool,
 ) -> None:
     """Run one rebalance pass over all model states and layers."""
+    from .eplb_state import _prepare_eplb_maps
+
     # Snapshot the FT reset epoch. A change in this value means a fault
     # recovery happened, and the in-flight rebalance must be abandoned.
     reset_epoch = state.ft_reset_epoch
@@ -123,6 +125,15 @@ def _transfer_cycle(
         t_start = time.perf_counter()
         new_physical_to_logical_map = run_rebalance_experts(
             model_state, state, physical_to_logical_map_cpu, stream
+        )
+        (
+            new_physical_to_logical_map,
+            new_logical_to_physical_map,
+            new_logical_replica_count,
+        ) = _prepare_eplb_maps(
+            new_physical_to_logical_map,
+            model_state.logical_to_physical_map.shape[1],
+            model_state.logical_to_physical_map.shape[2],
         )
 
         migration_batches_by_layer = None
@@ -199,6 +210,8 @@ def _transfer_cycle(
             model_state.pending_result = AsyncEplbLayerResult(
                 layer_idx=layer_idx,
                 new_physical_to_logical_map=new_physical_to_logical_map[layer_idx],
+                new_logical_to_physical_map=new_logical_to_physical_map[layer_idx],
+                new_logical_replica_count=new_logical_replica_count[layer_idx],
                 transfer_metadata=transfer_metadata,
                 consumed_event=consumed_event,
             )

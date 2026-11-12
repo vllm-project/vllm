@@ -55,6 +55,10 @@ class AsyncEplbLayerResult:
     New physical→logical mapping for layers_idx, on CPU.
     Shape: (num_physical_experts)
     """
+    new_logical_to_physical_map: torch.Tensor
+    """Padded logical→physical mapping for this layer, on CPU."""
+    new_logical_replica_count: torch.Tensor
+    """Replica counts for this layer, on CPU."""
     transfer_metadata: TransferMetadata
     """Metadata describing what was received during transfer_layer."""
     consumed_event: CpuGpuEvent
