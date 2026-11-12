@@ -74,7 +74,9 @@ def select_store_candidates(
     apply_eagle_drop = not config.num_hash_lookahead_tokens
     reachable_boundaries: tuple[int, ...] = ()
     if config.retention_interval is not None:
-        reachable_boundaries = (req.num_prompt_tokens - 1,)
+        reachable_boundaries = (
+            req.num_prompt_tokens - max(1, config.num_hash_lookahead_tokens),
+        )
         if req.shared_prefix_boundary:
             reachable_boundaries += (req.shared_prefix_boundary,)
 
