@@ -67,6 +67,7 @@ class NixlPullConnectorScheduler(NixlBaseConnectorScheduler):
         if (
             params is not None
             and params.get("do_remote_decode")
+            and self.is_bidirectional_kv_xfer_enabled
             and params.get("remote_block_ids")
             and all(
                 p in params

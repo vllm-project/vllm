@@ -33,6 +33,18 @@ steps:
         - vllm/platforms/rocm.py
       commands:
         - ATTENTION_BACKEND=TRITON_ATTN bash v1/kv_connector/nixl_integration/config_sweep_accuracy_test.sh
+- label: ":nvidia: (L4) NIXL one-way remote decode"
+  key: nixl-one-way-remote-decode
+  timeout_in_minutes: 15
+  working_dir: "/vllm-workspace/tests"
+  device: l4
+  num_devices: 1
+  source_file_dependencies:
+    - vllm/distributed/kv_transfer/kv_connector/v1/nixl/
+    - tests/v1/kv_connector/nixl_integration/test_remote_decode.py
+  commands:
+    - bash /vllm-workspace/.buildkite/scripts/check-kv-connectors.sh
+    - pytest -v -s v1/kv_connector/nixl_integration/test_remote_decode.py
 
 - label: ":nvidia: (L4) [Nightly] Distributed FlashInfer NixlConnector PD accuracy"
   key: distributed-flashinfer-nixlconnector-pd-accuracy-4-gpus
