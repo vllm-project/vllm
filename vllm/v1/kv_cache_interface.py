@@ -988,21 +988,21 @@ class DFlashSlidingWindowSpec(SlidingWindowSpec):
 
     DFlash/DSpark context KV is a per-position projection of the target's
     hidden states, and draft attention runs only past the last target token.
-    An allocation whose target tokens end at ``T`` therefore backs only blocks
-    from ``T - tail_tokens`` on (earlier ones stay null), and a prefix hit only
+    An allocation whose target tokens end at `T` therefore backs only blocks
+    from `T - tail_tokens` on (earlier ones stay null), and a prefix hit only
     needs cached drafter blocks in the window before the request end.
     """
 
     num_speculative_tokens: int = 0
-    """Drafts each step verifies; ``T`` counts them before acceptance."""
+    """Drafts each step verifies; `T` counts them before acceptance."""
     max_in_flight_steps: int = 1
     num_lookahead_tokens: int = 0
     """Slots each allocation backs past its target tokens for the drafts."""
 
     @property
     def tail_tokens(self) -> int:
-        """Tokens below ``T`` a draft step can still read: the window, plus
-        the drafts each in-flight step counts in ``T`` and may reject."""
+        """Tokens below `T` a draft step can still read: the window, plus
+        the drafts each in-flight step counts in `T` and may reject."""
         return (
             self.sliding_window + self.num_speculative_tokens * self.max_in_flight_steps
         )

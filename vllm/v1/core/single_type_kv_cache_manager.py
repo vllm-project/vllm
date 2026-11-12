@@ -675,8 +675,8 @@ class SingleTypeKVCacheManager(ABC):
             dcp_world_size: The world size of decode context parallelism.
             pcp_world_size: The world size of prefill context parallelism.
             num_request_tokens: The length of the request being looked up, for
-                managers whose hit rule depends on where it ends. ``None``
-                means ``max_length``.
+                managers whose hit rule depends on where it ends. `None`
+                means `max_length`.
 
         Returns:
             A tuple containing cached blocks and the exact cache-hit length in
@@ -1219,15 +1219,15 @@ class DFlashSlidingWindowManager(SlidingWindowManager):
     """Drafter sliding-window KV that is only read near the sequence end.
 
     An allocation, including a KV-connector load's, backs only the blocks a
-    draft step can read, those from ``num_tokens_main_model - tail_tokens`` on;
+    draft step can read, those from `num_tokens_main_model - tail_tokens` on;
     lower blocks are null, so a long prefill chunk holds one tail rather than
     the whole chunk. The tail's margin over the window covers in-flight drafts
     that may be rejected.
 
     Frees and hits see no drafts in flight, so they use the window like plain
-    sliding window. A prefix hit at ``h`` for a request of ``L`` tokens needs
-    cached blocks only in ``[L - sliding_window + 1, h)``: the drafter reads
-    only past the last target token, and everything from ``h`` on is
+    sliding window. A prefix hit at `h` for a request of `L` tokens needs
+    cached blocks only in `[L - sliding_window + 1, h)`: the drafter reads
+    only past the last target token, and everything from `h` on is
     recomputed.
     """
 
@@ -1293,11 +1293,11 @@ class DFlashSlidingWindowManager(SlidingWindowManager):
         pcp_world_size: int = 1,
         num_request_tokens: int | None = None,
     ) -> tuple[tuple[list[KVCacheBlock], ...], int]:
-        """Longest hit whose blocks in ``[L - sliding_window + 1, hit)`` are cached.
+        """Longest hit whose blocks in `[L - sliding_window + 1, hit)` are cached.
 
-        ``num_request_tokens`` (``L``) defaults to ``max_length``, which asks
+        `num_request_tokens` (`L`) defaults to `max_length`, which asks
         for the tail before the hit itself, like plain sliding window.
-        Underestimating ``L`` only asks for more blocks than needed.
+        Underestimating `L` only asks for more blocks than needed.
         """
         assert isinstance(kv_cache_spec, DFlashSlidingWindowSpec)
         assert not drop_eagle_block, "Drafter context KV needs no EAGLE drop."
