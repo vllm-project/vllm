@@ -1045,6 +1045,8 @@ class AnthropicServingMessages(OpenAIServingChat):
             state = _ActiveBlockState()
             # Map from tool call index to tool_use_id
             tool_index_to_id: dict[int, str] = {}
+            # Arguments of tool calls whose name has not arrived yet, by index
+            unnamed_tool_args: dict[int, list[str]] = {}
 
             def stop_active_block():
                 events: list[str] = []
@@ -1226,76 +1228,65 @@ class AnthropicServingMessages(OpenAIServingChat):
                 # tool calls - process all tool calls in the delta
                 if len(origin_chunk.choices[0].delta.tool_calls) > 0:
                     for tool_call in origin_chunk.choices[0].delta.tool_calls:
+                        index = tool_call.index
+                        function = tool_call.function
+                        tool_name = function.name if function else None
+                        tool_args = function.arguments if function else None
                         if tool_call.id is not None:
                             # Update mapping for incremental updates
-                            tool_index_to_id[tool_call.index] = tool_call.id
-                            # Only create new block if different tool call
-                            # AND has a name
-                            tool_name = (
-                                tool_call.function.name if tool_call.function else None
+                            tool_index_to_id[index] = tool_call.id
+                            if state.tool_use_id != tool_call.id and tool_name is None:
+                                # Some parsers (e.g. pre-v11 Mistral) stream
+                                # arguments before the name; hold them.
+                                unnamed_tool_args.setdefault(index, [])
+                        tool_use_id = tool_index_to_id.get(index)
+                        if tool_use_id is None:
+                            continue
+                        # Only create new block if different tool call
+                        # AND has a name
+                        if tool_name is not None and (
+                            index in unnamed_tool_args
+                            or (
+                                tool_call.id is not None
+                                and state.tool_use_id != tool_call.id
                             )
-                            if (
-                                state.tool_use_id != tool_call.id
-                                and tool_name is not None
-                            ):
-                                for event in stop_and_flush():
-                                    yield event
-                                tool_used = True
-                                last_tool_args = []
-                                start_event = start_block(
-                                    AnthropicContentBlock(
-                                        type="tool_use",
-                                        id=tool_call.id,
-                                        name=tool_name,
-                                        input={},
-                                    )
+                        ):
+                            for event in stop_and_flush():
+                                yield event
+                            tool_used = True
+                            last_tool_args = []
+                            start_event = start_block(
+                                AnthropicContentBlock(
+                                    type="tool_use",
+                                    id=tool_use_id,
+                                    name=tool_name,
+                                    input={},
                                 )
-                                yield start_event
-                            # Handle initial arguments if present
-                            if (
-                                tool_call.function
-                                and tool_call.function.arguments
-                                and state.tool_use_id == tool_call.id
-                            ):
-                                last_tool_args.append(tool_call.function.arguments)
-                                chunk = AnthropicStreamEvent(
-                                    index=(
-                                        state.block_index
-                                        if state.block_index is not None
-                                        else state.content_block_index
-                                    ),
-                                    type="content_block_delta",
-                                    delta=AnthropicDelta(
-                                        type="input_json_delta",
-                                        partial_json=tool_call.function.arguments,
-                                    ),
-                                )
-                                data = chunk.model_dump_json(exclude_unset=True)
-                                yield wrap_data_with_event(data, "content_block_delta")
-                        else:
-                            # Incremental update - use index to find tool_use_id
-                            tool_use_id = tool_index_to_id.get(tool_call.index)
-                            if (
-                                tool_use_id is not None
-                                and tool_call.function
-                                and tool_call.function.arguments
-                                and state.tool_use_id == tool_use_id
-                            ):
-                                last_tool_args.append(tool_call.function.arguments)
-                                chunk = AnthropicStreamEvent(
-                                    index=(
-                                        state.block_index
-                                        if state.block_index is not None
-                                        else state.content_block_index
-                                    ),
-                                    type="content_block_delta",
-                                    delta=AnthropicDelta(
-                                        type="input_json_delta",
-                                        partial_json=tool_call.function.arguments,
-                                    ),
-                                )
-                                data = chunk.model_dump_json(exclude_unset=True)
-                                yield wrap_data_with_event(data, "content_block_delta")
+                            )
+                            yield start_event
+                            tool_args = "".join(unnamed_tool_args.pop(index, [])) + (
+                                tool_args or ""
+                            )
+                        if not tool_args:
+                            continue
+                        if index in unnamed_tool_args:
+                            unnamed_tool_args[index].append(tool_args)
+                        elif state.tool_use_id == tool_use_id:
+                            last_tool_args.append(tool_args)
+                            chunk = AnthropicStreamEvent(
+                                index=(
+                                    state.block_index
+                                    if state.block_index is not None
+                                    else state.content_block_index
+                                ),
+                                type="content_block_delta",
+                                delta=AnthropicDelta(
+                                    type="input_json_delta",
+                                    partial_json=tool_args,
+                                ),
+                            )
+                            data = chunk.model_dump_json(exclude_unset=True)
+                            yield wrap_data_with_event(data, "content_block_delta")
                     continue
             for event in stop_and_flush():
                 yield event
