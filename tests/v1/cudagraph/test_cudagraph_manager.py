@@ -807,13 +807,13 @@ def test_draft_prefill_matches_shared_target_metadata_shape(
 def test_mixed_batch_at_decode_only_token_count_still_gets_a_graph(monkeypatch):
     """A mixed batch must not fall to eager where only decode graphs are staged.
 
-    ``round_up(size, decode_query_len)`` lands FULL decode graphs on token counts
+    `round_up(size, decode_query_len)` lands FULL decode graphs on token counts
     the PIECEWISE ladder never uses -- with capture sizes [1, 2, 4, 8, 16, 24]
     and query length 3, FULL covers 3, 6, 9 and 18 while PIECEWISE has only
     1, 2, 4, 8, 16, 24. Building each mode's candidate ranges independently keeps
     a PIECEWISE graph reachable there. Deriving the ranges from the staged sizes
     instead offers a mixed batch nothing but decode descriptors, whose
-    ``uniform_token_count`` it can never match, so it runs fully eager.
+    `uniform_token_count` it can never match, so it runs fully eager.
     """
     manager = _make_spec_decode_manager(monkeypatch)
 
@@ -852,10 +852,10 @@ def test_uniform_decode_beyond_capture_ladder_falls_back(monkeypatch):
 def test_dynamic_spec_decode_shared_token_count_stays_reachable(monkeypatch):
     """Every captured decode graph must remain reachable from dispatch().
 
-    Under dynamic speculative decoding ``decode_query_lens`` is a list, and the
+    Under dynamic speculative decoding `decode_query_lens` is a list, and the
     staging loop rounds each capture size up to *every* query length. Several
-    decode graphs therefore land on the same ``num_tokens`` -- e.g. capture size
-    2 stages both ``round_up(2, 1) == 2`` and ``round_up(2, 2) == 2``. Building
+    decode graphs therefore land on the same `num_tokens` -- e.g. capture size
+    2 stages both `round_up(2, 1) == 2` and `round_up(2, 2) == 2`. Building
     the candidate ranges one descriptor at a time would give all but the first
     of those an empty range, so they would never enter a candidate list and
     their batches would silently fall through to PIECEWISE.

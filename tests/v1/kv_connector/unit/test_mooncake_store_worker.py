@@ -10,6 +10,7 @@ import queue
 import sys
 import threading
 import types
+from collections.abc import Callable
 from dataclasses import replace
 from types import SimpleNamespace
 from unittest.mock import MagicMock, patch
@@ -21,15 +22,16 @@ from tests.v1.attention.utils import dense_kv_cache_views
 from vllm.distributed import mooncake_store
 from vllm.distributed.kv_events import KVEventAggregator
 from vllm.distributed.kv_transfer.kv_connector.v1.mooncake import (
-    rdma_utils,
+    transfer_engine_registry,
 )
-from vllm.distributed.kv_transfer.kv_connector.v1.mooncake.store import (
+from vllm.distributed.kv_transfer.kv_connector.v1.mooncake_store import (
+    rdma_utils,
     worker,
 )
-from vllm.distributed.kv_transfer.kv_connector.v1.mooncake.store import (
+from vllm.distributed.kv_transfer.kv_connector.v1.mooncake_store import (
     worker as mooncake_store_worker,
 )
-from vllm.distributed.kv_transfer.kv_connector.v1.mooncake.store.data import (  # noqa: E501
+from vllm.distributed.kv_transfer.kv_connector.v1.mooncake_store.data import (  # noqa: E501
     BlobBlockHashes,
     BoundaryPut,
     ChunkedTokenDatabase,
@@ -39,7 +41,7 @@ from vllm.distributed.kv_transfer.kv_connector.v1.mooncake.store.data import (  
     RequestTracker,
     TailKeyBoundary,
 )
-from vllm.distributed.kv_transfer.kv_connector.v1.mooncake.store.layout import (  # noqa: E501
+from vllm.distributed.kv_transfer.kv_connector.v1.mooncake_store.layout import (  # noqa: E501
     HeadMajorStoreLayout,
     KeyMetadata,
     MambaStoreLayout,
@@ -47,10 +49,10 @@ from vllm.distributed.kv_transfer.kv_connector.v1.mooncake.store.layout import (
     RankLocalStoreLayout,
     TokenMajorStoreLayout,
 )
-from vllm.distributed.kv_transfer.kv_connector.v1.mooncake.store.metrics import (
+from vllm.distributed.kv_transfer.kv_connector.v1.mooncake_store.metrics import (
     MooncakeStoreConnectorStats,
 )
-from vllm.distributed.kv_transfer.kv_connector.v1.mooncake.store.scheduler import (  # noqa: E501
+from vllm.distributed.kv_transfer.kv_connector.v1.mooncake_store.scheduler import (  # noqa: E501
     _partial_tail_non_mamba_puts,
 )
 from vllm.model_executor.layers.mamba.mamba_utils import get_conv_state_layout
@@ -71,6 +73,12 @@ def _reset_conv_state_layout_cache():
     get_conv_state_layout.cache_clear()
     yield
     get_conv_state_layout.cache_clear()
+
+
+@pytest.fixture(autouse=True)
+def _reset_shared_transfer_engine():
+    yield
+    transfer_engine_registry._SHARED = None
 
 
 _TP_SHARED_NAMESPACE = (
@@ -188,6 +196,7 @@ def _make_store_sending_thread(
     supports_group_ids: bool = False,
     kv_role: str = "kv_producer",
     enable_kv_event: bool = False,
+    record_operation: Callable[..., None] | None = None,
 ) -> mooncake_store_worker.KVCacheStoreSendingThread:
     if coord is None:
         coord = _default_send_coord()
@@ -209,6 +218,7 @@ def _make_store_sending_thread(
         replicate_config=replicate_config,
         enable_group_semantics=enable_group_semantics,
         supports_group_ids=supports_group_ids,
+        record_operation=record_operation,
     )
     thread.request_queue.task_done = MagicMock()
     return thread
@@ -800,6 +810,47 @@ def test_setup_passes_the_current_gpus_device_names(
     assert store.setup.call_args.args[5] == expected
     if physical_gpu is None:
         platform.visible_device_id_to_physical_device_id.assert_not_called()
+
+
+def test_setup_passes_an_existing_transfer_engine():
+    config = mooncake_store.MooncakeStoreConfig(
+        metadata_server="P2PHANDSHAKE",
+        master_server_address="127.0.0.1:50051",
+        protocol="rdma",
+        device_name="mlx5_0",
+    )
+    store = MagicMock()
+    store.setup.return_value = 0
+    engine = object()
+    mooncake_store.setup_mooncake_store(store, config, "10.0.0.1:15051", engine=engine)
+
+    assert store.setup.call_args.kwargs == {"engine": engine}
+    assert store.setup.call_args.args[5] == ""
+
+
+def test_setup_rejects_an_engine_the_store_cannot_accept():
+    class _Store:
+        def setup(
+            self,
+            local_hostname,
+            metadata_server,
+            global_segment_size,
+            local_buffer_size,
+            protocol,
+            rdma_devices,
+            master_server_addr,
+            tenant_id="default",
+        ):
+            raise AssertionError("setup should not be called")
+
+    config = mooncake_store.MooncakeStoreConfig(
+        metadata_server="P2PHANDSHAKE",
+        master_server_address="127.0.0.1:50051",
+        protocol="rdma",
+        device_name="",
+    )
+    with pytest.raises(RuntimeError, match="setup accepts engine="):
+        mooncake_store.setup_mooncake_store(_Store(), config, "host", engine=object())
 
 
 @pytest.mark.parametrize(
@@ -1699,7 +1750,7 @@ def test_partial_tail_with_smaller_mamba_blocks_writes_one_mamba_key(tp_rank):
 
 
 def test_shared_prefix_junction_handoff_writes_only_its_mamba_key():
-    """A junction hand-off (``--enable-mamba-shared-prefix-checkpoint``) below
+    """A junction hand-off (`--enable-mamba-shared-prefix-checkpoint`) below
     the prompt checkpoint stores its Mamba state under the junction hash and
     no attention tail."""
     store = MagicMock()
@@ -2001,6 +2052,48 @@ def test_store_sending_thread_reports_job_when_store_raises(failing_call):
     assert thread.take_completed_saves() == {req.store_job_id: 1}
 
 
+@pytest.mark.parametrize("boundary_save", [False, True])
+@pytest.mark.parametrize(
+    ("results", "status"),
+    [([-900, -900], "error"), ([-901, -901], "error"), ([0, -900], "partial_failure")],
+)
+def test_failed_existence_check_skips_put_and_completes_save(
+    boundary_save: bool, results: list[int], status: str
+) -> None:
+    store = MagicMock()
+    store.batch_is_exist.return_value = results
+    stats = MooncakeStoreConnectorStats()
+    thread = _make_store_sending_thread(store, record_operation=stats.record_operation)
+    req = _make_store_req("failed-exists", [b"a0", b"a1"])
+    if boundary_save:
+        req.token_len_chunk = 0
+        req.boundary_puts = [BoundaryPut(0, 1, 16), BoundaryPut(0, 2, 32)]
+
+    _run_store_req(thread, req)
+
+    assert store.batch_put_from_multi_buffers.call_count == 0
+    assert thread.take_completed_saves() == {req.store_job_id: 1}
+    assert stats.reduce()["save_exists_failed_keys"] == sum(r < 0 for r in results)
+    assert stats.data["save_exists"][0]["status"] == status
+
+
+@pytest.mark.parametrize("error", [-900, -901, -1401])
+def test_failed_put_still_completes_save(error: int) -> None:
+    store = MagicMock()
+    store.batch_is_exist.return_value = [0, 0]
+    store.batch_put_from_multi_buffers.return_value = [error, error]
+    stats = MooncakeStoreConnectorStats()
+    thread = _make_store_sending_thread(store, record_operation=stats.record_operation)
+    req = _make_store_req("failed-put", [b"a0", b"a1"])
+
+    _run_store_req(thread, req)
+
+    assert store.batch_put_from_multi_buffers.call_count == 1
+    assert thread.take_completed_saves() == {req.store_job_id: 1}
+    assert stats.reduce()["save_put_failed_keys"] == 2
+    assert stats.data["save_put"][0]["status"] != "ok"
+
+
 def test_store_sending_thread_reports_job_when_the_preamble_raises():
     # The report has to survive a failure before the first store call too, so
     # every dequeue leaves through the same exit.
@@ -2042,6 +2135,25 @@ def test_stale_store_job_cannot_touch_a_reused_request_id():
     assert "req-a" not in thread._skip_store_requests
     assert thread._get_retry_token_ids(stale) is None
     assert thread._get_retry_token_ids(live) == (32, list(range(32, 64)))
+
+
+def test_wait_for_save_retires_preempted_attempt_before_queueing():
+    w = _make_bare_worker()
+    w.kv_send_thread = _make_store_sending_thread(MagicMock())
+    stale = _make_store_req("req-a", [b"a0", b"a1"])
+    stale.store_job_id = 1
+    w.kv_send_thread.add_request(stale)
+    live = _make_store_req("req-a", [b"a0", b"a1"])
+    live.store_job_id = 2
+    meta = mooncake_store_worker.MooncakeStoreConnectorMetadata(set(), {"req-a"})
+    meta.add_request(live)
+
+    with patch.object(torch.cuda, "Event"):
+        w.wait_for_save(meta)
+    w.get_finished(set(), meta)
+
+    assert w.kv_send_thread.is_live_store_job(live)
+    assert not w.kv_send_thread.is_live_store_job(stale)
 
 
 def test_store_recving_thread_reports_failed_block_ids():
@@ -2854,6 +2966,109 @@ def test_requester_worker_init_uses_positional_setup(tmp_path, monkeypatch):
     assert w.coord.retention_interval == 0
 
 
+def _p2p_store_config(**overrides: object) -> dict[str, object]:
+    config: dict[str, object] = {
+        "metadata_server": "P2PHANDSHAKE",
+        "global_segment_size": "4gb",
+        "local_buffer_size": "64mb",
+        "protocol": "rdma",
+        "device_name": "mlx5_0",
+        "master_server_address": "10.0.0.7:50051",
+    }
+    config.update(overrides)
+    return config
+
+
+def test_worker_reuses_pd_transfer_engine(tmp_path, monkeypatch):
+    from vllm.distributed.kv_transfer.kv_connector.v1.mooncake.transfer_engine_registry import (  # noqa: E501
+        clear_shared_transfer_engine,
+        register_shared_transfer_engine,
+    )
+
+    class _Engine:
+        def __init__(self) -> None:
+            self.inner = object()
+
+        def get_engine(self):
+            return self.inner
+
+    engine = _Engine()
+    register_shared_transfer_engine(
+        engine=engine,
+        hostname="10.9.8.7",
+        rpc_port=16000,
+        protocol="rdma",
+    )
+    try:
+        store = MagicMock()
+        store.setup.return_value = 0
+        _install_fake_mooncake(monkeypatch, store)
+        _patch_worker_runtime(monkeypatch)
+        monkeypatch.setenv("MOONCAKE_REQUESTER_LOCAL_HOSTNAME", "worker-a:50053")
+        monkeypatch.setenv(
+            "MOONCAKE_CONFIG_PATH",
+            _write_mooncake_config(tmp_path, _p2p_store_config(protocol="tcp")),
+        )
+        worker.MooncakeStoreWorker(
+            _make_vllm_config(
+                extra_config={"reuse_pd_transfer_engine": True},
+            ),
+            _make_kv_cache_config(),
+        )
+        assert store.setup.call_args.args[0] == "10.9.8.7:16000"
+        assert store.setup.call_args.args[1] == ""
+        assert store.setup.call_args.args[4] == "rdma"
+        assert store.setup.call_args.kwargs["engine"] is engine.inner
+    finally:
+        clear_shared_transfer_engine(engine)
+
+
+def test_worker_reuse_requires_pd_engine(tmp_path, monkeypatch):
+    store = MagicMock()
+    store.setup.return_value = 0
+    _install_fake_mooncake(monkeypatch, store)
+    _patch_worker_runtime(monkeypatch)
+    monkeypatch.setenv(
+        "MOONCAKE_CONFIG_PATH",
+        _write_mooncake_config(tmp_path, _p2p_store_config()),
+    )
+    with pytest.raises(RuntimeError, match="no MooncakeConnector TransferEngine"):
+        worker.MooncakeStoreWorker(
+            _make_vllm_config(extra_config={"reuse_pd_transfer_engine": True}),
+            _make_kv_cache_config(),
+        )
+    store.setup.assert_not_called()
+
+
+def test_supports_sleep_mode_with_reused_engine_ignores_store_json(
+    tmp_path, monkeypatch
+):
+    from vllm.config import KVTransferConfig
+    from vllm.distributed.kv_transfer.kv_connector.v1.mooncake_store.connector import (  # noqa: E501
+        MooncakeStoreConnector,
+    )
+
+    monkeypatch.setenv(
+        "MOONCAKE_CONFIG_PATH",
+        _write_mooncake_config(
+            tmp_path,
+            _p2p_store_config(protocol="tcp", device_name=""),
+        ),
+    )
+    reused = KVTransferConfig(
+        kv_connector="MooncakeStoreConnector",
+        kv_role="kv_both",
+        kv_connector_extra_config={"reuse_pd_transfer_engine": True},
+    )
+    assert MooncakeStoreConnector.supports_sleep_mode(reused) is True
+    plain = KVTransferConfig(
+        kv_connector="MooncakeStoreConnector",
+        kv_role="kv_both",
+    )
+    with pytest.raises(ValueError, match="sleep requires"):
+        MooncakeStoreConnector.supports_sleep_mode(plain)
+
+
 def test_requester_worker_init_prefers_local_hostname_override(
     tmp_path,
     monkeypatch,
@@ -3556,7 +3771,7 @@ def test_worker_put_striding_covers_every_rank_get_namespace(
     When num_kv_head < tp_size, ranks holding the same KV heads stripe
     their PUTs across one shared key namespace. That dedup is only valid
     when those ranks really share a namespace: with DCP > 1 each rank GETs
-    every key from its own ``@dcpN`` namespace, so striding must be
+    every key from its own `@dcpN` namespace, so striding must be
     disabled.
     """
     tp_size = 4
@@ -4024,7 +4239,7 @@ def test_store_sending_thread_skips_when_token_len_below_lcm():
 
 
 def test_store_sending_thread_only_stores_swa_blocks_in_window():
-    """For SWA groups, only blocks within ``sliding_window`` of an
+    """For SWA groups, only blocks within `sliding_window` of an
     lcm-aligned boundary are stored — a block outside every such window
     can never participate in any future hit (mirrors recv-side masking).
 
@@ -4367,7 +4582,7 @@ def _register_with_mocked_threads(
     kv_caches: dict[str, torch.Tensor],
 ) -> None:
     """Call register_kv_caches with the I/O transfer threads mocked out."""
-    prefix = "vllm.distributed.kv_transfer.kv_connector.v1.mooncake.store.worker."
+    prefix = "vllm.distributed.kv_transfer.kv_connector.v1.mooncake_store.worker."
     with (
         patch(prefix + "KVCacheStoreSendingThread", side_effect=_auto_set_ready_event),
         patch(prefix + "KVCacheStoreRecvingThread", side_effect=_auto_set_ready_event),
@@ -4485,10 +4700,10 @@ def _make_bare_worker(
 def test_mooncake_lookup_reuses_resolved_hash_checkpoint(
     use_eagle, prefix_match_unit, dcp_world_size, mamba_block_size
 ):
-    from vllm.distributed.kv_transfer.kv_connector.v1.mooncake.store import (
+    from vllm.distributed.kv_transfer.kv_connector.v1.mooncake_store import (
         coordinator as mooncake_coordinator,
     )
-    from vllm.distributed.kv_transfer.kv_connector.v1.mooncake.store.scheduler import (
+    from vllm.distributed.kv_transfer.kv_connector.v1.mooncake_store.scheduler import (
         MooncakeStoreScheduler,
     )
 
@@ -4527,7 +4742,7 @@ def test_mooncake_lookup_reuses_resolved_hash_checkpoint(
         ),
     )
     with patch(
-        "vllm.distributed.kv_transfer.kv_connector.v1.mooncake.store."
+        "vllm.distributed.kv_transfer.kv_connector.v1.mooncake_store."
         "scheduler.LookupKeyClient"
     ):
         scheduler = MooncakeStoreScheduler(
@@ -4563,7 +4778,7 @@ def test_scheduler_follows_core_hit_alignment(alignment, expected):
     """The store takes partial hits from core's resolved alignment, not from its
     own groups: these Mamba specs alone would allow them, but core may still
     keep hits on the block (e.g. for a sliding-window group it never sees)."""
-    from vllm.distributed.kv_transfer.kv_connector.v1.mooncake.store.scheduler import (
+    from vllm.distributed.kv_transfer.kv_connector.v1.mooncake_store.scheduler import (
         MooncakeStoreScheduler,
     )
 
@@ -4597,7 +4812,7 @@ def test_scheduler_follows_core_hit_alignment(alignment, expected):
         parallel_config=SimpleNamespace(decode_context_parallel_size=1, world_size=1),
     )
     with patch(
-        "vllm.distributed.kv_transfer.kv_connector.v1.mooncake.store."
+        "vllm.distributed.kv_transfer.kv_connector.v1.mooncake_store."
         "scheduler.LookupKeyClient"
     ):
         scheduler = MooncakeStoreScheduler(
@@ -5818,6 +6033,78 @@ def _registered_worker(kind: str = "dense"):
     return worker, device, host
 
 
+def _enable_reuse(worker: mooncake_store_worker.MooncakeStoreWorker) -> None:
+    worker._reuse_pd_transfer_engine = True
+
+
+@pytest.mark.cpu_test
+def test_reused_engine_skips_device_kv_registration():
+    store_worker = _make_bare_worker(num_gpu_blocks=2)
+    store_worker.token_dbs[0].store_layout = MagicMock()
+    _enable_reuse(store_worker)
+    _register_with_mocked_threads(store_worker, {"layer0": torch.zeros(2, 4)})
+    store_worker.store.register_buffer.assert_not_called()
+    assert store_worker._device_regions == {}
+
+
+@pytest.mark.cpu_test
+def test_reused_engine_registers_host_kv_only():
+    from vllm.v1.kv_cache_interface import KVCacheTensor
+
+    store_worker = _make_bare_worker(num_gpu_blocks=2)
+    spec = FullAttentionSpec(
+        block_size=16, num_kv_heads=1, head_size=1, dtype=torch.float16
+    )
+    config = KVCacheConfig(
+        num_blocks=2,
+        kv_cache_tensors=[
+            KVCacheTensor(
+                size=4 * 32,
+                layers=["source"],
+                layer_stride=4 * 32,
+                block_stride=32,
+                host_resident=True,
+            ),
+            KVCacheTensor(
+                size=2 * 32, layers=["layer0"], layer_stride=2 * 32, block_stride=32
+            ),
+        ],
+        kv_cache_groups=[
+            KVCacheGroupSpec(["source"], spec, host_resident=True),
+            KVCacheGroupSpec(["layer0"], spec),
+        ],
+        hisparse_host_num_blocks=4,
+    )
+    store_worker._kv_cache_config = config
+    store_worker._kv_cache_groups = list(config.transfer_groups)
+    store_worker.token_dbs = [
+        ChunkedTokenDatabase(KeyMetadata("test-model", 0, 0, 0, 0), chunk_size=16)
+        for _ in store_worker._kv_cache_groups
+    ]
+    _enable_reuse(store_worker)
+    caches = {
+        "source": torch.zeros(4, 32, dtype=torch.uint8),
+        "layer0": torch.zeros(2, 32, dtype=torch.uint8),
+    }
+    store_worker.store = _FakeRegistrationStore()
+    _register_with_mocked_threads(store_worker, caches)
+    assert store_worker.store.registered == {}
+    assert store_worker._device_regions == {}
+
+
+@pytest.mark.cpu_test
+def test_reused_engine_sleep_cycle_is_noop():
+    store_worker = _make_bare_worker(num_gpu_blocks=2)
+    store_worker.token_dbs[0].store_layout = MagicMock()
+    _enable_reuse(store_worker)
+    _register_with_mocked_threads(store_worker, {"layer0": torch.zeros(2, 4)})
+    store_worker.store.register_buffer.reset_mock()
+    store_worker.unregister_kv_caches()
+    store_worker.restore_kv_caches()
+    store_worker.store.unregister_buffer.assert_not_called()
+    store_worker.store.register_buffer.assert_not_called()
+
+
 @pytest.mark.cpu_test
 @pytest.mark.parametrize("kind", ["dense", "hisparse"])
 def test_sleep_cycle_releases_and_restores_device_regions(kind: str):
@@ -6244,9 +6531,9 @@ def test_store_worker_close_swallows_store_errors():
 
 
 def test_blob_block_hashes_wire_roundtrip():
-    """The lookup wire format sends a ``hash_len`` frame plus the raw hashes
+    """The lookup wire format sends a `hash_len` frame plus the raw hashes
     concatenated back-to-back; the server rebuilds them through a zero-copy
-    ``BlobBlockHashes`` view over the frame buffer."""
+    `BlobBlockHashes` view over the frame buffer."""
     hashes = [BlockHash(bytes([i]) * 16) for i in range(5)]
     hash_len = len(hashes[0])
 

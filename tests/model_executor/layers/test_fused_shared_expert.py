@@ -5,6 +5,7 @@ import importlib
 import inspect
 import sys
 from copy import deepcopy
+from functools import partial
 from types import ModuleType, SimpleNamespace
 from typing import Any, cast
 from unittest.mock import patch
@@ -33,6 +34,8 @@ from vllm.model_executor.models.qwen3_next import (
     _should_replicate_misaligned_shared_expert,
 )
 from vllm.model_executor.models.utils import (
+    AutoWeightsLoader,
+    WeightsMapper,
     get_fused_shared_expert_layers,
     maybe_fuse_shared_experts,
 )
@@ -1092,8 +1095,8 @@ def _make_fake_moe_model(
 def test_fused_shared_expert_layers_matches_container_index_space() -> None:
     """The fused-layer set follows the module tree, not a hard-coded offset.
 
-    ``nn.ModuleList`` MTP layers (Qwen3 Next/3.5, Qwen4 Exp) are 0-based,
-    while ``nn.ModuleDict`` MTP layers (GLM4, DeepSeek) are keyed by absolute
+    `nn.ModuleList` MTP layers (Qwen3 Next/3.5, Qwen4 Exp) are 0-based,
+    while `nn.ModuleDict` MTP layers (GLM4, DeepSeek) are keyed by absolute
     layer index. Both must redirect without a per-loader offset.
     """
     list_model = _make_fake_moe_model(["0", "1"], [True, False], use_dict=False)
@@ -1138,11 +1141,11 @@ def test_mixed_fused_shared_experts_rejected_with_ep_or_nixl_ep(
 ) -> None:
     """Mixed FSE must be rejected with EP or a shared-workspace all2all backend.
 
-    With EP, per-layer geometry differences are not validated. ``nixl_ep``
+    With EP, per-layer geometry differences are not validated. `nixl_ep`
     additionally keeps a single process-wide buffer initialized from the first
-    MoE layer's ``num_experts_per_rank`` and ignores later geometries. A mixed
-    model has fused layers with ``n_routed + n_shared`` experts and non-fused
-    layers with ``n_routed``, so reusing that buffer would silently map experts
+    MoE layer's `num_experts_per_rank` and ignores later geometries. A mixed
+    model has fused layers with `n_routed + n_shared` experts and non-fused
+    layers with `n_routed`, so reusing that buffer would silently map experts
     to the wrong slots. Construction must fail cleanly instead of running the
     untested mixed path.
     """
@@ -1165,8 +1168,8 @@ def _assert_mtp_fused_shared_expert_redirect(
 ) -> None:
     """Load a fused MTP shared expert and verify it lands in the appended slot.
 
-    The MTP loaders see different name/index spaces (0-based ``ModuleList`` or
-    absolute ``ModuleDict``); using the live module map must redirect either.
+    The MTP loaders see different name/index spaces (0-based `ModuleList` or
+    absolute `ModuleDict`); using the live module map must redirect either.
     """
     packed_down = torch.full((128, 16), 3, dtype=torch.uint8)
     down_scale = torch.full((128, 1), 127, dtype=torch.uint8)
@@ -1188,7 +1191,7 @@ def _assert_mtp_shared_expert_not_fused(
     """Load an unfused MTP shared expert and verify no fused slot is appended.
 
     Without AITER the shared expert stays a separate MLP, so the routed tensor must
-    keep exactly ``n_routed_experts`` rows.
+    keep exactly `n_routed_experts` rows.
     """
     packed_down = torch.full((128, 16), 3, dtype=torch.uint8)
     down_scale = torch.full((128, 1), 127, dtype=torch.uint8)
@@ -1326,7 +1329,7 @@ def _build_mtp_for_model(
 
 # TODO: move to conftest.py.
 class _SingleRankGroup:
-    """No-op single-rank stand-in for a compiled ``GroupCoordinator``."""
+    """No-op single-rank stand-in for a compiled `GroupCoordinator`."""
 
     world_size = 1
     rank_in_group = 0
@@ -1381,6 +1384,16 @@ class _SingleRankGroup:
 
     def destroy(self) -> None:
         return None
+
+
+def _load_minimax_m3_weights(
+    model: nn.Module, weights: list[tuple[str, torch.Tensor]]
+) -> set[str]:
+    """Load like `MiniMaxM3SparseForCausalLM`; the inner model has no loader."""
+    redirect = partial(minimax_m3_model._redirect_fused_shared_experts, model=model)
+    mapper = minimax_m3_model.MiniMaxM3SparseForCausalLM.hf_to_vllm_mapper
+    mapper = mapper | WeightsMapper(weights_transforms=[redirect])
+    return AutoWeightsLoader(model).load_weights(weights, mapper=mapper)
 
 
 @pytest.fixture
@@ -1725,7 +1738,10 @@ def test_models_fse_init(
                         )
                     )
             with set_current_vllm_config(vllm_config):
-                loaded = model.load_weights(checkpoint)
+                if model_type == "minimax_m3":
+                    loaded = _load_minimax_m3_weights(model, checkpoint)
+                else:
+                    loaded = model.load_weights(checkpoint)
                 base = config.num_hidden_layers
                 mtp_cases = [
                     (
@@ -2138,7 +2154,7 @@ def test_quark_shared_expert_fse_exclude_is_scoped_to_the_layer() -> None:
     """Excluding one layer's shared experts must not disable FSE elsewhere.
 
     amd/GLM-5.2-MXFP4 excludes its MTP layer (78) wholesale, including
-    ``model.layers.78.mlp.shared_experts.{gate,up,down}_proj``, while the 75
+    `model.layers.78.mlp.shared_experts.{gate,up,down}_proj`, while the 75
     target MoE layers keep MXFP4 shared experts.
     """
     quant_config = QuarkConfig(
@@ -2193,10 +2209,10 @@ def test_quark_shared_expert_fse_ignores_sibling_gate_exclusions() -> None:
 
     Qwen3.x MoE checkpoints (e.g. amd/Qwen3.5-397B-A17B-MoE-MXFP4) quantize the
     shared expert to MXFP4 but leave the tiny routing gates next to it in BF16:
-    ``model.language_model.layers.N.mlp.shared_expert_gate`` and
-    ``model.language_model.layers.N.mlp.gate``. Neither is a shared-expert
-    projection, so fusion must stay enabled. Matching ``shared_expert`` against
-    raw exclude entries also matches ``shared_expert_gate``, which silently
+    `model.language_model.layers.N.mlp.shared_expert_gate` and
+    `model.language_model.layers.N.mlp.gate`. Neither is a shared-expert
+    projection, so fusion must stay enabled. Matching `shared_expert` against
+    raw exclude entries also matches `shared_expert_gate`, which silently
     disables FSE on every such checkpoint.
     """
     expert_prefix = "model.language_model.layers.0.mlp.experts"

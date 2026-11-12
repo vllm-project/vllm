@@ -1,11 +1,11 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
-"""The specialized decode's deferred RecoverSSM commit (backend ``fp32_deferred``):
+"""The specialized decode's deferred RecoverSSM commit (backend `fp32_deferred`):
 the FP32-state commit of the Triton RecoverSSM (same association; FP32
 checkpoints), whose commit after sampling turns each request's accepted count into
 the pending replay of its record slot (its request-state index); the next verify
 replays it (the specialized KDA core in the same pass, the stock verify after
-``flush``)."""
+`flush`)."""
 
 from dataclasses import dataclass, field
 
@@ -40,7 +40,7 @@ def allocate_records(
     scratch row. A row that owns no record slot has record index -1; the verify
     kernels write its records there. Such rows can carry live state slots: a DCP
     FULL CUDA-graph capture gives its dummy requests KV context
-    (``set_dcp_capture_context``: block ids 0, 1, ...) while their record rows are
+    (`set_dcp_capture_context`: block ids 0, 1, ...) while their record rows are
     -1. Nothing reads row -1."""
     shape = (1 + max_num_reqs, num_heads, spec_query_len)
     return KDARecoverSSMRecords(
@@ -51,7 +51,7 @@ def allocate_records(
 
 @dataclass
 class KDARecoverSSMDeferred:
-    """A step's deferred RecoverSSM (the KDA metadata's ``recoverssm_deferred``,
+    """A step's deferred RecoverSSM (the KDA metadata's `recoverssm_deferred`,
     set by the specialized decode's metadata build): after sampling, each request's
     accepted count becomes the pending replay of its record slot instead of a
     commit; the next verify replays it."""
@@ -77,9 +77,9 @@ class KDARecoverSSMDeferred:
 
 @dataclass
 class KDADeferredCommitContext(KDARecoverSSMCommitContext):
-    """``KDARecoverSSMCommitContext`` with the ``fp32_deferred`` backend: the
-    FP32-state commit (``cutedsl.kda.commit``) and the deferred replay. Falls back
-    to the Triton commit (backend ``triton``) where the FP32 commit cannot run."""
+    """`KDARecoverSSMCommitContext` with the `fp32_deferred` backend: the
+    FP32-state commit (`cutedsl.kda.commit`) and the deferred replay. Falls back
+    to the Triton commit (backend `triton`) where the FP32 commit cannot run."""
 
     @classmethod
     def create(  # type: ignore[override]
@@ -125,10 +125,10 @@ class KDADeferredCommitContext(KDARecoverSSMCommitContext):
     ) -> None:
         """Fold accepted KDA and convolution inputs into every layer.
 
-        Deferred RecoverSSM (``pending``, backend ``fp32_deferred``): the records of
-        request b are in slot ``record_rows[b]``; its accepted count becomes that
+        Deferred RecoverSSM (`pending`, backend `fp32_deferred`): the records of
+        request b are in slot `record_rows[b]`; its accepted count becomes that
         slot's pending replay (the next verify folds it in), except for the rows
-        of ``eager`` (a [B] mask, or None: no row), which are committed now."""
+        of `eager` (a [B] mask, or None: no row), which are committed now."""
         if self.backend != FP32_DEFERRED:
             assert pending is None
             super().commit(
@@ -231,9 +231,9 @@ class KDADeferredCommitContext(KDARecoverSSMCommitContext):
         pending: torch.Tensor,
     ) -> None:
         """Deferred RecoverSSM: fold the pending replays of the step's requests
-        (``record_rows[b]``: request b's record slot) into their checkpoints in
+        (`record_rows[b]`: request b's record slot) into their checkpoints in
         place, every layer, so a verify that does not replay them (the stock
-        verify) starts from the accepted state. ``pending`` is left: the commit
+        verify) starts from the accepted state. `pending` is left: the commit
         after this step's sampling rewrites it."""
         batch = state_indices.shape[0]
         if batch == 0:
