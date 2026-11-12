@@ -64,22 +64,25 @@ if _fa4_available():
     from vllm.vllm_flash_attn.flash_attn_interface import flash_attn_varlen_func
 
 
-def _fa2_available() -> bool:
-    if not (
-        current_platform.is_cuda() and current_platform.is_device_capability_family(80)
-    ):
+def _prefix_lm_fa_available() -> bool:
+    """The Triton backend's FlashAttention PrefixLM path: FA2 on SM 8.x, FA3 on 9.x."""
+    if not current_platform.is_cuda():
         return False
     from vllm.v1.attention.backends.fa_utils import is_fa_version_supported
 
-    return is_fa_version_supported(2)
+    if current_platform.is_device_capability_family(80):
+        return is_fa_version_supported(2)
+    if current_platform.is_device_capability_family(90):
+        return is_fa_version_supported(3)
+    return False
 
 
-requires_fa2 = pytest.mark.skipif(
-    not _fa2_available(),
-    reason="Triton PrefixLM fast path requires FlashAttention-2 on SM 8.x",
+requires_prefix_lm_fa = pytest.mark.skipif(
+    not _prefix_lm_fa_available(),
+    reason="Triton PrefixLM fast path needs FA2 on SM 8.x or FA3 on SM 9.x",
 )
 
-if _fa2_available() and not _fa4_available():
+if _prefix_lm_fa_available() and not _fa4_available():
     from types import MethodType
 
     from tests.v1.attention.test_attention_backends import (
@@ -94,7 +97,7 @@ if _fa2_available() and not _fa4_available():
     from vllm.config import set_current_vllm_config
     from vllm.v1.kv_cache_interface import FullAttentionSpec, get_kv_quant_mode
 
-if _fa2_available():
+if _prefix_lm_fa_available():
     from vllm.v1.attention.backends.triton_attn import (
         TritonAttentionImpl,
         TritonAttentionMetadataBuilder,
@@ -916,20 +919,20 @@ def test_composite_shared_cache_across_image_and_causal_steps(
 # A PrefixLM prompt is two bidirectional blocks, the state and the question.
 # Request 0 prefills one from scratch; request 1 resumes after a cache hit on
 # its state block. Request 2 decodes, which no range covers.
-FA2_SEQ_LENS = [224, 300, 129]
-FA2_QUERY_LENS = [224, 60, 1]
-FA2_MM_RANGES = {
+PREFIX_LM_SEQ_LENS = [224, 300, 129]
+PREFIX_LM_QUERY_LENS = [224, 60, 1]
+PREFIX_LM_MM_RANGES = {
     0: [(0, 175), (176, 223)],
     1: [(0, 239), (240, 299)],
     2: [(0, 63), (64, 127)],
 }
 
 
-@requires_fa2
+@requires_prefix_lm_fa
 @pytest.mark.parametrize("head_size", [128, 256])
 @pytest.mark.parametrize("with_decode", [False, True])
 def test_triton_prefix_lm_matches_dense_reference(head_size: int, with_decode: bool):
-    """A PrefixLM prefill takes the FlashAttention-2 path, anything else Triton.
+    """A PrefixLM prefill takes the FlashAttention path, anything else Triton.
 
     The batch is built from real metadata and a real ``TritonAttentionImpl``.
     The decode row has a query outside every range, so it must leave the fast
@@ -937,8 +940,9 @@ def test_triton_prefix_lm_matches_dense_reference(head_size: int, with_decode: b
     """
     torch.manual_seed(0)
     num_reqs = 3 if with_decode else 2
-    seq_lens, query_lens = FA2_SEQ_LENS[:num_reqs], FA2_QUERY_LENS[:num_reqs]
-    mm_ranges = {i: FA2_MM_RANGES[i] for i in range(num_reqs)}
+    seq_lens = PREFIX_LM_SEQ_LENS[:num_reqs]
+    query_lens = PREFIX_LM_QUERY_LENS[:num_reqs]
+    mm_ranges = {i: PREFIX_LM_MM_RANGES[i] for i in range(num_reqs)}
 
     vllm_config = _enable_mm_prefix(
         create_vllm_config(
@@ -1022,7 +1026,7 @@ def test_triton_prefix_lm_matches_dense_reference(head_size: int, with_decode: b
             output=torch.empty_like(query),
         )
 
-    assert (attn_metadata.fa2_prefix_lm is not None) is (not with_decode)
+    assert (attn_metadata.prefix_lm_fa is not None) is (not with_decode)
 
     ref_args = (query, k_fulls, v_fulls, query_lens, seq_lens)
     expected = _dense_reference(*ref_args, mm_ranges, None, scale)
