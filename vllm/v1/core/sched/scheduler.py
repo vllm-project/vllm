@@ -2294,8 +2294,10 @@ class Scheduler(SchedulerInterface):
                 )
             )
         if self.connector is not None and self._sync_kv_load_blocks:
-            for req_id in num_scheduled_tokens:
-                self._sync_kv_load_blocks.pop(req_id, None)
+            for req_id in [
+                r for r in self._sync_kv_load_blocks if r in num_scheduled_tokens
+            ]:
+                del self._sync_kv_load_blocks[req_id]
         if kv_connector_output and kv_connector_output.invalid_block_ids:
             # These blocks contain externally computed tokens that failed to
             # load. Identify affected requests and adjust their computed token
