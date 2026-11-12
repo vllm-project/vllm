@@ -6,6 +6,7 @@ rotation of linear-layer inputs."""
 import pytest
 import torch
 
+from vllm._aiter_ops import rocm_aiter_ops
 from vllm.config.model import ModelConfig
 from vllm.model_executor.kernels.linear.mxfp4.aiter import AiterMxfp4LinearKernel
 from vllm.model_executor.kernels.linear.mxfp4.base import MxFp4LinearLayerConfig
@@ -282,6 +283,8 @@ def test_online_mxfp4_hadamard(
     supported, reason = kernel_cls.is_supported()
     if not supported:
         pytest.skip(reason)
+    if fused and not rocm_aiter_ops.is_asm_fp4_gemm_supported():
+        pytest.skip("AITER's ASM FP4 GEMM needs VLLM_ROCM_USE_AITER=1 on gfx950.")
     default_vllm_config.model_config = ModelConfig()
     set_random_seed(0)
     with torch.device(current_platform.device_type):
