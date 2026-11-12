@@ -66,7 +66,6 @@ from vllm.distributed.kv_transfer.kv_connector.v1.nixl.tp_mapping import (
 )
 from vllm.distributed.kv_transfer.kv_connector.v1.nixl.utils import get_base_request_id
 from vllm.logger import init_logger
-from vllm.v1.kv_cache_interface import is_full_attention_spec
 
 if TYPE_CHECKING:
     from vllm.config import VllmConfig
@@ -178,10 +177,6 @@ class NixlPushConnectorWorker(NixlBaseConnectorWorker):
         self._chunked_push = bool(
             extra_config.get("enable_chunked_push", False)
             and self.kv_transfer_config.kv_role == "kv_producer"
-        )
-        self._chunk_full_attention = tuple(
-            is_full_attention_spec(group.kv_cache_spec)
-            for group in self.kv_cache_config.transfer_groups
         )
         # The main thread hands jobs and retirements to the writer through
         # this queue; the chunk state below belongs to the writer.
@@ -486,9 +481,9 @@ class NixlPushConnectorWorker(NixlBaseConnectorWorker):
             return False
         # The slices in _chunk_block_ranges need D's blocks to fit the prompt.
         return all(
-            job.total_blocks >= len(ids)
-            for full_attention, ids in zip(self._chunk_full_attention, remote)
-            if full_attention
+            block_range[1] >= len(ids)
+            for block_range, ids in zip(job.block_ranges, remote, strict=True)
+            if block_range is not None
         )
 
     def _drop_chunk_request(self, req_id: ReqId) -> None:
@@ -541,7 +536,7 @@ class NixlPushConnectorWorker(NixlBaseConnectorWorker):
             # last block, submitted once every earlier WRITE of the request
             # has completed; if one failed, the request is pushed whole when it
             # finishes.
-            last = job.end_block == job.total_blocks
+            last = job.last
             if last and state.pending_jobs > 1:
                 self._chunk_deferred.append(task)
                 continue
@@ -613,15 +608,22 @@ class NixlPushConnectorWorker(NixlBaseConnectorWorker):
         remote_groups = self._as_grouped_block_ids(reg_data["local_block_ids"])
         local: list[list[int]] = []
         remote: list[list[int]] = []
-        for full_attention, local_ids, remote_ids in zip(
-            self._chunk_full_attention, job.block_ids, remote_groups
+        for local_ids, block_range, remote_ids in zip(
+            job.block_ids, job.block_ranges, remote_groups, strict=True
         ):
-            if not full_attention:
+            if block_range is None:
                 # State blocks, in the last job only, are paired with D's as in
                 # a whole-request push.
                 local.append(local_ids)
                 remote.append(list(remote_ids) if local_ids else [])
-            elif (ranges := self._chunk_block_ranges(job, len(remote_ids))) is None:
+            elif (
+                ranges := self._chunk_block_ranges(
+                    block_range[0],
+                    block_range[0] + len(local_ids),
+                    block_range[1],
+                    len(remote_ids),
+                )
+            ) is None:
                 local.append([])
                 remote.append([])
             else:
@@ -655,17 +657,18 @@ class NixlPushConnectorWorker(NixlBaseConnectorWorker):
 
     @staticmethod
     def _chunk_block_ranges(
-        job: NixlPushChunkJob, num_remote_blocks: int
+        start_block: int, end_block: int, total_blocks: int, num_remote_blocks: int
     ) -> tuple[slice, slice] | None:
-        """Map a job's range onto D's uncached suffix: slices of a
-        full-attention group's ids in the job and of D's ids for the group."""
-        remote_start = job.total_blocks - num_remote_blocks
-        start = max(job.start_block, remote_start)
-        if start >= job.end_block:
+        """Map a full-attention group's blocks `[start_block, end_block)` of
+        `total_blocks` onto D's uncached suffix: slices of the job's ids and
+        of D's ids for the group."""
+        remote_start = total_blocks - num_remote_blocks
+        start = max(start_block, remote_start)
+        if start >= end_block:
             return None
         return (
-            slice(start - job.start_block, job.end_block - job.start_block),
-            slice(start - remote_start, job.end_block - remote_start),
+            slice(start - start_block, end_block - start_block),
+            slice(start - remote_start, end_block - remote_start),
         )
 
     def _finish_chunk_job(self, task: _ChunkTask, failed: bool = False) -> None:

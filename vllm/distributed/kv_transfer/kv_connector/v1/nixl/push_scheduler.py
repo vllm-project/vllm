@@ -44,7 +44,7 @@ from vllm.logger import init_logger
 from vllm.utils.math_utils import cdiv
 from vllm.v1.kv_cache_interface import (
     MambaSpec,
-    SlidingWindowMLASpec,
+    SlidingWindowSpec,
     is_full_attention_spec,
 )
 
@@ -62,7 +62,7 @@ logger = init_logger(__name__)
 @dataclass
 class _ChunkPushTracker:
     request: Request
-    next_block: int = 0
+    next_token: int = 0
 
 
 class NixlPushConnectorScheduler(NixlBaseConnectorScheduler):
@@ -121,16 +121,14 @@ class NixlPushConnectorScheduler(NixlBaseConnectorScheduler):
         if self._chunked_push:
             parallel_config = vllm_config.parallel_config
             transfer_groups = kv_cache_config.transfer_groups
-            self._chunk_full_attention = tuple(
-                is_full_attention_spec(group.kv_cache_spec) for group in transfer_groups
-            )
-            block_sizes = {
+            # Block size of each full-attention transfer group, 0 for the other
+            # groups.
+            block_sizes = tuple(
                 group.kv_cache_spec.block_size
-                for group, full_attention in zip(
-                    transfer_groups, self._chunk_full_attention
-                )
-                if full_attention
-            }
+                if is_full_attention_spec(group.kv_cache_spec)
+                else 0
+                for group in transfer_groups
+            )
             if vllm_config.kv_transfer_config.kv_role != "kv_producer":
                 self._chunked_push = False
             elif (
@@ -138,14 +136,12 @@ class NixlPushConnectorScheduler(NixlBaseConnectorScheduler):
                 or parallel_config.pipeline_parallel_size != 1
                 or parallel_config.prefill_context_parallel_size != 1
                 or parallel_config.decode_context_parallel_size != 1
-                or len(block_sizes) != 1
+                or not any(block_sizes)
                 or not all(
-                    full_attention
-                    or isinstance(
-                        group.kv_cache_spec, (MambaSpec, SlidingWindowMLASpec)
-                    )
-                    for group, full_attention in zip(
-                        transfer_groups, self._chunk_full_attention
+                    block_size
+                    or isinstance(group.kv_cache_spec, (MambaSpec, SlidingWindowSpec))
+                    for block_size, group in zip(
+                        block_sizes, transfer_groups, strict=True
                     )
                 )
             ):
@@ -153,13 +149,13 @@ class NixlPushConnectorScheduler(NixlBaseConnectorScheduler):
                 # in; the others push requests whole.
                 logger.warning(
                     "NIXL chunked push needs a device KV buffer, PP=1, PCP=1, "
-                    "DCP=1, full-attention KV cache groups of one block size, "
-                    "and otherwise only Mamba and DeepSeek-V4 sliding-window "
-                    "groups. Falling back to whole-request push."
+                    "DCP=1, a full-attention KV cache group, and otherwise only "
+                    "Mamba and sliding-window groups. Falling back to "
+                    "whole-request push."
                 )
                 self._chunked_push = False
             else:
-                (self._chunk_block_size,) = block_sizes
+                self._chunk_block_sizes = block_sizes
 
     def get_num_new_matched_tokens(
         self, request: Request, num_computed_tokens: int
@@ -420,8 +416,6 @@ class NixlPushConnectorScheduler(NixlBaseConnectorScheduler):
         block_state = scheduler_output.kv_connector_block_state
         assert block_state is not None
 
-        block_size = self._chunk_block_size
-
         for (
             req_id,
             num_scheduled_tokens,
@@ -434,21 +428,13 @@ class NixlPushConnectorScheduler(NixlBaseConnectorScheduler):
                 request.num_computed_tokens + num_scheduled_tokens,
                 request.num_prompt_tokens,
             )
-            # The partial last block is complete once the whole prompt is.
-            end_block = (
-                cdiv(computed_after, block_size)
-                if computed_after >= request.num_prompt_tokens
-                else computed_after // block_size
-            )
-            start_block = tracker.next_block
-            if end_block <= start_block:
+            if computed_after <= tracker.next_token:
                 continue
 
-            total_blocks = cdiv(request.num_prompt_tokens, block_size)
-            last = end_block == total_blocks
+            last = computed_after == request.num_prompt_tokens
             all_block_ids = block_state.get_block_ids(req_id)
             assert all_block_ids is not None
-            # The groups other than full attention hold state that only the last
+            # The groups other than full attention hold state that the last
             # step completes; it is clipped as in a whole-request push.
             groups = (
                 self.get_exchange_clipped_blocks(all_block_ids)
@@ -456,21 +442,35 @@ class NixlPushConnectorScheduler(NixlBaseConnectorScheduler):
                 else self.kv_cache_config.select_transfer_block_ids(all_block_ids)
             )
             block_ids: list[list[int]] = []
-            for full_attention, ids in zip(self._chunk_full_attention, groups):
-                if full_attention:
-                    block_ids.append(list(ids[start_block:end_block]))
-                else:
+            block_ranges: list[tuple[int, int] | None] = []
+            for block_size, ids in zip(self._chunk_block_sizes, groups, strict=True):
+                if not block_size:
                     block_ids.append(list(ids) if last else [])
+                    block_ranges.append(None)
+                    continue
+                # The partial last block is complete once the whole prompt is.
+                start = tracker.next_token // block_size
+                end = (
+                    cdiv(computed_after, block_size)
+                    if last
+                    else computed_after // block_size
+                )
+                block_ids.append(list(ids[start:end]))
+                block_ranges.append(
+                    (start, cdiv(request.num_prompt_tokens, block_size))
+                )
+            if not any(block_ids):
+                continue
+
             meta.push_chunk_jobs.append(
                 NixlPushChunkJob(
                     request_id=req_id,
                     block_ids=tuple(block_ids),
-                    start_block=start_block,
-                    end_block=end_block,
-                    total_blocks=total_blocks,
+                    block_ranges=tuple(block_ranges),
+                    last=last,
                 )
             )
-            tracker.next_block = end_block
+            tracker.next_token = computed_after
 
     def has_pending_push_work(self) -> bool:
         # Keep the engine main loop alive while we have:

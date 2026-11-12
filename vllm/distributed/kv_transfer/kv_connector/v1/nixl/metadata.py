@@ -274,19 +274,19 @@ class ReqMeta:
 
 @dataclass(frozen=True)
 class NixlPushChunkJob:
-    """Prompt blocks `[start_block, end_block)` of a running request, with
-    their ids per transfer group. The job that ends at `total_blocks`, the
-    prompt's block count, also carries the blocks of the groups other than
-    full attention, which hold state that only the last step completes, and
-    the request's completion notification to D. In the other jobs those
-    groups are empty and no notification is sent.
+    """Prompt blocks of a running request computed in one step, per transfer
+    group. `block_ranges[i]` is `(start_block, total_blocks)` for a
+    full-attention group: its blocks from `start_block`, and the prompt's
+    block count in the group. It is `None` for the other groups, which hold
+    state that the last step completes, so their blocks ride on the `last`
+    job with the request's completion notification to D; in the other jobs
+    they are empty and no notification is sent.
     """
 
     request_id: ReqId
     block_ids: BlockIds
-    start_block: int
-    end_block: int
-    total_blocks: int
+    block_ranges: tuple[tuple[int, int] | None, ...]
+    last: bool
 
 
 class NixlConnectorMetadata(KVConnectorMetadata):
