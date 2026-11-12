@@ -2,6 +2,7 @@
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 """Unit tests for native offloading specs and their factory."""
 
+import logging
 import os
 import uuid
 from typing import Any
@@ -370,6 +371,7 @@ def test_tiering_spec_create_worker_uses_single_slot_for_replicated_layout(monke
         spec_name="TieringOffloadingSpec",
         cpu_bytes_to_use=worker_kv_bytes_per_block * 8,
         worker_kv_bytes_per_block=worker_kv_bytes_per_block,
+        rank=1,
         world_size=4,
         replicated_layout=True,
     )
@@ -395,6 +397,8 @@ def test_tiering_spec_create_worker_uses_single_slot_for_replicated_layout(monke
     spec.create_worker(kv_caches)
 
     assert region_calls[0]["rank"] == 0
+    # Workers share the slot, so each pre-faults only its share of the region.
+    assert region_calls[0]["populate_shard"] == (1, 4)
     assert region_calls[0]["kv_bytes_per_chunk"] == worker_kv_bytes_per_block
     assert worker_calls[0]["kv_caches"] is kv_caches
     assert worker_calls[0]["mmap_region"] is region
@@ -428,6 +432,54 @@ def test_tiering_spec_create_worker_uses_worker_rank_for_sharded_layout(monkeypa
     spec.create_worker(MagicMock())
 
     assert region_calls[0]["rank"] == 1
+    assert region_calls[0]["populate_shard"] is None
+
+
+@pytest.mark.parametrize(
+    "secondary_tiers,canonical_layout,is_parallelism_agnostic,replicated_layout,warns",
+    [
+        ([{"type": "example"}], False, True, False, True),
+        ([{"type": "example"}], False, False, False, True),
+        ([{"type": "example"}], True, False, False, True),
+        ([{"type": "example"}], True, True, False, False),
+        ([{"type": "example"}], False, False, True, False),
+        ([], False, False, False, False),
+    ],
+)
+def test_tiering_spec_warns_when_secondary_tiers_are_topology_bound(
+    caplog_vllm,
+    monkeypatch,
+    secondary_tiers,
+    canonical_layout,
+    is_parallelism_agnostic,
+    replicated_layout,
+    warns,
+):
+    """Direct-layout KV warns even when it is flagged parallelism-agnostic,
+    unless it is replicated MLA, which FileMapper shares across TP sizes."""
+    import vllm.v1.kv_offload.tiering.spec as tiering_spec_module
+
+    for name in ("SharedOffloadRegion", "CPUPrimaryTierOffloadingManager"):
+        monkeypatch.setattr(tiering_spec_module, name, MagicMock())
+    spec = _create_spec(
+        spec_name="TieringOffloadingSpec",
+        worker_kv_bytes_per_block=4096,
+        world_size=2 if replicated_layout else 1,
+        is_parallelism_agnostic=is_parallelism_agnostic,
+        replicated_layout=replicated_layout,
+        canonical_layout=canonical_layout,
+        extra_config={"secondary_tiers": secondary_tiers},
+    )
+
+    spec.get_manager().shutdown()
+
+    warnings = [
+        record
+        for record in caplog_vllm.records
+        if record.name == tiering_spec_module.__name__
+        and record.levelno == logging.WARNING
+    ]
+    assert len(warnings) == int(warns)
 
 
 @pytest.mark.parametrize("world_size", [2, 4, 8])
