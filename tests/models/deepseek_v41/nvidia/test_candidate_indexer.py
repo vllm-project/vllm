@@ -9,12 +9,13 @@ import pytest
 from vllm.engine.arg_utils import EngineArgs
 from vllm.platforms import current_platform
 
-
-@pytest.mark.skipif(
+pytestmark = pytest.mark.skipif(
     not current_platform.is_cuda()
     or not current_platform.is_device_capability_family(90),
     reason="Requires an SM90 GPU",
 )
+
+
 @pytest.mark.parametrize(
     "options,expected",
     [
@@ -46,15 +47,6 @@ from vllm.platforms import current_platform
         ),
         pytest.param(
             {
-                "ubatch_size": 2,
-                "hf_overrides": {"engram_layer_ids": []},
-                "all2all_backend": "deepep_high_throughput",
-            },
-            True,
-            id="microbatching-validation",
-        ),
-        pytest.param(
-            {
                 "tensor_parallel_size": 2,
                 "decode_context_parallel_size": 2,
                 "nnodes": 2,
@@ -79,3 +71,18 @@ def test_candidate_indexer_default_respects_support_and_override(options, expect
         **options,
     ).create_engine_config()
     assert config.attention_config.indexer_sparse_logits is expected
+
+
+def test_candidate_indexer_microbatching_respects_model_runner_validation():
+    """Text-only mode retains the multimodal architecture's microbatching limit."""
+    args = EngineArgs(
+        model=os.getenv("MODEL_NAME", "deepseek-ai/DeepSeek-V4.1-Flash"),
+        tokenizer_mode="deepseek_v41",
+        language_model_only=True,
+        max_model_len=4096,
+        ubatch_size=2,
+        hf_overrides={"engram_layer_ids": []},
+        all2all_backend="deepep_high_throughput",
+    )
+    with pytest.raises(ValueError, match="dual batch overlap with multimodal models"):
+        args.create_engine_config()
