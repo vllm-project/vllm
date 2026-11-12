@@ -129,6 +129,9 @@ def _qwen3_json_body_args(raw_args: str, partial: bool) -> str | None:
     stripped = raw_args.strip()
     if not stripped.startswith("{"):
         return None
+    if partial and not stripped.endswith("}"):
+        # Incomplete JSON: defer without reparsing the growing body per chunk.
+        return ""
     try:
         parsed = json.loads(stripped)
     except json.JSONDecodeError:
@@ -421,6 +424,31 @@ class Qwen3Parser(ParserEngine):
             self._arg_value_extender = functools.partial(
                 _qwen3_arg_value_extender, closed=closed
             )
+
+    def _try_extract_name(self, idx: int) -> str | None:
+        raw = self._tool_slots[idx].args
+        if not raw.lstrip().startswith("{"):
+            return super()._try_extract_name(idx)
+        # JSON body: the regex could match a "name" field nested inside a
+        # leading "arguments"/"parameters" object, so only trust it ahead
+        # of those keys; the complete body parses exactly.
+        try:
+            parsed = json.loads(raw.strip())
+        except json.JSONDecodeError:
+            parsed = None
+        if isinstance(parsed, dict):
+            name = parsed.get("name")
+            return name if isinstance(name, str) and name else None
+        match = self._NAME_RE.search(raw)
+        if not match:
+            return None
+        key_positions = [
+            p for key in ('"arguments"', '"parameters"') if (p := raw.find(key)) != -1
+        ]
+        envelope_end = min(key_positions, default=len(raw))
+        if match.start() < envelope_end and match.group(1):
+            return match.group(1)
+        return None
 
     def extract_reasoning(
         self,

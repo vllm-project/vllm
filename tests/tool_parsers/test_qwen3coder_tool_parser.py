@@ -1620,3 +1620,44 @@ class TestJsonToolBody:
 
         assert names == ["get_current_weather"]
         assert json.loads(streamed) == {"city": "Dallas", "state": "TX"}
+
+    SHADOWED_OUTPUT = (
+        "<tool_call>\n"
+        '{"arguments": {"name": "not_a_tool", "city": "Dallas"}, '
+        '"name": "get_current_weather"}\n'
+        "</tool_call>"
+    )
+
+    def test_json_body_shadowed_name(self, qwen3_tool_parser):
+        """A "name" field inside a leading arguments object must not win."""
+        request = ChatCompletionRequest(model=MODEL, messages=[])
+        extracted = qwen3_tool_parser.extract_tool_calls(
+            self.SHADOWED_OUTPUT, request=request
+        )
+
+        assert extracted.tools_called
+        assert len(extracted.tool_calls) == 1
+        assert extracted.tool_calls[0].function.name == "get_current_weather"
+        assert json.loads(extracted.tool_calls[0].function.arguments) == {
+            "name": "not_a_tool",
+            "city": "Dallas",
+        }
+
+    def test_json_body_shadowed_name_streaming(
+        self, qwen3_tool_parser, qwen3_tokenizer
+    ):
+        request = ChatCompletionRequest(model=MODEL, messages=[])
+
+        streamed = ""
+        names = []
+        for delta_message in stream_delta_message_generator(
+            qwen3_tool_parser, qwen3_tokenizer, self.SHADOWED_OUTPUT, request
+        ):
+            for tool_call in delta_message.tool_calls or []:
+                if tool_call.function and tool_call.function.name:
+                    names.append(tool_call.function.name)
+                if tool_call.function and tool_call.function.arguments:
+                    streamed += tool_call.function.arguments
+
+        assert names == ["get_current_weather"]
+        assert json.loads(streamed) == {"name": "not_a_tool", "city": "Dallas"}
