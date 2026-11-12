@@ -656,7 +656,8 @@ def test_hisparse_eager_mirror_records_transfer_without_page_copy(monkeypatch):
 
 
 @pytest.mark.parametrize("is_host_writer", [False, True])
-@pytest.mark.parametrize("device", ["cpu", "cuda"])
+# Restores are one batched driver copy (cuMemcpyBatchAsync), so they need a device.
+@pytest.mark.parametrize("device", ["cuda"])
 def test_hisparse_tail_restore_preserves_imported_rows(
     monkeypatch, request, is_host_writer, device
 ):
@@ -934,6 +935,7 @@ def test_hisparse_prefill_mirrors_source_groups_and_flushes_partial_group(
     worker.cache_handles = handles
     worker._set_row_mirrors((SparseKVRowMirror((0, 0, 0), 7, 2),))
     worker._per_layer_mirrored = set()
+    worker._in_step = True
     worker._submitted_mirror_layers = set()
     worker._layer_ready_events = tuple(MagicMock() for _ in handles)
     enqueue_row_dma = MagicMock()
@@ -1241,6 +1243,57 @@ def test_hisparse_empty_step_does_not_replay_stale_host_mirror(monkeypatch):
     torch.testing.assert_close(handle.mirror_slot_mapping, torch.tensor([4, 5]))
 
 
+def test_hisparse_layer_mirror_only_inside_connector_step(monkeypatch):
+    """Layers mirror between start_step and finish_forward only: graph-capture
+    forwards run outside connector steps and must not mirror."""
+    handle = SimpleNamespace(
+        runtime=SimpleNamespace(eager_host_mirror=False, resident_source_index=0),
+        decode_batch=False,
+        host_mirror_required=False,
+        num_actual_tokens=0,
+        num_decode_tokens=0,
+        req_id_per_token=None,
+        mirror_slot_mapping=torch.empty(0, dtype=torch.int64),
+    )
+    worker = _make_hisparse_worker()
+    worker.is_host_writer = True
+    worker._forward_ready_event = MagicMock()
+    worker._layer_ready_events = (MagicMock(),)
+    worker.host_caches = ()
+    worker.host_num_blocks = 1
+    worker.cache_handles = _as_cache_handles(handle)
+    worker._post_forward_transfers = []
+    worker._pending_invalid_block_ids = []
+    enqueue_row_dma = MagicMock()
+    monkeypatch.setattr(worker, "_enqueue_row_dma", enqueue_row_dma)
+    monkeypatch.setattr(torch.accelerator, "current_stream", MagicMock)
+
+    worker.start_step(
+        SimpleNamespace(
+            host_block_copies=[],
+            command=None,
+            source_block_ids=[],
+            row_mirrors={},
+            all_context_pages_resident=True,
+            row_mirrors_from_resident=False,
+            residency_updates={},
+        ),
+        None,
+    )
+    handle.host_mirror_required = True
+    worker._enqueue_layer_mirror(0)
+    enqueue_row_dma.assert_called_once_with(
+        (0,), ready_event=worker._layer_ready_events[0]
+    )
+    worker.finish_forward()
+
+    enqueue_row_dma.reset_mock()
+    handle.host_mirror_required = True
+    worker._enqueue_layer_mirror(0)
+    worker._enqueue_layer_mirror(0)
+    enqueue_row_dma.assert_not_called()
+
+
 def test_hisparse_cache_handles_join_index_groups_during_construction(monkeypatch):
     """Followers must not allocate duplicate runtime state before profiling."""
     monkeypatch.setattr(
@@ -1372,6 +1425,7 @@ class _TestReplaySSMMixer(MambaMixer2):
         torch.nn.Module.__init__(self)
         self.use_replayssm = True
         self.use_flashinfer_replayssm = backend == MambaBackendEnum.FLASHINFER
+        self.use_replayssm_trackers = self.use_flashinfer_replayssm
         self.state_alignment = 16
         self.mamba_config = MambaConfig(backend=backend)
         self._replayssm_ring_start = torch.empty(0, dtype=torch.int32)
