@@ -16,6 +16,7 @@
 # limitations under the License.
 """Transformers modeling backend mixin for multi-modal models."""
 
+import inspect
 import math
 from collections import defaultdict
 from collections.abc import Callable, Iterable, Mapping, Sequence
@@ -33,6 +34,7 @@ from vllm.compilation.decorators import should_torch_compile_mm_encoder
 from vllm.config.utils import getattr_iter
 from vllm.inputs import MultiModalDataBuiltins, MultiModalDataDict
 from vllm.logger import init_logger
+from vllm.model_executor.layers.attention import MMEncoderAttention
 from vllm.model_executor.models.interfaces import (
     MultiModalEmbeddings,
     SupportsMRoPE,
@@ -63,7 +65,8 @@ from vllm.multimodal.utils import get_load_audio_from_video
 from vllm.utils.gpu_sync_debug import gpu_sync_allowed
 from vllm.utils.torch_utils import async_tensor_h2d, token_ids_to_tensor
 
-from .base import Base
+from .base import VLLM_ATTN_ATTR, Base
+from .fusers.attention import VLLM_MM_ENCODER_ATTN_IMPL
 from .utils import infer_dynamic_arg_dims
 
 if TYPE_CHECKING:
@@ -1338,14 +1341,52 @@ class MultiModalMixin(SupportsMultiModal, SupportsMRoPE, Base):
                 "dynamic dimension (e.g. sequence length, number of patches).\n"
                 "Please report any issues you encounter to help us improve it."
             )
-            # One encoder can serve several modalities, and must only be decorated once
-            for encoder_cls in dict.fromkeys(encoder_classes.values()):
+            # Encoders batching images by `cu_seqlens` derive it from `grid_thw` with
+            # data-dependent ops, so only their blocks are compiled, like native vLLM
+            # One class can serve several modalities, and must only be decorated once
+            for cls in self._pre_trained_model_classes.encoder_blocks or dict.fromkeys(
+                encoder_classes.values()
+            ):
                 self._decorate_cls_for_torch_compile(
-                    cls=encoder_cls,
-                    dynamic_arg_dims=infer_dynamic_arg_dims(encoder_cls),
+                    cls=cls,
+                    dynamic_arg_dims=infer_dynamic_arg_dims(cls),
                     enable_if=should_torch_compile_mm_encoder,
                     is_encoder=True,
                 )
+
+    def _find_encoder_block_classes(
+        self, model: "PreTrainedModel"
+    ) -> list[type[torch.nn.Module]]:
+        """Modules are visited outermost first, so only the first of each nest of
+        modules taking `cu_seqlens` is kept."""
+        names: list[str] = []
+        classes: dict[type[torch.nn.Module], None] = {}
+        for name, module in model.named_modules():
+            if "cu_seqlens" in inspect.signature(module.forward).parameters and not (
+                any(name.startswith(f"{outer}.") for outer in names)
+            ):
+                names.append(name)
+                classes[type(module)] = None
+        return list(classes)
+
+    def _create_attention_instances(self, prefix: str = ""):
+        super()._create_attention_instances(prefix)
+        if not self.compilation_config.compile_mm_encoder:
+            return
+        # Encoders batching images by `cu_seqlens` split them with `.tolist()` unless
+        # they dispatch to a flash attention implementation, which compile can't trace
+        modules: Iterable[Any] = self.model.modules()
+        for module in modules:
+            if (
+                hasattr(module, "num_heads")
+                and hasattr(module, "head_dim")
+                and "cu_seqlens" in inspect.signature(module.forward).parameters
+            ):
+                module.config._attn_implementation = VLLM_MM_ENCODER_ATTN_IMPL
+                attn = MMEncoderAttention(
+                    num_heads=module.num_heads, head_size=module.head_dim
+                )
+                setattr(module, VLLM_ATTN_ATTR, attn)
 
     def get_language_model(self) -> torch.nn.Module:
         """Transformers modeling backend multimodal classes do not contain a separate

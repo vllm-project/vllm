@@ -14,6 +14,7 @@ from typing import Any
 import pytest
 import torch
 import torch.nn as nn
+from PIL import Image
 from safetensors.torch import load_file, save_file
 from transformers import (
     AutoConfig,
@@ -25,6 +26,7 @@ from transformers import (
 )
 from transformers.conversion_mapping import WeightConverter, WeightRenaming
 
+from vllm import SamplingParams
 from vllm.compilation.counter import compilation_counter
 from vllm.config import (
     ModelConfig,
@@ -156,30 +158,52 @@ def test_models(
     )
 
 
+@pytest.mark.parametrize(
+    ("model", "num_models"),
+    [
+        # Unannotated and `torch.BoolTensor` inputs
+        ("HuggingFaceTB/SmolVLM-256M-Instruct", 2),
+        # Batches images by `cu_seqlens`, so each of its 24 blocks is compiled
+        ("Qwen/Qwen3-VL-2B-Instruct", 25),
+    ],
+)
 @create_new_process_for_each_test("spawn")
 def test_compile_mm_encoder(
-    vllm_runner: type[VllmRunner], monkeypatch: pytest.MonkeyPatch
+    vllm_runner: type[VllmRunner],
+    monkeypatch: pytest.MonkeyPatch,
+    model: str,
+    num_models: int,
 ) -> None:
-    """Idefics3's encoder has an unannotated and a `torch.BoolTensor` input."""
+    """The encoder compiles whatever the signature or attention it dispatches to."""
     # Disable multiprocessing so that the counter is in the same process
     monkeypatch.setenv("VLLM_ENABLE_V1_MULTIPROCESSING", "0")
 
-    # One graph for the language model and one for the encoder
+    # One graph for the language model and one for each compiled encoder module
     with (
-        compilation_counter.expect(num_models_seen=2),
+        compilation_counter.expect(num_models_seen=num_models),
         vllm_runner(
-            "HuggingFaceTB/SmolVLM-256M-Instruct",
+            model,
             model_impl="transformers",
             max_model_len=2048,
-            limit_mm_per_prompt={"image": 1},
+            limit_mm_per_prompt={"image": 2},
             gpu_memory_utilization=0.5,
             compilation_config={
                 "mode": CompilationMode.VLLM_COMPILE,
                 "compile_mm_encoder": True,
             },
-        ),
+        ) as vllm_model,
     ):
-        pass
+        # The profile run compiles with one image, so serve two of different sizes
+        content = [
+            {"type": "image_pil", "image_pil": Image.new("RGB", size, color)}
+            for size, color in (((336, 336), "red"), ((224, 448), "green"))
+        ]
+        content.append({"type": "text", "text": "Describe the images."})
+        outputs = vllm_model.llm.chat(
+            [{"role": "user", "content": content}],
+            SamplingParams(temperature=0, max_tokens=4),
+        )
+        assert outputs[0].outputs[0].token_ids
 
 
 def test_eagle3_mm(vllm_runner: type[VllmRunner], tmp_path) -> None:
@@ -218,13 +242,14 @@ def test_infer_dynamic_arg_dims():
             mask: torch.BoolTensor | None = None,
             grid: tuple[int, int] = (1, 1),
             tiles: list[torch.Tensor] | None = None,
+            embeddings: tuple[torch.Tensor, torch.Tensor] | None = None,
             use_cache=False,
             logits_to_keep: int | torch.Tensor = 0,
             **kwargs,
         ):
             pass
 
-    dynamic = ("pixel_values", "position_ids", "mask")
+    dynamic = ("pixel_values", "position_ids", "mask", "embeddings")
     assert infer_dynamic_arg_dims(Encoder) == dict.fromkeys(dynamic, 0)
     assert infer_dynamic_arg_dims(Encoder, dim=1) == dict.fromkeys(dynamic, 1)
 

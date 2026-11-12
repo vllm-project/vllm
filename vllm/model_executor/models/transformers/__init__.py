@@ -18,11 +18,15 @@
 
 from typing import TYPE_CHECKING
 
+import torch
 import torch.nn.functional as F
 from transformers.modeling_utils import ALL_ATTENTION_FUNCTIONS
 
 from vllm.model_executor.models.transformers.base import VLLM_ATTN_ATTR
 from vllm.model_executor.models.transformers.causal import CausalMixin
+from vllm.model_executor.models.transformers.fusers.attention import (
+    VLLM_MM_ENCODER_ATTN_IMPL,
+)
 from vllm.model_executor.models.transformers.legacy import LegacyMixin
 from vllm.model_executor.models.transformers.moe import MoEMixin
 from vllm.model_executor.models.transformers.mtp import MTPMixin
@@ -42,8 +46,6 @@ from vllm.model_executor.models.transformers.transcription import (
 from vllm.multimodal import MULTIMODAL_REGISTRY
 
 if TYPE_CHECKING:
-    import torch
-
     from vllm.model_executor.layers.attention import Attention, MLAAttention
 
 
@@ -125,8 +127,35 @@ def vllm_mla_attention_forward(
     return attn_output, None
 
 
+def vllm_mm_encoder_attention_forward(
+    # Transformers args
+    module: "torch.nn.Module",
+    query: "torch.Tensor",
+    key: "torch.Tensor",
+    value: "torch.Tensor",
+    attention_mask: "torch.Tensor",
+    **kwargs,
+):
+    """Variable-length attention for encoders that batch images by `cu_seqlens`."""
+    query, key, value = (x.transpose(1, 2) for x in (query, key, value))
+    # No sequence is longer than the whole batch, and unlike `max_length_q` (a Python
+    # int which compile would bake in), this follows the dynamic shape of `query`
+    max_seqlen = torch.full((), query.shape[1], dtype=torch.int32)
+    attn_output = getattr(module, VLLM_ATTN_ATTR)(
+        query,
+        key,
+        value,
+        cu_seqlens=kwargs["cu_seq_lens_q"],
+        max_seqlen=max_seqlen,
+    )
+    return attn_output, None
+
+
 ALL_ATTENTION_FUNCTIONS.register("vllm", vllm_attention_forward)
 ALL_ATTENTION_FUNCTIONS.register("vllm_mla", vllm_mla_attention_forward)
+ALL_ATTENTION_FUNCTIONS.register(
+    VLLM_MM_ENCODER_ATTN_IMPL, vllm_mm_encoder_attention_forward
+)
 
 
 # Text only models
