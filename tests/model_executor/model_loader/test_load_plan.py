@@ -546,6 +546,19 @@ def test_view_ops_stay_direct(loader, shape, param_shape):
     assert plan.get_dest("layer.weight") is not None
 
 
+def test_reversed_rows_stay_direct():
+    """Rows that continue one another in the checkpoint but land in reverse
+    order stay two writes; merged, they would need a negative stride."""
+
+    def loader(param, loaded):
+        param[0].copy_(loaded[1])
+        param[1].copy_(loaded[0])
+
+    make, shapes = _single(loader, shape=(2, 3))
+    _, plan = _check_plan_equals_cold_start(make, shapes)
+    assert len(plan.get_dest("layer.weight")) == 2
+
+
 def test_tensors_sharing_one_storage():
     """Two checkpoint tensors on one storage: each write lands in its own
     tensor, whichever tensor names the storage."""
