@@ -22,7 +22,12 @@ import torch
 from vllm.v1.core.block_pool import BlockPool
 from vllm.v1.core.kv_cache_manager import KVCacheBlocks
 from vllm.v1.core.kv_cache_planning import get_kv_cache_groups
-from vllm.v1.core.kv_cache_utils import BlockHashWithGroupId, KVCacheBlock
+from vllm.v1.core.kv_cache_utils import (
+    BlockHashWithGroupId,
+    KVCacheBlock,
+    KVCacheBlockCopy,
+    generate_scheduler_kv_cache_config,
+)
 from vllm.v1.core.sched.output import KVConnectorBlockState, SchedulerOutput
 from vllm.v1.core.single_type_kv_cache_manager import FullAttentionManager
 from vllm.v1.kv_cache_interface import (
@@ -35,6 +40,8 @@ from vllm.v1.kv_cache_interface import (
 )
 from vllm.v1.kv_cache_layout import KVCacheLayout
 from vllm.v1.request import RequestStatus
+
+from ..utils import create_request, create_scheduler, create_vllm_config
 
 moriio_connector = importlib.import_module(
     "vllm.distributed.kv_transfer.kv_connector.v1.moriio.moriio_connector"
@@ -310,6 +317,22 @@ def _glm5_next_mtp_kv_cache_config() -> KVCacheConfig:
             dtype=torch.bfloat16,
             dcp_sharded=False,
         )
+    return _group_kv_cache_specs(specs)
+
+
+def _mixed_precision_mla_kv_cache_config(block_size: int) -> KVCacheConfig:
+    specs: dict[str, KVCacheSpec] = {}
+    for i in range(2):
+        specs[f"layers.{i}.attn"] = MLAAttentionSpec(
+            block_size=block_size, num_kv_heads=1, head_size=576, dtype=torch.bfloat16
+        )
+        specs[f"layers.{i}.indexer"] = MLAAttentionSpec(
+            block_size=block_size, num_kv_heads=1, head_size=132, dtype=torch.uint8
+        )
+    return _group_kv_cache_specs(specs)
+
+
+def _group_kv_cache_specs(specs: dict[str, KVCacheSpec]) -> KVCacheConfig:
     vllm_config = SimpleNamespace(
         scheduler_config=SimpleNamespace(disable_hybrid_kv_cache_manager=False),
         parallel_config=SimpleNamespace(pipeline_parallel_size=1),
@@ -1104,6 +1127,86 @@ def test_update_state_drops_decode_recompute_tail_block(
     meta = sched.build_connector_meta(output)
     assert not meta.reqs_to_recv
     assert output.new_block_ids_to_zero == [100, 101, 102]
+
+
+@pytest.mark.usefixtures("restore_moriio_role")
+@pytest.mark.parametrize(
+    ("hybrid", "num_external_tokens", "zero_ids", "copies", "expected"),
+    [
+        pytest.param(False, 127, [100, 101, 102], None, True, id="zeroed-dst"),
+        pytest.param(
+            False, 127, None, [KVCacheBlockCopy(7, 101)], True, id="copied-dst"
+        ),
+        pytest.param(True, 1500, None, None, True, id="hybrid-state"),
+        pytest.param(True, 0, None, None, False, id="hybrid-load-after-forward"),
+        pytest.param(False, 127, [102], None, False, id="zeroed-elsewhere"),
+        pytest.param(False, 127, None, None, False, id="no-stream-work"),
+        pytest.param(False, 0, [100, 101, 102], None, False, id="release-only"),
+    ],
+)
+def test_read_meta_orders_reads_after_stream_work(
+    hybrid, num_external_tokens, zero_ids, copies, expected
+):
+    if hybrid:
+        scheduler = _glm5_next_mtp_scheduler()
+        remote_blocks = [[10, 11], [50], [90]]
+        local_blocks = ([200, 201], [100, 101, 102], [300])
+    else:
+        scheduler = moriio_connector.MoRIIOConnectorScheduler(
+            _gate_vllm_config(block_size=64),
+            "engine",
+            _mixed_precision_mla_kv_cache_config(block_size=64),
+        )
+        remote_blocks = [[10, 11]]
+        local_blocks = ([100, 101, 102],)
+    scheduler.update_state_after_alloc(
+        _make_read_request(remote_blocks),
+        _FakeBlocks(local_blocks),
+        num_external_tokens=num_external_tokens,
+    )
+    output = SchedulerOutput.make_empty()
+    output.has_sync_kv_loads = num_external_tokens > 0
+    output.new_block_ids_to_zero = zero_ids
+    output.kv_cache_block_copies = copies
+
+    meta = scheduler.build_connector_meta(output)
+
+    assert meta.order_reads_after_compute_stream is expected
+
+
+@pytest.mark.usefixtures("restore_moriio_role")
+def test_sync_read_destinations_are_zeroed_with_mixed_precision_kv():
+    vllm_config = create_vllm_config(
+        block_size=16,
+        kv_connector="MoRIIOConnector",
+        kv_connector_extra_config={"read_mode": "true", "host_ip": "127.0.0.1"},
+    )
+    scheduler = create_scheduler(
+        vllm_config,
+        num_blocks=64,
+        kv_cache_config=generate_scheduler_kv_cache_config(
+            [_mixed_precision_mla_kv_cache_config(block_size=16)]
+        ),
+    )
+    request = create_request(num_tokens=64, do_remote_prefill=True)
+    request.kv_transfer_params = {
+        "do_remote_prefill": True,
+        "transfer_id": "tx",
+        "remote_engine_id": "prefill",
+        "remote_block_ids": [[10, 11, 12, 13]],
+        "remote_host": "127.0.0.1",
+        "remote_handshake_port": 6000,
+        "remote_notify_port": 6001,
+    }
+    scheduler.add_request(request)
+
+    output = scheduler.schedule()
+
+    recv = output.kv_connector_metadata.reqs_to_recv[request.request_id]
+    read_dst_block_ids = {b for group in recv.local_block_ids for b in group}
+    assert output.has_sync_kv_loads
+    assert read_dst_block_ids
+    assert read_dst_block_ids <= set(output.new_block_ids_to_zero or ())
 
 
 def test_update_state_pairs_shorter_local_blocks_with_remote_suffix():

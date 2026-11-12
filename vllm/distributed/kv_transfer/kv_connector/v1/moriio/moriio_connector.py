@@ -102,6 +102,7 @@ from vllm.distributed.parallel_state import (
 )
 from vllm.forward_context import ForwardContext
 from vllm.logger import init_logger
+from vllm.utils.gpu_sync_debug import gpu_sync_allowed
 from vllm.utils.math_utils import cdiv
 from vllm.utils.network_utils import (
     make_zmq_path,
@@ -1440,6 +1441,27 @@ class MoRIIOConnectorScheduler:
             block_ids = current_blocks
         return self._clamp_to_prompt_blocks(req, block_ids)
 
+    def _compute_stream_writes_read_destinations(
+        self, scheduler_output: SchedulerOutput
+    ) -> bool:
+        read_dst_block_ids = {
+            block_id
+            for _, block_ids in self._reqs_need_recv.values()
+            for group in block_ids
+            for block_id in group
+        }
+        if not read_dst_block_ids:
+            return False
+        if not scheduler_output.has_sync_kv_loads:
+            return False
+        if self._has_mamba:
+            return True
+        stream_written_block_ids = {
+            *(scheduler_output.new_block_ids_to_zero or ()),
+            *(c.dst_block_id for c in scheduler_output.kv_cache_block_copies or ()),
+        }
+        return not read_dst_block_ids.isdisjoint(stream_written_block_ids)
+
     def build_connector_meta(
         self,
         scheduler_output: SchedulerOutput,
@@ -1494,6 +1516,9 @@ class MoRIIOConnectorScheduler:
                 local_block_ids=block_ids,
                 kv_transfer_params=kv_params,
             )
+        meta.order_reads_after_compute_stream = (
+            self._compute_stream_writes_read_destinations(scheduler_output)
+        )
         if (
             self.mode == MoRIIOMode.READ
             and self._has_mamba
@@ -3420,6 +3445,11 @@ class MoRIIOConnectorWorker:
         # path lets TP workers diverge into a forward collective while a peer is
         # still blocked handshaking -> NCCL hang (see below).
         self._eager_handshake_all_dp_ranks(metadata)
+
+        if metadata.order_reads_after_compute_stream:
+            # MoRI's reads are not ordered after work on the compute stream.
+            with gpu_sync_allowed():
+                torch.cuda.current_stream().synchronize()
 
         wait_handshake_readd_req = False
         remote_engine_id = None

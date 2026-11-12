@@ -580,13 +580,16 @@ class MoRIIOConnectorMetadata(KVConnectorMetadata):
         self.reqs_to_save: dict[ReqId, ReqMeta] = {}
         self.reqs_to_send: dict[ReqId, float] = {}
         self.transfer_id_to_request_id: dict[TransferId, ReqId] = {}
+        self.order_reads_after_compute_stream = False
 
     def __repr__(self):
         return (
             f"MoRIIOConnectorMetadata: reqs_to_recv={self.reqs_to_recv}, "
             f"reqs_to_save={self.reqs_to_save}, "
             f"reqs_to_send={self.reqs_to_send}, "
-            f"transfer_id_to_request_id={self.transfer_id_to_request_id}"
+            f"transfer_id_to_request_id={self.transfer_id_to_request_id}, "
+            f"order_reads_after_compute_stream="
+            f"{self.order_reads_after_compute_stream}"
         )
 
     def add_new_req(
