@@ -1127,10 +1127,6 @@ vllm serve llava-hf/llava-1.5-7b-hf \
 ### Audio Inputs
 
 Audio input is supported according to [OpenAI Audio API](https://platform.openai.com/docs/guides/audio?audio-generation-quickstart-example=audio-in).
-Gemma 4 accepts short audio clips, including 161–320 samples at 16 kHz
-(a single mel frame), without additional serving flags. Gemma 4 Unified
-uses one audio token per 640-sample frame, rounding up for partial frames.
-
 Here is a simple example using Ultravox-v0.5-1B.
 
 First, launch the OpenAI-compatible server:
