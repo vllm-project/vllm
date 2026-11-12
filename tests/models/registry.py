@@ -835,6 +835,7 @@ _AUTOMATIC_CONVERTED_MODELS = {
 
 _MULTIMODAL_EXAMPLE_MODELS = {
     # [Decoder-only]
+    "Alpamayo2Edge": _HfExamplesInfo("nvidia/Alpamayo2-Edge", max_model_len=8192),
     "Alpamayo2Super": _HfExamplesInfo("nvidia/Alpamayo2-Super", max_model_len=8192),
     "AriaForConditionalGeneration": _HfExamplesInfo(
         "rhymes-ai/Aria",
