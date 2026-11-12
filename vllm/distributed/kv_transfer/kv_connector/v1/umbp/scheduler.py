@@ -184,12 +184,13 @@ _LazyCandidate = tuple[KVCacheBlock, str, int, bytes]
 class _LookupBlockPool(BlockPool):
     """Request-scoped residency view for the core hit-window algorithms."""
 
-    def __init__(self, hash_block_size: int) -> None:
+    def __init__(self, hash_block_size: int, num_hash_lookahead_tokens: int) -> None:
         super().__init__(
             num_gpu_blocks=1,
             enable_caching=True,
             hash_block_size=hash_block_size,
             enable_kv_cache_events=False,
+            num_hash_lookahead_tokens=num_hash_lookahead_tokens,
         )
         self.hits: list[set[bytes]] = []
         self.hit_blocks: dict[bytes, KVCacheBlock] = {}
@@ -302,8 +303,11 @@ class UMBPStoreConnectorScheduler:
         ]
         model_config = getattr(vllm_config, "model_config", None)
         speculative_config = getattr(vllm_config, "speculative_config", None)
+        self.num_hash_lookahead_tokens = vllm_config.num_hash_lookahead_tokens
         use_eagle = bool(
-            speculative_config is not None and speculative_config.use_eagle_block_drop()
+            speculative_config is not None
+            and speculative_config.use_eagle_block_drop()
+            and not self.num_hash_lookahead_tokens
         )
         self.use_eagle = use_eagle
         explicit_eagle_groups = {
@@ -312,9 +316,9 @@ class UMBPStoreConnectorScheduler:
             if group.is_eagle_group
         }
         self._eagle_store_groups = (
-            explicit_eagle_groups
-            if explicit_eagle_groups or not use_eagle
-            else set(kv_cache_config.prefix_cacheable_group_ids)
+            (explicit_eagle_groups or set(kv_cache_config.prefix_cacheable_group_ids))
+            if use_eagle
+            else set()
         )
         max_model_len = getattr(
             model_config,
@@ -356,7 +360,9 @@ class UMBPStoreConnectorScheduler:
             )
             else None
         )
-        self._lookup_pool = _LookupBlockPool(self.hash_block_size)
+        self._lookup_pool = _LookupBlockPool(
+            self.hash_block_size, self.num_hash_lookahead_tokens
+        )
         self._local_cache_lookup: Callable[[int, bytes], bool] | None = None
         if self._lookup_coordinator is not None:
             self._lookup_coordinator.block_pool = self._lookup_pool
@@ -631,7 +637,7 @@ class UMBPStoreConnectorScheduler:
         assert self.codec is not None
         objects: dict[int, list[tuple[bytes, tuple[str, ...]]]] = {}
         keys: list[str] = []
-        lookup_limit = request.num_tokens - 1
+        lookup_limit = min(request.num_tokens - 1, len(hashes) * self.hash_block_size)
         if self.use_eagle and self._lookup_coordinator is not None:
             lookup_limit = min(request.num_tokens, len(hashes) * self.hash_block_size)
         for group_id, unit in self._lookup_units.items():
@@ -1463,8 +1469,10 @@ class UMBPStoreConnectorScheduler:
                     if self.enable_kv_cache_events and index > 0
                     else None
                 )
+                # The hash also covers the next lookahead tokens.
+                hash_end = token_end + self.num_hash_lookahead_tokens
                 token_ids_by_block.append(
-                    tuple(request.all_token_ids[index * group_block_size : token_end])
+                    tuple(request.all_token_ids[index * group_block_size : hash_end])
                     if self.enable_kv_cache_events
                     else ()
                 )
@@ -1562,7 +1570,10 @@ class UMBPStoreConnectorScheduler:
             ()
             if num_prompt_tokens is None
             else replay_boundaries(
-                num_prompt_tokens, self.block_size, use_eagle=self.use_eagle
+                num_prompt_tokens,
+                self.block_size,
+                use_eagle=self.use_eagle,
+                num_hash_lookahead_tokens=self.num_hash_lookahead_tokens,
             )
         )
         mask = manager_cls.reachable_block_mask(
@@ -1585,6 +1596,7 @@ class UMBPStoreConnectorScheduler:
     def request_finished(
         self, request: Request, block_ids: tuple[list[int], ...]
     ) -> tuple[bool, dict[str, Any] | None]:
+        self._register_finished_lookahead_save(request, block_ids)
         self._pending_loads.pop(request.request_id, None)
         self._load_specs.pop(request.request_id, None)
         self._requests.pop(request.request_id, None)
@@ -1597,6 +1609,49 @@ class UMBPStoreConnectorScheduler:
             self._lazy_scan_pending = True
         return False, None
 
+    def _register_finished_lookahead_save(
+        self, request: Request, block_ids: tuple[list[int], ...]
+    ) -> None:
+        """Pin completed KV whose hash became available with the last sample."""
+        tracker = self._request_trackers.get(request.request_id)
+        # Only a request that computed KV has saved any; one still waiting for
+        # its load has not.
+        if (
+            not self.store_enabled
+            or not self.num_hash_lookahead_tokens
+            or tracker is None
+            or not tracker.saved_tokens
+        ):
+            return
+        completed_tokens = request.num_computed_tokens - (
+            request.num_in_flight_tokens - request.num_stale_output_tokens
+        )
+        save_limit = (
+            request.num_tokens if self.save_decode_cache else request.num_prompt_tokens
+        )
+        reserved_keys = {
+            key for event in self._store_events.values() for key in event.iter_keys()
+        }
+        plans = self._store_plans(
+            request,
+            tracker,
+            min(completed_tokens, save_limit),
+            block_ids_override=tuple(
+                block_ids[group_id]
+                for group_id in self.kv_cache_config.prefix_cacheable_group_ids
+            ),
+            skip_keys=reserved_keys,
+        )
+        if not plans:
+            return
+        pool = self._gpu_block_pool
+        assert pool is not None
+        # Full blocks end before the partial tail, so their pins never overlap.
+        pool.touch(
+            [pool.blocks[block_id] for block_id in dict.fromkeys(plans.block_ids)]
+        )
+        self._pending_finished_stores.setdefault(request.request_id, []).extend(plans)
+
     def _register_lazy_prefix_chains(
         self,
         request: Request,
@@ -1606,8 +1661,13 @@ class UMBPStoreConnectorScheduler:
         if self.codec is None:
             return
         prompt_tokens = request.num_prompt_tokens
-        save_to = min(prompt_tokens, request.num_computed_tokens)
         hashes = list(request.block_hashes)
+        # A lookahead hash needs tokens past its block, so the tail may have none.
+        save_to = min(
+            prompt_tokens,
+            request.num_computed_tokens,
+            len(hashes) * self.hash_block_size,
+        )
         if save_to <= 0 or not hashes:
             return
 
@@ -1872,7 +1932,12 @@ class UMBPStoreConnectorScheduler:
                                 if plan.parent_block_hash is not None
                                 else None
                             ),
-                            token_ids=list(plan.token_ids),
+                            token_ids=list(plan.token_ids[: plan.block_size]),
+                            lookahead_token_ids=(
+                                [list(lookahead)]
+                                if (lookahead := plan.token_ids[plan.block_size :])
+                                else None
+                            ),
                             block_size=plan.block_size,
                             lora_id=None,
                             medium=plan.medium,
