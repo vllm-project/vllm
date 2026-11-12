@@ -569,7 +569,7 @@ def has_flashinfer_sparse_mla_sm120_config(num_q_heads: int, top_k: int) -> bool
 
 @functools.cache
 def has_flashinfer_msa() -> bool:
-    """Return ``True`` if FlashInfer MiniMax Sparse Attention (MSA) ops are
+    """Return `True` if FlashInfer MiniMax Sparse Attention (MSA) ops are
     available. Which architectures they serve depends on the build."""
     if not has_flashinfer():
         return False
@@ -595,9 +595,9 @@ def has_flashinfer_msa() -> bool:
 
 @functools.cache
 def has_flashinfer_msa_packed_kv() -> bool:
-    """Return ``True`` if the FlashInfer MSA attention kernels accept K/V
+    """Return `True` if the FlashInfer MSA attention kernels accept K/V
     views split from vLLM's packed-content KV cache, advertised by the
-    ``SUPPORTS_PACKED_KV`` flag on ``flashinfer.msa_ops``."""
+    `SUPPORTS_PACKED_KV` flag on `flashinfer.msa_ops`."""
     if not has_flashinfer_msa():
         return False
     import flashinfer.msa_ops as msa_ops
@@ -607,8 +607,8 @@ def has_flashinfer_msa_packed_kv() -> bool:
 
 @functools.cache
 def has_flashinfer_msa_sm90() -> bool:
-    """Return ``True`` if the FlashInfer MSA attention kernels serve SM90
-    (Hopper). Detected from the ``out`` parameter both attention ops gained
+    """Return `True` if the FlashInfer MSA attention kernels serve SM90
+    (Hopper). Detected from the `out` parameter both attention ops gained
     with their SM90 backend, since flashinfer exposes no capability flag for
     it."""
     if not has_flashinfer_msa():
@@ -625,8 +625,8 @@ def has_flashinfer_msa_sm90() -> bool:
 
 @functools.cache
 def has_flashinfer_msa_per_token_topk() -> bool:
-    """Return ``True`` if ``flashinfer.msa_ops.msa_topk_select`` accepts a
-    per-token ``num_valid_pages`` tensor. Detected from the parameter's type
+    """Return `True` if `flashinfer.msa_ops.msa_topk_select` accepts a
+    per-token `num_valid_pages` tensor. Detected from the parameter's type
     annotation, since flashinfer exposes no capability flag for it."""
     if not has_flashinfer_msa():
         return False

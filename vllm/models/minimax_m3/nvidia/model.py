@@ -967,7 +967,7 @@ class MiniMaxM3SparseAttention(nn.Module, AttentionLayerBase):
         # computed once so both selectors agree. impl is AttentionImplBase
         # (broader than the AttentionImpl that AttentionLayerBase annotates).
         use_flashinfer_msa = minimax_m3_use_flashinfer_msa(
-            topk_blocks=sparse_cfg["sparse_topk_blocks"],
+            topk_blocks=config.index_topk_blocks,
             kv_cache_dtype=self.kv_cache_dtype,
             num_heads=self.num_heads,
             num_kv_heads=self.num_kv_heads,

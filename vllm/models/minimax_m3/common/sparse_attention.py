@@ -623,7 +623,7 @@ def select_main_backend_and_impl_cls(
     Blackwell (SM100) uses the MSA attend for supported top-k block counts
     when the KV cache is BF16, FP8 E4M3 or NVFP4; SM90 and SM120/SM121 use the
     FlashInfer MSA attend when the caller passes the
-    ``minimax_m3_use_flashinfer_msa`` verdict; MI355 uses AITER sparse PA with
+    `minimax_m3_use_flashinfer_msa` verdict; MI355 uses AITER sparse PA with
     shuffle KV cache layout; Other platforms and FP8 E5M2 fall back to Triton.
     NVFP4 is MSA-only. The MSA/FlashInfer modules are imported lazily to avoid
     import errors on unsupported platforms.

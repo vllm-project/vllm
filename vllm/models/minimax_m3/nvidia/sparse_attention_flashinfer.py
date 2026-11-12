@@ -4,8 +4,8 @@
 
 K and V are views split from the packed-content KV cache, which flashinfer
 reads in place on SM90 and, given packed-KV support
-(``has_flashinfer_msa_packed_kv``), on SM120/SM121. Imported only when
-``minimax_m3_use_flashinfer_msa`` passes.
+(`has_flashinfer_msa_packed_kv`), on SM120/SM121. Imported only when
+`minimax_m3_use_flashinfer_msa` passes.
 """
 
 import torch

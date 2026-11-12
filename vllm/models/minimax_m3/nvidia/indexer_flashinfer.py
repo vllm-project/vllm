@@ -2,10 +2,10 @@
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 """FlashInfer indexer impl for MiniMax M3 on SM90 and SM120/SM121.
 
-One whole-batch ``msa_proxy_score`` call plus one ``msa_topk_select`` call, no
+One whole-batch `msa_proxy_score` call plus one `msa_topk_select` call, no
 decode/prefill split. Each token's causal extent and trailing local window go
-to the top-k kernel through the per-token ``num_valid_pages`` tensor and
-``force_end_blocks``. Imported only when ``minimax_m3_use_flashinfer_msa``
+to the top-k kernel through the per-token `num_valid_pages` tensor and
+`force_end_blocks`. Imported only when `minimax_m3_use_flashinfer_msa`
 passes.
 """
 
@@ -49,7 +49,7 @@ class MiniMaxM3IndexerFlashInferBackend(MiniMaxM3IndexerBackend):
 
 @dataclass
 class MiniMaxM3IndexerFlashInferMetadata(MiniMaxM3IndexerMetadata):
-    """Whole-batch proxy/top-k inputs; ``prefill``/``decode`` stay ``None``."""
+    """Whole-batch proxy/top-k inputs; `prefill`/`decode` stay `None`."""
 
     proxy_cu_seqlens_q: torch.Tensor | None = None  # [num_reqs + 1] int32
     proxy_seqused_k: torch.Tensor | None = None  # [num_reqs] int32
