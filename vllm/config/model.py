@@ -933,6 +933,9 @@ class ModelConfig:
             # Rebuild after multimodal_config exists so text-only mm_prefix
             # clearing is applied (and cached for later with_hf_config calls).
             self.model_arch_config = self.get_model_arch_config()
+        elif self.model_arch_config.is_mm_prefix_lm:
+            # A text-only architecture can inherit mm_prefix from its config.
+            self.model_arch_config = self.get_model_arch_config()
 
         if self.disable_sliding_window:
             # Set after get_and_verify_max_len to ensure that max_model_len
@@ -1036,8 +1039,10 @@ class ModelConfig:
         The deep-copied cache preserves the top-level decision instead.
         """
         if self.multimodal_config is None:
-            # Early call before multimodal init — do not clear mm_prefix yet.
-            return True
+            # Before model inspection, do not clear mm_prefix yet. Afterwards,
+            # only a text-only architecture is left without a multimodal config.
+            model_info = getattr(self, "_model_info", None)
+            return model_info is None or model_info.supports_multimodal
 
         supports_mm = self._cached_supports_multimodal_inputs()
         if not supports_mm:

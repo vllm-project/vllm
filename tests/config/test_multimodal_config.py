@@ -112,6 +112,7 @@ def test_mm_encoder_attn_dtype_hash_updates(tmp_path):
 
 _MULTIMODAL_MODEL = "llava-hf/llava-1.5-7b-hf"
 _TEXT_ONLY_MODEL = "TinyLlama/TinyLlama-1.1B-Chat-v1.0"
+_GEMMA4_MODEL = "google/gemma-4-12B-it"
 
 
 def _make_mm_prefix_model_config(
@@ -123,13 +124,29 @@ def _make_mm_prefix_model_config(
 
 
 def test_supports_multimodal_for_mm_prefix_before_multimodal_config():
-    """A text-only model never builds a multimodal config, so the early
-    return must neither clear mm_prefix nor write the sticky cache."""
+    """Before the model is inspected the early return must not clear
+    mm_prefix, and it never writes the sticky cache."""
     model_config = _make_mm_prefix_model_config(_TEXT_ONLY_MODEL)
     assert model_config.multimodal_config is None
+    assert model_config._supports_multimodal_for_mm_prefix() is False
 
+    del model_config._model_info
     assert model_config._supports_multimodal_for_mm_prefix() is True
     assert not getattr(model_config, "_supports_multimodal_inputs_cache", None)
+
+
+def test_text_only_architecture_clears_inherited_mm_prefix():
+    """Regression test for #67161: a text-only class loaded from a checkpoint
+    whose text config asks for bidirectional vision attention must not keep
+    mm_prefix, which would restrict the attention backends for no reason."""
+    multimodal = ModelConfig(_GEMMA4_MODEL)
+    assert multimodal.is_mm_prefix_lm is True
+
+    text_only = ModelConfig(
+        _GEMMA4_MODEL, hf_overrides={"architectures": ["Gemma4ForCausalLM"]}
+    )
+    assert text_only.multimodal_config is None
+    assert text_only.is_mm_prefix_lm is False
 
 
 def test_language_model_only_disables_via_supports_multimodal_inputs():
