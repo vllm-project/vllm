@@ -506,11 +506,12 @@ class DeepseekCompressor(nn.Module):
             extra_kwargs = {
                 "num_decode_tokens": state_metadata.num_decode_tokens,
                 "compress_scratch": self._compress_scratch,
+                "fp8_scale": fp8_scale,
             }
         else:
             # Indexer path (head_dim == 128) or non-CUDA GPUs (AMD, XPU, etc.).
             compress_norm_rope_store_fn = compress_norm_rope_store_triton
-            extra_kwargs = {}
+            extra_kwargs = {"fp8_scale": fp8_scale}
 
         compress_norm_rope_store_fn(
             state_cache=state_cache,
