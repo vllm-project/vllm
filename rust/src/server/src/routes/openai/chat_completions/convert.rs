@@ -148,22 +148,10 @@ pub(super) fn prepare_chat_request(
         request.vllm_xargs.as_ref(),
     );
 
-    // OpenAI treats `tools: []` like an omitted field: with no tool declared
-    // anywhere, `auto` and `required` have nothing to call and fall back to
-    // `none`. A named choice still fails tool resolution, as no tool matches it.
-    let tool_choice = match request.tool_choice {
-        Some(ToolChoice::Value(ToolChoiceValue::Auto | ToolChoiceValue::Required))
-            if request.tools.as_ref().is_some_and(Vec::is_empty)
-                && messages.iter().all(|message| message.declared_tools().is_none()) =>
-        {
-            Some(ToolChoice::Value(ToolChoiceValue::None))
-        }
-        tool_choice => tool_choice,
-    };
     let tool_context = ResolvedToolContext::new(
         &messages,
         convert_tools(request.tools)?,
-        tool_choice.as_ref().map(convert_tool_choice).transpose()?,
+        request.tool_choice.as_ref().map(convert_tool_choice).transpose()?,
         request.parallel_tool_calls.unwrap_or(true),
     )
     .map_err(|error| chat_submit_error("failed to resolve request tools", error))?;
@@ -198,7 +186,7 @@ pub(super) fn prepare_chat_request(
             logprob_token_ids,
             structured_outputs,
             skip_reading_prefix_cache: None,
-            routed_experts_prompt_start: None,
+            routed_experts_prompt_start: request.routed_experts_prompt_start,
             vllm_xargs: merge_kv_transfer_params(
                 merge_ec_transfer_params(request.vllm_xargs, request.ec_transfer_params.as_ref()),
                 request.kv_transfer_params.as_ref(),
@@ -380,6 +368,7 @@ fn convert_content(content: MessageContent) -> Result<ChatContent, ApiError> {
                     format: input_audio.format,
                     uuid,
                 }),
+                ContentPart::ToolReference { name } => Ok(ChatContentPart::ToolReference { name }),
             })
             .try_collect()
             .map(ChatContent::Parts),
@@ -487,7 +476,7 @@ mod tests {
     use vllm_chat::{
         AssistantContentBlock, AssistantToolCall, ChatContentPart, ChatMessage as VllmChatMessage,
         ChatRenderer, ChatTool as VllmChatTool, ChatToolChoice, GenerationPromptMode,
-        KimiK3ChatRenderer, SamplingParams as VllmSamplingParams,
+        KimiK3ChatRenderer, KimiK3Variant, SamplingParams as VllmSamplingParams,
     };
     use vllm_text::{
         Prompt, PromptTruncation, PromptTruncationLimit, TruncationSide, output::TextDecodeOptions,
@@ -915,10 +904,11 @@ mod tests {
         );
 
         let tokenizer = Arc::new(TestTokenizer::new());
-        let prompt = KimiK3ChatRenderer::new(tokenizer.clone(), Default::default())
-            .render(&prepared.chat_request)
-            .expect("Kimi K3 rendering succeeds")
-            .prompt;
+        let prompt =
+            KimiK3ChatRenderer::new(tokenizer.clone(), Default::default(), KimiK3Variant::K3)
+                .render(&prepared.chat_request)
+                .expect("Kimi K3 rendering succeeds")
+                .prompt;
         let Prompt::TokenIds(prompt_token_ids) = prompt else {
             panic!("Kimi K3 renders token IDs");
         };
@@ -1453,6 +1443,52 @@ mod tests {
     }
 
     #[test]
+    fn prepare_chat_request_maps_tool_reference_parts() {
+        let request = |reference: &str| -> ChatCompletionRequest {
+            serde_json::from_value(json!({
+                "model": "Qwen/Qwen1.5-0.5B-Chat",
+                "messages": [
+                    {"role": "user", "content": "find a weather tool"},
+                    {"role": "assistant", "tool_calls": [{
+                        "id": "call_1",
+                        "type": "function",
+                        "function": {"name": "tool_search", "arguments": "{}"},
+                    }]},
+                    {"role": "tool", "tool_call_id": "call_1", "content": [
+                        {"type": "tool_reference", "name": reference},
+                    ]},
+                ],
+                "tools": [
+                    {"type": "function", "function": {"name": "tool_search"}},
+                    {"type": "function", "function": {"name": "get_weather"}, "defer_loading": true},
+                ],
+            }))
+            .expect("tool_reference parts parse")
+        };
+        let prepare = |reference| {
+            prepare_chat_request(
+                request(reference),
+                &served(&["Qwen/Qwen1.5-0.5B-Chat"]),
+                ResolvedRequestContext::default(),
+            )
+        };
+
+        let prepared = prepare("get_weather").expect("request is valid");
+        assert_eq!(
+            prepared.chat_request.messages[2],
+            VllmChatMessage::tool_response(
+                vec![ChatContentPart::tool_reference("get_weather")],
+                "call_1",
+            )
+        );
+
+        let error = prepare("get_time").unwrap_err();
+        assert_eq!(error.status_code(), StatusCode::BAD_REQUEST);
+        expect!["tool_reference `get_time` was not found in the available tools"]
+            .assert_eq(&error.to_error_response().error.message);
+    }
+
+    #[test]
     fn prepare_chat_request_accepts_assistant_reasoning_history() {
         let message = ChatCompletionMessage {
             role: AssistantRole,
@@ -1681,39 +1717,6 @@ mod tests {
         assert!(!prepared.options.is_named_tool_choice);
     }
 
-    /// Like OpenAI, `tools: []` is an omitted field: no tool reaches the
-    /// renderer, and `auto` and `required` fall back to `none`.
-    #[test]
-    fn prepare_chat_request_treats_empty_tools_as_omitted() {
-        let cases = [
-            None,
-            Some(ToolChoiceValue::None),
-            Some(ToolChoiceValue::Auto),
-            Some(ToolChoiceValue::Required),
-        ];
-        for tool_choice in cases {
-            let request = ChatCompletionRequest {
-                tools: Some(Vec::new()),
-                tool_choice: tool_choice.map(ToolChoice::Value),
-                ..base_request()
-            };
-
-            let prepared = prepare_chat_request(
-                request,
-                &served(&["Qwen/Qwen1.5-0.5B-Chat"]),
-                ResolvedRequestContext::default(),
-            )
-            .unwrap_or_else(|error| panic!("{tool_choice:?}: {error:?}"));
-
-            assert!(prepared.chat_request.initial_tools().is_empty());
-            assert_eq!(
-                prepared.chat_request.tool_choice(),
-                &ChatToolChoice::None,
-                "{tool_choice:?}"
-            );
-        }
-    }
-
     /// Tools declared in a developer message stay available under `tools: []`,
     /// as they would with `tools` omitted.
     #[test]
@@ -1761,8 +1764,7 @@ mod tests {
         }
     }
 
-    /// A named tool choice keeps the empty list, so it reports the missing
-    /// function instead of falling back to `none`.
+    /// A named tool choice with empty `tools` reports the missing function.
     #[test]
     fn prepare_chat_request_rejects_named_tool_choice_with_empty_tools() {
         let request = ChatCompletionRequest {

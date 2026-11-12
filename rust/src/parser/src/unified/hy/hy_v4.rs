@@ -158,7 +158,7 @@ mod tests {
                 UnifiedParserEvent::ToolCall(crate::tool::ToolCallDelta {
                     tool_index: 0,
                     name: Some("get_weather".to_string()),
-                    arguments: r#"{"city":"Beijing"}"#.to_string(),
+                    arguments: r#"{"city": "Beijing"}"#.to_string(),
                 }),
                 UnifiedParserEvent::ToolCall(crate::tool::ToolCallDelta {
                     tool_index: 1,
