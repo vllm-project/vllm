@@ -7312,7 +7312,9 @@ def test_dcp_partial_tail_store_is_independent_of_handoff_batching(split_handoff
         output = SchedulerOutput.make_empty()
         if index == 0:
             output.scheduled_new_reqs = [
-                NewRequestData.from_request(request, ([11, 12], [0, 0, 24, 25]))
+                NewRequestData.from_request(
+                    request, ([11, 12], [0, 0, 24, 25]), request.prefill_token_ids
+                )
             ]
             output.num_scheduled_tokens = {request.request_id: 60}
             output.total_num_scheduled_tokens = 60
