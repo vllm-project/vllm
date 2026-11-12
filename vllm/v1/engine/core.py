@@ -154,6 +154,8 @@ class EngineCore:
                 VLLM_VERSION,
                 vllm_config,
             )
+            if (spec_config := vllm_config.speculative_config) is not None:
+                logger.info("%s", spec_config.resolved_summary(vllm_config))
 
         self.log_stats = log_stats
         # Opaque weight version supplied by the caller.

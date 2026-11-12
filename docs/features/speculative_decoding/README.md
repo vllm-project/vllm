@@ -215,6 +215,24 @@ vllm serve <target-model> \
   `target_parallel_config`, `draft_parallel_config`, and `draft_load_config`
   are populated by vLLM and are not intended to be set by users.
 
+### Checking the resolved draft config
+
+The draft model's config is resolved separately from the target's, so a target setting such as `--revision` or a RoPE override may not reach the draft. At startup, vLLM logs the resolved speculative config with each draft setting next to the target's:
+
+```text
+Resolved speculative config:
+  method: eagle3
+  num_speculative_tokens: 3
+  model: draft=vllm-project/EAGLE3-LLaMA3.1-Instruct-8B, target=unsloth/Meta-Llama-3.1-8B-Instruct
+  revision: draft=main, target=main
+  max_position_embeddings: draft=8192, target=131072
+  rope_parameters: draft={'rope_theta': 10000.0, 'rope_type': 'default'}, target={...}
+  tensor_parallel_size: draft=1, target=2
+  decode_context_parallel_size: draft=1, target=1
+```
+
+If acceptance is unexpectedly low, check this block for settings the draft did not inherit. Speculators without a draft model (e.g. ngram, suffix) log only `method` and `num_speculative_tokens`.
+
 ## Lossless guarantees of Speculative Decoding
 
 In vLLM, speculative decoding aims to enhance inference efficiency while maintaining accuracy. This section addresses the lossless guarantees of
