@@ -186,7 +186,7 @@ class Fp8BlockScaledMMLinearKernel(
         out_dtype: torch.dtype,
     ) -> torch.Tensor:
         """apply_block_scaled_mm with an explicit output dtype; implemented by
-        kernels that set ``supports_partial_sum_dtype``."""
+        kernels that set `supports_partial_sum_dtype`."""
         raise NotImplementedError
 
 

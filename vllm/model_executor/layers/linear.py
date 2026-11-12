@@ -1685,7 +1685,7 @@ class KimiK3MergedQKVGateLinear(MergedColumnParallelLinear):
 def _fp16_partial_linear(
     x: torch.Tensor, weight: torch.Tensor, bias: torch.Tensor | None, scale: float
 ) -> torch.Tensor:
-    """FP32-accumulated x @ weight.T, times ``scale``, cast to FP16.
+    """FP32-accumulated x @ weight.T, times `scale`, cast to FP16.
 
     torch.mm has no BF16 -> FP16 output, hence the FP32 output and the cast;
     bias and scale are applied in place so only one FP32 buffer is live.
@@ -1824,7 +1824,7 @@ class RowParallelLinear(LinearBase):
 
     def _set_fp16_partials(self, mode: Literal["gemm", "kernel"] | None) -> None:
         """Partial sums for VLLM_TP_FP16_PARTIAL_SUMS: "gemm" (FP16 GEMM output
-        in ``forward``), "kernel" (the quantized kernel reads partial_sum_dtype
+        in `forward`), "kernel" (the quantized kernel reads partial_sum_dtype
         and partial_sum_scale) or None (BF16)."""
         self._fp16_partials = mode
         self.partial_sum_dtype = torch.float16 if mode == "kernel" else None
@@ -1981,8 +1981,8 @@ class RowParallelLinear(LinearBase):
 
     def disable_fp16_partial_sums(self, reason: str) -> None:
         """Go back to BF16 partial sums. For wrappers that call
-        ``quant_method.apply`` on this layer and all-reduce the result
-        themselves, bypassing the unscale in ``forward``."""
+        `quant_method.apply` on this layer and all-reduce the result
+        themselves, bypassing the unscale in `forward`."""
         if self._fp16_partials is None:
             return
         logger.warning_once(
