@@ -60,7 +60,9 @@ def reserve_aux_intermediate_tensor_slots(model: nn.Module) -> None:
     if not upstream_keys:
         return
 
-    hidden_size = cast(nn.Module, decoder).config.hidden_size
+    hidden_size = getattr(
+        decoder, "aux_hidden_size", cast(nn.Module, decoder).config.hidden_size
+    )
     make_empty = model.make_empty_intermediate_tensors
 
     def make_empty_with_aux(batch_size, dtype, device):
