@@ -111,14 +111,13 @@ vllm serve <model> \
       "spec_name": "FSOffloadingSpec",
       "fs_backend": "gds",
       "root_dir": "/mnt/nvme/kv_cache",
-      "fs_bytes_to_use": 1000000000000,
       "block_size": 64,
       "read_only": true
     }
   }'
 ```
 
-Files are named by block content hash, so blocks written by an earlier run or by another instance with the same model and parallel configuration are found by an asynchronous on-disk lookup. With `read_only` (the default), the instance only loads existing files and never writes. `fs_bytes_to_use` sizes the in-memory index of known files; evicting an entry from the index does not delete its file.
+Files are named by block content hash, so blocks written by an earlier run or by another instance with the same model and parallel configuration are found by an asynchronous on-disk lookup. With `read_only` (the default), the instance only loads existing files and never writes. Keys found on disk are remembered in an in-memory LRU index of `fs_index_size` entries so later requests skip the disk lookup; dropping a key from the index does not delete its file.
 
 ## `kv_connector_extra_config` Reference
 
@@ -126,7 +125,7 @@ Files are named by block content hash, so blocks written by an earlier run or by
 | --- | --- | --- | --- | --- |
 | `spec_name` | no | `CPUOffloadingSpec` | both | Set to `TieringOffloadingSpec` for multi-tier, or `FSOffloadingSpec` for direct storage. |
 | `cpu_bytes_to_use` | yes | — | both | Total bytes of host memory reserved for the CPU tier across all workers (not per-worker). Not used by `FSOffloadingSpec`. |
-| `fs_bytes_to_use` | yes | — | direct storage | Byte budget that sizes the index of known files for `FSOffloadingSpec`. |
+| `fs_index_size` | no | `100000` | direct storage | Number of known file keys `FSOffloadingSpec` remembers in memory. |
 | `root_dir` | yes | — | direct storage | Directory holding the block files for `FSOffloadingSpec`. |
 | `fs_backend` | no | `gds` | direct storage | Worker backend for `FSOffloadingSpec`. Only `gds` is available. |
 | `read_only` | no | `true` | direct storage | If `true`, `FSOffloadingSpec` only loads existing files and never stores. |

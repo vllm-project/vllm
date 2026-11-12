@@ -127,7 +127,7 @@ class CPUOffloadingManager(OffloadingManager):
         self,
         keys: Iterable[OffloadKey],
         chunks: Iterable[ChunkStatus],
-    ) -> LoadStoreSpec:
+    ) -> CPULoadStoreSpec:
         return CPULoadStoreSpec([chunk.chunk_id for chunk in chunks])
 
     def _record_accesses(
