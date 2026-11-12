@@ -4081,6 +4081,46 @@ def test_hisparse_prefill_staging_plan_resolves_resident_sources():
     assert (plan.gpu_row_ids == -1).all()
 
 
+@pytest.mark.parametrize("device", ["cpu", "cuda"])
+def test_hisparse_prefill_resident_sources_bound_temporary_storage(device):
+    """Wide tables must not be copied once per staged history block."""
+    from torch.utils._python_dispatch import TorchDispatchMode
+    from torch.utils._pytree import tree_leaves
+
+    if device == "cuda" and not torch.cuda.is_available():
+        pytest.skip("requires CUDA")
+
+    class StorageSizes(TorchDispatchMode):
+        peak = 0
+
+        def __torch_dispatch__(self, func, types, args=(), kwargs=None):
+            result = func(*args, **(kwargs or {}))
+            for value in tree_leaves(result):
+                if isinstance(value, torch.Tensor):
+                    self.peak = max(self.peak, value.untyped_storage().nbytes())
+            return result
+
+    block_size = 4
+    block_table = torch.arange(1, 513, dtype=torch.int32, device=device).view(4, 128)
+    plan = build_hisparse_prefill_staging_plan(
+        block_table,
+        torch.full((4,), 128 * block_size, dtype=torch.int32, device=device),
+        block_size,
+        staging_block_capacity=512,
+    )
+    state_indices = torch.tensor([1, 3, 5, 7], dtype=torch.int32, device=device)
+    resident_table = torch.zeros((8, 4096), dtype=torch.int32, device=device)
+    resident_table[state_indices.long(), :128] = block_table + 1000
+    with StorageSizes() as sizes:
+        plan.ensure_gpu_sources(resident_table, state_indices, block_size)
+
+    expected = torch.where(
+        plan.row_ids >= block_size, plan.row_ids + 1000 * block_size, -1
+    )
+    torch.testing.assert_close(plan.gpu_row_ids, expected)
+    assert sizes.peak <= 2 * resident_table.nbytes
+
+
 def test_hisparse_prefill_resident_sources_follow_each_resident_group():
     """Layers of different resident groups share one batch staging plan.
 

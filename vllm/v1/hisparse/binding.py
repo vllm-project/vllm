@@ -14,6 +14,7 @@ from vllm.v1.hisparse.layout import (
     HISPARSE_HOT_SUFFIX,
     HISPARSE_RESIDENT_SUFFIX,
     get_hisparse_kv_cache_groups,
+    is_hisparse_spec,
 )
 from vllm.v1.hisparse.runtime import (
     HiSparseCacheHandle,
@@ -30,7 +31,6 @@ from vllm.v1.kv_cache_interface import (
     KVCacheLayout,
     KVCacheSpec,
     KVCacheTensor,
-    MLAAttentionSpec,
     UniformTypeKVCacheSpecs,
     create_kv_cache_views,
 )
@@ -51,7 +51,7 @@ def resolve_hisparse_specs(
     mla_specs = {
         name: spec
         for name, spec in kv_cache_spec.items()
-        if isinstance(spec, MLAAttentionSpec)
+        if is_hisparse_spec(vllm_config, spec, name)
     }
     if not mla_specs:
         return kv_cache_spec
@@ -71,7 +71,11 @@ def resolve_hisparse_specs(
         name: spec.copy_with_new_block_size(block_size)
         for name, spec in mla_specs.items()
     }
-    groups = get_hisparse_kv_cache_groups(vllm_config, kv_cache_spec)
+    # Worker-side derivation runs before the engine resolves the packed layout.
+    # Only the selected sources determine their resident and hot specs.
+    groups = get_hisparse_kv_cache_groups(
+        vllm_config, {name: kv_cache_spec[name] for name in mla_specs}
+    )
     assert groups is not None
     return kv_cache_spec | {
         layer_name: group.kv_cache_spec
@@ -196,6 +200,16 @@ def _tensor_placements(
     }
 
 
+def _source_specs(kv_cache_config: KVCacheConfig) -> dict[str, KVCacheSpec]:
+    """Each host-resident source layer's spec."""
+    source_specs: dict[str, KVCacheSpec] = {}
+    for group in kv_cache_config.kv_cache_groups:
+        if group.host_resident:
+            assert isinstance(group.kv_cache_spec, UniformTypeKVCacheSpecs)
+            source_specs.update(group.kv_cache_spec.kv_cache_specs)
+    return source_specs
+
+
 def bind_hisparse_kv_caches(
     *,
     forward_context: dict[str, Any],
@@ -212,6 +226,7 @@ def bind_hisparse_kv_caches(
         for group_id, group in enumerate(kv_cache_config.kv_cache_groups)
         if isinstance(group.kv_cache_spec, HiSparseResidentSpec)
     ]
+    source_specs = _source_specs(kv_cache_config)
     residency: torch.Tensor | None = None
     if resident_groups:
         table_shapes = {
@@ -233,12 +248,16 @@ def bind_hisparse_kv_caches(
             tensor_config, byte_offset = tensor_configs[cache_name]
             assert not tensor_config.host_resident
             cache_handle = _get_hisparse_cache(forward_context, layer_name)
+            tokens_per_state = source_specs[layer_name].tokens_per_state
+            if not isinstance(tokens_per_state, int) or tokens_per_state < 1:
+                raise ValueError("HiSparse requires an integer tokens_per_state")
+            cache_handle.runtime.tokens_per_state = tokens_per_state
             cache_handle.bind_cache(
                 kv_caches[cache_name],
                 byte_offset=byte_offset,
                 block_stride=tensor_config.block_stride,
                 num_blocks=kv_cache_config.num_blocks,
-                block_size=group.kv_cache_spec.block_size,
+                block_size=source_specs[layer_name].num_states,
                 block_table=residency[resident_source_index],
                 slot_mapping=block_tables.slot_mappings[group_id],
             )
@@ -270,7 +289,7 @@ def bind_hisparse_kv_caches(
                 byte_offset=byte_offset,
                 block_stride=tensor_config.block_stride,
                 num_blocks=kv_cache_config.num_blocks,
-                block_size=group.kv_cache_spec.block_size,
+                block_size=source_specs[layer_name].num_states,
                 block_table=block_tables.input_block_tables[group_id],
             )
             resident = cache_handle.view
@@ -322,6 +341,7 @@ def rebind_hisparse_device_caches(
     views and hot entries are dropped.
     """
     tensor_configs = _tensor_placements(kv_cache_config)
+    source_specs = _source_specs(kv_cache_config)
     for group in kv_cache_config.kv_cache_groups:
         spec = group.kv_cache_spec
         for cache_name in group.layer_names:
@@ -336,7 +356,7 @@ def rebind_hisparse_device_caches(
                     byte_offset=byte_offset,
                     block_stride=tensor_config.block_stride,
                     num_blocks=kv_cache_config.num_blocks,
-                    block_size=spec.block_size,
+                    block_size=source_specs[layer_name].num_states,
                     block_table=cache_handle.block_table,
                     slot_mapping=cache_handle.slot_mapping,
                 )
@@ -351,6 +371,6 @@ def rebind_hisparse_device_caches(
                     byte_offset=byte_offset,
                     block_stride=tensor_config.block_stride,
                     num_blocks=kv_cache_config.num_blocks,
-                    block_size=spec.block_size,
+                    block_size=source_specs[layer_name].num_states,
                     block_table=runtime.hot_block_table,
                 )

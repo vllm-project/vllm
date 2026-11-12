@@ -263,10 +263,10 @@ class HiSparseConnectorWorker:
             raise RuntimeError("HiSparse connector worker is already initialized.")
         resident = cache_handles[0].view
         assert resident is not None
-        self.kernel_block_size = resident.block_size
-        self._block_row_offsets = torch.arange(
-            self.kernel_block_size, dtype=torch.int32, device=device
+        self.kernel_block_size = (
+            resident.block_size * cache_handles[0].runtime.tokens_per_state
         )
+        self.row_value_bytes = cache_handles[0].runtime.row_value_bytes
         self.host_num_blocks = host_num_blocks
         self.pinned_host_pools = pinned_host_pools
         self.shared_host_region = shared_host_region
@@ -384,7 +384,6 @@ class HiSparseConnectorWorker:
             row_bytes = resident_cache.shape[-1] * resident_cache.element_size()
             if (
                 resident_cache.ndim != 3
-                or resident_cache.shape[1] != self.kernel_block_size
                 or resident_cache.stride(1) * resident_cache.element_size() != row_bytes
             ):
                 raise RuntimeError("HiSparse DMA requires contiguous resident rows.")
@@ -531,13 +530,12 @@ class HiSparseConnectorWorker:
         device = self.cache_handles[0].runtime.device
         staging = torch.tensor(block_ids, dtype=torch.int32, pin_memory=True)
         blocks = staging.to(device, dtype=torch.int32, non_blocking=True)
-        slots = (
-            blocks[:, None] * self.kernel_block_size + self._block_row_offsets
-        ).flatten()
-        sorted_slots = torch.sort(slots).values
         state_indices = request_state_indices.to(device=device, dtype=torch.long)
         for runtime in self.leader_runtimes:
-            runtime.invalidate_sorted_slots(sorted_slots, state_indices)
+            block_size = runtime.hot.block_size
+            offsets = torch.arange(block_size, dtype=torch.int32, device=device)
+            slots = (blocks[:, None] * block_size + offsets[None, :]).flatten()
+            runtime.invalidate_sorted_slots(torch.sort(slots).values, state_indices)
 
     def reset_hot_state(self) -> None:
         for runtime in self.leader_runtimes:
@@ -646,26 +644,39 @@ class HiSparseConnectorWorker:
             return
         mirrors = self._row_mirrors
         num_layers = len(layer_indices)
-        descriptor_count = len(mirrors) * num_layers
+        planes_per_row = 2 if self.row_value_bytes else 1
+        descriptor_stride = num_layers * planes_per_row
+        descriptor_count = len(mirrors) * descriptor_stride
         descriptors = self._acquire_dma_descriptors(descriptor_count)
-        destination_starts = self._row_mirror_destination_starts
-        row_counts = self._row_mirror_counts
-        for descriptor_offset, layer_index in enumerate(layer_indices):
+        raw_destination_starts = self._row_mirror_destination_starts
+        raw_row_counts = self._row_mirror_counts
+        descriptor_cursor = 0
+        for layer_index in layer_indices:
             cache = self.cache_handles[layer_index]
             source_index = cache.runtime.resident_source_index
             if source_index >= self._row_mirror_source_starts.shape[1]:
                 raise RuntimeError("HiSparse row DMA source index is out of range.")
-            source_rows = self._row_mirror_source_starts[:, source_index]
+            assert cache.view is not None
+            block_size = cache.view.block_size
+            ratio = cache.runtime.tokens_per_state
+            destination_starts = raw_destination_starts // ratio
+            row_counts = (
+                raw_destination_starts + raw_row_counts
+            ) // ratio - destination_starts
+            active = row_counts > 0
+            if not np.any(active):
+                continue
+            destination_starts = destination_starts[active]
+            row_counts = row_counts[active]
+            source_rows = self._row_mirror_source_starts[active, source_index] // ratio
             source = self.resident_caches[layer_index]
             destination = self.host_caches[layer_index]
             row_bytes = source.shape[-1] * source.element_size()
-            source_blocks, source_row_offsets = np.divmod(
-                source_rows, self.kernel_block_size
-            )
+            source_blocks, source_row_offsets = np.divmod(source_rows, block_size)
             source_out_of_range = (
                 np.any(source_blocks < 0)
                 or np.any(source_blocks >= source.shape[0])
-                or np.any(source_row_offsets + row_counts > self.kernel_block_size)
+                or np.any(source_row_offsets + row_counts > block_size)
             )
             if source_out_of_range:
                 raise RuntimeError("HiSparse row DMA source is out of range.")
@@ -673,20 +684,47 @@ class HiSparseConnectorWorker:
                 destination_starts + row_counts > destination.shape[0]
             ):
                 raise RuntimeError("HiSparse row DMA index is out of range.")
-            descriptor_slice = slice(descriptor_offset, descriptor_count, num_layers)
-            descriptors.src_np[descriptor_slice] = (
-                source.data_ptr()
-                + source_blocks * source.stride(0) * source.element_size()
-                + source_row_offsets * row_bytes
+            destination_pages, destination_offsets = np.divmod(
+                destination_starts, block_size
             )
-            descriptors.dst_np[descriptor_slice] = (
-                destination.data_ptr() + destination_starts * row_bytes
+            if np.any(destination_offsets + row_counts > block_size):
+                raise RuntimeError("HiSparse row mirror crosses a host page")
+            planes = (
+                (
+                    (0, self.row_value_bytes),
+                    (
+                        block_size * self.row_value_bytes,
+                        row_bytes - self.row_value_bytes,
+                    ),
+                )
+                if self.row_value_bytes
+                else ((0, row_bytes),)
             )
-            descriptors.sizes_np[descriptor_slice] = row_counts * row_bytes
+            for plane_index, (offset, width) in enumerate(planes):
+                descriptor_slice = slice(
+                    descriptor_cursor + plane_index,
+                    descriptor_cursor + len(row_counts) * planes_per_row,
+                    planes_per_row,
+                )
+                descriptors.src_np[descriptor_slice] = (
+                    source.data_ptr()
+                    + source_blocks * source.stride(0) * source.element_size()
+                    + offset
+                    + source_row_offsets * width
+                )
+                descriptors.dst_np[descriptor_slice] = (
+                    destination.data_ptr()
+                    + destination_pages * block_size * row_bytes
+                    + offset
+                    + destination_offsets * width
+                )
+                descriptors.sizes_np[descriptor_slice] = row_counts * width
+            descriptor_cursor += len(row_counts) * planes_per_row
 
-        self._submit_dma_descriptors(
-            descriptors, descriptor_count, ready_event=ready_event
-        )
+        if descriptor_cursor:
+            self._submit_dma_descriptors(
+                descriptors, descriptor_cursor, ready_event=ready_event
+            )
 
     def _enqueue_layer_mirror(self, layer_index: int) -> None:
         handle = self.cache_handles[layer_index]
@@ -751,8 +789,8 @@ class HiSparseConnectorWorker:
         num_layers = len(self.cache_handles)
         descriptor_count = len(transfers) * num_layers
         descriptors = self._acquire_dma_descriptors(descriptor_count)
-        host_rows = np.fromiter(
-            (transfer.host_block_id * self.kernel_block_size for transfer in transfers),
+        host_blocks = np.fromiter(
+            (transfer.host_block_id for transfer in transfers),
             dtype=np.int64,
             count=len(transfers),
         )
@@ -765,12 +803,14 @@ class HiSparseConnectorWorker:
             ]
             source = self.host_caches[layer_index]
             destination = self.resident_caches[layer_index]
+            block_size = destination.shape[1]
+            host_rows = host_blocks * block_size
             if np.any(resident_blocks < 0) or np.any(
                 resident_blocks >= destination.shape[0]
             ):
                 raise RuntimeError("HiSparse restore destination is out of range.")
             if np.any(host_rows < 0) or np.any(
-                host_rows + self.kernel_block_size > source.shape[0]
+                host_rows + block_size > source.shape[0]
             ):
                 raise RuntimeError("HiSparse restore source is out of range.")
             row_bytes = destination.shape[-1] * destination.element_size()
@@ -782,7 +822,7 @@ class HiSparseConnectorWorker:
                 destination.data_ptr()
                 + resident_blocks * destination.stride(0) * destination.element_size()
             )
-            descriptors.sizes_np[descriptor_slice] = self.kernel_block_size * row_bytes
+            descriptors.sizes_np[descriptor_slice] = block_size * row_bytes
         stream = torch.accelerator.current_stream()
         self.backend.swap_blocks_batch(
             descriptors.src[:descriptor_count],
@@ -806,8 +846,8 @@ class HiSparseConnectorWorker:
         num_layers = len(self.cache_handles)
         descriptor_count = len(transfers) * num_layers
         descriptors = self._acquire_dma_descriptors(descriptor_count)
-        destination_rows = np.fromiter(
-            (transfer.host_block_id * self.kernel_block_size for transfer in transfers),
+        destination_blocks = np.fromiter(
+            (transfer.host_block_id for transfer in transfers),
             dtype=np.int64,
             count=len(transfers),
         )
@@ -825,10 +865,12 @@ class HiSparseConnectorWorker:
             source_blocks = source_blocks_by_transfer[:, source_index]
             source = self.resident_caches[layer_index]
             destination = self.host_caches[layer_index]
+            block_size = source.shape[1]
+            destination_rows = destination_blocks * block_size
             if np.any(source_blocks < 0) or np.any(source_blocks >= source.shape[0]):
                 raise RuntimeError("HiSparse spill DMA source is out of range.")
             if np.any(destination_rows < 0) or np.any(
-                destination_rows + self.kernel_block_size > destination.shape[0]
+                destination_rows + block_size > destination.shape[0]
             ):
                 raise RuntimeError("HiSparse spill DMA destination is out of range.")
             row_bytes = source.shape[-1] * source.element_size()
@@ -840,7 +882,7 @@ class HiSparseConnectorWorker:
             descriptors.dst_np[descriptor_slice] = (
                 destination.data_ptr() + destination_rows * row_bytes
             )
-            descriptors.sizes_np[descriptor_slice] = self.kernel_block_size * row_bytes
+            descriptors.sizes_np[descriptor_slice] = block_size * row_bytes
         self._submit_dma_descriptors(
             descriptors,
             descriptor_count,
@@ -904,11 +946,23 @@ class HiSparseConnectorWorker:
                 self._enqueue_row_dma(pending_layers, ready_event=ready_event)
                 self._submitted_mirror_layers.update(pending_layers)
         assert cache.req_id_per_token is not None
-        self._invalidate_written_slots(
-            [handle.runtime for _, handle in active if handle.runtime.is_group_leader],
-            dst_slots[:num_rows],
-            cache.req_id_per_token[:num_rows],
-        )
+        leaders_by_ratio: dict[int, list[Any]] = {}
+        for _, handle in active:
+            if handle.runtime.is_group_leader:
+                leaders_by_ratio.setdefault(handle.runtime.tokens_per_state, []).append(
+                    handle.runtime
+                )
+        for ratio, leaders in leaders_by_ratio.items():
+            written_slots = dst_slots[:num_rows]
+            if ratio > 1:
+                written_slots = torch.where(
+                    (written_slots >= 0) & ((written_slots + 1) % ratio == 0),
+                    written_slots // ratio,
+                    -1,
+                )
+            self._invalidate_written_slots(
+                leaders, written_slots, cache.req_id_per_token[:num_rows]
+            )
 
     def _finish_mirror_phase(self, ready_event: torch.Event | None = None) -> None:
         state = self._slot_mapping_staging

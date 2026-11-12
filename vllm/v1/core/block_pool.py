@@ -1,6 +1,7 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 import weakref
+from collections import OrderedDict
 from collections.abc import Callable, Iterable, Sequence
 from typing import Any
 
@@ -171,6 +172,7 @@ class BlockPool:
         # Callbacks for blocks released with ``unpin_blocks`` whose contents
         # are still being read until the pool reuses them.
         self._reuse_watchers: dict[int, Callable[[KVCacheBlock], None]] = {}
+        self._readable_free_blocks: OrderedDict[int, KVCacheBlock] = OrderedDict()
 
     def get_cached_block(
         self, block_hash: BlockHash, kv_cache_group_ids: list[int]
@@ -695,6 +697,22 @@ class BlockPool:
 
         ret: list[KVCacheBlock] = self.free_block_queue.popleft_n(num_blocks)
 
+        if self._readable_free_blocks:
+            for block in ret:
+                self._readable_free_blocks.pop(block.block_id, None)
+            kept = []
+            for index, block in enumerate(ret):
+                if not self._readable_free_blocks:
+                    break
+                if block.block_hash is None or block.block_id in self._reuse_watchers:
+                    continue
+                # Keep GPU-only prefixes ahead of copies backed by another tier.
+                _, replacement = self._readable_free_blocks.popitem(last=False)
+                self.free_block_queue.remove(replacement)
+                ret[index] = replacement
+                kept.append(block)
+            self.free_block_queue.prepend_n(kept)
+
         if self._reuse_watchers:
             self._notify_reuse(ret)
 
@@ -723,6 +741,7 @@ class BlockPool:
 
     def _notify_reuse(self, blocks: Iterable[KVCacheBlock]) -> None:
         for block in blocks:
+            self._readable_free_blocks.pop(block.block_id, None)
             watcher = self._reuse_watchers.pop(block.block_id, None)
             if watcher is not None:
                 watcher(block)
@@ -734,8 +753,8 @@ class BlockPool:
     ) -> None:
         """Release references to blocks that stay readable until reused.
 
-        The blocks become last-resort eviction candidates regardless of prefix
-        caching: they join the tail of the free queue and count as free.
+        The blocks count as free but remain readable. Unused and uncached pages
+        are reused first, then these copies, then GPU-only prefix-cache pages.
         `on_reuse` fires when `get_new_blocks` hands a block out (or the
         cache is reset), so the caller can stop reading it.
         """
@@ -746,6 +765,8 @@ class BlockPool:
             self._reuse_watchers[block.block_id] = on_reuse
             if block.ref_cnt == 0:
                 released.append(block)
+                if self.enable_caching:
+                    self._readable_free_blocks[block.block_id] = block
         self.free_block_queue.append_n(released)
 
     def _maybe_evict_cached_block(self, block: KVCacheBlock) -> bool:
@@ -787,6 +808,7 @@ class BlockPool:
             # candidate), so remove it.
             if block.ref_cnt == 0:
                 self.free_block_queue.remove(block)
+                self._readable_free_blocks.pop(block.block_id, None)
             block.ref_cnt += 1
             if self.metrics_collector:
                 self.metrics_collector.on_block_accessed(block)
@@ -823,7 +845,10 @@ class BlockPool:
                 continue
             block.ref_cnt -= 1
             if block.ref_cnt == 0:
-                if block.block_hash is None or not self.enable_caching or evict_first:
+                if self.enable_caching and block.block_id in self._reuse_watchers:
+                    self._readable_free_blocks[block.block_id] = block
+                    blocks_to_evict_last.append(block)
+                elif block.block_hash is None or not self.enable_caching or evict_first:
                     # LIFO reuse of non-cached blocks for better GPU locality,
                     # and of cached ones when asked to evict them first.
                     blocks_to_evict_first.append(block)

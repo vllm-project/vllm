@@ -496,6 +496,8 @@ class HiSparseHotSpec(KVCacheSpec):
 
     page_size: int
     blocks_per_request: int
+    supports_strided_attention: bool = False
+    """Whether attention consumes padded page strides without flattening rows."""
 
     @property
     def prefix_cacheable(self) -> bool:
@@ -506,7 +508,10 @@ class HiSparseHotSpec(KVCacheSpec):
         return self.page_size
 
     def get_block_stride_alignment(self) -> int:
-        return math.lcm(self.page_size, super().get_block_stride_alignment())
+        alignment = super().get_block_stride_alignment()
+        if self.supports_strided_attention:
+            return alignment
+        return math.lcm(self.page_size, alignment)
 
     @property
     def block_table_token_alignment(self) -> int | None:
