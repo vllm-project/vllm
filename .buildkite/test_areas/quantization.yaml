@@ -6,7 +6,9 @@ steps:
   device: h200_35gb
   key: quantization
   automatic_shard: true
-  timeout_in_minutes: 40
+  # Re-enabled with no timings on main, so the runtime sharder keeps it in one
+  # job (about 100 min) until main has timed it; then it splits under 20 min.
+  timeout_in_minutes: 120
   source_file_dependencies:
   - csrc/
   - vllm/model_executor/layers/quantization
