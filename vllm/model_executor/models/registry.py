@@ -152,6 +152,7 @@ _TEXT_GENERATION_MODELS = {
     "Lfm2MoeForCausalLM": ("lfm2_moe", "Lfm2MoeForCausalLM"),
     "Lfm3ForCausalLM": ("lfm3", "Lfm3ForCausalLM"),
     "LagunaForCausalLM": ("laguna", "LagunaForCausalLM"),
+    "LaraMiniForCausalLM": ("lara_mini", "LaraMiniForCausalLM"),
     "LlamaForCausalLM": ("llama", "LlamaForCausalLM"),
     "Llama4ForCausalLM": ("llama4", "Llama4ForCausalLM"),
     # For decapoda-research/llama-*
