@@ -22,7 +22,7 @@ class MockCohereTokenizer:
 
     Text round-trips through UTF-8 bytes so a multi-byte character can split
     across "tokens" (reproducing trailing U+FFFD buffering), while each
-    ``<|...|>`` marker is a single id so token-id reasoning-end gating behaves
+    `<|...|>` marker is a single id so token-id reasoning-end gating behaves
     as with the real tokenizer.
     """
 
@@ -74,8 +74,8 @@ class MockCohereTokenizer:
 def token_deltas(
     tokenizer: MockCohereTokenizer, text: str, chunk_size: int = 1
 ) -> list[tuple[str, list[int]]]:
-    """Split ``text`` into ``(delta_text, delta_token_ids)`` steps of
-    ``chunk_size`` tokens, buffering incomplete multi-byte sequences (trailing
+    """Split `text` into `(delta_text, delta_token_ids)` steps of
+    `chunk_size` tokens, buffering incomplete multi-byte sequences (trailing
     U+FFFD) into the next step as real streaming does."""
     ids = tokenizer.encode(text)
     deltas: list[tuple[str, list[int]]] = []
@@ -99,8 +99,8 @@ def make_parser(
     chat_template_kwargs: dict | None = None,
     model_config=None,
 ) -> Parser:
-    """Resolve the unified Cohere parser through ``ParserManager`` by registry
-    name (``cohere_command3`` / ``cohere_command4``)."""
+    """Resolve the unified Cohere parser through `ParserManager` by registry
+    name (`cohere_command3` / `cohere_command4`)."""
     cls = ParserManager.get_parser(name, name, enable_auto_tools=True)
     assert cls is not None
     return cls(
@@ -116,8 +116,8 @@ def drive_parser(
     request: ChatCompletionRequest,
     deltas: list[tuple[str, list[int]]],
 ) -> list[DeltaMessage]:
-    """Feed ``deltas`` through ``parse_delta`` (flushing on the last one) and
-    return the non-``None`` messages in order."""
+    """Feed `deltas` through `parse_delta` (flushing on the last one) and
+    return the non-`None` messages in order."""
     out: list[DeltaMessage] = []
     for i, (text, ids) in enumerate(deltas):
         delta = parser.parse_delta(text, ids, request, finished=i == len(deltas) - 1)
@@ -127,5 +127,5 @@ def drive_parser(
 
 
 def stream_parser(parser, request, tokenizer, text: str, chunk_size: int = 1):
-    """Stream ``text`` through ``parser`` in ``chunk_size``-token deltas."""
+    """Stream `text` through `parser` in `chunk_size`-token deltas."""
     return drive_parser(parser, request, token_deltas(tokenizer, text, chunk_size))
