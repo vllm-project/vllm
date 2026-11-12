@@ -383,6 +383,14 @@ steps:
   - vllm/v1/worker/gpu/spec_decode/dspark/
   - vllm/v1/worker/gpu/spec_decode/rejection_sampler.py
   - vllm/v1/worker/gpu/spec_decode/speculator.py
+  # STAGING ONLY, do not merge: persistent compile-cache pilot namespace.
+  # Step-level env keeps the command identical to main so the shard planner's
+  # exact timing-label match still applies. The AMD mirror overrides all three
+  # below, so no /raid path reaches it.
+  env:
+    VLLM_CACHE_ROOT: /raid/spec-decode-cache-pilot-2026-11-12/vllm
+    TRITON_CACHE_DIR: /raid/spec-decode-cache-pilot-2026-11-12/triton
+    FLASHINFER_WORKSPACE_BASE: /raid/spec-decode-cache-pilot-2026-11-12/flashinfer
   commands:
   - PYTHONPATH=/vllm-workspace pytest -s -v evals/gsm8k/test_gsm8k_correctness.py --config-list-file=configs/models-spec-decode.txt
   mirror:
@@ -392,6 +400,14 @@ steps:
       dind: false
       device: mi355_4
       timeout_in_minutes: 145
+      env:
+        # STAGING ONLY: keep the base step's /raid cache paths off this job.
+        # run-amd-test.sh re-pins VLLM_CACHE_ROOT/TRITON_CACHE_DIR to job-local
+        # /tmp dirs before any command runs, so those two values are inert;
+        # /root is flashinfer's default workspace base (jit/env.py: HOME).
+        VLLM_CACHE_ROOT: /root/.cache/vllm
+        TRITON_CACHE_DIR: /root/.triton/cache
+        FLASHINFER_WORKSPACE_BASE: /root
       depends_on:
       - image-build-amd
       source_file_dependencies:
