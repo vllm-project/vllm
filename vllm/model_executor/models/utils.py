@@ -825,6 +825,9 @@ def _merge_multimodal_embeddings(
 
 
 class StageMissingLayer(nn.Module):
+    # Omitted layers have no loaded weights for a quantization method to process.
+    quant_method = None
+
     def __init__(self, stage_name: str, module: nn.Module | None = None) -> None:
         super().__init__()
 
@@ -840,6 +843,9 @@ class StageMissingLayer(nn.Module):
     def tie_weights(self, embed_tokens: nn.Module) -> "StageMissingLayer":
         """Omitted layers do not need to share embedding weights."""
         return self
+
+    def process_weights_after_loading(self) -> None:
+        """Omitted layers have no loaded weights to process."""
 
     def __call__(self, *args, **kwargs):
         raise RuntimeError(f"{self} should not be called")
@@ -928,9 +934,10 @@ def _meta_tensors(module: nn.Module) -> dict[str, torch.Tensor]:
         )
         if tensor.is_meta
     }
-    for name, value in vars(module).items():
-        if isinstance(value, torch.Tensor) and value.is_meta:
-            tensors[name] = value
+    for prefix, submodule in module.named_modules():
+        for name, value in vars(submodule).items():
+            if isinstance(value, torch.Tensor) and value.is_meta:
+                tensors[f"{prefix}.{name}" if prefix else name] = value
     return tensors
 
 

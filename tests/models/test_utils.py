@@ -9,10 +9,12 @@ import regex as re
 import torch
 
 from vllm.config import get_current_vllm_config
+from vllm.model_executor.layers.quantization.base_config import QuantizeMethodBase
 from vllm.model_executor.layers.vocab_parallel_embedding import (
     ParallelLMHead,
     VocabParallelEmbedding,
 )
+from vllm.model_executor.model_loader.utils import process_weights_after_loading
 from vllm.model_executor.models.utils import (
     AutoWeightsLoader,
     StageMissingLayer,
@@ -219,26 +221,96 @@ def test_pp_stage_rejects_layers_in_forward_context():
 
 
 @pytest.mark.cpu_test
-def test_pp_stage_rejects_modules_assigned_elsewhere():
+@pytest.mark.parametrize(
+    "assign",
+    [
+        lambda child: setattr(child, "linear", torch.nn.Linear(2, 2)),
+        lambda child: setattr(child, "cache", torch.empty(2)),
+    ],
+    ids=["module", "tensor"],
+)
+def test_pp_stage_rejects_modules_assigned_elsewhere(assign):
     """Only direct children become placeholders; others would stay on meta."""
     mod = torch.nn.Module()
     mod.child = torch.nn.Module()
     with pytest.raises(ValueError, match="meta device"), pp_stage(mod, keep=False):
-        mod.child.linear = torch.nn.Linear(2, 2)
+        assign(mod.child)
+
+
+class RecordingQuantMethod(QuantizeMethodBase):
+    """Records that the quantization method's post-loading ran."""
+
+    def __init__(self, calls: list[str]):
+        self.calls = calls
+
+    def create_weights(self, layer, *weight_args, **extra_weight_attrs):
+        pass
+
+    def apply(self, layer, *args, **kwargs):
+        raise NotImplementedError
+
+    def process_weights_after_loading(self, layer):
+        self.calls.append("quant_method")
+
+
+class PostLoadHookModule(torch.nn.Module):
+    """Records that the module's own post-loading hook ran."""
+
+    def __init__(self, calls: list[str]):
+        super().__init__()
+        self.calls = calls
+
+    def process_weights_after_loading(self) -> None:
+        self.calls.append("module_hook")
+
+
+@pytest.mark.cpu_test
+@pytest.mark.parametrize("keep", [True, False])
+def test_pp_stage_skipped_modules_are_not_post_processed(keep: bool):
+    """Skipped modules keep their weights on meta, so post-loading skips them."""
+    calls: list[str] = []
+    head = torch.nn.Linear(2, 2)
+    head.quant_method = RecordingQuantMethod(calls)
+    mod = torch.nn.Module()
+    with pp_stage(mod, keep=keep):
+        mod.head = head
+        mod.hooked = PostLoadHookModule(calls)
+
+    model_config = SimpleNamespace(
+        word_embeddings_untied_by_checkpoint=False, quantization=None
+    )
+    process_weights_after_loading(mod, model_config, torch.device("cpu"))
+
+    assert calls == (["quant_method", "module_hook"] if keep else [])
 
 
 @pytest.mark.cpu_test
 @pytest.mark.parametrize(
-    ("rank", "tied", "kept"),
-    [(0, False, True), (1, True, False), (2, False, False), (2, True, True)],
+    ("rank", "tied", "drafter", "kept"),
+    [
+        (0, False, False, True),
+        (1, True, False, False),
+        (2, False, False, False),
+        (2, True, False, True),
+        (1, False, True, False),
+        (2, False, True, True),
+    ],
 )
 def test_pp_input_embedding_kept_where_used(
-    monkeypatch: pytest.MonkeyPatch, rank: int, tied: bool, kept: bool
+    monkeypatch: pytest.MonkeyPatch, rank: int, tied: bool, drafter: bool, kept: bool
 ):
-    """The first stage embeds tokens; the last one keeps it as tied lm_head."""
+    """The first stage embeds tokens; the last one keeps it as tied lm_head or
+    for a drafter that reuses it."""
     set_pp_rank(monkeypatch, rank, world_size=3)
+    speculative_config = SimpleNamespace(
+        uses_target_hidden_states=True,
+        draft_model_config=SimpleNamespace(may_use_target_embed=True),
+    )
+    vllm_config = SimpleNamespace(
+        speculative_config=speculative_config if drafter else None
+    )
     mod = torch.nn.Module()
-    with pp_input_embedding(mod, PP_CONFIG, tied=tied):
+    with pp_input_embedding(mod, vllm_config, tied=tied):
         mod.embed_tokens = torch.nn.Embedding(VOCAB_SIZE, HIDDEN_SIZE)
 
     assert isinstance(mod.embed_tokens, StageMissingLayer) != kept
