@@ -878,7 +878,7 @@ class TestFlashInferTopkToppRobustness:
     single poisoned request (NaN / +Inf / -Inf in row 0) must not:
 
     1. crash or hang the process;
-    2. produce out-of-range token ids (anything outside ``[0, vocab)``);
+    2. produce out-of-range token ids (anything outside `[0, vocab)`);
     3. corrupt other batch rows — neighbours of a poisoned row must
        still receive valid token ids (regression for cross-row
        corruption in a DP batch where one bad request would otherwise
@@ -971,7 +971,7 @@ class TestFlashInferTopkToppRobustness:
     def test_flashinfer_handles_pathological_logits(self, pattern: str, path: str):
         """flashinfer_sample must return valid ids even on poisoned logits.
 
-        Direct call into ``flashinfer_sample`` — exactly the code path the
+        Direct call into `flashinfer_sample` — exactly the code path the
         sampler takes when FI is enabled.
         """
         from vllm.v1.sample.ops.topk_topp_sampler import flashinfer_sample

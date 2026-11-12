@@ -3,7 +3,7 @@
 """FP4 codepoint + UE8M0 scale constants for the UltraQuant KV cache.
 
 K/V codes are FP4 E2M1. Per-group scales are UE8M0 (one byte, a power of
-two): ``s = 2^round(log2(c · absmax))`` with ``c = 0.156``. Decode
+two): `s = 2^round(log2(c · absmax))` with `c = 0.156`. Decode
 consumes Q as FP8 E4M3 so scaled F8F6F4 MFMA can run natively on CDNA4.
 
 AoS slot layout (group_size=32), per (token, head):
@@ -102,7 +102,7 @@ FP4_MAX: float = 6.0
 """Largest representable FP4 magnitude."""
 
 DEFAULT_CONSTANT_C: float = 0.156
-"""MSE-optimal scale constant; ``s_raw = c * absmax``, then UE8M0-snapped."""
+"""MSE-optimal scale constant; `s_raw = c * absmax`, then UE8M0-snapped."""
 
 
 def get_constant_c() -> float:

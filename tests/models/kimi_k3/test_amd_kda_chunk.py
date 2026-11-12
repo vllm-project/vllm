@@ -135,7 +135,7 @@ def test_gluon_chunk_matches_triton(seqlens: list[int]) -> None:
 
 @pytest.mark.parametrize("use_fused", [False, True])
 def test_out_argument_receives_the_result(use_fused: bool) -> None:
-    """``out`` is a promise about where the result lands.
+    """`out` is a promise about where the result lands.
 
     The layer passes a slice of its own output buffer so neither path has to
     copy afterwards, and it then skips the copy based on the returned tensor
@@ -203,13 +203,13 @@ def test_fused_chunk_survives_correlated_keys_and_real_gate_bias() -> None:
     Three properties of real traffic combine here and in none of the tests
     above, all measured from tensors captured off a live TP8 server:
 
-    * repetitive text gives near-duplicate L2-normalized keys, so ``k_i . k_j``
+    * repetitive text gives near-duplicate L2-normalized keys, so `k_i . k_j`
       approaches 1 and the Neumann terms stop shrinking;
-    * the checkpoint's ``dt_bias`` lies in ``[-7.8, -1.4]``, which makes the
+    * the checkpoint's `dt_bias` lies in `[-7.8, -1.4]`, which makes the
       within-chunk gate cumsum span ~300 powers of two;
-    * ``beta`` saturates near 0.95.
+    * `beta` saturates near 0.95.
 
-    ``_inputs`` draws all three from ``randn``, landing in the benign regime.
+    `_inputs` draws all three from `randn`, landing in the benign regime.
     """
     _requires_kernel()
 
@@ -263,11 +263,11 @@ def test_fused_conv_matches_reference_conv(seqlens: list[int], has_state: bool) 
     """The prologue's optional fused convolution must match a separate conv.
 
     The layer does not use this path -- recomputing the conv once per load
-    phase costs more than the ``causal_conv1d_fn`` launches it saves -- so it
+    phase costs more than the `causal_conv1d_fn` launches it saves -- so it
     is driven through the ops directly rather than through
-    ``chunk_kda_prefill``, which does not expose it.
+    `chunk_kda_prefill`, which does not expose it.
 
-    The reference is computed in torch rather than with ``causal_conv1d_fn``,
+    The reference is computed in torch rather than with `causal_conv1d_fn`,
     which is not self-consistent for these shapes on ROCm (it leaves part of
     its output unwritten, so repeated identical calls disagree).
 
@@ -398,7 +398,7 @@ def test_chunk_group_scan_matches_serial_walk(
     Two bugs lived here, both invisible while the path was gated to >= 128
     chunks per sequence:
 
-    * a group with no chunks returned before writing its ``B_g``, so the scan
+    * a group with no chunks returned before writing its `B_g`, so the scan
       folded whatever the workspace last held into the final state — these
       shapes have fewer chunks than groups, so most groups are empty;
     * the second pass started every group after the first from a zero state
@@ -423,8 +423,8 @@ def test_accepts_chunk_metadata_from_the_attention_builder(
 ) -> None:
     """The layer passes precomputed chunk metadata, not None.
 
-    ``KimiK3ROCmKDAMetadataBuilder`` builds these on device to avoid a blocking
-    device->host copy. Passing ``None`` instead takes a different path that
+    `KimiK3ROCmKDAMetadataBuilder` builds these on device to avoid a blocking
+    device->host copy. Passing `None` instead takes a different path that
     builds them locally, so drive the op with the builder's own tensors.
     """
     _requires_kernel()
@@ -458,7 +458,7 @@ def _checkpoint_buffer(rows: int, dtype: torch.dtype = torch.float32) -> torch.T
 
 
 def _prefix_inputs(inp: dict, seq: int, num_tokens: int) -> dict:
-    """Sequence ``seq`` truncated to its first ``num_tokens`` tokens."""
+    """Sequence `seq` truncated to its first `num_tokens` tokens."""
     bos = int(inp["cu"][seq])
     tokens = slice(bos, bos + num_tokens)
     prefix = dict(inp)
@@ -538,7 +538,7 @@ def test_checkpoint_leaves_the_output_and_final_state_alone() -> None:
 
 
 def _slice_inputs(inp: dict, start: int, end: int, h0: torch.Tensor) -> dict:
-    """Tokens ``[start, end)`` of a one-sequence fixture, resumed from ``h0``."""
+    """Tokens `[start, end)` of a one-sequence fixture, resumed from `h0`."""
     part = dict(inp)
     for key in ("q", "k", "v", "raw_g", "raw_beta"):
         part[key] = inp[key][:, start:end].contiguous()
@@ -585,7 +585,7 @@ def test_unusable_checkpoint_offsets_write_nothing(
     """Offsets the walk never reaches must leave the destination untouched.
 
     The recurrent state only exists at chunk boundaries, so an offset that is
-    not a multiple of ``KDA_CHECKPOINT_ALIGNMENT`` -- or that lies past the end
+    not a multiple of `KDA_CHECKPOINT_ALIGNMENT` -- or that lies past the end
     of the sequence -- cannot be honoured. Rounding it to a nearby boundary
     would hand the scheduler a state for the wrong token count, so the kernel
     stores nothing and leaves the caller to filter these out before the block
@@ -979,7 +979,7 @@ def test_padded_cache_stride_is_honoured(use_fused: bool, dtype: torch.dtype) ->
     """A mamba page may pad stride(0); only each state row is dense.
 
     The real `recurrent_state` is not a contiguous tensor, so a kernel that
-    assumes a packed ``H * V * K`` row stride addresses the wrong rows. The
+    assumes a packed `H * V * K` row stride addresses the wrong rows. The
     other cases in this file all build a contiguous cache, which cannot
     exercise that.
     """
@@ -1026,7 +1026,7 @@ def test_padded_checkpoint_stride_is_honoured(dtype: torch.dtype) -> None:
     """The checkpoint destination is the paged cache, which pads stride(0).
 
     Every other checkpoint case here builds a contiguous buffer, so none of
-    them would catch a kernel that assumes a packed ``H * V * K`` row stride
+    them would catch a kernel that assumes a packed `H * V * K` row stride
     and writes the snapshot into a neighbouring block.
     """
     _requires_kernel()

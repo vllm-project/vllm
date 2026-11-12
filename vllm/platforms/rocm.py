@@ -17,6 +17,7 @@ import vllm.envs as envs
 from vllm.logger import init_logger
 from vllm.v1.attention.backends.registry import AttentionBackendEnum
 
+from . import rocm_device_memory
 from .interface import DeviceCapability, Platform, PlatformEnum, in_wsl
 
 if TYPE_CHECKING:
@@ -696,6 +697,7 @@ class RocmPlatform(Platform):
         "fp8_per_block",
         "fp8_per_channel",
         "mxfp4_hadamard32",
+        "lut_b_moe",
         "online",
         "gpt_oss_mxfp4",
     ]
@@ -1277,6 +1279,11 @@ class RocmPlatform(Platform):
         torch.cuda.empty_cache()
         torch.cuda.reset_peak_memory_stats(device)
         return torch.cuda.max_memory_allocated(device)
+
+    @classmethod
+    def free_device_memory(cls, device: torch.device | None = None) -> int:
+        free = rocm_device_memory.exact_free_memory(device)
+        return super().free_device_memory(device) if free is None else free
 
     @classmethod
     def get_device_communicator_cls(cls) -> str:

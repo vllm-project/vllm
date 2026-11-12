@@ -1,6 +1,6 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
-"""DeepSeek V4 parser: ``<think>``/``</think>``
+"""DeepSeek V4 parser: `<think>`/`</think>`
 reasoning plus DSML tool calls in a single state machine.
 
 DeepSeek V4 output format::
@@ -63,10 +63,10 @@ def _param_patterns(
 ) -> tuple[re.Pattern, re.Pattern]:
     """Complete and trailing-partial parameter regexes for one DSML dialect.
 
-    The ``string`` attribute is optional: the model sometimes omits it, and
+    The `string` attribute is optional: the model sometimes omits it, and
     dropping such a parameter hands the client a tool call with no arguments.
     The trailing-partial regex captures the open value up to the end of the
-    text; ``_match_open_param`` holds back an unfinished next parameter tag
+    text; `_match_open_param` holds back an unfinished next parameter tag
     so a streamed string value never includes it.
     """
     start, close = re.escape(param_start), re.escape(param_close)
@@ -85,8 +85,8 @@ def _match_open_param(
 ) -> tuple[str, str | None, str, bool] | None:
     """Return (name, is_str, value, held_back) for the trailing open param.
 
-    An unfinished next parameter tag (``param_start`` with no ``>`` after it)
-    is cut from the value; ``held_back`` reports whether that happened.
+    An unfinished next parameter tag (`param_start` with no `>` after it)
+    is cut from the value; `held_back` reports whether that happened.
     """
     pm = partial_param_re.search(raw_args, pos)
     if pm is None:

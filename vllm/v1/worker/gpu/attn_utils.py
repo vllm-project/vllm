@@ -1,5 +1,6 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
+
 from collections.abc import Callable, Iterable, Mapping, Sequence
 from contextlib import AbstractContextManager, nullcontext
 from dataclasses import dataclass, replace
@@ -64,9 +65,9 @@ class AttentionCGSupportInfo:
     def narrow(
         self, support: AttentionCGSupport, backend: str | None
     ) -> "AttentionCGSupportInfo":
-        """Return an info tightened by ``support`` if it is more restrictive.
+        """Return an info tightened by `support` if it is more restrictive.
 
-        Lets attention groups built outside ``init_attn_backend`` (e.g.
+        Lets attention groups built outside `init_attn_backend` (e.g.
         encoder-only layers) contribute to the runner's cudagraph decision.
         """
         if support.value < self.min_cg_support.value:

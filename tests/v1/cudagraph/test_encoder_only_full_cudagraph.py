@@ -15,7 +15,7 @@ LLAMA = "hmellor/tiny-random-LlamaForCausalLM"
 
 def _tiny_config(arch: str):
     """Two-layer random configs for architectures that enable encoder-only
-    attention through ``is_causal=False`` (head sizes >= 32 so the default
+    attention through `is_causal=False` (head sizes >= 32 so the default
     FP32 backend is used)."""
     from transformers import DeepseekV2Config, Gemma3TextConfig, Qwen3Config
 
