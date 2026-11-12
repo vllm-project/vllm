@@ -8,6 +8,7 @@ writes KV past the token range the target model was scheduled for. The warmup
 hand-builds its `SchedulerOutput`s, so it has to reserve the same blocks.
 """
 
+import contextlib
 from types import SimpleNamespace
 
 import pytest
@@ -660,7 +661,7 @@ def test_sizing_warmup_waits_for_each_step(monkeypatch):
     ],
 )
 def test_sizing_warmup_fills_token_budget_beyond_max_model_len(
-    max_num_reqs, committable_blocks, expected_prefill_lens
+    monkeypatch, max_num_reqs, committable_blocks, expected_prefill_lens
 ):
     """max_num_batched_tokens can exceed max_model_len, so the scheduler can
     pack several prompts into one step. The sizing step must reach that
@@ -672,6 +673,9 @@ def test_sizing_warmup_fills_token_budget_beyond_max_model_len(
     runner.max_num_reqs = max_num_reqs
     if committable_blocks is not None:
         runner.extensible_kv_cache = _StubExtensibleCache(committable_blocks)
+        monkeypatch.setattr(
+            warmup, "_measure_sizing_step", lambda runner: contextlib.nullcontext()
+        )
     outputs: list[SchedulerOutput] = []
 
     warmup.run_kv_cache_sizing_warmup(

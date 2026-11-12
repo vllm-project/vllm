@@ -1,8 +1,9 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 
-from collections.abc import Callable
-from contextlib import AbstractContextManager, nullcontext
+import gc
+from collections.abc import Callable, Iterator
+from contextlib import AbstractContextManager, contextmanager, nullcontext
 from typing import Any
 
 import numpy as np
@@ -414,6 +415,36 @@ def run_context_prefill_warmup(
     return True
 
 
+@contextmanager
+def _measure_sizing_step(model_runner: GPUModelRunner) -> Iterator[None]:
+    """Record how far a sizing step grows torch's reservation from an emptied
+    cache, as serving starts once the cache is sized. Unlike the allocated
+    peak, this includes fragmentation, e.g. a large per-layer workspace that
+    no longer fits the segments freed around it. Allocations the step keeps
+    are not counted."""
+    kv_cache = model_runner.extensible_kv_cache
+    if kv_cache is None:
+        yield
+        return
+    device = model_runner.device
+    kv_cache.record_transient_peak()
+    gc.collect()
+    torch.accelerator.empty_cache()
+    torch.accelerator.reset_peak_memory_stats(device)
+    stats = torch.accelerator.memory_stats(device)
+    reserved_before = stats.get("reserved_bytes.all.current", 0)
+    allocated_before = stats.get("allocated_bytes.all.current", 0)
+    yield
+    stats = kv_cache.record_transient_peak()
+    left_allocated = max(
+        stats.get("allocated_bytes.all.current", 0) - allocated_before, 0
+    )
+    kv_cache.torch_reserve_growth_bytes = max(
+        kv_cache.torch_reserve_growth_bytes,
+        stats.get("reserved_bytes.all.peak", 0) - reserved_before - left_allocated,
+    )
+
+
 @torch.inference_mode()
 def run_kv_cache_sizing_warmup(
     model_runner: GPUModelRunner,
@@ -447,6 +478,7 @@ def run_kv_cache_sizing_warmup(
             max_prompt_len,
             prompt_logprobs=prompt_logprobs,
             prefill_only_fallback=True,
+            mixed_step_context=_measure_sizing_step(model_runner),
         )
         prompt_logprobs = None
     run_mixed_prefill_decode_warmup(
@@ -456,6 +488,7 @@ def run_kv_cache_sizing_warmup(
         max_num_tokens,
         prompt_logprobs=prompt_logprobs,
         prefill_only_fallback=True,
+        mixed_step_context=_measure_sizing_step(model_runner),
     )
     if model_runner.model_config.use_mla:
         from vllm.model_executor.layers.attention.mla_attention import (
@@ -469,9 +502,10 @@ def run_kv_cache_sizing_warmup(
                 model_runner.vllm_config
             )
         )
-        run_context_prefill_warmup(
-            model_runner, worker_execute_model, worker_sample_tokens, workspace_size
-        )
+        with _measure_sizing_step(model_runner):
+            run_context_prefill_warmup(
+                model_runner, worker_execute_model, worker_sample_tokens, workspace_size
+            )
 
 
 @torch.inference_mode()

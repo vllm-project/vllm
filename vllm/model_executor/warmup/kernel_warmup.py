@@ -73,16 +73,11 @@ def _outside_kv_cache_transient_window(worker: "Worker") -> Iterator[None]:
     before tuning, then restart peak tracking afterwards; the warmup steps that
     follow run with the tuned tactics and measure their own transients.
     """
-    cache_config = getattr(worker, "cache_config", None)
-    if not getattr(cache_config, "enable_extensible_kv_cache", False):
+    kv_cache = worker.model_runner.extensible_kv_cache
+    if kv_cache is None:
         yield
         return
-    stats = torch.accelerator.memory_stats(worker.device)
-    worker.kv_cache_transient_bytes_before_tuning = max(
-        getattr(worker, "kv_cache_transient_bytes_before_tuning", 0),
-        stats.get("allocated_bytes.all.peak", 0)
-        - stats.get("allocated_bytes.all.current", 0),
-    )
+    kv_cache.record_transient_peak()
     try:
         yield
     finally:

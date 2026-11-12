@@ -239,7 +239,6 @@ class Worker(WorkerBase):
             is_driver_worker=is_driver_worker,
         )
         self._external_weight_charges = ExternalWeightCharges()
-        self.kv_cache_transient_bytes_before_tuning = 0
 
         # configure float32 matmul precision according to vLLM env.
         precision = envs.VLLM_FLOAT32_MATMUL_PRECISION
@@ -1104,15 +1103,7 @@ class Worker(WorkerBase):
             # hide part of the peak from a later peak - current.
             kv_cache = self.model_runner.extensible_kv_cache
             assert kv_cache is not None
-            stats = torch.accelerator.memory_stats(self.device)
-            kv_cache.reserved_headroom_bytes = max(
-                kv_cache.reserved_headroom_bytes,
-                # kernel_warmup keeps FlashInfer autotuning out of this
-                # peak window; include what the steps before it reached.
-                getattr(self, "kv_cache_transient_bytes_before_tuning", 0),
-                stats.get("allocated_bytes.all.peak", 0)
-                - stats.get("allocated_bytes.all.current", 0),
-            )
+            kv_cache.record_transient_peak()
             if not self.model_config.enforce_eager:
                 # Warmup's blocks hold garbage and capture addresses only the
                 # null block: release them so the graphs fit (encoder graphs
