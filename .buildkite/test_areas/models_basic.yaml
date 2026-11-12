@@ -294,6 +294,7 @@ steps:
   mirror:
     amd:
       label: ":amd: (MI355) Kimi K3 Prefix Cache"
+      automatic_shard: true
       dind: false
       device: mi355_4
       timeout_in_minutes: 60
@@ -430,6 +431,7 @@ steps:
   mirror:
     amd:
       label: ":amd: (MI355) Qwen4 Exp HC Kernels"
+      automatic_shard: true
       dind: false
       device: mi355_1
       depends_on:
@@ -592,6 +594,7 @@ steps:
 
 - label: ":nvidia: (4xB200) GLM-5.3-Flash Specialized Decode"
   key: glm5next-nvidia-specialized-decode-4xb200
+  automatic_shard: true
   # Nightly only: 4-GPU B200 pods wait hours behind smaller jobs on per-PR runs.
   optional: true
   timeout_in_minutes: 40
