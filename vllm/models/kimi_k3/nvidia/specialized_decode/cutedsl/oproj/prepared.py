@@ -54,8 +54,10 @@ class OprojMailbox:
 
 # Two-shot all-reduce batches per TP (2-/4-node GB300, 32 MLA layers, us/layer, max over
 # ranks, multicast vs two-shot: TP8 B16 8.85/11.40, B32 10.63/11.32, B64 18.06/13.18;
-# TP16 B16 9.78/12.28, B32 14.96/13.05, B64 28.06/14.07).
-TWOSHOT = {8: "33-64:1", 16: "17-64:1"}
+# TP16 B16 9.78/12.28, B32 14.96/13.05, B64 28.06/14.07). TP8 keeps multicast up to 40
+# rows (eight requests at k = 4): decode-step A/B at 131K context, per token, -2.9% /
+# -0.6% at 35 / 40 rows.
+TWOSHOT = {8: "41-64:1", 16: "17-64:1"}
 
 
 def twoshot_batches(tp):
