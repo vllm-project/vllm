@@ -10,6 +10,7 @@ from vllm.model_executor.kernels.linear import (
     FlashInferB12xNvFp4LinearKernel,
     FlashInferCuteDslNvFp4W4A16LinearKernel,
     FlashInferCutlassNvFp4LinearKernel,
+    _prioritize_b12x_nvfp4,
 )
 from vllm.platforms.interface import PlatformEnum
 
@@ -32,8 +33,15 @@ def test_w4a16_kernel_does_not_precede_w4a4_kernels(w4a4_kernel):
     )
 
 
-def test_b12x_precedes_flashinfer_cutlass_on_sm12x():
+@pytest.mark.parametrize(
+    ("compute_capability", "b12x_first"),
+    [(120, True), (121, False), (100, False), (90, False)],
+)
+def test_b12x_precedes_flashinfer_cutlass_on_sm120_only(compute_capability, b12x_first):
     candidates = _POSSIBLE_NVFP4_KERNELS[PlatformEnum.CUDA]
-    assert candidates.index(FlashInferB12xNvFp4LinearKernel) < candidates.index(
-        FlashInferCutlassNvFp4LinearKernel
-    )
+    ordered = _prioritize_b12x_nvfp4(candidates, compute_capability)
+    assert (
+        ordered.index(FlashInferB12xNvFp4LinearKernel)
+        < ordered.index(FlashInferCutlassNvFp4LinearKernel)
+    ) == b12x_first
+    assert sorted(map(id, ordered)) == sorted(map(id, candidates))

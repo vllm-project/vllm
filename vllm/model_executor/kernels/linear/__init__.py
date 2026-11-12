@@ -601,8 +601,8 @@ _POSSIBLE_MXFP8_KERNELS: dict[PlatformEnum, list[type[Mxfp8LinearKernel]]] = {
 _POSSIBLE_NVFP4_KERNELS: dict[PlatformEnum, list[type[NvFp4LinearKernel]]] = {
     PlatformEnum.CUDA: [
         FlashInferCuteDslNvFp4LinearKernel,
-        FlashInferB12xNvFp4LinearKernel,
         FlashInferCutlassNvFp4LinearKernel,
+        FlashInferB12xNvFp4LinearKernel,
         CutlassNvFp4LinearKernel,
         # Weight-only: a fallback on a W4A4-capable checkpoint, not a preference.
         FlashInferCuteDslNvFp4W4A16LinearKernel,
@@ -1205,6 +1205,33 @@ def init_wfp8_a16_linear_kernel(
     )
 
 
+def _prioritize_b12x_nvfp4(
+    kernels: list[type[NvFp4LinearKernel]], compute_capability: int | None = None
+) -> list[type[NvFp4LinearKernel]]:
+    """Move FlashInfer b12x directly ahead of FlashInfer CUTLASS on SM120 only.
+
+    SM121 is excluded: b12x was slower than FlashInfer CUTLASS for prefill there.
+    A missing compute capability uses the current device. The input list is not
+    modified.
+    """
+    if compute_capability is None:
+        capability = current_platform.get_device_capability()
+        compute_capability = capability.to_int() if capability is not None else None
+    if (
+        compute_capability != 120
+        or FlashInferB12xNvFp4LinearKernel not in kernels
+        or FlashInferCutlassNvFp4LinearKernel not in kernels
+    ):
+        return kernels
+    kernels = kernels.copy()
+    kernels.remove(FlashInferB12xNvFp4LinearKernel)
+    kernels.insert(
+        kernels.index(FlashInferCutlassNvFp4LinearKernel),
+        FlashInferB12xNvFp4LinearKernel,
+    )
+    return kernels
+
+
 def init_nvfp4_linear_kernel(use_a16: bool = False) -> NvFp4LinearKernel:
     """Select and instantiate the best NVFP4 linear kernel for the
     current platform."""
@@ -1271,7 +1298,7 @@ def init_nvfp4_linear_kernel(use_a16: bool = False) -> NvFp4LinearKernel:
 
     # Auto-select from registry (or --linear-backend filtered).
     platform = current_platform._enum
-    possible = list(_POSSIBLE_NVFP4_KERNELS.get(platform, []))
+    possible = _prioritize_b12x_nvfp4(list(_POSSIBLE_NVFP4_KERNELS.get(platform, [])))
     if use_a16:
         possible = [kernel for kernel in possible if kernel in a16_kernels]
 

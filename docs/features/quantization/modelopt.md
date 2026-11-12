@@ -48,8 +48,8 @@ module prefix and decoder layer indices before constructing quantized layers.
     and logs a warning; this may reduce throughput for compute-heavy
     workloads. Use `--linear-backend` to override the automatic selection
     (this replaces the deprecated `VLLM_NVFP4_GEMM_BACKEND` environment
-    variable). On SM120 and SM121, automatic selection prefers FlashInfer's
-    b12x kernel over FlashInfer CUTLASS. Values relevant to NVFP4 include
+    variable). On SM120, automatic selection prefers FlashInfer's b12x kernel
+    over FlashInfer CUTLASS. Values relevant to NVFP4 include
     `cutlass`, `flashinfer_cutlass`, `flashinfer_cutedsl`,
     `flashinfer_trtllm`, `flashinfer_cudnn`, `flashinfer_b12x`, and
     `marlin`; see `KernelConfig` on the
