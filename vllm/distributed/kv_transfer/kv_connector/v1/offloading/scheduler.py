@@ -38,6 +38,7 @@ from vllm.v1.core.kv_cache_utils import eagle_proof_margin
 from vllm.v1.core.sched.output import SchedulerOutput
 from vllm.v1.core.single_type_kv_cache_manager import SingleTypeKVCacheManager
 from vllm.v1.kv_cache_interface import (
+    ChunkedLocalAttentionSpec,
     KVCacheConfig,
     KVCacheSpec,
     MambaSpec,
@@ -57,6 +58,7 @@ from vllm.v1.kv_offload.base import (
     ReqContext,
     RequestOffloadingContext,
     ScheduleEndContext,
+    SchedulerView,
     TierFilter,
     TierMatcher,
     make_offload_key,
@@ -118,6 +120,16 @@ class GroupOffloadConfig(NamedTuple):
 
     def load_window_size_in_chunks(self, num_tokens: int) -> int | None:
         window = self.sliding_window_size_in_chunks
+        if isinstance(self.kv_cache_spec, ChunkedLocalAttentionSpec):
+            # The next token attends only within its attention chunk, and the
+            # allocator nulls the blocks before that chunk.
+            chunk_size = self.kv_cache_spec.attention_chunk_size
+            local_start = num_tokens // chunk_size * chunk_size
+            if local_start == num_tokens:
+                return 0
+            return cdiv(num_tokens, self.tokens_per_chunk) - (
+                local_start // self.tokens_per_chunk
+            )
         if isinstance(self.kv_cache_spec, SlidingWindowSpec):
             assert window is not None
             # Lookup rounds the right edge up, but allocation retains the
@@ -366,6 +378,10 @@ class RequestOffloadState:
     max_offload_tokens: int | None = None
     # number of hits in the GPU cache
     num_locally_computed_tokens: int = 0
+    # Load cap from the connector's non-offloaded groups at the last lookup.
+    max_num_new_tokens: int | None = None
+    # End of the hit found by the last lookup_request(); None if deferred.
+    load_end: int | None = None
     # In-flight job IDs. Per the connector's invariant, at any given time
     # this contains either a single load job, or one or more store jobs.
     transfer_jobs: set[int] = field(default_factory=set)
@@ -611,7 +627,7 @@ def _create_req_context(
     )
 
 
-class OffloadingConnectorScheduler:
+class OffloadingConnectorScheduler(SchedulerView):
     """Implementation of Scheduler side methods"""
 
     def __init__(
@@ -735,6 +751,9 @@ class OffloadingConnectorScheduler:
             },
             num_hash_lookahead_tokens=vllm_config.num_hash_lookahead_tokens,
         )
+
+        with self.manager.lock:
+            self.manager.bind_scheduler_view(self)
 
     # Holds the manager lock for the current schedule(), or None between steps.
     # Read and written only by the scheduler thread, so it needs no
@@ -917,6 +936,32 @@ class OffloadingConnectorScheduler:
                 )
         return None if defer_lookup or pending_in_window else consecutive_hits
 
+    def _local_chunk_lookup(
+        self,
+        keys: Sequence[OffloadKey],
+        first_idx: int,
+        req_context: ReqContext,
+    ) -> int | None:
+        """Return the end index (in `keys`) of the consecutive hits from
+        `first_idx`, the first offload chunk of the attention chunk being read.
+        Returns None if the backend deferred a lookup or a hit isn't ready."""
+        defer_lookup = False
+        end_idx = first_idx
+        for key in keys[first_idx:]:
+            match self.manager.lookup(key, req_context):
+                case LookupResult.HIT:
+                    end_idx += 1
+                case LookupResult.HIT_PENDING:
+                    defer_lookup = True
+                    end_idx += 1
+                case LookupResult.RETRY:
+                    # Don't break: keep scanning to let manager kick off
+                    # async lookups.
+                    defer_lookup = True
+                case LookupResult.MISS:
+                    break
+        return None if defer_lookup else end_idx
+
     def _lookup_complete_chunks(
         self,
         req_status: RequestOffloadState,
@@ -1064,12 +1109,24 @@ class OffloadingConnectorScheduler:
                         candidate_end
                     )
                     assert initial_window is not None
-                    num_hit_chunks = self._sliding_window_lookup(
-                        offload_keys,
-                        required_window,
-                        req_status.req_context,
-                        initial_window + int(is_eagle_unverified),
+                    is_chunked_local = isinstance(
+                        group_config.kv_cache_spec, ChunkedLocalAttentionSpec
                     )
+                    if is_chunked_local and not is_eagle_unverified:
+                        # As in the GPU prefix cache: hits run forward from the
+                        # start of the attention chunk.
+                        num_hit_chunks = self._local_chunk_lookup(
+                            offload_keys,
+                            max(0, len(offload_keys) - initial_window),
+                            req_status.req_context,
+                        )
+                    else:
+                        num_hit_chunks = self._sliding_window_lookup(
+                            offload_keys,
+                            required_window,
+                            req_status.req_context,
+                            initial_window + int(is_eagle_unverified),
+                        )
                 if num_hit_chunks == 0:
                     return 0, full_attention_hit_boundary
 
@@ -1114,30 +1171,15 @@ class OffloadingConnectorScheduler:
             return None, full_attention_hit_boundary
 
         # Possibly delay the request if any hit chunk is already being loaded.
-        if self._chunks_being_loaded:
-            for group_config, group_state in zip(
-                self.config.kv_group_configs, req_status.group_states
-            ):
-                tokens_per_chunk = group_config.tokens_per_chunk
-                sliding_window_size_in_chunks = group_config.load_window_size_in_chunks(
-                    num_computed_tokens + num_hit_tokens
-                )
-                offload_keys = group_state.offload_keys
-                num_chunks = cdiv(
-                    num_computed_tokens + num_hit_tokens, tokens_per_chunk
-                )
-                start_chunk_idx = num_computed_tokens // tokens_per_chunk
-                offload_keys = offload_keys[start_chunk_idx:num_chunks]
-                if sliding_window_size_in_chunks is not None:
-                    offload_keys = offload_keys[-sliding_window_size_in_chunks:]
-                if any(key in self._chunks_being_loaded for key in offload_keys):
-                    # Hit chunks are being loaded, so delay the request.
-                    logger.debug(
-                        "Delaying request %s since some of its"
-                        " chunks are already being loaded",
-                        req_status.req.request_id,
-                    )
-                    return None, full_attention_hit_boundary
+        if self._chunks_being_loaded and any(
+            key in self._chunks_being_loaded
+            for key in self._load_keys(req_status, num_computed_tokens + num_hit_tokens)
+        ):
+            logger.debug(
+                "Delaying request %s since some of its chunks are already being loaded",
+                req_status.req.request_id,
+            )
+            return None, full_attention_hit_boundary
 
         logger.debug(
             "Request %s hit %s offloaded tokens after %s GPU hit tokens",
@@ -1147,6 +1189,49 @@ class OffloadingConnectorScheduler:
         )
 
         return num_hit_tokens, full_attention_hit_boundary
+
+    def _load_keys(
+        self,
+        req_status: RequestOffloadState,
+        num_cached_tokens: int,
+        partial_tail_boundary: int | None = None,
+    ) -> list[OffloadKey]:
+        """Keys a load ending at `num_cached_tokens` reads, in group order."""
+        num_computed_tokens = req_status.num_locally_computed_tokens
+        keys: list[OffloadKey] = []
+        for group_config, group_state in zip(
+            self.config.kv_group_configs, req_status.group_states
+        ):
+            tokens_per_chunk = group_config.tokens_per_chunk
+            num_chunks = cdiv(num_cached_tokens, tokens_per_chunk)
+            start_chunk_idx = num_computed_tokens // tokens_per_chunk
+            window = group_config.load_window_size_in_chunks(num_cached_tokens)
+            if window is not None:
+                start_chunk_idx = max(start_chunk_idx, num_chunks - window)
+            if partial_tail_boundary is None:
+                keys.extend(group_state.offload_keys[start_chunk_idx:num_chunks])
+                continue
+            keys.extend(group_state.offload_keys[start_chunk_idx : num_chunks - 1])
+            keys.append(
+                self._make_boundary_key(
+                    req_status.req,
+                    group_config.group_idx,
+                    self._partial_tail_key_tokens(group_config, partial_tail_boundary),
+                    req_status.req_context,
+                )
+            )
+        return keys
+
+    def lookup_request(self, req_context: ReqContext) -> list[OffloadKey] | None:
+        req_status = self._req_status[req_context.req_id]
+        num_hit_tokens = self._lookup(req_status, req_status.max_num_new_tokens)
+        if num_hit_tokens is None:
+            req_status.load_end = None
+            return None
+        req_status.load_end = req_status.num_locally_computed_tokens + num_hit_tokens
+        return self._load_keys(
+            req_status, req_status.load_end, req_status.partial_tail_boundary
+        )
 
     def _make_boundary_key(
         self,
@@ -1427,13 +1512,17 @@ class OffloadingConnectorScheduler:
                 group_state.offload_keys.clear()
         req_status.update_offload_keys()
         req_status.num_locally_computed_tokens = num_computed_tokens
+        req_status.max_num_new_tokens = max_num_new_tokens
 
         num_hit_tokens: int | None
         if request.skip_reading_external_kv or req_status.load_failed:
             num_hit_tokens = 0
         else:
             lookup_start = time.monotonic()
-            num_hit_tokens = self._lookup(req_status, max_num_new_tokens)
+            num_hit_tokens = None
+            if self.lookup_request(req_status.req_context) is not None:
+                assert req_status.load_end is not None
+                num_hit_tokens = req_status.load_end - num_computed_tokens
             self._connector_stats.observe_histogram(
                 _ConnectorMetricName.LOOKUP_SYNC_DELAY,
                 time.monotonic() - lookup_start,
