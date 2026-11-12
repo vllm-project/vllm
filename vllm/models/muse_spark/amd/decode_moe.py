@@ -18,6 +18,9 @@ runs the whole layer on the layer's own weights:
 Anything else runs the layer as before; the paths share every tensor at the
 layer boundary. Every rank takes the same path: the conditions read only the
 layer's configuration and the step's token count.
+
+The same experts also take Ulysses prefill's pre-quantized MXFP4 rows
+(`prequant_routes_experts`).
 """
 
 import functools
@@ -78,6 +81,18 @@ def _aiter_kernels_available() -> bool:
         )
         return False
     return True
+
+
+@functools.cache
+def _prequant_kernels_available() -> bool:
+    try:
+        from aiter.ops.quant import mxfp4_moe_sort_fwd  # noqa: F401
+    except ImportError:
+        logger.warning_once(
+            "Muse Spark pre-quantized MoE rows need a newer AITER; expanding them."
+        )
+        return False
+    return _aiter_kernels_available()
 
 
 class MuseSparkDecodeMoE:
@@ -334,6 +349,89 @@ def native_routes_moe(
     return out
 
 
+def prequant_routes_experts(
+    a1: torch.Tensor,
+    a1_scale: torch.Tensor,
+    topk_ids: torch.Tensor,
+    w1: torch.Tensor,
+    w2: torch.Tensor,
+    quant_config: FusedMoEQuantConfig,
+    expert_mask: torch.Tensor,
+) -> tuple[torch.Tensor, torch.Tensor] | None:
+    """This rank's unweighted per-(token, slot) expert outputs `[T, top_k, H]` of T
+    pre-quantized MXFP4 rows (`a1`, token order; E8M0 scales `a1_scale`), and the
+    `[E]` local expert index for the finalize. None when AITER lacks the kernels or
+    picks others for these routes."""
+    num_tokens, top_k = topk_ids.shape
+    hidden = a1.shape[1] * 2
+    if not _prequant_kernels_available():
+        return None
+    kernels = _stage_kernels(num_tokens, top_k, w1.shape[0], hidden, w1.shape[1] // 2)
+    if kernels is None:
+        return None
+    logger.info_once(
+        "Muse Spark MoE on native routes for pre-quantized rows active (%s; "
+        "block_m %d).",
+        kernels.stage1,
+        kernels.block_m,
+    )
+    # AITER's 0/1 `[E + 1]` EP mask as the `[E]` local expert index (-1: other
+    # ranks' experts).
+    mask = expert_mask[:-1].to(torch.int32)
+    local_index = torch.where(mask > 0, mask.cumsum(0, dtype=torch.int32) - 1, -1)
+    routes = _native_routes_experts(
+        a1,
+        topk_ids,
+        w1,
+        w2,
+        quant_config.w1_scale,
+        quant_config.w2_scale,
+        expert_mask,
+        local_index,
+        kernels,
+        prequant_scale=a1_scale,
+    )
+    return routes, local_index
+
+
+def native_routes_token_counts(moe: "MuseSparkMoE", first: int, last: int) -> list[int]:
+    """`stage_kernel_token_counts` of `moe`'s native-routes experts; empty when the
+    layer's experts do not take native routes."""
+    routed = moe.experts.routed_experts
+    if not (
+        isinstance(routed.quant_method, MuseSparkQuarkOCPMXFusedMoE)
+        and routed.moe_config.moe_parallel_config.use_ep
+        and _aiter_kernels_available()
+    ):
+        return []
+    kernel = routed.quant_method.moe_kernel
+    if kernel is None or not isinstance(kernel.fused_experts, MuseSparkAiterExperts):
+        return []
+    local, inter2 = routed.w13_weight.shape[:2]
+    return stage_kernel_token_counts(
+        first, last, moe.top_k, local, routed.moe_config.hidden_dim, inter2 // 2
+    )
+
+
+def stage_kernel_token_counts(
+    first: int, last: int, top_k: int, local_experts: int, hidden: int, inter: int
+) -> list[int]:
+    """One token count in `[first, last]` per distinct set of expert stages that
+    calls of `first..last` tokens launch: the largest count of each padded-token
+    bucket AITER picks the stages by."""
+    from aiter.fused_moe import get_padded_M
+
+    largest: dict[str, int] = {}
+    num_tokens = first
+    while num_tokens <= last:
+        padded = max(get_padded_M(num_tokens), num_tokens)
+        kernels = _stage_kernels_for(padded, top_k, local_experts, hidden, inter)
+        if kernels is not None:
+            largest[repr(kernels)] = min(padded, last)
+        num_tokens = padded + 1
+    return sorted(set(largest.values()))
+
+
 def _native_routes_experts(
     hidden_states: torch.Tensor,
     topk_ids: torch.Tensor,
@@ -344,9 +442,11 @@ def _native_routes_experts(
     expert_mask: torch.Tensor,
     local_index: torch.Tensor,
     kernels: StageKernels,
+    prequant_scale: torch.Tensor | None = None,
 ) -> torch.Tensor:
     """Unweighted per-(token, slot) MXFP4 expert outputs `[T, top_k, H]` of the T
-    bf16 rows `hidden_states`.
+    bf16 rows `hidden_states`, or with `prequant_scale` of the T MXFP4 rows
+    `hidden_states` (token order, E8M0 scales `prequant_scale`).
 
     The FlyDSL stage kernels and quant rule of AITER's fused_moe on the routes'
     repeated rows, on the `[T, top_k]` routes: one moe_sorting; the stage-1 quant
@@ -361,7 +461,7 @@ def _native_routes_experts(
     from aiter.ops.quant import fused_dynamic_mx_quant_moe_sort_hip
 
     num_tokens, top_k = topk_ids.shape
-    hidden = hidden_states.shape[1]
+    hidden = hidden_states.shape[1] * (1 if prequant_scale is None else 2)
     inter = w1.shape[1] // 2
     block_m = kernels.block_m
     e8m0, fp4x2 = torch.float8_e8m0fnu, torch.float4_e2m1fn_x2
@@ -371,7 +471,9 @@ def _native_routes_experts(
         rows = (sorted_ids.shape[0] + 31) // 32 * 32
         return torch.empty((rows, (cols // 32 + 7) // 8 * 8), dtype=e8m0, device=device)
 
-    if supports_sort_quant(num_tokens, hidden, top_k, block_m):
+    if prequant_scale is None and supports_sort_quant(
+        num_tokens, hidden, top_k, block_m
+    ):
         a1, a1_scale, sorted_ids, sorted_eids, num_valid = sort_quant(
             hidden_states,
             topk_ids,
@@ -396,18 +498,30 @@ def _native_routes_experts(
             rocm_aiter_ops.get_moe_dispatch_policy(),
             accumulate=False,
         )[:5]
-        a1 = torch.empty((num_tokens, hidden // 2), dtype=fp4x2, device=device)
-        a1_scale = _sorted_scales(sorted_ids, hidden)
-        fused_dynamic_mx_quant_moe_sort_hip(
-            a1,
-            a1_scale,
-            hidden_states,
-            sorted_ids,
-            num_valid,
-            num_tokens,
-            block_m,
-            num_tokens * top_k,
-        )
+        if prequant_scale is not None:
+            from aiter.ops.quant import mxfp4_moe_sort_fwd
+
+            a1 = hidden_states.view(fp4x2)
+            a1_scale = mxfp4_moe_sort_fwd(
+                prequant_scale.view(e8m0),
+                sorted_ids=sorted_ids,
+                num_valid_ids=num_valid,
+                token_num=num_tokens,
+                cols=hidden,
+            )
+        else:
+            a1 = torch.empty((num_tokens, hidden // 2), dtype=fp4x2, device=device)
+            a1_scale = _sorted_scales(sorted_ids, hidden)
+            fused_dynamic_mx_quant_moe_sort_hip(
+                a1,
+                a1_scale,
+                hidden_states,
+                sorted_ids,
+                num_valid,
+                num_tokens,
+                block_m,
+                num_tokens * top_k,
+            )
     a2_bf16 = _flydsl_stage1_wrapper(
         a1,
         w1,
