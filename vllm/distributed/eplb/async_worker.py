@@ -126,6 +126,7 @@ def _transfer_cycle(
         new_physical_to_logical_map = run_rebalance_experts(
             model_state, state, physical_to_logical_map_cpu, stream
         )
+
         migration_batches_by_layer = None
         if state.parallel_config.eplb_config.migration_batching_enabled:
             profile_name = "eplb: schedule migration batches"
