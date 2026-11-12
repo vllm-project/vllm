@@ -6,7 +6,7 @@ shared by all MoE layers holds a subset of expert rows that is managed on
 the device.
 
 ```bash
-vllm serve <model> --moe-expert-pool-rows 258
+vllm serve <model> --moe-backend marlin --moe-expert-pool-rows 258
 ```
 
 `--moe-expert-pool-rows N` (config field `OffloadConfig.moe_expert_pool_rows`,
@@ -16,6 +16,10 @@ The bank holds `layers x min(N, E - 1)` rows plus `top_k x decode tokens`
 staging rows, so its storage is `(layers x min(N, E - 1) + staging) x row
 bytes`; the planner's tables and scratch buffers are separate, small
 allocations. Rows can move between layers at run time.
+
+Prefill staging is enabled by default when the pool is enabled. It uses
+two full layers' worth of extra GPU memory, leaving less room for the KV
+cache. Add `--no-moe-expert-pool-prefill-staging` to disable it.
 
 ## How it works
 
@@ -38,8 +42,8 @@ allocations. Rows can move between layers at run time.
   the MoE layers stay inside the captured CUDA graph (`FULL_DECODE_ONLY`).
 - Wider batches (prefill): resident experts are read from the bank. Marlin
   reads its weights once per M-block, so a non-resident expert read through
-  the host view would cross PCIe several times per step. Prefill steps of
-  at least 512 tokens therefore copy each full layer into a device staging
+  the host view would cross PCIe several times per step. Uncaptured prefill
+  steps of at least 512 tokens copy each full layer into a device staging
   buffer by DMA, one layer ahead of the compute, and read non-resident rows
   from there. Copying resident rows too avoids reading the device-managed
   placement back to the host. Smaller wide batches read their routed rows
@@ -73,14 +77,18 @@ allocations. Rows can move between layers at run time.
 
 Qwen3.8-Flash-Next NVFP4 with 258 rows per layer (about a 32 GiB bank),
 `--compilation-config '{"cudagraph_mode":"FULL_DECODE_ONLY"}'`, 4096
-context, one request: decode about 63 tok/s (median of three fresh server
-launches). That number was measured on an RTX PRO 6000 Blackwell Max-Q
-limited to 48 GiB, on the integrated head 7dedc6d8 = this feature + PLE
-mmap support (#54129, which this model needs to load its PLE table within
-that budget) + deferred PLE rows (01554/vllm#46, part of the measured
-configuration, not required for loading); it is not a measurement of this
-branch alone. For reference, the existing `--offload-backend uva
---cpu-offload-gb 40` path gave about 7 tok/s in a single run on a
-different base commit; see `benchmarks/expert_pool/README.md` for the exact
-heads and conditions rather than reading the two as a controlled
-comparison.
+context, one request, and 768 MiB fixed KV cache: decode about 65 tok/s
+(median of three fresh server launches per condition). Measurements used
+an RTX PRO 6000 Blackwell Max-Q with approximately 48 GiB available GPU
+memory and a 100 GiB host-memory limit, at production commit `27e2470a`.
+They are not measurements on RTX 6000 Ada.
+
+With 512-token prefill chunks, staging used an additional 2.64 GiB of GPU
+memory and had a median measured-request TTFT of 9.3 seconds, versus
+6.9 seconds with staging disabled; decode throughput was similar. This
+workload does not establish a long-input prefill speedup.
+
+See `benchmarks/expert_pool/README.md` for the exact launch, sampling,
+per-run results, and the separately identified historical deferred-PLE
+measurements. Generated continuations differed across fresh launches, so
+these are response-throughput measurements for fixed input prompts.
