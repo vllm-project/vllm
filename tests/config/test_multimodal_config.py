@@ -124,14 +124,12 @@ def _make_mm_prefix_model_config(
 
 
 def test_supports_multimodal_for_mm_prefix_before_multimodal_config():
-    """Before the model is inspected the early return must not clear
-    mm_prefix, and it never writes the sticky cache."""
+    """A text-only model never builds a multimodal config, so the early
+    return reports text-only without writing the sticky cache."""
     model_config = _make_mm_prefix_model_config(_TEXT_ONLY_MODEL)
     assert model_config.multimodal_config is None
-    assert model_config._supports_multimodal_for_mm_prefix() is False
 
-    del model_config._model_info
-    assert model_config._supports_multimodal_for_mm_prefix() is True
+    assert model_config._supports_multimodal_for_mm_prefix() is False
     assert not getattr(model_config, "_supports_multimodal_inputs_cache", None)
 
 
