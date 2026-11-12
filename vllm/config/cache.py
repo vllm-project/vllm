@@ -337,7 +337,11 @@ class CacheConfig:
     Triton and FlashInfer support the 'none' and 'align' Mamba cache modes.
     Mamba2 speculative decoding supports both backends. Pipeline parallelism is not
     supported. Flushes are most efficient when mamba_block_size is a
-    multiple of replayssm_buffer_len, but this is not required."""
+    multiple of replayssm_buffer_len, but this is not required.
+    On ROCm, Kimi-K3 speculative decoding verifies the KDA layers with AITER's
+    FlyDSL kernel and keeps one KDA state slot per request. This requires
+    AITER with `flydsl_kda_verify_with_f_b`, TP8 and
+    `--no-enable-prefix-caching`; startup names any unmet requirement."""
     use_kda_recoverssm: bool = field(default=False, init=False)
     """Whether Kimi-K3 KDA uses RecoverSSM speculative decode."""
 

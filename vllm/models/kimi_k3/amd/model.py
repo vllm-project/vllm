@@ -21,6 +21,7 @@ from vllm.model_executor.models.interfaces import (
     SupportsMultiModal,
     SupportsPP,
     SupportsQuant,
+    SupportsReplaySSM,
 )
 from vllm.model_executor.models.kimi_k25 import KimiK25MediaPixelInputs
 from vllm.model_executor.models.kimi_k25_vit import (
@@ -48,6 +49,11 @@ from ..common.mm_preprocess import (
     KimiK3ProcessingInfo,
 )
 from .linear import KimiLinearForCausalLM
+from .ops.kda_replayssm import (
+    kda_replayssm_state_dtype,
+    kda_replayssm_state_shape,
+    use_kda_replayssm,
+)
 
 
 @MULTIMODAL_REGISTRY.register_processor(
@@ -63,6 +69,7 @@ class KimiK3ForConditionalGeneration(
     SupportsEagle3,
     HasInnerState,
     IsHybrid,
+    SupportsReplaySSM,
 ):
     """Kimi-K3 model with Kimi-K2.5 vision and KimiLinear text."""
 
@@ -238,12 +245,28 @@ class KimiK3ForConditionalGeneration(
     def get_mamba_state_dtype_from_config(cls, vllm_config: VllmConfig):
         text_config = vllm_config.model_config.hf_config.text_config
         temp_vllm_config = vllm_config.with_hf_config(text_config)
-        return KimiLinearForCausalLM.get_mamba_state_dtype_from_config(temp_vllm_config)
+        dtypes = KimiLinearForCausalLM.get_mamba_state_dtype_from_config(
+            temp_vllm_config
+        )
+        if use_kda_replayssm(vllm_config):
+            return kda_replayssm_state_dtype(dtypes)
+        return dtypes
 
     @classmethod
     def get_mamba_state_shape_from_config(cls, vllm_config: VllmConfig):
         text_config = vllm_config.model_config.hf_config.text_config
         temp_vllm_config = vllm_config.with_hf_config(text_config)
+        if use_kda_replayssm(vllm_config):
+            # Must match KimiK3DeltaAttention.get_state_shape: the ring is part
+            # of the page that sizes the packed block row.
+            kda_config = text_config.linear_attn_config
+            return kda_replayssm_state_shape(
+                vllm_config.parallel_config.tensor_parallel_size,
+                kda_config["num_heads"],
+                kda_config["head_dim"],
+                kda_config["short_conv_kernel_size"],
+                vllm_config.num_speculative_tokens,
+            )
         return KimiLinearForCausalLM.get_mamba_state_shape_from_config(temp_vllm_config)
 
     @classmethod

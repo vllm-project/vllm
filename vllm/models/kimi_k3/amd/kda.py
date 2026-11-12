@@ -47,6 +47,7 @@ from vllm.model_executor.model_loader.weight_utils import sharded_weight_loader
 from vllm.model_executor.utils import set_weight_attrs
 from vllm.models.kimi_k3.amd.kda_metadata import (
     PREFILL_CONV_BLOCK_M,
+    KDAReplaySSMVerifyMetadata,
     KimiK3ROCmKDABackend,
 )
 from vllm.models.kimi_k3.amd.ops.kda_checkpoint import (
@@ -60,10 +61,24 @@ from vllm.models.kimi_k3.amd.ops.kda_decode import (
     is_fused_kda_decode_supported,
 )
 from vllm.models.kimi_k3.amd.ops.kda_prefill import chunk_kda_prefill
+from vllm.models.kimi_k3.amd.ops.kda_replayssm import (
+    KDA_REPLAYSSM_CONV_SIZE,
+    KDA_REPLAYSSM_HEAD_DIM,
+    KDA_REPLAYSSM_HEADS,
+    get_flydsl_kda_verify,
+    kda_replayssm_state_dtype,
+    kda_replayssm_state_shape,
+    precompile_flydsl_kda_verify,
+    use_kda_replayssm,
+)
 from vllm.models.kimi_k3.amd.ops.third_party.kda import (
     fused_recurrent_kda,
     fused_recurrent_kda_packed_decode,
 )
+from vllm.models.kimi_k3.amd.specialized_decode.runtime import (
+    AUTO as DECODE_BACKEND_AUTO,
+)
+from vllm.models.kimi_k3.amd.specialized_decode.runtime import decode_backend
 from vllm.third_party.flash_linear_attention.ops.kda import FusedRMSNormGated
 from vllm.transformers_utils.configs.kimi_linear import KimiLinearConfig
 from vllm.v1.attention.backend import AttentionBackend
@@ -106,16 +121,27 @@ class KimiK3DeltaAttention(GatedDeltaNetAttention):
     def get_attn_backend(self) -> type[AttentionBackend]:
         return KimiK3ROCmKDABackend
 
-    def get_state_dtype(self) -> tuple[torch.dtype, torch.dtype]:
+    def get_state_dtype(self) -> tuple[torch.dtype, ...]:
         if self.model_config is None or self.cache_config is None:
             raise ValueError("model_config and cache_config must be set")
-        return MambaStateDtypeCalculator.kda_state_dtype(
+        dtypes = MambaStateDtypeCalculator.kda_state_dtype(
             self.model_config.dtype,
             self.cache_config.mamba_cache_dtype,
             self.cache_config.mamba_ssm_cache_dtype,
         )
+        if self.use_replayssm_ring:
+            return kda_replayssm_state_dtype(dtypes)
+        return dtypes
 
-    def get_state_shape(self) -> tuple[tuple[int, ...], tuple[int, ...]]:
+    def get_state_shape(self) -> tuple[tuple[int, ...], ...]:
+        if self.use_replayssm_ring:
+            return kda_replayssm_state_shape(
+                self.tp_size,
+                self.num_heads,
+                self.head_dim,
+                self.conv_size,
+                self.num_spec,
+            )
         return MambaStateShapeCalculator.kda_state_shape(
             self.tp_size,
             self.num_heads,
@@ -158,6 +184,10 @@ class KimiK3DeltaAttention(GatedDeltaNetAttention):
         prefix: str = "",
     ) -> None:
         super().__init__(config, vllm_config, prefix)
+        # With --use-replayssm, spec rows verify through FlyDSL into a ring in
+        # the KDA page; the commit after sampling folds the accepted steps
+        # into the checkpoint, so the page holds one state per request.
+        self.use_replayssm_ring = use_kda_replayssm(vllm_config)
 
         kda_config = config.linear_attn_config  # type: ignore[attr-defined]
         assert kda_config is not None, "linear_attn_config must be set"
@@ -233,7 +263,7 @@ class KimiK3DeltaAttention(GatedDeltaNetAttention):
         # ROCm can fuse the whole decode step (conv + recurrence + gated norm)
         # into one kernel, which wants a width-major fp32 conv weight staged at
         # load time. Everything else keeps the [channel, width] layout.
-        conv_state_dtype, recurrent_state_dtype = self.get_state_dtype()
+        conv_state_dtype, recurrent_state_dtype = self.get_state_dtype()[:2]
         # AITER's Gluon kernels currently require FP32 recurrent states.
         self.use_aiter_decode = recurrent_state_dtype == torch.float32 and bool(
             rocm_aiter_ops.is_kda_gluon_decode_available()
@@ -350,10 +380,104 @@ class KimiK3DeltaAttention(GatedDeltaNetAttention):
             prefix=f"{prefix}.o_proj",
         )
 
+        kda_conv_window = None
+        if self.use_replayssm_ring:
+            self._check_replayssm_ring(vllm_config)
+            # Step t's conv window of every spec row, which the commit turns
+            # into the conv state of the accepted step. One line per request.
+            kda_conv_window = torch.empty(
+                vllm_config.scheduler_config.max_num_seqs,
+                self.num_spec + 1,
+                3 * self.local_projection_size,
+                self.conv_size - 1,
+                dtype=torch.bfloat16,
+                device=self.conv1d.weight.device,
+            )
+        self.register_buffer("kda_conv_window", kda_conv_window, persistent=False)
+
         compilation_config = vllm_config.compilation_config
         if prefix in compilation_config.static_forward_context:
             raise ValueError(f"Duplicate layer name: {prefix}")
         compilation_config.static_forward_context[prefix] = self
+
+    def _check_replayssm_ring(self, vllm_config: VllmConfig) -> None:
+        """Refuse at init what the FlyDSL verify cannot run, rather than fall
+        back to a path whose KV cache has no per-draft state slots."""
+        verify = get_flydsl_kda_verify()
+        conv_state_dtype, recurrent_state_dtype = self.get_state_dtype()[:2]
+        f_b_weight = getattr(self.f_b_proj, "weight", None)
+        speculative_config = vllm_config.speculative_config
+        checks = (
+            (not rocm_aiter_ops.is_enabled(), "VLLM_ROCM_USE_AITER=1"),
+            (
+                verify is None,
+                (
+                    "AITER's flydsl_kda_verify_with_f_b (ROCm/aiter#7529) on "
+                    "gfx942 or gfx950"
+                ),
+            ),
+            (
+                verify is not None and self.num_spec + 1 > verify.max_tokens,
+                f"at most {getattr(verify, 'max_tokens', 1) - 1} speculative tokens",
+            ),
+            (
+                (self.local_num_heads, self.head_dim, self.conv_size)
+                != (
+                    KDA_REPLAYSSM_HEADS,
+                    KDA_REPLAYSSM_HEAD_DIM,
+                    KDA_REPLAYSSM_CONV_SIZE,
+                ),
+                (
+                    f"{KDA_REPLAYSSM_HEADS} KDA heads of {KDA_REPLAYSSM_HEAD_DIM} "
+                    f"per rank (TP8) and conv width {KDA_REPLAYSSM_CONV_SIZE}"
+                ),
+            ),
+            (self.gate_lower_bound is None, "the KDA gate lower bound"),
+            (self.conv1d.bias is not None, "a KDA conv without bias"),
+            (
+                vllm_config.model_config.dtype != torch.bfloat16
+                or conv_state_dtype != torch.bfloat16,
+                "bfloat16 activations and conv state",
+            ),
+            (
+                verify is not None and recurrent_state_dtype not in verify.state_dtypes,
+                "a float32 or bfloat16 recurrent state",
+            ),
+            (
+                f_b_weight is None
+                or f_b_weight.dtype != torch.bfloat16
+                or self.o_norm.weight.dtype != torch.bfloat16,
+                "unquantized bfloat16 f_b_proj and o_norm weights",
+            ),
+            (
+                vllm_config.cache_config.mamba_cache_mode != "none",
+                "no Mamba prefix caching (--no-enable-prefix-caching)",
+            ),
+            (
+                speculative_config is not None
+                and bool(
+                    getattr(speculative_config, "enable_adaptive_verification", False)
+                ),
+                "no adaptive verification",
+            ),
+            (
+                # Its K1 writes a state per draft position.
+                decode_backend(vllm_config) != DECODE_BACKEND_AUTO,
+                f"decode_backend={DECODE_BACKEND_AUTO}",
+            ),
+            (
+                # The ring changes the KDA page layout.
+                vllm_config.kv_transfer_config is not None
+                and vllm_config.kv_transfer_config.is_kv_transfer_instance,
+                "no KV connector",
+            ),
+        )
+        reasons = [reason for failed, reason in checks if failed]
+        if reasons:
+            raise ValueError(
+                "Kimi-K3 KDA ReplaySSM (--use-replayssm) on ROCm requires "
+                + "; ".join(reasons)
+            )
 
     @torch.no_grad()
     def process_weights_after_loading(self) -> None:
@@ -365,6 +489,17 @@ class KimiK3DeltaAttention(GatedDeltaNetAttention):
             )
         if self.decode_norm_weight is not None:
             self.decode_norm_weight.copy_(self.o_norm.weight)
+        if self.use_replayssm_ring:
+            verify = get_flydsl_kda_verify()
+            assert verify is not None and self.gate_lower_bound is not None
+            precompile_flydsl_kda_verify(
+                verify,
+                num_tokens=self.num_spec + 1,
+                state_dtype=self.get_state_dtype()[1],
+                norm_eps=self.o_norm.eps,
+                lower_bound=self.gate_lower_bound,
+                device=self.A_log.device,
+            )
 
     def rearrange_mixed_qkv(
         self, mixed_qkv: torch.Tensor
@@ -411,6 +546,7 @@ class KimiK3DeltaAttention(GatedDeltaNetAttention):
 
         self._forward(
             mixed_qkv=mixed_qkv,
+            f_a=f_a,
             g1=g1,
             g2=g2,
             beta=beta,
@@ -419,10 +555,74 @@ class KimiK3DeltaAttention(GatedDeltaNetAttention):
         core_attn_out = rearrange(core_attn_out, "1 n h d -> n (h d)")
         return self.o_proj(core_attn_out)[0]
 
+    def _replayssm_verify(
+        self,
+        r: KDAReplaySSMVerifyMetadata,
+        mixed_qkv: torch.Tensor,
+        f_a: torch.Tensor,
+        g2: torch.Tensor,
+        beta: torch.Tensor,
+        conv_state: torch.Tensor,
+        recurrent_state: torch.Tensor,
+        core_attn_out: torch.Tensor,
+    ) -> torch.Tensor | None:
+        """Verify the spec rows through FlyDSL, gated norm included. Returns
+        None when the outputs already landed in `core_attn_out`, else the spec
+        tokens' outputs in `spec_token_indx` order."""
+        verify = get_flydsl_kda_verify()
+        assert verify is not None
+        num_dense = r.cache_indices.shape[0] * r.num_tokens
+        if r.gather_tokens is None:
+            x, f_a, raw_beta, output_gate = (
+                mixed_qkv[:num_dense],
+                f_a[:num_dense],
+                beta[:, :num_dense],
+                g2[:num_dense],
+            )
+            out = core_attn_out[:, :num_dense]
+        else:
+            src = r.gather_tokens
+            x, f_a, raw_beta, output_gate = (
+                mixed_qkv.index_select(0, src),
+                f_a.index_select(0, src),
+                beta.index_select(1, src),
+                g2.index_select(0, src),
+            )
+            out = core_attn_out.new_empty((1, num_dense, *core_attn_out.shape[2:]))
+        verify(
+            f_a=f_a,
+            f_b_weight=self.f_b_proj.weight.view(
+                self.local_num_heads, self.head_dim, self.head_dim
+            ),
+            x=x,
+            conv_weight=self.conv1d.weight.view(-1, self.conv_size),
+            conv_bias=None,
+            conv_state=conv_state,
+            raw_beta=raw_beta,
+            A_log=self.A_log,
+            dt_bias=self.dt_bias,
+            lower_bound=self.gate_lower_bound,
+            state=recurrent_state,
+            cache_indices=r.cache_indices,
+            intermediate_indices=r.line_indices,
+            intermediate_conv_window=self.kda_conv_window,
+            output_gate=output_gate,
+            norm_weight=self.o_norm.weight,
+            norm_eps=self.o_norm.eps,
+            num_tokens=r.num_tokens,
+            replay_ring=self.kv_cache[2:6],
+            out=out,
+        )
+        if r.gather_tokens is None:
+            return None
+        assert r.scatter_tokens is not None
+        return out[0].index_select(0, r.scatter_tokens)
+
     @eager_break_during_capture
     def _forward(
         self,
         mixed_qkv: torch.Tensor,
+        f_a: torch.Tensor,
         g1: torch.Tensor,
         g2: torch.Tensor,
         beta: torch.Tensor,
@@ -456,11 +656,30 @@ class KimiK3DeltaAttention(GatedDeltaNetAttention):
 
         constant_caches = self.kv_cache
 
-        conv_state, recurrent_state = constant_caches
+        conv_state, recurrent_state = constant_caches[:2]
         # conv_state must be (..., dim, width-1) for the conv kernels.
         # DS layout stores it that way directly; SD layout needs a transpose.
         if not is_conv_state_dim_first():
             conv_state = conv_state.transpose(-1, -2)
+
+        replayssm_out = None
+        replayssm = getattr(m, "replayssm", None)
+        if replayssm is not None:
+            replayssm_out = self._replayssm_verify(
+                replayssm,
+                mixed_qkv,
+                f_a[:num_actual_tokens],
+                g2[:num_actual_tokens],
+                beta,
+                conv_state,
+                recurrent_state,
+                core_attn_out,
+            )
+            if m.num_prefills == 0 and m.num_decodes == 0:
+                if replayssm_out is not None:
+                    # A spec-only batch's spec tokens lead it, in order.
+                    core_attn_out[0, : replayssm_out.shape[0]] = replayssm_out
+                return
 
         # The packed DSA block row gives state slots a fractional-row pitch.
         # Older AITER versions address states by whole rows and cannot take
@@ -577,6 +796,12 @@ class KimiK3DeltaAttention(GatedDeltaNetAttention):
                 mixed_qkv_spec = mixed_qkv
                 g1_spec, beta_spec = g1, beta
                 mixed_qkv_ns = g1_ns = beta_ns = None
+            elif replayssm_out is not None:
+                # The FlyDSL verify already ran the spec rows.
+                mixed_qkv_spec = g1_spec = beta_spec = None
+                mixed_qkv_ns = mixed_qkv.index_select(0, non_spec_token_indx)
+                g1_ns = g1.index_select(1, non_spec_token_indx)
+                beta_ns = beta.index_select(1, non_spec_token_indx)
             else:
                 mixed_qkv_spec = mixed_qkv.index_select(0, spec_token_indx)
                 g1_spec = g1.index_select(1, spec_token_indx)
@@ -590,7 +815,7 @@ class KimiK3DeltaAttention(GatedDeltaNetAttention):
 
         # ---------- spec-decode multi-query path ----------
         core_attn_out_spec = None
-        if spec_sequence_masks is not None:
+        if mixed_qkv_spec is not None:
             assert spec_state_indices_tensor is not None
             assert spec_query_start_loc is not None
             spec_conv_indices = spec_state_indices_tensor[:, 0][: m.num_spec_decodes]
@@ -850,6 +1075,11 @@ class KimiK3DeltaAttention(GatedDeltaNetAttention):
             merged = core_attn_out[:, :num_actual_tokens]
             merged.index_copy_(1, spec_token_indx, core_attn_out_spec)
             merged.index_copy_(1, non_spec_token_indx, core_attn_out_non_spec)
+        elif replayssm_out is not None:
+            assert core_attn_out_non_spec is not None
+            core_attn_out[:, :num_actual_tokens].index_copy_(
+                1, non_spec_token_indx, core_attn_out_non_spec
+            )
         elif core_attn_out_non_spec is not None:
             if core_attn_out_non_spec.data_ptr() != core_attn_out.data_ptr():
                 core_attn_out[0, :num_actual_tokens] = core_attn_out_non_spec[
@@ -858,3 +1088,6 @@ class KimiK3DeltaAttention(GatedDeltaNetAttention):
         else:
             assert core_attn_out_spec is not None
         core_attn_out.copy_(self.o_norm(core_attn_out, g2))
+        if replayssm_out is not None:
+            # FlyDSL applied the gated norm to the spec tokens already.
+            core_attn_out[0].index_copy_(0, spec_token_indx, replayssm_out)

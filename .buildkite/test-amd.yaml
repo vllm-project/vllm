@@ -1366,6 +1366,7 @@ steps:
   - csrc/torch_bindings.cpp
   - tests/models/kimi_k3/test_amd_attn_res.py
   - tests/models/kimi_k3/test_amd_kda_decode.py
+  - tests/models/kimi_k3/test_amd_kda_replayssm.py
   - tests/models/kimi_k3/test_kda.py
   - tests/models/kimi_k3/test_kda_metadata.py
   - vllm/_custom_ops.py
@@ -1376,6 +1377,7 @@ steps:
     pytest -v -s
     models/kimi_k3/test_amd_attn_res.py
     models/kimi_k3/test_amd_kda_decode.py
+    models/kimi_k3/test_amd_kda_replayssm.py
     models/kimi_k3/test_kda.py
     models/kimi_k3/test_kda_metadata.py
 
