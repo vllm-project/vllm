@@ -5,6 +5,8 @@ use std::collections::HashMap;
 use std::time::Duration;
 
 use expect_test::expect;
+use vllm_chat::multimodal::MmModality;
+use vllm_engine_core_client::protocol::dtype::ModelDtype;
 use vllm_engine_core_client::protocol::structured_outputs::StructuredOutputBackend;
 use vllm_engine_core_client::{CoordinatorMode as EngineCoreCoordinatorMode, TransportMode};
 use vllm_server::{
@@ -12,9 +14,11 @@ use vllm_server::{
     OutputLogConfig, OutputLogging, ParserSelection, ReasoningEffort, RendererSelection,
 };
 use vllm_text::backend::hf::ModelSource;
-use vllm_tracing::LogLevel;
+use vllm_tracing::{LogFormatter, LogLevel};
 
-use super::{BenchCommand, Cli, Command, LogStatsInterval, SharedRuntimeArgs, parse_int_flag};
+use super::{
+    BenchCommand, Cli, Command, DtypeArg, LogStatsInterval, SharedRuntimeArgs, parse_int_flag,
+};
 
 /// Resolve the data parallel topology the way `vllm-rs serve` does at startup.
 fn topology(args: &super::ServeArgs) -> vllm_managed_engine::data_parallel::DataParallelTopology {
@@ -41,6 +45,24 @@ fn bench_serve_args_parse_without_managed_engine_repartition() {
     assert!(args.request_rate.is_infinite());
 }
 
+/// `--dtype` takes vLLM's choices, including the `half` and `float` aliases.
+#[test]
+fn render_dtype_accepts_vllm_choices() {
+    use clap::ValueEnum as _;
+
+    for (value, expected) in [
+        ("auto", None),
+        ("half", Some(ModelDtype::Float16)),
+        ("float16", Some(ModelDtype::Float16)),
+        ("bfloat16", Some(ModelDtype::BFloat16)),
+        ("float", Some(ModelDtype::Float32)),
+        ("float32", Some(ModelDtype::Float32)),
+    ] {
+        let arg = DtypeArg::from_str(value, false).unwrap();
+        assert_eq!(arg.model_dtype(), expected, "{value}");
+    }
+}
+
 #[test]
 fn render_args_build_config_without_tls() {
     let cli = Cli::try_parse_from([
@@ -53,6 +75,10 @@ fn render_args_build_config_without_tls() {
         "Qwen/Qwen2.5-0.5B",
         "--port",
         "8080",
+        "--dtype",
+        "float16",
+        "--lora-modules",
+        "adapter-a=org/adapter-a",
         "--max-model-len",
         "32768",
         "--served-model-name",
@@ -61,6 +87,8 @@ fn render_args_build_config_without_tls() {
         "deepseek_v32",
         "--max-logprobs",
         "-1",
+        "--limit-mm-per-prompt",
+        r#"{"image": 2, "video": {"count": 1, "num_frames": 32}}"#,
         // Set through `VLLM_SKIP_MODEL_NAME_VALIDATION`, which binds this
         // hidden flag.
         "--skip-model-name-validation",
@@ -88,6 +116,9 @@ fn render_args_build_config_without_tls() {
     assert_eq!(config.hf_config, None);
     assert_eq!(config.host, "127.0.0.1");
     assert_eq!(config.port, 8080);
+    assert_eq!(config.dtype, Some(ModelDtype::Float16));
+    assert_eq!(config.lora_modules[0].name, "adapter-a");
+    assert!(!config.language_model_only);
     assert_eq!(config.max_model_len, Some(32768));
     assert_eq!(config.served_model_name, ["qwen"]);
     assert!(config.skip_model_name_validation);
@@ -96,6 +127,9 @@ fn render_args_build_config_without_tls() {
     assert_eq!(config.reasoning_parser, ParserSelection::Auto);
     assert_eq!(config.renderer, RendererSelection::DeepSeekV32);
     assert_eq!(config.max_logprobs, Some(-1));
+    let limit = |modality| config.limit_mm_per_prompt[&modality].count();
+    assert_eq!(limit(MmModality::Image), Some(2));
+    assert_eq!(limit(MmModality::Video), Some(1));
     assert!(config.tls.is_none());
 }
 
@@ -714,30 +748,45 @@ fn serve_forwards_logging_config_to_managed_engine() {
     .assert_debug_eq(&config.python_args);
 }
 
-/// The JSON formatter is not implemented and fails startup, also in its
-/// dotted form, instead of reaching only the managed engine.
+/// The JSON formatter drives the frontend's own logs and reaches the managed
+/// engine; a formatter Python does not have fails startup.
 #[test]
-fn serve_rejects_unimplemented_logging_config() {
-    let error = Cli::try_parse_from([
+fn serve_logging_config_formatter() {
+    let cli = Cli::try_parse_from([
         "vllm-rs",
         "serve",
         "Qwen/Qwen3-0.6B",
-        "--logging-config",
-        r#"{"formatter":"json"}"#,
+        "--log-level",
+        "ERROR",
+        "--logging-config.formatter",
+        "json",
     ])
-    .unwrap_err();
-    assert_eq!(error.kind(), clap::error::ErrorKind::ValueValidation);
+    .unwrap();
+    assert_eq!(cli.log_formatter(), LogFormatter::Json);
+    let Command::Serve(args) = cli.command else {
+        panic!("expected serve args");
+    };
+    let config = args.to_managed_engine_config(5555, &topology(&args), None);
+    expect![[r#"
+        [
+            "--logging-config",
+            "{\"log_level\":\"ERROR\",\"formatter\":\"json\"}",
+            "--reasoning-parser",
+            "qwen3",
+        ]
+    "#]]
+    .assert_debug_eq(&config.python_args);
 
     let error = Cli::try_parse_from([
         "vllm-rs",
         "serve",
         "Qwen/Qwen3-0.6B",
         "--logging-config.formatter",
-        "json",
+        "xml",
     ])
     .unwrap_err();
     expect![[r#"
-        error: invalid value '{"formatter":"json"}' for '--logging-config <JSON>': invalid JSON object: formatter: unknown variant `json`, expected `text` at line 1 column 19
+        error: invalid value '{"formatter":"xml"}' for '--logging-config <JSON>': invalid JSON object: formatter: unknown variant `xml`, expected `text` or `json` at line 1 column 18
 
         For more information, try '--help'.
     "#]].assert_eq(&error.to_string());
@@ -774,12 +823,18 @@ fn frontend_args_json_resolves_logging_config() {
     )
     .unwrap();
 
-    let error = parse(
+    let cli = parse(
         r#"{"model_tag":"Qwen/Qwen3-0.6B","logging_config":{"log_level":"DEBUG","formatter":"json"}}"#,
+    )
+    .unwrap();
+    assert_eq!(cli.log_formatter(), LogFormatter::Json);
+
+    let error = parse(
+        r#"{"model_tag":"Qwen/Qwen3-0.6B","logging_config":{"log_level":"DEBUG","formatter":"xml"}}"#,
     )
     .unwrap_err();
     expect![[r#"
-        error: invalid value '{"model_tag":"Qwen/Qwen3-0.6B","logging_config":{"log_level":"DEBUG","formatter":"json"}}' for '--args-json <JSON>': invalid JSON arguments: logging_config.formatter: unknown variant `json`, expected `text` at line 1 column 87
+        error: invalid value '{"model_tag":"Qwen/Qwen3-0.6B","logging_config":{"log_level":"DEBUG","formatter":"xml"}}' for '--args-json <JSON>': invalid JSON arguments: logging_config.formatter: unknown variant `xml`, expected `text` or `json` at line 1 column 86
 
         For more information, try '--help'.
     "#]].assert_eq(&error.to_string());

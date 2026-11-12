@@ -10,6 +10,7 @@ mod grpc;
 mod listener;
 mod lora;
 mod middleware;
+mod mm_wire;
 mod model_names;
 mod render;
 mod routes;

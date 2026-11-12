@@ -130,6 +130,37 @@ def test_glm_mtp_feeds_back_final_normed_hidden(
     torch.testing.assert_close(logits_hidden, final_normed)
 
 
+@pytest.mark.skipif(
+    not current_platform.is_cuda(), reason="Tests the CUDA deepseek_v32 MTP layer"
+)
+def test_glm52_mtp_eh_proj_gets_low_latency_plan(default_vllm_config):
+    from vllm.models.deepseek_v32.nvidia import mtp
+
+    # SpeculativeConfig rewrites the draft model_type; the target keeps GLM's.
+    draft_config = mock.MagicMock(
+        hidden_size=16, rms_norm_eps=1e-5, index_topk=8, model_type="deepseek_mtp"
+    )
+    vllm_config = mock.MagicMock()
+    vllm_config.speculative_config.draft_model_config.hf_config = draft_config
+    vllm_config.model_config.hf_config.model_type = "glm_moe_dsa"
+    vllm_config.model_config.dtype = torch.bfloat16
+    vllm_config.scheduler_config.max_num_batched_tokens = 4
+    plan = {1: ("cute", None)}
+
+    with (
+        mock.patch.object(mtp, "build_glm52_plan", return_value=plan) as build_plan,
+        mock.patch.object(mtp, "DeepseekV32DecoderLayer", return_value=nn.Identity()),
+        mock.patch.object(mtp, "SharedHead", return_value=nn.Identity()),
+        mock.patch.object(mtp, "SparseMLAIndexGroupBuilder"),
+        mock.patch.object(mtp, "get_sparse_mla_index_group_max_rows", return_value=4),
+        mock.patch.object(mtp.current_platform, "device_type", "cpu"),
+    ):
+        layer = mtp.DeepseekV32MultiTokenPredictorLayer(vllm_config, "model.layers.78")
+
+    build_plan.assert_called_once_with(layer.eh_proj.weight, torch.bfloat16)
+    assert layer._eh_plan is plan
+
+
 @pytest.mark.parametrize(
     ("method", "expected"),
     [

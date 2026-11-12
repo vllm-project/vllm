@@ -202,8 +202,7 @@ class PoolingRunner:
             raise RuntimeError(
                 "CUDA out of memory occurred when warming up pooler "
                 f"({task=}) with {num_reqs} dummy requests. Please try "
-                "lowering `max_num_seqs` or `gpu_memory_utilization` when "
-                "initializing the engine."
+                "lowering `max_num_seqs` when initializing the engine."
             ) from e
 
     def dummy_pooler_run(self, hidden_states: torch.Tensor) -> None:
