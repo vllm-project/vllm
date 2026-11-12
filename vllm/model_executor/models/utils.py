@@ -260,7 +260,21 @@ class AutoWeightsLoader:
         ignore_unexpected_prefixes: list[str] | None = None,
         ignore_unexpected_suffixes: list[str] | None = None,
         ignore_unexpected_patterns: Iterable[str] | None = None,
+        ignore_unexpected_names_mapper: WeightsMapper | None = None,
     ) -> None:
+        """Args:
+        module: The module to load weights into.
+        ignore_unexpected_prefixes: Skip unexpected weights whose qualname
+            starts with any of these.
+        ignore_unexpected_suffixes: Skip unexpected weights whose qualname
+            ends with any of these.
+        ignore_unexpected_patterns: Skip unexpected weights whose checkpoint
+            name, mapped by `ignore_unexpected_names_mapper`, matches any of
+            these regexes. Expected weights still load.
+        ignore_unexpected_names_mapper: Maps checkpoint names to the names
+            `ignore_unexpected_patterns` are matched against.
+
+        """
         super().__init__()
 
         self.module = module
@@ -269,6 +283,11 @@ class AutoWeightsLoader:
         self.ignore_unexpected_patterns = [
             re.compile(p) for p in ignore_unexpected_patterns or []
         ]
+        self.ignore_unexpected_names_mapper = (
+            ignore_unexpected_names_mapper or WeightsMapper()
+        )
+        self.ignore_unexpected_names: set[str] = set()
+        """Qualnames of weights matching `ignore_unexpected_patterns`."""
 
         # Weight tying makes two qualnames point at the same `nn.Parameter`
         # (e.g. `lm_head.weight` and `model.embed_tokens.weight`). Loading both
@@ -310,8 +329,19 @@ class AutoWeightsLoader:
     def _can_ignore_unexpected(self, qualname: str) -> bool:
         iup = (qualname.startswith(p) for p in self.ignore_unexpected_prefixes)
         ius = (qualname.endswith(s) for s in self.ignore_unexpected_suffixes)
-        iur = (p.search(qualname) for p in self.ignore_unexpected_patterns)
-        return any(iup) or any(ius) or any(iur)
+        return any(iup) or any(ius) or qualname in self.ignore_unexpected_names
+
+    def _find_ignore_unexpected_names(
+        self, weights: Iterable[tuple[str, torch.Tensor]], mapper: WeightsMapper
+    ) -> Iterable[tuple[str, torch.Tensor]]:
+        """Record the qualnames of weights matching `ignore_unexpected_patterns`."""
+        patterns = self.ignore_unexpected_patterns
+        for name, weight in weights:
+            key = self.ignore_unexpected_names_mapper.map_name(name)
+            matches = key is not None and any(p.search(key) for p in patterns)
+            if matches and (qualname := mapper.map_name(name)) is not None:
+                self.ignore_unexpected_names.add(qualname)
+            yield name, weight
 
     def _load_param(
         self,
@@ -453,7 +483,7 @@ class AutoWeightsLoader:
 
                 # Patterns can name weights below the missing module
                 qualnames = [maybe_prefix(prefix, name) for name, _ in child_weights]
-                if all(map(self._can_ignore_unexpected, qualnames)):
+                if all(q in self.ignore_unexpected_names for q in qualnames):
                     logger.debug("Ignoring missing %s", prefix)
 
                     continue
@@ -493,6 +523,8 @@ class AutoWeightsLoader:
             self.ignore_unexpected_suffixes.extend(ignore_unexpected_suffixes)
         mapper |= self.REMOVE_UNUSED_ROTARY_EMBEDS_MAPPER
 
+        if self.ignore_unexpected_patterns:
+            weights = self._find_ignore_unexpected_names(weights, mapper)
         weights = mapper.apply(weights)
         weights = self._filter_skipped(weights)
 

@@ -170,17 +170,31 @@ def test_ignore_unexpected_patterns_skip_only_unexpected_weights():
 
     ones = torch.ones(2, 2)
     weights = [
-        ("moe.norm.weight", ones),
-        ("dense.norm.weight", ones),
-        # The pattern names weights below the missing module (e.g. MTP's `head`)
-        ("missing.head.weight", ones),
+        ("model.moe.norm.weight", ones),
+        ("model.dense.norm.weight", ones),
+        # Below the missing module, e.g. MiMo-V2-Flash's `^model\.mtp\.`
+        ("model.missing.head.weight", ones),
     ]
-    patterns = [r"\.norm", r"head\.weight"]
+    # Patterns match checkpoint names, before the mapper strips `model.`
+    patterns = [r"\.norm\.", r"^model\.missing\."]
+    mapper = WeightsMapper(orig_to_new_prefix={"model.": ""})
     loader = AutoWeightsLoader(mod, ignore_unexpected_patterns=patterns)
-    loaded = loader.load_weights(iter(weights))
+    loaded = loader.load_weights(iter(weights), mapper=mapper)
 
     assert loaded == {"moe.norm.weight"}
     assert torch.all(mod.moe.norm.weight == 1)
+
+
+@pytest.mark.cpu_test
+def test_unexpected_weight_below_missing_module_raises():
+    """Only patterns, not the `.bias` suffix every load ignores, may skip weights
+    below a missing module."""
+    mod = torch.nn.Module()
+    mod.lin = torch.nn.Linear(2, 2, bias=False)
+
+    weights = [("lin.weight", torch.ones(2, 2)), ("typo_proj.bias", torch.ones(2))]
+    with pytest.raises(ValueError, match="typo_proj"):
+        AutoWeightsLoader(mod).load_weights(iter(weights))
 
 
 class raise_if_cuda_sync:

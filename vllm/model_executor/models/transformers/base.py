@@ -145,7 +145,8 @@ class Base(
         self.ignore_unexpected_suffixes: list[str] = []
         """Ignore unexpected weights whose qualname ends with these suffixes."""
         self.ignore_unexpected_patterns: list[str] = []
-        """Ignore unexpected weights whose qualname matches these regexes."""
+        """Ignore unexpected weights whose checkpoint name, after Transformers'
+        renamings, matches these regexes."""
         self.packed_modules_mapping: dict[str, list[str]] = {}
         """Fused module -> constituent projections, populated by `recursive_replace`
         for the quantization machinery and loaders (e.g. bitsandbytes)."""
@@ -379,6 +380,10 @@ class Base(
         self.hf_to_vllm_mapper = WeightsMapper(
             orig_to_new_renaming=orig_to_new_renaming,
             orig_to_new_regex=orig_to_new_regex,
+        )
+        # The names Transformers matches `_keys_to_ignore_on_load_unexpected` against
+        self.hf_renaming_mapper = WeightsMapper(
+            orig_to_new_renaming=orig_to_new_renaming
         )
 
         # Apply mapping to quantization config if needed
@@ -920,6 +925,7 @@ class Base(
             ignore_unexpected_prefixes=self.ignore_unexpected_prefixes,
             ignore_unexpected_suffixes=self.ignore_unexpected_suffixes,
             ignore_unexpected_patterns=self.ignore_unexpected_patterns,
+            ignore_unexpected_names_mapper=self.hf_renaming_mapper,
         )
         return loader.load_weights(weights, mapper=self.hf_to_vllm_mapper)
 
