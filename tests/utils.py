@@ -1434,6 +1434,40 @@ def init_test_distributed_environment(
             ensure_model_parallel_initialized(tp_size, pp_size)
 
 
+def _print_ray_startup_state() -> None:
+    """Print the state behind a failed local ray.init: Ray reports only "Timed
+    out waiting for file .../gcs_server_port_...", and its GCS writes no logs
+    until it is up."""
+    import psutil
+
+    print(
+        "===== ray.init failed: "
+        f"loadavg={os.getloadavg()} cpus={os.cpu_count()} "
+        f"mem_available={psutil.virtual_memory().available >> 20}MiB "
+        f"tmp_free={psutil.disk_usage('/tmp').free >> 20}MiB"
+    )
+    # Our children (a crashed GCS stays a zombie) and Ray processes left by
+    # earlier sessions.
+    procs = {p.pid: p for p in psutil.Process().children(recursive=True)}
+    for proc in psutil.process_iter():
+        with contextlib.suppress(psutil.Error):
+            if "ray/core/src" in " ".join(proc.cmdline()):
+                procs[proc.pid] = proc
+    for proc in procs.values():
+        with contextlib.suppress(psutil.Error):
+            age = time.time() - proc.create_time()
+            print(
+                f"pid={proc.pid} ppid={proc.ppid()} name={proc.name()} "
+                f"status={proc.status()} age={age:.0f}s "
+                f"{' '.join(proc.cmdline())[:200]}"
+            )
+    logs = Path("/tmp/ray/session_latest/logs").resolve()
+    print(f"{logs}: {sorted(p.name for p in logs.glob('*'))}")
+    for log in sorted([*logs.glob("gcs_server*"), *logs.glob("raylet*")]):
+        tail = log.read_text(errors="replace").splitlines()[-30:]
+        print(f"----- {log.name} (last {len(tail)} lines)", *tail, sep="\n")
+
+
 def multi_process_parallel(
     monkeypatch: pytest.MonkeyPatch,
     tp_size: int,
@@ -1453,11 +1487,11 @@ def multi_process_parallel(
         ),
         **{env_var: "1" for env_var in current_platform.ray_noset_device_env_vars},
     }
-    ray.init(
-        runtime_env={
-            "env_vars": env_vars,
-        }
-    )
+    try:
+        ray.init(runtime_env={"env_vars": env_vars})
+    except Exception:
+        _print_ray_startup_state()
+        raise
 
     distributed_init_port = get_open_port()
     # Separate port for the DP master group; only used when data_parallel_size > 1.
