@@ -149,6 +149,9 @@ def can_fuse_query_quant(linears: list[torch.nn.Module]) -> bool:
     """Require both local projections to use the same MXFP8 activation ABI."""
     if not current_platform.is_cuda():
         return False
+    from vllm.model_executor.kernels.linear.mxfp8.batch_invariant import (
+        BatchInvariantMxfp8LinearKernel,
+    )
     from vllm.model_executor.kernels.linear.mxfp8.flashinfer import (
         FlashInferCutedslMxfp8LinearKernel,
         FlashInferCutlassMxfp8LinearKernel,
@@ -166,6 +169,7 @@ def can_fuse_query_quant(linears: list[torch.nn.Module]) -> bool:
             FlashInferCutedslMxfp8LinearKernel,
             FlashInferCutlassMxfp8LinearKernel,
             TorchMxFp8LinearKernel,
+            BatchInvariantMxfp8LinearKernel,
         )
         for linear in linears
     )

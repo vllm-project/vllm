@@ -24,6 +24,116 @@ def _require_sm90_and_cutedsl():
 # ===== Helpers =====
 
 
+@pytest.mark.parametrize(
+    "shape",
+    [
+        (7, 61, 256),
+        (5, 40, 264),
+        (17, 384, 5120),
+        (33, 2048, 5120),
+        (17, 129280, 5120),
+    ],
+)
+@torch.inference_mode()
+def test_fixed_bf16_projection_preserves_rows_in_batches_and_graph(shape):
+    """Fixed CuTe reduction covers tails, compile dispatch and changed replay data."""
+    from vllm.model_executor.kernels.linear.cute_dsl.batch_invariant import (
+        bf16_fixed_mm,
+    )
+
+    m, n, k = shape
+    torch.manual_seed(81)
+    a = torch.randint(-4, 5, (m, k), device="cuda").bfloat16()
+    weight = torch.randint(-4, 5, (n, k), device="cuda").bfloat16()
+    actual = bf16_fixed_mm(a, weight)
+    # Integer inputs keep each FP32 partial exact, independently of its tree.
+    oracle = (a.cpu().double() @ weight.cpu().double().T).float()
+    assert actual.dtype == torch.float32
+    assert torch.equal(actual.cpu(), oracle)
+    from vllm.model_executor.determinism.batch_invariant import linear_batch_invariant
+
+    linear = linear_batch_invariant(a.unsqueeze(0), weight)
+    assert torch.equal(linear.cpu(), oracle.bfloat16().unsqueeze(0))
+    assert torch.equal(actual[:1], bf16_fixed_mm(a[:1], weight))
+    assert torch.equal(bf16_fixed_mm(a.t().contiguous().t(), weight), actual)
+    torch.library.opcheck(
+        torch.ops.vllm.bf16_fixed_mm.default,
+        (a, weight),
+        test_utils=("test_faketensor", "test_aot_dispatch_dynamic"),
+    )
+    torch.accelerator.synchronize()
+    graph = torch.cuda.CUDAGraph()
+    with torch.cuda.graph(graph):
+        replayed = bf16_fixed_mm(a, weight)
+    a.zero_()
+    replayed.fill_(float("nan"))
+    graph.replay()
+    assert torch.count_nonzero(replayed).item() == 0
+    # Real BF16 distributions can expose rounding hidden by the exact oracle.
+    a.normal_()
+    weight.normal_()
+    actual = bf16_fixed_mm(a, weight)
+    assert torch.equal(actual[:1], bf16_fixed_mm(a[:1], weight))
+
+
+@pytest.mark.parametrize(
+    "n,k", [(384, 5120), (1024, 5120), (2048, 5120), (129280, 5120)]
+)
+@torch.inference_mode()
+def test_tensor_core_bf16_projection_rows_ignore_batch(monkeypatch, n, k):
+    """VLLM_BI_BF16_GEMM=tensor_core: DeepGEMM without split-K gives every row
+    the same bits at any M, including under CUDA-graph replay."""
+    from vllm import envs
+    from vllm.model_executor.kernels.linear.cute_dsl import batch_invariant as bi
+    from vllm.platforms import current_platform
+    from vllm.utils.deep_gemm import is_deep_gemm_supported
+
+    if not (
+        current_platform.is_device_capability_family(100) and is_deep_gemm_supported()
+    ):
+        pytest.skip("DeepGEMM BF16 GEMM requires SM100")
+    monkeypatch.setattr(envs, "VLLM_BI_BF16_GEMM", "tensor_core")
+    torch.manual_seed(n)
+    total = 1024 if n > 100000 else 8192
+    a = torch.randn(total, k, device="cuda").bfloat16()
+    weight = (torch.randn(n, k, device="cuda") * k**-0.5).bfloat16()
+    assert bi._uses_tensor_core(weight)
+    reference = bi.bf16_fixed_mm(a, weight)
+    for m in (1, 6, 7, 96, 129, 1000, total // 2):
+        assert torch.equal(bi.bf16_fixed_mm(a[-m:], weight), reference[-m:]), m
+    rows = torch.randperm(total, device="cuda")[:300]
+    assert torch.equal(bi.bf16_fixed_mm(a[rows], weight), reference[rows])
+    static = a[:96].clone()
+    bi.bf16_fixed_mm(static, weight)
+    graph = torch.cuda.CUDAGraph()
+    with torch.cuda.graph(graph):
+        replayed = bi.bf16_fixed_mm(static, weight)
+    static.copy_(a[100:196])
+    graph.replay()
+    assert torch.equal(replayed, reference[100:196])
+
+
+def test_tensor_core_rows_compile_before_serving(monkeypatch):
+    """The lm_head runs every row count up to its largest step up front, so a
+    later verification batch finds its DeepGEMM config already compiled."""
+    from types import SimpleNamespace
+
+    from vllm import envs
+    from vllm.model_executor.kernels.linear.cute_dsl import batch_invariant as bi
+
+    monkeypatch.setattr(envs, "VLLM_BI_BF16_GEMM", "tensor_core")
+    monkeypatch.setattr(bi, "_WARMED_M", {})
+    rows: list[int] = []
+    deep_gemm = SimpleNamespace(bf16_gemm_nt=lambda a, w, out: rows.append(len(a)))
+    monkeypatch.setattr(bi, "_deterministic_deep_gemm", lambda: deep_gemm)
+    weight = torch.zeros(128, 256, dtype=torch.bfloat16, device="cuda")
+    bi.compile_tensor_core_rows(weight, 5)
+    assert rows == [1, 2, 3, 4, 5]
+    bi.compile_tensor_core_rows(weight, 3)
+    bi._compile_tensor_core_configs(weight[:4], weight, torch.empty(4, 128))
+    assert rows == [1, 2, 3, 4, 5]
+
+
 def _ref(a, b):
     return torch.mm(a.float(), b.float().T)
 
@@ -607,3 +717,48 @@ def test_bf16_output_and_fp32_cache_coexist(M, N):
 
 if __name__ == "__main__":
     pytest.main([__file__, "-v"])
+
+
+@torch.inference_mode(False)
+def test_fixed_bf16_projection_runs_on_autograd_backward_stream():
+    """The CuTe launch follows torch's current stream on autograd threads.
+
+    The autograd engine sets its backward threads' stream from C++, which
+    vLLM's thread-local stream cache never sees; a launch taken from that
+    cache runs on a stream that does not wait for the kernel's inputs. The
+    producer below is long enough that a wrong stream reads stale data.
+    """
+    from vllm.model_executor.kernels.linear.cute_dsl.batch_invariant import (
+        bf16_fixed_mm,
+    )
+
+    torch.manual_seed(5)
+    m, n, k = 16, 384, 5120
+    weight = torch.randn(n, k, device="cuda").bfloat16()
+    big = torch.randn(8192, 8192, device="cuda")
+    seen: list[tuple[torch.Tensor, torch.Tensor]] = []
+
+    class _Proj(torch.autograd.Function):
+        @staticmethod
+        def forward(ctx, x):
+            return x * 2
+
+        @staticmethod
+        def backward(ctx, grad):
+            h = big
+            for _ in range(6):
+                h = h @ big
+            a = (h[:m, :k] * 1e-3).bfloat16()
+            seen.append((a, bf16_fixed_mm(a, weight)))
+            return grad
+
+    for _ in range(3):
+        x = torch.ones(m, k, device="cuda", requires_grad=True)
+        _Proj.apply(x).sum().backward()
+    torch.accelerator.synchronize()
+    for a, out in seen:
+        ref = a.float() @ weight.float().T
+        assert torch.allclose(out, ref, rtol=1e-2, atol=1e-2), (
+            "backward-thread launch read stale inputs"
+        )
+    assert torch.equal(seen[1][1], seen[2][1])
