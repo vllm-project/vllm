@@ -1382,6 +1382,9 @@ class SimpleStreamingEventProcessor:
     ) -> list[StreamingResponsesResponse]:
         """Open a new state and emit its 'added' / 'open' event sequence."""
         handlers = self._STATE_HANDLERS[target_state]
+        if target_state != _StateType.CONTENT:
+            # held logprobs came before this item, not from the output text
+            self.pending_logprobs = []
         if target_state == _StateType.TOOL_CALL:
             assert tool_call is not None
             call_name = resolve_responses_tool_call_name(
