@@ -57,17 +57,6 @@ def raise_if_nan_logits(num_nans_in_logits: Mapping[str, int]) -> None:
 
 
 @triton.jit
-def _kernel_slots_kernel(src, dst, n, block_size, shift, BLOCK: tl.constexpr):
-    """`dst = src + src // block_size * shift` over contiguous 1-D slots;
-    negative (padded) slots stay."""
-    offs = tl.program_id(0) * BLOCK + tl.arange(0, BLOCK)
-    mask = offs < n
-    slot = tl.load(src + offs, mask=mask)
-    mapped = tl.where(slot < 0, slot, slot + slot // block_size * shift)
-    tl.store(dst + offs, mapped, mask=mask)
-
-
-@triton.jit
 def _zero_kv_blocks_kernel(
     seg_addrs_ptr,
     seg_block_strides_ptr,
@@ -285,10 +274,6 @@ class AttentionGroup:
     # Persistent per ubatch: CUDA graphs capture the mapped block table.
     kernel_block_table: torch.Tensor | None = None
     kernel_block_offsets: torch.Tensor | None = None
-    # Set by runners that also map token caches' slot mappings to kernel blocks
-    # (map_to_kernel_slot_mapping), which lets packed token caches split.
-    maps_slot_mapping: bool = False
-    kernel_slot_mapping: torch.Tensor | None = None
     # When ubatching is enabled we will have a metadata builder for each ubatch
     # so that if they use internal persistent buffers for cudagraphs, and they
     # won't have to worry about conflicting with the other ubatches.
@@ -342,13 +327,6 @@ class AttentionGroup:
                 dtype=torch.int32,
                 device=device,
             )
-            if self.maps_slot_mapping and spec.tokens_per_state <= 1:
-                self.kernel_slot_mapping = torch.zeros(
-                    num_metadata_builders,
-                    vllm_config.scheduler_config.max_num_batched_tokens,
-                    dtype=torch.int64,
-                    device=device,
-                )
         self.metadata_builders = [
             builder_cls(
                 kv_cache_spec_builder,
@@ -390,9 +368,6 @@ class AttentionGroup:
             block_table_tensor=self.map_to_kernel_block_table(
                 common_attn_metadata.block_table_tensor, ubatch_idx
             ),
-            slot_mapping=self.map_to_kernel_slot_mapping(
-                common_attn_metadata.slot_mapping, ubatch_idx
-            ),
         )
 
     def map_to_kernel_block_table(
@@ -412,36 +387,6 @@ class AttentionGroup:
         )
         return out
 
-    def map_to_kernel_slot_mapping(
-        self,
-        slot_mapping: torch.Tensor,
-        ubatch_idx: int = 0,
-        out: torch.Tensor | None = None,
-    ) -> torch.Tensor:
-        """A token cache's slots in the kernel blocks of a packed cache: offset
-        `t` of block `b` moves to `b * kernel_block_stride * kernel_block_size
-        + t`. Padded (negative) slots stay. Written into `out` or this group's
-        persistent per-ubatch buffer."""
-        if not self.kernel_block_stride or self.kernel_slot_mapping is None:
-            return slot_mapping
-        assert self.kernel_block_size is not None
-        block_size = self.kv_cache_spec.block_size
-        shift = self.kernel_block_stride * self.kernel_block_size - block_size
-        if out is None:
-            out = self.kernel_slot_mapping[ubatch_idx, : slot_mapping.shape[0]]
-        if slot_mapping.is_cuda:
-            # One launch instead of the five ops below: this runs per packed
-            # group on every forward, the drafter's included.
-            n = slot_mapping.numel()
-            grid = (triton.cdiv(n, 1024),)
-            _kernel_slots_kernel[grid](
-                slot_mapping, out, n, block_size, shift, BLOCK=1024
-            )
-            return out
-        torch.floor_divide(slot_mapping, block_size, out=out)
-        out.mul_(shift).add_(slot_mapping)
-        return torch.where(slot_mapping < 0, slot_mapping, out, out=out)
-
     def map_kv_cache_to_kernel_blocks(self, kv_cache: torch.Tensor) -> torch.Tensor:
         """Views a packed cache in manager blocks as kernel blocks."""
         assert self.kernel_block_size is not None
@@ -449,16 +394,11 @@ class AttentionGroup:
         kernel_rows = spec.get_num_kernel_states(self.kernel_block_size)
         if kv_cache.shape[-2] == kernel_rows:
             return kv_cache
-        # Token caches are written through manager-block slot mappings, so only
-        # caches written from their block table (compressed ones, or as their
-        # backend declares) or whose slot mappings are mapped too
-        # (maps_slot_mapping) can be mapped.
+        # Token and pooled caches are written through manager-block slot
+        # mappings unless self-addressed, so only those and compressed caches
+        # (written from their block table) can be mapped.
         if (
-            (
-                spec.tokens_per_state <= 1
-                and not self.backend.writes_kv_cache_from_block_table()
-                and not self.maps_slot_mapping
-            )
+            (spec.tokens_per_state <= 1 and spec.uses_slot_mapping)
             or kv_cache.shape[1] != 1
             or kv_cache.stride(0) % (kernel_rows * kv_cache.stride(-2))
         ):

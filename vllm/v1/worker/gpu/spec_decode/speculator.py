@@ -11,6 +11,7 @@ import torch
 import torch.nn as nn
 
 from vllm.config import VllmConfig, get_layers_from_vllm_config
+from vllm.config import replace as replace_config
 from vllm.config.compilation import CUDAGraphMode
 from vllm.config.speculative import _DRAFT_VLLM_CONFIG_OVERRIDES
 from vllm.distributed.eplb.eplb_state import EplbState
@@ -148,15 +149,19 @@ class BaseSpeculator(ABC):
 
 
 class DraftModelSpeculator(BaseSpeculator):
-    # Whether every slot mapping the speculator builds goes through its attention
-    # groups' map_to_kernel_slot_mapping, so packed token caches may split.
-    maps_slot_mapping = False
-
     # Draft prefill runs on the target's batch, so it can reuse the target
     # forward's attention metadata. Otherwise the drafter rebuilds it.
     can_reuse_target_attn_metadata: bool = True
 
     def __init__(self, vllm_config: VllmConfig, device: torch.device):
+        assert vllm_config.speculative_config is not None
+        parallel_config = vllm_config.parallel_config
+        dcp = vllm_config.speculative_config.draft_decode_context_parallel_size
+        if dcp and dcp != parallel_config.decode_context_parallel_size:
+            vllm_config = copy.copy(vllm_config)
+            vllm_config.parallel_config = replace_config(
+                parallel_config, decode_context_parallel_size=dcp
+            )
         self.vllm_config = vllm_config
         self.device = device
 
@@ -402,7 +407,6 @@ class DraftModelSpeculator(BaseSpeculator):
             self.attn_vllm_config,
             self.device,
             active_layer_names=self.draft_attn_layer_names,
-            maps_slot_mapping=self.maps_slot_mapping,
         )
         self.block_tables = block_tables
         # The target model runner's buffers and attention groups. Draft
