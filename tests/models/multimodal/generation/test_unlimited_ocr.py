@@ -7,9 +7,20 @@ from PIL import Image, ImageDraw, ImageFont
 from vllm import SamplingParams
 from vllm.exceptions import VLLMValidationError
 from vllm.platforms import current_platform
+from vllm.utils.flashinfer import has_flashinfer
 
 DASH_BACKENDS = (
-    ["ROCM_AITER_FA"] if current_platform.is_rocm() else ["FLASH_ATTN", "FLASHINFER"]
+    ["ROCM_AITER_FA"]
+    if current_platform.is_rocm()
+    else [
+        "FLASH_ATTN",
+        pytest.param(
+            "FLASHINFER",
+            marks=pytest.mark.skipif(
+                not has_flashinfer(), reason="requires FlashInfer"
+            ),
+        ),
+    ]
 )
 
 
@@ -264,6 +275,8 @@ def test_unlimited_ocr2_excess_markers_survive_preemption(
     """Recomputation preserves raw logits after routing passes the last page."""
     import torch
 
+    monkeypatch.setenv("VLLM_BATCH_INVARIANT", "1")
+    monkeypatch.setenv("VLLM_WORKER_MULTIPROC_METHOD", "spawn")
     requests = []
     for idx in range(2):
         pages = []
@@ -287,6 +300,8 @@ def test_unlimited_ocr2_excess_markers_survive_preemption(
         max_model_len=1024,
         max_num_seqs=2,
         max_num_batched_tokens=128,
+        # 80 blocks x 16 tokens fit one request but not both; preemption needs it.
+        block_size=16,
         num_gpu_blocks_override=80,
         kv_cache_memory_bytes=1024**3,
         enable_chunked_prefill=True,

@@ -862,14 +862,14 @@ def flash_dash_attention(q, k, v, used, bias, backend, bs, local):
         )
         lse = lse.T
     elif backend == "FLASH_ATTN":
-        from vllm.v1.attention.backends.fa_utils import get_flash_attn_version
-        from vllm.vllm_flash_attn.flash_attn_interface import flash_attn_varlen_func
+        from vllm.v1.attention.backends.fa_utils import (
+            flash_attn_varlen_func,
+            get_flash_attn_version,
+        )
 
         version = get_flash_attn_version(head_size=dim)
         if version is None:
-            raise RuntimeError(
-                "DASH FLASH_ATTN requires a supported CUDA FlashAttention"
-            )
+            raise RuntimeError("DASH FLASH_ATTN requires a supported FlashAttention")
         block_table = None
         if version != 4:
             # FA2/3 use paged addressing to separate segment offsets and lengths.

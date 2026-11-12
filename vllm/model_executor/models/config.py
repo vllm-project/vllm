@@ -156,13 +156,6 @@ class Glm5NextModelConfig(VerifyAndUpdateConfig):
 
         cache_config.cache_dtype = "fp8"
         logger.info_once("Using fp8 KV cache for GLM-5.3-Flash")
-        spec_config = vllm_config.speculative_config
-        if (
-            spec_config is not None
-            and spec_config.method not in ("mtp", "dspark")
-            and spec_config.kv_cache_dtype is None
-        ):
-            spec_config.kv_cache_dtype = "auto"
 
 
 class Ernie4_5_VLMoeForConditionalGenerationConfig(VerifyAndUpdateConfig):

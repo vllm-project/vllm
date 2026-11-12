@@ -211,7 +211,9 @@ class TritonMLAImpl(MLACommonImpl[MLACommonMetadata]):
         # Each decode row attends to the last `decode_sliding_window` keys.
         self.decode_sliding_window = sliding_window
         assert sliding_window is None or self.dcp_world_size == 1, (
-            "Sliding-window Triton MLA does not support decode context parallelism"
+            "Sliding-window Triton MLA does not support decode context "
+            "parallelism; for a draft model, set "
+            "draft_decode_context_parallel_size=1."
         )
 
         if attn_type != AttentionType.DECODER:
