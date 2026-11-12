@@ -2,7 +2,7 @@
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 """Attention-layer shapes of current flagship models, for backend test matrices.
 
-Values are copied from each model's Hugging Face ``config.json`` (read on
+Values are copied from each model's Hugging Face `config.json` (read on
 2026-10-24). Only models whose layers run through a dense MHA/GQA backend are
 listed; MLA and sparse-attention models (DeepSeek V3/V3.2/V4/V4.1, GLM-5.x,
 Kimi K3, MiniMax M3's sparse layers) belong to the MLA/sparse backend suites.
@@ -106,9 +106,9 @@ def shapes_rejected_by(head_sizes: list[int]) -> list[AttnShape]:
 
 @dataclass(frozen=True)
 class ParallelLayout:
-    """One deployment of a model on ``gpus`` GPUs (= tp * pp * pcp * dp).
+    """One deployment of a model on `gpus` GPUs (= tp * pp * pcp * dp).
 
-    ``ep`` is the expert-parallel group size (tp * pcp * dp) or 1 when EP is
+    `ep` is the expert-parallel group size (tp * pcp * dp) or 1 when EP is
     off; DCP reuses TP ranks and shards the KV cache, so each rank holds about
     1/dcp of the context. PCP alone replicates the KV cache. See
     attn-test-work/parallel-layouts.md for the vLLM rules behind each reason.

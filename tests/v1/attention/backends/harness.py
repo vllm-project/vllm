@@ -2,10 +2,10 @@
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 """Backend-agnostic pieces of the attention backend suites.
 
-- ``PagedBatch``: a reordered (decode, extend, prefill) batch with a unique
+- `PagedBatch`: a reordered (decode, extend, prefill) batch with a unique
   block per page, so a test can say which cache slots each request reads.
-- ``ref_attention``: float32 reference over logical (unpaged) K/V.
-- ``KernelSpy``: records which kernels a forward actually called.
+- `ref_attention`: float32 reference over logical (unpaged) K/V.
+- `KernelSpy`: records which kernels a forward actually called.
 """
 
 import math
@@ -61,7 +61,7 @@ def make_paged_batch(
     """Build metadata whose blocks are a random permutation (no aliasing).
 
     Block-table rows are padded with block 0, as the model runner does.
-    ``num_padded_tokens`` > sum(query_lens) leaves trailing padding slots of
+    `num_padded_tokens` > sum(query_lens) leaves trailing padding slots of
     -1, as a CUDA-graph-padded batch does. A request may have no query tokens:
     seq_len 0 is a FULL CUDA graph padding row, seq_len > 0 a request whose KV
     an async connector is still loading.

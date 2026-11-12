@@ -2,11 +2,11 @@
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 """Full-graph capture and replay of ROCM_AITER_FA's decode path.
 
-The builder declares ``UNIFORM_BATCH``: FULL_DECODE_ONLY and
+The builder declares `UNIFORM_BATCH`: FULL_DECODE_ONLY and
 FULL_AND_PIECEWISE capture uniform decode batches (q_len 1, or 1 + spec
 tokens) as full graphs. This mirrors the runner: metadata tensors live in
-persistent buffers, capture uses ``build_for_cudagraph_capture`` with
-``max_seq_len = max_model_len``, and every replay rebuilds metadata into the
+persistent buffers, capture uses `build_for_cudagraph_capture` with
+`max_seq_len = max_model_len`, and every replay rebuilds metadata into the
 same buffers with different sequence lengths and block tables. Mode-level
 behavior (NONE / PIECEWISE / FULL_DECODE_ONLY / FULL_AND_PIECEWISE through the
 runner) is in tests/v1/e2e/attention/test_rocm_aiter_fa_runtime.py.
