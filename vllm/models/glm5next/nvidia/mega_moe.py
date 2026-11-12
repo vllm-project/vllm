@@ -8,6 +8,7 @@ from torch import nn
 from vllm.config import VllmConfig
 from vllm.logger import init_logger
 from vllm.model_executor.layers.fused_moe.deep_gemm_mega_moe import (
+    MEGA_MOE_BF16,
     MEGA_MOE_MXFP8,
     DeepGemmMegaMoEExperts,
     MegaMoEWeightSpec,
@@ -23,13 +24,14 @@ Shard = tuple[int | None, str]
 
 
 class Glm5NextMegaMoEExperts(DeepGemmMegaMoEExperts):
-    """MXFP8 MegaMoE experts loaded from GLM-5.3-Flash's block-FP8 checkpoint.
+    """MegaMoE experts loaded from a GLM-5.3 checkpoint.
 
-    The checkpoint stores E4M3 weights with one float32 scale per
-    `weight_block_size` block; the kernel takes power-of-two UE8M0 scales per
-    1x32. Loading writes each weight shard straight into the kernel layout and
-    stages its block scale in `*_weight_scale_inv`. Once a load is complete,
-    the model's `process_weights_after_loading` calls
+    A BF16 checkpoint (`weight_block_size` None) runs the BF16 kernel and loads
+    as is. GLM-5.3-Flash's block-FP8 checkpoint stores E4M3 weights with one
+    float32 scale per `weight_block_size` block; the kernel takes power-of-two
+    UE8M0 scales per 1x32. Loading writes each weight shard straight into the
+    kernel layout and stages its block scale in `*_weight_scale_inv`. Once a
+    load is complete, the model's `process_weights_after_loading` calls
     `requantize_block_fp8`, which rounds every newly loaded shard to the
     kernel scales in place. The shared expert is fused the same way.
     """
@@ -38,7 +40,7 @@ class Glm5NextMegaMoEExperts(DeepGemmMegaMoEExperts):
         self,
         vllm_config: VllmConfig,
         *,
-        weight_block_size: tuple[int, int],
+        weight_block_size: tuple[int, int] | None,
         num_shared_experts: int = 0,
         **kwargs,
     ):
@@ -47,7 +49,8 @@ class Glm5NextMegaMoEExperts(DeepGemmMegaMoEExperts):
         # Shards whose weight / block scale arrived since the last requantize.
         self._new_weights: set[Shard] = set()
         self._new_scales: set[Shard] = set()
-        super().__init__(vllm_config, weight_format=MEGA_MOE_MXFP8, **kwargs)
+        weight_format = MEGA_MOE_BF16 if weight_block_size is None else MEGA_MOE_MXFP8
+        super().__init__(vllm_config, weight_format=weight_format, **kwargs)
 
     def _fusable_shared_experts(
         self, shared_experts: nn.Module | None
@@ -57,6 +60,8 @@ class Glm5NextMegaMoEExperts(DeepGemmMegaMoEExperts):
 
     def _create_weights(self) -> None:
         super()._create_weights()
+        if self.weight_block_size is None:
+            return
         e, h, i = self.num_local_experts, self.hidden_size, self.intermediate_size
         self._register_block_scale("w13", (e, 2 * i, h))
         self._register_block_scale("w2", (e, h, i))
@@ -69,6 +74,7 @@ class Glm5NextMegaMoEExperts(DeepGemmMegaMoEExperts):
         """Stage the checkpoint's float32 block scales of `name`. The kernel's
         `{name}_weight_scale` is derived from them and never loaded."""
         *outer, n, k = shape
+        assert self.weight_block_size is not None
         block_m, block_k = self.weight_block_size
         scale = torch.zeros(*outer, n // block_m, k // block_k, dtype=torch.float32)
         self.register_parameter(
@@ -211,6 +217,7 @@ class Glm5NextMegaMoEExperts(DeepGemmMegaMoEExperts):
         )
         # Power-of-two block scales requantize exactly; any other is rounded.
         if not torch.equal(block_scale, block_scale.log2().round().exp2()):
+            assert self.weight_block_size is not None
             logger.warning_once(
                 "GLM-5.3-Flash on the deep_gemm_mega_moe backend: the checkpoint's "
                 "%dx%d block-FP8 MoE scales are not all powers of two, so "
