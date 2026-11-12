@@ -455,3 +455,51 @@ def test_larger_draft_batch_uses_null_kpool_slots(
     else:
         slots = compute_slots()
     assert slots.tolist() == [24, 9, 42, 19, 36, -1, -1, -1]
+
+
+@pytest.mark.parametrize("draft_block", [856, 1080])
+@pytest.mark.parametrize("use_cuda_graph", [False, True])
+def test_issue62558_draft_slot_mapping_boundaries(draft_block, use_cuda_graph):
+    device = torch.device("cuda")
+    sizes = [2 * draft_block, draft_block]
+    tables = BlockTables(sizes, 1, 8, [3, 3], device)
+    positions_list = [
+        draft_block - 1,
+        draft_block,
+        draft_block + 1,
+        2 * draft_block - 1,
+        2 * draft_block,
+        2 * draft_block + 1,
+    ]
+    positions = torch.tensor(positions_list, dtype=torch.int64, device=device)
+    idx = torch.tensor([0], dtype=torch.int32, device=device)
+    query_start = torch.tensor([0, 6], dtype=torch.int32, device=device)
+
+    def compute():
+        return tables.compute_slot_mappings(
+            idx, query_start, positions, num_tokens_padded=8
+        )
+
+    original = ([3, 7, 2], [8, 4, 9])
+    tables.append_block_ids(0, original, overwrite=True)
+    tables.apply_staged_writes()
+    slots = compute()
+    if use_cuda_graph:
+        torch.accelerator.synchronize()
+        graph = torch.cuda.CUDAGraph()
+        with torch.cuda.graph(graph):
+            slots = compute()
+
+    for ids in [original, ([10, 11, 12], [13, 14, 15])]:
+        tables.append_block_ids(0, ids, overwrite=True)
+        tables.apply_staged_writes()
+        if use_cuda_graph:
+            graph.replay()
+        else:
+            slots = compute()
+        for group, block_size in enumerate(sizes):
+            expected = [
+                ids[group][pos // block_size] * block_size + pos % block_size
+                for pos in positions_list
+            ] + [PAD_SLOT_ID, PAD_SLOT_ID]
+            assert slots[group].tolist() == expected

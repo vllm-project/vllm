@@ -577,6 +577,11 @@ class AttentionSpec(KVCacheSpec):
     head_size_v: int = None  # type: ignore[assignment]
     kv_quant_mode: KVQuantMode = KVQuantMode.NONE
     page_size_padded: int | None = None
+    block_size_multiple: int | None = None
+    """Backend opt-in to resizing token blocks to multiples of this value.
+    None preserves the configured block size during draft page fitting.
+    This is distinct from the byte-level block_stride_alignment.
+    """
     num_head_slots: int | None = None
     """H of the logical `[B, H, N, C]` page when packing diverges from one
     slot per KV head. None means one slot per KV head. Published by the backend.
@@ -711,6 +716,7 @@ class FullAttentionSpec(AttentionSpec):
             dcp_sharded=specs[0].dcp_sharded,
             max_tp_shards=specs[0].max_tp_shards,
             page_size_padded=specs[0].page_size_padded,
+            block_size_multiple=specs[0].block_size_multiple,
             num_head_slots=specs[0].num_head_slots,
             state_content_bytes=specs[0].state_content_bytes,
             kv_head_major_slots=specs[0].kv_head_major_slots,
@@ -803,6 +809,7 @@ class MLAAttentionSpec(FullAttentionSpec):
             dcp_sharded=specs[0].dcp_sharded,
             max_tp_shards=specs[0].max_tp_shards,
             page_size_padded=specs[0].page_size_padded,
+            block_size_multiple=specs[0].block_size_multiple,
             num_head_slots=specs[0].num_head_slots,
             state_content_bytes=specs[0].state_content_bytes,
             kv_head_major_slots=specs[0].kv_head_major_slots,
@@ -870,6 +877,7 @@ class RSWASpec(FullAttentionSpec):
             dcp_sharded=base.dcp_sharded,
             max_tp_shards=base.max_tp_shards,
             page_size_padded=base.page_size_padded,
+            block_size_multiple=base.block_size_multiple,
             num_head_slots=base.num_head_slots,
             state_content_bytes=base.state_content_bytes,
             kv_head_major_slots=base.kv_head_major_slots,
@@ -1100,6 +1108,7 @@ class SlidingWindowMLASpec(SlidingWindowSpec):
             dcp_sharded=specs[0].dcp_sharded,
             max_tp_shards=specs[0].max_tp_shards,
             page_size_padded=specs[0].page_size_padded,
+            block_size_multiple=specs[0].block_size_multiple,
             num_head_slots=specs[0].num_head_slots,
             state_content_bytes=specs[0].state_content_bytes,
             kv_head_major_slots=specs[0].kv_head_major_slots,
@@ -1308,6 +1317,7 @@ class SinkFullAttentionSpec(FullAttentionSpec):
             dcp_sharded=specs[0].dcp_sharded,
             max_tp_shards=specs[0].max_tp_shards,
             page_size_padded=specs[0].page_size_padded,
+            block_size_multiple=specs[0].block_size_multiple,
             num_head_slots=specs[0].num_head_slots,
             state_content_bytes=specs[0].state_content_bytes,
             kv_head_major_slots=specs[0].kv_head_major_slots,

@@ -97,7 +97,6 @@ tests/quantization/test_quark.py  # CI jobs disabled pending locked torchao tran
 tests/quantization/test_register_quantization_config.py  # CI jobs disabled pending locked torchao transitive dependencies
 tests/quantization/test_torchao.py  # CI jobs disabled pending locked torchao transitive dependencies
 tests/quantization/test_trtllm_nvfp4_hidden_dim_padding.py  # CI jobs disabled pending locked torchao transitive dependencies
-tests/quantization/test_turboquant.py  # CI jobs disabled pending locked torchao transitive dependencies
 tests/rocm/test_moe_padding.py  # CI jobs disabled pending locked torchao transitive dependencies
 tests/rocm/test_moe_weight_replay.py  # CI jobs disabled pending locked torchao transitive dependencies
 

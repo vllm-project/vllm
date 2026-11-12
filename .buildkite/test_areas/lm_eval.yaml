@@ -1121,11 +1121,16 @@ steps:
   timeout_in_minutes: 30
   device: h200_18gb
   source_file_dependencies:
+  - tests/quantization/test_turboquant.py
+  - vllm/v1/core/kv_cache_planning.py
+  - vllm/v1/kv_cache_interface.py
+  - vllm/v1/attention/backends/triton_attn.py
   - vllm/model_executor/layers/quantization/turboquant/
   - vllm/v1/attention/backends/turboquant_attn.py
   - vllm/v1/attention/ops/triton_turboquant_decode.py
   - vllm/v1/attention/ops/triton_turboquant_store.py
   commands:
+  - pytest -v -s quantization/test_turboquant.py
   - pytest -s -v evals/gsm8k/test_gsm8k_correctness.py --config-list-file=evals/gsm8k/configs/models-turboquant-t4nc.txt
   mirror:
     amd:

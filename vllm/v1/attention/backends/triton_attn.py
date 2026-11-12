@@ -306,8 +306,21 @@ class TritonAttentionMetadataBuilder(AttentionMetadataBuilder[TritonAttentionMet
 class TritonAttentionBackend(AttentionBackend):
     @classmethod
     def customize_spec(cls, spec: "AttentionSpec") -> "AttentionSpec":
-        """Per-token-head modes pack inline fp32 scales after each head's
-        data, so the content is (data + one scale) per K/V side."""
+        """Publish token block constraints and per-token-head scale packing.
+
+        Per-token-head modes store (data + one fp32 scale) per K/V side.
+        """
+        # The CUDA pointer-based FP8 path supports eight-token blocks.
+        # Keep other platforms and cache encodings on their existing contract.
+        if (
+            current_platform.is_cuda()
+            and not envs.VLLM_TRITON_USE_TD
+            and spec.kv_quant_mode == KVQuantMode.FP8_PER_TENSOR
+            and spec.head_size in (128, 256)
+            and spec.head_size_v == spec.head_size
+            and spec.tokens_per_state == 1
+        ):
+            spec = replace(spec, block_size_multiple=8)
         mode = spec.kv_quant_mode
         if spec.state_content_bytes is not None or not mode.is_per_token_head:
             return spec
@@ -337,6 +350,8 @@ class TritonAttentionBackend(AttentionBackend):
 
     @staticmethod
     def get_supported_kernel_block_sizes(kv_cache_spec=None) -> list[int | MultipleOf]:
+        if kv_cache_spec is not None and kv_cache_spec.block_size_multiple == 8:
+            return [MultipleOf(8)]
         return [MultipleOf(16)]
 
     @classmethod

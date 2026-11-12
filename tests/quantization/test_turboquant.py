@@ -6,6 +6,7 @@ Run: .venv/bin/python -m pytest tests/quantization/test_turboquant.py -v
 """
 
 import math
+from dataclasses import replace
 from types import SimpleNamespace
 
 import pytest
@@ -665,6 +666,369 @@ class TestHadamardRotation:
 # ============================================================================
 # Store → Decode round-trip test (GPU + Triton required)
 # ============================================================================
+
+
+def test_fp8_draft_fits_turboquant_hybrid_pages(vllm_runner, monkeypatch):
+    """An FP8 drafter must not inflate aligned target pages or break decoding."""
+    import json
+
+    from vllm import SamplingParams
+
+    monkeypatch.setenv("VLLM_USE_V2_MODEL_RUNNER", "1")
+    monkeypatch.setenv("VLLM_TRITON_USE_TD", "0")
+    # The local test sends a cache-inspection callable to its own worker.
+    monkeypatch.setenv("VLLM_ALLOW_INSECURE_SERIALIZATION", "1")
+
+    def cache_layout(worker):
+        from vllm.v1.kv_cache_interface import (
+            AttentionSpec,
+            KVQuantMode,
+            UniformTypeKVCacheSpecs,
+        )
+
+        layout = []
+        for group in worker.model_runner.kv_cache_config.kv_cache_groups:
+            spec = group.kv_cache_spec
+            specs = (
+                spec.kv_cache_specs.values()
+                if isinstance(spec, UniformTypeKVCacheSpecs)
+                else [spec]
+            )
+            for layer_spec in specs:
+                layout.append(
+                    {
+                        # Merged specs do not retain is_draft. In this model
+                        # pair only the drafter uses per-tensor FP8 storage.
+                        "draft": isinstance(layer_spec, AttentionSpec)
+                        and layer_spec.kv_quant_mode == KVQuantMode.FP8_PER_TENSOR,
+                        "attention": isinstance(layer_spec, AttentionSpec),
+                        "block_size": layer_spec.block_size,
+                        "page_size": layer_spec.page_size_bytes,
+                    }
+                )
+        return layout
+
+    with vllm_runner(
+        "Qwen/Qwen3.5-4B",
+        revision="851bf6e806efd8d0a36b00ddf55e13ccb7b8cd0a",
+        trust_remote_code=False,
+        dtype="bfloat16",
+        block_size=None,
+        max_model_len=4096,
+        max_num_seqs=1,
+        max_num_batched_tokens=512,
+        enable_chunked_prefill=True,
+        enable_prefix_caching=False,
+        enforce_eager=True,
+        gpu_memory_utilization=0.8,
+        disable_log_stats=False,
+        limit_mm_per_prompt={"image": 0, "video": 0},
+        kv_cache_dtype="turboquant_4bit_nc",
+        speculative_config={
+            "method": "dflash",
+            "model": "vllm-project/Qwen3.5-4B-DFlash2",
+            "revision": "50d7919bb821601f23301bc72d2c34f4046a055d",
+            "num_speculative_tokens": 15,
+            "attention_backend": "TRITON_ATTN",
+            "kv_cache_dtype": "fp8",
+        },
+    ) as runner:
+        llm = runner.llm
+        layout = llm.collective_rpc(cache_layout)[0]
+        target = [s for s in layout if s["attention"] and not s["draft"]]
+        draft = [s for s in layout if s["draft"]]
+        assert target and draft, layout
+        assert len({s["page_size"] for s in layout}) == 1, layout
+        target_block = target[0]["block_size"]
+        for spec in draft:
+            assert spec["block_size"] < target_block, layout
+            assert target_block % spec["block_size"] == 0, layout
+
+        tokenizer = llm.get_tokenizer()
+        sentence = "The red fox jumps over the blue fence. "
+        filler = tokenizer.encode(sentence * 500, add_special_tokens=False)
+        tail = tokenizer.encode(
+            "\nRepeat that sentence twelve more times:\n",
+            add_special_tokens=False,
+        )
+        block = draft[0]["block_size"]
+        lengths = [block - 1, block + 1]
+        prompts = [
+            {"prompt_token_ids": filler[: n - len(tail)] + tail} for n in lengths
+        ]
+        assert [len(p["prompt_token_ids"]) for p in prompts] == lengths
+        outputs = llm.generate(prompts, SamplingParams(temperature=0, max_tokens=64))
+        assert all("red fox" in output.outputs[0].text for output in outputs)
+        accepted = next(
+            m.value
+            for m in llm.get_metrics()
+            if m.name == "vllm:spec_decode_num_accepted_tokens"
+        )
+        assert accepted > 0, "The FP8 drafter must contribute accepted tokens"
+        print(
+            "PAGE_FIT_RESULT",
+            json.dumps(
+                {
+                    "layout": layout,
+                    "prompt_lengths": lengths,
+                    "accepted_draft_tokens": accepted,
+                }
+            ),
+        )
+
+
+def test_turboquant_speculative_graph_matches_eager(vllm_runner):
+    """Graph verification must retain history after chunked prefill."""
+    from tests.models.utils import check_logprobs_close
+    from vllm import SamplingParams
+
+    sentence = "The red fox jumps over the blue fence. "
+    prompts = [
+        [
+            {
+                "role": "user",
+                "content": sentence * 60
+                + "Repeat the same sentence twelve more times, without commentary.",
+            }
+        ],
+        [
+            {
+                "role": "user",
+                "content": "A store sells 12 boxes with 8 pens each. "
+                "It sells 31 pens. How many pens remain? Explain the calculation.",
+            }
+        ],
+    ]
+    params = SamplingParams(temperature=0, max_tokens=128, logprobs=5)
+    results = []
+    for eager in (True, False):
+        with vllm_runner(
+            "Qwen/Qwen3.5-4B",
+            trust_remote_code=False,
+            dtype="bfloat16",
+            block_size=None,
+            max_model_len=2048,
+            max_num_seqs=1,
+            max_num_batched_tokens=256,
+            enable_chunked_prefill=True,
+            enable_prefix_caching=False,
+            enforce_eager=eager,
+            gpu_memory_utilization=0.8,
+            disable_log_stats=False,
+            limit_mm_per_prompt={"image": 0, "video": 0},
+            kv_cache_dtype="turboquant_4bit_nc",
+            speculative_config={
+                "method": "ngram",
+                "num_speculative_tokens": 7,
+                "prompt_lookup_min": 3,
+                "prompt_lookup_max": 5,
+            },
+            compilation_config={
+                "mode": 0,
+                "cudagraph_mode": "FULL_DECODE_ONLY",
+                "cudagraph_capture_sizes": [8],
+            },
+        ) as runner:
+            outputs = runner.llm.chat(
+                prompts, params, chat_template_kwargs={"enable_thinking": False}
+            )
+            assert len(outputs[0].prompt_token_ids) > 256
+            accepted = next(
+                m.value
+                for m in runner.llm.get_metrics()
+                if m.name == "vllm:spec_decode_num_accepted_tokens"
+            )
+            assert accepted > 0, "The test must exercise accepted speculative tokens"
+            results.append(
+                [
+                    (
+                        list(o.outputs[0].token_ids),
+                        o.outputs[0].text,
+                        o.outputs[0].logprobs,
+                    )
+                    for o in outputs
+                ]
+            )
+    check_logprobs_close(
+        outputs_0_lst=results[0],
+        outputs_1_lst=results[1],
+        name_0="eager",
+        name_1="graph",
+    )
+
+
+@pytest.fixture
+def turboquant_workspace():
+    from vllm.v1.worker.workspace import init_workspace_manager, reset_workspace_manager
+
+    init_workspace_manager(torch.device("cuda"))
+    yield
+    reset_workspace_manager()
+
+
+@pytest.mark.parametrize("query_len", [2, 8, 128, 129, 256])
+@pytest.mark.parametrize("num_reqs", [1, 2])
+@pytest.mark.parametrize("capture", [False, True])
+def test_continuation_uses_device_lengths(
+    tmp_path, turboquant_workspace, query_len, num_reqs, capture
+):
+    """Rejected draft tokens must not extend attention, including graph replay."""
+    from transformers import GPT2Config
+
+    from vllm.config import (
+        ModelConfig,
+        ParallelConfig,
+        SpeculativeConfig,
+        VllmConfig,
+        set_current_vllm_config,
+    )
+    from vllm.v1.attention.backend import CommonAttentionMetadata
+    from vllm.v1.attention.backends.turboquant_attn import (
+        TurboQuantAttentionImpl,
+        TurboQuantMetadataBuilder,
+    )
+    from vllm.v1.attention.ops.triton_turboquant_store import (
+        triton_turboquant_store,
+    )
+    from vllm.v1.kv_cache_interface import FullAttentionSpec
+
+    # Only the model configuration is needed; no weights or network access.
+    GPT2Config(
+        architectures=["GPT2LMHeadModel"],
+        n_embd=128,
+        n_head=1,
+        n_layer=1,
+        n_positions=1024,
+    ).save_pretrained(tmp_path)
+    model_config = ModelConfig(
+        model=str(tmp_path),
+        tokenizer=str(tmp_path),
+        skip_tokenizer_init=True,
+        max_model_len=1024,
+        dtype="float16",
+    )
+    parallel_config = ParallelConfig()
+    config = VllmConfig(
+        model_config=model_config,
+        parallel_config=parallel_config,
+        speculative_config=SpeculativeConfig(
+            method="ngram",
+            num_speculative_tokens=query_len - 1,
+            prompt_lookup_min=3,
+            prompt_lookup_max=5,
+            target_model_config=model_config,
+            target_parallel_config=parallel_config,
+        ),
+    )
+    device = torch.device("cuda")
+    spec = FullAttentionSpec(
+        block_size=16,
+        num_kv_heads=1,
+        head_size=128,
+        dtype=torch.uint8,
+    )
+    with set_current_vllm_config(config):
+        impl = TurboQuantAttentionImpl(
+            num_heads=1,
+            head_size=128,
+            scale=128**-0.5,
+            kv_cache_dtype="turboquant_4bit_nc",
+        )
+        builder = TurboQuantMetadataBuilder(spec, [], config, device)
+
+    layer = torch.nn.Module()
+    impl._ensure_on_device(layer, device)
+
+    cfg = impl.tq_config
+    capacity = 1024
+    torch.manual_seed(62558)
+    key = torch.randn(num_reqs * capacity, 1, 128, device=device, dtype=torch.float16)
+    value = torch.randn_like(key)
+    query = torch.randn(
+        num_reqs * query_len, 1, 128, device=device, dtype=torch.float16
+    )
+    cache = torch.zeros(
+        num_reqs * capacity // 16,
+        16,
+        1,
+        cfg.slot_size_aligned,
+        dtype=torch.uint8,
+        device=device,
+    )
+    rotation = _build_hadamard(128, "cuda")
+    centroids = get_centroids(128, cfg.centroid_bits).to(device)
+    midpoints = (centroids[:-1] + centroids[1:]) / 2
+    triton_turboquant_store(
+        key,
+        value,
+        cache,
+        torch.arange(num_reqs * capacity, device=device),
+        rotation,
+        midpoints,
+        mse_bits=cfg.key_mse_bits,
+        key_packed_size=cfg.key_packed_size,
+        value_quant_bits=cfg.effective_value_quant_bits,
+        key_fp8=cfg.key_fp8,
+    )
+    qsl_cpu = torch.arange(num_reqs + 1, dtype=torch.int32) * query_len
+    common = CommonAttentionMetadata(
+        query_start_loc=qsl_cpu.to(device),
+        query_start_loc_cpu=qsl_cpu,
+        seq_lens=torch.full((num_reqs,), query_len, device=device, dtype=torch.int32),
+        seq_lens_cpu_upper_bound=torch.full((num_reqs,), query_len, dtype=torch.int32),
+        num_reqs=num_reqs,
+        num_actual_tokens=num_reqs * query_len,
+        max_query_len=query_len,
+        max_seq_len=capacity,
+        block_table_tensor=torch.arange(
+            num_reqs * capacity // 16, device=device, dtype=torch.int32
+        ).reshape(num_reqs, -1),
+        slot_mapping=torch.arange(num_reqs * query_len, device=device),
+    )
+    metadata = (
+        builder.build_for_cudagraph_capture(common)
+        if capture
+        else builder.build(0, common)
+    )
+    # Raw current-chunk K/V deliberately differ from the cached prefix.
+    k_chunk, v_chunk = key[: len(query)], value[: len(query)]
+
+    def attend(meta):
+        return impl._prefill_attention(
+            query,
+            k_chunk,
+            v_chunk,
+            cache,
+            meta,
+            rotation,
+            centroids,
+            rotation,
+            layer=layer,
+        )
+
+    if capture:
+        stream = torch.cuda.Stream()
+        stream.wait_stream(torch.cuda.current_stream())
+        with torch.cuda.stream(stream):
+            attend(metadata)
+        torch.cuda.current_stream().wait_stream(stream)
+        graph = torch.cuda.CUDAGraph()
+        with torch.cuda.graph(graph):
+            captured_output = attend(metadata)
+
+    # Replay with both shorter and near-capacity contexts, without recapture.
+    for context in [query_len + 128, capacity - 8]:
+        exact_cpu = torch.arange(num_reqs, dtype=torch.int32) + context
+        metadata.seq_lens.copy_(exact_cpu)
+        exact = replace(metadata, seq_lens_cpu=exact_cpu)
+        expected = attend(exact)
+        if capture:
+            graph.replay()
+            actual = captured_output
+        else:
+            optimistic = replace(metadata, seq_lens_cpu=exact_cpu + 5)
+            actual = attend(optimistic)
+        torch.testing.assert_close(actual, expected, atol=0, rtol=0)
 
 
 @pytest.mark.skipif(not GPGPU_AVAILABLE, reason="GPGPU not available")
