@@ -297,7 +297,7 @@ pub async fn connect_handshake(
 
     // 5. After the optional gate has opened, every engine may now send READY. Only coordinated
     //    (MoE) DP ranks share collectives, so only they must agree on the parallel config.
-    let mut parallel_config_hash = None;
+    let mut reference_parallel_config_hash: Option<Option<String>> = None;
     while engines.values().any(|state| !state.is_ready_received()) {
         debug!(
             handshake_address,
@@ -331,7 +331,7 @@ pub async fn connect_handshake(
                 );
                 if enable_inproc_coordinator {
                     check_parallel_config_hash(
-                        &mut parallel_config_hash,
+                        &mut reference_parallel_config_hash,
                         &engine_id,
                         &handshake_message,
                     )?;
@@ -561,19 +561,22 @@ fn validate_partitioned_engine(
 /// Check that every engine reports the same `parallel_config_hash`. Engines
 /// from launchers that disagree would otherwise pass startup and hang in a
 /// cross-rank collective.
+/// A missing hash agrees only with another missing hash.
 fn check_parallel_config_hash(
-    expected: &mut Option<String>,
+    expected: &mut Option<Option<String>>,
     engine_id: &EngineId,
     ready: &ReadyMessage,
 ) -> Result<()> {
-    let Some(hash) = &ready.parallel_config_hash else {
-        return Ok(());
-    };
+    let hash = ready.parallel_config_hash.as_deref();
     match expected {
-        None => *expected = Some(hash.clone()),
-        Some(expected) if expected != hash => bail_unexpected_handshake_message!(
-            "engine {engine_id:?} reports parallel config hash {hash}, but other engines report {expected}; launch every DP rank with the same parallel config"
-        ),
+        None => *expected = Some(ready.parallel_config_hash.clone()),
+        Some(expected) if expected.as_deref() != hash => {
+            let hash = hash.unwrap_or("<missing>");
+            let expected = expected.as_deref().unwrap_or("<missing>");
+            bail_unexpected_handshake_message!(
+                "engine {engine_id:?} reports parallel config hash {hash}, but other engines report {expected}; launch every DP rank with the same parallel config"
+            )
+        }
         Some(_) => {}
     }
     Ok(())

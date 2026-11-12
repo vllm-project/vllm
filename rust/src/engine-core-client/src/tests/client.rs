@@ -1331,11 +1331,12 @@ async fn partitioned_handshake_rejects_unexpected_ranks_and_headless_remote_engi
 async fn handshake_checks_parallel_config_hashes_only_for_coordinated_dp() {
     init_tracing();
 
-    async fn connect_engines_with_different_hashes(
+    async fn connect_engines_with_hashes(
         ipc: &IpcNamespace,
         coordinator_mode: Option<CoordinatorMode>,
+        hashes: [Option<&str>; 2],
     ) -> crate::Result<EngineCoreClient> {
-        let engine_tasks = ["a", "b"]
+        let engine_tasks = hashes
             .into_iter()
             .enumerate()
             .map(|(index, hash)| {
@@ -1343,7 +1344,7 @@ async fn handshake_checks_parallel_config_hashes_only_for_coordinated_dp() {
                     ipc.handshake_endpoint(),
                     EngineId::from(&[index as u8, 0x00]),
                     MockEngineConfig {
-                        parallel_config_hash: Some(hash.to_string()),
+                        parallel_config_hash: hash.map(str::to_string),
                         ..MockEngineConfig::default()
                     },
                 ))
@@ -1372,22 +1373,31 @@ async fn handshake_checks_parallel_config_hashes_only_for_coordinated_dp() {
 
     // Dense DP ranks share no collectives, so their configs may differ.
     let ipc = IpcNamespace::new().unwrap();
-    let client = connect_engines_with_different_hashes(&ipc, None).await.unwrap();
+    let client = connect_engines_with_hashes(&ipc, None, [Some("a"), Some("b")]).await.unwrap();
     client.shutdown().await.unwrap();
 
+    // Coordinated DP accepts matching hashes, including when every engine omits one.
     let ipc = IpcNamespace::new().unwrap();
-    let Err(error) =
-        connect_engines_with_different_hashes(&ipc, Some(CoordinatorMode::InProc)).await
-    else {
-        panic!("coordinated DP startup should fail");
-    };
-    assert!(
-        error
-            .to_report_string()
-            .contains("launch every DP rank with the same parallel config"),
-        "{}",
-        error.to_report_string()
-    );
+    let client = connect_engines_with_hashes(&ipc, Some(CoordinatorMode::InProc), [None, None])
+        .await
+        .unwrap();
+    client.shutdown().await.unwrap();
+
+    for hashes in [[Some("a"), Some("b")], [Some("a"), None], [None, Some("a")]] {
+        let ipc = IpcNamespace::new().unwrap();
+        let Err(error) =
+            connect_engines_with_hashes(&ipc, Some(CoordinatorMode::InProc), hashes).await
+        else {
+            panic!("coordinated DP startup should fail for hashes {hashes:?}");
+        };
+        assert!(
+            error
+                .to_report_string()
+                .contains("launch every DP rank with the same parallel config"),
+            "{}",
+            error.to_report_string()
+        );
+    }
 }
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
