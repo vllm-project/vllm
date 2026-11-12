@@ -22,7 +22,7 @@ from vllm.entrypoints.scale_out.token_in_token_out.protocol import GenerateReque
 from vllm.entrypoints.serve.engine.protocol import ErrorResponse
 from vllm.entrypoints.serve.engine.serving import BaseServing
 from vllm.entrypoints.serve.utils.request_logger import RequestLogger
-from vllm.exceptions import GenerationError
+from vllm.exceptions import GenerationError, VLLMValidationError
 from vllm.logger import init_logger
 from vllm.logprobs import Logprob, PromptLogprobs
 from vllm.tokenizers import TokenizerLike
@@ -34,6 +34,8 @@ logger = init_logger(__name__)
 _T = TypeVar("_T")
 SESSION_ID_HEADER = "X-Session-ID"
 PRIORITY_HEADER = "X-Vllm-Priority"
+PRIORITY_MIN = -(2**63)
+PRIORITY_MAX = 2**63 - 1
 
 
 def build_per_request_timing_metrics(
@@ -242,9 +244,18 @@ class GenerateBaseServing(BaseServing, BeamSearchOnlineMixin):
             priority = raw_request.headers.get(PRIORITY_HEADER)
             if priority is not None:
                 try:
-                    return int(priority)
+                    value = int(priority)
                 except ValueError:
                     pass
+                else:
+                    if not PRIORITY_MIN <= value <= PRIORITY_MAX:
+                        raise VLLMValidationError(
+                            f"{PRIORITY_HEADER} must be between {PRIORITY_MIN} "
+                            f"and {PRIORITY_MAX}.",
+                            parameter="priority",
+                            value=value,
+                        )
+                    return value
         return request.priority
 
     async def _with_kv_transfer_rejection_cleanup(

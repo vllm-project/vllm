@@ -49,7 +49,7 @@ Send the header `X-data-parallel-rank: <int>` to pin a request to one data-paral
 
 ## Request priority (`X-Vllm-Priority`)
 
-Send the header `X-Vllm-Priority: <int>` to set the request's priority. It overrides the body `priority`; a non-integer value is ignored. Non-zero priorities require the server to use priority scheduling (`--scheduling-policy priority`). The Rust frontend does not read the header on this endpoint and uses only the body `priority`.
+Send the header `X-Vllm-Priority: <int>` to set the request's priority. It overrides the body `priority`; a non-integer value is ignored. A header value outside `[-2**63, 2**63 - 1]`, the range of the body `priority`, is rejected. Non-zero priorities require the server to use priority scheduling (`--scheduling-policy priority`). The Rust frontend does not read the header on this endpoint and uses only the body `priority`.
 
 ## Output modes
 

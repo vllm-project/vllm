@@ -123,8 +123,11 @@ The `X-Request-Id` HTTP request header can be enabled with
 
 The Completions, Chat Completions, and Responses APIs also support the
 `X-Vllm-Priority` request header. Its value must be an integer and overrides
-the `priority` value in the JSON request body. Non-zero priorities require the
-server to use priority scheduling.
+the `priority` value in the JSON request body. The Python frontend rejects a
+header value outside `[-2**63, 2**63 - 1]`, the range of the body `priority`;
+the Rust frontend ignores a header value outside `[-2**31, 2**31 - 1]` and
+uses the body `priority`. Non-zero priorities require the server to use
+priority scheduling.
 
 ```python
 completion = client.chat.completions.create(

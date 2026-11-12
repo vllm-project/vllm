@@ -994,6 +994,30 @@ async def test_generate_priority_header_overrides_body(client):
 @pytest.mark.asyncio
 @pytest.mark.skipif(
     envs.VLLM_USE_RUST_FRONTEND,
+    reason="the Rust frontend does not read X-Vllm-Priority on this endpoint",
+)
+@pytest.mark.parametrize(
+    "server",
+    [["--scheduling-policy", "priority", "--max-num-seqs", "1"]],
+    indirect=True,
+)
+async def test_generate_priority_header_is_bounded_to_int64(client):
+    """An `X-Vllm-Priority` outside int64 is rejected with a 400, as in the body."""
+    payload = {
+        "model": MODEL_NAME,
+        "token_ids": [1, 2, 3],
+        "sampling_params": {"max_tokens": 1},
+    }
+    for priority, expected in ((2**63 - 1, 200), (2**63, 400)):
+        resp = await client.post(
+            GEN_ENDPOINT, json=payload, headers={"X-Vllm-Priority": str(priority)}
+        )
+        assert resp.status_code == expected, f"{priority}: {resp.text}"
+
+
+@pytest.mark.asyncio
+@pytest.mark.skipif(
+    envs.VLLM_USE_RUST_FRONTEND,
     reason="The Rust frontend does not support /render",
 )
 @pytest.mark.parametrize(
