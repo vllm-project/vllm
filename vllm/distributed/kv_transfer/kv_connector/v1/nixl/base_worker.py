@@ -3597,9 +3597,7 @@ class NixlBaseConnectorWorker:
     def _send_heartbeats(self, metadata: NixlConnectorMetadata) -> None:
         """Send heartbeats to remote engines, extending the lease on KV blocks."""
         now = time.perf_counter()
-        live_remote_reqs: set[tuple[EngineId, str]] = set()
         for engine_id, hb_info in metadata.heartbeat_by_engine.items():
-            live_remote_reqs.update((engine_id, r) for r in hb_info.req_ids)
             # Proactive handshake (this request may still be in waiting queue) so
             # the **next** heartbeat for this remote can go through.
             if (
@@ -3650,13 +3648,11 @@ class NixlBaseConnectorWorker:
                         extension,
                     )
         if metadata.heartbeat_by_engine:
-            # The scheduler ships its whole heartbeat set each time, so a request
-            # missing from it stopped waiting (transfer done or aborted). The
-            # read itself pops its entry (_read_blocks_for_req); this only
-            # bounds the bookkeeping for requests that never reach a read.
-            for key in list(self._remote_leases):
-                if key not in live_remote_reqs:
-                    del self._remote_leases[key]
+            # A model past its deadline no longer matters (the read is declined
+            # either way), and one for a request still heartbeated is renewed.
+            self._remote_leases = {
+                k: m for k, m in self._remote_leases.items() if m.deadline > now
+            }
 
     def _record_heartbeat_sent(
         self, key: tuple[EngineId, str], now: float, deadline: float, extension: int

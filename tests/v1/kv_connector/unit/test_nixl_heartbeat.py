@@ -114,6 +114,30 @@ def test_build_connector_meta_heartbeat_throttling():
     assert len(meta2.heartbeat_by_engine) == 0
 
 
+def test_new_request_is_heartbeated_without_waiting_for_the_round():
+    """A request tracked between two rounds is heartbeated on its own at the
+    next step, as the router may have held it for most of its lease."""
+    s = _sched(kv_lease_duration=30)
+    s.on_new_request(_req(1))
+    s.build_connector_meta(MagicMock())  # full round
+    late = _req(2)
+    late.kv_transfer_params["remote_blocks_expiry_time"] = 1234.5
+    late.kv_transfer_params["remote_lease_extension"] = 20
+    s.on_new_request(late)
+
+    info = s.build_connector_meta(MagicMock()).heartbeat_by_engine[_ENGINE_A]
+    assert info.req_ids == {"prefill-2"}
+    assert info.leases == {"prefill-2": (1234.5, 20)}
+    # The tracked set is untouched, and the next step is throttled again.
+    assert s._heartbeat_by_engine[_ENGINE_A].req_ids == {"prefill-1", "prefill-2"}
+    assert len(s.build_connector_meta(MagicMock()).heartbeat_by_engine) == 0
+
+    # A request stopped before the next step is not heartbeated.
+    s.on_new_request(_req(3))
+    s._stop_heartbeat(_req(3).request_id)
+    assert len(s.build_connector_meta(MagicMock()).heartbeat_by_engine) == 0
+
+
 # ===================================================================
 # Scheduler: cleanup paths (update_connector_output / request_finished)
 # ===================================================================

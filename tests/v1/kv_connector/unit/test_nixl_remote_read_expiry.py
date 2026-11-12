@@ -324,20 +324,25 @@ def test_unknown_clock_offset_builds_no_model(dist_init):
 
 
 @_FAKE_WRAPPER
-def test_send_heartbeats_prunes_finished_requests(dist_init, monkeypatch):
+def test_send_heartbeats_prunes_expired_models(dist_init, monkeypatch):
+    """Rounds may carry only some requests (new ones are sent right away), so
+    models are pruned by deadline rather than by absence from a round."""
     _, worker = _make_connector()
     now = {"t": 100.0}
     monkeypatch.setattr(time, "perf_counter", lambda: now["t"])
     leases = {"a": (130.0, 20), "b": (130.0, 20)}
     worker._send_heartbeats(_hb_meta("a", "b", leases=leases))
-    now["t"] = 112.0
-    worker._send_heartbeats(_hb_meta("a", "b", leases=leases))
-    assert worker._remote_leases[(_REMOTE, "a")].deadline == 132.0
-    # "b" left the scheduler's heartbeat set: its model goes away.
+    # "b" is no longer heartbeated; a round carrying only "a" keeps both.
+    now["t"] = 125.0
     worker._send_heartbeats(_hb_meta("a", leases={"a": leases["a"]}))
-    assert set(worker._remote_leases) == {(_REMOTE, "a")}
-    # An empty heartbeat round (throttled) must not prune anything.
+    assert worker._remote_leases[(_REMOTE, "a")].deadline == 145.0
+    assert set(worker._remote_leases) == {(_REMOTE, "a"), (_REMOTE, "b")}
+    # Past b's deadline the next round drops it; an empty (throttled) round
+    # prunes nothing.
+    now["t"] = 131.0
     worker._send_heartbeats(NixlConnectorMetadata())
+    assert len(worker._remote_leases) == 2
+    worker._send_heartbeats(_hb_meta("a", leases={"a": leases["a"]}))
     assert set(worker._remote_leases) == {(_REMOTE, "a")}
 
 
