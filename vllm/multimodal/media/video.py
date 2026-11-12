@@ -16,6 +16,7 @@ from vllm.logger import init_logger
 from vllm.utils.serial_utils import tensor2base64
 from vllm.utils.sparse_utils import (
     check_sparse_tensor_invariants_threadsafe,
+    check_torch_archive_size,
     safe_to_dense,
 )
 
@@ -244,6 +245,7 @@ class VideoEmbeddingMediaIO(MediaIO[torch.Tensor]):
         super().__init__()
 
     def _load_pickled_torch(self, data: bytes) -> torch.Tensor:
+        check_torch_archive_size(data, parameter="video_embeds")
         buffer = BytesIO(data)
         with check_sparse_tensor_invariants_threadsafe():
             tensor = torch.load(buffer, weights_only=True)
