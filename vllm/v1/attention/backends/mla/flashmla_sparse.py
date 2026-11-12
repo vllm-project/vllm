@@ -201,7 +201,9 @@ class FlashMLASparseBackend(AttentionBackend):
 
     @classmethod
     def supports_compute_capability(cls, capability: DeviceCapability) -> bool:
-        return capability.major in [9, 10]
+        # Thor (SM110) runs FlashMLA's SM100 kernels; FlashMLA rejects the
+        # shapes it has not validated there.
+        return capability.major in [9, 10, 11]
 
     @classmethod
     def supports_combination(

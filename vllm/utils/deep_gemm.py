@@ -716,9 +716,11 @@ def mqa_logits_use_mx_scales() -> bool:
     head weights pick the reduction: FP32 weights reduce in FP32, BF16 weights
     in BF16 and emit BF16 logits. FP8 indexer K caches then store each
     token's power-of-two scale as four equal UE8M0 bytes instead of an fp32.
+    Thor (SM110) runs the same SM100 kernels.
     """
-    return current_platform.is_cuda() and current_platform.is_device_capability_family(
-        100
+    return current_platform.is_cuda() and (
+        current_platform.is_device_capability_family(100)
+        or current_platform.is_device_capability_family(110)
     )
 
 
@@ -740,7 +742,7 @@ def mqa_logits_mx_inputs(
     it is passed with unit MX scales, which is exact since relu commutes with
     a positive scale. `weights` are cast to `logits_dtype`, so BF16 logits
     reduce in BF16 and FP32 logits in FP32. Returns `(q_scale, weights)`
-    unchanged off SM100.
+    unchanged off SM100 and SM110.
     """
     if not mqa_logits_use_mx_scales():
         return q_scale, weights
