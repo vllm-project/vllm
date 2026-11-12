@@ -113,7 +113,7 @@ def test_sm107_tile_layout() -> None:
     weight = torch.randn(1, 128, 256) * torch.logspace(-3, 0, 128)[:, None]
     packed, codebooks, scales = quantize_lut_b(weight)
     tiles = lut_b_to_sm107_tiles(packed, codebooks, scales)
-    assert tiles.shape == (1, 1, 2, 7168)
+    assert tiles.shape == (1, 1, 2, 6912)
     expected = dequantize_lut_b(packed, codebooks, scales, torch.float32)
     torch.testing.assert_close(_decode_sm107_tiles(tiles), expected, rtol=0, atol=0)
 
