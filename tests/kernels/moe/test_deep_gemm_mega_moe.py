@@ -938,8 +938,9 @@ def test_prepare_megamoe_inputs_is_bitwise_exact(num_tokens, hidden_size, hidden
 @requires_sm100
 @pytest.mark.parametrize("nvfp4", [False, True])
 @pytest.mark.parametrize("num_tokens", [7, 100])
+@pytest.mark.parametrize("log_balancedness", [False, True])
 def test_prepare_megamoe_eplb_maps_and_records_under_graph_replay(
-    monkeypatch, nvfp4, num_tokens
+    monkeypatch, nvfp4, num_tokens, log_balancedness
 ):
     """Fused EPLB staging maps each routed id to a replica of its logical expert
     and records unpadded load, and a replayed graph sees map and record-flag
@@ -968,9 +969,14 @@ def test_prepare_megamoe_eplb_maps_and_records_under_graph_replay(
     state = EplbLayerState(
         logical_to_physical_map=mapping.to(device),
         logical_replica_count=counts.to(device),
-        expert_load_view=torch.zeros(num_physical, dtype=torch.int32, device=device),
+        expert_load_view=torch.zeros(8, dtype=torch.int32, device=device),
         should_record_tensor=torch.tensor(True, device=device),
         num_unpadded_tokens_tensors=num_unpadded,
+        physical_load_view=(
+            torch.zeros(num_physical, dtype=torch.int32, device=device)
+            if log_balancedness
+            else None
+        ),
     )
     # Staging must read this ubatch's count; ubatch 0 would record nothing.
     monkeypatch.setattr(
@@ -1026,6 +1032,7 @@ def test_prepare_megamoe_eplb_maps_and_records_under_graph_replay(
         stage()
     physical = state.logical_to_physical_map
     record_flag, load = state.should_record_tensor, state.expert_load_view
+    physical_load = state.physical_load_view
     assert physical is not None and record_flag is not None and load is not None
     logical = torch.where(padding[:, None], -1, ids).long().cpu()
     valid = (logical >= 0) & (logical < 8)
@@ -1036,6 +1043,8 @@ def test_prepare_megamoe_eplb_maps_and_records_under_graph_replay(
         )
         record_flag.fill_(record)
         load.zero_()
+        if physical_load is not None:
+            physical_load.zero_()
         graph.replay()
         physical_to_logical = torch.full((num_physical,), -1, dtype=torch.long)
         for expert, slots in enumerate(physical.cpu()):
@@ -1043,9 +1052,12 @@ def test_prepare_megamoe_eplb_maps_and_records_under_graph_replay(
         mapped = topk_idx.cpu()
         assert (mapped[~valid] == -1).all()
         assert torch.equal(physical_to_logical[mapped[valid]], logical[valid])
-        recorded = mapped[valid & unpadded] if record else mapped.new_empty(0)
-        expected_load = torch.bincount(recorded, minlength=num_physical)
+        recorded = valid & unpadded if record else torch.zeros_like(valid)
+        expected_load = torch.bincount(logical[recorded], minlength=8)
         assert torch.equal(load.cpu(), expected_load.to(load.dtype))
+        if physical_load is not None:
+            expected_physical = torch.bincount(mapped[recorded], minlength=num_physical)
+            assert torch.equal(physical_load.cpu(), expected_physical.to(load.dtype))
     # Tokens spread over the replicas of a replicated expert.
     assert mapped[logical == 2].unique().numel() > 1
 
