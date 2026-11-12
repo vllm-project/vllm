@@ -18,7 +18,6 @@ import zmq
 
 from vllm import envs
 from vllm.config import CacheConfig, ParallelConfig, VllmConfig
-from vllm.config.utils import hash_config
 from vllm.logger import init_logger
 from vllm.platforms import current_platform
 from vllm.ray.ray_env import get_env_vars_to_copy
@@ -51,16 +50,16 @@ def get_engine_process_shutdown_timeout(
 ) -> float | None:
     """Return the EngineCore process-manager shutdown timeout.
 
-    ``VllmConfig.shutdown_timeout`` controls how long in-flight requests may
+    `VllmConfig.shutdown_timeout` controls how long in-flight requests may
     drain. A value of zero therefore tells EngineCore to abort requests as soon
     as it receives SIGTERM. The parent process manager still needs a separate
     window in which the EngineCore can release device resources before it is
-    force-killed. An explicitly set ``VLLM_WORKER_SHUTDOWN_TIMEOUT_SECONDS``
+    force-killed. An explicitly set `VLLM_WORKER_SHUTDOWN_TIMEOUT_SECONDS`
     sets that window on every platform. Otherwise ROCm gets a fixed window:
     its teardown can take longer than the generic best-effort window, and
     force-killing during teardown can leave VRAM resident.
 
-    ``process_timeout`` may be a remaining budget computed by an outer process
+    `process_timeout` may be a remaining budget computed by an outer process
     manager. Keep it unchanged unless both values are zero: a zero remaining
     budget for a positive request timeout must not receive a fresh grace period
     because EngineCore relies on that deadline to enforce request draining.
@@ -165,12 +164,12 @@ def _get_bundle_node_ip(bundle: dict[str, float]) -> str:
 def _dp_nodes_master_first(
     available_resources: dict[str, dict], dp_master_ip: str
 ) -> list[tuple[str, dict]]:
-    """Live Ray nodes as ``(node_id, resources)`` with the DP master first.
+    """Live Ray nodes as `(node_id, resources)` with the DP master first.
 
-    The master is found through the ``node:<ip>`` resource Ray sets on every
-    node, so this works with the resource maps from ``ray._private.state``.
-    Do not replace it with ``ray.util.state.list_nodes()``: that API goes
-    through the dashboard HTTP server and only exists with ``ray[default]``
+    The master is found through the `node:<ip>` resource Ray sets on every
+    node, so this works with the resource maps from `ray._private.state`.
+    Do not replace it with `ray.util.state.list_nodes()`: that API goes
+    through the dashboard HTTP server and only exists with `ray[default]`
     (see #23822).
     """
     master_key = f"node:{dp_master_ip}"
@@ -190,9 +189,9 @@ def _dp_nodes_master_first(
 def _node_ip_from_resources(node_resources: dict) -> str | None:
     """Return the node IP encoded in a Ray per-node resource dict, or None.
 
-    Ray advertises each node's IP as a ``node:<ip>`` resource key. The head node
-    also carries ``node:__internal_head__``, and placement groups add
-    ``..._group_...`` keys; both are ignored.
+    Ray advertises each node's IP as a `node:<ip>` resource key. The head node
+    also carries `node:__internal_head__`, and placement groups add
+    `..._group_...` keys; both are ignored.
     """
     for key in node_resources:
         if (
@@ -601,7 +600,7 @@ class CoreEngineActorManager:
             # Ray XPU known issue: dpctl initializes the GPU runtime early, so
             # setting device env vars in Ray actor's initialization method
             # will not affect device selection. See:
-            # https://github.com/ray-project/ray/blob/master/python/ray/_private/accelerators/intel_gpu.py#L56 # noqa: E501
+            # https://github.com/ray-project/ray/blob/master/python/ray/_private/accelerators/intel_gpu.py#L56
             if current_platform.is_xpu():
                 device_evar = current_platform.device_control_env_var
                 physical_gpu_ids = get_physical_gpu_ids_for_local_dp_rank(
@@ -1124,9 +1123,9 @@ def get_engine_zmq_bind_addresses(
 ) -> EngineZmqBindAddresses:
     """Create ZMQ endpoint templates for engine-client communication.
 
-    Each TCP address is a ``tcp://host:0`` placeholder. A single-process
-    ``MPClient`` binds its own ZMQ sockets. Cross-process frontends use
-    ``bind_engine_zmq_listeners`` so the supervisor binds raw listeners before
+    Each TCP address is a `tcp://host:0` placeholder. A single-process
+    `MPClient` binds its own ZMQ sockets. Cross-process frontends use
+    `bind_engine_zmq_listeners` so the supervisor binds raw listeners before
     launching engines and transfers listener ownership to each frontend."""
     parallel_config = vllm_config.parallel_config
     local_engine_count = parallel_config.data_parallel_size_local
@@ -1422,6 +1421,10 @@ def wait_for_engine_startup(
         and not parallel_config.data_parallel_external_lb
     )
 
+    # (engine index, parallel config hash) of the first READY engine, which
+    # the other engines' hashes are compared with.
+    reference_config_hash: tuple[int, str | None] | None = None
+
     # 1. Engine processes
     if isinstance(launch.engine_manager, CoreEngineProcManager):
         for sentinel in launch.engine_manager.sentinels():
@@ -1564,10 +1567,13 @@ def wait_for_engine_startup(
                 parallel_config.elastic_ep_max_dp_size = elastic_ep_max_dp_size
 
             # Validate config hash consistency across DP workers for MoE models.
+            # Compare possibly-updated engine config hashes with each other.
             if coordinated_dp:
                 worker_config_hash = msg.get("parallel_config_hash")
-                expected_hash = hash_config(parallel_config)
-                if worker_config_hash != expected_hash:
+                if reference_config_hash is None:
+                    reference_config_hash = (eng_index, worker_config_hash)
+                elif worker_config_hash != reference_config_hash[1]:
+                    reference_index, reference_hash = reference_config_hash
                     raise RuntimeError(
                         f"Configuration mismatch detected for engine "
                         f"{eng_index}. All DP workers must have identical "
@@ -1575,7 +1581,8 @@ def wait_for_engine_startup(
                         f"communication (e.g., enable_eplb, "
                         f"eplb_config.log_balancedness). "
                         f"Worker hash: {worker_config_hash}, "
-                        f"Expected hash: {expected_hash}. "
+                        f"Expected hash: {reference_hash} (engine "
+                        f"{reference_index}). "
                         f"Please ensure all workers are started with the same "
                         f"command-line arguments."
                     )
