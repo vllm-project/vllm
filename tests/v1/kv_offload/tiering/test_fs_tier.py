@@ -139,8 +139,11 @@ def make_job(
 
 
 def drain(tier: FileSystemTierManager) -> list:
-    """Block until all in-flight jobs finish, then collect results."""
-    tier.drain_jobs()
+    """Block until all in-flight jobs finish, then collect results.
+    Waits on the pool directly: drain_jobs() may drop loads that have not
+    started yet.
+    """
+    tier._pool.wait_idle()
     return list(tier.get_finished_jobs())
 
 

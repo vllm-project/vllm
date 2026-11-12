@@ -371,13 +371,13 @@ class FileSystemTierManager(SecondaryTierManager):
         Raise if materialize() raises.
         """
         while True:
+            if self._draining:
+                return False
             if self.manager_lock.acquire(timeout=_MANAGER_LOCK_POLL_S):
                 try:
                     return transfer_job.materialize()
                 finally:
                     self.manager_lock.release()
-            if self._draining:
-                return False
 
     @override
     def drain_jobs(self) -> None:

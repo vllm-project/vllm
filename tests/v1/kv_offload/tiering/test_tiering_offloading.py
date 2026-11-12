@@ -2507,14 +2507,14 @@ class TestTieringOffloadingManagerWithFsTier:
                 )
 
     @staticmethod
-    def _drain_fs_results(
+    def _wait_fs_tier(
         manager: TieringOffloadingManager, *fs_tiers: FileSystemTierManager
     ) -> None:
-        """Deterministically drain all in-flight FS work and promotion jobs."""
+        """Wait for fs tier to finish processing inflight jobs"""
         ctx = ScheduleEndContext(new_req_ids=[], preempted_req_ids=())
         manager.on_schedule_end(ctx)  # flush pending lookups to thread pool
         for tier in fs_tiers:
-            tier.drain_jobs()
+            tier._pool.wait_idle()
 
     @staticmethod
     def _write_keys_to_fs(fs_tier: FileSystemTierManager, keys) -> None:
@@ -2570,7 +2570,7 @@ class TestTieringOffloadingManagerWithFsTier:
             r = manager.lookup(k, req_ctx)
             assert r == LookupResult.HIT_PENDING
 
-        self._drain_fs_results(manager, fs_tier)
+        self._wait_fs_tier(manager, fs_tier)
 
         for k in keys:
             r = manager.lookup(k, req_ctx)
@@ -2617,7 +2617,7 @@ class TestTieringOffloadingManagerWithFsTier:
                 "Promotions initiate here"
             )
 
-        self._drain_fs_results(manager, fs_tier0, fs_tier1)
+        self._wait_fs_tier(manager, fs_tier0, fs_tier1)
 
         for k in keys0 + keys1:
             assert manager.lookup(k, req_ctx) == LookupResult.HIT
@@ -2664,9 +2664,9 @@ class TestTieringOffloadingManagerWithFsTier:
         # req2's queued promotion is dropped outright.
         assert not manager._pending_load_submissions
 
-        # Release the gate: allowing load_task to run materialize().
+        # Release the gate, allowing load_task to run materialize().
         load_gate.set()
-        fs_tier.drain_jobs()
+        fs_tier._pool.wait_idle()
         for _ in range(2):
             manager.on_schedule_end(
                 ScheduleEndContext(new_req_ids=[], preempted_req_ids=[])
