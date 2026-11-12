@@ -1381,7 +1381,11 @@ class Worker(WorkerBase):
                 f"{kv_cache_memory_bytes_to_gpu_limit}` "
                 f"({format_gib(kv_cache_memory_bytes_to_gpu_limit)} GiB) to fully "
                 f"utilize gpu memory. Current kv cache memory in use is "
-                f"{format_gib(self.available_kv_cache_memory_bytes)} GiB."
+                f"{format_gib(self.available_kv_cache_memory_bytes)} GiB. "
+                f"A pinned value is checked against a profile that also covers "
+                f"attention and allocator overhead, which this estimate does "
+                f"not, so the second value can be refused at startup; the "
+                f"refusal reports the value that fits."
             )
 
             logger.info(msg)
