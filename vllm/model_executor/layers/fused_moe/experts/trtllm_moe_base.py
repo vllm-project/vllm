@@ -51,7 +51,7 @@ class TrtLlmExpertsBase(FusedMoEExperts):
 
     The constructor caches the config-derived fields common to every backend
     and initializes the workspace; subclasses call
-    ``super().__init__(moe_config, quant_config)`` and add their own fields.
+    `super().__init__(moe_config, quant_config)` and add their own fields.
     """
 
     moe_config: "FusedMoEConfig"
@@ -112,11 +112,11 @@ class TrtLlmExpertsBase(FusedMoEExperts):
         valid_intermediate_size: int | None = None,
         num_fused_shared_experts: int = 0,
     ) -> torch.Tensor | None:
-        """Return the persistent trtllm-gen MoE workspace, or ``None``.
+        """Return the persistent trtllm-gen MoE workspace, or `None`.
 
         The buffer is sized for the largest batch, so smaller batches reuse it
         without another reservation. When FlashInfer lacks the workspace API,
-        ``None`` keeps FlashInfer's per-call workspace allocation.
+        `None` keeps FlashInfer's per-call workspace allocation.
         """
         if (
             not envs.VLLM_FLASHINFER_MOE_USE_WORKSPACE

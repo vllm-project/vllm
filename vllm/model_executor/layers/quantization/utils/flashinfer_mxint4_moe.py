@@ -214,7 +214,7 @@ def flashinfer_trtllm_mxint4_moe(
         e_score_correction_bias: Optional routing bias. dtype: bfloat16
         routing_method_type: FlashInfer RoutingMethodType enum value
         workspace_buffer: Optional caller-owned scratch buffer, sized by
-            ``trtllm_fused_moe_workspace_size(quant_mode="mxint4")``
+            `trtllm_fused_moe_workspace_size(quant_mode="mxint4")`
 
     Returns:
         Output tensor from MoE layer. dtype: same as x (bfloat16)
