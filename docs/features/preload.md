@@ -24,8 +24,7 @@ Key benefits:
 
 !!! note
     Weight preloading is only supported on CUDA and ROCm platforms. Tensor,
-    expert and data parallelism are supported, including across nodes;
-    pipeline parallelism is rejected when launching the daemon.
+    expert, pipeline and data parallelism are supported, including across nodes.
 
 ## Quick start
 
@@ -291,6 +290,34 @@ The daemon's `--weight-cache-socket-dir` and the loader's `socket_dir` /
 Socket paths are derived from the GPU UUID, so they are stable regardless of
 `CUDA_VISIBLE_DEVICES` index remapping.
 
+## Compressed-tensors FP8 with Marlin
+
+On CUDA GPUs with compute capability 8.9 or newer, serialized
+`compressed-tensors` W8A8 FP8 checkpoints can reuse their Marlin weights
+through the weight cache daemon. This supports dense linear layers with
+per-tensor or per-channel weight scales and static per-tensor or dynamic
+per-token checkpoint activation schemes. Marlin computes with FP8 weights
+and FP16 or BF16 activations; the checkpoint's activation quantization is
+not used by this weight-only backend.
+
+Select Marlin explicitly and use the same dtype in both processes:
+
+```bash
+vllm preload --model RedHatAI/Meta-Llama-3.1-8B-FP8 \
+    --dtype bfloat16 --kernel-config '{"linear_backend": "marlin"}'
+
+vllm serve RedHatAI/Meta-Llama-3.1-8B-FP8 \
+    --dtype bfloat16 --kernel-config '{"linear_backend": "marlin"}' \
+    --load-format ipc_cache
+```
+
+The daemon packs the weights and reorders the scales once. Each engine
+reuses those tensors without repacking them, including on repeated restarts.
+The default `zero_copy` mode and disk fallback behavior are unchanged; see
+[Loader configuration](#loader-configuration). Marlin does not support
+`VLLM_BATCH_INVARIANT=1`. This support does not include block FP8, MoE,
+or other compressed-tensors quantization schemes.
+
 ## Limitations
 
 - **Platform**: CUDA and ROCm only; other platforms raise
@@ -326,6 +353,15 @@ Socket paths are derived from the GPU UUID, so they are stable regardless of
   The engine reuses the quantized weights and scales without running online
   quantization again. This does not enable online MoE quantization or
   conversion from an already quantized checkpoint.
+  Serialized `compressed-tensors` W8A8 FP8 dense linear layers support
+  per-tensor and per-channel weights with static per-tensor or dynamic
+  per-token activations when both processes select the CUTLASS linear
+  backend. These checkpoints also support the
+  [Marlin weight-only backend](#compressed-tensors-fp8-with-marlin).
+  Engines retain the processed tensor layout and scales and rebuild
+  attention scale metadata from the cached scale buffers. Other
+  compressed-tensors schemes, transform wrappers, block FP8 and MoE are
+  not enabled by this support.
   Serialized ModelOpt `FP8` (per-tensor) and `FP8_PER_CHANNEL_PER_TOKEN`
   linear layers also support CUDA IPC with the CUTLASS linear backend.
   Set the same `--kernel-config '{"linear_backend": "cutlass"}'` on the daemon
