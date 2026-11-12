@@ -6,6 +6,7 @@ from collections.abc import Iterable, Iterator, Sequence
 from contextlib import ExitStack, contextmanager
 from dataclasses import dataclass, field, replace
 from itertools import chain
+from math import lcm
 from typing import Any, NamedTuple
 
 from vllm.config import VllmConfig
@@ -60,6 +61,7 @@ from vllm.v1.kv_offload.base import (
     TierMatcher,
     make_offload_key,
 )
+from vllm.v1.kv_offload.tiering.manager import TieringOffloadingManager
 from vllm.v1.metrics.cache_hit_source import CacheHitSource
 from vllm.v1.outputs import KVConnectorOutput
 from vllm.v1.request import Request, RequestStatus
@@ -68,6 +70,13 @@ logger = init_logger(__name__)
 
 # A cache reset fence held this long is reported once.
 _RESET_FENCE_WARN_S = 60
+
+# Opt-in PUT batching defaults (extra_config ``put_*``; see the usage docs).
+_DEFAULT_PUT_MAX_INFLIGHT_CHUNKS = 512
+_DEFAULT_PUT_GET_RESERVE_CHUNKS = 128
+# Steps a blocked request skips while admission state is unchanged, before
+# re-planning anyway (bounds both scan cost and retry latency).
+_PUT_RETRY_MAX_SKIPS = 15
 
 KV_LOAD_TIERS_KEY = "kv_load_tiers"
 MATCHER_MEDIUM_KEY = "medium"
@@ -616,6 +625,36 @@ class OffloadingConnectorScheduler:
         )
         self.manager: OffloadingManager = spec.get_manager()
         self._connector_stats = OffloadingConnectorStats()
+        self._put_batch_chunks = spec.extra_config.get("put_batch_chunks", 0)
+        self._put_retry_after: ReqId | None = None
+        self._put_retry_gate: dict[ReqId, tuple[tuple[int, ...], int]] = {}
+        self._put_manager: TieringOffloadingManager | None = None
+        # Batches admit whole units aligned across every group's chunks.
+        self._put_alignment = lcm(
+            self.config.alignment_tokens or 1,
+            *(g.tokens_per_chunk for g in self.config.kv_group_configs),
+        )
+        if self._put_batch_chunks:
+            if not isinstance(self.manager, TieringOffloadingManager):
+                raise ValueError("PUT batching requires a tiering manager")
+            self._put_manager = self.manager
+            # Full-attention groups store every chunk of a unit, so a unit
+            # needs at least this many credits; sparse groups may add more.
+            min_unit_chunks = sum(
+                self._put_alignment // g.tokens_per_chunk
+                for g in self.config.kv_group_configs
+                if g.sliding_window_size_in_chunks is None and not g.requires_cow_source
+            )
+            self.manager.configure_put_batching(
+                self._put_batch_chunks,
+                spec.extra_config.get(
+                    "put_max_inflight_chunks", _DEFAULT_PUT_MAX_INFLIGHT_CHUNKS
+                ),
+                spec.extra_config.get(
+                    "put_get_reserve_chunks", _DEFAULT_PUT_GET_RESERVE_CHUNKS
+                ),
+                min_unit_chunks=max(1, min_unit_chunks),
+            )
         self.use_lookahead_block_hashes = vllm_config.num_hash_lookahead_tokens > 0
 
         # The static config facts ride on the first stats payload of this
@@ -1977,6 +2016,62 @@ class OffloadingConnectorScheduler:
             return None
         return alignment_tokens // group_config.tokens_per_block
 
+    def _clip_put_frontier(
+        self,
+        ranges: list[tuple[int, int]],
+        key_ends: list[tuple[int, OffloadKey, int, int]],
+        budget: int | None,
+        needs_credit: set[OffloadKey],
+    ) -> tuple[list[tuple[int, int]], dict[OffloadKey, tuple[int, int]]]:
+        """Select whole aligned multi-group units, never a flattened prefix.
+
+        Eligibility/masks were computed against the ORIGINAL store horizon.
+        Clipping must not make an intermediate frontier look like a final SWA
+        tail. A minimum unit may exceed the nominal batch size only if all its
+        keys fit real credits (which are bounded by the PUT staging limit).
+        ``budget=None`` admits every unit: a finished request's blocks are
+        freed after this step, so its tail is offered once, in full.
+        Only ``needs_credit`` keys count against the budget and batch size:
+        resident keys (e.g. shared prefixes) allocate nothing.
+        """
+        alignment = self._put_alignment
+        units: dict[int, set[OffloadKey]] = {}
+        for end, key, _, _ in key_ends:
+            units.setdefault(cdiv(end, alignment) * alignment, set()).add(key)
+        chosen: set[OffloadKey] = set()
+        charged: set[OffloadKey] = set()
+        frontier = 0
+        for end, keys in sorted(units.items()):
+            size = len(charged | (keys & needs_credit))
+            if budget is not None and (
+                size > budget or (charged and size > self._put_batch_chunks)
+            ):
+                break
+            chosen.update(keys)
+            charged.update(keys & needs_credit)
+            frontier = end
+        if chosen and len(chosen) == len({key for _, key, _, _ in key_ends}):
+            # All eligible keys fit: resolve legitimately skipped trailing
+            # ranges as the original scheduler did, including SWA decode gaps.
+            frontier = max(
+                end * group.tokens_per_chunk
+                for group, (_, end) in zip(self.config.kv_group_configs, ranges)
+            )
+        clipped = [
+            (start, max(start, min(end, frontier // group.tokens_per_chunk)))
+            for group, (start, end) in zip(self.config.kv_group_configs, ranges)
+        ]
+        # Preserve an eligible occurrence, not just key membership: a duplicate
+        # at an earlier position may have an unavailable or unreachable source.
+        # This mapping is bounded by the admitted frontier/credit limit, even
+        # though eligibility planning still enumerates the remaining tail.
+        sources: dict[OffloadKey, tuple[int, int]] = {}
+        for end, key, group_idx, chunk_idx in key_ends:
+            if end <= frontier:
+                sources.setdefault(key, (group_idx, chunk_idx))
+        # Insertion order preserves CPU/GPU transfer-spec correspondence.
+        return clipped, sources
+
     def _build_store_jobs(
         self,
         scheduler_output: SchedulerOutput,
@@ -1984,14 +2079,46 @@ class OffloadingConnectorScheduler:
         blocks_per_chunk = self.config.blocks_per_chunk
         apply_eagle_drop = not self.use_lookahead_block_hashes
         store_jobs: dict[int, TransferJob] = {}
-        for req_id in chain(
+        req_ids: Iterable[ReqId] = chain(
             scheduler_output.num_scheduled_tokens,
             scheduler_output.finished_req_ids or (),
-        ):
+        )
+        if self._put_batch_chunks:
+            req_ids = list(dict.fromkeys(req_ids))
+            if self._put_retry_after in req_ids:
+                start = req_ids.index(self._put_retry_after) + 1
+                req_ids = req_ids[start:] + req_ids[:start]
+            # Finished requests get one store pass before their blocks are
+            # freed, so they claim primary capacity ahead of running ones.
+            finished = scheduler_output.finished_req_ids or set()
+            req_ids.sort(key=lambda r: r not in finished)
+            # Computed once per step and refreshed only after a store is
+            # prepared: gated or blocked requests leave it unchanged.
+            assert self._put_manager is not None
+            admission_state = self._put_manager.get_put_admission_state()
+        for req_id in req_ids:
             req_status = self._req_status.get(req_id)
             if req_status is None:
                 continue
             req = req_status.req
+            if self._put_batch_chunks:
+                if req_id in (scheduler_output.preempted_req_ids or ()):
+                    # Admission state was cleared in _build_connector_meta().
+                    continue
+                budget: int | None = admission_state[0]
+                previous, retries = self._put_retry_gate.get(req_id, ((), 0))
+                if (
+                    previous == admission_state
+                    and retries < _PUT_RETRY_MAX_SKIPS
+                    and not req.is_finished()
+                ):
+                    self._put_retry_gate[req_id] = (previous, retries + 1)
+                    continue
+                self._put_retry_gate.pop(req_id, None)
+                if req.is_finished():
+                    # Last chance: blocks are freed after this step, so the
+                    # allocator, not the advisory credit, bounds this store.
+                    budget = None
 
             if req.status is RequestStatus.FINISHED_ABORTED:
                 num_tokens_after_batch = req.num_computed_tokens
@@ -2020,6 +2147,7 @@ class OffloadingConnectorScheduler:
             # or unreachable by the load path's alignment constraints.
             new_offload_keys: list[OffloadKey] = []
             group_store_ranges: list[tuple[int, int]] = []
+            key_ends: list[tuple[int, OffloadKey, int, int]] = []
 
             reachable_boundaries: tuple[int, ...] = ()
             if self.config.retention_interval is not None:
@@ -2057,7 +2185,11 @@ class OffloadingConnectorScheduler:
                     store_horizon_chunks = None
                 elif req.is_finished():
                     store_horizon_chunks = num_chunks
-                elif num_chunks <= prompt_horizon_chunks:
+                elif num_chunks <= prompt_horizon_chunks or (
+                    # A PUT batch may have deferred the prompt's final tail
+                    # into decode; it stays reachable as that prompt's end.
+                    self._put_batch_chunks and start_chunk_idx < prompt_horizon_chunks
+                ):
                     store_horizon_chunks = prompt_horizon_chunks
                 else:
                     # An active decode frontier is not a final request
@@ -2154,6 +2286,30 @@ class OffloadingConnectorScheduler:
                     ):
                         continue
                     new_offload_keys.append(offload_key)
+                    if self._put_batch_chunks:
+                        key_ends.append(
+                            (
+                                (abs_chunk_idx + 1) * group_config.tokens_per_chunk,
+                                offload_key,
+                                group_config.group_idx,
+                                abs_chunk_idx,
+                            )
+                        )
+
+            if self._put_batch_chunks and new_offload_keys:
+                assert self._put_manager is not None
+                group_store_ranges, store_sources = self._clip_put_frontier(
+                    group_store_ranges,
+                    key_ends,
+                    budget,
+                    self._put_manager.keys_needing_put_credit(
+                        new_offload_keys, req_status.req_context
+                    ),
+                )
+                new_offload_keys = list(store_sources)
+                if not new_offload_keys:
+                    self._put_retry_gate[req_id] = (admission_state, 0)
+                    continue
 
             if not new_offload_keys:
                 req_status.advance_stored_idx(num_offloadable_tokens, apply_eagle_drop)
@@ -2162,15 +2318,36 @@ class OffloadingConnectorScheduler:
             store_output = self.manager.prepare_store(
                 new_offload_keys, req_status.req_context
             )
+            if self._put_batch_chunks:
+                assert self._put_manager is not None
+                admission_state = self._put_manager.get_put_admission_state()
             if store_output is None:
                 self._connector_stats.increase_counter(
                     _ConnectorMetricName.ALLOCATION_FAILURE
                 )
-                logger.warning("Request %s: cannot store chunks", req_id)
+                if self._put_batch_chunks:
+                    # Expected under batching: retried once capacity changes.
+                    self._put_retry_gate[req_id] = (admission_state, 0)
+                    logger.debug("Request %s: PUT batch deferred", req_id)
+                else:
+                    logger.warning("Request %s: cannot store chunks", req_id)
                 continue
 
+            if self._put_batch_chunks:
+                self._put_retry_after = req_id
+
             if not store_output.keys_to_store:
-                req_status.advance_stored_idx(num_offloadable_tokens, apply_eagle_drop)
+                if self._put_batch_chunks:
+                    for state, (_, end) in zip(
+                        req_status.group_states, group_store_ranges
+                    ):
+                        state.next_stored_chunk_idx = max(
+                            state.next_stored_chunk_idx, end
+                        )
+                else:
+                    req_status.advance_stored_idx(
+                        num_offloadable_tokens, apply_eagle_drop
+                    )
                 continue
 
             ordered_keys_to_store = tuple(dict.fromkeys(store_output.keys_to_store))
@@ -2200,6 +2377,11 @@ class OffloadingConnectorScheduler:
                         continue
 
                     chunk_idx = start_chunk_idx + idx
+                    if self._put_batch_chunks and store_sources.get(offload_key) != (
+                        group_config.group_idx,
+                        chunk_idx,
+                    ):
+                        continue
 
                     self._events_tracker.record_store(
                         req, group_config, chunk_idx, offload_key
@@ -2306,6 +2488,11 @@ class OffloadingConnectorScheduler:
                 len(self._reset_fence),
                 _RESET_FENCE_WARN_S,
             )
+        if self._put_batch_chunks:
+            for req_id in scheduler_output.preempted_req_ids or ():
+                self._put_retry_gate.pop(req_id, None)
+                if self._put_retry_after == req_id:
+                    self._put_retry_after = None
         self._update_req_states(scheduler_output)
         schedule_end_context = ScheduleEndContext(
             new_req_ids=[req.req_id for req in scheduler_output.scheduled_new_reqs],
@@ -2357,6 +2544,9 @@ class OffloadingConnectorScheduler:
             req_status = self._req_status.get(req_id)
             if req_status is None:
                 continue
+            self._put_retry_gate.pop(req_id, None)
+            if self._put_retry_after == req_id:
+                self._put_retry_after = None
             req_status.finished_signaled = True
             self.manager.on_request_finished(req_status.req_context)
             if not req_status.transfer_jobs:
@@ -2638,6 +2828,8 @@ class OffloadingConnectorScheduler:
 
         # Reset offloading manager cache
         self.manager.reset_cache()
+        self._put_retry_gate.clear()
+        self._put_retry_after = None
 
         # Reset store progress so active requests re-offload from chunk 0.
         for status in self._req_status.values():
