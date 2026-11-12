@@ -12,8 +12,8 @@ from vllm.forward_context import BatchDescriptor, set_forward_context
 from vllm.model_executor.model_loader import get_model
 from vllm.model_executor.model_loader.utils import get_draft_load_config
 from vllm.triton_utils import tl, triton
+from vllm.utils.math_utils import next_power_of_2
 from vllm.v1.kv_cache_interface import KVCacheConfig
-from vllm.v1.spec_decode.utils import next_power_of_2
 from vllm.v1.worker.gpu.attn_utils import build_slot_mappings_by_layer
 from vllm.v1.worker.gpu.block_table import BlockTables
 from vllm.v1.worker.gpu.cudagraph_utils import BatchExecutionDescriptor
@@ -65,7 +65,9 @@ class StandaloneARSpeculator(AutoRegressiveSpeculator):
             self.vllm_config,
             self.device,
             cudagraph_mode,
-            self.num_speculative_steps + 2,
+            self.vllm_config.get_decode_cudagraph_query_lens(
+                self.num_speculative_steps + 2
+            ),
             varlen_decode=self.enable_adaptive_verification,
         )
         super().init_cudagraph_manager(cudagraph_mode)
@@ -284,14 +286,15 @@ class StandaloneARSpeculator(AutoRegressiveSpeculator):
             draft_tokens.unsqueeze(1),
         )
         self.input_buffers.input_ids[:num_reqs].copy_(draft_tokens.int())
+        # Device-side limit: graph replays see an auto-fit reduction, no host sync.
         torch.clamp(
             self.input_buffers.positions[:num_reqs] + 1,
-            max=self.max_model_len - 1,
+            max=self.max_model_len_gpu - 1,
             out=self.input_buffers.positions[:num_reqs],
         )
         torch.clamp(
             self.input_buffers.seq_lens[:num_reqs] + 1,
-            max=self.max_model_len,
+            max=self.max_model_len_gpu,
             out=self.input_buffers.seq_lens[:num_reqs],
         )
 

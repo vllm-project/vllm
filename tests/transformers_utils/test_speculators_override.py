@@ -1,12 +1,12 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
-"""Tests for ``maybe_override_with_speculators`` config merging.
+"""Tests for `maybe_override_with_speculators` config merging.
 
 When a model is in speculators format, the function previously dropped any
-user-provided ``--speculative-config`` overrides (e.g. ``attention_backend``
+user-provided `--speculative-config` overrides (e.g. `attention_backend`
 added in https://github.com/vllm-project/vllm/pull/39930), silently replacing
 the dict with a freshly-extracted one. These tests pin the merge behavior so
-runtime fields from the user are preserved while ``model`` stays auto-detected
+runtime fields from the user are preserved while `model` stays auto-detected
 from the speculators format.
 """
 
@@ -96,9 +96,9 @@ def test_speculators_preserves_user_attention_backend_override():
 
 
 def test_speculators_user_cannot_override_model_field():
-    """``model`` is dictated by the speculators format and must stay locked.
+    """`model` is dictated by the speculators format and must stay locked.
 
-    Even if a user passes a different ``model`` in their override dict, the
+    Even if a user passes a different `model` in their override dict, the
     final config must use the speculators model path (so the drafter actually
     loads from the right weights).
     """

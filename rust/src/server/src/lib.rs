@@ -5,10 +5,12 @@
 
 mod config;
 mod error;
+mod fingerprint;
 mod grpc;
 mod listener;
 mod lora;
 mod middleware;
+mod mm_wire;
 mod model_names;
 mod render;
 mod routes;
@@ -24,16 +26,18 @@ use std::future::Future;
 use std::sync::{Arc, OnceLock};
 use std::time::Duration;
 
-use anyhow::{Context as _, Result};
+use anyhow::{Context as _, Result, bail};
 use axum::Router;
 use axum::body::Body;
 use axum::extract::ConnectInfo;
 use axum::http::Request;
 pub use config::{
     AccessLogConfig, ApiServerOptions, Config, CoordinatorMode, CorsConfig,
-    DEFAULT_KEEP_ALIVE_TIMEOUT, DEFAULT_LOG_STATS_INTERVAL, DEFAULT_REQUEST_BODY_LIMIT_BYTES,
-    HttpListenerMode, LoraModulePath, OutputLogConfig, OutputLogging, TlsConfig,
+    DEFAULT_KEEP_ALIVE_TIMEOUT, DEFAULT_LOG_STATS_INTERVAL, DEFAULT_MAX_N_SEQUENCES,
+    DEFAULT_REQUEST_BODY_LIMIT_BYTES, HttpListenerMode, LoraModulePath, OutputLogConfig,
+    OutputLogging, TlsConfig,
 };
+pub use fingerprint::FingerprintMode;
 use hyper::body::Incoming;
 use hyper::server::conn::http1;
 use hyper_util::rt::{TokioIo, TokioTimer};
@@ -42,6 +46,7 @@ use hyper_util::service::TowerToHyperService;
 pub use render::{RenderConfig, serve_render};
 pub use routes::openai::utils::types::ReasoningEffort;
 use thiserror_ext::AsReport as _;
+use tokio::sync::watch;
 use tokio::time::{Instant, sleep_until};
 use tokio_util::sync::CancellationToken;
 use tonic::transport::Server as TonicServer;
@@ -53,7 +58,7 @@ pub use vllm_chat::{
     ChatTemplateContentFormatOption, GenerationConfigMode, ParserSelection, RendererSelection,
 };
 use vllm_engine_core_client::{EngineCoreClient, EngineCoreClientConfig};
-use vllm_llm::Llm;
+use vllm_llm::EngineCoreLlm;
 pub use vllm_metrics::CustomHistogramBuckets;
 use vllm_metrics::METRICS;
 use vllm_text::TextLlm;
@@ -69,6 +74,31 @@ const GRPC_KEEPALIVE_INTERVAL: Duration = Duration::from_secs(7200);
 /// How long the server waits for a keepalive PING reply before dropping the gRPC
 /// connection. 20s matches the gRPC-core default.
 const GRPC_KEEPALIVE_TIMEOUT: Duration = Duration::from_secs(20);
+
+async fn monitor_llm_health(
+    mut health: watch::Receiver<bool>,
+    shutdown: CancellationToken,
+    keep_alive: bool,
+) -> Result<()> {
+    if keep_alive {
+        shutdown.cancelled().await;
+        return Ok(());
+    }
+
+    let health_result = tokio::select! {
+        biased;
+
+        result = health.wait_for(|healthy| !*healthy) => result,
+        _ = shutdown.cancelled() => return Ok(()),
+    };
+    let health_channel_error = health_result.err();
+
+    shutdown.cancel();
+    match health_channel_error {
+        None => bail!("LLM became permanently unhealthy"),
+        Some(error) => Err(error).context("LLM health channel closed"),
+    }
+}
 
 /// Resolve the public model names accepted by the frontend.
 fn effective_served_model_names(model: &str, served_model_name: &[String]) -> Vec<String> {
@@ -98,6 +128,7 @@ async fn build_state(config: &Config) -> Result<Arc<AppState>> {
             revision: config.revision.clone(),
             tokenizer: config.tokenizer.clone(),
             hf_config: config.hf_config.clone(),
+            skip_tokenizer_init: config.skip_tokenizer_init,
             hf_overrides: config.hf_overrides.clone(),
             generation_config: config.generation_config,
             renderer: config.renderer,
@@ -128,19 +159,23 @@ async fn build_state(config: &Config) -> Result<Arc<AppState>> {
     let client = EngineCoreClient::connect(EngineCoreClientConfig {
         transport_mode: config.transport_mode.clone(),
         coordinator_mode,
-        model_name: metrics_model_name,
+        model_name: metrics_model_name.clone(),
         client_index: 0,
         engine_stats_enabled: !config.disable_log_stats,
     })
     .await
     .context("failed to connect to engine core")?;
     let server_info = ServerInfoSnapshot::new(config, &client);
+    let system_fingerprint = config
+        .fingerprint_mode
+        .fingerprint(&client.ready_responses(), client.data_parallel_size());
 
-    let llm = Llm::new(client)
+    let llm = EngineCoreLlm::new(client)
         .with_log_stats(config.log_stats_interval.filter(|_| !config.disable_log_stats))
         .with_request_id_randomization(!config.disable_request_id_randomization)
         .with_stream_interval(config.stream_interval);
     let text = TextLlm::new(llm, text_backend)
+        .with_served_model_name(metrics_model_name)
         .with_max_logprobs(config.max_logprobs)
         .with_structured_outputs_backend(config.structured_outputs_backend);
 
@@ -161,6 +196,7 @@ async fn build_state(config: &Config) -> Result<Arc<AppState>> {
         AppState::new(served_model_names, chat)
             .with_model_path(config.model.clone())
             .with_api_server_options(config.api_server_options)
+            .with_system_fingerprint(system_fingerprint)
             .with_server_info(server_info)
             .with_api_keys(config.api_keys.clone())
             .with_cors(config.cors.clone())
@@ -260,7 +296,7 @@ where
             .transpose()
             .context("invalid gRPC TLS configuration")?;
         let (health_reporter, health_service) = health_reporter();
-        let engine_health = grpc::EngineHealth::subscribe(state.engine_core_client());
+        let engine_health = grpc::EngineHealth::subscribe(state.llm());
         let health_monitor = grpc::HealthMonitor::register(health_reporter, engine_health).await;
         let control_service = grpc::ControlGrpcService::new(
             grpc::ControlServiceImpl::new(state.clone())
@@ -296,6 +332,11 @@ where
     let server_shutdown = shutdown.child_token();
     let force_shutdown = CancellationToken::new();
     let shutdown_deadline = Arc::new(OnceLock::new());
+    let health_fut = monitor_llm_health(
+        state.llm().subscribe_health(),
+        server_shutdown.clone(),
+        config.keep_alive_on_engine_death,
+    );
 
     // Spawn a task to trigger `force_shutdown` after shutdown deadline elapses.
     tokio::spawn({
@@ -395,14 +436,16 @@ where
         }
     };
 
-    let (http_res, grpc_res) = tokio::join!(http_fut, grpc_fut);
+    let (http_res, grpc_res, health_res) = tokio::join!(http_fut, grpc_fut, health_fut);
     http_res.and(grpc_res)?;
 
     let shutdown_deadline = shutdown_deadline
         .get()
         .copied()
         .unwrap_or_else(|| Instant::now() + config.shutdown_timeout);
-    state.shutdown(shutdown_deadline).await
+    let shutdown_result = state.shutdown(shutdown_deadline).await;
+    health_res?;
+    shutdown_result
 }
 
 /// Per-connection timeouts applied while serving HTTP/HTTPS.
@@ -468,6 +511,8 @@ where
 
 #[cfg(test)]
 mod tests {
+    use std::task::Poll;
+
     use super::*;
 
     #[test]
@@ -486,5 +531,57 @@ mod tests {
             effective_served_model_names("backend-model", &served_names),
             served_names
         );
+    }
+
+    #[tokio::test]
+    async fn unhealthy_llm_cancels_server_shutdown_and_returns_error() {
+        let (health_tx, health) = watch::channel(true);
+        let shutdown = CancellationToken::new();
+        let mut monitor = Box::pin(monitor_llm_health(health, shutdown.clone(), false));
+
+        assert!(futures::poll!(&mut monitor).is_pending());
+        health_tx.send(false).expect("publish unhealthy LLM");
+
+        let Poll::Ready(result) = futures::poll!(&mut monitor) else {
+            panic!("health monitor did not react to an unhealthy LLM");
+        };
+        assert_eq!(
+            result.unwrap_err().to_string(),
+            "LLM became permanently unhealthy"
+        );
+        assert!(shutdown.is_cancelled());
+    }
+
+    #[tokio::test]
+    async fn unhealthy_llm_remains_fatal_when_shutdown_is_already_requested() {
+        let (health_tx, health) = watch::channel(true);
+        let shutdown = CancellationToken::new();
+
+        health_tx.send(false).expect("publish unhealthy LLM");
+        shutdown.cancel();
+
+        let result = monitor_llm_health(health, shutdown, false).await;
+        assert_eq!(
+            result.unwrap_err().to_string(),
+            "LLM became permanently unhealthy"
+        );
+    }
+
+    #[tokio::test]
+    async fn keep_alive_ignores_unhealthy_llm_until_shutdown() {
+        let (health_tx, health) = watch::channel(true);
+        let shutdown = CancellationToken::new();
+        let mut monitor = Box::pin(monitor_llm_health(health, shutdown.clone(), true));
+
+        assert!(futures::poll!(&mut monitor).is_pending());
+        health_tx.send(false).expect("publish unhealthy LLM");
+        assert!(futures::poll!(&mut monitor).is_pending());
+        assert!(!shutdown.is_cancelled());
+
+        shutdown.cancel();
+        let Poll::Ready(result) = futures::poll!(&mut monitor) else {
+            panic!("health monitor did not finish during shutdown");
+        };
+        result.expect("keep-alive shutdown is graceful");
     }
 }
