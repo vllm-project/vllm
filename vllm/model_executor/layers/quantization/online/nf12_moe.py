@@ -4,15 +4,24 @@
 import torch
 
 from vllm.model_executor.layers.fused_moe.activation import MoEActivation
+from vllm.model_executor.layers.fused_moe.config import FusedMoEConfig
 from vllm.model_executor.layers.fused_moe.routed_experts import RoutedExperts
 from vllm.model_executor.layers.fused_moe.runner.shared_experts import SharedExperts
 from vllm.model_executor.layers.quantization.online.moe_base import OnlineMoEMethodBase
 from vllm.model_executor.utils import replace_parameter
 from vllm.platforms import current_platform
+from vllm.utils.import_utils import has_nf12
 
 
 class Nf12OnlineMoEMethod(OnlineMoEMethodBase):
     """Losslessly encode BF16 experts and execute the native NF12 MoE kernels."""
+
+    def __init__(self, moe: FusedMoEConfig):
+        super().__init__(moe)
+        if not has_nf12():
+            raise ImportError(
+                'NF12 requires the optional package: uv pip install "vllm[nf12]"'
+            )
 
     @classmethod
     def can_implement(cls, layer: RoutedExperts) -> tuple[bool, str | None]:

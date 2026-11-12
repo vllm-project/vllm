@@ -10,6 +10,7 @@ from vllm.model_executor.layers.quantization.online.fp8 import OnlineLinearBase
 from vllm.model_executor.layers.quantization.utils.quant_utils import kNf12
 from vllm.model_executor.utils import replace_parameter
 from vllm.platforms import current_platform
+from vllm.utils.import_utils import has_nf12
 
 logger = init_logger(__name__)
 
@@ -30,6 +31,10 @@ class Nf12OnlineLinearMethod(OnlineLinearBase):
             )
         if self.input_dtype != torch.bfloat16:
             raise ValueError("NF12 requires BF16 weights and activations")
+        if not has_nf12():
+            raise ImportError(
+                'NF12 requires the optional package: uv pip install "vllm[nf12]"'
+            )
         self.unquantized = UnquantizedLinearMethod()
         self.fallback = False
 
