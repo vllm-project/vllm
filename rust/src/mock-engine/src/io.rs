@@ -7,26 +7,23 @@ use tokio::sync::mpsc;
 use tokio_util::sync::CancellationToken;
 use tracing::warn;
 use vllm_engine_core_client::mock_engine::MockEngineDataSockets;
-use vllm_engine_core_client::protocol::decode_msgpack;
 use vllm_engine_core_client::protocol::request::{EngineCoreRequest, EngineCoreRequestType};
 use vllm_engine_core_client::protocol::utility::EngineCoreUtilityRequest;
+use vllm_engine_core_client::protocol::{decode_msgpack, msgpack_zero_copy_threshold};
 use zeromq::{DealerSocket, PushSocket, SocketRecv as _, SocketSend as _, ZmqMessage};
 
 use crate::engine::{EngineInput, EngineOutput};
 
-/// Arrays of at least this many bytes go in auxiliary frames, as with Python's
-/// default `VLLM_MSGPACK_ZERO_COPY_THRESHOLD`.
-const AUX_FRAME_THRESHOLD: usize = 256;
-
 /// Send one engine output batch to the client over the appropriate push socket.
 async fn send_engine_outputs_to_client(
     push_sockets: &mut [PushSocket],
+    aux_frame_threshold: usize,
     EngineOutput {
         client_index,
         outputs,
     }: EngineOutput,
 ) -> Result<()> {
-    let message = ZmqMessage::try_from(outputs.into_frames(AUX_FRAME_THRESHOLD)?)
+    let message = ZmqMessage::try_from(outputs.into_frames(aux_frame_threshold)?)
         .map_err(|err| anyhow!("failed to build engine output message: {err}"))?;
     push_sockets[client_index as usize].send(message).await?;
     Ok(())
@@ -99,6 +96,7 @@ pub(crate) async fn run_io_loop(
     mut output_rx: mpsc::Receiver<EngineOutput>,
     shutdown: CancellationToken,
 ) -> Result<()> {
+    let aux_frame_threshold = msgpack_zero_copy_threshold();
     let (dealers, mut push_sockets): (Vec<_>, Vec<_>) =
         data_sockets.into_iter().map(|sockets| (sockets.dealer, sockets.push)).unzip();
     let mut input_streams =
@@ -112,7 +110,7 @@ pub(crate) async fn run_io_loop(
             output = output_rx.recv() => {
                 let output = output
                     .ok_or_else(|| anyhow!("mock engine output channel closed"))?;
-                send_engine_outputs_to_client(&mut push_sockets, output).await?;
+                send_engine_outputs_to_client(&mut push_sockets, aux_frame_threshold, output).await?;
             }
 
             input = input_streams.next() => {
