@@ -169,8 +169,14 @@ def test_ignore_unexpected_patterns_skip_only_unexpected_weights():
     mod.dense = torch.nn.Module()
 
     ones = torch.ones(2, 2)
-    weights = [("moe.norm.weight", ones), ("dense.norm.weight", ones)]
-    loader = AutoWeightsLoader(mod, ignore_unexpected_patterns=[r"\.norm"])
+    weights = [
+        ("moe.norm.weight", ones),
+        ("dense.norm.weight", ones),
+        # The pattern names weights below the missing module (e.g. MTP's `head`)
+        ("missing.head.weight", ones),
+    ]
+    patterns = [r"\.norm", r"head\.weight"]
+    loader = AutoWeightsLoader(mod, ignore_unexpected_patterns=patterns)
     loaded = loader.load_weights(iter(weights))
 
     assert loaded == {"moe.norm.weight"}

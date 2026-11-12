@@ -5,6 +5,7 @@
 import ast
 import functools
 import inspect
+import math
 import operator
 import textwrap
 import types
@@ -192,14 +193,37 @@ def _run_moe(experts: nn.Module, hidden_states: torch.Tensor) -> torch.Tensor:
     return out.reshape(orig_shape)
 
 
+def _scale(node: fx.Node) -> tuple[float, object] | None:
+    """`(c, x)` if `node` is `x * c`, `c * x` or `x / c` for a constant `c`."""
+    if node.kwargs or len(node.args) != 2:
+        return None
+    a, b = node.args
+    if is_op(node, "mul") and isinstance(b, (int, float)):
+        return float(b), a
+    if is_op(node, "mul") and isinstance(a, (int, float)):
+        return float(a), b
+    if (is_op(node, "truediv") or is_op(node, "div")) and isinstance(b, (int, float)):
+        return 1 / b, a
+    return None
+
+
 def _only_feeds(source: fx.Node, node: object) -> bool:
-    """Is `source` used only to compute `node`, along the first arguments `_unwrap`
-    follows, with every value on the way (and `node`) used once?"""
+    """Is `source` used only to compute `node`, along the arguments `_unwrap` and
+    `_scale` follow, with every value on the way (and `node`) used once?"""
     while isinstance(node, fx.Node) and len(node.users) == 1:
         if node is source:
             return True
-        node = node.args[0]
+        node = scale[1] if (scale := _scale(node)) else node.args[0]
     return False
+
+
+def _trace_for_inference(module: nn.Module, seq_len: int = 8) -> fx.Graph | None:
+    """Trace `module` in eval mode, as the traced forward replaces it at inference."""
+    training, module.training = module.training, False
+    try:
+        return trace(module, seq_len=seq_len)
+    finally:
+        module.training = training
 
 
 def _erase_unused(graph: fx.Graph, modules: set[str]) -> None:
@@ -342,6 +366,7 @@ class MoEBlockFuser:
         moe_block: nn.Module,
         experts_name: str,
         divides_shared_output: bool = False,
+        routed_scaling_factor: float = 1.0,
     ) -> "MoEBlockFuser | None":
         """Matches a block computing `experts(x, ids, weights) [* c] [+ shared(x)]`
         with `_, weights, ids = gate(x)`, up to reshapes, casts and `nn.Identity`.
@@ -355,6 +380,8 @@ class MoEBlockFuser:
             divides_shared_output: Whether vLLM routing would divide the shared
                 expert's output by `routed_scaling_factor` (fp16 overflow
                 protection), which Transformers decoder layers do not undo.
+            routed_scaling_factor: The scale vLLM routing applies to the experts'
+                output, which `c` must equal.
 
         Returns:
             A fuser if more than the experts can run in vLLM, else `None`.
@@ -363,9 +390,15 @@ class MoEBlockFuser:
         # Standard MoE block returns a single tensor.
         if _returns_tuple(type(moe_block)):
             return None
-        if (graph := trace(moe_block)) is None or not is_complete(graph):
+        if (graph := _trace_for_inference(moe_block)) is None:
             return None
-        # Only a graph that runs as traced can replace the forward.
+        if not is_complete(graph):
+            return None
+        # Only a graph that runs as traced can replace the forward, so it must not
+        # depend on optional inputs, which tracing fixes.
+        placeholders = [n for n in graph.nodes if n.op == "placeholder"]
+        if any(n.users for n in placeholders[1:]):
+            return None
         for node in graph.nodes:
             constant = node.op == "get_attr" and str(node.target).startswith("_tensor")
             if is_leaf_call(node) or constant:
@@ -379,15 +412,16 @@ class MoEBlockFuser:
         router = cls._match_router(getattr(moe_block, gate_name))
         scoring_func, router_dtype, renormalize = router or (None, None, None)
 
-        scaled = find_node(
-            graph,
-            lambda n: (
-                is_op(n, "mul")
-                and len(n.args) == 2
-                and not isinstance(n.args[1], fx.Node)
-                and unwrap(n.args[0]) is experts
-            ),
-        )
+        def scales_experts(n: fx.Node) -> bool:
+            return (scale := _scale(n)) is not None and unwrap(scale[1]) is experts
+
+        scaled = find_node(graph, scales_experts)
+        scaled_arg = None
+        if scaled is not None:
+            factor, scaled_arg = _scale(scaled) or (None, None)
+            # vLLM routing applies `routed_scaling_factor`, not `c`
+            if factor is None or not math.isclose(factor, routed_scaling_factor):
+                return None
         routed = scaled or experts
         # The experts' output plus the shared expert's, if any.
         combine = find_node(
@@ -395,6 +429,7 @@ class MoEBlockFuser:
             lambda n: (
                 is_op(n, "add")
                 and len(n.args) == 2
+                and not n.kwargs
                 and any(unwrap(arg) is routed for arg in n.args)
             ),
         )
@@ -424,7 +459,7 @@ class MoEBlockFuser:
             return None
         # The fused MoE returns the experts' output scaled and combined, so the
         # partial values must not be used anywhere else.
-        if scaled is not None and not _only_feeds(experts, scaled.args[0]):
+        if scaled is not None and not _only_feeds(experts, scaled_arg):
             return None
         if combine is not None:
             routed_arg = combine.args[routed_idx]
@@ -438,19 +473,23 @@ class MoEBlockFuser:
             fused = graph.call_function(_run_moe, (runner, hidden_states))
         experts.replace_all_uses_with(fused)
         if scaled is not None:
-            scaled.replace_all_uses_with(scaled.args[0])
+            # Read the operand again: it may be the replaced experts call
+            _, operand = _scale(scaled) or (None, None)
+            assert isinstance(operand, fx.Node)
+            scaled.replace_all_uses_with(operand)
         if combine is not None:
             combine.replace_all_uses_with(combine.args[routed_idx])
         moved = {gate_name, shared_name, shared_gate_name} - {None}
         _erase_unused(graph, moved | {experts_name})
-        # Fail closed if the router or shared expert is still used elsewhere.
+        # Fail closed if the experts, router or shared expert are used elsewhere.
         for node in graph.nodes:
-            if node.op in ("call_module", "get_attr") and (
-                str(node.target).split(".")[0] in moved
-            ):
+            refs_moved = str(node.target).split(".")[0] in moved | {experts_name}
+            is_ref = node.op in ("call_module", "get_attr") and node is not runner
+            if is_ref and refs_moved:
                 return None
         # Fail closed if the trace specialized on the input's sequence length.
-        retraced = trace(moe_block, seq_len=5)
+        # This only catches specialization that changes the generated code.
+        retraced = _trace_for_inference(moe_block, seq_len=5)
         if retraced is None or retraced.python_code("self").src != source:
             return None
         return cls(

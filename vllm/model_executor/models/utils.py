@@ -266,8 +266,9 @@ class AutoWeightsLoader:
         self.module = module
         self.ignore_unexpected_prefixes = ignore_unexpected_prefixes or []
         self.ignore_unexpected_suffixes = ignore_unexpected_suffixes or []
-        patterns = "|".join(f"({p})" for p in ignore_unexpected_patterns or [])
-        self.ignore_unexpected_regex = re.compile(patterns) if patterns else None
+        self.ignore_unexpected_patterns = [
+            re.compile(p) for p in ignore_unexpected_patterns or []
+        ]
 
         # Weight tying makes two qualnames point at the same `nn.Parameter`
         # (e.g. `lm_head.weight` and `model.embed_tokens.weight`). Loading both
@@ -309,9 +310,8 @@ class AutoWeightsLoader:
     def _can_ignore_unexpected(self, qualname: str) -> bool:
         iup = (qualname.startswith(p) for p in self.ignore_unexpected_prefixes)
         ius = (qualname.endswith(s) for s in self.ignore_unexpected_suffixes)
-        regex = self.ignore_unexpected_regex
-        iur = regex is not None and regex.search(qualname) is not None
-        return any(iup) or any(ius) or iur
+        iur = (p.search(qualname) for p in self.ignore_unexpected_patterns)
+        return any(iup) or any(ius) or any(iur)
 
     def _load_param(
         self,
@@ -447,6 +447,13 @@ class AutoWeightsLoader:
                 can_ignore_module = self._can_ignore_unexpected(prefix + ".")
                 can_ignore_param = self._can_ignore_unexpected(prefix)
                 if can_ignore_module or can_ignore_param:
+                    logger.debug("Ignoring missing %s", prefix)
+
+                    continue
+
+                # Patterns can name weights below the missing module
+                qualnames = [maybe_prefix(prefix, name) for name, _ in child_weights]
+                if all(map(self._can_ignore_unexpected, qualnames)):
                     logger.debug("Ignoring missing %s", prefix)
 
                     continue

@@ -214,8 +214,11 @@ class MoEMixin(MixtureOfExperts, Base):
     num_local_physical_experts: int
 
     def __init__(self, *, vllm_config: "VllmConfig", prefix: str = ""):
-        if vllm_config.model_config.hf_config.model_type == "aria":
+        model_type = vllm_config.model_config.hf_config.model_type
+        if model_type == "aria":
             self.check_version("5.18.0", "Aria")
+        elif model_type == "axk1":
+            self.check_version("5.23.0", "A.X-K1")
         # Skip MixtureOfExperts.__init__ and call the next class in MRO
         super(MixtureOfExperts, self).__init__(vllm_config=vllm_config, prefix=prefix)
 
@@ -377,7 +380,10 @@ class MoEMixin(MixtureOfExperts, Base):
                         and self.model_config.dtype == torch.float16
                     )
                     fuser = MoEBlockFuser.match(
-                        moe_block, experts_name, divides_shared_output
+                        moe_block,
+                        experts_name,
+                        divides_shared_output,
+                        routed_scaling_factor,
                     )
                     if fuser is not None:
                         # MoE block forward is fully replaced.
