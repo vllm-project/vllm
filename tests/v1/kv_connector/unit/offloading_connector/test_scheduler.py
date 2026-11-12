@@ -230,6 +230,7 @@ def test_swa_offload_window_covers_unaligned_hit(
         tokens_per_hash=8,
         blocks_per_chunk=4,
         offload_prompt_only=True,
+        async_init=False,
         extra_config={},
         kv_events_config=OffloadingKVEventsConfig(
             enable_kv_cache_events=False, self_describing_kv_events=False
@@ -2294,7 +2295,7 @@ def test_async_init_offloads_only_after_workers_are_ready(request_runner):
 
     runner.new_request(token_ids=[0] * block_size * 2)
     runner.run(decoded_tokens=[0, 0])
-    assert not runner.connector_scheduler._tier_ready
+    assert not runner.connector_scheduler._offloading_enabled
     runner.manager.lookup.assert_not_called()
     runner.manager.prepare_store.assert_not_called()
 
@@ -2302,7 +2303,7 @@ def test_async_init_offloads_only_after_workers_are_ready(request_runner):
     # a step later. Chunks skipped while not ready are still stored.
     ready = True
     runner.run(decoded_tokens=[0, 0, 0], expected_stored=(0, 1))
-    assert runner.connector_scheduler._tier_ready
+    assert runner.connector_scheduler._offloading_enabled
 
 
 def test_async_init_waits_for_every_worker(request_runner):
@@ -2314,21 +2315,15 @@ def test_async_init_waits_for_every_worker(request_runner):
         extra_config_overrides={"async_init": True},
     )
     scheduler = runner.connector_scheduler
-    rank0 = OffloadingWorkerMetadata(ready_ranks={0})
-    # A replayed output must not count the same rank twice.
-    for meta in (rank0, rank0.aggregate(rank0)):
+    # Each worker reports once, in separate steps; a repeated rank is not
+    # counted twice.
+    for rank, enabled in ((0, False), (0, False), (1, True)):
         scheduler.update_connector_output(
-            KVConnectorOutput(kv_connector_worker_meta=meta)
-        )
-        assert not scheduler._tier_ready
-    scheduler.update_connector_output(
-        KVConnectorOutput(
-            kv_connector_worker_meta=rank0.aggregate(
-                OffloadingWorkerMetadata(ready_ranks={1})
+            KVConnectorOutput(
+                kv_connector_worker_meta=OffloadingWorkerMetadata(ready_ranks={rank})
             )
         )
-    )
-    assert scheduler._tier_ready
+        assert scheduler._offloading_enabled == enabled
 
 
 def test_scheduler_reports_lookup_sync_delay(request_runner):

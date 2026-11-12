@@ -1154,7 +1154,7 @@ def test_deferred_host_setup(iid, host_register, monkeypatch, case):
         if case == "stopped":
             worker._setup_stop.set()
 
-        worker.start_background_setup()
+        worker.start_deferred_setup()
         assert worker._setup_thread is not None
         worker._setup_thread.join()
 

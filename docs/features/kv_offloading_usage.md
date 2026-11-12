@@ -109,7 +109,7 @@ Secondary tiers are not supported yet on engines whose workers span several node
 | `cache_policy_module_path` | no | — | both | Python import path for a custom `CachePolicy` not in the built-in registry. Required only when `eviction_policy` is not built-in and wasn't pre-registered via `CachePolicyFactory` (advanced). |
 | `store_threshold` | no | `0` | single-tier | Min lookups before a block is offloaded. Values ≥ 2 are rejected by `TieringOffloadingSpec`. |
 | `max_tracker_size` | no | `64000` | single-tier | Max entries in the lookup tracker. |
-| `async_init` | no | `false` | single-tier | Pre-fault and pin the CPU tier in a background thread so the engine starts sooner; it serves without offloading until every worker is ready. CUDA only; ignored with a warning elsewhere and by `TieringOffloadingSpec`. |
+| `async_init` | no | `false` | single-tier | Pre-fault and pin the CPU tier in a background thread so the engine starts sooner; it serves without offloading until every worker is ready. If the background setup fails on any worker, the error is logged and the engine keeps serving with offloading off. CUDA only; ignored with a warning elsewhere and by `TieringOffloadingSpec`. |
 | `async_init_pin_pace` | no | `2.0` | single-tier | Pause after each background pin call, as a multiple of that call's duration. `0` pins fastest but can stall serving while it runs. |
 | `secondary_tiers` | no | `[]` | multi-tier | List of secondary tier configs (see below). |
 | `tier_poll_interval_s` | no | `0.001` | multi-tier | Pause between tier-poll rounds for tiers that must be serviced between engine steps (currently `p2p`). See [Threading model](#threading-model). Set to `0` to disable the thread and service those tiers once per engine step instead. |

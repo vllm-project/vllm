@@ -73,7 +73,7 @@ class OffloadingConnectorMetadata(KVConnectorMetadata):
     store_jobs: dict[int, TransferJob]
     jobs_to_flush: set[int] | None = None
     # False until every worker reported ready under async_init.
-    tier_ready: bool = True
+    offloading_enabled: bool = True
 
 
 @dataclass
@@ -89,8 +89,7 @@ class OffloadingWorkerMetadata(KVConnectorWorkerMetadata):
     completed_jobs: dict[int, int] = field(default_factory=dict)
     failed_jobs: set[int] = field(default_factory=set)
     transfer_stats: TransferStats = field(default_factory=TransferStats)
-    # Ranks of workers that are ready, under async_init. A set, so outputs that
-    # are replayed after a failed step are not counted twice.
+    # Ranks of workers that became ready, under async_init. Each reports once.
     ready_ranks: set[int] = field(default_factory=set)
 
     def mark_completed(self, job_id: int, success: bool = True) -> None:

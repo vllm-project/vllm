@@ -830,7 +830,7 @@ class CPUOffloadingWorker(OffloadingWorker):
         pin_pace: float = 2.0,
     ):
         """defer_host_setup leaves pre-faulting and pinning mmap_region to
-        start_background_setup(); prefault_shard is then the share this worker
+        start_deferred_setup(); prefault_shard is then the share this worker
         pre-faults, and pin_pace paces its pinning (see pin_mmap_region)."""
         assert not canonical_layout or mmap_region is not None
         # The caller owns mmap_region until this constructor returns. After a
@@ -906,7 +906,7 @@ class CPUOffloadingWorker(OffloadingWorker):
         # Own stream, so expedited loads do not queue behind regular loads.
         self._expedited_load_handler = make_handler(gpu_to_cpu=False)
 
-    def start_background_setup(self) -> None:
+    def start_deferred_setup(self) -> None:
         if self._defer_host_setup and self._setup_thread is None:
             self._setup_thread = threading.Thread(
                 target=self._host_setup, name="vllm_offload_host_setup", daemon=True
