@@ -10,6 +10,7 @@
 mod logging;
 mod model;
 mod ssl;
+mod timeouts;
 mod unsupported;
 
 use std::collections::HashMap;
@@ -38,9 +39,9 @@ use vllm_managed_engine::cli::{ManagedEngineArgs, repartition_managed_engine_arg
 use vllm_managed_engine::data_parallel::{DataParallelLbArgs, DataParallelTopology};
 use vllm_server::{
     AccessLogConfig, ApiServerOptions, ChatTemplateContentFormatOption, Config, CoordinatorMode,
-    CorsConfig, CustomHistogramBuckets, DEFAULT_KEEP_ALIVE_TIMEOUT, DEFAULT_LOG_STATS_INTERVAL,
-    DEFAULT_MAX_N_SEQUENCES, DEFAULT_REQUEST_BODY_LIMIT_BYTES, FingerprintMode, HttpListenerMode,
-    LoraModulePath, OutputLogConfig, OutputLogging, ParserSelection, ReasoningEffort, RenderConfig,
+    CorsConfig, CustomHistogramBuckets, DEFAULT_LOG_STATS_INTERVAL, DEFAULT_MAX_N_SEQUENCES,
+    DEFAULT_REQUEST_BODY_LIMIT_BYTES, FingerprintMode, HttpListenerMode, LoraModulePath,
+    OutputLogConfig, OutputLogging, ParserSelection, ReasoningEffort, RenderConfig,
     RendererSelection,
 };
 use vllm_text::backend::hf::{HfOverrides, ModelFileSources};
@@ -49,6 +50,7 @@ use vllm_tracing::{LogFormatter, LogLevel};
 use crate::cli::logging::LoggingConfig;
 use crate::cli::model::ModelArgs;
 use crate::cli::ssl::SslArgs;
+use crate::cli::timeouts::ServerTimeoutArgs;
 use crate::cli::unsupported::UnsupportedArgs;
 
 /// Top-level parser for the `vllm-rs` binary.
@@ -158,6 +160,9 @@ pub struct RenderArgs {
     /// set, no gRPC server is started.
     #[arg(long)]
     grpc_port: Option<u16>,
+    /// Drain and keep-alive timeouts of the HTTP and gRPC listeners.
+    #[command(flatten)]
+    timeouts: ServerTimeoutArgs,
     /// Public model names accepted by the API.
     #[arg(long, num_args = 0..)]
     served_model_name: Vec<String>,
@@ -280,8 +285,8 @@ impl RenderArgs {
             host: self.host,
             port: self.port,
             grpc_port: self.grpc_port,
-            shutdown_timeout: Duration::ZERO,
-            keep_alive_timeout: DEFAULT_KEEP_ALIVE_TIMEOUT,
+            shutdown_timeout: self.timeouts.shutdown_timeout(),
+            keep_alive_timeout: self.timeouts.keep_alive_timeout(),
             tool_call_parser: self.tool_call_parser,
             reasoning_parser: self.reasoning_parser,
             tool_strict_level: self.tool_strict_level,
@@ -418,15 +423,10 @@ pub struct SharedRuntimeArgs {
     #[arg(long, default_value_t = NonZeroU32::MIN)]
     #[serde(default = "default_stream_interval")]
     pub stream_interval: NonZeroU32,
-    /// Maximum time to wait for active requests to drain during shutdown.
-    #[arg(long, default_value_t = 0)]
-    #[serde(default)]
-    pub shutdown_timeout: u64,
-    /// Maximum idle time (seconds) on a keep-alive HTTP connection before the
-    /// server closes it (default 5).
-    #[arg(long = "http-timeout-keep-alive", env = "VLLM_HTTP_TIMEOUT_KEEP_ALIVE")]
-    #[serde(default)]
-    pub http_timeout_keep_alive: Option<u64>,
+    /// Drain and keep-alive timeouts of the HTTP and gRPC listeners.
+    #[command(flatten)]
+    #[serde(flatten)]
+    pub timeouts: ServerTimeoutArgs,
 
     /// The file path to the chat template, or the template in single-line form
     /// for the specified model. Only the `hf` renderer supports it.
@@ -833,18 +833,6 @@ impl SharedRuntimeArgs {
         Duration::from_secs(self.engine_ready_timeout_secs)
     }
 
-    /// Maximum time to wait for active requests to drain during shutdown.
-    pub fn shutdown_timeout(&self) -> Duration {
-        Duration::from_secs(self.shutdown_timeout)
-    }
-
-    /// Maximum idle time on a keep-alive HTTP connection before the server
-    /// closes it.
-    pub fn keep_alive_timeout(&self) -> Duration {
-        self.http_timeout_keep_alive
-            .map_or(DEFAULT_KEEP_ALIVE_TIMEOUT, Duration::from_secs)
-    }
-
     /// Interval between periodic engine statistics logs, or `None` to never
     /// log.
     pub fn log_stats_interval(&self) -> Option<Duration> {
@@ -993,8 +981,8 @@ impl SharedRuntimeArgs {
         data_parallel_size: usize,
     ) -> Config {
         let ready_timeout = self.ready_timeout();
-        let shutdown_timeout = self.shutdown_timeout();
-        let keep_alive_timeout = self.keep_alive_timeout();
+        let shutdown_timeout = self.timeouts.shutdown_timeout();
+        let keep_alive_timeout = self.timeouts.keep_alive_timeout();
         let log_stats_interval = self.log_stats_interval();
         let api_server_options = self.api_server_options();
         let fingerprint_mode = self.fingerprint_mode_config();
@@ -1083,8 +1071,8 @@ impl SharedRuntimeArgs {
         manages_engine: bool,
     ) -> Config {
         let ready_timeout = self.ready_timeout();
-        let shutdown_timeout = self.shutdown_timeout();
-        let keep_alive_timeout = self.keep_alive_timeout();
+        let shutdown_timeout = self.timeouts.shutdown_timeout();
+        let keep_alive_timeout = self.timeouts.keep_alive_timeout();
         let log_stats_interval = self.log_stats_interval();
         let api_server_options = self.api_server_options();
         let fingerprint_mode = self.fingerprint_mode_config();
@@ -1535,7 +1523,7 @@ impl ServeArgs {
             reasoning_parser.as_deref(),
             self.runtime.language_model_only,
             self.runtime.disable_log_stats,
-            self.runtime.shutdown_timeout,
+            self.runtime.timeouts.shutdown_timeout,
             handshake_port,
             self.runtime.limit_mm_per_prompt_json(),
             hf_overrides,
