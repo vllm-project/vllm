@@ -728,20 +728,35 @@ class KimiK3DeltaAttention(GatedDeltaNetAttention):
         )
         # RecoverSSM: this layer's verify records of a speculative step, and its
         # verify and commit kernels: "cute" (SM10x, the short convolution fused
-        # into the verify) where they can run, else "triton".
+        # into the verify) where they can run, else "triton". The Triton verify
+        # first replays the accepted tokens of the request's last verify, so the
+        # commit after sampling is deferred and the records stay in its slot.
         self.recoverssm_backend: Literal["cute", "triton"] | None = None
         self.recoverssm_records: KDARecoverSSMRecords | None = None
         self.recoverssm_verify: CuteRecoverSSMVerify | None = None
         if self.use_recoverssm:
+            supported, reason = can_use_cute_recoverssm(
+                head_dim=self.head_dim,
+                window=self.spec_query_len,
+                conv_width=self.conv_size,
+                has_conv_bias=self.conv1d.bias is not None,
+                activation_dtype=vllm_config.model_config.dtype,
+                conv_state_dtype=conv_state_dtype,
+                state_dtype=recurrent_state_dtype,
+                conv_weight_dtype=self.conv1d.weight.dtype,
+                lower_bound=self.gate_lower_bound,
+            )
+            self.recoverssm_backend = "cute" if supported else "triton"
+            max_num_seqs = vllm_config.scheduler_config.max_num_seqs
             self.recoverssm_records = KDARecoverSSMRecords.allocate(
-                vllm_config.scheduler_config.max_num_seqs,
+                max_num_seqs,
                 self.local_num_heads,
                 self.spec_query_len,
                 self.head_dim,
                 vllm_config.model_config.dtype,
                 self.conv1d.weight.device,
+                by_slot=self.recoverssm_backend == "triton",
             )
-            max_num_seqs = vllm_config.scheduler_config.max_num_seqs
             records_bytes = len(kda_config["kda_layers"]) * sum(
                 t.numel() * t.element_size()
                 for t in (
@@ -756,18 +771,6 @@ class KimiK3DeltaAttention(GatedDeltaNetAttention):
                 max_num_seqs,
                 records_bytes / max_num_seqs / 2**20,
             )
-            supported, reason = can_use_cute_recoverssm(
-                head_dim=self.head_dim,
-                window=self.spec_query_len,
-                conv_width=self.conv_size,
-                has_conv_bias=self.conv1d.bias is not None,
-                activation_dtype=vllm_config.model_config.dtype,
-                conv_state_dtype=conv_state_dtype,
-                state_dtype=recurrent_state_dtype,
-                conv_weight_dtype=self.conv1d.weight.dtype,
-                lower_bound=self.gate_lower_bound,
-            )
-            self.recoverssm_backend = "cute" if supported else "triton"
             if self.recoverssm_backend == "triton":
                 logger.info_once(
                     "Using the Triton KDA RecoverSSM verify and commit: the CuTe "
@@ -1002,9 +1005,10 @@ class KimiK3DeltaAttention(GatedDeltaNetAttention):
         out: torch.Tensor | None,
     ) -> torch.Tensor:
         """RecoverSSM verify of the speculative requests: the short convolution
-        and the KDA recurrence from each request's checkpoint, which is left
-        unchanged. The verify records it writes let the commit after sampling
-        fold the accepted tokens in (KimiK3KDAMetadata.commit_recoverssm_state).
+        and the KDA recurrence from each request's checkpoint. The verify records
+        it writes let the commit after sampling fold the accepted tokens in
+        (KimiK3KDAMetadata.commit_recoverssm_state), or, deferred, the next verify,
+        which replays them into the checkpoint first.
         """
         num_tokens = mixed_qkv.shape[0]
         if out is None:
@@ -1043,6 +1047,9 @@ class KimiK3DeltaAttention(GatedDeltaNetAttention):
             # overlap path under graph capture). The Triton verify runs instead,
             # leaving the same conv state, records and SSM state.
 
+        # Deferred: the conv state still holds the last window, read at the
+        # pending replay's offset (num_accepted_tokens).
+        deferred = m.recoverssm_deferred
         if not is_conv_state_dim_first():
             conv_state = conv_state.transpose(-1, -2)
         mixed_qkv = causal_conv1d_update(
@@ -1077,6 +1084,9 @@ class KimiK3DeltaAttention(GatedDeltaNetAttention):
             state_indices=state_indices,
             spec_query_len=self.spec_query_len,
             out=out,
+            record_rows=deferred.record_rows if deferred is not None else None,
+            pending=deferred.pending if deferred is not None else None,
+            writers=deferred.writers if deferred is not None else None,
         )
 
     @eager_break_during_capture

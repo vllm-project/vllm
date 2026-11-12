@@ -950,6 +950,179 @@ def test_kda_recoverssm_verify_and_group_commit(
                 torch.testing.assert_close(actual_boundary_conv, expected_boundary_conv)
 
 
+@pytest.mark.parametrize("depart", [False, True])
+@pytest.mark.parametrize("align_mode", [False, True])
+@torch.inference_mode()
+def test_kda_recoverssm_deferred_commit_matches_commit(
+    align_mode: bool, depart: bool, monkeypatch: pytest.MonkeyPatch
+):
+    """Deferred, the commit after sampling leaves each request's accepted tokens
+    pending in its request slot and its next verify replays them; only commits that
+    move the checkpoint or complete a mamba block (align) still run. A request
+    leaving the runner (`depart`: e.g. re-added for its next streaming chunk) has
+    them folded in instead. Over a verify, a commit and a verify of the layer's path
+    (conv update + verify), the outputs, checkpoints and conv states match
+    committing after every verify (the replay runs in another kernel than the
+    commit: equal up to rounding).
+    """
+    monkeypatch.setattr(recoverssm_ops, "is_conv_state_dim_first", lambda: False)
+    num_layers, query_len, num_heads, dim, width = 2, 4, 2, 128, 4
+    num_blocks, max_num_reqs, block_size = 8, 6, 8
+    conv_dim = 3 * num_heads * dim
+    slots = torch.tensor([4, 0, 2], dtype=torch.int32, device=DEVICE)
+    accepted = torch.tensor([2, 4, 1], dtype=torch.int32, device=DEVICE)
+    num_seqs = slots.shape[0]
+    tokens = num_seqs * query_len
+    query_start_loc = torch.arange(
+        0, tokens + 1, query_len, dtype=torch.int32, device=DEVICE
+    )
+    # Align: the requests computed 0, 4 and 5 tokens before the first verify, so
+    # the first defers, the second completes block 0 and the third, whose window
+    # reached block 1, moves its checkpoint back to block 0.
+    block_table = torch.tensor(
+        [[1, 2], [3, 4], [5, 6]], dtype=torch.int32, device=DEVICE
+    )
+    num_computed = torch.tensor([0, 4, 5], dtype=torch.int32, device=DEVICE)
+    if align_mode:
+        state_indices = [[1, 3, 6], [1, 4, 6]]
+        expected_pending = [2, 0, 0]
+    else:
+        state_indices = [[1, 3, 5], [1, 3, 5]]
+        expected_pending = accepted.tolist()
+
+    torch.manual_seed(20261109)
+    steps = [
+        [
+            (
+                torch.randn(tokens, conv_dim, dtype=torch.bfloat16, device=DEVICE),
+                torch.randn(1, tokens, num_heads, dim, device=DEVICE).bfloat16(),
+                torch.randn(1, tokens, num_heads, device=DEVICE).bfloat16(),
+            )
+            for _ in range(num_layers)
+        ]
+        for _ in range(2)
+    ]
+
+    def run(deferred: bool):
+        torch.manual_seed(7)
+        layers = [
+            SimpleNamespace(
+                kv_cache=(
+                    torch.randn(
+                        num_blocks,
+                        query_len + width - 2,
+                        conv_dim,
+                        dtype=torch.bfloat16,
+                        device=DEVICE,
+                    ),
+                    0.01 * torch.randn(num_blocks, num_heads, dim, dim, device=DEVICE),
+                ),
+                conv_weight=torch.randn(
+                    conv_dim, width, dtype=torch.bfloat16, device=DEVICE
+                ),
+                recoverssm_records=KDARecoverSSMRecords.allocate(
+                    max_num_reqs,
+                    num_heads,
+                    query_len,
+                    dim,
+                    torch.bfloat16,
+                    DEVICE,
+                    by_slot=deferred,
+                ),
+                A_log=0.2 * torch.randn(num_heads, device=DEVICE),
+                dt_bias=0.1 * torch.randn(num_heads, dim, device=DEVICE),
+                local_num_heads=num_heads,
+                head_dim=dim,
+                gate_lower_bound=-5.0,
+            )
+            for _ in range(num_layers)
+        ]
+        context = KDARecoverSSMCommitContext.create(
+            layers, spec_query_len=query_len, max_num_reqs=max_num_reqs
+        )
+        pending = torch.zeros(max_num_reqs, dtype=torch.int32, device=DEVICE)
+        writers = torch.ones(max_num_reqs, num_heads, dtype=torch.int32, device=DEVICE)
+        outputs = []
+        for step, inputs in enumerate(steps):
+            # Zeroed per step and shared by the layers, as the builder stages it.
+            writers.zero_()
+            indices = torch.tensor(
+                state_indices[step], dtype=torch.int32, device=DEVICE
+            )
+            if align_mode and step == 1:
+                # The runner's pre-copy into the blocks the windows reached.
+                for layer in layers:
+                    for cache in layer.kv_cache:
+                        cache[[4, 6]] = cache[[3, 5]]
+            conv_accepted = (
+                pending[slots].clamp(min=1) if deferred else torch.ones_like(accepted)
+            )
+            for layer, (x, raw_g, raw_beta) in zip(layers, inputs):
+                conv_state, checkpoint = layer.kv_cache
+                x = causal_conv1d_update(
+                    x,
+                    conv_state.transpose(-1, -2),
+                    layer.conv_weight,
+                    None,
+                    activation="silu",
+                    conv_state_indices=indices,
+                    num_accepted_tokens=conv_accepted,
+                    query_start_loc=query_start_loc,
+                    max_query_len=query_len,
+                    validate_data=False,
+                    out=torch.empty_like(x),
+                )
+                q, k, v = (
+                    t.view(1, tokens, num_heads, dim)
+                    for t in x.split(num_heads * dim, dim=-1)
+                )
+                outputs.append(
+                    kda_recoverssm_verify(
+                        q=q,
+                        k=k,
+                        v=v,
+                        raw_g=raw_g,
+                        raw_beta=raw_beta,
+                        A_log=layer.A_log,
+                        dt_bias=layer.dt_bias,
+                        lower_bound=-5.0,
+                        checkpoint_state=checkpoint,
+                        records=layer.recoverssm_records,
+                        query_start_loc=query_start_loc,
+                        state_indices=indices,
+                        spec_query_len=query_len,
+                        record_rows=slots if deferred else None,
+                        pending=pending if deferred else None,
+                        writers=writers if deferred else None,
+                    )
+                )
+            if step == 0:
+                context.commit(
+                    accepted,
+                    indices,
+                    query_start_loc,
+                    block_table=block_table if align_mode else None,
+                    num_computed_tokens=num_computed if align_mode else None,
+                    mamba_block_size=block_size if align_mode else None,
+                    record_rows=slots if deferred else None,
+                    pending=pending if deferred else None,
+                )
+                if deferred:
+                    assert pending[slots].tolist() == expected_pending
+                    if depart:
+                        context.fold_pending(slots, pending)
+                        pending.zero_()
+        return layers, outputs
+
+    expected_layers, expected_outputs = run(deferred=False)
+    layers, outputs = run(deferred=True)
+    for actual, expected in zip(outputs, expected_outputs):
+        torch.testing.assert_close(actual, expected)
+    for layer, expected in zip(layers, expected_layers):
+        for actual_cache, expected_cache in zip(layer.kv_cache, expected.kv_cache):
+            torch.testing.assert_close(actual_cache, expected_cache)
+
+
 @pytest.mark.parametrize(
     ("num_heads", "num_seqs", "lower_bound", "fuse_output_norm", "conv_layout"),
     [

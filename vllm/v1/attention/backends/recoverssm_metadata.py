@@ -3,8 +3,12 @@
 
 import abc
 from dataclasses import dataclass
+from typing import TYPE_CHECKING
 
 import torch
+
+if TYPE_CHECKING:
+    from vllm.v1.worker.gpu.model_states.recoverssm import RecoverSSMState
 
 
 @dataclass(frozen=True)
@@ -23,4 +27,18 @@ class RecoverSSMMetadata(abc.ABC):
     def commit_recoverssm_state(
         self, num_accepted_tokens: torch.Tensor
     ) -> RecoverSSMPostprocessMetadata | None:
+        raise NotImplementedError
+
+
+class RecoverSSMMetadataBuilder:
+    """A builder of `RecoverSSMMetadata`. With `use_recoverssm`, the runner binds
+    its `RecoverSSMState` before every build, capture builds included: the
+    pending replays per request slot and the step's request slots."""
+
+    use_recoverssm: bool
+    recoverssm_state: "RecoverSSMState | None" = None
+
+    def fold_pending(self, slots: torch.Tensor, pending: torch.Tensor) -> None:
+        """Fold the pending replays of request slots `slots` (requests leaving the
+        runner) into their checkpoints."""
         raise NotImplementedError

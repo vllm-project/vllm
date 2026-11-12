@@ -60,6 +60,7 @@ def _kda_recurrent_step(
     return state + correction[:, None] * normalized_k[None, :], correction
 
 
+@triton.heuristics({"DEFERRED": lambda args: args["pending_ptr"] is not None})
 @triton.jit
 def _kda_recoverssm_verify_kernel(
     q_ptr,
@@ -75,6 +76,9 @@ def _kda_recoverssm_verify_kernel(
     out_ptr,
     query_start_loc_ptr,
     state_indices_ptr,
+    record_rows_ptr,
+    pending_ptr,
+    writers_ptr,
     lower_bound,
     null_block_id,
     stride_q_token,
@@ -94,6 +98,7 @@ def _kda_recoverssm_verify_kernel(
     stride_kg_head,
     stride_kg_pos,
     stride_kg_dim,
+    stride_writers_row,
     stride_out_token,
     stride_query_start_loc,
     stride_state_indices,
@@ -103,10 +108,16 @@ def _kda_recoverssm_verify_kernel(
     BV: tl.constexpr,
     SPEC_QUERY_LEN: tl.constexpr,
     USE_LOWER_BOUND: tl.constexpr,
+    DEFERRED: tl.constexpr,
 ):
     pid_v = tl.program_id(0)
     pid_b = tl.program_id(1)
     pid_h = tl.program_id(2)
+    # The records of request pid_b: its row of the step, or (deferred) its
+    # request slot.
+    record_row = pid_b.to(tl.int64)
+    if DEFERRED:
+        record_row = tl.load(record_rows_ptr + pid_b).to(tl.int64)
 
     bos = tl.load(query_start_loc_ptr + pid_b * stride_query_start_loc).to(tl.int64)
     eos = tl.load(query_start_loc_ptr + (pid_b + 1) * stride_query_start_loc).to(
@@ -140,6 +151,51 @@ def _kda_recoverssm_verify_kernel(
     )
     state = tl.load(state_ptrs, mask=mask_state, other=0.0).to(tl.float32)
     A = tl.exp(tl.load(A_log_ptr + pid_h).to(tl.float32))
+
+    writes_key_gate = pid_v == 0
+    if DEFERRED:
+        # Replay the request's pending tokens into its checkpoint first: the
+        # recurrence of the commit after sampling, from the verify records.
+        num_pending = tl.load(pending_ptr + record_row, mask=record_row >= 0, other=0)
+        correction_ptr = (
+            correction_cache_ptr
+            + record_row * stride_correction_row
+            + pid_h * stride_correction_head
+        )
+        kg_ptr = kg_cache_ptr + record_row * stride_kg_row + pid_h * stride_kg_head
+        dt_bias = tl.load(dt_bias_ptr + pid_h * K + offs_k, mask=mask_k, other=0.0).to(
+            tl.float32
+        )
+        for token_offset in range(num_pending):
+            kg_token_ptr = kg_ptr + token_offset * stride_kg_pos
+            k = tl.load(
+                kg_token_ptr + offs_k * stride_kg_dim, mask=mask_k, other=0.0
+            ).to(tl.float32)
+            raw_g = tl.load(
+                kg_token_ptr + (K + offs_k) * stride_kg_dim, mask=mask_k, other=0.0
+            ).to(tl.float32)
+            correction = tl.load(
+                correction_ptr
+                + token_offset * stride_correction_pos
+                + offs_v * stride_correction_dim,
+                mask=mask_v,
+                other=0.0,
+            )
+            normalized_k = k * tl.rsqrt(tl.sum(k * k) + 1e-6)
+            gate = _kda_gate(raw_g, dt_bias, A, lower_bound, USE_LOWER_BOUND)
+            state = (
+                state * tl.exp(gate)[None, :]
+                + correction[:, None] * normalized_k[None, :]
+            )
+        replayed = state.to(state_ptr.dtype.element_ty)
+        tl.store(state_ptrs, replayed, mask=mask_state & (num_pending > 0))
+        state = replayed.to(tl.float32)
+        # Each V block of the head read the old key / gate records; the last
+        # to finish its replay writes the new ones.
+        tl.debug_barrier()
+        last = (V + BV - 1) // BV - 1
+        ticket = tl.atomic_add(writers_ptr + record_row * stride_writers_row + pid_h, 1)
+        writes_key_gate = (ticket & last) == last
 
     for token_offset in tl.static_range(SPEC_QUERY_LEN):
         token_valid = token_offset < query_len
@@ -196,7 +252,7 @@ def _kda_recoverssm_verify_kernel(
 
         correction_ptr = (
             correction_cache_ptr
-            + pid_b * stride_correction_row
+            + record_row * stride_correction_row
             + pid_h * stride_correction_head
             + token_offset * stride_correction_pos
         )
@@ -205,10 +261,10 @@ def _kda_recoverssm_verify_kernel(
             correction,
             mask=token_valid & mask_v,
         )
-        if pid_v == 0:
+        if writes_key_gate:
             kg_ptr = (
                 kg_cache_ptr
-                + pid_b * stride_kg_row
+                + record_row * stride_kg_row
                 + pid_h * stride_kg_head
                 + token_offset * stride_kg_pos
             )
@@ -320,6 +376,65 @@ def _prepare_commit_plan_kernel(
 
 
 @triton.jit
+def _defer_commit_kernel(
+    state_indices_ptr,
+    record_rows_ptr,
+    pending_ptr,
+    pending_state_indices_ptr,
+    commit_lens_ptr,
+    final_state_indices_ptr,
+    boundary_state_indices_ptr,
+    null_block_id,
+    stride_state_indices,
+):
+    """After a commit plan: request b's accepted tokens become the pending replay
+    of its request slot (with its checkpoint's state index, for `fold_pending`), and its
+    commit is dropped, unless the commit moves its checkpoint to another slot or
+    completes a mamba block (align); those commit now, with nothing pending."""
+    spec_idx = tl.program_id(0)
+    record_row = tl.load(record_rows_ptr + spec_idx)
+    if record_row < 0:
+        tl.store(commit_lens_ptr + spec_idx, 0)
+        return
+    source_state_idx = tl.load(state_indices_ptr + spec_idx * stride_state_indices)
+    final_state_idx = tl.load(final_state_indices_ptr + spec_idx)
+    boundary_state_idx = tl.load(boundary_state_indices_ptr + spec_idx)
+    commit_now = (final_state_idx != source_state_idx) | (
+        boundary_state_idx > null_block_id
+    )
+    commit_len = tl.load(commit_lens_ptr + spec_idx)
+    tl.store(pending_ptr + record_row, tl.where(commit_now, 0, commit_len))
+    tl.store(pending_state_indices_ptr + record_row, source_state_idx)
+    tl.store(commit_lens_ptr + spec_idx, tl.where(commit_now, commit_len, 0))
+
+
+@triton.jit
+def _prepare_flush_plan_kernel(
+    slots_ptr,
+    pending_ptr,
+    pending_state_indices_ptr,
+    state_indices_ptr,
+    commit_lens_ptr,
+    final_state_indices_ptr,
+    boundary_state_indices_ptr,
+    boundary_recovery_lens_ptr,
+    null_block_id,
+    SPEC_QUERY_LEN: tl.constexpr,
+):
+    """The commit plan folding request slot `slots[b]`'s pending replay into its
+    checkpoint in place."""
+    b = tl.program_id(0)
+    slot = tl.load(slots_ptr + b)
+    commit_len = tl.minimum(tl.load(pending_ptr + slot), SPEC_QUERY_LEN)
+    state_idx = tl.load(pending_state_indices_ptr + slot)
+    tl.store(state_indices_ptr + b, state_idx)
+    tl.store(commit_lens_ptr + b, commit_len)
+    tl.store(final_state_indices_ptr + b, state_idx)
+    tl.store(boundary_state_indices_ptr + b, null_block_id)
+    tl.store(boundary_recovery_lens_ptr + b, 0)
+
+
+@triton.jit
 def _compact_conv_state_kernel(
     conv_state_ref_ptr,
     conv_state_base_addrs_ptr,
@@ -397,6 +512,9 @@ def _compact_conv_state_kernel(
     )
 
 
+@triton.heuristics(
+    {"HAS_RECORD_ROWS": lambda args: args["record_rows_ptr"] is not None}
+)
 @triton.jit
 def _commit_kda_state_kernel(
     state_ref_ptr,
@@ -411,6 +529,7 @@ def _commit_kda_state_kernel(
     A_log_ptr,
     dt_bias_ptr,
     state_indices_ptr,
+    record_rows_ptr,
     commit_lens_ptr,
     final_state_indices_ptr,
     boundary_state_indices_ptr,
@@ -439,6 +558,7 @@ def _commit_kda_state_kernel(
     NUM_HEADS: tl.constexpr,
     USE_LOWER_BOUND: tl.constexpr,
     ALIGN_MODE: tl.constexpr,
+    HAS_RECORD_ROWS: tl.constexpr,
 ):
     pid_v = tl.program_id(0)
     pid_b = tl.program_id(1)
@@ -473,16 +593,21 @@ def _commit_kda_state_kernel(
     correction_cache_ptr = correction_cache_base_addr.to(
         tl.pointer_type(correction_cache_ref_ptr.dtype.element_ty)
     )
-    # The records are those of request pid_b of the step.
+    # The records of request pid_b: its row of the step, or (deferred) its
+    # request slot.
+    record_row = pid_b.to(tl.int64)
+    if HAS_RECORD_ROWS:
+        record_row = tl.load(record_rows_ptr + pid_b).to(tl.int64)
     correction_cache_ptr += (
-        pid_b * correction_cache_block_stride + pid_h * stride_correction_cache_head
+        record_row * correction_cache_block_stride
+        + pid_h * stride_correction_cache_head
     )
     kg_cache_base_addr = tl.load(kg_cache_base_addrs_ptr + pid_l)
     kg_cache_block_stride = tl.load(kg_cache_block_strides_ptr + pid_l)
     kg_cache_ptr = kg_cache_base_addr.to(
         tl.pointer_type(kg_cache_ref_ptr.dtype.element_ty)
     )
-    kg_cache_ptr += pid_b * kg_cache_block_stride + pid_h * stride_kg_cache_head
+    kg_cache_ptr += record_row * kg_cache_block_stride + pid_h * stride_kg_cache_head
 
     offs_k = tl.arange(0, BK)
     offs_v = pid_v * BV + tl.arange(0, BV)
@@ -586,11 +711,14 @@ def _commit_kda_state_kernel(
 class KDARecoverSSMRecords:
     """One KDA layer's RecoverSSM verify records.
 
-    Per request of a speculative step (its row in the step's speculative batch),
-    head and verified token: the FP32 correction `u_t` [V] and the activation
-    dtype key and raw gate [2K]. A verify writes them and the commit after sampling
-    reads them; they are not part of a request's state and so are not stored in
-    the KV cache."""
+    Per request of a speculative step (its row in the step's speculative batch,
+    or, deferred, its request slot), head and verified token: the FP32 correction
+    `u_t` [V] and the activation dtype key and raw gate [2K]. A verify writes them
+    and the commit after sampling (deferred: the next verify) reads them; they are
+    not part of a request's state and so are not stored in the KV cache.
+
+    Records by request slot start one row into their allocation: rows that own no
+    slot (record row -1: capture dummies) write row -1, which nothing reads."""
 
     correction: torch.Tensor  # [max_num_reqs, H, Q, V] float32
     key_gate: torch.Tensor  # [max_num_reqs, H, Q, 2K] activation dtype
@@ -604,11 +732,14 @@ class KDARecoverSSMRecords:
         head_dim: int,
         dtype: torch.dtype,
         device: torch.device,
+        by_slot: bool = False,
     ) -> "KDARecoverSSMRecords":
-        shape = (max_num_reqs, num_heads, spec_query_len)
+        shape = (by_slot + max_num_reqs, num_heads, spec_query_len)
         return cls(
-            torch.empty((*shape, head_dim), dtype=torch.float32, device=device),
-            torch.empty((*shape, 2 * head_dim), dtype=dtype, device=device),
+            torch.empty((*shape, head_dim), dtype=torch.float32, device=device)[
+                by_slot:
+            ],
+            torch.empty((*shape, 2 * head_dim), dtype=dtype, device=device)[by_slot:],
         )
 
 
@@ -627,9 +758,17 @@ def kda_recoverssm_verify(
     state_indices: torch.Tensor,
     spec_query_len: int,
     out: torch.Tensor | None = None,
+    record_rows: torch.Tensor | None = None,
+    pending: torch.Tensor | None = None,
+    writers: torch.Tensor | None = None,
 ) -> torch.Tensor:
-    """Verify a KDA speculative window without modifying its checkpoint. Request
-    `b` writes its verify records to row `b` of `records`."""
+    """Verify a KDA speculative window from each request's checkpoint. Request `b`
+    writes its verify records to row `b` of `records`, and leaves its checkpoint
+    unchanged. Deferred (`pending`), it uses row `record_rows[b]` (its request
+    slot) instead, and first replays that slot's `pending` tokens from the records
+    into its checkpoint; `writers` [slots, H] (zero per slot at the step's start,
+    shared by the step's layers) elects the program that writes the new key /
+    gate records."""
     if q.ndim != 4 or q.shape[0] != 1:
         raise ValueError("KDA RecoverSSM q must have shape [1, tokens, heads, dim]")
     _, total_tokens, num_heads, key_dim = q.shape
@@ -690,7 +829,13 @@ def kda_recoverssm_verify(
 
     block_k = triton.next_power_of_2(key_dim)
     block_v = min(triton.next_power_of_2(value_dim), 32)
-    grid = (triton.cdiv(value_dim, block_v), batch, num_heads)
+    num_v_blocks = triton.cdiv(value_dim, block_v)
+    # Deferred, the last of a head's V blocks (a power-of-two count of `writers`)
+    # writes the new key / gate records.
+    assert pending is None or (
+        writers is not None and num_v_blocks & (num_v_blocks - 1) == 0
+    )
+    grid = (num_v_blocks, batch, num_heads)
     _kda_recoverssm_verify_kernel[grid](
         q,
         k,
@@ -705,6 +850,9 @@ def kda_recoverssm_verify(
         out,
         query_start_loc,
         state_indices,
+        record_rows,
+        pending,
+        writers,
         lower_bound or 0.0,
         NULL_BLOCK_ID,
         q.stride(1),
@@ -724,6 +872,7 @@ def kda_recoverssm_verify(
         kg_cache.stride(1),
         kg_cache.stride(2),
         kg_cache.stride(3),
+        writers.stride(0) if writers is not None else 0,
         out.stride(1),
         query_start_loc.stride(0),
         state_indices.stride(0),
@@ -760,6 +909,10 @@ class KDARecoverSSMCommitContext:
     final_state_indices: torch.Tensor
     boundary_state_indices: torch.Tensor
     boundary_recovery_lens: torch.Tensor
+    # Deferred: per request slot, the state index of the checkpoint its pending
+    # replay applies to (`fold_pending`).
+    pending_state_indices: torch.Tensor
+    flush_state_indices: torch.Tensor
     A_log: torch.Tensor
     dt_bias: torch.Tensor
     lower_bound: float | None
@@ -879,6 +1032,12 @@ class KDARecoverSSMCommitContext:
             boundary_recovery_lens=torch.empty(
                 max_num_reqs, dtype=torch.int32, device=device
             ),
+            pending_state_indices=torch.zeros(
+                max_num_reqs, dtype=torch.int32, device=device
+            ),
+            flush_state_indices=torch.empty(
+                max_num_reqs, dtype=torch.int32, device=device
+            ),
             A_log=torch.stack(tuple(A_log)).contiguous(),
             dt_bias=torch.stack(tuple(dt_bias)).contiguous(),
             lower_bound=lower_bounds.pop(),
@@ -895,8 +1054,15 @@ class KDARecoverSSMCommitContext:
         block_table: torch.Tensor | None = None,
         num_computed_tokens: torch.Tensor | None = None,
         mamba_block_size: int | None = None,
+        record_rows: torch.Tensor | None = None,
+        pending: torch.Tensor | None = None,
     ) -> None:
-        """Fold accepted KDA and convolution inputs into every layer."""
+        """Fold accepted KDA and convolution inputs into every layer.
+
+        Deferred (`pending`): request b's records are in row `record_rows[b]` (its
+        request slot), and its accepted tokens stay pending there for its next
+        verify to replay, unless the commit moves its checkpoint or completes a
+        mamba block (align), which fold now."""
         batch = state_indices.shape[0]
         if batch == 0:
             return
@@ -940,10 +1106,6 @@ class KDARecoverSSMCommitContext:
             0 if num_computed_tokens is None else num_computed_tokens.stride(0)
         )
 
-        num_layers = len(self.checkpoints)
-        conv_ref = self.conv_states[0]
-        conv_dim = conv_ref.shape[1]
-        block_history = triton.next_power_of_2(self.conv_history_len)
         _prepare_commit_plan_kernel[(batch,)](
             num_accepted_tokens,
             request_indices,
@@ -968,6 +1130,57 @@ class KDARecoverSSMCommitContext:
             SPEC_QUERY_LEN=self.spec_query_len,
             num_warps=1,
         )
+        if pending is not None:
+            _defer_commit_kernel[(batch,)](
+                state_indices,
+                record_rows,
+                pending,
+                self.pending_state_indices,
+                self.commit_lens,
+                self.final_state_indices,
+                self.boundary_state_indices,
+                NULL_BLOCK_ID,
+                state_indices.stride(0),
+                num_warps=1,
+            )
+            if block_table is None:
+                return
+        self._fold(state_indices, batch, block_table is not None, record_rows)
+
+    def fold_pending(self, slots: torch.Tensor, pending: torch.Tensor) -> None:
+        """Deferred: fold the pending replays of request slots `slots` into their
+        checkpoints in place (requests leaving the runner, whose next step, if
+        any, does not replay them). `pending` is left to the caller to clear."""
+        batch = slots.shape[0]
+        if batch == 0:
+            return
+        _prepare_flush_plan_kernel[(batch,)](
+            slots,
+            pending,
+            self.pending_state_indices,
+            self.flush_state_indices,
+            self.commit_lens,
+            self.final_state_indices,
+            self.boundary_state_indices,
+            self.boundary_recovery_lens,
+            NULL_BLOCK_ID,
+            SPEC_QUERY_LEN=self.spec_query_len,
+            num_warps=1,
+        )
+        self._fold(self.flush_state_indices[:batch], batch, False, slots)
+
+    def _fold(
+        self,
+        state_indices: torch.Tensor,
+        batch: int,
+        align: bool,
+        record_rows: torch.Tensor | None = None,
+    ) -> None:
+        """Run a prepared plan: the conv state compaction and the state commit."""
+        num_layers = len(self.checkpoints)
+        conv_ref = self.conv_states[0]
+        conv_dim = conv_ref.shape[1]
+        block_history = triton.next_power_of_2(self.conv_history_len)
         _compact_conv_state_kernel[(triton.cdiv(conv_dim, 256), batch, num_layers)](
             conv_ref,
             self.conv_state_base_addrs,
@@ -985,14 +1198,12 @@ class KDARecoverSSMCommitContext:
             state_indices.stride(0),
             BLOCK_D=256,
             BLOCK_HISTORY=block_history,
-            ALIGN_MODE=block_table is not None,
+            ALIGN_MODE=align,
             num_warps=4,
         )
 
         if self.backend == "cute":
-            cute_recoverssm_commit(
-                self, state_indices, batch, align=block_table is not None
-            )
+            cute_recoverssm_commit(self, state_indices, batch, align=align)
             return
         state_ref = self.checkpoints[0]
         _, num_heads, value_dim, key_dim = state_ref.shape
@@ -1016,6 +1227,7 @@ class KDARecoverSSMCommitContext:
             self.A_log,
             self.dt_bias,
             state_indices,
+            record_rows,
             self.commit_lens,
             self.final_state_indices,
             self.boundary_state_indices,
@@ -1043,7 +1255,7 @@ class KDARecoverSSMCommitContext:
             BV=block_v,
             NUM_HEADS=num_heads,
             USE_LOWER_BOUND=self.lower_bound is not None,
-            ALIGN_MODE=block_table is not None,
+            ALIGN_MODE=align,
             num_warps=4,
             num_stages=2,
         )
