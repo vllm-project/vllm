@@ -425,6 +425,16 @@ class TestChunkedPushScheduler:
             (([3], [7]), ((2, 3), None), True)
         ]
 
+    def test_sliding_window_state_ends_at_the_prompt(self):
+        # Speculative decoding adds lookahead blocks past the prompt.
+        sched, request, output = self._scheduler_with_request(
+            make_kv_cache_config(block_size=16, num_blocks=8, swa_enabled=True),
+            block_ids=([1, 2, 3], [5, 6, 7, 8]),
+        )
+        assert self._jobs(sched, output, request, 0, 40) == [
+            (([1, 2, 3], [5, 6, 7]), ((0, 3), None), True)
+        ]
+
     def test_preempted_request_pushes_again_from_first_block(self):
         sched, request, output = self._scheduler_with_request()
         output.num_scheduled_tokens = {request.request_id: 32}

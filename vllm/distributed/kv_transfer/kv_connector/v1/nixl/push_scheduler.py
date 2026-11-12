@@ -436,6 +436,21 @@ class NixlPushConnectorScheduler(NixlBaseConnectorScheduler):
             assert all_block_ids is not None
             # The groups other than full attention hold state that the last
             # step completes; it is clipped as in a whole-request push.
+            if last:
+                # A sliding-window block table can extend past the prompt into
+                # lookahead blocks; clip the window that ends at the prompt.
+                all_block_ids = tuple(
+                    ids[
+                        : cdiv(
+                            request.num_prompt_tokens, group.kv_cache_spec.block_size
+                        )
+                    ]
+                    if isinstance(group.kv_cache_spec, SlidingWindowSpec)
+                    else ids
+                    for group, ids in zip(
+                        self.kv_cache_config.kv_cache_groups, all_block_ids, strict=True
+                    )
+                )
             groups = (
                 self.get_exchange_clipped_blocks(all_block_ids)
                 if last
