@@ -9,6 +9,7 @@ import numpy as np
 import torch
 
 from vllm import PoolingParams, SamplingParams
+from vllm.config import VllmConfig
 from vllm.logger import init_logger
 from vllm.multimodal.inputs import MultiModalFeatureSpec, PlaceholderRange
 from vllm.utils.math_utils import cdiv
@@ -39,6 +40,7 @@ def _reserved_block_count(
     num_tokens: int,
     kvcache_spec: KVCacheSpec,
     *,
+    vllm_config: VllmConfig,
     num_lookahead_tokens: int,
     max_model_len: int,
     max_encoder_len: int,
@@ -70,7 +72,13 @@ def _reserved_block_count(
     if kvcache_spec.dcp_sharded:
         block_size *= dcp_world_size
     num_tokens = min(num_tokens + num_lookahead_tokens, max_model_len)
-    return cdiv(num_tokens, block_size) + num_speculative_blocks
+    num_blocks = cdiv(num_tokens, block_size) + num_speculative_blocks
+    if isinstance(kvcache_spec, MambaSpec):
+        # MambaManager may hold more blocks than its block-table row length.
+        return num_blocks
+    return min(
+        num_blocks, kvcache_spec.max_num_blocks_per_req(vllm_config, max_model_len)
+    )
 
 
 def _warmup_token_ids(model_runner: GPUModelRunner, num_tokens: int) -> list[int]:
@@ -94,6 +102,7 @@ def _warmup_block_counter(
         return _reserved_block_count(
             num_tokens,
             kvcache_spec,
+            vllm_config=vllm_config,
             num_lookahead_tokens=num_lookahead_tokens,
             max_model_len=max_model_len,
             max_encoder_len=max_encoder_len,
@@ -101,6 +110,19 @@ def _warmup_block_counter(
         )
 
     return block_count
+
+
+def _cap_num_warmup_reqs(
+    model_runner: GPUModelRunner, num_reqs: int, num_tokens_per_req: int
+) -> int:
+    """Limit synthetic requests to the scheduler's token budget."""
+    spec_config = model_runner.speculative_config
+    num_draft_slots = (
+        spec_config.max_num_new_slots_for_drafting if spec_config is not None else 0
+    )
+    return min(
+        num_reqs, model_runner.max_num_tokens // (num_tokens_per_req + num_draft_slots)
+    )
 
 
 def run_mixed_prefill_decode_warmup(
@@ -115,7 +137,21 @@ def run_mixed_prefill_decode_warmup(
 ) -> bool:
     """Run a V2 mixed prefill+decode step through normal scheduler inputs,
     requesting prompt_logprobs on the prefill request."""
-    if model_runner.is_pooling_model or model_runner.max_num_reqs < 2 or num_tokens < 3:
+    num_warmup_reqs = 2
+    if model_runner.is_pooling_model or model_runner.max_num_reqs < num_warmup_reqs:
+        return False
+
+    # This synthetic batch has one decode and one prefill request, and bypasses
+    # the scheduler's correction-slot reservation.
+    spec_config = model_runner.speculative_config
+    if spec_config is not None:
+        # Keep room for the draft slots of both requests.
+        num_tokens = min(
+            num_tokens,
+            model_runner.max_num_tokens
+            - num_warmup_reqs * spec_config.max_num_new_slots_for_drafting,
+        )
+    if num_tokens < 3:
         return False
 
     decode_req_id = f"{req_id_prefix}_decode_"
@@ -169,7 +205,7 @@ def run_mixed_prefill_decode_warmup(
 
     decode_prefill_output = SchedulerOutput.make_empty()
     decode_prefill_output.num_spec_tokens_to_schedule = (
-        model_runner.num_speculative_steps
+        model_runner.vllm_config.num_scheduled_spec_tokens
     )
     decode_prefill_output.scheduled_new_reqs = [
         NewRequestData(
@@ -199,7 +235,9 @@ def run_mixed_prefill_decode_warmup(
     ]
 
     mixed_output = SchedulerOutput.make_empty()
-    mixed_output.num_spec_tokens_to_schedule = model_runner.num_speculative_steps
+    mixed_output.num_spec_tokens_to_schedule = (
+        model_runner.vllm_config.num_scheduled_spec_tokens
+    )
     mixed_output.scheduled_cached_reqs = cached_decode_req
     mixed_output.scheduled_new_reqs = [
         NewRequestData(
@@ -269,8 +307,7 @@ def run_context_prefill_warmup(
     blocks_per_req = max(sum(block_counts), 1)
     num_reqs = min(
         cdiv(num_context_tokens, context_len),
-        model_runner.max_num_reqs,
-        model_runner.scheduler_config.max_num_batched_tokens // query_len,
+        _cap_num_warmup_reqs(model_runner, model_runner.max_num_reqs, query_len),
         (num_committable_kv_blocks(model_runner) - 1) // blocks_per_req,
     )
     if num_reqs < 1:
@@ -287,7 +324,9 @@ def run_context_prefill_warmup(
     token_ids = _warmup_token_ids(model_runner, context_len + query_len)
     sampling_params = SamplingParams(max_tokens=1, temperature=0.0)
     prefill_output = SchedulerOutput.make_empty()
-    prefill_output.num_spec_tokens_to_schedule = model_runner.num_speculative_steps
+    prefill_output.num_spec_tokens_to_schedule = (
+        model_runner.vllm_config.num_scheduled_spec_tokens
+    )
     prefill_output.scheduled_new_reqs = [
         NewRequestData(
             req_id=req_id,
@@ -411,7 +450,7 @@ def _warmup_kernels(
     if model_runner.vllm_config.is_mm_encoder_only:
         return
 
-    num_spec_steps = model_runner.num_speculative_steps
+    num_spec_steps = model_runner.vllm_config.num_scheduled_spec_tokens
     decode_query_len = model_runner.decode_query_len
     # Use decode_query_len + 1 tokens so the prefill batch's per-request query
     # length exceeds decode_query_len, preventing it from being misclassified as
@@ -451,10 +490,10 @@ def _warmup_kernels(
     decode_block_counts = [block_count(decode_len, s) for s in kv_cache_specs]
     max_blocks_per_req = sum(decode_block_counts)
 
-    num_reqs = min(
+    num_reqs = _cap_num_warmup_reqs(
+        model_runner,
         model_runner.scheduler_config.max_num_seqs,
-        model_runner.scheduler_config.max_num_batched_tokens
-        // max(prompt_len, decode_query_len),
+        max(prompt_len, decode_query_len),
     )
     block_tables = getattr(model_runner, "block_tables", None)
     null_blocks = block_tables is not None and (
