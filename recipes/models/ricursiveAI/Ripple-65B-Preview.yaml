@@ -5,19 +5,24 @@ meta:
   provider: "Ricursive Intelligence"
   description: "Ricursive's Ripple-65B Preview, a dense 65B model for reasoning and agentic coding with hybrid sliding-window and NoPE full attention, tool calling, and a DFlash2 speculative drafter."
   date_added: 2026-11-04
-  date_updated: 2026-11-04
+  date_updated: 2026-11-10
   tasks:
     - text
   related_recipes: []
   hardware:
     b300: verified
+    mi355x: verified
   default_hardware: b300
+  default_variant:
+    amd: bf16
 
 model:
   model_id: "ricursiveAI/Ripple-65B-Preview"
   min_vllm_version: "0.33.0"
   nightly_required: true
-  docker_image: "vllm/vllm-openai:nightly"
+  docker_image:
+    nvidia: "vllm/vllm-openai:nightly"
+    amd: "vllm/vllm-openai-rocm:nightly"
   architecture: dense
   parameter_count: "65B"
   active_parameters: "65B"
@@ -43,6 +48,14 @@ features:
     args:
       - "--speculative-config"
       - '{"method":"dflash","model":"ricursiveAI/Ripple-65B-Preview-DFlash2","num_speculative_tokens":7}'
+    hardware_overrides:
+      # BF16 target plus drafter KV does not fit a 2M context on one MI355X.
+      amd:
+        args:
+          - "--speculative-config"
+          - '{"method":"dflash","model":"ricursiveAI/Ripple-65B-Preview-DFlash2","num_speculative_tokens":7}'
+          - "--max-model-len"
+          - "1048576"
 
 opt_in_features:
   - spec_decoding
@@ -77,6 +90,28 @@ guide: |
 
   Ripple decides per turn whether to reason, so `reasoning_content` is empty
   when it answers directly.
+
+  ## AMD (1x MI355X, BF16)
+
+  Use the BF16 checkpoint on one MI355X. 
+  
+  ```bash
+  docker run --device=/dev/kfd --device=/dev/dri --group-add video \
+    --ipc=host --shm-size 16g \
+    -v ~/.cache/huggingface:/root/.cache/huggingface \
+    -p 8000:8000 \
+    vllm/vllm-openai-rocm:nightly \
+    ricursiveAI/Ripple-65B-Preview \
+    --tensor-parallel-size 1 \
+    --reasoning-parser ripple \
+    --enable-auto-tool-choice --tool-call-parser ripple \
+    --speculative-config '{"method":"dflash","model":"ricursiveAI/Ripple-65B-Preview-DFlash2","num_speculative_tokens":7}' \
+    --max-model-len 1048576
+  ```
+
+  Without DFlash2 the full 2,097,152-token context fits; with it, cap
+  `--max-model-len` at 1048576 on one GPU. In client requests, set `"model"`
+  to `ricursiveAI/Ripple-65B-Preview`.
 
   ## Client usage
 

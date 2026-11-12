@@ -86,7 +86,7 @@ class SpecializedDraft(LayerStages):
                 )
         self.mega: dict[int, Any] = {}
         if self.policy.enabled("moe"):
-            self.mega = self._build_mega()
+            self.mega = self._build_mega(prefill_q=self.q)
         self.dense: dict[int, Any] = {}
         self.ar_norm = None
         if self.policy.enabled("boundary"):
@@ -223,7 +223,9 @@ class SpecializedDraft(LayerStages):
             x, residual = self.reduced_norm(
                 x, partial, residual, layer.post_attention_layernorm
             )
-            x, partial = self.mlp(layer, x)
+            x, partial = self.mlp(
+                layer, x, moe_policy_tokens=tokens if rows is not None else None
+            )
             x, _ = self.reduced_norm(x, partial, residual, mtp.shared_head.norm)
         if rows is not None:
             out = x.new_empty((tokens, x.shape[1]))
