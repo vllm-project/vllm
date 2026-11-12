@@ -108,6 +108,10 @@ impl HealthMonitor {
         let mut readiness_open = true;
         let engine_failed = loop {
             let ready = tokio::select! {
+                // A failure can arrive with the shutdown it causes; `liveness`
+                // must still report it.
+                biased;
+
                 result = self.engine.liveness.wait_for(|healthy| !*healthy) => {
                     match result {
                         Ok(_) => warn!(
@@ -188,7 +192,7 @@ async fn set_readiness(reporter: &HealthReporter, ready: bool) {
 mod tests {
     use std::sync::{Arc, Mutex};
 
-    use futures::FutureExt as _;
+    use futures::{FutureExt as _, StreamExt as _};
     use tonic::Request;
     use tonic_health::pb::HealthCheckRequest;
     use tonic_health::pb::health_server::Health as _;
@@ -236,6 +240,27 @@ mod tests {
             .await;
 
         assert_eq!(serving_at_stop, Some(false));
+    }
+
+    #[tokio::test]
+    async fn liveness_reports_failure_that_arrives_with_shutdown() {
+        let (monitor, health, engine) = monitor().await;
+        let liveness = health
+            .watch(Request::new(HealthCheckRequest {
+                service: LIVENESS_SERVICE.to_string(),
+            }))
+            .await
+            .unwrap()
+            .into_inner();
+        engine[0].send(false).unwrap();
+        let shutdown = CancellationToken::new();
+        shutdown.cancel();
+
+        monitor.serve(shutdown, std::future::pending(), |stop| stop).await.unwrap();
+
+        // The watch ends once the service is removed, after its last status.
+        let statuses: Vec<_> = liveness.map(|response| response.unwrap().status).collect().await;
+        assert_eq!(statuses.last(), Some(&(ServingStatus::NotServing as i32)));
     }
 
     #[tokio::test]
