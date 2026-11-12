@@ -3,6 +3,8 @@
 
 import inspect
 from abc import ABC, abstractmethod
+from collections.abc import Iterator
+from contextlib import nullcontext
 from typing import TYPE_CHECKING, Any
 
 import regex as re
@@ -11,6 +13,7 @@ from torch import nn
 from transformers import PreTrainedConfig
 
 if TYPE_CHECKING:
+    from vllm.config.cache import CacheDType
     from vllm.model_executor.layers.quantization import QuantizationMethods
     from vllm.model_executor.layers.quantization.online.base import (
         OnlineQuantizationConfig,
@@ -35,8 +38,8 @@ class QuantizeMethodBase(ABC):
 
     supports_pre_processed_weights: bool = False
     """
-    Whether ``process_weights_after_loading`` supports running under
-    ``weights_already_processed``. Methods must skip tensor transforms in
+    Whether `process_weights_after_loading` supports running under
+    `weights_already_processed`. Methods must skip tensor transforms in
     that mode; the loader driver rejects methods that do not declare support.
     """
 
@@ -65,10 +68,10 @@ class QuantizeMethodBase(ABC):
 
     # Not required functions
     def tie_weights(self, layer: torch.nn.Module, embed_tokens: torch.nn.Module):
-        """Tie ``layer``'s weight to ``embed_tokens``' weight.
+        """Tie `layer`'s weight to `embed_tokens`' weight.
 
         The default shares the weight tensor, which is the standard behavior for
-        tied word embeddings and matches what ``ParallelLMHead.tie_weights`` did
+        tied word embeddings and matches what `ParallelLMHead.tie_weights` did
         directly before quantization methods became responsible for it.
         Quantization methods that need special weight handling (e.g. repacked
         weights) override this.
@@ -84,11 +87,23 @@ class QuantizeMethodBase(ABC):
         """
         return
 
-    def dequantize_weight(self, layer: nn.Module) -> torch.Tensor:
-        """Materialize a serialized quantized weight for requantization."""
+    def dequantize_weight(
+        self, layer: nn.Module
+    ) -> torch.Tensor | Iterator[tuple[slice, torch.Tensor, torch.Tensor]]:
+        """Materialize a serialized quantized weight for requantization.
+
+        Args:
+            layer: Layer holding the serialized weights.
+
+        Returns:
+            The dequantized weight for linear layers. For MoE layers, an
+            iterator of `(experts, w13, w2)` over groups of experts.
+
+        """
         raise NotImplementedError(
             f"The quantization method {type(self)} does not implement "
-            "dequantize_weight. Please open an issue."
+            "dequantize_weight, so re-quantization from this checkpoint is "
+            "not supported. Please open an issue."
         )
 
 
@@ -255,6 +270,10 @@ class QuantizationConfig(ABC):
 
         return WeightsMapper(orig_to_new_suffix={".g_idx": None})
 
+    def get_kv_cache_dtype(self, prefix: str) -> "CacheDType | None":
+        """Return a checkpoint-selected KV-cache dtype for one layer."""
+        return None
+
     def apply_vllm_mapper(  # noqa: B027
         self, hf_to_vllm_mapper: "WeightsMapper"
     ):
@@ -293,6 +312,7 @@ def resolve_quant_method(
     quant_config: QuantizationConfig, layer: torch.nn.Module, prefix: str
 ) -> QuantizeMethodBase | None:
     """Return the checkpoint method with configured online quantization."""
+    from vllm.config.quantization import layer_target_spec_scope
     from vllm.model_executor.layers.fused_moe import RoutedExperts
     from vllm.model_executor.layers.fused_moe.unquantized_fused_moe_method import (
         UnquantizedFusedMoEMethod,
@@ -302,46 +322,69 @@ def resolve_quant_method(
         UnquantizedLinearMethod,
     )
     from vllm.model_executor.layers.quantization.online.fp8 import OnlineLinearBase
+    from vllm.model_executor.layers.quantization.online.moe_base import (
+        OnlineMoEMethodBase,
+    )
+    from vllm.model_executor.layers.quantization.online.requantization import (
+        requantization_source_scope,
+    )
 
-    base_quant_method = quant_config.get_quant_method(layer, prefix)
-    if quant_config.online_quantization_config is None:
-        # No online configuration: retain the checkpoint method.
-        return base_quant_method
+    online_config = quant_config.online_quantization_config
     # Online quantization currently supports only LinearBase and RoutedExperts.
     # Embeddings and ParallelLMHead retain their checkpoint quantization method.
-    if not isinstance(layer, (LinearBase, RoutedExperts)):
+    is_online_supported_layer = isinstance(layer, (LinearBase, RoutedExperts))
+
+    online_target = None
+    target_spec = None
+    if online_config is not None and is_online_supported_layer:
+        online_config.packed_modules_mapping = quant_config.packed_modules_mapping
+        online_target = online_config.resolve_quant_method_cls(type(layer), prefix)
+        if online_config.args.targets is not None:
+            target = online_config._resolve_targets_quant_method_metadata(
+                prefix, type(layer)
+            )
+            target_spec = target[3] if target is not None else None
+
+    # The checkpoint method of requantized experts is only a dequantization source.
+    with (
+        (
+            requantization_source_scope()
+            if online_target is not None and isinstance(layer, RoutedExperts)
+            else nullcontext()
+        ),
+        layer_target_spec_scope(target_spec if online_target is None else None),
+    ):
+        # A `targets` spec without a weight key overrides the activation of the
+        # checkpoint method.
+        base_quant_method = quant_config.get_quant_method(layer, prefix)
+    if online_config is None:
+        # No online configuration: retain the checkpoint method.
+        return base_quant_method
+    if not is_online_supported_layer:
         # Online quantization only supports linear and routed MoE layers.
         return base_quant_method
 
-    quant_config.online_quantization_config.packed_modules_mapping = (
-        quant_config.packed_modules_mapping
-    )
     checkpoint_is_quantized = base_quant_method is not None and not isinstance(
         base_quant_method, (UnquantizedLinearMethod, UnquantizedFusedMoEMethod)
-    )
-    online_target = quant_config.online_quantization_config.resolve_quant_method_cls(
-        type(layer), prefix
     )
 
     if checkpoint_is_quantized:
         if online_target is None:
             # The checkpoint quant method is applied as there is no online override.
             return base_quant_method
-
-        if isinstance(layer, RoutedExperts):
+        if online_target[3].hadamard_size is not None:
             raise NotImplementedError(
-                "Requantizing checkpoint-quantized MoE layers is not supported."
+                f"{prefix}: online hadamard_size on an already quantized layer "
+                "(requantization) is not supported yet."
             )
 
-        online_quant_method = quant_config.online_quantization_config.get_quant_method(
-            layer, prefix
-        )
+        online_quant_method = online_config.get_quant_method(layer, prefix)
 
         assert base_quant_method is not None and not isinstance(
             base_quant_method, (UnquantizedLinearMethod, UnquantizedFusedMoEMethod)
         )
 
-        assert isinstance(online_quant_method, OnlineLinearBase)
+        assert isinstance(online_quant_method, (OnlineLinearBase, OnlineMoEMethodBase))
         online_quant_method.set_requantization_source(base_quant_method)
 
         # The online method dequantizes the checkpoint method before requantizing.
@@ -352,4 +395,4 @@ def resolve_quant_method(
         return base_quant_method
 
     # Quantize an unquantized layer with the online method.
-    return quant_config.online_quantization_config.get_quant_method(layer, prefix)
+    return online_config.get_quant_method(layer, prefix)

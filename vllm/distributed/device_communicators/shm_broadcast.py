@@ -10,6 +10,7 @@ import sys
 import threading
 import time
 import weakref
+from collections.abc import Sized
 from contextlib import contextmanager
 from dataclasses import dataclass, field
 from multiprocessing import shared_memory
@@ -45,7 +46,6 @@ from vllm.utils.network_utils import (
 
 logger = init_logger(__name__)
 
-
 SPINLOOP_EXT_ENABLED = False
 if envs.VLLM_USE_SPINLOOP_EXT:
     try:
@@ -57,6 +57,8 @@ if envs.VLLM_USE_SPINLOOP_EXT:
             "spinloop extension could not be loaded, disabling VLLM_USE_SPINLOOP_EXT!"
         )
 SPINLOOP_TIMEOUT_SECONDS = 0.1
+# How long MessageQueue.spin_until_readable() sleeps on a remote reader's socket.
+REMOTE_POLL_WAIT_MS = 1
 
 if TYPE_CHECKING:
     from _typeshed import SizedBuffer
@@ -70,6 +72,10 @@ VLLM_RINGBUFFER_WARNING_INTERVAL = envs.VLLM_RINGBUFFER_WARNING_INTERVAL
 # written-flag. Bounds lost-notify recovery latency to ~5s while the periodic
 # wakeup stays negligible (one flag check per reader every 5s).
 SHM_READER_RECHECK_INTERVAL_MS = 5000
+# How often a busy reader polls its notify socket. CONFLATE keeps one message,
+# but libzmq still queues an internal command per notification until the socket
+# is polled, so a reader that never goes idle would grow without bound.
+SHM_NOTIFY_POLL_INTERVAL_S = 2.0
 
 
 from_bytes_big = functools.partial(int.from_bytes, byteorder="big")
@@ -142,6 +148,8 @@ class SpinCondition:
         if is_reader:
             # Time of last shm buffer read
             self.last_read = time.monotonic()
+            # Time a busy reader last polled the notify socket
+            self.last_notify_poll = self.last_read
 
             # Time to keep busy-looping on the shm buffer before going idle
             self.busy_loop_s = busy_loop_s
@@ -184,6 +192,12 @@ class SpinCondition:
 
     def record_read(self):
         self.last_read = time.monotonic()
+        if self.last_read - self.last_notify_poll >= SHM_NOTIFY_POLL_INTERVAL_S:
+            self.last_notify_poll = self.last_read
+            # poll() makes libzmq process the queued commands; a bare recv()
+            # returns the pending message without doing so.
+            if self.local_notify_socket.poll(timeout=0):
+                self.local_notify_socket.recv(flags=zmq.NOBLOCK, copy=False)
 
     def cancel(self):
         # Sends cancellation ping that will cause the reader to wake up.
@@ -353,7 +367,7 @@ class ShmRingBuffer:
             ):
                 try:
                     self.shared_memory = shared_memory.SharedMemory(name=name)
-                    # See https://docs.python.org/3/library/multiprocessing.shared_memory.html # noqa
+                    # See https://docs.python.org/3/library/multiprocessing.shared_memory.html
                     # Some platforms allocate memory based on page size,
                     # so the shared memory block size may be larger or equal
                     # to the requested size. The size parameter is ignored
@@ -408,8 +422,8 @@ def _rebuild_tensor(buf: Any, shape: tuple[int, ...], dtype_str: str) -> torch.T
     Counterpart of `_reduce_tensor`. Note that pickle passes the original
     buffer-providing object from `loads(buffers=...)` straight to this
     function (no `PickleBuffer` wrapper on the receiving side), so `buf` is
-    a `zmq.Frame`, a `memoryview` of a shared-memory ring chunk, or `bytes`
-    if the buffer was serialized in-band.
+    a `zmq.Frame`, an owned `bytearray` from the shared-memory ring, or
+    `bytes`/`bytearray` if the buffer was serialized in-band.
     """
     dtype = getattr(torch, dtype_str)
     assert isinstance(dtype, torch.dtype)
@@ -423,11 +437,8 @@ def _rebuild_tensor(buf: Any, shape: tuple[int, ...], dtype_str: str) -> torch.T
         except ValueError:
             # Empty or read-only frame buffer; fall through to the copy path.
             pass
-    # Shared-memory ring buffer chunks are reused by the writer once all
-    # readers have marked them read, so we must copy out of them. bytearray
-    # (vs bytes) keeps the resulting tensor writable, matching normal tensor
-    # semantics.
-    raw = bytearray(buf)
+    # dequeue already owns SHM buffers. Copy other buffers to keep them writable.
+    raw = buf if isinstance(buf, bytearray) else bytearray(buf)
     if not raw:
         assert 0 in shape
         return torch.empty(shape, dtype=dtype)
@@ -685,7 +696,7 @@ class MessageQueue:
             # wait for all readers to connect
 
             # local readers
-            for i in range(self.n_local_reader):
+            for _ in range(self.n_local_reader):
                 # wait for subscription messages from all local readers
                 self.local_socket.recv()
             if self.n_local_reader > 0:
@@ -694,7 +705,7 @@ class MessageQueue:
                 self.local_socket.send(b"READY")
 
             # remote readers
-            for i in range(self.n_remote_reader):
+            for _ in range(self.n_remote_reader):
                 # wait for subscription messages from all remote readers
                 self.remote_socket.recv()
             if self.n_remote_reader > 0:
@@ -830,6 +841,81 @@ class MessageQueue:
                     return True
             return False
 
+    def _wait_until_readable(
+        self,
+        metadata_buffer,
+        read_timeout: ReadTimeoutWithWarnings,
+    ) -> bool:
+        """Wait for the current block to be readable by this reader."""
+
+        def check_readable() -> bool:
+            return self._is_readable(metadata_buffer)
+
+        if SPINLOOP_EXT_ENABLED and not check_readable():
+            spinloop(
+                metadata_buffer[0 : self.local_reader_rank + 1],
+                check_readable,
+                timeout=SPINLOOP_TIMEOUT_SECONDS,
+            )
+
+        if check_readable():
+            return True
+
+        # this block is either
+        # (1) not written
+        # (2) already read by this reader
+
+        # for readers, `self.current_idx` is the next block to read
+        # if this block is not ready,
+        # we need to wait until it is written
+        self._spin_condition.wait(timeout_ms=read_timeout.timeout_ms())
+
+        if self.shutting_down:
+            raise RuntimeError("cancelled")
+
+        # if we wait for a long time, log a message
+        if read_timeout.should_warn():
+            logger.info(LONG_WAIT_TIME_LOG_MSG, VLLM_RINGBUFFER_WARNING_INTERVAL)
+        return False
+
+    def _is_readable(self, metadata_buffer) -> bool:
+        """Whether the current block is written and not yet read by this reader."""
+        memory_fence()
+        read_flag = metadata_buffer[self.local_reader_rank + 1]
+        written_flag = metadata_buffer[0]
+        return bool(written_flag) and not read_flag
+
+    def readable(self) -> bool:
+        """Non-blocking check for whether a message is ready to be dequeued.
+        Raises RuntimeError if the queue has been shut down."""
+        if self.shutting_down:
+            raise RuntimeError("cancelled")
+        if self._is_local_reader:
+            with self.buffer.get_metadata(self.current_idx) as metadata_buffer:
+                return self._is_readable(metadata_buffer)
+        if self._is_remote_reader:
+            return bool(self.remote_socket.poll(timeout=0))
+        raise RuntimeError("Only readers can check readability")
+
+    def spin_until_readable(self, pending: Sized, deadline: float) -> None:
+        """Spin until a message is ready to be dequeued, `pending` is non-empty or
+        time.monotonic() reaches `deadline`. Callers must recheck readable().
+
+        Iterations are kept minimal, since each holds the GIL until it yields. A
+        remote reader instead sleeps briefly on its socket, without the GIL.
+        """
+        if self._is_remote_reader:
+            self.remote_socket.poll(timeout=REMOTE_POLL_WAIT_MS)
+            return
+        read_flag_idx = self.local_reader_rank + 1
+        monotonic = time.monotonic
+        with self.buffer.get_metadata(self.current_idx) as metadata_buffer:
+            while not pending and monotonic() < deadline:
+                memory_fence()
+                if metadata_buffer[0] and not metadata_buffer[read_flag_idx]:
+                    return
+                sched_yield()
+
     @contextmanager
     def acquire_read(
         self,
@@ -842,39 +928,7 @@ class MessageQueue:
         )
         with self.buffer.get_metadata(self.current_idx) as metadata_buffer:
             while True:
-
-                def check():
-                    memory_fence()
-                    read_flag = metadata_buffer[self.local_reader_rank + 1]
-                    written_flag = metadata_buffer[0]
-                    return not (not written_flag or read_flag)
-
-                if SPINLOOP_EXT_ENABLED and not check():
-                    spinloop(
-                        metadata_buffer[0 : self.local_reader_rank + 1],
-                        check,
-                        timeout=SPINLOOP_TIMEOUT_SECONDS,
-                    )
-
-                if not check():
-                    # this block is either
-                    # (1) not written
-                    # (2) already read by this reader
-
-                    # for readers, `self.current_idx` is the next block to read
-                    # if this block is not ready,
-                    # we need to wait until it is written
-                    self._spin_condition.wait(timeout_ms=read_timeout.timeout_ms())
-
-                    if self.shutting_down:
-                        raise RuntimeError("cancelled")
-
-                    # if we wait for a long time, log a message
-                    if read_timeout.should_warn():
-                        logger.info(
-                            LONG_WAIT_TIME_LOG_MSG, VLLM_RINGBUFFER_WARNING_INTERVAL
-                        )
-
+                if not self._wait_until_readable(metadata_buffer, read_timeout):
                     continue
                 # found a block that is not read by this reader
                 # let caller read from the buffer
@@ -981,7 +1035,9 @@ class MessageQueue:
                         buf_offset = offset + 4
                         buf_len = from_bytes_big(buf[offset:buf_offset])
                         offset = buf_offset + buf_len
-                        all_buffers.append(buf[buf_offset:offset])
+                        buffer = buf[buf_offset:offset]
+                        # Out-of-band arrays may outlive this reusable ring slot.
+                        all_buffers.append(buffer if i == 0 else bytearray(buffer))
                     obj = pickle.loads(all_buffers[0], buffers=all_buffers[1:])
             if overflow:
                 obj = MessageQueue.recv(self.local_socket, timeout)

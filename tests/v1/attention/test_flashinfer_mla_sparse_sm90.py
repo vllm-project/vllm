@@ -175,7 +175,8 @@ def test_builder_plans_only_rows_dispatched_to_mqa(monkeypatch, use_mha, num_dec
     """MHA prefill rows must not make the MQA kernel read beyond its query."""
     builder = object.__new__(FlashInferMLASparseSM90Builder)
     builder._adaptive_verification = False
-    builder.state = FakeState(TOPK)
+    state = FakeState(TOPK)
+    builder.state = state
     builder._attention_layer = SimpleNamespace(_use_sparse_mha=lambda _: use_mha)
     metadata = object.__new__(sm90_mod.FlashInferMLASparseSM90Metadata)
     metadata.state = None
@@ -204,8 +205,8 @@ def test_builder_plans_only_rows_dispatched_to_mqa(monkeypatch, use_mha, num_dec
     expected_lens = [1402] if num_decodes else []
     if not use_mha:
         expected_lens += [1, 2, 3, 4, 5]
-    assert builder.state.plan_calls[0][0] == len(expected_lens)
-    assert builder.state.plan_calls[0][1].tolist() == expected_lens
+    assert state.plan_calls[0][0] == len(expected_lens)
+    assert state.plan_calls[0][1].tolist() == expected_lens
 
 
 @pytest.mark.parametrize("kv_dtype", [torch.bfloat16, torch.float8_e4m3fn])

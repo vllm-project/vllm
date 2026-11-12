@@ -239,7 +239,7 @@ CONTAINER_ID="$(run "start exact candidate container" 90 docker run --detach \
     --name "$CONTAINER_NAME" --label "ai.vllm.snapshot.e2e.run=$RUN_ID" \
     --gpus "device=$GPU_UUID" --user 0 --privileged --pid=host --ipc=host \
     --network=host --env "CUDA_VISIBLE_DEVICES=$GPU_UUID" --env HF_HUB_DISABLE_TELEMETRY=1 \
-    --env VLLM_NO_USAGE_STATS=1 --env VLLM_USE_V2_MODEL_RUNNER=1 \
+    --env VLLM_NO_USAGE_STATS=1 \
     ${HF_CACHE_MOUNT[@]+"${HF_CACHE_MOUNT[@]}"} \
     --entrypoint sleep "$IMAGE_ID" infinity)"
 [[ "$CONTAINER_ID" =~ ^[0-9a-f]{64}$ ]] || die "invalid container ID"
