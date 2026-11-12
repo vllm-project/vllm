@@ -498,11 +498,7 @@ class BaseMambaAttentionMetadataBuilder(AttentionMetadataBuilder[M], abc.ABC):
 
         if num_prefills > 0:
             num_computed_tokens = common_attn_metadata.compute_num_computed_tokens()
-            max_query_len_p = int(
-                torch.diff(
-                    common_attn_metadata.query_start_loc_cpu[-num_prefills - 1 :]
-                ).max()
-            )
+            max_query_len_p = int(query_lens_cpu[-num_prefills:].max())
 
             query_start_loc_p = (
                 common_attn_metadata.query_start_loc[-num_prefills - 1 :]
