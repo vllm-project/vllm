@@ -37,6 +37,7 @@ from vllm.model_executor.models.interfaces import (
     MultiModalEmbeddings,
     SupportsMRoPE,
     SupportsMultiModal,
+    _require_is_multimodal,
 )
 from vllm.model_executor.models.module_mapping import MultiModelKeys
 from vllm.multimodal import MULTIMODAL_REGISTRY, MultiModalKwargsItems
@@ -52,6 +53,7 @@ from vllm.multimodal.processing import (
     cached_encode,
 )
 from vllm.multimodal.processing.processor import HFMultiModalInputs
+from vllm.sequence import IntermediateTensors
 from vllm.utils.gpu_sync_debug import gpu_sync_allowed
 from vllm.utils.torch_utils import async_tensor_h2d, token_ids_to_tensor
 
@@ -953,6 +955,47 @@ class MultiModalMixin(SupportsMultiModal, SupportsMRoPE, Base):
     def __init__(self, *, vllm_config: "VllmConfig", prefix: str = ""):
         # Skip SupportsMRoPE.__init__ and call the next class in MRO
         super(SupportsMRoPE, self).__init__(vllm_config=vllm_config, prefix=prefix)
+        self._init_deepstack(vllm_config)
+
+    def _init_deepstack(self, vllm_config: "VllmConfig"):
+        """DeepStack models add extra vision features to the image tokens after
+        each of the first few decoder layers. Transformers selects those tokens with a
+        boolean mask, which CUDA graphs can't capture, so we add the features from a
+        fixed-address buffer instead."""
+        vision_config = getattr(self.config, "vision_config", None)
+        indexes = getattr(vision_config, "deepstack_visual_indexes", None) or []
+        self.deepstack_num_levels = len(indexes)
+        self.deepstack_num_tokens = 0
+        if not self.deepstack_num_levels:
+            return
+        if self.start_layer < self.deepstack_num_levels and not (
+            self.pp_group.is_first_rank and self.end_layer >= self.deepstack_num_levels
+        ):
+            raise ValueError(
+                f"The first {self.deepstack_num_levels} decoder layers receive "
+                "DeepStack features and must be on the first pipeline parallel rank."
+            )
+        if not self.pp_group.is_first_rank:
+            return
+        if (layers := self._decoder_layers) is None:
+            raise ValueError(
+                f"Could not identify the decoder layers of {type(self.model)} to add "
+                "DeepStack features to."
+            )
+        max_tokens = vllm_config.scheduler_config.max_num_batched_tokens
+        hidden_size = self.text_config.hidden_size
+        buffer = torch.zeros(self.deepstack_num_levels, 1, max_tokens, hidden_size)
+        # CUDA graphs replay their capture-time input addresses
+        self.register_buffer("deepstack_input_embeds", buffer, persistent=False)
+
+        def add_deepstack(level: int):
+            def hook(module, args, output: torch.Tensor) -> torch.Tensor:
+                return output + self.deepstack_input_embeds[level, :, : output.shape[1]]
+
+            return hook
+
+        for level in range(self.deepstack_num_levels):
+            layers[level].register_forward_hook(add_deepstack(level))
 
     def _find_encoder_classes(
         self, model: "PreTrainedModel"
@@ -1277,7 +1320,13 @@ class MultiModalMixin(SupportsMultiModal, SupportsMRoPE, Base):
         with gpu_sync_allowed():
             get_modality_features = getattr(self.model, f"get_{modality}_features")
             features = get_modality_features(pixel_values, return_dict=True, **kwargs)
-        return features.pooler_output
+        embeddings = features.pooler_output
+        # Carried alongside the embeddings so the encoder cache keeps them together
+        if not (deepstack := getattr(features, "deepstack_features", None)):
+            return embeddings
+        if isinstance(embeddings, torch.Tensor):
+            return torch.cat([embeddings, *deepstack], dim=-1)
+        return [torch.cat(item, dim=-1) for item in zip(embeddings, *deepstack)]
 
     def embed_multimodal(self, **kwargs) -> MultiModalEmbeddings:
         # Each helper detects its own inputs. We are called once per modality, so the
@@ -1290,6 +1339,69 @@ class MultiModalMixin(SupportsMultiModal, SupportsMRoPE, Base):
         ):
             embeddings.extend(process_input(**kwargs) or [])
         return embeddings
+
+    def _stash_deepstack_embeds(
+        self, multimodal_embeddings: MultiModalEmbeddings, is_multimodal: torch.Tensor
+    ) -> list[torch.Tensor]:
+        """Split the DeepStack features off `multimodal_embeddings` and scatter them
+        into `deepstack_input_embeds` at the multimodal positions."""
+        hidden_size = self.text_config.hidden_size
+        deepstack_size = hidden_size * self.deepstack_num_levels
+        embeddings, deepstack = [], []
+        for item in multimodal_embeddings:
+            embeddings.append(item[..., :hidden_size])
+            # Precomputed embeddings have no DeepStack features
+            if item.shape[-1] == hidden_size:
+                deepstack.append(item.new_zeros(*item.shape[:-1], deepstack_size))
+            else:
+                deepstack.append(item[..., hidden_size:])
+        # [num_mm_tokens, levels * hidden] -> [levels, num_mm_tokens, hidden]
+        deepstack_flat = torch.cat(deepstack).reshape(-1, deepstack_size)
+        deepstack_flat = deepstack_flat.unflatten(-1, (-1, hidden_size)).transpose(0, 1)
+
+        num_tokens = is_multimodal.numel()
+        buffer = self.deepstack_input_embeds[:, 0, :num_tokens]
+        buffer.zero_()
+        # If is_multimodal is on CPU this avoids a D2H sync
+        buffer[:, is_multimodal] = deepstack_flat.to(buffer.dtype)
+        self.deepstack_num_tokens = num_tokens
+        return embeddings
+
+    def embed_input_ids(
+        self,
+        input_ids: torch.Tensor,
+        multimodal_embeddings: MultiModalEmbeddings | None = None,
+        *,
+        is_multimodal: torch.Tensor | None = None,
+    ) -> torch.Tensor:
+        if (
+            hasattr(self, "deepstack_input_embeds")
+            and multimodal_embeddings is not None
+            and len(multimodal_embeddings) > 0
+        ):
+            multimodal_embeddings = self._stash_deepstack_embeds(
+                multimodal_embeddings, _require_is_multimodal(is_multimodal)
+            )
+        return super().embed_input_ids(
+            input_ids, multimodal_embeddings, is_multimodal=is_multimodal
+        )
+
+    def forward(
+        self,
+        input_ids: torch.Tensor | None,
+        positions: torch.Tensor,
+        intermediate_tensors: IntermediateTensors | None = None,
+        inputs_embeds: torch.Tensor | None = None,
+        **kwargs,
+    ) -> torch.Tensor | IntermediateTensors:
+        output = super().forward(
+            input_ids, positions, intermediate_tensors, inputs_embeds, **kwargs
+        )
+        # Steps without multimodal inputs must not reuse the previous features
+        if self.deepstack_num_tokens:
+            self.deepstack_input_embeds[:, 0, : self.deepstack_num_tokens].zero_()
+            self.deepstack_num_tokens = 0
+        return output
 
     def get_mrope_input_positions(
         self,
