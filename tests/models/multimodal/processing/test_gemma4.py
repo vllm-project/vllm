@@ -369,18 +369,23 @@ def test_embed_patches_normalizes_channel_last_patches():
     model.vision_input_norm = FusedMMInputNorm(
         image_mean=mean, image_std=std, rescale_factor=1 / 255
     )
+    model.config = SimpleNamespace(vision_config=SimpleNamespace(num_channels=3))
     model.vision_tower = SimpleNamespace(
-        config=SimpleNamespace(num_channels=3),
-        patch_embedder=lambda pixel_values, *_: pixel_values,
+        patch_embedder=SimpleNamespace(
+            input_proj=lambda pixel_values: pixel_values,
+            _position_embeddings=lambda *_: 0.0,
+        ),
     )
     model.model_dtype = torch.float32
 
     pixel_values = torch.randint(0, 256, (2, 6, 16 * 16 * 3), dtype=torch.uint8)
     output = model._embed_patches(pixel_values, None, None)
 
+    # `_embed_patches` also applies the embedder's [0, 1] -> [-1, 1] rescale.
     expected = (
         pixel_values.view(2, 6, -1, 3) / 255 - torch.tensor(mean)
     ) / torch.tensor(std)
+    expected = 2 * (expected - 0.5)
     torch.testing.assert_close(output, expected.view(pixel_values.shape))
 
 

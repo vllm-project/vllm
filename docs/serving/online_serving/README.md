@@ -28,6 +28,9 @@ We currently support the following OpenAI APIs:
 ## Anthropic APIs
 
 - Anthropic messages API (`/v1/messages`, `/v1/messages/count_tokens`)
+    - `max_tokens=0` (Anthropic's prompt-cache pre-warming request) is rejected
+      with a 400. vLLM samples at least one token per request, so warm the cache
+      with `max_tokens=1` instead.
 
 ## Cohere APIs
 
@@ -126,7 +129,7 @@ For further details on profiling vLLM, please refer to [this page](../../contrib
 
 ## Scale-Out APIs
 
-Scale-out APIs are disabled by default on `vllm serve`. Set `--enable-scale-out` to register the endpoints below. The dedicated `vllm launch render` and `vllm serve --tokens-only` modes always register their required endpoints regardless of `--enable-scale-out`.
+Scale-out APIs are disabled by default on `vllm serve`. Set `--enable-scale-out` to register the endpoints below; `VLLM_SERVER_DEV_MODE=1` also turns it on unless `--disable-scale-out` is passed. The dedicated `vllm launch render` and `vllm serve --tokens-only` modes always register their required endpoints regardless of `--enable-scale-out`.
 
 ### Tokens IN <> Tokens OUT APIs
 

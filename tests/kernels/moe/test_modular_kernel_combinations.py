@@ -53,7 +53,7 @@ from .modular_kernel_tools.parallel_utils import (
     ProcessGroupInfo,
     parallel_launch_with_config,
 )
-from .utils import check_accuracy, make_test_weights
+from .utils import check_accuracy
 
 has_any_multi_gpu_package = (
     has_deep_ep() or has_deep_gemm() or has_flashinfer_cutlass_fused_moe()
@@ -1044,7 +1044,9 @@ _PADDING_INTERMEDIATE_PAD_EXPECTED = 256
 # physical intermediate (128 isn't enough), so MXFP4 needs its own N pair.
 _PADDING_N_UNPADDED_MXFP4 = 512  # 2 * 256
 _PADDING_N_PADDED_MXFP4 = 768  # +256
-_PADDING_INTERMEDIATE_PAD_EXPECTED_MXFP4_W4A16 = 512
+# Bias-less W4A16 forwards no intermediate pad (ROCm/aiter#6598); these
+# weights have no bias.
+_PADDING_INTERMEDIATE_PAD_EXPECTED_MXFP4_W4A16 = 0
 
 # Both MXFP4 schemes also need a 256-wide physical hidden dim: W4A4's stage1
 # GEMM silently produces NaN/Inf below it (confirmed: K=896/1152 -> NaN,
@@ -1056,8 +1058,7 @@ _PADDING_K_UNPADDED_MXFP4 = 1024  # 4 * 256
 _PADDING_K_PADDED_MXFP4 = 1280  # +256
 # hidden_pad = (K_padded_mxfp4 - hidden_dim_unpadded) // 128 * 128.
 _PADDING_HIDDEN_PAD_EXPECTED_MXFP4 = 256
-# W4A4's SiLU path doubles intermediate_pad inside AITER, so this constant
-# (undoubled) differs from the W4A16 one above despite the same N pair.
+# W4A4's SiLU path doubles intermediate_pad inside AITER, so it's forwarded undoubled.
 _PADDING_INTERMEDIATE_PAD_EXPECTED_MXFP4_W4A4 = 256
 
 # {no padding, hidden-only, intermediate-only, both} -> (pad_hidden, pad_intermediate)
@@ -1126,7 +1127,7 @@ def _slice_unpadded_weights(
     """Derive the unpadded sub-block of a padded WeightTensors: same values,
     restricted to the region hidden_pad/intermediate_pad keeps.
 
-    Scale-shape choice (per_out_ch) must match _make_padding_matrix_weights()."""
+    Scale-shape choice (per_out_ch) must match WeightTensors.make()."""
     block_shape = quant_config.block_shape if quant_config is not None else None
     per_out_ch = quant_config is not None and quant_config.per_out_ch_quant
 
@@ -1152,30 +1153,6 @@ def _slice_unpadded_weights(
         w2_scale = weights.w2_scale
 
     return WeightTensors(w1=w1, w2=w2, w1_scale=w1_scale, w2_scale=w2_scale)
-
-
-def _make_padding_matrix_weights(config: Config) -> WeightTensors:
-    """Like WeightTensors.make(), but scales weights by
-    config.is_per_out_ch_quant instead of is_per_act_token_quant.
-
-    WeightTensors.make() ties weight-scale shape to activation quant, so
-    fp8_tensor_token would get per-channel scales despite being a per-tensor
-    weight scheme. Scoped here rather than fixing WeightTensors.make(),
-    which other tests depend on."""
-    (_, w1, w1_scale, w1_gs), (_, w2, w2_scale, w2_gs) = make_test_weights(
-        e=config.E,
-        n=config.N,
-        k=config.K,
-        in_dtype=config.dtype,
-        # weight_dtype, not quant_dtype: quant_dtype is None for MXFP4 W4A16
-        # (unquantized activation) even though the weight itself is mxfp4.
-        quant_dtype=config.weight_dtype,
-        block_shape=config.quant_block_shape,
-        per_out_ch_quant=config.is_per_out_ch_quant,
-    )
-    return WeightTensors(
-        w1=w1, w2=w2, w1_scale=w1_scale, w2_scale=w2_scale, w1_gs=w1_gs, w2_gs=w2_gs
-    )
 
 
 def _slice_unpadded_rank_tensors(
@@ -1399,7 +1376,7 @@ def test_aiter_moe_padding_matrix(mode: str, quant_config: TestMoEQuantConfig | 
         f"AiterExperts does not support quant scheme {quant_config}."
     )
 
-    weights = _make_padding_matrix_weights(config)
+    weights = WeightTensors.make(config)
     vllm_config, env_dict = config.make_env_data()
 
     hidden_pad_expected = _PADDING_HIDDEN_PAD_EXPECTED if pad_hidden else 0
@@ -1513,7 +1490,7 @@ def test_aiter_moe_padding_matrix_mxfp4(mode: str, quant_config: TestMoEQuantCon
         )
     assert config.is_valid()[0]
 
-    weights = _make_padding_matrix_weights(config)
+    weights = WeightTensors.make(config)
     vllm_config, env_dict = config.make_env_data()
 
     hidden_pad_expected = _PADDING_HIDDEN_PAD_EXPECTED_MXFP4 if pad_hidden else 0
