@@ -52,6 +52,9 @@ from vllm.model_executor.layers.attention.attention import (
     set_default_quant_scales,
     should_load_quant_weights,
 )
+from vllm.model_executor.layers.attention.kv_transfer_utils import (
+    maybe_transfer_kv_layer,
+)
 from vllm.model_executor.layers.attention.mla_attention import (
     _get_kv_b_proj_input_dtype,
     accumulate_mla_context_chunk,
@@ -543,7 +546,9 @@ class MultiHeadLatentAttention(nn.Module, AttentionLayerBase):
             dtype=hidden_states.dtype,
             device=hidden_states.device,
         )
-        self._attention(positions, q, kv_c_normed, k_pe.unsqueeze(1), attn_out)
+        self._attention(
+            self.layer_name, positions, q, kv_c_normed, k_pe.unsqueeze(1), attn_out
+        )
         return attn_out
 
     def _forward_q_lora(
@@ -615,7 +620,9 @@ class MultiHeadLatentAttention(nn.Module, AttentionLayerBase):
             dtype=hidden_states.dtype,
             device=hidden_states.device,
         )
-        self._attention(positions, q, kv_c_normed, k_pe.unsqueeze(1), attn_out)
+        self._attention(
+            self.layer_name, positions, q, kv_c_normed, k_pe.unsqueeze(1), attn_out
+        )
 
         gate = self.g_proj(hidden_states)[0] if self.g_proj is not None else None
         return attn_out, gate
@@ -639,8 +646,10 @@ class MultiHeadLatentAttention(nn.Module, AttentionLayerBase):
         return self.o_proj(attn_out)[0]
 
     @eager_break_during_capture
+    @maybe_transfer_kv_layer
     def _attention(
         self,
+        layer_name: str,
         positions: torch.Tensor,
         q: torch.Tensor,
         kv_c_normed: torch.Tensor,
