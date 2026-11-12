@@ -143,8 +143,6 @@ variants:
           - '{"cpu_offload":true}'
           - "--max-num-batched-tokens"
           - "4096"
-          - "--gpu-memory-utilization"
-          - "0.92"
         extra_env:
           VLLM_USE_V2_MODEL_RUNNER: "1"
           PYTORCH_CUDA_ALLOC_CONF: "expandable_segments:True"
