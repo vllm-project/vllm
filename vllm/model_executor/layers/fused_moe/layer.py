@@ -19,6 +19,7 @@ from vllm.model_executor.layers.fused_moe.activation import MoEActivation
 from vllm.model_executor.layers.fused_moe.config import (
     FusedMoEConfig,
     FusedMoEParallelConfig,
+    RoutedScaleMode,
 )
 from vllm.model_executor.layers.fused_moe.expert_map_manager import (
     ExpertMapManager,
@@ -135,8 +136,7 @@ def FusedMoEFactory(
     shared_expert_gate: torch.nn.Module | None = None,
     routed_input_transform: torch.nn.Module | None = None,
     routed_output_transform: torch.nn.Module | None = None,
-    apply_routed_scale_to_output: bool = False,
-    divide_shared_output_in_fp16: bool = False,
+    routed_scale_mode: RoutedScaleMode = RoutedScaleMode.ROUTER,
     zero_expert_type: str | None = None,
     hash_indices_table: torch.Tensor | None = None,
     bias_vl: torch.Tensor | None = None,
@@ -215,12 +215,9 @@ def FusedMoEFactory(
         shared_expert_gate: Pre-configured shared expert gate module
         routed_input_transform: Input transformation module
         routed_output_transform: Output transformation module
-        apply_routed_scale_to_output: Whether to apply routed_scaling_factor to
-                                      output instead of topk_weights
-        divide_shared_output_in_fp16: With apply_routed_scale_to_output, divide
-            the shared expert output by routed_scaling_factor for FP16 instead
-            of scaling the routed output. Only set this if the model's decoder
-            layer compensates with matching divisions (see DeepseekV2).
+        routed_scale_mode: Where routed_scaling_factor is applied: folded
+            into the top-k weights (ROUTER), or applied by the runner to the
+            output (OUTPUT, OUTPUT_FP16_GUARD). See RoutedScaleMode.
         zero_expert_type: Type of zero expert handling
         hash_indices_table: Hash table for expert indices
         bias_vl: Vision routing bias for image tokens (Deepseek V4)
@@ -325,25 +322,24 @@ def FusedMoEFactory(
             topk_group=topk_group,
             custom_routing_function=custom_routing_function,
             scoring_func=scoring_func,
-            # When apply_routed_scale_to_output is True, we set the scaling factor
-            # to 1.0 so it ends up being a nop. Applying the scale will be handled
-            # by the runner in this case.
+            # When the runner applies the scale (routed_scale_mode.scales_output),
+            # we set the scaling factor to 1.0 here so it ends up being a nop.
             # The member variable must be set in the same way as the router since
             # some quantization methods can access it.
             routed_scaling_factor=routed_scaling_factor
-            if not apply_routed_scale_to_output
+            if not routed_scale_mode.scales_output
             else 1.0,
             e_score_correction_bias=e_score_correction_bias,
             num_fused_shared_experts=num_fused_shared_experts,
             skip_padding=(skip_padding and moe_parallel_config.use_deepep_v2_kernels),
-            # Fused shared-expert slot weight. With apply_routed_scale_to_output
+            # Fused shared-expert slot weight. When the runner scales the output,
             # the runner scales the combined output by routed_scaling_factor, so
             # the shared slot weight must be 1/routed_scaling_factor for its net
             # contribution to be 1.0 (matching the un-scaled separate-MLP add).
             shared_expert_weight=(
                 (1.0 / routed_scaling_factor)
                 if (
-                    apply_routed_scale_to_output
+                    routed_scale_mode.scales_output
                     and num_fused_shared_experts > 0
                     and routed_scaling_factor
                 )
@@ -444,7 +440,7 @@ def FusedMoEFactory(
         custom_routing_function=custom_routing_function,
         scoring_func=scoring_func,
         routed_scaling_factor=routed_scaling_factor
-        if not apply_routed_scale_to_output
+        if not routed_scale_mode.scales_output
         else 1.0,
         swiglu_limit=swiglu_limit,
         swiglu_alpha=swiglu_alpha,
@@ -470,13 +466,12 @@ def FusedMoEFactory(
         shared_experts=shared_experts,
         routed_input_transform=routed_input_transform,
         routed_output_transform=routed_output_transform,
-        # When apply_routed_scale_to_output is True, we allow
-        # the scaling factor to be passed to the runner, otherwise
-        # we pass 1.0 so it ends up being a nop.
+        # When the runner applies the scale, pass the scaling factor to it;
+        # otherwise pass 1.0 so it ends up being a nop.
         routed_scaling_factor=routed_scaling_factor
-        if apply_routed_scale_to_output
+        if routed_scale_mode.scales_output
         else 1.0,
-        divide_shared_output_in_fp16=divide_shared_output_in_fp16,
+        routed_scale_mode=routed_scale_mode,
         **runner_args if runner_args is not None else {},
     )
 
