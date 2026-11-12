@@ -340,7 +340,11 @@ class VLLMServer:
     """Lifecycle of a single `vllm serve` process."""
 
     def __init__(
-        self, config_path: Path, log_path: Path, port: int, kv_cache_bytes: int
+        self,
+        config_path: Path | None,
+        log_path: Path,
+        port: int,
+        kv_cache_bytes: int,
     ) -> None:
         self.config_path = config_path
         self.log_path = log_path
@@ -358,8 +362,10 @@ class VLLMServer:
             str(TP_SIZE),
             "--kv-cache-memory-bytes",
             str(self.kv_cache_bytes),
-            "--kv-transfer-config",
-            self.config_path.read_text(),
+        ]
+        if self.config_path is not None:
+            cmd += ["--kv-transfer-config", self.config_path.read_text()]
+        cmd += [
             "--enable-prefix-caching",
             "--no-disable-hybrid-kv-cache-manager",
             "--port",
@@ -519,15 +525,17 @@ class BenchmarkRun:
     def __init__(
         self,
         spec: Scenario,
-        fs_dir: Path,
+        mode: str,
         session_dir: Path,
         port: int,
         max_seconds: int,
+        fs_dir: Path | None = None,
     ) -> None:
         self.spec = spec
         self.fs_dir = fs_dir
         self.port = port
         self.max_seconds = max_seconds
+        self.mode = mode
         self.run_dir = session_dir / spec.name
         self.run_dir.mkdir(parents=True, exist_ok=True)
         self.guidellm = GuideLLM(port, max_seconds)
@@ -541,8 +549,7 @@ class BenchmarkRun:
         print("  [1/5] Cleanup...")
         self._cleanup()
         print("  [2/5] Writing KV transfer config...")
-        config_path = self.run_dir / "kv_transfer_config.json"
-        self._write_config(config_path)
+        config_path = self._write_config(self.run_dir / "kv_transfer_config.json")
         print("  [3/5] Starting vLLM server...")
         with VLLMServer(
             config_path,
@@ -562,44 +569,61 @@ class BenchmarkRun:
         return result
 
     def _cleanup(self) -> None:
+        uid = os.getuid()
         for shm in Path("/dev/shm").glob("vllm_offload*"):
-            shm.unlink()
-        for entry in self.fs_dir.iterdir():
-            if entry.is_dir():
-                shutil.rmtree(entry)
-            else:
-                entry.unlink()
+            if shm.stat().st_uid == uid:
+                shm.unlink()
+        if self.mode == "fs":
+            self.fs_dir.mkdir(parents=True, exist_ok=True)
+            for entry in self.fs_dir.iterdir():
+                if entry.is_dir():
+                    shutil.rmtree(entry)
+                else:
+                    entry.unlink()
 
-    def _write_config(self, path: Path) -> None:
+    def _write_config(self, path: Path) -> Path | None:
+        """Write the KV transfer config; returns None in gpu mode."""
+        if self.mode == "gpu":
+            print("  GPU mode: skipping KV transfer config.")
+            return None
+        extra = {
+            "spec_name": "TieringOffloadingSpec",
+            "cpu_bytes_to_use": self.spec.cpu.get_num_bytes(),
+            "eviction_policy": "lru",
+            "block_size": self.spec.offload_block_size,
+        }
+        if self.mode == "fs":
+            extra["secondary_tiers"] = [
+                {
+                    "type": "fs",
+                    "root_dir": str(self.fs_dir) + "/",
+                }
+            ]
         config = {
             "kv_connector": "OffloadingConnector",
             "kv_role": "kv_both",
-            "kv_connector_extra_config": {
-                "spec_name": "TieringOffloadingSpec",
-                "cpu_bytes_to_use": self.spec.cpu.get_num_bytes(),
-                "eviction_policy": "lru",
-                "secondary_tiers": [
-                    {
-                        "type": "fs",
-                        "root_dir": str(self.fs_dir) + "/",
-                    }
-                ],
-                "block_size": self.spec.offload_block_size,
-            },
+            "kv_connector_extra_config": extra,
         }
         path.write_text(json.dumps(config, indent=2))
+        return path
 
 
 class BenchmarkSession:
     """Runs a list of specs and checkpoints results into a session dir."""
 
     def __init__(
-        self, fs_dir: Path, specs: list[Scenario], port: int, max_seconds: int
+        self,
+        mode: str,
+        specs: list[Scenario],
+        port: int,
+        max_seconds: int,
+        fs_dir: Path | None = None,
     ) -> None:
         self.fs_dir = fs_dir
         self.specs = specs
         self.port = port
         self.max_seconds = max_seconds
+        self.mode = mode
         self.session_dir = Path(f"benchmark_session_{datetime.now():%Y%m%d_%H%M%S}")
         self.session_dir.mkdir()
         self.results: list[dict] = []
@@ -616,7 +640,12 @@ class BenchmarkSession:
         for i, spec in enumerate(self.specs, 1):
             print(f"\n[{i}/{len(self.specs)}]")
             result = BenchmarkRun(
-                spec, self.fs_dir, self.session_dir, self.port, self.max_seconds
+                spec,
+                self.mode,
+                self.session_dir,
+                self.port,
+                self.max_seconds,
+                self.fs_dir,
             ).execute()
             self.results.append(result)
             self._checkpoint()
@@ -658,7 +687,7 @@ def compare(session_a: Path, session_b: Path) -> None:
                 print(f"{name:<60} {metric:<30} {va:>12} {vb:>12}  ({delta:+.1f}%)")
 
 
-def preflight(fs_dir: Path, port: int) -> None:
+def preflight(port: int) -> None:
     if shutil.which("guidellm") is None:
         raise RuntimeError("guidellm not found on PATH (pip install guidellm)")
 
@@ -673,7 +702,6 @@ def preflight(fs_dir: Path, port: int) -> None:
         ) from None
     finally:
         probe.close()
-    fs_dir.mkdir(parents=True, exist_ok=True)
 
 
 def main() -> None:
@@ -699,15 +727,21 @@ def build_parser() -> argparse.ArgumentParser:
         default=PORT,
         help="port for the vLLM server (default: %(default)s)",
     )
+    parser.add_argument(
+        "--mode",
+        choices=["gpu", "cpu", "fs"],
+        default="fs",
+        help="tier configuration (default: %(default)s)",
+    )
+    parser.add_argument(
+        "--fs-dir",
+        type=Path,
+        help="folder backing the FS tier (fs mode only)",
+    )
     subparsers = parser.add_subparsers(dest="command", required=True)
 
     bench = subparsers.add_parser(
         "bench", help="run all scenarios, or just the QUICK set with --quick"
-    )
-    bench.add_argument(
-        "fs_dir",
-        type=Path,
-        help="folder backing the tier store (wiped between runs)",
     )
     bench.add_argument(
         "--quick",
@@ -719,11 +753,6 @@ def build_parser() -> argparse.ArgumentParser:
         "bench-scenario", help="run named scenarios against a vLLM server"
     )
     bench_scenario.add_argument(
-        "fs_dir",
-        type=Path,
-        help="folder backing the tier store (wiped between runs)",
-    )
-    bench_scenario.add_argument(
         "--scenario",
         nargs="+",
         required=True,
@@ -733,11 +762,6 @@ def build_parser() -> argparse.ArgumentParser:
     )
 
     run = subparsers.add_parser("run", help="run one scenario built from explicit args")
-    run.add_argument(
-        "fs_dir",
-        type=Path,
-        help="folder backing the tier store (wiped between runs)",
-    )
     run.add_argument(
         "--concurrency", type=int, required=True, help="concurrent requests"
     )
@@ -778,6 +802,12 @@ def _resolve_block_bytes() -> float:
 def _main() -> None:
     args = build_parser().parse_args()
 
+    if args.mode == "fs":
+        if args.fs_dir is None:
+            sys.exit("--mode fs requires an fs_dir")
+    elif args.fs_dir is not None:
+        sys.exit(f"--mode {args.mode} does not use an fs_dir")
+
     if args.command == "compare":
         compare(args.session_a, args.session_b)
         return
@@ -815,11 +845,11 @@ def _main() -> None:
         spec.describe()
 
     try:
-        preflight(args.fs_dir, args.port)
+        preflight(args.port)
     except (RuntimeError, subprocess.CalledProcessError) as e:
         sys.exit(f"Preflight failed: {e}")
 
-    BenchmarkSession(args.fs_dir, specs, args.port, args.bench_seconds).run()
+    BenchmarkSession(args.mode, specs, args.port, args.bench_seconds, args.fs_dir).run()
 
 
 if __name__ == "__main__":
