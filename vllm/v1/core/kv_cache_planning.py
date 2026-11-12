@@ -1784,16 +1784,14 @@ class DefaultKVCacheConfigBuilder(KVCacheConfigBuilder):
         """See `KVCacheConfigBuilder.get_kv_cache_groups`.
 
         A model implementing `SupportsKVCacheGrouping` owns the grouping
-        decision; otherwise the default grouping is used.
+        decision unless HiSparse, which owns its own grouping, is enabled;
+        otherwise the default grouping is used.
         """
-        if not vllm_config.model_config.supports_kv_cache_grouping:
+        if (
+            not vllm_config.model_config.supports_kv_cache_grouping
+            or vllm_config.attention_config.hisparse_config is not None
+        ):
             return get_kv_cache_groups(vllm_config, kv_cache_spec)
-        if vllm_config.attention_config.hisparse_config is not None:
-            raise ValueError(
-                "A model-declared get_kv_cache_groups cannot be combined "
-                "with HiSparse, which owns its own KV cache grouping. "
-                "Remove one of them."
-            )
         model_cls, _ = vllm_config.model_config.registry.resolve_model_cls(
             vllm_config.model_config.architectures,
             vllm_config.model_config,

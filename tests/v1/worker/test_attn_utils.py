@@ -25,7 +25,7 @@ from tests.v1.attention.utils import (
 )
 from vllm.config.compilation import CompilationConfig, CUDAGraphMode
 from vllm.models.kimi_k3.common.dsa_cache import SelfAddressedMLASpec
-from vllm.v1.attention.backend import AttentionBackend, AttentionCGSupport, MultipleOf
+from vllm.v1.attention.backend import AttentionBackend, AttentionCGSupport
 from vllm.v1.core.kv_cache_utils import KVCacheBlockCopy
 from vllm.v1.hisparse.backend import CUDAHiSparseBackend
 from vllm.v1.hisparse.binding import allocate_hisparse_kv_caches
@@ -58,19 +58,18 @@ from vllm.v1.worker.utils import (
 
 
 @pytest.mark.parametrize(
-    ("enabled", "block_size", "main_sizes", "indexer_sizes", "expected"),
+    ("enabled", "block_size", "main_sizes", "indexer_sizes", "supported"),
     [
-        (True, 256, [64], [64], 64),
-        (True, 64, [32, 64], [16, 32], 32),
-        (True, 64, [MultipleOf(16)], [32], 32),
-        (True, 64, [64], [32], None),
-        (False, 256, [64], [64], 256),
+        (True, 256, [64], [64], True),
+        (True, 64, [64], [32], False),
+        (False, 256, [64], [64], True),
     ],
 )
-def test_get_kv_cache_spec_resolves_hisparse_block_size(
-    monkeypatch, enabled, block_size, main_sizes, indexer_sizes, expected
+def test_get_kv_cache_spec_keeps_hisparse_scheduler_block_size(
+    monkeypatch, enabled, block_size, main_sizes, indexer_sizes, supported
 ):
-    """Resolve shared MLA geometry before planning; leave other specs alone."""
+    """HiSparse pages at the scheduler block once its backends share a kernel
+    block; other specs are left alone."""
     specs = {
         "main": MLAAttentionSpec(
             block_size=block_size, num_kv_heads=1, head_size=576, dtype=torch.bfloat16
@@ -106,13 +105,13 @@ def test_get_kv_cache_spec_resolves_hisparse_block_size(
     config = SimpleNamespace(
         attention_config=SimpleNamespace(hisparse_config=object() if enabled else None)
     )
-    if expected is None:
+    if not supported:
         with pytest.raises(ValueError, match="supported by every sparse"):
             attn_utils.get_kv_cache_spec(config)
         return
 
     resolved = attn_utils.get_kv_cache_spec(config)
-    assert resolved["main"].block_size == resolved["indexer"].block_size == expected
+    assert resolved["main"].block_size == resolved["indexer"].block_size == block_size
     dense_backend = layers["dense"].get_attn_backend()
     assert resolved["dense"] == customize_attention_spec(dense_backend, specs["dense"])
     assert all(spec.block_size == block_size for spec in specs.values())

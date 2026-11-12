@@ -99,10 +99,13 @@ class PagedCacheView:
             storage_offset=byte_offset // itemsize,
         )
         row_bytes = row_width * itemsize
-        if block_stride % (block_size * row_bytes):
-            return cls(cache, cache, block_size, block_size)
+        assert block_stride % row_bytes == 0
+        num_pages = (raw_tensor.nbytes - byte_offset) // (block_size * row_bytes)
         attention_cache = (
-            raw_tensor[byte_offset:].view(dtype).view(-1, block_size, row_width)
+            raw_tensor.view(torch.uint8)[byte_offset:]
+            .narrow(0, 0, num_pages * block_size * row_bytes)
+            .view(dtype)
+            .view(num_pages, block_size, row_width)
         )
         return cls(cache, attention_cache, block_size, block_stride // row_bytes)
 

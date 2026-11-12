@@ -2,7 +2,7 @@
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 
 from collections import defaultdict
-from dataclasses import dataclass
+from dataclasses import dataclass, replace
 from typing import cast
 
 from vllm.config import VllmConfig
@@ -16,6 +16,7 @@ from vllm.v1.hisparse.runtime import (
 )
 from vllm.v1.hisparse.types import ACTIVE_TAIL_PAGES
 from vllm.v1.kv_cache_interface import (
+    CircularBufferSpec,
     HiSparseHotSpec,
     HiSparseResidentSpec,
     KVCacheConfig,
@@ -23,6 +24,7 @@ from vllm.v1.kv_cache_interface import (
     KVCacheGroupSpec,
     KVCacheSpec,
     KVCacheTensor,
+    MambaSpec,
     MLAAttentionSpec,
     SparseCacheRole,
     UniformTypeKVCacheSpecs,
@@ -224,7 +226,12 @@ def _lay_out_hisparse_groups(
         host_resident=True,
         enable_kv_transfer=True,
     )
-    regular_groups = groups[1:]
+    row_bytes = max(
+        indexer_page, *(group.kv_cache_spec.page_size_bytes for group in hot_groups)
+    )
+    regular_groups = [
+        split for group in groups[1:] for split in _split_state_group(group, row_bytes)
+    ]
     return [
         source_group,
         indexer_group,
@@ -232,6 +239,31 @@ def _lay_out_hisparse_groups(
         *hot_groups,
         *regular_groups,
     ]
+
+
+def _split_state_group(
+    group: KVCacheGroupSpec, row_bytes: int
+) -> list[KVCacheGroupSpec]:
+    """Split a per-request state group (e.g. Mamba) so its page fits the
+    device row the indexer and hot groups already need."""
+    spec = group.kv_cache_spec
+    uniform = spec if isinstance(spec, UniformTypeKVCacheSpecs) else None
+    state_spec = uniform.first_spec if uniform is not None else spec
+    if not isinstance(state_spec, (MambaSpec, CircularBufferSpec)):
+        return [group]
+    states_per_group = max(row_bytes // state_spec.page_size_bytes, 1)
+    num_groups = cdiv(len(group.layer_names), states_per_group)
+    splits = []
+    for i in range(num_groups):
+        names = group.layer_names[i::num_groups]
+        split_spec: KVCacheSpec | None = spec
+        if uniform is not None:
+            split_spec = UniformTypeKVCacheSpecs.from_specs(
+                {name: uniform.kv_cache_specs[name] for name in names}
+            )
+        assert split_spec is not None
+        splits.append(replace(group, layer_names=names, kv_cache_spec=split_spec))
+    return splits
 
 
 def create_hisparse_layout(

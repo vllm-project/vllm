@@ -46,8 +46,10 @@ def resolve_hisparse_specs(
     kv_cache_spec: dict[str, KVCacheSpec],
     attn_layers: Mapping[str, "AttentionLayerBase"],
 ) -> dict[str, KVCacheSpec]:
-    """Resolve a common kernel block size for HiSparse MLA specs, and add the
-    resident/hot specs HiSparse derives from them."""
+    """Check that the sparse attention and indexer backends share a kernel
+    block size, and add the resident/hot specs HiSparse derives from the MLA
+    specs. HiSparse pages at the scheduler block size, so a hybrid model's
+    packed block keeps its state pages the size of an MLA row."""
     mla_specs = {
         name: spec
         for name, spec in kv_cache_spec.items()
@@ -61,16 +63,12 @@ def resolve_hisparse_specs(
     backends = [attn_layers[name].get_attn_backend() for name in mla_specs]
     specs = list(mla_specs.values())
     try:
-        block_size = select_common_block_size(block_sizes.pop(), backends, specs)
+        select_common_block_size(block_sizes.pop(), backends, specs)
     except ValueError as error:
         raise ValueError(
             "HiSparse requires a GPU block size supported by every sparse "
             f"attention and indexer backend: {error}"
         ) from error
-    kv_cache_spec = kv_cache_spec | {
-        name: spec.copy_with_new_block_size(block_size)
-        for name, spec in mla_specs.items()
-    }
     groups = get_hisparse_kv_cache_groups(vllm_config, kv_cache_spec)
     assert groups is not None
     return kv_cache_spec | {

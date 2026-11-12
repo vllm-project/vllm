@@ -29,6 +29,7 @@ from vllm.v1.hisparse import runtime as runtime_module
 from vllm.v1.hisparse.coordinator import get_hisparse_coordinator
 from vllm.v1.hisparse.runtime import (
     HiSparseCacheHandle,
+    PagedCacheView,
     update_hisparse_residency,
 )
 from vllm.v1.hisparse.types import (
@@ -63,6 +64,35 @@ def test_cache_manager_binding_preserves_hisparse_and_legacy_pool_hooks(nested):
 
     assert hisparse.connector_scheduler.coordinator is get_hisparse_coordinator(manager)
     legacy.bind_gpu_block_pool.assert_called_once_with(manager.block_pool)
+
+
+def test_paged_cache_view_flat_rows_follow_unaligned_block_stride():
+    """Attention addresses hot rows as `block * attention_block_stride + row`,
+    which must hold when the block stride is not a whole number of pages."""
+    block_size, row_width, num_blocks = 4, 2, 3
+    row_bytes = row_width * 2
+    block_stride = 6 * row_bytes
+    raw = torch.zeros(num_blocks * block_stride, dtype=torch.uint8)
+    view = PagedCacheView.bind(
+        raw,
+        dtype=torch.bfloat16,
+        row_width=row_width,
+        byte_offset=row_bytes,
+        block_stride=block_stride,
+        num_blocks=num_blocks,
+        block_size=block_size,
+    )
+    view.cache.copy_(
+        torch.arange(view.cache.numel(), dtype=torch.bfloat16).view_as(view.cache)
+    )
+    assert view.attention_cache.is_contiguous()
+    rows = view.attention_cache.view(-1, row_width)
+    for block in range(num_blocks):
+        for row in range(block_size):
+            assert torch.equal(
+                rows[block * view.attention_block_stride + row],
+                view.cache[block, row],
+            )
 
 
 def test_hisparse_requires_block_outermost_device_layout():

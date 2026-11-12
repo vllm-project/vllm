@@ -225,6 +225,53 @@ def test_hisparse_derived_specs_do_not_affect_kv_cache_layout(monkeypatch):
     assert layouts[0] == layouts[1]
 
 
+def test_hisparse_hybrid_state_groups_fit_indexer_row():
+    """A hybrid model's state layers split into groups no wider than the
+    indexer group, and hot pages need only kernel-row alignment, so the device
+    row stays the indexer page instead of padding to a state group or hot page."""
+    block_size = 256
+    specs: dict[str, KVCacheSpec] = {}
+    for i in range(6):
+        specs[f"model.layers.{i}.self_attn"] = MLAAttentionSpec(
+            block_size=block_size,
+            num_kv_heads=1,
+            head_size=576,
+            dtype=torch.bfloat16,
+            is_index_group_leader=True,
+        )
+        specs[f"model.layers.{i}.self_attn.indexer"] = MLAAttentionSpec(
+            block_size=block_size,
+            num_kv_heads=1,
+            head_size=144,
+            dtype=torch.bfloat16,
+            cache_role=SparseCacheRole.INDEXER,
+        )
+    for i in range(6, 16):
+        specs[f"model.layers.{i}.linear_attn"] = MambaSpec(
+            block_size=block_size, shapes=((25000,),), dtypes=(torch.float32,)
+        )
+    config = VllmConfig(model_config=ModelConfig(max_model_len=1024))
+    config.attention_config.hisparse_config = HiSparseConfig()
+    config.model_config.hf_config.index_topk = 128
+
+    groups = get_hisparse_kv_cache_groups(config, specs)
+    assert groups is not None
+    device_groups = [group for group in groups if not group.host_resident]
+    indexer_page = 6 * block_size * 144 * 2
+    assert sorted(
+        name
+        for group in device_groups
+        for name in group.layer_names
+        if "linear_attn" in name
+    ) == sorted(name for name in specs if "linear_attn" in name)
+    assert (
+        kv_cache_planning._get_kv_cache_bytes_per_block(
+            device_groups, KVCacheLayout.BLHNC
+        )
+        == indexer_page
+    )
+
+
 def test_hisparse_rejects_deepseek_v4():
     full_specs = {
         "model.layers.0.attn": MLAAttentionSpec(

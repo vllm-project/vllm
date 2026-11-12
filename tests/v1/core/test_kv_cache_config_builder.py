@@ -120,11 +120,16 @@ class TestModelGroupingPriority:
         cfg = _make_vllm_config(supports_grouping=True)
         assert DefaultKVCacheConfigBuilder().get_kv_cache_groups(cfg, {}) == []
 
-    def test_model_grouping_rejects_hisparse(self):
+    def test_hisparse_owns_grouping_over_model(self):
         cfg = _make_vllm_config(supports_grouping=True)
         cfg.attention_config.hisparse_config = object()
-        with pytest.raises(ValueError, match="HiSparse"):
-            DefaultKVCacheConfigBuilder().get_kv_cache_groups(cfg, {})
+        with patch(
+            "vllm.v1.core.kv_cache_planning.get_kv_cache_groups",
+            return_value=["default"],
+        ):
+            groups = DefaultKVCacheConfigBuilder().get_kv_cache_groups(cfg, {})
+        assert groups == ["default"]
+        cfg.model_config.registry.resolve_model_cls.assert_not_called()
 
 
 class TestCoreChecksGrouping:
