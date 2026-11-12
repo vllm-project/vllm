@@ -4228,6 +4228,7 @@ fn python_msgpack_fixtures_match_rust_encoding_and_record_nixl_metrics() {
     assert_eq!(ready_response.effective_attention_block_size, Some(64));
     assert_eq!(ready_response.config_hash.as_deref(), Some("0123456789"));
     assert!(ready_response.enable_expert_parallel);
+    assert!(ready_response.allow_missing_mm_embeddings);
     assert_eq!(
         ready_response.cache_config_info,
         Some(BTreeMap::from([

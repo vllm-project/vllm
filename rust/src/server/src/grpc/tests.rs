@@ -999,6 +999,7 @@ async fn unary_generate_prepares_multimodal_input_for_engine_core() {
                     )),
                     mime_type: String::new(),
                     uuid: uuid.to_string(),
+                    ..Default::default()
                 })
                 .collect(),
             kv: Some(pb::KvCacheParameters {
@@ -1087,10 +1088,13 @@ async fn generate_forwards_preprocessed_multimodal_features() {
                         length: 2,
                         mm_hash: Some("image-hash-a".to_string()),
                         is_embed: vec![true, false],
+                        metadata: None,
+                        tensors: Default::default(),
                     },
                 )),
                 mime_type: String::new(),
                 uuid: String::new(),
+                ..Default::default()
             }],
             stopping: Some(pb::StoppingCriteria {
                 max_new_tokens: 10,
@@ -1107,6 +1111,107 @@ async fn generate_forwards_preprocessed_multimodal_features() {
         }
 
         engine_task.await.expect("mock engine task");
+        server_task.abort();
+    }
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+#[serial]
+async fn metadata_only_features_follow_engine_consumer_role() {
+    for allow_missing_mm_embeddings in [true, false] {
+        let ready = EngineCoreReadyResponse {
+            allow_missing_mm_embeddings,
+            ..default_ready_response()
+        };
+        let (inference_service, control_service, engine_health, engine_task) =
+            setup_grpc_service_with_engine_script(
+                b"engine-grpc-metadata-only",
+                ready,
+                multimodal_backend(),
+                None,
+                move |dealer, push| {
+                    boxed_test_future(async move {
+                        if !allow_missing_mm_embeddings {
+                            return;
+                        }
+                        let add = recv_engine_message(dealer).await;
+                        let request = decode_add_request(&add);
+                        let feature = &request.mm_features.as_ref().expect("features")[0];
+                        let data = feature.data.as_ref().expect("feature data");
+                        assert!(data.contains_key("image_grid_thw"));
+                        assert!(!data.contains_key("pixel_values"));
+                        let xargs = request
+                            .sampling_params
+                            .as_ref()
+                            .and_then(|params| params.extra_args.as_ref())
+                            .expect("KV transfer args");
+                        assert!(xargs.contains_key("kv_transfer_params"));
+                        assert!(!xargs.contains_key("ec_transfer_params"));
+                        send_outputs(
+                            push,
+                            engine_outputs_for_request(
+                                &request.request_id,
+                                default_stream_output_specs(),
+                            ),
+                        )
+                        .await;
+                    })
+                },
+            )
+            .await;
+        let (channel, server_task) = start_grpc_test_server(
+            inference_service,
+            control_service,
+            engine_health,
+            tokio_util::sync::CancellationToken::new(),
+        )
+        .await;
+        let mut client = InferenceClient::new(channel);
+
+        let grid = prost_types::Value {
+            kind: Some(prost_types::value::Kind::ListValue(
+                prost_types::ListValue {
+                    values: [1.0, 2.0, 4.0]
+                        .into_iter()
+                        .map(|number| prost_types::Value {
+                            kind: Some(prost_types::value::Kind::NumberValue(number)),
+                        })
+                        .collect(),
+                },
+            )),
+        };
+        let mut request = preprocessed_grpc_request(vec![pb::MediaItem {
+            modality: pb::Modality::Image as i32,
+            source: Some(pb::media_item::Source::Features(
+                pb::PreprocessedMediaFeatures {
+                    kwargs: None,
+                    identifier: "image-hash-a".to_string(),
+                    offset: 1,
+                    length: 2,
+                    mm_hash: Some("image-hash-a".to_string()),
+                    is_embed: Vec::new(),
+                    metadata: Some(prost_types::Struct {
+                        fields: BTreeMap::from([("image_grid_thw".to_string(), grid)]),
+                    }),
+                    tensors: Default::default(),
+                },
+            )),
+            ..Default::default()
+        }]);
+        request.kv = Some(pb::KvCacheParameters {
+            kv_transfer_params: Some(decode_kv_proto_struct()),
+            ..Default::default()
+        });
+
+        let result = client.generate(request).await;
+        if allow_missing_mm_embeddings {
+            result.expect("KV consumer accepts metadata-only features");
+            engine_task.await.expect("mock engine task");
+        } else {
+            let status = result.expect_err("non-consumer engines reject metadata-only features");
+            assert_eq!(status.code(), tonic::Code::InvalidArgument);
+            assert!(status.message().contains("EC or KV consumer"));
+        }
         server_task.abort();
     }
 }
@@ -1138,10 +1243,13 @@ fn preprocessed_grpc_media(
                 length,
                 mm_hash: Some(identifier.to_string()),
                 is_embed: Vec::new(),
+                metadata: None,
+                tensors: Default::default(),
             },
         )),
         mime_type: String::new(),
         uuid: String::new(),
+        ..Default::default()
     }
 }
 
@@ -1264,6 +1372,41 @@ async fn generate_validates_preprocessed_model_limits_and_prompt() {
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 #[serial]
+async fn generate_rejects_untrusted_mm_kwargs() {
+    let (mut client, server_task, _engine_task) =
+        grpc_test_server(b"engine-grpc-mm-kwargs", default_stream_output_specs()).await;
+
+    let kwargs = prost_types::Struct {
+        fields: [(
+            "max_pixels".to_string(),
+            prost_types::Value {
+                kind: Some(prost_types::value::Kind::NumberValue(4096.0)),
+            },
+        )]
+        .into(),
+    };
+    let num_frames =
+        super::convert::json_to_proto_struct(&serde_json::json!({"video": {"num_frames": 4}}));
+    for (processor, io) in [(Some(kwargs), None), (None, num_frames)] {
+        let status = client
+            .generate_stream(pb::GenerateRequest {
+                request_id: "test-mm-kwargs".to_string(),
+                model: "test-model".to_string(),
+                prompt: Some(pb::generate_request::Prompt::Text("hi".to_string())),
+                mm_processor_kwargs: processor,
+                media_io_kwargs: io,
+                ..Default::default()
+            })
+            .await
+            .expect_err("untrusted per-request mm kwargs must be rejected");
+        assert_eq!(status.code(), tonic::Code::InvalidArgument);
+        assert!(status.message().contains("--trust-request-mm-kwargs"));
+    }
+    server_task.abort();
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+#[serial]
 async fn streaming_generate_rejects_text_prompt_with_media() {
     let (mut client, server_task, _engine_task) = grpc_test_server(
         b"engine-grpc-stream-media-text",
@@ -1285,6 +1428,7 @@ async fn streaming_generate_rejects_text_prompt_with_media() {
                 )),
                 mime_type: String::new(),
                 uuid: "image-1".to_string(),
+                ..Default::default()
             }],
             ..Default::default()
         })
@@ -1317,6 +1461,7 @@ async fn unary_generate_accepts_request_larger_than_tonic_default() {
                 source: Some(pb::media_item::Source::RawBytes(vec![0; 5 * 1024 * 1024])),
                 mime_type: "image/png".to_string(),
                 uuid: "image-1".to_string(),
+                ..Default::default()
             }],
             ..Default::default()
         })

@@ -90,40 +90,13 @@ pub(super) fn expand_prompt_token_ids(
         prompt_index += lane.marker_token_ids.len();
         let replacement = lane.replacements.pop_front().expect("lane queue is non-empty");
         debug_assert_eq!(replacement.modality, lane.modality);
-        if replacement.tokens.is_empty() {
-            bail_multimodal!(
-                "placeholder token `{}` expanded to no tokens",
-                lane.placeholder_token
-            );
-        }
-
-        let replacement_len = replacement.tokens.len();
-        let structural_prefix = replacement.structural_prefix;
-        if structural_prefix > expanded.len() {
-            bail_multimodal!(
-                "placeholder token `{}` declares a structural prefix of {} token(s), but only {} token(s) precede it",
-                lane.placeholder_token,
-                structural_prefix,
-                expanded.len()
-            );
-        }
-        let range_len = structural_prefix + replacement_len;
-        let is_embed = {
-            let mut mask = Vec::with_capacity(range_len);
-            mask.extend(std::iter::repeat_n(false, structural_prefix));
-            mask.extend(
-                replacement.tokens.iter().map(|&token| token as u32 == lane.embed_token_id),
-            );
-            WireTensor::from_bool(vec![range_len], mask).map_err(Error::Multimodal)?
-        };
-
-        let expanded_offset = expanded.len() - structural_prefix;
-        expanded.extend(replacement.tokens.iter().map(|&token| token as u32));
-        ranges.entry(lane.modality).or_default().push(PlaceholderRange {
-            offset: expanded_offset,
-            length: range_len,
-            is_embed: Some(is_embed),
-        });
+        let range = place_replacement(
+            &mut expanded,
+            replacement,
+            lane.embed_token_id,
+            lane.placeholder_token,
+        )?;
+        ranges.entry(lane.modality).or_default().push(range);
     }
 
     for lane in &lanes {
@@ -140,6 +113,44 @@ pub(super) fn expand_prompt_token_ids(
     *prompt_token_ids = expanded;
 
     Ok(ranges)
+}
+
+/// Append one item's replacement to `expanded`, which ends where its marker
+/// stood, and return the item's placeholder range.
+pub(super) fn place_replacement(
+    expanded: &mut Vec<u32>,
+    replacement: &PromptReplacement,
+    embed_token_id: u32,
+    placeholder_token: &str,
+) -> Result<PlaceholderRange> {
+    if replacement.tokens.is_empty() {
+        bail_multimodal!("placeholder token `{placeholder_token}` expanded to no tokens");
+    }
+    let replacement_len = replacement.tokens.len();
+    let structural_prefix = replacement.structural_prefix;
+    if structural_prefix > expanded.len() {
+        bail_multimodal!(
+            "placeholder token `{}` declares a structural prefix of {} token(s), but only {} token(s) precede it",
+            placeholder_token,
+            structural_prefix,
+            expanded.len()
+        );
+    }
+    let range_len = structural_prefix + replacement_len;
+    let is_embed = {
+        let mut mask = Vec::with_capacity(range_len);
+        mask.extend(std::iter::repeat_n(false, structural_prefix));
+        mask.extend(replacement.tokens.iter().map(|&token| token as u32 == embed_token_id));
+        WireTensor::from_bool(vec![range_len], mask).map_err(Error::Multimodal)?
+    };
+
+    let expanded_offset = expanded.len() - structural_prefix;
+    expanded.extend(replacement.tokens.iter().map(|&token| token as u32));
+    Ok(PlaceholderRange {
+        offset: expanded_offset,
+        length: range_len,
+        is_embed: Some(is_embed),
+    })
 }
 
 #[cfg(test)]
