@@ -11,6 +11,7 @@ use serde_json::{Map, Value, json};
 use vllm_tokenizer::Tokenizer;
 
 use super::super::MediaPartSource;
+use super::KimiK3Variant;
 use crate::EffortValue;
 use crate::error::{Error, Result};
 use crate::reasoning::ReasoningControl;
@@ -26,7 +27,6 @@ pub(super) const END_OF_MSG: &str = "<|end_of_msg|>";
 pub(super) const IMAGE_PLACEHOLDER: &str = "<|media_pad|>";
 
 const DEFAULT_THINKING_EFFORT: &str = "max";
-const VALID_THINKING_EFFORTS: &[&str] = &["low", "high", "max"];
 
 /// K3 prompt encoder preserving Python's per-segment tokenization boundaries.
 pub(super) struct K3TokenWriter<'a> {
@@ -90,8 +90,8 @@ pub(super) fn render_request_with_media_order(
     }
 
     if let Some(effort) = thinking_effort {
-        // Preserve the checkpoint's literal guidance text: it still names
-        // `medium`, although the validator above no longer accepts it.
+        // Preserve the checkpoint's literal guidance text: it names `medium`
+        // even for K3, whose encoder does not accept it.
         write_internal_system(
             &mut out,
             "thinking-effort",
@@ -254,6 +254,7 @@ fn request_tools(request: &ChatRequest) -> &[ChatTool] {
 pub(super) fn resolve_reasoning(
     request: &ChatRequest,
     defaults: &HashMap<String, Value>,
+    variant: KimiK3Variant,
 ) -> Result<ReasoningControl> {
     let reasoning = ReasoningControl::resolve(request, defaults)?
         .fallback(ReasoningControl::enabled(DEFAULT_THINKING_EFFORT));
@@ -263,9 +264,12 @@ pub(super) fn resolve_reasoning(
                 "Kimi K3 reasoning_effort must be a string, got {value}"
             ))
         })?;
-        if !VALID_THINKING_EFFORTS.contains(&effort) {
+        let efforts = variant.thinking_efforts();
+        if !efforts.contains(&effort) {
+            let (last, rest) = efforts.split_last().expect("every variant accepts some effort");
+            let supported: String = rest.iter().map(|effort| format!("`{effort}`, ")).collect();
             return Err(Error::InvalidReasoningEffort(format!(
-                "unsupported reasoning_effort={effort:?}; supported values are `low`, `high`, and `max`"
+                "unsupported reasoning_effort={effort:?}; supported values are {supported}and `{last}`"
             )));
         }
     }
@@ -280,7 +284,8 @@ fn content_is_empty(content: &ChatContent) -> bool {
             ChatContentPart::ImageUrl { .. }
             | ChatContentPart::VideoUrl { .. }
             | ChatContentPart::InputAudio { .. }
-            | ChatContentPart::AudioUrl { .. } => false,
+            | ChatContentPart::AudioUrl { .. }
+            | ChatContentPart::ToolReference { .. } => false,
         }),
     }
 }
@@ -484,6 +489,9 @@ fn write_content(
                     }
                     ChatContentPart::AudioUrl { .. } => {
                         return Err(Error::UnsupportedMultimodalContent("audio_url"));
+                    }
+                    ChatContentPart::ToolReference { .. } => {
+                        return Err(Error::UnsupportedContentPart("tool_reference"));
                     }
                 }
             }

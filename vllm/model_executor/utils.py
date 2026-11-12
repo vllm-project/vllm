@@ -22,7 +22,7 @@ _weights_pre_processed: ContextVar[bool] = ContextVar(
 @contextmanager
 def weights_already_processed():
     """Mark that weights are already in post-processed (runtime) format, so
-    ``process_weights_after_loading`` skips tensor transforms (used by the
+    `process_weights_after_loading` skips tensor transforms (used by the
     weight cache IPC loader).
     """
     token = _weights_pre_processed.set(True)
@@ -104,7 +104,7 @@ def copy_weight_(dst: torch.Tensor, src: torch.Tensor) -> torch.Tensor:
 
 
 def _extent(t: torch.Tensor) -> int:
-    """Number of elements spanned by ``t`` in its storage."""
+    """Number of elements spanned by `t` in its storage."""
     if t.numel() == 0:
         return 0
     return 1 + sum((n - 1) * s for n, s in zip(t.shape, t.stride()))
@@ -117,7 +117,7 @@ def storage_view(
     stride: tuple[int, ...],
     dtype: torch.dtype,
 ) -> torch.Tensor:
-    """A ``dtype`` tensor on ``storage`` at element ``offset``. ``set_`` does
+    """A `dtype` tensor on `storage` at element `offset`. `set_` does
     not bounds-check: callers check that the view fits."""
     view = torch.empty(0, dtype=dtype, device=storage.device)
     return view.set_(storage, offset, shape, stride)
@@ -126,13 +126,13 @@ def storage_view(
 def _in_own_storage(
     old: torch.Tensor, new: torch.Tensor, whole_storage: bool = False
 ) -> torch.Tensor:
-    """``new`` copied into the bytes ``old`` spans if it fits, so the loaded
-    storage is kept (with its ``data_ptr``); else ``new`` itself. An equal-size
+    """`new` copied into the bytes `old` spans if it fits, so the loaded
+    storage is kept (with its `data_ptr`); else `new` itself. An equal-size
     result fits too: a repack to the same byte count (e.g. FP8 → Marlin int32)
     then keeps the address captured CUDA graphs read.
 
-    With ``whole_storage`` (direct reload), ``new`` may use the rest of
-    ``old``'s storage, so a weight that post-load processing grew keeps its
+    With `whole_storage` (direct reload), `new` may use the rest of
+    `old`'s storage, so a weight that post-load processing grew keeps its
     address on a reload too, as do a padded view with gaps (ROCm FP8 padding)
     and an emptied weight (the checkpoint bytes stay for the next reload)."""
     storage = old.untyped_storage()
@@ -171,20 +171,20 @@ def replace_parameter(
     weight. Called within implementations of the `process_weights_after_loading` method.
 
     The existing parameter object is kept (and so its class and loader attributes
-    for weight reloading): ``new_tensor`` is copied into it when shape, stride,
-    dtype and device match, which preserves ``data_ptr`` for captured CUDA graphs;
-    otherwise a smaller ``new_tensor`` is copied into the parameter's own storage
-    (so the loaded storage never shrinks), else ``.data`` is rebound to it. A new
-    parameter is registered only if none exists under ``param_name``, or if the
+    for weight reloading): `new_tensor` is copied into it when shape, stride,
+    dtype and device match, which preserves `data_ptr` for captured CUDA graphs;
+    otherwise a smaller `new_tensor` is copied into the parameter's own storage
+    (so the loaded storage never shrinks), else `.data` is rebound to it. A new
+    parameter is registered only if none exists under `param_name`, or if the
     existing one is an online requantization source (released after conversion).
 
-    Custom attributes set on ``new_tensor`` (e.g. kernel dispatch flags such as
-    ``is_shuffled``) are carried over to the parameter, except ``weight_loader``,
+    Custom attributes set on `new_tensor` (e.g. kernel dispatch flags such as
+    `is_shuffled`) are carried over to the parameter, except `weight_loader`,
     which is always taken from the existing parameter.
 
-    Under direct reload, a ``new_tensor`` larger than the parameter at cold start
+    Under direct reload, a `new_tensor` larger than the parameter at cold start
     may be written into the parameter's existing storage on a reload, so do not
-    read a local alias of the old data (``w = layer.weight.data``) after this call.
+    read a local alias of the old data (`w = layer.weight.data`) after this call.
 
     This function should not be called on weights which are tied/shared
 
@@ -270,10 +270,10 @@ def refill_derived(obj: object, name: str, new: torch.Tensor) -> torch.Tensor: .
 def refill_derived(
     obj: object, name: str, new: torch.Tensor | None
 ) -> torch.Tensor | None:
-    """Set ``obj.name`` (a plain attribute, never a parameter or buffer) to a
+    """Set `obj.name` (a plain attribute, never a parameter or buffer) to a
     tensor derived from the weights. A held tensor of the same shape, dtype and
     device is refilled in place, so captured CUDA graphs keep its address; it
-    must own its storage. Returns the tensor now held under ``name``."""
+    must own its storage. Returns the tensor now held under `name`."""
     old = getattr(obj, name, None)
     if (
         isinstance(old, torch.Tensor)
@@ -286,11 +286,11 @@ def refill_derived(
 
 
 def move_parameter(layer: torch.nn.Module, src_name: str, dst_name: str) -> None:
-    """Register the ``src_name`` parameter object under ``dst_name`` as well.
+    """Register the `src_name` parameter object under `dst_name` as well.
 
     Both names then refer to one object and so to one storage: the loader writes
     through the checkpoint name, kernels read the runtime name, and a later
-    `replace_parameter` on either name updates both. ``dst_name`` becomes the
+    `replace_parameter` on either name updates both. `dst_name` becomes the
     name `kernel_parameters` reports for the object."""
     param = getattr(layer, src_name)
     existing = layer._parameters.get(dst_name)
@@ -311,8 +311,8 @@ def retire_parameter(layer: torch.nn.Module, name: str) -> None:
 def set_kernel_parameter(
     layer: torch.nn.Module, name: str, tensor: torch.Tensor
 ) -> None:
-    """`replace_parameter`, for a tensor kernels read under ``name``: the parameter
-    is live even if it was retired before, and ``name`` becomes its runtime name
+    """`replace_parameter`, for a tensor kernels read under `name`: the parameter
+    is live even if it was retired before, and `name` becomes its runtime name
     if it is registered under several names (see `move_parameter`)."""
     replace_parameter(layer, name, tensor)
     param = getattr(layer, name)
@@ -328,7 +328,7 @@ def _is_live(param: torch.Tensor | None) -> bool:
 
 
 def get_live_param(layer: torch.nn.Module, name: str) -> torch.Tensor | None:
-    """``getattr(layer, name, None)``, treating retired or empty params as absent."""
+    """`getattr(layer, name, None)`, treating retired or empty params as absent."""
     tensor = getattr(layer, name, None)
     if isinstance(tensor, torch.nn.Parameter) and not _is_live(tensor):
         return None
