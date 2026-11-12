@@ -2879,8 +2879,13 @@ class DPEngineCoreProc(EngineCoreProc):
             self.ignore_start_dp_wave = True
             self.pending_pause = False
             logger.debug("DP pause consensus reached, ignoring START_DP_WAVE.")
-        elif self.enable_fault_tolerance and self.ft_sentinel.coordinator_disabled:
-            # Coordinator disabled: never idle-pause; engines keep stepping.
+        elif (
+            self.enable_fault_tolerance
+            and self.ft_sentinel.coordinator_disabled
+            and not self.ignore_start_dp_wave
+        ):
+            # Coordinator disabled: never idle-pause; engines keep stepping
+            # unless generation is paused.
             return True
 
         return has_unfinished

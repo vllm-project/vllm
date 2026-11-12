@@ -7,8 +7,10 @@ from concurrent.futures import Future
 from types import SimpleNamespace
 from unittest.mock import MagicMock
 
+from vllm.config import ParallelConfig
 from vllm.distributed.kv_transfer.kv_connector.utils import KVConnectorOutput
 from vllm.v1.core.sched.output import SchedulerOutput
+from vllm.v1.engine.core import DPEngineCoreProc, EngineCoreProc
 from vllm.v1.fault_tolerance.engine_core_sentinel import EngineCoreSentinel
 from vllm.v1.outputs import ModelRunnerOutput
 
@@ -66,3 +68,33 @@ def test_drain_batch_queue_drops_failures_and_empty_outputs():
 
     assert not batch_queue
     scheduler.update_from_output.assert_not_called()
+
+
+def test_paused_survivors_can_resume_after_scale_down(monkeypatch):
+    """Survivors woken by scale_down while generation is paused must go idle
+    again, or the regular resume is rejected as an in-flight pause."""
+    monkeypatch.setattr(EngineCoreProc, "resume_scheduler", lambda self: None)
+    monkeypatch.setattr(ParallelConfig, "has_unfinished_dp", lambda *_: False)
+    parallel_config = MagicMock()
+    parallel_config.sync_dp_state.return_value = (False, False)
+
+    engine = DPEngineCoreProc.__new__(DPEngineCoreProc)
+    engine.vllm_config = SimpleNamespace(parallel_config=parallel_config)
+    engine.dp_group = None
+    engine.dp_sync_interval = 1
+    engine.step_counter = 0
+    engine.scheduler = MagicMock()
+    engine.enable_fault_tolerance = True
+    engine.ft_sentinel = SimpleNamespace(coordinator_disabled=True)
+    # Paused by consensus, then woken by scale_down.
+    engine.pending_pause = False
+    engine.ignore_start_dp_wave = True
+    engine.engines_running = True
+
+    engine.engines_running = engine._has_global_unfinished_reqs(False)
+    assert not engine.engines_running
+
+    engine.resume_scheduler()
+    assert not engine.ignore_start_dp_wave
+    assert engine.engines_running
+    assert engine._has_global_unfinished_reqs(False)
