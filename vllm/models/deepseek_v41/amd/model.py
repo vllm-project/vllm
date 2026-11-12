@@ -11,7 +11,6 @@ import torch.nn as nn
 
 import vllm.envs as envs
 from vllm.config import VllmConfig
-from vllm.config.kernel import MEGA_MOE_BACKENDS
 from vllm.distributed import (
     get_pcp_group,
     get_pp_group,
@@ -198,8 +197,7 @@ def _validate_pcp_config(vllm_config: VllmConfig) -> None:
         or vllm_config.speculative_config is not None
         or vllm_config.kv_transfer_config is not None
         or vllm_config.cache_config.enable_prefix_caching
-        or vllm_config.kernel_config.moe_backend
-        in (*MEGA_MOE_BACKENDS, "aiter_mega_moe")
+        or vllm_config.kernel_config.moe_backend == "aiter_mega_moe"
         or vllm_config.kernel_config.monokernel
     ):
         raise NotImplementedError(

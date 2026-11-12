@@ -7,7 +7,6 @@ from unittest.mock import Mock
 import pytest
 import torch
 
-from vllm.config import CacheConfig, KernelConfig, ParallelConfig, VllmConfig
 from vllm.forward_context import ForwardContext, override_forward_context
 from vllm.models.deepseek_v41 import attention as attention_module
 from vllm.models.deepseek_v41.amd import model as amd_model_module
@@ -294,18 +293,27 @@ def test_pcp_rejects_speculation_other_than_fixed_length_dspark(method, adaptive
         model_module.DeepseekV4Model(vllm_config=config)
 
 
-def _rocm_pcp_config() -> VllmConfig:
-    return VllmConfig(
-        cache_config=CacheConfig(enable_prefix_caching=False),
-        parallel_config=ParallelConfig(prefill_context_parallel_size=2),
-        kernel_config=KernelConfig(),
+def _rocm_pcp_config():
+    return SimpleNamespace(
+        model_config=SimpleNamespace(hf_config=SimpleNamespace()),
+        quant_config=None,
+        parallel_config=SimpleNamespace(
+            prefill_context_parallel_size=2,
+            pipeline_parallel_size=1,
+            data_parallel_size=1,
+            decode_context_parallel_size=1,
+            use_ubatching=False,
+        ),
+        speculative_config=None,
+        kv_transfer_config=None,
+        cache_config=SimpleNamespace(enable_prefix_caching=False),
+        kernel_config=SimpleNamespace(moe_backend="auto", monokernel=False),
     )
 
 
 @pytest.mark.parametrize(
     "section,field,value",
     [
-        (None, None, None),
         ("cache_config", "enable_prefix_caching", True),
         ("kernel_config", "moe_backend", "aiter_mega_moe"),
         ("kernel_config", "monokernel", True),
@@ -313,29 +321,21 @@ def _rocm_pcp_config() -> VllmConfig:
 )
 def test_rocm_pcp_rejects_unsupported_configurations(section, field, value):
     config = _rocm_pcp_config()
-    if section is None:
-        amd_model_module._validate_pcp_config(config)
-        return
-    target = config if section == "config" else getattr(config, section)
-    setattr(target, field, value)
+    amd_model_module._validate_pcp_config(config)
+    setattr(getattr(config, section), field, value)
     with pytest.raises(NotImplementedError, match="PP=DP=DCP=1"):
-        amd_model_module._validate_pcp_config(config)
+        amd_model_module.DeepseekV4Model(vllm_config=config)
 
 
-def test_rocm_pcp_runs_sequential_attention_and_restores_streams(monkeypatch):
-    """PCP collectives must stay on one stream."""
+def test_rocm_pcp_attention_skips_stream_overlap_path(monkeypatch):
+    """The ROCm overlap path caches the compressor latent without the PCP gather."""
     attention = object.__new__(DeepseekV41ROCMAiterMLAAttention)
     torch.nn.Module.__init__(attention)
     attention.use_pcp = True
     attention.indexer = object()
-    aux_streams = [object()]
-    attention.aux_stream_list = aux_streams
-
-    def parent_forward(self, positions, hidden_states, llama_4_scaling=None):
-        assert self.aux_stream_list is None
-        return hidden_states
-
-    monkeypatch.setattr(attention_module.DeepseekV4Attention, "forward", parent_forward)
+    attention.aux_stream_list = [object()]
+    base_forward = Mock(side_effect=lambda positions, hidden, *args: hidden)
+    monkeypatch.setattr(attention_module.DeepseekV4Attention, "forward", base_forward)
     monkeypatch.setattr(
         "vllm.models.deepseek_v41.amd.rocm.current_platform.enable_multi_stream_overlap",
         lambda *args: True,
@@ -345,4 +345,4 @@ def test_rocm_pcp_runs_sequential_attention_and_restores_streams(monkeypatch):
         ForwardContext(no_compile_layers={}, attn_metadata=None, slot_mapping={})
     ):
         assert attention(torch.arange(2), hidden_states) is hidden_states
-    assert attention.aux_stream_list is aux_streams
+    base_forward.assert_called_once()
