@@ -164,6 +164,7 @@ class ServingTokens(GenerateBaseServing):
         return_tokens_as_token_ids: bool = False,
         enable_prompt_tokens_details: bool = False,
         enable_log_outputs: bool = False,
+        enable_force_include_usage: bool = False,
     ):
         super().__init__(
             engine_client=engine_client,
@@ -175,6 +176,7 @@ class ServingTokens(GenerateBaseServing):
         self.online_derenderer = online_derenderer
         self.enable_prompt_tokens_details = enable_prompt_tokens_details
         self.enable_log_outputs = enable_log_outputs
+        self.enable_force_include_usage = enable_force_include_usage
         self.force_no_detokenize = force_no_detokenize
         self.has_tokenizer = (
             not force_no_detokenize and self.renderer.tokenizer is not None
@@ -726,7 +728,7 @@ class ServingTokens(GenerateBaseServing):
         finish_reason_sent = [False] * sampling_params.n
 
         include_usage, include_continuous_usage = should_include_usage(
-            request.stream_options, False
+            request.stream_options, self.enable_force_include_usage
         )
 
         try:
