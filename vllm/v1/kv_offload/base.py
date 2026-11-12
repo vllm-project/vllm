@@ -92,6 +92,7 @@ class ReqContext:
     req_id: str
     kv_transfer_params: dict[str, Any] | None = None
     load_tier_filter: TierFilter = TierFilter.ALL
+    prompt_cache_ttl_s: float | None = None
     # Per-request scratch space keyed by value type, so a tier can parse
     # kv_transfer_params once (in on_new_request) and read the result back
     # on later calls for the same request.
@@ -384,6 +385,25 @@ class OffloadingManager(ABC):
     def reset_cache(self) -> None:
         """Evict all tracked blocks and reset internal state."""
         return
+
+    def evict(self, keys: Iterable[OffloadKey]) -> list[OffloadKey]:
+        """Evict the given blocks if they are present and not in use.
+
+        Args:
+            keys: the keys identifying the blocks to evict.
+
+        Returns:
+            The subset of keys that were actually evicted.
+        """
+        return []
+
+    def evict_expired_blocks(self) -> list[OffloadKey]:
+        """Evict offloaded blocks whose prefix-cache TTL has elapsed.
+
+        Returns:
+            The keys that were evicted.
+        """
+        return []
 
     def get_stats(self) -> "OffloadingConnectorStats | None":
         """Return collected metrics since last call, or None if disabled."""

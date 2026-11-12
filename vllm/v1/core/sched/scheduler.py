@@ -473,6 +473,7 @@ class Scheduler(SchedulerInterface):
         scheduled_timestamp = time.monotonic()
 
         self.kv_cache_manager.new_step_starts()
+        self.kv_cache_manager.evict_expired_blocks()
 
         # DP prefill balancing: on a throttled (non-cadence-aligned) step, defer
         # all prefill compute unless saturated.
@@ -2211,6 +2212,11 @@ class Scheduler(SchedulerInterface):
         return self.kv_cache_manager.usage
 
     def add_request(self, request: Request) -> None:
+        if request.prompt_cache_ttl_s is None:
+            default_ttl = self.cache_config.prefix_cache_ttl_seconds
+            request.prompt_cache_ttl_s = (
+                float("inf") if default_ttl is None else default_ttl
+            )
         existing = self.requests.get(request.request_id)
         if existing is not None:
             update = StreamingUpdate.from_request(request)

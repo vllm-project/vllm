@@ -124,6 +124,20 @@ class InputProcessor:
                         "model runner. Run vLLM with VLLM_USE_V2_MODEL_RUNNER=0 "
                         "to use thinking_token_budget."
                     )
+
+            if params.extra_args:
+                ttl = params.extra_args.get("prompt_cache_ttl_s")
+                if ttl is not None:
+                    try:
+                        valid = float(ttl) > 0
+                    except (TypeError, ValueError):
+                        valid = False
+                    if not valid:
+                        raise VLLMValidationError(
+                            f"prompt_cache_ttl_s must be a number > 0, got {ttl!r}",
+                            parameter="prompt_cache_ttl_s",
+                            value=ttl,
+                        )
         elif isinstance(params, PoolingParams):
             supported_pooling_tasks = [
                 task for task in supported_tasks if task in POOLING_TASKS

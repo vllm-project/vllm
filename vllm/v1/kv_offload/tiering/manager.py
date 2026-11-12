@@ -670,6 +670,7 @@ class TieringOffloadingManager(OffloadingManager):
         Only stores REQUEST_LEVEL tier decisions for use in prepare_store.
         """
         state = RequestState(req_context=req_context)
+        self.primary_tier.on_new_request(req_context)
         for tier in self.secondary_tiers:
             if tier is exclude_tier:
                 continue
@@ -817,6 +818,14 @@ class TieringOffloadingManager(OffloadingManager):
         for req_id in finished_req_ids:
             del self._req_state[req_id]
         self._processed_jobs_this_step = False
+
+    @override
+    def evict(self, keys: Iterable[OffloadKey]) -> list[OffloadKey]:
+        return self.primary_tier.evict(keys)
+
+    @override
+    def evict_expired_blocks(self) -> list[OffloadKey]:
+        return self.primary_tier.evict_expired_blocks()
 
     @override
     def get_stats(self) -> OffloadingConnectorStats | None:

@@ -439,6 +439,7 @@ def _create_req_context(req: Request) -> ReqContext:
         req_id=req.request_id,
         kv_transfer_params=params,
         load_tier_filter=load_filter,
+        prompt_cache_ttl_s=req.prompt_cache_ttl_s,
     )
 
 
@@ -835,6 +836,9 @@ class OffloadingConnectorScheduler:
                 - `True` if tokens will be loaded asynchronously
                   (between scheduler steps).
         """
+        # Never report a hit on a block whose TTL has elapsed.
+        self.manager.evict_expired_blocks()
+
         req_status = self._req_status[request.request_id]
         for group_state in req_status.group_states:
             group_state.block_ids.clear()
@@ -1218,6 +1222,7 @@ class OffloadingConnectorScheduler:
     def build_connector_meta(
         self, scheduler_output: SchedulerOutput
     ) -> KVConnectorMetadata:
+        self.manager.evict_expired_blocks()
         self._update_req_states(scheduler_output)
         schedule_end_context = ScheduleEndContext(
             new_req_ids=[req.req_id for req in scheduler_output.scheduled_new_reqs],

@@ -7,6 +7,7 @@ import pytest
 import torch
 
 from tests.v1.kv_connector.unit.offloading_connector.utils import (
+    MockLoadStoreSpec,
     generate_store_output,
     to_keys,
 )
@@ -36,6 +37,7 @@ from vllm.v1.kv_offload.base import (
     Medium,
     OffloadingEvent,
     OffloadingManager,
+    OffloadKey,
     OffloadPolicy,
     ReqContext,
     RequestOffloadingContext,
@@ -3204,3 +3206,161 @@ def test_request_finished_mixed_full_attn_and_sliding_window(
     # Verify fence is empty after full lifecycle (cleanup happened).
     assert runner.connector_scheduler._block_id_to_pending_jobs == {}
     assert len(runner.connector_scheduler._jobs) == 0
+
+
+class TTLHarness:
+    """A RequestRunner backed by a real CPUOffloadingManager with a 10s TTL."""
+
+    def __init__(self, request_runner, monkeypatch, async_scheduling: bool):
+        import vllm.v1.kv_offload.cpu.manager as cpu_mgr_mod
+        from vllm.v1.kv_offload.cpu.manager import CPUOffloadingManager
+
+        self.blocks_per_chunk = 3
+        self.block_size = 4
+        self.offloaded_block_size = self.block_size * self.blocks_per_chunk
+        self.runner = request_runner(
+            block_size=self.block_size,
+            blocks_per_chunk=self.blocks_per_chunk,
+            num_gpu_blocks=100,
+            async_scheduling=async_scheduling,
+        )
+        self.runner.scheduler.cache_config.prefix_cache_ttl_seconds = 10.0
+
+        self.manager = CPUOffloadingManager(num_blocks=10)
+        self.manager._get_load_store_spec = (  # type: ignore[method-assign]
+            lambda keys, blocks: MockLoadStoreSpec(keys)
+        )
+        self.runner.connector_scheduler.manager = self.manager
+
+        self.now = 1000.0
+        monkeypatch.setattr(cpu_mgr_mod.time, "monotonic", lambda: self.now)
+
+        # keys stored via prepare_store
+        self.stored: list[OffloadKey] = []
+        orig_prepare_store = self.manager.prepare_store
+
+        def tracking_prepare_store(keys, req_context):
+            out = orig_prepare_store(keys, req_context)
+            if out is not None and out.keys_to_store:
+                self.stored.extend(out.keys_to_store)
+            return out
+
+        self.manager.prepare_store = (  # type: ignore[method-assign]
+            tracking_prepare_store
+        )
+
+    def sweep_evicted(self) -> list[OffloadKey]:
+        """Run the expiry sweep and return the keys evicted."""
+        return self.manager.evict_expired_blocks()
+
+
+@pytest.mark.parametrize("async_scheduling", [True, False])
+def test_offloaded_blocks_prefix_cache_ttl(
+    request_runner, monkeypatch, async_scheduling: bool
+):
+    """Offloaded blocks follow the GPU prefix-cache TTL rule: they never expire
+    while a request uses them, expire TTL seconds after the last user is done,
+    and a CPU hit renews them."""
+    h = TTLHarness(request_runner, monkeypatch, async_scheduling)
+    runner = h.runner
+    token_ids = [0] * h.offloaded_block_size * 2
+
+    # Store 2 blocks.
+    runner.new_request(token_ids=token_ids)
+    runner.run(decoded_tokens=[0])
+    assert len(h.stored) == 2
+
+    # Long-running request: its blocks do not expire.
+    h.now += 100.0
+    assert h.sweep_evicted() == []
+
+    # Request finishes: TTL starts once its stores are done.
+    runner.run(
+        decoded_tokens=[EOS_TOKEN_ID],
+        expected_stored=range(6),
+    )
+    h.now += 9.0
+    assert h.sweep_evicted() == []
+
+    # CPU hit at t+9 renews the TTL to t+19.
+    runner.scheduler.reset_prefix_cache()
+    runner.new_request(token_ids=token_ids)
+    runner.run(
+        decoded_tokens=[EOS_TOKEN_ID],
+        expected_loaded=range(6),
+    )
+    h.now += 9.0
+    assert h.sweep_evicted() == []
+    h.now += 1.0
+    assert h.sweep_evicted() == h.stored
+
+
+@pytest.mark.parametrize("async_scheduling", [True, False])
+def test_offloaded_blocks_ttl_held_when_store_fails(
+    request_runner, monkeypatch, async_scheduling: bool
+):
+    """A request reusing offloaded blocks holds them even if it cannot store
+    its own new blocks (prepare_store returns None)."""
+    h = TTLHarness(request_runner, monkeypatch, async_scheduling)
+    runner = h.runner
+    prefix = [0] * h.offloaded_block_size * 2
+
+    runner.new_request(token_ids=prefix)
+    runner.run(decoded_tokens=[0])
+    runner.run(
+        decoded_tokens=[EOS_TOKEN_ID],
+        expected_stored=range(6),
+    )
+
+    # Same prefix (GPU hit) plus a new block, and the CPU cache cannot store.
+    runner.new_request(token_ids=prefix + [1] * h.offloaded_block_size)
+    h.manager.prepare_store = (  # type: ignore[method-assign]
+        lambda keys, req_context: None
+    )
+    runner.run(decoded_tokens=[0])
+
+    # Running far past the TTL: the shared offloaded blocks do not expire.
+    h.now += 100.0
+    assert h.sweep_evicted() == []
+
+    runner.run(decoded_tokens=[EOS_TOKEN_ID])
+    h.now += 9.0
+    assert h.sweep_evicted() == []
+    h.now += 1.0
+    assert h.sweep_evicted() == h.stored
+
+
+@pytest.mark.parametrize("async_scheduling", [True, False])
+def test_offloaded_blocks_ttl_deferred_for_aborted_load(
+    request_runner, monkeypatch, async_scheduling: bool
+):
+    """An aborted request releases its blocks only once its load completes,
+    so an expiring block is never mid-transfer (and thus never unevictable)."""
+    h = TTLHarness(request_runner, monkeypatch, async_scheduling)
+    runner = h.runner
+    token_ids = [0] * h.offloaded_block_size
+
+    runner.new_request(token_ids=token_ids)
+    runner.run(
+        decoded_tokens=[EOS_TOKEN_ID],
+        expected_stored=(0, 1, 2),
+    )
+
+    # Start loading the block from CPU, then abort before the load completes.
+    runner.scheduler.reset_prefix_cache()
+    runner.new_request(token_ids=token_ids)
+    runner.run(decoded_tokens=[], complete_transfers=False)
+    runner.scheduler.finish_requests(
+        (str(runner.req_id),), RequestStatus.FINISHED_ABORTED
+    )
+
+    # Far past the TTL, but the load is still in flight.
+    h.now += 100.0
+    assert h.sweep_evicted() == []
+
+    # Load completes: the TTL starts now.
+    runner.run(decoded_tokens=[], expected_loaded=(0, 1, 2))
+    h.now += 9.0
+    assert h.sweep_evicted() == []
+    h.now += 1.0
+    assert h.sweep_evicted() == h.stored
