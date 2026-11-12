@@ -10,6 +10,7 @@ import queue
 import sys
 import threading
 import types
+from collections.abc import Callable
 from dataclasses import replace
 from types import SimpleNamespace
 from unittest.mock import MagicMock, patch
@@ -195,6 +196,7 @@ def _make_store_sending_thread(
     supports_group_ids: bool = False,
     kv_role: str = "kv_producer",
     enable_kv_event: bool = False,
+    record_operation: Callable[..., None] | None = None,
 ) -> mooncake_store_worker.KVCacheStoreSendingThread:
     if coord is None:
         coord = _default_send_coord()
@@ -216,6 +218,7 @@ def _make_store_sending_thread(
         replicate_config=replicate_config,
         enable_group_semantics=enable_group_semantics,
         supports_group_ids=supports_group_ids,
+        record_operation=record_operation,
     )
     thread.request_queue.task_done = MagicMock()
     return thread
@@ -2049,6 +2052,48 @@ def test_store_sending_thread_reports_job_when_store_raises(failing_call):
     assert thread.take_completed_saves() == {req.store_job_id: 1}
 
 
+@pytest.mark.parametrize("boundary_save", [False, True])
+@pytest.mark.parametrize(
+    ("results", "status"),
+    [([-900, -900], "error"), ([-901, -901], "error"), ([0, -900], "partial_failure")],
+)
+def test_failed_existence_check_skips_put_and_completes_save(
+    boundary_save: bool, results: list[int], status: str
+) -> None:
+    store = MagicMock()
+    store.batch_is_exist.return_value = results
+    stats = MooncakeStoreConnectorStats()
+    thread = _make_store_sending_thread(store, record_operation=stats.record_operation)
+    req = _make_store_req("failed-exists", [b"a0", b"a1"])
+    if boundary_save:
+        req.token_len_chunk = 0
+        req.boundary_puts = [BoundaryPut(0, 1, 16), BoundaryPut(0, 2, 32)]
+
+    _run_store_req(thread, req)
+
+    assert store.batch_put_from_multi_buffers.call_count == 0
+    assert thread.take_completed_saves() == {req.store_job_id: 1}
+    assert stats.reduce()["save_exists_failed_keys"] == sum(r < 0 for r in results)
+    assert stats.data["save_exists"][0]["status"] == status
+
+
+@pytest.mark.parametrize("error", [-900, -901, -1401])
+def test_failed_put_still_completes_save(error: int) -> None:
+    store = MagicMock()
+    store.batch_is_exist.return_value = [0, 0]
+    store.batch_put_from_multi_buffers.return_value = [error, error]
+    stats = MooncakeStoreConnectorStats()
+    thread = _make_store_sending_thread(store, record_operation=stats.record_operation)
+    req = _make_store_req("failed-put", [b"a0", b"a1"])
+
+    _run_store_req(thread, req)
+
+    assert store.batch_put_from_multi_buffers.call_count == 1
+    assert thread.take_completed_saves() == {req.store_job_id: 1}
+    assert stats.reduce()["save_put_failed_keys"] == 2
+    assert stats.data["save_put"][0]["status"] != "ok"
+
+
 def test_store_sending_thread_reports_job_when_the_preamble_raises():
     # The report has to survive a failure before the first store call too, so
     # every dequeue leaves through the same exit.
@@ -2090,6 +2135,25 @@ def test_stale_store_job_cannot_touch_a_reused_request_id():
     assert "req-a" not in thread._skip_store_requests
     assert thread._get_retry_token_ids(stale) is None
     assert thread._get_retry_token_ids(live) == (32, list(range(32, 64)))
+
+
+def test_wait_for_save_retires_preempted_attempt_before_queueing():
+    w = _make_bare_worker()
+    w.kv_send_thread = _make_store_sending_thread(MagicMock())
+    stale = _make_store_req("req-a", [b"a0", b"a1"])
+    stale.store_job_id = 1
+    w.kv_send_thread.add_request(stale)
+    live = _make_store_req("req-a", [b"a0", b"a1"])
+    live.store_job_id = 2
+    meta = mooncake_store_worker.MooncakeStoreConnectorMetadata(set(), {"req-a"})
+    meta.add_request(live)
+
+    with patch.object(torch.cuda, "Event"):
+        w.wait_for_save(meta)
+    w.get_finished(set(), meta)
+
+    assert w.kv_send_thread.is_live_store_job(live)
+    assert not w.kv_send_thread.is_live_store_job(stale)
 
 
 def test_store_recving_thread_reports_failed_block_ids():
