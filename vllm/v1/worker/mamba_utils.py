@@ -707,13 +707,17 @@ def _get_mamba_gpu_state_copy_funcs(
     state_copy_funcs = copy_funcs[spec.mamba_type]
     if isinstance(layer, MambaBase) and layer.use_flashinfer_replayssm:
         if (
-            spec.mamba_type != MambaAttentionBackendEnum.MAMBA2
+            spec.mamba_type
+            not in (
+                MambaAttentionBackendEnum.MAMBA2,
+                MambaAttentionBackendEnum.GDN_ATTN,
+            )
             or len(spec.shapes) != 5
             or len(spec.dtypes) != 5
             or state_copy_funcs != (get_conv_copy_spec, get_temporal_copy_spec)
         ):
             raise ValueError(
-                "FlashInfer ReplaySSM requires two canonical Mamba2 "
+                "FlashInfer ReplaySSM requires two canonical Mamba2 or GDN "
                 "states and three ring states"
             )
         state_copy_funcs += (get_temporal_copy_spec,) * 3
@@ -933,7 +937,7 @@ class MambaSpecDecodeGPUContext:
             f"expected {self.num_groups} block tables, got {len(block_tables)}"
         )
         replayssm_groups: list[tuple[list[Any], MambaSpec, torch.Tensor]] = []
-        has_baseline_layer = False
+        has_baseline_temporal_state = False
         for group_local_idx, mamba_group_id in enumerate(self.mamba_group_ids):
             kv_cache_group = kv_cache_config.kv_cache_groups[mamba_group_id]
             mixers: list[Any] = []
@@ -949,11 +953,15 @@ class MambaSpecDecodeGPUContext:
                     isinstance(attention, MambaBase)
                     and attention.use_flashinfer_replayssm
                 )
-                has_baseline_layer |= not is_flashinfer_replayssm
+                has_baseline_temporal_state |= (
+                    not is_flashinfer_replayssm
+                    and get_temporal_copy_spec in state_copy_funcs
+                )
                 if is_flashinfer_replayssm:
                     if len(kv_caches) != len(state_copy_funcs):
                         raise ValueError(
-                            "FlashInfer ReplaySSM requires five bound Mamba2 states"
+                            "FlashInfer ReplaySSM requires five bound Mamba2 or GDN "
+                            "states"
                         )
                     mixers.append(attention)
                 if len(kv_caches) < len(state_copy_funcs):
@@ -1041,20 +1049,20 @@ class MambaSpecDecodeGPUContext:
                     idx += 1
 
             if mixers:
-                spec = kv_cache_group.kv_cache_spec
-                if not isinstance(spec, MambaSpec):
-                    raise TypeError(
-                        "FlashInfer ReplaySSM layers require a Mamba cache spec; "
-                        f"got {type(spec).__name__}"
-                    )
+                spec = _get_mamba_spec_for_layer(kv_cache_group, layer_names[0])
+                assert all(
+                    _get_mamba_spec_for_layer(kv_cache_group, name) == spec
+                    for name in layer_names
+                ), "FlashInfer ReplaySSM requires equal Mamba cache specs"
                 replayssm_groups.append(
                     (mixers, spec, aligned_index_block_tables[group_local_idx])
                 )
 
         assert idx == self.num_states
-        if replayssm_groups and has_baseline_layer:
+        if replayssm_groups and has_baseline_temporal_state:
             raise ValueError(
-                "mixed FlashInfer ReplaySSM and baseline Mamba layers are unsupported"
+                "mixed FlashInfer ReplaySSM and baseline Mamba temporal states "
+                "are unsupported"
             )
 
         # Cache per-group block-table base addresses and per-request stride.

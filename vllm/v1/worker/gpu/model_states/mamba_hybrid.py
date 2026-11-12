@@ -12,7 +12,10 @@ from vllm.config.compilation import CUDAGraphMode
 from vllm.model_executor.layers.mamba.mamba_utils import MambaStateCopyFuncsByType
 from vllm.triton_utils import tl, triton
 from vllm.utils.torch_utils import async_tensor_h2d
-from vllm.v1.attention.backends.gdn_attn import GDNAttentionMetadataBuilder
+from vllm.v1.attention.backends.gdn_attn import (
+    GDNAttentionMetadata,
+    GDNAttentionMetadataBuilder,
+)
 from vllm.v1.attention.backends.mamba2_attn import (
     Mamba2AttentionMetadata,
     Mamba2AttentionMetadataBuilder,
@@ -37,20 +40,27 @@ from vllm.v1.worker.mamba_utils import (
     preprocess_mamba_align_fused_kernel,
     validate_mamba_state_copy_funcs,
 )
-from vllm.v1.worker.replayssm_utils import initialize_replayssm_ring_trackers
+from vllm.v1.worker.replayssm_utils import (
+    initialize_replayssm_ring_trackers,
+    may_cross_mamba_block_boundary,
+)
 from vllm.v1.worker.utils import AttentionGroup
 
 
 @dataclass
 class MambaHybridAttnMetadata(ModelSpecificAttnMetadata):
     is_prefilling: torch.Tensor
+    is_last_prefill: torch.Tensor
     num_accepted_tokens: torch.Tensor | None = None
     num_decode_draft_tokens_cpu: torch.Tensor | None = None
 
     def get_extra_common_attn_kwargs(
         self, kv_cache_group_id: int, num_reqs: int
     ) -> dict[str, Any]:
-        return {"is_prefilling": self.is_prefilling[:num_reqs]}
+        return {
+            "is_prefilling": self.is_prefilling[:num_reqs],
+            "is_last_prefill": self.is_last_prefill[:num_reqs],
+        }
 
     def get_extra_attn_kwargs(
         self, attn_metadata_builder: Any, num_reqs: int
@@ -91,12 +101,14 @@ class MambaHybridModelState(DefaultModelState):
             self.max_num_reqs, dtype=torch.int32, device=self.device
         )
         self._replayssm_query_start_loc: torch.Tensor | None = None
+        self._replayssm_may_materialize = True
         # Pre-copy prefix-cache state (V2). The migration of each request's
         # mamba state across block boundaries runs as a fused GPU kernel reusing
         # the postprocess copy machinery, so the per-step src columns and the
         # running state_idx are kept GPU-resident.
         self._align_mode = self.cache_config.mamba_cache_mode == "align"
         self._use_flashinfer_replayssm = vllm_config.use_flashinfer_replayssm
+        self._use_gdn_replayssm = vllm_config.is_gdn_replayssm_enabled()
         if self._use_flashinfer_replayssm:
             self._is_prefilling_gpu = torch.zeros(
                 self.max_num_reqs, dtype=torch.bool, device=self.device
@@ -286,6 +298,15 @@ class MambaHybridModelState(DefaultModelState):
             is_prefilling_np = is_prefilling_np & ~input_batch.prefill_runs_as_decode_np
         is_prefilling = torch.zeros(num_reqs, dtype=torch.bool, device="cpu")
         is_prefilling[: input_batch.num_reqs] = torch.from_numpy(is_prefilling_np)
+        is_last_prefill = torch.zeros(num_reqs, dtype=torch.bool, device="cpu")
+        is_last_prefill[: input_batch.num_reqs] = torch.from_numpy(
+            input_batch.is_prefilling_np
+            & (
+                input_batch.num_computed_prefill_tokens_np
+                + input_batch.num_scheduled_tokens
+                >= input_batch.prefill_len_np
+            )
+        )
         # During CUDAGraph capture, num_decode_draft_tokens_cpu and num_accepted_tokens
         # are created by attn_metadata_builder.build_for_cudagraph_capture, so we only
         # compute them during actual (non-capture) forward execution.
@@ -338,6 +359,7 @@ class MambaHybridModelState(DefaultModelState):
 
         mamba_attn_metadata = MambaHybridAttnMetadata(
             is_prefilling=is_prefilling,
+            is_last_prefill=is_last_prefill,
             num_accepted_tokens=num_accepted_tokens,
             num_decode_draft_tokens_cpu=num_decode_draft_tokens_cpu,
         )
@@ -362,20 +384,52 @@ class MambaHybridModelState(DefaultModelState):
         )
         if self._use_flashinfer_replayssm:
             self._replayssm_query_start_loc = None
+            self._replayssm_may_materialize = True
+            if (
+                self._use_gdn_replayssm
+                and self._align_mode
+                and self.vllm_config.num_speculative_tokens == 0
+            ):
+                assert self._mamba_ctx is not None
+                replay = self._mamba_ctx.replayssm
+                assert replay is not None
+                # Skip GDN's per-layer materialization when no request can reach
+                # a block boundary. With draft tokens the CPU positions here are
+                # only upper bounds, so the gate applies to standard decoding.
+                self._replayssm_may_materialize = may_cross_mamba_block_boundary(
+                    input_batch.num_computed_tokens_np,
+                    input_batch.num_scheduled_tokens,
+                    replay.mamba_block_size,
+                )
+            metadata_type = (
+                GDNAttentionMetadata
+                if self._use_gdn_replayssm
+                else Mamba2AttentionMetadata
+            )
             mamba_metadata = next(
                 (
                     metadata
                     for metadata in attn_metadata.values()
-                    if isinstance(metadata, Mamba2AttentionMetadata)
+                    if isinstance(metadata, metadata_type)
                 ),
                 None,
             )
             # Autotune dummy runs and draft capture can omit Mamba metadata.
             if mamba_metadata is not None:
                 self._replayssm_query_start_loc = input_batch.query_start_loc
-                replayssm_prefilling = (
-                    torch.arange(num_reqs, device="cpu") >= mamba_metadata.num_decodes
-                )
+                if (
+                    isinstance(mamba_metadata, GDNAttentionMetadata)
+                    and mamba_metadata.spec_sequence_masks_cpu is not None
+                ):
+                    # GDN replay rows are the spec rows; all others prefilled.
+                    replayssm_prefilling = ~mamba_metadata.spec_sequence_masks_cpu[
+                        :num_reqs
+                    ]
+                else:
+                    replayssm_prefilling = (
+                        torch.arange(num_reqs, device="cpu")
+                        >= mamba_metadata.num_decodes
+                    )
                 async_tensor_h2d(
                     replayssm_prefilling, out=self._is_prefilling_gpu[:num_reqs]
                 )
@@ -483,6 +537,7 @@ class MambaHybridModelState(DefaultModelState):
             is_prefilling=self._is_prefilling_gpu[:num_reqs],
             live_cols=(self._mamba_state_idx_gpu if self._align_mode else None),
             num_reqs=num_reqs,
+            may_materialize=self._replayssm_may_materialize,
         )
 
 

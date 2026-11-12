@@ -42,8 +42,10 @@ from vllm.config import (
     SpeculativeConfig,
     VllmConfig,
     WatermarkConfig,
+    replace,
     update_config,
 )
+from vllm.config.cache import MambaCacheMode, MambaDType
 from vllm.config.compilation import CompilationMode, CUDAGraphMode, PassConfig
 from vllm.config.kernel import IrOpPriorityConfig
 from vllm.config.load import LoadConfig
@@ -156,6 +158,155 @@ def test_flashinfer_replayssm_validates_config(
             VllmConfig.validate_mamba_cached_kernel(config)
     else:
         VllmConfig.validate_mamba_cached_kernel(config)
+
+
+def _gdn_replayssm_config(
+    model_path: Path,
+    mode: MambaCacheMode,
+    ssm_dtype: MambaDType = "float16",
+    architecture: str = "Qwen3_5ForCausalLM",
+    use_replayssm: bool = True,
+    num_speculative_tokens: int = 0,
+) -> VllmConfig:
+    from transformers import Qwen3_5TextConfig, Qwen4ExpConfig, Qwen4ExpTextConfig
+
+    is_qwen4 = architecture.startswith("Qwen4Exp")
+    config_cls = Qwen4ExpTextConfig if is_qwen4 else Qwen3_5TextConfig
+    hf_config = config_cls(
+        architectures=[architecture],
+        num_hidden_layers=2,
+        linear_key_head_dim=128,
+        linear_value_head_dim=128,
+        layer_types=["linear_attention", "full_attention"],
+        max_position_embeddings=128,
+        **(
+            {"linear_num_value_heads": 48, "ple_layer_ids": [1], "eos_token_id": 1}
+            if is_qwen4
+            else {}
+        ),
+    )
+    if architecture == "Qwen4ExpForConditionalGeneration":
+        hf_config = Qwen4ExpConfig(architectures=[architecture], text_config=hf_config)
+    hf_config.save_pretrained(model_path)
+    config = VllmConfig(
+        model_config=ModelConfig(
+            model=str(model_path),
+            tokenizer_mode="skip",
+            dtype="bfloat16",
+            max_model_len=128,
+            enforce_eager=True,
+        ),
+        cache_config=CacheConfig(
+            use_replayssm=use_replayssm,
+            replayssm_buffer_len=16,
+            mamba_cache_mode=mode,
+            enable_prefix_caching=mode == "align",
+            mamba_cache_dtype="auto",
+            mamba_ssm_cache_dtype=ssm_dtype,
+        ),
+        scheduler_config=SchedulerConfig(max_model_len=128, is_encoder_decoder=False),
+        parallel_config=ParallelConfig(distributed_executor_backend="uni"),
+        device_config=DeviceConfig(device="cpu"),
+    )
+    if num_speculative_tokens:
+        config = replace(
+            config,
+            speculative_config=SpeculativeConfig(
+                method="mtp",
+                num_speculative_tokens=num_speculative_tokens,
+                enable_adaptive_verification=False,
+                target_model_config=config.model_config,
+                target_parallel_config=config.parallel_config,
+            ),
+        )
+    return config
+
+
+def test_gdn_replayssm_requires_fp16_state(tmp_path):
+    with pytest.raises(ValueError, match="--mamba-ssm-cache-dtype float16"):
+        _gdn_replayssm_config(tmp_path, "none", "bfloat16")
+
+
+@pytest.mark.parametrize(
+    "architecture,num_speculative_tokens",
+    [("Qwen4ExpForCausalLM", 0), ("Qwen4ExpForConditionalGeneration", 7)],
+)
+def test_qwen4_replayssm_preserves_ple_cache(
+    tmp_path, architecture, num_speculative_tokens
+):
+    from vllm.models.qwen4_exp.nvidia.model import (
+        Qwen4ExpForCausalLM,
+        Qwen4ExpForConditionalGeneration,
+    )
+
+    model_cls = (
+        Qwen4ExpForCausalLM
+        if architecture == "Qwen4ExpForCausalLM"
+        else Qwen4ExpForConditionalGeneration
+    )
+    baseline = _gdn_replayssm_config(
+        tmp_path,
+        "none",
+        architecture=architecture,
+        use_replayssm=False,
+        num_speculative_tokens=num_speculative_tokens,
+    )
+    if current_platform.is_rocm():
+        with pytest.raises(ValueError, match="does not support Qwen4Exp on ROCm"):
+            _gdn_replayssm_config(tmp_path, "none", architecture=architecture)
+        return
+    replay = _gdn_replayssm_config(
+        tmp_path,
+        "none",
+        architecture=architecture,
+        num_speculative_tokens=num_speculative_tokens,
+    )
+    assert replay.model_config.supports_replayssm
+    assert replay.is_gdn_replayssm_enabled()
+    assert replay.use_flashinfer_replayssm
+    assert not baseline.is_gdn_replayssm_enabled()
+    baseline_gdn, baseline_ple = model_cls.get_mamba_specs_from_config(baseline)
+    replay_gdn, replay_ple = model_cls.get_mamba_specs_from_config(replay)
+    assert replay_gdn.shapes == baseline_gdn.shapes + (
+        (48, 32, 128),
+        (16, 32, 128),
+        (48, 32),
+    )
+    assert replay_gdn.dtypes == baseline_gdn.dtypes + (
+        torch.bfloat16,
+        torch.bfloat16,
+        torch.float32,
+    )
+    assert model_cls.get_mamba_state_shape_from_config(replay) == replay_gdn.shapes
+    assert model_cls.get_mamba_state_dtype_from_config(replay) == replay_gdn.dtypes
+    assert replay_gdn.page_size_bytes > baseline_gdn.page_size_bytes
+    assert replay_ple == baseline_ple
+    assert len(replay_ple.shapes) == 1
+    assert replay_ple.tp_replicated
+    if num_speculative_tokens:
+        from vllm.models.qwen4_exp.nvidia.mtp import _make_draft_vllm_config
+
+        draft = _make_draft_vllm_config(replay, 2, 1)
+        assert draft.model_config.architecture == "Qwen4ExpMTP"
+        assert not draft.cache_config.use_replayssm
+        assert replay.cache_config.use_replayssm
+
+
+def test_gdn_replayssm_align_configures_flashinfer_materializer(tmp_path, monkeypatch):
+    """--use-replayssm selects FlashInfer's FP16 materializer before import."""
+    # Register the variable so monkeypatch removes what the validator sets.
+    monkeypatch.setenv("GDN_UCACHE_STATE_DTYPE", "")
+    monkeypatch.delenv("GDN_UCACHE_STATE_DTYPE")
+    config = _gdn_replayssm_config(tmp_path, "none")
+    assert config.is_gdn_replayssm_enabled()
+    assert config.use_flashinfer_replayssm
+    assert "GDN_UCACHE_STATE_DTYPE" not in os.environ
+    config = _gdn_replayssm_config(tmp_path, "align")
+    assert config.is_gdn_replayssm_enabled()
+    assert os.environ["GDN_UCACHE_STATE_DTYPE"] == "fp16"
+    monkeypatch.setenv("GDN_UCACHE_STATE_DTYPE", "bf16")
+    with pytest.raises(ValueError, match="GDN_UCACHE_STATE_DTYPE='bf16'"):
+        _gdn_replayssm_config(tmp_path, "align")
 
 
 def _write_json(path: Path, value: object) -> None:

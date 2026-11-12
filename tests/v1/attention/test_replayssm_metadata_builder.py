@@ -18,13 +18,61 @@ from tests.v1.attention.utils import (
     create_common_attn_metadata,
     create_vllm_config,
 )
-from vllm.config import SpeculativeConfig
+from vllm.config import CacheConfig, CompilationConfig, SpeculativeConfig, VllmConfig
 from vllm.config.compilation import CUDAGraphMode
-from vllm.config.mamba import MambaBackendEnum
+from vllm.config.mamba import MambaBackendEnum, MambaConfig
+from vllm.v1.attention.backends.registry import MambaAttentionBackendEnum
+from vllm.v1.attention.backends.short_conv_attn import (
+    PleShortConvAttentionMetadataBuilder,
+)
 from vllm.v1.kv_cache_interface import MambaSpec
 
 BLOCK_SIZE = 16
 DEVICE = torch.device("cpu")
+
+
+@pytest.mark.parametrize(
+    "mamba_backend", [MambaBackendEnum.TRITON, MambaBackendEnum.FLASHINFER]
+)
+def test_ple_metadata_stays_canonical_with_replayssm_enabled(mamba_backend):
+    config = VllmConfig(
+        cache_config=CacheConfig(use_replayssm=True),
+        mamba_config=MambaConfig(backend=mamba_backend),
+        compilation_config=CompilationConfig(cudagraph_mode=CUDAGraphMode.FULL),
+    )
+    builder = PleShortConvAttentionMetadataBuilder(
+        MambaSpec(
+            block_size=BLOCK_SIZE,
+            shapes=((16, 64),),
+            dtypes=(torch.float32,),
+            mamba_type=MambaAttentionBackendEnum.SHORT_CONV,
+        ),
+        ["ple"],
+        config,
+        DEVICE,
+    )
+    assert not builder.use_replayssm
+    assert not builder.use_flashinfer_replayssm
+    common = create_common_attn_metadata(
+        BatchSpec(seq_lens=[17, 18], query_lens=[1, 1]),
+        BLOCK_SIZE,
+        DEVICE,
+        arange_block_indices=True,
+    ).replace(
+        is_prefilling=torch.tensor([False, False], dtype=torch.bool),
+    )
+    for metadata in (
+        builder.build(0, common),
+        builder.build_for_cudagraph_capture(common),
+    ):
+        torch.testing.assert_close(
+            metadata.state_indices_tensor, common.block_table_tensor[:, 0]
+        )
+        assert metadata.write_pos_d is None
+        assert metadata.is_flush_d is None
+        assert metadata.bc_pre_scratch is None
+        assert metadata.replayssm_scratch is None
+        assert metadata.replayssm_state_indices_d is None
 
 
 @dataclass
