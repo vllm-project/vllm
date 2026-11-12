@@ -142,6 +142,10 @@ def _record_view(kv: torch.Tensor, block: int, plain: bool = False) -> torch.Ten
     row = PLAIN_ROW if plain else RECORD
     kv = kv if kv.dtype == torch.uint8 else kv.view(torch.uint8)
     assert kv.stride(0) >= block * row, (tuple(kv.shape), kv.stride(), block)
+    if plain:
+        # vLLM binds a plain cache as [blocks, block, 512] already
+        shape, stride = tuple(kv.shape), kv.stride()
+        assert shape[1:] == (block, row) and stride[1] == row, (shape, stride, block)
     return torch.as_strided(kv, (kv.shape[0], block, row), (kv.stride(0), row, 1))
 
 

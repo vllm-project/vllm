@@ -106,8 +106,9 @@ def run(monkeypatch):
         monkeypatch.setattr(md, "is_forward_context_available", lambda: True)
         monkeypatch.setattr(md, "get_forward_context", lambda: fc)
 
-        def pick(device, draft=None):
+        def pick(device, draft=None, plain_kv=False):
             runner.draft = draft
+            runner.plain_kv = plain_kv
             return runner
 
         monkeypatch.setattr(md, "_mono_runner", pick)
@@ -346,6 +347,33 @@ def test_layers_take_whole_or_ffn_launch(monkeypatch, layer, path):
     assert got == path
 
 
+@pytest.mark.parametrize(
+    "layer, path",
+    [
+        (_decoder_layer(kv_cache_dtype="fp8_e4m3"), "whole"),
+        (_decoder_layer(kv_cache_dtype="fp8_e4m3", compress_ratio=0), "whole"),
+        (
+            _decoder_layer(
+                kv_cache_dtype="fp8_e4m3", compressor=object(), indexer=_indexer()
+            ),
+            "whole",
+        ),
+        (_decoder_layer(kv_cache_dtype="fp8_e4m3", kv_mxfp8=True), "ffn"),
+        (_decoder_layer(kv_cache_dtype="fp8_e4m3", compressor=object()), "ffn"),
+    ],
+    ids=["standard", "window", "kv-source", "mxfp8-record", "compressor-only"],
+)
+def test_plain_fp8_kv_layers(monkeypatch, layer, path):
+    """A plain fp8 KV cache (--kv-cache-dtype fp8_e4m3) takes the whole-layer
+    kernels on gfx950 too; every layer, the FFN-only ones included, records it
+    for the runner the layers share."""
+    _deployment(monkeypatch)
+    mono = md.MonoDecodeLayer.create(layer, _config(cache_dtype="fp8_e4m3"))
+    got = None if mono is None else "ffn" if mono.ffn_only else "whole"
+    assert got == path
+    assert mono.plain_kv
+
+
 @pytest.mark.parametrize("mode", [CUDAGraphMode.NONE, CUDAGraphMode.FULL])
 def test_decode_step_runs_ffn_launch(run, mode):
     out, calls = run(mode, ffn_only=True, metadata={"swa": _swa()})
@@ -377,7 +405,7 @@ def test_other_steps_reduce_wo_b_themselves(run, case):
     assert out is None and not calls
 
 
-def _config(monokernel=True, **parallel):
+def _config(monokernel=True, cache_dtype="auto", **parallel):
     parallel = (
         dict(enable_expert_parallel=False, enable_eplb=False, data_parallel_size=1)
         | parallel
@@ -392,6 +420,7 @@ def _config(monokernel=True, **parallel):
         ),
         parallel_config=SimpleNamespace(**parallel),
         kernel_config=SimpleNamespace(monokernel=monokernel),
+        cache_config=SimpleNamespace(cache_dtype=cache_dtype),
     )
 
 
@@ -554,6 +583,15 @@ def test_gfx942_layers(monkeypatch, layer, kind):
     of 128 experts and top 3."""
     _deployment(monkeypatch, cdna=3, tp=4)
     assert _kind(md.MonoDecodeLayer.create(layer, _config())) == kind
+
+
+def test_gfx942_plain_fp8_kv_takes_ffn_launch(monkeypatch):
+    """Plain fp8 rows are served on gfx950 only: on gfx942 such a layer keeps
+    vLLM's attention and runs the FFN launch, on a runner without plain_kv."""
+    _deployment(monkeypatch, cdna=3, tp=4)
+    layer = _decoder_layer(kv_cache_dtype="fp8_e4m3")
+    mono = md.MonoDecodeLayer.create(layer, _config(cache_dtype="fp8_e4m3"))
+    assert _kind(mono) == "ffn top 6" and not mono.plain_kv
 
 
 def test_gfx942_tp2_runs_vllm_path(monkeypatch):
