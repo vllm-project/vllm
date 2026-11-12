@@ -46,6 +46,7 @@ repos:
   hooks:
   - id: ty
     args: [--no-project] # Don't build vLLM to resolve its dynamic dependencies
+    additional_dependencies: ["pydantic==2.13.5"]
 - repo: https://github.com/astral-sh/uv-pre-commit
   rev: 46787482b9fb2003c56e0f7592e312ef381829d9  # frozen: 0.13.6
   hooks:
