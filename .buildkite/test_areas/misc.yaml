@@ -582,7 +582,6 @@ steps:
   key: python-only-installation
   depends_on: ~
   optional: true
-  # Covers python_only_compile.sh waiting up to 55 minutes for the wheel.
   timeout_in_minutes: 75
   device: h200_18gb
   source_file_dependencies:
@@ -607,7 +606,6 @@ steps:
   key: python-314-smoke-nightly
   depends_on: ~
   optional: true
-  # Covers python_only_compile.sh waiting up to 55 minutes for the wheel.
   timeout_in_minutes: 85
   device: h200_18gb
   source_file_dependencies:
