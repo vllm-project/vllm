@@ -954,9 +954,6 @@ class GPUModelRunner(LoRAModelRunnerMixin):
         dummy_scheduler_output.total_num_scheduled_tokens = num_tokens
         dummy_scheduler_output.num_scheduled_tokens = num_scheduled_tokens
 
-        # Disable any use of KVConnector for dummy runs.
-        self.kv_connector.set_disabled(True)
-
         # Get the intermediate tensors for the dummy run.
         intermediate_tensors = None
         if not self.is_first_pp_rank:
@@ -967,25 +964,30 @@ class GPUModelRunner(LoRAModelRunnerMixin):
             num_active_loras = (
                 self.lora_config.max_loras if self.lora_config is not None else 0
             )
-        with self.maybe_dummy_run_with_lora(
-            self.lora_config,
-            num_scheduled_tokens=np.array(num_tokens_per_request, dtype=np.int32),
-            num_sampled_tokens=None,
-            remove_lora=True,
-            num_active_loras=num_active_loras,
-        ):
-            # Execute the model.
-            self.execute_model(
-                dummy_scheduler_output,
-                intermediate_tensors=intermediate_tensors,
-                dummy_run=True,
-                skip_attn_for_dummy_run=skip_attn,
-                is_profile=is_profile,
-                context_len=context_len,
-                valid_dummy_state_slots=valid_dummy_state_slots,
-                randomize_inputs=randomize_inputs,
-            )
-        self.kv_connector.set_disabled(False)
+        # Disable any use of KVConnector for dummy runs. Re-enable it even if
+        # the forward raises: the /health_generate probe survives failures.
+        self.kv_connector.set_disabled(True)
+        try:
+            with self.maybe_dummy_run_with_lora(
+                self.lora_config,
+                num_scheduled_tokens=np.array(num_tokens_per_request, dtype=np.int32),
+                num_sampled_tokens=None,
+                remove_lora=True,
+                num_active_loras=num_active_loras,
+            ):
+                # Execute the model.
+                self.execute_model(
+                    dummy_scheduler_output,
+                    intermediate_tensors=intermediate_tensors,
+                    dummy_run=True,
+                    skip_attn_for_dummy_run=skip_attn,
+                    is_profile=is_profile,
+                    context_len=context_len,
+                    valid_dummy_state_slots=valid_dummy_state_slots,
+                    randomize_inputs=randomize_inputs,
+                )
+        finally:
+            self.kv_connector.set_disabled(False)
 
         # Non-last PP ranks don't produce output for sampling.
         if not self.is_last_pp_rank:
