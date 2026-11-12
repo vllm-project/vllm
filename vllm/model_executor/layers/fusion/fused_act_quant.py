@@ -6,7 +6,9 @@ Given an activation module and the downstream linear it feeds, fuse the
 activation with that linear's input quantization into a single kernel when the
 linear advertises a consumable input quantization key (see quant_activation.py).
 Falls back to the plain activation when nothing matches, so a model forward can
-always call maybe_fused_act_quant unconditionally.
+always call maybe_fused_act_quant unconditionally. maybe_fused_mm_act_quant also
+folds in the linear producing the activation's input when that linear's GEMM
+can apply the activation and quantization in its epilogue.
 
 This is the manual-fusion counterpart to ActivationQuantFusionPass: when fusion
 fires here, the activation and quantization are already consumed, so a compiler
@@ -18,6 +20,7 @@ from types import FunctionType, MethodType
 
 import torch
 
+from vllm._custom_ops import scaled_fp4_quant
 from vllm.model_executor.layers.activation import (
     GELU,
     ReLUSquaredActivation,
@@ -34,7 +37,7 @@ from vllm.model_executor.layers.fusion.relu2_nvfp4_quant import (
     _relu_squared_nvfp4_max_rows,
     relu_squared_nvfp4_quant,
 )
-from vllm.model_executor.layers.linear import LinearBase
+from vllm.model_executor.layers.linear import ColumnParallelLinear, LinearBase
 from vllm.model_executor.layers.quantization.utils.quant_utils import (
     QuantKey,
     kFp8Dynamic128Sym,
@@ -42,7 +45,9 @@ from vllm.model_executor.layers.quantization.utils.quant_utils import (
     kNvfp4Dynamic,
 )
 from vllm.platforms import current_platform
+from vllm.utils.flashinfer import flashinfer_scaled_fp4_mm
 from vllm.utils.math_utils import round_up
+from vllm.utils.torch_utils import direct_register_custom_op
 
 FP8_DTYPE = current_platform.fp8_dtype()
 FP4_DTYPE = torch.uint8
@@ -107,6 +112,26 @@ def _silu_and_mul_fp8_dynamic_128(
     return _silu_and_mul_fp8_dynamic_block(x, linear, 128, kFp8Dynamic128Sym)
 
 
+def _nvfp4_output(
+    num_tokens: int, d: int, device: torch.device
+) -> tuple[torch.Tensor, torch.Tensor]:
+    """Packed NVFP4 data and block scales for a num_tokens x d activation."""
+    # NVFP4 packs 2 values into 1 byte
+    result = torch.empty((num_tokens, d // 2), dtype=FP4_DTYPE, device=device)
+
+    # Block scale output: swizzled tensor-core layout
+    # [num_m_tiles, num_k_tiles, 32, 4, 4] of int32-packed FP8 scales, so the
+    # row/col extents must be padded to the 128x4 tile like
+    # scaled_fp4_quant's allocator (create_fp4_scale_tensor). Each group of 16
+    # elements shares one FP8 scale.
+    rounded_m = round_up(num_tokens, 128)
+    rounded_n = round_up(d // 16, 4)
+    block_scale = torch.empty(
+        (rounded_m, rounded_n // 4), dtype=torch.int32, device=device
+    ).view(FP8_DTYPE)
+    return result, block_scale
+
+
 def _act_nvfp4_dynamic(
     x: torch.Tensor,
     d: int,
@@ -119,21 +144,7 @@ def _act_nvfp4_dynamic(
     assert x.ndim in (2, 3), f"Input must be 2D or 3D, got {x.shape}"
     out_shape = x.shape[:-1] + (d,)
     x = x.reshape(-1, x.shape[-1])
-    num_tokens = x.shape[0]
-
-    # NVFP4 packs 2 values into 1 byte
-    result = torch.empty((num_tokens, d // 2), dtype=FP4_DTYPE, device=x.device)
-
-    # Block scale output: swizzled tensor-core layout
-    # [num_m_tiles, num_k_tiles, 32, 4, 4] of int32-packed FP8 scales, so the
-    # row/col extents must be padded to the 128x4 tile like
-    # scaled_fp4_quant's allocator (create_fp4_scale_tensor). Each group of 16
-    # elements shares one FP8 scale.
-    rounded_m = round_up(num_tokens, 128)
-    rounded_n = round_up(d // 16, 4)
-    block_scale = torch.empty(
-        (rounded_m, rounded_n // 4), dtype=torch.int32, device=x.device
-    ).view(FP8_DTYPE)
+    result, block_scale = _nvfp4_output(x.shape[0], d, x.device)
 
     # The kernel folds the global scale into the block scales, and the
     # consumer GEMM's alpha (= input_global_scale * weight_global_scale)
@@ -300,3 +311,131 @@ def maybe_fused_act_quant(
         if producer is not None and (support is None or support(act_fn, x, linear)):
             return producer(x, linear)
     return act_fn(x if bias is None else x + bias)
+
+
+# The GEMM with the bias add + GELU + NVFP4 quant epilogue is built for SM12x.
+_IS_SM12X = current_platform.is_cuda() and current_platform.is_device_capability_family(
+    120
+)
+
+
+def _can_fuse_mm_gelu_nvfp4(
+    linear: LinearBase, act_fn: torch.nn.Module, next_linear: LinearBase
+) -> bool:
+    if not _IS_SM12X:
+        return False
+    from vllm.model_executor.kernels.linear.nvfp4.flashinfer import (
+        FlashInferCutlassNvFp4LinearKernel,
+    )
+
+    # compressed-tensors and Quark keep the kernel on the layer's scheme.
+    method = getattr(linear, "scheme", getattr(linear, "quant_method", None))
+    return (
+        type(act_fn) is GELU
+        and get_input_quant_key(next_linear) == kNvfp4Dynamic
+        # linear(x) is only its quant method's GEMM: no LoRA wrapper or input
+        # transform, and the output stays partitioned.
+        and isinstance(linear, ColumnParallelLinear)
+        and not linear.requires_unquantized_input
+        and not linear.gather_output
+        # The fused GEMM reads the weights in this kernel's layout, unpadded.
+        and type(getattr(method, "kernel", None)) is FlashInferCutlassNvFp4LinearKernel
+        and linear.input_size_per_partition % 32 == 0
+        and linear.output_size_per_partition % 32 == 0
+        and linear.bias is not None
+    )
+
+
+# Below one 128-row tile the fused epilogue spends most of its work on padding
+# rows, so FlashInfer's GEMM and the bias add + GELU + NVFP4 kernel are faster.
+_MM_GELU_NVFP4_MIN_TOKENS = 128
+
+
+def _mm_gelu_nvfp4_quant_fake(
+    x: torch.Tensor,
+    weight: torch.Tensor,
+    weight_scale: torch.Tensor,
+    alpha: torch.Tensor,
+    input_global_scale_inv: torch.Tensor,
+    bias: torch.Tensor,
+    output_global_scale: torch.Tensor,
+) -> tuple[torch.Tensor, torch.Tensor]:
+    return _nvfp4_output(x.shape[0], weight.shape[0], x.device)
+
+
+def _mm_gelu_nvfp4_quant(
+    x: torch.Tensor,
+    weight: torch.Tensor,
+    weight_scale: torch.Tensor,
+    alpha: torch.Tensor,
+    input_global_scale_inv: torch.Tensor,
+    bias: torch.Tensor,
+    output_global_scale: torch.Tensor,
+) -> tuple[torch.Tensor, torch.Tensor]:
+    result, block_scale = _nvfp4_output(x.shape[0], weight.shape[0], x.device)
+    x_fp4, x_block_scale = scaled_fp4_quant(x, input_global_scale_inv)
+    if x.shape[0] < _MM_GELU_NVFP4_MIN_TOKENS:
+        y = flashinfer_scaled_fp4_mm(
+            x_fp4,
+            weight,
+            x_block_scale,
+            weight_scale,
+            alpha,
+            x.dtype,
+            backend="cutlass",
+        )
+        torch.ops._C.gelu_nvfp4_quant(result, block_scale, y, output_global_scale, bias)
+    else:
+        torch.ops._C.cutlass_scaled_fp4_mm_gelu_nvfp4_quant(
+            result,
+            block_scale,
+            x_fp4,
+            weight,
+            x_block_scale,
+            weight_scale,
+            alpha,
+            bias,
+            output_global_scale,
+        )
+    return result, block_scale
+
+
+# Keep the M-dependent choice outside Dynamo: vLLM drops shape guards.
+direct_register_custom_op(
+    op_name="mm_gelu_nvfp4_quant",
+    op_func=_mm_gelu_nvfp4_quant,
+    fake_impl=_mm_gelu_nvfp4_quant_fake,
+)
+
+
+def maybe_fused_mm_act_quant(
+    linear: LinearBase,
+    act_fn: torch.nn.Module,
+    x: torch.Tensor,
+    next_linear: LinearBase,
+) -> "torch.Tensor | QuantizedActivation":
+    """Apply linear and act_fn, fusing both with next_linear's input quant into
+    linear's GEMM when possible, else into the activation as
+    maybe_fused_act_quant does.
+    """
+    if not _can_fuse_mm_gelu_nvfp4(linear, act_fn, next_linear):
+        x, bias = linear(x)
+        return maybe_fused_act_quant(act_fn, x, next_linear, bias)
+
+    n = linear.output_size_per_partition
+    result, block_scale = torch.ops.vllm.mm_gelu_nvfp4_quant(
+        x.reshape(-1, x.shape[-1]),
+        linear.weight,
+        linear.weight_scale,
+        linear.alpha,
+        linear.input_global_scale_inv,
+        linear.bias,
+        next_linear.input_global_scale_inv,
+    )
+    return QuantizedActivation(
+        data=result.view(x.shape[:-1] + (n // 2,)),
+        scale=block_scale,
+        orig_dtype=x.dtype,
+        orig_shape=x.shape[:-1] + (n,),
+        quant_key=kNvfp4Dynamic,
+    )

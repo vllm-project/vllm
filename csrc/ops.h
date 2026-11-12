@@ -113,6 +113,13 @@ void cutlass_scaled_fp4_mm(torch::stable::Tensor& D,
                            torch::stable::Tensor const& alpha,
                            std::optional<torch::stable::Tensor> const& bias);
 
+void cutlass_scaled_fp4_mm_gelu_nvfp4_quant(
+    torch::stable::Tensor& D, torch::stable::Tensor& D_sf,
+    torch::stable::Tensor const& A, torch::stable::Tensor const& B,
+    torch::stable::Tensor const& A_sf, torch::stable::Tensor const& B_sf,
+    torch::stable::Tensor const& alpha, torch::stable::Tensor const& bias,
+    torch::stable::Tensor const& output_global_scale);
+
 void cutlass_fp4_group_mm(torch::stable::Tensor& output,
                           const torch::stable::Tensor& a,
                           const torch::stable::Tensor& b,

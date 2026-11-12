@@ -6,12 +6,14 @@ Tests all fusion paths in _FUSED_ACT_QUANT and _FUSED_BIAS_ACT_QUANT:
 - kFp8StaticTensorSym: all platforms
 - kFp8Dynamic128Sym: CUDA only
 - kNvfp4Dynamic: CUDA SM100+ only (SiLU+Mul, and bias add + GELU)
+and the GEMM + bias add + GELU + NVFP4 path of maybe_fused_mm_act_quant (SM12x).
 """
 
 import pytest
 import torch
 
 import vllm.envs as envs
+from tests.kernels.utils import opcheck
 from tests.utils import TestFP8Layer
 from vllm._custom_ops import scaled_fp4_quant
 from vllm.config import (
@@ -30,20 +32,30 @@ from vllm.model_executor.layers.activation import GELU, SiluAndMul
 from vllm.model_executor.layers.fusion.fused_act_quant import (
     _FUSED_ACT_QUANT,
     _FUSED_BIAS_ACT_QUANT,
+    _MM_GELU_NVFP4_MIN_TOKENS,
+    _can_fuse_mm_gelu_nvfp4,
     has_fused_bias_act_quant,
     maybe_fused_act_quant,
+    maybe_fused_mm_act_quant,
 )
 from vllm.model_executor.layers.fusion.quant_activation import (
     QuantizedActivation,
     expose_input_quant_key,
     get_input_quant_key,
 )
+from vllm.model_executor.layers.linear import (
+    ColumnParallelLinear,
+    LinearBase,
+    RowParallelLinear,
+)
+from vllm.model_executor.layers.quantization.modelopt import ModelOptNvFp4Config
 from vllm.model_executor.layers.quantization.utils.quant_utils import (
     kFp8Dynamic128Sym,
     kFp8StaticTensorSym,
     kNvfp4Dynamic,
 )
 from vllm.platforms import current_platform
+from vllm.utils.torch_utils import set_random_seed
 
 
 # Mock linear layer for testing fusion paths that don't have real kernel support
@@ -374,6 +386,106 @@ def test_manual_fusion_bias_gelu_nvfp4_dynamic(
             atol=3e-1,
             rtol=3e-1,
         )
+
+
+def _nvfp4_linear(
+    linear_cls: type[LinearBase], k: int, n: int, input_global_scale: torch.Tensor
+) -> LinearBase:
+    """A ModelOpt NVFP4 linear loaded with a random weight and bias."""
+    from tests.kernels.quantization.nvfp4_utils import quant_nvfp4_tensor
+
+    layer = linear_cls(
+        k,
+        n,
+        bias=True,
+        quant_config=ModelOptNvFp4Config(
+            is_checkpoint_nvfp4_serialized=True,
+            kv_cache_quant_algo=None,
+            exclude_modules=[],
+        ),
+    )
+    weight, weight_scale, weight_global_scale = quant_nvfp4_tensor(
+        torch.randn(n, k) / k**0.5, is_sf_swizzled_layout=False
+    )
+    layer.weight.data.copy_(weight)
+    layer.weight_scale.data.copy_(weight_scale)
+    # ModelOpt stores the reciprocals of the quantization global scales.
+    layer.weight_scale_2.data.fill_(1 / weight_global_scale)
+    layer.input_scale.data.fill_(1 / input_global_scale)
+    layer.bias.data.normal_()
+    layer.quant_method.process_weights_after_loading(layer)
+    return layer
+
+
+@pytest.mark.parametrize("dtype", [torch.bfloat16, torch.float16])
+# 64 tokens take FlashInfer's GEMM and the bias add + GELU + NVFP4 kernel, 130
+# the fused GEMM.
+@pytest.mark.parametrize("num_tokens", [64, 130])
+@pytest.mark.skipif(
+    not current_platform.is_device_capability_family(120),
+    reason="The GEMM + bias add + GELU + NVFP4 quant kernel is built for SM12x",
+)
+def test_manual_fusion_mm_gelu_nvfp4_dynamic(
+    dtype: torch.dtype, num_tokens: int, dist_init
+) -> None:
+    """A BERT-style NVFP4 FFN through maybe_fused_mm_act_quant matches the one
+    through the up projection and the bias add + GELU + NVFP4 producer: exactly
+    below 128 tokens, within rounding from 128 on."""
+    from tests.kernels.quantization.nvfp4_utils import get_nvfp4_global_scale
+    from vllm.model_executor.kernels.linear.nvfp4.flashinfer import (
+        FlashInferCutlassNvFp4LinearKernel,
+    )
+
+    set_random_seed(0)
+    torch.set_default_device("cuda")
+    torch.set_default_dtype(dtype)
+    x = torch.randn(num_tokens, 1024)
+    config = VllmConfig(
+        compilation_config=CompilationConfig(custom_ops=["none"]),
+    )
+
+    with set_current_vllm_config(config):
+        gelu = GELU()
+        up = _nvfp4_linear(ColumnParallelLinear, 1024, 4096, get_nvfp4_global_scale(x))
+        kernel = getattr(up.quant_method, "kernel", None)
+        if type(kernel) is not FlashInferCutlassNvFp4LinearKernel:
+            pytest.skip("The fused GEMM reads FlashInfer CUTLASS NVFP4 weights")
+        y, _ = up(x)
+        down = _nvfp4_linear(
+            RowParallelLinear, 4096, 1024, get_nvfp4_global_scale(gelu(y))
+        )
+        # As BertLayer wires its FFN.
+        up.skip_bias_add = has_fused_bias_act_quant(gelu, down)
+
+        y, bias = up(x)
+        unfused, _ = down(maybe_fused_act_quant(gelu, y, down, bias))
+
+        assert _can_fuse_mm_gelu_nvfp4(up, gelu, down)
+        opcheck(
+            torch.ops.vllm.mm_gelu_nvfp4_quant,
+            (
+                x,
+                up.weight,
+                up.weight_scale,
+                up.alpha,
+                up.input_global_scale_inv,
+                up.bias,
+                down.input_global_scale_inv,
+            ),
+        )
+        fused, _ = down(maybe_fused_mm_act_quant(up, gelu, x, down))
+        if num_tokens < _MM_GELU_NVFP4_MIN_TOKENS:
+            torch.testing.assert_close(fused, unfused, atol=0, rtol=0)
+        else:
+            # Only skipping the 16-bit rounding of the up projection's output
+            # tells them apart.
+            rel = (fused - unfused).float().norm() / unfused.float().norm()
+            assert rel < 0.02
+
+        # An up projection that needs its unquantized input (LoRA, input
+        # transforms) keeps the unfused path.
+        up.requires_unquantized_input = True
+        assert not _can_fuse_mm_gelu_nvfp4(up, gelu, down)
 
 
 @pytest.mark.parametrize("dtype", [torch.bfloat16, torch.float16])

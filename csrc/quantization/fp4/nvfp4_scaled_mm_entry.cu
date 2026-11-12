@@ -35,6 +35,12 @@ void cutlass_scaled_fp4_mm_sm120a(
     torch::stable::Tensor const& B, torch::stable::Tensor const& A_sf,
     torch::stable::Tensor const& B_sf, torch::stable::Tensor const& alpha,
     std::optional<torch::stable::Tensor> const& bias);
+void cutlass_scaled_fp4_mm_gelu_nvfp4_quant_sm120a(
+    torch::stable::Tensor& D, torch::stable::Tensor& D_sf,
+    torch::stable::Tensor const& A, torch::stable::Tensor const& B,
+    torch::stable::Tensor const& A_sf, torch::stable::Tensor const& B_sf,
+    torch::stable::Tensor const& alpha, torch::stable::Tensor const& bias,
+    torch::stable::Tensor const& output_global_scale);
 #endif
 
 void cutlass_scaled_fp4_mm(torch::stable::Tensor& D,
@@ -68,6 +74,29 @@ void cutlass_scaled_fp4_mm(torch::stable::Tensor& D,
   STD_TORCH_CHECK_NOT_IMPLEMENTED(
       false, "No compiled nvfp4 mm kernel for SM ", sm,
       ". Recompile with CUDA >= 12.8 and CC >= 100.");
+}
+
+void cutlass_scaled_fp4_mm_gelu_nvfp4_quant(
+    torch::stable::Tensor& D, torch::stable::Tensor& D_sf,
+    torch::stable::Tensor const& A, torch::stable::Tensor const& B,
+    torch::stable::Tensor const& A_sf, torch::stable::Tensor const& B_sf,
+    torch::stable::Tensor const& alpha, torch::stable::Tensor const& bias,
+    torch::stable::Tensor const& output_global_scale) {
+  const torch::stable::accelerator::DeviceGuard device_guard(
+      A.get_device_index());
+  const int32_t sm = get_sm_version_num();
+
+#if defined(ENABLE_NVFP4_SM120) && ENABLE_NVFP4_SM120
+  if (sm >= 120 && sm < 130) {
+    cutlass_scaled_fp4_mm_gelu_nvfp4_quant_sm120a(
+        D, D_sf, A, B, A_sf, B_sf, alpha, bias, output_global_scale);
+    return;
+  }
+#endif
+
+  STD_TORCH_CHECK_NOT_IMPLEMENTED(
+      false, "No compiled nvfp4 mm + GELU + nvfp4 quant kernel for SM ", sm,
+      ". It is built for SM120 with CUDA >= 12.8.");
 }
 
 bool cutlass_scaled_mm_supports_fp4(int64_t cuda_device_capability) {

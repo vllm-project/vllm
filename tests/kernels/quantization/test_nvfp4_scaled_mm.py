@@ -2,7 +2,13 @@
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 import pytest
 import torch
-from nvfp4_utils import FLOAT4_E2M1_MAX, FLOAT8_E4M3_MAX, dequantize_nvfp4_to_dtype
+from nvfp4_utils import (
+    FLOAT4_E2M1_MAX,
+    FLOAT8_E4M3_MAX,
+    convert_swizzled_to_linear,
+    dequantize_nvfp4_to_dtype,
+    get_nvfp4_global_scale,
+)
 
 from vllm import _custom_ops as ops
 from vllm.platforms import current_platform
@@ -107,3 +113,83 @@ def test_nvfp4_gemm(
     )
 
     torch.testing.assert_close(out, expected_out.to(dtype=dtype), atol=1e-1, rtol=1e-1)
+
+
+@pytest.mark.parametrize("dtype", DTYPES)
+# m, n, packed k, one per config: M = 150 takes 128x64 tiles with N = 2080
+# padding the last 4-column scale tile; M = 600 (128x128 tiles) and M = 2100
+# (256x128) pad the last 128-row one.
+@pytest.mark.parametrize(
+    "shape", [(150, 2080, 256), (600, 1024, 2048), (2100, 1024, 2048)]
+)
+@torch.inference_mode()
+def test_nvfp4_gemm_gelu_quant(dtype: torch.dtype, shape: tuple[int, int, int]) -> None:
+    """The epilogue's NVFP4 of gelu(a @ b^T + bias) matches the GEMM, GELU and
+    scaled_fp4_quant run apart, except where skipping the 16-bit rounding of the
+    GEMM output moves a value to the neighboring FP4 code."""
+    if not current_platform.is_device_capability_family(120):
+        pytest.skip("The GELU + NVFP4 quant epilogue is implemented for SM12x only.")
+    set_random_seed(42)
+    m, n, packed_k = shape
+    k = packed_k * 2
+    block_size = 16
+    device = "cuda:0"
+    a_dtype = torch.randn((m, k), dtype=dtype, device=device)
+    b_dtype = torch.randn((n, k), dtype=dtype, device=device) / k**0.5
+    a_global_scale = get_nvfp4_global_scale(a_dtype)
+    b_global_scale = get_nvfp4_global_scale(b_dtype)
+    alpha = 1.0 / (a_global_scale * b_global_scale)
+    a_fp4, a_scale = ops.scaled_fp4_quant(a_dtype, a_global_scale)
+    b_fp4, b_scale = ops.scaled_fp4_quant(b_dtype, b_global_scale)
+    bias = torch.randn(n, dtype=dtype, device=device)
+
+    y = torch.nn.functional.gelu(
+        ops.cutlass_scaled_fp4_mm(
+            a_fp4, b_fp4, a_scale, b_scale, alpha, dtype, bias=bias
+        )
+    )
+    y_global_scale = get_nvfp4_global_scale(y)
+    ref, ref_scale = ops.scaled_fp4_quant(y, y_global_scale)
+
+    # Into buffers holding stale bytes, as under torch.compile buffer reuse.
+    out = torch.full_like(ref, 0xFF)
+    out_scale = torch.empty_like(ref_scale)
+    out_scale.view(torch.uint8).fill_(0xFF)
+    torch.ops._C.cutlass_scaled_fp4_mm_gelu_nvfp4_quant(
+        out, out_scale, a_fp4, b_fp4, a_scale, b_scale, alpha, bias, y_global_scale
+    )
+
+    # No stale scale survives in the 128x4 tile padding: the padded columns are
+    # zero, and so are the padded rows except a few past M that the epilogue
+    # quantizes from all-zero accumulators.
+    sf_rows, sf_cols = out_scale.shape
+    out_sf = convert_swizzled_to_linear(
+        out_scale.view(torch.uint8), sf_rows, sf_cols * block_size, block_size
+    )
+    assert not out_sf[:, n // block_size :].any()
+    assert not (out_sf[m:] == 0xFF).any()
+
+    assert (out == ref).float().mean() > 0.97
+    # No further from the exact result than the separate kernels.
+    exact = get_ref_results(
+        a_fp4,
+        b_fp4,
+        a_scale,
+        b_scale,
+        a_global_scale,
+        b_global_scale,
+        m,
+        n,
+        torch.float32,
+        block_size,
+        device,
+    )
+    exact = torch.nn.functional.gelu(exact + bias.float())
+
+    def error(data: torch.Tensor, scale: torch.Tensor) -> float:
+        value = dequantize_nvfp4_to_dtype(
+            data, scale, y_global_scale, torch.float32, device, block_size
+        )
+        return ((value - exact).norm() / exact.norm()).item()
+
+    assert error(out, out_scale) <= error(ref, ref_scale) * 1.02 + 1e-3

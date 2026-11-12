@@ -14,6 +14,7 @@
  * limitations under the License.
  */
 
+#include <torch/csrc/stable/macros.h>
 #include <torch/csrc/stable/tensor.h>
 
 #include "torch_utils.h"
@@ -26,6 +27,7 @@
 
 #include "cutlass/gemm/collective/collective_builder.hpp"
 #include "cutlass/epilogue/collective/collective_builder.hpp"
+#include "cutlass/epilogue/thread/activation.h"
 #include "cutlass/gemm/device/gemm_universal_adapter.h"
 #include "cutlass/gemm/kernel/gemm_universal.hpp"
 
@@ -72,6 +74,17 @@ struct sm120_fp4_config_default {
   using PerSmTileShape_MNK = Shape<_256, _128, _128>;
 };
 
+// Twice the CTAs of sm120_fp4_config_M256, for the GELU + NVFP4 quant epilogue
+// at small M.
+struct sm120_fp4_config_M256_N64 {
+  using KernelSchedule = cutlass::gemm::collective::KernelScheduleAuto;
+  using EpilogueSchedule = cutlass::epilogue::collective::EpilogueScheduleAuto;
+  using TileScheduler = void;
+  using ClusterShape = Shape<_1, _1, _1>;
+  using MmaTileShape = Shape<_128, _64, _128>;
+  using PerSmTileShape_MNK = Shape<_128, _64, _128>;
+};
+
 template <typename Config, typename OutType, bool HasBias = false>
 struct Fp4GemmSm120 {
   using ElementA = cutlass::nv_float4_t<cutlass::float_e2m1_t>;
@@ -112,6 +125,63 @@ struct Fp4GemmSm120 {
           ArchTag, OperatorClass, PerSmTileShape_MNK, ClusterShape,
           cutlass::epilogue::collective::EpilogueTileAuto, ElementAccumulator,
           ElementAccumulator, ElementC, LayoutCTag, AlignmentC, ElementD,
+          LayoutDTag, AlignmentD, typename Config::EpilogueSchedule,
+          FusionOp>::CollectiveOp;
+
+  using CollectiveMainloop =
+      typename cutlass::gemm::collective::CollectiveBuilder<
+          ArchTag, OperatorClass, ElementA, LayoutATag, AlignmentA, ElementB,
+          LayoutBTag, AlignmentB, ElementAccumulator, MmaTileShape,
+          ClusterShape,
+          cutlass::gemm::collective::StageCountAutoCarveout<static_cast<int>(
+              sizeof(typename CollectiveEpilogue::SharedStorage))>,
+          typename Config::KernelSchedule>::CollectiveOp;
+
+  using TileScheduler = typename Config::TileScheduler;
+  using GemmKernel =
+      cutlass::gemm::kernel::GemmUniversal<Shape<int, int, int, int>,
+                                           CollectiveMainloop,
+                                           CollectiveEpilogue, TileScheduler>;
+
+  using Gemm = cutlass::gemm::device::GemmUniversalAdapter<GemmKernel>;
+};
+
+// D = NVFP4 of GELU(alpha * acc + bias), with the block scales in the
+// 128x4-swizzled layout of scaled_fp4_quant: the input of the next NVFP4 linear
+// instead of a 16-bit output.
+template <typename Config, typename BiasType>
+struct Fp4GemmSm120GeluNvfp4Quant {
+  using ElementA = cutlass::nv_float4_t<cutlass::float_e2m1_t>;
+  using LayoutATag = cutlass::layout::RowMajor;
+  static constexpr int AlignmentA = 32;
+
+  using ElementB = cutlass::nv_float4_t<cutlass::float_e2m1_t>;
+  using LayoutBTag = cutlass::layout::ColumnMajor;
+  static constexpr int AlignmentB = 32;
+
+  using ElementD = cutlass::float_e2m1_t;
+  using ElementSFD = cutlass::float_ue4m3_t;
+  using LayoutDTag = cutlass::layout::RowMajor;
+  static constexpr int AlignmentD = 128 / cutlass::sizeof_bits<ElementD>::value;
+
+  using ElementAccumulator = float;
+  using ArchTag = cutlass::arch::Sm120;
+  using OperatorClass = cutlass::arch::OpClassBlockScaledTensorOp;
+
+  using MmaTileShape = typename Config::MmaTileShape;
+  using ClusterShape = typename Config::ClusterShape;
+  using PerSmTileShape_MNK = typename Config::PerSmTileShape_MNK;
+
+  using FusionOp =
+      cutlass::epilogue::fusion::LinCombPerColBiasEltActBlockScaleFactor<
+          cutlass::epilogue::thread::GELU, 16, ElementD, ElementAccumulator,
+          ElementSFD, LayoutDTag, BiasType, void>;
+
+  using CollectiveEpilogue =
+      typename cutlass::epilogue::collective::CollectiveBuilder<
+          ArchTag, OperatorClass, PerSmTileShape_MNK, ClusterShape,
+          cutlass::epilogue::collective::EpilogueTileAuto, ElementAccumulator,
+          ElementAccumulator, void, LayoutDTag, AlignmentD, ElementD,
           LayoutDTag, AlignmentD, typename Config::EpilogueSchedule,
           FusionOp>::CollectiveOp;
 
@@ -208,6 +278,61 @@ void runGemm(torch::stable::Tensor& D, torch::stable::Tensor const& A,
   CUTLASS_CHECK(gemm.run(arguments, workspace.data_ptr(), stream));
 }
 
+template <typename Gemm, typename BiasType>
+void runGemmGeluNvfp4Quant(
+    torch::stable::Tensor& D, torch::stable::Tensor& D_sf,
+    torch::stable::Tensor const& A, torch::stable::Tensor const& B,
+    torch::stable::Tensor const& A_sf, torch::stable::Tensor const& B_sf,
+    torch::stable::Tensor const& alpha, torch::stable::Tensor const& bias,
+    torch::stable::Tensor const& output_global_scale, int M, int N, int K,
+    cudaStream_t stream) {
+  using ElementA = typename Gemm::ElementA;
+  using ElementB = typename Gemm::ElementB;
+  using ElementD = typename Gemm::ElementD;
+  using ElementSF = cutlass::float_ue4m3_t;
+
+  using StrideA = typename Gemm::GemmKernel::StrideA;
+  using StrideB = typename Gemm::GemmKernel::StrideB;
+  using StrideD = typename Gemm::GemmKernel::StrideD;
+
+  using Sm1xxBlkScaledConfig =
+      typename Gemm::GemmKernel::CollectiveMainloop::Sm1xxBlkScaledConfig;
+
+  auto stride_A = cutlass::make_cute_packed_stride(StrideA{}, {M, K, 1});
+  auto stride_B = cutlass::make_cute_packed_stride(StrideB{}, {N, K, 1});
+  auto stride_D = cutlass::make_cute_packed_stride(StrideD{}, {M, N, 1});
+
+  auto layout_SFA = Sm1xxBlkScaledConfig::tile_atom_to_shape_SFA(
+      cute::make_shape(M, N, K, 1));
+  auto layout_SFB = Sm1xxBlkScaledConfig::tile_atom_to_shape_SFB(
+      cute::make_shape(M, N, K, 1));
+
+  typename Gemm::Arguments arguments{
+      cutlass::gemm::GemmUniversalMode::kGemm,
+      {M, N, K, 1},
+      {static_cast<ElementA const*>(A.data_ptr()), stride_A,
+       static_cast<ElementB const*>(B.data_ptr()), stride_B,
+       static_cast<ElementSF const*>(A_sf.data_ptr()), layout_SFA,
+       static_cast<ElementSF const*>(B_sf.data_ptr()), layout_SFB},
+      {{}, nullptr, stride_D, static_cast<ElementD*>(D.data_ptr()), stride_D}};
+  auto& fusion_args = arguments.epilogue.thread;
+  fusion_args.alpha_ptr = static_cast<float const*>(alpha.data_ptr());
+  fusion_args.bias_ptr = static_cast<BiasType const*>(bias.data_ptr());
+  fusion_args.block_scale_factor_ptr = static_cast<ElementSF*>(D_sf.data_ptr());
+  // The scale scaled_fp4_quant takes as input_global_scale.
+  fusion_args.norm_constant_ptr =
+      static_cast<float const*>(output_global_scale.data_ptr());
+
+  Gemm gemm;
+  size_t workspace_size = Gemm::get_workspace_size(arguments);
+  auto workspace =
+      torch::stable::empty(workspace_size, torch::headeronly::ScalarType::Byte,
+                           std::nullopt, A.device());
+  CUTLASS_CHECK(gemm.can_implement(arguments));
+  CUTLASS_CHECK(gemm.initialize(arguments, workspace.data_ptr(), stream));
+  CUTLASS_CHECK(gemm.run(arguments, workspace.data_ptr(), stream));
+}
+
 namespace {
 
 // Dispatch function to select appropriate config based on M (file-local;
@@ -261,6 +386,37 @@ void cutlass_fp4_gemm_dispatch(torch::stable::Tensor& D,
   } else {
     cutlass_fp4_gemm_dispatch<OutType, false>(D, A, B, A_sf, B_sf, alpha,
                                               nullptr, m, n, k, stream);
+  }
+}
+
+// Each config at the M where it is the fastest with this epilogue
+// (RTX PRO 6000, K = 1024, N = 4096).
+template <typename BiasType>
+void cutlass_fp4_gemm_gelu_nvfp4_quant_dispatch(
+    torch::stable::Tensor& D, torch::stable::Tensor& D_sf,
+    torch::stable::Tensor const& A, torch::stable::Tensor const& B,
+    torch::stable::Tensor const& A_sf, torch::stable::Tensor const& B_sf,
+    torch::stable::Tensor const& alpha, torch::stable::Tensor const& bias,
+    torch::stable::Tensor const& output_global_scale, int m, int n, int k,
+    cudaStream_t stream) {
+  if (m > 2048) {
+    using Gemm = typename Fp4GemmSm120GeluNvfp4Quant<sm120_fp4_config_default,
+                                                     BiasType>::Gemm;
+    runGemmGeluNvfp4Quant<Gemm, BiasType>(D, D_sf, A, B, A_sf, B_sf, alpha,
+                                          bias, output_global_scale, m, n, k,
+                                          stream);
+  } else if (m > 256) {
+    using Gemm = typename Fp4GemmSm120GeluNvfp4Quant<sm120_fp4_config_M256,
+                                                     BiasType>::Gemm;
+    runGemmGeluNvfp4Quant<Gemm, BiasType>(D, D_sf, A, B, A_sf, B_sf, alpha,
+                                          bias, output_global_scale, m, n, k,
+                                          stream);
+  } else {
+    using Gemm = typename Fp4GemmSm120GeluNvfp4Quant<sm120_fp4_config_M256_N64,
+                                                     BiasType>::Gemm;
+    runGemmGeluNvfp4Quant<Gemm, BiasType>(D, D_sf, A, B, A_sf, B_sf, alpha,
+                                          bias, output_global_scale, m, n, k,
+                                          stream);
   }
 }
 
@@ -341,6 +497,94 @@ void cutlass_scaled_fp4_mm_sm120a(
   } else {
     STD_TORCH_CHECK(false, "Unsupported output data type of nvfp4 mm sm120 (",
                     out_dtype, ")");
+  }
+#else
+  STD_TORCH_CHECK(false,
+                  "Unsupported CUTLASS version. Set VLLM_CUTLASS_SRC_DIR to "
+                  "a CUTLASS 3.8 source directory to enable support.");
+#endif  // defined(CUTLASS_ARCH_MMA_SM120_SUPPORTED)
+}
+
+void cutlass_scaled_fp4_mm_gelu_nvfp4_quant_sm120a(
+    torch::stable::Tensor& D, torch::stable::Tensor& D_sf,
+    torch::stable::Tensor const& A, torch::stable::Tensor const& B,
+    torch::stable::Tensor const& A_sf, torch::stable::Tensor const& B_sf,
+    torch::stable::Tensor const& alpha, torch::stable::Tensor const& bias,
+    torch::stable::Tensor const& output_global_scale) {
+#if defined(CUTLASS_ARCH_MMA_SM120_SUPPORTED)
+  CHECK_INPUT(A, FLOAT4_E2M1X2, "a");
+  CHECK_INPUT(B, FLOAT4_E2M1X2, "b");
+  CHECK_INPUT(A_sf, SF_DTYPE, "scale_a");
+  CHECK_INPUT(B_sf, SF_DTYPE, "scale_b");
+  CHECK_INPUT(alpha, torch::headeronly::ScalarType::Float, "alpha");
+  CHECK_INPUT(output_global_scale, torch::headeronly::ScalarType::Float,
+              "output_global_scale");
+  CHECK_INPUT(D, FLOAT4_E2M1X2, "out");
+  CHECK_INPUT(D_sf, SF_DTYPE, "out_block_scale");
+  CHECK_TH_CUDA(bias, "bias");
+  CHECK_CONTIGUOUS(bias, "bias");
+
+  STD_TORCH_CHECK(A.dim() == 2 && B.dim() == 2 && A.size(1) == B.size(1),
+                  "a and b shapes cannot be multiplied (", A.size(0), "x",
+                  A.size(1), " and ", B.size(0), "x", B.size(1), ")");
+  auto const m = A.size(0);
+  auto const n = B.size(0);
+  auto const k = A.size(1) * 2;
+  STD_TORCH_CHECK(k % 32 == 0 && n % 32 == 0,
+                  "Expected k and n divisible by 32, got k = ", k, ", n = ", n);
+
+  auto round_up = [](int x, int y) { return (x + y - 1) / y * y; };
+  int rounded_m = round_up(m, 128);
+  int rounded_n = round_up(n, 128);
+  int rounded_k = round_up(k / 16, 4);
+  int out_sf_cols = round_up(n / 16, 4);
+  STD_TORCH_CHECK(
+      A_sf.dim() == 2 && A_sf.size(0) == rounded_m && A_sf.size(1) == rounded_k,
+      "scale_a must be padded and swizzled to a shape (", rounded_m, "x",
+      rounded_k, ")");
+  STD_TORCH_CHECK(
+      B_sf.dim() == 2 && B_sf.size(0) == rounded_n && B_sf.size(1) == rounded_k,
+      "scale_b must be padded and swizzled to a shape (", rounded_n, "x",
+      rounded_k, ")");
+  STD_TORCH_CHECK(D.dim() == 2 && D.size(0) == m && D.size(1) == n / 2,
+                  "out must be a packed nvfp4 matrix of shape (", m, "x", n / 2,
+                  ")");
+  STD_TORCH_CHECK(D_sf.dim() == 2 && D_sf.size(0) == rounded_m &&
+                      D_sf.size(1) == out_sf_cols,
+                  "out_block_scale must be padded to a shape (", rounded_m, "x",
+                  out_sf_cols, ")");
+  STD_TORCH_CHECK(bias.dim() == 1 && bias.size(0) == n,
+                  "bias must be a vector of n = ", n, " elements");
+
+  const torch::stable::accelerator::DeviceGuard device_guard(
+      A.get_device_index());
+  const cudaStream_t stream = get_current_cuda_stream(A.get_device_index());
+
+  // The epilogue writes the scales of the [m, n / 16] block, plus those of a
+  // few rows past m (GELU of the bias alone, with their data outside out).
+  // Zero the rest of the 128x4 tile padding first so no stale scale survives:
+  // all of it if the columns are padded, else the last 128-row tile, which is
+  // contiguous in the swizzled layout.
+  if ((n / 16) % 4 != 0) {
+    STD_CUDA_CHECK(cudaMemsetAsync(D_sf.data_ptr(), 0, D_sf.numel(), stream));
+  } else if (m % 128 != 0) {
+    auto* last_tile = static_cast<uint8_t*>(D_sf.data_ptr()) +
+                      static_cast<int64_t>(rounded_m - 128) * out_sf_cols;
+    STD_CUDA_CHECK(cudaMemsetAsync(last_tile, 0, 128 * out_sf_cols, stream));
+  }
+
+  auto const bias_dtype = bias.scalar_type();
+  if (bias_dtype == torch::headeronly::ScalarType::BFloat16) {
+    cutlass_fp4_gemm_gelu_nvfp4_quant_dispatch<cutlass::bfloat16_t>(
+        D, D_sf, A, B, A_sf, B_sf, alpha, bias, output_global_scale, m, n, k,
+        stream);
+  } else if (bias_dtype == torch::headeronly::ScalarType::Half) {
+    cutlass_fp4_gemm_gelu_nvfp4_quant_dispatch<cutlass::half_t>(
+        D, D_sf, A, B, A_sf, B_sf, alpha, bias, output_global_scale, m, n, k,
+        stream);
+  } else {
+    STD_TORCH_CHECK(false, "Unsupported bias data type of nvfp4 mm sm120 (",
+                    bias_dtype, ")");
   }
 #else
   STD_TORCH_CHECK(false,

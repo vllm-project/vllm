@@ -192,6 +192,14 @@ STABLE_TORCH_LIBRARY_FRAGMENT(_C, ops) {
       "                      Tensor block_scale_a, Tensor block_scale_b,"
       "                      Tensor alpha, Tensor? bias=None) -> ()");
 
+  // CUTLASS nvfp4 block scaled GEMM whose epilogue adds the bias, applies GELU
+  // and quantizes the result to nvfp4 (SM120)
+  ops.def(
+      "cutlass_scaled_fp4_mm_gelu_nvfp4_quant(Tensor! out,"
+      " Tensor! out_block_scale, Tensor a, Tensor b, Tensor block_scale_a,"
+      " Tensor block_scale_b, Tensor alpha, Tensor bias,"
+      " Tensor output_global_scale) -> ()");
+
   // cutlass nvfp4 block scaled group GEMM
   ops.def(
       "cutlass_fp4_group_mm(Tensor! out, Tensor a, Tensor b,"
@@ -837,6 +845,8 @@ STABLE_TORCH_LIBRARY_IMPL(_C, CUDA, ops) {
 
   // FP4/NVFP4 ops
   ops.impl("cutlass_scaled_fp4_mm", TORCH_BOX(&cutlass_scaled_fp4_mm));
+  ops.impl("cutlass_scaled_fp4_mm_gelu_nvfp4_quant",
+           TORCH_BOX(&cutlass_scaled_fp4_mm_gelu_nvfp4_quant));
   ops.impl("scaled_fp4_quant", TORCH_BOX(&scaled_fp4_quant_func));
   ops.impl("scaled_fp4_quant.out", TORCH_BOX(&scaled_fp4_quant_out));
   ops.impl("scaled_fp4_experts_quant", TORCH_BOX(&scaled_fp4_experts_quant));

@@ -17,7 +17,7 @@ from vllm.model_executor.layers.attention import (
 )
 from vllm.model_executor.layers.fusion.fused_act_quant import (
     has_fused_bias_act_quant,
-    maybe_fused_act_quant,
+    maybe_fused_mm_act_quant,
 )
 from vllm.model_executor.layers.fusion.quant_activation import QuantizedActivation
 from vllm.model_executor.layers.linear import (
@@ -344,9 +344,8 @@ class BertIntermediate(nn.Module):
     def forward(
         self, hidden_states: torch.Tensor, next_linear: LinearBase
     ) -> torch.Tensor | QuantizedActivation:
-        hidden_states, bias = self.dense(hidden_states)
-        return maybe_fused_act_quant(
-            self.intermediate_act_fn, hidden_states, next_linear, bias
+        return maybe_fused_mm_act_quant(
+            self.dense, self.intermediate_act_fn, hidden_states, next_linear
         )
 
 
