@@ -469,7 +469,7 @@ class MoRIIOConstants:
     PING_INTERVAL = 3
     MAX_PING_RETRIES = 100
     # References to a failed engine that fail without a new handshake.
-    HANDSHAKE_FAILURE_COOLDOWN = 8
+    HANDSHAKE_FAILURE_COOLDOWN = 1
     MAX_HANDSHAKE_FAILURE_COOLDOWN = 512
     DEFAULT_HANDSHAKE_PORT = "6301"
     DEFAULT_NOTIFY_PORT = "61005"
