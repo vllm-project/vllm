@@ -789,12 +789,12 @@ def _launch(
     ):
         bm, bn = 256, 256
         n_first = K < 4096
-        grid = (
+        full_k_grid = (
             (triton.cdiv(N, bn), triton.cdiv(M, bm), 1)
             if n_first
             else (triton.cdiv(M, bm), triton.cdiv(N, bn), 1)
         )
-        _block32_tiled_kernel[grid](
+        _block32_tiled_kernel[full_k_grid](
             x,
             x_scale,
             weight,
