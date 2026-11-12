@@ -959,7 +959,15 @@ class AiterFlashAttentionBackend(AttentionBackend):
 
 
 class AiterFlashAttentionImpl(AttentionImpl):
-    _kv_view_cache: tuple[torch.Tensor, int, torch.Tensor, torch.Tensor] | None = None
+    _kv_view_cache: (
+        tuple[
+            torch.Tensor,
+            int,
+            tuple[torch.Tensor, torch.Tensor],
+            tuple[torch.Tensor, torch.Tensor],
+        ]
+        | None
+    ) = None
 
     def __init__(
         self,
@@ -1262,10 +1270,7 @@ class AiterFlashAttentionImpl(AttentionImpl):
         # performance to make sure it does not introduce any overhead.
         num_actual_tokens = attn_metadata.num_actual_tokens
 
-        key_cache, value_cache = self._split_kv_cache(kv_cache)
-        if is_quantized_kv_cache(self.kv_cache_dtype):
-            key_cache = key_cache.view(current_platform.fp8_dtype())
-            value_cache = value_cache.view(current_platform.fp8_dtype())
+        key_cache, value_cache = self._split_kv_cache(kv_cache, fp8=True)
 
         # decode:extend:prefill
         query = query[:num_actual_tokens]
@@ -1617,7 +1622,7 @@ class AiterFlashAttentionImpl(AttentionImpl):
         return output
 
     def _split_kv_cache(
-        self, kv_cache: torch.Tensor
+        self, kv_cache: torch.Tensor, fp8: bool = False
     ) -> tuple[torch.Tensor, torch.Tensor]:
         cache = self._kv_view_cache
         if (
@@ -1625,7 +1630,7 @@ class AiterFlashAttentionImpl(AttentionImpl):
             and cache[0] is kv_cache
             and cache[1] == kv_cache.data_ptr()
         ):
-            return cache[2], cache[3]
+            return cache[3] if fp8 else cache[2]
         if rocm_aiter_ops.is_shuffle_kv_cache_enabled():
             # (B, 2, N, H*hs) -> one (B, N, H, hs) per side, which is what the
             # shuffle read/write kernels reinterpret in place. The heads are
@@ -1638,8 +1643,13 @@ class AiterFlashAttentionImpl(AttentionImpl):
             key_cache, value_cache = kv_cache.transpose(1, 2).split(
                 self.head_size, dim=-1
             )
-        self._kv_view_cache = (kv_cache, kv_cache.data_ptr(), key_cache, value_cache)
-        return key_cache, value_cache
+        raw = (key_cache, value_cache)
+        typed = raw
+        if is_quantized_kv_cache(self.kv_cache_dtype):
+            fp8_dtype = current_platform.fp8_dtype()
+            typed = (key_cache.view(fp8_dtype), value_cache.view(fp8_dtype))
+        self._kv_view_cache = (kv_cache, kv_cache.data_ptr(), raw, typed)
+        return typed if fp8 else raw
 
     def do_kv_cache_update(
         self,
@@ -1649,14 +1659,11 @@ class AiterFlashAttentionImpl(AttentionImpl):
         kv_cache: torch.Tensor,
         slot_mapping: torch.Tensor,
     ):
-        key_cache, value_cache = self._split_kv_cache(kv_cache)
+        key_cache, value_cache = self._split_kv_cache(kv_cache, fp8=True)
 
         # key and value may be None in the case of cross attention. They are
         # calculated once based on the output from the encoder and then cached
         # in KV cache.
-        if is_quantized_kv_cache(self.kv_cache_dtype):
-            key_cache = key_cache.view(current_platform.fp8_dtype())
-            value_cache = value_cache.view(current_platform.fp8_dtype())
         # Reshape the input keys and values and store them in the cache.
         # Skip this if sharing KV cache with an earlier attention layer.
         # NOTE(woosuk): Here, key and value are padded while slot_mapping
@@ -1755,13 +1762,10 @@ class AiterFlashAttentionImpl(AttentionImpl):
         layer_slot_mapping: torch.Tensor,
     ):
         # (B, H, N, 2*hs) -> ((B, N, H, hs), (B, N, H, hs))
-        key_cache, value_cache = self._split_kv_cache(kv_cache)
+        key_cache, value_cache = self._split_kv_cache(kv_cache, fp8=True)
         flash_layout = True
 
         is_fp8_kv_cache = is_quantized_kv_cache(self.kv_cache_dtype)
-        if is_fp8_kv_cache:
-            key_cache = key_cache.view(current_platform.fp8_dtype())
-            value_cache = value_cache.view(current_platform.fp8_dtype())
 
         rocm_aiter_ops.triton_rope_and_cache(
             query,
