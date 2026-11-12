@@ -22,25 +22,6 @@ from vllm.platforms import current_platform
 if not (current_platform.is_cuda_alike() or current_platform.is_xpu()):
     pytest.skip("Requires CUDA, ROCm or XPU", allow_module_level=True)
 
-DEVICE = current_platform.device_type
-
-
-@pytest.fixture(autouse=True)
-def _xpu_torch_cuda_aliases():
-    """The XPU model runner aliases torch.cuda stream APIs to torch.xpu."""
-    if not current_platform.is_xpu():
-        yield
-        return
-    from vllm.v1.worker.xpu_model_runner import _torch_cuda_wrapper
-
-    saved = dict(vars(torch.cuda))
-    with _torch_cuda_wrapper():
-        yield
-    for name in set(vars(torch.cuda)) - set(saved):
-        delattr(torch.cuda, name)
-    vars(torch.cuda).update(saved)
-
-
 from tests.v1.attention.utils import dense_kv_cache_tensor, dense_kv_cache_views
 from tests.v1.kv_connector.unit.offloading_connector.utils import (
     make_kv_cache_group_from_specs,
@@ -79,6 +60,30 @@ from vllm.v1.simple_kv_offload.sizing import sync_num_offload_blocks_across_work
 from vllm.v1.simple_kv_offload.worker import SimpleCPUOffloadWorker
 from vllm.v1.worker.gpu.kv_connector import ActiveKVConnector
 from vllm.v1.worker.utils import allocate_kv_cache
+
+DEVICE = current_platform.device_type
+
+xpu_stream_priority_bug = pytest.mark.skipif(
+    current_platform.is_xpu(),
+    reason="torch.xpu.Stream.priority_range() reports an unusable lowest priority",
+)
+
+
+@pytest.fixture(autouse=True)
+def _xpu_torch_cuda_aliases():
+    """The XPU model runner aliases torch.cuda stream APIs to torch.xpu."""
+    if not current_platform.is_xpu():
+        yield
+        return
+    from vllm.v1.worker.xpu_model_runner import _torch_cuda_wrapper
+
+    saved = dict(vars(torch.cuda))
+    with _torch_cuda_wrapper():
+        yield
+    for name in set(vars(torch.cuda)) - set(saved):
+        delattr(torch.cuda, name)
+    vars(torch.cuda).update(saved)
+
 
 NUM_BLOCKS = 64
 BLOCK_BYTES = 4096
@@ -126,6 +131,7 @@ def _make_backend() -> tuple[DmaCopyBackend, torch.Tensor, torch.Tensor]:
     return backend, gpu["k"], cpu["k"]
 
 
+@xpu_stream_priority_bug
 def test_no_forward_step_completes_cpu_store(monkeypatch):
     """A finished request's final store must drain without another model step."""
     backend, gpu, cpu = _make_backend()
@@ -165,6 +171,7 @@ def test_no_forward_step_completes_cpu_store(monkeypatch):
         backend.shutdown()
 
 
+@xpu_stream_priority_bug
 def test_deferred_store_waits_for_draft_forward(monkeypatch):
     """Target completion must not submit the store before draft finalization."""
     backend, gpu, cpu = _make_backend()
@@ -850,6 +857,7 @@ def test_disk_backend_alignment_only_required_for_direct_io(
         backend.shutdown()
 
 
+@xpu_stream_priority_bug
 @pytest.mark.parametrize("hugepages", [False, True])
 def test_cpu_caches_round_trip_on_pinned_host_buffer(hugepages, hugepage_with_free):
     """Store then load returns the same bytes on ordinary or HugeTLB pages."""

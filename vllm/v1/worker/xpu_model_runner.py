@@ -35,20 +35,12 @@ class XPUMMEncoderModelRunner(MMEncoderModelRunner):
             super().__init__(vllm_config, device)
 
 
-class _XPUStream(torch.xpu.Stream):
-    @staticmethod
-    def priority_range() -> tuple[int, int]:
-        # torch.xpu.Stream.priority_range() reports a lowest priority (1) that
-        # streams cannot use with events (stream.wait_event fails).
-        return 0, -1
-
-
 @contextmanager
 def _torch_cuda_wrapper():
     # Replace cuda APIs with xpu APIs. Each callable gets its own functools.partial
     # so it is not the same object as torch.xpu.* (Torch Dynamo _get_handlers()
     # asserts on duplicate registration when cuda aliases xpu directly).
-    torch.cuda.Stream = _XPUStream
+    torch.cuda.Stream = torch.xpu.Stream
     torch.cuda.default_stream = partial(torch.xpu.current_stream)
     torch.cuda.current_stream = partial(torch.xpu.current_stream)
     torch.cuda.stream = partial(torch.xpu.stream)
