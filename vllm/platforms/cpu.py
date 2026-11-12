@@ -347,14 +347,17 @@ class CpuPlatform(Platform):
                 logger.warning(
                     "VLLM_CPU_KVCACHE_SPACE=%d is ignored because it is not "
                     "a positive size (0 means vLLM does not override the KV "
-                    "cache size through this variable).",
+                    "cache size through this variable). This legacy variable "
+                    "is deprecated; use --kv-cache-memory-bytes instead.",
                     kv_cache_space,
                 )
             elif cache_config.kv_cache_memory_bytes is not None:
                 logger.warning(
                     "VLLM_CPU_KVCACHE_SPACE=%d is ignored because "
                     "kv_cache_memory_bytes is explicitly set; the legacy "
-                    "environment variable no longer takes precedence.",
+                    "environment variable no longer takes precedence. "
+                    "VLLM_CPU_KVCACHE_SPACE is deprecated; use "
+                    "--kv-cache-memory-bytes instead.",
                     kv_cache_space,
                 )
             else:
