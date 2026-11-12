@@ -20,13 +20,6 @@ import os
 from collections.abc import Iterable
 from typing import TYPE_CHECKING, ClassVar
 
-try:
-    from vllm.fs_io_C import batch_lookup as batch_lookup_C
-
-    _HAS_BATCH_LOOKUP_C = True
-except ImportError:
-    _HAS_BATCH_LOOKUP_C = False
-
 from typing_extensions import override
 
 from vllm.logger import init_logger
@@ -39,7 +32,7 @@ from vllm.v1.kv_offload.base import (
     ReqContext,
 )
 from vllm.v1.kv_offload.file_mapper import FileMapper
-from vllm.v1.kv_offload.tiering.async_lookup import AsyncLookupManager
+from vllm.v1.kv_offload.fs.lookup import FsAsyncLookupManager
 from vllm.v1.kv_offload.tiering.backpressure import BackpressureDetector
 from vllm.v1.kv_offload.tiering.base import (
     JobId,
@@ -60,23 +53,6 @@ if TYPE_CHECKING:
     from vllm.v1.kv_offload.base import OffloadingSpec
 
 logger = init_logger(__name__)
-
-
-class FsAsyncLookupManager(AsyncLookupManager):
-    """Async existence checks for files named by a FileMapper."""
-
-    def __init__(self, file_mapper: FileMapper, tier_type: str) -> None:
-        super().__init__(tier_type=tier_type)
-        self._file_mapper = file_mapper
-
-    def batch_lookup(
-        self, keys: list[OffloadKey], req_context: ReqContext
-    ) -> Iterable[bool]:
-        paths = [self._file_mapper.get_file_name(k) for k in keys]
-        if _HAS_BATCH_LOOKUP_C:
-            # C extension: GIL released for the entire faccessat() batch.
-            return batch_lookup_C(paths)
-        return (os.path.exists(p) for p in paths)
 
 
 class FileSystemTierManager(SecondaryTierManager):

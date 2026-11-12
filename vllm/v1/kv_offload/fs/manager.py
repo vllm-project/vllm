@@ -18,8 +18,8 @@ from vllm.v1.kv_offload.base import (
 from vllm.v1.kv_offload.cpu.manager import CPUOffloadingManager
 from vllm.v1.kv_offload.cpu.policies.base import ChunkStatus
 from vllm.v1.kv_offload.file_mapper import FileMapper
+from vllm.v1.kv_offload.fs.lookup import FsAsyncLookupManager
 from vllm.v1.kv_offload.fs.worker import FSLoadStoreSpec
-from vllm.v1.kv_offload.tiering.fs.manager import FsAsyncLookupManager
 from vllm.v1.metrics.cache_hit_source import CacheHitSource
 
 

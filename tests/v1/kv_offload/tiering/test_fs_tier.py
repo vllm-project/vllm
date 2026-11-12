@@ -571,12 +571,12 @@ def test_batch_lookup_c_extension(tmp_path):
 
 @pytest.mark.parametrize("use_c_ext", [True, False])
 def test_batch_lookup_dispatch(fs_tier, monkeypatch, use_c_ext):
-    import vllm.v1.kv_offload.tiering.fs.manager as mgr_mod
+    import vllm.v1.kv_offload.fs.lookup as lookup_mod
 
-    if use_c_ext and not mgr_mod._HAS_BATCH_LOOKUP_C:
+    if use_c_ext and not lookup_mod._HAS_BATCH_LOOKUP_C:
         pytest.skip("fs_io_C extension not built")
 
-    monkeypatch.setattr(mgr_mod, "_HAS_BATCH_LOOKUP_C", use_c_ext)
+    monkeypatch.setattr(lookup_mod, "_HAS_BATCH_LOOKUP_C", use_c_ext)
 
     tier, _ = fs_tier
     tier.submit_store(make_job(1, [key(1)], [0]))
