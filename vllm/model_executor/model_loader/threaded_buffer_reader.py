@@ -163,7 +163,15 @@ class ThreadPinnedBuffer:
         dest = self._view[offset : offset + nbytes]
         got = 0
         while got < nbytes:
-            count = os.preadv(fd, [dest[got:]], file_offset + got)
+            if hasattr(os, "preadv"):
+                count = os.preadv(fd, [dest[got:]], file_offset + got)
+            else:
+                # No preadv on this platform: fall back to pread and copy
+                # the bytes into the buffer.
+                chunk = os.pread(fd, nbytes - got, file_offset + got)
+                count = len(chunk)
+                if count:
+                    dest[got : got + count] = chunk
             if count == 0:
                 raise EOFError("Checkpoint truncated during streaming prefetch")
             got += count
