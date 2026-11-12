@@ -260,6 +260,15 @@ class TestDeferredLogprobs:
         processor.defer_logprobs(["t1"], _token_logprobs)
         assert processor.pending_logprobs == []
 
+    def test_logprobs_held_before_reasoning_stay_out_of_content(self):
+        processor = SimpleStreamingEventProcessor()
+        processor.defer_logprobs(["<think>"], _token_logprobs)
+        _run_through_processor(processor, DeltaMessage(reasoning="hmm"))
+        events = _stream_steps(processor, [("answer", ["t1"])])
+
+        deltas = [e for e in events if e.type == "response.output_text.delta"]
+        assert [lp.token for lp in deltas[0].logprobs] == ["t1"]
+
 
 class TestSimpleToolCallShapes:
     def test_arguments_done_emitted_without_deltas(self):
