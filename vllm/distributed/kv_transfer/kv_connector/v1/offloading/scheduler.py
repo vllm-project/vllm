@@ -272,16 +272,17 @@ class SchedulerOffloadConfig(NamedTuple):
         group_block_sizes = {config.tokens_per_block for config in kv_group_configs}
         has_partial_recurrent_group = any(
             config.requires_cow_source
-            and config.tokens_per_block > spec.tokens_per_hash
+            and config.tokens_per_chunk > spec.tokens_per_hash
             for config in kv_group_configs
         )
-        # Partial tails currently require one physical block per offload chunk
-        # and uniform, non-windowed groups so one boundary identifies every
-        # group's source. EAGLE groups key their partial tail at a proof
-        # position past the boundary. DCP needs additional hand-off semantics.
+        # Partial tails require uniform, non-windowed groups so one boundary
+        # identifies every group's source, and hash boundaries that fall
+        # between chunk boundaries (always true when a recurrent group's
+        # chunk is coarser than the hash unit). EAGLE groups key their
+        # partial tail at a proof position past the boundary. DCP needs
+        # additional hand-off semantics.
         supports_partial_tail = (
-            spec.blocks_per_chunk == 1
-            and len(group_block_sizes) == 1
+            len(group_block_sizes) == 1
             and has_partial_recurrent_group
             and all(
                 config.sliding_window_size_in_chunks is None
@@ -650,6 +651,11 @@ class OffloadingConnectorScheduler:
             self.config.kv_group_configs[0].tokens_per_block
             if self.config.supports_partial_tail
             else 0
+        )
+        # Partial tails are searched and bridged on the chunk grid; the
+        # per-group source blocks stay block-granular.
+        self._partial_tail_chunk_tokens = (
+            self._partial_tail_block_size * self.config.blocks_per_chunk
         )
         # Core's prefix cache matches an EAGLE group this many tokens past a
         # hit and then drops them. A partial tail stores and looks up EAGLE
@@ -1176,7 +1182,7 @@ class OffloadingConnectorScheduler:
         local_tokens = req_status.num_locally_computed_tokens
         complete_boundary = local_tokens + complete_hit
         tokens_per_hash = self.config.tokens_per_hash
-        block_size = self._partial_tail_block_size
+        chunk_tokens = self._partial_tail_chunk_tokens
         # A recurrent group holds state only at a producer's tail, so the
         # full-attention prefix, not the complete hit, bounds the search.
         anchor_boundary = max(complete_boundary, full_attention_hit_boundary or 0)
@@ -1187,17 +1193,15 @@ class OffloadingConnectorScheduler:
             )
             if not group_config.requires_cow_source
             for key in group_state.offload_keys[
-                complete_boundary // block_size : anchor_boundary // block_size
+                complete_boundary // chunk_tokens : anchor_boundary // chunk_tokens
             ]
         )
         if anchor_pending:
             anchor_boundary = complete_boundary
         # A partial tail carries its own EAGLE proof, so it may also lie in
-        # the block after the chunk that the complete-chunk lookup pops.
-        num_search_blocks = 2 if self._max_eagle_proof_margin else 1
-        block_end = anchor_boundary + (
-            num_search_blocks * self._partial_tail_block_size
-        )
+        # the chunk after the one that the complete-chunk lookup pops.
+        num_search_chunks = 2 if self._max_eagle_proof_margin else 1
+        block_end = anchor_boundary + num_search_chunks * chunk_tokens
         max_boundary = min(
             req_status.req.num_prompt_tokens - 1,
             block_end - 1,
@@ -1215,16 +1219,18 @@ class OffloadingConnectorScheduler:
         if max_boundary <= complete_boundary:
             return complete_hit
 
-        # A boundary past the block of anchor_boundary also loads that
-        # block's complete chunk. Look it up once, and only if it is needed.
-        # Partial tails use one block per chunk, so a block index is a chunk
-        # index.
-        bridge_chunk_idx = anchor_boundary // block_size
-        bridge_boundary = (bridge_chunk_idx + 1) * block_size
-        # Bridge keys that the complete-chunk lookup did not confirm.
-        unconfirmed_bridge_keys: list[tuple[GroupOffloadConfig, OffloadKey]] = []
+        # A boundary in a chunk past anchor_boundary's also loads that
+        # chunk's, and every earlier unconfirmed chunk's, complete data.
+        # Look each bridge chunk up once, ascending, and only if it is
+        # needed; the first miss caps the search below that chunk.
+        anchor_chunk_idx = anchor_boundary // chunk_tokens
+        max_chunk_idx = max_boundary // chunk_tokens
+        # Bridge keys that the complete-chunk lookup did not confirm,
+        # as (group, chunk index, key).
+        unconfirmed_bridge_keys: list[tuple[GroupOffloadConfig, int, OffloadKey]] = []
         pending = anchor_pending
-        if max_boundary >= bridge_boundary:
+        for bridge_chunk_idx in range(anchor_chunk_idx, max_chunk_idx):
+            chunk_keys: list[tuple[GroupOffloadConfig, int, OffloadKey]] = []
             for group_config, group_state in zip(
                 self.config.kv_group_configs, req_status.group_states
             ):
@@ -1234,31 +1240,39 @@ class OffloadingConnectorScheduler:
                 pending |= key in (self._chunks_being_loaded or ())
                 # An EAGLE group always confirmed the chunk that it popped.
                 if group_state.lookup_hit_end_chunk_idx <= bridge_chunk_idx:
-                    unconfirmed_bridge_keys.append((group_config, key))
-            for _, key in unconfirmed_bridge_keys:
+                    chunk_keys.append((group_config, bridge_chunk_idx, key))
+            missing = False
+            for _, _, key in chunk_keys:
                 result = self.manager.lookup(key, req_status.req_context)
                 if result is LookupResult.MISS:
-                    max_boundary = bridge_boundary - tokens_per_hash
+                    chunk_end = (bridge_chunk_idx + 1) * chunk_tokens
+                    max_boundary = chunk_end - tokens_per_hash
+                    missing = True
                     break
                 pending |= result is not LookupResult.HIT
+            unconfirmed_bridge_keys.extend(chunk_keys)
+            if missing:
+                break
         bridge_pending = pending
         # A tail of this request may lie below a sibling's longer full-attention
-        # prefix. A block-aligned boundary there is a complete chunk, which the
+        # prefix. A chunk-aligned boundary there is a complete chunk, which the
         # complete-chunk lookup already missed.
         for boundary in range(max_boundary, complete_boundary, -tokens_per_hash):
-            if boundary <= anchor_boundary and boundary % block_size == 0:
+            if boundary <= anchor_boundary and boundary % chunk_tokens == 0:
                 continue
-            loads_bridge = boundary >= bridge_boundary
+            boundary_chunk_idx = boundary // chunk_tokens
+            loads_bridge = boundary_chunk_idx > anchor_chunk_idx
             hit, boundary_pending = self._lookup_partial_tail(
                 req_status, boundary, loads_bridge and bridge_pending
             )
             if hit:
                 # The complete-chunk lookup recorded the confirmed bridge keys.
                 if loads_bridge:
-                    for group_config, key in unconfirmed_bridge_keys:
-                        self._events_tracker.record_lookup(
-                            req_status.req, group_config, bridge_chunk_idx, key
-                        )
+                    for group_config, chunk_idx, key in unconfirmed_bridge_keys:
+                        if chunk_idx < boundary_chunk_idx:
+                            self._events_tracker.record_lookup(
+                                req_status.req, group_config, chunk_idx, key
+                            )
                 req_status.partial_tail_boundary = boundary
                 return boundary - local_tokens
             pending |= boundary_pending
@@ -1793,12 +1807,9 @@ class OffloadingConnectorScheduler:
         if not self.config.supports_partial_tail:
             return store_jobs
 
+        chunk_tokens = self._partial_tail_chunk_tokens
         for req_id, entries in handoffs.items():
-            entries = [
-                entry
-                for entry in entries
-                if entry[2] % self._partial_tail_block_size != 0
-            ]
+            entries = [entry for entry in entries if entry[2] % chunk_tokens != 0]
             if not entries:
                 continue
             req_status = self._req_status.get(req_id)
@@ -1847,11 +1858,16 @@ class OffloadingConnectorScheduler:
             cow_blocks = {group_idx: block_id for group_idx, block_id, _ in entries}
             assert self._cow_source_groups.issubset(cow_blocks)
 
-            assert boundary % self._partial_tail_block_size != 0
-            block_idx = boundary // self._partial_tail_block_size
+            # A partial tail covers the gap from the last chunk boundary to
+            # the hand-off, so its boundary sits off the chunk grid.
+            assert boundary % chunk_tokens != 0
+            chunk_start_block_idx = (
+                boundary // chunk_tokens * self.config.blocks_per_chunk
+            )
+            last_block_idx = (boundary - 1) // self._partial_tail_block_size
             if any(
                 group.group_idx not in self._cow_source_groups
-                and block_idx >= len(group_states[group.group_idx].block_ids)
+                and last_block_idx >= len(group_states[group.group_idx].block_ids)
                 for group in self.config.kv_group_configs
             ):
                 continue
@@ -1865,13 +1881,24 @@ class OffloadingConnectorScheduler:
                 )
                 for group, tokens in zip(self.config.kv_group_configs, key_tokens)
             ]
-            block_ids = [
-                cow_blocks[group.group_idx]
+            # Per group the tail stores one contiguous block range and the
+            # block index the worker maps it to: every whole block of the
+            # tail's chunk for a non-recurrent group (the chunk-aligned start
+            # keeps the sub-block mapping skip-free), or its single CoW state
+            # block at the boundary for a recurrent one.
+            sources = [
+                ([cow_blocks[group.group_idx]], last_block_idx)
                 if group.group_idx in self._cow_source_groups
-                else group_states[group.group_idx].block_ids[block_idx]
+                else (
+                    group_states[group.group_idx].block_ids[
+                        chunk_start_block_idx : last_block_idx + 1
+                    ],
+                    chunk_start_block_idx,
+                )
                 for group in self.config.kv_group_configs
             ]
-            assert all(block_id != 0 for block_id in block_ids)
+            block_ids = [ids for ids, _ in sources]
+            assert all(block_id != 0 for ids in block_ids for block_id in ids)
 
             store_output = self.manager.prepare_store(keys, req_status.req_context)
             if store_output is None:
@@ -1894,10 +1921,15 @@ class OffloadingConnectorScheduler:
             accepted_groups = [group_by_key[key] for key in store_output.keys_to_store]
             group_sizes = [0] * len(self.config.kv_group_configs)
             block_indices = [0] * len(self.config.kv_group_configs)
-            for group_idx in accepted_groups:
-                group_sizes[group_idx] = 1
-                block_indices[group_idx] = block_idx
-            source_blocks = [block_ids[group_idx] for group_idx in accepted_groups]
+            for config_idx in accepted_groups:
+                group_blocks, first_block_idx = sources[config_idx]
+                group_sizes[config_idx] = len(group_blocks)
+                block_indices[config_idx] = first_block_idx
+            source_blocks = [
+                block_id
+                for config_idx in accepted_groups
+                for block_id in block_ids[config_idx]
+            ]
 
             job_id = self._generate_job_id()
             req_status.transfer_jobs.add(job_id)
