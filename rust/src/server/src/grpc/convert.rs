@@ -335,7 +335,6 @@ pub fn to_prompt_info(
     }
 }
 
-/// Convert a worker prefill-progress snapshot to the public gRPC response.
 pub fn to_prefill_progress(progress: &PrefillProgress) -> pb::PrefillProgress {
     pb::PrefillProgress {
         request_id: progress.request_id.clone(),

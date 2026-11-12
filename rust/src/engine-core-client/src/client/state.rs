@@ -3,7 +3,6 @@
 
 use std::collections::{BTreeMap, BTreeSet, HashMap};
 use std::num::NonZeroU32;
-use std::sync::Arc;
 use std::sync::atomic::{AtomicU64, Ordering};
 
 use tokio::sync::oneshot;
@@ -15,7 +14,7 @@ pub(crate) use crate::client::output_channel::{OutputReceiver, OutputSender};
 use crate::client::stream::EngineCoreStreamOutput;
 use crate::error::{Error, Result};
 use crate::protocol::output::{
-    EngineCoreEventType, EngineCoreFinishReason, EngineCoreOutput, PrefillProgress,
+    EngineCoreEventType, EngineCoreFinishReason, EngineCoreOutput,
 };
 use crate::protocol::stats::SchedulerStats;
 use crate::protocol::utility::UtilityOutput;
@@ -266,7 +265,6 @@ impl RequestRegistry {
         None
     }
 
-    /// Route prefill progress to the streams that own it; best effort.
 
     /// Advance the request's LoRA scheduling phase from the engine-core events
     /// attached to one output, mirroring the Python frontend's

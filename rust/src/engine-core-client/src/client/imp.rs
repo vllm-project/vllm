@@ -28,7 +28,7 @@ use crate::metrics::{
     EngineSleepState, IterationMetricHandles, LoraInfoExporter, SchedulerStatsRecorder,
 };
 use crate::protocol::encode_msgpack;
-use crate::protocol::output::{EngineCoreOutput, EngineCoreOutputs, PrefillProgress};
+use crate::protocol::output::{EngineCoreOutput, EngineCoreOutputs};
 use crate::protocol::request::{EngineCoreRequest, EngineCoreRequestType};
 use crate::protocol::stats::SchedulerStats;
 use crate::protocol::utility::{EngineCoreUtilityRequest, UtilityOutput};

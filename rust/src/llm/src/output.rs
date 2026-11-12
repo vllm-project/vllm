@@ -219,7 +219,6 @@ pub struct GenerateOutput {
     /// request finishes, so text decoding can drop the rows of tokens cut off
     /// by a stop string.
     pub routed_experts: AuxOutputRows,
-    /// Optional request-scoped worker prefill-progress snapshot.
     pub prefill_progress: Option<Box<PrefillProgress>>,
     /// Snapshot of engine lifecycle timestamps after this output.
     ///
@@ -407,7 +406,6 @@ impl GenerateOutputStream {
             && raw.new_token_ids.is_empty()
             && raw.finish_reason.is_none();
 
-        // Populate the one-time prompt info on the first ordinary output.
         if let Some(info) = &mut self.pending_prompt_info
             && info.prompt_logprobs.is_none()
         {
