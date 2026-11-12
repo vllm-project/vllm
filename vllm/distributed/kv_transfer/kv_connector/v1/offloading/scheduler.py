@@ -1120,6 +1120,8 @@ class OffloadingConnectorScheduler:
         # per group
         group_sizes: list[int] = []
         block_indices: list[int] = []
+        load_chunk_ranges: list[tuple[int, int]] = []
+        load_block_ids: list[list[int]] = []
         for config_idx, (group_config, group_state) in enumerate(
             zip(self.config.kv_group_configs, req_status.group_states)
         ):
@@ -1158,11 +1160,14 @@ class OffloadingConnectorScheduler:
                 )
 
             num_chunks = cdiv(num_cached_tokens, tokens_per_chunk)
+            load_block_ids.append([block.block_id for block in group_blocks])
+            load_chunk_ranges.append((0, 0))
             if num_pending_gpu_blocks:
                 start_chunk_idx = (
                     load_start_gpu_block_idx // self.config.blocks_per_chunk
                 )
                 end_chunk_idx = num_chunks - (partial_tail_boundary is not None)
+                load_chunk_ranges[-1] = (start_chunk_idx, end_chunk_idx)
                 assert len(offload_keys) >= end_chunk_idx
                 group_keys_to_load = offload_keys[start_chunk_idx:end_chunk_idx]
                 if partial_tail_boundary is not None:
@@ -1201,7 +1206,9 @@ class OffloadingConnectorScheduler:
             block_indices.append(load_start_gpu_block_idx)
 
         for handler in self._store_handlers.values():
-            handler.on_load_scheduled(req_status, num_cached_tokens)
+            handler.on_load_scheduled(
+                req_status, num_cached_tokens, load_chunk_ranges, load_block_ids
+            )
 
         src_spec = self.manager.prepare_load(keys_to_load, req_status.req_context)
         dst_spec = GPULoadStoreSpec(
@@ -1585,6 +1592,8 @@ class OffloadingConnectorScheduler:
                     )
                     req_status.load_failed = True
                 self.manager.complete_load(job_status.keys, req_context)
+                for handler in self._store_handlers.values():
+                    handler.on_load_complete(job_status)
                 if self._chunks_being_loaded:
                     self._chunks_being_loaded.difference_update(job_status.keys)
             if self._block_id_to_pending_jobs:

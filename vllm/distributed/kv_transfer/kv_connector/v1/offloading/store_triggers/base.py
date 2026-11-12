@@ -6,6 +6,7 @@ from typing import TYPE_CHECKING, Any, ClassVar, Protocol
 
 from vllm.distributed.kv_transfer.kv_connector.v1.offloading.common import (
     ReqId,
+    TransferJobStatus,
 )
 from vllm.distributed.kv_transfer.kv_connector.v1.offloading.events import (
     OffloadingEventsTracker,
@@ -104,12 +105,27 @@ class StoreTriggerHandler(ABC):
         self,
         req_status: RequestOffloadState,
         num_cached_tokens: int,
+        load_chunk_ranges: Sequence[tuple[int, int]],
+        load_block_ids: Sequence[Sequence[int]],
     ) -> None:
         """Called when the scheduler makes a load job for a request.
 
         Args:
             req_status: the request of the load.
             num_cached_tokens: the number of tokens on the GPU after the load.
+            load_chunk_ranges: per group, the [start, end) range of the
+                loaded chunks. An empty range if the group loads nothing.
+            load_block_ids: per group, the GPU block ids of the request after
+                the allocation. The request state gets them in a later step.
+
+        """
+        return
+
+    def on_load_complete(self, job_status: TransferJobStatus) -> None:
+        """Called when a load job of a tracked request completes.
+
+        Args:
+            job_status: the status of the completed load job.
 
         """
         return
