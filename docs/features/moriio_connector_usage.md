@@ -139,7 +139,11 @@ WRITE mode is used by default. READ mode can be configured by setting `--kv-tran
 ### WRITE transfer validation and trust boundaries
 
 Both peers must run a version that exchanges WRITE prompt token counts. The
-producer checks its computed prompt length against the consumer's expected
+producer compares a scheduler-derived SHA-256 fingerprint of the transferred
+prompt content on both peers, including multimodal identifiers, embeddings and
+LoRA identity. Mamba groups must contain exactly one state slot per side; the
+extra tail-block allowance applies only to attention groups. The
+producer also checks its computed prompt length against the consumer's expected
 transferred length, and checks every cache group's block count before writing.
 Hybrid prefill reports its truncated N-1-token prompt; the consumer may reserve
 one additional attention block for its locally recomputed last token.

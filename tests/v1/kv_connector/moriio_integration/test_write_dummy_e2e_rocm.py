@@ -1033,14 +1033,28 @@ def test_write_mismatched_prompt_fails_at_openai_endpoint():
 
         block_size = _block_size(decode)
         # Prove the transport works before checking partial/whole-page shortfalls.
-        for prefill_len, decode_len in [(4, 4), (3, 4), (4, 4 * block_size)]:
+        for case_index, (prefill_len, decode_len, different_content) in enumerate(
+            [
+                (16, 16, False),
+                (16, 16, True),
+                (3, 4, False),
+                (4, 4 * block_size, False),
+            ]
+        ):
+            base_token = 1000 + 100 * case_index
+            source_token = base_token + (1000 if different_content else 0)
             transfer_id = f"tx-{uuid.uuid4()}"
             body = {"model": arch.model, "max_tokens": 1, "temperature": 0}
             response = requests.post(
                 f"{prefill.url_root}/v1/completions",
                 json={
                     **body,
-                    "prompt": list(range(1000, 1000 + prefill_len)),
+                    "prompt": list(
+                        range(
+                            source_token,
+                            source_token + prefill_len,
+                        )
+                    ),
                     "kv_transfer_params": {
                         **peer_params(configs[1]),
                         "transfer_id": transfer_id,
@@ -1056,7 +1070,7 @@ def test_write_mismatched_prompt_fails_at_openai_endpoint():
                 f"{decode.url_root}/v1/completions",
                 json={
                     **body,
-                    "prompt": list(range(1000, 1000 + decode_len)),
+                    "prompt": list(range(base_token, base_token + decode_len)),
                     "kv_transfer_params": {
                         **peer_params(configs[0]),
                         "transfer_id": transfer_id,
@@ -1065,7 +1079,7 @@ def test_write_mismatched_prompt_fails_at_openai_endpoint():
                 },
                 timeout=120,
             )
-            if prefill_len == decode_len:
+            if prefill_len == decode_len and not different_content:
                 response.raise_for_status()
                 assert response.json()["choices"]
             else:
