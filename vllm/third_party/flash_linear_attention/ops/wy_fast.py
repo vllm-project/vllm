@@ -40,7 +40,9 @@ def _wu_cdna3_config(programs: int, device: int) -> triton.Config:
 
 @triton.heuristics({"IS_VARLEN": lambda args: args["cu_seqlens"] is not None})
 @autotune_unless_cdna3(
-    configs=_WU_STOCK, key=["H", "K", "V", "BT", "BK", "BV", "IS_VARLEN"]
+    configs=_WU_STOCK,
+    key=["H", "K", "V", "BT", "BK", "BV", "IS_VARLEN"],
+    cdna3_configs=_WU_CDNA3,
 )
 @triton.jit(do_not_specialize=["T"])
 def recompute_w_u_fwd_kernel(

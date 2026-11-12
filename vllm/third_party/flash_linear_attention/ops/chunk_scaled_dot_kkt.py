@@ -59,7 +59,9 @@ def _kkt_cdna3_config(tokens_heads: int) -> triton.Config:
         "IS_VARLEN": lambda args: args["cu_seqlens"] is not None,
     }
 )
-@autotune_unless_cdna3(configs=_KKT_STOCK, key=["H", "K", "BT", "IS_VARLEN"])
+@autotune_unless_cdna3(
+    configs=_KKT_STOCK, key=["H", "K", "BT", "IS_VARLEN"], cdna3_configs=_KKT_CDNA3
+)
 @triton.jit(do_not_specialize=["T"])
 def chunk_scaled_dot_kkt_fwd_kernel(
     k,

@@ -62,7 +62,9 @@ def _fwd_o_cdna3_config(V: int, chunk_heads: int, device: int) -> triton.Config:
         "IS_VARLEN": lambda args: args["cu_seqlens"] is not None,
     }
 )
-@autotune_unless_cdna3(configs=_FWD_O_STOCK, key=["H", "K", "V", "BT"])
+@autotune_unless_cdna3(
+    configs=_FWD_O_STOCK, key=["H", "K", "V", "BT"], cdna3_configs=_FWD_O_CDNA3
+)
 @triton.jit(do_not_specialize=["T"])
 def chunk_fwd_kernel_o(
     q,

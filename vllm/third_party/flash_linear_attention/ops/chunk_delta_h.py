@@ -15,7 +15,7 @@ from vllm.utils.platform_utils import num_compute_units
 
 from .index import prepare_chunk_indices, prepare_chunk_offsets
 from .op import exp, exp2
-from .utils import FLA_CHUNK_SIZE, is_cdna3, use_cuda_graph
+from .utils import FLA_CHUNK_SIZE, compile_on_first_launch, is_cdna3, use_cuda_graph
 
 NUM_WARPS = [2, 4, 8, 16]
 # Triton's AMD backend fails to lower this kernel with num_stages=4.
@@ -42,6 +42,9 @@ def _fwd_h_cdna3_config(
     pick = _FWD_H_PICK.get(key)
     if pick is None:
         return None
+    # Never slower than a stock BV=32 pick, whatever the grid size.
+    if pick.kwargs["BV"] == _FWD_H_CDNA3.kwargs["BV"]:
+        return _FWD_H_CDNA3
     programs = triton.cdiv(V, _FWD_H_CDNA3.kwargs["BV"]) * num_seq_heads
     return _FWD_H_CDNA3 if programs <= num_compute_units(device) else pick
 
@@ -60,6 +63,7 @@ _FWD_H_HEURISTICS = {
 @triton.autotune(
     configs=_FWD_H_STOCK, key=["H", "K", "V", "BT"], use_cuda_graph=use_cuda_graph
 )
+@compile_on_first_launch([_FWD_H_CDNA3])
 @triton.jit(do_not_specialize=["T"])
 def chunk_gated_delta_rule_fwd_kernel_h_blockdim64(
     k,
