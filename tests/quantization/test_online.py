@@ -2461,8 +2461,6 @@ def test_online_nf12_generation_matches_bf16(
     from tests.models.utils import check_logprobs_close
     from vllm.model_executor.layers.quantization.online.nf12 import (
         Nf12OnlineLinearMethod,
-    )
-    from vllm.model_executor.layers.quantization.online.nf12_moe import (
         Nf12OnlineMoEMethod,
     )
 

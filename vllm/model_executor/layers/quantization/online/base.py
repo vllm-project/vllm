@@ -60,8 +60,10 @@ from vllm.model_executor.layers.quantization.online.mxfp8 import (
     Mxfp8OnlineLinearMethod,
     Mxfp8OnlineMoEMethod,
 )
-from vllm.model_executor.layers.quantization.online.nf12 import Nf12OnlineLinearMethod
-from vllm.model_executor.layers.quantization.online.nf12_moe import Nf12OnlineMoEMethod
+from vllm.model_executor.layers.quantization.online.nf12 import (
+    Nf12OnlineLinearMethod,
+    Nf12OnlineMoEMethod,
+)
 from vllm.model_executor.layers.quantization.online.nvfp4 import (
     Nvfp4OnlineMoEMethod,
 )
