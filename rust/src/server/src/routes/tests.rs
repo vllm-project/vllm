@@ -823,7 +823,7 @@ fn test_render_state(
         max_model_len,
         max_n_sequences: crate::DEFAULT_MAX_N_SEQUENCES,
         text: TextRequestProcessor::new(backend.clone(), max_model_len.unwrap_or(u32::MAX)),
-        chat: ChatRequestProcessor::render_only(backend)
+        chat: ChatRequestProcessor::new(backend, None, None)
             .with_parser_selections(tool_call_parser, reasoning_parser),
         lora_modules: Vec::new(),
     }
@@ -2125,7 +2125,7 @@ async fn render_glm_tools_for_none_follow_server_exclusion_setting() {
             max_model_len: Some(4096),
             max_n_sequences: crate::DEFAULT_MAX_N_SEQUENCES,
             text: TextRequestProcessor::new(Arc::new(FakeChatBackend::new()), 4096),
-            chat: ChatRequestProcessor::render_only(backend.clone())
+            chat: ChatRequestProcessor::new(backend.clone(), None, None)
                 .with_exclude_tools_when_tool_choice_none(exclude),
             lora_modules: Vec::new(),
         }));
@@ -4292,7 +4292,7 @@ fn multimodal_render_app() -> axum::Router {
     ));
     build_render_router(Arc::new(RenderState {
         text: TextRequestProcessor::new(backend.clone(), u32::MAX),
-        chat: ChatRequestProcessor::render_only(backend).with_model_dtype(ModelDtype::BFloat16),
+        chat: ChatRequestProcessor::new(backend, Some(ModelDtype::BFloat16), None),
         ..test_render_state(None, ParserSelection::Auto, ParserSelection::Auto)
     }))
 }
@@ -12242,7 +12242,7 @@ async fn n_limit_follows_max_n_sequences_option() {
         max_model_len: Some(128),
         max_n_sequences: 2,
         text: TextRequestProcessor::new(backend.clone(), 128),
-        chat: ChatRequestProcessor::render_only(backend),
+        chat: ChatRequestProcessor::new(backend, None, None),
         lora_modules: Vec::new(),
     }));
     for (uri, body) in [

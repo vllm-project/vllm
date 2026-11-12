@@ -202,11 +202,16 @@ async fn build_state(config: &RenderConfig) -> Result<Arc<RenderState>> {
         .is_some()
         .then(|| config.dtype.resolve(loaded.text_backend.config_dtype()))
         .transpose()?;
+    if let Some(model_dtype) = model_dtype {
+        info!(
+            dtype = model_dtype.as_str(),
+            "multimodal preprocessing enabled"
+        );
+    }
     let max_model_len = config.max_model_len.unwrap_or(u32::MAX);
     let text = TextRequestProcessor::new(loaded.text_backend, max_model_len)
         .with_max_logprobs(config.max_logprobs);
-    let mut chat = ChatRequestProcessor::render_only(loaded.chat_backend)
-        .with_max_model_len(config.max_model_len)
+    let chat = ChatRequestProcessor::new(loaded.chat_backend, model_dtype, config.max_model_len)
         .with_parser_selections(
             config.tool_call_parser.clone(),
             config.reasoning_parser.clone(),
@@ -220,13 +225,6 @@ async fn build_state(config: &RenderConfig) -> Result<Arc<RenderState>> {
                 .collect(),
         )
         .with_exclude_tools_when_tool_choice_none(config.exclude_tools_when_tool_choice_none);
-    if let Some(model_dtype) = model_dtype {
-        info!(
-            dtype = model_dtype.as_str(),
-            "multimodal preprocessing enabled"
-        );
-        chat = chat.with_model_dtype(model_dtype);
-    }
     Ok(Arc::new(RenderState {
         model: config.model.clone(),
         served_model_names,
