@@ -1386,6 +1386,30 @@ def test_partial_lookup_returns_zero_without_stored_tail():
 
 
 @pytest.mark.cpu_test
+@pytest.mark.parametrize(
+    "pending_result", [LookupResult.RETRY, LookupResult.HIT_PENDING]
+)
+@pytest.mark.parametrize(
+    "required_result,expected", [(LookupResult.HIT, None), (LookupResult.MISS, 0)]
+)
+def test_partial_lookup_defers_only_for_viable_pending_boundary(
+    pending_result, required_result, expected
+):
+    scheduler = _make_partial_tail_scheduler()
+    request, _ = _make_anchored_partial_tail_request(scheduler, {0: set(), 1: set()})
+
+    def lookup(key, req_context):
+        if req_context.get_offload_key_position(key) == 12:
+            return (
+                pending_result if get_offload_group_idx(key) == 0 else required_result
+            )
+        return LookupResult.MISS
+
+    scheduler.manager.lookup.side_effect = lookup
+    assert scheduler.get_num_new_matched_tokens(request, 0) == (expected, False)
+
+
+@pytest.mark.cpu_test
 def test_partial_lookup_requires_resident_full_attention_prefix():
     # Tail keys resident but the chunk [0,16) was evicted: reporting the tail
     # would make the load request a missing chunk.

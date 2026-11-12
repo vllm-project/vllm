@@ -1296,8 +1296,8 @@ class OffloadingConnectorScheduler:
         `bridge_pending` is True if a complete chunk that the hit also loads
         is not ready yet.
         Returns `(hit, pending)`. `hit` is True only if every key is ready.
-        `pending` is True if a key looked up before the first miss is not
-        ready yet.
+        `pending` is True if no required key missed and a required key or
+        bridge chunk is not ready yet.
         """
         req = req_status.req
         req_context = req_status.req_context
@@ -1314,7 +1314,7 @@ class OffloadingConnectorScheduler:
             pending |= key in (self._chunks_being_loaded or ())
             result = self.manager.lookup(key, req_context)
             if result is LookupResult.MISS:
-                return False, pending
+                return False, False
             pending |= result is not LookupResult.HIT
             boundary_keys.append((group_config, key_tokens, key))
 
