@@ -9,7 +9,6 @@ import pytest
 import torch
 
 import vllm.model_executor.layers.mamba.gdn.qwen_gdn_linear_attn as gdn_module
-import vllm.utils.flashinfer as flashinfer_utils
 from vllm.model_executor.layers.mamba.gdn.qwen_gdn_linear_attn import (
     _resolve_gdn_prefill_backend,
     fi_chunk_gated_delta_rule,
@@ -119,39 +118,13 @@ def test_a_non_cuda_platform_resolves_to_triton(
 
 # --- what the prefill adapter hands FlashInfer -------------------------------
 #
-# The batch maximum is a later addition to chunk_gated_delta_rule; 0.7.0 keeps
-# it internal and derives the grids from the token total. The adapter has to
-# read the installed signature and leave the keyword out of the builds that do
-# not take it, or every architecture the base path already served raises
-# TypeError. These stubs declare their parameters explicitly: a **kwargs stub
-# would accept the keyword either way and prove nothing.
+# The adapter gives FlashInfer the batch's longest sequence and the host copy of
+# cu_seqlens, so the CP grids are sized from the batch rather than the token
+# total. The stub declares its parameters explicitly: a **kwargs stub would
+# accept a misspelled keyword and prove nothing.
 
 
-def _stub_without_max_seqlen(seen: dict):
-    def chunk_gated_delta_rule(
-        q,
-        k,
-        v,
-        g=None,
-        beta=None,
-        initial_state=None,
-        output_final_state=False,
-        cu_seqlens=None,
-        use_qk_l2norm_in_kernel=False,
-        output=None,
-        state_checkpoints=None,
-        checkpoint_cu_starts=None,
-        checkpoint_every_n_tokens=0,
-        use_cp="auto",
-        backend="auto",
-    ):
-        seen.update(backend=backend, has_max_seqlen=False, q_shape=tuple(q.shape))
-        return torch.zeros_like(q), initial_state
-
-    return chunk_gated_delta_rule
-
-
-def _stub_with_max_seqlen(seen: dict):
+def _stub(seen: dict):
     def chunk_gated_delta_rule(
         q,
         k,
@@ -173,7 +146,6 @@ def _stub_with_max_seqlen(seen: dict):
     ):
         seen.update(
             backend=backend,
-            has_max_seqlen=True,
             max_seqlen=max_seqlen,
             cu_seqlens_cpu=cu_seqlens_cpu,
             q_shape=tuple(q.shape),
@@ -181,28 +153,6 @@ def _stub_with_max_seqlen(seen: dict):
         return torch.zeros_like(q), initial_state
 
     return chunk_gated_delta_rule
-
-
-def _install_stub(monkeypatch: pytest.MonkeyPatch, fn) -> SimpleNamespace:
-    """Publish `fn` as the installed GDN prefill and reset the cached probe."""
-    module = SimpleNamespace(chunk_gated_delta_rule=fn)
-    monkeypatch.setattr(flashinfer_utils, "has_flashinfer", lambda: True)
-    monkeypatch.setattr(
-        flashinfer_utils,
-        "_get_submodule",
-        lambda name: module if name == "flashinfer.gdn_prefill" else None,
-    )
-    monkeypatch.setitem(sys.modules, "flashinfer.gdn_prefill", module)
-    flashinfer_utils.flashinfer_gdn_prefill_takes.cache_clear()
-    return module
-
-
-@pytest.fixture(autouse=True)
-def _forget_probe():
-    """The probe is cached for the process, so neither side may leak."""
-    flashinfer_utils.flashinfer_gdn_prefill_takes.cache_clear()
-    yield
-    flashinfer_utils.flashinfer_gdn_prefill_takes.cache_clear()
 
 
 def _adapter_inputs(seq_lens: list[int], num_heads: int = 2, head_dim: int = 4):
@@ -229,11 +179,12 @@ def _adapter_inputs(seq_lens: list[int], num_heads: int = 2, head_dim: int = 4):
     [([1024, 1024, 1024, 1024], 1024), ([4096], 4096)],
     ids=["four-equal", "one-long"],
 )
-def test_adapter_passes_the_batch_maximum_when_the_build_takes_it(
+def test_adapter_passes_the_batch_maximum(
     monkeypatch: pytest.MonkeyPatch, seq_lens: list[int], batch_maximum: int
 ) -> None:
     seen: dict = {}
-    _install_stub(monkeypatch, _stub_with_max_seqlen(seen))
+    module = SimpleNamespace(chunk_gated_delta_rule=_stub(seen))
+    monkeypatch.setitem(sys.modules, "flashinfer.gdn_prefill", module)
 
     inputs = _adapter_inputs(seq_lens)
     host = inputs["cu_seqlens"].clone()
@@ -249,34 +200,3 @@ def test_adapter_passes_the_batch_maximum_when_the_build_takes_it(
     assert seen["q_shape"] == (sum(seq_lens), 2, 4)
     assert tuple(output.shape) == (1, sum(seq_lens), 2, 4)
     assert final_state.shape == inputs["initial_state"].shape
-
-
-def test_adapter_omits_the_batch_maximum_when_the_build_lacks_it(
-    monkeypatch: pytest.MonkeyPatch,
-) -> None:
-    seen: dict = {}
-    _install_stub(monkeypatch, _stub_without_max_seqlen(seen))
-
-    output, final_state = fi_chunk_gated_delta_rule(
-        **_adapter_inputs([1024, 1024, 1024, 1024]),
-        max_seq_len=1024,
-        cu_seqlens_cpu=torch.tensor([0, 1024, 2048, 3072, 4096]),
-    )
-
-    # No TypeError, and the backend still names the implementation to run.
-    assert seen["has_max_seqlen"] is False
-    assert seen["backend"] == "flashinfer"
-    assert tuple(output.shape) == (1, 4096, 2, 4)
-    assert final_state is not None
-
-
-def test_the_probe_answers_from_the_signature(
-    monkeypatch: pytest.MonkeyPatch,
-) -> None:
-    probe = flashinfer_utils.flashinfer_gdn_prefill_takes
-
-    _install_stub(monkeypatch, _stub_without_max_seqlen({}))
-    assert not probe("max_seqlen") and not probe("cu_seqlens_cpu")
-
-    _install_stub(monkeypatch, _stub_with_max_seqlen({}))
-    assert probe("max_seqlen") and probe("cu_seqlens_cpu")
