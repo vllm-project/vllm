@@ -524,6 +524,11 @@ class SpeculativeConfig:
     draft_tensor_parallel_size: int | None = Field(default=None, ge=1)
     """The degree of the tensor parallelism for the draft model. Can only be 1
     or the same as the target model's tensor parallel size."""
+    draft_decode_context_parallel_size: int | None = Field(default=None, ge=1)
+    """The degree of decode context parallelism for the draft model. Can only be
+    1 or the same as the target model's decode context parallel size. Defaults to
+    the target's, except for DFlash/DSpark drafts, which default to 1 unless they
+    are full-attention MLA."""
     tensor_parallel_size: int | None = None
     """Users should pass "draft_tensor_parallel_size". This parameter's purpose is to
     warn users when they mistakenly provide the wrong argument."""
@@ -591,8 +596,7 @@ class SpeculativeConfig:
     cuts its cost per draft token; the target still verifies with the full
     vocabulary, so outputs follow the usual speculative decoding guarantees.
     Accepts SGLang's `--speculative-token-map` file (`.pt`) or a JSON list.
-    EOS ids are always included. The rows follow
-    `draft_lm_head_quantization`. Requires an MTP drafter that shares an
+    EOS ids are always included. Requires an MTP drafter that shares an
     unquantized lm_head and tensor parallel size 1."""
 
     draft_token_map_dynamic_rows: int = Field(default=0, ge=0)
@@ -687,6 +691,15 @@ class SpeculativeConfig:
     enable_adaptive_verification: bool = False
     """Whether to adaptively size the draft-verification budget from per-request
     confidence. Currently only supported for method="dspark"."""
+
+    prefill_context_kv_only: bool = False
+    """Set on a P/D prefill instance (Model Runner V2, DFlash-based speculators)
+    to only store the drafter's context K/V, which the decode instance reads:
+    no drafts, no lookahead KV slots, and, for draft models that support it,
+    the draft weights only drafting reads are freed. Requests that decode there
+    run without speculation. Keep the rest of the speculative config as on the
+    decode instance; adaptive verification and dynamic speculative decoding are
+    turned off."""
 
     @staticmethod
     def _acceptance_length_to_rates(length: float, n: int) -> list[float]:
@@ -1507,6 +1520,24 @@ class SpeculativeConfig:
                 )
         config_cls.apply_options(self)
 
+        if self.prefill_context_kv_only:
+            if not config_cls.supports_prefill_context_kv_only:
+                raise ValueError(
+                    "prefill_context_kv_only is not supported with speculative "
+                    f"method {self.custom_method or self.method!r}."
+                )
+            if (
+                self.enable_adaptive_verification
+                or self.uses_dynamic_speculative_decoding()
+            ):
+                logger.warning_once(
+                    "prefill_context_kv_only schedules no drafts to verify. "
+                    "Disabling adaptive verification and dynamic speculative "
+                    "decoding."
+                )
+                self.enable_adaptive_verification = False
+                self.num_speculative_tokens_per_batch_size = None
+
         if (
             config_cls.adaptive_verification_uses_draft_logits
             and self.enable_adaptive_verification
@@ -1655,6 +1686,19 @@ class SpeculativeConfig:
             )
         return speculative_draft_tensor_parallel_size
 
+    @staticmethod
+    def _verify_and_get_draft_dcp(
+        target_parallel_config: ParallelConfig, draft_dcp: int | None
+    ) -> int:
+        """Default the draft's DCP to the target's; an explicit value must be 1
+        or the target's."""
+        target_dcp = target_parallel_config.decode_context_parallel_size
+        if draft_dcp is None:
+            return target_dcp
+        if draft_dcp not in (1, target_dcp):
+            raise ValueError(f"{draft_dcp=} must be 1 or {target_dcp}.")
+        return draft_dcp
+
     def update_arch_(self):
         """EagleConfig and ExtractHiddenStatesConfig update architectures, so update all
         architectures-related fields in self.draft_model_config
@@ -1795,6 +1839,13 @@ class SpeculativeConfig:
         if self.draft_token_map is not None and self.method != "mtp":
             raise ValueError(
                 f"draft_token_map requires method 'mtp', got {self.method!r}."
+            )
+        if (
+            self.draft_token_map is not None
+            and self.draft_lm_head_quantization is not None
+        ):
+            raise ValueError(
+                "draft_token_map does not support draft_lm_head_quantization yet."
             )
 
         if self.rejection_sample_method == "fly":

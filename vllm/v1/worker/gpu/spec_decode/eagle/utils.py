@@ -142,19 +142,11 @@ def load_eagle_model(target_model: nn.Module, vllm_config: VllmConfig) -> nn.Mod
 
     maybe_share_target_embed(eagle_model, draft_inner, target_inner)
 
-    quantization = speculative_config.draft_lm_head_quantization
-    has_token_map = speculative_config.draft_token_map is not None
-    # With a draft token map only its rows are quantized, in
-    # load_draft_token_map below.
     draft_head = share_target_lm_head(
         eagle_model,
         get_target_lm_head(target_model, target_language_model),
-        None if has_token_map else quantization,
+        speculative_config.draft_lm_head_quantization,
     )
-    if draft_head is None and quantization is not None:
-        raise ValueError(
-            "draft_lm_head_quantization needs a drafter that shares the target lm_head."
-        )
     if draft_head is not None:
         # MTP layers route logits through layer.shared_head.head, not
         # eagle_model.lm_head, so the per-layer copies need fixing up too.
@@ -168,7 +160,7 @@ def load_eagle_model(target_model: nn.Module, vllm_config: VllmConfig) -> nn.Mod
                     sh.head = draft_head
 
     # Only now does the drafter hold the lm_head it drafts with.
-    if has_token_map:
+    if speculative_config.draft_token_map is not None:
         from vllm.model_executor.layers.draft_vocab import load_draft_token_map
 
         load_draft_token_map(eagle_model, vllm_config)

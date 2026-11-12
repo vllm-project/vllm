@@ -22,7 +22,7 @@
 #   docker buildx bake -f docker/docker-bake.hcl -f docker/versions.json
 # =============================================================================
 
-ARG CUDA_VERSION=13.0.3
+ARG CUDA_VERSION=13.2.1
 ARG PYTHON_VERSION=3.12
 ARG UBUNTU_VERSION=24.04
 ARG INSTALL_RUBIN_PRERELEASE=false
@@ -42,10 +42,10 @@ ARG EFA_INSTALLER_SHA256=83993044fa4df3dc2f8b5c2f7051d61b9689441be023a2c92ea51d3
 # private registries that use a different repository naming conventions.
 #
 # Example:
-# docker build --build-arg BUILD_BASE_IMAGE=registry.acme.org/mirror/pytorch/manylinux2_28-builder:cuda13.0
+# docker build --build-arg BUILD_BASE_IMAGE=registry.acme.org/mirror/pytorch/manylinux2_28-builder:cuda13.2
 
 # Build wheels against the same glibc floor as PyTorch's published wheels.
-ARG BUILD_BASE_IMAGE=pytorch/manylinux2_28-builder:cuda13.0-78e737ad29420ffc4800e677c51e2a852caf8359
+ARG BUILD_BASE_IMAGE=pytorch/manylinux2_28-builder:cuda13.2-9f3983c9d680f3cc243dfa0524efcb881be7869e
 # Using cuda base image with minimal dependencies necessary for JIT compilation (FlashInfer, DeepGEMM, EP kernels)
 ARG FINAL_BASE_IMAGE=nvidia/cuda:${CUDA_VERSION}-base-ubuntu${UBUNTU_VERSION}
 
@@ -923,6 +923,9 @@ RUN chmod 0755 /usr/local/bin/vllm-nonroot-entrypoint.sh
 # Only needed for datacenter/professional GPUs with older drivers.
 # See: https://docs.nvidia.com/deploy/cuda-compatibility/
 ENV VLLM_ENABLE_CUDA_COMPATIBILITY=0
+# The final image's compat libraries, which can be newer than torch's CUDA
+# (Rubin: CUDA 13.5 image with cu134 torch).
+ENV VLLM_CUDA_COMPATIBILITY_PATH=/usr/local/cuda/compat
 
 # ============================================================
 # SLOW-CHANGING DEPENDENCIES BELOW

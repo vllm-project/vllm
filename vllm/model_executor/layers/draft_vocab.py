@@ -25,21 +25,10 @@ from typing import TYPE_CHECKING
 
 import torch
 import torch.nn as nn
-import torch.nn.functional as F
 
-from vllm import _custom_ops as ops
 from vllm.logger import init_logger
 from vllm.model_executor.layers.linear import ReplicatedLinear, UnquantizedLinearMethod
 from vllm.model_executor.layers.logits_processor import LogitsProcessor
-from vllm.model_executor.layers.quantization.utils.nvfp4_emulation_utils import (
-    FLOAT4_E2M1_MAX,
-    _e2m1_inline,
-)
-from vllm.model_executor.layers.quantization.utils.quant_utils import (
-    kFp8DynamicTensorSym,
-    kFp8StaticChannelSym,
-    weight_amax,
-)
 from vllm.model_executor.layers.vocab_parallel_embedding import (
     UnquantizedEmbeddingMethod,
     VocabParallelEmbedding,
@@ -48,10 +37,6 @@ from vllm.triton_utils import tl, triton
 
 if TYPE_CHECKING:
     from vllm.config import VllmConfig
-    from vllm.model_executor.kernels.linear import (
-        FP8ScaledMMLinearKernel,
-        NvFp4LinearKernel,
-    )
 
 logger = init_logger(__name__)
 
@@ -88,56 +73,15 @@ def load_draft_token_ids(path: str, extra_ids: list[int]) -> torch.Tensor:
     return torch.unique(token_ids, sorted=True)
 
 
-# Rows per step when copying or quantizing lm_head rows, which bounds the
+# Rows per step when copying lm_head rows, which bounds the
 # temporaries.
 _CHUNK = 16384
 
 
-def _quantize_rows(
-    weight: torch.Tensor, quantization: str, ids: torch.Tensor | None = None
-) -> tuple[torch.Tensor, ...]:
-    """Weight-only quantized `weight[ids]` (all rows by default).
-
-    Returns `(fp8_rows, row_scales)` for "fp8" and
-    `(packed_e2m1, e4m3_block_scales, global_scale)` for "nvfp4". The NVFP4
-    global scale covers all of `weight`, so any subset quantizes the same way.
-    """
-    if ids is None:
-        ids = torch.arange(weight.shape[0], device=weight.device)
-    if quantization == "nvfp4":
-        fp4_fp8_max = FLOAT4_E2M1_MAX * torch.finfo(torch.float8_e4m3fn).max
-        global_scale = fp4_fp8_max / weight_amax(weight).float().clamp(min=1e-12)
-    out: list[torch.Tensor] = []
-    for start in range(0, ids.numel(), _CHUNK):
-        rows = weight[ids[start : start + _CHUNK]]
-        if quantization == "fp8":
-            parts = ops.scaled_fp8_quant(rows, use_per_token_if_dynamic=True)
-        else:
-            parts = ops.scaled_fp4_quant(
-                rows, global_scale, is_sf_swizzled_layout=False
-            )
-        if not out:
-            out = [p.new_empty(ids.numel(), *p.shape[1:]) for p in parts]
-        for dst, part in zip(out, parts):
-            dst[start : start + part.shape[0]] = part
-    return tuple(out) if quantization == "fp8" else (*out, 1.0 / global_scale)
-
-
 class _Rows(ReplicatedLinear):
-    """lm_head rows as a linear layer, optionally weight-only quantized.
+    """lm_head rows as a linear layer."""
 
-    FP8 keeps one scale per row and NVFP4 one E4M3 scale per 16 weights; both
-    run on the platform's weight-only kernel.
-    """
-
-    weight: nn.Parameter
-
-    def __init__(self, weight: torch.Tensor, quantization: str | None):
-        num_rows = weight.shape[0]
-        # Weight-only kernels can require aligned output rows. The token map
-        # and dynamic candidates need not be aligned, e.g. after adding EOS.
-        if quantization is not None and (padding := -num_rows % 8):
-            weight = F.pad(weight, (0, 0, 0, padding))
+    def __init__(self, weight: torch.Tensor):
         with torch.device(weight.device):
             super().__init__(
                 weight.shape[1],
@@ -147,65 +91,22 @@ class _Rows(ReplicatedLinear):
                 return_bias=False,
                 disable_tp=True,
             )
-        self.num_rows = num_rows
-        self.kernel: FP8ScaledMMLinearKernel | NvFp4LinearKernel | None = None
-        if quantization is None:
-            self.weight_loader(self.weight, weight)
-            self.quant_method.process_weights_after_loading(self)
-            return
-        from vllm.model_executor.kernels.linear import (
-            init_nvfp4_linear_kernel,
-            init_wfp8_a16_linear_kernel,
-        )
-
-        # What a quantization scheme sets on its layer in create_weights.
-        self.input_size_per_partition = self.input_size
-        self.output_size_per_partition = self.output_size
-        self.logical_widths = self.output_partition_sizes
-        self.orig_dtype = self.params_dtype
-        quantized = _quantize_rows(weight, quantization)
-        if quantization == "fp8":
-            self.kernel = init_wfp8_a16_linear_kernel(
-                weight_quant_key=kFp8StaticChannelSym,
-                activation_quant_key=kFp8DynamicTensorSym,
-                weight_shape=tuple(weight.shape),
-                input_dtype=weight.dtype,
-                out_dtype=weight.dtype,
-            )
-            # The scaled-mm kernels take the weight as (K, N), tagged as such.
-            self.weight = nn.Parameter(quantized[0].t(), requires_grad=False)
-            self.weight.input_dim = 0
-            self.weight.output_dim = 1
-            self.weight_scale = nn.Parameter(quantized[1], requires_grad=False)
-            self.input_scale = None
-            self.weight_block_size = None
-        else:
-            self.kernel = init_nvfp4_linear_kernel(use_a16=True)
-            self.weight = nn.Parameter(quantized[0], requires_grad=False)
-            self.weight_scale = nn.Parameter(quantized[1], requires_grad=False)
-            self.weight_global_scale = nn.Parameter(quantized[2], requires_grad=False)
-        self.kernel.process_weights_after_loading(self)
-
-    def forward(self, x: torch.Tensor) -> torch.Tensor:  # type: ignore[override]
-        if self.kernel is None:
-            return self.quant_method.apply(self, x)
-        return self.kernel.apply_weights(self, x)[..., : self.num_rows]
+        self.weight_loader(self.weight, weight)
+        self.quant_method.process_weights_after_loading(self)
 
 
-# The two kernels below compute `x[n] @ weight[ids[n, j]]` for the dynamic
-# rows, reading only the picked rows instead of gathering them into a copy.
-# One program handles BLOCK_ROWS picked rows of one token.
+# The kernel below computes `x[n] @ weight[ids[n, j]]` for the dynamic rows,
+# reading only the picked rows instead of gathering them into a copy. One
+# program handles BLOCK_ROWS picked rows of one token.
 @triton.jit
 def _gather_rows_gemv_kernel(
     x_ptr,
     weight_ptr,
-    scale_ptr,
     ids_ptr,
     out_ptr,
     num_rows,
     hidden_size,
     weight_stride,
-    HAS_SCALE: tl.constexpr,
     BLOCK_ROWS: tl.constexpr,
     BLOCK_HIDDEN: tl.constexpr,
 ):
@@ -224,60 +125,6 @@ def _gather_rows_gemv_kernel(
             other=0.0,
         )
         acc += tl.sum(w.to(tl.float32) * x[None, :].to(tl.float32), axis=1)
-    if HAS_SCALE:
-        acc *= tl.load(scale_ptr + ids, mask=row_mask, other=0.0)
-    tl.store(
-        out_ptr + token * num_rows + rows,
-        acc.to(out_ptr.dtype.element_ty),
-        mask=row_mask,
-    )
-
-
-@triton.jit
-def _gather_rows_gemv_nvfp4_kernel(
-    x_ptr,
-    packed_ptr,
-    scale_ptr,
-    global_scale_ptr,
-    ids_ptr,
-    out_ptr,
-    num_rows,
-    hidden_size,
-    packed_stride,
-    scale_stride,
-    BLOCK_ROWS: tl.constexpr,
-    BLOCK_BYTES: tl.constexpr,
-):
-    token = tl.program_id(0)
-    rows = tl.program_id(1) * BLOCK_ROWS + tl.arange(0, BLOCK_ROWS)
-    row_mask = rows < num_rows
-    ids = tl.load(ids_ptr + token * num_rows + rows, mask=row_mask, other=0)
-    ids = ids.to(tl.int64)
-    acc = tl.zeros((BLOCK_ROWS,), dtype=tl.float32)
-    num_bytes = hidden_size // 2
-    for start in range(0, num_bytes, BLOCK_BYTES):
-        bcols = start + tl.arange(0, BLOCK_BYTES)
-        bmask = bcols < num_bytes
-        mask = row_mask[:, None] & bmask[None, :]
-        # Each byte packs two E2M1 values (low nibble first) and every 8 bytes
-        # (16 values) share one E4M3 block scale.
-        b = tl.load(
-            packed_ptr + ids[:, None] * packed_stride + bcols[None, :],
-            mask=mask,
-            other=0,
-        ).to(tl.int32)
-        sc = tl.load(
-            scale_ptr + ids[:, None] * scale_stride + (bcols // 8)[None, :],
-            mask=mask,
-            other=0.0,
-        ).to(tl.float32)
-        x_ptrs = x_ptr + token * hidden_size + 2 * bcols
-        x_lo = tl.load(x_ptrs, mask=bmask, other=0.0).to(tl.float32)
-        x_hi = tl.load(x_ptrs + 1, mask=bmask, other=0.0).to(tl.float32)
-        v_lo = _e2m1_inline(b & 15)
-        v_hi = _e2m1_inline((b >> 4) & 15)
-        acc += tl.sum((v_lo * x_lo[None, :] + v_hi * x_hi[None, :]) * sc, axis=1)
-    acc *= tl.load(global_scale_ptr)
     tl.store(
         out_ptr + token * num_rows + rows,
         acc.to(out_ptr.dtype.element_ty),
@@ -286,89 +133,33 @@ def _gather_rows_gemv_nvfp4_kernel(
 
 
 def gather_rows_gemv(
-    x: torch.Tensor, rows: tuple[torch.Tensor, ...], ids: torch.Tensor
+    x: torch.Tensor, weight: torch.Tensor, ids: torch.Tensor
 ) -> torch.Tensor:
     """`out[n, j] = x[n] @ weight[ids[n, j]]` without materializing the rows.
 
     Args:
         x: Activations, shape `(N, H)`.
-        rows: `(weight,)` in the activation dtype, `(fp8_weight, row_scale)`
-            or `(nvfp4_packed, block_scales, global_scale)`.
+        weight: lm_head weight, shape `(V, H)`.
         ids: Row ids per token, shape `(N, J)`.
 
     """
     if not x.is_cuda:
-        assert len(rows) == 1, "quantized rows need CUDA"
-        return torch.einsum("nd,njd->nj", x, rows[0][ids])
+        return torch.einsum("nd,njd->nj", x, weight[ids])
     num_tokens, num_rows = ids.shape
     out = x.new_empty(num_tokens, num_rows)
     grid = (num_tokens, triton.cdiv(num_rows, 64))
-    if len(rows) == 3:
-        packed, scales, global_scale = rows
-        _gather_rows_gemv_nvfp4_kernel[grid](
-            x.contiguous(),
-            packed,
-            scales,
-            global_scale,
-            ids.contiguous(),
-            out,
-            num_rows,
-            x.shape[-1],
-            packed.stride(0),
-            scales.stride(0),
-            BLOCK_ROWS=64,
-            BLOCK_BYTES=128,
-        )
-        return out
-    weight = rows[0]
     _gather_rows_gemv_kernel[grid](
         x.contiguous(),
         weight,
-        rows[1] if len(rows) == 2 else weight,
         ids.contiguous(),
         out,
         num_rows,
         x.shape[-1],
         weight.stride(0),
-        HAS_SCALE=len(rows) == 2,
         BLOCK_ROWS=64,
-        BLOCK_HIDDEN=128 if weight.element_size() > 1 else 256,
+        BLOCK_HIDDEN=128,
     )
     return out
-
-
-# Writes the listed and the picked logits into the `-inf` target-vocabulary
-# logits in one launch; columns `[0, num_listed)` of the grid are listed rows,
-# the next `num_picked` are picked rows.
-@triton.jit
-def _scatter_draft_logits_kernel(
-    out_ptr,
-    listed_ptr,
-    token_ids_ptr,
-    picked_ptr,
-    picks_ptr,
-    candidate_ids_ptr,
-    vocab_size,
-    num_listed,
-    num_picked,
-    BLOCK: tl.constexpr,
-):
-    token = tl.program_id(0)
-    cols = tl.program_id(1) * BLOCK + tl.arange(0, BLOCK)
-    is_listed = cols < num_listed
-    is_picked = (cols >= num_listed) & (cols < num_listed + num_picked)
-    pcols = tl.where(is_picked, cols - num_listed, 0)
-    listed_id = tl.load(token_ids_ptr + cols, mask=is_listed, other=0)
-    listed = tl.load(listed_ptr + token * num_listed + cols, mask=is_listed, other=0.0)
-    pick = tl.load(picks_ptr + token * num_picked + pcols, mask=is_picked, other=0)
-    picked_id = tl.load(candidate_ids_ptr + pick, mask=is_picked, other=0)
-    picked = tl.load(picked_ptr + token * num_picked + pcols, mask=is_picked, other=0.0)
-    ids = tl.where(is_listed, listed_id, picked_id).to(tl.int64)
-    tl.store(
-        out_ptr + token * vocab_size + ids,
-        tl.where(is_listed, listed, picked),
-        mask=is_listed | is_picked,
-    )
 
 
 def scatter_draft_logits(
@@ -382,28 +173,11 @@ def scatter_draft_logits(
     """Target-vocabulary logits, `-inf` outside the listed and picked rows.
 
     `out[n, token_ids] = listed[n]` and `out[n, candidate_ids[picks[n]]] =
-    picked[n]`, in one kernel on CUDA.
+    picked[n]`.
     """
     out = listed.new_full((listed.shape[0], vocab_size), float("-inf"))
-    if not listed.is_cuda:
-        out[:, token_ids] = listed
-        out.scatter_(1, candidate_ids[picks], picked)
-        return out
-    num_listed, num_picked = listed.shape[1], picked.shape[1]
-    block = 1024
-    grid = (listed.shape[0], triton.cdiv(num_listed + num_picked, block))
-    _scatter_draft_logits_kernel[grid](
-        out,
-        listed.contiguous(),
-        token_ids,
-        picked.contiguous(),
-        picks.contiguous(),
-        candidate_ids,
-        vocab_size,
-        num_listed,
-        num_picked,
-        BLOCK=block,
-    )
+    out[:, token_ids] = listed
+    out.scatter_(1, candidate_ids[picks], picked)
     return out
 
 
@@ -485,7 +259,6 @@ class DraftVocab:
         lm_head: VocabParallelEmbedding,
         token_ids: torch.Tensor,
         dynamic_rows: int = 0,
-        quantization: str | None = None,
     ) -> None:
         """Restrict drafting to the `token_ids` rows of `lm_head`.
 
@@ -496,8 +269,6 @@ class DraftVocab:
             lm_head: The drafter's full-vocabulary lm_head.
             token_ids: Sorted, unique target ids of the listed rows.
             dynamic_rows: Rows outside the list picked per draft token.
-            quantization: `draft_lm_head_quantization`, applied to the copied
-                rows only ("fp8" or "nvfp4", weight-only).
 
         """
         head = getattr(lm_head, "base_layer", lm_head)
@@ -529,20 +300,18 @@ class DraftVocab:
 
         weight = head.weight[:vocab_size]
         self.token_ids = token_ids.to(weight.device)
-        self.rows = _Rows(weight[self.token_ids], quantization)
+        self.rows = _Rows(weight[self.token_ids])
         self.num_dynamic_rows = dynamic_rows
         if dynamic_rows > 0:
-            self._init_dynamic_rows(weight, quantization)
+            self._init_dynamic_rows(weight)
         logger.info(
-            "Draft vocabulary: %d of %d tokens plus %d dynamic rows per draft "
-            "token, %s rows.",
+            "Draft vocabulary: %d of %d tokens plus %d dynamic rows per draft token.",
             token_ids.numel(),
             vocab_size,
             dynamic_rows,
-            quantization or weight.dtype,
         )
 
-    def _init_dynamic_rows(self, weight: torch.Tensor, quantization: str | None):
+    def _init_dynamic_rows(self, weight: torch.Tensor):
         """Score the rows outside the list with a rank-256 lm_head factor.
 
         The basis is the top right singular vectors of the lm_head (the top
@@ -574,14 +343,8 @@ class DraftVocab:
                 for ids in self.candidate_ids.split(_CHUNK)
             ]
         )
-        # The scorer only ranks rows, which FP8 preserves far better than NVFP4.
-        self.scorer = _Rows(scores, None if quantization is None else "fp8")
-        # Quantized copies hold only the candidates and are indexed by position.
-        self.gather_rows = (
-            (weight,)
-            if quantization is None
-            else _quantize_rows(weight, quantization, self.candidate_ids)
-        )
+        self.scorer = _Rows(scores)
+        self.weight = weight
 
     def _token_map_logits(
         self, hidden_states: torch.Tensor
@@ -594,8 +357,7 @@ class DraftVocab:
             return logits, None
         scores = self.scorer(hidden_states @ self.basis)
         picks = scores.topk(self.num_dynamic_rows, dim=-1, sorted=False).indices
-        gather_ids = self.candidate_ids[picks] if len(self.gather_rows) == 1 else picks
-        picked = gather_rows_gemv(hidden_states, self.gather_rows, gather_ids)
+        picked = gather_rows_gemv(hidden_states, self.weight, self.candidate_ids[picks])
         return logits, (picked, picks)
 
 
@@ -621,5 +383,4 @@ def load_draft_token_map(model: nn.Module, vllm_config: "VllmConfig") -> None:
         model.lm_head,
         load_draft_token_ids(spec.draft_token_map, eos_ids),
         spec.draft_token_map_dynamic_rows,
-        spec.draft_lm_head_quantization,
     )
