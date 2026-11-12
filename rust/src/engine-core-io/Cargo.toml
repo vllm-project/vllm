@@ -1,0 +1,19 @@
+[package]
+name = "vllm-engine-core-io"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+description = "The Rust engine core's side of the frontend transport: the ZMQ input and output socket threads."
+
+[dependencies]
+bytes = { workspace = true }
+futures = { workspace = true }
+tokio = { workspace = true }
+vllm-engine-core-protocol = { workspace = true }
+zeromq = { workspace = true }
+
+[dev-dependencies]
+vllm-engine-core-client = { workspace = true, features = ["test-util"] }
+
+[lints]
+workspace = true

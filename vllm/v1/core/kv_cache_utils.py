@@ -1031,7 +1031,55 @@ def get_request_block_hasher(
 
         return new_block_hashes
 
+    if envs.VLLM_USE_RUST_CORE:
+        return _get_rust_request_block_hasher(
+            hash_block_size,
+            caching_hash_fn,
+            num_hash_lookahead_tokens,
+            request_block_hasher,
+        )
     return request_block_hasher
+
+
+def _get_rust_request_block_hasher(
+    hash_block_size: int,
+    caching_hash_fn: Callable[[Any], bytes],
+    num_hash_lookahead_tokens: int,
+    fallback: Callable[[Request], list[BlockHash]],
+) -> Callable[[Request], list[BlockHash]]:
+    """Wrap `fallback` in the bitwise-identical Rust hasher, which delegates
+    blocks with multi-modal or prompt-embeds extra keys back to it. Returns
+    `fallback` if the extension is missing or `caching_hash_fn` is unknown."""
+    from vllm.utils import hashing
+
+    algo_names: dict[Callable[[Any], bytes], str] = {
+        hashing.sha256: "sha256",
+        hashing.sha256_cbor: "sha256_cbor",
+        hashing.xxhash: "xxhash",
+        hashing.xxhash_cbor: "xxhash_cbor",
+    }
+    algo_name = algo_names.get(caching_hash_fn)
+    # Without the xxhash package the Python hasher raises; keep that behavior.
+    if algo_name is None or (
+        algo_name.startswith("xxhash") and hashing._xxhash is None
+    ):
+        return fallback
+    try:
+        from vllm._rust_core import RustRequestBlockHasher
+    except ImportError:
+        logger.warning_once(
+            "VLLM_USE_RUST_CORE is set but vllm._rust_core is not built; "
+            "using the Python block hasher."
+        )
+        return fallback
+    # NONE_HASH is read on each call since init_none_hash may run later.
+    return RustRequestBlockHasher(
+        hash_block_size,
+        algo_name,
+        None,
+        num_hash_lookahead_tokens,
+        fallback,
+    )
 
 
 def frontend_block_hashes(

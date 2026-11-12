@@ -14,22 +14,8 @@ pub type Result<T> = std::result::Result<T, Error>;
 /// Public error type for the Rust engine-core client.
 #[derive(Debug, Error, Macro)]
 pub enum Error {
-    #[error("messagepack encode failed for {target_type}: {message}")]
-    Encode {
-        target_type: &'static str,
-        message: String,
-    },
-    #[error("messagepack decode failed for {target_type}: {message}")]
-    Decode {
-        target_type: &'static str,
-        message: String,
-    },
-    #[error("messagepack value decode failed")]
-    ValueDecode(#[from] rmpv::decode::Error),
-    #[error("messagepack ext value decode failed: {message}")]
-    ExtValueDecode { message: String },
-    #[error("invalid structured outputs params: {message}")]
-    InvalidStructuredOutputsParams { message: String },
+    #[error(transparent)]
+    Protocol(#[from] vllm_engine_core_protocol::Error),
     #[error("io error")]
     Io(#[from] std::io::Error),
     #[error("transport error")]
@@ -59,11 +45,6 @@ pub enum Error {
     UnsupportedAuxFrames { frame_count: usize },
     #[error("external coordinator mode is not implemented yet")]
     UnsupportedExternalCoordinator,
-    #[error("unsupported field `{field}` in {context}")]
-    UnsupportedField {
-        context: &'static str,
-        field: &'static str,
-    },
     #[error("request `{request_id}` is already in flight")]
     DuplicateRequestId { request_id: String },
     #[error(

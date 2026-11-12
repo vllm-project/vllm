@@ -5,7 +5,12 @@ members = [
     "src/build-info",
     "src/chat",
     "src/cmd",
+    "src/engine-core",
     "src/engine-core-client",
+    "src/engine-core-connectors",
+    "src/engine-core-io",
+    "src/engine-core-protocol",
+    "src/engine-core-py",
     "src/llm",
     "src/managed-engine",
     "src/metrics",
@@ -78,6 +83,7 @@ prometheus-client-derive-encode = "0.5.0"
 prost = "0.14.3"
 prost-types = "0.14.3"
 protox = "0.9.1"
+pyo3 = { version = "0.28.3", features = ["extension-module", "abi3-py311"] }
 rand = "0.9.3"
 rand_distr = "0.5.1"
 rayon = "1.11.0"
@@ -144,7 +150,11 @@ validator = { version = "0.20.0", features = ["derive"] }
 vllm-bench = { path = "src/bench" }
 vllm-build-info = { path = "src/build-info" }
 vllm-chat = { path = "src/chat" }
+vllm-engine-core = { path = "src/engine-core" }
 vllm-engine-core-client = { path = "src/engine-core-client" }
+vllm-engine-core-connectors = { path = "src/engine-core-connectors" }
+vllm-engine-core-io = { path = "src/engine-core-io" }
+vllm-engine-core-protocol = { path = "src/engine-core-protocol" }
 vllm-llm = { path = "src/llm" }
 vllm-managed-engine = { path = "src/managed-engine" }
 vllm-metrics = { path = "src/metrics" }
@@ -156,6 +166,7 @@ vllm-tokenizer = { path = "src/tokenizer" }
 vllm-tracing = { path = "src/tracing" }
 winnow = { version = "1.0.2", features = ["simd"] }
 xgrammar-structural-tag = "0.4.1"
+xxhash-rust = { version = "0.8.18", features = ["xxh3"] }
 zeromq = { git = "https://github.com/zeromq/zmq.rs", rev = "67dcba97559ebe8e8206dab753710d8b9cb07591", default-features = false, features = [
     "tokio-runtime",
     "all-transport",
@@ -177,3 +188,4 @@ tokenizers = { opt-level = 3 }
 [profile.release]
 lto = "thin"
 panic = "abort"
+

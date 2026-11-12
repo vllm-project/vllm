@@ -17,6 +17,8 @@ if TYPE_CHECKING:
     VLLM_RPC_BASE_PATH: str = tempfile.gettempdir()
     VLLM_USE_MODELSCOPE: bool = False
     VLLM_USE_FASTOKENS: bool = False
+    VLLM_USE_RUST_CORE: bool = False
+    VLLM_RUST_CORE_NATIVE_HOOKS: bool = True
     VLLM_RINGBUFFER_WARNING_INTERVAL: int = 60
     VLLM_NCCL_SO_PATH: str | None = None
     LD_LIBRARY_PATH: str | None = None
@@ -784,6 +786,19 @@ environment_variables: dict[str, Callable[[], Any]] = {
     # (`hf`, `deepseek_v32`, `deepseek_v4`, …). The `fastokens`
     # Python package (>= 0.3.5) must be installed.
     "VLLM_USE_FASTOKENS": lambda: bool(int(os.getenv("VLLM_USE_FASTOKENS", "0"))),
+    # Experimental. If set, the engine core uses the Rust implementations in
+    # `vllm._rust_core` (the scheduler with its KV cache manager, prefix-caching
+    # block hashing and the Mooncake store lookup paths). Each component falls
+    # back to Python, with a log line, if the extension is not built or does
+    # not support the configuration. See docs/design/rust_engine_core.md.
+    "VLLM_USE_RUST_CORE": lambda: bool(int(os.getenv("VLLM_USE_RUST_CORE", "0"))),
+    # With the Rust scheduler, whether it uses native ports of its
+    # collaborators where they support the configuration (the NIXL and
+    # Mooncake store connectors' scheduler halves) instead of calling the
+    # Python ones. Defaults to 1; 0 keeps the Python collaborators.
+    "VLLM_RUST_CORE_NATIVE_HOOKS": lambda: bool(
+        int(os.getenv("VLLM_RUST_CORE_NATIVE_HOOKS", "1"))
+    ),
     # Interval in seconds to log a warning message when the ring buffer is full
     "VLLM_RINGBUFFER_WARNING_INTERVAL": lambda: int(
         os.environ.get("VLLM_RINGBUFFER_WARNING_INTERVAL", "60")
@@ -2492,6 +2507,8 @@ def compile_factors() -> dict[str, object]:
         "VLLM_TRITON_JIT_WARMUP_NUM_THREADS",
         "VLLM_RPC_BASE_PATH",
         "VLLM_USE_MODELSCOPE",
+        "VLLM_USE_RUST_CORE",
+        "VLLM_RUST_CORE_NATIVE_HOOKS",
         "VLLM_RINGBUFFER_WARNING_INTERVAL",
         "VLLM_DEBUG_DUMP_PATH",
         "VLLM_PORT",

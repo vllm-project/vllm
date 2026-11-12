@@ -576,7 +576,10 @@ fn is_engine_core_dead(error: &Error) -> bool {
 
 fn is_decode_error(error: &Error) -> bool {
     match error {
-        Error::Decode { .. } | Error::ExtValueDecode { .. } => true,
+        Error::Protocol(
+            vllm_engine_core_protocol::Error::Decode { .. }
+            | vllm_engine_core_protocol::Error::ExtValueDecode { .. },
+        ) => true,
         Error::Shared(error) => is_decode_error(error),
         _ => false,
     }

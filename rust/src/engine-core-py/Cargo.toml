@@ -1,0 +1,23 @@
+[package]
+name = "vllm-engine-core-py"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+description = "PyO3 bindings exposing vllm-engine-core to Python as `vllm._rust_core`."
+
+[lib]
+name = "_rust_core"
+crate-type = ["cdylib"]
+
+[dependencies]
+bytes = { workspace = true }
+indexmap = { workspace = true }
+pyo3 = { workspace = true }
+rustc-hash = { workspace = true }
+serde = { workspace = true }
+serde_json = { workspace = true }
+thiserror-ext = { workspace = true }
+vllm-engine-core = { workspace = true }
+vllm-engine-core-connectors = { workspace = true }
+vllm-engine-core-io = { workspace = true }
+vllm-engine-core-protocol = { workspace = true }

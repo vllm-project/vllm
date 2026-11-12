@@ -1,0 +1,89 @@
+group: Rust Engine Core
+depends_on:
+  - image-build-cpu
+steps:
+# `cargo fmt`, clippy and the checked-in trace replays of the engine-core
+# crates run in the workspace-wide "Rust Frontend Cargo" jobs.
+- label: ":computer: (CPU) Rust Engine Core Python Parity"
+  key: rust-engine-core-python-parity
+  depends_on:
+    - image-build-cpu
+  timeout_in_minutes: 45
+  device: cpu-medium
+  working_dir: "/vllm-workspace"
+  source_file_dependencies:
+    - rust/Cargo.toml
+    - rust/Cargo.lock
+    - rust/src/engine-core/
+    - rust/src/engine-core-connectors/
+    - rust/src/engine-core-io/
+    - rust/src/engine-core-protocol/
+    - rust/src/engine-core-py/
+    - rust-toolchain.toml
+    - tools/build_rust.py
+    - vllm/envs.py
+    - vllm/v1/engine/core.py
+    - vllm/v1/engine/rust_core_io.py
+    - vllm/config/scheduler.py
+    - vllm/v1/core/
+    - vllm/v1/hisparse/
+    - vllm/v1/structured_output/
+    - vllm/distributed/kv_transfer/kv_connector/v1/nixl/
+    - vllm/distributed/kv_transfer/kv_connector/v1/mooncake_store/
+    - tests/v1/core/rust_core_diff.py
+    - tests/v1/core/rust_scheduler_plugin.py
+    - tests/v1/core/test_rust_core_hash.py
+    - tests/v1/core/test_rust_native_input.py
+    - tests/v1/core/test_rust_native_output.py
+    - tests/v1/core/test_rust_scheduler.py
+    - tests/v1/kv_connector/unit/nixl_rust_diff.py
+    - tests/v1/kv_connector/unit/test_mooncake_store_rust.py
+    - tests/v1/kv_connector/unit/test_mooncake_store_rust_scheduler.py
+    - tests/v1/kv_connector/unit/test_nixl_rust_scheduler.py
+    - .buildkite/test_areas/rust_engine_core.yaml
+  commands:
+    # The image builds `vllm._rust_core` with the wheel; fail rather than skip.
+    - python3 -c "import vllm._rust_core"
+    - >-
+      pytest -v -s tests/v1/core/test_rust_core_hash.py tests/v1/core/test_rust_scheduler.py
+      tests/v1/core/test_rust_native_output.py tests/v1/core/test_rust_native_input.py
+    - >-
+      pytest -v -s
+      tests/v1/kv_connector/unit/test_mooncake_store_rust.py
+      tests/v1/kv_connector/unit/test_mooncake_store_rust_scheduler.py
+      tests/v1/kv_connector/unit/test_nixl_rust_scheduler.py
+    # Differential fuzzing smoke: Rust scheduler vs Python, per workload mode.
+    - python3 -m tests.v1.core.rust_core_diff --mode rust-sched --seeds 0-20
+    - python3 -m tests.v1.core.rust_core_diff --mode rust-sched --seeds 0-20 --async
+    - python3 -m tests.v1.core.rust_core_diff --mode rust-sched --seeds 0-20 --extended
+    - python3 -m tests.v1.core.rust_core_diff --mode rust-sched --seeds 0-20 --nixl
+    - python3 -m tests.v1.core.rust_core_diff --mode rust-sched --seeds 0-20 --mooncake
+    - python3 -m tests.v1.core.rust_core_diff --mode rust-sched --seeds 0-20 --structured
+    - python3 -m tests.v1.core.rust_core_diff --mode rust-sched --seeds 0-20 --streaming
+
+- label: ":computer: (CPU) Rust Engine Core Trace Replay"
+  key: rust-engine-core-trace-replay
+  depends_on:
+    - image-build-cpu
+  timeout_in_minutes: 45
+  device: cpu-medium
+  working_dir: "/vllm-workspace"
+  source_file_dependencies:
+    - rust/Cargo.toml
+    - rust/Cargo.lock
+    - rust/src/engine-core/
+    - rust/src/engine-core-connectors/
+    - rust-toolchain.toml
+    - vllm/config/scheduler.py
+    - vllm/v1/core/
+    - vllm/v1/hisparse/
+    - vllm/v1/kv_cache_interface.py
+    - vllm/v1/request.py
+    - vllm/distributed/kv_transfer/kv_connector/v1/nixl/
+    - vllm/distributed/kv_transfer/kv_connector/v1/mooncake_store/
+    - tests/v1/core/rust_core_diff.py
+    - tests/v1/kv_connector/unit/nixl_rust_diff.py
+    - .buildkite/test_areas/rust_engine_core.yaml
+    - .buildkite/scripts/run-rust-engine-core-traces.sh
+  commands:
+    - .buildkite/scripts/run-rust-engine-core-traces.sh 3

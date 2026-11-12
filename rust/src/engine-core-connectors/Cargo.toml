@@ -1,0 +1,21 @@
+[package]
+name = "vllm-engine-core-connectors"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+description = "Native KV connectors of the Rust engine core: the NIXL and Mooncake store scheduler halves."
+
+[dependencies]
+indexmap = { workspace = true }
+libc = { workspace = true }
+rustc-hash = { workspace = true }
+serde_json = { workspace = true }
+thiserror = { workspace = true }
+vllm-engine-core = { workspace = true }
+
+[dev-dependencies]
+expect-test = { workspace = true }
+vllm-engine-core = { workspace = true, features = ["test-util"] }
+
+[lints]
+workspace = true

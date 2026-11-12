@@ -173,7 +173,7 @@ async fn wait_for_endpoint(endpoint: &str, connect_timeout: Duration) -> Result<
 
 /// Encode the engine-ready response sent on input socket registration.
 fn ready_response_payload(config: &MockEngineConfig) -> Result<Vec<u8>> {
-    encode_msgpack(&config.ready_response)
+    Ok(encode_msgpack(&config.ready_response)?)
 }
 
 /// Join a frontend-owned handshake endpoint and open mock engine sockets.

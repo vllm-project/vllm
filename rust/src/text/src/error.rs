@@ -3,6 +3,7 @@
 
 use thiserror::Error;
 use vllm_engine_core_client::Error as EngineCoreError;
+use vllm_engine_core_client::protocol::Error as ProtocolError;
 use vllm_llm::Error as LlmError;
 
 pub use crate::lower::logprobs::LogprobsError;
@@ -110,7 +111,9 @@ impl Error {
             | Self::Llm(LlmError::EngineCoreClient(
                 EngineCoreError::InvalidDataParallelRank { .. },
             ))
-            | Self::EngineCore(EngineCoreError::InvalidStructuredOutputsParams { .. }) => true,
+            | Self::EngineCore(EngineCoreError::Protocol(
+                ProtocolError::InvalidStructuredOutputsParams { .. },
+            )) => true,
             _ => false,
         }
     }

@@ -15,7 +15,8 @@ Requests flow `HTTP/gRPC DTO → chat or text request → engine request`. Depen
 | `vllm-text` | Prompt text handling, tokenizer and model loading, incremental detokenization, lowering text requests into engine generate requests |
 | `vllm-tokenizer` | Tokenizer backends and incremental decoding |
 | `vllm-llm` | Token-in/token-out facade over the engine client, with request timing, metrics, and stats |
-| `vllm-engine-core-client` | ZMQ transport and the MessagePack protocol to the engine core |
+| `vllm-engine-core-client` | ZMQ transport to the engine core |
+| `vllm-engine-core-protocol` | MessagePack wire types of the engine core protocol, shared with the Rust engine core |
 | `vllm-cmd` (`vllm-rs`) | CLI entry points and process wiring |
 
 The remaining crates are tooling and infrastructure (`vllm-metrics`, `vllm-tracing`, `vllm-build-info`, `vllm-managed-engine`, `vllm-mock-engine`, `vllm-bench`). Check `Cargo.toml` for the current dependency graph before adding a cross-crate dependency.

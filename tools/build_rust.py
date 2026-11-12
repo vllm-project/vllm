@@ -55,15 +55,17 @@ def rust_extensions(*, optional: bool = False) -> list[RustExtension]:
             binding=Binding.Exec,
             optional=optional,
         ),
-        # Example PyO3 module (the removed tool-parser bridge):
-        # RustExtension(
-        #     target="vllm._rust_tool_parser",
-        #     path="rust/src/parser/python/Cargo.toml",
-        #     features=["pyo3/abi3-py38"],
-        #     binding=Binding.PyO3,
-        #     optional=optional,
-        #     py_limited_api=True,
-        # ),
+        # Native engine-core components (`VLLM_USE_RUST_CORE`). The workspace
+        # release profile aborts on panic; the extension must unwind so that
+        # PyO3 turns panics into Python exceptions.
+        RustExtension(
+            target="vllm._rust_core",
+            path="rust/src/engine-core-py/Cargo.toml",
+            args=["--config", 'profile.release.panic="unwind"'],
+            binding=Binding.PyO3,
+            optional=optional,
+            py_limited_api=True,
+        ),
     ]
 
 

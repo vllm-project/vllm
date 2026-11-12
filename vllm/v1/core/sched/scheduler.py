@@ -383,6 +383,7 @@ class Scheduler(SchedulerInterface):
             self.connector.bind_kv_cache_manager(self.kv_cache_manager)
 
         self.use_pp = self.parallel_config.pipeline_parallel_size > 1
+        # TODO(rust-engine-core): a spec-defined order, not a `set[int]`'s.
         self._pending_encoder_input_ids: dict[str, set[int]] = {}
         # Scheduler iteration counter. Drives the PP+async decode-throttle
         # cadence (`next_decode_eligible_step`).
@@ -1920,6 +1921,9 @@ class Scheduler(SchedulerInterface):
         # Update block hashes for the new tokens.
         session.update_block_hashes()
         session.num_prompt_tokens = len(session.prompt_token_ids)
+        # TODO(rust-engine-core): the session may be in the waiting queue: under
+        # the priority policy this breaks the heap invariant, so the pop order
+        # depends on heapq's algorithm. Requeue it instead.
         session.arrival_time = update.arrival_time
         session.sampling_params = update.sampling_params
         session.prefix_cache_hit_limit = session.get_prefix_cache_hit_limit()
@@ -2562,6 +2566,8 @@ class Scheduler(SchedulerInterface):
 
         request_errors = self.grammar_compile_error_reqs
         self.grammar_compile_error_reqs = {}
+        # TODO(rust-engine-core): finish these in a spec-defined order (dict
+        # insertion order), not a `set[str]`'s.
         error_req_ids = set(request_errors)
         error_req_ids.update(self.encoder_cache_mismatch_reqs)
         self.encoder_cache_mismatch_reqs.clear()
@@ -3712,6 +3718,8 @@ class Scheduler(SchedulerInterface):
         """
         affected_req_ids: set[str] = set()
         total_affected_tokens = 0
+        # TODO(rust-engine-core): iterate these in a spec-defined order, not a
+        # `set[int]`'s.
         blocks_to_evict: set[int] = set()
         # If a block is invalid and shared by multiple requests in the batch,
         # these requests must be rescheduled, but only the first will recompute
