@@ -1327,20 +1327,22 @@ class Qwen2_5_VLForConditionalGeneration(
 
     def iter_mm_grid_thw(
         self, mm_features: list[MultiModalFeatureSpec]
-    ) -> Iterator[tuple[int, int, int, int, float]]:
+    ) -> Iterator[tuple[int, int, int, int, int, float]]:
         """Iterate over multimodal features and yield grid information.
 
         Args:
             mm_features: List of multimodal feature specifications
 
         Yields:
-            Tuple of (offset, grid_t, grid_h, grid_w, t_factor) for each frame/image
+            Tuple of (offset, num_tokens, grid_t, grid_h, grid_w, t_factor) for each
+            frame/image, where num_tokens is the length of its placeholder
 
         """
         spatial_merge_size = self.config.vision_config.spatial_merge_size
         tokens_per_second = getattr(self.config.vision_config, "tokens_per_second", 1.0)
         for mm_feature in sorted(mm_features, key=lambda f: f.mm_position.offset):
             offset = mm_feature.mm_position.offset
+            num_tokens = mm_feature.mm_position.length
             data = mm_feature.data
             assert data is not None
             if mm_feature.modality == "image":
@@ -1348,7 +1350,14 @@ class Qwen2_5_VLForConditionalGeneration(
                 assert isinstance(grid, torch.Tensor)
                 t, h, w = grid.tolist()
                 assert t == 1, f"Image must have 1 frame, got {t}"
-                yield offset, 1, h // spatial_merge_size, w // spatial_merge_size, 1.0
+                yield (
+                    offset,
+                    num_tokens,
+                    1,
+                    h // spatial_merge_size,
+                    w // spatial_merge_size,
+                    1.0,
+                )
             elif mm_feature.modality == "video":
                 grid = data["video_grid_thw"].data
                 assert isinstance(grid, torch.Tensor)
@@ -1360,6 +1369,7 @@ class Qwen2_5_VLForConditionalGeneration(
                 t_factor = second_per_grid_ts * tokens_per_second
                 yield (
                     offset,
+                    num_tokens,
                     t,
                     h // spatial_merge_size,
                     w // spatial_merge_size,
@@ -1375,16 +1385,17 @@ class Qwen2_5_VLForConditionalGeneration(
     ) -> tuple[torch.Tensor, int]:
         llm_pos_ids_list: list = []
         st = 0
+        st_idx = 0
 
         for (
             offset,
+            num_tokens,
             llm_grid_t,
             llm_grid_h,
             llm_grid_w,
             t_factor,
         ) in self.iter_mm_grid_thw(mm_features):
             text_len = offset - st
-            st_idx = llm_pos_ids_list[-1].max() + 1 if len(llm_pos_ids_list) > 0 else 0
             llm_pos_ids_list.append(
                 np.broadcast_to(np.arange(text_len), (3, text_len)) + st_idx
             )
@@ -1392,11 +1403,22 @@ class Qwen2_5_VLForConditionalGeneration(
             grid_indices = np.indices((llm_grid_t, llm_grid_h, llm_grid_w))
             if t_factor != 1.0:
                 grid_indices[0] = (grid_indices[0] * t_factor).astype(np.int64)
-            llm_pos_ids_list.append(grid_indices.reshape(3, -1) + text_len + st_idx)
-            st = offset + llm_grid_t * llm_grid_h * llm_grid_w
+            # A pruned video has fewer placeholder tokens than grid cells. Which
+            # cells are kept is known only after encoding, so take the first ones.
+            llm_pos_ids_list.append(
+                grid_indices.reshape(3, -1)[:, :num_tokens] + text_len + st_idx
+            )
+            st = offset + num_tokens
+
+            if self.is_multimodal_pruning_enabled:
+                # `recompute_mrope_positions` continues the text at the media
+                # width. The text must get the same positions here, because it
+                # is not recomputed when the media item is a prefix cache hit.
+                st_idx += text_len + llm_grid_w
+            else:
+                st_idx = llm_pos_ids_list[-1].max() + 1
 
         if st < len(input_tokens):
-            st_idx = llm_pos_ids_list[-1].max() + 1 if len(llm_pos_ids_list) > 0 else 0
             text_len = len(input_tokens) - st
             llm_pos_ids_list.append(
                 np.broadcast_to(np.arange(text_len), (3, text_len)) + st_idx

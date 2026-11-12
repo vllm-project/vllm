@@ -8,6 +8,7 @@ from vllm.assets.image import ImageAsset
 from vllm.platforms import current_platform
 
 from ....conftest import VIDEO_ASSETS
+from ...utils import check_logprobs_close
 from .vlm_utils.builders import sample_frames_with_video_metadata
 
 models = ["Qwen/Qwen2.5-VL-3B-Instruct"]
@@ -216,6 +217,54 @@ def test_qwen2_5_vl_video_fits_max_model_len(vllm_runner, model) -> None:
     output_ids, output_text = outputs[0]
     assert len(output_ids) > 17280
     assert len(output_text) > 0
+
+
+@pytest.mark.core_model
+@pytest.mark.skipif(
+    current_platform.is_cpu(), reason="Video pruning is not tested on CPU"
+)
+@pytest.mark.parametrize("model", models)
+def test_qwen2_5_vl_evs_image_after_video_prefix_cache(
+    vllm_runner, video_assets, image_assets, model
+) -> None:
+    """With pruning enabled, a prompt with an image after a video must be served,
+    and it must give the same output when its media are a prefix cache hit.
+    """
+    video = sample_frames_with_video_metadata(
+        (video_assets[0].np_ndarrays, video_assets[0].metadata), 16
+    )
+    image = image_assets[0].pil_image.resize((336, 224))
+    prompt = qwen2_5_vl_chat_template(
+        VIDEO_PLACEHOLDER,
+        IMAGE_PLACEHOLDER,
+        "Describe the video in one sentence. ",
+        "Then describe the image in one sentence.",
+    )
+
+    with vllm_runner(
+        model,
+        runner="generate",
+        dtype=target_dtype,
+        max_model_len=4096,
+        limit_mm_per_prompt={"image": 1, "video": 1},
+        video_pruning_rate=0.75,
+        enable_prefix_caching=True,
+    ) as vllm_model:
+        # The second request reuses the KV cache of the first one up to the last
+        # full block, which ends in the text after the image.
+        outputs = [
+            vllm_model.generate_greedy_logprobs(
+                [prompt], 32, num_logprobs=5, images=[image], videos=[video]
+            )
+            for _ in range(2)
+        ]
+
+    check_logprobs_close(
+        outputs_0_lst=outputs[0],
+        outputs_1_lst=outputs[1],
+        name_0="cache_miss",
+        name_1="cache_hit",
+    )
 
 
 @pytest.mark.core_model
