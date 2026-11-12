@@ -596,12 +596,6 @@ _TEXT_GENERATION_EXAMPLE_MODELS = {
     "SolarForCausalLM": _HfExamplesInfo(
         "upstage/solar-pro-preview-instruct", trust_remote_code=True
     ),
-    "TeleChat2ForCausalLM": _HfExamplesInfo(
-        "Tele-AI/TeleChat2-3B", trust_remote_code=True
-    ),
-    "TeleChat3ForCausalLM": _HfExamplesInfo(
-        "Tele-AI/TeleChat3-36B-Thinking", trust_remote_code=True
-    ),
     "TeleFLMForCausalLM": _HfExamplesInfo(
         "CofeAI/FLM-2-52B-Instruct-2407", trust_remote_code=True
     ),

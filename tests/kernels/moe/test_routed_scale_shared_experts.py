@@ -8,7 +8,7 @@ import torch.nn as nn
 
 from vllm.config import VllmConfig, set_current_vllm_config
 from vllm.forward_context import set_forward_context
-from vllm.model_executor.layers.fused_moe import FusedMoEFactory
+from vllm.model_executor.layers.fused_moe import FusedMoEFactory, RoutedScaleMode
 from vllm.utils.torch_utils import set_random_seed
 
 NUM_EXPERTS = 8
@@ -34,16 +34,19 @@ class SharedMLP(nn.Module):
 
 
 @pytest.mark.parametrize("dtype", [torch.float16, torch.bfloat16])
-@pytest.mark.parametrize("divide_shared_output_in_fp16", [False, True])
+@pytest.mark.parametrize(
+    "routed_scale_mode",
+    [RoutedScaleMode.OUTPUT, RoutedScaleMode.OUTPUT_FP16_GUARD],
+)
 def test_routed_scale_applied_to_output_with_shared_experts(
     dtype: torch.dtype,
-    divide_shared_output_in_fp16: bool,
+    routed_scale_mode: RoutedScaleMode,
     dist_init,
     workspace_init,
 ):
-    """Without the opt-in, the output is scale * routed + shared for every
-    dtype. With it, FP16 gives routed + shared / scale (the decoder layer is
-    expected to compensate)."""
+    """OUTPUT gives scale * routed + shared for every dtype. OUTPUT_FP16_GUARD
+    gives routed + shared / scale in FP16 (the decoder layer is expected to
+    compensate) and scale * routed + shared otherwise."""
     set_random_seed(0)
     device = "cuda" if torch.cuda.is_available() else "cpu"
     torch.set_default_device(device)
@@ -67,8 +70,7 @@ def test_routed_scale_applied_to_output_with_shared_experts(
         moe = FusedMoEFactory(
             shared_experts=shared_experts,
             routed_scaling_factor=ROUTED_SCALING_FACTOR,
-            apply_routed_scale_to_output=True,
-            divide_shared_output_in_fp16=divide_shared_output_in_fp16,
+            routed_scale_mode=routed_scale_mode,
             prefix="moe",
             **common,
         )
@@ -89,11 +91,20 @@ def test_routed_scale_applied_to_output_with_shared_experts(
             routed = routed_only(hidden_states, router_logits)
             shared = shared_experts(hidden_states)
 
-    if divide_shared_output_in_fp16 and dtype == torch.float16:
+    if (
+        routed_scale_mode is RoutedScaleMode.OUTPUT_FP16_GUARD
+        and dtype == torch.float16
+    ):
         expected = routed + shared / ROUTED_SCALING_FACTOR
     else:
         expected = routed * ROUTED_SCALING_FACTOR + shared
     torch.testing.assert_close(actual, expected, atol=1e-3, rtol=1e-3)
+
+
+def test_routed_scale_mode_scales_output():
+    assert not RoutedScaleMode.ROUTER.scales_output
+    assert RoutedScaleMode.OUTPUT.scales_output
+    assert RoutedScaleMode.OUTPUT_FP16_GUARD.scales_output
 
 
 def _mha_moe_config():
@@ -141,4 +152,4 @@ def test_mha_decoder_layer_does_not_divide_shared_output(
             vllm_config=vllm_config, prefix="model.layers.0", config=config
         )
     assert layer.use_mha
-    assert layer.mlp.experts.divide_shared_output_in_fp16 is False
+    assert layer.mlp.experts.routed_scale_mode is RoutedScaleMode.OUTPUT
