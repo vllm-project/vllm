@@ -1425,7 +1425,7 @@ class UniformTypeKVCacheSpecs(KVCacheSpec):
 
     @property
     def uses_slot_mapping(self) -> bool:
-        return self.first_spec.uses_slot_mapping
+        return any(spec.uses_slot_mapping for spec in self.kv_cache_specs.values())
 
 
 def iter_layer_specs(kv_cache_spec: KVCacheSpec) -> Collection[KVCacheSpec]:
