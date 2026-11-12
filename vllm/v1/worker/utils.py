@@ -396,10 +396,12 @@ class AttentionGroup:
         if kv_cache.shape[-2] == kernel_rows:
             return kv_cache
         # A padded page spreads its kernel blocks evenly.
+        row_bytes = spec.num_heads * spec.state_content_size_bytes
         page_stride = (
-            spec.page_size_bytes
-            // kv_cache.element_size()
-            // (kv_cache.shape[-2] // kernel_rows)
+            kernel_rows
+            * kv_cache.stride(-2)
+            * spec.page_size_bytes
+            // (spec.num_states * row_bytes)
         )
         # Token and pooled caches are written through manager-block slot
         # mappings unless self-addressed, so only those and compressed caches
@@ -434,8 +436,9 @@ class AttentionGroup:
         """Views a packed cache in kernel blocks as manager blocks."""
         assert self.kernel_block_stride
         spec = self.kv_cache_spec
-        row_bytes = kv_cache.stride(-2) * kv_cache.element_size()
-        rows = cdiv(spec.page_size_bytes, row_bytes)
+        rows = cdiv(
+            spec.page_size_bytes, spec.num_heads * spec.state_content_size_bytes
+        )
         return kv_cache.as_strided(
             (num_blocks, *kv_cache.shape[1:-2], rows, kv_cache.shape[-1]),
             (kv_cache.stride(0) * self.kernel_block_stride, *kv_cache.stride()[1:]),
