@@ -120,6 +120,7 @@ from vllm.v1.outputs import (
 from vllm.v1.utils import report_usage_stats
 from vllm.v1.worker.extensible_kv_cache import (
     extend_kv_cache,
+    kv_cache_export_handle_types,
     kv_cache_lent_for_weight_update,
     measure_kv_cache_blocks,
     pad_kv_cache_segments,
@@ -239,6 +240,7 @@ class Worker(WorkerBase):
             is_driver_worker=is_driver_worker,
         )
         self._external_weight_charges = ExternalWeightCharges()
+        self.kv_cache_transient_bytes_before_tuning = 0
 
         # configure float32 matmul precision according to vLLM env.
         precision = envs.VLLM_FLOAT32_MATMUL_PRECISION
@@ -1001,7 +1003,7 @@ class Worker(WorkerBase):
     def extensible_kv_cache_unsupported_reason(self) -> str | None:
         # Every rank must reach the same decision: one that keeps the feature
         # would wait in the block-count all-reduces for one that dropped it.
-        reason = vmm_unavailable_reason()
+        reason = vmm_unavailable_reason(kv_cache_export_handle_types(self.vllm_config))
         if all_reduce_int(
             get_world_group().cpu_group, int(reason is not None), ReduceOp.MAX
         ):
@@ -1047,6 +1049,7 @@ class Worker(WorkerBase):
             # Track the transient peak of the warmup steps themselves; they
             # reach shapes (spec-decode drafts, encoder batches) profiling
             # does not, and `measure_kv_cache_blocks` keeps that peak free.
+            # One-off autotuning is excluded by kernel_warmup.
             torch.accelerator.reset_peak_memory_stats(self.device)
         warmup_sizes: list[int] = []
 
@@ -1110,6 +1113,9 @@ class Worker(WorkerBase):
             stats = torch.accelerator.memory_stats(self.device)
             kv_cache.reserved_headroom_bytes = max(
                 kv_cache.reserved_headroom_bytes,
+                # kernel_warmup keeps FlashInfer autotuning out of this
+                # peak window; include what the steps before it reached.
+                getattr(self, "kv_cache_transient_bytes_before_tuning", 0),
                 stats.get("allocated_bytes.all.peak", 0)
                 - stats.get("allocated_bytes.all.current", 0),
             )
