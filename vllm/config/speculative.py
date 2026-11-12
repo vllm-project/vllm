@@ -4,7 +4,7 @@
 import copy
 import functools
 import os
-from collections.abc import Callable, Mapping
+from collections.abc import Callable, Iterator, Mapping
 from dataclasses import field
 from typing import TYPE_CHECKING, Any, Literal, Self, get_args
 
@@ -28,6 +28,7 @@ from vllm.transformers_utils.repo_utils import get_subfolder_path
 from vllm.utils.import_utils import LazyLoader
 from vllm.v1.attention.backends.registry import AttentionBackendEnum
 from vllm.v1.worker.gpu.spec_decode.speculator_config import (
+    DraftModelSpeculatorConfig,
     SpeculatorConfig,
     get_custom_speculator_config_class,
     get_method_config_class,
@@ -1961,3 +1962,33 @@ class SpeculativeConfig:
         )
         num_spec_tokens = self.num_speculative_tokens
         return f"SpeculativeConfig({method=}, {model=}, {num_spec_tokens=})"
+
+    def resolved_summary(self, vllm_config: VllmConfig) -> str:
+        """The resolved speculative config, with each draft setting next to the
+        target's, so settings the draft did not inherit stand out."""
+        lines = [
+            f"method: {self.custom_method or self.method}",
+            f"num_speculative_tokens: {self.num_speculative_tokens}",
+        ]
+        if isinstance(self.speculator_config, DraftModelSpeculatorConfig):
+            rows = self._draft_and_target_settings(vllm_config)
+            lines += [f"{name}: draft={d}, target={t}" for name, d, t in rows]
+        return "Resolved speculative config:\n  " + "\n  ".join(lines)
+
+    def _draft_and_target_settings(
+        self, vllm_config: VllmConfig
+    ) -> Iterator[tuple[str, Any, Any]]:
+        draft_cfg = self.draft_model_config
+        target_cfg = vllm_config.model_config
+        yield "model", draft_cfg.model, target_cfg.model
+        yield "revision", draft_cfg.revision, target_cfg.revision
+
+        draft_text = draft_cfg.hf_text_config
+        target_text = target_cfg.hf_text_config
+        for key in ("max_position_embeddings", "rope_parameters"):
+            yield key, getattr(draft_text, key, None), getattr(target_text, key, None)
+
+        draft_par_cfg = self.draft_parallel_config
+        target_par_cfg = self.target_parallel_config
+        for key in ("tensor_parallel_size", "decode_context_parallel_size"):
+            yield key, getattr(draft_par_cfg, key), getattr(target_par_cfg, key)
