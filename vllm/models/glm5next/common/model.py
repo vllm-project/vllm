@@ -357,7 +357,8 @@ class Glm5NextMoE(nn.Module):
         quant_config: QuantizationConfig | None,
         prefix: str,
     ) -> None:
-        """DeepGEMM FP8xFP8 MegaMoE: the kernel dispatches, runs the routed and
+        """DeepGEMM MegaMoE, BF16xBF16 for an unquantized checkpoint and
+        FP8xFP8 for a block-FP8 one: the kernel dispatches, runs the routed and
         shared experts and combines across the EP group."""
         from vllm.model_executor.layers.fused_moe.deep_gemm_mega_moe import (
             MegaMoEActivation,
@@ -376,9 +377,9 @@ class Glm5NextMoE(nn.Module):
         if (config.n_group or 1) > 1 or (config.topk_group or 1) > 1:
             raise NotImplementedError("GLM-5.3 MegaMoE requires one expert group.")
         weight_block_size = getattr(quant_config, "weight_block_size", None)
-        if weight_block_size is None:
+        if quant_config is not None and weight_block_size is None:
             raise NotImplementedError(
-                "GLM-5.3 MegaMoE requires a block-FP8 checkpoint "
+                "GLM-5.3 MegaMoE requires a BF16 or a block-FP8 checkpoint "
                 "(quantization_config.weight_block_size)."
             )
         if self.n_physical_experts % self.ep_size != 0:
@@ -397,14 +398,16 @@ class Glm5NextMoE(nn.Module):
             top_k=config.num_experts_per_tok,
             hidden_size=config.hidden_size,
             intermediate_size=config.moe_intermediate_size,
-            weight_block_size=tuple(weight_block_size),
+            weight_block_size=None
+            if weight_block_size is None
+            else tuple(weight_block_size),
             num_shared_experts=config.n_shared_experts or 0,
             activation=MegaMoEActivation("swiglu", clamp=config.swiglu_limit),
             prefix=f"{prefix}.experts",
         )
 
     def finalize_mega_moe_weights(self) -> None:
-        if self.use_mega_moe:
+        if self.use_mega_moe and self.experts.weight_block_size is not None:
             self.experts.requantize_block_fp8()
 
     def forward(
