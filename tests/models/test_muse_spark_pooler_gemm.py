@@ -43,7 +43,10 @@ def test_pooling_default_gemm_gate(monkeypatch, is_rocm, cdna, expected) -> None
 @pytest.mark.skipif(
     not muse_model._pooling_uses_default_gemm(), reason="requires CDNA3 or CDNA4"
 )
-@pytest.mark.parametrize("m", [1, 4, 8, 48, 128, 256], ids=lambda m: f"M{m}")
+# On gfx950 both shapes resolve to rows of AITER's Qwen3.5-397B tuned GEMM
+# table, so a retune there changes these projections. M = 32 and 64 are the
+# pooler's first split-K row and its highest-error row.
+@pytest.mark.parametrize("m", [1, 4, 8, 32, 48, 64, 128, 256], ids=lambda m: f"M{m}")
 @pytest.mark.parametrize("shape", [POOLER, UNPOOLER], ids=["pooler", "unpooler"])
 def test_default_gemm_matches_f_linear_at_production_shape(
     monkeypatch, shape, m
