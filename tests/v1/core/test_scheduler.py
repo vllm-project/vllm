@@ -2725,8 +2725,6 @@ def test_local_reset_still_publishes_when_connector_reset_fails():
     publisher.publish.assert_called_once()
 
 
-
-
 def test_reset_prefix_cache_publishes_real_manager_event():
     scheduler = create_scheduler(
         enable_prefix_caching=True,
