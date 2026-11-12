@@ -300,9 +300,9 @@ def test_measured_sizing_warns_when_utilization_withholds_memory(
     monkeypatch.setattr(accelerator, "memory_reserved", lambda *args: 0)
     # The model took 20 GiB since startup, 1 GiB of it the committed KV prefix.
     monkeypatch.setattr(
-        extensible_kv_cache.current_platform,
-        "free_device_memory",
-        lambda device: (init_free_gib - 20) * gib,
+        extensible_kv_cache,
+        "device_memory_info",
+        lambda device=None: ((init_free_gib - 20) * gib, 80 * gib),
     )
     monkeypatch.setattr(
         extensible_kv_cache,
