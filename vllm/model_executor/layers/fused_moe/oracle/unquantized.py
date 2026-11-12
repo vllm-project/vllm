@@ -267,13 +267,15 @@ def select_unquantized_moe_backend(
             )
             return UnquantizedMoeBackend.FLASHINFER_TRTLLM, TrtLlmBf16LoRAExperts
 
-        if current_platform.is_xpu():
-            from vllm.model_executor.layers.fused_moe.experts.xpu_moe import (
-                XPUExperts,
-            )
-
-            logger.info_once("Using XPU Unquantized MoE LoRA backend")
-            return UnquantizedMoeBackend.XPU, XPUExperts
+        # On XPU, TRITON stays the fallback (e.g. for batch invariance) and is
+        # forced by --moe-backend triton.
+        if current_platform.is_xpu() and moe_config.moe_backend != "triton":
+            backend = UnquantizedMoeBackend.XPU
+            oracle = UnquantizedMoEKernelOracle(moe_config, None, None)
+            kernel_cls, _ = oracle.try_backend(backend)
+            if kernel_cls is not None:
+                logger.info_once(oracle.make_log_backend(backend, is_lora=True))
+                return backend, kernel_cls
 
         return UnquantizedMoEKernelOracle(moe_config, None, None).return_or_raise(
             UnquantizedMoeBackend.TRITON,
