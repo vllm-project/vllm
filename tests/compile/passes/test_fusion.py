@@ -840,7 +840,12 @@ def test_aiter_fusion_rmsnorm_gated_quant_no_gdn_layers(
 class _AiterMxfp4OutProj(torch.nn.Module):
     """MXFP4 linear on AiterMxfp4LinearKernel, as an online-MXFP4 out_proj."""
 
-    def __init__(self, in_features: int, out_features: int):
+    def __init__(
+        self,
+        in_features: int,
+        out_features: int,
+        hadamard: torch.Tensor | None = None,
+    ):
         super().__init__()
         from types import SimpleNamespace
 
@@ -860,14 +865,48 @@ class _AiterMxfp4OutProj(torch.nn.Module):
             MxFp4LinearLayerConfig(activation_quant_key=kMxfp4Dynamic)
         )
         w = torch.randn(out_features, in_features) * 0.02
+        if hadamard is not None:
+            from vllm.model_executor.layers.quantization.input_hadamard import (
+                block_hadamard_rotate,
+            )
+
+            w = block_hadamard_rotate(w, hadamard)
         w_q, w_s = dynamic_mxfp4_quant(w)
         self.weight = torch.nn.Parameter(w_q, requires_grad=False)
         self.weight_scale = torch.nn.Parameter(w_s, requires_grad=False)
         kernel.process_weights_after_loading(self)
+        self.kernel = kernel
         self.quant_method = SimpleNamespace(kernel=kernel)
 
     def forward(self, x):
         return self.quant_method.kernel.apply_weights(self, x)
+
+
+class _KernelApply:
+    def __init__(self, kernel):
+        self.kernel = kernel
+
+    def apply(self, layer, x, bias=None):
+        return self.kernel.apply_weights(layer, x, bias)
+
+
+class _HadamardMxfp4OutProj(_AiterMxfp4OutProj):
+    """Same linear, with the 32-wide rotation `InputHadamardLinearMethod` runs
+    before the GEMM. The weight is rotated before it is quantized."""
+
+    def __init__(self, in_features: int, out_features: int, hadamard: torch.Tensor):
+        from vllm.model_executor.layers.quantization.input_hadamard import (
+            InputHadamardLinearMethod,
+        )
+
+        super().__init__(in_features, out_features, hadamard)
+        self.register_buffer("input_hadamard", hadamard, persistent=False)
+        self.quant_method = InputHadamardLinearMethod(
+            _KernelApply(self.kernel), hadamard.shape[0], rotate_weight=False
+        )
+
+    def forward(self, x):
+        return self.quant_method.apply(self, x)
 
 
 class TestGatedMxfp4Model(torch.nn.Module):
@@ -882,6 +921,7 @@ class TestGatedMxfp4Model(torch.nn.Module):
         eps: float,
         activation: str,
         out_flatten: bool,
+        hadamard: bool = False,
     ):
         super().__init__()
         self.num_heads = num_heads
@@ -895,7 +935,18 @@ class TestGatedMxfp4Model(torch.nn.Module):
             activation=activation,
         )
         self.norm.weight.data.normal_(1.0, 0.1)
-        self.out_proj = _AiterMxfp4OutProj(num_heads * head_dim, out_features)
+        if hadamard:
+            from vllm.model_executor.layers.quantization.input_hadamard import (
+                hadamard_matrix,
+            )
+
+            self.out_proj = _HadamardMxfp4OutProj(
+                num_heads * head_dim,
+                out_features,
+                hadamard_matrix(32, torch.device("cuda")),
+            )
+        else:
+            self.out_proj = _AiterMxfp4OutProj(num_heads * head_dim, out_features)
 
     def forward(self, x, z):
         x = torch.relu(x).reshape(-1, self.num_heads, self.head_dim)
@@ -941,11 +992,12 @@ def test_gated_mxfp4_fusion_is_limited_to_cdna4(
 # tables, so it runs the ASM GEMM and nothing fuses. flatten(-2) needs the
 # pass's symbolic-reshape rewrite to match.
 @pytest.mark.parametrize(
-    "out_features, activation, out_flatten, expect_fused",
+    "out_features, activation, out_flatten, expect_fused, hadamard",
     [
-        pytest.param(2560, "sigmoid", True, True, id="triton-sigmoid-flatten"),
-        pytest.param(2560, "swish", False, True, id="triton-swish-reshape"),
-        pytest.param(8192, "sigmoid", True, False, id="asm-not-fused"),
+        pytest.param(2560, "sigmoid", True, True, False, id="triton-sigmoid-flatten"),
+        pytest.param(2560, "swish", False, True, False, id="triton-swish-reshape"),
+        pytest.param(8192, "sigmoid", True, False, False, id="asm-not-fused"),
+        pytest.param(2560, "sigmoid", True, True, True, id="triton-hadamard32"),
     ],
 )
 @pytest.mark.skipif(
@@ -957,6 +1009,7 @@ def test_aiter_fusion_rmsnorm_gated_mxfp4_gemm(
     out_flatten: bool,
     out_features: int,
     expect_fused: bool,
+    hadamard: bool,
     monkeypatch: pytest.MonkeyPatch,
 ):
     from vllm.platforms.rocm import get_cdna_version
@@ -997,8 +1050,9 @@ def test_aiter_fusion_rmsnorm_gated_mxfp4_gemm(
             eps,
             activation,
             out_flatten,
+            hadamard,
         )
-        assert model.out_proj.quant_method.kernel.use_asm_gemm == (not expect_fused)
+        assert model.out_proj.kernel.use_asm_gemm == (not expect_fused)
 
         mock_gdn = _MockGDNLayer(num_v_heads=num_heads, head_v_dim=head_dim)
         # The mock is an uninitialized nn.Module, so bypass submodule
@@ -1025,10 +1079,37 @@ def test_aiter_fusion_rmsnorm_gated_mxfp4_gemm(
         if not expect_fused:
             assert fusion_pass.matched_count == 0
             return
-        result_unfused = torch.compile(model, backend=backend2)(x, z)
 
         assert fusion_pass.matched_count == 1
         backend.check_after_ops([AiterRMSNormGatedMxfp4GemmPattern.FUSED_OP])
+
+        if hadamard:
+            # The rotated kernel is not dynamic_mxfp4_quant: it uses the HIP
+            # RoundUp scale. Compare to the fused op itself, and to the same
+            # op with the rotation left off, so a dropped or double rotation
+            # fails.
+            fused_op = AiterRMSNormGatedMxfp4GemmPattern.FUSED_OP
+            op_kwargs = dict(
+                x=torch.relu(x).reshape(-1, hidden_dim),
+                z=z.reshape(-1, hidden_dim),
+                norm_weight=model.norm.weight,
+                epsilon=eps,
+                activation=activation,
+                weight=model.out_proj.weight,
+                weight_scale=model.out_proj.weight_scale,
+                out_dtype=dtype,
+            )
+            ref = fused_op(**op_kwargs, hadamard_rotate=True)
+            plain = fused_op(**op_kwargs, hadamard_rotate=False)
+            err = (result_fused.float() - ref.float()).norm() / ref.float().norm()
+            plain_err = (result_fused.float() - plain.float()).norm() / (
+                plain.float().norm()
+            )
+            assert err < 1e-3, err
+            assert plain_err > 1e-2, plain_err
+            return
+
+        result_unfused = torch.compile(model, backend=backend2)(x, z)
 
         # The fused quant writes the codes and scales dynamic_mxfp4_quant does.
         err = (result_fused.float() - result_unfused.float()).norm() / (
