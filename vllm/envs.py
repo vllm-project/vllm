@@ -33,6 +33,7 @@ if TYPE_CHECKING:
     S3_ENDPOINT_URL: str | None = None
     VLLM_MODEL_REDIRECT_PATH: str | None = None
     VLLM_CACHE_ROOT: str = os.path.expanduser("~/.cache/vllm")
+    VLLM_COMPILE_CACHE_ROOT: str = os.path.join(VLLM_CACHE_ROOT, "torch_compile_cache")
     VLLM_CONFIG_ROOT: str = os.path.expanduser("~/.config/vllm")
     VLLM_USAGE_STATS_SERVER: str = "https://stats.vllm.ai"
     VLLM_NO_USAGE_STATS: bool = False
@@ -759,6 +760,16 @@ environment_variables: dict[str, Callable[[], Any]] = {
         os.getenv(
             "VLLM_CACHE_ROOT",
             os.path.join(get_default_cache_root(), "vllm"),
+        )
+    ),
+    # Root directory for torch.compile artifacts
+    # Defaults to `$VLLM_CACHE_ROOT/torch_compile_cache`
+    "VLLM_COMPILE_CACHE_ROOT": lambda: os.path.expanduser(
+        os.getenv(
+            "VLLM_COMPILE_CACHE_ROOT",
+            os.path.join(
+                environment_variables["VLLM_CACHE_ROOT"](), "torch_compile_cache"
+            ),
         )
     ),
     # used in distributed environment to determine the ip address
@@ -2511,6 +2522,7 @@ def compile_factors() -> dict[str, object]:
         "VLLM_DEBUG_DUMP_PATH",
         "VLLM_PORT",
         "VLLM_CACHE_ROOT",
+        "VLLM_COMPILE_CACHE_ROOT",
         # Runtime memory-plan persistence; does not affect compiled graphs.
         "VLLM_ENABLE_STARTUP_PLAN",
         # Location-only derived paths: where a cache/config directory lives
