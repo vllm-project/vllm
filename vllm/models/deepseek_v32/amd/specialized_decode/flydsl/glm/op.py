@@ -90,12 +90,19 @@ def _fp8_rows(t: dict, name: str) -> tuple[torch.Tensor, torch.Tensor]:
     or [rows / R, K / 128] blocks (R = `FP8_BLOCK_ROWS`, a partial last block
     included)."""
     w, s = t[f"w_{name}"], t[f"s_{name}"]
-    _expect(w, f"w_{name}", tuple(w.shape), torch.float8_e4m3fn)
     if s.dim() == 2:
+        # row-major, rows possibly padded apart (VLLM_ROCM_FP8_PADDING): pack_fp8
+        # copies the values into tiles either way
+        if w.dtype is not torch.float8_e4m3fn or w.dim() != 2 or w.stride(1) != 1:
+            raise ValueError(
+                f"w_{name}: {w.dtype} {tuple(w.shape)} strides {w.stride()}, "
+                "expected row-major float8_e4m3fn"
+            )
         rows = FP8_BLOCK_ROWS.get(name, FP8_BLOCK)
         shape = (-(-w.shape[0] // rows), w.shape[1] // FP8_BLOCK)
         _expect(s, f"s_{name}", shape, torch.float32)
     else:
+        _expect(w, f"w_{name}", tuple(w.shape), torch.float8_e4m3fn)
         _expect(s, f"s_{name}", (w.shape[0],), torch.float32)
     return pack_fp8(w), s
 

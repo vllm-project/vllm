@@ -424,10 +424,20 @@ def test_index_weights_from_model():
 
 
 # ------------------------------------------------ FP8 block checkpoints (GLM-5.3)
-def _block_linear(g, rows, k, kernel="AiterFp8BlockScaledMMKernel", shuffled=False):
+def _pad_rows(q):
+    """`_maybe_pad_fp8_weight` (VLLM_ROCM_FP8_PADDING): rows 256 bytes apart."""
+    return torch.nn.functional.pad(q.view(torch.uint8), (0, 256))[:, :-256].view(
+        q.dtype
+    )
+
+
+def _block_linear(
+    g, rows, k, kernel="AiterFp8BlockScaledMMKernel", shuffled=False, padded=True
+):
     """A Quark 128 x 128 block FP8 linear as process_weights_after_loading leaves it
-    (weight [rows, k], F32 block scales [ceil(rows / 128), k / 128]; `shuffled`:
-    AITER's gfx1250 B-preshuffle); returns (module, values, block scales)."""
+    (weight [rows, k], its rows padded apart by default, F32 block scales [ceil(rows /
+    128), k / 128]; `shuffled`: AITER's gfx1250 B-preshuffle); returns (module, values,
+    block scales)."""
     from vllm.model_executor.layers.quantization.utils.quant_utils import (
         kFp8Static128BlockSym,
     )
@@ -435,6 +445,8 @@ def _block_linear(g, rows, k, kernel="AiterFp8BlockScaledMMKernel", shuffled=Fal
     q = _fp8(g, rows, k)
     s = torch.rand(-(-rows // 128), k // 128, generator=g) * 1e-2 + 1e-4
     w = shuffle(q.view(torch.uint8)).view(torch.float8_e4m3fn) if shuffled else q
+    if padded and not shuffled:
+        w = _pad_rows(w)
     scheme = type("QuarkW8A8Fp8PerBlock", (), {})()
     scheme.weight_quant_key = kFp8Static128BlockSym
     scheme.fp8_linear = type(kernel, (), {})()
@@ -460,7 +472,8 @@ def test_fp8_linear_blocks_every_layout(kernel, shuffled):
     fused_qkv_a_proj's 2624 rows); a view unless vLLM preshuffled the bytes."""
     mod, q, s = _block_linear(_g(21), 2624, 512, kernel, shuffled)
     w, sc = VW.fp8_linear_blocks(mod, "x", (2624, 512))
-    assert torch.equal(w.view(torch.uint8), q.view(torch.uint8)) and w.is_contiguous()
+    assert torch.equal(w.view(torch.uint8), q.view(torch.uint8)) and w.stride(1) == 1
+    assert w.stride(0) == (512 if shuffled else 512 + 256)
     assert torch.equal(sc, s) and sc.shape == (21, 4)
     same = w.untyped_storage().data_ptr() == mod.weight.untyped_storage().data_ptr()
     assert same is not shuffled
@@ -487,7 +500,7 @@ def test_fp8_linear_blocks_refusals():
     refused(mod, "e4m3fnuz")
     mod, _, _ = _block_linear(g, 2048, 512)
     mod.weight = _p(mod.weight.data.t())
-    refused(mod, "dense")
+    refused(mod, "row-major")
     mod, _, _ = _block_linear(g, 2048, 512)
     mod.weight_scale = _p(torch.ones(2048))
     refused(mod, "expected F32")

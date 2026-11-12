@@ -47,11 +47,12 @@ dequantization, transposed into a copy). The kernel's FP8 matrices are the keys 
 
 FP8 block checkpoints (Quark `QuarkW8A8Fp8PerBlock`, 128 x 128 weight blocks, per-128
 dynamic activations, e.g. amd/GLM-5.3-Quark-MXFP4-AttnFP8): `w_<name>` the same
-[rows, K] values, `s_<name>` the checkpoint's F32 block scales [ceil(rows / 128),
-K / 128] (vLLM widens E8M0 scales), a view (`fp8_linear_blocks`). w_uv's scales are
-regrouped per 64 value rows (`FP8_BLOCK_ROWS`; a copy of 128 scales), w_uk is MLA's
-BF16 `W_UK_T` as above. All FP8 linears of a layer, the indexer's `wq_b` included, use
-one scale format (the kernel is built for one).
+[rows, K] values (rows possibly padded apart by VLLM_ROCM_FP8_PADDING), `s_<name>`
+the checkpoint's F32 block scales [ceil(rows / 128), K / 128] (vLLM widens E8M0
+scales), a view (`fp8_linear_blocks`). w_uv's scales are regrouped per 64 value rows
+(`FP8_BLOCK_ROWS`; a copy of 128 scales), w_uk is MLA's BF16 `W_UK_T` as above. All
+FP8 linears of a layer, the indexer's `wq_b` included, use one scale format (the
+kernel is built for one).
 
 Refused (`WeightViewError`): a shared expert fused into the routed tensors, any MoE
 backend other than AITER_MXFP4_MXFP4 (the expert layout is the backend's), attention
@@ -256,10 +257,12 @@ def fp8_linear_blocks(mod, name: str, shape: tuple[int, int]):
     )
     w, (rows, k) = _data(mod.weight), shape
     _need(w.dtype is FP8, f"{name} is {w.dtype}, expected float8_e4m3fn (OCP)")
+    # row-major; VLLM_ROCM_FP8_PADDING (default on) leaves rows of a multiple of
+    # 512 bytes 256 bytes apart (the op's tile packing reads through the padding)
     _need(
-        tuple(w.shape) == (rows, k) and w.is_contiguous(),
+        tuple(w.shape) == (rows, k) and w.stride(1) == 1 and w.stride(0) >= k,
         f"{name} FP8 weight {tuple(w.shape)} strides {w.stride()}, expected {shape} "
-        "dense",
+        "row-major",
     )
     if getattr(mod, "aiter_bpreshuffled", False):
         w = unshuffle_16x16(w)

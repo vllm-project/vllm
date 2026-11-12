@@ -542,6 +542,12 @@ def test_op_fp8_scale_formats(import_kernel):
         OP.fp8_block_of(dict(t_blocks, **rows["o"]))
     with pytest.raises(ValueError, match="s_uv"):  # uv's blocks are 64 rows
         OP._fp8_rows(dict(t_blocks, s_uv=torch.ones(16, 4)), "uv")
+    # block FP8 rows padded apart (VLLM_ROCM_FP8_PADDING) pack like dense ones
+    q = torch.randint(0, 126, (2048, 2048), dtype=torch.uint8)
+    padded = torch.nn.functional.pad(q, (0, 256))[:, :-256]
+    dense, _ = OP._fp8_rows(dict(t_blocks, w_q_b=q.view(torch.float8_e4m3fn)), "q_b")
+    w, _ = OP._fp8_rows(dict(t_blocks, w_q_b=padded.view(torch.float8_e4m3fn)), "q_b")
+    assert padded.stride(0) == 2304 and torch.equal(w, dense)
 
 
 @pytest.mark.parametrize("block", [16, 64])
