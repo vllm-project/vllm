@@ -48,8 +48,11 @@ from vllm.renderers.chat_utils import (
 from vllm.renderers.chat_utils.content_parser import (
     PROMPT_EMBEDS_PLACEHOLDER_ID_PREFIX,
 )
-from vllm.tokenizers.hf import HfTokenizer, maybe_make_thread_pool
-from vllm.transformers_utils.chat_templates import get_chat_template_fallback_path
+from vllm.tokenizers.hf import HfTokenizer
+from vllm.transformers_utils.chat_templates import (
+    get_chat_template_fallback_path,
+    get_chat_template_override_path,
+)
 from vllm.transformers_utils.processor import cached_get_processor
 from vllm.utils.async_utils import make_async
 from vllm.utils.func_utils import supports_kw
@@ -327,6 +330,14 @@ def resolve_chat_template(
         # Resolve template names (e.g. "tool_use") to actual Jinja content
         # so that downstream kwargs detection can parse template variables.
         return tokenizer.get_chat_template(chat_template, tools=tools)
+
+    # Predefined templates that replace the ones shipped on HF Hub
+    path = get_chat_template_override_path(
+        model_type=model_config.hf_config.model_type,
+        tokenizer_name_or_path=tokenizer.name_or_path,
+    )
+    if path is not None:
+        return load_chat_template(path)
 
     # 2nd priority: AutoProcessor chat template, unless tool calling is enabled
     if tools is None:
@@ -1097,14 +1108,6 @@ class HfRenderer(BaseRenderer[HfTokenizer]):
         config: VllmConfig,
         tokenizer: HfTokenizer | None,
     ) -> None:
-        # Ensure the og tokenizer is never modified by maybe_make_thread_pool
-        tokenizer = copy.copy(tokenizer)
-        if (
-            # Skip for mock configs and tokenizers
-            getattr(config.model_config, "enable_prompt_embeds", False)
-            and isinstance(tokenizer, HfTokenizer)
-        ):
-            _ensure_prompt_embeds_placeholder_token(tokenizer)
         super().__init__(config, tokenizer)
 
         self.use_unified_vision_chunk = getattr(
@@ -1115,10 +1118,10 @@ class HfRenderer(BaseRenderer[HfTokenizer]):
             safe_apply_chat_template, executor=self._executor
         )
 
-        if self.tokenizer is not None:
-            maybe_make_thread_pool(
-                self.tokenizer, config.model_config.renderer_num_workers + 1
-            )
+    def _prepare_tokenizer(self, tokenizer: HfTokenizer) -> None:
+        # Skip for mock configs
+        if getattr(self.model_config, "enable_prompt_embeds", False):
+            _ensure_prompt_embeds_placeholder_token(tokenizer)
 
     def _replace_executor(self) -> None:
         """Replace the inner render pool after a stuck worker.

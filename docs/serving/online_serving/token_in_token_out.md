@@ -95,6 +95,7 @@ print(response["choices"][0]["token_ids"])
 - `logprobs` follow coupled chat. `top_logprobs` is cut to `sampling_params.logprobs`, `logprob_token_ids` is honored. When a parser hides the reasoning with `include_reasoning: false`, `logprobs`, `token_ids` and `sampling_mask` are dropped so they don't expose it.
 - `finish_reason` follows coupled chat too. It's `tool_calls` when the message has tool calls except with a named `tool_choice` or a `length` cut.
 - With `stream: true`, each choice carries a chat `delta` (`role`, `content`, `reasoning`, `tool_calls`) instead of `text`, and `finish_reason` follows coupled chat. `role` is set on the first chunk of each choice, `n > 1` is supported, and `null` fields are left out of `delta`. A chunk is sent whenever the engine output carries a parsed delta, visible token IDs, logprobs or a `finish_reason`. Parsing runs on the API server event loop, so `--api-server-count` scales it.
+- The message `role` is the generate server's `--response-role`. `parse_context` doesn't carry `messages`, `add_generation_prompt` or `echo`, so the last message's role and `echo` aren't applied. Use [`/derender`](derenderer.md) for those.
 - Cohere grounding citations aren't returned. The parser strips the citation spans from `content`, and the document map can't go over JSON in `parse_context`.
 
 A streamed tool call looks like this, with the usage chunk and `data: [DONE]` framed as at the other levels:
@@ -138,6 +139,51 @@ The final output of every choice carries `weight_versions`, the label of the wei
 - With `stream: true`, only the last chunk of each choice carries the list, including the last chunk after an abort. Its offsets cover the whole output. Earlier chunks carry `null` or omit the field.
 - An output with no tokens, such as a request aborted before its first token, gets `[]`.
 - The labels are the ones you set with `/update_weight_version` or `/finish_weight_update`, see [Async Reinforcement Learning](../../training/async_rl.md#weight-versions-in-outputs). vLLM doesn't order or check them, and the label is `"default"` until you set one.
+
+## Multimodal inputs
+
+A request can carry media in two ways, and can use both at once:
+
+- `content_parts`: raw media (`image_url`, `audio_url` or `video_url`, each with an optional `uuid`). `token_ids` holds one placeholder token per item, and the server expands it.
+- `features`: items whose placeholders are already expanded in `token_ids`, at the ranges given in `mm_placeholders`. Pass the processed tensors in `kwargs_data`, or omit them to look the items up in the processor cache by `mm_hashes`.
+
+When both are set, every `content_parts` placeholder must come after the last `features` range. Only the tokens after that range are processed, so the expanded runs before it are left as they are. Models that insert media at the start of the prompt (such as PaliGemma, BLIP-2 and Molmo) would place a new item right after that range without an error, so don't combine the two fields for them.
+
+This fits multi-turn rollouts. Each turn resends the previous prompt with its images already expanded, adds the new turn with one placeholder per new image, and sends the earlier images as `features`:
+
+```python
+import httpx
+
+url = "http://localhost:8000/inference/v1/generate"
+
+# Turn 1: turn1_ids holds one <|image_pad|> for image A.
+turn1 = httpx.post(url, json={
+    "token_ids": turn1_ids,
+    "content_parts": [{"type": "image_url", "url": url_a, "uuid": "img-a"}],
+    "sampling_params": {"max_tokens": 256},
+    "return_token_ids": True,
+}).json()
+
+# Turn 2: image A is expanded in turn1["prompt_token_ids"];
+# turn2_ids appends one <|image_pad|> for image B.
+turn2 = httpx.post(url, json={
+    "token_ids": (
+        turn1["prompt_token_ids"] + turn1["choices"][0]["token_ids"] + turn2_ids
+    ),
+    "features": {
+        "mm_hashes": {"image": ["img-a"]},
+        "mm_placeholders": turn1["mm_placeholders"],
+    },
+    "content_parts": [{"type": "image_url", "url": url_b, "uuid": "img-b"}],
+    "sampling_params": {"max_tokens": 256},
+    "return_token_ids": True,
+}).json()
+```
+
+Here `"img-a"` finds image A in the processor cache because turn 1 sent it with that `uuid`. Two cases need a different approach:
+
+- If the server sets `--mm-processor-kwargs` or `--media-io-kwargs`, the `uuid` is hashed with them and is no longer the cache key. Take `features` from a [render](renderer.md) response instead.
+- If the item has been evicted from the cache, the request fails. Resend the item with `kwargs_data`.
 
 ## Aborting requests
 

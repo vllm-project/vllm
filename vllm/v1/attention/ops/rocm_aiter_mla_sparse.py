@@ -21,6 +21,7 @@ from vllm.triton_utils import tl, triton
 from vllm.utils.torch_utils import LayerNameType, direct_register_custom_op
 from vllm.v1.attention.backends.mla.indexer import DeepseekV32IndexerMetadata
 from vllm.v1.attention.ops.common import pack_seq_triton, unpack_seq_triton
+from vllm.v1.attention.ops.mxfp4_mla.read import load_mxfp4_rows
 from vllm.v1.attention.ops.pcp import maybe_gather_indexer_k
 from vllm.v1.worker.workspace import current_workspace_manager
 
@@ -226,6 +227,7 @@ def indexer_k_quant_and_cache_triton(
     scale_fmt,
     block_tile_size=16,
     head_tile_size=16,
+    cache_layout: str | None = None,
 ):
     num_blocks = kv_cache.shape[0]
     head_dim = k.shape[-1]
@@ -237,7 +239,10 @@ def indexer_k_quant_and_cache_triton(
     kv_cache_value = kv_cache[:, : block_size * head_dim].view(FP8_DTYPE)
     kv_cache_scale = kv_cache[:, block_size * head_dim :].view(torch.float32)
     head_tile_size = head_tile_size // kv_cache.element_size()
-    layout = "NORMAL" if block_size == 1 else "SHUFFLE"
+    if cache_layout is None:
+        layout = "NORMAL" if block_size == 1 else "SHUFFLE"
+    else:
+        layout = cache_layout
     grid = (num_tokens,)
     _indexer_k_quant_and_cache_kernel[grid](
         k,
@@ -805,6 +810,7 @@ def rocm_fp8_paged_mqa_logits(
     max_model_len: int,
     *,
     compress_ratio: int = 1,
+    cache_layout: str | None = None,
 ) -> torch.Tensor:
     """Compute FP8 MQA logits using paged KV-cache.
 
@@ -822,6 +828,8 @@ def rocm_fp8_paged_mqa_logits(
             used to distribute work across SMs.
         max_model_len: Maximum sequence length used to size the logits output.
         compress_ratio: C4A (4) takes block-flat Triton; 1 and 2 stay on AITER.
+        cache_layout: Explicit cache layout override; "NORMAL" (block-flat)
+            also takes the Triton path.
 
     Returns:
         Logits tensor of shape [B * next_n, max_model_len], dtype
@@ -833,11 +841,12 @@ def rocm_fp8_paged_mqa_logits(
     batch_size, next_n = q_fp8.shape[:2]
     block_size = kv_cache_fp8.shape[1]
 
-    # C4A only: Flash/DSv3.2 also skip insert but still write SHUFFLE.
+    # Block-flat (NORMAL) caches take the Triton path: C4A by ratio, others
+    # by explicit cache_layout. Flash/DSv3.2 also skip insert but write SHUFFLE.
     if (
         (_ON_GFX950 or _ON_GFX942)
-        and _indexer_k_is_c4a_block_flat(compress_ratio)
         and block_size > 1
+        and (cache_layout == "NORMAL" or _indexer_k_is_c4a_block_flat(compress_ratio))
     ):
         if block_size % 64 == 0:
             return rocm_fp8_paged_mqa_logits_triton(
@@ -1330,6 +1339,10 @@ def rocm_aiter_sparse_attn_indexer_fake(
     candidate_write: bool = False,
     use_pcp: bool = False,
     pcp_shard_decode_requests: bool = False,
+    cache_layout: str | None = None,
+    dcp_rank: int = 0,
+    dcp_world_size: int = 1,
+    cp_interleave: int = 1,
 ) -> torch.Tensor:
     return topk_indices_buffer
 
@@ -1356,8 +1369,17 @@ def rocm_aiter_sparse_attn_indexer(
     candidate_write: bool = False,
     use_pcp: bool = False,
     pcp_shard_decode_requests: bool = False,
+    cache_layout: str | None = None,
+    dcp_rank: int = 0,
+    dcp_world_size: int = 1,
+    cp_interleave: int = 1,
 ) -> torch.Tensor:
     from vllm._aiter_ops import rocm_aiter_ops
+
+    if dcp_world_size > 1:
+        raise NotImplementedError(
+            "The ROCm sparse attention indexer does not support DCP"
+        )
 
     # careful! this will be None in dummy run
     forward_context = get_forward_context()
@@ -1423,6 +1445,7 @@ def rocm_aiter_sparse_attn_indexer(
             candidate_write,
             use_pcp,
             pcp_shard_decode_requests,
+            cache_layout=cache_layout,
         )
     layer_attn_metadata = attn_metadata[k_cache_prefix]
     assert isinstance(layer_attn_metadata, DeepseekV32IndexerMetadata)
@@ -1459,7 +1482,14 @@ def rocm_aiter_sparse_attn_indexer(
             slot_mapping,
             quant_block_size,
             scale_fmt,
+            cache_layout=cache_layout,
         )
+
+    # C4A caches are block-flat by ratio; other block-flat callers pass
+    # cache_layout="NORMAL" explicitly. The rest keep the auto-selected layout.
+    resolved_cache_layout = cache_layout
+    if resolved_cache_layout is None and _indexer_k_is_c4a_block_flat(compress_ratio):
+        resolved_cache_layout = "NORMAL"
 
     if has_prefill:
         prefill_metadata = layer_attn_metadata.prefill
@@ -1473,17 +1503,18 @@ def rocm_aiter_sparse_attn_indexer(
         for chunk in prefill_metadata.chunks:
             k_fp8 = k_fp8_full[: chunk.total_seq_lens]
             k_scale = k_scale_full[: chunk.total_seq_lens]
-            cp_gather_indexer_k_quant_cache_triton(
-                kv_cache,
-                k_fp8,
-                k_scale,
-                chunk.block_table,
-                chunk.cu_seq_lens,
-                token_to_seq=chunk.token_to_seq,
-                cache_layout=(
-                    "NORMAL" if _indexer_k_is_c4a_block_flat(compress_ratio) else None
-                ),
-            )
+            # Query-split sub-chunks of one request share the K workspace
+            # filled by the first sub-chunk.
+            if not chunk.skip_kv_gather:
+                cp_gather_indexer_k_quant_cache_triton(
+                    kv_cache,
+                    k_fp8,
+                    k_scale,
+                    chunk.block_table,
+                    chunk.cu_seq_lens,
+                    token_to_seq=chunk.token_to_seq,
+                    cache_layout=resolved_cache_layout,
+                )
             logits = rocm_fp8_mqa_logits(
                 q_fp8[chunk.token_start : chunk.token_end],
                 (k_fp8, k_scale.view(torch.float32)),
@@ -1581,6 +1612,7 @@ def rocm_aiter_sparse_attn_indexer(
             decode_metadata.schedule_metadata,
             max_model_len=max_model_len,
             compress_ratio=compress_ratio,
+            cache_layout=cache_layout,
         )
 
         if candidate_blocks is not None:
@@ -2369,6 +2401,7 @@ def _sparse_attn_prefill_ragged_kernel(
     num_kv,
     scale,
     HAS_ATTN_SINK: tl.constexpr,
+    IS_MXFP4: tl.constexpr,
     OUT_DV: tl.constexpr,
     BLOCK_H: tl.constexpr,
     BLOCK_D: tl.constexpr,
@@ -2410,13 +2443,19 @@ def _sparse_attn_prefill_ragged_kernel(
         valid = in_range & (slot >= 0) & (slot < num_kv)
         safe_slot = tl.where(valid, slot, 0)
 
-        kv = tl.load(
-            kv_ptr
-            + _sparse_kv_row_offset(safe_slot[:, None], kv_stride_n)
-            + dim_offsets[None, :] * kv_stride_d,
-            mask=valid[:, None] & dim_mask[None, :],
-            other=0.0,
-        )
+        if IS_MXFP4:
+            # mxfp4_mla: kv_stride_n is the packed row pitch in bytes.
+            kv = load_mxfp4_rows(
+                kv_ptr, safe_slot, valid, kv_stride_n, BLOCK_K, BLOCK_D
+            ).to(q.dtype)
+        else:
+            kv = tl.load(
+                kv_ptr
+                + _sparse_kv_row_offset(safe_slot[:, None], kv_stride_n)
+                + dim_offsets[None, :] * kv_stride_d,
+                mask=valid[:, None] & dim_mask[None, :],
+                other=0.0,
+            )
 
         next_k_pos = k_start + BLOCK_K + k_offsets
         slot = tl.load(
@@ -2487,6 +2526,7 @@ def _sparse_attn_decode_ragged_bf16_partial_kernel(
     head_dim,
     num_kv,
     scale,
+    IS_MXFP4: tl.constexpr,
     BLOCK_H: tl.constexpr,
     BLOCK_D: tl.constexpr,
     BLOCK_K: tl.constexpr,
@@ -2534,13 +2574,19 @@ def _sparse_attn_decode_ragged_bf16_partial_kernel(
         valid = in_range & (slot >= 0) & (slot < num_kv)
         safe_slot = tl.where(valid, slot, 0)
 
-        kv = tl.load(
-            kv_ptr
-            + _sparse_kv_row_offset(safe_slot[:, None], kv_stride_n)
-            + dim_offsets[None, :] * kv_stride_d,
-            mask=valid[:, None] & dim_mask[None, :],
-            other=0.0,
-        )
+        if IS_MXFP4:
+            # mxfp4_mla: kv_stride_n is the packed row pitch in bytes.
+            kv = load_mxfp4_rows(
+                kv_ptr, safe_slot, valid, kv_stride_n, BLOCK_K, BLOCK_D
+            ).to(q.dtype)
+        else:
+            kv = tl.load(
+                kv_ptr
+                + _sparse_kv_row_offset(safe_slot[:, None], kv_stride_n)
+                + dim_offsets[None, :] * kv_stride_d,
+                mask=valid[:, None] & dim_mask[None, :],
+                other=0.0,
+            )
 
         next_k_pos = k_start + BLOCK_K + k_offsets
         slot = tl.load(
@@ -3736,6 +3782,7 @@ def _rocm_sparse_attn_prefill_ragged_triton(
     nope_head_dim: int,
     rope_head_dim: int,
     out: torch.Tensor | None = None,
+    is_mxfp4: bool = False,
 ) -> torch.Tensor:
     assert q.ndim == 3, f"expected q=[sq,h,d], got {q.shape}"
     assert kv.ndim == 2, f"expected kv=[skv,d], got {kv.shape}"
@@ -3795,6 +3842,7 @@ def _rocm_sparse_attn_prefill_ragged_triton(
         kv.shape[0],
         float(scale),
         HAS_ATTN_SINK=has_attn_sink,
+        IS_MXFP4=is_mxfp4,
         OUT_DV=out.shape[-1],
         BLOCK_H=block_h,
         BLOCK_D=block_d,
@@ -3814,6 +3862,7 @@ def _rocm_sparse_attn_prefill_triton(
     rope_head_dim: int,
     topk_length: torch.Tensor | None = None,
     out: torch.Tensor | None = None,
+    is_mxfp4: bool = False,
 ) -> torch.Tensor:
     ragged_indices, ragged_indptr = build_ragged_indices_from_dense(
         indices,
@@ -3832,6 +3881,7 @@ def _rocm_sparse_attn_prefill_triton(
         nope_head_dim=nope_head_dim,
         rope_head_dim=rope_head_dim,
         out=out,
+        is_mxfp4=is_mxfp4,
     )
 
 
@@ -4108,6 +4158,7 @@ def _rocm_sparse_attn_decode_ragged_bf16_triton(
     rope_head_dim: int,
     num_splits: int,
     out: torch.Tensor | None = None,
+    is_mxfp4: bool = False,
 ) -> torch.Tensor:
     """Split-K decode over an bf16 ragged KV cache.
 
@@ -4125,6 +4176,7 @@ def _rocm_sparse_attn_decode_ragged_bf16_triton(
         rope_head_dim: RoPE width of `d`.
         num_splits: Number of KV splits per query.
         out: Optional destination with `d` trailing elements.
+        is_mxfp4: `kv` holds packed `mxfp4_mla` rows instead of bf16.
 
     Returns:
         The attention output, `out` when provided.
@@ -4200,6 +4252,7 @@ def _rocm_sparse_attn_decode_ragged_bf16_triton(
         head_dim,
         kv.shape[0],
         float(scale),
+        IS_MXFP4=is_mxfp4,
         BLOCK_H=block_h,
         BLOCK_D=block_d,
         BLOCK_K=block_k,
@@ -4656,6 +4709,7 @@ def rocm_sparse_attn_prefill(
     output: torch.Tensor,
     ragged_indices: torch.Tensor | None = None,
     ragged_indptr: torch.Tensor | None = None,
+    kv_cache_dtype: str = "auto",
 ) -> None:
     assert kv.ndim == 3 and kv.shape[1] == 1, (
         f"ROCm Triton sparse prefill expects kv=[skv,1,d], got {kv.shape}"
@@ -4729,6 +4783,7 @@ def rocm_sparse_attn_prefill(
             nope_head_dim=nope_head_dim,
             rope_head_dim=rope_head_dim,
             out=output,
+            is_mxfp4=kv_cache_dtype == "mxfp4_mla",
         )
     else:
         assert indices is not None
@@ -4743,6 +4798,7 @@ def rocm_sparse_attn_prefill(
             rope_head_dim=rope_head_dim,
             topk_length=topk_length,
             out=output,
+            is_mxfp4=kv_cache_dtype == "mxfp4_mla",
         )
 
 
@@ -4758,6 +4814,7 @@ def rocm_sparse_attn_decode_bf16(
     ragged_indices: torch.Tensor,
     ragged_indptr: torch.Tensor,
     num_splits: int,
+    kv_cache_dtype: str = "auto",
 ) -> None:
     """Run split-K sparse attention over decode rows using an unquantized KV cache.
 
@@ -4774,6 +4831,7 @@ def rocm_sparse_attn_decode_bf16(
         ragged_indptr: Segment offsets into `ragged_indices`, `[sq + 1]`.
         num_splits: KV splits per query, from
             `rocm_sparse_decode_bf16_num_splits`.
+        kv_cache_dtype: `"mxfp4_mla"` reads `kv` as packed rows.
 
     """
     assert kv.ndim == 3 and kv.shape[1] == 1, (
@@ -4807,6 +4865,7 @@ def rocm_sparse_attn_decode_bf16(
         rope_head_dim=rope_head_dim,
         num_splits=num_splits,
         out=out,
+        is_mxfp4=kv_cache_dtype == "mxfp4_mla",
     )
     if not direct:
         output.copy_(out[..., : output.shape[-1]])

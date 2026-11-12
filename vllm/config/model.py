@@ -191,8 +191,8 @@ class ModelConfig:
     - "deepseek_v32" will always use the tokenizer from `deepseek_v32`.
     - "deepseek_v4" will always use the tokenizer from `deepseek_v4`.
     - "deepseek_v41" will use the DeepSeek V4.1 prompt encoder.
-    - "kimi_k3" will always use the "hf" tokenizer but render chat prompts
-      with Kimi K3's Python XTML encoding instead of a Jinja template.
+    - "kimi_k3" requires a tokenizer with native Kimi K3 XTML chat encoding.
+      It rejects the generic Hugging Face Jinja fallback.
     - "glm5_next" uses the "hf" tokenizer and renderer on the Python frontend;
       the Rust frontend renders GLM-5.3 and GLM-5.3-Flash prompts natively,
       and selects this under "auto" for the `glm5_next` model type
@@ -1576,29 +1576,6 @@ class ModelConfig:
         cls = MODELS_CONFIG_MAP.get(architecture, None)
         if cls is not None:
             cls.verify_and_update_model_config(self)
-
-    def verify_dual_chunk_attention_config(
-        self,
-        load_config: LoadConfig,
-    ) -> None:
-        if hasattr(self.hf_config, "dual_chunk_attention_config"):
-            # Try loading the sparse attention config
-            from vllm.model_executor.model_loader.weight_utils import (
-                get_sparse_attention_config,
-            )
-
-            sparse_attn_config = get_sparse_attention_config(self, load_config)
-            if sparse_attn_config:
-                self.hf_config.dual_chunk_attention_config[
-                    "sparse_attention_config"
-                ] = sparse_attn_config
-                if (
-                    "sparse_attention_enabled"
-                    not in self.hf_config.dual_chunk_attention_config
-                ):
-                    self.hf_config.dual_chunk_attention_config[
-                        "sparse_attention_enabled"
-                    ] = True
 
     def verify_with_parallel_config(
         self,
