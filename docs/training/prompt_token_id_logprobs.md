@@ -51,12 +51,11 @@ lists of Python ints are much slower to copy and serialize. With a logits
 
 ## Requirements
 
-- The V2 model runner (`VLLM_USE_V2_MODEL_RUNNER=1`).
 - The longest row at most `--max-logprobs` candidates.
 - No `--kv-sharing-fast-prefill`.
 
 `prompt_logprob_start` also applies to `prompt_logprobs` (top-K prompt
-logprobs, V2 model runner only): positions up to and including
+logprobs): positions up to and including
 `prompt_logprob_start` get `None`, and later positions are scored as usual.
 
 Scoring requests skip prefix-cache reads by default. Set
