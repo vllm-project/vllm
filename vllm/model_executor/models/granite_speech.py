@@ -60,9 +60,7 @@ from vllm.multimodal.processing import (
 from vllm.sequence import IntermediateTensors
 from vllm.tokenizers import cached_tokenizer_from_config
 from vllm.transformers_utils.processor import cached_processor_from_config
-from vllm.utils.gpu_sync_debug import gpu_sync_allowed
 from vllm.utils.tensor_schema import TensorSchema, TensorShape
-from vllm.utils.torch_utils import PIN_MEMORY
 
 from .blip2 import Blip2QFormerModel
 from .interfaces import (
@@ -118,11 +116,11 @@ class GraniteSpeechAudioInputs(TensorSchema):
         - 160: Fixed feature dimension for Mel spectrogram features
     """
 
-    input_features: Annotated[torch.Tensor, TensorShape("b", "fi", 160)]
+    input_features: Annotated[
+        torch.Tensor | list[torch.Tensor],
+        TensorShape("b", "fi", 160, dynamic_dims={"fi"}),
+    ]
     """Audio input features."""
-
-    input_features_mask: Annotated[torch.Tensor, TensorShape("b", "fo")]
-    """Mask for variable length audio features."""
 
     audio_embed_sizes: Annotated[list[int], TensorShape("b")]
     """List of audio embedding sizes for each item in batch."""
@@ -661,7 +659,6 @@ class GraniteSpeechForConditionalGeneration(
         **kwargs: object,
     ) -> GraniteSpeechAudioInputs | None:
         input_features = kwargs.pop("input_features", None)
-        input_features_mask = kwargs.pop("input_features_mask", None)
         audio_embed_sizes = kwargs.pop("audio_embed_sizes", None)
 
         if input_features is None:
@@ -670,25 +667,10 @@ class GraniteSpeechForConditionalGeneration(
         if not isinstance(audio_embed_sizes, torch.Tensor):
             raise ValueError("audio_embed_sizes must be a tensor")
 
-        # If we have a batch of variable feature length audio clips, we need
-        # to mask the features; usually we would get an input_features_mask
-        # from the processor, but we handle rebuilding it here since
-        # vLLM generally processes everything independently + batches.
-        if input_features_mask is None:
-            input_features_mask = self._build_input_features_mask(audio_embed_sizes)
-
         if not isinstance(input_features, (torch.Tensor, list)):
             raise ValueError(
                 "Incorrect type of audio input features. "
                 f"Got type: {type(input_features)}"
-            )
-
-        if input_features_mask is not None and not isinstance(
-            input_features_mask, torch.Tensor
-        ):
-            raise ValueError(
-                "Incorrect type of audio input features mask. "
-                f"Got type: {type(input_features_mask)}"
             )
 
         if isinstance(input_features, torch.Tensor):
@@ -712,45 +694,15 @@ class GraniteSpeechForConditionalGeneration(
             # passed as a batch, we expect a list of 2D var len input features
             # so unsqueeze them.
             input_features = [
-                feat.unsqueeze(dim=0) for feat in input_features if feat.ndim == 2
+                feat.to(self.encoder.input_linear.weight.dtype)
+                for feat in input_features
+                if feat.ndim == 2
             ]
-
-            # stack them into a 3D tensor of size [bsz, most_num_features, 160].
-            input_features = self._pad_and_stack_input_features(
-                input_features,
-            ).to(self.encoder.input_linear.weight.dtype)
 
         return GraniteSpeechAudioInputs(
             input_features=input_features,
-            input_features_mask=input_features_mask,
             audio_embed_sizes=audio_embed_sizes.flatten().tolist(),
         )
-
-    def _build_input_features_mask(
-        self,
-        audio_embed_sizes: torch.Tensor,
-    ) -> torch.Tensor:
-        """Calculate the input features mask, which will generally be used
-        to mask the padded features for all entries in the batch except
-        for those with the most audio features.
-
-        Args:
-            audio_embed_sizes: torch.Tensor
-                Tensor of num features in each seq in the batch.
-
-        Returns:
-            torch.Tensor: Mask of shape (bsz, num_features) to be applied to
-            the audio features prior to splitting the audio embeddings.
-
-        """
-        most_audio_features = int(torch.max(audio_embed_sizes))
-        mask_indices = torch.arange(most_audio_features).view(1, -1)
-        input_features_mask = mask_indices < audio_embed_sizes.view(-1, 1)
-        target_device = self.encoder.input_linear.weight.device
-        if target_device == input_features_mask.device:
-            return input_features_mask
-        masked = input_features_mask.pin_memory() if PIN_MEMORY else input_features_mask
-        return masked.to(target_device, non_blocking=True)
 
     def _pad_and_stack_input_features(
         self,
@@ -806,19 +758,29 @@ class GraniteSpeechForConditionalGeneration(
         """
         # TODO (Alex) - support embedding inputs
         input_features = audio_input["input_features"]
-        batch_size = get_encoder_batch_size(self.config, input_features.shape[1])
-        # [bsz, <max feature size>, 4096]
-        projected_embeds = torch.cat(
-            [
-                self.projector(self.encoder(features))
-                for features in input_features.split(batch_size)
-            ]
+        audio_embed_sizes = audio_input["audio_embed_sizes"]
+        order = sorted(
+            range(len(input_features)),
+            key=lambda i: input_features[i].shape[0],
+            reverse=True,
         )
-        # Apply mask on variable length audio features.
-        with gpu_sync_allowed():
-            masked_embeds = projected_embeds[audio_input["input_features_mask"]]
-        # Split variable length features into a tuple
-        return torch.split(masked_embeds, audio_input["audio_embed_sizes"])
+        audio_embeds: dict[int, torch.Tensor] = {}
+        start = 0
+        while start < len(order):
+            num_features = input_features[order[start]].shape[0]
+            batch_size = get_encoder_batch_size(self.config, num_features)
+            group = order[start : start + batch_size]
+            start += len(group)
+            features = self._pad_and_stack_input_features(
+                [input_features[i].unsqueeze(0) for i in group]
+            )
+            projected_embeds = self.projector(self.encoder(features))
+            sizes = [audio_embed_sizes[i] for i in group]
+            group_embeds = torch.cat(
+                [embeds[:size] for embeds, size in zip(projected_embeds, sizes)]
+            ).split(sizes)
+            audio_embeds.update(zip(group, group_embeds))
+        return tuple(audio_embeds[i] for i in range(len(order)))
 
     def embed_multimodal(
         self,
