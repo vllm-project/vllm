@@ -847,6 +847,7 @@ def test_simple_context_token_counting():
             prompt_token_ids=[1, 2, 3, 4, 5],
             num_cached_tokens=2,
             num_cache_creation_tokens=3,
+            finished=False,
         )
     )
     context.append_output(
@@ -863,6 +864,39 @@ def test_simple_context_token_counting():
     assert context.num_output_tokens == 3  # 2 + 1
     assert context.num_cached_tokens == 2
     assert context.num_cache_creation_tokens == 3
+
+
+def test_simple_context_turn_metrics_tracking():
+    """A completed turn records per-turn input/output/cached token counts."""
+    context = SimpleContext()
+    assert context.all_turn_metrics == []
+
+    # Streaming deltas within one turn; only the last one ends the turn.
+    context.append_output(
+        create_simple_context_output(
+            text="a",
+            token_ids=[10, 11],
+            prompt_token_ids=[1, 2, 3, 4, 5],
+            num_cached_tokens=2,
+            finished=False,
+        )
+    )
+    context.append_output(
+        create_simple_context_output(
+            text="b",
+            token_ids=[12],
+            prompt_token_ids=[1, 2, 3, 4, 5],
+            num_cached_tokens=2,
+            finished=True,
+        )
+    )
+
+    assert len(context.all_turn_metrics) == 1
+    turn = context.all_turn_metrics[0]
+    assert turn.input_tokens == 5
+    assert turn.output_tokens == 3
+    assert turn.cached_input_tokens == 2
+    assert turn.tool_output_tokens == 0
 
 
 def test_simple_context_final_output():

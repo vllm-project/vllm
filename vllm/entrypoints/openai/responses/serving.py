@@ -7,7 +7,7 @@ from collections import deque
 from collections.abc import AsyncGenerator, AsyncIterator, Callable, Mapping, Sequence
 from contextlib import AsyncExitStack
 from http import HTTPStatus
-from typing import Any, Final, cast
+from typing import Any, Final, Literal, cast
 
 from fastapi import Request
 from openai.types.responses import (
@@ -793,6 +793,12 @@ class OpenAIServingResponses(GenerateBaseServing):
         # we guarantee that if the status is not "completed", it is accurate.
         # "completed" is implemented as the "catch-all" for now.
         status: ResponseStatus = "completed"
+        incomplete_reason: Literal["max_output_tokens", "content_filter"] | None = None
+
+        def _mark_incomplete_length() -> None:
+            nonlocal status, incomplete_reason
+            status = "incomplete"
+            incomplete_reason = "max_output_tokens"
 
         input_messages: ResponseInputOutputMessage | None = None
         output_messages: ResponseInputOutputMessage | None = None
@@ -822,7 +828,7 @@ class OpenAIServingResponses(GenerateBaseServing):
             num_tool_output_tokens = context.num_tool_output_tokens
             if len(output) > 0:
                 if context.finish_reason == "length":
-                    status = "incomplete"
+                    _mark_incomplete_length()
                 elif context.finish_reason == "abort":
                     status = "cancelled"
                 else:
@@ -836,13 +842,13 @@ class OpenAIServingResponses(GenerateBaseServing):
                 input_messages = context.input_messages
                 output_messages = context.output_messages
 
-            # TODO: Calculate usage.
-            # assert final_res.prompt_token_ids is not None
-            num_tool_output_tokens = 0
+            num_tool_output_tokens = sum(
+                turn.tool_output_tokens for turn in context.all_turn_metrics
+            )
 
             # Check finish reason from the parser
             if context.finish_reason == "length":
-                status = "incomplete"
+                _mark_incomplete_length()
         else:
             assert isinstance(context, SimpleContext)
             # Use final_output which has accumulated text/token_ids/logprobs
@@ -856,7 +862,7 @@ class OpenAIServingResponses(GenerateBaseServing):
 
             # Check if generation was stopped due to max_tokens
             if final_output.finish_reason == "length":
-                status = "incomplete"
+                _mark_incomplete_length()
 
             streamed_items = context.streamed_output_items
             self._log_final_output(
@@ -878,7 +884,9 @@ class OpenAIServingResponses(GenerateBaseServing):
 
             # Calculate usage.
             assert final_res.prompt_token_ids is not None
-            num_tool_output_tokens = 0
+            num_tool_output_tokens = sum(
+                turn.tool_output_tokens for turn in context.all_turn_metrics
+            )
 
         assert isinstance(context, (SimpleContext, HarmonyContext, ParsableContext))
         num_prompt_tokens = context.num_prompt_tokens
@@ -939,6 +947,7 @@ class OpenAIServingResponses(GenerateBaseServing):
             metrics=per_request_metrics,
             kv_transfer_params=context.kv_transfer_params,
             ec_transfer_params=context.ec_transfer_params,
+            incomplete_reason=incomplete_reason,
         )
 
         if request.store:
