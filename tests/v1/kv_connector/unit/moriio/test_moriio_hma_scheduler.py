@@ -1205,7 +1205,7 @@ def test_update_state_preserves_each_mamba_group():
     [
         ("full", True),
         ("no_address", False),
-        ("no_transfer_id", True),
+        ("no_transfer_id", False),
         ("bad_port", False),
         ("no_remote_engine", False),
     ],
@@ -1236,11 +1236,6 @@ def test_read_abort_before_scheduling_releases_only_routable_requests(case, rout
     assert ("9ed3b2574f8750be" in sched._reqs_need_recv) is routable
     meta = sched.build_connector_meta(SchedulerOutput.make_empty())
     assert ("9ed3b2574f8750be" in meta.reqs_to_recv) is routable
-    if case == "no_transfer_id":
-        assert (
-            meta.reqs_to_recv["9ed3b2574f8750be"].transfer_id
-            == "sidecar-9ed3b2574f8750be"
-        )
 
 
 def test_align_read_blocks_allows_configured_lookahead_tail():

@@ -528,7 +528,11 @@ class MoRIIOConnector(KVConnectorBase_V1, SupportsHMA):
 
 def _can_route_read_release(request_id: str, params: dict[str, Any]) -> bool:
     """Whether add_new_req can build a READ release for this request."""
-    if "remote_engine_id" not in params or "remote_block_ids" not in params:
+    if (
+        not params.get("transfer_id")
+        or "remote_engine_id" not in params
+        or "remote_block_ids" not in params
+    ):
         return False
     if get_peer_zmq_from_request_id(request_id, is_producer=False) is not None:
         return True
@@ -1670,9 +1674,6 @@ class MoRIIOConnectorScheduler:
                     request.request_id,
                 )
             else:
-                # Same fallback as update_state_after_alloc for llm-d requests.
-                if not params.get("transfer_id"):
-                    params["transfer_id"] = f"sidecar-{request.request_id}"
                 # Carry the actually-allocated blocks (incl. the per-request KDA
                 # mamba slot) instead of []: a do_remote_prefill request finishing
                 # before update_state_after_alloc still has blocks, and dropping the
@@ -3336,10 +3337,11 @@ class MoRIIOConnectorWorker:
         the collective (raising early would hang the peers still waiting for it).
         Every worker reaches the all-reduce(MIN) vote, so every worker agrees on
         which engines failed. A failed engine is returned rather than raised so
-        only its requests fail. It is not handshaked again for its next few
-        references (doubling on each further failure): a handshake that times
-        out stalls the whole batch. It still raises when block-level recovery
-        is unsupported.
+        only its requests fail. It is not handshaked again on the next step that
+        references it, then on twice as many after each further failure: a
+        handshake that times out stalls the whole batch. Releases carry no blocks
+        and need no handshake, so they are left out. It still raises when
+        block-level recovery is unsupported.
 
         Returns:
             Remote engines whose handshake failed on at least one TP worker.
@@ -3352,6 +3354,8 @@ class MoRIIOConnectorWorker:
         engines: dict[str, ReqMeta] = {}
         failed: set[EngineId] = set()
         for _req_id, meta in metadata.reqs_to_recv.items():
+            if not any(meta.local_block_ids):
+                continue
             remote_engine_id = (
                 str(meta.remote_host) + ":" + str(meta.remote_handshake_port)
             )
@@ -3508,6 +3512,10 @@ class MoRIIOConnectorWorker:
                 str(meta.remote_host) + ":" + str(meta.remote_handshake_port)
             )
             meta.remote_engine_id = remote_engine_id
+            if not any(meta.local_block_ids):
+                # A release only notifies prefill; it needs no handshake.
+                self._read_blocks_for_req(req_id, meta)
+                continue
             if remote_engine_id in failed_engines:
                 self._fail_recv_without_read(req_id, meta)
                 continue

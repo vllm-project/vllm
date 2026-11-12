@@ -535,6 +535,42 @@ def test_tp_vote_fails_an_engine_another_rank_could_not_reach(monkeypatch):
     assert worker._handshake_cooldowns == {}
 
 
+def test_release_to_a_failing_engine_skips_the_handshake(monkeypatch):
+    """A release carries no blocks and only notifies prefill, so it neither
+    handshakes nor counts toward a failed engine's cooldown."""
+    heads, layers = MODELS["mla"]
+    state = _global_state(layers, heads)
+    producers, (consumer,) = _ranks("mla", 1, 1, True, LAYOUTS[0], state)
+    worker = consumer.worker
+    _make_reader(consumer, producers, "xgmi")
+    _fail_handshakes_to(worker, "bad", monkeypatch)
+    handshakes = []
+    fail = worker._moriio_handshake
+    worker._moriio_handshake = lambda *a: handshakes.append(a) or fail(*a)
+    sent = []
+    worker.moriio_wrapper.send_notify = lambda transfer_id, host, port, **_: (
+        sent.append(transfer_id)
+    )
+    worker.moriio_wrapper.waiting_for_transfer_complete = lambda *a, **k: None
+    worker._ready_requests = queue.Queue()
+    worker.load_ready_flag = {}
+    metadata = MoRIIOConnectorMetadata()
+    metadata.reqs_to_recv["req-release"] = dataclasses.replace(
+        _meta(["full"], 1),
+        transfer_id="t-release",
+        remote_host="bad",
+        local_block_ids=[[]],
+    )
+
+    worker.start_load_kv(metadata)
+    worker._handshake_initiation_executor.shutdown()
+
+    assert handshakes == []
+    assert sent == ["t-release"]
+    assert worker._invalid_block_ids == set()
+    assert worker._handshake_cooldowns == {}
+
+
 @pytest.mark.parametrize("model", ["mla_hybrid", "sliding"])
 def test_failed_handshake_still_fails_the_step_without_block_recovery(
     model, monkeypatch
