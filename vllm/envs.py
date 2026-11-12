@@ -143,6 +143,7 @@ if TYPE_CHECKING:
     VLLM_ROCM_DCP_VUP_RS: bool = False
     VLLM_ROCM_DSA_MULTISTREAM: bool = False
     VLLM_ROCM_MEM_HEADROOM_GIB: float = 0.0
+    VLLM_PREFILL_CADENCE_NO_ESCAPE: bool = False
     VLLM_ROCM_USE_AITER_LINEAR: bool = True
     VLLM_ROCM_USE_AITER_LINEAR_HIPBMM: bool = False
     VLLM_ROCM_USE_AITER_MOE: bool = True
@@ -1347,6 +1348,13 @@ environment_variables: dict[str, Callable[[], Any]] = {
     # scratch and RCCL buffers, which grow lazily. 0 disables the cap.
     "VLLM_ROCM_MEM_HEADROOM_GIB": lambda: float(
         os.getenv("VLLM_ROCM_MEM_HEADROOM_GIB", "0")
+    ),
+    # Local prefill cadence (--prefill-schedule-interval): keep holding prefill
+    # when a release step leaves requests waiting, instead of turning the hold
+    # off (capacity escape). With max-num-seqs below the client count the queue
+    # never drains, so without this the interval is not applied.
+    "VLLM_PREFILL_CADENCE_NO_ESCAPE": lambda: (
+        os.getenv("VLLM_PREFILL_CADENCE_NO_ESCAPE", "0").lower() in ("true", "1")
     ),
     # use aiter linear op if aiter ops are enabled
     # The following list of related ops

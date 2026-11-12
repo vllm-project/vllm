@@ -26,6 +26,7 @@ from vllm.distributed.kv_transfer.kv_connector.v1 import (
 )
 from vllm.distributed.kv_transfer.kv_connector.v1.base import KVConnectorMetadata
 from vllm.distributed.kv_transfer.kv_connector.v1.metrics import KVConnectorStats
+import vllm.envs as envs
 from vllm.logger import init_logger
 from vllm.multimodal import MULTIMODAL_REGISTRY, MultiModalRegistry
 from vllm.multimodal.encoder_budget import MultiModalBudget
@@ -437,6 +438,9 @@ class Scheduler(SchedulerInterface):
                 self.local_prefill_interval,
                 self.local_prefill_interval,
             )
+        # VLLM_PREFILL_CADENCE_NO_ESCAPE: keep the hold when the waiting queue
+        # does not drain (see the local cadence gate in schedule()).
+        self.prefill_cadence_no_escape = envs.VLLM_PREFILL_CADENCE_NO_ESCAPE
         # A full interval back, so the first step is never gated.
         self.last_prefill_step = -self.local_prefill_interval
         # Steps that actually scheduled tokens. `current_step` counts every
@@ -813,10 +817,13 @@ class Scheduler(SchedulerInterface):
         # in-flight chunks for interval-1 of every interval steps, capping
         # prefill at roughly one budget per interval and growing the waiting
         # queue without bound.
+        # VLLM_PREFILL_CADENCE_NO_ESCAPE=1 keeps the hold anyway (opt-in): when
+        # max-num-seqs caps admissions the queue never drains, so the escape
+        # would otherwise disable the cadence for the whole run.
         if (
             not defer_prefills
             and self.local_prefill_interval > 1
-            and not self.prefill_capacity_bound
+            and (not self.prefill_capacity_bound or self.prefill_cadence_no_escape)
             # This call becomes executed step num_executed_steps + 1 if it
             # schedules anything, and last_prefill_step is stamped on the same
             # convention below.
