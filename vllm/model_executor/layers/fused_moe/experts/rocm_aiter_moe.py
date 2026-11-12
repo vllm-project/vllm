@@ -6,7 +6,6 @@ from typing import TYPE_CHECKING
 
 import torch
 
-import vllm.envs as envs
 import vllm.model_executor.layers.fused_moe.modular_kernel as mk
 from vllm._aiter_ops import rocm_aiter_ops
 from vllm.model_executor.layers.fused_moe.activation import MoEActivation
@@ -570,12 +569,7 @@ class AiterExperts(mk.FusedMoEExpertsModular):
         workspace2 = (0,)
         # MoRI dispatches MXFP4 activations packed two per byte, so K is
         # half the hidden size there.
-        packed_fp4_input = self.moe_config.use_mori_epv1_kernels and (
-            self.quant_config.use_mxfp4_w4a4
-            or (
-                self.moe_config.use_mxfp4_w4a4_dsv4 and envs.VLLM_MORI_A4W4_FP4_DISPATCH
-            )
-        )
+        packed_fp4_input = self.moe_config.use_mori_fp4_dispatch(self.quant_config)
         output = (M, K * 2 if packed_fp4_input else K)
         return (workspace1, workspace2, output)
 

@@ -1656,6 +1656,20 @@ class FusedMoEConfig:
     def use_mori_epv2_kernels(self):
         return self.moe_parallel_config.use_mori_epv2_kernels
 
+    def use_mori_fp4_dispatch(self, quant_config: FusedMoEQuantConfig) -> bool:
+        """Whether MoRI EPv1 dispatches the MoE input as packed MXFP4 with e8m0
+        block scales, which the experts take without quantizing again.
+
+        Covers MXFP4 W4A4 checkpoints and the DeepSeek V4.1 a4w4 MoE, whose W4A16
+        quant config runs MXFP4 activations in AITER. The prepare/finalize
+        selection and AiterExperts.workspace_shapes both read this; if they
+        disagreed, the expert output would be allocated at half width.
+        """
+        return self.use_mori_epv1_kernels and (
+            quant_config.use_mxfp4_w4a4
+            or (quant_config.use_mxfp4_w4a16 and self.use_mxfp4_w4a4_dsv4)
+        )
+
     @property
     def use_fi_nvl_two_sided_kernels(self):
         return self.moe_parallel_config.use_fi_nvl_two_sided_kernels

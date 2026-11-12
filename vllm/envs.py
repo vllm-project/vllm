@@ -148,7 +148,6 @@ if TYPE_CHECKING:
     VLLM_ROCM_USE_AITER_MOE: bool = True
     VLLM_ROCM_AITER_MOE_DISPATCH_POLICY: int = 0
     VLLM_ROCM_USE_AITER_MOE_A4W4_DSV4: bool | None = None
-    VLLM_MORI_A4W4_FP4_DISPATCH: bool = False
     VLLM_ROCM_USE_AITER_MOE_SITUV2: Literal["auto", "a4w4", "a8w4", "a16w4"] = "auto"
     VLLM_ROCM_USE_AITER_RMSNORM: bool = True
     VLLM_ROCM_USE_AITER_MLA: bool = True
@@ -1376,15 +1375,11 @@ environment_variables: dict[str, Callable[[], Any]] = {
     # Opt-in switch for a4w4 (FP4 activation) MoE on DeepSeek V4.1, AITER
     # MXFP4 backend. Default is a8w4 (FP8); set to "1" to enable a4w4
     # ("true" is not accepted -- only "0"/"1"). Raises if set for other
-    # models.
+    # models. Under MoRI EPv1, a4w4 also dispatches the MoE input as packed
+    # MXFP4 with e8m0 block scales, which the experts take without
+    # quantizing again.
     "VLLM_ROCM_USE_AITER_MOE_A4W4_DSV4": lambda: maybe_convert_bool(
         os.getenv("VLLM_ROCM_USE_AITER_MOE_A4W4_DSV4")
-    ),
-    # With VLLM_ROCM_USE_AITER_MOE_A4W4_DSV4=1 and MoRI: dispatch the MoE input
-    # as packed MXFP4 with e8m0 block scales, which the a4w4 experts take
-    # without quantizing again, instead of BF16 (a quarter of the bytes).
-    "VLLM_MORI_A4W4_FP4_DISPATCH": lambda: bool(
-        int(os.getenv("VLLM_MORI_A4W4_FP4_DISPATCH", "0"))
     ),
     # MoE sorting dispatch policy for AITER fused MoE kernels.
     #   0 = auto (default): single-pass for small batches, multi-pass

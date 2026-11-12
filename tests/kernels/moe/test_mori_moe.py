@@ -91,8 +91,7 @@ def _mori_worker(pgi, vllm_config, cpu_group, m, n, k, scheme, graph):
     init_workspace_manager(pgi.device)
     set_random_seed(47)
     fp8 = scheme == "fp8_token_channel"
-    # DeepSeek V4.1 A4W4: VLLM_MORI_A4W4_FP4_DISPATCH=1 dispatches its input
-    # as packed MXFP4, like the W4A4 path.
+    # DeepSeek V4.1 A4W4 dispatches its input as packed MXFP4, like W4A4.
     dsv4 = scheme == "mxfp4_dsv4"
     mxfp4 = scheme == "mxfp4" or dsv4
     dtype = current_platform.fp8_dtype() if fp8 else None
@@ -269,6 +268,5 @@ def test_mori_moe(m, n, k, scheme):
         "VLLM_ROCM_USE_AITER": "1",
         "VLLM_ROCM_USE_AITER_MOE": "1",
         "VLLM_ROCM_USE_AITER_FUSION_SHARED_EXPERTS": "0",
-        "VLLM_MORI_A4W4_FP4_DISPATCH": "1" if scheme == "mxfp4_dsv4" else "0",
     }
     parallel_launch_with_config(2, _mori_worker, config, env, m, n, k, scheme, m == 32)
