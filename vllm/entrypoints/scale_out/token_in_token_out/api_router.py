@@ -49,7 +49,7 @@ router = APIRouter()
 
 
 class _RenderedJSONResponse(JSONResponse):
-    """A body already rendered to JSON, sent with ``JSONResponse`` headers."""
+    """A body already rendered to JSON, sent with `JSONResponse` headers."""
 
     def render(self, content: Any) -> bytes:
         return content

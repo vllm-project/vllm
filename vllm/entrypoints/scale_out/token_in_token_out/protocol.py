@@ -673,7 +673,7 @@ class GenerateDerenderResponse(GenerateResponseBase):
 @dataclass
 class RenderedGenerateResponse:
     """A non-streaming generate response already rendered to its JSON body:
-    the bytes ``JSONResponse`` gives for the equivalent ``GenerateResponse``."""
+    the bytes `JSONResponse` gives for the equivalent `GenerateResponse`."""
 
     body: bytes
 

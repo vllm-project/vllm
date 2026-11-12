@@ -41,7 +41,7 @@ from vllm.v1.outputs import LogprobsLists
 
 @pytest.fixture(autouse=True)
 def _fixed_created_time(monkeypatch):
-    """Compared bodies are built at different times; ``created`` must match."""
+    """Compared bodies are built at different times; `created` must match."""
     monkeypatch.setattr(serving_mod.time, "time", lambda: 1700000000.0)
 
 
@@ -59,7 +59,7 @@ def _rows(n, slots, seed=0, vocab=50_000):
 
 
 def _stored(k, *steps, flat):
-    """The rows of ``steps`` as the LogprobsProcessor stores them."""
+    """The rows of `steps` as the LogprobsProcessor stores them."""
     processor = LogprobsProcessor(
         tokenizer=None,
         logprobs=create_sample_logprobs(flat),
@@ -115,7 +115,7 @@ def _body(serving, k, outputs, finish_reason="length"):
 
 
 def _outcome(serving, k, choices, finish_reason="length"):
-    """Bodies of the list and the flat storage of ``choices``, or the error
+    """Bodies of the list and the flat storage of `choices`, or the error
     each raises."""
     results = []
     for flat in (False, True):
@@ -241,7 +241,7 @@ def test_aborted_choice_without_tokens():
 
 
 def test_float_reprs_match_repr():
-    """The msgspec fast path gives ``repr``'s digits for float32 values."""
+    """The msgspec fast path gives `repr`'s digits for float32 values."""
     bits = np.random.default_rng(0).integers(0, 2**32, 1 << 20, dtype=np.uint64)
     values = bits.astype(np.uint32).view(np.float32)
     values = values[np.isfinite(values)].astype(np.float64)
@@ -321,7 +321,7 @@ def _full_request(n=40):
 
 
 async def _serve_full(serving, rows):
-    """serve_tokens_full_generator for one choice of ``rows`` (k=3)."""
+    """serve_tokens_full_generator for one choice of `rows` (k=3)."""
 
     async def results():
         yield _final([(rows[0][:, 0].tolist(), _stored(3, rows, flat=True))])

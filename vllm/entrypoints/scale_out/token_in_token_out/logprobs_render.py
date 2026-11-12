@@ -1,13 +1,13 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
-"""Object-free rendering of ``/inference/v1/generate`` sample logprobs.
+"""Object-free rendering of `/inference/v1/generate` sample logprobs.
 
-:func:`render_tokens_logprobs` reads the engine rows of a
-:class:`~vllm.logprobs.FlatLogprobs` and produces exactly the JSON that
-``ServingTokens._create_tokens_logprobs`` + ``model_dump`` + Starlette's
-``JSONResponse.render`` produce for the same rows, without a Python object
+`render_tokens_logprobs` reads the engine rows of a
+`FlatLogprobs` and produces exactly the JSON that
+`ServingTokens._create_tokens_logprobs` + `model_dump` + Starlette's
+`JSONResponse.render` produce for the same rows, without a Python object
 per entry, yielding to the event loop between blocks of rows.
-:func:`render_json_with_fragments` splices such pre-rendered values into the
+`render_json_with_fragments` splices such pre-rendered values into the
 JSON of the remaining (small) response.
 """
 
@@ -28,10 +28,10 @@ RENDER_BLOCK_ENTRIES = 1 << 13
 
 
 class _LeadTable:
-    """token id -> ``prefix + str(id) + suffix`` as a numpy object array, so a
+    """token id -> `prefix + str(id) + suffix` as a numpy object array, so a
     block of ids maps to its JSON pieces with one fancy index.
 
-    Covers ids below ``max_ids``, kept for the process lifetime (a few MB per
+    Covers ids below `max_ids`, kept for the process lifetime (a few MB per
     table at a 150k vocabulary); blocks with other ids are formatted per call.
     """
 
@@ -75,20 +75,20 @@ _NEXT_TOP_LEADS = _LeadTable(b'},{"token_id":', b',"logprob":')
 
 
 def _rank_pieces(ranks: list[int]) -> list[bytes]:
-    """``,"rank":<rank>`` with a rank of 0 sent as null, like ``rank or None``."""
+    """`,"rank":<rank>` with a rank of 0 sent as null, like `rank or None`."""
     return [b',"rank":%d' % r if r else b',"rank":null' for r in ranks]
 
 
 def format_float_reprs(values: np.ndarray) -> list[bytes]:
-    """``[repr(float(v)).encode() for v in values]`` for a non-empty 1-D
+    """`[repr(float(v)).encode() for v in values]` for a non-empty 1-D
     float64 array of finite values that float32 represents exactly.
 
-    ``repr`` is what ``json.dumps`` emits. msgspec's shortest round-trip
+    `repr` is what `json.dumps` emits. msgspec's shortest round-trip
     encoder is used instead where it gives the same digits: for
-    ``1e-4 <= |v| < 1e16`` and zeros; other magnitudes, where the exponent
-    notation differs (``1e-05`` vs ``0.00001``), use ``repr``. The fast path
+    `1e-4 <= |v| < 1e16` and zeros; other magnitudes, where the exponent
+    notation differs (`1e-05` vs `0.00001`), use `repr`. The fast path
     is disabled if an import-time probe finds msgspec formatting that differs
-    from ``repr``.
+    from `repr`.
     """
     floats = values.tolist()
     if not _MSGSPEC_FLOATS_MATCH_REPR:
@@ -107,7 +107,7 @@ def _format_fast(values: np.ndarray, floats: list[float]) -> list[bytes]:
 
 
 def _msgspec_floats_match_repr() -> bool:
-    """Probe the msgspec fast path against ``repr`` once at import: float32
+    """Probe the msgspec fast path against `repr` once at import: float32
     boundaries of the fast range, powers of ten, extremes and a fixed
     pseudo-random sample."""
     probe: list[float] = [0.0, -0.0, 0.1, 0.5, 1.0, 9999.0, 123.456, -1.2e-7]
@@ -140,8 +140,8 @@ async def render_tokens_logprobs(
     container: FlatLogprobs,
     lock: asyncio.Lock | None = None,
 ) -> list[bytes] | None:
-    """See :func:`_render_tokens_logprobs`. Renders of more than one block
-    hold ``lock``: they all run on the event loop's thread, so interleaving
+    """See `_render_tokens_logprobs`. Renders of more than one block
+    hold `lock`: they all run on the event loop's thread, so interleaving
     them adds no throughput, only memory, as each holds its partial output.
     """
     rows = container.rows()
@@ -155,13 +155,13 @@ async def _render_tokens_logprobs(
     sampled_token_ids: Sequence[int],
     container: FlatLogprobs,
 ) -> list[bytes] | None:
-    """Render the ``GenerateLogProbs`` JSON of one choice, as parts whose
+    """Render the `GenerateLogProbs` JSON of one choice, as parts whose
     concatenation is the JSON.
 
     Per position, the per-entry path builds a dict from the row (keys keep
     their first occurrence's order, values come from the last occurrence;
-    slot 0 has the engine rank, slot ``j`` rank ``j``), looks the sampled
-    entry up by the sampled id, and lists every dict item as ``top_logprobs``
+    slot 0 has the engine rank, slot `j` rank `j`), looks the sampled
+    entry up by the sampled id, and lists every dict item as `top_logprobs`
     (one fewer when the sampled id repeats in the top-k); logprobs are clamped
     (NaN and values below -9999 are -9999.0) and a rank of 0 is null.
 
@@ -253,7 +253,7 @@ async def _render_tokens_logprobs(
 
 
 def _dumps(content: Any) -> bytes:
-    """Same serialization as ``starlette.responses.JSONResponse.render``."""
+    """Same serialization as `starlette.responses.JSONResponse.render`."""
     return json.dumps(
         content,
         ensure_ascii=False,
@@ -266,10 +266,10 @@ def _dumps(content: Any) -> bytes:
 def render_json_with_fragments(
     content: dict[str, Any], key: str, fragments: Mapping[int, list[bytes]]
 ) -> list[bytes]:
-    """Render ``content`` like ``JSONResponse``, with the value of
-    ``content["choices"][i][key]`` replaced by the pre-rendered JSON
-    ``fragments[i]`` (parts to concatenate), as parts whose concatenation is
-    the body. ``content`` is modified in place."""
+    """Render `content` like `JSONResponse`, with the value of
+    `content["choices"][i][key]` replaced by the pre-rendered JSON
+    `fragments[i]` (parts to concatenate), as parts whose concatenation is
+    the body. `content` is modified in place."""
     token = secrets.token_hex(16)
     for index in fragments:
         content["choices"][index][key] = token
