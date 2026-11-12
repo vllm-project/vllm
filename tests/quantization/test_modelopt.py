@@ -854,7 +854,9 @@ def _pack_int8_pb_wo_weight(
     )
 
 
-@pytest.mark.skipif(not current_platform.is_cuda(), reason="WNA16 kernels are CUDA")
+@pytest.mark.skipif(
+    not current_platform.is_cuda_alike(), reason="WNA16 kernels are CUDA and ROCm"
+)
 @pytest.mark.parametrize(
     ("quant_algo", "dtype"),
     [

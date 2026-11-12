@@ -693,6 +693,7 @@ class RocmPlatform(Platform):
         "modelopt_fp4",
         "modelopt_mxfp8",
         "modelopt_mixed",
+        "modelopt_int8",
         "fp8_per_tensor",
         "fp8_per_block",
         "fp8_per_channel",
