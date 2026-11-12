@@ -17,6 +17,20 @@ For further details on generative models, please refer to [this page](../models/
 - `LLM.generate` - Generates completions for the given input prompts.
 - `LLM.chat` - Generates responses for a chat conversation.
 
+## Beam Search
+
+`LLM.beam_search()` returns each selected beam's prompt and generated tokens.
+A terminating EOS token is omitted by default. Set
+`BeamSearchParams(include_stop_str_in_output=True, ...)` to retain it in the
+returned token IDs. Set `skip_special_tokens=False` as well to show special EOS
+tokens in decoded text. The OpenAI-compatible beam-search endpoint applies
+the same flags to the generated portion of its response.
+
+EOS still contributes its log probability to beam ranking when omitted from
+the returned tokens. Completed EOS beams report `finish_reason="stop"` and
+the terminating token ID as `stop_reason`. With `ignore_eos=True`, EOS tokens
+are ordinary generated tokens.
+
 ## Asynchronous Queue APIs
 
 - `LLM.enqueue` - Enqueues prompts for generation without waiting for completion.

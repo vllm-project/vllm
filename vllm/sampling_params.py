@@ -1513,6 +1513,9 @@ class BeamSearchParams(
     normalizes a beam's cumulative log-probability when ranking beams, as in
     Transformers. Values above 0 favor longer beams, below 0 shorter ones."""
     include_stop_str_in_output: bool = False
+    """Include a terminating EOS token in the returned token IDs. Decoded text
+    still follows skip_special_tokens. EOS logprobs always contribute to the
+    beam score, whether or not the token is included."""
     structured_outputs: StructuredOutputsParams | None = None
     skip_special_tokens: bool = True
     watermarking: bool | None = None
