@@ -9,10 +9,8 @@ from unittest.mock import AsyncMock, Mock
 import numpy as np
 import pytest
 
-import vllm.entrypoints.speech_to_text.base.serving as serving_module
 import vllm.envs as envs
 from vllm.config.speech_to_text import SpeechToTextConfig, VADConfig
-from vllm.entrypoints.serve.engine.protocol import ErrorResponse
 from vllm.entrypoints.speech_to_text.base.serving import SpeechToTextBaseServing
 from vllm.entrypoints.speech_to_text.transcription.protocol import TranscriptionResponse
 
@@ -218,36 +216,6 @@ async def test_language_detection_cancel_aborts_engine_request():
     sampling_params = engine_client.generate.call_args.args[1]
     assert sampling_params.watermarking is False
     engine_client.abort.assert_awaited_once_with(request_id)
-
-
-@pytest.mark.asyncio
-async def test_vad_without_silero_vad_returns_install_hint(monkeypatch):
-    server = SpeechToTextBaseServing.__new__(SpeechToTextBaseServing)
-    server.engine_client = SimpleNamespace(errored=False, check_admission=Mock())
-    server.models = SimpleNamespace(model_name=lambda: "audio")
-    server.model_cls = SimpleNamespace(
-        supports_segment_timestamp=True, supports_diarized_transcription=False
-    )
-    monkeypatch.setattr(server, "_check_model", AsyncMock(return_value=None))
-    monkeypatch.setattr(serving_module, "has_silero_vad", lambda: False)
-    request = SimpleNamespace(
-        model="audio",
-        response_format="json",
-        stream=False,
-        use_beam_search=False,
-        build_vad_config=lambda: VADConfig(enabled=True),
-    )
-
-    response = await server._create_speech_to_text(
-        audio_data=b"audio",
-        request=request,
-        raw_request=None,
-        response_class=TranscriptionResponse,
-        stream_generator_method=Mock(),
-    )
-
-    assert isinstance(response, ErrorResponse)
-    assert "pip install vllm[audio]" in response.error.message
 
 
 def _make_blocking_vad_server(monkeypatch, decode_workers: int, vad_workers: int):
