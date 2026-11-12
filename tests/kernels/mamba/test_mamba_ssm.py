@@ -138,6 +138,7 @@ def selective_scan_opcheck_fn(
     initial_state_idx=None,
     cu_chunk_seqlen=None,
     last_chunk_indices=None,
+    max_seqlen=0,
 ):
     """If return_last_state is True, returns (out, last_state)
     last_state has shape (batch, dim, dstate).
@@ -188,6 +189,7 @@ def selective_scan_opcheck_fn(
             initial_state_idx,
             cu_chunk_seqlen,
             last_chunk_indices,
+            max_seqlen,
         ),
         test_utils=["test_schema", "test_faketensor"],
     )
@@ -561,8 +563,12 @@ def test_selective_state_update_varlen(dim, dstate, has_z, itype, max_seq_len):
 @pytest.mark.parametrize("is_variable_B", [True])
 # tests correctness in case subset of the sequences are padded
 @pytest.mark.parametrize("with_padding", [False, True])
+# tests the launch config chosen from the longest sequence and from an
+# underestimate of it, which must split sequences into more chunks
+@pytest.mark.parametrize("max_seqlen_mode", ["exact", "under"])
 @skip_unless_cuda_alike
 def test_selective_scan_varlen(
+    max_seqlen_mode,
     with_padding,
     is_variable_B,
     is_variable_C,
@@ -666,6 +672,10 @@ def test_selective_scan_varlen(
     has_initial_state = torch.randint(
         0, 2, (cumsum.shape[0] - 1,), dtype=torch.bool, device=u.device
     )
+    max_seqlen = {
+        "exact": max(seqlens[0]),
+        "under": max(1, max(seqlens[0]) // 3),
+    }[max_seqlen_mode]
     out = selective_scan_fn(
         u,
         prev_state,
@@ -680,6 +690,7 @@ def test_selective_scan_varlen(
         cumsum,
         padded_state_indices,
         has_initial_state,
+        max_seqlen=max_seqlen,
     )
     outs_ref = []
     splits = [
@@ -731,6 +742,7 @@ def test_selective_scan_varlen(
         has_initial_state,
         prev_state,
         block_size=2048,
+        max_seqlen=max_seqlen,
     )
 
 

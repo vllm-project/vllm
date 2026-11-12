@@ -61,6 +61,8 @@ class BaseMambaAttentionMetadata:
     # last_chunk_indices_p is a tensor of shape (batch,) that contains the
     # index of the last chunk for every sequence in the (prefill) batch.
     last_chunk_indices_p: torch.Tensor | None = None
+    # Length of the longest prefill request, 0 if there are none.
+    max_query_len_p: int = 0
 
     # The following attributes are for triton implementation of causal_conv1d
     nums_dict: dict | None = None
@@ -457,6 +459,7 @@ class BaseMambaAttentionMetadataBuilder(AttentionMetadataBuilder[M], abc.ABC):
         has_initial_states_p = None
         query_start_loc_p = None
         query_start_loc_d = None
+        max_query_len_p = 0
 
         # for causal_conv1d
         nums_dict, batch_ptr, token_chunk_offset_ptr = None, None, None
@@ -495,6 +498,11 @@ class BaseMambaAttentionMetadataBuilder(AttentionMetadataBuilder[M], abc.ABC):
 
         if num_prefills > 0:
             num_computed_tokens = common_attn_metadata.compute_num_computed_tokens()
+            max_query_len_p = int(
+                torch.diff(
+                    common_attn_metadata.query_start_loc_cpu[-num_prefills - 1 :]
+                ).max()
+            )
 
             query_start_loc_p = (
                 common_attn_metadata.query_start_loc[-num_prefills - 1 :]
@@ -549,6 +557,7 @@ class BaseMambaAttentionMetadataBuilder(AttentionMetadataBuilder[M], abc.ABC):
             num_decodes=num_decodes,
             num_decode_tokens=num_decode_tokens,
             query_start_loc_p=query_start_loc_p,
+            max_query_len_p=max_query_len_p,
             has_initial_states_p=has_initial_states_p,
             state_indices_tensor_p=state_indices_tensor_p,
             state_indices_tensor_d=state_indices_tensor_d,
