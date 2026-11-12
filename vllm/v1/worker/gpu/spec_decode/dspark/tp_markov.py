@@ -457,10 +457,14 @@ class TPMarkovSampler:
             return "adaptive verification is enabled"
         if speculator.use_fp64_gumbel:
             return "fp64 Gumbel sampling is enabled"
-        if hasattr(model, "sample_sequential") or hasattr(
-            model, "apply_output_logit_transform"
+        if (
+            hasattr(model, "sample_sequential")
+            or hasattr(model, "sample_markov_chain")
+            or hasattr(model, "apply_output_logit_transform")
         ):
             return "the draft model has its own Markov sampling"
+        if getattr(model, "has_recurrent_markov_head", False):
+            return "the Markov head is recurrent"
         if speculator.draft_logits.values.dtype != torch.bfloat16:
             return "the draft logits cache is not bf16"
         return None
