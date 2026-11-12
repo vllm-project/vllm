@@ -10,6 +10,7 @@ mod grpc;
 mod listener;
 mod lora;
 mod middleware;
+mod mm_wire;
 mod model_names;
 mod render;
 mod routes;
@@ -132,7 +133,7 @@ async fn build_state(config: &Config) -> Result<Arc<AppState>> {
     let client = EngineCoreClient::connect(EngineCoreClientConfig {
         transport_mode: config.transport_mode.clone(),
         coordinator_mode,
-        model_name: metrics_model_name,
+        model_name: metrics_model_name.clone(),
         client_index: 0,
         engine_stats_enabled: !config.disable_log_stats,
     })
@@ -148,6 +149,7 @@ async fn build_state(config: &Config) -> Result<Arc<AppState>> {
         .with_request_id_randomization(!config.disable_request_id_randomization)
         .with_stream_interval(config.stream_interval);
     let text = TextLlm::new(llm, text_backend)
+        .with_served_model_name(metrics_model_name)
         .with_max_logprobs(config.max_logprobs)
         .with_structured_outputs_backend(config.structured_outputs_backend);
 
