@@ -87,6 +87,12 @@ class FileMapper:
             {
                 "tokens_per_block": group.tokens_per_block,
                 "layer_names": list(group.layer_names),
+                **(
+                    {"tokens_per_state": [str(r) for r in group.tokens_per_state]}
+                    if group.tokens_per_state
+                    and any(r != 1 for r in group.tokens_per_state)
+                    else {}
+                ),
             }
             for group in config.groups
         ]

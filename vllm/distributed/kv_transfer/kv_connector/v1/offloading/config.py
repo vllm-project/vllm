@@ -2,6 +2,7 @@
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 """Translate vLLM KV cache metadata for native offloading backends."""
 
+from fractions import Fraction
 from typing import TYPE_CHECKING
 
 from vllm.utils.math_utils import cdiv, round_up
@@ -56,6 +57,18 @@ def _group_kv_bytes_per_block(group: "KVCacheGroupSpec") -> int:
     if isinstance(spec, UniformTypeKVCacheSpecs):
         return spec.page_size_bytes
     return spec.page_size_bytes * len(group.layer_names)
+
+
+def _group_tokens_per_state(group: "KVCacheGroupSpec") -> tuple[int | Fraction, ...]:
+    def spec_tps(spec) -> int | Fraction:
+        try:
+            return spec.tokens_per_state
+        except (AttributeError, NotImplementedError):
+            return 1
+
+    if group.layer_tokens_per_state:
+        return tuple(group.layer_tokens_per_state[name] for name in group.layer_names)
+    return tuple(spec_tps(spec) for spec in iter_layer_specs(group.kv_cache_spec))
 
 
 def get_sliding_window_size_in_chunks(
@@ -166,6 +179,7 @@ def build_offloading_config(
                 next(iter(iter_layer_specs(group.kv_cache_spec))),
                 tokens_per_block * blocks_per_chunk,
             ),
+            tokens_per_state=_group_tokens_per_state(group),
         )
         for (group_id, group), tokens_per_block in zip(
             selected_groups, group_tokens_per_block
@@ -212,6 +226,7 @@ def build_offloading_config(
     is_parallelism_agnostic = False
     if canonical_layout:
         tp_size = parallel_config.tensor_parallel_size
+        dcp_size = parallel_config.decode_context_parallel_size
         total_kv_heads = vllm_config.model_config.get_total_num_kv_heads()
 
         def spec_certifiable(spec: KVCacheSpec) -> bool:
@@ -221,9 +236,13 @@ def build_offloading_config(
             if spec.kv_quant_mode.is_per_token_head:
                 return False
             if type(spec) is MLAAttentionSpec:
+                tps = spec.tokens_per_state
+                if tps < 1 or spec.block_size % tps:
+                    return False
+                num_states = spec.block_size // tps
                 return (
-                    spec.tokens_per_state == 1
-                    and spec.real_page_size_bytes % spec.block_size == 0
+                    spec.real_page_size_bytes % num_states == 0
+                    and tp_size % dcp_size == 0
                 )
             if isinstance(spec, (SlidingWindowMLASpec, MLAAttentionSpec)):
                 return False
