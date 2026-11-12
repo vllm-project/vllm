@@ -175,7 +175,9 @@ class HandshakeTestConnector(ExampleConnector):
     NixlConnector does."""
 
     def get_handshake_metadata(self) -> KVConnectorHandshakeMetadata | None:
-        return HandshakeTestMetadata(agent="worker")
+        return HandshakeTestMetadata(
+            agent=self._kv_transfer_config.get_from_extra_config("agent", "")
+        )
 
     def set_xfer_handshake_metadata_pp_aware(
         self, metadata: dict[tuple[int, int], KVConnectorHandshakeMetadata]
@@ -1294,16 +1296,23 @@ def test_multi_connector_worker_metadata(mc):
 @pytest.mark.cpu_test
 def test_handshake_metadata_reaches_only_its_connector():
     """With PP, the engine core gives the scheduler side the handshake metadata
-    of every stage. A sibling that exchanges none, such as a KV store next to
-    NIXL on a PP prefill instance, must not receive it: the base class rejects
-    pp_rank > 0 and the engine fails to start."""
-    children = [
-        {
+    of every stage. Each sub-connector must receive only the metadata it
+    reported. A sibling that reports none, such as a KV store next to NIXL on a
+    PP prefill instance, would reject pp_rank > 0 in the base class, and the
+    engine would fail to start."""
+
+    def handshake_child(agent: str) -> dict[str, Any]:
+        return {
             "kv_connector": "HandshakeTestConnector",
             "kv_role": "kv_both",
             "kv_connector_module_path": __name__,
-        },
+            "kv_connector_extra_config": {"agent": agent},
+        }
+
+    children = [
+        handshake_child("first"),
         {"kv_connector": "ExampleConnector", "kv_role": "kv_both"},
+        handshake_child("third"),
     ]
     vllm_config = create_vllm_config(
         kv_connector="MultiConnector",
@@ -1326,13 +1335,14 @@ def test_handshake_metadata_reaches_only_its_connector():
         {(pp_rank, 0): worker.get_handshake_metadata() for pp_rank in range(2)}
     )
 
-    expected = HandshakeTestMetadata(agent="worker")
-    handshake_connector = scheduler.sub_connectors[0]
-    assert isinstance(handshake_connector, HandshakeTestConnector)
-    assert handshake_connector.received_handshake_metadata == {
-        (0, 0): expected,
-        (1, 0): expected,
-    }
+    for index, agent in ((0, "first"), (2, "third")):
+        handshake_connector = scheduler.sub_connectors[index]
+        assert isinstance(handshake_connector, HandshakeTestConnector)
+        expected = HandshakeTestMetadata(agent=agent)
+        assert handshake_connector.received_handshake_metadata == {
+            (0, 0): expected,
+            (1, 0): expected,
+        }
 
 
 def _make_multi_connector(connector_names: list[str]) -> MultiConnector:
