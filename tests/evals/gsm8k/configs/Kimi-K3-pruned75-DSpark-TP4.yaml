@@ -4,8 +4,11 @@ min_acceptance_length: 4.8
 num_questions: 1319
 num_fewshot: 5
 startup_max_wait_seconds: 1800
+# STAGING ONLY, do not merge: restores the value #67071 removed so this
+# throwaway validation runs the known-good configuration.
 server_args: >-
   --trust-remote-code
+  --gpu-memory-utilization 0.90
   --tensor-parallel-size 4
   --load-format fastsafetensors
   --disable-flashinfer-autotune
