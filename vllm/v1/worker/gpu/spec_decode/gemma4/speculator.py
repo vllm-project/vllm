@@ -12,7 +12,6 @@ from collections import defaultdict
 import torch.nn as nn
 
 from vllm.compilation.backends import set_model_tag
-from vllm.config import VllmConfig, replace
 from vllm.distributed.parallel_state import get_pp_group
 from vllm.logger import init_logger
 from vllm.model_executor.model_loader import get_model
@@ -57,41 +56,19 @@ class Gemma4Speculator(TargetDependentARSpeculator):
         target_model: nn.Module,
         target_attn_layer_names: set[str],
     ) -> nn.Module:
-        draft_vllm_config = self._create_draft_vllm_config()
+        # The draft keeps the target's VllmConfig: Gemma4MTPModel reads its own
+        # config from speculative_config.draft_model_config, and pairing the
+        # dense draft with the target's parallel_config fails validation under
+        # expert parallelism.
         with set_model_tag("eagle_head"):
             draft_model = get_model(
-                vllm_config=draft_vllm_config,
+                vllm_config=self.vllm_config,
                 model_config=self.speculative_config.draft_model_config,
-                load_config=get_draft_load_config(draft_vllm_config),
+                load_config=get_draft_load_config(self.vllm_config),
             )
         self._setup_gemma4_kv_sharing(draft_model, target_attn_layer_names)
         self._share_embeddings(draft_model, target_model)
         return draft_model
-
-    def _create_draft_vllm_config(self) -> VllmConfig:
-        """Preserve the target's forced TRITON_ATTN backend for draft layers.
-
-        Gemma4 forces TRITON_ATTN due to heterogeneous head dimensions
-        (head_dim=256 sliding, global_head_dim=512 full). The base class
-        resets attention_config.backend to None for draft models, causing
-        sliding layers to fall back to FLASH_ATTN which cannot handle
-        KV-shared cache. Override to carry the target's backend through.
-        """
-        draft_model_config = self.speculative_config.draft_model_config
-        draft_vllm_config = replace(
-            self.vllm_config,
-            model_config=draft_model_config,
-        )
-        target_backend = self.vllm_config.attention_config.backend
-        if target_backend is not None:
-            draft_vllm_config = replace(
-                draft_vllm_config,
-                attention_config=replace(
-                    draft_vllm_config.attention_config,
-                    backend=target_backend,
-                ),
-            )
-        return draft_vllm_config
 
     def _setup_gemma4_kv_sharing(
         self,
