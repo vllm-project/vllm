@@ -1,6 +1,6 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
-"""``w4afp8`` checkpoints: INT4 group-128 routed experts with FP8 activations,
+"""`w4afp8` checkpoints: INT4 group-128 routed experts with FP8 activations,
 FP8 block-128 everywhere else.
 
 Routed experts are remapped at load time onto the compressed-tensors W4A8 FP8
@@ -37,9 +37,9 @@ _EXPERT_WEIGHT = re.compile(_EXPERT + r"\.weight$")
 def _repack_signed_int4_to_uint4b8(
     weights: Iterable[tuple[str, torch.Tensor]],
 ) -> Iterable[tuple[str, torch.Tensor]]:
-    """Signed INT4 packed 2 per int8 -> ``uint4b8`` packed 8 per int32.
+    """Signed INT4 packed 2 per int8 -> `uint4b8` packed 8 per int32.
 
-    XOR with ``0x88`` adds 8 (mod 16) to both nibbles of each byte.
+    XOR with `0x88` adds 8 (mod 16) to both nibbles of each byte.
     """
     for name, tensor in weights:
         if tensor.dtype is torch.int8 and _EXPERT_WEIGHT.search(name):

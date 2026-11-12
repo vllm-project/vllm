@@ -129,7 +129,7 @@ async def _concurrent_request_loop(
 
 
 def _num_running_requests(metrics_text: str) -> float:
-    """Sum ``vllm:num_requests_running`` across the server's label sets."""
+    """Sum `vllm:num_requests_running` across the server's label sets."""
     total = 0.0
     for family in text_string_to_metric_families(metrics_text):
         if family.name == "vllm:num_requests_running":
@@ -145,7 +145,7 @@ async def _wait_for_running_request(
 ) -> float:
     """Wait until the server reports a running request, returning the delay.
 
-    ``ShutdownState.inflight_requests`` is incremented before the HTTP call is
+    `ShutdownState.inflight_requests` is incremented before the HTTP call is
     awaited, so it only shows that a client coroutine started. Draining can
     only complete work the engine has already admitted, so synchronize on the
     server's own scheduler gauge instead.

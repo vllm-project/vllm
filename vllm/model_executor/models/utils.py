@@ -19,9 +19,6 @@ from vllm.distributed import (
 )
 from vllm.logger import init_logger
 from vllm.model_executor.layers.vocab_parallel_embedding import VocabParallelEmbedding
-from vllm.model_executor.model_loader.mtp_validation import (
-    is_mtp_completeness_check_enabled,
-)
 from vllm.model_executor.model_loader.reload import (
     support_quantized_model_reload_from_hp_weights,
 )
@@ -50,7 +47,7 @@ ShardIds: TypeAlias = ShardId | list[ShardId]
 WeightsTransformFn: TypeAlias = Callable[
     [Iterable[tuple[str, torch.Tensor]]], Iterable[tuple[str, torch.Tensor]]
 ]
-"""A lazy transform over a raw checkpoint ``(name, tensor)`` stream, passing
+"""A lazy transform over a raw checkpoint `(name, tensor)` stream, passing
 unrecognized tensors through unchanged."""
 
 
@@ -60,7 +57,7 @@ class WeightsMapper:
 
     If a key maps to a value of `None`, the corresponding weight is ignored.
 
-    ``weights_transforms`` rewrite the raw weight stream in list order before
+    `weights_transforms` rewrite the raw weight stream in list order before
     any name mapping."""
 
     orig_to_new_renaming: list["WeightRenaming"] = field(default_factory=list)
@@ -92,12 +89,12 @@ class WeightsMapper:
         )
 
     def map_name(self, key: str) -> str | None:
-        """Map a weight name; returns ``None`` if the weight should be ignored."""
+        """Map a weight name; returns `None` if the weight should be ignored."""
         result = self._map_name_with_shard(key)
         return result[0] if result is not None else None
 
     def _map_name(self, key: str) -> str | None:
-        """Backward-compatible alias for :meth:`map_name`."""
+        """Backward-compatible alias for `map_name`."""
         return self.map_name(key)
 
     def _map_name_with_shard(self, key: str) -> tuple[str, ShardIds | None] | None:
@@ -274,8 +271,6 @@ class AutoWeightsLoader:
         # would write the same storage twice, so only the first name reached by
         # module traversal is loaded and the rest are skipped.
         self.aliased_params = _get_tied_embedding_params(module)
-        self._skipped_aliases = dict[str, str]()
-        self._loaded_params_are_complete = True
 
     def _groupby_prefix(
         self,
@@ -409,7 +404,6 @@ class AutoWeightsLoader:
                     logger.warning(
                         "Unable to collect loaded parameters for module %s", module
                     )
-                    self._loaded_params_are_complete = False
                 else:
                     yield from map(
                         lambda x: self._get_qualname(base_prefix, x),
@@ -490,36 +484,16 @@ class AutoWeightsLoader:
         weights = mapper.apply(weights)
         weights = self._filter_skipped(weights)
 
-        autoloaded_weights = set(self._load_module("", self.module, weights))
-        self._check_skipped_aliases(autoloaded_weights)
-        return autoloaded_weights
+        return set(self._load_module("", self.module, weights))
 
     def _filter_skipped(
         self, weights: Iterable[tuple[str, torch.Tensor]]
     ) -> Iterable[tuple[str, torch.Tensor]]:
         for name, weight in weights:
-            if (canonical := self.aliased_params.get(name)) is not None:
-                self._skipped_aliases[name] = canonical
             if self._can_skip(name):
                 continue
 
             yield name, weight
-
-    def _check_skipped_aliases(self, autoloaded_weights: set[str]) -> None:
-        """Guard against skipping an alias whose canonical name never loads."""
-        if (
-            not self._loaded_params_are_complete
-            or not is_mtp_completeness_check_enabled()
-        ):
-            return
-        for alias, canonical in self._skipped_aliases.items():
-            if canonical not in autoloaded_weights:
-                raise ValueError(
-                    f"{alias!r} was skipped because it is tied to {canonical!r} "
-                    f"in {self.module._get_name()}, but {canonical!r} was not "
-                    "found in the checkpoint, so the tied weight is "
-                    "uninitialized."
-                )
 
 
 def get_fused_shared_expert_layers(
@@ -531,10 +505,10 @@ def get_fused_shared_expert_layers(
 
     The index is taken from each MoE module's qualified name, so it follows the
     same index space as the caller's weight names: 0-based for modules stored in
-    an ``nn.ModuleList``, and absolute for ``nn.ModuleDict`` MTP layers keyed by
+    an `nn.ModuleList`, and absolute for `nn.ModuleDict` MTP layers keyed by
     layer index. No loader needs to hard-code an offset.
 
-    Also rejects mixed fusion when EPLB is enabled or the ``nixl_ep`` all2all
+    Also rejects mixed fusion when EPLB is enabled or the `nixl_ep` all2all
     backend is selected, and logs the resolved policy.
     """
     fused_layers: set[int] = set()
@@ -1085,7 +1059,7 @@ def compute_skip_topk_layers(config: "PreTrainedConfig") -> set[int]:
 def pp_splits_layer_sharing(
     num_hidden_layers: int, users: Iterable[int], consumers: set[int]
 ) -> bool:
-    """Whether a later PP stage's first ``users`` layer is one of ``consumers``,
+    """Whether a later PP stage's first `users` layer is one of `consumers`,
     which read state an earlier layer wrote in the same forward pass."""
     from vllm.distributed.parallel_state import get_pp_group
     from vllm.distributed.utils import get_pp_indices
@@ -1126,7 +1100,7 @@ def make_empty_intermediate_tensors_factory(
     hidden_size: int,
     buffers: Mapping[str, torch.Tensor] | None = None,
 ):
-    """``buffers`` are token-major cross-layer state sent along with ``keys``."""
+    """`buffers` are token-major cross-layer state sent along with `keys`."""
     buffers = buffers or {}
 
     def make_empty_intermediate_tensors(

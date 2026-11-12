@@ -194,6 +194,7 @@ tests/transformers_utils/test_deepseek_v4_utils.py  # CI jobs disabled pending l
 tests/transformers_utils/test_dory_config.py  # CI jobs disabled pending locked cmake installation
 tests/transformers_utils/test_dspark_mla_config.py  # CI jobs disabled pending locked cmake installation
 tests/transformers_utils/test_hf_overrides_model_type.py  # CI jobs disabled pending locked cmake installation
+tests/transformers_utils/test_minimax_m3_config.py  # CI jobs disabled pending locked cmake installation
 tests/transformers_utils/test_muse_spark_config.py  # CI jobs disabled pending locked cmake installation
 tests/transformers_utils/test_processor.py  # CI jobs disabled pending locked cmake installation
 tests/transformers_utils/test_repo_utils.py  # CI jobs disabled pending locked cmake installation

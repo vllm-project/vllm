@@ -36,6 +36,39 @@ def _kv_fetch_stages(scheduler) -> tuple[int, ...]:
     return tuple(scheduler._kv_fetch_counts[s] for s in KV_FETCH_STAGES)
 
 
+@pytest.mark.parametrize(
+    "max_num_seqs, max_inflight, expected_loading",
+    [
+        (16, None, (2, 4, 5)),
+        (16, 8, (2, 4, 5)),
+        (1, 8, (2, 4, 5)),
+        (1, None, (0, 0, 0)),
+    ],
+)
+def test_max_async_kv_loads_per_step(max_num_seqs, max_inflight, expected_loading):
+    """Per-step limits pace loads; full batches require an in-flight cap."""
+    vllm_config = create_vllm_config(max_num_seqs=max_num_seqs)
+    vllm_config.scheduler_config.max_async_kv_loads_per_step = 2
+    vllm_config.scheduler_config.max_num_inflight_kv_loads = max_inflight
+    scheduler = create_scheduler(vllm_config)
+    block_size = vllm_config.cache_config.block_size
+    local = create_request(block_size=block_size, num_tokens=block_size)
+    scheduler.add_request(local)
+    scheduler_output = scheduler.schedule()
+    for _ in range(5):
+        scheduler.add_request(
+            create_request(
+                block_size=block_size, num_tokens=block_size * 3, do_remote_prefill=True
+            )
+        )
+    for num_loading in expected_loading:
+        scheduler.update_from_output(
+            scheduler_output, create_model_runner_output([local])
+        )
+        scheduler_output = scheduler.schedule()
+        assert _kv_fetch_stages(scheduler)[1] == num_loading
+
+
 def _remote_scheduler(max_num_seqs: int, max_num_inflight_kv_loads: int):
     vllm_config = create_vllm_config(max_num_seqs=max_num_seqs)
     vllm_config.scheduler_config.max_num_inflight_kv_loads = max_num_inflight_kv_loads
@@ -158,11 +191,14 @@ def test_aborted_kv_load_counts_until_transfer_done():
     assert waiting.status == RequestStatus.WAITING_FOR_REMOTE_KVS
 
 
-def test_inflight_kv_load_cap_does_not_block_local_requests():
-    """Async-load requests past the cap don't hold back local ones."""
-    scheduler, block_size = _remote_scheduler(
-        max_num_seqs=2, max_num_inflight_kv_loads=1
-    )
+@pytest.mark.parametrize("max_inflight, max_per_step", [(1, None), (None, 1), (8, 1)])
+def test_async_kv_load_limits_do_not_block_local_requests(max_inflight, max_per_step):
+    """Throttled async loads don't hold back local requests."""
+    vllm_config = create_vllm_config(max_num_seqs=2)
+    vllm_config.scheduler_config.max_num_inflight_kv_loads = max_inflight
+    vllm_config.scheduler_config.max_async_kv_loads_per_step = max_per_step
+    scheduler = create_scheduler(vllm_config)
+    block_size = vllm_config.cache_config.block_size
     remote = [
         create_request(
             block_size=block_size, num_tokens=block_size * 3, do_remote_prefill=True
@@ -656,13 +692,9 @@ def test_cannot_schedule_after_recv():
     # request is retrieved from preempted list.
     scheduler_output = scheduler.schedule()
     model_runner_output = create_model_runner_output(reqs=[request_remote])
-    # V2 emits a resumed (previously preempted) request as a NewRequestData
+    # A resumed (previously preempted) request is emitted as a NewRequestData
     # rather than a cached request.
-    if scheduler.use_v2_model_runner:
-        num_computed = scheduler_output.scheduled_new_reqs[0].num_computed_tokens
-    else:
-        cached = scheduler_output.scheduled_cached_reqs
-        num_computed = cached.num_computed_tokens[0]
+    num_computed = scheduler_output.scheduled_new_reqs[0].num_computed_tokens
     assert num_computed == NUM_PROMPT_BLOCKS * BLOCK_SIZE
     scheduler.update_from_output(scheduler_output, model_runner_output)
     assert len(scheduler.running) == 1
@@ -839,7 +871,6 @@ def test_p_side_chunked_prefill_mamba(mock_platform):
     # Model returns no tokens for intermediate prefill chunk
     intermediate_output = ModelRunnerOutput(
         req_ids=[request.request_id],
-        req_id_to_index={request.request_id: 0},
         sampled_token_ids=[[]],
     )
     scheduler.update_from_output(scheduler_output, intermediate_output)
