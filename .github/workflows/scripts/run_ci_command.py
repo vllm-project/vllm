@@ -5,6 +5,7 @@ import http.client
 import json
 import os
 import random
+import string
 import sys
 import time
 import urllib.error
@@ -517,7 +518,25 @@ def parse_command(body: str) -> str | None:
     body = body.strip()
     if body in ALL_CI_COMMANDS:
         return body
+    if parse_include_step_keys(body):
+        return COMMAND_RUN_CI + (
+            ALLOW_STALE_SUFFIX if body.endswith(ALLOW_STALE_SUFFIX) else ""
+        )
     return None
+
+
+def parse_include_step_keys(body: str) -> list[str]:
+    body = body.strip().removesuffix(ALLOW_STALE_SUFFIX)
+    prefix = f"{COMMAND_RUN_CI} --include "
+    if not body.startswith(prefix):
+        return []
+    keys = body[len(prefix) :].split()
+    if not keys or len(set(keys)) != len(keys):
+        return []
+    allowed = set(string.ascii_letters + string.digits + "_-")
+    if any(key.startswith("--") or not set(key) <= allowed for key in keys):
+        return []
+    return keys
 
 
 def is_ci_command_attempt(body: str) -> bool:
@@ -706,6 +725,7 @@ def create_build_payload(
     comment_id: int,
     command: str = COMMAND_RUN_CI,
     pr: Mapping[str, Any],
+    include_step_keys: Sequence[str] = (),
 ) -> dict[str, Any]:
     if command not in RUN_CI_COMMAND_ENV:
         raise ValueError(f"Unsupported run command: {command}")
@@ -715,7 +735,7 @@ def create_build_payload(
         "VLLM_CI_TRIGGERED_BY": actor,
         **RUN_CI_COMMAND_ENV[command],
     }
-    return {
+    payload = {
         "commit": pr["head"]["sha"],
         # Use the head label (owner:branch) rather than the bare ref so a PR
         # whose fork branch is named e.g. "main" does not collide with the
@@ -733,6 +753,11 @@ def create_build_payload(
             "github-triggered-by": actor,
         },
     }
+    if include_step_keys:
+        keys_json = json.dumps(include_step_keys, separators=(",", ":"))
+        payload["env"]["VLLM_CI_INCLUDE_STEP_KEYS"] = keys_json
+        payload["meta_data"]["github-include-step-keys"] = keys_json
+    return payload
 
 
 def create_retry_build_payload(
@@ -1026,6 +1051,7 @@ def handle_run_ci(
     pr: Mapping[str, Any],
     branch_updater: GitHubClient | None = None,
     allow_repeat_run: bool = False,
+    include_step_keys: Sequence[str] = (),
 ) -> str:
     ci_name = ci_name_for_command(command)
     duplicate_builds = buildkite.list_builds(
@@ -1072,11 +1098,19 @@ def handle_run_ci(
             comment_id=comment_id,
             command=command,
             pr=current_pr,
+            include_step_keys=include_step_keys,
         )
     )
     return (
         f"Triggered [Buildkite {ci_name} #{build['number']}]({build['web_url']}) "
         f"for commit `{current_pr['head']['sha'][:12]}`."
+        + (
+            " Requested additional jobs: "
+            + ", ".join(f"`{key}`" for key in include_step_keys)
+            + "."
+            if include_step_keys
+            else ""
+        )
         + (f"\n\n{warning}" if warning else "")
     )
 
@@ -1352,7 +1386,8 @@ def reply_unrecognized_command(
         issue_number,
         f"❌ @{actor}, that is not a recognized CI command, so no CI was "
         "started. Post a new comment containing only one of: "
-        f"{commands}.\n\n{command_comment_marker(comment_id)}",
+        f"{commands}, or `/ci run --include <job-key> [<job-key> ...]`."
+        f"\n\n{command_comment_marker(comment_id)}",
     )
 
 
@@ -1427,6 +1462,7 @@ def run(
                 pr=pr,
                 branch_updater=branch_updater,
                 allow_repeat_run=is_trusted_permission(permission),
+                include_step_keys=parse_include_step_keys(event["comment"]["body"]),
             )
         elif command in RETRY_COMMANDS:
             message = handle_retry_failed(

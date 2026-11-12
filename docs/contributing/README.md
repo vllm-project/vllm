@@ -350,6 +350,14 @@ review process:
   the `ready` label, the PR author can use `/ci run`, `/ci retry`, `/ci cancel`,
   or the corresponding `/amd-ci` variants. New commits do not start upstream
   CI automatically.
+- To add optional jobs to the normal PR selection for one build, comment
+  `/ci run --include <job-key> [<job-key> ...]`. Use stable `key` values from
+  `.buildkite/test_areas/*.yaml` or the other `.buildkite/` job files, for example:
+  `/ci run --include language-models-test-extended-pooling language-models-test-mteb`.
+  Dependencies are included automatically; unknown keys fail pipeline generation.
+  The build records the GitHub requester, comment ID, and requested keys.
+  The same permissions, branch freshness, and repeat-run restrictions apply.
+  This starts a new build; use Buildkite's **Run more jobs** for an active build.
 - Before creating a Buildkite build, `/ci run` and `/amd-ci run`, including
   `all` and `nightly`, check the requested PR commit against its target branch
   in the upstream repository. Your branch must contain every commit currently
