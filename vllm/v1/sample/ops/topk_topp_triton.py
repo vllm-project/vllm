@@ -842,14 +842,13 @@ def _histogram(
     BLOCK: tl.constexpr,
 ):
     """Add the chunk's logits in the row's span to its histogram. A narrowed span
-    (finite floor) also adds the exact count and mass of the logits above it, and the
-    mass below it."""
+    also adds the exact count and mass of the logits above it, and the mass below it."""
     top, floor, scale, _ = _span(span_row, row_max, first, BIN_SCALE)
     offs = tl.arange(0, BLOCK)
     hi = tl.minimum(lo + chunk, vocab)
     counts = tl.zeros([BINS], tl.int32)
     x_next = tl.load(row_ptr + lo + offs, mask=lo + offs < hi, other=-float("inf"))
-    if floor == -float("inf"):  # the first span: every logit is in it
+    if first:  # the first span: every logit is in it
         for start in range(lo, hi, BLOCK):
             idx = start + offs
             x = x_next
@@ -1002,7 +1001,7 @@ def _plan_row(
         lo = _reach(
             hist_row,
             upper,
-            p * total_lo * (1 - 1e-4) - mass_up,
+            p * total_lo * (1 - 1e-6) - mass_up,
             1,
             F,
             NC,
@@ -1014,7 +1013,7 @@ def _plan_row(
             _reach(
                 hist_row,
                 lower,
-                p * total_hi * (1 + 1e-4) - mass_up,
+                p * total_hi * (1 + 1e-6) - mass_up,
                 2,
                 F,
                 NC,
@@ -1036,12 +1035,12 @@ def _plan_row(
         # A top-p row's exact mass in the span also bounds the mass below each bin.
         inside = total_lo - mass_up - mass_down
         up_all = tl.sum(upper)
-        slack = 1e-4 * up_all
-        target = p * total_hi * (1 + 1e-4) - mass_up - inside + up_all + slack
+        slack = 1e-6 * up_all
+        target = p * total_hi * (1 + 1e-6) - mass_up - inside + up_all + slack
         hi = tl.minimum(
             hi, _reach(hist_row, upper, target, 1, F, NC, BINS, scale, floor_w)
         )
-        target = p * total_lo * (1 - 1e-4) - mass_up - inside + tl.sum(lower) - slack
+        target = p * total_lo * (1 - 1e-6) - mass_up - inside + tl.sum(lower) - slack
         lo = tl.maximum(
             lo, _reach(hist_row, lower, target, 2, F, NC, BINS, scale, floor_w)
         )
@@ -1061,8 +1060,8 @@ def _plan_row(
         tl.atomic_add(cut_rows, 1, sem="relaxed", scope="gpu")
         if (flag == K_FIRST) & (p_row < 1.0) & (last == 0):  # its top-p: next round
             tl.atomic_add(next_rows, 1, sem="relaxed", scope="gpu")
-    elif last | ((last_bin == BINS - 1) & (floor == -float("inf"))):
-        tl.store(state_row, ALONE_C)  # last round, or the open last bin
+    elif last:
+        tl.store(state_row, ALONE_C)
         tl.atomic_add(cut_rows, 1, sem="relaxed", scope="gpu")
     elif apart & (in_kb <= WINDOW):
         tl.store(span_row + 3, K_FIRST * 1.0)
@@ -1075,6 +1074,12 @@ def _plan_row(
     else:
         new_top = top - (first_bin - 0.5) / scale  # half a bin wider on each side
         new_floor = top - (last_bin + 1.5) / scale
+        new_scale = BINS / (new_top - new_floor)
+        if (last_bin == BINS - 1) & (floor == -float("inf")):
+            # The cuts may lie in the open last bin, so the span stays open below:
+            # the same bins, from the first bin down (the mass above becomes exact).
+            new_floor = floor
+            new_scale = scale
         tl.atomic_add(next_rows, 1, sem="relaxed", scope="gpu")
         _start_span(
             hist_row,
@@ -1082,7 +1087,7 @@ def _plan_row(
             above_row,
             new_top,
             new_floor,
-            BINS / (new_top - new_floor),
+            new_scale,
             tl.where(apart, K_FIRST * 1.0, flag),
             BINS,
         )

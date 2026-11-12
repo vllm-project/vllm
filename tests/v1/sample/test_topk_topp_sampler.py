@@ -870,6 +870,7 @@ class TestTritonTopkToppExact:
             ("zipf", 8, 131072, None, 0.9),
             ("zipf", 8, 131072, 100, 0.9),
             ("zipf", 1, 248320, None, 0.95),
+            ("normal", 8, 248320, None, 0.99),
             ("huge", 4, 131072, 1000, None),
             ("huge", 4, 131072, None, 0.5),
             ("bf16", 4, 131072, 300, None),
@@ -939,6 +940,32 @@ class TestTritonTopkToppExact:
             tt.apply_top_k_top_p_triton(logits, k_rows, p_rows)
         assert [_num_compiled(kernel) for kernel in kernels] == warmed
 
+    def test_high_p_tail_is_refined_by_all_programs(self):
+        """A top-p nucleus that ends below the first histogram span (16 nats under the
+        row max) is refined in further rounds by all programs. It used to fall back to
+        one program's radix select per row, 50x to 100x slower than a nucleus inside
+        the span (p = 0.999 on real rows took 7 ms to 39 ms)."""
+        from vllm.v1.sample.ops.topk_topp_triton import apply_top_k_top_p_triton
+
+        batch = 64
+        source = _make_logits("tail", batch, 131072, self.generator)
+
+        def median_ms(p: float) -> float:
+            p_rows = torch.full((batch,), p)
+            times = []
+            for _ in range(5):
+                logits = source.clone()
+                start = torch.cuda.Event(enable_timing=True)
+                end = torch.cuda.Event(enable_timing=True)
+                start.record()
+                apply_top_k_top_p_triton(logits, None, p_rows)
+                end.record()
+                end.synchronize()
+                times.append(start.elapsed_time(end))
+            return sorted(times)[2]
+
+        assert median_ms(0.9995) < 10 * median_ms(0.9)
+
     def test_empty_batch(self):
         """Steps with no rows to filter (e.g. no drafts to verify) return as is."""
         from vllm.v1.sample.ops.topk_topp_triton import apply_top_k_top_p_triton
@@ -1002,6 +1029,8 @@ def _make_logits(kind: str, batch: int, vocab: int, gen: Generator) -> torch.Ten
     if kind == "zeros":
         return torch.zeros(batch, vocab)
     logits = torch.randn(batch, vocab, generator=gen)
+    if kind == "tail":  # top-p 0.9995 cuts 16.7 nats below the max, past the 16
+        logits[:, :4] = 18.0
     if kind == "huge":  # thinking-budget forcing, at a sampled position
         logits[:, 0] = 1e9
     if kind == "neginf":
