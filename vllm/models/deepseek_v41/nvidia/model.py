@@ -10,7 +10,7 @@ import torch
 import torch.nn as nn
 
 import vllm.envs as envs
-from vllm.config import VllmConfig
+from vllm.config import CUDAGraphMode, VllmConfig
 from vllm.config.kernel import MEGA_MOE_BACKENDS, NATIVE_MEGA_MOE_BACKENDS
 from vllm.distributed import (
     get_pcp_group,
@@ -807,6 +807,29 @@ class DeepseekV4Model(nn.Module, EagleModelMixin):
                 "Speculative decoding requires fixed-length DSpark with PP=1. "
                 "Prefix caching requires SWA bounded replay."
             )
+        cudagraph_mode = vllm_config.compilation_config.cudagraph_mode
+        if (
+            self.parallel_config.prefill_context_parallel_size > 1
+            and cudagraph_mode != CUDAGraphMode.NONE
+        ):
+            from vllm.v1.attention.backends.mla.indexer import (
+                _supports_varlen_paged_mqa_logits,
+                _use_flattening,
+            )
+
+            if not cudagraph_mode.separate_routine():
+                raise NotImplementedError(
+                    "DeepSeek-V4.1 PCP supports CUDA graphs only with "
+                    "FULL_DECODE_ONLY or FULL_AND_PIECEWISE."
+                )
+            if vllm_config.num_speculative_tokens > 0 and not (
+                _use_flattening(vllm_config) or _supports_varlen_paged_mqa_logits()
+            ):
+                raise NotImplementedError(
+                    "DeepSeek-V4.1 PCP speculative CUDA graphs require flattened "
+                    "or varlen indexer queries; native queries do not yet support "
+                    "empty decode owners. Set -cc.cudagraph_mode=NONE."
+                )
         self.use_native_mega_moe = (
             vllm_config.kernel_config.moe_backend in NATIVE_MEGA_MOE_BACKENDS
         )
