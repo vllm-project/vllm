@@ -44,7 +44,7 @@ class NixlDataTransport(DataTransport):
         if NixlWrapper is None or nixl_agent_config is None:
             raise RuntimeError(
                 "ECCPUConnector requires NIXL; "
-                "install the `nixl` package or set a different ec_connector."
+                "install the `nixl` package or set ec_transport to another transport."
             )
         # agent_name → remote dlist handle (from add_remote_peer, used by post_read)
         self._peer_handles: dict[str, int] = {}
