@@ -11,6 +11,7 @@ from vllm.model_executor.layers.fused_moe.config import RoutingMethodType
 from vllm.model_executor.layers.fused_moe.expert_map_manager import (
     determine_expert_map,
 )
+from vllm.models.muse_spark.amd import ulysses_sp as usp
 from vllm.models.muse_spark.amd.muse_moe_runner import MuseSparkAiterExperts
 from vllm.models.muse_spark.amd.ops import decode_moe as dmoe
 from vllm.platforms import current_platform
@@ -158,6 +159,32 @@ def test_decode_moe_takes_aiters_flydsl_stages_or_falls_back(
             num_tokens, TOP_K, local_experts, HIDDEN, HIDDEN
         )
         assert kernels is None or kernels.stage1.startswith("flydsl_moe1_")
+
+
+@pytest.mark.skipif(not ROCM_GFX950_AITER, reason="requires gfx950 and AITER")
+@pytest.mark.parametrize("local_experts", [32, 64])
+@pytest.mark.parametrize("first, last", [(129, 8192), (1024, 16384), (5000, 12000)])
+def test_stage_kernel_token_counts_cover_every_call_size(
+    local_experts: int, first: int, last: int
+) -> None:
+    """Every call of `first..last` tokens launches the expert stages of one of the
+    warmup token counts, and each count launches a different set."""
+    from vllm.models.muse_spark.amd import decode_moe
+
+    def stages(num_tokens: int) -> str | None:
+        kernels = decode_moe._stage_kernels(
+            num_tokens, TOP_K, local_experts, HIDDEN, HIDDEN
+        )
+        return None if kernels is None else repr(kernels)
+
+    counts = decode_moe.stage_kernel_token_counts(
+        first, last, TOP_K, local_experts, HIDDEN, HIDDEN
+    )
+    assert counts and all(first <= n <= last for n in counts)
+    warmed = [stages(n) for n in counts]
+    assert None not in warmed and len(set(warmed)) == len(counts)
+    for num_tokens in range(first, last + 1):
+        assert stages(num_tokens) in (None, *warmed), num_tokens
 
 
 def _per_route_and_native(
@@ -553,3 +580,104 @@ def test_sort_quant_quantizes_every_finite_bf16_like_aiter() -> None:
         x = x.view(-1, HIDDEN).contiguous()
         ids = _route_ids(x.shape[0], "local", mask, g)
         _assert_sort_quant_matches_aiter(x, ids, expert_map, mask)
+
+
+def _prefill_moe_routing(
+    kind: str, num_tokens: int, num_experts: int, local_start: int, local: int
+) -> torch.Tensor:
+    logits = torch.randn(num_tokens, num_experts, device="cuda")
+    if kind == "skewed_to_local":
+        logits[:, local_start : local_start + local] += 6.0
+    elif kind == "skewed_away":
+        logits[:, local_start : local_start + local] -= 20.0
+    return torch.topk(logits, 8, dim=-1).indices.to(torch.int32)
+
+
+@pytest.mark.skipif(not ROCM_GFX950_AITER, reason="requires gfx950 and AITER")
+@pytest.mark.parametrize(
+    "local_start, kind",
+    [(0, "uniform"), (128, "uniform"), (0, "skewed_to_local"), (128, "skewed_away")]
+    + [(None, "uniform")],
+    ids=lambda v: "no_ep" if v is None else str(v),
+)
+@pytest.mark.parametrize("num_tokens", [1, 37, 1000, 5000, 8192])
+@torch.inference_mode()
+def test_rocm_prefill_moe_prequant_rows_match_the_bf16_rows(
+    rocm_aiter_moe, local_start: int | None, kind: str, num_tokens: int
+) -> None:
+    """Muse-sized MoE rank (EP4 or no EP): the experts fed one pre-quantized MXFP4
+    row per token (Ulysses) match the experts quantizing the same BF16 rows
+    themselves, after the finalize."""
+    from aiter.ops.quant import per_1x32_f4_quant_hip
+
+    from vllm.models.muse_spark.amd.decode_moe import prequant_routes_experts
+
+    torch.manual_seed(num_tokens)
+    num_experts, top_k, hidden_size = 256, 8, 4096
+    ep_size = 1 if local_start is None else 4
+    local = num_experts // ep_size
+    device = torch.device("cuda")
+    dtype = torch.bfloat16
+    w13_float = (
+        torch.randn(local, 2 * hidden_size, hidden_size, dtype=dtype, device=device)
+        / hidden_size**0.5
+    )
+    w2_float = (
+        torch.randn(local, hidden_size, hidden_size, dtype=dtype, device=device)
+        / hidden_size**0.5
+    )
+    w13, w2, quant_config = _mxfp4_weights(w13_float, w2_float)
+    config = _moe_config(
+        parallel_config=_parallel_config(ep_size=ep_size),
+        num_experts=num_experts,
+        top_k=top_k,
+        hidden_size=hidden_size,
+        intermediate_size=hidden_size,
+        device="cuda",
+        routing_method=RoutingMethodType.Renormalize,
+    )
+    experts = MuseSparkAiterExperts(config, quant_config)
+    reducer = experts.finalize_weight_and_reduce_impl()
+    expert_mask = None
+    if local_start is not None:
+        expert_mask = torch.zeros(num_experts + 1, dtype=torch.int32, device=device)
+        expert_mask[local_start : local_start + local] = 1
+    topk_ids = _prefill_moe_routing(
+        kind, num_tokens, num_experts, local_start or 0, local
+    )
+    topk_weights = torch.softmax(torch.randn(num_tokens, top_k, device=device), dim=-1)
+    rows = torch.randn(num_tokens, hidden_size, dtype=dtype, device=device)
+    a1, a1_scale = per_1x32_f4_quant_hip(rows, shuffle=False)
+    if expert_mask is not None and (
+        prequant_routes_experts(
+            a1, a1_scale, topk_ids, w13, w2, quant_config, expert_mask
+        )
+        is None
+    ):
+        pytest.skip("AITER lacks the kernels for pre-quantized rows")
+
+    route_buffer, launch = _route_launcher(
+        experts,
+        rows,
+        w13,
+        w2,
+        topk_weights,
+        topk_ids,
+        intermediate_size=hidden_size,
+        num_experts=num_experts,
+        num_local_experts=local,
+        expert_map=expert_mask,
+    )
+    out = torch.empty(num_tokens, hidden_size, dtype=dtype, device=device)
+
+    def finalize() -> torch.Tensor:
+        return reducer.apply(out, route_buffer, topk_weights, topk_ids, False).clone()
+
+    launch()
+    reference = finalize()
+    usp.attach_prequant(rows, a1, a1_scale)
+    launch()
+    prequant = finalize()
+    assert usp.take_prequant(rows) is None, "the experts did not take the rows"
+    assert torch.isfinite(prequant).all()
+    torch.testing.assert_close(prequant, reference, atol=1e-2, rtol=1e-2)

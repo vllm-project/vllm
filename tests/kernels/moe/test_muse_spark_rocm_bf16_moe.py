@@ -2,6 +2,8 @@
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 """Muse Spark ROCm MoE experts, deployment checks and post-expert finalize."""
 
+import gc
+import weakref
 from collections.abc import Callable
 from dataclasses import fields
 from types import SimpleNamespace
@@ -259,6 +261,28 @@ def test_muse_aiter_experts_expand_routes_with_unit_weights(monkeypatch) -> None
     reducer = experts.finalize_weight_and_reduce_impl()
     assert isinstance(reducer, MuseSparkTopKWeightAndReduce)
     assert reducer.pre_norm_all_reduce
+
+
+def test_unit_weights_buffers_outlive_rebuilt_experts(monkeypatch) -> None:
+    """A weight reload rebuilds the experts while CUDA graphs captured before it
+    keep reading the old unit-weights buffers, so those must stay allocated."""
+    monkeypatch.setattr(amd_muse_moe_runner, "_UNIT_WEIGHTS_BUFS", {})
+    config = _moe_config(parallel_config=_parallel_config(tp_size=8))
+    quant_config = _quant_config(_rms_norm, MuseSparkQuarkOCPMXMoEQuantConfig)
+    device = torch.device("cpu")
+
+    experts = MuseSparkAiterExperts(config, quant_config)
+    captured = weakref.ref(experts._unit_weights(64, 2, device)._base)
+    experts._unit_weights(64 * 1024, 2, device)  # outgrown by a larger step
+    del experts
+    gc.collect()
+    rebuilt = MuseSparkAiterExperts(config, quant_config)
+    weights = rebuilt._unit_weights(64, 2, device)
+
+    buf = captured()
+    assert buf is not None
+    assert torch.all(buf == 1.0)
+    assert torch.all(weights == 1.0)
 
 
 def test_muse_mxfp4_method_requires_w4a4_aiter(monkeypatch) -> None:

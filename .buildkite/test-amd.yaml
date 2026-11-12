@@ -3075,6 +3075,7 @@ steps:
   - tests/distributed/test_muse_spark_decode_moe.py
   - tests/models/test_muse_spark_rocm_mono.py
   - vllm/models/muse_spark/amd/
+  - tests/models/test_muse_spark_rocm_ulysses_sp.py
   commands:
   - pytest -v -s tests/distributed/test_context_parallel.py
   - pytest -v -s tests/v1/attention/test_rocm_mla_dcp_context.py
@@ -3090,6 +3091,7 @@ steps:
   - pytest -v -s tests/distributed/test_rocm_quick_reduce.py
   - pytest -v -s tests/distributed/test_quick_all_reduce.py
   - pytest -v -s tests/distributed/test_muse_spark_decode_moe.py
+  - pytest -v -s tests/models/test_muse_spark_rocm_ulysses_sp.py -m 'distributed(num_gpus=2)'
 
 - label: ":amd: (MI355) Distributed AgRs All2All"
   timeout_in_minutes: 30
