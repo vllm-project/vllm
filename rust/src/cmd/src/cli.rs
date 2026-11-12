@@ -31,6 +31,7 @@ use vllm_chat::GenerationConfigMode;
 use vllm_chat::ToolStrictLevel;
 use vllm_chat::multimodal::MmLimitPerPrompt;
 use vllm_engine_core_client::TransportMode;
+use vllm_engine_core_client::protocol::dtype::ModelDtype;
 use vllm_engine_core_client::protocol::structured_outputs::StructuredOutputBackend;
 use vllm_managed_engine::ManagedEngineConfig;
 use vllm_managed_engine::cli::{ManagedEngineArgs, repartition_managed_engine_args};
@@ -43,7 +44,7 @@ use vllm_server::{
     RendererSelection,
 };
 use vllm_text::backend::hf::{HfOverrides, ModelFileSources};
-use vllm_tracing::LogLevel;
+use vllm_tracing::{LogFormatter, LogLevel};
 
 use crate::cli::logging::LoggingConfig;
 use crate::cli::model::ModelArgs;
@@ -67,6 +68,12 @@ impl Cli {
     pub fn log_level(&self) -> LogLevel {
         self.runtime()
             .map_or_else(LogLevel::from_env, SharedRuntimeArgs::effective_log_level)
+    }
+
+    /// The formatter of the Rust frontend's own logs for this command.
+    pub fn log_formatter(&self) -> LogFormatter {
+        self.runtime()
+            .map_or_else(LogFormatter::default, SharedRuntimeArgs::log_formatter)
     }
 
     fn runtime(&self) -> Option<&SharedRuntimeArgs> {
@@ -209,11 +216,38 @@ pub struct RenderArgs {
     chat_template_content_format: ChatTemplateContentFormatOption,
     /// Maximum model context length used for request validation. When not set,
     /// prompt-length validation is skipped and the engine enforces its own limit in later stage.
+    /// Set it to the engine's for multimodal models: some image processors size
+    /// images to fit it.
     #[arg(long)]
     max_model_len: Option<u32>,
     /// Maximum accepted logprobs count; -1 disables the cap.
     #[arg(long, value_parser = clap::value_parser!(i32).range(-1..), allow_negative_numbers = true)]
     max_logprobs: Option<i32>,
+    /// LoRA adapters whose names are accepted as the request model, each as
+    /// `name=path` or a JSON object: `{"name": "name", "path": "lora_path",
+    /// "base_model_name": "id"}`. Rendering does not load adapter weights.
+    #[arg(long, num_args = 1.., value_name = "MODULE")]
+    lora_modules: Vec<LoraModulePath>,
+    /// Disable multimodal preprocessing and treat the model as language-only.
+    #[arg(long)]
+    language_model_only: bool,
+    /// Dtype that multimodal inputs are preprocessed in; set it to the
+    /// engine's `--dtype`. `auto` follows the model config's dtype (or its
+    /// `text_config`'s), running float32 checkpoints in bfloat16 like vLLM; it
+    /// does not inspect weights or the GPU, so pass the engine's dtype when it
+    /// differs.
+    #[arg(long, value_enum, default_value_t)]
+    dtype: DtypeArg,
+    /// The maximum number of input items allowed per prompt for each
+    /// modality, as a JSON object (e.g. `{"image": 16, "video": 2}`); set it
+    /// to the engine's `--limit-mm-per-prompt`. Unspecified modalities are
+    /// unlimited.
+    ///
+    /// Also accepts the engine's configurable form
+    /// (e.g. `{"video": {"count": 1, "num_frames": 32}}`); only `count`
+    /// applies to rendering.
+    #[arg(long, value_parser = parse_json::<MmLimitPerPrompt>, value_name = "JSON", default_value = "{}")]
+    limit_mm_per_prompt: MmLimitPerPrompt,
     /// TLS options for HTTPS/mTLS.
     #[command(flatten)]
     ssl: SslArgs,
@@ -253,7 +287,37 @@ impl RenderArgs {
             chat_template_content_format: self.chat_template_content_format,
             max_model_len: self.max_model_len,
             max_logprobs: self.max_logprobs,
+            lora_modules: self.lora_modules,
+            language_model_only: self.language_model_only,
+            dtype: self.dtype.model_dtype(),
+            limit_mm_per_prompt: self.limit_mm_per_prompt,
             tls,
+        }
+    }
+}
+
+/// `vllm-rs render --dtype` values: vLLM's `--dtype` choices.
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq, clap::ValueEnum)]
+pub enum DtypeArg {
+    /// Follow the model config.
+    #[default]
+    Auto,
+    #[value(name = "float16", alias = "half")]
+    Float16,
+    #[value(name = "bfloat16")]
+    BFloat16,
+    #[value(name = "float32", alias = "float")]
+    Float32,
+}
+
+impl DtypeArg {
+    /// The fixed model dtype, or `None` for `auto`.
+    fn model_dtype(self) -> Option<ModelDtype> {
+        match self {
+            Self::Auto => None,
+            Self::Float16 => Some(ModelDtype::Float16),
+            Self::BFloat16 => Some(ModelDtype::BFloat16),
+            Self::Float32 => Some(ModelDtype::Float32),
         }
     }
 }
@@ -726,9 +790,9 @@ pub struct SharedRuntimeArgs {
     pub log_level: Option<LogLevel>,
 
     /// vLLM logging configuration as a JSON object. The Rust frontend's own
-    /// logs honor `log_level` and the `text` formatter, and other formatters
-    /// fail startup; the remaining fields apply to Python logging only. The
-    /// Python supervisor sends the resolved `log_level` and `formatter`.
+    /// logs honor `log_level` and `formatter` (`text` or `json`); the
+    /// remaining fields apply to Python logging only. The Python supervisor
+    /// sends the resolved `log_level` and `formatter`.
     #[arg(long, value_parser = parse_json::<LoggingConfig>, value_name = "JSON")]
     #[serde(default)]
     pub logging_config: Option<LoggingConfig>,
@@ -809,6 +873,15 @@ impl SharedRuntimeArgs {
         self.log_level
             .or_else(|| self.logging_config.as_ref()?.log_level)
             .unwrap_or_else(LogLevel::from_env)
+    }
+
+    /// The formatter of the Rust frontend's own logs,
+    /// `--logging-config.formatter`, `text` by default.
+    pub fn log_formatter(&self) -> LogFormatter {
+        self.logging_config
+            .as_ref()
+            .and_then(|config| config.formatter)
+            .unwrap_or_default()
     }
 
     /// Return the logging config as JSON for managed Python engine forwarding,
