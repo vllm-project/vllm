@@ -347,6 +347,12 @@ GPU kernel launches. The worker waits for this process
 before serving requests and restarts it if it exits; while it is down, lookups
 are cache misses.
 
+By default lookups are served one at a time. Under bursts of long prompts they
+queue behind each other and can time out (see below). `lookup_parallelism: N`
+runs N lookup processes, each serving one lookup at a time, so up to N lookups
+reach the Mooncake master concurrently. Each process is a separate Python
+process (it imports vLLM) and uses about 1.5 GB of host memory.
+
 ### Lookup timeout and circuit breaker
 
 Prefix lookups (blocking, async, and arrival-time prefetch) wait at most
@@ -368,6 +374,7 @@ reset waits at most 60 seconds.
 - `lookup_prefetch_limit` (int): Maximum number of arrival-time lookups in flight. Beyond it, a request is looked up when the scheduler first reaches it; scheduler lookups are not capped. Set to a positive value to enable arrival-time lookup. Default: `0` (disabled).
 - `lookup_prefetch_ttl_s` (float): Maximum age of a completed async lookup result, measured from when its RPC returned. Older results are looked up again, as are lookups whose token/hash range changed. Pending lookups use the separate lookup timeout above. Default: `2.0` seconds.
 - `lookup_timeout_s` (float): Maximum wait for a prefix lookup, including executor queue time. Default: `1.0` seconds.
+- `lookup_parallelism` (int): Number of lookups served concurrently, each by its own lookup process on worker rank 0 (see [Lookup process](#lookup-process)). Default: `1`.
 - `lookup_rpc_port` (int): Custom port for the ZMQ lookup RPC socket. Default: `0`.
 - `custom_mem_pool` (str): Optional Mooncake allocator for the GPU KV cache.
   `"NVLINK"` is used in the [EGM deployment example](#standalone-egm-over-nvlink);

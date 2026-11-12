@@ -394,3 +394,71 @@ def test_lookup_process_matches_in_process_lookup(
             client.close()
             process.close()
             owner.close()
+
+
+def test_lookup_parallelism_serves_lookups_concurrently(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """With `lookup_parallelism: 2`, a lookup is not queued behind a slow one:
+    each client thread owns the socket of a different lookup channel."""
+    with tempfile.TemporaryDirectory(prefix="mc-", dir="/tmp") as rpc_dir:
+        monkeypatch.setenv("VLLM_RPC_BASE_PATH", rpc_dir)
+        config = VllmConfig(
+            device_config=DeviceConfig("cpu"),
+            kv_transfer_config=KVTransferConfig(
+                kv_connector="MooncakeStoreConnector",
+                kv_role="kv_both",
+                kv_connector_extra_config={
+                    "lookup_parallelism": 2,
+                    "lookup_timeout_s": 5.0,
+                },
+            ),
+        )
+        paths = [worker.get_zmq_rpc_path_lookup(config, c) for c in range(2)]
+        assert len(set(paths)) == 2
+        context = zmq.Context()
+        peers = []
+        for path in paths:
+            peer = context.socket(zmq.REP)
+            peer.setsockopt(zmq.RCVTIMEO, 5000)
+            peer.bind(path)
+            peers.append(peer)
+        held, release = threading.Lock(), threading.Event()
+        holder: list[int] = []
+
+        def serve(i: int) -> None:
+            peers[i].recv_multipart()
+            with held:
+                first = not holder
+                if first:
+                    holder.append(i)
+            if first:  # the first channel to get a lookup holds its reply
+                assert release.wait(5)
+            peers[i].send(encode_lookup_response(MooncakeLookupResult(16 * (i + 1))))
+
+        servers = [threading.Thread(target=serve, args=(i,)) for i in range(2)]
+        for s in servers:
+            s.start()
+        client = worker.LookupKeyClient(config)
+        try:
+            assert client.lookup("slow", 128, [], non_block=True) is None
+            deadline = time.monotonic() + 5
+            fast = None
+            while fast is None and time.monotonic() < deadline:
+                fast = client.lookup("fast", 128, [], non_block=True)
+                time.sleep(0.001)
+            assert fast is not None and fast.hit_length > 0
+            assert client.lookup("slow", 128, [], non_block=True) is None
+            release.set()
+            slow = client.lookup("slow", 128, [])
+            assert {slow.hit_length, fast.hit_length} == {16, 32}
+        finally:
+            release.set()
+            for s in servers:
+                s.join(5)
+            client.executor.shutdown(wait=True, cancel_futures=True)
+            client.close()
+            client.ctx.term()
+            for peer in peers:
+                peer.close(linger=0)
+            context.term()
