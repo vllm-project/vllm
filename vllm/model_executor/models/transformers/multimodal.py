@@ -1321,8 +1321,10 @@ class MultiModalMixin(SupportsMultiModal, SupportsMRoPE, Base):
             get_modality_features = getattr(self.model, f"get_{modality}_features")
             features = get_modality_features(pixel_values, return_dict=True, **kwargs)
         embeddings = features.pooler_output
-        # Carried alongside the embeddings so the encoder cache keeps them together
-        if not (deepstack := getattr(features, "deepstack_features", None)):
+        # Carried alongside the embeddings so the encoder cache keeps them together.
+        # Other layouts (e.g. Granite 4 Vision's layer map) aren't supported yet.
+        deepstack = getattr(features, "deepstack_features", None)
+        if not (self.deepstack_num_levels and deepstack):
             return embeddings
         if isinstance(embeddings, torch.Tensor):
             return torch.cat([embeddings, *deepstack], dim=-1)
