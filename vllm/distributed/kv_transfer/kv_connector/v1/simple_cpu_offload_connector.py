@@ -142,10 +142,9 @@ class SimpleCPUOffloadConnector(KVConnectorBase_V1, SupportsHMA):
                 f"Unknown kv_offload_backend {kv_offload_backend!r}; "
                 f"expected one of {VALID_KV_OFFLOAD_BACKENDS}"
             )
-        hybrid_mode = kv_offload_backend == "hybrid"
-        disk_mode = kv_offload_backend in ("disk", "hybrid")
+        uses_disk = kv_offload_backend in ("disk", "hybrid")
         self._cache_hit_source = (
-            CacheHitSource.DISK if disk_mode else CacheHitSource.HOST
+            CacheHitSource.DISK if uses_disk else CacheHitSource.HOST
         )
 
         disk_path = extra_config.get("disk_path", None) or None
@@ -156,7 +155,7 @@ class SimpleCPUOffloadConnector(KVConnectorBase_V1, SupportsHMA):
         use_page_cache = bool(extra_config.get("use_page_cache", False))
         hot_cache_tokens = 0
         max_load_slots = disk_buffer_slots
-        if hybrid_mode:
+        if kv_offload_backend == "hybrid":
             from vllm.v1.kv_cache_interface import FullAttentionSpec
 
             hot_cache_tokens = int(
@@ -184,7 +183,7 @@ class SimpleCPUOffloadConnector(KVConnectorBase_V1, SupportsHMA):
             extra_config.get("cpu_hugepage_block_size")
         )
 
-        if disk_mode:
+        if uses_disk:
             if disk_path is None:
                 raise ValueError(
                     'kv_offload_backend="disk" requires disk_path to be set.'
@@ -251,8 +250,8 @@ class SimpleCPUOffloadConnector(KVConnectorBase_V1, SupportsHMA):
                 scheduler_block_size=scheduler_block_size,
                 hash_block_size=hash_block_size,
                 lazy_offload=lazy_offload,
-                disk_capacity_bytes=disk_capacity_bytes if disk_mode else 0,
-                use_page_cache=use_page_cache if disk_mode else False,
+                disk_capacity_bytes=disk_capacity_bytes if uses_disk else 0,
+                use_page_cache=use_page_cache if uses_disk else False,
                 num_cpu_blocks=num_cpu_blocks,
                 aligned_num_cpu_blocks=aligned_num_cpu_blocks,
                 hot_cache_tokens_per_request=hot_cache_tokens,
