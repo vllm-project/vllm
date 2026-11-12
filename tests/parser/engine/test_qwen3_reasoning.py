@@ -2,11 +2,11 @@
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 """Tests for the engine-based Qwen3 reasoning parser.
 
-Validates that ``Qwen3Parser`` correctly handles
-``<think>``/``</think>`` reasoning with Qwen3-specific extensions:
-- ``<tool_call>`` as implicit reasoning end (terminal + token ID)
-- Stripping ``<think>`` from generated output (old template compat)
-- No terminal text (``</think>``, ``<tool_call>``) leaks into output
+Validates that `Qwen3Parser` correctly handles
+`<think>`/`</think>` reasoning with Qwen3-specific extensions:
+- `<tool_call>` as implicit reasoning end (terminal + token ID)
+- Stripping `<think>` from generated output (old template compat)
+- No terminal text (`</think>`, `<tool_call>`) leaks into output
 """
 
 import dataclasses
@@ -734,8 +734,8 @@ class TestWhitespaceStrippingDisabled:
 
 
 class TestThinkingDisabled:
-    """When ``enable_thinking=False``, the chat template pre-fills a closed
-    ``<think>\\n\\n</think>\\n\\n`` block.  The model output starts in content
+    """When `enable_thinking=False`, the chat template pre-fills a closed
+    `<think>\\n\\n</think>\\n\\n` block.  The model output starts in content
     state, so the parser's initial state must be CONTENT — not REASONING.
     """
 

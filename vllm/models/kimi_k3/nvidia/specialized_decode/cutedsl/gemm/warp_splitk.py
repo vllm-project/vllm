@@ -5,7 +5,7 @@
 # flashinfer/gemm/kernels/dense_bf16_gemm_warp_splitk.py
 """FlashInfer's cp.async-pipelined BF16 GEMM for M <= 32 whose four compute warps hold
 split-K partials (warp split-K), kernel unchanged; the autotune heuristics are dropped
-for per-shape tactics chosen by ``decode.py`` and compiled before capture.
+for per-shape tactics chosen by `decode.py` and compiled before capture.
 
 The weight streams through two cp.async loader warps with an L2 evict_first hint
 (one tile is issued before the PDL wait), the activations through one or two loader
@@ -67,7 +67,7 @@ def _partial_offset(feature, token, token_tile: int):
 
 
 def _a_fragment_offset(lane, compute_warp, m_iter, phase, k_tile):
-    """Element offset of one lane's A ``ldmatrix.x4`` address within a stage."""
+    """Element offset of one lane's A `ldmatrix.x4` address within a stage."""
     linear = lane % 16 + (lane // 16) * 128 + phase * 256
     row = linear % _MMA_SHAPE[0] + m_iter * _MMA_SHAPE[0]
     col = linear // _MMA_SHAPE[0] + compute_warp * (k_tile // _COMPUTE_WARPS)
@@ -75,7 +75,7 @@ def _a_fragment_offset(lane, compute_warp, m_iter, phase, k_tile):
 
 
 def _b_pair_offset(lane, compute_warp, n_iter, pair, token_tile, k_tile):
-    """Element offset of one lane's B ``ldmatrix.x4`` address within a stage."""
+    """Element offset of one lane's B `ldmatrix.x4` address within a stage."""
     b_atom = lane % 8 + ((lane % 32) // 8) * (token_tile * 8)
     linear = b_atom + pair * 2 * token_tile * 16 + n_iter * 8
     row = linear % token_tile
@@ -85,7 +85,7 @@ def _b_pair_offset(lane, compute_warp, n_iter, pair, token_tile, k_tile):
 
 @dsl_user_op
 def _ldmatrix_x4(smem, offset, *, loc=None, ip=None):
-    """``ldmatrix.x4`` of the 16-bit fragment ``offset`` elements into ``smem``."""
+    """`ldmatrix.x4` of the 16-bit fragment `offset` elements into `smem`."""
     return prims.ldmatrix(
         smem.iterator.raw_ptr() + offset,
         num=4,
@@ -99,8 +99,8 @@ def _ldmatrix_x4(smem, offset, *, loc=None, ip=None):
 def _l2_policy_evict_first(*, loc=None, ip=None):
     """64-bit L2 evict_first policy (fraction 1.0).
 
-    Must stay a runtime ``createpolicy``: with the equivalent constant, ptxas
-    13.0 emits the invalid ``LDGSTS ... [R+UR], desc[UR1]`` encoding.
+    Must stay a runtime `createpolicy`: with the equivalent constant, ptxas
+    13.0 emits the invalid `LDGSTS ... [R+UR], desc[UR1]` encoding.
     """
     return cutlass.Int64(
         llvm.inline_asm(
@@ -149,12 +149,12 @@ def _issue_weight_tile(
     loc=None,
     ip=None,
 ):
-    """Issue one A-loader thread's cp.async copies for weight K tile ``k_tile``.
+    """Issue one A-loader thread's cp.async copies for weight K tile `k_tile`.
 
     Plain Python control flow only: this helper is not preprocessed by the DSL.
-    ``with_policy`` selects the ``.L2::cache_hint`` form; the pre-barrier
+    `with_policy` selects the `.L2::cache_hint` form; the pre-barrier
     prologue tile must use the plain form because ptxas 13.0 misencodes the
-    hinted copy in that position (``LDGSTS ... [R+UR], desc[UR<odd>]``).
+    hinted copy in that position (`LDGSTS ... [R+UR], desc[UR<odd>]`).
     """
     copy_count = output_tile * k_tile_size // (8 * _A_LOADER_THREADS)
     for copy_idx in range(copy_count):
@@ -631,8 +631,8 @@ def compile_warp_splitk(device_index: int, n: int, k: int, tactic: WarpSplitKTac
 
 
 class PreparedWarpSplitK:
-    """``out[M, N] = x[M, K] @ weight[N, K]^T`` for M <= 32 with a tactic per M;
-    ``x`` and ``out`` packed row-major, 32 B aligned."""
+    """`out[M, N] = x[M, K] @ weight[N, K]^T` for M <= 32 with a tactic per M;
+    `x` and `out` packed row-major, 32 B aligned."""
 
     def __init__(self, weight, tactics):
         n, k = weight.shape
