@@ -152,17 +152,20 @@ class MuseSparkDecodeMoE:
         hidden_states: torch.Tensor,
         kernels: StageKernels,
         shard: "TokenShard | None" = None,
+        fp8_act: tuple[torch.Tensor, torch.Tensor] | None = None,
     ) -> torch.Tensor:
+        """`fp8_act`: the per-token FP8 rows and scales of `hidden_states` for an
+        FP8 pooler."""
         router, pooler, unpooler = moe.moe_router, moe.pooler, moe.unpooler
         norm, post_norm = moe.pre_expert_norm, moe.post_expert_norm
         assert pooler is not None and unpooler is not None
         assert norm is not None and post_norm is not None
+        pooled = moe.pool_projection(hidden_states, fp8_act)
         if shard is not None:
             router_logits = shard.gather(moe._router_logits(hidden_states))
-            pooled = shard.gather(pooler(hidden_states)[0])
+            pooled = shard.gather(pooled)
         else:
             router_logits = moe._router_logits(hidden_states, reduce_splits=False)
-            pooled = pooler(hidden_states)[0]
         topk_weights, topk_ids, normed = decode_moe_prep(
             router_logits.contiguous(),
             router.expert_bias,

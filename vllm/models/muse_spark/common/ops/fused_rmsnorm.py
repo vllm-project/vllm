@@ -32,6 +32,16 @@ def _effective_weight(w_ptr, d, dm, gain_center):
 
 
 @triton.jit
+def _quant_rows_store(y, q_ptr, qs_ptr, idx, t, mask, tm, QMAX: tl.constexpr):
+    """Per-token quantization of the rows of `y` as rounded to BF16 (the values a
+    BF16 store would hand the next GEMM): `q = y / s` with `s = amax / QMAX`."""
+    yb = y.to(tl.bfloat16).to(tl.float32)
+    scale = tl.maximum(tl.max(tl.abs(yb), axis=1) / QMAX, 1e-12)
+    tl.store(q_ptr + idx, (yb / scale[:, None]).to(q_ptr.dtype.element_ty), mask=mask)
+    tl.store(qs_ptr + t, scale, mask=tm)
+
+
+@triton.jit
 def _blend_and_store(
     y_ptr,
     s_ptr,
@@ -70,6 +80,7 @@ def _blend_and_store(
 def _rmsnorm_fwd_kernel(
     x_ptr,
     y_ptr,
+    qs_ptr,
     w_ptr,
     s_ptr,
     alpha_ptr,
@@ -86,6 +97,8 @@ def _rmsnorm_fwd_kernel(
     RESIDUAL: tl.constexpr,
     GATE_STREAM: tl.constexpr,
     PER_CHANNEL: tl.constexpr,
+    QUANT_OUT: tl.constexpr,
+    QMAX: tl.constexpr,
     bT: tl.constexpr,
     bD: tl.constexpr,
     USE_PDL: tl.constexpr,
@@ -93,7 +106,8 @@ def _rmsnorm_fwd_kernel(
     """RMSNorm over the last dim of `[T, D]`; fp32 math, the store rounds once.
 
     `KAHAN` uses compensated fp32 instead of fp64 for the cross-tile sum
-    (Blackwell runs fp64 at 1/64 rate).
+    (Blackwell runs fp64 at 1/64 rate). `QUANT_OUT` (single tile, no residual)
+    stores `y` quantized per token into `y_ptr` and the scales into `qs_ptr`.
     """
     if USE_PDL:
         tl.extra.cuda.gdc_wait()
@@ -138,7 +152,10 @@ def _rmsnorm_fwd_kernel(
         else:
             if HAS_WEIGHT and not INPUT_SCALE:
                 y = y * w[None, :]
-            tl.store(y_ptr + idx, y.to(y_ptr.dtype.element_ty), mask=mask)
+            if QUANT_OUT:
+                _quant_rows_store(y, y_ptr, qs_ptr, idx, t, mask, tm, QMAX)
+            else:
+                tl.store(y_ptr + idx, y.to(y_ptr.dtype.element_ty), mask=mask)
     else:
         if KAHAN:
             sum_sq = tl.zeros([bT], dtype=tl.float32)
@@ -215,6 +232,7 @@ def fused_rmsnorm_fwd(
     use_kahan_summation: bool = True,
     out: torch.Tensor | None = None,
     out_dtype: torch.dtype | None = None,
+    out_scale: torch.Tensor | None = None,
     residual_stream: torch.Tensor | None = None,
     alpha: torch.Tensor | float | None = None,
     beta: torch.Tensor | None = None,
@@ -222,6 +240,9 @@ def fused_rmsnorm_fwd(
     """RMSNorm with a gain-centred weight, applied before or after the norm.
 
     With `residual_stream` it returns `alpha * residual_stream + beta * norm(x)`.
+    With `out_scale` (`[T]` float32), `out` (an FP8 or INT8 tensor) receives the
+    output quantized per token and `out_scale` its scales (one tile per row, no
+    residual).
     """
     input_shape = x.shape
     x = x.reshape(-1, x.shape[-1])
@@ -304,6 +325,11 @@ def fused_rmsnorm_fwd(
 
     tile_elems = 8192
     bD = min(triton.next_power_of_2(D), tile_elems)
+    quant = out_scale is not None
+    if out_scale is not None:
+        assert not residual and bD >= D, "a quantized output needs one tile per row"
+        assert out is not None, "a quantized output needs out"
+        assert out_scale.shape == (T,) and out_scale.is_contiguous()
     # The residual epilogue's fp32 stream + blend make a full-width tile spill
     # at larger T. B300, D=8192 (us, median): T=512 wants bD 4096 (14.4 vs
     # 18.1), T=8192 wants 2048 (136.6 vs 170.1); T=1 keeps the single tile
@@ -321,6 +347,7 @@ def fused_rmsnorm_fwd(
     _rmsnorm_fwd_kernel[(triton.cdiv(T, bT),)](
         x,
         y,
+        out_scale if quant else x,
         w,
         # Unused pointers must be valid; constexprs keep them undereferenced.
         residual_stream if residual else x,
@@ -338,6 +365,8 @@ def fused_rmsnorm_fwd(
         RESIDUAL=residual,
         GATE_STREAM=gate_stream,
         PER_CHANNEL=per_channel,
+        QUANT_OUT=quant,
+        QMAX=_quant_max(y.dtype) if quant else 0.0,
         bT=bT,
         bD=bD,
         num_warps=num_warps,
@@ -345,6 +374,12 @@ def fused_rmsnorm_fwd(
         **({"launch_pdl": True} if enable_pdl else {}),
     )
     return y.view(input_shape)
+
+
+def _quant_max(dtype: torch.dtype) -> float:
+    return float(
+        torch.finfo(dtype).max if dtype.is_floating_point else torch.iinfo(dtype).max
+    )
 
 
 # The whole row must be live for the second norm, so this path is single-tile.
@@ -357,6 +392,8 @@ def _norm_residual_norm_fwd_kernel(
     stream_ptr,
     new_stream_ptr,
     out_ptr,
+    q_ptr,
+    qs_ptr,
     post_w_ptr,
     pre_w_ptr,
     alpha_ptr,
@@ -374,10 +411,14 @@ def _norm_residual_norm_fwd_kernel(
     PRE_INPUT_SCALE: tl.constexpr,
     GATE_STREAM: tl.constexpr,
     PER_CHANNEL: tl.constexpr,
+    STORE_OUT: tl.constexpr,
+    QUANT_OUT: tl.constexpr,
+    QMAX: tl.constexpr,
     bT: tl.constexpr,
     bD: tl.constexpr,
 ):
-    """One residual boundary: post-norm, gated add, and the next pre-norm."""
+    """One residual boundary: post-norm, gated add, and the next pre-norm, stored
+    (`STORE_OUT`) and/or quantized per token (`QUANT_OUT`)."""
     t = tl.program_id(0) * bT + tl.arange(0, bT)
     tm = t < T
     d = tl.arange(0, bD)
@@ -427,7 +468,10 @@ def _norm_residual_norm_fwd_kernel(
     if PRE_HAS_WEIGHT and not PRE_INPUT_SCALE:
         z = z * pre_w[None, :]
 
-    tl.store(out_ptr + idx, z.to(out_ptr.dtype.element_ty), mask=mask)
+    if STORE_OUT:
+        tl.store(out_ptr + idx, z.to(out_ptr.dtype.element_ty), mask=mask)
+    if QUANT_OUT:
+        _quant_rows_store(z, q_ptr, qs_ptr, idx, t, mask, tm, QMAX)
 
 
 def supports_norm_residual_norm(
@@ -472,6 +516,88 @@ def fused_norm_residual_norm_fwd(
     Only the sum-of-squares order differs from two `fused_rmsnorm_fwd` calls;
     vs fp64 at D=8192, 9e-6 of the bf16 outputs differ by one ulp.
     """
+    out = torch.empty_like(branch, dtype=out_dtype)
+    new_stream = _norm_residual_norm(
+        branch,
+        stream,
+        post_weight,
+        pre_weight,
+        post_eps,
+        pre_eps,
+        alpha=alpha,
+        beta=beta,
+        post_gain_center=post_gain_center,
+        pre_gain_center=pre_gain_center,
+        post_input_scale=post_input_scale,
+        pre_input_scale=pre_input_scale,
+        out=out,
+    )
+    return out, new_stream
+
+
+def fused_norm_residual_norm_quant_fwd(
+    branch: torch.Tensor,
+    stream: torch.Tensor,
+    post_weight: torch.Tensor | None,
+    pre_weight: torch.Tensor | None,
+    post_eps: float,
+    pre_eps: float,
+    *,
+    alpha: torch.Tensor | float,
+    beta: torch.Tensor,
+    post_gain_center: float = 0.0,
+    pre_gain_center: float = 0.0,
+    post_input_scale: bool = False,
+    pre_input_scale: bool = False,
+    quant_dtype: torch.dtype | None = None,
+    out_dtype: torch.dtype | None = None,
+) -> tuple[torch.Tensor | None, torch.Tensor, torch.Tensor, torch.Tensor]:
+    """`fused_norm_residual_norm_fwd` with `out` quantized per token (FP8 by
+    default): `(out, new_stream, out_q [T, D], out_scale [T])`, where `out` is
+    stored only if `out_dtype` is given (else None)."""
+    T, D = branch.reshape(-1, branch.shape[-1]).shape
+    quant_dtype = quant_dtype or current_platform.fp8_dtype()
+    out_q = torch.empty((T, D), dtype=quant_dtype, device=branch.device)
+    out_scale = torch.empty((T,), dtype=torch.float32, device=branch.device)
+    out = None if out_dtype is None else torch.empty_like(branch, dtype=out_dtype)
+    new_stream = _norm_residual_norm(
+        branch,
+        stream,
+        post_weight,
+        pre_weight,
+        post_eps,
+        pre_eps,
+        alpha=alpha,
+        beta=beta,
+        post_gain_center=post_gain_center,
+        pre_gain_center=pre_gain_center,
+        post_input_scale=post_input_scale,
+        pre_input_scale=pre_input_scale,
+        out=out,
+        out_quant=(out_q, out_scale),
+    )
+    return out, new_stream, out_q, out_scale
+
+
+def _norm_residual_norm(
+    branch: torch.Tensor,
+    stream: torch.Tensor,
+    post_weight: torch.Tensor | None,
+    pre_weight: torch.Tensor | None,
+    post_eps: float,
+    pre_eps: float,
+    *,
+    alpha: torch.Tensor | float,
+    beta: torch.Tensor,
+    post_gain_center: float,
+    pre_gain_center: float,
+    post_input_scale: bool,
+    pre_input_scale: bool,
+    out: torch.Tensor | None,
+    out_quant: tuple[torch.Tensor, torch.Tensor] | None = None,
+) -> torch.Tensor:
+    """Run the boundary kernel into `out` and/or `out_quant`; returns the new
+    stream."""
     input_shape = branch.shape
     assert supports_norm_residual_norm(branch, stream), (
         "fused norm/residual/norm boundary: unsupported branch "
@@ -511,8 +637,8 @@ def fused_norm_residual_norm_fwd(
     else:
         alpha_scalar = float(alpha)
 
-    out = torch.empty_like(branch, dtype=out_dtype)
     new_stream = torch.empty_like(stream)
+    out_q, out_scale = out_quant if out_quant is not None else (None, None)
 
     bD = triton.next_power_of_2(D)
     bT = max(1, _BOUNDARY_TILE_ELEMS // bD)
@@ -528,8 +654,10 @@ def fused_norm_residual_norm_fwd(
         branch,
         stream,
         new_stream,
-        out,
         # Unused pointers must be valid; constexprs keep them undereferenced.
+        out if out is not None else branch,
+        out_q if out_q is not None else branch,
+        out_scale if out_scale is not None else branch,
         post_weight if post_weight is not None else branch,
         pre_weight if pre_weight is not None else branch,
         alpha if gate_stream else beta,
@@ -547,8 +675,11 @@ def fused_norm_residual_norm_fwd(
         PRE_INPUT_SCALE=pre_input_scale,
         GATE_STREAM=gate_stream,
         PER_CHANNEL=per_channel,
+        STORE_OUT=out is not None,
+        QUANT_OUT=out_q is not None,
+        QMAX=_quant_max(out_q.dtype) if out_q is not None else 0.0,
         bT=bT,
         bD=bD,
         num_warps=num_warps,
     )
-    return out.view(input_shape), new_stream.view(input_shape)
+    return new_stream.view(input_shape)

@@ -752,6 +752,20 @@ Some models are supported only via the [Transformers modeling backend](#transfor
     memory for the KV cache. It cannot be combined with LoRA.
 
 !!! note
+    On ROCm gfx950 (MI355X), `MuseSparkForConditionalGeneration` runs the
+    [online](../features/quantization/online.md) `fp8_per_channel` quantization of
+    the target decoder's fused QKV-gate projection and MoE pooler and unpooler on
+    its own FP8 W8A8 GEMMs, with the per-token activations quantized by the
+    preceding norm. Enable it with
+    `--quantization-config '{"linear": "fp8_per_channel", "ignore": ["*o_proj"]}'`.
+    Other online targets are rejected on these layers. Keep `o_proj` in BF16: FP8
+    costs more accuracy there, and the Ulysses prefill requires it. The DSpark
+    draft (it does not take `--quantization-config`), the router and `lm_head`
+    stay BF16. It lowers decode step time and frees BF16 weight memory for the KV
+    cache, at a small accuracy cost. It cannot be combined with LoRA,
+    `--monokernel` or `VLLM_ROCM_QUICK_REDUCE_QUANTIZATION=INT4`/`INT3`.
+
+!!! note
     Both Nemotron Nano architecture names and `NemotronH_Omni_Reasoning_V3` map to
     the same vLLM implementation.
     Audio inputs are only supported by the Omni variants; `NemotronH_Nano_VL_V2`
