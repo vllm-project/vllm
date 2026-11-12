@@ -92,6 +92,10 @@ def load_dspark_model(target_model: nn.Module, vllm_config: VllmConfig) -> nn.Mo
 
     draft_vllm_config = replace(
         vllm_config,
+        # The drafter runs without the target's adapters. Keeping the LoRA
+        # config would have its MoE pick LoRA-aware experts that need a LoRA
+        # context the drafter is never given.
+        lora_config=None,
         parallel_config=_get_dspark_parallel_config(
             vllm_config.parallel_config,
             speculative_config.draft_parallel_config.tensor_parallel_size,
