@@ -89,6 +89,9 @@ class TransferJob(ABC):
         materialize() may only be called once and only by the tiers, when
         they wish to access the keys and chunk_ids for this TransferJob.
 
+        Callers not running under the manager lock should take the manager lock.
+        (for an example look at fs/manager.py)
+
         Returns:
             True if the job is materialized after the call (acquisition
             succeeded, or the job was materialized at construction); False
