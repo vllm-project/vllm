@@ -95,7 +95,7 @@ fn main() -> ExitCode {
         let _guard = vllm_tracing::set_default_tracing(process_label, LogLevel::from_env());
         Cli::parse()
     };
-    vllm_tracing::init_tracing(process_label, cli.log_level());
+    vllm_tracing::init_tracing(process_label, cli.log_level(), cli.log_formatter());
 
     let mut runtime = tokio::runtime::Builder::new_multi_thread();
     runtime.enable_all();
