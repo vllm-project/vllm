@@ -356,6 +356,66 @@ async def test_commit_without_session_update_returns_error(model_name):
             assert "model_not_validated" in event.get("code", "")
 
 
+async def _connect_until_refused(ws_url: str, timeout: float = 30.0):
+    """Open sessions until one is refused; the SIGTERM handler runs async."""
+    async with asyncio.timeout(timeout):
+        while True:
+            async with websockets.connect(ws_url) as ws:
+                try:
+                    event = await receive_event(ws, timeout=timeout)
+                except websockets.ConnectionClosed:
+                    return ws.close_code, ws.close_reason
+                assert event["type"] == "session.created"
+            await asyncio.sleep(0.1)
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("model_name", [MODEL_NAME])
+async def test_realtime_shutdown_refuses_new_sessions(
+    model_name, mary_had_lamb_audio_chunks
+):
+    """After SIGTERM, new sessions are closed with 1001 (Going Away), and a
+    session opened before SIGTERM is still served."""
+    server_args = [
+        "--enforce-eager",
+        "--max-model-len",
+        "2048",
+        "--shutdown-timeout",
+        "60",
+        *MISTRAL_FORMAT_ARGS,
+    ]
+
+    with RemoteOpenAIServer(model_name, server_args) as remote_server:
+        ws_url = _get_websocket_url(remote_server)
+        async with websockets.connect(ws_url) as open_ws:
+            assert (await receive_event(open_ws, timeout=30.0))[
+                "type"
+            ] == "session.created"
+            await send_event(open_ws, {"type": "session.update", "model": model_name})
+            await send_event(open_ws, {"type": "input_audio_buffer.commit"})
+            for chunk in mary_had_lamb_audio_chunks[:20]:
+                await send_event(
+                    open_ws, {"type": "input_audio_buffer.append", "audio": chunk}
+                )
+            first = await receive_event(open_ws, timeout=600.0)
+            assert first["type"] == "transcription.delta", first
+
+            remote_server.proc.send_signal(signal.SIGTERM)
+
+            code, reason = await _connect_until_refused(ws_url)
+            assert (code, reason) == (1001, "Server shutting down")
+
+            await send_event(open_ws, {"type": "not.an.event"})
+            event = await receive_event(open_ws, timeout=30.0)
+            while event["type"] == "transcription.delta":
+                event = await receive_event(open_ws, timeout=30.0)
+            assert event == {
+                "type": "error",
+                "error": "Unknown event type: not.an.event",
+                "code": "unknown_event",
+            }
+
+
 class _DrainingEngineClient:
     """Engine stand-in whose drain lasts until the test releases it."""
 
