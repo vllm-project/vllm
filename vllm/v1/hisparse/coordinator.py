@@ -424,6 +424,30 @@ class HiSparseCoordinator:
         for hot_manager in self.hot_managers:
             hot_manager.require_hot(request_id)
 
+    def get_transition_reclaimable_blocks(self, request_id: str) -> int:
+        """Clean resident blocks a hot-first allocation can release immediately."""
+        if not self.hot_managers or not all(
+            request_id in manager.hot_required for manager in self.hot_managers
+        ):
+            return 0
+        hot_blocks = sum(
+            manager.get_num_required_blocks(request_id) for manager in self.hot_managers
+        )
+        assert self.gpu_pool is not None
+        if not hot_blocks or hot_blocks > self.gpu_pool.get_num_free_blocks():
+            return 0
+        state = self.request_states.get(request_id)
+        if state is None:
+            return 0
+        reclaimable = 0
+        for page_idx in state.pinned_clean:
+            if page_idx in state.pending_pages or page_idx not in state.valid_pages:
+                continue
+            blocks = self._resident_page_blocks(request_id, page_idx)
+            if blocks is not None:
+                reclaimable += sum(block.ref_cnt == 1 for block in blocks)
+        return reclaimable
+
     def update_residency(self, request_id: str) -> None:
         """Per-step residency policy for a scheduled request.
 
