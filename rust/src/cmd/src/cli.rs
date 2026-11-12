@@ -1417,8 +1417,8 @@ pub struct ServeArgs {
     /// Unix domain socket path. If set, host and port arguments are ignored.
     #[arg(long)]
     pub uds: Option<String>,
-    /// TCP port for the gRPC Inference and Control services. When not set, no
-    /// gRPC server is started.
+    /// TCP port for the gRPC Inference, Control, and Render services. When not
+    /// set, no gRPC server is started.
     #[arg(long)]
     pub grpc_port: Option<u16>,
 
