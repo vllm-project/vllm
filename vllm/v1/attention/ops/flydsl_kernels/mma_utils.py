@@ -13,9 +13,9 @@ def _fragment(v):
 
 
 def mma(atom, acc, a, b, **atom_state):
-    """Issue ``atom`` once on per-lane operand vectors; return the new acc.
+    """Issue `atom` once on per-lane operand vectors; return the new acc.
 
-    ``atom_state`` is forwarded to ``fx.gemm`` (e.g. ``scale_a``/``scale_b``
+    `atom_state` is forwarded to `fx.gemm` (e.g. `scale_a`/`scale_b`
     for scaled MFMA).
     """
     c = _fragment(acc)
