@@ -2471,6 +2471,39 @@ def test_dspark_draft_eplb_can_be_disabled(
 
 
 @pytest.mark.skip_global_cleanup
+def test_eagle_draft_eplb_opt_out_disables_elastic_ep_on_draft(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+):
+    monkeypatch.setattr(current_platform, "is_cuda_alike", lambda: True)
+    target_model_config = _write_deepseek_v2_config(tmp_path / "target", 4)
+    draft_model_config = _write_deepseek_v2_config(tmp_path / "draft", 4)
+    target_parallel_config = _eplb_parallel_config(0)
+    target_parallel_config.enable_elastic_ep = True
+
+    speculative_config = SpeculativeConfig(
+        method="eagle3",
+        model=draft_model_config.model,
+        num_speculative_tokens=1,
+        target_model_config=target_model_config,
+        target_parallel_config=target_parallel_config,
+        draft_enable_eplb=False,
+    )
+    target_vllm_config = VllmConfig(
+        model_config=target_model_config,
+        parallel_config=target_parallel_config,
+        device_config=DeviceConfig(device="cpu"),
+        speculative_config=speculative_config,
+    )
+
+    draft_vllm_config = speculative_config.apply_draft_overrides(target_vllm_config)
+
+    assert not draft_vllm_config.parallel_config.enable_eplb
+    assert not draft_vllm_config.parallel_config.enable_elastic_ep
+    assert target_parallel_config.enable_eplb
+    assert target_parallel_config.enable_elastic_ep
+
+
+@pytest.mark.skip_global_cleanup
 def test_dspark_draft_eplb_rejects_elastic_ep_unless_disabled(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ):
@@ -2607,6 +2640,18 @@ def test_speculative_config_compile_factors():
     config = SpeculativeConfig(model="ngram", num_speculative_tokens=2)
     factors = config.compile_factors()
     assert factors["uses_aux_hidden_states"] is False
+
+
+def test_dspark_compile_factors_hash_graph_settings_once():
+    config = SpeculativeConfig(model="ngram", num_speculative_tokens=2)
+    config.method = "dspark"
+    config.enable_adaptive_verification = True
+    config.draft_tensor_parallel_size = 4
+
+    factors = config.compile_factors()
+
+    assert factors["speculator"] == (True, 4)
+    assert "dspark" not in factors
 
 
 @dataclass

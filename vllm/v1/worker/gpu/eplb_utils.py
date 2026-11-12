@@ -16,7 +16,7 @@ from vllm.model_executor.models.interfaces import (
     MixtureOfExperts,
     get_mixture_of_experts_model,
 )
-from vllm.models.deepseek_v4.common.eplb_util import dspark_draft_supports_eplb
+from vllm.v1.worker.gpu.spec_decode.dspark.config import dspark_draft_supports_eplb
 
 if TYPE_CHECKING:
     from vllm.v1.worker.gpu.model_runner import GPUModelRunner

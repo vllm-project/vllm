@@ -2,6 +2,7 @@
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 
 from contextlib import nullcontext
+from functools import partial
 from types import SimpleNamespace
 from unittest.mock import Mock, patch
 
@@ -10,7 +11,7 @@ import torch
 import torch.nn as nn
 from transformers import PreTrainedConfig
 
-from vllm.config import ParallelConfig
+from vllm.config import ParallelConfig, SpeculativeConfig
 from vllm.multimodal.processing import InputProcessingContext
 
 
@@ -356,15 +357,21 @@ def test_dspark_shares_target_embedding_with_smaller_draft_vocabulary():
         hf_config=SimpleNamespace(model_type="qwen3"),
         get_vocab_size=Mock(return_value=99),
     )
+    speculative_config = SimpleNamespace(
+        draft_model_config=draft_model_config,
+        draft_parallel_config=SimpleNamespace(tensor_parallel_size=1),
+        attention_backend=None,
+        kv_cache_dtype=None,
+        draft_load_config=None,
+        draft_lm_head_quantization=None,
+        draft_enable_eplb=True,
+        resolved_draft_num_redundant_experts=None,
+    )
+    speculative_config.apply_draft_eplb_overrides = partial(
+        SpeculativeConfig.apply_draft_eplb_overrides, speculative_config
+    )
     vllm_config = SimpleNamespace(
-        speculative_config=SimpleNamespace(
-            draft_model_config=draft_model_config,
-            draft_parallel_config=SimpleNamespace(tensor_parallel_size=1),
-            attention_backend=None,
-            kv_cache_dtype=None,
-            draft_load_config=None,
-            draft_lm_head_quantization=None,
-        ),
+        speculative_config=speculative_config,
         parallel_config=ParallelConfig(),
         attention_config=SimpleNamespace(backend=None),
         cache_config=SimpleNamespace(),

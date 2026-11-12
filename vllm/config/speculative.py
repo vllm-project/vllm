@@ -823,11 +823,6 @@ class SpeculativeConfig:
         # state.
         factors["uses_aux_hidden_states"] = self.uses_aux_hidden_states
         factors["speculator"] = normalize_value(self.speculator_config.hash_factors())
-        if self.method == "dspark":
-            factors["dspark"] = (
-                self.enable_adaptive_verification,
-                self.draft_tensor_parallel_size,
-            )
         if self.resolved_draft_num_redundant_experts is not None:
             factors["resolved_draft_num_redundant_experts"] = (
                 self.resolved_draft_num_redundant_experts
@@ -1783,7 +1778,7 @@ class SpeculativeConfig:
             if not target_parallel_config.enable_eplb:
                 return
 
-            from vllm.models.deepseek_v4.common.eplb_util import (
+            from vllm.v1.worker.gpu.spec_decode.dspark.config import (
                 dspark_draft_supports_eplb,
             )
 
@@ -1919,6 +1914,7 @@ class SpeculativeConfig:
             return replace(
                 parallel_config,
                 enable_eplb=False,
+                enable_elastic_ep=False,
                 eplb_config=replace(
                     parallel_config.eplb_config,
                     num_redundant_experts=0,

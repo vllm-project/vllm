@@ -6,8 +6,8 @@ import torch.nn as nn
 from vllm.config import ModelConfig, ParallelConfig, VllmConfig, replace
 from vllm.logger import init_logger
 from vllm.model_executor.model_loader.utils import get_draft_load_config
-from vllm.models.deepseek_v4.common.eplb_util import dspark_draft_supports_eplb
 from vllm.v1.attention.backends.registry import AttentionBackendEnum
+from vllm.v1.worker.gpu.spec_decode.dspark.config import dspark_draft_supports_eplb
 from vllm.v1.worker.gpu.spec_decode.utils import get_pp_safe_draft_load_config
 
 logger = init_logger(__name__)
