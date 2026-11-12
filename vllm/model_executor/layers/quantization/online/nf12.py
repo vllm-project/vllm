@@ -20,6 +20,8 @@ class Nf12OnlineLinearMethod(OnlineLinearBase):
 
     weight_quant_key = kNf12
     activation_quant_key = None
+    # Preserve the router's unquantized FP32 computation.
+    quantize_router = False
 
     def __init__(self):
         super().__init__()

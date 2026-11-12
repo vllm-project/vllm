@@ -132,6 +132,7 @@ class OnlineLinearBase(OnlineRequantizationMixin, LinearMethodBase):
     weights onto meta device and materializes them just-in-time."""
 
     uses_meta_device: bool = True
+    quantize_router: bool = True
     activation_quant_key: QuantKey | None
 
     def __init__(self):

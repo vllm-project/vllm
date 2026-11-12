@@ -2668,12 +2668,20 @@ def test_online_nf12_linear_matches_exact_bf16(
     not HAS_NF12,
     reason="NF12 requires CUDA SM80+ and the optional nf12 package.",
 )
+@pytest.mark.parametrize("targets", [False, True])
 @torch.inference_mode()
-def test_online_nf12_preserves_fp32_router(default_vllm_config, dist_init) -> None:
+def test_online_nf12_preserves_fp32_router(
+    default_vllm_config, dist_init, targets
+) -> None:
     """An NF12-compatible gate shape still uses the original FP32 logits path."""
     from vllm.model_executor.layers.fused_moe.router.gate_linear import GateLinear
 
-    config = OnlineQuantizationConfig(quant_config_args(linear="nf12"))
+    args = (
+        quant_config_args(targets={"model.gate": "nf12"})
+        if targets
+        else quant_config_args(linear="nf12")
+    )
+    config = OnlineQuantizationConfig(args)
     default_vllm_config.model_config = ModelConfig(dtype="bfloat16")
     with torch.device("cuda"):
         reference = GateLinear(
@@ -2689,6 +2697,7 @@ def test_online_nf12_preserves_fp32_router(default_vllm_config, dist_init) -> No
             params_dtype=torch.bfloat16,
             out_dtype=torch.float32,
             quant_config=config,
+            prefix="model.gate",
             return_bias=False,
         )
         generator = torch.Generator(device="cuda").manual_seed(0)

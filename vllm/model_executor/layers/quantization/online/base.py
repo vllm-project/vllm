@@ -378,10 +378,11 @@ class OnlineQuantizationConfig(QuantizationConfig):
         quant_method_cls = self._get_method_cls(quant_spec, table, layer_cls)
         if quant_method_cls is None:
             return None
-        if quant_method_cls is Nf12OnlineLinearMethod and issubclass(
-            layer_cls, GateLinear
+        if (
+            issubclass(quant_method_cls, OnlineLinearBase)
+            and not quant_method_cls.quantize_router
+            and issubclass(layer_cls, GateLinear)
         ):
-            # Keep the router's unquantized FP32-output GEMM path.
             return None
         assert quant_spec is not None
         assert issubclass(quant_method_cls, (OnlineMoEMethodBase, OnlineLinearBase))
