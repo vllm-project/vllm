@@ -12,6 +12,7 @@ from vllm.model_executor.layers.fusion.quant_activation import (
     as_quantized_activation,
 )
 from vllm.model_executor.layers.quantization.utils.nvfp4_utils import (
+    nvfp4_weight_padding_bytes,
     pad_nvfp4_activation_for_cutlass,
 )
 from vllm.model_executor.layers.quantization.utils.quant_utils import (
@@ -56,13 +57,11 @@ class NvFp4LinearKernel(ABC):
         self,
         layer: torch.nn.Module,
         x: torch.Tensor | QuantizedActivation,
-        *,
-        padded_n: int | None = None,
     ) -> QuantizedActivation:
-        """Prepare 2D packed NVFP4 data with swizzled 128x4 block scales.
+        """Return 2D packed NVFP4 data with swizzled 128x4 block scales.
 
-        Tensor inputs are quantized with optional K padding. Prequantized inputs
-        are validated and padded without modifying the caller's activation.
+        K is zero-padded to match the padded weight. Prequantized inputs are
+        validated and padded without modifying the caller's activation.
         """
         qa = as_quantized_activation(x, self.input_quant_key())
         if qa is None:
@@ -71,15 +70,16 @@ class NvFp4LinearKernel(ABC):
                 x,
                 layer.input_global_scale_inv,
                 is_sf_swizzled_layout=True,
-                padded_n=padded_n,
+                padded_n=layer.weight.shape[1] * 2,
             )
             return QuantizedActivation(data, scale, x.dtype, x.shape, kNvfp4Dynamic)
 
         data = qa.data.reshape(-1, qa.data.shape[-1])
-        if padded_n is not None:
-            padding_bytes = padded_n // 2 - data.shape[-1]
-            assert padding_bytes >= 0
-            data = pad_nvfp4_activation_for_cutlass(data, padding_bytes)
+        assert data.shape[-1] == layer.input_size_per_partition // 2, (
+            f"Expected {layer.input_size_per_partition // 2} packed NVFP4 bytes "
+            f"per row, got {data.shape[-1]}"
+        )
+        data = pad_nvfp4_activation_for_cutlass(data, nvfp4_weight_padding_bytes(layer))
         return replace(qa, data=data)
 
     @classmethod

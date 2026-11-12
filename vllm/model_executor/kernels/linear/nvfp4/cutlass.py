@@ -64,7 +64,7 @@ class CutlassNvFp4LinearKernel(NvFp4LinearKernel):
         bias: torch.Tensor | None = None,
     ) -> torch.Tensor:
         output_size = layer.output_size_per_partition
-        qa = self.prepare_input(layer, x, padded_n=layer.weight.shape[1] * 2)
+        qa = self.prepare_input(layer, x)
 
         # A padded N leaves the bias shorter than the GEMM output.
         fuse_bias = (

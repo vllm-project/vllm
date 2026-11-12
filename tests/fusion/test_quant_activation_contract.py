@@ -139,15 +139,11 @@ def test_only_known_backends_support_prequantized_input():
 
 
 def test_supporting_backend_declares_consume_via_helper():
+    helper_names = NvFp4LinearKernel.prepare_input.__code__.co_names
+    assert "as_quantized_activation" in helper_names
     for cls in SUPPORTING:
-        fn = _resolved_apply_weights(cls)
-        names = fn.__code__.co_names
-        if "as_quantized_activation" in names:
-            continue
-        assert "prepare_input" in names, cls.__name__
-        assert "as_quantized_activation" in cls.prepare_input.__code__.co_names, (
-            cls.__name__
-        )
+        names = _resolved_apply_weights(cls).__code__.co_names
+        assert {"as_quantized_activation", "prepare_input"} & set(names), cls.__name__
 
 
 def test_bridge_marks_supporting_and_skips_others():

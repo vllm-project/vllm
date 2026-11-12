@@ -144,7 +144,7 @@ class FlashInferCuteDslNvFp4LinearKernel(NvFp4LinearKernel):
         bias: torch.Tensor | None = None,
     ) -> torch.Tensor:
         output_size = layer.output_size_per_partition
-        qa = self.prepare_input(layer, x, padded_n=layer.weight.shape[1] * 2)
+        qa = self.prepare_input(layer, x)
 
         out = flashinfer_scaled_fp4_mm(
             qa.data,
@@ -207,7 +207,7 @@ class FlashInferCutlassNvFp4LinearKernel(NvFp4LinearKernel):
         bias: torch.Tensor | None = None,
     ) -> torch.Tensor:
         output_size = layer.output_size_per_partition
-        qa = self.prepare_input(layer, x, padded_n=layer.weight.shape[1] * 2)
+        qa = self.prepare_input(layer, x)
 
         out = flashinfer_scaled_fp4_mm(
             qa.data,
@@ -330,7 +330,7 @@ class FlashInferCudnnNvFp4LinearKernel(NvFp4LinearKernel):
         bias: torch.Tensor | None = None,
     ) -> torch.Tensor:
         output_size = layer.output_size_per_partition
-        qa = self.prepare_input(layer, x, padded_n=layer.weight.shape[1] * 2)
+        qa = self.prepare_input(layer, x)
 
         out = flashinfer_scaled_fp4_mm(
             qa.data,
@@ -387,7 +387,7 @@ class FlashInferB12xNvFp4LinearKernel(NvFp4LinearKernel):
         bias: torch.Tensor | None = None,
     ) -> torch.Tensor:
         output_size = layer.output_size_per_partition
-        qa = self.prepare_input(layer, x, padded_n=layer.weight.shape[1] * 2)
+        qa = self.prepare_input(layer, x)
 
         out = flashinfer_scaled_fp4_mm(
             qa.data,
