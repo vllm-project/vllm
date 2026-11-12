@@ -11,8 +11,9 @@ whose total size exceeds L2, so every call reads its weight from DRAM.
 Bandwidth is the theoretical minimum traffic (FP4 weight + E4M3 block scales
 read once, without any N/K padding a kernel may add; activation and output are
 <0.1% at M <= 16) over the measured time. Pass `--peak-gbps` to also report it
-as a percentage of the device's peak. CUPTI sums kernel durations only, so launch
-gaps between a provider's kernels (quant, pad, GEMM) are not counted.
+as a percentage of the device's peak. Each sample is the span from the first
+kernel's start to the last kernel's end in the graph replay, so gaps between a
+provider's kernels (quant, pad, GEMM) are counted, as in a CUDA-graph decode step.
 
 By default only providers vLLM can select are timed; `--include-gated` adds the
 ones it gates off (FlashInfer CuTe-DSL W4A4 is limited to sm_10x) by bypassing
