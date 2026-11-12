@@ -986,6 +986,7 @@ class Platform:
 
         # Compute attention page size for 1 token
         if model_config.use_mla:
+            from vllm.v1.attention.ops.mxfp4_mla import row_bytes as mxfp4_row_bytes
             from vllm.v1.kv_cache_interface import DS_MLA_STATE_CONTENT_BYTES
 
             attn_page_size_1_token = MLAAttentionSpec(
@@ -995,8 +996,13 @@ class Platform:
                 dtype=kv_cache_dtype,
                 cache_dtype_str=cache_config.cache_dtype,
                 kv_quant_mode=kv_quant_mode,
-                state_content_bytes=DS_MLA_STATE_CONTENT_BYTES.get(
-                    cache_config.cache_dtype
+                # Must match MLAAttention.get_kv_cache_spec, else the mamba
+                # state no longer fits the real (smaller) MLA page.
+                # test_hybrid_block_size_matches_the_layer_page checks both.
+                state_content_bytes=(
+                    mxfp4_row_bytes(model_config.get_head_size())
+                    if cache_config.cache_dtype == "mxfp4_mla"
+                    else DS_MLA_STATE_CONTENT_BYTES.get(cache_config.cache_dtype)
                 ),
             ).page_size_bytes
         elif (
@@ -1372,6 +1378,15 @@ class Platform:
         if cls._global_graph_pool is None:
             cls._global_graph_pool = self.graph_pool_handle()
         return cls._global_graph_pool
+
+    @classmethod
+    def reset_global_graph_pool(cls) -> None:
+        """Make the next `get_global_graph_pool` call create a new pool.
+
+        Call this once all graphs in the pool are destroyed. Their outputs can
+        keep the old pool allocated, and capturing into it would fail.
+        """
+        cls._global_graph_pool = None
 
     @classmethod
     def get_static_graph_wrapper_cls(cls) -> str:
