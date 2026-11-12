@@ -460,14 +460,17 @@ impl<'de> Deserialize<'de> for EngineCoreOutputs {
     }
 }
 
-/// Decode one ordinary or multipart engine-core output message into the strong
-/// typed public protocol shape.
-pub fn decode_engine_core_outputs(frames: &[Bytes]) -> Result<EngineCoreOutputs> {
-    let first_frame = frames.first().ok_or_else(|| ext_value_decode!("missing output frame"))?;
+impl EngineCoreOutputs {
+    /// Decode one ordinary or multipart engine-core output message into the strong
+    /// typed public protocol shape.
+    pub fn from_frames(frames: &[Bytes]) -> Result<Self> {
+        let first_frame =
+            frames.first().ok_or_else(|| ext_value_decode!("missing output frame"))?;
 
-    let mut outputs: EngineCoreOutputs = decode_msgpack(first_frame.as_ref())?;
-    outputs.resolve_in_place(frames)?;
-    Ok(outputs)
+        let mut outputs: Self = decode_msgpack(first_frame.as_ref())?;
+        outputs.resolve_in_place(frames)?;
+        Ok(outputs)
+    }
 }
 
 #[cfg(test)]
@@ -531,7 +534,7 @@ mod tests {
         ]);
         let wire = (0, vec![OpaqueValue::Array(fields); 2]);
         let frames = [Bytes::from(encode_msgpack(&wire).unwrap())];
-        let decoded = decode_engine_core_outputs(&frames).unwrap();
+        let decoded = EngineCoreOutputs::from_frames(&frames).unwrap();
         // A second output also checks that the first output's tail was consumed.
         assert_eq!(decoded.as_request_batch().unwrap().outputs, vec![output; 2]);
     }
@@ -546,11 +549,11 @@ mod tests {
         ] {
             let wire = (0, vec![OpaqueValue::Array(fields)]);
             let frames = [Bytes::from(encode_msgpack(&wire).unwrap())];
-            assert!(decode_engine_core_outputs(&frames).is_err());
+            assert!(EngineCoreOutputs::from_frames(&frames).is_err());
         }
         let wire = (0, vec![("req-1", vec![42_u32])]);
         let frames = [Bytes::from(encode_msgpack(&wire).unwrap())];
-        let decoded = decode_engine_core_outputs(&frames).unwrap();
+        let decoded = EngineCoreOutputs::from_frames(&frames).unwrap();
         assert_eq!(
             decoded.as_request_batch().unwrap().outputs,
             vec![EngineCoreOutput {

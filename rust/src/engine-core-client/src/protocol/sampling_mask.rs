@@ -144,9 +144,7 @@ impl WireSamplingMask {
 mod tests {
     use super::*;
     use crate::protocol::dtype::{NumpyDtype, TensorDtype};
-    use crate::protocol::output::{
-        EngineCoreOutput, RequestBatchOutputs, decode_engine_core_outputs,
-    };
+    use crate::protocol::output::{EngineCoreOutput, EngineCoreOutputs, RequestBatchOutputs};
     use crate::protocol::tensor::WireArrayData;
     use crate::protocol::{decode_msgpack, encode_msgpack};
 
@@ -221,7 +219,7 @@ mod tests {
             [2_i32, 12, 16, 18].into_iter().flat_map(i32::to_le_bytes).collect::<Vec<_>>();
         let offsets = [0_i64, 2, 4].into_iter().flat_map(i64::to_le_bytes).collect::<Vec<_>>();
 
-        let decoded = decode_engine_core_outputs(&[
+        let decoded = EngineCoreOutputs::from_frames(&[
             Bytes::from(primary),
             Bytes::from(token_ids),
             Bytes::from(offsets),
