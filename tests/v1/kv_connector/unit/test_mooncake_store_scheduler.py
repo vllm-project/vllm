@@ -233,7 +233,6 @@ def _make_preemption_scheduler_output():
 
 
 def _preempt(scheduler: MooncakeStoreScheduler):
-    # Scheduler._preempt_request marks the request before reporting it.
     scheduler._unfinished_requests["req-0"][0].status = RequestStatus.PREEMPTED
     return scheduler.build_connector_meta(_make_preemption_scheduler_output())
 

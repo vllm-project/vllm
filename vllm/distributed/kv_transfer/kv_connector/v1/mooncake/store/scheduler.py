@@ -336,9 +336,7 @@ class MooncakeStoreScheduler:
         for req_id in preempted_ids:
             entry = self._unfinished_requests.get(req_id)
             if entry is not None and entry[0].status != RequestStatus.PREEMPTED:
-                # Preempted outside schedule() (e.g. reset_prefix_cache) and
-                # re-admitted in this step: the state belongs to the new attempt.
-                continue
+                continue  # Already re-admitted; the state is the new attempt's.
             self.client.discard(req_id)
             self.load_specs.pop(req_id, None)
             self._request_trackers.pop(req_id, None)

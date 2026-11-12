@@ -2045,8 +2045,6 @@ def test_stale_store_job_cannot_touch_a_reused_request_id():
 
 
 def test_wait_for_save_retires_preempted_attempt_before_queueing():
-    # A request preempted outside schedule() is re-admitted in the step that
-    # reports the preemption, so that step's job belongs to the new attempt.
     w = _make_bare_worker()
     w.kv_send_thread = _make_store_sending_thread(MagicMock())
     stale = _make_store_req("req-a", [b"a0", b"a1"])
