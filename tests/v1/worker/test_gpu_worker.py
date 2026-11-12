@@ -749,12 +749,15 @@ def test_ranks_agree_on_extensible_kv_cache(
         reduced.append((value, op))
         return int(any_rank_unsupported)
 
-    monkeypatch.setattr(gpu_worker, "vmm_unavailable_reason", lambda: local_reason)
+    monkeypatch.setattr(
+        gpu_worker, "vmm_unavailable_reason", lambda export_handle_types: local_reason
+    )
     monkeypatch.setattr(gpu_worker, "all_reduce_int", all_reduce_int)
     monkeypatch.setattr(
         gpu_worker, "get_world_group", lambda: SimpleNamespace(cpu_group=None)
     )
-    assert Worker.extensible_kv_cache_unsupported_reason(SimpleNamespace()) == expected
+    worker = SimpleNamespace(vllm_config=SimpleNamespace(kv_transfer_config=None))
+    assert Worker.extensible_kv_cache_unsupported_reason(worker) == expected
     assert reduced == [(int(local_reason is not None), dist.ReduceOp.MAX)]
 
 
