@@ -650,6 +650,7 @@ steps:
   automatic_shard: true
   device: b200-k8s
   optional: true
+  timeout_in_minutes: 30
   working_dir: "/vllm-workspace/"
   num_devices: 2
   commands:
