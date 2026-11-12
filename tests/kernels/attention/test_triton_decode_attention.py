@@ -8,6 +8,7 @@ import vllm.v1.attention.ops.triton_decode_attention as triton_decode_attention
 from vllm.platforms import current_platform
 from vllm.utils.math_utils import cdiv
 from vllm.utils.torch_utils import set_random_seed
+from vllm.v1.attention.ops.dcp import CPTritonContext, correct_attn_out
 from vllm.v1.attention.ops.triton_decode_attention import decode_attention_fwd
 
 pytestmark = pytest.mark.skip_global_cleanup
@@ -117,11 +118,11 @@ def _quantize_to_fp8(tensor: torch.Tensor):
     return fp8_tensor, scale
 
 
-def _make_mla_single_split_case(dtype, fp8_kv=False):
+def _make_mla_single_split_case(dtype, fp8_kv=False, head_dims=None):
     batch, heads = 2, 16
     # Existing 576/512 FP8 exceeds SM120's shared-memory limit, so exercise the
     # other production MLA geometry for FP8.
-    d_qk, d_v = (288, 256) if fp8_kv else (576, 512)
+    d_qk, d_v = head_dims or ((288, 256) if fp8_kv else (576, 512))
     page_size, seq_len = 16, 129
     pages_per_batch = cdiv(seq_len, page_size)
     num_pages = batch * pages_per_batch
@@ -246,6 +247,37 @@ def test_mla_single_split_skips_stage2(monkeypatch, dtype, fp8_kv, sliding_windo
     assert torch.isneginf(case["lse"][1]).all()
     assert torch.isfinite(case["o"]).all()
     assert torch.isfinite(case["lse"][0]).all()
+
+
+@pytest.mark.parametrize("all_empty", [False, True])
+def test_mla_single_split_empty_shards_merge(all_empty):
+    """Empty direct-output shards preserve populated and all-empty DCP results."""
+    set_random_seed(0)
+    case = _make_mla_single_split_case(torch.float16, head_dims=(288, 256))
+    case["q"][1].copy_(case["q"][0])
+    ref_o, ref_lse = _run_mla_single_split_legacy(case)
+    _run_mla_single_split_direct(case)
+    assert torch.count_nonzero(case["o"][1]) == 0
+    assert torch.isneginf(case["lse"][1]).all()
+
+    first = 1 if all_empty else 0
+    expected_o = torch.zeros_like(ref_o[:1]) if all_empty else ref_o[:1]
+    expected_lse = (
+        torch.full_like(ref_lse[:1], float("-inf")) if all_empty else ref_lse[:1]
+    )
+    for output, lse in ((ref_o, ref_lse), (case["o"], case["lse"])):
+        all_lses = torch.stack((lse[first : first + 1], lse[1:]))
+        corrected = [
+            correct_attn_out(
+                output[row : row + 1].clone(), all_lses, rank, CPTritonContext()
+            )
+            for rank, row in enumerate((first, 1))
+        ]
+        merged = corrected[0][0] + corrected[1][0]
+        assert torch.isfinite(merged).all()
+        torch.testing.assert_close(merged, expected_o, rtol=0, atol=0)
+        for _, merged_lse in corrected:
+            torch.testing.assert_close(merged_lse, expected_lse, rtol=0, atol=0)
 
 
 def test_mla_single_split_cuda_graph_replay():
