@@ -3,7 +3,8 @@
 """Kimi-K3.1 DSA indexer cache, shared by the NVIDIA and ROCm stacks."""
 
 import math
-from dataclasses import replace
+from dataclasses import dataclass, fields, replace
+from typing import Self
 
 import torch
 
@@ -25,6 +26,7 @@ from vllm.v1.attention.backends.mla.indexer import (
 )
 from vllm.v1.kv_cache_interface import (
     DS_MLA_STATE_CONTENT_BYTES,
+    KVCacheSpec,
     MLAAttentionSpec,
     get_kv_quant_mode,
 )
@@ -138,16 +140,28 @@ class KimiK3IndexerBackend(DeepseekV32IndexerBackend):
         # KDA state page sizes the whole block row rather than one MLA page.
         return (KVCacheLayout.BLHNC,)
 
-    @classmethod
-    def writes_kv_cache_from_block_table(cls) -> bool:
-        return True
-
     @staticmethod
     def get_builder_cls() -> type[KimiK3IndexerMetadataBuilder]:
         return KimiK3IndexerMetadataBuilder
 
 
+@dataclass(frozen=True, kw_only=True)
+class SelfAddressedMLASpec(MLAAttentionSpec):
+    """An MLA cache written at slots that already address its kernel blocks."""
+
+    @property
+    def uses_slot_mapping(self) -> bool:
+        return False
+
+    @classmethod
+    def from_spec(cls, spec: KVCacheSpec) -> Self:
+        return cls(**{f.name: getattr(spec, f.name) for f in fields(spec) if f.init})
+
+
 class KimiK3IndexerCache(DeepseekV32IndexerCache):
+    def get_kv_cache_spec(self, vllm_config: VllmConfig) -> SelfAddressedMLASpec:
+        return SelfAddressedMLASpec.from_spec(super().get_kv_cache_spec(vllm_config))
+
     def get_attn_backend(self) -> type[AttentionBackend]:
         return KimiK3IndexerBackend
 

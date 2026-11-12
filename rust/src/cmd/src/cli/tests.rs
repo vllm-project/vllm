@@ -5,6 +5,8 @@ use std::collections::HashMap;
 use std::time::Duration;
 
 use expect_test::expect;
+use vllm_chat::multimodal::MmModality;
+use vllm_engine_core_client::protocol::dtype::ModelDtype;
 use vllm_engine_core_client::protocol::structured_outputs::StructuredOutputBackend;
 use vllm_engine_core_client::{CoordinatorMode as EngineCoreCoordinatorMode, TransportMode};
 use vllm_server::{
@@ -12,9 +14,11 @@ use vllm_server::{
     OutputLogConfig, OutputLogging, ParserSelection, ReasoningEffort, RendererSelection,
 };
 use vllm_text::backend::hf::ModelSource;
-use vllm_tracing::LogLevel;
+use vllm_tracing::{LogFormatter, LogLevel};
 
-use super::{BenchCommand, Cli, Command, LogStatsInterval, SharedRuntimeArgs, parse_int_flag};
+use super::{
+    BenchCommand, Cli, Command, DtypeArg, LogStatsInterval, SharedRuntimeArgs, parse_int_flag,
+};
 
 /// Resolve the data parallel topology the way `vllm-rs serve` does at startup.
 fn topology(args: &super::ServeArgs) -> vllm_managed_engine::data_parallel::DataParallelTopology {
@@ -41,6 +45,24 @@ fn bench_serve_args_parse_without_managed_engine_repartition() {
     assert!(args.request_rate.is_infinite());
 }
 
+/// `--dtype` takes vLLM's choices, including the `half` and `float` aliases.
+#[test]
+fn render_dtype_accepts_vllm_choices() {
+    use clap::ValueEnum as _;
+
+    for (value, expected) in [
+        ("auto", None),
+        ("half", Some(ModelDtype::Float16)),
+        ("float16", Some(ModelDtype::Float16)),
+        ("bfloat16", Some(ModelDtype::BFloat16)),
+        ("float", Some(ModelDtype::Float32)),
+        ("float32", Some(ModelDtype::Float32)),
+    ] {
+        let arg = DtypeArg::from_str(value, false).unwrap();
+        assert_eq!(arg.model_dtype(), expected, "{value}");
+    }
+}
+
 #[test]
 fn render_args_build_config_without_tls() {
     let cli = Cli::try_parse_from([
@@ -53,6 +75,10 @@ fn render_args_build_config_without_tls() {
         "Qwen/Qwen2.5-0.5B",
         "--port",
         "8080",
+        "--dtype",
+        "float16",
+        "--lora-modules",
+        "adapter-a=org/adapter-a",
         "--max-model-len",
         "32768",
         "--served-model-name",
@@ -61,6 +87,8 @@ fn render_args_build_config_without_tls() {
         "deepseek_v32",
         "--max-logprobs",
         "-1",
+        "--limit-mm-per-prompt",
+        r#"{"image": 2, "video": {"count": 1, "num_frames": 32}}"#,
         // Set through `VLLM_SKIP_MODEL_NAME_VALIDATION`, which binds this
         // hidden flag.
         "--skip-model-name-validation",
@@ -88,6 +116,9 @@ fn render_args_build_config_without_tls() {
     assert_eq!(config.hf_config, None);
     assert_eq!(config.host, "127.0.0.1");
     assert_eq!(config.port, 8080);
+    assert_eq!(config.dtype, Some(ModelDtype::Float16));
+    assert_eq!(config.lora_modules[0].name, "adapter-a");
+    assert!(!config.language_model_only);
     assert_eq!(config.max_model_len, Some(32768));
     assert_eq!(config.served_model_name, ["qwen"]);
     assert!(config.skip_model_name_validation);
@@ -96,6 +127,9 @@ fn render_args_build_config_without_tls() {
     assert_eq!(config.reasoning_parser, ParserSelection::Auto);
     assert_eq!(config.renderer, RendererSelection::DeepSeekV32);
     assert_eq!(config.max_logprobs, Some(-1));
+    let limit = |modality| config.limit_mm_per_prompt[&modality].count();
+    assert_eq!(limit(MmModality::Image), Some(2));
+    assert_eq!(limit(MmModality::Video), Some(1));
     assert!(config.tls.is_none());
 }
 
@@ -276,6 +310,7 @@ fn serve_args_forward_python_flags_with_separator() {
                         ),
                         log_stats_interval: None,
                         disable_request_id_randomization: false,
+                        keep_alive_on_engine_death: false,
                         http_max_request_body_size: None,
                         skip_model_name_validation: false,
                         server_dev_mode: false,
@@ -713,30 +748,45 @@ fn serve_forwards_logging_config_to_managed_engine() {
     .assert_debug_eq(&config.python_args);
 }
 
-/// The JSON formatter is not implemented and fails startup, also in its
-/// dotted form, instead of reaching only the managed engine.
+/// The JSON formatter drives the frontend's own logs and reaches the managed
+/// engine; a formatter Python does not have fails startup.
 #[test]
-fn serve_rejects_unimplemented_logging_config() {
-    let error = Cli::try_parse_from([
+fn serve_logging_config_formatter() {
+    let cli = Cli::try_parse_from([
         "vllm-rs",
         "serve",
         "Qwen/Qwen3-0.6B",
-        "--logging-config",
-        r#"{"formatter":"json"}"#,
+        "--log-level",
+        "ERROR",
+        "--logging-config.formatter",
+        "json",
     ])
-    .unwrap_err();
-    assert_eq!(error.kind(), clap::error::ErrorKind::ValueValidation);
+    .unwrap();
+    assert_eq!(cli.log_formatter(), LogFormatter::Json);
+    let Command::Serve(args) = cli.command else {
+        panic!("expected serve args");
+    };
+    let config = args.to_managed_engine_config(5555, &topology(&args), None);
+    expect![[r#"
+        [
+            "--logging-config",
+            "{\"log_level\":\"ERROR\",\"formatter\":\"json\"}",
+            "--reasoning-parser",
+            "qwen3",
+        ]
+    "#]]
+    .assert_debug_eq(&config.python_args);
 
     let error = Cli::try_parse_from([
         "vllm-rs",
         "serve",
         "Qwen/Qwen3-0.6B",
         "--logging-config.formatter",
-        "json",
+        "xml",
     ])
     .unwrap_err();
     expect![[r#"
-        error: invalid value '{"formatter":"json"}' for '--logging-config <JSON>': invalid JSON object: formatter: unknown variant `json`, expected `text` at line 1 column 19
+        error: invalid value '{"formatter":"xml"}' for '--logging-config <JSON>': invalid JSON object: formatter: unknown variant `xml`, expected `text` or `json` at line 1 column 18
 
         For more information, try '--help'.
     "#]].assert_eq(&error.to_string());
@@ -773,12 +823,18 @@ fn frontend_args_json_resolves_logging_config() {
     )
     .unwrap();
 
-    let error = parse(
+    let cli = parse(
         r#"{"model_tag":"Qwen/Qwen3-0.6B","logging_config":{"log_level":"DEBUG","formatter":"json"}}"#,
+    )
+    .unwrap();
+    assert_eq!(cli.log_formatter(), LogFormatter::Json);
+
+    let error = parse(
+        r#"{"model_tag":"Qwen/Qwen3-0.6B","logging_config":{"log_level":"DEBUG","formatter":"xml"}}"#,
     )
     .unwrap_err();
     expect![[r#"
-        error: invalid value '{"model_tag":"Qwen/Qwen3-0.6B","logging_config":{"log_level":"DEBUG","formatter":"json"}}' for '--args-json <JSON>': invalid JSON arguments: logging_config.formatter: unknown variant `json`, expected `text` at line 1 column 87
+        error: invalid value '{"model_tag":"Qwen/Qwen3-0.6B","logging_config":{"log_level":"DEBUG","formatter":"xml"}}' for '--args-json <JSON>': invalid JSON arguments: logging_config.formatter: unknown variant `xml`, expected `text` or `json` at line 1 column 86
 
         For more information, try '--help'.
     "#]].assert_eq(&error.to_string());
@@ -1004,6 +1060,7 @@ fn serve_args_forward_env_only_settings_to_frontend_config() {
     let config = parse(&[]);
     assert_eq!(config.log_stats_interval, Some(Duration::from_secs(10)));
     assert!(!config.disable_request_id_randomization);
+    assert!(!config.keep_alive_on_engine_death);
     assert!(!config.api_server_options.skip_model_name_validation);
     assert!(!config.api_server_options.server_dev_mode);
     assert_eq!(config.api_server_options.max_n_sequences, 16384);
@@ -1014,6 +1071,7 @@ fn serve_args_forward_env_only_settings_to_frontend_config() {
 
     // Set through `VLLM_LOG_STATS_INTERVAL`,
     // `VLLM_DISABLE_REQUEST_ID_RANDOMIZATION`,
+    // `VLLM_KEEP_ALIVE_ON_ENGINE_DEATH`,
     // `VLLM_HTTP_MAX_REQUEST_BODY_SIZE`, `VLLM_SKIP_MODEL_NAME_VALIDATION`,
     // `VLLM_SERVER_DEV_MODE`, and `VLLM_MAX_N_SEQUENCES`, which bind these
     // hidden flags.
@@ -1022,6 +1080,8 @@ fn serve_args_forward_env_only_settings_to_frontend_config() {
         "2.5",
         "--disable-request-id-randomization",
         "1",
+        "--keep-alive-on-engine-death",
+        "2",
         "--http-max-request-body-size",
         "1048576",
         "--skip-model-name-validation",
@@ -1033,6 +1093,7 @@ fn serve_args_forward_env_only_settings_to_frontend_config() {
     ]);
     assert_eq!(config.log_stats_interval, Some(Duration::from_millis(2500)));
     assert!(config.disable_request_id_randomization);
+    assert!(config.keep_alive_on_engine_death);
     assert!(config.api_server_options.skip_model_name_validation);
     assert!(config.api_server_options.server_dev_mode);
     assert_eq!(config.api_server_options.max_n_sequences, 8);
@@ -1072,6 +1133,7 @@ fn args_json_reads_env_only_settings_from_env() {
     let args = apply(&[]).unwrap();
     assert_eq!(args.log_stats_interval(), Some(Duration::from_secs(10)));
     assert!(!args.disable_request_id_randomization);
+    assert!(!args.keep_alive_on_engine_death);
     assert!(!args.api_server_options().skip_model_name_validation);
     assert!(!args.api_server_options().server_dev_mode);
     assert_eq!(args.api_server_options().max_n_sequences, 16384);
@@ -1083,6 +1145,7 @@ fn args_json_reads_env_only_settings_from_env() {
     let args = apply(&[
         ("VLLM_LOG_STATS_INTERVAL", "0.5"),
         ("VLLM_DISABLE_REQUEST_ID_RANDOMIZATION", "1"),
+        ("VLLM_KEEP_ALIVE_ON_ENGINE_DEATH", "-1"),
         ("VLLM_HTTP_MAX_REQUEST_BODY_SIZE", "1048576"),
         ("VLLM_SKIP_MODEL_NAME_VALIDATION", " TRUE "),
         ("VLLM_SERVER_DEV_MODE", " 1"),
@@ -1091,6 +1154,7 @@ fn args_json_reads_env_only_settings_from_env() {
     .unwrap();
     assert_eq!(args.log_stats_interval(), Some(Duration::from_millis(500)));
     assert!(args.disable_request_id_randomization);
+    assert!(args.keep_alive_on_engine_death);
     assert!(args.api_server_options().skip_model_name_validation);
     assert!(args.api_server_options().server_dev_mode);
     assert_eq!(args.api_server_options().max_n_sequences, 8);
@@ -1107,6 +1171,7 @@ fn args_json_reads_env_only_settings_from_env() {
     let errors = [
         apply(&[("VLLM_LOG_STATS_INTERVAL", "ten")]).unwrap_err(),
         apply(&[("VLLM_DISABLE_REQUEST_ID_RANDOMIZATION", "true")]).unwrap_err(),
+        apply(&[("VLLM_KEEP_ALIVE_ON_ENGINE_DEATH", "true")]).unwrap_err(),
         apply(&[("VLLM_HTTP_MAX_REQUEST_BODY_SIZE", "32MiB")]).unwrap_err(),
         apply(&[("VLLM_HTTP_MAX_REQUEST_BODY_SIZE", "-1")]).unwrap_err(),
         apply(&[("VLLM_SERVER_DEV_MODE", "true")]).unwrap_err(),
@@ -1116,6 +1181,7 @@ fn args_json_reads_env_only_settings_from_env() {
         [
             "invalid VLLM_LOG_STATS_INTERVAL: `ten` is not a number of seconds",
             "invalid VLLM_DISABLE_REQUEST_ID_RANDOMIZATION: `true` is not an integer",
+            "invalid VLLM_KEEP_ALIVE_ON_ENGINE_DEATH: `true` is not an integer",
             "invalid VLLM_HTTP_MAX_REQUEST_BODY_SIZE: `32MiB` is not a number of bytes",
             "invalid VLLM_HTTP_MAX_REQUEST_BODY_SIZE: `-1` is not a number of bytes",
             "invalid VLLM_SERVER_DEV_MODE: `true` is not an integer",
@@ -2249,6 +2315,7 @@ fn frontend_args_accept_json() {
                         ),
                         log_stats_interval: None,
                         disable_request_id_randomization: false,
+                        keep_alive_on_engine_death: false,
                         http_max_request_body_size: None,
                         skip_model_name_validation: false,
                         server_dev_mode: false,
@@ -3207,6 +3274,7 @@ fn serve_args_accept_handshake_aliases() {
                         ),
                         log_stats_interval: None,
                         disable_request_id_randomization: false,
+                        keep_alive_on_engine_death: false,
                         http_max_request_body_size: None,
                         skip_model_name_validation: false,
                         server_dev_mode: false,
@@ -3540,6 +3608,7 @@ fn serve_frontend_config_uses_dp_address_as_advertised_host() {
                 10s,
             ),
             disable_request_id_randomization: false,
+            keep_alive_on_engine_death: false,
             shutdown_timeout: 0ns,
             manages_engine: true,
             keep_alive_timeout: 5s,
@@ -3673,6 +3742,7 @@ fn serve_frontend_config_keeps_tcp_transport_for_non_local_only_topology() {
                 10s,
             ),
             disable_request_id_randomization: false,
+            keep_alive_on_engine_death: false,
             shutdown_timeout: 0ns,
             manages_engine: true,
             keep_alive_timeout: 5s,
@@ -3919,6 +3989,7 @@ fn frontend_config_uses_external_coordinator_when_coordinator_address_is_present
                 10s,
             ),
             disable_request_id_randomization: false,
+            keep_alive_on_engine_death: false,
             shutdown_timeout: 0ns,
             manages_engine: false,
             keep_alive_timeout: 5s,
