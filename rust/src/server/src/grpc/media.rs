@@ -192,7 +192,7 @@ fn raw_parts_from_proto(
         })?;
         match &source {
             pb::media_item::Source::Url(url) => {
-                validate_media_uri(index, "url", url, &["http", "https"])?;
+                validate_media_uri(index, "url", url, &["http", "https", "file"])?;
             }
             pb::media_item::Source::DataUri(uri) => {
                 validate_media_uri(index, "data_uri", uri, &["data"])?;
@@ -479,5 +479,17 @@ mod tests {
             }),
         };
         assert_eq!(kwargs["pixel_values"], expected);
+    }
+
+    #[test]
+    fn raw_urls_accept_file_and_web_schemes_only() {
+        let with_url = |url: &str| pb::MediaItem {
+            modality: pb::Modality::Image as i32,
+            source: Some(pb::media_item::Source::Url(url.into())),
+            ..Default::default()
+        };
+        raw_parts_from_proto(vec![with_url("file:///media/a.png")], None).unwrap();
+        let error = raw_parts_from_proto(vec![with_url("ftp://x/a.png")], None).unwrap_err();
+        assert!(error.message().contains("scheme"), "{}", error.message());
     }
 }

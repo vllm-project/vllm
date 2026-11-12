@@ -88,6 +88,7 @@ async fn main() -> Result<()> {
         trust_request_chat_template: false,
         exclude_tools_when_tool_choice_none: false,
         limit_mm_per_prompt: HashMap::new(),
+        media_fetch_policy: Default::default(),
         lora_modules: Vec::new(),
         chat_template_content_format: ChatTemplateContentFormatOption::Auto,
         max_logprobs: None,
