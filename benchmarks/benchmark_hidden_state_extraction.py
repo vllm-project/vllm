@@ -326,7 +326,7 @@ def main():
     parser.add_argument("--layers", type=int, nargs="+", default=[1, 2, 3, 4])
     parser.add_argument("--skip-baseline", action="store_true")
     parser.add_argument("--skip-extract", action="store_true")
-    parser.add_argument("--gpu-memory-utilization", type=float, default=0.9)
+    parser.add_argument("--gpu-memory-utilization", type=float, default=None)
     parser.add_argument("--max-num-batched-tokens", type=int, default=None)
     parser.add_argument("--max-cudagraph-capture-size", type=int, default=None)
     parser.add_argument("--max-model-len", type=int, default=None)
