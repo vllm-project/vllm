@@ -4,6 +4,8 @@
 from typing import Any
 
 import pytest
+import transformers
+from packaging.version import Version
 from transformers import AutoModelForSeq2SeqLM
 
 from vllm.assets.audio import AudioAsset
@@ -36,9 +38,7 @@ AUDIO_MODEL_SETTINGS: dict[str, dict[str, Any]] = {
             "<sound>Transcribe the input speech.<|im_end|>\n"
             "<|im_start|>assistant\n"
         ),
-        "vllm_runner_kwargs": {
-            "gpu_memory_utilization": 0.85,
-        },
+        "vllm_runner_kwargs": {},
     },
     "microsoft/VibeVoice-ASR-HF": {
         "prompt": (
@@ -55,7 +55,6 @@ AUDIO_MODEL_SETTINGS: dict[str, dict[str, Any]] = {
         "sampling_rate": 24000,
         "vllm_runner_kwargs": {
             "max_num_batched_tokens": 2048,
-            "gpu_memory_utilization": 0.85,
         },
     },
     "zai-org/GLM-ASR-Nano-2512": {
@@ -135,10 +134,15 @@ def test_transformers_audio_generation(
     )
 
 
-def test_transformers_audio_mixed_lengths(vllm_runner: type[VllmRunner]):
+def test_transformers_audio_mixed_lengths(
+    vllm_runner: type[VllmRunner], monkeypatch: pytest.MonkeyPatch
+):
     """Audios of different lengths encoded in one batch are split into items, whose
     ragged fields must each stay a batch of one. One prompt holds both audios, as
     separate requests may not reach the encoder in the same step."""
+    # TODO: Remove once huggingface/transformers#50417 is released
+    if Version(transformers.__version__) < Version("5.23.0.dev0"):
+        monkeypatch.setenv("VLLM_GPU_SYNC_CHECK", "warn")
     model_id = "microsoft/VibeVoice-ASR-HF"
     settings = AUDIO_MODEL_SETTINGS[model_id]
     target_sr = settings["sampling_rate"]
