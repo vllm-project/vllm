@@ -105,6 +105,25 @@ vllm serve google/gemma-4-31B-it \
     --attention-backend TRITON_FLASHINFER
 ```
 
+### Triton PrefixLM Prefill on Ampere and Ada
+
+On compute capability 8.x, `TRITON_ATTN` hands PrefixLM prefills to
+FlashAttention-2 instead of its own kernel. A query in bidirectional range
+`[start, end]` attends to keys `0..end`, so each (request, range) piece is one
+non-causal FA2 sequence over the paged KV cache. Nothing needs to be set; the
+fast path is used when all of the following hold:
+
+- the GPU is SM 8.x and the FA2 build is available;
+- the layer has no sliding window, ALiBi, logits soft cap or sinks, is a
+  decoder layer, and has head size 256 or less;
+- the KV cache is not quantized and the query is FP16 or BF16;
+- every query token in the batch lies in a bidirectional range, as in a
+  PrefixLM prefill.
+
+Any other batch, including one that mixes decodes or causal text tokens, runs
+the Triton kernel unchanged. Other GPUs keep the Triton kernel for these
+batches until the FA2 path is measured there.
+
 ### Manual Selection
 
 When you explicitly set a backend via `--attention-backend` or `AttentionConfig`:
