@@ -17,7 +17,7 @@ from transformers import (
     AutoModelForSeq2SeqLM,
     GPT2Config,
     GPT2LMHeadModel,
-    PreTrainedTokenizerFast,
+    TokenizersBackend,
 )
 
 from tests.utils import RemoteOpenAIServer
@@ -419,7 +419,7 @@ def beam_eos_model(tmp_path_factory):
     vocabulary.update({f"word{i}": i + 4 for i in range(28)})
     tokenizer = Tokenizer(models.WordLevel(vocabulary, unk_token="<unk>"))
     tokenizer.pre_tokenizer = pre_tokenizers.Whitespace()
-    tokenizer = PreTrainedTokenizerFast(
+    tokenizer = TokenizersBackend(
         tokenizer_object=tokenizer,
         bos_token="<bos>",
         eos_token="<eos>",
