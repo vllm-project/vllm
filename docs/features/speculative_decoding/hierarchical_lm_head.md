@@ -2,7 +2,7 @@
 
 The model-independent
 `vllm.model_executor.layers.hierarchical_lm_head.HierarchicalLMHead` layer
-provides centroid-based vocabulary routing for Gemma4 MTP and NemotronH MTP.
+provides centroid-based vocabulary routing for NemotronH MTP.
 The layer owns centroid routing and vocabulary ordering; the caller supplies the unsharded floating-point
 LM-head weights. Choose `backend="compiled"` (default) or `backend="moe"`
 when constructing the layer:
@@ -15,7 +15,7 @@ when constructing the layer:
   selected clusters. There is no activation, second GEMM, or routing-weight sum.
   It retains a full copy of the head weights arranged by cluster. Call
   `prepare_weights(lm_head_weight)` after loading or reloading weights or token
-  ordering, before CUDA graph capture. Gemma and Nemotron do this automatically.
+  ordering, before CUDA graph capture. Nemotron does this automatically.
   Reloads refill the buffer in place to preserve captured graph addresses.
 
 Actual lowering and performance depend on PyTorch and hardware. Neither backend
@@ -56,10 +56,6 @@ vllm serve nvidia/NVIDIA-Nemotron-3.5-Lightning-30B-A3B-BF16 \
   --tensor-parallel-size 1 \
   --speculative-config '{"method":"mtp","num_speculative_tokens":7,"use_local_argmax_reduction":true}'
 ```
-
-For Gemma4 MTP with ordered embeddings, set the assistant HF config field
-`hierarchical_lm_head_backend` to `compiled` (default) or `moe`, and optionally
-`hierarchical_lm_head_moe_routing` to `unsorted` (default), `auto`, or `sorted`.
 
 Nemotron hierarchical routing is disabled by default and requires a trained
 router sidecar when enabled.
