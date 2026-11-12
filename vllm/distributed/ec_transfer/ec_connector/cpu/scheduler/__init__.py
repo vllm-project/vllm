@@ -32,6 +32,7 @@ from vllm.logger import init_logger
 
 if TYPE_CHECKING:
     from vllm.config import VllmConfig
+    from vllm.distributed.ec_transfer.ec_connector.cpu.data.base import DataTransport
     from vllm.multimodal.inputs import MultiModalFeatureSpec
     from vllm.v1.core.sched.output import SchedulerOutput
     from vllm.v1.outputs import ECConnectorOutput
@@ -85,8 +86,9 @@ class ECCPUScheduler:
         )
 
         self._ec_config = ec_config
-        # NIXL p2p is an option of this connector, not engine-wide behavior, so
-        # it lives in extra config. Extra config is not type coerced, so a value
+        # P2P is an option of this connector, not engine-wide behavior, so it
+        # lives in extra config. The key keeps its original name ("nixl") although
+        # it now switches P2P on for every ec_transport. Extra config is not type coerced, so a value
         # that arrived as a JSON/CLI string is parsed, not truth-tested.
         raw_nixl = ec_config.get_from_extra_config("ec_enable_nixl", False)
         self._nixl_enabled = (
@@ -122,15 +124,49 @@ class ECCPUScheduler:
                 self.shutdown()
                 raise
 
+    def _create_data_transport(self, engine_id: str) -> "DataTransport":
+        """Build the P2P data plane named by `ec_transport` (default nixl)."""
+        name = str(self._ec_config.get_from_extra_config("ec_transport", "nixl"))
+        if name == "nixl":
+            from vllm.distributed.ec_transfer.ec_connector.cpu.data.nixl import (
+                NixlDataTransport,
+            )
+            from vllm.distributed.nixl_utils import NixlWrapper, nixl_agent_config
+
+            if NixlWrapper is None or nixl_agent_config is None:
+                raise RuntimeError(
+                    "ec_transport='nixl' (the default) requires NIXL; install the "
+                    "`nixl` package or set ec_transport to another transport."
+                )
+            return NixlDataTransport(
+                agent_name=engine_id,
+                base_ptr=self._region.blocks.data_ptr(),
+                num_blocks=self._region.num_blocks,
+                block_size_bytes=self._region.block_size_bytes,
+                total_size_bytes=self._region.num_blocks
+                * self._region.block_size_bytes,
+            )
+        if name == "moriio":
+            from vllm import envs
+            from vllm.distributed.ec_transfer.ec_connector.cpu.data.moriio import (
+                MoRIIODataTransport,
+            )
+            from vllm.utils.network_utils import get_ip
+
+            return MoRIIODataTransport(
+                agent_name=engine_id,
+                region=self._region.blocks,
+                block_size_bytes=self._region.block_size_bytes,
+                host=envs.VLLM_EC_SIDE_CHANNEL_HOST or get_ip(),
+            )
+        raise ValueError(f"Unknown ec_transport {name!r}; expected nixl or moriio")
+
     def _setup_nixl(self, vllm_config: "VllmConfig") -> None:
         # Lazy imports keep nixl/zmq off the gate-off path.
         from vllm import envs
         from vllm.distributed.ec_transfer.ec_connector.cpu.control.zmq import (
             ZmqClientTransport,
             ZmqServerTransport,
-        )
-        from vllm.distributed.ec_transfer.ec_connector.cpu.data.nixl import (
-            NixlDataTransport,
         )
         from vllm.distributed.ec_transfer.ec_connector.cpu.protocol import (
             compute_ec_compatibility_hash,
@@ -139,15 +175,9 @@ class ECCPUScheduler:
             PRODUCER_PIN_LEASE_S,
             ProducerSession,
         )
-        from vllm.distributed.nixl_utils import NixlWrapper, nixl_agent_config
         from vllm.utils.network_utils import get_ip
         from vllm.version import __version__ as VLLM_VERSION
 
-        if NixlWrapper is None or nixl_agent_config is None:
-            raise RuntimeError(
-                "ec_enable_nixl requires NIXL; install the `nixl` package or "
-                "remove ec_enable_nixl from ec_connector_extra_config."
-            )
         engine_id = self._ec_config.engine_id
         assert engine_id is not None
         dp_index = vllm_config.parallel_config.data_parallel_index
@@ -165,13 +195,7 @@ class ECCPUScheduler:
             dtype=str(self._dtype),
             block_size_bytes=self._region.block_size_bytes,
         )
-        self._data = NixlDataTransport(
-            agent_name=f"{engine_id}_dp{dp_index}",
-            base_ptr=self._region.blocks.data_ptr(),
-            num_blocks=self._region.num_blocks,
-            block_size_bytes=self._region.block_size_bytes,
-            total_size_bytes=self._region.num_blocks * self._region.block_size_bytes,
-        )
+        self._data = self._create_data_transport(f"{engine_id}_dp{dp_index}")
         if self._is_producer:
             self._peer_host = envs.VLLM_EC_SIDE_CHANNEL_HOST or get_ip()
             if self._peer_host in ("0.0.0.0", "::", "*"):
