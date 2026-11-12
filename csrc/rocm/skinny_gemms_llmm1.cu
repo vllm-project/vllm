@@ -2,10 +2,6 @@
 // SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 //
 // Host-side launcher of the LLMM1 skinny GEMM; kernels in skinny_gemms.cuh.
-// Also owns the single non-template SWMMAC host entrypoint from the shared
-// header; the other split skinny-GEMM translation units only instantiate
-// kernels.
-#define VLLM_ROCM_DEFINE_SWMMAC_GEMM
 #include "skinny_gemms.cuh"
 
 torch::Tensor LLMM1(at::Tensor& in_a, at::Tensor& in_b,
