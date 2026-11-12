@@ -173,6 +173,18 @@ steps:
       depends_on:
       - image-build-amd
 
+- label: ":nvidia: (L4) HF3FS Connector Pipeline Parallel"
+  key: hf3fs-connector-pipeline-parallel
+  timeout_in_minutes: 20
+  device: l4
+  num_devices: 2
+  source_file_dependencies:
+    - vllm/distributed/kv_transfer/kv_connector/v1/hf3fs/
+    - tests/v1/kv_connector/unit/test_hf3fs_connector.py
+  commands:
+    - export VLLM_WORKER_MULTIPROC_METHOD=spawn
+    - pytest -v -s v1/kv_connector/unit/test_hf3fs_connector.py -k pipeline_parallel
+
 # The shared KV Connectors steps above exclude vllm/distributed/kv_transfer/ from
 # their triggers, and CUDA skips MoRIIO's mori/aiter-gated tests. Run the whole
 # MoRIIO suite on ROCm whenever the connector or its tests change.
