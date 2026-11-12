@@ -535,22 +535,25 @@ def _rocm_aiter_topk_gating_impl(
     num_shared_experts: int = 0,
     shared_expert_scoring_func: str = "",
     score_func: str = "softmax",
+    correction_bias: torch.Tensor | None = None,
+    routed_scaling_factor: float = 1.0,
 ) -> None:
     # Callers pick this op only for launches AITER's topk_gating supports (see
-    # dispatch_topk_softmax_func/dispatch_topk_sigmoid_func); everything else
-    # goes to topk_softmax (softmax) or vllm_topk_sigmoid (sigmoid).
+    # dispatch_topk_softmax_func/dispatch_topk_sigmoid_func and fused_topk_bias);
+    # everything else goes to topk_softmax (softmax) or vllm_topk_sigmoid (sigmoid).
     from aiter.ops.topk import topk_gating
 
     # AITER renormalizes the selected softmax/sigmoid mass inside this launch,
     # preserving vLLM's `renormalize=True` semantics without a second
-    # pointwise kernel, and sigmoids the trailing shared-expert columns.
+    # pointwise kernel, scales it by `routed_scaling_factor`, and sigmoids the
+    # trailing shared-expert columns.
     topk_gating(
         topk_weights,
         topk_indices,
         gating_output,
-        correction_bias=None,
+        correction_bias=correction_bias,
         need_renorm=renormalize,
-        routed_scaling_factor=1.0,
+        routed_scaling_factor=routed_scaling_factor,
         score_func=score_func,
         num_shared_experts=num_shared_experts,
     )
@@ -565,6 +568,8 @@ def _rocm_aiter_topk_gating_fake(
     num_shared_experts: int = 0,
     shared_expert_scoring_func: str = "",
     score_func: str = "softmax",
+    correction_bias: torch.Tensor | None = None,
+    routed_scaling_factor: float = 1.0,
 ) -> None:
     pass
 
@@ -3745,6 +3750,8 @@ class rocm_aiter_ops:
         num_shared_experts: int = 0,
         shared_expert_scoring_func: str = "",
         score_func: str = "softmax",
+        correction_bias: torch.Tensor | None = None,
+        routed_scaling_factor: float = 1.0,
     ) -> tuple[torch.Tensor, ...]:
         torch.ops.vllm.rocm_aiter_topk_gating(
             topk_weights,
@@ -3755,6 +3762,8 @@ class rocm_aiter_ops:
             num_shared_experts,
             shared_expert_scoring_func,
             score_func,
+            correction_bias,
+            routed_scaling_factor,
         )
         return topk_weights, topk_indices
 
@@ -3871,6 +3880,7 @@ class rocm_aiter_ops:
         inv_rope_positions: torch.Tensor | None = None,
         inv_rope_cos_sin_cache: torch.Tensor | None = None,
         out_mxfp8: tuple[torch.Tensor, torch.Tensor] | None = None,
+        dot_precision: str | None = None,
     ) -> None:
         """Sparse MLA read straight from the KV cache, for prefill and decode.
 
@@ -3883,12 +3893,15 @@ class rocm_aiter_ops:
         is DeepSeek V4's second cache: SWA window in kv_buffer, top-k
         compressed tokens here. inv_rope_positions and inv_rope_cos_sin_cache
         make the store apply the inverse RoPE; out_mxfp8 = (data, scale)
-        replaces o with MXFP8 rows.
+        replaces o with MXFP8 rows. dot_precision overrides the default
+        selected from q's dtype.
         """
         from aiter.ops.triton.attention.sparse_mla import sparse_mla_fwd
 
         assert (o is None) != (out_mxfp8 is None)
         fp8_q = q.dtype == FP8_DTYPE
+        if dot_precision is None:
+            dot_precision = "fp8" if fp8_q else "bf16"
         sparse_mla_fwd(
             q,
             kv_buffer,
@@ -3899,7 +3912,7 @@ class rocm_aiter_ops:
             kv_lora_rank=kv_lora_rank,
             qk_rope_head_dim=qk_rope_head_dim,
             has_invalid=has_invalid,
-            dot_precision="fp8" if fp8_q else "bf16",
+            dot_precision=dot_precision,
             q_scale=q_scale if fp8_q else None,
             out=o,
             attn_sink=attn_sink,
