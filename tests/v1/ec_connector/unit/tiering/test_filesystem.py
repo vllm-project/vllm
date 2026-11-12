@@ -626,3 +626,63 @@ def test_index_hit_skips_probe_unless_recorded_size_is_stale(
     finally:
         manager.shutdown()
     assert probes == ([path] if stale_size else [])
+
+
+def test_failed_read_holds_capacity_until_cleanup_succeeds(tmp_path, monkeypatch):
+    from vllm.distributed.ec_transfer.ec_connector.tiering import executor
+
+    release_delete = Event()
+    delete_started = Event()
+    deny_delete = True
+    remove_entry = executor.remove_entry
+
+    def fail_read(*args):
+        raise OSError("temporary read failure")
+
+    def delete(path):
+        delete_started.set()
+        assert release_delete.wait(timeout=10)
+        if deny_delete:
+            raise PermissionError("temporary unlink failure")
+        remove_entry(path)
+
+    monkeypatch.setattr(executor, "load_entry", fail_read)
+    monkeypatch.setattr(executor, "remove_entry", delete)
+    manager = ECFileSystemTierManager(tmp_path, _NAMESPACE_DIGEST, 4, 1, 1)
+    other = "c" * 64
+    try:
+        assert manager.submit_write(_CACHE_KEY, [memoryview(b"data")], 4)
+        manager.drain()
+        assert manager.poll_completed_writes()[0].success
+        assert manager.lookup(_CACHE_KEY, 4, "request")
+        assert manager.submit_read(_CACHE_KEY, [memoryview(bytearray(4))])
+        manager._executor.drain()
+        assert not manager.poll_completed_reads()[0].success
+        assert manager.used_bytes == 4
+        assert delete_started.wait(timeout=5)
+        assert not manager.contains(_CACHE_KEY)
+        assert manager.lookup(_CACHE_KEY, 4, "request") is False
+        assert not manager.submit_write(other, [memoryview(b"next")], 4)
+        release_delete.set()
+        manager.drain()
+        assert manager.used_bytes == 4
+        assert len(list(tmp_path.rglob("*.ec"))) == 1
+        # Failed cleanup must not turn the unreadable entry back into a hit.
+        assert not manager.contains(_CACHE_KEY)
+        assert manager.lookup(_CACHE_KEY, 4, "new-request") is False
+        deny_delete = False
+        assert not manager.submit_write(_CACHE_KEY, [memoryview(b"data")], 4)
+        manager.drain()
+        assert manager.used_bytes == 0
+        assert not list(tmp_path.rglob("*.ec"))
+        assert manager.submit_write(_CACHE_KEY, [memoryview(b"next")], 4)
+        manager.drain()
+        assert manager.poll_completed_writes()[0].success
+        assert manager.contains(_CACHE_KEY)
+        assert manager.lookup(_CACHE_KEY, 4, "request") is True
+        assert sum(path.stat().st_size for path in tmp_path.rglob("*.ec")) == 4
+    finally:
+        release_delete.set()
+        manager.release_request("request")
+        manager.release_request("new-request")
+        manager.shutdown()

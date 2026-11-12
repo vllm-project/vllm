@@ -149,6 +149,7 @@ class ECFileSystemTierManager:
         self._accepting = True
         self._shutdown = False
         self._entries: OrderedDict[str, ECFileEntry] = OrderedDict()
+        self._invalid_keys: set[str] = set()
         self._pending_reads: dict[int, ECFileEntry] = {}
         self._pending_writes: dict[int, ECFileEntry] = {}
         self._pending_write_keys: set[str] = set()
@@ -179,7 +180,7 @@ class ECFileSystemTierManager:
 
     def contains(self, cache_key: str) -> bool:
         """Return an in-memory membership decision without filesystem I/O."""
-        if cache_key not in self._entries:
+        if cache_key in self._invalid_keys or cache_key not in self._entries:
             return False
         self._entries.move_to_end(cache_key)
         return True
@@ -192,7 +193,7 @@ class ECFileSystemTierManager:
             raise ValueError("file_size_bytes must be positive")
         if not self._accepting or file_size_bytes > self._capacity_bytes:
             return False
-        if cache_key in self._deleting_keys:
+        if cache_key in self._deleting_keys or cache_key in self._invalid_keys:
             return False
         if cache_key in self._pending_write_keys:
             return None
@@ -234,6 +235,8 @@ class ECFileSystemTierManager:
         if not self._accepting:
             return False
 
+        if cache_key in self._invalid_keys:
+            return False
         entry = self._entries.get(cache_key)
         if entry is None:
             raise KeyError(f"encoder-cache entry is not indexed: {cache_key}")
@@ -263,6 +266,9 @@ class ECFileSystemTierManager:
         if file_size_bytes <= 0:
             raise ValueError("file_size_bytes must be positive")
         if file_size_bytes > self._capacity_bytes:
+            return False
+        if cache_key in self._invalid_keys:
+            self._evict_to_capacity()
             return False
         if (
             cache_key in self._entries
@@ -353,8 +359,8 @@ class ECFileSystemTierManager:
         if not completion.success:
             current_entry = self._entries.get(completion.cache_key)
             if current_entry is indexed_entry:
-                del self._entries[completion.cache_key]
-                self._used_bytes -= indexed_entry.file_size_bytes
+                self._invalid_keys.add(completion.cache_key)
+                self._entries.move_to_end(completion.cache_key, last=False)
             self._lookup.mark_miss(
                 [self._lookup.key(completion.cache_key, indexed_entry.file_size_bytes)]
             )
@@ -401,7 +407,9 @@ class ECFileSystemTierManager:
         indexed_entry = self._pending_deletes.pop(completion.job_id)
         self._deleting_keys.remove(indexed_entry.cache_key)
         self._pending_delete_bytes -= indexed_entry.file_size_bytes
-        if not completion.success:
+        if completion.success:
+            self._invalid_keys.discard(indexed_entry.cache_key)
+        else:
             self._entries[indexed_entry.cache_key] = indexed_entry
             self._entries.move_to_end(indexed_entry.cache_key, last=False)
             self._used_bytes += indexed_entry.file_size_bytes
@@ -449,12 +457,19 @@ class ECFileSystemTierManager:
     def _evict_to_capacity(self, required_bytes: int = 0) -> bool:
         target_bytes = self._capacity_bytes - required_bytes
         # Pending deletes will free space, but cannot fund a write until confirmed.
-        while self._used_bytes + self._reserved_write_bytes > target_bytes:
+        while (
+            self._invalid_keys - self._deleting_keys
+            or self._used_bytes + self._reserved_write_bytes > target_bytes
+        ):
+            needs_capacity = (
+                self._used_bytes + self._reserved_write_bytes > target_bytes
+            )
             victim: tuple[str, ECFileEntry] | None = None
             for cache_key, indexed_entry in self._entries.items():
                 if (
                     self._read_pins[cache_key] == 0
                     and cache_key not in self._pending_write_keys
+                    and (cache_key in self._invalid_keys or needs_capacity)
                 ):
                     victim = (cache_key, indexed_entry)
                     break
