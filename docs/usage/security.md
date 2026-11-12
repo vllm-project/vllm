@@ -376,6 +376,12 @@ Built-in demo tools are controlled by two settings:
 
 To disable the Python code interpreter specifically, omit `code_interpreter` from `VLLM_GPT_OSS_SYSTEM_TOOL_MCP_LABELS`.
 
+For MCP tools in a Responses API request, `allowed_tools` is also checked before
+executing a model-generated tool call. A call outside the requested list is
+rejected before contacting the tool server or invoking a demo tool. This applies
+to both Harmony and non-Harmony models. An empty list permits no sub-tools;
+omitting the filter or including `"*"` preserves unrestricted sub-tool access.
+
 **Consider a custom implementation**: The GPT-OSS Python tool is a reference implementation. For production deployments, consider implementing a custom code execution sandbox with stricter isolation guarantees. See the [GPT-OSS documentation](https://github.com/openai/gpt-oss?tab=readme-ov-file#python) for guidance.
 
 ## Dynamic LoRA Loading

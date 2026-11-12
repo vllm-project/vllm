@@ -1408,6 +1408,98 @@ async def test_reasoning_tokens_counted_for_text_reasoning_model(monkeypatch):
     OpenAIResponseUsage.model_validate(response.usage.model_dump(mode="json"))
 
 
+@pytest.mark.asyncio
+@pytest.mark.parametrize("harmony", [False, True])
+@pytest.mark.parametrize(
+    "namespace,server_label,tool_name,method",
+    [
+        ("browser", "web_search_preview", "search", "call_search_tool"),
+        ("python", "code_interpreter", "python", "call_python_tool"),
+        ("container", "container", "exec", "call_container_tool"),
+    ],
+)
+@pytest.mark.parametrize(
+    "policy", ["allow", "deny", "empty", "wildcard", "none", "filter"]
+)
+async def test_mcp_allowlist_enforced_before_execution(
+    harmony: bool,
+    namespace: str,
+    server_label: str,
+    tool_name: str,
+    method: str,
+    policy: str,
+) -> None:
+    from mcp import ClientSession
+    from mcp.types import CallToolResult, TextContent
+    from openai_harmony import Message
+    from tokenizers import Tokenizer
+    from tokenizers.models import WordLevel
+    from transformers import PreTrainedTokenizerFast
+
+    from vllm.exceptions import VLLMValidationError
+
+    allowed = {
+        "allow": [tool_name],
+        "deny": ["unrelated_tool"],
+        "empty": [],
+        "wildcard": ["*"],
+        "none": None,
+        "filter": {"tool_names": [tool_name]},
+    }[policy]
+    request = ResponsesRequest(
+        model="test-model",
+        input="test",
+        tools=[Mcp(type="mcp", server_label=server_label, allowed_tools=allowed)],
+    )
+    tokenizer = PreTrainedTokenizerFast(
+        tokenizer_object=Tokenizer(WordLevel({"[UNK]": 0}, unk_token="[UNK]")),
+        unk_token="[UNK]",
+    )
+    if harmony:
+        context = HarmonyContext(
+            [],
+            [namespace],
+            frozenset(),
+            HarmonyParser(tokenizer),
+            request=request,
+        )
+        message = Message.from_role_and_content("assistant", '{"code":"1"}')
+        message.recipient = (
+            namespace if namespace == "python" else f"{namespace}.{tool_name}"
+        )
+    else:
+        context = ParsableContext(
+            response_messages=[],
+            tokenizer=tokenizer,
+            parser_cls=None,
+            request=request,
+            available_tools=[namespace],
+            chat_template=None,
+            chat_template_content_format="auto",
+        )
+        message = ResponseFunctionToolCall(
+            type="function_call",
+            name=server_label,
+            arguments='{"code":"1"}',
+            call_id="test-call",
+        )
+    session = AsyncMock(spec=ClientSession)
+    session.call_tool.return_value = CallToolResult(
+        content=[TextContent(type="text", text="tool-result")],
+    )
+    if policy in ("deny", "empty"):
+        with pytest.raises(VLLMValidationError, match="not permitted by allowed_tools"):
+            await getattr(context, method)(session, message)
+        session.call_tool.assert_not_awaited()
+        assert namespace not in context.called_tools
+    else:
+        output = await getattr(context, method)(session, message)
+        assert (
+            output[0].content[0].text if harmony else output[0].output
+        ) == "tool-result"
+        session.call_tool.assert_awaited_once()
+
+
 class TestExtractAllowedToolsFromMcpRequests:
     """Test class for _extract_allowed_tools_from_mcp_requests function."""
 

@@ -37,6 +37,7 @@ from vllm.entrypoints.openai.responses.utils import (
 from vllm.entrypoints.serve.utils.tool_calls_utils import (
     maybe_filter_parallel_tool_calls,
 )
+from vllm.exceptions import VLLMValidationError
 from vllm.outputs import RequestOutput
 from vllm.parser.abstract_parser import Parser
 from vllm.renderers.chat_utils import (
@@ -107,12 +108,30 @@ class TurnMetrics:
 
 
 class ConversationContext(ABC):
+    request: ResponsesRequest | None = None
     response_parser: Parser | None = None
     request_metrics: "RequestStateStats | None" = None
     # Built-in tools can trigger additional model generations. In that case,
     # the stored engine timestamps cover only one turn, while token usage is
     # accumulated across all turns.
     request_metrics_cover_all_generation_turns: bool = True
+
+    def _validate_mcp_tool_call(self, namespace: str, tool_name: str) -> None:
+        from vllm.renderers.online_renderer import (
+            _extract_allowed_tools_from_mcp_requests,
+        )
+
+        if self.request is None:
+            return
+        allowed_tools = _extract_allowed_tools_from_mcp_requests(self.request.tools)
+        server_label = _map_tool_name_to_tool_type(namespace)
+        allowed = allowed_tools.get(server_label)
+        if allowed is not None and tool_name not in allowed:
+            raise VLLMValidationError(
+                f"MCP tool '{namespace}.{tool_name}' is not permitted "
+                "by allowed_tools.",
+                parameter="tools",
+            )
 
     @abstractmethod
     def append_output(self, output: RequestOutput) -> None:
@@ -451,6 +470,7 @@ class ParsableContext(ConversationContext):
         tool_session: Union["ClientSession", Tool],
         last_msg: ResponseFunctionToolCall,
     ) -> list[ResponseInputOutputItem]:
+        self._validate_mcp_tool_call("python", "python")
         self.called_tools.add("python")
         if isinstance(tool_session, Tool):
             return await tool_session.get_result_parsable_context(self)
@@ -476,6 +496,7 @@ class ParsableContext(ConversationContext):
         tool_session: Union["ClientSession", Tool],
         last_msg: ResponseFunctionToolCall,
     ) -> list[ResponseInputOutputItem]:
+        self._validate_mcp_tool_call("browser", "search")
         self.called_tools.add("browser")
         if isinstance(tool_session, Tool):
             return await tool_session.get_result_parsable_context(self)
@@ -519,6 +540,7 @@ class ParsableContext(ConversationContext):
                     "user":optional[str] "user name",
                 }
         """
+        self._validate_mcp_tool_call("container", "exec")
         self.called_tools.add("container")
         if isinstance(tool_session, Tool):
             return await tool_session.get_result_parsable_context(self)
@@ -851,10 +873,11 @@ class HarmonyContext(ConversationContext):
     async def call_search_tool(
         self, tool_session: Union["ClientSession", Tool], last_msg: Message
     ) -> list[Message]:
+        tool_name = last_msg.recipient.split(".")[1]
+        self._validate_mcp_tool_call("browser", tool_name)
         self.called_tools.add("browser")
         if isinstance(tool_session, Tool):
             return await tool_session.get_result(self)
-        tool_name = last_msg.recipient.split(".")[1]
         if envs.VLLM_TOOL_JSON_ERROR_AUTOMATIC_RETRY:
             try:
                 args = json.loads(last_msg.content[0].text)
@@ -878,6 +901,7 @@ class HarmonyContext(ConversationContext):
     async def call_python_tool(
         self, tool_session: Union["ClientSession", Tool], last_msg: Message
     ) -> list[Message]:
+        self._validate_mcp_tool_call("python", "python")
         self.called_tools.add("python")
         if isinstance(tool_session, Tool):
             return await tool_session.get_result(self)
@@ -940,10 +964,11 @@ class HarmonyContext(ConversationContext):
                     "user":optional[str] "user name",
                 }
         """
+        tool_name = last_msg.recipient.split(".")[1].split(" ")[0]
+        self._validate_mcp_tool_call("container", tool_name)
         self.called_tools.add("container")
         if isinstance(tool_session, Tool):
             return await tool_session.get_result(self)
-        tool_name = last_msg.recipient.split(".")[1].split(" ")[0]
         if envs.VLLM_TOOL_JSON_ERROR_AUTOMATIC_RETRY:
             try:
                 args = json.loads(last_msg.content[0].text)
