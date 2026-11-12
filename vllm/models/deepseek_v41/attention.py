@@ -70,13 +70,17 @@ from vllm.models.deepseek_v4.common.grouped_wo_a import DeepseekV4GroupedWoA
 from vllm.models.deepseek_v41.common.ops.fused_layout import Q_CHUNK
 from vllm.models.deepseek_v41.common.rope import build_deepseek_v4_rope
 from vllm.models.deepseek_v41.compressor import DeepseekCompressor
+from vllm.models.deepseek_v41.shardq import dsv41_shardq_eligible
 from vllm.platforms import current_platform
 from vllm.triton_utils import tl, triton
 from vllm.utils.multi_stream_utils import (
     execute_in_parallel,
     maybe_execute_in_parallel,
 )
-from vllm.v1.attention.backend import AttentionBackend, AttentionMetadata
+from vllm.v1.attention.backend import (
+    AttentionBackend,
+    AttentionMetadata,
+)
 from vllm.v1.attention.backends.mla.indexer import (
     DeepseekV41IndexerBackend,
     dsa_indexer_uses_fp4,
@@ -86,6 +90,7 @@ from vllm.v1.attention.backends.mla.sparse_indexer import (
     DeepseekV41SparseIndexerBackend,
 )
 from vllm.v1.attention.backends.mla.sparse_swa import DeepseekV4SWACache
+from vllm.v1.attention.ops.shardq import ShardQMetadata
 from vllm.v1.kv_cache_interface import (
     KVCacheSpec,
     MLAAttentionSpec,
@@ -310,8 +315,14 @@ class DeepseekV4Attention(nn.Module, AttentionLayerBase, ABC):
         kv: torch.Tensor,
         positions: torch.Tensor,
         output: torch.Tensor,
+        shardq: "ShardQMetadata | None" = None,
     ) -> None:
-        """Platform-specific sparse MLA forward; writes attention into `output`."""
+        """Platform-specific sparse MLA forward; writes attention into `output`.
+
+        `shardq` (ShardQ layers only) carries a token-sharded prefill step:
+        the decode prefix is still head-sharded, while the post-decode tokens
+        are laid out and attended per rank in `shardq.attn_metadata`.
+        """
         raise NotImplementedError
 
     @abstractmethod
@@ -350,6 +361,7 @@ class DeepseekV4Attention(nn.Module, AttentionLayerBase, ABC):
         candidate_block_buffer: torch.Tensor | None = None,
     ) -> None:
         super().__init__()
+        self.vllm_config = vllm_config
         config = vllm_config.model_config.hf_config
         quant_config = vllm_config.quant_config
         cache_config = vllm_config.cache_config
@@ -747,12 +759,13 @@ class DeepseekV4Attention(nn.Module, AttentionLayerBase, ABC):
         # The eager attention region writes into a caller-owned buffer
         # (breakable_cudagraph needs in-place outputs); its shape and how it is
         # projected afterwards follow the interface contract above.
-        attn_out = self._alloc_attn_out(hidden_states.shape[0], hidden_states)
+        full_num_tokens = positions.shape[0]
+        attn_out = self._alloc_attn_out(full_num_tokens, hidden_states)
 
         # Keep the attention input preparation in the captured graph. Only the
         # sparse indexer and MLA attention run in the eager break below.
         qr_kv, kv_score, indexer_weights = self._run_parallel_input_projections(
-            hidden_states
+            hidden_states, full_num_tokens
         )
         qr, qr_scale, kv = self._split_qkv_and_norm(qr_kv)
 
@@ -772,7 +785,9 @@ class DeepseekV4Attention(nn.Module, AttentionLayerBase, ABC):
         """Write only the KV `forward` writes (SWA KV, compressed KV, index K),
         skipping wq_b, the indexer's top-k and attention."""
         attn_metadata = get_forward_context().attn_metadata
-        qr_kv, kv_score, _ = self._run_parallel_input_projections(hidden_states)
+        qr_kv, kv_score, _ = self._run_parallel_input_projections(
+            hidden_states, positions.shape[0]
+        )
         _, _, kv = self._split_qkv_and_norm(qr_kv)
         cache_positions = positions
         if isinstance(attn_metadata, dict):
@@ -989,8 +1004,15 @@ class DeepseekV4Attention(nn.Module, AttentionLayerBase, ABC):
             indexer_result = prepare_indexer()
         index_q, index_q_scale, index_weights_out = indexer_result
 
+        # The indexer op reads only this argument's row count and device (to
+        # clear its top-k buffer). Under the token-sharded decoder the local
+        # stream is shorter than the top-k layout, so pass the full-row KV
+        # latent, which `_run_parallel_input_projections` gathered.
+        indexer_hidden_states = (
+            kv if kv.shape[0] != hidden_states.shape[0] else hidden_states
+        )
         self._sparse_indexer_and_attn(
-            hidden_states,
+            indexer_hidden_states,
             index_q,
             index_q_scale,
             index_weights_out,
@@ -1000,11 +1022,19 @@ class DeepseekV4Attention(nn.Module, AttentionLayerBase, ABC):
             attn_out,
         )
 
-    def _fused_wqa_wkv_gemm(self, hidden_states: torch.Tensor) -> torch.Tensor:
+    def _fused_wqa_wkv_gemm(
+        self, hidden_states: torch.Tensor, full_num_tokens: int | None = None
+    ) -> torch.Tensor:
         # Override point: the ROCm layer preshuffles this weight in place, so
         # it cannot go through fused_wqa_wkv directly.
         num_tokens = hidden_states.shape[0]
+        if full_num_tokens is None:
+            full_num_tokens = num_tokens
         # MergedColumnParallelLinear returns (output, bias); bias is None.
+        if num_tokens < full_num_tokens:
+            # The decoder already holds only this rank's token shard.
+            qr_kv, _ = self.fused_wqa_wkv(hidden_states)
+            return sp_all_gather(qr_kv.contiguous())[:full_num_tokens]
         if self.shard_fused_wqa_wkv and num_tokens >= _SHARD_FUSED_WQA_WKV_MIN_TOKENS:
             qr_kv, _ = self.fused_wqa_wkv(sp_shard(hidden_states))
             return sp_all_gather(qr_kv)[:num_tokens]
@@ -1021,12 +1051,14 @@ class DeepseekV4Attention(nn.Module, AttentionLayerBase, ABC):
         return self.wq_b(qr)
 
     def _run_parallel_input_projections(
-        self, hidden_states: torch.Tensor
+        self, hidden_states: torch.Tensor, full_num_tokens: int | None = None
     ) -> tuple[
         torch.Tensor,
         torch.Tensor | None,
         torch.Tensor | None,
     ]:
+        if full_num_tokens is None:
+            full_num_tokens = hidden_states.shape[0]
         aux_streams = self.aux_stream_list
         if aux_streams is not None:
             aux_streams = aux_streams[:2]
@@ -1058,7 +1090,7 @@ class DeepseekV4Attention(nn.Module, AttentionLayerBase, ABC):
             aux_fns[1] = indexer_weights_proj
 
         qr_kv, (kv_score, indexer_weights) = execute_in_parallel(
-            lambda: self._fused_wqa_wkv_gemm(hidden_states),
+            lambda: self._fused_wqa_wkv_gemm(hidden_states, full_num_tokens),
             aux_fns,
             self.ln_events[0],
             self.ln_events[1:3],
@@ -1066,6 +1098,16 @@ class DeepseekV4Attention(nn.Module, AttentionLayerBase, ABC):
             enable=hidden_states.shape[0]
             <= envs.VLLM_MULTI_STREAM_GEMM_TOKEN_THRESHOLD,
         )
+
+        if hidden_states.shape[0] < full_num_tokens:
+            # The A projections ran on this rank's token shard; the TP B
+            # projections and cache writes need the full rows.
+            if kv_score is not None:
+                kv_score = sp_all_gather(kv_score.contiguous())[:full_num_tokens]
+            if indexer_weights is not None:
+                indexer_weights = sp_all_gather(indexer_weights.contiguous())[
+                    :full_num_tokens
+                ]
 
         return qr_kv, kv_score, indexer_weights
 
@@ -1093,7 +1135,46 @@ class DeepseekV4Attention(nn.Module, AttentionLayerBase, ABC):
 
         # MLA attention writes into the pre-allocated `out` buffer
         # ([num_tokens, padded_heads, head_dim]).
-        self.forward_mqa(q, kv, positions, out)
+        shardq = self._shardq_from_context()
+        if shardq is None:
+            self.forward_mqa(q, kv, positions, out)
+        else:
+            self.forward_mqa(q, kv, positions, out, shardq=shardq)
+
+    def _shardq_from_context(self) -> ShardQMetadata | None:
+        """This step's ShardQ view, when the metadata builders produced one."""
+        if not getattr(self, "use_shardq", False):
+            return None
+        attn_metadata = get_forward_context().attn_metadata
+        if not isinstance(attn_metadata, dict):
+            return None
+        swa_metadata = attn_metadata.get(self.swa_cache_layer.prefix)
+        shardq = (
+            getattr(swa_metadata, "shardq", None) if swa_metadata is not None else None
+        )
+        compressed = None
+        if self.compressed_cache_prefix is not None:
+            compressed = attn_metadata.get(self.compressed_cache_prefix)
+            if shardq is None and compressed is not None:
+                shardq = getattr(compressed, "shardq", None)
+        if shardq is None:
+            return None
+        sharded: dict[str, AttentionMetadata] = {}
+        if compressed is not None and getattr(compressed, "shardq", None) is not None:
+            sharded[self.compressed_cache_prefix] = compressed.shardq.attn_metadata
+        if (
+            swa_metadata is not None
+            and getattr(swa_metadata, "shardq", None) is not None
+        ):
+            sharded[self.swa_cache_layer.prefix] = swa_metadata.shardq.attn_metadata
+        out = ShardQMetadata(
+            num_decode_tokens=shardq.num_decode_tokens,
+            num_tokens_per_rank=shardq.num_tokens_per_rank,
+            token_ids=shardq.token_ids,
+            rank_offsets=shardq.rank_offsets,
+        )
+        out.attn_metadata = sharded  # type: ignore[assignment]
+        return out
 
     def _fused_qnorm_rope_kv_insert(
         self,
@@ -1308,6 +1389,7 @@ class DeepseekV4IndexerCache(torch.nn.Module, AttentionLayerBase):
         self.dtype = dtype
         self.compress_ratio = compress_ratio
         vllm_config = get_current_vllm_config()
+        self.vllm_config = vllm_config
         self.sparse_logits = vllm_config.attention_config.indexer_sparse_logits
         # aiter's paged MXFP4 kernels write this cache and read it in place.
         self.rocm_mxfp4 = current_platform.is_rocm() and dsa_indexer_uses_fp4(
@@ -1361,6 +1443,9 @@ class DeepseekV4IndexerCache(torch.nn.Module, AttentionLayerBase):
             ),
         )
 
+    # The attention path and the indexer must reject the same splits.
+    shardq_eligibility = staticmethod(dsv41_shardq_eligible)
+
     def forward(self): ...
 
     def get_attn_backend(self) -> type[AttentionBackend]:
@@ -1373,6 +1458,29 @@ class DeepseekV4IndexerCache(torch.nn.Module, AttentionLayerBase):
         if self.sparse_logits:
             return DeepseekV41SparseIndexerBackend
         return DeepseekV41IndexerBackend
+
+
+def _short_context_topk_rows(
+    positions: torch.Tensor,
+    indexer_metadata: Any,
+) -> tuple[torch.Tensor, int]:
+    """Positions the short-context top-k fill reads, and how many rows.
+
+    ShardQ keeps the step's decodes in place and packs this rank's tokens
+    after them, so the fill must use those compact rows' positions instead of
+    the batch's first rows.
+    """
+    gather = (
+        indexer_metadata.prefill.shardq_gather_indices
+        if indexer_metadata.prefill is not None
+        else None
+    )
+    if gather is None:
+        return (
+            positions,
+            indexer_metadata.num_decode_tokens + indexer_metadata.num_prefill_tokens,
+        )
+    return positions[gather], gather.numel()
 
 
 class DeepseekV4Indexer(nn.Module):
@@ -1624,14 +1732,13 @@ class DeepseekV4Indexer(nn.Module):
                 if self.owns_k:
                     self._produce_k(cache_latent, cache_positions, rotary_emb)
                 assert self.topk_indices_buffer is not None
-                num_tokens = (
-                    indexer_metadata.num_decode_tokens
-                    + indexer_metadata.num_prefill_tokens
+                short_positions, num_tokens = _short_context_topk_rows(
+                    positions, indexer_metadata
                 )
                 if num_tokens > 0:
                     fill_short_context_topk_indices[(num_tokens,)](
                         self.topk_indices_buffer,
-                        positions,
+                        short_positions,
                         TOP_K=self.topk_tokens,
                         COMPRESS_RATIO=self.compress_ratio,
                         PADDED_TOP_K=triton.next_power_of_2(self.topk_tokens),
