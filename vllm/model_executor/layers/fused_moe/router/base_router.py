@@ -134,7 +134,8 @@ def get_moe_padding_mask(num_tokens: int) -> torch.Tensor | None:
 
     Routers set these rows' expert ids to -1 so the dispatch and experts skip
     them; None when VLLM_MOE_SKIP_PADDING is off, the runner does not mark
-    padding, or the rows were gathered from other ranks before routing.
+    padding, or the router sees more rows than the mask covers (naive DP
+    dispatch all-gathers rows from every DP rank before routing).
     """
     if envs.VLLM_MOE_SKIP_PADDING and is_forward_context_available():
         is_padding = get_forward_context().is_padding
