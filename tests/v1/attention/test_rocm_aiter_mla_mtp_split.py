@@ -66,6 +66,8 @@ class _ExpandPageIndicesKernel:
         num_real_tokens,
         *,
         KERNEL_BLOCK_SIZE,
+        PAGE_STRIDE,
+        ROW_STRIDE,
         BLOCK_SIZE,
         CLAMP_TAIL=False,
     ):
@@ -87,8 +89,9 @@ class _ExpandPageIndicesKernel:
                 block_id = int(
                     block_table_tensor[req_idx, token_idx // KERNEL_BLOCK_SIZE].item()
                 )
+                token_row = token_idx % KERNEL_BLOCK_SIZE
                 page_indices[out_start + token_idx] = (
-                    block_id * KERNEL_BLOCK_SIZE + token_idx % KERNEL_BLOCK_SIZE
+                    block_id * PAGE_STRIDE + token_row * ROW_STRIDE
                 )
 
 
@@ -154,6 +157,7 @@ def _builder(
         _uniform_padded_mtp_qo_len=(AiterMLAMetadataBuilder._uniform_padded_mtp_qo_len),
         _use_persistent_metadata=False,
         kernel_block_size=kernel_block_size,
+        _flat_index_steps=(kernel_block_size, 1),
         _num_attention_heads=(
             asm_heads
             if asm_dcp_verify
@@ -192,6 +196,9 @@ def _builder(
     )
     stub._fill_dcp_verify_page_table = (
         AiterMLAMetadataBuilder._fill_dcp_verify_page_table.__get__(stub)
+    )
+    stub._flat_page_index_steps = (
+        AiterMLAMetadataBuilder._flat_page_index_steps.__get__(stub)
     )
     return stub
 
