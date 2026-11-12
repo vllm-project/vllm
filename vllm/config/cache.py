@@ -225,7 +225,14 @@ class CacheConfig:
     utilization.
 
     If unspecified, 1.0 with the extensible KV cache (sized from measured
-    memory) and 0.92 otherwise; see `resolved_gpu_memory_utilization`."""
+    memory) and 0.92 otherwise; see `resolved_gpu_memory_utilization`.
+
+    With the extensible KV cache (the default on CUDA and ROCm), leave this
+    unset unless something needs memory that vLLM does not measure: other
+    processes sharing the GPU (including ones that allocate after vLLM has
+    started), unified-memory devices whose memory the CPU also uses, weight
+    transfer buffers for weight updates, or KV connectors that allocate their
+    own device buffers. A lower value takes memory away from the KV cache."""
 
     @property
     def device_memory_utilization(self) -> float | None:
