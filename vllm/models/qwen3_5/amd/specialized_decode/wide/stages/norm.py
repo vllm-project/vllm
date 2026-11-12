@@ -11,7 +11,8 @@ residual, stored in place); ``x = bf16(res * rsqrt(mean(res^2) + eps) * (1 +
 w))`` (the Gemma-style norm of Qwen3.5) is stored as bf16, and with ``q4``
 also as MXFP4 (``mx``'s activation quantization, the W4A4 GEMMs' input):
 ``"plain"`` of ``x``, ``"h32"`` of ``bf16(x H32)``, the block Hadamard
-rotation an ``InputHadamardLinearMethod`` applies before quantizing. Without
+rotation an ``InputHadamardLinearMethod`` applies before quantizing; a
+``"_t"`` suffix scales as the Triton FP4 GEMM does (``mx.scale_code``). Without
 an exchange (the step's first layer) the residual is the embedding as is.
 """
 
@@ -47,7 +48,7 @@ from vllm.models.qwen3_5.amd.specialized_decode.wide.stages import mx
 
 COLS = HIDDEN // THREADS  # a thread's columns: one scale group
 assert COLS == mx.GROUP
-Q4_MODES = (None, "plain", "h32")
+Q4_MODES = (None, "plain", "h32", "plain_t", "h32_t")
 LDS_WORDS = WAVES
 
 
@@ -81,22 +82,33 @@ class Out(TraceInvariant):
             raise ValueError(f"q4 {q4!r}: one of {Q4_MODES}")
         self.res, self.x = fx.Int64(res), fx.Int64(x)
         self.x4, self.x4s, self.q4 = fx.Int64(x4), fx.Int64(x4s), q4
+        self.h32 = q4 is not None and q4.startswith("h32")
+        self.rceil = q4 is None or not q4.endswith("_t")
 
 
 @traced
-def combine(g, xch, out, w, lds, rows: int, eps: float, emb=None):
-    """``xch``: the exchange whose lines hold ``y`` (None: the first layer,
-    the residual is ``emb``, [rows, HIDDEN] bf16, and is stored to
-    ``out.res``); ``w``: the norm weight [HIDDEN] bf16; ``lds``: ``LDS_WORDS``
-    f32 words."""
+def combine(g, xch, out, w, lds, rows: int, eps: float, emb=None, res_in=None):
+    """``xch``: the exchange whose lines hold ``y``; None: ``y`` is ``emb``
+    ([rows, HIDDEN] bf16) added to ``res_in`` (same), or without ``res_in``
+    the first layer's residual. The sum is stored to ``out.res``; ``w``: the
+    norm weight [HIDDEN] bf16; ``lds``: ``LDS_WORDS`` f32 words."""
     col = g.tid * i32(COLS)
     wv = [unpack_bf16x8(ld_i32x4(w, col // 2 + 4 * q)) for q in range(4)]
     for row in range(g.bid, i32(rows), i32(BLOCKS)):
         base = row * i32(HIDDEN // 2) + col // 2  # i32 words
-        src = out.res if const_expr(xch is not None) else fx.Int64(emb)
+        if const_expr(xch is not None):
+            src = out.res
+        elif const_expr(res_in is not None):
+            src = fx.Int64(res_in)
+        else:
+            src = fx.Int64(emb)
         old = [unpack_bf16x8(ld_i32x4(src, base + 4 * q, CM_DEV)) for q in range(4)]
         z = []
-        if const_expr(xch is None):
+        if const_expr(xch is None and res_in is not None):
+            for q in range_constexpr(4):
+                y = unpack_bf16x8(ld_i32x4(fx.Int64(emb), base + 4 * q, CM_DEV))
+                z += [bf16_round(old[q][e] + y[e]) for e in range(8)]
+        elif const_expr(xch is None):
             for q in range_constexpr(4):
                 z += list(old[q])
         else:
@@ -127,9 +139,9 @@ def combine(g, xch, out, w, lds, rows: int, eps: float, emb=None):
             st(out.x, base + 4 * q, pack_bf16x8(xs[8 * q : 8 * q + 8]), CM_DEV)
         if const_expr(out.q4 is not None):
             vals = xs
-            if const_expr(out.q4 == "h32"):
+            if const_expr(out.h32):
                 vals = [bf16_round(v) for v in hadamard32(xs)]
-            code = mx.scale_code(mx.amax(vals))
+            code = mx.scale_code(mx.amax(vals), out.rceil)
             words = mx.quant_f32_group(vals, code)
             st(
                 out.x4,

@@ -47,7 +47,10 @@ def qkv_proj(g, gemm, w, x, qkv_out, part, rows: int, fold0: int, pending=None):
         for t in range_constexpr(gemm.tiles):
             token = fx.Int32(t * 16) + lane % 16
             if token < rows:
-                words = [pack_bf16(acc[t][0], acc[t][1]), pack_bf16(acc[t][2], acc[t][3])]
+                words = [
+                    pack_bf16(acc[t][0], acc[t][1]),
+                    pack_bf16(acc[t][2], acc[t][3]),
+                ]
                 st(
                     qkv_out,
                     (token * QKV + row) // 2,

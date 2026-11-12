@@ -5,6 +5,12 @@ kernels' arguments out (``Launcher``), and ``attention_core``, the part of a
 full-attention layer that stays vLLM's (q / k norms, RoPE and the attention on
 the qkv rows the previous launch projected).
 
+Up to ``K.SPLIT_MAX`` rows a layer's MLP half is ``mono.blocks.layer_block``
+(``Launcher.mono_layer``) after the layer's split launch (``LayerBuild.split``)
+and the final norm is vLLM's (``gemma_norm``); up to ``MONO_GDN_MAX`` rows a
+GDN layer whose in_proj_qkvz is plain MXFP4 runs ``mono.blocks.gdn_block``
+instead of its split launch (``Launcher.mono_gdn``).
+
 ``Launcher`` holds the per-rank state every launch reads: the scratch every
 width shares (launches of a step run in order), the two barrier slots the
 launches of a step alternate (``wide.common.grid``), the fold counters, the
@@ -20,8 +26,8 @@ from vllm.models.qwen3_5.amd.specialized_decode.runtime.guards import (
     experts_rip,
     gdn_states,
     linear_format,
-    router_gate,
     routed_experts,
+    router_gate,
 )
 from vllm.models.qwen3_5.amd.specialized_decode.wide import layer as K
 from vllm.models.qwen3_5.amd.specialized_decode.wide import layout as L
@@ -32,9 +38,12 @@ from vllm.models.qwen3_5.amd.specialized_decode.wide.abi import (
 from vllm.models.qwen3_5.amd.specialized_decode.wide.common.grid import (
     FOLD_BASE,
     SLOT_WORDS,
+    SLOTS,
+    launch_slots,
     sync_words,
 )
 from vllm.models.qwen3_5.amd.specialized_decode.wide.stages import exchange
+from vllm.platforms import current_platform
 
 # Profiling: set True in the worker before the model is built (for example on
 # import of a ``--worker-extension-cls`` module) to build every launch with
@@ -43,6 +52,11 @@ from vllm.models.qwen3_5.amd.specialized_decode.wide.stages import exchange
 # 100 MHz; the phase names are ``layer.phase_names(key)``). Off: no stamps are
 # compiled.
 TRACE = False
+
+# rows up to which a plain-MXFP4 in_proj_qkvz GDN layer runs gdn_block, faster
+# there than the split launch (a graph replay at 1 / 2 rows: 13 / 15 us vs 19
+# / 20; at 4 rows they tie)
+MONO_GDN_MAX = 2
 
 
 def _unused() -> dict:
@@ -89,7 +103,7 @@ class Launcher:
         self.alarm = int(self.peers.addresses[0].item()) + 4 * rank
         self.flags = self.peers.bytes[: 4 * tp].view(torch.int32)
         base = self.sync.data_ptr()
-        self.slots = (base, base + 4 * SLOT_WORDS)
+        self.slots = tuple(base + 4 * SLOT_WORDS * i for i in range(SLOTS))
         self.folds = base + 4 * FOLD_BASE
         self.traced = TRACE
         self.trace = torch.zeros(
@@ -97,16 +111,81 @@ class Launcher:
         )
         self.args = [self._static_args(i) for i in range(len(model.layers))]
         self.launches = len(model.layers)
-        if self.launches % 2:
-            raise ValueError(
-                f"{self.launches} launches a step: the barrier slots need an even count"
+        self.split_widths = tuple(s for s in widths if s <= K.SPLIT_MAX)
+        # the wide launches of a step at each width (their barrier slots)
+        self.launch_count = {}
+        for s in widths:
+            n = sum(not self.mono_gdn_layer(i, s) for i in range(len(model.layers)))
+            if n == 1:
+                raise ValueError(f"one wide launch a step at {s} rows")
+            self.launch_count[s] = n
+        if self.split_widths:
+            self._init_split(group, dev)
+
+    def _init_split(self, group, dev) -> None:
+        """The state of the split widths' ``layer_block`` launches: its scratch
+        a width, its peer buffer and health words (``mono.abi``), and the
+        hand-off rows between the launches (``h`` the MLP half's output,
+        ``res`` the residual, ``core`` the GDN launch's)."""
+        from vllm.models.qwen3_5.amd.specialized_decode.mono import blocks
+        from vllm.models.qwen3_5.amd.specialized_decode.mono import layout as ML
+        from vllm.models.qwen3_5.amd.specialized_decode.mono.abi import (
+            PEER_HEAD as MONO_HEAD,
+        )
+        from vllm.models.qwen3_5.amd.specialized_decode.mono.common.plan import (
+            HEALTH_WORDS,
+        )
+        from vllm.models.qwen3_5.amd.specialized_decode.runtime.peer import PeerBuffer
+
+        def nbytes(s: int) -> int:
+            lay = blocks.layer_scratch_layout(blocks.LayerBuild(tokens=s))
+            return (blocks.scratch_bytes(lay) + 255) // 256 * 256
+
+        self.mono_scratch = {
+            s: torch.zeros(nbytes(s), dtype=torch.uint8, device=dev)
+            for s in self.split_widths
+        }
+        self.mono_health = torch.zeros(HEALTH_WORDS, dtype=torch.int32, device=dev)
+        self.mono_peers = PeerBuffer(
+            MONO_HEAD + blocks.peer_bytes(ML.MAX_TOKENS),
+            group,
+            self.rank,
+            self.tp,
+            dev,
+        )
+        self.mono_peers.bytes.zero_()
+        self.mono_peer_table = self.mono_peers.addresses + MONO_HEAD
+        self.mono_alarm = int(self.mono_peers.addresses[0].item()) + 4 * self.rank
+        if self.rip != ML.RIP:
+            raise ValueError(f"experts of {self.rip} rows a rank ({ML.RIP} only)")
+        n = max(self.split_widths)
+        bf = torch.bfloat16
+        self.h = torch.empty(n, L.HIDDEN, dtype=bf, device=dev)
+        self.res = torch.empty(n, L.HIDDEN, dtype=bf, device=dev)
+        self.core = torch.empty(n, L.VALUE_DIM, dtype=bf, device=dev)
+        # gdn_block's: its residual out apart from the residual it reads
+        self.gdn_res = torch.empty(n, L.HIDDEN, dtype=bf, device=dev)
+        self.gdn_scratch = {
+            s: torch.zeros(
+                blocks.scratch_bytes(
+                    blocks.gdn_scratch_layout(blocks.GdnBuild(tokens=s))
+                ),
+                dtype=torch.uint8,
+                device=dev,
             )
+            for s in self.split_widths
+            if s <= MONO_GDN_MAX
+        }
 
     def view(self, name: str, rows: int, cols: int) -> torch.Tensor:
         """Scratch buffer ``name`` of a ``rows`` step as [rows, cols] bf16."""
         off, n = K.scratch_layout(rows, self.rip)[name]
         assert n >= rows * cols * 2, (name, n, rows, cols)
-        return self.scratch[off : off + rows * cols * 2].view(torch.bfloat16).view(rows, cols)
+        return (
+            self.scratch[off : off + rows * cols * 2]
+            .view(torch.bfloat16)
+            .view(rows, cols)
+        )
 
     def _next_norm(self, i: int):
         layers = self.model.layers
@@ -175,10 +254,13 @@ class Launcher:
         """Layer ``i``'s build at ``rows``."""
         layers = self.model.layers
         layer = layers[i]
+        if rows <= K.SPLIT_MAX:
+            return self._split_key(i, rows)
         nxt = layers[i + 1] if i + 1 < len(layers) else None
         next_q4 = "none"
         if nxt is not None and _is_gdn(nxt):
-            next_q4 = K.q4_of(linear_format(nxt.linear_attn.in_proj_qkvz).fmt) or "none"
+            nq = linear_format(nxt.linear_attn.in_proj_qkvz)
+            next_q4 = K.q4_of(nq.fmt, nq.shuffled) or "none"
         common = dict(
             tokens=rows,
             tp=self.tp,
@@ -194,7 +276,7 @@ class Launcher:
         qkvz, out = linear_format(g.in_proj_qkvz), linear_format(g.out_proj)
         first_q4 = "none"
         if i == 0:
-            first_q4 = K.q4_of(qkvz.fmt) or "none"
+            first_q4 = K.q4_of(qkvz.fmt, qkvz.shuffled) or "none"
         return K.LayerBuild(
             kind="gdn",
             first=i == 0,
@@ -207,14 +289,166 @@ class Launcher:
             **common,
         )
 
+    def _split_key(self, i: int, rows: int) -> K.LayerBuild:
+        layer = self.model.layers[i]
+        eps = layer.input_layernorm.variance_epsilon
+        if not _is_gdn(layer):
+            return K.LayerBuild(
+                kind="attn",
+                tokens=rows,
+                tp=self.tp,
+                eps=eps,
+                trace=self.traced,
+                split=True,
+            )
+        g = layer.linear_attn
+        qkvz, out = linear_format(g.in_proj_qkvz), linear_format(g.out_proj)
+        return K.LayerBuild(
+            kind="gdn",
+            tokens=rows,
+            tp=self.tp,
+            first=i == 0,
+            qkvz=qkvz.fmt,
+            qkvz_shuffled=qkvz.shuffled,
+            out=out.fmt,
+            out_shuffled=out.shuffled,
+            first_q4=K.q4_of(qkvz.fmt, qkvz.shuffled) or "none",
+            rip=self.rip,
+            eps=eps,
+            gdn_eps=g.norm.eps,
+            trace=self.traced,
+            split=True,
+        )
+
+    def mono_key(self, i: int, rows: int):
+        """Layer ``i``'s ``layer_block`` build at a split width: out_proj /
+        o_proj's format as ``linear_format`` reads it (an "mxfp4_h32" out_proj
+        reads the rotated core the GDN launch leaves)."""
+        from vllm.models.qwen3_5.amd.specialized_decode.mono import blocks
+
+        layer = self.model.layers[i]
+        o = layer.linear_attn.out_proj if _is_gdn(layer) else layer.self_attn.o_proj
+        f = linear_format(o)
+        if not _is_gdn(layer) and f.fmt == "mxfp4_h32":
+            raise ValueError("a Hadamard-rotated o_proj: its input is not rotated")
+        return blocks.LayerBuild(
+            tokens=rows,
+            eps=layer.post_attention_layernorm.variance_epsilon,
+            oq=f.fmt != "bf16",
+            og=not _is_gdn(layer),
+            shuffled=f.shuffled if f.fmt != "bf16" else True,
+        )
+
     def launch(self, key, i: int, seq: int, dynamic: dict) -> int:
         """Launch ``key`` for layer ``i`` as the step's launch ``seq`` (which
-        picks its barrier slot); returns the next ``seq``."""
+        picks its barrier slots); returns the next ``seq``."""
         a = self.args[i] | dynamic
-        a["sync"] = self.slots[seq % 2]
-        a["sync_next"] = self.slots[(seq + 1) % 2]
+        sync, nxt = launch_slots(self.launch_count[key.tokens])[seq]
+        a["sync"] = self.slots[sync]
+        a["sync_next"] = self.slots[nxt]
         K.run(key, a)
         return seq + 1
+
+    def mono_gdn_layer(self, i: int, rows: int) -> bool:
+        """Whether layer ``i`` runs ``gdn_block`` at ``rows``: a GDN layer with
+        a plain MXFP4 in_proj_qkvz (gdn_block's only format) and an out_proj
+        that reads an unrotated core."""
+        layer = self.model.layers[i]
+        if rows > MONO_GDN_MAX or not _is_gdn(layer):
+            return False
+        g = layer.linear_attn
+        return (
+            linear_format(g.in_proj_qkvz).fmt == "mxfp4"
+            and linear_format(g.out_proj).fmt != "mxfp4_h32"
+        )
+
+    def gdn_key(self, i: int, rows: int, first: bool):
+        from vllm.models.qwen3_5.amd.specialized_decode.mono import blocks
+
+        layer = self.model.layers[i]
+        g = layer.linear_attn
+        return blocks.GdnBuild(
+            tokens=rows,
+            first=first,
+            eps=layer.input_layernorm.variance_epsilon,
+            norm_eps=g.norm.eps,
+            shuffled=linear_format(g.in_proj_qkvz).shuffled,
+        )
+
+    def mono_gdn(self, i: int, h, residual, st_idx):
+        """Layer ``i``'s residual add + input_layernorm and ``linear_attn`` up
+        to out_proj's input (``gdn_block``; ``residual`` None on the first
+        layer) -> (the core, the residual) in ``core`` and ``gdn_res``."""
+        from vllm.models.qwen3_5.amd.specialized_decode.mono import blocks
+
+        g = self.model.layers[i].linear_attn
+        rows = h.size(0)
+        conv_state, rstate = gdn_states(g)
+        core, res_out = self.core[:rows], self.gdn_res[:rows]
+        blocks.gdn_block(
+            self.gdn_key(i, rows, residual is None),
+            hidden=h,
+            residual=residual,
+            res_out=res_out,
+            ln_w=self.model.layers[i].input_layernorm.weight,
+            w_qkvz=g.in_proj_qkvz.weight,
+            w_qkvzs=g.in_proj_qkvz.weight_scale,
+            w_ba=g.in_proj_ba.weight,
+            conv_w=g.conv1d.weight,
+            conv_state=conv_state.transpose(-1, -2),
+            a_log=g.A_log,
+            dt_bias=g.dt_bias,
+            norm_w=g.norm.weight,
+            rstate=rstate,
+            st_idx=st_idx,
+            core=core,
+            scratch=self.gdn_scratch[rows],
+            epoch=self.epoch,
+            health=self.mono_health,
+            alarm=self.mono_alarm,
+            layer=i,
+        )
+        return core, res_out
+
+    def mono_layer(self, i: int, core, gate, residual):
+        """Layer ``i``'s out_proj / o_proj, its all-reduce, the residual add +
+        post_attention_layernorm and the MoE with its all-reduce
+        (``layer_block``) -> (the layer's output, the residual) in ``h`` and
+        ``res``."""
+        from vllm.models.qwen3_5.amd.specialized_decode.mono import blocks
+
+        layer = self.model.layers[i]
+        rows = core.size(0)
+        key = self.mono_key(i, rows)
+        o = layer.linear_attn.out_proj if _is_gdn(layer) else layer.self_attn.o_proj
+        mlp = layer.mlp
+        ex = routed_experts(mlp)
+        out, res_out = self.h[:rows], self.res[:rows]
+        blocks.layer_block(
+            key,
+            core=core,
+            gate=gate,
+            residual=residual,
+            w_o=o.weight,
+            w_os=o.weight_scale if key.oq else None,
+            ln_w=layer.post_attention_layernorm.weight,
+            w_gate=mlp.gate.weight,
+            w_sg=mlp.shared_expert_gate.weight,
+            w13=ex.w13_weight,
+            w13s=ex.w13_weight_scale,
+            w2=ex.w2_weight,
+            w2s=ex.w2_weight_scale,
+            out=out,
+            res_out=res_out,
+            scratch=self.mono_scratch[rows],
+            peers=self.mono_peer_table,
+            rank=self.rank,
+            epoch=self.epoch,
+            health=self.mono_health,
+            alarm=self.mono_alarm,
+            layer=blocks.LAYER_SLOT + i,
+        )
+        return out, res_out
 
 
 def attention_core(attn, qkv, positions) -> tuple[torch.Tensor, torch.Tensor]:
@@ -245,3 +479,20 @@ def attention_core(attn, qkv, positions) -> tuple[torch.Tensor, torch.Tensor]:
     out = attn.attn(q, k, v)
     rows = qkv.size(0)
     return out.reshape(rows, -1).contiguous(), gate.reshape(rows, -1).contiguous()
+
+
+@torch.compile(dynamic=True, backend=current_platform.simple_compile_backend)
+def _gemma_add_rms_norm(
+    x: torch.Tensor, residual: torch.Tensor, weight: torch.Tensor, eps: float
+) -> tuple[torch.Tensor, torch.Tensor]:
+    """``GemmaRMSNorm.forward_native(x, residual)`` in one launch: this forward
+    is not torch.compiled, so the CustomOp would run as ~10 eager kernels."""
+    t = x.float() + residual.float()
+    res = t.to(x.dtype)
+    t = t * torch.rsqrt(t.pow(2).mean(dim=-1, keepdim=True) + eps)
+    return (t * (weight.float() + 1.0)).to(x.dtype), res
+
+
+def gemma_norm(norm, x, residual) -> tuple[torch.Tensor, torch.Tensor]:
+    """A ``GemmaRMSNorm`` with the residual add -> (x, the residual)."""
+    return _gemma_add_rms_norm(x, residual, norm.weight, norm.variance_epsilon)

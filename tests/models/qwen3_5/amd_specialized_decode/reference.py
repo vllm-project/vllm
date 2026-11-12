@@ -18,8 +18,12 @@ def bf(t):
 def mxfp4(n, k, gen, lo=118, hi=124, device="cpu"):
     """Random e2m1 codes and E8M0 scales: (packed [n, k / 2] uint8, scales
     [n, k / 32] uint8)."""
-    codes = torch.randint(0, 16, (n, k), generator=gen, dtype=torch.uint8, device=device)
-    sc = torch.randint(lo, hi, (n, k // 32), generator=gen, dtype=torch.uint8, device=device)
+    codes = torch.randint(
+        0, 16, (n, k), generator=gen, dtype=torch.uint8, device=device
+    )
+    sc = torch.randint(
+        lo, hi, (n, k // 32), generator=gen, dtype=torch.uint8, device=device
+    )
     return codes[..., 0::2] | (codes[..., 1::2] << 4), sc
 
 
@@ -64,29 +68,45 @@ def hadamard32(device):
 
 
 def rotate32(x):
-    """``block_hadamard_rotate`` of bf16-valued ``x``: f32 math, bf16 out."""
-    h = hadamard32(x.device).float()
-    return bf((x.float().unflatten(-1, (-1, 32)) @ h).flatten(-2))
+    """``block_hadamard_rotate`` of bf16-valued ``x``: f32 math, bf16 out, in
+    the fast transform's order (``norm.hadamard32``) as the kernels sum it: a
+    matmul's order rounds a rare bf16 ulp apart, which moves a whole 32-group's
+    MXFP4 codes."""
+    v = x.float().unflatten(-1, (-1, 32))
+    h = 1
+    while h < 32:
+        v = v.unflatten(-1, (-1, 2, h))
+        a, b = v[..., 0, :], v[..., 1, :]
+        v = torch.stack([a + b, a - b], -2).flatten(-3)
+        h *= 2
+    return bf((v * torch.tensor(1.0 / 32**0.5, dtype=torch.float32)).flatten(-2))
 
 
-def quant_act(x):
-    """AITER's dynamic MXFP4 quantization of activation rows -> dequantized."""
+def quant_act(x, rceil: bool = True):
+    """AITER's MXFP4 quantization of activation rows -> dequantized:
+    ``rceil`` ``per_1x32_f4_quant_hip`` (the ASM FP4 GEMM's and
+    ``fused_moe``'s), else ``dynamic_mxfp4_quant`` (the Triton GEMM's)."""
+    from aiter import per_1x32_f4_quant_hip
     from aiter.ops.triton.quant import dynamic_mxfp4_quant
 
-    q, s = dynamic_mxfp4_quant(x.to(torch.bfloat16).contiguous())
-    return dequant_mx(q, s)
+    xb = x.to(torch.bfloat16).contiguous()
+    if rceil:
+        q, s = per_1x32_f4_quant_hip(xb, shuffle=False)
+    else:
+        q, s = dynamic_mxfp4_quant(xb)
+    return dequant_mx(q.view(torch.uint8), s.view(torch.uint8)[: xb.shape[0]])
 
 
-def linear(x, w, fmt: str):
+def linear(x, w, fmt: str, shuffled: bool = True):
     """``x @ W.T`` with the stock rounding: ``w`` a bf16 weight, or for
     "mxfp4" / "mxfp4_h32" the dequantized float64 weight (of the rotated
-    weight for h32); the input quantized (after its rotation) as AITER does.
-    Returns bf16-rounded float64."""
+    weight for h32); the input quantized (after its rotation) as the GEMM
+    does (``shuffled``: the ASM one). Returns bf16-rounded float64."""
     if fmt == "bf16":
         return bf(x.double() @ w.double().T)
     if fmt == "mxfp4_h32":
         x = rotate32(x)
-    return bf(quant_act(x) @ w.T)
+    return bf(quant_act(x, shuffled) @ w.T)
 
 
 def gemma_norm(z, w, eps):
@@ -95,10 +115,20 @@ def gemma_norm(z, w, eps):
     return bf(z * rr * (1 + w.double()))
 
 
-def gdn(x, w, st_idx, conv_state, ssm, eps: float, fmts=("bf16", "bf16")):
+def gdn(
+    x,
+    w,
+    st_idx,
+    conv_state,
+    ssm,
+    eps: float,
+    fmts=("bf16", "bf16"),
+    shuffled: bool = True,
+):
     """The GDN block of rows ``x`` with state slots ``st_idx`` (<= 0: none).
     ``w``: qkvz, ba, conv, a_log, dt_bias, norm, out (dequantized float64
-    for MXFP4 formats ``fmts`` = (in_proj_qkvz's, out_proj's)). Returns
+    for MXFP4 formats ``fmts`` = (in_proj_qkvz's, out_proj's), ``shuffled``
+    as ``linear``). Returns
     (conv output q | k | v, z, new conv states, new recurrent states, core
     [rows, NV * 128], out_proj output)."""
     rows = x.shape[0]
@@ -107,7 +137,7 @@ def gdn(x, w, st_idx, conv_state, ssm, eps: float, fmts=("bf16", "bf16")):
     key_dim = (w["qkvz"].shape[0] - 2 * nv * dk) // 2
     nk = key_dim // dk
     conv_dim = 2 * key_dim + nv * dk
-    qkvz = linear(x, w["qkvz"], fmts[0])
+    qkvz = linear(x, w["qkvz"], fmts[0], shuffled)
     bav = bf(x.double() @ w["ba"].double().T)
     mixed, z = qkvz[:, :conv_dim], qkvz[:, conv_dim:]
     conv_state = conv_state.double().clone()
@@ -131,7 +161,9 @@ def gdn(x, w, st_idx, conv_state, ssm, eps: float, fmts=("bf16", "bf16")):
     q = q / torch.sqrt((q * q).sum(-1, keepdim=True) + 1e-6) * dk**-0.5
     k = k / torch.sqrt((k * k).sum(-1, keepdim=True) + 1e-6)
     beta = torch.sigmoid(bav[:, :nv])
-    g = -torch.exp(w["a_log"].double()) * F.softplus(bav[:, nv:] + w["dt_bias"].double())
+    g = -torch.exp(w["a_log"].double()) * F.softplus(
+        bav[:, nv:] + w["dt_bias"].double()
+    )
     core = torch.zeros(rows, nv, dk, dtype=torch.float64, device=x.device)
     per_k = nv // nk
     zz = z.view(rows, nv, dk)
@@ -149,7 +181,7 @@ def gdn(x, w, st_idx, conv_state, ssm, eps: float, fmts=("bf16", "bf16")):
         rr = torch.rsqrt((o * o).mean(-1, keepdim=True) + eps)
         core[r] = bf(o * rr * w["norm"].double() * F.silu(zz[r]))
     core = core.view(rows, nv * dk)
-    return out, z, conv_state, ssm, core, linear(core, w["out"], fmts[1])
+    return out, z, conv_state, ssm, core, linear(core, w["out"], fmts[1], shuffled)
 
 
 def route(x, w_gate, experts: int, topk: int, prefer=None, margin: float = 1e-2):
@@ -182,8 +214,20 @@ def route(x, w_gate, experts: int, topk: int, prefer=None, margin: float = 1e-2)
     return ids, ws, logits
 
 
-def moe(x, w_gate, w13, w13s, w2, w2s, experts: int, topk: int, ri: int, rip: int,
-        prefer=None, xd=None):
+def moe(
+    x,
+    w_gate,
+    w13,
+    w13s,
+    w2,
+    w2s,
+    experts: int,
+    topk: int,
+    ri: int,
+    rip: int,
+    prefer=None,
+    xd=None,
+):
     """The MoE of rows ``x`` (one rank's intermediate slice; unshuffled MXFP4
     expert codes and scales), activations quantized to MXFP4 as AITER does
     (the input and the gate-up product). Returns (y f64, ids, weights);

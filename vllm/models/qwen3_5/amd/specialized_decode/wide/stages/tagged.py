@@ -90,7 +90,7 @@ def poll(g, specs, tag):
     out, i = [], 0
     for _, _, n in specs:
         words = []
-        for h in range(-(-n // 2)):
+        for _ in range(-(-n // 2)):
             words += [seen[i][e] for e in range(0, seen[i].numel, 2)]
             i += 1
         out.append(words)

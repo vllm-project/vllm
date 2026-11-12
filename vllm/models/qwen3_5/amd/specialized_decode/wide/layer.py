@@ -18,6 +18,16 @@ out_proj is one phase: their hand-offs are tagged pairs (``stages.tagged``).
 A launch reads the residual and the normed rows ``x`` the previous one left in
 its scratch and leaves the next ones there; the step's last leaves the final
 norm's rows in ``x``.
+
+Up to ``SPLIT_MAX`` rows a layer is two launches (``LayerBuild.split``), its
+MLP half ``mono.blocks.layer_block`` (out_proj / o_proj -> all-reduce ->
+post-attention norm -> MoE -> all-reduce, dataflow hand-offs, no grid
+barriers) after:
+
+    gdn   [embedding or] the previous layer's output + residual -> input norm
+          -> GDN proj + conv -> recurrence + gated norm -> core
+    attn  the previous layer's output + residual -> input norm -> qkv_proj
+          (then vLLM's attention)
 """
 
 from dataclasses import dataclass
@@ -29,6 +39,7 @@ from flydsl.expr import const_expr
 from flydsl.expr.typing import Int32, Int64
 
 from vllm.models.qwen3_5.amd.specialized_decode.wide.common.grid import (
+    FOLD_COUNTERS,
     Grid,
     TraceInvariant,
     grid_sync,
@@ -70,11 +81,14 @@ FORMATS = ("bf16", "mxfp4", "mxfp4_h32")  # a GDN projection's weight format
 # fold counter bases: the GDN projection's and out_proj's share a phase
 FOLD_PROJ, FOLD_OUT, FOLD_PIECES = 0, 128, 256
 TAG_LAYERS = 256  # tags a step: (layer, use) pairs below it
+SPLIT_MAX = 16  # rows up to which a layer's MLP half is mono.blocks.layer_block
 
 
-def q4_of(fmt: str):
-    """The MXFP4 rows a GEMM of weight format ``fmt`` reads (``norm.Q4_MODES``)."""
-    return {"bf16": None, "mxfp4": "plain", "mxfp4_h32": "h32"}[fmt]
+def q4_of(fmt: str, shuffled: bool = True):
+    """The MXFP4 rows a GEMM of weight format ``fmt`` reads (``norm.Q4_MODES``),
+    unless ``shuffled`` (the ASM GEMM) as the Triton GEMM quantizes them."""
+    q = {"bf16": None, "mxfp4": "plain", "mxfp4_h32": "h32"}[fmt]
+    return q if q is None or shuffled else q + "_t"
 
 
 @dataclass(frozen=True)
@@ -87,13 +101,19 @@ class LayerBuild:
     qkvz_shuffled: bool = False  # MXFP4 in_proj_qkvz on AITER's ASM GEMM layout
     out: str = "bf16"  # out_proj's format
     out_shuffled: bool = False
-    first_q4: str = "none"  # the first combine's MXFP4 rows ("none", "plain", "h32")
+    first_q4: str = "none"  # the first combine's MXFP4 rows ("none", ``norm.Q4_MODES``)
     next_q4: str = "none"  # the closing combine's, for the next layer's qkvz
     qkv_tail: bool = False  # the next layer is full attention: run its qkv_proj
     rip: int = 256  # the experts' padded intermediate rows a rank
     eps: float = 1e-6
     gdn_eps: float = 1e-6
     trace: bool = False  # CTA 0 stamps the clock at every phase end (``phase_names``)
+    # the launch ends at the GDN core (``core_out`` [rows, VALUE_DIM] bf16,
+    # Hadamard-rotated for an "mxfp4_h32" out_proj), or for "attn" at its
+    # qkv_proj (``qkv_out`` in the scratch, of ``w_qkv``); its input combine
+    # adds ``emb`` to ``res_in`` (the first layer: ``emb`` alone), its MXFP4
+    # rows ``first_q4``
+    split: bool = False
 
     def __post_init__(self):
         if self.kind not in KINDS:
@@ -105,8 +125,17 @@ class LayerBuild:
         if self.first and self.kind != "gdn":
             raise ValueError("the step's first layer is a GDN layer")
         for q in (self.first_q4, self.next_q4):
-            if q not in ("none", "plain", "h32"):
+            if q != "none" and q not in norm.Q4_MODES:
                 raise ValueError(f"MXFP4 rows {q!r}")
+        if self.split and self.tokens > SPLIT_MAX:
+            raise ValueError(f"split launches: up to {SPLIT_MAX} rows")
+
+
+def core_of(key: LayerBuild) -> str:
+    """The GDN core's format for out_proj (``gdn.CORE_MODES``)."""
+    if key.out == "bf16" or key.out_shuffled:
+        return key.out
+    return key.out + "_t"
 
 
 def _q4(q: str):
@@ -117,6 +146,8 @@ ABI = KernelAbi(
     (
         "scratch",
         "emb",
+        "res_in",
+        "core_out",
         "n_in",
         "n_post",
         "n_next",
@@ -160,6 +191,12 @@ TRACE_WORDS = 32  # i64 stamps a layer in the trace buffer
 def phase_names(key) -> list[str]:
     """The stamps of a traced build (``LayerBuild.trace``), in order: each
     marks the end of the named phase ("start": the kernel's start)."""
+    if key.split:
+        return [
+            "start",
+            "combine",
+            "gdn_proj+recur" if key.kind == "gdn" else "qkv_proj",
+        ]
     out = ["start"] + (["first_combine"] if key.first else [])
     if key.kind == "gdn":
         if fused_gdn(key):
@@ -262,9 +299,7 @@ def build(key: LayerBuild):
     S, tp = key.tokens, key.tp
     shape = moe.Shape(S, key.rip)
     MoeLds = moe.lds_struct(shape)
-    aux_words = max(
-        ex_.GroupTile.words(S), gdn.recur_lds_words(), norm.LDS_WORDS
-    )
+    aux_words = max(ex_.GroupTile.words(S), gdn.recur_lds_words(), norm.LDS_WORDS)
     chunks = _resident_chunks()
 
     @fx.struct
@@ -287,11 +322,14 @@ def build(key: LayerBuild):
     name += "" if key.qkvz == "bf16" else f"_qkvz_{key.qkvz}"
     name += "" if key.out == "bf16" else f"_out_{key.out}"
     name += "_qkv" if key.qkv_tail else ""
+    name += "_split" if key.split else ""
 
     @flyc.kernel(name=name, known_block_size=[THREADS, 1, 1])
     def kernel(
         scratch: Int64,
         emb: Int64,
+        res_in: Int64,
+        core_out: Int64,
         n_in: Int64,
         n_post: Int64,
         n_next: Int64,
@@ -397,7 +435,7 @@ def build(key: LayerBuild):
                 emb if first else None,
             )
 
-        if const_expr(key.first):
+        if const_expr(key.first and not key.split):
             combine(None, n_in, _q4(key.first_q4), first=True)
             end_phase("first_combine")
 
@@ -409,9 +447,21 @@ def build(key: LayerBuild):
                 x4s=scr.x4s,
                 **{k: getattr(scr, k) for k in moe.scratch_words(shape)},
             )
+            if shape.ks > 1 and FOLD_PIECES + shape.max_pieces > FOLD_COUNTERS:
+                raise ValueError(
+                    f"{shape.max_pieces} gate/up pieces overrun the fold counters"
+                )
             push, read = all_reduce(MLP)
             moe.mlp(
-                g, shape, gemm, ml, scr.x, mw, b, push, end_phase,
+                g,
+                shape,
+                gemm,
+                ml,
+                scr.x,
+                mw,
+                b,
+                push,
+                end_phase,
                 (FOLD_PROJ, FOLD_PIECES),
                 pre,
             )
@@ -431,7 +481,9 @@ def build(key: LayerBuild):
         def back(weights, source, k, pending=None, name="out+allreduce+combine"):
             push, read = all_reduce(ATTN)
             tile = ex_.GroupTile(gl.aux.ptr, S)
-            gdn.out(g, gemm, weights, source, scr.part, tile, push, k, FOLD_OUT, pending)
+            gdn.out(
+                g, gemm, weights, source, scr.part, tile, push, k, FOLD_OUT, pending
+            )
             if const_expr(key.trace):
                 end_phase(name.removesuffix("+allreduce+combine"))
             reduce(push)
@@ -463,7 +515,7 @@ def build(key: LayerBuild):
                 qkv=scr.qkv,
                 z=scr.z,
                 ba=scr.ba,
-                core=scr.core,
+                core=core_out if key.split else scr.core,
                 core_s=scr.core_s,
                 part=scr.part,
                 st_idx=st_idx,
@@ -473,7 +525,29 @@ def build(key: LayerBuild):
                 ssm_stride=ssm_stride,
             )
             out_w = gdn.out_weights(w_out, w_out_s, key.out, key.out_shuffled)
-            if const_expr(tiled.resident(S)):
+            if const_expr(key.split):
+                out = norm.Out(scr.res, scr.x, scr.x4, scr.x4s, _q4(key.first_q4))
+                res = None if key.first else res_in
+                norm.combine(g, None, out, n_in, aux_f32, S, key.eps, emb, res)
+                # the projection's first weights, in the barrier's wait
+                pending = end_phase("combine", lambda: gdn.proj_issue(g, w))
+                gtag = tag0 + 1
+                gdn.proj(g, gemm, w, b, S, FOLD_PROJ, pending, gtag)
+                core_fmt = "bf16_h32" if key.out == "mxfp4_h32" else "bf16"
+                gdn.recur(
+                    g,
+                    w,
+                    b,
+                    aux_f32,
+                    S,
+                    key.gdn_eps,
+                    core_fmt,
+                    None,
+                    gtag,
+                    tag_core=False,
+                )
+                stamp("gdn_proj+recur")
+            elif const_expr(tiled.resident(S)):
                 # the recurrence polls the projection's tagged outputs; with a
                 # bf16 core out_proj polls the recurrence's too (its weights
                 # issued before the recurrence, to land under it), an MXFP4
@@ -488,7 +562,9 @@ def build(key: LayerBuild):
                         out_w, source, VALUE_DIM, pending, "gdn+out+allreduce+combine"
                     )
                 else:
-                    gdn.recur(g, w, b, aux_f32, S, key.gdn_eps, key.out, None, gtag)
+                    gdn.recur(
+                        g, w, b, aux_f32, S, key.gdn_eps, core_of(key), None, gtag
+                    )
                     pending = end_phase(
                         "gdn_proj+recur",
                         lambda: tiled.issue_unit(bid, tid, out_w, gdn.out_plan()),
@@ -498,15 +574,28 @@ def build(key: LayerBuild):
             else:
                 gdn.proj(g, gemm, w, b, S, FOLD_PROJ)
                 end_phase("gdn_proj+conv")
-                gdn.recur(g, w, b, aux_f32, S, key.gdn_eps, key.out)
+                gdn.recur(g, w, b, aux_f32, S, key.gdn_eps, core_of(key))
                 end_phase("gdn_recur")
                 if const_expr(key.out == "bf16"):
                     source = tiled.Source(scr.core, VALUE_DIM)
                 else:
                     source = tiled.Mx4Source(scr.core, scr.core_s, VALUE_DIM)
                 pre = back(out_w, source, VALUE_DIM)
-            mlp_half(pre)
-        if const_expr(key.kind == "attn"):
+            if const_expr(not key.split):
+                mlp_half(pre)
+        if const_expr(key.kind == "attn" and key.split):
+            out = norm.Out(scr.res, scr.x, scr.x4, scr.x4s, None)
+            norm.combine(g, None, out, n_in, aux_f32, S, key.eps, emb, res_in)
+            qw = attn_.qkv_weights(w_qkv)
+            pending = end_phase(
+                "combine",
+                lambda: tiled.issue_unit(bid, tid, qw, attn_.qkv_plan()),
+            )
+            attn_.qkv_proj(
+                g, gemm, w_qkv, scr.x, scr.qkv_out, scr.part, S, FOLD_PROJ, pending
+            )
+            stamp("qkv_proj")
+        if const_expr(key.kind == "attn" and not key.split):
             pre = back(
                 tiled.Bf16Weights(w_out, HIDDEN, ATTN_CORE),
                 gdn.GatedCore(attn, gate, ATTN_CORE),
@@ -521,6 +610,8 @@ def build(key: LayerBuild):
     def launch(
         scratch: Int64,
         emb: Int64,
+        res_in: Int64,
+        core_out: Int64,
         n_in: Int64,
         n_post: Int64,
         n_next: Int64,
@@ -562,6 +653,8 @@ def build(key: LayerBuild):
         kernel(
             scratch,
             emb,
+            res_in,
+            core_out,
             n_in,
             n_post,
             n_next,

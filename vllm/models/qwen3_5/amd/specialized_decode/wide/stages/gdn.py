@@ -80,7 +80,12 @@ from vllm.models.qwen3_5.amd.specialized_decode.wide.layout import (
     VALUE_DIM,
 )
 from vllm.models.qwen3_5.amd.specialized_decode.wide.stages import exchange as ex_
-from vllm.models.qwen3_5.amd.specialized_decode.wide.stages import mx, norm, tagged, tiled
+from vllm.models.qwen3_5.amd.specialized_decode.wide.stages import (
+    mx,
+    norm,
+    tagged,
+    tiled,
+)
 
 PROJ_SPLITS = 3  # 72 row groups x 3 = 216 units
 BA_SPLITS = 32  # [b | a] units: one 64-row group (32 rows) x 32 slices of 2 chunks
@@ -90,7 +95,9 @@ L2_EPS = 1e-6  # the in-kernel q / k L2 norm's
 # widths past tiled.RESIDENT_MAX up to which a projection group's conv loads
 # are issued by its last arriver alone
 CONV_LATE_ROWS = 48
-CORE_MODES = ("bf16", "mxfp4", "mxfp4_h32")  # the out_proj input's format
+# the out_proj input's format; "bf16_h32": Hadamard-rotated bf16 rows, for an
+# MXFP4 out_proj that quantizes them itself (``LayerBuild.split``)
+CORE_MODES = ("bf16", "bf16_h32", "mxfp4", "mxfp4_h32", "mxfp4_t", "mxfp4_h32_t")
 
 
 def proj_plan():
@@ -458,7 +465,9 @@ def recur_first(g, b, rows: int):
 
 
 @traced
-def recur(g, w, b, lds, rows: int, eps: float, core: str, h=None, tag=None):
+def recur(
+    g, w, b, lds, rows: int, eps: float, core: str, h=None, tag=None, tag_core=True
+):
     """``w``: ``a_log`` (f32), ``dt_bias`` (bf16), ``norm`` ([GDN_DV] bf16);
     ``b``: ``qkv``, ``z``, ``ba`` (partials), ``st_idx``, ``ssm`` (a slot [NV,
     DV, DK] f32, slots ``ssm_stride`` apart), ``core`` ([rows, VALUE_DIM]
@@ -467,7 +476,8 @@ def recur(g, w, b, lds, rows: int, eps: float, core: str, h=None, tag=None):
     units (row, value head) ``bid, bid + BLOCKS, ..``, the next unit's state
     loads in flight while one computes. With ``tag`` (resident widths, bf16
     core) the projection's outputs are tagged pairs (``proj``) and ``core``
-    is published as (bf16 pair, tag) pairs. ``h``: the first unit's state
+    is published as (bf16 pair, tag) pairs, unless ``tag_core`` is False (a
+    plain ``core`` another launch reads). ``h``: the first unit's state
     loads (``recur_first``), or None."""
     kq = g.lane % 32
     k0 = kq * 4
@@ -493,7 +503,7 @@ def recur(g, w, b, lds, rows: int, eps: float, core: str, h=None, tag=None):
             if g.tid < GDN_DV:
                 lds_st(lds + Y_AT + g.tid, fx.Float32(0.0))
             fx.barrier()
-        publish(g, b, lds, row, vh, core, tag)
+        publish(g, b, lds, row, vh, core, tag if tag_core else None)
         h = nxt
         fx.barrier()
 
@@ -536,7 +546,10 @@ def stage(g, w, b, lds, rows: int, row, vh, tag):
     else:
         got = tagged.poll(
             g,
-            [(b.qkv, (row * QKVZ + fx.min(col, i32(QKVZ - 4))) // 2, 2), (b.ba, gate_at, 1)],
+            [
+                (b.qkv, (row * QKVZ + fx.min(col, i32(QKVZ - 4))) // 2, 2),
+                (b.ba, gate_at, 1),
+            ],
             tag,
         )
         wv = got[0]
@@ -644,7 +657,10 @@ def publish(g, b, lds, row, vh, core: str, tag):
     """The head's 128 gated-norm outputs (``Y_AT``) to ``core``: bf16 (a
     thread four, or with ``tag`` as tagged pairs), or for an MXFP4
     ``out_proj`` a thread a 32-group rounded to bf16 (the stock norm's
-    output), Hadamard-rotated for "mxfp4_h32" (rounded again), quantized."""
+    output), Hadamard-rotated for "mxfp4_h32" (rounded again), quantized
+    (``mx.scale_code``; "_t": as the Triton FP4 GEMM does); "bf16_h32"
+    stores the rotated group as bf16 instead."""
+    h32, rceil = core.startswith("mxfp4_h32"), not core.endswith("_t")
     if const_expr(core == "bf16"):
         if g.tid < GDN_DV // 4:
             ys = lds_ld(lds + Y_AT + g.tid * 4, 4, fx.Float32)
@@ -654,15 +670,33 @@ def publish(g, b, lds, row, vh, core: str, tag):
                 st(b.core, first, fx.Vector.from_elements(words, fx.Int32), CM_DEV)
             else:
                 tagged.put(b.core, first, words, tag)
+    elif const_expr(core == "bf16_h32"):
+        if g.tid < GDN_DV // mx.GROUP:
+            vals = []
+            for m in range_constexpr(mx.GROUP // 4):
+                y4 = lds_ld(lds + Y_AT + g.tid * mx.GROUP + 4 * m, 4, fx.Float32)
+                vals += [bf16_round(y4[e]) for e in range(4)]
+            vals = norm.hadamard32(vals)
+            words = [
+                pack_bf16(vals[2 * e], vals[2 * e + 1]) for e in range(mx.GROUP // 2)
+            ]
+            first = (row * VALUE_DIM + vh * GDN_DV + g.tid * mx.GROUP) // 2
+            for q in range_constexpr(mx.GROUP // 8):
+                st(
+                    b.core,
+                    first + 4 * q,
+                    fx.Vector.from_elements(words[4 * q : 4 * q + 4], fx.Int32),
+                    CM_DEV,
+                )
     else:
         if g.tid < GDN_DV // mx.GROUP:
             vals = []
             for m in range_constexpr(mx.GROUP // 4):
                 y4 = lds_ld(lds + Y_AT + g.tid * mx.GROUP + 4 * m, 4, fx.Float32)
                 vals += [bf16_round(y4[e]) for e in range(4)]
-            if const_expr(core == "mxfp4_h32"):
+            if const_expr(h32):
                 vals = [bf16_round(v) for v in norm.hadamard32(vals)]
-            code = mx.scale_code(mx.amax(vals))
+            code = mx.scale_code(mx.amax(vals), rceil)
             words = mx.quant_f32_group(vals, code)
             el = row * VALUE_DIM + vh * GDN_DV + g.tid * mx.GROUP
             st(b.core, el // 8, fx.Vector.from_elements(words, fx.Int32), CM_DEV)

@@ -74,6 +74,8 @@ RESIDENT_MAX = 16  # widths whose GEMM units stage their whole K slice once
 # the loads at that phase's barrier cost more than the preload hides (measured
 # at 128 rows)
 PRELOAD_ROWS = 96
+
+
 def token_tiles(rows: int) -> int:
     return -(-rows // TILE)
 

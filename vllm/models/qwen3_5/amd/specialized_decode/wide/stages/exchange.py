@@ -144,12 +144,19 @@ class Exchange(TraceInvariant):
     ``bases``: every rank's mailbox base (wave-uniform Int64, rank order),
     ``own``: this rank's."""
 
-    def __init__(self, bases, own, rank, tp: int, kind: int, mode: str, parity, tag, rows):
+    def __init__(
+        self, bases, own, rank, tp: int, kind: int, mode: str, parity, tag, rows
+    ):
         if mode not in MODES:
             raise ValueError(f"exchange mode {mode!r}: one of {MODES}")
         if rows > _area_rows(mode):
             raise ValueError(f"{rows} rows past the {mode} region's")
-        self.bases, self.own, self.rank, self.tp = bases, fx.Int64(own), fx.Int32(rank), tp
+        self.bases, self.own, self.rank, self.tp = (
+            bases,
+            fx.Int64(own),
+            fx.Int32(rank),
+            tp,
+        )
         self.kind, self.mode, self.rows = kind, mode, rows
         self.region = region_base(kind, mode, parity, tp)
         self.tag = fx.Int32(tag)

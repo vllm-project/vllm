@@ -21,7 +21,19 @@ a full-attention layer's after vLLM's attention:
                 attn  o_proj + all-reduce + post-attention norm, MoE as above
 
 The embedding stays vLLM's; the last launch's closing norm is the final
-norm."""
+norm.
+
+A step of up to ``K.SPLIT_MAX`` rows runs each layer's MLP half on
+``mono.blocks.layer_block`` instead:
+
+    GDN layer   gdn   [embedding or] residual add + input norm, GDN -> core
+                layer_block   out_proj + all-reduce + post-attention norm,
+                              MoE + all-reduce
+    attention   attn  residual add + input norm, qkv_proj
+                (vLLM) q / k norms, RoPE, attention -> output, gate
+                layer_block   o_proj (gated) + ... as above
+
+and the final norm is vLLM's."""
 
 from typing import Any, NamedTuple
 
@@ -43,6 +55,7 @@ from vllm.models.qwen3_5.amd.specialized_decode.runtime.guards import (
 from vllm.models.qwen3_5.amd.specialized_decode.runtime.layers import (
     Launcher,
     attention_core,
+    gemma_norm,
 )
 from vllm.models.qwen3_5.amd.specialized_decode.runtime.routing import step_reason
 from vllm.models.qwen3_5.amd.specialized_decode.wide import layer as K
@@ -72,6 +85,22 @@ def agree(reasons: list[str], group, what: str) -> None:
         )
 
 
+def _compile_mono(launch, abi) -> None:
+    """Compiles a ``mono`` launch without running it (FlyDSL's compile-only
+    mode, which has no FLYDSL_ prefix, returns before the launch)."""
+    import os
+
+    old = os.environ.get("COMPILE_ONLY")
+    os.environ["COMPILE_ONLY"] = "1"
+    try:
+        launch(*abi.zeros(), stream=torch.cuda.current_stream())
+    finally:
+        if old is None:
+            del os.environ["COMPILE_ONLY"]
+        else:
+            os.environ["COMPILE_ONLY"] = old
+
+
 class SpecializedDecode:
     """The executor over one ``Qwen3_5Model``: builds the launch state, binds
     it to each KV cache and plans and runs every decode step."""
@@ -93,12 +122,11 @@ class SpecializedDecode:
         builds = sorted({k for ks in self.keys.values() for k in ks}, key=repr)
         for key in builds:
             K.compile_only(key)
-        self.failstop = FailStop(
-            self.launch.health[FAILED : FAILED + 1],
-            tp.rank_in_group,
-            tp.world_size,
-            tp.cpu_group,
-        )
+        failed = [self.launch.health[FAILED : FAILED + 1]]
+        if self.launch.split_widths:
+            builds += self._compile_split(dev)
+            failed.append(self.launch.mono_health[FAILED : FAILED + 1])
+        self.failstop = FailStop(failed, tp.rank_in_group, tp.world_size, tp.cpu_group)
         self._kv: tuple[int, int] | None = None
         self.steps = 0
         # the epoch at the last LOG_EVERY step, copied without blocking
@@ -117,6 +145,34 @@ class SpecializedDecode:
             k0.qkvz,
             k0.out,
         )
+
+    def _compile_split(self, dev) -> list:
+        """Compiles the split widths' ``layer_block`` and ``gdn_block`` builds
+        and warms up the residual add + norm vLLM's parts of their steps run,
+        before graph capture."""
+        from vllm.models.qwen3_5.amd.specialized_decode.mono import blocks
+
+        la = self.launch
+        keys = {
+            la.mono_key(i, s)
+            for s in la.split_widths
+            for i in range(len(self.model.layers))
+        }
+        gdn_keys = {
+            la.gdn_key(i, s, i == 0)
+            for s in la.split_widths
+            for i in range(len(self.model.layers))
+            if la.mono_gdn_layer(i, s)
+        }
+        for key in sorted(keys, key=repr):
+            _compile_mono(blocks.build_layer(key), blocks.LAYER_ABI)
+        for key in sorted(gdn_keys, key=repr):
+            _compile_mono(blocks.build_gdn(key), blocks.GDN_ABI)
+        with torch.inference_mode():
+            for s in (1, 2):
+                x = torch.zeros(s, L.HIDDEN, dtype=torch.bfloat16, device=dev)
+                gemma_norm(self.model.norm, x, x)
+        return sorted(keys, key=repr) + sorted(gdn_keys, key=repr)
 
     def _keys(self, rows: int) -> list:
         """Every layer's build at ``rows``, in step order."""
@@ -200,13 +256,17 @@ class SpecializedDecode:
         la.epoch.add_(1)
         if inputs_embeds is None:
             inputs_embeds = model.embed_input_ids(input_ids)
+        if rows <= K.SPLIT_MAX:
+            return self._run_split(step, inputs_embeds, positions)
         keys = self.keys[rows]
         seq = 0
         for i, layer in enumerate(model.layers):
             if layer.layer_type == "linear_attention":
                 dyn = {
                     "emb": inputs_embeds if i == 0 else 0,
-                    "st_idx": md[layer.linear_attn.prefix].non_spec_state_indices_tensor,
+                    "st_idx": md[
+                        layer.linear_attn.prefix
+                    ].non_spec_state_indices_tensor,
                 }
             else:
                 qkv = la.view("qkv_out", rows, L.QKV)
@@ -215,6 +275,38 @@ class SpecializedDecode:
             seq = la.launch(keys[i], i, seq, dyn)
         out = la.out[:rows]
         out.copy_(la.view("x", rows, L.HIDDEN))
+        return out
+
+    def _run_split(self, step: Step, emb: torch.Tensor, positions) -> torch.Tensor:
+        """A split width's forward (``K.SPLIT_MAX``): each layer's split
+        launch (or ``gdn_block``: ``Launcher.mono_gdn_layer``), then its
+        ``layer_block``."""
+        model, la, md, rows = self.model, self.launch, step.attn_metadata, step.width
+        keys = self.keys[rows]
+        h, res = emb, None
+        seq = 0
+        for i, layer in enumerate(model.layers):
+            gate = None
+            dyn = {"emb": h, "res_in": 0 if res is None else res}
+            if la.mono_gdn_layer(i, rows):
+                st_idx = md[layer.linear_attn.prefix].non_spec_state_indices_tensor
+                core, residual = la.mono_gdn(i, h, res, st_idx)
+                h, res = la.mono_layer(i, core, gate, residual)
+                continue
+            if layer.layer_type == "linear_attention":
+                core = la.core[:rows]
+                st_idx = md[layer.linear_attn.prefix].non_spec_state_indices_tensor
+                dyn |= {"core_out": core, "st_idx": st_idx}
+                seq = la.launch(keys[i], i, seq, dyn)
+            else:
+                dyn["w_qkv"] = layer.self_attn.qkv_proj.weight
+                seq = la.launch(keys[i], i, seq, dyn)
+                qkv = la.view("qkv_out", rows, L.QKV)
+                core, gate = attention_core(layer.self_attn, qkv, positions)
+            residual = la.view("res", rows, L.HIDDEN)
+            h, res = la.mono_layer(i, core, gate, residual)
+        out = la.out[:rows]
+        out.copy_(gemma_norm(model.norm, h, res)[0])
         return out
 
     LOG_EVERY = 1024

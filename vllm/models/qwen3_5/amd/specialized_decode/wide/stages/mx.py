@@ -3,9 +3,11 @@
 """MXFP4 activations on the scaled fp4 matrix instruction (gfx950).
 
 A 32-value group is sixteen bytes of e2m1 codes (low nibble first) and one
-E8M0 scale code. The scale follows AITER's activation quantization (the stock
-MoE's, ``_mxfp4_quant_op``): ``amax`` rounded on its top mantissa bits
-(``+ 0x200000``, the mantissa then dropped), the code that exponent minus 2,
+E8M0 scale code, as the stock consumer's activation quantization takes it:
+AITER's ``per_1x32_f4_quant_hip`` (the ASM FP4 GEMM's, and ``fused_moe``'s
+input and inter-stage) the smallest power of two at least ``amax / 6``
+(``rceil``); the Triton FP4 GEMM's ``dynamic_mxfp4_quant`` ``amax`` rounded
+on its top mantissa bits (``+ 0x200000``, the mantissa then dropped) minus 2,
 so values past 6 x scale saturate. ``mfma_f4`` (``common.ops``) multiplies two
 16 x 128 operands of such groups: a lane holds row (token) ``lane % 16`` and
 the 32 values of K block ``lane // 16``, the block's scale code in the low byte
@@ -26,8 +28,21 @@ def i32(v):
     return fx.Int32(v)
 
 
-def scale_code(amax):
-    """The E8M0 code of a group whose largest magnitude is ``amax`` (f32)."""
+def scale_code(amax, rceil: bool = True):
+    """The E8M0 code of a group whose largest magnitude is ``amax`` (f32):
+    ``rceil`` AITER's HIP quantization's, else the Triton one's."""
+    if rceil:
+        a = fx.Float32(amax)
+        q = a * fx.Float32(1.0 / 6.0)  # amax / 6 rounded to nearest (Markstein)
+        q = fx.Float32(
+            fmath.fma(
+                fx.Float32(fmath.fma(-q, fx.Float32(6.0), a)), fx.Float32(1.0 / 6.0), q
+            )
+        )
+        bits = q.bitcast(fx.Int32)
+        e = (bits >> i32(23)) & i32(0xFF)
+        e = e + ((bits & i32(0x7FFFFF)) != i32(0)).select(i32(1), i32(0))
+        return fx.min(fx.max(e, i32(1)), i32(253))
     bits = fx.Float32(amax).bitcast(fx.Int32)
     e = ((bits + i32(0x200000)) >> i32(23)) & i32(0xFF)
     return fx.min(fx.max(e - i32(2), i32(0)), i32(254))

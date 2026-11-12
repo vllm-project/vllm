@@ -229,9 +229,13 @@ def _layer_reasons(layer) -> list[str]:
     out += why
     dense |= more
     out += [
-        f"{name} {w.dtype}, not bf16" for name, w in dense.items() if w.dtype != torch.bfloat16
+        f"{name} {w.dtype}, not bf16"
+        for name, w in dense.items()
+        if w.dtype != torch.bfloat16
     ]
-    out += [f"{name} not contiguous" for name, w in dense.items() if not w.is_contiguous()]
+    out += [
+        f"{name} not contiguous" for name, w in dense.items() if not w.is_contiguous()
+    ]
     return out
 
 
@@ -301,7 +305,8 @@ def cache_reasons(model, tp: int) -> list[str]:
 
 class FailStop:
     """Stops every TP rank at the same step once any of them gave up an in-kernel
-    wait (its health word FAILED, ``wide.abi``). Each step queues a D2H copy of
+    wait (a FAILED health word: the wide launches', ``wide.abi``, and the
+    split widths' ``layer_block``'s, ``mono.abi``). Each step queues a D2H copy of
     this rank's word and keeps the newest copy that has landed, without blocking;
     every CHECK_EVERY steps the ranks agree on those over the TP CPU group and all
     raise together. A rank that raised alone would leave the others in the next
@@ -309,9 +314,9 @@ class FailStop:
 
     CHECK_EVERY = 16
 
-    def __init__(self, failed: torch.Tensor, rank: int, world: int, group):
+    def __init__(self, failed: list[torch.Tensor], rank: int, world: int, group):
         self.failed, self.rank, self.world, self.group = failed, rank, world, group
-        self.host = torch.zeros(1, dtype=torch.int32, pin_memory=True)
+        self.host = torch.zeros(len(failed), dtype=torch.int32, pin_memory=True)
         self.copied: torch.cuda.Event | None = None
         self.seen = False
         self.steps = 0
@@ -322,8 +327,9 @@ class FailStop:
             return
         if self.copied is None or self.copied.query():
             if self.copied is not None:
-                self.seen |= bool(self.host[0])
-            self.host.copy_(self.failed, non_blocking=True)
+                self.seen |= bool(self.host.any())
+            for j, word in enumerate(self.failed):
+                self.host[j : j + 1].copy_(word, non_blocking=True)
             self.copied = torch.cuda.Event()
             self.copied.record()
         self.steps += 1

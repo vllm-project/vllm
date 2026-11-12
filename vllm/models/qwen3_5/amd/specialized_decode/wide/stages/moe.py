@@ -50,6 +50,7 @@ from vllm.models.qwen3_5.amd.specialized_decode.wide.common.ops import (
     exp,
     ld,
     ld_i32x4,
+    lds_barrier,
     lds_ld,
     lds_st,
     mfma_f4,
@@ -108,9 +109,14 @@ def local_route(rows: int) -> bool:
     return rows <= LOCAL_ROUTE_MAX
 
 
+EXP_UPKS = 0
+
+
 def up_splits(rows: int) -> int:
     """K slices of a gate/up piece: a step of a few rows has ~11 units a row,
     8 pieces a unit, too few for 256 CUs when each streams 256 KiB."""
+    if EXP_UPKS:
+        return EXP_UPKS
     if rows <= 1:
         return 4
     if rows <= 2:
@@ -340,7 +346,7 @@ def route(g, part, route_buf, rows: int):
         for s in range_constexpr(1, plan.splits):
             sg = sg + shared[s]
         picks = []
-        for j in range_constexpr(TOPK):
+        for _ in range_constexpr(TOPK):
             best_v, best_i = values[0], index[0]
             for p in range_constexpr(1, PER):
                 take = values[p] > best_v
@@ -568,9 +574,7 @@ def build_schedule(tid, s: Shape, lds, load_id):
                 u = unit_start + blk
                 lds_st(lds.units + u * 3, e)
                 lds_st(lds.units + u * 3 + 1, start + blk * TILE)
-                lds_st(
-                    lds.units + u * 3 + 2, fx.min(counts[r] - blk * TILE, i32(TILE))
-                )
+                lds_st(lds.units + u * 3 + 2, fx.min(counts[r] - blk * TILE, i32(TILE)))
         start = start + counts[r]
         unit_start = unit_start + blocks[r]
     if tid == 0:
@@ -738,12 +742,12 @@ def _up_epilogue(g, s, lds, b, pc, acc, fold0: int):
     piece = pc.u * PIECES + pc.blk
     if const_expr(s.ks == 1):
         lds_st(lds.panel + row * 64 + col, acc.bitcast(fx.Int32))
-        fx.barrier()
+        lds_barrier()
         last = True
     else:
         st(b.upart, ((piece * s.ks + pc.ks) * TILE + row) * 64 + col, acc, CM_DEV)
         last = fold_arrive(g, i32(fold0) + piece, s.ks)
-    if last:
+    if last:  # noqa: SIM102 (``last`` may be a trace-time True)
         if wave == 0:
             if const_expr(s.ks == 1):
                 at = lds.panel + row * 64 + group * 8
@@ -756,7 +760,10 @@ def _up_epilogue(g, s, lds, b, pc, acc, fold0: int):
                 us = [fx.Float32(0.0)] * 8
                 for k in range_constexpr(s.ks):
                     at = ((piece * s.ks + k) * TILE + row) * 64 + group * 8
-                    gk = [ld(b.upart, at + 4 * h, fx.Float32, 4, cm=CM_DEV) for h in range(2)]
+                    gk = [
+                        ld(b.upart, at + 4 * h, fx.Float32, 4, cm=CM_DEV)
+                        for h in range(2)
+                    ]
                     uk = [
                         ld(b.upart, at + 32 + 4 * h, fx.Float32, 4, cm=CM_DEV)
                         for h in range(2)
@@ -772,7 +779,7 @@ def _up_epilogue(g, s, lds, b, pc, acc, fold0: int):
                 st(b.act4, a * (RI // 8) + pc.blk * 4 + group, word, CM_DEV)
                 if group == 0:
                     st(b.act4s, a * AGROUPS + pc.blk, code, CM_DEV)
-    fx.barrier()
+    lds_barrier()
 
 
 # --------------------------------------------------------------------------
@@ -881,7 +888,9 @@ def down(g, s, lds, w, b, xch, local: bool):
                         )
                     if g.lane % TILE < count:
                         lds_st(
-                            lds.contrib + a * (TILE * s.pass_tiles) + t * TILE
+                            lds.contrib
+                            + a * (TILE * s.pass_tiles)
+                            + t * TILE
                             + (g.lane // TILE) * 4,
                             acc.bitcast(fx.Int32),
                         )
@@ -900,7 +909,10 @@ def down(g, s, lds, w, b, xch, local: bool):
                         wj = lds_ld(lds.wts + row * SLOTS + j).bitcast(fx.Float32)
                     else:
                         wj = ld(
-                            b.route, rows * SLOTS + row * SLOTS + j, fx.Float32, cm=CM_DEV
+                            b.route,
+                            rows * SLOTS + row * SLOTS + j,
+                            fx.Float32,
+                            cm=CM_DEV,
                         )
                     cj = lds_ld(lds.contrib + (row * SLOTS + j) * cols + c).bitcast(
                         fx.Float32
@@ -1220,7 +1232,12 @@ def _down_stream(g, s, lds, db, ds, out, dest, xb, xc, group_live):
         weights, codes = loaded
         for t in range_constexpr(DOWN_BLOCK):
             acc[t] = mfma_f4(
-                weights[t], xb[k], zeros(4) if k == 0 else acc[t], codes[t // 2], xc[k], opsel_a=2 * (k % 2) + t % 2
+                weights[t],
+                xb[k],
+                zeros(4) if k == 0 else acc[t],
+                codes[t // 2],
+                xc[k],
+                opsel_a=2 * (k % 2) + t % 2,
             )
         if const_expr(k == steps - 1):
             _down_store(g, lds, out, dest, first_tile(blk), acc)
@@ -1233,7 +1250,9 @@ def _down_store(g, lds, out, dest, first, acc):
     row, group = g.lane % TILE, g.lane // TILE
     base = lds.stage + g.wave * (TILE * STAGE_STRIDE)
     for t in range_constexpr(DOWN_BLOCK):
-        lds_st(base + row * STAGE_STRIDE + (4 * t + group) * 4, acc[t].bitcast(fx.Int32))
+        lds_st(
+            base + row * STAGE_STRIDE + (4 * t + group) * 4, acc[t].bitcast(fx.Int32)
+        )
     column = first * TILE + row * 4
     for qd in range_constexpr(4):
         valid, a = dest[qd]
@@ -1257,11 +1276,16 @@ def major_combine(g, xch, b, rows: int):
             ld(b.route, rows * SLOTS + tk * SLOTS + j, fx.Float32, cm=CM_DEV)
             for j in range(SLOTS)
         ]
-        halves = [ld(b.split, tk * SLOTS + j, fx.Int32, cm=CM_DEV) == xch.tag for j in range(SLOTS)]
+        halves = [
+            ld(b.split, tk * SLOTS + j, fx.Int32, cm=CM_DEV) == xch.tag
+            for j in range(SLOTS)
+        ]
         ps, ps2 = [], []
         for j in range_constexpr(SLOTS):
             at = (tk * SLOTS + j) * HIDDEN + col
-            ps.append([ld(b.mpart, at + 4 * h, fx.Float32, 4, cm=CM_DEV) for h in range(2)])
+            ps.append(
+                [ld(b.mpart, at + 4 * h, fx.Float32, 4, cm=CM_DEV) for h in range(2)]
+            )
             ps2.append(
                 [
                     ld(
@@ -1324,9 +1348,7 @@ def mlp(g, s: Shape, gemm, ml, x, w: Weights, b: Bufs, xch, end_phase, folds, pr
     else:
         route(g, b.part, b.route, s.rows)
         end_phase(names[1])
-        build_schedule(
-            g.tid, s, lds, lambda a: ld(b.route, a, fx.Int32, cm=CM_DEV)
-        )
+        build_schedule(g.tid, s, lds, lambda a: ld(b.route, a, fx.Int32, cm=CM_DEV))
     if const_expr(major(s.rows)):
         experts(g, s, lds, w, b, xch.tag)
         end_phase(names[2])

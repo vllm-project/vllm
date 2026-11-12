@@ -11,6 +11,8 @@ slot's: the k-th barrier of a launch waits for ``k * 4`` on every stripe, so
 each launch must start from zeroed counters. Launches alternate between two
 slots, and each zeroes the slot the next one uses (the launch before it is
 done by then): ``sync`` is this launch's slot, ``sync_next`` the next one's.
+A step of an odd launch count runs its last launch on a third slot, so the
+next step starts on slot 0 again (``launch_slots``).
 Every CTA must take every barrier of a launch: the kernels run one CTA per
 CU, all co-resident.
 
@@ -49,15 +51,28 @@ STRIPES = 64  # arrival counters: wave 0's lanes poll them all at once
 STRIPE_WORDS = 64  # one 256-byte line a counter
 PER_STRIPE = BLOCKS // STRIPES
 SLOT_WORDS = STRIPES * STRIPE_WORDS  # a launch slot's barrier counters
-FOLD_BASE = 2 * SLOT_WORDS  # the fold counters follow both slots' stripes
+SLOTS = 3
+FOLD_BASE = SLOTS * SLOT_WORDS  # the fold counters follow the slots' stripes
 FOLD_STRIDE = 16  # a fold counter's words: one 64-byte line
-FOLD_COUNTERS = 512
+FOLD_COUNTERS = 4096  # pieces from FOLD_PIECES: ~1.5k at 16 rows with K splits
 
 
 def sync_words() -> int:
-    """i32 words of a rank's sync buffer: two launch slots, then the fold
+    """i32 words of a rank's sync buffer: the launch slots, then the fold
     counters."""
     return FOLD_BASE + FOLD_COUNTERS * FOLD_STRIDE
+
+
+def launch_slots(n: int) -> list[tuple[int, int]]:
+    """(``sync``, ``sync_next``) slot indices of a step's ``n`` launches: the
+    same every step (a CUDA graph bakes them), each launch zeroing the next
+    one's slot, the last the next step's first's."""
+    if n < 2:
+        raise ValueError(f"{n} launches a step: the barrier slots need two")
+    slot = [i % 2 for i in range(n)]
+    if n % 2:
+        slot[-1] = 2
+    return [(slot[i], slot[(i + 1) % n]) for i in range(n)]
 
 
 class TraceInvariant:

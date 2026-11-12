@@ -76,7 +76,7 @@ def _worker(rank, rows, variant, port, out_q):
         variant
     ]
     shuffled = variant != "mxfp4t"
-    q4 = K.q4_of(fmt) or "none"
+    q4 = K.q4_of(fmt, shuffled) or "none"
     rip = L.RI
     eps = 1e-6
     log = []
@@ -150,8 +150,9 @@ def _worker(rank, rows, variant, port, out_q):
         for _ in range(2)
     ]
 
-    peers = PeerBuffer(PEER_HEAD + exchange.mailbox_bytes(TP), dist.group.WORLD,
-                       rank, TP, dev)
+    peers = PeerBuffer(
+        PEER_HEAD + exchange.mailbox_bytes(TP), dist.group.WORLD, rank, TP, dev
+    )
     peers.bytes.zero_()
     table = (peers.addresses + PEER_HEAD).clone()
     alarm = int(peers.addresses[0].item()) + 4 * rank
@@ -172,21 +173,41 @@ def _worker(rank, rows, variant, port, out_q):
         a = dict.fromkeys(K.ABI.names, 0)
         m = moes[i]
         a |= dict(
-            scratch=scratch, peers=table, rank=rank, epoch=epoch, layer=i,
-            folds=base + 4 * FOLD_BASE, health=health, alarm=alarm, trace=0,
-            sync=slots[seq % 2], sync_next=slots[(seq + 1) % 2],
-            w_gate=m["w_gate"], w13=m["w13"], w13s=m["w13s"], w2=m["w2"],
+            scratch=scratch,
+            peers=table,
+            rank=rank,
+            epoch=epoch,
+            layer=i,
+            folds=base + 4 * FOLD_BASE,
+            health=health,
+            alarm=alarm,
+            trace=0,
+            sync=slots[seq % 2],
+            sync_next=slots[(seq + 1) % 2],
+            w_gate=m["w_gate"],
+            w13=m["w13"],
+            w13s=m["w13s"],
+            w2=m["w2"],
             w2s=m["w2s"],
         )
         return a | kw
 
     def gdn_args(gk, conv, ssm):
         return dict(
-            w_qkvz=gk["qkvz"], w_qkvz_s=gk["qkvz_s"], w_ba=gk["ba"],
-            w_conv=gk["conv"], a_log=gk["a_log"], dt_bias=gk["dt_bias"],
-            gdn_norm=gk["norm"], w_out=gk["out"], w_out_s=gk["out_s"],
-            conv_state=conv, conv_stride=conv.stride(0), ssm=ssm,
-            ssm_stride=ssm.stride(0), st_idx=st_idx,
+            w_qkvz=gk["qkvz"],
+            w_qkvz_s=gk["qkvz_s"],
+            w_ba=gk["ba"],
+            w_conv=gk["conv"],
+            a_log=gk["a_log"],
+            dt_bias=gk["dt_bias"],
+            gdn_norm=gk["norm"],
+            w_out=gk["out"],
+            w_out_s=gk["out_s"],
+            conv_state=conv,
+            conv_stride=conv.stride(0),
+            ssm=ssm,
+            ssm_stride=ssm.stride(0),
+            st_idx=st_idx,
         )
 
     def launch(key, a):
@@ -204,6 +225,12 @@ def _worker(rank, rows, variant, port, out_q):
             tot = tot + p.double()
         return R.bf(tot).to(dev)
 
+    # the first layer's reference rows come from the embedding, not the
+    # kernel's x: a rare row a bf16 ulp apart under the Hadamard rotation moves
+    # its 32-groups' MXFP4 codes (the rotation itself is checked bit for bit in
+    # test_split.py), so an h32 first layer allows that one row
+    slack = {"L0": 1 if fmt == "mxfp4_h32" else 0}
+
     def mlp_ref(res, xn, i, n_next, tag, x4_live):
         m = moes[i]
         route = scratch[lay["route"][0] :].view(torch.int32)
@@ -214,15 +241,33 @@ def _worker(rank, rows, variant, port, out_q):
                 sview("x4", L.HIDDEN // 2, torch.uint8),
                 sview("x4s", L.HIDDEN // 32, torch.int32),
             )
-            note(f"{tag} moe input (MXFP4)", rel(kxd, R.quant_act(xn)), 2e-2)
+            note(
+                f"{tag} moe input (MXFP4)",
+                rel(kxd, R.quant_act(xn)),
+                2e-2 * (1 + slack.get(tag, 0)),
+            )
         y, ids, ws = R.moe(
-            xn, m["w_gate"], m["r13"], m["r13s"], m["r2"], m["r2s"], L.EXPERTS,
-            L.TOPK, L.RI, rip, prefer=kr[:, : L.TOPK], xd=kxd,
+            xn,
+            m["w_gate"],
+            m["r13"],
+            m["r13s"],
+            m["r2"],
+            m["r2s"],
+            L.EXPERTS,
+            L.TOPK,
+            L.RI,
+            rip,
+            prefer=kr[:, : L.TOPK],
+            xd=kxd,
         )
         if "y" in lay:  # else (expert-major) the residual after the exchange
-            note(f"{tag} moe y", rel(sview("y", L.HIDDEN, torch.float32), y), 1e-2)
+            note(
+                f"{tag} moe y",
+                rel(sview("y", L.HIDDEN, torch.float32), y),
+                1e-2 * (1 + slack.get(tag, 0)),
+            )
         same = sum(set(kr[r].tolist()) == set(ids[r].tolist()) for r in range(S))
-        note(f"{tag} routes", 1 - same / S, 0)
+        note(f"{tag} routes", 1 - same / S, slack.get(tag, 0) / S)
         kws = route.view(torch.float32)[S * L.SLOTS : 2 * S * L.SLOTS]
         note(f"{tag} route weights", rel(kws.view(S, L.SLOTS), ws), 1e-2)
         res2 = R.bf(res + allsum(R.bf(y)))
@@ -230,55 +275,89 @@ def _worker(rank, rows, variant, port, out_q):
 
     t0 = time.time()
     # GDN layer 0, the step's first; the next layer is attention
-    k0 = K.LayerBuild(kind="gdn", tokens=S, tp=TP, first=True, qkvz=fmt,
-                      qkvz_shuffled=shuffled, out=fmt, out_shuffled=shuffled,
-                      first_q4=q4, qkv_tail=True)
+    k0 = K.LayerBuild(
+        kind="gdn",
+        tokens=S,
+        tp=TP,
+        first=True,
+        qkvz=fmt,
+        qkvz_shuffled=shuffled,
+        out=fmt,
+        out_shuffled=shuffled,
+        first_q4=q4,
+        qkv_tail=True,
+    )
     conv0, ssm0 = convs[0].clone(), ssms[0].clone()
-    launch(k0, args(0, 0, emb=emb, n_in=norms[0], n_post=norms[1],
-                    n_next=norms[2], w_qkv=w_qkv, **gdn_args(g0k, conv0, ssm0)))
+    launch(
+        k0,
+        args(
+            0,
+            0,
+            emb=emb,
+            n_in=norms[0],
+            n_post=norms[1],
+            n_next=norms[2],
+            w_qkv=w_qkv,
+            **gdn_args(g0k, conv0, ssm0),
+        ),
+    )
     # in f32 as the kernel and stock: under a Hadamard rotation one ulp of x
     # moves a whole 32-group's MXFP4 codes
     z0 = emb.float()
-    x0 = R.bf(z0 * torch.rsqrt((z0 * z0).mean(-1, keepdim=True) + eps)
-              * (1 + norms[0].float()))
-    _, _, rconv, rssm, _, outp = R.gdn(x0, g0r, st_idx, convs[0], ssms[0], eps,
-                                       (fmt, fmt))
+    x0 = R.bf(
+        z0
+        * torch.rsqrt((z0 * z0).mean(-1, keepdim=True) + eps)
+        * (1 + norms[0].float())
+    )
+    _, _, rconv, rssm, _, outp = R.gdn(
+        x0, g0r, st_idx, convs[0], ssms[0], eps, (fmt, fmt), shuffled
+    )
     note("L0 conv state", rel(conv0, rconv), 1e-2)
     note("L0 ssm state", rel(ssm0, rssm), 1e-2)
     res1 = R.bf(emb.double() + allsum(outp))
-    res2, x2 = mlp_ref(res1, R.gemma_norm(res1, norms[1], eps), 0, norms[2], "L0",
-                       True)
+    res2, x2 = mlp_ref(res1, R.gemma_norm(res1, norms[1], eps), 0, norms[2], "L0", True)
     kres, kx = sview("res", L.HIDDEN).clone(), sview("x", L.HIDDEN).clone()
-    note("L0 residual", rel(kres, res2), 1e-2)
-    note("L0 x", rel(kx, x2), 1e-2)
+    note("L0 residual", rel(kres, res2), 1e-2 * (1 + slack["L0"]))
+    note("L0 x", rel(kx, x2), 1e-2 * (1 + slack["L0"]))
     tail = R.bf(kx.double() @ w_qkv.double().T)
     note("L0 next qkv_proj", rel(sview("qkv_out", L.QKV), tail), 1e-2)
 
     # attention layer 1: o_proj and the MLP half; the next layer is GDN
     k1 = K.LayerBuild(kind="attn", tokens=S, tp=TP, next_q4=q4)
-    launch(k1, args(1, 1, n_post=norms[3], n_next=norms[4], w_out=w_o, attn=attn,
-                    gate=gate))
+    launch(
+        k1,
+        args(1, 1, n_post=norms[3], n_next=norms[4], w_out=w_o, attn=attn, gate=gate),
+    )
     core1 = R.bf(attn.double() * R.bf(torch.sigmoid(gate.double())))
     res3 = R.bf(kres.double() + allsum(R.bf(core1 @ w_o.double().T)))
-    res4, x4 = mlp_ref(res3, R.gemma_norm(res3, norms[3], eps), 1, norms[4], "L1",
-                       q4 == "none")
+    res4, x4 = mlp_ref(
+        res3, R.gemma_norm(res3, norms[3], eps), 1, norms[4], "L1", q4 == "none"
+    )
     kres, kx = sview("res", L.HIDDEN).clone(), sview("x", L.HIDDEN).clone()
     note("L1 residual", rel(kres, res4), 1e-2)
     note("L1 x", rel(kx, x4), 1e-2)
 
     # GDN layer 2, closing with the final norm
-    k2 = K.LayerBuild(kind="gdn", tokens=S, tp=TP, qkvz=fmt, qkvz_shuffled=shuffled,
-                      out=fmt, out_shuffled=shuffled)
+    k2 = K.LayerBuild(
+        kind="gdn",
+        tokens=S,
+        tp=TP,
+        qkvz=fmt,
+        qkvz_shuffled=shuffled,
+        out=fmt,
+        out_shuffled=shuffled,
+    )
     conv2, ssm2 = convs[1].clone(), ssms[1].clone()
-    launch(k2, args(2, 2, n_post=norms[5], n_next=norms[6],
-                    **gdn_args(g2k, conv2, ssm2)))
-    _, _, rconv, rssm, _, outp = R.gdn(kx.double(), g2r, st_idx, convs[1], ssms[1],
-                                       eps, (fmt, fmt))
+    launch(
+        k2, args(2, 2, n_post=norms[5], n_next=norms[6], **gdn_args(g2k, conv2, ssm2))
+    )
+    _, _, rconv, rssm, _, outp = R.gdn(
+        kx.double(), g2r, st_idx, convs[1], ssms[1], eps, (fmt, fmt), shuffled
+    )
     note("L2 conv state", rel(conv2, rconv), 1e-2)
     note("L2 ssm state", rel(ssm2, rssm), 1e-2)
     res5 = R.bf(kres.double() + allsum(outp))
-    res6, x6 = mlp_ref(res5, R.gemma_norm(res5, norms[5], eps), 2, norms[6], "L2",
-                       True)
+    res6, x6 = mlp_ref(res5, R.gemma_norm(res5, norms[5], eps), 2, norms[6], "L2", True)
     note("L2 residual", rel(sview("res", L.HIDDEN), res6), 1e-2)
     note("L2 x (final norm)", rel(sview("x", L.HIDDEN), x6), 1e-2)
     out_q.put((rank, log, time.time() - t0))
@@ -295,8 +374,7 @@ def test_layers_tp8(rows, variant):
     ctx = mp.get_context("spawn")
     q = ctx.Queue()
     procs = [
-        ctx.Process(target=_worker, args=(r, rows, variant, port, q))
-        for r in range(TP)
+        ctx.Process(target=_worker, args=(r, rows, variant, port, q)) for r in range(TP)
     ]
     for p in procs:
         p.start()
