@@ -23,6 +23,7 @@ from vllm.engine.arg_utils import EngineArgs
 from vllm.model_executor.model_loader.tensorizer import (
     TensorizerConfig,
     TensorSerializer,
+    deserialize_tensorizer_model,
     is_vllm_tensorized,
     open_stream,
     tensorize_vllm_model,
@@ -31,6 +32,7 @@ from vllm.model_executor.model_loader.tensorizer_loader import (
     BLACKLISTED_TENSORIZER_ARGS,
     TensorizerLoader,
 )
+from vllm.model_executor.models.utils import StageMissingLayer, pp_stage
 from vllm.utils.import_utils import PlaceholderModule
 
 from .conftest import DummyExecutor, assert_from_collective_rpc
@@ -362,6 +364,39 @@ def test_deserialized_hf_weights_are_ready_for_forward(tmp_path, monkeypatch):
     loaded = TensorizerLoader(load_config).load_model(config, model_config)
 
     torch.testing.assert_close(loaded(inputs), source(inputs))
+
+
+@torch.inference_mode()
+def test_deserialize_skips_modules_this_pp_stage_does_not_build(tmp_path):
+    """A vLLM model tensorized with one pipeline stage loads into a stage that
+    skips some of its modules, such as `lm_head` before the last stage."""
+
+    def build() -> torch.nn.Module:
+        model = torch.nn.Module()
+        model.register_parameter(
+            "vllm_tensorized_marker",
+            torch.nn.Parameter(torch.ones(1), requires_grad=False),
+        )
+        model.layer = torch.nn.Linear(2, 2, bias=False)
+        return model
+
+    source = build()
+    source.lm_head = torch.nn.Linear(2, 2, bias=False)
+    path = tmp_path / "model.tensors"
+    with open_stream(path, "wb+") as stream:
+        serializer = TensorSerializer(stream)
+        serializer.write_module(source)
+        serializer.close()
+
+    with torch.device("meta"):
+        model = build()
+        with pp_stage(model, keep=False):
+            model.lm_head = torch.nn.Linear(2, 2, bias=False)
+
+    deserialize_tensorizer_model(model, TensorizerConfig(tensorizer_uri=str(path)))
+
+    assert isinstance(model.lm_head, StageMissingLayer)
+    torch.testing.assert_close(model.layer.weight.cpu(), source.layer.weight)
 
 
 def test_load_with_just_model_tensors(just_serialize_model_tensors, model_ref):

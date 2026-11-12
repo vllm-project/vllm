@@ -495,8 +495,15 @@ def deserialize_tensorizer_model(
             f"It must either point to a local existing file, or have a "
             f"S3, HTTP or HTTPS scheme."
         )
-    # Skip modules this model lacks, unloaded parameters fail the meta check
-    modules = {name for name, _ in model.named_modules()}
+    from vllm.model_executor.models.utils import PPMissingLayer, StageMissingLayer
+
+    # Skip modules this model or pipeline stage lacks, unloaded parameters fail
+    # the meta check
+    modules = {
+        name
+        for name, module in model.named_modules()
+        if not isinstance(module, (PPMissingLayer, StageMissingLayer))
+    }
     skipped: list[str] = []
 
     def in_model(name: str) -> bool:
