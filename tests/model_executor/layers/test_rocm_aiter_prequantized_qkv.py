@@ -833,3 +833,290 @@ def test_fp8_prefill_attention_matches_dequantized_reference(
     )
     relative_error = (output.float() - expected).norm() / expected.norm()
     assert relative_error < 0.03
+
+
+def _fp8_with_scale(values: torch.Tensor, scale: torch.Tensor) -> torch.Tensor:
+    return (values.float() / scale).to(current_platform.fp8_dtype())
+
+
+def _per_kv_head_fp8(
+    values: torch.Tensor, num_kv_heads: int
+) -> tuple[torch.Tensor, torch.Tensor]:
+    """Quantize one sequence with one scale per KV head, shared by its group."""
+    fp8_dtype = current_platform.fp8_dtype()
+    limit = torch.finfo(fp8_dtype).max
+    group = values.shape[1] // num_kv_heads
+    quantized = torch.empty_like(values, dtype=fp8_dtype)
+    scales = torch.empty(num_kv_heads, dtype=torch.float32, device=values.device)
+    for kv_head in range(num_kv_heads):
+        heads = slice(kv_head * group, (kv_head + 1) * group)
+        scale = (values[:, heads].float().abs().amax() / limit).clamp(min=1e-12)
+        scales[kv_head] = scale
+        quantized[:, heads] = _fp8_with_scale(values[:, heads], scale)
+    return quantized, scales
+
+
+def _dequant_per_kv_head(
+    quantized: torch.Tensor, scales: torch.Tensor, num_kv_heads: int
+) -> torch.Tensor:
+    values = quantized.float()
+    group = values.shape[1] // num_kv_heads
+    for kv_head in range(num_kv_heads):
+        heads = slice(kv_head * group, (kv_head + 1) * group)
+        values[:, heads] *= scales[kv_head]
+    return values
+
+
+def _chunk_context(
+    context_lens: list[int],
+    chunk_size: int,
+    num_kv_heads: int,
+    page_workspace: int,
+) -> rocm_aiter_fa.AiterChunkContextMetadata:
+    """The same chunk tables the metadata builder writes, at a small chunk size."""
+    device = "cuda"
+    computed = torch.tensor(context_lens, dtype=torch.int32)
+    num_extends = len(context_lens)
+    num_chunks = (int(computed.max()) + chunk_size - 1) // chunk_size
+    chunk_starts = (
+        torch.arange(num_chunks, dtype=torch.int32).unsqueeze(1).expand(-1, num_extends)
+        * chunk_size
+    )
+    chunk_ends = torch.minimum(computed.unsqueeze(0), chunk_starts + chunk_size)
+    chunk_seq_lens = (chunk_ends - chunk_starts).clamp(min=0)
+    cu_seq_lens_cpu = torch.zeros(num_chunks, num_extends + 1, dtype=torch.int32)
+    torch.cumsum(chunk_seq_lens, dim=1, out=cu_seq_lens_cpu[:, 1:])
+    max_cum_tokens = int(cu_seq_lens_cpu[:, -1].max())
+    range_idx = torch.arange(max_cum_tokens, dtype=torch.int32)[None, None, :]
+    ended_here = range_idx == cu_seq_lens_cpu[:, 1:][:, :, None]
+    token_to_batch = torch.cumsum(ended_here.sum(dim=1), dim=1)
+    return rocm_aiter_fa.AiterChunkContextMetadata(
+        workspace=torch.empty(
+            (2, page_workspace, num_kv_heads, HEAD_DIM),
+            dtype=current_platform.fp8_dtype(),
+            device=device,
+        ),
+        cu_seq_lens_chunk=cu_seq_lens_cpu.to(device),
+        chunk_starts=chunk_starts.to(device),
+        token_to_batch=token_to_batch.to(device),
+        max_seq_lens=chunk_seq_lens.max(dim=1).values.tolist(),
+        num_chunks=num_chunks,
+        total_token_per_batch=cu_seq_lens_cpu[:, -1].tolist(),
+        swa_metadata=None,
+        cu_seq_lens_chunk_host=cu_seq_lens_cpu.tolist(),
+    )
+
+
+def _paged_fp8_cache(
+    sequences: list[torch.Tensor], page_size: int
+) -> tuple[torch.Tensor, torch.Tensor]:
+    """Pack per-sequence FP8 tokens into an NHD paged cache."""
+    blocks = []
+    table_rows = []
+    next_block = 0
+    for sequence in sequences:
+        num_blocks = (sequence.shape[0] + page_size - 1) // page_size
+        padded = torch.zeros(
+            num_blocks * page_size,
+            *sequence.shape[1:],
+            dtype=sequence.dtype,
+            device=sequence.device,
+        )
+        padded[: sequence.shape[0]] = sequence
+        blocks.append(padded.view(num_blocks, page_size, *sequence.shape[1:]))
+        table_rows.append(list(range(next_block, next_block + num_blocks)))
+        next_block += num_blocks
+    width = max(len(row) for row in table_rows)
+    block_table = torch.zeros(len(table_rows), width, dtype=torch.int32, device="cuda")
+    for index, row in enumerate(table_rows):
+        block_table[index, : len(row)] = torch.tensor(
+            row, dtype=torch.int32, device="cuda"
+        )
+    return torch.cat(blocks).contiguous(), block_table
+
+
+def _bf16_extend_reference(
+    query: torch.Tensor,
+    key: torch.Tensor,
+    value: torch.Tensor,
+    query_lens: list[int],
+    context_lens: list[int],
+) -> torch.Tensor:
+    """Causal attention of each query suffix over its cached context plus itself."""
+    outputs = []
+    query_at = 0
+    key_at = 0
+    for query_len, context_len in zip(query_lens, context_lens):
+        total = context_len + query_len
+        q = query[query_at : query_at + query_len].float().permute(1, 0, 2)
+        k = key[key_at : key_at + total].float().permute(1, 0, 2)
+        v = value[key_at : key_at + total].float().permute(1, 0, 2)
+        positions = torch.arange(total, device=query.device)
+        allowed = positions <= (
+            context_len + torch.arange(query_len, device=query.device)[:, None]
+        )
+        mask = torch.zeros(query_len, total, dtype=torch.float32, device=query.device)
+        mask = mask.masked_fill(~allowed, float("-inf"))
+        attended = torch.nn.functional.scaled_dot_product_attention(
+            q, k, v, attn_mask=mask
+        )
+        outputs.append(attended.permute(1, 0, 2))
+        query_at += query_len
+        key_at += total
+    return torch.cat(outputs)
+
+
+@requires_cdna4_aiter
+@pytest.mark.parametrize(
+    ("num_heads", "num_kv_heads", "query_lens", "context_lens"),
+    [
+        pytest.param(4, 1, [8], [40], id="one-sequence"),
+        pytest.param(8, 2, [5, 9], [24, 40], id="two-sequences-two-kv-heads"),
+    ],
+)
+def test_extend_forward_with_cached_fp8_context_matches_bf16(
+    monkeypatch, num_heads, num_kv_heads, query_lens, context_lens
+):
+    """Chunked prefill: FP8 causal suffix, FP8 context chunks, and the LSE merge.
+
+    The reference is BF16 attention on the same dequantized values, so a wrong
+    descale or a dropped chunk shows up as a large error rather than FP8 noise.
+    """
+    monkeypatch.setattr(
+        rocm_aiter_fa.rocm_aiter_ops, "is_shuffle_kv_cache_enabled", lambda: False
+    )
+    device = "cuda"
+    torch.manual_seed(0)
+    page_size = 16
+    chunk_size = 16
+    query_tokens = sum(query_lens)
+    group = num_heads // num_kv_heads
+
+    suffix_q = torch.randn(query_tokens, num_heads, HEAD_DIM, device=device)
+    suffix_k = torch.randn(query_tokens, num_kv_heads, HEAD_DIM, device=device)
+    suffix_v = torch.randn(query_tokens, num_kv_heads, HEAD_DIM, device=device)
+    contexts_k = [
+        torch.randn(length, num_kv_heads, HEAD_DIM, device=device)
+        for length in context_lens
+    ]
+    contexts_v = [
+        torch.randn(length, num_kv_heads, HEAD_DIM, device=device)
+        for length in context_lens
+    ]
+
+    q_parts, k_parts, v_parts = [], [], []
+    q_scales, k_scales, v_scales = [], [], []
+    query_at = 0
+    for query_len in query_lens:
+        rows = slice(query_at, query_at + query_len)
+        q_fp8, q_scale = _per_kv_head_fp8(suffix_q[rows], num_kv_heads)
+        k_fp8, k_scale = _per_kv_head_fp8(suffix_k[rows], num_kv_heads)
+        v_fp8, v_scale = _per_kv_head_fp8(suffix_v[rows], num_kv_heads)
+        q_parts.append(q_fp8)
+        k_parts.append(k_fp8)
+        v_parts.append(v_fp8)
+        q_scales.append(q_scale)
+        k_scales.append(k_scale)
+        v_scales.append(v_scale)
+        query_at += query_len
+    prequantized = PrequantizedQKV(
+        query=torch.cat(q_parts),
+        key=torch.cat(k_parts),
+        value=torch.cat(v_parts),
+        query_descale=torch.stack(q_scales),
+        key_descale=torch.stack(k_scales),
+        value_descale=torch.stack(v_scales),
+    )
+
+    fp8_max = torch.finfo(current_platform.fp8_dtype()).max
+    k_cache_scale = (torch.cat(contexts_k).float().abs().amax() / fp8_max).clamp(
+        min=1e-12
+    )
+    v_cache_scale = (torch.cat(contexts_v).float().abs().amax() / fp8_max).clamp(
+        min=1e-12
+    )
+    context_k_fp8 = [
+        _fp8_with_scale(sequence, k_cache_scale) for sequence in contexts_k
+    ]
+    context_v_fp8 = [
+        _fp8_with_scale(sequence, v_cache_scale) for sequence in contexts_v
+    ]
+    key_cache, block_table = _paged_fp8_cache(context_k_fp8, page_size)
+    value_cache, value_table = _paged_fp8_cache(context_v_fp8, page_size)
+    assert torch.equal(block_table, value_table)
+
+    chunk = _chunk_context(context_lens, chunk_size, num_kv_heads, max(context_lens))
+    starts = [0, *torch.tensor(query_lens).cumsum(0).tolist()]
+    metadata = SimpleNamespace(
+        extend_metadata=rocm_aiter_fa.AiterFlashAttentionChunkPrefillMetadata(
+            max_query_len=max(query_lens),
+            max_seq_len=max(q + c for q, c in zip(query_lens, context_lens)),
+            query_start_loc=torch.tensor(starts, dtype=torch.int32, device=device),
+            chunk_context_metadata=chunk,
+            query_start_loc_host=starts,
+        )
+    )
+    impl = object.__new__(rocm_aiter_fa.AiterFlashAttentionImpl)
+    impl.num_kv_heads = num_kv_heads
+    impl.kv_cache_dtype = "fp8"
+    impl.scale = HEAD_DIM**-0.5
+    impl.sliding_window = (-1, -1)
+    impl.alibi_slopes = None
+    impl.sinks = None
+    output = torch.empty(
+        query_tokens, num_heads, HEAD_DIM, dtype=torch.bfloat16, device=device
+    )
+    impl.extend_forward(
+        attn_metadata=metadata,
+        query=suffix_q.bfloat16(),
+        key=suffix_k.bfloat16(),
+        value=suffix_v.bfloat16(),
+        key_cache=key_cache,
+        value_cache=value_cache,
+        output=output,
+        cu_seqlens_q=torch.tensor(starts, dtype=torch.int32, device=device),
+        max_seqlen_q=max(query_lens),
+        max_seqlen_k=max(q + c for q, c in zip(query_lens, context_lens)),
+        block_table=block_table,
+        slot_mapping=torch.zeros(query_tokens, dtype=torch.int64, device=device),
+        k_scale=k_cache_scale.reshape(1),
+        v_scale=v_cache_scale.reshape(1),
+        prequantized_qkv=prequantized,
+    )
+
+    def _dequant_suffix(quantized: torch.Tensor, scales: torch.Tensor) -> torch.Tensor:
+        parts = []
+        token_at = 0
+        for index, query_len in enumerate(query_lens):
+            parts.append(
+                _dequant_per_kv_head(
+                    quantized[token_at : token_at + query_len],
+                    scales[index],
+                    num_kv_heads,
+                )
+            )
+            token_at += query_len
+        return torch.cat(parts)
+
+    ref_q = _dequant_suffix(prequantized.query, prequantized.query_descale)
+    ref_k_suffix = _dequant_suffix(prequantized.key, prequantized.key_descale)
+    ref_v_suffix = _dequant_suffix(prequantized.value, prequantized.value_descale)
+    # One packed stream per sequence: dequantized cached context, then the
+    # dequantized suffix. KV heads are repeated out to the query heads.
+    packed_k, packed_v = [], []
+    suffix_at = 0
+    for index, query_len in enumerate(query_lens):
+        packed_k.append(context_k_fp8[index].float() * k_cache_scale)
+        packed_k.append(ref_k_suffix[suffix_at : suffix_at + query_len])
+        packed_v.append(context_v_fp8[index].float() * v_cache_scale)
+        packed_v.append(ref_v_suffix[suffix_at : suffix_at + query_len])
+        suffix_at += query_len
+    expected = _bf16_extend_reference(
+        ref_q,
+        torch.cat(packed_k).repeat_interleave(group, dim=1),
+        torch.cat(packed_v).repeat_interleave(group, dim=1),
+        query_lens,
+        context_lens,
+    )
+    relative_error = (output.float() - expected).norm() / expected.norm()
+    assert relative_error < 0.03, relative_error

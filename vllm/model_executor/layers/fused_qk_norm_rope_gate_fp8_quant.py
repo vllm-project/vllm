@@ -5,6 +5,7 @@
 import torch
 
 from vllm._aiter_ops import rocm_aiter_ops
+from vllm.compilation.breakable_cudagraph import eager_break_during_capture
 from vllm.model_executor.layers.fused_qk_norm_rope import (
     fused_qk_rmsnorm_rope_gate,
 )
@@ -122,6 +123,7 @@ def _allocate_outputs(
     )
 
 
+@eager_break_during_capture
 def _fused_qk_norm_rope_gate_fp8_quant_impl(
     q_gate: torch.Tensor,
     key: torch.Tensor,
@@ -248,9 +250,11 @@ def _fused_qk_norm_rope_gate_fp8_quant_fake(
     return
 
 
-# The implementation reads per-step attention metadata from forward context.
-# Keep it outside piecewise CUDA graphs so capture-time decode/prefill offsets
-# are not replayed against a different runtime batch.
+# The implementation reads per-step attention metadata on the host and branches
+# on it (decode-only vs prefill). Piecewise compilation splits here, and
+# breakable CUDA graphs must run this wrapper eagerly: a captured decode batch
+# would otherwise replay without writing the FP8 Q/K/V. The outputs are the
+# caller-provided buffers, which is what the break requires.
 direct_register_custom_op(
     op_name="fused_qk_norm_rope_gate_fp8_quant",
     op_func=_fused_qk_norm_rope_gate_fp8_quant_impl,

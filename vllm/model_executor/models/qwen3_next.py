@@ -35,6 +35,7 @@ from vllm.model_executor.layers.fused_moe.utils import (
 )
 from vllm.model_executor.layers.fused_qk_norm_rope import fused_qk_rmsnorm_rope_gate
 from vllm.model_executor.layers.fused_qk_norm_rope_gate_fp8_quant import (
+    MAX_PREQUANTIZED_SEQUENCES,
     fused_qk_norm_rope_gate_fp8_quant,
     supports_prequantized_scheduler,
 )
@@ -411,20 +412,38 @@ class Qwen3NextAttention(nn.Module):
             and supports_dtype
             and (text_only or supports_mrope)
         )
-        self.use_prequantized_qkv = (
+        # gfx950 vllm serve defaults to max_num_seqs=1024, and a multimodal
+        # config without --language-model-only is not text-only. Either one
+        # leaves this layer on the BF16 path, so say so instead of serving
+        # quietly.
+        prequantized_ready = (
             self.attn_output_gate
             and getattr(self.rotary_emb, "is_neox_style", False)
             and getattr(self.rotary_emb, "dtype", None) == torch.bfloat16
             and is_aiter_cdna4
-            and text_only
-            and supports_prequantized_scheduler(max_num_seqs)
             and isinstance(self.attn, PrequantizedQKVAttention)
             and self.attn.supports_prequantized_qkv_input
         )
+        scheduler_ok = supports_prequantized_scheduler(max_num_seqs)
+        self.use_prequantized_qkv = prequantized_ready and text_only and scheduler_ok
         if self.use_prequantized_qkv:
             self.attn.receives_prequantized_qkv = True
             logger.info_once(
                 "Using fused AITER Q/K norm, RoPE, gate, and FP8 quantization"
+            )
+        elif prequantized_ready:
+            missing = []
+            if not text_only:
+                missing.append("--language-model-only")
+            if not scheduler_ok:
+                missing.append(
+                    f"--max-num-seqs at most {MAX_PREQUANTIZED_SEQUENCES} "
+                    f"(got {max_num_seqs})"
+                )
+            logger.info_once(
+                "Prequantized FP8 QKV attention is off (%s); "
+                "serving uses the BF16 path.",
+                ", ".join(missing),
             )
 
         # Off by default; Qwen3.5 enables the fused sigmoid-gate-mul Triton

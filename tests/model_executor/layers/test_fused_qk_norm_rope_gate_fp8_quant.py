@@ -35,6 +35,20 @@ PREFILL_TOKENS = pytest.mark.parametrize("tokens", [2, 7, 129, 2048])
 DECODE_BATCHES = pytest.mark.parametrize("tokens", [1, 7, 128, MAX_NUM_SEQS])
 
 
+def test_fused_quant_impl_breaks_during_capture():
+    """The producer branches on host metadata, so breakable graphs must not
+    capture it. A captured decode batch would replay into a prefill without
+    writing the FP8 Q/K/V."""
+    from vllm.compilation.breakable_cudagraph import eager_break_during_capture
+
+    impl = prep_module._fused_qk_norm_rope_gate_fp8_quant_impl
+    wrapper = eager_break_during_capture(lambda: None)
+    assert (impl.__code__.co_filename, impl.__code__.co_name) == (
+        wrapper.__code__.co_filename,
+        wrapper.__code__.co_name,
+    )
+
+
 @pytest.mark.parametrize(
     ("max_num_seqs", "expected"),
     [
