@@ -87,6 +87,10 @@ from vllm.v1.utils import record_function_or_nullcontext
 
 logger = init_logger(__name__)
 
+# Reports per prefill: the cadence stays tied to the scheduled chunks but a
+# request never exceeds this many updates.
+PREFILL_PROGRESS_UPDATES_PER_REQUEST = 32
+
 # Cap on per-request prefill progress reports; the final zero is always sent.
 PREFILL_PROGRESS_MAX_UPDATES = 100
 
@@ -2268,14 +2272,19 @@ class Scheduler(SchedulerInterface):
         """Queue a progress update for one scheduled request.
 
         A request that finishes prefill reports a final zero and stops being
-        tracked; while it is prefilling it reports after each quarter of its
-        remaining work, up to `PREFILL_PROGRESS_MAX_UPDATES`.
+        tracked; while it is prefilling it reports after each
+        `1 / PREFILL_PROGRESS_UPDATES_PER_REQUEST` of its remaining work.
         """
         computed = max(0, request.num_computed_tokens - request.num_in_flight_tokens)
         remaining = request.num_tokens - computed
         state = self._prefill_progress.get(request.request_id)
         if remaining <= 0:
             if state is None:
+                pending.setdefault(request.client_index, []).append(
+                    PrefillProgress(
+                        request_id=request.request_id, remaining_prefill_tokens=0
+                    )
+                )
                 return
             del self._prefill_progress[request.request_id]
             pending.setdefault(state.client_index, []).append(
@@ -2289,7 +2298,8 @@ class Scheduler(SchedulerInterface):
             self._prefill_progress[request.request_id] = state
         if (
             state.last_remaining is not None
-            and remaining > state.last_remaining * 3 // 4
+            and remaining * PREFILL_PROGRESS_UPDATES_PER_REQUEST
+            > state.last_remaining * (PREFILL_PROGRESS_UPDATES_PER_REQUEST - 1)
         ):
             return
         state.last_remaining = remaining
@@ -2330,6 +2340,14 @@ class Scheduler(SchedulerInterface):
 
         outputs: dict[int, list[EngineCoreOutput]] = defaultdict(list)
         prefill_progress: dict[int, list[PrefillProgress]] = defaultdict(list)
+
+        # A prefill-only step samples nothing, so report from the schedule
+        # itself rather than from the outputs.
+        for scheduled_id in scheduler_output.num_scheduled_tokens:
+            scheduled = self.requests.get(scheduled_id)
+            if scheduled is None or scheduled.num_output_tokens:
+                continue
+            self._report_prefill_progress(scheduled, prefill_progress)
         spec_decoding_stats: SpecDecodingStats | None = None
 
         failed_kv_load_req_ids: set[str] = set()
@@ -2385,8 +2403,6 @@ class Scheduler(SchedulerInterface):
             # Drop-mode stale output (same-step resume) is discarded entirely.
             if output_is_stale and request.drop_stale_output:
                 continue
-
-            self._report_prefill_progress(request, prefill_progress)
 
             req_index = req_indices[req_id]
             generated_token_ids = (
