@@ -6,7 +6,9 @@ use std::fs;
 use std::path::Path;
 
 use serde::{Deserialize, Serialize};
+use serde_with::{DefaultOnError, serde_as};
 use thiserror_ext::AsReport as _;
+use vllm_engine_core_client::protocol::dtype::ModelDtype;
 
 use crate::error::{Error, Result};
 use crate::normalize_top_k;
@@ -144,6 +146,7 @@ impl HfSpecialTokens {
 ///
 /// We do not support additional entry points such as `decoder`, `generator`, or
 /// `text_encoder`.
+#[serde_as]
 #[derive(Debug, Default, Deserialize)]
 #[serde(default)]
 pub struct ModelConfig {
@@ -155,10 +158,12 @@ pub struct ModelConfig {
     n_routed_experts: Option<OneOrManyExpertCount>,
     num_local_experts: Option<OneOrManyExpertCount>,
     block_configs: Vec<BlockConfig>,
-    /// Checkpoint dtype; `torch_dtype` before transformers 4.56. Kept loose so
-    /// an unexpected value never fails model loading.
-    dtype: Option<serde_json::Value>,
-    torch_dtype: Option<serde_json::Value>,
+    /// Checkpoint dtype; `torch_dtype` before transformers 4.56. An unexpected
+    /// value reads as absent rather than failing model loading.
+    #[serde_as(as = "DefaultOnError")]
+    dtype: Option<ModelDtype>,
+    #[serde_as(as = "DefaultOnError")]
+    torch_dtype: Option<ModelDtype>,
     #[serde(alias = "llm_config", alias = "thinker_config")]
     text_config: Option<Box<ModelConfig>>,
 }
@@ -263,12 +268,10 @@ impl ModelConfig {
         self.model_type.as_deref().or_else(|| self.text_config.as_deref()?.model_type())
     }
 
-    /// Return the checkpoint dtype name, such as `bfloat16`, following the
-    /// same text-config selection as `model_type`.
-    pub fn dtype(&self) -> Option<&str> {
-        (self.dtype.as_ref().or(self.torch_dtype.as_ref()))
-            .and_then(serde_json::Value::as_str)
-            .or_else(|| self.text_config.as_deref()?.dtype())
+    /// Return the checkpoint dtype, following the same text-config selection
+    /// as `model_type`.
+    pub fn dtype(&self) -> Option<ModelDtype> {
+        (self.dtype.or(self.torch_dtype)).or_else(|| self.text_config.as_deref()?.dtype())
     }
 
     /// Return the effective model vocabulary size, following the same
@@ -380,7 +383,7 @@ where
 
 #[cfg(test)]
 mod tests {
-    use super::{GenerationConfig, HfTokenizerConfig, ModelConfig};
+    use super::{GenerationConfig, HfTokenizerConfig, ModelConfig, ModelDtype};
 
     #[test]
     fn tokenizer_config_reads_single_and_named_chat_templates() {
@@ -434,18 +437,29 @@ mod tests {
     #[test]
     fn model_config_reads_checkpoint_dtype() {
         for (config, expected) in [
-            (r#"{"dtype":"bfloat16"}"#, Some("bfloat16")),
-            (r#"{"torch_dtype":"float16"}"#, Some("float16")),
+            (r#"{"dtype":"bfloat16"}"#, Some(ModelDtype::BFloat16)),
+            (r#"{"torch_dtype":"float16"}"#, Some(ModelDtype::Float16)),
+            // Both names, as written by some transformers versions.
+            (
+                r#"{"dtype":"bfloat16","torch_dtype":"bfloat16"}"#,
+                Some(ModelDtype::BFloat16),
+            ),
             (
                 r#"{"text_config":{"torch_dtype":"float32"}}"#,
-                Some("float32"),
+                Some(ModelDtype::Float32),
             ),
+            (r#"{"torch_dtype":"float8_e4m3fn"}"#, None),
             (r#"{"torch_dtype":{"unexpected":true}}"#, None),
             ("{}", None),
         ] {
             let config: ModelConfig = serde_json::from_str(config).unwrap();
-            assert_eq!(config.dtype(), expected);
+            assert_eq!(config.dtype(), expected, "{config:?}");
         }
+        // An unexpected dtype does not fail the rest of the config.
+        let config: ModelConfig =
+            serde_json::from_str(r#"{"torch_dtype":"float8_e4m3fn","model_type":"llama"}"#)
+                .unwrap();
+        assert_eq!(config.model_type(), Some("llama"));
     }
 
     #[test]

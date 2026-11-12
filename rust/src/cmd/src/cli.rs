@@ -30,6 +30,7 @@ use vllm_chat::GenerationConfigMode;
 use vllm_chat::ToolStrictLevel;
 use vllm_chat::multimodal::MmLimitPerPrompt;
 use vllm_engine_core_client::TransportMode;
+use vllm_engine_core_client::protocol::dtype::ModelDtype;
 use vllm_engine_core_client::protocol::structured_outputs::StructuredOutputBackend;
 use vllm_managed_engine::ManagedEngineConfig;
 use vllm_managed_engine::cli::{ManagedEngineArgs, repartition_managed_engine_args};
@@ -39,7 +40,7 @@ use vllm_server::{
     CorsConfig, CustomHistogramBuckets, DEFAULT_KEEP_ALIVE_TIMEOUT, DEFAULT_LOG_STATS_INTERVAL,
     DEFAULT_MAX_N_SEQUENCES, DEFAULT_REQUEST_BODY_LIMIT_BYTES, FingerprintMode, HttpListenerMode,
     LoraModulePath, OutputLogConfig, OutputLogging, ParserSelection, ReasoningEffort, RenderConfig,
-    RenderDtype, RendererSelection,
+    RendererSelection,
 };
 use vllm_text::backend::hf::{HfOverrides, ModelFileSources};
 
@@ -212,8 +213,8 @@ pub struct RenderArgs {
     /// `text_config`'s), running float32 checkpoints in bfloat16 like vLLM; it
     /// does not inspect weights or the GPU, so pass the engine's dtype when it
     /// differs.
-    #[arg(long, default_value = "auto")]
-    dtype: RenderDtype,
+    #[arg(long, value_enum, default_value_t)]
+    dtype: DtypeArg,
     /// The maximum number of input items allowed per prompt for each
     /// modality, as a JSON object (e.g. `{"image": 16, "video": 2}`); set it
     /// to the engine's `--limit-mm-per-prompt`. Unspecified modalities are
@@ -265,9 +266,35 @@ impl RenderArgs {
             max_logprobs: self.max_logprobs,
             lora_modules: self.lora_modules,
             language_model_only: self.language_model_only,
-            dtype: self.dtype,
+            dtype: self.dtype.model_dtype(),
             limit_mm_per_prompt: self.limit_mm_per_prompt,
             tls,
+        }
+    }
+}
+
+/// `vllm-rs render --dtype` values: vLLM's `--dtype` choices.
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq, clap::ValueEnum)]
+pub enum DtypeArg {
+    /// Follow the model config.
+    #[default]
+    Auto,
+    #[value(name = "float16", alias = "half")]
+    Float16,
+    #[value(name = "bfloat16")]
+    BFloat16,
+    #[value(name = "float32", alias = "float")]
+    Float32,
+}
+
+impl DtypeArg {
+    /// The fixed model dtype, or `None` for `auto`.
+    fn model_dtype(self) -> Option<ModelDtype> {
+        match self {
+            Self::Auto => None,
+            Self::Float16 => Some(ModelDtype::Float16),
+            Self::BFloat16 => Some(ModelDtype::BFloat16),
+            Self::Float32 => Some(ModelDtype::Float32),
         }
     }
 }

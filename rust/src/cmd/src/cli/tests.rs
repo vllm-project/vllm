@@ -11,12 +11,13 @@ use vllm_engine_core_client::protocol::structured_outputs::StructuredOutputBacke
 use vllm_engine_core_client::{CoordinatorMode as EngineCoreCoordinatorMode, TransportMode};
 use vllm_server::{
     Config, FingerprintMode, GenerationConfigMode, HttpListenerMode, LoraModulePath,
-    OutputLogConfig, OutputLogging, ParserSelection, ReasoningEffort, RenderDtype,
-    RendererSelection,
+    OutputLogConfig, OutputLogging, ParserSelection, ReasoningEffort, RendererSelection,
 };
 use vllm_text::backend::hf::ModelSource;
 
-use super::{BenchCommand, Cli, Command, LogStatsInterval, SharedRuntimeArgs, parse_int_flag};
+use super::{
+    BenchCommand, Cli, Command, DtypeArg, LogStatsInterval, SharedRuntimeArgs, parse_int_flag,
+};
 
 /// Resolve the data parallel topology the way `vllm-rs serve` does at startup.
 fn topology(args: &super::ServeArgs) -> vllm_managed_engine::data_parallel::DataParallelTopology {
@@ -41,6 +42,24 @@ fn bench_serve_args_parse_without_managed_engine_repartition() {
     };
     assert_eq!(args.backend, vllm_bench::BackendKind::OpenaiChat);
     assert!(args.request_rate.is_infinite());
+}
+
+/// `--dtype` takes vLLM's choices, including the `half` and `float` aliases.
+#[test]
+fn render_dtype_accepts_vllm_choices() {
+    use clap::ValueEnum as _;
+
+    for (value, expected) in [
+        ("auto", None),
+        ("half", Some(ModelDtype::Float16)),
+        ("float16", Some(ModelDtype::Float16)),
+        ("bfloat16", Some(ModelDtype::BFloat16)),
+        ("float", Some(ModelDtype::Float32)),
+        ("float32", Some(ModelDtype::Float32)),
+    ] {
+        let arg = DtypeArg::from_str(value, false).unwrap();
+        assert_eq!(arg.model_dtype(), expected, "{value}");
+    }
 }
 
 #[test]
@@ -96,7 +115,7 @@ fn render_args_build_config_without_tls() {
     assert_eq!(config.hf_config, None);
     assert_eq!(config.host, "127.0.0.1");
     assert_eq!(config.port, 8080);
-    assert_eq!(config.dtype, RenderDtype::Fixed(ModelDtype::Float16));
+    assert_eq!(config.dtype, Some(ModelDtype::Float16));
     assert_eq!(config.lora_modules[0].name, "adapter-a");
     assert!(!config.language_model_only);
     assert_eq!(config.max_model_len, Some(32768));

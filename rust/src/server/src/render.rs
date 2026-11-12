@@ -2,7 +2,6 @@
 // SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 
 use std::collections::{HashMap, HashSet};
-use std::str::FromStr;
 use std::sync::Arc;
 
 use anyhow::{Context as _, Result, bail};
@@ -63,7 +62,8 @@ pub struct RenderConfig {
     /// Disable multimodal preprocessing and treat the model as language-only.
     pub language_model_only: bool,
     /// Dtype multimodal tensors are produced in; must match the engine's.
-    pub dtype: RenderDtype,
+    /// `None` follows the model config, like vLLM's `--dtype auto`.
+    pub dtype: Option<ModelDtype>,
     /// Maximum multimodal items per prompt for each modality.
     pub limit_mm_per_prompt: MmLimitPerPrompt,
     pub tls: Option<TlsConfig>,
@@ -84,48 +84,13 @@ impl RenderConfig {
     }
 }
 
-/// Model dtype selection for the render server, which has no engine to report
-/// it.
-#[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
-pub enum RenderDtype {
-    /// Follow the model config, like vLLM's `--dtype auto`.
-    #[default]
-    Auto,
-    Fixed(ModelDtype),
-}
-
-impl FromStr for RenderDtype {
-    type Err = String;
-
-    fn from_str(value: &str) -> Result<Self, Self::Err> {
-        Ok(match value {
-            "auto" => Self::Auto,
-            "half" | "float16" => Self::Fixed(ModelDtype::Float16),
-            "bfloat16" => Self::Fixed(ModelDtype::BFloat16),
-            "float" | "float32" => Self::Fixed(ModelDtype::Float32),
-            _ => {
-                return Err(format!(
-                    "unsupported dtype `{value}`; expected auto, half, float16, bfloat16, float, or float32"
-                ));
-            }
-        })
-    }
-}
-
-impl RenderDtype {
-    /// Resolve the dtype from the checkpoint's config dtype the way vLLM's
-    /// `auto` does: float32 or missing dtypes run in bfloat16.
-    fn resolve(self, config_dtype: Option<&str>) -> Result<ModelDtype> {
-        match self {
-            Self::Fixed(dtype) => Ok(dtype),
-            Self::Auto => match config_dtype.unwrap_or("float32") {
-                "float16" => Ok(ModelDtype::Float16),
-                "bfloat16" | "float32" => Ok(ModelDtype::BFloat16),
-                other => {
-                    bail!("cannot infer the model dtype from config dtype `{other}`; pass --dtype")
-                }
-            },
-        }
+/// Resolve the model dtype from the checkpoint's config dtype the way vLLM's
+/// `--dtype auto` does on GPUs with bfloat16: float32, missing, and
+/// unrecognized config dtypes run in bfloat16.
+fn auto_model_dtype(config_dtype: Option<ModelDtype>) -> ModelDtype {
+    match config_dtype {
+        Some(ModelDtype::Float16) => ModelDtype::Float16,
+        Some(ModelDtype::BFloat16 | ModelDtype::Float32) | None => ModelDtype::BFloat16,
     }
 }
 
@@ -194,14 +159,10 @@ async fn build_state(config: &RenderConfig) -> Result<Arc<RenderState>> {
     ))
     .with_accept_any(config.skip_model_name_validation);
     validate_lora_modules(&served_model_names, &config.lora_modules)?;
-    // Only multimodal preprocessing reads the dtype, so text-only models never
-    // fail on an unusual config dtype.
-    let model_dtype = loaded
-        .chat_backend
-        .multimodal_model_info()
-        .is_some()
-        .then(|| config.dtype.resolve(loaded.text_backend.config_dtype()))
-        .transpose()?;
+    // Only multimodal preprocessing reads the dtype.
+    let model_dtype = (loaded.chat_backend.multimodal_model_info().is_some()).then(|| {
+        (config.dtype).unwrap_or_else(|| auto_model_dtype(loaded.text_backend.config_dtype()))
+    });
     if let Some(model_dtype) = model_dtype {
         info!(
             dtype = model_dtype.as_str(),
@@ -295,22 +256,15 @@ mod tests {
     }
 
     #[test]
-    fn render_dtype_auto_follows_config_like_vllm() {
-        let auto = RenderDtype::Auto;
-        assert_eq!(auto.resolve(Some("float16")).unwrap(), ModelDtype::Float16);
-        assert_eq!(
-            auto.resolve(Some("bfloat16")).unwrap(),
-            ModelDtype::BFloat16
-        );
-        assert_eq!(auto.resolve(Some("float32")).unwrap(), ModelDtype::BFloat16);
-        assert_eq!(auto.resolve(None).unwrap(), ModelDtype::BFloat16);
-        assert!(auto.resolve(Some("float8_e4m3fn")).is_err());
-
-        let fixed: RenderDtype = "half".parse().unwrap();
-        assert_eq!(
-            fixed.resolve(Some("bfloat16")).unwrap(),
-            ModelDtype::Float16
-        );
+    fn auto_model_dtype_follows_config_like_vllm() {
+        for (config_dtype, expected) in [
+            (Some(ModelDtype::Float16), ModelDtype::Float16),
+            (Some(ModelDtype::BFloat16), ModelDtype::BFloat16),
+            (Some(ModelDtype::Float32), ModelDtype::BFloat16),
+            (None, ModelDtype::BFloat16),
+        ] {
+            assert_eq!(auto_model_dtype(config_dtype), expected);
+        }
     }
 
     #[tokio::test]
@@ -344,7 +298,7 @@ mod tests {
                 max_logprobs: None,
                 lora_modules: Vec::new(),
                 language_model_only: false,
-                dtype: RenderDtype::Auto,
+                dtype: None,
                 limit_mm_per_prompt: Default::default(),
                 tls: None,
             },

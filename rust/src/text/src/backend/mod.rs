@@ -8,6 +8,7 @@ use std::str::FromStr;
 use std::sync::Arc;
 
 use serde_with::{DeserializeFromStr, SerializeDisplay};
+use vllm_engine_core_client::protocol::dtype::ModelDtype;
 use vllm_tokenizer::DynTokenizer;
 
 use crate::error::Result;
@@ -135,9 +136,8 @@ pub trait TextBackend: Send + Sync {
         usize::MAX
     }
 
-    /// Return the checkpoint dtype name declared by the model config, such as
-    /// `bfloat16`, if any.
-    fn config_dtype(&self) -> Option<&str> {
+    /// Return the checkpoint dtype declared by the model config, if any.
+    fn config_dtype(&self) -> Option<ModelDtype> {
         None
     }
 
