@@ -1040,7 +1040,7 @@ class VllmRunner:
             # CCL context in the engine subprocess. The default utilization of
             # 0.92 leaves too little headroom for both, so lower it on XPU when
             # the caller did not request an explicit value.
-            if "gpu_memory_utilization" not in kwargs:
+            if kwargs.get("gpu_memory_utilization") is None:
                 kwargs["gpu_memory_utilization"] = 0.9
             gpu_memory_utilization = kwargs["gpu_memory_utilization"]
             # XPU (Level Zero) can also release device memory lazily after a

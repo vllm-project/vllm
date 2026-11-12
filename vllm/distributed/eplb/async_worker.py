@@ -195,6 +195,18 @@ class AsyncEplbRunner:
                 "Async EPLB worker drained for model %s", model_state.model_name
             )
 
+    def busy_ranks(self) -> tuple["EplbModelState", int, list[int]]:
+        """The layer of the running job and the EP ranks still running it.
+        Called by every EP rank in the same step, while a cycle is running.
+        """
+        assert self._job is not None
+        model_state, layer_idx = self._layers_left[0]
+        ep_group = get_ep_group()
+        busy = torch.zeros(ep_group.world_size, dtype=torch.int32)
+        busy[ep_group.rank_in_group] = int(not self._job.done())
+        ep_group.cpu_all_reduce_(busy)
+        return model_state, layer_idx, busy.nonzero().flatten().tolist()
+
     def _finish_layer(self, apply: bool) -> None:
         assert self._job is not None
         result: AsyncEplbLayerResult = self._job.result()

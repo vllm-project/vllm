@@ -34,7 +34,7 @@ steps:
   device: intel_gpu_k8s
   num_devices: 1
   resource_claim_template: b70-1
-  working_dir: "/workspace/vllm/"
+  working_dir: "/vllm-workspace/"
   env:
     VLLM_TEST_DEVICE: "xpu"
   source_file_dependencies:

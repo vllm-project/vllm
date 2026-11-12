@@ -2,18 +2,27 @@
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 
 import threading
+from concurrent.futures import Future
+from datetime import timedelta
 from types import SimpleNamespace
-from unittest.mock import MagicMock
+from unittest.mock import MagicMock, patch
 
 import pytest
 import torch
+import torch.distributed as dist
+import torch.multiprocessing as mp
 
-from vllm.distributed.eplb.async_worker import AsyncEplbExecutor
+from vllm.config import ParallelConfig
+from vllm.distributed.eplb import async_worker, eplb_state
+from vllm.distributed.eplb.async_worker import AsyncEplbExecutor, AsyncEplbRunner
 from vllm.distributed.eplb.eplb_state import (
+    EplbState,
     _commit_eplb_maps,
     _commit_eplb_maps_for_layer,
 )
+from vllm.distributed.parallel_state import GroupCoordinator
 from vllm.platforms import current_platform
+from vllm.utils.network_utils import get_open_port
 from vllm.v1.worker.sentinel.eplb_redistribute import reset_eplb_async_state
 
 from .eplb_utils import (
@@ -172,6 +181,65 @@ def test_commit_eplb_maps_for_layer():
     assert torch.equal(model_state.physical_to_logical_map[1], original_phy2log[1])
 
 
+def _overrun_warning_worker(rank: int, world_size: int, port: int):
+    dist.init_process_group(
+        "gloo",
+        init_method=f"tcp://127.0.0.1:{port}",
+        rank=rank,
+        world_size=world_size,
+    )
+    ep_group = GroupCoordinator(
+        group_ranks=[list(range(world_size))],
+        local_rank=0,
+        torch_distributed_backend="gloo",
+        use_device_communicator=False,
+        group_name="eplb_overrun_warning_test",
+    )
+    # A rank that skips the collective fails the test instead of hanging it.
+    ep_group.cpu_timeout = timedelta(seconds=30)
+
+    interval = 4
+    model_state = MagicMock()
+    model_state.model_name = "m"
+    model_state.model.num_moe_layers = 3
+    model_state.num_committed_layers = 1
+    state = EplbState(ParallelConfig(), torch.device("cpu"))
+    state.is_async = True
+    state.expert_rearrangement_step_interval = interval
+    state.expert_rearrangement_step = interval - 1
+    state.model_states = {"m": model_state}
+    with patch.object(async_worker, "get_ep_group", return_value=ep_group):
+        runner = AsyncEplbRunner(0, MagicMock(), MagicMock(), False)
+    # Rank 0 has finished the transfer of layer 1; rank 1 is still in it.
+    runner._layers_left.append((model_state, 1))
+    runner._job = Future()
+    if rank == 0:
+        runner._job.set_result(None)
+    state.async_runner = runner
+
+    with (
+        patch.object(eplb_state, "get_ep_group", return_value=ep_group),
+        patch.object(async_worker, "get_ep_group", return_value=ep_group),
+        patch.object(eplb_state.logger, "warning") as warning,
+    ):
+        state.step()
+
+    if rank == 0:
+        warning.assert_called_once()
+        message = warning.call_args.args[0] % warning.call_args.args[1:]
+        assert message.endswith("slowest EP ranks [1]: transferring layer 1")
+    else:
+        warning.assert_not_called()
+    dist.destroy_process_group()
+
+
+def test_async_rearrangement_overrun_warning_names_slowest_rank():
+    """When an async cycle overruns step_interval, every EP rank must enter
+    the progress all-reduce, and only rank 0 logs the rank that is behind.
+    """
+    mp.spawn(_overrun_warning_worker, args=(2, get_open_port()), nprocs=2, join=True)
+
+
 @pytest.mark.skipif(not torch.cuda.is_available(), reason="requires CUDA")
 def test_commit_eplb_maps_for_layer_does_not_sync_host():
     """Async EPLB commits a layer from the main thread every step, so the commit
@@ -240,6 +308,25 @@ def test_async_eplb_applies_every_layer_of_every_model_in_order(async_eplb):
     for model_state in run.model_states:
         expected_map = torch.arange(4).roll(1).repeat(2, 1)
         assert torch.equal(model_state.physical_to_logical_map.cpu(), expected_map)
+
+
+def test_async_rearrangement_interval_starts_after_last_layer_commit(async_eplb):
+    """An async cycle longer than step_interval must not start the next
+    rearrangement in the step its last layer commits.
+    """
+    state = async_eplb.state
+    start_async_rearrangement(state)
+    # Shorter than the cycle, which applies one of its four layers per step.
+    state.expert_rearrangement_step_interval = 2
+    finish_async_cycle(state)
+    assert state.expert_rearrangement_step == 0
+
+    state.step()
+    assert not async_cycle_running(state)
+    state.step()
+    assert async_cycle_running(state)
+    state.expert_rearrangement_step_interval = 1000
+    finish_async_cycle(state)
 
 
 def test_async_eplb_failure_raises_until_reset(async_eplb):
