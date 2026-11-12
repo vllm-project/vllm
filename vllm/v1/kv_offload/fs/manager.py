@@ -2,7 +2,8 @@
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 """Scheduler-side manager for direct device <-> filesystem offloading."""
 
-from collections.abc import Collection, Iterable
+from collections import OrderedDict
+from collections.abc import Collection
 
 from typing_extensions import override
 
@@ -10,72 +11,72 @@ from vllm.v1.kv_offload.base import (
     LoadStoreSpec,
     LookupResult,
     Medium,
+    OffloadingManager,
     OffloadKey,
     PrepareStoreOutput,
     ReqContext,
+    RequestOffloadingContext,
     ScheduleEndContext,
 )
-from vllm.v1.kv_offload.cpu.manager import CPUOffloadingManager
-from vllm.v1.kv_offload.cpu.policies.base import ChunkStatus
 from vllm.v1.kv_offload.file_mapper import FileMapper
 from vllm.v1.kv_offload.fs.lookup import FsAsyncLookupManager
 from vllm.v1.kv_offload.fs.worker import FSLoadStoreSpec
 from vllm.v1.metrics.cache_hit_source import CacheHitSource
 
+DEFAULT_INDEX_SIZE = 100_000
 
-class FSOffloadingManager(CPUOffloadingManager):
+
+class FSOffloadingManager(OffloadingManager):
     """Tracks content-addressed KV files that the worker moves to and from
     device memory directly, unlike FileSystemTierManager, which stages
     through the CPU tier.
 
-    The CPU manager's index holds the keys this instance knows about, with
-    num_chunks capping its size. Keys missing from the index are looked up
-    on disk asynchronously, and found files are adopted into the index, so
-    files written by other instances or earlier runs are reused. Evicting a
-    key only drops it from the index; its file stays on disk.
+    Keys are looked up on disk asynchronously, so files written by other
+    instances or earlier runs are reused. Keys found on disk or stored by
+    this instance are remembered in a bounded LRU index, so later requests
+    hit without probing again. Dropping a key from the index leaves its
+    file on disk.
     """
 
-    def __init__(self, file_mapper: FileMapper, read_only: bool = True, **kwargs):
-        super().__init__(**kwargs)
+    def __init__(
+        self,
+        file_mapper: FileMapper,
+        index_size: int = DEFAULT_INDEX_SIZE,
+        read_only: bool = True,
+    ):
+        assert index_size > 0
         self.medium = Medium.STORAGE
+        self._index_size = index_size
         self._read_only = read_only
+        self._index: OrderedDict[OffloadKey, None] = OrderedDict()
+        # Keys whose store is in flight; their files may be incomplete.
+        self._storing: set[OffloadKey] = set()
         self._fs_lookup = FsAsyncLookupManager(file_mapper, tier_type="fs")
+
+    def _remember(self, key: OffloadKey) -> None:
+        self._index[key] = None
+        self._index.move_to_end(key)
+        if len(self._index) > self._index_size:
+            self._index.popitem(last=False)
+
+    @override
+    def on_new_request(self, req_context: ReqContext) -> RequestOffloadingContext:
+        return RequestOffloadingContext()
 
     @override
     def lookup(self, key: OffloadKey, req_context: ReqContext) -> LookupResult:
-        result = super().lookup(key, req_context)
-        if result is not LookupResult.MISS:
-            return result
+        if key in self._index:
+            self._index.move_to_end(key)
+            return LookupResult.HIT
+        if key in self._storing:
+            return LookupResult.HIT_PENDING
         found = self._fs_lookup.lookup(key, req_context)
         if found is None:
             return LookupResult.RETRY
-        if not found or not self._adopt(key, req_context):
+        if not found:
             return LookupResult.MISS
+        self._remember(key)
         return LookupResult.HIT
-
-    def _adopt(self, key: OffloadKey, req_context: ReqContext) -> bool:
-        """Index an on-disk key as a ready, evictable chunk."""
-        if self._get_num_free_chunks() == 0:
-            evicted = self._policy.evict(1, protected=set())
-            if evicted is None:
-                return False
-            self._num_evictable_cache_chunks -= len(evicted)
-            for _, evicted_chunk in evicted:
-                self._free_chunk(evicted_chunk)
-        (chunk,) = self._allocate_chunks([key])
-        self._policy.insert(key, chunk, req_context)
-        chunk.ref_cnt = 0
-        self._num_evictable_cache_chunks += 1
-        self._policy.mark_evictable(key)
-        return True
-
-    @override
-    def _get_load_store_spec(
-        self,
-        keys: Iterable[OffloadKey],
-        chunks: Iterable[ChunkStatus],
-    ) -> LoadStoreSpec:
-        return FSLoadStoreSpec(list(keys))
 
     @override
     def get_load_source(
@@ -84,29 +85,56 @@ class FSOffloadingManager(CPUOffloadingManager):
         return CacheHitSource.DISK
 
     @override
+    def prepare_load(
+        self, keys: Collection[OffloadKey], req_context: ReqContext
+    ) -> LoadStoreSpec:
+        return FSLoadStoreSpec(list(keys))
+
+    @override
     def prepare_store(
+        self, keys: Collection[OffloadKey], req_context: ReqContext
+    ) -> PrepareStoreOutput | None:
+        keys_to_store = (
+            []
+            if self._read_only
+            else [k for k in keys if k not in self._index and k not in self._storing]
+        )
+        self._storing.update(keys_to_store)
+        # Empty, not None: None counts as an allocation failure.
+        return PrepareStoreOutput(
+            keys_to_store=keys_to_store,
+            store_spec=FSLoadStoreSpec(keys_to_store),
+            evicted_keys=[],
+        )
+
+    @override
+    def complete_store(
         self,
         keys: Collection[OffloadKey],
         req_context: ReqContext,
-    ) -> PrepareStoreOutput | None:
-        if self._read_only:
-            # Empty, not None: None counts as an allocation failure.
-            return PrepareStoreOutput(
-                keys_to_store=[], store_spec=FSLoadStoreSpec([]), evicted_keys=[]
-            )
-        return super().prepare_store(keys, req_context)
+        success: bool = True,
+    ) -> None:
+        for key in keys:
+            self._storing.discard(key)
+            if success:
+                self._remember(key)
+        if success:
+            self._fs_lookup.mark_present(keys)
 
     @override
     def on_schedule_end(self, context: ScheduleEndContext) -> None:
-        super().on_schedule_end(context)
         self._fs_lookup.flush()
 
     @override
     def on_request_finished(self, req_context: ReqContext) -> None:
-        super().on_request_finished(req_context)
         self._fs_lookup.cleanup(req_context.req_id)
+
+    @override
+    def reset_cache(self) -> None:
+        # Pre-reset jobs never reach complete_store, so drop them here too.
+        self._index.clear()
+        self._storing.clear()
 
     @override
     def shutdown(self) -> None:
         self._fs_lookup.shutdown()
-        super().shutdown()
