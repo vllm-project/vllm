@@ -12,6 +12,7 @@ from vllm.config import ParallelConfig
 from vllm.model_executor.model_loader.reload import lifecycle
 from vllm.model_executor.models.utils import (
     PPMissingLayer,
+    StageMissingLayer,
     spec_decode_needs_target_embed,
 )
 from vllm.platforms import current_platform
@@ -57,15 +58,20 @@ def test_drafter_without_own_embedding_gets_the_targets(monkeypatch, draft_embed
     assert draft_inner.embed_tokens is target_embed
 
 
-def test_missing_target_embedding_raises_instead_of_running_on_garbage(monkeypatch):
+@pytest.mark.parametrize(
+    "missing",
+    [PPMissingLayer, lambda: StageMissingLayer("pp_stage", _embed())],
+    ids=["pp_missing", "stage_missing"],
+)
+def test_missing_target_embedding_raises_instead_of_running_on_garbage(
+    monkeypatch, missing
+):
     monkeypatch.setattr(eagle_utils, "get_pp_group", _fake_pp(2))
     draft_inner = _inner(_embed())
     draft = SimpleNamespace(has_own_embed_tokens=False)
 
     with pytest.raises(RuntimeError, match="needs the target input embedding"):
-        eagle_utils.maybe_share_target_embed(
-            draft, draft_inner, _inner(PPMissingLayer())
-        )
+        eagle_utils.maybe_share_target_embed(draft, draft_inner, _inner(missing()))
 
 
 def test_drafter_with_distinct_weights_keeps_them(monkeypatch):
