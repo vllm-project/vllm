@@ -1415,7 +1415,6 @@ def test_flashinfer_varlen_cudagraph_capability(
         if adaptive is not None
         else None,
         parallel_config=SimpleNamespace(decode_context_parallel_size=dcp_size),
-        model_config=SimpleNamespace(get_num_attention_heads=lambda _: 32),
     )
     monkeypatch.setattr(fi, "force_use_trtllm_attention", lambda: None)
     monkeypatch.setattr(fi, "supports_trtllm_attention", lambda **_: True)
