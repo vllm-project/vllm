@@ -6,6 +6,14 @@ Efficient memory usage is crucial for working with large language models. Quanti
 
 > **Note:** When using the Flash Attention 3 backend with FP8 KV cache, attention operations are also performed in the quantized (FP8) domain. In this configuration, queries are quantized to FP8 in addition to keys and values.
 
+On NVIDIA Hopper (SM90, including H100), ordinary causal attention with
+`--kv-cache-dtype fp8` or `fp8_e4m3` prefers FlashInfer when supported. Its decode
+path keeps queries in BF16/FP16. FlashAttention remains available as a fallback
+and can be selected explicitly with `--attention-backend FLASH_ATTN`.
+This preference does not apply to MLA, non-causal attention, or multimodal prefix
+attention. Backend selection alone does not guarantee batch-invariant outputs;
+see [Batch Invariance](../batch_invariance.md).
+
 ### Supported FP8 KV-Cache Quantization Schemes
 
 vLLM supports two main quantization strategies for the FP8 KV-cache:

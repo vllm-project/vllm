@@ -45,6 +45,123 @@ def clear_cache():
     _cached_get_attn_backend.cache_clear()
 
 
+@pytest.mark.skipif(not current_platform.is_cuda(), reason="CUDA backend priorities")
+@pytest.mark.parametrize(
+    "major, kv_cache_dtype, use_mla, use_non_causal, use_mm_prefix, expected",
+    [
+        (9, "fp8", False, False, False, "FLASHINFER"),
+        (9, "fp8_e4m3", False, False, False, "FLASHINFER"),
+        (9, "auto", False, False, False, "FLASH_ATTN"),
+        (9, None, False, False, False, "FLASH_ATTN"),
+        (9, "bfloat16", False, False, False, "FLASH_ATTN"),
+        (9, "fp8_e5m2", False, False, False, "FLASH_ATTN"),
+        (9, "fp8", True, False, False, "FLASH_ATTN_MLA"),
+        (9, "fp8", False, True, False, "FLASH_ATTN"),
+        (9, "fp8", False, False, True, "TRITON_FLASH_ATTN"),
+        (8, "fp8", False, False, False, "FLASH_ATTN"),
+        (10, "fp8", False, False, False, "FLASHINFER"),
+        (10, "fp8", False, True, False, "FLASH_ATTN"),
+        (10, "fp8", False, False, True, "TRITON_FLASHINFER"),
+        (12, "fp8", False, False, False, "FLASH_ATTN"),
+    ],
+)
+def test_hopper_fp8_backend_priority(
+    major, kv_cache_dtype, use_mla, use_non_causal, use_mm_prefix, expected
+):
+    """Prefer FlashInfer for Hopper FP8 decode without changing other routes."""
+    from vllm.platforms.cuda import _get_backend_priorities
+
+    backends = _get_backend_priorities(
+        use_mla=use_mla,
+        device_capability=DeviceCapability(major, 0),
+        kv_cache_dtype=kv_cache_dtype,
+        use_non_causal=use_non_causal,
+        use_mm_prefix=use_mm_prefix,
+    )
+    assert backends[0].name == expected
+    if not use_mla:
+        assert AttentionBackendEnum.FLASH_ATTN in backends
+        assert AttentionBackendEnum.TRITON_ATTN in backends
+
+
+@pytest.mark.skipif(
+    not current_platform.is_cuda() or not current_platform.is_device_capability(90),
+    reason="Hopper FP8 KV-cache default",
+)
+@pytest.mark.parametrize(
+    "head_size, selected, use_per_head_quant_scales",
+    [
+        (96, None, False),
+        (128, AttentionBackendEnum.FLASH_ATTN, False),
+        (128, None, True),
+    ],
+    ids=["unsupported_flashinfer_head_size", "explicit_flash_attn", "per_head_scales"],
+)
+def test_hopper_fp8_can_select_flash_attn(
+    head_size, selected, use_per_head_quant_scales
+):
+    """Keep FlashAttention available for unsupported shapes and explicit selection."""
+    config = VllmConfig(attention_config=AttentionConfig(backend=selected))
+    with set_current_vllm_config(config):
+        backend = get_attn_backend(
+            head_size,
+            torch.bfloat16,
+            "fp8",
+            use_per_head_quant_scales=use_per_head_quant_scales,
+        )
+    assert backend.get_name() == "FLASH_ATTN"
+
+
+@pytest.mark.skipif(
+    not current_platform.is_cuda() or not current_platform.is_device_capability(90),
+    reason="Hopper FP8 KV-cache default",
+)
+@pytest.mark.parametrize("kv_cache_dtype", ["fp8", "fp8_e4m3"])
+@pytest.mark.parametrize("enforce_eager", [True, False])
+def test_hopper_fp8_default_matches_explicit_flashinfer(
+    vllm_runner, enable_pickle, kv_cache_dtype, enforce_eager
+):
+    """The default serves FP8 KV through FlashInfer, including CUDA graphs."""
+    from tests.models.utils import check_logprobs_close
+    from vllm.model_executor.layers.attention import Attention
+
+    def attention_backends(model):
+        return {
+            layer.get_attn_backend().get_name()
+            for layer in model.modules()
+            if isinstance(layer, Attention)
+        }
+
+    outputs = []
+    for backend in (None, AttentionBackendEnum.FLASHINFER):
+        with vllm_runner(
+            "Qwen/Qwen3-0.6B",
+            dtype="bfloat16",
+            kv_cache_dtype=kv_cache_dtype,
+            attention_config=AttentionConfig(backend=backend),
+            enforce_eager=enforce_eager,
+            enable_chunked_prefill=True,
+            max_model_len=512,
+            max_num_seqs=4,
+            seed=0,
+        ) as model:
+            assert model.apply_model(attention_backends) == [{"FLASHINFER"}]
+            outputs.append(
+                model.generate_greedy_logprobs(
+                    ["The capital of France is", "Explain why the sky is blue."],
+                    max_tokens=16,
+                    num_logprobs=5,
+                )
+            )
+
+    check_logprobs_close(
+        outputs_0_lst=outputs[0],
+        outputs_1_lst=outputs[1],
+        name_0="auto_fp8_kv",
+        name_1="flashinfer_fp8_kv",
+    )
+
+
 # Define MLA and non-MLA backends separately
 DEVICE_MLA_BACKENDS = {
     "cuda": [
