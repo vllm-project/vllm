@@ -3,11 +3,12 @@
 
 use std::collections::{HashMap, HashSet};
 use std::sync::Arc;
+use std::time::Duration;
 
 use anyhow::{Context as _, Result, bail};
+use futures::FutureExt as _;
 use serde_json::Value;
 use tokio_util::sync::CancellationToken;
-use tonic::transport::Server as TonicServer;
 use tonic_health::server::health_reporter;
 use tracing::info;
 use vllm_chat::multimodal::MmLimitPerPrompt;
@@ -21,12 +22,12 @@ use vllm_text::backend::hf::{HfOverrides, ModelSource};
 
 use crate::lora::check_lora_module;
 use crate::model_names::ServedModelNames;
-use crate::serving::{GRPC_KEEPALIVE_INTERVAL, GRPC_KEEPALIVE_TIMEOUT};
+use crate::serving::{
+    self, BoundListener, ConnectionTimeouts, GrpcServer, HttpServer, ListenerTls,
+};
 use crate::{
     DEFAULT_REQUEST_BODY_LIMIT_BYTES, HttpListenerMode, LoraModulePath, ReasoningEffort, TlsConfig,
     grpc,
-    listener::{Listener, MaybeTlsListener},
-    tls,
 };
 
 /// Configuration for the engine-free text rendering server.
@@ -50,6 +51,11 @@ pub struct RenderConfig {
     pub port: u16,
     /// Port for the gRPC Render service on `host`; `None` disables gRPC.
     pub grpc_port: Option<u16>,
+    /// Maximum time to wait for active HTTP/gRPC requests to drain on shutdown.
+    pub shutdown_timeout: Duration,
+    /// Maximum idle time on a keep-alive HTTP connection before the server
+    /// closes it (`VLLM_HTTP_TIMEOUT_KEEP_ALIVE`, default 5s).
+    pub keep_alive_timeout: Duration,
     pub tool_call_parser: ParserSelection,
     pub reasoning_parser: ParserSelection,
     pub tool_strict_level: Option<ToolStrictLevel>,
@@ -207,111 +213,66 @@ async fn build_state(config: &RenderConfig) -> Result<Arc<RenderState>> {
 /// to an inference engine.
 pub async fn serve_render(config: RenderConfig, shutdown: CancellationToken) -> Result<()> {
     config.validate().context("invalid render server configuration")?;
-    let tls_config = config
-        .tls
-        .as_ref()
-        .map(tls::build_server_config)
-        .transpose()
-        .context("invalid TLS configuration")?;
-    // gRPC reuses the HTTP TLS config plus ALPN h2.
-    let grpc_tls_config = match (config.grpc_port, &config.tls) {
-        (Some(_), Some(tls)) => {
-            Some(tls::build_grpc_server_config(tls).context("invalid gRPC TLS configuration")?)
-        }
-        _ => None,
-    };
+    let tls = ListenerTls::build(config.tls.as_ref(), config.grpc_port.is_some())?;
     let state = tokio::select! {
         result = build_state(&config) => result?,
         _ = shutdown.cancelled() => return Ok(()),
     };
-    let listener_mode = HttpListenerMode::BindTcp {
+    info!(model = %config.model, "starting engine-free Rust render server");
+
+    let bind_tcp = |port| HttpListenerMode::BindTcp {
         host: config.host.clone(),
-        port: config.port,
+        port,
     };
-    let listener = Listener::bind(&listener_mode)
+    let listener = BoundListener::bind(&bind_tcp(config.port), tls.http)
         .await
         .with_context(|| format!("failed to bind {}:{}", config.host, config.port))?;
-    let address = listener.local_addr_display()?;
-    let scheme = if tls_config.is_some() {
-        "https"
-    } else {
-        "http"
-    };
-    let listener = match tls_config {
-        Some(context) => MaybeTlsListener::tls(listener, context),
-        None => MaybeTlsListener::plain(listener),
-    };
-    let grpc_listener = match config.grpc_port {
+    let grpc = match config.grpc_port {
         Some(port) => {
-            let mode = HttpListenerMode::BindTcp {
-                host: config.host.clone(),
-                port,
-            };
-            let listener = Listener::bind(&mode)
+            let listener = BoundListener::bind(&bind_tcp(port), tls.grpc)
                 .await
                 .with_context(|| format!("failed to bind gRPC {}:{port}", config.host))?;
-            let address = listener.local_addr_display()?;
-            let listener = match grpc_tls_config {
-                Some(context) => MaybeTlsListener::tls(listener, context),
-                None => MaybeTlsListener::plain(listener),
-            };
-            Some((address, listener))
+            Some(render_grpc_server(state.clone(), listener).await)
         }
         None => None,
     };
-    info!(
-        %address,
-        scheme,
-        model = %config.model,
-        "starting engine-free Rust render server"
-    );
-
-    // If either protocol exits first, cancel the other one too.
-    let server_shutdown = shutdown.child_token();
-    let http_fut = async {
-        let result = axum::serve(listener, crate::routes::render::build_router(state.clone()))
-            .with_graceful_shutdown(server_shutdown.clone().cancelled_owned())
-            .await
-            .context("render server failed");
-        server_shutdown.cancel();
-        result
+    let http = HttpServer {
+        listener,
+        app: crate::routes::render::build_router(state),
+        timeouts: ConnectionTimeouts::for_keep_alive(config.keep_alive_timeout),
     };
-    let grpc_fut = async {
-        let Some((address, grpc_listener)) = grpc_listener else {
-            return Ok(());
-        };
-        info!(%address, "starting engine-free Rust render gRPC server");
-        let result = serve_render_grpc(state.clone(), grpc_listener, server_shutdown.clone()).await;
-        server_shutdown.cancel();
-        result
-    };
-    let (http_result, grpc_result) = tokio::join!(http_fut, grpc_fut);
-    http_result.and(grpc_result)
+    serving::serve(
+        "render server",
+        &config.model,
+        http,
+        grpc,
+        config.shutdown_timeout,
+        shutdown,
+    )
+    .await?;
+    Ok(())
 }
 
-/// Serve the gRPC Render service and its health service until `shutdown`.
-pub(crate) async fn serve_render_grpc(
+/// The gRPC Render service and its health services on `listener`.
+pub(crate) async fn render_grpc_server(
     state: Arc<RenderState>,
-    listener: MaybeTlsListener,
-    shutdown: CancellationToken,
-) -> Result<()> {
+    listener: BoundListener,
+) -> GrpcServer {
     let (health_reporter, health_service) = health_reporter();
-    let health_monitor =
+    let health =
         grpc::HealthMonitor::register(health_reporter, grpc::HealthSource::EngineFree).await;
     let render_service = grpc::RenderGrpcService::new(grpc::RenderServiceImpl::new(state))
         .max_decoding_message_size(DEFAULT_REQUEST_BODY_LIMIT_BYTES);
-    let server = TonicServer::builder()
-        .http2_keepalive_interval(Some(GRPC_KEEPALIVE_INTERVAL))
-        .http2_keepalive_timeout(Some(GRPC_KEEPALIVE_TIMEOUT))
+    let router = serving::grpc_server_builder()
         .add_service(health_service)
         .add_service(render_service);
-    health_monitor
-        .serve(shutdown, std::future::pending(), |stop| {
-            server.serve_with_incoming_shutdown(listener, stop)
-        })
-        .await
-        .expect("never forced to abort")
-        .context("render gRPC server failed")
+    GrpcServer {
+        listener,
+        health,
+        serve: Box::new(move |incoming, stop| {
+            router.serve_with_incoming_shutdown(incoming, stop).boxed()
+        }),
+    }
 }
 
 #[cfg(test)]
@@ -360,6 +321,8 @@ mod tests {
                 host: "127.0.0.1".to_string(),
                 port: 8000,
                 grpc_port: None,
+                shutdown_timeout: Duration::ZERO,
+                keep_alive_timeout: crate::DEFAULT_KEEP_ALIVE_TIMEOUT,
                 tool_call_parser: ParserSelection::Auto,
                 reasoning_parser: ParserSelection::Explicit("typo".to_string()),
                 renderer: RendererSelection::Auto,

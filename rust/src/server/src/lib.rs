@@ -23,7 +23,7 @@ mod tls;
 mod tls_tests;
 mod utils;
 
-use std::sync::{Arc, OnceLock};
+use std::sync::Arc;
 
 use anyhow::{Context as _, Result, bail};
 use axum::Router;
@@ -34,14 +34,13 @@ pub use config::{
     OutputLogging, TlsConfig,
 };
 pub use fingerprint::FingerprintMode;
+use futures::FutureExt as _;
 pub use render::{RenderConfig, serve_render};
 pub use routes::openai::utils::types::ReasoningEffort;
 use tokio::sync::watch;
-use tokio::time::{Instant, sleep_until};
 use tokio_util::sync::CancellationToken;
-use tonic::transport::Server as TonicServer;
 use tonic_health::server::health_reporter;
-use tracing::{info, warn};
+use tracing::info;
 use vllm_chat::{ChatLlm, LoadModelBackendsOptions, load_model_backends};
 pub use vllm_chat::{
     ChatTemplateContentFormatOption, GenerationConfigMode, ParserSelection, RendererSelection,
@@ -52,12 +51,9 @@ pub use vllm_metrics::CustomHistogramBuckets;
 use vllm_metrics::METRICS;
 use vllm_text::TextLlm;
 
-use crate::listener::{Listener, MaybeTlsListener};
 use crate::routes::build_router;
 use crate::server_info::ServerInfoSnapshot;
-use crate::serving::{
-    ConnectionTimeouts, GRPC_KEEPALIVE_INTERVAL, GRPC_KEEPALIVE_TIMEOUT, serve_connections,
-};
+use crate::serving::{BoundListener, ConnectionTimeouts, GrpcServer, HttpServer, ListenerTls};
 use crate::state::AppState;
 
 async fn monitor_llm_health(
@@ -237,14 +233,9 @@ where
 {
     config.validate().context("invalid OpenAI frontend configuration")?;
 
-    // Build the TLS server config once, up front, so a bad cert/key fails fast
+    // Build the TLS server configs once, up front, so a bad cert/key fails fast
     // before the (potentially long) engine handshake.
-    let tls_config = config
-        .tls
-        .as_ref()
-        .map(tls::build_server_config)
-        .transpose()
-        .context("invalid TLS configuration")?;
+    let tls = ListenerTls::build(config.tls.as_ref(), config.grpc_listener_mode.is_some())?;
 
     // Also check shutdown during the (potentially long) startup handshake and
     // static LoRA loading.
@@ -260,26 +251,17 @@ where
 
     info!(model, "starting vLLM server");
 
-    let listener = Listener::bind(&config.listener_mode)
+    let listener = BoundListener::bind(&config.listener_mode, tls.http)
         .await
         .context("failed to bind listener for OpenAI server")?;
-    let bind_address = listener.local_addr_display()?;
 
     // Optionally bind the gRPC Inference server on a separate port. Bind
     // synchronously here so bind errors (port in use, permission denied, ...)
     // surface before serving rather than being deferred until shutdown.
-    let grpc_setup = if let Some(grpc_listener_mode) = &config.grpc_listener_mode {
-        let grpc_listener = Listener::bind(grpc_listener_mode)
+    let grpc = if let Some(grpc_listener_mode) = &config.grpc_listener_mode {
+        let grpc_listener = BoundListener::bind(grpc_listener_mode, tls.grpc)
             .await
             .with_context(|| format!("failed to bind gRPC listener for {grpc_listener_mode:?}"))?;
-        let addr = grpc_listener.local_addr_display()?;
-        // gRPC reuses the HTTP TLS config (same SslContext) plus ALPN h2.
-        let grpc_tls = config
-            .tls
-            .as_ref()
-            .map(tls::build_grpc_server_config)
-            .transpose()
-            .context("invalid gRPC TLS configuration")?;
         let (health_reporter, health_service) = health_reporter();
         let engine_health = grpc::EngineHealth::subscribe(state.llm());
         let health_monitor = grpc::HealthMonitor::register(
@@ -298,144 +280,52 @@ where
         let render_service =
             grpc::RenderGrpcService::new(grpc::RenderServiceImpl::new(state.clone()))
                 .max_decoding_message_size(DEFAULT_REQUEST_BODY_LIMIT_BYTES);
-        let svc = TonicServer::builder()
-            .http2_keepalive_interval(Some(GRPC_KEEPALIVE_INTERVAL))
-            .http2_keepalive_timeout(Some(GRPC_KEEPALIVE_TIMEOUT))
+        let router = serving::grpc_server_builder()
             .layer(middleware::request_runtime_layer(state.clone()))
             .add_service(health_service)
             .add_service(control_service)
             .add_service(inference_service)
             .add_service(render_service);
-        Some((addr, grpc_listener, svc, grpc_tls, health_monitor))
+        Some(GrpcServer {
+            listener: grpc_listener,
+            health: health_monitor,
+            serve: Box::new(move |incoming, stop| {
+                router.serve_with_incoming_shutdown(incoming, stop).boxed()
+            }),
+        })
     } else {
         None
     };
 
-    let scheme = if tls_config.is_some() {
-        "https"
-    } else {
-        "http"
+    let http = HttpServer {
+        listener,
+        app,
+        timeouts: ConnectionTimeouts::for_keep_alive(config.keep_alive_timeout),
     };
-    let model = model.as_str();
-
-    // Run HTTP and gRPC concurrently under a child token of the caller's shutdown
-    // token. Caller cancellation propagates into both protocols; if either
-    // protocol exits first, we cancel this child token so its sibling also
-    // begins a graceful drain.
+    // The LLM health monitor cancels `server_shutdown` on a permanent engine
+    // failure; ending the servers in turn ends the monitor.
     let server_shutdown = shutdown.child_token();
-    let force_shutdown = CancellationToken::new();
-    let shutdown_deadline = Arc::new(OnceLock::new());
     let health_fut = monitor_llm_health(
         state.llm().subscribe_health(),
         server_shutdown.clone(),
         config.keep_alive_on_engine_death,
     );
-
-    // Spawn a task to trigger `force_shutdown` after shutdown deadline elapses.
-    tokio::spawn({
-        let shutdown = server_shutdown.clone();
-        let force_shutdown = force_shutdown.clone();
-        let shutdown_deadline = shutdown_deadline.clone();
-        let shutdown_timeout = config.shutdown_timeout;
-
-        async move {
-            shutdown.cancelled().await;
-            let deadline = Instant::now() + shutdown_timeout;
-            let _ = shutdown_deadline.set(deadline);
-
-            if shutdown_timeout.is_zero() {
-                force_shutdown.cancel();
-            } else {
-                sleep_until(deadline).await;
-                force_shutdown.cancel();
-            }
-        }
-    });
-
-    // 0 disables keep-alive but still bounds the head read (default), so a
-    // silent client cannot hold the connection open.
-    let keep_alive_timeout = config.keep_alive_timeout;
-    let timeouts = ConnectionTimeouts {
-        header_read: if keep_alive_timeout.is_zero() {
-            DEFAULT_KEEP_ALIVE_TIMEOUT
-        } else {
-            keep_alive_timeout
-        },
-        keep_alive_enabled: !keep_alive_timeout.is_zero(),
+    let serve_fut = async {
+        let result = serving::serve(
+            "OpenAI server",
+            &model,
+            http,
+            grpc,
+            config.shutdown_timeout,
+            server_shutdown.clone(),
+        )
+        .await;
+        server_shutdown.cancel();
+        result
     };
+    let (serve_res, health_res) = tokio::join!(serve_fut, health_fut);
+    let shutdown_deadline = serve_res?;
 
-    let http_fut = {
-        let shutdown = server_shutdown.child_token();
-        let server_shutdown = server_shutdown.clone();
-        let force_shutdown = force_shutdown.clone();
-        async move {
-            let listener = match tls_config {
-                Some(context) => MaybeTlsListener::tls(listener, context),
-                None => MaybeTlsListener::plain(listener),
-            };
-            let server = serve_connections(listener, app, shutdown.cancelled_owned(), timeouts);
-
-            info!(
-                bind_address,
-                scheme, model, "OpenAI server is ready to accept requests"
-            );
-
-            let result = tokio::select! {
-                result = server => {
-                    result.context("HTTP server failed")
-                }
-                _ = force_shutdown.cancelled() => {
-                    warn!("HTTP graceful shutdown deadline elapsed; aborting server");
-                    Ok(())
-                }
-            };
-
-            server_shutdown.cancel();
-            result
-        }
-    };
-
-    let grpc_fut = {
-        let shutdown = server_shutdown.child_token();
-        let server_shutdown = server_shutdown.clone();
-        let force_shutdown = force_shutdown.clone();
-        async move {
-            let Some((addr, grpc_listener, svc, grpc_tls, health_monitor)) = grpc_setup else {
-                // No gRPC configured: just wait for shutdown so we do not race the
-                // join! by resolving early and tripping the cancellation token.
-                shutdown.cancelled().await;
-                return Ok(());
-            };
-            let tls = grpc_tls.is_some();
-            let incoming = match grpc_tls {
-                Some(context) => MaybeTlsListener::tls(grpc_listener, context),
-                None => MaybeTlsListener::plain(grpc_listener),
-            };
-            let server = health_monitor.serve(shutdown, force_shutdown.cancelled(), |stop| {
-                let server = svc.serve_with_incoming_shutdown(incoming, stop);
-                async move {
-                    let result = server.await.context("gRPC server failed");
-                    server_shutdown.cancel();
-                    result
-                }
-            });
-
-            info!(%addr, tls, model, "gRPC server is ready to accept requests");
-
-            server.await.unwrap_or_else(|| {
-                warn!("gRPC graceful shutdown deadline elapsed; aborting server");
-                Ok(())
-            })
-        }
-    };
-
-    let (http_res, grpc_res, health_res) = tokio::join!(http_fut, grpc_fut, health_fut);
-    http_res.and(grpc_res)?;
-
-    let shutdown_deadline = shutdown_deadline
-        .get()
-        .copied()
-        .unwrap_or_else(|| Instant::now() + config.shutdown_timeout);
     let shutdown_result = state.shutdown(shutdown_deadline).await;
     health_res?;
     shutdown_result

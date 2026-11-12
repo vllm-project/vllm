@@ -280,6 +280,8 @@ impl RenderArgs {
             host: self.host,
             port: self.port,
             grpc_port: self.grpc_port,
+            shutdown_timeout: Duration::ZERO,
+            keep_alive_timeout: DEFAULT_KEEP_ALIVE_TIMEOUT,
             tool_call_parser: self.tool_call_parser,
             reasoning_parser: self.reasoning_parser,
             tool_strict_level: self.tool_strict_level,

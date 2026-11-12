@@ -3595,14 +3595,19 @@ async fn render_chat_rejects_undecodable_media_as_invalid_argument() {
 /// status, so the render gRPC server's drain finishes.
 #[tokio::test]
 async fn render_grpc_server_shutdown_ends_health_watches() {
-    let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.expect("bind grpc listener");
-    let addr = listener.local_addr().expect("local addr");
+    let listener = crate::serving::BoundListener::bind(
+        &crate::HttpListenerMode::BindTcp {
+            host: "127.0.0.1".to_string(),
+            port: 0,
+        },
+        None,
+    )
+    .await
+    .expect("bind grpc listener");
+    let addr = listener.address().to_string();
     let shutdown = tokio_util::sync::CancellationToken::new();
-    let server = tokio::spawn(crate::render::serve_render_grpc(
-        Arc::new(render_state()),
-        MaybeTlsListener::plain(Listener::Tcp(listener)),
-        shutdown.clone(),
-    ));
+    let grpc = crate::render::render_grpc_server(Arc::new(render_state()), listener).await;
+    let server = tokio::spawn(grpc.run(shutdown.clone(), std::future::pending()));
     let channel = Endpoint::from_shared(format!("http://{addr}"))
         .expect("grpc endpoint")
         .connect()
@@ -3627,6 +3632,7 @@ async fn render_grpc_server_shutdown_ends_health_watches() {
         .await
         .expect("server drains")
         .expect("server task")
+        .expect("not aborted")
         .expect("server result");
     drop(client);
 }
