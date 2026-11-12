@@ -1,6 +1,7 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
-"""Which rows the PP sampled-token broadcast must carry."""
+"""PP helpers of the V2 model runner: which rows the sampled-token broadcast
+must carry, and which received tensors do not match their buffers."""
 
 from unittest.mock import Mock
 
@@ -123,6 +124,28 @@ def test_prepare_pp_intermediate_tensors_accepts_sp_local_rows() -> None:
 
     assert prepared["hidden_states"].shape == (2, 16)
     torch.testing.assert_close(prepared["hidden_states"], received["hidden_states"])
+
+
+@pytest.mark.parametrize("received_rows", [8, 4])
+def test_prepare_pp_intermediate_tensors_preserves_padding(received_rows: int) -> None:
+    persistent = IntermediateTensors(
+        {"hidden_states": torch.zeros(8, 16, dtype=torch.bfloat16)}
+    )
+    received = IntermediateTensors(
+        {"hidden_states": torch.ones(received_rows, 16, dtype=torch.bfloat16)}
+    )
+
+    prepared = pp_utils.prepare_pp_intermediate_tensors(
+        persistent,
+        received,
+        num_tokens=8,
+        dummy_run=False,
+        num_valid_tokens=3,
+    )
+
+    assert prepared["hidden_states"].shape == (received_rows, 16)
+    assert torch.equal(prepared["hidden_states"][:3], received["hidden_states"][:3])
+    assert torch.count_nonzero(persistent["hidden_states"][3:]).item() == 0
 
 
 def test_activation_transport_falls_back_on_cross_rank_schema_mismatch(
@@ -308,3 +331,51 @@ def test_finishing_prefill_row_does_not_drop_a_sibling_row():
 
     assert mask is not None
     assert mask.tolist() == [False, True]
+
+
+@pytest.mark.parametrize(
+    ("received_dtype", "buffer_dtype", "lossy"),
+    [
+        # An FP32 residual stream received into a model-dtype buffer.
+        (torch.float32, torch.bfloat16, True),
+        # Same width, but BF16 has fewer mantissa bits and FP16 less range.
+        (torch.float16, torch.bfloat16, True),
+        (torch.bfloat16, torch.float16, True),
+        (torch.bfloat16, torch.bfloat16, False),
+        (torch.bfloat16, torch.float32, False),
+        (torch.float8_e4m3fn, torch.bfloat16, False),
+    ],
+)
+def test_warns_only_when_the_buffer_narrows(
+    caplog_vllm, received_dtype, buffer_dtype, lossy
+):
+    """A stage boundary may widen a received tensor, but not round it silently."""
+    received = {"hidden_states": torch.zeros(4, 8, dtype=received_dtype)}
+    buffers = {"hidden_states": torch.zeros(4, 8, dtype=buffer_dtype)}
+
+    pp_utils.check_received_tensors(received, buffers)
+
+    warnings = [r.getMessage() for r in caplog_vllm.records if r.levelname == "WARNING"]
+    assert len(warnings) == int(lossy)
+    assert all("'hidden_states'" in w for w in warnings)
+
+
+def test_rejects_a_missing_or_reshaped_tensor():
+    """A missing tensor would leave the buffer stale, and a per-token shape that
+    broadcasts into the buffer would fill it with wrong values."""
+    buffers = {"hidden_states": torch.zeros(4, 2, 8)}
+
+    with pytest.raises(ValueError, match="does not send"):
+        pp_utils.check_received_tensors({}, buffers)
+    with pytest.raises(ValueError, match="per-token shape"):
+        pp_utils.check_received_tensors({"hidden_states": torch.zeros(4, 8)}, buffers)
+
+
+def test_warns_about_a_tensor_without_a_buffer(caplog_vllm):
+    """The per-step copy drops a received tensor that has no buffer."""
+    received = {"hidden_states": torch.zeros(4, 8), "ds_3": torch.zeros(4, 8)}
+
+    pp_utils.check_received_tensors(received, {"hidden_states": torch.zeros(4, 8)})
+
+    warnings = [r.getMessage() for r in caplog_vllm.records if r.levelname == "WARNING"]
+    assert len(warnings) == 1 and "'ds_3'" in warnings[0]

@@ -196,6 +196,7 @@ def prepare_pp_intermediate_tensors(
     received: IntermediateTensors,
     num_tokens: int,
     dummy_run: bool,
+    num_valid_tokens: int | None = None,
 ) -> IntermediateTensors:
     """Copy into V2 persistent buffers unless receive already targeted them."""
     tensors: dict[str, torch.Tensor] = {}
@@ -206,9 +207,54 @@ def prepare_pp_intermediate_tensors(
             src = received.tensors[key][:num_tokens]
             dst = persistent_tensor[: src.shape[0]]
             if src.data_ptr() != dst.data_ptr():
-                dst.copy_(src)
+                copy_tokens = src.shape[0]
+                if num_valid_tokens is not None:
+                    copy_tokens = min(copy_tokens, num_valid_tokens)
+                dst[:copy_tokens].copy_(src[:copy_tokens])
         tensors[key] = dst
     return IntermediateTensors(tensors)
+
+
+def check_received_tensors(
+    received: dict[str, torch.Tensor], buffers: dict[str, torch.Tensor]
+) -> None:
+    """Check tensors received from the previous PP stage against the persistent
+    buffers they are copied into. The per-step copy drops tensors without a
+    buffer, broadcasts mismatched trailing dimensions and rounds to the buffer's
+    dtype without an error."""
+    if missing := buffers.keys() - received.keys():
+        raise ValueError(
+            f"The previous pipeline stage does not send the intermediate tensors "
+            f"{sorted(missing)} that this stage expects."
+        )
+    if unexpected := received.keys() - buffers.keys():
+        logger.warning(
+            "PP intermediate tensors %s from the previous stage have no buffer on "
+            "this stage and are dropped. Declare them in the model's "
+            "make_empty_intermediate_tensors.",
+            sorted(unexpected),
+        )
+    for name, buffer in buffers.items():
+        tensor = received[name]
+        if tensor.shape[1:] != buffer.shape[1:]:
+            raise ValueError(
+                f"PP intermediate tensor {name!r} has per-token shape "
+                f"{tuple(tensor.shape[1:])}, but its buffer on this stage has "
+                f"{tuple(buffer.shape[1:])}."
+            )
+        src, dst = tensor.dtype, buffer.dtype
+        if src == dst or not (src.is_floating_point and dst.is_floating_point):
+            continue
+        src_info, dst_info = torch.finfo(src), torch.finfo(dst)
+        if dst_info.eps > src_info.eps or dst_info.max < src_info.max:
+            logger.warning(
+                "PP intermediate tensor %r arrives as %s but its buffer is %s, so "
+                "it loses precision at every stage boundary. Declare the dtype in "
+                "the model's make_empty_intermediate_tensors.",
+                name,
+                src,
+                dst,
+            )
 
 
 def compute_need_sampled_mask(input_batch: InputBatch) -> np.ndarray | None:
@@ -275,6 +321,7 @@ class PPHandler:
         self.upstream_aux_keys: tuple[str, ...] = ()
         self.local_aux_keys: tuple[str, ...] = ()
         self.num_aux_hidden_states = 0
+        self.checked_received_tensors = False
 
     def init_activation_transport(
         self,
@@ -328,6 +375,13 @@ class PPHandler:
 
     def on_req_idx_freed(self, req_idx: int) -> None:
         self.req_idx_gen_np[req_idx] += 1
+
+    def check_received_tensors(
+        self, received: dict[str, torch.Tensor], buffers: dict[str, torch.Tensor]
+    ) -> None:
+        if not self.checked_received_tensors:
+            check_received_tensors(received, buffers)
+            self.checked_received_tensors = True
 
     def _sample_len(self, input_batch: InputBatch) -> int:
         # Width of the sampled-token broadcast. Must be the same on all ranks.
