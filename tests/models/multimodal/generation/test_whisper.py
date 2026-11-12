@@ -310,7 +310,7 @@ def test_parse_language_detection_output():
 
 
 def test_create_fake_bias_for_k_proj_injects_out_features():
-    """Packed k_proj weights get a zeros bias of length ``out_features``."""
+    """Packed k_proj weights get a zeros bias of length `out_features`."""
     from vllm.model_executor.models.whisper import _create_fake_bias_for_k_proj
 
     packed = torch.ones(2, 16)

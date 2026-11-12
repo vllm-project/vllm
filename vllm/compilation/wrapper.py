@@ -1,6 +1,8 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 
+import dis
+import itertools
 import os
 import sys
 from abc import abstractmethod
@@ -76,7 +78,7 @@ class TorchCompileWithNoGuardsWrapper:
             args_list = list(args)
             kwargs_dict = dict(kwargs)
             with layerwise_nvtx_marker_context(
-                "Torch Compiled Module (input):{}".format(self.__class__.__name__),
+                f"Torch Compiled Module (input):{self.__class__.__name__}",
                 self,
                 in_tensor=args_list,
                 kwargs=kwargs_dict,
@@ -175,9 +177,14 @@ class TorchCompileWithNoGuardsWrapper:
             )
 
         if envs.VLLM_USE_BYTECODE_HOOK and mode != CompilationMode.STOCK_TORCH_COMPILE:
-            self._bytecode_hook_handle = (
-                torch._dynamo.convert_frame.register_bytecode_hook(self.bytecode_hook)
-            )
+            # A model whose base class is also @support_torch_compile runs this
+            # twice; a second hook would outlive cleanup() and pin the model.
+            if getattr(self, "_bytecode_hook_handle", None) is None:
+                self._bytecode_hook_handle = (
+                    torch._dynamo.convert_frame.register_bytecode_hook(
+                        self.bytecode_hook
+                    )
+                )
             self._compiled_bytecode: CodeType | None = None
 
     def aot_compile(self, *args: Any, **kwargs: Any) -> Any:
@@ -268,9 +275,11 @@ class TorchCompileWithNoGuardsWrapper:
                 except Exception:
                     pass
 
+        # Dynamo emits `<module>._buffers.update` for buffers assigned during forward
+        pairs = itertools.pairwise(dis.get_instructions(new_code))
         if (
             self.vllm_config.compilation_config.cudagraph_mode != CUDAGraphMode.NONE
-            and "update" in new_code.co_names
+            and any(a.argval == "_buffers" and b.argval == "update" for a, b in pairs)
         ):
             import depyf
 
@@ -289,6 +298,7 @@ class TorchCompileWithNoGuardsWrapper:
         handle = getattr(self, "_bytecode_hook_handle", None)
         if handle is not None:
             handle.remove()
+            self._bytecode_hook_handle = None
 
     @contextmanager
     def _dispatch_to_compiled_code(self) -> Generator[None, None, None]:
@@ -362,3 +372,11 @@ def reset_compile_wrapper(model: torch.nn.Module) -> None:
         compile_prefix=model._compile_prefix,
         is_encoder=model._is_encoder,
     )
+
+
+def remove_bytecode_hooks(model: torch.nn.Module) -> None:
+    """Remove the global bytecode hooks of model's compiled modules, which
+    otherwise keep them, and the weights they hold, alive."""
+    for module in model.modules():
+        if isinstance(module, TorchCompileWithNoGuardsWrapper):
+            module.cleanup()
