@@ -18,7 +18,6 @@ from __future__ import annotations
 
 from collections.abc import Callable, Iterable
 from dataclasses import replace
-from typing import Any
 
 import torch
 from torch import nn
@@ -69,7 +68,6 @@ class LoopCoderAttention(nn.Module):
         quant_config: QuantizationConfig | None = None,
         prefix: str = "",
         attn_type: str = AttentionType.DECODER,
-        dual_chunk_attention_config: dict[str, Any] | None = None,
         layer_idx: int = 0,
     ) -> None:
         super().__init__()
@@ -93,7 +91,6 @@ class LoopCoderAttention(nn.Module):
         self.q_size = self.num_heads * self.head_dim
         self.kv_size = self.num_kv_heads * self.head_dim
         self.scaling = self.head_dim**-0.5
-        self.dual_chunk_attention_config = dual_chunk_attention_config
 
         # Get loop_num from config, default to 2 if not specified
         self.loop_num = getattr(config, "loop_num", 2)
@@ -124,7 +121,6 @@ class LoopCoderAttention(nn.Module):
             self.head_dim,
             max_position=max_position,
             rope_parameters=config.rope_parameters,
-            dual_chunk_attention_config=dual_chunk_attention_config,
         )
         self.attn = nn.ModuleList()
 
@@ -162,12 +158,6 @@ class LoopCoderAttention(nn.Module):
                     quant_config=quant_config,
                     attn_type=attn_type,
                     prefix=f"{unique_prefix}.attn",
-                    **{
-                        "layer_idx": unique_layer_idx,
-                        "dual_chunk_attention_config": dual_chunk_attention_config,
-                    }
-                    if dual_chunk_attention_config and loop_idx == 0
-                    else {},
                 )
             )
 
@@ -218,9 +208,6 @@ class LoopCoderDecoderLayer(nn.Module):
     ) -> None:
         super().__init__()
         self.hidden_size = config.hidden_size
-        dual_chunk_attention_config = getattr(
-            config, "dual_chunk_attention_config", None
-        )
         self.layer_idx = layer_idx
         if getattr(config, "is_causal", True):
             attn_type = AttentionType.DECODER
@@ -237,7 +224,6 @@ class LoopCoderDecoderLayer(nn.Module):
             quant_config=quant_config,
             prefix=f"{prefix}.self_attn",
             attn_type=attn_type,
-            dual_chunk_attention_config=dual_chunk_attention_config,
             layer_idx=self.layer_idx,
         )
         self.mlp = LlamaMLP(
@@ -386,12 +372,10 @@ class IQuestLoopCoderModel(nn.Module):
         ):
             assert config.max_window_layers == config.num_hidden_layers, (
                 "Sliding window for some but all layers is not supported. "
-                "This model uses sliding window but `max_window_layers` = {} "
-                "is less than `num_hidden_layers` = {}. Please open an issue "
-                "to discuss this feature.".format(
-                    config.max_window_layers,
-                    config.num_hidden_layers,
-                )
+                "This model uses sliding window but `max_window_layers` = "
+                f"{config.max_window_layers} is less than `num_hidden_layers` = "
+                f"{config.num_hidden_layers}. Please open an issue "
+                "to discuss this feature."
             )
 
         self.config = config

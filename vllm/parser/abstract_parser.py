@@ -9,7 +9,7 @@ from dataclasses import dataclass, field, replace
 
 from openai.types.responses import ToolChoiceCustom, ToolChoiceFunction
 from pydantic import TypeAdapter, ValidationError
-from xgrammar import Grammar, StructuralTag
+from xgrammar import StructuralTag
 from xgrammar.structural_tag import (
     ConstStringFormat,
     Format,
@@ -66,7 +66,7 @@ logger = init_logger(__name__)
 
 @dataclass
 class StreamState:
-    """Mutable state for ``Parser.parse_delta()``. One per stream."""
+    """Mutable state for `Parser.parse_delta()`. One per stream."""
 
     reasoning_ended: bool = False
     tool_call_text_started: bool = False
@@ -112,10 +112,10 @@ class StreamState:
 class Parser:
     """Parse model output into reasoning, content and tool calls.
 
-    The serving layer holds one ``Parser`` per request and calls only the
-    members defined here. ``ParserEngine`` implements them over a single
-    declarative engine; ``DelegatingParser`` composes a legacy
-    ``ReasoningParser`` / ``ToolParser`` pair.
+    The serving layer holds one `Parser` per request and calls only the
+    members defined here. `ParserEngine` implements them over a single
+    declarative engine; `DelegatingParser` composes a legacy
+    `ReasoningParser` / `ToolParser` pair.
     """
 
     # Class-level parser classes for compatibility with existing patterns
@@ -307,15 +307,8 @@ def structured_outputs_to_format(params: StructuredOutputsParams) -> Format | No
     if params.grammar is not None:
         from vllm.v1.structured_output.utils import grammar_is_likely_lark
 
-        grammar = params.grammar
-        # IMPORTANT(arpera):
-        # GrammarFormat only accepts EBNF.
-        if grammar_is_likely_lark(grammar):
-            try:
-                grammar = str(Grammar.from_lark(grammar))
-            except Exception as e:
-                raise VLLMValidationError("Invalid grammar specification.") from e
-        return GrammarFormat(grammar=grammar)
+        syntax = "lark" if grammar_is_likely_lark(params.grammar) else "ebnf"
+        return GrammarFormat(grammar=params.grammar, syntax=syntax)
     if params.structural_tag is not None:
         check_json_nesting(params.structural_tag, structural_tag=True)
         s_tag = json.loads(params.structural_tag)
