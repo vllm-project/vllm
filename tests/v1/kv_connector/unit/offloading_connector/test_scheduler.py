@@ -29,7 +29,12 @@ from tests.v1.spec_decode.utils import attach_speculator_config
 from vllm import SamplingParams
 from vllm.config import KVEventsConfig, KVTransferConfig, SpeculativeConfig
 from vllm.distributed.kv_events import MEDIUM_CPU, BlockRemoved, BlockStored
+from vllm.distributed.kv_transfer.kv_connector.factory import KVConnectorFactory
 from vllm.distributed.kv_transfer.kv_connector.v1.base import KVConnectorRole
+from vllm.distributed.kv_transfer.kv_connector.v1.example_connector import (
+    ExampleConnector,
+)
+from vllm.distributed.kv_transfer.kv_connector.v1.multi_connector import MultiConnector
 from vllm.distributed.kv_transfer.kv_connector.v1.offloading import (
     scheduler as scheduler_module,
 )
@@ -112,6 +117,24 @@ from vllm.v1.worker.gpu.spec_decode.mtp.config import MTPSpeculatorConfig
 def _as_mock(value: object) -> MagicMock:
     assert isinstance(value, MagicMock)
     return value
+
+
+class ControllableLookupConnector(ExampleConnector):
+    """A real connector with per-request lookup results for composition tests."""
+
+    def __init__(self, *args, **kwargs):
+        super().__init__(*args, **kwargs)
+        self.lookup_results: dict[str, tuple[int | None, bool]] = {}
+
+    def get_num_new_matched_tokens(
+        self, request: Request, num_computed_tokens: int
+    ) -> tuple[int | None, bool]:
+        return self.lookup_results.get(request.request_id, (0, False))
+
+
+KVConnectorFactory.register_connector(
+    "ControllableLookupConnector", __name__, ControllableLookupConnector.__name__
+)
 
 
 def test_update_offload_keys_without_scanning_hash_prefix():
@@ -355,16 +378,96 @@ def _make_partial_tail_request(
 def _make_real_partial_tail_request(
     scheduler: OffloadingConnectorScheduler, request_id: str
 ) -> Request:
+    request = _make_real_request(request_id)
+    scheduler.on_new_request(request)
+    return request
+
+
+def _make_real_request(request_id: str) -> Request:
     init_none_hash(sha256)
-    request = Request(
+    return Request(
         request_id=request_id,
         prompt_token_ids=list(range(30)),
         sampling_params=SamplingParams(max_tokens=1),
         pooling_params=None,
         block_hasher=get_request_block_hasher(4, sha256),
     )
-    scheduler.on_new_request(request)
-    return request
+
+
+def _store_real_partial_tail_hit(
+    scheduler: OffloadingConnectorScheduler,
+    manager: CPUOffloadingManager,
+    request: Request,
+) -> None:
+    state = scheduler._req_status[request.request_id]
+    state.num_locally_computed_tokens = 16
+    state.update_offload_keys()
+    boundary_keys = [
+        scheduler._make_boundary_key(request, config.group_idx, 28, state.req_context)
+        for config in scheduler.config.kv_group_configs
+    ]
+    stored = manager.prepare_store(boundary_keys, state.req_context)
+    assert stored is not None
+    manager.complete_store(stored.keys_to_store, state.req_context)
+
+
+def _make_sync_budget_multi_connector(
+    *, external_first: bool, hit_tokens: int = 12
+) -> tuple[MultiConnector, OffloadingConnector, ControllableLookupConnector]:
+    block_size = 4
+    kv_spec = FullAttentionSpec(
+        block_size=block_size,
+        num_kv_heads=1,
+        head_size=1,
+        dtype=torch.float32,
+    )
+    hit_bytes = hit_tokens * kv_spec.page_size_bytes // block_size
+    offload_config = {
+        "kv_connector": "OffloadingConnector",
+        "kv_role": "kv_both",
+        "kv_connector_extra_config": {
+            "cpu_bytes_to_use": 1 << 20,
+            "sync_load_budget_bytes": hit_bytes,
+        },
+    }
+    external_config = {
+        "kv_connector": "ControllableLookupConnector",
+        "kv_role": "kv_both",
+        "kv_connector_module_path": __name__,
+    }
+    children = (
+        [external_config, offload_config]
+        if external_first
+        else [offload_config, external_config]
+    )
+    vllm_config = create_vllm_config(
+        block_size=block_size,
+        kv_connector="MultiConnector",
+        kv_role="kv_both",
+        kv_connector_extra_config={"connectors": children},
+        disable_hybrid_kv_cache_manager=True,
+    )
+    kv_cache_config = KVCacheConfig(
+        num_blocks=100,
+        kv_cache_tensors=[],
+        kv_cache_groups=[KVCacheGroupSpec(["layer"], kv_spec)],
+    )
+    multi = MultiConnector(vllm_config, KVConnectorRole.SCHEDULER, kv_cache_config)
+    connectors = multi.sub_connectors
+    offloading = next(c for c in connectors if isinstance(c, OffloadingConnector))
+    external = next(c for c in connectors if isinstance(c, ControllableLookupConnector))
+    return multi, offloading, external
+
+
+def _store_real_offload_hit(
+    manager: CPUOffloadingManager, request: Request, num_chunks: int = 3
+) -> None:
+    req_context = ReqContext(req_id="seed")
+    manager.on_new_request(req_context)
+    keys = [make_offload_key(block_hash, 0) for block_hash in request.block_hashes]
+    stored = manager.prepare_store(keys[:num_chunks], req_context)
+    assert stored is not None
+    manager.complete_store(stored.keys_to_store, req_context)
 
 
 def test_create_req_context_preserves_kv_hints():
@@ -649,8 +752,10 @@ def test_sync_partial_tail_load_targets_hashed_blocks():
     """A sync load's blocks are hashed at allocation; the partial-tail load
     must still target them, matching the async case."""
     scheduler = _make_partial_tail_scheduler()
-    scheduler.config = scheduler.config._replace(sync_load_budget_bytes=1 << 40)
+    hit_bytes = 28 * scheduler.config.kv_bytes_per_token
+    scheduler.config = scheduler.config._replace(sync_load_budget_bytes=hit_bytes)
     request = _make_partial_tail_request(scheduler)
+    second = _make_partial_tail_request(scheduler, request_id="second")
     req_status = scheduler._req_status["req"]
     scheduler.manager.lookup.return_value = LookupResult.HIT
 
@@ -677,6 +782,7 @@ def test_sync_partial_tail_load_targets_hashed_blocks():
     assert dst_spec.block_indices == [0, 1]
     # Sync-load keys are not held back for other requests.
     assert not scheduler._chunks_being_loaded
+    assert scheduler.get_num_new_matched_tokens(second, 0) == (28, True)
 
 
 def test_sync_load_budget_is_shared_per_step():
@@ -691,8 +797,130 @@ def test_sync_load_budget_is_shared_per_step():
     scheduler.manager.lookup.return_value = LookupResult.HIT
 
     assert scheduler.get_num_new_matched_tokens(first, 0) == (28, False)
+    scheduler.update_state_after_alloc(
+        first,
+        KVCacheBlocks(
+            (
+                [KVCacheBlock(31), KVCacheBlock(32)],
+                [KVCacheBlock(0, is_null=True), KVCacheBlock(41)],
+            )
+        ),
+        num_external_tokens=28,
+    )
     assert scheduler.get_num_new_matched_tokens(second, 0) == (28, True)
-    assert scheduler._current_batch_sync_loads == {"a"}
+    assert set(scheduler._current_batch_sync_loads) == {"a"}
+
+
+@pytest.mark.cpu_test
+def test_sync_load_budget_is_refunded_when_allocated_hit_is_rejected():
+    manager = CPUOffloadingManager(num_chunks=8)
+    scheduler = _make_partial_tail_scheduler(manager=manager)
+    hit_bytes = 4 * scheduler.config.kv_bytes_per_token
+    scheduler.config = scheduler.config._replace(sync_load_budget_bytes=hit_bytes)
+    first = _make_real_partial_tail_request(scheduler, "first")
+    second = _make_real_partial_tail_request(scheduler, "second")
+    _store_real_partial_tail_hit(scheduler, manager, first)
+
+    assert scheduler.get_num_new_matched_tokens(first, 24) == (4, False)
+    scheduler.update_state_after_alloc(
+        first, KVCacheBlocks(([], [])), num_external_tokens=0
+    )
+
+    assert scheduler.get_num_new_matched_tokens(second, 24) == (4, False)
+
+
+@pytest.mark.cpu_test
+def test_unallocated_sync_candidate_does_not_use_later_budget():
+    manager = CPUOffloadingManager(num_chunks=8)
+    scheduler = _make_partial_tail_scheduler(manager=manager)
+    hit_bytes = 12 * scheduler.config.kv_bytes_per_token
+    scheduler.config = scheduler.config._replace(sync_load_budget_bytes=hit_bytes)
+    first = _make_real_partial_tail_request(scheduler, "first")
+    second = _make_real_partial_tail_request(scheduler, "second")
+    _store_real_partial_tail_hit(scheduler, manager, first)
+
+    assert scheduler.get_num_new_matched_tokens(first, 16) == (12, False)
+    assert scheduler.get_num_new_matched_tokens(second, 16) == (12, False)
+
+
+@pytest.mark.cpu_test
+def test_multi_connector_refunds_unselected_offload_hit_budget():
+    multi, offloading, external = _make_sync_budget_multi_connector(
+        external_first=True, hit_tokens=4
+    )
+    manager = offloading.scheduler.manager
+    assert isinstance(manager, CPUOffloadingManager)
+    first = _make_real_request("first")
+    second = _make_real_request("second")
+    multi.on_new_request(first)
+    multi.on_new_request(second)
+    _store_real_offload_hit(manager, first, num_chunks=1)
+
+    external.lookup_results[first.request_id] = (4, False)
+    assert multi.get_num_new_matched_tokens(first, 0) == (4, False)
+    multi.update_state_after_alloc(first, KVCacheBlocks(([],)), 4)
+
+    external.lookup_results[second.request_id] = (0, False)
+    assert multi.get_num_new_matched_tokens(second, 0) == (4, False)
+
+
+@pytest.mark.cpu_test
+def test_multi_connector_refunds_offload_budget_when_later_lookup_is_pending():
+    multi, offloading, external = _make_sync_budget_multi_connector(
+        external_first=False
+    )
+    manager = offloading.scheduler.manager
+    assert isinstance(manager, CPUOffloadingManager)
+    first = _make_real_request("first")
+    second = _make_real_request("second")
+    multi.on_new_request(first)
+    multi.on_new_request(second)
+    _store_real_offload_hit(manager, first)
+    external.lookup_results[first.request_id] = (None, False)
+
+    assert multi.get_num_new_matched_tokens(first, 0) == (None, False)
+
+    external.lookup_results[second.request_id] = (0, False)
+    assert multi.get_num_new_matched_tokens(second, 0) == (12, False)
+
+
+@pytest.mark.cpu_test
+def test_repeated_sync_lookup_reuses_its_reservation():
+    manager = CPUOffloadingManager(num_chunks=8)
+    scheduler = _make_partial_tail_scheduler(manager=manager)
+    hit_bytes = 12 * scheduler.config.kv_bytes_per_token
+    scheduler.config = scheduler.config._replace(sync_load_budget_bytes=hit_bytes)
+    request = _make_real_partial_tail_request(scheduler, "request")
+    _store_real_partial_tail_hit(scheduler, manager, request)
+
+    assert scheduler.get_num_new_matched_tokens(request, 16) == (12, False)
+    assert scheduler.get_num_new_matched_tokens(request, 16) == (12, False)
+
+
+@pytest.mark.cpu_test
+def test_sync_load_budget_resets_after_connector_metadata():
+    manager = CPUOffloadingManager(num_chunks=8)
+    scheduler = _make_partial_tail_scheduler(manager=manager)
+    hit_bytes = 12 * scheduler.config.kv_bytes_per_token
+    scheduler.config = scheduler.config._replace(sync_load_budget_bytes=hit_bytes)
+    first = _make_real_partial_tail_request(scheduler, "first")
+    second = _make_real_partial_tail_request(scheduler, "second")
+    _store_real_partial_tail_hit(scheduler, manager, first)
+
+    assert scheduler.get_num_new_matched_tokens(first, 16) == (12, False)
+    scheduler.update_state_after_alloc(
+        first,
+        KVCacheBlocks(
+            (
+                [KVCacheBlock(31), KVCacheBlock(32)],
+                [KVCacheBlock(0, is_null=True), KVCacheBlock(41)],
+            )
+        ),
+        num_external_tokens=12,
+    )
+    scheduler.build_connector_meta(SchedulerOutput.make_empty())
+
+    assert scheduler.get_num_new_matched_tokens(second, 16) == (12, False)
 
 
 def test_lookup_cap_stops_at_authoritative_prefix_boundary():
