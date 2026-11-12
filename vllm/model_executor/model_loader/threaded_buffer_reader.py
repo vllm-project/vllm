@@ -39,7 +39,8 @@ the read (26.06 GB/s pinned against 1.7 GiB/s of storage).
 The tensors are yielded in the order they appear in the file, no
 matter which thread read them.
 
-Measured on an A100 over a quarkfs mount, reading 2 GiB shards with 8
+Measured on an A100 over an all-flash distributed file system, reading
+2 GiB shards with 8
 threads:
 
     one reader, read then copy        9.94 s    206.2 MiB/s

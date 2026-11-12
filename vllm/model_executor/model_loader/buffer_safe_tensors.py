@@ -16,7 +16,8 @@ The obvious alternative - pread into the page cache, then copy out of
 the mapping - pays for the bytes twice: once when the kernel fills the
 page cache, once when the copy reads them back out.
 
-Measured on 48 shards / 232.94 GiB of MiniMax-M3.1-Flash over quarkfs:
+Measured on 48 shards / 232.94 GiB of MiniMax-M3.1-Flash over an
+all-flash distributed file system:
 
     read into the destination     36.31 s    6.41 GiB/s
     build the zero-copy views      0.35 s
