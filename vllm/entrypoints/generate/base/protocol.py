@@ -35,6 +35,11 @@ TopLogprobsParam: TypeAlias = Annotated[
 
 MMPayload: TypeAlias = Literal["tensors", "none"]
 
+# Range of a request priority, in the body or the `X-Vllm-Priority` header:
+# int32, the type of `priority` in the Rust frontend.
+PRIORITY_MIN = -(2**31)
+PRIORITY_MAX = 2**31 - 1
+
 _CACHE_SALT_FORBIDDEN_CHARS = frozenset("@/\\\x00")
 _MAX_CACHE_SALT_LENGTH = 128
 
