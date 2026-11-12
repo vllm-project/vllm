@@ -43,6 +43,7 @@ from vllm.model_executor.models.utils import (
     _merge_multimodal_embeddings,
     is_pp_missing_parameter,
     maybe_prefix,
+    should_torch_compile_mtp_drafter,
 )
 from vllm.sequence import IntermediateTensors
 
@@ -226,7 +227,8 @@ class BailingMoeV3MultiTokenPredictor(nn.Module):
         "hidden_states": 0,
         "intermediate_tensors": 0,
         "inputs_embeds": 0,
-    }
+    },
+    enable_if=should_torch_compile_mtp_drafter,
 )
 class BailingMoeV3MTPModel(nn.Module, SupportsPP, SupportsMultiModalEmbeddings):
     hf_to_vllm_mapper = BailingMoeV3ForCausalLM.hf_to_vllm_mapper

@@ -931,6 +931,16 @@ class PPMissingLayer(torch.nn.Identity):
         return args[0] if args else next(iter(kwargs.values()))
 
 
+def should_torch_compile_mtp_drafter(vllm_config: VllmConfig) -> bool:
+    """`enable_if` for MTP drafters that pick their module by `spec_step_idx`.
+
+    The drafter is compiled once with guards dropped, so a compiled
+    multi-module drafter would reuse the first-traced module for every step.
+    """
+    spec_config = vllm_config.speculative_config
+    return spec_config is None or not spec_config.use_multi_module_mtp()
+
+
 def spec_decode_needs_target_embed(vllm_config: VllmConfig) -> bool:
     """Whether the last PP rank needs the target input embedding, for a
     hidden-state drafter that may reuse it (see `maybe_share_target_embed`)."""
