@@ -637,16 +637,15 @@ class TritonExperts(LoRAExpertsMixin, mk.FusedMoEExpertsModular):
             )
         elif (
             activation == MoEActivation.SILU
-            and self.activation_config.clamp_limit == 10.0
-            and N == 1024
+            and self.activation_config.clamp_limit is not None
             and self.quant_config.use_fp8_w8a8
             and self.block_shape == [128, 128]
+            and N % 256 == 0
             and lora_context is None
             and not self.quantization_emulation
-            and num_tokens <= 32
             and intermediate_cache1.dtype == torch.bfloat16
             and current_platform.is_cuda()
-            and current_platform.get_device_name() == "NVIDIA H20-3e"
+            and current_platform.is_device_capability(90)
         ):
             qintermediate_cache2, a2q_scale = (
                 silu_mul_per_token_group_quant_fp8_colmajor(

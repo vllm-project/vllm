@@ -958,31 +958,38 @@ def _glm52_device_plan(
     return plan
 
 
-@pytest.mark.parametrize("n,k", glm53_gemm._H20_PROJECTIONS)
+@pytest.mark.parametrize("n,k", glm53_gemm._SM90_PROJECTIONS)
 @pytest.mark.parametrize("num_tokens", [1, 2, 3])
-def test_glm53_h20_projection_replays_with_updated_inputs(n, k, num_tokens, dist_init):
+def test_glm53_sm90_projection_replays_with_updated_inputs(n, k, num_tokens, dist_init):
     """Selected decode rows and the cuBLAS fallback read current graph inputs."""
     if not current_platform.is_cuda() or not current_platform.has_device_capability(90):
         pytest.skip("CuTe DSL projection requires SM90 or newer")
     if not glm53_gemm.shape_dynamic_skinny_gemm.is_available():
         pytest.skip("CuTe DSL is not available")
     from vllm.config import VllmConfig, set_current_vllm_config
-    from vllm.model_executor.layers.linear import ReplicatedLinear
+    from vllm.model_executor.layers.linear import (
+        ReplicatedLinear,
+        UnquantizedLinearMethod,
+    )
 
     torch.manual_seed(42)
     with set_current_vllm_config(VllmConfig()), torch.device("cuda"):
         layer = ReplicatedLinear(k, n, bias=False, params_dtype=torch.bfloat16)
         layer.weight.data.normal_(std=0.1)
-        method = glm53_gemm.Glm5NextLowLatencyLinearMethod(
-            glm53_gemm._H20_PROJECTIONS[(n, k)]
+        glm53_gemm.enable_sm90_low_latency_gemm(layer, torch.bfloat16)
+        expected_method = (
+            glm53_gemm.Glm5NextLowLatencyLinearMethod
+            if current_platform.is_device_capability(90)
+            else UnquantizedLinearMethod
         )
-        method.process_weights_after_loading(layer)
+        assert type(layer.quant_method) is expected_method
+        layer.quant_method.process_weights_after_loading(layer)
         x = torch.randn(num_tokens, k, dtype=torch.bfloat16)
-        method.apply(layer, x)
+        layer(x)
         torch.accelerator.synchronize()
         graph = torch.cuda.CUDAGraph()
         with torch.cuda.graph(graph):
-            output = method.apply(layer, x)
+            output, _ = layer(x)
         x.normal_()
         graph.replay()
         torch.accelerator.synchronize()

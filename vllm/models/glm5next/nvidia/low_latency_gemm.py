@@ -1,6 +1,6 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
-"""BF16 projection choices measured for GLM-5.3-Flash TP4 decode on H20-3e."""
+"""SM90 BF16 projection choices measured for GLM-5.3-Flash TP4 decode on H20."""
 
 import torch
 from torch import nn
@@ -15,7 +15,7 @@ from vllm.platforms import current_platform
 
 # (local N, K) -> measured token count and kernel layout. Larger batches keep
 # cuBLAS. See benchmarks/kernels/benchmark_glm5next_decode.py.
-_H20_PROJECTIONS = {
+_SM90_PROJECTIONS = {
     (6416, 4096): {
         1: SkinnyGemmConfig(1, 128, 2),
         2: SkinnyGemmConfig(2, 64, 4, k_unroll=2),
@@ -56,12 +56,12 @@ class Glm5NextLowLatencyLinearMethod(UnquantizedLinearMethod):
         return super().apply(layer, x, bias)
 
 
-def enable_h20_low_latency_gemm(module: nn.Module, dtype: torch.dtype) -> None:
+def enable_sm90_low_latency_gemm(module: nn.Module, dtype: torch.dtype) -> None:
     if (
         dtype != torch.bfloat16
         or envs.VLLM_BATCH_INVARIANT
         or not current_platform.is_cuda()
-        or current_platform.get_device_name() != "NVIDIA H20-3e"
+        or not current_platform.is_device_capability(90)
         or not shape_dynamic_skinny_gemm.is_available()
     ):
         return
@@ -75,7 +75,7 @@ def enable_h20_low_latency_gemm(module: nn.Module, dtype: torch.dtype) -> None:
         weight = getattr(child, "weight", None)
         if weight is None or weight.ndim != 2 or weight.dtype != dtype:
             continue
-        plan = _H20_PROJECTIONS.get(tuple(weight.shape))
+        plan = _SM90_PROJECTIONS.get(tuple(weight.shape))
         if plan is not None:
             child.quant_method = Glm5NextLowLatencyLinearMethod(plan)
             configs.update(plan.values())

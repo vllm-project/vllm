@@ -628,10 +628,10 @@ class Glm5NextDecoderLayer(nn.Module):
 
         if current_platform.is_cuda():
             from vllm.models.glm5next.nvidia.low_latency_gemm import (
-                enable_h20_low_latency_gemm,
+                enable_sm90_low_latency_gemm,
             )
 
-            enable_h20_low_latency_gemm(self.self_attn, vllm_config.model_config.dtype)
+            enable_sm90_low_latency_gemm(self.self_attn, vllm_config.model_config.dtype)
 
     def forward(
         self,

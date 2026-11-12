@@ -105,11 +105,12 @@ def test_silu_mul_fp8_quant_deep_gemm(T: int, N: int):
     torch.testing.assert_close(output_scales, ref_output_scales)
 
 
-@pytest.mark.parametrize("rows", [1, 8, 64, 256])
-@pytest.mark.parametrize("width", [256, 1024])
+@pytest.mark.parametrize("rows", [1, 8, 33, 64, 256, 2048])
+@pytest.mark.parametrize("width", [256, 1024, 4096])
+@pytest.mark.parametrize("clamp_limit", [0.0, 7.0, 10.0])
 @pytest.mark.parametrize("use_ue8m0", [False, True])
 @pytest.mark.skipif(not current_platform.is_cuda(), reason="CUDA quantizer parity")
-def test_clamped_decode_quant_preserves_cuda_rounding(rows, width, use_ue8m0):
+def test_clamped_quant_preserves_cuda_rounding(rows, width, clamp_limit, use_ue8m0):
     """Fusion must preserve the FP8 bytes and scales consumed by MoE GEMM2."""
     set_random_seed(42)
     x = torch.randn(rows, width, device=DEVICE, dtype=torch.bfloat16)
@@ -119,10 +120,10 @@ def test_clamped_decode_quant_preserves_cuda_rounding(rows, width, use_ue8m0):
         actual, actual_scales = silu_mul_per_token_group_quant_fp8_colmajor(
             x,
             use_ue8m0=use_ue8m0,
-            clamp_limit=10.0,
+            clamp_limit=clamp_limit,
             match_cuda_quantization=True,
         )
-        torch.ops._C.silu_and_mul_with_clamp(activated, x, 10.0, 1.0, 0.0)
+        torch.ops._C.silu_and_mul_with_clamp(activated, x, clamp_limit, 1.0, 0.0)
         expected, expected_scales = per_token_group_quant_fp8(
             activated, GROUP_SIZE, use_ue8m0=use_ue8m0
         )
