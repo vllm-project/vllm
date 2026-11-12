@@ -1429,13 +1429,12 @@ class LlavaOnevision2ProcessingInfo(BaseProcessingInfo):
     def get_num_frames_with_most_features(
         self,
         seq_len: int,
-        mm_counts: Mapping[str, int],
+        num_videos: int,
         max_frames_per_video: int = _MAX_FRAMES_PER_VIDEO,
     ) -> int:
-        max_videos = mm_counts.get("video", 0)
         max_total_frames = self._get_max_video_frames(seq_len)
         max_frames_per_video = min(
-            max_total_frames // max(max_videos, 1), max_frames_per_video
+            max_total_frames // max(num_videos, 1), max_frames_per_video
         )
         return max(max_frames_per_video, 1)
 
@@ -1448,7 +1447,9 @@ class LlavaOnevision2ProcessingInfo(BaseProcessingInfo):
         return self.get_num_video_tokens(
             image_width=w,
             image_height=h,
-            num_frames=self.get_num_frames_with_most_features(seq_len, mm_counts),
+            num_frames=self.get_num_frames_with_most_features(
+                seq_len, mm_counts.get("video", 0)
+            ),
         )
 
     def get_supported_mm_limits(self) -> Mapping[str, int | None]:
