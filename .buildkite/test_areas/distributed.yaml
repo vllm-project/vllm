@@ -873,6 +873,8 @@ steps:
   source_file_dependencies:
   - vllm/entrypoints/cli/preload.py
   - vllm/model_executor/model_loader/weight_cache/
+  - vllm/models/deepseek_v41/
+  - vllm/model_executor/kernels/linear/mxfp8/deep_gemm.py
   - vllm/model_executor/layers/fused_moe/expert_map_manager.py
   - tests/model_executor/model_loader/test_weight_cache.py
   commands:
@@ -890,6 +892,8 @@ steps:
       source_file_dependencies:
       - vllm/entrypoints/cli/preload.py
       - vllm/model_executor/model_loader/weight_cache/
+      - vllm/models/deepseek_v41/
+      - vllm/model_executor/kernels/linear/mxfp8/deep_gemm.py
       - vllm/model_executor/layers/fused_moe/expert_map_manager.py
       - tests/model_executor/model_loader/test_weight_cache.py
       - vllm/platforms/rocm.py

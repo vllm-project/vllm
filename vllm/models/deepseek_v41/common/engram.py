@@ -1818,6 +1818,21 @@ class Engram(nn.Module):
             self._prefetch_stream = torch.cuda.Stream(device=self.staged_rows.device)
         self._prefetch_done = torch.cuda.Event()
 
+    def rebuild_runtime_state_after_ipc(
+        self,
+        max_tokens: int,
+        device: torch.device,
+        prefetch_stream: torch.cuda.Stream | None,
+    ) -> None:
+        old_staged_rows = self.staged_rows
+        self._batch = None
+        self._prefetch_stream = prefetch_stream
+        self._prefetch_done = None
+        with torch.device(device):
+            self._init_staging(max_tokens, old_staged_rows.shape[-1])
+        torch.utils.swap_tensors(old_staged_rows, self.staged_rows)
+        self.staged_rows = old_staged_rows
+
     def prepare_embeddings(self, hash_ids: torch.Tensor) -> None:
         """Look up, or prefetch from host memory, rows before the decoder layers
         consume them; DP-sharded tables take the group's gathered hash IDs."""

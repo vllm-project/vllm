@@ -985,6 +985,41 @@ class DeepseekV4Model(nn.Module, EagleModelMixin):
         else:
             self._mtp_hidden_buffer = None
 
+    def rebuild_runtime_state_after_ipc(self, device: torch.device) -> None:
+        engrams = [
+            layer.engram
+            for layer in islice(self.layers, self.start_layer, self.end_layer)
+            if getattr(layer, "engram", None) is not None
+        ]
+        if any(engram.embed_tokens.peer_rows for engram in engrams):
+            raise RuntimeError(
+                "IPC loading cannot rebuild DeepSeek-V4.1 symmetric-memory "
+                "Engram peer tables; use disk loading"
+            )
+
+        with torch.device(device):
+            for name in (
+                "topk_indices_buffer",
+                "candidate_block_buffer",
+                "_mtp_hidden_buffer",
+            ):
+                buffer = getattr(self, name)
+                if buffer is not None:
+                    replacement = torch.empty_like(buffer, device=device)
+                    torch.utils.swap_tensors(buffer, replacement)
+
+            max_tokens = self.vllm_config.scheduler_config.max_num_batched_tokens
+            prefetch_stream = (
+                torch.cuda.Stream(device=device)
+                if any(engram.embed_tokens.cpu_offload for engram in engrams)
+                else None
+            )
+            for engram in engrams:
+                engram.rebuild_runtime_state_after_ipc(
+                    max_tokens, device, prefetch_stream
+                )
+            self.engram_batch = EngramBatch.create(engrams, max_tokens)
+
     def embed_input_ids(self, input_ids: torch.Tensor) -> torch.Tensor:
         return self.embed_tokens(input_ids)
 
@@ -1782,6 +1817,9 @@ class DeepseekV41LLMForCausalLM(
     def load_weights(self, weights: Iterable[tuple[str, torch.Tensor]]) -> set[str]:
         loader = AutoWeightsLoader(self)
         return loader.load_weights(weights, mapper=self.hf_to_vllm_mapper)
+
+    def rebuild_runtime_state_after_ipc(self, device: torch.device) -> None:
+        self.model.rebuild_runtime_state_after_ipc(device)
 
     def process_weights_after_loading(self) -> None:
         self.model.finalize_mhc_broadcast_weights()

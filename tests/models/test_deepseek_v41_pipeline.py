@@ -68,3 +68,58 @@ def test_stage_entry_injects_engram_before_mhc_pre(monkeypatch):
     mhc_residual, mhc_pre_mix = mhc_pre_calls[0]
     torch.testing.assert_close(mhc_residual, hidden + 10)
     assert mhc_pre_mix is pre_mix
+
+
+def test_engram_ipc_runtime_state_rebuilds_meta_staging(dist_init, monkeypatch):
+    from transformers import PreTrainedConfig
+
+    from vllm.config import (
+        EngramConfig,
+        KernelConfig,
+        SchedulerConfig,
+        set_current_vllm_config,
+    )
+    from vllm.models.deepseek_v41.common.engram import Engram, EngramLayout
+
+    config = PreTrainedConfig(
+        hidden_size=16,
+        hc_mult=1,
+        rms_norm_eps=1e-6,
+        engram_layer_ids=[0],
+        engram_num_embeddings=[32],
+        engram_max_ngram_size=2,
+        engram_n_heads=1,
+        engram_head_dim=32,
+        engram_compressed_vocab_size=4,
+        engram_pad_token_id=0,
+        engram_vocab_size=31,
+    )
+    vllm_config = SimpleNamespace(
+        scheduler_config=SchedulerConfig(
+            max_model_len=8,
+            is_encoder_decoder=False,
+            max_num_batched_tokens=8,
+            max_num_seqs=1,
+        ),
+        engram_config=EngramConfig(cpu_offload=False),
+        kernel_config=KernelConfig(),
+    )
+    monkeypatch.setattr(
+        torch.cuda,
+        "get_device_properties",
+        lambda _: SimpleNamespace(multi_processor_count=1),
+    )
+    monkeypatch.setattr(torch.accelerator, "current_device_index", lambda: 0)
+    with set_current_vllm_config(vllm_config), torch.device("meta"):
+        module = Engram(config, None, EngramLayout(config), 0, False, "engram")
+
+    placeholder = module.staged_rows
+    assert placeholder.is_meta
+    module.rebuild_runtime_state_after_ipc(8, torch.device("cpu"), None)
+
+    assert module.staged_rows is placeholder
+    assert placeholder.device == torch.device("cpu")
+    assert placeholder.shape == (8, 1, 32)
+    assert module._prefetch_stream is None
+    assert module._prefetch_done is None
+    assert module._batch is None

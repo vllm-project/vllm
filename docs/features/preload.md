@@ -1,14 +1,15 @@
 # Preload
 
-vLLM's preload feature keeps model artifacts resident in GPU memory across
-engine restarts, so a restarting engine reuses them instead of rebuilding them
-from scratch. The design is extensible to different kinds of artifacts; it
-currently supports **model weights** via the weight cache daemon.
+vLLM's preload feature keeps model artifacts resident across engine restarts,
+so a restarting engine reuses them instead of rebuilding them from scratch. The
+design is extensible to different kinds of artifacts; it currently supports
+**model weights** via the weight cache daemon.
 
 With weight preloading, a daemon process per GPU holds its rank's
-post-quantized, TP-sharded weights and serves CUDA IPC handles to vLLM engines
-over a Unix domain socket, so a restarting engine maps the weights via
-zero-copy IPC instead of reloading them from disk.
+post-quantized, TP-sharded weights in GPU memory and, for large CPU-offloaded
+weights, a host shared-memory arena. It serves CUDA IPC handles and host arena
+file descriptors to vLLM engines over a Unix domain socket, so a restarting
+engine maps the weights via zero-copy IPC instead of reloading them from disk.
 
 Key benefits:
 
@@ -49,6 +50,16 @@ vllm serve meta-llama/Llama-3.1-8B-Instruct \
 
 The daemon itself must load from disk; passing `--load-format ipc_cache` to
 `vllm preload` is an error.
+
+## DeepSeek-V4.1 on NVIDIA Blackwell
+
+The current DeepSeek-V4.1 support covers the target-model preload path on
+NVIDIA Blackwell GPUs, including large private CPU-offloaded Engram weights
+through the host shared-memory arena described below. DP-shared and THP-backed
+Engram storage are not covered. ROCm, GPU symmetric peer Engram, and DSpark
+draft-model caching are also not covered by this DeepSeek-V4.1 preload support.
+This scope is specific to the current DeepSeek-V4.1 path; it does not impose
+new platform or draft-model restrictions on other models.
 
 ## Preloading the FlashInfer autotune cache
 
@@ -179,7 +190,8 @@ daemons at a trusted deployment.
 
 1. `vllm preload` spawns one daemon process per GPU. Each daemon loads its
    shard from disk using the configured loader, runs quantization
-   post-processing, and exports every parameter/buffer as a CUDA IPC handle.
+   post-processing, packs large CPU storages into a host arena before warmup,
+   and exports GPU parameters/buffers as CUDA IPC handles.
 2. An engine started with `--load-format ipc_cache` builds its model on the
    meta device (no storage) and requests the tensors from the daemon on its
    GPU.
@@ -187,11 +199,29 @@ daemons at a trusted deployment.
    cached weights: checkpoint content (hashed from safetensors metadata, so
    identical weights in different directories still match), model
    architecture, TP/DP size/rank, dtype, quantization method and config, text
-   RoPE parameters, model revision, KV cache dtype and quantization skip layers,
-   and vLLM version. On any mismatch the engine falls back to disk loading
-   (unless `fallback` is disabled).
+   RoPE parameters, Engram and attention configurations, model revision, KV
+   cache dtype and quantization skip layers, and vLLM version. On any mismatch
+   the engine falls back to disk loading (unless `fallback` is disabled).
 4. The engine also verifies the daemon's GPU UUID matches its own device, so a
    stale socket cannot serve weights for the wrong GPU.
+
+### Host shared memory for CPU-offloaded weights
+
+After loading and post-processing, and before warmup, the daemon packs large
+CPU parameter and buffer storages into a `memfd` arena and retargets the
+original tensors to views of that arena in place. This allows the original
+standalone storages to be released instead of keeping a second resident copy.
+
+For `get_state`, the daemon sends the arena file descriptor with `SCM_RIGHTS`
+and sends only lightweight dtype, shape, stride, and offset descriptors in the
+message. Small CPU tensors continue to travel by value. In `zero_copy` mode the
+engine reconstructs tensor views directly over its `mmap` of the arena rather
+than receiving large CPU tensor payloads through pickle.
+
+When pinned host access is required, each process registers its own mapping
+with `cudaHostRegister`. The registration and mapping remain alive while any
+tensor storage refers to them and are released after the last such storage is
+gone. Each process has an independent registration and mapping lifecycle.
 
 Tied weights (e.g. `lm_head.weight` sharing storage with
 `embed_tokens.weight`) are exported once and re-established as aliases in the
@@ -255,12 +285,14 @@ not cached and keep loading from disk in the engine.
 
 The loader supports two modes, selected via `--model-loader-extra-config`:
 
-- `zero_copy` (default): the engine maps the daemon's CUDA allocations
-  directly. The daemon must stay alive for the engine's lifetime, and each
-  GPU carries only one copy of the weights.
-- `copy`: the engine clones every tensor into its own GPU memory and then
-  asks the daemon to release its cache. Use this when the daemon should free
-  GPU memory after handing off, at the cost of a full copy per restart.
+- `zero_copy` (default): the engine maps the daemon's CUDA allocations and
+  host arena directly. The mapped tensor owners keep those allocations and the
+  host mapping alive without making a second copy. The daemon must be
+  restarted to serve later engine restarts after it exits.
+- `copy`: the engine clones GPU and CPU tensors into engine-owned memory,
+  including pinned CPU copies where required, and then asks the daemon to
+  release its GPU and host cache. Use this when the daemon should free its
+  memory after handing off, at the cost of a full copy per restart.
 
 !!! warning
     In `zero_copy` mode the weights live in the daemon's CUDA IPC allocations,
@@ -343,8 +375,10 @@ Socket paths are derived from the GPU UUID, so they are stable regardless of
 
 ## Security
 
-The socket protocol uses pickle and is intended only for trusted local
-processes owned by the same user:
+The socket protocol uses pickle for control messages, tensor descriptors, and
+small CPU tensors, and passes host arena file descriptors only through
+`SCM_RIGHTS`. It is intended only for trusted local processes owned by the same
+user:
 
 - Daemon sockets live in a per-user private directory (mode `0700`) and the
   socket files are restricted to the owner (`0600`).

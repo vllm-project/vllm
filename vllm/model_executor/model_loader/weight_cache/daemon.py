@@ -3,9 +3,9 @@
 """Weight cache daemon for fast engine restarts.
 
 One daemon process per GPU holds the post-quantized, TP-sharded weights of its
-rank in GPU memory and serves CUDA IPC handles to vLLM engines over a Unix
-domain socket. Restarting engines map the weights via zero-copy IPC instead of
-reloading from disk.
+rank in GPU memory and a memfd host arena. It serves CUDA IPC handles and host
+shared-memory descriptors to vLLM engines over a Unix domain socket. Restarting
+engines map the weights via zero-copy IPC instead of reloading from disk.
 
 Launch one daemon per TP rank with a single command:
 
@@ -107,6 +107,7 @@ from vllm.distributed.device_communicators.flashinfer_all_reduce import (
 from vllm.logger import configure_logging, init_logger
 from vllm.model_executor.model_loader import get_model_loader
 from vllm.model_executor.model_loader.utils import process_weights_after_loading
+from vllm.model_executor.model_loader.weight_cache.host_arena import HostArena
 from vllm.model_executor.model_loader.weight_cache.protocol import (
     TensorEntry,
     WeightCacheKey,
@@ -146,6 +147,7 @@ logger = init_logger("vllm.model_executor.model_loader.weight_cache.daemon")
 
 def export_entries(
     model: torch.nn.Module,
+    arena: HostArena | None = None,
 ) -> tuple[dict[str, TensorEntry], dict[str, str]]:
     """Export a model's tensors, preserving tied-parameter aliases.
 
@@ -176,7 +178,7 @@ def export_entries(
             aliases[name] = canonical
             return
         canonical_by_id[id(tensor)] = name
-        entries[name] = TensorEntry.from_tensor(tensor, kind)
+        entries[name] = TensorEntry.from_tensor(tensor, kind, arena=arena)
 
     for name, param in model.named_parameters(remove_duplicate=False):
         _add(name, param, "param")
@@ -277,6 +279,7 @@ class WeightCacheDaemon:
         self.is_draft = is_draft
         self.role = format_daemon_role(is_draft)
         self.model: torch.nn.Module | None = None
+        self.host_arena: HostArena | None = None
         # Engine watch connections, held open for the daemon's lifetime.
         self._watchers: list[socket.socket] = []
         key_dp_size, key_dp_rank = get_engine_dp_placement(vllm_config, dp_rank)
@@ -295,6 +298,8 @@ class WeightCacheDaemon:
             enable_expert_parallel=parallel_config.enable_expert_parallel,
             expert_placement_strategy=parallel_config.expert_placement_strategy,
             kernel_config=vllm_config.kernel_config,
+            engram_config=getattr(vllm_config, "engram_config", None),
+            attention_config=getattr(vllm_config, "attention_config", None),
         )
 
     def warmup(self) -> None:
@@ -303,6 +308,15 @@ class WeightCacheDaemon:
             cache.warmup(self, self.d2d)
 
     def load_model(self) -> None:
+        engram_config = self.vllm_config.engram_config
+        if engram_config is not None:
+            for option in ("dp_shared_memory", "use_thp"):
+                if getattr(engram_config, option):
+                    raise ValueError(
+                        f"Weight cache daemon does not support Engram {option}=True; "
+                        "use private CPU Engram storage (dp_shared_memory=False, "
+                        "use_thp=False)"
+                    )
         torch.accelerator.set_device_index(self.local_rank)
         # Outside the config context so the daemon keeps its own rendezvous
         # instead of the engine's; model parallel groups (TP/DP/EP) are then
@@ -319,6 +333,7 @@ class WeightCacheDaemon:
         with set_current_vllm_config(self.vllm_config):
             ensure_model_parallel_initialized(self.tp_size, self.pp_size)
             self.model = self.get_model()
+            self.host_arena = HostArena.from_model(self.model)
         # In-place reloads use configs already normalized by model construction.
         self.loaded_rope_parameters_hash = hash_rope_parameters(self.model_config)
         # Loading and post-processing leave freed transients in the caching
@@ -337,9 +352,10 @@ class WeightCacheDaemon:
     def release_distributed(self) -> None:
         """Release process groups and BLAS workspaces after loading and warmup.
 
-        Serving only exports CUDA IPC handles, so the communicators (NCCL,
-        custom all-reduce and FlashInfer workspaces) and cached BLAS scratch
-        would otherwise pin GPU memory for the daemon's lifetime.
+        Serving only exports weight handles and host descriptors, so the
+        communicators (NCCL, custom all-reduce and FlashInfer workspaces) and
+        cached BLAS scratch would otherwise pin GPU memory for the daemon's
+        lifetime.
         """
         free_before, _ = torch.accelerator.get_memory_info()
         # No rank may tear down a communicator while a peer is still in a
@@ -519,7 +535,8 @@ class WeightCacheDaemon:
             send_msg(conn, {"status": "error", "message": "Weights were released"})
             return
         gpu_uuid = get_current_device_uuid()
-        entries, aliases = export_entries(self.model)
+        arena = getattr(self, "host_arena", None)
+        entries, aliases = export_entries(self.model, arena=arena)
         send_msg(
             conn,
             {
@@ -528,7 +545,9 @@ class WeightCacheDaemon:
                 "aliases": aliases,
                 "attrs": export_model_attrs(self.model),
                 "gpu_uuid": gpu_uuid,
+                "host_arena": arena.descriptor if arena is not None else None,
             },
+            fds=[arena.fd] if arena is not None else None,
         )
         logger.info_once(
             "Weight cache %s daemon rank %d sent %d tensors (+%d aliases) to engine",
@@ -564,6 +583,7 @@ class WeightCacheDaemon:
 
     def _handle_release(self, conn: socket.socket) -> None:
         self.model = None
+        self.host_arena = None
         torch.accelerator.empty_cache()
         logger.info(
             "Weight cache %s daemon rank %d released cached weights",
