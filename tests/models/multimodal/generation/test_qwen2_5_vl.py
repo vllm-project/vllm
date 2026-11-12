@@ -8,6 +8,7 @@ from vllm.assets.image import ImageAsset
 from vllm.platforms import current_platform
 
 from ....conftest import VIDEO_ASSETS
+from ...utils import check_logprobs_close
 from .vlm_utils.builders import sample_frames_with_video_metadata
 
 models = ["Qwen/Qwen2.5-VL-3B-Instruct"]
@@ -182,6 +183,55 @@ def test_qwen2_5_vl_evs_batched_videos(
 
             # Ensure the output is a string
             assert isinstance(output_text, str)
+
+
+@pytest.mark.core_model
+@pytest.mark.skipif(
+    current_platform.is_cpu(), reason="Video pruning is not tested on CPU"
+)
+@pytest.mark.parametrize("model", models)
+def test_qwen2_5_vl_evs_chunked_prefill_images(
+    vllm_runner, image_assets, model
+) -> None:
+    """With pruning enabled, a prefill chunk that starts on an image's first
+    token must keep the M-RoPE positions of prefilling the prompt in one chunk.
+    """
+    prompt = qwen2_5_vl_chat_template(
+        IMAGE_PLACEHOLDER, IMAGE_PLACEHOLDER, "Describe the two images."
+    )
+    images = [[asset.pil_image for asset in image_assets]]
+
+    outputs = []
+    # A 256-token chunk holds either image but not both, and an image is never
+    # split, so the second image starts a chunk.
+    for max_num_batched_tokens in (4096, 256):
+        with vllm_runner(
+            model,
+            runner="generate",
+            dtype=target_dtype,
+            max_model_len=4096,
+            max_num_seqs=1,
+            enable_chunked_prefill=True,
+            max_num_batched_tokens=max_num_batched_tokens,
+            disable_chunked_mm_input=True,
+            limit_mm_per_prompt={"image": 2, "video": 0},
+            mm_processor_kwargs={
+                "size": {"shortest_edge": 4 * 28 * 28, "longest_edge": 256 * 28 * 28}
+            },
+            video_pruning_rate=0.75,
+        ) as vllm_model:
+            outputs.append(
+                vllm_model.generate_greedy_logprobs(
+                    [prompt], 32, num_logprobs=5, images=images
+                )
+            )
+
+    check_logprobs_close(
+        outputs_0_lst=outputs[0],
+        outputs_1_lst=outputs[1],
+        name_0="one_chunk",
+        name_1="chunked",
+    )
 
 
 @pytest.mark.core_model
