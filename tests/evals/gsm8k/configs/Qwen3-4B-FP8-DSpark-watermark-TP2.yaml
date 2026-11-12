@@ -15,7 +15,6 @@ min_acceptance_length: 3.915
 server_args: >-
   --tensor-parallel-size 2
   --max-model-len 4096
-  --gpu-memory-utilization 0.92
   --no-enable-prefix-caching
   --speculative-config.method dspark
   --speculative-config.model deepseek-ai/dspark_qwen3_4b_block7
