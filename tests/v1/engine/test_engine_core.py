@@ -1,6 +1,7 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 
+import asyncio
 import copy
 import gc
 import time
@@ -24,7 +25,7 @@ from vllm.config import (
     SchedulerConfig,
     VllmConfig,
 )
-from vllm.engine.arg_utils import EngineArgs
+from vllm.engine.arg_utils import AsyncEngineArgs, EngineArgs
 from vllm.platforms import current_platform
 from vllm.utils.torch_utils import set_default_torch_num_threads
 from vllm.v1.core.sched.interface import PauseState
@@ -33,6 +34,7 @@ from vllm.v1.engine import (
     EngineCoreRequest,
     EngineCoreRequestType,
     FinishReason,
+    StreamAdmissionResult,
 )
 from vllm.v1.engine.core import (
     DPEngineCoreProc,
@@ -40,6 +42,7 @@ from vllm.v1.engine.core import (
     EngineCoreProc,
     EngineShutdownState,
 )
+from vllm.v1.engine.core_client import EngineCoreClient
 from vllm.v1.executor.abstract import Executor
 from vllm.v1.executor.uniproc_executor import UniProcExecutor
 from vllm.v1.kv_cache_interface import KVCacheConfig
@@ -97,6 +100,59 @@ def test_stream_admission_requires_persistent_state():
     with pytest.raises(ValueError, match="Stream admission requires persistent state"):
         engine_core.admit_stream(admission)
     assert not engine_core.scheduler.has_requests()
+
+
+@create_new_process_for_each_test()
+def test_stream_admission_decode_failure_fails_only_its_own_call(
+    state_stub_models, dummy_state_model_path
+):
+    """Through the multiprocess engine's input thread: an admit_stream call
+    whose request has a field of the wrong type fails as that call's own
+    utility failure, and the engine goes on reading: a valid admission is
+    then accepted and another utility call succeeds."""
+    vllm_config = AsyncEngineArgs(
+        model=dummy_state_model_path,
+        load_format="dummy",
+        enable_prefix_caching=False,
+        async_scheduling=False,
+        enable_extensible_kv_cache=False,
+        enforce_eager=True,
+        max_model_len=64,
+        max_num_batched_tokens=512,
+        max_num_seqs=2,
+    ).create_engine_config()
+
+    def admission(**fields) -> EngineCoreRequest:
+        request = make_request()
+        request.prompt_token_ids = None
+        request.resumable = True
+        for name, value in fields.items():
+            setattr(request, name, value)
+        return request
+
+    async def run():
+        client = EngineCoreClient.make_async_mp_client(
+            vllm_config, Executor.get_class(vllm_config), log_stats=False
+        )
+        try:
+            with pytest.raises(Exception, match="Call to admit_stream method failed"):
+                await asyncio.wait_for(
+                    client.admit_stream_async(admission(data_parallel_rank="bad")),
+                    60,
+                )
+            valid = admission()
+            result = await asyncio.wait_for(client.admit_stream_async(valid), 60)
+            assert result == StreamAdmissionResult(True, valid.request_id)
+            tasks = await asyncio.wait_for(client.get_supported_tasks_async(), 60)
+            assert "generate" in tasks
+            await client.abort_requests_async([valid.request_id])
+            await asyncio.wait_for(
+                client.wait_stream_retired_async(valid.request_id), 60
+            )
+        finally:
+            client.shutdown()
+
+    asyncio.run(run())
 
 
 @create_new_process_for_each_test()

@@ -835,3 +835,634 @@ async def test_async_llm_stream_ends_with_a_turn_that_stops_off_eos(
             assert (await after.finish())[0] == _llm_expected_turns(llm)
     finally:
         llm.shutdown()
+
+
+# Stream admission: the engine reserves a stream's slot before any input.
+
+
+def _admission(core, request_id="stream", **fields) -> EngineCoreRequest:
+    return EngineCoreRequest(
+        **{
+            "request_id": request_id,
+            "prompt_token_ids": None,
+            "mm_features": None,
+            "sampling_params": _params(core),
+            "pooling_params": None,
+            "arrival_time": time.time(),
+            "lora_request": None,
+            "cache_salt": None,
+            "data_parallel_rank": None,
+            "resumable": True,
+            **fields,
+        }
+    )
+
+
+def _feed_admitted(core, update_seq, tokens, *, resumable=True, request_id="stream"):
+    """Send input `update_seq` of an admitted stream, or with
+    `resumable=False` the close that carries no input."""
+    from vllm.v1.engine import StreamAdmissionContext
+
+    request = _admission(
+        core,
+        request_id,
+        prompt_token_ids=list(tokens),
+        resumable=resumable,
+        stream_admission=StreamAdmissionContext(
+            input_closed=not resumable, update_seq=update_seq
+        ),
+    )
+    core.add_request(*core.preprocess_add_request(request))
+
+
+def _steps_until_retired(core, request_id="stream"):
+    """Step until a batch carries the stream's retirement notice; returns
+    every output of the stream seen on the way."""
+    seen = []
+    for _ in range(MAX_STEPS):
+        outputs, _ = core.step_fn()
+        for batch in outputs.values():
+            seen += [o for o in batch.outputs if o.request_id == request_id]
+            if request_id in (batch.retired_streams or ()):
+                return seen
+    raise AssertionError(f"{request_id} did not retire in {MAX_STEPS} steps")
+
+
+@create_new_process_for_each_test("spawn")
+def test_engine_core_admitted_stream_runs_on_the_slot_from_admission(
+    dummy_state_model_path,
+):
+    """An admission reserves a slot and leaves the engine with no work; the
+    stream's inputs then run on that slot with the tokens of an ordinary
+    stream, and after the close the engine's steps deliver the retirement
+    notice to the caller of admit_stream."""
+    from vllm.v1.engine import StreamAdmissionResult
+
+    core = _engine_core(dummy_state_model_path)
+    try:
+        model = _model(core)
+        result = core.admit_stream(_admission(core))
+        assert result == StreamAdmissionResult(True, "stream")
+        handle = _manager(core).get("stream")
+        assert handle is not None
+        assert core.step_fn() == ({}, False)
+        _feed_admitted(core, 1, FIRST_INPUT)
+        first = _run_turn(core, "stream")
+        _feed_admitted(core, 2, SECOND_INPUT)
+        second = _run_turn(core, "stream")
+        assert [first, second] == _expected_turns(model.vocab_size, model.eos_token_id)
+        assert _manager(core).get("stream") == handle
+        _feed_admitted(core, 3, [0], resumable=False)
+        (end,) = _steps_until_retired(core)
+        assert end.finish_reason is not None and end.ends_stream is True
+        assert _manager(core).num_free_slots == 2
+    finally:
+        core.shutdown()
+
+
+@create_new_process_for_each_test("spawn")
+def test_in_process_abort_pause_that_clears_the_cache_keeps_one_retirement_notice(
+    dummy_state_model_path,
+):
+    """An abort pause ends an admitted stream as it ends other requests: the
+    in-process engine sends no output for it and steps until its scheduled
+    slot has retired, dropping those steps' outputs; the stream's retirement
+    notice is not dropped with them, and the steps after the pause deliver
+    it exactly once."""
+    core = _engine_core(dummy_state_model_path)
+    try:
+        assert core.admit_stream(_admission(core)).accepted
+        _feed_admitted(core, 1, FIRST_INPUT)
+        _run_turn(core, "stream")
+        assert core.pause_scheduler() is None
+        assert "stream" not in core.scheduler.requests
+        assert _retiring(core) == []
+        core.resume_scheduler()
+        notices = []
+        outputs_of_stream = []
+        for _ in range(4):
+            outputs, _ = core.step_fn()
+            for batch in outputs.values():
+                notices += batch.retired_streams or []
+                outputs_of_stream += [
+                    o for o in batch.outputs if o.request_id == "stream"
+                ]
+        assert notices == ["stream"]
+        assert outputs_of_stream == []
+        assert _manager(core).num_free_slots == 2
+    finally:
+        core.shutdown()
+
+
+@create_new_process_for_each_test("spawn")
+@pytest.mark.parametrize("multiprocessing", ["0", "1"], ids=["in_process", "sync_mp"])
+def test_synchronous_clients_do_not_implement_stream_admission(
+    dummy_state_model_path, monkeypatch, multiprocessing
+):
+    """Only the async multiprocess client implements admission and the wait
+    for retirement: the in-process client and the synchronous multiprocess
+    client, which LLM uses, raise NotImplementedError."""
+    monkeypatch.setenv("VLLM_ENABLE_V1_MULTIPROCESSING", multiprocessing)
+    llm = LLM(**_engine_kwargs(dummy_state_model_path, **RESOLVED_DEFAULTS))
+    client = llm.llm_engine.engine_core
+    assert isinstance(client, InprocClient) == (multiprocessing == "0")
+    request = _raw_admission(llm.llm_engine.vllm_config)
+    with pytest.raises(NotImplementedError):
+        asyncio.run(client.admit_stream_async(request))
+    with pytest.raises(NotImplementedError):
+        asyncio.run(client.wait_stream_retired_async("raw"))
+
+
+class _AdmittedStream:
+    """One admitted streaming-input request on AsyncLLM: each `feed()` sends
+    the next input, `close()` ends the generator; `task` collects the turns
+    and the finish reason of the output that ends the stream. `admitted` is
+    set when the frontend first reads the generator, which it does only
+    after the admission has succeeded."""
+
+    def __init__(self, llm, request_id):
+        from vllm.sampling_params import RequestOutputKind
+
+        self.llm = llm
+        self.request_id = request_id
+        self.inputs: asyncio.Queue = asyncio.Queue()
+        self.turn_ended = asyncio.Event()
+        self.admitted = asyncio.Event()
+        self.params = SamplingParams(
+            max_tokens=8, temperature=0, output_kind=RequestOutputKind.DELTA
+        )
+        self.task = asyncio.create_task(self._run())
+
+    async def _inputs(self):
+        from vllm.engine.protocol import StreamingInput
+        from vllm.inputs import TokensPrompt
+
+        self.admitted.set()
+        while (tokens := await self.inputs.get()) is not None:
+            yield StreamingInput(prompt=TokensPrompt(prompt_token_ids=list(tokens)))
+
+    async def _run(self):
+        turns: list[list[int]] = [[]]
+        final = None
+        async for output in self.llm.generate(
+            self._inputs(), self.params, self.request_id, stream_admission=True
+        ):
+            completion = output.outputs[0]
+            turns[-1].extend(completion.token_ids)
+            if completion.finish_reason is not None and not output.finished:
+                turns.append([])
+                self.turn_ended.set()
+            if output.finished:
+                final = completion.finish_reason
+        return [turn for turn in turns if turn], final
+
+    async def feed(self, tokens):
+        self.turn_ended.clear()
+        self.inputs.put_nowait(tokens)
+        await asyncio.wait_for(self.turn_ended.wait(), TIMEOUT)
+
+    async def close(self):
+        self.inputs.put_nowait(None)
+        return await asyncio.wait_for(self.task, TIMEOUT)
+
+
+@pytest.mark.asyncio
+async def test_async_llm_admitted_stream_runs_closes_and_retires(
+    dummy_state_model_path, monkeypatch
+):
+    """An admitted stream produces the tokens of an ordinary stream for each
+    input, ends with a stop output once its generator ends, and
+    wait_stream_retired returns once its slot is free; the caller's request
+    ID can then be admitted again."""
+    llm = _async_llm(dummy_state_model_path, monkeypatch)
+    try:
+        stream = _AdmittedStream(llm, "stream")
+        await stream.feed(FIRST_INPUT)
+        await stream.feed(SECOND_INPUT)
+        turns, final = await stream.close()
+        assert turns == _llm_expected_turns(llm)
+        assert final == "stop"
+        await asyncio.wait_for(llm.wait_stream_retired("stream"), TIMEOUT)
+        again = _AdmittedStream(llm, "stream")
+        await again.feed(FIRST_INPUT)
+        assert (await again.close())[0] == _llm_expected_turns(llm)[:1]
+    finally:
+        llm.shutdown()
+
+
+@pytest.mark.asyncio
+async def test_async_llm_refuses_a_stream_when_every_slot_is_held(
+    dummy_state_model_path, monkeypatch
+):
+    """With both slots held by streams that have no input yet, a third
+    admission raises StreamAdmissionError with reason capacity and HTTP
+    status 503; ending a stream frees its slot for the next admission."""
+    from http import HTTPStatus
+
+    from vllm.v1.engine import StreamAdmissionError
+
+    llm = _async_llm(dummy_state_model_path, monkeypatch)
+    try:
+        held = [_AdmittedStream(llm, f"held-{i}") for i in range(2)]
+        for stream in held:
+            await asyncio.wait_for(stream.admitted.wait(), TIMEOUT)
+        refused = _AdmittedStream(llm, "refused")
+        with pytest.raises(StreamAdmissionError) as error:
+            await asyncio.wait_for(refused.task, TIMEOUT)
+        assert error.value.result.reason == "capacity"
+        assert error.value.http_status == HTTPStatus.SERVICE_UNAVAILABLE
+        await held[0].close()
+        await asyncio.wait_for(llm.wait_stream_retired("held-0"), TIMEOUT)
+        admitted = _AdmittedStream(llm, "admitted")
+        await admitted.feed(FIRST_INPUT)
+        await admitted.close()
+        await held[1].close()
+    finally:
+        llm.shutdown()
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("mode", ["keep", "wait"])
+async def test_async_llm_never_fed_stream_leaves_the_engine_idle_for_a_pause(
+    dummy_state_model_path, monkeypatch, mode
+):
+    """A never-fed stream is not unfinished work: a pause that keeps or waits
+    for requests completes while it holds its slot, and an admission during
+    the pause is refused as engine_paused."""
+    from vllm.v1.engine import StreamAdmissionError
+
+    llm = _async_llm(dummy_state_model_path, monkeypatch)
+    try:
+        idle = _AdmittedStream(llm, "idle")
+        await asyncio.wait_for(idle.admitted.wait(), TIMEOUT)
+        await asyncio.wait_for(
+            llm.pause_generation(mode=mode, clear_cache=False), TIMEOUT
+        )
+        refused = _AdmittedStream(llm, "refused")
+        with pytest.raises(StreamAdmissionError) as error:
+            await asyncio.wait_for(refused.task, TIMEOUT)
+        assert error.value.result.reason == "engine_paused"
+        await asyncio.wait_for(llm.resume_generation(), TIMEOUT)
+        await idle.feed(FIRST_INPUT)
+        assert (await idle.close())[0] == _llm_expected_turns(llm)[:1]
+    finally:
+        llm.shutdown()
+
+
+@pytest.mark.asyncio
+async def test_async_llm_never_fed_stream_expires_while_the_engine_is_idle(
+    dummy_state_model_path, monkeypatch
+):
+    """The idle engine wakes at the earliest stream deadline: a stream that
+    gets no input within the configured never-fed timeout ends with one abort
+    output, and its slot retires."""
+    from vllm.v1.engine.async_llm import AsyncLLM
+
+    monkeypatch.setenv("VLLM_ENABLE_V1_MULTIPROCESSING", "1")
+    llm = AsyncLLM.from_engine_args(
+        AsyncEngineArgs(
+            **_engine_kwargs(
+                dummy_state_model_path,
+                **RESOLVED_DEFAULTS,
+                stream_admission_timeouts={"never_fed_timeout": 0.5},
+            )
+        )
+    )
+    try:
+        stream = _AdmittedStream(llm, "idle")
+        turns, final = await asyncio.wait_for(stream.task, TIMEOUT)
+        assert (turns, final) == ([], "abort")
+        await asyncio.wait_for(llm.wait_stream_retired("idle"), TIMEOUT)
+    finally:
+        llm.shutdown()
+
+
+async def _next_output(client, request_id):
+    """The next engine output for `request_id`, with its batch."""
+    while True:
+        batch = await asyncio.wait_for(client.get_output_async(), TIMEOUT)
+        for output in batch.outputs:
+            if output.request_id == request_id:
+                return output, batch
+
+
+# The two tests below read the engine's outputs from the multiprocess client
+# itself, so they build the client without AsyncLLM, whose output handler
+# would consume them.
+
+
+def _async_mp_client(path, monkeypatch, **overrides):
+    from vllm.v1.engine.core_client import EngineCoreClient
+    from vllm.v1.executor import Executor
+
+    monkeypatch.setenv("VLLM_ENABLE_V1_MULTIPROCESSING", "1")
+    config = AsyncEngineArgs(
+        **_engine_kwargs(path, **RESOLVED_DEFAULTS, **overrides)
+    ).create_engine_config()
+    return config, EngineCoreClient.make_async_mp_client(
+        config, Executor.get_class(config), log_stats=False
+    )
+
+
+def _raw_admission(config, request_id="raw", **fields) -> EngineCoreRequest:
+    params = SamplingParams(temperature=0, max_tokens=8)
+    params.update_from_generation_config(
+        {}, int(config.model_config.hf_config.eos_token_id)
+    )
+    return EngineCoreRequest(
+        **{
+            "request_id": request_id,
+            "prompt_token_ids": None,
+            "mm_features": None,
+            "sampling_params": params,
+            "pooling_params": None,
+            "arrival_time": time.time(),
+            "lora_request": None,
+            "cache_salt": None,
+            "data_parallel_rank": None,
+            "resumable": True,
+            "external_req_id": request_id,
+            **fields,
+        }
+    )
+
+
+@pytest.mark.asyncio
+async def test_multiprocess_abort_pause_output_carries_no_stream_marking(
+    dummy_state_model_path, monkeypatch
+):
+    """The abort output that the multiprocess engine core sends for an
+    admitted stream an abort pause ends has neither ends_stream nor
+    stream_output; the stream's retirement notice follows."""
+    from vllm.v1.engine import FinishReason
+
+    config, client = _async_mp_client(dummy_state_model_path, monkeypatch)
+    try:
+        result = await asyncio.wait_for(
+            client.admit_stream_async(_raw_admission(config)), TIMEOUT
+        )
+        assert result.accepted
+        await asyncio.wait_for(
+            client.pause_scheduler_async(mode="abort", clear_cache=False), TIMEOUT
+        )
+        output, _ = await _next_output(client, "raw")
+        assert output.finish_reason == FinishReason.ABORT
+        assert output.ends_stream is False
+        assert output.stream_output is None
+        await asyncio.wait_for(client.wait_stream_retired_async("raw"), TIMEOUT)
+    finally:
+        client.shutdown()
+
+
+@pytest.mark.asyncio
+async def test_multiprocess_engine_rejects_an_input_it_cannot_validate(
+    dummy_state_model_path, monkeypatch
+):
+    """An input of an admitted stream that fails the engine's validation
+    before preprocessing gets one rejection output with its own context, a
+    validation_error RequestError and no finished request; the session then
+    runs a valid input."""
+    from vllm.v1.engine import FinishReason, StreamAdmissionContext, StreamOutput
+
+    config, client = _async_mp_client(dummy_state_model_path, monkeypatch)
+    try:
+        await asyncio.wait_for(
+            client.admit_stream_async(_raw_admission(config)), TIMEOUT
+        )
+        context = StreamAdmissionContext(update_seq=1)
+        invalid = _raw_admission(
+            config,
+            prompt_token_ids=list(FIRST_INPUT),
+            stream_admission=context,
+            sampling_params=SamplingParams(n=2),
+        )
+        await client.add_request_async(invalid)
+        rejection, batch = await _next_output(client, "raw")
+        assert rejection.new_token_ids == []
+        assert rejection.finish_reason == FinishReason.ERROR
+        assert rejection.ends_stream is False
+        assert rejection.stream_output == StreamOutput(context, "validation_error")
+        assert rejection.error.code == "validation_error"
+        assert not batch.finished_requests
+
+        valid = _raw_admission(
+            config,
+            prompt_token_ids=list(FIRST_INPUT),
+            stream_admission=StreamAdmissionContext(update_seq=2),
+        )
+        await client.add_request_async(valid)
+        output, _ = await _next_output(client, "raw")
+        assert output.stream_output == StreamOutput(
+            StreamAdmissionContext(update_seq=2)
+        )
+        await client.abort_requests_async(["raw"])
+        await asyncio.wait_for(client.wait_stream_retired_async("raw"), TIMEOUT)
+    finally:
+        client.shutdown()
+
+
+def _raw_input(config, update_seq, tokens=FIRST_INPUT, **fields):
+    from vllm.v1.engine import StreamAdmissionContext
+
+    return _raw_admission(
+        config,
+        prompt_token_ids=list(tokens),
+        stream_admission=StreamAdmissionContext(update_seq=update_seq),
+        **fields,
+    )
+
+
+@pytest.mark.asyncio
+async def test_multiprocess_rejected_input_with_abort_immediately_keeps_its_session(
+    dummy_state_model_path, monkeypatch
+):
+    """An input that the scheduler rejects leaves its session unchanged also
+    when it has abort_immediately set: the session then runs a valid input."""
+    from vllm.v1.engine import StreamAdmissionContext, StreamOutput
+
+    config, client = _async_mp_client(dummy_state_model_path, monkeypatch)
+    try:
+        await asyncio.wait_for(
+            client.admit_stream_async(_raw_admission(config)), TIMEOUT
+        )
+        empty = _raw_input(config, 1, tokens=(), abort_immediately=True)
+        await client.add_request_async(empty)
+        rejection, batch = await _next_output(client, "raw")
+        assert rejection.stream_output == StreamOutput(
+            empty.stream_admission, "empty_update"
+        )
+        assert not batch.finished_requests
+        await client.add_request_async(_raw_input(config, 2))
+        output, _ = await _next_output(client, "raw")
+        assert output.stream_output == StreamOutput(
+            StreamAdmissionContext(update_seq=2)
+        )
+        await client.abort_requests_async(["raw"])
+        await asyncio.wait_for(client.wait_stream_retired_async("raw"), TIMEOUT)
+    finally:
+        client.shutdown()
+
+
+@pytest.mark.asyncio
+async def test_multiprocess_paused_engine_rejections_and_their_precedence(
+    dummy_state_model_path, monkeypatch
+):
+    """While the engine rejects new requests, an input whose session has
+    ended is rejected as engine_paused with a retryable RequestError, not as
+    unknown_admission, and an input that also fails validation is rejected
+    as validation_error, which preprocessing reports first. A new request
+    without a context keeps the ordinary paused-engine error output."""
+    from vllm.v1.engine import FinishReason, StreamOutput
+
+    config, client = _async_mp_client(dummy_state_model_path, monkeypatch)
+    try:
+        await asyncio.wait_for(
+            client.admit_stream_async(_raw_admission(config)), TIMEOUT
+        )
+        await client.abort_requests_async(["raw"])
+        await asyncio.wait_for(client.wait_stream_retired_async("raw"), TIMEOUT)
+        await asyncio.wait_for(
+            client.pause_generation_async(mode="wait", clear_cache=False), TIMEOUT
+        )
+
+        late = _raw_input(config, 1)
+        await client.add_request_async(late)
+        paused, batch = await _next_output(client, "raw")
+        assert paused.finish_reason == FinishReason.ERROR
+        assert paused.ends_stream is False
+        assert paused.stream_output == StreamOutput(
+            late.stream_admission, "engine_paused"
+        )
+        assert paused.error.code == "engine_paused" and paused.error.retryable
+        assert not batch.finished_requests
+
+        invalid = _raw_input(config, 2, sampling_params=SamplingParams(n=2))
+        await client.add_request_async(invalid)
+        refused, _ = await _next_output(client, "raw")
+        assert refused.stream_output == StreamOutput(
+            invalid.stream_admission, "validation_error"
+        )
+        assert refused.error.code == "validation_error"
+
+        plain = _raw_admission(
+            config, "plain", prompt_token_ids=list(FIRST_INPUT), resumable=False
+        )
+        await client.add_request_async(plain)
+        ordinary, batch = await _next_output(client, "plain")
+        assert ordinary.finish_reason == FinishReason.ERROR
+        assert ordinary.stream_output is None
+        assert ordinary.error.code == "engine_paused"
+        assert "plain" in batch.finished_requests
+    finally:
+        client.shutdown()
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("context", [True, False], ids=["input", "context_free"])
+async def test_multiprocess_preprocessing_failure_leaves_the_session_unchanged(
+    dummy_state_model_path, monkeypatch, context
+):
+    """A request under an admitted ID whose preprocessing raises an
+    unexpected error changes nothing in the session, whose next valid input
+    then runs its whole turn with the tokens of a first input and parks.
+    With a context the request is rejected as preprocessing_error; without
+    one it gets the ordinary error output, with no stream_output and its ID
+    in finished_requests.
+
+    The trigger is sampling parameters without max_tokens: they pass the
+    stream-input validation, and `Request.__init__` then fails its assert
+    that max_tokens is set. If that assert goes, this test needs another
+    unexpected preprocessing error."""
+    from vllm.v1.engine import FinishReason, StreamAdmissionContext, StreamOutput
+
+    config, client = _async_mp_client(dummy_state_model_path, monkeypatch)
+    try:
+        await asyncio.wait_for(
+            client.admit_stream_async(_raw_admission(config)), TIMEOUT
+        )
+        failing = _raw_input(config, 1, sampling_params=SamplingParams(max_tokens=None))
+        if not context:
+            failing.stream_admission = None
+        await client.add_request_async(failing)
+        refused, batch = await _next_output(client, "raw")
+        assert refused.new_token_ids == []
+        assert refused.finish_reason == FinishReason.ERROR
+        assert refused.ends_stream is False
+        if context:
+            assert refused.stream_output == StreamOutput(
+                failing.stream_admission, "preprocessing_error"
+            )
+            assert not batch.finished_requests
+        else:
+            assert refused.stream_output is None
+            assert "raw" in batch.finished_requests
+
+        await client.add_request_async(_raw_input(config, 2))
+        tokens: list[int] = []
+        for _ in range(MAX_STEPS):
+            output, _ = await _next_output(client, "raw")
+            assert output.error is None
+            assert output.stream_output == StreamOutput(
+                StreamAdmissionContext(update_seq=2)
+            )
+            tokens.extend(output.new_token_ids)
+            if output.finish_reason is not None:
+                break
+        hf_config = config.model_config.hf_config
+        assert (
+            tokens
+            == _expected_turns(
+                config.model_config.get_vocab_size(), int(hf_config.eos_token_id)
+            )[0]
+        )
+        assert output.finish_reason == FinishReason.STOP
+        assert output.ends_stream is False
+        await client.abort_requests_async(["raw"])
+        await asyncio.wait_for(client.wait_stream_retired_async("raw"), TIMEOUT)
+    finally:
+        client.shutdown()
+
+
+@pytest.mark.asyncio
+async def test_multiprocess_draining_shutdown_does_not_wait_for_a_never_fed_stream(
+    dummy_state_model_path, monkeypatch
+):
+    """A never-fed stream is not unfinished work, so a shutdown that drains
+    does not wait for it: on SIGTERM the engine process exits by itself with
+    code 0, well inside the shutdown window and long before the stream's
+    never-fed deadline; an engine that waited for the session would still be
+    running when the window closes. The client gets no output for the
+    session, only the engine's end.
+
+    The never-fed deadline is set through stream_admission_timeouts so that
+    it cannot end the session during the test."""
+    from vllm.v1.engine.exceptions import EngineDeadError
+
+    window = 60
+    config, client = _async_mp_client(
+        dummy_state_model_path,
+        monkeypatch,
+        shutdown_timeout=window,
+        stream_admission_timeouts={"never_fed_timeout": 10 * window},
+    )
+    try:
+        result = await asyncio.wait_for(
+            client.admit_stream_async(_raw_admission(config)), TIMEOUT
+        )
+        assert result.accepted
+        (process,) = client.resources.engine_manager.processes
+        batches = []
+
+        async def read_outputs():
+            while True:
+                batches.append(await client.get_output_async())
+
+        reader = asyncio.create_task(read_outputs())
+        process.terminate()
+        await asyncio.to_thread(process.join, window)
+        assert process.exitcode == 0
+        with pytest.raises(EngineDeadError):
+            await asyncio.wait_for(reader, TIMEOUT)
+        assert [o for batch in batches for o in batch.outputs] == []
+    finally:
+        client.shutdown()
