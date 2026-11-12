@@ -201,8 +201,8 @@ def _close_while_server_stopped(address: str, server_pid: int, scenario: str):
         assert worker.poll(job) is None
     elif scenario == "lookup":
         started = time.monotonic()
-        assert list(scheduler.lookup(["stuck"])) == [False]
-        assert list(scheduler.lookup(["stuck"])) == [False]
+        assert list(scheduler.lookup(["stuck"])) == [None]
+        assert list(scheduler.lookup(["stuck"])) == [None]
         assert time.monotonic() - started < 5
     scheduler.close()
     worker.close()

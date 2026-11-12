@@ -256,6 +256,11 @@ def test_extensible_kv_cache_from_cli():
 requires_cuda = pytest.mark.skipif(
     not torch.cuda.is_available(), reason="requires CUDA"
 )
+# ROCm refuses single-chunk KV cache access, which POSIX fd importers need.
+requires_cuda_not_rocm = pytest.mark.skipif(
+    not torch.cuda.is_available() or torch.version.hip is not None,
+    reason="requires CUDA, not ROCm",
+)
 
 
 @requires_cuda
@@ -315,6 +320,13 @@ def test_extensible_kv_cache_rejects_manual_kv_cache_size(manual_size):
         engine_args.create_engine_config(UsageContext.OPENAI_API_SERVER)
 
 
+_EXPORTS_FD_CONNECTOR = {
+    "kv_connector": "ExportsKVCacheTestConnector",
+    "kv_role": "kv_both",
+    "kv_connector_module_path": "tests.v1.kv_connector.unit.utils",
+}
+
+
 def _fake_executor(vllm_config, collective_rpc):
     from types import MethodType, SimpleNamespace
 
@@ -360,6 +372,21 @@ def test_extensible_kv_cache_falls_back_when_driver_unsupported():
 
     # No KV cache at all: nothing to size, so the feature is turned off.
     assert fake.extensible_kv_cache_unsupported_reason([{}]) is not None
+
+
+@requires_cuda_not_rocm
+def test_extensible_kv_cache_does_not_fall_back_under_a_posix_fd_importer():
+    """The torch allocator's KV cache cannot be exported as POSIX file
+    descriptors, so a failed VMM probe stops startup instead."""
+    vllm_config = EngineArgs(
+        model="facebook/opt-125m",
+        kv_transfer_config=KVTransferConfig(**_EXPORTS_FD_CONNECTOR),
+    ).create_engine_config(UsageContext.OPENAI_API_SERVER)
+    assert vllm_config.cache_config.enable_extensible_kv_cache
+    fake = _fake_executor(vllm_config, lambda method: [None])
+    with pytest.raises(RuntimeError, match="no VMM support"):
+        fake.disable_extensible_kv_cache("no VMM support")
+    assert vllm_config.cache_config.enable_extensible_kv_cache
 
 
 def test_all_reduce_int(monkeypatch):
@@ -556,19 +583,26 @@ def test_lmcache_mp_connector_without_hook_uses_legacy_ipc(
     assert transfer.kv_cache_access() == access
 
 
-def _nixl_config_for_extensible_kv_cache(monkeypatch, *, rocm, requested, imex_channel):
+def _nixl_config_for_extensible_kv_cache(
+    monkeypatch, *, rocm, requested, imex_channel, transfer=None
+):
 
     import vllm.platforms
 
-    transfer = KVTransferConfig(
-        kv_connector="NixlConnector", kv_role="kv_both", kv_buffer_device="cuda"
-    )
+    if transfer is None:
+        transfer = KVTransferConfig(
+            kv_connector="NixlConnector", kv_role="kv_both", kv_buffer_device="cuda"
+        )
     # Import the connector, which the config asks, before stubbing the platform.
     transfer.kv_cache_access()
     monkeypatch.setattr(
         vllm.platforms,
         "current_platform",
-        SimpleNamespace(is_cuda_alike=lambda: True, is_rocm=lambda: rocm),
+        # MultiConnector builds each child's KVTransferConfig, whose
+        # kv_buffer_device defaults to the platform's device_type.
+        SimpleNamespace(
+            device_type="cuda", is_cuda_alike=lambda: True, is_rocm=lambda: rocm
+        ),
     )
     monkeypatch.setattr(
         "vllm.utils.vmm_driver.imex_channel_available", lambda: imex_channel
@@ -674,6 +708,58 @@ def test_extensible_kv_cache_off_with_lmcache_mp(monkeypatch, multi, requested):
     else:
         VllmConfig._resolve_extensible_kv_cache(config)
         assert config.cache_config.enable_extensible_kv_cache is False
+
+
+@requires_cuda_not_rocm
+@pytest.mark.parametrize(
+    "kwargs, match",
+    [
+        (dict(kv_cache_memory_bytes=1 << 30), "kv_cache_memory_bytes"),
+        (dict(enable_extensible_kv_cache=False), "it is disabled"),
+    ],
+)
+def test_posix_fd_importer_needs_the_extensible_kv_cache(kwargs, match):
+    """Only the extensible KV cache is exportable as POSIX file descriptors:
+    without it the connector's import would fail later, less clearly."""
+    engine_args = EngineArgs(
+        model="facebook/opt-125m",
+        kv_transfer_config=KVTransferConfig(**_EXPORTS_FD_CONNECTOR),
+        **kwargs,
+    )
+    with pytest.raises(ValueError, match=match):
+        engine_args.create_engine_config(UsageContext.OPENAI_API_SERVER)
+
+
+def test_posix_fd_importer_keeps_the_extensible_kv_cache_next_to_nixl(
+    monkeypatch,
+):
+    """NIXL alone keeps the cache off without an IMEX channel, but an fd
+    importer (LMCache) needs it."""
+    from vllm.config.vllm import VllmConfig
+
+    transfer = KVTransferConfig(
+        kv_connector="MultiConnector",
+        kv_role="kv_both",
+        kv_connector_extra_config={
+            "connectors": [
+                {
+                    "kv_connector": "NixlConnector",
+                    "kv_role": "kv_both",
+                    "kv_buffer_device": "cuda",
+                },
+                _EXPORTS_FD_CONNECTOR,
+            ]
+        },
+    )
+    config = _nixl_config_for_extensible_kv_cache(
+        monkeypatch,
+        rocm=False,
+        requested=None,
+        imex_channel=False,
+        transfer=transfer,
+    )
+    VllmConfig._resolve_extensible_kv_cache(config)
+    assert config.cache_config.enable_extensible_kv_cache
 
 
 @requires_cuda
