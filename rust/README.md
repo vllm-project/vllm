@@ -64,6 +64,10 @@ SMG `VllmEngine` gRPC server in place of HTTP. The Rust listener exposes the
 `vllm.Inference` and `vllm.Control` services alongside HTTP. These are different
 gRPC APIs; `--grpc` and `--grpc-port` are mutually exclusive.
 
+`GenerateStream` supports parallel sampling through `sampling.num_sequences`;
+see [Rust frontend gRPC inference](../docs/serving/online_serving/README.md#rust-frontend-grpc-inference)
+for request defaults and response indexing.
+
 ### gRPC health checks
 
 The gRPC listener also serves `grpc.health.v1.Health`. Kubernetes probes should
