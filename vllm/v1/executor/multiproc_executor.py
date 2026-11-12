@@ -463,9 +463,10 @@ class MultiprocExecutor(Executor):
     def check_health_gpu(self) -> None:
         # Unlike execute_dummy_batch, wait for every rank: PP stages other
         # than the output rank fail independently.
-        self.collective_rpc(
+        errors = self.collective_rpc(
             "check_health_gpu", timeout=envs.VLLM_EXECUTE_MODEL_TIMEOUT_SECONDS
         )
+        self._raise_probe_errors(errors)
 
     def take_draft_token_ids(self) -> DraftTokenIds | None:
         # OPTIMIZATION: Get output only from a single worker (output_rank)

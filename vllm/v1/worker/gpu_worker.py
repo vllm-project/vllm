@@ -1612,11 +1612,14 @@ class Worker(WorkerBase):
             num_active_loras=0,
         )
 
-    def check_health_gpu(self) -> None:
-        """Readiness probe: a dummy forward pass that has completed on the
-        device when this returns."""
-        self.execute_dummy_batch()
-        self.synchronize_device()
+    def check_health_gpu(self) -> str | None:
+        try:
+            self.execute_dummy_batch()
+            self.synchronize_device()
+        except Exception as e:
+            logger.exception("GPU health probe failed")
+            return repr(e)
+        return None
 
     def add_lora(self, lora_request: LoRARequest) -> bool:
         return self.model_runner.add_lora(lora_request)

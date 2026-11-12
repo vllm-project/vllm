@@ -63,6 +63,20 @@ class FaultInjectionWorkerExtension:
 
         handle = self.model_runner.get_model().register_forward_hook(hook)
 
+    def fault_raise_on_next_forward_on_worker(self, worker_rank: str) -> None:
+        """Raise a Python error after the next forward pass on one worker.
+
+        Unlike a CUDA fault, the engine can keep serving after this.
+        """
+        if self.rank != int(worker_rank):
+            return
+
+        def hook(*_):
+            handle.remove()
+            raise RuntimeError("injected probe failure")
+
+        handle = self.model_runner.get_model().register_forward_hook(hook)
+
     def fault_dp_mismatched_collective(self, dp_ranks: str) -> None:
         """Enter a DP all-reduce that the other ranks never join (#36594)."""
         if not self._fault_targets_me(dp_ranks):
