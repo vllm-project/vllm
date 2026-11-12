@@ -8,10 +8,15 @@ exactly what the model runs (activation quant, padding, GEMM). Timing uses
 FlashInfer CUPTI on a CUDA graph that walks ``copies`` distinct weight copies
 whose total size exceeds L2, so every call reads its weight from DRAM.
 
-Bandwidth is reported against the theoretical minimum traffic: FP4 weight +
-E4M3 block scales read once, without any N/K padding a kernel may add
-(activation and output are <0.1% at M <= 16). CUPTI sums kernel durations only,
-so launch gaps between a provider's kernels (quant, pad, GEMM) are not counted.
+Bandwidth is the theoretical minimum traffic (FP4 weight + E4M3 block scales
+read once, without any N/K padding a kernel may add; activation and output are
+<0.1% at M <= 16) over the measured time. Pass ``--peak-gbps`` to also report it
+as a percentage of the device's peak. CUPTI sums kernel durations only, so launch
+gaps between a provider's kernels (quant, pad, GEMM) are not counted.
+
+By default only providers vLLM can select are timed; ``--include-gated`` adds the
+ones it gates off (FlashInfer CuTe-DSL W4A4 is limited to sm_10x) by bypassing
+``is_supported``.
 
 Providers whose output deviates from the dequantized-weight reference
 (cosine similarity below ``--min-cos``) are reported as errors.
@@ -77,7 +82,7 @@ QWEN3_8_27B_SHAPES = {
 
 # provider: (kernel class, autotune, bypass is_supported)
 # FlashInferCuteDsl W4A4 is gated to sm_10x in vLLM; flashinfer#5100 added the
-# SM12x kernels, so the gate is bypassed here to measure it on SM120.
+# SM12x kernels, so --include-gated bypasses the gate to measure it on SM12x.
 PROVIDERS: dict[str, tuple[type[NvFp4LinearKernel], bool, bool]] = {
     "fi-cutlass": (FlashInferCutlassNvFp4LinearKernel, False, False),
     "fi-cutlass-tuned": (FlashInferCutlassNvFp4LinearKernel, True, False),
@@ -94,12 +99,19 @@ PROVIDERS: dict[str, tuple[type[NvFp4LinearKernel], bool, bool]] = {
     "fi-cudnn": (FlashInferCudnnNvFp4LinearKernel, False, False),
 }
 
-DATASHEET_BW_GBPS = {"workstation": 1792.0, "server": 1597.0}
+GATED_PROVIDERS = [p for p, (_, _, bypass) in PROVIDERS.items() if bypass]
 
-
-def datasheet_edition() -> str:
-    name = torch.cuda.get_device_properties(0).name
-    return "server" if "Server" in name else "workstation"
+# Providers whose apply_weights quantizes the activation with scaled_fp4_quant.
+FP4_QUANT_PROVIDERS = {
+    "fi-cutlass",
+    "fi-cutlass-tuned",
+    "fi-b12x",
+    "b12x-native",
+    "fi-cute-w4a4",
+    "fi-cute-w4a4-tuned",
+    "vllm-cutlass",
+    "fi-cudnn",
+}
 
 
 @dataclass
@@ -114,7 +126,7 @@ class Result:
     us_samples: list[float]
     weight_bytes: int
     gbps: float | None
-    pct_bw: dict[str, float]
+    pct_peak: float | None
     max_abs_err: float | None
     cos_sim: float | None
     error: str | None = None
@@ -238,7 +250,7 @@ def run_case(shape: str, m: int, provider: str, args: argparse.Namespace) -> Res
             us=us,
             us_samples=samples,
             gbps=gbps,
-            pct_bw={ed: 100 * gbps / bw for ed, bw in DATASHEET_BW_GBPS.items()},
+            pct_peak=100 * gbps / args.peak_gbps if args.peak_gbps else None,
             max_abs_err=max_abs_err,
             cos_sim=cos.item(),
         )
@@ -248,7 +260,7 @@ def run_case(shape: str, m: int, provider: str, args: argparse.Namespace) -> Res
             us=None,
             us_samples=[],
             gbps=None,
-            pct_bw={},
+            pct_peak=None,
             max_abs_err=None,
             cos_sim=None,
             error=f"{type(e).__name__}: {e}"[:500],
@@ -256,7 +268,7 @@ def run_case(shape: str, m: int, provider: str, args: argparse.Namespace) -> Res
 
 
 def run_quant_only(shape: str, m: int, args: argparse.Namespace) -> Result:
-    """Standalone scaled_fp4_quant cost (the W4A4 providers' extra launch)."""
+    """Standalone scaled_fp4_quant cost (the extra launch of the providers using it)."""
     k = QWEN3_8_27B_SHAPES[shape][0]
     base = dict(
         shape=shape,
@@ -267,7 +279,7 @@ def run_quant_only(shape: str, m: int, args: argparse.Namespace) -> Result:
         provider="quant-only",
         weight_bytes=0,
         gbps=None,
-        pct_bw={},
+        pct_peak=None,
         max_abs_err=None,
         cos_sim=None,
     )
@@ -319,7 +331,6 @@ def metadata() -> dict:
     props = torch.cuda.get_device_properties(0)
     return {
         "gpu": props.name,
-        "datasheet_edition": datasheet_edition(),
         "capability": f"{props.major}.{props.minor}",
         "sm_count": props.multi_processor_count,
         "l2_bytes": getattr(props, "L2_cache_size", None),
@@ -341,7 +352,23 @@ def main() -> None:
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("--shapes", nargs="+", default=list(QWEN3_8_27B_SHAPES))
     parser.add_argument("--m", nargs="+", type=int, default=[1, 2, 3, 4, 8, 12, 16])
-    parser.add_argument("--providers", nargs="+", default=list(PROVIDERS))
+    parser.add_argument(
+        "--providers",
+        nargs="+",
+        default=None,
+        help="Providers to time (default: all that vLLM can select).",
+    )
+    parser.add_argument(
+        "--include-gated",
+        action="store_true",
+        help="Also time providers vLLM gates off on this device.",
+    )
+    parser.add_argument(
+        "--peak-gbps",
+        type=float,
+        default=None,
+        help="Device peak DRAM bandwidth in GB/s; enables the %% of peak column.",
+    )
     parser.add_argument("--rotate-mb", type=float, default=512.0)
     parser.add_argument("--max-copies", type=int, default=4096)
     parser.add_argument("--warmup", type=int, default=10)
@@ -351,9 +378,13 @@ def main() -> None:
     parser.add_argument("--seed", type=int, default=0)
     parser.add_argument("--output-json", type=str, default=None)
     args = parser.parse_args()
+    if args.providers is None:
+        args.providers = [
+            p for p in PROVIDERS if args.include_gated or p not in GATED_PROVIDERS
+        ]
 
     if not current_platform.is_device_capability_family(120):
-        raise RuntimeError("This benchmark targets SM12x (RTX PRO 6000 Blackwell).")
+        raise RuntimeError("This benchmark targets SM12x GPUs.")
     try:
         import cupti  # noqa: F401
     except ImportError as e:
@@ -361,13 +392,12 @@ def main() -> None:
         raise RuntimeError("CUPTI timing requires `uv pip install cupti-python`") from e
     torch.set_default_device("cuda")
     torch.manual_seed(args.seed)
-    edition = datasheet_edition()
 
     cases = [(s, m, p) for s in args.shapes for m in args.m for p in args.providers]
     # Shuffle so clock/thermal drift is shared across providers.
     random.Random(args.seed).shuffle(cases)
     results: list[Result] = []
-    if any("w4a4" in p for p in args.providers):
+    if any(p in FP4_QUANT_PROVIDERS for p in args.providers):
         first_shape_per_k = {QWEN3_8_27B_SHAPES[s][0]: s for s in args.shapes}
         results = [
             run_quant_only(s, m, args)
@@ -382,7 +412,9 @@ def main() -> None:
             r = run_case(shape, m, provider, args)
         results.append(r)
         status = r.error or (
-            f"{r.us:8.2f} us {r.pct_bw[edition]:5.1f}%  cos={r.cos_sim:.4f}"
+            f"{r.us:8.2f} us {r.gbps:7.1f} GB/s"
+            + (f" {r.pct_peak:5.1f}%" if r.pct_peak is not None else "")
+            + f"  cos={r.cos_sim:.4f}"
         )
         print(f"{shape:18s} M={m:<3d} {provider:20s} {status}", flush=True)
         torch.accelerator.empty_cache()
