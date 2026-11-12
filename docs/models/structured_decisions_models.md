@@ -406,9 +406,11 @@ vllm serve baselabs/mammoth-1
 ```
 
 - The full attention layers read the shared prefix and the question as two
-  bidirectional blocks, and each prompt is prefilled in one step, so a
-  `--max-num-batched-tokens` below `--max-model-len` is raised to it.
-  `--max-model-len` defaults to the trained 16,384 tokens.
+  bidirectional blocks, and each prompt is prefilled in one step. Chunked
+  prefill is therefore off for every request on the server, a
+  `--max-num-batched-tokens` below `--max-model-len` is raised to it, and a
+  smaller `--max-num-scheduled-tokens` is refused. `--max-model-len` defaults
+  to the trained 16,384 tokens.
 - Prefix caching (on by default) prefills the shared prefix once per decision
   request instead of once per question. It needs FlashInfer's GatedDeltaNet
   prefill (Hopper, or Blackwell with CUDA 13) and is turned off with other

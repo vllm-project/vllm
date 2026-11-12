@@ -1,6 +1,8 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
-"""SlotLMStrategy prompts and reads, against golden prompts rendered by qev."""
+"""SlotLMStrategy prompts and reads, against prompts rendered by qev, the
+checkpoints' reference runtime (`qev.engine.DecisionEngine`, installed by their
+`setup.sh`)."""
 
 import math
 from types import SimpleNamespace

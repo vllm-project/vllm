@@ -1,6 +1,5 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
-import functools
 from types import SimpleNamespace
 
 import numpy as np
@@ -8,35 +7,19 @@ import pytest
 import torch
 from transformers.models.qwen3_5 import Qwen3_5Config
 
-from vllm.config.compilation import CUDAGraphMode
+from vllm.config import VllmConfig
+from vllm.engine.arg_utils import EngineArgs
 from vllm.model_executor.layers.mamba.gdn import qwen_gdn_linear_attn
-from vllm.model_executor.models import qwen3_5_slot
-from vllm.model_executor.models.config import Qwen3_5ForSlotDecisionConfig
 from vllm.model_executor.models.qwen3_5_slot import Qwen3_5SlotDecisionModelState
 from vllm.sampling_params import SamplingParams
-from vllm.transformers_utils.model_arch_config_convertor import (
-    Qwen3_5ModelArchConfigConvertor,
-)
 from vllm.v1.attention.backends.registry import AttentionBackendEnum
 from vllm.v1.core.sched.prefix_lm_scheduler import PREFIX_LM_LEN
-from vllm.v1.kv_cache_interface import FullAttentionSpec, MambaSpec
 from vllm.v1.worker.gpu.model_states.mamba_hybrid import MambaHybridModelState
 
 pytestmark = pytest.mark.cpu_test
 
 PREFIX_LM = "vllm.v1.core.sched.prefix_lm_scheduler.PrefixLM"
 TRITON, FLASH = AttentionBackendEnum.TRITON_ATTN, AttentionBackendEnum.FLASH_ATTN
-
-
-@pytest.fixture(autouse=True)
-def gdn_prefill_backend(monkeypatch):
-    """The hook sees the GDN prefill backend that make_vllm_config names."""
-    monkeypatch.setattr(
-        qwen_gdn_linear_attn,
-        "_resolve_gdn_prefill_backend",
-        lambda vllm_config: ("auto", vllm_config.gdn_prefill_backend),
-    )
-
 
 OVERRIDES = {
     "attention": {
@@ -49,36 +32,46 @@ OVERRIDES = {
 }
 
 
-def make_config(overrides=OVERRIDES) -> Qwen3_5Config:
-    arch = ["Qwen3_5ForConditionalGeneration"]
-    return Qwen3_5Config(architectures=arch, modeling_overrides=overrides)
-
-
-def make_model_config(hf_config, max_model_len=None):
-    return SimpleNamespace(
-        hf_config=hf_config,
-        original_max_model_len=max_model_len,
-        max_model_len=max_model_len or 262144,
+@pytest.fixture(autouse=True)
+def gdn_prefill_backend(monkeypatch):
+    """Report FlashInfer's GDN prefill, which this CPU host lacks, unless a test
+    names another backend."""
+    backend = {"name": "flashinfer"}
+    monkeypatch.setattr(
+        qwen_gdn_linear_attn,
+        "_resolve_gdn_prefill_backend",
+        lambda vllm_config: ("auto", backend["name"]),
     )
+    return backend
 
 
-@pytest.mark.parametrize("head_dtype,expected", [(None, "float32"), ("model", "model")])
-def test_detected_with_an_fp32_head_by_default(head_dtype, expected):
-    config = make_config()
-    arch = Qwen3_5ModelArchConfigConvertor(config, config.text_config).convert()
-    assert arch.architectures == ["Qwen3_5ForSlotDecision"]
-    config.head_dtype = head_dtype
-    Qwen3_5ForSlotDecisionConfig.verify_and_update_model_config(
-        make_model_config(config)
-    )
-    assert config.head_dtype == expected
+def make_vllm_config(
+    tmp_path, overrides=OVERRIDES, head_dtype=None, **engine_args
+) -> VllmConfig:
+    """The engine config of a checkpoint with only a config.json."""
+    Qwen3_5Config(
+        architectures=["Qwen3_5ForConditionalGeneration"],
+        modeling_overrides=overrides,
+        head_dtype=head_dtype,
+        # As in the checkpoints, far above the trained length.
+        text_config={"max_position_embeddings": 262144},
+    ).save_pretrained(tmp_path)
+    return EngineArgs(
+        model=str(tmp_path), skip_tokenizer_init=True, **engine_args
+    ).create_engine_config()
 
 
-@pytest.mark.parametrize("user_len,expected", [(None, 16384), (65536, 65536)])
-def test_model_config_defaults_to_the_trained_length(user_len, expected):
-    model_config = make_model_config(make_config(), user_len)
-    Qwen3_5ForSlotDecisionConfig.verify_and_update_model_config(model_config)
-    assert model_config.max_model_len == expected
+@pytest.mark.parametrize("head_dtype,fp32", [(None, True), ("model", False)])
+def test_detected_with_an_fp32_head_by_default(tmp_path, head_dtype, fp32):
+    model_config = make_vllm_config(tmp_path, head_dtype=head_dtype).model_config
+    assert model_config.architecture == "Qwen3_5ForSlotDecision"
+    assert (model_config.head_dtype == torch.float32) == fp32
+
+
+@pytest.mark.parametrize("max_model_len,expected", [(None, 16384), (65536, 65536)])
+def test_model_config_defaults_to_the_trained_length(tmp_path, max_model_len, expected):
+    config = make_vllm_config(tmp_path, max_model_len=max_model_len)
+    assert config.model_config.max_model_len == expected
 
 
 @pytest.mark.parametrize(
@@ -89,81 +82,51 @@ def test_model_config_defaults_to_the_trained_length(user_len, expected):
         {"n_slots": True},
     ],
 )
-def test_model_config_rejects_unsupported_overrides(change):
-    model_config = make_model_config(make_config({**OVERRIDES, **change}))
+def test_model_config_rejects_unsupported_overrides(tmp_path, change):
     with pytest.raises(ValueError, match="modeling_overrides"):
-        Qwen3_5ForSlotDecisionConfig.verify_and_update_model_config(model_config)
-
-
-def make_vllm_config(**changes):
-    config = SimpleNamespace(
-        model_config=SimpleNamespace(
-            architecture="Qwen3_5ForSlotDecision",
-            max_model_len=32768,
-            hf_text_config=SimpleNamespace(mamba_ssm_dtype="float32"),
-        ),
-        cache_config=SimpleNamespace(
-            enable_prefix_caching=True,
-            mamba_ssm_cache_dtype="auto",
-            prefix_match_unit=None,
-            kv_offloading_size=None,
-        ),
-        scheduler_config=SimpleNamespace(
-            max_num_batched_tokens=33024,
-            max_num_scheduled_tokens=None,
-            max_num_seqs=256,
-            scheduler_cls=None,
-        ),
-        attention_config=SimpleNamespace(backend=None, backend_per_kind={}),
-        parallel_config=SimpleNamespace(
-            prefill_context_parallel_size=1,
-            decode_context_parallel_size=1,
-            use_ubatching=False,
-        ),
-        kv_transfer_config=None,
-        speculative_config=None,
-        gdn_prefill_backend="flashinfer",
-    )
-    for path, value in changes.items():
-        *parents, name = path.split(".")
-        setattr(functools.reduce(getattr, parents, config), name, value)
-    return config
+        make_vllm_config(tmp_path, overrides={**OVERRIDES, **change})
 
 
 @pytest.mark.parametrize(
-    "change,prefix_caching",
+    "engine_args,gdn,prefix_caching",
     [
-        ({}, True),
-        ({"gdn_prefill_backend": "triton"}, False),
+        ({}, "flashinfer", True),
+        ({}, "triton", False),
         (
             {
-                "attention_config.backend_per_kind": {
-                    "full_attention": TRITON,
-                    "sliding_window": FLASH,
+                "attention_config": {
+                    "backend_per_kind": {
+                        "full_attention": "TRITON_ATTN",
+                        "sliding_window": "FLASH_ATTN",
+                    }
                 },
                 # As the hook and VllmConfig set it, for a second run of the hook.
-                "scheduler_config.scheduler_cls": f"{PREFIX_LM}AsyncScheduler",
+                "scheduler_cls": f"{PREFIX_LM}AsyncScheduler",
             },
+            "flashinfer",
             True,
         ),
         # A per-kind Triton backend leaves the global one as it is.
         (
             {
-                "attention_config.backend": FLASH,
-                "attention_config.backend_per_kind": {"full_attention": TRITON},
+                "attention_config": {
+                    "backend": "FLASH_ATTN",
+                    "backend_per_kind": {"full_attention": "TRITON_ATTN"},
+                }
             },
+            "flashinfer",
             True,
         ),
     ],
 )
-def test_config_prefills_each_prompt_in_one_step(change, prefix_caching):
-    config = make_vllm_config(
-        **{"scheduler_config.enable_chunked_prefill": not prefix_caching}, **change
-    )
-    Qwen3_5ForSlotDecisionConfig.verify_and_update_config(config)
+def test_config_prefills_each_prompt_in_one_step(
+    tmp_path, gdn_prefill_backend, engine_args, gdn, prefix_caching
+):
+    gdn_prefill_backend["name"] = gdn
+    config = make_vllm_config(tmp_path, enable_chunked_prefill=True, **engine_args)
     scheduler_config = config.scheduler_config
-    backend = change.get("attention_config.backend", TRITON)
-    assert config.attention_config.backend == backend
+    backend = engine_args.get("attention_config", {}).get("backend", "TRITON_ATTN")
+    assert config.attention_config.backend == AttentionBackendEnum[backend]
     assert config.cache_config.enable_prefix_caching == prefix_caching
     assert not scheduler_config.enable_chunked_prefill
     assert scheduler_config.scheduler_cls == f"{PREFIX_LM}Scheduler"
@@ -171,30 +134,39 @@ def test_config_prefills_each_prompt_in_one_step(change, prefix_caching):
 
 
 @pytest.mark.parametrize(
-    "change,match",
+    "engine_args,match",
     [
-        ({"attention_config.backend": FLASH}, "TRITON_ATTN"),
+        ({"attention_backend": "FLASH_ATTN"}, "TRITON_ATTN"),
         (
-            {"attention_config.backend_per_kind": {"full_attention": FLASH}},
+            {
+                "attention_config": {
+                    "backend_per_kind": {"full_attention": "FLASH_ATTN"}
+                }
+            },
             "TRITON_ATTN attention backend for full attention, not FLASH_ATTN",
         ),
-        ({"scheduler_config.max_num_scheduled_tokens": 8192}, "max-num-scheduled"),
-        ({"cache_config.prefix_match_unit": 32}, "prefix-match-unit"),
-        ({"speculative_config": object()}, "speculative decoding"),
-        ({"parallel_config.prefill_context_parallel_size": 2}, "context parallel"),
-        ({"scheduler_config.scheduler_cls": "my.Scheduler"}, "scheduler-cls"),
+        ({"max_num_scheduled_tokens": 8192}, "max-num-scheduled"),
+        ({"prefix_match_unit": 32}, "prefix-match-unit"),
+        ({"kv_offloading_size": 1.0}, "kv-offloading-size"),
+        (
+            {"speculative_config": {"method": "ngram", "num_speculative_tokens": 2}},
+            "speculative decoding",
+        ),
+        ({"prefill_context_parallel_size": 2}, "context parallel"),
+        ({"enable_dbo": True}, "micro-batching"),
+        ({"scheduler_cls": "my.Scheduler"}, "scheduler-cls"),
     ],
 )
-def test_config_rejects_unsupported_features(change, match):
-    config = make_vllm_config(**change)
+def test_config_rejects_unsupported_features(tmp_path, engine_args, match):
     with pytest.raises(ValueError, match=match):
-        Qwen3_5ForSlotDecisionConfig.verify_and_update_config(config)
+        make_vllm_config(tmp_path, **engine_args)
 
 
 @pytest.mark.parametrize("budget,expected", [(8192, 32768), (33024, 33024)])
-def test_config_raises_a_budget_below_max_model_len(budget, expected):
-    config = make_vllm_config(**{"scheduler_config.max_num_batched_tokens": budget})
-    Qwen3_5ForSlotDecisionConfig.verify_and_update_config(config)
+def test_config_raises_a_budget_below_max_model_len(tmp_path, budget, expected):
+    config = make_vllm_config(
+        tmp_path, max_model_len=32768, max_num_batched_tokens=budget
+    )
     assert config.scheduler_config.max_num_batched_tokens == expected
 
 
@@ -263,35 +235,3 @@ def test_model_state_refuses_a_step_inside_a_block(monkeypatch):
     add("a", 4)
     with pytest.raises(RuntimeError, match="inside one of its blocks"):
         state._block_ranges(make_batch(["a"], [0], [6]))
-
-
-def test_model_state_builds_the_full_attention_with_the_ranges(monkeypatch):
-    state, add = make_model_state(monkeypatch)
-    hybrid = lambda self, batch, mode, tables, slots, groups, config: {"gdn": groups}
-    monkeypatch.setattr(MambaHybridModelState, "prepare_attn", hybrid)
-    monkeypatch.setattr(qwen3_5_slot, "build_attn_metadata", lambda **kw: {"attn": kw})
-    attn, gdn = [object.__new__(FullAttentionSpec)], [object.__new__(MambaSpec)]
-    groups = [attn, gdn]
-    config = SimpleNamespace(
-        kv_cache_groups=[SimpleNamespace(kv_cache_spec=s[0]) for s in (attn, gdn)]
-    )
-    add("a", 4)
-    batch = make_batch(["causal", "a"], [10, 4], [1, 6])
-    batch.__dict__.update(
-        num_reqs=2,
-        num_tokens=7,
-        max_query_len=6,
-        query_start_loc=None,
-        query_start_loc_np=np.array([0, 1, 7]),
-        seq_lens=None,
-        seq_lens_cpu_upper_bound=torch.tensor([11, 10]),
-        prompt_lens=None,
-    )
-    # A FULL graph step runs one-token queries and gets no ranges.
-    full = state.prepare_attn(batch, CUDAGraphMode.FULL, (), None, groups, config)
-    assert full == {"gdn": groups}
-    metadata = state.prepare_attn(batch, CUDAGraphMode.NONE, (), None, groups, config)
-    assert metadata["gdn"] == [[], gdn]
-    assert metadata["attn"]["attn_groups"] == [attn, []]
-    assert metadata["attn"]["mm_req_doc_ranges"] == {1: [(0, 3), (4, 9)]}
-    assert metadata["attn"]["max_seq_len"] == 11

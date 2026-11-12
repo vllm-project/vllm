@@ -109,8 +109,8 @@ def test_hits_stop_at_the_prefix_and_prompts_prefill_whole(cls):
 
 
 def test_waiting_prompt_holds_the_queue():
-    """A PrefixLM prompt one token over the block-aligned budget left waits, and
-    the causal c behind it, which would fit, does not skip it."""
+    """A PrefixLM prompt one token over the budget left waits, and the causal c
+    behind it, which would fit, does not skip it."""
     scheduler = make_scheduler(96)
     a, b, c = list(range(64)), list(range(100, 133)), list(range(200, 216))
     assert step(
