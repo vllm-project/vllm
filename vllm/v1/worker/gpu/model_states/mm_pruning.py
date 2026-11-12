@@ -9,6 +9,8 @@ from vllm.multimodal.utils import (
     copy_mm_embedding_modality,
     get_mm_features_in_window,
 )
+from vllm.utils.gpu_sync_debug import gpu_sync_allowed
+from vllm.v1.mrope import MRoPEPositionState
 from vllm.v1.worker.gpu.input_batch import InputBatch
 from vllm.v1.worker.gpu.mm.encoder_cache import EncoderCache
 from vllm.v1.worker.gpu.mm.rope import RopeState
@@ -30,6 +32,7 @@ class MultiModalPruner:
         rope_state: RopeState,
         encoder_cache: EncoderCache,
         inputs_embeds_size: int,
+        export_position_state: bool,
     ) -> None:
         self.model = model
         self.rope_state = rope_state
@@ -37,6 +40,8 @@ class MultiModalPruner:
         # The cleaned embedding width: pruning models append their mrope-position
         # channels as trailing columns, so embeds[:, :inputs_embeds_size] strips them.
         self.inputs_embeds_size = inputs_embeds_size
+        self.export_position_state = export_position_state
+        self._pending_position_states: dict[str, tuple[torch.Tensor, int]] = {}
 
     def strip(self, mm_embeds: list[torch.Tensor]) -> list[torch.Tensor]:
         """Draft forward: strip the appended position channels only.
@@ -89,6 +94,8 @@ class MultiModalPruner:
                 num_computed_tokens=num_computed,
             )
             self.rope_state.update_prefill_positions(req_idx, new_positions, delta)
+            if self.export_position_state:
+                self._pending_position_states[req_id] = (new_positions, delta)
             cleaned.extend(
                 copy_mm_embedding_modality(src, dst)
                 for src, dst in zip(req_embeds, req_cleaned)
@@ -96,6 +103,18 @@ class MultiModalPruner:
 
         assert pos == len(mm_embeds)
         return cleaned
+
+    def take_position_states(self) -> dict[str, MRoPEPositionState]:
+        with gpu_sync_allowed():
+            states = {
+                req_id: MRoPEPositionState(
+                    positions=positions.to(dtype=torch.int32, device="cpu").tolist(),
+                    delta=int(delta),
+                )
+                for req_id, (positions, delta) in self._pending_position_states.items()
+            }
+        self._pending_position_states.clear()
+        return states
 
     def _num_window_embeds(self, req_id: str, query_start: int, query_end: int) -> int:
         """Count the media items contributing embeddings to [query_start,
@@ -128,6 +147,7 @@ def maybe_create_mm_pruner(
     model: nn.Module,
     rope_state: RopeState | None,
     encoder_cache: EncoderCache | None,
+    export_position_state: bool = False,
 ) -> MultiModalPruner | None:
     """Create a MultiModalPruner if the model prunes embeddings and uses M-RoPE."""
     if (
@@ -140,5 +160,9 @@ def maybe_create_mm_pruner(
         return None
 
     return MultiModalPruner(
-        model, rope_state, encoder_cache, model_config.get_inputs_embeds_size()
+        model,
+        rope_state,
+        encoder_cache,
+        model_config.get_inputs_embeds_size(),
+        export_position_state,
     )
