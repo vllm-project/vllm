@@ -2666,6 +2666,42 @@ def test_online_nf12_linear_matches_exact_bf16(
     not HAS_NF12,
     reason="NF12 requires CUDA SM80+ and the optional nf12 package.",
 )
+@torch.inference_mode()
+def test_online_nf12_preserves_bf16_special_values(
+    default_vllm_config, dist_init
+) -> None:
+    """Loading preserves signed zeros, subnormals, infinities and NaN payloads."""
+    import nf12
+
+    default_vllm_config.model_config = ModelConfig(dtype="bfloat16")
+    config = OnlineQuantizationConfig(quant_config_args(linear="nf12"))
+    with set_default_torch_dtype(torch.bfloat16), torch.device("cuda"):
+        layer = ColumnParallelLinear(
+            64,
+            16,
+            bias=False,
+            params_dtype=torch.bfloat16,
+            quant_config=config,
+            disable_tp=True,
+        )
+        weight = torch.full((16, 64), 0.125)
+        weight.view(torch.int16)[0, :8] = torch.tensor(
+            [0, -32768, 1, -32767, 32640, -128, 32705, -61], dtype=torch.int16
+        )
+        layer.weight.weight_loader(layer.weight, weight)
+        layer.quant_method.process_weights_after_loading(layer)
+        encoded = nf12.NF12Weight(
+            layer.weight, layer.weight_escapes, layer.weight_exp_base
+        )
+    torch.testing.assert_close(
+        encoded.decode().view(torch.int16), weight.view(torch.int16), rtol=0, atol=0
+    )
+
+
+@pytest.mark.skipif(
+    not HAS_NF12,
+    reason="NF12 requires CUDA SM80+ and the optional nf12 package.",
+)
 @pytest.mark.parametrize("targets", [False, True])
 @torch.inference_mode()
 def test_online_nf12_preserves_fp32_router(
