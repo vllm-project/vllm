@@ -44,7 +44,6 @@ from vllm.plugins import load_endpoint_plugins
 from vllm.plugins.endpoint_plugins.interface import (
     EndpointPlugin,
     attach_endpoint_plugins,
-    drain_endpoint_plugins,
     init_endpoint_plugins_state,
 )
 from vllm.utils.argparse_utils import FlexibleArgumentParser
@@ -634,23 +633,12 @@ async def _serve_in_child(case: str) -> None:
                 assert time.monotonic() < deadline
                 time.sleep(0.01)
             if case == "abandoned_engine_shutdown_hangs":
+                events.append("signal_during_engine_shutdown")
                 os.kill(os.getpid(), signal.SIGTERM)
                 threading.Event().wait()
             raise RuntimeError("engine shutdown failed")
 
-    async def drain_after_signal(state: State, deadline: float) -> None:
-        # A repeated signal is handled while the zero-timeout drain is pending.
-        # Handlers run in delivery order, so SIGTERM's has run once SIGUSR1's has.
-        handled = asyncio.Event()
-        loop.add_signal_handler(signal.SIGUSR1, handled.set)
-        os.kill(os.getpid(), signal.SIGTERM)
-        os.kill(os.getpid(), signal.SIGUSR1)
-        await handled.wait()
-        events.append("signal_during_drain")
-        await drain_endpoint_plugins(state, deadline)
-
-    timeout = 0 if case == "zero_timeout_signal_during_drain" else 30
-    engine = _Engine(events, shutdown_timeout=1 if case in _ONE_SECOND else timeout)
+    engine = _Engine(events, shutdown_timeout=1 if case in _ONE_SECOND else 30)
     blocked = asyncio.Event()
 
     class _Blocking(DummyAdminEndpointPlugin):
@@ -713,11 +701,6 @@ async def _serve_in_child(case: str) -> None:
 
     async with engine_context(), contextlib.AsyncExitStack() as stack:
         monkeypatch = stack.enter_context(pytest.MonkeyPatch.context())
-        if case == "zero_timeout_signal_during_drain":
-            monkeypatch.setattr(
-                "vllm.entrypoints.launchers.launcher.drain_endpoint_plugins",
-                drain_after_signal,
-            )
         plugins = [_dummy("A", events), _Blocking(events), _dummy("C", events)]
         plugins[1].hang_drain = case in _HANGING_DRAIN
         app = await _build_plugin_app(
@@ -758,7 +741,6 @@ _AFTER_START = (
     *_ONE_SECOND,
     "stop_ignores_signal",
     "stop_hangs_after_watchdog",
-    "zero_timeout_signal_during_drain",
 )
 _ROLLED_BACK = ["partial_cleanup:B", "stop:A", "native_shutdown"]
 _EXITED = ["engine_context_exit"]
@@ -788,26 +770,18 @@ _EXITED = ["engine_context_exit"]
         (
             "abandoned_engine_shutdown_hangs",
             (128 + signal.SIGTERM,),
-            ["start:C", "drain_hangs", "drain_cancel_ignored", "engine_shutdown"],
+            [
+                "start:C",
+                "drain_hangs",
+                "drain_cancel_ignored",
+                "engine_shutdown",
+                "signal_during_engine_shutdown",
+            ],
         ),
         (
             "drain_cancelled_stop_hangs",
             (128 + signal.SIGTERM,),
             ["start:C", "stop:C", "stop:B"],
-        ),
-        (
-            "zero_timeout_signal_during_drain",
-            (0,),
-            [
-                "start:C",
-                "signal_during_drain",
-                "engine_shutdown",
-                "stop:C",
-                "stop:B",
-                "stop:A",
-                "native_shutdown",
-                *_EXITED,
-            ],
         ),
         (
             "stop_hangs_after_watchdog",

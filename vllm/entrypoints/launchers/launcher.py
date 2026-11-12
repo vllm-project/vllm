@@ -316,7 +316,7 @@ async def serve_http(
         # shutdown that never returns. Exit directly: as a container's PID 1,
         # the process ignores a signal whose action is the default.
         logger.warning(
-            "[shutdown] API server: received %s during cleanup; exiting",
+            "[shutdown] API server: received %s during shutdown; exiting",
             signal.Signals(signum).name,
         )
         os._exit(128 + signum)
@@ -353,30 +353,33 @@ async def serve_http(
         )
         timeout = vllm_config.shutdown_timeout if vllm_config is not None else 0
         deadline = time.monotonic() + timeout
-        drain = loop.create_task(drain_endpoint_plugins(app.state, deadline))
-        if timeout > 0:
+        if timeout <= 0:
+            # Drain hooks are skipped, so there is no drain to abandon.
+            await drain_endpoint_plugins(app.state, deadline)
+        else:
+            drain = loop.create_task(drain_endpoint_plugins(app.state, deadline))
             drain_task, drain_deadline = drain, deadline
-        settled = (drain, drain_abandoned)
-        cancelled = False
-        # Like a TaskGroup, defer repeated cancellation until the drain settles.
-        while not (drain.done() or drain_abandoned.done()):
-            try:
-                await asyncio.wait(settled, return_when=asyncio.FIRST_COMPLETED)
-            except asyncio.CancelledError:
-                if not cancelled:
-                    drain.cancel()
-                cancelled = True
-        if drain_abandoned.done():
-            # Neither cancellation nor an engine error may skip the exit, and
-            # `stop` must not run beside the abandoned drain.
-            signum = drain_abandoned.result()
-            exiting = loop.run_in_executor(None, abandon_drain, signum)
-            while True:
-                with contextlib.suppress(asyncio.CancelledError):
-                    await asyncio.wait((exiting,))
-        if cancelled:
-            raise asyncio.CancelledError
-        drain.result()
+            settled = (drain, drain_abandoned)
+            cancelled = False
+            # Like a TaskGroup, defer repeated cancellation until the drain settles.
+            while not (drain.done() or drain_abandoned.done()):
+                try:
+                    await asyncio.wait(settled, return_when=asyncio.FIRST_COMPLETED)
+                except asyncio.CancelledError:
+                    if not cancelled:
+                        drain.cancel()
+                    cancelled = True
+            if drain_abandoned.done():
+                # Neither cancellation nor an engine error may skip the exit, and
+                # `stop` must not run beside the abandoned drain.
+                signum = drain_abandoned.result()
+                exiting = loop.run_in_executor(None, abandon_drain, signum)
+                while True:
+                    with contextlib.suppress(asyncio.CancelledError):
+                        await asyncio.wait((exiting,))
+            if cancelled:
+                raise asyncio.CancelledError
+            drain.result()
 
         if engine_client is not None:
             remaining = max(0.0, deadline - time.monotonic())
