@@ -317,14 +317,12 @@ fn legacy_structured_output(
     legacy: &pb::decoding_parameters::LegacyStructuredOutput,
 ) -> pb::StructuredOutput {
     use pb::decoding_parameters::LegacyStructuredOutput as Legacy;
-    use pb::structured_output::{Kind, StringChoices};
+    use pb::structured_output::Kind;
 
     let kind = match legacy {
         Legacy::Json(schema) => Kind::Json(schema.clone()),
         Legacy::Regex(regex) => Kind::Regex(regex.clone()),
-        Legacy::Choice(choices) => Kind::Choice(StringChoices {
-            choices: choices.choices.clone(),
-        }),
+        Legacy::Choice(choices) => Kind::Choice(choices.clone()),
         Legacy::Grammar(grammar) => Kind::Grammar(grammar.clone()),
         Legacy::JsonObject(json_object) => Kind::JsonObject(*json_object),
         Legacy::StructuralTag(tag) => Kind::StructuralTag(tag.clone()),
@@ -686,8 +684,8 @@ mod tests {
     /// ambiguous and rejected.
     #[test]
     fn grpc_legacy_structured_output_fields_still_constrain() {
-        use pb::decoding_parameters::{LegacyStructuredOutput as Legacy, StringChoices};
-        use pb::structured_output::Kind;
+        use pb::decoding_parameters::LegacyStructuredOutput as Legacy;
+        use pb::structured_output::{Kind, StringChoices};
 
         let schema = r#"{"type":"object"}"#;
         let request = |decoding| pb::GenerateRequest {
@@ -713,7 +711,7 @@ mod tests {
                 Legacy::Choice(StringChoices {
                     choices: vec!["yes".to_string(), "no".to_string()],
                 }),
-                Kind::Choice(pb::structured_output::StringChoices {
+                Kind::Choice(StringChoices {
                     choices: vec!["yes".to_string(), "no".to_string()],
                 }),
             ),
