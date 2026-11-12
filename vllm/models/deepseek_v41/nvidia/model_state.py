@@ -253,7 +253,8 @@ class DeepseekV41ModelState(DefaultModelState):
             )
 
         # Per request state index; batches gather from it (see prepare_attn).
-        self._replay_start_np = np.zeros(self.max_num_reqs, dtype=np.int32)
+        # PCP capture batches index one dummy request per local segment.
+        self._replay_start_np = np.zeros(max_local_reqs, dtype=np.int32)
         self._replay_start = torch.zeros(
             max_local_reqs, dtype=torch.int32, device=device
         )
@@ -272,7 +273,7 @@ class DeepseekV41ModelState(DefaultModelState):
                     "request is represented on every rank."
                 )
             # Requests whose every prompt row is read (prompt logprobs) never trim.
-            self._keeps_rows_np = np.zeros(self.max_num_reqs, dtype=np.bool_)
+            self._keeps_rows_np = np.zeros(max_local_reqs, dtype=np.bool_)
             self._dropped_before = UvaBufferPool(max_local_reqs + 1, torch.int32)
             self._kv_floor = UvaBufferPool(max_local_reqs, torch.int32)
             # The replay batch's inputs: its rows of the batch, query offsets,
@@ -415,7 +416,7 @@ class DeepseekV41ModelState(DefaultModelState):
                 )
                 if self.pcp_size > 1:
                     self._kept_gathered_slot_mappings = torch.empty(
-                        len(specs),
+                        len(groups),
                         self.max_num_tokens * self.pcp_size,
                         dtype=torch.int64,
                         device=self.device,
@@ -720,22 +721,13 @@ class DeepseekV41ModelState(DefaultModelState):
         pcp_manager: "PCPManager | None" = None,
     ) -> None:
         block_table_provider = pcp_manager or block_tables
-        if pcp_manager is not None:
-            input_buffers = pcp_manager.input_buffers
 
         def prepare(desc: BatchExecutionDescriptor) -> None:
             # Capture reuses the runtime path on a dummy batch, so the graph reads
             # the buffers a real step fills.
             num_reqs = min(desc.num_tokens, input_buffers.max_num_reqs)
-            input_batch = InputBatch.make_dummy(
-                num_reqs, desc.num_tokens, input_buffers
-            )
-            if pcp_manager is not None:
-                input_batch = pcp_manager.prepare_inputs_for_capture_or_profile(
-                    input_batch
-                )
             self._prepare_replay_batch(
-                input_batch,
+                InputBatch.make_dummy(num_reqs, desc.num_tokens, input_buffers),
                 CUDAGraphMode.NONE,
                 block_table_provider.get_dummy_block_tables(num_reqs),
                 block_table_provider.get_dummy_slot_mappings(desc.num_tokens),
