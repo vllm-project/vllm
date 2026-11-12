@@ -808,6 +808,10 @@ async def async_request_openai_audio(
                                     output.output_tokens = usage.get(
                                         "completion_tokens"
                                     )
+                                    # The dataset counts a text prompt that is
+                                    # never sent; the server counts the audio.
+                                    if (pt := usage.get("prompt_tokens")) is not None:
+                                        output.prompt_len = pt
 
                     output.generated_text = generated_text
                     if stream_error is not None:
