@@ -1085,7 +1085,8 @@ def _build_paged_cache(
 
 
 @pytest.mark.skipif(
-    not torch.cuda.is_available()
+    not sparse_indexer.current_platform.is_cuda()
+    or not torch.cuda.is_available()
     or not sparse_indexer.current_platform.is_device_capability_family(90),
     reason="SM90 WGMMA required",
 )
@@ -1213,7 +1214,8 @@ def test_candidate_logits_layout_and_graph(
 
 
 @pytest.mark.skipif(
-    not torch.cuda.is_available()
+    not sparse_indexer.current_platform.is_cuda()
+    or not torch.cuda.is_available()
     or not sparse_indexer.current_platform.is_device_capability_family(90),
     reason="SM90 WGMMA required",
 )
@@ -1256,7 +1258,8 @@ def test_candidate_logits_large_page_stride(large_page_stride: bool):
 
 
 @pytest.mark.skipif(
-    not torch.cuda.is_available()
+    not sparse_indexer.current_platform.is_cuda()
+    or not torch.cuda.is_available()
     or not sparse_indexer.current_platform.is_device_capability_family(90),
     reason="SM90 WGMMA required",
 )
