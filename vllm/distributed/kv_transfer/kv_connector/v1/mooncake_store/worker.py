@@ -11,7 +11,6 @@ and MooncakeDistributedStore integration.
 """
 
 import dataclasses
-import functools
 import math
 import os
 import queue
@@ -24,6 +23,7 @@ from contextlib import AbstractContextManager
 from dataclasses import dataclass, replace
 from typing import Any, Literal, TypeVar, cast
 
+import msgspec
 import torch
 import zmq
 
@@ -48,27 +48,28 @@ from vllm.distributed.kv_transfer.kv_connector.v1.mooncake.transfer_engine_regis
 )
 from vllm.distributed.kv_transfer.kv_connector.v1.mooncake_store import rdma_utils
 from vllm.distributed.kv_transfer.kv_connector.v1.mooncake_store.coordinator import (  # noqa: E501
-    ExternalCachedBlockPool,
     MooncakeStoreCoordinator,
 )
 from vllm.distributed.kv_transfer.kv_connector.v1.mooncake_store.data import (  # noqa: E501
-    BlobBlockHashes,
     ChunkedTokenDatabase,
     MooncakeLookupResult,
     MooncakeStoreConnectorMetadata,
     MooncakeStoreWorkerMetadata,
     ReqMeta,
-    TailKeyBoundary,
 )
 from vllm.distributed.kv_transfer.kv_connector.v1.mooncake_store.layout import (  # noqa: E501
     ATTENTION_STORE_LAYOUTS,
     AttentionStoreLayout,
     KeyMetadata,
     MambaStoreLayout,
-    PoolKey,
     StoreLayout,
     StoreShardId,
     TokenMajorStoreLayout,
+)
+from vllm.distributed.kv_transfer.kv_connector.v1.mooncake_store.lookup import (  # noqa: E501
+    LookupProcess,
+    LookupProcessSpec,
+    MooncakeStoreLookup,
 )
 from vllm.distributed.kv_transfer.kv_connector.v1.mooncake_store.protocol import (  # noqa: E501
     LOOKUP_MSG,
@@ -76,7 +77,6 @@ from vllm.distributed.kv_transfer.kv_connector.v1.mooncake_store.protocol import
     RESP_ERR,
     RESP_OK,
     decode_lookup_response,
-    encode_lookup_response,
 )
 from vllm.distributed.kv_transfer.kv_connector.v1.mooncake_store.selective_lease import (  # noqa: E501
     SelectiveLookupLease,
@@ -1517,7 +1517,7 @@ def _reused_transfer_engine() -> SharedMooncakeTransferEngine:
     return shared
 
 
-class MooncakeStoreWorker:
+class MooncakeStoreWorker(MooncakeStoreLookup):
     """Worker-side component for MooncakeStoreConnector."""
 
     # Bare workers built with __new__ in tests read this default.
@@ -1706,10 +1706,7 @@ class MooncakeStoreWorker:
             else None
         )
 
-        # Start lookup server on rank 0 for scheduler-side prefix queries
         self.lookup_server: LookupKeyServer | None = None
-        if vllm_config.parallel_config.rank == 0:
-            self.lookup_server = LookupKeyServer(self, vllm_config)
 
         kv_event_config = vllm_config.kv_events_config
         self.enable_kv_events = False
@@ -1740,6 +1737,7 @@ class MooncakeStoreWorker:
                 "(global_segment_size=%d), KV transfer disabled.",
                 store_config.global_segment_size,
             )
+            self._start_lookup_server(vllm_config, serve_lookups=False)
             return
 
         if (
@@ -1777,6 +1775,28 @@ class MooncakeStoreWorker:
                 self._lookup_key_prefixes,
                 self._record_kv_connector_operation,
             )
+        self._start_lookup_server(
+            vllm_config, serve_lookups=extra_config.get("enable_lookup", True)
+        )
+
+    def _start_lookup_server(
+        self, vllm_config: VllmConfig, serve_lookups: bool
+    ) -> None:
+        """Serve scheduler-side lookups and admin commands from rank 0."""
+        if vllm_config.parallel_config.rank == 0:
+            self.lookup_server = LookupKeyServer(self, vllm_config, serve_lookups)
+
+    def lookup_process_spec(self, vllm_config: VllmConfig) -> LookupProcessSpec:
+        return LookupProcessSpec(
+            socket_path=get_zmq_rpc_path_lookup(vllm_config),
+            store_config=MooncakeStoreConfig.load_from_config(),
+            local_hostname=get_ip(),
+            coord=self.coord,
+            token_dbs=self.token_dbs,
+            lookup_key_prefixes=self._lookup_key_prefixes,
+            hash_block_size=self.hash_block_size,
+            selective_lease=self._selective_lease is not None,
+        )
 
     def _select_store_layout(
         self, extra_config: dict[str, Any]
@@ -2333,6 +2353,10 @@ class MooncakeStoreWorker:
         logger.info(
             "Started %d Mooncake KV-load receive thread(s)", self.num_recv_threads
         )
+        lookup_server = getattr(self, "lookup_server", None)
+        if lookup_server is not None:
+            # Serve no requests before lookups can be answered.
+            lookup_server.wait_ready()
 
     def unregister_kv_caches(self) -> None:
         """Unregister device KV buffers after the engine has drained transfers."""
@@ -2446,26 +2470,6 @@ class MooncakeStoreWorker:
             failed_recving=failed_recving,
         )
 
-    def _record_kv_connector_operation(
-        self,
-        operation: str,
-        duration_seconds: float,
-        num_keys: int,
-        *,
-        num_bytes: int = 0,
-        status: str = "ok",
-        num_failed_keys: int = 0,
-    ) -> None:
-        with self._kv_connector_stats_lock:
-            self.kv_connector_stats.record_operation(
-                operation=operation,
-                duration_seconds=duration_seconds,
-                num_keys=num_keys,
-                num_bytes=num_bytes,
-                status=status,
-                num_failed_keys=num_failed_keys,
-            )
-
     def get_kv_connector_stats(self) -> MooncakeStoreConnectorStats | None:
         with self._kv_connector_stats_lock:
             if self.kv_connector_stats.is_empty():
@@ -2512,200 +2516,6 @@ class MooncakeStoreWorker:
             return None
         return MooncakeStoreWorkerMetadata(completed_saves=completed_saves)
 
-    def lookup(
-        self, num_tokens: int, block_hashes: Sequence[BlockHash]
-    ) -> MooncakeLookupResult:
-        """Check how many prefix tokens exist in the store.
-
-        Checks across all rank-specific key namespaces that may be loaded. A
-        hit covering all `num_tokens` is re-derived below the request end so
-        the last token is recomputed for sampling.
-        """
-        if self._capacity_only:
-            return MooncakeLookupResult(0)
-
-        token_len = self.coord.align_lookup_length(num_tokens)
-        if not block_hashes or token_len <= 0:
-            return MooncakeLookupResult(0)
-
-        # Build per-(group, hash) candidate keys expanded across rank namespaces.
-        # candidate_meta stores (group, hash_bytes, end_token) for each key slice.
-        candidate_keys: list[str] = []
-        candidate_meta: list[tuple[int, bytes, int]] = []
-        fine_grained = self.coord.enable_partial_hash_hits
-        lookup_masks = None if fine_grained else self.coord.lookup_mask(token_len)
-        for g_idx, db in enumerate(self.token_dbs):
-            if not self._kv_cache_groups[g_idx].kv_cache_spec.prefix_cacheable:
-                continue
-            spec_block_size = self._kv_cache_groups[g_idx].kv_cache_spec.block_size
-            key_prefixes = self._lookup_key_prefixes[g_idx]
-            lookup_mask = None if lookup_masks is None else lookup_masks[g_idx]
-            unit_size = self.hash_block_size if fine_grained else db.chunk_size
-            max_units = (
-                min(token_len, len(block_hashes) * self.hash_block_size) // unit_size
-            )
-            for unit_id in range(max_units):
-                block_id = unit_id * unit_size // spec_block_size
-                if lookup_mask is not None and (
-                    block_id >= len(lookup_mask) or not lookup_mask[block_id]
-                ):
-                    continue
-                end_token = (unit_id + 1) * unit_size
-                h = block_hashes[end_token // self.hash_block_size - 1]
-                hash_hex = h.hex()
-                for key_prefix in key_prefixes:
-                    candidate_keys.append(
-                        PoolKey.build_key_string(key_prefix, hash_hex)
-                    )
-                candidate_meta.append((g_idx, bytes(h), end_token))
-
-        if not candidate_keys:
-            return MooncakeLookupResult(0)
-
-        exists_fn = (
-            self.store.batch_is_exist
-            if self._selective_lease is None
-            else self._selective_lease.probe
-        )
-        lookup_start = time.perf_counter()
-        try:
-            res = exists_fn(candidate_keys)
-            self._record_kv_connector_operation(
-                "lookup_exists",
-                time.perf_counter() - lookup_start,
-                len(candidate_keys),
-            )
-        except Exception as e:
-            self._record_kv_connector_operation(
-                "lookup_exists",
-                time.perf_counter() - lookup_start,
-                len(candidate_keys),
-                status="error",
-                num_failed_keys=len(candidate_keys),
-            )
-            logger.error("Remote connection failed in lookup: %s", e)
-            return MooncakeLookupResult(0)
-
-        # A (group, hash) is "present" only when every namespace that will be
-        # loaded has it (per-group count: sharded groups need every rank's
-        # shard, replicated groups one namespace per unique KV head).
-        exists_set = set()
-        pos = 0
-        previous_page = None
-        preceding_chunks_present = True
-        for g_idx, hash_bytes, end_token in candidate_meta:
-            spec_block_size = self._kv_cache_groups[g_idx].kv_cache_spec.block_size
-            page = (g_idx, (end_token - 1) // spec_block_size)
-            if page != previous_page:
-                preceding_chunks_present = True
-                previous_page = page
-            count = len(self._lookup_key_prefixes[g_idx])
-            present = all(res[pos + j] == 1 for j in range(count))
-            # A page-prefix hit covers every Store chunk before its final chunk.
-            if preceding_chunks_present and present:
-                exists_set.add((g_idx, hash_bytes))
-            if end_token % self.token_dbs[g_idx].chunk_size == 0:
-                preceding_chunks_present &= present
-            pos += count
-
-        hit, load_masks = self._longest_hit(
-            num_tokens, token_len, block_hashes, exists_set
-        )
-        if self._selective_lease is None:
-            return hit
-        return self._selective_lease.lease_hit(
-            block_hashes,
-            hit,
-            load_masks,
-            exists_set,
-            functools.partial(self._longest_hit, num_tokens, token_len, block_hashes),
-        )
-
-    def _longest_hit(
-        self,
-        num_tokens: int,
-        token_len: int,
-        block_hashes: Sequence[BlockHash],
-        exists_set: set[tuple[int, bytes]],
-    ) -> tuple[MooncakeLookupResult, tuple[list[bool], ...]]:
-        """Longest prefix hit and its load masks over the stored group/hash pairs."""
-        cached_block_pool = ExternalCachedBlockPool(
-            self.hash_block_size,
-            exists_set,
-        )
-        load_masks, hit_length = self.coord.find_longest_cache_hit(
-            block_hashes,
-            token_len,
-            cached_block_pool,
-        )
-        if hit_length >= num_tokens:
-            usable_length = self.coord.align_lookup_length(num_tokens - 1)
-            if usable_length <= 0:
-                return MooncakeLookupResult(0), ()
-            load_masks, hit_length = self.coord.find_longest_cache_hit(
-                block_hashes,
-                usable_length,
-                cached_block_pool,
-            )
-        return (
-            MooncakeLookupResult(
-                hit_length,
-                self._tail_key_boundaries(
-                    block_hashes,
-                    hit_length,
-                    cached_block_pool,
-                    load_masks,
-                ),
-            ),
-            load_masks,
-        )
-
-    def _tail_key_boundaries(
-        self,
-        block_hashes: Sequence[BlockHash],
-        hit_length: int,
-        cached_block_pool: ExternalCachedBlockPool,
-        load_masks: tuple[list[bool], ...],
-    ) -> tuple[TailKeyBoundary, ...]:
-        """Return the hash boundary used to store each group's tail block.
-
-        With fine-grained prefix matching, `hit_length` may fall within a
-        physical cache block and may not align with the hash boundary used to
-        store that block. For each KV-cache group, return the token boundary
-        whose hash was used as the store key.
-        """
-        if hit_length <= 0:
-            return ()
-
-        boundaries = []
-        hit_boundary_hash_idx = hit_length // self.hash_block_size - 1
-        for group_id, db in enumerate(self.token_dbs):
-            if not load_masks[group_id] or not load_masks[group_id][-1]:
-                continue
-            chunk_id = cdiv(hit_length, db.chunk_size) - 1
-            boundary_tokens = hit_length
-            contains_hit_boundary = cached_block_pool.contains(
-                group_id, block_hashes[hit_boundary_hash_idx]
-            )
-            if not self.coord.enable_partial_hash_hits:
-                assert contains_hit_boundary
-            if not contains_hit_boundary:
-                next_chunk_hash_idx = min(
-                    (chunk_id + 1) * db.chunk_size // self.hash_block_size,
-                    len(block_hashes),
-                )
-                for hash_idx in range(hit_boundary_hash_idx + 1, next_chunk_hash_idx):
-                    if cached_block_pool.contains(group_id, block_hashes[hash_idx]):
-                        boundary_tokens = (hash_idx + 1) * self.hash_block_size
-                        break
-                else:
-                    raise AssertionError(
-                        f"No tail key found for cache group {group_id} at "
-                        f"hit length {hit_length}"
-                    )
-            boundaries.append(TailKeyBoundary(group_id, boundary_tokens))
-        return tuple(boundaries)
-
     def get_kv_events(self) -> list[BlockStored]:
         if self.enable_kv_events and self.kv_send_thread is not None:
             return self.kv_send_thread.get_kv_events()
@@ -2729,6 +2539,10 @@ class MooncakeStoreWorker:
         if store is None:
             return
         self.store = None
+        lookup_server = getattr(self, "lookup_server", None)
+        if lookup_server is not None:
+            lookup_server.close()
+            self.lookup_server = None
         deadline = time.monotonic() + 5.0
         for thread in (self.kv_send_thread, *self.kv_recv_threads):
             if thread is None:
@@ -2754,22 +2568,29 @@ class MooncakeStoreWorker:
 
 
 class LookupKeyServer:
-    """ZMQ server on worker rank 0 for the LookupKey admin channel.
+    """Rank 0 endpoints of the LookupKey channel.
 
-    Handles two request types, tagged at frame 0:
-    - `LOOKUP_MSG`: prefix-cache hit query, returns its load plan.
-    - `RESET_MSG`: drains the send thread queue, then runs
-      `store.remove_all(force=True)`. Caller must have paused the
-      scheduler first.
+    `LOOKUP_MSG` requests are served by a separate lookup process (see
+    `lookup.py`), so they never take this process's GIL. This process serves
+    the admin socket, where `RESET_MSG` drains the send thread queue, then runs
+    `store.remove_all(force=True)`. Caller must have paused the scheduler
+    first.
     """
 
     def __init__(
         self,
         store_worker: MooncakeStoreWorker,
         vllm_config: VllmConfig,
+        serve_lookups: bool,
     ):
+        self._lookup_socket_path = get_zmq_rpc_path_lookup(vllm_config)
+        self.lookup_process = (
+            LookupProcess(store_worker.lookup_process_spec(vllm_config))
+            if serve_lookups
+            else None
+        )
         self.ctx = zmq.Context()  # type: ignore[attr-defined]
-        socket_path = get_zmq_rpc_path_lookup(vllm_config)
+        socket_path = get_zmq_rpc_path_admin(vllm_config)
         self._ipc_path = socket_path.removeprefix("ipc://")
         if os.path.exists(self._ipc_path):
             os.unlink(self._ipc_path)
@@ -2788,15 +2609,7 @@ class LookupKeyServer:
                 all_frames = self.socket.recv_multipart(copy=False)
                 msg_type = bytes(all_frames[0])
 
-                if msg_type == LOOKUP_MSG:
-                    num_tokens = int.from_bytes(all_frames[1], byteorder="big")
-                    hash_len = int.from_bytes(all_frames[2], byteorder="big")
-                    blob = all_frames[3].buffer
-                    block_hashes = BlobBlockHashes(blob, hash_len)
-                    result = self.store_worker.lookup(num_tokens, block_hashes)
-                    self.socket.send(encode_lookup_response(result))
-
-                elif msg_type == RESET_MSG:
+                if msg_type == RESET_MSG:
                     try:
                         # Drain in-flight puts before wiping the master;
                         # otherwise stale puts can repopulate it post-reset.
@@ -2821,7 +2634,17 @@ class LookupKeyServer:
         self.thread = threading.Thread(target=process_request, daemon=True)
         self.thread.start()
 
+    def wait_ready(self) -> None:
+        if self.lookup_process is not None:
+            self.lookup_process.wait_ready()
+
     def close(self):
+        if self.lookup_process is not None:
+            self.lookup_process.close()
+            self.lookup_process = None
+            lookup_ipc_path = self._lookup_socket_path.removeprefix("ipc://")
+            if os.path.exists(lookup_ipc_path):
+                os.unlink(lookup_ipc_path)
         self.socket.close(linger=0)
         if os.path.exists(self._ipc_path):
             os.unlink(self._ipc_path)
@@ -2868,11 +2691,11 @@ def _lookup_signature(
 
 
 class LookupKeyClient:
-    """ZMQ client for the LookupKey admin channel.
+    """ZMQ client for the LookupKey channel.
 
-    Routes both prefix-cache lookups and admin commands (currently:
-    `reset`) to `LookupKeyServer` on worker rank 0. The first frame
-    of every request is a named tag from `protocol.py`.
+    Routes prefix-cache lookups to the rank 0 lookup process and admin
+    commands (currently: `reset`) to `LookupKeyServer` on worker rank 0. The
+    first frame of every request is a named tag from `protocol.py`.
     """
 
     class _LookupExpired(TimeoutError):
@@ -2890,17 +2713,12 @@ class LookupKeyClient:
             probe_window_s=self._lookup_timeout_s,
         )
         self.ctx = zmq.Context()  # type: ignore[attr-defined]
-        socket_path = get_zmq_rpc_path_lookup(vllm_config)
-        self.socket = make_zmq_socket(
-            self.ctx,
-            socket_path,
-            zmq.REQ,  # type: ignore[attr-defined]
-            bind=False,
-        )
-
-        # Allow a new request after a timeout and discard late replies to it.
-        self.socket.setsockopt(zmq.REQ_RELAXED, 1)
-        self.socket.setsockopt(zmq.REQ_CORRELATE, 1)
+        self.socket = self._make_socket(get_zmq_rpc_path_lookup(vllm_config))
+        self.admin_socket = self._make_socket(get_zmq_rpc_path_admin(vllm_config))
+        # Telemetry of the lookup process's store RPCs, reported by the
+        # scheduler-side connector.
+        self._stats_lock = threading.Lock()
+        self.kv_connector_stats = MooncakeStoreConnectorStats()
 
         # Async lookup support
         # One shared ZMQ REQ socket requires serial send/receive operations.
@@ -2914,16 +2732,31 @@ class LookupKeyClient:
         )
         self._lookup_ttl_s = extra_config.get("lookup_prefetch_ttl_s", 2.0)
 
-    def _wait_for_socket(self, event: int, deadline: float) -> None:
+    def _make_socket(self, path: str) -> zmq.Socket:
+        sock = make_zmq_socket(
+            self.ctx,
+            path,
+            zmq.REQ,  # type: ignore[attr-defined]
+            bind=False,
+        )
+        # Allow a new request after a timeout and discard late replies to it.
+        sock.setsockopt(zmq.REQ_RELAXED, 1)
+        sock.setsockopt(zmq.REQ_CORRELATE, 1)
+        return sock
+
+    @staticmethod
+    def _wait_for_socket(sock: zmq.Socket, event: int, deadline: float) -> None:
         remaining_ms = int((deadline - time.monotonic()) * 1000)
-        if remaining_ms <= 0 or not self.socket.poll(remaining_ms, event):
+        if remaining_ms <= 0 or not sock.poll(remaining_ms, event):
             raise TimeoutError("Mooncake lookup timed out")
 
-    def _request(self, frames: Sequence[bytes], deadline: float) -> bytes:
-        self._wait_for_socket(zmq.POLLOUT, deadline)
-        self.socket.send_multipart(frames, copy=False, flags=zmq.NOBLOCK)
-        self._wait_for_socket(zmq.POLLIN, deadline)
-        return self.socket.recv(flags=zmq.NOBLOCK)
+    def _request(
+        self, sock: zmq.Socket, frames: Sequence[bytes], deadline: float
+    ) -> list[bytes]:
+        self._wait_for_socket(sock, zmq.POLLOUT, deadline)
+        sock.send_multipart(frames, copy=False, flags=zmq.NOBLOCK)
+        self._wait_for_socket(sock, zmq.POLLIN, deadline)
+        return sock.recv_multipart(flags=zmq.NOBLOCK)
 
     def _lookup(
         self, num_tokens: int, block_hashes: list[BlockHash], deadline: float
@@ -2937,7 +2770,22 @@ class LookupKeyClient:
             hash_len.to_bytes(2, byteorder="big"),
             b"".join(block_hashes),
         )
-        return decode_lookup_response(self._request(all_frames, deadline))
+        response, *stats = self._request(self.socket, all_frames, deadline)
+        if stats:
+            data = msgspec.msgpack.decode(stats[0])
+            with self._stats_lock:
+                self.kv_connector_stats.aggregate(
+                    MooncakeStoreConnectorStats(data=data)
+                )
+        return decode_lookup_response(response)
+
+    def get_kv_connector_stats(self) -> MooncakeStoreConnectorStats | None:
+        with self._stats_lock:
+            if self.kv_connector_stats.is_empty():
+                return None
+            stats = self.kv_connector_stats
+            self.kv_connector_stats = MooncakeStoreConnectorStats()
+            return stats
 
     def lookup(
         self,
@@ -3038,11 +2886,13 @@ class LookupKeyClient:
         rollout drain. Returns True on ACK, False on NACK or timeout.
         """
         try:
-            resp = self._request((RESET_MSG,), time.monotonic() + RESET_TIMEOUT_S)
+            (resp,) = self._request(
+                self.admin_socket, (RESET_MSG,), time.monotonic() + RESET_TIMEOUT_S
+            )
         except TimeoutError:
             logger.error("Mooncake store reset timed out")
             return False
-        return bytes(resp) == RESP_OK
+        return resp == RESP_OK
 
     def reset(self) -> bool:
         success = self.executor.submit(self._reset).result()
@@ -3056,6 +2906,7 @@ class LookupKeyClient:
             self.discard(req_id)
         self.executor.shutdown(wait=False, cancel_futures=True)
         self.socket.close(linger=0)
+        self.admin_socket.close(linger=0)
 
 
 def get_zmq_rpc_path_lookup(vllm_config: VllmConfig) -> str:
@@ -3072,3 +2923,8 @@ def get_zmq_rpc_path_lookup(vllm_config: VllmConfig) -> str:
     return (
         f"ipc://{base_url}/lookup_rpc_port_{rpc_port}_host_{hostname}_dp_rank{dp_rank}"
     )
+
+
+def get_zmq_rpc_path_admin(vllm_config: VllmConfig) -> str:
+    """Construct IPC path for the ZMQ admin socket served by rank 0."""
+    return get_zmq_rpc_path_lookup(vllm_config) + "_admin"

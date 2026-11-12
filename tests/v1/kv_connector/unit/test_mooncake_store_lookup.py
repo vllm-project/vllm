@@ -1,6 +1,13 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 
+import contextlib
+import json
+import os
+import shutil
+import socket
+import subprocess
+import sys
 import tempfile
 import threading
 import time
@@ -12,13 +19,30 @@ import zmq
 
 from vllm.config import DeviceConfig, KVTransferConfig, VllmConfig
 from vllm.distributed.kv_transfer.kv_connector.utils import CircuitBreaker
+from vllm.distributed.kv_transfer.kv_connector.v1.mooncake_store import (
+    lookup as lookup_mod,
+)
 from vllm.distributed.kv_transfer.kv_connector.v1.mooncake_store import worker
+from vllm.distributed.kv_transfer.kv_connector.v1.mooncake_store.coordinator import (  # noqa: E501
+    MooncakeStoreCoordinator,
+)
 from vllm.distributed.kv_transfer.kv_connector.v1.mooncake_store.data import (  # noqa: E501
+    ChunkedTokenDatabase,
     MooncakeLookupResult,
+)
+from vllm.distributed.kv_transfer.kv_connector.v1.mooncake_store.layout import (  # noqa: E501
+    KeyMetadata,
+    PoolKey,
+)
+from vllm.distributed.kv_transfer.kv_connector.v1.mooncake_store.metrics import (  # noqa: E501
+    MooncakeStoreConnectorStats,
 )
 from vllm.distributed.kv_transfer.kv_connector.v1.mooncake_store.protocol import (  # noqa: E501
     encode_lookup_response,
 )
+from vllm.distributed.mooncake_store import MooncakeStoreConfig, setup_mooncake_store
+from vllm.utils.network_utils import get_open_port
+from vllm.v1.kv_cache_interface import FullAttentionSpec, KVCacheGroupSpec
 
 pytestmark = pytest.mark.cpu_test
 
@@ -232,3 +256,141 @@ def test_cached_hit_does_not_reset_newer_failures(
     finally:
         server.join(10)
     assert not server.is_alive()
+
+
+@pytest.fixture
+def mooncake_master(tmp_path, monkeypatch: pytest.MonkeyPatch) -> Iterator[None]:
+    """Run a Mooncake master and point `MOONCAKE_CONFIG_PATH` at it."""
+    master_bin = shutil.which("mooncake_master") or os.path.join(
+        os.path.dirname(sys.executable), "mooncake_master"
+    )
+    if not os.path.exists(master_bin):
+        pytest.skip("mooncake_master is not installed")
+    port = get_open_port()
+    master = subprocess.Popen(
+        [
+            master_bin,
+            f"--port={port}",
+            f"--metrics_port={get_open_port()}",
+            "--enable_metric_reporting=false",
+        ],
+        stdout=subprocess.DEVNULL,
+        stderr=subprocess.DEVNULL,
+    )
+    try:
+        deadline = time.monotonic() + 60
+        while True:
+            assert master.poll() is None
+            with (
+                contextlib.suppress(OSError),
+                socket.create_connection(("127.0.0.1", port)),
+            ):
+                break
+            assert time.monotonic() < deadline, "Mooncake master did not start"
+            time.sleep(0.1)
+        config_path = tmp_path / "mooncake.json"
+        config_path.write_text(
+            json.dumps(
+                {
+                    "metadata_server": "P2PHANDSHAKE",
+                    "master_server_address": f"127.0.0.1:{port}",
+                    "global_segment_size": "64MB",
+                    "local_buffer_size": "16MB",
+                    "protocol": "tcp",
+                    "device_name": "",
+                }
+            )
+        )
+        monkeypatch.setenv("MOONCAKE_CONFIG_PATH", str(config_path))
+        yield
+    finally:
+        master.kill()
+        master.wait()
+
+
+def test_lookup_process_matches_in_process_lookup(
+    mooncake_master, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """The rank 0 lookup process, with its own store client, answers lookups
+    exactly like an in-process lookup over the worker's store client, and is
+    restarted if it dies."""
+    monkeypatch.setattr(worker, "LOOKUP_BREAKER_FAILURE_THRESHOLD", 1000)
+    store_mod = pytest.importorskip("mooncake.store")
+    store_config = MooncakeStoreConfig.load_from_config()
+    owner = store_mod.MooncakeDistributedStore()
+    setup_mooncake_store(owner, store_config, "127.0.0.1")
+
+    spec = FullAttentionSpec(block_size=16, num_kv_heads=1, head_size=8, dtype=None)
+    coord = MooncakeStoreCoordinator(
+        [KVCacheGroupSpec(["l0"], spec)], scheduler_block_size=16, hash_block_size=16
+    )
+    db = ChunkedTokenDatabase(KeyMetadata("test-model", 0, 0, 0, 0), chunk_size=16)
+    prefixes = (db.store_layout.lookup_key_prefixes(((0, 0, 0, 0),)),)
+
+    hashes = [bytes([i]) * 32 for i in range(8)]
+    # Blocks 0-2 and 4 are stored: the hit stops at the hole after block 2.
+    for i in (0, 1, 2, 4):
+        key = PoolKey.build_key_string(prefixes[0][0], hashes[i].hex())
+        assert owner.put(key, b"x" * 64) == 0
+
+    in_process = lookup_mod.MooncakeStoreLookup()
+    in_process.store = owner
+    in_process.coord = coord
+    in_process.token_dbs = [db]
+    in_process.hash_block_size = 16
+    in_process._capacity_only = False
+    in_process._kv_cache_groups = coord.kv_cache_groups
+    in_process._lookup_key_prefixes = prefixes
+    in_process._selective_lease = None
+    in_process.kv_connector_stats = MooncakeStoreConnectorStats()
+    in_process._kv_connector_stats_lock = threading.Lock()
+
+    with tempfile.TemporaryDirectory(prefix="mc-", dir="/tmp") as rpc_dir:
+        os.environ["VLLM_RPC_BASE_PATH"] = rpc_dir
+        config = VllmConfig(
+            device_config=DeviceConfig("cpu"),
+            kv_transfer_config=KVTransferConfig(
+                kv_connector="MooncakeStoreConnector",
+                kv_role="kv_both",
+                kv_connector_extra_config={"lookup_timeout_s": 5.0},
+            ),
+        )
+        process = lookup_mod.LookupProcess(
+            lookup_mod.LookupProcessSpec(
+                socket_path=worker.get_zmq_rpc_path_lookup(config),
+                store_config=store_config,
+                local_hostname="127.0.0.1",
+                coord=coord,
+                token_dbs=[db],
+                lookup_key_prefixes=prefixes,
+                hash_block_size=16,
+                selective_lease=False,
+            )
+        )
+        client = worker.LookupKeyClient(config)
+        try:
+
+            def lookup_until_served(num_tokens: int) -> MooncakeLookupResult:
+                # Lookups time out until the killed process is restarted.
+                deadline = time.monotonic() + 120
+                while client.get_kv_connector_stats() is None:
+                    assert time.monotonic() < deadline
+                    result = client.lookup("r", num_tokens, hashes[: num_tokens // 16])
+                return result
+
+            process.wait_ready()
+            for num_tokens in (16, 33, 64, 128, 129):
+                expected = in_process.lookup(num_tokens, hashes[: num_tokens // 16])
+                got = client.lookup("r", num_tokens, hashes[: num_tokens // 16])
+                assert got == expected, num_tokens
+            assert expected.hit_length == 48
+            stats = client.get_kv_connector_stats()
+            assert stats is not None
+            assert len(stats.data["lookup_exists"]) == 5
+
+            process.proc.kill()
+            assert lookup_until_served(128).hit_length == 48
+        finally:
+            client.close()
+            process.close()
+            owner.close()

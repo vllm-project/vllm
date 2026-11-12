@@ -2,10 +2,10 @@
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 """Wire-format constants for the LookupKey ZMQ admin channel.
 
-This is the single source of truth shared by `LookupKeyClient` and
-`LookupKeyServer` on the scheduler<->worker rank-0 admin channel.
+This is the single source of truth shared by `LookupKeyClient`, the rank 0
+lookup process (`LOOKUP_MSG`) and `LookupKeyServer` (`RESET_MSG`).
 
-Wire format (REQ/REP over IPC):
+Wire format (REQ/REP over IPC; `RESET_MSG` uses the separate admin socket):
 
     Request: [msg_type: bytes] [payload_frames...]
 
@@ -16,9 +16,12 @@ Wire format (REQ/REP over IPC):
                    fixed-size block hash (0 when there are no hashes)
           frame 3: raw block hashes concatenated back-to-back (each hash_len
                    bytes); the server splits on hash_len
-        Response: hit_length (u32 big-endian, first 4 bytes), followed by zero
-                  or more 8-byte tail-key boundaries. Each entry is group_id
-                  (u32), then boundary_tokens (u32).
+        Response: frame 0: hit_length (u32 big-endian, first 4 bytes),
+                  followed by zero or more 8-byte tail-key boundaries. Each
+                  entry is group_id (u32), then boundary_tokens (u32).
+                  frame 1 (optional): msgpack-encoded
+                  `MooncakeStoreConnectorStats.data` of the lookup's store
+                  RPCs, reported by the scheduler-side connector.
 
       msg_type == RESET_MSG:
           (no payload frames)

@@ -458,6 +458,8 @@ class MooncakeStoreConnector(KVConnectorBase_V1, SupportsHMA):
         return kv_events
 
     def get_kv_connector_stats(self) -> KVConnectorStats | None:
+        if self.connector_scheduler is not None:
+            return self.connector_scheduler.client.get_kv_connector_stats()
         if self.connector_worker is None:
             return None
         return self.connector_worker.get_kv_connector_stats()
