@@ -176,15 +176,16 @@ class ExtensibleKVCache:
             raise ValueError("KV cache tensors do not tile the allocation.")
         return offsets, strides
 
-    def allocate(self, size: int) -> torch.Tensor:
-        """Allocator hook for allocate_kv_cache; commits the null block.
+    @property
+    def min_committed_blocks(self) -> int:
+        """The null block, plus one under block-outermost layouts, whose views
+        start inside block 0 and read past it (see `pad_kv_cache_segments`)."""
+        return 2 if self._is_block_outermost else 1
 
-        Under block-outermost layouts layers' views start inside block 0, so a
-        second block keeps at least half a granule mapped past each view's start
-        (see `pad_kv_cache_segments` for what reads it).
-        """
+    def allocate(self, size: int) -> torch.Tensor:
+        """Allocator hook for allocate_kv_cache; commits the minimum."""
         assert size == self.size, f"Expected {self.size} bytes, got {size}."
-        self.commit(2 if self._is_block_outermost else 1)
+        self.commit(self.min_committed_blocks)
         return self.buffer.full_view()
 
     def commit(
@@ -621,13 +622,40 @@ def measure_kv_cache_blocks(
     torch.accelerator.empty_cache()
     free_memory = current_platform.free_device_memory(device)
     transient_peak = kv_cache.reserved_headroom_bytes
-    available = measure_kv_cache_bytes(
+    measured = dict(
         init_free_memory=init_free_memory,
         free_memory=free_memory,
         committed_bytes=kv_cache.physical_bytes,
-        requested_memory=requested_memory,
         transient_peak_bytes=transient_peak,
     )
+    available = measure_kv_cache_bytes(requested_memory=requested_memory, **measured)
+    utilization = vllm_config.cache_config.gpu_memory_utilization
+    # Explicit values just under 1.0 are mostly habits from estimate-based
+    # sizing, which needed that headroom; this sizing measures it instead. Some
+    # still leave room for memory this sizing cannot see, which the message
+    # lists so that those users can keep their setting.
+    if utilization is not None and 0.7 < utilization < 1.0:
+        # A budget of all memory free at startup is bound by the device alone.
+        withheld = (
+            measure_kv_cache_bytes(requested_memory=init_free_memory, **measured)
+            - available
+        )
+        if withheld >= 1 << 30:
+            logger.warning_once(
+                "gpu_memory_utilization=%s caps this instance at %s GiB, keeping "
+                "%s GiB of free device memory out of the KV cache. The "
+                "extensible KV cache is sized from the memory measured after "
+                "warmup and CUDA graph capture, so vLLM's own use needs no "
+                "headroom below 1.0. Leave gpu_memory_utilization unset unless "
+                "it leaves room for memory vLLM does not measure: other "
+                "processes sharing the GPU (including ones that allocate on it "
+                "later), the CPU on a unified-memory device, weight transfer "
+                "buffers for weight updates, or a KV connector's own device "
+                "buffers.",
+                utilization,
+                format_gib(requested_memory),
+                format_gib(withheld),
+            )
     kv_cache_bytes = reserve_mm_ipc_gpu_memory(
         available,
         vllm_config.model_config.multimodal_config,
