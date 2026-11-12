@@ -59,8 +59,10 @@ steps:
   - vllm/config/model.py
   - vllm/config/scheduler.py
   - vllm/config/vllm.py
+  - vllm/engine/arg_utils.py
   - vllm/model_executor/layers/state.py
   - vllm/model_executor/models/registry.py
+  - vllm/outputs.py
   - vllm/v1/core/kv_cache_coordinator.py
   - vllm/v1/core/kv_cache_planning.py
   - vllm/v1/core/sched/output.py
@@ -68,12 +70,17 @@ steps:
   - vllm/v1/core/sched/state_scheduler.py
   - vllm/v1/core/single_type_kv_cache_manager.py
   - vllm/v1/core/state_slot_manager.py
-  - vllm/v1/engine/async_llm.py
+  - vllm/v1/core/stream_admission.py
   - vllm/v1/engine/__init__.py
+  - vllm/v1/engine/async_llm.py
   - vllm/v1/engine/core.py
+  - vllm/v1/engine/core_client.py
+  - vllm/v1/engine/input_processor.py
   - vllm/v1/engine/output_processor.py
   - vllm/v1/kv_cache_interface.py
+  - vllm/v1/metrics/stats.py
   - vllm/v1/outputs.py
+  - vllm/v1/request.py
   - vllm/v1/worker/gpu/attn_utils.py
   - vllm/v1/worker/gpu/cudagraph_utils.py
   - vllm/v1/worker/gpu/model_runner.py
