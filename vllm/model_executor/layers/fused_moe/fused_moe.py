@@ -14,7 +14,9 @@ import vllm.model_executor.layers.fused_moe.modular_kernel as mk
 from vllm import _custom_ops as ops
 from vllm.logger import init_logger
 from vllm.model_executor.determinism.batch_invariant_configs import (
+    allow_hopper_moe_tuned_config,
     get_batch_invariant_moe_config,
+    is_batch_invariant_moe_tuned_table,
 )
 from vllm.model_executor.layers.fused_moe.activation import (
     MoEActivation,
@@ -1304,14 +1306,19 @@ def get_moe_configs(
     be picked and the associated configuration chosen to invoke the kernel.
     A down-projection config is optional and uses a separate `_down.json` file.
     """
-    # Avoid optimizing for the batch invariant case. Use default config
-    if envs.VLLM_BATCH_INVARIANT:
+    if envs.VLLM_BATCH_INVARIANT and not allow_hopper_moe_tuned_config(
+        E, N, dtype, block_n, block_k, down_moe
+    ):
         return None
 
     # First look up if an optimized configuration is available in the configs
     # directory
     block_shape = [block_n, block_k] if block_n and block_k else None
     json_file_name = get_config_file_name(E, N, dtype, block_shape)
+    if envs.VLLM_BATCH_INVARIANT and not allow_hopper_moe_tuned_config(
+        E, N, dtype, block_n, block_k, down_moe, json_file_name
+    ):
+        return None
     if down_moe:
         json_file_name = json_file_name.removesuffix(".json") + "_down.json"
 
@@ -1319,7 +1326,7 @@ def get_moe_configs(
 
     # note that we prioritize user defined config
     user_defined_config_folder = envs.VLLM_TUNED_CONFIG_FOLDER
-    if user_defined_config_folder is not None:
+    if user_defined_config_folder is not None and not envs.VLLM_BATCH_INVARIANT:
         user_defined_config_file_path = os.path.join(
             user_defined_config_folder, json_file_name
         )
@@ -1342,6 +1349,10 @@ def get_moe_configs(
                 tuned_config = json.load(f)
                 # Delete triton_version from tuned_config
                 tuned_config.pop("triton_version", None)
+                if envs.VLLM_BATCH_INVARIANT and not is_batch_invariant_moe_tuned_table(
+                    tuned_config
+                ):
+                    return None
                 return {int(key): val for key, val in tuned_config.items()}
 
     # If no optimized configuration is available, we will use the default
