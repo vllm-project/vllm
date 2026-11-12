@@ -48,11 +48,9 @@ class NixlPullConnectorWorker(NixlBaseConnectorWorker):
         """Start loading by triggering non-blocking nixl_xfer.
         We check for these trnxs to complete in each step().
         """
-        # Send heartbeats to P-side engines to keep KV blocks alive while
-        # requests sit in the D scheduler WAITING queue. This runs first so
-        # that every rank keeps its lease model (replicated-PCP ranks > 0
-        # return early below yet still gate their reads) and so that a round
-        # shipped in the same step as a read is credited before the gate.
+        # Heartbeats keep P's blocks alive while requests wait on D. Sent first so
+        # replicated-PCP ranks > 0 (which return early) and this step's reads see
+        # this round's renewals.
         self._send_heartbeats(metadata)
 
         for req_id, meta in metadata.reqs_to_recv.items():
@@ -126,20 +124,13 @@ class NixlPullConnectorWorker(NixlBaseConnectorWorker):
                 self._reqs_to_send[req_id] = expiration_time
 
     def _is_remote_read_expired(self, meta: ReqMeta) -> bool:
-        """Whether the remote's lease on this request's blocks has (nearly) run out.
-
-        P exports the deadline of the lease it grants when a prefill finishes (D
-        exports its turn-2 TTL). Past it the remote has released the blocks and
-        reused them, so the read would load other requests' KV and SSM state
-        without any transport error. The deadline is rebased with the handshake
-        clock offset and extended by the renewals our heartbeats caused
-        (`_record_heartbeat_sent`).
-        """
+        """Whether the remote's lease on the blocks has (nearly) run out, after
+        which they may hold other requests' KV. Uses the exported deadline, rebased
+        by the clock offset and extended by our heartbeats' renewals."""
         remote = meta.remote
         assert remote is not None
         clock_offset = self._engine_clock_offset.get(remote.engine_id)
-        # A full local prefix hit issues no read at all. The deadline may be
-        # absent (older peer, or a router that drops it): read as before.
+        # No read for a full local hit; no deadline (older peer): read as before.
         if (
             not meta.local_physical_block_ids
             or remote.blocks_expiry_time is None
@@ -171,9 +162,7 @@ class NixlPullConnectorWorker(NixlBaseConnectorWorker):
             self._background_nixl_handshake(req_id, engine_id, meta)
             return
         if self._is_remote_read_expired(meta):
-            # One warning per remote engine explains the condition; every
-            # occurrence is counted (Num declined expired reads) and logged at
-            # debug level, as a stalled router can produce these continuously.
+            # Warn once per engine; each decline is counted and debug-logged.
             logger.warning_once(
                 "Declining remote KV reads from engine %s whose lease ran out "
                 "before the read (router held the request longer than "

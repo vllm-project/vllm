@@ -128,10 +128,8 @@ def _share_storage_and_block_stride(caches: list[torch.Tensor]) -> bool:
     return len(block_strides) == len(storage_ptrs) == 1
 
 
-# Upper bound (seconds) of the slack between a modelled remote lease deadline
-# and the moment this worker acts on it (sends a heartbeat that must still find
-# the lease alive, or posts a read). It absorbs the error of the handshake
-# clock-offset estimate and the propagation delay of a notification.
+# Max slack (s) kept before a remote lease deadline when heartbeating or reading:
+# absorbs clock-offset estimation error and notification/read latency.
 _KV_BLOCKS_EXPIRY_SAFETY_MARGIN = 5.0
 
 
@@ -873,9 +871,7 @@ class NixlBaseConnectorWorker:
         self._invalid_engine_backoff: dict[EngineId, tuple[float, float]] = {}
         # Map of engine_id -> clock offset.
         self._engine_clock_offset: dict[EngineId, float] = {}
-        # Remote leases as renewed by the heartbeats this worker sent, so the
-        # pull path knows how long the producer keeps the blocks before it
-        # reads them. Keyed by (remote engine id, remote request id).
+        # (remote engine, remote req id) -> lease deadline renewed by our heartbeats.
         self._remote_leases: dict[tuple[EngineId, str], float] = {}
 
         # Metadata.
@@ -1551,14 +1547,8 @@ class NixlBaseConnectorWorker:
                     try:
                         remote_agents, clock_offset = f.result()
                         self._remote_agents[eid] = remote_agents
-                        # Lease models built before a re-handshake keep the
-                        # previous rebasing; perf_counter is the system-wide
-                        # monotonic clock, so the offsets differ by estimation
-                        # noise only, well inside the safety margin.
                         self._engine_clock_offset[eid] = clock_offset
-                        # Lease deadlines exported by this engine are rebased
-                        # with this offset; log it so the clock assumption
-                        # (see docs/design/nixl_kv_cache_lease.md) is checkable.
+                        # Exported lease deadlines are rebased with this offset.
                         logger.info(
                             "NIXL clock offset to engine %s: %.3fs", eid, clock_offset
                         )
@@ -3769,13 +3759,10 @@ class NixlBaseConnectorWorker:
                     )
             clock_offset = self._engine_clock_offset.get(engine_id)
             if all_sent and clock_offset is not None:
-                # A round that missed a rank is not counted. This avoids relying
-                # on the scheduler-side aggregation that keeps the blocks
-                # allocated until every rank's lease has ended.
+                # Only count rounds that reached every remote rank.
                 for remote_req_id, (expiry, extension) in hb_info.leases.items():
                     if "," in remote_req_id:
-                        # The payload is comma-separated, so the remote cannot
-                        # match this id and renews nothing for it.
+                        # Heartbeats are comma-separated: P can't match this id.
                         continue
                     self._record_heartbeat_sent(
                         (engine_id, remote_req_id),
@@ -3784,8 +3771,7 @@ class NixlBaseConnectorWorker:
                         extension,
                     )
         if metadata.heartbeat_by_engine:
-            # A lease past its deadline no longer matters (the read is declined
-            # either way), and one for a request still heartbeated is renewed.
+            # Expired leases no longer matter: the read is declined either way.
             self._remote_leases = {
                 k: d for k, d in self._remote_leases.items() if d > now
             }
@@ -3793,14 +3779,9 @@ class NixlBaseConnectorWorker:
     def _record_heartbeat_sent(
         self, key: tuple[EngineId, str], now: float, deadline: float, extension: int
     ) -> None:
-        """Apply one heartbeat sent at `now` to our model of the remote's lease
-        (initial deadline `deadline`, our clock), mirroring its
-        `_handle_heartbeat`: a heartbeat that reaches a live lease renews it
-        to `now + extension`. Our send time plus the safety margin stands in
-        for the arrival time, so the model lags the real lease (as long as a
-        notification propagates within the margin). Once a heartbeat finds the
-        lease gone, no later one renews it: the deadline no longer moves while
-        `now` grows."""
+        """Mirror the remote's `_handle_heartbeat` for a heartbeat sent at `now`:
+        a live lease (initial `deadline`, our clock) renews to `now + extension`;
+        a lapsed one stays lapsed, as its deadline no longer moves."""
         lease = self._remote_leases.setdefault(key, deadline)
         if now + self._lease_safety_margin <= lease:
             self._remote_leases[key] = max(lease, now + extension)
