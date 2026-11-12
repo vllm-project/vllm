@@ -57,10 +57,10 @@ models:
     base_flags: "--trust-remote-code --attention-backend TRITON_ATTN --block-size 128 --language-model-only --kv-cache-dtype fp8"
     prefill:
       tp: "--gpu-memory-utilization 0.85 --enforce-eager"
-      ep: "--gpu-memory-utilization 0.85 --enforce-eager"
+      ep: "--gpu-memory-utilization 0.85 --enforce-eager --max-num-batched-tokens 2048"
     decode:
       tp: "--gpu-memory-utilization 0.85"
-      ep: '--gpu-memory-utilization 0.75 --compilation-config {"cudagraph_mode":"FULL_DECODE_ONLY","custom_ops":["+quant_fp8"]}'
+      ep: '--gpu-memory-utilization 0.75 --max-num-batched-tokens 64 --compilation-config {"cudagraph_mode":"FULL_DECODE_ONLY","custom_ops":["+quant_fp8"]}'
 
   - model: DeepSeek-R1-MXFP4
     env:
