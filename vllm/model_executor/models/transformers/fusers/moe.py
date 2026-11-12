@@ -414,6 +414,23 @@ class MoEBlockFuser:
         setattr(moe_block, self.gate_name, gate)
         return gate
 
+    def shared_expert_gate(
+        self, moe_block: nn.Module, prefix: str
+    ) -> ReplicatedLinear | None:
+        """Rebuild the HF shared expert's sigmoid gate, if any, as a
+        `ReplicatedLinear`."""
+        if self.shared_gate_name is None:
+            return None
+        hf_gate = getattr(moe_block, self.shared_gate_name)
+        gate = ReplicatedLinear(
+            hf_gate.in_features,
+            hf_gate.out_features,
+            bias=hf_gate.bias is not None,
+            prefix=maybe_prefix(prefix, self.shared_gate_name),
+        )
+        setattr(moe_block, self.shared_gate_name, gate)
+        return gate
+
     def shared_experts(
         self, moe_block: nn.Module, prefix: str
     ) -> SharedExpertMLP | None:
@@ -422,16 +439,7 @@ class MoEBlockFuser:
         if self.shared_name is None:
             return None
         shared_experts = getattr(moe_block, self.shared_name)
-        gate = None
-        if self.shared_gate_name is not None:
-            hf_gate = getattr(moe_block, self.shared_gate_name)
-            gate = ReplicatedLinear(
-                hf_gate.in_features,
-                hf_gate.out_features,
-                bias=hf_gate.bias is not None,
-                prefix=maybe_prefix(prefix, self.shared_gate_name),
-            )
-            setattr(moe_block, self.shared_gate_name, gate)
+        gate = self.shared_expert_gate(moe_block, prefix)
         return SharedExpertMLP(shared_experts, gate)
 
     def rewrite_forward(self, moe_block: nn.Module) -> None:

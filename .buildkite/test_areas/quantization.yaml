@@ -131,10 +131,12 @@ steps:
       - image-build-amd
       source_file_dependencies:
       - tests/quantization/test_gfx950_moe.py
+      - tests/quantization/test_online_shared_expert_fusion.py
       - tests/quantization/test_rocm_moe.py
       - tests/utils.py
       - vllm/model_executor/models/deepseek_v2.py
       - vllm/model_executor/models/qwen3_moe.py
+      - vllm/model_executor/models/transformers/
       - vllm/model_executor/models/gpt_oss.py
       - vllm/model_executor/model_loader/
       - vllm/model_executor/layers/fused_moe/
@@ -148,6 +150,7 @@ steps:
       commands:
       - pytest -v -s tests/quantization/test_rocm_moe.py
       - pytest -v -s tests/quantization/test_gfx950_moe.py
+      - pytest -v -s tests/quantization/test_online_shared_expert_fusion.py -k transformers_backend
 
 - label: ":nvidia: (H200 MIG 35GB) Quantized Models"
   device: h200_35gb

@@ -498,7 +498,7 @@ class AutoWeightsLoader:
 
 def get_fused_shared_expert_layers(
     module: nn.Module,
-    moe_cls: type[nn.Module],
+    moe_cls: type[nn.Module] | tuple[type[nn.Module], ...],
     enable_eplb: bool = False,
 ) -> frozenset[int]:
     """Resolve fused-shared-expert layer indices from the live module tree.
@@ -578,13 +578,14 @@ def maybe_fuse_shared_experts(
     n_shared_experts: int,
     fused_shared_expert_layers: frozenset[int],
     ckpt_prefix: str = "mlp.shared_experts",
+    experts_prefix: str = "mlp.experts",
 ) -> Iterable[tuple[str, torch.Tensor]]:
     """Route AITER fused-shared-expert checkpoint weights into fused slots.
 
     When AITER fused-shared-experts is active, shared experts are packed into
     the routed expert tensor. The checkpoint stores them under `ckpt_prefix`
     as a single (possibly widened) tensor; this splits it into
-    `n_shared_experts` chunks named `mlp.experts.{n_routed_experts + j}` so
+    `n_shared_experts` chunks named `{experts_prefix}.{n_routed_experts + j}` so
     the `RoutedExperts` loader treats them as extra experts. Yields the input
     unchanged when the fusion is inactive, so callers can wrap unconditionally.
 
@@ -593,6 +594,7 @@ def maybe_fuse_shared_experts(
         n_routed_experts: Number of routed experts; offsets the fused slots.
         n_shared_experts: Number of shared experts packed into the tensor.
         ckpt_prefix: Checkpoint module name of the shared experts.
+        experts_prefix: Checkpoint module name of the routed experts.
         fused_shared_expert_layers: Layer indices whose shared expert was fused
             at construction time, as returned by
             `get_fused_shared_expert_layers`. Only weights belonging to these
@@ -634,7 +636,7 @@ def maybe_fuse_shared_experts(
             else:
                 chunk_weight = loaded_weight[:, sl]
             yield (
-                name.replace(prefix, f"mlp.experts.{n_routed_experts + j}."),
+                name.replace(prefix, f"{experts_prefix}.{n_routed_experts + j}."),
                 chunk_weight,
             )
 

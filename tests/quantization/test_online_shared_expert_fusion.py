@@ -643,6 +643,69 @@ def test_online_quantization(
     ]
 
 
+def test_transformers_backend_fuses_shared_expert(
+    tmp_path: Path,
+    monkeypatch,
+    single_rank_parallel_state,
+    workspace_init,
+) -> None:
+    """The Transformers modeling backend runs the shared expert as an extra routed
+    expert, loaded from the checkpoint's shared expert weights."""
+    from transformers import DeepseekV3Config, DeepseekV3ForCausalLM
+
+    _enable_aiter(monkeypatch, fse=True)
+    config = DeepseekV3Config(
+        hidden_size=256,
+        intermediate_size=512,
+        moe_intermediate_size=256,
+        num_attention_heads=4,
+        num_key_value_heads=4,
+        num_hidden_layers=1,
+        vocab_size=256,
+        q_lora_rank=64,
+        kv_lora_rank=512,
+        qk_nope_head_dim=128,
+        qk_rope_head_dim=64,
+        v_head_dim=128,
+        n_routed_experts=4,
+        num_experts_per_tok=1,
+        n_group=1,
+        topk_group=1,
+        n_shared_experts=1,
+        first_k_dense_replace=0,
+    )
+    hf_model = DeepseekV3ForCausalLM(config).to(torch.bfloat16)
+    # Make routed expert 0 a copy of the shared expert, so the fused slot can be
+    # compared with it after any layout processing.
+    mlp = hf_model.model.layers[0].mlp
+    shared = mlp.shared_experts
+    with torch.no_grad():
+        for param in hf_model.parameters():
+            torch.nn.init.normal_(param, std=0.02)
+        gate_up = torch.cat([shared.gate_proj.weight, shared.up_proj.weight])
+        mlp.experts.gate_up_proj[0] = gate_up
+        mlp.experts.down_proj[0] = shared.down_proj.weight
+    hf_model.save_pretrained(tmp_path)
+
+    model, _ = load_model_without_vllm_runner(
+        str(tmp_path), model_config_kwargs={"model_impl": "transformers"}
+    )
+
+    moe = next(
+        module
+        for module in model.modules()
+        if getattr(module, "is_fused_shared_expert_enabled", False)
+    )
+    assert moe.shared_experts is None
+    routed_experts = moe.experts.routed_experts
+    assert routed_experts.expert_map_manager.num_fused_shared_experts == 1
+    slot = config.n_routed_experts
+    w13, w2 = routed_experts.w13_weight, routed_experts.w2_weight
+    torch.testing.assert_close(w13[slot], w13[0])
+    torch.testing.assert_close(w2[slot], w2[0])
+    assert not torch.equal(w13[slot], w13[1])
+
+
 _MINIMAX_NVFP4_ROUTED_MXFP8_SHARED_QUANT_CONFIG: dict[str, Any] = {
     # Mirrors MiniMax-M3.1's checkpoint: MXFP8 linears and shared experts,
     # compressed-tensors NVFP4 routed experts.
