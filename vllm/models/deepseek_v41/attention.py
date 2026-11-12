@@ -60,6 +60,14 @@ from vllm.model_executor.layers.attention_layer_base import AttentionLayerBase
 from vllm.model_executor.layers.layernorm import RMSNorm
 from vllm.model_executor.layers.quantization import QuantizationConfig
 from vllm.model_executor.models.utils import extract_layer_index
+from vllm.model_executor.warmup.jit_warmup_triton_helper import (
+    DispatchSpec,
+    TritonWarmupTensor,
+    triton_kernel_dispatcher_with_warmup,
+)
+from vllm.models.deepseek_v4.attention import fill_short_context_topk_indices
+from vllm.models.deepseek_v4.common.grouped_wo_a import DeepseekV4GroupedWoA
+from vllm.models.deepseek_v41.common.ops.fused_layout import Q_CHUNK
 from vllm.models.deepseek_v41.common.rope import build_deepseek_v4_rope
 from vllm.models.deepseek_v41.compressor import DeepseekCompressor
 from vllm.platforms import current_platform
@@ -90,9 +98,81 @@ logger = init_logger(__name__)
 # shard per TP rank and all-gathers the result.
 _SHARD_FUSED_WQA_WKV_MIN_TOKENS = 2048
 
+# From this many tokens, eager steps build the padded interleaved Q with
+# _pad_interleaved_q instead of in the fused KV-insert op. Set from a
+# 64-16384-token sweep on B300: by GPU time alone the copy wins from about
+# 256 tokens, but it costs one extra eager launch, and with that launch gap
+# fully exposed the crossover moves to about 2048. This value keeps the
+# large-step win without betting on launch overlap.
+_Q_PAD_COPY_MIN_TOKENS = 2048
+
+
+@triton.jit
+def _pad_interleaved_q_kernel(
+    q_ptr,
+    out_ptr,
+    num_rows,
+    LIVE: tl.constexpr,
+    PAD: tl.constexpr,
+    BLOCK_ROWS: tl.constexpr,
+):
+    # One row per (token, 16-dim chunk): LIVE copied elements, then PAD zeros.
+    pid = tl.program_id(0)
+    rows = pid.to(tl.int64) * BLOCK_ROWS + tl.arange(0, BLOCK_ROWS).to(tl.int64)
+    row_mask = rows[:, None] < num_rows
+    cols = tl.arange(0, LIVE)
+    x = tl.load(q_ptr + rows[:, None] * LIVE + cols[None, :], mask=row_mask)
+    out_rows = out_ptr + rows[:, None] * (LIVE + PAD)
+    tl.store(out_rows + cols[None, :], x, mask=row_mask)
+    pad_cols = tl.arange(0, PAD)
+    tl.store(
+        out_rows + LIVE + pad_cols[None, :],
+        tl.zeros([BLOCK_ROWS, PAD], dtype=x.dtype),
+        mask=row_mask,
+    )
+
+
+def _pad_interleaved_q_warmup_inputs(
+    *,
+    live_heads: int,
+    padded_heads: int,
+    head_dim: int,
+    dtype: torch.dtype,
+) -> dict[str, object]:
+    return dict(
+        q=TritonWarmupTensor(dtype, shape=(1, live_heads, head_dim)),
+        out=TritonWarmupTensor(dtype, shape=(1, padded_heads, head_dim)),
+    )
+
+
+@triton_kernel_dispatcher_with_warmup(
+    kernel=_pad_interleaved_q_kernel,
+    warmup_inputs=_pad_interleaved_q_warmup_inputs,
+)
+def _pad_interleaved_q(q: torch.Tensor, out: torch.Tensor) -> DispatchSpec:
+    """Copy chunk-interleaved `q` [N, H, D] into `out` [N, HP, D].
+
+    Writes the fused KV-insert op's interleaved Q layout: in each 16-dim chunk,
+    the H live heads copied bit for bit, then +0.0 in the HP - H padding slots.
+    Both tensors are dense and share a dtype; `16 * H` and `16 * (HP - H)`
+    must be powers of two.
+    """
+    num_tokens, live_heads, head_dim = q.shape
+    padded_heads = out.shape[1]
+    assert out.shape == (num_tokens, padded_heads, head_dim) and out.dtype == q.dtype
+    num_rows = num_tokens * (head_dim // Q_CHUNK)
+    block_rows = 4
+    return (triton.cdiv(num_rows, block_rows),), dict(
+        num_rows=num_rows,
+        LIVE=live_heads * Q_CHUNK,
+        PAD=(padded_heads - live_heads) * Q_CHUNK,
+        BLOCK_ROWS=block_rows,
+        num_warps=4,
+    )
+
 
 def _replace_layer_index(prefix: str, layer_id: int) -> str:
-    """Swap the layer index inside a ``...layers.<idx>...`` prefix."""
+    """Swap the layer index inside a `...layers.<idx>...` prefix."""
     new_prefix, n = re.subn(r"\.layers\.\d+\.", f".layers.{layer_id}.", prefix)
     assert n == 1, f"Cannot locate layer index in prefix {prefix}"
     return new_prefix
@@ -107,25 +187,6 @@ def _indexer_k_cache_head_dim(index_head_dim: int, use_fp4_kv: bool) -> int:
     # NOTE(yifan): FP8 indexer cache uses the same layout as V3.2:
     # head_dim bytes = 128 fp8 + 4 fp32 scale = 132.
     return index_head_dim + index_head_dim // 128 * 4
-
-
-@triton.jit
-def _fill_short_context_topk_indices(
-    output,
-    positions,
-    TOP_K: tl.constexpr,
-    COMPRESS_RATIO: tl.constexpr,
-    PADDED_TOP_K: tl.constexpr,
-):
-    # small triton kernel that selects every candidate, -1 otherwise
-    row = tl.program_id(0)
-    offsets = tl.arange(0, PADDED_TOP_K)
-    num_compressed = (tl.load(positions + row) + 1) // COMPRESS_RATIO
-    tl.store(
-        output + row * TOP_K + offsets,
-        tl.where(offsets < num_compressed, offsets, -1),
-        mask=offsets < TOP_K,
-    )
 
 
 # Which packed fp8_ds_mla record a V4.1 layer writes. FlashMLA decodes
@@ -144,15 +205,15 @@ def _resolve_dsv4_kv_cache_dtype(
     cache_config: CacheConfig | None,
     packed_kv_cache_dtype: CacheDType | str = "fp8_ds_mla",
 ) -> tuple[CacheDType | str, torch.dtype]:
-    """Map ``(layout, --kv-cache-dtype)`` to ``(cache_dtype_str, torch_dtype)``.
+    """Map `(layout, --kv-cache-dtype)` to `(cache_dtype_str, torch_dtype)`.
 
     Both layouts are paged; they differ in the per-token block format. The
-    packed formats are ``uint8``-backed: ``fp8_ds_mla`` is UE8M0 block-scaled
-    fp8 throughout, ``nvfp4_ds_mla`` keeps that sliding-window record and
-    stores the compressed cache as NVFP4. An unspecific ``--kv-cache-dtype``
-    (``auto`` / ``fp8``) resolves to ``packed_kv_cache_dtype``, the record this
+    packed formats are `uint8`-backed: `fp8_ds_mla` is UE8M0 block-scaled
+    fp8 throughout, `nvfp4_ds_mla` keeps that sliding-window record and
+    stores the compressed cache as NVFP4. An unspecific `--kv-cache-dtype`
+    (`auto` / `fp8`) resolves to `packed_kv_cache_dtype`, the record this
     layer's kernel prefers, and the canonical string is written back onto
-    ``cache_config`` so the page-size specs pick the right per-token slot.
+    `cache_config` so the page-size specs pick the right per-token slot.
     Plain-row backends store each token's KV row in its element dtype: bf16 or
     per-tensor FP8 E4M3.
     """
@@ -185,12 +246,12 @@ def _resolve_dsv4_kv_cache_dtype(
 class DeepseekV4Attention(nn.Module, AttentionLayerBase, ABC):
     """DeepseekV4 MLA attention layer.
 
-    The platform-specific sparse-MLA forward (``forward_mqa`` /
-    ``get_padded_num_q_heads`` / ``_o_proj`` / ``backend_cls``) is provided by a
-    subclass — ``DeepseekV4FlashMLAAttention`` /
-    ``DeepseekV4FlashInferSM120Attention`` /
-    ``DeepseekV4FlashInferMLAAttention`` (CUDA) or
-    ``DeepseekV41ROCMAiterMLAAttention`` (ROCm) — selected by the platform-specific
+    The platform-specific sparse-MLA forward (`forward_mqa` /
+    `get_padded_num_q_heads` / `_o_proj` / `backend_cls`) is provided by a
+    subclass — `DeepseekV4FlashMLAAttention` /
+    `DeepseekV4FlashInferSM120Attention` /
+    `DeepseekV4FlashInferMLAAttention` (CUDA) or
+    `DeepseekV41ROCMAiterMLAAttention` (ROCm) — selected by the platform-specific
     deepseek_v41 model module. The base is never instantiated directly.
     """
 
@@ -212,11 +273,11 @@ class DeepseekV4Attention(nn.Module, AttentionLayerBase, ABC):
 
     @property
     def accepts_unnormed_unroped_query(self) -> bool:
-        """Whether ``forward_mqa``'s ``q`` is the raw ``wq_b`` output.
+        """Whether `forward_mqa`'s `q` is the raw `wq_b` output.
 
         True when the attention kernel applies the Q norm and RoPE itself, and
         reads Q in its own chunk-interleaved layout, so the layer only
-        zero-pads Q to ``padded_heads`` and inserts KV before calling it.
+        zero-pads Q to `padded_heads` and inserts KV before calling it.
         """
         return False
 
@@ -224,7 +285,7 @@ class DeepseekV4Attention(nn.Module, AttentionLayerBase, ABC):
     def packed_kv_cache_dtype(self) -> CacheDType:
         """The packed KV record this layer's kernel prefers.
 
-        What an unspecific ``--kv-cache-dtype`` (``auto`` / ``fp8``) resolves
+        What an unspecific `--kv-cache-dtype` (`auto` / `fp8`) resolves
         to. Mega attention overrides it: its kernel is the one that can read
         an NVFP4 compressed cache.
         """
@@ -236,9 +297,9 @@ class DeepseekV4Attention(nn.Module, AttentionLayerBase, ABC):
         """Q head count the q/output buffers are allocated at.
 
         The layer allocates the q/output buffers at
-        ``[N, get_padded_num_q_heads(n_local_heads), head_dim]``. Must satisfy
-        ``result >= num_heads``. Backends with no padding constraint return
-        ``num_heads``.
+        `[N, get_padded_num_q_heads(n_local_heads), head_dim]`. Must satisfy
+        `result >= num_heads`. Backends with no padding constraint return
+        `num_heads`.
         """
         raise NotImplementedError
 
@@ -250,7 +311,7 @@ class DeepseekV4Attention(nn.Module, AttentionLayerBase, ABC):
         positions: torch.Tensor,
         output: torch.Tensor,
     ) -> None:
-        """Platform-specific sparse MLA forward; writes attention into ``output``."""
+        """Platform-specific sparse MLA forward; writes attention into `output`."""
         raise NotImplementedError
 
     @abstractmethod
@@ -259,7 +320,7 @@ class DeepseekV4Attention(nn.Module, AttentionLayerBase, ABC):
         attn_out: "torch.Tensor | QuantizedActivation",
         positions: torch.Tensor,
     ) -> torch.Tensor:
-        """Project whatever ``_alloc_attn_out`` produced through wo_a and wo_b.
+        """Project whatever `_alloc_attn_out` produced through wo_a and wo_b.
 
         Takes the buffer whole, so each layer owns the shape it allocated: the
         bf16 layers slice off their padding heads and apply the inverse RoPE,
@@ -387,9 +448,10 @@ class DeepseekV4Attention(nn.Module, AttentionLayerBase, ABC):
         )
 
         self.kv_norm = RMSNorm(self.head_dim, self.eps)
-        self.wo_a = ColumnParallelLinear(
+        self.wo_a = DeepseekV4GroupedWoA(
             self.n_heads * self.head_dim // self.n_groups,
             self.n_groups * self.o_lora_rank,
+            n_groups=self.n_groups,
             bias=False,
             quant_config=quant_config,
             return_bias=False,
@@ -490,13 +552,6 @@ class DeepseekV4Attention(nn.Module, AttentionLayerBase, ABC):
                 candidate_write=is_candidate_source,
             )
 
-        self._prepare_and_attn_fn = self._prepare_and_attn
-        if not vllm_config.use_v2_model_runner:
-            # MRV1's piecewise capture only tolerates the wide eager region: with
-            # the narrow one the attention input preparation stays in the captured
-            # graph and MRV1 produces garbage (#51430).
-            self._prepare_and_attn_fn = self._prepare_and_attn_eager
-
         self.aux_stream_list = aux_stream_list
         # [0]: GEMM start / post-GEMM event0. [1..3]: GEMM done events;
         # [1] doubles as post-GEMM event1. Reuse is safe: GEMM fully joins
@@ -536,13 +591,6 @@ class DeepseekV4Attention(nn.Module, AttentionLayerBase, ABC):
             )
 
         swa_bounded_replay = cache_config.swa_bounded_replay
-        if swa_bounded_replay and not vllm_config.use_v2_model_runner:
-            logger.warning_once(
-                "SWA bounded replay needs model runner V2 (only it skips the "
-                "paged-KV writes of replayed tokens); the sliding-window cache "
-                "takes part in prefix caching instead."
-            )
-            swa_bounded_replay = False
         if (
             swa_bounded_replay
             and vllm_config.parallel_config.prefill_context_parallel_size > 1
@@ -550,19 +598,18 @@ class DeepseekV4Attention(nn.Module, AttentionLayerBase, ABC):
         ):
             logger.warning_once("SWA bounded replay with PCP requires prefix caching.")
             swa_bounded_replay = False
-        # CDNA4 (MI350/MI355, gfx950) is where prefix-cache SWA replay is
-        # validated. The AITER sparse-MLA path and the default Triton gather
-        # path both clamp to replay_start. CDNA3 and other ROCm archs have
-        # not been validated, so the sliding-window cache stays in the prefix
-        # cache there. The CDNA version is imported only on ROCm: loading the
-        # ROCm platform resolves the GPU arch and fails when no GPU is visible.
+        # Replay relies on the AITER sparse-MLA and Triton gather paths
+        # clamping to replay_start, validated on a compatible CDNA version
+        # only. The import is ROCm-only: it resolves the GPU arch and fails
+        # with no GPU visible.
         if swa_bounded_replay and current_platform.is_rocm():
             from vllm.platforms.rocm import get_cdna_version
 
-            if get_cdna_version() != 4:
+            if get_cdna_version() not in (3, 4):
                 logger.warning_once(
-                    "Prefix-cache SWA replay is only enabled on ROCm CDNA4; the "
-                    "sliding-window cache takes part in prefix caching instead."
+                    "Prefix-cache SWA replay is only enabled on a compatible "
+                    "ROCm CDNA version; the sliding-window cache takes part "
+                    "in prefix caching instead."
                 )
                 swa_bounded_replay = False
         self.swa_cache_layer = DeepseekV4SWACache(
@@ -620,6 +667,15 @@ class DeepseekV4Attention(nn.Module, AttentionLayerBase, ABC):
         else:
             self.compressed_cache_prefix = None
 
+        # _pad_interleaved_q needs power-of-two chunk widths: 32 live heads of
+        # 64 (e.g. TP2) qualify, 16 or 8 (768 or 896 pad columns) do not.
+        self._pads_q_by_copy = (
+            self.accepts_unnormed_unroped_query
+            and self.n_local_heads == 32
+            and self.padded_heads == 64
+            and self.max_num_batched_tokens >= _Q_PAD_COPY_MIN_TOKENS
+        )
+
         if vllm_config.kernel_config.enable_jit_warmup:
             from vllm.v1.attention.backends.mla.sparse_swa import (
                 _COMPUTE_PREFILL_METADATA_KERNEL,
@@ -631,6 +687,14 @@ class DeepseekV4Attention(nn.Module, AttentionLayerBase, ABC):
                 window_size=self.window_size,
                 block_size=self.swa_cache_layer.block_size,
             )
+
+            if self._pads_q_by_copy:
+                _pad_interleaved_q.register_warmup(
+                    live_heads=self.n_local_heads,
+                    padded_heads=self.padded_heads,
+                    head_dim=self.head_dim,
+                    dtype=vllm_config.model_config.dtype,
+                )
 
             if self.compress_ratio > 1:
                 from vllm.v1.attention.backends.mla.compressor_utils import (
@@ -692,7 +756,7 @@ class DeepseekV4Attention(nn.Module, AttentionLayerBase, ABC):
         )
         qr, qr_scale, kv = self._split_qkv_and_norm(qr_kv)
 
-        self._prepare_and_attn_fn(
+        self._prepare_and_attn(
             hidden_states,
             qr,
             kv,
@@ -705,7 +769,7 @@ class DeepseekV4Attention(nn.Module, AttentionLayerBase, ABC):
         return self._o_proj(attn_out, positions)
 
     def forward_kv(self, positions: torch.Tensor, hidden_states: torch.Tensor) -> None:
-        """Write only the KV ``forward`` writes (SWA KV, compressed KV, index K),
+        """Write only the KV `forward` writes (SWA KV, compressed KV, index K),
         skipping wq_b, the indexer's top-k and attention."""
         attn_metadata = get_forward_context().attn_metadata
         qr_kv, kv_score, _ = self._run_parallel_input_projections(hidden_states)
@@ -748,7 +812,7 @@ class DeepseekV4Attention(nn.Module, AttentionLayerBase, ABC):
                 )
 
     def bind_gemm_rs(self) -> None:
-        """Fuse ``wo_b`` with the sequence-parallel TP reduce-scatter.
+        """Fuse `wo_b` with the sequence-parallel TP reduce-scatter.
 
         The decoder layer calls this after the model initialized the
         process-wide GEMM-RS workspace and before weights load: the
@@ -768,10 +832,10 @@ class DeepseekV4Attention(nn.Module, AttentionLayerBase, ABC):
             gemm_rs.warn_incompatible_projection()
 
     def _wo_b_proj(self, z: torch.Tensor | QuantizedActivation) -> torch.Tensor:
-        """Apply ``wo_b``; with GEMM-RS bound, also reduce-scatter the result.
+        """Apply `wo_b`; with GEMM-RS bound, also reduce-scatter the result.
 
-        Every ``_o_proj`` implementation projects through this so the decoder
-        layer sees one contract: when ``gemm_rs`` is bound the output is
+        Every `_o_proj` implementation projects through this so the decoder
+        layer sees one contract: when `gemm_rs` is bound the output is
         already the local sequence-parallel shard, otherwise it is the
         unreduced TP partial.
         """
@@ -785,7 +849,7 @@ class DeepseekV4Attention(nn.Module, AttentionLayerBase, ABC):
     def _alloc_attn_out(
         self, num_tokens: int, hidden_states: torch.Tensor
     ) -> "torch.Tensor | QuantizedActivation":
-        """The buffer ``forward_mqa`` fills, per the interface contract."""
+        """The buffer `forward_mqa` fills, per the interface contract."""
         return torch.empty(
             (num_tokens, self.padded_heads, self.head_dim),
             dtype=hidden_states.dtype,
@@ -833,34 +897,6 @@ class DeepseekV4Attention(nn.Module, AttentionLayerBase, ABC):
             self.eps,
         )
         return qr, None, kv
-
-    @eager_break_during_capture
-    def _prepare_and_attn_eager(
-        self,
-        hidden_states: torch.Tensor,
-        qr: torch.Tensor | QuantizedActivation,
-        kv: torch.Tensor,
-        qr_scale: torch.Tensor | None,
-        kv_score: torch.Tensor,
-        indexer_weights: torch.Tensor,
-        positions: torch.Tensor,
-        attn_out: "torch.Tensor | QuantizedActivation",
-    ) -> None:
-        """Wide eager region: the whole of ``_prepare_and_attn`` runs eagerly.
-
-        The nested ``_sparse_indexer_and_attn`` break runs inline, since
-        ``add_eager`` clears ``_capturing`` before invoking this.
-        """
-        self._prepare_and_attn(
-            hidden_states,
-            qr,
-            kv,
-            qr_scale,
-            kv_score,
-            indexer_weights,
-            positions,
-            attn_out,
-        )
 
     def _prepare_and_attn(
         self,
@@ -1007,11 +1043,7 @@ class DeepseekV4Attention(nn.Module, AttentionLayerBase, ABC):
             compressor = self.compressor
 
             def compressor_kv_score() -> torch.Tensor:
-                return torch.mm(
-                    hidden_states,
-                    compressor.fused_wkv_wgate.weight.T,
-                    out_dtype=torch.float32,
-                )
+                return compressor.fused_wkv_wgate(hidden_states)
 
             aux_fns[0] = compressor_kv_score
 
@@ -1072,12 +1104,14 @@ class DeepseekV4Attention(nn.Module, AttentionLayerBase, ABC):
             dict[str, AttentionMetadata] | list[dict[str, AttentionMetadata]] | None
         ),
     ) -> torch.Tensor:
-        """Ready ``q`` for the attention kernel and publish this step's KV.
+        """Ready `q` for the attention kernel and publish this step's KV.
 
-        One launch does both. With ``accepts_unnormed_unroped_query`` the
+        One launch does both. With `accepts_unnormed_unroped_query` the
         attention kernel norms and rotates Q itself and reads it in its own
         chunk-interleaved layout, so the Q half of the launch is a zero-pad to
-        ``padded_heads`` -- and nothing at all once the shard is that wide.
+        `padded_heads` -- and nothing at all once the shard is that wide.
+        On large eager steps of a `_pads_q_by_copy` layer, a KV-only launch
+        leaves that pad to `_pad_interleaved_q`.
         """
         if not isinstance(attn_metadata, dict):
             # Profile run: kernel doesn't fire; produce a padded tensor so
@@ -1143,6 +1177,12 @@ class DeepseekV4Attention(nn.Module, AttentionLayerBase, ABC):
                 and self.n_local_heads == self.padded_heads
                 else self.padded_heads
             )
+            # Captured graphs keep the fused pad.
+            copy_q = (
+                self._pads_q_by_copy
+                and q.shape[0] >= _Q_PAD_COPY_MIN_TOKENS
+                and not torch.cuda.is_current_stream_capturing()
+            )
             q_padded = torch.ops._C.fused_deepseek_v4_qnorm_rope_kv_rope_quant_insert(
                 q,
                 kv,
@@ -1150,7 +1190,7 @@ class DeepseekV4Attention(nn.Module, AttentionLayerBase, ABC):
                 slot_mapping,
                 positions,
                 cos_sin_cache,
-                pad_to,
+                0 if copy_q else pad_to,
                 self.eps,
                 swa_metadata.block_size,
                 False,  # apply_q_norm: qr is normed before wq_b
@@ -1158,6 +1198,10 @@ class DeepseekV4Attention(nn.Module, AttentionLayerBase, ABC):
                 not self.accepts_unnormed_unroped_query,  # apply_q_rope
                 self.accepts_unnormed_unroped_query,  # is_q_interleaved
             )
+            if copy_q:
+                out = q.new_empty((q.shape[0], self.padded_heads, q.shape[2]))
+                _pad_interleaved_q(q, out)
+                return out
             return q if pad_to == 0 else q_padded
 
         assert not self.accepts_unnormed_unroped_query, (
@@ -1223,6 +1267,7 @@ class DeepseekV4Attention(nn.Module, AttentionLayerBase, ABC):
         return MLAAttentionSpec(
             block_size=vllm_config.cache_config.block_size,
             num_kv_heads=1,
+            max_tp_shards=1,
             head_size=self.head_dim,
             dtype=torch.uint8 if uses_fp8_ds_mla_layout else self.kv_cache_torch_dtype,
             tokens_per_state=self.compress_ratio,
@@ -1293,6 +1338,7 @@ class DeepseekV4IndexerCache(torch.nn.Module, AttentionLayerBase):
         return MLAAttentionSpec(
             block_size=self.cache_config.block_size,
             num_kv_heads=1,
+            max_tp_shards=1,
             head_size=self.head_dim,
             dtype=self.dtype,
             tokens_per_state=self.compress_ratio,
@@ -1332,16 +1378,16 @@ class DeepseekV4IndexerCache(torch.nn.Module, AttentionLayerBase):
 class DeepseekV4Indexer(nn.Module):
     """DeepSeek V4.1 sparse-attention indexer.
 
-    Exists only on ``index_source_layer_ids``; consumers reuse the topk
-    indices it publishes into the shared ``topk_indices_buffer``. Unlike v4.0
+    Exists only on `index_source_layer_ids`; consumers reuse the topk
+    indices it publishes into the shared `topk_indices_buffer`. Unlike v4.0
     the index key is derived from the kv-source layer's compressor latent
-    (``k = k_norm(wk(latent))``, ``owns_k``) instead of an indexer-local
+    (`k = k_norm(wk(latent))`, `owns_k`) instead of an indexer-local
     compressor over hidden states, so there is no hidden-state K GEMM here.
     Non-owning index sources share the kv source's paged K cache.
 
-    Two-level candidate filtering: the indexer at ``candidate_source_layer_id``
-    additionally publishes the top ``candidate_topk_blocks`` blocks of
-    ``candidate_block_size`` compressed positions (``candidate_write``);
+    Two-level candidate filtering: the indexer at `candidate_source_layer_id`
+    additionally publishes the top `candidate_topk_blocks` blocks of
+    `candidate_block_size` compressed positions (`candidate_write`);
     later indexers mask their scores to those blocks before their own top-k.
     """
 
@@ -1493,7 +1539,7 @@ class DeepseekV4Indexer(nn.Module):
     ) -> None:
         """Turn the compressor's pre-RoPE latent into paged index keys.
 
-        ``k_norm(wk(latent))`` at group-boundary tokens, RoPE'd at the group
+        `k_norm(wk(latent))` at group-boundary tokens, RoPE'd at the group
         position and MXFP4/FP8-quantized into the indexer K cache.
         """
         attn_metadata = get_forward_context().attn_metadata
@@ -1530,7 +1576,7 @@ class DeepseekV4Indexer(nn.Module):
         """Build the indexer queries: wq_b over qr plus fused RoPE/quant.
 
         Split out so the ROCm layer can schedule it apart from
-        ``_produce_k`` (e.g. on an aux stream once ``qr`` is ready).
+        `_produce_k` (e.g. on an aux stream once `qr` is ready).
         """
         q = self._wq_b_proj(qr, qr_scale)
         q = q.view(-1, self.n_head, self.head_dim)
@@ -1583,7 +1629,7 @@ class DeepseekV4Indexer(nn.Module):
                     + indexer_metadata.num_prefill_tokens
                 )
                 if num_tokens > 0:
-                    _fill_short_context_topk_indices[(num_tokens,)](
+                    fill_short_context_topk_indices[(num_tokens,)](
                         self.topk_indices_buffer,
                         positions,
                         TOP_K=self.topk_tokens,
@@ -1610,3 +1656,18 @@ class DeepseekV4Indexer(nn.Module):
         # ReplicatedLinear returns (output, bias); bias is None.
         q, _ = self.wq_b(qr)
         return q
+
+
+def autotune_indexer_wq_b(model: nn.Module, num_tokens: int) -> None:
+    """Short-context dummy runs skip wq_b, so tune it directly."""
+    for module in model.modules():
+        if isinstance(module, DeepseekV4Indexer):
+            # Run every wq_b: FlashInfer keys on op, runner, shapes and dtype,
+            # and skips profiling on a cache hit, so duplicates are cheap.
+            qr = torch.randn(
+                num_tokens,
+                module.q_lora_rank,
+                dtype=module.vllm_config.model_config.dtype,
+                device=next(module.weights_proj.parameters()).device,
+            )
+            module.wq_b(qr)

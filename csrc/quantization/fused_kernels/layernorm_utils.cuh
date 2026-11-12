@@ -537,11 +537,13 @@ __device__ void norm_and_quant(
     } else {
       scale_val = *scale;
     }
+    float y[VEC_SIZE];
 #pragma unroll
     for (int j = 0; j < VEC_SIZE; ++j) {
-      out.val[j] = ScaledQuant<scalar_out_t, mul_by_recip>::quant_fn(
-          static_cast<scalar_t>(x.val[j] * rms) * w.val[j], scale_val);
+      y[j] = static_cast<scalar_t>(x.val[j] * rms) * w.val[j];
     }
+    ScaledQuant<scalar_out_t, mul_by_recip>::template quant_vec_fn<VEC_SIZE>(
+        out.val, y, scale_val);
     vec_output[i] = out;
   }
 }

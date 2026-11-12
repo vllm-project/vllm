@@ -1,7 +1,7 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
-"""Tests for :class:`ParserEngine` — the glue layer between
-:class:`StreamingParserEngine` events and the serving layer's
+"""Tests for `ParserEngine` — the glue layer between
+`StreamingParserEngine` events and the serving layer's
 DeltaMessage / ExtractedToolCallInformation protocol.
 """
 
@@ -1196,12 +1196,12 @@ class _ReasoningOnlyDelegating(DelegatingParser):
 
 class TestReasoningOnlyEndTokenLeak:
     """When there is no tool parser, the content passthrough must not
-    re-emit the end-of-reasoning marker (e.g. ``</think>``) as content.
+    re-emit the end-of-reasoning marker (e.g. `</think>`) as content.
 
-    Regression test for the scenario where ``</think>`` arrives as a
+    Regression test for the scenario where `</think>` arrives as a
     single-token delta: the engine correctly consumes it (emitting
     REASONING_END with no content), but the content passthrough
-    fired because ``delta_message is None`` and reasoning had just ended.
+    fired because `delta_message is None` and reasoning had just ended.
     """
 
     def test_think_end_not_leaked_as_content(self):
@@ -1317,10 +1317,10 @@ class TestSkipToolSpanForwarding:
     """Reasoning (skip_tool_parsing) pass: tool syntax is forwarded verbatim
     for the tool pass, and the lexical passthrough flag never goes stale.
 
-    ``_combined_config`` defines ``</tool_call>`` only from ``TOOL_ARGS``; the
-    skip pass stays in ``CONTENT``, so the closer arrives with no current-state
+    `_combined_config` defines `</tool_call>` only from `TOOL_ARGS`; the
+    skip pass stays in `CONTENT`, so the closer arrives with no current-state
     transition. It must still be forwarded and must clear the span — otherwise
-    ``_in_skipped_tool_span`` stays True for the rest of the request. This is the
+    `_in_skipped_tool_span` stays True for the rest of the request. This is the
     shape of every current engine grammar whose wrapper closer has no CONTENT
     transition (qwen3, deepseek, glm47_moe, nemotron_v3).
     """
@@ -1360,9 +1360,9 @@ class TestSkipToolSpanForwarding:
         that also closes text blocks must be consumed, not leaked as content.
 
         The config combines the two real patterns — a qwen3-style tool-only
-        closer with no CONTENT transition (``</a>``) and an inkling-style token
-        that closes both tool and text blocks (``</b>``). A stale span would
-        route the trailing ``</b>`` down the forward path and leak it.
+        closer with no CONTENT transition (`</a>`) and an inkling-style token
+        that closes both tool and text blocks (`</b>`). A stale span would
+        route the trailing `</b>` down the forward path and leak it.
         """
         ts, close_a, close_b = "<tc>", "</a>", "</b>"
         cfg = ParserEngineConfig(
@@ -1707,9 +1707,9 @@ class TestArgDeltaWithConverter:
 
 
 def _extender_config(structural: frozenset[str] | None = None) -> ParserEngineConfig:
-    """``_kv_converter`` plus an extender for its trailing ``k=v`` record,
+    """`_kv_converter` plus an extender for its trailing `k=v` record,
     which is open until whitespace follows it; mirrors
-    ``_glm47_arg_value_extender``."""
+    `_glm47_arg_value_extender`."""
 
     def factory(raw_args: str):
         if re.search(r"\w+=\S+$", raw_args) is None:
@@ -1730,12 +1730,12 @@ def _extender_config(structural: frozenset[str] | None = None) -> ParserEngineCo
 
 
 class TestArgValueExtender:
-    """Engine contract for ``ParserEngineConfig.arg_value_extender``."""
+    """Engine contract for `ParserEngineConfig.arg_value_extender`."""
 
     def test_live_extender_sees_deltas_without_structural_chars(self):
         """A delta without structural chars must still reach the live
-        extender: gating it out drops ``el`` from the streamed value and the
-        next accepted delta ``l=`` lands on the gap, so the converted JSON
+        extender: gating it out drops `el` from the streamed value and the
+        next accepted delta `l=` lands on the gap, so the converted JSON
         no longer extends what was streamed."""
         engine = _make_engine(_extender_config(structural=frozenset("= ")))
         assert _run_streaming_tool(engine, "f", ["a", "=h", "el", "l=", "o "]) == {
@@ -2080,8 +2080,8 @@ class TestDropSpecialTokens:
 
 class TestTruncatedToolOpenerStreamParity:
     """Regression tests for #47137: when generation terminates inside a
-    ``<tool_call>`` opener that has not been promoted to a tool call
-    (via ``max_tokens`` or a ``stop`` string), the non-streaming path
+    `<tool_call>` opener that has not been promoted to a tool call
+    (via `max_tokens` or a `stop` string), the non-streaming path
     must drop the incomplete markup, matching the streaming path."""
 
     _QWEN3_VOCAB = {
