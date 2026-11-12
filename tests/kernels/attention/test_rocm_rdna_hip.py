@@ -429,6 +429,16 @@ def test_rdna_valid_for_any_batch():
     assert 512 in backend.get_supported_head_sizes()
 
 
+def test_rdna_prefers_built_page_size():
+    """Runs without --block-size get the pages the kernels are built for."""
+    from vllm.config.cache import CacheConfig
+    from vllm.v1.attention.backends import rocm_rdna_attn as rdna
+
+    backend = rdna.RocmRdnaAttentionBackend
+    assert backend.get_preferred_block_size(CacheConfig.DEFAULT_BLOCK_SIZE) == 16
+    assert any(v.page_size == 16 for v in hip.variants())
+
+
 # ---------------------------------------------------------------- prefill
 
 
