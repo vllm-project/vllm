@@ -14,6 +14,7 @@ None; `Step.layer(i)` is the kernel callable of mono layer i (None for vLLM's la
 from __future__ import annotations
 
 import collections
+import time
 from collections.abc import Callable
 from functools import partial
 from typing import NamedTuple
@@ -38,6 +39,8 @@ logger = init_logger(__name__)
 # that run vLLM's layers. Under FULL graphs plan() runs at capture only, so a replay
 # is counted by the device step counter instead (SpecializedDecode.kernel_steps).
 counters: collections.Counter[str] = collections.Counter()
+# rank 0 logs the kernel step counters at most this often (a device read)
+STEP_REPORT_S = 60.0
 
 # (positions, hidden_states, residual) -> (hidden_states, residual)
 LayerKernel = Callable[
@@ -92,6 +95,7 @@ class SpecializedDecode:
         # (data_ptr, numel) of the first mono layer's KV cache prepare_kv bound
         self._kv: tuple[int, int] | None = None
         self.watch = self._poll_watch()
+        self._next_report = time.monotonic() + STEP_REPORT_S
         logger.info(
             "GLM-5.2 specialized decode: layers %d..%d, batch sizes %s; larger batches "
             "run vLLM's decode",
@@ -183,3 +187,22 @@ class SpecializedDecode:
         under graph replay). Raises on expired polls."""
         if self.watch is not None and not torch.cuda.is_current_stream_capturing():
             self.watch.after_step()
+        self._report_steps()
+
+    def _report_steps(self) -> None:
+        """Rank 0, at most every STEP_REPORT_S: the kernel steps run per batch size
+        (device counters, graph replays included) and the steps plan() sent to vLLM's
+        layers, by reason (plan() runs for eager steps and at capture only)."""
+        if self.mono.rank != 0 or torch.cuda.is_current_stream_capturing():
+            return
+        now = time.monotonic()
+        if now < self._next_report:
+            return
+        self._next_report = now + STEP_REPORT_S
+        prefix = "vllm_path:"
+        logger.info(
+            "GLM-5.2 specialized decode: kernel steps per batch size %s; vLLM-path "
+            "plans %s",
+            self.kernel_steps(),
+            {k[len(prefix) :]: v for k, v in counters.items() if k.startswith(prefix)},
+        )

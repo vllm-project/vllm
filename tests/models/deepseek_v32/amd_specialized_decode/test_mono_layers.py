@@ -518,6 +518,30 @@ def test_rope_tables_and_layer_metadata(monkeypatch):
         assert ML.layer_metadata(name) == want
 
 
+def test_step_report(monkeypatch):
+    """Rank 0 logs the kernel step counters and the vLLM-path plans at most once
+    every STEP_REPORT_S; other ranks never do."""
+    logs = []
+    monkeypatch.setattr(D, "logger", NS(info=lambda *a: logs.append(a)))
+    monkeypatch.setattr(torch.cuda, "is_current_stream_capturing", lambda: False)
+    clock = {"t": 100.0}
+    monkeypatch.setattr(D.time, "monotonic", lambda: clock["t"])
+    obj = D.SpecializedDecode.__new__(D.SpecializedDecode)
+    obj.watch, obj._next_report = None, 100.0 + D.STEP_REPORT_S
+    obj.mono = NS(rank=0, kernel_steps=lambda: {1: 7, 2: 3})
+    D.counters.clear()
+    D.counters.update({"mono_steps": 4, "vllm_path:prefill_or_mixed": 2})
+    obj.after_step()
+    assert logs == []
+    clock["t"] += D.STEP_REPORT_S
+    obj.after_step()
+    obj.after_step()
+    assert len(logs) == 1 and logs[0][1:] == ({1: 7, 2: 3}, {"prefill_or_mixed": 2})
+    obj.mono.rank, clock["t"] = 1, clock["t"] + D.STEP_REPORT_S
+    obj.after_step()
+    assert len(logs) == 1
+
+
 def test_op_fp8_scale_formats(import_kernel):
     """The op packs per-row ([rows]) or block ([rows / R, K / 128], uv R = 64) F32
     scales, checks their shape, and builds the kernel for one format only."""

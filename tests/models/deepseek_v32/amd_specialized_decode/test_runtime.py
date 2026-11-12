@@ -288,7 +288,7 @@ def test_poll_watch(monkeypatch):
     monkeypatch.setattr(torch.cuda, "is_current_stream_capturing", lambda: False)
     for mode in ("raise", "off"):
         obj = D.SpecializedDecode.__new__(D.SpecializedDecode)
-        obj.mono, obj.cfg = object(), DecodeConfig(failstop=mode)
+        obj.mono, obj.cfg = NS(rank=1), DecodeConfig(failstop=mode)
         obj.watch = obj._poll_watch()
         obj.after_step()
         if mode == "off":
