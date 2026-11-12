@@ -41,6 +41,28 @@ def test_cpu_offload(disable_pin_memory, disable_uva):
     )
 
 
+def test_cpu_offload_online_quantization():
+    """Serving with online quantization and CPU offloading must not raise.
+
+    Online quantization creates its weights on the meta device, which the
+    offloader leaves for the online method to materialize: online-quantized
+    weights are not offloaded (see `test_uva_offloader_skips_meta_weights`).
+    """
+    compare_two_settings(
+        model="hmellor/tiny-random-LlamaForCausalLM",
+        arg1=["--quantization", "fp8_per_tensor"],
+        arg2=["--quantization", "fp8_per_tensor", "--cpu-offload-gb", "1"],
+    )
+
+
+def test_uva_offloader_skips_meta_weights():
+    """Weights online quantization will create are not offloaded."""
+    offloader = UVAOffloader(cpu_offload_max_bytes=1 << 30)
+    layer = nn.Linear(8, 8, device="meta")
+    offloader.wrap_modules(iter([layer]))
+    assert layer.weight.is_meta and offloader.cpu_offload_bytes == 0
+
+
 @pytest.mark.parametrize(
     ("offload_kwargs", "offloader_type"),
     [

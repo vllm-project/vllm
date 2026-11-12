@@ -46,6 +46,14 @@ vllm serve Qwen/Qwen3.5-35B-A3B --quantization mxfp4 \
 vllm serve Qwen/Qwen3.6-35B-A3B --quantization lut_b_moe
 ```
 
+!!! note
+    `--cpu-offload-gb` does not offload the weights that online quantization
+    creates: they stay in GPU memory. Only layers that are not quantized online
+    are offloaded. When `--cpu-offload-gb` offloads the MoE experts
+    (`--cpu-offload-params` empty or matching them), `nvfp4_per_token` stages
+    the full-precision experts on the CPU and moves them to the GPU one expert
+    at a time to quantize them.
+
 ## Supported Schemes
 
 | Scheme | Weight recipe | Activation recipe | Notes |
