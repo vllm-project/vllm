@@ -158,7 +158,7 @@ def _make_mla_single_split_case(dtype, fp8_kv=False):
     }
 
 
-def _run_mla_single_split_legacy(case):
+def _run_mla_single_split_legacy(case, sliding_window=0):
     """Run the pre-optimization two-stage path as an exact oracle."""
     o_ref = torch.empty_like(case["o"])
     lse_ref = torch.empty_like(case["lse"])
@@ -177,6 +177,7 @@ def _run_mla_single_split_legacy(case):
         case["scale"],
         case["scale"],
         is_mla=True,
+        sliding_window=sliding_window,
         o=o_ref,
         lse=lse_ref,
         write_direct=False,
@@ -189,11 +190,12 @@ def _run_mla_single_split_legacy(case):
         case["v"],
         case["seq_lens"],
         1,
+        sliding_window=sliding_window,
     )
     return o_ref, lse_ref
 
 
-def _run_mla_single_split_direct(case):
+def _run_mla_single_split_direct(case, sliding_window=0):
     decode_attention_fwd(
         case["q"],
         case["kv"],
@@ -209,18 +211,20 @@ def _run_mla_single_split_direct(case):
         k_scale=case["scale"],
         v_scale=case["scale"],
         is_mla=True,
+        sliding_window=sliding_window,
         write_direct=True,
     )
 
 
 @pytest.mark.parametrize("dtype", [torch.bfloat16, torch.float16])
 @pytest.mark.parametrize("fp8_kv", [False, True])
-def test_mla_single_split_skips_stage2(monkeypatch, dtype, fp8_kv):
+@pytest.mark.parametrize("sliding_window", [0, 5, 64])
+def test_mla_single_split_skips_stage2(monkeypatch, dtype, fp8_kv, sliding_window):
     """A single MLA split needs no second-stage identity reduction."""
     if fp8_kv and not current_platform.has_device_capability(89):
         pytest.skip("FP8 KV cache requires compute capability 8.9 or newer")
     case = _make_mla_single_split_case(dtype, fp8_kv)
-    o_ref, lse_ref = _run_mla_single_split_legacy(case)
+    o_ref, lse_ref = _run_mla_single_split_legacy(case, sliding_window)
 
     stage2_calls = 0
     original_stage2 = triton_decode_attention._decode_softmax_reducev_fwd
@@ -233,7 +237,7 @@ def test_mla_single_split_skips_stage2(monkeypatch, dtype, fp8_kv):
     monkeypatch.setattr(
         triton_decode_attention, "_decode_softmax_reducev_fwd", count_stage2
     )
-    _run_mla_single_split_direct(case)
+    _run_mla_single_split_direct(case, sliding_window)
 
     assert stage2_calls == 0
     assert torch.equal(case["o"][0], o_ref[0])
