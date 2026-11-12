@@ -296,16 +296,27 @@ async def test_get_bytes_allows_body_within_limit(
 
 @pytest.mark.asyncio
 async def test_requests_do_not_retain_clients_when_reuse_is_disabled(
-    local_media_server: str,
+    monkeypatch: pytest.MonkeyPatch, local_media_server: str
 ) -> None:
     connection = HTTPConnection(reuse_client=False)
     url = f"{local_media_server}/small"
+    sessions: list[aiohttp.ClientSession] = []
+    client_session = aiohttp.ClientSession
+
+    def make_client_session(*args, **kwargs) -> aiohttp.ClientSession:
+        session = client_session(*args, **kwargs)
+        sessions.append(session)
+        return session
+
+    monkeypatch.setattr("vllm.connections.aiohttp.ClientSession", make_client_session)
 
     assert connection.get_bytes(url) == _SMALL_BODY
     assert await connection.async_get_bytes(url) == _SMALL_BODY
 
     assert connection._sync_client is None
     assert connection._async_client is None
+    assert len(sessions) == 1
+    assert sessions[0].closed
 
 
 @pytest.mark.asyncio
