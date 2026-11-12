@@ -8,15 +8,16 @@ import numpy as np
 import pytest
 import torch
 
-from vllm.v1.spec_decode.fly import compute_fly_entropy
 from vllm.v1.watermarking import GumbelWatermarker
 from vllm.v1.watermarking.spec_decode import watermarked_rejection_sample
 from vllm.v1.worker.gpu.sample.gumbel import gumbel_sample
 from vllm.v1.worker.gpu.sample.watermark import philox_gumbel_sample
 from vllm.v1.worker.gpu.spec_decode.draft_logits import DraftLogitsCache
+from vllm.v1.worker.gpu.spec_decode.fly import compute_fly_entropy
 from vllm.v1.worker.gpu.spec_decode.rejection_sampler import (
     RejectionSampler,
     gather_draft_sampled,
+    unconditional_to_conditional_rates,
 )
 from vllm.v1.worker.gpu.spec_decode.rejection_sampler_utils import (
     rejection_sample,
@@ -873,8 +874,6 @@ def test_synthetic_rejection_sample(
     is P(all draft steps 0..i accepted) = product(conditional_rates[0:i+1]).
     This is approximately mean(num accepted >= i + 1) over many trials.
     """
-    from vllm.v1.spec_decode.utils import unconditional_to_conditional_rates
-
     torch.manual_seed(42)
     device = "cuda"
     num_trials = 10 * VOCAB_SIZE

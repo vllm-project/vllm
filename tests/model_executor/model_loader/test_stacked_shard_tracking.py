@@ -14,6 +14,7 @@ from torch import nn
 from vllm.config import LoadConfig
 from vllm.model_executor.layers.linear import (
     MergedColumnParallelLinear,
+    MinimaxM3QKVParallelLinearWithIndexer,
     QKVParallelLinear,
 )
 from vllm.model_executor.model_loader.default_loader import DefaultModelLoader
@@ -94,6 +95,21 @@ def test_merged_column_tuple_shard_is_one_span():
     load(
         layer, ("weight", shard((8, HIDDEN), (0, 1))), ("weight", shard((4, HIDDEN), 2))
     )
+    assert layer.pop_missing_shards() == []
+
+
+def test_minimax_m3_qkv_with_indexer_loads_all_shards():
+    layer = MinimaxM3QKVParallelLinearWithIndexer(
+        HIDDEN,
+        HEAD,
+        total_num_heads=2,
+        total_num_kv_heads=1,
+        total_num_index_heads=1,
+        index_head_size=HEAD,
+    )
+    index_q = ("weight", shard((HEAD, HIDDEN), "index_q"))
+    index_k = ("weight", shard((HEAD, HIDDEN), "index_k"))
+    load(layer, Q, K, V, index_q, index_k)
     assert layer.pop_missing_shards() == []
 
 

@@ -97,7 +97,7 @@ def test_deepseek_rocm_adaptive_indexer_support(
     fixed_config = _make_indexer_config(architecture=architecture, adaptive=False)
 
     assert backend_cls.supports_device_cpu_query_lens_mismatch()
-    assert indexer._rocm_supports_flattened_device_query_lens(adaptive_config)
+    assert indexer._supports_deepseek_v4_flattened_device_query_lens(adaptive_config)
     assert backend_cls.get_builder_cls() is DeepseekV32IndexerMetadataBuilder
     assert indexer._use_flattening(adaptive_config)
     assert (
@@ -154,7 +154,9 @@ def test_rocm_adaptive_indexer_flattening_rejects_other_architectures(
     _mock_rocm_platform(monkeypatch)
     adaptive_config = _make_indexer_config(architecture=architecture, adaptive=True)
 
-    assert not indexer._rocm_supports_flattened_device_query_lens(adaptive_config)
+    assert not indexer._supports_deepseek_v4_flattened_device_query_lens(
+        adaptive_config
+    )
     assert not indexer._use_flattening(adaptive_config)
     assert (
         DeepseekV32IndexerMetadataBuilder.get_cudagraph_support(
