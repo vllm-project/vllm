@@ -180,10 +180,9 @@ def _resolve_kda_decode_backend(
     """Pick the decode path: `aiter` (AITER's single-launch Gluon kernel for the
     conv update, recurrence and gated RMSNorm) or `stock` (separate launches).
     `backend` comes from `additional_config.kda_decode_backend`; only `auto` can
-    pick `aiter`, and it needs an fp32 state, head_dim 128, a width-4 conv, no
-    spec decode and AITER's kernel. Without a lower bound the stock kernel falls
-    back to -5.0 while AITER switches to the unbounded gate, so that config
-    keeps the stock chain."""
+    pick `aiter`. Without a lower bound the stock kernel falls back to -5.0
+    while AITER switches to the unbounded gate, so that config keeps the stock
+    chain."""
     if backend not in ("auto", "native", "flashinfer", "triton"):
         raise ValueError(f"Unsupported KDA decode backend: {backend}")
     eligible = (
@@ -607,7 +606,7 @@ class Glm5NextLinearAttention(GatedDeltaNetAttention):
         # AITER's single-launch decode applies the gated RMSNorm in-kernel, so an
         # eligible layer hands the norm to _forward. The route is chosen there
         # per step: breakable PIECEWISE graphs replay _forward, not this function.
-        out_gate = g2 if self._use_aiter_decode else None
+        fuse_gated_norm = self._use_aiter_decode
         # Call the decorated eager break directly so host-side prefill branches
         # are not captured by PIECEWISE CUDA graphs.
         self._forward(
@@ -615,9 +614,9 @@ class Glm5NextLinearAttention(GatedDeltaNetAttention):
             g1=g1,
             beta=beta,
             core_attn_out=core_attn_out,
-            out_gate=out_gate,
+            g2=g2 if fuse_gated_norm else None,
         )
-        if out_gate is None:
+        if not fuse_gated_norm:
             core_attn_out = self.o_norm(core_attn_out, g2)
         core_attn_out = core_attn_out.reshape(core_attn_out.size(1), -1)
         return self.o_proj(core_attn_out)[0]
@@ -629,9 +628,8 @@ class Glm5NextLinearAttention(GatedDeltaNetAttention):
         g1: torch.Tensor,
         beta: torch.Tensor,
         core_attn_out: torch.Tensor,
-        out_gate: torch.Tensor | None = None,
+        g2: torch.Tensor | None = None,
     ) -> None:
-        """With `out_gate`, also apply the gated RMSNorm that `forward` skips."""
         forward_context = get_forward_context()
         attn_metadata_raw = forward_context.attn_metadata
 
@@ -643,8 +641,8 @@ class Glm5NextLinearAttention(GatedDeltaNetAttention):
             # Profile/warmup dummy runs may omit mamba-family metadata. They
             # still norm, as forward does for other layers, so the profiled
             # memory matches a real step.
-            if out_gate is not None:
-                core_attn_out.copy_(self.o_norm(core_attn_out, out_gate))
+            if g2 is not None:
+                core_attn_out.copy_(self.o_norm(core_attn_out, g2))
             return
         assert isinstance(attn_metadata_narrowed, GDNAttentionMetadata)
         has_initial_state = attn_metadata_narrowed.has_initial_state
@@ -689,13 +687,14 @@ class Glm5NextLinearAttention(GatedDeltaNetAttention):
 
         num_decodes = attn_metadata_narrowed.num_decodes
         if (
-            out_gate is not None
+            g2 is not None
             and attn_metadata_narrowed.num_prefills == 0
             and num_decodes > 0
         ):
             # One launch for the conv update, recurrence and gated RMSNorm
-            # (out_gate implies no spec decode). The [N, 1] indices: the
+            # (`g2` is passed only without spec decode). The [N, 1] indices: the
             # block-table column can be strided, which the flat form rejects.
+            assert self._use_aiter_decode
             assert non_spec_state_indices_tensor is not None
             assert self.decode_conv1d_weight is not None
             state_indices = non_spec_state_indices_tensor[:num_decodes].unsqueeze(1)
@@ -710,7 +709,7 @@ class Glm5NextLinearAttention(GatedDeltaNetAttention):
                 ssm_state_indices=state_indices,
                 conv_state=conv_state,
                 conv_weight=self.decode_conv1d_weight,
-                out_gate=out_gate[:num_decodes],
+                out_gate=g2[:num_decodes],
                 norm_weight=self.o_norm.weight,
                 norm_eps=self.o_norm.eps,
                 out=core_attn_out[0, :num_decodes],
@@ -943,5 +942,9 @@ class Glm5NextLinearAttention(GatedDeltaNetAttention):
                     0, :num_actual_tokens
                 ]
 
-        if out_gate is not None:
-            core_attn_out.copy_(self.o_norm(core_attn_out, out_gate))
+        # A layer with the fused decode hands g2 over on every step, but only a
+        # plain-decode step takes the fused launch above, which applies the norm
+        # itself; a step with a prefill runs the stock chain and leaves it to
+        # this line.
+        if g2 is not None:
+            core_attn_out.copy_(self.o_norm(core_attn_out, g2))

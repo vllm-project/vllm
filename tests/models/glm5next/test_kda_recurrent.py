@@ -265,19 +265,7 @@ def test_fused_recurrent_kda_more_than_65535_programs(num_seqs: int, num_heads: 
     assert torch.equal(full_state, ref_state)
 
 
-def _aiter_kda_decode_runnable() -> bool:
-    if not current_platform.is_rocm():
-        return False
-    from vllm._aiter_ops import rocm_aiter_ops
-    from vllm.platforms.rocm import get_cdna_version
-
-    return get_cdna_version() >= 4 and rocm_aiter_ops._kda_gluon_decode_importable()
-
-
-@pytest.mark.skipif(
-    not _aiter_kda_decode_runnable(),
-    reason="Needs AITER's Gluon KDA decode kernel (CDNA4+)",
-)
+@pytest.mark.skipif(not current_platform.is_rocm(), reason="Requires ROCm")
 @pytest.mark.parametrize("dim_first", [False, True])
 @torch.inference_mode()
 def test_aiter_decode_route_follows_replayed_step(dist_init, monkeypatch, dim_first):
@@ -297,11 +285,11 @@ def test_aiter_decode_route_follows_replayed_step(dist_init, monkeypatch, dim_fi
     from vllm.config import CUDAGraphMode, set_current_vllm_config
     from vllm.forward_context import ForwardContext, override_forward_context
     from vllm.models.glm5next.common.kda import Glm5NextLinearAttention
-    from vllm.utils.torch_utils import set_default_torch_dtype
+    from vllm.utils.torch_utils import set_default_torch_dtype, set_random_seed
     from vllm.v1.attention.backends.gdn_attn import GDNAttentionMetadata
     from vllm.v1.attention.backends.utils import compute_causal_conv1d_metadata
 
-    torch.manual_seed(0)
+    set_random_seed(0)
     device = torch.device("cuda")
     # 32 heads: one rank's share of GLM-5.3-Flash's 64 at tensor parallel 2. With
     # hidden_size = heads * D, o_proj can be the identity, so the layer output is
@@ -328,6 +316,10 @@ def test_aiter_decode_route_follows_replayed_step(dist_init, monkeypatch, dim_fi
                 with monkeypatch.context() as env:
                     env.setenv("VLLM_ROCM_USE_AITER", use_aiter)
                     rocm_aiter_ops.refresh_env_variables()
+                    if use_aiter == "1" and not (
+                        rocm_aiter_ops.is_kda_gluon_decode_available()
+                    ):
+                        pytest.skip("Needs AITER's Gluon KDA decode kernel (CDNA4+)")
                     layers[name] = Glm5NextLinearAttention(
                         config, vllm_config, prefix=f"model.layers.{index}.linear_attn"
                     )
