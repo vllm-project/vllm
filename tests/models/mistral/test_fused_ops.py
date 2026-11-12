@@ -178,6 +178,8 @@ def test_indexer_q(rope, num_tokens: int, use_rope: bool):
     weights = kw[:, head_dim:]
     softmax_scale, head_scale = head_dim**-0.5, num_heads**-0.5
 
+    if use_rope and not current_platform.is_cuda():
+        pytest.skip("the fused_indexer_q_rope_quant reference is CUDA-only")
     # Unfused MistralIndexer.forward.
     q_ref = _ssmax_ref(q, log_positions, s, b)
     if use_rope:
