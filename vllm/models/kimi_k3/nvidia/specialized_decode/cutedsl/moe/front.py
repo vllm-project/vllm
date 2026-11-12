@@ -377,8 +377,10 @@ SPLITS = {
 # TP8 R1 32K 8.858 -> 8.794.
 EARLY_ROUTE = {8: "5-8:1", 16: ""}
 # Split batches whose front GEMM rows join the gate/up kernel as extra M-tiles (one
-# kernel instead of two that slow each other ~2x side by side).
-MERGED = {8: "41-64:1", 16: "33-64:1"}
+# kernel instead of two that slow each other ~2x side by side). TP8 from 33 rows: on
+# verify steps at k = 4 (seven and eight requests), decode-step A/B at 131K context,
+# per token, -2.0% (mean of both batch sizes and two jobs).
+MERGED = {8: "33-64:1", 16: "33-64:1"}
 # Shared-expert split-K tactics (M tile, N tile, split, stages) by width (TP8 768, TP16
 # 384): gate_up, then down.
 SHARED_TACTICS = {
