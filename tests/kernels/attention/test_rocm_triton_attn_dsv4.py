@@ -507,9 +507,12 @@ def test_v41_decode_preserves_aiter_ragged_metadata(
         assert call["topk_compress_ratio"] == (4 if direct else 0)
 
 
-@pytest.mark.parametrize("num_tokens", [1, 7, 64])
+@pytest.mark.parametrize("num_tokens", [1, 4, 7, 64])
+@pytest.mark.parametrize("interspersed_invalid", [False, True])
 @torch.inference_mode()
-def test_v41_global_topk_ragged_fused_indptr(num_tokens: int) -> None:
+def test_v41_global_topk_ragged_fused_indptr(
+    num_tokens: int, interspersed_invalid: bool
+) -> None:
     from vllm.models.deepseek_v41.amd.rocm import (
         compute_global_topk_ragged_indices_and_indptr,
     )
@@ -518,12 +521,14 @@ def test_v41_global_topk_ragged_fused_indptr(num_tokens: int) -> None:
     block_size = 4
     topk = 17
     torch.manual_seed(num_tokens)
-    row_lens = torch.arange(num_tokens, device=device) % (topk + 1)
+    row_lens = (torch.arange(num_tokens, device=device) + 5) % (topk + 1)
     offsets = torch.arange(topk, device=device)
     topk_indices = torch.randint(
         0, 24, (num_tokens, topk), dtype=torch.int32, device=device
     )
     topk_indices = torch.where(offsets[None, :] < row_lens[:, None], topk_indices, -1)
+    if interspersed_invalid:
+        topk_indices[:, 1::3] = -1
     token_to_req_indices = (
         torch.arange(num_tokens, dtype=torch.int32, device=device) % 3
     )
@@ -539,17 +544,17 @@ def test_v41_global_topk_ragged_fused_indptr(num_tokens: int) -> None:
             is_valid_token,
         )
     )
-    expected_values, expected_positions, expected_indptr, expected_lens = (
-        _ref_global_topk_ragged(
-            topk_indices,
-            token_to_req_indices,
-            block_table,
-            block_size,
-            is_valid_token,
-        )
+    expected_values, _, expected_indptr, expected_lens = _ref_global_topk_ragged(
+        topk_indices,
+        token_to_req_indices,
+        block_table,
+        block_size,
+        is_valid_token,
     )
 
-    torch.testing.assert_close(actual_ragged[expected_positions], expected_values)
+    torch.testing.assert_close(
+        actual_ragged[: expected_values.numel()], expected_values
+    )
     torch.testing.assert_close(actual_indptr, expected_indptr)
     torch.testing.assert_close(actual_lens, expected_lens)
 
@@ -3758,6 +3763,8 @@ def test_sparse_mla_backend_forward_mqa_fp8_ds_mla_merged_cache() -> None:
     impl.scale = scale
     impl.sinks = None
     impl.topk_indices_buffer = topk_buf
+    impl.owns_indexer = True
+    impl.index_epoch = 0
 
     metadata = SimpleNamespace(
         num_actual_tokens=num_q,
