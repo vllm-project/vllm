@@ -119,7 +119,9 @@ KNOWN_DEFECTS["zero-query-rows"] = Defect(
     "extend chunk planner and sliding-window gather give them context, "
     "adding chunks no real row needs.",
     (
-        _DISPATCH + "test_zero_query_rows_after_real_rows[*-decode-*]",
+        # Full-attention decode with seq_len-0 padding rows passes on main.
+        _DISPATCH + "test_zero_query_rows_after_real_rows[full-decode-kv-load]",
+        _DISPATCH + "test_zero_query_rows_after_real_rows[sliding-decode-*]",
         _BUILDER + "test_chunk_planner_skips_rows_without_queries[*-kv-load]",
         _BUILDER + "test_sliding_window_extend_skips_rows_without_queries[kv-load]",
     ),
