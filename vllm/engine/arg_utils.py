@@ -831,6 +831,9 @@ class EngineArgs:
     async_scheduling_depth: int = SchedulerConfig.async_scheduling_depth
 
     stream_interval: int = SchedulerConfig.stream_interval
+    stream_admission_timeouts: dict[str, float] = get_field(
+        SchedulerConfig, "stream_admission_timeouts"
+    )
 
     kv_sharing_fast_prefill: bool = CacheConfig.kv_sharing_fast_prefill
     swa_bounded_replay: bool = CacheConfig.swa_bounded_replay
@@ -1818,6 +1821,10 @@ class EngineArgs:
         scheduler_group.add_argument(
             "--stream-interval", **scheduler_kwargs["stream_interval"]
         )
+        scheduler_group.add_argument(
+            "--stream-admission-timeouts",
+            **scheduler_kwargs["stream_admission_timeouts"],
+        )
 
         # Compilation arguments
         compilation_kwargs = get_kwargs(CompilationConfig)
@@ -2696,6 +2703,7 @@ class EngineArgs:
             async_scheduling=self.async_scheduling,
             async_scheduling_depth=self.async_scheduling_depth,
             stream_interval=self.stream_interval,
+            stream_admission_timeouts=self.stream_admission_timeouts,
         )
 
         if not model_config.is_multimodal_model and self.default_mm_loras:
