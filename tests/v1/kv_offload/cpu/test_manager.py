@@ -1669,13 +1669,14 @@ def test_request_key_positions_order_tails_across_kv_groups():
     assert set(output.evicted_keys) == {group_0_tail, group_1_tail}
 
 
+@pytest.mark.parametrize("cache_policy", ["lru", "arc"])
 @pytest.mark.parametrize("batch_size", [1, 2, 3])
 @pytest.mark.parametrize("reverse_completion", [False, True])
-def test_unfinished_lru_prefix_survives_pressure_across_store_batches(
-    batch_size, reverse_completion
+def test_unfinished_prefix_survives_pressure_across_store_batches(
+    cache_policy, batch_size, reverse_completion
 ):
     """Keep a contiguous prefix while its owner is still generating."""
-    manager = make_cpu_manager(num_chunks=8)
+    manager = make_cpu_manager(num_chunks=8, cache_policy=cache_policy)
     ctx = make_req_context("unfinished")
     groups = [
         [make_offload_key(str(position).encode(), group) for position in range(3)]
@@ -1728,8 +1729,9 @@ def test_unfinished_lru_reused_prefix_outlives_new_tail(reuse_method):
     assert manager.lookup(head, ctx) is LookupResult.HIT
 
 
-def test_unfinished_lru_backfill_orders_by_token_position():
-    manager = make_cpu_manager(num_chunks=3)
+@pytest.mark.parametrize("cache_policy", ["lru", "arc"])
+def test_unfinished_backfill_orders_by_token_position(cache_policy):
+    manager = make_cpu_manager(num_chunks=3, cache_policy=cache_policy)
     ctx = make_req_context("backfill")
     head, middle, tail = to_keys([1, 2, 3])
     for position, key in enumerate([head, middle, tail], 1):
@@ -1741,6 +1743,130 @@ def test_unfinished_lru_backfill_orders_by_token_position():
     output = manager.prepare_store([to_key(4)], make_req_context("B"))
     assert output is not None
     assert output.evicted_keys == [tail]
+
+
+def test_arc_running_request_ages_as_its_oldest_t1_chunk():
+    """Tail-first applies within a running request; requests stay in T1 order."""
+    manager = make_cpu_manager(num_chunks=5, cache_policy="arc")
+    old = make_req_context("old")
+    old_key = to_key(1)
+    old.set_offload_key_position(old_key, 16)
+    assert manager.prepare_store([old_key], old) is not None
+    manager.complete_store([old_key], old)
+
+    running = make_req_context("running")
+    head, middle, tail = to_keys([2, 3, 4])
+    for position, key in enumerate([head, middle, tail], 1):
+        running.set_offload_key_position(key, position * 16)
+    for batch in ([head], [middle, tail]):
+        assert manager.prepare_store(batch, running) is not None
+        manager.complete_store(batch, running)
+
+    newer = make_req_context("newer")
+    newer_key = to_key(5)
+    newer.set_offload_key_position(newer_key, 16)
+    assert manager.prepare_store([newer_key], newer) is not None
+    manager.complete_store([newer_key], newer)
+
+    output = manager.prepare_store(to_keys([10, 11, 12]), make_req_context("B"))
+    assert output is not None
+    assert output.evicted_keys == [old_key, tail, middle]
+    assert manager.lookup(head, running) is LookupResult.HIT
+    assert manager.lookup(newer_key, newer) is LookupResult.HIT
+
+
+def test_arc_running_request_can_be_evicted_entirely():
+    manager = make_cpu_manager(num_chunks=2, cache_policy="arc")
+    running = make_req_context("running")
+    head, tail = to_keys([1, 2])
+    running.set_offload_key_position(head, 16)
+    running.set_offload_key_position(tail, 32)
+    assert manager.prepare_store([head, tail], running) is not None
+    manager.complete_store([head, tail], running)
+
+    output = manager.prepare_store(to_keys([10, 11]), make_req_context("B"))
+    assert output is not None
+    assert output.evicted_keys == [tail, head]
+
+
+@pytest.mark.parametrize("pin_tail", [False, True])
+def test_arc_repeated_pressure_does_not_rescan_evicted_chunks(pin_tail):
+    class CountingList(list):
+        reads = 0
+
+        def __getitem__(self, index):
+            CountingList.reads += 1
+            return super().__getitem__(index)
+
+    num_keys = 128
+    manager = make_cpu_manager(num_chunks=num_keys, cache_policy="arc")
+    policy = manager._policy
+    assert isinstance(policy, ARCCachePolicy)
+    running = make_req_context("running")
+    keys = to_keys(list(range(num_keys)))
+    for position, key in enumerate(keys, 1):
+        running.set_offload_key_position(key, position * 16)
+    manager.prepare_store(keys[:1], running)
+    state, _ = next(iter(policy._running.values()))
+    state.entries = CountingList(state.entries)
+    assert manager.prepare_store(keys[1:], running) is not None
+    manager.complete_store(keys, running)
+    evictable = keys
+    if pin_tail:
+        manager.prepare_load(keys[-1:], make_req_context("pin"))
+        evictable = keys[:-1]
+
+    for i in range(len(evictable) - 1):
+        output = manager.prepare_store([to_key(1000 + i)], make_req_context(f"{i}"))
+        assert output is not None
+        assert output.evicted_keys == [evictable[-1 - i]]
+    assert CountingList.reads <= 16 * num_keys
+
+
+def test_arc_running_request_chunk_promoted_to_t2_leaves_its_t1_order():
+    manager = make_cpu_manager(num_chunks=3, cache_policy="arc")
+    policy = manager._policy
+    assert isinstance(policy, ARCCachePolicy)
+    running = make_req_context("running")
+    head, middle, tail = to_keys([1, 2, 3])
+    for position, key in enumerate([head, middle, tail], 1):
+        running.set_offload_key_position(key, position * 16)
+    assert manager.prepare_store([head, middle, tail], running) is not None
+    manager.complete_store([head, middle, tail], running)
+
+    reader = make_req_context("reader")
+    manager.prepare_load([middle], reader)
+    manager.complete_load([middle], reader)
+    manager.on_request_finished(reader)
+    assert middle in policy.t2
+    pin = make_req_context("pin")
+    manager.prepare_load([tail], pin)
+
+    output = manager.prepare_store([to_key(10)], make_req_context("B"))
+    assert output is not None
+    assert output.evicted_keys == [head]
+    manager.complete_load([tail], pin)
+
+
+def test_arc_request_finishing_after_reset_ignores_pre_reset_chunks():
+    manager = make_cpu_manager(num_chunks=1, cache_policy="arc")
+    running = make_req_context("running")
+    head, tail = to_keys([1, 2])
+    running.set_offload_key_position(head, 16)
+    running.set_offload_key_position(tail, 32)
+    assert manager.prepare_store([head], running) is not None
+    manager.complete_store([head], running)
+    manager.reset_cache()
+
+    other = make_req_context("other")
+    other_key = to_key(9)
+    assert manager.prepare_store([other_key], other) is not None
+    manager.complete_store([other_key], other)
+    manager.prepare_load([other_key], other)
+    assert manager.prepare_store([tail], running) is None
+    manager.on_request_finished(running)
+    manager.complete_load([other_key], other)
+    assert manager.lookup(other_key, other) is LookupResult.HIT
 
 
 def test_lru_failed_store_retry_preserves_prefix_order():
