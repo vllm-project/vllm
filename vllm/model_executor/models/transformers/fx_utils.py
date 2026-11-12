@@ -248,7 +248,9 @@ def _leaf_attention_interfaces():
 
 
 def trace(module: nn.Module, seq_len: int = 8) -> fx.Graph | None:
-    """Trace `module.forward`, returning the partial graph on failure."""
+    """Trace `module.forward` in eval mode, returning the partial graph on failure.
+
+    vLLM only runs inference, so branches on `self.training` take that path."""
     parameters = forward_parameters(type(module))
     # vLLM never passes `past_key_values` so it is always the default value of `None`.
     # Make this concrete to simplify tracing.
@@ -266,12 +268,15 @@ def trace(module: nn.Module, seq_len: int = 8) -> fx.Graph | None:
         ),
         None,
     )
+    training, module.training = module.training, False
     try:
         with _leaf_attention_interfaces():
             return tracer.trace(module, concrete_args=concrete_args)
     except Exception as exc:
         logger.debug("Could not fully trace %s: %s", type(module), exc)
         return getattr(tracer, "graph", None)
+    finally:
+        module.training = training
 
 
 def recover_forward(cls: type[nn.Module]) -> tuple[ast.FunctionDef, Callable]:

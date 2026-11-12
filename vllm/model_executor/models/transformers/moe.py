@@ -380,19 +380,8 @@ class MoEMixin(MixtureOfExperts, Base):
                         is_fused_checkpoint_transposed=is_transposed,
                         routed_experts_cls=TransformersRoutedExperts,
                     )
-                    # Transformers decoder layers do not compensate for dividing
-                    # the shared output by the scaling factor, which only
-                    # RoutedScaleMode.OUTPUT_FP16_GUARD does (in FP16).
-                    divides_shared_output = (
-                        routed_scaling_factor != 1.0
-                        and routed_scale_mode is RoutedScaleMode.OUTPUT_FP16_GUARD
-                        and self.model_config.dtype == torch.float16
-                    )
                     fuser = MoEBlockFuser.match(
-                        moe_block,
-                        experts_name,
-                        divides_shared_output,
-                        routed_scaling_factor,
+                        moe_block, experts_name, routed_scaling_factor
                     )
                     if fuser is not None:
                         # MoE block forward is fully replaced.

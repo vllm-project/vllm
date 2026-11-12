@@ -632,20 +632,6 @@ def test_moe_fuser_unrecognized_router_moves_shared_expert():
     assert fuser.shared_name == "shared_expert"
 
 
-@pytest.mark.parametrize(
-    ("block_cls", "scoring_func"),
-    [
-        (MoEBlockSharedUnflattened, None),  # routing falls back to Transformers
-        (MoEBlock, "softmax"),  # no shared output to divide
-    ],
-)
-def test_moe_fuser_divided_shared_output(block_cls, scoring_func):
-    with torch.device("meta"):
-        fuser = MoEBlockFuser.match(block_cls(), "experts", divides_shared_output=True)
-    assert fuser is not None
-    assert fuser.scoring_func == scoring_func
-
-
 def test_moe_fuser_scaled_output_needs_vllm_routing():
     """Only vLLM routing applies the routed scale, so nothing else moves without it."""
     with torch.device("meta"):

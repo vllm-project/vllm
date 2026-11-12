@@ -217,15 +217,6 @@ def _only_feeds(source: fx.Node, node: object) -> bool:
     return False
 
 
-def _trace_for_inference(module: nn.Module, seq_len: int = 8) -> fx.Graph | None:
-    """Trace `module` in eval mode, as the traced forward replaces it at inference."""
-    training, module.training = module.training, False
-    try:
-        return trace(module, seq_len=seq_len)
-    finally:
-        module.training = training
-
-
 def _erase_unused(graph: fx.Graph, modules: set[str]) -> None:
     """Erase unused nodes, keeping calls to child modules not in `modules` and
     in-place writes, which may have side effects."""
@@ -365,7 +356,6 @@ class MoEBlockFuser:
         cls,
         moe_block: nn.Module,
         experts_name: str,
-        divides_shared_output: bool = False,
         routed_scaling_factor: float = 1.0,
     ) -> "MoEBlockFuser | None":
         """Matches a block computing `experts(x, ids, weights) [* c] [+ shared(x)]`
@@ -377,9 +367,6 @@ class MoEBlockFuser:
         Args:
             moe_block: The MoE block.
             experts_name: The name of the experts in `moe_block`.
-            divides_shared_output: Whether vLLM routing would divide the shared
-                expert's output by `routed_scaling_factor` (fp16 overflow
-                protection), which Transformers decoder layers do not undo.
             routed_scaling_factor: The scale vLLM routing applies to the experts'
                 output, which `c` must equal.
 
@@ -390,7 +377,7 @@ class MoEBlockFuser:
         # Standard MoE block returns a single tensor.
         if _returns_tuple(type(moe_block)):
             return None
-        if (graph := _trace_for_inference(moe_block)) is None:
+        if (graph := trace(moe_block)) is None:
             return None
         if not is_complete(graph):
             return None
@@ -443,16 +430,6 @@ class MoEBlockFuser:
                 combine = None
             else:
                 shared_name, shared_gate_name = match
-        if scoring_func is not None and shared_name and divides_shared_output:
-            logger.warning_once(
-                "%s could be fused but routing it in vLLM would apply "
-                "`routed_scaling_factor` by dividing the shared expert output, "
-                "which only fp16 overflow protection expects the decoder layer to "
-                "compensate for. Falling back to routing in Transformers; run in "
-                "bfloat16 to fuse it.",
-                type(moe_block).__name__,
-            )
-            scoring_func = router_dtype = renormalize = None
         # Without vLLM routing, only a shared expert can move to vLLM, and only
         # if the block does not scale the experts' output (vLLM routing does).
         if scoring_func is None and (shared_name is None or scaled is not None):
@@ -489,7 +466,7 @@ class MoEBlockFuser:
                 return None
         # Fail closed if the trace specialized on the input's sequence length.
         # This only catches specialization that changes the generated code.
-        retraced = _trace_for_inference(moe_block, seq_len=5)
+        retraced = trace(moe_block, seq_len=5)
         if retraced is None or retraced.python_code("self").src != source:
             return None
         return cls(
