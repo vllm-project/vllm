@@ -10,6 +10,7 @@ import torch
 from vllm.config import CUDAGraphMode, VllmConfig
 from vllm.distributed.parallel_state import get_dcp_group, get_pcp_group
 from vllm.logger import init_logger
+from vllm.utils.math_utils import cdiv
 from vllm.utils.torch_utils import async_tensor_h2d
 from vllm.v1.attention.backends.utils import PAD_SLOT_ID, get_dcp_local_seq_lens
 from vllm.v1.worker.gpu.block_table import BlockTables
@@ -426,6 +427,12 @@ class PCPManager:
             )
             for rank in range(self.pcp_world_size)
         )
+
+    def get_num_reqs_for_dispatch(self, num_reqs: int, has_prefill: bool) -> int:
+        """Match decode graphs to the largest rank-local request count."""
+        if self.shard_decode_requests and not has_prefill:
+            return cdiv(num_reqs, self.pcp_world_size)
+        return num_reqs
 
     @staticmethod
     def _resolve_num_reqs_after_padding(
