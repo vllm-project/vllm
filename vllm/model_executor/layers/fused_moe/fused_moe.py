@@ -13,6 +13,9 @@ import vllm.envs as envs
 import vllm.model_executor.layers.fused_moe.modular_kernel as mk
 from vllm import _custom_ops as ops
 from vllm.logger import init_logger
+from vllm.model_executor.determinism.batch_invariant_configs import (
+    get_batch_invariant_moe_config,
+)
 from vllm.model_executor.layers.fused_moe.activation import (
     MoEActivation,
     apply_moe_activation,
@@ -577,7 +580,12 @@ def fused_moe_kernel(
                     a_scale_ptrs + offs_ks * stride_ask, mask=token_mask, other=0.0
                 )
                 b_scale = tl.load(b_scale_ptrs + offs_ks * stride_bsk)
-                if SWAP_AB:
+                if group_n >= BLOCK_SIZE_N and group_n % BLOCK_SIZE_N == 0:
+                    if SWAP_AB:
+                        accumulator += tl.dot(b, a) * b_scale * a_scale[None, :]
+                    else:
+                        accumulator += tl.dot(a, b) * a_scale[:, None] * b_scale
+                elif SWAP_AB:
                     accumulator += tl.dot(b, a) * b_scale[:, None] * a_scale[None, :]
                 else:
                     accumulator += tl.dot(a, b) * a_scale[:, None] * b_scale[None, :]
@@ -1413,13 +1421,7 @@ def get_default_config(
     block_shape: list[int] | None = None,
 ) -> dict[str, int]:
     if envs.VLLM_BATCH_INVARIANT:
-        return {
-            "BLOCK_SIZE_M": 64,
-            "BLOCK_SIZE_N": 64,
-            "BLOCK_SIZE_K": 32,
-            "GROUP_SIZE_M": 8,
-            "SPLIT_K": 1,
-        }
+        return get_batch_invariant_moe_config(E, N, K, dtype, block_shape)
 
     # num_stages can cause triton.runtime.errors.OutOfResources on ROCm.
     num_stages_rocm = 2

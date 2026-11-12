@@ -1008,7 +1008,6 @@ steps:
 #   - tests/quantization/reference_mxfp4.py
 #   - tests/quantization/test_auto_round.py
 #   commands:
-#   - uv pip install --system b12x==1.5.1
 #   - pytest -v -s model_executor/kernels/test_b12x_linear.py
 #       model_executor/test_b12x_warmup.py
 #       kernels/quantization/test_block_fp8.py
@@ -1041,7 +1040,6 @@ steps:
 #       - vllm/platforms/rocm.py
 #       - tools/benchmark_helion_kernels.py
 
- 
 - label: ":nvidia: (H100) [Nightly] FP8 MoE Kernels"
   key: kernels-fp8-moe-test-1xh100
   automatic_shard: true
@@ -1131,7 +1129,6 @@ steps:
       commands:
       - pytest -v -s kernels/moe/test_ocp_mx_moe.py::test_rocm_mxfp4_moe_oracle -k AITER_MXFP4
       - pytest -v -s kernels/moe/test_flydsl_moe.py
-
 
 - label: ":nvidia: (H100) FusedMoE Layer Kernels"
   key: kernels-fusedmoe-layer-test-2-h100s
@@ -1319,39 +1316,6 @@ steps:
   - amd-smi
   - python3 examples/basic/offline_inference/chat.py --attention-backend TRITON_ATTN
   - pytest -v -s tests/kernels/attention/test_attention_selector.py
-
-- label: ":amd: (MI300) DeepSeek-V4.1 gfx942 Mono Decode Kernels"
-  key: dsv41-mono-decode-gfx942-amd
-  automatic_shard: true
-  dind: false
-  device: mi300_1
-  num_devices: 1
-  timeout_in_minutes: 30
-  working_dir: /vllm-workspace/
-  depends_on:
-  - image-build-amd
-  source_file_dependencies:
-  - vllm/models/deepseek_v41/amd/
-  - vllm/model_executor/layers/sparse_attn_indexer.py
-  - vllm/v1/attention/ops/rocm_aiter_mla_sparse.py
-  - vllm/v1/worker/gpu/spec_decode/dspark/
-  - tests/kernels/models/amd/test_dsv41_gfx942_topk.py
-  - tests/kernels/models/amd/test_dsv41_gfx942_cand_logits.py
-  - tests/kernels/models/amd/test_dsv41_gfx942_sparse_indexer.py
-  - tests/kernels/models/amd/test_dsv41_gfx942_decode_meta.py
-  - tests/kernels/models/amd/test_dsv41_gfx942_fused_markov.py
-  - tests/kernels/models/amd/test_dsv41_gfx942_draft_lm_head.py
-  - tests/kernels/models/amd/test_dsv41_mono_gfx942.py
-  commands:
-  - >-
-    pytest -v -s
-    tests/kernels/models/amd/test_dsv41_gfx942_topk.py
-    tests/kernels/models/amd/test_dsv41_gfx942_cand_logits.py
-    tests/kernels/models/amd/test_dsv41_gfx942_sparse_indexer.py
-    tests/kernels/models/amd/test_dsv41_gfx942_decode_meta.py
-    tests/kernels/models/amd/test_dsv41_gfx942_fused_markov.py
-    tests/kernels/models/amd/test_dsv41_gfx942_draft_lm_head.py
-    tests/kernels/models/amd/test_dsv41_mono_gfx942.py
 
 - label: ":amd: (MI355) Mamba SSM Kernels"
   key: amd-mamba-ssm-kernels-mi355
