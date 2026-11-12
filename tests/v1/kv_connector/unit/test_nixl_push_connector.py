@@ -552,8 +552,8 @@ def _chunk_worker() -> _StubWriterWorker:
 
 
 def _publish(w: _StubWriterWorker, *jobs: NixlPushChunkJob, ready: bool = True):
-    """Publish jobs as ``wait_for_save`` does; their CUDA event reports
-    ``ready``."""
+    """Publish jobs as `wait_for_save` does; their CUDA event reports
+    `ready`."""
     meta = NixlConnectorMetadata()
     meta.push_chunk_jobs = list(jobs)
     with patch(
@@ -612,8 +612,8 @@ def test_handed_off_request_is_reported_once_it_finishes():
 def _fail_writes(w: _StubWriterWorker) -> None:
     """Make in-flight WRITEs report failure when polled."""
     w._log_failure = MagicMock()
-    w._handle_failed_transfer = (
-        lambda req_id, handle, failed: failed.add(req_id) or True
+    w._handle_failed_transfer = lambda req_id, handle, failed: (
+        failed.add(req_id) or True
     )
     w.nixl_wrapper.check_xfer_state.return_value = "ERR"
 
