@@ -18,6 +18,8 @@ from transformers import (
     AutoConfig,
     AutoModel,
     AutoModelForCausalLM,
+    LlamaConfig,
+    LlamaForCausalLM,
     PreTrainedConfig,
 )
 
@@ -966,3 +968,98 @@ def test_mtp_draft_loads_mtp_weights(model_type, tmp_path, tp_init, monkeypatch)
                 layer.get_parameter(param_name).cpu(),
                 weights[f"{mtp}.{ckpt_name}"].to(torch.bfloat16),
             )
+
+
+# `down_proj` stored as FP8 with one fp32 scale per output row, dequantized in `forward`
+FP8_LLAMA_MODELING = """
+import torch
+from torch import nn
+from transformers.models.llama.modeling_llama import (
+    LlamaForCausalLM,
+    LlamaMLP,
+    LlamaModel,
+)
+
+
+class Fp8LlamaMLP(LlamaMLP):
+    def __init__(self, config):
+        super().__init__(config)
+        del self.down_proj
+        shape = (config.hidden_size, config.intermediate_size)
+        self.down_proj_fp8 = nn.Parameter(
+            torch.empty(shape, dtype=torch.float8_e4m3fn), requires_grad=False
+        )
+        self.down_proj_scale = nn.Parameter(
+            torch.empty(shape[0], 1, dtype=torch.float32), requires_grad=False
+        )
+
+    def forward(self, x):
+        down_proj = (self.down_proj_fp8.float() * self.down_proj_scale).to(x.dtype)
+        hidden = self.act_fn(self.gate_proj(x)) * self.up_proj(x)
+        return nn.functional.linear(hidden, down_proj)
+
+
+class Fp8LlamaModel(LlamaModel):
+    def __init__(self, config):
+        super().__init__(config)
+        for layer in self.layers:
+            layer.mlp = Fp8LlamaMLP(config)
+
+
+class Fp8LlamaForCausalLM(LlamaForCausalLM):
+    def __init__(self, config):
+        super().__init__(config)
+        self.model = Fp8LlamaModel(config)
+"""
+
+
+def get_fp8_parameters(model: nn.Module) -> dict[str, torch.Tensor]:
+    return {
+        name: param.cpu()
+        for name, param in model.named_parameters()
+        if ".down_proj_" in name
+    }
+
+
+def test_declared_dtypes_are_kept(vllm_runner, tmp_path):
+    """Parameters the modeling declares in a dtype other than the model's load in
+    that dtype, as with `from_pretrained`."""
+    config = LlamaConfig(
+        vocab_size=128,
+        hidden_size=128,
+        intermediate_size=256,
+        num_hidden_layers=2,
+        num_attention_heads=2,
+        num_key_value_heads=1,
+        head_dim=64,
+    )
+    weights = LlamaForCausalLM(config).to(torch.bfloat16).state_dict()
+    for i in range(config.num_hidden_layers):
+        prefix = f"model.layers.{i}.mlp"
+        down_proj = weights.pop(f"{prefix}.down_proj.weight").float()
+        scale = down_proj.abs().amax(dim=1, keepdim=True) / 448
+        weights[f"{prefix}.down_proj_fp8"] = (down_proj / scale).to(torch.float8_e4m3fn)
+        weights[f"{prefix}.down_proj_scale"] = scale
+    save_file(weights, tmp_path / "model.safetensors", metadata={"format": "pt"})
+    (tmp_path / "modeling_fp8_llama.py").write_text(FP8_LLAMA_MODELING)
+    config.architectures = ["Fp8LlamaForCausalLM"]
+    config.auto_map = {
+        "AutoModel": "modeling_fp8_llama.Fp8LlamaModel",
+        "AutoModelForCausalLM": "modeling_fp8_llama.Fp8LlamaForCausalLM",
+    }
+    config.save_pretrained(tmp_path)
+
+    with vllm_runner(
+        str(tmp_path),
+        model_impl="transformers",
+        dtype="bfloat16",
+        skip_tokenizer_init=True,
+        enforce_eager=True,
+    ) as llm:
+        (loaded,) = llm.apply_model(get_fp8_parameters)
+
+    assert loaded.keys() == {k for k in weights if ".down_proj_" in k}
+    for name, param in loaded.items():
+        assert param.dtype == weights[name].dtype, name
+        # Bitwise, as FP8 has no `torch.equal`
+        assert torch.equal(param.view(torch.uint8), weights[name].view(torch.uint8))
