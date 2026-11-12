@@ -1244,6 +1244,28 @@ steps:
   - pytest -v -s kernels/moe/test_modular_oai_triton_moe.py --shard-id=$$BUILDKITE_PARALLEL_JOB --num-shards=$$BUILDKITE_PARALLEL_JOB_COUNT
   - VLLM_ROCM_USE_AITER=1 VLLM_ROCM_USE_AITER_MOE=1 pytest -v -s kernels/moe/test_modular_kernel_combinations.py -k "not multigpu" --shard-id=$$BUILDKITE_PARALLEL_JOB --num-shards=$$BUILDKITE_PARALLEL_JOB_COUNT
 
+- label: ":amd: (MI300) MXFP8 a8w8 MoE"
+  timeout_in_minutes: 20
+  mirror_hardwares: [amdexperimental, amdproduction, amdgfx942nightly, amdmi300]
+  dind: false
+  agent_pool: mi300_1
+  optional: true
+  working_dir: "/vllm-workspace/tests"
+  source_file_dependencies:
+  - vllm/model_executor/layers/fused_moe/experts/aiter_mxfp8_a8w8_moe.py
+  - vllm/model_executor/layers/fused_moe/oracle/
+  - vllm/model_executor/layers/quantization/utils/mxfp8_utils.py
+  - vllm/_aiter_ops.py
+  - vllm/platforms/rocm.py
+  - tests/kernels/moe/test_aiter_mxfp8_a8w8_moe.py
+  - tests/kernels/moe/test_mxfp8_aiter_backend_selection.py
+  commands:
+  # The a8w8 backend is gfx942 only, so the MI355 MoE step skips its tests.
+  - >-
+    pytest -v -s
+    kernels/moe/test_aiter_mxfp8_a8w8_moe.py
+    kernels/moe/test_mxfp8_aiter_backend_selection.py
+
 - label: ":amd: (MI300) MoE Kernels Multi-GPU" # TBD
   timeout_in_minutes: 30
   mirror_hardwares: [amdexperimental, amdproduction, amdgfx942nightly, amdmi300]
