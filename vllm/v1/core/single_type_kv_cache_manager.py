@@ -112,6 +112,9 @@ class SingleTypeKVCacheManager(ABC):
         self.block_pool = block_pool
         self.enable_caching = enable_caching
         self.max_admission_blocks_per_request = max_admission_blocks_per_request
+        # {req_id: tighter admission cap} for requests whose prefill chunks the
+        # scheduler capped (see `SchedulerConfig.prefill_chunk_backoff`).
+        self.admission_cap_overrides: dict[str, int] = {}
         # Record newly allocated block ids only when worker-side zeroing will
         # consume them and this manager holds a spec type that gets zeroed.
         self._record_new_block_ids = (
@@ -217,19 +220,30 @@ class SingleTypeKVCacheManager(ABC):
 
         """
         num_required_blocks = cdiv(num_tokens, self.block_size)
-        if apply_admission_cap and self.max_admission_blocks_per_request is not None:
-            # Recycling-aware specs (SWA, chunked-local) cap the per-request
-            # reservation here so admission matches the startup pool sizer
-            # (`SlidingWindowSpec.max_admission_blocks_per_request` / its
-            # chunked-local counterpart). `remove_skipped_blocks` runs from
-            # `allocate_slots` before each chunk's `get_num_blocks_to_allocate`,
-            # so per-request peak real-held blocks <= this cap, which keeps
-            # `sum(reservations) <= pool` <=> `sum(peak_real_held) <= pool`.
-            # Drift between the two would re-introduce the deadlock from
-            # issue #39734 or, worse, mid-prefill OOM.
-            num_required_blocks = min(
-                num_required_blocks, self.max_admission_blocks_per_request
+        cap = self.max_admission_blocks_per_request
+        if cap is not None and request_id in self.admission_cap_overrides:
+            cap = min(cap, self.admission_cap_overrides[request_id])
+        # req_to_blocks is positional: a skipped external-load prefix is null
+        # padding, so len() is not the number of blocks this request can recycle.
+        blocks = self.req_to_blocks.get(request_id)
+        if apply_admission_cap and cap is not None and blocks:
+            # Live blocks are a suffix. The skipped prefix is null, so stop
+            # at the first null instead of scanning a long external-load prefix
+            # on every admission.
+            held = 0
+            for block in reversed(blocks):
+                if block.is_null:
+                    break
+                held += block.ref_cnt == 1
+            uncapped = self.get_num_blocks_to_allocate(
+                request_id, num_tokens, new_computed_blocks,
+                total_computed_tokens, num_local_computed_tokens,
+                num_tokens_main_model, apply_admission_cap=False,
+                prefill_end=prefill_end,
             )
+            return min(uncapped, max(0, cap - held))
+        if apply_admission_cap and cap is not None:
+            num_required_blocks = min(num_required_blocks, cap)
         num_req_blocks = len(self.req_to_blocks.get(request_id, ()))
 
         if request_id in self.num_cached_block:
@@ -591,6 +605,7 @@ class SingleTypeKVCacheManager(ABC):
         req_blocks = self.req_to_blocks.pop(request_id, [])
         self.num_cached_block.pop(request_id, None)
         self._partial_hit_reqs.pop(request_id, None)
+        self.admission_cap_overrides.pop(request_id, None)
         return trim_null_head(req_blocks)
 
     def free(self, request_id: str) -> None:

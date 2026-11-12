@@ -3,8 +3,9 @@
 import itertools
 import time
 from collections import defaultdict, deque
-from collections.abc import Iterable
+from collections.abc import Callable, Iterable
 from dataclasses import replace
+from functools import partial
 from typing import Any
 
 from vllm.compilation.cuda_graph import CUDAGraphStat
@@ -32,7 +33,7 @@ from vllm.multimodal.encoder_budget import MultiModalBudget
 from vllm.multimodal.inputs import MultiModalKwargsItem
 from vllm.multimodal.utils import get_mm_features_in_window
 from vllm.outputs import RequestError
-from vllm.utils.math_utils import cdiv
+from vllm.utils.math_utils import cdiv, round_down
 from vllm.v1.core.encoder_cache_manager import (
     EncoderCacheManager,
     EncoderDecoderCacheManager,
@@ -394,6 +395,9 @@ class Scheduler(SchedulerInterface):
         self.scheduler_reserve_full_isl = (
             self.scheduler_config.scheduler_reserve_full_isl
         )
+        self.prefill_chunk_backoff = self.scheduler_config.prefill_chunk_backoff
+        # Number of requests admitted by `_allocate_with_chunk_backoff`.
+        self.num_prefill_chunk_backoffs = 0
         # Cache-aware admission needs a prefix cache to consult, and reorders by
         # position, which only a FCFS queue has.
         self.cache_aware_window = (
@@ -811,6 +815,8 @@ class Scheduler(SchedulerInterface):
             )
             if 0 < long_prefill_token_threshold < num_new_tokens:
                 num_new_tokens = long_prefill_token_threshold
+            if self.prefill_chunk_backoff:
+                num_new_tokens = self._apply_prefill_chunk_cap(request, num_new_tokens)
             num_new_tokens = min(
                 num_new_tokens, token_budget, input_budget - draft_slots
             )
@@ -1350,6 +1356,10 @@ class Scheduler(SchedulerInterface):
 
                     if 0 < long_prefill_token_threshold < num_new_tokens:
                         num_new_tokens = long_prefill_token_threshold
+                    if self.prefill_chunk_backoff:
+                        num_new_tokens = self._apply_prefill_chunk_cap(
+                            request, num_new_tokens
+                        )
 
                     # chunked prefill has to be enabled explicitly to allow
                     # pooling requests to be chunked
@@ -1463,6 +1473,11 @@ class Scheduler(SchedulerInterface):
                 # Replayed tokens are already counted in the adopted hit; a
                 # chunk that ends inside the replayed range needs no new slots.
                 num_tokens_past_hit = max(num_new_tokens - num_replay_tokens, 0)
+                skip_zeroing_group_ids = (
+                    self.connector.get_loaded_kv_cache_group_ids(request)
+                    if load_kv_async and self.connector is not None
+                    else ()
+                )
                 new_blocks = self.kv_cache_manager.allocate_slots(
                     request,
                     num_tokens_past_hit,
@@ -1471,16 +1486,44 @@ class Scheduler(SchedulerInterface):
                     num_lookahead_tokens=effective_lookahead_tokens,
                     num_external_computed_tokens=num_external_computed_tokens,
                     delay_cache_blocks=load_kv_async,
-                    skip_zeroing_group_ids=(
-                        self.connector.get_loaded_kv_cache_group_ids(request)
-                        if load_kv_async and self.connector is not None
-                        else ()
-                    ),
+                    skip_zeroing_group_ids=skip_zeroing_group_ids,
                     num_encoder_tokens=num_encoder_tokens,
                     full_sequence_must_fit=self.scheduler_reserve_full_isl,
                     reserved_blocks=reserved_blocks,
                     has_scheduled_reqs=bool(self.running),
                 )
+
+                if (
+                    new_blocks is None
+                    and self.prefill_chunk_backoff
+                    and not self.running
+                    and not num_scheduled_tokens
+                    and not request.has_encoder_inputs
+                    and not num_replay_tokens
+                    and not pad_spec_decode
+                    and not self.need_mamba_block_aligned_split
+                ):
+                    # Nothing runs this step, so nothing will free a block:
+                    # retry the head with smaller chunks instead of idling.
+                    new_blocks, num_new_tokens = self._allocate_with_chunk_backoff(
+                        request,
+                        num_computed_tokens,
+                        num_new_tokens,
+                        load_kv_async,
+                        reserved_blocks,
+                        partial(
+                            self.kv_cache_manager.allocate_slots,
+                            request,
+                            num_new_computed_tokens=num_new_local_computed_tokens,
+                            new_computed_blocks=new_computed_blocks,
+                            num_lookahead_tokens=effective_lookahead_tokens,
+                            num_external_computed_tokens=num_external_computed_tokens,
+                            delay_cache_blocks=load_kv_async,
+                            skip_zeroing_group_ids=skip_zeroing_group_ids,
+                            full_sequence_must_fit=True,
+                            has_scheduled_reqs=False,
+                        ),
+                    )
 
                 if new_blocks is None:
                     # The request cannot be scheduled.
@@ -3515,6 +3558,84 @@ class Scheduler(SchedulerInterface):
         return self._parked_reserved_blocks + sum(
             self._request_remaining_blocks(req) for req in self._inflight_prefills
         )
+
+    def _apply_prefill_chunk_cap(self, request: Request, num_new_tokens: int) -> int:
+        """Clamp `num_new_tokens` by the request's prefill chunk cap, if any."""
+        chunk_cap = self.kv_cache_manager.get_prefill_chunk_cap(request.request_id)
+        if chunk_cap is None:
+            return num_new_tokens
+        return min(num_new_tokens, chunk_cap)
+
+    def _set_prefill_chunk_cap(
+        self, request: Request, chunk_tokens: int | None
+    ) -> None:
+        max_in_flight_tokens = 0
+        if chunk_tokens is not None:
+            max_in_flight_tokens = (
+                self.vllm_config.max_concurrent_batches * chunk_tokens
+                + self.num_lookahead_tokens
+            )
+        self.kv_cache_manager.set_prefill_chunk_cap(
+            request.request_id, chunk_tokens, max_in_flight_tokens
+        )
+
+    def _allocate_with_chunk_backoff(
+        self,
+        request: Request,
+        num_computed_tokens: int,
+        num_new_tokens: int,
+        load_kv_async: bool,
+        reserved_blocks: int,
+        allocate_slots: Callable[..., KVCacheBlocks | None],
+    ) -> tuple[KVCacheBlocks | None, int]:
+        """Retry a waiting request that failed to allocate, on a step that
+        would otherwise schedule nothing, with halved block-aligned prefill
+        chunks (`SchedulerConfig.prefill_chunk_backoff`).
+
+        Each attempt caps the request's chunks, and with them the admission cap
+        of its recycling-aware groups, and keeps the full-sequence check, so
+        success means the rest of the prefill fits at that chunk size; the cap
+        then sticks until the request's blocks are freed. The reservations of
+        the other in-flight prefills are always kept.
+
+        Returns:
+            The allocated blocks (None if no chunk size fits) and the number of
+            new tokens to schedule.
+        """
+        prev_chunk_cap = self.kv_cache_manager.get_prefill_chunk_cap(request.request_id)
+        # Keep the other in-flight prefills' reservations, but not its own.
+        others_reserved_blocks = self._inflight_prefill_reserved_blocks()
+        others_reserved_blocks -= self._parked_reservations.get(request, 0)
+        if request in self._inflight_prefills:
+            others_reserved_blocks -= self._request_remaining_blocks(request)
+        reserved_blocks = max(reserved_blocks, others_reserved_blocks)
+        chunk_tokens = prev_chunk_cap or num_new_tokens or self.max_num_scheduled_tokens
+        while (chunk_tokens := round_down(chunk_tokens // 2, self.block_size)) > 0:
+            num_tokens = num_new_tokens
+            if not load_kv_async:
+                num_tokens = self._reserve_prefill_lookahead(
+                    request, num_computed_tokens, min(num_new_tokens, chunk_tokens)
+                )
+                if num_tokens == 0:
+                    continue
+            self._set_prefill_chunk_cap(request, chunk_tokens)
+            new_blocks = allocate_slots(num_tokens, reserved_blocks=reserved_blocks)
+            if new_blocks is not None:
+                self.num_prefill_chunk_backoffs += 1
+                logger.warning(
+                    "KV cache cannot fit a full prefill chunk with nothing "
+                    "running; capped prefill chunks of request %s at %d tokens "
+                    "(%d/%d tokens computed, %d free blocks, %d reserved).",
+                    request.request_id,
+                    chunk_tokens,
+                    num_computed_tokens,
+                    request.num_tokens,
+                    self.kv_cache_manager.block_pool.get_num_free_blocks(),
+                    reserved_blocks,
+                )
+                return new_blocks, num_tokens
+        self._set_prefill_chunk_cap(request, prev_chunk_cap)
+        return None, num_new_tokens
 
     def _reserve_parked(self, request: Request) -> None:
         """Cache a parked async KV load's reservation. Set when parked and refreshed

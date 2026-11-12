@@ -8,6 +8,7 @@ import torch
 
 from vllm.sampling_params import SamplingParams
 from vllm.utils.hashing import sha256
+from vllm.utils.math_utils import cdiv
 from vllm.v1.core.block_pool import BlockPool
 from vllm.v1.core.kv_cache_utils import (
     BlockHash,
@@ -1012,6 +1013,85 @@ def test_predictor_matches_allocator_blocks_calculation_with_admission_cap():
             f"but allocator pulled {len(new_blocks)}"
         )
         total_computed = num_tokens
+
+
+@pytest.mark.parametrize("chunked_local", [False, True], ids=["swa", "chunked-local"])
+@pytest.mark.parametrize("shared", [False, True], ids=["exclusive", "shared"])
+def test_admission_cap_counts_recyclable_held_blocks(chunked_local, shared):
+    """The capped estimate for a request that already holds blocks is the cap
+    minus the real blocks it can recycle, not minus the null-padded length of
+    its block table (which would collapse it to 0 after a long external load).
+    """
+    block_size = 16
+    max_in_flight_tokens = 1024
+    if chunked_local:
+        spec = ChunkedLocalAttentionSpec(
+            block_size=block_size,
+            num_kv_heads=1,
+            head_size=1,
+            dtype=torch.float32,
+            attention_chunk_size=128,
+        )
+        manager_cls = ChunkedLocalAttentionManager
+    else:
+        spec = SlidingWindowSpec(
+            block_size=block_size,
+            num_kv_heads=1,
+            head_size=1,
+            dtype=torch.float32,
+            sliding_window=128,
+        )
+        manager_cls = SlidingWindowManager
+    cap = spec.max_admission_blocks_per_request(
+        max_in_flight_tokens=max_in_flight_tokens, max_model_len=8192
+    )
+    block_pool = BlockPool(
+        num_gpu_blocks=200, enable_caching=True, hash_block_size=block_size
+    )
+    manager = manager_cls(
+        spec,
+        block_pool=block_pool,
+        enable_caching=True,
+        kv_cache_group_id=0,
+        scheduler_block_size=block_size,
+        max_admission_blocks_per_request=cap,
+    )
+
+    # An async external load of a long prefix keeps only the window's blocks;
+    # the skipped prefix is padded with null blocks.
+    num_computed_tokens = 1856
+    num_prompt_tokens = 3200
+    manager.add_local_computed_blocks("req", [], 0, num_computed_tokens)
+    manager.allocate_external_computed_blocks("req", 0, num_computed_tokens)
+    req_blocks = manager.req_to_blocks["req"]
+    real_blocks = [block for block in req_blocks if not block.is_null]
+    assert len(req_blocks) > cap > len(real_blocks) > 0
+    if shared:
+        # Another request hits the same blocks: recycling them returns
+        # nothing to the pool, so they must not offset the reservation.
+        manager.add_local_computed_blocks(
+            "other", list(req_blocks), num_computed_tokens, 0
+        )
+        assert all(block.ref_cnt == 2 for block in real_blocks)
+    num_recyclable = 0 if shared else len(real_blocks)
+
+    def estimate(num_tokens: int, apply_admission_cap: bool) -> int:
+        return manager.get_num_blocks_to_allocate(
+            request_id="req",
+            num_tokens=num_tokens,
+            new_computed_blocks=[],
+            total_computed_tokens=num_computed_tokens,
+            num_local_computed_tokens=num_computed_tokens,
+            num_tokens_main_model=num_tokens,
+            apply_admission_cap=apply_admission_cap,
+        )
+
+    uncapped = cdiv(num_prompt_tokens, block_size) - len(req_blocks)
+    assert estimate(num_prompt_tokens, False) == uncapped
+    assert estimate(num_prompt_tokens, True) == cap - num_recyclable
+    # Close to the end of the sequence the uncapped need is the tighter bound.
+    tail_tokens = num_computed_tokens + 2 * block_size
+    assert estimate(tail_tokens, True) == estimate(tail_tokens, False) == 2
 
 
 def test_pop_blocks_for_free_trims_null_head():
