@@ -24,7 +24,7 @@ The batch mixes long prompts (chunked prefill -> extends), a shared prefix
 - n-gram speculative decoding (multi-token decode rows)
 
 Dummy weights make greedy tokens fragile, so the comparison is
-``check_logprobs_close``: tokens may diverge only where the other run ranks
+`check_logprobs_close`: tokens may diverge only where the other run ranks
 the token in its top-k.
 """
 
@@ -177,7 +177,7 @@ DUMMY_HALF_RANGE = 1e-3
 
 def _scale_dummy_weights(model: torch.nn.Module, logit_gain: float) -> None:
     """Give norms unit gain, rescale every matrix to std 1/sqrt(fan_in) and the
-    LM head further by ``logit_gain``, in place and identically on every
+    LM head further by `logit_gain`, in place and identically on every
     backend, so the logits are peaked and greedy tokens depend on what
     attention returns."""
     uniform_std = DUMMY_HALF_RANGE / 3**0.5
@@ -325,7 +325,9 @@ FULL = [
 
 @pytest.mark.parametrize("model", MODELS)
 @pytest.mark.parametrize("cudagraph_mode, async_scheduling", CORE)
-def test_engine_modes(vllm_runner, monkeypatch, model, cudagraph_mode, async_scheduling):
+def test_engine_modes(
+    vllm_runner, monkeypatch, model, cudagraph_mode, async_scheduling
+):
     _compare(
         vllm_runner,
         monkeypatch,

@@ -2,8 +2,8 @@
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 """ROCM_AITER_FA's fused KV-cache update hooks against a float32 reference.
 
-``do_rope_and_kv_cache_update`` (RoPE + cache write) and
-``do_qk_norm_rope_kvcache_update`` (per-head RMSNorm + RoPE + cache write)
+`do_rope_and_kv_cache_update` (RoPE + cache write) and
+`do_qk_norm_rope_kvcache_update` (per-head RMSNorm + RoPE + cache write)
 replace the separate ops the compile fusion passes match. Each must produce
 the rotated q/k and the cache bytes the unfused path would.
 """

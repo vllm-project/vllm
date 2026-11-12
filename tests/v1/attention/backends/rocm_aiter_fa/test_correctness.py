@@ -6,9 +6,9 @@ Dimensions: model shape (head size, H/KV, TP-sharded heads, sliding window)
 x phase (prefill / extend / decode / mixed) x tokens per request (1, 2048,
 4096, 8192) x requests per batch (1, 16, 128) x block size (16, 32) x KV
 dtype (auto, fp8). Pre-merge runs a covering set where every value of each
-dimension meets every phase; ``-m slow_test`` runs the full product.
+dimension meets every phase; `-m slow_test` runs the full product.
 
-Prefill and extend batches are capped at ``TOKEN_BUDGET`` new tokens, as the
+Prefill and extend batches are capped at `TOKEN_BUDGET` new tokens, as the
 scheduler's max_num_batched_tokens would cap them; requests beyond the budget
 become decodes over the same context, which is what a running batch holds.
 """
