@@ -276,6 +276,7 @@ def test_online_mxfp4_hadamard(
     num_tokens,
     default_vllm_config,
     dist_init,
+    monkeypatch,
 ):
     """The rotated layer computes the same GEMM with less MXFP4 error, and
     matches the unrotated layer run on explicitly rotated operands. Only
@@ -283,8 +284,11 @@ def test_online_mxfp4_hadamard(
     supported, reason = kernel_cls.is_supported()
     if not supported:
         pytest.skip(reason)
+    if kernel_cls is AiterMxfp4LinearKernel:
+        # The ASM GEMM is gated on VLLM_ROCM_USE_AITER, which CI does not set.
+        monkeypatch.setattr(rocm_aiter_ops, "_AITER_ENABLED", True)
     if fused and not rocm_aiter_ops.is_asm_fp4_gemm_supported():
-        pytest.skip("AITER's ASM FP4 GEMM needs VLLM_ROCM_USE_AITER=1 on gfx950.")
+        pytest.skip("AITER's ASM FP4 GEMM needs gfx950.")
     default_vllm_config.model_config = ModelConfig()
     set_random_seed(0)
     with torch.device(current_platform.device_type):
