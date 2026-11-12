@@ -266,6 +266,25 @@ def _boundary_chunks(tokenizer, parser, end_token_id=None):
     ]
 
 
+def test_parse_delta_empty_reasoning_kept_on_boundary(tokenizer, request_obj):
+    """Regression: an empty reasoning block that ends in the same delta as a
+    tool call starts must be emitted as reasoning="", not dropped."""
+    parser = make_parser(tokenizer, reasoning=True, tool=True)
+    text = (
+        "<think></think>"
+        '<tool_call>\n{"name": "get_weather", '
+        '"arguments": {"city": "Dallas"}}\n</tool_call>'
+    )
+    chunks = [tokenizer.encode(text, add_special_tokens=False)]
+    results = stream_chunks(parser, tokenizer, chunks, request_obj)
+
+    assert any(r is not None and r.reasoning == "" for r in results)
+    _, content, tool_calls = collect_fields(results)
+    assert content == ""
+    assert len(tool_calls) > 0
+    assert tool_calls[0].function.name == "get_weather"
+
+
 def test_parse_delta_reasoning_not_dropped_on_boundary(tokenizer, request_obj):
     """Regression: reasoning must not be lost when a multi-token delta
     spans the reasoning/tool-call boundary."""
