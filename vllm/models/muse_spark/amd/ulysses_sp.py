@@ -34,7 +34,11 @@ from vllm.distributed import get_tensor_model_parallel_world_size, get_tp_group
 from vllm.logger import init_logger
 from vllm.platforms import current_platform
 
+from . import fp8_dense
+from .ops import fp8_linear
+
 if TYPE_CHECKING:
+    from vllm.model_executor.layers.quantization import QuantizationConfig
     from vllm.v1.worker.gpu_worker import Worker
 
     from .model import TokenShard
@@ -297,14 +301,31 @@ def _quant_weight(full: torch.Tensor) -> FP8Weight:
     return weight, scale.view(1, -1)
 
 
+def _rows(parts: list[torch.Tensor], rows: slice) -> torch.Tensor:
+    return torch.cat([p[rows] for p in parts])
+
+
 def build_weights(
     qkv_proj: torch.nn.Module, o_proj: torch.nn.Module, q: int, kv: int
 ) -> UlyssesWeights:
     """The full FP8 weights of the TP-sharded fused `[q|k|v|o-gate]` (`q`, `kv`:
     this rank's sizes) and O projections."""
+    qkv_rows, gate_rows = slice(0, q + 2 * kv), slice(q + 2 * kv, 2 * q + 2 * kv)
+    if fp8_dense.is_converted(qkv_proj):
+        # Rows are quantized independently, so the gathered FP8 rows and scales
+        # equal quantizing the gathered BF16 weight.
+        weights, scales = fp8_dense.full_weight_parts(
+            qkv_proj, _group(), get_tensor_model_parallel_world_size()
+        )
+        o = torch.cat(_all_gather_weight(o_proj), dim=1)
+        torch.accelerator.empty_cache()
+        qkv, gate = (
+            (_rows(weights, rows), _rows(scales, rows).view(1, -1))
+            for rows in (qkv_rows, gate_rows)
+        )
+        return UlyssesWeights(qkv, gate, _quant_weight(o))
     parts = _all_gather_weight(qkv_proj)
-    qkv = torch.cat([p[: q + 2 * kv] for p in parts])
-    gate = torch.cat([p[q + 2 * kv : 2 * q + 2 * kv] for p in parts])
+    qkv, gate = _rows(parts, qkv_rows), _rows(parts, gate_rows)
     del parts
     o = torch.cat(_all_gather_weight(o_proj), dim=1)
     # Release the cached blocks so the resident copies get blocks of their own size.
@@ -312,11 +333,23 @@ def build_weights(
     return UlyssesWeights(_quant_weight(qkv), _quant_weight(gate), _quant_weight(o))
 
 
-def quant_rows(x: torch.Tensor) -> FP8Weight:
-    """Per-token dynamic FP8 quantization of `x` (aiter)."""
-    return rocm_aiter_ops.per_token_quant(x.contiguous(), current_platform.fp8_dtype())
+def require_bf16_o_proj(
+    o_proj: torch.nn.Module, quant_config: "QuantizationConfig | None"
+) -> None:
+    """Refuse online quantization of `o_proj`: the Ulysses prefill builds its own
+    FP8 copy from the BF16 weight."""
+    if fp8_dense.online_target(o_proj, quant_config):
+        raise ValueError(
+            f"Muse Spark ulysses_prefill needs a BF16 {o_proj.prefix}; add "
+            '"*o_proj" to quantization_config.ignore.'
+        )
 
 
-def gemm(xq: FP8Weight, w: FP8Weight, out_dtype: torch.dtype) -> torch.Tensor:
-    """FP8 GEMM of the `quant_rows` output `xq` with `w` (aiter CK)."""
+def gemm(
+    xq: FP8Weight, w: FP8Weight, out_dtype: torch.dtype, scaled_mm: bool = False
+) -> torch.Tensor:
+    """FP8 GEMM of per-token FP8 rows `xq` with `w`: aiter CK, or with `scaled_mm`
+    hipBLASLt's row-wise scaled GEMM."""
+    if scaled_mm:
+        return fp8_linear.scaled_mm(xq[0], xq[1], w[0], w[1], out_dtype)
     return rocm_aiter_ops.w8a8_gemm(xq[0], w[0], xq[1], w[1], None, out_dtype)
