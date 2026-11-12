@@ -78,7 +78,7 @@ steps:
     'export VLLM_USE_RUST_FRONTEND=1 &&
     export VLLM_WORKER_MULTIPROC_METHOD=spawn &&
     cd tests &&
-    PYTHONPATH=/workspace/vllm pytest -v -s entrypoints/serve/dev/rpc/test_collective_rpc.py &&
+    PYTHONPATH=/vllm-workspace pytest -v -s entrypoints/serve/dev/rpc/test_collective_rpc.py &&
     pytest -v -s entrypoints/serve/instrumentator/test_basic.py -k "not server_load" &&
     pytest -v -s entrypoints/scale_out/token_in_token_out/test_serving_tokens.py -k "not stream and not lora and not test_generate_logprobs and not stop_string_workflow" &&
     pytest -v -s entrypoints/serve/instrumentator/test_metrics.py -k "text and not show and not run_batch and not test_metrics_counts and not test_metrics_exist" &&
@@ -90,7 +90,7 @@ steps:
   device: intel_gpu_k8s
   num_devices: 1
   resource_claim_template: b70-1
-  working_dir: "/workspace/vllm/"
+  working_dir: "/vllm-workspace/"
   env:
     VLLM_TEST_DEVICE: "xpu"
   source_file_dependencies:
@@ -110,7 +110,7 @@ steps:
   device: intel_gpu_k8s
   num_devices: 1
   resource_claim_template: b70-1
-  working_dir: "/workspace/vllm/"
+  working_dir: "/vllm-workspace/"
   env:
     VLLM_TEST_DEVICE: "xpu"
   source_file_dependencies:
