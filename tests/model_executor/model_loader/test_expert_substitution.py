@@ -35,7 +35,7 @@ from vllm.v1.attention.backends.registry import AttentionBackendEnum
 
 
 def _moe_sparsity_config(retained_per_layer):
-    """The ``quantization_config.moe_sparsity_config`` novice format."""
+    """The `quantization_config.moe_sparsity_config` novice format."""
     return {
         "config_groups": {},
         "format": "fakequant",
@@ -56,7 +56,7 @@ MODEL_CONFIG = SimpleNamespace(
 
 def _nvfp4_quantization_config(retained_per_layer):
     """A compressed-tensors NVFP4 config that targets the stacked experts."""
-    nvfp4_weights = {
+    nvfp4_weights: dict[str, object] = {
         "actorder": None,
         "block_structure": None,
         "dynamic": False,
@@ -98,8 +98,8 @@ _FP4_MAGNITUDES = (0.0, 0.5, 1.0, 1.5, 2.0, 3.0, 4.0, 6.0)
 def _pack_nvfp4(weight: torch.Tensor, global_scale: float):
     """Quantize one [N, K] projection to packed FP4 and per-group scales.
 
-    Mirrors ``ref_nvfp4_quant`` from ``nvfp4_emulation_utils`` plus the
-    two-values-per-byte packing of ``break_fp4_bytes``.
+    Mirrors `ref_nvfp4_quant` from `nvfp4_emulation_utils` plus the
+    two-values-per-byte packing of `break_fp4_bytes`.
     """
     num_rows, num_cols = weight.shape
     blocks = weight.float().reshape(num_rows, num_cols // 16, 16)
@@ -221,34 +221,54 @@ def test_missing_novices_tensor_is_rejected():
 
 
 @pytest.mark.parametrize("missing_novices", [False, True])
-def test_tensorizer_finalizes_local_novices(monkeypatch, missing_novices):
+@pytest.mark.usefixtures("dist_init", "workspace_init")
+def test_tensorizer_finalizes_local_novices(tmp_path: Path, missing_novices):
     """Raw Tensorizer loading must reject an unloaded local novices tensor."""
-    from vllm.model_executor.model_loader import tensorizer_loader
+    from vllm.model_executor.model_loader.tensorizer import TensorSerializer
 
-    model = _cpu_model(local_layers=(0,))
-    weights = [("weight", torch.tensor([1.0, 2.0]))]
-    if not missing_novices:
-        weights.append((_novices(0), torch.ones(2, 2)))
-    finalize = Mock(wraps=model.process_weights_after_loading)
-    monkeypatch.setattr(model, "process_weights_after_loading", finalize)
-    monkeypatch.setattr(tensorizer_loader, "initialize_model", lambda **kwargs: model)
-    loader = object.__new__(tensorizer_loader.TensorizerLoader)
-    monkeypatch.setattr(loader, "_get_weights_iterator", lambda: iter(weights))
-    config = SimpleNamespace(
-        model_config=SimpleNamespace(dtype=torch.float32),
-        device_config=SimpleNamespace(device="cpu"),
+    weights = _write_tiny_qwen3_mone_checkpoint(tmp_path)
+    novices = weights[_novices(0)]
+    if missing_novices:
+        del weights[_novices(0)]
+    checkpoint = tmp_path / "model.tensors"
+    with checkpoint.open("wb+") as stream:
+        serializer = TensorSerializer(stream)
+        serializer.write_state_dict(weights)
+        serializer.close()
+
+    model_config = ModelConfig(
+        model=str(tmp_path),
+        skip_tokenizer_init=True,
+        dtype="float16",
+        max_model_len=32,
+        enforce_eager=True,
     )
+    load_config = LoadConfig(
+        load_format="tensorizer",
+        model_loader_extra_config={
+            "tensorizer_config": {"tensorizer_uri": str(checkpoint)}
+        },
+    )
+    config = VllmConfig(
+        model_config=model_config,
+        device_config=DeviceConfig(device="cuda"),
+        load_config=load_config,
+        attention_config=AttentionConfig(backend=AttentionBackendEnum.FLASH_ATTN),
+        kernel_config=KernelConfig(moe_backend="triton"),
+    )
+    loader = get_model_loader(load_config)
 
     if missing_novices:
         with pytest.raises(ValueError, match="missing or incomplete"):
-            loader._load_model_serialized_cpu(config)
+            loader.load_model(config, model_config)
     else:
-        assert loader._load_model_serialized_cpu(config) is model
+        model = loader.load_model(config, model_config)
+        routed_experts = model.model.layers[0].mlp.experts.routed_experts
+        substitution = routed_experts.expert_substitution
         torch.testing.assert_close(
-            model.model.layers[0].mlp.experts.novices,
-            torch.ones(2, 2),
+            substitution.novices.cpu(),
+            novices,
         )
-    finalize.assert_called_once_with()
 
 
 def _write_tiny_qwen3_mone_checkpoint(model_dir: Path) -> dict[str, torch.Tensor]:
@@ -352,7 +372,7 @@ def _write_tiny_qwen3_mone_nvfp4_checkpoint(model_dir: Path) -> dict[str, torch.
     """One MoE layer of 4 NVFP4 experts that retains experts 0-2, collapses 3.
 
     Expert tensors use the stacked (fused) names of compact MoNE exports:
-    ``experts.gate_up_proj.weight_packed`` and friends.
+    `experts.gate_up_proj.weight_packed` and friends.
     """
     config = Qwen3MoeConfig(
         architectures=["Qwen3MoeForCausalLM"],
