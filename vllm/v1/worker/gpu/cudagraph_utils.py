@@ -166,10 +166,10 @@ def get_cudagraph_seq_len_bounds(
 ) -> list[int]:
     """Context-length bounds to capture extra FULL decode graphs for.
 
-    A module declares one by setting ``cudagraph_seq_len_bound``: when the
-    attention metadata's ``max_seq_len`` is at most that bound, its forward
+    A module declares one by setting `cudagraph_seq_len_bound`: when the
+    attention metadata's `max_seq_len` is at most that bound, its forward
     skips work, and the skip is safe to capture in a FULL graph because such a
-    graph replays only for batches within its ``max_seq_len``.
+    graph replays only for batches within its `max_seq_len`.
     """
     parallel_config = vllm_config.parallel_config
     if (
