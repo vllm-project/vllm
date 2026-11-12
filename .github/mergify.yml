@@ -710,6 +710,7 @@ pull_request_rules:
     - label != stale
     - or:
       - files~=^vllm/distributed/kv_transfer/kv_connector/v1/mooncake/
+      - files~=^vllm/distributed/kv_transfer/kv_connector/v1/mooncake_store/
       # Covers the mooncake/ connector dir, mooncake_store_embedding/ and
       # mooncake_ec_connector.py.
       - files~=^vllm/distributed/ec_transfer/ec_connector/mooncake
