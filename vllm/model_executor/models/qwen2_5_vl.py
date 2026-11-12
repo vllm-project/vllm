@@ -26,7 +26,7 @@
 # limitations under the License.
 """Inference-only Qwen2.5-VL model compatible with HuggingFace weights."""
 
-from collections.abc import Callable, Iterable, Iterator, Mapping, Sequence
+from collections.abc import Callable, Hashable, Iterable, Iterator, Mapping, Sequence
 from functools import partial
 from typing import Annotated, Any, Literal, TypeAlias
 
@@ -1779,29 +1779,109 @@ class Qwen2_5_VLForConditionalGeneration(
         )
         return max_frames_per_video
 
-    def _get_encoder_cudagraph_capture_metadata_kwargs(
+    def prepare_encoder_cudagraph_capture_inputs(
         self,
         token_budget: int,
         max_batch_size: int,
         max_frames_per_batch: int,
-    ) -> dict[str, Any]:
-        # Each local window is bounded by fixed geometry: (window_size /
-        # patch_size / spatial_merge_size)^2 merged tokens, times
-        # spatial_merge_size^2 in the unmerged sequence the kernels see.
-        spatial_merge_size = self.visual.spatial_merge_size
-        vit_merger_window_size = (
-            self.visual.window_size // spatial_merge_size // self.visual.patch_size
+        device: torch.device,
+        dtype: torch.dtype,
+        path: str = "default",
+        axis_keys: tuple[Hashable, ...] | None = None,
+    ):
+        from vllm.v1.worker.encoder_cudagraph_defs import (
+            EncoderCudaGraphCaptureInputs,
         )
-        return {
-            "max_window_seqs_per_batch": (
-                self.visual.get_encoder_cudagraph_max_window_seqs(
-                    token_budget, max_batch_size, max_frames_per_batch
-                )
-            ),
-            "max_seqlen_window_override": (
-                vit_merger_window_size**2 * spatial_merge_size**2
-            ),
+
+        spatial_merge_size = self.visual.spatial_merge_size
+        max_window_seqs_per_batch = self.visual.get_encoder_cudagraph_max_window_seqs(
+            token_budget, max_batch_size, max_frames_per_batch
+        )
+        # Use ceil here (not floor) so total captured capacity is never smaller
+        # than token_budget when token_budget is not divisible by max_batch_size
+        # (e.g., 324 budget with max_batch_size=8). Floor under-allocates
+        # input_buffer and can fail replay copy for valid single-item batches.
+        per_mm_item_output = (token_budget + max_batch_size - 1) // max_batch_size
+
+        frames_per_item = max_frames_per_batch // max_batch_size
+        if frames_per_item > 1:
+            # Build the capture grid using a video-format layout so that
+            # cu_seqlens is sized for video replays from the start.
+            # cu_seqlens has one entry per attention sequence (one per frame),
+            # so using T > 1 per item makes the buffer large enough without
+            # relying solely on padding.
+            # Ceiling ensures frames_per_item * tokens_per_frame >= per_mm_item_output
+            # so the pixel_values buffer covers any valid single-item replay.
+            tokens_per_frame = (
+                per_mm_item_output + frames_per_item - 1
+            ) // frames_per_item
+            # Video-format grid_config (T=frames_per_item).
+            grid_config = [
+                [
+                    frames_per_item,
+                    spatial_merge_size,
+                    tokens_per_frame * spatial_merge_size,
+                ]
+                for _ in range(max_batch_size)
+            ]
+        else:
+            # Image-format grid_config (T=1).
+            grid_config = [
+                [1, spatial_merge_size, per_mm_item_output * spatial_merge_size]
+                for _ in range(max_batch_size)
+            ]
+
+        # Create dummy pixel_values; uint8 when normalization is fused
+        # on-device. Contents are overwritten before every replay.
+        patch_embed = self.visual.patch_embed
+        in_channels = patch_embed.proj.in_channels
+        patch_size = patch_embed.patch_size
+        temporal_patch_size = patch_embed.temporal_patch_size
+        total_patches = sum(t * h * w for t, h, w in grid_config)
+        flattened_patch_size = (
+            in_channels * temporal_patch_size * patch_size * patch_size
+        )
+        dummy_pixel_values = torch.zeros(
+            total_patches,
+            flattened_patch_size,
+            device=device,
+            dtype=self.visual.input_norm.input_dtype or dtype,
+        )
+
+        # Override max_seqlen with a safe upper bound for capture.
+        # max_seqlen.item() gets baked into the CUDA graph (not replayed),
+        # so the capture value must cover any replay scenario.
+        # Worst case: 1 item consuming the full budget ->
+        # seq_len = token_budget * spatial_merge_size^2.
+        # For window-attention, each local window is bounded by fixed geometry:
+        # (window_size / patch_size / spatial_merge_size)^2 windows in merged
+        # token space, multiplied by spatial_merge_size^2 to map back to the
+        # unmerged sequence length used by attention kernels.
+        vit_merger_window_size = (
+            self.visual.window_size
+            // self.visual.spatial_merge_size
+            // self.visual.patch_size
+        )
+        max_seqlen_window_override = vit_merger_window_size**2 * (spatial_merge_size**2)
+        metadata = self.visual.prepare_encoder_metadata(
+            grid_config,
+            max_batch_size=max_batch_size,
+            max_frames_per_batch=max_frames_per_batch,
+            max_window_seqs_per_batch=max_window_seqs_per_batch,
+            max_seqlen_override=token_budget * (spatial_merge_size**2),
+            max_seqlen_window_override=max_seqlen_window_override,
+            device=device,
+        )
+
+        # Just use image-modality dummy input_buffer for capturing, since it's also
+        # compatible for video inputs (has the same shape: [num_patches, C*T*P*P]).
+        values = metadata | {
+            "pixel_values": dummy_pixel_values,
         }
+
+        return EncoderCudaGraphCaptureInputs(
+            values=values,
+        )
 
     def forward(
         self,

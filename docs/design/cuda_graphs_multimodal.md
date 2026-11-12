@@ -144,7 +144,7 @@ Models opt-in to encoder CUDA Graphs by implementing the [SupportsEncoderCudaGra
 !!! note
     The `SupportsEncoderCudaGraph` protocol is designed to be model-agnostic. New vision encoder models can opt-in by implementing the protocol methods without modifying the manager.
 
-    Vision towers that take `pixel_values` with `image_grid_thw` / `video_grid_thw` (Qwen2-VL style) can inherit `GridThwEncoderCudaGraphMixin` from `vllm/model_executor/models/encoder_cudagraph_utils.py`, which implements the protocol; the model then provides `get_encoder_cudagraph_config()` and overrides a hook only where it differs.
+    Vision towers that take `pixel_values` with `image_grid_thw` / `video_grid_thw` (Qwen2-VL style) can inherit `GridThwEncoderCudaGraphMixin` from `vllm/model_executor/models/encoder_cudagraph_utils.py`, which implements the protocol; the model then provides `get_encoder_cudagraph_config()` and overrides a protocol method only where it differs.
 
 ## Configuration
 
