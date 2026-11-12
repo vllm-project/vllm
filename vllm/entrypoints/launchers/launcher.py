@@ -284,6 +284,8 @@ async def serve_http(
         try:
             if engine_client is not None:
                 engine_client.shutdown(timeout=0)
+        except Exception:
+            logger.exception("[shutdown] API server: engine shutdown failed")
         finally:
             os._exit(128 + signum)
 
@@ -301,14 +303,17 @@ async def serve_http(
             )
             drain_abandoned.set_result(signum)
             return
-        cleanup_only = engine_stopped or (
-            shutdown_task is not None and shutdown_task.done()
+        cleanup_only = (
+            engine_stopped
+            or drain_abandoned.done()
+            or (shutdown_task is not None and shutdown_task.done())
         )
         if not shutdown_event.is_set() or not cleanup_only:
             request_shutdown()
             return
-        # Only HTTP and plugin cleanup remain. A repeated signal must not wait
-        # for a hook that never returns. Exit directly: as a container's PID 1,
+        # Only HTTP and plugin cleanup, or engine shutdown after an abandoned
+        # drain, remain. A repeated signal must not wait for a hook or engine
+        # shutdown that never returns. Exit directly: as a container's PID 1,
         # the process ignores a signal whose action is the default.
         logger.warning(
             "[shutdown] API server: received %s during cleanup; exiting",

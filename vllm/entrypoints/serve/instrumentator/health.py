@@ -46,6 +46,11 @@ async def ready(raw_request: Request) -> Response:
             await client.check_health()
         except EngineDeadError:
             return Response(status_code=503)
+        except Exception:
+            # Draining may begin during the check.
+            if getattr(state, "draining", False):
+                return Response(status_code=503)
+            raise
     if getattr(state, "draining", False) or not endpoint_plugins_ready(state):
         return Response(status_code=503)
     return Response(status_code=200)

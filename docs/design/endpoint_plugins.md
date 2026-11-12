@@ -150,7 +150,7 @@ The server runs eligible plugins' `drain(state, timeout)` hooks concurrently bef
 
 The engine receives the deadline's remaining allowance, which may be zero if plugin drains consume it. There is no reserved engine allowance. With `--shutdown-timeout 0` (the default), the server sets draining, skips drain hooks and proceeds with immediate engine shutdown and plugin cleanup. The CPU-only render server uses the same configured timeout for plugin drains.
 
-`stop` hooks run only after drains settle, including after watchdog exit and startup rollback. Cancellation cleanup remains cooperative, so the drain deadline is **not a hard process-exit bound**. If a drain ignores cancellation, a repeated SIGINT or SIGTERM after the deadline abandons it: the server stops the engine with no remaining allowance, then exits with status 128 plus the signal number without running `stop` hooks.
+`stop` hooks run only after drains settle, including after watchdog exit and startup rollback. Cancellation cleanup remains cooperative, so the drain deadline is **not a hard process-exit bound**. If a drain ignores cancellation, a repeated SIGINT or SIGTERM after the deadline abandons it: the server stops the engine with no remaining allowance, then exits with status 128 plus the signal number without running `stop` hooks. A further signal during that engine shutdown exits at once without waiting for it, which may leave the EngineCore process running, as after SIGKILL.
 
 ## Registering the entry point
 

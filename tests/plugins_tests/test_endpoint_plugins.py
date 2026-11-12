@@ -19,6 +19,7 @@ import signal
 import socket
 import subprocess
 import sys
+import threading
 import time
 from argparse import Namespace
 from contextlib import asynccontextmanager
@@ -43,6 +44,7 @@ from vllm.plugins import load_endpoint_plugins
 from vllm.plugins.endpoint_plugins.interface import (
     EndpointPlugin,
     attach_endpoint_plugins,
+    drain_endpoint_plugins,
     init_endpoint_plugins_state,
 )
 from vllm.utils.argparse_utils import FlexibleArgumentParser
@@ -621,26 +623,34 @@ async def _serve_in_child(case: str) -> None:
     class _Engine(_ServingEngineClient):
         def shutdown(self, timeout: float | None = None) -> None:
             super().shutdown(timeout)
-            if case != "abandon_during_engine_shutdown":
+            if case not in _HANGING_DRAIN:
                 return
-            # Watchdog exit cancels shutdown during engine shutdown, which fails.
+            # Watchdog exit cancels shutdown during engine shutdown, which then
+            # fails, or hangs after sending one more signal.
             self.errored, self.is_running = True, False
             loop.call_soon_threadsafe(terminate_if_errored, state.server, self)
             deadline = time.monotonic() + _TIMEOUT_S
             while not state.shutdown_task.cancelling():
                 assert time.monotonic() < deadline
                 time.sleep(0.01)
+            if case == "abandoned_engine_shutdown_hangs":
+                os.kill(os.getpid(), signal.SIGTERM)
+                threading.Event().wait()
             raise RuntimeError("engine shutdown failed")
 
-    class _RepeatsSignal:
-        @property
-        def shutdown_timeout(self) -> int:
-            os.kill(os.getpid(), signal.SIGTERM)
-            return 0
+    async def drain_after_signal(state: State, deadline: float) -> None:
+        # A repeated signal is handled while the zero-timeout drain is pending.
+        # Handlers run in delivery order, so SIGTERM's has run once SIGUSR1's has.
+        handled = asyncio.Event()
+        loop.add_signal_handler(signal.SIGUSR1, handled.set)
+        os.kill(os.getpid(), signal.SIGTERM)
+        os.kill(os.getpid(), signal.SIGUSR1)
+        await handled.wait()
+        events.append("signal_during_drain")
+        await drain_endpoint_plugins(state, deadline)
 
-    engine = _Engine(events, shutdown_timeout=1 if case in _ONE_SECOND else 30)
-    if case == "zero_timeout_repeated_signal":
-        engine.vllm_config = _RepeatsSignal()
+    timeout = 0 if case == "zero_timeout_signal_during_drain" else 30
+    engine = _Engine(events, shutdown_timeout=1 if case in _ONE_SECOND else timeout)
     blocked = asyncio.Event()
 
     class _Blocking(DummyAdminEndpointPlugin):
@@ -703,6 +713,11 @@ async def _serve_in_child(case: str) -> None:
 
     async with engine_context(), contextlib.AsyncExitStack() as stack:
         monkeypatch = stack.enter_context(pytest.MonkeyPatch.context())
+        if case == "zero_timeout_signal_during_drain":
+            monkeypatch.setattr(
+                "vllm.entrypoints.launchers.launcher.drain_endpoint_plugins",
+                drain_after_signal,
+            )
         plugins = [_dummy("A", events), _Blocking(events), _dummy("C", events)]
         plugins[1].hang_drain = case in _HANGING_DRAIN
         app = await _build_plugin_app(
@@ -737,13 +752,13 @@ async def _serve_in_child(case: str) -> None:
                 await client.get(f"http://127.0.0.1:{port}/health")
 
 
-_HANGING_DRAIN = ("drain_ignores_cancel", "abandon_during_engine_shutdown")
+_HANGING_DRAIN = ("abandon_during_engine_shutdown", "abandoned_engine_shutdown_hangs")
 _ONE_SECOND = (*_HANGING_DRAIN, "drain_cancelled_stop_hangs")
 _AFTER_START = (
     *_ONE_SECOND,
     "stop_ignores_signal",
     "stop_hangs_after_watchdog",
-    "zero_timeout_repeated_signal",
+    "zero_timeout_signal_during_drain",
 )
 _ROLLED_BACK = ["partial_cleanup:B", "stop:A", "native_shutdown"]
 _EXITED = ["engine_context_exit"]
@@ -766,12 +781,12 @@ _EXITED = ["engine_context_exit"]
             ["start:C", "engine_shutdown", "stop:C", "stop:B"],
         ),
         (
-            "drain_ignores_cancel",
+            "abandon_during_engine_shutdown",
             (128 + signal.SIGTERM,),
             ["start:C", "drain_hangs", "drain_cancel_ignored", "engine_shutdown"],
         ),
         (
-            "abandon_during_engine_shutdown",
+            "abandoned_engine_shutdown_hangs",
             (128 + signal.SIGTERM,),
             ["start:C", "drain_hangs", "drain_cancel_ignored", "engine_shutdown"],
         ),
@@ -781,10 +796,11 @@ _EXITED = ["engine_context_exit"]
             ["start:C", "stop:C", "stop:B"],
         ),
         (
-            "zero_timeout_repeated_signal",
+            "zero_timeout_signal_during_drain",
             (0,),
             [
                 "start:C",
+                "signal_during_drain",
                 "engine_shutdown",
                 "stop:C",
                 "stop:B",
@@ -808,7 +824,7 @@ def test_shutdown_during_plugin_lifecycle(
     cancellation or never returns, a repeated SIGTERM or SIGINT exits the
     process instead of hanging: after engine shutdown, or once the shutdown
     task has been cancelled. After the drain deadline, it abandons the drain
-    and exits once the engine has shut down."""
+    and exits once the engine has shut down, or at the next signal."""
     code = (
         "import runpy, uvloop; "
         f"scope = runpy.run_path({__file__!r}); "
@@ -829,6 +845,8 @@ def test_shutdown_during_plugin_lifecycle(
     # Uvicorn versions either return or raise SystemExit(3) on startup failure.
     assert result.returncode in returncodes, output
     assert events == ["start:A", "start:B", *expected], output
+    if case == "abandon_during_engine_shutdown":
+        assert "RuntimeError: engine shutdown failed" in output, output
 
 
 class _StartOnlyPlugin(_LegacyEndpointPlugin):
@@ -916,6 +934,9 @@ class _ReadyPlugin(_LegacyEndpointPlugin):
         pytest.param(True, "error", False, 500, id="engine-error"),
         pytest.param(True, "error", True, 503, id="draining-before-engine-error"),
         pytest.param(True, "drains", False, 503, id="draining-during-engine-check"),
+        pytest.param(
+            True, "drains-then-error", False, 503, id="draining-during-engine-error"
+        ),
         pytest.param(False, None, False, 503, id="render-not-ready"),
     ],
 )
@@ -930,8 +951,10 @@ async def test_ready_reports_plugin_readiness_and_draining(
                 raise EngineDeadError()
             if engine_health == "error":
                 raise RuntimeError("health failed")
-            if engine_health == "drains":
+            if engine_health in ("drains", "drains-then-error"):
                 app.state.draining = True
+            if engine_health == "drains-then-error":
+                raise RuntimeError("health failed")
 
     engine = _Engine([]) if engine_health else None
     plugins = [_LegacyEndpointPlugin() if plugin is None else _ReadyPlugin(plugin)]
