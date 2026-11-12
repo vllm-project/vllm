@@ -1667,6 +1667,29 @@ def test_cooperative_topk_candidate_overflow(seq_len: int, top_k: int) -> None:
 
 
 @pytest.mark.skipif(not _has_device_capability(90), reason="This test requires SM90+")
+@pytest.mark.parametrize("num_rows", [1, 6, 7, 8])
+@pytest.mark.parametrize("seq_len", [32768, 262144, 1 << 20])
+@pytest.mark.parametrize("top_k", [512, 2048])
+@pytest.mark.parametrize("dtype", [torch.float32, torch.bfloat16])
+@torch.inference_mode()
+def test_cooperative_topk_overflow_long_stride(
+    num_rows: int, seq_len: int, top_k: int, dtype: torch.dtype
+) -> None:
+    """Candidate overflow on max_model_len=1M logits, which take CS24 (1-6
+    rows) and oversized CS16 (7-8 rows) on SM107 with FP32."""
+    stride = 1 << 20
+    row = 1.0 + torch.arange(seq_len, dtype=torch.float32) * (0.01 / seq_len)
+    logits = torch.full((num_rows, stride), float("inf"), device="cuda", dtype=dtype)
+    logits[:, :seq_len] = row.cuda()
+    lengths = torch.full((num_rows,), seq_len, dtype=torch.int32, device="cuda")
+    indices = torch.empty((num_rows, top_k), dtype=torch.int32, device="cuda")
+
+    _run_topk_backend("cooperative_topk", logits, lengths, indices, top_k, seq_len)
+    torch.accelerator.synchronize()
+    _assert_cooperative_topk_exact(logits, indices, seq_len, top_k)
+
+
+@pytest.mark.skipif(not _has_device_capability(90), reason="This test requires SM90+")
 @pytest.mark.parametrize("num_rows", [9, 34, 64])
 @pytest.mark.parametrize("seq_len", [65535, 65536, 65537])
 @pytest.mark.parametrize("dtype", [torch.float32, torch.bfloat16])

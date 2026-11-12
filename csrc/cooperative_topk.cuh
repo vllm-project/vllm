@@ -51,8 +51,6 @@ constexpr uint32_t kFusedStagesCS24 = 3 * kStagesPerFp32Stage<InT>;
 template <typename InT>
 constexpr uint32_t kFusedMaxLenCS16 =
     16 * kFusedStagesCS16<InT> * kSizePerStage;
-template <typename InT>
-constexpr uint32_t kMinLenCS16 = 4 * kStagesPerFp32Stage<InT> * kSizePerStage;
 
 // CS=4 single-pass path: 49152 FP32 or 98304 BF16 elements per block
 template <typename InT>
@@ -156,37 +154,46 @@ __device__ __forceinline__ void dsmem_hist_reduce(uint32_t* histogram) {
   auto cluster = cooperative_groups::this_cluster();
   const auto tx = threadIdx.x;
   const auto rank = blockIdx.y;
+  constexpr uint32_t kVecs = NumBins / 4;
+  static_assert(NumBins % 4 == 0);
+  uint4* const hist4 = reinterpret_cast<uint4*>(histogram);
   if constexpr ((CS & (CS - 1)) != 0) {
-    constexpr uint32_t kOwn = (NumBins + CS - 1) / CS;
-    __shared__ uint32_t s_red[kOwn];
-    const uint32_t lo = min(rank * kOwn, NumBins);
-    const uint32_t n = min(kOwn, NumBins - lo);
-    for (uint32_t t = tx; t < kOwn; t += hist4096::kBlockSize) {
+    constexpr uint32_t kOwnVecs = (kVecs + CS - 1) / CS;
+    __shared__ __align__(16) uint32_t s_red[kOwnVecs * 4];
+    const uint32_t lo = min(rank * kOwnVecs, kVecs);
+    const uint32_t n = min(kOwnVecs, kVecs - lo);
+    for (uint32_t t = tx; t < kOwnVecs * 4; t += hist4096::kBlockSize) {
       s_red[t] = 0;
     }
     cluster.sync();
     for (uint32_t t = tx; t < n * CS; t += hist4096::kBlockSize) {
-      const uint32_t b = t / CS, src = t % CS;
-      atomicAdd(&s_red[b], *cluster.map_shared_rank(&histogram[lo + b], src));
+      const uint32_t v = t % n, src = t / n;
+      const uint4 h = *cluster.map_shared_rank(hist4 + lo + v, src);
+      atomicAdd(&s_red[4 * v + 0], h.x);
+      atomicAdd(&s_red[4 * v + 1], h.y);
+      atomicAdd(&s_red[4 * v + 2], h.z);
+      atomicAdd(&s_red[4 * v + 3], h.w);
     }
     __syncthreads();
     for (uint32_t t = tx; t < n * CS; t += hist4096::kBlockSize) {
-      const uint32_t b = t % n, dst = t / n;
-      *cluster.map_shared_rank(&histogram[lo + b], dst) = s_red[b];
+      const uint32_t v = t % n, dst = t / n;
+      *cluster.map_shared_rank(hist4 + lo + v, dst) =
+          reinterpret_cast<const uint4*>(s_red)[v];
     }
     cluster.sync();
   } else {
-    static_assert(NumBins % CS == 0);
-    // Fold the distributed per-rank bins into cluster-visible totals.
+    static_assert(kVecs % CS == 0 && kVecs % hist4096::kWarpSize == 0);
+    constexpr uint32_t kLocalVecs = kVecs / CS;
     cluster.sync();
-    constexpr auto kLocal = NumBins / CS;
-    const auto off = kLocal * rank;
-#pragma unroll
-    for (uint32_t bin = tx; bin < NumBins; bin += hist4096::kBlockSize) {
-      // Cover histograms wider than one CTA without changing the reduction.
-      const auto addr = &histogram[off + bin / CS];
-      const auto src = cluster.map_shared_rank(addr, bin % CS);
-      *src = warp_reduce_sum_subN<CS>(*src);
+    for (uint32_t t = tx; t < kVecs; t += hist4096::kBlockSize) {
+      uint4* const src =
+          cluster.map_shared_rank(hist4 + kLocalVecs * rank + t / CS, t % CS);
+      uint4 h = *src;
+      h.x = warp_reduce_sum_subN<CS>(h.x);
+      h.y = warp_reduce_sum_subN<CS>(h.y);
+      h.z = warp_reduce_sum_subN<CS>(h.z);
+      h.w = warp_reduce_sum_subN<CS>(h.w);
+      *src = h;
     }
     cluster.sync();
   }
@@ -314,7 +321,7 @@ struct SmemFused {
   alignas(128) uint32_t counter_eq;
   alignas(128) hist4096::MatchBin match;
   uint32_t warp_sum[hist4096::kNumWarps];
-  union {
+  union alignas(16) {
     uint32_t histogram[kExactHistBins];
     hist4096::Tie tie_buffer[kMaxTopK];
   };
@@ -347,8 +354,11 @@ __device__ void cluster_tie_refine(int32_t* __restrict__ row_output,
     active[e] = g < num_ties;
     if (active[e]) {
       uint32_t r = 0;
-      while (r + 1 < CS && tie_prefix[r + 1] <= g) {
-        r++;
+#pragma unroll
+      for (uint32_t step = hist4096::kWarpSize / 2; step > 0; step >>= 1) {
+        if (r + step < CS && tie_prefix[r + step] <= g) {
+          r += step;
+        }
       }
       const hist4096::Tie t =
           *cluster.map_shared_rank(&smem->tie_buffer[g - tie_prefix[r]], r);
@@ -615,22 +625,23 @@ __device__ void large_topk(const InT* __restrict__ row_input,
   }
   cluster.sync();
 
-  // Thread 0 computes serial prefix sum
-  if (tx == 0) {
-    uint32_t prefix = 0, ta = 0, te = 0;
-    for (uint32_t i = 0; i < CS; i++) {
-      if (i == rank) {
-        s_prefix_packed = prefix;  // my prefix
-      }
-      s_tie_prefix[i] = te;
-      s_rank_start[i] = rank_start(i);
-      ta += s_local_counts[i] & kAboveMask;   // total above
-      te += s_local_counts[i] >> kAboveBits;  // total equal
-      prefix += s_local_counts[i];
+  static_assert(CS <= hist4096::kWarpSize);
+  if (tx < hist4096::kWarpSize) {
+    const uint32_t count = tx < CS ? s_local_counts[tx] : 0;
+    const uint32_t inclusive = hist4096::warp_inclusive_sum(tx, count);
+    const uint32_t exclusive = inclusive - count;
+    if (tx == rank) {
+      s_prefix_packed = exclusive;
     }
-    s_tie_prefix[CS] = te;
-    s_total_above = ta;
-    s_total_equal = te;
+    if (tx < CS) {
+      s_tie_prefix[tx] = exclusive >> kAboveBits;
+      s_rank_start[tx] = rank_start(tx);
+    }
+    if (tx == CS - 1) {
+      s_tie_prefix[CS] = inclusive >> kAboveBits;
+      s_total_above = inclusive & kAboveMask;
+      s_total_equal = inclusive >> kAboveBits;
+    }
   }
   __syncthreads();
 
