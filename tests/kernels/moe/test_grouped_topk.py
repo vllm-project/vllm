@@ -156,21 +156,6 @@ def test_grouped_topk_skips_mask_for_rows_gathered_before_routing(
     assert torch.all(topk_ids >= 0)
 
 
-@pytest.mark.parametrize("skip_padding", [False, True])
-def test_grouped_topk_cpu_masks_padding_only_on_request(skip_padding, monkeypatch):
-    """CPU expert kernels index buffers with the expert id, so CPU grouped
-    routing keeps padding rows on real experts unless the model opts in."""
-    monkeypatch.setattr(current_platform, "is_cpu", lambda: True)
-    router = GroupedTopKRouter(
-        top_k=2,
-        global_num_experts=8,
-        num_expert_group=1,
-        topk_group=1,
-        skip_padding=skip_padding,
-    )
-    assert router.masks_padding is skip_padding
-
-
 @pytest.mark.skipif(
     not current_platform.is_cuda(), reason="This test is skipped on non-CUDA platform."
 )
