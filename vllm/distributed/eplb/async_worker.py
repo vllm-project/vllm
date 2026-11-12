@@ -4,7 +4,6 @@
 
 import threading
 import time
-from dataclasses import replace
 from typing import TYPE_CHECKING
 
 import torch
@@ -60,12 +59,10 @@ def run_rebalance_experts(
 
     # Move the global expert load window to CPU for computation.
     with device_stream(stream):
-        eplb_stats = replace(
-            eplb_stats,
-            global_expert_load_window=eplb_stats.global_expert_load_window.cpu(),
-        )
+        global_expert_load_window = eplb_stats.global_expert_load_window.cpu()
     # Compute new expert mappings for the model
     new_physical_to_logical_map = eplb_state.policy.rebalance_experts(
+        global_expert_load_window,
         eplb_stats,
         physical_to_logical_map_cpu,
     )

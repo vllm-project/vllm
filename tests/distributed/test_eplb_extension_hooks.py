@@ -255,24 +255,25 @@ def test_policy_receives_extended_stats_without_losing_inputs(model_state, use_a
         metadata: tuple[int, ...] = ()
 
     class Policy(DefaultEplbPolicy):
-        def rebalance_experts(self, stats, old_global_expert_indices=None):
+        def rebalance_experts(self, weight, stats, old_global_expert_indices=None):
+            assert stats is published_stats
             assert isinstance(stats, Stats)
             assert stats.metadata == (3, 7)
-            assert stats.global_expert_load_window.device.type == "cpu"
-            return super().rebalance_experts(stats, old_global_expert_indices)
+            assert weight.device.type == "cpu"
+            return super().rebalance_experts(weight, stats, old_global_expert_indices)
 
     loads = torch.tensor([[13, 3, 4, 3]])
     current = torch.tensor([[0, 1, 2, 3, 0, 1]])
-    stats = Stats(loads, 6, 1, 1, 2, metadata=(3, 7))
+    published_stats = Stats(loads, 6, 1, 1, 2, metadata=(3, 7))
     state = _State(Policy())
     if use_async:
-        model_state.eplb_stats = stats
+        model_state.eplb_stats = published_stats
         result = run_rebalance_experts(model_state, state, current, None)
     else:
-        result = state.policy.rebalance_experts(stats, current)
+        result = state.policy.rebalance_experts(loads, published_stats, current)
     default_state = EplbState(ParallelConfig(), torch.device("cpu"))
     assert isinstance(default_state.policy, DefaultEplbPolicy)
-    expected = default_state.policy.rebalance_experts(stats, current)
+    expected = default_state.policy.rebalance_experts(loads, published_stats, current)
     torch.testing.assert_close(result, expected, rtol=0, atol=0)
 
 

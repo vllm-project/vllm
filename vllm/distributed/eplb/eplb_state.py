@@ -1070,6 +1070,7 @@ class EplbState:
                         eplb_model_state.physical_to_logical_map.cpu()
                     )
                 new_physical_to_logical_map = self.policy.rebalance_experts(
+                    load_window_cpu,
                     EplbStats(
                         global_expert_load_window=load_window_cpu,
                         num_replicas=num_replicas,

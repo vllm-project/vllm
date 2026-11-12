@@ -271,11 +271,11 @@ class DefaultEplbPolicy(AbstractEplbPolicy):
 
     def rebalance_experts(
         self,
+        weight: torch.Tensor,
         stats: EplbStats,
         old_global_expert_indices: torch.Tensor | None = None,
     ) -> torch.Tensor:
         """Balance aggregate logical-expert loads and preserve local slots."""
-        weight = stats.global_expert_load_window
         num_replicas = stats.num_replicas
         num_groups = stats.num_groups
         num_nodes = stats.num_nodes
