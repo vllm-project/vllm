@@ -205,8 +205,8 @@ def _dsv4_inputs(s_q, h_q, num_valid, seed=1234):
 def test_bf16_triton_sparse_mla_attn_sink(h_q, num_valid, sink_mode):
     """attn_sink is an extra per-head logit in the softmax denominator.
 
-    ``checkpoint_range`` draws sinks from the released DSv4-Flash range
-    (~[-2.2, 2.5]); ``comparable_mass`` sets them near log(num_valid) so the
+    `checkpoint_range` draws sinks from the released DSv4-Flash range
+    (~[-2.2, 2.5]); `comparable_mass` sets them near log(num_valid) so the
     sink holds about as much softmax mass as the keys and a wrong scale or
     offset shows up for every row length.
     """

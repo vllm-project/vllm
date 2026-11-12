@@ -212,10 +212,10 @@ def triton_bf16_mla_sparse_interface(
             Set to 0 when q/kv contain only the nope latent (e.g. DSv4
             prefill where RoPE is not split out).
         attn_sink: Optional per-head fp32 sink logit added to the softmax
-            denominator (DSv4). It must be on ``q``'s device, contiguous and
-            at least ``num_heads_q`` long (extra padded entries are ignored).
-            ``-inf`` entries are a no-op. The returned ``softmax_lse`` and
-            ``max_logits`` are over the selected keys only and exclude the
+            denominator (DSv4). It must be on `q`'s device, contiguous and
+            at least `num_heads_q` long (extra padded entries are ignored).
+            `-inf` entries are a no-op. The returned `softmax_lse` and
+            `max_logits` are over the selected keys only and exclude the
             sink, so do not merge them with other partial results as if they
             included it.
 
