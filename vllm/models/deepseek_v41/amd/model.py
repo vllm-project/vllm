@@ -83,6 +83,7 @@ from vllm.models.deepseek_v41.amd.mono_decode import (
     link_layers,
 )
 from vllm.models.deepseek_v41.amd.mono_decode import flush as mono_flush
+from vllm.models.deepseek_v41.amd.ops import mhc_seam
 from vllm.models.deepseek_v41.amd.rocm import DeepseekV41ROCMAiterMLAAttention
 from vllm.models.deepseek_v41.attention import DeepseekV4Attention
 from vllm.models.deepseek_v41.decoder_replay_layers import DecoderReplayLayers
@@ -343,6 +344,14 @@ class DeepseekV4DecoderLayer(nn.Module):
         # input as MXFP8 for the first GEMM (fused_wqa_wkv / shared gate_up).
         self.attn_seam_mxfp8 = False
         self.ffn_seam_mxfp8 = False
+        # Elsewhere (gfx942), seams with a post block run as one AITER launch
+        # from mhc_seam.MIN_TOKENS tokens.
+        self.mhc_seam = (
+            partial(mhc_seam.mhc_pre_delayed_seam, self.mhc_pre_delayed)
+            if not self.fuse_seam_norm
+            and mhc_seam.supported(self.hidden_size, self.hc_mult)
+            else None
+        )
         # Decode steps of an eligible layer may run as the mono decode layer.
         self.mono = MonoDecodeLayer.create(self, vllm_config)
         if self.mono is not None and self.mono.ffn_only:
@@ -353,6 +362,8 @@ class DeepseekV4DecoderLayer(nn.Module):
     def process_weights_after_loading(self) -> None:
         if self.mono is not None:
             self.mono.build_runner(self.attn_norm.weight.device)
+        if self.mhc_seam is not None and self.hc_attn_fn.is_cuda:
+            mhc_seam.warmup(self.hidden_size, self.hc_mult, self.hc_attn_fn.device)
         if not self.use_mega_mhc or not self.hc_attn_fn.is_cuda:
             return
         # Reloads and in-place updates end here too; refilled in place, so
@@ -424,7 +435,7 @@ class DeepseekV4DecoderLayer(nn.Module):
         mhc_pre = (
             partial(mhc_pre_delayed_overlap, self.mhc_pre_delayed, overlap=mhc_overlap)
             if mhc_overlap is not None
-            else self.mhc_pre_delayed
+            else self.mhc_seam or self.mhc_pre_delayed
         )
         # The overlap's layer input comes from the Triton collapse, not Mega-MHC.
         mxfp8_pre = partial(mhc_pre_delayed_mxfp8, self.mhc_pre_delayed)
@@ -585,7 +596,7 @@ class DeepseekV4DecoderLayer(nn.Module):
         pre_fn = (
             partial(mhc_pre_delayed_mxfp8, self.mhc_pre_delayed)
             if self.attn_seam_mxfp8
-            else self.mhc_pre_delayed
+            else self.mhc_seam or self.mhc_pre_delayed
         )
         residual, post_mix, res_mix, x, _attn_pre = pre_fn(
             residual,
