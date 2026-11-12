@@ -8,6 +8,7 @@ import pytest
 
 from tests.parser.engine.conftest import make_mock_tokenizer
 from vllm.entrypoints.generate.base.protocol import ExtractedToolCallInformation
+from vllm.parser.engine.parser_engine import ParserEngine, ToolCallSlot
 from vllm.parser.llama_json import (
     TOOL_START,
     LlamaJsonParser,
@@ -396,3 +397,53 @@ def test_streaming_parallel_calls_are_chunk_invariant(
 def test_registered_tool_parser_aliases(name):
     parser_class = ToolParserManager.get_tool_parser(name)
     assert parser_class.__name__ == "LlamaJsonEngineToolParser"
+
+
+@pytest.mark.parametrize("chunk_size", [1, 2, 5])
+def test_streaming_name_after_parameters(parser, mock_request, chunk_size):
+    body = ' lorem \\"ipsum\\" name: ' * 50
+    text = f'{{"parameters": {{"content": "{body}"}}, "name": "write"}}'
+    results = _stream(parser, mock_request, text, chunk_size)
+    assert _collect_names(results) == ["write"]
+    assert json.loads(_collect_args(results)[0]) == json.loads(text)["parameters"]
+
+
+class _CountingPattern:
+    """Wraps the name pattern and counts the characters it is asked to scan."""
+
+    def __init__(self):
+        self.scanned = 0
+
+    def search(self, text, *args, **kwargs):
+        self.scanned += len(text)
+        return ParserEngine._NAME_RE.search(text, *args, **kwargs)
+
+
+@pytest.mark.parametrize(
+    "parts",
+    [
+        ['{"na', 'me"', " :", ' "wr', 'ite"', "}"],
+        ['{"a": "x", "', 'name": "', '"', ', "name": "late"}'],
+        ['{"x": "\\"name\\" ', 'is here", "name"', ': "f"}'],
+        ['{"name"', ' 1, "name": "g"}'],
+    ],
+    ids=["split_everywhere", "empty_first_name", "name_in_value", "broken_first"],
+)
+def test_search_args_matches_full_search(parts):
+    slot = ToolCallSlot()
+    for part in parts:
+        slot.append_args(part)
+        m = ParserEngine._NAME_RE.search(slot.args)
+        expected = m.group(1) if m else None
+        assert slot.search_args(ParserEngine._NAME_RE) == expected
+
+
+def test_search_args_scans_each_char_once():
+    slot = ToolCallSlot()
+    pattern = _CountingPattern()
+    chunk = '{"summary": "' + "lorem ipsum " * 10
+    for _ in range(200):
+        slot.append_args(chunk)
+        assert slot.search_args(pattern) is None
+    # A full search per chunk would scan about 200 * 200 / 2 chunks.
+    assert pattern.scanned <= 3 * len(slot.args)

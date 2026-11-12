@@ -69,6 +69,9 @@ class ToolCallSlot:
         "_streamed_joined",
         "extend_open_value",
         "open_value_streams",
+        "_name_window",
+        "_name_parts_seen",
+        "_json_name",
     )
 
     def __init__(self) -> None:
@@ -82,6 +85,9 @@ class ToolCallSlot:
         self._streamed_joined: str | None = ""
         self.extend_open_value: ArgValueExtender | None = None
         self.open_value_streams: bool = False
+        self._name_window = ""
+        self._name_parts_seen = 0
+        self._json_name: str | None = None
 
     @property
     def args(self) -> str:
@@ -92,6 +98,25 @@ class ToolCallSlot:
     def append_args(self, value: str) -> None:
         self._args_parts.append(value)
         self._args_joined = None
+
+    def search_args(self, pattern: re.Pattern[str]) -> str | None:
+        """Group 1 of the leftmost `pattern` match in the args, or `None`.
+
+        Each call scans only the args appended since the last call, plus the
+        tail where a partial match may still complete.
+        """
+        if self._json_name is None:
+            text = self._name_window + "".join(
+                self._args_parts[self._name_parts_seen :]
+            )
+            self._name_parts_seen = len(self._args_parts)
+            m = pattern.search(text)
+            if m is None:
+                partial = pattern.search(text, partial=True)
+                self._name_window = text[partial.start() :] if partial else ""
+                return None
+            self._json_name = m.group(1)
+        return self._json_name
 
     @property
     def streamed_json(self) -> str:
@@ -1179,12 +1204,7 @@ class ParserEngine(Parser):
     _NAME_RE = re.compile(r'"name"\s*:\s*"([^"]*)"')
 
     def _try_extract_name(self, idx: int) -> str | None:
-        m = self._NAME_RE.search(self._tool_slots[idx].args)
-        if m:
-            name = m.group(1)
-            if name:
-                return name
-        return None
+        return self._tool_slots[idx].search_args(self._NAME_RE) or None
 
     # ── Build ExtractedToolCallInformation ─────────────────────────────
 
