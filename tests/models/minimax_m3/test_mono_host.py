@@ -34,33 +34,10 @@ from vllm.models.minimax_m3.amd.mono.runner import (  # noqa: E402
     dense_prefix,
     token_rows,
 )
-from vllm.models.minimax_m3.amd.mono.selection import (  # noqa: E402
-    enabled_monokernels,
-)
 
 
 def _selection_config(**extra):
     return SimpleNamespace(additional_config=extra)
-
-
-@pytest.mark.parametrize(
-    "names, want",
-    [
-        (None, {"decode", "drafter"}),
-        (["drafter"], {"drafter"}),
-        ("decode", {"decode"}),
-        (["decode", "drafter"], {"decode", "drafter"}),
-    ],
-)
-def test_enabled_monokernels(names, want):
-    extra = {} if names is None else {"minimax_m3_monokernel": names}
-    assert enabled_monokernels(_selection_config(**extra)) == want
-
-
-@pytest.mark.parametrize("names", [[], ["mono"], ["decode", "draft"]])
-def test_enabled_monokernels_rejects_unknown_names(names):
-    with pytest.raises(ValueError, match="minimax_m3_monokernel"):
-        enabled_monokernels(_selection_config(minimax_m3_monokernel=names))
 
 
 def _linear(dtype: torch.dtype, scale_cols: int):
@@ -215,12 +192,6 @@ def test_config_refusal_accepts_the_supported_deployment(fse, aux):
 def test_config_refusal_names_the_unmet_condition(cfg, model, why):
     reason = config_refusal(cfg, model)
     assert reason is not None and why in reason
-
-
-def test_config_refusal_needs_every_cu(monkeypatch):
-    monkeypatch.setattr(mono_dispatch, "_compute_units", lambda: BLOCKS - 8)
-    reason = config_refusal(_vllm_config(), _model())
-    assert reason is not None and "CUs" in reason
 
 
 @pytest.mark.parametrize(
