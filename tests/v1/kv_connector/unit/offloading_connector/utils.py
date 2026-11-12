@@ -140,6 +140,7 @@ class MockOffloadingWorker(OffloadingWorker):
 class MockOffloadingSpec(OffloadingSpec):
     def __init__(self, config: OffloadingConfig):
         super().__init__(config)
+        self.async_init = bool(self.extra_config.get("async_init", False))
 
         self.manager = MagicMock(spec=OffloadingManager)
         self.manager.prepare_load = lambda keys, req_context: MockLoadStoreSpec(keys)

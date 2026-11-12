@@ -66,10 +66,13 @@ class OffloadingConnectorWorker:
             tuple[int, GPULoadStoreSpec, LoadStoreSpec]
         ] = []
         self._connector_worker_meta = OffloadingWorkerMetadata()
+        # Under async_init, report readiness once.
+        self._report_ready = self.spec.async_init
 
     def _init_worker(self, kv_caches: CanonicalKVCaches) -> None:
         self._kv_caches = kv_caches
         self.worker = self.spec.get_worker(kv_caches)
+        self.worker.start_deferred_setup()
 
     def register_kv_caches(self, kv_caches: dict[str, torch.Tensor]):
         kv_cache_config = self.kv_cache_config
@@ -249,6 +252,8 @@ class OffloadingConnectorWorker:
 
     def start_kv_transfers(self, metadata: OffloadingConnectorMetadata):
         assert self.worker is not None
+        if not metadata.offloading_enabled:
+            assert not metadata.store_jobs and not metadata.load_jobs
         for job_id, src_spec, dst_spec in self._unsubmitted_store_jobs:
             assert isinstance(src_spec, GPULoadStoreSpec)
             device_ptrs = resolve_device_pointers(src_spec, self._kv_caches)
@@ -340,8 +345,15 @@ class OffloadingConnectorWorker:
         return failed_recving
 
     def build_connector_worker_meta(self) -> OffloadingWorkerMetadata | None:
-        """Return completed transfer job IDs since the last call."""
-        if not self._connector_worker_meta.completed_jobs:
+        """Return job completions, and readiness under async_init, since the
+        last call."""
+        if self._report_ready and self.worker is not None and self.worker.is_ready():
+            self._connector_worker_meta.ready_ranks = {self.spec.config.parallel.rank}
+            self._report_ready = False
+        if (
+            not self._connector_worker_meta.completed_jobs
+            and not self._connector_worker_meta.ready_ranks
+        ):
             return None
         meta = self._connector_worker_meta
         self._connector_worker_meta = OffloadingWorkerMetadata()

@@ -746,6 +746,17 @@ class OffloadingWorker(ABC):
     @abstractmethod
     def wait(self, job_ids: set[int]) -> None: ...
 
+    def start_deferred_setup(self) -> None:
+        """Start setup deferred by async_init.
+
+        No transfers are submitted until is_ready().
+        """
+        return
+
+    def is_ready(self) -> bool:
+        """Whether this worker can take transfers."""
+        return True
+
     def shutdown(self) -> None:
         return
 
@@ -776,6 +787,9 @@ class OffloadingSpec(ABC):
         self.config = config
         self.extra_config = config.extra_config
         self.replicated_layout: bool = False
+        # When True, the worker finishes its setup in the background and the
+        # engine serves without offloading until every worker is ready.
+        self.async_init: bool = False
         self.kv_events_config = OffloadingKVEventsConfig(
             enable_kv_cache_events=config.enable_kv_cache_events,
             self_describing_kv_events=bool(
