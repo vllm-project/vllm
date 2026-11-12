@@ -1053,17 +1053,23 @@ def replace_vision_chunk_video_placeholder(
     return prompt_raw
 
 
-# --- Recipe-style string encoding ----------------------------------------
+# --- Recipe-style segmented prompt encoding ------------------------------
 #
-# `--tokenize-backend recipe` routes the rendered string prompt through
-# deepseek-recipe's Rust tokenizer, built from the served fast tokenizer's
-# own serialized vocabulary (deepseek-recipe does not resolve HF repo ids).
-# Its ``encode`` yields token IDs identical to the builtin encoder for the
-# default chat path (add_special_tokens=False), keeping KV-cache prefix
-# reuse unchanged. No separate model path is needed; models without a fast
-# tokenizer backend fall back to builtin encoding.
+# `--tokenize-backend recipe` mirrors deepseek-recipe's
+# ``TokenizerEncoder::encode_ids``: the rendered prompt is split at
+# added-vocabulary special-token spellings (longest match first), the plain
+# regions between them are encoded as one batch (Rust ``encode_batch_fast``,
+# parallel across CPU threads), and each special spelling contributes its
+# added-vocabulary ID in between. Token IDs are identical to the builtin
+# encoder for the default chat path (add_special_tokens=False), so KV-cache
+# prefix reuse is unchanged; no extra package is needed beyond the served
+# fast tokenizer. It pays off on long prompts carrying many special-token
+# spellings; models without a fast tokenizer backend fall back to builtin
+# encoding.
 
 _recipe_tokenizer_cache: dict[int, Any] = {}
+_recipe_added_vocab_cache: dict[int, dict[str, int]] = {}
+_recipe_pattern_cache: dict[int, Any] = {}
 
 
 def _tokenizer_backend(tokenizer: Any):
@@ -1073,7 +1079,12 @@ def _tokenizer_backend(tokenizer: Any):
 
 
 def _get_recipe_tokenizer(backend_tokenizer: Any):
-    """Lazily build and cache the Rust tokenizer for a tokenizers backend."""
+    """Lazily build and cache the Rust tokenizer for a tokenizers backend.
+
+    Only needed by the DeepSeek renderers' conversation-level recipe path; the
+    segmented string encoder below works on the served fast tokenizer
+    directly.
+    """
     key = id(backend_tokenizer)
     recipe_tokenizer = _recipe_tokenizer_cache.get(key)
     if recipe_tokenizer is None:
@@ -1084,11 +1095,43 @@ def _get_recipe_tokenizer(backend_tokenizer: Any):
     return recipe_tokenizer
 
 
+def _recipe_added_vocabulary(backend_tokenizer: Any) -> dict[str, int]:
+    """Added-vocabulary spelling -> ID map (mirrors ``PromptTokenizer``)."""
+    key = id(backend_tokenizer)
+    added = _recipe_added_vocab_cache.get(key)
+    if added is None:
+        added = {
+            token.content: token_id
+            for token_id, token in backend_tokenizer.get_added_tokens_decoder().items()
+            if token.content
+        }
+        _recipe_added_vocab_cache[key] = added
+    return added
+
+
+def _recipe_special_pattern(backend_tokenizer: Any):
+    """Aho-corasick-style longest-match regex over the added vocabulary."""
+    key = id(backend_tokenizer)
+    if key in _recipe_pattern_cache:
+        return _recipe_pattern_cache[key]
+    added = _recipe_added_vocabulary(backend_tokenizer)
+    if added:
+        import re
+
+        spellings = sorted(added, key=len, reverse=True)
+        pattern = re.compile("|".join(re.escape(spelling) for spelling in spellings))
+    else:
+        pattern = None
+    _recipe_pattern_cache[key] = pattern
+    return pattern
+
+
 def _encode_prompt_with_recipe(
     prompt_str: str, tokenizer: Any
 ) -> list[int] | None:
-    """Token ids for ``prompt_str`` via the recipe backend, or None to fall
-    back to builtin encoding when the served tokenizer has no fast backend."""
+    """Token ids for ``prompt_str`` via the segmented parallel encoder, or
+    None to fall back to builtin encoding when the served tokenizer has no
+    fast backend."""
     backend_tokenizer = _tokenizer_backend(tokenizer)
     if backend_tokenizer is None:
         logger.warning_once(
@@ -1097,9 +1140,34 @@ def _encode_prompt_with_recipe(
         )
         return None
 
-    import deepseek_recipe as _dr
+    plain = lambda text: backend_tokenizer.encode(  # noqa: E731
+        text, add_special_tokens=False
+    ).ids
+    pattern = _recipe_special_pattern(backend_tokenizer)
+    if pattern is None:
+        return plain(prompt_str)
 
-    return _get_recipe_tokenizer(backend_tokenizer).encode(prompt_str)
+    added = _recipe_added_vocabulary(backend_tokenizer)
+    matches = list(pattern.finditer(prompt_str))
+    if not matches:
+        return plain(prompt_str)
+
+    regions: list[str] = []
+    cursor = 0
+    for match in matches:
+        regions.append(prompt_str[cursor : match.start()])
+        cursor = match.end()
+    regions.append(prompt_str[cursor:])
+
+    encodings = backend_tokenizer.encode_batch_fast(
+        regions, add_special_tokens=False
+    )
+    token_ids: list[int] = []
+    for match, encoding in zip(matches, encodings[:-1]):
+        token_ids.extend(encoding.ids)
+        token_ids.append(added[match.group(0)])
+    token_ids.extend(encodings[-1].ids)
+    return token_ids
 
 
 class HfRenderer(BaseRenderer[HfTokenizer]):

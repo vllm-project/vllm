@@ -393,27 +393,51 @@ prefill/decode, the tokenizer change is unlikely to be visible end-to-end.
 
 For long prompts, vLLM's default prompt tokenization is single-threaded Python
 string encoding. `--tokenize-backend recipe` (opt-in; the default remains
-`builtin`) routes the rendered prompt string through the optional
-[deepseek-recipe](https://github.com/deepseek-ai/deepseek-recipe) Rust
-tokenizer, built from the served fast tokenizer's own serialized vocabulary:
+`builtin`) instead mirrors [deepseek-recipe](https://github.com/deepseek-ai/deepseek-recipe)'s
+segmented parallel encoding: the rendered prompt is split at added-vocabulary
+special-token spellings (longest match first), the plain regions between them
+are encoded as one parallel batch (Rust `encode_batch_fast`), and each special
+spelling contributes its added-vocabulary ID.
 
 ```console
-pip install deepseek_recipe
+pip install deepseek-recipe  # optional: needed for DeepSeek models only
 vllm serve Qwen/Qwen3-8B --tokenize-backend recipe
 ```
 
-The `deepseek_recipe` package must be installed; if it is missing and the flag
-is enabled, vLLM raises a clear `ImportError` at the first tokenize call.
+For DeepSeek models the renderer hands the conversation to deepseek-recipe's
+reference encoder (`DeepseekV4Encoding` / `DeepseekV41Encoding`), which renders
+the official prompt -- including the reference handling of system messages and
+the V4.1 reasoning-effort system turn -- and tokenizes it with the same
+segmented parallel encoder. This requires the optional `deepseek_recipe`
+package; when it is missing the renderer keeps vLLM's own renderer. Tool
+calling and multi-modal conversations stay on vLLM's own renderer.
+
 Models without a fast tokenizer (`tokenizer.json`) fall back to `builtin`
-encoding with a warning. Token IDs are identical to the `builtin` path for the
-default chat encoding (`add_special_tokens=False`), so KV-cache prefix reuse
-is unchanged; requests that opt into extra special tokens or token offsets
-keep the builtin encoder.
+encoding with a warning. On the default chat encoding
+(`add_special_tokens=False`) Qwen-style token IDs are identical to the
+`builtin` path, so KV-cache prefix reuse is unchanged; requests that opt into
+extra special tokens or token offsets keep the builtin encoder. DeepSeek
+models follow the reference encoder's rendering, which may differ from vLLM's
+own renderer for system messages and thinking mode.
 
 Recipe helps most on long prompts (tens of thousands of characters): prompt
-tokenization stays out of the GIL while the Rust tokenizer encodes the whole
-string. For short prompts the added overhead can make recipe slower than
-`builtin`, so measure before enabling it fleet-wide.
+tokenization stays out of the GIL while the tokenizer encodes the plain
+regions in parallel. Measured on a 320-core Kunpeng 920 host (CPU only,
+prompt tokenization alone, `builtin` vs `recipe`):
+
+| Model | Prompt | `builtin` | `recipe` | Speedup |
+|---|---|---:|---:|---:|
+| Qwen3-8B | 18.5k chars, 20-turn chat | 5.6 ms | 8.5 ms | 0.65x |
+| Qwen3-8B | 92.5k chars, 100-turn chat | 30.2 ms | 14.1 ms | 2.14x |
+| Qwen3.6-27B | 92.3k chars, 100-turn chat | 28.2 ms | 14.8 ms | 1.90x |
+| DeepSeek-V4.1-Flash | 91.3k chars, 100-turn chat | 34.1 ms | 17.1 ms | 2.00x |
+| GLM-5.2 | 89.9k chars, 100-turn chat | 31.3 ms | 8.8 ms | 3.55x |
+| any model | 256k chars, single block | ~90-100 ms | ~89-102 ms | ~1.0x |
+
+The gains come from the many plain regions a multi-turn chat produces; a
+single block of text has only one region and gains nothing. Short chats can
+lose 10-35% to the per-region encoder call overhead, so measure before
+enabling it fleet-wide.
 
 ### Parallel Processing
 
