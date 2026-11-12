@@ -711,9 +711,9 @@ def test_write_done_no_request_matches_is_dropped_after_defer_timeout(clock):
     _write_done(wrapper, "tGone")
     assert worker.get_finished() == (set(), set())
 
-    # A repeat does not restart its clock.
+    # A repeat that gets past the wrapper's dedup does not restart its clock.
     clock.now += 59
-    _write_done(wrapper, "tGone")
+    wrapper.done_write_cache_req_ids.append("tGone")
     assert worker.get_finished() == (set(), set())
     assert list(worker._unmatched_write_completions) == ["tGone"]
 

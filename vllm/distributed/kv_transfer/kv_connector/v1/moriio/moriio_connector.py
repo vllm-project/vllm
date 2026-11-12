@@ -3045,8 +3045,10 @@ class MoRIIOConnectorWorker:
             self._num_expired_write_completions += expired
             logger.warning(
                 "MoRIIO WRITE: dropped %d write_done notification(s) that no "
-                "request on this rank matched within defer_timeout (%d so far).",
+                "request on this rank matched before defer_timeout elapsed or "
+                "the %d-entry cap was reached (%d so far).",
                 expired,
+                _MAX_UNMATCHED_WRITE_COMPLETIONS,
                 self._num_expired_write_completions,
             )
 
