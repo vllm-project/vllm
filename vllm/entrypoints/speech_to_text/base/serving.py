@@ -200,7 +200,9 @@ class SpeechToTextBaseServing(GenerateBaseServing):
                     target_sr=self.asr_config.sample_rate, method=resample_method
                 ).resample(y, orig_sr=sr)
                 sr = self.asr_config.sample_rate
-        except ValueError:
+        except (ValueError, ImportError):
+            # ImportError means the configured audio backend is unusable: a
+            # server problem, not a bad upload, so it must not become a 400.
             raise
         except Exception as exc:
             raise ValueError("Invalid or unsupported audio file.") from exc
