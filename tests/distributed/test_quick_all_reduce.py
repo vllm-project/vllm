@@ -226,9 +226,14 @@ def test_create_sp_collectives_returns_what_aiter_builds(
     monkeypatch: pytest.MonkeyPatch,
 ):
     engine, router = _FakeFlyDSLInt4(), object()
-    seen = []
+    seen: list[object] = []
+
+    def create(quick):
+        seen.append(quick)
+        return router
+
     module = types.ModuleType("sp_collectives")
-    module.create_sp_collectives = lambda quick: seen.append(quick) or router
+    monkeypatch.setattr(module, "create_sp_collectives", create, raising=False)
     _install_fake_sp_module(monkeypatch, module)
 
     assert aiter_ops.rocm_aiter_ops.create_sp_collectives(engine) is router
@@ -758,7 +763,7 @@ def sp_int4_router_worker(
         # for it, so a None here is a broken detection in vLLM.
         router = sp._sp_router()
         assert router is not None
-        calls = {"reduce_scatter": [], "all_gather": []}
+        calls: dict[str, list[bool]] = {"reduce_scatter": [], "all_gather": []}
 
         def spy(call, log):
             def wrapper(x):

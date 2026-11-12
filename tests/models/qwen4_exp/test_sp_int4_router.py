@@ -25,8 +25,8 @@ class _Router:
 
     def __init__(self, serves: bool):
         self.serves = serves
-        self.reduce_scatter_inputs = []
-        self.all_gather_inputs = []
+        self.reduce_scatter_inputs: list[torch.Tensor] = []
+        self.all_gather_inputs: list[torch.Tensor] = []
 
     def reduce_scatter(self, x):
         self.reduce_scatter_inputs.append(x)
@@ -64,7 +64,7 @@ class _Tp:
 @pytest.fixture
 def common_calls(monkeypatch):
     """The common collectives, recording their inputs and returning marked tensors."""
-    calls = {"reduce_scatter": [], "all_gather": []}
+    calls: dict[str, list[torch.Tensor]] = {"reduce_scatter": [], "all_gather": []}
 
     def reduce_scatter(x):
         calls["reduce_scatter"].append(x)

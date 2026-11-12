@@ -34,7 +34,7 @@ def _sp_all_gather_fake(x: torch.Tensor) -> torch.Tensor:
 def _sp_router():
     """AITER's INT4 sequence-parallel collectives of the TP group, built by
     `decoder_layer_sp_collectives` before the first forward, or None."""
-    qr_comm = get_tp_group().device_communicator.qr_comm
+    qr_comm = getattr(get_tp_group().device_communicator, "qr_comm", None)
     return None if qr_comm is None else qr_comm.sp_collectives()
 
 
