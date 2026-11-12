@@ -12,8 +12,8 @@ These tests verify:
 
 import os
 import threading
-import uuid
 import time
+import uuid
 from collections.abc import Iterable
 from typing import cast
 from unittest.mock import MagicMock, patch
@@ -46,13 +46,13 @@ from vllm.v1.kv_offload.base import (
     TierMatcher,
     make_offload_key,
 )
-from vllm.v1.kv_offload.cpu import shared_offload_region as region_module
 from vllm.v1.kv_offload.config import (
     OffloadingCacheConfig,
     OffloadingConfig,
     OffloadingModelConfig,
     OffloadingParallelConfig,
 )
+from vllm.v1.kv_offload.cpu import shared_offload_region as region_module
 from vllm.v1.kv_offload.cpu.common import CPULoadStoreSpec, CPUOffloadingInfo
 from vllm.v1.kv_offload.tiering import spec as tiering_spec_module
 from vllm.v1.kv_offload.tiering.base import (
@@ -2402,6 +2402,7 @@ def test_tiering_spec_segments_region_and_skips_scheduler_prefault(monkeypatch):
         assert all(os.path.exists(path) for path, _, _ in worker._segments)
     finally:
         worker.cleanup()
+
 
 # ---------------------------------------------------------------------------
 # FS-tier integration tests
