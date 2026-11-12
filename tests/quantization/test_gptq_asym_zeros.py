@@ -89,3 +89,34 @@ def test_asym_config_rejected_off_xpu(monkeypatch):
     monkeypatch.setattr(auto_gptq.current_platform, "is_xpu", lambda: False)
     with pytest.raises(ValueError, match="sym=False"):
         _asym_config()
+
+
+def test_linear_method_converts_qzeros_in_place(dist_init, monkeypatch):
+    # The XPU kernel must get raw zero points, and the conversion must keep the
+    # checkpoint parameter object so that a weight reload can refill it.
+    from vllm.model_executor.layers.quantization import auto_gptq
+    from vllm.platforms import PlatformEnum
+
+    monkeypatch.setattr(auto_gptq.current_platform, "_enum", PlatformEnum.XPU)
+    method = auto_gptq.AutoGPTQLinearMethod(_asym_config())
+    layer = torch.nn.Module()
+    method.create_weights(layer, 128, [64], 128, 64, torch.bfloat16)
+    checkpoint_qzeros = layer.qzeros
+    z = torch.randint(0, 16, (1, 64))
+    checkpoint_qzeros.data.copy_(_pack_along_last(z - 1, 4))
+
+    method.process_weights_after_loading(layer)
+
+    assert layer.qzeros is checkpoint_qzeros
+    assert torch.equal(layer.qzeros.data, _pack_along_last(z, 4))
+
+
+def test_asym_rejected_in_batch_invariant_mode(monkeypatch):
+    # The batch-invariant path dequantizes without zero points.
+    from vllm.model_executor.layers.quantization import auto_gptq
+    from vllm.platforms import PlatformEnum
+
+    monkeypatch.setattr(auto_gptq.current_platform, "_enum", PlatformEnum.XPU)
+    monkeypatch.setattr(auto_gptq.envs, "VLLM_BATCH_INVARIANT", True)
+    with pytest.raises(NotImplementedError, match="VLLM_BATCH_INVARIANT"):
+        auto_gptq.AutoGPTQLinearMethod(_asym_config())

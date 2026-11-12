@@ -180,6 +180,7 @@ steps:
         bash .buildkite/scripts/hardware_ci/run-intel-test.sh
         'cd tests &&
         pytest -v -s quantization/test_auto_round.py &&
+        pytest -v -s quantization/test_gptq_asym_zeros.py &&
         pytest -v -s
         quantization/test_online.py
         --deselect=tests/quantization/test_online.py::test_online_quantization_loads_real_weights
