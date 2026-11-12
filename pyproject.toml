@@ -111,6 +111,16 @@ ignore-var-parameters = true
 [tool.ruff.format]
 docstring-code-format = true
 
+# Not run in CI, mirrors the ty config below for contributors who use mypy
+[tool.mypy]
+ignore_missing_imports = true
+check_untyped_defs = true
+follow_imports = "silent"
+
+[[tool.mypy.overrides]]
+module = "tests.*"
+disable_error_code = ["arg-type", "assignment"]
+
 [tool.pytest.ini_options]
 markers = [
     "slow_test",
