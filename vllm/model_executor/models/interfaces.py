@@ -1923,8 +1923,9 @@ class SupportsEncoderCudaGraph(Protocol):
         `encoder_cudagraph_max_vision_items_per_batch` are not explicitly
         specified by the user.
         """
-        # Min: a 224x224 image with patch_size=14 and a 2x2 merge gives
-        # 8x8 = 64 output tokens.
+        # Min: about one small image (224x224, patch_size=14, 2x2 merge ->
+        # 64 tokens). It also caps the auto-inferred max_batch_size at 64,
+        # since max_batch_size <= min_budget.
         return (
             64,
             min(
