@@ -1042,17 +1042,15 @@ def replace_vision_chunk_video_placeholder(
     return prompt_raw
 
 
-# --- Recipe-style segmented parallel tokenization -------------------------
+# --- Recipe-style string encoding ----------------------------------------
 #
 # `--tokenize-backend recipe` routes the rendered string prompt through
-# deepseek_recipe.encode_prompt: split at added-vocabulary special-token
-# spellings (aho-corasick) and encode the plain regions in parallel via
-# encode_batch_fast. Token IDs match the builtin encoder for the default
-# chat path (add_special_tokens=False), keeping KV-cache prefix reuse
-# unchanged. The Rust tokenizer is built from the served fast tokenizer's
-# own serialized vocabulary (deepseek-recipe does not resolve HF repo ids),
-# so no separate model path is needed; models without a fast tokenizer
-# backend fall back to builtin encoding.
+# deepseek-recipe's Rust tokenizer, built from the served fast tokenizer's
+# own serialized vocabulary (deepseek-recipe does not resolve HF repo ids).
+# Its ``encode`` yields token IDs identical to the builtin encoder for the
+# default chat path (add_special_tokens=False), keeping KV-cache prefix
+# reuse unchanged. No separate model path is needed; models without a fast
+# tokenizer backend fall back to builtin encoding.
 
 _recipe_tokenizer_cache: dict[int, Any] = {}
 
@@ -1090,7 +1088,7 @@ def _encode_prompt_with_recipe(
 
     import deepseek_recipe as _dr
 
-    return _dr.encode_prompt(prompt_str, _get_recipe_tokenizer(backend_tokenizer))
+    return _get_recipe_tokenizer(backend_tokenizer).encode(prompt_str)
 
 
 class HfRenderer(BaseRenderer[HfTokenizer]):

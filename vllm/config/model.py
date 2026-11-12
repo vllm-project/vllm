@@ -213,10 +213,9 @@ class ModelConfig:
 
     - "builtin" tokenizes the rendered prompt as one string with the model's
       tokenizer (the default).
-    - "recipe" segments the rendered prompt at added-vocabulary special-token
-      spellings (aho-corasick) and encodes the plain regions in parallel with
-      `deepseek_recipe.encode_prompt`, using the served fast tokenizer's own
-      vocabulary. Token IDs match "builtin" for the default chat path
+    - "recipe" routes the rendered prompt string through deepseek-recipe's Rust
+      tokenizer (built from the served fast tokenizer's own vocabulary).
+      Token IDs match "builtin" for the default chat path
       (`add_special_tokens=False`), so KV-cache prefix reuse is unchanged;
       requests that opt into extra special tokens or token offsets, and models
       without a fast tokenizer backend, fall back to "builtin". Requires the
