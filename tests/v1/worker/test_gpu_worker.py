@@ -660,6 +660,7 @@ def test_every_pp_rank_runs_a_forward_before_the_sync_check(
         scheduler_config=SimpleNamespace(max_num_seqs=4, max_num_batched_tokens=64),
         compilation_config=compilation_config,
         model_runner=SimpleNamespace(
+            model=torch.nn.Module(),
             is_pooling_model=False,
             maybe_remove_all_loras=lambda lora_config: None,
             lora_config=None,
