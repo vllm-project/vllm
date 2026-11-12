@@ -2376,6 +2376,11 @@ class MooncakeStoreWorker:
         if self._capacity_only or not self.can_put:
             return
 
+        # A request may be re-admitted in the step reporting its preemption.
+        assert self.kv_send_thread is not None
+        for req_id in metadata.preempted_req_ids:
+            self.kv_send_thread.delete_finished_stored_request(req_id)
+
         current_event = None
         for request in metadata.requests:
             if request.can_save:
@@ -2387,7 +2392,6 @@ class MooncakeStoreWorker:
             if not request.can_save:
                 continue
             request.current_event = current_event
-            assert self.kv_send_thread is not None
             self.kv_send_thread.add_request(request)
 
     def get_finished(
@@ -2479,16 +2483,12 @@ class MooncakeStoreWorker:
         finished_req_ids: set[str],
         meta: MooncakeStoreConnectorMetadata,
     ) -> None:
-        """Retire the ledger entries of requests that finished or were preempted.
+        """Retire the ledger entries of finished requests.
 
         An entry may only go once its jobs have drained, because they still read
-        the resume offset it owns; a request that comes back after preemption
-        then saves from the start rather than from where the last attempt got to.
+        the resume offset it owns.
         """
         assert self.kv_send_thread is not None
-
-        for req_id in meta.preempted_req_ids:
-            self.kv_send_thread.delete_finished_stored_request(req_id)
 
         pending_save_req_ids = {
             request.req_id for request in meta.requests if request.can_save
