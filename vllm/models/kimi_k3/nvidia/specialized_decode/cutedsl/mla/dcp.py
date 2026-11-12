@@ -17,7 +17,8 @@ every context.
 """
 
 import math
-from functools import cache
+from functools import cache, reduce
+from operator import or_
 
 import cutlass
 import cutlass.cute as cute
@@ -90,6 +91,12 @@ PARTIALS_DEFAULT = {"mla": "1-64:bf16,65-320:proj", "dsa": "1-159:bf16,160-320:p
 # of a kernel of o_proj's launch shape after DcpValue: R = 2 ahead of R = 1, both
 # ahead of the 16-row CTAs.
 VALUE_ROWS = {16: "7-8:2"}
+# The `rows_per_cta` merge's poll of the DCP sources, batch tables per DCP size (1: on):
+# every pass reloads every source's 8 bytes at once and the merge then adds them in
+# source order, instead of waiting on each source in turn (one dependent reload per
+# source still pending when the row's LSEs landed). Same words, same order (bit for
+# bit). DCP16 at 7-8 rows: set by a 16-rank decode-step A/B and the c=1 AgentX runs.
+VALUE_POLL_ALL = {16: "7-8:1"}
 
 
 def resolve_partials(spec, kind):
@@ -275,6 +282,7 @@ class DcpValue:
         preprojected=False,
         pushed=False,
         rows_per_cta=None,
+        poll_all=None,
     ):
         """`q_chunks`: 16 B chunks per q mailbox head row (36 FP8, 72 BF16);
         `q_heads`: q mailbox rows per token (default DCP * H); `lse_scale`: to
@@ -285,7 +293,9 @@ class DcpValue:
         decode before pushed every rank's rows and LSEs and re-armed the q mailbox
         (dsa.attn_sparse), so DcpValue only merges; `rows_per_cta` (`pushed`
         only): request rows per merging CTA (None: VALUE_ROWS of the DCP size and
-        batch; 0: one CTA per (head, 16 rows))."""
+        batch; 0: one CTA per (head, 16 rows)); `poll_all` (`rows_per_cta` only):
+        poll a row's sources together (None: VALUE_POLL_ALL of the DCP size and
+        batch)."""
         self.heads, self.size, self.batch = heads, size, batch
         assert partials in FORMATS, partials
         self.q, self.per_row, self.partials = q, per_row, partials
@@ -328,6 +338,9 @@ class DcpValue:
             assert 1 <= rows_per_cta <= 4 and batch <= 64, (rows_per_cta, batch)
             self.rows_per_cta = rows_per_cta
             self.grid = (heads, -(-batch // rows_per_cta), 1)
+        if poll_all is None:
+            poll_all = batch_table(VALUE_POLL_ALL.get(size, "")).get(batch, 0) == 1
+        self.poll_all = self.rows_per_cta > 0 and poll_all
 
     @cute.jit
     def __call__(self, *args):
@@ -471,10 +484,13 @@ class DcpValue:
                 scales[r, lane] = scale
         named_barrier(1 + r, 128)  # the weights, for this slot's 4 warps
         merged = zeros(4, Float32)
-        for s in cutlass.range_constexpr(D):
-            w = scales[r, s]
-            if w >= Float32(0):
-                self.poll_pair(sources[s], loads[s], w, merged)
+        if cutlass.const_expr(self.poll_all):
+            self.poll_all_sources(sources, loads, scales, r, merged)
+        else:
+            for s in cutlass.range_constexpr(D):
+                w = scales[r, s]
+                if w >= Float32(0):
+                    self.poll_pair(sources[s], loads[s], w, merged)
         pairs = tuple(
             pack_pair(merged[2 * e], merged[2 * e + 1], policy=None) for e in range(2)
         )
@@ -856,6 +872,46 @@ class DcpValue:
                 store_words(at(output, t, col), (bf16x2(lo, hi),))
 
     @cute.jit
+    def poll_all_sources(
+        self, sources, loads, scales, r: cutlass.Constexpr[int], merged
+    ):
+        """`poll_all`: the row's sources with a partial (scale >= 0) polled together
+        (every pass reloads every source into registers; a published source keeps its
+        words until re-armed below), then re-armed and added in source order with
+        poll_pair's operations."""
+        D = self.size
+        n: cutlass.Constexpr = len(loads[0])
+        values = cute.make_rmem_tensor((D, n), Uint32)
+        want = Uint32(0)
+        pending = Uint32(0)
+        for s in cutlass.range_constexpr(D):
+            want |= Uint32(scales[r, s] >= Float32(0)) << s
+            for k in cutlass.range_constexpr(n):
+                values[s, k] = loads[s][k]
+            pending |= (
+                Uint32(reduce(or_, (v == Uint32(PAIR_SENT) for v in loads[s]))) << s
+            )
+        pending &= want
+        while pending != 0:
+            pending = Uint32(0)
+            for s in cutlass.range_constexpr(D):
+                words = load_volatile(sources[s], count=n)
+                for k in cutlass.range_constexpr(n):
+                    values[s, k] = words[k]
+                pending |= (
+                    Uint32(reduce(or_, (v == Uint32(PAIR_SENT) for v in words))) << s
+                )
+            pending &= want
+        for s in cutlass.range_constexpr(D):
+            w = scales[r, s]
+            if w >= Float32(0):
+                store_words(sources[s], (Uint32(PAIR_SENT),) * n)
+                for e in cutlass.range_constexpr(n):
+                    lo, hi = unpack_bf16(values[s, e])
+                    merged[2 * e] += w * lo
+                    merged[2 * e + 1] += w * hi
+
+    @cute.jit
     def poll_pair(self, source, words, w, merged):
         """Polls a BF16 partial chunk (2 len(words) values) until published, re-arms
         it and adds it, weighted by `w`, to `merged`."""
@@ -887,6 +943,7 @@ def compile_value(
     preprojected=False,
     pushed=False,
     rows_per_cta=None,
+    poll_all=None,
 ):
     """DcpValue of one batch (`q` rows per request); `uv`: the (shape, stride,
     dtype) of W_UV, `pitch`: the projected rows' (the gate follows the 2112 query /
@@ -894,7 +951,7 @@ def compile_value(
     (BF16 for FlashMLA sparse, else FP8), rows / LSE as the sparse decode returns
     them (`lse_base_e`: natural-log, else base 2) and `lens` the sparse decode's
     per-row valid counts. `partials`: the format of its DcpMailbox;
-    `rows_per_cta`: DcpValue's (`pushed`)."""
+    `rows_per_cta`, `poll_all`: DcpValue's (`pushed`)."""
     f32, i32 = torch.float32, torch.int32
     w_uv, gate = fake(*uv), fake((batch, heads * 128), (pitch, 1))
     rows = fake((batch, 1, size * heads, 512))
@@ -924,6 +981,7 @@ def compile_value(
             preprojected,
             pushed,
             rows_per_cta,
+            poll_all,
         )
     totals = fake((batch // q,), None, i32, 4)
     width = 512
