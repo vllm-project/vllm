@@ -168,13 +168,13 @@ def _block32_tiled_kernel(
         if GROUP_TILES and not N_FIRST and N == 2304 and K == 5120:
             # Reuse an activation/weight neighborhood without changing ownership.
             grid_m = tl.num_programs(0)
-            grid_n: tl.constexpr = (N + BLOCK_N - 1) // BLOCK_N
+            grid_n_cols: tl.constexpr = (N + BLOCK_N - 1) // BLOCK_N
             linear = pid_n * grid_m + pid_m
-            first_m = (linear // (8 * grid_n)) * 8
+            first_m = (linear // (8 * grid_n_cols)) * 8
             group_m = tl.minimum(grid_m - first_m, 8)
-            within = linear % (8 * grid_n)
+            within = linear % (8 * grid_n_cols)
             first_n = (within // (group_m * 4)) * 4
-            group_n = tl.minimum(grid_n - first_n, 4)
+            group_n = tl.minimum(grid_n_cols - first_n, 4)
             pid_m = first_m + (within % (group_m * 4)) // group_n
             pid_n = first_n + within % group_n
     offs_m = pid_m * BLOCK_M + tl.arange(0, BLOCK_M)
