@@ -110,7 +110,7 @@ from vllm.v1.outputs import (
     DraftTokenIds,
     ModelRunnerOutput,
 )
-from vllm.v1.utils import compute_iteration_details, report_usage_stats
+from vllm.v1.utils import report_usage_stats
 from vllm.v1.worker.extensible_kv_cache import (
     extend_kv_cache,
     kv_cache_lent_for_weight_update,
@@ -1024,6 +1024,10 @@ class Worker(WorkerBase):
         """Commit the final size of an extensible KV cache."""
         extend_kv_cache(self.model_runner, self._kv_cache_config, num_blocks)
         self.cache_config.num_gpu_blocks = num_blocks
+        if getattr(self.model_runner, "adaptive_verification", None) is not None:
+            # Capture profiled step costs with only a block or two committed,
+            # so their KV reads hit L2; profile again against the final cache.
+            self.model_runner.profile_adaptive_verification()
 
     @instrument(span_name="Warmup (GPU)")
     def compile_or_warm_up_model(self) -> CompilationTimes:
@@ -1102,6 +1106,12 @@ class Worker(WorkerBase):
                 stats.get("allocated_bytes.all.peak", 0)
                 - stats.get("allocated_bytes.all.current", 0),
             )
+            if not self.model_config.enforce_eager:
+                # Warmup's blocks hold garbage and capture addresses only the
+                # null block: release them so the graphs fit (encoder graphs
+                # can take GiBs). extend_kv_cache commits the size measured
+                # after capture.
+                kv_cache.commit(kv_cache.min_committed_blocks, shrink=True)
 
         cuda_graph_memory_bytes = 0
         if not self.model_config.enforce_eager:
@@ -1300,6 +1310,7 @@ class Worker(WorkerBase):
             and self.model_runner.get_draft_model() is not None
             and speculative_config is not None
             and speculative_config.draft_model_config is not None
+            and not speculative_config.prefill_context_kv_only
         )
 
     def _set_draft_weight_update_target(self) -> None:
@@ -1345,7 +1356,8 @@ class Worker(WorkerBase):
         if not self.profiler.should_annotate:
             return nullcontext()
 
-        iteration_details = compute_iteration_details(scheduler_output)
+        iteration_details = scheduler_output.iteration_details
+        assert iteration_details is not None
 
         if self.vllm_config.profiler_config.detailed_trace_annotation:
             # Compute roofline-model metrics per request, split by phase
@@ -1696,6 +1708,16 @@ class Worker(WorkerBase):
             raise RuntimeError(
                 f"{type(self.weight_transfer_engine).__name__} does not support "
                 "draft model weight updates."
+            )
+        speculative_config = self.vllm_config.speculative_config
+        if (
+            is_draft
+            and speculative_config is not None
+            and speculative_config.prefill_context_kv_only
+        ):
+            raise RuntimeError(
+                "Draft model weight updates are not supported with "
+                "prefill_context_kv_only, which frees draft weights."
             )
 
         if self._weight_update_active:

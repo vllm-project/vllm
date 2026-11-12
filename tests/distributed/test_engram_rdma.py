@@ -29,6 +29,13 @@ from vllm.distributed.engram_share.rdma.runtime import (
 )
 
 
+def test_rdma_rejects_packed_fp4_before_allocation():
+    from vllm.models.deepseek_v41.common.engram import ParallelEngramEmbedding
+
+    with pytest.raises(ValueError, match="rdma_provider.*packed FP4"):
+        ParallelEngramEmbedding(1, 256, (1,), rdma_provider="test", packed_fp4=True)
+
+
 def test_external_provider_is_initialized_only_by_the_loader(tmp_path, monkeypatch):
     """Loading the interface does not open a remote reader or acquire a lease."""
     (tmp_path / "test_engram_provider.py").write_text(
