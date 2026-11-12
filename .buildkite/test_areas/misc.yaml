@@ -977,11 +977,15 @@ steps:
     - vllm/model_executor/layers
     - vllm/lora/ops/triton_ops
     - vllm/model_executor/kernels/linear
+    - vllm/config/compilation.py
+    - vllm/config/vllm.py
+    - vllm/compilation/compiler_interface.py
     - vllm/model_executor/determinism
     - tests/v1/determinism/
   commands:
     - export VLLM_WORKER_MULTIPROC_METHOD=spawn
     - pytest -v -s v1/determinism/test_batch_invariance.py
+    - pytest -v -s v1/determinism/test_hopper_native_dispatch.py
     - pytest -v -s v1/determinism/test_rms_norm_batch_invariant.py
     - pytest -v -s v1/determinism/test_lora_shrink_batch_invariant.py
     - pytest -v -s v1/determinism/test_batch_invariance_vlm.py -k vision_fa3
@@ -1027,11 +1031,15 @@ steps:
     - vllm/model_executor/layers
     - vllm/lora/ops/triton_ops
     - vllm/model_executor/kernels/linear
+    - vllm/config/compilation.py
+    - vllm/config/vllm.py
+    - vllm/compilation/compiler_interface.py
     - vllm/model_executor/determinism
     - tests/v1/determinism/
   commands:
     - export VLLM_WORKER_MULTIPROC_METHOD=spawn
     - pytest -v -s v1/determinism/test_batch_invariance.py
+    - pytest -v -s v1/determinism/test_hopper_native_dispatch.py
     - pytest -v -s v1/determinism/test_rms_norm_batch_invariant.py
     - pytest -v -s v1/determinism/test_lora_shrink_batch_invariant.py
     - pytest -v -s v1/determinism/test_batch_invariance_vlm.py

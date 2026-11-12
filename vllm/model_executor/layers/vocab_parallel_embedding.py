@@ -21,6 +21,9 @@ from vllm.model_executor.custom_op import PluggableLayer
 from vllm.model_executor.determinism.batch_invariant import (
     linear_batch_invariant,
 )
+from vllm.model_executor.determinism.batch_invariant_configs import (
+    use_hopper_native_linear,
+)
 from vllm.model_executor.layers.quantization.base_config import (
     QuantizationConfig,
     QuantizeMethodBase,
@@ -84,6 +87,8 @@ class UnquantizedEmbeddingMethod(QuantizeMethodBase):
         if envs.VLLM_BATCH_INVARIANT and (
             current_platform.is_cuda_alike() or current_platform.is_xpu()
         ):
+            if use_hopper_native_linear(x, layer.weight, bias):
+                return torch.nn.functional.linear(x.contiguous(), layer.weight)
             return linear_batch_invariant(x, layer.weight, bias)
         return dispatch_unquantized_gemm()(layer, x, layer.weight, bias)
 

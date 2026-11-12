@@ -894,6 +894,7 @@ class VllmConfig:
             or model.dtype != torch.bfloat16
             or model.quantization is not None
             or not current_platform.is_cuda()
+            or bi.supports_hopper_native_dispatch()
         ):
             return False
         family = bi._get_tuned_matmul_arch_family(

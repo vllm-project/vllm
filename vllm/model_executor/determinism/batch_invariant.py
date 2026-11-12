@@ -10,9 +10,11 @@ import torch.distributed as dist
 
 import vllm.envs as envs
 from vllm.model_executor.determinism.batch_invariant_configs import (
+    HOPPER_DETERMINISTIC_INDUCTOR_CONFIG,
     _get_descriptor_matmul_config,
     _get_matmul_config,
     resolve_tuned_matmul_configs,
+    supports_hopper_native_dispatch,
 )
 from vllm.platforms import current_platform
 from vllm.triton_utils import tl, triton
@@ -1514,6 +1516,13 @@ def override_envs_for_invariance():
     os.environ["VLLM_USE_AOT_COMPILE"] = "0"
     import torch._inductor.config as inductor_config
 
+    if supports_hopper_native_dispatch():
+        # Stable selection and separate Inductor cache factors.
+        for key, value in HOPPER_DETERMINISTIC_INDUCTOR_CONFIG.items():
+            if key == "triton.autotune_pointwise":
+                inductor_config.triton.autotune_pointwise = value
+            else:
+                setattr(inductor_config, key, value)
     if hasattr(inductor_config, "batch_invariant"):
         inductor_config.batch_invariant = True
 
@@ -1522,6 +1531,7 @@ def init_batch_invariance():
     # this will hit all the csrc overrides as well
     if envs.VLLM_BATCH_INVARIANT:
         resolve_tuned_matmul_configs()
+        supports_hopper_native_dispatch()
         override_envs_for_invariance()
         enable_batch_invariant_mode()
 

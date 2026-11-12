@@ -154,8 +154,8 @@ When batch invariance is enabled, vLLM:
 1. Uses deterministic kernel implementations for attention and other operations
 2. Ensures consistent numerical behavior across different batch sizes
 3. Disables certain optimizations that may introduce non-determinism
-4. Under tensor parallelism, keeps custom all-reduce on with a fixed reduction order (both custom kernels sum the ranks in the same order, and large inputs are reduced in fixed-size chunks), and disables FlashInfer, AITER and QuickReduce all-reduce
-5. On CUDA devices with tuned matmul table entries for the model's bf16 unquantized forward linear layers (Ada, Hopper, Blackwell),
+4. Under tensor parallelism, keeps custom all-reduce on with a fixed reduction order (both custom kernels sum the ranks in the same order, and large inputs are reduced in fixed-size chunks), disables FlashInfer, AITER and QuickReduce all-reduce, and disables fused all-reduce + RMSNorm on Hopper (`fuse_allreduce_rms=False`)
+5. On Ada and Blackwell with tuned matmul table entries for the model's BF16 unquantized forward linear layers,
    runs without `torch.compile` using breakable CUDA graphs so tile configs follow the runtime batch size; set `VLLM_USE_BREAKABLE_CUDAGRAPH=0` to opt out.
 6. Splits the LoRA shrink reduction into 8 fixed K chunks that are summed in a fixed order instead of with atomics
 
@@ -168,6 +168,22 @@ the FlashAttention version selector uses FlashAttention 2 in this mode.
 
 !!! note
     Enabling batch invariance may impact performance compared to the default non-deterministic mode. This trade-off is intentional to guarantee reproducibility.
+
+### Hopper native dispatch
+
+With `VLLM_BATCH_INVARIANT=1`, Hopper (SM90) uses native cuBLASLt
+dispatch for contiguous-weight, aligned, bias-free BF16 linear and LM-head
+projections with at least 128 outputs (making non-contiguous activations
+contiguous so a layer does not switch kernel families). The workspace and
+PyTorch settings disable split-K. Narrow projections (with fewer than 128
+outputs, such as small routers) retain the batch-invariant matmul because
+cuBLAS can switch to GEMV for a single input row.
+
+The engine retains its configured TorchInductor compilation and CUDA graph
+mode; fused all-reduce + RMSNorm is forced off (`fuse_allreduce_rms=False`) on
+Hopper (`SM90`). TorchInductor uses deterministic candidate selection. The
+shipped H200 unquantized expert table for Qwen3-30B-A3B (`E=128, N=768`) can
+select its tiles at runtime with one K partition.
 
 ## Future Improvements
 
