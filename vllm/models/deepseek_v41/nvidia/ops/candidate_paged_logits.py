@@ -24,7 +24,7 @@ from vllm.model_executor.warmup.jit_warmup_cutedsl_helper import (
 
 
 class CandidatePagePlanKernel(VllmCuTeDSLJitKernel[tuple[int, int]]):
-    """Cache `(physical_page << 32) | token_offset` for all consumer layers."""
+    """Cache int32 page IDs; consumers derive offsets from sparse indices."""
 
     @staticmethod
     def kernel(key: tuple[int, int]) -> Any:
@@ -42,12 +42,11 @@ class CandidatePagePlanKernel(VllmCuTeDSLJitKernel[tuple[int, int]]):
             tid, _, _ = cute.arch.thread_idx()
             block = tile * 256 + tid
             if block < sparse_indices.shape[1]:
-                address = Int64(0)
+                page = Int32(0)
                 if block * sparse_block_size < valid_end[row]:
                     pos = sparse_indices[row, block] * sparse_block_size
                     page = block_table[row_indices[row], pos // page_size]
-                    address = (Int64(page) << 32) | Int64(pos % page_size)
-                physical_blocks[row, block] = address
+                physical_blocks[row, block] = page
 
         @cute.jit
         def entry(
@@ -89,7 +88,7 @@ class CandidatePagePlanKernel(VllmCuTeDSLJitKernel[tuple[int, int]]):
         def vector():
             return make_fake_tensor(Int32, (cute.sym_int(),), (1,), assumed_align=4)
 
-        return matrix(Int32), matrix(Int32), vector(), vector(), matrix(Int64)
+        return matrix(Int32), matrix(Int32), vector(), vector(), matrix(Int32)
 
     @kernel_launcher
     def __call__(
@@ -103,6 +102,7 @@ class CandidatePagePlanKernel(VllmCuTeDSLJitKernel[tuple[int, int]]):
         page_size: int,
         sparse_block_size: int,
     ) -> CuTeDSLLaunchSpec[tuple[int, int]]:
+        assert physical_blocks.dtype == torch.int32
         return (page_size, sparse_block_size), (
             block_table,
             sparse_indices,
@@ -134,6 +134,7 @@ class CandidatePagedLogitsKernel(
             q: cute.Tensor,
             cache: cute.Tensor,
             weights: cute.Tensor,
+            sparse_indices: cute.Tensor,
             physical_blocks: cute.Tensor,
             valid_end: cute.Tensor,
             logits: cute.Tensor,
@@ -194,23 +195,25 @@ class CandidatePagedLogitsKernel(
                             tma.tma_tensor, (sparse_block_size, 128)
                         )
                         dst_tiles = cute.zipped_divide(sk, (sparse_block_size, 128))
-                        block_address = Int64(0)
+                        block_page = Int32(0)
+                        block_offset = Int32(0)
                         if (
                             tid < tile_tokens // sparse_block_size
                             and start + tid * sparse_block_size < end
                         ):
-                            block_address = physical_blocks[
-                                row, tile * (tile_tokens // sparse_block_size) + tid
-                            ]
+                            idx = tile * (tile_tokens // sparse_block_size) + tid
+                            block_page = physical_blocks[row, idx]
+                            block_offset = sparse_indices[row, idx] % (
+                                page_size // sparse_block_size
+                            )
                         for block in cutlass.range_constexpr(
                             tile_tokens // sparse_block_size
                         ):
-                            address = cute.arch.shuffle_sync(block_address, block)
-                            page = Int32(address >> 32)
-                            offset = Int32(address & 0xFFFFFFFF)
+                            page = cute.arch.shuffle_sync(block_page, block)
+                            offset = cute.arch.shuffle_sync(block_offset, block)
                             simple_tma_copy(
                                 tma.atom,
-                                src_tiles[None, (offset // sparse_block_size, 0, page)],
+                                src_tiles[None, (offset, 0, page)],
                                 dst_tiles[None, (block, 0)],
                                 loaded,
                             )
@@ -243,11 +246,13 @@ class CandidatePagedLogitsKernel(
                             col = start + token
                             scale = Float32(0)
                             if col < end:
-                                address = physical_blocks[row, col // sparse_block_size]
-                                page = Int32(address >> 32)
+                                block = col // sparse_block_size
+                                page = physical_blocks[row, block]
                                 base = Int64(page) * page_stride
                                 offset = (
-                                    Int32(address & 0xFFFFFFFF)
+                                    sparse_indices[row, block]
+                                    % (page_size // sparse_block_size)
+                                    * sparse_block_size
                                     + col % sparse_block_size
                                 )
                                 scale = recast_val(
@@ -262,12 +267,15 @@ class CandidatePagedLogitsKernel(
                         base = Int64(0)
                         offset = Int32(0)
                         if col < end:
-                            address = physical_blocks[row, col // sparse_block_size]
-                            page = Int32(address >> 32)
+                            block = col // sparse_block_size
+                            page = physical_blocks[row, block]
                             # Interleaved KV pools need 64-bit address arithmetic.
                             base = Int64(page) * page_stride
                             offset = (
-                                Int32(address & 0xFFFFFFFF) + col % sparse_block_size
+                                sparse_indices[row, block]
+                                % (page_size // sparse_block_size)
+                                * sparse_block_size
+                                + col % sparse_block_size
                             )
                             scale = recast_val(
                                 cache[base + page_size * 32 + offset], Float32
@@ -361,6 +369,7 @@ class CandidatePagedLogitsKernel(
             q: cute.Tensor,
             cache: cute.Tensor,
             weights: cute.Tensor,
+            sparse_indices: cute.Tensor,
             physical_blocks: cute.Tensor,
             valid_end: cute.Tensor,
             logits: cute.Tensor,
@@ -404,6 +413,7 @@ class CandidatePagedLogitsKernel(
                 q,
                 cache,
                 weights,
+                sparse_indices,
                 physical_blocks,
                 valid_end,
                 logits,
@@ -454,7 +464,10 @@ class CandidatePagedLogitsKernel(
             ),
             make_fake_tensor(Float32, (rows, 32), (cute.sym_int(), 1), assumed_align=4),
             make_fake_tensor(
-                Int64, (rows, cute.sym_int()), (cute.sym_int(), 1), assumed_align=8
+                Int32, (rows, cute.sym_int()), (cute.sym_int(), 1), assumed_align=4
+            ),
+            make_fake_tensor(
+                Int32, (rows, cute.sym_int()), (cute.sym_int(), 1), assumed_align=4
             ),
             make_fake_tensor(Int32, (rows,), (cute.sym_int(),), assumed_align=4),
             make_fake_tensor(
@@ -470,6 +483,7 @@ class CandidatePagedLogitsKernel(
         q: torch.Tensor,
         cache: torch.Tensor,
         weights: torch.Tensor,
+        sparse_indices: torch.Tensor,
         physical_blocks: torch.Tensor,
         valid_end: torch.Tensor,
         logits: torch.Tensor,
@@ -487,7 +501,9 @@ class CandidatePagedLogitsKernel(
         assert page_size in (16, 32, 64) and sparse_block_size in (8, 16)
         assert logits.dtype == weights.dtype == torch.float32
         assert weights.shape == q.shape[:2] and weights.stride(1) == 1
-        assert physical_blocks.dtype == torch.int64 and physical_blocks.stride(1) == 1
+        assert sparse_indices.dtype == physical_blocks.dtype == torch.int32
+        assert sparse_indices.stride(1) == physical_blocks.stride(1) == 1
+        assert sparse_indices.shape == physical_blocks.shape
         assert valid_end.dtype == torch.int32 and valid_end.shape == (q.shape[0],)
         assert logits.shape == (
             q.shape[0],
@@ -520,6 +536,7 @@ class CandidatePagedLogitsKernel(
                 q.view(torch.int32),
                 cache_words,
                 weights,
+                sparse_indices,
                 physical_blocks,
                 valid_end,
                 logits,

@@ -1090,6 +1090,50 @@ def _build_paged_cache(
     or not sparse_indexer.current_platform.is_device_capability_family(90),
     reason="SM90 WGMMA required",
 )
+@pytest.mark.parametrize("page_size", [16, 32, 64])
+def test_candidate_logits_int32_page_ids(page_size: int):
+    """Preserve physical page IDs across the full supported int32 range."""
+    from vllm.models.deepseek_v41.nvidia.ops.candidate_paged_logits import (
+        prepare_candidate_pages,
+    )
+
+    max_page = torch.iinfo(torch.int32).max - 1
+    blocks_per_page = page_size // 8
+    i32 = dict(device="cuda", dtype=torch.int32)
+    table = torch.tensor([[0, 1 << 25, max_page]], **i32)
+    indices = torch.tensor(
+        [
+            [
+                0,
+                blocks_per_page - 1,
+                blocks_per_page,
+                2 * blocks_per_page,
+                3 * blocks_per_page - 1,
+                -1,
+            ]
+        ],
+        **i32,
+    )
+    physical_blocks = torch.empty_like(indices)
+    prepare_candidate_pages(
+        table,
+        indices,
+        torch.tensor([40], **i32),
+        torch.tensor([0], **i32),
+        physical_blocks,
+        page_size=page_size,
+        sparse_block_size=8,
+    )
+    expected = torch.tensor([[0, 0, 1 << 25, max_page, max_page, 0]], **i32)
+    torch.testing.assert_close(physical_blocks, expected, atol=0, rtol=0)
+
+
+@pytest.mark.skipif(
+    not sparse_indexer.current_platform.is_cuda()
+    or not torch.cuda.is_available()
+    or not sparse_indexer.current_platform.is_device_capability_family(90),
+    reason="SM90 WGMMA required",
+)
 @pytest.mark.parametrize(
     "page_size,block_size,next_n,pad,offset,tile",
     [
@@ -1147,7 +1191,7 @@ def test_candidate_logits_layout_and_graph(
     candidates = candidates[:, torch.randperm(count, device="cuda")]
     starts = torch.zeros_like(lens)
     si = torch.empty_like(candidates)
-    physical_blocks = torch.empty_like(candidates, dtype=torch.int64)
+    physical_blocks = torch.empty_like(candidates)
     end = torch.empty_like(lens)
     out = torch.empty((rows, width + 64), device="cuda")[:, :width]
 
@@ -1168,6 +1212,7 @@ def test_candidate_logits_layout_and_graph(
             q,
             cache,
             weights,
+            si,
             physical_blocks,
             end,
             out,
@@ -1245,11 +1290,12 @@ def test_candidate_logits_large_page_stride(large_page_stride: bool):
     )
     q = torch.ones((1, 32, 128), device="cuda").to(torch.float8_e4m3fn)
     weights = torch.ones((1, 32), device="cuda")
-    physical_blocks = ((page << 32) | (torch.arange(8, device="cuda") * 8))[None]
+    indices = torch.arange(8, device="cuda", dtype=torch.int32)[None]
+    physical_blocks = torch.full_like(indices, page)
     end = torch.tensor([page_size], device="cuda", dtype=torch.int32)
     out = torch.empty((1, 64), device="cuda")
     candidate_paged_logits(
-        q, cache, weights, physical_blocks, end, out, sparse_block_size=8
+        q, cache, weights, indices, physical_blocks, end, out, sparse_block_size=8
     )
     torch.testing.assert_close(
         out[:, :page_size], torch.full_like(out[:, :page_size], 4096), atol=0, rtol=0
