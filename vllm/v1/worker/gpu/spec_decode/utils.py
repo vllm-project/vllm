@@ -9,7 +9,6 @@ import torch
 from vllm.config import LoadConfig, replace
 from vllm.distributed import get_pp_group
 from vllm.logger import init_logger
-from vllm.utils.gpu_sync_debug import gpu_sync_allowed
 from vllm.v1.core.sched.output import SchedulerOutput
 from vllm.v1.outputs import DraftTokenIds
 from vllm.v1.worker.gpu.async_utils import async_copy_to_np, new_d2h_stream
@@ -58,41 +57,25 @@ def get_pp_safe_draft_load_config(load_config: LoadConfig) -> LoadConfig:
 
 
 @dataclass(slots=True)
-class CopyPending:
-    pending: bool
+class _PendingCopy:
+    # Cleared once synchronized, to skip redundant driver calls.
+    event: torch.cuda.Event | None
 
-
-@dataclass(slots=True)
-class CopyBarrier:
-    event: torch.cuda.Event
-    pending: CopyPending
-
-
-@dataclass(slots=True)
-class DraftTokens:
-    ids: np.ndarray
-    copy_pending: CopyPending
-    copy_event: torch.cuda.Event
+    def wait(self) -> None:
+        if self.event is not None:
+            self.event.synchronize()
+            self.event = None
 
 
 class DraftTokensHandler:
-    def __init__(self, max_concurrent_batches: int, device: torch.device | None = None):
+    def __init__(self, device: torch.device | None = None):
         self.device = device
         self.copy_stream = new_d2h_stream(device)
-        # Blocking (sleep) events to avoid busy-polling the CUDA driver lock.
-        self._copy_barriers: list[CopyBarrier] = [
-            CopyBarrier(
-                event=torch.cuda.Event(blocking=True),
-                pending=CopyPending(pending=False),
-            )
-            for _ in range(max_concurrent_batches)
-        ]
-        self._next_copy_barrier = 0
 
         # Latest drafts per live request: a row view into an async-copied
-        # pinned array and pending copy event, or just the draft width when
-        # the scheduler doesn't need the token ids.
-        self._draft_tokens_by_req: dict[str, DraftTokens | int] = {}
+        # pinned array with its copy's event (synced in get_draft_tokens), or
+        # just the draft width when the scheduler doesn't need the token ids.
+        self._draft_tokens_by_req: dict[str, tuple[np.ndarray, _PendingCopy] | int] = {}
         # Requests whose drafts the scheduler will fetch for the latest step's
         # structured-output grammar bitmask; None means all requests.
         self._spec_decode_req_ids: Iterable[str] | None = None
@@ -119,20 +102,8 @@ class DraftTokensHandler:
 
         # For spec decoding + structured outputs, we must transfer the
         # draft tokens back to the scheduler for grammar validation.
-        copy_barrier = self._copy_barriers[self._next_copy_barrier]
-        self._next_copy_barrier = (self._next_copy_barrier + 1) % len(
-            self._copy_barriers
-        )
-        copy_event = copy_barrier.event
-
-        # Wait on previous copy if it's still pending. Only rarely occurs
-        # if we have more than max_concurrent_batches in-flight.
-        copy_pending_container = copy_barrier.pending
-        if copy_pending_container.pending:
-            with gpu_sync_allowed():
-                copy_event.synchronize()
-            copy_pending_container.pending = False
-
+        # Blocking (sleep) event to avoid busy-polling the CUDA driver lock.
+        copy_event = torch.cuda.Event(blocking=True)
         current_stream = torch.cuda.current_stream(self.device)
         self.copy_stream.wait_stream(current_stream)
         with torch.cuda.stream(self.copy_stream):
@@ -143,18 +114,9 @@ class DraftTokensHandler:
             draft_tokens.record_stream(self.copy_stream)
             copy_event.record()
 
-        copy_pending = CopyPending(pending=True)
-        copy_barrier.pending = copy_pending
+        copy = _PendingCopy(copy_event)
         for req_id, row in zip(input_batch.req_ids, draft_tokens_np):
-            draft_tokens = self._draft_tokens_by_req.get(req_id, None)
-            if isinstance(draft_tokens, DraftTokens):
-                draft_tokens.ids = row
-                draft_tokens.copy_event = copy_event
-                draft_tokens.copy_pending = copy_pending
-            else:
-                self._draft_tokens_by_req[req_id] = DraftTokens(
-                    row, copy_pending, copy_event
-                )
+            self._draft_tokens_by_req[req_id] = (row, copy)
 
     def discard(self, req_id: str) -> None:
         self._draft_tokens_by_req.pop(req_id, None)
@@ -163,33 +125,25 @@ class DraftTokensHandler:
         """Return the latest drafts needed for the current step's grammar bitmask.
         Requests without retained drafts are omitted.
         """
-        out_req_ids: list[str] = []
-        out_draft_tokens: list[list[int]] = []
-        request_ids = list(
-            self._spec_decode_req_ids
-            if self._spec_decode_req_ids is not None
-            else self._draft_tokens_by_req
-        )
-        for req_id in request_ids:
-            draft_tokens = self._draft_tokens_by_req.get(req_id, None)
-            if draft_tokens is None:
-                continue
-
-            draft_token_ids: list[int]
-            if isinstance(draft_tokens, int):
-                draft_token_ids = [-1] * draft_tokens
+        drafts_by_req = self._draft_tokens_by_req
+        req_ids = self._spec_decode_req_ids
+        if req_ids is None:
+            out_req_ids = list(drafts_by_req)
+        else:
+            out_req_ids = [req_id for req_id in req_ids if req_id in drafts_by_req]
+        draft_token_ids: list[list[int]] = []
+        for req_id in out_req_ids:
+            drafts = drafts_by_req[req_id]
+            if isinstance(drafts, int):
+                # Construct placeholders from draft token width.
+                draft_token_ids.append([-1] * drafts)
             else:
-                copy_pending_container = draft_tokens.copy_pending
-                if copy_pending_container.pending:
-                    # Clear the barrier for every row from this copy
-                    draft_tokens.copy_event.synchronize()
-                    copy_pending_container.pending = False
-                draft_token_ids = draft_tokens.ids.tolist()
+                ids, copy = drafts
+                copy.wait()
+                # Convert numpy view to list.
+                draft_token_ids.append(ids.tolist())
 
-            out_req_ids.append(req_id)
-            out_draft_tokens.append(draft_token_ids)
-
-        return DraftTokenIds(out_req_ids, out_draft_tokens)
+        return DraftTokenIds(out_req_ids, draft_token_ids)
 
 
 def get_parallel_drafting_token_id(hf_config) -> int:

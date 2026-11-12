@@ -35,7 +35,7 @@ def _get_draft_toks(handler: DraftTokensHandler) -> dict[str, list[int]]:
 
 @pytest.mark.skipif(not torch.cuda.is_available(), reason="Requires CUDA")
 def test_draft_tokens_follow_request_lifecycle() -> None:
-    handler = DraftTokensHandler(max_concurrent_batches=2, device=torch.device("cuda"))
+    handler = DraftTokensHandler(torch.device("cuda"))
 
     # The worker samples two structured-output requests
     _set_draft_toks(
@@ -82,7 +82,7 @@ def test_draft_tokens_follow_request_lifecycle() -> None:
     handler.begin_step(deferred_output)
     assert _get_draft_toks(handler) == {"a": [13, 14]}
 
-    # Subsequent reads return all retained drafts again.
+    # Without structured-output spec decode, all retained drafts are fetched.
     handler.begin_step(SchedulerOutput.make_empty())
 
     # Requests finish independently, and the handler is empty once all are gone
