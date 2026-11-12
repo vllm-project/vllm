@@ -88,9 +88,11 @@ class DeepseekV4CPUIndexerMetadataBuilder(DeepseekV32IndexerMetadataBuilder):
         max_logits_bytes: int,
         request_offset: int = 0,
         fused_mqa_topk_eligible: bool = False,
+        m_split_tp_size: int = 1,
     ) -> list[tuple[slice, slice]]:
-        # workspace_size/max_logits_bytes/fused_mqa_topk_eligible are unused: no
-        # flat-gather workspace or dense M*N buffer is allocated.
+        # workspace_size/max_logits_bytes/fused_mqa_topk_eligible/m_split_tp_size
+        # are unused: no flat-gather workspace or dense M*N buffer is
+        # allocated.
         num_reqs = compressed_seq_lens_cpu.shape[0]
         total_query_len = int(prefill_query_lens_cpu.sum().item())
         return [
