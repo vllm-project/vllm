@@ -52,9 +52,9 @@ def _positive_float(name: str, value: object) -> float:
 class MooncakeECConfig:
     """Validated settings shared by the Scheduler and Worker roles.
 
-    ``control_port`` is the first TP-shard port after the DP offset;
-    ``control_addr`` targets that shard, which advertises the full topology.
-    ``control_host`` is the address this instance both advertises and binds,
+    `control_port` is the first TP-shard port after the DP offset;
+    `control_addr` targets that shard, which advertises the full topology.
+    `control_host` is the address this instance both advertises and binds,
     so reaching a Consumer means being routed to it rather than finding it on
     every interface.
     """

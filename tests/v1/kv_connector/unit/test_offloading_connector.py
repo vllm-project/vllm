@@ -137,8 +137,8 @@ def _wait_for_prefix_cache_reset(llm: LLM, reset_connector: bool = False) -> Non
     """Wait for async offload transfers to finish so prefix cache can reset.
 
     The GPU-to-CPU offload runs on a CUDA stream asynchronously. While blocks
-    are still held by the offload worker, ``reset_prefix_cache`` returns
-    ``False``. Between retries we send a dummy single-token prefill to force
+    are still held by the offload worker, `reset_prefix_cache` returns
+    `False`. Between retries we send a dummy single-token prefill to force
     the engine to step, which polls the worker for completed transfers and
     frees GPU blocks.
     """
