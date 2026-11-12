@@ -73,17 +73,20 @@ from vllm.models.deepseek_v4.common.spec_decode import needs_mtp_hidden_buffer
 from vllm.models.deepseek_v41.amd.engram import RocmEngram
 from vllm.models.deepseek_v41.amd.mhc import (
     MHC_OVERLAP_MAX_TOKENS,
+    MHC_SEAM_MIN_TOKENS,
     MHCOverlapStream,
     mhc_pre_delayed_mxfp8,
     mhc_pre_delayed_overlap,
+    mhc_pre_delayed_seam,
     supports_mhc_overlap,
+    supports_mhc_seam,
+    warmup_mhc_seam,
 )
 from vllm.models.deepseek_v41.amd.mono_decode import (
     MonoDecodeLayer,
     link_layers,
 )
 from vllm.models.deepseek_v41.amd.mono_decode import flush as mono_flush
-from vllm.models.deepseek_v41.amd.ops import mhc_seam
 from vllm.models.deepseek_v41.amd.rocm import DeepseekV41ROCMAiterMLAAttention
 from vllm.models.deepseek_v41.attention import DeepseekV4Attention
 from vllm.models.deepseek_v41.decoder_replay_layers import DecoderReplayLayers
@@ -344,14 +347,19 @@ class DeepseekV4DecoderLayer(nn.Module):
         # input as MXFP8 for the first GEMM (fused_wqa_wkv / shared gate_up).
         self.attn_seam_mxfp8 = False
         self.ffn_seam_mxfp8 = False
-        # Elsewhere (gfx942), seams with a post block run as one AITER launch
-        # from mhc_seam.MIN_TOKENS tokens.
+        # Elsewhere (gfx942), seams with a post block run as one AITER call
+        # from MHC_SEAM_MIN_TOKENS tokens.
         self.mhc_seam = (
-            partial(mhc_seam.mhc_pre_delayed_seam, self.mhc_pre_delayed)
+            partial(mhc_pre_delayed_seam, self.mhc_pre_delayed)
             if not self.fuse_seam_norm
-            and mhc_seam.supported(self.hidden_size, self.hc_mult)
+            and supports_mhc_seam(self.hidden_size, self.hc_mult)
             else None
         )
+        if self.mhc_seam is not None:
+            logger.info_once(
+                "mhc_seam: aiter mhc_fused_post_pre_delayed from %d tokens",
+                MHC_SEAM_MIN_TOKENS,
+            )
         # Decode steps of an eligible layer may run as the mono decode layer.
         self.mono = MonoDecodeLayer.create(self, vllm_config)
         if self.mono is not None and self.mono.ffn_only:
@@ -363,7 +371,7 @@ class DeepseekV4DecoderLayer(nn.Module):
         if self.mono is not None:
             self.mono.build_runner(self.attn_norm.weight.device)
         if self.mhc_seam is not None and self.hc_attn_fn.is_cuda:
-            mhc_seam.warmup(self.hidden_size, self.hc_mult, self.hc_attn_fn.device)
+            warmup_mhc_seam(self.hidden_size, self.hc_mult, self.hc_attn_fn.device)
         if not self.use_mega_mhc or not self.hc_attn_fn.is_cuda:
             return
         # Reloads and in-place updates end here too; refilled in place, so
