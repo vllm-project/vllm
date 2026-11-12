@@ -1,18 +1,25 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 
+from types import SimpleNamespace
+
 import pytest
 import regex as re
 import torch
 
+from vllm.config import get_current_vllm_config
 from vllm.model_executor.layers.vocab_parallel_embedding import (
     ParallelLMHead,
     VocabParallelEmbedding,
 )
 from vllm.model_executor.models.utils import (
     AutoWeightsLoader,
+    StageMissingLayer,
     WeightsMapper,
     _merge_multimodal_embeddings,
+    check_pp_stage_modules,
+    pp_input_embedding,
+    pp_stage,
 )
 from vllm.platforms import current_platform
 
@@ -156,6 +163,150 @@ def test_module_load_shared_params_that_are_not_tied_embeddings():
 
     assert loaded == {"gate.weight"}
     assert torch.all(mod.gate.weight == torch.Tensor([[1, 2], [3, 4]]))
+
+
+def set_pp_rank(monkeypatch: pytest.MonkeyPatch, rank: int, world_size: int):
+    pp_group = SimpleNamespace(
+        rank_in_group=rank,
+        world_size=world_size,
+        is_first_rank=rank == 0,
+        is_last_rank=rank == world_size - 1,
+    )
+    monkeypatch.setattr("vllm.distributed.get_pp_group", lambda: pp_group)
+    monkeypatch.setattr(
+        "vllm.distributed.parallel_state.get_pp_group", lambda: pp_group
+    )
+
+
+PP_CONFIG = SimpleNamespace(
+    speculative_config=None,
+    model_config=SimpleNamespace(get_vocab_size=lambda: VOCAB_SIZE),
+)
+
+
+@pytest.mark.cpu_test
+@pytest.mark.parametrize("keep", [True, False])
+def test_pp_stage_builds_children_only_when_kept(keep: bool):
+    """A skipped child is a placeholder whose checkpoint weights are not loaded."""
+    mod = torch.nn.Module()
+    with pp_stage(mod, keep=keep):
+        mod.linear = torch.nn.Linear(2, 2)
+
+    weights = [("linear.weight", torch.ones(2, 2)), ("linear.bias", torch.ones(2))]
+    loaded = AutoWeightsLoader(mod).load_weights(iter(weights))
+
+    assert isinstance(mod.linear, StageMissingLayer) != keep
+    assert loaded == ({"linear.weight", "linear.bias"} if keep else set())
+
+
+class ForwardContextLayer(torch.nn.Module):
+    """Registers itself in the forward context like attention layers do."""
+
+    def __init__(self, prefix: str):
+        super().__init__()
+        compilation_config = get_current_vllm_config().compilation_config
+        compilation_config.static_forward_context[prefix] = self
+
+
+@pytest.mark.cpu_test
+@pytest.mark.usefixtures("default_vllm_config")
+def test_pp_stage_rejects_layers_in_forward_context():
+    """A skipped layer must not stay registered for KV cache allocation."""
+    mod = torch.nn.Module()
+    with pytest.raises(ValueError, match="forward context"), pp_stage(mod, keep=False):
+        mod.attn = ForwardContextLayer("attn")
+
+
+@pytest.mark.cpu_test
+def test_pp_stage_rejects_modules_assigned_elsewhere():
+    """Only direct children become placeholders; others would stay on meta."""
+    mod = torch.nn.Module()
+    mod.child = torch.nn.Module()
+    with pytest.raises(ValueError, match="meta device"), pp_stage(mod, keep=False):
+        mod.child.linear = torch.nn.Linear(2, 2)
+
+
+@pytest.mark.cpu_test
+@pytest.mark.parametrize(
+    ("rank", "tied", "kept"),
+    [(0, False, True), (1, True, False), (2, False, False), (2, True, True)],
+)
+def test_pp_input_embedding_kept_where_used(
+    monkeypatch: pytest.MonkeyPatch, rank: int, tied: bool, kept: bool
+):
+    """The first stage embeds tokens; the last one keeps it as tied lm_head."""
+    set_pp_rank(monkeypatch, rank, world_size=3)
+    mod = torch.nn.Module()
+    with pp_input_embedding(mod, PP_CONFIG, tied=tied):
+        mod.embed_tokens = torch.nn.Embedding(VOCAB_SIZE, HIDDEN_SIZE)
+
+    assert isinstance(mod.embed_tokens, StageMissingLayer) != kept
+
+
+@pytest.mark.cpu_test
+@pytest.mark.usefixtures("dist_init")
+@pytest.mark.parametrize(
+    ("rank", "tie", "unused"),
+    [
+        (0, False, "lm_head"),
+        (0, True, None),
+        (1, False, "embed_tokens"),
+        (1, True, None),
+    ],
+)
+def test_check_pp_stage_modules_warns_about_unused_modules(
+    monkeypatch: pytest.MonkeyPatch,
+    caplog_vllm,
+    rank: int,
+    tie: bool,
+    unused: str | None,
+):
+    """A stage that builds an embedding or lm_head it never uses is reported."""
+    set_pp_rank(monkeypatch, rank, world_size=2)
+
+    check_pp_stage_modules(ModuleWithTiedWeights(tie), PP_CONFIG)
+
+    messages = [record.getMessage() for record in caplog_vllm.records]
+    warnings = [message for message in messages if "never uses" in message]
+    if unused is None:
+        assert not warnings
+    else:
+        assert len(warnings) == 1 and unused in warnings[0]
+
+
+@pytest.mark.cpu_test
+@pytest.mark.usefixtures("dist_init")
+def test_check_pp_stage_modules_accepts_embedding_used_as_lm_head(
+    monkeypatch: pytest.MonkeyPatch, caplog_vllm
+):
+    """Some tied models use the embedding module itself as `lm_head`."""
+    set_pp_rank(monkeypatch, 1, world_size=2)
+    mod = torch.nn.Module()
+    mod.model = torch.nn.Module()
+    mod.model.embed_tokens = VocabParallelEmbedding(VOCAB_SIZE, HIDDEN_SIZE)
+    mod.lm_head = mod.model.embed_tokens
+
+    check_pp_stage_modules(mod, PP_CONFIG)
+
+    assert not any("never uses" in r.getMessage() for r in caplog_vllm.records)
+
+
+@pytest.mark.cpu_test
+@pytest.mark.usefixtures("dist_init")
+def test_check_pp_stage_modules_rejects_lm_head_tied_to_skipped_embedding(
+    monkeypatch: pytest.MonkeyPatch,
+):
+    """A tie condition that disagrees with `pp_input_embedding` fails at load."""
+    set_pp_rank(monkeypatch, 1, world_size=2)
+    mod = torch.nn.Module()
+    mod.model = torch.nn.Module()
+    with pp_input_embedding(mod.model, PP_CONFIG, tied=False):
+        mod.model.embed_tokens = VocabParallelEmbedding(VOCAB_SIZE, HIDDEN_SIZE)
+    mod.lm_head = ParallelLMHead(VOCAB_SIZE, HIDDEN_SIZE)
+    mod.lm_head = mod.lm_head.tie_weights(mod.model.embed_tokens)
+
+    with pytest.raises(ValueError, match="skipped"):
+        check_pp_stage_modules(mod, PP_CONFIG)
 
 
 class raise_if_cuda_sync:

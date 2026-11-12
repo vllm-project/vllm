@@ -79,7 +79,6 @@ from .interfaces import (
 )
 from .utils import (
     AutoWeightsLoader,
-    PPMissingLayer,
     WeightsMapper,
     extract_layer_index,
     get_fused_shared_expert_layers,
@@ -87,6 +86,8 @@ from .utils import (
     make_layers,
     maybe_fuse_shared_experts,
     maybe_prefix,
+    pp_input_embedding,
+    pp_last_stage,
 )
 
 KVCache = tuple[torch.Tensor, torch.Tensor]
@@ -672,10 +673,12 @@ class Qwen3NextModel(nn.Module, EagleModelMixin):
 
         self.vocab_size = config.vocab_size
 
-        self.embed_tokens = VocabParallelEmbedding(
-            self.vocab_size,
-            config.hidden_size,
-        )
+        # Qwen3-Next never ties `lm_head` to the input embedding.
+        with pp_input_embedding(self, vllm_config, tied=False):
+            self.embed_tokens = VocabParallelEmbedding(
+                self.vocab_size,
+                config.hidden_size,
+            )
 
         def get_layer(prefix: str):
             return Qwen3NextDecoderLayer(
@@ -696,10 +699,8 @@ class Qwen3NextModel(nn.Module, EagleModelMixin):
             ["hidden_states", "residual"], config.hidden_size
         )
 
-        if get_pp_group().is_last_rank:
+        with pp_last_stage(self):
             self.norm = Qwen3NextRMSNorm(config.hidden_size, eps=config.rms_norm_eps)
-        else:
-            self.norm = PPMissingLayer()
 
         self.aux_hidden_state_layers: tuple[int, ...] = ()
 
@@ -863,11 +864,12 @@ class Qwen3NextForCausalLM(
             vllm_config=vllm_config, prefix=maybe_prefix(prefix, "model")
         )
 
-        self.lm_head = ParallelLMHead(
-            config.vocab_size,
-            config.hidden_size,
-            prefix=maybe_prefix(prefix, "lm_head"),
-        )
+        with pp_last_stage(self):
+            self.lm_head = ParallelLMHead(
+                config.vocab_size,
+                config.hidden_size,
+                prefix=maybe_prefix(prefix, "lm_head"),
+            )
         self.logits_processor = LogitsProcessor(config.vocab_size)
         self.make_empty_intermediate_tensors = (
             self.model.make_empty_intermediate_tensors

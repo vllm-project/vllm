@@ -148,3 +148,40 @@ It is also worth noting that we should update `MambaAttentionBackendEnum` in [`r
 Finally, if one wants to support torch compile and CUDA graphs, it necessary to wrap the call to the mamba-like layer inside a custom op and register it.
 Please see the calls to `direct_register_custom_op` in [vllm/model_executor/layers/mamba/linear/minimax_linear_attn.py](../../../vllm/model_executor/layers/mamba/linear/minimax_linear_attn.py) or [vllm/model_executor/layers/mamba/short_conv.py](../../../vllm/model_executor/layers/mamba/short_conv.py) for examples of this.
 The new custom op should then be added to the list `_attention_ops` in [vllm/config/compilation.py](../../../vllm/config/compilation.py) to ensure that piecewise CUDA graphs works as intended.
+
+### How to support pipeline parallelism?
+
+With pipeline parallelism, each stage builds only the part of the model it runs. Build the decoder layers with `make_layers`, which returns the range of layers this stage runs and fills the rest with placeholders. Build the modules outside the layer stack in these contexts from [vllm/model_executor/models/utils.py](../../../vllm/model_executor/models/utils.py):
+
+- `pp_input_embedding(self, vllm_config, tied=...)` for the input embedding. It is kept on the first stage, and on the last stage when `lm_head` is tied to it or a drafter reuses it. Pass the condition your model uses to call `tie_weights` as `tied`.
+- `pp_last_stage(self)` for the final norm and `lm_head`.
+- `pp_stage(self, keep=...)` for other modules that only some stages use.
+
+```python
+class MyModel(nn.Module):
+    def __init__(self, *, vllm_config: VllmConfig, prefix: str = ""):
+        super().__init__()
+        config = vllm_config.model_config.hf_text_config
+        with pp_input_embedding(self, vllm_config, tied=config.tie_word_embeddings):
+            self.embed_tokens = VocabParallelEmbedding(
+                config.vocab_size, config.hidden_size
+            )
+        self.start_layer, self.end_layer, self.layers = make_layers(...)
+        with pp_last_stage(self):
+            self.norm = RMSNorm(config.hidden_size, eps=config.rms_norm_eps)
+
+
+class MyModelForCausalLM(nn.Module, SupportsPP):
+    def __init__(self, *, vllm_config: VllmConfig, prefix: str = ""):
+        super().__init__()
+        config = vllm_config.model_config.hf_text_config
+        self.model = MyModel(vllm_config=vllm_config, prefix=f"{prefix}.model")
+        with pp_last_stage(self):
+            self.lm_head = ParallelLMHead(config.vocab_size, config.hidden_size)
+        if config.tie_word_embeddings:
+            self.lm_head = self.lm_head.tie_weights(self.model.embed_tokens)
+```
+
+On the other stages, each module assigned in these contexts is replaced by a placeholder that uses no device memory and that weight loading skips. Assign the modules directly to the module passed to the context. Layers that register in the forward context, such as attention, cannot be skipped this way; build them with `make_layers`. When pipeline parallelism is enabled, vLLM warns at startup if a stage builds an input embedding or `lm_head` that it never uses.
+
+The forward pass still checks `get_pp_group().is_first_rank` to choose between the input embedding and the `IntermediateTensors` from the previous stage, and `get_pp_group().is_last_rank` to choose between applying the final norm and returning `IntermediateTensors`. See [`Qwen3MoeModel`](../../../vllm/model_executor/models/qwen3_moe.py) for an example.

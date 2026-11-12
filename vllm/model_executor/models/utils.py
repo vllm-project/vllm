@@ -2,6 +2,7 @@
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 
 import itertools
+from collections import Counter
 from collections.abc import Callable, Iterable, Mapping
 from contextlib import contextmanager
 from dataclasses import dataclass, field, replace
@@ -18,7 +19,10 @@ from vllm.distributed import (
     get_tensor_model_parallel_world_size,
 )
 from vllm.logger import init_logger
-from vllm.model_executor.layers.vocab_parallel_embedding import VocabParallelEmbedding
+from vllm.model_executor.layers.vocab_parallel_embedding import (
+    ParallelLMHead,
+    VocabParallelEmbedding,
+)
 from vllm.model_executor.model_loader.reload import (
     support_quantized_model_reload_from_hp_weights,
 )
@@ -916,6 +920,94 @@ def no_init_weights(
             yield
 
 
+def _meta_tensors(module: nn.Module) -> dict[str, torch.Tensor]:
+    tensors = {
+        name: tensor
+        for name, tensor in itertools.chain(
+            module.named_parameters(), module.named_buffers()
+        )
+        if tensor.is_meta
+    }
+    for name, value in vars(module).items():
+        if isinstance(value, torch.Tensor) and value.is_meta:
+            tensors[name] = value
+    return tensors
+
+
+@contextmanager
+def pp_stage(module: nn.Module, *, keep: bool):
+    """Within this context, build the direct children assigned to `module` only
+    if `keep` is true on this pipeline stage.
+
+    Otherwise each child is replaced with a `StageMissingLayer`, its weights stay
+    on the meta device, and weight loading skips it. Layers that register in the
+    forward context, such as attention, cannot be skipped this way; build them
+    with `make_layers`.
+    """
+    if keep:
+        yield
+        return
+
+    vllm_config = get_current_vllm_config_or_none()
+    forward_context: dict[str, Any] = {}
+    if vllm_config is not None:
+        forward_context = vllm_config.compilation_config.static_forward_context
+    layers_before = set(forward_context)
+    meta_before = {id(t) for t in _meta_tensors(module).values()}
+
+    with no_init_weights(module, lambda mod: StageMissingLayer("pp_stage", mod)):
+        yield
+
+    if registered := sorted(set(forward_context) - layers_before):
+        raise ValueError(
+            "`pp_stage` cannot skip layers that register in the forward context "
+            f"({registered}); build them with `make_layers`."
+        )
+    if leaked := [
+        name for name, t in _meta_tensors(module).items() if id(t) not in meta_before
+    ]:
+        raise ValueError(
+            f"`pp_stage` left tensors of {type(module).__name__} on the meta device: "
+            f"{leaked}. Assign each module to skip directly to the module passed to "
+            "`pp_stage`, and create no other tensors in its context."
+        )
+
+
+@contextmanager
+def pp_input_embedding(module: nn.Module, vllm_config: VllmConfig, *, tied: bool):
+    """Within this context, build the input embedding assigned to `module` only on
+    the pipeline stages that use it: the first stage, and the last stage when
+    `lm_head` shares its weight or a drafter reuses it.
+
+    Args:
+        module: The module the embedding is assigned to.
+        vllm_config: The vLLM config.
+        tied: Whether the model ties `lm_head` to this embedding. Pass the same
+            condition the model uses to call `tie_weights`.
+
+    """
+    from vllm.distributed import get_pp_group
+
+    pp_group = get_pp_group()
+    keep = (
+        pp_group.is_first_rank
+        or (tied and pp_group.is_last_rank)
+        or spec_decode_needs_target_embed(vllm_config)
+    )
+    with pp_stage(module, keep=keep):
+        yield
+
+
+@contextmanager
+def pp_last_stage(module: nn.Module):
+    """Within this context, build the modules assigned to `module`, such as the
+    final norm and `lm_head`, only on the last pipeline stage."""
+    from vllm.distributed import get_pp_group
+
+    with pp_stage(module, keep=get_pp_group().is_last_rank):
+        yield
+
+
 class LayerFn(Protocol):
     def __call__(self, prefix: str) -> torch.nn.Module: ...
 
@@ -945,6 +1037,83 @@ def spec_decode_needs_target_embed(vllm_config: VllmConfig) -> bool:
         return False
     pp = get_pp_group()
     return pp.world_size > 1 and pp.is_last_rank
+
+
+def check_pp_stage_modules(model: nn.Module, vllm_config: VllmConfig) -> None:
+    """Check where a pipeline stage keeps its input embedding and `lm_head`.
+
+    Warns about vocabulary-sized modules this stage builds but never uses, and
+    fails if a kept `lm_head` is tied to an embedding this stage skipped.
+    """
+    from vllm.distributed.parallel_state import get_pp_group
+
+    pp_group = get_pp_group()
+    if pp_group.world_size == 1:
+        return
+
+    heads: dict[str, ParallelLMHead] = {}
+    embeds: dict[str, VocabParallelEmbedding] = {}
+    for name, module in model.named_modules():
+        if isinstance(module, ParallelLMHead):
+            heads[name] = module
+        elif isinstance(module, VocabParallelEmbedding):
+            embeds[name] = module
+
+    def weight_of(module: nn.Module) -> torch.Tensor | None:
+        weight = getattr(module, "weight", None)
+        return weight if isinstance(weight, torch.Tensor) else None
+
+    def device_weight(module: nn.Module) -> torch.Tensor | None:
+        weight = weight_of(module)
+        return None if weight is None or weight.is_meta else weight
+
+    def storage(modules: Iterable[nn.Module]) -> set[int]:
+        return {w.data_ptr() for m in modules if (w := device_weight(m)) is not None}
+
+    unused: list[tuple[str, torch.Tensor]] = []
+    if pp_group.is_last_rank:
+        for name, head in heads.items():
+            if (weight := weight_of(head)) is not None and weight.is_meta:
+                raise ValueError(
+                    f"`{name}` is tied to an input embedding that this pipeline "
+                    "stage skipped. Pass the condition the model uses to tie "
+                    "`lm_head` as `tied` to `pp_input_embedding`."
+                )
+    else:
+        embed_storage = storage(embeds.values())
+        for name, head in heads.items():
+            weight = device_weight(head)
+            if weight is not None and weight.data_ptr() not in embed_storage:
+                unused.append((name, weight))
+
+    if not pp_group.is_first_rank and not spec_decode_needs_target_embed(vllm_config):
+        tied_storage: set[int] = set()
+        if pp_group.is_last_rank:
+            # `lm_head` either shares the embedding weight or is the embedding.
+            names = Counter(
+                id(m) for _, m in model.named_modules(remove_duplicate=False)
+            )
+            tied_storage = storage(heads.values()) | storage(
+                e for e in embeds.values() if names[id(e)] > 1
+            )
+        vocab_size = vllm_config.model_config.get_vocab_size()
+        for name, embed in embeds.items():
+            weight = device_weight(embed)
+            if (
+                weight is not None
+                and embed.org_vocab_size == vocab_size
+                and weight.data_ptr() not in tied_storage
+            ):
+                unused.append((name, weight))
+
+    if unused:
+        logger.warning(
+            "Pipeline stage %d builds modules it never uses: %s (%.2f GiB). Build "
+            "them under `pp_input_embedding` or `pp_last_stage` instead.",
+            pp_group.rank_in_group,
+            ", ".join(name for name, _ in unused),
+            sum(weight.nbytes for _, weight in unused) / 2**30,
+        )
 
 
 def make_layers(

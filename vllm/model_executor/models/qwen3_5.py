@@ -38,9 +38,6 @@ from transformers import (
 
 from vllm.compilation.decorators import support_torch_compile
 from vllm.config import VllmConfig
-from vllm.distributed import (
-    get_pp_group,
-)
 from vllm.logger import init_logger
 from vllm.model_executor.layers.fusion.mm_input_norm import build_mm_input_norm
 from vllm.model_executor.layers.layernorm import GemmaRMSNorm as Qwen3_5RMSNorm
@@ -92,7 +89,6 @@ from .qwen3_vl import (
 )
 from .utils import (
     AutoWeightsLoader,
-    PPMissingLayer,
     WeightsMapper,
     _merge_multimodal_embeddings,
     extract_layer_index,
@@ -101,6 +97,8 @@ from .utils import (
     make_layers,
     maybe_fuse_shared_experts,
     maybe_prefix,
+    pp_input_embedding,
+    pp_last_stage,
 )
 
 logger = init_logger(__name__)
@@ -246,10 +244,11 @@ class Qwen3_5Model(Qwen3NextModel):
 
         self.vocab_size = config.vocab_size
 
-        self.embed_tokens = VocabParallelEmbedding(
-            self.vocab_size,
-            config.hidden_size,
-        )
+        with pp_input_embedding(self, vllm_config, tied=config.tie_word_embeddings):
+            self.embed_tokens = VocabParallelEmbedding(
+                self.vocab_size,
+                config.hidden_size,
+            )
 
         def get_layer(prefix: str):
             return Qwen3_5DecoderLayer(
@@ -270,10 +269,8 @@ class Qwen3_5Model(Qwen3NextModel):
             ["hidden_states", "residual"], config.hidden_size
         )
 
-        if get_pp_group().is_last_rank:
+        with pp_last_stage(self):
             self.norm = Qwen3_5RMSNorm(config.hidden_size, eps=config.rms_norm_eps)
-        else:
-            self.norm = PPMissingLayer()
 
         self.aux_hidden_state_layers: tuple[int, ...] = ()
 
@@ -341,17 +338,15 @@ class Qwen3_5ForCausalLMBase(
             vllm_config=vllm_config, prefix=maybe_prefix(prefix, "model")
         )
 
-        if get_pp_group().is_last_rank:
+        with pp_last_stage(self):
             self.lm_head = ParallelLMHead(
                 config.vocab_size,
                 config.hidden_size,
                 quant_config=self.quant_config,
                 prefix=maybe_prefix(prefix, "lm_head"),
             )
-            if config.tie_word_embeddings:
-                self.lm_head = self.lm_head.tie_weights(self.model.embed_tokens)
-        else:
-            self.lm_head = PPMissingLayer()
+        if config.tie_word_embeddings:
+            self.lm_head = self.lm_head.tie_weights(self.model.embed_tokens)
 
         self.logits_processor = LogitsProcessor(config.vocab_size)
         self.make_empty_intermediate_tensors = (

@@ -13,7 +13,7 @@ from vllm.model_executor.layers.quantization.online.lm_head import (
 )
 from vllm.model_executor.model_loader import get_model
 from vllm.model_executor.model_loader.utils import get_draft_load_config
-from vllm.model_executor.models.utils import PPMissingLayer
+from vllm.model_executor.models.utils import PPMissingLayer, StageMissingLayer
 from vllm.v1.worker.gpu.spec_decode.utils import get_pp_safe_draft_load_config
 
 
@@ -87,7 +87,7 @@ def maybe_share_target_embed(
     target_embed = getattr(target_inner, "embed_tokens", None) or getattr(
         target_inner, "embedding", None
     )
-    if isinstance(target_embed, PPMissingLayer):
+    if isinstance(target_embed, (PPMissingLayer, StageMissingLayer)):
         target_embed = None
     # The drafter does not use the target's LoRA adapter.
     if isinstance(target_embed, BaseLayerWithLoRA):

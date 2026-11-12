@@ -110,13 +110,14 @@ from vllm.model_executor.models.qwen3_vl import (
 )
 from vllm.model_executor.models.utils import (
     AutoWeightsLoader,
-    PPMissingLayer,
     WeightsMapper,
     _merge_multimodal_embeddings,
     extract_layer_index,
     make_empty_intermediate_tensors_factory,
     make_layers,
     maybe_prefix,
+    pp_input_embedding,
+    pp_last_stage,
     sequence_parallel_chunk,
 )
 from vllm.model_executor.utils import set_weight_attrs
@@ -506,10 +507,11 @@ class Qwen3_5Model(nn.Module, EagleModelMixin):
 
         self.vocab_size = config.vocab_size
 
-        self.embed_tokens = VocabParallelEmbedding(
-            self.vocab_size,
-            config.hidden_size,
-        )
+        with pp_input_embedding(self, vllm_config, tied=config.tie_word_embeddings):
+            self.embed_tokens = VocabParallelEmbedding(
+                self.vocab_size,
+                config.hidden_size,
+            )
 
         def get_layer(prefix: str):
             return Qwen3_5DecoderLayer(
@@ -531,10 +533,8 @@ class Qwen3_5Model(nn.Module, EagleModelMixin):
             ["hidden_states", "residual"], config.hidden_size
         )
 
-        if get_pp_group().is_last_rank:
+        with pp_last_stage(self):
             self.norm = Qwen3_5RMSNorm(config.hidden_size, eps=config.rms_norm_eps)
-        else:
-            self.norm = PPMissingLayer()
 
         self.aux_hidden_state_layers: tuple[int, ...] = ()
 
@@ -687,7 +687,7 @@ class Qwen3_5ForCausalLMBase(
             vllm_config=vllm_config, prefix=maybe_prefix(prefix, "model")
         )
 
-        if get_pp_group().is_last_rank:
+        with pp_last_stage(self):
             if config.tie_word_embeddings:
                 self.lm_head = self.model.embed_tokens
             else:
@@ -697,8 +697,6 @@ class Qwen3_5ForCausalLMBase(
                     quant_config=self.quant_config,
                     prefix=maybe_prefix(prefix, "lm_head"),
                 )
-        else:
-            self.lm_head = PPMissingLayer()
 
         self.logits_processor = LogitsProcessor(config.vocab_size)
         self.make_empty_intermediate_tensors = (  # type: ignore[method-assign]

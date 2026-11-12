@@ -68,6 +68,8 @@ from .utils import (
     make_empty_intermediate_tensors_factory,
     make_layers,
     maybe_prefix,
+    pp_input_embedding,
+    pp_last_stage,
 )
 
 _GPT_OSS_STREAMED_EXPERT_SUFFIX_TO_SHARD = {
@@ -484,10 +486,12 @@ class GptOssModel(nn.Module, EagleModelMixin):
         self.config = vllm_config.model_config.hf_config
         self.quant_config = vllm_config.quant_config
         self.parallel_config = vllm_config.parallel_config
-        self.embedding = VocabParallelEmbedding(
-            self.config.vocab_size,
-            self.config.hidden_size,
-        )
+        # gpt-oss never ties `lm_head` to the input embedding.
+        with pp_input_embedding(self, vllm_config, tied=False):
+            self.embedding = VocabParallelEmbedding(
+                self.config.vocab_size,
+                self.config.hidden_size,
+            )
         self.start_layer, self.end_layer, self.layers = make_layers(
             self.config.num_hidden_layers,
             lambda prefix: self.block_cls(
@@ -497,7 +501,8 @@ class GptOssModel(nn.Module, EagleModelMixin):
             ),
             prefix=f"{prefix}.layers",
         )
-        self.norm = RMSNorm(self.config.hidden_size, eps=1e-5)
+        with pp_last_stage(self):
+            self.norm = RMSNorm(self.config.hidden_size, eps=1e-5)
         self.make_empty_intermediate_tensors = make_empty_intermediate_tensors_factory(
             ["hidden_states", "residual"], self.config.hidden_size
         )
@@ -1421,11 +1426,12 @@ class GptOssForCausalLM(
             vllm_config=vllm_config,
             prefix=maybe_prefix(prefix, "model"),
         )
-        self.lm_head = ParallelLMHead(
-            self.config.vocab_size,
-            self.config.hidden_size,
-            prefix=maybe_prefix(prefix, "lm_head"),
-        )
+        with pp_last_stage(self):
+            self.lm_head = ParallelLMHead(
+                self.config.vocab_size,
+                self.config.hidden_size,
+                prefix=maybe_prefix(prefix, "lm_head"),
+            )
         self.logits_processor = LogitsProcessor(self.config.vocab_size)
         self.make_empty_intermediate_tensors = (
             self.model.make_empty_intermediate_tensors
