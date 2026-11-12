@@ -58,6 +58,7 @@ from vllm.tokenizers import get_tokenizer
 from vllm.tokenizers.mistral import MistralTokenizer
 from vllm.tokenizers.registry import cached_tokenizer_from_config
 from vllm.v1.engine.async_llm import AsyncLLM
+from vllm.v1.kv_hints import KvHintAction, KvHintsEnvelope
 from vllm.v1.metrics.stats import RequestStateStats
 
 GPT_OSS_MODEL_NAME = "openai/gpt-oss-20b"
@@ -3507,3 +3508,65 @@ async def test_non_streaming_finish_reason_matches_tool_calls(
     assert bool(choice.message.tool_calls) == (text != "Hello, how are you?"), (
         "finish_reason must reflect whether tool calls were emitted"
     )
+
+
+@pytest.mark.asyncio
+async def test_serving_chat_forwards_kv_hints_to_engine():
+    mock_engine = _build_mock_engine()
+    serving_chat = _build_serving_chat(mock_engine)
+    payload = {"block_hashes": [1234, 5678]}
+    req = ChatCompletionRequest(
+        model=MODEL_NAME,
+        messages=[{"role": "user", "content": "what is 1+1?"}],
+        kv_hints={
+            "protocol_version": "0.1",
+            "message_id": "msg-1",
+            "actions": [
+                {
+                    "action_id": "act-1",
+                    "action_type": "kv.fetch",
+                    "action_version": "1.0",
+                    "payload": payload,
+                }
+            ],
+        },
+    )
+
+    with suppress(Exception):
+        await serving_chat.create_chat_completion(req)
+
+    assert mock_engine.generate.call_args.kwargs["kv_hints"] == KvHintsEnvelope(
+        protocol_version="0.1",
+        message_id="msg-1",
+        actions=[
+            KvHintAction(
+                action_id="act-1",
+                action_type="kv.fetch",
+                action_version="1.0",
+                payload=payload,
+            )
+        ],
+    )
+
+    req.kv_hints = None
+    with suppress(Exception):
+        await serving_chat.create_chat_completion(req)
+
+    assert mock_engine.generate.call_args.kwargs["kv_hints"] is None
+
+
+@pytest.mark.asyncio
+async def test_serving_chat_rejects_malformed_kv_hints():
+    mock_engine = _build_mock_engine()
+    serving_chat = _build_serving_chat(mock_engine)
+    req = ChatCompletionRequest(
+        model=MODEL_NAME,
+        messages=[{"role": "user", "content": "what is 1+1?"}],
+        kv_hints={"protocol_version": "0.1", "message_id": "msg-1"},
+    )
+
+    with pytest.raises(VLLMValidationError) as excinfo:
+        await serving_chat.create_chat_completion(req)
+
+    assert excinfo.value.parameter == "kv_hints"
+    mock_engine.generate.assert_not_called()

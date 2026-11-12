@@ -3,6 +3,7 @@
 
 import json
 from collections.abc import AsyncGenerator
+from contextlib import suppress
 from dataclasses import dataclass, field
 from typing import Any
 from unittest.mock import AsyncMock, MagicMock
@@ -31,6 +32,7 @@ from vllm.renderers.hf import HfRenderer
 from vllm.renderers.online_renderer import OnlineRenderer
 from vllm.tokenizers.registry import cached_tokenizer_from_config
 from vllm.v1.engine.async_llm import AsyncLLM
+from vllm.v1.kv_hints import KvHintAction, KvHintsEnvelope
 from vllm.v1.metrics.stats import RequestSpecDecodeMetrics, RequestStateStats
 
 MODEL_NAME = "openai-community/gpt2"
@@ -1422,3 +1424,68 @@ def test_non_numeric_logprobs_rejected(field_name):
             max_tokens=10,
             **{field_name: "2"},
         )
+
+
+def _build_mock_engine() -> MagicMock:
+    engine = MagicMock(spec=AsyncLLM)
+    engine.errored = False
+    engine.model_config = MockModelConfig()
+    engine.input_processor = MagicMock()
+    engine.renderer = _build_renderer(engine.model_config)
+    return engine
+
+
+@pytest.mark.asyncio
+async def test_completion_forwards_kv_hints_to_engine():
+    engine = _build_mock_engine()
+    serving = _build_serving_completion(engine)
+    payload = {"block_hashes": [1234, 5678]}
+    request = CompletionRequest(
+        model=MODEL_NAME,
+        prompt="Test",
+        kv_hints={
+            "protocol_version": "0.1",
+            "message_id": "msg-1",
+            "actions": [
+                {
+                    "action_id": "act-1",
+                    "action_type": "kv.fetch",
+                    "action_version": "1.0",
+                    "payload": payload,
+                }
+            ],
+        },
+    )
+
+    with suppress(Exception):
+        await serving.create_completion(request)
+
+    assert engine.generate.call_args.kwargs["kv_hints"] == KvHintsEnvelope(
+        protocol_version="0.1",
+        message_id="msg-1",
+        actions=[
+            KvHintAction(
+                action_id="act-1",
+                action_type="kv.fetch",
+                action_version="1.0",
+                payload=payload,
+            )
+        ],
+    )
+
+
+@pytest.mark.asyncio
+async def test_completion_rejects_malformed_kv_hints():
+    engine = _build_mock_engine()
+    serving = _build_serving_completion(engine)
+    request = CompletionRequest(
+        model=MODEL_NAME,
+        prompt="Test",
+        kv_hints={"protocol_version": "0.1", "actions": []},
+    )
+
+    with pytest.raises(VLLMValidationError) as excinfo:
+        await serving.create_completion(request)
+
+    assert excinfo.value.parameter == "kv_hints"
+    engine.generate.assert_not_called()

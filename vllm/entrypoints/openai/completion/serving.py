@@ -201,6 +201,7 @@ class OpenAIServingCompletion(GenerateBaseServing):
 
         # Extract data_parallel_rank from header (router can inject it)
         data_parallel_rank = self._get_data_parallel_rank(raw_request)
+        kv_hints = self._get_kv_hints(request)
 
         # Schedule the request and get the result generator.
         max_model_len = self.model_config.max_model_len
@@ -262,6 +263,7 @@ class OpenAIServingCompletion(GenerateBaseServing):
                     priority=self._get_priority(request, raw_request),
                     data_parallel_rank=data_parallel_rank,
                     session_id=session_id,
+                    kv_hints=kv_hints,
                 )
 
             generators.append(generator)
