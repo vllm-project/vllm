@@ -482,3 +482,31 @@ def test_get_requests_hf_dataset_with_mm_processor_args(
         assert req.prompt[0]["role"] == "user"
         content_types = {part["type"] for part in req.prompt[0]["content"]}
         assert content_types == {"text", "image_url"}
+
+
+@pytest.mark.benchmark
+def test_get_requests_prefix_repetition_without_prefix_flags(
+    hf_tokenizer: PreTrainedTokenizerBase,
+) -> None:
+    """Unset --prefix-repetition-* flags fall back to the dataset defaults."""
+    args = _parse_throughput_args(
+        "--dataset-name", "prefix_repetition", "--num-prompts", "20"
+    )
+    requests = get_requests(args, hf_tokenizer)
+
+    assert len(requests) == 20
+    assert all(r.expected_output_len == 128 for r in requests)
+
+
+@pytest.mark.parametrize(
+    ("argv", "expected"),
+    [
+        (["--output-len", "64"], 64),
+        (["--output-len", "64", "--custom-output-len", "32"], 32),
+    ],
+)
+def test_custom_audio_output_len_follows_flag_precedence(argv, expected) -> None:
+    """custom_audio reads custom_output_len: --custom-output-len > --output-len."""
+    args = _parse_throughput_args("--dataset-name", "custom_audio", *argv)
+
+    assert _to_serve_args(args).custom_output_len == expected

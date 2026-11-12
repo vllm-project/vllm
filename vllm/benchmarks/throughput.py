@@ -17,6 +17,7 @@ from transformers import AutoModelForCausalLM, PreTrainedTokenizerBase
 
 from vllm.benchmarks.datasets import (
     BenchmarkDataset,
+    PrefixRepetitionRandomDataset,
     RandomDataset,
     SampleRequest,
     add_random_dataset_base_args,
@@ -563,6 +564,10 @@ def _to_serve_args(args: argparse.Namespace) -> argparse.Namespace:
     # matching prior throughput behaviour of omitting output_len when unset.
     d["hf_output_len"] = output_len
     d["sharegpt_output_len"] = output_len
+    custom_output_len = getattr(args, "custom_output_len", None)
+    d["custom_output_len"] = (
+        output_len if custom_output_len is None else custom_output_len
+    )
     # Explicit --enable-multimodal-chat wins; otherwise auto-enable for the
     # multimodal chat backend (preserves today's vllm-chat handling). Callers
     # without a --backend flag (e.g. bench mm-processor) drive every request
@@ -958,28 +963,28 @@ def add_cli_args(parser: FlexibleArgumentParser):
     parser.add_argument(
         "--prefix-repetition-prefix-len",
         type=int,
-        default=None,
+        default=PrefixRepetitionRandomDataset.DEFAULT_PREFIX_LEN,
         help="Number of prefix tokens per request, used only for prefix "
         "repetition dataset.",
     )
     parser.add_argument(
         "--prefix-repetition-suffix-len",
         type=int,
-        default=None,
+        default=PrefixRepetitionRandomDataset.DEFAULT_SUFFIX_LEN,
         help="Number of suffix tokens per request, used only for prefix "
         "repetition dataset. Total input length is prefix_len + suffix_len.",
     )
     parser.add_argument(
         "--prefix-repetition-num-prefixes",
         type=int,
-        default=None,
+        default=PrefixRepetitionRandomDataset.DEFAULT_NUM_PREFIXES,
         help="Number of prefixes to generate, used only for prefix repetition "
         "dataset. Prompts per prefix is num_requests // num_prefixes.",
     )
     parser.add_argument(
         "--prefix-repetition-output-len",
         type=int,
-        default=None,
+        default=PrefixRepetitionRandomDataset.DEFAULT_OUTPUT_LEN,
         help="Number of output tokens per request, used only for prefix "
         "repetition dataset.",
     )
