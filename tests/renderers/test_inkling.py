@@ -310,9 +310,32 @@ class TestRenderingSemantics:
         ]
         assert render_text(
             inkling_tokenizer, messages, add_generation_prompt=False
+        ) == ("<|message_tool|>bash<|content_text|>stdoutstderr<|end_message|>")
+
+    def test_tool_response_coalesces_text_around_media(self, inkling_tokenizer):
+        image = {
+            "type": "image_url",
+            "image_url": {"url": "data:image/png;base64,AAAA"},
+        }
+        messages = [
+            {
+                "role": "tool",
+                "name": "shot",
+                "content": [
+                    {"type": "text", "text": "before"},
+                    {"type": "text", "text": " and "},
+                    image,
+                    {"type": "text", "text": "after"},
+                    {"type": "text", "text": " image"},
+                ],
+            }
+        ]
+        assert render_text(
+            inkling_tokenizer, messages, add_generation_prompt=False
         ) == (
-            "<|message_tool|>bash<|content_text|>stdout<|end_message|>"
-            "<|message_tool|>bash<|content_text|>stderr<|end_message|>"
+            "<|message_tool|>shot<|content_text|>before and <|end_message|>"
+            "<|message_tool|>shot<|content_image|><|end_message|>"
+            "<|message_tool|>shot<|content_text|>after image<|end_message|>"
         )
 
     @pytest.mark.parametrize("content", ["", None, []])
