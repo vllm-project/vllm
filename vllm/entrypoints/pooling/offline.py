@@ -7,7 +7,7 @@ from typing import Any
 from tqdm.auto import tqdm
 
 from vllm.entrypoints.common.offline import OfflineInferenceMixin
-from vllm.inputs import DataPrompt, PromptType
+from vllm.inputs import DataPrompt
 from vllm.logger import init_logger
 from vllm.lora.request import LoRARequest
 from vllm.outputs import (
@@ -18,6 +18,7 @@ from vllm.outputs import (
 )
 from vllm.pooling_params import PoolingParams
 from vllm.renderers.chat_utils import ChatTemplateConfig
+from vllm.renderers.chat_utils.types import ChatTemplateContentFormatOption
 from vllm.tasks import SCORE_TYPE_MAP, PoolingTask, SupportedTask
 
 from .base.io_processor import PoolingIOProcessor
@@ -30,7 +31,9 @@ from .types import (
     OfflineOutputsContext,
     OfflinePluginInputsContext,
     OfflineScoringInputsContext,
+    PoolingInput,
     RequestFactory,
+    input_to_seq,
 )
 
 logger = init_logger(__name__)
@@ -59,15 +62,33 @@ class PoolingOfflineMixin(OfflineInferenceMixin):
         # Use thread pool executor to accelerate preprocessing.
         self._executor = self.renderer._executor
 
+    def _resolve_content_format(
+        self,
+        chat_template_content_format: ChatTemplateContentFormatOption | None,
+    ) -> ChatTemplateContentFormatOption:
+        """Fallback to the engine-level content format when unset."""
+        if chat_template_content_format is not None:
+            return chat_template_content_format
+        return self.chat_template_config.chat_template_content_format
+
     def encode(
         self,
-        prompts: PromptType | Sequence[PromptType] | DataPrompt,
+        prompts: PoolingInput | list[PoolingInput] | DataPrompt,
         pooling_params: PoolingParams | Sequence[PoolingParams] | None = None,
         *,
         use_tqdm: bool | Callable[..., tqdm] = True,
         lora_request: list[LoRARequest] | LoRARequest | None = None,
         pooling_task: PoolingTask | None = None,
         tokenization_kwargs: dict[str, Any] | None = None,
+        add_generation_prompt: bool = False,
+        continue_final_message: bool = False,
+        add_special_tokens: bool = False,
+        chat_template: str | None = None,
+        chat_template_kwargs: dict[str, Any] | None = None,
+        chat_template_content_format: ChatTemplateContentFormatOption | None = None,
+        media_io_kwargs: dict[str, dict[str, Any]] | None = None,
+        mm_processor_kwargs: dict[str, Any] | None = None,
+        cache_salt: str | None = None,
     ) -> list[PoolingRequestOutput]:
         """Apply pooling to the hidden states corresponding to the input
         prompts.
@@ -89,6 +110,24 @@ class PoolingOfflineMixin(OfflineInferenceMixin):
             lora_request: LoRA request to use for generation, if any.
             pooling_task: Override the pooling task to use.
             tokenization_kwargs: Overrides for `tokenizer.encode`.
+            add_generation_prompt: If true, add the generation prompt to the
+                chat template.
+            continue_final_message: If true, leave the final chat message
+                open-ended so the model continues it. Mutually exclusive with
+                `add_generation_prompt`.
+            add_special_tokens: If true, add special tokens (e.g. BOS) on top
+                of what the chat template produces.
+            chat_template: Override the model's default chat template.
+            chat_template_kwargs: Extra keyword args forwarded to the chat
+                template renderer.
+            chat_template_content_format: How to render chat message content.
+                Defaults to the engine-level configuration.
+            media_io_kwargs: Extra kwargs forwarded to media IO connectors,
+                keyed by modality.
+            mm_processor_kwargs: Additional kwargs forwarded to the HF
+                multi-modal processor.
+            cache_salt: If set, the prefix cache is salted with this string to
+                prevent prompt guessing in multi-user environments.
 
         Returns:
             A list of `PoolingRequestOutput` objects containing the
@@ -104,24 +143,36 @@ class PoolingOfflineMixin(OfflineInferenceMixin):
 
         io_processor = self.pooling_io_processors[pooling_task]
 
+        # Shared `OfflineInputsContext` kwargs for encode / plugin contexts.
+        ctx_common: dict[str, Any] = dict(
+            pooling_task=pooling_task,
+            tokenization_kwargs=tokenization_kwargs,
+            pooling_params=pooling_params,
+            lora_request=lora_request,
+            priorities=None,
+            add_generation_prompt=add_generation_prompt,
+            continue_final_message=continue_final_message,
+            add_special_tokens=add_special_tokens,
+            chat_template=chat_template,
+            chat_template_kwargs=chat_template_kwargs,
+            chat_template_content_format=self._resolve_content_format(
+                chat_template_content_format
+            ),
+            media_io_kwargs=media_io_kwargs,
+            mm_processor_kwargs=mm_processor_kwargs,
+            cache_salt=cache_salt,
+        )
+
         ctx: AnyOfflineInputsContext
         if isinstance(prompts, dict) and "data" in prompts:
             ctx = OfflinePluginInputsContext(
-                pooling_task=pooling_task,
                 prompts=prompts,  # type: ignore[arg-type]
-                tokenization_kwargs=tokenization_kwargs,
-                pooling_params=pooling_params,
-                lora_request=lora_request,
-                priorities=None,
+                **ctx_common,
             )
         else:
             ctx = OfflineEncodeInputsContext(
-                pooling_task=pooling_task,
-                prompts=prompts,
-                tokenization_kwargs=tokenization_kwargs,
-                pooling_params=pooling_params,
-                lora_request=lora_request,
-                priorities=None,
+                inputs_seq=input_to_seq(prompts),
+                **ctx_common,
             )
 
         request_factory, num_requests = io_processor.get_request_factory_offline(ctx)
@@ -196,12 +247,21 @@ class PoolingOfflineMixin(OfflineInferenceMixin):
 
     def embed(
         self,
-        prompts: PromptType | Sequence[PromptType],
+        prompts: PoolingInput | list[PoolingInput],
         *,
         use_tqdm: bool | Callable[..., tqdm] = True,
         pooling_params: PoolingParams | Sequence[PoolingParams] | None = None,
         lora_request: list[LoRARequest] | LoRARequest | None = None,
         tokenization_kwargs: dict[str, Any] | None = None,
+        add_generation_prompt: bool = False,
+        continue_final_message: bool = False,
+        add_special_tokens: bool = False,
+        chat_template: str | None = None,
+        chat_template_kwargs: dict[str, Any] | None = None,
+        chat_template_content_format: ChatTemplateContentFormatOption | None = None,
+        media_io_kwargs: dict[str, dict[str, Any]] | None = None,
+        mm_processor_kwargs: dict[str, Any] | None = None,
+        cache_salt: str | None = None,
     ) -> list[EmbeddingRequestOutput] | list[PoolingRequestOutput]:
         """Generate embeddings using the model's configured pooling task.
 
@@ -221,6 +281,24 @@ class PoolingOfflineMixin(OfflineInferenceMixin):
                 If `False`, no progress bar is created.
             lora_request: LoRA request to use for generation, if any.
             tokenization_kwargs: Overrides for `tokenizer.encode`.
+            add_generation_prompt: If true, add the generation prompt to the
+                chat template.
+            continue_final_message: If true, leave the final chat message
+                open-ended so the model continues it. Mutually exclusive with
+                `add_generation_prompt`.
+            add_special_tokens: If true, add special tokens (e.g. BOS) on top
+                of what the chat template produces.
+            chat_template: Override the model's default chat template.
+            chat_template_kwargs: Extra keyword args forwarded to the chat
+                template renderer.
+            chat_template_content_format: How to render chat message content.
+                Defaults to the engine-level configuration.
+            media_io_kwargs: Extra kwargs forwarded to media IO connectors,
+                keyed by modality.
+            mm_processor_kwargs: Additional kwargs forwarded to the HF
+                multi-modal processor.
+            cache_salt: If set, the prefix cache is salted with this string to
+                prevent prompt guessing in multi-user environments.
 
         Returns:
             For `embed`, `EmbeddingRequestOutput` objects with one vector per
@@ -239,6 +317,15 @@ class PoolingOfflineMixin(OfflineInferenceMixin):
             if self.pooling_task == "token_embed"
             else "embed",
             tokenization_kwargs=tokenization_kwargs,
+            add_generation_prompt=add_generation_prompt,
+            continue_final_message=continue_final_message,
+            add_special_tokens=add_special_tokens,
+            chat_template=chat_template,
+            chat_template_kwargs=chat_template_kwargs,
+            chat_template_content_format=chat_template_content_format,
+            media_io_kwargs=media_io_kwargs,
+            mm_processor_kwargs=mm_processor_kwargs,
+            cache_salt=cache_salt,
         )
 
         if self.pooling_task == "token_embed":
@@ -247,12 +334,21 @@ class PoolingOfflineMixin(OfflineInferenceMixin):
 
     def classify(
         self,
-        prompts: PromptType | Sequence[PromptType],
+        prompts: PoolingInput | list[PoolingInput],
         *,
         pooling_params: PoolingParams | Sequence[PoolingParams] | None = None,
         use_tqdm: bool | Callable[..., tqdm] = True,
         lora_request: list[LoRARequest] | LoRARequest | None = None,
         tokenization_kwargs: dict[str, Any] | None = None,
+        add_generation_prompt: bool = False,
+        continue_final_message: bool = False,
+        add_special_tokens: bool = False,
+        chat_template: str | None = None,
+        chat_template_kwargs: dict[str, Any] | None = None,
+        chat_template_content_format: ChatTemplateContentFormatOption | None = None,
+        media_io_kwargs: dict[str, dict[str, Any]] | None = None,
+        mm_processor_kwargs: dict[str, Any] | None = None,
+        cache_salt: str | None = None,
     ) -> list[ClassificationRequestOutput]:
         """Generate class logits for each prompt.
 
@@ -272,6 +368,24 @@ class PoolingOfflineMixin(OfflineInferenceMixin):
                 If `False`, no progress bar is created.
             lora_request: LoRA request to use for generation, if any.
             tokenization_kwargs: Overrides for `tokenizer.encode`.
+            add_generation_prompt: If true, add the generation prompt to the
+                chat template.
+            continue_final_message: If true, leave the final chat message
+                open-ended so the model continues it. Mutually exclusive with
+                `add_generation_prompt`.
+            add_special_tokens: If true, add special tokens (e.g. BOS) on top
+                of what the chat template produces.
+            chat_template: Override the model's default chat template.
+            chat_template_kwargs: Extra keyword args forwarded to the chat
+                template renderer.
+            chat_template_content_format: How to render chat message content.
+                Defaults to the engine-level configuration.
+            media_io_kwargs: Extra kwargs forwarded to media IO connectors,
+                keyed by modality.
+            mm_processor_kwargs: Additional kwargs forwarded to the HF
+                multi-modal processor.
+            cache_salt: If set, the prefix cache is salted with this string to
+                prevent prompt guessing in multi-user environments.
 
         Returns:
             A list of `ClassificationRequestOutput` objects containing the
@@ -285,6 +399,15 @@ class PoolingOfflineMixin(OfflineInferenceMixin):
             lora_request=lora_request,
             pooling_task="classify",
             tokenization_kwargs=tokenization_kwargs,
+            add_generation_prompt=add_generation_prompt,
+            continue_final_message=continue_final_message,
+            add_special_tokens=add_special_tokens,
+            chat_template=chat_template,
+            chat_template_kwargs=chat_template_kwargs,
+            chat_template_content_format=chat_template_content_format,
+            media_io_kwargs=media_io_kwargs,
+            mm_processor_kwargs=mm_processor_kwargs,
+            cache_salt=cache_salt,
         )
 
         return [ClassificationRequestOutput.from_base(item) for item in items]
@@ -299,7 +422,15 @@ class PoolingOfflineMixin(OfflineInferenceMixin):
         pooling_params: PoolingParams | None = None,
         lora_request: list[LoRARequest] | LoRARequest | None = None,
         tokenization_kwargs: dict[str, Any] | None = None,
+        add_generation_prompt: bool = False,
+        continue_final_message: bool = False,
+        add_special_tokens: bool = False,
         chat_template: str | None = None,
+        chat_template_kwargs: dict[str, Any] | None = None,
+        chat_template_content_format: ChatTemplateContentFormatOption | None = None,
+        media_io_kwargs: dict[str, dict[str, Any]] | None = None,
+        mm_processor_kwargs: dict[str, Any] | None = None,
+        cache_salt: str | None = None,
     ) -> list[ScoringRequestOutput]:
         """Generate similarity scores for all pairs `<text,text_pair>` or
           `<multi-modal data, multi-modal data pair>`.
@@ -332,9 +463,27 @@ class PoolingOfflineMixin(OfflineInferenceMixin):
                 it is used to create the progress bar.
                 If `False`, no progress bar is created.
             lora_request: LoRA request to use for generation, if any.
+
+            tokenization_kwargs: Overrides for `tokenizer.encode`.
+            add_generation_prompt: If true, add the generation prompt to the
+                chat template.
+            continue_final_message: If true, leave the final chat message
+                open-ended so the model continues it. Mutually exclusive with
+                `add_generation_prompt`.
+            add_special_tokens: If true, add special tokens (e.g. BOS) on top
+                of what the chat template produces.
             chat_template: The chat template to use for scoring. If None, use
                 the chat template passed to the LLM constructor.
-            tokenization_kwargs: Overrides for `tokenizer.encode`.
+            chat_template_kwargs: Extra keyword args forwarded to the chat
+                template renderer.
+            chat_template_content_format: How to render chat message content.
+                Defaults to the engine-level configuration.
+            media_io_kwargs: Extra kwargs forwarded to media IO connectors,
+                keyed by modality.
+            mm_processor_kwargs: Additional kwargs forwarded to the HF
+                multi-modal processor.
+            cache_salt: If set, the prefix cache is salted with this string to
+                prevent prompt guessing in multi-user environments.
 
         Returns:
             A list of `ScoringRequestOutput` objects containing the
@@ -385,8 +534,18 @@ class PoolingOfflineMixin(OfflineInferenceMixin):
             pooling_params=pooling_params,
             tokenization_kwargs=tokenization_kwargs,
             lora_request=lora_request,
-            chat_template=chat_template,
             priorities=None,
+            add_generation_prompt=add_generation_prompt,
+            continue_final_message=continue_final_message,
+            add_special_tokens=add_special_tokens,
+            chat_template=chat_template,
+            chat_template_kwargs=chat_template_kwargs,
+            chat_template_content_format=self._resolve_content_format(
+                chat_template_content_format
+            ),
+            media_io_kwargs=media_io_kwargs,
+            mm_processor_kwargs=mm_processor_kwargs,
+            cache_salt=cache_salt,
         )
 
         request_factory, num_requests = io_processor.get_request_factory_offline(ctx)

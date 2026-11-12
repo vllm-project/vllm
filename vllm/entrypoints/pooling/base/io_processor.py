@@ -8,6 +8,7 @@ from typing import Any, Final, cast
 from vllm import (
     PoolingParams,
     PoolingRequestOutput,
+    PromptType,
 )
 from vllm.config import VllmConfig
 from vllm.exceptions import VLLMValidationError
@@ -23,6 +24,7 @@ from vllm.utils.mistral import is_mistral_tokenizer
 from ..types import (
     AnyOfflineInputsContext,
     AnyRenderParam,
+    ChatType,
     EncodeChatRenderParams,
     EncodeCMPLRenderParams,
     OfflineEncodeInputsContext,
@@ -34,6 +36,7 @@ from ..types import (
     RequestFactory,
     RequestGenerator,
     ScoringRenderParams,
+    is_conversations,
 )
 
 
@@ -185,21 +188,8 @@ class PoolingIOProcessor:
     ) -> tuple[RequestFactory, int]:
         assert isinstance(ctx, OfflineEncodeInputsContext)
 
-        prompts_seq = prompt_to_seq(ctx.prompts)
-        num_requests = len(prompts_seq)
+        num_requests = len(ctx.inputs_seq)
         pooling_task = ctx.pooling_task
-
-        parsed_prompts = [
-            (
-                prompt
-                if isinstance(prompt, bytes)
-                else parse_model_prompt(self.model_config, prompt)
-            )
-            for prompt in prompts_seq
-        ]
-        tok_params = self.renderer.default_cmpl_tok_params.with_kwargs(
-            **(ctx.tokenization_kwargs or {})
-        )
 
         pooling_params: PoolingParams | Sequence[PoolingParams]
         if ctx.pooling_params is None:
@@ -226,17 +216,60 @@ class PoolingIOProcessor:
         seq_lora_requests = self._lora_request_to_seq(ctx.lora_request, num_requests)
         seq_priority = self._priority_to_seq(ctx.priorities, num_requests)
 
+        # `add_special_tokens` is an explicit offline API knob. User-provided
+        # `tokenization_kwargs` still wins if it sets the same key.
+        tok_kwargs: dict[str, Any] = {
+            "add_special_tokens": ctx.add_special_tokens,
+        }
+        tok_kwargs.update(ctx.tokenization_kwargs or {})
+        tok_params = self.renderer.default_cmpl_tok_params.with_kwargs(**tok_kwargs)
+
+        chat_params = ctx.build_chat_params(
+            self.chat_template, self.chat_template_content_format
+        )
+        self._validate_chat_template(
+            request_chat_template=ctx.chat_template,
+            chat_template_kwargs=ctx.chat_template_kwargs,
+            trust_request_chat_template=self.trust_request_chat_template,
+        )
+
+        # Pack the renderer-side `prompt_extras` once and share it across both
+        # the chat and completion branches. `mm_processor_kwargs` / `cache_salt`
+        # are forwarded here (see `OfflineInputsContext.build_prompt_extras`).
+        prompt_extras = ctx.build_prompt_extras()
+
         def request_factory() -> RequestGenerator:
             for i in range(num_requests):
-                yield EncodeCMPLRenderParams(
-                    prompts=parsed_prompts[i],
-                    tok_params=tok_params,
-                    prompt_extras=None,
-                    skip_mm_cache=False,
-                    params=params_seq[i],
-                    lora_requests=seq_lora_requests[i],
-                    priorities=seq_priority[i],
-                )
+                prompt_or_conversations = ctx.inputs_seq[i]
+
+                if is_conversations(prompt_or_conversations):
+                    conversations: ChatType = prompt_or_conversations
+                    yield EncodeChatRenderParams(
+                        conversations=conversations,
+                        chat_params=chat_params,
+                        tok_params=tok_params,
+                        prompt_extras=prompt_extras,
+                        skip_mm_cache=False,
+                        params=params_seq[i],
+                        lora_requests=seq_lora_requests[i],
+                        priorities=seq_priority[i],
+                    )
+                else:
+                    prompt: PromptType = prompt_or_conversations
+                    parsed_prompt = (
+                        prompt
+                        if isinstance(prompt, bytes)
+                        else parse_model_prompt(self.model_config, prompt)
+                    )
+                    yield EncodeCMPLRenderParams(
+                        prompts=parsed_prompt,
+                        tok_params=tok_params,
+                        prompt_extras=prompt_extras,
+                        skip_mm_cache=False,
+                        params=params_seq[i],
+                        lora_requests=seq_lora_requests[i],
+                        priorities=seq_priority[i],
+                    )
 
         return request_factory, num_requests
 
