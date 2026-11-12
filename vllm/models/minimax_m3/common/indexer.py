@@ -4,14 +4,14 @@
 
 The indexer scores KV blocks with the index heads and selects the top-k blocks
 (plus fixed init/local blocks) that the main block-sparse attention
-(``sparse_attention.py``) then attends to. It owns its own side cache
-(``MiniMaxM3IndexerCache``, one index-key vector per token), metadata, and
+(`sparse_attention.py`) then attends to. It owns its own side cache
+(`MiniMaxM3IndexerCache`, one index-key vector per token), metadata, and
 metadata builder, mirroring how DeepSeek V4 keeps the indexer separate from the
 main attention.
 
-``MiniMaxM3Indexer`` is the ``nn.Module`` the attention layer holds (like
-``DeepseekV4Indexer``); it picks a kernel impl in ``__init__`` (via
-``select_indexer_impl_cls``) and delegates ``forward`` to it.
+`MiniMaxM3Indexer` is the `nn.Module` the attention layer holds (like
+`DeepseekV4Indexer`); it picks a kernel impl in `__init__` (via
+`select_indexer_impl_cls`) and delegates `forward` to it.
 """
 
 from dataclasses import dataclass
@@ -42,6 +42,11 @@ else:
         minimax_m3_index_topk,
     )
 
+from vllm.models.minimax_m3.common.varlen_decode import (
+    VarlenDecodeBuilderMixin,
+    build_decode_query_layout,
+    make_token_to_req_buffer,
+)
 from vllm.v1.attention.backend import (
     AttentionBackend,
     AttentionCGSupport,
@@ -90,6 +95,15 @@ class MiniMaxM3IndexerBackend(AttentionBackend):
     def get_supported_head_sizes(cls) -> list[int]:
         return [128]
 
+    @classmethod
+    def supports_device_cpu_query_lens_mismatch(cls) -> bool:
+        # Only builders with ragged decode kernels read per-request query
+        # lengths from the device; the others assume uniform rows.
+        return (
+            super().supports_device_cpu_query_lens_mismatch()
+            and cls.get_builder_cls().supports_varlen_decode()
+        )
+
     @staticmethod
     def get_supported_kernel_block_sizes(kv_cache_spec=None) -> list[int | MultipleOf]:
         return [128]
@@ -103,7 +117,7 @@ class MiniMaxM3IndexerCache(nn.Module, AttentionLayerBase):
     """Side KV cache for the indexer's per-token index keys (key-only).
 
     Registers itself in the static forward context so the KV-cache manager
-    allocates it (like ``DeepseekV32IndexerCache``).
+    allocates it (like `DeepseekV32IndexerCache`).
     """
 
     def __init__(
@@ -182,14 +196,17 @@ class MiniMaxM3IndexerPrefillMetadata:
 
 @dataclass
 class MiniMaxM3IndexerDecodeMetadata:
-    """Per-decode state (cudagraph-safe). ``decode_query_len`` is the uniform
-    per-request query length (1, or 1 + num_speculative_tokens)."""
+    """Per-decode state (cudagraph-safe). `decode_query_len` is the uniform
+    per-request query length (1, or 1 + num_speculative_tokens); it is 0 for
+    a ragged batch, whose query lengths come from `query_start_loc`."""
 
     seq_lens: torch.Tensor  # [num_decodes] int32
     block_table: torch.Tensor
     max_seq_len: int
     decode_query_len: int
     max_decode_query_len: int
+    query_start_loc: torch.Tensor | None = None
+    token_to_req_indices: torch.Tensor | None = None
 
 
 @dataclass
@@ -213,10 +230,10 @@ class MiniMaxM3IndexerMetadata(AttentionMetadata):
 
 
 class MiniMaxM3IndexerMetadataBuilder(
-    AttentionMetadataBuilder[MiniMaxM3IndexerMetadata]
+    VarlenDecodeBuilderMixin, AttentionMetadataBuilder[MiniMaxM3IndexerMetadata]
 ):
     """Abstract base: shared setup only. The Triton and MSA builders are
-    parallel subclasses that each own their full ``build`` (no shared code)."""
+    parallel subclasses that each own their full `build` (no shared code)."""
 
     # Full cudagraphs for uniform decode batches (incl. spec-decode verify).
     _cudagraph_support: ClassVar[AttentionCGSupport] = AttentionCGSupport.UNIFORM_BATCH
@@ -234,9 +251,8 @@ class MiniMaxM3IndexerMetadataBuilder(
         super().__init__(kv_cache_spec, layer_names, vllm_config, device)
         hf_config = vllm_config.model_config.hf_config
         text_config = getattr(hf_config, "text_config", hf_config)
-        sparse_cfg = text_config.sparse_attention_config
         # Index-query head count from model config (cache spec has 1 vec/token).
-        total_index_heads = sparse_cfg["sparse_num_index_heads"]
+        total_index_heads = text_config.index_n_heads
         tp_size = get_tensor_model_parallel_world_size()
         if total_index_heads >= tp_size:
             assert total_index_heads % tp_size == 0
@@ -260,10 +276,18 @@ class MiniMaxM3IndexerMetadataBuilder(
             dtype=torch.int32,
             device=device,
         )
+        self.varlen_decode = self._use_varlen_decode(vllm_config)
+        self.token_to_req_buffer = make_token_to_req_buffer(
+            vllm_config, device, self.varlen_decode
+        )
 
 
 class MiniMaxM3IndexerTritonMetadataBuilder(MiniMaxM3IndexerMetadataBuilder):
     """Triton indexer metadata: no SM100 fmha_sm100 plan."""
+
+    @classmethod
+    def supports_varlen_decode(cls) -> bool:
+        return current_platform.is_rocm()
 
     def build(
         self,
@@ -281,7 +305,7 @@ class MiniMaxM3IndexerTritonMetadataBuilder(MiniMaxM3IndexerMetadataBuilder):
             split_decodes_and_prefills(
                 common_attn_metadata,
                 decode_threshold=self.reorder_batch_threshold,
-                require_uniform=True,
+                require_uniform=not self.varlen_decode,
             )
         )
         assert num_decodes + num_prefills == num_reqs
@@ -308,20 +332,22 @@ class MiniMaxM3IndexerTritonMetadataBuilder(MiniMaxM3IndexerMetadataBuilder):
 
         decode_metadata: MiniMaxM3IndexerDecodeMetadata | None = None
         if num_decodes > 0:
-            qsl_cpu = common_attn_metadata.query_start_loc_cpu
-            query_lens_cpu = qsl_cpu[1 : num_decodes + 1] - qsl_cpu[:num_decodes]
-            decode_query_len = int(query_lens_cpu[0].item())
-            assert decode_query_len > 0
-            assert torch.all(
-                (query_lens_cpu == decode_query_len) | (query_lens_cpu == 0)
+            decode_query_len, decode_qsl, token_to_req = build_decode_query_layout(
+                common_attn_metadata,
+                query_start_loc,
+                num_decodes,
+                num_decode_tokens,
+                self.token_to_req_buffer,
+                self.varlen_decode,
             )
-            assert num_decode_tokens == num_decodes * decode_query_len
             decode_metadata = MiniMaxM3IndexerDecodeMetadata(
                 seq_lens=seq_lens[:num_decodes],
                 block_table=block_table[:num_decodes],
                 max_seq_len=common_attn_metadata.max_seq_len,
                 decode_query_len=decode_query_len,
                 max_decode_query_len=self.max_decode_query_len,
+                query_start_loc=decode_qsl,
+                token_to_req_indices=token_to_req,
             )
 
         return MiniMaxM3IndexerMetadata(
@@ -342,9 +368,9 @@ class MiniMaxM3IndexerImpl(nn.Module):
     """Abstract base for the indexer kernel impls.
 
     Each impl owns its side cache and reports its backend via
-    ``indexer_backend_cls`` (so each gets its own builder). The Triton and MSA
-    subclasses each own a full ``forward`` returning ``(decode_topk,
-    prefill_topk)`` -- no shared forward code.
+    `indexer_backend_cls` (so each gets its own builder). The Triton and MSA
+    subclasses each own a full `forward` returning `(decode_topk,
+    prefill_topk)` -- no shared forward code.
     """
 
     # Set by each impl so the side cache reports the matching backend + builder.
@@ -403,15 +429,15 @@ class MiniMaxM3IndexerImpl(nn.Module):
         )
 
     def reserve_workspace(self) -> None:
-        """Reserve the workspace-manager scratch ``forward`` needs; called from
-        the memory-profiling run, which skips ``forward``."""
+        """Reserve the workspace-manager scratch `forward` needs; called from
+        the memory-profiling run, which skips `forward`."""
         return
 
     def forward(
         self,
         index_query: torch.Tensor,
     ) -> tuple[torch.Tensor | None, torch.Tensor | None]:
-        """Return ``(decode_topk, prefill_topk)``; implemented per kernel impl."""
+        """Return `(decode_topk, prefill_topk)`; implemented per kernel impl."""
         raise NotImplementedError
 
 
@@ -479,6 +505,14 @@ class MiniMaxM3IndexerTritonImpl(MiniMaxM3IndexerImpl):
                 out=buf_htk,
                 **fused_sparse_kwargs,
                 **decode_backend_kwargs,
+                **(
+                    {}
+                    if d.query_start_loc is None
+                    else {
+                        "query_start_loc": d.query_start_loc,
+                        "token_to_req_indices": d.token_to_req_indices,
+                    }
+                ),
             )
         if index_md.num_prefills > 0:
             p = index_md.prefill
@@ -511,13 +545,16 @@ def select_indexer_impl_cls(
     *,
     topk_blocks: int,
     indexer_kv_dtype: IndexerKVDType | str = "bf16",
+    use_flashinfer_msa: bool = False,
 ) -> type[MiniMaxM3IndexerImpl]:
     """Pick the indexer impl off the platform, top-k count, and cache dtype.
 
-    On Blackwell (SM100) with ``topk_blocks == 16`` (the only width fmha_sm100's
-    ``sparse_topk_select`` kernel supports), the fmha_sm100 score + top-k path is
+    On Blackwell (SM100) with `topk_blocks == 16` (the only width fmha_sm100's
+    `sparse_topk_select` kernel supports), the fmha_sm100 score + top-k path is
     used for both bf16 and fp8 index caches. An nvfp4 index cache uses the MSA
-    Q8KV4/Q8KV8 paged indexers (SM100/SM103/SM107 only). Everything else falls back to
+    Q8KV4/Q8KV8 paged indexers (SM100/SM103/SM107 only). On SM90 and SM120/SM121, the
+    flashinfer.msa_ops impl is used when the caller passes the
+    `minimax_m3_use_flashinfer_msa` verdict. Everything else falls back to
     the Triton indexer, with fp8 restricted to CUDA platforms that advertise fp8
     support and to ROCm gfx942 (MI300-series, CDNA3). gfx950 (MI350-series)
     takes the fp8 path through the AITER indexer instead, so this fallback
@@ -536,6 +573,15 @@ def select_indexer_impl_cls(
             raise ValueError(
                 "attention_config.minimax_m3_indexer_cp requires a bf16 index "
                 f"cache, got indexer_kv_dtype={indexer_kv_dtype!r}"
+            )
+        # The CP impl reuses the Triton builder, which emits ragged decode
+        # metadata under adaptive verification; CP decode scores uniform rows.
+        spec_config = get_current_vllm_config().speculative_config
+        if spec_config is not None and spec_config.enable_adaptive_verification:
+            raise ValueError(
+                "attention_config.minimax_m3_indexer_cp does not support adaptive "
+                "verification. Pass enable_adaptive_verification=false in the "
+                "speculative config, or disable minimax_m3_indexer_cp."
             )
         from vllm.models.minimax_m3.amd.indexer_context_parallel import (
             MiniMaxM3IndexerTritonCPImpl,
@@ -608,6 +654,19 @@ def select_indexer_impl_cls(
             indexer_kv_dtype,
         )
         return MiniMaxM3IndexerMSAImpl
+    if use_flashinfer_msa:
+        # Lazy import so unsupported / flashinfer-less setups never import it.
+        from vllm.models.minimax_m3.nvidia.indexer_flashinfer import (
+            MiniMaxM3IndexerFlashInferImpl,
+        )
+
+        logger.info_once(
+            "MiniMax M3 indexer: selected FlashInfer MSA (proxy score + top-k) "
+            "[topk_blocks=%d, indexer_kv_dtype=%s]",
+            topk_blocks,
+            indexer_kv_dtype,
+        )
+        return MiniMaxM3IndexerFlashInferImpl
     if indexer_kv_dtype not in ("bf16", "fp8", "fp8_e4m3"):
         raise NotImplementedError(
             f"indexer_kv_dtype={indexer_kv_dtype!r} is not supported by the "
@@ -624,10 +683,10 @@ def select_indexer_impl_cls(
 
 
 class MiniMaxM3Indexer(nn.Module):
-    """Indexer module held by the attention layer (like ``DeepseekV4Indexer``).
+    """Indexer module held by the attention layer (like `DeepseekV4Indexer`).
 
-    Picks the kernel impl in ``__init__`` (``select_indexer_impl_cls``) and
-    delegates ``forward``; exposes the impl's side cache via ``index_cache``.
+    Picks the kernel impl in `__init__` (`select_indexer_impl_cls`) and
+    delegates `forward`; exposes the impl's side cache via `index_cache`.
     """
 
     def __init__(
@@ -646,11 +705,13 @@ class MiniMaxM3Indexer(nn.Module):
         cache_config: CacheConfig | None = None,
         indexer_kv_dtype: IndexerKVDType | str = "bf16",
         topk_indices_buffer: torch.Tensor | None = None,
+        use_flashinfer_msa: bool = False,
     ) -> None:
         super().__init__()
         impl_cls = select_indexer_impl_cls(
             topk_blocks=topk_blocks,
             indexer_kv_dtype=indexer_kv_dtype,
+            use_flashinfer_msa=use_flashinfer_msa,
         )
         self.impl = impl_cls(
             num_kv_heads=num_kv_heads,

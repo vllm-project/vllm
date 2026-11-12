@@ -45,8 +45,8 @@ def _mxfp8_backend_to_kernel_cls(
 ) -> list[type[mk.FusedMoEExperts]]:
     """Resolve the MXFP8 expert classes for a backend.
 
-    DeepGEMM resolves directly to ``DeepGemmExperts`` (not the
-    ``TritonOrDeepGemmExperts`` wrapper, whose Triton fallback cannot handle the
+    DeepGEMM resolves directly to `DeepGemmExperts` (not the
+    `TritonOrDeepGemmExperts` wrapper, whose Triton fallback cannot handle the
     MXFP8 1x32 scheme); all other backends defer to the FP8 resolver.
     """
     if backend == Fp8MoeBackend.DEEPGEMM:

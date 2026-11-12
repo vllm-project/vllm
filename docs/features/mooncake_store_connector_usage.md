@@ -111,7 +111,10 @@ vllm serve meta-llama/Llama-3.1-8B-Instruct \
                 },
                 {
                     "kv_connector": "MooncakeStoreConnector",
-                    "kv_role": "kv_both"
+                    "kv_role": "kv_both",
+                    "kv_connector_extra_config": {
+                        "reuse_pd_transfer_engine": true
+                    }
                 }
             ]
         }
@@ -136,12 +139,24 @@ vllm serve meta-llama/Llama-3.1-8B-Instruct \
                 },
                 {
                     "kv_connector": "MooncakeStoreConnector",
-                    "kv_role": "kv_consumer"
+                    "kv_role": "kv_consumer",
+                    "kv_connector_extra_config": {
+                        "reuse_pd_transfer_engine": true
+                    }
                 }
             ]
         }
     }'
 ```
+
+`reuse_pd_transfer_engine` makes the store share the TransferEngine that
+`MooncakeConnector` initialized in the same worker, so each worker runs one
+engine instead of two. `MooncakeConnector` must be listed first. The shared
+engine keeps the PD connector's settings; the store JSON's `metadata_server`,
+`protocol` and `device_name` are ignored, and the store registers no KV
+buffers. Sleep mode is governed by `MooncakeConnector`'s checks. Leave
+`MOONCAKE_GLOBAL_SEGMENT_SIZE` unset so only the store config mounts the CPU
+segment.
 
 To also offload newly completed decode KV blocks, add the following extra
 configuration to the decoder's `MooncakeStoreConnector` entry.
@@ -154,6 +169,7 @@ Store. It also covers prompt KV delivered directly by `MooncakeConnector`.
 ```json
 {
     "kv_connector_extra_config": {
+        "reuse_pd_transfer_engine": true,
         "save_decode_cache": true
     }
 }
@@ -321,12 +337,27 @@ Strict isolation requires a Mooncake master started with `--enable_multi_tenants
 - **kv_consumer**: For instances that load KV caches from the pool.
 - **kv_both**: The instance both stores and loads KV caches. Use this for single-node CPU offloading or prefiller instances.
 
+### Lookup timeout and circuit breaker
+
+Prefix lookups (blocking, async, and arrival-time prefetch) wait at most
+`lookup_timeout_s` (see below), including time queued on the lookup executor.
+A timeout or lookup error returns a cache miss so the request computes locally.
+Only lookups that reached the store count as failures; lookups that expire
+while queued behind others do not. After 3 consecutive failures, lookups are
+skipped for 30 seconds. After the cooldown, a single probe lookup either closes
+the breaker or reopens it.
+
+This bounds the scheduler's wait for prefix lookup. It does not cancel a master
+RPC already running inside the worker or apply to KV loads and saves. Store
+reset waits at most 60 seconds.
+
 ### kv_connector_extra_config
 
 - `load_async` (bool): Enable asynchronous loading for better compute-I/O overlap. Default: `true`.
 - `lookup_async` (bool): Run the external prefix-cache lookup on a background thread without waiting for its result. With a positive `lookup_prefetch_limit`, lookup starts as soon as the request is added to the scheduler, so it overlaps the time the request waits in the queue. GPU KV allocation and loading still happen through the scheduler. Default: `false`.
 - `lookup_prefetch_limit` (int): Maximum number of arrival-time lookups in flight. Beyond it, a request is looked up when the scheduler first reaches it; scheduler lookups are not capped. Set to a positive value to enable arrival-time lookup. Default: `0` (disabled).
-- `lookup_prefetch_ttl_s` (float): Maximum age of a completed async lookup result, measured from when its RPC returned. Older results are looked up again, as are lookups whose token/hash range changed; a lookup still in flight never expires. Default: `2.0` seconds.
+- `lookup_prefetch_ttl_s` (float): Maximum age of a completed async lookup result, measured from when its RPC returned. Older results are looked up again, as are lookups whose token/hash range changed. Pending lookups use the separate lookup timeout above. Default: `2.0` seconds.
+- `lookup_timeout_s` (float): Maximum wait for a prefix lookup, including executor queue time. Default: `1.0` seconds.
 - `lookup_rpc_port` (int): Custom port for the ZMQ lookup RPC socket. Default: `0`.
 - `custom_mem_pool` (str): Optional Mooncake allocator for the GPU KV cache.
   `"NVLINK"` is used in the [EGM deployment example](#standalone-egm-over-nvlink);

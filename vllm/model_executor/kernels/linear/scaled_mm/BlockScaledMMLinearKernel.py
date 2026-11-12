@@ -41,8 +41,8 @@ class FP8BlockParams(FP8Params):
 
     @property
     def block_scale_attr(self) -> str:
-        """Fp8LinearMethod registers the block scale as ``weight_scale_inv``,
-        compressed-tensors as ``weight_scale``."""
+        """Fp8LinearMethod registers the block scale as `weight_scale_inv`,
+        compressed-tensors as `weight_scale`."""
         return (
             self.WEIGHT_SCALE
             if self.weight_scale_inv is None
@@ -186,7 +186,7 @@ class Fp8BlockScaledMMLinearKernel(
         out_dtype: torch.dtype,
     ) -> torch.Tensor:
         """apply_block_scaled_mm with an explicit output dtype; implemented by
-        kernels that set ``supports_partial_sum_dtype``."""
+        kernels that set `supports_partial_sum_dtype`."""
         raise NotImplementedError
 
 
@@ -222,8 +222,10 @@ class Fp8BlockScaledDynamicMMLinearKernel(Fp8BlockScaledMMLinearKernel, ABC):
         if not is_base_supported and not is_fallback_supported:
             return (
                 False,
-                f"base is not supported due to {reason_1}; "
-                f"fallback is not supported due to {reason_2}",
+                (
+                    f"base is not supported due to {reason_1}; "
+                    f"fallback is not supported due to {reason_2}"
+                ),
             )
         if not is_base_supported:
             return False, f"base is not supported due to {reason_1}"
@@ -240,8 +242,10 @@ class Fp8BlockScaledDynamicMMLinearKernel(Fp8BlockScaledMMLinearKernel, ABC):
         if not can_implement_base and not can_implement_fallback:
             return (
                 False,
-                f"base cannot implement due to {reason_1}; "
-                f"fallback cannot implement due to {reason_2}",
+                (
+                    f"base cannot implement due to {reason_1}; "
+                    f"fallback cannot implement due to {reason_2}"
+                ),
             )
         if not can_implement_base:
             return False, f"base cannot implement due to {reason_1}"

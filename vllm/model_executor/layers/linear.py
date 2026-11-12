@@ -463,7 +463,7 @@ class ColumnParallelLinear(LinearBase):
         disable_tp: If true, weights matrix won't be sharded through tp rank.
         tp_rank: Override the tensor-parallel rank used for sharding. Defaults to
             the global TP rank. Used to shard at a coarser granularity than one
-            shard per rank (see ``DCPGroupColumnParallelLinear``).
+            shard per rank (see `DCPGroupColumnParallelLinear`).
         tp_size: Override the tensor-parallel world size used for sharding.
             Defaults to the global TP world size.
 
@@ -653,11 +653,11 @@ class DCPGroupColumnParallelLinear(ColumnParallelLinear):
 
     With Decode Context Parallelism (DCP) the KV cache is sharded across a DCP
     group, so MLA decode must attend the group's full head set. This layer shards
-    its output across DCP *groups* (effective tp size ``tp_size //
-    dcp_world_size``) rather than across every rank, so each rank in a group
+    its output across DCP *groups* (effective tp size `tp_size //
+    dcp_world_size`) rather than across every rank, so each rank in a group
     holds the whole group's heads, letting decode skip the query all-gather.
 
-    :meth:`forward` returns the group's full head set. :meth:`_local_view`
+    `forward` returns the group's full head set. `_local_view`
     extracts this rank's TP shard for prefill.
     """
 
@@ -680,7 +680,7 @@ class DCPGroupColumnParallelLinear(ColumnParallelLinear):
     def _local_view(self, out: torch.Tensor) -> torch.Tensor:
         """Slice this rank's tp head shard from a group-heads output.
 
-        ``out`` is head-shaped, i.e. ``(..., group_heads, head_dim)``.
+        `out` is head-shaped, i.e. `(..., group_heads, head_dim)`.
         """
         if self.group_size == 1:
             return out
@@ -1418,14 +1418,14 @@ class MinimaxM3QKVParallelLinearWithIndexer(QKVParallelLinear):
 
         [q | k | v | index_q | index_k]
 
-    ``index_q`` must have the same head count as the KV heads
-    (``total_num_index_heads == total_num_kv_heads``) and ``index_head_size ==
-    head_size``, so it shards exactly like K/V -- including the KV-head
-    *replication* path when ``tp_size > total_num_kv_heads`` (this is what makes
-    a TP size greater than the KV-head count work). ``index_k`` is a single
+    `index_q` must have the same head count as the KV heads
+    (`total_num_index_heads == total_num_kv_heads`) and `index_head_size ==
+    head_size`, so it shards exactly like K/V -- including the KV-head
+    *replication* path when `tp_size > total_num_kv_heads` (this is what makes
+    a TP size greater than the KV-head count work). `index_k` is a single
     shared head, replicated to every rank.
 
-    ``replicate_index_q`` moves ``index_q`` onto that replicated path too, so
+    `replicate_index_q` moves `index_q` onto that replicated path too, so
     every rank projects all the index heads rather than its own. That is what
     indexer context parallelism needs: it inverts the split, scoring every head
     against a shard of the blocks instead of one head against all of them.
@@ -1600,10 +1600,10 @@ class KimiK3MergedQKVGateLinear(MergedColumnParallelLinear):
 
     NOTE: Kimi-K3-specific. This is tailored to its replicated Q/KV latent
     projections and tensor-parallel output gate; it is not a general-purpose
-    linear layer. It lives here alongside ``MergedColumnParallelLinear``, whose
+    linear layer. It lives here alongside `MergedColumnParallelLinear`, whose
     sharding and weight-loading machinery it reuses.
 
-    The per-rank shard layout is ``[q_a | kv_a | gate]``. The latent shards
+    The per-rank shard layout is `[q_a | kv_a | gate]`. The latent shards
     stay replicated across tensor-parallel ranks while the gate shard is
     tensor-parallel, matching the standalone projections they replace.
     """
@@ -1687,7 +1687,7 @@ class KimiK3MergedQKVGateLinear(MergedColumnParallelLinear):
 def _fp16_partial_linear(
     x: torch.Tensor, weight: torch.Tensor, bias: torch.Tensor | None, scale: float
 ) -> torch.Tensor:
-    """FP32-accumulated x @ weight.T, times ``scale``, cast to FP16.
+    """FP32-accumulated x @ weight.T, times `scale`, cast to FP16.
 
     torch.mm has no BF16 -> FP16 output, hence the FP32 output and the cast;
     bias and scale are applied in place so only one FP32 buffer is live.
@@ -1864,7 +1864,7 @@ class RowParallelLinear(LinearBase):
 
     def _set_fp16_partials(self, mode: Literal["gemm", "kernel"] | None) -> None:
         """Partial sums for VLLM_TP_FP16_PARTIAL_SUMS: "gemm" (FP16 GEMM output
-        in ``forward``), "kernel" (the quantized kernel reads partial_sum_dtype
+        in `forward`), "kernel" (the quantized kernel reads partial_sum_dtype
         and partial_sum_scale) or None (BF16)."""
         self._fp16_partials = mode
         self.partial_sum_dtype = torch.float16 if mode == "kernel" else None
@@ -2021,8 +2021,8 @@ class RowParallelLinear(LinearBase):
 
     def disable_fp16_partial_sums(self, reason: str) -> None:
         """Go back to BF16 partial sums. For wrappers that call
-        ``quant_method.apply`` on this layer and all-reduce the result
-        themselves, bypassing the unscale in ``forward``."""
+        `quant_method.apply` on this layer and all-reduce the result
+        themselves, bypassing the unscale in `forward`."""
         if self._fp16_partials is None:
             return
         logger.warning_once(

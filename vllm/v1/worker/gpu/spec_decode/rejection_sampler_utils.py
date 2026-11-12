@@ -3,7 +3,6 @@
 import torch
 
 from vllm.triton_utils import tl, tldevice, triton
-from vllm.v1.spec_decode.fly import compute_fly_entropy
 from vllm.v1.worker.gpu.sample.gumbel import (
     gumbel_block_argmax,
     spec_step_seed,
@@ -14,6 +13,7 @@ from vllm.v1.worker.gpu.spec_decode.draft_logits import (
     DraftLogitsCache,
     draft_logits_row,
 )
+from vllm.v1.worker.gpu.spec_decode.fly import compute_fly_entropy
 
 
 @triton.jit

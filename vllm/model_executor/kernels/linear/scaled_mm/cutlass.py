@@ -179,8 +179,8 @@ class CutlassFP8ScaledMMLinearKernel(FP8ScaledMMLinearKernel):
     def _pad_to_alignment(
         x: torch.Tensor, dim: int, alignment: int, value: float = 0.0
     ) -> torch.Tensor:
-        """Pad tensor ``x`` along ``dim`` to the next multiple of
-        ``alignment``."""
+        """Pad tensor `x` along `dim` to the next multiple of
+        `alignment`."""
         remainder = x.shape[dim] % alignment
         if remainder == 0:
             return x
@@ -278,8 +278,10 @@ class CutlassFp8BlockScaledMMKernel(Fp8BlockScaledMMLinearKernel):
         if not CUTLASS_BLOCK_FP8_SUPPORTED:
             return (
                 False,
-                "The device compute capability of"
-                f"{compute_capability} is not supported.",
+                (
+                    "The device compute capability of "
+                    f"{compute_capability} is not supported."
+                ),
             )
         return True, None
 
@@ -293,8 +295,10 @@ class CutlassFp8BlockScaledMMKernel(Fp8BlockScaledMMLinearKernel):
         if act_quant_desc.group_shape != GroupShape(1, 128):
             return (
                 False,
-                "Supports only dynamic per token group activation "
-                "quantization with group_shape=(1,128).",
+                (
+                    "Supports only dynamic per token group activation "
+                    "quantization with group_shape=(1,128)."
+                ),
             )
         return True, None
 
