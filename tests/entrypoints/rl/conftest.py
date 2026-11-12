@@ -94,17 +94,22 @@ def server(
     """
     env = {**os.environ, "VLLM_SERVER_DEV_MODE": "1"}
     base = _DUMMY_ARGS if dummy_weights else _BASE_ARGS
+    extra_args = extra_args or []
+    # `vllm serve` would default to one API server per DP rank.
+    if "--api-server-count" not in extra_args:
+        extra_args = ["--api-server-count", "1", *extra_args]
     cmd = [
         sys.executable,
         "-m",
-        "vllm.entrypoints.openai.api_server",
-        "--model",
+        "vllm.entrypoints.cli.main",
+        "serve",
         MODEL_NAME,
         "--port",
         str(port),
         "--served-model-name",
         "m",
-        *(base + (extra_args or [])),
+        *base,
+        *extra_args,
     ]
     proc = subprocess.Popen(
         cmd, env=env, stdout=subprocess.DEVNULL, stderr=subprocess.PIPE
