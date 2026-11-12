@@ -214,25 +214,27 @@ def process_weights_after_loading(
     from vllm.model_executor.layers.fused_moe.expert_pool.install import (
         PREFILL_STAGE_MIN_TOKENS,
         install_expert_pool,
+        pool_layers,
     )
 
-    vllm_config = get_current_vllm_config()
-    scheduler_config = vllm_config.scheduler_config
-    # A decode step verifies 1 + num_speculative_tokens tokens per request.
-    install_expert_pool(
-        model,
-        target_device,
-        max_decode_tokens=(
-            scheduler_config.max_num_seqs * (1 + vllm_config.num_speculative_tokens)
-            if scheduler_config is not None
-            else 1
-        ),
-        stage_min_tokens=(
-            PREFILL_STAGE_MIN_TOKENS
-            if vllm_config.offload_config.moe_expert_pool_prefill_staging
-            else 0
-        ),
-    )
+    if pool_layers(model):
+        vllm_config = get_current_vllm_config()
+        scheduler_config = vllm_config.scheduler_config
+        # A decode step verifies 1 + num_speculative_tokens tokens per request.
+        install_expert_pool(
+            model,
+            target_device,
+            max_decode_tokens=(
+                scheduler_config.max_num_seqs * (1 + vllm_config.num_speculative_tokens)
+                if scheduler_config is not None
+                else 1
+            ),
+            stage_min_tokens=(
+                PREFILL_STAGE_MIN_TOKENS
+                if vllm_config.offload_config.moe_expert_pool_prefill_staging
+                else 0
+            ),
+        )
 
     finalize_model_weights(model, target_device)
 
