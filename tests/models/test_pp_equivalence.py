@@ -13,8 +13,12 @@ CI sets `VLLM_TRITON_FORCE_FIRST_CONFIG=1`: Triton autotuning picks configs per
 process by timing, so two engines could otherwise run different kernels.
 """
 
+import contextlib
 import hashlib
 import math
+import os
+import sys
+import tempfile
 from functools import partial
 
 import numpy as np
@@ -299,15 +303,42 @@ def test_pp_equivalence_detects_a_changed_weight(vllm_runner):
     assert ref != test
 
 
+@contextlib.contextmanager
+def _capture_stdio():
+    """Capture stdout/stderr at the FD level.
+
+    Avoid pytest ``capfd``: on ROCm/XPU, ``@multi_gpu_test`` spawns a child and
+    cloudpickles fixtures, and ``capfd`` is not picklable.
+    """
+    with tempfile.TemporaryFile() as tmp:
+        out_fd, err_fd = sys.stdout.fileno(), sys.stderr.fileno()
+        saved_out, saved_err = os.dup(out_fd), os.dup(err_fd)
+        try:
+            os.dup2(tmp.fileno(), out_fd)
+            os.dup2(tmp.fileno(), err_fd)
+            yield tmp
+        finally:
+            sys.stdout.flush()
+            sys.stderr.flush()
+            os.dup2(saved_out, out_fd)
+            os.dup2(saved_err, err_fd)
+            os.close(saved_out)
+            os.close(saved_err)
+
+
 @pytest.mark.timeout(CASE_TIMEOUT_S)
 @multi_gpu_test(num_gpus=2)
 @pytest.mark.parametrize("arch", SPLIT_KV_SHARING)
-def test_pp_rejects_split_kv_sharing(vllm_runner, monkeypatch, capfd, arch: str):
+def test_pp_rejects_split_kv_sharing(vllm_runner, monkeypatch, arch: str):
     """A split that separates a layer from the layer whose KV cache it reads must
     fail at startup rather than produce output."""
     num_layers, partition = SPLIT_KV_SHARING[arch]
     monkeypatch.setenv("VLLM_PP_LAYER_PARTITION", partition)
-    with pytest.raises(RuntimeError, match="Engine core initialization failed"):
-        _run(vllm_runner, arch, 2, num_layers)
+    with _capture_stdio() as captured:
+        with pytest.raises(RuntimeError, match="Engine core initialization failed"):
+            _run(vllm_runner, arch, 2, num_layers)
+        captured.flush()
+        captured.seek(0)
+        output = captured.read().decode("utf-8", errors="replace")
     # The engine error does not carry the cause; the workers log it.
-    assert "Specified KV sharing target layer" in "".join(capfd.readouterr())
+    assert "Specified KV sharing target layer" in output
