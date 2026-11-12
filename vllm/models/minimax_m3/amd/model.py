@@ -38,6 +38,9 @@ from vllm.config import (
 from vllm.distributed import get_pp_group, get_tensor_model_parallel_world_size
 from vllm.forward_context import get_forward_context
 from vllm.logger import init_logger
+from vllm.model_executor.kernels.linear.mxfp8.aiter_flydsl import (
+    AiterFlyDSLMxfp8LinearKernel,
+)
 from vllm.model_executor.kernels.linear.mxfp8.rocm_native import (
     _FUSED_QUANT_MAX_M,
     RocmDotScaledMxfp8LinearKernel,
@@ -54,6 +57,7 @@ from vllm.model_executor.layers.fused_moe import (
     FusedMoEFactory,
     GateLinear,
     RoutedExperts,
+    RoutedScaleMode,
     fused_moe_make_expert_params_mapping,
 )
 from vllm.model_executor.layers.fused_moe.utils import (
@@ -342,6 +346,10 @@ class MiniMaxM3MLP(nn.Module):
     def _down_proj_quantizes_in_gemm(self, num_tokens: int) -> bool:
         """Whether down_proj's kernel quantizes its input inside the GEMM at
         this token count; that is already a single launch, so keep it."""
+        if not isinstance(
+            _mxfp8_linear_kernel(self.down_proj), RocmDotScaledMxfp8LinearKernel
+        ):
+            return False
         n, k = self.down_proj.weight.shape
         return (
             0 < num_tokens <= _FUSED_QUANT_MAX_M
@@ -550,7 +558,9 @@ class MiniMaxM3MoE(nn.Module):
             swiglu_alpha=config.swiglu_alpha,
             swiglu_beta=1.0,
             routed_scaling_factor=self.routed_scaling_factor,
-            apply_routed_scale_to_output=not self.use_aiter_moe_fse,
+            routed_scale_mode=RoutedScaleMode.ROUTER
+            if self.use_aiter_moe_fse
+            else RoutedScaleMode.OUTPUT,
             router_logits_dtype=self.gate.out_dtype,
             shared_experts=self.shared_experts,
             n_shared_experts=(
@@ -1584,21 +1594,27 @@ class MiniMaxM3SparseAttention(nn.Module, AttentionLayerBase):
         return self.impl.forward(self, query, self.kv_cache, output)
 
 
+def _mxfp8_linear_kernel(linear: nn.Module):
+    """The MXFP8 kernel of `linear`, or None."""
+    # Quark keeps the kernel on the layer's scheme, ModelOpt on the method.
+    kernel = getattr(getattr(linear, "scheme", None), "ocp_mx_linear", None)
+    if kernel is None:
+        kernel = getattr(getattr(linear, "quant_method", None), "kernel", None)
+    return kernel
+
+
 def _can_fuse_input_norm_mxfp8(qkv_proj: nn.Module) -> bool:
     """Whether `input_layernorm` can hand `qkv_proj` an MXFP8 activation.
 
     The quant key does not encode the scale layout (FlashInfer wants swizzled
-    scales under the same key), so this also requires the ROCm `dot_scaled`
-    kernel, which reads the row-major scales the fused norm writes.
+    scales under the same key), so this also requires a ROCm kernel that
+    reads the row-major scales the fused norm writes.
     """
     if envs.VLLM_BATCH_INVARIANT or get_input_quant_key(qkv_proj) != kMxfp8Dynamic:
         return False
-    # Quark keeps the kernel on the layer's scheme, ModelOpt on the method.
-    kernel = getattr(getattr(qkv_proj, "scheme", None), "ocp_mx_linear", None)
-    if kernel is None:
-        kernel = getattr(getattr(qkv_proj, "quant_method", None), "kernel", None)
+    kernel = _mxfp8_linear_kernel(qkv_proj)
     return isinstance(
-        kernel, RocmDotScaledMxfp8LinearKernel
+        kernel, (RocmDotScaledMxfp8LinearKernel, AiterFlyDSLMxfp8LinearKernel)
     ) and kernel.supports_quantized_input(qkv_proj)
 
 
