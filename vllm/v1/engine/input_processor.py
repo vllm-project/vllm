@@ -487,6 +487,29 @@ class InputProcessor:
             )
             if self.tokenizer is not None:
                 sampling_params.update_from_tokenizer(self.tokenizer)
+            reasoning = self.vllm_config.reasoning_config
+            if (
+                sampling_params.thinking_token_budget is not None
+                and reasoning is not None
+                and (end_ids := reasoning.reasoning_end_token_ids)
+            ):
+                allowed = sampling_params.allowed_token_ids
+                if allowed is not None and not set(end_ids).issubset(allowed):
+                    raise VLLMValidationError(
+                        "thinking_token_budget forces reasoning_end tokens "
+                        "excluded by allowed_token_ids.",
+                        parameter="allowed_token_ids",
+                    )
+                if any(
+                    end_ids[i : i + len(word)] == word
+                    for word in sampling_params.bad_words_token_ids or ()
+                    for i in range(len(end_ids) - len(word) + 1)
+                ):
+                    raise VLLMValidationError(
+                        "thinking_token_budget forces reasoning_end tokens "
+                        "prohibited by bad_words.",
+                        parameter="bad_words",
+                    )
             if sampling_params.trace_decode_token_ids:
                 self._normalize_trace_replay_params(sampling_params, prompt_len)
         else:
