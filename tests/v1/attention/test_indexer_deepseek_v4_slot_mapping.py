@@ -479,9 +479,11 @@ def test_compressed_slot_mapping_inherits_padded_token_slots():
 
 
 @pytest.mark.skipif(not torch.cuda.is_available(), reason="requires CUDA")
-def test_compressed_slot_mapping_dcp_uses_rank_local_state_positions():
+@pytest.mark.parametrize("self_addressed", [False, True])
+def test_compressed_slot_mapping_dcp_uses_rank_local_state_positions(self_addressed):
     """Under DCP each rank writes only the states it owns, at the state's
-    rank-local position."""
+    rank-local position, whether ownership comes from the tokens' slots or,
+    for a self-addressed cache, from the rank."""
     device = torch.device("cuda")
     dcp, interleave, ratio, block_size = 2, 4, 2, 4
     num_tokens = 32
@@ -494,7 +496,7 @@ def test_compressed_slot_mapping_dcp_uses_rank_local_state_positions():
         slot_mapping = torch.where(owned, 0, -1).to(torch.int64).to(device)
         compressed = get_compressed_slot_mapping(
             num_tokens,
-            slot_mapping,
+            None if self_addressed else slot_mapping,
             query_start_loc,
             seq_lens,
             block_table,
@@ -502,6 +504,7 @@ def test_compressed_slot_mapping_dcp_uses_rank_local_state_positions():
             compress_ratio=ratio,
             dcp_world_size=dcp,
             cp_interleave=interleave,
+            dcp_rank=rank,
         )
         local_pos = pos // (interleave * dcp) * interleave + pos % interleave
         state = local_pos // ratio

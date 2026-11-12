@@ -98,7 +98,7 @@ class KimiK3IndexerMetadataBuilder(DeepseekV32IndexerMetadataBuilder):
     ) -> DeepseekV32IndexerMetadata:
         slot_mapping = get_compressed_slot_mapping(
             common_attn_metadata.num_actual_tokens,
-            common_attn_metadata.slot_mapping,
+            None,
             common_attn_metadata.query_start_loc,
             common_attn_metadata.seq_lens,
             common_attn_metadata.block_table_tensor,
@@ -107,6 +107,7 @@ class KimiK3IndexerMetadataBuilder(DeepseekV32IndexerMetadataBuilder):
             out=self.slot_mapping_buffer,
             dcp_world_size=self.dcp_world_size,
             cp_interleave=self.cp_kv_cache_interleave_size,
+            dcp_rank=self.dcp_rank,
         )
         metadata = super().build(
             common_prefix_len,
