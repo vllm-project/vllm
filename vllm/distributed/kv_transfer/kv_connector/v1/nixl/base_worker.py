@@ -696,15 +696,15 @@ class NixlBaseConnectorWorker:
         )
 
         self.kv_cache_config = kv_cache_config
-        transfer_block_sizes = [
+        self._transfer_block_sizes = [
             group.kv_cache_spec.block_size
             for group in kv_cache_config.transfer_groups
             if get_representative_spec_type(group.kv_cache_spec)
             not in (MambaSpec, CircularBufferSpec)
         ]
         self.block_size = (
-            math.lcm(*transfer_block_sizes)
-            if transfer_block_sizes
+            math.lcm(*self._transfer_block_sizes)
+            if self._transfer_block_sizes
             else cast(int, vllm_config.cache_config.block_size)
         )
         # Per-layer specs, unwrapping UniformTypeKVCacheSpecs group wrappers.
@@ -2001,6 +2001,7 @@ class NixlBaseConnectorWorker:
                 for name in names
             },
             packed_member_layouts=self._packed_member_layouts,
+            transfer_block_sizes=self._transfer_block_sizes,
         )
         # Wrap metadata in payload with hash for defensive decoding
         assert self.compat_hash is not None
@@ -2839,6 +2840,19 @@ class NixlBaseConnectorWorker:
                 f"Local: {self._physical_blocks_per_logical_kv_block}, "
                 f"Remote: {remote_physical_per_logical}. "
                 "Disable prefix caching with --disable-prefix-caching."
+            )
+        # Every group's blocks are paired at the one engine-level P/D ratio.
+        local_sizes = self._transfer_block_sizes
+        remote_sizes = nixl_agent_meta.transfer_block_sizes
+        if self._dst_pairs[remote_engine_id].groups_match and any(
+            local * remote_sizes[0] != remote * local_sizes[0]
+            for local, remote in zip(local_sizes, remote_sizes)
+        ):
+            raise NotImplementedError(
+                "KV cache groups whose block sizes scale differently between P "
+                f"and D are not supported. Local: {local_sizes}, "
+                f"Remote: {remote_sizes}. Use the same tensor parallel size on "
+                "P and D."
             )
 
         if block_size_ratio != 1:

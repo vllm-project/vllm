@@ -403,6 +403,7 @@ def _register_overlaid_mla_worker(
     worker.transfer_tp_rank = 0
     worker.transfer_tp_size = 1
     worker.block_size = 4
+    worker._transfer_block_sizes = [4, 4]
     worker.engine_id = "local-engine"
     worker.use_mla = True
     worker.model_config = MagicMock()
