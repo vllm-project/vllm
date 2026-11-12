@@ -1,5 +1,7 @@
 // SPDX-License-Identifier: Apache-2.0
-// Conv semantics adapted from vLLM causal_conv1d.py;
+// SPDX-FileCopyrightText: Copyright contributors to the vLLM project
+// Convolution semantics adapted from
+// vllm/model_executor/layers/mamba/ops/causal_conv1d.py.
 // Copyright (c) 2024, Tri Dao.
 // Modified: CTA-local BF16 conv, single projected output ownership,
 // expected pad/null early return before metadata/history accesses.
@@ -59,7 +61,7 @@ __device__ __forceinline__ uint32_t round_pair(float lo, float hi) {
   return result;
 }
 
-// Called only after the original raw BF16 scatter, original global stores and
+// Called only after the raw BF16 scatter, global stores and
 // final CTA barrier. The complete raw8x136 tile remains intact throughout.
 __device__ __forceinline__ void epilogue(void* shared_b, int slice_col,
                                          const ConvParams& params,
@@ -155,13 +157,8 @@ __device__ __forceinline__ void epilogue(void* shared_b, int slice_col,
 
 }  // namespace vllm_mamba_input_conv
 
-// SPDX-License-Identifier: Apache-2.0
-// Conv semantics adapted from vLLM causal_conv1d.py;
-// Copyright (c) 2024, Tri Dao.
-// Adapted from mamba_input_conv_epilogue.cuh: actual T1..7 masks, odd tail,
-// physical-history acceptance bounds and untouched history suffix.
 namespace vllm_mamba_input_conv {
-// Called only after the original raw BF16 scatter, original global stores and
+// Called only after the raw BF16 scatter, global stores and
 // final CTA barrier. Only the actual short rows are read; physical history
 // can be larger than the current draft window and its unused suffix is kept.
 template <int ActualT>
@@ -269,15 +266,8 @@ __device__ __forceinline__ void epilogue_short(void* shared_b, int slice_col,
 
 }  // namespace vllm_mamba_input_conv
 
-// SPDX-License-Identifier: Apache-2.0
-// SPDX-FileCopyrightText: Copyright contributors to the vLLM project
-// Batched request selection reuses the original short-convolution arithmetic.
-// Its causal-conv attribution remains in mamba_input_conv_short_epilogue.cuh.
-
-
-
+// Batched requests reuse epilogue_short.
 namespace vllm_mamba_input_conv {
-
 
 template <int Tokens>
 __device__ __forceinline__ void epilogue_batch(void* shared_b, int slice_col,
@@ -290,7 +280,7 @@ __device__ __forceinline__ void epilogue_batch(void* shared_b, int slice_col,
   const int index_stride = params.reserved >> kBatchHistoryBits;
   const int history_len = params.reserved & ((1 << kBatchHistoryBits) - 1);
   // One CTA owns all M<=8 rows and one channel tile. Requests run sequentially;
-  // every active epilogue ends at its original CTA barrier. Inactive returns
+  // every active epilogue ends at its CTA barrier. Inactive returns
   // are CTA-uniform, before accepted/history access, so all lanes keep step.
   for (int batch = 0; batch < batches; ++batch) {
     ConvParams request = params;
@@ -312,12 +302,7 @@ static_assert(kSharedReuseBytes + 7 * kRawPitch * sizeof(uint16_t) <=
 
 }  // namespace vllm_mamba_input_conv
 
-// SPDX-License-Identifier: Apache-2.0
-// SPDX-FileCopyrightText: Copyright contributors to the vLLM project
-// Conv semantics adapted from vLLM causal_conv1d.py;
-// Copyright (c) 2024, Tri Dao.
-// Wider Marlin raw M16/M32 scatter, unchanged BF16 conv math.
-// Adapted from the validated mamba_input_conv_short_epilogue.cuh above.
+// BF16 convolution for the Marlin M16/M32 scatter layout.
 
 namespace vllm_mamba_input_conv {
 // Raw matrix remains immutable; one request's history/conv scratch is reused.
@@ -430,9 +415,9 @@ __device__ __forceinline__ void epilogue_wide_sequence(void* shared_b,
   __syncthreads();
 }
 
-// Same explicit new-family descriptor as C's M<=8 prototype:
-// reserved low4bits=physicalH, positive upperbits=cache-index stride.
-// Runtime rows=B*ActualT; all rows must fit ONE selected MMA tile.
+// Descriptor: reserved low four bits hold the physical history length;
+// upper bits hold the cache-index stride. All B*ActualT rows must fit one MMA
+// tile.
 template <int TileRows, int ActualT>
 __device__ __forceinline__ void epilogue_wide(void* shared_b, int slice_col,
                                               const ConvParams& params,

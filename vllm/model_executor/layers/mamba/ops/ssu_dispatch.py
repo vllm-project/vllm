@@ -374,11 +374,11 @@ def flashinfer_replayssm_autotune_supported() -> bool:
 def _gb10_replayssm_profile_tactic(
     batch: int, tokens: int, sr_rng: str
 ) -> dict[str, object]:
-    """FP16 choices measured over complete accepted-token Markov courses.
+    """Select FP16 launch presets for small-batch GB10 replay.
 
-    Rounding policy is supplied by the caller. The common T6 cutoff avoids
-    four mode-specific exceptions worth at most 0.64 us per complete layer.
-    Unmeasured/nonpositive shapes retain FlashInfer's ordinary selection.
+    Presets cover measured batch/verification-length/RNG combinations.
+    Unmatched cases keep FlashInfer's normal selection. This function
+    never changes the caller's rounding policy.
     """
     if not (1 <= batch <= 4 and 1 <= tokens <= 8 and batch * tokens <= 16):
         return {}
@@ -462,7 +462,10 @@ def selective_state_update_replayssm_flashinfer(
         and max_seqlen is None
         and not enable_pdl
         and enable_stochastic_rounding
-        and stochastic_rounding_philox_rounds == 5
+        and (
+            stochastic_rounding_rng == "shared_seed"
+            or stochastic_rounding_philox_rounds == 5
+        )
         and stochastic_rounding_rng in ("philox", "shared_seed")
         and scratch is not None
         and state.dtype == torch.float16

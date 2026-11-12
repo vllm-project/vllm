@@ -47,16 +47,15 @@ class MambaConfig:
     Uses random bits to unbias the rounding error, which can improve
     numerical stability for long sequences."""
     stochastic_rounding_philox_rounds: int = 0
-    """Number of Philox PRNG rounds for stochastic rounding random number
-    generation. 0 uses the Triton default. Higher values improve randomness
-    quality at the cost of compute."""
+    """Philox PRNG rounds when stochastic rounding uses Philox.
+    Zero selects the backend default (10 for FlashInfer ReplaySSM).
+    Shared-seed rounding does not use this count."""
 
     stochastic_rounding_rng: MambaSRRNG = "philox"
     """Stochastic-rounding random source (Philox by default).
-    ``shared_seed`` uses one uniform seed
-    per invocation instead of per-element Philox with FlashInfer ReplaySSM.
-    It correlates rounding decisions across elements; model-quality equivalence
-    has not been validated."""
+    ``shared_seed`` reuses one fresh seed with uniform low 32 bits per layer
+    invocation instead of per-element Philox with FlashInfer ReplaySSM.
+    Rounding decisions across elements are correlated."""
 
     ssu_algorithm: MambaSSUAlgorithm | None = None
     """Selective state update algorithm to use with the FlashInfer backend.

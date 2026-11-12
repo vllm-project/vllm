@@ -4,7 +4,9 @@
 
 import pytest
 import torch
+
 from tests.kernels.utils import opcheck
+from vllm import _custom_ops as ops
 from vllm.model_executor.layers.mamba.ops.causal_conv1d import causal_conv1d_update
 from vllm.model_executor.layers.mamba.ops.marlin_input_conv import _first_cache_indices
 from vllm.model_executor.layers.quantization.utils.marlin_utils import (
@@ -15,8 +17,6 @@ from vllm.model_executor.layers.quantization.utils.marlin_utils_fp4 import (
 )
 from vllm.platforms import current_platform
 from vllm.scalar_type import scalar_types
-
-from vllm import _custom_ops as ops
 
 M, N, K = 8, 18560, 4096
 CONV_START, CONV_END = 8192, 18432
@@ -54,7 +54,7 @@ def operands():
             torch.randn(5, HISTORY + 1, CHANNELS, device=device, dtype=torch.bfloat16)
             * 0.1
         )
-        # Keep the original B1 seed/weights unchanged; only extra rows are new.
+        # Generate extra rows afterward to keep single-request operands reproducible.
         batch_input = torch.cat(
             (x, torch.randn(24, K, dtype=x.dtype, device=device) * 0.1)
         )

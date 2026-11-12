@@ -7,6 +7,7 @@ from dataclasses import replace
 
 import torch
 from torch import nn
+
 from vllm.compilation.breakable_cudagraph import eager_break_during_capture
 from vllm.config import CacheConfig, ModelConfig, VllmConfig, get_current_vllm_config
 from vllm.config.compilation import CompilationMode, CUDAGraphMode
@@ -538,8 +539,8 @@ class MambaMixer2(MambaBase, PluggableLayer):
             or "vllm::mamba_mixer2_with_input_projection" in splitting_ops
         )
         # Adaptive/token-keyed FULL graphs can replay shorter logical queries
-        # without rerunning this opaque Python dispatch. The legacy18arg kernel
-        # has no device query-length pointer: preserve original conv/SSU there.
+        # without rerunning this opaque Python dispatch. The fused kernel has
+        # no device query-length input, so these graphs use the ordinary path.
         speculative = vllm_config.speculative_config
         uniform_capture_contract = (
             not (speculative is not None and speculative.enable_adaptive_verification)
@@ -1036,7 +1037,7 @@ class MambaMixer2(MambaBase, PluggableLayer):
 
             if _conv_precomputed:
                 # Batched admission requires the full configured uniform window.
-                # B1 also admits runtime-short queries, as before.
+                # B1 also admits runtime-short queries.
                 assert (
                     not has_prefill
                     and 1 <= num_decodes <= 4

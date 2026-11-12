@@ -5,6 +5,7 @@
 import pytest
 import torch
 from transformers import NemotronHConfig
+
 from vllm.compilation.wrapper import compile_model_with_stock_torch
 from vllm.config import (
     CacheConfig,
@@ -157,7 +158,9 @@ def owned_mamba(tmp_path, dist_init, request, monkeypatch):
         mamba_config=MambaConfig(
             backend=MambaBackendEnum.FLASHINFER,
             enable_stochastic_rounding=sr_rng is not None,
-            stochastic_rounding_philox_rounds=5 if sr_rng is not None else 0,
+            stochastic_rounding_philox_rounds=(
+                options.get("sr_rounds", 5) if sr_rng is not None else 0
+            ),
             stochastic_rounding_rng=sr_rng or "philox",
         ),
         compilation_config=CompilationConfig(
@@ -300,11 +303,22 @@ def test_gb10_mamba_respects_disabled_marlin_kernel(owned_mamba):
     "owned_mamba",
     [
         dict(checkpoint_dtype="float16", sr_rng="shared_seed", nonzero_weights=True),
+        dict(
+            checkpoint_dtype="float16",
+            sr_rng="shared_seed",
+            sr_rounds=0,
+            nonzero_weights=True,
+        ),
         dict(state_dtype="int8", sr_rng="philox", nonzero_weights=True),
         dict(state_dtype="int8", sr_rng="shared_seed", nonzero_weights=True),
     ],
     indirect=True,
-    ids=["fp16-shared-seed", "int8-philox", "int8-shared-seed"],
+    ids=[
+        "fp16-shared-seed",
+        "fp16-shared-default-rounds",
+        "int8-philox",
+        "int8-shared-seed",
+    ],
 )
 @pytest.mark.parametrize(("batches", "query_tokens"), [(1, 8), (2, 8), (1, 4)])
 @torch.inference_mode()
@@ -443,7 +457,7 @@ def test_dynamic_tokens_keep_real_marlin_mamba_dispatch(owned_mamba, trace_token
         torch._dynamo.mark_dynamic(value, 0)
     assert not torch._dynamo.config.suppress_errors
     compile_model_with_stock_torch(layer, config)
-    invoke(trace_tokens)  # Old exact-M8 admission raises ConstraintViolationError.
+    invoke(trace_tokens)  # Compile with a dynamic row count.
     # Warm both compiled input paths before profiling runtime dispatch.
     invoke(8)
     invoke(16)

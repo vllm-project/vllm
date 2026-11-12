@@ -197,7 +197,7 @@ Marlin operator and its dispatcher keep their stock behavior.
 For compatible FP16 ReplaySSM calls, this GB10 path applies measured launch
 profiles to 29 combinations of uniform batch/token shape and caller-selected
 rounding policy among `B=1–4`, `T=1–8`, `B*T <= 16`. The policy must be Philox
-with five configured rounds or shared seed with five configured rounds.
+with five configured rounds or shared seed, independent of its unused round count.
 The selector never changes the caller's rounding mode or round count. It
 requires the actual fused Marlin-convolution producer, equal configured/runtime
 verification lengths, BF16 inputs, a 16-token checkpoint window

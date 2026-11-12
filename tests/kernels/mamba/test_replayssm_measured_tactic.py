@@ -106,18 +106,36 @@ def _invoke(kwargs, calls):
 
 
 @pytest.mark.parametrize("batch,tokens,policy", POINTS)
-def test_measured_replayssm_profile_grid(calls, batch, tokens, policy):
+@pytest.mark.parametrize("rounds", [0, 5, 10])
+def test_measured_replayssm_profile_grid(calls, batch, tokens, policy, rounds):
     kwargs = _arguments(batch, tokens, policy)
+    kwargs["stochastic_rounding_philox_rounds"] = rounds
     actual = _invoke(kwargs, calls)
-    expected = _expected((batch, tokens, policy))
+    expected = (
+        _expected((batch, tokens, policy))
+        if policy == "shared_seed" or rounds == 5
+        else {}
+    )
     controls = {k: actual[k] for k in SPLIT if k in actual}
     assert controls == expected
-    assert actual["philox_rounds"] == 5
+    assert actual["philox_rounds"] == (rounds or 10)
     assert actual["rand_seed"].dtype == torch.int64
     assert actual["rand_seed"].shape == (1,)
     assert actual["cb_scaled"] is kwargs["scratch"][0]
     assert actual.get("sr_rng", "philox") == policy
     assert ("sr_rng" in actual) == (policy == "shared_seed")
+
+
+@pytest.mark.parametrize("tokens", [4, 8])
+def test_shared_seed_profile_needs_no_explicit_round_count(calls, tokens):
+    kwargs = _arguments(1, tokens, "shared_seed")
+    del kwargs["stochastic_rounding_philox_rounds"]
+    actual = _invoke(kwargs, calls)
+    assert {key: actual[key] for key in SPLIT if key in actual} == _expected(
+        (1, tokens, "shared_seed")
+    )
+    assert actual["philox_rounds"] == 10
+    assert actual["sr_rng"] == "shared_seed"
 
 
 def test_measured_replayssm_profile_scope_count():

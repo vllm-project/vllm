@@ -48,7 +48,6 @@ vllm serve nvidia/NVIDIA-Nemotron-3.5-Lightning-30B-A3B-NVFP4 \
     --mamba-backend flashinfer \
     --mamba-ssm-cache-dtype float16 \
     --enable-mamba-cache-stochastic-rounding \
-    --mamba-cache-philox-rounds 5 \
     --use-replayssm \
     --replayssm-buffer-len 16 \
     --enable-prefix-caching \
