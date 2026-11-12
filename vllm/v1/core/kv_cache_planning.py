@@ -840,9 +840,15 @@ def _promote_local_kv_cache_specs(
                 spec,
                 target_cls,
                 # Promoted specs allocate blocks for all tokens and never free
-                # below the window, so the trailing-edge extension and replay
-                # bound are moot.
-                drop=("extra_retained_tokens", "bounded_replay"),
+                # below the window, so the trailing-edge extension, replay
+                # bound and a DFlash drafter's tail are moot.
+                drop=(
+                    "extra_retained_tokens",
+                    "bounded_replay",
+                    "num_speculative_tokens",
+                    "max_in_flight_steps",
+                    "num_lookahead_tokens",
+                ),
                 block_size=block_size,
                 page_size_padded=promoted_page_size_padded(spec, block_size),
             )

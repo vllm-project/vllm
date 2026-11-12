@@ -15,6 +15,7 @@ from vllm.config import (
 from vllm.v1.core.single_type_kv_cache_manager import (
     ChunkedLocalAttentionManager,
     CrossAttentionManager,
+    DFlashSlidingWindowManager,
     FullAttentionManager,
     HiSparseSourceManager,
     MambaManager,
@@ -26,6 +27,7 @@ from vllm.v1.core.single_type_kv_cache_manager import (
 from vllm.v1.kv_cache_interface import (
     ChunkedLocalAttentionSpec,
     CrossAttentionSpec,
+    DFlashSlidingWindowSpec,
     FullAttentionSpec,
     HiddenStateCacheSpec,
     KVCacheGroupRole,
@@ -89,6 +91,7 @@ spec_manager_map: dict[type[KVCacheSpec], type[SingleTypeKVCacheManager]] = {
     HiddenStateCacheSpec: FullAttentionManager,
     SlidingWindowSpec: SlidingWindowManager,
     SlidingWindowMLASpec: SlidingWindowManager,
+    DFlashSlidingWindowSpec: DFlashSlidingWindowManager,
     ChunkedLocalAttentionSpec: ChunkedLocalAttentionManager,
     MambaSpec: MambaManager,
     CrossAttentionSpec: CrossAttentionManager,
@@ -101,6 +104,7 @@ spec_uniform_base_map: dict[type[KVCacheSpec], type[KVCacheSpec]] = {
     HiddenStateCacheSpec: FullAttentionSpec,
     SlidingWindowSpec: SlidingWindowSpec,
     SlidingWindowMLASpec: SlidingWindowMLASpec,
+    DFlashSlidingWindowSpec: DFlashSlidingWindowSpec,
     ChunkedLocalAttentionSpec: ChunkedLocalAttentionSpec,
     MambaSpec: MambaSpec,
     CrossAttentionSpec: CrossAttentionSpec,
@@ -130,6 +134,14 @@ spec_args_map: dict[type[KVCacheSpec], dict[str, Any]] = {
         head_size=128,
         dtype=torch.bfloat16,
         sliding_window=128,
+    ),
+    DFlashSlidingWindowSpec: dict(
+        block_size=64,
+        num_kv_heads=8,
+        head_size=128,
+        dtype=torch.bfloat16,
+        sliding_window=128,
+        num_speculative_tokens=3,
     ),
     ChunkedLocalAttentionSpec: dict(
         block_size=64,
@@ -275,6 +287,7 @@ class TestKVCacheSpecRegistry:
         [
             (SlidingWindowSpec, "sliding_window", 256),
             (SlidingWindowMLASpec, "sliding_window", 256),
+            (DFlashSlidingWindowSpec, "sliding_window", 256),
             (ChunkedLocalAttentionSpec, "attention_chunk_size", 8),
             (MambaSpec, "num_speculative_blocks", 4),
         ],
@@ -293,12 +306,17 @@ class TestKVCacheSpecRegistry:
             (FullAttentionSpec, ChunkedLocalAttentionSpec),
             (FullAttentionSpec, MambaSpec),
             (SlidingWindowMLASpec, SlidingWindowSpec),
+            (DFlashSlidingWindowSpec, SlidingWindowSpec),
             (ChunkedLocalAttentionSpec, SlidingWindowSpec),
             (MambaSpec, CrossAttentionSpec),
         ],
     )
     def test_different_uniform_groups_are_not_uniform(self, left_cls, right_cls):
-        assert not are_uniform_specs(make_spec(left_cls), make_spec(right_cls))
+        # Either layer may come first; a subclass's family must not be
+        # accepted by its parent's own uniformity check.
+        left, right = make_spec(left_cls), make_spec(right_cls)
+        assert not are_uniform_specs(left, right)
+        assert not are_uniform_specs(right, left)
 
     def test_different_block_sizes_are_not_uniform(self):
         spec = make_spec(FullAttentionSpec)

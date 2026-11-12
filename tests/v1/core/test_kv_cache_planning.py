@@ -46,6 +46,7 @@ from vllm.v1.hisparse.layout import (
 from vllm.v1.kv_cache_interface import (
     ChunkedLocalAttentionSpec,
     CircularBufferSpec,
+    DFlashSlidingWindowSpec,
     FullAttentionSpec,
     HiddenStateCacheSpec,
     HiSparseHotSpec,
@@ -2132,6 +2133,82 @@ def test_warns_only_when_untagged_draft_meets_mamba(make_specs, warns, caplog_vl
     _spec_decode_kv_cache_groups([make_specs()])
     warned = "could be identified as the draft model's" in caplog_vllm.text
     assert warned == warns
+
+
+@pytest.mark.parametrize(
+    ("method", "num_lookahead_tokens"),
+    [("dflash", 4), ("dspark", 3), ("eagle", None)],
+)
+def test_dflash_drafter_sliding_window_layers_back_only_their_tail(
+    method, num_lookahead_tokens
+):
+    """Only a DFlash-family drafter's own sliding-window layers get the
+    tail-only spec."""
+    from vllm.config import set_current_vllm_config
+    from vllm.model_executor.layers.attention import Attention
+    from vllm.v1.attention.backends.cpu_attn import CPUAttentionBackend
+
+    config = VllmConfig(model_config=ModelConfig(max_model_len=1024))
+    config.cache_config.kv_cache_layout = "BLHNC"
+    config.speculative_config = fake_speculative_config(
+        method=method,
+        num_speculative_tokens=3,
+        draft_model_config=SimpleNamespace(
+            hf_config=SimpleNamespace(), architectures=[]
+        ),
+        use_eagle=lambda: True,
+        use_eagle_block_drop=lambda: method == "eagle",
+        use_dflash=lambda: method == "dflash",
+        use_dspark=lambda: method == "dspark",
+        use_multi_module_mtp=lambda: False,
+        parallel_drafting=False,
+        prefill_context_kv_only=False,
+    )
+    with set_current_vllm_config(config):
+        target = Attention(
+            num_heads=1,
+            head_size=64,
+            scale=0.125,
+            cache_config=config.cache_config,
+            per_layer_sliding_window=64,
+            prefix="layers.1",
+            attn_backend=CPUAttentionBackend,
+        )
+        draft = Attention(
+            num_heads=1,
+            head_size=64,
+            scale=0.125,
+            cache_config=config.cache_config,
+            per_layer_sliding_window=64,
+            prefix="draft.0",
+            attn_backend=CPUAttentionBackend,
+        )
+        draft.is_draft_layer = True
+        target_spec = target.get_kv_cache_spec(config)
+        draft_spec = draft.get_kv_cache_spec(config)
+    assert isinstance(target_spec, SlidingWindowSpec)
+    assert isinstance(draft_spec, SlidingWindowSpec)
+    specs = {
+        "layers.0": new_kv_cache_spec(),
+        "layers.1": target_spec,
+        "draft.0": _as_draft(draft_spec),
+    }
+    configs = get_kv_cache_configs(config, [specs], [2**30])
+    spec_by_layer = {
+        name: group.kv_cache_spec
+        for group in generate_scheduler_kv_cache_config(configs).kv_cache_groups
+        for name in group.layer_names
+    }
+
+    assert type(spec_by_layer["layers.1"]) is SlidingWindowSpec
+    draft_spec = spec_by_layer["draft.0"]
+    if num_lookahead_tokens is None:
+        assert type(draft_spec) is SlidingWindowSpec
+        return
+    assert isinstance(draft_spec, DFlashSlidingWindowSpec)
+    assert draft_spec.num_speculative_tokens == 3
+    assert draft_spec.max_in_flight_steps == config.max_concurrent_batches
+    assert draft_spec.num_lookahead_tokens == num_lookahead_tokens
 
 
 _GQA_SPEC = FullAttentionSpec(
