@@ -57,6 +57,11 @@ from vllm.model_executor.model_loader.buffer_safe_tensors import (
 from vllm.model_executor.model_loader.ep_weight_filter import (
     should_skip_weight,
 )
+from vllm.model_executor.model_loader.threaded_buffer_reader import (
+    ThreadPinnedBuffer,
+    largest_tensor,
+    stream_shard_tensors,
+)
 from vllm.model_executor.utils import copy_weight_
 from vllm.platforms import current_platform
 from vllm.tracing import instrument
@@ -1366,42 +1371,48 @@ def streaming_safetensors_weights_iterator(
     io_threads_per_file: int = DEFAULT_STREAMING_IO_THREADS_PER_FILE,
     block_size: int = DEFAULT_SAFETENSORS_PREFETCH_BLOCK_SIZE,
 ) -> Generator[tuple[str, torch.Tensor], None, None]:
-    """Read shards in parallel blocks and consume them in completion order.
+    """Read shards with one pinned buffer per IO thread.
 
-    Up to ``prefetch_file_window`` shards are prefetched concurrently in input
-    order. Each active shard owns one executor with ``io_threads_per_file``
-    threads. Retained model tensors and the OS page cache can outlive this window.
+    Each active shard is read by ``io_threads_per_file`` IO threads,
+    each of which owns one pinned buffer and reads a disjoint set of
+    tensors into it. The buffers are created once and reused for every
+    shard, so the pages are pinned once for the whole load rather than
+    once per shard.
+
+    Expert weights that do not belong to this rank are skipped before
+    they are read, so the storage only moves the bytes this rank needs.
     """
-    files = _prefetched_checkpoint_files(
-        hf_weights_files,
-        prefetch_file_window=prefetch_file_window,
-        io_threads_per_file=io_threads_per_file,
-        block_size=block_size,
-        map_after_prefetch=True,
-    )
-    try:
-        with tqdm(
-            total=len(hf_weights_files),
-            desc="Streaming safetensors checkpoint shards",
-            disable=not enable_tqdm(use_tqdm_on_load),
-            bar_format=_BAR_FORMAT,
-        ) as progress:
-            for result in files:
-                try:
-                    mapped = result.mapped
-                    assert mapped is not None
-                    for name in mapped.keys():  # noqa: SIM118
-                        if not should_skip_weight(name, local_expert_ids):
-                            # A view over the shard's mapping: no copy is
-                            # made here. The view keeps the mapping alive,
-                            # so it stays valid until the consumer is done
-                            # with it, even if the shard is closed below.
-                            yield name, mapped.get_tensor(name)
-                finally:
-                    del result
-                progress.update(1)
-    finally:
-        files.close()
+    if io_threads_per_file < 1:
+        raise ValueError("IO threads per file must be >= 1")
+
+    def keep(name: str) -> bool:
+        return not should_skip_weight(name, local_expert_ids)
+
+    # The pinned buffers are created once and reused for every shard, so
+    # the pages are pinned once for the whole load. Pinning is slow
+    # (22 ms for 32 MiB on an A100), so pinning per shard would cost
+    # seconds for a checkpoint of any size. The buffer has to be big
+    # enough for the biggest tensor any shard holds.
+    biggest = max((largest_tensor(path, keep) for path in hf_weights_files), default=0)
+    buffers = [
+        ThreadPinnedBuffer(max(block_size, biggest)) for _ in range(io_threads_per_file)
+    ]
+
+    with tqdm(
+        total=len(hf_weights_files),
+        desc="Streaming safetensors checkpoint shards",
+        disable=not enable_tqdm(use_tqdm_on_load),
+        bar_format=_BAR_FORMAT,
+    ) as progress:
+        for path in hf_weights_files:
+            yield from stream_shard_tensors(
+                path,
+                io_threads=io_threads_per_file,
+                keep=keep,
+                buffer_capacity=block_size,
+                buffers=buffers,
+            )
+            progress.update(1)
 
 
 def safetensors_weights_iterator(
