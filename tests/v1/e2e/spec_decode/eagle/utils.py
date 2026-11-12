@@ -11,8 +11,7 @@ from vllm.platforms import current_platform
 
 from ..utils import (
     _skip_if_insufficient_gpus_for_tp,
-    assert_request_outputs_match,
-    evaluate_llm_for_gsm8k,
+    check_spec_decode_matches_reference,
     get_test_prompts,
 )
 
@@ -74,62 +73,43 @@ def _run_eagle_correctness(
         max_model_len = 2048
         max_num_batched_tokens = 128 if enable_chunked_prefill else max_model_len
 
-        with vllm_runner(
-            model_name,
-            block_size=None,
-            trust_remote_code=False,
-            max_model_len=max_model_len,
-            tensor_parallel_size=tp_size,
-            attention_config=attention_config,
-            enable_chunked_prefill=None,
-            compilation_config=CompilationConfig(),
-            **extra_kwargs,
-        ) as ref_runner:
-            evaluate_llm_for_gsm8k(
-                ref_runner.llm,
-                expected_accuracy_threshold=expected_accuracy_threshold,
-            )
-            ref_outputs = ref_runner.llm.chat(test_prompts, sampling_config)
-
-        with vllm_runner(
-            model_name,
-            block_size=None,
-            trust_remote_code=True,
-            tensor_parallel_size=tp_size,
-            speculative_config={
-                "method": method,
-                "model": spec_model_name,
-                "num_speculative_tokens": 3,
-                "max_model_len": max_model_len,
-            },
-            max_model_len=max_model_len,
-            max_num_batched_tokens=max_num_batched_tokens,
-            enable_chunked_prefill=enable_chunked_prefill,
-            model_impl=model_impl,
-            attention_config=attention_config,
-            compilation_config=CompilationConfig(),
-            **extra_kwargs,
-        ) as spec_runner:
-            # EAGLE/EAGLE3 supports async scheduling by default.
-            has_async = (
-                spec_runner.llm.llm_engine.vllm_config.scheduler_config.async_scheduling
-            )
-            assert has_async, (
-                f"Expected async scheduling for {method}: target={model_name}, "
-                f"draft={spec_model_name}, backend={attn_backend}; got {has_async}"
-            )
-            evaluate_llm_for_gsm8k(
-                spec_runner.llm,
-                expected_accuracy_threshold=expected_accuracy_threshold,
-            )
-            spec_outputs = spec_runner.llm.chat(test_prompts, sampling_config)
-
-        assert_request_outputs_match(
-            ref_outputs,
-            spec_outputs,
-            required_matches=int(0.6 * len(ref_outputs)) + 1,
-            context=(
-                f"{method} target={model_name}, draft={spec_model_name}, "
-                f"backend={attn_backend}"
+        check_spec_decode_matches_reference(
+            vllm_runner,
+            sampling_config,
+            test_prompts,
+            target_model=model_name,
+            target_engine_kwargs=dict(
+                block_size=None,
+                trust_remote_code=False,
+                max_model_len=max_model_len,
+                tensor_parallel_size=tp_size,
+                attention_config=attention_config,
+                enable_chunked_prefill=None,
+                compilation_config=CompilationConfig(),
+                **extra_kwargs,
             ),
+            spec_model=model_name,
+            spec_engine_kwargs=dict(
+                block_size=None,
+                trust_remote_code=True,
+                tensor_parallel_size=tp_size,
+                speculative_config={
+                    "method": method,
+                    "model": spec_model_name,
+                    "num_speculative_tokens": 3,
+                    "max_model_len": max_model_len,
+                },
+                max_model_len=max_model_len,
+                max_num_batched_tokens=max_num_batched_tokens,
+                enable_chunked_prefill=enable_chunked_prefill,
+                model_impl=model_impl,
+                attention_config=attention_config,
+                compilation_config=CompilationConfig(),
+                **extra_kwargs,
+            ),
+            # Heuristic: expect at least 60% of the prompts to match exactly
+            # Upon failure, inspect the outputs to check for inaccuracy.
+            prompts_required_matches=int(0.6 * len(test_prompts)) + 1,
+            gsm8k_spec_accuracy_threshold=expected_accuracy_threshold,
+            gsm8k_target_accuracy_threshold=expected_accuracy_threshold,
         )
