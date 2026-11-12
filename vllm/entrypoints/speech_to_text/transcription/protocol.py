@@ -4,7 +4,7 @@
 import json
 import time
 from http import HTTPStatus
-from typing import TYPE_CHECKING, Literal, TypeAlias
+from typing import TYPE_CHECKING, ClassVar, Literal, TypeAlias
 
 from fastapi import HTTPException, UploadFile
 from pydantic import (
@@ -184,7 +184,7 @@ class TranscriptionRequest(OpenAIBaseModel):
     # --8<-- [end:transcription-sampling-params]
 
     # Default sampling parameters for transcription requests.
-    _DEFAULT_SAMPLING_PARAMS: dict = {
+    _DEFAULT_SAMPLING_PARAMS: ClassVar[dict] = {
         "repetition_penalty": 1.0,
         "temperature": 1.0,
         "top_p": 1.0,

@@ -499,10 +499,9 @@ def test_decode_only_batch_reports_no_ranges():
 @pytest.mark.parametrize(
     "head_size",
     [
-        # 128: FA4's default SM100 path (not the dedicated hd256 kernel), so
-        # paged KV + seqused_k works on B200 and H100. Non-paged mm_prefix
-        # cases in this file already use HEAD_SIZE=128.
         pytest.param(128, id="hd128"),
+        # 256: Gemma4 sliding-window head dim.
+        pytest.param(256, id="sliding_256"),
         # 512: Gemma4 global head dim; FA4 resolves on H100, skips on
         # Blackwell (TMEM).
         pytest.param(512, id="global_512"),
@@ -511,10 +510,7 @@ def test_decode_only_batch_reports_no_ranges():
 def test_mm_prefix_kv_cache_path(head_size: int):
     """FA4 + mask_mod + block_table matches a dense reference.
 
-    Use head_size=128 on B200/H100 (FA4 + paged/`seqused_k` supported) and
-    512 on H100 only (Blackwell FA4 rejects 512 via TMEM). Avoid 256: SM100's
-    dedicated hd256 2CTA kernel asserts away `seqused_k`, which paged KV
-    requires.
+    Blackwell FA4 rejects 512 via TMEM, so that case runs on H100 only.
 
     Tensors, kv_cache_spec, and FlashAttentionImpl must all use the same
     `head_size` — `run_attention_backend` / `create_standard_kv_cache_spec`
