@@ -14,10 +14,11 @@ from vllm.forward_context import get_forward_context
 from vllm.logger import init_logger
 from vllm.model_executor.custom_op import CustomOp
 from vllm.model_executor.kernels.attention.dsa.fused_mqa_topk import (
+    FUSED_MQA_TOPK_WARMUP,
     fused_mqa_topk_chunk,
     fused_mqa_topk_key_scales,
     fused_mqa_topk_prefill,
-    get_fused_mqa_topk_workspaces,
+    reserve_fused_mqa_topk_workspaces,
     use_fused_mqa_topk,
 )
 from vllm.model_executor.layers.indexer_topk import get_indexer_topk
@@ -177,9 +178,12 @@ def sparse_attn_indexer_kpool(
             ((RADIX_TOPK_WORKSPACE_SIZE,), torch.uint8),
         )
         # Allocate the largest fused_mqa_topk workspaces so they are accounted
-        # for (freed again, they overlap the dense logits below).
+        # for (native: freed again, they overlap the dense logits below;
+        # flashtopk: held by its Selector).
         if fused_mqa_topk:
-            get_fused_mqa_topk_workspaces(q_quant.device, q_quant.shape[0])
+            reserve_fused_mqa_topk_workspaces(
+                q_quant.device, q_quant.shape[0], topk_tokens // max(index_kpool, 1)
+            )
 
         # Reserve profiler-visible memory for the worst-case decode logits,
         # whose shape is [B * next_n, max_pool_len]. This profiling branch
@@ -860,6 +864,9 @@ class SparseAttnIndexerKpool(CustomOp):
             if _cfg is not None
             else torch.float32
         )
+        if _cfg is not None and _cfg.kernel_config.enable_jit_warmup:
+            # Compiles the fused_mqa_topk backend the profiling run reserves.
+            FUSED_MQA_TOPK_WARMUP.register_warmup()
         _parallel = _cfg.parallel_config if _cfg is not None else None
         self._parallel_config = _parallel
         self.dcp_world_size = 1

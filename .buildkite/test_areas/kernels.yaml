@@ -864,6 +864,8 @@ steps:
   - tests/kernels/test_bf16x3_router_gemm_cutedsl.py
   - tests/kernels/test_top_k_per_row.py
   - csrc/fused_mqa_topk/
+  - vllm/model_executor/kernels/attention/dsa/fused_mqa_topk.py
+  - vllm/third_party/flashtopk/
   - tests/kernels/attention/test_fused_mqa_topk.py
   - tests/kernels/quantization/test_silu_mul_nvfp4_quant.py
   - tests/kernels/quantization/test_block_fp8.py
@@ -879,6 +881,7 @@ steps:
     - pytest -v -s tests/kernels/attention/test_flashinfer_mla_decode.py
     - pytest -v -s tests/kernels/test_top_k_per_row.py
     - pytest -v -s tests/kernels/attention/test_fused_mqa_topk.py
+    - VLLM_FUSED_MQA_TOPK_BACKEND=flashtopk pytest -v -s tests/kernels/attention/test_fused_mqa_topk.py
     - pytest -v -s tests/kernels/quantization/test_silu_mul_nvfp4_quant.py
     - pytest -v -s tests/kernels/quantization/test_flashinfer_scaled_mm.py
     - pytest -v -s tests/kernels/moe/test_nvfp4_moe.py

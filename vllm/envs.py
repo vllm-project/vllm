@@ -60,6 +60,7 @@ if TYPE_CHECKING:
     VLLM_XLA_CACHE_PATH: str = os.path.join(VLLM_CACHE_ROOT, "xla_cache")
     VLLM_XLA_CHECK_RECOMPILATION: bool = False
     VLLM_USE_FUSED_MQA_TOPK: bool = True
+    VLLM_FUSED_MQA_TOPK_BACKEND: Literal["native", "flashtopk"] = "native"
     VLLM_SPARSE_INDEXER_MAX_LOGITS_MB: int = 512
     VLLM_SPARSE_INDEXER_MAX_DECODE_LOGITS_MB: int = 2048
     VLLM_ADAPTIVE_VERIFICATION_PROFILE_CONTEXT_LEN: int = 8192
@@ -1139,11 +1140,20 @@ environment_variables: dict[str, Callable[[], Any]] = {
     # Enable SPMD mode for TPU backend.
     "VLLM_XLA_USE_SPMD": lambda: bool(int(os.getenv("VLLM_XLA_USE_SPMD", "0"))),
     # Use the single-launch fused FP8 MQA-logits + top-k kernel for the sparse
-    # MLA indexer prefill chunks it supports on SM100-family GPUs (see
-    # use_fused_mqa_topk / fused_mqa_topk_chunk); other chunks take the dense
-    # path. Default: on (set to 0 for the dense path).
+    # MLA indexer prefill chunks it supports (see use_fused_mqa_topk /
+    # fused_mqa_topk_chunk); other chunks take the dense path. The kernel is
+    # chosen by VLLM_FUSED_MQA_TOPK_BACKEND. Default: on (set to 0 for the
+    # dense path).
     "VLLM_USE_FUSED_MQA_TOPK": lambda: bool(
         int(os.getenv("VLLM_USE_FUSED_MQA_TOPK", "1"))
+    ),
+    # Kernel of the fused MQA-logits + top-k prefill path (VLLM_USE_FUSED_MQA_TOPK):
+    # "native": vLLM's fused_mqa_topk op, SM100-family GPUs only.
+    # "flashtopk": FlashTopK (vendored in vllm/third_party/flashtopk), SM90 and
+    # SM100-family GPUs; the fused path on Hopper. Its workspace (~1 GiB per
+    # GPU) is held for the process. Default: "native".
+    "VLLM_FUSED_MQA_TOPK_BACKEND": env_with_choices(
+        "VLLM_FUSED_MQA_TOPK_BACKEND", "native", ["native", "flashtopk"]
     ),
     # Maximum size (in MB) for logits tensor in sparse MLA indexer prefill chunks.
     # Bounds the [M, N] float32 logits tensor to prevent CUDA OOM.

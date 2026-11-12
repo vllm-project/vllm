@@ -31,10 +31,11 @@ from vllm.model_executor.kernels.attention.dsa.candidate_blocks import (
     select_candidate_blocks as _select_candidate_blocks,
 )
 from vllm.model_executor.kernels.attention.dsa.fused_mqa_topk import (
+    FUSED_MQA_TOPK_WARMUP,
     fused_mqa_topk_chunk,
     fused_mqa_topk_key_scales,
     fused_mqa_topk_prefill,
-    get_fused_mqa_topk_workspaces,
+    reserve_fused_mqa_topk_workspaces,
     use_fused_mqa_topk,
 )
 from vllm.model_executor.layers.indexer_topk import (
@@ -597,8 +598,11 @@ def sparse_attn_indexer(
         current_workspace_manager().get_simultaneous(*profile_specs)
         if fused_mqa_topk:
             # Allocate the largest fused_mqa_topk workspaces so they are
-            # accounted for (freed again, they overlap the dense logits below).
-            get_fused_mqa_topk_workspaces(q_quant.device, q_quant.shape[0])
+            # accounted for (native: freed again, they overlap the dense logits
+            # below; flashtopk: held by its Selector).
+            reserve_fused_mqa_topk_workspaces(
+                q_quant.device, q_quant.shape[0], topk_tokens
+            )
 
         # Decode rows per step: each decode is padded to 1 + speculative tokens.
         # The profiling run sets the vLLM config; other dummy runs may not.
@@ -1315,6 +1319,8 @@ class SparseAttnIndexer(CustomOp):
                 pad_value=0 if use_fp4_cache else -float("inf"),
             )
             _UNPACK_SEQ_TRITON_KERNEL.register_warmup()
+            # Compiles the fused_mqa_topk backend the profiling run reserves.
+            FUSED_MQA_TOPK_WARMUP.register_warmup()
 
             if self.dcp_world_size > 1 and current_platform.is_cuda() and has_cutedsl():
                 from vllm.model_executor.kernels.attention.dsa.dcp_indexer_cutedsl import (  # noqa: E501

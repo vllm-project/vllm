@@ -1,6 +1,10 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
-"""Single-launch fused MQA-logits + top-k prefill vs the dense indexer path."""
+"""Single-launch fused MQA-logits + top-k prefill vs the dense indexer path.
+
+Runs on the backend VLLM_FUSED_MQA_TOPK_BACKEND selects (native or flashtopk);
+tests of the native op's internals run on the native backend only.
+"""
 
 from types import SimpleNamespace
 
@@ -10,10 +14,14 @@ import torch
 import vllm.envs as envs
 from vllm import _custom_ops as ops
 from vllm.model_executor.kernels.attention.dsa.fused_mqa_topk import (
+    FUSED_MQA_TOPK_WARMUP,
+    FusedMqaTopkWarmup,
     fused_mqa_topk_available,
+    fused_mqa_topk_backend,
     fused_mqa_topk_min_keys,
     fused_mqa_topk_prefill,
     get_fused_mqa_topk_workspaces,
+    reserve_fused_mqa_topk_workspaces,
 )
 from vllm.model_executor.layers.sparse_attn_indexer import as_fp32_logits
 from vllm.utils.deep_gemm import (
@@ -29,7 +37,16 @@ from vllm.v1.attention.backends.mla.indexer import (
 
 requires_fused_mqa_topk = pytest.mark.skipif(
     not torch.cuda.is_available() or not fused_mqa_topk_available(),
-    reason="Requires the SM100 fused MQA+top-k extension",
+    reason="Requires the fused MQA+top-k backend (native: SM100 extension; "
+    "flashtopk: FlashTopK on SM90/SM100)",
+)
+requires_native = pytest.mark.skipif(
+    fused_mqa_topk_backend() != "native",
+    reason="Tests the native fused_mqa_topk op's internals",
+)
+requires_flashtopk = pytest.mark.skipif(
+    fused_mqa_topk_backend() != "flashtopk",
+    reason="Tests the flashtopk backend's adapter",
 )
 
 TOPKS = (512, 1024, 2048)
@@ -275,6 +292,7 @@ def test_rescan_scores_only_its_block():
 
 
 @requires_fused_mqa_topk
+@requires_native
 def test_gate_with_common_score_offset():
     """Regression test: scores sharing a large common offset with a narrow top
     tail (top ranks within ~1 of each other at ~+68) must still get a tight gate.
@@ -328,6 +346,7 @@ def test_cuda_graph_replay():
 
 
 @requires_fused_mqa_topk
+@requires_native
 def test_op_rejects_bad_inputs():
     """The launcher does not re-check; the op enforces its contract."""
     q, k, scales, weights = _inputs(16, 4096)
@@ -339,6 +358,39 @@ def test_op_rejects_bad_inputs():
     wide = torch.empty(16, 2 * TOPK, device="cuda", dtype=torch.int32)
     with pytest.raises(RuntimeError, match="must be contiguous"):
         fused_mqa_topk_prefill(q, k, scales, weights, starts, ends, wide[:, :TOPK])
+
+
+@requires_fused_mqa_topk
+@requires_flashtopk
+def test_strided_output():
+    """A top-k slice of a wider index buffer (the non-kpool indexer writes into
+    topk_indices_buffer[rows, :topk]); the native op rejects it instead."""
+    rows, keys = 64, 65536
+    q, k, scales, weights = _inputs(rows, keys)
+    starts = torch.full((rows,), 1000, device="cuda", dtype=torch.int32)
+    ends = torch.arange(keys - rows + 1, keys + 1, device="cuda", dtype=torch.int32)
+    wide = torch.full((rows, 2 * TOPK), -7, device="cuda", dtype=torch.int32)
+    fused_mqa_topk_prefill(q, k, scales, weights, starts, ends, wide[:, :TOPK])
+    _check(wide[:, :TOPK].contiguous(), q, k, scales, weights, starts, ends)
+    assert (wide[:, TOPK:] == -7).all()
+
+
+@requires_fused_mqa_topk
+def test_jit_warmup_compiles_reserved_backend():
+    """The profiling run's reservation becomes a JIT warmup key; warming it
+    leaves the backend correct on a pruning-eligible (>= 128K keys) call."""
+    device = torch.device("cuda", torch.accelerator.current_device_index())
+    reserve_fused_mqa_topk_workspaces(device, 256, 512)
+    key = FusedMqaTopkWarmup.CompileKey(fused_mqa_topk_backend(), device.index, 512)
+    assert key in FUSED_MQA_TOPK_WARMUP.get_warmup_keys()
+    FUSED_MQA_TOPK_WARMUP.warmup()
+    rows, keys = 64, 1 << 17
+    q, k, scales, weights = _inputs(rows, keys)
+    starts = torch.zeros(rows, device="cuda", dtype=torch.int32)
+    ends = torch.arange(keys - rows + 1, keys + 1, device="cuda", dtype=torch.int32)
+    out = torch.empty(rows, 512, device="cuda", dtype=torch.int32)
+    fused_mqa_topk_prefill(q, k, scales, weights, starts, ends, out)
+    _check(out, q, k, scales, weights, starts, ends)
 
 
 KPOOL = 4
