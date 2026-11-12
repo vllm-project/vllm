@@ -59,6 +59,7 @@ from vllm.v1.kv_cache_interface import (
     SlidingWindowMLASpec,
     SlidingWindowSpec,
     SparseCacheRole,
+    TQFullAttentionSpec,
     UniformTypeKVCacheSpecs,
 )
 from vllm.v1.kv_cache_layout import KVCacheLayout
@@ -2412,3 +2413,55 @@ def test_shrink_kv_cache_configs_leaves_host_resident_tensors():
     assert config.num_blocks == 10
     assert config.kv_cache_tensors[0] == host_tensor
     assert config.kv_cache_tensors[1].size == 2 * spec.page_size_bytes * 10
+
+
+def test_unify_tq_full_attention_spec_gemma4():
+    """TQFullAttentionSpec page-size unification for Gemma-4-31B at TP1.
+
+    Gemma 4 has two KV cache groups on ROCm with --kv-cache-dtype turboquant_*:
+      - Full-attention layers (TQ):   4 KV heads, head_dim=512, slot_size=454
+        → real_page_size = 16 * 4 * 454 = 29,056 B
+      - Sliding-window layers (fp8): 16 KV heads, head_dim=256, bfloat16 layout
+        → real_page_size = 16 * 16 * 256 * 2 = 131,072 B
+
+    The TQ page (29,056 B) doesn't divide evenly into the fp8 page (131,072 B),
+    so ``unify_kv_cache_spec_page_size`` must pad the TQ spec.  It should pick
+    the largest supported block_size (64) that still fits in 131,072 B and
+    compute the padded slot_size accordingly, keeping page_size_padded = 131,072 B.
+    """
+    # Gemma-4-31B FA layers: 4 KV heads, head_dim=512, TQ slot=454 B
+    tq_fa_spec = TQFullAttentionSpec(
+        block_size=16,
+        num_kv_heads=4,
+        head_size=512,
+        head_size_v=512,
+        dtype=torch.bfloat16,
+        tq_slot_size=454,
+    )
+    # Gemma-4-31B SW layers: 16 KV heads, head_dim=256, fp8 (1 B/elem)
+    sw_fp8_spec = SlidingWindowSpec(
+        block_size=16,
+        num_kv_heads=16,
+        head_size=256,
+        head_size_v=256,
+        dtype=torch.float8_e4m3fnuz,
+        sliding_window=4096,
+    )
+
+    assert tq_fa_spec.real_page_size_bytes == 16 * 4 * 454  # 29,056 B
+    assert sw_fp8_spec.page_size_bytes == 16 * 16 * 256 * 2  # 131,072 B
+
+    unified = kv_cache_planning.unify_kv_cache_spec_page_size(
+        {"tq_fa": tq_fa_spec, "sw_fp8": sw_fp8_spec}
+    )
+
+    unified_tq = unified["tq_fa"]
+    assert isinstance(unified_tq, TQFullAttentionSpec)
+    # Largest block_size where block_size * 4 heads * 454 B/slot <= 131,072 B
+    # 64 * 4 * 454 = 116,224 <= 131,072; 128 * 4 * 454 = 232,448 > 131,072
+    assert unified_tq.block_size == 64
+    assert unified_tq.page_size_padded == 131_072
+    assert unified_tq.page_size_bytes == 131_072
+
+    # SW spec already has the largest page; it must be unchanged.
+    assert unified["sw_fp8"] == sw_fp8_spec
