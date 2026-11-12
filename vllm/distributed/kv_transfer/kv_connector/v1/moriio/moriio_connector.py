@@ -1160,9 +1160,10 @@ class MoRIIOConnectorScheduler:
                                     )
                                     # A later full local hit resumes from
                                     # the block cached for N-1 tokens.
-                                    if aligned_remote and cached_state not in (
-                                        None,
-                                        *aligned_local,
+                                    if (
+                                        aligned_remote
+                                        and cached_state is not None
+                                        and cached_state not in aligned_local
                                     ):
                                         aligned_local = [cached_state, *aligned_local]
                                         aligned_remote = [
