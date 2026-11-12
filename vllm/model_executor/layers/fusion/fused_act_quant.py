@@ -14,6 +14,7 @@ pass cannot fuse the same boundary again.
 """
 
 from collections.abc import Callable
+from types import FunctionType, MethodType
 
 import torch
 
@@ -24,6 +25,10 @@ from vllm.model_executor.layers.fusion.quant_activation import (
 )
 from vllm.model_executor.layers.fusion.relu2_fp8_quant import (
     relu_squared_static_fp8_quant,
+)
+from vllm.model_executor.layers.fusion.relu2_nvfp4_quant import (
+    _relu_squared_nvfp4_max_rows,
+    relu_squared_nvfp4_quant,
 )
 from vllm.model_executor.layers.linear import LinearBase
 from vllm.model_executor.layers.quantization.utils.quant_utils import (
@@ -170,6 +175,46 @@ def _relu_squared_static_fp8_quant_supported(
     )
 
 
+def _uses_native_relu_squared(act_fn: torch.nn.Module) -> bool:
+    if not isinstance(act_fn, ReLUSquaredActivation):
+        return False
+    forward = act_fn._forward_method
+    if type(forward) is FunctionType:
+        try:
+            # Dynamo handles this direct attribute access when unwrapping a
+            # compiled bound method; getattr(..., default) loses that handling.
+            forward = forward._torchdynamo_inline  # type: ignore[attr-defined]
+        except AttributeError:
+            return False
+    return (
+        type(forward) is MethodType
+        and forward.__func__ is ReLUSquaredActivation.forward_native
+    )
+
+
+def _relu_squared_nvfp4_quant_supported(
+    act_fn: torch.nn.Module,
+    x: torch.Tensor,
+    linear: LinearBase,
+) -> bool:
+    scale = getattr(linear, "input_global_scale_inv", None)
+    return (
+        # CUDA ReLU2 suppresses NaNs; this producer matches native semantics.
+        _uses_native_relu_squared(act_fn)
+        and x.is_cuda
+        and x.dtype == torch.bfloat16
+        and x.ndim == 2
+        and x.shape[-1] > 0
+        and x.shape[-1] % 16 == 0
+        and x.shape[0] <= _relu_squared_nvfp4_max_rows(x.shape[-1])
+        and x.is_contiguous()
+        and isinstance(scale, torch.Tensor)
+        and scale.dtype == torch.float32
+        and scale.device == x.device
+        and scale.numel() == 1
+    )
+
+
 # Optional per-entry predicates preserve the unconditional fallback contract
 # for producers whose supported inputs are narrower than their registry key.
 _FUSED_ACT_QUANT_SUPPORT: dict[
@@ -191,6 +236,11 @@ if current_platform.is_cuda_alike():
 # Add NVFP4 if supported (requires SM100+)
 if current_platform.is_cuda() and hasattr(torch.ops._C, "silu_and_mul_nvfp4_quant"):
     _FUSED_ACT_QUANT[(SiluAndMul, kNvfp4Dynamic)] = _silu_and_mul_nvfp4_dynamic
+
+if current_platform.is_cuda() and current_platform.is_device_capability_family(100):
+    _RELU2_NVFP4_KEY = (ReLUSquaredActivation, kNvfp4Dynamic)
+    _FUSED_ACT_QUANT[_RELU2_NVFP4_KEY] = relu_squared_nvfp4_quant
+    _FUSED_ACT_QUANT_SUPPORT[_RELU2_NVFP4_KEY] = _relu_squared_nvfp4_quant_supported
 
 
 def maybe_fused_act_quant(
