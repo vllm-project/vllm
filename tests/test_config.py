@@ -2255,6 +2255,24 @@ def test_speculative_config_compile_factors():
     assert factors["uses_aux_hidden_states"] is False
 
 
+@pytest.mark.parametrize(
+    "overrides",
+    [
+        {"max_async_kv_loads_per_step": 4},
+        {"cache_aware_admission_window": 8},
+        {"cache_aware_admission_threshold": 0.9},
+    ],
+)
+def test_scheduler_only_knobs_do_not_change_compile_factors(overrides):
+    """Admission and KV-load knobs never reach the compiled graph, so changing
+    them must keep the compile cache key."""
+    base = SchedulerConfig.default_factory(max_model_len=2048)
+    changed = SchedulerConfig.default_factory(max_model_len=2048, **overrides)
+    assert changed.compile_factors() == base.compile_factors()
+    fewer_seqs = SchedulerConfig.default_factory(max_model_len=2048, max_num_seqs=64)
+    assert fewer_seqs.compile_factors() != base.compile_factors()
+
+
 @dataclass
 class _TestConfigFields:
     a: int
