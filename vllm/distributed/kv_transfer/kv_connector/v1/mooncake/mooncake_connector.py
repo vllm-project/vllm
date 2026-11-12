@@ -1607,8 +1607,9 @@ class MooncakeConnectorWorker:
 
     def shutdown(self):
         """Cleanup background threads on destruction."""
-        if hasattr(self, "engine"):
-            clear_shared_transfer_engine(self.engine)
+        if not hasattr(self, "engine"):
+            return
+        clear_shared_transfer_engine(self.engine)
         self.async_zmq_ctx.term()
         if not self.is_kv_consumer:
             self._sender_executor.shutdown(wait=False)
