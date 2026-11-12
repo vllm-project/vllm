@@ -15,7 +15,7 @@ import queue
 import threading
 from collections import OrderedDict
 from collections.abc import Callable
-from concurrent.futures import Future, ThreadPoolExecutor, wait
+from concurrent.futures import FIRST_COMPLETED, Future, ThreadPoolExecutor, wait
 
 import torch
 
@@ -50,15 +50,21 @@ def _alloc_aligned(num_slots: int, bpb: int) -> torch.Tensor:
 
 
 class DiskBackend:
-    """Async disk offload backend with pipelined GPU DMA and interleaved IO.
+    """Async disk offload with bounded staging and an optional DRAM hot cache.
 
     Architecture:
-    - Separate coordinator threads for store and load (never block each other)
-    - Interleaved pipeline: DMA slot N while preadv/pwritev slot N-1
-    - O_DIRECT by default; page cache is opt-in via use_page_cache
+    - Separate store/load queues, coordinator threads, and staging pools
+    - Overlap GPU DMA on one staging slot with disk I/O on another
+    - O_DIRECT by default; page cache is opt-in via `use_page_cache`
 
-    Same launch_copy interface as DmaCopyBackend so the worker can swap
-    backends without changing calling code.
+    Hybrid retains DRAM copies of eligible SSD-backed blocks. Loads can lease
+    free or unreferenced LRU hot rows as extra staging slots within the existing
+    memory budget. Parallel SSD reads are consumed as they complete, with hot
+    H2D copies filling read gaps. Each slot's DMA finishes before reuse; leased
+    rows and hot-source references are released before reporting job completion.
+
+    Shares the `DmaCopyBackend` task/completion interface; `launch_copy` also
+    accepts `hot_blocks` to select stores eligible for a DRAM copy.
     """
 
     def __init__(self) -> None:
@@ -504,14 +510,14 @@ class DiskBackend:
         hot_index = 0
         previous_hot: torch.Event | None = None
 
-        def hot_batch(read: Future[None] | None = None) -> bool:
+        def hot_batch(cold_ready: Callable[[], bool] | None = None) -> bool:
             nonlocal hot_index, previous_hot
             if hot_index == len(hot):
                 return False
             if previous_hot is not None:
                 previous_hot.synchronize()
             # A cold read may finish while the preceding hot DMA is draining.
-            if read is not None and read.done():
+            if cold_ready is not None and cold_ready():
                 return False
             assert self._hot_load_params is not None
             row, gpu = hot[hot_index]
@@ -523,7 +529,7 @@ class DiskBackend:
 
         def while_read(read: Future[None]) -> bool:
             try:
-                while not read.done() and hot_batch(read):
+                while not read.done() and hot_batch(read.done):
                     pass
             finally:
                 # Even a failed hot copy must drain the read before releasing rows.
@@ -532,7 +538,7 @@ class DiskBackend:
 
         try:
             if leased:
-                self._do_load_parallel(cold, leased, stream, while_read)
+                self._do_load_parallel(cold, leased, stream, hot_batch)
             else:
                 self._do_load(
                     [disk for disk, _ in cold],
@@ -554,7 +560,7 @@ class DiskBackend:
         cold: list[tuple[int, int]],
         leased: list[int],
         stream: torch.cuda.Stream,
-        while_read: Callable[[Future[None]], bool],
+        hot_batch: Callable[[Callable[[], bool]], bool],
     ) -> None:
         assert self._read_executor is not None
         executor = self._read_executor
@@ -571,28 +577,41 @@ class DiskBackend:
             for row in leased
         ]
         slots = slots[: len(cold)]
-        pending = []
+        pending: dict[Future[None], tuple[int, int]] = {}
 
-        def read(i: int):
-            return executor.submit(
+        def read(slot: int, block: int) -> None:
+            disk, gpu = cold[block]
+            future = executor.submit(
                 self._read_into,
-                slots[i % len(slots)][0],
-                cold[i][0] * self._total_block_bytes,
+                slots[slot][0],
+                disk * self._total_block_bytes,
             )
+            pending[future] = (slot, gpu)
+
+        def cold_ready() -> bool:
+            return any(future.done() for future in pending)
 
         try:
             for i in range(len(slots)):
-                pending.append(read(i))
-            for i, (_, gpu) in enumerate(cold):
-                index = i % len(slots)
-                while_read(pending[index])
-                _, params, row = slots[index]
-                copy_blocks([row], [gpu], params)
-                if i + len(slots) < len(cold):
-                    event = torch.Event()
-                    event.record(stream)
-                    event.synchronize()
-                    pending[index] = read(i + len(slots))
+                read(i, i)
+            next_block = len(slots)
+            while pending:
+                done = {future for future in pending if future.done()}
+                if not done:
+                    if hot_batch(cold_ready):
+                        continue
+                    done, _ = wait(pending, return_when=FIRST_COMPLETED)
+                for future in done:
+                    index, gpu = pending.pop(future)
+                    future.result()
+                    _, params, row = slots[index]
+                    copy_blocks([row], [gpu], params)
+                    if next_block < len(cold):
+                        event = torch.Event()
+                        event.record(stream)
+                        event.synchronize()
+                        read(index, next_block)
+                        next_block += 1
         finally:
             for future in pending:
                 future.cancel()
