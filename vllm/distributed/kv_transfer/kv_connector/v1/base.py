@@ -48,6 +48,7 @@ from typing import TYPE_CHECKING, Any, Literal
 
 import torch
 
+from vllm.config.kv_transfer import KVCacheAccess
 from vllm.logger import init_logger
 from vllm.v1.attention.backend import AttentionMetadata
 from vllm.v1.core.sched.output import SchedulerOutput
@@ -198,8 +199,22 @@ class KVConnectorBase_V1(ABC):
     def supports_lookahead_block_hashes(
         cls, kv_transfer_config: "KVTransferConfig"
     ) -> bool:
-        """Whether the connector supports core lookahead hashing."""
-        return False
+        """Whether the connector supports core lookahead hashing.
+
+        If False, `num_hash_lookahead_tokens` is 0 and block hashes cover only
+        each block's own tokens.
+        """
+        return True
+
+    @classmethod
+    def kv_cache_access(cls, kv_transfer_config: "KVTransferConfig") -> KVCacheAccess:
+        """How the connector's workers reach the device KV cache, as
+        `KVCacheAccess` flags, which decide how the extensible KV cache
+        allocates it, or whether it can be used: e.g. `REGISTERS` if they
+        register it with a UCX or RDMA engine, which requires each segment to
+        be backed by a single physical allocation. Defaults to `IN_PROCESS`.
+        """
+        return KVCacheAccess.IN_PROCESS
 
     @property
     def requires_kv_delivery(self) -> bool:
@@ -217,6 +232,16 @@ class KVConnectorBase_V1(ABC):
     def supports_sleep_mode(cls, kv_transfer_config: "KVTransferConfig") -> bool:
         """Whether the connector can follow the KV cache remap of sleep mode."""
         return True
+
+    @classmethod
+    def only_restores_canonical_kv(cls, kv_transfer_config: "KVTransferConfig") -> bool:
+        """Whether every KV block it loads is a whole block that vLLM's own
+        cache writer produced for an identical KV cache layout.
+
+        Attention backends may then keep fast paths that assume no foreign
+        bytes (e.g. NaNs in unwritten slots) ever reach the KV cache.
+        """
+        return False
 
     def __init__(
         self,
