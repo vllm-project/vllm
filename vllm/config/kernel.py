@@ -346,7 +346,7 @@ class KernelConfig:
     - "aiter": Use AMD AITer kernels (ROCm only)
     - "aiter_mega_moe": Use the AITER MegaMoE fused dispatch/GEMM/combine
       kernel (ROCm gfx950, requires DP+EP with a MoRI all2all backend;
-      DeepSeek-V4 only)
+      DeepSeek-V4 and V4.1 only)
     - "aiter_triton_mxfp4_bf16": Use the AITER Triton MXFP4 W4A16
       (moe_gemm_a16w4) MoE kernel (ROCm gfx942/gfx950/gfx1250)
     - "aiter_triton_mxfp4_mxfp4": Use the AITER Triton/Gluon MXFP4 W4A4
@@ -361,12 +361,11 @@ class KernelConfig:
     sparse_indexer_topk_backend: SparseIndexerTopkBackend = "auto"
     """Backend for the DSA sparse indexer decode top-k kernel. Available options:
 
-    - "auto": The pre-existing chain (cooperative -> persistent -> per_row);
-      the other backends are opt-in. On SM100 the prefill top-k (without
-      DCP) runs DeepSelect on the BF16 logits, as under "deep_select"
+    - "auto": The pre-existing chain (cooperative -> persistent -> per_row)
+      on CUDA and per_row on ROCm; the other backends are opt-in
     - "deep_select": Use DeepSelect kernels (SM100a/SM103a only)
     - "cooperative": Use vLLM's cooperative_topk kernel
-    - "persistent": Use vLLM's persistent_topk kernel
+    - "persistent": Use vLLM's persistent_topk kernel (CUDA and ROCm)
     - "per_row": Use vLLM's top_k_per_row_decode kernel
     - "flashinfer": Use FlashInfer's top_k_ragged_transform kernel
     - "flashinfer_gvr2": Use FlashInfer's self-sampling GVR V2 top-k

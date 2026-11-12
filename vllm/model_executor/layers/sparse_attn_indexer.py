@@ -598,6 +598,25 @@ def dcp_shardq_context(
     return mla_layer_name, gathered_context
 
 
+def should_skip_indexer_scoring(
+    mla_metadata: object, cudagraph_runtime_mode: CUDAGraphMode
+) -> bool:
+    """Whether the indexer can skip scoring because the main MLA runs a pure
+    prefill on dense MHA, which does not read the top-k indices.
+
+    The indexer and main MLA may classify the same short extend differently
+    because they use independent decode thresholds, so this takes the main MLA
+    metadata. The indexer K cache must still be written.
+    """
+    prefill = getattr(mla_metadata, "prefill", None)
+    return (
+        cudagraph_runtime_mode != CUDAGraphMode.FULL
+        and getattr(prefill, "use_dense_mha", False)
+        and getattr(mla_metadata, "num_decode_tokens", -1) == 0
+        and not torch.cuda.is_current_stream_capturing()
+    )
+
+
 @eager_break_during_capture
 def sparse_attn_indexer(
     hidden_states: torch.Tensor,
@@ -819,23 +838,13 @@ def sparse_attn_indexer(
             quant_block_size,
             "mxfp8" if mqa_logits_use_mx_scales() else scale_fmt,
         )
-    # The indexer and main MLA may classify the same short extend differently
-    # because they use independent decode thresholds. Only the main MLA route
-    # can determine whether the top-k indices will be consumed.
-    if forward_context.cudagraph_runtime_mode != CUDAGraphMode.FULL:
-        dense_mha_layer = _resolve_layer_name(dense_mha_metadata_layer_name)
-        if dense_mha_layer:
-            mla_metadata = attn_metadata.get(dense_mha_layer)
-            prefill_metadata = getattr(mla_metadata, "prefill", None)
-            if (
-                getattr(prefill_metadata, "use_dense_mha", False)
-                and getattr(mla_metadata, "num_decode_tokens", -1) == 0
-                and not torch.cuda.is_current_stream_capturing()
-            ):
-                # Deliberately leave the buffer untouched. Dense MHA does not
-                # consume top-k indices for this batch; clearing it would be
-                # unnecessary work.
-                return topk_indices_buffer
+    dense_mha_layer = _resolve_layer_name(dense_mha_metadata_layer_name)
+    if dense_mha_layer and should_skip_indexer_scoring(
+        attn_metadata.get(dense_mha_layer), forward_context.cudagraph_runtime_mode
+    ):
+        # Deliberately leave the buffer untouched; clearing it would be
+        # unnecessary work.
+        return topk_indices_buffer
 
     # The buffer must be pre-filled with -1 (the "no token" sentinel) before the
     # top-k kernels scatter valid indices into it. On the fused deepseek_v32
@@ -1038,11 +1047,9 @@ def sparse_attn_indexer(
                             logits_dtype=logits_dtype,
                         )
                         # DeepSelect ranks the bf16 logits in place of their exact
-                        # fp32 copy (only ties at the cutoff may resolve
-                        # differently), so "auto" takes it too and skips the
-                        # upcast; fp32 logits keep the per-row top-k.
+                        # fp32 copy; fp32 logits keep the per-row top-k.
                         use_deep_select = (
-                            topk_backend in ("auto", "deep_select")
+                            topk_backend == "deep_select"
                             and logits.dtype == torch.bfloat16
                             and prefill_dcp_world_size == 1
                             and is_deep_select_supported(logits, topk_tokens)
@@ -1615,6 +1622,8 @@ class SparseAttnIndexer(CustomOp):
                 candidate_blocks=self.candidate_blocks,
                 candidate_block_size=self.candidate_block_size,
                 candidate_write=self.candidate_write,
+                use_pcp=self.use_pcp,
+                pcp_shard_decode_requests=self.pcp_shard_decode_requests,
                 cache_layout=self.cache_layout,
                 dcp_rank=self.dcp_rank,
                 dcp_world_size=self.dcp_world_size,

@@ -92,9 +92,12 @@ def _prepare_chunk(chunk, world, rank, interleave):
 def prepare_prefill_metadata(metadata, world, rank, interleave):
     """Build read-only geometry once for the layers sharing this attention group."""
     return FP4PrefillMetadata(
-        metadata.chunks,
-        metadata.max_prefill_seq_len,
-        [_prepare_chunk(chunk, world, rank, interleave) for chunk in metadata.chunks],
+        chunks=metadata.chunks,
+        max_prefill_seq_len=metadata.max_prefill_seq_len,
+        shardq_gather_indices=metadata.shardq_gather_indices,
+        plans=[
+            _prepare_chunk(chunk, world, rank, interleave) for chunk in metadata.chunks
+        ],
     )
 
 

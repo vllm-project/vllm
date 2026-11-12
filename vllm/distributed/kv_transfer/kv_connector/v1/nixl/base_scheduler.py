@@ -251,10 +251,7 @@ class NixlBaseConnectorScheduler:
                     del self._heartbeat_by_engine[engine_id]
 
     def get_exchange_clipped_blocks(
-        self,
-        block_ids: BlockIds,
-        clip_ssm: bool = True,
-        num_tokens: int | None = None,
+        self, block_ids: BlockIds, clip_ssm: bool = True
     ) -> BlockIds:
         """Clip a request's block lists down to the transferable blocks.
 
@@ -269,9 +266,7 @@ class NixlBaseConnectorScheduler:
 
         Use this at every block-id exchange point. Pass `clip_ssm=False`
         for per-step partial lists (host-buffer save), where the SSM strip
-        does not apply. Pass the computed `num_tokens` to drop speculative
-        lookahead blocks first, so a window ends at the last computed token
-        on both sides.
+        does not apply.
         """
         if len(block_ids) == 0:
             # No blocks to clip, e.g. a full prefix cache hit.
@@ -288,11 +283,6 @@ class NixlBaseConnectorScheduler:
         clipped = []
         for i, blocks in enumerate(block_ids):
             if n_sw := self.blocks_per_sw[i]:
-                if num_tokens is not None:
-                    block_size = self.kv_cache_config.transfer_groups[
-                        i
-                    ].kv_cache_spec.block_size
-                    blocks = blocks[: cdiv(num_tokens, block_size)]
                 blocks = blocks[-n_sw:]
             elif (
                 clip_ssm

@@ -50,6 +50,29 @@ else:
 
 logger = init_logger(__name__)
 
+
+# Positional-encoding keys the draft must share with the target (#58080).
+# ``max_position_embeddings`` is deliberately excluded: shared drafts already
+# get it via ``_maybe_override_draft_max_position_embeddings`` (#63909).
+_ROPE_HF_OVERRIDE_KEYS = frozenset(
+    {
+        "rope_scaling",
+        "rope_parameters",
+        "original_max_position_embeddings",
+        "rope_theta",
+        "partial_rotary_factor",
+    }
+)
+# Nested HF configs that commonly wrap those rope fields (VL / hybrid).
+_NESTED_HF_CONFIG_KEYS = frozenset(
+    {
+        "text_config",
+        "language_config",
+        "llm_config",
+        "thinker_config",
+    }
+)
+
 MTPModelTypes = Literal[
     "deepseek_mtp",
     "dots3_note_mtp",
@@ -128,6 +151,26 @@ def _rope_only_sizes_cache(hf_config: PreTrainedConfig) -> bool:
         params.get("rope_type", "default") in _CACHE_ONLY_ROPE_TYPES
         for params in iter_rope_parameters(hf_config)
     )
+
+
+# RoPE types whose cos_sin_cache holds original_max_position_embeddings * factor
+# positions, whatever max_position_embeddings is.
+_YARN_ROPE_TYPES = frozenset({"yarn", "deepseek_yarn", "deepseek_llama_scaling"})
+
+
+def _yarn_cache_positions(hf_config: PreTrainedConfig) -> int | None:
+    positions = []
+    for params in iter_rope_parameters(hf_config):
+        original = params.get("original_max_position_embeddings")
+        factor = params.get("factor")
+        if (
+            params.get("rope_type") not in _YARN_ROPE_TYPES
+            or not original
+            or not factor
+        ):
+            return None
+        positions.append(int(original * factor))
+    return min(positions, default=None)
 
 
 _MINIMAX_M3_MODEL_TYPES = ("minimax_m3_vl", "minimax_m3_text")
@@ -481,6 +524,11 @@ class SpeculativeConfig:
     draft_tensor_parallel_size: int | None = Field(default=None, ge=1)
     """The degree of the tensor parallelism for the draft model. Can only be 1
     or the same as the target model's tensor parallel size."""
+    draft_decode_context_parallel_size: int | None = Field(default=None, ge=1)
+    """The degree of decode context parallelism for the draft model. Can only be
+    1 or the same as the target model's decode context parallel size. Defaults to
+    the target's, except for DFlash/DSpark drafts, which default to 1 unless they
+    are full-attention MLA."""
     tensor_parallel_size: int | None = None
     """Users should pass "draft_tensor_parallel_size". This parameter's purpose is to
     warn users when they mistakenly provide the wrong argument."""
@@ -628,6 +676,15 @@ class SpeculativeConfig:
     enable_adaptive_verification: bool = False
     """Whether to adaptively size the draft-verification budget from per-request
     confidence. Currently only supported for method="dspark"."""
+
+    prefill_context_kv_only: bool = False
+    """Set on a P/D prefill instance (Model Runner V2, DFlash-based speculators)
+    to only store the drafter's context K/V, which the decode instance reads:
+    no drafts, no lookahead KV slots, and, for draft models that support it,
+    the draft weights only drafting reads are freed. Requests that decode there
+    run without speculation. Keep the rest of the speculative config as on the
+    decode instance; adaptive verification and dynamic speculative decoding are
+    turned off."""
 
     @staticmethod
     def _acceptance_length_to_rates(length: float, n: int) -> list[float]:
@@ -1301,6 +1358,45 @@ class SpeculativeConfig:
         return target_hf_overrides(hf_config)
 
     @staticmethod
+    def _select_draft_hf_overrides(
+        overrides: Mapping[str, Any],
+    ) -> dict[str, Any]:
+        """Keep rope-relevant keys, including those nested under VL wrappers."""
+        selected: dict[str, Any] = {}
+        for key, value in overrides.items():
+            if key in _ROPE_HF_OVERRIDE_KEYS:
+                selected[key] = copy.deepcopy(value)
+            elif key in _NESTED_HF_CONFIG_KEYS and isinstance(value, Mapping):
+                nested = SpeculativeConfig._select_draft_hf_overrides(value)
+                if nested:
+                    selected[key] = nested
+        return selected
+
+    @staticmethod
+    def _apply_dict_then_arch_override(
+        target_hf_overrides: dict[str, Any],
+        hf_config: PreTrainedConfig,
+        transformers_mtp_overrides: dict[str, Any] | None = None,
+    ) -> PreTrainedConfig:
+        """Apply dict rope overrides, then the draft arch rewrite.
+
+        Dict patches run first so nested keys (`text_config.rope_parameters`)
+        apply before arch mapping may promote `text_config`. Nested wrappers
+        are skipped on flat draft configs, where setting them would create a
+        bare `text_config` dict that `get_text_config()` picks up instead.
+        """
+        overrides = {
+            key: value
+            for key, value in target_hf_overrides.items()
+            if key not in _NESTED_HF_CONFIG_KEYS
+            or getattr(hf_config, key, None) is not None
+        }
+        ModelConfig._apply_dict_overrides(hf_config, overrides)
+        return SpeculativeConfig.hf_config_override(
+            hf_config, transformers_mtp_overrides
+        )
+
+    @staticmethod
     def compose_draft_hf_overrides(
         target_hf_overrides: HfOverrides | None,
         transformers_mtp_overrides: dict[str, Any] | None = None,
@@ -1311,8 +1407,13 @@ class SpeculativeConfig:
         (e.g. test harnesses shrinking `num_hidden_layers`) and must also
         reach the draft config — otherwise a draft belonging to a large
         target is instantiated at full size even when the target is shrunk.
-        Dict overrides are target-specific key patches and are not applied
-        to the draft.
+
+        Dict overrides are mostly target-specific key patches, but
+        rope-relevant keys (`rope_parameters` / `rope_scaling` /
+        `rope_theta`, including nested `text_config`) must reach the
+        draft or a YaRN-style target override leaves the draft on native
+        rope (#58080). `max_position_embeddings` stays target-only so the
+        draft max-model-len clamp keeps holding (#63909).
 
         The composed override must stay picklable: the draft `ModelConfig`
         is sent to spawned engine-core processes, so a local closure would
@@ -1320,15 +1421,31 @@ class SpeculativeConfig:
         target via `functools.partial` over a module-referenceable static
         method instead.
         """
-        if not callable(target_hf_overrides):
+        if callable(target_hf_overrides):
+            return functools.partial(
+                SpeculativeConfig._apply_composed_hf_override,
+                target_hf_overrides,
+                transformers_mtp_overrides=transformers_mtp_overrides,
+            )
+
+        if not isinstance(target_hf_overrides, Mapping) or not target_hf_overrides:
+            return functools.partial(
+                SpeculativeConfig.hf_config_override,
+                transformers_mtp_overrides=transformers_mtp_overrides,
+            )
+
+        draft_overrides = SpeculativeConfig._select_draft_hf_overrides(
+            target_hf_overrides
+        )
+        if not draft_overrides:
             return functools.partial(
                 SpeculativeConfig.hf_config_override,
                 transformers_mtp_overrides=transformers_mtp_overrides,
             )
 
         return functools.partial(
-            SpeculativeConfig._apply_composed_hf_override,
-            target_hf_overrides,
+            SpeculativeConfig._apply_dict_then_arch_override,
+            draft_overrides,
             transformers_mtp_overrides=transformers_mtp_overrides,
         )
 
@@ -1387,6 +1504,24 @@ class SpeculativeConfig:
                     f"{self.custom_method or self.method!r}."
                 )
         config_cls.apply_options(self)
+
+        if self.prefill_context_kv_only:
+            if not config_cls.supports_prefill_context_kv_only:
+                raise ValueError(
+                    "prefill_context_kv_only is not supported with speculative "
+                    f"method {self.custom_method or self.method!r}."
+                )
+            if (
+                self.enable_adaptive_verification
+                or self.uses_dynamic_speculative_decoding()
+            ):
+                logger.warning_once(
+                    "prefill_context_kv_only schedules no drafts to verify. "
+                    "Disabling adaptive verification and dynamic speculative "
+                    "decoding."
+                )
+                self.enable_adaptive_verification = False
+                self.num_speculative_tokens_per_batch_size = None
 
         if (
             config_cls.adaptive_verification_uses_draft_logits
@@ -1536,6 +1671,19 @@ class SpeculativeConfig:
             )
         return speculative_draft_tensor_parallel_size
 
+    @staticmethod
+    def _verify_and_get_draft_dcp(
+        target_parallel_config: ParallelConfig, draft_dcp: int | None
+    ) -> int:
+        """Default the draft's DCP to the target's; an explicit value must be 1
+        or the target's."""
+        target_dcp = target_parallel_config.decode_context_parallel_size
+        if draft_dcp is None:
+            return target_dcp
+        if draft_dcp not in (1, target_dcp):
+            raise ValueError(f"{draft_dcp=} must be 1 or {target_dcp}.")
+        return draft_dcp
+
     def update_arch_(self):
         """EagleConfig and ExtractHiddenStatesConfig update architectures, so update all
         architectures-related fields in self.draft_model_config
@@ -1590,13 +1738,6 @@ class SpeculativeConfig:
         for src, config_name, dst in _DRAFT_VLLM_CONFIG_OVERRIDES:
             if (value := getattr(self, src)) is not None:
                 sub_config = replace(getattr(vllm_config, config_name), **{dst: value})
-                if config_name == "cache_config":
-                    # replace() marks the copied block_size as user-specified, so the
-                    # draft's attention backend would have to support that size, which
-                    # is only a placeholder until model load. Keep the target's flag.
-                    sub_config.user_specified_block_size = (
-                        vllm_config.cache_config.user_specified_block_size
-                    )
                 vllm_config = replace(vllm_config, **{config_name: sub_config})
         return vllm_config
 

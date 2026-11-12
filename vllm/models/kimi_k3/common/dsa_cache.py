@@ -3,11 +3,12 @@
 """Kimi-K3.1 DSA indexer cache, shared by the NVIDIA and ROCm stacks."""
 
 import math
-from dataclasses import replace
+from dataclasses import dataclass, fields, replace
+from typing import Self
 
 import torch
 
-from vllm.config import VllmConfig, get_current_vllm_config
+from vllm.config import VllmConfig
 from vllm.model_executor.layers.sparse_attn_indexer import MXFP4_BLOCK_SIZE
 from vllm.model_executor.models.deepseek_v2 import DeepseekV32IndexerCache
 from vllm.platforms import current_platform
@@ -25,6 +26,7 @@ from vllm.v1.attention.backends.mla.indexer import (
 )
 from vllm.v1.kv_cache_interface import (
     DS_MLA_STATE_CONTENT_BYTES,
+    KVCacheSpec,
     MLAAttentionSpec,
     get_kv_quant_mode,
 )
@@ -128,22 +130,9 @@ class KimiK3IndexerMetadataBuilder(DeepseekV32IndexerMetadataBuilder):
 class KimiK3IndexerBackend(DeepseekV32IndexerBackend):
     @staticmethod
     def get_supported_kernel_block_sizes(kv_cache_spec=None):
-        if kv_cache_spec is not None:
-            fp4 = kv_cache_spec.head_size == 68
-        else:
-            fp4 = (
-                get_current_vllm_config().attention_config.resolve_indexer_kv_dtype(
-                    "fp8"
-                )
-                == "mxfp4"
-            )
-        return (
-            [64]
-            if fp4
-            else DeepseekV32IndexerBackend.get_supported_kernel_block_sizes(
-                kv_cache_spec
-            )
-        )
+        # The packed indexer cache is block-flat; the FP4 and ROCm FP8 kernels
+        # tile it by 64 tokens.
+        return [64]
 
     @classmethod
     def supported_kv_cache_layouts(cls) -> tuple[KVCacheLayout, ...]:
@@ -151,16 +140,28 @@ class KimiK3IndexerBackend(DeepseekV32IndexerBackend):
         # KDA state page sizes the whole block row rather than one MLA page.
         return (KVCacheLayout.BLHNC,)
 
-    @classmethod
-    def writes_kv_cache_from_block_table(cls) -> bool:
-        return True
-
     @staticmethod
     def get_builder_cls() -> type[KimiK3IndexerMetadataBuilder]:
         return KimiK3IndexerMetadataBuilder
 
 
+@dataclass(frozen=True, kw_only=True)
+class SelfAddressedMLASpec(MLAAttentionSpec):
+    """An MLA cache written at slots that already address its kernel blocks."""
+
+    @property
+    def uses_slot_mapping(self) -> bool:
+        return False
+
+    @classmethod
+    def from_spec(cls, spec: KVCacheSpec) -> Self:
+        return cls(**{f.name: getattr(spec, f.name) for f in fields(spec) if f.init})
+
+
 class KimiK3IndexerCache(DeepseekV32IndexerCache):
+    def get_kv_cache_spec(self, vllm_config: VllmConfig) -> SelfAddressedMLASpec:
+        return SelfAddressedMLASpec.from_spec(super().get_kv_cache_spec(vllm_config))
+
     def get_attn_backend(self) -> type[AttentionBackend]:
         return KimiK3IndexerBackend
 

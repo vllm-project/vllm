@@ -1,7 +1,6 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 import asyncio
-import contextlib
 import itertools
 import logging
 import os
@@ -25,6 +24,7 @@ from huggingface_hub.utils import httpx
 
 from vllm import envs
 from vllm.config import KVTransferConfig, VllmConfig
+from vllm.config.kv_transfer import KVCacheAccess
 from vllm.distributed.kv_transfer.kv_connector.utils import (
     EngineId,
     TransferTopology,
@@ -53,9 +53,9 @@ from vllm.distributed.kv_transfer.kv_connector.v1.mooncake.stats import (
     MooncakeKVConnectorStats,
     MooncakePromMetrics,
 )
-from vllm.distributed.kv_transfer.kv_connector.v1.ssm_conv_transfer_utils import (
-    MambaConvSplitInfo,
-    derive_mamba_conv_split,
+from vllm.distributed.kv_transfer.kv_connector.v1.mooncake.transfer_engine_registry import (  # noqa: E501
+    clear_shared_transfer_engine,
+    register_shared_transfer_engine,
 )
 from vllm.distributed.parallel_state import (
     get_pp_group,
@@ -64,7 +64,6 @@ from vllm.distributed.parallel_state import (
 )
 from vllm.forward_context import ForwardContext
 from vllm.logger import init_logger
-from vllm.model_executor.layers.mamba.mamba_utils import is_conv_state_dim_first
 from vllm.model_executor.models.utils import extract_layer_index
 from vllm.platforms import current_platform
 from vllm.utils.math_utils import cdiv
@@ -318,62 +317,6 @@ def _compute_sender_transfer_plan(
         0,
         remote_kv_block_len,
     )
-
-
-def _mamba_hetero_tp_segments(
-    conv_proj_bytes: tuple[int, ...],
-    ssm_bytes: int,
-    local_tp_rank: int,
-    local_tp_size: int,
-    remote_tp_rank: int,
-    remote_tp_size: int,
-) -> list[tuple[int, int, int]]:
-    """(src_offset, dst_offset, length) copies of one Mamba state page between
-    producer and consumer pages of different TP sizes.
-
-    A page (DS conv layout) is `[conv proj 0 | proj 1 | ... | temporal]`,
-    each part sharded by heads across TP. Merging or splitting shards must
-    move each part separately: e.g. GDN/KDA producer TP8 -> consumer TP4 puts
-    producer rank 2r+1's Q after rank 2r's Q, not after its whole page.
-
-    Args:
-        conv_proj_bytes: this (producer) rank's conv sub-projection sizes.
-        ssm_bytes: this rank's temporal state size.
-        local_tp_rank: producer TP rank.
-        local_tp_size: producer TP size.
-        remote_tp_rank: consumer TP rank.
-        remote_tp_size: consumer TP size.
-
-    """
-    tp_ratio = _get_tp_ratio(local_tp_size, remote_tp_size)
-    parts = (*conv_proj_bytes, ssm_bytes)
-    segments: list[tuple[int, int, int]] = []
-    local_offset = 0
-    if tp_ratio > 0:
-        # Several producer ranks fill one consumer page; this rank owns slot
-        # ``local_tp_rank % tp_ratio`` of every part.
-        assert local_tp_rank // tp_ratio == remote_tp_rank
-        slot = local_tp_rank % tp_ratio
-        for size in parts:
-            segments.append((local_offset, local_offset * tp_ratio + slot * size, size))
-            local_offset += size
-        return segments
-
-    # One producer page feeds several consumer ranks; send this consumer's slice.
-    ratio_abs = -tp_ratio
-    assert remote_tp_rank // ratio_abs == local_tp_rank
-    slot = remote_tp_rank % ratio_abs
-    for size in parts:
-        assert size % ratio_abs == 0, (
-            f"Mamba state part of {size} bytes does not split across "
-            f"{ratio_abs} consumer ranks."
-        )
-        remote_size = size // ratio_abs
-        segments.append(
-            (local_offset + slot * remote_size, local_offset // ratio_abs, remote_size)
-        )
-        local_offset += size
-    return segments
 
 
 def _can_coalesce_block_transfers(
@@ -713,12 +656,6 @@ class MooncakeXferMetadata(
     # Random per register_kv_caches, so ids never repeat across restarts.
     # 0 means the peer sends the layout on every pull.
     layout_id: int = 0
-    # Consumer kernel block size (tokens) and kernel blocks per logical block.
-    # 0 means the peer did not send them; assume they match the producer.
-    # Sent on every pull, with or without the layout.
-    kernel_block_size: int = 0
-    physical_blocks_per_logical: int = 0
-    prefix_caching: bool = False
 
 
 class MooncakeXferResponseStatus(IntEnum):
@@ -839,6 +776,11 @@ class MooncakeConnectorMetadata(KVConnectorMetadata):
 
 class MooncakeConnector(KVConnectorBase_V1, SupportsHMA):
     _cache_hit_source = CacheHitSource.P2P
+
+    @classmethod
+    def kv_cache_access(cls, kv_transfer_config: KVTransferConfig) -> KVCacheAccess:
+        # Registers the device KV cache with an RDMA engine.
+        return KVCacheAccess.REGISTERS
 
     @classmethod
     def supports_lookahead_block_hashes(
@@ -1486,6 +1428,12 @@ class MooncakeConnectorWorker:
             self.hostname,
             self.rpc_port,
         )
+        register_shared_transfer_engine(
+            engine=self.engine,
+            hostname=self.hostname,
+            rpc_port=self.rpc_port,
+            protocol=str(protocol),
+        )
 
         self._remote_agents: dict[EngineId, dict[int, dict[int, str]]] = {}
         self._pending_bootstrap_queries: dict[str, asyncio.Event] = {}
@@ -1621,22 +1569,6 @@ class MooncakeConnectorWorker:
             total_num_kv_heads=self.model_config.get_total_num_kv_heads(),
             attn_backends=self.attn_backends,
         )
-        # Per-rank Mamba state page layout, to move state between TP sizes.
-        # None when the layout cannot be split (not DS conv layout, extra
-        # state records, or an unsupported Mamba type).
-        self._mamba_conv_split: MambaConvSplitInfo | None = None
-        mamba_spec = next(
-            (s for s in self._layer_specs.values() if isinstance(s, MambaSpec)), None
-        )
-        if (
-            mamba_spec is not None
-            and len(mamba_spec.shapes) == 2
-            and is_conv_state_dim_first()
-        ):
-            with contextlib.suppress(NotImplementedError):
-                self._mamba_conv_split = derive_mamba_conv_split(
-                    mamba_spec, self.tp_size
-                )
 
         self.async_zmq_ctx = zmq.asyncio.Context()
         self._encoder = msgspec.msgpack.Encoder()
@@ -1675,6 +1607,8 @@ class MooncakeConnectorWorker:
 
     def shutdown(self):
         """Cleanup background threads on destruction."""
+        if hasattr(self, "engine"):
+            clear_shared_transfer_engine(self.engine)
         self.async_zmq_ctx.term()
         if not self.is_kv_consumer:
             self._sender_executor.shutdown(wait=False)
@@ -1905,10 +1839,7 @@ class MooncakeConnectorWorker:
                 else self.transfer_topo.total_num_kv_heads
             ),
         )
-        if validation_err is None:
-            validation_err = self._validate_hetero_layout(meta)
         if validation_err is not None:
-            logger.error(validation_err)
             response = MooncakeXferResponse(
                 status=MooncakeXferResponseStatus.ERROR,
                 err_msg=validation_err,
@@ -2070,41 +2001,6 @@ class MooncakeConnectorWorker:
             )
             await sock.send_multipart((identity, self._encoder.encode(response)))
 
-    def _validate_hetero_layout(self, meta: MooncakeXferMetadata) -> str | None:
-        """Reject consumer layouts that differ from ours in ways we cannot map."""
-        local_ppl = self._physical_blocks_per_logical_kv_block
-        remote_ppl = meta.physical_blocks_per_logical or local_ppl
-        if remote_ppl != local_ppl:
-            if meta.kernel_block_size not in (0, self.block_size):
-                return (
-                    "Mooncake cannot map KV blocks between kernel block sizes "
-                    f"{self.block_size} (producer) and {meta.kernel_block_size} "
-                    "(consumer)."
-                )
-            # With different logical block sizes (e.g. a hybrid model's block
-            # fits its per-rank Mamba state, so it differs across TP sizes),
-            # a consumer with prefix caching asks only for the blocks after
-            # its hit, which cannot be lined up with ours without knowing the
-            # hit length.
-            if meta.prefix_caching:
-                return (
-                    "Mooncake transfers between different logical block sizes "
-                    f"({local_ppl * self.block_size} tokens on the producer, "
-                    f"{remote_ppl * self.block_size} on the consumer) require "
-                    "the consumer to run with --no-enable-prefix-caching."
-                )
-        if (
-            self.kv_cache_config.has_mamba_layers
-            and meta.remote_tp_size != self.tp_size
-            and self._mamba_conv_split is None
-        ):
-            return (
-                "Mooncake heterogeneous TP for Mamba hybrid models requires the "
-                "DS conv state layout (VLLM_SSM_CONV_STATE_LAYOUT=DS) and a "
-                "Mamba1/Mamba2/GDN state with only conv and temporal parts."
-            )
-        return None
-
     def resolve_need_send(
         self,
         send_meta: SendBlockMeta,
@@ -2125,27 +2021,27 @@ class MooncakeConnectorWorker:
         )
 
     def _logical_to_kernel_block_ids(
-        self,
-        block_ids: list[list[int]],
-        physical_blocks_per_logical: int | None = None,
+        self, block_ids: list[list[int]]
     ) -> list[list[int]]:
         # For example, if a 544-token logical block is served by 32-token
         # FA kernel blocks, FA block id k expands to [17k, ..., 17k + 16],
         # while the matching Mamba/GDN state block remains k. Only attention
         # groups need logical block ids expanded to kernel block ids; Mamba/GDN
         # state block ids stay in the logical/page-id space.
-        # ``physical_blocks_per_logical`` is the owner's ratio (the consumer's
-        # for its block ids); defaults to ours.
-        ratio = (
-            physical_blocks_per_logical or self._physical_blocks_per_logical_kv_block
-        )
-        if ratio == 1:
+        if self._physical_blocks_per_logical_kv_block == 1:
             return block_ids
 
-        block_arange = np.arange(ratio).reshape(1, -1)
+        block_arange = np.arange(self._physical_blocks_per_logical_kv_block).reshape(
+            1, -1
+        )
         group_specs = self.kv_cache_config.transfer_groups
         return [
-            (np.array(group)[:, None] * ratio + block_arange).reshape(-1).tolist()
+            (
+                np.array(group)[:, None] * self._physical_blocks_per_logical_kv_block
+                + block_arange
+            )
+            .reshape(-1)
+            .tolist()
             if not isinstance(group_specs[i].kv_cache_spec, MambaSpec)
             else group
             for i, group in enumerate(block_ids)
@@ -2164,26 +2060,6 @@ class MooncakeConnectorWorker:
         err_reqs: list[ReqId] = []
         err_msg: str | None = None
         remote_session = f"{agent_meta.remote_hostname}:{agent_meta.remote_port}"
-        local_ppl = self._physical_blocks_per_logical_kv_block
-        remote_ppl = agent_meta.physical_blocks_per_logical or local_ppl
-        # Logical block sizes differ (e.g. a hybrid model across TP sizes):
-        # attention blocks are matched in kernel blocks instead.
-        hetero_blocks = remote_ppl != local_ppl
-        mamba_segments: list[tuple[int, int, int]] | None = None
-        if (
-            self.kv_cache_config.has_mamba_layers
-            and agent_meta.remote_tp_size != self.tp_size
-        ):
-            # Checked at handshake by _validate_hetero_layout.
-            assert self._mamba_conv_split is not None
-            mamba_segments = _mamba_hetero_tp_segments(
-                self._mamba_conv_split.proj_bytes,
-                self._mamba_conv_split.ssm_sizes[1],
-                self.tp_rank,
-                self.tp_size,
-                agent_meta.remote_tp_rank,
-                agent_meta.remote_tp_size,
-            )
 
         for d_req_id, send_meta in ready_reqs:
             _, remote_block_ids_per_group = agent_meta.req_blocks[d_req_id]
@@ -2237,12 +2113,7 @@ class MooncakeConnectorWorker:
 
                 n_local = len(local_group)
                 n_remote = len(remote_group)
-                if hetero_blocks and not is_mamba_group:
-                    # Both sides list the whole prompt from block 0 (the
-                    # consumer has no prefix caching); trimmed to the kernel
-                    # blocks both have after expansion below.
-                    pass
-                elif n_local < n_remote:
+                if n_local < n_remote:
                     logger.error(
                         "req %s: local blocks(%d) < remote blocks(%d) "
                         "in a KV cache group (is_mamba_group=%s)",
@@ -2269,12 +2140,11 @@ class MooncakeConnectorWorker:
                 continue
 
             # Normalize before kernel expansion so _contiguous_runs can
-            # coalesce the resulting ascending kernel runs. Hetero block
-            # sizes pair kernel blocks by position, so keep their order.
+            # coalesce the resulting ascending kernel runs.
             for group_index, (local_group, remote_group) in enumerate(
                 zip(local_block_ids_by_group, remote_block_ids_by_group)
             ):
-                if local_group and not hetero_blocks:
+                if local_group:
                     (
                         local_block_ids_by_group[group_index],
                         remote_block_ids_by_group[group_index],
@@ -2284,15 +2154,8 @@ class MooncakeConnectorWorker:
                 local_block_ids_by_group
             )
             remote_block_ids_by_group = self._logical_to_kernel_block_ids(
-                remote_block_ids_by_group, remote_ppl
+                remote_block_ids_by_group
             )
-            if hetero_blocks:
-                for i, (local_group, remote_group) in enumerate(
-                    zip(local_block_ids_by_group, remote_block_ids_by_group)
-                ):
-                    n = min(len(local_group), len(remote_group))
-                    local_block_ids_by_group[i] = local_group[:n]
-                    remote_block_ids_by_group[i] = remote_group[:n]
 
             # Regions of the same KV group share block ids; group them once.
             block_runs: dict[tuple[int, tuple[int, ...]], tuple[np.ndarray, ...]] = {}
@@ -2326,31 +2189,6 @@ class MooncakeConnectorWorker:
                     )
                 local_ids, remote_ids, run_starts, run_lens = block_runs[group_key]
                 if len(local_ids) == 0:
-                    continue
-
-                if mamba_segments is not None and isinstance(
-                    self._layer_specs.get(local_region.layer_name), MambaSpec
-                ):
-                    # Mamba state is head-sharded, not replicated: every
-                    # producer rank sends its share of each state part.
-                    for src_offset, dst_offset, length in mamba_segments:
-                        assert src_offset + length <= local_region.kv_block_len
-                        assert dst_offset + length <= remote_region.kv_block_len
-                    for local_block_id, remote_block_id in zip(
-                        local_ids.tolist(), remote_ids.tolist()
-                    ):
-                        for src_offset, dst_offset, length in mamba_segments:
-                            src_ptrs.append(
-                                local_region.base_addr
-                                + local_block_id * local_region.block_len
-                                + src_offset
-                            )
-                            dst_ptrs.append(
-                                remote_region.base_addr
-                                + remote_block_id * remote_region.block_len
-                                + dst_offset
-                            )
-                            lengths.append(length)
                     continue
 
                 (
@@ -3333,13 +3171,8 @@ class MooncakeConnectorWorker:
         # Replicated KV keeps that offset at 0. MLA is replicated in practice;
         # gating on use_mla alone would promote and then fail the length check
         # for a non-replicated MLA rank with tp_ratio != 1.
-        # Mamba state is never replicated, and with TP ratio != 1 it is copied
-        # per layer and state part, so its regions must stay unmerged.
         tp_ratio = _get_tp_ratio(self.tp_size, meta.remote_tp_size)
-        if tp_ratio == 1 or (
-            self._producer_cache_is_replicated()
-            and not self.kv_cache_config.has_mamba_layers
-        ):
+        if tp_ratio == 1 or self._producer_cache_is_replicated():
             covered_both_sides = len(local_regions) == len(pre_align_local) and len(
                 remote_regions
             ) == len(pre_align_remote)
@@ -3402,12 +3235,6 @@ class MooncakeConnectorWorker:
             req_id: (pull_meta.transfer_id, pull_meta.local_block_ids)
             for req_id, pull_meta in pull_metas.items()
         }
-        # Checked by the producer on every pull (_validate_hetero_layout).
-        hetero_layout: dict[str, Any] = dict(
-            kernel_block_size=self.block_size,
-            physical_blocks_per_logical=self._physical_blocks_per_logical_kv_block,
-            prefix_caching=self.cache_config.enable_prefix_caching,
-        )
         if not include_layout:
             return MooncakeXferMetadata(
                 remote_hostname=self.hostname,
@@ -3420,7 +3247,6 @@ class MooncakeConnectorWorker:
                 kv_caches_base_addr=[],
                 block_lens=[],
                 kv_block_lens=[],
-                **hetero_layout,
             )
         return MooncakeXferMetadata(
             remote_hostname=self.hostname,
@@ -3440,7 +3266,6 @@ class MooncakeConnectorWorker:
                 list(groups) for groups in self.region_shared_groups
             ],
             registered_row_offsets=self.region_row_offsets,
-            **hetero_layout,
         )
 
     def _validate_head_resharding_layout(

@@ -62,6 +62,20 @@ def get_kv_connector_cache_layout(vllm_config: VllmConfig | None = None):
     return None
 
 
+def kv_connector_may_load_foreign_kv(vllm_config: VllmConfig) -> bool:
+    """Whether the configured KV connector may load bytes that vLLM's own
+    cache writer did not produce for this KV cache layout.
+
+    Attention backends whose fast paths assume no foreign bytes (e.g. NaNs in
+    unwritten slots) reach the KV cache keep them only when this is False.
+    """
+    kv_config = vllm_config.kv_transfer_config
+    if kv_config is None:
+        return False
+    connector_cls = KVConnectorFactory.get_connector_class(kv_config)
+    return not connector_cls.only_restores_canonical_kv(kv_config)
+
+
 class KVOutputAggregator:
     """Utility class to aggregate the output of all workers into a single
     output corresponding to Rank 0 for scheduler."""
@@ -389,8 +403,7 @@ def get_current_attn_backends_and_specs(
     never split group-wide (`prepare_kernel_block_sizes`), and a cache that
     needs smaller kernel blocks views them inside each block, so its kernel
     pages never split transferred blocks. Compressed caches are skipped too
-    (`check_compressed_kernel_split` guards them); caches whose backend writes
-    them from their block table must be packed.
+    (`check_compressed_kernel_split` guards them).
     """
     layout = vllm_config.cache_config.get_resolved_kv_cache_layout()
     pairs: dict[tuple[type[AttentionBackend], AttentionSpec | None], None] = {}
@@ -406,10 +419,6 @@ def get_current_attn_backends_and_specs(
             if isinstance(spec, AttentionSpec):
                 if spec.tokens_per_state > 1:
                     continue
-                if backend.writes_kv_cache_from_block_table():
-                    assert layout.is_block_outermost, (
-                        "Kernel-paged caches must be packed"
-                    )
                 if layout.is_block_outermost:
                     continue
             else:
