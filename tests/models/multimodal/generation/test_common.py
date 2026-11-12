@@ -1445,6 +1445,7 @@ def test_custom_inputs_models_heavy(
 
 
 @pytest.mark.core_model
+@create_new_process_for_each_test(method="spawn")
 def test_gemma4_generate_without_image_resize(vllm_runner, monkeypatch):
     """Pre-resized pixels must generate the same tokens as processor resizing."""
     from PIL import Image
