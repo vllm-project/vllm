@@ -124,6 +124,13 @@ HANDSHAKE_TIMEOUT_MINS = 5
 
 _R = TypeVar("_R")  # Return type for collective_rpc
 
+# RPCs that replace target weights in place. The model runner clears its own
+# encoder cache during these, but the scheduler's EncoderCacheManager must be
+# reset too, or pre-replacement hashes still count as cache hits: the next
+# request reusing them re-serves embeddings computed under the old weights or
+# hits "Encoder cache miss" once the model runner's copy is gone.
+_WEIGHT_REPLACEMENT_RPC_METHODS = frozenset({"reload_weights", "finish_weight_update"})
+
 
 class EngineCore:
     """Inner loop of vLLM's Engine."""
@@ -1261,7 +1268,10 @@ class EngineCore:
         args: tuple = (),
         kwargs: dict[str, Any] | None = None,
     ) -> list[_R]:
-        return self.model_executor.collective_rpc(method, timeout, args, kwargs)
+        results = self.model_executor.collective_rpc(method, timeout, args, kwargs)
+        if method in _WEIGHT_REPLACEMENT_RPC_METHODS:
+            self.scheduler.reset_encoder_cache()
+        return results
 
     def set_weight_version(self, weight_version: str) -> None:
         self._weight_version = weight_version

@@ -1020,3 +1020,33 @@ def test_pause_synchronizes_device_before_cache_reset(deferred: bool):
     else:
         assert result is None
     assert order == ["synchronize_device", "reset_caches"]
+
+
+def test_weight_replacement_rpc_resets_scheduler_encoder_cache():
+    """Weight-replacement RPCs must reset the scheduler's encoder cache
+    bookkeeping too, not just the model runner's copy. Otherwise
+    pre-replacement hashes still count as cache hits: `reload_weights` then
+    crashes the next same-image request with "Encoder cache miss", and
+    `finish_weight_update` re-serves embeddings computed under the old
+    weights (#67088)."""
+    core = object.__new__(EngineCore)
+    core.model_executor = MagicMock()
+    core.scheduler = MagicMock()
+
+    core.collective_rpc("reload_weights")
+    core.model_executor.collective_rpc.assert_called_once_with(
+        "reload_weights", None, (), None
+    )
+    core.scheduler.reset_encoder_cache.assert_called_once()
+
+    core.model_executor.reset_mock()
+    core.scheduler.reset_mock()
+    core.collective_rpc("finish_weight_update")
+    core.scheduler.reset_encoder_cache.assert_called_once()
+
+    core.scheduler.reset_mock()
+    core.collective_rpc("update_max_model_len", args=(512,))
+    core.scheduler.reset_encoder_cache.assert_not_called()
+
+    core.collective_rpc(lambda: "result")
+    core.scheduler.reset_encoder_cache.assert_not_called()
