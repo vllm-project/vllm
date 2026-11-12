@@ -3,15 +3,15 @@
 """The Qwen3.8-2.4T specialized decode executor (step mode): one routing
 decision per step, then the whole forward on the wide kernels.
 
-Built by the model state once the weights are loaded (``Qwen3_5ModelState``):
-checks the loaded model, builds the per-rank launch state (``Launcher``) and
+Built by the model state once the weights are loaded (`Qwen3_5ModelState`):
+checks the loaded model, builds the per-rank launch state (`Launcher`) and
 compiles every kernel build of every width, before memory profiling and graph
-capture. ``bind_caches`` checks the GDN states vLLM binds (the CUDA-graph
-memory-profiling cache, then the real one). Each step ``plan`` returns a
-``Step`` or None, and ``run`` runs a planned step's forward. Weight reloads are
+capture. `bind_caches` checks the GDN states vLLM binds (the CUDA-graph
+memory-profiling cache, then the real one). Each step `plan` returns a
+`Step` or None, and `run` runs a planned step's forward. Weight reloads are
 not supported.
 
-A planned step runs one persistent launch per decoder layer (``wide.layer``),
+A planned step runs one persistent launch per decoder layer (`wide.layer`),
 a full-attention layer's after vLLM's attention:
 
     GDN layer   gdn   [embedding -> input norm] GDN, out_proj + all-reduce
@@ -23,8 +23,8 @@ a full-attention layer's after vLLM's attention:
 The embedding stays vLLM's; the last launch's closing norm is the final
 norm.
 
-A step of up to ``K.SPLIT_MAX`` rows runs each layer's MLP half on
-``mono.blocks.layer_block`` instead:
+A step of up to `K.SPLIT_MAX` rows runs each layer's MLP half on
+`mono.blocks.layer_block` instead:
 
     GDN layer   gdn   [embedding or] residual add + input norm, GDN -> core
                 layer_block   out_proj + all-reduce + post-attention norm,
@@ -66,14 +66,14 @@ logger = init_logger(__name__)
 
 
 class Step(NamedTuple):
-    """A planned step: ``width`` rows, one decode token a request."""
+    """A planned step: `width` rows, one decode token a request."""
 
     width: int
     attn_metadata: dict[str, Any]  # by layer name
 
 
 def agree(reasons: list[str], group, what: str) -> None:
-    """Raises on every TP rank if any rank has ``reasons``: a rank that refused
+    """Raises on every TP rank if any rank has `reasons`: a rank that refused
     alone would leave the others spinning in-kernel."""
     from vllm.models.qwen3_5.amd.specialized_decode.runtime.peer import tp_agree
 
@@ -86,7 +86,7 @@ def agree(reasons: list[str], group, what: str) -> None:
 
 
 def _compile_mono(launch, abi) -> None:
-    """Compiles a ``mono`` launch without running it (FlyDSL's compile-only
+    """Compiles a `mono` launch without running it (FlyDSL's compile-only
     mode, which has no FLYDSL_ prefix, returns before the launch)."""
     import os
 
@@ -102,7 +102,7 @@ def _compile_mono(launch, abi) -> None:
 
 
 class SpecializedDecode:
-    """The executor over one ``Qwen3_5Model``: builds the launch state, binds
+    """The executor over one `Qwen3_5Model`: builds the launch state, binds
     it to each KV cache and plans and runs every decode step."""
 
     def __init__(self, model, config: DecodeConfig):
@@ -147,7 +147,7 @@ class SpecializedDecode:
         )
 
     def _compile_split(self, dev) -> list:
-        """Compiles the split widths' ``layer_block`` and ``gdn_block`` builds
+        """Compiles the split widths' `layer_block` and `gdn_block` builds
         and warms up the residual add + norm vLLM's parts of their steps run,
         before graph capture."""
         from vllm.models.qwen3_5.amd.specialized_decode.mono import blocks
@@ -175,7 +175,7 @@ class SpecializedDecode:
         return sorted(keys, key=repr) + sorted(gdn_keys, key=repr)
 
     def _keys(self, rows: int) -> list:
-        """Every layer's build at ``rows``, in step order."""
+        """Every layer's build at `rows`, in step order."""
         return [self.launch.key(i, rows) for i in range(len(self.model.layers))]
 
     def _kv_key(self) -> tuple[int, int] | None:
@@ -214,8 +214,8 @@ class SpecializedDecode:
         - PIECEWISE steps: they run (or capture) the compiled stock model's
           graphs, and taking one would leave them uncaptured for the prefills
           of that size;
-        - widths without a build (``DecodeConfig.widths``);
-        - steps that are not pure decode steps (``step_reason``).
+        - widths without a build (`DecodeConfig.widths`);
+        - steps that are not pure decode steps (`step_reason`).
 
         Eager steps of a built width run the kernels too. Every predicate is the
         same on all TP ranks: the kernels' exchanges need every rank on one
@@ -248,8 +248,8 @@ class SpecializedDecode:
         positions: torch.Tensor,
         inputs_embeds: torch.Tensor | None,
     ) -> torch.Tensor:
-        """``Qwen3_5Model.forward`` of a planned step -> the final norm's
-        hidden states [S, H]. ``inputs_embeds``: the multimodal wrapper's
+        """`Qwen3_5Model.forward` of a planned step -> the final norm's
+        hidden states [S, H]. `inputs_embeds`: the multimodal wrapper's
         embeddings of the step's tokens (decode rows are sampled text tokens,
         so the token embeddings), else None."""
         model, la, md, rows = self.model, self.launch, step.attn_metadata, step.width
@@ -278,9 +278,9 @@ class SpecializedDecode:
         return out
 
     def _run_split(self, step: Step, emb: torch.Tensor, positions) -> torch.Tensor:
-        """A split width's forward (``K.SPLIT_MAX``): each layer's split
-        launch (or ``gdn_block``: ``Launcher.mono_gdn_layer``), then its
-        ``layer_block``."""
+        """A split width's forward (`K.SPLIT_MAX`): each layer's split
+        launch (or `gdn_block`: `Launcher.mono_gdn_layer`), then its
+        `layer_block`."""
         model, la, md, rows = self.model, self.launch, step.attn_metadata, step.width
         keys = self.keys[rows]
         h, res = emb, None

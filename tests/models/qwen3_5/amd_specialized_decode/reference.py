@@ -1,7 +1,7 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 """Float64 references of the wide decode's stages with the stock path's bf16
-rounding points (``bf``), at one TP8 rank's Qwen3.8-2.4T shapes. Tensors stay
+rounding points (`bf`), at one TP8 rank's Qwen3.8-2.4T shapes. Tensors stay
 on the device they come on."""
 
 import torch
@@ -28,14 +28,14 @@ def mxfp4(n, k, gen, lo=118, hi=124, device="cpu"):
 
 
 def shuffle_data(packed):
-    """AITER's ``shuffle_weight(layout=(16, 16))`` of fp4 codes [.., n, k / 2]."""
+    """AITER's `shuffle_weight(layout=(16, 16))` of fp4 codes [.., n, k / 2]."""
     *lead, n, kb = packed.shape
     v = packed.reshape(-1, n // 16, 16, kb // 16, 16).permute(0, 1, 3, 2, 4)
     return v.contiguous().view(*lead, n, kb)
 
 
 def shuffle_scale(sc):
-    """AITER's ``e8m0_shuffle`` of [rows, cols] scales (cols padded to 8)."""
+    """AITER's `e8m0_shuffle` of [rows, cols] scales (cols padded to 8)."""
     rows, cols = sc.shape
     pad = (cols + 7) // 8 * 8
     if pad != cols:
@@ -50,8 +50,8 @@ def shuffle_scale(sc):
 
 
 def dequant_mx(q, s):
-    """Dequantized float64 [.., k] of packed e2m1 codes ``q`` [.., k / 2] and
-    E8M0 scales ``s`` [.., >= k / 32]."""
+    """Dequantized float64 [.., k] of packed e2m1 codes `q` [.., k / 2] and
+    E8M0 scales `s` [.., >= k / 32]."""
     q = q.long()
     lut = E2M1.to(q.device, torch.float64)
     vals = torch.stack([lut[q & 15], lut[q >> 4]], -1).flatten(-2)
@@ -68,8 +68,8 @@ def hadamard32(device):
 
 
 def rotate32(x):
-    """``block_hadamard_rotate`` of bf16-valued ``x``: f32 math, bf16 out, in
-    the fast transform's order (``norm.hadamard32``) as the kernels sum it: a
+    """`block_hadamard_rotate` of bf16-valued `x`: f32 math, bf16 out, in
+    the fast transform's order (`norm.hadamard32`) as the kernels sum it: a
     matmul's order rounds a rare bf16 ulp apart, which moves a whole 32-group's
     MXFP4 codes."""
     v = x.float().unflatten(-1, (-1, 32))
@@ -84,8 +84,8 @@ def rotate32(x):
 
 def quant_act(x, rceil: bool = True):
     """AITER's MXFP4 quantization of activation rows -> dequantized:
-    ``rceil`` ``per_1x32_f4_quant_hip`` (the ASM FP4 GEMM's and
-    ``fused_moe``'s), else ``dynamic_mxfp4_quant`` (the Triton GEMM's)."""
+    `rceil` `per_1x32_f4_quant_hip` (the ASM FP4 GEMM's and
+    `fused_moe`'s), else `dynamic_mxfp4_quant` (the Triton GEMM's)."""
     from aiter import per_1x32_f4_quant_hip
     from aiter.ops.triton.quant import dynamic_mxfp4_quant
 
@@ -98,10 +98,10 @@ def quant_act(x, rceil: bool = True):
 
 
 def linear(x, w, fmt: str, shuffled: bool = True):
-    """``x @ W.T`` with the stock rounding: ``w`` a bf16 weight, or for
+    """`x @ W.T` with the stock rounding: `w` a bf16 weight, or for
     "mxfp4" / "mxfp4_h32" the dequantized float64 weight (of the rotated
     weight for h32); the input quantized (after its rotation) as the GEMM
-    does (``shuffled``: the ASM one). Returns bf16-rounded float64."""
+    does (`shuffled`: the ASM one). Returns bf16-rounded float64."""
     if fmt == "bf16":
         return bf(x.double() @ w.double().T)
     if fmt == "mxfp4_h32":
@@ -110,7 +110,7 @@ def linear(x, w, fmt: str, shuffled: bool = True):
 
 
 def gemma_norm(z, w, eps):
-    """``GemmaRMSNorm`` of bf16-valued rows ``z``: (1 + w) weights."""
+    """`GemmaRMSNorm` of bf16-valued rows `z`: (1 + w) weights."""
     rr = torch.rsqrt(z.pow(2).mean(-1, keepdim=True) + eps)
     return bf(z * rr * (1 + w.double()))
 
@@ -125,10 +125,10 @@ def gdn(
     fmts=("bf16", "bf16"),
     shuffled: bool = True,
 ):
-    """The GDN block of rows ``x`` with state slots ``st_idx`` (<= 0: none).
-    ``w``: qkvz, ba, conv, a_log, dt_bias, norm, out (dequantized float64
-    for MXFP4 formats ``fmts`` = (in_proj_qkvz's, out_proj's), ``shuffled``
-    as ``linear``). Returns
+    """The GDN block of rows `x` with state slots `st_idx` (<= 0: none).
+    `w`: qkvz, ba, conv, a_log, dt_bias, norm, out (dequantized float64
+    for MXFP4 formats `fmts` = (in_proj_qkvz's, out_proj's), `shuffled`
+    as `linear`). Returns
     (conv output q | k | v, z, new conv states, new recurrent states, core
     [rows, NV * 128], out_proj output)."""
     rows = x.shape[0]
@@ -187,9 +187,9 @@ def gdn(
 def route(x, w_gate, experts: int, topk: int, prefer=None, margin: float = 1e-2):
     """The fused router's logits (bf16) -> (expert ids [rows, topk + 1], f64
     weights): softmax top-k of the routed experts, then the shared expert
-    (index ``experts``) at sigmoid of its logit. ``prefer``: a kernel's
+    (index `experts`) at sigmoid of its logit. `prefer`: a kernel's
     picks [rows, topk], taken for a row when they are a top-k within
-    ``margin`` (relative to the row's largest logit) of the boundary, as
+    `margin` (relative to the row's largest logit) of the boundary, as
     inputs a few bf16 ulps apart flip near-tied experts."""
     rows = x.shape[0]
     logits = bf(x.double() @ w_gate.double().T)
@@ -228,11 +228,11 @@ def moe(
     prefer=None,
     xd=None,
 ):
-    """The MoE of rows ``x`` (one rank's intermediate slice; unshuffled MXFP4
+    """The MoE of rows `x` (one rank's intermediate slice; unshuffled MXFP4
     expert codes and scales), activations quantized to MXFP4 as AITER does
     (the input and the gate-up product). Returns (y f64, ids, weights);
-    ``prefer``: as ``route``; ``xd``: the experts' dequantized input rows
-    (default ``quant_act(x)``)."""
+    `prefer`: as `route`; `xd`: the experts' dequantized input rows
+    (default `quant_act(x)`)."""
     ids, ws, _ = route(x, w_gate, experts, topk, prefer)
     if xd is None:
         xd = quant_act(x)

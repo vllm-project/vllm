@@ -2,32 +2,32 @@
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 """Batch-tiled GEMMs on the bf16 matrix unit.
 
-A CTA computes ``C[token, row] = sum_k X[token, k] * W[row, k]`` for 64 x
-``mtiles`` weight rows (16-row tiles, one a wave per ``mtiles`` step) over a
+A CTA computes `C[token, row] = sum_k X[token, k] * W[row, k]` for 64 x
+`mtiles` weight rows (16-row tiles, one a wave per `mtiles` step) over a
 slice of K and every row of the step. Activations stream through LDS in
-``CHUNK``-wide K steps shared by the four waves, double buffered; weights go
-from global memory straight to the A operand registers, ``DEPTH`` chunks
-ahead. The step's rows are the N dimension of ``v_mfma_f32_16x16x32_bf16``:
-``ceil(S / 16)`` token tiles reuse each weight load, and the staged
-activations never grow past two chunks. Up to ``RESIDENT_MAX`` rows a unit
+`CHUNK`-wide K steps shared by the four waves, double buffered; weights go
+from global memory straight to the A operand registers, `DEPTH` chunks
+ahead. The step's rows are the N dimension of `v_mfma_f32_16x16x32_bf16`:
+`ceil(S / 16)` token tiles reuse each weight load, and the staged
+activations never grow past two chunks. Up to `RESIDENT_MAX` rows a unit
 instead stages its whole K slice of the real rows once and keeps every
-chunk's weights in flight, with no barrier per chunk (``Gemm._resident``);
-its first weights may be issued before the phase's grid wait (``pending``,
-``issue_unit``), and a 16-row tile may share its K slice among the four
-waves (``SplitK(kwaves=True)``, ``Gemm.run_kwaves``).
+chunk's weights in flight, with no barrier per chunk (`Gemm._resident`);
+its first weights may be issued before the phase's grid wait (`pending`,
+`issue_unit`), and a 16-row tile may share its K slice among the four
+waves (`SplitK(kwaves=True)`, `Gemm.run_kwaves`).
 
-The MFMA operand ABI (explicit, it is the instruction's): lane ``l`` of a wave
-holds weight row ``l % 16`` and, for K slice ``m`` (0..3) of a chunk, the 8
-K elements at ``koff(m, l // 16)``; its accumulator of token tile ``t`` holds
-rows ``4 (l // 16) + e`` (e = 0..3) of token ``16 t + l % 16``. A weight
-source picks ``koff`` so a lane's loads are contiguous in its format: bf16
-rows take ``32 m + 8 g`` (a load instruction's four lanes of a row read 64
-contiguous bytes), MXFP4 rows ``32 g + 8 m`` (a lane's one 16-byte load is
-its 32 K values). The B operand is read from LDS at the same ``koff``.
+The MFMA operand ABI (explicit, it is the instruction's): lane `l` of a wave
+holds weight row `l % 16` and, for K slice `m` (0..3) of a chunk, the 8
+K elements at `koff(m, l // 16)`; its accumulator of token tile `t` holds
+rows `4 (l // 16) + e` (e = 0..3) of token `16 t + l % 16`. A weight
+source picks `koff` so a lane's loads are contiguous in its format: bf16
+rows take `32 m + 8 g` (a load instruction's four lanes of a row read 64
+contiguous bytes), MXFP4 rows `32 g + 8 m` (a lane's one 16-byte load is
+its 32 K values). The B operand is read from LDS at the same `koff`.
 
-A split-K plan (``SplitK``) cuts a GEMM too narrow to fill the grid along K;
-its partials ``[split, token, row]`` (f32) are summed in split order by a
-later phase or by the row group's last arriving unit (``fold``).
+A split-K plan (`SplitK`) cuts a GEMM too narrow to fill the grid along K;
+its partials `[split, token, row]` (f32) are summed in split order by a
+later phase or by the row group's last arriving unit (`fold`).
 """
 
 from __future__ import annotations
@@ -85,14 +85,14 @@ def resident(rows: int) -> bool:
 
 
 def resident_stride(chunks: int) -> int:
-    """i32 words of a resident stage row of ``chunks`` K chunks; 16 pad bytes
+    """i32 words of a resident stage row of `chunks` K chunks; 16 pad bytes
     stagger the rows over the banks."""
     return chunks * CHUNK // 2 + 4
 
 
 def stage_words(rows: int, chunks: int = 1) -> int:
     """i32 words of a GEMM's LDS stage: two chunk buffers of every padded row,
-    or, at a resident width, ``chunks`` K chunks of every real row if larger."""
+    or, at a resident width, `chunks` K chunks of every real row if larger."""
     words = 2 * token_tiles(rows) * TILE * XSTRIDE
     if resident(rows):
         words = max(words, rows * resident_stride(chunks))
@@ -109,7 +109,7 @@ def i32(v) -> fx.Int32:
 
 
 class Bf16Weights(TraceInvariant):
-    """A bf16 ``[rows, cols]`` row-major matrix at byte address ``addr``."""
+    """A bf16 `[rows, cols]` row-major matrix at byte address `addr`."""
 
     window = 6  # chunks a resident unit keeps in flight (16 VGPRs a chunk)
 
@@ -121,9 +121,9 @@ class Bf16Weights(TraceInvariant):
         return i32(32 * m) + g * i32(8)
 
     def issue(self, row, chunk, g, mask=None):
-        """The lane's four 16-byte loads of chunk ``chunk``; a row past ``rows``
-        reads the last row, a column past ``cols`` loads as zero. With
-        ``mask`` false, no request (zeros)."""
+        """The lane's four 16-byte loads of chunk `chunk`; a row past `rows`
+        reads the last row, a column past `cols` loads as zero. With
+        `mask` false, no request (zeros)."""
         row = (row < i32(self.rows)).select(row, i32(self.rows - 1))
         out = []
         for m in range(SLICES):
@@ -149,11 +149,11 @@ class Bf16Weights(TraceInvariant):
 
 
 class Fp4Weights(TraceInvariant):
-    """An MXFP4 ``[rows, cols]`` matrix (e2m1, one E8M0 scale per 32 K) decoded to
-    bf16 operands in registers. ``shuffled``: AITER's ASM-GEMM layout (data
-    through ``shuffle_weight(layout=(16, 16))``, scales through
-    ``e8m0_shuffle``); else the Triton FP4 GEMM's (data row-major ``[rows,
-    cols / 2]``, scales transposed ``[cols / 32, rows]``)."""
+    """An MXFP4 `[rows, cols]` matrix (e2m1, one E8M0 scale per 32 K) decoded to
+    bf16 operands in registers. `shuffled`: AITER's ASM-GEMM layout (data
+    through `shuffle_weight(layout=(16, 16))`, scales through
+    `e8m0_shuffle`); else the Triton FP4 GEMM's (data row-major `[rows,
+    cols / 2]`, scales transposed `[cols / 32, rows]`)."""
 
     window = 16  # chunks a resident unit keeps in flight (5 VGPRs a chunk)
 
@@ -195,8 +195,8 @@ class Fp4Weights(TraceInvariant):
         return kb * i32(self.rows) + row
 
     def issue(self, row, chunk, g, mask=None):
-        """The lane's 16-byte data load and its scale byte of chunk ``chunk``;
-        with ``mask`` false, no request (zeros)."""
+        """The lane's 16-byte data load and its scale byte of chunk `chunk`;
+        with `mask` false, no request (zeros)."""
         row = (row < i32(self.rows)).select(row, i32(self.rows - 1))
         at = self._data_word(row, chunk, g)
         if mask is None:
@@ -234,11 +234,11 @@ class Fp4Weights(TraceInvariant):
 
 
 class Source(TraceInvariant):
-    """Activations ``X[token, k]``: ``issue(token, k)`` returns the raw loads of 8
-    elements (as stored, no arithmetic), ``convert(raw)`` their 8 bf16 as four
-    packed i32 words. ``fill`` issues a chunk a K step ahead and ``put``
+    """Activations `X[token, k]`: `issue(token, k)` returns the raw loads of 8
+    elements (as stored, no arithmetic), `convert(raw)` their 8 bf16 as four
+    packed i32 words. `fill` issues a chunk a K step ahead and `put`
     converts after the step's MFMAs, so the wait for the loads lands behind the
-    matrix work. Default: a bf16 ``[tokens, ld]`` matrix at ``addr``."""
+    matrix work. Default: a bf16 `[tokens, ld]` matrix at `addr`."""
 
     def __init__(self, addr=None, ld_elems: int = 0, cm: int = CM_DEV):
         self.addr, self.ld, self.cm = (
@@ -251,7 +251,7 @@ class Source(TraceInvariant):
         return [ld_i32x4(self.addr, (token * i32(self.ld) + k) // i32(2), self.cm)]
 
     def issue_batch(self, coords):
-        """``issue`` of every (token, k) of ``coords``: a resident stage's
+        """`issue` of every (token, k) of `coords`: a resident stage's
         loads of one thread."""
         return [self.issue(token, k) for token, k in coords]
 
@@ -260,9 +260,9 @@ class Source(TraceInvariant):
 
 
 class Mx4Source(Source):
-    """MXFP4 activations ``X[token, k]`` (e2m1 codes ``[tokens, k / 2]`` bytes
-    at ``codes``, a scale code word a 32-group ``[tokens, k / 32]`` at
-    ``scales``, ``mx``'s layout), decoded to bf16 as staged: e2m1 times a
+    """MXFP4 activations `X[token, k]` (e2m1 codes `[tokens, k / 2]` bytes
+    at `codes`, a scale code word a 32-group `[tokens, k / 32]` at
+    `scales`, `mx`'s layout), decoded to bf16 as staged: e2m1 times a
     power of two is exact in bf16, so the bf16 MFMA's products are the W4A4
     GEMM's."""
 
@@ -294,11 +294,11 @@ class Mx4Source(Source):
 
 
 class Gemm(TraceInvariant):
-    """The staged-activation K loop for one step width ``rows`` (the tokens).
-    ``page``: the LDS stage (``stage_words(rows, chunks)`` i32 words),
-    ``k_total``: K when it is not a multiple of ``CHUNK`` (activations past it
-    stage as 0). At a resident width a unit's K slice (at most ``chunks``
-    chunks) of the real rows is staged once (``_resident``)."""
+    """The staged-activation K loop for one step width `rows` (the tokens).
+    `page`: the LDS stage (`stage_words(rows, chunks)` i32 words),
+    `k_total`: K when it is not a multiple of `CHUNK` (activations past it
+    stage as 0). At a resident width a unit's K slice (at most `chunks`
+    chunks) of the real rows is staged once (`_resident`)."""
 
     def __init__(
         self,
@@ -362,11 +362,11 @@ class Gemm(TraceInvariant):
         return [self.operand(buf, t, m, koff) for m in range(SLICES)]
 
     def run_kwaves(self, source, weights, row, first, count: int, pending=None):
-        """One 16-row weight tile (the lane's row ``row``) over chunks ``first
-        .. first + count`` of a resident stage, wave ``w`` multiplying chunks
-        ``w count / 4 ..`` of them; the waves' accumulators are then added in
+        """One 16-row weight tile (the lane's row `row`) over chunks `first
+        .. first + count` of a resident stage, wave `w` multiplying chunks
+        `w count / 4 ..` of them; the waves' accumulators are then added in
         wave order through the stage. Returns the sums, one a token tile, the
-        same in every wave. ``pending``: the wave's weights (``issue_unit``)."""
+        same in every wave. `pending`: the wave's weights (`issue_unit`)."""
         if not self.resident:
             raise ValueError("K waves need a resident stage")
         if count > self.chunks:
@@ -407,13 +407,13 @@ class Gemm(TraceInvariant):
         return out
 
     def multiply(self, buf, a, acc, weights):
-        """``acc`` plus the chunk in LDS buffer ``buf`` times the weight
-        operands ``a`` ([mtile][slice])."""
+        """`acc` plus the chunk in LDS buffer `buf` times the weight
+        operands `a` (`[mtile][slice]`)."""
         return self.mma_tiles(acc, a, lambda t: self.operands(buf, t, weights.koff))
 
     def stage(self, source, weights, rows, first, count: int, i, pre=None):
-        """The activation and weight loads of chunk ``first + min(i, count - 1)``;
-        ``pre``: its weight loads, already issued (``preload``)."""
+        """The activation and weight loads of chunk `first + min(i, count - 1)`;
+        `pre`: its weight loads, already issued (`preload`)."""
         chunk = first + (i < i32(count)).select(i, i32(count - 1))
         xs = self.fill(source, chunk)
         if pre is None:
@@ -421,10 +421,10 @@ class Gemm(TraceInvariant):
         return xs, pre
 
     def preload(self, weights, rows, first, count: int, mask=None):
-        """The weight loads ``run`` stages outside its loop (every chunk when
-        ``count`` <= UNROLL, else the first ``depth``), to issue before the
-        phase (weights do not depend on the phase before) and pass to ``run``
-        as ``pending``."""
+        """The weight loads `run` stages outside its loop (every chunk when
+        `count` <= UNROLL, else the first `depth`), to issue before the
+        phase (weights do not depend on the phase before) and pass to `run`
+        as `pending`."""
         n = count if count <= UNROLL else min(self.depth, count)
         return [
             [weights.issue(r, first + i32(i), self.group, mask) for r in rows]
@@ -432,11 +432,11 @@ class Gemm(TraceInvariant):
         ]
 
     def run(self, source, weights, rows, first, count: int, pending=None):
-        """Accumulate chunks ``first .. first + count`` (a trace-time count) into
-        one accumulator per (weight tile, token tile); ``rows``: the lane's
-        weight row of each weight tile. ``pending``: the unit's weights already
-        in flight, at the resident widths every chunk's (``issue_chunks``),
-        else ``preload``'s of the first chunks."""
+        """Accumulate chunks `first .. first + count` (a trace-time count) into
+        one accumulator per (weight tile, token tile); `rows`: the lane's
+        weight row of each weight tile. `pending`: the unit's weights already
+        in flight, at the resident widths every chunk's (`issue_chunks`),
+        else `preload`'s of the first chunks."""
         if self.resident:
             return self._resident(source, weights, rows, first, count, pending)
         pre = list(pending or ())
@@ -449,11 +449,11 @@ class Gemm(TraceInvariant):
     # resident_stride(count)`` words, its K slice contiguous
     def _resident(self, source, weights, rows, first, count: int, pending):
         """The unit's activations first, then the weights of its first
-        ``weights.window`` chunks, then the activations to LDS behind one
+        `weights.window` chunks, then the activations to LDS behind one
         barrier, then each chunk's MFMAs, waiting only for its own weights
-        (``vmcnt`` counts in issue order: the activations land first, the
-        weights stream in under the MFMAs), chunk ``c + window`` issued as
-        chunk ``c`` multiplies. A closing barrier frees the stage for the next
+        (`vmcnt` counts in issue order: the activations land first, the
+        weights stream in under the MFMAs), chunk `c + window` issued as
+        chunk `c` multiplies. A closing barrier frees the stage for the next
         unit."""
         if count > self.chunks:
             raise ValueError(f"{count} K chunks past the stage's {self.chunks}")
@@ -479,8 +479,8 @@ class Gemm(TraceInvariant):
         return acc
 
     def _resident_vectors(self, count: int):
-        """This thread's 8-element vectors of a resident stage: ``tid, tid +
-        THREADS, ...``; past the last one a thread repeats it (the same value to
+        """This thread's 8-element vectors of a resident stage: `tid, tid +
+        THREADS, ...`; past the last one a thread repeats it (the same value to
         the same address)."""
         n = self.batch * count * (CHUNK // 8)
         out = []
@@ -521,8 +521,8 @@ class Gemm(TraceInvariant):
             lds_st(self.page + at, fx.Vector(words))
 
     def operands_resident(self, c, count: int, t: int, koff):
-        """Token tile ``t``'s four slice operands of chunk ``c`` of a resident
-        stage of ``count`` chunks (a token past the step reads the last row)."""
+        """Token tile `t`'s four slice operands of chunk `c` of a resident
+        stage of `count` chunks (a token past the step reads the last row)."""
         token = i32(t * TILE) + self.lane % i32(TILE)
         if (t + 1) * TILE > self.batch:
             token = (token < i32(self.batch)).select(token, i32(self.batch - 1))
@@ -535,9 +535,9 @@ class Gemm(TraceInvariant):
         ]
 
     def mma_tiles(self, acc, a, operands):
-        """``acc`` plus the weight operands ``a`` ([mtile][slice]) times the B
-        operands ``operands(t)`` of each token tile; tile ``t + 1``'s are read
-        while tile ``t``'s MFMAs run."""
+        """`acc` plus the weight operands `a` (`[mtile][slice]`) times the B
+        operands `operands(t)` of each token tile; tile `t + 1`'s are read
+        while tile `t`'s MFMAs run."""
         acc = [list(r) for r in acc]
         ops = operands(0)
         for t in range(self.tiles):
@@ -573,12 +573,12 @@ class Gemm(TraceInvariant):
 
 @traced
 def _gemm_loop(gemm, source, weights, rows, first, count, pre):
-    """``Gemm.run`` for a long K, unrolled by ``depth``: slot ``j`` holds the
-    loads of chunk ``c + j``; once chunk ``c`` has multiplied and chunk ``c +
-    1``'s activations are staged, its slot is re-issued with chunk ``c +
-    depth``, so a slot keeps its registers across iterations (a rotating ring
+    """`Gemm.run` for a long K, unrolled by `depth`: slot `j` holds the
+    loads of chunk `c + j`; once chunk `c` has multiplied and chunk `c +
+    1`'s activations are staged, its slot is re-issued with chunk `c +
+    depth`, so a slot keeps its registers across iterations (a rotating ring
     is copied at the back edge, and a copy waits out the loads in flight).
-    Chunks past ``count`` re-issue the last one."""
+    Chunks past `count` re-issue the last one."""
     depth = gemm.depth
     if depth < 2:
         raise ValueError("the K loop stages chunk c + 1 from the next slot")
@@ -617,12 +617,12 @@ def _gemm_loop(gemm, source, weights, rows, first, count, pre):
 
 
 class SplitK(TraceInvariant):
-    """A GEMM of ``rows`` weight rows over ``k`` columns cut into ``splits`` K
-    slices, one unit per (row group, slice); a row group is ``ROWS * mtiles``
-    rows, or with ``kwaves`` one 16-row tile whose K slice the four waves
-    share (``Gemm.run_kwaves``). Partials index rows from 0 with stride
-    ``padded``. When the chunks do not divide evenly, the first ``long``
-    slices take ``per + 1`` chunks, the others ``per``; ``max_per`` is the
+    """A GEMM of `rows` weight rows over `k` columns cut into `splits` K
+    slices, one unit per (row group, slice); a row group is `ROWS * mtiles`
+    rows, or with `kwaves` one 16-row tile whose K slice the four waves
+    share (`Gemm.run_kwaves`). Partials index rows from 0 with stride
+    `padded`. When the chunks do not divide evenly, the first `long`
+    slices take `per + 1` chunks, the others `per`; `max_per` is the
     longest."""
 
     def __init__(
@@ -647,7 +647,7 @@ class SplitK(TraceInvariant):
         return self.groups * self.splits
 
     def first_chunk(self, split):
-        """Slice ``split``'s first chunk (``split`` may be traced)."""
+        """Slice `split`'s first chunk (`split` may be traced)."""
         if self.long == 0:
             return split * i32(self.per)
         return split * i32(self.per) + fx.min(split, i32(self.long))
@@ -658,7 +658,7 @@ class SplitK(TraceInvariant):
 
 def unit_rows(plan, unit, tid):
     """(group, split, the wave's first row a weight tile, the lane's row a
-    weight tile) of ``unit``."""
+    weight tile) of `unit`."""
     wave, lane = tid // i32(LANES), tid % i32(LANES)
     group, split = unit % i32(plan.groups), unit // i32(plan.groups)
     if plan.kwaves:
@@ -671,16 +671,16 @@ def unit_rows(plan, unit, tid):
 
 
 def issue_chunks(weights, rows, first, count: int, group):
-    """The weight loads of chunks ``first .. first + count`` of a lane's
-    ``rows`` (one a weight tile), ``[chunk][weight tile]``."""
+    """The weight loads of chunks `first .. first + count` of a lane's
+    `rows` (one a weight tile), `[chunk][weight tile]`."""
     return [
         [weights.issue(r, first + i32(c), group) for r in rows] for c in range(count)
     ]
 
 
 def issue_unit(bid, tid, weights, plan):
-    """The weights of CTA ``bid``'s first unit of ``plan`` (``gemm_units``'s
-    ``pending``), every chunk in flight (with ``kwaves`` the wave's share);
+    """The weights of CTA `bid`'s first unit of `plan` (`gemm_units`'s
+    `pending`), every chunk in flight (with `kwaves` the wave's share);
     a CTA past the last unit loads the last unit's and drops them. Weights
     are immutable, so they may be issued before the phase's grid wait."""
     unit = (i32(bid) < i32(plan.units)).select(i32(bid), i32(plan.units - 1))
@@ -701,10 +701,10 @@ def issue_unit(bid, tid, weights, plan):
 
 
 def unit_preload(gemm, weights, plan, bid):
-    """Past ``RESIDENT_MAX``, the weight loads of ``run``'s first chunks
-    (``Gemm.preload``) of CTA ``bid``'s unit of ``plan``, for
-    ``gemm_units(pending=...)``: issued in an earlier phase (weights do not
-    depend on it), so they land while the grid waits. ``plan`` has at most one
+    """Past `RESIDENT_MAX`, the weight loads of `run`'s first chunks
+    (`Gemm.preload`) of CTA `bid`'s unit of `plan`, for
+    `gemm_units(pending=...)`: issued in an earlier phase (weights do not
+    depend on it), so they land while the grid waits. `plan` has at most one
     unit a CTA; a CTA without one issues no request."""
     assert plan.units <= BLOCKS, (plan.units, BLOCKS)
     live = bid < i32(plan.units)
@@ -741,12 +741,12 @@ def _gemm_unit(gemm, source, weights, plan, epilogue, after, unit, pending):
 def gemm_units(
     bid, workers, gemm, source, weights, plan, epilogue, after=None, pending=None
 ):
-    """Run every unit of ``plan`` over the grid: CTA ``bid`` takes units
-    ``bid, bid + workers, ...``. ``epilogue(unit, split, first_row, lane, acc)``
-    finishes a weight tile's accumulators; ``after(group, split)``, when given,
-    runs once a unit behind all waves' epilogues (CTA-uniform). ``pending``:
-    the first unit's weights, ``issue_unit``'s at the resident widths,
-    ``unit_preload``'s at the others."""
+    """Run every unit of `plan` over the grid: CTA `bid` takes units
+    `bid, bid + workers, ...`. `epilogue(unit, split, first_row, lane, acc)`
+    finishes a weight tile's accumulators; `after(group, split)`, when given,
+    runs once a unit behind all waves' epilogues (CTA-uniform). `pending`:
+    the first unit's weights, `issue_unit`'s at the resident widths,
+    `unit_preload`'s at the others."""
     start = bid
     if const_expr(pending is not None):
         if bid < i32(plan.units):
@@ -757,7 +757,7 @@ def gemm_units(
 
 
 def partial_epilogue(gemm, plan, part):
-    """Each unit's accumulators to ``part[(split, token, row)]`` (f32, device
+    """Each unit's accumulators to `part[(split, token, row)]` (f32, device
     scope)."""
 
     @traced
@@ -777,7 +777,7 @@ def partial_epilogue(gemm, plan, part):
 
 
 def sum_partials4(part, plan, tokens: int, token, row):
-    """Rows ``row .. row + 3`` of ``token`` summed over the splits in split
+    """Rows `row .. row + 3` of `token` summed over the splits in split
     order; every split's 16-byte load is issued before the first add."""
     loads = [
         ld(
@@ -797,14 +797,14 @@ def sum_partials4(part, plan, tokens: int, token, row):
 
 def fold(g, gemm, plan, part, counter0, finish, done=None, other=None, begin=None):
     """Split-K units whose row group's last arriving unit sums the group's
-    partials and finishes them: ``finish(group, first_row, lane, acc)`` with the
+    partials and finishes them: `finish(group, first_row, lane, acc)` with the
     summed accumulators of each weight tile, in the epilogue's layout, then
-    ``done(group)`` (CTA-uniform, when given). ``begin(group, first_row,
-    lane)`` (when given) runs on the last arriver before each tile's partial
-    loads, to issue loads ``finish`` needs alongside them. With two splits,
-    ``other(group)`` (CTA-uniform, when given) runs on the group's first
-    arriver instead. Returns the (epilogue, after) pair of ``gemm_units``;
-    ``counter0`` is the first of the plan's ``groups`` fold counters."""
+    `done(group)` (CTA-uniform, when given). `begin(group, first_row,
+    lane)` (when given) runs on the last arriver before each tile's partial
+    loads, to issue loads `finish` needs alongside them. With two splits,
+    `other(group)` (CTA-uniform, when given) runs on the group's first
+    arriver instead. Returns the (epilogue, after) pair of `gemm_units`;
+    `counter0` is the first of the plan's `groups` fold counters."""
     assert other is None or plan.splits == 2, plan.splits
     epilogue = partial_epilogue(gemm, plan, part)
 

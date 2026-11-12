@@ -1,19 +1,19 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 """The launches of one decoder layer: vLLM's modules and tensors in, the
-kernels' arguments out (``Launcher``), and ``attention_core``, the part of a
+kernels' arguments out (`Launcher`), and `attention_core`, the part of a
 full-attention layer that stays vLLM's (q / k norms, RoPE and the attention on
 the qkv rows the previous launch projected).
 
-Up to ``K.SPLIT_MAX`` rows a layer's MLP half is ``mono.blocks.layer_block``
-(``Launcher.mono_layer``) after the layer's split launch (``LayerBuild.split``)
-and the final norm is vLLM's (``gemma_norm``); up to ``MONO_GDN_MAX`` rows a
-GDN layer whose in_proj_qkvz is plain MXFP4 runs ``mono.blocks.gdn_block``
-instead of its split launch (``Launcher.mono_gdn``).
+Up to `K.SPLIT_MAX` rows a layer's MLP half is `mono.blocks.layer_block`
+(`Launcher.mono_layer`) after the layer's split launch (`LayerBuild.split`)
+and the final norm is vLLM's (`gemma_norm`); up to `MONO_GDN_MAX` rows a
+GDN layer whose in_proj_qkvz is plain MXFP4 runs `mono.blocks.gdn_block`
+instead of its split launch (`Launcher.mono_gdn`).
 
-``Launcher`` holds the per-rank state every launch reads: the scratch every
+`Launcher` holds the per-rank state every launch reads: the scratch every
 width shares (launches of a step run in order), the two barrier slots the
-launches of a step alternate (``wide.common.grid``), the fold counters, the
+launches of a step alternate (`wide.common.grid`), the fold counters, the
 step epoch (bumped once a step; a CUDA graph captures the bump, and the TP
 exchange and tagged hand-off tags carry it), the health words and the peer
 mailboxes of the TP exchange."""
@@ -23,9 +23,9 @@ import torch
 from vllm.model_executor.layers.fused_qk_norm_rope import fused_qk_rmsnorm_rope_gate
 from vllm.model_executor.layers.utils import warmup_rocm_skinny_gemm_workspaces
 from vllm.models.qwen3_5.amd.specialized_decode.runtime.guards import (
+    checked_format,
     experts_rip,
     gdn_states,
-    linear_format,
     routed_experts,
     router_gate,
 )
@@ -69,7 +69,7 @@ def _is_gdn(layer) -> bool:
 
 
 def _scales(linear):
-    return 0 if linear_format(linear).fmt == "bf16" else linear.weight_scale
+    return 0 if checked_format(linear).fmt == "bf16" else linear.weight_scale
 
 
 class Launcher:
@@ -123,10 +123,10 @@ class Launcher:
             self._init_split(group, dev)
 
     def _init_split(self, group, dev) -> None:
-        """The state of the split widths' ``layer_block`` launches: its scratch
-        a width, its peer buffer and health words (``mono.abi``), and the
-        hand-off rows between the launches (``h`` the MLP half's output,
-        ``res`` the residual, ``core`` the GDN launch's)."""
+        """The state of the split widths' `layer_block` launches: its scratch
+        a width, its peer buffer and health words (`mono.abi`), and the
+        hand-off rows between the launches (`h` the MLP half's output,
+        `res` the residual, `core` the GDN launch's)."""
         from vllm.models.qwen3_5.amd.specialized_decode.mono import blocks
         from vllm.models.qwen3_5.amd.specialized_decode.mono import layout as ML
         from vllm.models.qwen3_5.amd.specialized_decode.mono.abi import (
@@ -178,7 +178,7 @@ class Launcher:
         }
 
     def view(self, name: str, rows: int, cols: int) -> torch.Tensor:
-        """Scratch buffer ``name`` of a ``rows`` step as [rows, cols] bf16."""
+        """Scratch buffer `name` of a `rows` step as [rows, cols] bf16."""
         off, n = K.scratch_layout(rows, self.rip)[name]
         assert n >= rows * cols * 2, (name, n, rows, cols)
         return (
@@ -251,7 +251,7 @@ class Launcher:
                 }
 
     def key(self, i: int, rows: int) -> K.LayerBuild:
-        """Layer ``i``'s build at ``rows``."""
+        """Layer `i`'s build at `rows`."""
         layers = self.model.layers
         layer = layers[i]
         if rows <= K.SPLIT_MAX:
@@ -259,7 +259,7 @@ class Launcher:
         nxt = layers[i + 1] if i + 1 < len(layers) else None
         next_q4 = "none"
         if nxt is not None and _is_gdn(nxt):
-            nq = linear_format(nxt.linear_attn.in_proj_qkvz)
+            nq = checked_format(nxt.linear_attn.in_proj_qkvz)
             next_q4 = K.q4_of(nq.fmt, nq.shuffled) or "none"
         common = dict(
             tokens=rows,
@@ -273,7 +273,7 @@ class Launcher:
         if not _is_gdn(layer):
             return K.LayerBuild(kind="attn", **common)
         g = layer.linear_attn
-        qkvz, out = linear_format(g.in_proj_qkvz), linear_format(g.out_proj)
+        qkvz, out = checked_format(g.in_proj_qkvz), checked_format(g.out_proj)
         first_q4 = "none"
         if i == 0:
             first_q4 = K.q4_of(qkvz.fmt, qkvz.shuffled) or "none"
@@ -302,7 +302,7 @@ class Launcher:
                 split=True,
             )
         g = layer.linear_attn
-        qkvz, out = linear_format(g.in_proj_qkvz), linear_format(g.out_proj)
+        qkvz, out = checked_format(g.in_proj_qkvz), checked_format(g.out_proj)
         return K.LayerBuild(
             kind="gdn",
             tokens=rows,
@@ -321,14 +321,14 @@ class Launcher:
         )
 
     def mono_key(self, i: int, rows: int):
-        """Layer ``i``'s ``layer_block`` build at a split width: out_proj /
-        o_proj's format as ``linear_format`` reads it (an "mxfp4_h32" out_proj
+        """Layer `i`'s `layer_block` build at a split width: out_proj /
+        o_proj's format as `checked_format` reads it (an "mxfp4_h32" out_proj
         reads the rotated core the GDN launch leaves)."""
         from vllm.models.qwen3_5.amd.specialized_decode.mono import blocks
 
         layer = self.model.layers[i]
         o = layer.linear_attn.out_proj if _is_gdn(layer) else layer.self_attn.o_proj
-        f = linear_format(o)
+        f = checked_format(o)
         if not _is_gdn(layer) and f.fmt == "mxfp4_h32":
             raise ValueError("a Hadamard-rotated o_proj: its input is not rotated")
         return blocks.LayerBuild(
@@ -340,8 +340,8 @@ class Launcher:
         )
 
     def launch(self, key, i: int, seq: int, dynamic: dict) -> int:
-        """Launch ``key`` for layer ``i`` as the step's launch ``seq`` (which
-        picks its barrier slots); returns the next ``seq``."""
+        """Launch `key` for layer `i` as the step's launch `seq` (which
+        picks its barrier slots); returns the next `seq`."""
         a = self.args[i] | dynamic
         sync, nxt = launch_slots(self.launch_count[key.tokens])[seq]
         a["sync"] = self.slots[sync]
@@ -350,7 +350,7 @@ class Launcher:
         return seq + 1
 
     def mono_gdn_layer(self, i: int, rows: int) -> bool:
-        """Whether layer ``i`` runs ``gdn_block`` at ``rows``: a GDN layer with
+        """Whether layer `i` runs `gdn_block` at `rows`: a GDN layer with
         a plain MXFP4 in_proj_qkvz (gdn_block's only format) and an out_proj
         that reads an unrotated core."""
         layer = self.model.layers[i]
@@ -358,8 +358,8 @@ class Launcher:
             return False
         g = layer.linear_attn
         return (
-            linear_format(g.in_proj_qkvz).fmt == "mxfp4"
-            and linear_format(g.out_proj).fmt != "mxfp4_h32"
+            checked_format(g.in_proj_qkvz).fmt == "mxfp4"
+            and checked_format(g.out_proj).fmt != "mxfp4_h32"
         )
 
     def gdn_key(self, i: int, rows: int, first: bool):
@@ -372,13 +372,13 @@ class Launcher:
             first=first,
             eps=layer.input_layernorm.variance_epsilon,
             norm_eps=g.norm.eps,
-            shuffled=linear_format(g.in_proj_qkvz).shuffled,
+            shuffled=checked_format(g.in_proj_qkvz).shuffled,
         )
 
     def mono_gdn(self, i: int, h, residual, st_idx):
-        """Layer ``i``'s residual add + input_layernorm and ``linear_attn`` up
-        to out_proj's input (``gdn_block``; ``residual`` None on the first
-        layer) -> (the core, the residual) in ``core`` and ``gdn_res``."""
+        """Layer `i`'s residual add + input_layernorm and `linear_attn` up
+        to out_proj's input (`gdn_block`; `residual` None on the first
+        layer) -> (the core, the residual) in `core` and `gdn_res`."""
         from vllm.models.qwen3_5.amd.specialized_decode.mono import blocks
 
         g = self.model.layers[i].linear_attn
@@ -411,10 +411,10 @@ class Launcher:
         return core, res_out
 
     def mono_layer(self, i: int, core, gate, residual):
-        """Layer ``i``'s out_proj / o_proj, its all-reduce, the residual add +
+        """Layer `i`'s out_proj / o_proj, its all-reduce, the residual add +
         post_attention_layernorm and the MoE with its all-reduce
-        (``layer_block``) -> (the layer's output, the residual) in ``h`` and
-        ``res``."""
+        (`layer_block`) -> (the layer's output, the residual) in `h` and
+        `res`."""
         from vllm.models.qwen3_5.amd.specialized_decode.mono import blocks
 
         layer = self.model.layers[i]
@@ -452,7 +452,7 @@ class Launcher:
 
 
 def attention_core(attn, qkv, positions) -> tuple[torch.Tensor, torch.Tensor]:
-    """``Qwen3NextAttention.forward`` from qkv_proj's output to o_proj's
+    """`Qwen3NextAttention.forward` from qkv_proj's output to o_proj's
     input, without the output gate (the attn launch applies it): the split,
     q / k norms, RoPE and gate copy in one launch, then the attention ->
     (attention output [S, heads HD], gate [S, heads HD])."""
@@ -485,7 +485,7 @@ def attention_core(attn, qkv, positions) -> tuple[torch.Tensor, torch.Tensor]:
 def _gemma_add_rms_norm(
     x: torch.Tensor, residual: torch.Tensor, weight: torch.Tensor, eps: float
 ) -> tuple[torch.Tensor, torch.Tensor]:
-    """``GemmaRMSNorm.forward_native(x, residual)`` in one launch: this forward
+    """`GemmaRMSNorm.forward_native(x, residual)` in one launch: this forward
     is not torch.compiled, so the CustomOp would run as ~10 eager kernels."""
     t = x.float() + residual.float()
     res = t.to(x.dtype)
@@ -494,5 +494,5 @@ def _gemma_add_rms_norm(
 
 
 def gemma_norm(norm, x, residual) -> tuple[torch.Tensor, torch.Tensor]:
-    """A ``GemmaRMSNorm`` with the residual add -> (x, the residual)."""
+    """A `GemmaRMSNorm` with the residual add -> (x, the residual)."""
     return _gemma_add_rms_norm(x, residual, norm.weight, norm.variance_epsilon)

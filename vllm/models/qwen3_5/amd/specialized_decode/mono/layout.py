@@ -1,11 +1,11 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
-"""Qwen3.8 (``Qwen3_5MoeForCausalLM``, amd/Qwen3.8-2.4T-A95B): the shapes the
+"""Qwen3.8 (`Qwen3_5MoeForCausalLM`, amd/Qwen3.8-2.4T-A95B): the shapes the
 kernels are built for, at TP8 (the only TP size they serve), so every shape
 below is a compile-time constant of a kernel.
 
 The routed experts and the online-MXFP4 linears (in_proj_qkvz, out_proj)
-hold the layouts in ``mx_layout``.
+hold the layouts in `mx_layout`.
 """
 
 import torch
@@ -83,7 +83,7 @@ assert ATTN_HEADS // TP * ATTN_HD == CORE and RIP % 128 == 0
 
 
 def need(ok: bool, what: str) -> None:
-    """A launch argument check that ``python -O`` keeps: the kernels read
+    """A launch argument check that `python -O` keeps: the kernels read
     out-of-bounds memory silently where a fault would be wanted."""
     if not ok:
         raise ValueError(f"Qwen3.8 specialized decode: {what}")

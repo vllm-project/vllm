@@ -1,25 +1,25 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
-"""The tensor-parallel all-reduce of a block's output ``y_r [rows, HIDDEN]``
+"""The tensor-parallel all-reduce of a block's output `y_r [rows, HIDDEN]`
 over peer mailboxes, in lines: every rank ends with the same bf16 sum of the
 ranks' partials, added in rank order.
 
 Lines: a partial is stored as lines ordered by (column group, token block):
-group ``g`` is columns ``64 g .. 64 g + 63`` (one row group of the producing
+group `g` is columns `64 g .. 64 g + 63` (one row group of the producing
 GEMM, whose last arriving unit pushes it), a line eight tokens of one group,
-256 dwords of bf16. Lane ``l`` of the wave that writes a line holds token
-``l // 8`` of the block, columns ``8 (l % 8) ..``. A step whose rows are not
+256 dwords of bf16. Lane `l` of the wave that writes a line holds token
+`l // 8` of the block, columns `8 (l % 8) ..`. A step whose rows are not
 a multiple of eight ends each group with a partial line: only its rows'
 tokens are stored and read, at the same addresses as in a whole line.
 
-An exchange's ``mode``:
+An exchange's `mode`:
 
-- ``sum`` (one-shot, up to ``ONE_SHOT_MAX`` rows): every rank pushes every
+- `sum` (one-shot, up to `ONE_SHOT_MAX` rows): every rank pushes every
   group to every rank; a reader adds the ranks' copies in rank order. Every
   link carries the whole tensor, one hop.
-- ``scatter`` then ``gather`` (two-shot, wider steps): group ``g``'s owner
-  is rank ``g // OWNED``; every rank pushes ``g`` to its owner only, the
-  owner adds the copies in rank order (``reduce_lines``) and pushes the sum,
+- `scatter` then `gather` (two-shot, wider steps): group `g`'s owner
+  is rank `g // OWNED`; every rank pushes `g` to its owner only, the
+  owner adds the copies in rank order (`reduce_lines`) and pushes the sum,
   rounded to bf16, to every rank. A link carries an eighth of the tensor
   each way, two hops.
 
@@ -113,7 +113,7 @@ def _region_words(mode: str, tp: int) -> int:
 
 
 def region_base(kind: int, mode: str, parity, tp: int = TP):
-    """Word offset of region (kind, mode, parity) in a mailbox; ``parity`` may
+    """Word offset of region (kind, mode, parity) in a mailbox; `parity` may
     be traced."""
     base = 0
     for k in range(KINDS):
@@ -139,10 +139,10 @@ def owner(group):
 
 
 class Exchange(TraceInvariant):
-    """One use of a mailbox region: exchange ``kind`` of the layer in ``mode``,
-    this rank ``rank`` of ``tp``, layer parity ``parity``, tagged ``tag``.
-    ``bases``: every rank's mailbox base (wave-uniform Int64, rank order),
-    ``own``: this rank's."""
+    """One use of a mailbox region: exchange `kind` of the layer in `mode`,
+    this rank `rank` of `tp`, layer parity `parity`, tagged `tag`.
+    `bases`: every rank's mailbox base (wave-uniform Int64, rank order),
+    `own`: this rank's."""
 
     def __init__(
         self, bases, own, rank, tp: int, kind: int, mode: str, parity, tag, rows
@@ -183,7 +183,7 @@ class Exchange(TraceInvariant):
         ) * fx.Int32(32)
 
     def dests(self, group):
-        """``(base, live)`` of every rank this rank pushes ``group`` to (live
+        """`(base, live)` of every rank this rank pushes `group` to (live
         None: always)."""
         if const_expr(self.mode == "scatter"):
             own = owner(group)
@@ -191,14 +191,14 @@ class Exchange(TraceInvariant):
         return [(b, None) for b in self.bases]
 
     def sources(self, group):
-        """The ranks a reader takes ``group`` from, in rank order."""
+        """The ranks a reader takes `group` from, in rank order."""
         if const_expr(self.mode == "gather"):
             return [owner(group)]
         return [fx.Int32(r) for r in range(self.tp)]
 
     def put_words(self, group, token, seg, words):
-        """The lane's four packed bf16 dwords of ``token``, columns ``64 group +
-        8 seg ..``, into its destinations' rows of this rank; a token past the
+        """The lane's four packed bf16 dwords of `token`, columns `64 group +
+        8 seg ..`, into its destinations' rows of this rank; a token past the
         step's rows stores nothing."""
         at = self._row(self.rank) + self._word(group, token) + fx.Int32(seg) * 4
         live = fx.Int32(token) < fx.Int32(self.rows) if self.partial else None
@@ -213,7 +213,7 @@ class Exchange(TraceInvariant):
         self.put_words(group, token, seg, pack_bf16x8(vals))
 
     def flag(self, group, blk):
-        """Lane 0's flag of line ``blk`` of ``group``, after the drain."""
+        """Lane 0's flag of line `blk` of `group`, after the drain."""
         at = self._row(self.rank) + fx.Int32(self.flags_at) + self.line(group, blk)
         for base, to in self.dests(group):
             if const_expr(to is None):
@@ -222,8 +222,8 @@ class Exchange(TraceInvariant):
                 _st_if(base, at, self.tag, to)
 
     def get_words(self, src, group, token, seg, gate):
-        """``src``'s four dwords of ``token`` (segment ``seg`` of its group's
-        line) after the poll whose difference ``gate`` (zero) covers it."""
+        """`src`'s four dwords of `token` (segment `seg` of its group's
+        line) after the poll whose difference `gate` (zero) covers it."""
         at = self._row(src) + gate + self._word(group, token) + fx.Int32(seg) * 4
         return ld_i32x4(self.own, at, cm=CM_SYS)
 
@@ -239,8 +239,8 @@ def _st_if(base, at, value, ok):
 
 @traced
 def wait_lines(g, ex, lines):
-    """Poll, from every lane, the flags of ``lines`` (a list of (group, token
-    block) pairs, the lane's own) of every source ``ex.sources(group)`` until
+    """Poll, from every lane, the flags of `lines` (a list of (group, token
+    block) pairs, the lane's own) of every source `ex.sources(group)` until
     all carry the tag, bounded. Returns the differences from the tag (zero
     once the poll ends; 0 or 1, so a timed-out poll's loads stay in bounds),
     one a (line, source) in that order, to add to the payload loads."""
@@ -268,9 +268,9 @@ def wait_lines(g, ex, lines):
 
 
 class GroupTile(TraceInvariant):
-    """An LDS ``[rows, 64]`` bf16 tile (i32 words, a 16-byte pad a row) that a
+    """An LDS `[rows, 64]` bf16 tile (i32 words, a 16-byte pad a row) that a
     producer gathers one column group of every token in before it pushes the
-    group's lines (``push_tile``)."""
+    group's lines (`push_tile`)."""
 
     STRIDE = COLS // 2 + 4
 
@@ -282,7 +282,7 @@ class GroupTile(TraceInvariant):
         return rows * GroupTile.STRIDE
 
     def put_vals(self, token, col, vals4):
-        """Four f32 of ``token`` at columns ``col ..`` of the group, rounded to
+        """Four f32 of `token` at columns `col ..` of the group, rounded to
         bf16."""
         w = fx.Vector.from_elements(list(vals4), fx.Float32)
         lds_st(
@@ -291,9 +291,9 @@ class GroupTile(TraceInvariant):
         )
 
     def put_acc(self, col0, lane, acc, tiles: int, scale=None):
-        """A wave's GEMM accumulators (16 columns from ``col0`` within the
-        group, the epilogue layout: lane ``l`` holds columns ``col0 + 4 (l //
-        16) ..`` of token ``16 t + l % 16``), each times ``scale(token, col)``
+        """A wave's GEMM accumulators (16 columns from `col0` within the
+        group, the epilogue layout: lane `l` holds columns `col0 + 4 (l //
+        16) ..` of token `16 t + l % 16`), each times `scale(token, col)`
         (4 f32) when given, rounded to bf16."""
         for t in range(tiles):
             token = fx.Int32(t * 16) + lane % 16
@@ -308,8 +308,8 @@ class GroupTile(TraceInvariant):
 
 @traced
 def push_tile(g, xch, tile, group):
-    """The tile (column group ``group`` of every token) as exchange lines to
-    the group's destinations: wave ``w`` pushes lines ``w, w + 4, ..``, the
+    """The tile (column group `group` of every token) as exchange lines to
+    the group's destinations: wave `w` pushes lines `w, w + 4, ..`, the
     payload first, one drain, then each line's flag from lane 0."""
     lpg = lines_per_group(tile.rows)
     seg = g.lane % 8
@@ -331,8 +331,8 @@ def push_tile(g, xch, tile, group):
 
 @traced
 def push_line(g, xch, group, blk, vals):
-    """A wave's line ``blk`` of ``group`` (lane ``l``: token ``8 blk + l //
-    8``, columns ``64 group + 8 (l % 8) ..``, 8 f32 rounded to bf16), drained,
+    """A wave's line `blk` of `group` (lane `l`: token `8 blk + l //
+    8`, columns `64 group + 8 (l % 8) ..`, 8 f32 rounded to bf16), drained,
     then flagged from lane 0."""
     token = blk * fx.Int32(TOKENS) + g.lane // 8
     xch.put(group, token, g.lane % 8, vals)
@@ -343,10 +343,10 @@ def push_line(g, xch, group, blk, vals):
 
 @traced
 def reduce_lines(g, sc, ga, wave_id, waves: int):
-    """The owner half of a two-shot all-reduce: wave ``wave_id`` (of ``waves``
-    over the grid) takes lines ``wave_id, wave_id + waves, ..`` of this rank's
-    owned groups, adds the scatter ``sc``'s copies in rank order and pushes
-    the bf16 sum to every rank through the gather ``ga``."""
+    """The owner half of a two-shot all-reduce: wave `wave_id` (of `waves`
+    over the grid) takes lines `wave_id, wave_id + waves, ..` of this rank's
+    owned groups, adds the scatter `sc`'s copies in rank order and pushes
+    the bf16 sum to every rank through the gather `ga`."""
     lines = OWNED * sc.lpg
     for i in range(wave_id, fx.Int32(lines), waves):
         group = sc.rank * fx.Int32(OWNED) + i // fx.Int32(sc.lpg)
@@ -365,14 +365,14 @@ def reduce_lines(g, sc, ga, wave_id, waves: int):
 
 @traced
 def wait_row(g, xch, row, group):
-    """The flags of ``row``'s line of ``group`` from its sources, polled by the
-    calling thread; returns the per-source gates (``wait_lines``)."""
+    """The flags of `row`'s line of `group` from its sources, polled by the
+    calling thread; returns the per-source gates (`wait_lines`)."""
     return wait_lines(g, xch, [(group, fx.Int32(row) // fx.Int32(TOKENS))])
 
 
 def row_sum(xch, row, group, seg, gates):
-    """``row``'s 8 values at segment ``seg`` of ``group`` summed over the
-    sources in rank order (f32), after ``wait_row``'s ``gates``."""
+    """`row`'s 8 values at segment `seg` of `group` summed over the
+    sources in rank order (f32), after `wait_row`'s `gates`."""
     srcs = xch.sources(group)
     loads = [xch.get(s, group, row, seg, gates[i]) for i, s in enumerate(srcs)]
     acc = list(loads[0])

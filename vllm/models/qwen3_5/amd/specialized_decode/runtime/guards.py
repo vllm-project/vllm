@@ -1,9 +1,9 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
-"""The refusals that need the loaded model (``model_reasons``: the module
+"""The refusals that need the loaded model (`model_reasons`: the module
 variants and every weight's dtype and layout as the kernels read it in place)
-and the GDN states vLLM binds (``cache_reasons``), each listing every reason;
-and ``FailStop``, which stops the engine once an in-kernel wait gave up."""
+and the GDN states vLLM binds (`cache_reasons`), each listing every reason;
+and `FailStop`, which stops the engine once an in-kernel wait gave up."""
 
 from typing import NamedTuple
 
@@ -17,9 +17,9 @@ FP4 = (torch.uint8, torch.float4_e2m1fn_x2)
 
 
 class LinearFormat(NamedTuple):
-    """How the kernels read a linear: ``fmt`` "bf16", "mxfp4" or "mxfp4_h32"
+    """How the kernels read a linear: `fmt` "bf16", "mxfp4" or "mxfp4_h32"
     (online MXFP4 of a 32-block Hadamard-rotated weight, the input rotated
-    the same way before its quantization), ``shuffled`` the MXFP4 weight on
+    the same way before its quantization), `shuffled` the MXFP4 weight on
     AITER's ASM FP4 GEMM layout."""
 
     fmt: str
@@ -27,9 +27,9 @@ class LinearFormat(NamedTuple):
 
 
 def linear_format(linear) -> LinearFormat | None:
-    """``linear``'s format, None for one the kernels do not read: unquantized
+    """`linear`'s format, None for one the kernels do not read: unquantized
     (bf16), or online MXFP4 on AITER's FP4 GEMMs, optionally inside a
-    32-block ``InputHadamardLinearMethod``."""
+    32-block `InputHadamardLinearMethod`."""
     from vllm.model_executor.kernels.linear.mxfp4.aiter import AiterMxfp4LinearKernel
     from vllm.model_executor.layers.linear import UnquantizedLinearMethod
     from vllm.model_executor.layers.quantization.input_hadamard import (
@@ -53,6 +53,14 @@ def linear_format(linear) -> LinearFormat | None:
     ):
         return None
     return LinearFormat(fmt, bool(qm.kernel.use_asm_gemm))
+
+
+def checked_format(linear) -> LinearFormat:
+    """`linear_format` of a linear the weight checks accepted."""
+    f = linear_format(linear)
+    if f is None:
+        raise ValueError(f"{type(linear.quant_method).__name__}: not a kernel format")
+    return f
 
 
 def fp4_scale_shape(rows: int, k: int, shuffled: bool) -> tuple[int, int]:
@@ -240,7 +248,7 @@ def _layer_reasons(layer) -> list[str]:
 
 
 def model_reasons(model, tp: int) -> list[str]:
-    """Every reason the kernels cannot serve the loaded ``Qwen3_5Model``."""
+    """Every reason the kernels cannot serve the loaded `Qwen3_5Model`."""
     reasons = []
     if tp != L.TP:
         reasons.append(f"TP {tp}")
@@ -305,8 +313,8 @@ def cache_reasons(model, tp: int) -> list[str]:
 
 class FailStop:
     """Stops every TP rank at the same step once any of them gave up an in-kernel
-    wait (a FAILED health word: the wide launches', ``wide.abi``, and the
-    split widths' ``layer_block``'s, ``mono.abi``). Each step queues a D2H copy of
+    wait (a FAILED health word: the wide launches', `wide.abi`, and the
+    split widths' `layer_block`'s, `mono.abi`). Each step queues a D2H copy of
     this rank's word and keeps the newest copy that has landed, without blocking;
     every CHECK_EVERY steps the ranks agree on those over the TP CPU group and all
     raise together. A rank that raised alone would leave the others in the next

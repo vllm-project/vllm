@@ -1,7 +1,7 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
-"""The decoder layer's two launches, each persistent, ``BLOCKS`` x ``THREADS``,
-S <= ``MAX_TOKENS`` rows:
+"""The decoder layer's two launches, each persistent, `BLOCKS` x `THREADS`,
+S <= `MAX_TOKENS` rows:
 
     gdn    (a GDN layer's residual add + input_layernorm and ``linear_attn``
            up to out_proj's input): h (+ residual) -> the residual out, x =
@@ -17,13 +17,13 @@ S <= ``MAX_TOKENS`` rows:
 Neither keeps x [S, H] in LDS (at 16 rows a bf16 x is 262 KB): the norm tasks
 (CTAs 0 .. NRED - 1) put their columns' sums of squares, and every consumer
 builds what it reads of x from the residual add's inputs in global memory
-(``stages.norm``): the router and in_proj_ba a bf16 K slice, in_proj_qkvz and
+(`stages.norm`): the router and in_proj_ba a bf16 K slice, in_proj_qkvz and
 the routed experts the rows' MXFP4 codes, the shared gate a dot product. From
-``GDN_XQ_MIN`` / ``LAYER_XQ_MIN`` rows the norm tasks quantize their columns
-once into a shared MXFP4 image (``xq``) that in_proj_qkvz and the experts copy
+`GDN_XQ_MIN` / `LAYER_XQ_MIN` rows the norm tasks quantize their columns
+once into a shared MXFP4 image (`xq`) that in_proj_qkvz and the experts copy
 instead: every CTA rebuilding all of x would move 256 x 2 [S, H] bf16 through
 the L2s each launch. A launch's input is a previous launch's output (plain
-loads), except the layer launch's AR sums (``xbuf``), which its norm tasks
+loads), except the layer launch's AR sums (`xbuf`), which its norm tasks
 write in the launch.
 """
 
@@ -228,8 +228,8 @@ def gdn_offset(tokens: int) -> int:
 
 
 def _xq_layout(lay, key):
-    """With ``key.xq``: the x rows' shared MXFP4 image (16 B aligned) past
-    ``lay``."""
+    """With `key.xq`: the x rows' shared MXFP4 image (16 B aligned) past
+    `lay`."""
     if not key.xq:
         return lay
     return lay | pair_layout(
@@ -256,7 +256,7 @@ LAYER_REGIONS = ("msq", "xqf", "rpart", "sgate", "route", "inter")
 
 
 def layer_scratch_layout(key: LayerBuild) -> dict:
-    """The mailbox regions, then ``xbuf``: the AR sums [S, H] bf16 the norm
+    """The mailbox regions, then `xbuf`: the AR sums [S, H] bf16 the norm
     tasks write for the consumers' x (16 B aligned)."""
     s = key.tokens
     lay = pair_layout(
@@ -294,7 +294,7 @@ def peer_layout(s):
 
 
 def peer_bytes(s):
-    """The peer buffer: both parities' regions at ``s`` rows."""
+    """The peer buffer: both parities' regions at `s` rows."""
     return 2 * scratch_bytes(peer_layout(s))
 
 
@@ -586,15 +586,15 @@ def gdn_block(
     alarm,
     layer,
 ):
-    """A GDN layer's residual add + input_layernorm and ``linear_attn`` up to
-    out_proj's input: ``hidden`` [S, H] bf16 (+ ``residual``, None with
-    ``key.first``) -> ``res_out`` [S, H] and ``core`` [S, CORE] bf16. Every
+    """A GDN layer's residual add + input_layernorm and `linear_attn` up to
+    out_proj's input: `hidden` [S, H] bf16 (+ `residual`, None with
+    `key.first`) -> `res_out` [S, H] and `core` [S, CORE] bf16. Every
     weight as vLLM holds it after loading (in_proj_qkvz online MXFP4 with e8m0
-    scales, in the layout of the FP4 GEMM AITER picked: ``key.shuffled``).
-    ``conv_state`` [slots, CONV, 3] or a transposed view of [slots, 3, CONV]
-    (strides read); ``rstate`` [slots, NV, 128, 128] fp32, a slot dense, slots
-    strided; ``st_idx`` [>= S] int32, <= 0 a pad row (no state written, a zero
-    core row); ``epoch`` a device int32 bumped once a step, ``layer`` this
+    scales, in the layout of the FP4 GEMM AITER picked: `key.shuffled`).
+    `conv_state` [slots, CONV, 3] or a transposed view of [slots, 3, CONV]
+    (strides read); `rstate` [slots, NV, 128, 128] fp32, a slot dense, slots
+    strided; `st_idx` [>= S] int32, <= 0 a pad row (no state written, a zero
+    core row); `epoch` a device int32 bumped once a step, `layer` this
     launch's tag slot."""
     s = key.tokens
     bf = torch.bfloat16
@@ -690,7 +690,7 @@ def router_loads(c, i, q):
 
 @traced
 def stage_router(c, i, q, ops, src):
-    """Router task (i, q) on x's K quarter q (``rs`` loaded). Parts q > 0
+    """Router task (i, q) on x's K quarter q (`rs` loaded). Parts q > 0
     publish fp32 partials; part 0 adds them in part order, rounds to bf16
     (GateLinear's output) and puts the logits to every rank's RLOG."""
     s, lane, wave = c["S"], c["lane"], c["wave"]
@@ -721,7 +721,7 @@ def _rlog_at(rlog, s, t, e):
 @traced
 def _x_fp4(c, src, missing):
     """The routed experts' x (RCEIL MXFP4, as the stock decode MoE quantizes
-    it) -> LDS; ``missing``: the CTA has no rstd yet."""
+    it) -> LDS; `missing`: the CTA has no rstd yet."""
     if missing:
         N.load_rstd(c)
     N.x_fp4_to_lds(c, src)
@@ -729,8 +729,8 @@ def _x_fp4(c, src, missing):
 
 @traced
 def _x_ug(c, src, xq, missing):
-    """The routed experts' x -> LDS: the shared MXFP4 image (``xq``), else
-    built here (``_x_fp4``)."""
+    """The routed experts' x -> LDS: the shared MXFP4 image (`xq`), else
+    built here (`_x_fp4`)."""
     if const_expr(xq):
         N.xq_to_lds(c)
     else:
@@ -1007,12 +1007,12 @@ def layer_block(
     gate=None,
 ):
     """out_proj / o_proj and its TP all-reduce, the residual add +
-    post_attention_layernorm, the sparse MoE and its TP all-reduce: ``core``
-    [S, CORE] bf16 (x sigmoid(``gate``) with ``key.og``) and ``residual`` [S,
-    H] -> ``res_out`` (the sum over the ranks + residual) and ``out`` (the
-    MoE's output) [S, H] bf16. ``w_o`` as vLLM holds it after loading
-    (``key.oq``: fp4x2 with e8m0 ``w_os``, in the layout of the FP4 GEMM
-    AITER picked: ``key.shuffled``); the routed experts as the
+    post_attention_layernorm, the sparse MoE and its TP all-reduce: `core`
+    [S, CORE] bf16 (x sigmoid(`gate`) with `key.og`) and `residual` [S,
+    H] -> `res_out` (the sum over the ranks + residual) and `out` (the
+    MoE's output) [S, H] bf16. `w_o` as vLLM holds it after loading
+    (`key.oq`: fp4x2 with e8m0 `w_os`, in the layout of the FP4 GEMM
+    AITER picked: `key.shuffled`); the routed experts as the
     AITER_MXFP4_MXFP4 backend holds them (shuffled, e8m0 scales), the shared
     expert fused as expert 512."""
     s = key.tokens

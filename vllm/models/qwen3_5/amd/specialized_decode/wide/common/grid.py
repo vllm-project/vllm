@@ -4,20 +4,20 @@
 phases and the split-K fold's last-arriver count, both behind a bounded wait.
 
 Grid barrier (striped): a CTA adds one to its
-arrival stripe, one of ``STRIPES`` counters on separate 256-byte lines, four
+arrival stripe, one of `STRIPES` counters on separate 256-byte lines, four
 CTAs a stripe; wave 0's 64 lanes poll every stripe at once, one load each, and
 a ballot says when all reached the barrier's count. The counters are a launch
-slot's: the k-th barrier of a launch waits for ``k * 4`` on every stripe, so
+slot's: the k-th barrier of a launch waits for `k * 4` on every stripe, so
 each launch must start from zeroed counters. Launches alternate between two
 slots, and each zeroes the slot the next one uses (the launch before it is
-done by then): ``sync`` is this launch's slot, ``sync_next`` the next one's.
+done by then): `sync` is this launch's slot, `sync_next` the next one's.
 A step of an odd launch count runs its last launch on a third slot, so the
-next step starts on slot 0 again (``launch_slots``).
+next step starts on slot 0 again (`launch_slots`).
 Every CTA must take every barrier of a launch: the kernels run one CTA per
 CU, all co-resident.
 
-Every wait gives up after ``WAIT_TICKS``: the CTA records the site in its
-health record, raises its rank's flag on the output rank (``alarm``) and sets
+Every wait gives up after `WAIT_TICKS`: the CTA records the site in its
+health record, raises its rank's flag on the output rank (`alarm`) and sets
 the rank's FAILED word, so its later waits, and every other CTA's, exit at
 once and the launch runs to its end. The host reads FAILED after the step.
 """
@@ -64,7 +64,7 @@ def sync_words() -> int:
 
 
 def launch_slots(n: int) -> list[tuple[int, int]]:
-    """(``sync``, ``sync_next``) slot indices of a step's ``n`` launches: the
+    """(`sync`, `sync_next`) slot indices of a step's `n` launches: the
     same every step (a CUDA graph bakes them), each launch zeroing the next
     one's slot, the last the next step's first's."""
     if n < 2:
@@ -92,10 +92,10 @@ class TraceInvariant:
 class Grid(TraceInvariant):
     """The CTA's identity and its synchronization words.
 
-    ``sync`` / ``sync_next``: this launch's barrier slot and the next launch's
-    (byte addresses); ``folds``: the fold counters; ``health``: the rank's
-    health words; ``alarm``: this rank's flag word on the output rank (0:
-    none); ``scratch``: an LDS word the CTA's threads share verdicts in."""
+    `sync` / `sync_next`: this launch's barrier slot and the next launch's
+    (byte addresses); `folds`: the fold counters; `health`: the rank's
+    health words; `alarm`: this rank's flag word on the output rank (0:
+    none); `scratch`: an LDS word the CTA's threads share verdicts in."""
 
     def __init__(self, tid, bid, sync, sync_next, folds, health, alarm, scratch):
         self.tid = fx.Int32(tid)
@@ -155,7 +155,7 @@ def prologue(g):
 
 @traced
 def _poll_stripes(g, target):
-    """Wave 0: poll every stripe until all reached ``target``, bounded. A rank
+    """Wave 0: poll every stripe until all reached `target`, bounded. A rank
     that failed before this barrier does not wait; one that fails while this
     CTA waits lets it time out on its own (the poll loop stays one load)."""
     lane_word = g.lane * STRIPE_WORDS  # the descriptor base stays wave-uniform
@@ -175,11 +175,11 @@ def _poll_stripes(g, target):
 def grid_sync(g, between=None):
     """Every CTA's stores so far visible to every CTA, then all CTAs past this
     point: drain, CTA barrier, one arrival on the CTA's stripe, wave 0 polls
-    all stripes for this barrier's count. ``between()``, when given, runs
+    all stripes for this barrier's count. `between()`, when given, runs
     after the arrival and before the wait: work that reads no other CTA's
     stores and stores nothing another CTA reads, such as loads of data no CTA
     writes (the next phase's weights) or LDS work of the CTA's own; its
-    result is returned. Wave 0's poll waits for its loads (``vmcnt`` counts
+    result is returned. Wave 0's poll waits for its loads (`vmcnt` counts
     in issue order)."""
     g.barriers += 1
     _arrive(g)
@@ -206,8 +206,8 @@ def _wait(g, target):
 
 @traced
 def fold_arrive(g, counter, arrivals):
-    """A split-K unit's arrival at fold counter ``counter`` after its partials:
-    True on the CTA that arrives last of ``arrivals``, which resets the counter
+    """A split-K unit's arrival at fold counter `counter` after its partials:
+    True on the CTA that arrives last of `arrivals`, which resets the counter
     for the next launch."""
     drain_stores()
     fx.barrier()

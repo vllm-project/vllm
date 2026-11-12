@@ -3,16 +3,16 @@
 """The MoE and o_proj stages: the MXFP4 arithmetic, the online-MXFP4 GEMV and
 o_proj, the route (the top-10 of 512 logits, the union U of the step's picks)
 and the routed experts (ug, INTER through MXFP4, down) with the shared expert
-fused as expert 512, at the rank's shapes ``c["moe"]`` (``mx_layout.MoeDims``).
+fused as expert 512, at the rank's shapes `c["moe"]` (`mx_layout.MoeDims`).
 
-A stage reads the kernel context ``c``: ``S``, ``TP``, ``KT`` (picks a token),
-the thread ids, ``rank``, the mailbox (``put``, ``put_bf``, ``put_words``,
-``poll``), LDS (``red``, ``xl``, ``il``, ``contrib``, ``rt``), the scratch
-regions ``sgate`` / ``route`` / ``inter``, the peer regions ``ar`` / ``final``,
-``args`` and the variant flags ``oq`` / ``og`` / ``u1``. Where the
-router logits are is the model's: ``rlog_at(t, lane, i)`` is token t's logit
-of expert lane + 64 i as a poll spec, ``rlog_last`` (n, spec of i) the n
-logits that land last, and CTA ``route_cta`` also puts ROUTE (for the tests).
+A stage reads the kernel context `c`: `S`, `TP`, `KT` (picks a token),
+the thread ids, `rank`, the mailbox (`put`, `put_bf`, `put_words`,
+`poll`), LDS (`red`, `xl`, `il`, `contrib`, `rt`), the scratch
+regions `sgate` / `route` / `inter`, the peer regions `ar` / `final`,
+`args` and the variant flags `oq` / `og` / `u1`. Where the
+router logits are is the model's: `rlog_at(t, lane, i)` is token t's logit
+of expert lane + 64 i as a poll spec, `rlog_last` (n, spec of i) the n
+logits that land last, and CTA `route_cta` also puts ROUTE (for the tests).
 """
 
 import math
@@ -79,7 +79,7 @@ def token_tiles(s):
 
 
 def tok(t0, i):
-    """Token t0 + i of a tile (``red``'s token i)."""
+    """Token t0 + i of a tile (`red`'s token i)."""
     return i + t0 if t0 else i
 
 
@@ -89,14 +89,14 @@ def put_acc(c, acc):
 
 
 def rows_at(xl, xrow, t0):
-    """LDS row t0 of the bf16 rows at ``xl`` (``xrow`` a row)."""
+    """LDS row t0 of the bf16 rows at `xl` (`xrow` a row)."""
     return xl + t0 * xrow // 2 if t0 else xl
 
 
 def tiled(c, mfma, epi):
-    """Each 16-token tile in turn: ``mfma(t0, n)`` (its first token, n tokens)
-    -> ``red``, then ``epi(t0, n)`` over its tokens t0 .. t0 + n - 1
-    (``red``'s 0 .. n - 1)."""
+    """Each 16-token tile in turn: `mfma(t0, n)` (its first token, n tokens)
+    -> `red`, then `epi(t0, n)` over its tokens t0 .. t0 + n - 1
+    (`red`'s 0 .. n - 1)."""
     for t0, n in token_tiles(c["S"]):
         put_acc(c, mfma(t0, n))
         epi(t0, n)
@@ -126,7 +126,7 @@ def mx_scale(amax):
 
 
 def mx_scale_round(amax):
-    """``mx_scale`` as the Triton FP4 GEMM's ``dynamic_mxfp4_quant`` takes it:
+    """`mx_scale` as the Triton FP4 GEMM's `dynamic_mxfp4_quant` takes it:
     amax's mantissa rounded at its top two bits, then 2^(floor(log2) - 2)
     (codes clamped to 1 .. 254; a block's elements may saturate at 6)."""
     e = ((amax.bitcast(fx.Int32) + 0x200000) >> 23) & 0xFF
@@ -134,7 +134,7 @@ def mx_scale_round(amax):
 
 
 def pk_fp4_bf16(old, word, scale, j):
-    """A packed bf16 pair / ``scale`` -> e2m1 codes into byte j of ``old``
+    """A packed bf16 pair / `scale` -> e2m1 codes into byte j of `old`
     (nearest even, saturating at 6)."""
     v = fx.Vector.from_elements([fx.Int32(word)], fx.Int32).bitcast(fx.BFloat16)
     return fx.Int32(
@@ -149,7 +149,7 @@ def pk_fp4_bf16(old, word, scale, j):
 
 
 def pk_fp4_f32(old, a, b, scale, j):
-    """Two fp32 / ``scale`` -> e2m1 codes into byte j of ``old``."""
+    """Two fp32 / `scale` -> e2m1 codes into byte j of `old`."""
     return fx.Int32(
         rocdl.cvt_scalef32_pk_fp4_f32(
             T.i32,
@@ -163,7 +163,7 @@ def pk_fp4_f32(old, a, b, scale, j):
 
 
 def pk_bf16_fp4(word, scale, j):
-    """Byte j of ``word``'s two e2m1 codes times ``scale`` -> a bf16 pair."""
+    """Byte j of `word`'s two e2m1 codes times `scale` -> a bf16 pair."""
     v = rocdl.cvt_scalef32_pk_bf16_fp4(
         T.vec(2, T.bf16),
         as_ir_value(fx.Int32(word)),
@@ -174,7 +174,7 @@ def pk_bf16_fp4(word, scale, j):
 
 
 def mfma_f4(a, b, acc, sa, sb):
-    """16x16x128 fp4 x fp4 (e8m0 scales ``sa``, ``sb``: a lane's 32-block)."""
+    """16x16x128 fp4 x fp4 (e8m0 scales `sa`, `sb`: a lane's 32-block)."""
     return fx.Vector(
         rocdl.mfma_scale_f32_16x16x128_f8f6f4(
             T.vec(4, T.f32), [a, b, acc, 4, 4, 0, sa, 0, sb]
@@ -183,7 +183,7 @@ def mfma_f4(a, b, acc, sa, sb):
 
 
 def fp4x8_bf16(word, scale):
-    """The 8 fp4 of ``word`` times ``scale`` -> an MFMA operand (8 bf16 as 4 i32,
+    """The 8 fp4 of `word` times `scale` -> an MFMA operand (8 bf16 as 4 i32,
     nibble order: element 2 j, 2 j + 1 from byte j)."""
     out = []
     for j in range(4):
@@ -199,7 +199,7 @@ def fp4x8_bf16(word, scale):
 
 def fp4_mfmas(tile, scale, xl, xoff, acc):
     """One 128-K step: a lane's 16 B of fp4 (4 dwords, K 32 (lane / 16) + 8 q ..
-    for dword q) against the bf16 B rows at LDS ``xl`` + ``xoff`` (the same K)."""
+    for dword q) against the bf16 B rows at LDS `xl` + `xoff` (the same K)."""
     for q in range_constexpr(4):
         xb = fx.Vector(
             fx.ptr_load(
@@ -230,11 +230,11 @@ def _paired(k):
 
 
 def fp4_gemv_loads(lane, wave, w, ws, rg, k, rows, shuffled=True, live=None):
-    """An online-MXFP4 linear's rows 16 rg .. (``rows`` of them, K ``k``) for
-    this wave: its K steps' tiles and their scale words (``_paired``; past the
-    last step clamped, ``fp4_gemv`` zeroes those). ``shuffled``: the ASM FP4
+    """An online-MXFP4 linear's rows 16 rg .. (`rows` of them, K `k`) for
+    this wave: its K steps' tiles and their scale words (`_paired`; past the
+    last step clamped, `fp4_gemv` zeroes those). `shuffled`: the ASM FP4
     GEMM's shuffled weight and scales, else the Triton FP4 GEMM's row-major
-    weight and transposed scales (a word a step). ``live`` false: no memory
+    weight and transposed scales (a word a step). `live` false: no memory
     access (zeros)."""
     n = k // L.FP4_STEP
     if live is None:
@@ -276,8 +276,8 @@ def fp4_gemv_loads(lane, wave, w, ws, rg, k, rows, shuffled=True, live=None):
 
 
 def fp4_gemv(lane, wave, xl, xrow, k, s, rg, ops, shuffled=True):
-    """The ``fp4_gemv_loads`` operands against the MXFP4-exact bf16 rows at LDS
-    ``xl`` (row stride ``xrow``) -> this wave's fp32 partial MFMA tile."""
+    """The `fp4_gemv_loads` operands against the MXFP4-exact bf16 rows at LDS
+    `xl` (row stride `xrow`) -> this wave's fp32 partial MFMA tile."""
     n = k // L.FP4_STEP
     t = fx.min(lane % 16, s - 1)
     acc = fx.Vector.filled(4, 0.0, fx.Float32)
@@ -305,8 +305,8 @@ def fp4_gemv(lane, wave, xl, xrow, k, s, rg, ops, shuffled=True):
 
 
 def fp4q_gemv(lane, wave, xl, k, s, rg, ops, shuffled=True):
-    """The ``fp4_gemv_loads`` operands against the x rows' MXFP4 codes at LDS
-    ``xl`` (``quant_x_fp4``'s layout), one scaled fp4 MFMA a step -> this
+    """The `fp4_gemv_loads` operands against the x rows' MXFP4 codes at LDS
+    `xl` (`quant_x_fp4`'s layout), one scaled fp4 MFMA a step -> this
     wave's fp32 partial MFMA tile. K's steps split evenly over the waves."""
     n = k // L.FP4_STEP
     t = fx.min(lane % 16, s - 1)
@@ -337,10 +337,10 @@ def fp4q_gemv(lane, wave, xl, k, s, rg, ops, shuffled=True):
 
 @traced
 def ksplit_rows(c, region, at, q, parts, out, t0=0, n=None):
-    """A K-split GEMV task's 16 rows (``red``, tokens t0 .. t0 + n - 1; part
-    q of ``parts``): parts q > 0 publish fp32 partials to ``region`` at
-    ``at(qq, t, r)``; part 0 adds them in part order, rounds to bf16 (the
-    GEMM's output) and passes token t's rows r, r + 1 to ``out(t, r, vs)``."""
+    """A K-split GEMV task's 16 rows (`red`, tokens t0 .. t0 + n - 1; part
+    q of `parts`): parts q > 0 publish fp32 partials to `region` at
+    `at(qq, t, r)`; part 0 adds them in part order, rounds to bf16 (the
+    GEMM's output) and passes token t's rows r, r + 1 to `out(t, r, vs)`."""
     tid = c["tid"]
     n = c["S"] if n is None else n
     if q > 0:  # noqa: SIM102 (traced: `and` does not combine traced values)
@@ -372,9 +372,9 @@ def ksplit_rows(c, region, at, q, parts, out, t0=0, n=None):
 
 # ---------------------------------------------------------------- x through MXFP4
 def _quad_scale(ptr, rceil=True):
-    """A lane's 8 bf16 at LDS ``ptr`` (4 words) and their 1 x 32 block's e8m0
-    code (the amax over the block's 4 lanes; ``mx_scale``, else
-    ``mx_scale_round``)."""
+    """A lane's 8 bf16 at LDS `ptr` (4 words) and their 1 x 32 block's e8m0
+    code (the amax over the block's 4 lanes; `mx_scale`, else
+    `mx_scale_round`)."""
     wv = fx.Vector(fx.ptr_load(ptr, result_type=fx.Vector.make_type(4, fx.Int32)))
     vs = []
     for d in range_constexpr(4):
@@ -389,11 +389,11 @@ def _quad_scale(ptr, rceil=True):
 
 @traced
 def quant_x(c, k):
-    """The rows of K ``k`` in LDS through MXFP4 in place, 1 x 32 blocks, 8
+    """The rows of K `k` in LDS through MXFP4 in place, 1 x 32 blocks, 8
     elements a lane (a block on 4 adjacent lanes: one 16 B LDS access a lane,
     conflict-free): an fp4 linear's input rows, as its GEMM quantizes them
-    (``c["shuffled"]``: the ASM FP4 GEMM's ``per_1x32_f4_quant_hip``, RCEIL;
-    else the Triton FP4 GEMM's ``dynamic_mxfp4_quant``)."""
+    (`c["shuffled"]`: the ASM FP4 GEMM's `per_1x32_f4_quant_hip`, RCEIL;
+    else the Triton FP4 GEMM's `dynamic_mxfp4_quant`)."""
     s, tid, xl = c["S"], c["tid"], c["xl"]
     xrow = k + gemv.LDS_PAD
     nq = s * k // 8
@@ -412,23 +412,23 @@ def quant_x(c, k):
 
 
 def xq_row(k):
-    """Bytes a token's fp4 x row of K ``k`` takes in LDS (padded)."""
+    """Bytes a token's fp4 x row of K `k` takes in LDS (padded)."""
     return k // 2 + 16
 
 
 def xq_scales(s, k):
-    """Dword of LDS ``xl`` where the fp4 x rows' e8m0 codes start (a dword a
+    """Dword of LDS `xl` where the fp4 x rows' e8m0 codes start (a dword a
     1 x 32 block, token-major)."""
     return s * xq_row(k) // 4
 
 
 @traced
 def quant_x_fp4(c, k):
-    """The x rows in LDS (bf16, K ``k``) -> MXFP4 codes over them,
-    ``quant_x``'s arithmetic and lanes (the routed experts' input, as the stock
-    decode MoE quantizes it): token t's block b at byte t ``xq_row`` + 16 b
+    """The x rows in LDS (bf16, K `k`) -> MXFP4 codes over them,
+    `quant_x`'s arithmetic and lanes (the routed experts' input, as the stock
+    decode MoE quantizes it): token t's block b at byte t `xq_row` + 16 b
     (element 2 j in byte j's low nibble; a lane's 8 elements one word), its
-    code at dword ``xq_scales`` + t (k / 32) + b. Every thread reads before
+    code at dword `xq_scales` + t (k / 32) + b. Every thread reads before
     any writes."""
     s, tid, xl = c["S"], c["tid"], c["xl"]
     xrow = k + gemv.LDS_PAD
@@ -468,7 +468,7 @@ def quant_x_fp4(c, k):
 
 # ---------------------------------------------------------------- o_proj
 def o_loads(c, rg, k):
-    """o_proj rows 16 rg .. (K ``k``): this wave's weights."""
+    """o_proj rows 16 rg .. (K `k`): this wave's weights."""
     lane, wave, a = c["lane"], c["wave"], c["args"]
     if const_expr(c["oq"]):
         return fp4_gemv_loads(
@@ -508,8 +508,8 @@ def _o_out(c, rg, t0, n):
 
 @traced
 def gated_rows_to_lds(c, k):
-    """``og``: bf16(core x sigmoid(gate)) (fp32 math, as the compiled
-    ``o * torch.sigmoid(gate)``) -> the o_proj input rows in LDS."""
+    """`og`: bf16(core x sigmoid(gate)) (fp32 math, as the compiled
+    `o * torch.sigmoid(gate)`) -> the o_proj input rows in LDS."""
     tid, s, xl = c["tid"], c["S"], c["xl"]
     a = c["args"]
     words = s * k // 8
@@ -537,8 +537,8 @@ def gated_rows_to_lds(c, k):
 
 @traced
 def run_oproj(c, oops, k):
-    """This CTA's o_proj tasks (rows 16 (bid + 256 j) .., K ``k``) on the core
-    rows (plain loads: the previous launch wrote them), their weights ``oops``
+    """This CTA's o_proj tasks (rows 16 (bid + 256 j) .., K `k`) on the core
+    rows (plain loads: the previous launch wrote them), their weights `oops`
     already in flight."""
     core = c["args"]["core"]
     if const_expr(c["og"]):
@@ -608,7 +608,7 @@ def _route_mp(c, lgs):
 def route_token(c, t):
     """Token t on this wave: the 512 bf16 logits (packed pairs), 8 a lane (expert
     lane + 64 i; a NaN logit, a warmup's garbage row, ranks last) -> the top-10
-    (``_route_mp``). Returns (rank, expert, weight), lanes < ``TOPK``."""
+    (`_route_mp`). Returns (rank, expert, weight), lanes < `TOPK`."""
     lane = c["lane"]
     per = E // 64
     specs = [c["rlog_at"](t, lane, i) for i in range(per)]
@@ -635,7 +635,7 @@ def put_route(c, t, rank, e, w):
 @traced
 def local_route(c):
     """Every CTA routes its tokens itself, wave t token t, into its LDS route
-    (``load_route``'s layout; ``load_route``'s barrier follows). Waits on the
+    (`load_route`'s layout; `load_route`'s barrier follows). Waits on the
     logits that land last first, so the full polls don't spin."""
     lane, wave, rt, kt, s = c["lane"], c["wave"], c["rt"], c["KT"], c["S"]
     n, last = c["rlog_last"]
@@ -657,10 +657,10 @@ def local_route(c):
 
 @traced
 def load_route(c):
-    """The LDS route (ids, weights; a token's ``KT`` picks) -> the union U in
-    expert order: ``flag[e]`` -> slot, ``expert[slot]``, ``kof[slot][t]`` (the
+    """The LDS route (ids, weights; a token's `KT` picks) -> the union U in
+    expert order: `flag[e]` -> slot, `expert[slot]`, `kof[slot][t]` (the
     token's pick index, -1 if not picked); the fused shared expert is U's last
-    slot, every token's pick ``TOPK`` with its SGATE weight. Returns |U|."""
+    slot, every token's pick `TOPK` with its SGATE weight. Returns |U|."""
     s, tid, lane, wave = c["S"], c["tid"], c["lane"], c["wave"]
     rt, kt = c["rt"], c["KT"]
     kf, max_u = kof_t(c), c["max_u"]
@@ -730,16 +730,16 @@ def inter_pairs(d):
 
 
 def ug_rows(d, wave, g, h):
-    """Wave ``wave``'s w13 row group in half h of ug task group g: gate (wave %
+    """Wave `wave`'s w13 row group in half h of ug task group g: gate (wave %
     2 == 0) or up, of the block's columns 16 h .."""
     return L.w13_group(d, wave % 2, 2 * g + h)
 
 
 def ug_loads(c, task, h, live, shared=False):
-    """Half h of task ``task``: its w13 operands for this wave (``ug_rows``' row
+    """Half h of task `task`: its w13 operands for this wave (`ug_rows`' row
     group, K quarter wave / 2) and its scale words (a word two steps); out of
-    bounds (no memory access, zeros) where ``live`` is false. ``shared``: the
-    fused shared expert's task ``task`` (no union yet)."""
+    bounds (no memory access, zeros) where `live` is false. `shared`: the
+    fused shared expert's task `task` (no union yet)."""
     lane, wave = c["lane"], c["wave"]
     a, rt, d = c["args"], c["rt"], c["moe"]
     groups = d.ri // UG_COLS
@@ -774,9 +774,9 @@ def ug_loads(c, task, h, live, shared=False):
 
 @traced
 def ug_half(c, task, h, ops):
-    """Half h of task ``task`` (columns 32 g + 16 h .., g = task % groups): the
-    gate and up rows against the x rows' MXFP4 codes in LDS (``ops``:
-    ``ug_loads``) -> silu(g) u (fp32) of columns 2 cp, 2 cp + 1 of the half,
+    """Half h of task `task` (columns 32 g + 16 h .., g = task % groups): the
+    gate and up rows against the x rows' MXFP4 codes in LDS (`ops`:
+    `ug_loads`) -> silu(g) u (fp32) of columns 2 cp, 2 cp + 1 of the half,
     thread (token tid / 8, cp tid % 8)."""
     s, tid, lane, wave, red = c["S"], c["tid"], c["lane"], c["wave"], c["red"]
     d = c["moe"]
@@ -817,7 +817,7 @@ def ug_half(c, task, h, ops):
 
 @traced
 def ug_put(c, slot, g, hv0, hv1, shared):
-    """Block g's silu(g) u (``ug_half`` of both halves) through MXFP4 (RCEIL
+    """Block g's silu(g) u (`ug_half` of both halves) through MXFP4 (RCEIL
     scale over the block's 32 columns on a token's 8 lanes), as the stock
     decode kernel quantizes its intermediate -> the pick's code words (half
     0: words 0, 1 of the block, half 1: words 2, 3) and e8m0 code in INTER."""
@@ -853,10 +853,10 @@ def ug_put(c, slot, g, hv0, hv1, shared):
 
 @traced
 def run_ug(c, ps, ps0, x_to_lds):
-    """The routed experts' gate | up: x into LDS (``x_to_lds``, as MXFP4
+    """The routed experts' gate | up: x into LDS (`x_to_lds`, as MXFP4
     codes) while the logits come in, the route, then the union's ug tasks
     over every CTA, a task's halves in turn with the next half's weights in
-    flight. ``ps``: the fused shared expert's tasks run first on CTAs ``ps0``
+    flight. `ps`: the fused shared expert's tasks run first on CTAs `ps0`
     .. (they need no route). Returns |U|."""
     bid, d = c["bid"], c["moe"]
     groups = d.ri // UG_COLS
@@ -899,20 +899,20 @@ def irow(d):
 
 
 def iq_scales(d, s, kt):
-    """Dword of LDS ``il`` where the fp4 INTER rows' e8m0 codes start (a dword
+    """Dword of LDS `il` where the fp4 INTER rows' e8m0 codes start (a dword
     a 1 x 32 block, RIP / 32 a pick)."""
     return s * kt * irow(d) // 4
 
 
 def early_slots(c, nu):
-    """Union slots whose ug tasks all run in ``run_ug``'s full rounds (with the
-    fused shared expert's tasks run first: ``ps``)."""
+    """Union slots whose ug tasks all run in `run_ug`'s full rounds (with the
+    fused shared expert's tasks run first: `ps`)."""
     groups = c["moe"].ri // UG_COLS
     return (nu - 1) * groups // BLOCKS * (BLOCKS // groups)
 
 
 def _pick_early(c, pick, cut):
-    """A pick's slot is below ``cut`` (the fused shared expert's: slot |U| - 1)."""
+    """A pick's slot is below `cut` (the fused shared expert's: slot |U| - 1)."""
     rt, kt = c["rt"], c["KT"]
     t = pick // kt
     k = pick % kt
@@ -923,11 +923,11 @@ def _pick_early(c, pick, cut):
 
 @traced
 def load_inter(c, cut=None, early=True):
-    """Every pick's INTER (fp4 code words, e8m0 codes; ``ug_put``) -> LDS (fp4
+    """Every pick's INTER (fp4 code words, e8m0 codes; `ug_put`) -> LDS (fp4
     rows of RIP, padded, the pad columns zero codes; then the e8m0 codes), a
-    poll batch at a time. With ``cut``: only the picks of slots below it
-    (``early``) or the rest; a pair not loaded polls its token's fused shared
-    expert pick instead, which ``run_ug`` put before the route."""
+    poll batch at a time. With `cut`: only the picks of slots below it
+    (`early`) or the rest; a pair not loaded polls its token's fused shared
+    expert pick instead, which `run_ug` put before the route."""
     s, tid, d, kt = c["S"], c["tid"], c["moe"], c["KT"]
     ri, rip = d.ri, d.rip
     ir = irow(d)
@@ -988,7 +988,7 @@ def load_inter(c, cut=None, early=True):
 
 def down_loads(c, rgd, nu, b0, hi=None):
     """The w2 tiles and scale words of a wave's batch from slot b0 (slots b0,
-    b0 + 8, ...; past ``hi``, |U| by default, the last slot's)."""
+    b0 + 8, ...; past `hi`, |U| by default, the last slot's)."""
     hi = nu if hi is None else hi
     lane, d = c["lane"], c["moe"]
     a, rt = c["args"], c["rt"]
@@ -1014,7 +1014,7 @@ def down_loads(c, rgd, nu, b0, hi=None):
 
 @traced
 def down_zero(c, n=1):
-    """``n`` row groups' (t, k) contributions in LDS := 0."""
+    """`n` row groups' (t, k) contributions in LDS := 0."""
     s, tid, kt = c["S"], c["tid"], c["KT"]
     for i in range_constexpr((n * s * kt * ROWS + THREADS - 1) // THREADS):
         j = tid + THREADS * i
@@ -1033,8 +1033,8 @@ def down_slots(c, rgd, nu, ops0, lo, hi, nxt=None, part=0):
     """Hidden rows 16 rgd .. of slots lo .. hi: each slot's w2 against its
     picks' INTER (wave w the slots lo + w, lo + w + 8, ...; a batch in flight
     under the last one's MFMAs) -> fp32 (t, k) contributions times the route
-    weight in LDS (row group ``part`` of them). The last batch's prefetch is
-    ``nxt`` = (row group, first slot, end slot)'s first batch, returned."""
+    weight in LDS (row group `part` of them). The last batch's prefetch is
+    `nxt` = (row group, first slot, end slot)'s first batch, returned."""
     s, lane, wave = c["S"], c["lane"], c["wave"]
     rt, kt, d = c["rt"], c["KT"], c["moe"]
     cb = c["contrib"] + part * contrib_floats(s, kt)
@@ -1110,7 +1110,7 @@ def down_slots(c, rgd, nu, ops0, lo, hi, nxt=None, part=0):
 
 @traced
 def down_put(c, rgd, part=0):
-    """Hidden rows 16 rgd ..: the contributions (``part``) summed in top-k
+    """Hidden rows 16 rgd ..: the contributions (`part`) summed in top-k
     order -> bf16 partial -> every rank's FINAL."""
     s, tid, kt, d = c["S"], c["tid"], c["KT"], c["moe"]
     cb = c["contrib"] + part * contrib_floats(s, kt)
@@ -1135,8 +1135,8 @@ def down_put(c, rgd, part=0):
 
 
 def stage_down(c, rgd, nu, ops0, rgd_next=None):
-    """Hidden rows 16 rgd .. over every slot (``down_slots``) -> every rank's
-    FINAL (``down_put``); the last batch's prefetch is row group ``rgd_next``'s
+    """Hidden rows 16 rgd .. over every slot (`down_slots`) -> every rank's
+    FINAL (`down_put`); the last batch's prefetch is row group `rgd_next`'s
     first batch, returned (the loop runs: |U| >= TOPK > WAVES)."""
     down_zero(c)
     nxt = None if rgd_next is None else (rgd_next, 0, nu)

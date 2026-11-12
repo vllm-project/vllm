@@ -4,13 +4,13 @@
 
 A 32-value group is sixteen bytes of e2m1 codes (low nibble first) and one
 E8M0 scale code, as the stock consumer's activation quantization takes it:
-AITER's ``per_1x32_f4_quant_hip`` (the ASM FP4 GEMM's, and ``fused_moe``'s
-input and inter-stage) the smallest power of two at least ``amax / 6``
-(``rceil``); the Triton FP4 GEMM's ``dynamic_mxfp4_quant`` ``amax`` rounded
-on its top mantissa bits (``+ 0x200000``, the mantissa then dropped) minus 2,
-so values past 6 x scale saturate. ``mfma_f4`` (``common.ops``) multiplies two
-16 x 128 operands of such groups: a lane holds row (token) ``lane % 16`` and
-the 32 values of K block ``lane // 16``, the block's scale code in the low byte
+AITER's `per_1x32_f4_quant_hip` (the ASM FP4 GEMM's, and `fused_moe`'s
+input and inter-stage) the smallest power of two at least `amax / 6`
+(`rceil`); the Triton FP4 GEMM's `dynamic_mxfp4_quant` `amax` rounded
+on its top mantissa bits (`+ 0x200000`, the mantissa then dropped) minus 2,
+so values past 6 x scale saturate. `mfma_f4` (`common.ops`) multiplies two
+16 x 128 operands of such groups: a lane holds row (token) `lane % 16` and
+the 32 values of K block `lane // 16`, the block's scale code in the low byte
 of a register.
 """
 
@@ -29,8 +29,8 @@ def i32(v):
 
 
 def scale_code(amax, rceil: bool = True):
-    """The E8M0 code of a group whose largest magnitude is ``amax`` (f32):
-    ``rceil`` AITER's HIP quantization's, else the Triton one's."""
+    """The E8M0 code of a group whose largest magnitude is `amax` (f32):
+    `rceil` AITER's HIP quantization's, else the Triton one's."""
     if rceil:
         a = fx.Float32(amax)
         q = a * fx.Float32(1.0 / 6.0)  # amax / 6 rounded to nearest (Markstein)
@@ -49,7 +49,7 @@ def scale_code(amax, rceil: bool = True):
 
 
 def scale_value(code):
-    """``2 ** (code - 127)`` as f32 (code 0 gives 0, as a zero group's)."""
+    """`2 ** (code - 127)` as f32 (code 0 gives 0, as a zero group's)."""
     return (fx.Int32(code) << i32(23)).bitcast(fx.Float32)
 
 
@@ -72,7 +72,7 @@ def _pack_bf16(word, pair, scale, byte: int):
 
 def quant_bf16_group(pairs, code):
     """Sixteen packed bf16 pairs (Int32) of a 32-value group as four Int32 words
-    of e2m1 codes over ``scale_value(code)``."""
+    of e2m1 codes over `scale_value(code)`."""
     scale = scale_value(code)
     words = []
     for w in range(4):
@@ -84,8 +84,8 @@ def quant_bf16_group(pairs, code):
 
 
 def quant_f32_word(values, scale):
-    """8 f32 values as one Int32 word of e2m1 codes over ``scale``
-    (``scale_value`` of the group's code)."""
+    """8 f32 values as one Int32 word of e2m1 codes over `scale`
+    (`scale_value` of the group's code)."""
     lo = _pack_f32(
         _pack_f32(i32(0), values[0], values[1], scale, 0),
         values[2],

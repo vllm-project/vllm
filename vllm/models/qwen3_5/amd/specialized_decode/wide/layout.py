@@ -1,7 +1,7 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 """The shapes the wide kernels are compiled for: Qwen3.8-2.4T-A95B at TP8, one
-rank's share. ``SHAPES`` is what the runtime checks the checkpoint's text
+rank's share. `SHAPES` is what the runtime checks the checkpoint's text
 config against; every other constant follows from it."""
 
 TP = 8

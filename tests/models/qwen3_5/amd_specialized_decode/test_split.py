@@ -1,20 +1,20 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
-"""The split widths (``wide.layer.SPLIT_MAX`` rows and fewer) at TP8 on 8
+"""The split widths (`wide.layer.SPLIT_MAX` rows and fewer) at TP8 on 8
 MI355X: a layer is the wide GDN (or attention) launch up to its core (or
-qkv_proj), then ``mono.blocks.layer_block``. GDN layer 0 (the step's first)
+qkv_proj), then `mono.blocks.layer_block`. GDN layer 0 (the step's first)
 to its core, then layer_block; attention layer 1's input combine and
 qkv_proj, then layer_block on synthetic attention rows; GDN layer 2 on layer
 1's output and residual. Each reference is fed the kernels' previous outputs.
 
 layer_block's MoE is judged as #60833's tests judge it: its error to the
 exact MoE (float64 on the dequantized weights, activations unquantized) at
-most ``MOE_ERR_RATIO`` times the stock ``fused_moe``'s on the same input,
-its cosine to the exact one above ``1 - 5e-2``.
+most `MOE_ERR_RATIO` times the stock `fused_moe`'s on the same input,
+its cosine to the exact one above `1 - 5e-2`.
 
-``test_split_gdn_quant`` (one gfx950 GPU) checks the split GDN launch's MXFP4
-input rows bit for bit against AITER's quantizers: ``per_1x32_f4_quant_hip``
-for the ASM GEMM layout, ``dynamic_mxfp4_quant`` for the Triton one."""
+`test_split_gdn_quant` (one gfx950 GPU) checks the split GDN launch's MXFP4
+input rows bit for bit against AITER's quantizers: `per_1x32_f4_quant_hip`
+for the ASM GEMM layout, `dynamic_mxfp4_quant` for the Triton one."""
 
 import os
 
@@ -64,7 +64,7 @@ def _worker(rank, S, variant, port, out_q):
 
     from . import reference as R
 
-    torch.cuda.set_device(rank)
+    torch.accelerator.set_device_index(rank)
     dev = torch.device("cuda", rank)
     dist.init_process_group(
         "gloo", init_method=f"tcp://127.0.0.1:{port}", rank=rank, world_size=TP
@@ -180,7 +180,7 @@ def _worker(rank, S, variant, port, out_q):
     core = torch.empty(S, L.VALUE_DIM, dtype=torch.bfloat16, device=dev)
 
     def check_health():
-        torch.cuda.synchronize()
+        torch.accelerator.synchronize()
         if int(health[FAILED]) or int(mhealth[0]):
             raise RuntimeError(
                 f"rank {rank}: in-kernel wait gave up: wide {health[:16].tolist()} "
@@ -582,7 +582,7 @@ def test_split_gdn_quant(rows, variant):
         sync_next=base + 4 * SLOT_WORDS * sched[0][1],
     )
     K.run(key, a)
-    torch.cuda.synchronize()
+    torch.accelerator.synchronize()
     if int(health[FAILED]):
         raise RuntimeError(f"in-kernel wait gave up: {health[:16].tolist()}")
 

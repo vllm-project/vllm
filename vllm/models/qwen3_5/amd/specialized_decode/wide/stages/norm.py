@@ -1,18 +1,18 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 """The residual add and RMSNorm after a TP exchange (the decoder layer's
-``norm(hidden, residual)``), and the next GEMMs' activations.
+`norm(hidden, residual)`), and the next GEMMs' activations.
 
-``combine``: a CTA a row, thread ``t`` columns ``32 t .. 32 t + 31`` (one
-MXFP4 scale group, half an exchange line group). The exchanged sum ``y``
+`combine`: a CTA a row, thread `t` columns `32 t .. 32 t + 31` (one
+MXFP4 scale group, half an exchange line group). The exchanged sum `y`
 (the ranks' bf16 partials added in rank order, rounded to bf16: the stock
 all-reduce's output) is added to the residual and rounded to bf16 (the new
-residual, stored in place); ``x = bf16(res * rsqrt(mean(res^2) + eps) * (1 +
-w))`` (the Gemma-style norm of Qwen3.5) is stored as bf16, and with ``q4``
-also as MXFP4 (``mx``'s activation quantization, the W4A4 GEMMs' input):
-``"plain"`` of ``x``, ``"h32"`` of ``bf16(x H32)``, the block Hadamard
-rotation an ``InputHadamardLinearMethod`` applies before quantizing; a
-``"_t"`` suffix scales as the Triton FP4 GEMM does (``mx.scale_code``). Without
+residual, stored in place); `x = bf16(res * rsqrt(mean(res^2) + eps) * (1 +
+w))` (the Gemma-style norm of Qwen3.5) is stored as bf16, and with `q4`
+also as MXFP4 (`mx`'s activation quantization, the W4A4 GEMMs' input):
+`"plain"` of `x`, `"h32"` of `bf16(x H32)`, the block Hadamard
+rotation an `InputHadamardLinearMethod` applies before quantizing; a
+`"_t"` suffix scales as the Triton FP4 GEMM does (`mx.scale_code`). Without
 an exchange (the step's first layer) the residual is the embedding as is.
 """
 
@@ -57,9 +57,9 @@ def i32(v):
 
 
 def hadamard32(v):
-    """``v`` (32 f32) times the normalized Sylvester Hadamard matrix of order
-    32 (``hadamard_matrix(32)``: symmetric, so row and column vectors agree):
-    the fast transform's five butterfly levels, then ``1 / sqrt(32)``."""
+    """`v` (32 f32) times the normalized Sylvester Hadamard matrix of order
+    32 (`hadamard_matrix(32)`: symmetric, so row and column vectors agree):
+    the fast transform's five butterfly levels, then `1 / sqrt(32)`."""
     v = list(v)
     h = 1
     while h < 32:
@@ -72,10 +72,10 @@ def hadamard32(v):
 
 
 class Out(TraceInvariant):
-    """A combine's outputs (byte addresses): ``res`` the residual [rows,
-    HIDDEN] bf16 (read, then updated in place), ``x`` the normed rows bf16,
-    with ``q4`` their MXFP4 codes ``x4`` ([rows, HIDDEN / 2] bytes) and scale
-    code words ``x4s`` ([rows, HIDDEN / 32])."""
+    """A combine's outputs (byte addresses): `res` the residual [rows,
+    HIDDEN] bf16 (read, then updated in place), `x` the normed rows bf16,
+    with `q4` their MXFP4 codes `x4` ([rows, HIDDEN / 2] bytes) and scale
+    code words `x4s` ([rows, HIDDEN / 32])."""
 
     def __init__(self, res, x, x4=0, x4s=0, q4=None):
         if q4 not in Q4_MODES:
@@ -88,10 +88,10 @@ class Out(TraceInvariant):
 
 @traced
 def combine(g, xch, out, w, lds, rows: int, eps: float, emb=None, res_in=None):
-    """``xch``: the exchange whose lines hold ``y``; None: ``y`` is ``emb``
-    ([rows, HIDDEN] bf16) added to ``res_in`` (same), or without ``res_in``
-    the first layer's residual. The sum is stored to ``out.res``; ``w``: the
-    norm weight [HIDDEN] bf16; ``lds``: ``LDS_WORDS`` f32 words."""
+    """`xch`: the exchange whose lines hold `y`; None: `y` is `emb`
+    ([rows, HIDDEN] bf16) added to `res_in` (same), or without `res_in`
+    the first layer's residual. The sum is stored to `out.res`; `w`: the
+    norm weight [HIDDEN] bf16; `lds`: `LDS_WORDS` f32 words."""
     col = g.tid * i32(COLS)
     wv = [unpack_bf16x8(ld_i32x4(w, col // 2 + 4 * q)) for q in range(4)]
     for row in range(g.bid, i32(rows), i32(BLOCKS)):

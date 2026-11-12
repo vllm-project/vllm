@@ -1,16 +1,16 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 """The wide decode's layer kernels at TP8 on 8 MI355X against the float64
-references (``reference``) with the stock path's rounding points: three
+references (`reference`) with the stock path's rounding points: three
 launches on synthetic per-rank weights, a GDN layer that is the step's first
 (the embedding's input norm, the next attention layer's qkv_proj), an
 attention layer (o_proj and the MLP half) and a GDN layer closing with the
 final norm, each launch's reference fed the kernels' previous outputs.
 
 Tolerances are relative Frobenius errors. The MoE is checked on the kernels'
-own MXFP4 input rows (``x4``): the references' inputs differ from the kernels'
+own MXFP4 input rows (`x4`): the references' inputs differ from the kernels'
 in a few bf16 ulps, which flip MXFP4 codes; routes are compared as top-k sets
-within a tie margin (``reference.route``), as such inputs flip near-tied
+within a tie margin (`reference.route`), as such inputs flip near-tied
 experts."""
 
 import os
@@ -67,7 +67,7 @@ def _worker(rank, rows, variant, port, out_q):
     from . import reference as R
 
     S = rows
-    torch.cuda.set_device(rank)
+    torch.accelerator.set_device_index(rank)
     dev = torch.device("cuda", rank)
     dist.init_process_group(
         "gloo", init_method=f"tcp://127.0.0.1:{port}", rank=rank, world_size=TP
@@ -212,7 +212,7 @@ def _worker(rank, rows, variant, port, out_q):
 
     def launch(key, a):
         K.run(key, a)
-        torch.cuda.synchronize()
+        torch.accelerator.synchronize()
         if int(health[FAILED]) != 0:
             raise RuntimeError(f"rank {rank}: an in-kernel wait gave up")
 

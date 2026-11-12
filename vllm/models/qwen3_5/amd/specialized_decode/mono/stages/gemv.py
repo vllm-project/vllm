@@ -1,7 +1,7 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 """bf16 GEMV pieces the kernels share: 16 weight rows a task against up
-to 16 token rows in LDS, one ``mfma_f32_16x16x32_bf16`` per 32 K.
+to 16 token rows in LDS, one `mfma_f32_16x16x32_bf16` per 32 K.
 
 K is walked in 128-wide chunks, wave w taking chunks w, w + 8, ...; a lane reads
 64 contiguous bytes of its row a chunk (4 dwordx4 at q 32 + g 8 elements: lane
@@ -28,15 +28,15 @@ LDS_PAD = 8  # bf16 a padded token row
 
 
 def chunks(k):
-    """A wave's K chunks for K = ``k``: (count a wave, total)."""
+    """A wave's K chunks for K = `k`: (count a wave, total)."""
     n = k // KCH
     return (n + WAVES - 1) // WAVES, n
 
 
 def loads(lane, wave, w, row0, k, nt=True, ldk=None, k0=0):
-    """This wave's operands of weight rows ``row0`` .. + 16 (row-major, ``ldk``
-    bf16 a row at ``w``, K columns ``k0`` .. ``k0 + k``): a list a chunk
-    (clamped into K: ``mfmas`` zeroes the extra)."""
+    """This wave's operands of weight rows `row0` .. + 16 (row-major, `ldk`
+    bf16 a row at `w`, K columns `k0` .. `k0 + k`): a list a chunk
+    (clamped into K: `mfmas` zeroes the extra)."""
     per, n = chunks(k)
     ldk = k if ldk is None else ldk
     r_w = rsrc(w)
@@ -64,8 +64,8 @@ def loads(lane, wave, w, row0, k, nt=True, ldk=None, k0=0):
 
 
 def mfmas(lane, wave, xl, xrow, k, s, ops):
-    """``loads``' operands against token rows 0 .. s - 1 of the LDS rows ``xl``
-    (``xrow`` bf16 a row) -> this wave's 16x16 accumulator."""
+    """`loads`' operands against token rows 0 .. s - 1 of the LDS rows `xl`
+    (`xrow` bf16 a row) -> this wave's 16x16 accumulator."""
     per, n = chunks(k)
     g = lane // ROWS
     t = fx.min(lane % ROWS, s - 1)
@@ -99,7 +99,7 @@ def const_live(per, n):
 @traced
 def rows_to_lds(tid, src, k, s, xl, xrow, cm=0, ldk=None, k0=0):
     """Columns k0 .. k0 + k of token rows 0 .. s - 1 of the bf16 [s, ldk] at
-    ``src`` -> LDS (``xrow`` a row), 16 B a lane."""
+    `src` -> LDS (`xrow` a row), 16 B a lane."""
     ldk = k if ldk is None else ldk
     words = s * k // 8
     for i in range_constexpr((words + THREADS - 1) // THREADS):

@@ -13,10 +13,10 @@ tuple) its launcher's closures capture; an object in a closure is not keyed, and
 a parameter used only by build-time Python (a placement table, a layout) is in no
 closure at all. Two builds differing only there would share one binary -- every
 TP rank ran rank 3's kernel once that way. So a build's parameters are one frozen
-dataclass of scalars, ``key_tuple`` turns it into one (name, value) tuple, and the
+dataclass of scalars, `key_tuple` turns it into one (name, value) tuple, and the
 launcher references that tuple: every field is keyed, whatever the body uses.
 
-The tuple also carries the model's kernel sources (``source_digest``): FlyDSL
+The tuple also carries the model's kernel sources (`source_digest`): FlyDSL
 keys a helper's source only when its walk reaches it, and it does not reach a
 helper called inside a traced function's dynamic loop or branch (the rewriter
 moves those bodies into nested functions it does not scan) nor one outside the
@@ -39,7 +39,7 @@ _ROOT = Path(__file__).resolve().parents[1]
 
 @functools.cache
 def source_digest() -> str:
-    """sha256 of every ``.py`` file of the ``mono`` package, each file's path and
+    """sha256 of every `.py` file of the `mono` package, each file's path and
     contents."""
     h = hashlib.sha256()
     for f in sorted(_ROOT.rglob("*.py")):
@@ -49,8 +49,8 @@ def source_digest() -> str:
 
 
 def key_tuple(key, sources: str) -> tuple:
-    """``key``'s (field name, value) pairs, every value a scalar, then
-    ("sources", ``sources``): the model's ``source_digest``."""
+    """`key`'s (field name, value) pairs, every value a scalar, then
+    ("sources", `sources`): the model's `source_digest`."""
     out = []
     for f in fields(key):
         value = getattr(key, f.name)
@@ -84,8 +84,8 @@ HEALTH_WORDS = health_words(BLOCKS)
 
 
 def pair_layout(items, align: int = PAIR_BYTES, start: int = 0) -> dict:
-    """``items`` (name, pairs) laid out in order: name -> (byte offset, bytes),
-    each region from an ``align``-byte boundary at or past ``start``."""
+    """`items` (name, pairs) laid out in order: name -> (byte offset, bytes),
+    each region from an `align`-byte boundary at or past `start`."""
     out, off = {}, start
     for name, pairs in items:
         off = (off + align - 1) // align * align
@@ -104,8 +104,8 @@ def pair_layout(items, align: int = PAIR_BYTES, start: int = 0) -> dict:
 
 
 def _python_params(fn) -> tuple[str, ...]:
-    """Parameter names of a ``@flyc.kernel`` / ``@flyc.jit`` object's Python
-    function (FlyDSL keeps it as ``_func`` / ``func``)."""
+    """Parameter names of a `@flyc.kernel` / `@flyc.jit` object's Python
+    function (FlyDSL keeps it as `_func` / `func`)."""
     py = getattr(fn, "func", None) or getattr(fn, "_func", None)
     if py is None:
         raise TypeError(f"no Python function behind {fn!r}")
@@ -117,7 +117,7 @@ class KernelAbi:
     names: tuple[str, ...]
 
     def check(self, kernel, launcher) -> None:
-        """The kernel takes exactly ``names``; the launcher too, then ``stream``."""
+        """The kernel takes exactly `names`; the launcher too, then `stream`."""
         got = _python_params(kernel)
         if got != self.names:
             raise TypeError(f"kernel parameters {got} != ABI {self.names}")
@@ -126,7 +126,7 @@ class KernelAbi:
             raise TypeError(f"launcher parameters {got} != ABI {self.names} + stream")
 
     def pack(self, values: dict) -> list:
-        """``values`` (every name, nothing else) in ABI order."""
+        """`values` (every name, nothing else) in ABI order."""
         try:
             if len(values) == len(self.names):
                 return [values[n] for n in self.names]

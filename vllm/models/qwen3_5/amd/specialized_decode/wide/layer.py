@@ -1,7 +1,7 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 """The wide decode's launches: one persistent kernel per GDN layer, one per
-full-attention layer after vLLM's attention (``LayerBuild.kind``):
+full-attention layer after vLLM's attention (`LayerBuild.kind`):
 
     gdn   [first: embedding -> input norm -> x]
           GDN proj + conv -> recurrence + gated norm -> out_proj
@@ -13,14 +13,14 @@ full-attention layer after vLLM's attention (``LayerBuild.kind``):
           -> the MLP half as above
 
 Phases are separated by grid barriers; an exchange's readers wait on its line
-flags instead. Up to ``tiled.RESIDENT_MAX`` rows GDN proj -> recurrence ->
-out_proj is one phase: their hand-offs are tagged pairs (``stages.tagged``).
-A launch reads the residual and the normed rows ``x`` the previous one left in
+flags instead. Up to `tiled.RESIDENT_MAX` rows GDN proj -> recurrence ->
+out_proj is one phase: their hand-offs are tagged pairs (`stages.tagged`).
+A launch reads the residual and the normed rows `x` the previous one left in
 its scratch and leaves the next ones there; the step's last leaves the final
-norm's rows in ``x``.
+norm's rows in `x`.
 
-Up to ``SPLIT_MAX`` rows a layer is two launches (``LayerBuild.split``), its
-MLP half ``mono.blocks.layer_block`` (out_proj / o_proj -> all-reduce ->
+Up to `SPLIT_MAX` rows a layer is two launches (`LayerBuild.split`), its
+MLP half `mono.blocks.layer_block` (out_proj / o_proj -> all-reduce ->
 post-attention norm -> MoE -> all-reduce, dataflow hand-offs, no grid
 barriers) after:
 
@@ -85,8 +85,8 @@ SPLIT_MAX = 16  # rows up to which a layer's MLP half is mono.blocks.layer_block
 
 
 def q4_of(fmt: str, shuffled: bool = True):
-    """The MXFP4 rows a GEMM of weight format ``fmt`` reads (``norm.Q4_MODES``),
-    unless ``shuffled`` (the ASM GEMM) as the Triton GEMM quantizes them."""
+    """The MXFP4 rows a GEMM of weight format `fmt` reads (`norm.Q4_MODES`),
+    unless `shuffled` (the ASM GEMM) as the Triton GEMM quantizes them."""
     q = {"bf16": None, "mxfp4": "plain", "mxfp4_h32": "h32"}[fmt]
     return q if q is None or shuffled else q + "_t"
 
@@ -132,7 +132,7 @@ class LayerBuild:
 
 
 def core_of(key: LayerBuild) -> str:
-    """The GDN core's format for out_proj (``gdn.CORE_MODES``)."""
+    """The GDN core's format for out_proj (`gdn.CORE_MODES`)."""
     if key.out == "bf16" or key.out_shuffled:
         return key.out
     return key.out + "_t"
@@ -189,7 +189,7 @@ TRACE_WORDS = 32  # i64 stamps a layer in the trace buffer
 
 
 def phase_names(key) -> list[str]:
-    """The stamps of a traced build (``LayerBuild.trace``), in order: each
+    """The stamps of a traced build (`LayerBuild.trace`), in order: each
     marks the end of the named phase ("start": the kernel's start)."""
     if key.split:
         return [
@@ -278,11 +278,15 @@ def scratch_bytes(rows: int, rip: int = 256) -> int:
 
 
 class Scratch(TraceInvariant):
-    """A width's scratch buffers (``scratch_layout``) as byte addresses."""
+    """A width's scratch buffers (`scratch_layout`) as byte addresses."""
 
     def __init__(self, base, rows: int, rip: int):
         for name, (off, _) in scratch_layout(rows, rip).items():
             setattr(self, name, fx.Int64(base) + fx.Int64(off))
+
+    def __getattr__(self, name: str) -> fx.Int64:
+        # the attributes are the width's layout names, set in __init__
+        raise AttributeError(name)
 
 
 # --------------------------------------------------------------------------
@@ -392,7 +396,7 @@ def build(key: LayerBuild):
                 names.append(name)
 
         def end_phase(name, issue=None):
-            """The phase's grid barrier; at resident widths ``issue()`` (the
+            """The phase's grid barrier; at resident widths `issue()` (the
             next phase's first weights) runs inside it, its result returned."""
             out = grid_sync(g, issue if tiled.resident(S) else None)
             stamp(name)
@@ -557,7 +561,9 @@ def build(key: LayerBuild):
                 if const_expr(fused_gdn(key)):
                     pending = tiled.issue_unit(bid, tid, out_w, gdn.out_plan())
                     gdn.recur(g, w, b, aux_f32, S, key.gdn_eps, "bf16", None, gtag)
-                    source = tagged.Pairs(g, scr.core, VALUE_DIM, gtag)
+                    source: tagged.Pairs | tiled.Source | tiled.Mx4Source = (
+                        tagged.Pairs(g, scr.core, VALUE_DIM, gtag)
+                    )
                     pre = back(
                         out_w, source, VALUE_DIM, pending, "gdn+out+allreduce+combine"
                     )
@@ -698,7 +704,7 @@ def build(key: LayerBuild):
 
 
 def run(key: LayerBuild, args: dict) -> None:
-    """Launch ``key``'s kernel on the current stream; ``args``: every ABI name
+    """Launch `key`'s kernel on the current stream; `args`: every ABI name
     (tensors by data pointer, ints as is)."""
     from vllm.v1.attention.ops.flydsl_kernels import _run_compiled
 
@@ -709,7 +715,7 @@ def run(key: LayerBuild, args: dict) -> None:
 
 
 def compile_only(key: LayerBuild) -> None:
-    """Compile ``key``'s kernel without launching it (FlyDSL's compile-only
+    """Compile `key`'s kernel without launching it (FlyDSL's compile-only
     mode returns before the launch)."""
     import os
 

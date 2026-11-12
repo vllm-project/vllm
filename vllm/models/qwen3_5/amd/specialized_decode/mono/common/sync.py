@@ -4,7 +4,7 @@
 # Copyright (C) 2026, Advanced Micro Devices, Inc.:
 # atom/mono/device/sync.py
 """The tagged mailbox: hand-offs between the CTAs of one GPU (device scope) and
-between GPUs (system scope), every address a named region (``Addr``)."""
+between GPUs (system scope), every address a named region (`Addr`)."""
 
 from __future__ import annotations
 
@@ -37,13 +37,13 @@ WAIT_TICKS = WAIT_SECONDS * 100_000_000  # s_memrealtime ticks at 100 MHz
 
 @traced
 def _spin(load_all, pending, health, alarm, region_id, index, tag):
-    """Re-issue ``load_all`` until ``pending`` clears, for at most WAIT_TICKS, and
-    not at all once this rank has failed (``health`` word FAILED), so a failed
+    """Re-issue `load_all` until `pending` clears, for at most WAIT_TICKS, and
+    not at all once this rank has failed (`health` word FAILED), so a failed
     step runs to its end instead of hanging. A side-effecting op in the loop keeps
     the loads from being hoisted.
 
-    A CTA's first give-up is recorded in its ``health`` record; it then raises the
-    output rank's flag for this rank (``alarm``) and drains that store before it
+    A CTA's first give-up is recorded in its `health` record; it then raises the
+    output rank's flag for this rank (`alarm`) and drains that store before it
     sets FAILED, so no later store of this rank's can overtake the flag."""
     t0 = memrealtime()
     v = load_all()
@@ -93,18 +93,18 @@ class Addr:
 
 
 def sreg(base, offset, region):
-    """Scratch region ``region`` at byte ``offset`` of ``base``."""
+    """Scratch region `region` at byte `offset` of `base`."""
     return Addr(region, Space.SCRATCH, base + fx.Int64(offset))
 
 
 def preg(base, offset, region):
-    """Peer-symmetric region ``region`` at byte ``offset`` of a rank's buffer
-    ``base``."""
+    """Peer-symmetric region `region` at byte `offset` of a rank's buffer
+    `base`."""
     return Addr(region, Space.PEER, base + fx.Int64(offset))
 
 
 def shift(a, delta):
-    """``a`` moved by ``delta`` bytes (a traced or Python integer), same region."""
+    """`a` moved by `delta` bytes (a traced or Python integer), same region."""
     return Addr(a.region, a.space, a.value + delta)
 
 
@@ -117,16 +117,16 @@ class Mailbox:
 
     Every 32-bit value is stored next to this launch's tag; a consumer
     polls the payload until all tags match, so a hand-off costs one round trip
-    (no store drain, no separate flag). The tag is ``layer + 1``: it tells the
+    (no store drain, no separate flag). The tag is `layer + 1`: it tells the
     layers of one step apart, and the runner zeroes every mailbox at a step's
-    start (``StepMailboxes.begin_step``), so a pair from an earlier step never
-    carries a live tag. Every address is an ``Addr``: its space picks the scope.
+    start (`StepMailboxes.begin_step`), so a pair from an earlier step never
+    carries a live tag. Every address is an `Addr`: its space picks the scope.
     """
 
     def __init__(self, layer, health, alarm, region_ids):
-        """``health``: this rank's health words (FAILED, then a wait record a
-        CTA); ``alarm``: this rank's flag word on the output rank;
-        ``region_ids``: region name -> the id a record names it by."""
+        """`health`: this rank's health words (FAILED, then a wait record a
+        CTA); `alarm`: this rank's flag word on the output rank;
+        `region_ids`: region name -> the id a record names it by."""
         self.tag = layer + 1
         self.health = health
         self.alarm = alarm
@@ -169,7 +169,7 @@ class Mailbox:
         )
 
     def poll(self, specs, batch=POLL_MAX):
-        """Batched poll of pairs ``specs`` = [(Addr, pair index, npairs in {1, 2})],
+        """Batched poll of pairs `specs` = [(Addr, pair index, npairs in {1, 2})],
         all of one space.
 
         All pairs are re-loaded together while any tag is stale, so a batch costs
@@ -218,8 +218,8 @@ class Mailbox:
 
 @traced
 def publish(put, a, i, v, who):
-    """This CTA's plain stores made readable by every CTA, then (thread ``who``)
-    the mailbox pair (``a``, i) := v. The stores are drained first: a flag may
+    """This CTA's plain stores made readable by every CTA, then (thread `who`)
+    the mailbox pair (`a`, i) := v. The stores are drained first: a flag may
     not overtake the data it announces, and a workgroup-scope release fence does
     not wait for them (LLVM's AMDGPU memory model omits vmcnt outside tgsplit
     mode: the workgroup's waves share one CU, the readers here do not)."""

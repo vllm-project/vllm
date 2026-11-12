@@ -1,7 +1,7 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 """The gated delta rule of a GDN (linear-attention) block, on the in_proj
-outputs the block's earlier stages put to PROJ / BAPART (``in_proj``):
+outputs the block's earlier stages put to PROJ / BAPART (`in_proj`):
 
     gdn  (S x NV value heads x 8 chunks of 16 state rows, task n on CTA
          (n + goff) % 256; a CTA runs its tasks phase by phase, so the rounds'
@@ -100,7 +100,7 @@ def silu(z):
 # ---------------------------------------------------------------- in_proj_ba
 def ba_loads(c, i, parts, k):
     """in_proj_ba task i's weights for this wave (rows 16 (i / parts) .., K
-    columns ``k`` (i % parts) .. of ``parts k``)."""
+    columns `k` (i % parts) .. of `parts k`)."""
     g, q = i // parts, i % parts
     return gemv.loads(
         c["lane"], c["wave"], c["args"]["w_ba"], g * ROWS, k, ldk=parts * k, k0=q * k
@@ -108,8 +108,8 @@ def ba_loads(c, i, parts, k):
 
 
 def stage_ba(c, i, ops, parts, k, sliced=False):
-    """in_proj_ba task i (``ba_loads``) on the unquantized x rows (LDS rows of
-    ``parts k`` + pad; ``sliced``: only the task's K part, rows of ``k`` +
+    """in_proj_ba task i (`ba_loads`) on the unquantized x rows (LDS rows of
+    `parts k` + pad; `sliced`: only the task's K part, rows of `k` +
     pad) -> fp32 BAPART."""
     lane, wave = c["lane"], c["wave"]
     if const_expr(sliced):
@@ -246,7 +246,7 @@ def decay_beta(b, a, dtb, a_log):
 def gdn_gates(c, k, t, h, qkw=None):
     """The key head's q and k (QK) l2-normed (q scaled by HD^-1/2); the head's
     decay exp(-exp(A_log) softplus(a + dt_bias)) and beta = sigmoid(b), b and a
-    as the model's ``ba_of`` hands them over."""
+    as the model's `ba_of` hands them over."""
     tid, lane, wave, g = c["tid"], c["lane"], c["wave"], c["gdn"]
     kh = h // (g.nv // g.nk)
     if tid < 2 * HD:
@@ -278,7 +278,7 @@ def gdn_gates(c, k, t, h, qkw=None):
 @traced
 def gdn_recur(c, k, t, h, ch):
     """State rows 16 ch .. of head h, one token: decay, the delta rule, the new
-    state (in place), o = bf16(h q) -> LDS ``ol``, the chunk's sum of squares
+    state (in place), o = bf16(h q) -> LDS `ol`, the chunk's sum of squares
     -> ONRM."""
     tid, lane = c["tid"], c["lane"]
     v = tid // 32
@@ -317,7 +317,7 @@ def gdn_recur(c, k, t, h, ch):
 @traced
 def gdn_norm(c, k, t, h, ch):
     """Rows 16 ch ..: RMSNormGated over the head's 128 (every chunk's partial):
-    bf16(o rstd w gate(z)) -> ``core``, the gate the model's ``z_gate``."""
+    bf16(o rstd w gate(z)) -> `core`, the gate the model's `z_gate`."""
     tid = c["tid"]
     a, g = c["args"], c["gdn"]
     if tid < VCH:
@@ -341,7 +341,7 @@ def gdn_norm(c, k, t, h, ch):
 
 
 def gdn_round(c, r):
-    """Round r's task of this CTA (``bid - goff`` cyclically + ``BLOCKS r``,
+    """Round r's task of this CTA (`bid - goff` cyclically + `BLOCKS r`,
     clamped into range), its (token, head, chunk) and the round's LDS."""
     nv = c["gdn"].nv
     n = c["S"] * nv * NVCH
@@ -362,7 +362,7 @@ def _sel(vals, i):
 
 @traced
 def gdn_tasks_batched(c, tasks, ks):
-    """``gdn_tasks`` with each hand-off polled for every round at once: the conv
+    """`gdn_tasks` with each hand-off polled for every round at once: the conv
     inputs and q / k one batch each, b / a and the norm partials a round on a
     thread group."""
     tid, g = c["tid"], c["gdn"]
@@ -398,7 +398,7 @@ def gdn_tasks_batched(c, tasks, ks):
         fx.ptr_store(decay, c["scal"] + r * 4)
         fx.ptr_store(beta, c["scal"] + r * 4 + 1)
     gpu.barrier()
-    for i, ((cr, live, t, h, ch), k) in enumerate(zip(tasks, ks)):
+    for i, ((cr, live, t, h, _ch), k) in enumerate(zip(tasks, ks)):
         if live:
             gdn_gates(cr, k, t, h, qks[i][0])
     for (cr, live, t, h, ch), k in zip(tasks, ks):
@@ -434,7 +434,7 @@ def gdn_tasks_batched(c, tasks, ks):
 
 @traced
 def gdn_tasks(c, rounds):
-    """This CTA's GDN tasks (``rounds`` of them) phase by phase: a task waits
+    """This CTA's GDN tasks (`rounds` of them) phase by phase: a task waits
     only on earlier phases of other CTAs' tasks, and every CTA finishes a
     phase's work before it waits in the next."""
     tasks = [gdn_round(c, r) for r in range(rounds)]

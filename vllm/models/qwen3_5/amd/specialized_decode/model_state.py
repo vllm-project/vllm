@@ -1,7 +1,7 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
-"""The model-runner state of ``Qwen3_5ForCausalLMBase``: vLLM's hybrid state,
-plus the lifecycle of the specialized decode when ``--monokernel`` selects
+"""The model-runner state of `Qwen3_5ForCausalLMBase`: vLLM's hybrid state,
+plus the lifecycle of the specialized decode when `--monokernel` selects
 it."""
 
 from typing import TYPE_CHECKING
@@ -21,7 +21,7 @@ if TYPE_CHECKING:
 
 
 class Qwen3_5ModelState(MambaHybridModelState):
-    """With ``--monokernel``, builds the specialized decode once the weights
+    """With `--monokernel`, builds the specialized decode once the weights
     are loaded, and checks it against every bound KV cache (the CUDA-graph
     memory-profiling cache, then the real one)."""
 

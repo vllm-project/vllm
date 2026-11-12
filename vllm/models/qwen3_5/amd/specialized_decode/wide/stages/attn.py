@@ -1,11 +1,11 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 """A full-attention layer's projections around vLLM's attention: the input
-projection ``qkv = x @ W_qkv.T`` (bf16, ``[q | gate interleaved a head | k |
-v]`` as ``Qwen3NextAttention.qkv_proj`` returns it) as the tail of the
+projection `qkv = x @ W_qkv.T` (bf16, `[q | gate interleaved a head | k |
+v]` as `Qwen3NextAttention.qkv_proj` returns it) as the tail of the
 launch before it, in three K slices a 64-row group folded by the group's
-last arriver into bf16 rows; its output projection is ``gdn.out`` over
-``gdn.GatedCore``.
+last arriver into bf16 rows; its output projection is `gdn.out` over
+`gdn.GatedCore`.
 """
 
 from __future__ import annotations
@@ -38,7 +38,7 @@ def qkv_weights(w):
 
 
 def qkv_proj(g, gemm, w, x, qkv_out, part, rows: int, fold0: int, pending=None):
-    """``qkv_out`` ([rows, QKV] bf16) of ``x`` ([rows, HIDDEN] bf16)."""
+    """`qkv_out` ([rows, QKV] bf16) of `x` ([rows, HIDDEN] bf16)."""
     plan = qkv_plan()
 
     @traced

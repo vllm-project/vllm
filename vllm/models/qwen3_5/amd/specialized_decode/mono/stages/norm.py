@@ -4,15 +4,15 @@
 tile in LDS: at 8192 columns a 16-row bf16 x is 262 KB, more than a CU's LDS.
 
 The norm tasks (CTAs 0 .. NRED - 1, 128 columns each) add the block input
-and the residual -> ``res_out`` and put their columns' sums of squares (MSQ).
+and the residual -> `res_out` and put their columns' sums of squares (MSQ).
 Every consumer then builds what it reads of x = bf16(z rstd (1 + w)) from
-global memory: a bf16 K slice (``x_rows_to_lds``: the router, in_proj_ba),
-the rows' MXFP4 codes (``x_fp4_to_lds``: in_proj_qkvz and the routed
-experts, as their GEMMs quantize x), or a dot product (``stage_sgate``). At
+global memory: a bf16 K slice (`x_rows_to_lds`: the router, in_proj_ba),
+the rows' MXFP4 codes (`x_fp4_to_lds`: in_proj_qkvz and the routed
+experts, as their GEMMs quantize x), or a dot product (`stage_sgate`). At
 the wider widths the norm tasks quantize their columns once instead
-(``stage_xq``) and the MXFP4 consumers copy the image (``xq_to_lds``).
-A source ``src`` is (a, cache modifier, b or None): z = a + b, fp32 of the
-bf16 words, as ``fused_add_rms_norm`` reads the unrounded sum."""
+(`stage_xq`) and the MXFP4 consumers copy the image (`xq_to_lds`).
+A source `src` is (a, cache modifier, b or None): z = a + b, fp32 of the
+bf16 words, as `fused_add_rms_norm` reads the unrounded sum."""
 
 import flydsl.expr as fx
 from aiter.ops.flydsl.kernels import buffer_ops as bo
@@ -73,7 +73,7 @@ def _pair(z0, z1):
 
 @traced
 def stage_front(c, j, src, msq=True):
-    """Columns 128 j ..: a + b (fp32; bf16 -> ``res_out``) and, with ``msq``, the
+    """Columns 128 j ..: a + b (fp32; bf16 -> `res_out`) and, with `msq`, the
     columns' sums of squares -> MSQ."""
     s, tid, lane = c["S"], c["tid"], c["lane"]
     a, cm, b = src
@@ -100,7 +100,7 @@ def stage_front(c, j, src, msq=True):
 @traced
 def stage_norm(c, j):
     """Columns 128 j ..: the AR sum (rank order, fp32 -> bf16) + residual (fp32;
-    bf16 -> ``res_out``); the bf16 AR sums -> ``xbuf`` and the columns' sums of
+    bf16 -> `res_out`); the bf16 AR sums -> `xbuf` and the columns' sums of
     squares -> MSQ, the store drained first."""
     s, tid, lane = c["S"], c["tid"], c["lane"]
     a = c["args"]
@@ -130,7 +130,7 @@ def stage_norm(c, j):
 
 @traced
 def load_rstd(c):
-    """Every norm task's sums of squares -> each token's rstd -> LDS ``rs``
+    """Every norm task's sums of squares -> each token's rstd -> LDS `rs`
     (fp32 sum in task order). A wave waits on the last token's first, so the
     full polls don't spin."""
     s, tid, lane, red = c["S"], c["tid"], c["lane"], c["red"]
@@ -168,7 +168,7 @@ def _z_words(src, t, kk):
 @traced
 def local_rstd(c, src):
     """Every token's rstd from all its columns on this CTA, no hand-off (fp32
-    sums in a fixed order, the same on every CTA) -> LDS ``rs``: at a few rows
+    sums in a fixed order, the same on every CTA) -> LDS `rs`: at a few rows
     cheaper than waiting on the norm tasks' MSQ."""
     s, tid, lane, wave, red = c["S"], c["tid"], c["lane"], c["wave"], c["red"]
     per = H // 8 // THREADS  # rounds a token
@@ -197,7 +197,7 @@ def local_rstd(c, src):
 
 
 def _x_words(c, src, t, kk):
-    """Token t's x columns kk .. kk + 7 (4 packed bf16 words), from ``src``."""
+    """Token t's x columns kk .. kk + 7 (4 packed bf16 words), from `src`."""
     av, bv = _z_words(src, t, kk)
     wv = fx.Vector(
         bo.buffer_load(rsrc(c["args"]["ln_w"]), kk // 2, vec_width=4, dtype=T.i32)
@@ -221,8 +221,8 @@ def _x_norm(c, t, loaded):
 
 @traced
 def x_rows_to_lds(c, src, klen, k0):
-    """Every token's x columns k0 .. k0 + klen (bf16) -> LDS ``xl`` rows of
-    ``klen`` + pad, 8 columns a lane."""
+    """Every token's x columns k0 .. k0 + klen (bf16) -> LDS `xl` rows of
+    `klen` + pad, 8 columns a lane."""
     s, tid = c["S"], c["tid"]
     xrow = klen + gemv.LDS_PAD
     words = s * klen // 8
@@ -240,12 +240,12 @@ def x_rows_to_lds(c, src, klen, k0):
 
 @traced
 def x_fp4_to_lds(c, src, rceil=True):
-    """Every token's x (bf16) through MXFP4 -> LDS ``xl``, as ``quant_x_fp4``
-    lays it out (token t's block b at byte t ``xq_row`` + 16 b, its e8m0 code
-    at dword ``xq_scales`` + t (H / 32) + b), 8 columns a lane, a block on 4
-    adjacent lanes. ``rceil``: the RCEIL scale of the stock decode MoE's and
+    """Every token's x (bf16) through MXFP4 -> LDS `xl`, as `quant_x_fp4`
+    lays it out (token t's block b at byte t `xq_row` + 16 b, its e8m0 code
+    at dword `xq_scales` + t (H / 32) + b), 8 columns a lane, a block on 4
+    adjacent lanes. `rceil`: the RCEIL scale of the stock decode MoE's and
     the ASM FP4 GEMM's activation quant, else the Triton FP4 GEMM's
-    (``mx_scale_round``). ``LOAD_GROUP`` rounds' loads go out together."""
+    (`mx_scale_round`). `LOAD_GROUP` rounds' loads go out together."""
     s, tid = c["S"], c["tid"]
     kq = H // 8
     nq = s * kq
@@ -274,14 +274,14 @@ def x_fp4_to_lds(c, src, rceil=True):
 
 
 def xq_dwords(s):
-    """Dwords of the x rows' MXFP4 image (``x_fp4_to_lds``' LDS layout)."""
+    """Dwords of the x rows' MXFP4 image (`x_fp4_to_lds`' LDS layout)."""
     return xq_scales(s, H) + s * H // 32
 
 
 @traced
 def stage_xq(c, j, src, rceil=True):
-    """Columns 128 j .. of every token's x through MXFP4 (``x_fp4_to_lds``) ->
-    the shared image ``xq``, then XQF pair j (``rs`` loaded)."""
+    """Columns 128 j .. of every token's x through MXFP4 (`x_fp4_to_lds`) ->
+    the shared image `xq`, then XQF pair j (`rs` loaded)."""
     s, tid = c["S"], c["tid"]
     per = COLS // 8
     nq = s * per
@@ -314,7 +314,7 @@ def stage_xq(c, j, src, rceil=True):
 
 @traced
 def xq_to_lds(c):
-    """Every norm task's XQF, then the shared MXFP4 image ``xq`` -> LDS ``xl``."""
+    """Every norm task's XQF, then the shared MXFP4 image `xq` -> LDS `xl`."""
     s, tid = c["S"], c["tid"]
     if tid < NRED:
         c["poll"]([(c["xqf"], tid, 1)])
@@ -346,7 +346,7 @@ def xq_to_lds(c):
 def stage_sgate(c, t, src):
     """Token t's shared-expert weight: sigmoid(bf16(x . w_sg)) in fp32 (the
     top-k kernel's fused sigmoid on the combined gate's bf16 logit) -> SGATE,
-    x built from ``src`` (``rs`` loaded)."""
+    x built from `src` (`rs` loaded)."""
     tid, lane, wave, red = c["tid"], c["lane"], c["wave"], c["red"]
     per = H // THREADS  # 16: two 8-column words a thread
     acc = fx.Float32(0.0)
@@ -372,7 +372,7 @@ def stage_sgate(c, t, src):
 
 @traced
 def stage_final(c, j):
-    """Columns 128 j ..: FINAL in rank order -> bf16 ``out``."""
+    """Columns 128 j ..: FINAL in rank order -> bf16 `out`."""
     s, tid = c["S"], c["tid"]
     for p in range_constexpr(token_passes(s)):
         t = tid // 64 + WAVES * p

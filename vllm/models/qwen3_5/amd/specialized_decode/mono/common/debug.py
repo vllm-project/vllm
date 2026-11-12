@@ -20,13 +20,13 @@ def region_id(name: str) -> int:
 
 
 def region_ids(names) -> dict[str, int]:
-    """Name -> ``region_id``: a ``Mailbox``'s table."""
+    """Name -> `region_id`: a `Mailbox`'s table."""
     return {n: region_id(n) for n in names}
 
 
 def given_up_waits(health: torch.Tensor, names) -> list[str]:
     """Each CTA's first wait that gave up, the earliest first, from a rank's
-    ``health`` words; ``names`` the regions a record may name."""
+    `health` words; `names` the regions a record may name."""
     by_id = {region_id(n): n for n in names}
     records = health.view(BLOCKS + 1, RECORD_WORDS)[1:]
     records = records[records[:, 0] != 0].tolist()
