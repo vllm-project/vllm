@@ -159,6 +159,91 @@ The following extra parameters are supported:
     --8<-- "vllm/entrypoints/speech_to_text/transcription/protocol.py:transcription-extra-params"
     ```
 
+### Voice Activity Detection (VAD)
+
+With VAD enabled, vLLM runs [Silero VAD](https://github.com/snakers4/silero-vad) on the
+uploaded audio and drops non-speech before it reaches the model. Speech segments are then
+packed into chunks of at most the model's maximum clip length. This reduces hallucinations
+on silence and background noise. If the audio contains no speech, the response has empty
+text without running the model.
+VAD is off by default and is enabled per request; it works for both the Transcriptions
+and Translations APIs.
+
+VAD needs the `silero-vad` and `onnxruntime` packages, which are part of the audio extra:
+
+```bash
+pip install vllm[audio]
+```
+
+Without them, requests with VAD enabled return a 400 error.
+
+VAD options are flattened multipart form fields with a `vad_config.` prefix:
+
+??? code
+
+    ```bash
+    curl -X POST "http://localhost:8000/v1/audio/transcriptions" \
+      -H "Authorization: Bearer token-abc123" \
+      -F "file=@audio.mp3" \
+      -F "model=openai/whisper-large-v3-turbo" \
+      -F "vad_config.enabled=true" \
+      -F "vad_config.threshold=0.5" \
+      -F "vad_config.min_silence_duration_ms=2000"
+    ```
+
+With the OpenAI Python client, pass them through `extra_body`:
+
+??? code
+
+    ```python
+    transcription = client.audio.transcriptions.create(
+        model="openai/whisper-large-v3-turbo",
+        file=audio_file,
+        extra_body={"vad_config.enabled": True},
+    )
+    ```
+
+**VAD Parameters:**
+
+The defaults follow [faster-whisper](https://github.com/SYSTRAN/faster-whisper).
+Out-of-range values return a 400 error.
+
+| Field | Default | Description |
+| ----- | ------- | ----------- |
+| `vad_config.enabled` | `false` | Enable VAD for this request. |
+| `vad_config.threshold` | `0.5` | Speech probability (0 to 1) above which audio is speech. |
+| `vad_config.neg_threshold` | `threshold - 0.15` | Probability (0 to 1, at most `threshold`) below which audio is silence. In between, the previous state is kept. |
+| `vad_config.min_speech_duration_ms` | `0` | Drop speech segments shorter than this. |
+| `vad_config.max_speech_duration_s` | unlimited | Split speech segments longer than this, at a silence when possible. |
+| `vad_config.min_silence_duration_ms` | `2000` | Silence needed to end a speech segment. |
+| `vad_config.speech_pad_ms` | `600` | Padding kept before and after each speech segment. |
+| `vad_config.min_silence_at_max_speech_ms` | `98` | Minimum silence used to split a segment that reached `max_speech_duration_s`. |
+| `vad_config.use_max_poss_sil_at_max_speech` | `true` | Split at the longest silence near the limit instead of the last one. |
+
+**Limitations:**
+
+- VAD can drop very quiet or very short speech, such as a lone "thank you". If transcripts
+  miss such speech, lower `vad_config.threshold` (for example, to `0.3`).
+- `response_format=verbose_json` is not supported yet with VAD and returns a 400 error,
+  because segment timestamps would not refer to positions in the original audio.
+- Diarization models, such as `OpenMOSS-Team/MOSS-Transcribe-Diarize`, reject VAD, because
+  dropping silence would shift the speaker timestamps.
+
+**Tuning VAD Workers:**
+
+By default, VAD runs on the audio preprocessing thread pool together with audio decoding
+(`VLLM_MAX_AUDIO_PREPROCESS_WORKERS`, default 2). Under high concurrency with long audio,
+VAD can become the bottleneck. `--max-vad-workers N` runs VAD on a dedicated pool of `N`
+threads so it scales independently of decoding:
+
+```bash
+vllm serve openai/whisper-large-v3-turbo --max-vad-workers 4
+```
+
+In profiling, 4 workers gave the best throughput for long audio at high concurrency; for
+short clips, the default pool is enough. Each VAD worker holds its own ONNX Runtime session,
+and decoded audio waiting for a VAD worker is bounded by the worker counts.
+
 ## Translations API
 
 Our Translation API is compatible with [OpenAI's Translations API](https://platform.openai.com/docs/api-reference/audio/createTranslation);
@@ -186,6 +271,8 @@ The following extra parameters are supported:
 ```python
 --8<-- "vllm/entrypoints/speech_to_text/translation/protocol.py:translation-extra-params"
 ```
+
+The [VAD options](#voice-activity-detection-vad) work the same way as for transcriptions.
 
 ## Realtime API
 
