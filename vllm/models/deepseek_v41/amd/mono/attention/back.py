@@ -12,7 +12,8 @@ One launch a layer and rank, `BLOCKS` x `THREADS`, S rows:
             dequantized into its QK operands and kept raw in LDS; QK (bf16
             MFMA), the chunk's max / sum per head, bf16 p in LDS; PV over the
             chunk's raw rows (wave w: dims 64 w ..) -> the chunk's partial
-            (bf16) and its (max, sum) per head, published
+            (bf16) and its (max, sum) per head, published. Over plain fp8
+            rows `stage_split_plain` runs the same unit with fp8 MFMAs.
     combine (S x H): a (token, head)'s chunks merged with the sink folded in,
             bf16, inverse GPT-J RoPE of dims 448.., vLLM's MXFP8 of each 32
             -> XO (published)
@@ -38,6 +39,7 @@ from .device import (
     BLOCKS,
     CM_DEV,
     THREADS,
+    UNIT_SCALE,
     WAVES,
     Mailbox,
     bf16_round,
@@ -56,6 +58,7 @@ from .device import (
     ld_f32,
     ld_i32,
     mfma_bf16,
+    mfma_scaled,
     mx_code,
     mx_mul,
     pow2,
@@ -74,6 +77,8 @@ from .plan import (
     HEAD_TILE,
     KEYS,
     NOPE,
+    P_SHIFT,
+    PLAIN_ROW,
     ROPE,
     ROWS,
     WOA_ROWS,
@@ -110,6 +115,7 @@ class BackBuild:
     ratio: int  # 0: window only; 1 / 2: top-k over a compressed cache
     timeline: bool = False
     tuned: bool = False  # a tuned build's paths (``layer.MonoBuild.tuned``)
+    plain: bool = False  # plain fp8 KV rows and fp8 q (`stage_split_plain`)
 
 
 def plus(t0, v):
@@ -192,6 +198,9 @@ def key_rec(c, t, k):
     off = slot % blk
     page = base + fx.Int64(b) * stride
     z = a["zrec"]
+    if const_expr(c["plain"]):
+        # a plain row has no scales: the zero record's address stands in
+        return ok.select(page + fx.Int64(off * PLAIN_ROW), z), z, ok
     data = ok.select(page + fx.Int64(off * DATA), z)
     sc = ok.select(page + fx.Int64(blk * DATA + off * 8), z + fx.Int64(DATA))
     if const_expr(GFX942):
@@ -487,56 +496,282 @@ def stage_split(c, unit):
                         )
                     )
         stamp(c, 6)
-        # partial[t][ch][head][dim] bf16: lane (r16, g) holds C rows 4 g + i ->
-        # dims 64 w + 16 g + 4 i + dt of head ht2 * 16 + r16: 32 contiguous
-        # bytes, two 16 B stores (4 lanes fill a 128 B line). Tuned, whole
-        # 64 B sectors: store j of lane g takes dims 32 j + 8 g .. from lane
-        # 2 j + g // 2 of its row (its words 4 (g % 2) ..)
+        store_partial(c, accs, t, ch, dbase, g, r16)
+        publish(c, c["srdy"], t * nchunk + ch)
+        stamp(c, 7)
+
+
+@traced
+def store_partial(c, accs, t, ch, dbase, g, r16):
+    """A split unit's PV accumulators -> its bf16 partial.
+
+    partial[t][ch][head][dim] bf16: lane (r16, g) holds C rows 4 g + i ->
+    dims 64 w + 16 g + 4 i + dt of head ht2 * 16 + r16: 32 contiguous
+    bytes, two 16 B stores (4 lanes fill a 128 B line). Tuned, whole
+    64 B sectors: store j of lane g takes dims 32 j + 8 g .. from lane
+    2 j + g // 2 of its row (its words 4 (g % 2) ..)"""
+    d, nchunk = c["d"], c["nchunk"]
+    if const_expr(c["tuned"]):
+        odd = (g % 2) == 1
+    for ht2 in range_constexpr(d.head_tiles):
+        hh = ht2 * HEAD_TILE + r16
+        words = []
+        for i in range_constexpr(4):
+            v4 = fx.Vector.from_elements(
+                [accs[ht2][dt][i] for dt in range(4)], fx.Float32
+            )
+            w2 = v4.to(fx.BFloat16).bitcast(fx.Int32)
+            words += [w2[0], w2[1]]
         if const_expr(c["tuned"]):
-            odd = (g % 2) == 1
-        for ht2 in range_constexpr(d.head_tiles):
-            hh = ht2 * HEAD_TILE + r16
-            words = []
-            for i in range_constexpr(4):
-                v4 = fx.Vector.from_elements(
-                    [accs[ht2][dt][i] for dt in range(4)], fx.Float32
+            row = ((t * nchunk + ch) * d.heads + hh) * HEAD_DIM + dbase
+            for j in range_constexpr(2):
+                src = r16 + 16 * (2 * j + g // 2)
+                out = [
+                    odd.select(
+                        lane_gather(words[4 + e], src), lane_gather(words[e], src)
+                    )
+                    for e in range(4)
+                ]
+                bo.buffer_store(
+                    fx.Vector.from_elements(out, fx.Int32),
+                    rsrc(c["part"]),
+                    (row + 32 * j + 8 * g) // 2,
+                    cache_modifier=CM_DEV,
                 )
-                w2 = v4.to(fx.BFloat16).bitcast(fx.Int32)
-                words += [w2[0], w2[1]]
-            if const_expr(c["tuned"]):
-                row = ((t * nchunk + ch) * d.heads + hh) * HEAD_DIM + dbase
-                for j in range_constexpr(2):
-                    src = r16 + 16 * (2 * j + g // 2)
-                    out = [
-                        odd.select(
-                            lane_gather(words[4 + e], src), lane_gather(words[e], src)
-                        )
-                        for e in range(4)
-                    ]
-                    bo.buffer_store(
-                        fx.Vector.from_elements(out, fx.Int32),
-                        rsrc(c["part"]),
-                        (row + 32 * j + 8 * g) // 2,
-                        cache_modifier=CM_DEV,
-                    )
-                continue
-            off = (((t * nchunk + ch) * d.heads + hh) * HEAD_DIM + dbase + 16 * g) // 2
+            continue
+        off = (((t * nchunk + ch) * d.heads + hh) * HEAD_DIM + dbase + 16 * g) // 2
 
-            def store_part(off=off, words=words):
-                for hlf in range_constexpr(2):
-                    bo.buffer_store(
-                        fx.Vector.from_elements(words[4 * hlf : 4 * hlf + 4], fx.Int32),
-                        rsrc(c["part"]),
-                        off + 4 * hlf,
-                        cache_modifier=CM_DEV,
-                    )
+        def store_part(off=off, words=words):
+            for hlf in range_constexpr(2):
+                bo.buffer_store(
+                    fx.Vector.from_elements(words[4 * hlf : 4 * hlf + 4], fx.Int32),
+                    rsrc(c["part"]),
+                    off + 4 * hlf,
+                    cache_modifier=CM_DEV,
+                )
 
-            if const_expr(d.heads < d.heads_pad):
-                # TP8: the padded columns of the head tile are not stored
-                if hh < d.heads:
-                    store_part()
-            else:
+        if const_expr(d.heads < d.heads_pad):
+            # TP8: the padded columns of the head tile are not stored
+            if hh < d.heads:
                 store_part()
+        else:
+            store_part()
+
+
+# ---------------------------------------------------------------- split, plain fp8
+
+# A plain row in LDS: 512 bytes + 16 B, so 16 B stores stay aligned
+REC_PLAIN = PLAIN_ROW + 16
+Q_ROW_PLAIN = HEAD_DIM // 4 + 4  # an fp8 q row in LDS (i32 words): 512 B + 16 B
+P_PAD_PLAIN = 4  # i32 words past an fp8 P row: rows stay 16 B aligned
+
+
+def p_row_plain(d: Dims, s: int) -> int:
+    """An fp8 P row (one head's chunk of e4m3 p) in LDS, i32 words."""
+    return chunk_keys(d, s) // 4 + P_PAD_PLAIN
+
+
+def byte_column(ws, b):
+    """Byte `b` of each of four words, as one word (word i's byte -> byte i)."""
+    out = (ws[0] >> (8 * b)) & 0xFF
+    for i in range(1, 4):
+        out = out | (((ws[i] >> (8 * b)) & 0xFF) << (8 * i))
+    return out
+
+
+@traced
+def stage_split_plain(c, unit):
+    """`stage_split` over plain fp8 rows, with fp8 MFMAs throughout (the
+    scheme of aiter's Gluon `sparse_mla_fp8`): QK as e4m3 q x e4m3 keys, P
+    scaled by 2^P_SHIFT and quantized to e4m3, PV as e4m3 P x e4m3 values,
+    every 128-key step one 16x16x128 scaled MFMA at unit scales. A unit knows
+    its chunk's exact max before it exponentiates (no lazy rescale), so the
+    chunk's largest p is e4m3's largest value. The published max is the
+    chunk's less P_SHIFT, which makes the combine's merge undo the scaling;
+    the cache's per-tensor scale is applied to the scores here and to the
+    values in the combine."""
+    tid, lane, wave, d, s = c["tid"], c["lane"], c["wave"], c["d"], c["S"]
+    a, sl = c["args"], c["sl"]
+    nchunk = c["nchunk"]
+    t = unit // nchunk
+    ch = unit % nchunk
+    ck = chunk_keys(d, s)
+    ngrp = head_groups(d, s)
+    nkt = ck // 16  # 16-key tiles a chunk
+    nht = d.head_tiles // ngrp  # head tiles a wave
+    hgi = wave // nkt
+    kt = wave % nkt
+    g = lane // 16
+    r16 = lane % 16
+    k0 = ch * ck
+    prow = p_row_plain(d, s)
+    if const_expr("krdy" in c):
+        await_flags(c, c["krdy"], 1, lambda u: t)
+    kv_len = ld_i32(a["klen"], t, CM_DEV if const_expr("krdy" in c) else 0)
+    key = k0 + kt * 16 + r16
+    data, _, okv = key_rec(c, t, key)
+    # the token's e4m3 q, every head: [H x 512] bytes (`front.stage_wqb`)
+    qrow = d.heads * HEAD_DIM // 16
+    qv = []
+    for i in range_constexpr(cdiv(qrow, THREADS)):
+        u = fresh(tid) + THREADS * i
+        qv.append(
+            fx.Vector(
+                bo.buffer_load(
+                    rsrc(a["q"]),
+                    (t * d.q_rows) // 4 + fx.min(u, qrow - 1) * 4,
+                    vec_width=4,
+                    dtype=T.i32,
+                )
+            )
+        )
+    kscale = ld_f32(a["kv_scale"], 0)
+    qscale = ld_f32(a["q_scale"], 0)
+    if k0 < kv_len:
+        # a key's 512 e4m3 as 8 x 16 B, lane g: dims 64 c + 16 g .. -- for the
+        # 128-dim step i, chunks 2 i and 2 i + 1 are the scaled MFMA's operand
+        kv = [gload(data + fx.Int64(64 * c8 + 16 * g), words=4) for c8 in range(8)]
+        for i in range_constexpr(cdiv(qrow, THREADS)):
+            u = fresh(tid) + THREADS * i
+            if u < qrow:
+                fx.ptr_store(
+                    qv[i],
+                    sl["q"]
+                    + (u // (HEAD_DIM // 16)) * Q_ROW_PLAIN
+                    + (u % (HEAD_DIM // 16)) * 4,
+                )
+        # the raw rows to LDS for the PV (head group 0's waves)
+        if hgi == 0:
+            rawb = sl["raw"] + (kt * 16 + r16) * (REC_PLAIN // 4)
+            for c8 in range_constexpr(8):
+                fx.ptr_store(kv[c8], rawb + (64 * c8 + 16 * g) // 4)
+        gpu.barrier()
+        stamp(c, 5)
+        # QK: A = the keys straight from their loads, B = q of a head tile
+        scale = fx.Int32(a["qk_scale"]).bitcast(fx.Float32) * (qscale * kscale)
+        unit_sc = fx.Int32(UNIT_SCALE)
+        st = sl["st"]
+        accs = [fx.Vector.filled(4, 0.0, fx.Float32) for _ in range(nht)]
+        for i in range_constexpr(HEAD_DIM // 128):
+            kw = fx.Vector.from_elements(
+                [kv[2 * i][e] for e in range(4)] + [kv[2 * i + 1][e] for e in range(4)],
+                fx.Int32,
+            )
+            for ht in range_constexpr(nht):
+                qb = sl["q"] + ((hgi * nht + ht) * HEAD_TILE + r16) * Q_ROW_PLAIN
+                lo, hi = (
+                    fx.Vector(
+                        fx.ptr_load(
+                            qb + 32 * i + 16 * h + 4 * g,
+                            result_type=fx.Vector.make_type(4, fx.Int32),
+                        )
+                    )
+                    for h in range(2)
+                )
+                qw = fx.Vector.from_elements(
+                    [lo[e] for e in range(4)] + [hi[e] for e in range(4)], fx.Int32
+                )
+                accs[ht] = mfma_scaled(kw, qw, accs[ht], unit_sc, unit_sc)
+        # scores of keys 4 g + i (C rows), head r16 of a tile (C column)
+        ok = (key < kv_len) & okv
+        okw = ok.select(fx.Int32(1), fx.Int32(0))
+        valid = [lane_gather(okw, 4 * g + i) != 0 for i in range(4)]
+        svs = []
+        for ht in range_constexpr(nht):
+            sv = [
+                fx.Float32(valid[i].select(accs[ht][i] * scale, fx.Float32(NEG)))
+                for i in range(4)
+            ]
+            mw = butterfly(
+                fx.max(fx.max(sv[0], sv[1]), fx.max(sv[2], sv[3])), (32, 16), fx.max
+            )
+            if g == 0:
+                fx.ptr_store(mw, st + ((hgi * nht + ht) * nkt + kt) * HEAD_TILE + r16)
+            svs.append(sv)
+        gpu.barrier()
+        lst = st + d.heads_pad * nkt
+        for ht in range_constexpr(nht):
+            hti = hgi * nht + ht
+            m = fx.ptr_load(st + (hti * nkt) * HEAD_TILE + r16)
+            for j in range_constexpr(1, nkt):
+                m = fx.max(m, fx.ptr_load(st + (hti * nkt + j) * HEAD_TILE + r16))
+            ms = m - fx.Float32(P_SHIFT)
+            sv = svs[ht]
+            p = [
+                fx.Float32(valid[i].select(hw_exp2(sv[i] - ms), fx.Float32(0.0)))
+                for i in range(4)
+            ]
+            lw = (p[0] + p[2]) + (p[1] + p[3])
+            lw = lw + xshfl(lw, 32)
+            lw = lw + xshfl(lw, 16)
+            # keys 16 kt + 4 g .. + 3 of head r16: one word of the fp8 P row
+            fx.ptr_store(
+                fp8_pack4(*[clamp_fp8(v) for v in p]),
+                sl["p"] + (hti * HEAD_TILE + r16) * prow + 4 * kt + g,
+            )
+            if g == 0:
+                fx.ptr_store(lw, lst + (hti * nkt + kt) * HEAD_TILE + r16)
+        gpu.barrier()
+        # chunk stats: (max less P_SHIFT, sum of the scaled p) per head
+        if tid < d.heads:
+            hts = tid // HEAD_TILE
+            hr = tid % HEAD_TILE
+            mm = fx.ptr_load(st + (hts * nkt) * HEAD_TILE + hr)
+            ll = fx.ptr_load(lst + (hts * nkt) * HEAD_TILE + hr)
+            for j in range_constexpr(1, nkt):
+                mm = fx.max(mm, fx.ptr_load(st + (hts * nkt + j) * HEAD_TILE + hr))
+                ll = ll + fx.ptr_load(lst + (hts * nkt + j) * HEAD_TILE + hr)
+            bo.buffer_store(
+                fx.Vector.from_elements([mm - fx.Float32(P_SHIFT), ll], fx.Float32),
+                rsrc(c["pstat"]),
+                ((t * nchunk + ch) * d.heads + tid) * 2,
+                cache_modifier=CM_DEV,
+            )
+        # PV: wave w dims 64 w + 4 r16 + dt (dt = 0..3: one LDS word holds the
+        # four of a key). A = V^T, row = a dim: lane (r16, g) takes keys
+        # 16 g + j and 64 + 16 g + j (j < 16) of the chunk, the scaled MFMA's
+        # K order, as bytes gathered from the keys' words; B = the P rows'
+        # same bytes. A 64-key chunk leaves the upper 64 keys zero.
+        dbase = 64 * wave
+        halves = ck // 64
+        vw = [
+            fx.Int32(
+                fx.ptr_load(
+                    sl["raw"]
+                    + (64 * h + 16 * g + j) * (REC_PLAIN // 4)
+                    + (dbase + 4 * r16) // 4
+                )
+            )
+            for h in range(halves)
+            for j in range(16)
+        ]
+        zero = fx.Int32(0)
+        av = []
+        for dt in range_constexpr(4):
+            cols = [byte_column(vw[4 * m : 4 * m + 4], dt) for m in range(4 * halves)]
+            av.append(
+                fx.Vector.from_elements(cols + [zero] * (8 - len(cols)), fx.Int32)
+            )
+        accs = [
+            [fx.Vector.filled(4, 0.0, fx.Float32) for _ in range(4)]
+            for _ in range(d.head_tiles)
+        ]
+        for ht2 in range_constexpr(d.head_tiles):
+            pb = sl["p"] + (ht2 * HEAD_TILE + r16) * prow
+            pw = []
+            for h in range_constexpr(halves):
+                v = fx.Vector(
+                    fx.ptr_load(
+                        pb + 16 * h + 4 * g,
+                        result_type=fx.Vector.make_type(4, fx.Int32),
+                    )
+                )
+                pw += [v[e] for e in range(4)]
+            pv = fx.Vector.from_elements(pw + [zero] * (8 - len(pw)), fx.Int32)
+            for dt in range_constexpr(4):
+                accs[ht2][dt] = mfma_scaled(av[dt], pv, accs[ht2][dt], unit_sc, unit_sc)
+        stamp(c, 6)
+        store_partial(c, accs, t, ch, dbase, g, r16)
         publish(c, c["srdy"], t * nchunk + ch)
         stamp(c, 7)
 
@@ -615,6 +850,9 @@ def stage_combine(c, unit):
         lsum = lsum + ls[cc] * wgt
         tot = [tot[e] + vs[cc][e] * wgt for e in range(8)]
     inv = fx.Float32(1.0) / lsum
+    if const_expr(c["plain"]):
+        # the values' per-tensor scale (`stage_split_plain`)
+        inv = inv * ld_f32(a["kv_scale"], 0)
     o = [bf16_round(tot[e] * inv) for e in range(8)]
     # inverse GPT-J RoPE of each pair: e' = e cos + o sin, o' = o cos - e sin
     y = []
@@ -804,6 +1042,7 @@ def back_context(key, lds, args: dict, scratch, tag, layout=None) -> dict:
         "d": d,
         "ratio": key.ratio,
         "tuned": key.tuned,
+        "plain": key.plain,
         "mb": Mailbox(tag),
         "nchunk": back_plan(key)[0],
         "sl": {"q": spl.q.ptr, "raw": spl.raw.ptr, "p": spl.p.ptr, "st": spl.st.ptr},
@@ -872,7 +1111,10 @@ def run_back(c, key, bid):
     _, n_split, n_comb, COMB0, WOA0, WOB0, early_wob = back_plan(key)
     stamp(c, 0)
     for unit in range(first_task(bid, 0), n_split, BLOCKS):
-        stage_split(c, unit)
+        if const_expr(c["plain"]):
+            stage_split_plain(c, unit)
+        else:
+            stage_split(c, unit)
     stamp(c, 1)
     for unit in range(first_task(bid, COMB0), n_comb, BLOCKS):
         stage_combine(c, unit)

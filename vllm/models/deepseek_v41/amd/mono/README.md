@@ -25,8 +25,9 @@ new, reading vLLM's KV records and weights as loaded.
   the block's non-causal SWA rows).
   The paths interleave freely (same tensors at the layer boundary).
 - Steps: decode only (FULL graph or eager), M <= 48 rows (8 requests x 6
-  DSpark tokens), TP2 / TP4 / TP8 (gfx950), `fp8_ds_mla` KV records (ROCm), text tokens (the
-  routing bias is `e_score_correction_bias`).
+  DSpark tokens), TP2 / TP4 / TP8 (gfx950), `fp8_ds_mla` KV records (ROCm) or,
+  on gfx950, plain fp8 rows (`--kv-cache-dtype fp8_e4m3`, `MonoBuild.plain_kv`),
+  text tokens (the routing bias is `e_score_correction_bias`).
 - Tuned builds (`MonoBuild.tuned`): the target's compress-ratio-2 layers at TP2
   on gfx950 compile paths tuned for those step widths, bit-exact against the
   generic code that every other build compiles unchanged; they have a scratch
@@ -92,6 +93,13 @@ new, reading vLLM's KV records and weights as loaded.
   records as vLLM's insert writes them (dims 0..447 e4m3 with a UE8M0 per 64,
   RoPE dims bf16, 584 B); keys = the sliding window plus the top-k compressed
   rows, softmax in base 2 with the attention sink folded in.
+- Attention over plain fp8 rows: rows and q as vLLM's full-cache insert writes
+  them (all 512 dims e4m3 under the per-tensor KV / q scales, RoPE in fp32 with
+  no bf16 rounding before the quant); the split runs fp8 MFMAs throughout like
+  aiter's Gluon `sparse_mla_fp8` (e4m3 q x keys, P scaled by 2^log2(448) to
+  e4m3, P x values), each 128-key step one 16x16x128 scaled MFMA. A split
+  knows its chunk's exact max before the exponent, so P has no lazy-rescale
+  headroom to leave.
 - MoE: vLLM's router (bf16 gate GEMV, f32 logits, `topk_hash_softplus_sqrt`)
   and AITER a8w4 `fused_moe` (interleaved gate / up, swiglu limit 10, weights
   in aiter's (16, 16) shuffle and `shuffle_scale` order); the shared expert as

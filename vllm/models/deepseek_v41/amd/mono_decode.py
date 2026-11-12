@@ -6,7 +6,8 @@ A decode step's backbone layer -- the attention seam, the attention, its TP
 all-reduce, the FFN seam, the MoE and its all-reduce -- runs as two persistent
 FlyDSL launches (`mono`, this directory) on the layer's loaded
 weights, the TP reductions inside the kernels. Every backbone layer of the
-checkpoint runs whole (compress ratio 0, 1 or 2 over `fp8_ds_mla` records):
+checkpoint runs whole (compress ratio 0, 1 or 2 over `fp8_ds_mla` records, or
+on gfx950 over plain fp8 rows, `--kv-cache-dtype fp8_e4m3`):
 the first layer and the Engram layers hand K1 a settled residual, and an index
 source runs vLLM's compressor and indexer between the two launches. A layer
 outside that (an MXFP8 KV cache, another indexer) keeps vLLM's attention seam
@@ -53,6 +54,7 @@ if TYPE_CHECKING:
 logger = init_logger(__name__)
 
 RECORD = 584  # an fp8_ds_mla KV record: 576 data bytes, 8 scale bytes
+PLAIN_ROW = 512  # a plain fp8 KV row (fp8_e4m3): 512 e4m3, one per-tensor scale
 SWA_WIDTH = 128  # a causal decode token's window slots
 MAX_ROWS = 48  # the kernels' step rows at most: 8 requests x (1 + 5 DSpark drafts)
 # A gfx942 workgroup has 64 KB of LDS, not 160 KB as on gfx950. Its kernels
@@ -77,12 +79,20 @@ _runner = None
 _draft_runner = None
 
 
-def _mono_runner(device: torch.device, draft: "MonoDecodeLayer | None" = None):
+def _mono_runner(
+    device: torch.device,
+    draft: "MonoDecodeLayer | None" = None,
+    plain_kv: bool = False,
+):
     """The process's mono runner (one a TP rank, shared by every layer of the
     target; the DSpark draft's layers share one of their own, as its routing and
     SWA rows differ). Its peer-memory handshake is collective over the TP group:
-    every rank builds it at load, at the same layer (`build_runner`)."""
+    every rank builds it at load, at the same layer (`build_runner`).
+    `plain_kv`: the model's KV cache holds plain fp8 rows, the same for every
+    layer."""
     global _runner, _draft_runner
+    for built in (_runner, _draft_runner):
+        assert built is None or built.plain_kv == plain_kv, plain_kv
     if draft is not None:
         if _draft_runner is None:
             if torch.cuda.is_current_stream_capturing():
@@ -101,6 +111,7 @@ def _mono_runner(device: torch.device, draft: "MonoDecodeLayer | None" = None):
                 topk=draft.topk,
                 ug_groups=DRAFT_UG_GROUPS,
                 swa_width=draft.swa_width,
+                plain_kv=plain_kv,
             )
         return _draft_runner
     if _runner is None:
@@ -119,16 +130,19 @@ def _mono_runner(device: torch.device, draft: "MonoDecodeLayer | None" = None):
             get_tensor_model_parallel_rank(),
             get_tp_group().cpu_group,
             device,
+            plain_kv=plain_kv,
         )
     return _runner
 
 
-def _record_view(kv: torch.Tensor, block: int) -> torch.Tensor:
+def _record_view(kv: torch.Tensor, block: int, plain: bool = False) -> torch.Tensor:
     """A layer's fp8_ds_mla cache as [blocks, block, RECORD] bytes (a block's
-    data rows, then its scale words: the kernels index both from it)."""
+    data rows, then its scale words: the kernels index both from it); `plain`:
+    a plain fp8 cache as [blocks, block, PLAIN_ROW] bytes."""
+    row = PLAIN_ROW if plain else RECORD
     kv = kv if kv.dtype == torch.uint8 else kv.view(torch.uint8)
-    assert kv.stride(0) >= block * RECORD, (tuple(kv.shape), kv.stride(), block)
-    return torch.as_strided(kv, (kv.shape[0], block, RECORD), (kv.stride(0), RECORD, 1))
+    assert kv.stride(0) >= block * row, (tuple(kv.shape), kv.stride(), block)
+    return torch.as_strided(kv, (kv.shape[0], block, row), (kv.stride(0), row, 1))
 
 
 def _scale_bytes(scale: torch.Tensor) -> torch.Tensor:
@@ -309,8 +323,12 @@ class MonoDecodeLayer:
         experts: int = 384,
         topk: int = 6,
         swa_width: int = SWA_WIDTH,
+        plain_kv: bool = False,
     ) -> None:
         self.ffn_only = ffn_only
+        # the model's KV cache holds plain fp8 rows (fp8_e4m3): every layer
+        # records it, as they share one runner
+        self.plain_kv = plain_kv
         # a layer of the DSpark draft: its own routing and (non-causal) SWA rows
         self.draft, self.experts, self.topk, self.swa_width = (
             draft,
@@ -386,6 +404,8 @@ class MonoDecodeLayer:
         config = vllm_config.model_config.hf_config
         attn, ffn = layer.attn, layer.ffn
         gfx942 = _on_gfx942()
+        # gfx942 layers keep vLLM's attention over a plain cache (the FFN launch)
+        plain = vllm_config.cache_config.cache_dtype == "fp8_e4m3" and not gfx942
         if gfx942:
             # The gfx942 indexer's top-k hooks need topk512_gfx942.cu. Build it
             # when the model is created, so that a failed build shows at
@@ -441,7 +461,9 @@ class MonoDecodeLayer:
                 experts,
                 topk,
             )
-            return MonoDecodeLayer(ffn_only=True, experts=experts, topk=topk)
+            return MonoDecodeLayer(
+                ffn_only=True, experts=experts, topk=topk, plain_kv=plain
+            )
         # the whole layer: the kernels' attention takes the standard layers; an
         # index source's compressor and indexer run between its two launches
         from vllm.models.deepseek_v41.amd.rocm import DeepseekV41RocmMxfp4Indexer
@@ -456,8 +478,11 @@ class MonoDecodeLayer:
             why = f"a {type(attn.indexer).__name__}"
         elif attn.compress_ratio not in (0, 1, 2):
             why = f"compress ratio {attn.compress_ratio}"
-        elif attn.kv_mxfp8 or attn.kv_cache_dtype != "fp8_ds_mla":
+        elif attn.kv_mxfp8 or attn.kv_cache_dtype not in ("fp8_ds_mla", "fp8_e4m3"):
             why = f"a {attn.kv_cache_dtype} KV cache"
+        elif attn.kv_cache_dtype == "fp8_e4m3" and gfx942:
+            # vLLM serves plain fp8 rows on gfx950 only
+            why = "a fp8_e4m3 KV cache on gfx942"
         elif draft and (attn.compress_ratio or attn.indexer is not None):
             why = "a draft layer with compressed keys"
         if why is not None and draft:
@@ -467,7 +492,7 @@ class MonoDecodeLayer:
             logger.info_once(
                 "DSv4.1 mono decode: the FFN launch for layers with %s", why
             )
-            return MonoDecodeLayer(ffn_only=True)
+            return MonoDecodeLayer(ffn_only=True, plain_kv=plain)
         if draft:
             from vllm.v1.attention.backends.mla.compressor_utils import (
                 get_dspark_swa_index_width,
@@ -482,14 +507,15 @@ class MonoDecodeLayer:
                 swa_width=get_dspark_swa_index_width(
                     config.sliding_window, spec.num_speculative_tokens
                 ),
+                plain_kv=plain,
             )
         logger.info_once("DSv4.1 mono decode: the whole standard backbone layers")
-        return MonoDecodeLayer()
+        return MonoDecodeLayer(plain_kv=plain)
 
     def build_runner(self, device: torch.device) -> None:
         """Build the layer's runner after loading rather than at its first
         decode step, which must not allocate, exchange handles or sync."""
-        _mono_runner(device, self if self.draft else None)
+        _mono_runner(device, self if self.draft else None, self.plain_kv)
 
     def weights(self, layer: "DeepseekV4DecoderLayer"):
         if self._weights is not None:
@@ -503,7 +529,7 @@ class MonoDecodeLayer:
             self._weights = self._weights_942(layer)
             return self._weights
         self._weights = MonoLayerWeights(
-            attn=None if self.ffn_only else self._attn_weights(a),
+            attn=None if self.ffn_only else self._attn_weights(a, self.plain_kv),
             hc_attn_fn=layer.hc_attn_fn,
             hc_attn_scale=layer.hc_attn_scale,
             hc_attn_base=layer.hc_attn_base,
@@ -588,10 +614,19 @@ class MonoDecodeLayer:
         return attn
 
     @staticmethod
-    def _attn_weights(a):
+    def _attn_weights(a, plain_kv: bool = False):
         from vllm.models.deepseek_v41.amd.mono.attention.plan import Dims
         from vllm.models.deepseek_v41.amd.mono.runner import AttnWeights
 
+        # a plain cache's scales: the buffers vLLM's insert, compressor and
+        # attention read (``_register_plain_fp8_kv_scales``)
+        scales = {}
+        if plain_kv:
+            scales = dict(
+                kv_scale=a._flashinfer_fp8_kv_scale,
+                q_scale=a._flashinfer_fp8_q_scale,
+                q_scale_inv=a._flashinfer_fp8_q_scale_inv,
+            )
         attn = AttnWeights(
             layer_id=a.layer_id,
             wqkv=a.fused_wqa_wkv.weight,
@@ -607,6 +642,7 @@ class MonoDecodeLayer:
             attn_sink=a.attn_sink,
             cos_sin=a.rotary_emb.cos_sin_cache,
             ratio=a.compress_ratio,
+            **scales,
         )
         attn.check(Dims(get_tensor_model_parallel_world_size()))
         return attn
@@ -694,7 +730,7 @@ class MonoDecodeLayer:
         if why is not None:
             return self._skip(why)
         assert swa is not None
-        runner = _mono_runner(x.device, self if self.draft else None)
+        runner = _mono_runner(x.device, self if self.draft else None, self.plain_kv)
         logger.info_once(
             "DSv4.1 mono decode %slayer active (decode steps of <= %d rows)",
             "draft " if self.draft else "",
@@ -724,7 +760,9 @@ class MonoDecodeLayer:
             kw.update(
                 topk_indices=attn.topk_indices_buffer,
                 comp_cache=_record_view(
-                    attn._compressed_kv_cache(), comp.block_size // attn.compress_ratio
+                    attn._compressed_kv_cache(),
+                    comp.block_size // attn.compress_ratio,
+                    self.plain_kv,
                 ),
                 comp_block_table=comp.block_table,
             )
@@ -737,7 +775,7 @@ class MonoDecodeLayer:
             pre_mix,
             positions,
             swa.slot_mapping,
-            _record_view(attn.swa_cache_layer.kv_cache, swa.block_size),
+            _record_view(attn.swa_cache_layer.kv_cache, swa.block_size, self.plain_kv),
             swa.decode_swa_indices,
             swa.decode_swa_lens,
             swa.token_to_req_indices,
@@ -763,7 +801,7 @@ class MonoDecodeLayer:
             why = "non-contiguous layer inputs"
         if why is not None:
             return self._skip(why)
-        runner = _mono_runner(part.device)
+        runner = _mono_runner(part.device, plain_kv=self.plain_kv)
         logger.info_once(
             "DSv4.1 mono decode FFN launch active (decode steps of <= %d rows)",
             _max_rows(),

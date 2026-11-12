@@ -73,6 +73,7 @@ from .plan import (
     KEYS,
     KV_DIM,
     NOPE,
+    PLAIN_ROW,
     Q_RANK,
     QKV_ROWS,
     ROPE,
@@ -113,6 +114,9 @@ class FrontBuild:
     timeline: bool = False
     swa_width: int = WINDOW  # the SWA index rows' width (the DSpark draft's: wider)
     tuned: bool = False
+    # plain fp8 KV rows (`plan.PLAIN_ROW`) and fp8 q, instead of fp8_ds_mla
+    # records and bf16 q
+    plain: bool = False
 
 
 def plus(t0, v):
@@ -312,8 +316,9 @@ def stage_wqkv(c, task, part, ops, t0, n, live, settle=False):
 def stage_qkv(c, t):
     """Token t: the K halves summed -> bf16; q_norm -> bf16 -> MXFP8 (QX8);
     kv_norm -> bf16 -> RoPE -> bf16 -> the fp8_ds_mla record at
-    slot_mapping[t]. 256 threads (8 q columns and 2 kv columns each); threads
-    256.. mirror thread 255 and store nothing."""
+    slot_mapping[t] (plain: the fp8 row, `store_plain_row`). 256 threads (8 q
+    columns and 2 kv columns each); threads 256.. mirror thread 255 and store
+    nothing."""
     tid, lane, wave, red = c["tid"], c["lane"], c["wave"], c["red"]
     a, s = c["args"], c["S"]
     tt = fx.min(tid, 255)
@@ -426,52 +431,76 @@ def stage_qkv(c, t):
         publish(c, c["qrdy"], t, flag_stride(c["S"]))
     # kv: this thread's pair (2 tt, 2 tt + 1)
     kn = [bf16_round((xk[j] * rk) * kw[j]) for j in range(2)]
-    e0 = bf16_round(kn[0] * cs - kn[1] * sn)
-    e1 = bf16_round(kn[0] * sn + kn[1] * cs)
-    # record quant of the nope dims: a 64-block = 32 threads (half a wave).
-    # On gfx942 FP8_MAX is 224: vLLM's gfx942 cache writer and reader use
-    # FNUZ records with that maximum.
-    amax = butterfly(fx.max(abs(e0), abs(e1)), (1, 2, 4, 8, 16), fx.max)
-    rcode = ceil_exp(
-        div_rn(
-            fx.max(amax, fx.Float32(1e-4)),
-            fx.Float32(FP8_MAX),
-            fx.Float32(1.0 / FP8_MAX),
+    if const_expr(c["plain"]):
+        store_plain_row(c, kn, cs, sn, slot, mine, tt)
+    else:
+        e0 = bf16_round(kn[0] * cs - kn[1] * sn)
+        e1 = bf16_round(kn[0] * sn + kn[1] * cs)
+        # record quant of the nope dims: a 64-block = 32 threads (half a wave).
+        # On gfx942 FP8_MAX is 224: vLLM's gfx942 cache writer and reader use
+        # FNUZ records with that maximum.
+        amax = butterfly(fx.max(abs(e0), abs(e1)), (1, 2, 4, 8, 16), fx.max)
+        rcode = ceil_exp(
+            div_rn(
+                fx.max(amax, fx.Float32(1e-4)),
+                fx.Float32(FP8_MAX),
+                fx.Float32(1.0 / FP8_MAX),
+            )
         )
-    )
-    inv = mx_mul(rcode)
-    q0 = clamp_fp8(e0 * inv)
-    q1 = clamp_fp8(e1 * inv)
-    n0 = xshfl(q0, 1)
-    n1 = xshfl(q1, 1)
-    word = fp8_pack4(q0, q1, n0, n1)
-    rope_word = (
-        fx.Vector.from_elements([e0, e1], fx.Float32)
-        .to(fx.BFloat16)
-        .bitcast(fx.Int32)[0]
-    )
-    blk = a["swa_block"]
-    sblock = slot // blk
-    soff = slot % blk
-    base = a["swa"] + fx.Int64(sblock) * fx.Int64(a["swa_stride"])
-    rec = base + fx.Int64(soff * DATA)
-    if mine & (tt % 32 == 0) & (tt < NOPE // 2):
-        fx.ptr_store(rcode.bitcast(fx.Float32), red + 8 + tt // 32)
-    gpu.barrier()
-    if mine & (slot >= 0):
-        if tt < NOPE // 2:
-            if tt % 2 == 0:
-                gstore(rec + fx.Int64(2 * tt), word, words=1)
-        else:
-            gstore(rec + fx.Int64(NOPE + 4 * (tt - NOPE // 2)), rope_word, words=1)
-        if tt == 0:
-            sb = [fx.ptr_load(red + 8 + b).bitcast(fx.Int32) for b in range(7)]
-            w0 = sb[0] | (sb[1] << 8) | (sb[2] << 16) | (sb[3] << 24)
-            w1 = sb[4] | (sb[5] << 8) | (sb[6] << 16)
-            sc = base + fx.Int64(blk * DATA + soff * 8)
-            gstore(sc, fx.Vector.from_elements([w0, w1], fx.Int32), words=2)
+        inv = mx_mul(rcode)
+        q0 = clamp_fp8(e0 * inv)
+        q1 = clamp_fp8(e1 * inv)
+        n0 = xshfl(q0, 1)
+        n1 = xshfl(q1, 1)
+        word = fp8_pack4(q0, q1, n0, n1)
+        rope_word = (
+            fx.Vector.from_elements([e0, e1], fx.Float32)
+            .to(fx.BFloat16)
+            .bitcast(fx.Int32)[0]
+        )
+        blk = a["swa_block"]
+        sblock = slot // blk
+        soff = slot % blk
+        base = a["swa"] + fx.Int64(sblock) * fx.Int64(a["swa_stride"])
+        rec = base + fx.Int64(soff * DATA)
+        if mine & (tt % 32 == 0) & (tt < NOPE // 2):
+            fx.ptr_store(rcode.bitcast(fx.Float32), red + 8 + tt // 32)
+        gpu.barrier()
+        if mine & (slot >= 0):
+            if tt < NOPE // 2:
+                if tt % 2 == 0:
+                    gstore(rec + fx.Int64(2 * tt), word, words=1)
+            else:
+                gstore(rec + fx.Int64(NOPE + 4 * (tt - NOPE // 2)), rope_word, words=1)
+            if tt == 0:
+                sb = [fx.ptr_load(red + 8 + b).bitcast(fx.Int32) for b in range(7)]
+                w0 = sb[0] | (sb[1] << 8) | (sb[2] << 16) | (sb[3] << 24)
+                w1 = sb[4] | (sb[5] << 8) | (sb[6] << 16)
+                sc = base + fx.Int64(blk * DATA + soff * 8)
+                gstore(sc, fx.Vector.from_elements([w0, w1], fx.Int32), words=2)
     if const_expr(not c["tuned"]):
         publish(c, c["qrdy"], t)
+
+
+@traced
+def store_plain_row(c, kn, cs, sn, slot, mine, tt):
+    """This thread's kv pair (bf16, normed) -> RoPE in fp32 -> the plain fp8
+    row at `slot`: every dim times 1 / kv_scale, saturated to e4m3, with no
+    bf16 rounding after the RoPE, as vLLM's full-cache insert writes it
+    (`fusedDeepseekV4FullCacheKernel`). Even threads store their pair and the
+    next thread's as one word."""
+    a = c["args"]
+    e0 = kn[0] * cs - kn[1] * sn
+    e1 = kn[0] * sn + kn[1] * cs
+    inv = fx.Float32(1.0) / ld_f32(a["kv_scale"], 0)
+    q0 = clamp_fp8(e0 * inv)
+    q1 = clamp_fp8(e1 * inv)
+    word = fp8_pack4(q0, q1, xshfl(q0, 1), xshfl(q1, 1))
+    blk = a["swa_block"]
+    page = a["swa"] + fx.Int64(slot // blk) * fx.Int64(a["swa_stride"])
+    row = page + fx.Int64((slot % blk) * PLAIN_ROW)
+    if mine & (slot >= 0) & (tt % 2 == 0):
+        gstore(row + fx.Int64(2 * tt), word, words=1)
 
 
 # ---------------------------------------------------------------- wq_b
@@ -526,12 +555,24 @@ def stage_wqb(c, task0, bops, t0, n, rope, settle=False):
         cs, sn = rope
         e0 = is_rope.select(v0 * cs - v1 * sn, v0)
         e1 = is_rope.select(v0 * sn + v1 * cs, v1)
-        word = (
-            fx.Vector.from_elements([e0, e1], fx.Float32)
-            .to(fx.BFloat16)
-            .bitcast(fx.Int32)[0]
-        )
-        bo.buffer_store(word, rsrc(a["q"]), (t * d.q_rows + r0) // 2)
+        if const_expr(c["plain"]):
+            # vLLM's plain path hands its attention e4m3 q: the fp32 RoPE
+            # output times q_scale_inv, saturated. A q row is [H x 512] bytes;
+            # an even thread stores its pair and the next thread's.
+            qi = ld_f32(a["q_scale_inv"], 0)
+            zero = fx.Float32(0.0)
+            lo = fp8_pack4(clamp_fp8(e0 * qi), clamp_fp8(e1 * qi), zero, zero)
+            lo = lo & fx.Int32(0xFFFF)
+            word = lo | (xshfl(lo, 1) << 16)
+            if rp % 2 == 0:
+                bo.buffer_store(word, rsrc(a["q"]), (t * d.q_rows + r0) // 4)
+        else:
+            word = (
+                fx.Vector.from_elements([e0, e1], fx.Float32)
+                .to(fx.BFloat16)
+                .bitcast(fx.Int32)[0]
+            )
+            bo.buffer_store(word, rsrc(a["q"]), (t * d.q_rows + r0) // 2)
     gpu.barrier()
 
 
@@ -575,6 +616,7 @@ def front_context(key, lds, args: dict, scratch, tag, layout=None) -> dict:
         "ratio": key.ratio,
         "swa_width": key.swa_width,
         "tuned": key.tuned,
+        "plain": key.plain,
         "ldbf": lambda ptr, i: fx.Float32(
             fx.BFloat16(bo.buffer_load(rsrc(ptr), i, vec_width=1, dtype=T.bf16))
         ),

@@ -34,6 +34,12 @@ MAX_TOKENS = 48
 # KV record (V4 fp8_ds_mla): 576 B data rows (448 e4m3 | 64 bf16), then 8 B of
 # scales a token (7 UE8M0 + pad) after the block's rows
 DATA = 576
+# A plain fp8 KV row (--kv-cache-dtype fp8_e4m3): all 512 dims e4m3, RoPE
+# dims included, under one per-tensor scale; the block's rows back to back
+PLAIN_ROW = 512
+# log2(448): softmax p is scaled by 2^P_SHIFT before its e4m3 quant, so a
+# chunk's largest p lands on e4m3's largest value
+P_SHIFT = 8.807354922057604
 
 # attention: a split is 16 keys; a token has at most TOPK + WINDOW keys
 BK = 16

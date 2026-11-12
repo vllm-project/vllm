@@ -25,7 +25,7 @@ import torch
 from vllm.v1.attention.ops.flydsl_kernels import _run_compiled
 
 from .attention.front import FRONT_POINTS
-from .attention.plan import HEAD_DIM, HIDDEN, KEYS, Q_RANK, WINDOW, Dims
+from .attention.plan import HEAD_DIM, HIDDEN, KEYS, PLAIN_ROW, Q_RANK, WINDOW, Dims
 from .common.arch import GFX942
 from .common.plan import BLOCKS
 from .layer import (
@@ -88,6 +88,12 @@ class AttnWeights:
     attn_sink: torch.Tensor  # [>= H] f32
     cos_sin: torch.Tensor  # [positions, 64] f32 (the layer's rope table)
     ratio: int  # 0 / 1 / 2: the layer's compress ratio
+    # a plain fp8 cache's per-tensor scales, [1] f32 each (vLLM's
+    # `_flashinfer_fp8_*` buffers): the KV scale of both caches, q's scale and
+    # its inverse (q's quant multiplier); None over fp8_ds_mla records
+    kv_scale: torch.Tensor | None = None
+    q_scale: torch.Tensor | None = None
+    q_scale_inv: torch.Tensor | None = None
 
     def check(self, d: Dims) -> None:
         h, g = d.heads, d.groups
@@ -106,6 +112,16 @@ class AttnWeights:
         }
         _check_tensors(self, f"layer {self.layer_id}", want)
         assert self.cos_sin.dtype == torch.float32 and self.cos_sin.shape[-1] == 64
+        scales = (self.kv_scale, self.q_scale, self.q_scale_inv)
+        if any(t is not None for t in scales):
+            _check_tensors(
+                self,
+                f"layer {self.layer_id}",
+                {
+                    n: ((1,), torch.float32)
+                    for n in ("kv_scale", "q_scale", "q_scale_inv")
+                },
+            )
 
 
 @dataclass
@@ -197,6 +213,7 @@ class DSV41MonoLayer:
         ug_groups: int = 2,
         swa_width: int = WINDOW,
         generic: bool = False,
+        plain_kv: bool = False,
     ):
         _ensure_writable_flydsl_cache()
         from .common.peer_memory import PeerBuffer
@@ -217,11 +234,17 @@ class DSV41MonoLayer:
         self.experts, self.topk, self.ug_groups = experts, topk, ug_groups
         self.swa_width = swa_width
         self.generic = generic  # every build generic (``MonoBuild.generic``)
+        # plain fp8 KV rows and fp8 q (``MonoBuild.plain_kv``): every layer of
+        # a model has the same cache dtype
+        assert not (plain_kv and GFX942), "plain fp8 KV needs gfx950"
+        self.plain_kv = plain_kv
         self.d = Dims(tp)
         dev = self.device = torch.device(device)
         self._scratch: dict[tuple[int, bool, bool], torch.Tensor] = {}
         # [epoch, -, -, -, a mark per CTA, the MoE's counters]
         self.epoch = torch.zeros(EPOCH_WORDS, dtype=torch.int32, device=dev)
+        # K1's rotated q, K2's input: bf16 rows, or with plain_kv e4m3 rows of
+        # H x 512 bytes a token at the start of the same buffer
         self.q = torch.zeros(
             MAX_TOKENS, self.d.heads, HEAD_DIM, dtype=torch.bfloat16, device=dev
         )
@@ -229,6 +252,8 @@ class DSV41MonoLayer:
         self.klen = torch.zeros(2 * MAX_TOKENS, dtype=torch.int32, device=dev)
         self._dummy = torch.zeros(4, dtype=torch.int32, device=dev)
         self._zero_rec = torch.zeros(1024, dtype=torch.uint8, device=dev)
+        # the scales an fp8_ds_mla build is passed and does not read
+        self._unit = torch.ones(1, dtype=torch.float32, device=dev)
         # the first layer's incoming pre-mix: stream 0 of the broadcast embedding
         self._first_pre = torch.zeros(MAX_TOKENS, HC, dtype=torch.float32, device=dev)
         self._first_pre[:, 0] = 1.0
@@ -296,6 +321,7 @@ class DSV41MonoLayer:
                 ug_groups=self.ug_groups,
                 swa_width=self.swa_width,
                 generic=self.generic,
+                plain_kv=self.plain_kv,
             )
         return self._builds[key]
 
@@ -314,6 +340,7 @@ class DSV41MonoLayer:
                 ug_groups=self.ug_groups,
                 swa_width=self.swa_width,
                 generic=self.generic,
+                plain_kv=self.plain_kv,
             )
             # On gfx942, keylist.launch writes an index source's keys between
             # vLLM's indexer and K2 (forward), so its K2 is the one without
@@ -359,7 +386,7 @@ class DSV41MonoLayer:
         pre_mix: torch.Tensor,  # [M, 4] f32
         positions: torch.Tensor,  # [M] int64
         slot_mapping: torch.Tensor,  # [M] int64
-        swa_cache: torch.Tensor,  # [blocks, block, 584] uint8
+        swa_cache: torch.Tensor,  # [blocks, block, 584] uint8 (plain: 512)
         swa_indices: torch.Tensor,  # [>= M, 1, 128] int32
         swa_lens: torch.Tensor,  # [>= M] int32
         token_to_req: torch.Tensor,  # [>= M] int32
@@ -395,13 +422,20 @@ class DSV41MonoLayer:
         assert (
             swa_indices.stride(0) == self.swa_width and swa_cache.dtype == torch.uint8
         )
-        assert swa_cache.shape[-1] == 584 and swa_cache.stride(1) == 584
+        rec = PLAIN_ROW if self.plain_kv else 584
+        assert swa_cache.shape[-1] == rec and swa_cache.stride(1) == rec
         swa_block = swa_cache.shape[1]
+        if self.plain_kv:
+            assert a.kv_scale is not None and a.q_scale is not None
+            assert a.q_scale_inv is not None
+            kv_scale, q_scale, q_scale_inv = a.kv_scale, a.q_scale, a.q_scale_inv
+        else:
+            kv_scale = q_scale = q_scale_inv = self._unit
         if ratio:
             assert topk_indices is not None and comp_cache is not None
             assert comp_block_table is not None
             assert topk_indices.dtype == torch.int32 and topk_indices.stride(0) == 512
-            assert comp_cache.dtype == torch.uint8 and comp_cache.stride(1) == 584
+            assert comp_cache.dtype == torch.uint8 and comp_cache.stride(1) == rec
             assert comp_block_table.dtype == torch.int32
             comp, comp_stride, comp_block = (
                 comp_cache,
@@ -455,6 +489,8 @@ class DSV41MonoLayer:
             self.klen.data_ptr(),
             self.normed.data_ptr(),
             self.qr.data_ptr(),
+            kv_scale.data_ptr(),
+            q_scale_inv.data_ptr(),
             scratch.data_ptr(),
             self.epoch.data_ptr(),
             self.tl1.data_ptr() if self.timeline else 0,
@@ -502,6 +538,8 @@ class DSV41MonoLayer:
             positions.data_ptr(),
             a.attn_sink.data_ptr(),
             self._qk_scale,
+            kv_scale.data_ptr(),
+            q_scale.data_ptr(),
             a.cos_sin.data_ptr(),
             a.wo_a.data_ptr(),
             a.wo_a_scale.data_ptr(),
