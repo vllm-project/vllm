@@ -158,8 +158,6 @@ features:
           - '{"indexer_kv_dtype": "fp8"}'
           - "--compilation-config"
           - '{"cudagraph_mode": "FULL_DECODE_ONLY"}'
-          - "--gpu-memory-utilization"
-          - "0.85"
         env:
           VLLM_ROCM_SHUFFLE_KV_CACHE_LAYOUT: "1"
           VLLM_ROCM_MINIMAX_M3_MONO: "1"
@@ -1669,7 +1667,6 @@ guide: |
     --max-model-len 262144 \
     --max-num-seqs 80 \
     --limit-mm-per-prompt '{"video": 0}' \
-    --gpu-memory-utilization 0.9 \
     --no-enable-log-requests \
     --disable-hybrid-kv-cache-manager \
     --moe-backend marlin \

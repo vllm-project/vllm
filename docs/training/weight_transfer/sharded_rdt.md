@@ -74,7 +74,7 @@ vllm serve my-model \
 Everything else — which producers exist, how the model splits into layer groups, the ownership table — arrives from the trainer at the init handshake.
 
 !!! warning "Size the receive buffers before choosing `gpu_memory_utilization`"
-    Each worker holds `num_rdt_buffers` receive buffers, each large enough for the biggest single slice batch it pulls. Like NCCL and NIXL internals, they do **not** count against `gpu_memory_utilization`, so a fraction that leaves no headroom OOMs at the first sync even though the engine came up healthy. The buffer size is driven by the largest atomic slice — for an untied vocab matrix on a worker that holds it unsliced, that is the whole embedding.
+    Each worker holds `num_rdt_buffers` receive buffers, each large enough for the biggest single slice batch it pulls. Like NCCL and NIXL internals, they do **not** count against `gpu_memory_utilization`, so a fraction that leaves no headroom OOMs at the first sync even though the engine came up healthy. With the extensible KV cache (the default on CUDA and ROCm), `gpu_memory_utilization` defaults to 1.0 and the KV cache takes all memory left after warmup, so set it explicitly to leave room for these buffers (see [GPU Memory Utilization](../../configuration/optimization.md#gpu-memory-utilization)). The buffer size is driven by the largest atomic slice — for an untied vocab matrix on a worker that holds it unsliced, that is the whole embedding.
 
 ## Trainer Side
 
