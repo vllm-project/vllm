@@ -826,7 +826,6 @@ fn test_render_state(
         chat: ChatRequestProcessor::render_only(backend)
             .with_parser_selections(tool_call_parser, reasoning_parser),
         lora_modules: Vec::new(),
-        model_names: ServedModelNames::new(vec!["render-model".to_string()]),
     }
 }
 
@@ -1948,7 +1947,6 @@ async fn render_list_models_reports_configured_max_model_len() {
 async fn render_accepts_lora_adapter_model() {
     let mut app = build_render_router(Arc::new(RenderState {
         lora_modules: vec!["adapter-a=org/adapter-a".parse().expect("lora module")],
-        model_names: ServedModelNames::new(vec!["render-model".into(), "adapter-a".into()]),
         ..test_render_state(Some(128), ParserSelection::Auto, ParserSelection::Auto)
     }));
 
@@ -2124,7 +2122,6 @@ async fn render_glm_tools_for_none_follow_server_exclusion_setting() {
         let mut app = build_render_router(Arc::new(RenderState {
             model: "glm-test".into(),
             served_model_names: ServedModelNames::new(vec!["glm-test".into()]),
-            model_names: ServedModelNames::new(vec!["glm-test".into()]),
             max_model_len: Some(4096),
             max_n_sequences: crate::DEFAULT_MAX_N_SEQUENCES,
             text: TextRequestProcessor::new(Arc::new(FakeChatBackend::new()), 4096),
@@ -12247,7 +12244,6 @@ async fn n_limit_follows_max_n_sequences_option() {
         text: TextRequestProcessor::new(backend.clone(), 128),
         chat: ChatRequestProcessor::render_only(backend),
         lora_modules: Vec::new(),
-        model_names: ServedModelNames::new(vec!["render-model".to_string()]),
     }));
     for (uri, body) in [
         (

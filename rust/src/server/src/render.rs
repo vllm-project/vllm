@@ -140,8 +140,14 @@ pub(crate) struct RenderState {
     pub(crate) text: TextRequestProcessor,
     pub(crate) chat: ChatRequestProcessor,
     pub(crate) lora_modules: Vec<LoraModulePath>,
+}
+
+impl RenderState {
     /// Served model names followed by LoRA adapter names.
-    pub(crate) model_names: ServedModelNames,
+    pub(crate) fn model_names(&self) -> ServedModelNames {
+        (self.served_model_names.clone())
+            .with_names(self.lora_modules.iter().map(|module| module.name.clone()))
+    }
 }
 
 /// Check `--lora-modules` the way `vllm-rs serve` does when it loads them.
@@ -188,9 +194,6 @@ async fn build_state(config: &RenderConfig) -> Result<Arc<RenderState>> {
     ))
     .with_accept_any(config.skip_model_name_validation);
     validate_lora_modules(&served_model_names, &config.lora_modules)?;
-    let model_names = served_model_names
-        .clone()
-        .with_names(config.lora_modules.iter().map(|module| module.name.clone()));
     // Only multimodal preprocessing reads the dtype, so text-only models never
     // fail on an unusual config dtype.
     let model_dtype = loaded
@@ -232,7 +235,6 @@ async fn build_state(config: &RenderConfig) -> Result<Arc<RenderState>> {
         text,
         chat,
         lora_modules: config.lora_modules.clone(),
-        model_names,
     }))
 }
 
