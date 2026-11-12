@@ -1380,6 +1380,11 @@ class Platform:
         return cls._global_graph_pool
 
     @classmethod
+    def reset_global_graph_pool(cls) -> None:
+        """Clear the cached handle so the next lookup creates a new graph pool."""
+        cls._global_graph_pool = None
+
+    @classmethod
     def get_static_graph_wrapper_cls(cls) -> str:
         """Get static graph wrapper class for static graph."""
         return "vllm.compilation.base_static_graph.AbstractStaticGraphWrapper"

@@ -316,6 +316,34 @@ def test_capture_with_no_eager_break_records_one_graph(cuda_capture_stream):
     assert cap.num_eager_breaks == 0
 
 
+def test_shutdown_allows_recapture_with_live_outputs(cuda_capture_stream):
+    """A previous engine's graph outputs can outlive its graphs and shutdown."""
+    from vllm.compilation.breakable_cudagraph import BreakableCUDAGraphCapture
+    from vllm.config import VllmConfig
+    from vllm.v1.worker.gpu.shutdown import free_before_shutdown
+
+    vllm_config = VllmConfig()
+    x = torch.ones(4, device=DEVICE_TYPE)
+    first = BreakableCUDAGraphCapture(pool=current_platform.get_global_graph_pool())
+    with first:
+        old_output = x + 1
+    first.replay()
+    torch.accelerator.synchronize()
+    del first
+
+    free_before_shutdown(vllm_config)
+    torch.accelerator.empty_cache()
+
+    second = BreakableCUDAGraphCapture(pool=current_platform.get_global_graph_pool())
+    with second:
+        new_output = x + 2
+    x.fill_(3)
+    second.replay()
+    torch.accelerator.synchronize()
+    assert torch.equal(old_output, torch.full_like(x, 2))
+    assert torch.equal(new_output, torch.full_like(x, 5))
+
+
 def test_add_eager_creates_alternating_graph_eager_graph(cuda_capture_stream):
     from vllm.compilation.breakable_cudagraph import BreakableCUDAGraphCapture
 

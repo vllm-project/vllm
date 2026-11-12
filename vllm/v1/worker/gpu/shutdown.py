@@ -8,6 +8,7 @@ logger = init_logger(__name__)
 
 def free_before_shutdown(vllm_config: VllmConfig) -> None:
     from vllm.model_executor.layers.rotary_embedding import _ROPE_DICT
+    from vllm.platforms import current_platform
     from vllm.v1.worker.workspace import reset_workspace_manager
 
     cache_config = vllm_config.cache_config
@@ -18,3 +19,7 @@ def free_before_shutdown(vllm_config: VllmConfig) -> None:
 
     _ROPE_DICT.clear()
     reset_workspace_manager()
+
+    # Outputs can outlive their graphs, leaving a retired pool allocated.
+    # A later engine must capture into a new pool.
+    current_platform.reset_global_graph_pool()
