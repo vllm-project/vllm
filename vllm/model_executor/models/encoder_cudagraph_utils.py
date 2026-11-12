@@ -15,7 +15,7 @@ from vllm.v1.worker.encoder_cudagraph_defs import (
 )
 
 
-class GridThwEncoderCudaGraphMixin(SupportsEncoderCudaGraph):
+class Qwen2VLEncoderCudaGraphMixin(SupportsEncoderCudaGraph):
     """Encoder CUDA graph support for Qwen2-VL-style vision towers.
 
     Inputs are concatenated patches (`pixel_values` or

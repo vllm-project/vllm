@@ -111,7 +111,7 @@ from vllm.utils.tensor_schema import TensorSchema, TensorShape
 
 from ...utils.torch_utils import async_tensor_h2d
 from .commandr import CohereForCausalLM, CohereMLP, LayerNorm
-from .encoder_cudagraph_utils import GridThwEncoderCudaGraphMixin
+from .encoder_cudagraph_utils import Qwen2VLEncoderCudaGraphMixin
 from .interfaces import (
     MultiModalEmbeddings,
     SupportsEagle,
@@ -1300,7 +1300,7 @@ class CohereCompassMultiModalProcessor(
 class CohereCompassForConditionalGeneration(
     nn.Module,
     SupportsMultiModal,
-    GridThwEncoderCudaGraphMixin,
+    Qwen2VLEncoderCudaGraphMixin,
     SupportsLoRA,
     SupportsPP,
     SupportsMRoPE,
