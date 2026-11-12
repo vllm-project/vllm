@@ -1,7 +1,7 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 """The DeepSeek-V4.1 mono decode path through the real model: a five-layer
-DeepSeek-V4.1-Flash at TP2 and TP4 on CDNA4, and at TP4 on gfx942, served with
+DeepSeek-V4.1-Flash at TP2 and TP4 on CDNA4, and at TP4 and TP8 on gfx942, served with
 `--monokernel` on and off on the same random weights: every decoder layer's
 outputs at every decode step must match. Unlike
 `test_dsv41_mono_numerics.py`, which checks the kernels against vLLM's ops
@@ -71,9 +71,12 @@ def _arch() -> str:
 
 
 # The (tensor parallel size, decode rows) cases of each GPU. The gfx942 kernels
-# build for TP4 only. 8 rows are two GEMV passes of 6 rows there, the second
+# build for TP4 and TP8. 8 rows are two GEMV passes of 6 rows there, the second
 # one padded, and 42 rows are the most that they take.
-CASES = {"cdna4": [(2, 8), (4, 8), (8, 8), (8, 28)], "gfx942": [(4, 8), (4, 42)]}
+CASES = {
+    "cdna4": [(2, 8), (4, 8), (8, 8), (8, 28)],
+    "gfx942": [(4, 8), (4, 42), (8, 8), (8, 42)],
+}
 
 
 @torch.no_grad()
@@ -493,7 +496,9 @@ def _merged_matches_two_launches(vllm_runner, monkeypatch) -> None:
         assert not any(r["target"] + r["draft"]), r
 
 
-@pytest.mark.parametrize(("tp", "rows"), [(2, 8), (4, 8), (4, 42), (8, 8), (8, 28)])
+@pytest.mark.parametrize(
+    ("tp", "rows"), [(2, 8), (4, 8), (4, 42), (8, 8), (8, 28), (8, 42)]
+)
 def test_mono_decode_matches_the_model(vllm_runner, monkeypatch, tmp_path, tp, rows):
     arch = _arch()
     if not arch:
