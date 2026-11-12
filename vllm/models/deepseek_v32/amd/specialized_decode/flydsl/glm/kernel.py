@@ -2819,12 +2819,13 @@ def build_glm5_monokernel(
         UG_S_BYTES = 2 * expert_inter * (HIDDEN // 32)
 
         if const_expr(S == 1):
-            # one task per CTA: task u takes intermediates (u % 32) * 8 of routed slot u
-            # // 32 (slot 8 for u < 32, which also take the shared expert's); the 8 gate
-            # + 8 up rows are one MFMA row group and all waves split K
+            # one task per CTA and round: task u takes intermediates (u % (inter / 8))
+            # * 8 of routed slot u // (inter / 8) (slot 8 for u < inter / 8, which also
+            # take the shared expert's); the 8 gate + 8 up rows are one MFMA row group
+            # and all waves split K. TP8 (inter 256) is one round, TP4 (512) two.
             UG8 = 8
             UG8_CPW = UG_NKC // WAVES
-            for u in range(start("ug"), G, G):
+            for u in range(start("ug"), G * ug_task_rounds(expert_inter), G):
                 u = fx.Int32(u)
                 stage("ug")
                 s_u, c = fx.Int32(0), u % (expert_inter // UG8)
