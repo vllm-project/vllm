@@ -88,6 +88,10 @@ from vllm.v1.metrics.stats import IterationStats
 
 logger = init_logger(__name__)
 
+# How long a passing idle /health_generate probe is reused, so frequent polling
+# does not run a dummy batch on every call.
+IDLE_PROBE_CACHE_TTL_S = 10.0
+
 
 class InputStreamError(Exception):
     """Wrapper for errors from the input stream generator.
@@ -1163,11 +1167,15 @@ class AsyncLLM(EngineClient):
         if self.errored:
             raise self.dead_error
 
-    async def check_health_gpu(self) -> None:
+    async def check_health_gpu(self, timeout_s: float) -> None:
         """Check that every EngineCore can run the model.
 
         Each EngineCore reports whether it is sleeping or busy; an idle one
         runs a GPU probe.
+
+        Args:
+            timeout_s: How long to wait for each EngineCore before reporting
+                `probe_timeout`.
 
         Raises:
             EngineDeadError: If the EngineCore is dead.
@@ -1178,11 +1186,10 @@ class AsyncLLM(EngineClient):
         await self.check_health()
         engine_ranks = self.engine_core.get_engine_ranks()
         tasks = {rank: self._health_probe_task(rank) for rank in engine_ranks}
-        timeout = envs.VLLM_HEALTH_GENERATE_TIMEOUT_S
         # asyncio.wait never cancels the probes, so a caller timing out or
         # disconnecting leaves them running for the next caller.
-        await asyncio.wait(tasks.values(), timeout=timeout)
-        self._raise_if_unhealthy(tasks, timeout)
+        await asyncio.wait(tasks.values(), timeout=timeout_s)
+        self._raise_if_unhealthy(tasks, timeout_s)
 
     def _health_probe_task(self, engine_rank: int) -> asyncio.Task[EngineHealthState]:
         """Concurrent `/health_generate` callers share one in-flight probe per
@@ -1191,7 +1198,7 @@ class AsyncLLM(EngineClient):
         if task is None or task.done():
             task = asyncio.create_task(
                 self.engine_core.check_health_gpu_async(
-                    engine_rank, envs.VLLM_HEALTH_GENERATE_PROBE_CACHE_TTL_S
+                    engine_rank, IDLE_PROBE_CACHE_TTL_S
                 )
             )
             task.add_done_callback(

@@ -401,14 +401,14 @@ livenessProbe:
   periodSeconds: 10
 readinessProbe:
   httpGet:
-    path: /health_generate
+    path: /health_generate?timeout_s=20
     port: 8000
   initialDelaySeconds: 60
   periodSeconds: 10
   timeoutSeconds: 30
 ```
 
-Set `timeoutSeconds` above `VLLM_HEALTH_GENERATE_TIMEOUT_S` (20 s by default); the Kubernetes default of 1 s can be shorter than an idle GPU probe. Don't use `/health_generate` for the liveness probe: it returns 503 while the engine sleeps, so the container would be restarted during a weight sync.
+Set `timeoutSeconds` above the `timeout_s` query parameter (20 s by default); the Kubernetes default of 1 s can be shorter than an idle GPU probe. Don't use `/health_generate` for the liveness probe: it returns 503 while the engine sleeps, so the container would be restarted during a weight sync.
 
 ## Serving with gRPC
 

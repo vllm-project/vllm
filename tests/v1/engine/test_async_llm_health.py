@@ -9,7 +9,6 @@ from unittest.mock import AsyncMock, Mock
 
 import pytest
 
-import vllm.envs as envs
 from vllm.v1.engine import EngineHealthState
 from vllm.v1.engine.async_llm import AsyncLLM
 from vllm.v1.engine.core import EngineCoreProc
@@ -120,14 +119,13 @@ def make_async_engine(*rank_results) -> AsyncLLM:
     ],
 )
 async def test_check_health_gpu_aggregates_engine_ranks(
-    monkeypatch: pytest.MonkeyPatch, rank_results, reason, engine_ranks
+    rank_results, reason, engine_ranks
 ):
-    monkeypatch.setattr(envs, "VLLM_HEALTH_GENERATE_TIMEOUT_S", 0.05)
     engine = make_async_engine(*rank_results)
 
     error = EngineSleepingError if reason == "sleeping" else EngineUnhealthyError
     with pytest.raises(error) as exc_info:
-        await engine.check_health_gpu()
+        await engine.check_health_gpu(0.05)
 
     assert exc_info.value.reason == reason
     assert exc_info.value.details["engine_ranks"] == engine_ranks
@@ -135,12 +133,9 @@ async def test_check_health_gpu_aggregates_engine_ranks(
 
 
 @pytest.mark.asyncio
-async def test_concurrent_health_checks_share_one_probe(
-    monkeypatch: pytest.MonkeyPatch,
-):
+async def test_concurrent_health_checks_share_one_probe():
     """A probe outlives callers that time out, and later callers reuse it
     instead of queueing another one behind a blocked busy loop."""
-    monkeypatch.setattr(envs, "VLLM_HEALTH_GENERATE_TIMEOUT_S", 0.05)
     finish = asyncio.Event()
 
     async def probe(*_args):
@@ -152,8 +147,8 @@ async def test_concurrent_health_checks_share_one_probe(
 
     for _ in range(2):
         with pytest.raises(EngineUnhealthyError, match="timed out"):
-            await engine.check_health_gpu()
+            await engine.check_health_gpu(0.05)
     finish.set()
-    await engine.check_health_gpu()
+    await engine.check_health_gpu(0.05)
 
     assert engine.engine_core.check_health_gpu_async.await_count == 1

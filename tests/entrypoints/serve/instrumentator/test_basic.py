@@ -254,7 +254,7 @@ async def test_health_generate_response(error, expected_body):
     mock_engine_client.check_health_gpu.side_effect = error
     mock_request.app.state.engine_client = mock_engine_client
 
-    response = await health_generate(mock_request)
+    response = await health_generate(mock_request, timeout_s=20.0)
 
     assert response.status_code == 503
     assert json.loads(response.body) == expected_body

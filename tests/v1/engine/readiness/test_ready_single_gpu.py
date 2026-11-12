@@ -33,9 +33,9 @@ def test_no_false_positive(server):
 @pytest.mark.parametrize("fault", ["fault_ima_now", "fault_ima_on_next_forward"])
 def test_cuda_error_while_idle(fault: str):
     """An async CUDA fault that nothing has synchronized on yet, raised before
-    or during the probe's own forward pass, fails that same `/health_generate` call."""
+    or during the probe's own forward pass, fails the next probe."""
     with ready_probe_server(MODEL, []) as srv:
         assert srv.status() == 200
         srv.rpc(fault, "0")
         assert srv.status("/health") == 200
-        assert srv.status() == 503
+        assert srv.wait_until_unready() is not None

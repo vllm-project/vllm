@@ -112,10 +112,7 @@ For further details on speech to text, please refer to [this page](speech_to_tex
 
 A busy engine rank is reported ready without extra GPU work. An idle rank runs one dummy forward pass on every worker. For MoE models with data parallelism, idle ranks only check that the engine answers, because a dummy batch outside a DP wave could deadlock.
 
-| Env var | Default | Meaning |
-| :---- | :---- | :---- |
-| `VLLM_HEALTH_GENERATE_TIMEOUT_S` | 20 | How long to wait for each engine rank before reporting `probe_timeout`. |
-| `VLLM_HEALTH_GENERATE_PROBE_CACHE_TTL_S` | 10 | How long a passing idle probe is reused. `0` disables the cache. |
+The `timeout_s` query parameter sets how long to wait for each engine rank before reporting `probe_timeout` (default 20 s), e.g. `/health_generate?timeout_s=10`. A passing idle probe is reused for 10 s, so frequent polling does not run a dummy batch on every call.
 
 Use `/health_generate` for readiness checks and keep `/health` for liveness checks, so that a sleeping or temporarily slow server is taken out of rotation instead of restarted. `/health_generate` is not authenticated with `--api-key`, like `/health`.
 

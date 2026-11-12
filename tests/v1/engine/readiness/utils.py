@@ -23,9 +23,18 @@ class ReadyProbeServer:
         self.server = server
         self.model = model
 
+    def _health_generate(self) -> requests.Response:
+        return requests.get(
+            self.server.url_for("health_generate"),
+            params={"timeout_s": PROBE_TIMEOUT_S},
+            timeout=30,
+        )
+
     def status(self, path: str = "/health_generate") -> int | None:
         """Return the HTTP status, or None if the server is unreachable."""
         try:
+            if path == "/health_generate":
+                return self._health_generate().status_code
             return requests.get(
                 self.server.url_for(path.lstrip("/")), timeout=30
             ).status_code
@@ -33,15 +42,21 @@ class ReadyProbeServer:
             return None
 
     def ready_body(self) -> dict:
-        resp = requests.get(self.server.url_for("health_generate"), timeout=30)
+        resp = self._health_generate()
         return resp.json() if resp.status_code != 200 else {}
 
-    def wait_until_unready(self) -> float | None:
-        """Return seconds until `/health_generate` stops returning 200, or None."""
+    def wait_until_unready(self) -> dict | None:
+        """Return the first not-ready `/health_generate` body, or None.
+
+        A passing idle probe is cached for a few seconds, so a fault may take
+        that long to show.
+        """
         start = time.monotonic()
         while time.monotonic() - start < DETECT_DEADLINE_S:
-            if self.status() != 200:
-                return time.monotonic() - start
+            with suppress(requests.RequestException):
+                resp = self._health_generate()
+                if resp.status_code != 200:
+                    return resp.json()
             time.sleep(0.5)
         return None
 
@@ -121,8 +136,6 @@ class ReadyProbeServer:
 def ready_probe_server(model: str, extra_args: list[str]):
     env = {
         "VLLM_SERVER_DEV_MODE": "1",
-        "VLLM_HEALTH_GENERATE_TIMEOUT_S": str(PROBE_TIMEOUT_S),
-        "VLLM_HEALTH_GENERATE_PROBE_CACHE_TTL_S": "0",
         # The engine processes import the fault injection classes by name.
         "PYTHONPATH": os.pathsep.join(
             p for p in (str(REPO_ROOT), os.environ.get("PYTHONPATH")) if p
