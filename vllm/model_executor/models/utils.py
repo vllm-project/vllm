@@ -1042,8 +1042,8 @@ def spec_decode_needs_target_embed(vllm_config: VllmConfig) -> bool:
 def check_pp_stage_modules(model: nn.Module, vllm_config: VllmConfig) -> None:
     """Check where a pipeline stage keeps its input embedding and `lm_head`.
 
-    Warns about vocabulary-sized modules this stage builds but never uses, and
-    fails if a kept `lm_head` is tied to an embedding this stage skipped.
+    Logs vocabulary-sized modules this stage builds but never uses at debug level,
+    and fails if a kept `lm_head` is tied to an embedding this stage skipped.
     """
     from vllm.distributed.parallel_state import get_pp_group
 
@@ -1107,7 +1107,7 @@ def check_pp_stage_modules(model: nn.Module, vllm_config: VllmConfig) -> None:
                 unused.append((name, weight))
 
     if unused:
-        logger.warning(
+        logger.debug(
             "Pipeline stage %d builds modules it never uses: %s (%.2f GiB). Build "
             "them under `pp_input_embedding` or `pp_last_stage` instead.",
             pp_group.rank_in_group,

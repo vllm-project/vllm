@@ -1,6 +1,7 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 
+import logging
 from types import SimpleNamespace
 
 import pytest
@@ -254,7 +255,7 @@ def test_pp_input_embedding_kept_where_used(
         (1, True, None),
     ],
 )
-def test_check_pp_stage_modules_warns_about_unused_modules(
+def test_check_pp_stage_modules_reports_unused_modules(
     monkeypatch: pytest.MonkeyPatch,
     caplog_vllm,
     rank: int,
@@ -263,15 +264,16 @@ def test_check_pp_stage_modules_warns_about_unused_modules(
 ):
     """A stage that builds an embedding or lm_head it never uses is reported."""
     set_pp_rank(monkeypatch, rank, world_size=2)
+    caplog_vllm.set_level(logging.DEBUG, logger="vllm")
 
     check_pp_stage_modules(ModuleWithTiedWeights(tie), PP_CONFIG)
 
     messages = [record.getMessage() for record in caplog_vllm.records]
-    warnings = [message for message in messages if "never uses" in message]
+    reports = [message for message in messages if "never uses" in message]
     if unused is None:
-        assert not warnings
+        assert not reports
     else:
-        assert len(warnings) == 1 and unused in warnings[0]
+        assert len(reports) == 1 and unused in reports[0]
 
 
 @pytest.mark.cpu_test
@@ -281,6 +283,7 @@ def test_check_pp_stage_modules_accepts_embedding_used_as_lm_head(
 ):
     """Some tied models use the embedding module itself as `lm_head`."""
     set_pp_rank(monkeypatch, 1, world_size=2)
+    caplog_vllm.set_level(logging.DEBUG, logger="vllm")
     mod = torch.nn.Module()
     mod.model = torch.nn.Module()
     mod.model.embed_tokens = VocabParallelEmbedding(VOCAB_SIZE, HIDDEN_SIZE)
