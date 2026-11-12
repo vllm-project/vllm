@@ -67,6 +67,7 @@ from vllm.model_executor.layers.quantization.base_config import QuantizationConf
 from vllm.model_executor.layers.quantization.fp8 import Fp8Config
 from vllm.model_executor.layers.quantization.utils.quant_utils import is_layer_skipped
 from vllm.model_executor.layers.rotary_embedding import get_rope
+from vllm.model_executor.layers.rotary_embedding.common import yarn_get_mscale
 from vllm.model_executor.layers.vocab_parallel_embedding import (
     ParallelLMHead,
     VocabParallelEmbedding,
@@ -177,6 +178,17 @@ def _build_rope_parameters(config: PreTrainedConfig) -> dict | None:
     return rope_parameters or None
 
 
+def _get_mla_attention_scale(config: PreTrainedConfig, head_dim: int) -> float:
+    scaling = head_dim**-0.5
+    rope_parameters = _build_rope_parameters(config) or {}
+    mscale_all_dim = rope_parameters.get("mscale_all_dim", 0)
+    if mscale_all_dim:
+        scaling *= (
+            yarn_get_mscale(rope_parameters.get("factor", 1.0), mscale_all_dim) ** 2
+        )
+    return scaling
+
+
 def _build_mla_rotary_embedding(
     config: PreTrainedConfig,
     head_size: int,
@@ -184,11 +196,14 @@ def _build_mla_rotary_embedding(
     rope_parameters = _build_rope_parameters(config)
     if rope_parameters is not None and "mrope_section" in rope_parameters:
         rope_type = rope_parameters.get("rope_type", "default")
-        if rope_type != "default":
+        if rope_type not in ("default", "yarn"):
             raise ValueError(
-                f"Bailing M-RoPE only supports rope_type='default', got {rope_type!r}"
+                "Bailing M-RoPE only supports rope_type='default' or 'yarn', "
+                f"got {rope_type!r}"
             )
-        rope_parameters["rope_type"] = "bailing_mrope"
+        rope_parameters["rope_type"] = (
+            "bailing_mrope_yarn" if rope_type == "yarn" else "bailing_mrope"
+        )
 
     return get_rope(
         head_size=head_size,
@@ -479,7 +494,7 @@ class BailingMoeV3MLAAttention(nn.Module):
         tp_size = get_tensor_model_parallel_world_size()
         assert self.num_heads % tp_size == 0
         self.num_local_heads = self.num_heads // tp_size
-        self.scaling = self.qk_head_dim**-0.5
+        self.scaling = _get_mla_attention_scale(config, self.qk_head_dim)
 
         self.q_proj: ColumnParallelLinear | None
         self.kv_a_proj_with_mqa: ReplicatedLinear | None
