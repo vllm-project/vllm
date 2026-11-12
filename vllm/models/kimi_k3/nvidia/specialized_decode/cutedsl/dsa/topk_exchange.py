@@ -78,7 +78,9 @@ LL64 = os.environ.get("VLLM_KIMI_K3_DSA_LL64", "1") != "0"
 # shortened the merge's tail after the push in a one-GPU A/B of the LocalTopk
 # push -> merge chain (DCP16, 8 rows, 32K-512K contexts, the first or the last
 # source rank landing last).
-MERGE_SELECT = {16: "1-8:digits"}
+# DCP8 entries (TP8 + DCP8, DSpark k = 4, 1-3 requests = 5-15 rows): set by a
+# decode-step A/B there.
+MERGE_SELECT = {16: "1-8:digits", 8: "1-15:digits"}
 DIGIT_BINS = 2048  # "digits": the score's top 11 bits
 DIGIT_LOW = 32  # then its low 5 bits
 TIE_LOW_BITS = 10  # tie ids: a (gid bits - 10)-bit digit, then a 10-bit one

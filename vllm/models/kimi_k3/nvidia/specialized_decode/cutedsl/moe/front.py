@@ -358,7 +358,13 @@ FUSED, SPLIT = "9-64:1", "9-12:6,13-24:4,25-64:2"
 # SPEED-Bench 8k mixed) SharedDown on 2 SMs (~123 us at M32) outlasts the experts (TP8
 # q=1 B32: 3 SMs, -5.4% step). Verify steps (q > 1) share experts among a request's q
 # tokens: TP8 DL7 M16/32/64 -5.9/-12.9/-1.1%, TP16 M32 -5.9%.
-SPLITS = {8: ("25-32:3", "13-16:6,25-32:4,33-64:3"), 16: ("", "25-32:3")}
+# TP8 verify 9-12 rows (two requests at k = 4): SharedDown on 12 SMs instead of 6, so
+# it no longer outlasts the routed experts (decode-step A/B: -6% per token; 8 and 16
+# SMs were slower).
+SPLITS = {
+    8: ("25-32:3", "9-12:12,13-16:6,25-32:4,33-64:3"),
+    16: ("", "25-32:3"),
+}
 # Split-K shared-expert batches whose routing kernel releases the persistent experts
 # at entry (``RouteSitu.early``): their launch and prologue (mbarriers, tensor maps,
 # TMEM, x image; ~3.8 us after a late release at TP8 B5, all after the ids exist)
