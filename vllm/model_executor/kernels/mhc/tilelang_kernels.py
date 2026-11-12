@@ -1159,7 +1159,7 @@ class HcPrenormGemmTileLangKernel(
             return hc_prenorm_gemm_block_m_tilelang
         return hc_prenorm_gemm_tilelang
 
-    def dispatch(  # type: ignore[override]
+    def dispatch(
         self,
         *,
         num_tokens: int,
@@ -1370,7 +1370,7 @@ class MhcPreBigFuseTileLangKernel(
             compile_key.hc_mult,
         )
 
-    def dispatch(  # type: ignore[override]
+    def dispatch(
         self,
         *,
         hidden_size: int,
@@ -1616,7 +1616,7 @@ class MhcPostTileLangKernel(VllmTileLangJitKernel["MhcPostTileLangKernel.Compile
     def kernel() -> Any:
         return mhc_post_tilelang
 
-    def dispatch(  # type: ignore[override]
+    def dispatch(
         self,
         **compile_key_fields: int,
     ) -> CompileKey:
@@ -1697,7 +1697,7 @@ class MhcFusedTileLangKernel(
     def kernel() -> Any:
         return mhc_fused_tilelang
 
-    def dispatch(  # type: ignore[override]
+    def dispatch(
         self,
         *,
         num_tokens: int,
@@ -1819,7 +1819,7 @@ class HcHeadFusedTileLangKernel(
     def kernel() -> Any:
         return hc_head_fuse_tilelang
 
-    def dispatch(  # type: ignore[override]
+    def dispatch(
         self,
         *,
         hidden_size: int,

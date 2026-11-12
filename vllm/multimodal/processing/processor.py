@@ -1275,6 +1275,7 @@ class BaseMultiModalProcessor(ABC, Generic[_I]):
         self,
         mm_inputs: Mapping[str, object],
         hf_processor_mm_kwargs: Mapping[str, object],
+        /,
         processed_data: BatchFeature,
     ) -> BatchFeature:
         """Post-process the combined processor and passthrough data.

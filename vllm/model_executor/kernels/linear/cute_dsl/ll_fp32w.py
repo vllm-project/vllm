@@ -84,7 +84,7 @@ class LLFp32WGemm(VllmJitKernel["LLFp32WGemm.CompileKey"]):
             use_pdl=use_pdl(),
         )
 
-    def dispatch(  # type: ignore[override]
+    def dispatch(
         self,
         *,
         M: int,

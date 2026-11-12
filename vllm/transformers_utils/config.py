@@ -2,7 +2,7 @@
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 
 import os
-from collections.abc import Callable, Iterator, Sequence
+from collections.abc import Callable, Generator, Iterator, Sequence
 from contextlib import contextmanager
 from dataclasses import asdict
 from functools import cache, partial, wraps
@@ -235,7 +235,7 @@ def is_rope_parameters_nested(rope_parameters: dict[str, Any]) -> bool:
 
 
 @contextmanager
-def _mistral_patch_hf_hub_constants() -> Iterator[None]:
+def _mistral_patch_hf_hub_constants() -> Generator[None]:
     hf_safetensors_single_file = constants.SAFETENSORS_SINGLE_FILE
     hf_safetensors_index_file = constants.SAFETENSORS_INDEX_FILE
     constants.SAFETENSORS_SINGLE_FILE = "consolidated.safetensors"

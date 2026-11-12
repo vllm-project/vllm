@@ -10,7 +10,7 @@ import shutil
 import socket
 import subprocess
 import time
-from collections.abc import Iterator
+from collections.abc import Generator, Iterator
 from dataclasses import dataclass
 from math import lcm
 from uuid import uuid4
@@ -291,7 +291,7 @@ def _expected_cached(prev_prompt_len: int, hit_unit: int, spec: bool) -> int:
 
 
 @contextlib.contextmanager
-def _serve(deployment: Deployment, mode: Mode) -> Iterator[list[RemoteOpenAIServer]]:
+def _serve(deployment: Deployment, mode: Mode) -> Generator[list[RemoteOpenAIServer]]:
     with contextlib.ExitStack() as stack:
         # Sequential shutdown waits on memory still held by sibling servers.
         servers: list[RemoteOpenAIServer] = []

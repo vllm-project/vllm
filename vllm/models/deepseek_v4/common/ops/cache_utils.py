@@ -364,7 +364,7 @@ class DequantizeAndGatherKCacheKernel(
                 bf16_vals = tl.load(bf16_cache_ptr + chunk_offsets)
                 tl.store(output_row_ptr + bf16_output_offset + chunk_offsets, bf16_vals)
 
-    def dispatch(  # type: ignore[override]
+    def dispatch(
         self,
         *,
         max_model_len: int,
@@ -642,7 +642,7 @@ class ComputeGlobalTopkIndicesAndLensKernel(
         # Zero out length for padding tokens.
         tl.store(topk_lens_ptr + token_idx, tl.where(is_valid_token, count, 0))
 
-    def dispatch(  # type: ignore[override]
+    def dispatch(
         self,
         *,
         topk_width: int,
@@ -916,7 +916,7 @@ class CombineTopkSwaIndicesKernel(
             combined_len = topk_len + swa_len
             tl.store(combined_lens_ptr + token_idx, combined_len)
 
-    def dispatch(  # type: ignore[override]
+    def dispatch(
         self,
         *,
         topk_width: int,
@@ -1520,7 +1520,7 @@ class BuildFlashinferMixedSparseIndicesKernel(
 
         tl.store(sparse_topk_lens_ptr + token_idx, SWA_TOTAL_WIDTH + topk_len)
 
-    def dispatch(  # type: ignore[override]
+    def dispatch(
         self,
         *,
         swa_index_width: int,

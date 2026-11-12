@@ -80,7 +80,7 @@ class PackSeqTritonKernel(VllmTritonJitKernel["PackSeqTritonKernel.CompileKey"])
         x_vals = tl.load(x_row_ptr, mask=valid_row[:, None] & d_mask)
         tl.store(out_row_ptr, x_vals, mask=valid_row[:, None] & d_mask)
 
-    def dispatch(  # type: ignore[override]
+    def dispatch(
         self,
         *,
         dtype: torch.dtype,
@@ -285,7 +285,7 @@ class UnpackSeqTritonKernel(VllmTritonJitKernel["UnpackSeqTritonKernel.CompileKe
         packed_vals = tl.load(packed_row_ptr, mask=valid_row[:, None] & d_mask)
         tl.store(out_row_ptr, packed_vals, mask=valid_row[:, None] & d_mask)
 
-    def dispatch(  # type: ignore[override]
+    def dispatch(
         self,
         *,
         dtype: torch.dtype,

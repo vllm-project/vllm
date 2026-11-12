@@ -111,7 +111,7 @@ class FA4MLAPrefillKernel(VllmJitKernel["FA4MLAPrefillKernel.CompileKey"]):
         assert kernel is not None
         return kernel(*args, **kwargs)
 
-    def dispatch(  # type: ignore[override]
+    def dispatch(
         self,
         *,
         batch_size: int,
@@ -395,7 +395,7 @@ class FA4SplitKVCombineKernel(VllmJitKernel["FA4SplitKVCombineKernel.CompileKey"
                 ),
             )
 
-    def dispatch(  # type: ignore[override]
+    def dispatch(
         self,
         *,
         dtype: torch.dtype,

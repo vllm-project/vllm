@@ -1,7 +1,7 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 import contextlib
-from collections.abc import Iterator
+from collections.abc import Generator
 from dataclasses import dataclass, field
 from typing import TYPE_CHECKING
 
@@ -61,7 +61,7 @@ class StepTimingCollector:
         self._timed: list[tuple[StepTimingEvents, tuple[bool, int, int]]] = []
 
     @contextlib.contextmanager
-    def collect(self) -> Iterator[list[StepTimingSample]]:
+    def collect(self) -> Generator[list[StepTimingSample]]:
         """Time every step run in this block.
 
         The yielded list holds one sample per timed step once the block exits;

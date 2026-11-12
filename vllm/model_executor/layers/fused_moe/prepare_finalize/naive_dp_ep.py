@@ -1,6 +1,6 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
-from collections.abc import Iterator
+from collections.abc import Generator
 from contextlib import contextmanager
 
 import torch
@@ -150,7 +150,7 @@ class MoEPrepareAndFinalizeNaiveDPEPModular(mk.FusedMoEPrepareAndFinalizeModular
         return current_platform.is_rocm()
 
     @contextmanager
-    def _comm_region(self) -> Iterator[None]:
+    def _comm_region(self) -> Generator[None]:
         """Scope the dispatch/combine collective runs in.
 
         Without DBO the collective runs on the calling stream. Under DBO it

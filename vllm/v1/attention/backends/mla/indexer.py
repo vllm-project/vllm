@@ -159,7 +159,7 @@ class PrepareUniformDecodeKernel(
         # All reqs now have decode_len = 1.
         tl.store(decode_lens_ptr + idx, 1)
 
-    def dispatch(  # type: ignore[override]
+    def dispatch(
         self,
         *,
         block_size: int,
@@ -534,7 +534,7 @@ class BuildPrefillChunkMetadataKernel(
             mask = offset < compressed_seq_len
             tl.store(token_to_seq_ptr + seq_start + offset, batch_idx, mask=mask)
 
-    def dispatch(  # type: ignore[override]
+    def dispatch(
         self,
         *,
         query_slice_start: int,

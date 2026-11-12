@@ -2,7 +2,7 @@
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 import gc
 import weakref
-from collections.abc import Iterable, Iterator, Sequence
+from collections.abc import Generator, Iterable, Sequence
 from concurrent.futures import Future, ThreadPoolExecutor
 from contextlib import contextmanager, nullcontext
 from dataclasses import replace
@@ -175,7 +175,7 @@ class ElasticEPScalingExecutor:
         )
 
     @contextmanager
-    def _suppress_eplb(self) -> Iterator[None]:
+    def _suppress_eplb(self) -> Generator[None]:
         # A rank warming up alone must not advance the EPLB step counter.
         runner = self.worker.model_runner
         was_suppressed = runner.eep_eplb_suppressed
@@ -186,7 +186,7 @@ class ElasticEPScalingExecutor:
             runner.eep_eplb_suppressed = was_suppressed
 
     @contextmanager
-    def _disable_flashinfer_autotune(self) -> Iterator[None]:
+    def _disable_flashinfer_autotune(self) -> Generator[None]:
         kernel_config = self.worker.vllm_config.kernel_config
         enabled = kernel_config.enable_flashinfer_autotune
         kernel_config.enable_flashinfer_autotune = False

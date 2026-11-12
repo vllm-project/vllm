@@ -1,7 +1,7 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 
-from collections.abc import Iterator
+from collections.abc import Generator
 from contextlib import contextmanager
 from contextvars import ContextVar
 
@@ -16,7 +16,7 @@ _requantization_source: ContextVar[bool] = ContextVar(
 
 
 @contextmanager
-def requantization_source_scope() -> Iterator[None]:
+def requantization_source_scope() -> Generator[None]:
     """Mark quantization methods created in this scope as requantization sources.
 
     Their weights are only dequantized, so oracles can skip backend selection.

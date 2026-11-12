@@ -113,7 +113,7 @@ class FA4DenseAttentionKernel(VllmJitKernel["FA4DenseAttentionKernel.CompileKey"
         assert flash_attn_varlen_func is not None
         return flash_attn_varlen_func(*args, **kwargs)
 
-    def dispatch(  # type: ignore[override]
+    def dispatch(
         self,
         *,
         q_stage: int,

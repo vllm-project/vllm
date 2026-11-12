@@ -2,7 +2,7 @@
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 
 import contextlib
-from collections.abc import Iterator
+from collections.abc import Generator
 from dataclasses import dataclass
 from functools import partial
 from types import SimpleNamespace
@@ -371,7 +371,7 @@ def test_append_block_ids_rejects_write_past_row_capacity():
 @contextlib.contextmanager
 def _no_dummy_loras(
     lora_config: LoRAConfig | None, remove_lora: bool = True
-) -> Iterator[None]:
+) -> Generator[None]:
     """No-op stand-in for LoRAModelRunnerMixin.maybe_setup_dummy_loras."""
     yield
 

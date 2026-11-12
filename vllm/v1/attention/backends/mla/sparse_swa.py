@@ -389,7 +389,7 @@ class ComputePrefillMetadataKernel(
 
         tl.store(prefill_gather_lens_ptr + offset, gather_len, mask=mask)
 
-    def dispatch(  # type: ignore[override]
+    def dispatch(
         self,
         *,
         num_prefills: int,
@@ -1151,7 +1151,7 @@ class ComputeSWAIndicesAndLensKernel(
 
     kernel = staticmethod(_compute_swa_indices_and_lens_kernel)
 
-    def dispatch(  # type: ignore[override]
+    def dispatch(
         self,
         **compile_key_fields: int,
     ) -> CompileKey:
@@ -1326,7 +1326,7 @@ class ComputeDSparkNoncausalSWAIndicesKernel(
                 mask=offset < index_width,
             )
 
-    def dispatch(  # type: ignore[override]
+    def dispatch(
         self,
         *,
         window_size: int,

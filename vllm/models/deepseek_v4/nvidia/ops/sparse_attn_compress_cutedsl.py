@@ -403,7 +403,7 @@ class SparseAttnCompressNormRopeStoreC4Kernel(
 
         return host_entrypoint
 
-    def dispatch(  # type: ignore[override]
+    def dispatch(
         self,
         *,
         compress_ratio: int,
@@ -898,7 +898,7 @@ class SparseAttnCompressNormRopeStoreFullC4Kernel(
 
         return host_entrypoint
 
-    def dispatch(  # type: ignore[override]
+    def dispatch(
         self,
         *,
         compress_ratio: int,
@@ -1356,9 +1356,7 @@ class SparseAttnCompressC128Block8Kernel(
 
         return host_entrypoint
 
-    def dispatch(  # type: ignore[override]
-        self, *, head_size: int, state_width: int
-    ) -> CompileKey:
+    def dispatch(self, *, head_size: int, state_width: int) -> CompileKey:
         return self.CompileKey(head_size=head_size, state_width=state_width)
 
     def get_warmup_keys(self, vllm_config: Any) -> list[CompileKey]:
@@ -1653,7 +1651,7 @@ class SparseAttnNormRopeStoreKernel(
 
         return host_entrypoint
 
-    def dispatch(  # type: ignore[override]
+    def dispatch(
         self,
         *,
         compress_ratio: int,
@@ -2007,7 +2005,7 @@ class SparseAttnNormRopeStoreFullKernel(
 
         return host_entrypoint
 
-    def dispatch(  # type: ignore[override]
+    def dispatch(
         self,
         *,
         store_full_fp8: bool,
