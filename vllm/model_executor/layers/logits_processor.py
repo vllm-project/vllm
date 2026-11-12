@@ -127,6 +127,11 @@ class LogitsProcessor(PluggableLayer):
             # NOTE(woosuk): Here, the outputs of every device should not be None
             # because XLA requires strict SPMD among all devices. Every device
             # should execute the same operations after gathering the logits.
+            # ROCm collectives are stream-ordered; make the logits producer
+            # stream complete before the TP all-gather outside graph capture.
+            if (current_platform.is_rocm()
+                    and not torch.cuda.is_current_stream_capturing()):
+                torch.cuda.current_stream(logits.device).synchronize()
             logits = tensor_model_parallel_all_gather(logits)
         else:
             # None may be returned for rank > 0

@@ -3,7 +3,7 @@
 
 import json
 import os
-from contextlib import contextmanager, nullcontext
+from contextlib import nullcontext
 from types import SimpleNamespace
 from unittest.mock import patch
 
@@ -281,7 +281,7 @@ def test_memory_profile_bounds_decode_logits_rows(monkeypatch, kv_cache_memory_b
     assert get_current_vllm_config_or_none() is None
 
 
-def test_rocm_expandable_segments_disabled_after_graph_capture(monkeypatch):
+def test_rocm_expandable_segments_disabled_after_warmup(monkeypatch):
     import vllm.platforms.rocm as rocm_platform
     from vllm.distributed.device_communicators import base_device_communicator
 
@@ -289,13 +289,6 @@ def test_rocm_expandable_segments_disabled_after_graph_capture(monkeypatch):
     expected = "expandable_segments:False,max_split_size_mb:64"
     writes: list[str] = []
     guard_calls: list[None] = []
-    events: list[str] = []
-
-    @contextmanager
-    def capture_context():
-        events.append("enter")
-        yield
-        events.append("exit")
 
     monkeypatch.setattr(current_platform, "is_rocm", lambda: True)
     monkeypatch.setattr(rocm_platform, "on_gfx1151", lambda: True)
@@ -310,11 +303,8 @@ def test_rocm_expandable_segments_disabled_after_graph_capture(monkeypatch):
         lambda: guard_calls.append(None),
     )
 
-    with gpu_worker._rocm_steady_state_allocator_after_graph_capture(capture_context()):
-        assert writes == []
-        assert guard_calls == []
+    gpu_worker._disable_rocm_expandable_segments_after_warmup()
 
-    assert events == ["enter", "exit"]
     assert writes == [expected]
     assert os.environ["PYTORCH_HIP_ALLOC_CONF"] == expected
     assert guard_calls == [None]
