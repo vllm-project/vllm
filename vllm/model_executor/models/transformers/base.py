@@ -810,10 +810,6 @@ class Base(
         with torch.device("meta"):
             self.model: "PreTrainedModel" = AutoModel.from_config(...)
         ```
-
-        Each one is created in `dtype` when given, else in its own dtype, which
-        `from_pretrained` keeps too. That is the model dtype `from_config` builds
-        under, unless the modeling declared another (e.g. FP8 or fp32 weights).
         """
         device = self.device_config.device
 
