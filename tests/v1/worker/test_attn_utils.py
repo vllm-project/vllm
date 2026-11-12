@@ -25,7 +25,7 @@ from tests.v1.attention.utils import (
 )
 from vllm.config.compilation import CompilationConfig, CUDAGraphMode
 from vllm.models.kimi_k3.common.dsa_cache import SelfAddressedMLASpec
-from vllm.v1.attention.backend import AttentionBackend, AttentionCGSupport
+from vllm.v1.attention.backend import AttentionBackend, AttentionCGSupport, MultipleOf
 from vllm.v1.core.kv_cache_utils import KVCacheBlockCopy
 from vllm.v1.hisparse.backend import CUDAHiSparseBackend
 from vllm.v1.hisparse.binding import allocate_hisparse_kv_caches
@@ -58,23 +58,41 @@ from vllm.v1.worker.utils import (
 
 
 @pytest.mark.parametrize(
-    ("enabled", "block_size", "main_sizes", "indexer_sizes", "supported"),
+    (
+        "enabled",
+        "block_size",
+        "main_sizes",
+        "indexer_sizes",
+        "self_addressed",
+        "expected",
+    ),
     [
-        (True, 256, [64], [64], True),
-        (True, 64, [64], [32], False),
-        (False, 256, [64], [64], True),
+        (True, 256, [64], [64], False, 64),
+        (True, 64, [32, 64], [16, 32], False, 32),
+        (True, 64, [MultipleOf(16)], [32], False, 32),
+        (True, 64, [64], [32], False, None),
+        (True, 256, [MultipleOf(64)], [64], True, 256),
+        (True, 256, [64], [64], True, 64),
+        (False, 256, [64], [64], False, 256),
     ],
 )
-def test_get_kv_cache_spec_keeps_hisparse_scheduler_block_size(
-    monkeypatch, enabled, block_size, main_sizes, indexer_sizes, supported
+def test_get_kv_cache_spec_resolves_hisparse_block_size(
+    monkeypatch,
+    enabled,
+    block_size,
+    main_sizes,
+    indexer_sizes,
+    self_addressed,
+    expected,
 ):
-    """HiSparse pages at the scheduler block once its backends share a kernel
-    block; other specs are left alone."""
+    """HiSparse keeps the scheduler block only for a self-addressed indexer
+    whose sparse attention backends support it; other specs are left alone."""
+    indexer_cls = SelfAddressedMLASpec if self_addressed else MLAAttentionSpec
     specs = {
         "main": MLAAttentionSpec(
             block_size=block_size, num_kv_heads=1, head_size=576, dtype=torch.bfloat16
         ),
-        "indexer": MLAAttentionSpec(
+        "indexer": indexer_cls(
             block_size=block_size,
             num_kv_heads=1,
             head_size=128,
@@ -105,13 +123,13 @@ def test_get_kv_cache_spec_keeps_hisparse_scheduler_block_size(
     config = SimpleNamespace(
         attention_config=SimpleNamespace(hisparse_config=object() if enabled else None)
     )
-    if not supported:
+    if expected is None:
         with pytest.raises(ValueError, match="supported by every sparse"):
             attn_utils.get_kv_cache_spec(config)
         return
 
     resolved = attn_utils.get_kv_cache_spec(config)
-    assert resolved["main"].block_size == resolved["indexer"].block_size == block_size
+    assert resolved["main"].block_size == resolved["indexer"].block_size == expected
     dense_backend = layers["dense"].get_attn_backend()
     assert resolved["dense"] == customize_attention_spec(dense_backend, specs["dense"])
     assert all(spec.block_size == block_size for spec in specs.values())

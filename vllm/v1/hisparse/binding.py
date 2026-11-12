@@ -31,6 +31,7 @@ from vllm.v1.kv_cache_interface import (
     KVCacheSpec,
     KVCacheTensor,
     MLAAttentionSpec,
+    SparseCacheRole,
     UniformTypeKVCacheSpecs,
     create_kv_cache_views,
 )
@@ -46,10 +47,14 @@ def resolve_hisparse_specs(
     kv_cache_spec: dict[str, KVCacheSpec],
     attn_layers: Mapping[str, "AttentionLayerBase"],
 ) -> dict[str, KVCacheSpec]:
-    """Check that the sparse attention and indexer backends share a kernel
-    block size, and add the resident/hot specs HiSparse derives from the MLA
-    specs. HiSparse pages at the scheduler block size, so a hybrid model's
-    packed block keeps its state pages the size of an MLA row."""
+    """Resolve the HiSparse page size for the MLA specs, and add the
+    resident/hot specs HiSparse derives from them.
+
+    HiSparse pages at the common kernel block, unless the indexer derives its
+    own kernel-block slots (so its device cache can split a packed block) and
+    every sparse attention backend supports the scheduler block: then a hybrid
+    model's packed block, which keeps its state pages the size of an MLA row,
+    is kept."""
     mla_specs = {
         name: spec
         for name, spec in kv_cache_spec.items()
@@ -60,15 +65,35 @@ def resolve_hisparse_specs(
     block_sizes = {spec.block_size for spec in mla_specs.values()}
     if len(block_sizes) != 1:
         raise ValueError("HiSparse requires one scheduler block size.")
+    scheduler_block_size = block_sizes.pop()
     backends = [attn_layers[name].get_attn_backend() for name in mla_specs]
     specs = list(mla_specs.values())
     try:
-        select_common_block_size(block_sizes.pop(), backends, specs)
+        block_size = select_common_block_size(scheduler_block_size, backends, specs)
     except ValueError as error:
         raise ValueError(
             "HiSparse requires a GPU block size supported by every sparse "
             f"attention and indexer backend: {error}"
         ) from error
+    sparse_names = [
+        name
+        for name, spec in mla_specs.items()
+        if spec.cache_role is not SparseCacheRole.INDEXER
+    ]
+    keeps_packed_block = all(
+        not spec.uses_slot_mapping
+        for spec in mla_specs.values()
+        if spec.cache_role is SparseCacheRole.INDEXER
+    ) and scheduler_block_size == select_common_block_size(
+        scheduler_block_size,
+        [attn_layers[name].get_attn_backend() for name in sparse_names],
+        [mla_specs[name] for name in sparse_names],
+    )
+    if not keeps_packed_block:
+        kv_cache_spec = kv_cache_spec | {
+            name: spec.copy_with_new_block_size(block_size)
+            for name, spec in mla_specs.items()
+        }
     groups = get_hisparse_kv_cache_groups(vllm_config, kv_cache_spec)
     assert groups is not None
     return kv_cache_spec | {

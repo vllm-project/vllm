@@ -888,7 +888,7 @@ class SparseMLACommonImpl(MLACommonBaseImpl[T], SharedTopkIndicesBuffer, Generic
                 physical_topk,
                 valid_counts,
                 layer=layer,
-                block_size=block_size,
+                block_size=hot_cache.shape[1],
                 is_decode=num_decode_tokens >= num_tokens,
             )
 
@@ -912,7 +912,7 @@ class SparseMLACommonImpl(MLACommonBaseImpl[T], SharedTopkIndicesBuffer, Generic
                 physical_topk,
                 valid_counts,
                 layer=layer,
-                block_size=block_size,
+                block_size=hot_cache.shape[1],
                 is_decode=True,
             )
 

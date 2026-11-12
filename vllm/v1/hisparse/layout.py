@@ -248,10 +248,11 @@ def _split_state_group(
     device row the indexer and hot groups already need."""
     spec = group.kv_cache_spec
     uniform = spec if isinstance(spec, UniformTypeKVCacheSpecs) else None
-    state_spec = uniform.first_spec if uniform is not None else spec
-    if not isinstance(state_spec, (MambaSpec, CircularBufferSpec)):
+    state_specs = list(uniform.kv_cache_specs.values()) if uniform else [spec]
+    if not isinstance(state_specs[0], (MambaSpec, CircularBufferSpec)):
         return [group]
-    states_per_group = max(row_bytes // state_spec.page_size_bytes, 1)
+    state_page = max(state.page_size_bytes for state in state_specs)
+    states_per_group = max(row_bytes // state_page, 1)
     num_groups = cdiv(len(group.layer_names), states_per_group)
     splits = []
     for i in range(num_groups):

@@ -1023,7 +1023,7 @@ class FlashInferMLASparseImpl(SparseMLACommonImpl[FlashInferMLASparseMetadata]):
             topk_indices,
             seq_lens,
             layer=layer,
-            block_size=runtime.hot.block_size,
+            block_size=kv_cache.shape[1],
             is_decode=True,
         )
 
