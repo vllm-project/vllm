@@ -6525,7 +6525,7 @@ def test_mamba_zero_retention_keeps_latest_decode_boundary(
 
     # The next turn replays prompt + output verbatim and hits a decode boundary
     # instead of falling back to the prompt checkpoint.
-    req1 = make_request("1", req0.all_token_ids + [7] * 20, block_size, sha256)
+    req1 = make_request("1", list(req0.all_token_ids) + [7] * 20, block_size, sha256)
     computed_blocks, num_computed_tokens, _ = manager.get_computed_blocks(req1)
     assert num_computed_tokens == hit_blocks * block_size
     assert [len(blocks) for blocks in computed_blocks.blocks] == [hit_blocks] * 2
