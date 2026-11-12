@@ -10,6 +10,7 @@ from collections.abc import Callable, Iterable
 from contextlib import AbstractContextManager, ExitStack, contextmanager, nullcontext
 from datetime import timedelta
 from fnmatch import filter as fnmatch_filter
+from functools import partial
 from types import NoneType
 from typing import TYPE_CHECKING, Any
 
@@ -1495,7 +1496,10 @@ class Worker(WorkerBase):
                 )
             )
             assert tensor_dict is not None
-            check_intermediate_tensors(tensor_dict, self._pp_recv_specs)
+            # After the postprocessing that all-gathers and reshapes the tensors.
+            comm_postprocess.append(
+                partial(check_intermediate_tensors, tensor_dict, self._pp_recv_specs)
+            )
             intermediate_tensors = AsyncIntermediateTensors(
                 tensor_dict,
                 comm_handles=comm_handles,

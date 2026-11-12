@@ -121,7 +121,8 @@ def test_load_model_preserves_compiled_graphs_at_runtime(monkeypatch):
     worker = SimpleNamespace(
         vllm_config=SimpleNamespace(weight_transfer_config=None),
         model_runner=SimpleNamespace(
-            load_model=lambda **kwargs: loading_threads.append(torch.get_num_threads())
+            load_model=lambda **kwargs: loading_threads.append(torch.get_num_threads()),
+            intermediate_tensors=None,
         ),
         _maybe_get_memory_pool_context=lambda **kwargs: nullcontext(),
         _scoped_allocator_max_split=lambda **kwargs: nullcontext(),
