@@ -64,13 +64,12 @@ if is_aiter_found_and_supported():
         )
         from aiter.ops.triton.quant import dynamic_mxfp4_quant
 
-        if rocm_use_aiter_fp4_asm_gemm:
-            from aiter import gemm_a4w4, per_1x32_f4_quant_hip
-
         M = x.shape[0]
         N = weight.shape[0]
         K = weight.shape[1]
         if rocm_use_aiter_fp4_asm_gemm:
+            from aiter import gemm_a4w4, per_1x32_f4_quant_hip
+
             # The preshuffle kernel's tuned configs split K in some M buckets.
             if (
                 M <= 64
