@@ -156,6 +156,7 @@ from vllm.utils.flashinfer import (
     has_flashinfer_nvlink_one_sided,
     has_flashinfer_trtllm_fused_moe,
 )
+from vllm.utils.import_utils import has_nf12
 from vllm.utils.torch_utils import set_default_torch_dtype
 
 if current_platform.is_rocm():
@@ -170,6 +171,11 @@ else:
 
 
 DEVICE = current_platform.device_type
+HAS_NF12 = (
+    current_platform.is_cuda()
+    and current_platform.has_device_capability(80)
+    and has_nf12()
+)
 GRANITE_MODEL_NAME = "ibm-granite/granite-3.0-1b-a400m-base"
 PARTIALLY_PREQUANTIZED_MODEL_NAME = (
     "nm-testing/tinysmokeqwen3moe-W4A16-first-only-CTstable"
@@ -2444,8 +2450,8 @@ def test_online_quantization_loads_real_weights(
 
 
 @pytest.mark.skipif(
-    not (current_platform.is_cuda() and current_platform.has_device_capability(80)),
-    reason="NF12 requires CUDA SM80 or newer.",
+    not HAS_NF12,
+    reason="NF12 requires CUDA SM80+ and the optional nf12 package.",
 )
 @pytest.mark.parametrize("model_name", ["Qwen/Qwen3-0.6B", GRANITE_MODEL_NAME])
 def test_online_nf12_generation_matches_bf16(
@@ -2502,8 +2508,8 @@ def test_online_nf12_generation_matches_bf16(
 
 
 @pytest.mark.skipif(
-    not (current_platform.is_cuda() and current_platform.has_device_capability(80)),
-    reason="NF12 requires CUDA SM80 or newer.",
+    not HAS_NF12,
+    reason="NF12 requires CUDA SM80+ and the optional nf12 package.",
 )
 @pytest.mark.parametrize("targets", [False, True])
 def test_online_nf12_preserves_unsupported_quantized_moe(
@@ -2587,8 +2593,8 @@ def test_online_nf12_preserves_unsupported_quantized_moe(
 
 
 @pytest.mark.skipif(
-    not (current_platform.is_cuda() and current_platform.has_device_capability(80)),
-    reason="NF12 requires CUDA SM80 or newer.",
+    not HAS_NF12,
+    reason="NF12 requires CUDA SM80+ and the optional nf12 package.",
 )
 def test_online_nf12_rejects_checkpoint_reload(vllm_runner, monkeypatch) -> None:
     """Reject re-encoding weights that captured graphs may still reference."""
@@ -2611,8 +2617,8 @@ def test_online_nf12_rejects_checkpoint_reload(vllm_runner, monkeypatch) -> None
 
 
 @pytest.mark.skipif(
-    not (current_platform.is_cuda() and current_platform.has_device_capability(80)),
-    reason="NF12 requires CUDA SM80 or newer.",
+    not HAS_NF12,
+    reason="NF12 requires CUDA SM80+ and the optional nf12 package.",
 )
 @pytest.mark.parametrize("output_size,input_size", [(64, 64), (65, 64), (64, 65)])
 @torch.inference_mode()
@@ -2659,8 +2665,8 @@ def test_online_nf12_linear_matches_exact_bf16(
 
 
 @pytest.mark.skipif(
-    not (current_platform.is_cuda() and current_platform.has_device_capability(80)),
-    reason="NF12 requires CUDA SM80 or newer.",
+    not HAS_NF12,
+    reason="NF12 requires CUDA SM80+ and the optional nf12 package.",
 )
 @torch.inference_mode()
 def test_online_nf12_preserves_fp32_router(default_vllm_config, dist_init) -> None:
