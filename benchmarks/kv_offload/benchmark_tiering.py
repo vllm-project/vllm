@@ -69,6 +69,54 @@ def gib(n: float) -> int:
     return int(n * 1024**3)
 
 
+def gpu_block_bytes_from_spec(
+    block_size: int = TOKENS_PER_BLOCK, tp_size: int = TP_SIZE
+) -> int:
+    """GPU KV bytes for one TOKENS_PER_BLOCK-token block, per rank.
+
+    Offline: builds a VllmConfig and asks vLLM's KV cache spec machinery,
+    which accounts for hybrid/SWA layer layouts. No GPU or weights needed.
+    """
+    from vllm.config import CacheConfig, ModelConfig, ParallelConfig, VllmConfig
+    from vllm.v1.worker.gpu.attn_utils import get_kv_cache_spec
+
+    vllm_config = VllmConfig(
+        model_config=ModelConfig(model=MODEL),
+        cache_config=CacheConfig(block_size=block_size),
+        parallel_config=ParallelConfig(tensor_parallel_size=1),
+    )
+    specs = get_kv_cache_spec(vllm_config)
+    bytes_per_token = sum(sp.page_size_bytes for sp in specs.values()) // block_size
+    return bytes_per_token * TOKENS_PER_BLOCK
+
+
+def gpu_block_bytes_from_engine(block_size: int = TOKENS_PER_BLOCK) -> int:
+    """GPU KV bytes for one TOKENS_PER_BLOCK-token block, whole model.
+
+    Ground truth: builds a TP=1 engine with dummy weights (uniproc executor,
+    worker in-process) and reads the allocated cache tensors from the model
+    runner directly. Needs a GPU.
+    """
+    os.environ["VLLM_ENABLE_V1_MULTIPROCESSING"] = "0"
+    from vllm import LLM
+
+    llm = LLM(
+        model=MODEL,
+        # enforce_eager=True,
+        tensor_parallel_size=1,
+        load_format="dummy",
+        max_model_len=8192,
+        disable_log_stats=True,
+        numa_bind=False,
+        block_size=block_size,
+    )
+    runner = (
+        llm.llm_engine.engine_core.engine_core.model_executor.driver_worker.model_runner
+    )
+    total = sum(t.numel() * t.element_size() for t in runner.kv_caches)
+    return total // runner.kv_cache_config.num_blocks
+
+
 def _cell(v: object) -> str:
     """CSV cell: blank for missing, floats rounded to 2 decimals."""
     if v is None:
