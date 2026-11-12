@@ -5,16 +5,25 @@ from typing import Literal
 import torch
 import torch.nn as nn
 
+import vllm.envs as envs
 from vllm.config import VllmConfig, replace
 from vllm.distributed.parallel_state import get_pp_group
+from vllm.logger import init_logger
 from vllm.lora.layers.base import BaseLayerWithLoRA
 from vllm.model_executor.layers.quantization.online.lm_head import (
     quantized_lm_head_copy,
 )
+from vllm.model_executor.layers.vocab_parallel_embedding import (
+    ParallelLMHead,
+    UnquantizedEmbeddingMethod,
+)
 from vllm.model_executor.model_loader import get_model
 from vllm.model_executor.model_loader.utils import get_draft_load_config
 from vllm.model_executor.models.utils import PPMissingLayer
+from vllm.platforms import current_platform
 from vllm.v1.worker.gpu.spec_decode.utils import get_pp_safe_draft_load_config
+
+logger = init_logger(__name__)
 
 
 def _should_share(eagle: nn.Module, flag: str, draft, target) -> bool:
@@ -70,6 +79,39 @@ def share_target_lm_head(
         del draft_model.lm_head
     draft_model.lm_head = head
     return head
+
+
+def default_draft_lm_head_quantization(
+    vllm_config: VllmConfig, draft_model: nn.Module, target_lm_head: nn.Module | None
+) -> Literal["nvfp4"] | None:
+    """NVFP4 for an MTP drafter sharing an unquantized BF16 lm_head on DGX
+    Spark (SM121), where reading that head is a large part of each draft step.
+    """
+    spec = vllm_config.speculative_config
+    assert spec is not None and spec.draft_model_config is not None
+    draft_config = spec.draft_model_config
+    if (
+        spec.method != "mtp"
+        or not current_platform.is_device_capability(121)
+        or envs.VLLM_BATCH_INVARIANT
+        or envs.VLLM_RELOAD_MODE == "direct"
+        or draft_config.dtype != torch.bfloat16
+        or draft_config.head_dtype != draft_config.dtype
+        or not isinstance(target_lm_head, ParallelLMHead)
+        or not isinstance(target_lm_head.quant_method, UnquantizedEmbeddingMethod)
+        or not _should_share(
+            draft_model,
+            "has_own_lm_head",
+            getattr(draft_model, "lm_head", None),
+            target_lm_head,
+        )
+    ):
+        return None
+    logger.info_once(
+        "Using an NVFP4 copy of the lm_head for the MTP drafter; set "
+        '"draft_lm_head_quantization": "none" to keep the BF16 head.'
+    )
+    return "nvfp4"
 
 
 def get_target_lm_head(target_model: nn.Module, target_language_model: nn.Module):
@@ -142,11 +184,15 @@ def load_eagle_model(target_model: nn.Module, vllm_config: VllmConfig) -> nn.Mod
 
     maybe_share_target_embed(eagle_model, draft_inner, target_inner)
 
-    draft_head = share_target_lm_head(
-        eagle_model,
-        get_target_lm_head(target_model, target_language_model),
-        speculative_config.draft_lm_head_quantization,
-    )
+    target_lm_head = get_target_lm_head(target_model, target_language_model)
+    quantization = speculative_config.draft_lm_head_quantization
+    if quantization is None:
+        quantization = default_draft_lm_head_quantization(
+            vllm_config, eagle_model, target_lm_head
+        )
+    elif quantization == "none":
+        quantization = None
+    draft_head = share_target_lm_head(eagle_model, target_lm_head, quantization)
     if draft_head is not None:
         # MTP layers route logits through layer.shared_head.head, not
         # eagle_model.lm_head, so the per-layer copies need fixing up too.

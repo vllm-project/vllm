@@ -99,7 +99,7 @@ class DSparkSpeculatorConfig(DFlashSpeculatorConfig):
                 )
             hf_config.dspark_draft_topk = dspark_draft_topk
 
-        if spec.draft_lm_head_quantization is not None:
+        if spec.draft_lm_head_quantization not in (None, "none"):
             # Other drafters may read lm_head.weight directly (e.g. Muse Spark).
             if not {"DSparkDraftModel", "DSparkV41DraftModel"} & set(
                 draft.architectures

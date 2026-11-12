@@ -1191,7 +1191,10 @@ class VllmConfig:
             # `quant_method`, so a rerun would process each base layer twice
             raise ValueError("Direct reload does not support LoRA.")
         spec = self.speculative_config
-        if spec is not None and spec.draft_lm_head_quantization is not None:
+        if spec is not None and spec.draft_lm_head_quantization not in (
+            None,
+            "none",
+        ):
             # after `begin` the draft's quantized lm_head is a view of the target
             # lm_head's storage: post-load processing would write it there
             raise ValueError(

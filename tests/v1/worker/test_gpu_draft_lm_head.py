@@ -219,3 +219,60 @@ def test_layerwise_reload_of_drafter_keeps_copy(
     assert after.keys() == before.keys()
     for name, tensor in before.items():
         assert torch.equal(after[name], tensor), name
+
+
+@pytest.mark.parametrize(
+    ("change", "expected"),
+    [
+        ({}, "nvfp4"),
+        ({"capability": 120}, None),
+        ({"method": "eagle3"}, None),
+        ({"dtype": torch.float16}, None),
+        ({"head_dtype": torch.float32}, None),
+        ({"quantized_head": True}, None),
+        ({"own_head": True}, None),
+        ({"batch_invariant": True}, None),
+        ({"reload_mode": "direct"}, None),
+    ],
+)
+def test_default_draft_lm_head_quantization(
+    default_vllm_config, dist_init, monkeypatch, change, expected
+):
+    """MTP on SM121 gets an NVFP4 head copy only when it shares an
+    unquantized BF16 lm_head."""
+    from vllm.v1.worker.gpu.spec_decode.eagle import utils
+
+    case = {
+        "capability": 121,
+        "method": "mtp",
+        "dtype": torch.bfloat16,
+        "head_dtype": None,
+        "quantized_head": False,
+        "own_head": False,
+        "batch_invariant": False,
+        "reload_mode": "layerwise",
+    } | change
+    monkeypatch.setattr(
+        utils.current_platform,
+        "is_device_capability",
+        lambda capability, device_id=0: capability == case["capability"],
+    )
+    monkeypatch.setattr(utils.envs, "VLLM_BATCH_INVARIANT", case["batch_invariant"])
+    monkeypatch.setattr(utils.envs, "VLLM_RELOAD_MODE", case["reload_mode"])
+    draft_config = SimpleNamespace(
+        dtype=case["dtype"], head_dtype=case["head_dtype"] or case["dtype"]
+    )
+    vllm_config = SimpleNamespace(
+        speculative_config=SimpleNamespace(
+            method=case["method"], draft_model_config=draft_config
+        ),
+    )
+    head = ParallelLMHead(VOCAB, HIDDEN, disable_tp=True)
+    if case["quantized_head"]:
+        head.quant_method = object()
+    # A drafter with its own top-level head that differs from the target's.
+    drafter = SimpleNamespace(has_own_lm_head=case["own_head"], lm_head=None)
+
+    assert (
+        utils.default_draft_lm_head_quantization(vllm_config, drafter, head) == expected
+    )

@@ -137,10 +137,11 @@ def load_dspark_model(target_model: nn.Module, vllm_config: VllmConfig) -> nn.Mo
         getattr(draft_model_config.hf_config, "draft_vocab_size", None)
         or draft_model_config.get_vocab_size()
     )
+    quantization = speculative_config.draft_lm_head_quantization
     share_target_lm_head(
         draft_model,
         get_target_lm_head(target_model, target_language_model),
-        speculative_config.draft_lm_head_quantization,
+        None if quantization == "none" else quantization,
         can_share=draft_output_vocab_size == target_vocab_size,
     )
 
