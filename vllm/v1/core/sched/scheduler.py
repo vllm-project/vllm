@@ -87,6 +87,10 @@ from vllm.v1.utils import record_function_or_nullcontext
 
 logger = init_logger(__name__)
 
+# Cap on per-request prefill progress reports; the final zero is always sent.
+PREFILL_PROGRESS_MAX_UPDATES = 100
+
+
 @dataclass
 class _PrefillProgressState:
     """Reporting state for one request that is still prefilling."""
@@ -2265,7 +2269,7 @@ class Scheduler(SchedulerInterface):
 
         A request that finishes prefill reports a final zero and stops being
         tracked; while it is prefilling it reports after each quarter of its
-        remaining work.
+        remaining work, up to `PREFILL_PROGRESS_MAX_UPDATES`.
         """
         computed = max(0, request.num_computed_tokens - request.num_in_flight_tokens)
         remaining = request.num_tokens - computed
@@ -2742,7 +2746,11 @@ class Scheduler(SchedulerInterface):
             if (eco := engine_core_outputs.get(client_index)) is None:
                 engine_core_outputs[client_index] = eco = EngineCoreOutputs()
             eco.outputs.extend(
-                EngineCoreOutput(request_id=update.request_id, prefill_progress=update)
+                EngineCoreOutput(
+                    request_id=update.request_id,
+                    new_token_ids=[],
+                    prefill_progress=update,
+                )
                 for update in updates
             )
 
