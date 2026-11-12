@@ -35,6 +35,7 @@ from vllm.distributed.parallel_state import (
 )
 from vllm.model_executor.layers.activation import get_act_fn
 from vllm.model_executor.layers.attention import Attention
+from vllm.model_executor.layers.layernorm import LayerNorm
 from vllm.model_executor.layers.linear import (
     ColumnParallelLinear,
     QKVParallelLinear,
@@ -52,6 +53,7 @@ from vllm.sequence import IntermediateTensors
 from .interfaces import SupportsCrossEncoding, SupportsPP
 from .utils import (
     AutoWeightsLoader,
+    WeightsMapper,
     make_empty_intermediate_tensors_factory,
     make_layers,
     maybe_prefix,
@@ -155,11 +157,11 @@ class GPT2Block(nn.Module):
         hidden_size = config.hidden_size
         inner_dim = config.n_inner if config.n_inner is not None else 4 * hidden_size
 
-        self.ln_1 = nn.LayerNorm(hidden_size, eps=config.layer_norm_epsilon)
+        self.ln_1 = LayerNorm(hidden_size, eps=config.layer_norm_epsilon)
         self.attn = GPT2Attention(
             config, cache_config, quant_config, prefix=f"{prefix}.attn"
         )
-        self.ln_2 = nn.LayerNorm(hidden_size, eps=config.layer_norm_epsilon)
+        self.ln_2 = LayerNorm(hidden_size, eps=config.layer_norm_epsilon)
         self.mlp = GPT2MLP(inner_dim, config, quant_config, prefix=f"{prefix}.mlp")
 
     def forward(
@@ -182,6 +184,11 @@ class GPT2Block(nn.Module):
 
 @support_torch_compile
 class GPT2Model(nn.Module):
+    # Drop attention mask buffers; NOTE: "c_attn.bias" must not be dropped.
+    hf_to_vllm_mapper = WeightsMapper(
+        orig_to_new_substr={".attn.bias": None, ".attn.masked_bias": None}
+    )
+
     def __init__(self, *, vllm_config: VllmConfig, prefix: str = ""):
         super().__init__()
 
@@ -206,7 +213,7 @@ class GPT2Model(nn.Module):
             lambda prefix: GPT2Block(config, cache_config, quant_config, prefix=prefix),
             prefix=f"{prefix}.h",
         )
-        self.ln_f = nn.LayerNorm(self.embed_dim, eps=config.layer_norm_epsilon)
+        self.ln_f = LayerNorm(self.embed_dim, eps=config.layer_norm_epsilon)
         self.make_empty_intermediate_tensors = make_empty_intermediate_tensors_factory(
             ["hidden_states"], config.n_embd
         )
@@ -253,11 +260,10 @@ class GPT2Model(nn.Module):
             yield name, loaded_weight
 
     def load_weights(self, weights: Iterable[tuple[str, torch.Tensor]]) -> set[str]:
-        # Skip attention mask buffers; NOTE: "c_attn.bias" must not be skipped.
-        loader = AutoWeightsLoader(
-            self, skip_substrs=[".attn.bias", ".attn.masked_bias"]
+        loader = AutoWeightsLoader(self)
+        return loader.load_weights(
+            self._transpose_conv1d(weights), mapper=self.hf_to_vllm_mapper
         )
-        return loader.load_weights(self._transpose_conv1d(weights))
 
 
 class GPT2LMHeadModel(nn.Module, SupportsPP):
@@ -322,6 +328,7 @@ class GPT2ForSequenceClassification(nn.Module, SupportsCrossEncoding):
         transformer: An instance of GPT2Model used for forward operations.
         score: A layer for calculating logits.
         _pooler: An instance of Pooler used for pooling operations.
+
     """
 
     is_pooling_model = True

@@ -37,6 +37,7 @@ def random_dataset_params() -> Params:
 
 def _fingerprint_sample(req: SampleRequest) -> tuple[str, int, int]:
     """Project a SampleRequest into a comparable tuple."""
+    assert isinstance(req.prompt, str)
     return (req.prompt, req.prompt_len, req.expected_output_len)
 
 
@@ -153,6 +154,7 @@ def _mm_fingerprint_sample(
     - count of multimodal items
     - per-item type and URL prefix (e.g., 'data:image/jpeg;base64,')
     """
+    assert isinstance(req.prompt, str)
     items = req.multi_modal_data or []
     item_prefixes: list[str] = []
     for it in items:

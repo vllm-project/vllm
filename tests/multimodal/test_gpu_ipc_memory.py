@@ -6,7 +6,6 @@ import time
 
 import pytest
 
-import vllm.config.multimodal as multimodal_config_module
 from vllm.config.multimodal import MultiModalConfig
 from vllm.multimodal.gpu_ipc_memory import (
     MultiModalGPUMemoryPool,
@@ -15,10 +14,11 @@ from vllm.multimodal.gpu_ipc_memory import (
     reserve_mm_ipc_gpu_memory,
     set_mm_gpu_ipc_pool,
 )
-from vllm.multimodal.video import (
+from vllm.multimodal.video_decoders import PYNVVIDEOCODEC_VIDEO_BACKEND
+from vllm.multimodal.video_decoders.pynvvideocodec import (
     PYNVVIDEOCODEC_CUDA_CONTEXT_BYTES,
     PYNVVIDEOCODEC_DECODER_GPU_MEMORY_BYTES,
-    PYNVVIDEOCODEC_VIDEO_BACKEND,
+    get_pynvvideocodec_decoder_gpu_memory_bytes,
 )
 from vllm.utils.mem_constants import GiB_bytes
 
@@ -28,12 +28,18 @@ def _mm_config(
     mm_ipc_gpu_memory_gb: float = 0,
     video_backend: str | None = None,
     hw_decoders: int | None = None,
+    max_width: int | None = None,
+    max_height: int | None = None,
 ) -> MultiModalConfig:
     video_kwargs: dict[str, object] = (
         {} if video_backend is None else {"video_backend": video_backend}
     )
     if hw_decoders is not None:
         video_kwargs["hw_decoders"] = hw_decoders
+    if max_width is not None:
+        video_kwargs["max_width"] = max_width
+    if max_height is not None:
+        video_kwargs["max_height"] = max_height
 
     return MultiModalConfig(
         mm_ipc_gpu_memory_gb=mm_ipc_gpu_memory_gb,
@@ -44,9 +50,11 @@ def _mm_config(
 def _pynvvideocodec_decoder_budget(
     api_process_count: int = 1,
     hw_decoders: int = 2,
+    max_width: int | None = None,
+    max_height: int | None = None,
 ) -> int:
     return api_process_count * (
-        PYNVVIDEOCODEC_DECODER_GPU_MEMORY_BYTES * hw_decoders
+        get_pynvvideocodec_decoder_gpu_memory_bytes(max_width, max_height) * hw_decoders
         + PYNVVIDEOCODEC_CUDA_CONTEXT_BYTES
     )
 
@@ -186,11 +194,7 @@ def test_reserve_mm_ipc_gpu_memory_raw_frame_budget_only(
     monkeypatch: pytest.MonkeyPatch,
     video_backend: str | None,
 ):
-    monkeypatch.setattr(
-        multimodal_config_module.envs,
-        "VLLM_VIDEO_LOADER_BACKEND",
-        "opencv",
-    )
+    monkeypatch.setenv("VLLM_VIDEO_LOADER_BACKEND", "opencv")
     mm_config = _mm_config(
         mm_ipc_gpu_memory_gb=0.25,
         video_backend=video_backend,
@@ -202,11 +206,7 @@ def test_reserve_mm_ipc_gpu_memory_raw_frame_budget_only(
 def test_reserve_mm_ipc_gpu_memory_includes_pynvvideocodec_decoder_budget(
     monkeypatch: pytest.MonkeyPatch,
 ):
-    monkeypatch.setattr(
-        multimodal_config_module.envs,
-        "VLLM_VIDEO_LOADER_BACKEND",
-        "opencv",
-    )
+    monkeypatch.setenv("VLLM_VIDEO_LOADER_BACKEND", "opencv")
     mm_config = _mm_config(
         mm_ipc_gpu_memory_gb=0.25,
         video_backend=PYNVVIDEOCODEC_VIDEO_BACKEND,
@@ -221,11 +221,7 @@ def test_reserve_mm_ipc_gpu_memory_includes_pynvvideocodec_decoder_budget(
 def test_reserve_mm_ipc_gpu_memory_uses_env_video_backend(
     monkeypatch: pytest.MonkeyPatch,
 ):
-    monkeypatch.setattr(
-        multimodal_config_module.envs,
-        "VLLM_VIDEO_LOADER_BACKEND",
-        PYNVVIDEOCODEC_VIDEO_BACKEND,
-    )
+    monkeypatch.setenv("VLLM_VIDEO_LOADER_BACKEND", PYNVVIDEOCODEC_VIDEO_BACKEND)
     available_bytes = 4 * GiB_bytes
 
     assert reserve_mm_ipc_gpu_memory(available_bytes, _mm_config()) == (
@@ -236,11 +232,7 @@ def test_reserve_mm_ipc_gpu_memory_uses_env_video_backend(
 def test_reserve_mm_ipc_gpu_memory_scales_decoder_budget_by_api_servers(
     monkeypatch: pytest.MonkeyPatch,
 ):
-    monkeypatch.setattr(
-        multimodal_config_module.envs,
-        "VLLM_VIDEO_LOADER_BACKEND",
-        PYNVVIDEOCODEC_VIDEO_BACKEND,
-    )
+    monkeypatch.setenv("VLLM_VIDEO_LOADER_BACKEND", PYNVVIDEOCODEC_VIDEO_BACKEND)
     available_bytes = 8 * GiB_bytes
 
     assert reserve_mm_ipc_gpu_memory(
@@ -253,11 +245,7 @@ def test_reserve_mm_ipc_gpu_memory_scales_decoder_budget_by_api_servers(
 def test_reserve_mm_ipc_gpu_memory_uses_configured_hw_decoders(
     monkeypatch: pytest.MonkeyPatch,
 ):
-    monkeypatch.setattr(
-        multimodal_config_module.envs,
-        "VLLM_VIDEO_LOADER_BACKEND",
-        "opencv",
-    )
+    monkeypatch.setenv("VLLM_VIDEO_LOADER_BACKEND", "opencv")
     available_bytes = 4 * GiB_bytes
     mm_config = _mm_config(
         video_backend=PYNVVIDEOCODEC_VIDEO_BACKEND,
@@ -266,4 +254,30 @@ def test_reserve_mm_ipc_gpu_memory_uses_configured_hw_decoders(
 
     assert reserve_mm_ipc_gpu_memory(available_bytes, mm_config) == (
         available_bytes - _pynvvideocodec_decoder_budget(hw_decoders=3)
+    )
+
+
+def test_reserve_mm_ipc_gpu_memory_scales_for_configured_decoder_dimensions(
+    monkeypatch: pytest.MonkeyPatch,
+):
+    monkeypatch.setenv("VLLM_VIDEO_LOADER_BACKEND", "opencv")
+    available_bytes = 8 * GiB_bytes
+    max_width = 7680
+    max_height = 4320
+    mm_config = _mm_config(
+        video_backend=PYNVVIDEOCODEC_VIDEO_BACKEND,
+        max_width=max_width,
+        max_height=max_height,
+    )
+
+    assert reserve_mm_ipc_gpu_memory(available_bytes, mm_config) == (
+        available_bytes
+        - _pynvvideocodec_decoder_budget(
+            max_width=max_width,
+            max_height=max_height,
+        )
+    )
+    assert (
+        get_pynvvideocodec_decoder_gpu_memory_bytes(max_width, max_height)
+        > PYNVVIDEOCODEC_DECODER_GPU_MEMORY_BYTES
     )

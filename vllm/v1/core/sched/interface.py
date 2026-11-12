@@ -9,6 +9,7 @@ from vllm.multimodal import MULTIMODAL_REGISTRY, MultiModalRegistry
 
 if TYPE_CHECKING:
     from vllm.config import VllmConfig
+    from vllm.config.kv_events import KVEventsConfig
     from vllm.distributed.ec_transfer.ec_connector.base import ECConnectorBase
     from vllm.distributed.kv_transfer.kv_connector.v1 import KVConnectorBase_V1
     from vllm.v1.core.sched.output import GrammarOutput, SchedulerOutput
@@ -25,7 +26,7 @@ class PauseState(enum.IntEnum):
 
     - UNPAUSED: Normal operation
     - PAUSE_NEW: No new requests are scheduled, requests already in
-                 running state are scheduled.
+                 running state or holding KV blocks are scheduled.
     - PAUSE_ALL: No requests are scheduled
     """
 
@@ -70,14 +71,15 @@ class SchedulerInterface(ABC):
         preparing inputs to the model.
 
         Args:
-            throttle_prefills: DP prefill balancing. When True (set by the DP
-                engine core on non-cadence-aligned steps), new prefill compute is
-                deferred to a later step so prefills stay aligned across DP ranks;
-                automatically overridden when the rank is saturated.
+            throttle_prefills: When True (set by the engine core on steps between
+                `prefill_schedule_interval` multiples), new prefill compute is
+                deferred to a later step; automatically overridden when the
+                engine is saturated.
 
         Returns:
             A SchedulerOutput object containing information about the scheduled
             requests.
+
         """
         raise NotImplementedError
 
@@ -104,6 +106,7 @@ class SchedulerInterface(ABC):
         Returns:
             A dict of client index to EngineCoreOutputs object containing the
             outputs for each request originating from that client.
+
         """
         raise NotImplementedError
 
@@ -114,6 +117,7 @@ class SchedulerInterface(ABC):
 
         Args:
             draft_token_ids: The input draft token ids for each request.
+
         """
         raise NotImplementedError
 
@@ -128,6 +132,7 @@ class SchedulerInterface(ABC):
             draft_token_ids: The input draft token ids for each request.
             scheduler_output: Update the given scheduler_output
                 with the corresponding draft token ids.
+
         """
         raise NotImplementedError
 
@@ -137,7 +142,14 @@ class SchedulerInterface(ABC):
 
         Args:
             request: The new request being added.
+
         """
+        raise NotImplementedError
+
+    @abstractmethod
+    def has_request(self, request_id: str) -> bool:
+        """Returns True if the scheduler holds the request, including an open
+        streaming-input session waiting for its next input."""
         raise NotImplementedError
 
     @abstractmethod
@@ -161,6 +173,7 @@ class SchedulerInterface(ABC):
         Returns:
             List of requests that were aborted. Will not include any that were
             already finished.
+
         """
         raise NotImplementedError
 
@@ -217,6 +230,8 @@ class SchedulerInterface(ABC):
                 preempted and moved to the waiting queue. Otherwise, this method
                 will only reset the KV prefix cache when there is no running request
                 taking KV cache.
+            reset_connector: If True, also reset any KV connector state.
+
         """
         raise NotImplementedError
 
@@ -255,4 +270,7 @@ class SchedulerInterface(ABC):
         return None
 
     def get_ec_connector(self) -> "ECConnectorBase | None":
+        return None
+
+    def get_kv_event_publisher_config(self) -> "KVEventsConfig | None":
         return None

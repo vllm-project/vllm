@@ -2,16 +2,16 @@
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 """Inkling short-conv state managed as a sliding-window KV cache.
 
-Each decoder layer owns one ``InklingConvState`` (an ``AttentionLayerBase``) that
-emits a single ``SlidingWindowSpec`` for the layer's 4 sconv streams (K, V,
+Each decoder layer owns one `InklingConvState` (an `AttentionLayerBase`) that
+emits a single `SlidingWindowSpec` for the layer's 4 sconv streams (K, V,
 attn-output, mlp-output), packed head-major into one block:
 
     H = num_kv_heads (per-rank), N = block_size = sconv_kernel_size,
     D = head_dim(K) + head_dim(V) + hidden/H(attn) + hidden/H(mlp)
 
-``D`` is TP-invariant; per rank we store ``H/TP`` heads of width ``D``. The conv
+`D` is TP-invariant; per rank we store `H/TP` heads of width `D`. The conv
 reads/writes this cache out-of-band via a custom backend; the (smaller) conv page
-is padded up to the uniform attention page by ``unify_kv_cache_spec_page_size``.
+is padded up to the uniform attention page by `unify_kv_cache_spec_page_size`.
 """
 
 from __future__ import annotations
@@ -106,32 +106,6 @@ class InklingSconvBackend(AttentionBackend):
     @staticmethod
     def get_name() -> str:
         return "INKLING_SCONV_SWA"
-
-    @classmethod
-    def indexes_kv_by_block_stride(cls) -> bool:
-        # num_blocks is the outermost dim (HND, see get_kv_cache_shape), so the
-        # padded conv page is read through a strided view.
-        return True
-
-    @staticmethod
-    def get_kv_cache_shape(
-        num_blocks: int,
-        block_size: int,
-        num_kv_heads: int,
-        head_size: int,
-        cache_dtype_str: str = "auto",
-    ) -> tuple[int, ...]:
-        # HND, num-blocks-first, head-major: [num_blocks, H, N, D].
-        return (num_blocks, num_kv_heads, block_size, head_size)
-
-    @staticmethod
-    def get_kv_cache_stride_order(
-        include_num_layers_dimension: bool = False,
-    ) -> tuple[int, ...]:
-        # Identity: physical layout == logical [num_blocks, H, N, D].
-        if include_num_layers_dimension:
-            return (0, 1, 2, 3, 4)
-        return (0, 1, 2, 3)
 
     @staticmethod
     def get_impl_cls():

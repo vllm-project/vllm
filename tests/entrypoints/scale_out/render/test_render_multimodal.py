@@ -16,7 +16,6 @@ VISION_MODEL_NAME = "Qwen/Qwen3-VL-2B-Instruct"
 @pytest.fixture(scope="module")
 def vision_server():
     """Vision-capable server used for multimodal /render tests."""
-
     args = [
         "--enforce-eager",
         "--max-model-len",
@@ -27,15 +26,10 @@ def vision_server():
         "1",
         "--limit-mm-per-prompt.video",
         "0",
+        "--enable-scale-out",
     ]
 
-    env_overrides: dict[str, str] = {}
-
-    with RemoteOpenAIServer(
-        VISION_MODEL_NAME,
-        args,
-        env_dict=env_overrides,
-    ) as remote_server:
+    with RemoteOpenAIServer(VISION_MODEL_NAME, args) as remote_server:
         yield remote_server
 
 
@@ -53,7 +47,6 @@ async def test_chat_completion_render_with_base64_image_url(
     local_asset_server,
 ):
     """Render a multimodal chat request and verify tokens are returned."""
-
     image = local_asset_server.get_image_asset("RGBA_comp.png")
     data_url = encode_image_url(image, format="PNG")
 
@@ -112,12 +105,41 @@ async def test_chat_completion_render_with_base64_image_url(
 
 
 @pytest.mark.asyncio
+async def test_chat_completion_render_rejects_local_file_when_disabled(
+    vision_client,
+):
+    """A file URL without `--allowed-local-media-path` is a client error."""
+    response = await vision_client.post(
+        "/v1/chat/completions/render",
+        json={
+            "model": VISION_MODEL_NAME,
+            "messages": [
+                {
+                    "role": "user",
+                    "content": [
+                        {
+                            "type": "image_url",
+                            "image_url": {"url": "file:///tmp/disallowed.png"},
+                        },
+                        {"type": "text", "text": "What's in this image?"},
+                    ],
+                }
+            ],
+        },
+    )
+
+    assert response.status_code == 400
+    error = response.json()["error"]
+    assert error["type"] == "BadRequestError"
+    assert "--allowed-local-media-path" in error["message"]
+
+
+@pytest.mark.asyncio
 async def test_tokenize_matches_render_for_multimodal_input(
     vision_client,
     local_asset_server,
 ):
     """`/tokenize` should match `/v1/chat/completions/render` token output."""
-
     image = local_asset_server.get_image_asset("RGBA_comp.png")
     data_url = encode_image_url(image, format="PNG")
 

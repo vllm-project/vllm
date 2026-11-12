@@ -1,7 +1,6 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
-"""
-Fused compressor + FP8/MXFP4 UE8M0 quantization + KV cache insert kernels.
+"""Fused compressor + FP8/MXFP4 UE8M0 quantization + KV cache insert kernels.
 
 Three specialized kernels:
   - _fused_kv_compress_norm_rope_insert_sparse_attn:
@@ -19,14 +18,45 @@ even/odd halves, producing (N_QUANT_BLOCKS, MXFP4_BLOCK/2) packed nibbles
 and N_QUANT_BLOCKS ue8m0 bytes.
 """
 
+from dataclasses import dataclass
 from functools import lru_cache
+from types import SimpleNamespace
 from typing import Any
 
 import torch
 
+from vllm.model_executor.warmup.jit_warmup import kernel_launcher
+from vllm.model_executor.warmup.jit_warmup_triton_helper import (
+    LaunchSpec,
+    TritonWarmupTensor,
+    VllmTritonJitKernel,
+)
+from vllm.platforms import current_platform
 from vllm.triton_utils import tl, triton
+from vllm.utils.deep_gemm import mqa_logits_use_mx_scales
+from vllm.utils.math_utils import round_up
+from vllm.v1.attention.ops.common import pack_ue8m0_x4
+
+if current_platform.is_rocm():
+    from vllm.platforms.rocm import _ON_GFX950
+else:
+    _ON_GFX950 = False
 
 from .fused_indexer_q import _fp32x2_to_fp4x2
+
+
+def _plain_fp8_store_kwargs(
+    kv_cache: torch.Tensor, fp8_scale: torch.Tensor | None
+) -> dict[str, Any]:
+    """Head=512 kernel kwargs for a plain per-tensor fp8 cache row."""
+    assert kv_cache.dim() == 3 and kv_cache.stride(-1) == 1
+    assert fp8_scale is not None and fp8_scale.numel() == 1
+    assert fp8_scale.dtype == torch.float32
+    return {
+        "fp8_scale_ptr": fp8_scale,
+        "STORE_PLAIN_FP8": True,
+        "PLAIN_FP8_MAX": torch.finfo(kv_cache.dtype).max,
+    }
 
 
 def compress_norm_rope_store_triton(
@@ -52,21 +82,46 @@ def compress_norm_rope_store_triton(
     quant_block: int,
     token_stride: int,
     scale_dim: int,
+    fp8_scale: torch.Tensor | None = None,
 ) -> None:
     """Shared triton launcher for the fused compress+norm+RoPE+insert path.
 
-    Picks one of the three kernels in this module based on ``head_dim`` and
-    ``use_fp4_cache``. Identical launch signature for all three.
+    Picks one of the three kernels in this module based on `head_dim` and
+    `use_fp4_cache`. Identical launch signature for all three.
     """
     if head_dim == 512:
         kernel = _fused_kv_compress_norm_rope_insert_sparse_attn
         num_warps = 4
-    elif use_fp4_cache:
-        kernel = _fused_kv_compress_norm_rope_insert_indexer_mxfp4_attn
-        num_warps = 1
+        kernel_kwargs = {"SANITIZE_CACHE_NANS": _ON_GFX950}
+        if kv_cache.dtype == torch.float8_e4m3fn:
+            kernel_kwargs.update(_plain_fp8_store_kwargs(kv_cache, fp8_scale))
+            token_stride = kv_cache.stride(1)
     else:
-        kernel = _fused_kv_compress_norm_rope_insert_indexer_attn
-        num_warps = 1
+        _FUSED_KV_COMPRESS_NORM_ROPE_INSERT_INDEXER_TRITON_KERNEL(
+            state_cache=state_cache,
+            num_actual=num_actual,
+            token_to_req_indices=token_to_req_indices,
+            positions=positions,
+            slot_mapping=slot_mapping,
+            block_table=block_table,
+            block_size=block_size,
+            state_width=state_width,
+            cos_sin_cache=cos_sin_cache,
+            kv_cache=kv_cache,
+            k_cache_metadata=k_cache_metadata,
+            pdl_kwargs=pdl_kwargs,
+            head_dim=head_dim,
+            rope_head_dim=rope_head_dim,
+            compress_ratio=compress_ratio,
+            overlap=overlap,
+            use_fp4_cache=use_fp4_cache,
+            rms_norm_weight=rms_norm_weight,
+            rms_norm_eps=rms_norm_eps,
+            quant_block=quant_block,
+            token_stride=token_stride,
+            scale_dim=scale_dim,
+        )
+        return
 
     kernel[(num_actual,)](
         # state cache
@@ -103,6 +158,7 @@ def compress_norm_rope_store_triton(
         SCALE_DIM=scale_dim,
         KV_BLOCK_STRIDE=kv_cache.stride(0),
         num_warps=num_warps,
+        **kernel_kwargs,
         **pdl_kwargs,
     )
 
@@ -145,14 +201,21 @@ def _fused_kv_compress_norm_rope_insert_sparse_attn(
     TOKEN_STRIDE: tl.constexpr,  # 576 for DeepseekV4
     SCALE_DIM: tl.constexpr,  # 8 for DeepseekV4 (7 real + 1 pad)
     KV_BLOCK_STRIDE: tl.constexpr,
+    SANITIZE_CACHE_NANS: tl.constexpr,
+    fp8_scale_ptr=None,
+    STORE_PLAIN_FP8: tl.constexpr = False,
+    PLAIN_FP8_MAX: tl.constexpr = 0.0,
 ):
     """Fused compress → RMSNorm → FP8 quant (nope) → RoPE → bf16 store (rope).
 
     One program per token; early-exits for non-boundary positions.
 
-    Cache block layout (``block_size`` tokens):
+    Cache block layout (`block_size` tokens):
       [0, bs*576):       token data (448 fp8 + 128 bf16 each)
       [bs*576, +bs*8):   uint8 UE8M0 scales (7 real + 1 pad each)
+
+    STORE_PLAIN_FP8 writes a plain per-tensor fp8 row instead, TOKEN_STRIDE
+    apart.
     """
     token_idx = tl.program_id(0)
 
@@ -224,8 +287,26 @@ def _fused_kv_compress_norm_rope_insert_sparse_attn(
     kv_block_idx = kv_slot_idx // kv_cache_block_size
     kv_pos_in_block = kv_slot_idx % kv_cache_block_size
 
-    cache_block_ptr = k_cache_ptr + kv_block_idx.to(tl.int64) * KV_BLOCK_STRIDE
+    # Byte-addressed: the cache is uint8 (fp8_ds_mla) or float8 (plain rows).
+    cache_block_ptr = (
+        k_cache_ptr.to(tl.pointer_type(tl.uint8))
+        + kv_block_idx.to(tl.int64) * KV_BLOCK_STRIDE
+    )
     fp8_ptr = cache_block_ptr + kv_pos_in_block * TOKEN_STRIDE
+    if STORE_PLAIN_FP8:
+        # Round to bf16 first, as V4.1 does with its bf16 latent.
+        rope_store_plain_kv_row(
+            normed.to(tl.bfloat16).to(tl.float32),
+            position,
+            cos_sin_cache_ptr,
+            cos_sin_stride,
+            fp8_ptr.to(tl.pointer_type(k_cache_ptr.dtype.element_ty)),
+            fp8_scale_ptr,
+            COMPRESS_RATIO,
+            STORE_FP8=True,
+            FP8_MAX=PLAIN_FP8_MAX,
+        )
+        return
     scale_ptr = (
         cache_block_ptr
         + kv_cache_block_size * TOKEN_STRIDE
@@ -261,7 +342,8 @@ def _fused_kv_compress_norm_rope_insert_sparse_attn(
 
     scale_idx = tl.arange(0, N_QUANT_BLOCKS)
     encoded = exponents + 127.0
-    encoded = tl.maximum(tl.minimum(encoded, 255.0), 0.0)
+    max_encoded: tl.constexpr = 254.0 if SANITIZE_CACHE_NANS else 255.0
+    encoded = tl.maximum(tl.minimum(encoded, max_encoded), 0.0)
     tl.store(
         scale_ptr + scale_idx,
         encoded.to(tl.uint8),
@@ -289,12 +371,44 @@ def _fused_kv_compress_norm_rope_insert_sparse_attn(
     new_even = even * cos_v - odd * sin_v
     new_odd = odd * cos_v + even * sin_v
     result = tl.interleave(new_even, new_odd)  # [TRITON_BLOCK_SIZE] fp32
+    if SANITIZE_CACHE_NANS:
+        result = tl.where(result == result, result, 0.0)
 
     # Store rotated rope portion as bf16 into the cache's bf16 area.
     bf16_ptr = (fp8_ptr + NOPE_HEAD_DIM).to(tl.pointer_type(tl.bfloat16))
     rope_local = block - NOPE_HEAD_DIM
     is_rope = (block >= NOPE_HEAD_DIM) & mask
     tl.store(bf16_ptr + rope_local, result.to(tl.bfloat16), mask=is_rope)
+
+
+@triton.jit
+def rope_store_plain_kv_row(
+    row,
+    position,
+    cos_sin,
+    cos_stride,
+    dst,
+    fp8_scale,
+    COMPRESS_RATIO: tl.constexpr,
+    STORE_FP8: tl.constexpr,
+    FP8_MAX: tl.constexpr,
+):
+    """GPT-J RoPE on the last 64 lanes of a [448 NoPE | 64 RoPE] fp32 row, then
+    store it as a plain bf16 row or a per-tensor fp8 one."""
+    # NoPE pairs load (cos, sin) = (1, 0), so the rotation is the identity there.
+    even, odd = tl.split(tl.reshape(row, (256, 2)))
+    pair = tl.arange(0, 256) - 224
+    cs = cos_sin + (position // COMPRESS_RATIO * COMPRESS_RATIO) * cos_stride
+    c = tl.load(cs + tl.maximum(pair, 0), pair >= 0, other=1.0).to(tl.float32)
+    s = tl.load(cs + 32 + tl.maximum(pair, 0), pair >= 0, other=0.0).to(tl.float32)
+    row = tl.interleave(even * c - odd * s, odd * c + even * s).to(tl.bfloat16)
+
+    d = tl.arange(0, 512)
+    if STORE_FP8:
+        scaled = row.to(tl.float32) * (1.0 / tl.load(fp8_scale))
+        tl.store(dst + d, tl.clamp(scaled, -FP8_MAX, FP8_MAX).to(dst.dtype.element_ty))
+    else:
+        tl.store(dst + d, row)
 
 
 # =============================================================================
@@ -349,7 +463,7 @@ def _compress_gather_split_sparse_attn(
     NUM_SPLITS: tl.constexpr,
     HEAD_TILE: tl.constexpr,  # HEAD_SIZE // NUM_SPLITS
 ):
-    """Stage 1: per-(token, head-split) compress gather, write to fp32 scratch
+    """Stage 1: per-(token, head-split) compress gather, write to fp32 scratch.
 
     No-overlap gather (cr>=128) on rows [0, COMPRESS_RATIO)
     """
@@ -417,9 +531,13 @@ def _finalize_norm_rope_quant_store_sparse_attn(
     TOKEN_STRIDE: tl.constexpr,
     SCALE_DIM: tl.constexpr,
     KV_BLOCK_STRIDE: tl.constexpr,
+    SANITIZE_CACHE_NANS: tl.constexpr,
+    fp8_scale_ptr=None,
+    STORE_PLAIN_FP8: tl.constexpr = False,
+    PLAIN_FP8_MAX: tl.constexpr = 0.0,
 ):
     """Stage 2: read compressed_kv[512] from scratch buffer, then
-    RMSNorm + FP8 quant (nope) + RoPE + bf16 store
+    RMSNorm + FP8 quant (nope) + RoPE + bf16 store, or a plain fp8 row
     """
     token_idx = tl.program_id(0)
     slot_id = tl.load(slot_mapping_ptr + token_idx)
@@ -445,8 +563,25 @@ def _finalize_norm_rope_quant_store_sparse_attn(
         return
     kv_block_idx = kv_slot_idx // kv_cache_block_size
     kv_pos_in_block = kv_slot_idx % kv_cache_block_size
-    cache_block_ptr = k_cache_ptr + kv_block_idx.to(tl.int64) * KV_BLOCK_STRIDE
+    cache_block_ptr = (
+        k_cache_ptr.to(tl.pointer_type(tl.uint8))
+        + kv_block_idx.to(tl.int64) * KV_BLOCK_STRIDE
+    )
     fp8_ptr = cache_block_ptr + kv_pos_in_block * TOKEN_STRIDE
+    if STORE_PLAIN_FP8:
+        # Round to bf16 first, as V4.1 does with its bf16 latent.
+        rope_store_plain_kv_row(
+            normed.to(tl.bfloat16).to(tl.float32),
+            position,
+            cos_sin_cache_ptr,
+            cos_sin_stride,
+            fp8_ptr.to(tl.pointer_type(k_cache_ptr.dtype.element_ty)),
+            fp8_scale_ptr,
+            COMPRESS_RATIO,
+            STORE_FP8=True,
+            FP8_MAX=PLAIN_FP8_MAX,
+        )
+        return
     scale_ptr = (
         cache_block_ptr
         + kv_cache_block_size * TOKEN_STRIDE
@@ -474,7 +609,8 @@ def _finalize_norm_rope_quant_store_sparse_attn(
     tl.store(fp8_ptr + block, x_uint8, mask=block < NOPE_HEAD_DIM)
 
     scale_idx = tl.arange(0, N_QUANT_BLOCKS)
-    encoded = tl.maximum(tl.minimum(exponents + 127.0, 255.0), 0.0)
+    max_encoded: tl.constexpr = 254.0 if SANITIZE_CACHE_NANS else 255.0
+    encoded = tl.maximum(tl.minimum(exponents + 127.0, max_encoded), 0.0)
     tl.store(
         scale_ptr + scale_idx, encoded.to(tl.uint8), mask=scale_idx < N_NOPE_BLOCKS
     )
@@ -494,6 +630,8 @@ def _finalize_norm_rope_quant_store_sparse_attn(
     new_even = even * cos_v - odd * sin_v
     new_odd = odd * cos_v + even * sin_v
     result = tl.interleave(new_even, new_odd)
+    if SANITIZE_CACHE_NANS:
+        result = tl.where(result == result, result, 0.0)
     bf16_ptr = (fp8_ptr + NOPE_HEAD_DIM).to(tl.pointer_type(tl.bfloat16))
     rope_local = block - NOPE_HEAD_DIM
     is_rope = (block >= NOPE_HEAD_DIM) & mask
@@ -521,7 +659,12 @@ def _launch_two_stage_sparse_attn_compressor(
     rope_head_dim: int,
     num_actual: int,
     compress_scratch: torch.Tensor,
+    fp8_scale: torch.Tensor | None = None,
 ) -> None:
+    plain_kwargs = {}
+    if kv_cache.dtype == torch.float8_e4m3fn:
+        plain_kwargs = _plain_fp8_store_kwargs(kv_cache, fp8_scale)
+        token_stride = kv_cache.stride(1)
     num_splits = _pick_compress_num_splits(num_actual, compress_ratio, head_dim)
     head_tile = head_dim // num_splits
     scratch = compress_scratch[:num_actual]
@@ -564,6 +707,8 @@ def _launch_two_stage_sparse_attn_compressor(
         TOKEN_STRIDE=token_stride,
         SCALE_DIM=scale_dim,
         KV_BLOCK_STRIDE=kv_cache.stride(0),
+        SANITIZE_CACHE_NANS=_ON_GFX950,
+        **plain_kwargs,
     )
 
 
@@ -592,8 +737,9 @@ def compress_norm_rope_store_two_stage_triton(
     scale_dim: int,
     num_decode_tokens: int,
     compress_scratch: torch.Tensor,
+    fp8_scale: torch.Tensor | None = None,
 ) -> None:
-    """Two-stage split compressor dispatch for head=512 cr>=128 (no-overlap)
+    """Two-stage split compressor dispatch for head=512 cr>=128 (no-overlap).
 
     Run the occupancy-fanned two-stage split for prefill [num_decodee_tokens:]
     to fill the CUs, and use the original single-pass launcher
@@ -623,6 +769,7 @@ def compress_norm_rope_store_two_stage_triton(
             rope_head_dim=rope_head_dim,
             num_actual=num_prefills,
             compress_scratch=compress_scratch,
+            fp8_scale=fp8_scale,
         )
     if num_decodes > 0:
         compress_norm_rope_store_triton(
@@ -648,13 +795,22 @@ def compress_norm_rope_store_two_stage_triton(
             quant_block=quant_block,
             token_stride=token_stride,
             scale_dim=scale_dim,
+            fp8_scale=fp8_scale,
         )
 
 
 # =============================================================================
 # Indexer path (head=128, all FP8, single quant block)
 # =============================================================================
-@triton.jit
+@triton.jit(
+    do_not_specialize=[
+        "state_cache_stride0",
+        "state_cache_stride1",
+        "block_table_stride",
+        "rms_norm_eps",
+        "cos_sin_stride",
+    ]
+)
 def _fused_kv_compress_norm_rope_insert_indexer_attn(
     # ── state cache (compressor internal state) ──
     state_cache_ptr,
@@ -689,6 +845,7 @@ def _fused_kv_compress_norm_rope_insert_indexer_attn(
     TOKEN_STRIDE: tl.constexpr,  # 128 for indexer
     SCALE_DIM: tl.constexpr,  # 4 for indexer (1 float32)
     KV_BLOCK_STRIDE: tl.constexpr,
+    MX_SCALE: tl.constexpr,  # store the scale as 4 packed UE8M0 bytes
 ):
     """Fused compress → RMSNorm → RoPE → FP8 quant → store.
 
@@ -700,7 +857,7 @@ def _fused_kv_compress_norm_rope_insert_indexer_attn(
 
     For head_dim=128 we have exactly one quant block, so we skip the
     [N_QUANT_BLOCKS, QUANT_BLOCK] reshape entirely and use a flat
-    ``tl.max`` reduction.
+    `tl.max` reduction.
     """
     token_idx = tl.program_id(0)
 
@@ -825,13 +982,24 @@ def _fused_kv_compress_norm_rope_insert_indexer_attn(
 
     # Single float32 scale
     scale_val = tl.exp2(exponent)
-    tl.store(scale_ptr.to(tl.pointer_type(tl.float32)), scale_val)
+    if MX_SCALE:
+        tl.store(scale_ptr.to(tl.pointer_type(tl.int32)), pack_ue8m0_x4(scale_val))
+    else:
+        tl.store(scale_ptr.to(tl.pointer_type(tl.float32)), scale_val)
 
 
 # =============================================================================
 # Indexer path (head=128, MXFP4: 2 nibbles/byte + ue8m0 per 32-elem block)
 # =============================================================================
-@triton.jit
+@triton.jit(
+    do_not_specialize=[
+        "state_cache_stride0",
+        "state_cache_stride1",
+        "block_table_stride",
+        "rms_norm_eps",
+        "cos_sin_stride",
+    ]
+)
 def _fused_kv_compress_norm_rope_insert_indexer_mxfp4_attn(
     # ── state cache (compressor internal state) ──
     state_cache_ptr,
@@ -866,12 +1034,13 @@ def _fused_kv_compress_norm_rope_insert_indexer_mxfp4_attn(
     TOKEN_STRIDE: tl.constexpr,  # HEAD_SIZE // 2 = 64 packed bytes/token
     SCALE_DIM: tl.constexpr,  # HEAD_SIZE // QUANT_BLOCK = 4 ue8m0 bytes/token
     KV_BLOCK_STRIDE: tl.constexpr,
+    MX_SCALE: tl.constexpr,  # unused for MXFP4 (kept for signature parity)
 ):
     """Fused compress → RMSNorm → RoPE → MXFP4 quant → store.
 
     One program per token; early-exits for non-boundary positions.
 
-    Cache block layout (``block_size`` tokens per cache block):
+    Cache block layout (`block_size` tokens per cache block):
       [0, bs*TOKEN_STRIDE):        packed MXFP4 nibbles (2 values/byte)
       [bs*TOKEN_STRIDE, +bs*SCALE_DIM): ue8m0 scale bytes (one per 32-elem block)
 
@@ -1019,3 +1188,239 @@ def _fused_kv_compress_norm_rope_insert_indexer_mxfp4_attn(
 
     tl.store(val_ptr + tl.arange(0, TOKEN_STRIDE), packed_flat)
     tl.store(scale_ptr + tl.arange(0, SCALE_DIM), ue8m0)
+
+
+class FusedKVCompressNormRopeInsertIndexerTritonKernel(
+    VllmTritonJitKernel["FusedKVCompressNormRopeInsertIndexerTritonKernel.CompileKey"]
+):
+    @dataclass(frozen=True)
+    class CompileKey:
+        dtype: torch.dtype
+        use_fp4_cache: bool
+        head_size: int
+        triton_block_size: int
+        state_width: int
+        compress_ratio: int
+        overlap: bool
+        rope_head_dim: int
+        fp8_max: float
+        quant_block: int
+        token_stride: int
+        scale_dim: int
+        block_size: int
+        kv_cache_block_size: int
+        kv_block_stride: int
+        mx_scale: bool
+
+    # Canonical kernel for the launcher's arg_names mapping; the launched
+    # variant (fp8/mxfp4, same arg_names) is picked per call in __call__.
+    kernel = staticmethod(_fused_kv_compress_norm_rope_insert_indexer_attn)
+
+    def dispatch(  # type: ignore[override]
+        self,
+        *,
+        dtype: torch.dtype,
+        use_fp4_cache: bool,
+        head_dim: int,
+        rope_head_dim: int,
+        compress_ratio: int,
+        cache_block_size: int,
+        cache_alignment: int,
+        runtime_state_width: int | None = None,
+        runtime_quant_block: int | None = None,
+        runtime_token_stride: int | None = None,
+        runtime_scale_dim: int | None = None,
+        runtime_kv_block_stride: int | None = None,
+    ) -> CompileKey:
+        overlap = compress_ratio == 4
+        default_quant_block = 32 if use_fp4_cache else 128
+        quant_block = (
+            runtime_quant_block
+            if runtime_quant_block is not None
+            else default_quant_block
+        )
+        default_token_stride = head_dim // 2 if use_fp4_cache else head_dim
+        token_stride = (
+            runtime_token_stride
+            if runtime_token_stride is not None
+            else default_token_stride
+        )
+        default_scale_dim = head_dim // quant_block if use_fp4_cache else 4
+        scale_dim = (
+            runtime_scale_dim if runtime_scale_dim is not None else default_scale_dim
+        )
+        raw_kv_cache_block_size = cache_block_size // compress_ratio
+        kv_cache_block_size = (
+            raw_kv_cache_block_size if raw_kv_cache_block_size >= 1 else 1
+        )
+        state_block_size = (
+            4
+            if compress_ratio == 4
+            else 8
+            if compress_ratio == 128
+            else cache_block_size
+        )
+        default_kv_block_stride = round_up(
+            kv_cache_block_size * (token_stride + scale_dim),
+            cache_alignment,
+        )
+        kv_block_stride = (
+            runtime_kv_block_stride
+            if runtime_kv_block_stride is not None
+            else default_kv_block_stride
+        )
+        state_width = (
+            runtime_state_width
+            if runtime_state_width is not None
+            else head_dim * (1 + overlap)
+        )
+        return self.CompileKey(
+            dtype=dtype,
+            use_fp4_cache=use_fp4_cache,
+            head_size=head_dim,
+            triton_block_size=triton.next_power_of_2(head_dim),
+            state_width=state_width,
+            compress_ratio=compress_ratio,
+            overlap=overlap,
+            rope_head_dim=rope_head_dim,
+            fp8_max=448.0,
+            quant_block=quant_block,
+            token_stride=token_stride,
+            scale_dim=scale_dim,
+            block_size=state_block_size,
+            kv_cache_block_size=kv_cache_block_size,
+            kv_block_stride=kv_block_stride,
+            mx_scale=not use_fp4_cache and mqa_logits_use_mx_scales(),
+        )
+
+    def get_warmup_keys(self, vllm_config: Any) -> list[CompileKey]:
+        hf_config = vllm_config.model_config.hf_config
+        if hf_config is None:
+            return []
+
+        cache_block_size = vllm_config.cache_config.block_size
+        from vllm.v1.attention.backends.mla.indexer import (
+            dsa_indexer_uses_fp4,
+        )
+
+        use_fp4_cache = dsa_indexer_uses_fp4(vllm_config)
+        # The MXFP4 variant packs FP4 with CUDA PTX; ROCm writes the MXFP4
+        # indexer cache with aiter's op instead.
+        if use_fp4_cache and current_platform.is_rocm():
+            return []
+        head_dim = int(getattr(hf_config, "index_head_dim", 0) or 0)
+        rope_head_dim = int(getattr(hf_config, "qk_rope_head_dim", 0) or 0)
+        if head_dim <= 0 or rope_head_dim <= 0 or cache_block_size <= 0:
+            return []
+
+        cache_dtype = vllm_config.cache_config.cache_dtype
+        cache_alignment = 576 if cache_dtype == "fp8_ds_mla" else 512
+        return self._trace_dispatch(self.dispatch)(
+            dtype=vllm_config.model_config.dtype,
+            use_fp4_cache=use_fp4_cache,
+            head_dim=head_dim,
+            rope_head_dim=rope_head_dim,
+            compress_ratio=4,
+            cache_block_size=cache_block_size,
+            cache_alignment=cache_alignment,
+        )
+
+    def warmup_inputs(self, compile_key: CompileKey) -> dict[str, Any]:
+        fp32_ptr = TritonWarmupTensor(torch.float32, shape=(1, 1))
+        int32_ptr = TritonWarmupTensor(torch.int32)
+        int64_ptr = TritonWarmupTensor(torch.int64)
+        # kv_cache supplies kv_cache_block_size (shape[1]) and KV_BLOCK_STRIDE
+        # (stride(0)); reproduce both so warmup and launch specialize identically.
+        kv_cache = TritonWarmupTensor(
+            torch.uint8,
+            shape=(1, compile_key.kv_cache_block_size, 1),
+            strides=(compile_key.kv_block_stride, 1, 1),
+        )
+        return dict(
+            state_cache=fp32_ptr,
+            num_actual=1,
+            token_to_req_indices=int32_ptr,
+            positions=int64_ptr,
+            slot_mapping=int64_ptr,
+            block_table=int32_ptr,
+            block_size=compile_key.block_size,
+            state_width=compile_key.state_width,
+            cos_sin_cache=fp32_ptr,
+            kv_cache=kv_cache,
+            k_cache_metadata=SimpleNamespace(slot_mapping=int64_ptr),
+            pdl_kwargs={},
+            head_dim=compile_key.head_size,
+            rope_head_dim=compile_key.rope_head_dim,
+            compress_ratio=compile_key.compress_ratio,
+            overlap=compile_key.overlap,
+            use_fp4_cache=compile_key.use_fp4_cache,
+            rms_norm_weight=TritonWarmupTensor(
+                compile_key.dtype,
+                shape=(compile_key.head_size,),
+            ),
+            rms_norm_eps=1e-6,
+            quant_block=compile_key.quant_block,
+            token_stride=compile_key.token_stride,
+            scale_dim=compile_key.scale_dim,
+        )
+
+    @kernel_launcher
+    def __call__(
+        self,
+        *,
+        state_cache: torch.Tensor,
+        num_actual: int,
+        token_to_req_indices: torch.Tensor,
+        positions: torch.Tensor,
+        slot_mapping: torch.Tensor,
+        block_table: torch.Tensor,
+        block_size: int,
+        state_width: int,
+        cos_sin_cache: torch.Tensor,
+        kv_cache: torch.Tensor,
+        k_cache_metadata: Any,
+        pdl_kwargs: dict,
+        head_dim: int,
+        rope_head_dim: int,
+        compress_ratio: int,
+        overlap: bool,
+        use_fp4_cache: bool,
+        rms_norm_weight: torch.Tensor,
+        rms_norm_eps: float,
+        quant_block: int,
+        token_stride: int,
+        scale_dim: int,
+    ) -> LaunchSpec:
+        return (num_actual,), dict(
+            kernel=(
+                _fused_kv_compress_norm_rope_insert_indexer_mxfp4_attn
+                if use_fp4_cache
+                else _fused_kv_compress_norm_rope_insert_indexer_attn
+            ),
+            state_cache_stride0=state_cache.stride(0),
+            state_cache_stride1=state_cache.stride(1),
+            block_table_stride=block_table.stride(0),
+            cos_sin_stride=cos_sin_cache.stride(0),
+            k_cache_ptr=kv_cache,
+            kv_slot_mapping_ptr=k_cache_metadata.slot_mapping,
+            kv_cache_block_size=kv_cache.shape[1],
+            HEAD_SIZE=head_dim,
+            TRITON_BLOCK_SIZE=triton.next_power_of_2(head_dim),
+            STATE_WIDTH=state_width,
+            COMPRESS_RATIO=compress_ratio,
+            OVERLAP=overlap,
+            ROPE_HEAD_DIM=rope_head_dim,
+            FP8_MAX=448.0,
+            QUANT_BLOCK=quant_block,
+            TOKEN_STRIDE=token_stride,
+            SCALE_DIM=scale_dim,
+            KV_BLOCK_STRIDE=kv_cache.stride(0),
+            MX_SCALE=not use_fp4_cache and mqa_logits_use_mx_scales(),
+            num_warps=1,
+            **pdl_kwargs,
+        )
+
+
+_FUSED_KV_COMPRESS_NORM_ROPE_INSERT_INDEXER_TRITON_KERNEL = (
+    FusedKVCompressNormRopeInsertIndexerTritonKernel()
+)

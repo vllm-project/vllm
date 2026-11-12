@@ -9,6 +9,7 @@ use serde_json::json;
 use thiserror_ext::AsReport;
 use vllm_text::tokenizer::Tokenizer;
 
+use crate::EffortValue;
 use crate::renderer::test_utils::{FixtureRequestOptions, fixture_chat_request};
 
 use super::{
@@ -17,7 +18,7 @@ use super::{
     MESSAGE_TOOL, MESSAGE_USER,
 };
 use crate::event::{AssistantContentBlock, AssistantToolCall};
-use crate::request::{ChatMessage, ChatRequest, GenerationPromptMode, ReasoningEffort};
+use crate::request::{ChatMessage, ChatRequest, GenerationPromptMode};
 use crate::{ChatRenderer, Error};
 
 struct FixtureTokenizer;
@@ -87,7 +88,7 @@ impl Tokenizer for FixtureTokenizer {
 }
 
 fn renderer() -> InklingChatRenderer {
-    InklingChatRenderer::new(Arc::new(FixtureTokenizer)).unwrap()
+    InklingChatRenderer::new(Arc::new(FixtureTokenizer), Default::default()).unwrap()
 }
 
 fn render_token_ids(request: &ChatRequest) -> Vec<u32> {
@@ -105,7 +106,7 @@ fn fixture_request(name: &str) -> ChatRequest {
 
 fn inkling_fixture_options() -> FixtureRequestOptions {
     FixtureRequestOptions {
-        enable_thinking: Some(false),
+        enable_thinking: None,
         no_generation_prompt_when_last_assistant: false,
     }
 }
@@ -206,13 +207,13 @@ fn renders_request_and_developer_tools_as_tool_declare() {
 #[test]
 fn renders_named_reasoning_effort_after_tool_declarations() {
     for (effort, expected) in [
-        (ReasoningEffort::None, "0.0"),
-        (ReasoningEffort::Minimal, "0.1"),
-        (ReasoningEffort::Low, "0.2"),
-        (ReasoningEffort::Medium, "0.7"),
-        (ReasoningEffort::High, "0.9"),
-        (ReasoningEffort::XHigh, "0.99"),
-        (ReasoningEffort::Max, "0.99"),
+        (EffortValue::from("none"), "0.0"),
+        (EffortValue::from("minimal"), "0.1"),
+        (EffortValue::from("low"), "0.2"),
+        (EffortValue::from("medium"), "0.7"),
+        (EffortValue::from("high"), "0.9"),
+        (EffortValue::from("xhigh"), "0.99"),
+        (EffortValue::from("max"), "0.99"),
     ] {
         let mut request = fixture_request("tool_declare_input.json");
         request.chat_options.reasoning_effort = Some(effort);
@@ -285,6 +286,43 @@ fn defaults_reasoning_effort_to_high() {
 }
 
 #[test]
+fn normalized_mode_and_scalar_are_reflected_in_prompt_and_kwargs() {
+    for (kwargs, expected, enabled) in [
+        (
+            json!({"enable_thinking": true, "reasoning_effort": "none"}),
+            "0.9",
+            true,
+        ),
+        (
+            json!({"thinking": false, "reasoning_effort": 10}),
+            "0.0",
+            false,
+        ),
+        (json!({"reasoning_effort": 0}), "0.0", false),
+        (json!({"reasoning_effort": null}), "0.9", true),
+        (json!({"reasoning_effort": 0.37}), "0.37", true),
+    ] {
+        let mut request = ChatRequest::for_test();
+        request.chat_options.template_kwargs = serde_json::from_value(kwargs).unwrap();
+        let rendered = renderer().render(&request).unwrap();
+        let prompt = render_symbolic_tokens(&rendered.prompt.into_token_ids().unwrap());
+        assert!(prompt.contains(&format!("Thinking effort level: {expected}<|end_message|>")));
+        assert_eq!(
+            rendered.effective_template_kwargs["enable_thinking"],
+            enabled
+        );
+        assert_eq!(
+            rendered.effective_template_kwargs["reasoning_effort"],
+            if enabled {
+                json!(expected.parse::<f64>().unwrap())
+            } else {
+                json!("none")
+            }
+        );
+    }
+}
+
+#[test]
 fn renders_numeric_reasoning_effort_template_kwarg() {
     let mut request = ChatRequest::for_test();
     request
@@ -301,19 +339,17 @@ fn renders_numeric_reasoning_effort_template_kwarg() {
 }
 
 #[test]
-fn ignores_unsupported_reasoning_effort_values() {
-    for value in [json!(true), json!("invalid"), json!(null)] {
-        let mut request = ChatRequest::for_test();
-        request
-            .chat_options
-            .template_kwargs
-            .insert("reasoning_effort".to_string(), value);
+fn ignores_unsupported_reasoning_effort_names() {
+    let mut request = ChatRequest::for_test();
+    request
+        .chat_options
+        .template_kwargs
+        .insert("reasoning_effort".to_string(), json!("invalid"));
 
-        assert_eq!(
-            render_symbolic_tokens(&render_token_ids(&request)),
-            "<|message_user|><|content_text|>test<|end_message|><|message_model|>"
-        );
-    }
+    assert_eq!(
+        render_symbolic_tokens(&render_token_ids(&request)),
+        "<|message_user|><|content_text|>test<|end_message|><|message_model|>"
+    );
 }
 
 #[test]
@@ -362,18 +398,32 @@ fn renders_developer_messages_as_system() {
 }
 
 #[test]
-fn rejects_non_object_tool_call_arguments() {
-    let request = ChatRequest {
-        messages: vec![ChatMessage::assistant_blocks(vec![
-            AssistantContentBlock::ToolCall(AssistantToolCall {
-                id: "call_1".to_string(),
-                name: "get_weather".to_string(),
-                arguments: "[]".to_string(),
-            }),
-        ])],
-        ..ChatRequest::for_test()
+fn coerces_tool_call_arguments_that_are_not_an_object_to_empty() {
+    let render_arguments = |arguments: &str| {
+        let request = ChatRequest {
+            messages: vec![ChatMessage::assistant_blocks(vec![
+                AssistantContentBlock::ToolCall(AssistantToolCall {
+                    id: "call_1".to_string(),
+                    name: "get_weather".to_string(),
+                    arguments: arguments.to_string(),
+                }),
+            ])],
+            ..ChatRequest::for_test()
+        };
+        renderer().render(&request).unwrap().prompt
     };
 
-    let error = renderer().render(&request).unwrap_err();
-    assert!(error.as_report().to_string().contains("JSON object"));
+    let empty = render_arguments("{}");
+    for arguments in [
+        r#"{"city": "Par"#,
+        "   ",
+        "[]",
+        "42",
+        "true",
+        r#""hello""#,
+        "null",
+    ] {
+        assert_eq!(render_arguments(arguments), empty, "{arguments:?}");
+    }
+    assert_ne!(render_arguments(r#"{"city":"Paris"}"#), empty);
 }

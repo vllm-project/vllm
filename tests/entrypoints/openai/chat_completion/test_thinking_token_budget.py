@@ -1,7 +1,7 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 
-"""E2E tests for ``thinking_token_budget`` with reasoning models.
+"""E2E tests for `thinking_token_budget` with reasoning models.
 
 Covers Qwen3-0.6B and Qwen3.5 FP8 + MTP.
 """
@@ -33,7 +33,6 @@ def _count_reasoning_decode_token_ids_between_markers(
     reasoning_end_ids: list[int],
 ) -> int | None:
     """Count decode tokens in the thinking span (after last start, before first end)."""
-
     if not reasoning_start_ids or not reasoning_end_ids:
         raise ValueError("reasoning marker token id lists must be non-empty")
 
@@ -72,9 +71,7 @@ def server():
         "0.4",
         "--no-async-scheduling",
     ]
-    # thinking_token_budget is not yet supported by the V2 model runner.
-    env_dict = {"VLLM_USE_V2_MODEL_RUNNER": "0"}
-    with RemoteOpenAIServer(MODEL_NAME, args, env_dict=env_dict) as remote_server:
+    with RemoteOpenAIServer(MODEL_NAME, args) as remote_server:
         yield remote_server
 
 
@@ -90,9 +87,7 @@ def server_with_auto_reasoning_config():
         "0.4",
         "--no-async-scheduling",
     ]
-    # thinking_token_budget is not yet supported by the V2 model runner.
-    env_dict = {"VLLM_USE_V2_MODEL_RUNNER": "0"}
-    with RemoteOpenAIServer(MODEL_NAME, args, env_dict=env_dict) as remote_server:
+    with RemoteOpenAIServer(MODEL_NAME, args) as remote_server:
         yield remote_server
 
 
@@ -126,8 +121,7 @@ def server_qwen35_fp8_mtp_tp2():
             }
         ),
     ]
-    # thinking_token_budget is not yet supported by the V2 model runner.
-    env_dict: dict[str, str] = {"VLLM_USE_V2_MODEL_RUNNER": "0"}
+    env_dict: dict[str, str] = {}
     # With 4+ GPUs, run TP=2 on physical devices 2,3 so module-scoped 0.6B servers
     # on 0,1 do not exhaust memory on the same devices as this worker.
     if current_platform.device_count() >= 4:
@@ -158,7 +152,6 @@ async def client(request, server, server_with_auto_reasoning_config):
 async def test_thinking_token_budget_mixed_requests(client: openai.AsyncOpenAI):
     """Test that mixed requests (some with thinking_token_budget, some without)
     complete successfully without errors."""
-
     response_with_budget = await client.chat.completions.create(
         model=MODEL_NAME,
         messages=MESSAGES,
@@ -187,7 +180,6 @@ async def test_thinking_token_budget_limits_reasoning(client: openai.AsyncOpenAI
     grouped into streamed chunks (a single chunk can carry several tokens under
     async scheduling / stream_interval > 1). Counting chunks under-counts.
     """
-
     tokenizer = get_tokenizer(tokenizer_name=MODEL_NAME)
     start_ids = list(tokenizer.encode(REASONING_START_STR, add_special_tokens=False))
     end_ids = list(tokenizer.encode(REASONING_END_STR, add_special_tokens=False))
@@ -221,18 +213,46 @@ async def test_thinking_token_budget_limits_reasoning(client: openai.AsyncOpenAI
 
 
 @pytest.mark.asyncio
+@pytest.mark.parametrize("client", ["default"], indirect=True)
+async def test_thinking_token_budget_responses_api(client: openai.AsyncOpenAI):
+    """/v1/responses applies thinking_token_budget like /v1/chat/completions."""
+    extra_body = {"thinking_token_budget": THINK_BUDGET}
+    chat = await client.chat.completions.create(
+        model=MODEL_NAME,
+        messages=MESSAGES,
+        max_tokens=100,
+        temperature=0.0,
+        extra_body=extra_body,
+    )
+    response = await client.responses.create(
+        model=MODEL_NAME,
+        input=MESSAGES,
+        max_output_tokens=100,
+        temperature=0.0,
+        extra_body=extra_body,
+    )
+
+    reasoning = "".join(
+        part.text
+        for item in response.output
+        if item.type == "reasoning"
+        for part in item.content or []
+    )
+    assert reasoning == chat.choices[0].message.reasoning
+
+
+@pytest.mark.asyncio
 @multi_gpu_only(num_gpus=2)
 @requires_fp8
 async def test_thinking_token_budget_qwen35_fp8_mtp_concurrent_mixed_budget_and_plain(
     server_qwen35_fp8_mtp_tp2,
 ):
-    """Concurrent chat requests: some with ``thinking_token_budget``, some without.
+    """Concurrent chat requests: some with `thinking_token_budget`, some without.
 
     Exercises the scheduler / input processor under a mixed batch on the same
     Qwen3.5 FP8 + MTP (TP=2) server. Budgeted calls are checked with
-    ``_count_reasoning_decode_token_ids_between_markers`` on full token ids.
+    `_count_reasoning_decode_token_ids_between_markers` on full token ids.
     """
-
     _batch_spec: list[tuple[Literal["budget"], int] | tuple[Literal["plain"], None]] = [
         ("budget", 1),
         ("budget", 12),

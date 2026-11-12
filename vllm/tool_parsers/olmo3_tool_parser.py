@@ -8,12 +8,12 @@ import regex as re
 from transformers import PreTrainedTokenizerBase
 
 import vllm.envs as envs
-from vllm.entrypoints.openai.chat_completion.protocol import (
-    ChatCompletionRequest,
-)
-from vllm.entrypoints.openai.engine.protocol import (
+from vllm.entrypoints.generate.base.protocol import (
     DeltaMessage,
     ExtractedToolCallInformation,
+)
+from vllm.entrypoints.openai.chat_completion.protocol import (
+    ChatCompletionRequest,
 )
 from vllm.logger import init_logger
 from vllm.tool_parsers.abstract_tool_parser import (
@@ -31,8 +31,7 @@ logger = init_logger(__name__)
 
 
 class Olmo3PythonicToolParser(ToolParser):
-    """
-    Tool call parser for Olmo 3 models that produce tool calls as
+    """Tool call parser for Olmo 3 models that produce tool calls as
     newline-separated pythonic strings.
     Used when --enable-auto-tool-choice --tool-call-parser pythonic are all set
     Code copied from pythonic_tool_parser.py and updated to handle
@@ -71,9 +70,7 @@ class Olmo3PythonicToolParser(ToolParser):
     def extract_tool_calls(
         self, model_output: str, request: ChatCompletionRequest
     ) -> ExtractedToolCallInformation:
-        """
-        Extract the tool calls from a complete model response.
-        """
+        """Extract the tool calls from a complete model response."""
         original_model_output = model_output
         # Remove xml tags.
         match = re.search(
@@ -141,7 +138,13 @@ class Olmo3PythonicToolParser(ToolParser):
     ) -> DeltaMessage | None:
         # All function calls start with the <function_calls> tag.
         # But since this is streaming, we may have seen only part of the tag.
-        if not current_text.startswith("<"):
+        start_tag = "<function_calls>"
+        if start_tag.startswith(current_text):
+            return None
+        if not current_text.startswith(start_tag):
+            # Release text withheld while it could still have been the tag.
+            if start_tag.startswith(previous_text):
+                return DeltaMessage(content=current_text)
             return DeltaMessage(content=delta_text)
 
         try:

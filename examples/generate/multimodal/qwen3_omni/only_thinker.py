@@ -1,7 +1,6 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
-"""
-This example shows how to use vLLM for running offline inference
+"""This example shows how to use vLLM for running offline inference
 with the correct prompt format on Qwen3-Omni (thinker only).
 """
 
@@ -205,8 +204,8 @@ def parse_args():
     parser.add_argument(
         "--gpu-memory-utilization",
         type=float,
-        default=0.9,
-        help="GPU memory utilization (0.0 to 1.0).",
+        default=None,
+        help="GPU memory utilization (0.0 to 1.0; default: vLLM's default).",
     )
     parser.add_argument(
         "--max-model-len",

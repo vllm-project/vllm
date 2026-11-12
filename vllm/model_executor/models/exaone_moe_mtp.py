@@ -46,16 +46,10 @@ class ExaoneMoeMultiTokenPredictor(nn.Module):
 
         model_config = vllm_config.model_config
         quant_config = vllm_config.quant_config
-        lora_config = vllm_config.lora_config
         config = model_config.hf_config
 
         self.config = config
-        lora_vocab = (
-            (lora_config.lora_extra_vocab_size * (lora_config.max_loras or 1))
-            if lora_config
-            else 0
-        )
-        self.vocab_size = config.vocab_size + lora_vocab
+        self.vocab_size = config.vocab_size
         self.org_vocab_size = config.vocab_size
 
         self.mtp_start_layer_idx = config.num_hidden_layers
@@ -64,7 +58,6 @@ class ExaoneMoeMultiTokenPredictor(nn.Module):
         self.embed_tokens = VocabParallelEmbedding(
             self.vocab_size,
             config.hidden_size,
-            org_num_embeddings=config.vocab_size,
         )
 
         self.fc = ColumnParallelLinear(
@@ -81,7 +74,7 @@ class ExaoneMoeMultiTokenPredictor(nn.Module):
                 vllm_config.model_config.hf_config,
                 quant_config=quant_config,
                 prefix=f"{prefix}.layers.{idx}",
-                mtp_layer=True,
+                is_mtp=True,
             )
             for idx in range(self.num_mtp_layers)
         )
@@ -159,7 +152,7 @@ class ExaoneMoeMTP(nn.Module):
             prefix=maybe_prefix(prefix, "lm_head"),
         )
         if config.tie_word_embeddings:
-            self.lm_head.weight = self.model.embed_tokens.weight
+            self.lm_head = self.lm_head.tie_weights(self.model.embed_tokens)
         self.logits_processor = LogitsProcessor(
             self.unpadded_vocab_size, config.vocab_size
         )

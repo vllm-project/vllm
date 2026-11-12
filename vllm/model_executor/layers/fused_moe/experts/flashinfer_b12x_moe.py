@@ -31,20 +31,21 @@ class FlashInferB12xExperts(mk.FusedMoEExpertsModular):
     """FlashInfer CuteDSL fused MoE expert for SM12x (SM120/SM121,
     RTX Pro 6000 / DGX Spark).
 
-    Uses ``b12x_fused_moe`` from FlashInfer PR #3080 which fuses token
+    Uses `b12x_fused_moe` from FlashInfer PR #3080 which fuses token
     dispatch, two GEMMs, SwiGLU activation, and topk-weight reduction into a
     single kernel call.  Input quantization (BF16→FP4) is performed inside the
     kernel so BF16 hidden states are passed directly.
 
     Weight scale factors are converted to the MMA layout produced by
-    ``convert_sf_to_mma_layout`` once during ``process_weights_after_loading``
-    and cached as ``w1_sf_mma`` / ``w2_sf_mma``.
+    `convert_sf_to_mma_layout` once during `process_weights_after_loading`
+    and cached as `w1_sf_mma` / `w2_sf_mma`.
 
     Only NVFP4 (kNvfp4Static/kNvfp4Dynamic) quantization is supported.
     """
 
     _ACTIVATION_MAP: dict[MoEActivation, str] = {
         MoEActivation.SILU: "silu",
+        MoEActivation.GELU_TANH: "gelu_tanh",
         MoEActivation.RELU2_NO_MUL: "relu2",
     }
 
@@ -188,7 +189,11 @@ class FlashInferB12xExperts(mk.FusedMoEExpertsModular):
 
     @staticmethod
     def _supports_activation(activation: MoEActivation) -> bool:
-        return activation in (MoEActivation.SILU, MoEActivation.RELU2_NO_MUL)
+        return activation in (
+            MoEActivation.SILU,
+            MoEActivation.GELU_TANH,
+            MoEActivation.RELU2_NO_MUL,
+        )
 
     @staticmethod
     def _supports_parallel_config(moe_parallel_config: FusedMoEParallelConfig) -> bool:

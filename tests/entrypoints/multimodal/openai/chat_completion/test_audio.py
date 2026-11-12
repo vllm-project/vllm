@@ -10,7 +10,6 @@ import pytest_asyncio
 from tests.utils import RemoteOpenAIServer
 from vllm.assets.audio import AudioAsset
 from vllm.multimodal.utils import encode_audio_base64, encode_audio_url, fetch_audio
-from vllm.platforms import current_platform
 
 MODEL_NAME = "fixie-ai/ultravox-v0_5-llama-3_2-1b"
 TEST_AUDIO_URLS = [
@@ -18,10 +17,6 @@ TEST_AUDIO_URLS = [
     AudioAsset("mary_had_lamb").url,
 ]
 MAXIMUM_AUDIOS = 2
-
-# Disable prefix caching on ROCm to reduce non-determinism in
-# streaming-vs-non-streaming comparisons.
-_ROCM_ARGS = ["--no-enable-prefix-caching"] if current_platform.is_rocm() else []
 
 
 @pytest.fixture(scope="module")
@@ -37,7 +32,7 @@ def server():
         "--trust-remote-code",
         "--limit-mm-per-prompt",
         json.dumps({"audio": MAXIMUM_AUDIOS}),
-        *_ROCM_ARGS,
+        "--no-enable-prefix-caching",
     ]
 
     with RemoteOpenAIServer(MODEL_NAME, args) as remote_server:
@@ -52,18 +47,20 @@ async def client(server):
 
 @pytest.fixture(scope="session")
 def base64_encoded_audio() -> dict[str, str]:
-    return {
-        audio_url: encode_audio_base64(*fetch_audio(audio_url))
-        for audio_url in TEST_AUDIO_URLS
-    }
+    encoded = {}
+    for audio_url in TEST_AUDIO_URLS:
+        audio, sample_rate = fetch_audio(audio_url)
+        encoded[audio_url] = encode_audio_base64(audio, int(sample_rate))
+    return encoded
 
 
 @pytest.fixture(scope="session")
 def url_encoded_audio() -> dict[str, str]:
-    return {
-        audio_url: encode_audio_url(*fetch_audio(audio_url))
-        for audio_url in TEST_AUDIO_URLS
-    }
+    encoded = {}
+    for audio_url in TEST_AUDIO_URLS:
+        audio, sample_rate = fetch_audio(audio_url)
+        encoded[audio_url] = encode_audio_url(audio, int(sample_rate))
+    return encoded
 
 
 def dummy_messages_from_audio_url(

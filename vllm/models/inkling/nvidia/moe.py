@@ -6,14 +6,14 @@ Overfit to the served checkpoint: sigmoid gate (+ selection bias) top-k over
 the routed experts, log-sigmoid renormalization over the k routed + S shared
 "sink" logits, scaled by route_scale * global_scale. The routed top-k goes
 through vLLM's FusedMoE (which handles TP/EP); the sink experts run in
-:class:`InklingSinkExperts` -- replicated across EP ranks (every token
+`InklingSinkExperts` -- replicated across EP ranks (every token
 activates every sink) and always bf16 (the checkpoint excludes every
-``shared_experts`` from quantization).
+`shared_experts` from quantization).
 
 NVFP4 routed experts reuse vLLM's fused-MoE methods; excluded (bf16) layers
 fall back to the unquantized method. Checkpoint fused stacked tensors are
 translated to the standard per-expert loads in
-:meth:`InklingMoE.load_expert_weight`.
+`InklingMoE.load_expert_weight`.
 """
 
 from __future__ import annotations
@@ -34,7 +34,7 @@ from vllm.distributed import (
     get_tensor_model_parallel_world_size,
 )
 from vllm.model_executor.kernels.linear.cute_dsl import ll_bf16
-from vllm.model_executor.layers.fused_moe import FusedMoE
+from vllm.model_executor.layers.fused_moe import FusedMoEFactory
 from vllm.model_executor.utils import set_weight_attrs
 from vllm.platforms import current_platform
 from vllm.triton_utils import tl, tldevice, triton
@@ -283,7 +283,7 @@ class InklingSinkExperts(nn.Module):
     EP-sharding them would hotspot the owning rank) and TP-sharded on the
     intermediate dim so the output remains a TP-partial sum like the routed
     output. The sinks are always bf16 (the checkpoint excludes every
-    ``shared_experts`` from quantization): the experts concatenate into two
+    `shared_experts` from quantization): the experts concatenate into two
     plain dense GEMMs with the fused sink epilogue between them.
     """
 
@@ -324,7 +324,7 @@ class InklingSinkExperts(nn.Module):
         return [key]
 
     def forward(self, x: torch.Tensor, gammas: torch.Tensor) -> torch.Tensor:
-        """``sum_e gammas[:, e] * MLP_e(x)`` (TP-partial along d_mlp)."""
+        """`sum_e gammas[:, e] * MLP_e(x)` (TP-partial along d_mlp)."""
         from .ops import sink_silu_mul_epilogue
 
         # One GEMM over the experts' stacked w13 (a view), fused epilogue,
@@ -439,7 +439,7 @@ class InklingMoE(nn.Module):
         # power-of-two EP sizes (n_routed is a power of two).
         num_experts = n_routed + (-n_routed) % _inkling_moe_ep_size()
 
-        self.experts = FusedMoE(
+        self.experts = FusedMoEFactory(
             num_experts=num_experts,
             top_k=config.num_experts_per_tok,
             hidden_size=config.hidden_size,
@@ -485,7 +485,7 @@ class InklingMoE(nn.Module):
         topk: int,
         renormalize: bool,
     ) -> tuple[torch.Tensor, torch.Tensor]:
-        """FusedMoE ``custom_routing_function``: the routed top-k slice of the
+        """FusedMoE `custom_routing_function`: the routed top-k slice of the
         full (routed + sink) selection.
 
         forward() stashes its selection (keyed by logits identity) so the
@@ -501,7 +501,7 @@ class InklingMoE(nn.Module):
         weights, ids = self.gate.select_experts(gating_output)
         return weights[:, :topk].contiguous(), ids[:, :topk].contiguous()
 
-    def forward(self, x: torch.Tensor) -> torch.Tensor | None:
+    def forward_partials(self, x: torch.Tensor) -> tuple[torch.Tensor, torch.Tensor]:
         router_logits = self.gate.compute_logits(x)
         num_tokens = x.shape[0]
         # One gate select per layer: the routed slice is stashed for the
@@ -527,6 +527,10 @@ class InklingMoE(nn.Module):
         )
         self._routed_sel = None
 
+        return out, sink_out
+
+    def forward(self, x: torch.Tensor) -> torch.Tensor:
+        out, sink_out = self.forward_partials(x)
         return out.add_(sink_out)
 
     # -- weight loading ----------------------------------------------------
@@ -542,8 +546,8 @@ class InklingMoE(nn.Module):
     def load_expert_weight(self, name: str, weight: torch.Tensor) -> list[str]:
         """Load one checkpoint expert tensor.
 
-        ``name`` is relative to the mlp module: ``experts.<t>`` (routed
-        stack) or ``shared_experts.shared_<t>`` (sink experts). Returns the
+        `name` is relative to the mlp module: `experts.<t>` (routed
+        stack) or `shared_experts.shared_<t>` (sink experts). Returns the
         loaded param names (relative to this module).
         """
         if name.startswith("shared_experts."):

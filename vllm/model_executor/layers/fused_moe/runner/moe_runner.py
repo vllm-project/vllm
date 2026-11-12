@@ -2,7 +2,7 @@
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 from collections.abc import Callable, Iterable
 from contextlib import nullcontext
-from typing import TYPE_CHECKING
+from typing import TYPE_CHECKING, cast
 
 import torch
 import torch.nn.functional as F
@@ -24,18 +24,23 @@ from vllm.logger import init_logger
 from vllm.model_executor.layers.fused_moe.activation import MoEActivation
 from vllm.model_executor.layers.fused_moe.config import (
     FusedMoEConfig,
+    RoutedScaleMode,
 )
 from vllm.model_executor.layers.fused_moe.fused_moe_method_base import (
     FusedMoEMethodBase,
 )
-from vllm.model_executor.layers.fused_moe.fused_moe_modular_method import (
-    FusedMoEModularMethod,
-)
+from vllm.model_executor.layers.fused_moe.moe_output import UnfinalizedMoEOutput
 from vllm.model_executor.layers.fused_moe.routed_experts import (
     RoutedExperts,
 )
+from vllm.model_executor.layers.fused_moe.router.base_router import (
+    get_moe_padding_mask,
+)
 from vllm.model_executor.layers.fused_moe.router.fused_moe_router import (
     FusedMoERouter,
+)
+from vllm.model_executor.layers.fused_moe.router.routing_simulator_router import (
+    RoutingSimulatorRouter,
 )
 from vllm.model_executor.layers.fused_moe.router.zero_expert_router import (
     ZeroExpertRouter,
@@ -47,6 +52,8 @@ from vllm.model_executor.layers.fused_moe.runner.shared_experts import (
     SharedExperts,
     SharedExpertsOrder,
 )
+from vllm.model_executor.layers.utils import dispatch_unquantized_gemm
+from vllm.model_executor.utils import refill_derived
 from vllm.platforms import current_platform
 from vllm.utils.torch_utils import (
     _USE_LAYERNAME,
@@ -65,7 +72,7 @@ def register_layer_for_moe_forward_op(
     prefix = layer.layer_name
     compilation_config = vllm_config.compilation_config
     if prefix in compilation_config.static_forward_context:
-        raise ValueError("Duplicate layer name: {}".format(prefix))
+        raise ValueError(f"Duplicate layer name: {prefix}")
     compilation_config.static_forward_context[prefix] = layer
     compilation_config.static_all_moe_layers.append(prefix)
 
@@ -124,11 +131,14 @@ def _moe_forward(
     hidden_dim_unpadded: int,
 ) -> torch.Tensor:
     layer = get_layer_from_name(_resolve_layer_name(layer_name))
-    return layer._forward_impl(
-        hidden_states,
-        router_logits,
-        shared_experts_input,
-        input_ids,
+    return cast(
+        torch.Tensor,
+        layer._forward_impl(
+            hidden_states,
+            router_logits,
+            shared_experts_input,
+            input_ids,
+        ),
     )
 
 
@@ -158,11 +168,14 @@ def _moe_forward_shared(
     hidden_dim_unpadded: int,
 ) -> tuple[torch.Tensor, torch.Tensor]:
     layer = get_layer_from_name(_resolve_layer_name(layer_name))
-    return layer._forward_impl(
-        hidden_states,
-        router_logits,
-        shared_experts_input,
-        input_ids,
+    return cast(
+        tuple[torch.Tensor, torch.Tensor],
+        layer._forward_impl(
+            hidden_states,
+            router_logits,
+            shared_experts_input,
+            input_ids,
+        ),
     )
 
 
@@ -197,7 +210,7 @@ direct_register_custom_op(
     op_func=_moe_forward,
     mutates_args=["hidden_states"],
     fake_impl=_moe_forward_fake,
-    tags=(torch.Tag.needs_fixed_stride_order,),
+    tags=(torch.Tag.needs_exact_strides,),
 )
 
 
@@ -205,13 +218,15 @@ direct_register_custom_op(
     op_name="moe_forward_shared",
     op_func=_moe_forward_shared,
     fake_impl=_moe_forward_shared_fake,
-    tags=(torch.Tag.needs_fixed_stride_order,),
+    tags=(torch.Tag.needs_exact_strides,),
 )
 
 
 def _unpack(
-    result: torch.Tensor | tuple[torch.Tensor, torch.Tensor],
-) -> tuple[torch.Tensor | None, torch.Tensor]:
+    result: torch.Tensor
+    | UnfinalizedMoEOutput
+    | tuple[torch.Tensor, torch.Tensor | UnfinalizedMoEOutput],
+) -> tuple[torch.Tensor | None, torch.Tensor | UnfinalizedMoEOutput]:
     if isinstance(result, tuple):
         return result
     else:
@@ -219,8 +234,7 @@ def _unpack(
 
 
 class MoERunner(MoERunnerInterface):
-    """
-    Standard MoE runner implementation for executing Mixture of Experts layers.
+    """Standard MoE runner implementation for executing Mixture of Experts layers.
 
     This is the primary concrete implementation of MoE execution logic, providing
     comprehensive support for standard MoE operations. It handles:
@@ -254,6 +268,7 @@ class MoERunner(MoERunnerInterface):
         routed_input_transform: torch.nn.Module | None = None,
         routed_output_transform: torch.nn.Module | None = None,
         routed_scaling_factor: float = 1.0,
+        routed_scale_mode: RoutedScaleMode = RoutedScaleMode.ROUTER,
     ):
         super().__init__()
         self.moe_config = moe_config
@@ -261,6 +276,7 @@ class MoERunner(MoERunnerInterface):
         self.routed_input_transform = routed_input_transform
         self.routed_output_transform = routed_output_transform
         self.routed_scaling_factor = routed_scaling_factor
+        self.routed_scale_mode = routed_scale_mode
         self.gate = gate
         self.shared_expert_gate = shared_expert_gate
         self.routed_experts = routed_experts
@@ -268,7 +284,7 @@ class MoERunner(MoERunnerInterface):
 
         # When both gates are present and FSE is enabled, fuse their
         # weight matrices into [num_experts + num_shared, hidden] so one
-        # F.linear produces combined logits. The topk kernel can then
+        # GEMM produces combined logits. The topk kernel can then
         # apply routing softmax and shared expert activation (sigmoid)
         # in a single launch.
         self._fse_fuse_gate = gate is not None and shared_expert_gate is not None
@@ -295,13 +311,23 @@ class MoERunner(MoERunnerInterface):
     def load_weights(
         self, weights: Iterable[tuple[str, torch.Tensor]]
     ) -> Iterable[str]:
-        return self.routed_experts.load_weights(weights)
+        # routed_experts reports names relative to itself, but callers such as
+        # AutoWeightsLoader qualify what this returns with the runner's prefix.
+        for name in self.routed_experts.load_weights(weights):
+            yield f"routed_experts.{name}"
 
     def _select_forward(self) -> Callable:
-        if current_platform.is_tpu() or current_platform.is_cpu():
+        if current_platform.is_tpu():
             # TODO: Once the OOM issue for the TPU backend is resolved, we
             # will switch to using the moe_forward custom op.
-            # Note: CPU doesn't require wrapped _forward_impl.
+            return _moe_forward if self._shared_experts is None else _moe_forward_shared
+
+        if current_platform.is_cpu():
+            # CPU never touches the workspace manager (Monolithic experts
+            # skip it entirely; Modular experts' _allocate_buffers bypasses
+            # it too, see modular_kernel.py) -- the ContextVar-based lane
+            # lookup was the only part of this call graph Dynamo can't
+            # trace, so CPU can always call the fused-MoE op directly.
             return _moe_forward if self._shared_experts is None else _moe_forward_shared
 
         return (
@@ -314,10 +340,6 @@ class MoERunner(MoERunnerInterface):
     def shared_experts(self) -> SharedExperts | None:
         return self._shared_experts
 
-    @property
-    def is_internal_router(self) -> bool:
-        return self.gate is not None
-
     # TODO(bnell): Temporary hack. Get rid of this.
     def _replace_quant_method(self, quant_method: FusedMoEMethodBase):
         self.routed_experts._replace_quant_method(quant_method)
@@ -329,19 +351,22 @@ class MoERunner(MoERunnerInterface):
         if self._shared_experts is not None:
             self._shared_experts._set_moe_config(new_moe_config)
 
-    def _maybe_fuse_gate_weights(self):
-        """Fuse router and shared expert gate weights on first call.
+    def process_weights_after_loading(self) -> None:
+        """Fuse router and shared expert gate weights.
 
         Cannot be done at __init__ because gate weights are loaded after
-        module construction (via weight_loader). Called once from
-        _forward_impl before the first forward pass.
+        module construction (via weight_loader). The loader runs this after
+        every load or reload, refilling the fused tensor in place so captured
+        CUDA graphs see updated gates.
         """
-        if self._combined_gate_weight is None:
-            assert self.gate is not None and self.shared_expert_gate is not None
-            self._combined_gate_weight = torch.cat(
-                [self.gate.weight, self.shared_expert_gate.weight],
-                dim=0,
-            )
+        if not self._fse_fuse_gate:
+            return
+        assert self.gate is not None and self.shared_expert_gate is not None
+        refill_derived(
+            self,
+            "_combined_gate_weight",
+            torch.cat([self.gate.weight, self.shared_expert_gate.weight], dim=0),
+        )
 
     @property
     def _quant_method(self) -> FusedMoEMethodBase:
@@ -353,7 +378,7 @@ class MoERunner(MoERunnerInterface):
     ) -> tuple[torch.Tensor, torch.Tensor | None]:
         """Apply transform for routed experts (e.g., latent projection).
 
-        This is called by FusedMoE.forward_native. The original hidden_states
+        This is called by MoERunner.forward_native. The original hidden_states
         is saved separately so shared experts get [S, hidden_size] while
         routed experts get the transformed [S, moe_latent_size].
 
@@ -393,18 +418,22 @@ class MoERunner(MoERunnerInterface):
         shared_output: torch.Tensor | None,
         fused_output: torch.Tensor,
     ) -> tuple[torch.Tensor | None, torch.Tensor]:
-        """Apply routed_scaling_factor to the output with FP16 overflow
-        protection.
+        """Apply routed_scaling_factor to the output.
 
-        Scale the fused expert output by routed_scaling_factor. For FP16,
-        avoid overflow by dividing shared_output by the scale instead
-        (the decoder layer compensates with matching divisions).
+        Scale the fused expert output by routed_scaling_factor. With
+        RoutedScaleMode.OUTPUT_FP16_GUARD, FP16 outputs with shared experts
+        avoid overflow by dividing shared_output by the scale instead; the
+        model's decoder layer must compensate with matching divisions.
         """
         if self.routed_scaling_factor != 1.0:
-            if fused_output.dtype != torch.float16 or shared_output is None:
-                fused_output *= self.routed_scaling_factor
-            elif shared_output is not None:
+            if (
+                self.routed_scale_mode is RoutedScaleMode.OUTPUT_FP16_GUARD
+                and shared_output is not None
+                and fused_output.dtype == torch.float16
+            ):
                 shared_output *= 1.0 / self.routed_scaling_factor
+            else:
+                fused_output *= self.routed_scaling_factor
         return shared_output, fused_output
 
     @property
@@ -448,9 +477,18 @@ class MoERunner(MoERunnerInterface):
         Latent MoE output transforms may contain non-linear ops, e.g. RMSNorm.
         TP partial routed outputs must be summed in latent space before such
         transforms are applied.
+
+        A transform that commutes with the TP sum is exempt: if
+        `sum_r T(x_r) == T(sum_r x_r)`, applying the transform to the local
+        partial output and letting the existing late all-reduce sum the
+        combined result is equivalent, and costs one collective instead of two.
+        Such a transform opts out by setting `reduce_commutative = True`.
+        The default is False, so transforms that do not declare themselves
+        keep being reduced early.
         """
         if (
             self.routed_output_transform is not None
+            and not getattr(self.routed_output_transform, "reduce_commutative", False)
             and not self.moe_config.is_sequence_parallel
             and (self.moe_config.tp_size > 1 or self.moe_config.ep_size > 1)
             and not fused_output_is_reduced
@@ -580,19 +618,46 @@ class MoERunner(MoERunnerInterface):
         router_logits: torch.Tensor,
         shared_experts_input: torch.Tensor | None,
         input_ids: torch.Tensor | None = None,
-    ) -> tuple[torch.Tensor | None, torch.Tensor]:
+        shared_experts_overlapping: bool = False,
+    ) -> tuple[torch.Tensor | None, torch.Tensor | UnfinalizedMoEOutput]:
         """Run expert routing and the fused MoE kernel via the quant method.
 
         Orchestrates shared expert execution (before/after), expert selection
         via the router, and the actual fused MoE computation. Returns
         (shared_expert_output, fused_expert_output).
+
+        `shared_experts_overlapping` should be True only if using multi-stream
+        overlap. Then the shared expert was already launched in a separate
+        stream, so the results only have to be awaited here.
         """
         self._maybe_apply_shared_experts(
             shared_experts_input, SharedExpertsOrder.NO_OVERLAP
         )
 
-        if self.routed_experts.quant_method.is_monolithic:
+        if (
+            self.routed_experts.quant_method.is_monolithic
+            and self.moe_config.dp_size > 1
+            and self.routed_experts.supports_precomputed_routing
+            # The simulator feeds the kernel random logits to route itself.
+            and not isinstance(self.router, RoutingSimulatorRouter)
+            and (is_padding := get_moe_padding_mask(hidden_states.shape[0])) is not None
+        ):
+            # The kernel's own routing would send padding rows to experts; use
+            # vLLM's top-k, which marks them -1.
+            topk_weights, topk_ids = self.router.select_experts(
+                hidden_states=hidden_states,
+                router_logits=router_logits,
+                topk_indices_dtype=torch.int32,
+                input_ids=input_ids,
+            )
+            if not self.router.masks_padding:
+                topk_ids = topk_ids.masked_fill(is_padding.unsqueeze(1), -1)
+            fused_out = self.routed_experts.forward_monolithic_routed(
+                hidden_states, topk_weights, topk_ids
+            )
+        elif self.routed_experts.quant_method.is_monolithic:
             # Monolithic kernels: pass router_logits to routed_experts
+            router_logits = self.router.prepare_monolithic_logits(router_logits)
             fused_out = self.routed_experts.forward_monolithic(
                 x=hidden_states,
                 router_logits=router_logits,
@@ -615,10 +680,9 @@ class MoERunner(MoERunnerInterface):
                 shared_experts_input=shared_experts_input,
             )
 
-        self._maybe_apply_shared_experts(
-            shared_experts_input,
-            SharedExpertsOrder.MULTI_STREAM_OVERLAPPED,
-        )
+        if shared_experts_overlapping:
+            assert self._shared_experts is not None
+            self._shared_experts.wait()
 
         return (
             self._shared_experts.output if self._shared_experts is not None else None,
@@ -635,22 +699,14 @@ class MoERunner(MoERunnerInterface):
         """
         ctx = get_forward_context()
         return (
-            ctx.dp_metadata.sp_local_sizes(self.moe_config.sp_size)
+            ctx.dp_metadata.sp_local_sizes(
+                self.moe_config.sp_size,
+                pcp_size=self.moe_config.pcp_size,
+                use_ep=self.moe_config.use_ep,
+            )
             if ctx.dp_metadata
             else nullcontext()
         )
-
-    def _maybe_sync_shared_experts_stream(
-        self,
-        shared_experts_input: torch.Tensor | None,
-    ):
-        # If router/gate provided, then apply it here.
-        # (Note: This code runs only when "overlapped mode" is on to allow
-        #        parallel execution of shared experts with the FusedMoE via
-        #        separate cuda stream)
-        if self._shared_experts is not None:
-            assert shared_experts_input is not None
-            self._shared_experts.maybe_sync_shared_experts_stream(shared_experts_input)
 
     def _maybe_add_zero_expert_output(
         self,
@@ -694,7 +750,6 @@ class MoERunner(MoERunnerInterface):
         1. pytorch cannot handle union types in custom op signatures so
            _moe_forward and _moe_forward_shared must be split.
         """
-
         # Apply transform for routed experts (e.g., latent projection for
         # latent MoE). When the caller pre-applies the routed input transform
         # outside the runner (e.g. to overlap it on a separate stream), it
@@ -707,7 +762,7 @@ class MoERunner(MoERunnerInterface):
             )
 
         # Record before `_maybe_pad_hidden_states` pads activations to match
-        # `moe_config.hidden_dim`, e.g. after `align_trtllm_fp4_moe_hidden_dim_for_fi`
+        # `moe_config.hidden_dim`, e.g. after `align_fp4_moe_hidden_dim_for_fi`
         # so routed output can be trimmed before
         # shared+routed add / latent up proj if needed.
 
@@ -740,6 +795,7 @@ class MoERunner(MoERunnerInterface):
 
         # Extract outputs from result
         shared_output, fused_output = _unpack(result)
+        fused_output = cast(torch.Tensor, fused_output)
 
         if og_hidden_dim_pre_xform is not None:
             fused_output = fused_output[..., :og_hidden_dim_pre_xform]
@@ -815,17 +871,31 @@ class MoERunner(MoERunnerInterface):
     def _maybe_combine(
         self,
         shared_output: torch.Tensor | None,
-        hidden_states: torch.Tensor,
-    ) -> torch.Tensor | tuple[torch.Tensor | None, torch.Tensor]:
+        hidden_states: torch.Tensor | UnfinalizedMoEOutput,
+    ) -> (
+        torch.Tensor
+        | UnfinalizedMoEOutput
+        | tuple[torch.Tensor | None, torch.Tensor | UnfinalizedMoEOutput]
+    ):
         if self.do_naive_dispatch_combine:
+            if isinstance(hidden_states, UnfinalizedMoEOutput):
+                raise RuntimeError(
+                    "Naive expert-parallel combine cannot consume a deferred "
+                    "MoE output."
+                )
             hidden_states = get_ep_group().combine(
-                hidden_states, self.moe_config.is_sequence_parallel
+                hidden_states,
+                self.moe_config.is_sequence_parallel,
             )
 
         if (
             self.moe_config.pcp_size > 1
             and not self.moe_config.moe_parallel_config.use_all2all_kernels
         ):
+            if isinstance(hidden_states, UnfinalizedMoEOutput):
+                raise RuntimeError(
+                    "PCP reduce-scatter cannot consume a deferred MoE output."
+                )
             hidden_states = get_pcp_group().reduce_scatter(hidden_states, dim=0)
 
         if self.shared_experts is not None:
@@ -840,7 +910,11 @@ class MoERunner(MoERunnerInterface):
         router_logits: torch.Tensor,
         shared_experts_input: torch.Tensor | None,
         input_ids: torch.Tensor | None = None,
-    ) -> torch.Tensor | tuple[torch.Tensor, torch.Tensor]:
+    ) -> (
+        torch.Tensor
+        | UnfinalizedMoEOutput
+        | tuple[torch.Tensor, torch.Tensor | UnfinalizedMoEOutput]
+    ):
         """Entry point called by the custom op to run the MoE computation.
 
         Handles pre-dispatch setup (gate application, external shared expert
@@ -851,21 +925,28 @@ class MoERunner(MoERunnerInterface):
         - fused MoE kernel execution
         - shared expert computation.
 
-        Returns a single tensor of combined fused and shared output (if present).
+        Returns routed output, optionally paired with shared-expert output. A
+        fused consumer may request the routed output in deferred-finalize form.
         """
         # TODO(bnell): this can be removed after MK migration is complete.
         self.routed_experts._ensure_moe_quant_config_init()
 
-        # Sync aux and main stream for shared expert multi-stream overlap.
-        self._maybe_sync_shared_experts_stream(shared_experts_input)
+        # If using multi-stream overlap for shared experts, we must launch it
+        # before routed expert dispatch.
+        shared_experts_overlapping = False
+        if self._shared_experts is not None:
+            shared_experts_overlapping = self._shared_experts.maybe_forward_async(
+                shared_experts_input
+            )
 
         # If the Runner holds the gate, apply it after the stream sync,
         # so it can run overlapped with the
         # NOTE: in future PR, MoE runner will always hold the gate.
         if self.gate is not None:
             if self._fse_fuse_gate:
-                self._maybe_fuse_gate_weights()
-                router_logits = F.linear(hidden_states, self._combined_gate_weight)
+                router_logits = dispatch_unquantized_gemm()(
+                    self, hidden_states, self._combined_gate_weight, None
+                )
             else:
                 router_logits, _ = self.gate(hidden_states)
 
@@ -883,6 +964,7 @@ class MoERunner(MoERunnerInterface):
                 router_logits=router_logits,
                 shared_experts_input=shared_experts_input,
                 input_ids=input_ids,
+                shared_experts_overlapping=shared_experts_overlapping,
             )
 
             return self._maybe_combine(
@@ -895,44 +977,6 @@ class MoERunner(MoERunnerInterface):
     # Old methods from FusedMoE layer. Remove when possible.
     #
     #########################################################
-
-    # Note: maybe_init_modular_kernel should only be called by
-    # prepare_communication_buffer_for_model.
-    # This is called after all weight loading and post-processing, so it
-    # should be safe to swap out the quant_method.
-    def maybe_init_modular_kernel(self) -> None:
-        # NOTE(rob): WIP refactor. For quant methods that own the MK
-        # we create the MK during process_weights_after_loading.
-        if (
-            self.routed_experts.quant_method.supports_internal_mk
-            or self.routed_experts.quant_method.is_monolithic
-        ):
-            return None
-
-        self.routed_experts._ensure_moe_quant_config_init()
-        # routing_tables only needed for round-robin expert placement with
-        # DeepEP all2all backend.
-        routing_tables = self._expert_routing_tables()
-
-        if isinstance(self.routed_experts.quant_method, FusedMoEModularMethod):
-            base_quant_method = self.routed_experts.quant_method.old_quant_method
-        else:
-            base_quant_method = self.routed_experts.quant_method
-
-        prepare_finalize = base_quant_method.maybe_make_prepare_finalize(
-            routing_tables=routing_tables
-        )
-        if prepare_finalize is not None:
-            logger.debug(
-                "%s for %s(%s)", prepare_finalize.__class__.__name__, self, id(self)
-            )
-            self._replace_quant_method(
-                FusedMoEModularMethod.make(
-                    self.routed_experts,
-                    base_quant_method,
-                    prepare_finalize,
-                )
-            )
 
     #
     # Properties
@@ -1021,8 +1065,7 @@ class MoERunner(MoERunnerInterface):
         logical_to_physical_map: torch.Tensor,
         logical_replica_count: torch.Tensor,
     ) -> None:
-        """
-        Register the EPLB state in this layer.
+        """Register the EPLB state in this layer.
 
         This is used later in forward pass, where we get the expert mapping
         and record the load metrics in `expert_load_view`.
