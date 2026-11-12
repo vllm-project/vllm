@@ -233,18 +233,28 @@ class NixlBaseConnectorWorker:
         # block_size_ratio for heterogeneous block sizes), SSM descs have
         # logical_blocks entries per region (no kernel splitting, and never
         # ratio-expanded since state blocks are indivisible).
-        logical_blocks = dst_num_blocks // physical_blocks_per_logical
         if ssm_regions is None:
             ssm_regions = self._ssm_region_indices or range(
                 len(self.block_len_per_layer)
             )
         ssm_slot = {region: slot for slot, region in enumerate(ssm_regions)}
+        ssm_capacities = np.asarray(
+            [
+                int(region_num_blocks[region] / (block_size_ratio or 1))
+                for region in ssm_regions
+            ],
+            dtype=np.int64,
+        )
+        assert np.all(ssm_capacities % physical_blocks_per_logical == 0)
+        ssm_capacities //= physical_blocks_per_logical
+        ssm_offsets = np.cumsum(
+            np.concatenate(([0], ssm_capacities[:-1] * ssm_regions_per_layer))
+        )
         # NOTE (NickLucche) SSM and Attention block regions can be exchanged
         # arbitrarily by manager. Therefore, descs are laid out as:
         #   [descs_fa (all regions) | descs_ssm (all SSM regions) | desc_ple].
         # num_fa_descs offset must be computed per-engine since P and D can
         # have different num_blocks (and thus different FA desc counts).
-        num_ssm_descs = len(ssm_regions) * ssm_regions_per_layer
         pair_regions = np.asarray(pairs[0], dtype=np.int64)
         pair_keys = np.asarray(pairs[1], dtype=np.int64)
         sub_descs = np.arange(ssm_regions_per_layer, dtype=np.int64)
@@ -259,19 +269,20 @@ class NixlBaseConnectorWorker:
                 desc_ids = region_offsets[group_regions][:, None] + blocks[None, :]
             elif _is_ssm_spec(spec_type):
                 if i == self._ple_group_index:
-                    ssm_desc_ids = np.array([num_ssm_descs], dtype=np.int64)
+                    desc_ids = (
+                        int(ssm_capacities.sum()) * ssm_regions_per_layer
+                        + blocks[None, :]
+                        + num_fa_descs
+                    )
                 else:
                     # Each SSM region owns ssm_regions_per_layer consecutive
                     # descs, in ssm_regions order.
                     slots = np.array([ssm_slot[r] for r in group_regions.tolist()])
-                    ssm_desc_ids = (
-                        slots[:, None] * ssm_regions_per_layer + sub_descs
+                    offsets = (
+                        ssm_offsets[slots, None]
+                        + sub_descs * ssm_capacities[slots, None]
                     ).ravel()
-                desc_ids = (
-                    ssm_desc_ids[:, None] * logical_blocks
-                    + blocks[None, :]
-                    + num_fa_descs
-                )
+                    desc_ids = offsets[:, None] + blocks[None, :] + num_fa_descs
             else:
                 raise ValueError(
                     f"Unknown spec type {self._group_spec_types[i]} at index {i}"
@@ -437,6 +448,10 @@ class NixlBaseConnectorWorker:
             for layer_name in layer_names:
                 regions_by_layer[layer_name].append(region)
         self._regions_by_layer: dict[str, list[int]] = dict(regions_by_layer)
+
+    def _requires_layer_name_routing(self) -> bool:
+        """Whether PP push must match HMA layers by name, not region index."""
+        return self._supports_pp_hma and self.pp_size > 1 and self._is_hma_required
 
     @staticmethod
     def _expand_remote_packed_rows(nixl_agent_meta: NixlAgentMetadata) -> None:
@@ -948,11 +963,21 @@ class NixlBaseConnectorWorker:
                     "> 1 with hybrid KV cache layouts (HMA); use NixlPushConnector "
                     "for PP + HMA."
                 )
-            # Mamba/SSM hybrid PP stages are not validated yet.
-            if self._has_mamba:
+            if self._has_mamba and (
+                self._is_csa_linear
+                or not any(
+                    isinstance(spec, MLAAttentionSpec)
+                    for spec in self._layer_specs.values()
+                )
+                or not all(
+                    isinstance(spec, (MLAAttentionSpec, MambaSpec))
+                    for spec in self._layer_specs.values()
+                )
+            ):
                 raise NotImplementedError(
                     "NixlPushConnector does not support pipeline_parallel_size > 1 "
-                    "with Mamba/SSM hybrid KV cache layouts yet."
+                    "with Mamba/SSM layouts other than MLA+SSM; "
+                    "each producer stage must contain an MLA layer."
                 )
             # Decode-side PP is unsupported (completions counted per consumer rank).
             if vllm_config.kv_transfer_config.kv_role == "kv_consumer":
@@ -1639,7 +1664,7 @@ class NixlBaseConnectorWorker:
             and not self._has_mamba
         )
         if split_packed_rows and any(
-            not isinstance(spec, (MLAAttentionSpec, SlidingWindowMLASpec))
+            not isinstance(spec, (MLAAttentionSpec, SlidingWindowMLASpec, MambaSpec))
             for spec in self._layer_specs.values()
         ):
             raise NotImplementedError("PP push with packed KV caches requires MLA")
@@ -2096,15 +2121,24 @@ class NixlBaseConnectorWorker:
 
         region_indices = self._ssm_region_indices or range(len(base_addresses))
         for i in region_indices:
+            capacity = self.region_num_blocks[i]
+            assert capacity % physical_per_logical == 0
+            region_blocks = capacity // physical_per_logical
             base_addr = base_addresses[i]
             block_stride = self.block_stride_per_layer[i] * physical_per_logical
             for off, sz in conv_offsets:
                 strided_descs.append(
-                    (base_addr + off, sz, device_id, block_stride, num_blocks)
+                    (base_addr + off, sz, device_id, block_stride, region_blocks)
                 )
             # SSM temporal state follows the conv state.
             strided_descs.append(
-                (base_addr + conv_size, ssm_size, device_id, block_stride, num_blocks)
+                (
+                    base_addr + conv_size,
+                    ssm_size,
+                    device_id,
+                    block_stride,
+                    region_blocks,
+                )
             )
 
         if (region_index := self._ple_region_index) is not None:
@@ -2156,18 +2190,25 @@ class NixlBaseConnectorWorker:
         assert pairs.remote_ssm_regions is not None, "SSM regions were not paired"
         ple_region = pairs.remote_ple_region
         for i in pairs.remote_ssm_regions:
+            capacity = (
+                nixl_agent_meta.region_num_blocks[i]
+                if nixl_agent_meta.region_num_blocks is not None
+                else nixl_agent_meta.num_blocks
+            )
+            assert capacity % remote_physical_per_logical == 0
+            region_blocks = capacity // remote_physical_per_logical
             base_addr = nixl_agent_meta.kv_caches_base_addr[i]
             block_stride = (
                 nixl_agent_meta.block_strides[i] * remote_physical_per_logical
             )
             for off, sz in conv_offsets:
                 strided_descs.append(
-                    (base_addr + off, sz, device_id, block_stride, num_blocks)
+                    (base_addr + off, sz, device_id, block_stride, region_blocks)
                 )
             # SSM temporal state is also TP-sharded on the heads dimension.
             ssm_addr = base_addr + conv_size_remote + local_offset * ssm_read_size
             strided_descs.append(
-                (ssm_addr, ssm_read_size, device_id, block_stride, num_blocks)
+                (ssm_addr, ssm_read_size, device_id, block_stride, region_blocks)
             )
 
         if self._ple_region_index is not None:
@@ -3019,6 +3060,10 @@ class NixlBaseConnectorWorker:
         num_remote_regions = len(nixl_agent_meta.kv_caches_base_addr)
         if nixl_agent_meta.region_num_blocks is not None:
             assert len(nixl_agent_meta.region_num_blocks) == num_remote_regions
+            if self._has_mamba:
+                assert self.dst_region_num_blocks[remote_engine_id] == (
+                    nixl_agent_meta.region_num_blocks
+                ), "Remote TP ranks advertised inconsistent layer capacities"
         assert len(nixl_agent_meta.block_strides) == num_remote_regions
         assert all(
             stride >= block_len

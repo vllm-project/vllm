@@ -262,8 +262,14 @@ Invariants enforced when pairing:
   layer's region is shared by several groups.
 
 Decode-side PP is unsupported because completions are counted per
-consumer rank. Mamba/SSM hybrids are unsupported under PP. Packed PP push
-requires MLA caches and equal P/D block sizes. MLA pages are replicated
+consumer rank. MLA+SSM hybrids, including Kimi KDA+MLA, use the same layer
+pairing for PP push. Attention descriptors precede the conv/SSM descriptors.
+Each section follows its region order. Attention uses kernel-block capacities,
+while conv/SSM sub-regions use logical-state capacities and each peer's page
+stride. This preserves the existing TP split handles: MLA is replicated and
+SSM state is sharded. Each producer stage must contain an MLA layer; other
+SSM hybrid layouts, including CSA-linear, remain unsupported under PP.
+Packed PP push requires MLA caches and equal P/D block sizes. MLA pages are replicated
 across TP ranks, so producer TP1 to consumer TP2 is supported.
 
 ## Scheduler-side responsibilities
