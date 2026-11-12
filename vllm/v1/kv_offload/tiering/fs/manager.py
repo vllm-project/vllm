@@ -18,6 +18,7 @@ import functools
 import json
 import os
 from collections.abc import Iterable
+from contextlib import contextmanager
 from typing import TYPE_CHECKING, ClassVar
 
 try:
@@ -207,7 +208,7 @@ class FileSystemTierManager(SecondaryTierManager):
         )
 
         self._lookup_manager = FsAsyncLookupManager(tier=self, tier_type=self.tier_type)
-        # Set while drain_jobs() waits on the pool
+        # Set while drain_jobs() / shutdown waits on the pool
         self._draining = False
 
     @override
@@ -353,6 +354,15 @@ class FileSystemTierManager(SecondaryTierManager):
             yield from self.events
             self.events.clear()
 
+    @contextmanager
+    def _drain_scope(self):
+        """Mark the tier as draining when the block runs"""
+        self._draining = True
+        try:
+            yield
+        finally:
+            self._draining = False
+
     def _materialize_under_lock(self, transfer_job: TransferJob) -> bool:
         """Determine if the manager_lock can be acquired and materialize
         job under the lock.
@@ -372,9 +382,8 @@ class FileSystemTierManager(SecondaryTierManager):
     @override
     def drain_jobs(self) -> None:
         """Block until all in-flight transfers in the threadpool finish."""
-        self._draining = True
-        self._pool.wait_idle()
-        self._draining = False
+        with self._drain_scope():
+            self._pool.wait_idle()
 
     def on_request_finished(self, req_context: ReqContext) -> None:
         self._lookup_manager.cleanup(req_context.req_id)
@@ -391,4 +400,5 @@ class FileSystemTierManager(SecondaryTierManager):
         clearing pending tasks and waiting for active threads to complete.
         """
         self._lookup_manager.shutdown()
-        self._pool.shutdown(wait=True)
+        with self._drain_scope():
+            self._pool.shutdown(wait=True)

@@ -2697,6 +2697,61 @@ class TestTieringOffloadingManagerWithFsTier:
                 "whose materialize() needs the manager lock the reset holds"
             )
 
+    def test_shutdown_with_unmaterialized_fs_promotion(
+        self, tmp_path, manager_lock, monkeypatch
+    ):
+        """shutdown() must complete while a load worker is blocked on the
+        manager lock: TieringOffloadingManager.shutdown() holds that lock
+        across tier teardown when the tier-poll thread fails to exit, and the
+        FS pool join would otherwise wait forever on a worker looping in
+        _materialize_under_lock().
+        """
+        mmap = _mock_mmap_region(8, 64)
+        primary_tier = CPUPrimaryTierOffloadingManager(num_chunks=8, mmap_region=mmap)
+        fs_tier = self._make_fs_tier(mmap, str(tmp_path), manager_lock)
+        manager = TieringOffloadingManager(
+            primary_tier=primary_tier,
+            secondary_tiers=[fs_tier],
+            lock=manager_lock,
+        )
+
+        keys = to_keys(range(2))
+        self._write_keys_to_fs(fs_tier, keys)
+        req_ctx = ReqContext(req_id="r1")
+        manager.on_new_request(req_ctx)
+        for k in keys:
+            assert manager.lookup(k, req_ctx) is LookupResult.RETRY
+        manager.on_schedule_end(
+            ScheduleEndContext(new_req_ids=["r1"], preempted_req_ids=[])
+        )
+        self._wait_lookup_workers(fs_tier)
+
+        load_gate = self._gate_fs_load_materialization(fs_tier, monkeypatch)
+        for k in keys:
+            assert manager.lookup(k, req_ctx) is LookupResult.HIT_PENDING
+        # Flush the pending promotion into the fs tier's thread pool.
+        manager.on_schedule_end(
+            ScheduleEndContext(new_req_ids=[], preempted_req_ids=[])
+        )
+
+        # Hold the manager lock across the tier shutdown, as
+        # TieringOffloadingManager.shutdown() does when the tier-poll thread
+        # fails to exit.
+        shutdown_thread = threading.Thread(target=fs_tier.shutdown)
+        with fs_tier.manager_lock:
+            shutdown_thread.start()
+            # Release the gate: the worker proceeds to _materialize_under_lock
+            # and loops on the lock held above.
+            load_gate.set()
+            shutdown_thread.join(timeout=5)
+            assert not shutdown_thread.is_alive(), (
+                "fs shutdown deadlocked: pool join waits for a load worker "
+                "looping on the manager lock the shutdown holds"
+            )
+        # Releasing the lock lets a deadlocked worker finish, so the shutdown
+        # completes and the test does not leak a stuck thread.
+        shutdown_thread.join(timeout=10)
+
 
 if __name__ == "__main__":
     pytest.main([__file__, "-v"])
